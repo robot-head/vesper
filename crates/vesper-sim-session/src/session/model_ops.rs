@@ -338,7 +338,7 @@ impl<'w> Session<'w> {
                     });
                     json!({ "Err": state.unreachable_code })
                 } else {
-                    let up = model.processes[state.owners[&to]].up;
+                    let up = model.process_up(state.owners[&to]);
                     let bytes = message.len() as u64;
                     let state = model.networks.get_mut(network).unwrap();
                     let sent = state
@@ -526,7 +526,7 @@ impl<'w> Session<'w> {
             Internal::Deliver { network, message } => {
                 let state = &model.networks[network];
                 let to = state.net.in_flight_to(*message).expect("in-flight message");
-                let up = model.processes[state.owners[&to]].up;
+                let up = model.process_up(state.owners[&to]);
                 let state = model.networks.get_mut(network).unwrap();
                 match state.net.arrive(*message, up).expect("in-flight message") {
                     Arrival::Delivered(m, request) => {
@@ -686,18 +686,18 @@ impl<'w> Session<'w> {
             Internal::Fault(index) => match &plan.spec.faults[*index].fault {
                 Fault::Crash { process, in_flight } => {
                     let p = plan.process_index[process];
-                    if !model.processes[p].up {
-                        return Err(SessionError::Model {
-                            task: internal.describe(),
-                            message: format!("process {process} is already down"),
-                        });
-                    }
-                    if model.crashes >= plan.spec.limits.max_epochs {
-                        return Err(SessionError::EpochLimit);
-                    }
-                    model.crashes += 1;
-                    let epoch = model.processes[p].epoch;
-                    model.processes[p].up = false;
+                    let epoch = match model.crash_process(p, plan.spec.limits.max_epochs) {
+                        Ok(epoch) => epoch,
+                        Err(crate::model::ProcessCrashError::AlreadyDown) => {
+                            return Err(SessionError::Model {
+                                task: internal.describe(),
+                                message: format!("process {process} is already down"),
+                            });
+                        }
+                        Err(crate::model::ProcessCrashError::EpochLimit) => {
+                            return Err(SessionError::EpochLimit);
+                        }
+                    };
                     crashed_process = Some(p);
                     events.push(ModelEvent::Crash {
                         process: process.clone(),
@@ -780,17 +780,11 @@ impl<'w> Session<'w> {
                 }
                 Fault::Restart { process } => {
                     let p = plan.process_index[process];
-                    if model.processes[p].up {
+                    let Ok(epoch) = model.restart_process(p) else {
                         return Err(SessionError::Model {
                             task: internal.describe(),
                             message: format!("process {process} is already up"),
                         });
-                    }
-                    let epoch = model.processes[p].epoch + 1;
-                    model.processes[p] = crate::model::ProcessState {
-                        name: process.clone(),
-                        epoch,
-                        up: true,
                     };
                     let specs = &self.plan.restarts[p];
                     if (self.instances.len() + specs.len()) as u64 > plan.spec.limits.max_instances
