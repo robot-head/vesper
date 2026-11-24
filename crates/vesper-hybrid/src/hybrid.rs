@@ -68,6 +68,21 @@ mod codegen_scalar_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/codegen_seq.rs"]
+mod codegen_seq_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/codegen_control.rs"]
+mod codegen_control_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/ffi_lowering.rs"]
+mod ffi_lowering_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/codegen_export.rs"]
 mod codegen_export_binding;
 
@@ -199,6 +214,15 @@ static WRAP_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// declined.
 static NUMERIC_CALLS: AtomicU64 = AtomicU64::new(0);
 static NUMERIC_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// `seq` requests (`ChunkSeq`, `Slice`) the Vesper module emitted, and declined.
+static SEQ_CALLS: AtomicU64 = AtomicU64::new(0);
+static SEQ_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// `control` requests (closures, handlers, effect calls) the Vesper module emitted, and declined.
+static CONTROL_CALLS: AtomicU64 = AtomicU64::new(0);
+static CONTROL_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// `ffi` requests (`.vsys` foreign calls) the Vesper module emitted, and declined.
+static FFI_CALLS: AtomicU64 = AtomicU64::new(0);
+static FFI_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// `scalar` requests (scalars, locals, control flow) the Vesper module
 /// emitted, and left to Rust (unplanned, or declined by the hook).
 static SCALAR_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -978,12 +1002,13 @@ fn wrap_component(
     Some(bytes)
 }
 
-/// The `numeric` hook of `vesper::codegen_swap` from
-/// `modules/codegen_numeric` (#1285): vector and `TiledSeq` operations
-/// emitted in Vesper. The graph walk's `INSTRUCTION` requests are declined
-/// here, without crossing: the Rust family code then sends the typed
-/// requests of `codegen_swap::numeric`, which the Vesper hook answers.
-fn vesper_numeric(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, String> {
+fn lend_codegen_op(
+    lent: &mut vesper::codegen_swap::Lent<'_, '_>,
+    family: &str,
+    entry: fn(u64) -> u64,
+    calls: &AtomicU64,
+    declined: &AtomicU64,
+) -> Result<bool, String> {
     if lent.op == vesper::codegen_swap::INSTRUCTION {
         return Ok(false);
     }
@@ -998,25 +1023,73 @@ fn vesper_numeric(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool,
         &mut *lent.module,
         lent.op,
         lent.args,
-        codegen_numeric_binding::numeric,
+        entry,
     );
     if let Some(e) = crossing.error {
-        return Err(format!("codegen (numeric op {}): {e}", lent.op));
+        return Err(format!("codegen ({family} op {}): {e}", lent.op));
     }
     if crossing.unreturned {
         return Err(format!(
-            "codegen (numeric op {}) kept a lent handle",
+            "codegen ({family} op {}) kept a lent handle",
             lent.op
         ));
     }
     if answer == 1 {
-        NUMERIC_CALLS.fetch_add(1, Relaxed);
+        calls.fetch_add(1, Relaxed);
         lent.results.extend(crossing.results);
         Ok(true)
     } else {
-        NUMERIC_DECLINED.fetch_add(1, Relaxed);
+        declined.fetch_add(1, Relaxed);
         Ok(false)
     }
+}
+
+/// The `numeric` hook of `vesper::codegen_swap` from
+/// `modules/codegen_numeric` (#1285): vector and `TiledSeq` operations
+/// emitted in Vesper. The graph walk's `INSTRUCTION` requests are declined
+/// here, without crossing: the Rust family code then sends the typed
+/// requests of `codegen_swap::numeric`, which the Vesper hook answers.
+fn vesper_numeric(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, String> {
+    lend_codegen_op(
+        lent,
+        "numeric",
+        codegen_numeric_binding::numeric,
+        &NUMERIC_CALLS,
+        &NUMERIC_DECLINED,
+    )
+}
+
+/// The `seq` hook of `vesper::codegen_swap` from `modules/codegen_seq` (#1283).
+fn vesper_seq(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, String> {
+    lend_codegen_op(
+        lent,
+        "seq",
+        codegen_seq_binding::seq,
+        &SEQ_CALLS,
+        &SEQ_DECLINED,
+    )
+}
+
+/// The `control` hook of `vesper::codegen_swap` from `modules/codegen_control` (#1284).
+fn vesper_control(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, String> {
+    lend_codegen_op(
+        lent,
+        "control",
+        codegen_control_binding::control,
+        &CONTROL_CALLS,
+        &CONTROL_DECLINED,
+    )
+}
+
+/// The `ffi` hook of `vesper::codegen_swap` from `modules/ffi_lowering` (#1287).
+fn vesper_ffi(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, String> {
+    lend_codegen_op(
+        lent,
+        "ffi",
+        ffi_lowering_binding::ffi,
+        &FFI_CALLS,
+        &FFI_DECLINED,
+    )
 }
 
 /// `scalar_hook`'s request numbers past the plan's (1-10) for the typed
@@ -1481,6 +1554,12 @@ extern "C" fn install() {
         wasm: Some(vesper_wasm),
         component: Some(vesper_component),
         numeric: Some(vesper_numeric),
+        seq: (!std::env::var_os("VESPER_HYBRID_SEQ").is_some_and(|v| v == "0"))
+            .then_some(vesper_seq as vesper::codegen_swap::Hook),
+        control: (!std::env::var_os("VESPER_HYBRID_CONTROL").is_some_and(|v| v == "0"))
+            .then_some(vesper_control as vesper::codegen_swap::Hook),
+        ffi: (!std::env::var_os("VESPER_HYBRID_FFI").is_some_and(|v| v == "0"))
+            .then_some(vesper_ffi as vesper::codegen_swap::Hook),
         // `VESPER_HYBRID_SCALAR=0` leaves scalars to Rust (the scoreboard's
         // before side).
         scalar: (!std::env::var_os("VESPER_HYBRID_SCALAR").is_some_and(|v| v == "0"))
@@ -1588,6 +1667,21 @@ extern "C" fn report() {
         "vesper-hybrid: codegen emitted {} numeric requests from Vesper ({} declined)",
         NUMERIC_CALLS.load(Relaxed),
         NUMERIC_DECLINED.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: codegen emitted {} seq requests from Vesper ({} declined)",
+        SEQ_CALLS.load(Relaxed),
+        SEQ_DECLINED.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: codegen emitted {} control requests from Vesper ({} declined)",
+        CONTROL_CALLS.load(Relaxed),
+        CONTROL_DECLINED.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: codegen emitted {} ffi requests from Vesper ({} declined)",
+        FFI_CALLS.load(Relaxed),
+        FFI_DECLINED.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: codegen emitted {} scalar requests from Vesper ({} left to Rust)",

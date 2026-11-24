@@ -1,0 +1,17 @@
+// @export vsys Cranelift direct rust=vesper_cranelift_sys
+//
+// The `control` codegen swap of the hybrid Stage 2 build (self-hosting SH4
+// lane 10, #1284): closures, handlers and effect calls emitted in Vesper
+// through the lent Cranelift builder. crates/vesper-hybrid installs
+// `control` as the `control` hook of `vesper::codegen_swap`; it emits one
+// typed request of `codegen_swap::control`, and returns 0 to leave it to
+// Rust.
+use @vesper/codegen-control-emit::{
+    control_hook
+};
+
+// One request: `call` is the address of the lent call. Returns 1 when it
+// emitted the request, 0 to leave it to Rust.
+pub fn control(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    control_hook(call)
+}

@@ -61,6 +61,25 @@ const MODULES: &[(&str, &str, &str)] = &[
         "modules/codegen_scalar",
         "port/codegen_scalar.rs",
     ),
+    // SH4 lane 9 (#1283): ChunkSeq and Slice operations, through the `seq` hook.
+    (
+        "hybrid_codegen_seq",
+        "modules/codegen_seq",
+        "port/codegen_seq.rs",
+    ),
+    // SH4 lane 10 (#1284): closures, handlers and effect calls, through the
+    // `control` hook.
+    (
+        "hybrid_codegen_control",
+        "modules/codegen_control",
+        "port/codegen_control.rs",
+    ),
+    // SH4 lane 13 (#1287): foreign (.vsys) call emission, through the `ffi` hook.
+    (
+        "hybrid_ffi_lowering",
+        "modules/ffi_lowering",
+        "port/ffi_lowering.rs",
+    ),
     // SH4 lane 12 (#1286): the export ABI v2 glue over the lent module.
     (
         "hybrid_codegen_export",
