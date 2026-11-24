@@ -25,14 +25,14 @@ impl BinRange {
 /// The port build keeps the same two arrays (exemplar 0 means none) and the
 /// scalars in the port's `HistogramStats` mirror, with the sum as two words:
 /// 7,976 bytes. Vesper updates them in place.
-#[cfg(vesper_port)]
+#[cfg(feature = "vesper-port")]
 #[derive(Debug)]
 pub struct FastLogHistogram {
     buckets: [u64; HISTOGRAM_BINS],
     exemplars: [u64; HISTOGRAM_BINS],
     stats: crate::port::repr::HistogramStats,
 }
-#[cfg(vesper_port)]
+#[cfg(feature = "vesper-port")]
 impl Default for FastLogHistogram {
     fn default() -> Self {
         Self {
@@ -48,7 +48,7 @@ impl Default for FastLogHistogram {
         }
     }
 }
-#[cfg(vesper_port)]
+#[cfg(feature = "vesper-port")]
 impl FastLogHistogram {
     pub const FOOTPRINT_BYTES: usize = core::mem::size_of::<Self>();
     pub fn bucket_index(value: u64) -> usize {
@@ -114,7 +114,7 @@ impl FastLogHistogram {
 /// 7,984 bytes: two 496-element u64 arrays, one u64 total, an exact u128
 /// sum and the u64 minimum and maximum (no heap).
 /// Exemplar IDs are caller-supplied opaque nonzero span IDs, not context owners.
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 #[derive(Debug)]
 pub struct FastLogHistogram {
     buckets: [u64; HISTOGRAM_BINS],
@@ -124,7 +124,7 @@ pub struct FastLogHistogram {
     min: u64,
     max: u64,
 }
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 impl Default for FastLogHistogram {
     fn default() -> Self {
         Self {
@@ -137,7 +137,7 @@ impl Default for FastLogHistogram {
         }
     }
 }
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 impl FastLogHistogram {
     pub const FOOTPRINT_BYTES: usize = core::mem::size_of::<Self>();
     pub fn bucket_index(value: u64) -> usize {
@@ -223,7 +223,7 @@ impl FastLogHistogram {
 // The Rust build's unit tests reach private fields; the port build's
 // counterpart is `port_tests` below, and the public-API half runs against
 // both builds in tests/histogram.rs.
-#[cfg(all(test, not(vesper_port)))]
+#[cfg(all(test, not(feature = "vesper-port")))]
 mod tests {
     use super::*;
     #[test]
@@ -280,7 +280,7 @@ mod tests {
 
 // The translated `checked_counters_are_transactional` for the port build:
 // the same overflows, set up in the port's arrays and stats mirror.
-#[cfg(all(test, vesper_port))]
+#[cfg(all(test, feature = "vesper-port"))]
 mod port_tests {
     use super::*;
     #[test]

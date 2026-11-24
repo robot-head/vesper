@@ -8,6 +8,8 @@
 //! stays in fixed-size Rust arrays and `repr` mirrors, which the binding
 //! lends to Vesper in place (export ABI v3), so nothing here allocates.
 
+#![cfg_attr(not(feature = "vesper-port"), allow(dead_code, unused_imports))]
+
 pub use crate::port_binding::*;
 pub use crate::{
     BinRange, ErrorCode, FinishError, HistogramError, PrimaryAttribute, Redacted, SpanRecord,
