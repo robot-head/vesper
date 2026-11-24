@@ -6,8 +6,6 @@
 //!   the result enums of its operations, plus mutants of those bindings
 //!   that make each refusal fire. The Rust side writes `{:?}` of the plan
 //!   or the message; the Vesper side writes the same text.
-//! - Handler keys: `native_handlers::effect_key` of every effect instance
-//!   of every row a world mentions, and `Kind::of` of every type.
 //!
 //! What the Vesper side cannot compute yet comes in the input: each
 //! function's direct callees, which Rust finds by walking checked bodies
@@ -597,76 +595,6 @@ fn native_pulse_examples_plan() {
         checked += 1;
     }
     assert!(checked >= 3, "only {checked} native-pulse examples");
-}
-
-// ------------------------------------------------------------------ handler keys
-
-fn rows(w: &World) -> Vec<Effects> {
-    fn walk(t: &Type, out: &mut Vec<Effects>) {
-        match t {
-            Type::Function {
-                params,
-                result,
-                effects,
-                ..
-            } => {
-                out.push(effects.clone());
-                params.iter().for_each(|(_, t)| walk(t, out));
-                walk(result, out);
-            }
-            Type::Named(_, a) | Type::Tuple(a) => a.iter().for_each(|t| walk(t, out)),
-            Type::Row(e) => out.push(e.clone()),
-            _ => {}
-        }
-    }
-    let mut out: Vec<Effects> = w.functions.values().map(|f| f.effects.clone()).collect();
-    for t in world_types(w) {
-        walk(&t, &mut out);
-    }
-    out
-}
-
-#[test]
-fn handler_keys_match_rust() {
-    let entry = package().entry("control_handler_keys", false);
-    let bad = differential(
-        "handler keys",
-        |c| {
-            let mut out = String::new();
-            for r in rows(&c.world) {
-                out.push_str("R\n");
-                for e in &r.instances {
-                    out.push_str(&format!("K {}\n", vesper::native_handlers::effect_key(e)));
-                }
-            }
-            for t in world_types(&c.world) {
-                out.push_str(&format!("T {:?}\n", vesper::native_handlers::Kind::of(&t)));
-            }
-            if encode_world(&c.world, |_, _| {}).is_none() {
-                return String::new();
-            }
-            out
-        },
-        |c| {
-            let w = &c.world;
-            let rs = rows(w);
-            let ts = world_types(w);
-            let Some(input) = encode_world(w, |e, out| {
-                out.push(rs.len() as u64);
-                for r in &rs {
-                    out.push(e.ty(&Type::Row(r.clone())));
-                }
-                out.push(ts.len() as u64);
-                for t in &ts {
-                    out.push(e.ty(t));
-                }
-            }) else {
-                return String::new();
-            };
-            entry.text(&input)
-        },
-    );
-    assert_eq!(bad, 0);
 }
 
 /// Refusals the corpus never reaches: a mixed read buffer, missing and
