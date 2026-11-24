@@ -713,3 +713,33 @@ fn main() -> u64 {
         "expected uextend->band/ishl/bor->ireduce.i32 chain to fold to native i32 ops (ireduce_count={ireduce_count}):\n{fn_clif}"
     );
 }
+
+#[test]
+fn narrow_shifts_fold_through_ireduce() {
+    let source = "fn compact(v: u32) -> u32 {
+    let mut x = v & 153498185;
+    x = (x | (x >> 2)) & 51130563;
+    x = (x | (x >> 4)) & 50393103;
+    x
+}
+
+fn main() -> u64 {
+    widen_u64(compact(17891665))
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("compact\n"))
+        .unwrap_or(&clif);
+    let ireduce_count = fn_clif.matches("ireduce.i32").count();
+    assert!(
+        ireduce_count == 1,
+        "expected uextend->ushr->ireduce.i32 chain to fold to native i32 ops (ireduce_count={ireduce_count}):\n{fn_clif}"
+    );
+}
