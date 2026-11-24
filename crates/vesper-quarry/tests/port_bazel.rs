@@ -90,6 +90,15 @@ fn divergent_page_fails_the_corrupt_header_test() {
 }
 
 #[test]
+fn divergent_wal_fails_reopen_recovery_test() {
+    run(
+        "VESPER_QUARRY_DIVERGENT_WAL",
+        &["committed_changes_survive_reopen_and_aborts_roll_back"],
+        "page_locks_conflict_without_waiting_and_handles_are_checked",
+    );
+}
+
+#[test]
 fn committed_binding_is_current() {
     let Some(generated) = std::env::var_os("VESPER_QUARRY_BINDING") else {
         return;

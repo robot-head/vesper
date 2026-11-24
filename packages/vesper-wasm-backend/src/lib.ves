@@ -9,7 +9,12 @@ use self::enc::{
 };
 use self::err::{
     WErr,
-    werr
+    werr,
+    werr_syms
+};
+use @vesper/check-data::util::{
+    push_decimal,
+    w
 };
 use self::module::{
     Builder,
@@ -33,12 +38,23 @@ use self::lower::{
 use self::component::{
     exports
 };
+use self::tables::{
+    dummy_l,
+    rebuild_l,
+    stage2_heap_mark,
+    stage2_heap_reset,
+    stage2_heap_swap
+};
 use @vesper/check-data::pack_text;
 use @vesper/check-data::input::{
+    Ctx,
     Reader,
     read_ctx
 };
-use @vesper/place-ir::read_program;
+use @vesper/place-ir::{
+    Program,
+    read_program
+};
 
 const K_ENTRY: u8 = 1;
 const K_LIMIT: u8 = 2;
@@ -53,6 +69,59 @@ fn compile(in b: Slice[u8]) -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64]) 
     let p = read_program(inout r, in b, in c);
     let pool = p.pool.len();
     let f = read_facts(inout r, in b, in c, pool);
+    compile_with_facts(sink c, sink p, sink f)
+}
+
+fn compile_diag(in b: Slice[u8], want_syms: bool)
+    -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64], ChunkSeq[u8]) eff [Fail[WErr]] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c);
+    let pool = p.pool.len();
+    let f = read_facts(inout r, in b, in c, pool);
+    compile_with_facts_diag(sink c, sink p, sink f, want_syms)
+}
+
+fn append_sym_line(idx: u32, in label: Slice[u8], inout out: ChunkSeq[u8]) {
+    if idx == 4294967295 {
+        return;
+    }
+    push_decimal(inout out, w(idx));
+    out.push(32);
+    out.extend(in label);
+    out.push(10);
+}
+
+fn append_fn_syms(in l: L, inout out: ChunkSeq[u8]) {
+    for i in 0..l.b.import_count() {
+        push_decimal(inout out, i);
+        out.extend(in " wasi_import\n".as_bytes());
+    }
+    append_sym_line(l.alloc, in "__alloc".as_bytes(), inout out);
+    append_sym_line(l.h_str_eq, in "__str_eq".as_bytes(), inout out);
+    append_sym_line(l.h_fmod, in "__fmod".as_bytes(), inout out);
+    append_sym_line(l.h_seq_reserve, in "__seq_reserve".as_bytes(), inout out);
+    append_sym_line(l.h_bytes_eq, in "__bytes_eq".as_bytes(), inout out);
+    append_sym_line(l.h_utf8, in "__utf8".as_bytes(), inout out);
+    for i in 0..l.plan.insts.len() {
+        let inst = l.plan.inst(i);
+        let idx = l.func_of(inst.key);
+        push_decimal(inout out, w(idx));
+        out.push(32);
+        l.cx.names.write(inst.key, inout out);
+        out.push(10);
+    }
+}
+
+fn compile_with_facts_core(
+    sink c: Ctx,
+    sink p: Program,
+    sink f: Facts,
+    want_syms: bool,
+    inout syms_out: ChunkSeq[u8]
+) -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64]) eff [Fail[WErr]] {
     if f.max_pages == 0 || f.max_pages > 65536 {
         Fail::raise(werr(K_LIMIT, 0, 1));
     }
@@ -61,17 +130,88 @@ fn compile(in b: Slice[u8]) -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64]) 
     let ir = ir_new(p);
     let mut cx = cx_new(c, f, ir);
     if cx.fn_sig(cx.f.entry) == 0 {
-        Fail::raise(werr(K_ENTRY, 0, 2));
+        Fail::raise(werr_syms(K_ENTRY, 0, 2, cx.f.entry, cx.f.entry));
     }
     let pl = plan(inout cx);
     let mut l = lowerer_new(cx, pl, max_instructions);
     l.declare_all();
     let wit = exports(inout l);
-    l.define_all();
+    l.define_init();
+    let mut lim = l.pre_reserve_define_all();
+    let mut d_perm_buf = ChunkSeq::new[u8]();
+    d_perm_buf.reserve(134217728);
+    let d_perm_end = stage2_heap_mark();
+    let mut d_perm = wrapping_sub(d_perm_end, 134217728);
+    let mut d_mark = d_perm_end;
+    for i in 0..l.plan.insts.len() {
+        let n_mask = l.cx.names.mask_val();
+        let n_tmask = l.cx.types.t_mask();
+        let n_rmask = l.cx.types.r_mask();
+        let n_eqp = l.eq_pending.len();
+        let n_btypes = l.b.types.len();
+        let n_bvals = l.b.vals.len();
+        let n_bfuncs = l.b.funcs.len();
+        let inst = l.plan.inst(i);
+        let body = l.function(inst);
+        let idx = l.func_of(inst.key);
+        let s_def = stage2_heap_swap(d_perm);
+        l.b.define(idx, in body);
+        d_perm = stage2_heap_swap(s_def);
+        if d_perm_end != 0 && d_perm >= d_perm_end {
+            Fail::raise(werr_syms(K_LIMIT, 0, 93, inst.key, 0));
+        }
+        if l
+            .can_rewind_define(
+                in lim,
+                n_mask,
+                n_tmask,
+                n_rmask,
+                n_eqp,
+                n_btypes,
+                n_bvals,
+                n_bfuncs
+            ) {
+            let mut dl = dummy_l(l.cx.k, l.cx.s);
+            swap(inout l, inout dl);
+            let (fl0, next_perm) = rebuild_l(dl, d_mark, d_perm);
+            let mut fl = fl0;
+            d_perm = next_perm;
+            swap(inout l, inout fl);
+        } else {
+            let s_pre = stage2_heap_swap(d_perm);
+            lim = l.pre_reserve_define_all();
+            d_perm = stage2_heap_swap(s_pre);
+            d_mark = stage2_heap_mark();
+        }
+    }
+    let _ = stage2_heap_swap(d_mark);
+    l.define_finish();
     let functions = l.b.function_count();
     let handlers = handler_report(in l);
+    if want_syms {
+        append_fn_syms(in l, inout syms_out);
+    }
     let core = l.b.finish(max_pages);
     (core, wit, functions, handlers)
+}
+
+pub fn compile_with_facts(sink c: Ctx, sink p: Program, sink f: Facts)
+    -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64]) eff [Fail[WErr]] {
+    let mut dummy_syms = ChunkSeq::new[u8]();
+    compile_with_facts_core(sink c, sink p, sink f, false, inout dummy_syms)
+}
+
+pub fn compile_with_facts_diag(sink c: Ctx, sink p: Program, sink f: Facts, want_syms: bool)
+    -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64], ChunkSeq[u8]) eff [Fail[WErr]] {
+    let mut syms_out = ChunkSeq::new[u8]();
+    let (core, wit, functions, handlers) = compile_with_facts_core(
+        sink c,
+        sink p,
+        sink f,
+        want_syms,
+        inout syms_out
+    );
+    (core, wit, functions, handlers, syms_out)
 }
 
 // The artifact's `handlers` (`HandlerLowering`, in plan order): their count,
@@ -135,6 +275,34 @@ pub fn wasm_backend_compile_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
                 Option::None => {},
             }
         }
+        push_all(inout out, in handlers);
+        out
+    } with {
+        return value => value,
+        raise(e, resume) => {
+            let mut out = ChunkSeq::new[u64]();
+            out.push(1);
+            out.push(widen_u64(e.kind));
+            out.push(widen_u64(e.construct));
+            out.push(e.site);
+            out
+        },
+    }
+}
+
+pub fn wasm_backend_compile_diag(in input: Str) -> ChunkSeq[u64] {
+    wasm_backend_compile_diag_bytes(in input.as_bytes())
+}
+
+pub fn wasm_backend_compile_diag_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
+    handle Fail[WErr] in {
+        let (core, wit, functions, handlers, syms_out) = compile_diag(in input, true);
+        let mut out = ChunkSeq::new[u64]();
+        out.push(0);
+        out.push(functions);
+        push_all(inout out, in pack_text(in syms_out));
+        push_all(inout out, in pack_text(in core));
+        push_all(inout out, in pack_text(in wit));
         push_all(inout out, in handlers);
         out
     } with {
