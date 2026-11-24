@@ -1,4 +1,5 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel/tests:ci_analysis_test.bzl", "environment_test")
 
 # The `*42` oracles embed the Lean models, the Logos checker recipe and the
 # resource-model manifests from the root package (`//:oracle_sources`). Their
@@ -55,4 +56,13 @@ vesper_crate(
         # Serial fresh Lean endpoint sessions need the complete 900 s envelope (#574).
         "test/resource_oracle42": "long",
     },
+)
+
+# Guard test-cache scope: only the Logos acceptance test inherits the sealed
+# root's random path. Part of //:bazel_ci_tests.
+environment_test(
+    name = "logos_environment_test",
+    expected = ["VESPER_LOGOS42_ROOT"],
+    target_under_test = ":test/logos42_acceptance",
+    visibility = ["//:__pkg__"],
 )

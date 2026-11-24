@@ -1659,12 +1659,6 @@ filegroup(
 
 # Guard test-cache scope and embedded compiler inputs.
 environment_test(
-    name = "logos_environment_test",
-    expected = ["VESPER_LOGOS42_ROOT"],
-    target_under_test = "//crates/vesper-oracles:test/logos42_acceptance",
-)
-
-environment_test(
     name = "ordinary_environment_test",
     expected = [],
     target_under_test = "//:test/tiled",
@@ -1713,8 +1707,9 @@ test_suite(
         ":frontend_environment_test",
         ":frontend_runfiles_test",
         ":integration_inputs_test",
-        ":logos_environment_test",
         ":ordinary_environment_test",
+        # The Logos acceptance test's environment scope (#1825).
+        "//crates/vesper-oracles:logos_environment_test",
         ":proof_packet_runfiles_test",
     ],
 )
