@@ -1,0 +1,10 @@
+[package]
+name = "@vesper/hybrid-codegen-control"
+version = "0.1.0"
+edition = "2026"
+# Every emission reaches Cranelift through @vesper/cranelift's `.vsys` library.
+capability_ceiling = ["Fail", "Ffi"]
+
+[dependencies]
+"@vesper/codegen-control-emit" = { version = "^0.1", path = "../../../../packages/vesper-codegen-control-emit" }
+"@vesper/cranelift" = { version = "^0.1", path = "../../../../packages/vesper-cranelift" }

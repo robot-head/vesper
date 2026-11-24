@@ -1338,6 +1338,33 @@ vesper_package(
     deps = ["//packages/vesper-cranelift:cranelift_package"],
 )
 
+vesper_package(
+    name = "codegen_seq_emit_package",
+    srcs = glob(["packages/vesper-codegen-seq/emit/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-seq/emit/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = ["//packages/vesper-cranelift:cranelift_package"],
+)
+
+vesper_package(
+    name = "codegen_control_emit_package",
+    srcs = glob(["packages/vesper-codegen-control-emit/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-control-emit/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = ["//packages/vesper-cranelift:cranelift_package"],
+)
+
+vesper_package(
+    name = "ffi_emit_package",
+    srcs = glob(["packages/vesper-ffi-lowering/emit/src/**/*.ves"]),
+    manifest = "packages/vesper-ffi-lowering/emit/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":codegen_base_package",
+        "//packages/vesper-cranelift:cranelift_package",
+    ],
+)
+
 # Bounds hoisting for the hybrid compiler's bounds_hoist module (SH3 lane
 # 12, #1251).
 vesper_package(
