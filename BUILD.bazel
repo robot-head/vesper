@@ -463,6 +463,20 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # #1829: @vesper/native-vectorize against src/native_vectorize.rs on
+        # the optimized CLIF of the corpus mains.
+        "test/self_host_native_vectorize": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # #1829: @vesper/native-cold-outline against src/native_cold_outline.rs;
+        # its kernels are the programs of tests/native_cold_outline.rs.
+        "test/self_host_native_cold_outline": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + ["tests/native_cold_outline.rs"],
         # SH4 lane 16 (#1290): @vesper/ebpf-backend against src/ebpf_backend
         # over the eBPF fixtures and the corpus; the package depends on the
         # @vesper/ebpf port in crates/vesper-ebpf/vesper.
@@ -1120,6 +1134,8 @@ vesper_crate(
         # The pass differential lowers, hoists and IR-checks each sampled
         # program (~20 min debug); the JIT test runs two children.
         "test/self_host_bounds_hoist_pass": "eternal",
+        "test/self_host_native_vectorize": "eternal",
+        "test/self_host_native_cold_outline": "eternal",
         "test/self_host_bounds_hoist_jit": "eternal",
         # The dyn differential runs both passes over every .ves source twice.
         "test/self_host_check_dyn": "long",
@@ -1500,6 +1516,29 @@ vesper_package(
         ":ir_opt_package",
         ":place_ir_package",
     ],
+)
+
+vesper_package(
+    name = "clif_package",
+    srcs = glob(["packages/vesper-clif/src/**/*.ves"]),
+    manifest = "packages/vesper-clif/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
+vesper_package(
+    name = "native_vectorize_package",
+    srcs = glob(["packages/vesper-native-vectorize/src/**/*.ves"]),
+    manifest = "packages/vesper-native-vectorize/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":clif_package"],
+)
+
+vesper_package(
+    name = "native_cold_outline_package",
+    srcs = glob(["packages/vesper-native-cold-outline/src/**/*.ves"]),
+    manifest = "packages/vesper-native-cold-outline/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":clif_package"],
 )
 
 vesper_package(

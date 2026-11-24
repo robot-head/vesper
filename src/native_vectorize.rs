@@ -61,6 +61,11 @@ pub fn run(func: &mut ir::Function, simd: bool) -> usize {
     if !simd || std::env::var_os("VESPER_VECTORIZE").is_some_and(|v| v == "off") {
         return 0;
     }
+    CAPTURED.with(|c| {
+        if let Some(c) = c.borrow_mut().as_mut() {
+            c.push(func.clone());
+        }
+    });
     let headers: Vec<Block> = func
         .layout
         .blocks()
@@ -90,6 +95,22 @@ pub fn run(func: &mut ir::Function, simd: bool) -> usize {
         }
     }
     done
+}
+
+thread_local! {
+    static CAPTURED: std::cell::RefCell<Option<Vec<ir::Function>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` and returns, with its result, a copy of every function this
+/// pass was given on this thread meanwhile (as it was before the pass).
+/// The `@vesper/native-vectorize` differential (#1829) compares the port
+/// on exactly these inputs.
+pub fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<ir::Function>) {
+    let outer = CAPTURED.with(|c| c.borrow_mut().replace(Vec::new()));
+    let r = f();
+    let got = CAPTURED.with(|c| std::mem::replace(&mut *c.borrow_mut(), outer));
+    (r, got.unwrap_or_default())
 }
 
 /// What a body instruction is, for the two-lane copy.

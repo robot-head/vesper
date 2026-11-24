@@ -209,6 +209,8 @@ MODULES = {
     "source_analysis": ("2", "", "compiler helpers (native, ir_inline, runtime); not tour code: goes with the compiler"),
     "browser_tour": ("G1-12", "", "tour glue over the wasm-built compiler: needs website/wasm and the wasm seed"),
     "native_clif_opt": ("G1-11", "", "new in #1466 (#1426); ported with the walk"),
+    "native_vectorize": ("#1829", "vesper-native-vectorize", "0 diffs; CLIF edit scripts (tests/common/clif_words.rs)"),
+    "native_cold_outline": ("#1829", "vesper-native-cold-outline", "decisions in Vesper, 0 diffs; helper building (entity copying) stays Rust"),
 }
 
 

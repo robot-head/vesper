@@ -1,0 +1,764 @@
+//! Cranelift IR as words for the Vesper CLIF passes (#1829), and the edit
+//! scripts they answer with.
+//!
+//! `@vesper/clif` (packages/vesper-clif) reads a function in the words of
+//! [`encode`] into tables, and a pass there (`@vesper/native-vectorize`)
+//! changes those tables while it writes each change as an edit script.
+//! [`apply`] replays the script on the Rust function with the same cursor
+//! and builder calls the Rust pass makes, in the same order, so the entity
+//! numbers come out the same and the two functions print the same.
+//!
+//! # Function words
+//!
+//! All little-endian `u64`s:
+//!
+//! - `VERSION`, flags ([`H_SIMD`]: the vectorizer's flag; [`H_NO_OUTLINE`]),
+//!   `n_values`, `n_insts`, `n_blocks`, the pointer type (0 when not
+//!   given), `n_returns`, the signature's return types;
+//! - per value: `kind | type << 8`, `a`, `b` where kind is [`V_RESULT`]
+//!   (inst `a`, result `b`), [`V_PARAM`] (block `a`, param `b`), [`V_ALIAS`]
+//!   (of `a`, already resolved) or [`V_UNION`];
+//! - the layout: `n`, then per block `block`, `cold`, `n_params`, params,
+//!   `n_insts`, insts;
+//! - per instruction (all of the dfg's, in order): `opcode`, `effects`,
+//!   `cond`, `imm`, `offset`, `mem`, `n_args`, args, `n_results`, results,
+//!   `n_dests`, then per destination `block`, `n`, block args ([`NONE`] for
+//!   an argument that is not a value).
+//!
+//! Opcodes and types are this file's own codes ([`OPCODES`], [`TYPES`]),
+//! mirrored by packages/vesper-clif/src/codes.ves: 0 is "another one".
+//!
+//! # Edit scripts
+//!
+//! Each op names what it creates, which [`apply`] checks against what
+//! Cranelift hands out:
+//!
+//! - [`E_BLOCK`] `block`: `make_block`;
+//! - [`E_PARAM`] `block type value`: `append_block_param`;
+//! - [`E_PLACE`] `block before`: `layout.insert_block`;
+//! - [`E_RETARGET`] `inst from to`: every destination of `inst` at `from`
+//!   goes to `to`;
+//! - [`E_CLONE`] `block inst new n values...`: `clone_inst`, its values
+//!   (`inst_values` order) replaced, put at the bottom of `block`;
+//! - [`E_INS`] `block opcode type cond imm offset mem n args... n_dests
+//!   (block n args...)... new`: one builder call at the bottom of `block`.
+#![allow(dead_code)]
+
+use cranelift_codegen::cursor::{Cursor as _, FuncCursor};
+use cranelift_codegen::ir::{
+    self, Block, BlockArg, Inst, InstBuilder, InstructionData, MemFlags, Opcode, Type, Value,
+    condcodes::IntCC, types,
+};
+
+pub const VERSION: u64 = 2;
+pub const NONE: u64 = u64::MAX;
+
+pub const V_RESULT: u64 = 0;
+pub const V_PARAM: u64 = 1;
+pub const V_ALIAS: u64 = 2;
+pub const V_UNION: u64 = 3;
+
+pub const E_END: u64 = 0;
+pub const E_BLOCK: u64 = 1;
+pub const E_PARAM: u64 = 2;
+pub const E_PLACE: u64 = 3;
+pub const E_RETARGET: u64 = 4;
+pub const E_CLONE: u64 = 5;
+pub const E_INS: u64 = 6;
+
+/// Memory flag bits of the `mem` word.
+pub const M_READONLY: u64 = 1;
+pub const M_CAN_MOVE: u64 = 2;
+pub const M_ENDIAN: u64 = 4;
+pub const M_LITTLE: u64 = 8;
+pub const M_NOTRAP: u64 = 16;
+pub const M_ALIGNED: u64 = 32;
+
+/// Effect bits of the `effects` word.
+pub const F_TERMINATOR: u64 = 1;
+pub const F_BRANCH: u64 = 2;
+pub const F_CALL: u64 = 4;
+pub const F_RETURN: u64 = 8;
+pub const F_TRAP: u64 = 16;
+pub const F_SIDE_EFFECTS: u64 = 32;
+pub const F_LOAD: u64 = 64;
+pub const F_STORE: u64 = 128;
+/// The instruction's format is `UnaryConst`.
+pub const F_UNARY_CONST: u64 = 256;
+/// A `UnaryGlobalValue` whose global value is a symbol, or `iadd_imm`s of
+/// one (`global_is_pure_symbol` of the cold outliner).
+pub const F_PURE_GV: u64 = 512;
+/// A `StackLoad`/`StackStore` format: `imm` is the stack slot.
+pub const F_STACK_SLOT: u64 = 1024;
+/// The format is `Trap`: `imm` is the trap code's byte.
+pub const F_TRAP_CODE: u64 = 2048;
+
+/// Function flag bits (the second header word).
+pub const H_SIMD: u64 = 1;
+/// Dynamic stack slots, exception tables, or a signature parameter or
+/// return whose purpose is not `Normal`: the cold outliner leaves it be.
+pub const H_NO_OUTLINE: u64 = 2;
+
+/// Opcode codes, 1 up (0 is any other opcode). Append only.
+pub const OPCODES: &[Opcode] = &[
+    Opcode::Iconst,
+    Opcode::Iadd,
+    Opcode::IaddImm,
+    Opcode::Isub,
+    Opcode::IrsubImm,
+    Opcode::Imul,
+    Opcode::ImulImm,
+    Opcode::Ishl,
+    Opcode::IshlImm,
+    Opcode::Ushr,
+    Opcode::UshrImm,
+    Opcode::Band,
+    Opcode::BandImm,
+    Opcode::Bor,
+    Opcode::BorImm,
+    Opcode::Bxor,
+    Opcode::BxorImm,
+    Opcode::Icmp,
+    Opcode::IcmpImm,
+    Opcode::Uextend,
+    Opcode::Sextend,
+    Opcode::Ireduce,
+    Opcode::Select,
+    Opcode::Load,
+    Opcode::Store,
+    Opcode::Uload8,
+    Opcode::Sload8,
+    Opcode::Istore32,
+    Opcode::FcvtFromSint,
+    Opcode::Fmul,
+    Opcode::Bitcast,
+    Opcode::F32const,
+    Opcode::Jump,
+    Opcode::Brif,
+    Opcode::BrTable,
+    Opcode::Return,
+    Opcode::Splat,
+    Opcode::UaddOverflow,
+    Opcode::Umulhi,
+    Opcode::Bnot,
+    Opcode::ScalarToVector,
+    Opcode::SwidenLow,
+    Opcode::SwidenHigh,
+    Opcode::Call,
+    Opcode::CallIndirect,
+    Opcode::ReturnCall,
+    Opcode::ReturnCallIndirect,
+    Opcode::TryCall,
+    Opcode::TryCallIndirect,
+    Opcode::Trap,
+    Opcode::Udiv,
+    Opcode::Sdiv,
+    Opcode::Urem,
+    Opcode::Srem,
+    Opcode::StackAddr,
+    Opcode::StackLoad,
+    Opcode::StackStore,
+    Opcode::GetFramePointer,
+    Opcode::GetStackPointer,
+    Opcode::GetReturnAddress,
+    Opcode::DynamicStackLoad,
+    Opcode::DynamicStackStore,
+    Opcode::Nop,
+    Opcode::F64const,
+    Opcode::F128const,
+    Opcode::Vconst,
+    Opcode::SymbolValue,
+    Opcode::FuncAddr,
+];
+
+/// Type codes, 1 up (0 is any other type).
+pub const TYPES: &[Type] = &[
+    types::I8,
+    types::I16,
+    types::I32,
+    types::I64,
+    types::I128,
+    types::F16,
+    types::F32,
+    types::F64,
+    types::F128,
+    types::I8X16,
+    types::I16X8,
+    types::I32X4,
+    types::I64X2,
+    types::F32X4,
+    types::F64X2,
+];
+
+const CONDS: &[IntCC] = &[
+    IntCC::Equal,
+    IntCC::NotEqual,
+    IntCC::SignedLessThan,
+    IntCC::SignedGreaterThanOrEqual,
+    IntCC::SignedGreaterThan,
+    IntCC::SignedLessThanOrEqual,
+    IntCC::UnsignedLessThan,
+    IntCC::UnsignedGreaterThanOrEqual,
+    IntCC::UnsignedGreaterThan,
+    IntCC::UnsignedLessThanOrEqual,
+];
+
+pub fn opcode_code(op: Opcode) -> u64 {
+    OPCODES
+        .iter()
+        .position(|&o| o == op)
+        .map_or(0, |i| i as u64 + 1)
+}
+
+pub fn type_code(t: Type) -> u64 {
+    TYPES
+        .iter()
+        .position(|&x| x == t)
+        .map_or(0, |i| i as u64 + 1)
+}
+
+fn type_of(code: u64) -> Result<Type, String> {
+    TYPES
+        .get((code as usize).wrapping_sub(1))
+        .copied()
+        .ok_or_else(|| format!("type code {code}"))
+}
+
+fn cond_code(c: IntCC) -> u64 {
+    CONDS
+        .iter()
+        .position(|&x| x == c)
+        .map_or(0, |i| i as u64 + 1)
+}
+
+fn cond_of(code: u64) -> Result<IntCC, String> {
+    CONDS
+        .get((code as usize).wrapping_sub(1))
+        .copied()
+        .ok_or_else(|| format!("condition code {code}"))
+}
+
+fn mem_word(f: MemFlags) -> u64 {
+    let mut m = 0;
+    if f.readonly() {
+        m |= M_READONLY;
+    }
+    if f.can_move() {
+        m |= M_CAN_MOVE;
+    }
+    if let Some(e) = f.explicit_endianness() {
+        m |= M_ENDIAN;
+        if e == ir::Endianness::Little {
+            m |= M_LITTLE;
+        }
+    }
+    if f.notrap() {
+        m |= M_NOTRAP;
+    }
+    if f.aligned() {
+        m |= M_ALIGNED;
+    }
+    m
+}
+
+/// The flags of a builder-made access: `MemFlags::new()`, or with an
+/// explicit endianness.
+fn mem_flags(m: u64) -> Result<MemFlags, String> {
+    if m & !(M_ENDIAN | M_LITTLE) != 0 {
+        return Err(format!("memory flags {m:#x} on a new instruction"));
+    }
+    let f = MemFlags::new();
+    Ok(if m & M_ENDIAN == 0 {
+        f
+    } else if m & M_LITTLE != 0 {
+        f.with_endianness(ir::Endianness::Little)
+    } else {
+        f.with_endianness(ir::Endianness::Big)
+    })
+}
+
+fn effects(op: Opcode) -> u64 {
+    let mut e = 0;
+    if op.is_terminator() {
+        e |= F_TERMINATOR;
+    }
+    if op.is_branch() {
+        e |= F_BRANCH;
+    }
+    if op.is_call() {
+        e |= F_CALL;
+    }
+    if op.is_return() {
+        e |= F_RETURN;
+    }
+    if op.can_trap() {
+        e |= F_TRAP;
+    }
+    if op.other_side_effects() {
+        e |= F_SIDE_EFFECTS;
+    }
+    if op.can_load() {
+        e |= F_LOAD;
+    }
+    if op.can_store() {
+        e |= F_STORE;
+    }
+    e
+}
+
+fn pure_symbol(func: &ir::Function, gv: ir::GlobalValue) -> bool {
+    match &func.global_values[gv] {
+        ir::GlobalValueData::Symbol { .. } => true,
+        ir::GlobalValueData::IAddImm { base, .. } => pure_symbol(func, *base),
+        _ => false,
+    }
+}
+
+fn no_outline(func: &ir::Function) -> bool {
+    !func.dynamic_stack_slots.is_empty()
+        || !func.dfg.exception_tables.is_empty()
+        || !func
+            .signature
+            .params
+            .iter()
+            .chain(&func.signature.returns)
+            .all(|p| matches!(p.purpose, ir::ArgumentPurpose::Normal))
+}
+
+fn push_bytes(out: &mut Vec<u8>, w: u64) {
+    out.extend_from_slice(&w.to_le_bytes());
+}
+
+/// The words of `func` (see the module comment), as bytes.
+pub fn encode(func: &ir::Function, simd: bool) -> Vec<u8> {
+    encode_with(func, simd, None)
+}
+
+/// [`encode`] with the module's pointer type (the cold outliner's).
+pub fn encode_with(func: &ir::Function, simd: bool, ptr: Option<Type>) -> Vec<u8> {
+    let dfg = &func.dfg;
+    let mut w: Vec<u64> = vec![
+        VERSION,
+        (simd as u64) | if no_outline(func) { H_NO_OUTLINE } else { 0 },
+        dfg.num_values() as u64,
+        dfg.num_insts() as u64,
+        dfg.num_blocks() as u64,
+        ptr.map_or(0, type_code),
+        func.signature.returns.len() as u64,
+    ];
+    w.extend(
+        func.signature
+            .returns
+            .iter()
+            .map(|r| type_code(r.value_type)),
+    );
+    for v in dfg.values() {
+        let ty = type_code(dfg.value_type(v)) << 8;
+        let r = dfg.resolve_aliases(v);
+        if r != v {
+            w.extend([V_ALIAS | ty, r.as_u32() as u64, 0]);
+            continue;
+        }
+        match dfg.value_def(v) {
+            ir::ValueDef::Result(i, n) => w.extend([V_RESULT | ty, i.as_u32() as u64, n as u64]),
+            ir::ValueDef::Param(b, n) => w.extend([V_PARAM | ty, b.as_u32() as u64, n as u64]),
+            ir::ValueDef::Union(..) => w.extend([V_UNION | ty, 0, 0]),
+        }
+    }
+    let blocks: Vec<Block> = func.layout.blocks().collect();
+    w.push(blocks.len() as u64);
+    for b in blocks {
+        w.push(b.as_u32() as u64);
+        w.push(func.layout.is_cold(b) as u64);
+        let params = dfg.block_params(b);
+        w.push(params.len() as u64);
+        w.extend(params.iter().map(|p| p.as_u32() as u64));
+        let insts: Vec<Inst> = func.layout.block_insts(b).collect();
+        w.push(insts.len() as u64);
+        w.extend(insts.iter().map(|i| i.as_u32() as u64));
+    }
+    for inst in (0..dfg.num_insts()).map(|i| Inst::from_u32(i as u32)) {
+        let data = &dfg.insts[inst];
+        let op = data.opcode();
+        let (mut cond, mut imm, mut offset, mut mem) = (0, 0, 0, 0);
+        let mut extra = 0;
+        match *data {
+            InstructionData::StackLoad {
+                stack_slot,
+                offset: o,
+                ..
+            }
+            | InstructionData::StackStore {
+                stack_slot,
+                offset: o,
+                ..
+            } => {
+                extra = F_STACK_SLOT;
+                imm = stack_slot.as_u32() as u64;
+                offset = i64::from(o) as u64;
+            }
+            InstructionData::Trap { code, .. } => {
+                extra = F_TRAP_CODE;
+                imm = code.as_raw().get() as u64;
+            }
+            InstructionData::UnaryConst { .. } => extra = F_UNARY_CONST,
+            InstructionData::UnaryGlobalValue { global_value, .. } => {
+                if pure_symbol(func, global_value) {
+                    extra = F_PURE_GV;
+                }
+            }
+            InstructionData::IntCompare { cond: c, .. } => cond = cond_code(c),
+            InstructionData::IntCompareImm {
+                cond: c, imm: i, ..
+            } => {
+                cond = cond_code(c);
+                imm = i.bits() as u64;
+            }
+            InstructionData::UnaryImm { imm: i, .. }
+            | InstructionData::BinaryImm64 { imm: i, .. } => imm = i.bits() as u64,
+            InstructionData::UnaryIeee32 { imm: i, .. } => imm = i.bits() as u64,
+            InstructionData::UnaryIeee64 { imm: i, .. } => imm = i.bits(),
+            InstructionData::BinaryImm8 { imm: i, .. }
+            | InstructionData::TernaryImm8 { imm: i, .. } => imm = i as u64,
+            InstructionData::Load {
+                flags, offset: o, ..
+            }
+            | InstructionData::Store {
+                flags, offset: o, ..
+            } => {
+                mem = mem_word(flags);
+                offset = i64::from(i32::from(o)) as u64;
+            }
+            InstructionData::LoadNoOffset { flags, .. }
+            | InstructionData::StoreNoOffset { flags, .. } => mem = mem_word(flags),
+            _ => {}
+        }
+        w.extend([opcode_code(op), effects(op) | extra, cond, imm, offset, mem]);
+        let args = dfg.inst_args(inst);
+        w.push(args.len() as u64);
+        w.extend(args.iter().map(|a| a.as_u32() as u64));
+        let results = dfg.inst_results(inst);
+        w.push(results.len() as u64);
+        w.extend(results.iter().map(|r| r.as_u32() as u64));
+        let dests = data.branch_destination(&dfg.jump_tables, &dfg.exception_tables);
+        w.push(dests.len() as u64);
+        for c in dests {
+            w.push(c.block(&dfg.value_lists).as_u32() as u64);
+            let args: Vec<BlockArg> = c.args(&dfg.value_lists).collect();
+            w.push(args.len() as u64);
+            for a in args {
+                w.push(match a {
+                    BlockArg::Value(v) => v.as_u32() as u64,
+                    _ => NONE,
+                });
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(w.len() * 8);
+    for x in w {
+        push_bytes(&mut out, x);
+    }
+    out
+}
+
+struct Script<'a> {
+    w: &'a [u64],
+    at: usize,
+}
+
+impl Script<'_> {
+    fn next(&mut self) -> Result<u64, String> {
+        let x = *self.w.get(self.at).ok_or("edit script ends early")?;
+        self.at += 1;
+        Ok(x)
+    }
+    fn value(&mut self) -> Result<Value, String> {
+        Ok(Value::from_u32(self.next()? as u32))
+    }
+    fn block(&mut self) -> Result<Block, String> {
+        Ok(Block::from_u32(self.next()? as u32))
+    }
+    fn values(&mut self) -> Result<Vec<Value>, String> {
+        let n = self.next()?;
+        (0..n).map(|_| self.value()).collect()
+    }
+}
+
+fn expect<T: PartialEq + std::fmt::Debug>(what: &str, got: T, want: T) -> Result<(), String> {
+    if got == want {
+        Ok(())
+    } else {
+        Err(format!(
+            "{what}: Cranelift made {got:?}, the script names {want:?}"
+        ))
+    }
+}
+
+/// Replays the edit script `words` (see the module comment) on `func`.
+pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
+    let mut s = Script { w: words, at: 0 };
+    loop {
+        match s.next()? {
+            E_END => return Ok(()),
+            E_BLOCK => {
+                let want = s.block()?;
+                expect("block", func.dfg.make_block(), want)?;
+            }
+            E_PARAM => {
+                let b = s.block()?;
+                let ty = type_of(s.next()?)?;
+                let want = s.value()?;
+                expect("param", func.dfg.append_block_param(b, ty), want)?;
+            }
+            E_PLACE => {
+                let b = s.block()?;
+                let before = s.block()?;
+                func.layout.insert_block(b, before);
+            }
+            E_RETARGET => {
+                let inst = Inst::from_u32(s.next()? as u32);
+                let from = s.block()?;
+                let to = s.block()?;
+                let ir::DataFlowGraph {
+                    insts,
+                    jump_tables,
+                    exception_tables,
+                    value_lists,
+                    ..
+                } = &mut func.dfg;
+                for c in insts[inst].branch_destination_mut(jump_tables, exception_tables) {
+                    if c.block(value_lists) == from {
+                        c.set_block(to, value_lists);
+                    }
+                }
+            }
+            E_CLONE => {
+                let b = s.block()?;
+                let inst = Inst::from_u32(s.next()? as u32);
+                let want = Inst::from_u32(s.next()? as u32);
+                let vals = s.values()?;
+                let new = func.dfg.clone_inst(inst);
+                expect("clone", new, want)?;
+                let mut it = vals.into_iter();
+                let mut short = false;
+                func.dfg.map_inst_values(new, |v| {
+                    it.next().unwrap_or_else(|| {
+                        short = true;
+                        v
+                    })
+                });
+                if short || it.next().is_some() {
+                    return Err(format!("clone of {inst}: wrong value count"));
+                }
+                FuncCursor::new(func).at_bottom(b).insert_inst(new);
+            }
+            E_INS => {
+                let b = s.block()?;
+                let made = build(func, b, &mut s)?;
+                let want = Inst::from_u32(s.next()? as u32);
+                expect("instruction", made, want)?;
+            }
+            op => return Err(format!("edit op {op}")),
+        }
+    }
+}
+
+/// One builder call at the bottom of `block`, as the Rust passes make it.
+fn build(func: &mut ir::Function, block: Block, s: &mut Script) -> Result<Inst, String> {
+    let code = s.next()?;
+    let ty_word = s.next()?;
+    let cond_word = s.next()?;
+    let imm = s.next()? as i64;
+    let offset = s.next()? as i64 as i32;
+    let mem = s.next()?;
+    let args = s.values()?;
+    let n_dests = s.next()?;
+    let mut dests: Vec<(Block, Vec<Value>)> = vec![];
+    for _ in 0..n_dests {
+        let b = s.block()?;
+        dests.push((b, s.values()?));
+    }
+    let op = *OPCODES
+        .get((code as usize).wrapping_sub(1))
+        .ok_or_else(|| format!("opcode code {code}"))?;
+    let arity = |n: usize| -> Result<(), String> {
+        if args.len() == n {
+            Ok(())
+        } else {
+            Err(format!("{op}: {} arguments", args.len()))
+        }
+    };
+    let a = |i: usize| args[i];
+    let mut pos = FuncCursor::new(func).at_bottom(block);
+    let ins = pos.ins();
+    let made = match op {
+        Opcode::Iconst => {
+            arity(0)?;
+            ins.iconst(type_of(ty_word)?, imm)
+        }
+        Opcode::IaddImm => {
+            arity(1)?;
+            ins.iadd_imm(a(0), imm)
+        }
+        Opcode::ImulImm => {
+            arity(1)?;
+            ins.imul_imm(a(0), imm)
+        }
+        Opcode::IcmpImm => {
+            arity(1)?;
+            ins.icmp_imm(cond_of(cond_word)?, a(0), imm)
+        }
+        Opcode::Icmp => {
+            arity(2)?;
+            ins.icmp(cond_of(cond_word)?, a(0), a(1))
+        }
+        Opcode::Iadd | Opcode::Isub | Opcode::Band | Opcode::Bor | Opcode::Bxor => {
+            arity(2)?;
+            match op {
+                Opcode::Iadd => ins.iadd(a(0), a(1)),
+                Opcode::Isub => ins.isub(a(0), a(1)),
+                Opcode::Band => ins.band(a(0), a(1)),
+                Opcode::Bor => ins.bor(a(0), a(1)),
+                _ => ins.bxor(a(0), a(1)),
+            }
+        }
+        Opcode::Umulhi => {
+            arity(2)?;
+            ins.umulhi(a(0), a(1))
+        }
+        Opcode::Fmul => {
+            arity(2)?;
+            ins.fmul(a(0), a(1))
+        }
+        Opcode::UaddOverflow => {
+            arity(2)?;
+            ins.uadd_overflow(a(0), a(1)).0
+        }
+        Opcode::Bnot => {
+            arity(1)?;
+            ins.bnot(a(0))
+        }
+        Opcode::Splat => {
+            arity(1)?;
+            ins.splat(type_of(ty_word)?, a(0))
+        }
+        Opcode::ScalarToVector => {
+            arity(1)?;
+            ins.scalar_to_vector(type_of(ty_word)?, a(0))
+        }
+        Opcode::SwidenLow => {
+            arity(1)?;
+            ins.swiden_low(a(0))
+        }
+        Opcode::SwidenHigh => {
+            arity(1)?;
+            ins.swiden_high(a(0))
+        }
+        Opcode::FcvtFromSint => {
+            arity(1)?;
+            ins.fcvt_from_sint(type_of(ty_word)?, a(0))
+        }
+        Opcode::Bitcast => {
+            arity(1)?;
+            ins.bitcast(type_of(ty_word)?, mem_flags(mem)?, a(0))
+        }
+        Opcode::Load => {
+            arity(1)?;
+            ins.load(type_of(ty_word)?, mem_flags(mem)?, a(0), offset)
+        }
+        Opcode::Store => {
+            arity(2)?;
+            ins.store(mem_flags(mem)?, a(0), a(1), offset);
+            return last_inst(func, block);
+        }
+        Opcode::Brif => {
+            arity(1)?;
+            let [(t, ta), (e, ea)] = dests.as_slice() else {
+                return Err("brif: destinations".into());
+            };
+            let ta: Vec<BlockArg> = ta.iter().map(|&v| BlockArg::Value(v)).collect();
+            let ea: Vec<BlockArg> = ea.iter().map(|&v| BlockArg::Value(v)).collect();
+            ins.brif(a(0), *t, &ta, *e, &ea);
+            return last_inst(func, block);
+        }
+        _ => return Err(format!("no builder for {op}")),
+    };
+    let _ = made;
+    last_inst(func, block)
+}
+
+fn last_inst(func: &ir::Function, block: Block) -> Result<Inst, String> {
+    func.layout
+        .last_inst(block)
+        .ok_or_else(|| "empty block after a build".into())
+}
+
+/// The cold outliner's edit ops: [`E_OUTLINE`] `idx root owned shared
+/// has_return trap live_ins remat shared_slots exclusive_slots ordered`
+/// (lists as `n` then entries, `remat` as (value, inst) pairs, `trap` the
+/// trap code's byte or 0), or [`E_SKIP`] for a round whose region the
+/// analysis refused.
+pub const E_OUTLINE: u64 = 7;
+pub const E_SKIP: u64 = 8;
+
+/// Replays the cold outliner's script on `func`: each [`E_OUTLINE`] goes
+/// through `native_cold_outline::apply_extraction`, which builds the helper
+/// and the stub from the port's decisions. Returns the helpers.
+pub fn apply_outline<M: cranelift_module::Module>(
+    m: &mut M,
+    parent_key: &str,
+    func: &mut ir::Function,
+    words: &[u64],
+) -> Result<Vec<(cranelift_module::FuncId, String, ir::Function)>, String> {
+    use vesper::native_cold_outline::{Extraction, apply_extraction};
+    let mut s = Script { w: words, at: 0 };
+    let mut out = vec![];
+    let blocks = |s: &mut Script| -> Result<Vec<Block>, String> {
+        let n = s.next()?;
+        (0..n).map(|_| s.block()).collect()
+    };
+    let slots = |s: &mut Script| -> Result<Vec<ir::StackSlot>, String> {
+        let n = s.next()?;
+        (0..n)
+            .map(|_| Ok(ir::StackSlot::from_u32(s.next()? as u32)))
+            .collect()
+    };
+    loop {
+        match s.next()? {
+            E_END => return Ok(out),
+            E_SKIP => {}
+            E_OUTLINE => {
+                let idx = s.next()? as usize;
+                let root = s.block()?;
+                let owned = blocks(&mut s)?.into_iter().collect();
+                let _shared = blocks(&mut s)?;
+                let has_return = s.next()? != 0;
+                let trap = s.next()?;
+                let first_trap = std::num::NonZeroU8::new(trap as u8).map(ir::TrapCode::from_raw);
+                let live_ins = s.values()?;
+                let n = s.next()?;
+                let mut remat = vec![];
+                for _ in 0..n {
+                    let v = s.value()?;
+                    remat.push((v, Inst::from_u32(s.next()? as u32)));
+                }
+                let shared_slots = slots(&mut s)?;
+                let exclusive_slots = slots(&mut s)?;
+                let ordered_blocks = blocks(&mut s)?;
+                let plan = Extraction {
+                    root,
+                    owned,
+                    has_return,
+                    first_trap,
+                    live_ins,
+                    remat,
+                    shared_slots,
+                    exclusive_slots,
+                    ordered_blocks,
+                };
+                out.push(apply_extraction(m, parent_key, idx, func, &plan)?);
+            }
+            op => return Err(format!("outline op {op}")),
+        }
+    }
+}
