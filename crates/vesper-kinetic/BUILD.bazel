@@ -91,6 +91,12 @@ filegroup(
             "            gd0 - radii,\n            normal,\n",
             "            gd0 - ra,\n            normal,\n",
         ),
+        (
+            "ccd",
+            "ccd",
+            "        if d <= margin {\n",
+            "        if d < -1.0 {\n",
+        ),
     ]
 ]
 
