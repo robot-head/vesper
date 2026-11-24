@@ -234,6 +234,23 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn memset(dst: *mut c_void, byte: i32, n: usize) -> *mut c_void;
         fn syscall(nr: i64, ...) -> i64;
         fn ioctl(fd: i32, req: u64, ...) -> i32;
+        #[cfg(target_os = "linux")]
+        fn epoll_create1(flags: i32) -> i32;
+        #[cfg(target_os = "linux")]
+        fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut c_void) -> i32;
+        #[cfg(target_os = "linux")]
+        fn epoll_wait(epfd: i32, events: *mut c_void, maxevents: i32, timeout: i32) -> i32;
+        #[cfg(target_os = "macos")]
+        fn kqueue() -> i32;
+        #[cfg(target_os = "macos")]
+        fn kevent(
+            kq: i32,
+            changelist: *const c_void,
+            nchanges: i32,
+            eventlist: *mut c_void,
+            nevents: i32,
+            timeout: *const c_void,
+        ) -> i32;
         fn mmap(
             addr: *mut c_void,
             len: usize,
@@ -289,7 +306,7 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         #[cfg_attr(not(target_os = "macos"), link_name = "__errno_location")]
         fn errno_address() -> *mut i32;
     }
-    vec![
+    let mut syms = vec![
         ("open", open as *const u8),
         ("read", read as *const u8),
         ("write", write as *const u8),
@@ -381,7 +398,19 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("ioctl", ioctl as *const u8),
         ("mmap", mmap as *const u8),
         ("munmap", munmap as *const u8),
-    ]
+    ];
+    #[cfg(target_os = "linux")]
+    {
+        syms.push(("epoll_create1", epoll_create1 as *const u8));
+        syms.push(("epoll_ctl", epoll_ctl as *const u8));
+        syms.push(("epoll_wait", epoll_wait as *const u8));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        syms.push(("kqueue", kqueue as *const u8));
+        syms.push(("kevent", kevent as *const u8));
+    }
+    syms
 }
 #[cfg(windows)]
 fn libc_symbols() -> Vec<(&'static str, *const u8)> {
@@ -404,6 +433,99 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
             lp_default_char: *const c_void,
             lp_used_default_char: *mut i32,
         ) -> i32;
+        fn CreateIoCompletionPort(
+            file_handle: u64,
+            existing_completion_port: u64,
+            completion_key: u64,
+            number_of_concurrent_threads: u32,
+        ) -> u64;
+        fn PostQueuedCompletionStatus(
+            completion_port: u64,
+            number_of_bytes_transferred: u32,
+            completion_key: u64,
+            overlapped: u64,
+        ) -> i32;
+        fn GetQueuedCompletionStatus(
+            completion_port: u64,
+            bytes_transferred: *mut u32,
+            completion_key: *mut u64,
+            overlapped: *mut u64,
+            milliseconds: u32,
+        ) -> i32;
+        fn CloseHandle(handle: u64) -> i32;
+        fn GetLastError() -> u32;
+        fn CreateFileW(
+            lp_file_name: *const u16,
+            dw_desired_access: u32,
+            dw_share_mode: u32,
+            lp_security_attributes: *const c_void,
+            dw_creation_disposition: u32,
+            dw_flags_and_attributes: u32,
+            h_template_file: *mut c_void,
+        ) -> u64;
+        fn ReadFile(
+            h_file: u64,
+            lp_buffer: *mut c_void,
+            n_number_of_bytes_to_read: u32,
+            lp_number_of_bytes_read: *mut u32,
+            lp_overlapped: *mut c_void,
+        ) -> i32;
+        fn WriteFile(
+            h_file: u64,
+            lp_buffer: *const c_void,
+            n_number_of_bytes_to_write: u32,
+            lp_number_of_bytes_written: *mut u32,
+            lp_overlapped: *mut c_void,
+        ) -> i32;
+        fn FlushFileBuffers(h_file: u64) -> i32;
+        fn GetFileSizeEx(h_file: u64, lp_file_size: *mut i64) -> i32;
+        fn GetFileAttributesExW(
+            lp_file_name: *const u16,
+            f_info_level_id: i32,
+            lp_file_information: *mut c_void,
+        ) -> i32;
+        fn FindFirstFileW(lp_file_name: *const u16, lp_find_file_data: *mut c_void) -> u64;
+        fn FindNextFileW(h_find_file: u64, lp_find_file_data: *mut c_void) -> i32;
+        fn FindClose(h_find_file: u64) -> i32;
+        fn MoveFileExW(
+            lp_existing_file_name: *const u16,
+            lp_new_file_name: *const u16,
+            dw_flags: u32,
+        ) -> i32;
+        fn DeleteFileW(lp_file_name: *const u16) -> i32;
+        fn RemoveDirectoryW(lp_path_name: *const u16) -> i32;
+        fn CreateDirectoryW(lp_path_name: *const u16, lp_security_attributes: *const c_void)
+        -> i32;
+        fn GetCurrentProcessId() -> u32;
+        fn CreatePipe(
+            h_read_pipe: *mut *mut c_void,
+            h_write_pipe: *mut *mut c_void,
+            lp_pipe_attributes: *const c_void,
+            n_size: u32,
+        ) -> i32;
+        fn SetHandleInformation(h_object: *mut c_void, dw_mask: u32, dw_flags: u32) -> i32;
+        fn GetStdHandle(n_std_handle: i32) -> *mut c_void;
+        fn CreateProcessW(
+            lp_application_name: *const u16,
+            lp_command_line: *mut u16,
+            lp_process_attributes: *const c_void,
+            lp_thread_attributes: *const c_void,
+            b_inherit_handles: i32,
+            dw_creation_flags: u32,
+            lp_environment: *const c_void,
+            lp_current_directory: *const u16,
+            lp_startup_info: *const c_void,
+            lp_process_information: *mut c_void,
+        ) -> i32;
+        fn WaitForSingleObject(h_handle: *mut c_void, dw_milliseconds: u32) -> u32;
+        fn GetExitCodeProcess(h_process: *mut c_void, lp_exit_code: *mut u32) -> i32;
+        fn TerminateProcess(h_process: *mut c_void, u_exit_code: u32) -> i32;
+        fn GetProcessId(process: *mut c_void) -> u32;
+        fn ExitProcess(u_exit_code: u32);
+        fn GetProcessHeap() -> *mut c_void;
+        fn HeapAlloc(h_heap: *mut c_void, dw_flags: u32, dw_bytes: usize) -> *mut c_void;
+        fn HeapFree(h_heap: *mut c_void, dw_flags: u32, lp_mem: *mut c_void) -> i32;
+        fn RtlMoveMemory(dst: *mut c_void, src: *const c_void, len: usize);
     }
     vec![
         ("GetCommandLineW", GetCommandLineW as *const u8),
@@ -422,6 +544,47 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ),
         ("lstrlenW", lstrlenW as *const u8),
         ("WideCharToMultiByte", WideCharToMultiByte as *const u8),
+        (
+            "CreateIoCompletionPort",
+            CreateIoCompletionPort as *const u8,
+        ),
+        (
+            "PostQueuedCompletionStatus",
+            PostQueuedCompletionStatus as *const u8,
+        ),
+        (
+            "GetQueuedCompletionStatus",
+            GetQueuedCompletionStatus as *const u8,
+        ),
+        ("CloseHandle", CloseHandle as *const u8),
+        ("GetLastError", GetLastError as *const u8),
+        ("CreateFileW", CreateFileW as *const u8),
+        ("ReadFile", ReadFile as *const u8),
+        ("WriteFile", WriteFile as *const u8),
+        ("FlushFileBuffers", FlushFileBuffers as *const u8),
+        ("GetFileSizeEx", GetFileSizeEx as *const u8),
+        ("GetFileAttributesExW", GetFileAttributesExW as *const u8),
+        ("FindFirstFileW", FindFirstFileW as *const u8),
+        ("FindNextFileW", FindNextFileW as *const u8),
+        ("FindClose", FindClose as *const u8),
+        ("MoveFileExW", MoveFileExW as *const u8),
+        ("DeleteFileW", DeleteFileW as *const u8),
+        ("RemoveDirectoryW", RemoveDirectoryW as *const u8),
+        ("CreateDirectoryW", CreateDirectoryW as *const u8),
+        ("GetCurrentProcessId", GetCurrentProcessId as *const u8),
+        ("CreatePipe", CreatePipe as *const u8),
+        ("SetHandleInformation", SetHandleInformation as *const u8),
+        ("GetStdHandle", GetStdHandle as *const u8),
+        ("CreateProcessW", CreateProcessW as *const u8),
+        ("WaitForSingleObject", WaitForSingleObject as *const u8),
+        ("GetExitCodeProcess", GetExitCodeProcess as *const u8),
+        ("TerminateProcess", TerminateProcess as *const u8),
+        ("GetProcessId", GetProcessId as *const u8),
+        ("ExitProcess", ExitProcess as *const u8),
+        ("GetProcessHeap", GetProcessHeap as *const u8),
+        ("HeapAlloc", HeapAlloc as *const u8),
+        ("HeapFree", HeapFree as *const u8),
+        ("RtlMoveMemory", RtlMoveMemory as *const u8),
     ]
 }
 #[cfg(not(any(unix, windows)))]

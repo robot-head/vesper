@@ -45,13 +45,10 @@
 //! software model of the protocol, not an encrypted-memory implementation.
 
 use crate::error::TeeError;
-use crate::gpa::{IntervalSet, PAGE_4K};
+use crate::gpa::IntervalSet;
 use crate::linear::{Ledger, Obligation};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-
-/// Host mmap replies are whole 4 KiB pages; the mapped set counts pages.
-const PAGE_SIZE: u64 = 4096;
 
 /// A value returned by the untrusted host (VMGEXIT, #VE, RSI host call).
 /// The raw bits are private; validators are the only way out.
@@ -115,23 +112,25 @@ impl HostClockValidator {
 
     pub fn accept(&mut self, reported: UntrustedHostVal<u64>) -> Result<u64, TeeError> {
         let t = reported.raw_bits;
-        if let Some(prev) = self.last {
-            if t < prev {
-                return Err(TeeError::HostTimeNonMonotonic {
-                    previous: prev,
-                    reported: t,
-                });
+        let (has_prev, prev) = match self.last {
+            Some(p) => (1, p),
+            None => (0, 0),
+        };
+        match crate::port::vesper::host_validate_clock(has_prev, prev, self.max_step, t) {
+            0 => {
+                self.last = Some(t);
+                Ok(t)
             }
-            if t - prev > self.max_step {
-                return Err(TeeError::HostTimeJump {
-                    previous: prev,
-                    reported: t,
-                    max_step: self.max_step,
-                });
-            }
+            1 => Err(TeeError::HostTimeNonMonotonic {
+                previous: prev,
+                reported: t,
+            }),
+            _ => Err(TeeError::HostTimeJump {
+                previous: prev,
+                reported: t,
+                max_step: self.max_step,
+            }),
         }
-        self.last = Some(t);
-        Ok(t)
     }
 }
 
@@ -167,27 +166,27 @@ impl HostMappingTable {
         requested_len: u64,
     ) -> Result<HostMmapReply, TeeError> {
         let HostMmapReply { addr, len } = reply.raw_bits;
-        let invalid = TeeError::HostMmapInvalid { addr, len };
-        if len == 0
-            || len != requested_len
-            || !addr.is_multiple_of(PAGE_SIZE)
-            || !len.is_multiple_of(PAGE_SIZE)
-        {
-            return Err(invalid);
+        let count = (self.mapped.words.len() / 2) as u64;
+        self.mapped.words.resize(self.mapped.words.len() + 2, 0);
+        let res = crate::port::vesper::host_accept_mmap(
+            &mut self.mapped.words,
+            count,
+            self.window_start,
+            self.window_end,
+            addr,
+            len,
+            requested_len,
+        );
+        if res == u64::MAX {
+            self.mapped.words.truncate((count as usize) * 2);
+            Err(TeeError::HostMmapInvalid { addr, len })
+        } else if res == u64::MAX - 1 {
+            self.mapped.words.truncate((count as usize) * 2);
+            Err(TeeError::HostMmapOverlap { addr, len })
+        } else {
+            self.mapped.words.truncate((res as usize) * 2);
+            Ok(HostMmapReply { addr, len })
         }
-        let end = addr.checked_add(len).ok_or(invalid.clone())?;
-        if addr < self.window_start || end > self.window_end {
-            return Err(invalid);
-        }
-        if self
-            .mapped
-            .first_overlap(addr / PAGE_SIZE, end / PAGE_SIZE)
-            .is_some()
-        {
-            return Err(TeeError::HostMmapOverlap { addr, len });
-        }
-        self.mapped.insert(addr / PAGE_SIZE, end / PAGE_SIZE);
-        Ok(HostMmapReply { addr, len })
     }
 
     /// Record a successful unmap the guest itself requested. This method does
@@ -196,20 +195,26 @@ impl HostMappingTable {
     /// currently tracked; invalid requests leave all tracked ranges intact.
     pub fn unmap(&mut self, m: HostMmapReply) -> Result<(), TeeError> {
         let HostMmapReply { addr, len } = m;
-        let invalid = TeeError::HostMmapInvalid { addr, len };
-        if len == 0 || !addr.is_multiple_of(PAGE_4K) || !len.is_multiple_of(PAGE_4K) {
-            return Err(invalid);
+        let count = (self.mapped.words.len() / 2) as u64;
+        self.mapped.words.resize(self.mapped.words.len() + 2, 0);
+        let res = crate::port::vesper::host_unmap(
+            &mut self.mapped.words,
+            count,
+            self.window_start,
+            self.window_end,
+            addr,
+            len,
+        );
+        if res == u64::MAX {
+            self.mapped.words.truncate((count as usize) * 2);
+            Err(TeeError::HostMmapInvalid { addr, len })
+        } else if res == u64::MAX - 1 {
+            self.mapped.words.truncate((count as usize) * 2);
+            Err(TeeError::HostMmapUntracked { addr, len })
+        } else {
+            self.mapped.words.truncate((res as usize) * 2);
+            Ok(())
         }
-        let end = addr.checked_add(len).ok_or(invalid.clone())?;
-        if addr < self.window_start || end > self.window_end {
-            return Err(invalid);
-        }
-        let (start_page, end_page) = (addr / PAGE_4K, end / PAGE_4K);
-        if !self.mapped.covers(start_page, end_page) {
-            return Err(TeeError::HostMmapUntracked { addr, len });
-        }
-        self.mapped.remove(start_page, end_page);
-        Ok(())
     }
 }
 

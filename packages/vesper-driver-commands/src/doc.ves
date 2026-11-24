@@ -1,0 +1,383 @@
+// `vesper doc`: CLI option parsing, validation, and `--help` in Vesper,
+// delegating doc generation and `store-olean` (`src/doc_commands.rs`) to
+// `HybridCommands::hc_doc_run`.
+use @vesper/driver::{
+    Args,
+    args_count,
+    eq
+};
+use super::{
+    arg,
+    byte_at,
+    print,
+    fail,
+    stdout_stream
+};
+
+fn print_doc_help() eff [Ffi[HybridCommands]] {
+    print(
+        stdout_stream(),
+        in "Usage: vesper doc FILE [--json] [-o OUTPUT | --bundle DIR] [--query QUERY.json] [--search TEXT]\n                [--wire LAYOUTS.json] [--wcsd-stack [--target TRIPLE]] [--proof-audit REPORT.json ...] [--olean-store DIR|default [--olean-root DIR]]\n       vesper doc PACKAGE_DIR (--json | --bundle DIR) [--search TEXT] [--wcsd-stack [--target TRIPLE]] [--proof-audit REPORT.json ...] [--olean-store ...]\n       vesper doc store-olean --proof-audit REPORT.json --root LEAN_BUILD_DIR --store DIR|default [--json]\n\nCheck source and generate deterministic local API documentation.\nDefault: escaped static HTML on stdout. --json: typed JSON metadata and search results.\n-o creates a new local output file; existing files are preserved. --bundle creates a new directory holding index.html,\nsearch.html (a self-contained signature search page), search-index.json and linked .olean certificates.\n--query reads a full structural JSON query (no wildcard/generic inference). --search takes a text query, e.g.\n'inout Tx.{total}, u64 -> ()', 'sink linear Tx -> u64 eff []' or a name; `_` matches any type and omitted passes,\nmodes and eff [...] are unconstrained (needs --json; the search page runs the same matcher).\nSource is limited to 128 KiB and bounded tokens/nesting/items/types; query to 32 KiB; output to 2 MiB.\nLocal intra-doc references such as [Type::method] resolve against documented checked declarations; unknown, ambiguous or unsupported references fail generation.\nGenerated private Pact helpers are excluded. Struct byte rulers describe the native eight-byte ABI, not wire formats.\nFieldTree heatmaps show each parameter's checked footprint (inout write, in read, sink consume, free siblings); a may-use\nanalysis of each body marks declared leaves it never reaches and infers the effects it may perform. Mode-crossing tables\ngive the [K-Adt] mode of each generic type per parameter mode; capability badges (Pure, Zero-Alloc, Uncancellable\nLinear I/O, Abortable Checkpoint, Constant-Time, Hard-Realtime, Deterministic Float) come from checked effect rows.\nWith --wcsd-stack (and optional --target TRIPLE, e.g. x86_64-unknown-linux-gnu or aarch64-unknown-linux-gnu),\nevery closed-row `eff [Realtime]` function is compiled standalone to Cranelift machine code, its emitted prologues are\ndecoded, and its exact worst-case stack depth (WCSD) in bytes and worst call path (or unavailability reason) are\nattached to the Hard-Realtime capability badge.\nA PACKAGE_DIR documents every .ves file of the package (Loom.toml discovery as for path-less lint) with one page per\nfile, an overview with package capabilities against the manifest's capability_ceiling, and ONE package-wide search\nindex over file-qualified functions and impl/model methods; generic functions match by instantiation.\n--wire compiles vesper-wire-layouts JSON declarations with the Bridge layout checker (explicit endianness, no implicit\npadding) into 16-byte field-span records and SVG cache-line rulers. Linear typestate graphs are rendered as SVG.\n--proof-audit (repeatable, up to 16) reads `vesper proof-audit --json` reports. An item is proved/audited only when\nevery @proof(Name) anchor in its docs names a theorem in an accepted kernel-replayed audit; otherwise unverified.\n--olean-store links each audited .olean from a Loom content-addressed store (`default` is ~/.vesper/store), bound to\nthe exact audit report and rehashed on read; store-olean records them there, or add --olean-root LEAN_BUILD_DIR to\npublish them from the proof-audit output in the same run (the bytes must match the audited size and BLAKE3). A link is content identity, not provenance.\nBadges describe Lean theorems about models, not the Rust or Vesper implementation. No network, JIT or doctest execution.\n"
+            .as_bytes()
+    );
+}
+
+fn any_json_flag(in args: Args, n: u64) -> bool {
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            return false;
+        }
+        let a_buf = arg(in args, i);
+        if eq(in a_buf.as_slice(), in "--json") {
+            return true;
+        }
+        i = wrapping_add(i, 1);
+    }
+    false
+}
+
+fn fail_doc(has_json: bool, in message: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
+    if !has_json {
+        return fail(in message);
+    }
+    let err_len = HybridCommands::hc_doc_json_err(in message);
+    if err_len == 0 {
+        return fail(in message);
+    }
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    err.resize(err_len, 0);
+    let actual = HybridCommands::hc_doc_err(inout err.as_slice_mut());
+    if actual > err.len() {
+        err.resize(actual, 0);
+        let _got = HybridCommands::hc_doc_err(inout err.as_slice_mut());
+    } else {
+        err.truncate(actual);
+    }
+    fail(in err.as_slice())
+}
+
+fn pack_args(in args: Args, n: u64) -> ChunkSeq[u8] {
+    let mut packed: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a_buf = arg(in args, i);
+        packed.extend(in a_buf.as_slice());
+        packed.push(0);
+        i = wrapping_add(i, 1);
+    }
+    packed
+}
+
+fn run_packed(in args: Args, n: u64) -> i64 eff [Ffi[HybridCommands]] {
+    let packed = pack_args(in args, n);
+    let err_len = HybridCommands::hc_doc_run(in packed.as_slice());
+    if err_len == 0 {
+        return 0;
+    }
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    err.resize(err_len, 0);
+    let actual = HybridCommands::hc_doc_err(inout err.as_slice_mut());
+    if actual > err.len() {
+        err.resize(actual, 0);
+        let _got = HybridCommands::hc_doc_err(inout err.as_slice_mut());
+    } else {
+        err.truncate(actual);
+    }
+    fail(in err.as_slice())
+}
+
+fn run_store_olean(in args: Args, n: u64, has_json: bool) -> i64 eff [Ffi[HybridCommands]] {
+    let mut has_audit = false;
+    let mut has_root = false;
+    let mut has_store = false;
+    let mut i: u64 = 2;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a_buf = arg(in args, i);
+        let a = a_buf.as_slice();
+        if eq(in a, in "--help") || eq(in a, in "-h") {
+            print_doc_help();
+            return 0;
+        } else if eq(in a, in "--json") {
+            // Tracked via `has_json`.
+        } else if eq(in a, in "--proof-audit") && !has_audit {
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail_doc(
+                    has_json,
+                    in "--proof-audit requires a proof-audit JSON report".as_bytes()
+                );
+            }
+            let v_buf = arg(in args, i);
+            let v = v_buf.as_slice();
+            if v.len() != 0 && byte_at(in v, 0) == 45 {
+                return fail_doc(
+                    has_json,
+                    in "--proof-audit requires a proof-audit JSON report".as_bytes()
+                );
+            }
+            has_audit = true;
+        } else if eq(in a, in "--root") && !has_root {
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail_doc(has_json, in "--root requires the Lean build directory".as_bytes());
+            }
+            let v_buf = arg(in args, i);
+            let v = v_buf.as_slice();
+            if v.len() != 0 && byte_at(in v, 0) == 45 {
+                return fail_doc(has_json, in "--root requires the Lean build directory".as_bytes());
+            }
+            has_root = true;
+        } else if eq(in a, in "--store") && !has_store {
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail_doc(
+                    has_json,
+                    in "--store requires a store directory or 'default'".as_bytes()
+                );
+            }
+            let v_buf = arg(in args, i);
+            let v = v_buf.as_slice();
+            if v.len() != 0 && byte_at(in v, 0) == 45 {
+                return fail_doc(
+                    has_json,
+                    in "--store requires a store directory or 'default'".as_bytes()
+                );
+            }
+            has_store = true;
+        } else {
+            let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            err.extend(in "unexpected store-olean argument '".as_bytes());
+            err.extend(in a);
+            err.push(39);
+            return fail_doc(has_json, in err.as_slice());
+        }
+        i = wrapping_add(i, 1);
+    }
+    if !has_audit || !has_root || !has_store {
+        return fail_doc(
+            has_json,
+            in "store-olean needs --proof-audit, --root and --store".as_bytes()
+        );
+    }
+    run_packed(in args, n)
+}
+
+fn check_value(in args: Args, i: u64, n: u64) -> bool {
+    if i >= n {
+        return false;
+    }
+    let v_buf = arg(in args, i);
+    let v = v_buf.as_slice();
+    if v.len() != 0 && byte_at(in v, 0) == 45 {
+        return false;
+    }
+    true
+}
+
+fn dup_err(in flag: Slice[u8]) -> ChunkSeq[u8] {
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    err.extend(in "duplicate ".as_bytes());
+    err.extend(in flag);
+    err
+}
+
+pub fn run_doc(in args: Args) -> i64 eff [Ffi[HybridCommands]] {
+    let n = args_count(in args);
+    let has_json = any_json_flag(in args, n);
+    if n > 1 {
+        let first_buf = arg(in args, 1);
+        if eq(in first_buf.as_slice(), in "store-olean") {
+            return run_store_olean(in args, n, has_json);
+        }
+    }
+    let mut has_input = false;
+    let mut has_output = false;
+    let mut has_bundle = false;
+    let mut has_query = false;
+    let mut has_text_query = false;
+    let mut has_wire = false;
+    let mut has_store = false;
+    let mut has_olean_root = false;
+    let mut audits_count: u64 = 0;
+    let mut json = false;
+    let mut wcsd_stack = false;
+    let mut has_target = false;
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a_buf = arg(in args, i);
+        let a = a_buf.as_slice();
+        if eq(in a, in "--help") || eq(in a, in "-h") {
+            print_doc_help();
+            return 0;
+        } else if eq(in a, in "--json") {
+            json = true;
+        } else if eq(in a, in "--wcsd-stack") {
+            wcsd_stack = true;
+        } else if eq(in a, in "--target") {
+            if has_target {
+                let err = dup_err(in a);
+                return fail_doc(has_json, in err.as_slice());
+            }
+            i = wrapping_add(i, 1);
+            if !check_value(in args, i, n) {
+                return fail_doc(has_json, in "--target requires a target triple".as_bytes());
+            }
+            has_target = true;
+        } else if eq(in a, in "-o") {
+            if has_output {
+                let err = dup_err(in a);
+                return fail_doc(has_json, in err.as_slice());
+            }
+            i = wrapping_add(i, 1);
+            if !check_value(in args, i, n) {
+                return fail_doc(has_json, in "-o requires a new output path".as_bytes());
+            }
+            has_output = true;
+        } else if eq(in a, in "--bundle") {
+            if has_bundle {
+                let err = dup_err(in a);
+                return fail_doc(has_json, in err.as_slice());
+            }
+            i = wrapping_add(i, 1);
+            if !check_value(in args, i, n) {
+                return fail_doc(has_json, in "--bundle requires a new output directory".as_bytes());
+            }
+            has_bundle = true;
+        } else if eq(in a, in "--query") {
+            if has_query {
+                let err = dup_err(in a);
+                return fail_doc(has_json, in err.as_slice());
+            }
+            i = wrapping_add(i, 1);
+            if !check_value(in args, i, n) {
+                return fail_doc(has_json, in "--query requires a query JSON file".as_bytes());
+            }
+            has_query = true;
+        } else if eq(in a, in "--search") {
+            if has_text_query {
+                let err = dup_err(in a);
+                return fail_doc(has_json, in err.as_slice());
+            }
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail_doc(has_json, in "--search requires a text query".as_bytes());
+            }
+            let v_buf = arg(in args, i);
+            let v = v_buf.as_slice();
+            if v.len() != 0 && byte_at(in v, 0) == 45 {
+                let arrow = v.len() >= 2 && byte_at(in v, 1) == 62;
+                if !arrow {
+                    return fail_doc(has_json, in "--search requires a text query".as_bytes());
+                }
+            }
+            has_text_query = true;
+        } else if eq(in a, in "--wire") {
+            if has_wire {
+                let err = dup_err(in a);
+                return fail_doc(has_json, in err.as_slice());
+            }
+            i = wrapping_add(i, 1);
+            if !check_value(in args, i, n) {
+                return fail_doc(has_json, in "--wire requires a wire layout JSON file".as_bytes());
+            }
+            has_wire = true;
+        } else if eq(in a, in "--olean-store") {
+            if has_store {
+                let err = dup_err(in a);
+                return fail_doc(has_json, in err.as_slice());
+            }
+            i = wrapping_add(i, 1);
+            if !check_value(in args, i, n) {
+                return fail_doc(
+                    has_json,
+                    in "--olean-store requires a store directory or 'default'".as_bytes()
+                );
+            }
+            has_store = true;
+        } else if eq(in a, in "--olean-root") {
+            if has_olean_root {
+                let err = dup_err(in a);
+                return fail_doc(has_json, in err.as_slice());
+            }
+            i = wrapping_add(i, 1);
+            if !check_value(in args, i, n) {
+                return fail_doc(
+                    has_json,
+                    in "--olean-root requires the Lean build directory".as_bytes()
+                );
+            }
+            has_olean_root = true;
+        } else if eq(in a, in "--proof-audit") {
+            if audits_count == 16 {
+                return fail_doc(has_json, in "at most 16 --proof-audit reports".as_bytes());
+            }
+            i = wrapping_add(i, 1);
+            if !check_value(in args, i, n) {
+                return fail_doc(
+                    has_json,
+                    in "--proof-audit requires a proof-audit JSON report".as_bytes()
+                );
+            }
+            audits_count = wrapping_add(audits_count, 1);
+        } else if a.len() != 0 && byte_at(in a, 0) == 45 {
+            let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            err.extend(in "unknown doc option '".as_bytes());
+            err.extend(in a);
+            err.push(39);
+            return fail_doc(has_json, in err.as_slice());
+        } else {
+            if has_input {
+                return fail_doc(
+                    has_json,
+                    in "doc accepts one source file or package directory".as_bytes()
+                );
+            }
+            has_input = true;
+        }
+        i = wrapping_add(i, 1);
+    }
+    if !has_input {
+        return fail_doc(
+            has_json,
+            in "doc requires a source file or package directory; see doc --help".as_bytes()
+        );
+    }
+    if has_target && !wcsd_stack {
+        return fail_doc(has_json, in "--target requires --wcsd-stack".as_bytes());
+    }
+    if has_output && has_bundle {
+        return fail_doc(has_json, in "-o and --bundle are exclusive".as_bytes());
+    }
+    if has_bundle && json {
+        return fail_doc(has_json, in "--bundle writes HTML and JSON files; drop --json".as_bytes());
+    }
+    if has_text_query && !json {
+        return fail_doc(
+            has_json,
+            in "--search needs --json (the bundle's search.html runs the same query)".as_bytes()
+        );
+    }
+    if has_store && audits_count == 0 {
+        return fail_doc(
+            has_json,
+            in "--olean-store needs at least one --proof-audit report".as_bytes()
+        );
+    }
+    if has_olean_root && !has_store {
+        return fail_doc(
+            has_json,
+            in "--olean-root needs --olean-store (where the certificates are published)".as_bytes()
+        );
+    }
+    run_packed(in args, n)
+}

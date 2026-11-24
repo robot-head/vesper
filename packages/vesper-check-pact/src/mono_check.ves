@@ -73,16 +73,16 @@ const CODE_E0608: u8 = 1;
 const CODE_E0609: u8 = 2;
 const CODE_E0611: u8 = 3;
 
-struct MonoDiags {
-    codes: ChunkSeq[u8],
-    s: ChunkSeq[u64],
-    e: ChunkSeq[u64],
-    msg_a: ChunkSeq[u32],
-    msg_n: ChunkSeq[u32],
-    msg_bytes: ChunkSeq[u8]
+pub struct MonoDiags {
+    pub codes: ChunkSeq[u8],
+    pub s: ChunkSeq[u64],
+    pub e: ChunkSeq[u64],
+    pub msg_a: ChunkSeq[u32],
+    pub msg_n: ChunkSeq[u32],
+    pub msg_bytes: ChunkSeq[u8]
 }
 
-struct CxPool {
+pub struct CxPool {
     env_a: ChunkSeq[u32],
     env_n: ChunkSeq[u32],
     env_params: ChunkSeq[Gen],
@@ -101,7 +101,7 @@ struct CxPool {
     scope_models: ChunkSeq[u32]
 }
 
-struct MonoTables {
+pub struct MonoTables {
     // ADTs for `type_obligations`: generic param names per ADT.
     adt_names: ChunkSeq[u32],
     adt_ga: ChunkSeq[u32],
@@ -117,32 +117,32 @@ struct MonoTables {
     tb_an: ChunkSeq[u32],
     tb_args: ChunkSeq[u32],
     // Functions (`funcs` in sorted order).
-    fn_names: ChunkSeq[u32],
-    fn_is_stub: ChunkSeq[u8],
-    fn_s: ChunkSeq[u64],
-    fn_e: ChunkSeq[u64],
+    pub fn_names: ChunkSeq[u32],
+    pub fn_is_stub: ChunkSeq[u8],
+    pub fn_s: ChunkSeq[u64],
+    pub fn_e: ChunkSeq[u64],
     // Generics per function.
-    fn_ga: ChunkSeq[u32],
-    fn_gn: ChunkSeq[u32],
-    gen_names: ChunkSeq[u32],
+    pub fn_ga: ChunkSeq[u32],
+    pub fn_gn: ChunkSeq[u32],
+    pub gen_names: ChunkSeq[u32],
     // Non-dyn bounds per function (`bounds_of`).
-    fn_ba: ChunkSeq[u32],
-    fn_bn: ChunkSeq[u32],
-    bnd_trait: ChunkSeq[u32],
-    bnd_ty: ChunkSeq[u32],
-    bnd_aa: ChunkSeq[u32],
-    bnd_an: ChunkSeq[u32],
-    bnd_args: ChunkSeq[u32],
+    pub fn_ba: ChunkSeq[u32],
+    pub fn_bn: ChunkSeq[u32],
+    pub bnd_trait: ChunkSeq[u32],
+    pub bnd_ty: ChunkSeq[u32],
+    pub bnd_aa: ChunkSeq[u32],
+    pub bnd_an: ChunkSeq[u32],
+    pub bnd_args: ChunkSeq[u32],
     // Calls per function (`calls_in`).
-    fn_ca: ChunkSeq[u32],
-    fn_cn: ChunkSeq[u32],
-    call_s: ChunkSeq[u64],
-    call_e: ChunkSeq[u64],
-    call_callee: ChunkSeq[u32],
-    call_va: ChunkSeq[u32],
-    call_vn: ChunkSeq[u32],
-    call_vname: ChunkSeq[u32],
-    call_vty: ChunkSeq[u32],
+    pub fn_ca: ChunkSeq[u32],
+    pub fn_cn: ChunkSeq[u32],
+    pub call_s: ChunkSeq[u64],
+    pub call_e: ChunkSeq[u64],
+    pub call_callee: ChunkSeq[u32],
+    pub call_va: ChunkSeq[u32],
+    pub call_vn: ChunkSeq[u32],
+    pub call_vname: ChunkSeq[u32],
+    pub call_vty: ChunkSeq[u32],
     call_sc_a: ChunkSeq[u32],
     call_sc_n: ChunkSeq[u32],
     call_scope_at: ChunkSeq[u32],
@@ -162,7 +162,7 @@ struct MonoTables {
     walk_tys: ChunkSeq[u32]
 }
 
-fn diags_new() -> MonoDiags {
+pub fn diags_new() -> MonoDiags {
     MonoDiags {
         codes: ChunkSeq::new[u8](),
         s: ChunkSeq::new[u64](),
@@ -177,11 +177,11 @@ fn node_at(in t: Types, ty: u32) -> TypeNode {
     t.node(ty)
 }
 
-fn is_dyn_generic(in names: Names, s: u32) -> bool {
+pub fn is_dyn_generic(in names: Names, s: u32) -> bool {
     sym_starts_with(in names, s, "__dyn__")
 }
 
-fn closed(in t: Types, ty: u32) -> bool {
+pub fn closed(in t: Types, ty: u32) -> bool {
     if has_infer(in t, ty) {
         return false;
     }
@@ -231,7 +231,7 @@ fn seen_contains(in diags: MonoDiags, s: u64, e: u64, in msg: ChunkSeq[u8]) -> b
     false
 }
 
-fn push_diag(inout diags: MonoDiags, code: u8, s: u64, e: u64, in msg: ChunkSeq[u8]) {
+pub fn push_diag(inout diags: MonoDiags, code: u8, s: u64, e: u64, in msg: ChunkSeq[u8]) {
     diags.codes.push(code);
     diags.s.push(s);
     diags.e.push(e);
@@ -301,7 +301,7 @@ fn get_cx(in cp: CxPool, fi: u64) -> CxHeader {
     }
 }
 
-fn get_call_cx(in cp: CxPool, in m: MonoTables, fi: u64, cidx: u64) -> CxHeader {
+pub fn get_call_cx(in cp: CxPool, in m: MonoTables, fi: u64, cidx: u64) -> CxHeader {
     let base = get_cx(in cp, fi);
     let sa = w(u32_at(in m.call_sc_a, cidx));
     let sn = w(u32_at(in m.call_sc_n, cidx));
@@ -327,7 +327,7 @@ fn get_call_cx(in cp: CxPool, in m: MonoTables, fi: u64, cidx: u64) -> CxHeader 
     }
 }
 
-fn close_bounded(in t: Types, in names: Names, in m: MonoTables, inout errors: MonoDiags)
+pub fn close_bounded(in t: Types, in names: Names, in m: MonoTables, inout errors: MonoDiags)
     -> ChunkSeq[u8] {
     let nf = m.fn_names.len();
     let mut bounded = ChunkSeq::with_capacity[u8](nf);
@@ -588,7 +588,7 @@ fn check_type_obligations(
     }
 }
 
-fn check_obligations(
+pub fn check_obligations(
     inout sess: PactSession,
     in m: MonoTables,
     in cp: CxPool,
@@ -668,7 +668,7 @@ fn check_obligations(
     }
 }
 
-fn read_mono_tables(
+pub fn read_mono_tables(
     inout r: Reader,
     in b: Slice[u8],
     inout sess: PactSession,

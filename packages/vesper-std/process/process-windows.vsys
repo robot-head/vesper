@@ -1,28 +1,127 @@
-// @vesper-std/process's import on Windows (self-hosting SH0 lane 3,
-// #1125), with src-windows/: the C-ABI host shim in crates/vesper-std-host
-// (src/process.rs). Linux and macOS import the C library itself
-// (process-linux.vsys, process-macos.vsys).
+// Windows `kernel32` bindings for `@vesper-std/process`, bypassing `vesper_std_host`.
 sys library StdProcess (
     target = "@TARGET@", abi = "@ABI@",
-    link = "static", name = "vesper_std_host",
+    link = "dynamic", name = "kernel32",
     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
 ) {
-    linear extern type ProcCommand;
-    linear extern type ProcChild;
-    wire struct ProcStatus { code: i64, signal: u32, exited: u32 }
-    fn vstd_proc_command(nocapture in program: CSlice[u8]) -> ForeignVal[ProcCommand];
-    fn vstd_proc_arg(inout c: ProcCommand, nocapture in arg: CSlice[u8]) -> ForeignVal[Unit];
-    fn vstd_proc_env(inout c: ProcCommand, nocapture in key: CSlice[u8], nocapture in value: CSlice[u8]) -> ForeignVal[Unit];
-    fn vstd_proc_env_remove(inout c: ProcCommand, nocapture in key: CSlice[u8]) -> ForeignVal[Unit];
-    fn vstd_proc_env_clear(inout c: ProcCommand) -> ForeignVal[Unit];
-    fn vstd_proc_cwd(inout c: ProcCommand, nocapture in dir: CSlice[u8]) -> ForeignVal[Unit];
-    fn vstd_proc_stdio(inout c: ProcCommand, which: u32, mode: u32) -> ForeignVal[Unit];
-    fn vstd_proc_spawn(sink c: ProcCommand, nocapture inout err: u64) -> ForeignVal[Option[ProcChild]];
-    fn vstd_proc_command_free(sink c: ProcCommand) -> ForeignVal[Unit];
-    fn vstd_proc_wait(inout ch: ProcChild, nocapture inout status: ProcStatus, nocapture inout err: u64) -> ForeignVal[u32];
-    fn vstd_proc_output(in ch: ProcChild, which: u32, nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
-    fn vstd_proc_child_id(in ch: ProcChild) -> ForeignVal[u64];
-    fn vstd_proc_free(sink ch: ProcChild) -> ForeignVal[Unit];
-    fn vstd_proc_exit(code: i64) -> ForeignVal[Unit];
-    fn vstd_proc_id() -> ForeignVal[u64];
+    const CREATE_UNICODE_ENVIRONMENT: u32 = 1024;
+    const STARTF_USESTDHANDLES: u32 = 256;
+    const HANDLE_FLAG_INHERIT: u32 = 1;
+    const INFINITE: u32 = 4294967295;
+    const GENERIC_READ: u32 = 2147483648;
+    const GENERIC_WRITE: u32 = 1073741824;
+    const FILE_SHARE_READ: u32 = 1;
+    const FILE_SHARE_WRITE: u32 = 2;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 128;
+    const STD_INPUT_HANDLE: i32 = -10;
+    const STD_OUTPUT_HANDLE: i32 = -11;
+    const STD_ERROR_HANDLE: i32 = -12;
+
+    wire struct HandleBox {
+        h: u64,
+    }
+
+    wire struct DwordBox {
+        v: u32,
+    }
+
+    wire struct SecAttr {
+        length: u32,
+        pad0: u32,
+        sec_desc: u64,
+        inherit: i32,
+        pad1: i32,
+    }
+
+    // `STARTUPINFOW` on 64-bit Windows (104 bytes).
+    wire struct StartupInfoW {
+        cb: u32,
+        pad0: u32,
+        reserved: u64,
+        desktop: u64,
+        title: u64,
+        x: u32,
+        y: u32,
+        x_size: u32,
+        y_size: u32,
+        x_count_chars: u32,
+        y_count_chars: u32,
+        fill_attr: u32,
+        flags: u32,
+        show_window: u16,
+        cb_reserved2: u16,
+        pad1: u32,
+        reserved2: u64,
+        std_input: u64,
+        std_output: u64,
+        std_error: u64,
+    }
+
+    // `PROCESS_INFORMATION` on 64-bit Windows (24 bytes).
+    wire struct ProcessInfo {
+        h_process: u64,
+        h_thread: u64,
+        pid: u32,
+        tid: u32,
+    }
+
+    fn CreatePipe(
+        nocapture inout read_pipe: HandleBox,
+        nocapture inout write_pipe: HandleBox,
+        nocapture in sec_attrs: SecAttr,
+        size: u32
+    ) -> ForeignVal[i32] errno;
+    fn SetHandleInformation(handle: u64, mask: u32, flags: u32) -> ForeignVal[i32] errno;
+    fn GetStdHandle(std_handle: i32) -> ForeignVal[u64];
+    fn CreateFileW(
+        nocapture in path: CWStr,
+        desired_access: u32,
+        share_mode: u32,
+        nocapture in sec_attrs: SecAttr,
+        creation_disposition: u32,
+        flags_and_attributes: u32,
+        template_file: u64
+    ) -> ForeignVal[u64] errno;
+    fn CreateProcessW(
+        app_name: u64,
+        nocapture in cmd_line: CWStr,
+        proc_attrs: u64,
+        thread_attrs: u64,
+        inherit_handles: i32,
+        creation_flags: u32,
+        environment: u64,
+        cur_dir: u64,
+        nocapture in startup_info: StartupInfoW,
+        nocapture inout proc_info: ProcessInfo
+    ) -> ForeignVal[i32] errno;
+    fn ReadFile(
+        handle: u64,
+        nocapture inout buf: CSlice[u8],
+        nocapture inout bytes_read: DwordBox,
+        overlapped: u64
+    ) -> ForeignVal[i32] errno;
+    fn CloseHandle(handle: u64) -> ForeignVal[i32];
+    fn WaitForSingleObject(handle: u64, millis: u32) -> ForeignVal[u32];
+    fn GetExitCodeProcess(handle: u64, nocapture inout code: DwordBox) -> ForeignVal[i32] errno;
+    fn TerminateProcess(handle: u64, exit_code: u32) -> ForeignVal[i32] errno;
+    fn GetProcessId(handle: u64) -> ForeignVal[u32];
+    fn GetCurrentProcessId() -> ForeignVal[u32];
+    fn ExitProcess(code: u32) -> ForeignVal[Unit];
+    fn GetEnvironmentStringsW() -> ForeignVal[u64];
+    fn FreeEnvironmentStringsW(block: u64) -> ForeignVal[i32];
+    fn lstrlenW(s: u64) -> ForeignVal[i32];
+    fn WideCharToMultiByte(
+        code_page: u32,
+        flags: u32,
+        wide_str: u64,
+        wide_len: i32,
+        nocapture inout multi_byte: CSlice[u8],
+        default_char: u64,
+        used_default: u64
+    ) -> ForeignVal[i32];
+    fn GetProcessHeap() -> ForeignVal[u64];
+    fn HeapAlloc(heap: u64, flags: u32, bytes: u64) -> ForeignVal[u64];
+    fn HeapFree(heap: u64, flags: u32, mem: u64) -> ForeignVal[i32];
+    fn RtlMoveMemory(dst: u64, nocapture in src: CSlice[u8]) -> ForeignVal[Unit];
 }

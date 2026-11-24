@@ -2100,6 +2100,21 @@ pub mod plan_probe {
         pub calls: Vec<ForeignCall>,
     }
 
+    /// `drops::check_rows`.
+    pub fn check_drop_rows(world: &World) -> Result<(), FfiError> {
+        drops::check_rows(world)
+    }
+
+    /// `drops::span_base` + `drops::generated` across all imported libraries.
+    pub fn append_drops(module: &mut Module, imports: &Imports) {
+        let mut base = drops::span_base(module);
+        for (name, import) in &imports.libraries {
+            let (items, next) = drops::generated(name, &import.descriptor, base);
+            module.items.extend(items);
+            base = next;
+        }
+    }
+
     /// One `Rewriter` pass over `module`, in place: pass 1 without
     /// `arities`, pass 2 with them.
     pub fn rewrite(

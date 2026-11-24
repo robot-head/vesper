@@ -588,3 +588,158 @@ fn main() -> u64 {
         "expected guarded fast-loop iadd+const overflow checks to be eliminated and body merged:\n{clif}"
     );
 }
+
+#[test]
+fn guarded_loop_pb0_join_param_overflow_is_eliminated() {
+    let source = "fn copy_blocks(in src: Slice[u8], inout dst: Slice[u8], blocks: u64) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    for b in 0..blocks {
+        let base = 16 * b;
+        for i in 0..16 {
+            let v = src[i];
+            dst.set(base + i, v);
+        }
+    }
+}
+fn main() -> u64 {
+    let mut a = ChunkSeq::new[u8]();
+    let mut b = ChunkSeq::new[u8]();
+    for i in 0..16 {
+        a.push(wrapping_u8(i));
+    }
+    for _ in 0..32 {
+        b.push(0);
+    }
+    handle Fail[ArithOverflow] in {
+        handle Fail[RuntimeError] in {
+            copy_blocks(in a.as_slice(), inout b.as_slice_mut(), 2);
+            match b.try_get(19) {
+                Option::Some(v) => widen_u64(v),
+                Option::None => 999,
+            }
+        } with {
+            return x => x,
+            raise(_, _) => 998,
+        }
+    } with {
+        return x => x,
+        raise(_, _) => 997,
+    }
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert_eq!(agree(source), "3");
+    let fast_body = clif
+        .split("\n\n")
+        .find(|blk| blk.contains("uload8") && blk.contains("istore8"))
+        .unwrap_or("");
+    assert!(
+        !fast_body.is_empty() && !fast_body.contains("icmp ult"),
+        "expected guarded fast-loop pb0 join-param iadd overflow check to be eliminated:\n{clif}"
+    );
+}
+
+#[test]
+fn brif_preheader_hoists_reassociated_address_arithmetic() {
+    let source = "fn copy_strided(in src: Slice[u8], inout dst: Slice[u32], blocks: u64) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    for b in 0..blocks {
+        let base = 16 * b;
+        for i in 0..16 {
+            let v = widen_u32(src[2 + i]);
+            dst.set(base + i, v);
+        }
+    }
+}
+fn main() -> u64 {
+    let mut a = ChunkSeq::new[u8]();
+    let mut b = ChunkSeq::new[u32]();
+    for i in 0..20 {
+        a.push(wrapping_u8(i));
+    }
+    for _ in 0..32 {
+        b.push(0);
+    }
+    handle Fail[ArithOverflow] in {
+        handle Fail[RuntimeError] in {
+            copy_strided(in a.as_slice(), inout b.as_slice_mut(), 2);
+            match b.try_get(19) {
+                Option::Some(v) => widen_u64(v),
+                Option::None => 999,
+            }
+        } with {
+            return x => x,
+            raise(_, _) => 998,
+        }
+    } with {
+        return x => x,
+        raise(_, _) => 997,
+    }
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert_eq!(agree(source), "5");
+    let fast_body = clif
+        .split("\n\n")
+        .find(|blk| blk.contains("uload8") && blk.contains("istore32"))
+        .unwrap_or("");
+    let imul_count = fast_body.matches("imul_imm").count();
+    assert!(
+        !fast_body.is_empty() && imul_count <= 1,
+        "expected invariant base/scale arithmetic to hoist into brif preheader (imul_imm={imul_count}):\n{fast_body}"
+    );
+}
+
+#[test]
+fn narrow_binary_ops_fold_through_ireduce() {
+    let source = "fn spread(v: u32) -> u32 {
+    let mut x = v & 1023;
+    x = (x | (x << 16)) & 50331903;
+    x = (x | (x << 8)) & 50393103;
+    x
+}
+
+fn main() -> u64 {
+    widen_u64(spread(341))
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert_eq!(agree(source), "16797701");
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("spread\n"))
+        .unwrap_or(&clif);
+    let ireduce_count = fn_clif.matches("ireduce.i32").count();
+    assert!(
+        ireduce_count == 1,
+        "expected uextend->band/ishl/bor->ireduce.i32 chain to fold to native i32 ops (ireduce_count={ireduce_count}):\n{fn_clif}"
+    );
+}
+
+#[test]
+fn narrow_shifts_fold_through_ireduce() {
+    let source = "fn compact(v: u32) -> u32 {
+    let mut x = v & 153498185;
+    x = (x | (x >> 2)) & 51130563;
+    x = (x | (x >> 4)) & 50393103;
+    x
+}
+
+fn main() -> u64 {
+    widen_u64(compact(17891665))
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("compact\n"))
+        .unwrap_or(&clif);
+    let ireduce_count = fn_clif.matches("ireduce.i32").count();
+    assert!(
+        ireduce_count == 1,
+        "expected uextend->ushr->ireduce.i32 chain to fold to native i32 ops (ireduce_count={ireduce_count}):\n{fn_clif}"
+    );
+}

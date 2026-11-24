@@ -1970,17 +1970,6 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.m.declare_func_in_func(callee, self.b.func),
         ))
     }
-    /// Whether `symbol` may be declared with `sig` itself (the `ffi` hook
-    /// is offered only such calls).
-    fn foreign_import_direct(&self, symbol: &str, sig: &ir::Signature) -> bool {
-        match self.m.declarations().get_name(symbol) {
-            Some(cranelift_module::FuncOrDataId::Func(id)) => {
-                self.m.declarations().get_function_decl(id).signature == *sig
-            }
-            Some(_) => true,
-            None => runtime_import(symbol).is_none(),
-        }
-    }
     fn foreign_symbol_free(&self, name: &str, linkage: Linkage) -> Result<bool, String> {
         let declarations = self.m.declarations();
         match declarations.get_name(name) {
@@ -1995,8 +1984,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             )),
         }
     }
-    /// Revoke the library's protection key; returns the saved PKRU.
-    fn foreign_isolate(&mut self, library: &str) -> Result<ir::Value, String> {
+    fn foreign_isolation_data(
+        &mut self,
+        library: &str,
+    ) -> Result<cranelift_module::DataId, String> {
         let isa = self.m.isa();
         if isa.triple().architecture != target_lexicon::Architecture::X86_64
             || isa.triple().operating_system != target_lexicon::OperatingSystem::Linux
@@ -2025,6 +2016,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .define_data(data, &description)
                 .map_err(|e| e.to_string())?;
         }
+        Ok(data)
+    }
+    /// Revoke the library's protection key; returns the saved PKRU.
+    fn foreign_isolate(&mut self, library: &str) -> Result<ir::Value, String> {
+        let data = self.foreign_isolation_data(library)?;
         let global = self.m.declare_data_in_func(data, self.b.func);
         let pointer = self.m.target_config().pointer_type();
         let address = self.b.ins().symbol_value(pointer, global);
@@ -2245,14 +2241,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         if crate::codegen_swap::hook(crate::codegen_swap::Family::Ffi).is_none() {
             return Ok(None);
         }
-        // A symbol shared with the runtime's imports is called through its
-        // address (`foreign_import`), which the steps do not express, and
-        // Apple arm64 pads a variadic call's argument registers with zero
-        // words (`sys::Variadic`), which they do not carry either.
         let abi = plan.function.abi();
-        if abi.variadic.is_some_and(|v| v.padding > 0) {
-            return Ok(None);
-        }
         let pointer = self.m.target_config().pointer_type();
         let mut sig = self.m.make_signature();
         for t in &abi.parameters {
@@ -2260,20 +2249,6 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         if let Some(t) = abi.result {
             sig.returns.push(abi_param(t, pointer));
-        }
-        if !plan.function.is_indirect()
-            && !self.foreign_import_direct(plan.function.link_symbol(), &sig)
-        {
-            return Ok(None);
-        }
-        // Multi-byte mapping results (`u16`/`u32`/`u64`) need `umul_overflow`
-        // in `foreign_range_register`, which `@vesper/cranelift` does not
-        // expose yet; decline before `BEGIN` / argument evaluation.
-        if plan.function.mapping_length().is_some()
-            && let ValueType::Handle { handle, .. } = plan.function.result()
-            && handle.mapping().is_some_and(|s| s.bits() > 8)
-        {
-            return Ok(None);
         }
         let descriptors = plan.function.parameters();
         let handler = match plan.handler {
@@ -2509,19 +2484,29 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
             }
         }
-        let mut words = if plan.function.is_indirect() {
+        let architecture = self.m.isa().triple().architecture;
+        let cpu = ffi::cpu::code_for(plan.function.symbol(), architecture)?;
+        let (call_op, mut words) = if plan.function.is_indirect() {
             let pointer = c_args.remove(0);
             let sig_ref = self.b.import_signature(sig);
-            vec![u64::from(sig_ref.as_u32()), word(pointer)]
+            (
+                swap::CALL_INDIRECT,
+                vec![u64::from(sig_ref.as_u32()), word(pointer)],
+            )
+        } else if let Some((arch, code)) = cpu {
+            if arch == ffi::cpu::Arch::X86_64 {
+                sig.call_conv = cranelift_codegen::isa::CallConv::SystemV;
+            }
+            let callee = self.foreign_code(plan.function.symbol(), &sig, &code)?;
+            (swap::CALL, vec![u64::from(callee.as_u32())])
         } else {
-            let symbol = plan.function.link_symbol();
-            self.foreign_symbol_free(symbol, Linkage::Import)?;
-            let callee = self
-                .m
-                .declare_function(symbol, Linkage::Import, &sig)
-                .map_err(|e| format!("foreign symbol '{symbol}': {e}"))?;
-            let callee = self.m.declare_func_in_func(callee, self.b.func);
-            vec![u64::from(callee.as_u32())]
+            match self.foreign_import(plan.function.link_symbol(), sig)? {
+                Callee::Direct(callee) => (swap::CALL, vec![u64::from(callee.as_u32())]),
+                Callee::Indirect(sig_ref, address) => (
+                    swap::CALL_INDIRECT,
+                    vec![u64::from(sig_ref.as_u32()), word(address)],
+                ),
+            }
         };
         let refusal = if strings.is_empty() {
             None
@@ -2553,19 +2538,43 @@ impl<M: Module> Codegen<'_, '_, M> {
             Some(idx) => {
                 let v = c_args[idx];
                 let (reg_id, _) = self.foreign_range_helpers()?;
+                let elem_bytes = match plan.function.result() {
+                    ValueType::Handle { handle, .. } => handle
+                        .mapping()
+                        .map_or(1, |s| u64::from(s.bits() / 8))
+                        .max(1),
+                    _ => 1,
+                };
                 (
                     word(v),
-                    u64::from(self.b.func.dfg.value_type(v) == types::I64),
+                    u64::from(self.b.func.dfg.value_type(v) == types::I64) | (elem_bytes << 1),
                     u64::from(reg_id.as_u32()),
                 )
             }
             None => (NO_VALUE, 0, NO_VALUE),
+        };
+        if let Some(v) = abi.variadic {
+            for _ in 0..v.padding {
+                let zero = self.b.ins().iconst(types::I64, 0);
+                c_args.insert(v.first - v.padding, zero);
+            }
+        }
+        let saved = if plan.handler == Handler::IsolatedMpk {
+            let data = self.foreign_isolation_data(&plan.library)?;
+            let r = self.foreign_request(
+                swap::ISOLATE,
+                &[u64::from(data.as_u32()), u64::from(pointer == types::I64)],
+            )?;
+            *r.first().ok_or("malformed ffi ISOLATE answer")?
+        } else {
+            NO_VALUE
         };
         for &(_, data, len, stride) in &released {
             self.foreign_range_unregister(value_of_word(data)?, value_of_word(len)?, stride)?;
         }
         words.extend([
             errno,
+            saved,
             u64::from(abi.result.is_some()),
             little,
             len_word,
@@ -2581,11 +2590,6 @@ impl<M: Module> Codegen<'_, '_, M> {
             words.push(c.len() as u64);
             words.extend(c);
         }
-        let call_op = if plan.function.is_indirect() {
-            swap::CALL_INDIRECT
-        } else {
-            swap::CALL
-        };
         let r = self.foreign_request(call_op, &words)?;
         let [raw, os] = r[..] else {
             return Err("malformed ffi CALL answer".into());

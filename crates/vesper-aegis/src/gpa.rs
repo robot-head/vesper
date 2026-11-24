@@ -17,78 +17,57 @@ pub const PAGE_4K: u64 = 4096;
 /// Highest page frame number + 1 (52-bit guest physical addresses).
 pub const MAX_PFN: u64 = 1 << 40;
 
-/// Disjoint, non-adjacent half-open page-frame intervals.
+/// Disjoint, non-adjacent half-open page-frame intervals, backed by
+/// `@vesper/aegis::gpa` (`[s0, e0, s1, e1, ...]`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct IntervalSet {
-    map: BTreeMap<u64, u64>,
+    pub(crate) words: Vec<u64>,
 }
 
 impl IntervalSet {
+    #[inline]
+    fn count(&self) -> u64 {
+        (self.words.len() / 2) as u64
+    }
+
     /// First page in `[s, e)` that lies in the set.
     pub(crate) fn first_overlap(&self, s: u64, e: u64) -> Option<u64> {
-        if let Some((&a, &b)) = self.map.range(..=s).next_back()
-            && b > s
-        {
-            return Some(s.max(a));
-        }
-        self.map.range(s..e).next().map(|(&a, _)| a)
+        let p = crate::port::vesper::gpa_first_overlap(&self.words, self.count(), s, e);
+        (p < MAX_PFN).then_some(p)
     }
 
     pub(crate) fn covers(&self, s: u64, e: u64) -> bool {
-        matches!(self.map.range(..=s).next_back(), Some((_, &b)) if b >= e)
+        crate::port::vesper::gpa_covers(&self.words, self.count(), s, e) != 0
     }
 
-    /// First page in `[s, e)` not in the set.
-    pub(crate) fn first_gap(&self, s: u64, e: u64) -> Option<u64> {
-        let mut at = s;
-        while at < e {
-            match self.map.range(..=at).next_back() {
-                Some((_, &b)) if b > at => at = b,
-                _ => return Some(at),
-            }
-        }
-        None
-    }
-
-    pub(crate) fn insert(&mut self, mut s: u64, mut e: u64) {
-        if let Some((&a, &b)) = self.map.range(..=s).next_back()
-            && b >= s
-        {
-            s = a;
-            e = e.max(b);
-            self.map.remove(&a);
-        }
-        while let Some((&a, &b)) = self.map.range(s..=e).next() {
-            e = e.max(b);
-            self.map.remove(&a);
-        }
-        self.map.insert(s, e);
+    pub(crate) fn insert(&mut self, s: u64, e: u64) {
+        let count = self.count();
+        self.words.resize(self.words.len() + 2, 0);
+        let new_count = crate::port::vesper::gpa_insert(&mut self.words, count, s, e);
+        self.words.truncate((new_count as usize) * 2);
     }
 
     pub(crate) fn remove(&mut self, s: u64, e: u64) {
-        if let Some((&a, &b)) = self.map.range(..s).next_back()
-            && b > s
-        {
-            self.map.insert(a, s);
-            if b > e {
-                self.map.insert(e, b);
-                return;
-            }
+        let count = self.count();
+        if count == 0 {
+            return;
         }
-        while let Some((&a, &b)) = self.map.range(s..e).next() {
-            self.map.remove(&a);
-            if b > e {
-                self.map.insert(e, b);
-            }
-        }
+        self.words.resize(self.words.len() + 2, 0);
+        let new_count = crate::port::vesper::gpa_remove(&mut self.words, count, s, e);
+        self.words.truncate((new_count as usize) * 2);
     }
 
     pub(crate) fn pages(&self) -> u64 {
-        self.map.iter().map(|(a, b)| b - a).sum()
+        crate::port::vesper::gpa_pages(&self.words, self.count())
     }
 
     pub(crate) fn intervals(&self) -> usize {
-        self.map.len()
+        self.words.len() / 2
+    }
+
+    pub(crate) fn check_access(&self, gpa: u64, len: u64) -> Option<u64> {
+        let p = crate::port::vesper::gpa_check_access(&self.words, self.count(), gpa, len);
+        (p < MAX_PFN).then_some(p)
     }
 }
 
@@ -336,16 +315,7 @@ impl GpaAcceptanceTracker {
 
     /// Check that `[gpa, gpa + len)` lies entirely in accepted private pages.
     pub fn check_access(&self, gpa: u64, len: u64) -> Result<(), TeeError> {
-        if len == 0 {
-            return Ok(());
-        }
-        let last = gpa
-            .checked_add(len - 1)
-            .ok_or(TeeError::UnacceptedPageAccess {
-                gpa_page_4k: gpa & !0xFFF,
-            })?;
-        let (s, e) = (gpa / PAGE_4K, last / PAGE_4K + 1);
-        match self.accepted.first_gap(s, e) {
+        match self.accepted.check_access(gpa, len) {
             None => Ok(()),
             Some(p) => Err(TeeError::UnacceptedPageAccess {
                 gpa_page_4k: p * PAGE_4K,

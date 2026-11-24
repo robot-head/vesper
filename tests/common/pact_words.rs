@@ -67,19 +67,7 @@ pub fn signature(e: &mut Enc, t: &mut Vec<u64>, f: &Function) {
 }
 
 /// The declaration section (`read_decls` in decl.ves).
-pub fn encode_declarations(
-    e: &mut Enc,
-    t: &mut Vec<u64>,
-    m: &Module,
-    base: &World,
-    identity: &str,
-) {
-    t.push(e.name(identity));
-    t.push(base.functions.len() as u64);
-    for (name, f) in &base.functions {
-        t.push(e.name(name));
-        generics(e, t, &f.generics);
-    }
+pub fn encode_traits(e: &mut Enc, t: &mut Vec<u64>, m: &Module) {
     let traits: Vec<_> = m
         .items
         .iter()
@@ -104,6 +92,16 @@ pub fn encode_declarations(
             signature(e, t, f);
         }
     }
+}
+
+fn encode_declarations(e: &mut Enc, t: &mut Vec<u64>, m: &Module, base: &World, identity: &str) {
+    t.push(e.name(identity));
+    t.push(base.functions.len() as u64);
+    for (name, f) in &base.functions {
+        t.push(e.name(name));
+        generics(e, t, &f.generics);
+    }
+    encode_traits(e, t, m);
     let confs: Vec<_> = m
         .items
         .iter()
@@ -573,10 +571,113 @@ pub fn decode_resolve_outcomes(
     (diagnostics, true, outcomes)
 }
 
+/// Encodes a module's structs, canonical impls, and struct-owned bounds for
+/// `check_pact_builtin_derive`.
+pub fn encode_builtin_derive(m: &Module, base: &World) -> Option<Vec<u8>> {
+    let mut e = Enc::default();
+    let mut t = vec![];
+
+    let mut structs = vec![];
+    let mut confs = vec![];
+    for item in &m.items {
+        match item {
+            Item::Adt(a) => structs.push(a),
+            Item::Conformance(c) => confs.push(c),
+            _ => {}
+        }
+    }
+
+    t.push(structs.len() as u64);
+    for a in &structs {
+        t.push(e.name(&a.name));
+        t.push(mode_word(a.mode));
+        t.push(u64::from(a.is_enum));
+        t.push(a.generics.len() as u64);
+        for g in &a.generics {
+            t.push(e.name(&g.name));
+            t.push(mode_word(g.bound));
+            t.push(u64::from(g.row));
+        }
+        let fields: Vec<&vesper::ast::Field> = if a.is_enum || a.variants.is_empty() {
+            vec![]
+        } else {
+            a.variants[0].fields.iter().collect()
+        };
+        t.push(fields.len() as u64);
+        for f in fields {
+            t.push(e.name(&f.name));
+            t.push(e.ty(&f.ty));
+        }
+    }
+
+    t.push(confs.len() as u64);
+    for c in &confs {
+        t.push(u64::from(c.kind == vesper::ast::ConformanceKind::Canonical));
+        t.push(u64::from(c.trait_ref.package.is_none()));
+        t.push(e.name(&c.trait_ref.name));
+        t.push(c.trait_ref.args.len() as u64);
+        t.push(e.ty(&c.self_ty));
+        t.push(c.generics.len() as u64);
+        for g in &c.generics {
+            t.push(e.name(&g.name));
+            t.push(mode_word(g.bound));
+            t.push(u64::from(g.row));
+        }
+        t.push(u64::from(!c.where_clauses.is_empty()));
+        t.push(u64::from(c.methods.is_empty() && c.assoc.is_empty()));
+        t.push(c.span.start as u64);
+        t.push(c.span.end as u64);
+    }
+
+    t.push(m.trait_bounds.len() as u64);
+    for b in &m.trait_bounds {
+        t.push(e.name(&b.owner));
+        t.push(e.name(&b.param));
+        t.push(e.name(&b.trait_ref.name));
+        t.push(b.trait_ref.args.len() as u64);
+        for a in &b.trait_ref.args {
+            t.push(e.ty(a));
+        }
+    }
+
+    let w = e.world(base);
+    Some(e.finish(&w, &t))
+}
+
+pub fn decode_builtin_derive(words: &[u64]) -> (Vec<Diagnostic>, bool, String) {
+    let (diag_text, mut at) = decode_packed_text_at(words, 0);
+    let diagnostics = decode_session_text(&diag_text);
+    let ok = words.get(at).copied().unwrap_or(0) != 0;
+    at += 1;
+    if !ok {
+        return (diagnostics, false, String::new());
+    }
+    let (impls, _) = decode_packed_text_at(words, at);
+    (diagnostics, true, impls)
+}
+
 pub fn encode_mono_check_input(
     outcome: &vesper::pact_frontend::MonoCheckOutcome,
     pkg_name: &str,
     pkg_ver: &str,
+) -> Option<Vec<u8>> {
+    encode_mono_input_with_tail(outcome, pkg_name, pkg_ver, &[])
+}
+
+pub fn encode_mono_plan_input(
+    outcome: &vesper::pact_frontend::MonoCheckOutcome,
+    pkg_name: &str,
+    pkg_ver: &str,
+) -> Option<Vec<u8>> {
+    let tail: Vec<u64> = outcome.funcs.iter().map(|f| u64::from(f.has_dyn)).collect();
+    encode_mono_input_with_tail(outcome, pkg_name, pkg_ver, &tail)
+}
+
+fn encode_mono_input_with_tail(
+    outcome: &vesper::pact_frontend::MonoCheckOutcome,
+    pkg_name: &str,
+    pkg_ver: &str,
+    tail: &[u64],
 ) -> Option<Vec<u8>> {
     let prelude = vesper::pact_frontend::prelude_world();
     let fp = vesper::pact_frontend::declaration_fingerprint(&outcome.module);
@@ -679,6 +780,7 @@ pub fn encode_mono_check_input(
             t.push(e.ty(ty));
         }
     }
+    t.extend_from_slice(tail);
     out.extend_from_slice(&e.finish(&[], &t));
     Some(out)
 }
@@ -719,4 +821,154 @@ pub fn decode_mono_check(words: &[u64]) -> (Vec<Diagnostic>, bool, Vec<bool>, Ve
         errors.push(Diagnostic::new(code, msg, start..end));
     }
     (session_diags, true, bounded, errors)
+}
+
+#[allow(clippy::type_complexity)]
+pub fn decode_mono_plan(
+    words: &[u64],
+) -> (
+    Vec<Diagnostic>,
+    bool,
+    Vec<Diagnostic>,
+    Vec<(String, String)>,
+    Vec<(String, usize, usize, String)>,
+) {
+    let (diag_text, mut at) = decode_packed_text_at(words, 0);
+    let session_diags = decode_session_text(&diag_text);
+    let ok = words.get(at).copied().unwrap_or(0) != 0;
+    at += 1;
+    if !ok {
+        return (session_diags, false, vec![], vec![], vec![]);
+    }
+    let ne = words.get(at).copied().unwrap_or(0) as usize;
+    at += 1;
+    let mut errors = Vec::with_capacity(ne);
+    for _ in 0..ne {
+        let code_tag = words.get(at).copied().unwrap_or(0);
+        at += 1;
+        let start = words.get(at).copied().unwrap_or(0) as usize;
+        at += 1;
+        let end = words.get(at).copied().unwrap_or(0) as usize;
+        at += 1;
+        let (msg, next_at) = decode_packed_text_at(words, at);
+        at = next_at;
+        let code = match code_tag {
+            1 => "E0608",
+            2 => "E0609",
+            3 => "E0611",
+            4 => "E0615",
+            _ => "E0607",
+        };
+        errors.push(Diagnostic::new(code, msg, start..end));
+    }
+    if !errors.is_empty() {
+        return (session_diags, true, errors, vec![], vec![]);
+    }
+    let nc = words.get(at).copied().unwrap_or(0) as usize;
+    at += 1;
+    let mut clones = Vec::with_capacity(nc);
+    for _ in 0..nc {
+        let (origin, next_at) = decode_packed_text_at(words, at);
+        let (cname, next_at2) = decode_packed_text_at(words, next_at);
+        at = next_at2;
+        clones.push((origin, cname));
+    }
+    let nr = words.get(at).copied().unwrap_or(0) as usize;
+    at += 1;
+    let mut rewrites = Vec::with_capacity(nr);
+    for _ in 0..nr {
+        let (caller, next_at) = decode_packed_text_at(words, at);
+        at = next_at;
+        let start = words.get(at).copied().unwrap_or(0) as usize;
+        at += 1;
+        let end = words.get(at).copied().unwrap_or(0) as usize;
+        at += 1;
+        let (target, next_at2) = decode_packed_text_at(words, at);
+        at = next_at2;
+        rewrites.push((caller, start, end, target));
+    }
+    (session_diags, true, errors, clones, rewrites)
+}
+
+pub fn encode_builtin_wanted(m: &Module) -> Vec<u8> {
+    let mut e = Enc::default();
+    let mut decls = vec![];
+    for i in &m.items {
+        match i {
+            Item::Adt(a) => decls.push(e.name(&a.name)),
+            Item::Trait(t) => decls.push(e.name(&t.name)),
+            Item::Effect(ef) => decls.push(e.name(&ef.name)),
+            Item::Conformance(c) => {
+                if let ConformanceKind::Model { name, .. } = &c.kind {
+                    decls.push(e.name(name));
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut refs = vec![];
+    for b in &m.trait_bounds {
+        refs.push((
+            u64::from(b.trait_ref.package.is_none()),
+            e.name(&b.trait_ref.name),
+        ));
+    }
+    for i in &m.items {
+        if let Item::Conformance(c) = i {
+            refs.push((
+                u64::from(c.trait_ref.package.is_none()),
+                e.name(&c.trait_ref.name),
+            ));
+            for w in &c.where_clauses {
+                refs.push((
+                    u64::from(w.trait_ref.package.is_none()),
+                    e.name(&w.trait_ref.name),
+                ));
+            }
+        }
+    }
+    let json = serde_json::to_vec(&m.items).unwrap_or_default();
+    let mut t = vec![];
+    t.push(decls.len() as u64);
+    t.extend(decls);
+    t.push(refs.len() as u64);
+    for (p, n) in refs {
+        t.push(p);
+        t.push(n);
+    }
+    t.push(json.len() as u64);
+    let mut out = e.finish(&[], &t);
+    out.extend_from_slice(&json);
+    out
+}
+
+fn push_padded_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    out.extend_from_slice(bytes);
+    let pad = (8 - (bytes.len() % 8)) % 8;
+    out.resize(out.len() + pad, 0);
+}
+
+pub fn encode_deps_input(
+    m: &Module,
+    base: &World,
+    identity: &str,
+    deps: &[(&str, &str, &Module, &World)],
+) -> Option<Vec<u8>> {
+    let mut out = vec![];
+    let local_bytes = declaration_input(m, base, identity)?;
+    push_padded_bytes(&mut out, &local_bytes);
+    out.extend_from_slice(&(deps.len() as u64).to_le_bytes());
+    for (pkg_name, dep_id, dm, db) in deps {
+        push_padded_bytes(&mut out, pkg_name.as_bytes());
+        push_padded_bytes(&mut out, dep_id.as_bytes());
+        let dep_bytes = declaration_input(dm, db, dep_id)?;
+        push_padded_bytes(&mut out, &dep_bytes);
+        let mut te = Enc::default();
+        let mut tt = vec![];
+        encode_traits(&mut te, &mut tt, dm);
+        let tr_bytes = te.finish(&[], &tt);
+        push_padded_bytes(&mut out, &tr_bytes);
+    }
+    Some(out)
 }

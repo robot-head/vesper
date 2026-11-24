@@ -18,8 +18,10 @@ build = "build.rs"
 vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
 
 [dependencies]
-vesper-std-host = { path = "../vesper-std-host" }
 vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+
+[dev-dependencies]
+vesper-std-host = { path = "../vesper-std-host" }
 
 [build-dependencies]
 vesper-port-harness = { path = "../vesper-port-harness", optional = true }

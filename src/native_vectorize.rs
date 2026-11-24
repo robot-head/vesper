@@ -72,15 +72,20 @@ pub fn run(func: &mut ir::Function, simd: bool) -> usize {
         if let Some(plan) = plan(func, &cfg, h) {
             emit(func, &plan);
             done += 1;
-            if std::env::var_os("VESPER_VECTORIZE").is_some_and(|v| v == "debug") {
-                let flags =
-                    cranelift_codegen::settings::Flags::new(cranelift_codegen::settings::builder());
-                if let Err(e) = cranelift_codegen::verify_function(func, &flags) {
-                    eprintln!(
-                        "{}",
-                        cranelift_codegen::print_errors::pretty_verifier_error(func, None, e)
-                    );
-                }
+        } else if let Some(wplan) = plan_widen_i8_f32(func, &cfg, h) {
+            emit_widen_i8_f32(func, &wplan);
+            done += 1;
+        } else {
+            continue;
+        }
+        if std::env::var_os("VESPER_VECTORIZE").is_some_and(|v| v == "debug") {
+            let flags =
+                cranelift_codegen::settings::Flags::new(cranelift_codegen::settings::builder());
+            if let Err(e) = cranelift_codegen::verify_function(func, &flags) {
+                eprintln!(
+                    "{}",
+                    cranelift_codegen::print_errors::pretty_verifier_error(func, None, e)
+                );
             }
         }
     }
@@ -847,4 +852,417 @@ fn emit(func: &mut ir::Function, plan: &Plan) {
         plan.header,
         &[BlockArg::Value(j2)],
     );
+}
+
+#[derive(Clone, Copy)]
+enum WidenStage {
+    U8,
+    I8,
+    Sint,
+    F32(Option<Value>),
+    Bits(Option<Value>),
+}
+
+struct WidenI8F32Plan {
+    header: Block,
+    j: Value,
+    bound: Value,
+    entries: Vec<Inst>,
+    invariants: Vec<Inst>,
+    scalars: Vec<Inst>,
+    src_addr: Value,
+    src_offset: i32,
+    dst_addr: Value,
+    dst_offset: i32,
+    scale: Option<Value>,
+}
+
+fn plan_widen_i8_f32(
+    func: &ir::Function,
+    cfg: &ControlFlowGraph,
+    h: Block,
+) -> Option<WidenI8F32Plan> {
+    let j = resolve(func, func.dfg.block_params(h)[0]);
+    if func.dfg.value_type(j) != types::I64 {
+        return None;
+    }
+    let term = func.layout.last_inst(h)?;
+    let InstructionData::Brif {
+        arg,
+        blocks: [then_call, else_call],
+        ..
+    } = func.dfg.insts[term]
+    else {
+        return None;
+    };
+    let (cond, lhs, bound) = compare(func, strip_condition(func, arg))?;
+    if !matches!(cond, IntCC::UnsignedLessThan) || lhs != j {
+        return None;
+    }
+    let (body, body_args) = call(func, then_call);
+    let (exit, exit_args) = call(func, else_call);
+    if !body_args.is_empty() || !exit_args.is_empty() || body == h || exit == h {
+        return None;
+    }
+    for inst in func.layout.block_insts(h) {
+        if inst != term
+            && !matches!(
+                func.dfg.insts[inst].opcode(),
+                Opcode::Icmp | Opcode::IcmpImm | Opcode::Uextend | Opcode::Iconst
+            )
+        {
+            return None;
+        }
+    }
+    if !func.dfg.block_params(body).is_empty() {
+        return None;
+    }
+    let body_term = func.layout.last_inst(body)?;
+    let InstructionData::Jump { destination, .. } = func.dfg.insts[body_term] else {
+        return None;
+    };
+    let (back, back_args) = call(func, destination);
+    let [BlockArg::Value(next)] = back_args.as_slice() else {
+        return None;
+    };
+    if back != h || !is_step(func, *next, j, 1) {
+        return None;
+    }
+    let preds =
+        |b: Block| -> Vec<(Block, Inst)> { cfg.pred_iter(b).map(|p| (p.block, p.inst)).collect() };
+    if preds(body).iter().any(|(p, _)| *p != h) {
+        return None;
+    }
+    let mut entries = vec![];
+    for (p, inst) in preds(h) {
+        if p == body {
+            continue;
+        }
+        if p == h {
+            return None;
+        }
+        entries.push(inst);
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    let looped: HashSet<Block> = [h, body].into_iter().collect();
+    if looped.contains(&def_block(func, bound)?) {
+        return None;
+    }
+
+    let mut kinds: HashMap<Value, Kind> = HashMap::new();
+    kinds.insert(j, Kind::Scalar { step: Some(1) });
+    let mut widen: HashMap<Value, WidenStage> = HashMap::new();
+    let kind_of = |kinds: &HashMap<Value, Kind>, v: Value| -> Option<Kind> {
+        let v = resolve(func, v);
+        if let Some(k) = kinds.get(&v) {
+            return Some(*k);
+        }
+        (!looped.contains(&def_block(func, v)?)).then_some(Kind::Invariant)
+    };
+
+    let mut invariants = vec![];
+    let mut scalars = vec![];
+    let mut src_load: Option<(Value, i32)> = None;
+    let mut dst_store: Option<(Value, i32, Option<Value>)> = None;
+
+    for inst in func.layout.block_insts(body) {
+        if inst == body_term {
+            break;
+        }
+        let data = func.dfg.insts[inst];
+        let args: Vec<Value> = func
+            .dfg
+            .inst_args(inst)
+            .iter()
+            .map(|&v| resolve(func, v))
+            .collect();
+        let results = func.dfg.inst_results(inst);
+        match data {
+            InstructionData::Load {
+                opcode: Opcode::Uload8 | Opcode::Sload8,
+                flags,
+                offset,
+                ..
+            } => {
+                if src_load.is_some() || dst_store.is_some() || !plain(flags) {
+                    return None;
+                }
+                let Some(Kind::Scalar { step: Some(1) }) = kind_of(&kinds, args[0]) else {
+                    return None;
+                };
+                src_load = Some((args[0], i32::from(offset)));
+                let stage = if data.opcode() == Opcode::Sload8 {
+                    WidenStage::Sint
+                } else {
+                    WidenStage::U8
+                };
+                widen.insert(resolve(func, results[0]), stage);
+                continue;
+            }
+            InstructionData::Load {
+                opcode: Opcode::Load,
+                flags,
+                ..
+            } => {
+                if kind_of(&kinds, args[0]) == Some(Kind::Invariant)
+                    && flags.readonly()
+                    && flags.can_move()
+                {
+                    kinds.insert(resolve(func, results[0]), Kind::Invariant);
+                    invariants.push(inst);
+                    continue;
+                }
+                return None;
+            }
+            InstructionData::Store {
+                opcode: Opcode::Istore32,
+                flags,
+                offset,
+                ..
+            } => {
+                if src_load.is_none() || dst_store.is_some() || !plain(flags) {
+                    return None;
+                }
+                let Some(Kind::Scalar { step: Some(4) }) = kind_of(&kinds, args[1]) else {
+                    return None;
+                };
+                let scale = match widen.get(&args[0]) {
+                    Some(WidenStage::Bits(s) | WidenStage::F32(s)) => *s,
+                    _ => return None,
+                };
+                dst_store = Some((args[1], i32::from(offset), scale));
+                continue;
+            }
+            _ => {}
+        }
+
+        if results.len() != 1
+            || (!pure(data.opcode())
+                && !matches!(
+                    data.opcode(),
+                    Opcode::FcvtFromSint | Opcode::Fmul | Opcode::Bitcast | Opcode::F32const
+                ))
+        {
+            return None;
+        }
+        let r = resolve(func, results[0]);
+        let r_ty = func.dfg.value_type(r);
+        if let Some(&stage) = args.first().and_then(|a| widen.get(a)) {
+            let next_stage = match (data.opcode(), stage) {
+                (Opcode::Ireduce, WidenStage::U8) if r_ty == types::I8 => WidenStage::I8,
+                (Opcode::Sextend, WidenStage::I8) => WidenStage::Sint,
+                (Opcode::FcvtFromSint, WidenStage::Sint) if r_ty == types::F32 => {
+                    WidenStage::F32(None)
+                }
+                (Opcode::Fmul, WidenStage::F32(None))
+                    if args.len() == 2
+                        && kind_of(&kinds, args[1]) == Some(Kind::Invariant)
+                        && func.dfg.value_type(args[1]) == types::F32 =>
+                {
+                    WidenStage::F32(Some(args[1]))
+                }
+                (Opcode::Bitcast, WidenStage::F32(s)) if r_ty == types::I32 => WidenStage::Bits(s),
+                (Opcode::Uextend, WidenStage::Bits(s)) if r_ty == types::I64 => WidenStage::Bits(s),
+                _ => return None,
+            };
+            widen.insert(r, next_stage);
+            continue;
+        }
+        if data.opcode() == Opcode::Fmul
+            && args.len() == 2
+            && kind_of(&kinds, args[0]) == Some(Kind::Invariant)
+            && func.dfg.value_type(args[0]) == types::F32
+            && let Some(WidenStage::F32(None)) = widen.get(&args[1])
+        {
+            widen.insert(r, WidenStage::F32(Some(args[0])));
+            continue;
+        }
+
+        let arg_kinds: Vec<Kind> = args
+            .iter()
+            .map(|&v| kind_of(&kinds, v))
+            .collect::<Option<_>>()?;
+        if arg_kinds.iter().all(|k| *k == Kind::Invariant) {
+            kinds.insert(r, Kind::Invariant);
+            invariants.push(inst);
+        } else {
+            let k = Kind::Scalar {
+                step: step(func, &data, &args, &arg_kinds),
+            };
+            kinds.insert(r, k);
+            scalars.push(inst);
+        }
+    }
+
+    let (src_addr, src_offset) = src_load?;
+    let (dst_addr, dst_offset, scale) = dst_store?;
+
+    for inst in func.layout.block_insts(h) {
+        for &v in func.dfg.inst_args(inst) {
+            let rv = resolve(func, v);
+            if rv != j && (kinds.contains_key(&rv) || widen.contains_key(&rv)) {
+                return None;
+            }
+        }
+    }
+    for b in func.layout.blocks() {
+        if b == h || b == body {
+            continue;
+        }
+        for inst in func.layout.block_insts(b) {
+            for &v in func.dfg.inst_args(inst) {
+                let rv = resolve(func, v);
+                if kinds.contains_key(&rv) || widen.contains_key(&rv) {
+                    return None;
+                }
+            }
+        }
+    }
+
+    Some(WidenI8F32Plan {
+        header: h,
+        j,
+        bound,
+        entries,
+        invariants,
+        scalars,
+        src_addr,
+        src_offset,
+        dst_addr,
+        dst_offset,
+        scale,
+    })
+}
+
+fn emit_widen_i8_f32(func: &mut ir::Function, plan: &WidenI8F32Plan) {
+    let pre = func.dfg.make_block();
+    let j0 = func.dfg.append_block_param(pre, types::I64);
+    let lanes = func.dfg.make_block();
+    let jv = func.dfg.append_block_param(lanes, types::I64);
+    func.layout.insert_block(pre, plan.header);
+    func.layout.insert_block(lanes, plan.header);
+    for &inst in &plan.entries {
+        let ir::DataFlowGraph {
+            insts,
+            jump_tables,
+            exception_tables,
+            value_lists,
+            ..
+        } = &mut func.dfg;
+        for c in insts[inst].branch_destination_mut(jump_tables, exception_tables) {
+            if c.block(value_lists) == plan.header {
+                c.set_block(pre, value_lists);
+            }
+        }
+    }
+
+    let mut invariants: HashMap<Value, Value> = HashMap::new();
+    for &inst in &plan.invariants {
+        let old = resolve(func, func.dfg.inst_results(inst)[0]);
+        let (_, new) = copy_inst(func, pre, inst, &invariants);
+        if let Some(new) = new {
+            invariants.insert(old, new);
+        }
+    }
+
+    let emit_addrs = |func: &mut ir::Function, block: Block, j_val: Value| -> (Value, Value) {
+        let mut map = invariants.clone();
+        map.insert(plan.j, j_val);
+        for &inst in &plan.scalars {
+            let old = resolve(func, func.dfg.inst_results(inst)[0]);
+            let (_, new) = copy_inst(func, block, inst, &map);
+            map.insert(old, new.expect("scalar has result"));
+        }
+        let map_addr = |func: &mut ir::Function, base: Value, offset: i32| -> Value {
+            let b = map.get(&base).copied().unwrap_or(base);
+            if offset == 0 {
+                b
+            } else {
+                FuncCursor::new(func)
+                    .at_bottom(block)
+                    .ins()
+                    .iadd_imm(b, i64::from(offset))
+            }
+        };
+        let src = map_addr(func, plan.src_addr, plan.src_offset);
+        let dst = map_addr(func, plan.dst_addr, plan.dst_offset);
+        (src, dst)
+    };
+
+    let (src0, dst0) = emit_addrs(func, pre, j0);
+    {
+        let mut pos = FuncCursor::new(func).at_bottom(pre);
+        let in_bounds = pos.ins().icmp(IntCC::UnsignedLessThan, j0, plan.bound);
+        let trip = pos.ins().isub(plan.bound, j0);
+        let at_least_8 = pos
+            .ins()
+            .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, trip, 8);
+        let (src_end, src_ovf) = pos.ins().uadd_overflow(src0, trip);
+        let four = pos.ins().iconst(types::I64, 4);
+        let dst_hi = pos.ins().umulhi(trip, four);
+        let dst_mul_ovf = pos.ins().icmp_imm(IntCC::NotEqual, dst_hi, 0);
+        let dst_bytes = pos.ins().imul_imm(trip, 4);
+        let (dst_end, dst_ovf) = pos.ins().uadd_overflow(dst0, dst_bytes);
+        let no_ovf_1 = pos.ins().icmp_imm(IntCC::Equal, src_ovf, 0);
+        let no_ovf_2 = pos.ins().icmp_imm(IntCC::Equal, dst_ovf, 0);
+        let no_ovf_3 = pos.ins().bnot(dst_mul_ovf);
+        let c1 = pos
+            .ins()
+            .icmp(IntCC::UnsignedLessThanOrEqual, dst_end, src0);
+        let c2 = pos
+            .ins()
+            .icmp(IntCC::UnsignedLessThanOrEqual, src_end, dst0);
+        let disjoint = pos.ins().bor(c1, c2);
+        let ok = pos.ins().band(in_bounds, at_least_8);
+        let ok = pos.ins().band(ok, no_ovf_1);
+        let ok = pos.ins().band(ok, no_ovf_2);
+        let ok = pos.ins().band(ok, no_ovf_3);
+        let ok = pos.ins().band(ok, disjoint);
+        pos.ins().brif(
+            ok,
+            lanes,
+            &[BlockArg::Value(j0)],
+            plan.header,
+            &[BlockArg::Value(j0)],
+        );
+    }
+
+    let (src_v, dst_v) = emit_addrs(func, lanes, jv);
+    {
+        let mut pos = FuncCursor::new(func).at_bottom(lanes);
+        let w = pos.ins().load(types::I64, MemFlags::new(), src_v, 0);
+        let v_i64x2 = pos.ins().scalar_to_vector(types::I64X2, w);
+        let v_i8x16 = pos.ins().bitcast(
+            types::I8X16,
+            MemFlags::new().with_endianness(ir::Endianness::Little),
+            v_i64x2,
+        );
+        let v_i16x8 = pos.ins().swiden_low(v_i8x16);
+        let lo_i32x4 = pos.ins().swiden_low(v_i16x8);
+        let hi_i32x4 = pos.ins().swiden_high(v_i16x8);
+        let mut lo_f32x4 = pos.ins().fcvt_from_sint(types::F32X4, lo_i32x4);
+        let mut hi_f32x4 = pos.ins().fcvt_from_sint(types::F32X4, hi_i32x4);
+        if let Some(scale) = plan.scale {
+            let s = invariants.get(&scale).copied().unwrap_or(scale);
+            let v_scale = pos.ins().splat(types::F32X4, s);
+            lo_f32x4 = pos.ins().fmul(lo_f32x4, v_scale);
+            hi_f32x4 = pos.ins().fmul(hi_f32x4, v_scale);
+        }
+        pos.ins().store(MemFlags::new(), lo_f32x4, dst_v, 0);
+        pos.ins().store(MemFlags::new(), hi_f32x4, dst_v, 16);
+        let j8 = pos.ins().iadd_imm(jv, 8);
+        let rem = pos.ins().isub(plan.bound, j8);
+        let more = pos
+            .ins()
+            .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, rem, 8);
+        pos.ins().brif(
+            more,
+            lanes,
+            &[BlockArg::Value(j8)],
+            plan.header,
+            &[BlockArg::Value(j8)],
+        );
+    }
 }

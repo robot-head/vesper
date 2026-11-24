@@ -15,16 +15,21 @@ use @vesper/cranelift::{
     call_arg,
     call_arg_count,
     call_conv_default,
+    cc_eq,
     declare_function,
     import_function,
+    ins_atomic_cas,
     ins_atomic_load,
     ins_atomic_rmw,
     ins_atomic_store,
     ins_call,
     ins_convert,
     ins_func_addr,
+    ins_icmp,
     ins_iconst,
     ins_load,
+    ins_select,
+    ins_store,
     linkage_import,
     mem_trusted,
     sig_new,
@@ -46,6 +51,7 @@ const AO_SUB: u64 = 5;
 const AO_AND: u64 = 6;
 const AO_OR: u64 = 7;
 const AO_XOR: u64 = 8;
+const AO_CAS: u64 = 9;
 
 // The shim's `atomic_rmw` ops.
 const AR_ADD: u32 = 1;
@@ -82,6 +88,8 @@ pub fn atomic_known(call: u64, op: u32) -> bool eff [Ffi[Cranelift]] {
     }
     if code == AO_LOAD {
         n == 4
+    } else if code == AO_CAS {
+        n == 10
     } else {
         code >= AO_STORE && code <= AO_XOR && n == 5
     }
@@ -133,6 +141,23 @@ pub fn atomic_request(call: u64, op: u32, inout b: Builder, inout m: Module)
     if code == AO_LOAD {
         let v = ins_atomic_load(inout b, aty(t), flags, data);
         return a_widen(inout b, v, t, signed);
+    }
+    if code == AO_CAS {
+        let expected = value_of_word(call_arg(call, 4));
+        let replacement = value_of_word(call_arg(call, 5));
+        let ptr = value_of_word(call_arg(call, 6));
+        let ok = wrapping_i64(call_arg(call, 7));
+        let err = wrapping_i64(call_arg(call, 8));
+        let offset = wrapping_i32(call_arg(call, 9));
+        let old = ins_atomic_cas(inout b, flags, data, expected, replacement);
+        let same = ins_icmp(inout b, cc_eq(), old, expected);
+        let old_w = a_widen(inout b, old, t, signed);
+        let ok_v = ins_iconst(inout b, aty(TyCode::I64), ok);
+        let err_v = ins_iconst(inout b, aty(TyCode::I64), err);
+        let tag = ins_select(inout b, same, ok_v, err_v);
+        ins_store(inout b, 0, tag, ptr, 0);
+        ins_store(inout b, 0, old_w, ptr, offset);
+        return ptr;
     }
     let x = value_of_word(call_arg(call, 4));
     if code == AO_STORE {

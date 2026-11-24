@@ -4,37 +4,34 @@
 //! Rust code, like the seed package (seed/), which has no build script.
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    // The harness sets the cfg under `vesper-port`; declare it either way.
+    // The harness sets cfg(vesper_port); declare it either way.
     println!("cargo:rustc-check-cfg=cfg({})", vesper_port_harness::CFG);
-    #[cfg(feature = "vesper-port")]
-    {
-        let port = vesper_port_harness::Port::new("ebpf", "vesper")
-            .binding("port/binding.rs")
-            .rust_types("crate::port");
-        #[cfg(feature = "vesper-port-divergent")]
-        let port = {
-            // The edits in VESPER_EBPF_DIVERGENT (comma-separated indices
-            // into EDITS; port/check.sh groups edits that no test sees
-            // together, so each group is one build); unset applies every
-            // edit.
-            println!("cargo:rerun-if-env-changed=VESPER_EBPF_DIVERGENT");
-            let only: Option<Vec<usize>> = std::env::var("VESPER_EBPF_DIVERGENT").ok().map(|v| {
-                v.split(',')
-                    .map(|i| {
-                        i.trim()
-                            .parse::<usize>()
-                            .expect("VESPER_EBPF_DIVERGENT is a list of indices")
-                    })
-                    .collect()
-            });
-            EDITS
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| only.as_ref().is_none_or(|only| only.contains(i)))
-                .fold(port, |port, (_, (from, to))| port.edit(from, to))
-        };
-        port.build();
-    }
+    let port = vesper_port_harness::Port::new("ebpf", "vesper")
+        .binding("port/binding.rs")
+        .rust_types("crate::port");
+    #[cfg(feature = "vesper-port-divergent")]
+    let port = {
+        // The edits in VESPER_EBPF_DIVERGENT (comma-separated indices
+        // into EDITS; port/check.sh groups edits that no test sees
+        // together, so each group is one build); unset applies every
+        // edit.
+        println!("cargo:rerun-if-env-changed=VESPER_EBPF_DIVERGENT");
+        let only: Option<Vec<usize>> = std::env::var("VESPER_EBPF_DIVERGENT").ok().map(|v| {
+            v.split(',')
+                .map(|i| {
+                    i.trim()
+                        .parse::<usize>()
+                        .expect("VESPER_EBPF_DIVERGENT is a list of indices")
+                })
+                .collect()
+        });
+        EDITS
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| only.as_ref().is_none_or(|only| only.contains(i)))
+            .fold(port, |port, (_, (from, to))| port.edit(from, to))
+    };
+    port.build();
 }
 
 /// The divergence checks, one per ported module (mirrored in BUILD.bazel

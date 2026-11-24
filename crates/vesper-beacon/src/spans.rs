@@ -1,5 +1,5 @@
 use crate::{Redacted, TraceError, W3cSpanContext};
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 use core::cell::Cell;
 use core::num::NonZeroU64;
 
@@ -49,12 +49,12 @@ pub enum FinishError {
 /// The port build keeps the trace, flags and next ID in the port's
 /// `PoolState` mirror and the slots as one byte each; Vesper picks the slot
 /// and the ID and updates both in place.
-#[cfg(vesper_port)]
+#[cfg(feature = "vesper-port")]
 pub struct SpanPool<const ACTIVE: usize> {
     state: core::cell::Cell<crate::port::repr::PoolState>,
     occupied: core::cell::RefCell<[u8; ACTIVE]>,
 }
-#[cfg(vesper_port)]
+#[cfg(feature = "vesper-port")]
 impl<const ACTIVE: usize> SpanPool<ACTIVE> {
     pub fn new(trace_id: u128, first_span_id: NonZeroU64, flags: u8) -> Result<Self, TraceError> {
         let state = crate::port::pool_new(
@@ -103,14 +103,14 @@ impl<const ACTIVE: usize> SpanPool<ACTIVE> {
         })
     }
 }
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 pub struct SpanPool<const ACTIVE: usize> {
     trace_id: u128,
     flags: u8,
     next_id: Cell<Option<NonZeroU64>>,
     occupied: [Cell<bool>; ACTIVE],
 }
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 impl<const ACTIVE: usize> SpanPool<ACTIVE> {
     pub fn new(trace_id: u128, first_span_id: NonZeroU64, flags: u8) -> Result<Self, TraceError> {
         W3cSpanContext::new(trace_id, first_span_id.get(), flags)?;
@@ -242,7 +242,7 @@ impl<const ACTIVE: usize> ActiveSpan<'_, ACTIVE> {
     }
     /// The port enqueues the record and frees the slot, or fails with both
     /// unchanged.
-    #[cfg(vesper_port)]
+    #[cfg(feature = "vesper-port")]
     fn finish<const QUEUE: usize>(
         self,
         queue: &mut TelemetryRing<QUEUE>,
@@ -274,7 +274,7 @@ impl<const ACTIVE: usize> ActiveSpan<'_, ACTIVE> {
             Err(error) => Err(FinishFailure { error, span: self }),
         }
     }
-    #[cfg(not(vesper_port))]
+    #[cfg(not(feature = "vesper-port"))]
     fn finish<const QUEUE: usize>(
         self,
         queue: &mut TelemetryRing<QUEUE>,
@@ -322,13 +322,13 @@ pub struct SpanRecord {
 /// The port build keeps the records as the port's `SpanRow` mirrors and the
 /// head and length in its `RingState` mirror; Vesper pushes, pops and
 /// drains them in place.
-#[cfg(vesper_port)]
+#[cfg(feature = "vesper-port")]
 #[derive(Debug)]
 pub struct TelemetryRing<const QUEUE: usize> {
     records: [crate::port::repr::SpanRow; QUEUE],
     state: crate::port::repr::RingState,
 }
-#[cfg(vesper_port)]
+#[cfg(feature = "vesper-port")]
 impl<const QUEUE: usize> Default for TelemetryRing<QUEUE> {
     fn default() -> Self {
         Self {
@@ -337,7 +337,7 @@ impl<const QUEUE: usize> Default for TelemetryRing<QUEUE> {
         }
     }
 }
-#[cfg(vesper_port)]
+#[cfg(feature = "vesper-port")]
 impl<const QUEUE: usize> TelemetryRing<QUEUE> {
     pub const fn len(&self) -> usize {
         self.state.len as usize
@@ -391,14 +391,14 @@ impl<const QUEUE: usize> TelemetryRing<QUEUE> {
         out
     }
 }
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 #[derive(Debug)]
 pub struct TelemetryRing<const QUEUE: usize> {
     records: [Option<SpanRecord>; QUEUE],
     head: usize,
     len: usize,
 }
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 impl<const QUEUE: usize> Default for TelemetryRing<QUEUE> {
     fn default() -> Self {
         Self {
@@ -408,7 +408,7 @@ impl<const QUEUE: usize> Default for TelemetryRing<QUEUE> {
         }
     }
 }
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 impl<const QUEUE: usize> TelemetryRing<QUEUE> {
     pub const fn len(&self) -> usize {
         self.len
@@ -532,7 +532,7 @@ impl<const BATCH: usize> Default for ColumnBatch<BATCH> {
 }
 impl<const BATCH: usize> ColumnBatch<BATCH> {
     /// Appends one drained record (the port build's drain; `len < BATCH`).
-    #[cfg(vesper_port)]
+    #[cfg(feature = "vesper-port")]
     fn push(&mut self, record: SpanRecord) {
         let i = self.len;
         self.trace_ids[i] = record.context.trace_id();
@@ -590,7 +590,7 @@ pub struct SpanRecords<'a, const QUEUE: usize> {
 }
 impl<const QUEUE: usize> Iterator for SpanRecords<'_, QUEUE> {
     type Item = SpanRecord;
-    #[cfg(vesper_port)]
+    #[cfg(feature = "vesper-port")]
     fn next(&mut self) -> Option<Self::Item> {
         if self.offset == self.end {
             return None;
@@ -600,7 +600,7 @@ impl<const QUEUE: usize> Iterator for SpanRecords<'_, QUEUE> {
         self.offset += 1;
         Some(crate::port::record_of_value(&row))
     }
-    #[cfg(not(vesper_port))]
+    #[cfg(not(feature = "vesper-port"))]
     fn next(&mut self) -> Option<Self::Item> {
         if self.offset == self.end {
             return None;

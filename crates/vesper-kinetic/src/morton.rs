@@ -2,27 +2,16 @@
 //!
 //! Bit `3i` of a code is bit `i` of `x`, bit `3i + 1` is bit `i` of `y` and
 //! bit `3i + 2` is bit `i` of `z`. [`spec_encode`] is the bit-by-bit
-//! specification that `lean/KineticColoring.lean` models; [`encode`] uses
-//! the usual magic-mask spreading and is tested against it.
+//! specification that `lean/KineticColoring.lean` models; [`encode`] is
+//! tested against it.
 
 /// Largest coordinate an axis can carry (`2^10 - 1`).
 pub const AXIS_MAX: u16 = 1023;
 /// Mask of the 30 bits a code can use.
 pub const CODE_MASK: u32 = (1 << 30) - 1;
 
-// The magic-bits interleave: an axis value is spread so that two zero
-// bits follow each of its bits, by shifting and masking with the pattern
-// each step leaves (named by the shift); compacting runs the steps
-// backwards. Bit 3i of SPREAD_MASK_2 is set for i < 10.
-#[cfg_attr(vesper_port, allow(dead_code))]
+// The masks `arch` needs: an axis value, and bit 3i set for i < 10.
 const AXIS_MASK: u32 = AXIS_MAX as u32;
-#[cfg_attr(vesper_port, allow(dead_code))]
-const SPREAD_MASK_16: u32 = 0x0300_00ff;
-#[cfg_attr(vesper_port, allow(dead_code))]
-const SPREAD_MASK_8: u32 = 0x0300_f00f;
-#[cfg_attr(vesper_port, allow(dead_code))]
-const SPREAD_MASK_4: u32 = 0x030c_30c3;
-#[cfg_attr(vesper_port, allow(dead_code))]
 const SPREAD_MASK_2: u32 = 0x0924_9249;
 
 /// Typed rejection of out-of-range Morton inputs.
@@ -47,6 +36,10 @@ impl std::fmt::Display for MortonError {
 
 impl std::error::Error for MortonError {}
 
+// The port-backed build calls the Vesper port (vesper/src/morton.ves, by
+// lookup tables); the seed build calls the frozen magic-bits engine in
+// seed/src/engine/morton.rs.
+
 /// Spread the low 10 bits of `v` so bit `i` lands at bit `3i`.
 #[cfg(vesper_port)]
 #[inline]
@@ -58,12 +51,7 @@ pub fn spread(v: u32) -> u32 {
 #[cfg(not(vesper_port))]
 #[inline]
 pub const fn spread(v: u32) -> u32 {
-    let mut x = v & AXIS_MASK;
-    x = (x | (x << 16)) & SPREAD_MASK_16;
-    x = (x | (x << 8)) & SPREAD_MASK_8;
-    x = (x | (x << 4)) & SPREAD_MASK_4;
-    x = (x | (x << 2)) & SPREAD_MASK_2;
-    x
+    crate::engine::morton::spread(v)
 }
 
 /// Inverse of [`spread`]: gather bits `0, 3, 6, ...` into the low 10 bits.
@@ -77,12 +65,7 @@ pub fn compact(v: u32) -> u32 {
 #[cfg(not(vesper_port))]
 #[inline]
 pub const fn compact(v: u32) -> u32 {
-    let mut x = v & SPREAD_MASK_2;
-    x = (x | (x >> 2)) & SPREAD_MASK_4;
-    x = (x | (x >> 4)) & SPREAD_MASK_8;
-    x = (x | (x >> 8)) & SPREAD_MASK_16;
-    x = (x | (x >> 16)) & AXIS_MASK;
-    x
+    crate::engine::morton::compact(v)
 }
 
 /// Branchless encode of three coordinates that are already known to be in
@@ -97,56 +80,67 @@ pub fn encode_masked(x: u16, y: u16, z: u16) -> u32 {
 #[cfg(not(vesper_port))]
 #[inline]
 pub const fn encode_masked(x: u16, y: u16, z: u16) -> u32 {
-    spread(x as u32) | (spread(y as u32) << 1) | (spread(z as u32) << 2)
+    crate::engine::morton::encode_masked(x, y, z)
 }
 
 /// Encode with range checking.
 pub fn encode(x: u16, y: u16, z: u16) -> Result<u32, MortonError> {
     #[cfg(vesper_port)]
     {
-        crate::port::morton_encode(x, y, z)
+        // The packed export: the code, or bit 63 with the axis and value.
+        let word = crate::port::morton_encode_packed(x, y, z);
+        if word >> 63 == 0 {
+            Ok(word as u32)
+        } else {
+            Err(MortonError::AxisOutOfRange {
+                axis: (word >> 16) as u8,
+                value: word as u16,
+            })
+        }
     }
     #[cfg(not(vesper_port))]
     {
-        for (axis, value) in [(0u8, x), (1, y), (2, z)] {
-            if value > AXIS_MAX {
-                return Err(MortonError::AxisOutOfRange { axis, value });
-            }
-        }
-        Ok(encode_masked(x, y, z))
+        crate::engine::morton::encode(x, y, z)
     }
+}
+
+/// The axes of a packed decode, `x | y << 10 | z << 20`.
+#[cfg(vesper_port)]
+#[inline]
+fn unpack(word: u64) -> (u16, u16, u16) {
+    let axis = |shift: u64| ((word >> shift) & u64::from(AXIS_MAX)) as u16;
+    (axis(0), axis(10), axis(20))
 }
 
 /// Branchless decode of the low 30 bits.
 #[cfg(vesper_port)]
 #[inline]
 pub fn decode_masked(code: u32) -> (u16, u16, u16) {
-    crate::port::morton_decode_masked(code)
+    unpack(u64::from(crate::port::morton_decode_masked_packed(code)))
 }
 
 /// Rust build of [`decode_masked`].
 #[cfg(not(vesper_port))]
 #[inline]
 pub const fn decode_masked(code: u32) -> (u16, u16, u16) {
-    (
-        compact(code) as u16,
-        compact(code >> 1) as u16,
-        compact(code >> 2) as u16,
-    )
+    crate::engine::morton::decode_masked(code)
 }
 
 /// Decode with range checking.
 pub fn decode(code: u32) -> Result<(u16, u16, u16), MortonError> {
     #[cfg(vesper_port)]
     {
-        crate::port::morton_decode(code)
+        // The packed export: x | y << 10 | z << 20, or bit 63.
+        let word = crate::port::morton_decode_packed(code);
+        if word >> 63 == 0 {
+            Ok(unpack(word))
+        } else {
+            Err(MortonError::CodeOutOfRange(code))
+        }
     }
     #[cfg(not(vesper_port))]
     {
-        if code & !CODE_MASK != 0 {
-            return Err(MortonError::CodeOutOfRange(code));
-        }
-        Ok(decode_masked(code))
+        crate::engine::morton::decode(code)
     }
 }
 

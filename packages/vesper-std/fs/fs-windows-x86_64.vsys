@@ -1,95 +1,87 @@
-// @vesper-std/fs's import on Windows (SH6 lane 13, #1408): the same
-// functions as the Linux and macOS files, provided by the Windows part of
-// crates/vesper-std-host (src/fs.rs) over `std::fs` until Vesper calls
-// Win32 itself (gap G7: UTF-16 paths). Paths are UTF-8. The shim's
-// descriptors index its own table, and `errno` is the thread's last
-// error: the Win32 error code, or `ERROR_INVALID_NAME` (123) for a path
-// that is not UTF-8.
+// Windows `kernel32` bindings for `@vesper-std/fs`, bypassing `vesper_std_host`.
 sys library StdFs (
     target = "@TARGET@", abi = "@ABI@",
-    link = "static", name = "vesper_std_host",
+    link = "dynamic", name = "kernel32",
     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
 ) {
-    const OS: u32 = 3;
-    const O_WRONLY: i32 = 1;
-    const O_CREAT: i32 = 64;
-    const O_EXCL: i32 = 128;
-    const O_TRUNC: i32 = 512;
-    const O_APPEND: i32 = 1024;
-    const O_CLOEXEC: i32 = 524288;
-    const O_DIRECTORY: i32 = 65536;
-    const O_NOFOLLOW: i32 = 131072;
-    const AT_FDCWD: i32 = -100;
-    const AT_REMOVEDIR: i32 = 512;
-    // `errno` values src/sys.ves tests (Win32 errors on Windows).
-    const ENOTDIR: u32 = 267;
-    const ELOOP: u32 = 1921;
-    const STAT_MODE_WORD: u64 = 3;
-    const STAT_MODE_SHIFT: u64 = 0;
-    const STAT_SIZE_WORD: u64 = 6;
-    const STAT_MTIME_WORD: u64 = 11;
-    const DIRENT_TYPE: u64 = 18;
-    const DIRENT_NAME: u64 = 19;
-    // A `DIR *` from `opendir`.
-    linear extern type Dir;
-    // Room for every target's `struct stat`, read word by word.
-    wire struct Stat {
-        w0: u64, w1: u64, w2: u64, w3: u64, w4: u64, w5: u64, w6: u64, w7: u64, w8: u64, w9: u64, w10: u64, w11: u64, w12: u64, w13: u64, w14: u64, w15: u64, w16: u64, w17: u64
+    const INVALID_HANDLE_VALUE: u64 = 18446744073709551615;
+    const GENERIC_READ: u32 = 2147483648;
+    const GENERIC_WRITE: u32 = 1073741824;
+    const FILE_APPEND_DATA: u32 = 4;
+    const FILE_SHARE_ALL: u32 = 7;
+    const CREATE_NEW: u32 = 1;
+    const CREATE_ALWAYS: u32 = 2;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 128;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 16;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 1024;
+    const MOVEFILE_REPLACE_EXISTING: u32 = 1;
+    const ERROR_FILE_NOT_FOUND: u32 = 2;
+    const ERROR_PATH_NOT_FOUND: u32 = 3;
+    const ERROR_NO_MORE_FILES: u32 = 18;
+    const ERROR_HANDLE_EOF: u32 = 38;
+    const ERROR_BROKEN_PIPE: u32 = 109;
+
+    wire struct Win32FileAttrData {
+        dwFileAttributes: u32,
+        ftCreationTimeLow: u32,
+        ftCreationTimeHigh: u32,
+        ftLastAccessTimeLow: u32,
+        ftLastAccessTimeHigh: u32,
+        ftLastWriteTimeLow: u32,
+        ftLastWriteTimeHigh: u32,
+        nFileSizeHigh: u32,
+        nFileSizeLow: u32,
     }
-    #[link_name = "vstd_open"]
-    fn open(nocapture in path: CStr, flags: i32, ..., mode: i64) -> ForeignVal[i32] errno;
-    #[link_name = "vstd_read"]
-    fn read(fd: i32, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64] errno;
-    #[link_name = "vstd_write"]
-    fn write(fd: i32, nocapture in buf: CSlice[u8]) -> ForeignVal[i64] errno;
-    #[link_name = "vstd_fsync"]
-    fn fsync(fd: i32) -> ForeignVal[i32] errno;
-    #[link_name = "vstd_fcntl"]
-    fn fcntl(fd: i32, cmd: i32, ..., arg: i64) -> ForeignVal[i32] errno;
-    #[link_name = "vstd_close"]
-    fn close(fd: i32) -> ForeignVal[i32];
-    #[link_name = "vstd_fstat"]
-    fn fstat(fd: i32, nocapture inout st: Stat) -> ForeignVal[i32] errno;
-    #[link_name = "vstd_stat"]
-    fn stat(nocapture in path: CStr, nocapture inout st: Stat) -> ForeignVal[i32] errno;
-    #[link_name = "vstd_lstat"]
-    fn lstat(nocapture in path: CStr, nocapture inout st: Stat) -> ForeignVal[i32] errno;
-    #[link_name = "vstd_rename"]
-    fn rename(nocapture in from: CStr, nocapture in to: CStr) -> ForeignVal[i32] errno;
-    #[link_name = "vstd_unlink"]
-    fn unlink(nocapture in path: CStr) -> ForeignVal[i32] errno;
-    #[link_name = "vstd_rmdir"]
-    fn rmdir(nocapture in path: CStr) -> ForeignVal[i32] errno;
-    #[link_name = "vstd_mkdir"]
-    fn mkdir(nocapture in path: CStr, mode: u32) -> ForeignVal[i32] errno;
-    #[link_name = "vstd_getpid"]
-    fn getpid() -> ForeignVal[i32];
-    #[link_name = "vstd_opendir"]
-    fn opendir(nocapture in path: CStr) -> ForeignVal[Option[Dir]] errno;
-    #[link_name = "vstd_readdir"]
-    fn readdir(inout d: Dir) -> ForeignVal[u64] errno;
-    #[link_name = "vstd_closedir"]
-    fn closedir(sink d: Dir) -> ForeignVal[i32];
-    #[link_name = "vstd_openat"]
-    fn openat(dirfd: i32, nocapture in path: CStr, flags: i32, ..., mode: i64) -> ForeignVal[i32] errno;
-    #[link_name = "vstd_unlinkat"]
-    fn unlinkat(dirfd: i32, nocapture in path: CStr, flags: i32) -> ForeignVal[i32] errno;
-    #[link_name = "vstd_fdopendir"]
-    fn fdopendir(fd: i32) -> ForeignVal[Option[Dir]] errno;
-    // The calling thread's `errno`, which src/sys.ves clears before
-    // `readdir`, whose `NULL` is an error only when it sets one.
-    #[link_name = "vstd_errno_address"]
-    fn errno_address() -> ForeignVal[u64];
-    #[link_name = "vstd_memset"]
-    fn fill(address: u64, byte: i32, size: u64) -> ForeignVal[u64];
-    // The 8 bytes of a `struct dirent` from byte 16, which hold `d_type`
-    // and the first bytes of `d_name`.
-    #[link_name = "vstd_memcpy"]
-    fn read_word(nocapture inout word: u64, address: u64, size: u64) -> ForeignVal[u64];
-    // The address of the NUL that ends the C string at `address`.
-    #[link_name = "vstd_strchr"]
-    fn find_byte(address: u64, byte: i32) -> ForeignVal[u64];
-    // Copy `buf.len()` bytes from `address` into `buf`.
-    #[link_name = "vstd_bcopy"]
-    fn copy_from(address: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[Unit];
+
+    fn CreateFileW(
+        nocapture in lpFileName: CWStr,
+        dwDesiredAccess: u32,
+        dwShareMode: u32,
+        lpSecurityAttributes: u64,
+        dwCreationDisposition: u32,
+        dwFlagsAndAttributes: u32,
+        hTemplateFile: u64
+    ) -> ForeignVal[u64] errno;
+    fn ReadFile(
+        hFile: u64,
+        nocapture inout lpBuffer: CSlice[u8],
+        nocapture inout lpNumberOfBytesRead: u32,
+        lpOverlapped: u64
+    ) -> ForeignVal[i32] errno;
+    fn WriteFile(
+        hFile: u64,
+        nocapture in lpBuffer: CSlice[u8],
+        nocapture inout lpNumberOfBytesWritten: u32,
+        lpOverlapped: u64
+    ) -> ForeignVal[i32] errno;
+    fn FlushFileBuffers(hFile: u64) -> ForeignVal[i32] errno;
+    fn CloseHandle(hObject: u64) -> ForeignVal[i32];
+    fn GetFileSizeEx(hFile: u64, nocapture inout lpFileSize: i64) -> ForeignVal[i32] errno;
+    fn GetFileAttributesExW(
+        nocapture in lpFileName: CWStr,
+        fInfoLevelId: i32,
+        nocapture inout lpFileInformation: Win32FileAttrData
+    ) -> ForeignVal[i32] errno;
+    fn FindFirstFileW(
+        nocapture in lpFileName: CWStr,
+        nocapture inout lpFindFileData: CSlice[u8]
+    ) -> ForeignVal[u64] errno;
+    fn FindNextFileW(
+        hFindFile: u64,
+        nocapture inout lpFindFileData: CSlice[u8]
+    ) -> ForeignVal[i32] errno;
+    fn FindClose(hFindFile: u64) -> ForeignVal[i32];
+    fn MoveFileExW(
+        nocapture in lpExistingFileName: CWStr,
+        nocapture in lpNewFileName: CWStr,
+        dwFlags: u32
+    ) -> ForeignVal[i32] errno;
+    fn DeleteFileW(nocapture in lpFileName: CWStr) -> ForeignVal[i32] errno;
+    fn RemoveDirectoryW(nocapture in lpPathName: CWStr) -> ForeignVal[i32] errno;
+    fn CreateDirectoryW(
+        nocapture in lpPathName: CWStr,
+        lpSecurityAttributes: u64
+    ) -> ForeignVal[i32] errno;
+    fn GetCurrentProcessId() -> ForeignVal[u32];
 }

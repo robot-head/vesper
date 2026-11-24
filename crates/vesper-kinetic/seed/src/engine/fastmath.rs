@@ -1,0 +1,482 @@
+//! The frozen fdlibm Rust implementation replaced in `src/fastmath.rs`
+//! (SH6 lane 9, #1404): the seed build of `sin`, `cos`, `atan2`, `exp` and
+//! `log`; the binary32 functions there widen to these.
+
+// The polynomial coefficients are fdlibm's published values, written with
+// all their digits.
+#![allow(clippy::excessive_precision, clippy::approx_constant)]
+
+use crate::crmath;
+
+// IEEE 754 binary64 fields and fdlibm's high-word thresholds; the same
+// names as vesper/src/fastmath.ves. The high word has 20 fraction bits.
+const F64_EXP_BIAS: i32 = 1023;
+const F64_MANT_BITS: u32 = 52;
+const F64_EXP_FIELD: u32 = 0x7ff;
+const LOW_WORD_MASK: u64 = 0xffff_ffff;
+const HIGH_MANT_BITS: u32 = 20;
+const HIGH_MANT_MASK: i32 = 0x000f_ffff;
+const HIGH_ABS_MASK: u32 = 0x7fff_ffff;
+const HIGH_ONE: i32 = 0x3ff0_0000;
+const HIGH_MIN_NORMAL: i32 = 0x0010_0000;
+/// `pow2` and the scaling at the ends of `exp`'s range: the least k scaled
+/// in one step, the k that overflows 2^k, and the split of a subnormal
+/// scale into two factors.
+const POW2_NORMAL_MIN: i32 = -1021;
+const POW2_OVERFLOW: i32 = 1024;
+const POW2_SUBNORMAL_SPLIT: i32 = 1000;
+/// 2^-28, below which `e^x = 1 + x` to within half an ULP.
+const EXP_TINY: f64 = 3.725_290_298_461_914e-9;
+/// fdlibm e_log.c: two54's exponent, the offset that picks k so that
+/// `x/2^k` is near sqrt(2), the thresholds of the t1/t2 split, and 1/3.
+const TWO54_EXP: i32 = 54;
+const LOG_SQRT2_ROUND: i32 = 0x95f64;
+const LOG_T1_SPLIT: i32 = 0x6147a;
+const LOG_T2_SPLIT: i32 = 0x6b851;
+const ONE_THIRD: f64 = 0.333_333_333_333_333_33;
+/// fdlibm e_rem_pio2.c: the exponent losses after which the next, longer
+/// split of pi/2 is used.
+const PIO2_2_LOSS: i32 = 16;
+const PIO2_3_LOSS: i32 = 49;
+/// pi/4 and 2^-27 (below which `sin x = x` and `cos x = 1`), as a double
+/// and as a high word.
+const PI_O_4: f64 = 0.785_398_163_397_448_3;
+const TWO_M27: f64 = 7.450_580_596_923_828e-9;
+const TWO_M27_HIGH: u32 = 0x3e40_0000;
+/// fdlibm s_atan.c: the high words of 2^66, 0.4375, 0.6875, 1.1875 and
+/// 2.4375 that pick the reduction.
+const ATAN_HUGE_HIGH: u32 = 0x4410_0000;
+const ATAN_SMALL_HIGH: u32 = 0x3fdc_0000;
+const ATAN_ID1_HIGH: u32 = 0x3fe6_0000;
+const ATAN_ID2_HIGH: u32 = 0x3ff3_0000;
+const ATAN_ID3_HIGH: u32 = 0x4003_8000;
+/// e_atan2.c: an exponent gap above which |y/x| is huge (or tiny).
+const ATAN2_EXP_GAP: i32 = 60;
+
+#[inline]
+fn high(x: f64) -> u32 {
+    (x.to_bits() >> 32) as u32
+}
+
+#[inline]
+fn with_high(x: f64, hi: u32) -> f64 {
+    f64::from_bits((u64::from(hi) << 32) | (x.to_bits() & LOW_WORD_MASK))
+}
+
+/// `2^k` for `-1022 <= k <= 1023`.
+#[inline]
+fn pow2(k: i32) -> f64 {
+    f64::from_bits(((k + F64_EXP_BIAS) as u64) << F64_MANT_BITS)
+}
+
+/// Round to the nearest integer, ties to even, for `|x| < 2^51`: the
+/// classic `x + 1.5·2^52 − 1.5·2^52`, two correctly rounded additions.
+#[inline]
+fn rint(x: f64) -> f64 {
+    const SHIFT: f64 = 6_755_399_441_055_744.0;
+    (x + SHIFT) - SHIFT
+}
+
+// ----- exp -----------------------------------------------------------------
+
+const LN2_HI: f64 = 6.93147180369123816490e-01;
+const LN2_LO: f64 = 1.90821492927058770002e-10;
+const INV_LN2: f64 = 1.44269504088896338700e+00;
+
+/// Rust build of [`crate::fastmath::exp`].
+pub(crate) fn exp(x: f64) -> f64 {
+    const P1: f64 = 1.66666666666666019037e-01;
+    const P2: f64 = -2.77777777770155933842e-03;
+    const P3: f64 = 6.61375632143793436117e-05;
+    const P4: f64 = -1.65339022054652515390e-06;
+    const P5: f64 = 4.13813679705723846039e-08;
+    const O_THRESHOLD: f64 = 7.09782712893383973096e+02;
+    const U_THRESHOLD: f64 = -7.45133219101941108420e+02;
+    if x.is_nan() {
+        return x + x;
+    }
+    if x > O_THRESHOLD {
+        return f64::INFINITY;
+    }
+    if x < U_THRESHOLD {
+        return 0.0;
+    }
+    let ax = x.abs();
+    if ax < EXP_TINY {
+        // |x| < 2^-28: e^x = 1 + x to within half an ULP.
+        return 1.0 + x;
+    }
+    let (hi, lo, k) = if ax <= 0.5 * LN2_HI {
+        (x, 0.0, 0i32)
+    } else {
+        let k = rint(x * INV_LN2);
+        // k·LN2_HI is exact: LN2_HI has 32 trailing zero bits and |k| < 2^11.
+        (x - k * LN2_HI, k * LN2_LO, k as i32)
+    };
+    let r = hi - lo;
+    let t = r * r;
+    let c = r - t * (P1 + t * (P2 + t * (P3 + t * (P4 + t * P5))));
+    let y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi);
+    if k == 0 {
+        y
+    } else if k >= POW2_NORMAL_MIN {
+        if k == POW2_OVERFLOW {
+            y * 2.0 * pow2(F64_EXP_BIAS)
+        } else {
+            y * pow2(k)
+        }
+    } else {
+        // Subnormal result: scale in two steps.
+        y * pow2(k + POW2_SUBNORMAL_SPLIT) * pow2(-POW2_SUBNORMAL_SPLIT)
+    }
+}
+
+// ----- log -----------------------------------------------------------------
+
+/// Rust build of [`crate::fastmath::log`].
+pub(crate) fn log(x: f64) -> f64 {
+    const TWO54: f64 = 1.80143985094819840000e+16;
+    const LG1: f64 = 6.666666666666735130e-01;
+    const LG2: f64 = 3.999999999940941908e-01;
+    const LG3: f64 = 2.857142874366239149e-01;
+    const LG4: f64 = 2.222219843214978396e-01;
+    const LG5: f64 = 1.818357216161805012e-01;
+    const LG6: f64 = 1.531383769920937332e-01;
+    const LG7: f64 = 1.479819860511658591e-01;
+    if x.is_nan() {
+        return x + x;
+    }
+    if x == 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if x < 0.0 {
+        return f64::NAN;
+    }
+    if x == f64::INFINITY {
+        return x;
+    }
+    let mut x = x;
+    let mut k: i32 = 0;
+    let mut hx = high(x) as i32;
+    if hx < HIGH_MIN_NORMAL {
+        // Subnormal: scale up by 2^54.
+        k -= TWO54_EXP;
+        x *= TWO54;
+        hx = high(x) as i32;
+    }
+    k += (hx >> HIGH_MANT_BITS) - F64_EXP_BIAS;
+    hx &= HIGH_MANT_MASK;
+    let i = (hx + LOG_SQRT2_ROUND) & HIGH_MIN_NORMAL;
+    // Normalise x or x/2 into [sqrt(2)/2, sqrt(2)).
+    x = with_high(x, (hx | (i ^ HIGH_ONE)) as u32);
+    k += i >> HIGH_MANT_BITS;
+    let f = x - 1.0;
+    let dk = f64::from(k);
+    if (HIGH_MANT_MASK & (2 + hx)) < 3 {
+        // -2^-20 <= f < 2^-20.
+        if f == 0.0 {
+            return if k == 0 {
+                0.0
+            } else {
+                dk * LN2_HI + dk * LN2_LO
+            };
+        }
+        let r = f * f * (0.5 - ONE_THIRD * f);
+        return if k == 0 {
+            f - r
+        } else {
+            dk * LN2_HI - ((r - dk * LN2_LO) - f)
+        };
+    }
+    let s = f / (2.0 + f);
+    let z = s * s;
+    let mut i = hx - LOG_T1_SPLIT;
+    let w = z * z;
+    let j = LOG_T2_SPLIT - hx;
+    let t1 = w * (LG2 + w * (LG4 + w * LG6));
+    let t2 = z * (LG1 + w * (LG3 + w * (LG5 + w * LG7)));
+    i |= j;
+    let r = t2 + t1;
+    if i > 0 {
+        let hfsq = 0.5 * f * f;
+        if k == 0 {
+            f - (hfsq - s * (hfsq + r))
+        } else {
+            dk * LN2_HI - ((hfsq - (s * (hfsq + r) + dk * LN2_LO)) - f)
+        }
+    } else if k == 0 {
+        f - s * (f - r)
+    } else {
+        dk * LN2_HI - ((s * (f - r) - dk * LN2_LO) - f)
+    }
+}
+
+// ----- sin, cos --------------------------------------------------------------
+
+/// fdlibm `__kernel_sin` on `[-π/4, π/4]`; `x + y` is the reduced argument.
+#[inline]
+fn k_sin(x: f64, y: f64, has_tail: bool) -> f64 {
+    const S1: f64 = -1.66666666666666324348e-01;
+    const S2: f64 = 8.33333333332248946124e-03;
+    const S3: f64 = -1.98412698298579493134e-04;
+    const S4: f64 = 2.75573137070700676789e-06;
+    const S5: f64 = -2.50507602534068634195e-08;
+    const S6: f64 = 1.58969099521155010221e-10;
+    let z = x * x;
+    let w = z * z;
+    let r = S2 + z * (S3 + z * S4) + z * w * (S5 + z * S6);
+    let v = z * x;
+    if !has_tail {
+        x + v * (S1 + z * r)
+    } else {
+        x - ((z * (0.5 * y - v * r) - y) - v * S1)
+    }
+}
+
+/// fdlibm `__kernel_cos` on `[-π/4, π/4]`.
+#[inline]
+fn k_cos(x: f64, y: f64) -> f64 {
+    const C1: f64 = 4.16666666666666019037e-02;
+    const C2: f64 = -1.38888888888741095749e-03;
+    const C3: f64 = 2.48015872894767294178e-05;
+    const C4: f64 = -2.75573143513906633035e-07;
+    const C5: f64 = 2.08757232129817482790e-09;
+    const C6: f64 = -1.13596475577881948265e-11;
+    let z = x * x;
+    let w = z * z;
+    let r = z * (C1 + z * (C2 + z * C3)) + w * w * (C4 + z * (C5 + z * C6));
+    let hz = 0.5 * z;
+    let w = 1.0 - hz;
+    w + (((1.0 - w) - hz) + (z * r - x * y))
+}
+
+/// Cody–Waite reduction `x = n·π/2 + (y0 + y1)` for `|x| < 2^20·π/2`
+/// (fdlibm's "medium" `__ieee754_rem_pio2`, three-part π/2).
+fn rem_pio2_medium(x: f64) -> (i32, f64, f64) {
+    const INV_PIO2: f64 = 6.36619772367581382433e-01;
+    const PIO2_1: f64 = 1.57079632673412561417e+00;
+    const PIO2_1T: f64 = 6.07710050650619224932e-11;
+    const PIO2_2: f64 = 6.07710050630396597660e-11;
+    const PIO2_2T: f64 = 2.02226624879595063154e-21;
+    const PIO2_3: f64 = 2.02226624871116645580e-21;
+    const PIO2_3T: f64 = 8.47842766036889956997e-32;
+    let fnum = rint(x * INV_PIO2);
+    let n = fnum as i32;
+    let mut r = x - fnum * PIO2_1;
+    let mut w = fnum * PIO2_1T;
+    let j = ((high(x) >> HIGH_MANT_BITS) & F64_EXP_FIELD) as i32;
+    let mut y0 = r - w;
+    let exp_of = |v: f64| ((high(v) >> HIGH_MANT_BITS) & F64_EXP_FIELD) as i32;
+    if j - exp_of(y0) > PIO2_2_LOSS {
+        // Second iteration, good to 118 bits.
+        let t = r;
+        w = fnum * PIO2_2;
+        r = t - w;
+        w = fnum * PIO2_2T - ((t - r) - w);
+        y0 = r - w;
+        if j - exp_of(y0) > PIO2_3_LOSS {
+            // Third iteration, 151 bits.
+            let t = r;
+            w = fnum * PIO2_3;
+            r = t - w;
+            w = fnum * PIO2_3T - ((t - r) - w);
+            y0 = r - w;
+        }
+    }
+    let y1 = (r - y0) - w;
+    (n, y0, y1)
+}
+
+/// `|x|` below which the fast reduction is used (`2^20·π/2`).
+const MEDIUM_LIMIT: f64 = 1_647_099.0;
+
+/// Rust build of [`crate::fastmath::sin`].
+pub(crate) fn sin(x: f64) -> f64 {
+    if !x.is_finite() {
+        // NaN for ±∞, the input's own NaN otherwise (as fdlibm does).
+        #[allow(clippy::eq_op)]
+        return x - x;
+    }
+    let ax = x.abs();
+    if ax <= PI_O_4 {
+        if ax < TWO_M27 {
+            // |x| < 2^-27: sin x = x to within half an ULP.
+            return x;
+        }
+        return k_sin(x, 0.0, false);
+    }
+    if ax >= MEDIUM_LIMIT {
+        return crmath::sin(x);
+    }
+    let (n, y0, y1) = rem_pio2_medium(x);
+    match n & 3 {
+        0 => k_sin(y0, y1, true),
+        1 => k_cos(y0, y1),
+        2 => -k_sin(y0, y1, true),
+        _ => -k_cos(y0, y1),
+    }
+}
+
+/// Rust build of [`crate::fastmath::cos`].
+pub(crate) fn cos(x: f64) -> f64 {
+    if !x.is_finite() {
+        // NaN for ±∞, the input's own NaN otherwise (as fdlibm does).
+        #[allow(clippy::eq_op)]
+        return x - x;
+    }
+    let ax = x.abs();
+    if ax <= PI_O_4 {
+        if ax < TWO_M27 {
+            return 1.0;
+        }
+        return k_cos(x, 0.0);
+    }
+    if ax >= MEDIUM_LIMIT {
+        return crmath::cos(x);
+    }
+    let (n, y0, y1) = rem_pio2_medium(x);
+    match n & 3 {
+        0 => k_cos(y0, y1),
+        1 => -k_sin(y0, y1, true),
+        2 => -k_cos(y0, y1),
+        _ => k_sin(y0, y1, true),
+    }
+}
+
+// ----- atan, atan2 -------------------------------------------------------------
+
+const ATAN_HI: [f64; 4] = [
+    4.63647609000806093515e-01,
+    7.85398163397448278999e-01,
+    9.82793723247329054082e-01,
+    1.57079632679489655800e+00,
+];
+const ATAN_LO: [f64; 4] = [
+    2.26987774529616870924e-17,
+    3.06161699786838301793e-17,
+    1.39033110312309984516e-17,
+    6.12323399573676603587e-17,
+];
+const AT: [f64; 11] = [
+    3.33333333333329318027e-01,
+    -1.99999999998764832476e-01,
+    1.42857142725034663711e-01,
+    -1.11111104054623557880e-01,
+    9.09088713343650656196e-02,
+    -7.69187620504482999495e-02,
+    6.66107313738753120669e-02,
+    -5.83357013379057348645e-02,
+    4.97687799461593236017e-02,
+    -3.65315727442169155270e-02,
+    1.62858201153657823623e-02,
+];
+
+/// fdlibm `atan` (binary64).
+fn atan(x: f64) -> f64 {
+    let hx = high(x);
+    let ix = hx & HIGH_ABS_MASK;
+    let negative = hx >> 31 == 1;
+    if ix >= ATAN_HUGE_HIGH {
+        // |x| >= 2^66.
+        if x.is_nan() {
+            return x + x;
+        }
+        let z = ATAN_HI[3] + ATAN_LO[3];
+        return if negative { -z } else { z };
+    }
+    let (id, x) = if ix < ATAN_SMALL_HIGH {
+        // |x| < 0.4375.
+        if ix < TWO_M27_HIGH {
+            // |x| < 2^-27.
+            return x;
+        }
+        (None, x)
+    } else {
+        let x = x.abs();
+        if ix < ATAN_ID2_HIGH {
+            if ix < ATAN_ID1_HIGH {
+                (Some(0), (2.0 * x - 1.0) / (2.0 + x))
+            } else {
+                (Some(1), (x - 1.0) / (x + 1.0))
+            }
+        } else if ix < ATAN_ID3_HIGH {
+            (Some(2), (x - 1.5) / (1.0 + 1.5 * x))
+        } else {
+            (Some(3), -1.0 / x)
+        }
+    };
+    let z = x * x;
+    let w = z * z;
+    let s1 = z * (AT[0] + w * (AT[2] + w * (AT[4] + w * (AT[6] + w * (AT[8] + w * AT[10])))));
+    let s2 = w * (AT[1] + w * (AT[3] + w * (AT[5] + w * (AT[7] + w * AT[9]))));
+    match id {
+        None => x - x * (s1 + s2),
+        Some(id) => {
+            let z = ATAN_HI[id] - ((x * (s1 + s2) - ATAN_LO[id]) - x);
+            if negative { -z } else { z }
+        }
+    }
+}
+
+/// Rust build of [`crate::fastmath::atan2`].
+pub(crate) fn atan2(y: f64, x: f64) -> f64 {
+    const PI_O_4: f64 = 7.8539816339744827900e-01;
+    const PI_O_2: f64 = 1.57079632679489655800e+00;
+    const PI: f64 = 3.14159265358979311600e+00;
+    const PI_LO: f64 = 1.2246467991473531772e-16;
+    if x.is_nan() || y.is_nan() {
+        return x + y;
+    }
+    if x == 1.0 {
+        return atan(y);
+    }
+    let y_neg = y.is_sign_negative();
+    let x_neg = x.is_sign_negative();
+    let m = u8::from(y_neg) | (u8::from(x_neg) << 1);
+    if y == 0.0 {
+        return match m {
+            0 | 1 => y,
+            2 => PI,
+            _ => -PI,
+        };
+    }
+    if x == 0.0 {
+        return if y_neg { -PI_O_2 } else { PI_O_2 };
+    }
+    if x.is_infinite() {
+        return if y.is_infinite() {
+            match m {
+                0 => PI_O_4,
+                1 => -PI_O_4,
+                2 => 3.0 * PI_O_4,
+                _ => -3.0 * PI_O_4,
+            }
+        } else {
+            match m {
+                0 => 0.0,
+                1 => -0.0,
+                2 => PI,
+                _ => -PI,
+            }
+        };
+    }
+    if y.is_infinite() {
+        return if y_neg { -PI_O_2 } else { PI_O_2 };
+    }
+    let k = ((high(y) & HIGH_ABS_MASK) as i32 - (high(x) & HIGH_ABS_MASK) as i32) >> HIGH_MANT_BITS;
+    let (z, m) = if k > ATAN2_EXP_GAP {
+        // |y/x| > 2^60.
+        (PI_O_2 + 0.5 * PI_LO, m & 1)
+    } else if x_neg && k < -ATAN2_EXP_GAP {
+        // |y|/x < -2^-60.
+        (0.0, m)
+    } else {
+        (atan((y / x).abs()), m)
+    };
+    match m {
+        0 => z,
+        1 => -z,
+        2 => PI - (z - PI_LO),
+        _ => (z - PI_LO) - PI,
+    }
+}

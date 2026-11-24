@@ -105,8 +105,11 @@ uint32_t vcl_insertlane(vcl_builder *b, uint32_t x, uint32_t y, uint32_t lane);
 uint32_t vcl_vconst(vcl_builder *b, uint32_t ty_code, const uint8_t *bytes, size_t len);
 uint32_t vcl_shuffle(vcl_builder *b, uint32_t x, uint32_t y, const uint8_t *mask, size_t len);
 uint32_t vcl_atomic_rmw(vcl_builder *b, uint32_t op, uint32_t ty_code, uint32_t fl, uint32_t addr, uint32_t x);
+uint32_t vcl_atomic_cas(vcl_builder *b, uint32_t fl, uint32_t addr, uint32_t expected, uint32_t replacement);
 uint32_t vcl_atomic_load(vcl_builder *b, uint32_t ty_code, uint32_t fl, uint32_t addr);
 void vcl_atomic_store(vcl_builder *b, uint32_t fl, uint32_t x, uint32_t addr);
+uint32_t vcl_isplit(vcl_builder *b, uint32_t x);
+uint32_t vcl_iconcat(vcl_builder *b, uint32_t lo, uint32_t hi);
 uint32_t vcl_func_addr(vcl_builder *b, uint32_t ty_code, uint32_t fref);
 uint32_t vcl_symbol_value(vcl_builder *b, uint32_t ty_code, uint32_t gv);
 uint32_t vcl_global_value(vcl_builder *b, uint32_t ty_code, uint32_t gv);
@@ -189,6 +192,14 @@ uint64_t vcl_module_last_relocs(const vcl_module *m, uint64_t *out, size_t out_l
 /* Two words per call site: return offset, frame offset (UINT64_MAX: none). */
 uint64_t vcl_module_last_call_sites(const vcl_module *m, uint64_t *out, size_t out_len);
 uint64_t vcl_module_last_frame_size(const vcl_module *m);
+
+/* Sequence emission (SH4 lane 9, part 2b). Architectures: 0 other,
+   1 x86-64, 2 AArch64, 3 RISC-V 64. */
+uint32_t vcl_declare_anonymous_data(vcl_module *m, bool writable, bool tls);
+void vcl_call_memset(vcl_builder *b, const vcl_module *m, uint32_t dst, uint32_t val, uint32_t count);
+void vcl_call_memmove(vcl_builder *b, const vcl_module *m, uint32_t dst, uint32_t src, uint32_t count);
+uint32_t vcl_isa_triple_arch(const vcl_module *m);
+uint32_t vcl_has_x86_pshufb_lowering(const vcl_module *m);
 
 #ifdef __cplusplus
 }

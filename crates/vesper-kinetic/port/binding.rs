@@ -100,30 +100,6 @@ impl Abi for crate::port::LbvhError {
     }
 }
 
-impl Abi for crate::port::MortonError {
-    const WORDS: usize = 3;
-    fn put(&self, out: &mut [u64]) {
-        match self {
-            crate::port::MortonError::AxisOutOfRange { axis: f0, value: f1 } => {
-                out[0] = 0;
-                Abi::put(f0, &mut out[1..]);
-                Abi::put(f1, &mut out[2..]);
-            }
-            crate::port::MortonError::CodeOutOfRange(f0) => {
-                out[0] = 1;
-                Abi::put(f0, &mut out[1..]);
-            }
-        }
-    }
-    fn get(words: &[u64]) -> Self {
-        match words[0] {
-            0 => crate::port::MortonError::AxisOutOfRange { axis: Abi::get(&words[1..]), value: Abi::get(&words[2..]) },
-            1 => crate::port::MortonError::CodeOutOfRange(Abi::get(&words[1..])),
-            tag => panic!("invalid MortonError tag {tag} from Vesper"),
-        }
-    }
-}
-
 impl Abi for crate::port::SapError {
     const WORDS: usize = 3;
     fn put(&self, out: &mut [u64]) {
@@ -154,11 +130,9 @@ impl Abi for crate::port::SapError {
 }
 
 const _: () = assert!(<() as Abi>::WORDS == 1);
-const _: () = assert!(<(u16, u16, u16) as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port::ColoringError as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port::GjkError as Abi>::WORDS == 1);
 const _: () = assert!(<crate::port::LbvhError as Abi>::WORDS == 3);
-const _: () = assert!(<crate::port::MortonError as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port::SapError as Abi>::WORDS == 3);
 const _: () = assert!(<f64 as Abi>::WORDS == 1);
 const _: () = assert!(<u32 as Abi>::WORDS == 1);
@@ -196,10 +170,10 @@ unsafe extern "C" {
     fn vesper_kinetic_lbvh_pairs(codes: *mut u64, prims: *mut u64, leaf: *mut u64, left: *mut u64, right: *mut u64, node_box: *mut u64, stack: *mut u64, out: *mut u64, tk: *mut u64, novals: *mut u64, tv: *mut u64, hist: *mut u64, max_pairs: i64) -> i64;
     fn vesper_kinetic_lbvh_spread21(v: i64) -> i64;
     fn vesper_kinetic_morton_compact(v: i64) -> i64;
-    fn vesper_kinetic_morton_decode(result: *mut u64, code: i64, fail: *mut u64) -> i64;
-    fn vesper_kinetic_morton_decode_masked(result: *mut u64, code: i64) -> i64;
-    fn vesper_kinetic_morton_encode(x: i64, y: i64, z: i64, fail: *mut u64) -> i64;
+    fn vesper_kinetic_morton_decode_masked_packed(code: i64) -> i64;
+    fn vesper_kinetic_morton_decode_packed(code: i64) -> i64;
     fn vesper_kinetic_morton_encode_masked(x: i64, y: i64, z: i64) -> i64;
+    fn vesper_kinetic_morton_encode_packed(x: i64, y: i64, z: i64) -> i64;
     fn vesper_kinetic_morton_spread(v: i64) -> i64;
     fn vesper_kinetic_multi_colorer_color(bodies: *mut u64, offs: *mut u64, capacity: i64, masks: *mut u64, keys: *mut u64, order: *mut u64, colors: *mut u64, offsets: *mut u64, sorted: *mut u64, fail: *mut u64) -> i64;
     fn vesper_kinetic_sap_build(boxes: *mut u64, keys: *mut u64, order: *mut u64, smin: *mut u64, smax: *mut u64, tk: *mut u64, tv: *mut u64, hist: *mut u64, fail: *mut u64) -> i64;
@@ -487,43 +461,22 @@ pub fn morton_compact(v: u32) -> u32 {
     raw as u32
 }
 
-/// Calls `morton_decode` of the Vesper library `kinetic` (`vesper_kinetic_morton_decode`).
-pub fn morton_decode(code: u32) -> Result<(u16, u16, u16), crate::port::MortonError> {
-    let mut result = [0u64; 3];
-    let mut fail = [0u64; 4];
-    // SAFETY: `vesper_kinetic_morton_decode` has exactly this signature in the export ABI; every
+/// Calls `morton_decode_masked_packed` of the Vesper library `kinetic` (`vesper_kinetic_morton_decode_masked_packed`).
+pub fn morton_decode_masked_packed(code: u32) -> u32 {
+    // SAFETY: `vesper_kinetic_morton_decode_masked_packed` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_kinetic_morton_decode(result.as_mut_ptr(), code as i64, fail.as_mut_ptr()) };
-    match fail[0] {
-        0 => Ok(<(u16, u16, u16) as Abi>::get(&result[0..])),
-        1 => Err(<crate::port::MortonError as Abi>::get(&fail[1..])),
-        status => panic!("invalid failure status {status} from vesper_kinetic_morton_decode"),
-    }
+    let raw = unsafe { vesper_kinetic_morton_decode_masked_packed(code as i64) };
+    raw as u32
 }
 
-/// Calls `morton_decode_masked` of the Vesper library `kinetic` (`vesper_kinetic_morton_decode_masked`).
-pub fn morton_decode_masked(code: u32) -> (u16, u16, u16) {
-    let mut result = [0u64; 3];
-    // SAFETY: `vesper_kinetic_morton_decode_masked` has exactly this signature in the export ABI; every
+/// Calls `morton_decode_packed` of the Vesper library `kinetic` (`vesper_kinetic_morton_decode_packed`).
+pub fn morton_decode_packed(code: u32) -> u64 {
+    // SAFETY: `vesper_kinetic_morton_decode_packed` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_kinetic_morton_decode_masked(result.as_mut_ptr(), code as i64) };
-    <(u16, u16, u16) as Abi>::get(&result[0..])
-}
-
-/// Calls `morton_encode` of the Vesper library `kinetic` (`vesper_kinetic_morton_encode`).
-pub fn morton_encode(x: u16, y: u16, z: u16) -> Result<u32, crate::port::MortonError> {
-    let mut fail = [0u64; 4];
-    // SAFETY: `vesper_kinetic_morton_encode` has exactly this signature in the export ABI; every
-    // pointer is a live, writable buffer of the size the ABI requires, and
-    // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_kinetic_morton_encode(x as i64, y as i64, z as i64, fail.as_mut_ptr()) };
-    match fail[0] {
-        0 => Ok(raw as u32),
-        1 => Err(<crate::port::MortonError as Abi>::get(&fail[1..])),
-        status => panic!("invalid failure status {status} from vesper_kinetic_morton_encode"),
-    }
+    let raw = unsafe { vesper_kinetic_morton_decode_packed(code as i64) };
+    raw as u64
 }
 
 /// Calls `morton_encode_masked` of the Vesper library `kinetic` (`vesper_kinetic_morton_encode_masked`).
@@ -533,6 +486,15 @@ pub fn morton_encode_masked(x: u16, y: u16, z: u16) -> u32 {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_kinetic_morton_encode_masked(x as i64, y as i64, z as i64) };
     raw as u32
+}
+
+/// Calls `morton_encode_packed` of the Vesper library `kinetic` (`vesper_kinetic_morton_encode_packed`).
+pub fn morton_encode_packed(x: u16, y: u16, z: u16) -> u64 {
+    // SAFETY: `vesper_kinetic_morton_encode_packed` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_kinetic_morton_encode_packed(x as i64, y as i64, z as i64) };
+    raw as u64
 }
 
 /// Calls `morton_spread` of the Vesper library `kinetic` (`vesper_kinetic_morton_spread`).

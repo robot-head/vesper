@@ -41,54 +41,16 @@ pub enum MapKind {
 }
 
 impl MapKind {
-    #[cfg(vesper_port)]
     pub fn kernel_type(self) -> u32 {
         crate::port::ffi::program_map_kernel_type(self)
     }
 
-    #[cfg(not(vesper_port))]
-    pub fn kernel_type(self) -> u32 {
-        match self {
-            MapKind::Hash => BPF_MAP_TYPE_HASH,
-            MapKind::Array => BPF_MAP_TYPE_ARRAY,
-            MapKind::PerCpuHash => BPF_MAP_TYPE_PERCPU_HASH,
-            MapKind::PerCpuArray => BPF_MAP_TYPE_PERCPU_ARRAY,
-            MapKind::LruHash => BPF_MAP_TYPE_LRU_HASH,
-            MapKind::RingBuf => BPF_MAP_TYPE_RINGBUF,
-            MapKind::ProgArray => BPF_MAP_TYPE_PROG_ARRAY,
-        }
-    }
-
-    #[cfg(vesper_port)]
     pub fn from_kernel_type(t: u32) -> Option<MapKind> {
         crate::port::ffi::program_map_from_kernel_type(t)
     }
 
-    #[cfg(not(vesper_port))]
-    pub fn from_kernel_type(t: u32) -> Option<MapKind> {
-        Some(match t {
-            BPF_MAP_TYPE_HASH => MapKind::Hash,
-            BPF_MAP_TYPE_ARRAY => MapKind::Array,
-            BPF_MAP_TYPE_PERCPU_HASH => MapKind::PerCpuHash,
-            BPF_MAP_TYPE_PERCPU_ARRAY => MapKind::PerCpuArray,
-            BPF_MAP_TYPE_LRU_HASH => MapKind::LruHash,
-            BPF_MAP_TYPE_RINGBUF => MapKind::RingBuf,
-            BPF_MAP_TYPE_PROG_ARRAY => MapKind::ProgArray,
-            _ => return None,
-        })
-    }
-
-    #[cfg(vesper_port)]
     pub fn is_array(self) -> bool {
         crate::port::ffi::program_map_is_array(self)
-    }
-
-    #[cfg(not(vesper_port))]
-    pub fn is_array(self) -> bool {
-        matches!(
-            self,
-            MapKind::Array | MapKind::PerCpuArray | MapKind::ProgArray
-        )
     }
 }
 
@@ -133,48 +95,8 @@ impl MapDef {
     }
 
     /// Kernel `map_alloc_check` rules for the supported kinds.
-    #[cfg(vesper_port)]
     pub fn validate(&self) -> Result<(), String> {
         crate::port::map_validate(self)
-    }
-
-    #[cfg(not(vesper_port))]
-    pub fn validate(&self) -> Result<(), String> {
-        if self.name.is_empty() || self.name.len() >= BPF_OBJ_NAME_LEN || !self.name.is_ascii() {
-            return Err(format!(
-                "map name {:?} must be 1..=15 ASCII bytes",
-                self.name
-            ));
-        }
-        match self.kind {
-            MapKind::RingBuf => {
-                if self.key_size != 0 || self.value_size != 0 {
-                    return Err("ringbuf key and value size must be 0".into());
-                }
-                let n = self.max_entries;
-                if n < RINGBUF_MIN_SIZE || !n.is_power_of_two() {
-                    return Err("ringbuf size must be a power of two >= 4096".into());
-                }
-            }
-            k => {
-                if self.max_entries == 0 || self.value_size == 0 {
-                    return Err("max_entries and value_size must be nonzero".into());
-                }
-                if k.is_array() && self.key_size != 4 {
-                    return Err("array maps have 4-byte keys".into());
-                }
-                if k == MapKind::ProgArray && self.value_size != 4 {
-                    return Err("program arrays have 4-byte values".into());
-                }
-                if self.key_size == 0 || self.key_size > MAX_BPF_STACK {
-                    return Err("key size must be 1..=512".into());
-                }
-                if self.value_size > MAX_VALUE_SIZE {
-                    return Err("value size too large".into());
-                }
-            }
-        }
-        Ok(())
     }
 }
 
@@ -201,41 +123,18 @@ impl ProgramType {
         ProgramType::Kprobe,
     ];
 
-    #[cfg(vesper_port)]
     pub fn kernel_type(self) -> u32 {
         crate::port::ffi::program_prog_kernel_type(self)
     }
 
-    #[cfg(not(vesper_port))]
-    pub fn kernel_type(self) -> u32 {
-        match self {
-            ProgramType::Xdp => 6,
-            ProgramType::SchedCls => 3,
-            ProgramType::Tracepoint => 5,
-            ProgramType::Kprobe => 2,
-        }
-    }
-
-    #[cfg(vesper_port)]
     pub fn from_kernel_type(t: u32) -> Option<ProgramType> {
         crate::port::ffi::program_prog_from_kernel_type(t)
     }
 
-    #[cfg(not(vesper_port))]
-    pub fn from_kernel_type(t: u32) -> Option<ProgramType> {
-        ProgramType::ALL.into_iter().find(|p| p.kernel_type() == t)
-    }
-
     /// Whether the program reads and writes packet bytes directly
     /// (`data`/`data_end` in its context).
-    #[cfg(vesper_port)]
     pub fn has_packet(self) -> bool {
         crate::port::ffi::program_has_packet(self)
-    }
-
-    #[cfg(not(vesper_port))]
-    pub fn has_packet(self) -> bool {
-        matches!(self, ProgramType::Xdp | ProgramType::SchedCls)
     }
 
     /// Whether `BPF_PROG_TEST_RUN` can execute the program type.
@@ -245,14 +144,8 @@ impl ProgramType {
 
     /// Tracing programs (kprobe, tracepoint) run in process context with
     /// the tracing helper set.
-    #[cfg(vesper_port)]
     pub fn is_tracing(self) -> bool {
         crate::port::ffi::program_is_tracing(self)
-    }
-
-    #[cfg(not(vesper_port))]
-    pub fn is_tracing(self) -> bool {
-        matches!(self, ProgramType::Tracepoint | ProgramType::Kprobe)
     }
 }
 

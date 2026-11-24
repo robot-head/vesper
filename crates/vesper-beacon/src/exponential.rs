@@ -27,15 +27,15 @@ pub const EXP_HISTOGRAM_MIN_SCALE: i32 = -10;
 
 /// The port build keeps the same counts array and the scalars in the port's
 /// `ExpState` mirror (the sum as two words); Vesper updates them in place.
-#[cfg(vesper_port)]
+#[cfg(feature = "vesper-port")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExponentialHistogram {
     counts: [u64; EXP_HISTOGRAM_BUCKETS],
     state: crate::port::repr::ExpState,
 }
-#[cfg(vesper_port)]
+#[cfg(feature = "vesper-port")]
 impl Eq for ExponentialHistogram {}
-#[cfg(vesper_port)]
+#[cfg(feature = "vesper-port")]
 impl Default for ExponentialHistogram {
     fn default() -> Self {
         use vesper_port_abi::Word;
@@ -57,14 +57,14 @@ impl Default for ExponentialHistogram {
 }
 
 /// Bucket index of `v >= 1` at `scale`.
-#[cfg(vesper_port)]
+#[cfg(feature = "vesper-port")]
 pub fn exp_bucket_index(v: u64, scale: i32) -> i32 {
     debug_assert!(v >= 1);
     debug_assert!((EXP_HISTOGRAM_MIN_SCALE..=EXP_HISTOGRAM_MAX_SCALE).contains(&scale));
     crate::port::no_overflow(crate::port::exp_bucket_index(v, scale))
 }
 
-#[cfg(vesper_port)]
+#[cfg(feature = "vesper-port")]
 impl ExponentialHistogram {
     pub const FOOTPRINT_BYTES: usize = core::mem::size_of::<Self>();
     pub fn scale(&self) -> i32 {
@@ -103,7 +103,7 @@ impl ExponentialHistogram {
     }
 }
 
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExponentialHistogram {
     scale: i32,
@@ -117,7 +117,7 @@ pub struct ExponentialHistogram {
     min: u64,
     max: u64,
 }
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 impl Default for ExponentialHistogram {
     fn default() -> Self {
         Self {
@@ -136,7 +136,7 @@ impl Default for ExponentialHistogram {
 
 /// `floor(2^scale * log2(v))` for `v >= 1` and `0 < scale <= 20`, by the
 /// binary logarithm squaring method on a Q1.63 mantissa.
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 fn log2_fixed(v: u64, scale: i32) -> i64 {
     let k = 63 - v.leading_zeros() as i64;
     let mut x = u128::from(v) << (63 - k);
@@ -153,7 +153,7 @@ fn log2_fixed(v: u64, scale: i32) -> i64 {
 }
 
 /// Bucket index of `v >= 1` at `scale`.
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 pub fn exp_bucket_index(v: u64, scale: i32) -> i32 {
     debug_assert!(v >= 1);
     debug_assert!((EXP_HISTOGRAM_MIN_SCALE..=EXP_HISTOGRAM_MAX_SCALE).contains(&scale));
@@ -171,7 +171,7 @@ pub fn exp_bucket_index(v: u64, scale: i32) -> i32 {
     log2_fixed(v, scale) as i32
 }
 
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 impl ExponentialHistogram {
     pub const FOOTPRINT_BYTES: usize = core::mem::size_of::<Self>();
     pub fn scale(&self) -> i32 {
