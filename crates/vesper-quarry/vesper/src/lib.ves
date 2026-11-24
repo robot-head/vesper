@@ -48,6 +48,10 @@ use self::entry::{
     execute_q,
     set_rows_q
 };
+use self::internal::{
+    check as internal_check_impl,
+    route as internal_route_impl
+};
 use self::paths::{
     access_paths_q
 };
@@ -321,4 +325,12 @@ pub fn wal_decode(in payload: Slice[u8], inout meta: Slice[u64]) -> u64 {
 
 pub fn wal_decode_header(in h: Slice[u8], inout out: Slice[u64]) -> u64 {
     wal_decode_header_impl(in h, inout out)
+}
+
+pub fn internal_route(in b: Slice[u8], rowid: u64, inv_ts: u64) -> u64 {
+    internal_route_impl(in b, rowid, inv_ts)
+}
+
+pub fn internal_check(in b: Slice[u8]) -> u64 {
+    internal_check_impl(in b)
 }

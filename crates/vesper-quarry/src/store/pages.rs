@@ -475,17 +475,7 @@ pub(crate) fn internal_key(b: &[u8], i: usize) -> Key {
 }
 /// Child index whose subtree holds `key`: the number of separators <= key.
 pub(crate) fn route(b: &[u8], key: Key) -> usize {
-    let n = count(b);
-    let (mut lo, mut hi) = (0, n);
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        if internal_key(b, mid) <= key {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    lo
+    crate::port::binding::internal_route(b, key.rowid, key.inv_ts) as usize
 }
 pub(crate) fn internal_build(b: &mut [u8], id: u64, lvl: u8, children: &[u64], keys: &[Key]) {
     debug_assert_eq!(children.len(), keys.len() + 1);
@@ -535,26 +525,13 @@ pub(crate) fn internal_remove(b: &mut [u8], i: usize) {
     set_count(b, n - 1);
 }
 fn check_internal(b: &[u8]) -> StoreResult<()> {
-    let n = count(b);
-    if level(b) == 0 || n > INTERNAL_CAP {
-        return Err(corrupt("internal node header"));
+    match crate::port::binding::internal_check(b) {
+        0 => Ok(()),
+        1 => Err(corrupt("internal node header")),
+        2 => Err(corrupt("internal keys out of order")),
+        3 => Err(corrupt("internal child names a fixed page")),
+        _ => Err(corrupt("internal node padding")),
     }
-    for i in 1..n {
-        if internal_key(b, i - 1) >= internal_key(b, i) {
-            return Err(corrupt("internal keys out of order"));
-        }
-    }
-    for i in 0..=n {
-        if child(b, i) <= FSM_PAGE {
-            return Err(corrupt("internal child names a fixed page"));
-        }
-    }
-    let tail_zero = b[CHILD_OFF + 4 * (n + 1)..KEY_OFF].iter().all(|&x| x == 0)
-        && b[KEY_OFF + 16 * n..].iter().all(|&x| x == 0);
-    if !tail_zero || b[26..32].iter().any(|&x| x != 0) || rd16(b, 22) != 0 {
-        return Err(corrupt("internal node padding"));
-    }
-    Ok(())
 }
 
 // ---- PAX leaves ----------------------------------------------------------

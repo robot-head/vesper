@@ -52,4 +52,7 @@ const DIVERGENT: &[(&str, &str)] = &[
     // wal.rs (vesper/src/wal.ves): valid WAL headers are rejected;
     // durable committed_changes_survive_reopen_and_aborts_roll_back fails.
     ("if seq == 0 || base == 0 {", "if true {"),
+    // store/pages.rs (vesper/src/internal.ves): B+Tree internal route always goes left;
+    // store_ssi threads_keep_an_invariant_that_write_skew_breaks fails.
+    ("if key_le(kr, kt, rowid, inv_ts) {", "if false {"),
 ];

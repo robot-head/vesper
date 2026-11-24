@@ -99,6 +99,15 @@ fn divergent_wal_fails_reopen_recovery_test() {
 }
 
 #[test]
+fn divergent_internal_fails_store_ssi_test() {
+    run(
+        "VESPER_QUARRY_DIVERGENT_INTERNAL",
+        &["threads_keep_an_invariant_that_write_skew_breaks"],
+        "read_only_anomaly_is_rejected",
+    );
+}
+
+#[test]
 fn committed_binding_is_current() {
     let Some(generated) = std::env::var_os("VESPER_QUARRY_BINDING") else {
         return;

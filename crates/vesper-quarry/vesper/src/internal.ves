@@ -1,0 +1,227 @@
+// @vesper/quarry::internal: B+Tree internal node routing, mutation, and validation (`src/store/pages.rs`).
+
+const PAGE_SIZE: u64 = 16384;
+const FSM_PAGE: u64 = 1;
+const INTERNAL_CAP: u64 = 817;
+// (PAGE_SIZE - 32 - 4) / 20
+const CHILD_OFF: u64 = 32;
+const KEY_OFF: u64 = 3304;
+// 32 + 4 * (INTERNAL_CAP + 1)
+
+fn get_u8(in b: Slice[u8], idx: u64) -> u64 {
+    match b.try_get(idx) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn set_u8(inout b: Slice[u8], idx: u64, v: u64) {
+    b.try_set(idx, wrapping_u8(v & 255));
+}
+
+fn rd16(in b: Slice[u8], off: u64) -> u64 {
+    get_u8(in b, off) | (get_u8(in b, wrapping_add(off, 1)) << 8)
+}
+
+fn rd32(in b: Slice[u8], off: u64) -> u64 {
+    get_u8(in b, off) | (get_u8(in b, wrapping_add(off, 1)) << 8) | (
+        get_u8(in b, wrapping_add(off, 2)) << 16
+    ) | (get_u8(in b, wrapping_add(off, 3)) << 24)
+}
+
+fn rd64(in b: Slice[u8], off: u64) -> u64 {
+    match b.try_read_u64_le(off) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn wr16(inout b: Slice[u8], off: u64, v: u64) {
+    set_u8(inout b, off, v & 255);
+    set_u8(inout b, wrapping_add(off, 1), (v >> 8) & 255);
+}
+
+fn wr32(inout b: Slice[u8], off: u64, v: u64) {
+    set_u8(inout b, off, v & 255);
+    set_u8(inout b, wrapping_add(off, 1), (v >> 8) & 255);
+    set_u8(inout b, wrapping_add(off, 2), (v >> 16) & 255);
+    set_u8(inout b, wrapping_add(off, 3), (v >> 24) & 255);
+}
+
+fn wr64(inout b: Slice[u8], off: u64, v: u64) {
+    wr32(inout b, off, v & 4294967295);
+    wr32(inout b, wrapping_add(off, 4), (v >> 32) & 4294967295);
+}
+
+fn key_le(a_r: u64, a_t: u64, b_r: u64, b_t: u64) -> bool {
+    a_r < b_r || (a_r == b_r && a_t <= b_t)
+}
+
+fn key_ge(a_r: u64, a_t: u64, b_r: u64, b_t: u64) -> bool {
+    a_r > b_r || (a_r == b_r && a_t >= b_t)
+}
+
+fn all_zero(in b: Slice[u8], start: u64, end: u64) -> bool {
+    let mut i: u64 = start;
+    loop {
+        if wrapping_add(i, 8) > end {
+            break;
+        }
+        if rd64(in b, i) != 0 {
+            return false;
+        }
+        i = wrapping_add(i, 8);
+    }
+    loop {
+        if i >= end {
+            break;
+        }
+        if get_u8(in b, i) != 0 {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+fn zero_range(inout b: Slice[u8], start: u64, end: u64) {
+    let mut i: u64 = start;
+    loop {
+        if i >= end {
+            break;
+        }
+        set_u8(inout b, i, 0);
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn move_right(inout b: Slice[u8], src_start: u64, src_end: u64, dst_start: u64) {
+    let len = wrapping_sub(src_end, src_start);
+    let mut i: u64 = len;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        set_u8(inout b, wrapping_add(dst_start, i), get_u8(in b, wrapping_add(src_start, i)));
+    }
+}
+
+fn move_left(inout b: Slice[u8], src_start: u64, src_end: u64, dst_start: u64) {
+    let len = wrapping_sub(src_end, src_start);
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        set_u8(inout b, wrapping_add(dst_start, i), get_u8(in b, wrapping_add(src_start, i)));
+        i = wrapping_add(i, 1);
+    }
+}
+
+pub fn route(in b: Slice[u8], rowid: u64, inv_ts: u64) -> u64 {
+    let n = rd16(in b, 20);
+    let mut lo: u64 = 0;
+    let mut hi: u64 = n;
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        let koff = wrapping_add(KEY_OFF, mid << 4);
+        let kr = rd64(in b, koff);
+        let kt = rd64(in b, wrapping_add(koff, 8));
+        if key_le(kr, kt, rowid, inv_ts) {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+pub fn insert(inout b: Slice[u8], pos: u64, rowid: u64, inv_ts: u64, right: u64) {
+    let n = rd16(in b, 20);
+    let ks = wrapping_add(KEY_OFF, pos << 4);
+    move_right(inout b, ks, wrapping_add(KEY_OFF, n << 4), wrapping_add(ks, 16));
+    wr64(inout b, ks, rowid);
+    wr64(inout b, wrapping_add(ks, 8), inv_ts);
+    let cs = wrapping_add(CHILD_OFF, wrapping_add(pos, 1) << 2);
+    move_right(inout b, cs, wrapping_add(CHILD_OFF, wrapping_add(n, 1) << 2), wrapping_add(cs, 4));
+    wr32(inout b, cs, right);
+    wr16(inout b, 20, wrapping_add(n, 1));
+}
+
+pub fn remove(inout b: Slice[u8], i: u64) {
+    let n = rd16(in b, 20);
+    let k = if i == 0 {
+        0
+    } else {
+        wrapping_sub(i, 1)
+    };
+    move_left(
+        inout b,
+        wrapping_add(KEY_OFF, wrapping_add(k, 1) << 4),
+        wrapping_add(KEY_OFF, n << 4),
+        wrapping_add(KEY_OFF, k << 4)
+    );
+    zero_range(
+        inout b,
+        wrapping_add(KEY_OFF, wrapping_sub(n, 1) << 4),
+        wrapping_add(KEY_OFF, n << 4)
+    );
+    move_left(
+        inout b,
+        wrapping_add(CHILD_OFF, wrapping_add(i, 1) << 2),
+        wrapping_add(CHILD_OFF, wrapping_add(n, 1) << 2),
+        wrapping_add(CHILD_OFF, i << 2)
+    );
+    zero_range(
+        inout b,
+        wrapping_add(CHILD_OFF, n << 2),
+        wrapping_add(CHILD_OFF, wrapping_add(n, 1) << 2)
+    );
+    wr16(inout b, 20, wrapping_sub(n, 1));
+}
+
+// Returns 0 = Ok, 1 = header, 2 = keys out of order, 3 = fixed page child, 4 = padding.
+pub fn check(in b: Slice[u8]) -> u64 {
+    let n = rd16(in b, 20);
+    let lvl = get_u8(in b, 25);
+    if lvl == 0 || n > INTERNAL_CAP {
+        return 1;
+    }
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        let p_off = wrapping_add(KEY_OFF, wrapping_sub(i, 1) << 4);
+        let c_off = wrapping_add(KEY_OFF, i << 4);
+        let pr = rd64(in b, p_off);
+        let pt = rd64(in b, wrapping_add(p_off, 8));
+        let cr = rd64(in b, c_off);
+        let ct = rd64(in b, wrapping_add(c_off, 8));
+        if key_ge(pr, pt, cr, ct) {
+            return 2;
+        }
+        i = wrapping_add(i, 1);
+    }
+    let mut j: u64 = 0;
+    loop {
+        if j > n {
+            break;
+        }
+        if rd32(in b, wrapping_add(CHILD_OFF, j << 2)) <= FSM_PAGE {
+            return 3;
+        }
+        j = wrapping_add(j, 1);
+    }
+    if !all_zero(in b, wrapping_add(CHILD_OFF, wrapping_add(n, 1) << 2), KEY_OFF)
+        || !all_zero(in b, wrapping_add(KEY_OFF, n << 4), PAGE_SIZE)
+        || !all_zero(in b, 26, 32)
+        || rd16(in b, 22) != 0 {
+        return 4;
+    }
+    0
+}
