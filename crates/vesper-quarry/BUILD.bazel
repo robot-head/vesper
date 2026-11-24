@@ -67,6 +67,9 @@ PORT_DIVERGENT = {
     "internal": ("vesper/src/internal.ves", {
         "if key_le(kr, kt, rowid, inv_ts) {": "if false {",
     }),
+    "store_log": ("vesper/src/store_log.ves", {
+        "if tag == 3 {": "if tag == 99 {",
+    }),
 }
 
 [
@@ -137,6 +140,7 @@ PORT_TEST_DATA = glob(["tests/fixtures/planner/**"])
             ("page", "pages"),
             ("wal", "durable"),
             ("internal", "store_ssi"),
+            ("store_log", "store"),
         ]
     ]
 ]

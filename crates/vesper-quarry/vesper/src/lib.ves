@@ -32,6 +32,7 @@
 //     sizes of a Rust `Value` and a Rust `Vec<Value>` (the row executor
 //     charges them exactly as the Rust executor did).
 
+use self::store_log::record_decode as sl_record_decode;
 use self::util::{
     ex,
     lim,
@@ -333,4 +334,12 @@ pub fn internal_route(in b: Slice[u8], rowid: u64, inv_ts: u64) -> u64 {
 
 pub fn internal_check(in b: Slice[u8]) -> u64 {
     internal_check_impl(in b)
+}
+
+pub fn store_log_record_decode(
+    in payload: Slice[u8],
+    inout out_hdr: Slice[u64],
+    inout out_ranges: Slice[u64]
+) -> u64 {
+    sl_record_decode(in payload, inout out_hdr, inout out_ranges)
 }
