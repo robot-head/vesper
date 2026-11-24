@@ -684,3 +684,202 @@ pub fn check_select() -> u64 {
         + expected_auto_sel * 100_000_000;
     assert_eq!(agree(&checked, "check_select", &MODES), expected);
 }
+
+#[test]
+fn seeded_work_stealing_pool_and_trace_match_rust() {
+    use vesper_pulse::driver::DriverKind;
+    use vesper_pulse::pool::{Pool, PoolConfig, TraceEvent as RustTraceEvent};
+    use vesper_pulse::scheduler::{Event, Resume, Step};
+    use vesper_pulse::select::AnyDriver;
+
+    #[derive(Clone, Copy, Debug)]
+    struct TestFiber {
+        yields: u64,
+        fail: bool,
+        tag: u64,
+    }
+
+    impl Resume for TestFiber {
+        fn resume(mut self, _event: Event) -> Step<Self> {
+            if self.yields > 0 {
+                self.yields -= 1;
+                Step::Yield(self)
+            } else if self.fail {
+                Step::Failed(format!("err-{}", self.tag))
+            } else {
+                Step::Complete(self.tag.to_le_bytes().to_vec())
+            }
+        }
+    }
+
+    let cfg = PoolConfig::new(4).seed(0x5150_1234).driver_wakeup(false);
+    let pool = Pool::new(cfg).expect("rust pool");
+    pool.spawn(TestFiber {
+        yields: 0,
+        fail: false,
+        tag: 10,
+    });
+    pool.spawn(TestFiber {
+        yields: 2,
+        fail: false,
+        tag: 20,
+    });
+    pool.spawn(TestFiber {
+        yields: 3,
+        fail: true,
+        tag: 30,
+    });
+    pool.spawn_pinned(
+        2,
+        TestFiber {
+            yields: 1,
+            fail: false,
+            tag: 40,
+        },
+    )
+    .unwrap();
+    pool.spawn(TestFiber {
+        yields: 2,
+        fail: false,
+        tag: 50,
+    });
+
+    let kind: DriverKind = DriverKind::ALL
+        .iter()
+        .copied()
+        .find(|k| k.compiled())
+        .expect("compiled driver");
+    let out = pool
+        .run_seeded(|_| {
+            AnyDriver::start(kind, 16).map_err(|e| std::io::Error::other(format!("{e:?}")))
+        })
+        .expect("rust run_seeded");
+
+    let fnv_mix = |mut h: u64, v: u64| -> u64 {
+        for b in v.to_le_bytes() {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(1099511628211);
+        }
+        h
+    };
+    let mut h: u64 = 14695981039346656037;
+    h = fnv_mix(h, out.completed.len() as u64);
+    h = fnv_mix(h, out.failures.len() as u64);
+    h = fnv_mix(h, out.abandoned as u64);
+    h = fnv_mix(h, out.workers.len() as u64);
+    for w in &out.workers {
+        h = fnv_mix(h, w.resumed);
+        h = fnv_mix(h, w.stolen);
+        h = fnv_mix(h, w.steal_attempts);
+    }
+    h = fnv_mix(h, out.trace.len() as u64);
+    for t in &out.trace {
+        h = fnv_mix(h, t.step);
+        h = fnv_mix(h, t.worker as u64);
+        h = fnv_mix(h, t.fiber.get());
+        let ev = match t.event {
+            RustTraceEvent::Start => 1u64,
+            RustTraceEvent::Yield => 2,
+            RustTraceEvent::Io => 3,
+            RustTraceEvent::Cancelled => 4,
+        };
+        h = fnv_mix(h, ev);
+        match t.stolen_from {
+            Some(v) => {
+                h = fnv_mix(h, 1);
+                h = fnv_mix(h, v as u64);
+            }
+            None => {
+                h = fnv_mix(h, 0);
+            }
+        }
+    }
+
+    let src = r#"
+use @vesper/pulse::{
+    FiberId, PoolConfig, TraceEntry, TraceEvent, WorkerStats, default_pool_config, new_seeded_pool,
+    run_seeded, spawn_fiber, spawn_pinned
+};
+fn mix_u64(h_in: u64, v: u64) -> u64 {
+    let mut h = h_in;
+    let mut i: u64 = 0;
+    loop {
+        if i >= 8 { break; }
+        let byte = (wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8)))) & 255;
+        h = wrapping_mul(h ^ byte, 1099511628211);
+        i = wrapping_add(i, 1);
+    }
+    h
+}
+pub fn check_pool() -> u64 {
+    let mut cfg = default_pool_config(4);
+    cfg.seed = 0x5150_1234;
+    cfg.driver_wakeup = false;
+    let mut pool = match new_seeded_pool(cfg) {
+        Result::Ok(p) => p,
+        Result::Err(_) => return 1,
+    };
+    let _ = spawn_fiber(inout pool, 0, false, 10, Option::None);
+    let _ = spawn_fiber(inout pool, 2, false, 20, Option::None);
+    let _ = spawn_fiber(inout pool, 3, true, 30, Option::None);
+    let _ = spawn_pinned(inout pool, 2, 1, false, 40);
+    let _ = spawn_fiber(inout pool, 2, false, 50, Option::None);
+    let out = run_seeded(inout pool);
+
+    let mut h: u64 = 14695981039346656037;
+    h = mix_u64(h, out.completed.len());
+    h = mix_u64(h, out.failures.len());
+    h = mix_u64(h, out.abandoned);
+    h = mix_u64(h, out.workers.len());
+    let mut wi: u64 = 0;
+    loop {
+        if wi >= out.workers.len() { break; }
+        let w = match out.workers.try_get(wi) {
+            Option::Some(v) => v,
+            Option::None => WorkerStats {
+                resumed: 0, stolen: 0, steal_attempts: 0, submitted: 0, parked: 0, pinned_core: Option::None
+            },
+        };
+        h = mix_u64(h, w.resumed);
+        h = mix_u64(h, w.stolen);
+        h = mix_u64(h, w.steal_attempts);
+        wi = wrapping_add(wi, 1);
+    }
+    h = mix_u64(h, out.trace.len());
+    let mut ti: u64 = 0;
+    loop {
+        if ti >= out.trace.len() { break; }
+        let t = match out.trace.try_get(ti) {
+            Option::Some(v) => v,
+            Option::None => TraceEntry {
+                step: 0, worker: 0, fiber: FiberId { bits: 0 },
+                event: TraceEvent::TraceStart, stolen_from: Option::None
+            },
+        };
+        h = mix_u64(h, t.step);
+        h = mix_u64(h, t.worker);
+        h = mix_u64(h, t.fiber.bits);
+        let ev: u64 = match t.event {
+            TraceEvent::TraceStart => 1,
+            TraceEvent::TraceYield => 2,
+            TraceEvent::TraceIo => 3,
+            TraceEvent::TraceCancelled => 4,
+        };
+        h = mix_u64(h, ev);
+        match t.stolen_from {
+            Option::Some(v) => {
+                h = mix_u64(h, 1);
+                h = mix_u64(h, v);
+            }
+            Option::None => {
+                h = mix_u64(h, 0);
+            }
+        }
+        ti = wrapping_add(ti, 1);
+    }
+    h
+}
+"#;
+    let checked = check_pulse_driver(src);
+    assert_eq!(agree(&checked, "check_pool", &MODES), h);
+}
