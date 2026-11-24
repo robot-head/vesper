@@ -54,8 +54,8 @@ pub fn prelude() -> Vec<Item> {
 pub struct Elaborated {
     pub module: Module,
     /// Synthetic span start to the source span it stands for.
-    synthetic: BTreeMap<usize, Span>,
-    base: usize,
+    pub(super) synthetic: BTreeMap<usize, Span>,
+    pub(super) base: usize,
 }
 impl Elaborated {
     /// Point a core diagnostic at source text.
