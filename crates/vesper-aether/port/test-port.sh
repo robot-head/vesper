@@ -47,3 +47,6 @@ expect packed_port capture_matches_the_rust_capture
 # vq (Vesper-only; the Rust reference is a unit-test module): a chain may
 # hold one buffer more than the limit.
 expect lib devices::queue::reference::differential::capture_matches_the_rust_capture -- devices::queue::reference::abba::both_builds_compute_the_same_workload
+# seccomp: unaligned seccomp_data load offset is rejected.
+expect seccomp malformed_programs_are_rejected -- compiled_profile_allows_exactly_the_allowlist
+expect seccomp_port validate_and_evaluate_match_rust -- compile_matches_rust

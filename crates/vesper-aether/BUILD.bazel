@@ -37,6 +37,7 @@ AETHER_PARTS = [
     "vesper/src/hotset.ves",
     "vesper/src/packed.ves",
     "vesper/src/vq.ves",
+    "vesper/src/seccomp.ves",
 ]
 
 genrule(
@@ -129,10 +130,14 @@ rust_library(
             "-Clink-arg=$(location :aether_vesper)",
             "-Clink-arg=$(location :aether_rng)",
         ],
-        deps = [":port"] + extra,
+        deps = [":port"] + all_crate_deps(
+            _CRATE_DATA,
+            normal = True,
+            platforms = _CRATE_DATA["platforms"],
+        ) + extra,
     )
     for test, extra in [
-        ("slot_plan", ["//crates/vesper-loom-cas"]),
+        ("slot_plan", []),
         ("slot_plan_port", []),
         ("abba_slot_plan", ["//crates/vesper-bench"]),
         ("boot", []),
@@ -141,11 +146,13 @@ rust_library(
         ("hotset", []),
         ("hotset_port", []),
         ("abba_hotset", ["//crates/vesper-bench"]),
-        ("virtio_packed", ["//crates/vesper-loom-cas"]),
+        ("virtio_packed", []),
         ("packed_port", []),
         ("abba_packed", ["//crates/vesper-bench"]),
         ("virtqueue", []),
         ("devices", []),
         ("device_features", []),
+        ("seccomp", []),
+        ("seccomp_port", []),
     ]
 ]

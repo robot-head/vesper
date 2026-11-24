@@ -8,7 +8,15 @@
 //! `:aether_source` does the same).
 
 /// The files of the port, in order.
-const PARTS: &[&str] = &["util", "slot_plan", "pvh", "hotset", "packed", "vq"];
+const PARTS: &[&str] = &[
+    "util",
+    "slot_plan",
+    "pvh",
+    "hotset",
+    "packed",
+    "vq",
+    "seccomp",
+];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -73,4 +81,9 @@ const DIVERGENT_EDITS: &[(&str, &str)] = &[
     ("        if !avail || used {", "        if !avail {"),
     // vq: a chain may hold one buffer more than the limit.
     ("    if count >= max_desc {", "    if count > max_desc {"),
+    // seccomp: allow-list validator accepts an unaligned seccomp_data load offset.
+    (
+        "    if code == BPF_LD_W_ABS {\n        if k % 4 != 0 || k >= SECCOMP_DATA_BYTES {",
+        "    if code == BPF_LD_W_ABS {\n        if k >= SECCOMP_DATA_BYTES {",
+    ),
 ];
