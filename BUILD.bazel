@@ -1563,6 +1563,24 @@ filegroup(
 )
 
 filegroup(
+    name = "vesper_sources",
+    srcs = glob([
+        "examples/**/*.ves",
+        "packages/**/*.ves",
+    ]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "toml_manifests",
+    srcs = glob([
+        "Cargo.toml",
+        "packages/**/*.toml",
+    ]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
     name = "lean",
     srcs = glob(["lean/**"]),
     visibility = ["//visibility:public"],
