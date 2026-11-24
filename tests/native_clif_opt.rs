@@ -774,3 +774,113 @@ fn main() -> u64 {
         "expected pure shift diamond to if-convert to branchless select:\n{fn_clif}"
     );
 }
+
+#[test]
+fn seq_header_loads_reuse_across_try_set() {
+    let source = "
+struct Bag {
+    s: ChunkSeq[u64],
+}
+
+fn fill_and_sum(inout b: Bag, n: u64) -> u64 {
+    let mut i: u64 = 0;
+    let mut acc: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let _ = b.s.try_set(i, wrapping_mul(i, 3));
+        let v = match b.s.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        acc = wrapping_add(acc, v);
+        i = wrapping_add(i, 1);
+    }
+    acc
+}
+
+fn make_bag() -> Bag {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new();
+    s.push(0);
+    s.push(0);
+    s.push(0);
+    s.push(0);
+    s.push(0);
+    s.push(0);
+    Bag { s: s }
+}
+
+fn main() -> u64 {
+    let mut b = make_bag();
+    let a = fill_and_sum(inout b, 6);
+    let c = fill_and_sum(inout b, 4);
+    wrapping_add(a, c)
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("main\n"))
+        .unwrap_or(&clif);
+    let try_set_blocks: Vec<&str> = fn_clif
+        .split("\n\n")
+        .filter(|blk| {
+            blk.contains("stack_addr.i64") && blk.contains("select ") && blk.contains("store ")
+        })
+        .collect();
+    assert!(
+        !try_set_blocks.is_empty()
+            && try_set_blocks.iter().all(|blk| !blk
+                .split("store ")
+                .nth(1)
+                .unwrap_or("")
+                .contains("load.i64")),
+        "expected SeqHeader/Param loads to hoist and reuse across try_set:\n{fn_clif}"
+    );
+}
+
+#[test]
+fn constant_param_jumps_thread_and_branch_conditions_propagate() {
+    let source = "
+fn classify(x: u64, inout s: ChunkSeq[u64]) -> u64 {
+    let tag = if x > 10 {
+        s.push(x);
+        1
+    } else {
+        0
+    };
+    if tag == 1 {
+        s.push(42);
+        42
+    } else {
+        7
+    }
+}
+
+fn main() -> u64 {
+    let mut s1: ChunkSeq[u64] = ChunkSeq::new();
+    let mut s2: ChunkSeq[u64] = ChunkSeq::new();
+    wrapping_add(classify(20, inout s1), classify(3, inout s2))
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("classify\n"))
+        .unwrap_or(&clif);
+    assert!(
+        !fn_clif.contains("icmp_imm eq") && !fn_clif.contains("icmp eq"),
+        "expected `tag == 1` branch to thread away:\n{fn_clif}"
+    );
+}
