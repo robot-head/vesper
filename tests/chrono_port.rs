@@ -1337,3 +1337,177 @@ pub fn main() -> u64 {{
     let got = agree(&checked, "main", &MODES);
     assert_eq!(got, h);
 }
+
+#[test]
+fn shard_arena_cow_checkpoint_delta_and_blake3_match_rust() {
+    use vesper_chrono::arena::{ArenaDelta, ShardArena, capture_arena_epoch, rebuild_arena};
+
+    assert!(ShardArena::new(256, 65).is_err());
+    let mut arena = ShardArena::new(256, 64).unwrap();
+    arena.write(10, b"hello").unwrap();
+    arena.write(130, b"world").unwrap();
+    let cp1 = arena.checkpoint();
+    let kf1_bytes = cp1.keyframe().encode();
+
+    arena.write(10, b"HELLO").unwrap();
+    arena.write(200, b"tail").unwrap();
+    let cp2 = arena.checkpoint();
+    let delta2_bytes = cp2.delta().encode();
+
+    // Corrupt a byte in delta2_bytes and check Rust rejects Corrupt.
+    let mut corrupt = delta2_bytes.clone();
+    corrupt[10] ^= 0xff;
+    assert!(ArenaDelta::decode(&corrupt, 16).is_err());
+
+    // Rebuild from keyframe1 + delta2.
+    let rebuilt = rebuild_arena([kf1_bytes.as_slice(), delta2_bytes.as_slice()], 16).unwrap();
+    let mut rb_bytes = vec![0u8; 256];
+    rebuilt.read(0, &mut rb_bytes).unwrap();
+
+    // Also test capture_arena_epoch into FlightRecorder.
+    let mut rec = FlightRecorder::new(RecorderConfig {
+        ring_bytes: 4096,
+        max_records: 32,
+        max_payload: 512,
+        snapshot_slots: 4,
+        snapshot_image_bytes: 512,
+    })
+    .unwrap();
+    let ep1 = capture_arena_epoch(&mut rec, 100, &cp1, 2).unwrap();
+    let ep2 = capture_arena_epoch(&mut rec, 200, &cp2, 2).unwrap();
+
+    let mut h = fnv1a(b"arena");
+    h = mix_u64(h, arena.epoch());
+    h = mix_u64(h, arena.stats().checkpoints);
+    h = mix_u64(h, arena.stats().shard_copies);
+    h = mix_u64(h, arena.stats().shards_dirtied);
+    h = mix_bytes(h, &kf1_bytes);
+    h = mix_bytes(h, &delta2_bytes);
+    h = mix_bytes(h, &rb_bytes);
+    h = mix_u64(h, u64::from(ep1));
+    h = mix_u64(h, u64::from(ep2));
+
+    let source = format!(
+        r#"use @vesper/chrono::arena::{{
+    apply_delta, capture_arena_epoch, checkpoint_arena, checkpoint_delta, checkpoint_keyframe,
+    decode_delta, encode_delta, new_arena, read_arena, write_arena,
+}};
+use @vesper/chrono::ring::{{RecorderConfig, new_recorder}};
+{FNV_PREAMBLE}
+fn push_str_bytes(inout out: ChunkSeq[u8], in s: Str) {{
+    let b = s.as_bytes();
+    let mut i: u64 = 0;
+    loop {{
+        if i >= b.len() {{ break; }}
+        out.push(match b.try_get(i) {{ Option::Some(v) => v, Option::None => 0 }});
+        i = wrapping_add(i, 1);
+    }}
+}}
+pub fn main() -> u64 {{
+    let bad_geom = match new_arena(256, 65) {{ Result::Ok(_) => false, Result::Err(_) => true }};
+    if !bad_geom {{ return 1; }}
+    let mut arena = match new_arena(256, 64) {{
+        Result::Ok(a) => a,
+        Result::Err(_) => return 2,
+    }};
+    let mut b1: ChunkSeq[u8] = ChunkSeq::new();
+    push_str_bytes(inout b1, in "hello");
+    let mut b2: ChunkSeq[u8] = ChunkSeq::new();
+    push_str_bytes(inout b2, in "world");
+    let _ = write_arena(inout arena, 10, in b1.as_slice());
+    let _ = write_arena(inout arena, 130, in b2.as_slice());
+    let cp1 = checkpoint_arena(inout arena);
+    let kf1 = checkpoint_keyframe(in cp1);
+    let kf1_bytes = encode_delta(in kf1);
+
+    let mut b3: ChunkSeq[u8] = ChunkSeq::new();
+    push_str_bytes(inout b3, in "HELLO");
+    let mut b4: ChunkSeq[u8] = ChunkSeq::new();
+    push_str_bytes(inout b4, in "tail");
+    let _ = write_arena(inout arena, 10, in b3.as_slice());
+    let _ = write_arena(inout arena, 200, in b4.as_slice());
+    let cp2 = checkpoint_arena(inout arena);
+    let d2 = checkpoint_delta(in cp2);
+    let delta2_bytes = encode_delta(in d2);
+
+    let mut corrupt: ChunkSeq[u8] = ChunkSeq::new();
+    let mut ci: u64 = 0;
+    loop {{
+        if ci >= delta2_bytes.as_slice().len() {{ break; }}
+        let byte = match delta2_bytes.as_slice().try_get(ci) {{ Option::Some(v) => v, Option::None => 0 }};
+        corrupt.push(if ci == 10 {{ byte ^ 255 }} else {{ byte }});
+        ci = wrapping_add(ci, 1);
+    }}
+    let corrupt_err = match decode_delta(in corrupt.as_slice(), 16) {{
+        Result::Ok(_) => false,
+        Result::Err(code) => code == 7,
+    }};
+    if !corrupt_err {{ return 3; }}
+
+    let dec_kf1 = match decode_delta(in kf1_bytes.as_slice(), 16) {{
+        Result::Ok(d) => d,
+        Result::Err(_) => return 4,
+    }};
+    let dec_d2 = match decode_delta(in delta2_bytes.as_slice(), 16) {{
+        Result::Ok(d) => d,
+        Result::Err(_) => return 5,
+    }};
+    let mut rebuilt = match new_arena(dec_kf1.len, widen_u64(dec_kf1.shard_len)) {{
+        Result::Ok(a) => a,
+        Result::Err(_) => return 6,
+    }};
+    if apply_delta(in dec_kf1, inout rebuilt) != 0 {{ return 7; }}
+    let _ = checkpoint_arena(inout rebuilt);
+    if apply_delta(in dec_d2, inout rebuilt) != 0 {{ return 8; }}
+    let _ = checkpoint_arena(inout rebuilt);
+    let rb_bytes = match read_arena(in rebuilt, 0, 256) {{
+        Result::Ok(b) => b,
+        Result::Err(_) => return 9,
+    }};
+
+    let rcfg = RecorderConfig {{
+        ring_bytes: 4096,
+        max_records: 32,
+        max_payload: 512,
+        snapshot_slots: 4,
+        snapshot_image_bytes: 512,
+    }};
+    let mut rec = match new_recorder(rcfg) {{
+        Result::Ok(r) => r,
+        Result::Err(_) => return 10,
+    }};
+    let ep1 = match capture_arena_epoch(inout rec, 100, in cp1, 2) {{
+        Result::Ok(v) => v,
+        Result::Err(_) => return 11,
+    }};
+    let ep2 = match capture_arena_epoch(inout rec, 200, in cp2, 2) {{
+        Result::Ok(v) => v,
+        Result::Err(_) => return 12,
+    }};
+
+    let mut h: u64 = 14695981039346656037;
+    let tag = "arena";
+    let tb = tag.as_bytes();
+    let mut ti: u64 = 0;
+    loop {{
+        if ti >= tb.len() {{ break; }}
+        let b = match tb.try_get(ti) {{ Option::Some(v) => v, Option::None => 0 }};
+        h = wrapping_mul(h ^ widen_u64(b), 1099511628211);
+        ti = wrapping_add(ti, 1);
+    }}
+    h = mix_u64(h, arena.epoch);
+    h = mix_u64(h, arena.stats.checkpoints);
+    h = mix_u64(h, arena.stats.shard_copies);
+    h = mix_u64(h, arena.stats.shards_dirtied);
+    h = mix_bytes(h, in kf1_bytes.as_slice());
+    h = mix_bytes(h, in delta2_bytes.as_slice());
+    h = mix_bytes(h, in rb_bytes.as_slice());
+    h = mix_u64(h, widen_u64(ep1));
+    h = mix_u64(h, widen_u64(ep2));
+    h
+}}"#
+    );
+    let checked = check_chrono_driver(&source);
+    let got = agree(&checked, "main", &MODES);
+    assert_eq!(got, h);
+}
