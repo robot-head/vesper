@@ -1,0 +1,16 @@
+// @export vsys Cranelift direct rust=vesper_cranelift_sys
+//
+// The `seq` codegen swap of the hybrid Stage 2 build (self-hosting SH4
+// lane 9, #1283): ChunkSeq and Slice operations emitted in Vesper through
+// the lent Cranelift builder. crates/vesper-hybrid installs `seq` as the
+// `seq` hook of `vesper::codegen_swap`; it emits one typed request of
+// `codegen_swap::seq`, and returns 0 to leave it to Rust.
+use @vesper/codegen-seq-emit::{
+    seq_hook
+};
+
+// One request: `call` is the address of the lent call. Returns 1 when it
+// emitted the request, 0 to leave it to Rust.
+pub fn seq(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    seq_hook(call)
+}

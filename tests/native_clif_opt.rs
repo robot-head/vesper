@@ -743,3 +743,34 @@ fn main() -> u64 {
         "expected uextend->ushr->ireduce.i32 chain to fold to native i32 ops (ireduce_count={ireduce_count}):\n{fn_clif}"
     );
 }
+
+#[test]
+fn pure_shift_diamond_if_converts_to_select() {
+    let source = "
+fn safe_shl(x: u64, s: u32) -> u64 {
+    if s < 64 {
+        wrapping_shl_u64(x, s)
+    } else {
+        0
+    }
+}
+
+fn main() -> u64 {
+    wrapping_add(safe_shl(3, 5), safe_shl(3, 70))
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("safe_shl\n"))
+        .unwrap_or(&clif);
+    assert!(
+        fn_clif.contains("select ") && !fn_clif.contains("brif "),
+        "expected pure shift diamond to if-convert to branchless select:\n{fn_clif}"
+    );
+}

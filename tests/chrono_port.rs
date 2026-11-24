@@ -1511,3 +1511,265 @@ pub fn main() -> u64 {{
     let got = agree(&checked, "main", &MODES);
     assert_eq!(got, h);
 }
+
+#[test]
+fn bundle_capture_seal_open_and_mac_match_rust() {
+    use vesper_chrono::bundle::{Bundle, BundleKey, BundleLimits};
+    use vesper_chrono::redact::{FieldRule, RedactionPolicy};
+
+    let mut rec = FlightRecorder::new(RecorderConfig::small()).unwrap();
+    rec.record_effect(1, 10, 1, 2, b"abPPP-s3cr!").unwrap();
+    rec.record_inout_write(1, 20, 0xAA, 7).unwrap();
+    rec.capture_snapshot(30, b"img-s3cr").unwrap();
+
+    let mut pol = RedactionPolicy::new();
+    pol.pii_field(FieldRule {
+        effect_id: 1,
+        op_tag: 2,
+        offset: 2,
+        len: 3,
+    })
+    .unwrap();
+    pol.secret_value(b"s3cr").unwrap();
+
+    let key = BundleKey::new([9; 32]);
+    let bytes = Bundle::export(&rec, &pol, b"meta-s3cr", &key).unwrap();
+    let opened = Bundle::open(&bytes, &key, &BundleLimits::default()).unwrap();
+
+    let wrong_key = BundleKey::new([1; 32]);
+    assert!(Bundle::open(&bytes, &wrong_key, &BundleLimits::default()).is_err());
+
+    let mut h = fnv1a(b"bundle");
+    h = mix_bytes(h, &bytes);
+    h = mix_bytes(h, &opened.metadata);
+    h = mix_u64(h, opened.first_seq);
+    h = mix_u64(h, opened.next_seq);
+    h = mix_u64(h, opened.records.len() as u64);
+    h = mix_u64(h, opened.snapshots.len() as u64);
+    h = mix_u64(h, opened.redactions.len() as u64);
+
+    let source = format!(
+        r#"use @vesper/chrono::bundle::{{default_limits, export_bundle, open_bundle}};
+use @vesper/chrono::redact::{{FieldRule, add_pii_field, add_secret_value, new_policy}};
+use @vesper/chrono::ring::{{
+    capture_snapshot, new_recorder, record_effect, record_inout_write, small_config,
+}};
+{FNV_PREAMBLE}
+fn push_str_bytes(inout out: ChunkSeq[u8], in s: Str) {{
+    let b = s.as_bytes();
+    let mut i: u64 = 0;
+    loop {{
+        if i >= b.len() {{ break; }}
+        out.push(match b.try_get(i) {{ Option::Some(v) => v, Option::None => 0 }});
+        i = wrapping_add(i, 1);
+    }}
+}}
+pub fn main() -> u64 {{
+    let mut rec = match new_recorder(small_config()) {{
+        Result::Ok(r) => r,
+        Result::Err(_) => return 1,
+    }};
+    let _ = record_effect(inout rec, 1, 10, 1, 2, in "abPPP-s3cr!".as_bytes());
+    let _ = record_inout_write(inout rec, 1, 20, 170, 7);
+    let _ = capture_snapshot(inout rec, 30, in "img-s3cr".as_bytes());
+
+    let mut pol = new_policy();
+    let _ = add_pii_field(inout pol, FieldRule {{ effect_id: 1, op_tag: 2, offset: 2, len: 3 }});
+    let _ = add_secret_value(inout pol, in "s3cr".as_bytes());
+
+    let mut key: ChunkSeq[u8] = ChunkSeq::new();
+    let mut wrong_key: ChunkSeq[u8] = ChunkSeq::new();
+    let mut ki: u64 = 0;
+    loop {{
+        if ki >= 32 {{ break; }}
+        key.push(9);
+        wrong_key.push(1);
+        ki = wrapping_add(ki, 1);
+    }}
+    let mut meta: ChunkSeq[u8] = ChunkSeq::new();
+    push_str_bytes(inout meta, in "meta-s3cr");
+
+    let bytes = match export_bundle(in rec, in pol, in meta.as_slice(), in key.as_slice()) {{
+        Result::Ok(b) => b,
+        Result::Err(_) => return 2,
+    }};
+    let opened = match open_bundle(in bytes.as_slice(), in key.as_slice(), default_limits()) {{
+        Result::Ok(b) => b,
+        Result::Err(_) => return 3,
+    }};
+    let wrong_err = match open_bundle(in bytes.as_slice(), in wrong_key.as_slice(), default_limits()) {{
+        Result::Ok(_) => false,
+        Result::Err(code) => code == 6,
+    }};
+    if !wrong_err {{ return 4; }}
+
+    let mut h: u64 = 14695981039346656037;
+    let tag = "bundle";
+    let tb = tag.as_bytes();
+    let mut ti: u64 = 0;
+    loop {{
+        if ti >= tb.len() {{ break; }}
+        let b = match tb.try_get(ti) {{ Option::Some(v) => v, Option::None => 0 }};
+        h = wrapping_mul(h ^ widen_u64(b), 1099511628211);
+        ti = wrapping_add(ti, 1);
+    }}
+    h = mix_bytes(h, in bytes.as_slice());
+    h = mix_bytes(h, in opened.metadata.as_slice());
+    h = mix_u64(h, opened.first_seq);
+    h = mix_u64(h, opened.next_seq);
+    h = mix_u64(h, opened.records.as_slice().len());
+    h = mix_u64(h, opened.snapshots.as_slice().len());
+    h = mix_u64(h, opened.redactions.as_slice().len());
+    h
+}}"#
+    );
+    let checked = check_chrono_driver(&source);
+    let got = agree(&checked, "main", &MODES);
+    assert_eq!(got, h);
+}
+
+#[test]
+fn activation_checkpoint_encode_decode_and_blake3_match_rust() {
+    use vesper_chrono::checkpoint::{
+        ActivationCheckpoint, CheckpointLimits, JournalEntry, ParkPoint, ResumeTag, StackShape,
+    };
+
+    let cp = ActivationCheckpoint {
+        fiber_id: 7,
+        generation: 3,
+        park: ParkPoint {
+            evidence_depth: 1,
+            op: 4,
+            flags: 0,
+            arg0: 11,
+            arg1: 22,
+        },
+        data_at_park: b"parked".to_vec(),
+        data: b"resumed".to_vec(),
+        stack: Some(StackShape {
+            anchor: 0x1000,
+            words: vec![(8, 16), (24, -8)],
+        }),
+        journal: vec![JournalEntry {
+            park: ParkPoint {
+                evidence_depth: 0,
+                op: 2,
+                flags: 1,
+                arg0: 5,
+                arg1: 6,
+            },
+            data: b"j0".to_vec(),
+            tag: ResumeTag::Value,
+            value: 42,
+        }],
+        image: Some(b"img!".to_vec()),
+    };
+    let encoded = cp.encode();
+    let decoded = ActivationCheckpoint::decode(&encoded, &CheckpointLimits::default()).unwrap();
+    assert_eq!(decoded, cp);
+
+    let mut corrupt = encoded.clone();
+    corrupt[12] ^= 1;
+    assert!(ActivationCheckpoint::decode(&corrupt, &CheckpointLimits::default()).is_err());
+
+    let mut h = fnv1a(b"checkpoint");
+    h = mix_bytes(h, &encoded);
+    h = mix_u64(h, decoded.fiber_id);
+    h = mix_u64(h, decoded.generation);
+    h = mix_bytes(h, &decoded.data);
+    h = mix_u64(h, decoded.journal[0].value);
+
+    let source = format!(
+        r#"use @vesper/chrono::checkpoint::{{
+    ActivationCheckpoint, JournalEntry, ParkPoint, StackShape, StackWord, decode_checkpoint,
+    default_checkpoint_limits, encode_checkpoint,
+}};
+{FNV_PREAMBLE}
+fn push_str_bytes(inout out: ChunkSeq[u8], in s: Str) {{
+    let b = s.as_bytes();
+    let mut i: u64 = 0;
+    loop {{
+        if i >= b.len() {{ break; }}
+        out.push(match b.try_get(i) {{ Option::Some(v) => v, Option::None => 0 }});
+        i = wrapping_add(i, 1);
+    }}
+}}
+pub fn main() -> u64 {{
+    let mut dp: ChunkSeq[u8] = ChunkSeq::new();
+    push_str_bytes(inout dp, in "parked");
+    let mut d: ChunkSeq[u8] = ChunkSeq::new();
+    push_str_bytes(inout d, in "resumed");
+    let mut words: ChunkSeq[StackWord] = ChunkSeq::new();
+    words.push(StackWord {{ slot: 8, target: 16 }});
+    words.push(StackWord {{ slot: 24, target: wrapping_sub(0, 8) }});
+    let mut jdata: ChunkSeq[u8] = ChunkSeq::new();
+    push_str_bytes(inout jdata, in "j0");
+    let mut journal: ChunkSeq[JournalEntry] = ChunkSeq::new();
+    journal.push(JournalEntry {{
+        park: ParkPoint {{ evidence_depth: 0, op: 2, flags: 1, arg0: 5, arg1: 6 }},
+        data: jdata,
+        tag: 0,
+        value: 42,
+    }});
+    let mut img: ChunkSeq[u8] = ChunkSeq::new();
+    push_str_bytes(inout img, in "img!");
+
+    let cp = ActivationCheckpoint {{
+        fiber_id: 7,
+        generation: 3,
+        park: ParkPoint {{ evidence_depth: 1, op: 4, flags: 0, arg0: 11, arg1: 22 }},
+        data_at_park: dp,
+        data: d,
+        has_stack: true,
+        stack: StackShape {{ anchor: 4096, words: words }},
+        journal: journal,
+        has_image: true,
+        image: img,
+    }};
+    let encoded = encode_checkpoint(in cp);
+    let decoded = match decode_checkpoint(in encoded.as_slice(), default_checkpoint_limits()) {{
+        Result::Ok(v) => v,
+        Result::Err(_) => return 1,
+    }};
+
+    let mut corrupt: ChunkSeq[u8] = ChunkSeq::new();
+    let mut ci: u64 = 0;
+    loop {{
+        if ci >= encoded.as_slice().len() {{ break; }}
+        let byte = match encoded.as_slice().try_get(ci) {{ Option::Some(v) => v, Option::None => 0 }};
+        corrupt.push(if ci == 12 {{ byte ^ 1 }} else {{ byte }});
+        ci = wrapping_add(ci, 1);
+    }}
+    let corrupt_err = match decode_checkpoint(in corrupt.as_slice(), default_checkpoint_limits()) {{
+        Result::Ok(_) => false,
+        Result::Err(code) => code == 4,
+    }};
+    if !corrupt_err {{ return 2; }}
+
+    let mut h: u64 = 14695981039346656037;
+    let tag = "checkpoint";
+    let tb = tag.as_bytes();
+    let mut ti: u64 = 0;
+    loop {{
+        if ti >= tb.len() {{ break; }}
+        let b = match tb.try_get(ti) {{ Option::Some(v) => v, Option::None => 0 }};
+        h = wrapping_mul(h ^ widen_u64(b), 1099511628211);
+        ti = wrapping_add(ti, 1);
+    }}
+    h = mix_bytes(h, in encoded.as_slice());
+    h = mix_u64(h, decoded.fiber_id);
+    h = mix_u64(h, decoded.generation);
+    h = mix_bytes(h, in decoded.data.as_slice());
+    let mut dec = decoded;
+    let j0_val = match dec.journal.pop() {{
+        Option::Some(j) => j.value,
+        Option::None => 0,
+    }};
+    h = mix_u64(h, j0_val);
+    h
+}}"#
+    );
+    let checked = check_chrono_driver(&source);
+    let got = agree(&checked, "main", &MODES);
+    assert_eq!(got, h);
+}

@@ -38,7 +38,8 @@ use self::enc::{
 };
 use self::err::{
     WErr,
-    werr
+    werr,
+    werr_syms
 };
 use self::ir::{
     FnInfo,
@@ -77,6 +78,11 @@ use self::plan::{
     instance_name,
     prefixed_key,
     tvars_new
+};
+use self::tables::{
+    alloc_code,
+    stage2_heap_mark,
+    stage2_heap_reset
 };
 
 const VT_I32: u8 = 127;
@@ -342,14 +348,22 @@ copy struct HFns {
 }
 
 fn em_new(inst: Inst, info: FnInfo) -> Em {
+    let mut c = code_new();
+    c.bytes.reserve(256);
+    let mut locals = ChunkSeq::new[ValTy]();
+    locals.reserve(32);
+    let mut names = ChunkSeq::new[NameSlot]();
+    names.reserve(32);
+    let mut values = ChunkSeq::new[u32]();
+    values.reserve(64);
     Em {
         inst: inst,
         info: info,
-        code: code_new(),
-        locals: ChunkSeq::new[ValTy](),
+        code: c,
+        locals: locals,
         nparams: 0,
-        names: ChunkSeq::new[NameSlot](),
-        values: ChunkSeq::new[u32](),
+        names: names,
+        values: values,
         generics: ChunkSeq::new[u32](),
         vars: vars_new(),
         mark: NONE32,
@@ -624,51 +638,6 @@ fn info0() -> FnInfo {
     }
 }
 
-// `$alloc(size) -> pointer`.
-fn alloc_code(heap: u32) -> Code {
-    let mut c = code_new();
-    let p: u32 = 1;
-    let end: u32 = 2;
-    c.global_get(heap);
-    c.tee(p);
-    c.get(0);
-    c.i64_const(7);
-    c.op(OP_I64_ADD);
-    c.i64_const(-8);
-    c.op(OP_I64_AND);
-    c.op(OP_I64_ADD);
-    c.tee(end);
-    c.memory_size();
-    c.op(OP_I64_EXTEND_I32_U);
-    c.i64_const(16);
-    c.op(OP_I64_SHL);
-    c.op(OP_I64_GT_U);
-    c.open(OP_IF);
-    c.get(end);
-    c.memory_size();
-    c.op(OP_I64_EXTEND_I32_U);
-    c.i64_const(16);
-    c.op(OP_I64_SHL);
-    c.op(OP_I64_SUB);
-    c.i64_const(65535);
-    c.op(OP_I64_ADD);
-    c.i64_const(16);
-    c.op(OP_I64_SHR_U);
-    c.op(OP_I32_WRAP_I64);
-    c.memory_grow();
-    c.i32_const(-1);
-    c.op(OP_I32_EQ);
-    c.open(OP_IF);
-    c.op(OP_UNREACHABLE);
-    c.op(OP_END);
-    c.op(OP_END);
-    c.get(end);
-    c.global_set(heap);
-    c.get(p);
-    c.op(OP_END);
-    c
-}
-
 // A body with one `(n, i64)` locals entry.
 pub fn body_n(n: u64, in c: Code) -> ChunkSeq[u8] {
     let mut counts = ChunkSeq::new[u32]();
@@ -681,6 +650,7 @@ pub fn body_n(n: u64, in c: Code) -> ChunkSeq[u8] {
 // A body with one `(1, t)` entry per local.
 pub fn body_each(in locals: ChunkSeq[ValTy], in c: Code) -> ChunkSeq[u8] {
     let mut counts = ChunkSeq::new[u32]();
+    counts.reserve(locals.len());
     for i in 0..locals.len() {
         counts.push(1);
     }
@@ -694,13 +664,17 @@ fn topological(in l: L, fi: u64) -> (ChunkSeq[u64], bool) {
     let row = l.cx.ir.p.function(fi);
     let n = row.bc;
     let mut state = ChunkSeq::new[u8]();
+    state.reserve(n);
     for i in 0..n {
         state.push(0);
     }
     let mut post = ChunkSeq::new[u64]();
+    post.reserve(n);
     let mut acyclic = true;
     let mut sb = ChunkSeq::new[u64]();
+    sb.reserve(n);
     let mut si = ChunkSeq::new[u64]();
+    si.reserve(n);
     if n == 0 {
         return (post, false);
     }
@@ -742,6 +716,7 @@ fn topological(in l: L, fi: u64) -> (ChunkSeq[u64], bool) {
         }
     }
     let mut order = ChunkSeq::new[u64]();
+    order.reserve(post.len());
     let mut k = post.len();
     loop {
         if k == 0 {
@@ -768,8 +743,11 @@ fn cfg_of(in l: L, fi: u64, in order: ChunkSeq[u64]) -> Cfg {
     let row = l.cx.ir.p.function(fi);
     let n = row.bc;
     let mut pos = ChunkSeq::new[u64]();
+    pos.reserve(n);
     let mut idom = ChunkSeq::new[u64]();
+    idom.reserve(n);
     let mut header = ChunkSeq::new[u8]();
+    header.reserve(n);
     for i in 0..n {
         pos.push(NONE64);
         idom.push(NONE64);
@@ -779,7 +757,9 @@ fn cfg_of(in l: L, fi: u64, in order: ChunkSeq[u64]) -> Cfg {
         let ok = pos.try_set(u64_at(in order, p), p);
     }
     let mut es = ChunkSeq::new[u64]();
+    es.reserve(n);
     let mut ed = ChunkSeq::new[u64]();
+    ed.reserve(n);
     for p in 0..order.len() {
         let b = u64_at(in order, p);
         let (s0, sn) = successors(in l, fi, b);
@@ -854,6 +834,7 @@ fn intersect(in idom: ChunkSeq[u64], in pos: ChunkSeq[u64], a0: u64, b0: u64) ->
 
 fn copy_u64s(in xs: ChunkSeq[u64]) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u64]();
+    out.reserve(xs.len());
     for i in 0..xs.len() {
         out.push(u64_at(in xs, i));
     }
@@ -911,7 +892,7 @@ impl L {
         self.plan.inst(wrapping_sub(i, 1))
     }
 
-    fn func_of(in self, key: u32) -> u32 {
+    pub fn func_of(in self, key: u32) -> u32 {
         wrapping_sub(get32(in self.funcs, key), 1)
     }
 
@@ -1048,21 +1029,29 @@ impl L {
         }
     }
 
-    pub fn define_all(inout self) eff [Fail[WErr]] {
+    pub fn define_init(inout self) {
         let a = alloc_code(self.heap);
         self.b.define(self.alloc, in body_n(2, in a));
-        for i in 0..self.plan.insts.len() {
-            let inst = self.plan.inst(i);
-            let body = self.function(inst);
-            let idx = self.func_of(inst.key);
-            self.b.define(idx, in body);
-        }
+    }
+
+    pub fn define_finish(inout self) eff [Fail[WErr]] {
         for i in 0..self.plan.handlers.len() {
             self.define_dispatch(i);
             self.define_ret(i);
             self.define_abort(i);
         }
         self.flush_helpers();
+    }
+
+    pub fn define_all(inout self) eff [Fail[WErr]] {
+        self.define_init();
+        for i in 0..self.plan.insts.len() {
+            let inst = self.plan.inst(i);
+            let body = self.function(inst);
+            let idx = self.func_of(inst.key);
+            self.b.define(idx, in body);
+        }
+        self.define_finish();
     }
 
     // `signature`: the Wasm parameter count of an instance under its role
@@ -1391,7 +1380,7 @@ impl L {
     }
 
     // `Lowerer::reclaiming`.
-    fn reclaiming(in self, key: u32) -> bool {
+    fn reclaiming(inout self, key: u32) -> bool {
         let i = self.plan.find(key);
         if i == 0 {
             return false;
@@ -1409,7 +1398,8 @@ impl L {
             return false;
         }
         for k in 0..sig.pn {
-            if self.cx.f.param(add(sig.p0, k)).pass == TyPass::Inout {
+            let pm = self.cx.f.param(add(sig.p0, k));
+            if pm.pass == TyPass::Inout {
                 return false;
             }
         }
@@ -1639,39 +1629,40 @@ impl L {
     // ----- function bodies -------------------------------------------------
 
     // `Emit::function`.
-    fn function(inout self, inst: Inst) -> ChunkSeq[u8] eff [Fail[WErr]] {
+    pub fn function(inout self, inst: Inst) -> ChunkSeq[u8] eff [Fail[WErr]] {
         let info = self.cx.ir.info(inst.fi);
-        let mut e = em_new(inst, info);
+        self.e = em_new(inst, info);
         let vars = self.plan.vars(inst);
-        e.vars = vars.vars();
+        self.e.vars = vars.vars();
         let fs = self.cx.fn_sig(inst.base);
         if fs != 0 {
             let sig = self.cx.f.sig(wrapping_sub(fs, 1));
             for g in 0..sig.gn {
                 let gr = self.cx.f.gen(add(sig.g0, g));
                 if vars.get(gr.name) == NONE32 {
-                    e.generics.push(gr.name);
+                    self.e.generics.push(gr.name);
                 }
             }
         }
         for v in 0..info.vn {
-            e.values.push(0);
+            self.e.values.push(0);
         }
         let mut mode: u8 = 255;
         if inst.role == R_OP_CLAUSE {
             let c = self.plan.clause_of(inst.handler, inst.op);
-            e.resume = c.resume;
-            e.clause_handler = inst.handler;
+            self.e.resume = c.resume;
+            self.e.clause_handler = inst.handler;
             mode = c.mode;
         }
         let mut index: u32 = 0;
         for i in 0..info.pn {
             let p = self.cx.ir.param(add(info.p0, i));
-            if p.name == e.resume {
+            if p.name == self.e.resume {
                 continue;
             }
             let cell = p.pass == TyPass::Inout || inst.role == R_HANDLER_BODY;
-            e
+            self
+                .e
                 .names
                 .push(
                     NameSlot {
@@ -1683,11 +1674,10 @@ impl L {
             index = wrapping_add(index, 1);
         }
         if mode == M_TAIL {
-            e.frame = index;
+            self.e.frame = index;
             index = wrapping_add(index, 1);
         }
-        e.nparams = index;
-        self.e = e;
+        self.e.nparams = index;
         if self.reclaiming(inst.key) {
             let mark = self.local();
             self.e.code.global_get(self.tail_mark);
@@ -1759,7 +1749,7 @@ impl L {
         }
     }
 
-    fn value(in self, v: u64) -> u32 eff [Fail[WErr]] {
+    pub fn value(in self, v: u64) -> u32 eff [Fail[WErr]] {
         let x = u32_at(in self.e.values, v);
         if x == 0 {
             Fail::raise(werr(K_INVALID, 0, 142));
@@ -1777,7 +1767,7 @@ impl L {
         let ok = self.e.values.try_set(v, inc32(x));
     }
 
-    fn dest(inout self, v: u64) -> u32 {
+    pub fn dest(inout self, v: u64) -> u32 {
         let x = u32_at(in self.e.values, v);
         if x != 0 {
             return wrapping_sub(x, 1);
@@ -2700,9 +2690,11 @@ impl L {
                     return;
                 }
                 if self.cx.fn_sig(root) != 0 {
-                    Fail::raise(werr(K_UNSUPPORTED, U_FUNCTION_VALUE, 190));
+                    Fail::raise(
+                        werr_syms(K_UNSUPPORTED, U_FUNCTION_VALUE, 190, self.e.inst.key, root)
+                    );
                 }
-                Fail::raise(werr(K_INVALID, 0, 191));
+                Fail::raise(werr_syms(K_INVALID, 0, 191, self.e.inst.key, root));
             }
             let segs = self.path_names(path);
             let (v, t) = self.read_place(root, in segs);
@@ -3579,6 +3571,9 @@ impl L {
             return;
         }
         if self.cx.ir.find(callee) != 0 {
+            if self.try_heap_intrinsic(callee, dv, a) {
+                return;
+            }
             let key = self.callee_key(dv);
             if key == NONE32 {
                 Fail::raise(werr(K_INVALID, 0, 220));

@@ -41,6 +41,13 @@ fn backend() -> &'static Entry {
     })
 }
 
+fn backend_diag() -> &'static Entry {
+    static BACKEND_DIAG: OnceLock<Entry> = OnceLock::new();
+    BACKEND_DIAG.get_or_init(|| {
+        Package::load("packages/vesper-wasm-backend").entry("wasm_backend_compile_diag", true)
+    })
+}
+
 fn imports() -> Imports {
     let (triple, abi) = vesper::packages::vsys_target(None).expect("host target");
     let mut imports = Imports::new();
@@ -79,9 +86,74 @@ fn port(c: &ForeignChecked, o: &WasmOptions) -> Result<Vec<u8>, String> {
     }
 }
 
+fn port_with_syms(c: &ForeignChecked, o: &WasmOptions, syms_out: &Path) -> Result<Vec<u8>, String> {
+    let w = &c.checked.world;
+    let program = backend_program(w, o).ok_or("optimize failed")?;
+    let input = wasm_input(w, &program, "main", o).ok_or("not encodable")?;
+    let words = backend_diag().words(&input);
+    if words.first() != Some(&0) {
+        return Err(format!("{:?}", outcome(&words)));
+    }
+    let syms_len = *words.get(2).ok_or("missing syms len")? as usize;
+    let syms_words = syms_len.div_ceil(8);
+    let syms_end = 3 + syms_words;
+    let mut syms = Vec::with_capacity(syms_words * 8);
+    for w in &words[3..syms_end] {
+        syms.extend_from_slice(&w.to_le_bytes());
+    }
+    syms.truncate(syms_len);
+    let _ = std::fs::write(syms_out, &syms);
+    let mut stripped = Vec::with_capacity(2 + words.len() - syms_end);
+    stripped.push(words[0]);
+    stripped.push(words[1]);
+    stripped.extend_from_slice(&words[syms_end..]);
+    match outcome(&stripped) {
+        Outcome::Module { core, wit, .. } => Ok(wrap(core, &wit, o.world)),
+        o => Err(format!("{o:?}")),
+    }
+}
+
+#[derive(Default)]
+struct MemLimiter {
+    current_bytes: usize,
+    peak_bytes: usize,
+    grow_calls: usize,
+    failed_grow: Option<(usize, usize, Option<usize>)>,
+}
+
+impl wasmtime::ResourceLimiter for MemLimiter {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        self.grow_calls += 1;
+        if maximum.is_some_and(|m| desired > m) {
+            self.failed_grow = Some((current, desired, maximum));
+            return Ok(false);
+        }
+        self.current_bytes = desired;
+        if desired > self.peak_bytes {
+            self.peak_bytes = desired;
+        }
+        Ok(true)
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        Ok(maximum.is_none_or(|m| desired <= m))
+    }
+}
+
 struct WasiHost {
     ctx: wasmtime_wasi::WasiCtx,
     table: wasmtime::component::ResourceTable,
+    limiter: MemLimiter,
 }
 impl wasmtime_wasi::WasiView for WasiHost {
     fn ctx(&mut self) -> wasmtime_wasi::WasiCtxView<'_> {
@@ -101,6 +173,138 @@ struct Ctx {
     dirs: Vec<(PathBuf, String)>,
     /// Wasmtime fuel, 200 million by default.
     fuel: Option<u64>,
+    /// Optional host path prefix matching the guest output `.wasm` path for `.stage`/`.err.txt` diagnostics.
+    diag_base: Option<PathBuf>,
+    /// Optional `<func_idx> <name>` map file for symbolizing `<wasm function N>` traps.
+    syms_file: Option<PathBuf>,
+}
+
+fn sidecar_path(base: &Path, suffix: &str) -> PathBuf {
+    let mut s = base.as_os_str().to_os_string();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+fn remove_stage2_sidecars(base: &Path) {
+    for suffix in ["", ".err.txt", ".stage", ".syms"] {
+        let _ = std::fs::remove_file(sidecar_path(base, suffix));
+    }
+}
+
+fn demangle_vesper_sym(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'_' && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'_' if i > 0 => {
+                    out.push_str("::");
+                    i += 2;
+                    continue;
+                }
+                b'1' => {
+                    out.push('_');
+                    i += 2;
+                    continue;
+                }
+                b'2' => {
+                    out.push('-');
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+fn load_syms(path: &Path) -> std::collections::HashMap<u32, String> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return map;
+    };
+    for line in text.lines() {
+        if let Some((idx, name)) = line.split_once(' ')
+            && let Ok(n) = idx.parse::<u32>()
+        {
+            map.insert(n, demangle_vesper_sym(name));
+        }
+    }
+    map
+}
+
+fn symbolize_backtrace(raw: &str, syms: &std::collections::HashMap<u32, String>) -> String {
+    if syms.is_empty() {
+        return raw.to_string();
+    }
+    let marker = "<wasm function ";
+    let mut out = String::with_capacity(raw.len() + 256);
+    let mut rest = raw;
+    while let Some(pos) = rest.find(marker) {
+        out.push_str(&rest[..pos + marker.len()]);
+        let after = &rest[pos + marker.len()..];
+        if let Some(end) = after.find('>')
+            && let Ok(idx) = after[..end].parse::<u32>()
+        {
+            out.push_str(&after[..end]);
+            if let Some(name) = syms.get(&idx) {
+                out.push_str(" (");
+                out.push_str(name);
+                out.push(')');
+            }
+            out.push('>');
+            rest = &after[end + 1..];
+        } else {
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn read_stage2_sidecar_notes(base: &Path) -> String {
+    let mut notes = String::new();
+    if let Ok(stage) = std::fs::read_to_string(sidecar_path(base, ".stage")) {
+        let trimmed = stage.trim();
+        if !trimmed.is_empty() {
+            notes.push_str(&format!(
+                "\n  stages:\n    {}",
+                trimmed.replace('\n', "\n    ")
+            ));
+        }
+    }
+    if let Ok(err) = std::fs::read_to_string(sidecar_path(base, ".err.txt")) {
+        let trimmed = err.trim();
+        if !trimmed.is_empty() {
+            notes.push_str(&format!(
+                "\n  stage2_diag:\n    {}",
+                trimmed.replace('\n', "\n    ")
+            ));
+        }
+    }
+    notes
+}
+
+fn format_stage2_error(label: &str, got: u64, base: Option<&Path>) -> String {
+    let kind_desc = if got == 10 || got == 11 || got == 12 {
+        format!("CLI argument error (code={got})")
+    } else {
+        let code = got / 1_000_000;
+        let val = got % 1_000_000;
+        match code {
+            1 => format!("load_package_graph failed (code=1, detail={val})"),
+            2 => format!("name/package assembly failed with {val} diagnostic(s) (code=2)"),
+            3 => format!("wasm-backend WErr failed at site={val} (code=3)"),
+            4 => format!("IoError writing core wasm (code=4, detail={val})"),
+            _ => format!("unexpected stage2 status code={code} val={val}"),
+        }
+    };
+    let notes = base.map(read_stage2_sidecar_notes).unwrap_or_default();
+    format!("{label} returned {got} [{kind_desc}]{notes}")
 }
 
 /// Run the nullary `main` returning `u64` under Wasmtime with WASI.
@@ -109,6 +313,7 @@ fn run(component: &[u8], ctx: &Ctx) -> Result<u64, String> {
     let mut c = wasmtime::Config::new();
     c.wasm_component_model(true);
     c.consume_fuel(true);
+    c.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
     let engine = wasmtime::Engine::new(&c).expect("engine");
     let component = Component::new(&engine, component).map_err(|e| format!("load: {e:?}"))?;
     let mut linker = Linker::<WasiHost>::new(&engine);
@@ -127,9 +332,12 @@ fn run(component: &[u8], ctx: &Ctx) -> Result<u64, String> {
         WasiHost {
             ctx: b.build(),
             table: Default::default(),
+            limiter: MemLimiter::default(),
         },
     );
-    store.set_fuel(ctx.fuel.unwrap_or(200_000_000)).unwrap();
+    store.limiter(|h| &mut h.limiter);
+    let fuel_budget = ctx.fuel.unwrap_or(200_000_000);
+    store.set_fuel(fuel_budget).unwrap();
     let instance = linker
         .instantiate(&mut store, &component)
         .map_err(|e| format!("instantiate: {e:?}"))?;
@@ -141,8 +349,35 @@ fn run(component: &[u8], ctx: &Ctx) -> Result<u64, String> {
         .expect("main export");
     let func = instance.get_func(&mut store, main).expect("main func");
     let mut results = vec![Val::Bool(false)];
-    func.call(&mut store, &[], &mut results)
-        .map_err(|e| format!("trap: {e:?}"))?;
+    if let Err(e) = func.call(&mut store, &[], &mut results) {
+        let fuel_left = store.get_fuel().unwrap_or(0);
+        let fuel_used = fuel_budget.saturating_sub(fuel_left);
+        let lim = &store.data().limiter;
+        let cur_mib = lim.current_bytes / (1024 * 1024);
+        let peak_mib = lim.peak_bytes / (1024 * 1024);
+        let pages = lim.current_bytes / 65536;
+        let max_pages = lim.peak_bytes / 65536;
+        let syms = ctx.syms_file.as_deref().map(load_syms).unwrap_or_default();
+        let bt = symbolize_backtrace(&format!("{e:?}"), &syms);
+        let fail_grow = match lim.failed_grow {
+            Some((cur, des, max)) => format!(
+                ", denied_grow=({} MiB -> {} MiB, max={})",
+                cur / (1024 * 1024),
+                des / (1024 * 1024),
+                max.map_or_else(|| "none".into(), |m| format!("{} MiB", m / (1024 * 1024)))
+            ),
+            None => String::new(),
+        };
+        let notes = ctx
+            .diag_base
+            .as_deref()
+            .map(read_stage2_sidecar_notes)
+            .unwrap_or_default();
+        return Err(format!(
+            "trap: {bt}\n  [wasm_stats: current={cur_mib} MiB ({pages} pages), peak={peak_mib} MiB ({max_pages} pages), grows={}, fuel_used={fuel_used}/{fuel_budget}{fail_grow}]{notes}",
+            lim.grow_calls
+        ));
+    }
     match results.first() {
         Some(Val::U64(x)) => Ok(*x),
         other => Err(format!("result {other:?}")),
@@ -1112,8 +1347,24 @@ fn wasm_backend_emits_runnable_core_under_seed_runner() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+fn with_large_stack<F>(f: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(f)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[test]
 fn stage2_collects_package_under_wasi() {
+    with_large_stack(stage2_collects_package_under_wasi_impl);
+}
+
+fn stage2_collects_package_under_wasi_impl() {
     let dir = fresh("stage2-collect");
     let sample_dir = dir.join("sample");
     let runner_dir = dir.join("runner");
@@ -1171,7 +1422,8 @@ fn stage2_collects_package_under_wasi() {
             .expect("load");
     assert!(assembled.ok(), "{:?}", assembled.diagnostics);
     let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports()).expect("check");
-    let o = options(false);
+    let mut o = options(false);
+    o.max_memory_pages = 65535;
     let component = port(&checked, &o).expect("compile @vesper/stage2 to wasm");
     let got = run(
         &component,
@@ -1181,8 +1433,363 @@ fn stage2_collects_package_under_wasi() {
         },
     )
     .expect("run @vesper/stage2 under WASI");
-    // 2 modules (`lib.ves`, `sub.ves`), 2 functions (`main`, `helper`),
-    // 2 ADTs (`Pair`, `Flag`), 0 diagnostic bytes => 2020200.
-    assert_eq!(got, 2020200);
+    // 3 modules (prelude + `lib.ves` + `sub.ves`), 19 functions (17 prelude + `main` + `helper`),
+    // 4 ADTs (2 prelude + `Pair` + `Flag`), 0 diagnostic bytes => 3190400.
+    assert_eq!(got, 3190400);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn stage2_compiles_package_to_runnable_wasm() {
+    with_large_stack(stage2_compiles_package_to_runnable_wasm_impl);
+}
+
+fn stage2_compiles_package_to_runnable_wasm_impl() {
+    let dir = fresh("stage2-compile");
+    let sample_dir = dir.join("sample");
+    let runner_dir = dir.join("runner");
+    std::fs::create_dir_all(sample_dir.join("src")).unwrap();
+    std::fs::create_dir_all(runner_dir.join("src")).unwrap();
+
+    std::fs::write(
+        sample_dir.join("Loom.toml"),
+        "[package]\nname = \"@vesper-test/sample\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sample_dir.join("src/lib.ves"),
+        "mod sub;\n\
+         use self::sub::helper;\n\
+         struct Pair { a: u64, b: u64 }\n\
+         enum Flag { Off, On(u64) }\n\
+         pub fn main() -> u64 {\n\
+             let p = Pair { a: 10, b: 11 };\n\
+             let f = Flag::On(p.a);\n\
+             let v = match f {\n\
+                 Flag::Off => 0,\n\
+                 Flag::On(x) => wrapping_add(x, p.b),\n\
+             };\n\
+             helper(v)\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sample_dir.join("src/sub.ves"),
+        "pub fn helper(x: u64) -> u64 { wrapping_mul(x, 2) }\n",
+    )
+    .unwrap();
+
+    let stage2_path = repo()
+        .join("packages/vesper-stage2")
+        .to_string_lossy()
+        .replace('\\', "/");
+    std::fs::write(
+        runner_dir.join("Loom.toml"),
+        format!(
+            "[package]\nname = \"@vesper-test/stage2-compile-run\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+             [dependencies]\n\"@vesper/stage2\" = {{ version = \"^0.1\", path = \"{stage2_path}\" }}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        runner_dir.join("src/lib.ves"),
+        "use @vesper/stage2::stage2_compile_dir;\n\
+         pub fn main() -> u64 eff [Ffi[StdFs]] {\n\
+             let (code, val) = stage2_compile_dir(in \".\", in \"out.wasm\", in \"main\");\n\
+             wrapping_add(wrapping_mul(code, 1000000), val)\n\
+         }\n",
+    )
+    .unwrap();
+
+    let assembled =
+        vesper::packages::load_for_target(&runner_dir, Some("wasm32-wasip2"), false).expect("load");
+    assert!(assembled.ok(), "{:?}", assembled.diagnostics);
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports()).expect("check");
+    let mut o = options(false);
+    o.max_memory_pages = 65535;
+    let component = port(&checked, &o).expect("compile @vesper/stage2 to wasm");
+    let out_diag = sample_dir.join("out.wasm");
+    remove_stage2_sidecars(&out_diag);
+    let got = run(
+        &component,
+        &Ctx {
+            dirs: vec![(sample_dir.clone(), ".".into())],
+            diag_base: Some(out_diag.clone()),
+            ..Ctx::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("run @vesper/stage2 compile under WASI:\n{e}"));
+    assert!(
+        got > 0 && got < 1_000_000,
+        "{}",
+        format_stage2_error("stage2_compile_dir", got, Some(&out_diag))
+    );
+
+    let out_core = std::fs::read(sample_dir.join("out.wasm")).expect("read out.wasm");
+    let runner_bin = seed_runner::build_runner(&dir);
+    let out_file = dir.join("out.wasm");
+    std::fs::write(&out_file, &out_core).unwrap();
+    let exec = std::process::Command::new(&runner_bin)
+        .args([
+            "--invoke",
+            &format!("{}#main", vesper::wasm_backend::ENTRY_INTERFACE),
+            "--print",
+        ])
+        .arg(&out_file)
+        .output()
+        .expect("run vwasm on stage2 output");
+    assert!(
+        exec.status.success(),
+        "vwasm failed: {}",
+        String::from_utf8_lossy(&exec.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&exec.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "42",
+        "stage2-compiled wasm returned {stdout}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn stage2_compiles_vesper_ast() {
+    with_large_stack(stage2_compiles_vesper_ast_impl);
+}
+
+fn stage2_compiles_vesper_ast_impl() {
+    let dir = fresh("stage2-ast");
+    let runner_dir = dir.join("runner");
+    std::fs::create_dir_all(runner_dir.join("src")).unwrap();
+
+    let stage2_path = repo()
+        .join("packages/vesper-stage2")
+        .to_string_lossy()
+        .replace('\\', "/");
+    std::fs::write(
+        runner_dir.join("Loom.toml"),
+        format!(
+            "[package]\nname = \"@vesper-test/stage2-ast-run\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+             [dependencies]\n\"@vesper/stage2\" = {{ version = \"^0.1\", path = \"{stage2_path}\" }}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        runner_dir.join("src/lib.ves"),
+        "use @vesper/stage2::stage2_compile_dir;\n\
+         pub fn main() -> u64 eff [Ffi[StdFs]] {\n\
+             let (code, val) = stage2_compile_dir(in \"packages/vesper-stage2\", in \"/out/tmp_stage2_ast_out.wasm\", in \"main\");\n\
+             wrapping_add(wrapping_mul(code, 1000000), val)\n\
+         }\n",
+    )
+    .unwrap();
+
+    let assembled =
+        vesper::packages::load_for_target(&runner_dir, Some("wasm32-wasip2"), false).expect("load");
+    assert!(assembled.ok(), "{:?}", assembled.diagnostics);
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports()).expect("check");
+    let mut o = options(false);
+    o.max_memory_pages = 65535;
+    let component = port(&checked, &o).expect("compile @vesper/stage2 to wasm");
+    let ast_out_path = dir.join("tmp_stage2_ast_out.wasm");
+    remove_stage2_sidecars(&ast_out_path);
+    let got = run(
+        &component,
+        &Ctx {
+            dirs: vec![(repo(), ".".into()), (dir.clone(), "/out".into())],
+            fuel: Some(u64::MAX),
+            diag_base: Some(ast_out_path.clone()),
+            ..Ctx::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("run @vesper/stage2 compile under WASI:\n{e}"));
+    let err_note = read_stage2_sidecar_notes(&ast_out_path);
+    assert!(
+        err_note.is_empty() && got > 1_000_000 && got < 10_000_000,
+        "{}",
+        format_stage2_error("stage2_compile_dir", got, Some(&ast_out_path))
+    );
+    let out_bytes = std::fs::read(&ast_out_path).expect("read out");
+    assert_eq!(out_bytes.len(), got as usize);
+    assert!(out_bytes.starts_with(b"\0asm"), "invalid wasm header");
+    remove_stage2_sidecars(&ast_out_path);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn stage2_self_compilation_fixed_point() {
+    with_large_stack(stage2_self_compilation_fixed_point_impl);
+}
+
+fn stage2_self_compilation_fixed_point_impl() {
+    let dir = fresh("stage2-fixed-point");
+    let stage2_pkg = repo().join("packages/vesper-stage2");
+    let assembled = vesper::packages::load_for_target(&stage2_pkg, Some("wasm32-wasip2"), false)
+        .expect("load @vesper/stage2");
+    assert!(assembled.ok(), "{:?}", assembled.diagnostics);
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports()).expect("check");
+    let mut o = options(false);
+    o.max_memory_pages = 65535;
+    let stage2_guest = "/out/tmp_stage2_fp.wasm";
+    let stage3_guest = "/out/tmp_stage3_fp.wasm";
+    let stage2_path = dir.join("tmp_stage2_fp.wasm");
+    let stage3_path = dir.join("tmp_stage3_fp.wasm");
+    let boot_syms_path = sidecar_path(&stage2_path, ".boot.syms");
+    remove_stage2_sidecars(&stage2_path);
+    remove_stage2_sidecars(&stage3_path);
+    let _ = std::fs::remove_file(&boot_syms_path);
+    let boot_component = port_with_syms(&checked, &o, &boot_syms_path)
+        .expect("compile @vesper/stage2 boot component");
+
+    let got = run(
+        &boot_component,
+        &Ctx {
+            args: vec!["stage2", "packages/vesper-stage2", stage2_guest, "main"],
+            env: vec![("VESPER_STAGE2_SYMS", "1")],
+            dirs: vec![(repo(), ".".into()), (dir.clone(), "/out".into())],
+            fuel: Some(u64::MAX),
+            diag_base: Some(stage2_path.clone()),
+            syms_file: Some(boot_syms_path.clone()),
+        },
+    )
+    .unwrap_or_else(|e| panic!("run @vesper/stage2 boot under WASI:\n{e}"));
+    assert_eq!(
+        got,
+        0,
+        "{}",
+        format_stage2_error("stage2 boot", got, Some(&stage2_path))
+    );
+    let stage2_bytes = std::fs::read(&stage2_path).expect("read stage2.wasm");
+    assert!(stage2_bytes.starts_with(b"\0asm"), "invalid stage2.wasm");
+
+    // Wrap stage2.wasm (core module emitted by @vesper/stage2) into a WASI component and run it to produce stage3.wasm.
+    let program = backend_program(&checked.checked.world, &o).expect("backend_program");
+    let input = wasm_input(&checked.checked.world, &program, "main", &o).expect("wasm_input");
+    let wit = match outcome(&backend().words(&input)) {
+        Outcome::Module { wit, .. } => wit,
+        other => panic!("expected module wit, got {other:?}"),
+    };
+    let stage2_component = wrap(stage2_bytes.clone(), &wit, o.world);
+    let stage2_syms = sidecar_path(&stage2_path, ".syms");
+    let got3 = run(
+        &stage2_component,
+        &Ctx {
+            args: vec!["stage2", "packages/vesper-stage2", stage3_guest, "main"],
+            env: vec![("VESPER_STAGE2_SYMS", "1")],
+            dirs: vec![(repo(), ".".into()), (dir.clone(), "/out".into())],
+            fuel: Some(u64::MAX),
+            diag_base: Some(stage3_path.clone()),
+            syms_file: Some(stage2_syms),
+        },
+    )
+    .unwrap_or_else(|e| panic!("run @vesper/stage2 self-built component under WASI:\n{e}"));
+    assert_eq!(
+        got3,
+        0,
+        "{}",
+        format_stage2_error("stage2 self-built", got3, Some(&stage3_path))
+    );
+
+    let stage3_bytes = std::fs::read(&stage3_path).expect("read stage3.wasm");
+    assert_eq!(
+        stage2_bytes,
+        stage3_bytes,
+        "Stage 2 fixed point mismatch: stage2.wasm ({} bytes) != stage3.wasm ({} bytes)",
+        stage2_bytes.len(),
+        stage3_bytes.len()
+    );
+
+    remove_stage2_sidecars(&stage2_path);
+    remove_stage2_sidecars(&stage3_path);
+    let _ = std::fs::remove_file(&boot_syms_path);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn stage2_compiles_package_under_seed_runner() {
+    with_large_stack(stage2_compiles_package_under_seed_runner_impl);
+}
+
+fn stage2_compiles_package_under_seed_runner_impl() {
+    let dir = fresh("stage2-seed-runner");
+    let sample_dir = dir.join("sample");
+    std::fs::create_dir_all(sample_dir.join("src")).unwrap();
+    std::fs::write(
+        sample_dir.join("Loom.toml"),
+        "[package]\nname = \"@vesper-test/sample\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sample_dir.join("src/lib.ves"),
+        "pub fn main() -> u64 { 42 }\n",
+    )
+    .unwrap();
+
+    let stage2_pkg = repo().join("packages/vesper-stage2");
+    let assembled = vesper::packages::load_for_target(&stage2_pkg, Some("wasm32-wasip2"), false)
+        .expect("load @vesper/stage2");
+    assert!(assembled.ok(), "{:?}", assembled.diagnostics);
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports()).expect("check");
+    let mut o = options(false);
+    o.max_memory_pages = 65535;
+    let boot_component = port(&checked, &o).expect("compile @vesper/stage2 boot component");
+    let stage2_wasm = dir.join("stage2_boot.wasm");
+    std::fs::write(&stage2_wasm, &boot_component).unwrap();
+
+    let runner_bin = seed_runner::build_runner(&dir);
+    let out_wasm = dir.join("out.wasm");
+    let exec = std::process::Command::new(&runner_bin)
+        .args([
+            "--arg",
+            "stage2",
+            "--arg",
+            "/sample",
+            "--arg",
+            "/out.wasm",
+            "--arg",
+            "main",
+            "--cwd",
+            "/",
+            "--stack",
+            "65536",
+            "--input",
+            "/sample/Loom.toml",
+        ])
+        .arg(sample_dir.join("Loom.toml"))
+        .args(["--input", "/sample/src/lib.ves"])
+        .arg(sample_dir.join("src/lib.ves"))
+        .args(["--output", "/out.wasm"])
+        .arg(&out_wasm)
+        .args([
+            "--invoke",
+            &format!("{}#main", vesper::wasm_backend::ENTRY_INTERFACE),
+            "--print",
+        ])
+        .arg(&stage2_wasm)
+        .output()
+        .expect("run vwasm on stage2");
+    assert!(
+        exec.status.success(),
+        "vwasm stage2 failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&exec.stdout),
+        String::from_utf8_lossy(&exec.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&exec.stdout).trim(), "0");
+
+    let run_out = std::process::Command::new(&runner_bin)
+        .args([
+            "--invoke",
+            &format!("{}#main", vesper::wasm_backend::ENTRY_INTERFACE),
+            "--print",
+        ])
+        .arg(&out_wasm)
+        .output()
+        .expect("run vwasm on stage2 output");
+    assert!(
+        run_out.status.success(),
+        "vwasm out.wasm failed: {}",
+        String::from_utf8_lossy(&run_out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run_out.stdout).trim(), "42");
     std::fs::remove_dir_all(dir).unwrap();
 }

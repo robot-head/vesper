@@ -61,6 +61,9 @@ PORT_DIVERGENT = {
     "page": ("vesper/src/page.ves", {
         "if kind != 1 || level != 0 || flags != 0 {": "if false {",
     }),
+    "wal": ("vesper/src/wal.ves", {
+        "if seq == 0 || base == 0 {": "if true {",
+    }),
 }
 
 [
@@ -129,6 +132,7 @@ PORT_TEST_DATA = glob(["tests/fixtures/planner/**"])
             ("values", "sql"),
             ("stats", "planner_spec"),
             ("page", "pages"),
+            ("wal", "durable"),
         ]
     ]
 ]

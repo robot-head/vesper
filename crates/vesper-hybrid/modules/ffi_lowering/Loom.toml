@@ -1,0 +1,10 @@
+[package]
+name = "@vesper/hybrid-ffi-lowering"
+version = "0.1.0"
+edition = "2026"
+# Every emission reaches Cranelift through @vesper/cranelift's `.vsys` library.
+capability_ceiling = ["Fail", "Ffi"]
+
+[dependencies]
+"@vesper/ffi-emit" = { version = "^0.1", path = "../../../../packages/vesper-ffi-lowering/emit" }
+"@vesper/cranelift" = { version = "^0.1", path = "../../../../packages/vesper-cranelift" }

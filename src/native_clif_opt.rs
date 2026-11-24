@@ -75,6 +75,8 @@ pub fn run(func: &mut ir::Function) {
     hoist_loop_invariants(func);
     share_invariant_loads(func);
     hoist_loop_invariants(func);
+    if_convert_pure_diamonds(func);
+    merge_blocks(func);
     sink_slot_inits(func);
     merge_tails(func);
     shrink_unused_slots(func);
@@ -3289,5 +3291,256 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
                 }
             }
         }
+    }
+}
+
+fn is_pure_if_convert_op(op: Opcode) -> bool {
+    matches!(
+        op,
+        Opcode::Iconst
+            | Opcode::F32const
+            | Opcode::F64const
+            | Opcode::Iadd
+            | Opcode::IaddImm
+            | Opcode::Isub
+            | Opcode::Imul
+            | Opcode::ImulImm
+            | Opcode::Band
+            | Opcode::Bor
+            | Opcode::Bxor
+            | Opcode::Ishl
+            | Opcode::Ushr
+            | Opcode::Sshr
+            | Opcode::Icmp
+            | Opcode::IcmpImm
+            | Opcode::Ireduce
+            | Opcode::Uextend
+            | Opcode::Sextend
+            | Opcode::Bnot
+            | Opcode::Ineg
+            | Opcode::Select
+            | Opcode::Clz
+            | Opcode::Ctz
+            | Opcode::Popcnt
+            | Opcode::Bitrev
+            | Opcode::Fadd
+            | Opcode::Fsub
+            | Opcode::Fmul
+    )
+}
+
+fn is_if_convert_scalar_ty(ty: Type) -> bool {
+    matches!(
+        ty,
+        types::I8 | types::I16 | types::I32 | types::I64 | types::F32 | types::F64
+    )
+}
+
+fn is_if_convert_cond_ty(ty: Type) -> bool {
+    matches!(ty, types::I8 | types::I16 | types::I32 | types::I64)
+}
+
+/// Converts small pure, non-trapping `brif` diamonds and triangles into
+/// branchless `select`s (e.g. `if s < 64 { x << s } else { 0 }`, `min`, `max`).
+fn if_convert_pure_diamonds(func: &mut ir::Function) {
+    loop {
+        let mut cfg = ControlFlowGraph::with_function(func);
+        let blocks: Vec<Block> = func.layout.blocks().collect();
+        let mut changed = false;
+
+        for block in blocks {
+            if !func.layout.is_block_inserted(block) {
+                continue;
+            }
+            let Some(brif_inst) = func.layout.last_inst(block) else {
+                continue;
+            };
+            let InstructionData::Brif {
+                opcode: _,
+                arg: cond,
+                blocks: [t_call, f_call],
+            } = func.dfg.insts[brif_inst]
+            else {
+                continue;
+            };
+            if !is_if_convert_cond_ty(func.dfg.value_type(cond)) {
+                continue;
+            }
+            let t_blk = t_call.block(&func.dfg.value_lists);
+            let f_blk = f_call.block(&func.dfg.value_lists);
+            if t_blk == f_blk || t_blk == block || f_blk == block {
+                continue;
+            }
+            if t_call.len(&func.dfg.value_lists) != 0 || f_call.len(&func.dfg.value_lists) != 0 {
+                // Only handle empty-arg brif arms; triangle arm to join may carry args below.
+                // Check triangle case where one arm jumps directly to join with args.
+                let t_preds = cfg.pred_iter(t_blk).count();
+                let f_preds = cfg.pred_iter(f_blk).count();
+                let (arm_blk, arm_call, join_call, arm_is_then) =
+                    if t_preds == 1 && t_call.len(&func.dfg.value_lists) == 0 {
+                        (t_blk, t_call, f_call, true)
+                    } else if f_preds == 1 && f_call.len(&func.dfg.value_lists) == 0 {
+                        (f_blk, f_call, t_call, false)
+                    } else {
+                        continue;
+                    };
+                let _ = arm_call;
+                let Some(arm_term) = func.layout.last_inst(arm_blk) else {
+                    continue;
+                };
+                let InstructionData::Jump {
+                    opcode: Opcode::Jump,
+                    destination: arm_dest,
+                } = func.dfg.insts[arm_term]
+                else {
+                    continue;
+                };
+                let join_blk = join_call.block(&func.dfg.value_lists);
+                if arm_dest.block(&func.dfg.value_lists) != join_blk {
+                    continue;
+                }
+                let arm_insts: Vec<Inst> = func
+                    .layout
+                    .block_insts(arm_blk)
+                    .take_while(|&i| i != arm_term)
+                    .collect();
+                if arm_insts.is_empty()
+                    || arm_insts.len() > 6
+                    || !arm_insts
+                        .iter()
+                        .all(|&i| is_pure_if_convert_op(func.dfg.insts[i].opcode()))
+                {
+                    continue;
+                }
+                let arm_args: Vec<Value> = arm_dest
+                    .args(&func.dfg.value_lists)
+                    .filter_map(|a| a.as_value())
+                    .collect();
+                let join_args: Vec<Value> = join_call
+                    .args(&func.dfg.value_lists)
+                    .filter_map(|a| a.as_value())
+                    .collect();
+                if arm_args.len() != join_args.len()
+                    || arm_args.len() > 2
+                    || arm_args.len() != arm_dest.len(&func.dfg.value_lists)
+                    || join_args.len() != join_call.len(&func.dfg.value_lists)
+                    || arm_args.iter().zip(&join_args).any(|(&a, &b)| {
+                        let ta = func.dfg.value_type(a);
+                        ta != func.dfg.value_type(b) || !is_if_convert_scalar_ty(ta)
+                    })
+                {
+                    continue;
+                }
+                for inst in arm_insts {
+                    func.layout.remove_inst(inst);
+                    func.layout.insert_inst(inst, brif_inst);
+                }
+                let mut pos = cranelift_codegen::cursor::FuncCursor::new(func).at_inst(brif_inst);
+                let mut selected = Vec::with_capacity(arm_args.len());
+                for (&a, &b) in arm_args.iter().zip(&join_args) {
+                    let (t_v, f_v) = if arm_is_then { (a, b) } else { (b, a) };
+                    selected.push(BlockArg::Value(pos.ins().select(cond, t_v, f_v)));
+                }
+                pos.ins().jump(join_blk, &selected);
+                func.layout.remove_inst(brif_inst);
+                func.layout.remove_inst(arm_term);
+                func.layout.remove_block(arm_blk);
+                changed = true;
+                break;
+            }
+
+            let t_preds = cfg.pred_iter(t_blk).count();
+            let f_preds = cfg.pred_iter(f_blk).count();
+            let Some(t_term) = func.layout.last_inst(t_blk) else {
+                continue;
+            };
+            let Some(f_term) = func.layout.last_inst(f_blk) else {
+                continue;
+            };
+            let (t_jump, f_jump) = match (func.dfg.insts[t_term], func.dfg.insts[f_term]) {
+                (
+                    InstructionData::Jump {
+                        opcode: Opcode::Jump,
+                        destination: td,
+                    },
+                    InstructionData::Jump {
+                        opcode: Opcode::Jump,
+                        destination: fd,
+                    },
+                ) => (td, fd),
+                _ => continue,
+            };
+
+            let t_dest_blk = t_jump.block(&func.dfg.value_lists);
+            let f_dest_blk = f_jump.block(&func.dfg.value_lists);
+
+            if t_preds == 1
+                && f_preds == 1
+                && t_dest_blk == f_dest_blk
+                && t_dest_blk != t_blk
+                && t_dest_blk != f_blk
+            {
+                // Full diamond: block -> {t_blk, f_blk} -> join
+                let t_insts: Vec<Inst> = func
+                    .layout
+                    .block_insts(t_blk)
+                    .take_while(|&i| i != t_term)
+                    .collect();
+                let f_insts: Vec<Inst> = func
+                    .layout
+                    .block_insts(f_blk)
+                    .take_while(|&i| i != f_term)
+                    .collect();
+                if (t_insts.is_empty() && f_insts.is_empty())
+                    || t_insts.len() + f_insts.len() > 6
+                    || !t_insts
+                        .iter()
+                        .chain(&f_insts)
+                        .all(|&i| is_pure_if_convert_op(func.dfg.insts[i].opcode()))
+                {
+                    continue;
+                }
+                let t_args: Vec<Value> = t_jump
+                    .args(&func.dfg.value_lists)
+                    .filter_map(|a| a.as_value())
+                    .collect();
+                let f_args: Vec<Value> = f_jump
+                    .args(&func.dfg.value_lists)
+                    .filter_map(|a| a.as_value())
+                    .collect();
+                if t_args.len() != f_args.len()
+                    || t_args.len() > 2
+                    || t_args.len() != t_jump.len(&func.dfg.value_lists)
+                    || f_args.len() != f_jump.len(&func.dfg.value_lists)
+                    || t_args.iter().zip(&f_args).any(|(&a, &b)| {
+                        let ta = func.dfg.value_type(a);
+                        ta != func.dfg.value_type(b) || !is_if_convert_scalar_ty(ta)
+                    })
+                {
+                    continue;
+                }
+                for inst in t_insts.into_iter().chain(f_insts) {
+                    func.layout.remove_inst(inst);
+                    func.layout.insert_inst(inst, brif_inst);
+                }
+                let mut pos = cranelift_codegen::cursor::FuncCursor::new(func).at_inst(brif_inst);
+                let mut selected = Vec::with_capacity(t_args.len());
+                for (&a, &b) in t_args.iter().zip(&f_args) {
+                    selected.push(BlockArg::Value(pos.ins().select(cond, a, b)));
+                }
+                pos.ins().jump(t_dest_blk, &selected);
+                func.layout.remove_inst(brif_inst);
+                func.layout.remove_inst(t_term);
+                func.layout.remove_inst(f_term);
+                func.layout.remove_block(t_blk);
+                func.layout.remove_block(f_blk);
+                changed = true;
+                break;
+            }
+        }
+        if !changed {
+            break;
+        }
+        cfg.compute(func);
     }
 }

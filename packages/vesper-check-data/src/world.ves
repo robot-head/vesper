@@ -4,6 +4,7 @@
 
 use self::util::{
     add,
+    copy_seq,
     inc,
     fold,
     inc32,
@@ -283,7 +284,156 @@ pub fn find_span(in rows: ChunkSeq[SpanRow], start: u64, end: u64) -> u64 {
 
 const NO_ADT: u32 = NONE32;
 
+fn copy_span_rows(in rows: ChunkSeq[SpanRow]) -> ChunkSeq[SpanRow] {
+    let n = rows.len();
+    if n == 0 {
+        return ChunkSeq::new[SpanRow]();
+    }
+    let mut out = ChunkSeq::with_capacity[SpanRow](n);
+    for i in 0..n {
+        match rows.try_get(i) {
+            Option::Some(r) => out
+                .push(
+                    SpanRow {
+                        start: r.start,
+                        end: r.end,
+                        ty: r.ty,
+                    }
+                ),
+            Option::None => {},
+        }
+    }
+    out
+}
+
 impl World {
+    pub fn deep_clone_in_heap(in self) -> World {
+        let mut adts = ChunkSeq::with_capacity[Adt](self.adts.len());
+        for i in 0..self.adts.len() {
+            match self.adts.try_get(i) {
+                Option::Some(v) => adts
+                    .push(
+                        Adt {
+                            name: v.name,
+                            mode: v.mode,
+                            ga: v.ga,
+                            gn: v.gn,
+                            va: v.va,
+                            vn: v.vn,
+                            is_enum: v.is_enum,
+                            tile: v.tile,
+                            span_zero: v.span_zero,
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        let mut generics = ChunkSeq::with_capacity[Generic](self.generics.len());
+        for i in 0..self.generics.len() {
+            match self.generics.try_get(i) {
+                Option::Some(v) => generics
+                    .push(
+                        Generic {
+                            name: v.name,
+                            bound: v.bound,
+                            row: v.row,
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        let mut variants = ChunkSeq::with_capacity[Variant](self.variants.len());
+        for i in 0..self.variants.len() {
+            match self.variants.try_get(i) {
+                Option::Some(v) => variants
+                    .push(
+                        Variant {
+                            name: v.name,
+                            fa: v.fa,
+                            fc: v.fc,
+                            named: v.named,
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        let mut fields = ChunkSeq::with_capacity[Field](self.fields.len());
+        for i in 0..self.fields.len() {
+            match self.fields.try_get(i) {
+                Option::Some(v) => fields
+                    .push(
+                        Field {
+                            name: v.name,
+                            ty: v.ty,
+                            modality: v.modality,
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        let mut effects = ChunkSeq::with_capacity[EffectRow](self.effects.len());
+        for i in 0..self.effects.len() {
+            match self.effects.try_get(i) {
+                Option::Some(v) => effects
+                    .push(
+                        EffectRow {
+                            name: v.name,
+                            linear: v.linear,
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        let k_copy = Known {
+            string: self.k.string,
+            str_: self.k.str_,
+            dyn_: self.k.dyn_,
+            region_box: self.k.region_box,
+            watermark: self.k.watermark,
+            chunk_seq: self.k.chunk_seq,
+            slice: self.k.slice,
+            tiled_seq: self.k.tiled_seq,
+            box_: self.k.box_,
+            vec: self.k.vec,
+            mask: self.k.mask,
+            u8_: self.k.u8_,
+            u16_: self.k.u16_,
+            u32_: self.k.u32_,
+            u64_: self.k.u64_,
+            usize_: self.k.usize_,
+            i8_: self.k.i8_,
+            i16_: self.k.i16_,
+            i32_: self.k.i32_,
+            i64_: self.k.i64_,
+            isize_: self.k.isize_,
+            i128_: self.k.i128_,
+            u128_: self.k.u128_,
+            f32_: self.k.f32_,
+            f64_: self.k.f64_,
+            bool_: self.k.bool_,
+            unit: self.k.unit,
+            never: self.k.never,
+            region: self.k.region,
+            len: self.k.len,
+            cap: self.k.cap,
+            data: self.k.data,
+        };
+        World {
+            adts: adts,
+            generics: generics,
+            variants: variants,
+            fields: fields,
+            by_name: copy_seq[u32](in self.by_name),
+            box_active: self.box_active,
+            k: k_copy,
+            effects: effects,
+            effect_by_name: copy_seq[u32](in self.effect_by_name),
+            expr_types: copy_span_rows(in self.expr_types),
+            partial_ops: copy_span_rows(in self.partial_ops),
+            overflow_ops: copy_span_rows(in self.overflow_ops),
+        }
+    }
+
     pub fn adt(in self, i: u32) -> Adt {
         match self.adts.try_get(w(i)) {
             Option::Some(a) => a,

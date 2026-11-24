@@ -116,6 +116,22 @@ vesper_hybrid(
             "//packages/vesper-codegen-numeric:codegen_numeric_package",
             "//packages/vesper-cranelift:cranelift_package",
         ],
+        # ChunkSeq and Slice operations (#1283), through the shim.
+        "hybrid_codegen_seq": [
+            "//:codegen_seq_emit_package",
+            "//packages/vesper-cranelift:cranelift_package",
+        ],
+        # Closures, handlers and effect calls (#1284), through the shim.
+        "hybrid_codegen_control": [
+            "//:codegen_control_emit_package",
+            "//packages/vesper-cranelift:cranelift_package",
+        ],
+        # Foreign (.vsys) call emission (#1287), through the shim.
+        "hybrid_ffi_lowering": [
+            "//:codegen_base_package",
+            "//:ffi_emit_package",
+            "//packages/vesper-cranelift:cranelift_package",
+        ],
         # Scalars, locals and control flow (#1280): the plan, and emission
         # through the shim.
         "hybrid_codegen_scalar": [
@@ -208,6 +224,9 @@ vesper_hybrid(
         "hybrid_codegen_export": "modules/codegen_export",
         "hybrid_codegen_numeric": "modules/codegen_numeric",
         "hybrid_codegen_scalar": "modules/codegen_scalar",
+        "hybrid_codegen_seq": "modules/codegen_seq",
+        "hybrid_codegen_control": "modules/codegen_control",
+        "hybrid_ffi_lowering": "modules/ffi_lowering",
         "hybrid_ir_check": "modules/ir_check",
         "hybrid_ir_inline": "modules/ir_inline",
         "hybrid_ir_opt": "modules/ir_opt",

@@ -1,0 +1,291 @@
+// @vesper/quarry::wal: WAL record and header codec (`src/wal.rs`).
+
+const PAGE_SIZE: u64 = 16384;
+const MAX_PAYLOAD: u64 = 32832;
+// 2 * PAGE_SIZE + 64
+
+// Decode error codes:
+//   0 = Ok
+//   1 = unknown log record tag
+//   2 = page image length
+//   3 = trailing log record bytes
+//   4 = log byte string too long
+//   5 = truncated log record
+const ERR_TAG: u64 = 1;
+const ERR_PAGE_LEN: u64 = 2;
+const ERR_TRAILING: u64 = 3;
+const ERR_TOO_LONG: u64 = 4;
+const ERR_TRUNCATED: u64 = 5;
+
+fn get_u8(in b: Slice[u8], idx: u64) -> u64 {
+    match b.try_get(idx) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn set_u8(inout b: Slice[u8], idx: u64, v: u64) {
+    b.try_set(idx, wrapping_u8(v & 255));
+}
+
+fn set_u64(inout s: Slice[u64], idx: u64, v: u64) {
+    s.try_set(idx, v);
+}
+
+fn rd_u16(in b: Slice[u8], off: u64) -> u64 {
+    get_u8(in b, off) | (get_u8(in b, wrapping_add(off, 1)) << 8)
+}
+
+fn rd_u32(in b: Slice[u8], off: u64) -> u64 {
+    get_u8(in b, off) | (get_u8(in b, wrapping_add(off, 1)) << 8) | (
+        get_u8(in b, wrapping_add(off, 2)) << 16
+    ) | (get_u8(in b, wrapping_add(off, 3)) << 24)
+}
+
+fn rd_u64(in b: Slice[u8], off: u64) -> u64 {
+    rd_u32(in b, off) | (rd_u32(in b, wrapping_add(off, 4)) << 32)
+}
+
+fn wr_u16(inout b: Slice[u8], off: u64, v: u64) {
+    set_u8(inout b, off, v & 255);
+    set_u8(inout b, wrapping_add(off, 1), (v >> 8) & 255);
+}
+
+fn wr_u32(inout b: Slice[u8], off: u64, v: u64) {
+    set_u8(inout b, off, v & 255);
+    set_u8(inout b, wrapping_add(off, 1), (v >> 8) & 255);
+    set_u8(inout b, wrapping_add(off, 2), (v >> 16) & 255);
+    set_u8(inout b, wrapping_add(off, 3), (v >> 24) & 255);
+}
+
+fn wr_u64(inout b: Slice[u8], off: u64, v: u64) {
+    wr_u32(inout b, off, v & 4294967295);
+    wr_u32(inout b, wrapping_add(off, 4), (v >> 32) & 4294967295);
+}
+
+fn copy_bytes(inout dst: Slice[u8], dst_off: u64, in src: Slice[u8], len: u64) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        set_u8(inout dst, wrapping_add(dst_off, i), get_u8(in src, i));
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn push_bytes(inout out: Slice[u8], at: u64, in src: Slice[u8]) -> u64 {
+    let len = src.len();
+    wr_u32(inout out, at, len);
+    let data_at = wrapping_add(at, 4);
+    copy_bytes(inout out, data_at, in src, len);
+    wrapping_add(data_at, len)
+}
+
+pub fn encode(
+    tag: u64,
+    txn: u64,
+    prev: u64,
+    page: u64,
+    undo_next: u64,
+    slot: u64,
+    in b1: Slice[u8],
+    in b2: Slice[u8],
+    inout out: Slice[u8]
+) -> u64 {
+    set_u8(inout out, 0, tag);
+    let mut at: u64 = 1;
+    if tag == 1 {
+        wr_u64(inout out, at, page);
+        at = wrapping_add(at, 8);
+        return push_bytes(inout out, at, in b1);
+    }
+    if tag == 2 {
+        wr_u64(inout out, at, txn);
+        wr_u64(inout out, wrapping_add(at, 8), prev);
+        wr_u64(inout out, wrapping_add(at, 16), page);
+        wr_u16(inout out, wrapping_add(at, 24), slot);
+        return push_bytes(inout out, wrapping_add(at, 26), in b1);
+    }
+    if tag == 3 {
+        wr_u64(inout out, at, txn);
+        wr_u64(inout out, wrapping_add(at, 8), prev);
+        wr_u64(inout out, wrapping_add(at, 16), page);
+        wr_u16(inout out, wrapping_add(at, 24), slot);
+        at = push_bytes(inout out, wrapping_add(at, 26), in b1);
+        return push_bytes(inout out, at, in b2);
+    }
+    if tag == 4 {
+        wr_u64(inout out, at, txn);
+        wr_u64(inout out, wrapping_add(at, 8), prev);
+        wr_u64(inout out, wrapping_add(at, 16), page);
+        wr_u64(inout out, wrapping_add(at, 24), undo_next);
+        wr_u16(inout out, wrapping_add(at, 32), slot);
+        return push_bytes(inout out, wrapping_add(at, 34), in b1);
+    }
+    wr_u64(inout out, at, txn);
+    wr_u64(inout out, wrapping_add(at, 8), prev);
+    wrapping_add(at, 16)
+}
+
+// `meta`: [tag, txn, prev, page, undo_next, slot, b1_off, b1_len, b2_off, b2_len]
+pub fn decode(in payload: Slice[u8], inout meta: Slice[u64]) -> u64 {
+    let total = payload.len();
+    if total < 1 {
+        return ERR_TRUNCATED;
+    }
+    let tag = get_u8(in payload, 0);
+    let mut at: u64 = 1;
+    let mut txn: u64 = 0;
+    let mut prev: u64 = 0;
+    let mut page: u64 = 0;
+    let mut undo_next: u64 = 0;
+    let mut slot: u64 = 0;
+    let mut b1_off: u64 = 0;
+    let mut b1_len: u64 = 0;
+    let mut b2_off: u64 = 0;
+    let mut b2_len: u64 = 0;
+
+    if tag == 1 {
+        if wrapping_sub(total, at) < 12 {
+            return ERR_TRUNCATED;
+        }
+        page = rd_u64(in payload, at);
+        at = wrapping_add(at, 8);
+        b1_len = rd_u32(in payload, at);
+        at = wrapping_add(at, 4);
+        if b1_len > MAX_PAYLOAD {
+            return ERR_TOO_LONG;
+        }
+        if wrapping_sub(total, at) < b1_len {
+            return ERR_TRUNCATED;
+        }
+        if b1_len != PAGE_SIZE {
+            return ERR_PAGE_LEN;
+        }
+        b1_off = at;
+        at = wrapping_add(at, b1_len);
+    } else if tag == 2 {
+        if wrapping_sub(total, at) < 30 {
+            return ERR_TRUNCATED;
+        }
+        txn = rd_u64(in payload, at);
+        prev = rd_u64(in payload, wrapping_add(at, 8));
+        page = rd_u64(in payload, wrapping_add(at, 16));
+        slot = rd_u16(in payload, wrapping_add(at, 24));
+        b1_len = rd_u32(in payload, wrapping_add(at, 26));
+        at = wrapping_add(at, 30);
+        if b1_len > MAX_PAYLOAD {
+            return ERR_TOO_LONG;
+        }
+        if wrapping_sub(total, at) < b1_len {
+            return ERR_TRUNCATED;
+        }
+        b1_off = at;
+        at = wrapping_add(at, b1_len);
+    } else if tag == 3 {
+        if wrapping_sub(total, at) < 30 {
+            return ERR_TRUNCATED;
+        }
+        txn = rd_u64(in payload, at);
+        prev = rd_u64(in payload, wrapping_add(at, 8));
+        page = rd_u64(in payload, wrapping_add(at, 16));
+        slot = rd_u16(in payload, wrapping_add(at, 24));
+        b1_len = rd_u32(in payload, wrapping_add(at, 26));
+        at = wrapping_add(at, 30);
+        if b1_len > MAX_PAYLOAD {
+            return ERR_TOO_LONG;
+        }
+        if wrapping_sub(total, at) < b1_len {
+            return ERR_TRUNCATED;
+        }
+        b1_off = at;
+        at = wrapping_add(at, b1_len);
+        if wrapping_sub(total, at) < 4 {
+            return ERR_TRUNCATED;
+        }
+        b2_len = rd_u32(in payload, at);
+        at = wrapping_add(at, 4);
+        if b2_len > MAX_PAYLOAD {
+            return ERR_TOO_LONG;
+        }
+        if wrapping_sub(total, at) < b2_len {
+            return ERR_TRUNCATED;
+        }
+        b2_off = at;
+        at = wrapping_add(at, b2_len);
+    } else if tag == 4 {
+        if wrapping_sub(total, at) < 38 {
+            return ERR_TRUNCATED;
+        }
+        txn = rd_u64(in payload, at);
+        prev = rd_u64(in payload, wrapping_add(at, 8));
+        page = rd_u64(in payload, wrapping_add(at, 16));
+        undo_next = rd_u64(in payload, wrapping_add(at, 24));
+        slot = rd_u16(in payload, wrapping_add(at, 32));
+        b1_len = rd_u32(in payload, wrapping_add(at, 34));
+        at = wrapping_add(at, 38);
+        if b1_len > MAX_PAYLOAD {
+            return ERR_TOO_LONG;
+        }
+        if wrapping_sub(total, at) < b1_len {
+            return ERR_TRUNCATED;
+        }
+        b1_off = at;
+        at = wrapping_add(at, b1_len);
+    } else if tag == 5 || tag == 6 {
+        if wrapping_sub(total, at) < 16 {
+            return ERR_TRUNCATED;
+        }
+        txn = rd_u64(in payload, at);
+        prev = rd_u64(in payload, wrapping_add(at, 8));
+        at = wrapping_add(at, 16);
+    } else {
+        return ERR_TAG;
+    }
+
+    if at != total {
+        return ERR_TRAILING;
+    }
+    set_u64(inout meta, 0, tag);
+    set_u64(inout meta, 1, txn);
+    set_u64(inout meta, 2, prev);
+    set_u64(inout meta, 3, page);
+    set_u64(inout meta, 4, undo_next);
+    set_u64(inout meta, 5, slot);
+    set_u64(inout meta, 6, b1_off);
+    set_u64(inout meta, 7, b1_len);
+    set_u64(inout meta, 8, b2_off);
+    set_u64(inout meta, 9, b2_len);
+    0
+}
+
+// Validate WAL header bytes (excluding CRC32C which is checked in Rust).
+// Returns 1 on valid (`out[0] = seq`, `out[1] = base`), 0 on invalid.
+pub fn decode_header(in h: Slice[u8], inout out: Slice[u64]) -> u64 {
+    if h.len() != 32 {
+        return 0;
+    }
+    // Magic "QRYWAL01": 81, 82, 89, 87, 65, 76, 48, 49
+    if get_u8(in h, 0) != 81
+        || get_u8(in h, 1) != 82
+        || get_u8(in h, 2) != 89
+        || get_u8(in h, 3) != 87
+        || get_u8(in h, 4) != 65
+        || get_u8(in h, 5) != 76
+        || get_u8(in h, 6) != 48
+        || get_u8(in h, 7) != 49 {
+        return 0;
+    }
+    if rd_u32(in h, 28) != 0 {
+        return 0;
+    }
+    let seq = rd_u64(in h, 8);
+    let base = rd_u64(in h, 16);
+    if seq == 0 || base == 0 {
+        return 0;
+    }
+    set_u64(inout out, 0, seq);
+    set_u64(inout out, 1, base);
+    1
+}

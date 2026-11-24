@@ -692,6 +692,14 @@ fn encode_mono_input_with_tail(
         64,
         &fp,
     )?;
+    out.extend_from_slice(&encode_mono_body(outcome, tail));
+    Some(out)
+}
+
+pub fn encode_mono_body(
+    outcome: &vesper::pact_frontend::MonoCheckOutcome,
+    tail: &[u64],
+) -> Vec<u8> {
     let mut e = Enc::default();
     let mut t = vec![];
     t.push(outcome.adts.len() as u64);
@@ -781,8 +789,7 @@ fn encode_mono_input_with_tail(
         }
     }
     t.extend_from_slice(tail);
-    out.extend_from_slice(&e.finish(&[], &t));
-    Some(out)
+    e.finish(&[], &t)
 }
 
 pub fn decode_mono_check(words: &[u64]) -> (Vec<Diagnostic>, bool, Vec<bool>, Vec<Diagnostic>) {

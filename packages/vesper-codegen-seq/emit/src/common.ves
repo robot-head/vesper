@@ -44,6 +44,7 @@ use @vesper/cranelift::{
     ins_ireduce,
     ins_ishl_imm,
     ins_istore8,
+    ins_istore16,
     ins_istore32,
     ins_jump,
     ins_jump0,
@@ -56,6 +57,7 @@ use @vesper/cranelift::{
     ins_symbol_value,
     ins_uextend,
     ins_uload8,
+    ins_uload16,
     ins_uload32,
     inst_result,
     linkage_import,
@@ -351,6 +353,8 @@ pub fn seq_load_elem(inout b: Builder, in m: Module, addr: Value, e: ElemDesc, o
     }
     if e.stride == 1 {
         ins_uload8(inout b, ty_i64(), PLAIN, addr, 0)
+    } else if e.stride == 2 {
+        ins_uload16(inout b, ty_i64(), PLAIN, addr, 0)
     } else if e.stride == 4 {
         ins_uload32(inout b, PLAIN, addr, 0)
     } else {
@@ -376,6 +380,8 @@ pub fn seq_store_elem(inout b: Builder, addr: Value, raw: Value, e: ElemDesc, op
     let v = coerce(inout b, raw, e, optimize);
     if e.stride == 1 {
         ins_istore8(inout b, PLAIN, v, addr, 0);
+    } else if e.stride == 2 {
+        ins_istore16(inout b, PLAIN, v, addr, 0);
     } else if e.stride == 4 {
         ins_istore32(inout b, PLAIN, v, addr, 0);
     } else {

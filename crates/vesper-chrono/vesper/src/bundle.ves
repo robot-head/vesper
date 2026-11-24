@@ -1,0 +1,642 @@
+// `.vchrono` crash bundles: serialized, redacted, and authenticated recordings.
+use @vesper-std/hash::blake3::{
+    blake3_keyed,
+    digest_bytes
+};
+use super::redact::{
+    RedactionEntry,
+    RedactionPolicy,
+    scrub_image,
+    scrub_metadata,
+    scrub_record,
+    verify_absent,
+};
+use super::ring::{
+    FlightEvent,
+    FlightRecorder,
+    SnapshotImage,
+    events,
+    first_retained_seq,
+    snapshots
+};
+use super::wire::{
+    EventHeader,
+    decode_inout_write,
+    decode_obligation_record,
+    digest_bytes as wire_digest_bytes,
+    effect_inout_write,
+    effect_obligation,
+    encode_event_header,
+    header_bytes,
+    inout_write_bytes,
+    op_tag_digest,
+    reserved_effect_base,
+};
+
+pub copy struct BundleLimits {
+    pub max_bytes: u64,
+    pub max_records: u64,
+    pub max_payload: u64,
+    pub max_snapshots: u64,
+    pub max_image: u64,
+    pub max_metadata: u64,
+    pub max_redactions: u64,
+}
+
+pub fn default_limits() -> BundleLimits {
+    BundleLimits {
+        max_bytes: 268435456,
+        max_records: 4194304,
+        max_payload: 1048576,
+        max_snapshots: 4096,
+        max_image: 67108864,
+        max_metadata: 1048576,
+        max_redactions: 4194304,
+    }
+}
+
+pub struct Bundle {
+    pub metadata: ChunkSeq[u8],
+    pub first_seq: u64,
+    pub next_seq: u64,
+    pub evicted_records: u64,
+    pub records: ChunkSeq[FlightEvent],
+    pub snapshots: ChunkSeq[SnapshotImage],
+    pub redactions: ChunkSeq[RedactionEntry],
+}
+
+// BundleError codes:
+// 0 = Ok
+// 1 = TooLarge
+// 2 = Truncated
+// 3 = BadMagic
+// 4 = UnsupportedVersion
+// 5 = UnsupportedFlags
+// 6 = Authentication
+// 7 = LimitExceeded
+// 8 = TrailingBytes
+// 9 = Malformed
+// 10 = RedactionSurvived
+
+fn byte_at(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn push_u32_le(inout out: ChunkSeq[u8], v: u32) {
+    let w = widen_u64(v);
+    out.push(wrapping_u8(w & 255));
+    out.push(wrapping_u8(wrapping_shr_u64(w, 8) & 255));
+    out.push(wrapping_u8(wrapping_shr_u64(w, 16) & 255));
+    out.push(wrapping_u8(wrapping_shr_u64(w, 24) & 255));
+}
+
+fn push_u64_le(inout out: ChunkSeq[u8], v: u64) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= 8 {
+            break;
+        }
+        out
+            .push(
+                wrapping_u8(
+                    wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8))) & 255,
+                )
+            );
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn push_slice(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= s.len() {
+            break;
+        }
+        out.push(byte_at(in s, i));
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn read_u32_le(in b: Slice[u8], off: u64) -> u32 {
+    match b.try_read_u32_le(off) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn read_u64_le(in b: Slice[u8], off: u64) -> u64 {
+    match b.try_read_u64_le(off) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn reverse_events(inout src: ChunkSeq[FlightEvent]) -> ChunkSeq[FlightEvent] {
+    let mut rev: ChunkSeq[FlightEvent] = ChunkSeq::new();
+    loop {
+        match src.pop() {
+            Option::Some(e) => rev.push(e),
+            Option::None => break,
+        }
+    }
+    rev
+}
+
+fn reverse_snapshots(inout src: ChunkSeq[SnapshotImage]) -> ChunkSeq[SnapshotImage] {
+    let mut rev: ChunkSeq[SnapshotImage] = ChunkSeq::new();
+    loop {
+        match src.pop() {
+            Option::Some(s) => rev.push(s),
+            Option::None => break,
+        }
+    }
+    rev
+}
+
+pub fn capture_bundle(
+    in recorder: FlightRecorder,
+    in policy: RedactionPolicy,
+    in metadata_in: Slice[u8],
+) -> Bundle {
+    let mut redactions: ChunkSeq[RedactionEntry] = ChunkSeq::new();
+    let mut metadata: ChunkSeq[u8] = ChunkSeq::new();
+    push_slice(inout metadata, in metadata_in);
+    scrub_metadata(in policy, inout metadata, inout redactions);
+
+    let mut raw_evs = events(in recorder);
+    let mut rev_evs = reverse_events(inout raw_evs);
+    let mut records: ChunkSeq[FlightEvent] = ChunkSeq::new();
+    loop {
+        match rev_evs.pop() {
+            Option::Some(ev_in) => {
+                let mut ev = ev_in;
+                scrub_record(
+                    in policy,
+                    ev.lamport_seq,
+                    ev.effect_id,
+                    ev.op_tag,
+                    ev.digest,
+                    inout ev.payload,
+                    inout redactions,
+                );
+                records.push(ev);
+            }
+            Option::None => break,
+        }
+    }
+
+    let mut raw_snaps = snapshots(in recorder);
+    let mut rev_snaps = reverse_snapshots(inout raw_snaps);
+    let mut snaps: ChunkSeq[SnapshotImage] = ChunkSeq::new();
+    loop {
+        match rev_snaps.pop() {
+            Option::Some(sn_in) => {
+                let mut sn = sn_in;
+                scrub_image(in policy, sn.epoch_id, inout sn.image, inout redactions);
+                snaps.push(sn);
+            }
+            Option::None => break,
+        }
+    }
+
+    Bundle {
+        metadata: metadata,
+        first_seq: first_retained_seq(in recorder),
+        next_seq: recorder.next_seq,
+        evicted_records: recorder.evicted_records,
+        records: records,
+        snapshots: snaps,
+        redactions: redactions,
+    }
+}
+
+pub fn seal_bundle(in bundle: Bundle, in key: Slice[u8]) -> Result[ChunkSeq[u8], u32] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new();
+    // MAGIC "VCHRONO1"
+    out.push(86);
+    out.push(67);
+    out.push(72);
+    out.push(82);
+    out.push(79);
+    out.push(78);
+    out.push(79);
+    out.push(49);
+    // version = 1, flags = 0
+    push_u32_le(inout out, 1);
+    push_u32_le(inout out, 0);
+    let mlen = bundle.metadata.as_slice().len();
+    if mlen > 4294967295 {
+        return Result::Err(7);
+    }
+    push_u32_le(inout out, wrapping_u32(mlen));
+    push_slice(inout out, in bundle.metadata.as_slice());
+    push_u64_le(inout out, bundle.first_seq);
+    push_u64_le(inout out, bundle.next_seq);
+    push_u64_le(inout out, bundle.evicted_records);
+
+    let rcount = bundle.records.as_slice().len();
+    if rcount > 4294967295 {
+        return Result::Err(7);
+    }
+    push_u32_le(inout out, wrapping_u32(rcount));
+    let recs = bundle.records.as_slice();
+    let mut ri: u64 = 0;
+    loop {
+        if ri >= rcount {
+            break;
+        }
+        match recs.try_get(ri) {
+            Option::Some(rec) => {
+                let plen = rec.payload.as_slice().len();
+                if plen > 4294967295 {
+                    return Result::Err(7);
+                }
+                let op_tag = if rec.digest {
+                    rec.op_tag | op_tag_digest()
+                } else {
+                    rec.op_tag
+                };
+                let hdr = encode_event_header(
+                    EventHeader {
+                        lamport_seq: rec.lamport_seq,
+                        fiber_id: rec.fiber_id,
+                        ipt_tsc_anchor: rec.time_ns,
+                        effect_id: rec.effect_id,
+                        op_tag: op_tag,
+                        payload_byte_len: wrapping_u32(plen),
+                    }
+                );
+                push_slice(inout out, in hdr.as_slice());
+                push_slice(inout out, in rec.payload.as_slice());
+            }
+            Option::None => {}
+        }
+        ri = wrapping_add(ri, 1);
+    }
+
+    let scount = bundle.snapshots.as_slice().len();
+    if scount > 4294967295 {
+        return Result::Err(7);
+    }
+    push_u32_le(inout out, wrapping_u32(scount));
+    let snaps = bundle.snapshots.as_slice();
+    let mut si: u64 = 0;
+    loop {
+        if si >= scount {
+            break;
+        }
+        match snaps.try_get(si) {
+            Option::Some(sn) => {
+                let ilen = sn.image.as_slice().len();
+                if ilen > 4294967295 {
+                    return Result::Err(7);
+                }
+                push_u32_le(inout out, sn.epoch_id);
+                push_u64_le(inout out, sn.start_lamport_seq);
+                push_u64_le(inout out, sn.time_ns);
+                push_u32_le(inout out, wrapping_u32(ilen));
+                push_slice(inout out, in sn.image.as_slice());
+            }
+            Option::None => {}
+        }
+        si = wrapping_add(si, 1);
+    }
+
+    let red_count = bundle.redactions.as_slice().len();
+    if red_count > 4294967295 {
+        return Result::Err(7);
+    }
+    push_u32_le(inout out, wrapping_u32(red_count));
+    let reds = bundle.redactions.as_slice();
+    let mut rdi: u64 = 0;
+    loop {
+        if rdi >= red_count {
+            break;
+        }
+        match reds.try_get(rdi) {
+            Option::Some(e) => {
+                out.push(e.target_tag);
+                push_u64_le(inout out, e.target_val);
+                push_u32_le(inout out, e.offset);
+                push_u32_le(inout out, e.len);
+            }
+            Option::None => {}
+        }
+        rdi = wrapping_add(rdi, 1);
+    }
+
+    match blake3_keyed(in key, in out.as_slice()) {
+        Option::Some(mac) => {
+            digest_bytes(mac, inout out);
+            Result::Ok(out)
+        }
+        Option::None => Result::Err(6),
+    }
+}
+
+pub fn export_bundle(
+    in recorder: FlightRecorder,
+    in policy: RedactionPolicy,
+    in metadata: Slice[u8],
+    in key: Slice[u8],
+) -> Result[ChunkSeq[u8], u32] {
+    let b = capture_bundle(in recorder, in policy, in metadata);
+    match seal_bundle(in b, in key) {
+        Result::Err(e) => Result::Err(e),
+        Result::Ok(bytes) => match verify_absent(in policy, in bytes.as_slice()) {
+            Option::Some(_) => Result::Err(10),
+            Option::None => Result::Ok(bytes),
+        },
+    }
+}
+
+fn slice_copy(in src: Slice[u8], start: u64, len: u64) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new();
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        out.push(byte_at(in src, wrapping_add(start, i)));
+        i = wrapping_add(i, 1);
+    }
+    out
+}
+
+fn validate_bundle(in b: Bundle) -> u32 {
+    if b.first_seq == 0 || b.evicted_records != wrapping_sub(b.first_seq, 1) {
+        return 9;
+    }
+    let recs = b.records.as_slice();
+    let count = recs.len();
+    if wrapping_add(b.first_seq, count) != b.next_seq {
+        return 9;
+    }
+    let mut last_time: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= count {
+            break;
+        }
+        match recs.try_get(i) {
+            Option::Some(rec) => {
+                if rec.lamport_seq != wrapping_add(b.first_seq, i) {
+                    return 9;
+                }
+                if rec.time_ns < last_time {
+                    return 9;
+                }
+                last_time = rec.time_ns;
+                if rec.digest && rec.payload.as_slice().len() != wire_digest_bytes() {
+                    return 9;
+                }
+                if rec.effect_id == effect_inout_write() {
+                    if rec.payload.as_slice().len() != inout_write_bytes() || rec.digest {
+                        return 9;
+                    }
+                    match decode_inout_write(in rec.payload.as_slice()) {
+                        Option::Some(_) => {}
+                        Option::None => return 9,
+                    }
+                } else if rec.effect_id == effect_obligation() {
+                    if rec.digest {
+                        return 9;
+                    }
+                    match decode_obligation_record(in rec.payload.as_slice()) {
+                        Option::Some(_) => {}
+                        Option::None => return 9,
+                    }
+                } else if rec.effect_id >= reserved_effect_base() && rec.digest {
+                    return 9;
+                }
+            }
+            Option::None => {}
+        }
+        i = wrapping_add(i, 1);
+    }
+    0
+}
+
+pub fn open_bundle(
+    in bytes: Slice[u8],
+    in key: Slice[u8],
+    limits: BundleLimits,
+) -> Result[Bundle, u32] {
+    if bytes.len() > limits.max_bytes {
+        return Result::Err(1);
+    }
+    if bytes.len() < 40 {
+        return Result::Err(2);
+    }
+    if byte_at(in bytes, 0) != 86
+        || byte_at(in bytes, 1) != 67
+        || byte_at(in bytes, 2) != 72
+        || byte_at(in bytes, 3) != 82
+        || byte_at(in bytes, 4) != 79
+        || byte_at(in bytes, 5) != 78
+        || byte_at(in bytes, 6) != 79
+        || byte_at(in bytes, 7) != 49 {
+        return Result::Err(3);
+    }
+    let body_len = wrapping_sub(bytes.len(), 32);
+    let body = slice_copy(in bytes, 0, body_len);
+    match blake3_keyed(in key, in body.as_slice()) {
+        Option::None => return Result::Err(6),
+        Option::Some(mac) => {
+            let mut mac_bytes: ChunkSeq[u8] = ChunkSeq::new();
+            digest_bytes(mac, inout mac_bytes);
+            let mut mi: u64 = 0;
+            loop {
+                if mi >= 32 {
+                    break;
+                }
+                if byte_at(in mac_bytes.as_slice(), mi)
+                    != byte_at(in bytes, wrapping_add(body_len, mi)) {
+                    return Result::Err(6);
+                }
+                mi = wrapping_add(mi, 1);
+            }
+        }
+    }
+
+    let bs = body.as_slice();
+    let mut at: u64 = 8;
+    if wrapping_sub(body_len, at) < 12 {
+        return Result::Err(2);
+    }
+    let version = read_u32_le(in bs, at);
+    at = wrapping_add(at, 4);
+    if version != 1 {
+        return Result::Err(4);
+    }
+    let flags = read_u32_le(in bs, at);
+    at = wrapping_add(at, 4);
+    if flags != 0 {
+        return Result::Err(5);
+    }
+    let mlen = widen_u64(read_u32_le(in bs, at));
+    at = wrapping_add(at, 4);
+    if mlen > limits.max_metadata {
+        return Result::Err(7);
+    }
+    if wrapping_sub(body_len, at) < mlen {
+        return Result::Err(2);
+    }
+    let metadata = slice_copy(in bs, at, mlen);
+    at = wrapping_add(at, mlen);
+
+    if wrapping_sub(body_len, at) < 28 {
+        return Result::Err(2);
+    }
+    let first_seq = read_u64_le(in bs, at);
+    let next_seq = read_u64_le(in bs, wrapping_add(at, 8));
+    let evicted_records = read_u64_le(in bs, wrapping_add(at, 16));
+    let rcount = widen_u64(read_u32_le(in bs, wrapping_add(at, 24)));
+    at = wrapping_add(at, 28);
+    if rcount > limits.max_records {
+        return Result::Err(7);
+    }
+
+    let mut records: ChunkSeq[FlightEvent] = ChunkSeq::new();
+    let mut ri: u64 = 0;
+    loop {
+        if ri >= rcount {
+            break;
+        }
+        if wrapping_sub(body_len, at) < header_bytes() {
+            return Result::Err(2);
+        }
+        let h_slice = slice_copy(in bs, at, header_bytes());
+        at = wrapping_add(at, header_bytes());
+        let lamport_seq = read_u64_le(in h_slice.as_slice(), 0);
+        let fiber_id = read_u64_le(in h_slice.as_slice(), 8);
+        let time_ns = read_u64_le(in h_slice.as_slice(), 16);
+        let effect_id = wrapping_u16(widen_u64(read_u32_le(in h_slice.as_slice(), 24)) & 65535);
+        let raw_op = wrapping_u16(
+            wrapping_shr_u64(widen_u64(read_u32_le(in h_slice.as_slice(), 24)), 16) & 65535,
+        );
+        let plen = widen_u64(read_u32_le(in h_slice.as_slice(), 28));
+        if plen > limits.max_payload {
+            return Result::Err(7);
+        }
+        if wrapping_sub(body_len, at) < plen {
+            return Result::Err(2);
+        }
+        let payload = slice_copy(in bs, at, plen);
+        at = wrapping_add(at, plen);
+        let digest_bit = op_tag_digest();
+        records
+            .push(
+                FlightEvent {
+                    lamport_seq: lamport_seq,
+                    fiber_id: fiber_id,
+                    time_ns: time_ns,
+                    effect_id: effect_id,
+                    op_tag: raw_op & wrapping_u16(wrapping_sub(65535, widen_u64(digest_bit))),
+                    digest: (raw_op & digest_bit) != 0,
+                    payload: payload,
+                }
+            );
+        ri = wrapping_add(ri, 1);
+    }
+
+    if wrapping_sub(body_len, at) < 4 {
+        return Result::Err(2);
+    }
+    let scount = widen_u64(read_u32_le(in bs, at));
+    at = wrapping_add(at, 4);
+    if scount > limits.max_snapshots {
+        return Result::Err(7);
+    }
+    let mut snaps: ChunkSeq[SnapshotImage] = ChunkSeq::new();
+    let mut si: u64 = 0;
+    loop {
+        if si >= scount {
+            break;
+        }
+        if wrapping_sub(body_len, at) < 24 {
+            return Result::Err(2);
+        }
+        let epoch_id = read_u32_le(in bs, at);
+        let start_seq = read_u64_le(in bs, wrapping_add(at, 4));
+        let time_ns = read_u64_le(in bs, wrapping_add(at, 12));
+        let ilen = widen_u64(read_u32_le(in bs, wrapping_add(at, 20)));
+        at = wrapping_add(at, 24);
+        if ilen > limits.max_image {
+            return Result::Err(7);
+        }
+        if wrapping_sub(body_len, at) < ilen {
+            return Result::Err(2);
+        }
+        let img = slice_copy(in bs, at, ilen);
+        at = wrapping_add(at, ilen);
+        snaps
+            .push(
+                SnapshotImage {
+                    epoch_id: epoch_id,
+                    start_lamport_seq: start_seq,
+                    time_ns: time_ns,
+                    image: img,
+                }
+            );
+        si = wrapping_add(si, 1);
+    }
+
+    if wrapping_sub(body_len, at) < 4 {
+        return Result::Err(2);
+    }
+    let red_count = widen_u64(read_u32_le(in bs, at));
+    at = wrapping_add(at, 4);
+    if red_count > limits.max_redactions {
+        return Result::Err(7);
+    }
+    let mut reds: ChunkSeq[RedactionEntry] = ChunkSeq::new();
+    let mut rdi: u64 = 0;
+    loop {
+        if rdi >= red_count {
+            break;
+        }
+        if wrapping_sub(body_len, at) < 17 {
+            return Result::Err(2);
+        }
+        let tag = byte_at(in bs, at);
+        let val = read_u64_le(in bs, wrapping_add(at, 1));
+        if tag > 2 || (tag == 1 && val > 4294967295) || (tag == 2 && val != 0) {
+            return Result::Err(9);
+        }
+        let off = read_u32_le(in bs, wrapping_add(at, 9));
+        let len = read_u32_le(in bs, wrapping_add(at, 13));
+        at = wrapping_add(at, 17);
+        reds
+            .push(
+                RedactionEntry {
+                    target_tag: tag,
+                    target_val: val,
+                    offset: off,
+                    len: len,
+                }
+            );
+        rdi = wrapping_add(rdi, 1);
+    }
+    if at != body_len {
+        return Result::Err(8);
+    }
+
+    let bundle = Bundle {
+        metadata: metadata,
+        first_seq: first_seq,
+        next_seq: next_seq,
+        evicted_records: evicted_records,
+        records: records,
+        snapshots: snaps,
+        redactions: reds,
+    };
+    let verr = validate_bundle(in bundle);
+    if verr != 0 {
+        return Result::Err(verr);
+    }
+    Result::Ok(bundle)
+}
