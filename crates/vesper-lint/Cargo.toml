@@ -11,21 +11,19 @@ build = "build.rs"
 # vesper-lint-seed, same library name), instead of this package; see "Crates
 # the compiler links" in docs/maintenance/porting-a-crate.md.
 #
-# This package builds the same Rust by default. Under `vesper-port`,
-# build.rs links the Vesper port in vesper/ and sets cfg(vesper_port), and
-# `analyze`, `apply_edits` and `Policy::parse` forward to it (self-hosting
-# SH1 lane 13, #1156). Rust stays the default until the port matches it in
-# function and performance (docs/parallel-results/self-host-lint.md).
+# This package builds the Vesper port in vesper/ and sets cfg(vesper_port)
+# unconditionally, forwarding `analyze`, `apply_edits` and `Policy::parse`
+# to it (self-hosting SH1 lane 13, #1156).
 
 [features]
-vesper-port = ["dep:vesper-port-abi"]
+vesper-port = []
 # Deliberately wrong Vesper builds, one edit per ported area: the port test
 # runs must fail (port/test-port.sh asserts which tests do).
 vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
 vesper-core = { path = "../vesper-core" }
-vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+vesper-port-abi = { path = "../vesper-port-abi" }
 serde = { workspace = true }
 toml = "=0.8.23"
 
@@ -52,4 +50,3 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }
 
 [[example]]
 name = "abba"
-required-features = ["vesper-port"]

@@ -416,6 +416,8 @@ struct Mono<'a> {
     names: BTreeSet<String>,
     clones: Vec<(String, Function)>,
     errors: Vec<Diagnostic>,
+    record_rewrites: bool,
+    rewrites: Vec<(String, usize, usize, String)>,
 }
 
 fn collect_mono_funcs(module: &Module) -> BTreeMap<String, Function> {
@@ -482,6 +484,7 @@ pub struct MonoFuncInput {
     pub generics: Vec<Generic>,
     pub scopes: Vec<Vec<String>>,
     pub is_conf_generated: bool,
+    pub has_dyn: bool,
     pub all_bounds: Vec<MonoBoundInput>,
     pub bounds: Vec<MonoBoundInput>,
     pub calls: Vec<MonoCallInput>,
@@ -497,6 +500,14 @@ pub struct MonoCheckOutcome {
     pub type_bounds: Vec<MonoTypeBoundInput>,
     pub funcs: Vec<MonoFuncInput>,
     pub bounded: Vec<bool>,
+    pub errors: Vec<Diagnostic>,
+}
+
+#[doc(hidden)]
+pub struct MonoPlanOutcome {
+    pub check: MonoCheckOutcome,
+    pub clones: Vec<(String, String)>,
+    pub rewrites: Vec<(String, usize, usize, String)>,
     pub errors: Vec<Diagnostic>,
 }
 
@@ -655,6 +666,8 @@ impl Elaborator {
             names: BTreeSet::new(),
             clones: vec![],
             errors: vec![],
+            record_rewrites: false,
+            rewrites: vec![],
         };
         let mut func_inputs = Vec::with_capacity(fn_names.len());
         for name in &fn_names {
@@ -744,6 +757,7 @@ impl Elaborator {
                 generics: f.generics.clone(),
                 scopes,
                 is_conf_generated,
+                has_dyn: self.dyn_params_of(name).is_some(),
                 all_bounds,
                 bounds,
                 calls,
@@ -787,6 +801,60 @@ impl Elaborator {
         }
     }
 
+    /// Differential probe for `Mono::evidence`, `Mono::instance`, and
+    /// `Mono::instantiate_body` (`#1668`).
+    pub(super) fn probe_mono_plan_step(&self, module: &Module, world: &World) -> MonoPlanOutcome {
+        let check = self.probe_mono_check_step(module, world);
+        let funcs = collect_mono_funcs(module);
+        let mut m = Mono {
+            el: self,
+            world,
+            bounded: funcs
+                .keys()
+                .filter(|n| !self.bounds_of(n).is_empty() || n.starts_with(STUB))
+                .cloned()
+                .collect(),
+            funcs,
+            instances: BTreeMap::new(),
+            names: BTreeSet::new(),
+            clones: vec![],
+            errors: vec![],
+            record_rewrites: true,
+            rewrites: vec![],
+        };
+        m.close_bounded();
+        m.check_obligations();
+        if m.errors.is_empty() {
+            let roots: Vec<String> = m
+                .funcs
+                .keys()
+                .filter(|n| !m.bounded.contains(*n))
+                .cloned()
+                .collect();
+            for root in roots {
+                let mut f = m.funcs[&root].clone();
+                let cx = Ctx {
+                    origin: root,
+                    vars: BTreeMap::new(),
+                    evidence: vec![],
+                    depth: 0,
+                };
+                m.instantiate_body(&mut f, &cx);
+            }
+        }
+        let clones = m
+            .clones
+            .iter()
+            .map(|(origin, f)| (origin.clone(), f.name.clone()))
+            .collect();
+        MonoPlanOutcome {
+            check,
+            clones,
+            rewrites: m.rewrites,
+            errors: m.errors,
+        }
+    }
+
     /// Replaces bounded generics by their instances (see the module docs).
     pub(super) fn monomorphize(
         &self,
@@ -811,6 +879,8 @@ impl Elaborator {
             names: BTreeSet::new(),
             clones: vec![],
             errors: vec![],
+            record_rewrites: false,
+            rewrites: vec![],
         };
         m.close_bounded();
         m.check_obligations();
@@ -1546,6 +1616,12 @@ impl Mono<'_> {
         }
         if rewrites.is_empty() {
             return;
+        }
+        if self.record_rewrites {
+            for (s, n) in &rewrites {
+                self.rewrites
+                    .push((f.name.clone(), s.start, s.end, n.clone()));
+            }
         }
         let rewrites: BTreeMap<(usize, usize), String> = rewrites
             .into_iter()

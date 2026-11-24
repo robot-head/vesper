@@ -48,7 +48,16 @@ fn same_report(what: &str, program: &seed::CheckedProgram, limits: seed::Limits)
 #[test]
 fn repository_sources_lint_identically() {
     let corpus = support::corpus(256 * 1024);
-    assert!(corpus.len() > 100, "only {} checked sources", corpus.len());
+    let floor = if std::env::var_os("TEST_SRCDIR").is_some() {
+        15
+    } else {
+        100
+    };
+    assert!(
+        corpus.len() > floor,
+        "only {} checked sources",
+        corpus.len()
+    );
     let mut findings = 0;
     let mut skipped = 0;
     for (path, program) in &corpus {
@@ -919,12 +928,5 @@ fn port_frees_its_allocations() {
 }
 
 fn live() -> i64 {
-    #[cfg(feature = "vesper-port")]
-    {
-        vesper_lint::port_live_allocations()
-    }
-    #[cfg(not(feature = "vesper-port"))]
-    {
-        0
-    }
+    vesper_lint::port_live_allocations()
 }

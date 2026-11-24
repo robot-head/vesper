@@ -1,12 +1,13 @@
 # The flip gate for vesper-kinetic (scripts/ci/flip_gate.py, SH6 lane 1,
-# #1396; this crate's lane: SH6 lane 9, #1404). The flipped module is the
-# constraint colouring (coloring.rs: Colorer and MultiColorer). The package
-# has only its port; the frozen Rust is the seed's engine, which the
-# compiler links until Stage 2.
+# #1396; this crate's lane: SH6 lane 9, #1404). The flipped modules are the
+# constraint colouring (coloring.rs: Colorer and MultiColorer), gjk, sap and
+# the fast math (fastmath.rs). The package has only their port; the frozen
+# Rust is the seed's engine, which the compiler links until Stage 2.
 name = "vesper-kinetic"
 lane = "SH6-9"
 rust = [
   "crates/vesper-kinetic/seed/src/engine/coloring.rs",
+  "crates/vesper-kinetic/seed/src/engine/fastmath.rs",
   "crates/vesper-kinetic/seed/src/engine/gjk.rs",
   "crates/vesper-kinetic/seed/src/engine/sap.rs",
 ]
@@ -37,3 +38,7 @@ run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate gjk 20"
 [[abba]]
 workload = "sap"
 run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate sap 5"
+
+[[abba]]
+workload = "fastmath"
+run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate fastmath 20"
