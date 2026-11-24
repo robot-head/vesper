@@ -37,6 +37,10 @@ macro_rules! workloads {
     ($m:ident, $s:ident) => {
         mod $m {
             use $s::lbvh::{Aabb, Lbvh};
+            use $s::rigid::{
+                CcdConfig, ColliderShape, RigidBody, RigidCollider, RigidConfig, RigidMaterial,
+                RigidWorld, box_inv_inertia, sphere_inv_inertia,
+            };
             use $s::{
                 Body, BroadphaseMode, Colorer, ConstraintBodies, DistanceConstraint, MultiColorer,
                 SphereCollider, SweepAndPrune, World, WorldConfig, crmath, fastmath, gjk, morton,
@@ -336,6 +340,76 @@ macro_rules! workloads {
             pub fn pile_lbvh_4t(_: u64) -> u64 {
                 pile(4)
             }
+
+            pub fn ccd(seed: u64) -> u64 {
+                let mat = RigidMaterial {
+                    static_friction: 0.4,
+                    dynamic_friction: 0.3,
+                    restitution: 0.2,
+                    rolling_friction: 0.0,
+                };
+                let colliders = [
+                    RigidCollider {
+                        shape: ColliderShape::Box {
+                            half_extents: [0.05, 4.0, 4.0],
+                        },
+                        material: mat,
+                    },
+                    RigidCollider {
+                        shape: ColliderShape::Sphere { radius: 0.2 },
+                        material: mat,
+                    },
+                    RigidCollider {
+                        shape: ColliderShape::Capsule {
+                            half_height: 0.25,
+                            radius: 0.15,
+                        },
+                        material: mat,
+                    },
+                    RigidCollider {
+                        shape: ColliderShape::Box {
+                            half_extents: [0.2, 0.2, 0.2],
+                        },
+                        material: mat,
+                    },
+                ];
+                let mut bodies = vec![RigidBody::new([0.0, 0.0, 0.0], 0.0, [0.0; 3], 0)];
+                let mut s = seed ^ 0x9e37_79b9_7f4a_7c15;
+                for i in 0..16 {
+                    let y = ((i / 4) as f32 - 1.5) * 1.5;
+                    let z = ((i % 4) as f32 - 1.5) * 1.5;
+                    let col = 1 + (i % 3);
+                    let mut b = RigidBody::new(
+                        [-1.5 - (rng(&mut s) % 100) as f32 * 0.01, y, z],
+                        1.0,
+                        if col == 1 {
+                            sphere_inv_inertia(1.0, 0.2)
+                        } else {
+                            box_inv_inertia(1.0, [0.2; 3])
+                        },
+                        col as u32,
+                    );
+                    b.vel = [120.0 + (rng(&mut s) % 40) as f32, 0.0, 0.0];
+                    b.ang_vel = [1.0, 2.0, 0.5];
+                    bodies.push(b);
+                }
+                let cfg = RigidConfig {
+                    dt: 1.0 / 60.0,
+                    substeps: 1,
+                    gravity: [0.0, -9.81, 0.0],
+                    ..RigidConfig::default()
+                };
+                let mut w = RigidWorld::new(cfg, &bodies, &colliders).unwrap();
+                w.set_ccd(Some(CcdConfig::default())).unwrap();
+                for _ in 0..4 {
+                    w.step().unwrap();
+                }
+                let mut h = 0u64;
+                for i in 1..bodies.len() {
+                    h ^= w.body(i).unwrap().pos[0].to_bits() as u64;
+                }
+                h
+            }
         }
     };
 }
@@ -345,7 +419,7 @@ workloads!(port_build, vesper_kinetic);
 
 type Work = fn(u64) -> u64;
 
-const WORKLOADS: [(&str, Work, Work); 11] = [
+const WORKLOADS: [(&str, Work, Work); 12] = [
     ("morton", rust_build::morton, port_build::morton),
     ("fastmath", rust_build::fastmath, port_build::fastmath),
     ("crmath", rust_build::crmath, port_build::crmath),
@@ -365,6 +439,7 @@ const WORKLOADS: [(&str, Work, Work); 11] = [
         rust_build::pile_lbvh_4t,
         port_build::pile_lbvh_4t,
     ),
+    ("ccd", rust_build::ccd, port_build::ccd),
 ];
 
 /// Total nanoseconds for `ops` timed runs after `ops / 4` warm-up ones.

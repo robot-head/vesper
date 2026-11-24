@@ -48,6 +48,7 @@ use self::fastmath::{
     needs_crmath,
     sin as f_sin
 };
+use self::ccd::pair_toi as c_pair_toi;
 
 // ---------------------------------------------------------------------------
 // morton.rs
@@ -486,4 +487,52 @@ pub fn gjk_separation(
     if status == 3 {
         Fail::raise(GjkError::Degenerate);
     }
+}
+
+pub fn ccd_pair_toi(
+    in poses: Slice[f32],
+    ka: u32,
+    na: u64,
+    ra: f64,
+    kb: u32,
+    nb: u64,
+    rb: f64,
+    in local_pts: Slice[f64],
+    dt: f32,
+    gx: f32,
+    gy: f32,
+    gz: f32,
+    margin: f64,
+    target: f64,
+    mu: f64,
+    max_iter: u64,
+    inout va: Slice[f64],
+    inout vb: Slice[f64],
+    inout gjk_out: Slice[f64],
+    inout out_poses: Slice[f32],
+    inout out_s: Slice[f64]
+) -> u64 {
+    c_pair_toi(
+        in poses,
+        ka,
+        na,
+        ra,
+        kb,
+        nb,
+        rb,
+        in local_pts,
+        dt,
+        gx,
+        gy,
+        gz,
+        margin,
+        target,
+        mu,
+        max_iter,
+        inout va,
+        inout vb,
+        inout gjk_out,
+        inout out_poses,
+        inout out_s
+    )
 }
