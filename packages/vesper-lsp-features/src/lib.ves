@@ -143,6 +143,60 @@ fn symbol(inout v: ChunkSeq[u8], inout x: Ix, i: u64, in uri: Str, legacy: bool)
     true
 }
 
+// The answer to one `textDocument/documentSymbol` request on `x`, in the
+// hierarchical shape or the session's legacy `SymbolInformation` shape,
+// appended to `out` as `R<json>` or `E<error>`.
+fn symbols_answer(inout out: ChunkSeq[u8], inout x: Ix, in uri: Str, hierarchical: bool) {
+    if ix_err(in x) != ERR_NONE {
+        put_error_answer(inout out, ix_err(in x), ix_span_err(in x));
+        return;
+    }
+    let mut remaining = MAX_OUTPUT_BYTES;
+    let mut total: u64 = 2;
+    let mut body = ChunkSeq::new[u8]();
+    body.push(91);
+    let mut v = ChunkSeq::new[u8]();
+    for i in 0..decl_count(in x) {
+        if decl_name_len(in x, i) > remaining {
+            put_error_answer(inout out, ERR_OUTPUT_BYTES, SpanError::InvalidLimits);
+            return;
+        }
+        v.clear();
+        if !symbol(inout v, inout x, i, in uri, false) {
+            put_error_answer(inout out, ix_err(in x), ix_span_err(in x));
+            return;
+        }
+        let n = v.len();
+        if n >= remaining {
+            put_error_answer(inout out, ERR_OUTPUT_BYTES, SpanError::InvalidLimits);
+            return;
+        }
+        remaining = wrapping_sub(remaining, wrapping_add(n, 1));
+        if i > 0 {
+            body.push(44);
+            total = wrapping_add(total, 1);
+        }
+        total = wrapping_add(total, n);
+        if hierarchical {
+            put_bytes(inout body, in v.as_slice());
+        } else {
+            v.clear();
+            if !symbol(inout v, inout x, i, in uri, true) {
+                put_error_answer(inout out, ix_err(in x), ix_span_err(in x));
+                return;
+            }
+            put_bytes(inout body, in v.as_slice());
+        }
+    }
+    if total > MAX_OUTPUT_BYTES {
+        put_error_answer(inout out, ERR_OUTPUT_BYTES, SpanError::InvalidLimits);
+        return;
+    }
+    body.push(93);
+    out.push(82);
+    put_bytes(inout out, in body.as_slice());
+}
+
 // Task "symbols": the ten index-limit words, the shape (1 hierarchical, 0
 // the legacy `SymbolInformation`), the URI length and the source length,
 // then the URI and the source. `textDocument/documentSymbol`.
@@ -158,55 +212,39 @@ pub fn lsp_document_symbols(in input: Str) -> ChunkSeq[u64] {
     let uri = text_at(in b, r.pos, uri_len);
     let src = text_at(in b, wrapping_add(r.pos, uri_len), src_len);
     let mut x = index_new(src, in l);
-    if ix_err(in x) != ERR_NONE {
-        return error(ix_err(in x), ix_span_err(in x));
-    }
-    let mut remaining = MAX_OUTPUT_BYTES;
-    let mut total: u64 = 2;
     let mut out = ChunkSeq::new[u8]();
-    out.push(82);
-    out.push(91);
-    let mut legacy = ChunkSeq::new[u8]();
-    legacy.push(82);
-    legacy.push(91);
-    for i in 0..decl_count(in x) {
-        if decl_name_len(in x, i) > remaining {
-            return plain_error(ERR_OUTPUT_BYTES);
-        }
-        let mut v = ChunkSeq::new[u8]();
-        if !symbol(inout v, inout x, i, in uri, false) {
-            return error(ix_err(in x), ix_span_err(in x));
-        }
-        let n = v.len();
-        if n >= remaining {
-            return plain_error(ERR_OUTPUT_BYTES);
-        }
-        remaining = wrapping_sub(remaining, wrapping_add(n, 1));
+    symbols_answer(inout out, inout x, in uri, hierarchical);
+    pack(in out.as_slice())
+}
+
+// Task "symbols kept": the "symbols" words with a repeat count `n` after
+// the shape. `n` documentSymbol requests on one parse, the index rebuilt
+// for each (the server keeps the parse in its snapshot and builds the
+// index per request, as Rust does); the answers are joined by newlines.
+pub fn lsp_document_symbols_kept(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let l = read_index(in b, inout r);
+    let hierarchical = word(in b, inout r) == 1;
+    let n = word(in b, inout r);
+    let uri_len = word(in b, inout r);
+    let src_len = word(in b, inout r);
+    let uri = text_at(in b, r.pos, uri_len);
+    let src = text_at(in b, wrapping_add(r.pos, uri_len), src_len);
+    let mut x = index_new(src, in l);
+    let mut out = ChunkSeq::new[u8]();
+    for i in 0..n {
         if i > 0 {
-            out.push(44);
-            legacy.push(44);
-            total = wrapping_add(total, 1);
-        }
-        total = wrapping_add(total, n);
-        put_bytes(inout out, in v.as_slice());
-        if !hierarchical {
-            let mut f = ChunkSeq::new[u8]();
-            if !symbol(inout f, inout x, i, in uri, true) {
-                return error(ix_err(in x), ix_span_err(in x));
+            out.push(10);
+            if ix_err(in x) == ERR_NONE || ix_err(in x) == ERR_INVALID_SPAN {
+                reindex(inout x);
             }
-            put_bytes(inout legacy, in f.as_slice());
         }
+        symbols_answer(inout out, inout x, in uri, hierarchical);
     }
-    if total > MAX_OUTPUT_BYTES {
-        return plain_error(ERR_OUTPUT_BYTES);
-    }
-    out.push(93);
-    legacy.push(93);
-    if hierarchical {
-        pack(in out.as_slice())
-    } else {
-        pack(in legacy.as_slice())
-    }
+    pack(in out.as_slice())
 }
 
 // The answer to one definition request on `x` (after the URI check),

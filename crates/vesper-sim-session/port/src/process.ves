@@ -1,0 +1,154 @@
+// The `process-epochs-v1` state machine and model-bounds check
+// (src/model/mod.rs and src/session/model_ops.rs).
+
+const MAX_PROCESSES: u64 = 16;
+const MAX_LOGS: u64 = 16;
+const MAX_NETWORKS: u64 = 8;
+const MAX_FAULTS: u64 = 256;
+const MAX_FAILURES: u64 = 256;
+const MAX_EVENTS: u64 = 1000000;
+const MAX_EPOCHS: u64 = 64;
+const MAX_INSTANCES: u64 = 256;
+
+pub struct ProcessTable {
+    epochs: ChunkSeq[u64],
+    up: ChunkSeq[bool],
+    crashes: u64,
+    max_epochs: u64
+}
+
+fn epoch_at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn up_at(in s: ChunkSeq[bool], i: u64) -> bool {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => false,
+    }
+}
+
+pub fn process_table_new(n: u64, max_epochs: u64) -> ProcessTable {
+    let mut epochs = ChunkSeq::new[u64]();
+    let mut up = ChunkSeq::new[bool]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        epochs.push(0);
+        up.push(true);
+        i = wrapping_add(i, 1);
+    }
+    ProcessTable {
+        epochs: epochs,
+        up: up,
+        crashes: 0,
+        max_epochs: max_epochs
+    }
+}
+
+pub fn process_table_clone(in t: ProcessTable) -> ProcessTable {
+    let n = t.epochs.len();
+    let mut epochs = ChunkSeq::new[u64]();
+    let mut up = ChunkSeq::new[bool]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        epochs.push(epoch_at(in t.epochs, i));
+        up.push(up_at(in t.up, i));
+        i = wrapping_add(i, 1);
+    }
+    ProcessTable {
+        epochs: epochs,
+        up: up,
+        crashes: t.crashes,
+        max_epochs: t.max_epochs
+    }
+}
+
+pub fn process_table_crash(inout t: ProcessTable, p: u64) -> (u8, u64) {
+    if p >= t.epochs.len() {
+        return (3, 0);
+    }
+    if !up_at(in t.up, p) {
+        return (1, 0);
+    }
+    if t.crashes >= t.max_epochs {
+        return (2, 0);
+    }
+    t.crashes = wrapping_add(t.crashes, 1);
+    let _ = t.up.try_set(p, false);
+    (0, epoch_at(in t.epochs, p))
+}
+
+pub fn process_table_restart(inout t: ProcessTable, p: u64) -> (u8, u64) {
+    if p >= t.epochs.len() {
+        return (2, 0);
+    }
+    if up_at(in t.up, p) {
+        return (1, 0);
+    }
+    let next_epoch = wrapping_add(epoch_at(in t.epochs, p), 1);
+    let _ = t.epochs.try_set(p, next_epoch);
+    let _ = t.up.try_set(p, true);
+    (0, next_epoch)
+}
+
+pub fn process_table_is_up(in t: ProcessTable, p: u64) -> bool {
+    if p >= t.up.len() {
+        false
+    } else {
+        up_at(in t.up, p)
+    }
+}
+
+pub fn process_table_epoch(in t: ProcessTable, p: u64) -> u64 {
+    if p >= t.epochs.len() {
+        0
+    } else {
+        epoch_at(in t.epochs, p)
+    }
+}
+
+pub fn process_table_crashes(in t: ProcessTable) -> u64 {
+    t.crashes
+}
+
+pub fn process_table_len(in t: ProcessTable) -> u64 {
+    t.epochs.len()
+}
+
+pub fn validate_model_bounds(
+    max_events: u64,
+    max_epochs: u64,
+    max_instances: u64,
+    n_processes: u64,
+    n_logs: u64,
+    n_networks: u64,
+    n_faults: u64,
+    n_failures: u64
+) -> u8 {
+    if max_events == 0 || max_events > MAX_EVENTS {
+        return 1;
+    }
+    if max_epochs > MAX_EPOCHS {
+        return 2;
+    }
+    if max_instances == 0 || max_instances > MAX_INSTANCES {
+        return 3;
+    }
+    if n_processes > MAX_PROCESSES
+        || n_logs > MAX_LOGS
+        || n_networks > MAX_NETWORKS
+        || n_faults > MAX_FAULTS
+        || n_failures > MAX_FAILURES {
+        return 4;
+    }
+    0
+}

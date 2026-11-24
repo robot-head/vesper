@@ -24,7 +24,7 @@ use std::{
     },
     time::Duration,
 };
-use vesper::{check, native, native_handlers, parser, runtime::Runtime, seq::native_runtime};
+use vesper::{check, native, parser, runtime::Runtime, seq::native_runtime};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -362,7 +362,7 @@ fn a_non_tail_resumption_in_a_loop_is_refused_not_hung() {
     for optimize in [true, false] {
         let error = jit(NON_TAIL, optimize).unwrap_err();
         assert!(
-            error.contains(native_handlers::LOOP_RESUME_REFUSAL),
+            error.contains(native::LOOP_RESUME_REFUSAL),
             "optimize {optimize}: {error}"
         );
     }

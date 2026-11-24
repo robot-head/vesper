@@ -906,8 +906,7 @@ pub fn native_walk_decisions(in input: Str) -> ChunkSeq[u64] {
 // one-function `program`, callee `signatures`, `ng` generic `(name, ty)`
 // pairs, `nested` flag, and `nh` `Op::Handle` free names. Returns the
 // local names kept in registers, one per line.
-pub fn native_walk_register_locals(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
+pub fn native_walk_register_locals_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut r = Reader {
         pos: 0
     };
@@ -950,4 +949,8 @@ pub fn native_walk_register_locals(in input: Str) -> ChunkSeq[u64] {
         }
     }
     pack_text(in g.o)
+}
+
+pub fn native_walk_register_locals(in input: Str) -> ChunkSeq[u64] {
+    native_walk_register_locals_bytes(in input.as_bytes())
 }

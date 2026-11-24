@@ -16,8 +16,11 @@ mod check_harness;
 mod check_words;
 #[path = "common/ir_words.rs"]
 mod ir_words;
+#[path = "common/native_walk_words.rs"]
+mod native_walk_words;
 
 use check_harness::*;
+use native_walk_words::{function_input, handler_names};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::sync::OnceLock;
@@ -150,19 +153,6 @@ fn input(w: &World, p: &Program) -> Option<Vec<u8>> {
     Some(t.enc.finish(&world, &tail))
 }
 
-/// The free names of every `Op::Handle` body of `f`.
-fn handler_names(f: &FunctionIr) -> BTreeSet<String> {
-    f.blocks
-        .iter()
-        .flat_map(|b| &b.instructions)
-        .filter_map(|i| match &i.op {
-            Op::Handle { expr, .. } => Some(vesper::check::free_names(expr)),
-            _ => None,
-        })
-        .flatten()
-        .collect()
-}
-
 // ------------------------------------------------------------ swap hook
 
 fn register_locals_entry() -> &'static Entry {
@@ -173,77 +163,6 @@ fn register_locals_entry() -> &'static Entry {
             package().entry("native_walk_register_locals", true)
         })
     })
-}
-
-/// Encodes one `ir_graph_at` graph (`world_lean`, 1-function `Program`,
-/// referenced callee signatures, `generics`, `nested`, handler free names)
-/// for `@vesper/native-walk::native_walk_register_locals`.
-fn function_input(
-    world: &World,
-    f: &FunctionIr,
-    generics: &BTreeMap<String, Type>,
-    nested: bool,
-) -> Option<Vec<u8>> {
-    let adts_fit = world.adts.values().all(|a| {
-        a.variants
-            .iter()
-            .all(|v| v.fields.iter().all(|fld| ir_words::literal_fits(&fld.ty)))
-    });
-    if !adts_fit || !ir_words::function_fits(f) || !generics.values().all(ir_words::literal_fits) {
-        return None;
-    }
-    let mut callees: BTreeSet<&str> = BTreeSet::new();
-    for b in &f.blocks {
-        for i in &b.instructions {
-            if let Op::Call { callee, .. } = &i.op
-                && world.functions.contains_key(callee)
-            {
-                callees.insert(callee.as_str());
-            }
-        }
-    }
-    for callee in &callees {
-        let g = &world.functions[*callee];
-        let sig_fits = ir_words::literal_fits(&g.result)
-            && ir_words::literal_fits(&Type::Row(g.effects.clone()))
-            && g.params.iter().all(|p| ir_words::literal_fits(&p.ty));
-        if !sig_fits {
-            return None;
-        }
-    }
-    let program = Program {
-        functions: BTreeMap::from([(f.name.clone(), f.clone())]),
-    };
-    let mut t = ir_words::Tables::of(&program);
-    t.label_names();
-    let mut tail = t.section();
-    tail.push(callees.len() as u64);
-    for callee in callees {
-        let g = &world.functions[callee];
-        tail.push(t.enc.name(callee));
-        tail.push(g.generics.len() as u64);
-        tail.push(t.enc.ty(&g.result));
-        tail.push(t.enc.ty(&Type::Row(g.effects.clone())));
-        tail.push(g.params.len() as u64);
-        for q in &g.params {
-            tail.push(t.enc.name(&q.name));
-            tail.push(check_words::pass_word(q.pass));
-            tail.push(t.enc.ty(&q.ty));
-        }
-    }
-    tail.push(generics.len() as u64);
-    for (k, v) in generics {
-        tail.push(t.enc.name(k));
-        tail.push(t.enc.ty(v));
-    }
-    tail.push(u64::from(nested));
-    let names = handler_names(f);
-    tail.push(names.len() as u64);
-    for n in &names {
-        tail.push(t.enc.name(n));
-    }
-    let world_words = t.enc.world_lean(world);
-    Some(t.enc.finish(&world_words, &tail))
 }
 
 static SWAP_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -277,12 +196,7 @@ fn vesper_register_locals(
     {
         SWAP_HANDLES.fetch_add(1, Ordering::Relaxed);
     }
-    let out = register_locals_entry().text(&bytes);
-    let regs: BTreeSet<String> = out
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(str::to_owned)
-        .collect();
+    let regs = native_walk_words::decode_register_locals(&register_locals_entry().words(&bytes));
     if !regs.is_empty() {
         SWAP_REGS.fetch_add(1, Ordering::Relaxed);
     }

@@ -542,7 +542,10 @@ pub struct RigidWorld {
     saved_asleep: Vec<bool>,
     saved_sleep_ticks: Vec<u32>,
     island: Vec<u32>,
+    #[cfg(not(vesper_port))]
     island_awake: Vec<bool>,
+    #[cfg(vesper_port)]
+    sleep_scratch: sleep::SleepScratch,
     deferred: Vec<u32>,
     // Continuous collision detection.
     ccd: Option<CcdConfig>,
@@ -1126,7 +1129,10 @@ impl RigidWorld {
             saved_asleep: vec![false; n],
             saved_sleep_ticks: vec![0; n],
             island: vec![0; n],
+            #[cfg(not(vesper_port))]
             island_awake: vec![false; n],
+            #[cfg(vesper_port)]
+            sleep_scratch: sleep::SleepScratch::new(n),
             deferred: Vec::with_capacity(max_pairs),
             ccd: None,
             ccd_hits: 0,

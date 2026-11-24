@@ -29,7 +29,6 @@ const SOURCE_TESTS: &[&str] = &[
     "tests/arrays.rs",
     "tests/capability_effects.rs",
     "tests/floats.rs",
-    "tests/native_handlers.rs",
     "tests/vector_f32.rs",
     "tests/native_export_f32.rs",
     "tests/native_spans.rs",

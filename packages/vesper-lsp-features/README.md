@@ -5,7 +5,8 @@ wave SH5, lane 17 (#1340). Rust stays the default: the language server still
 runs `src/lsp`, and this package is checked against it by
 `tests/self_host_lsp_features.rs`.
 
-Part 1 ports navigation (`src/lsp/navigation.rs`):
+Part 1 ports navigation (`src/lsp/navigation.rs`); part 1b (#1828) brings it
+under the 1.5x bar:
 
 - `textDocument/documentSymbol`, in both the hierarchical and the legacy
   (`SymbolInformation`) shape;

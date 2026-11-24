@@ -1,0 +1,138 @@
+// @vesper/kinetic::diff: reverse-mode AD backward sweep and contact detection (`src/diff.rs`).
+
+const NONE_VAR: u32 = 0xffffffff;
+
+fn g32(in s: Slice[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn gf64(in s: Slice[f64], i: u64) -> f64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0.0,
+    }
+}
+
+fn abs64(x: f64) -> f64 {
+    if x < 0.0 {
+        -x
+    } else {
+        x
+    }
+}
+
+pub fn tape_backward(
+    in p0: Slice[u32],
+    in p1: Slice[u32],
+    in d0: Slice[f64],
+    in d1: Slice[f64],
+    inout adj: Slice[f64]
+) {
+    let mut i = adj.len();
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let a = gf64(in adj, i);
+        if a != 0.0 {
+            let q0 = g32(in p0, i);
+            if q0 != NONE_VAR {
+                let idx0 = widen_u64(q0);
+                adj.try_set(idx0, gf64(in adj, idx0) + a * gf64(in d0, i));
+            }
+            let q1 = g32(in p1, i);
+            if q1 != NONE_VAR {
+                let idx1 = widen_u64(q1);
+                adj.try_set(idx1, gf64(in adj, idx1) + a * gf64(in d1, i));
+            }
+        }
+    }
+}
+
+pub fn detect_contacts(
+    in pos: Slice[f64],
+    in vel: Slice[f64],
+    in inv_mass: Slice[f64],
+    in radii: Slice[f64],
+    dt: f64,
+    g1: f64,
+    margin: f64,
+    has_ground: bool,
+    ground_y: f64,
+    inout sweep: Slice[f64],
+    inout out_a: Slice[u32],
+    inout out_b: Slice[u32]
+) -> u64 {
+    let n = inv_mass.len();
+    let cap = out_a.len();
+    let g_term = g1 * dt * dt;
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let wi = gf64(in inv_mass, i);
+        let sw = if wi == 0.0 {
+            0.0
+        } else {
+            let b = wrapping_mul(i, 3);
+            let v1 = abs64(gf64(in vel, b))
+                + abs64(gf64(in vel, wrapping_add(b, 1)))
+                + abs64(gf64(in vel, wrapping_add(b, 2)));
+            v1 * dt + g_term
+        };
+        sweep.try_set(i, sw);
+        i = wrapping_add(i, 1);
+    }
+    let mut count: u64 = 0;
+    i = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let wi = gf64(in inv_mass, i);
+        let pi = wrapping_mul(i, 3);
+        let px = gf64(in pos, pi);
+        let py = gf64(in pos, wrapping_add(pi, 1));
+        let pz = gf64(in pos, wrapping_add(pi, 2));
+        let ri = gf64(in radii, i);
+        let si = gf64(in sweep, i);
+        if has_ground && wi > 0.0 && py - ri - ground_y < margin + si {
+            if count >= cap {
+                return 0xffffffffffffffff;
+            }
+            out_a.try_set(count, wrapping_u32(i));
+            out_b.try_set(count, NONE_VAR);
+            count = wrapping_add(count, 1);
+        }
+        let mut j = wrapping_add(i, 1);
+        loop {
+            if j >= n {
+                break;
+            }
+            let wj = gf64(in inv_mass, j);
+            if !(wi == 0.0 && wj == 0.0) {
+                let pj = wrapping_mul(j, 3);
+                let dx = px - gf64(in pos, pj);
+                let dy = py - gf64(in pos, wrapping_add(pj, 1));
+                let dz = pz - gf64(in pos, wrapping_add(pj, 2));
+                let reach = ri + gf64(in radii, j) + margin + si + gf64(in sweep, j);
+                if dx * dx + dy * dy + dz * dz < reach * reach {
+                    if count >= cap {
+                        return 0xffffffffffffffff;
+                    }
+                    out_a.try_set(count, wrapping_u32(i));
+                    out_b.try_set(count, wrapping_u32(j));
+                    count = wrapping_add(count, 1);
+                }
+            }
+            j = wrapping_add(j, 1);
+        }
+        i = wrapping_add(i, 1);
+    }
+    count
+}

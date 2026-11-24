@@ -1,0 +1,25 @@
+// `vesper lsp`: stdio LSP command routing in Vesper, delegating
+// `src/lsp.rs::serve` to `HybridCommands::hc_lsp_serve`.
+use @vesper/driver::{
+    Args
+};
+use super::{
+    fail
+};
+
+pub fn run_lsp(in _args: Args) -> i64 eff [Ffi[HybridCommands]] {
+    let err_len = HybridCommands::hc_lsp_serve();
+    if err_len == 0 {
+        return 0;
+    }
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    err.resize(err_len, 0);
+    let actual = HybridCommands::hc_lsp_err(inout err.as_slice_mut());
+    if actual > err.len() {
+        err.resize(actual, 0);
+        let _got = HybridCommands::hc_lsp_err(inout err.as_slice_mut());
+    } else {
+        err.truncate(actual);
+    }
+    fail(in err.as_slice())
+}

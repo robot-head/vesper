@@ -438,6 +438,7 @@ pub(crate) struct ModelPlan {
     pub failures: BTreeMap<(String, FailOp, u64), u32>,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 #[derive(Debug, Clone)]
 pub(crate) struct ProcessState {
     pub name: String,
@@ -459,21 +460,102 @@ pub(crate) struct NetState {
     pub owners: BTreeMap<u64, usize>,
 }
 
+#[cfg(feature = "vesper-port")]
+#[derive(Debug)]
+pub(crate) struct PortProcessTable(crate::port::ProcessTable);
+
+#[cfg(feature = "vesper-port")]
+impl Clone for PortProcessTable {
+    fn clone(&self) -> Self {
+        Self(crate::port::sim_process_table_clone(&self.0))
+    }
+}
+
 /// Mutable model state. It holds no runtime owners, so a step can be computed
 /// on a copy, checked against budgets and the expected trace, then committed.
 #[derive(Debug, Clone)]
 pub(crate) struct ModelState {
+    #[cfg(not(feature = "vesper-port"))]
     pub processes: Vec<ProcessState>,
+    #[cfg(feature = "vesper-port")]
+    pub process_names: Vec<String>,
+    #[cfg(feature = "vesper-port")]
+    pub process_table: PortProcessTable,
     pub logs: BTreeMap<String, LogState>,
     pub networks: BTreeMap<String, NetState>,
     pub occurrences: BTreeMap<(String, FailOp), u64>,
+    #[cfg(not(feature = "vesper-port"))]
     pub crashes: u32,
     pub warp: Option<warp::WarpState>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessCrashError {
+    AlreadyDown,
+    EpochLimit,
+}
+
 impl ModelState {
+    pub fn process_up(&self, p: usize) -> bool {
+        #[cfg(feature = "vesper-port")]
+        {
+            crate::port::sim_process_table_is_up(&self.process_table.0, p as u64)
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        {
+            self.processes[p].up
+        }
+    }
+
+    pub fn crash_process(&mut self, p: usize, max_epochs: u32) -> Result<u32, ProcessCrashError> {
+        #[cfg(feature = "vesper-port")]
+        {
+            let _ = max_epochs;
+            let (code, epoch) =
+                crate::port::sim_process_table_crash(&mut self.process_table.0, p as u64);
+            match code {
+                0 => Ok(epoch as u32),
+                1 => Err(ProcessCrashError::AlreadyDown),
+                _ => Err(ProcessCrashError::EpochLimit),
+            }
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        {
+            if !self.processes[p].up {
+                return Err(ProcessCrashError::AlreadyDown);
+            }
+            if self.crashes >= max_epochs {
+                return Err(ProcessCrashError::EpochLimit);
+            }
+            self.crashes += 1;
+            let epoch = self.processes[p].epoch;
+            self.processes[p].up = false;
+            Ok(epoch)
+        }
+    }
+
+    pub fn restart_process(&mut self, p: usize) -> Result<u32, ()> {
+        #[cfg(feature = "vesper-port")]
+        {
+            let (code, epoch) =
+                crate::port::sim_process_table_restart(&mut self.process_table.0, p as u64);
+            if code == 0 { Ok(epoch as u32) } else { Err(()) }
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        {
+            if self.processes[p].up {
+                return Err(());
+            }
+            let epoch = self.processes[p].epoch + 1;
+            self.processes[p].epoch = epoch;
+            self.processes[p].up = true;
+            Ok(epoch)
+        }
+    }
+
     pub fn new(plan: &ModelPlan, seed: u64) -> Self {
         let spec = &plan.spec;
+        #[cfg(not(feature = "vesper-port"))]
         let processes = spec
             .processes
             .iter()
@@ -483,6 +565,13 @@ impl ModelState {
                 up: true,
             })
             .collect();
+        #[cfg(feature = "vesper-port")]
+        let process_names: Vec<String> = spec.processes.iter().map(|p| p.name.clone()).collect();
+        #[cfg(feature = "vesper-port")]
+        let process_table = PortProcessTable(crate::port::sim_process_table_new(
+            spec.processes.len() as u64,
+            u64::from(spec.limits.max_epochs),
+        ));
         let logs = spec
             .logs
             .iter()
@@ -534,10 +623,16 @@ impl ModelState {
             })
             .collect();
         Self {
+            #[cfg(not(feature = "vesper-port"))]
             processes,
+            #[cfg(feature = "vesper-port")]
+            process_names,
+            #[cfg(feature = "vesper-port")]
+            process_table,
             logs,
             networks,
             occurrences: BTreeMap::new(),
+            #[cfg(not(feature = "vesper-port"))]
             crashes: 0,
             warp: spec
                 .warp
@@ -563,17 +658,34 @@ impl ModelState {
     }
 
     pub fn snapshot(&self, at_ns: u64) -> ModelSnapshot {
+        #[cfg(feature = "vesper-port")]
+        let processes: Vec<ProcessSnapshot> = self
+            .process_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| ProcessSnapshot {
+                name: name.clone(),
+                epoch: crate::port::sim_process_table_epoch(&self.process_table.0, i as u64) as u32,
+                up: crate::port::sim_process_table_is_up(&self.process_table.0, i as u64),
+            })
+            .collect();
+        #[cfg(not(feature = "vesper-port"))]
+        let processes: Vec<ProcessSnapshot> = self
+            .processes
+            .iter()
+            .map(|p| ProcessSnapshot {
+                name: p.name.clone(),
+                epoch: p.epoch,
+                up: p.up,
+            })
+            .collect();
+        #[cfg(feature = "vesper-port")]
+        let process_name = |i: usize| self.process_names[i].clone();
+        #[cfg(not(feature = "vesper-port"))]
+        let process_name = |i: usize| self.processes[i].name.clone();
         ModelSnapshot {
             at_ns,
-            processes: self
-                .processes
-                .iter()
-                .map(|p| ProcessSnapshot {
-                    name: p.name.clone(),
-                    epoch: p.epoch,
-                    up: p.up,
-                })
-                .collect(),
+            processes,
             logs: self
                 .logs
                 .iter()
@@ -583,7 +695,7 @@ impl ModelState {
                     (
                         name.clone(),
                         LogSnapshot {
-                            process: self.processes[log.process].name.clone(),
+                            process: process_name(log.process),
                             recovered: log.wal.is_recovered(),
                             durable_bytes: bytes.len() as u64,
                             durable_sha256: crate::program::sha256_hex(&bytes),
@@ -615,6 +727,9 @@ impl ModelState {
                 })
                 .collect(),
             warp: self.warp.as_ref().map(|w| {
+                #[cfg(feature = "vesper-port")]
+                let names = self.process_names.clone();
+                #[cfg(not(feature = "vesper-port"))]
                 let names: Vec<String> = self.processes.iter().map(|p| p.name.clone()).collect();
                 w.snapshot(&names)
             }),
@@ -634,24 +749,48 @@ pub(crate) fn validate(
     max_virtual_ns: u64,
 ) -> Result<ModelPlan, String> {
     let limits = &spec.limits;
-    if limits.max_events == 0 || limits.max_events > MAX_EVENTS {
-        return fail(format!("model max_events must be in 1..={MAX_EVENTS}"));
+    #[cfg(feature = "vesper-port")]
+    match crate::port::sim_validate_model_bounds(
+        limits.max_events,
+        u64::from(limits.max_epochs),
+        limits.max_instances,
+        spec.processes.len() as u64,
+        spec.logs.len() as u64,
+        spec.networks.len() as u64,
+        spec.faults.len() as u64,
+        spec.failures.len() as u64,
+    ) {
+        0 => {}
+        1 => return fail(format!("model max_events must be in 1..={MAX_EVENTS}")),
+        2 => return fail(format!("model max_epochs must be at most {MAX_EPOCHS}")),
+        3 => {
+            return fail(format!(
+                "model max_instances must be in 1..={MAX_INSTANCES}"
+            ));
+        }
+        _ => return fail("model exceeds its process/log/network/fault/failure count bounds"),
     }
-    if limits.max_epochs > MAX_EPOCHS {
-        return fail(format!("model max_epochs must be at most {MAX_EPOCHS}"));
-    }
-    if limits.max_instances == 0 || limits.max_instances > MAX_INSTANCES {
-        return fail(format!(
-            "model max_instances must be in 1..={MAX_INSTANCES}"
-        ));
-    }
-    if spec.processes.len() > MAX_PROCESSES
-        || spec.logs.len() > MAX_LOGS
-        || spec.networks.len() > MAX_NETWORKS
-        || spec.faults.len() > MAX_FAULTS
-        || spec.failures.len() > MAX_FAILURES
+    #[cfg(not(feature = "vesper-port"))]
     {
-        return fail("model exceeds its process/log/network/fault/failure count bounds");
+        if limits.max_events == 0 || limits.max_events > MAX_EVENTS {
+            return fail(format!("model max_events must be in 1..={MAX_EVENTS}"));
+        }
+        if limits.max_epochs > MAX_EPOCHS {
+            return fail(format!("model max_epochs must be at most {MAX_EPOCHS}"));
+        }
+        if limits.max_instances == 0 || limits.max_instances > MAX_INSTANCES {
+            return fail(format!(
+                "model max_instances must be in 1..={MAX_INSTANCES}"
+            ));
+        }
+        if spec.processes.len() > MAX_PROCESSES
+            || spec.logs.len() > MAX_LOGS
+            || spec.networks.len() > MAX_NETWORKS
+            || spec.faults.len() > MAX_FAULTS
+            || spec.failures.len() > MAX_FAILURES
+        {
+            return fail("model exceeds its process/log/network/fault/failure count bounds");
+        }
     }
     let networks: BTreeSet<&str> = spec.networks.iter().map(|n| n.name.as_str()).collect();
     if networks.len() != spec.networks.len() {

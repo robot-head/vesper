@@ -5,7 +5,15 @@
 //
 // The export ABI has no f32, so an f32 crosses the boundary as its bit
 // pattern (a `u32`), as in @vesper/tensor.
+use self::diff::{
+    detect_contacts as d_detect_contacts,
+    tape_backward as d_tape_backward
+};
 use self::manifold::pair_manifold as m_pair_manifold;
+use self::sleep::{
+    update_sleep_pass as s_update_sleep_pass,
+    wake_island_pass as s_wake_island_pass
+};
 use self::morton::{
     compact as m_compact,
     compact21 as m_compact21,
@@ -575,5 +583,89 @@ pub fn rigid_pair_manifold(
         inout kept,
         inout out_cands,
         inout out_normal
+    )
+}
+
+pub fn rigid_wake_island_pass(
+    in is_dyn: Slice[u8],
+    in edge_a: Slice[u32],
+    in edge_b: Slice[u32],
+    inout island: Slice[u32],
+    inout island_awake: Slice[u8],
+    inout asleep: Slice[u8],
+    inout sleep_ticks: Slice[u32]
+) -> bool {
+    s_wake_island_pass(
+        in is_dyn,
+        in edge_a,
+        in edge_b,
+        inout island,
+        inout island_awake,
+        inout asleep,
+        inout sleep_ticks
+    )
+}
+
+pub fn rigid_update_sleep_pass(
+    in is_dyn: Slice[u8],
+    in quiet: Slice[u8],
+    in edge_a: Slice[u32],
+    in edge_b: Slice[u32],
+    ticks: u32,
+    inout island: Slice[u32],
+    inout island_awake: Slice[u8],
+    inout asleep: Slice[u8],
+    inout sleep_ticks: Slice[u32]
+) {
+    s_update_sleep_pass(
+        in is_dyn,
+        in quiet,
+        in edge_a,
+        in edge_b,
+        ticks,
+        inout island,
+        inout island_awake,
+        inout asleep,
+        inout sleep_ticks
+    )
+}
+
+pub fn diff_tape_backward(
+    in p0: Slice[u32],
+    in p1: Slice[u32],
+    in d0: Slice[f64],
+    in d1: Slice[f64],
+    inout adj: Slice[f64]
+) {
+    d_tape_backward(in p0, in p1, in d0, in d1, inout adj)
+}
+
+pub fn diff_detect_contacts(
+    in pos: Slice[f64],
+    in vel: Slice[f64],
+    in inv_mass: Slice[f64],
+    in radii: Slice[f64],
+    dt: f64,
+    g1: f64,
+    margin: f64,
+    has_ground: bool,
+    ground_y: f64,
+    inout sweep: Slice[f64],
+    inout out_a: Slice[u32],
+    inout out_b: Slice[u32]
+) -> u64 {
+    d_detect_contacts(
+        in pos,
+        in vel,
+        in inv_mass,
+        in radii,
+        dt,
+        g1,
+        margin,
+        has_ground,
+        ground_y,
+        inout sweep,
+        inout out_a,
+        inout out_b
     )
 }

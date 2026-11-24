@@ -324,7 +324,6 @@ vesper_crate(
             "tests/native_block_param_homes.rs",
             "tests/native_export_f32.rs",
             "tests/native_fail_status.rs",
-            "tests/native_handlers.rs",
             "tests/native_hoist_calls.rs",
             "tests/native_spans.rs",
             "tests/vector_f32.rs",
