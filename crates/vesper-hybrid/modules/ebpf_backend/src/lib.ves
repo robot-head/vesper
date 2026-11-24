@@ -1,0 +1,17 @@
+// @vesper/hybrid-ebpf-backend: `vesper::ebpf_backend::compile_world` served
+// from Vesper in the hybrid Stage 2 build (self-hosting SH4 lane 16, #1290),
+// through the `ebpf` hook of `vesper::codegen_swap`.
+//
+// `compile_words` takes one compilation's input (the world, the Place IR and
+// the eBPF section; written by `input` in tests/common/ebpf_words.rs) and
+// returns `@vesper/ebpf-backend`'s answer, which `decode` reads back.
+
+// @export abi 4
+
+use @vesper/ebpf-backend::{
+    ebpf_backend_bytes
+};
+
+pub fn compile_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    ebpf_backend_bytes(in input)
+}
