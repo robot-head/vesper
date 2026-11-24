@@ -1815,7 +1815,7 @@ impl RigidWorld {
         let merge = CONTACT_MERGE_REL * (scale + CONTACT_MERGE_FLOOR);
         #[cfg(vesper_port)]
         {
-            return self.pair_manifold_port(
+            self.pair_manifold_port(
                 a,
                 b,
                 sa,
@@ -1829,7 +1829,7 @@ impl RigidWorld {
                 margin,
                 tol,
                 merge,
-            );
+            )
         }
         #[cfg(not(vesper_port))]
         {
