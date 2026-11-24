@@ -854,6 +854,27 @@ fn gjk_shape(core: &[[f64; 3]], radius: f64) -> Shape<'_> {
     }
 }
 
+#[cfg(vesper_port)]
+fn pack_world_shape<'a>(
+    core: &[[f64; 3]],
+    radius: f64,
+    buf: &'a mut [f64; 3 * MAX_HULL_VERTICES + 1],
+) -> (u32, usize, &'a [f64]) {
+    let n = core.len();
+    buf[..n * 3].copy_from_slice(core.as_flattened());
+    match n {
+        1 if radius > 0.0 => {
+            buf[3] = radius;
+            (0, 1, &buf[..4])
+        }
+        2 => {
+            buf[6] = radius;
+            (1, 2, &buf[..7])
+        }
+        _ => (2, n, &buf[..n * 3]),
+    }
+}
+
 /// A candidate contact in world coordinates: points on `a` and `b` and the
 /// penetration along the normal.
 #[derive(Debug, Clone, Copy)]
@@ -1781,90 +1802,188 @@ impl RigidWorld {
         let cb = &self.colliders[sb.collider as usize];
         let ra = world_core(&ca.shape, &sa, verts_a);
         let rb = world_core(&cb.shape, &sb, verts_b);
-        let shape_a = gjk_shape(verts_a, ra);
-        let shape_b = gjk_shape(verts_b, rb);
-        let sep = gjk::separation(&shape_a, &shape_b).map_err(|error| RigidError::Narrowphase {
-            a,
-            b,
-            error,
-        })?;
         let margin = f64::from(det::add(
             self.config.contact_margin,
             det::add(self.sweeps[a], self.sweeps[b]),
         ));
-        if sep.distance > margin {
-            return Ok(None);
-        }
-        // Normal from b to a.
-        let n = [-sep.normal[0], -sep.normal[1], -sep.normal[2]];
-        let neg_n = sep.normal;
-        // Extents along n: a's lowest, b's highest.
-        let a_min = dot64(shape_a.support(neg_n), n);
-        let b_max = dot64(shape_b.support(n), n);
         let scale = f64::from(det::max(
             self.bound_radius(sa.collider),
             self.bound_radius(sb.collider),
         ));
         let tol = MANIFOLD_MARGIN_FRACTION * f64::from(self.config.contact_margin)
             + MANIFOLD_REL_TOL * (scale + 1.0);
-        let mut cands = vec![Candidate {
-            pa: sep.point_a,
-            pb: sep.point_b,
-            depth: -sep.distance,
-        }];
-        // Vertices of b against a's support plane.
-        if verts_a.len() > 1 || verts_b.len() > 1 {
-            for v in verts_b.iter() {
-                let s = axpy64(*v, rb, n);
-                let depth = dot64(s, n) - a_min;
-                if depth > -margin {
-                    let pa = axpy64(s, -depth, n);
-                    let probe = Shape::Sphere {
-                        center: pa,
-                        radius: 0.0,
-                    };
-                    if gjk::distance(&probe, &shape_a).is_ok_and(|d| d <= tol) {
-                        cands.push(Candidate { pa, pb: s, depth });
-                    }
-                }
-            }
-            for u in verts_a.iter() {
-                let s = axpy64(*u, -ra, n);
-                let depth = b_max - dot64(s, n);
-                if depth > -margin {
-                    let pb = axpy64(s, depth, n);
-                    let probe = Shape::Sphere {
-                        center: pb,
-                        radius: 0.0,
-                    };
-                    if gjk::distance(&probe, &shape_b).is_ok_and(|d| d <= tol) {
-                        cands.push(Candidate { pa: s, pb, depth });
-                    }
-                }
-            }
+        let merge = CONTACT_MERGE_REL * (scale + CONTACT_MERGE_FLOOR);
+        #[cfg(vesper_port)]
+        {
+            self.pair_manifold_port(
+                a,
+                b,
+                sa,
+                sb,
+                ca.material,
+                cb.material,
+                verts_a,
+                ra,
+                verts_b,
+                rb,
+                margin,
+                tol,
+                merge,
+            )
         }
-        reduce(
+        #[cfg(not(vesper_port))]
+        {
+            let shape_a = gjk_shape(verts_a, ra);
+            let shape_b = gjk_shape(verts_b, rb);
+            let sep = gjk::separation(&shape_a, &shape_b)
+                .map_err(|error| RigidError::Narrowphase { a, b, error })?;
+            if sep.distance > margin {
+                return Ok(None);
+            }
+            // Normal from b to a.
+            let n = [-sep.normal[0], -sep.normal[1], -sep.normal[2]];
+            let neg_n = sep.normal;
+            // Extents along n: a's lowest, b's highest.
+            let a_min = dot64(shape_a.support(neg_n), n);
+            let b_max = dot64(shape_b.support(n), n);
+            let mut cands = vec![Candidate {
+                pa: sep.point_a,
+                pb: sep.point_b,
+                depth: -sep.distance,
+            }];
+            // Vertices of b against a's support plane.
+            if verts_a.len() > 1 || verts_b.len() > 1 {
+                for v in verts_b.iter() {
+                    let s = axpy64(*v, rb, n);
+                    let depth = dot64(s, n) - a_min;
+                    if depth > -margin {
+                        let pa = axpy64(s, -depth, n);
+                        let probe = Shape::Sphere {
+                            center: pa,
+                            radius: 0.0,
+                        };
+                        if gjk::distance(&probe, &shape_a).is_ok_and(|d| d <= tol) {
+                            cands.push(Candidate { pa, pb: s, depth });
+                        }
+                    }
+                }
+                for u in verts_a.iter() {
+                    let s = axpy64(*u, -ra, n);
+                    let depth = b_max - dot64(s, n);
+                    if depth > -margin {
+                        let pb = axpy64(s, depth, n);
+                        let probe = Shape::Sphere {
+                            center: pb,
+                            radius: 0.0,
+                        };
+                        if gjk::distance(&probe, &shape_b).is_ok_and(|d| d <= tol) {
+                            cands.push(Candidate { pa: s, pb, depth });
+                        }
+                    }
+                }
+            }
+            reduce(&mut cands, n, merge);
+            let material = combine(ca.material, cb.material);
+            let mut m = ContactManifold {
+                a: a as u32,
+                b: Some(b as u32),
+                normal: n.map(|v| v as f32),
+                count: cands.len(),
+                points: [ContactPoint::default(); MAX_MANIFOLD_POINTS],
+                radius_a: ra as f32,
+                radius_b: rb as f32,
+                material,
+            };
+            for (p, c) in m.points.iter_mut().zip(&cands) {
+                let core_a = axpy64(c.pa, ra, n);
+                let core_b = axpy64(c.pb, -rb, n);
+                p.local_a = rotate64(conj(sa.q), sub64(core_a, to64(sa.x))).map(|v| v as f32);
+                p.local_b = rotate64(conj(sb.q), sub64(core_b, to64(sb.x))).map(|v| v as f32);
+                p.depth = c.depth as f32;
+            }
+            Ok(Some(m))
+        }
+    }
+
+    #[cfg(vesper_port)]
+    #[allow(clippy::too_many_arguments)]
+    fn pair_manifold_port(
+        &self,
+        a: usize,
+        b: usize,
+        sa: State,
+        sb: State,
+        mat_a: RigidMaterial,
+        mat_b: RigidMaterial,
+        verts_a: &[[f64; 3]],
+        ra: f64,
+        verts_b: &[[f64; 3]],
+        rb: f64,
+        margin: f64,
+        tol: f64,
+        merge: f64,
+    ) -> Result<Option<ContactManifold>, RigidError> {
+        let mut da_buf = [0.0f64; 3 * MAX_HULL_VERTICES + 1];
+        let mut db_buf = [0.0f64; 3 * MAX_HULL_VERTICES + 1];
+        let (ka, na, da) = pack_world_shape(verts_a, ra, &mut da_buf);
+        let (kb, nb, db) = pack_world_shape(verts_b, rb, &mut db_buf);
+        let mut gjk_out = [0.0f64; 10];
+        let mut probe = [0.0f64; 4];
+        let mut cands = [0.0f64; (1 + 2 * MAX_HULL_VERTICES) * 7];
+        let mut kept = [0.0f64; (1 + 2 * MAX_HULL_VERTICES) * 7];
+        let mut out_cands = [0.0f64; MAX_MANIFOLD_POINTS * 7];
+        let mut out_normal = [0.0f64; 3];
+        let res = crate::port::rigid_pair_manifold(
+            ka,
+            na as u64,
+            ra,
+            da,
+            kb,
+            nb as u64,
+            rb,
+            db,
+            margin,
+            tol,
+            merge,
+            &mut gjk_out,
+            &mut probe,
             &mut cands,
-            n,
-            CONTACT_MERGE_REL * (scale + CONTACT_MERGE_FLOOR),
+            &mut kept,
+            &mut out_cands,
+            &mut out_normal,
         );
-        let material = combine(ca.material, cb.material);
+        if res == 0 {
+            return Ok(None);
+        }
+        if res > MAX_MANIFOLD_POINTS as u64 {
+            let error = match res {
+                7 => GjkError::InvalidShape,
+                8 => GjkError::NoConvergence,
+                _ => GjkError::Degenerate,
+            };
+            return Err(RigidError::Narrowphase { a, b, error });
+        }
+        let count = res as usize;
+        let n = out_normal;
         let mut m = ContactManifold {
             a: a as u32,
             b: Some(b as u32),
             normal: n.map(|v| v as f32),
-            count: cands.len(),
+            count,
             points: [ContactPoint::default(); MAX_MANIFOLD_POINTS],
             radius_a: ra as f32,
             radius_b: rb as f32,
-            material,
+            material: combine(mat_a, mat_b),
         };
-        for (p, c) in m.points.iter_mut().zip(&cands) {
-            let core_a = axpy64(c.pa, ra, n);
-            let core_b = axpy64(c.pb, -rb, n);
+        for (i, p) in m.points[..count].iter_mut().enumerate() {
+            let b = i * 7;
+            let pa = [out_cands[b], out_cands[b + 1], out_cands[b + 2]];
+            let pb = [out_cands[b + 3], out_cands[b + 4], out_cands[b + 5]];
+            let core_a = axpy64(pa, ra, n);
+            let core_b = axpy64(pb, -rb, n);
             p.local_a = rotate64(conj(sa.q), sub64(core_a, to64(sa.x))).map(|v| v as f32);
             p.local_b = rotate64(conj(sb.q), sub64(core_b, to64(sb.x))).map(|v| v as f32);
-            p.depth = c.depth as f32;
+            p.depth = out_cands[b + 6] as f32;
         }
         Ok(Some(m))
     }
