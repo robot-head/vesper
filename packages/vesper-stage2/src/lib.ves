@@ -157,7 +157,12 @@ pub fn stage2_compile_dir(in root_dir: Str, in out_wasm: Str, in entry_name: Str
         in mods,
         in entry_name
     );
-    let (names, types, world, call_rows, call_pairs) = typecheck_ast(in ir_ast, sink names0, sink types0, sink world0);
+    let (names, types, world, call_rows, call_pairs) = typecheck_ast(
+        in ir_ast,
+        sink names0,
+        sink types0,
+        sink world0
+    );
     let mut c = Ctx {
         names: names,
         types: types,
@@ -308,7 +313,11 @@ pub fn stage2_compile_dir(in root_dir: Str, in out_wasm: Str, in entry_name: Str
                 let ret_fn = nested_sym(inout c2, in "$handler_clause_", rx.s0, rx.s1);
                 push_hop(inout facts, widen_u64(ret_fn));
                 push_hop(inout facts, rc.pn);
-                let mut r_binds: u64 = if h.has_state { 1 } else { 0 };
+                let mut r_binds: u64 = if h.has_state {
+                    1
+                } else {
+                    0
+                };
                 for pi in 0..rc.pn {
                     let pid = match low.a.xs.try_get(wrapping_add(rc.pa, pi)) {
                         Option::Some(v) => v,
@@ -345,7 +354,11 @@ pub fn stage2_compile_dir(in root_dir: Str, in out_wasm: Str, in entry_name: Str
                     let op_fn = nested_sym(inout c2, in "$handler_clause_", ox.s0, ox.s1);
                     push_hop(inout facts, widen_u64(op_fn));
                     push_hop(inout facts, oc.pn);
-                    let mut o_binds: u64 = if h.has_state { 1 } else { 0 };
+                    let mut o_binds: u64 = if h.has_state {
+                        1
+                    } else {
+                        0
+                    };
                     for pi in 0..oc.pn {
                         let pid = match low.a.xs.try_get(wrapping_add(oc.pa, pi)) {
                             Option::Some(v) => v,
@@ -376,7 +389,11 @@ pub fn stage2_compile_dir(in root_dir: Str, in out_wasm: Str, in entry_name: Str
                     }
                 }
                 let b_ps = prog_fn_params(in prog, in fn_by_sym, body_fn);
-                let b_non = if h.has_state { 1 } else { 0 };
+                let b_non = if h.has_state {
+                    1
+                } else {
+                    0
+                };
                 let b_nfree = if b_ps.len() > b_non {
                     wrapping_sub(b_ps.len(), b_non)
                 } else {

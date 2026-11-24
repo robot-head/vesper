@@ -864,8 +864,7 @@ fn scan_dir_mods(
             let mut sn = ChunkSeq::new[u8]();
             sn.extend(in nb[0..wrapping_sub(nb.len(), 4)]);
             next_segs.push(sink sn);
-            if !has_file(in files, in p1.as_slice())
-                && !has_mod(in mods, pkg_idx, in next_segs) {
+            if !has_file(in files, in p1.as_slice()) && !has_mod(in mods, pkg_idx, in next_segs) {
                 match try_read_file(in p1.as_slice()) {
                     Option::Some(sub_text) => {
                         collect_mod_files(
@@ -899,8 +898,7 @@ fn scan_dir_mods(
             sn.extend(in nb);
             next_segs.push(sink sn);
             let p2 = join_path(in sub_dir.as_slice(), in "mod.ves".as_bytes());
-            if !has_file(in files, in p2.as_slice())
-                && !has_mod(in mods, pkg_idx, in next_segs) {
+            if !has_file(in files, in p2.as_slice()) && !has_mod(in mods, pkg_idx, in next_segs) {
                 match try_read_file(in p2.as_slice()) {
                     Option::Some(sub_text) => {
                         collect_mod_files(
@@ -1015,22 +1013,76 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
     sp_segs.push(sink sp_seg);
     let mut sp_src = ChunkSeq::new[u8]();
     sp_src.extend(in "impl String { fn new() -> String { \"\" } ".as_bytes());
-    sp_src.extend(in "fn with_capacity(n: u64) -> String { let mut s = String::new(); s.reserve(n); s } ".as_bytes());
-    sp_src.extend(in "fn utf8_byte(in bytes: Slice[u8], i: u64) -> u32 { match bytes.try_get(i) { Option::Some(b) => widen_u32(b), Option::None => 0 } } ".as_bytes());
-    sp_src.extend(in "fn utf8_width(in bytes: Slice[u8], i: u64) -> u64 { let b0 = String::utf8_byte(in bytes, i); let b1 = String::utf8_byte(in bytes, wrapping_add(i, 1)); let c2 = (String::utf8_byte(in bytes, wrapping_add(i, 2)) & 192) == 128; let c3 = (String::utf8_byte(in bytes, wrapping_add(i, 3)) & 192) == 128; if b0 < 128 { 1 } else if b0 < 194 { 0 } else if b0 < 224 { if (b1 & 192) == 128 { 2 } else { 0 } } else if b0 < 240 { let lo: u32 = if b0 == 224 { 160 } else { 128 }; let hi: u32 = if b0 == 237 { 159 } else { 191 }; if b1 >= lo && b1 <= hi && c2 { 3 } else { 0 } } else if b0 < 245 { let lo: u32 = if b0 == 240 { 144 } else { 128 }; let hi: u32 = if b0 == 244 { 143 } else { 191 }; if b1 >= lo && b1 <= hi && c2 && c3 { 4 } else { 0 } } else { 0 } } ".as_bytes());
-    sp_src.extend(in "fn utf8_decode(in bytes: Slice[u8], i: u64, w: u64) -> u32 { let b0 = String::utf8_byte(in bytes, i); let c1 = String::utf8_byte(in bytes, wrapping_add(i, 1)) & 63; let c2 = String::utf8_byte(in bytes, wrapping_add(i, 2)) & 63; let c3 = String::utf8_byte(in bytes, wrapping_add(i, 3)) & 63; if w == 1 { b0 } else if w == 2 { wrapping_mul(b0 & 31, 64) | c1 } else if w == 3 { wrapping_mul(b0 & 15, 4096) | wrapping_mul(c1, 64) | c2 } else { wrapping_mul(b0 & 7, 262144) | wrapping_mul(c1, 4096) | wrapping_mul(c2, 64) | c3 } } ".as_bytes());
-    sp_src.extend(in "fn from_utf8(in bytes: Slice[u8]) -> Option[String] { let n = bytes.len(); let mut out = String::with_capacity(n); let mut i: u64 = 0; let mut valid = true; loop { if i >= n { break; } let w = String::utf8_width(in bytes, i); if w == 0 || w > wrapping_sub(n, i) { valid = false; break; } out.push_char(String::utf8_decode(in bytes, i, w)); i = wrapping_add(i, w); } if valid { Option::Some(out) } else { Option::None } } } ".as_bytes());
-    sp_src.extend(in "pub fn checked_add_u64(a: u64, b: u64) -> Option[u64] { if b > wrapping_sub(18446744073709551615, a) { Option::None } else { Option::Some(wrapping_add(a, b)) } } ".as_bytes());
-    sp_src.extend(in "pub fn checked_sub_u64(a: u64, b: u64) -> Option[u64] { if b > a { Option::None } else { Option::Some(wrapping_sub(a, b)) } } ".as_bytes());
-    sp_src.extend(in "pub fn checked_mul_u64(a: u64, b: u64) -> Option[u64] { if a == 0 || b == 0 { Option::Some(0) } else if a > 18446744073709551615 / b { Option::None } else { Option::Some(wrapping_mul(a, b)) } } ".as_bytes());
-    sp_src.extend(in "pub fn checked_add_u128(a: u128, b: u128) -> Option[u128] { let s = wrapping_add(a, b); if s < a { Option::None } else { Option::Some(s) } } ".as_bytes());
-    sp_src.extend(in "pub fn checked_mul_u128(a: u128, b: u128) -> Option[u128] { if a == 0 || b == 0 { Option::Some(0) } else { let p = wrapping_mul(a, b); if p / a != b { Option::None } else { Option::Some(p) } } } ".as_bytes());
+    sp_src
+        .extend(
+            in "fn with_capacity(n: u64) -> String { let mut s = String::new(); s.reserve(n); s } "
+                .as_bytes()
+        );
+    sp_src
+        .extend(
+            in "fn utf8_byte(in bytes: Slice[u8], i: u64) -> u32 { match bytes.try_get(i) { Option::Some(b) => widen_u32(b), Option::None => 0 } } "
+                .as_bytes()
+        );
+    sp_src
+        .extend(
+            in "fn utf8_width(in bytes: Slice[u8], i: u64) -> u64 { let b0 = String::utf8_byte(in bytes, i); let b1 = String::utf8_byte(in bytes, wrapping_add(i, 1)); let c2 = (String::utf8_byte(in bytes, wrapping_add(i, 2)) & 192) == 128; let c3 = (String::utf8_byte(in bytes, wrapping_add(i, 3)) & 192) == 128; if b0 < 128 { 1 } else if b0 < 194 { 0 } else if b0 < 224 { if (b1 & 192) == 128 { 2 } else { 0 } } else if b0 < 240 { let lo: u32 = if b0 == 224 { 160 } else { 128 }; let hi: u32 = if b0 == 237 { 159 } else { 191 }; if b1 >= lo && b1 <= hi && c2 { 3 } else { 0 } } else if b0 < 245 { let lo: u32 = if b0 == 240 { 144 } else { 128 }; let hi: u32 = if b0 == 244 { 143 } else { 191 }; if b1 >= lo && b1 <= hi && c2 && c3 { 4 } else { 0 } } else { 0 } } "
+                .as_bytes()
+        );
+    sp_src
+        .extend(
+            in "fn utf8_decode(in bytes: Slice[u8], i: u64, w: u64) -> u32 { let b0 = String::utf8_byte(in bytes, i); let c1 = String::utf8_byte(in bytes, wrapping_add(i, 1)) & 63; let c2 = String::utf8_byte(in bytes, wrapping_add(i, 2)) & 63; let c3 = String::utf8_byte(in bytes, wrapping_add(i, 3)) & 63; if w == 1 { b0 } else if w == 2 { wrapping_mul(b0 & 31, 64) | c1 } else if w == 3 { wrapping_mul(b0 & 15, 4096) | wrapping_mul(c1, 64) | c2 } else { wrapping_mul(b0 & 7, 262144) | wrapping_mul(c1, 4096) | wrapping_mul(c2, 64) | c3 } } "
+                .as_bytes()
+        );
+    sp_src
+        .extend(
+            in "fn from_utf8(in bytes: Slice[u8]) -> Option[String] { let n = bytes.len(); let mut out = String::with_capacity(n); let mut i: u64 = 0; let mut valid = true; loop { if i >= n { break; } let w = String::utf8_width(in bytes, i); if w == 0 || w > wrapping_sub(n, i) { valid = false; break; } out.push_char(String::utf8_decode(in bytes, i, w)); i = wrapping_add(i, w); } if valid { Option::Some(out) } else { Option::None } } } "
+                .as_bytes()
+        );
+    sp_src
+        .extend(
+            in "pub fn checked_add_u64(a: u64, b: u64) -> Option[u64] { if b > wrapping_sub(18446744073709551615, a) { Option::None } else { Option::Some(wrapping_add(a, b)) } } "
+                .as_bytes()
+        );
+    sp_src
+        .extend(
+            in "pub fn checked_sub_u64(a: u64, b: u64) -> Option[u64] { if b > a { Option::None } else { Option::Some(wrapping_sub(a, b)) } } "
+                .as_bytes()
+        );
+    sp_src
+        .extend(
+            in "pub fn checked_mul_u64(a: u64, b: u64) -> Option[u64] { if a == 0 || b == 0 { Option::Some(0) } else if a > 18446744073709551615 / b { Option::None } else { Option::Some(wrapping_mul(a, b)) } } "
+                .as_bytes()
+        );
+    sp_src
+        .extend(
+            in "pub fn checked_add_u128(a: u128, b: u128) -> Option[u128] { let s = wrapping_add(a, b); if s < a { Option::None } else { Option::Some(s) } } "
+                .as_bytes()
+        );
+    sp_src
+        .extend(
+            in "pub fn checked_mul_u128(a: u128, b: u128) -> Option[u128] { if a == 0 || b == 0 { Option::Some(0) } else { let p = wrapping_mul(a, b); if p / a != b { Option::None } else { Option::Some(p) } } } "
+                .as_bytes()
+        );
     sp_src.extend(in "pub fn wrapping_neg_i64(x: i64) -> i64 { wrapping_sub(0, x) } ".as_bytes());
-    sp_src.extend(in "pub fn wrapping_shl_u64(x: u64, n: u32) -> u64 { x << widen_u64(n & 63) } ".as_bytes());
-    sp_src.extend(in "pub fn wrapping_shr_u64(x: u64, n: u32) -> u64 { x >> widen_u64(n & 63) } ".as_bytes());
-    sp_src.extend(in "pub fn wrapping_shl_u32(x: u32, n: u32) -> u32 { x << (n & 31) } ".as_bytes());
-    sp_src.extend(in "pub fn wrapping_shr_u32(x: u32, n: u32) -> u32 { x >> (n & 31) } ".as_bytes());
-    sp_src.extend(in "pub fn trailing_zeros_u64(x: u64) -> u32 { if x == 0 { 64 } else { let mut v = x; let mut c: u32 = 0; loop { if (v & 1) != 0 { break; } v = wrapping_shr_u64(v, 1); c = wrapping_add(c, 1); } c } }".as_bytes());
+    sp_src
+        .extend(
+            in "pub fn wrapping_shl_u64(x: u64, n: u32) -> u64 { x << widen_u64(n & 63) } "
+                .as_bytes()
+        );
+    sp_src
+        .extend(
+            in "pub fn wrapping_shr_u64(x: u64, n: u32) -> u64 { x >> widen_u64(n & 63) } "
+                .as_bytes()
+        );
+    sp_src
+        .extend(in "pub fn wrapping_shl_u32(x: u32, n: u32) -> u32 { x << (n & 31) } ".as_bytes());
+    sp_src
+        .extend(in "pub fn wrapping_shr_u32(x: u32, n: u32) -> u32 { x >> (n & 31) } ".as_bytes());
+    sp_src
+        .extend(
+            in "pub fn trailing_zeros_u64(x: u64) -> u32 { if x == 0 { 64 } else { let mut v = x; let mut c: u32 = 0; loop { if (v & 1) != 0 { break; } v = wrapping_shr_u64(v, 1); c = wrapping_add(c, 1); } c } }"
+                .as_bytes()
+        );
     collect_mod_files(
         0,
         in "".as_bytes(),

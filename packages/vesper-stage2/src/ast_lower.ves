@@ -650,17 +650,49 @@ fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -
                     if n == 0 && lc.names.spells(n32(ce.b), in "hash".as_bytes()) {
                         let wop = widen_u64(lc.names.intern(in "widen_u64".as_bytes()));
                         let idx = lc.ir.exs.len();
-                        lc.ir.exs.push(Ex { kind: X_UNARY, s0: s0, s1: s1, a: wop, b: ce.a, c: 0, n: 0, m: 0, x: 0 });
+                        lc
+                            .ir
+                            .exs
+                            .push(
+                                Ex {
+                                    kind: X_UNARY,
+                                    s0: s0,
+                                    s1: s1,
+                                    a: wop,
+                                    b: ce.a,
+                                    c: 0,
+                                    n: 0,
+                                    m: 0,
+                                    x: 0
+                                }
+                            );
                         return idx;
                     }
                     if n == 1 && lc.names.spells(n32(ce.b), in "eq".as_bytes()) {
                         let eop = widen_u64(lc.names.intern(in "==".as_bytes()));
-                        let rhs = match ast.args.get(idx_from_raw[ArgNode](list_at(in ast, e.c, 0))) {
+                        let rhs = match ast
+                            .args
+                            .get(idx_from_raw[ArgNode](list_at(in ast, e.c, 0))) {
                             Option::Some(ag) => lower_expr(inout lc, in ast, mod_idx, ag.expr),
                             Option::None => 0,
                         };
                         let idx = lc.ir.exs.len();
-                        lc.ir.exs.push(Ex { kind: X_BINARY, s0: s0, s1: s1, a: eop, b: ce.a, c: rhs, n: 0, m: 0, x: 0 });
+                        lc
+                            .ir
+                            .exs
+                            .push(
+                                Ex {
+                                    kind: X_BINARY,
+                                    s0: s0,
+                                    s1: s1,
+                                    a: eop,
+                                    b: ce.a,
+                                    c: rhs,
+                                    n: 0,
+                                    m: 0,
+                                    x: 0
+                                }
+                            );
                         return idx;
                     }
                 }

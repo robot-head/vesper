@@ -935,11 +935,52 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
     };
     if !has_re {
         let rva = n32(world.variants.len());
-        world.variants.push(Variant { name: names.intern(in "ArithOverflow".as_bytes()), fa: 0, fc: 0, named: false });
-        world.variants.push(Variant { name: names.intern(in "IndexOutOfBounds".as_bytes()), fa: 0, fc: 0, named: false });
-        world.variants.push(Variant { name: names.intern(in "DivisionByZero".as_bytes()), fa: 0, fc: 0, named: false });
+        world
+            .variants
+            .push(
+                Variant {
+                    name: names.intern(in "ArithOverflow".as_bytes()),
+                    fa: 0,
+                    fc: 0,
+                    named: false
+                }
+            );
+        world
+            .variants
+            .push(
+                Variant {
+                    name: names.intern(in "IndexOutOfBounds".as_bytes()),
+                    fa: 0,
+                    fc: 0,
+                    named: false
+                }
+            );
+        world
+            .variants
+            .push(
+                Variant {
+                    name: names.intern(in "DivisionByZero".as_bytes()),
+                    fa: 0,
+                    fc: 0,
+                    named: false
+                }
+            );
         let ridx = n32(world.adts.len());
-        world.adts.push(Adt { name: re_sym, mode: 0, ga: 0, gn: 0, va: rva, vn: 3, is_enum: true, tile: 0, span_zero: false });
+        world
+            .adts
+            .push(
+                Adt {
+                    name: re_sym,
+                    mode: 0,
+                    ga: 0,
+                    gn: 0,
+                    va: rva,
+                    vn: 3,
+                    is_enum: true,
+                    tile: 0,
+                    span_zero: false
+                }
+            );
         set_by_symbol(inout world.by_name, re_sym, inc32(ridx));
     }
     let fail_sym = names.intern(in "Fail".as_bytes());
@@ -1021,30 +1062,78 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
     let env_oa = n32(eff_ops.len());
     let mut p0 = ChunkSeq::new[u8]();
     let mut t0 = ChunkSeq::new[u32]();
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_env_arg_count", in p0, in t0, u64_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_env_var_count", in p0, in t0, u64_t);
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_env_arg_count",
+        in p0,
+        in t0,
+        u64_t
+    );
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_env_var_count",
+        in p0,
+        in t0,
+        u64_t
+    );
     let mut p_u64_s = ChunkSeq::new[u8]();
     p_u64_s.push(0);
     p_u64_s.push(1);
     let mut t_u64_s = ChunkSeq::new[u32]();
     t_u64_s.push(u64_t);
     t_u64_s.push(slice_u8_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_env_arg", in p_u64_s, in t_u64_s, i64_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_env_var_at", in p_u64_s, in t_u64_s, i64_t);
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_env_arg",
+        in p_u64_s,
+        in t_u64_s,
+        i64_t
+    );
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_env_var_at",
+        in p_u64_s,
+        in t_u64_s,
+        i64_t
+    );
     let mut p_s_s = ChunkSeq::new[u8]();
     p_s_s.push(0);
     p_s_s.push(1);
     let mut t_s_s = ChunkSeq::new[u32]();
     t_s_s.push(slice_u8_t);
     t_s_s.push(slice_u8_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_env_var", in p_s_s, in t_s_s, i64_t);
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_env_var",
+        in p_s_s,
+        in t_s_s,
+        i64_t
+    );
     let mut p_s_u = ChunkSeq::new[u8]();
     p_s_u.push(1);
     p_s_u.push(1);
     let mut t_s_u = ChunkSeq::new[u32]();
     t_s_u.push(slice_u8_t);
     t_s_u.push(u64_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_env_current_dir", in p_s_u, in t_s_u, i64_t);
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_env_current_dir",
+        in p_s_u,
+        in t_s_u,
+        i64_t
+    );
     eff_decls
         .push(
             EffDeclInfo {
@@ -1064,15 +1153,39 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
     p_s.push(0);
     let mut t_s = ChunkSeq::new[u32]();
     t_s.push(slice_u8_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_fs_parent_len", in p_s, in t_s, u64_t);
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_parent_len",
+        in p_s,
+        in t_s,
+        u64_t
+    );
     let mut p_f = ChunkSeq::new[u8]();
     p_f.push(0);
     let mut t_f = ChunkSeq::new[u32]();
     t_f.push(fs_file_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_fs_file_len", in p_f, in t_f, u64_t);
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_file_len",
+        in p_f,
+        in t_f,
+        u64_t
+    );
     let mut p_fs = ChunkSeq::new[u8]();
     p_fs.push(2);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_fs_close", in p_fs, in t_f, unit_t);
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_close",
+        in p_fs,
+        in t_f,
+        unit_t
+    );
     let mut p_open = ChunkSeq::new[u8]();
     p_open.push(0);
     p_open.push(0);
@@ -1081,7 +1194,15 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
     t_open.push(slice_u8_t);
     t_open.push(u64_t);
     t_open.push(u64_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_fs_open", in p_open, in t_open, opt_fs_file_t);
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_open",
+        in p_open,
+        in t_open,
+        opt_fs_file_t
+    );
     let mut p_read = ChunkSeq::new[u8]();
     p_read.push(1);
     p_read.push(1);
@@ -1090,19 +1211,43 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
     t_read.push(fs_file_t);
     t_read.push(slice_u8_t);
     t_read.push(u64_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_fs_read", in p_read, in t_read, i64_t);
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_read",
+        in p_read,
+        in t_read,
+        i64_t
+    );
     let mut p_write = ChunkSeq::new[u8]();
     p_write.push(1);
     p_write.push(0);
     p_write.push(1);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_fs_write", in p_write, in t_read, u64_t);
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_write",
+        in p_write,
+        in t_read,
+        u64_t
+    );
     let mut p_sync = ChunkSeq::new[u8]();
     p_sync.push(1);
     p_sync.push(1);
     let mut t_sync = ChunkSeq::new[u32]();
     t_sync.push(fs_file_t);
     t_sync.push(u64_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_fs_sync", in p_sync, in t_sync, u64_t);
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_sync",
+        in p_sync,
+        in t_sync,
+        u64_t
+    );
     let mut p_ren = ChunkSeq::new[u8]();
     p_ren.push(0);
     p_ren.push(0);
@@ -1111,21 +1256,61 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
     t_ren.push(slice_u8_t);
     t_ren.push(slice_u8_t);
     t_ren.push(u64_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_fs_rename", in p_ren, in t_ren, u64_t);
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_rename",
+        in p_ren,
+        in t_ren,
+        u64_t
+    );
     let mut p_rm = ChunkSeq::new[u8]();
     p_rm.push(0);
     p_rm.push(1);
     let mut t_rm = ChunkSeq::new[u32]();
     t_rm.push(slice_u8_t);
     t_rm.push(u64_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_fs_remove_file", in p_rm, in t_rm, u64_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_fs_sync_dir", in p_rm, in t_rm, u64_t);
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_remove_file",
+        in p_rm,
+        in t_rm,
+        u64_t
+    );
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_sync_dir",
+        in p_rm,
+        in t_rm,
+        u64_t
+    );
     let mut t_dir = ChunkSeq::new[u32]();
     t_dir.push(slice_u8_t);
     t_dir.push(bool_t);
     t_dir.push(u64_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_fs_remove_dir", in p_ren, in t_dir, u64_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_fs_create_dir", in p_ren, in t_dir, u64_t);
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_remove_dir",
+        in p_ren,
+        in t_dir,
+        u64_t
+    );
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_create_dir",
+        in p_ren,
+        in t_dir,
+        u64_t
+    );
     let mut p_meta = ChunkSeq::new[u8]();
     p_meta.push(0);
     p_meta.push(0);
@@ -1136,16 +1321,48 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
     t_meta.push(bool_t);
     t_meta.push(fs_meta_t);
     t_meta.push(u64_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_fs_metadata", in p_meta, in t_meta, u64_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_fs_read_dir", in p_rm, in t_rm, opt_fs_dir_t);
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_metadata",
+        in p_meta,
+        in t_meta,
+        u64_t
+    );
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_read_dir",
+        in p_rm,
+        in t_rm,
+        opt_fs_dir_t
+    );
     let mut t_dn = ChunkSeq::new[u32]();
     t_dn.push(fs_dir_t);
     t_dn.push(slice_u8_t);
     t_dn.push(types.named0(world.k.u32_));
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_fs_dir_next", in p_read, in t_dn, i64_t);
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_dir_next",
+        in p_read,
+        in t_dn,
+        i64_t
+    );
     let mut t_dc = ChunkSeq::new[u32]();
     t_dc.push(fs_dir_t);
-    add_ffi_op(inout names, inout params, inout eff_ops, in "vstd_fs_dir_close", in p_fs, in t_dc, unit_t);
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_dir_close",
+        in p_fs,
+        in t_dc,
+        unit_t
+    );
     eff_decls
         .push(
             EffDeclInfo {
