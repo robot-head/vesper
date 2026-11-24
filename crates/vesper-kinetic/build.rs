@@ -61,4 +61,6 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // rigid/ccd.rs: conservative advancement never detects a hit.
     ("        if d <= margin {\n", "        if d < -1.0 {\n"),
+    // rigid.rs (manifold): narrowphase always reports no contact.
+    ("    if d0 > margin {\n", "    if d0 <= margin {\n"),
 ];

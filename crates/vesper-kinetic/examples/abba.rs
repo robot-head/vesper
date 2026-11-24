@@ -410,6 +410,63 @@ macro_rules! workloads {
                 }
                 h
             }
+
+            pub fn manifold(seed: u64) -> u64 {
+                let mat = RigidMaterial {
+                    static_friction: 0.5,
+                    dynamic_friction: 0.4,
+                    restitution: 0.1,
+                    rolling_friction: 0.0,
+                };
+                let colliders = [
+                    RigidCollider {
+                        shape: ColliderShape::Box {
+                            half_extents: [5.0, 0.2, 5.0],
+                        },
+                        material: mat,
+                    },
+                    RigidCollider {
+                        shape: ColliderShape::Box {
+                            half_extents: [0.3, 0.3, 0.3],
+                        },
+                        material: mat,
+                    },
+                    RigidCollider {
+                        shape: ColliderShape::Capsule {
+                            half_height: 0.25,
+                            radius: 0.15,
+                        },
+                        material: mat,
+                    },
+                ];
+                let mut bodies = vec![RigidBody::new([0.0, -0.2, 0.0], 0.0, [0.0; 3], 0)];
+                let mut s = seed ^ 0x517c_c1b7_2722_0a95;
+                for i in 0..24 {
+                    let x = ((i % 4) as f32 - 1.5) * 0.7;
+                    let z = (((i / 4) % 3) as f32 - 1.0) * 0.7;
+                    let y = 0.32 + (i / 12) as f32 * 0.65;
+                    let col = 1 + (i % 2);
+                    let mut b =
+                        RigidBody::new([x, y, z], 1.0, box_inv_inertia(1.0, [0.3; 3]), col as u32);
+                    b.vel = [((rng(&mut s) % 5) as f32 - 2.0) * 0.1, -0.5, 0.0];
+                    bodies.push(b);
+                }
+                let cfg = RigidConfig {
+                    dt: 1.0 / 60.0,
+                    substeps: 2,
+                    gravity: [0.0, -9.81, 0.0],
+                    ..RigidConfig::default()
+                };
+                let mut w = RigidWorld::new(cfg, &bodies, &colliders).unwrap();
+                for _ in 0..8 {
+                    w.step().unwrap();
+                }
+                let mut h = 0u64;
+                for i in 1..bodies.len() {
+                    h ^= w.body(i).unwrap().pos[1].to_bits() as u64;
+                }
+                h
+            }
         }
     };
 }
@@ -419,7 +476,7 @@ workloads!(port_build, vesper_kinetic);
 
 type Work = fn(u64) -> u64;
 
-const WORKLOADS: [(&str, Work, Work); 12] = [
+const WORKLOADS: [(&str, Work, Work); 13] = [
     ("morton", rust_build::morton, port_build::morton),
     ("fastmath", rust_build::fastmath, port_build::fastmath),
     ("crmath", rust_build::crmath, port_build::crmath),
@@ -440,6 +497,7 @@ const WORKLOADS: [(&str, Work, Work); 12] = [
         port_build::pile_lbvh_4t,
     ),
     ("ccd", rust_build::ccd, port_build::ccd),
+    ("manifold", rust_build::manifold, port_build::manifold),
 ];
 
 /// Total nanoseconds for `ops` timed runs after `ops / 4` warm-up ones.

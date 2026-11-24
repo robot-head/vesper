@@ -5,6 +5,7 @@
 //
 // The export ABI has no f32, so an f32 crosses the boundary as its bit
 // pattern (a `u32`), as in @vesper/tensor.
+use self::manifold::pair_manifold as m_pair_manifold;
 use self::morton::{
     compact as m_compact,
     compact21 as m_compact21,
@@ -534,5 +535,45 @@ pub fn ccd_pair_toi(
         inout gjk_out,
         inout out_poses,
         inout out_s
+    )
+}
+
+pub fn rigid_pair_manifold(
+    ka: u32,
+    na: u64,
+    ra: f64,
+    in da: Slice[f64],
+    kb: u32,
+    nb: u64,
+    rb: f64,
+    in db: Slice[f64],
+    margin: f64,
+    tol: f64,
+    merge: f64,
+    inout gjk_out: Slice[f64],
+    inout probe: Slice[f64],
+    inout cands: Slice[f64],
+    inout kept: Slice[f64],
+    inout out_cands: Slice[f64],
+    inout out_normal: Slice[f64]
+) -> u64 {
+    m_pair_manifold(
+        ka,
+        na,
+        ra,
+        in da,
+        kb,
+        nb,
+        rb,
+        in db,
+        margin,
+        tol,
+        merge,
+        inout gjk_out,
+        inout probe,
+        inout cands,
+        inout kept,
+        inout out_cands,
+        inout out_normal
     )
 }

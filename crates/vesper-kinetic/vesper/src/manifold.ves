@@ -1,0 +1,431 @@
+// @vesper/kinetic::manifold: narrowphase contact manifold (`src/rigid.rs::pair_manifold_at`).
+use self::gjk::separation as g_separation;
+
+fn gf(in s: Slice[f64], i: u64) -> f64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0.0,
+    }
+}
+
+fn sf(inout s: Slice[f64], i: u64, v: f64) {
+    s.try_set(i, v);
+}
+
+fn abs64(x: f64) -> f64 {
+    if x < 0.0 {
+        -x
+    } else {
+        x
+    }
+}
+
+fn max64(a: f64, b: f64) -> f64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+fn support_dot(
+    kind: u32,
+    n_pts: u64,
+    rad: f64,
+    in d: Slice[f64],
+    dx: f64,
+    dy: f64,
+    dz: f64,
+    nx: f64,
+    ny: f64,
+    nz: f64
+) -> f64 {
+    let mut bx = gf(in d, 0);
+    let mut by = gf(in d, 1);
+    let mut bz = gf(in d, 2);
+    if kind == 1 {
+        let b1x = gf(in d, 3);
+        let b1y = gf(in d, 4);
+        let b1z = gf(in d, 5);
+        if b1x * dx + b1y * dy + b1z * dz > bx * dx + by * dy + bz * dz {
+            bx = b1x;
+            by = b1y;
+            bz = b1z;
+        }
+    } else if kind == 2 {
+        let mut best_dot = bx * dx + by * dy + bz * dz;
+        let mut i: u64 = 1;
+        loop {
+            if i >= n_pts {
+                break;
+            }
+            let base = wrapping_mul(i, 3);
+            let vx = gf(in d, base);
+            let vy = gf(in d, wrapping_add(base, 1));
+            let vz = gf(in d, wrapping_add(base, 2));
+            let s = vx * dx + vy * dy + vz * dz;
+            if s > best_dot {
+                bx = vx;
+                by = vy;
+                bz = vz;
+                best_dot = s;
+            }
+            i = wrapping_add(i, 1);
+        }
+    }
+    let dn = sqrt(dx * dx + dy * dy + dz * dz);
+    if rad != 0.0 && dn != 0.0 {
+        let sc = rad / dn;
+        bx = bx + dx * sc;
+        by = by + dy * sc;
+        bz = bz + dz * sc;
+    }
+    bx * nx + by * ny + bz * nz
+}
+
+fn copy_cand(in src: Slice[f64], si: u64, inout dst: Slice[f64], di: u64) {
+    let sb = wrapping_mul(si, 7);
+    let db = wrapping_mul(di, 7);
+    let mut k: u64 = 0;
+    loop {
+        if k >= 7 {
+            break;
+        }
+        sf(inout dst, wrapping_add(db, k), gf(in src, wrapping_add(sb, k)));
+        k = wrapping_add(k, 1);
+    }
+}
+
+fn write_cand(
+    inout dst: Slice[f64],
+    di: u64,
+    pax: f64,
+    pay: f64,
+    paz: f64,
+    pbx: f64,
+    pby: f64,
+    pbz: f64,
+    depth: f64
+) {
+    let db = wrapping_mul(di, 7);
+    sf(inout dst, db, pax);
+    sf(inout dst, wrapping_add(db, 1), pay);
+    sf(inout dst, wrapping_add(db, 2), paz);
+    sf(inout dst, wrapping_add(db, 3), pbx);
+    sf(inout dst, wrapping_add(db, 4), pby);
+    sf(inout dst, wrapping_add(db, 5), pbz);
+    sf(inout dst, wrapping_add(db, 6), depth);
+}
+
+fn remove_cand(inout s: Slice[f64], len: u64, idx: u64) -> u64 {
+    let mut i = idx;
+    let last = wrapping_sub(len, 1);
+    loop {
+        if i >= last {
+            break;
+        }
+        let next = wrapping_add(i, 1);
+        let sb = wrapping_mul(next, 7);
+        let db = wrapping_mul(i, 7);
+        let mut k: u64 = 0;
+        loop {
+            if k >= 7 {
+                break;
+            }
+            sf(inout s, wrapping_add(db, k), gf(in s, wrapping_add(sb, k)));
+            k = wrapping_add(k, 1);
+        }
+        i = next;
+    }
+    last
+}
+
+fn reduce_cands(
+    in cands: Slice[f64],
+    nc: u64,
+    nx: f64,
+    ny: f64,
+    nz: f64,
+    merge: f64,
+    inout kept: Slice[f64],
+    inout out_cands: Slice[f64]
+) -> u64 {
+    let merge2 = merge * merge;
+    let mut nk: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= nc {
+            break;
+        }
+        let cb = wrapping_mul(i, 7);
+        let cpx = gf(in cands, cb);
+        let cpy = gf(in cands, wrapping_add(cb, 1));
+        let cpz = gf(in cands, wrapping_add(cb, 2));
+        let cd = gf(in cands, wrapping_add(cb, 6));
+        let mut found = false;
+        let mut j: u64 = 0;
+        loop {
+            if j >= nk {
+                break;
+            }
+            let kb = wrapping_mul(j, 7);
+            let dx = gf(in kept, kb) - cpx;
+            let dy = gf(in kept, wrapping_add(kb, 1)) - cpy;
+            let dz = gf(in kept, wrapping_add(kb, 2)) - cpz;
+            if dx * dx + dy * dy + dz * dz <= merge2 {
+                if cd > gf(in kept, wrapping_add(kb, 6)) {
+                    copy_cand(in cands, i, inout kept, j);
+                }
+                found = true;
+                break;
+            }
+            j = wrapping_add(j, 1);
+        }
+        if !found {
+            copy_cand(in cands, i, inout kept, nk);
+            nk = wrapping_add(nk, 1);
+        }
+        i = wrapping_add(i, 1);
+    }
+    if nk <= 4 {
+        let mut k: u64 = 0;
+        loop {
+            if k >= nk {
+                break;
+            }
+            copy_cand(in kept, k, inout out_cands, k);
+            k = wrapping_add(k, 1);
+        }
+        return nk;
+    }
+    // 0: deepest
+    let mut i0: u64 = 0;
+    let mut best0 = gf(in kept, 6);
+    let mut k0: u64 = 1;
+    loop {
+        if k0 >= nk {
+            break;
+        }
+        let s = gf(in kept, wrapping_add(wrapping_mul(k0, 7), 6));
+        if s > best0 {
+            best0 = s;
+            i0 = k0;
+        }
+        k0 = wrapping_add(k0, 1);
+    }
+    copy_cand(in kept, i0, inout out_cands, 0);
+    nk = remove_cand(inout kept, nk, i0);
+    let p0x = gf(in out_cands, 0);
+    let p0y = gf(in out_cands, 1);
+    let p0z = gf(in out_cands, 2);
+
+    // 1: farthest from p0
+    let mut i1: u64 = 0;
+    let mut best1 = -1.0;
+    let mut k1: u64 = 0;
+    loop {
+        if k1 >= nk {
+            break;
+        }
+        let kb = wrapping_mul(k1, 7);
+        let dx = gf(in kept, kb) - p0x;
+        let dy = gf(in kept, wrapping_add(kb, 1)) - p0y;
+        let dz = gf(in kept, wrapping_add(kb, 2)) - p0z;
+        let s = dx * dx + dy * dy + dz * dz;
+        if s > best1 {
+            best1 = s;
+            i1 = k1;
+        }
+        k1 = wrapping_add(k1, 1);
+    }
+    copy_cand(in kept, i1, inout out_cands, 1);
+    nk = remove_cand(inout kept, nk, i1);
+    let p1x = gf(in out_cands, 7);
+    let p1y = gf(in out_cands, 8);
+    let p1z = gf(in out_cands, 9);
+    let e01x = p1x - p0x;
+    let e01y = p1y - p0y;
+    let e01z = p1z - p0z;
+
+    // 2: largest triangle with (p0, p1)
+    let mut i2: u64 = 0;
+    let mut best2 = -1.0;
+    let mut k2: u64 = 0;
+    loop {
+        if k2 >= nk {
+            break;
+        }
+        let kb = wrapping_mul(k2, 7);
+        let dx = gf(in kept, kb) - p0x;
+        let dy = gf(in kept, wrapping_add(kb, 1)) - p0y;
+        let dz = gf(in kept, wrapping_add(kb, 2)) - p0z;
+        let ax = e01y * dz - e01z * dy;
+        let ay = e01z * dx - e01x * dz;
+        let az = e01x * dy - e01y * dx;
+        let s = abs64(ax * nx + ay * ny + az * nz);
+        if s > best2 {
+            best2 = s;
+            i2 = k2;
+        }
+        k2 = wrapping_add(k2, 1);
+    }
+    copy_cand(in kept, i2, inout out_cands, 2);
+    nk = remove_cand(inout kept, nk, i2);
+    let p2x = gf(in out_cands, 14);
+    let p2y = gf(in out_cands, 15);
+    let p2z = gf(in out_cands, 16);
+
+    // 3: largest area added outside (p0, p1, p2)
+    let ox = e01y * (p2z - p0z) - e01z * (p2y - p0y);
+    let oy = e01z * (p2x - p0x) - e01x * (p2z - p0z);
+    let oz = e01x * (p2y - p0y) - e01y * (p2x - p0x);
+    let orient = ox * nx + oy * ny + oz * nz;
+    let sgn = if orient >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    let e12x = p2x - p1x;
+    let e12y = p2y - p1y;
+    let e12z = p2z - p1z;
+    let e20x = p0x - p2x;
+    let e20y = p0y - p2y;
+    let e20z = p0z - p2z;
+    let mut i3: u64 = 0;
+    let mut best3 = -1.0e300;
+    let mut k3: u64 = 0;
+    loop {
+        if k3 >= nk {
+            break;
+        }
+        let kb = wrapping_mul(k3, 7);
+        let cx = gf(in kept, kb);
+        let cy = gf(in kept, wrapping_add(kb, 1));
+        let cz = gf(in kept, wrapping_add(kb, 2));
+        let a0x = e01y * (cz - p0z) - e01z * (cy - p0y);
+        let a0y = e01z * (cx - p0x) - e01x * (cz - p0z);
+        let a0z = e01x * (cy - p0y) - e01y * (cx - p0x);
+        let ar0 = -(a0x * nx + a0y * ny + a0z * nz);
+        let a1x = e12y * (cz - p1z) - e12z * (cy - p1y);
+        let a1y = e12z * (cx - p1x) - e12x * (cz - p1z);
+        let a1z = e12x * (cy - p1y) - e12y * (cx - p1x);
+        let ar1 = -(a1x * nx + a1y * ny + a1z * nz);
+        let a2x = e20y * (cz - p2z) - e20z * (cy - p2y);
+        let a2y = e20z * (cx - p2x) - e20x * (cz - p2z);
+        let a2z = e20x * (cy - p2y) - e20y * (cx - p2x);
+        let ar2 = -(a2x * nx + a2y * ny + a2z * nz);
+        let s = max64(max64(sgn * ar0, sgn * ar1), sgn * ar2);
+        if k3 == 0 || s > best3 {
+            best3 = s;
+            i3 = k3;
+        }
+        k3 = wrapping_add(k3, 1);
+    }
+    copy_cand(in kept, i3, inout out_cands, 3);
+    4
+}
+
+// Returns 0 = None, 1..=4 = Some(count written to out_cands/out_normal), or 5 + gjk_err.
+pub fn pair_manifold(
+    ka: u32,
+    na: u64,
+    ra: f64,
+    in da: Slice[f64],
+    kb: u32,
+    nb: u64,
+    rb: f64,
+    in db: Slice[f64],
+    margin: f64,
+    tol: f64,
+    merge: f64,
+    inout gjk_out: Slice[f64],
+    inout probe: Slice[f64],
+    inout cands: Slice[f64],
+    inout kept: Slice[f64],
+    inout out_cands: Slice[f64],
+    inout out_normal: Slice[f64]
+) -> u64 {
+    let st0 = g_separation(ka, in da, kb, in db, inout gjk_out);
+    if st0 != 0 {
+        return wrapping_add(5, st0);
+    }
+    let d0 = gf(in gjk_out, 0);
+    if d0 > margin {
+        return 0;
+    }
+    let nx = -gf(in gjk_out, 1);
+    let ny = -gf(in gjk_out, 2);
+    let nz = -gf(in gjk_out, 3);
+    let a_min = support_dot(ka, na, ra, in da, -nx, -ny, -nz, nx, ny, nz);
+    let b_max = support_dot(kb, nb, rb, in db, nx, ny, nz, nx, ny, nz);
+    write_cand(
+        inout cands,
+        0,
+        gf(in gjk_out, 4),
+        gf(in gjk_out, 5),
+        gf(in gjk_out, 6),
+        gf(in gjk_out, 7),
+        gf(in gjk_out, 8),
+        gf(in gjk_out, 9),
+        -d0
+    );
+    let mut nc: u64 = 1;
+    if na > 1 || nb > 1 {
+        let mut ib: u64 = 0;
+        loop {
+            if ib >= nb {
+                break;
+            }
+            let base = wrapping_mul(ib, 3);
+            let sx = gf(in db, base) + rb * nx;
+            let sy = gf(in db, wrapping_add(base, 1)) + rb * ny;
+            let sz = gf(in db, wrapping_add(base, 2)) + rb * nz;
+            let depth = (sx * nx + sy * ny + sz * nz) - a_min;
+            if depth > -margin {
+                let pax = sx - depth * nx;
+                let pay = sy - depth * ny;
+                let paz = sz - depth * nz;
+                sf(inout probe, 0, pax);
+                sf(inout probe, 1, pay);
+                sf(inout probe, 2, paz);
+                sf(inout probe, 3, 0.0);
+                if g_separation(0, in probe, ka, in da, inout gjk_out) == 0
+                    && gf(in gjk_out, 0) <= tol {
+                    write_cand(inout cands, nc, pax, pay, paz, sx, sy, sz, depth);
+                    nc = wrapping_add(nc, 1);
+                }
+            }
+            ib = wrapping_add(ib, 1);
+        }
+        let mut ia: u64 = 0;
+        loop {
+            if ia >= na {
+                break;
+            }
+            let base = wrapping_mul(ia, 3);
+            let sx = gf(in da, base) - ra * nx;
+            let sy = gf(in da, wrapping_add(base, 1)) - ra * ny;
+            let sz = gf(in da, wrapping_add(base, 2)) - ra * nz;
+            let depth = b_max - (sx * nx + sy * ny + sz * nz);
+            if depth > -margin {
+                let pbx = sx + depth * nx;
+                let pby = sy + depth * ny;
+                let pbz = sz + depth * nz;
+                sf(inout probe, 0, pbx);
+                sf(inout probe, 1, pby);
+                sf(inout probe, 2, pbz);
+                sf(inout probe, 3, 0.0);
+                if g_separation(0, in probe, kb, in db, inout gjk_out) == 0
+                    && gf(in gjk_out, 0) <= tol {
+                    write_cand(inout cands, nc, sx, sy, sz, pbx, pby, pbz, depth);
+                    nc = wrapping_add(nc, 1);
+                }
+            }
+            ia = wrapping_add(ia, 1);
+        }
+    }
+    sf(inout out_normal, 0, nx);
+    sf(inout out_normal, 1, ny);
+    sf(inout out_normal, 2, nz);
+    reduce_cands(in cands, nc, nx, ny, nz, merge, inout kept, inout out_cands)
+}

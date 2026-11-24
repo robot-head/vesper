@@ -177,6 +177,7 @@ unsafe extern "C" {
     fn vesper_kinetic_morton_encode_packed(x: i64, y: i64, z: i64) -> i64;
     fn vesper_kinetic_morton_spread(v: i64) -> i64;
     fn vesper_kinetic_multi_colorer_color(bodies: *mut u64, offs: *mut u64, capacity: i64, masks: *mut u64, keys: *mut u64, order: *mut u64, colors: *mut u64, offsets: *mut u64, sorted: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_kinetic_rigid_pair_manifold(ka: i64, na: i64, ra: f64, da: *mut u64, kb: i64, nb: i64, rb: f64, db: *mut u64, margin: f64, tol: f64, merge: f64, gjk_out: *mut u64, probe: *mut u64, cands: *mut u64, kept: *mut u64, out_cands: *mut u64, out_normal: *mut u64) -> i64;
     fn vesper_kinetic_sap_build(boxes: *mut u64, keys: *mut u64, order: *mut u64, smin: *mut u64, smax: *mut u64, tk: *mut u64, tv: *mut u64, hist: *mut u64, fail: *mut u64) -> i64;
     fn vesper_kinetic_sap_pair_total(smin: *mut u64, smax: *mut u64, axis: i64, counts: *mut u64) -> i64;
     fn vesper_kinetic_sap_sortable(bits: i64) -> i64;
@@ -528,6 +529,15 @@ pub fn multi_colorer_color(bodies: &[u32], offs: &[u32], capacity: u64, masks: &
         1 => Err(<crate::port::ColoringError as Abi>::get(&fail[1..])),
         status => panic!("invalid failure status {status} from vesper_kinetic_multi_colorer_color"),
     }
+}
+
+/// Calls `rigid_pair_manifold` of the Vesper library `kinetic` (`vesper_kinetic_rigid_pair_manifold`).
+pub fn rigid_pair_manifold(ka: u32, na: u64, ra: f64, da: &[f64], kb: u32, nb: u64, rb: f64, db: &[f64], margin: f64, tol: f64, merge: f64, gjk_out: &mut [f64], probe: &mut [f64], cands: &mut [f64], kept: &mut [f64], out_cands: &mut [f64], out_normal: &mut [f64]) -> u64 {
+    // SAFETY: `vesper_kinetic_rigid_pair_manifold` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(da, |view_da| vesper_port_abi::with_slice(db, |view_db| vesper_port_abi::with_slice_mut(gjk_out, |view_gjk_out| vesper_port_abi::with_slice_mut(probe, |view_probe| vesper_port_abi::with_slice_mut(cands, |view_cands| vesper_port_abi::with_slice_mut(kept, |view_kept| vesper_port_abi::with_slice_mut(out_cands, |view_out_cands| vesper_port_abi::with_slice_mut(out_normal, |view_out_normal| unsafe { vesper_kinetic_rigid_pair_manifold(ka as i64, na as i64, ra, view_da, kb as i64, nb as i64, rb, view_db, margin, tol, merge, view_gjk_out, view_probe, view_cands, view_kept, view_out_cands, view_out_normal) }))))))));
+    raw as u64
 }
 
 /// Calls `sap_build` of the Vesper library `kinetic` (`vesper_kinetic_sap_build`).

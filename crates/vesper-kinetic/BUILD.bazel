@@ -97,6 +97,12 @@ filegroup(
             "        if d <= margin {\n",
             "        if d < -1.0 {\n",
         ),
+        (
+            "manifold",
+            "manifold",
+            "    if d0 > margin {\n",
+            "    if d0 <= margin {\n",
+        ),
     ]
 ]
 
