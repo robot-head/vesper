@@ -1773,3 +1773,639 @@ pub fn main() -> u64 {{
     let got = agree(&checked, "main", &MODES);
     assert_eq!(got, h);
 }
+
+#[test]
+fn ete_decoder_sync_packets_atoms_and_errors_match_rust() {
+    use vesper_chrono::ete::{EteDecoder, EteElement, EteError, InstructionSet, decode_elements};
+
+    let mut stream: Vec<u8> = Vec::new();
+    // A-Sync
+    stream.extend_from_slice(&[0x00; 11]);
+    stream.push(0x80);
+    // TraceInfo: plctl=0x03 (info + key)
+    stream.extend_from_slice(&[0x01, 0x03, 0x05, 0x81, 0x02]);
+    // TraceOn
+    stream.push(0x04);
+    // Context: 0x81, el=1, 64-bit=0x10, ns=0x20, vmid=0x40, ctxid=0x80 -> info=0xf1
+    stream.extend_from_slice(&[0x81, 0xf1, 0x07, 0x78, 0x56, 0x34, 0x12]);
+    // Long 64-bit IS0 Address (0x9d)
+    stream.extend_from_slice(&[0x9d, 0x04, 0x08, 0x10, 0x20, 0x30, 0x40, 0x00, 0x00]);
+    // Short IS0 Address 1-byte (0x95) + 2-byte (0x95)
+    stream.extend_from_slice(&[0x95, 0x12]);
+    stream.extend_from_slice(&[0x95, 0x83, 0x04]);
+    // Exact-match address 0 and 1
+    stream.extend_from_slice(&[0x90, 0x91]);
+    // Timestamp (0x02) + Timestamp with cycle count (0x03)
+    stream.extend_from_slice(&[0x02, 0x81, 0x02]);
+    stream.extend_from_slice(&[0x03, 0x03, 0x09]);
+    // Atoms: F1 (0xf7), F2 (0xda), F3 (0xfd), F4 (0xde), F5 (0xf5), F6 (0xe2)
+    stream.extend_from_slice(&[0xf7, 0xda, 0xfd, 0xde, 0xf5, 0xe2]);
+    // Exception (0x06) with type=3 (b1 = (3<<1)=0x06) + exact-match 0x90
+    stream.extend_from_slice(&[0x06, 0x06, 0x90]);
+    // ExceptionReturn (0x07), Event (0x73), Discard (0x00 0x03), Overflow (0x00 0x05)
+    stream.extend_from_slice(&[0x07, 0x73, 0x00, 0x03, 0x00, 0x05]);
+
+    let elems = decode_elements(&stream).expect("rust decode_elements");
+
+    let mut sync_stream = vec![0xaa, 0xbb, 0xcc];
+    sync_stream.extend_from_slice(&stream);
+    let sync_elems: Vec<_> = EteDecoder::sync(&sync_stream)
+        .expect("rust EteDecoder::sync")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("rust sync elements");
+
+    let unsync_err = match decode_elements(&[0x04]) {
+        Err(EteError::NotSynchronized { offset }) => offset as u64,
+        _ => panic!("expected NotSynchronized"),
+    };
+    let mut empty_hist_stream = vec![0x00; 11];
+    empty_hist_stream.push(0x80);
+    empty_hist_stream.push(0x90);
+    let empty_hist_err = match decode_elements(&empty_hist_stream) {
+        Err(EteError::EmptyAddressHistory { offset }) => offset as u64,
+        _ => panic!("expected EmptyAddressHistory"),
+    };
+    let no_sync_err = matches!(EteDecoder::sync(&[0x01, 0x02, 0x03]), Err(EteError::NoSync));
+
+    let fnv_mix = |mut h: u64, v: u64| -> u64 {
+        for i in 0..8 {
+            let b = (v >> (i * 8)) & 0xff;
+            h ^= b;
+            h = h.wrapping_mul(1099511628211);
+        }
+        h
+    };
+    let mix_elem = |mut h: u64, offset: u64, el: &EteElement| -> u64 {
+        h = fnv_mix(h, offset);
+        match el {
+            EteElement::Sync => fnv_mix(h, 1),
+            EteElement::TraceInfo {
+                info,
+                key,
+                spec,
+                cyct,
+            } => {
+                h = fnv_mix(h, 2);
+                h = fnv_mix(h, *info);
+                h = fnv_mix(h, *key);
+                h = fnv_mix(h, *spec);
+                fnv_mix(h, *cyct)
+            }
+            EteElement::TraceOn => fnv_mix(h, 3),
+            EteElement::Timestamp {
+                timestamp,
+                cycle_count,
+            } => {
+                h = fnv_mix(h, 4);
+                h = fnv_mix(h, *timestamp);
+                match cycle_count {
+                    Some(cc) => fnv_mix(fnv_mix(h, 1), *cc),
+                    None => fnv_mix(h, 0),
+                }
+            }
+            EteElement::Context(c) => {
+                h = fnv_mix(h, 5);
+                h = fnv_mix(h, u64::from(c.el));
+                h = fnv_mix(h, u64::from(c.sixty_four));
+                h = fnv_mix(h, u64::from(c.non_secure));
+                h = match c.vmid {
+                    Some(v) => fnv_mix(fnv_mix(h, 1), u64::from(v)),
+                    None => fnv_mix(h, 0),
+                };
+                match c.context_id {
+                    Some(v) => fnv_mix(fnv_mix(h, 1), u64::from(v)),
+                    None => fnv_mix(h, 0),
+                }
+            }
+            EteElement::Address { address, isa } => {
+                h = fnv_mix(h, 6);
+                h = fnv_mix(h, *address);
+                fnv_mix(
+                    h,
+                    if matches!(isa, InstructionSet::Is0) {
+                        0
+                    } else {
+                        1
+                    },
+                )
+            }
+            EteElement::Atom { executed } => {
+                h = fnv_mix(h, 7);
+                fnv_mix(h, u64::from(*executed))
+            }
+            EteElement::Exception {
+                exception_type,
+                preferred_return,
+                isa,
+            } => {
+                h = fnv_mix(h, 8);
+                h = fnv_mix(h, u64::from(*exception_type));
+                h = fnv_mix(h, *preferred_return);
+                fnv_mix(
+                    h,
+                    if matches!(isa, InstructionSet::Is0) {
+                        0
+                    } else {
+                        1
+                    },
+                )
+            }
+            EteElement::ExceptionReturn => fnv_mix(h, 9),
+            EteElement::Event { mask } => {
+                h = fnv_mix(h, 10);
+                fnv_mix(h, u64::from(*mask))
+            }
+            EteElement::Overflow => fnv_mix(h, 11),
+            EteElement::Discard => fnv_mix(h, 12),
+        }
+    };
+
+    let mut h: u64 = 14695981039346656037;
+    for &b in b"ete" {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(1099511628211);
+    }
+    h = fnv_mix(h, elems.len() as u64);
+    for e in &elems {
+        h = mix_elem(h, e.offset as u64, &e.element);
+    }
+    h = fnv_mix(h, sync_elems.len() as u64);
+    for e in &sync_elems {
+        h = mix_elem(h, e.offset as u64, &e.element);
+    }
+    h = fnv_mix(h, unsync_err);
+    h = fnv_mix(h, empty_hist_err);
+    h = fnv_mix(h, u64::from(no_sync_err));
+
+    let bytes_lit: String = stream
+        .iter()
+        .map(|b| format!("    s.push({});\n", b))
+        .collect();
+    let source = format!(
+        r#"use @vesper/chrono::ete::{{
+    EteElement, EteElementAt, EteError, InstructionSet,
+    decode_elements, decode_elements_from_sync
+}};
+fn mix_u64(h_in: u64, v: u64) -> u64 {{
+    let mut h = h_in;
+    let mut i: u64 = 0;
+    loop {{
+        if i >= 8 {{ break; }}
+        let byte = (wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8)))) & 255;
+        h = wrapping_mul(h ^ byte, 1099511628211);
+        i = wrapping_add(i, 1);
+    }}
+    h
+}}
+fn mix_isa(in isa: InstructionSet) -> u64 {{
+    match isa {{
+        InstructionSet::Is0 => 0,
+        InstructionSet::Is1 => 1,
+    }}
+}}
+fn mix_elem(h_in: u64, in e: EteElementAt) -> u64 {{
+    let mut h = mix_u64(h_in, e.offset);
+    match e.element {{
+        EteElement::Sync => mix_u64(h, 1),
+        EteElement::TraceInfo {{ info, key, spec, cyct }} => {{
+            h = mix_u64(h, 2);
+            h = mix_u64(h, info);
+            h = mix_u64(h, key);
+            h = mix_u64(h, spec);
+            mix_u64(h, cyct)
+        }}
+        EteElement::TraceOn => mix_u64(h, 3),
+        EteElement::Timestamp {{ timestamp, cycle_count }} => {{
+            h = mix_u64(h, 4);
+            h = mix_u64(h, timestamp);
+            match cycle_count {{
+                Option::Some(cc) => mix_u64(mix_u64(h, 1), cc),
+                Option::None => mix_u64(h, 0),
+            }}
+        }}
+        EteElement::Context(c) => {{
+            h = mix_u64(h, 5);
+            h = mix_u64(h, widen_u64(c.el));
+            h = mix_u64(h, if c.sixty_four {{ 1 }} else {{ 0 }});
+            h = mix_u64(h, if c.non_secure {{ 1 }} else {{ 0 }});
+            h = match c.vmid {{
+                Option::Some(v) => mix_u64(mix_u64(h, 1), widen_u64(v)),
+                Option::None => mix_u64(h, 0),
+            }};
+            match c.context_id {{
+                Option::Some(v) => mix_u64(mix_u64(h, 1), widen_u64(v)),
+                Option::None => mix_u64(h, 0),
+            }}
+        }}
+        EteElement::Address {{ address, isa }} => {{
+            h = mix_u64(h, 6);
+            h = mix_u64(h, address);
+            mix_u64(h, mix_isa(in isa))
+        }}
+        EteElement::Atom {{ executed }} => {{
+            h = mix_u64(h, 7);
+            mix_u64(h, if executed {{ 1 }} else {{ 0 }})
+        }}
+        EteElement::Exception {{ exception_type, preferred_return, isa }} => {{
+            h = mix_u64(h, 8);
+            h = mix_u64(h, widen_u64(exception_type));
+            h = mix_u64(h, preferred_return);
+            mix_u64(h, mix_isa(in isa))
+        }}
+        EteElement::ExceptionReturn => mix_u64(h, 9),
+        EteElement::Event {{ mask }} => {{
+            h = mix_u64(h, 10);
+            mix_u64(h, widen_u64(mask))
+        }}
+        EteElement::Overflow => mix_u64(h, 11),
+        EteElement::Discard => mix_u64(h, 12),
+    }}
+}}
+fn mix_all(h_in: u64, inout seq: ChunkSeq[EteElementAt]) -> u64 {{
+    let mut h = mix_u64(h_in, seq.len());
+    let mut rev: ChunkSeq[EteElementAt] = ChunkSeq::new();
+    loop {{
+        match seq.pop() {{
+            Option::Some(x) => rev.push(x),
+            Option::None => break,
+        }}
+    }}
+    loop {{
+        match rev.pop() {{
+            Option::Some(x) => {{ h = mix_elem(h, in x); }},
+            Option::None => break,
+        }}
+    }}
+    h
+}}
+fn build_stream() -> ChunkSeq[u8] {{
+    let mut s: ChunkSeq[u8] = ChunkSeq::new();
+{bytes_lit}    s
+}}
+pub fn main() -> u64 {{
+    let s = build_stream();
+    let mut elems = match decode_elements(in s.as_slice()) {{
+        Result::Ok(v) => v,
+        Result::Err(_) => return 1,
+    }};
+    let mut sync_s: ChunkSeq[u8] = ChunkSeq::new();
+    sync_s.push(0xaa);
+    sync_s.push(0xbb);
+    sync_s.push(0xcc);
+    let s2 = build_stream();
+    let mut si: u64 = 0;
+    loop {{
+        if si >= s2.len() {{ break; }}
+        let b = match s2.as_slice().try_get(si) {{ Option::Some(v) => v, Option::None => 0 }};
+        sync_s.push(b);
+        si = wrapping_add(si, 1);
+    }}
+    let mut sync_elems = match decode_elements_from_sync(in sync_s.as_slice()) {{
+        Result::Ok(v) => v,
+        Result::Err(_) => return 2,
+    }};
+    let mut unsync_s: ChunkSeq[u8] = ChunkSeq::new();
+    unsync_s.push(0x04);
+    let unsync_err = match decode_elements(in unsync_s.as_slice()) {{
+        Result::Err(EteError::NotSynchronized {{ offset }}) => offset,
+        _ => return 3,
+    }};
+    let mut empty_h: ChunkSeq[u8] = ChunkSeq::new();
+    let mut zi: u64 = 0;
+    loop {{
+        if zi >= 11 {{ break; }}
+        empty_h.push(0);
+        zi = wrapping_add(zi, 1);
+    }}
+    empty_h.push(0x80);
+    empty_h.push(0x90);
+    let empty_hist_err = match decode_elements(in empty_h.as_slice()) {{
+        Result::Err(EteError::EmptyAddressHistory {{ offset }}) => offset,
+        _ => return 4,
+    }};
+    let mut no_sync_s: ChunkSeq[u8] = ChunkSeq::new();
+    no_sync_s.push(1);
+    no_sync_s.push(2);
+    no_sync_s.push(3);
+    let no_sync_err = match decode_elements_from_sync(in no_sync_s.as_slice()) {{
+        Result::Err(EteError::NoSync) => 1,
+        _ => 0,
+    }};
+    let mut h: u64 = 14695981039346656037;
+    let tag = "ete";
+    let tb = tag.as_bytes();
+    let mut ti: u64 = 0;
+    loop {{
+        if ti >= tb.len() {{ break; }}
+        let b = match tb.try_get(ti) {{ Option::Some(v) => v, Option::None => 0 }};
+        h = wrapping_mul(h ^ widen_u64(b), 1099511628211);
+        ti = wrapping_add(ti, 1);
+    }}
+    h = mix_all(h, inout elems);
+    h = mix_all(h, inout sync_elems);
+    h = mix_u64(h, unsync_err);
+    h = mix_u64(h, empty_hist_err);
+    h = mix_u64(h, no_sync_err);
+    h
+}}"#
+    );
+    let checked = check_chrono_driver(&source);
+    let got = agree(&checked, "main", &MODES);
+    assert_eq!(got, h);
+}
+
+#[test]
+fn ipt_decoder_psb_tnt_ip_timing_and_errors_match_rust() {
+    use vesper_chrono::ipt::{
+        IpPacketKind, PSB_BYTES, PtDecoder, PtError, PtPacket, decode_packets,
+    };
+
+    let mut stream: Vec<u8> = Vec::new();
+    // Leading PAD + PSB
+    stream.push(0x00);
+    stream.extend_from_slice(&PSB_BYTES);
+    // FUP Full 64-bit IP (0x1d | (6<<5) = 0xdd)
+    stream.push(0xdd);
+    stream.extend_from_slice(&0x0000_7fff_1234_5678u64.to_le_bytes());
+    // ModeExec (0x99, cs_l=true, cs_d=false => 0x01)
+    stream.extend_from_slice(&[0x99, 0x01]);
+    // PIP (0x02 0x43 + 6 bytes)
+    stream.extend_from_slice(&[0x02, 0x43, 0x01, 0x20, 0x30, 0x00, 0x00, 0x00]);
+    // CBR (0x02 0x03 ratio=42 0x00)
+    stream.extend_from_slice(&[0x02, 0x03, 42, 0x00]);
+    // PSBEND
+    stream.extend_from_slice(&[0x02, 0x23]);
+    // Short TNT (0x3a => payload 0x1d = 1_1101 -> count=4, bits=0b1101)
+    stream.push(0x3a);
+    // Long TNT (0x02 0xa3 + 6 bytes)
+    stream.extend_from_slice(&[0x02, 0xa3, 0b1010_0101, 0x03, 0, 0, 0, 0]);
+    // TIP Update16 (0x0d | (1<<5) = 0x2d)
+    stream.extend_from_slice(&[0x2d, 0xaa, 0xbb]);
+    // TIP.PGE Update32 (0x11 | (2<<5) = 0x51)
+    stream.extend_from_slice(&[0x51, 0x11, 0x22, 0x33, 0x44]);
+    // TIP Sext48 negative bit 47 (0x0d | (3<<5) = 0x6d)
+    stream.extend_from_slice(&[0x6d, 0x10, 0x20, 0x30, 0x40, 0x50, 0x80]);
+    // TIP Update48 (0x0d | (4<<5) = 0x8d)
+    stream.extend_from_slice(&[0x8d, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+    // TIP.PGD Suppressed (0x01 | (0<<5) = 0x01)
+    stream.push(0x01);
+    // TSC (0x19 + 7 bytes), MTC (0x59 + 1 byte), CYC (0x07 0x04), TMA (0x02 0x73 ...), OVF, TraceStop
+    stream.extend_from_slice(&[0x19, 1, 2, 3, 4, 5, 6, 7]);
+    stream.extend_from_slice(&[0x59, 0xfe]);
+    stream.extend_from_slice(&[0x07, 0x04]);
+    stream.extend_from_slice(&[0x02, 0x73, 0x12, 0x34, 0x00, 0xab, 0x01]);
+    stream.extend_from_slice(&[0x02, 0xf3, 0x02, 0x83]);
+
+    let pkts = decode_packets(&stream).expect("rust decode_packets");
+
+    let mut sync_stream = vec![0x99, 0x00, 0xff];
+    sync_stream.extend_from_slice(&stream);
+    let sync_pkts: Vec<_> = PtDecoder::sync(&sync_stream)
+        .expect("rust PtDecoder::sync")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("rust sync packets");
+
+    let unsync_err = match decode_packets(&[0x3a]) {
+        Err(PtError::NotSynchronized { offset }) => offset as u64,
+        _ => panic!("expected NotSynchronized"),
+    };
+    let no_psb_err = matches!(PtDecoder::sync(&[0x02, 0x23]), Err(PtError::NoPsb));
+
+    let fnv_mix = |mut h: u64, v: u64| -> u64 {
+        for i in 0..8 {
+            let b = (v >> (i * 8)) & 0xff;
+            h ^= b;
+            h = h.wrapping_mul(1099511628211);
+        }
+        h
+    };
+    let mix_pkt = |mut h: u64, offset: u64, len: u64, p: &PtPacket| -> u64 {
+        h = fnv_mix(h, offset);
+        h = fnv_mix(h, len);
+        match p {
+            PtPacket::Pad => fnv_mix(h, 1),
+            PtPacket::Psb => fnv_mix(h, 2),
+            PtPacket::PsbEnd => fnv_mix(h, 3),
+            PtPacket::Tnt { tnt, long } => {
+                h = fnv_mix(h, 4);
+                h = fnv_mix(h, tnt.bits);
+                h = fnv_mix(h, u64::from(tnt.count));
+                fnv_mix(h, u64::from(*long))
+            }
+            PtPacket::Ip {
+                kind,
+                compression,
+                ip,
+            } => {
+                h = fnv_mix(h, 5);
+                let k = match kind {
+                    IpPacketKind::Tip => 0,
+                    IpPacketKind::TipPge => 1,
+                    IpPacketKind::TipPgd => 2,
+                    IpPacketKind::Fup => 3,
+                };
+                h = fnv_mix(h, k);
+                h = fnv_mix(h, u64::from(compression.ip_bytes()));
+                match ip {
+                    Some(v) => fnv_mix(fnv_mix(h, 1), *v),
+                    None => fnv_mix(h, 0),
+                }
+            }
+            PtPacket::Pip { cr3, non_root } => {
+                h = fnv_mix(h, 6);
+                h = fnv_mix(h, *cr3);
+                fnv_mix(h, u64::from(*non_root))
+            }
+            PtPacket::ModeExec { cs_l, cs_d } => {
+                h = fnv_mix(h, 7);
+                h = fnv_mix(h, u64::from(*cs_l));
+                fnv_mix(h, u64::from(*cs_d))
+            }
+            PtPacket::ModeTsx { in_tx, tx_abort } => {
+                h = fnv_mix(h, 8);
+                h = fnv_mix(h, u64::from(*in_tx));
+                fnv_mix(h, u64::from(*tx_abort))
+            }
+            PtPacket::Cbr { ratio } => fnv_mix(fnv_mix(h, 9), u64::from(*ratio)),
+            PtPacket::Tsc { tsc } => fnv_mix(fnv_mix(h, 10), *tsc),
+            PtPacket::Mtc { ctc } => fnv_mix(fnv_mix(h, 11), u64::from(*ctc)),
+            PtPacket::Cyc { cycles } => fnv_mix(fnv_mix(h, 12), *cycles),
+            PtPacket::Tma { ctc, fast_counter } => {
+                h = fnv_mix(h, 13);
+                h = fnv_mix(h, u64::from(*ctc));
+                fnv_mix(h, u64::from(*fast_counter))
+            }
+            PtPacket::Ovf => fnv_mix(h, 14),
+            PtPacket::TraceStop => fnv_mix(h, 15),
+        }
+    };
+
+    let mut h: u64 = 14695981039346656037;
+    for &b in b"ipt" {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(1099511628211);
+    }
+    h = fnv_mix(h, pkts.len() as u64);
+    for p in &pkts {
+        h = mix_pkt(h, p.offset as u64, p.len as u64, &p.packet);
+    }
+    h = fnv_mix(h, sync_pkts.len() as u64);
+    for p in &sync_pkts {
+        h = mix_pkt(h, p.offset as u64, p.len as u64, &p.packet);
+    }
+    h = fnv_mix(h, unsync_err);
+    h = fnv_mix(h, u64::from(no_psb_err));
+
+    let bytes_lit: String = stream
+        .iter()
+        .map(|b| format!("    s.push({});\n", b))
+        .collect();
+    let source = format!(
+        r#"use @vesper/chrono::ipt::{{
+    IpPacketKind, PtError, PtPacket, PtPacketAt,
+    decode_packets, decode_packets_from_psb, ip_bytes
+}};
+fn mix_u64(h_in: u64, v: u64) -> u64 {{
+    let mut h = h_in;
+    let mut i: u64 = 0;
+    loop {{
+        if i >= 8 {{ break; }}
+        let byte = (wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8)))) & 255;
+        h = wrapping_mul(h ^ byte, 1099511628211);
+        i = wrapping_add(i, 1);
+    }}
+    h
+}}
+fn mix_pkt(h_in: u64, in p: PtPacketAt) -> u64 {{
+    let mut h = mix_u64(h_in, p.offset);
+    h = mix_u64(h, p.len);
+    match p.packet {{
+        PtPacket::Pad => mix_u64(h, 1),
+        PtPacket::Psb => mix_u64(h, 2),
+        PtPacket::PsbEnd => mix_u64(h, 3),
+        PtPacket::Tnt {{ tnt, long }} => {{
+            h = mix_u64(h, 4);
+            h = mix_u64(h, tnt.bits);
+            h = mix_u64(h, widen_u64(tnt.count));
+            mix_u64(h, if long {{ 1 }} else {{ 0 }})
+        }}
+        PtPacket::Ip {{ kind, compression, ip }} => {{
+            h = mix_u64(h, 5);
+            let k: u64 = match kind {{
+                IpPacketKind::Tip => 0,
+                IpPacketKind::TipPge => 1,
+                IpPacketKind::TipPgd => 2,
+                IpPacketKind::Fup => 3,
+            }};
+            h = mix_u64(h, k);
+            h = mix_u64(h, widen_u64(ip_bytes(compression)));
+            match ip {{
+                Option::Some(v) => mix_u64(mix_u64(h, 1), v),
+                Option::None => mix_u64(h, 0),
+            }}
+        }}
+        PtPacket::Pip {{ cr3, non_root }} => {{
+            h = mix_u64(h, 6);
+            h = mix_u64(h, cr3);
+            mix_u64(h, if non_root {{ 1 }} else {{ 0 }})
+        }}
+        PtPacket::ModeExec {{ cs_l, cs_d }} => {{
+            h = mix_u64(h, 7);
+            h = mix_u64(h, if cs_l {{ 1 }} else {{ 0 }});
+            mix_u64(h, if cs_d {{ 1 }} else {{ 0 }})
+        }}
+        PtPacket::ModeTsx {{ in_tx, tx_abort }} => {{
+            h = mix_u64(h, 8);
+            h = mix_u64(h, if in_tx {{ 1 }} else {{ 0 }});
+            mix_u64(h, if tx_abort {{ 1 }} else {{ 0 }})
+        }}
+        PtPacket::Cbr {{ ratio }} => mix_u64(mix_u64(h, 9), widen_u64(ratio)),
+        PtPacket::Tsc {{ tsc }} => mix_u64(mix_u64(h, 10), tsc),
+        PtPacket::Mtc {{ ctc }} => mix_u64(mix_u64(h, 11), widen_u64(ctc)),
+        PtPacket::Cyc {{ cycles }} => mix_u64(mix_u64(h, 12), cycles),
+        PtPacket::Tma {{ ctc, fast_counter }} => {{
+            h = mix_u64(h, 13);
+            h = mix_u64(h, widen_u64(ctc));
+            mix_u64(h, widen_u64(fast_counter))
+        }}
+        PtPacket::Ovf => mix_u64(h, 14),
+        PtPacket::TraceStop => mix_u64(h, 15),
+    }}
+}}
+fn mix_all(h_in: u64, inout seq: ChunkSeq[PtPacketAt]) -> u64 {{
+    let mut h = mix_u64(h_in, seq.len());
+    let mut rev: ChunkSeq[PtPacketAt] = ChunkSeq::new();
+    loop {{
+        match seq.pop() {{
+            Option::Some(x) => rev.push(x),
+            Option::None => break,
+        }}
+    }}
+    loop {{
+        match rev.pop() {{
+            Option::Some(x) => {{ h = mix_pkt(h, in x); }},
+            Option::None => break,
+        }}
+    }}
+    h
+}}
+fn build_stream() -> ChunkSeq[u8] {{
+    let mut s: ChunkSeq[u8] = ChunkSeq::new();
+{bytes_lit}    s
+}}
+pub fn main() -> u64 {{
+    let s = build_stream();
+    let mut pkts = match decode_packets(in s.as_slice()) {{
+        Result::Ok(v) => v,
+        Result::Err(_) => return 1,
+    }};
+    let mut sync_s: ChunkSeq[u8] = ChunkSeq::new();
+    sync_s.push(0x99);
+    sync_s.push(0x00);
+    sync_s.push(0xff);
+    let s2 = build_stream();
+    let mut si: u64 = 0;
+    loop {{
+        if si >= s2.len() {{ break; }}
+        let b = match s2.as_slice().try_get(si) {{ Option::Some(v) => v, Option::None => 0 }};
+        sync_s.push(b);
+        si = wrapping_add(si, 1);
+    }}
+    let mut sync_pkts = match decode_packets_from_psb(in sync_s.as_slice()) {{
+        Result::Ok(v) => v,
+        Result::Err(_) => return 2,
+    }};
+    let mut unsync_s: ChunkSeq[u8] = ChunkSeq::new();
+    unsync_s.push(0x3a);
+    let unsync_err = match decode_packets(in unsync_s.as_slice()) {{
+        Result::Err(PtError::PtNotSynchronized {{ offset }}) => offset,
+        _ => return 3,
+    }};
+    let mut no_psb_s: ChunkSeq[u8] = ChunkSeq::new();
+    no_psb_s.push(0x02);
+    no_psb_s.push(0x23);
+    let no_psb_err = match decode_packets_from_psb(in no_psb_s.as_slice()) {{
+        Result::Err(PtError::NoPsb) => 1,
+        _ => 0,
+    }};
+    let mut h: u64 = 14695981039346656037;
+    let tag = "ipt";
+    let tb = tag.as_bytes();
+    let mut ti: u64 = 0;
+    loop {{
+        if ti >= tb.len() {{ break; }}
+        let b = match tb.try_get(ti) {{ Option::Some(v) => v, Option::None => 0 }};
+        h = wrapping_mul(h ^ widen_u64(b), 1099511628211);
+        ti = wrapping_add(ti, 1);
+    }}
+    h = mix_all(h, inout pkts);
+    h = mix_all(h, inout sync_pkts);
+    h = mix_u64(h, unsync_err);
+    h = mix_u64(h, no_psb_err);
+    h
+}}"#
+    );
+    let checked = check_chrono_driver(&source);
+    let got = agree(&checked, "main", &MODES);
+    assert_eq!(got, h);
+}

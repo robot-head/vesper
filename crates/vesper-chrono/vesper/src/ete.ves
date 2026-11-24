@@ -1,0 +1,1033 @@
+// Arm CoreSight ETE / ETMv4 instruction-trace element decoder.
+
+pub enum InstructionSet {
+    Is0,
+    Is1,
+}
+
+pub struct EteContext {
+    pub el: u8,
+    pub sixty_four: bool,
+    pub non_secure: bool,
+    pub vmid: Option[u32],
+    pub context_id: Option[u32],
+}
+
+pub fn default_ete_context() -> EteContext {
+    EteContext {
+        el: 0,
+        sixty_four: false,
+        non_secure: false,
+        vmid: Option::None,
+        context_id: Option::None,
+    }
+}
+
+pub enum EteElement {
+    Sync,
+    TraceInfo {
+        info: u64,
+        key: u64,
+        spec: u64,
+        cyct: u64,
+    },
+    TraceOn,
+    Timestamp {
+        timestamp: u64,
+        cycle_count: Option[u64],
+    },
+    Context(EteContext),
+    Address {
+        address: u64,
+        isa: InstructionSet,
+    },
+    Atom {
+        executed: bool,
+    },
+    Exception {
+        exception_type: u16,
+        preferred_return: u64,
+        isa: InstructionSet,
+    },
+    ExceptionReturn,
+    Event {
+        mask: u8,
+    },
+    Overflow,
+    Discard,
+}
+
+pub enum EteError {
+    Truncated {
+        offset: u64,
+        needed: u64,
+        available: u64,
+    },
+    NotSynchronized {
+        offset: u64,
+    },
+    NoSync,
+    MalformedExtension {
+        offset: u64,
+    },
+    Unsupported {
+        offset: u64,
+        header: u8,
+    },
+    Reserved {
+        offset: u64,
+        header: u8,
+    },
+    FieldTooLong {
+        offset: u64,
+    },
+    ExceptionWithoutAddress {
+        offset: u64,
+    },
+    EmptyAddressHistory {
+        offset: u64,
+    },
+}
+
+pub struct EteElementAt {
+    pub offset: u64,
+    pub element: EteElement,
+}
+
+pub fn async_len() -> u64 {
+    12
+}
+
+struct EteState {
+    pos: u64,
+    synced: bool,
+    has_h0: bool,
+    h0_addr: u64,
+    h0_isa: InstructionSet,
+    has_h1: bool,
+    h1_addr: u64,
+    h1_isa: InstructionSet,
+    has_h2: bool,
+    h2_addr: u64,
+    h2_isa: InstructionSet,
+    timestamp: u64,
+    context: EteContext,
+}
+
+struct UlebOut {
+    value: u64,
+    len: u64,
+}
+
+struct AddrOut {
+    address: u64,
+    isa: InstructionSet,
+    len: u64,
+}
+
+fn bit_not_u64(x: u64) -> u64 {
+    x ^ 0xffff_ffff_ffff_ffff
+}
+
+fn shl(x: u64, s: u64) -> u64 {
+    wrapping_shl_u64(x, wrapping_u32(s))
+}
+
+fn shr(x: u64, s: u64) -> u64 {
+    wrapping_shr_u64(x, wrapping_u32(s))
+}
+
+fn byte_at(in bytes: Slice[u8], idx: u64) -> u8 {
+    match bytes.try_get(idx) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn is_async_at(in bytes: Slice[u8], offset: u64) -> bool {
+    if offset > bytes.len() || wrapping_sub(bytes.len(), offset) < 12 {
+        return false;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= 11 {
+            break;
+        }
+        if byte_at(in bytes, wrapping_add(offset, i)) != 0 {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    byte_at(in bytes, wrapping_add(offset, 11)) == 0x80
+}
+
+fn need_bytes(in bytes: Slice[u8], offset: u64, needed: u64) -> Result[u64, EteError] {
+    let available = if bytes.len() >= offset {
+        wrapping_sub(bytes.len(), offset)
+    } else {
+        0
+    };
+    if available < needed {
+        Result::Err(
+            EteError::Truncated {
+                offset: offset,
+                needed: needed,
+                available: available,
+            }
+        )
+    } else {
+        Result::Ok(needed)
+    }
+}
+
+fn uleb(in bytes: Slice[u8], at: u64, max: u64, offset: u64) -> Result[UlebOut, EteError] {
+    let mut value: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= max {
+            break;
+        }
+        match need_bytes(in bytes, at, wrapping_add(i, 1)) {
+            Result::Ok(_) => {}
+            Result::Err(e) => return Result::Err(e),
+        }
+        let b = byte_at(in bytes, wrapping_add(at, i));
+        value = value | shl(widen_u64(b & 0x7f), wrapping_mul(7, i));
+        if (b & 0x80) == 0 {
+            return Result::Ok(
+                UlebOut {
+                    value: value,
+                    len: wrapping_add(i, 1)
+                }
+            );
+        }
+        i = wrapping_add(i, 1);
+    }
+    Result::Err(
+        EteError::FieldTooLong {
+            offset: offset
+        }
+    )
+}
+
+fn clone_isa(in isa: InstructionSet) -> InstructionSet {
+    match isa {
+        InstructionSet::Is0 => InstructionSet::Is0,
+        InstructionSet::Is1 => InstructionSet::Is1,
+    }
+}
+
+fn clone_opt_u32(in o: Option[u32]) -> Option[u32] {
+    match o {
+        Option::Some(v) => Option::Some(v),
+        Option::None => Option::None,
+    }
+}
+
+fn clone_ctx(in c: EteContext) -> EteContext {
+    EteContext {
+        el: c.el,
+        sixty_four: c.sixty_four,
+        non_secure: c.non_secure,
+        vmid: clone_opt_u32(in c.vmid),
+        context_id: clone_opt_u32(in c.context_id),
+    }
+}
+
+fn push_address(inout st: EteState, address: u64, in isa: InstructionSet) {
+    st.has_h2 = st.has_h1;
+    st.h2_addr = st.h1_addr;
+    st.h2_isa = clone_isa(in st.h1_isa);
+    st.has_h1 = st.has_h0;
+    st.h1_addr = st.h0_addr;
+    st.h1_isa = clone_isa(in st.h0_isa);
+    st.has_h0 = true;
+    st.h0_addr = address;
+    st.h0_isa = clone_isa(in isa);
+}
+
+fn latest_addr(in st: EteState) -> u64 {
+    if st.has_h0 {
+        st.h0_addr
+    } else {
+        0
+    }
+}
+
+fn is_addr_header(h: u8) -> bool {
+    (h >= 0x90 && h <= 0x92)
+        || h == 0x95
+        || h == 0x96
+        || h == 0x9a
+        || h == 0x9b
+        || h == 0x9d
+        || h == 0x9e
+        || h == 0x82
+        || h == 0x83
+        || h == 0x85
+        || h == 0x86
+}
+
+fn is_addr_with_context(h: u8) -> bool {
+    h == 0x82 || h == 0x83 || h == 0x85 || h == 0x86
+}
+
+fn decode_address(
+    inout st: EteState,
+    in bytes: Slice[u8],
+    h: u8,
+    at: u64,
+    offset: u64,
+) -> Result[AddrOut, EteError] {
+    let prev = latest_addr(in st);
+    if h == 0x95 || h == 0x96 {
+        match need_bytes(in bytes, at, 1) {
+            Result::Ok(_) => {}
+            Result::Err(e) => return Result::Err(e),
+        }
+        let b1 = byte_at(in bytes, at);
+        let two = (b1 & 0x80) != 0;
+        let b2: u8 = if two {
+            match need_bytes(in bytes, at, 2) {
+                Result::Ok(_) => {}
+                Result::Err(e) => return Result::Err(e),
+            }
+            byte_at(in bytes, wrapping_add(at, 1))
+        } else {
+            0
+        };
+        let len: u64 = if two {
+            2
+        } else {
+            1
+        };
+        if h == 0x95 {
+            let mask: u64 = if two {
+                0x1_fffc
+            } else {
+                0x1fc
+            };
+            let low: u64 = if two {
+                (widen_u64(b1 & 0x7f) << 2) | (widen_u64(b2) << 9)
+            } else {
+                widen_u64(b1 & 0x7f) << 2
+            };
+            let addr = (prev & bit_not_u64(mask)) | low;
+            push_address(inout st, addr, in InstructionSet::Is0);
+            return Result::Ok(
+                AddrOut {
+                    address: addr,
+                    isa: InstructionSet::Is0,
+                    len: len,
+                }
+            );
+        } else {
+            let mask: u64 = if two {
+                0xfffe
+            } else {
+                0xfe
+            };
+            let low: u64 = if two {
+                (widen_u64(b1 & 0x7f) << 1) | (widen_u64(b2) << 8)
+            } else {
+                widen_u64(b1 & 0x7f) << 1
+            };
+            let addr = (prev & bit_not_u64(mask)) | low;
+            push_address(inout st, addr, in InstructionSet::Is1);
+            return Result::Ok(
+                AddrOut {
+                    address: addr,
+                    isa: InstructionSet::Is1,
+                    len: len,
+                }
+            );
+        }
+    }
+    if h == 0x9a || h == 0x82 || h == 0x9d || h == 0x85 {
+        let wide = h == 0x9d || h == 0x85;
+        let n: u64 = if wide {
+            8
+        } else {
+            4
+        };
+        match need_bytes(in bytes, at, n) {
+            Result::Ok(_) => {}
+            Result::Err(e) => return Result::Err(e),
+        }
+        let b0 = byte_at(in bytes, at);
+        let b1 = byte_at(in bytes, wrapping_add(at, 1));
+        let mut a = (widen_u64(b0 & 0x7f) << 2) | (widen_u64(b1 & 0x7f) << 9);
+        let mut i: u64 = 2;
+        loop {
+            if i >= n {
+                break;
+            }
+            a = a | shl(widen_u64(byte_at(in bytes, wrapping_add(at, i))), wrapping_mul(8, i));
+            i = wrapping_add(i, 1);
+        }
+        let addr = if wide {
+            a
+        } else {
+            (prev & bit_not_u64(0xffff_ffff)) | a
+        };
+        push_address(inout st, addr, in InstructionSet::Is0);
+        return Result::Ok(
+            AddrOut {
+                address: addr,
+                isa: InstructionSet::Is0,
+                len: n,
+            }
+        );
+    }
+    if h == 0x9b || h == 0x83 || h == 0x9e || h == 0x86 {
+        let wide = h == 0x9e || h == 0x86;
+        let n: u64 = if wide {
+            8
+        } else {
+            4
+        };
+        match need_bytes(in bytes, at, n) {
+            Result::Ok(_) => {}
+            Result::Err(e) => return Result::Err(e),
+        }
+        let mut a = widen_u64(byte_at(in bytes, at) & 0x7f) << 1;
+        let mut i: u64 = 1;
+        loop {
+            if i >= n {
+                break;
+            }
+            a = a | shl(widen_u64(byte_at(in bytes, wrapping_add(at, i))), wrapping_mul(8, i));
+            i = wrapping_add(i, 1);
+        }
+        let addr = if wide {
+            a
+        } else {
+            (prev & bit_not_u64(0xffff_ffff)) | a
+        };
+        push_address(inout st, addr, in InstructionSet::Is1);
+        return Result::Ok(
+            AddrOut {
+                address: addr,
+                isa: InstructionSet::Is1,
+                len: n,
+            }
+        );
+    }
+    if h == 0x90 {
+        if !st.has_h0 {
+            return Result::Err(
+                EteError::EmptyAddressHistory {
+                    offset: offset
+                }
+            );
+        }
+        let a = st.h0_addr;
+        let isa = clone_isa(in st.h0_isa);
+        push_address(inout st, a, in isa);
+        return Result::Ok(
+            AddrOut {
+                address: a,
+                isa: isa,
+                len: 0
+            }
+        );
+    }
+    if h == 0x91 {
+        if !st.has_h1 {
+            return Result::Err(
+                EteError::EmptyAddressHistory {
+                    offset: offset
+                }
+            );
+        }
+        let a = st.h1_addr;
+        let isa = clone_isa(in st.h1_isa);
+        push_address(inout st, a, in isa);
+        return Result::Ok(
+            AddrOut {
+                address: a,
+                isa: isa,
+                len: 0
+            }
+        );
+    }
+    if h == 0x92 {
+        if !st.has_h2 {
+            return Result::Err(
+                EteError::EmptyAddressHistory {
+                    offset: offset
+                }
+            );
+        }
+        let a = st.h2_addr;
+        let isa = clone_isa(in st.h2_isa);
+        push_address(inout st, a, in isa);
+        return Result::Ok(
+            AddrOut {
+                address: a,
+                isa: isa,
+                len: 0
+            }
+        );
+    }
+    Result::Err(
+        EteError::Reserved {
+            offset: offset,
+            header: h
+        }
+    )
+}
+
+fn decode_context_info(inout st: EteState, in bytes: Slice[u8], at: u64) -> Result[u64, EteError] {
+    match need_bytes(in bytes, at, 1) {
+        Result::Ok(_) => {}
+        Result::Err(e) => return Result::Err(e),
+    }
+    let info = byte_at(in bytes, at);
+    let mut len: u64 = 1;
+    let mut vmid = clone_opt_u32(in st.context.vmid);
+    let mut context_id = clone_opt_u32(in st.context.context_id);
+    if (info & 0x40) != 0 {
+        match need_bytes(in bytes, at, wrapping_add(len, 1)) {
+            Result::Ok(_) => {}
+            Result::Err(e) => return Result::Err(e),
+        }
+        vmid = Option::Some(wrapping_u32(widen_u64(byte_at(in bytes, wrapping_add(at, len)))));
+        len = wrapping_add(len, 1);
+    }
+    if (info & 0x80) != 0 {
+        match need_bytes(in bytes, at, wrapping_add(len, 4)) {
+            Result::Ok(_) => {}
+            Result::Err(e) => return Result::Err(e),
+        }
+        let c0 = widen_u64(byte_at(in bytes, wrapping_add(at, len)));
+        let c1 = widen_u64(byte_at(in bytes, wrapping_add(at, wrapping_add(len, 1)))) << 8;
+        let c2 = widen_u64(byte_at(in bytes, wrapping_add(at, wrapping_add(len, 2)))) << 16;
+        let c3 = widen_u64(byte_at(in bytes, wrapping_add(at, wrapping_add(len, 3)))) << 24;
+        context_id = Option::Some(wrapping_u32(c0 | c1 | c2 | c3));
+        len = wrapping_add(len, 4);
+    }
+    st.context = EteContext {
+        el: info & 0x03,
+        sixty_four: (info & 0x10) != 0,
+        non_secure: (info & 0x20) != 0,
+        vmid: vmid,
+        context_id: context_id,
+    };
+    Result::Ok(len)
+}
+
+fn emit_atoms(inout out: ChunkSeq[EteElementAt], offset: u64, pattern: u64, count: u64) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= count {
+            break;
+        }
+        out
+            .push(
+                EteElementAt {
+                    offset: offset,
+                    element: EteElement::Atom {
+                        executed: (shr(pattern, i) & 1) == 1,
+                    },
+                }
+            );
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn f4_pattern(idx: u8) -> u64 {
+    if idx == 0 {
+        0x0e
+    } else if idx == 1 {
+        0x00
+    } else if idx == 2 {
+        0x0a
+    } else {
+        0x05
+    }
+}
+
+fn is_unsupported_header(h: u8) -> bool {
+    h == 0x05
+        || (h >= 0x08 && h <= 0x6f)
+        || h == 0x84
+        || (h >= 0x87 && h <= 0x8f)
+        || h == 0x93
+        || h == 0x94
+        || (h >= 0x97 && h <= 0x99)
+        || h == 0x9c
+        || (h >= 0xa0 && h <= 0xbf)
+}
+
+fn decode_packet(
+    inout st: EteState,
+    in bytes: Slice[u8],
+    inout out: ChunkSeq[EteElementAt],
+) -> Result[u64, EteError] {
+    let offset = st.pos;
+    let h = byte_at(in bytes, offset);
+    let at = wrapping_add(offset, 1);
+    if !st.synced {
+        if is_async_at(in bytes, offset) {
+            st.synced = true;
+            out
+                .push(
+                    EteElementAt {
+                        offset: offset,
+                        element: EteElement::Sync,
+                    }
+                );
+            return Result::Ok(async_len());
+        }
+        return Result::Err(
+            EteError::NotSynchronized {
+                offset: offset
+            }
+        );
+    }
+    if h == 0x00 {
+        if is_async_at(in bytes, offset) {
+            out
+                .push(
+                    EteElementAt {
+                        offset: offset,
+                        element: EteElement::Sync,
+                    }
+                );
+            return Result::Ok(async_len());
+        }
+        match need_bytes(in bytes, offset, 2) {
+            Result::Ok(_) => {}
+            Result::Err(e) => return Result::Err(e),
+        }
+        let b1 = byte_at(in bytes, wrapping_add(offset, 1));
+        if b1 == 0x03 {
+            out
+                .push(
+                    EteElementAt {
+                        offset: offset,
+                        element: EteElement::Discard,
+                    }
+                );
+            return Result::Ok(2);
+        }
+        if b1 == 0x05 {
+            out
+                .push(
+                    EteElementAt {
+                        offset: offset,
+                        element: EteElement::Overflow,
+                    }
+                );
+            return Result::Ok(2);
+        }
+        if b1 == 0x00 {
+            match need_bytes(in bytes, offset, async_len()) {
+                Result::Ok(_) => {}
+                Result::Err(e) => return Result::Err(e),
+            }
+            return Result::Err(
+                EteError::MalformedExtension {
+                    offset: offset
+                }
+            );
+        }
+        return Result::Err(
+            EteError::MalformedExtension {
+                offset: offset
+            }
+        );
+    }
+    if h == 0x01 {
+        let pl = match uleb(in bytes, at, 1, offset) {
+            Result::Ok(v) => v,
+            Result::Err(e) => return Result::Err(e),
+        };
+        let plctl = pl.value;
+        let mut len = pl.len;
+        let mut f0: u64 = 0;
+        let mut f1: u64 = 0;
+        let mut f2: u64 = 0;
+        let mut f3: u64 = 0;
+        if (plctl & 1) != 0 {
+            let r = match uleb(in bytes, wrapping_add(at, len), 5, offset) {
+                Result::Ok(v) => v,
+                Result::Err(e) => return Result::Err(e),
+            };
+            f0 = r.value;
+            len = wrapping_add(len, r.len);
+        }
+        if (plctl & 2) != 0 {
+            let r = match uleb(in bytes, wrapping_add(at, len), 5, offset) {
+                Result::Ok(v) => v,
+                Result::Err(e) => return Result::Err(e),
+            };
+            f1 = r.value;
+            len = wrapping_add(len, r.len);
+        }
+        if (plctl & 4) != 0 {
+            let r = match uleb(in bytes, wrapping_add(at, len), 5, offset) {
+                Result::Ok(v) => v,
+                Result::Err(e) => return Result::Err(e),
+            };
+            f2 = r.value;
+            len = wrapping_add(len, r.len);
+        }
+        if (plctl & 8) != 0 {
+            let r = match uleb(in bytes, wrapping_add(at, len), 5, offset) {
+                Result::Ok(v) => v,
+                Result::Err(e) => return Result::Err(e),
+            };
+            f3 = r.value;
+            len = wrapping_add(len, r.len);
+        }
+        out
+            .push(
+                EteElementAt {
+                    offset: offset,
+                    element: EteElement::TraceInfo {
+                        info: f0,
+                        key: f1,
+                        spec: f2,
+                        cyct: f3,
+                    },
+                }
+            );
+        return Result::Ok(wrapping_add(1, len));
+    }
+    if h == 0x02 || h == 0x03 {
+        let mut value: u64 = 0;
+        let mut len: u64 = 0;
+        let mut bits: u64 = 0;
+        loop {
+            match need_bytes(in bytes, at, wrapping_add(len, 1)) {
+                Result::Ok(_) => {}
+                Result::Err(e) => return Result::Err(e),
+            }
+            let b = byte_at(in bytes, wrapping_add(at, len));
+            len = wrapping_add(len, 1);
+            if len == 9 {
+                value = value | (widen_u64(b) << 56);
+                bits = 64;
+                break;
+            }
+            value = value | shl(widen_u64(b & 0x7f), bits);
+            bits = wrapping_add(bits, 7);
+            if (b & 0x80) == 0 {
+                break;
+            }
+        }
+        st.timestamp = if bits >= 64 {
+            value
+        } else {
+            let mask = wrapping_sub(shl(1, bits), 1);
+            (st.timestamp & bit_not_u64(mask)) | value
+        };
+        let mut cycle_count: Option[u64] = Option::None;
+        if h == 0x03 {
+            let cc = match uleb(in bytes, wrapping_add(at, len), 3, offset) {
+                Result::Ok(v) => v,
+                Result::Err(e) => return Result::Err(e),
+            };
+            len = wrapping_add(len, cc.len);
+            cycle_count = Option::Some(cc.value);
+        }
+        out
+            .push(
+                EteElementAt {
+                    offset: offset,
+                    element: EteElement::Timestamp {
+                        timestamp: st.timestamp,
+                        cycle_count: cycle_count,
+                    },
+                }
+            );
+        return Result::Ok(wrapping_add(1, len));
+    }
+    if h == 0x04 {
+        out
+            .push(
+                EteElementAt {
+                    offset: offset,
+                    element: EteElement::TraceOn,
+                }
+            );
+        return Result::Ok(1);
+    }
+    if h == 0x06 {
+        match need_bytes(in bytes, at, 1) {
+            Result::Ok(_) => {}
+            Result::Err(e) => return Result::Err(e),
+        }
+        let b1 = byte_at(in bytes, at);
+        let mut exception_type = widen_u64((b1 >> 1) & 0x1f);
+        let mut len: u64 = 1;
+        if (b1 & 0x80) != 0 {
+            match need_bytes(in bytes, at, 2) {
+                Result::Ok(_) => {}
+                Result::Err(e) => return Result::Err(e),
+            }
+            let b2 = byte_at(in bytes, wrapping_add(at, 1));
+            if (b2 & 0x80) != 0 {
+                return Result::Err(
+                    EteError::FieldTooLong {
+                        offset: offset
+                    }
+                );
+            }
+            exception_type = exception_type | (widen_u64(b2 & 0x1f) << 5);
+            len = 2;
+        }
+        let addr_at = wrapping_add(at, len);
+        if addr_at >= bytes.len() {
+            return Result::Err(
+                EteError::ExceptionWithoutAddress {
+                    offset: offset
+                }
+            );
+        }
+        let ah = byte_at(in bytes, addr_at);
+        if !is_addr_header(ah) {
+            return Result::Err(
+                EteError::ExceptionWithoutAddress {
+                    offset: offset
+                }
+            );
+        }
+        let ao = match decode_address(inout st, in bytes, ah, wrapping_add(addr_at, 1), offset) {
+            Result::Ok(v) => v,
+            Result::Err(e) => return Result::Err(e),
+        };
+        let mut total = wrapping_add(wrapping_add(len, 1), ao.len);
+        if is_addr_with_context(ah) {
+            let clen = match decode_context_info(
+                inout st,
+                in bytes,
+                wrapping_add(wrapping_add(addr_at, 1), ao.len),
+            ) {
+                Result::Ok(v) => v,
+                Result::Err(e) => return Result::Err(e),
+            };
+            total = wrapping_add(total, clen);
+            out
+                .push(
+                    EteElementAt {
+                        offset: offset,
+                        element: EteElement::Context(clone_ctx(in st.context)),
+                    }
+                );
+        }
+        out
+            .push(
+                EteElementAt {
+                    offset: offset,
+                    element: EteElement::Exception {
+                        exception_type: wrapping_u16(exception_type),
+                        preferred_return: ao.address,
+                        isa: ao.isa,
+                    },
+                }
+            );
+        return Result::Ok(wrapping_add(1, total));
+    }
+    if h == 0x07 {
+        out
+            .push(
+                EteElementAt {
+                    offset: offset,
+                    element: EteElement::ExceptionReturn,
+                }
+            );
+        return Result::Ok(1);
+    }
+    if h == 0x70 {
+        return Result::Ok(1);
+    }
+    if h >= 0x71 && h <= 0x7f {
+        out
+            .push(
+                EteElementAt {
+                    offset: offset,
+                    element: EteElement::Event {
+                        mask: h & 0x0f
+                    },
+                }
+            );
+        return Result::Ok(1);
+    }
+    if h == 0x80 {
+        out
+            .push(
+                EteElementAt {
+                    offset: offset,
+                    element: EteElement::Context(clone_ctx(in st.context)),
+                }
+            );
+        return Result::Ok(1);
+    }
+    if h == 0x81 {
+        let n = match decode_context_info(inout st, in bytes, at) {
+            Result::Ok(v) => v,
+            Result::Err(e) => return Result::Err(e),
+        };
+        out
+            .push(
+                EteElementAt {
+                    offset: offset,
+                    element: EteElement::Context(clone_ctx(in st.context)),
+                }
+            );
+        return Result::Ok(wrapping_add(1, n));
+    }
+    if is_addr_with_context(h) {
+        let ao = match decode_address(inout st, in bytes, h, at, offset) {
+            Result::Ok(v) => v,
+            Result::Err(e) => return Result::Err(e),
+        };
+        let c = match decode_context_info(inout st, in bytes, wrapping_add(at, ao.len)) {
+            Result::Ok(v) => v,
+            Result::Err(e) => return Result::Err(e),
+        };
+        out
+            .push(
+                EteElementAt {
+                    offset: offset,
+                    element: EteElement::Context(clone_ctx(in st.context)),
+                }
+            );
+        out
+            .push(
+                EteElementAt {
+                    offset: offset,
+                    element: EteElement::Address {
+                        address: ao.address,
+                        isa: ao.isa,
+                    },
+                }
+            );
+        return Result::Ok(wrapping_add(wrapping_add(1, ao.len), c));
+    }
+    if is_addr_header(h) {
+        let ao = match decode_address(inout st, in bytes, h, at, offset) {
+            Result::Ok(v) => v,
+            Result::Err(e) => return Result::Err(e),
+        };
+        out
+            .push(
+                EteElementAt {
+                    offset: offset,
+                    element: EteElement::Address {
+                        address: ao.address,
+                        isa: ao.isa,
+                    },
+                }
+            );
+        return Result::Ok(wrapping_add(1, ao.len));
+    }
+    if h == 0xf6 || h == 0xf7 {
+        emit_atoms(inout out, offset, widen_u64(h & 1), 1);
+        return Result::Ok(1);
+    }
+    if h >= 0xd8 && h <= 0xdb {
+        emit_atoms(inout out, offset, widen_u64(h & 0x03), 2);
+        return Result::Ok(1);
+    }
+    if h >= 0xf8 {
+        emit_atoms(inout out, offset, widen_u64(h & 0x07), 3);
+        return Result::Ok(1);
+    }
+    if h >= 0xdc && h <= 0xdf {
+        emit_atoms(inout out, offset, f4_pattern(h & 0x03), 4);
+        return Result::Ok(1);
+    }
+    if (h >= 0xd5 && h <= 0xd7) || h == 0xf5 {
+        let pattern: u64 = if h == 0xf5 {
+            0x0f
+        } else if h == 0xd5 {
+            0x00
+        } else if h == 0xd6 {
+            0x0a
+        } else {
+            0x15
+        };
+        emit_atoms(inout out, offset, pattern, 5);
+        return Result::Ok(1);
+    }
+    if (h >= 0xc0 && h <= 0xd4) || (h >= 0xe0 && h <= 0xf4) {
+        let count = wrapping_add(widen_u64(h & 0x1f), 3);
+        let last_n = (h & 0x20) != 0;
+        let pattern = wrapping_sub(shl(1, count), 1) | (
+            if last_n {
+                0
+            } else {
+                shl(1, count)
+            }
+        );
+        emit_atoms(inout out, offset, pattern, wrapping_add(count, 1));
+        return Result::Ok(1);
+    }
+    if is_unsupported_header(h) {
+        return Result::Err(
+            EteError::Unsupported {
+                offset: offset,
+                header: h
+            }
+        );
+    }
+    Result::Err(
+        EteError::Reserved {
+            offset: offset,
+            header: h
+        }
+    )
+}
+
+fn decode_from(in bytes: Slice[u8], start: u64) -> Result[ChunkSeq[EteElementAt], EteError] {
+    let mut st = EteState {
+        pos: start,
+        synced: false,
+        has_h0: false,
+        h0_addr: 0,
+        h0_isa: InstructionSet::Is0,
+        has_h1: false,
+        h1_addr: 0,
+        h1_isa: InstructionSet::Is0,
+        has_h2: false,
+        h2_addr: 0,
+        h2_isa: InstructionSet::Is0,
+        timestamp: 0,
+        context: default_ete_context(),
+    };
+    let mut out: ChunkSeq[EteElementAt] = ChunkSeq::new();
+    loop {
+        if st.pos >= bytes.len() {
+            break;
+        }
+        match decode_packet(inout st, in bytes, inout out) {
+            Result::Ok(len) => {
+                st.pos = wrapping_add(st.pos, len);
+            }
+            Result::Err(e) => return Result::Err(e),
+        }
+    }
+    Result::Ok(out)
+}
+
+pub fn decode_elements(in bytes: Slice[u8]) -> Result[ChunkSeq[EteElementAt], EteError] {
+    decode_from(in bytes, 0)
+}
+
+pub fn decode_elements_from_sync(in bytes: Slice[u8]) -> Result[ChunkSeq[EteElementAt], EteError] {
+    let mut i: u64 = 0;
+    loop {
+        if i >= bytes.len() {
+            break;
+        }
+        if is_async_at(in bytes, i) {
+            return decode_from(in bytes, i);
+        }
+        i = wrapping_add(i, 1);
+    }
+    Result::Err(EteError::NoSync)
+}
