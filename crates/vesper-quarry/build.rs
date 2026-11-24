@@ -55,10 +55,7 @@ const DIVERGENT: &[(&str, &str)] = &[
     // store/pages.rs (vesper/src/internal.ves): B+Tree internal route always goes left;
     // store_ssi threads_keep_an_invariant_that_write_skew_breaks fails.
     ("if key_le(kr, kt, rowid, inv_ts) {", "if false {"),
-    // store/log.rs (vesper/src/store_log.ves): PageDiff range check disabled;
-    // store malformed_headers_and_checksums_are_rejected fails.
-    (
-        "if len == 0 || off < end || wrapping_add(off, len) > PAGE_SIZE {",
-        "if false {",
-    ),
+    // store/log.rs (vesper/src/store_log.ves): Commit tag rejected as unknown;
+    // store fuzzy_checkpoint_runs_while_transactions_commit fails.
+    ("if tag == 3 {", "if tag == 99 {"),
 ];
