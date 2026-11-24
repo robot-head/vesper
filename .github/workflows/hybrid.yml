@@ -81,6 +81,8 @@ jobs:
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
+      - if: runner.os != 'Windows'
+        uses: ./.github/actions/aspect
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build the default compiler
@@ -97,7 +99,12 @@ jobs:
         # with the hybrid binary in place of target/debug/vesper. It builds
         # every CLI suite, so pull requests skip it (#1321).
         if: github.event_name != 'pull_request'
-        run: crates/vesper-hybrid/cli-suites.sh
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            crates/vesper-hybrid/cli-suites.sh
+          else
+            aspect crate hybrid cli-suites
+          fi
       - name: The differential harness catches a divergent layout
         # The pilot's word arithmetic and the whole layout (#1177) are both
         # wrong; a wrong layout cannot compile the pilot test's program, so

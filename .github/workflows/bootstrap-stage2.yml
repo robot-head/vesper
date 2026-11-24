@@ -24,6 +24,7 @@ jobs:
       CARGO_BUILD_JOBS: 4
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/aspect
       - name: Install the bootstrap toolchain
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
       - uses: Swatinem/rust-cache@v2
@@ -40,7 +41,7 @@ jobs:
       - name: Verify Stage 2 runner wrapper
         run: |
           bash -n bootstrap/stage2.sh
-          bootstrap/stage2.sh which
+          aspect bootstrap stage2 -- which
       - name: Build the compiler used by the port and hybrid tests
         run: |
           cargo build --locked -p vesper --bin vesper

@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -21,6 +22,21 @@ class PlatformWorkflowTests(unittest.TestCase):
     def setUp(self):
         self.platforms = workflow("platforms.yml")
         self.release = workflow("platform-release.yml")
+
+    @unittest.skipUnless(shutil.which("aspect"), "Aspect CLI unavailable")
+    def test_all_repository_scripts_have_discoverable_aspect_tasks(self):
+        scripts = subprocess.check_output(
+            ["git", "ls-files", "*.sh", "*.py"], cwd=ROOT, text=True,
+        ).splitlines()
+        catalog = json.loads(subprocess.check_output(["aspect", "describe"], cwd=ROOT))
+        paths = [
+            path
+            for command in catalog["commands"]
+            if command["summary"].startswith("Run ")
+            for path in re.findall(r"(?:^|\s)((?:[\w.-]+/)*[\w.-]+\.(?:sh|py))(?=\s|$)",
+                                   command["summary"])
+        ]
+        self.assertCountEqual(paths, scripts)
 
     def test_required_check_names_and_events_are_preserved(self):
         self.assertTrue({"push", "merge_group", "schedule",
@@ -49,9 +65,10 @@ class PlatformWorkflowTests(unittest.TestCase):
             self.assertNotIn("--workspace", commands)
             self.assertNotIn("clippy", commands)
             self.assertNotIn("check-lean-models", commands)
-            self.assertIn("scripts/ci/test-native-executables.sh", commands)
         mac_commands = "\n".join(s.get("run", "") for s in mac["steps"])
         windows_commands = "\n".join(s.get("run", "") for s in windows["steps"])
+        self.assertIn("aspect ci test-native-executables", mac_commands)
+        self.assertIn("scripts/ci/test-native-executables.sh", windows_commands)
         self.assertIn("--test platform", mac_commands)
         self.assertIn("--test windows_platform", windows_commands)
         self.assertIn("--test windows", windows_commands)
@@ -63,14 +80,15 @@ class PlatformWorkflowTests(unittest.TestCase):
         # macOS and Windows run only the export ABI tier; the ported crates
         # are platform-neutral and run once in the Linux job (#1010).
         jobs = self.platforms["jobs"]
-        for job in (jobs["platform"], jobs["windows"]):
-            step = next(s for s in job["steps"] if "test-port-harness.sh" in s.get("run", ""))
+        for job, command in (("platform", "aspect acceptance test-port-harness"),
+                             ("windows", "scripts/test-port-harness.sh")):
+            step = next(s for s in jobs[job]["steps"] if command in s.get("run", ""))
             self.assertEqual(step["env"]["VESPER_PORT_HARNESS_SCOPE"], "abi")
         ports = jobs["ports"]
         self.assertEqual(ports["runs-on"], "ubuntu-latest")
         self.assertEqual(ports["needs"], ["plan", "ports-compiler"])
         self.assertEqual(ports["steps"][0]["run"], 'test "$PLAN_RESULT" = success')
-        step = next(s for s in ports["steps"] if "test-port-harness.sh" in s.get("run", ""))
+        step = next(s for s in ports["steps"] if "aspect acceptance test-port-harness" in s.get("run", ""))
         self.assertNotIn("VESPER_PORT_HARNESS_SCOPE", step.get("env", {}))
         # One optimized compiler, built once and shared by every shard (#1103).
         compiler = jobs["ports-compiler"]
