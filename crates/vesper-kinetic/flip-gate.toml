@@ -7,6 +7,7 @@ name = "vesper-kinetic"
 lane = "SH6-9"
 rust = [
   "crates/vesper-kinetic/seed/src/engine/coloring.rs",
+  "crates/vesper-kinetic/seed/src/engine/crmath.rs",
   "crates/vesper-kinetic/seed/src/engine/fastmath.rs",
   "crates/vesper-kinetic/seed/src/engine/gjk.rs",
   "crates/vesper-kinetic/seed/src/engine/lbvh.rs",
@@ -56,3 +57,7 @@ run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate lbvh 5"
 [[abba]]
 workload = "pile-lbvh"
 run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate pile-lbvh 5"
+
+[[abba]]
+workload = "crmath"
+run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate crmath 20"
