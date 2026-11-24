@@ -2120,6 +2120,22 @@ fn fold_narrow_extends(func: &mut ir::Function) {
                 }
                 (
                     Opcode::Sextend,
+                    InstructionData::Unary {
+                        opcode: Opcode::Uextend,
+                        arg: inner,
+                    },
+                ) => {
+                    let inner = func.dfg.resolve_aliases(inner);
+                    if func.dfg.value_type(inner).bits() < src_ty.bits() {
+                        func.dfg.insts[inst] = InstructionData::Unary {
+                            opcode: Opcode::Uextend,
+                            arg: inner,
+                        };
+                        changed = true;
+                    }
+                }
+                (
+                    Opcode::Sextend,
                     InstructionData::UnaryImm {
                         opcode: Opcode::Iconst,
                         imm,
@@ -3783,27 +3799,102 @@ fn propagate_branch_conditions(func: &mut ir::Function) {
         return;
     };
 
-    let mut stack: Vec<(Block, HashMap<Value, bool>)> = vec![(entry, HashMap::new())];
-    while let Some((block, mut known)) = stack.pop() {
+    use cranelift_codegen::ir::condcodes::IntCC;
+
+    let eval_icmp = |cc: IntCC, ty: Type, a: i64, b: i64| -> Option<bool> {
+        let bits = ty.bits();
+        if !matches!(bits, 8 | 16 | 32 | 64) {
+            return None;
+        }
+        let mask = if bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
+        let ua = (a as u64) & mask;
+        let ub = (b as u64) & mask;
+        let shift = 64 - bits;
+        let sa = ((ua << shift) as i64) >> shift;
+        let sb = ((ub << shift) as i64) >> shift;
+        Some(match cc {
+            IntCC::Equal => ua == ub,
+            IntCC::NotEqual => ua != ub,
+            IntCC::UnsignedLessThan => ua < ub,
+            IntCC::UnsignedLessThanOrEqual => ua <= ub,
+            IntCC::UnsignedGreaterThan => ua > ub,
+            IntCC::UnsignedGreaterThanOrEqual => ua >= ub,
+            IntCC::SignedLessThan => sa < sb,
+            IntCC::SignedLessThanOrEqual => sa <= sb,
+            IntCC::SignedGreaterThan => sa > sb,
+            IntCC::SignedGreaterThanOrEqual => sa >= sb,
+        })
+    };
+
+    type PropState = (Block, HashMap<Value, bool>, HashMap<Value, i64>);
+    let mut stack: Vec<PropState> = vec![(entry, HashMap::new(), HashMap::new())];
+    while let Some((block, mut known, mut known_consts)) = stack.pop() {
         let insts: Vec<Inst> = func.layout.block_insts(block).collect();
         for inst in insts {
-            if let InstructionData::Ternary {
-                opcode: Opcode::Select,
-                args: [c, t_v, f_v],
-            } = func.dfg.insts[inst]
-            {
-                let c = func.dfg.resolve_aliases(c);
-                if let Some(&is_true) = known.get(&c) {
-                    let chosen = if is_true { t_v } else { f_v };
-                    let res = func.dfg.first_result(inst);
-                    func.dfg.detach_inst_results(inst);
-                    func.layout.remove_inst(inst);
-                    func.dfg.change_to_alias(res, chosen);
+            match func.dfg.insts[inst] {
+                InstructionData::Ternary {
+                    opcode: Opcode::Select,
+                    args: [c, t_v, f_v],
+                } => {
+                    let c = func.dfg.resolve_aliases(c);
+                    if let Some(&is_true) = known.get(&c) {
+                        let chosen = if is_true { t_v } else { f_v };
+                        let res = func.dfg.first_result(inst);
+                        func.dfg.detach_inst_results(inst);
+                        func.layout.remove_inst(inst);
+                        func.dfg.change_to_alias(res, chosen);
+                    }
                 }
+                InstructionData::IntCompareImm {
+                    opcode: Opcode::IcmpImm,
+                    cond: cc,
+                    arg,
+                    imm,
+                } => {
+                    let arg = func.dfg.resolve_aliases(arg);
+                    if let Some(&kc) = known_consts.get(&arg)
+                        && let Some(b) = eval_icmp(cc, func.dfg.value_type(arg), kc, imm.bits())
+                    {
+                        let res = func.dfg.first_result(inst);
+                        let res_ty = func.dfg.value_type(res);
+                        func.dfg.replace(inst).iconst(res_ty, i64::from(b));
+                        known.insert(res, b);
+                    }
+                }
+                InstructionData::IntCompare {
+                    opcode: Opcode::Icmp,
+                    cond: cc,
+                    args: [lhs, rhs],
+                } => {
+                    let lhs = func.dfg.resolve_aliases(lhs);
+                    let rhs = func.dfg.resolve_aliases(rhs);
+                    let lv = known_consts
+                        .get(&lhs)
+                        .copied()
+                        .or_else(|| constant(func, lhs, 1));
+                    let rv = known_consts
+                        .get(&rhs)
+                        .copied()
+                        .or_else(|| constant(func, rhs, 1));
+                    if let (Some(a), Some(b)) = (lv, rv)
+                        && let Some(res_bool) = eval_icmp(cc, func.dfg.value_type(lhs), a, b)
+                    {
+                        let res = func.dfg.first_result(inst);
+                        let res_ty = func.dfg.value_type(res);
+                        func.dfg.replace(inst).iconst(res_ty, i64::from(res_bool));
+                        known.insert(res, res_bool);
+                    }
+                }
+                _ => {}
             }
         }
 
         let mut edge_facts: Vec<(Block, Value, bool)> = Vec::new();
+        let mut const_edge_facts: Vec<(Block, Value, i64)> = Vec::new();
         if let Some(last) = func.layout.last_inst(block)
             && let InstructionData::Brif {
                 arg: cond,
@@ -3823,11 +3914,70 @@ fn propagate_branch_conditions(func: &mut ir::Function) {
                 let t_blk = t_call.block(&func.dfg.value_lists);
                 let f_blk = f_call.block(&func.dfg.value_lists);
                 if t_blk != f_blk {
-                    if cfg.pred_iter(t_blk).count() == 1 {
+                    let t_single = cfg.pred_iter(t_blk).count() == 1;
+                    let f_single = cfg.pred_iter(f_blk).count() == 1;
+                    if t_single {
                         edge_facts.push((t_blk, cond, true));
                     }
-                    if cfg.pred_iter(f_blk).count() == 1 {
+                    if f_single {
                         edge_facts.push((f_blk, cond, false));
+                    }
+                    if let Some(cmp_inst) = func.dfg.value_def(cond).inst() {
+                        match func.dfg.insts[cmp_inst] {
+                            InstructionData::IntCompareImm {
+                                opcode: Opcode::IcmpImm,
+                                cond: IntCC::Equal,
+                                arg,
+                                imm,
+                            } if t_single => {
+                                const_edge_facts.push((
+                                    t_blk,
+                                    func.dfg.resolve_aliases(arg),
+                                    imm.bits(),
+                                ));
+                            }
+                            InstructionData::IntCompareImm {
+                                opcode: Opcode::IcmpImm,
+                                cond: IntCC::NotEqual,
+                                arg,
+                                imm,
+                            } if f_single => {
+                                const_edge_facts.push((
+                                    f_blk,
+                                    func.dfg.resolve_aliases(arg),
+                                    imm.bits(),
+                                ));
+                            }
+                            InstructionData::IntCompare {
+                                opcode: Opcode::Icmp,
+                                cond: cc @ (IntCC::Equal | IntCC::NotEqual),
+                                args: [lhs, rhs],
+                            } => {
+                                let eq_blk = if cc == IntCC::Equal && t_single {
+                                    Some(t_blk)
+                                } else if cc == IntCC::NotEqual && f_single {
+                                    Some(f_blk)
+                                } else {
+                                    None
+                                };
+                                if let Some(target_blk) = eq_blk {
+                                    if let Some(c) = constant(func, rhs, 1) {
+                                        const_edge_facts.push((
+                                            target_blk,
+                                            func.dfg.resolve_aliases(lhs),
+                                            c,
+                                        ));
+                                    } else if let Some(c) = constant(func, lhs, 1) {
+                                        const_edge_facts.push((
+                                            target_blk,
+                                            func.dfg.resolve_aliases(rhs),
+                                            c,
+                                        ));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -3835,17 +3985,25 @@ fn propagate_branch_conditions(func: &mut ir::Function) {
 
         if let Some(children) = dom_children.get(&block) {
             for (idx, &child) in children.iter().enumerate() {
-                let mut child_known = if idx + 1 == children.len() {
-                    std::mem::take(&mut known)
+                let (mut child_known, mut child_consts) = if idx + 1 == children.len() {
+                    (
+                        std::mem::take(&mut known),
+                        std::mem::take(&mut known_consts),
+                    )
                 } else {
-                    known.clone()
+                    (known.clone(), known_consts.clone())
                 };
                 for &(eb, cond, val) in &edge_facts {
                     if eb == child {
                         child_known.insert(cond, val);
                     }
                 }
-                stack.push((child, child_known));
+                for &(eb, val, k) in &const_edge_facts {
+                    if eb == child {
+                        child_consts.insert(val, k);
+                    }
+                }
+                stack.push((child, child_known, child_consts));
             }
         }
     }
