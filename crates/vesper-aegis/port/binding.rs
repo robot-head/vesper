@@ -89,6 +89,9 @@ unsafe extern "C" {
     fn vesper_aegis_gpa_insert(iv: *mut u64, count: i64, s: i64, e: i64) -> i64;
     fn vesper_aegis_gpa_pages(iv: *mut u64, count: i64) -> i64;
     fn vesper_aegis_gpa_remove(iv: *mut u64, count: i64, s: i64, e: i64) -> i64;
+    fn vesper_aegis_host_accept_mmap(iv: *mut u64, count: i64, win_start: i64, win_end: i64, addr: i64, len: i64, req_len: i64) -> i64;
+    fn vesper_aegis_host_unmap(iv: *mut u64, count: i64, win_start: i64, win_end: i64, addr: i64, len: i64) -> i64;
+    fn vesper_aegis_host_validate_clock(has_prev: i64, prev: i64, max_step: i64, reported: i64) -> i64;
     fn vesper_aegis_iso8601_utc_to_unix(result: *mut u64, s: *mut u64) -> i64;
     fn vesper_aegis_sgx_parse(b: *mut u64, mode: i64, w: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_snp_etcb_parse(b: *mut u64, w: *mut u64, fail: *mut u64) -> i64;
@@ -360,6 +363,33 @@ pub fn gpa_remove(iv: &mut [u64], count: u64, s: u64, e: u64) -> u64 {
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice_mut(iv, |view_iv| unsafe { vesper_aegis_gpa_remove(view_iv, count as i64, s as i64, e as i64) });
+    raw as u64
+}
+
+/// Calls `host_accept_mmap` of the Vesper library `aegis` (`vesper_aegis_host_accept_mmap`).
+pub fn host_accept_mmap(iv: &mut [u64], count: u64, win_start: u64, win_end: u64, addr: u64, len: u64, req_len: u64) -> u64 {
+    // SAFETY: `vesper_aegis_host_accept_mmap` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(iv, |view_iv| unsafe { vesper_aegis_host_accept_mmap(view_iv, count as i64, win_start as i64, win_end as i64, addr as i64, len as i64, req_len as i64) });
+    raw as u64
+}
+
+/// Calls `host_unmap` of the Vesper library `aegis` (`vesper_aegis_host_unmap`).
+pub fn host_unmap(iv: &mut [u64], count: u64, win_start: u64, win_end: u64, addr: u64, len: u64) -> u64 {
+    // SAFETY: `vesper_aegis_host_unmap` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(iv, |view_iv| unsafe { vesper_aegis_host_unmap(view_iv, count as i64, win_start as i64, win_end as i64, addr as i64, len as i64) });
+    raw as u64
+}
+
+/// Calls `host_validate_clock` of the Vesper library `aegis` (`vesper_aegis_host_validate_clock`).
+pub fn host_validate_clock(has_prev: u64, prev: u64, max_step: u64, reported: u64) -> u64 {
+    // SAFETY: `vesper_aegis_host_validate_clock` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aegis_host_validate_clock(has_prev as i64, prev as i64, max_step as i64, reported as i64) };
     raw as u64
 }
 

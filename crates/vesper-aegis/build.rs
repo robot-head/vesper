@@ -96,4 +96,10 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
         "if idx >= count || iv_start(in iv, idx) > s {",
         "if true {",
     ),
+    // host: clock validator ignores max_step jumps.
+    (
+        "host",
+        "if wrapping_sub(reported, prev) > max_step {",
+        "if false {",
+    ),
 ];
