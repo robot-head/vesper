@@ -81,5 +81,6 @@ vesper_crate(
         ("log", "log.ves", "    put_u16(inout h, 1);\n", "    put_u16(inout h, 2);\n"),
         ("spine", "spine.ves", "            if n == 0 || n > max_rows {\n", "            if n > max_rows {\n"),
         ("image", "image.ves", "        if width != get(in widths, i) || count > max_rows {\n", "        if width != get(in widths, i) {\n"),
+        ("kafka_wire", "kafka_wire.ves", "        si64(inout out_rec, wrapping_add(rb, 3), klen_i);\n", "        si64(inout out_rec, wrapping_add(rb, 3), -1);\n"),
     ]
 ]

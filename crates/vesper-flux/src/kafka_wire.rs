@@ -380,6 +380,7 @@ impl<'a> R<'a> {
         }
         Err(MALFORMED)
     }
+    #[cfg(test)]
     pub(crate) fn varint(&mut self) -> KResult<i64> {
         let v = self.uvarint()?;
         Ok(((v >> 1) as i64) ^ -((v & 1) as i64))
@@ -983,56 +984,99 @@ pub(crate) fn decode_batches(bytes: &[u8], max_decoded: usize) -> KResult<Vec<Ba
         let codec = attributes & 0x7;
         let payload = &body[b.at..];
         let raw = decompress(codec, payload, max_decoded)?;
-        let mut rr = R::new(&raw, false);
-        let mut records = Vec::new();
-        let mut control = None;
-        for _ in 0..count {
-            let len = rr.varint()?;
-            let len = usize::try_from(len).map_err(|_| Fail::Proto("record length"))?;
-            let rec = rr.take(len)?;
-            let mut x = R::new(rec, false);
-            x.i8()?;
-            let ts_delta = x.varint()?;
-            let off_delta = x.varint()?;
-            let key = read_varbytes(&mut x)?;
-            let value = read_varbytes(&mut x)?;
-            let nh = x.varint()?;
-            if nh < 0 || nh as usize > x.rest() {
-                return Err(Fail::Proto("record headers"));
-            }
-            let mut headers = BTreeMap::new();
-            for _ in 0..nh {
-                let k = read_varbytes(&mut x)?.ok_or(Fail::Proto("record headers"))?;
-                let k = String::from_utf8(k).map_err(|_| Fail::Proto("record headers"))?;
-                let v = read_varbytes(&mut x)?.unwrap_or_default();
-                headers.insert(k, v);
-            }
-            if x.rest() != 0 {
-                return Err(Fail::Proto("record trailing bytes"));
-            }
-            let offset = base_offset
-                .checked_add(off_delta)
-                .ok_or(Fail::Proto("record offset"))?;
-            if is_control {
-                // Key: version i16, type i16 (0 abort, 1 commit).
-                let k = key.as_deref().ok_or(Fail::Proto("control record"))?;
-                let mut kr = R::new(k, false);
-                kr.i16()?;
-                control = Some(kr.i16()? == 1);
-                continue;
-            }
-            records.push((
-                offset,
-                KafkaRecord {
-                    key,
-                    value,
-                    headers,
-                    timestamp: base_ts.saturating_add(ts_delta),
-                },
-            ));
+        let n_rec = count as usize;
+        if n_rec > raw.len() {
+            return Err(MALFORMED);
         }
-        if is_control && control.is_none() {
-            return Err(Fail::Proto("control record"));
+        let mut cur = [0u64; 3];
+        let mut out_rec = vec![0i64; n_rec * 7];
+        let mut out_hdr = vec![0u64; (n_rec * 16).min(raw.len() * 2)];
+        let mut out_ctrl = [-1i64; 1];
+        let mut status = crate::port::binding::kw_decode_records(
+            &raw,
+            n_rec as u64,
+            base_offset,
+            base_ts,
+            u32::from(is_control),
+            &mut cur,
+            &mut out_rec,
+            &mut out_hdr,
+            &mut out_ctrl,
+        );
+        if status == 7 {
+            out_hdr.resize(raw.len() * 2, 0);
+            status = crate::port::binding::kw_decode_records(
+                &raw,
+                n_rec as u64,
+                base_offset,
+                base_ts,
+                u32::from(is_control),
+                &mut cur,
+                &mut out_rec,
+                &mut out_hdr,
+                &mut out_ctrl,
+            );
+        }
+        match status {
+            0 => {}
+            1 => return Err(Fail::Proto("record length")),
+            2 => return Err(Fail::Proto("record headers")),
+            3 => return Err(Fail::Proto("record trailing bytes")),
+            4 => return Err(Fail::Proto("record offset")),
+            5 => return Err(Fail::Proto("control record")),
+            _ => return Err(MALFORMED),
+        }
+        let control = if is_control {
+            if out_ctrl[0] < 0 {
+                return Err(Fail::Proto("control record"));
+            }
+            Some(out_ctrl[0] == 1)
+        } else {
+            None
+        };
+        let mut records = Vec::with_capacity(if is_control { 0 } else { n_rec });
+        if !is_control {
+            let mut h_idx = 0usize;
+            for i in 0..n_rec {
+                let rb = i * 7;
+                let offset = out_rec[rb];
+                let timestamp = out_rec[rb + 1];
+                let key = if out_rec[rb + 3] < 0 {
+                    None
+                } else {
+                    let s = out_rec[rb + 2] as usize;
+                    Some(raw[s..s + out_rec[rb + 3] as usize].to_vec())
+                };
+                let value = if out_rec[rb + 5] < 0 {
+                    None
+                } else {
+                    let s = out_rec[rb + 4] as usize;
+                    Some(raw[s..s + out_rec[rb + 5] as usize].to_vec())
+                };
+                let nh = out_rec[rb + 6] as usize;
+                let mut headers = BTreeMap::new();
+                for _ in 0..nh {
+                    let hb = h_idx * 4;
+                    let ks = out_hdr[hb] as usize;
+                    let kl = out_hdr[hb + 1] as usize;
+                    let k = std::str::from_utf8(&raw[ks..ks + kl])
+                        .map_err(|_| Fail::Proto("record headers"))?
+                        .to_string();
+                    let vs = out_hdr[hb + 2] as usize;
+                    let vl = out_hdr[hb + 3] as usize;
+                    headers.insert(k, raw[vs..vs + vl].to_vec());
+                    h_idx += 1;
+                }
+                records.push((
+                    offset,
+                    KafkaRecord {
+                        key,
+                        value,
+                        headers,
+                        timestamp,
+                    },
+                ));
+            }
         }
         let _ = start;
         out.push(Batch {
@@ -1047,15 +1091,6 @@ pub(crate) fn decode_batches(bytes: &[u8], max_decoded: usize) -> KResult<Vec<Ba
         });
     }
     Ok(out)
-}
-
-fn read_varbytes(r: &mut R<'_>) -> KResult<Option<Vec<u8>>> {
-    let n = r.varint()?;
-    if n < 0 {
-        return Ok(None);
-    }
-    let n = usize::try_from(n).map_err(|_| MALFORMED)?;
-    Ok(Some(r.take(n)?.to_vec()))
 }
 
 // ----------------------------------------------------------------------

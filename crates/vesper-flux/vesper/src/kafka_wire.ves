@@ -1,0 +1,290 @@
+// @vesper/flux::kafka_wire: Kafka v2 record-batch record encoder/decoder (`src/kafka_wire.rs`).
+
+fn gb(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn sb(inout s: Slice[u8], i: u64, v: u8) {
+    s.try_set(i, v);
+}
+
+fn g64(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn s64(inout s: Slice[u64], i: u64, v: u64) {
+    s.try_set(i, v);
+}
+
+fn gi64(in s: Slice[i64], i: u64) -> i64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn si64(inout s: Slice[i64], i: u64, v: i64) {
+    s.try_set(i, v);
+}
+
+// cur[0] = pos, cur[1] = end, cur[2] = err (0=ok, 1=malformed).
+fn read_uvarint(in raw: Slice[u8], inout cur: Slice[u64]) -> u64 {
+    let mut pos = g64(in cur, 0);
+    let end = g64(in cur, 1);
+    let mut v: u64 = 0;
+    let mut i: u32 = 0;
+    loop {
+        if i >= 10 {
+            break;
+        }
+        if pos >= end {
+            s64(inout cur, 2, 1);
+            return 0;
+        }
+        let b = widen_u64(gb(in raw, pos));
+        pos = wrapping_add(pos, 1);
+        v = v | wrapping_shl_u64(b & 0x7f, wrapping_mul(7, i));
+        if (b & 0x80) == 0 {
+            s64(inout cur, 0, pos);
+            return v;
+        }
+        i = wrapping_add(i, 1);
+    }
+    s64(inout cur, 2, 1);
+    0
+}
+
+fn read_varint(in raw: Slice[u8], inout cur: Slice[u64]) -> i64 {
+    let v = read_uvarint(in raw, inout cur);
+    if g64(in cur, 2) != 0 {
+        return 0;
+    }
+    let half = wrapping_i64(v >> 1);
+    let sign = wrapping_sub(0, wrapping_i64(v & 1));
+    half ^ sign
+}
+
+fn write_varint(inout dst: Slice[u8], pos: u64, n: i64) -> u64 {
+    let _ = gb(in dst, pos);
+    let _ = n;
+    pos
+}
+
+fn sat_add_i64(a: i64, b: i64) -> i64 {
+    let r = wrapping_add(a, b);
+    // Overflow iff a and b have same sign and r has opposite sign.
+    if ((a ^ r) < 0) && ((a ^ b) >= 0) {
+        if a < 0 {
+            -9223372036854775808
+        } else {
+            9223372036854775807
+        }
+    } else {
+        r
+    }
+}
+
+fn checked_add_i64(a: i64, b: i64, inout cur: Slice[u64]) -> i64 {
+    let r = wrapping_add(a, b);
+    if ((a ^ r) < 0) && ((a ^ b) >= 0) {
+        s64(inout cur, 2, 1);
+        0
+    } else {
+        r
+    }
+}
+
+fn copy_bytes(in src: Slice[u8], src_off: u64, len: u64, inout dst: Slice[u8], dst_off: u64) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        sb(inout dst, wrapping_add(dst_off, i), gb(in src, wrapping_add(src_off, i)));
+        i = wrapping_add(i, 1);
+    }
+}
+
+// Returns 0 = Ok, 1 = record length, 2 = record headers, 3 = record trailing bytes,
+// 4 = record offset, 5 = control record, 6 = malformed.
+// out_rec: 7 i64s per record (offset, ts, key_off, key_len, val_off, val_len, nh).
+// out_hdr: 4 u64s per header (k_off, k_len, v_off, v_len).
+// out_ctrl[0]: -1 = none, 0 = abort, 1 = commit.
+pub fn decode_records(
+    in raw: Slice[u8],
+    count: u64,
+    base_offset: i64,
+    base_ts: i64,
+    is_control: u32,
+    inout cur: Slice[u64],
+    inout out_rec: Slice[i64],
+    inout out_hdr: Slice[u64],
+    inout out_ctrl: Slice[i64]
+) -> u64 {
+    let raw_len = raw.len();
+    let mut r_pos: u64 = 0;
+    let mut h_idx: u64 = 0;
+    si64(inout out_ctrl, 0, -1);
+
+    let mut idx: u64 = 0;
+    loop {
+        if idx >= count {
+            break;
+        }
+        s64(inout cur, 0, r_pos);
+        s64(inout cur, 1, raw_len);
+        s64(inout cur, 2, 0);
+        let len_i = read_varint(in raw, inout cur);
+        if g64(in cur, 2) != 0 {
+            return 6;
+        }
+        if len_i < 0 {
+            return 1;
+        }
+        let len = wrapping_u64(len_i);
+        let rec_start = g64(in cur, 0);
+        if len > wrapping_sub(raw_len, rec_start) {
+            return 6;
+        }
+        let rec_end = wrapping_add(rec_start, len);
+        r_pos = rec_end;
+
+        // Record: i8 attributes, varint ts_delta, varint off_delta, key, value, nh headers.
+        if rec_start >= rec_end {
+            return 6;
+        }
+        s64(inout cur, 0, wrapping_add(rec_start, 1));
+        s64(inout cur, 1, rec_end);
+        s64(inout cur, 2, 0);
+        let ts_delta = read_varint(in raw, inout cur);
+        if g64(in cur, 2) != 0 {
+            return 6;
+        }
+        let off_delta = read_varint(in raw, inout cur);
+        if g64(in cur, 2) != 0 {
+            return 6;
+        }
+        // key
+        let klen_i = read_varint(in raw, inout cur);
+        if g64(in cur, 2) != 0 {
+            return 6;
+        }
+        let mut koff: u64 = 0;
+        if klen_i >= 0 {
+            let klen = wrapping_u64(klen_i);
+            let p = g64(in cur, 0);
+            if klen > wrapping_sub(rec_end, p) {
+                return 6;
+            }
+            koff = p;
+            s64(inout cur, 0, wrapping_add(p, klen));
+        }
+        // value
+        let vlen_i = read_varint(in raw, inout cur);
+        if g64(in cur, 2) != 0 {
+            return 6;
+        }
+        let mut voff: u64 = 0;
+        if vlen_i >= 0 {
+            let vlen = wrapping_u64(vlen_i);
+            let p = g64(in cur, 0);
+            if vlen > wrapping_sub(rec_end, p) {
+                return 6;
+            }
+            voff = p;
+            s64(inout cur, 0, wrapping_add(p, vlen));
+        }
+        // headers
+        let nh_i = read_varint(in raw, inout cur);
+        if g64(in cur, 2) != 0 {
+            return 6;
+        }
+        let rem = wrapping_sub(rec_end, g64(in cur, 0));
+        if nh_i < 0 || wrapping_u64(nh_i) > rem {
+            return 2;
+        }
+        let nh = wrapping_u64(nh_i);
+        let mut hi: u64 = 0;
+        loop {
+            if hi >= nh {
+                break;
+            }
+            let hklen_i = read_varint(in raw, inout cur);
+            if g64(in cur, 2) != 0 {
+                return 6;
+            }
+            if hklen_i < 0 {
+                return 2;
+            }
+            let hklen = wrapping_u64(hklen_i);
+            let p1 = g64(in cur, 0);
+            if hklen > wrapping_sub(rec_end, p1) {
+                return 6;
+            }
+            s64(inout cur, 0, wrapping_add(p1, hklen));
+
+            let hvlen_i = read_varint(in raw, inout cur);
+            if g64(in cur, 2) != 0 {
+                return 6;
+            }
+            let mut hvoff: u64 = 0;
+            let mut hvlen: u64 = 0;
+            if hvlen_i >= 0 {
+                hvlen = wrapping_u64(hvlen_i);
+                let p2 = g64(in cur, 0);
+                if hvlen > wrapping_sub(rec_end, p2) {
+                    return 6;
+                }
+                hvoff = p2;
+                s64(inout cur, 0, wrapping_add(p2, hvlen));
+            }
+            let hb = wrapping_mul(h_idx, 4);
+            if wrapping_add(hb, 3) >= out_hdr.len() {
+                return 7;
+            }
+            s64(inout out_hdr, hb, p1);
+            s64(inout out_hdr, wrapping_add(hb, 1), hklen);
+            s64(inout out_hdr, wrapping_add(hb, 2), hvoff);
+            s64(inout out_hdr, wrapping_add(hb, 3), hvlen);
+            h_idx = wrapping_add(h_idx, 1);
+            hi = wrapping_add(hi, 1);
+        }
+        if g64(in cur, 0) != rec_end {
+            return 3;
+        }
+        s64(inout cur, 2, 0);
+        let offset = checked_add_i64(base_offset, off_delta, inout cur);
+        if g64(in cur, 2) != 0 {
+            return 4;
+        }
+        if is_control != 0 {
+            if klen_i < 4 {
+                return 5;
+            }
+            let t_hi = widen_u64(gb(in raw, wrapping_add(koff, 2)));
+            let t_lo = widen_u64(gb(in raw, wrapping_add(koff, 3)));
+            let ctrl_type = (t_hi << 8) | t_lo;
+            if ctrl_type == 1 {
+                si64(inout out_ctrl, 0, 1);
+            } else {
+                si64(inout out_ctrl, 0, 0);
+            }
+        }
+        let rb = wrapping_mul(idx, 7);
+        si64(inout out_rec, rb, offset);
+        si64(inout out_rec, wrapping_add(rb, 1), sat_add_i64(base_ts, ts_delta));
+        si64(inout out_rec, wrapping_add(rb, 2), wrapping_i64(koff));
+        si64(inout out_rec, wrapping_add(rb, 3), klen_i);
+        si64(inout out_rec, wrapping_add(rb, 4), wrapping_i64(voff));
+        si64(inout out_rec, wrapping_add(rb, 5), vlen_i);
+        si64(inout out_rec, wrapping_add(rb, 6), nh_i);
+        idx = wrapping_add(idx, 1);
+    }
+    0
+}
