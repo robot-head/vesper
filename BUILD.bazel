@@ -781,6 +781,7 @@ vesper_crate(
     # (tests/common/corpus_shard.rs). The others were the slow tail of
     # "Test all targets" (8-9 min each), which hit BuildBuddy's 1-hour limit.
     test_shards = {
+        "test/chrono_port": 4,
         "test/self_host_bounds_hoist_jit": 4,
         # Four balanced shards: keeps per-shard JIT setup small while staying well under 1h.
         "test/self_host_check_pact": 4,
