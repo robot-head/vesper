@@ -1,47 +1,26 @@
-// @vesper-std/process on Windows: child processes (self-hosting SH0 lane
-// 3, #1125), over the `.vsys` library `StdProcess` (process-windows.vsys;
-// the host side is crates/vesper-std-host/src/process.rs, until this
-// package calls kernel32 itself). Linux and macOS use src/, over the C
-// library. Every operation performs `Ffi[StdProcess]`.
-//
-// A command (`ProcCommand`) and a running child (`ProcChild`) are linear
-// handles: a command is spawned or discarded, a child is released, exactly
-// once on every path. Functions that take a live handle return a
-// `Result` instead of raising, because a caller may not keep a linear
-// handle live across an unhandled `Fail` (E0402). `output` runs a command
-// to completion and owns its handles itself, so it raises.
-//
-// ```vesper
-// let mut c = command(in "cc");
-// arg(inout c, in "--version");
-// let out = output(c);
-// ```
+// @vesper-std/process (Windows): child processes directly over kernel32.
 use @vesper-std/fs::{
     IoError,
     error_of,
-    raise_io
+    invalid_input
 };
 
-// How a child ended: `exited` with `code`, or (Unix) killed by `signal`.
 pub copy struct ExitStatus {
     pub code: i64,
     pub signal: u32,
     pub exited: bool,
 }
 
-// Whether the child exited with code 0.
 pub fn success(s: ExitStatus) -> bool {
     s.exited && s.code == 0
 }
 
-// A finished child: its status and the captured output.
 pub struct Output {
     pub status: ExitStatus,
     pub stdout: ChunkSeq[u8],
     pub stderr: ChunkSeq[u8],
 }
 
-// Stream numbers and modes of `stdio`.
 pub fn stdin_stream() -> u32 {
     0
 }
@@ -66,129 +45,758 @@ pub fn null() -> u32 {
     2
 }
 
-// A command that runs `program` (searched on `PATH` when it has no path
-// separator) with no arguments, the parent's environment and directory,
-// and inherited standard streams.
-pub fn command(in program: Str) -> ProcCommand eff [Ffi[StdProcess]] {
+pub struct ProcCommand {
+    program: ChunkSeq[u8],
+    arg_bytes: ChunkSeq[u8],
+    arg_ends: ChunkSeq[u64],
+    env_ops: ChunkSeq[u8],
+    env_keys: ChunkSeq[u8],
+    env_key_ends: ChunkSeq[u64],
+    env_vals: ChunkSeq[u8],
+    env_val_ends: ChunkSeq[u64],
+    env_cleared: bool,
+    has_cwd: bool,
+    cwd: ChunkSeq[u8],
+    stdin_mode: u32,
+    stdout_mode: u32,
+    stderr_mode: u32,
+}
+
+pub struct ProcChild {
+    h_process: u64,
+    stdout_h: u64,
+    stderr_h: u64,
+    stdout_buf: ChunkSeq[u8],
+    stderr_buf: ChunkSeq[u8],
+    waited: bool,
+}
+
+fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn get64(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn get16(in s: Slice[u16], i: u64) -> u16 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn contains_byte(in s: Slice[u8], target: u8) -> bool {
+    for i in 0..s.len() {
+        if byte(in s, i) == target {
+            return true;
+        }
+    }
+    false
+}
+
+fn utf8_to_utf16(in bytes: Slice[u8], inout out: ChunkSeq[u16]) -> bool {
+    let n = bytes.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break true;
+        }
+        let b0 = widen_u32(byte(in bytes, i));
+        if b0 == 0 {
+            break false;
+        }
+        if b0 < 128 {
+            out.push(wrapping_u16(widen_u64(b0)));
+            i = wrapping_add(i, 1);
+        } else if b0 < 224 {
+            if wrapping_add(i, 1) >= n {
+                break false;
+            }
+            let b1 = widen_u32(byte(in bytes, wrapping_add(i, 1)));
+            let cp = ((b0 & 31) << 6) | (b1 & 63);
+            out.push(wrapping_u16(widen_u64(cp)));
+            i = wrapping_add(i, 2);
+        } else if b0 < 240 {
+            if wrapping_add(i, 2) >= n {
+                break false;
+            }
+            let b1 = widen_u32(byte(in bytes, wrapping_add(i, 1)));
+            let b2 = widen_u32(byte(in bytes, wrapping_add(i, 2)));
+            let cp = ((b0 & 15) << 12) | ((b1 & 63) << 6) | (b2 & 63);
+            out.push(wrapping_u16(widen_u64(cp)));
+            i = wrapping_add(i, 3);
+        } else {
+            if wrapping_add(i, 3) >= n {
+                break false;
+            }
+            let b1 = widen_u32(byte(in bytes, wrapping_add(i, 1)));
+            let b2 = widen_u32(byte(in bytes, wrapping_add(i, 2)));
+            let b3 = widen_u32(byte(in bytes, wrapping_add(i, 3)));
+            let cp = ((b0 & 7) << 18) | ((b1 & 63) << 12) | ((b2 & 63) << 6) | (b3 & 63);
+            let adj = wrapping_sub(widen_u64(cp), 65536);
+            out.push(wrapping_u16(wrapping_add(55296, wrapping_shr_u64(adj, 10))));
+            out.push(wrapping_u16(wrapping_add(56320, adj & 1023)));
+            i = wrapping_add(i, 4);
+        }
+    }
+}
+
+fn push_u16_le(inout out: ChunkSeq[u8], w: u16) {
+    out.push(wrapping_u8(widen_u64(w)));
+    out.push(wrapping_u8(wrapping_shr_u64(widen_u64(w), 8)));
+}
+
+fn alloc_utf16_bytes(in units: Slice[u16], with_double_nul: bool) -> u64 eff [Ffi[StdProcess]] {
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..units.len() {
+        push_u16_le(inout bytes, get16(in units, i));
+    }
+    push_u16_le(inout bytes, 0);
+    if with_double_nul {
+        push_u16_le(inout bytes, 0);
+    }
+    let heap = StdProcess::GetProcessHeap();
+    let ptr = StdProcess::HeapAlloc(heap, 0, bytes.len());
+    if ptr != 0 {
+        StdProcess::RtlMoveMemory(ptr, in bytes.as_slice());
+    }
+    ptr
+}
+
+fn free_heap_ptr(ptr: u64) eff [Ffi[StdProcess]] {
+    if ptr != 0 {
+        let heap = StdProcess::GetProcessHeap();
+        let _ = StdProcess::HeapFree(heap, 0, ptr);
+    }
+}
+
+fn needs_quotes(in s: Slice[u8]) -> bool {
+    if s.len() == 0 {
+        return true;
+    }
+    for i in 0..s.len() {
+        let b = byte(in s, i);
+        if b == 32 || b == 9 || b == 34 {
+            return true;
+        }
+    }
+    false
+}
+
+fn append_win_arg(inout out: ChunkSeq[u8], in a: Slice[u8]) {
+    if !needs_quotes(in a) {
+        out.extend(in a);
+        return;
+    }
+    out.push(34);
+    let mut bs: u64 = 0;
+    for i in 0..a.len() {
+        let b = byte(in a, i);
+        if b == 92 {
+            bs = wrapping_add(bs, 1);
+        } else if b == 34 {
+            for _ in 0..wrapping_add(wrapping_mul(bs, 2), 1) {
+                out.push(92);
+            }
+            out.push(34);
+            bs = 0;
+        } else {
+            for _ in 0..bs {
+                out.push(92);
+            }
+            out.push(b);
+            bs = 0;
+        }
+    }
+    for _ in 0..wrapping_mul(bs, 2) {
+        out.push(92);
+    }
+    out.push(34);
+}
+
+fn build_cmd_line(in c: ProcCommand, inout out: ChunkSeq[u16]) -> bool {
+    let mut raw: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    append_win_arg(inout raw, in c.program.as_slice());
+    let n = c.arg_ends.len();
+    for i in 0..n {
+        raw.push(32);
+        let a = if i == 0 {
+            0
+        } else {
+            get64(in c.arg_ends.as_slice(), wrapping_sub(i, 1))
+        };
+        let b = get64(in c.arg_ends.as_slice(), i);
+        append_win_arg(inout raw, in c.arg_bytes[a..b]);
+    }
+    utf8_to_utf16(in raw.as_slice(), inout out)
+}
+
+fn ascii_upper(b: u8) -> u8 {
+    if b >= 97 && b <= 122 {
+        wrapping_u8(wrapping_sub(widen_u64(b), 32))
+    } else {
+        b
+    }
+}
+
+fn slice_eq_nocase(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if ascii_upper(byte(in a, i)) != ascii_upper(byte(in b, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn env_key_bounds(in c: ProcCommand, i: u64) -> (u64, u64) {
+    let a = if i == 0 {
+        0
+    } else {
+        get64(in c.env_key_ends.as_slice(), wrapping_sub(i, 1))
+    };
+    let b = get64(in c.env_key_ends.as_slice(), i);
+    (a, b)
+}
+
+fn env_val_bounds(in c: ProcCommand, i: u64) -> (u64, u64) {
+    let a = if i == 0 {
+        0
+    } else {
+        get64(in c.env_val_ends.as_slice(), wrapping_sub(i, 1))
+    };
+    let b = get64(in c.env_val_ends.as_slice(), i);
+    (a, b)
+}
+
+fn is_last_env_op(in c: ProcCommand, idx: u64) -> bool {
+    let (ka, kb) = env_key_bounds(in c, idx);
+    let n = c.env_ops.len();
+    let mut j = wrapping_add(idx, 1);
+    loop {
+        if j >= n {
+            break true;
+        }
+        let (ja, jb) = env_key_bounds(in c, j);
+        if slice_eq_nocase(in c.env_keys[ja..jb], in c.env_keys[ka..kb]) {
+            break false;
+        }
+        j = wrapping_add(j, 1);
+    }
+}
+
+fn env_override_state(in c: ProcCommand, in key: Slice[u8]) -> u8 {
+    let n = c.env_ops.len();
+    let mut i = n;
+    loop {
+        if i == 0 {
+            break 0;
+        }
+        i = wrapping_sub(i, 1);
+        let (a, b) = env_key_bounds(in c, i);
+        if slice_eq_nocase(in c.env_keys[a..b], in key) {
+            let op = byte(in c.env_ops.as_slice(), i);
+            break if op == 1 {
+                1
+            } else {
+                2
+            };
+        }
+    }
+}
+
+fn append_parent_env(in c: ProcCommand, inout units: ChunkSeq[u16]) eff [Ffi[StdProcess]] {
+    let block = StdProcess::GetEnvironmentStringsW();
+    if block == 0 {
+        return;
+    }
+    let mut cur = block;
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    loop {
+        let wlen = StdProcess::lstrlenW(cur);
+        if wlen <= 0 {
+            break;
+        }
+        buf.clear();
+        let need = StdProcess::WideCharToMultiByte(
+            65001,
+            0,
+            cur,
+            wlen,
+            inout buf.as_slice_mut(),
+            0,
+            0
+        );
+        if need > 0 {
+            buf.resize(widen_u64(wrapping_u32(need)), 0);
+            let got = StdProcess::WideCharToMultiByte(
+                65001,
+                0,
+                cur,
+                wlen,
+                inout buf.as_slice_mut(),
+                0,
+                0
+            );
+            if got > 0 {
+                let s = buf[0..widen_u64(wrapping_u32(got))];
+                let mut eq: u64 = 0;
+                let mut found = false;
+                loop {
+                    if eq >= s.len() {
+                        break;
+                    }
+                    if byte(in s, eq) == 61 {
+                        found = true;
+                        break;
+                    }
+                    eq = wrapping_add(eq, 1);
+                }
+                if found && eq > 0 && env_override_state(in c, in s[0..eq]) == 0 {
+                    let _ = utf8_to_utf16(in s, inout units);
+                    units.push(0);
+                }
+            }
+        }
+        cur = wrapping_add(cur, wrapping_mul(wrapping_add(widen_u64(wrapping_u32(wlen)), 1), 2));
+    }
+    let _ = StdProcess::FreeEnvironmentStringsW(block);
+}
+
+fn build_env_block(in c: ProcCommand) -> u64 eff [Ffi[StdProcess]] {
+    if !c.env_cleared && c.env_ops.len() == 0 {
+        return 0;
+    }
+    let mut units: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    if !c.env_cleared {
+        append_parent_env(in c, inout units);
+    }
+    let n = c.env_ops.len();
+    for i in 0..n {
+        if byte(in c.env_ops.as_slice(), i) == 1 && is_last_env_op(in c, i) {
+            let (ka, kb) = env_key_bounds(in c, i);
+            let (va, vb) = env_val_bounds(in c, i);
+            let _ = utf8_to_utf16(in c.env_keys[ka..kb], inout units);
+            units.push(61);
+            let _ = utf8_to_utf16(in c.env_vals[va..vb], inout units);
+            units.push(0);
+        }
+    }
+    alloc_utf16_bytes(in units.as_slice(), true)
+}
+
+pub fn command(in program: Str) -> ProcCommand {
     command_path(in program.as_bytes())
 }
 
-pub fn command_path(in program: Slice[u8]) -> ProcCommand eff [Ffi[StdProcess]] {
-    match StdProcess::vstd_proc_command(in program) {
-        Result::Ok(c) => c,
-        // The host never returns NULL here.
-        Result::Err(_) => loop {},
+pub fn command_path(in program: Slice[u8]) -> ProcCommand {
+    let mut prog: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    prog.extend(in program);
+    ProcCommand {
+        program: prog,
+        arg_bytes: ChunkSeq::new[u8](),
+        arg_ends: ChunkSeq::new[u64](),
+        env_ops: ChunkSeq::new[u8](),
+        env_keys: ChunkSeq::new[u8](),
+        env_key_ends: ChunkSeq::new[u64](),
+        env_vals: ChunkSeq::new[u8](),
+        env_val_ends: ChunkSeq::new[u64](),
+        env_cleared: false,
+        has_cwd: false,
+        cwd: ChunkSeq::new[u8](),
+        stdin_mode: inherit(),
+        stdout_mode: inherit(),
+        stderr_mode: inherit(),
     }
 }
 
-pub fn arg(inout c: ProcCommand, in a: Str) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_arg(inout c, in a.as_bytes());
+pub fn arg(inout c: ProcCommand, in a: Str) {
+    arg_bytes(inout c, in a.as_bytes());
 }
 
-pub fn arg_bytes(inout c: ProcCommand, in a: Slice[u8]) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_arg(inout c, in a);
+pub fn arg_bytes(inout c: ProcCommand, in a: Slice[u8]) {
+    c.arg_bytes.extend(in a);
+    c.arg_ends.push(c.arg_bytes.len());
 }
 
-// Set `key` to `value` in the child's environment.
-pub fn env(inout c: ProcCommand, in key: Str, in value: Str) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_env(inout c, in key.as_bytes(), in value.as_bytes());
+pub fn env(inout c: ProcCommand, in key: Str, in value: Str) {
+    c.env_ops.push(1);
+    c.env_keys.extend(in key.as_bytes());
+    c.env_key_ends.push(c.env_keys.len());
+    c.env_vals.extend(in value.as_bytes());
+    c.env_val_ends.push(c.env_vals.len());
 }
 
-// Leave `key` out of the child's environment.
-pub fn env_remove(inout c: ProcCommand, in key: Str) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_env_remove(inout c, in key.as_bytes());
+pub fn env_remove(inout c: ProcCommand, in key: Str) {
+    c.env_ops.push(0);
+    c.env_keys.extend(in key.as_bytes());
+    c.env_key_ends.push(c.env_keys.len());
+    c.env_val_ends.push(c.env_vals.len());
 }
 
-// Start the child from an empty environment; `env` calls after this one
-// still apply.
-pub fn env_clear(inout c: ProcCommand) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_env_clear(inout c);
+pub fn env_clear(inout c: ProcCommand) {
+    c.env_cleared = true;
+    c.env_ops.clear();
+    c.env_keys.clear();
+    c.env_key_ends.clear();
+    c.env_vals.clear();
+    c.env_val_ends.clear();
 }
 
-// Run the child in directory `dir`.
-pub fn cwd(inout c: ProcCommand, in dir: Str) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_cwd(inout c, in dir.as_bytes());
+pub fn cwd(inout c: ProcCommand, in dir: Str) {
+    c.has_cwd = true;
+    c.cwd.clear();
+    c.cwd.extend(in dir.as_bytes());
 }
 
-// Set standard stream `stream` (`stdin_stream()` and friends) to `mode`
-// (`inherit()`, `capture()` or `null()`; stdin cannot be captured and is
-// then `null()`).
-pub fn stdio(inout c: ProcCommand, stream: u32, mode: u32) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_stdio(inout c, stream, mode);
-}
-
-// Throw a command away without running it.
-pub fn discard(sink c: ProcCommand) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_command_free(c);
-}
-
-// Start the command. The command is consumed either way.
-pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProcess]] {
-    let mut err: u64 = 0;
-    match StdProcess::vstd_proc_spawn(c, inout err) {
-        Option::Some(ch) => Result::Ok(ch),
-        Option::None => Result::Err(error_of(err)),
+pub fn stdio(inout c: ProcCommand, stream: u32, mode: u32) {
+    if stream == stdin_stream() {
+        c.stdin_mode = if mode == capture() {
+            null()
+        } else {
+            mode
+        };
+    } else if stream == stdout_stream() {
+        c.stdout_mode = mode;
+    } else if stream == stderr_stream() {
+        c.stderr_mode = mode;
     }
 }
 
-// Wait for the child to end, collecting captured output while it runs.
-// Waiting twice is an `invalid_input()` error.
-pub fn wait(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProcess]] {
-    let mut err: u64 = 0;
-    let mut s = ProcStatus {
-        code: 0,
-        signal: 0,
-        exited: 0,
+pub fn discard(sink c: ProcCommand) {}
+
+fn close_handle_if(h: u64) eff [Ffi[StdProcess]] {
+    if h != 0 && h != wrapping_sub(0, 1) {
+        let _ = StdProcess::CloseHandle(h);
+    }
+}
+
+fn make_capture_pipe() -> Result[(u64, u64), IoError] eff [Ffi[StdProcess]] {
+    let mut r = HandleBox {
+        h: 0
     };
-    if StdProcess::vstd_proc_wait(inout ch, inout s, inout err) != 0 {
-        return Result::Err(error_of(err));
+    let mut w = HandleBox {
+        h: 0
+    };
+    let sa = SecAttr {
+        length: 24,
+        pad0: 0,
+        sec_desc: 0,
+        inherit: 1,
+        pad1: 0,
+    };
+    let (ok, err) = StdProcess::CreatePipe(inout r, inout w, in sa, 0);
+    if ok == 0 {
+        return Result::Err(error_of(widen_u64(err)));
     }
+    let _ = StdProcess::SetHandleInformation(r.h, StdProcess::HANDLE_FLAG_INHERIT, 0);
+    Result::Ok((r.h, w.h))
+}
+
+fn open_nul_handle(for_write: bool) -> u64 eff [Ffi[StdProcess]] {
+    let mut nul: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    nul.push(78);
+    nul.push(85);
+    nul.push(76);
+    let sa = SecAttr {
+        length: 24,
+        pad0: 0,
+        sec_desc: 0,
+        inherit: 1,
+        pad1: 0,
+    };
+    let access = if for_write {
+        StdProcess::GENERIC_WRITE
+    } else {
+        StdProcess::GENERIC_READ
+    };
+    match StdProcess::CreateFileW(
+        in nul.as_slice(),
+        access,
+        StdProcess::FILE_SHARE_READ | StdProcess::FILE_SHARE_WRITE,
+        in sa,
+        StdProcess::OPEN_EXISTING,
+        StdProcess::FILE_ATTRIBUTE_NORMAL,
+        0
+    ) {
+        Result::Ok((h, _)) => h,
+        Result::Err(_) => wrapping_sub(0, 1),
+    }
+}
+
+pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProcess]] {
+    if contains_byte(in c.program.as_slice(), 0) {
+        return Result::Err(
+            IoError {
+                kind: invalid_input(),
+                os: 0
+            }
+        );
+    }
+    let mut cmd_w: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    if !build_cmd_line(in c, inout cmd_w) {
+        return Result::Err(
+            IoError {
+                kind: invalid_input(),
+                os: 0
+            }
+        );
+    }
+    let mut out_r: u64 = 0;
+    let mut out_w: u64 = 0;
+    if c.stdout_mode == capture() {
+        match make_capture_pipe() {
+            Result::Ok((r, w)) => {
+                out_r = r;
+                out_w = w;
+            },
+            Result::Err(e) => return Result::Err(e),
+        }
+    }
+    let mut err_r: u64 = 0;
+    let mut err_w: u64 = 0;
+    if c.stderr_mode == capture() {
+        match make_capture_pipe() {
+            Result::Ok((r, w)) => {
+                err_r = r;
+                err_w = w;
+            },
+            Result::Err(e) => {
+                close_handle_if(out_r);
+                close_handle_if(out_w);
+                return Result::Err(e);
+            },
+        }
+    }
+    let mut nul_in: u64 = 0;
+    let h_in = if c.stdin_mode == null() {
+        nul_in = open_nul_handle(false);
+        nul_in
+    } else {
+        StdProcess::GetStdHandle(StdProcess::STD_INPUT_HANDLE)
+    };
+    let mut nul_out: u64 = 0;
+    let h_out = if c.stdout_mode == capture() {
+        out_w
+    } else if c.stdout_mode == null() {
+        nul_out = open_nul_handle(true);
+        nul_out
+    } else {
+        StdProcess::GetStdHandle(StdProcess::STD_OUTPUT_HANDLE)
+    };
+    let mut nul_err: u64 = 0;
+    let h_err = if c.stderr_mode == capture() {
+        err_w
+    } else if c.stderr_mode == null() {
+        nul_err = open_nul_handle(true);
+        nul_err
+    } else {
+        StdProcess::GetStdHandle(StdProcess::STD_ERROR_HANDLE)
+    };
+    let env_ptr = build_env_block(in c);
+    let mut cwd_ptr: u64 = 0;
+    if c.has_cwd {
+        let mut cwd_w: ChunkSeq[u16] = ChunkSeq::new[u16]();
+        if !utf8_to_utf16(in c.cwd.as_slice(), inout cwd_w) {
+            free_heap_ptr(env_ptr);
+            close_handle_if(out_r);
+            close_handle_if(out_w);
+            close_handle_if(err_r);
+            close_handle_if(err_w);
+            close_handle_if(nul_in);
+            close_handle_if(nul_out);
+            close_handle_if(nul_err);
+            return Result::Err(
+                IoError {
+                    kind: invalid_input(),
+                    os: 0
+                }
+            );
+        }
+        cwd_ptr = alloc_utf16_bytes(in cwd_w.as_slice(), false);
+    }
+    let si = StartupInfoW {
+        cb: 104,
+        pad0: 0,
+        reserved: 0,
+        desktop: 0,
+        title: 0,
+        x: 0,
+        y: 0,
+        x_size: 0,
+        y_size: 0,
+        x_count_chars: 0,
+        y_count_chars: 0,
+        fill_attr: 0,
+        flags: StdProcess::STARTF_USESTDHANDLES,
+        show_window: 0,
+        cb_reserved2: 0,
+        pad1: 0,
+        reserved2: 0,
+        std_input: h_in,
+        std_output: h_out,
+        std_error: h_err,
+    };
+    let mut pi = ProcessInfo {
+        h_process: 0,
+        h_thread: 0,
+        pid: 0,
+        tid: 0,
+    };
+    let flags = if env_ptr != 0 {
+        StdProcess::CREATE_UNICODE_ENVIRONMENT
+    } else {
+        0
+    };
+    let res = StdProcess::CreateProcessW(
+        0,
+        in cmd_w.as_slice(),
+        0,
+        0,
+        1,
+        flags,
+        env_ptr,
+        cwd_ptr,
+        in si,
+        inout pi
+    );
+    free_heap_ptr(env_ptr);
+    free_heap_ptr(cwd_ptr);
+    close_handle_if(out_w);
+    close_handle_if(err_w);
+    close_handle_if(nul_in);
+    close_handle_if(nul_out);
+    close_handle_if(nul_err);
+    match res {
+        Result::Ok((ok, err)) => {
+            if ok == 0 {
+                close_handle_if(out_r);
+                close_handle_if(err_r);
+                return Result::Err(error_of(widen_u64(err)));
+            }
+        },
+        Result::Err(_) => {
+            close_handle_if(out_r);
+            close_handle_if(err_r);
+            return Result::Err(
+                IoError {
+                    kind: invalid_input(),
+                    os: 0
+                }
+            );
+        },
+    }
+    close_handle_if(pi.h_thread);
     Result::Ok(
-        ExitStatus {
-            code: s.code,
-            signal: s.signal,
-            exited: s.exited != 0,
+        ProcChild {
+            h_process: pi.h_process,
+            stdout_h: out_r,
+            stderr_h: err_r,
+            stdout_buf: ChunkSeq::new[u8](),
+            stderr_buf: ChunkSeq::new[u8](),
+            waited: false,
         }
     )
 }
 
-fn captured(in ch: ProcChild, stream: u32) -> ChunkSeq[u8] eff [Ffi[StdProcess]] {
-    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let n = StdProcess::vstd_proc_output(in ch, stream, inout buf.as_slice_mut());
-    if n > 0 {
-        buf.resize(n, 0);
-        let m = StdProcess::vstd_proc_output(in ch, stream, inout buf.as_slice_mut());
+fn drain_pipe(h: u64, inout dst: ChunkSeq[u8]) eff [Ffi[StdProcess]] {
+    if h == 0 {
+        return;
     }
-    buf
+    let mut tmp: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    tmp.resize(4096, 0);
+    let mut n = DwordBox {
+        v: 0
+    };
+    loop {
+        n.v = 0;
+        let (ok, _) = StdProcess::ReadFile(h, inout tmp.as_slice_mut(), inout n, 0);
+        if ok == 0 || n.v == 0 {
+            break;
+        }
+        let cnt = widen_u64(n.v);
+        dst.extend(in tmp[0..cnt]);
+    }
+    close_handle_if(h);
 }
 
-// What a waited child wrote to a captured stdout (empty before `wait`, or
-// when stdout was not captured).
-pub fn stdout(in ch: ProcChild) -> ChunkSeq[u8] eff [Ffi[StdProcess]] {
-    captured(in ch, stdout_stream())
+pub fn wait(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProcess]] {
+    if ch.waited {
+        return Result::Err(
+            IoError {
+                kind: invalid_input(),
+                os: 0
+            }
+        );
+    }
+    drain_pipe(ch.stdout_h, inout ch.stdout_buf);
+    ch.stdout_h = 0;
+    drain_pipe(ch.stderr_h, inout ch.stderr_buf);
+    ch.stderr_h = 0;
+    let _ = StdProcess::WaitForSingleObject(ch.h_process, StdProcess::INFINITE);
+    let mut code = DwordBox {
+        v: 0
+    };
+    let (ok, err) = StdProcess::GetExitCodeProcess(ch.h_process, inout code);
+    close_handle_if(ch.h_process);
+    ch.h_process = 0;
+    ch.waited = true;
+    if ok == 0 {
+        return Result::Err(error_of(widen_u64(err)));
+    }
+    Result::Ok(
+        ExitStatus {
+            code: widen_i64(code.v),
+            signal: 0,
+            exited: true,
+        }
+    )
 }
 
-pub fn stderr(in ch: ProcChild) -> ChunkSeq[u8] eff [Ffi[StdProcess]] {
-    captured(in ch, stderr_stream())
+pub fn stdout(in ch: ProcChild) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in ch.stdout_buf.as_slice());
+    out
 }
 
-// The child's process id (0 once it has been waited for).
+pub fn stderr(in ch: ProcChild) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in ch.stderr_buf.as_slice());
+    out
+}
+
 pub fn child_id(in ch: ProcChild) -> u64 eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_child_id(in ch)
+    if ch.waited || ch.h_process == 0 {
+        0
+    } else {
+        widen_u64(StdProcess::GetProcessId(ch.h_process))
+    }
 }
 
-// Release a child. One that was never waited for is killed and reaped.
 pub fn release(sink ch: ProcChild) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_free(ch);
+    close_handle_if(ch.stdout_h);
+    close_handle_if(ch.stderr_h);
+    if !ch.waited && ch.h_process != 0 {
+        let _ = StdProcess::TerminateProcess(ch.h_process, 1);
+        let _ = StdProcess::WaitForSingleObject(ch.h_process, StdProcess::INFINITE);
+        close_handle_if(ch.h_process);
+    }
 }
 
-// Run the command to completion with stdout and stderr captured and stdin
-// null: its status and output.
 pub fn output(sink c: ProcCommand) -> Output eff [Ffi[StdProcess], Fail[IoError]] {
     let mut c = c;
-    StdProcess::vstd_proc_stdio(inout c, stdin_stream(), null());
-    StdProcess::vstd_proc_stdio(inout c, stdout_stream(), capture());
-    StdProcess::vstd_proc_stdio(inout c, stderr_stream(), capture());
+    stdio(inout c, stdin_stream(), null());
+    stdio(inout c, stdout_stream(), capture());
+    stdio(inout c, stderr_stream(), capture());
     let mut ch = match spawn(c) {
         Result::Ok(ch) => ch,
         Result::Err(e) => return Fail::raise(e),
@@ -207,12 +815,10 @@ pub fn output(sink c: ProcCommand) -> Output eff [Ffi[StdProcess], Fail[IoError]
     }
 }
 
-// End this process now with exit status `code` (truncated to 32 bits).
 pub fn exit(code: i64) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_exit(code);
+    StdProcess::ExitProcess(wrapping_u32(wrapping_u64(code)));
 }
 
-// This process's id.
 pub fn id() -> u64 eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_id()
+    widen_u64(StdProcess::GetCurrentProcessId())
 }

@@ -4,9 +4,9 @@
 //! package's `src/**`, reads every `.ves` file, spawns `cc --version` and
 //! writes its report atomically (tests/driver.rs).
 
-// The Windows host functions of @vesper-std/process (Linux and macOS
-// call the C library; @vesper-std/fs calls kernel32 on Windows).
-pub use vesper_std_host::process;
+// All three native platforms call libc/kernel32 directly for @vesper-std/fs,
+// env and process; `vesper_std_host` is kept only for `live_handles()` until
+// the crate is retired.
 
 /// `driver::run()` and `driver::live_allocations()`.
 // Generated: rustfmt must never reflow it (the build checks it byte for

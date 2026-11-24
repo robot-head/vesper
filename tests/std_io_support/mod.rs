@@ -497,6 +497,35 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn CreateDirectoryW(lp_path_name: *const u16, lp_security_attributes: *const c_void)
         -> i32;
         fn GetCurrentProcessId() -> u32;
+        fn CreatePipe(
+            h_read_pipe: *mut *mut c_void,
+            h_write_pipe: *mut *mut c_void,
+            lp_pipe_attributes: *const c_void,
+            n_size: u32,
+        ) -> i32;
+        fn SetHandleInformation(h_object: *mut c_void, dw_mask: u32, dw_flags: u32) -> i32;
+        fn GetStdHandle(n_std_handle: i32) -> *mut c_void;
+        fn CreateProcessW(
+            lp_application_name: *const u16,
+            lp_command_line: *mut u16,
+            lp_process_attributes: *const c_void,
+            lp_thread_attributes: *const c_void,
+            b_inherit_handles: i32,
+            dw_creation_flags: u32,
+            lp_environment: *const c_void,
+            lp_current_directory: *const u16,
+            lp_startup_info: *const c_void,
+            lp_process_information: *mut c_void,
+        ) -> i32;
+        fn WaitForSingleObject(h_handle: *mut c_void, dw_milliseconds: u32) -> u32;
+        fn GetExitCodeProcess(h_process: *mut c_void, lp_exit_code: *mut u32) -> i32;
+        fn TerminateProcess(h_process: *mut c_void, u_exit_code: u32) -> i32;
+        fn GetProcessId(process: *mut c_void) -> u32;
+        fn ExitProcess(u_exit_code: u32);
+        fn GetProcessHeap() -> *mut c_void;
+        fn HeapAlloc(h_heap: *mut c_void, dw_flags: u32, dw_bytes: usize) -> *mut c_void;
+        fn HeapFree(h_heap: *mut c_void, dw_flags: u32, lp_mem: *mut c_void) -> i32;
+        fn RtlMoveMemory(dst: *mut c_void, src: *const c_void, len: usize);
     }
     vec![
         ("GetCommandLineW", GetCommandLineW as *const u8),
@@ -543,6 +572,19 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("RemoveDirectoryW", RemoveDirectoryW as *const u8),
         ("CreateDirectoryW", CreateDirectoryW as *const u8),
         ("GetCurrentProcessId", GetCurrentProcessId as *const u8),
+        ("CreatePipe", CreatePipe as *const u8),
+        ("SetHandleInformation", SetHandleInformation as *const u8),
+        ("GetStdHandle", GetStdHandle as *const u8),
+        ("CreateProcessW", CreateProcessW as *const u8),
+        ("WaitForSingleObject", WaitForSingleObject as *const u8),
+        ("GetExitCodeProcess", GetExitCodeProcess as *const u8),
+        ("TerminateProcess", TerminateProcess as *const u8),
+        ("GetProcessId", GetProcessId as *const u8),
+        ("ExitProcess", ExitProcess as *const u8),
+        ("GetProcessHeap", GetProcessHeap as *const u8),
+        ("HeapAlloc", HeapAlloc as *const u8),
+        ("HeapFree", HeapFree as *const u8),
+        ("RtlMoveMemory", RtlMoveMemory as *const u8),
     ]
 }
 #[cfg(not(any(unix, windows)))]
