@@ -95,13 +95,7 @@ fn injected(
     target: &str,
     op: FailOp,
 ) -> (u64, Option<u32>) {
-    let count = model.occurrences.entry((target.into(), op)).or_insert(0);
-    *count += 1;
-    let occurrence = *count;
-    (
-        occurrence,
-        plan.failures.get(&(target.into(), op, occurrence)).copied(),
-    )
+    model.next_failure(plan, target, op)
 }
 
 fn warp_error(task: &str, error: WarpError) -> SessionError {
