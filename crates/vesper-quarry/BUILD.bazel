@@ -67,6 +67,9 @@ PORT_DIVERGENT = {
     "internal": ("vesper/src/internal.ves", {
         "if key_le(kr, kt, rowid, inv_ts) {": "if false {",
     }),
+    "store_log": ("vesper/src/store_log.ves", {
+        "if len == 0 || off < end || wrapping_add(off, len) > PAGE_SIZE {": "if false {",
+    }),
 }
 
 [
