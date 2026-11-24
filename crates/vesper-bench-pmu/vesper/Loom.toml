@@ -2,5 +2,5 @@
 name = "@vesper/bench-pmu"
 version = "0.1.0"
 edition = "2026"
-capability_ceiling = ["Fail", "Alloc"]
+capability_ceiling = ["Fail", "Alloc", "Ffi[PerfSys]"]
 vsys = ["perf-@OS@.vsys"]

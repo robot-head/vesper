@@ -690,6 +690,10 @@ vesper_crate(
             ":files",
             "//crates/vesper-bench-pmu:vesper_pkg",
         ],
+        "test/pulse_port": [
+            ":files",
+            "//crates/vesper-pulse/vesper:vesper_pkg",
+        ],
         # .vsys imports carried by packages (#1150): drivers over @vesper-std/fs.
         "test/vsys_packages": [":files"],
         # .vsys types in `use` (#1326): the real @vesper/cranelift as a dependency.
@@ -732,6 +736,7 @@ vesper_crate(
         "test/self_host_ast": {"VESPER_AST_FUZZ": "1000"},
         "test/self_host_check_core_typing_exprs": {"CHECK_HARNESS_STRIDE": "4"},
         "test/self_host_check_loops_atomics": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_check_pact": {"RUST_TEST_THREADS": "1"},
         "test/self_host_check_regions_seqs": {"CHECK_HARNESS_STRIDE": "4"},
         "test/self_host_egraph": {"CHECK_HARNESS_STRIDE": "4"},
         "test/self_host_front_v2": {"VESPER_FRONT_FUZZ": "1000"},
@@ -761,6 +766,8 @@ vesper_crate(
     # "Test all targets" (8-9 min each), which hit BuildBuddy's 1-hour limit.
     test_shards = {
         "test/self_host_bounds_hoist_jit": 4,
+        # Four balanced shards: keeps per-shard JIT setup small while staying well under 1h.
+        "test/self_host_check_pact": 4,
         "test/self_host_codegen_scalar": 4,
         "test/self_host_front_end": 4,
         "test/self_host_ir_opt": 4,
@@ -1075,7 +1082,7 @@ vesper_crate(
         "test/self_host_native_walk": "long",
         "test/self_host_check_harness": "long",
         # The trait declaration differential (#1185) checks every corpus world.
-        "test/self_host_check_pact": "long",
+        "test/self_host_check_pact": "eternal",
         # The loops and atomics differential (#1182) passed 900 s on loaded CI.
         "test/self_host_check_loops_atomics": "eternal",
         # The tensor types differential (#1186) JIT-compiles the port and
@@ -1450,10 +1457,13 @@ vesper_package(
 
 vesper_package(
     name = "std_process_package",
-    srcs = glob(["packages/vesper-std/process/src/**/*.ves"]),
+    srcs = glob([
+        "packages/vesper-std/process/src/**/*.ves",
+        "packages/vesper-std/process/src-windows/**/*.ves",
+    ]),
     manifest = "packages/vesper-std/process/Loom.toml",
     visibility = ["//visibility:public"],
-    vsys = ["packages/vesper-std/process/process.vsys"],
+    vsys = glob(["packages/vesper-std/process/process-*.vsys"]),
     deps = [":std_fs_package"],
 )
 

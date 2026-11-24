@@ -2,7 +2,6 @@
 //! `normalize` of raw component tuples, every ALU transfer function at both
 //! widths, every branch refinement on both outcomes, and `meet`, over random
 //! scalars of every shape. Rust-exit lane 10 (#1405).
-#![cfg(feature = "vesper-port")]
 
 mod common;
 

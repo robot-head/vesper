@@ -35,6 +35,9 @@ use @vesper-std/fs::{
     IoError,
     not_found
 };
+use self::graph::{
+    run_graph
+};
 use self::forge::{
     run_forge
 };
@@ -130,6 +133,9 @@ pub fn run(in args: Args)
             return version();
         }
         return unknown_command(in c);
+    }
+    if eq(in c, in "graph") {
+        return run_graph(in args);
     }
     if eq(in c, in "forge") {
         return run_forge(in args);

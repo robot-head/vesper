@@ -1,0 +1,778 @@
+// @vesper-std/fs (Windows): files and directories directly over Win32 `kernel32` (`fs-windows.vsys`).
+
+pub copy struct IoError {
+    pub kind: u32,
+    pub os: u32,
+}
+
+pub fn not_found() -> u32 {
+    1
+}
+
+pub fn permission_denied() -> u32 {
+    2
+}
+
+pub fn already_exists() -> u32 {
+    3
+}
+
+pub fn not_a_directory() -> u32 {
+    4
+}
+
+pub fn is_a_directory() -> u32 {
+    5
+}
+
+pub fn directory_not_empty() -> u32 {
+    6
+}
+
+pub fn invalid_input() -> u32 {
+    7
+}
+
+pub fn interrupted() -> u32 {
+    8
+}
+
+pub fn unexpected_eof() -> u32 {
+    9
+}
+
+pub fn write_zero() -> u32 {
+    10
+}
+
+pub fn broken_pipe() -> u32 {
+    14
+}
+
+pub fn unsupported() -> u32 {
+    11
+}
+
+pub fn out_of_memory() -> u32 {
+    12
+}
+
+pub fn other() -> u32 {
+    13
+}
+
+fn errno_kind(os: u32) -> u32 {
+    match os {
+        2 => not_found(),
+        3 => not_found(),
+        5 => permission_denied(),
+        8 => out_of_memory(),
+        14 => out_of_memory(),
+        50 => unsupported(),
+        80 => already_exists(),
+        87 => invalid_input(),
+        109 => broken_pipe(),
+        120 => unsupported(),
+        123 => invalid_input(),
+        145 => directory_not_empty(),
+        183 => already_exists(),
+        267 => not_a_directory(),
+        _ => other(),
+    }
+}
+
+pub fn error_of(os: u64) -> IoError {
+    let code = wrapping_u32(os);
+    IoError {
+        kind: errno_kind(code),
+        os: code,
+    }
+}
+
+pub fn raise_io[T](os: u64) -> T eff [Fail[IoError]] {
+    Fail::raise(error_of(os))
+}
+
+pub fn raise_kind[T](kind: u32) -> T eff [Fail[IoError]] {
+    Fail::raise(
+        IoError {
+            kind: kind,
+            os: 0,
+        }
+    )
+}
+
+pub copy struct Metadata {
+    pub size: u64,
+    pub mtime_s: i64,
+    pub mtime_ns: u32,
+    pub kind: u32,
+}
+
+pub fn kind_file() -> u32 {
+    1
+}
+
+pub fn kind_dir() -> u32 {
+    2
+}
+
+pub fn kind_symlink() -> u32 {
+    3
+}
+
+pub fn kind_other() -> u32 {
+    4
+}
+
+fn u8_at(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn utf8_to_utf16(in src: Slice[u8]) -> ChunkSeq[u16] eff [Fail[IoError]] {
+    let n = src.len();
+    let mut out: ChunkSeq[u16] = ChunkSeq::with_capacity[u16](wrapping_add(n, 4));
+    let mut long_abs = false;
+    if n >= 240 && u8_at(in src, 1) == 58 {
+        let s2 = u8_at(in src, 2);
+        if s2 == 47 || s2 == 92 {
+            long_abs = true;
+            out.push(92);
+            out.push(92);
+            out.push(63);
+            out.push(92);
+        }
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b0 = widen_u32(u8_at(in src, i));
+        if b0 == 0 {
+            return raise_kind(invalid_input());
+        }
+        if b0 < 128 {
+            if long_abs && b0 == 47 {
+                out.push(92);
+            } else {
+                out.push(wrapping_u16(b0));
+            }
+            i = wrapping_add(i, 1);
+        } else if b0 >= 194 && b0 <= 223 && wrapping_add(i, 1) < n {
+            let b1 = widen_u32(u8_at(in src, wrapping_add(i, 1)));
+            if (b1 & 192) != 128 {
+                return raise_kind(invalid_input());
+            }
+            let cp = wrapping_shl_u32(b0 & 31, 6) | (b1 & 63);
+            out.push(wrapping_u16(cp));
+            i = wrapping_add(i, 2);
+        } else if b0 >= 224 && b0 <= 239 && wrapping_add(i, 2) < n {
+            let b1 = widen_u32(u8_at(in src, wrapping_add(i, 1)));
+            let b2 = widen_u32(u8_at(in src, wrapping_add(i, 2)));
+            if (b1 & 192) != 128 || (b2 & 192) != 128 {
+                return raise_kind(invalid_input());
+            }
+            let cp = wrapping_shl_u32(b0 & 15, 12) | wrapping_shl_u32(b1 & 63, 6) | (b2 & 63);
+            out.push(wrapping_u16(cp));
+            i = wrapping_add(i, 3);
+        } else if b0 >= 240 && b0 <= 244 && wrapping_add(i, 3) < n {
+            let b1 = widen_u32(u8_at(in src, wrapping_add(i, 1)));
+            let b2 = widen_u32(u8_at(in src, wrapping_add(i, 2)));
+            let b3 = widen_u32(u8_at(in src, wrapping_add(i, 3)));
+            if (b1 & 192) != 128 || (b2 & 192) != 128 || (b3 & 192) != 128 {
+                return raise_kind(invalid_input());
+            }
+            let cp = wrapping_shl_u32(b0 & 7, 18) | wrapping_shl_u32(
+                b1 & 63,
+                12
+            ) | wrapping_shl_u32(b2 & 63, 6) | (b3 & 63);
+            let adj = wrapping_sub(cp, 65536);
+            out.push(wrapping_u16(wrapping_add(55296, wrapping_shr_u32(adj, 10))));
+            out.push(wrapping_u16(wrapping_add(56320, adj & 1023)));
+            i = wrapping_add(i, 4);
+        } else {
+            return raise_kind(invalid_input());
+        }
+    }
+    out
+}
+
+fn open_handle(in path: Slice[u8], access: u32, disp: u32) -> u64 eff [Ffi[StdFs], Fail[IoError]] {
+    let wpath = utf8_to_utf16(in path);
+    match StdFs::CreateFileW(
+        in wpath.as_slice(),
+        access,
+        StdFs::FILE_SHARE_ALL,
+        0,
+        disp,
+        StdFs::FILE_ATTRIBUTE_NORMAL,
+        0
+    ) {
+        Result::Ok((h, err)) => {
+            if h == StdFs::INVALID_HANDLE_VALUE {
+                raise_io(widen_u64(err))
+            } else {
+                h
+            }
+        }
+        Result::Err(_) => raise_kind(invalid_input()),
+    }
+}
+
+fn write_all_handle(h: u64, in data: Slice[u8]) -> u32 eff [Ffi[StdFs]] {
+    let total = data.len();
+    let mut off: u64 = 0;
+    loop {
+        if off >= total {
+            break;
+        }
+        let mut wrote: u32 = 0;
+        let chunk_end = if wrapping_sub(total, off) > 1073741824 {
+            wrapping_add(off, 1073741824)
+        } else {
+            total
+        };
+        let (ok, err) = StdFs::WriteFile(h, in data[off..chunk_end], inout wrote, 0);
+        if ok == 0 {
+            return err;
+        }
+        if wrote == 0 {
+            return 29;
+        }
+        off = wrapping_add(off, widen_u64(wrote));
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Whole files.
+
+pub fn read(in path: Str) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    read_path(in path.as_bytes())
+}
+
+pub fn read_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    let h = open_handle(in path, StdFs::GENERIC_READ, StdFs::OPEN_EXISTING);
+    let mut fsize: i64 = 0;
+    let (sok, _) = StdFs::GetFileSizeEx(h, inout fsize);
+    let hint: u64 = if sok != 0 && fsize > 0 {
+        wrapping_add(wrapping_u64(fsize), 1)
+    } else {
+        4096
+    };
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    buf.resize(hint, 0);
+    let mut total: u64 = 0;
+    let mut err: u32 = 0;
+    loop {
+        let cap = buf.len();
+        if total == cap {
+            let next_cap = if cap < 4096 {
+                4096
+            } else {
+                wrapping_mul(cap, 2)
+            };
+            buf.resize(next_cap, 0);
+        }
+        let end = buf.len();
+        let mut got: u32 = 0;
+        let (ok, rerr) = StdFs::ReadFile(h, inout buf[total..end], inout got, 0);
+        if ok == 0 {
+            if rerr == StdFs::ERROR_HANDLE_EOF || rerr == StdFs::ERROR_BROKEN_PIPE {
+                break;
+            }
+            err = rerr;
+            break;
+        }
+        if got == 0 {
+            break;
+        }
+        total = wrapping_add(total, widen_u64(got));
+    }
+    let _ = StdFs::CloseHandle(h);
+    if err != 0 {
+        return raise_io(widen_u64(err));
+    }
+    buf.truncate(total);
+    buf
+}
+
+pub fn read_string(in path: Str) -> String eff [Ffi[StdFs], Fail[IoError]] {
+    let bytes = read_path(in path.as_bytes());
+    match String::from_utf8(in bytes.as_slice()) {
+        Option::Some(s) => s,
+        Option::None => raise_kind(invalid_input()),
+    }
+}
+
+fn write_mode(in path: Slice[u8], in data: Slice[u8], access: u32, disp: u32, sync: bool) eff [
+    Ffi[StdFs],
+    Fail[IoError]
+] {
+    let h = open_handle(in path, access, disp);
+    let mut err = write_all_handle(h, in data);
+    if err == 0 && sync {
+        let (fok, ferr) = StdFs::FlushFileBuffers(h);
+        if fok == 0 {
+            err = ferr;
+        }
+    }
+    let _ = StdFs::CloseHandle(h);
+    if err != 0 {
+        raise_io(widen_u64(err))
+    }
+}
+
+pub fn write(in path: Str, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_mode(in path.as_bytes(), in data, StdFs::GENERIC_WRITE, StdFs::CREATE_ALWAYS, false);
+}
+
+pub fn write_path(in path: Slice[u8], in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_mode(in path, in data, StdFs::GENERIC_WRITE, StdFs::CREATE_ALWAYS, false);
+}
+
+pub fn append(in path: Str, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_mode(in path.as_bytes(), in data, StdFs::FILE_APPEND_DATA, 4, false);
+}
+
+pub fn create_new(in path: Str, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_mode(in path.as_bytes(), in data, StdFs::GENERIC_WRITE, StdFs::CREATE_NEW, false);
+}
+
+fn push_hex(inout out: ChunkSeq[u8], n: u64) {
+    let mut shift: u64 = 60;
+    loop {
+        let d = wrapping_u8(wrapping_shr_u64(n, wrapping_u32(shift)) & 15);
+        if d < 10 {
+            out.push(wrapping_add(d, 48));
+        } else {
+            out.push(wrapping_add(d, 87));
+        }
+        if shift == 0 {
+            break;
+        }
+        shift = wrapping_sub(shift, 4);
+    }
+}
+
+fn parent_len(in path: Slice[u8]) -> u64 {
+    let mut i = path.len();
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let b = u8_at(in path, i);
+        if b == 47 || b == 92 {
+            return wrapping_add(i, 1);
+        }
+    }
+    0
+}
+
+pub fn replace(in path: Str, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    replace_path(in path.as_bytes(), in data);
+}
+
+pub fn replace_path(in path: Slice[u8], in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    let wpath = utf8_to_utf16(in path);
+    let cut = parent_len(in path);
+    let pid = widen_u64(StdFs::GetCurrentProcessId());
+    let mut attempt: u64 = 0;
+    let mut temp: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut wtemp: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    let mut h: u64 = StdFs::INVALID_HANDLE_VALUE;
+    loop {
+        temp.clear();
+        temp.extend(in path[0..cut]);
+        temp.push(46);
+        temp.push(118);
+        temp.push(115);
+        temp.push(116);
+        temp.push(45);
+        push_hex(inout temp, wrapping_shl_u64(pid, 32) | attempt);
+        temp.push(46);
+        temp.push(116);
+        temp.push(109);
+        temp.push(112);
+        wtemp = utf8_to_utf16(in temp.as_slice());
+        match StdFs::CreateFileW(
+            in wtemp.as_slice(),
+            StdFs::GENERIC_WRITE,
+            StdFs::FILE_SHARE_ALL,
+            0,
+            StdFs::CREATE_NEW,
+            StdFs::FILE_ATTRIBUTE_NORMAL,
+            0
+        ) {
+            Result::Ok((opened, err)) => {
+                if opened != StdFs::INVALID_HANDLE_VALUE {
+                    h = opened;
+                    break;
+                }
+                if (err == 80 || err == 183) && attempt < 1024 {
+                    attempt = wrapping_add(attempt, 1);
+                    continue;
+                }
+                return raise_io(widen_u64(err));
+            }
+            Result::Err(_) => return raise_kind(invalid_input()),
+        }
+    }
+    let mut err = write_all_handle(h, in data);
+    if err == 0 {
+        let (fok, ferr) = StdFs::FlushFileBuffers(h);
+        if fok == 0 {
+            err = ferr;
+        }
+    }
+    let _ = StdFs::CloseHandle(h);
+    if err == 0 {
+        match StdFs::MoveFileExW(
+            in wtemp.as_slice(),
+            in wpath.as_slice(),
+            StdFs::MOVEFILE_REPLACE_EXISTING
+        ) {
+            Result::Ok((mok, merr)) => {
+                if mok == 0 {
+                    err = merr;
+                }
+            }
+            Result::Err(_) => {
+                let _ = StdFs::DeleteFileW(in wtemp.as_slice());
+                return raise_kind(invalid_input());
+            }
+        }
+    }
+    if err != 0 {
+        let _ = StdFs::DeleteFileW(in wtemp.as_slice());
+        return raise_io(widen_u64(err));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Paths.
+
+fn check_win32(res: Result[(i32, u32), ForeignInvalid]) eff [Fail[IoError]] {
+    match res {
+        Result::Ok((ok, err)) => {
+            if ok == 0 {
+                raise_io(widen_u64(err))
+            }
+        }
+        Result::Err(_) => raise_kind(invalid_input()),
+    }
+}
+
+pub fn rename(in from: Str, in to: Str) eff [Ffi[StdFs], Fail[IoError]] {
+    let wf = utf8_to_utf16(in from.as_bytes());
+    let wt = utf8_to_utf16(in to.as_bytes());
+    check_win32(
+        StdFs::MoveFileExW(in wf.as_slice(), in wt.as_slice(), StdFs::MOVEFILE_REPLACE_EXISTING)
+    );
+}
+
+pub fn remove_file(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
+    let wp = utf8_to_utf16(in path.as_bytes());
+    check_win32(StdFs::DeleteFileW(in wp.as_slice()));
+}
+
+pub fn remove_dir(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
+    let wp = utf8_to_utf16(in path.as_bytes());
+    check_win32(StdFs::RemoveDirectoryW(in wp.as_slice()));
+}
+
+fn find_data_u32(in buf: Slice[u8], off: u64) -> u32 {
+    let b0 = widen_u32(u8_at(in buf, off));
+    let b1 = widen_u32(u8_at(in buf, wrapping_add(off, 1)));
+    let b2 = widen_u32(u8_at(in buf, wrapping_add(off, 2)));
+    let b3 = widen_u32(u8_at(in buf, wrapping_add(off, 3)));
+    b0 | wrapping_shl_u32(b1, 8) | wrapping_shl_u32(b2, 16) | wrapping_shl_u32(b3, 24)
+}
+
+fn find_data_name(in buf: Slice[u8], inout out: ChunkSeq[u16]) {
+    out.clear();
+    let mut i: u64 = 0;
+    loop {
+        if i >= 260 {
+            break;
+        }
+        let off = wrapping_add(44, wrapping_mul(i, 2));
+        let lo = widen_u16(u8_at(in buf, off));
+        let hi = widen_u16(u8_at(in buf, wrapping_add(off, 1)));
+        let cu = lo | wrapping_shl_u16(hi, 8);
+        if cu == 0 {
+            break;
+        }
+        out.push(cu);
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn is_dot_u16(in name: Slice[u16]) -> bool {
+    let n = name.len();
+    let c0 = match name.try_get(0) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    let c1 = match name.try_get(1) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    (n == 1 && c0 == 46) || (n == 2 && c0 == 46 && c1 == 46)
+}
+
+fn remove_dir_all_w(in wpath: Slice[u16]) eff [Ffi[StdFs], Fail[IoError]] {
+    let mut pattern: ChunkSeq[u16] = ChunkSeq::with_capacity[u16](wrapping_add(wpath.len(), 2));
+    pattern.extend(in wpath);
+    pattern.push(92);
+    pattern.push(42);
+    let mut data: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    data.resize(592, 0);
+    let fh = match StdFs::FindFirstFileW(in pattern.as_slice(), inout data.as_slice_mut()) {
+        Result::Ok((h, err)) => {
+            if h == StdFs::INVALID_HANDLE_VALUE {
+                if err == StdFs::ERROR_FILE_NOT_FOUND || err == StdFs::ERROR_NO_MORE_FILES {
+                    check_win32(StdFs::RemoveDirectoryW(in wpath));
+                    return ();
+                }
+                return raise_io(widen_u64(err));
+            }
+            h
+        }
+        Result::Err(_) => return raise_kind(invalid_input()),
+    };
+    let mut cname: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    let mut child: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    let mut walk_err: u32 = 0;
+    loop {
+        find_data_name(in data.as_slice(), inout cname);
+        if !is_dot_u16(in cname.as_slice()) {
+            let attrs = find_data_u32(in data.as_slice(), 0);
+            child.clear();
+            child.extend(in wpath);
+            child.push(92);
+            child.extend(in cname.as_slice());
+            if (attrs & StdFs::FILE_ATTRIBUTE_DIRECTORY) != 0
+                && (attrs & StdFs::FILE_ATTRIBUTE_REPARSE_POINT) == 0 {
+                remove_dir_all_w(in child.as_slice());
+            } else if (attrs & StdFs::FILE_ATTRIBUTE_DIRECTORY) != 0 {
+                let (rok, rerr) = match StdFs::RemoveDirectoryW(in child.as_slice()) {
+                    Result::Ok(x) => x,
+                    Result::Err(_) => (0, 87),
+                };
+                if rok == 0 {
+                    walk_err = rerr;
+                    break;
+                }
+            } else {
+                let (dok, derr) = match StdFs::DeleteFileW(in child.as_slice()) {
+                    Result::Ok(x) => x,
+                    Result::Err(_) => (0, 87),
+                };
+                if dok == 0 {
+                    walk_err = derr;
+                    break;
+                }
+            }
+        }
+        let (nok, nerr) = StdFs::FindNextFileW(fh, inout data.as_slice_mut());
+        if nok == 0 {
+            if nerr != StdFs::ERROR_NO_MORE_FILES {
+                walk_err = nerr;
+            }
+            break;
+        }
+    }
+    let _ = StdFs::FindClose(fh);
+    if walk_err != 0 {
+        return raise_io(widen_u64(walk_err));
+    }
+    check_win32(StdFs::RemoveDirectoryW(in wpath));
+}
+
+pub fn remove_dir_all(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
+    let wp = utf8_to_utf16(in path.as_bytes());
+    remove_dir_all_w(in wp.as_slice());
+}
+
+pub fn create_dir(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
+    let wp = utf8_to_utf16(in path.as_bytes());
+    check_win32(StdFs::CreateDirectoryW(in wp.as_slice(), 0));
+}
+
+pub fn create_dir_all(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
+    create_dir_all_path(in path.as_bytes());
+}
+
+fn ensure_one_dir(in wprefix: Slice[u16]) eff [Ffi[StdFs], Fail[IoError]] {
+    match StdFs::CreateDirectoryW(in wprefix, 0) {
+        Result::Ok((ok, err)) => {
+            if ok != 0 {
+                return ();
+            }
+            if err != 183 && err != 80 {
+                return raise_io(widen_u64(err));
+            }
+            let mut info = Win32FileAttrData {
+                dwFileAttributes: 0,
+                ftCreationTimeLow: 0,
+                ftCreationTimeHigh: 0,
+                ftLastAccessTimeLow: 0,
+                ftLastAccessTimeHigh: 0,
+                ftLastWriteTimeLow: 0,
+                ftLastWriteTimeHigh: 0,
+                nFileSizeHigh: 0,
+                nFileSizeLow: 0,
+            };
+            match StdFs::GetFileAttributesExW(in wprefix, 0, inout info) {
+                Result::Ok((aok, _)) => {
+                    if aok != 0 && (info.dwFileAttributes & StdFs::FILE_ATTRIBUTE_DIRECTORY) != 0 {
+                        return ();
+                    }
+                    raise_io(widen_u64(err))
+                }
+                Result::Err(_) => raise_io(widen_u64(err)),
+            }
+        }
+        Result::Err(_) => raise_kind(invalid_input()),
+    }
+}
+
+pub fn create_dir_all_path(in path: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    let wp = utf8_to_utf16(in path);
+    let n = wp.len();
+    if n == 0 {
+        return ();
+    }
+    let mut i: u64 = 0;
+    // Skip drive prefix like `C:\` or `C:/` so we don't try to CreateDirectory("C:").
+    if n >= 2 {
+        let c1 = match wp.try_get(1) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if c1 == 58 {
+            i = 2;
+        }
+    }
+    loop {
+        if i >= n {
+            break;
+        }
+        loop {
+            if i >= n {
+                break;
+            }
+            let c = match wp.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            if c != 47 && c != 92 {
+                break;
+            }
+            i = wrapping_add(i, 1);
+        }
+        if i >= n {
+            break;
+        }
+        loop {
+            if i >= n {
+                break;
+            }
+            let c = match wp.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            if c == 47 || c == 92 {
+                break;
+            }
+            i = wrapping_add(i, 1);
+        }
+        ensure_one_dir(in wp[0..i]);
+    }
+}
+
+fn filetime_to_unix(lo: u32, hi: u32) -> (i64, u32) {
+    let ticks = wrapping_shl_u64(widen_u64(hi), 32) | widen_u64(lo);
+    let epoch: u64 = 116444736000000000;
+    if ticks < epoch {
+        return (0, 0);
+    }
+    let rel = wrapping_sub(ticks, epoch);
+    handle Fail[RuntimeError] in {
+        let sec = rel / 10000000;
+        let rem = rel % 10000000;
+        (wrapping_i64(sec), wrapping_u32(wrapping_mul(rem, 100)))
+    } with {
+        return v => v,
+        raise(_, _) => (0, 0),
+    }
+}
+
+fn meta_path(in path: Slice[u8], follow: bool) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
+    let wp = utf8_to_utf16(in path);
+    let mut info = Win32FileAttrData {
+        dwFileAttributes: 0,
+        ftCreationTimeLow: 0,
+        ftCreationTimeHigh: 0,
+        ftLastAccessTimeLow: 0,
+        ftLastAccessTimeHigh: 0,
+        ftLastWriteTimeLow: 0,
+        ftLastWriteTimeHigh: 0,
+        nFileSizeHigh: 0,
+        nFileSizeLow: 0,
+    };
+    match StdFs::GetFileAttributesExW(in wp.as_slice(), 0, inout info) {
+        Result::Ok((ok, err)) => {
+            if ok == 0 {
+                return raise_io(widen_u64(err));
+            }
+            let size = wrapping_shl_u64(widen_u64(info.nFileSizeHigh), 32) | widen_u64(
+                info.nFileSizeLow
+            );
+            let (ms, mns) = filetime_to_unix(info.ftLastWriteTimeLow, info.ftLastWriteTimeHigh);
+            let kind = if !follow
+                && (info.dwFileAttributes & StdFs::FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+                kind_symlink()
+            } else if (info.dwFileAttributes & StdFs::FILE_ATTRIBUTE_DIRECTORY) != 0 {
+                kind_dir()
+            } else {
+                kind_file()
+            };
+            Metadata {
+                size: size,
+                mtime_s: ms,
+                mtime_ns: mns,
+                kind: kind,
+            }
+        }
+        Result::Err(_) => raise_kind(invalid_input()),
+    }
+}
+
+pub fn metadata(in path: Str) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
+    meta_path(in path.as_bytes(), true)
+}
+
+pub fn metadata_path(in path: Slice[u8]) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
+    meta_path(in path, true)
+}
+
+pub fn symlink_metadata(in path: Str) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
+    meta_path(in path.as_bytes(), false)
+}
+
+pub fn exists(in path: Str) -> bool eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        let _ = metadata(in path);
+        true
+    } with {
+        return v => v,
+        raise(_, _) => false,
+    }
+}

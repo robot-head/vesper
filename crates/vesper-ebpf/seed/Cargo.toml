@@ -18,7 +18,7 @@ build = false
 # code takes bug fixes only until self-hosting Stage 2.
 [lib]
 name = "vesper_ebpf"
-path = "../src/lib.rs"
+path = "src/lib.rs"
 
 [dependencies]
 object = { version = "=0.37.3", default-features = false, features = ["write_core", "elf", "std", "read_core"] }
@@ -31,5 +31,5 @@ libc = "0.2.177"
 # test file against it and against the port (--features vesper-port).
 
 [lints.rust]
-# cfg(vesper_port) is set only by the port-backed package's build script.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }
+# cfg(vesper_port) and feature = "vesper-port" are set only on the port-backed package.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)", 'cfg(feature, values("vesper-port"))'] }

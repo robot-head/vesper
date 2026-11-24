@@ -39,6 +39,9 @@ pub use self::session::{
     session_open,
     session_solve
 };
+use self::builtin_traits::{
+    builtin_derive_words
+};
 use self::mono_check::{
     mono_check_words
 };
@@ -57,6 +60,11 @@ use self::session::{
 // Task "mono_plan" (part 6): `Mono::evidence`, `Mono::instance`, `Mono::instantiate_body`.
 pub fn check_pact_mono_plan(in input: Str) -> ChunkSeq[u64] {
     mono_plan_words(in input.as_bytes())
+}
+
+// Task "builtin_derive" (part 4): `builtin_traits::derivable` + derived `impl`s.
+pub fn check_pact_builtin_derive(in input: Str) -> ChunkSeq[u64] {
+    builtin_derive_words(in input.as_bytes())
 }
 
 // Task "mono_check" (part 5): `Mono::close_bounded` and `Mono::check_obligations`.

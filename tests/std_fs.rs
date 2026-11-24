@@ -619,7 +619,7 @@ fn walks_are_sorted_by_path_bytes() {
         "a.b",
         "a/b.x",
         "c",
-        "B",
+        "B.txt",
         "a/b/c/e/f.ves",
         &format!("a/{long}"),
     ] {

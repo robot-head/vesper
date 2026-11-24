@@ -1,8 +1,10 @@
-//! The host side of `@vesper-std/fs`, `@vesper-std/process` and
-//! `@vesper-std/env` (self-hosting wave SH0 lane 3, #1125).
+//! The Windows host side of `@vesper-std/fs` and `@vesper-std/process`
+//! (self-hosting wave SH0 lane 3, #1125). On Linux and macOS both
+//! packages, and `@vesper-std/env` everywhere, call the system itself
+//! (SH6 lane 13, #1408).
 //!
-//! Each package imports one `.vsys` library (`StdFs`, `StdProcess`,
-//! `StdEnv`, in `packages/vesper-std/<pkg>/<pkg>.vsys`) whose functions are
+//! Each package imports one `.vsys` library (`StdFs`, `StdProcess`, in
+//! `packages/vesper-std/<pkg>/<pkg>-windows*.vsys`) whose functions are
 //! the `extern "C"` functions of this crate. Vesper code calls them through
 //! `Ffi[StdFs]` and friends; the JIT binds them through [`symbols`], an
 //! object links them by name.
@@ -23,8 +25,6 @@
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
-pub mod env;
-pub mod fs;
 pub mod process;
 
 /// The error kinds an I/O call reports, as `IoError.kind` in Vesper
@@ -231,8 +231,5 @@ pub(crate) unsafe fn free_handle<T>(kind: HandleKind, h: *mut T) -> T {
 /// Every host function, by its `.vsys` symbol, for
 /// `ForeignChecked::jit` (the JIT never resolves symbols from the process).
 pub fn symbols() -> Vec<(&'static str, *const u8)> {
-    let mut out = fs::symbols();
-    out.extend(process::symbols());
-    out.extend(env::symbols());
-    out
+    process::symbols()
 }

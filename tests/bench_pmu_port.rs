@@ -7,6 +7,25 @@ mod std_io_support;
 use std_io_support::{MODES, Temp, agree};
 use vesper::{ffi_lowering, packages};
 
+fn pmu_imports() -> ffi_lowering::Imports {
+    let (triple, abi) = packages::vsys_target(None).expect("host target");
+    let os = if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "windows"
+    };
+    let path = format!("crates/vesper-bench-pmu/vesper/perf-{os}.vsys");
+    let text = std::fs::read_to_string(&path).expect("read perf .vsys");
+    let text = text.replace("@TARGET@", triple).replace("@ABI@", abi);
+    let mut imports = ffi_lowering::Imports::new();
+    imports
+        .add(&text, ffi_lowering::Handler::Direct)
+        .expect("import perf .vsys");
+    imports
+}
+
 fn check_pmu_driver(source: &str) -> ffi_lowering::ForeignChecked {
     let dir = Temp::new("bench-pmu-port");
     let pmu_pkg = std::fs::canonicalize("crates/vesper-bench-pmu/vesper").unwrap();
@@ -27,7 +46,7 @@ fn check_pmu_driver(source: &str) -> ffi_lowering::ForeignChecked {
         assembled.diagnostics,
         assembled.manifest_errors
     );
-    ffi_lowering::check_module(&assembled.module, &ffi_lowering::Imports::new())
+    ffi_lowering::check_module(&assembled.module, &pmu_imports())
         .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics))
 }
 
@@ -176,4 +195,109 @@ pub fn check_seqlock() -> u64 {
 "#;
     let checked = check_pmu_driver(src);
     assert_eq!(agree(&checked, "check_seqlock", &MODES), 1);
+}
+
+#[test]
+fn sysfs_event_encoder_matches() {
+    let src = r#"
+use @vesper/bench-pmu::{format_table_new, format_table_add, encode_sysfs_event};
+
+pub fn check_encode() -> u64 {
+    let mut t = format_table_new();
+    if !format_table_add(inout t, in "event".as_bytes(), in "config:0-7".as_bytes()) {
+        return 0;
+    }
+    if !format_table_add(inout t, in "umask".as_bytes(), in "config:8-15".as_bytes()) {
+        return 0;
+    }
+    if !format_table_add(inout t, in "edge".as_bytes(), in "config:18".as_bytes()) {
+        return 0;
+    }
+    if !format_table_add(inout t, in "ldlat".as_bytes(), in "config1:0-15".as_bytes()) {
+        return 0;
+    }
+
+    let (c0, c1) = match encode_sysfs_event(
+        in "event=0x3c,umask=0x01,edge,ldlat=12".as_bytes(),
+        in t
+    ) {
+        Option::Some(v) => v,
+        Option::None => return 0,
+    };
+    // 0x3c | (0x01 << 8) | (1 << 18) = 60 + 256 + 262144 = 262460
+    if c0 != 262460 || c1 != 12 {
+        return 0;
+    }
+    // Unknown term must fail
+    match encode_sysfs_event(in "bogus=1".as_bytes(), in t) {
+        Option::Some(_) => 0,
+        Option::None => 1,
+    }
+}
+"#;
+    let checked = check_pmu_driver(src);
+    assert_eq!(agree(&checked, "check_encode", &MODES), 1);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_perf_group_probe_or_unavailable() {
+    if !std_io_support::jit_host() {
+        return;
+    }
+    use std::ffi::c_void;
+    unsafe extern "C" {
+        fn syscall(nr: i64, ...) -> i64;
+        fn ioctl(fd: i32, req: u64, ...) -> i32;
+        fn read(fd: i32, buf: *mut c_void, count: usize) -> isize;
+        fn close(fd: i32) -> i32;
+        fn getpid() -> i32;
+        fn mmap(
+            addr: *mut c_void,
+            len: usize,
+            prot: i32,
+            flags: i32,
+            fd: i32,
+            off: i64,
+        ) -> *mut c_void;
+        fn munmap(addr: *mut c_void, len: usize) -> i32;
+    }
+    let syms: Vec<(&'static str, *const u8)> = vec![
+        ("syscall", syscall as *const u8),
+        ("ioctl", ioctl as *const u8),
+        ("read", read as *const u8),
+        ("close", close as *const u8),
+        ("getpid", getpid as *const u8),
+        ("mmap", mmap as *const u8),
+        ("munmap", munmap as *const u8),
+    ];
+    let sys_nr: i64 = if cfg!(target_arch = "x86_64") {
+        298
+    } else {
+        241
+    };
+    let src = format!(
+        r#"
+use @vesper/bench-pmu::{{perf_group_open, perf_group_enable, perf_group_disable_and_read, perf_group_close}};
+
+pub fn probe_group() -> u64 eff [Ffi[PerfSys]] {{
+    match perf_group_open({sys_nr}) {{
+        Option::None => 1,
+        Option::Some(g) => {{
+            let ok = perf_group_enable(in g);
+            let mut sum: u64 = 0;
+            for i in 0..1000 {{
+                sum = wrapping_add(sum, i);
+            }}
+            let r = perf_group_disable_and_read(in g);
+            perf_group_close(g);
+            if ok && r.ok && sum > 0 {{ 2 }} else {{ 1 }}
+        }}
+    }}
+}}
+"#
+    );
+    let checked = check_pmu_driver(&src);
+    let got = std_io_support::word(&checked.jit("probe_group", &syms).unwrap());
+    assert!(got == 1 || got == 2, "unexpected probe result {got}");
 }

@@ -46,6 +46,7 @@ pub use {
 
 pub mod extras;
 pub mod lend;
+pub mod seq_extras;
 pub use extras::{
     vcl_define_function_bytes, vcl_module_data_at, vcl_module_data_count, vcl_module_data_linkage,
     vcl_module_data_name, vcl_module_function_at, vcl_module_function_linkage,
@@ -56,6 +57,10 @@ pub use lend::{
     Crossing, lend, lend_as, lend_module, lend_module_as, vcl_call_arg, vcl_call_arg_count,
     vcl_call_args, vcl_call_builder, vcl_call_module, vcl_call_op, vcl_call_result,
     vcl_call_return_builder, vcl_call_return_module,
+};
+pub use seq_extras::{
+    vcl_call_memmove, vcl_call_memset, vcl_declare_anonymous_data, vcl_has_x86_pshufb_lowering,
+    vcl_isa_triple_arch,
 };
 
 use cranelift_codegen::ir::{
@@ -1773,6 +1778,39 @@ pub unsafe extern "C" fn vcl_atomic_store(b: *mut Builder, fl: u32, x: u32, addr
     })
 }
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_atomic_cas(
+    b: *mut Builder,
+    fl: u32,
+    addr: u32,
+    expected: u32,
+    replacement: u32,
+) -> u32 {
+    with_builder(b, INVALID, |b| {
+        let f = flags(fl)?;
+        let v = b
+            .fb()
+            .ins()
+            .atomic_cas(f, value(addr), value(expected), value(replacement));
+        Ok(defined(b, v))
+    })
+}
+/// Splits a 128-bit integer into `(lo, hi)`: returns `lo`; `hi` is
+/// `vcl_inst_result(b, 1)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_isplit(b: *mut Builder, x: u32) -> u32 {
+    with_builder(b, INVALID, |b| {
+        let (lo, _hi) = b.fb().ins().isplit(value(x));
+        Ok(defined(b, lo))
+    })
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_iconcat(b: *mut Builder, lo: u32, hi: u32) -> u32 {
+    with_builder(b, INVALID, |b| {
+        let v = b.fb().ins().iconcat(value(lo), value(hi));
+        Ok(defined(b, v))
+    })
+}
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vcl_func_addr(b: *mut Builder, ty_code: u32, fref: u32) -> u32 {
     with_builder(b, INVALID, |b| {
         let t = ty(ty_code)?;
@@ -2460,6 +2498,9 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         vcl_atomic_rmw,
         vcl_atomic_load,
         vcl_atomic_store,
+        vcl_atomic_cas,
+        vcl_isplit,
+        vcl_iconcat,
         vcl_func_addr,
         vcl_symbol_value,
         vcl_global_value,
@@ -2515,5 +2556,10 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         vcl_module_last_relocs,
         vcl_module_last_call_sites,
         vcl_module_last_frame_size,
+        vcl_declare_anonymous_data,
+        vcl_call_memset,
+        vcl_call_memmove,
+        vcl_isa_triple_arch,
+        vcl_has_x86_pshufb_lowering,
     ]
 }

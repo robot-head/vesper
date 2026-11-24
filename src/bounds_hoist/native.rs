@@ -25,6 +25,39 @@ impl<M: Module> Codegen<'_, '_, M> {
             SeqOp::BoundsGuard { inclusive, form } => {
                 let (lo, hi) = (arg(0)?, arg(1)?);
                 let ty = arg_types.get(2).ok_or("bounds guard lacks its sequence")?;
+                if self.seq_hook_active() {
+                    let (is_seq, inv, _, c0, c1, c2, _) = self.seq_cached_view(arg(2)?, ty);
+                    let (np, nm) = (usize::from(form.plus), usize::from(form.minus));
+                    let ok = args.get(3 + np + nm).copied();
+                    let mut req = Vec::with_capacity(14 + np + nm);
+                    req.extend_from_slice(&[
+                        u64::from(inclusive),
+                        u64::from(is_seq),
+                        u64::from(inv),
+                        u64::from(form.negated),
+                        u64::from(ok.is_some()),
+                        crate::codegen_swap::word(lo),
+                        crate::codegen_swap::word(hi),
+                        crate::codegen_swap::word(arg(2)?),
+                        ok.map_or(0, crate::codegen_swap::word),
+                        c0,
+                        c1,
+                        c2,
+                        np as u64,
+                        nm as u64,
+                    ]);
+                    for k in 0..np {
+                        req.push(crate::codegen_swap::word(arg(3 + k)?));
+                    }
+                    for k in 0..nm {
+                        req.push(crate::codegen_swap::word(arg(3 + np + k)?));
+                    }
+                    if let Some(res) =
+                        self.seq_swap_req(crate::codegen_swap::seq::BOUNDS_GUARD, &req)?
+                    {
+                        return crate::codegen_swap::value_of(&res).map(Some);
+                    }
+                }
                 let (_, _, len) = self.seq_view(arg(2)?, ty);
                 let (np, nm) = (usize::from(form.plus), usize::from(form.minus));
                 let plus: Vec<ir::Value> = (0..np).map(|k| arg(3 + k)).collect::<Result<_, _>>()?;
@@ -78,6 +111,49 @@ impl<M: Module> Codegen<'_, '_, M> {
                     .ok_or("native hoisted access lacks its element type")?;
                 let elem = crate::numeric::default_type(&elem);
                 let stride = self.seq_stride(&elem)?;
+                if self.seq_hook_active() {
+                    use crate::codegen_swap::{seq as sops, value_of, word};
+                    let (is_seq, inv, h_inv, c0, c1, c2, cdata) = self.seq_cached_view(arg(0)?, ty);
+                    let desc = self.seq_elem_desc(&elem)?;
+                    let (kind, val) = match access {
+                        Access::Get => (sops::HOIST_GET, 0),
+                        Access::Set => (sops::HOIST_SET, word(arg(2)?)),
+                        Access::TryGet => (sops::HOIST_TRY_GET, 0),
+                        Access::TrySet => (sops::HOIST_TRY_SET, word(arg(2)?)),
+                    };
+                    let mut req = vec![
+                        kind,
+                        u64::from(is_seq),
+                        u64::from(inv),
+                        u64::from(h_inv),
+                        u64::from(self.operands_only),
+                        word(arg(0)?),
+                        word(arg(1)?),
+                        val,
+                        c0,
+                        c1,
+                        c2,
+                        cdata,
+                        desc[0],
+                        desc[1],
+                        desc[2],
+                    ];
+                    let meta = if access == Access::TryGet {
+                        let option = Type::Named("Option".into(), vec![elem.clone()]);
+                        let m = self.seq_option_meta_for(&option, &elem)?;
+                        req.extend_from_slice(&m);
+                        Some(m)
+                    } else {
+                        None
+                    };
+                    if let Some(res) = self.seq_swap_req(sops::HOISTED_ACCESS, &req)? {
+                        return if let Some(m) = meta {
+                            self.seq_option_finish_swap(&res, m).map(Some)
+                        } else {
+                            value_of(&res).map(Some)
+                        };
+                    }
+                }
                 let (h, start, _) = self.seq_view(arg(0)?, ty);
                 let i = arg(1)?;
                 Ok(Some(match access {
@@ -220,6 +296,15 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// caller, and a sequence's header block outlives every view of it), so
     /// the load cannot trap and may move.
     pub(super) fn invariant_word(&mut self, ptr: ir::Value, offset: i32) -> ir::Value {
+        if self.seq_hook_active()
+            && let Some(res) = self.seq_swap_req_or_record(
+                crate::codegen_swap::seq::INVARIANT_WORD,
+                &[crate::codegen_swap::word(ptr), offset as i64 as u64],
+            )
+            && let Some(v) = crate::codegen_swap::value_or_record(&res)
+        {
+            return v;
+        }
         let flags = MemFlags::trusted().with_readonly().with_can_move();
         self.b.ins().load(types::I64, flags, ptr, offset)
     }

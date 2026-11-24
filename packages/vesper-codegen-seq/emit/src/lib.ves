@@ -9,8 +9,9 @@
 // made in the order the Rust emitter makes them, so the object bytes are
 // the same.
 //
-// `seq_hook` declines every other request, `INSTRUCTION` included, and the
-// Rust code emits those.
+// `seq_hook` declines `INSTRUCTION` (0) so the Rust `Codegen` resolves
+// places/types/cached header words and dispatches typed `codegen_swap::seq`
+// ops (`RUNTIME` through `DROP_OP`) into `@vesper/codegen-seq-emit`.
 
 use @vesper/cranelift::{
     Block,
@@ -90,6 +91,18 @@ pub const DECLINED: u64 = 0;
 
 // The `seq` family's helper ops (`codegen_swap::seq`).
 pub const RUNTIME: u32 = 1;
+pub const STRING_LITERAL: u32 = 2;
+pub const STR_OP: u32 = 3;
+pub const STR_COMPARE: u32 = 4;
+pub const BOUNDS_GUARD: u32 = 5;
+pub const HOISTED_ACCESS: u32 = 6;
+pub const INVARIANT_WORD: u32 = 7;
+pub const EMPTY_HEADER: u32 = 8;
+pub const SEQ_OP: u32 = 9;
+pub const BYTE_OP: u32 = 10;
+pub const FUSED_TRY_GET: u32 = 11;
+pub const FUSED_CONDITION: u32 = 12;
+pub const DROP_OP: u32 = 13;
 
 // `MemFlags::new()`.
 const PLAIN: u32 = 0;
@@ -662,11 +675,48 @@ fn define_runtime(call: u64, inout m: Module) -> bool eff [Ffi[Cranelift]] {
 }
 
 // One `seq` request on the lent handles.
-fn seq(call: u64, inout m: Module) -> u64 eff [Ffi[Cranelift]] {
-    if call_op(call) == RUNTIME {
+fn seq(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[Cranelift]] {
+    let op = call_op(call);
+    if op == RUNTIME {
         // A failed definition leaves its error on the module, which the
         // host reports.
         define_runtime(call, inout m);
+        return HANDLED;
+    } else if op == STRING_LITERAL {
+        self::strings::emit_string_literal(call, inout b, inout m);
+        return HANDLED;
+    } else if op == STR_OP {
+        self::strings::emit_str_op(call, inout b, inout m);
+        return HANDLED;
+    } else if op == STR_COMPARE {
+        self::strings::emit_str_compare(call, inout b);
+        return HANDLED;
+    } else if op == BOUNDS_GUARD {
+        self::hoist::emit_bounds_guard(call, inout b);
+        return HANDLED;
+    } else if op == HOISTED_ACCESS {
+        self::hoist::emit_hoisted_access(call, inout b, in m);
+        return HANDLED;
+    } else if op == INVARIANT_WORD {
+        self::hoist::emit_invariant_word(call, inout b);
+        return HANDLED;
+    } else if op == EMPTY_HEADER {
+        self::seq_ops::emit_empty_header(call, inout b, inout m);
+        return HANDLED;
+    } else if op == SEQ_OP {
+        self::seq_ops::emit_seq_op(call, inout b, inout m);
+        return HANDLED;
+    } else if op == BYTE_OP {
+        self::bytes::emit_byte_op(call, inout b, in m);
+        return HANDLED;
+    } else if op == FUSED_TRY_GET {
+        self::drops::emit_fused_try_get(call, inout b);
+        return HANDLED;
+    } else if op == FUSED_CONDITION {
+        self::drops::emit_fused_condition(call, inout b);
+        return HANDLED;
+    } else if op == DROP_OP {
+        self::drops::emit_drop_op(call, inout b, inout m);
         return HANDLED;
     }
     DECLINED
@@ -674,7 +724,7 @@ fn seq(call: u64, inout m: Module) -> u64 eff [Ffi[Cranelift]] {
 
 // The `seq` hook.
 pub fn seq_hook(call: u64) -> u64 eff [Ffi[Cranelift]] {
-    let b = match call_builder(call) {
+    let mut b = match call_builder(call) {
         Some(b) => b,
         None => return DECLINED,
     };
@@ -685,7 +735,7 @@ pub fn seq_hook(call: u64) -> u64 eff [Ffi[Cranelift]] {
             return DECLINED;
         }
     };
-    let handled = seq(call, inout m);
+    let handled = seq(call, inout b, inout m);
     call_return_module(call, m);
     call_return_builder(call, b);
     handled

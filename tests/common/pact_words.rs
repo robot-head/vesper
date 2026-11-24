@@ -573,6 +573,91 @@ pub fn decode_resolve_outcomes(
     (diagnostics, true, outcomes)
 }
 
+/// Encodes a module's structs, canonical impls, and struct-owned bounds for
+/// `check_pact_builtin_derive`.
+pub fn encode_builtin_derive(m: &Module, base: &World) -> Option<Vec<u8>> {
+    let mut e = Enc::default();
+    let mut t = vec![];
+
+    let mut structs = vec![];
+    let mut confs = vec![];
+    for item in &m.items {
+        match item {
+            Item::Adt(a) => structs.push(a),
+            Item::Conformance(c) => confs.push(c),
+            _ => {}
+        }
+    }
+
+    t.push(structs.len() as u64);
+    for a in &structs {
+        t.push(e.name(&a.name));
+        t.push(mode_word(a.mode));
+        t.push(u64::from(a.is_enum));
+        t.push(a.generics.len() as u64);
+        for g in &a.generics {
+            t.push(e.name(&g.name));
+            t.push(mode_word(g.bound));
+            t.push(u64::from(g.row));
+        }
+        let fields: Vec<&vesper::ast::Field> = if a.is_enum || a.variants.is_empty() {
+            vec![]
+        } else {
+            a.variants[0].fields.iter().collect()
+        };
+        t.push(fields.len() as u64);
+        for f in fields {
+            t.push(e.name(&f.name));
+            t.push(e.ty(&f.ty));
+        }
+    }
+
+    t.push(confs.len() as u64);
+    for c in &confs {
+        t.push(u64::from(c.kind == vesper::ast::ConformanceKind::Canonical));
+        t.push(u64::from(c.trait_ref.package.is_none()));
+        t.push(e.name(&c.trait_ref.name));
+        t.push(c.trait_ref.args.len() as u64);
+        t.push(e.ty(&c.self_ty));
+        t.push(c.generics.len() as u64);
+        for g in &c.generics {
+            t.push(e.name(&g.name));
+            t.push(mode_word(g.bound));
+            t.push(u64::from(g.row));
+        }
+        t.push(u64::from(!c.where_clauses.is_empty()));
+        t.push(u64::from(c.methods.is_empty() && c.assoc.is_empty()));
+        t.push(c.span.start as u64);
+        t.push(c.span.end as u64);
+    }
+
+    t.push(m.trait_bounds.len() as u64);
+    for b in &m.trait_bounds {
+        t.push(e.name(&b.owner));
+        t.push(e.name(&b.param));
+        t.push(e.name(&b.trait_ref.name));
+        t.push(b.trait_ref.args.len() as u64);
+        for a in &b.trait_ref.args {
+            t.push(e.ty(a));
+        }
+    }
+
+    let w = e.world(base);
+    Some(e.finish(&w, &t))
+}
+
+pub fn decode_builtin_derive(words: &[u64]) -> (Vec<Diagnostic>, bool, String) {
+    let (diag_text, mut at) = decode_packed_text_at(words, 0);
+    let diagnostics = decode_session_text(&diag_text);
+    let ok = words.get(at).copied().unwrap_or(0) != 0;
+    at += 1;
+    if !ok {
+        return (diagnostics, false, String::new());
+    }
+    let (impls, _) = decode_packed_text_at(words, at);
+    (diagnostics, true, impls)
+}
+
 pub fn encode_mono_check_input(
     outcome: &vesper::pact_frontend::MonoCheckOutcome,
     pkg_name: &str,

@@ -1,0 +1,96 @@
+// `vesper graph`: CLI option parsing and `--help` in Vesper, delegating
+// `Loom.lock` snapshot validation, projection, and text/JSON/DOT rendering
+// (`src/package_graph.rs`) to `HybridCommands::hc_graph_run`.
+use @vesper/driver::{
+    Args,
+    args_count,
+    eq
+};
+use super::{
+    arg,
+    byte_at,
+    print,
+    fail,
+    stdout_stream
+};
+
+pub fn run_graph(in args: Args) -> i64 eff [Ffi[HybridCommands]] {
+    let n = args_count(in args);
+    let mut has_input = false;
+    let mut input: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut has_focus = false;
+    let mut focus: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut invert = false;
+    let mut json = false;
+    let mut dot = false;
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a_buf = arg(in args, i);
+        let a = a_buf.as_slice();
+        if eq(in a, in "--help") || eq(in a, in "-h") {
+            print(
+                stdout_stream(),
+                in "Usage: vesper graph [Loom.lock] [--package @org/name] [--invert] [--json|--dot]\n\nInspect declared snapshot metadata without resolving, executing or modifying files.\n--package selects a reachable package and its dependency closure.\n--invert follows dependents instead, and reverses drawn arrows.\n--json emits the versioned inspection report; --dot emits Graphviz DOT.\n"
+                    .as_bytes()
+            );
+            return 0;
+        } else if eq(in a, in "--package") {
+            if has_focus {
+                return fail(in "--package may only be specified once".as_bytes());
+            }
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail(in "--package requires a package name".as_bytes());
+            }
+            let v_buf = arg(in args, i);
+            has_focus = true;
+            focus.extend(in v_buf.as_slice());
+        } else if eq(in a, in "--invert") {
+            invert = true;
+        } else if eq(in a, in "--json") {
+            json = true;
+        } else if eq(in a, in "--dot") {
+            dot = true;
+        } else if a.len() != 0 && byte_at(in a, 0) == 45 {
+            let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            err.extend(in "unknown graph option '".as_bytes());
+            err.extend(in a);
+            err.push(39);
+            return fail(in err.as_slice());
+        } else {
+            if has_input {
+                return fail(in "graph accepts one solution snapshot".as_bytes());
+            }
+            has_input = true;
+            input.extend(in a);
+        }
+        i = wrapping_add(i, 1);
+    }
+    if !has_input {
+        input.extend(in "Loom.lock".as_bytes());
+    }
+    let err_len = HybridCommands::hc_graph_run(
+        in input.as_slice(),
+        has_focus,
+        in focus.as_slice(),
+        invert,
+        json,
+        dot
+    );
+    if err_len == 0 {
+        return 0;
+    }
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    err.resize(err_len, 0);
+    let actual = HybridCommands::hc_graph_err(inout err.as_slice_mut());
+    if actual > err.len() {
+        err.resize(actual, 0);
+        let _got = HybridCommands::hc_graph_err(inout err.as_slice_mut());
+    } else {
+        err.truncate(actual);
+    }
+    fail(in err.as_slice())
+}

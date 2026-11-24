@@ -38,7 +38,7 @@ fn corpus_verdicts() {
 #[test]
 fn every_rule_is_covered() {
     let covered: BTreeSet<&str> = corpus().iter().filter_map(|c| c.rule).collect();
-    let src = include_str!("../src/verifier.rs");
+    let src = include_str!("../seed/src/engine/verifier.rs");
     let mut rules = BTreeSet::new();
     for (i, _) in src.match_indices('"') {
         let rest = &src[i + 1..];
