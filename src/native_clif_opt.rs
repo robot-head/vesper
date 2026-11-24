@@ -3833,14 +3833,10 @@ fn propagate_branch_conditions(func: &mut ir::Function) {
 
         if let Some(children) = dom_children.get(&block) {
             for (idx, &child) in children.iter().enumerate() {
-                let mut child_known = if cfg.pred_iter(child).count() == 1 {
-                    if idx + 1 == children.len() {
-                        std::mem::take(&mut known)
-                    } else {
-                        known.clone()
-                    }
+                let mut child_known = if idx + 1 == children.len() {
+                    std::mem::take(&mut known)
                 } else {
-                    HashMap::new()
+                    known.clone()
                 };
                 for &(eb, cond, val) in &edge_facts {
                     if eb == child {
@@ -4129,16 +4125,17 @@ fn classify_seq_store(
 
 fn reuse_seq_header_loads(func: &mut ir::Function) {
     let seq_handles = collect_verified_seq_handles(func);
-    if seq_handles.is_empty() {
-        return;
-    }
 
     let mut cfg = ControlFlowGraph::with_function(func);
     let mut domtree = DominatorTree::with_function(func, &cfg);
     let mut loops = LoopAnalysis::new();
     loops.compute(func, &cfg, &domtree);
 
-    let all_loops: Vec<Loop> = loops.loops().collect();
+    let all_loops: Vec<Loop> = if seq_handles.is_empty() {
+        Vec::new()
+    } else {
+        loops.loops().collect()
+    };
     let rpo_blocks: Vec<Block> = domtree.cfg_postorder().iter().rev().copied().collect();
     for lp in all_loops {
         let header = loops.loop_header(lp);
@@ -4328,28 +4325,50 @@ fn reuse_seq_header_loads(func: &mut ir::Function) {
         entry.1.extend(written_fields);
     }
 
+    let block_has_side_effect: HashSet<Block> = func
+        .layout
+        .blocks()
+        .filter(|&b| {
+            func.layout.block_insts(b).any(|inst| {
+                matches!(
+                    func.dfg.insts[inst].opcode(),
+                    Opcode::Call
+                        | Opcode::CallIndirect
+                        | Opcode::Store
+                        | Opcode::Istore8
+                        | Opcode::Istore16
+                        | Opcode::Istore32
+                )
+            })
+        })
+        .collect();
+
     let Some(entry) = func.layout.entry_block() else {
         return;
     };
-    fn walk_dom(
-        func: &mut ir::Function,
-        block: Block,
-        cfg: &ControlFlowGraph,
-        dom_children: &HashMap<Block, Vec<Block>>,
-        header_clobbers: &HeaderClobbers,
-        seq_handles: &HashSet<Value>,
-        mut avail: HashMap<(Value, i64), Value>,
-    ) {
+    type AvailLoads = HashMap<(Value, i64), Value>;
+    let mut stack: Vec<(Block, AvailLoads)> = vec![(entry, AvailLoads::new())];
+    while let Some((block, mut avail)) = stack.pop() {
         if cfg.pred_iter(block).count() > 1 {
-            avail.clear();
+            let all_preds_clean = domtree.idom(block).is_some_and(|idom| {
+                cfg.pred_iter(block).all(|p| {
+                    p.block == idom
+                        || (domtree.idom(p.block) == Some(idom)
+                            && !block_has_side_effect.contains(&p.block))
+                })
+            });
+            if !all_preds_clean {
+                avail.clear();
+            }
         } else if let Some((clobber_all, written_fields)) = header_clobbers.get(&block) {
             if *clobber_all {
                 avail.clear();
             } else {
                 avail.retain(|&(b, o), _| {
-                    !written_fields
-                        .iter()
-                        .any(|&(p, po)| p == b && (po - o).abs() < 8)
+                    seq_handles.contains(&b)
+                        || written_fields
+                            .iter()
+                            .all(|&(p, po)| b == p && (po - o).abs() >= 8)
                 });
             }
         }
@@ -4359,10 +4378,21 @@ fn reuse_seq_header_loads(func: &mut ir::Function) {
             match func.dfg.insts[inst].opcode() {
                 Opcode::Call | Opcode::CallIndirect => avail.clear(),
                 Opcode::Store | Opcode::Istore8 | Opcode::Istore16 | Opcode::Istore32 => {
-                    match classify_seq_store(func, inst, seq_handles) {
+                    match classify_seq_store(func, inst, &seq_handles) {
                         SeqStoreKind::SeqElem | SeqStoreKind::StackSlot => {}
                         SeqStoreKind::ParamField(p, o) => {
-                            avail.retain(|&(b, bo), _| !(b == p && (bo - o).abs() < 8));
+                            avail.retain(|&(b, bo), _| {
+                                (b == p && (bo - o).abs() >= 8) || seq_handles.contains(&b)
+                            });
+                            if let InstructionData::Store {
+                                opcode: Opcode::Store,
+                                args: [val, _],
+                                ..
+                            } = func.dfg.insts[inst]
+                                && func.dfg.value_type(val) == types::I64
+                            {
+                                avail.insert((p, o), func.dfg.resolve_aliases(val));
+                            }
                         }
                         SeqStoreKind::Unknown => avail.clear(),
                     }
@@ -4404,27 +4434,14 @@ fn reuse_seq_header_loads(func: &mut ir::Function) {
         }
 
         if let Some(children) = dom_children.get(&block) {
-            for &child in children {
-                walk_dom(
-                    func,
-                    child,
-                    cfg,
-                    dom_children,
-                    header_clobbers,
-                    seq_handles,
-                    avail.clone(),
-                );
+            for (idx, &child) in children.iter().enumerate() {
+                let child_avail = if idx + 1 == children.len() {
+                    std::mem::take(&mut avail)
+                } else {
+                    avail.clone()
+                };
+                stack.push((child, child_avail));
             }
         }
     }
-
-    walk_dom(
-        func,
-        entry,
-        &cfg,
-        &dom_children,
-        &header_clobbers,
-        &seq_handles,
-        HashMap::new(),
-    );
 }

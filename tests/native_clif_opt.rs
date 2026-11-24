@@ -884,3 +884,49 @@ fn main() -> u64 {
         "expected `tag == 1` branch to thread away:\n{fn_clif}"
     );
 }
+
+#[test]
+fn seq_header_loads_reuse_across_clean_try_get_diamond() {
+    let source = "
+struct Bag { s: ChunkSeq[u64] }
+
+fn bump(inout b: Bag, i: u64) -> u64 {
+    let v = match b.s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    let _ = b.s.try_set(i, wrapping_add(v, 1));
+    v
+}
+
+fn main() -> u64 {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new();
+    s.push(10);
+    s.push(20);
+    let mut b = Bag { s: s };
+    let a = bump(inout b, 0);
+    let c = bump(inout b, 0);
+    wrapping_add(a, c)
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("bump\n"))
+        .unwrap_or(&clif);
+    let try_set_blk = fn_clif
+        .split("\n\n")
+        .find(|blk| {
+            blk.contains("stack_addr.i64") && blk.contains("select ") && blk.contains("store ")
+        })
+        .expect("expected try_set block in bump");
+    assert!(
+        !try_set_blk.contains("load.i64"),
+        "expected try_set after try_get diamond to reuse SeqHeader loads:\n{fn_clif}"
+    );
+}
