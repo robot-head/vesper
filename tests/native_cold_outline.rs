@@ -222,3 +222,32 @@ fn main() -> u64 {
         "Fail error-return guard must not outline the hot body as ::cold#0:\n{clif}"
     );
 }
+
+#[test]
+fn asymmetric_tail_with_many_live_ins_and_no_calls_or_slots_is_not_outlined() {
+    let source = "fn many_args_tail(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) -> u64 {
+    if a < 10 {
+        wrapping_add(a, b)
+    } else {
+        let mut acc = wrapping_add(c, d);
+        for i in 0..8 {
+            acc = wrapping_add(acc, wrapping_add(e, wrapping_add(f, i)));
+            acc = wrapping_add(acc, wrapping_mul(a, b));
+        }
+        acc
+    }
+}
+
+fn main() -> u64 {
+    many_args_tail(20, 3, 4, 5, 6, 7)
+}";
+    let world = check_world(source);
+    let eval = runtime::Runtime::new(&world).run("main", vec![]).unwrap();
+    let jit_opt = native::jit_with_options(&world, "main", true).unwrap();
+    assert_eq!(eval.to_string(), jit_opt.to_string());
+    let (_, clif) = native::object_with_options(&world, "main", None, true).unwrap();
+    assert!(
+        !clif.contains("many_args_tail::cold#"),
+        "0-call/0-slot/0-trap AsymmetricTail with >4 live-ins should not outline:\n{clif}"
+    );
+}

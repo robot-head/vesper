@@ -690,6 +690,10 @@ vesper_crate(
             ":files",
             "//crates/vesper-bench-pmu:vesper_pkg",
         ],
+        "test/pulse_port": [
+            ":files",
+            "//crates/vesper-pulse/vesper:vesper_pkg",
+        ],
         # .vsys imports carried by packages (#1150): drivers over @vesper-std/fs.
         "test/vsys_packages": [":files"],
         # .vsys types in `use` (#1326): the real @vesper/cranelift as a dependency.
@@ -1453,10 +1457,13 @@ vesper_package(
 
 vesper_package(
     name = "std_process_package",
-    srcs = glob(["packages/vesper-std/process/src/**/*.ves"]),
+    srcs = glob([
+        "packages/vesper-std/process/src/**/*.ves",
+        "packages/vesper-std/process/src-windows/**/*.ves",
+    ]),
     manifest = "packages/vesper-std/process/Loom.toml",
     visibility = ["//visibility:public"],
-    vsys = ["packages/vesper-std/process/process.vsys"],
+    vsys = glob(["packages/vesper-std/process/process-*.vsys"]),
     deps = [":std_fs_package"],
 )
 

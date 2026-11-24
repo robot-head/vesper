@@ -14,7 +14,7 @@
 
 // Constants, helpers and layouts that only the Rust implementation
 // (src/reference/) reads.
-#![cfg_attr(feature = "vesper-port", allow(dead_code))]
+#![allow(dead_code)]
 
 use crate::varint::Reader;
 use crate::{PacketType, TransportErrorCode};
@@ -249,7 +249,7 @@ pub enum Frame<'a> {
     PathResponse([u8; 8]),
 }
 
-pub use crate::imp::frame::{
+pub use crate::ported::frame::{
     allowed, crypto_header_len, encode_crypto_header, encode_stream_header, parse_frame,
     stream_header_len,
 };

@@ -559,6 +559,7 @@ fn routing_runs_in_vesper() {
     assert_eq!(prints(&bare, &["shot", "--help"]), 1);
     assert_eq!(prints(&bare, &["ebpf", "--help"]), 1);
     assert_eq!(prints(&bare, &["forge", "--help"]), 1);
+    assert_eq!(prints(&bare, &["graph", "--help"]), 1);
     assert_eq!(prints(&bare, &["verify", "--refute"]), 1);
     // Handed back: the Rust CLI prints.
     assert_eq!(prints(&bare, &["verify", "--help"]), 0);
@@ -820,6 +821,146 @@ fn forge_runs_in_vesper() {
         .current_dir(&dir)
         .env("VESPER_HYBRID_STATS", "1")
         .args(["forge", "check", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let prints: u64 = stderr
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("vesper-hybrid: the command layers printed ")
+                .and_then(|s| s.strip_suffix(" times from Vesper"))
+                .and_then(|n| n.parse().ok())
+        })
+        .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
+    assert_eq!(prints, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn seed_graph_tree(dir: &Path) {
+    let lock = serde_json::json!({
+        "schema_version": 1,
+        "roots": ["@acme/app"],
+        "packages": [
+            {
+                "name": "@acme/app",
+                "version": "1.0.0",
+                "source": { "kind": "path", "path": "." },
+                "digest": "0".repeat(64),
+                "features": [],
+                "capability_ceiling": ["Fail"],
+                "required_capabilities": ["Fail"],
+                "forbid_unsafe_ffi": true,
+                "dependencies": [
+                    {
+                        "package": "@acme/lib",
+                        "requirement": "^1.0",
+                        "allowed_capabilities": ["Fail"],
+                        "requested_features": ["std"]
+                    }
+                ],
+                "system_dependencies": []
+            },
+            {
+                "name": "@acme/lib",
+                "version": "1.2.0",
+                "source": { "kind": "path", "path": "lib" },
+                "digest": "1".repeat(64),
+                "features": ["std"],
+                "capability_ceiling": ["Fail"],
+                "required_capabilities": [],
+                "forbid_unsafe_ffi": true,
+                "dependencies": [],
+                "system_dependencies": []
+            }
+        ],
+        "system_packages": []
+    });
+    std::fs::write(
+        dir.join("Loom.lock"),
+        serde_json::to_vec_pretty(&lock).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(dir.join("bad.lock"), "{not-json").unwrap();
+    std::fs::write(
+        dir.join("empty.lock"),
+        r#"{"schema_version":1,"roots":[],"packages":[],"system_packages":[]}"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn graph_matches_the_default_compiler() {
+    let default = default_compiler();
+    let hybrid = hybrid();
+    let root = scratch("vesper-cli-graph");
+    let cases: &[&[&str]] = &[
+        &["graph", "--help"],
+        &["graph", "-h"],
+        &["graph", "--unknown"],
+        &["graph", "--package"],
+        &["graph", "--package", "@acme/app", "--package", "@acme/lib"],
+        &["graph", "--package", "bad", "--json", "--dot"],
+        &["graph", "--json", "--dot"],
+        &["graph", "Loom.lock", "bad.lock"],
+        &["graph", "missing.lock"],
+        &["graph", "bad.lock"],
+        &["graph", "empty.lock"],
+        &["graph", "empty.lock", "--json"],
+        &["graph"],
+        &["graph", "Loom.lock", "--json"],
+        &["graph", "Loom.lock", "--dot"],
+        &["graph", "--package", "@acme/lib", "--invert"],
+        &["graph", "--package", "@acme/missing", "--json"],
+    ];
+    let mut diffs = vec![];
+    for argv in cases {
+        let mut results = vec![];
+        for compiler in [&default, &hybrid] {
+            let work = root.join(if compiler == &default { "d" } else { "h" });
+            let _ = std::fs::remove_dir_all(&work);
+            std::fs::create_dir_all(&work).unwrap();
+            seed_graph_tree(&work);
+            let out = Command::new(compiler)
+                .current_dir(&work)
+                .env_remove("VESPER_HYBRID_STATS")
+                .args(*argv)
+                .output()
+                .unwrap();
+            results.push(out);
+        }
+        let d = &results[0];
+        let h = &results[1];
+        if d.status.code() != h.status.code() || d.stdout != h.stdout || d.stderr != h.stderr {
+            diffs.push(format!(
+                "{argv:?}: status {:?} vs {:?}, stdout {:?} vs {:?}, stderr {:?} vs {:?}",
+                d.status.code(),
+                h.status.code(),
+                String::from_utf8_lossy(&d.stdout),
+                String::from_utf8_lossy(&h.stdout),
+                String::from_utf8_lossy(&d.stderr),
+                String::from_utf8_lossy(&h.stderr),
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        diffs.is_empty(),
+        "Vesper `graph` differs from default CLI on {} cases:\n{}",
+        diffs.len(),
+        diffs.join("\n")
+    );
+}
+
+#[test]
+fn graph_runs_in_vesper() {
+    let hybrid = hybrid();
+    let dir = scratch("vesper-cli-graph-runs");
+    seed_graph_tree(&dir);
+    let out = Command::new(&hybrid)
+        .current_dir(&dir)
+        .env("VESPER_HYBRID_STATS", "1")
+        .args(["graph", "--help"])
         .output()
         .unwrap();
     assert!(out.status.success());

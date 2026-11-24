@@ -232,11 +232,81 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn unlinkat(dirfd: i32, path: *const c_char, flags: i32) -> i32;
         fn fdopendir(fd: i32) -> *mut c_void;
         fn memset(dst: *mut c_void, byte: i32, n: usize) -> *mut c_void;
+        fn syscall(nr: i64, ...) -> i64;
+        fn ioctl(fd: i32, req: u64, ...) -> i32;
+        #[cfg(target_os = "linux")]
+        fn epoll_create1(flags: i32) -> i32;
+        #[cfg(target_os = "linux")]
+        fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut c_void) -> i32;
+        #[cfg(target_os = "linux")]
+        fn epoll_wait(epfd: i32, events: *mut c_void, maxevents: i32, timeout: i32) -> i32;
+        #[cfg(target_os = "macos")]
+        fn kqueue() -> i32;
+        #[cfg(target_os = "macos")]
+        fn kevent(
+            kq: i32,
+            changelist: *const c_void,
+            nchanges: i32,
+            eventlist: *mut c_void,
+            nevents: i32,
+            timeout: *const c_void,
+        ) -> i32;
+        fn mmap(
+            addr: *mut c_void,
+            len: usize,
+            prot: i32,
+            flags: i32,
+            fd: i32,
+            off: i64,
+        ) -> *mut c_void;
+        fn munmap(addr: *mut c_void, len: usize) -> i32;
+        fn malloc(n: usize) -> *mut c_void;
+        fn free(p: *mut c_void);
+        fn posix_spawn_file_actions_init(fa: *mut c_void) -> i32;
+        fn posix_spawn_file_actions_destroy(fa: *mut c_void) -> i32;
+        fn posix_spawn_file_actions_adddup2(fa: *mut c_void, fd: i32, to: i32) -> i32;
+        fn posix_spawn_file_actions_addopen(
+            fa: *mut c_void,
+            fd: i32,
+            path: *const c_char,
+            flags: i32,
+            mode: u32,
+        ) -> i32;
+        fn posix_spawnattr_init(attr: *mut c_void) -> i32;
+        fn posix_spawnattr_destroy(attr: *mut c_void) -> i32;
+        fn posix_spawnattr_setflags(attr: *mut c_void, flags: i16) -> i32;
+        fn posix_spawnattr_setsigmask(attr: *mut c_void, set: *const c_void) -> i32;
+        fn posix_spawnattr_setsigdefault(attr: *mut c_void, set: *const c_void) -> i32;
+        fn sigemptyset(set: *mut c_void) -> i32;
+        fn sigaddset(set: *mut c_void, sig: i32) -> i32;
+        fn posix_spawn(
+            pid: *mut i32,
+            path: *const c_char,
+            fa: *const c_void,
+            attr: *const c_void,
+            argv: *const *mut c_char,
+            envp: *const *mut c_char,
+        ) -> i32;
+        fn posix_spawnp(
+            pid: *mut i32,
+            file: *const c_char,
+            fa: *const c_void,
+            attr: *const c_void,
+            argv: *const *mut c_char,
+            envp: *const *mut c_char,
+        ) -> i32;
+        #[cfg_attr(target_os = "macos", link_name = "pipe")]
+        #[cfg_attr(not(target_os = "macos"), link_name = "pipe2")]
+        fn make_pipe(fds: *mut i32, flags: i32) -> i32;
+        fn poll(fds: *mut c_void, n: usize, timeout: i32) -> i32;
+        fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+        fn kill(pid: i32, sig: i32) -> i32;
+        fn exit(code: i32) -> !;
         #[cfg_attr(target_os = "macos", link_name = "__error")]
         #[cfg_attr(not(target_os = "macos"), link_name = "__errno_location")]
         fn errno_address() -> *mut i32;
     }
-    vec![
+    let mut syms = vec![
         ("open", open as *const u8),
         ("read", read as *const u8),
         ("write", write as *const u8),
@@ -259,6 +329,57 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("unlinkat", unlinkat as *const u8),
         ("fdopendir", fdopendir as *const u8),
         ("memset", memset as *const u8),
+        ("malloc", malloc as *const u8),
+        ("free", free as *const u8),
+        (
+            "posix_spawn_file_actions_init",
+            posix_spawn_file_actions_init as *const u8,
+        ),
+        (
+            "posix_spawn_file_actions_destroy",
+            posix_spawn_file_actions_destroy as *const u8,
+        ),
+        (
+            "posix_spawn_file_actions_adddup2",
+            posix_spawn_file_actions_adddup2 as *const u8,
+        ),
+        (
+            "posix_spawn_file_actions_addopen",
+            posix_spawn_file_actions_addopen as *const u8,
+        ),
+        ("posix_spawnattr_init", posix_spawnattr_init as *const u8),
+        (
+            "posix_spawnattr_destroy",
+            posix_spawnattr_destroy as *const u8,
+        ),
+        (
+            "posix_spawnattr_setflags",
+            posix_spawnattr_setflags as *const u8,
+        ),
+        (
+            "posix_spawnattr_setsigmask",
+            posix_spawnattr_setsigmask as *const u8,
+        ),
+        (
+            "posix_spawnattr_setsigdefault",
+            posix_spawnattr_setsigdefault as *const u8,
+        ),
+        ("sigemptyset", sigemptyset as *const u8),
+        ("sigaddset", sigaddset as *const u8),
+        ("posix_spawn", posix_spawn as *const u8),
+        ("posix_spawnp", posix_spawnp as *const u8),
+        (
+            if cfg!(target_os = "macos") {
+                "pipe"
+            } else {
+                "pipe2"
+            },
+            make_pipe as *const u8,
+        ),
+        ("poll", poll as *const u8),
+        ("waitpid", waitpid as *const u8),
+        ("kill", kill as *const u8),
+        ("exit", exit as *const u8),
         (
             if cfg!(target_os = "macos") {
                 "__error"
@@ -273,7 +394,23 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("memcpy", memcpy as *const u8),
         ("strchr", strchr as *const u8),
         ("strstr", strstr as *const u8),
-    ]
+        ("syscall", syscall as *const u8),
+        ("ioctl", ioctl as *const u8),
+        ("mmap", mmap as *const u8),
+        ("munmap", munmap as *const u8),
+    ];
+    #[cfg(target_os = "linux")]
+    {
+        syms.push(("epoll_create1", epoll_create1 as *const u8));
+        syms.push(("epoll_ctl", epoll_ctl as *const u8));
+        syms.push(("epoll_wait", epoll_wait as *const u8));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        syms.push(("kqueue", kqueue as *const u8));
+        syms.push(("kevent", kevent as *const u8));
+    }
+    syms
 }
 #[cfg(windows)]
 fn libc_symbols() -> Vec<(&'static str, *const u8)> {
@@ -296,6 +433,27 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
             lp_default_char: *const c_void,
             lp_used_default_char: *mut i32,
         ) -> i32;
+        fn CreateIoCompletionPort(
+            file_handle: u64,
+            existing_completion_port: u64,
+            completion_key: u64,
+            number_of_concurrent_threads: u32,
+        ) -> u64;
+        fn PostQueuedCompletionStatus(
+            completion_port: u64,
+            number_of_bytes_transferred: u32,
+            completion_key: u64,
+            overlapped: u64,
+        ) -> i32;
+        fn GetQueuedCompletionStatus(
+            completion_port: u64,
+            bytes_transferred: *mut u32,
+            completion_key: *mut u64,
+            overlapped: *mut u64,
+            milliseconds: u32,
+        ) -> i32;
+        fn CloseHandle(handle: u64) -> i32;
+        fn GetLastError() -> u32;
     }
     vec![
         ("GetCommandLineW", GetCommandLineW as *const u8),
@@ -314,6 +472,20 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ),
         ("lstrlenW", lstrlenW as *const u8),
         ("WideCharToMultiByte", WideCharToMultiByte as *const u8),
+        (
+            "CreateIoCompletionPort",
+            CreateIoCompletionPort as *const u8,
+        ),
+        (
+            "PostQueuedCompletionStatus",
+            PostQueuedCompletionStatus as *const u8,
+        ),
+        (
+            "GetQueuedCompletionStatus",
+            GetQueuedCompletionStatus as *const u8,
+        ),
+        ("CloseHandle", CloseHandle as *const u8),
+        ("GetLastError", GetLastError as *const u8),
     ]
 }
 #[cfg(not(any(unix, windows)))]

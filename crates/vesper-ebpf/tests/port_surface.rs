@@ -222,10 +222,5 @@ fn stack_bound_reports_every_outcome() {
 
 #[test]
 fn implementation_follows_the_feature() {
-    let expected = if cfg!(feature = "vesper-port") {
-        "vesper"
-    } else {
-        "rust"
-    };
-    assert_eq!(vesper_ebpf::IMPLEMENTATION, expected);
+    assert_eq!(vesper_ebpf::IMPLEMENTATION, "vesper");
 }

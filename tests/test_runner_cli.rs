@@ -312,12 +312,12 @@ fn package_tests_call_vsys_from_a_path_dependency() {
     link = "static", name = "vesper_std_host",
     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
 ) {
-    fn vstd_dlsym(handle: u64, nocapture in name: CStr) -> ForeignVal[u64];
+    fn vstd_proc_id() -> ForeignVal[u64];
 }"#,
         ),
         (
             "host/src/lib.ves",
-            "pub fn arg_count() -> u64 eff [Ffi[StdEnv]] {\n    match StdEnv::vstd_dlsym(0, in \"environ\".as_bytes()) {\n        Result::Ok(0) => 0,\n        Result::Ok(_) => 3,\n        Result::Err(_) => 0,\n    }\n}",
+            "pub fn arg_count() -> u64 eff [Ffi[StdEnv]] {\n    if StdEnv::vstd_proc_id() == 0 {\n        0\n    } else {\n        3\n    }\n}",
         ),
         (
             "app/src/suite.ves",

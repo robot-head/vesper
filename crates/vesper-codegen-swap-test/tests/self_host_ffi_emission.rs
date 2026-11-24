@@ -203,6 +203,8 @@ const FORMS_VSYS: &str = r#"sys library Forms (
     callback Add(a: u64, b: u64) -> ForeignVal[u64];
     fn forms_lookup() -> ForeignVal[Option[Add]];
     fn forms_apply(in f: Add, x: u64) -> ForeignVal[u64];
+    fn forms_cwstr(nocapture in a: CWStr) -> ForeignVal[i32];
+    fn forms_cwstr_ret() -> ForeignVal[Option[CWStr]];
 }"#;
 
 const FORMS_SOURCE: &str = r#"
@@ -344,6 +346,20 @@ fn callbacks() -> u64 eff [Ffi[Forms]] {
         Some(f) => wrapping_add(Forms::forms_apply(f, 10), Forms::Add(f, 3, 4)),
         None => 0,
     }
+}
+fn cwstrs() -> u64 eff [Ffi[Forms]] {
+    let mut w: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    w.push(65);
+    w.push(66);
+    let n = match Forms::forms_cwstr(in w.as_slice()) {
+        Result::Ok(v) => v,
+        Result::Err(_) => 0,
+    };
+    let len = match Forms::forms_cwstr_ret() {
+        Option::Some(s) => s.len(),
+        Option::None => 0,
+    };
+    wrapping_add(widen_u64(wrapping_u32(n)), len)
 }
 "#;
 

@@ -5,19 +5,15 @@
 //! export ABI, and the slices a parsed span names.
 
 pub(crate) mod ack;
-#[cfg(feature = "vesper-port")]
 pub(crate) mod frame;
-#[cfg(feature = "vesper-port")]
 pub(crate) mod header;
 pub(crate) mod lifecycle;
 #[cfg(feature = "vesper-port")]
 pub(crate) mod packet;
-#[cfg(feature = "vesper-port")]
 pub(crate) mod packet_number;
 #[cfg(feature = "vesper-port")]
 pub(crate) mod recovery;
 pub(crate) mod stream;
-#[cfg(feature = "vesper-port")]
 pub(crate) mod varint;
 
 // Generated and committed, but kept outside src/ so formatters, which
@@ -27,7 +23,6 @@ pub(crate) mod varint;
 #[path = "../../port/binding.rs"]
 pub(crate) mod binding;
 
-#[cfg(feature = "vesper-port")]
 pub(crate) fn packet_type_to(t: crate::PacketType) -> binding::PktType {
     match t {
         crate::PacketType::Initial => binding::PktType::Initial,

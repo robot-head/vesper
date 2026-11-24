@@ -1,0 +1,449 @@
+// Fused try_get/condition and drop glue emission.
+
+use @vesper/cranelift::{
+    FuncId,
+    SigId,
+    Value,
+    append_block_param,
+    append_block_params_for_function_params,
+    block_param,
+    builder_new,
+    call_arg,
+    call_conv_default,
+    call_result_value,
+    call_result_var,
+    cc_eq,
+    cc_ne,
+    cc_ult,
+    create_block,
+    declare_function,
+    declare_var,
+    def_var,
+    define_function,
+    import_function,
+    import_signature,
+    ins_brif0,
+    ins_call,
+    ins_call_indirect,
+    ins_iadd,
+    ins_iadd_imm,
+    ins_icmp,
+    ins_icmp_imm,
+    ins_iconst,
+    ins_imul_imm,
+    ins_jump,
+    ins_jump0,
+    ins_load,
+    ins_return,
+    ins_store,
+    linkage_local,
+    linkage_preemptible,
+    mem_readonly,
+    mem_trusted,
+    module_get_function,
+    module_jit,
+    module_kind,
+    seal_all_blocks,
+    seal_block,
+    sig_new,
+    sig_param,
+    switch_to_block,
+    ty_i64,
+    ty_i8,
+    ty_of_word,
+    use_var,
+    vals1,
+    vals2,
+    value_of_word,
+    var_of_word
+};
+use self::common::{
+    DATA,
+    LEN,
+    PLAIN,
+    alloc,
+    copy_bytes,
+    runtime_call,
+    seq_elem_addr,
+    seq_set_word,
+    seq_view_cached,
+    zero
+};
+
+pub const DROP_SLOTS_STR: u64 = 1;
+pub const DROP_SLOTS_FIELDS: u64 = 2;
+pub const DROP_MOVED_ZERO: u64 = 3;
+pub const DROP_MOVED_CLEAR: u64 = 4;
+pub const DROP_FIELD_MOVED: u64 = 5;
+pub const DROP_REBIND_COPY: u64 = 6;
+pub const DROP_FREE_GUARD: u64 = 7;
+pub const DROP_GLUE: u64 = 8;
+
+const NODE_SEQ: u64 = 1;
+const NODE_STR: u64 = 2;
+const NODE_DYN: u64 = 3;
+const NODE_PRODUCT: u64 = 4;
+const NODE_ENUM: u64 = 5;
+
+pub fn emit_fused_try_get(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
+    let checked = call_arg(call, 0) != 0;
+    let is_seq = call_arg(call, 1) != 0;
+    let invariant = call_arg(call, 2) != 0;
+    let h_invariant = call_arg(call, 3) != 0;
+    let receiver = value_of_word(call_arg(call, 4));
+    let i = value_of_word(call_arg(call, 5));
+    let c0 = call_arg(call, 6);
+    let c1 = call_arg(call, 7);
+    let c2 = call_arg(call, 8);
+    let cdata = call_arg(call, 9);
+    let stride = wrapping_i64(call_arg(call, 10));
+
+    let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2);
+    let valid = if checked {
+        let v = ins_icmp(inout b, cc_ult(), i, len);
+        ins_uextend_i64(inout b, v)
+    } else {
+        ins_iconst(inout b, ty_i64(), 1)
+    };
+    let addr = seq_elem_addr(inout b, h, start, i, stride, h_invariant, cdata);
+    let valid_var = declare_var(inout b, ty_i64());
+    def_var(inout b, valid_var, valid);
+    let addr_var = declare_var(inout b, ty_i64());
+    def_var(inout b, addr_var, addr);
+    call_result_var(call, valid_var);
+    call_result_var(call, addr_var);
+}
+
+fn ins_uextend_i64(inout b: Builder, v: Value) -> Value eff [Ffi[Cranelift]] {
+    @vesper/cranelift::ins_uextend(inout b, ty_i64(), v)
+}
+
+pub fn emit_fused_condition(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
+    let kind = call_arg(call, 0);
+    let valid_var = var_of_word(call_arg(call, 1));
+    let valid = use_var(inout b, valid_var);
+    let cond = if kind == 0 {
+        ins_icmp_imm(inout b, cc_ne(), valid, 0)
+    } else if kind == 1 {
+        ins_icmp_imm(inout b, cc_eq(), valid, 0)
+    } else {
+        ins_iconst(inout b, ty_i8(), 1)
+    };
+    call_result_value(call, cond);
+}
+
+fn zero_words(inout b: Builder, ptr: Value, size: u32) eff [Ffi[Cranelift]] {
+    let mut off: u32 = 0;
+    loop {
+        if off >= size {
+            break;
+        }
+        let z = zero(inout b);
+        seq_set_word(inout b, ptr, wrapping_i32(widen_u64(off)), z);
+        off = wrapping_add(off, 8);
+    }
+}
+
+fn helper_load(inout b: Builder, ptr: Value, is_agg: bool, scalar_ty: u64)
+    -> Value eff [Ffi[Cranelift]] {
+    if is_agg {
+        ptr
+    } else {
+        ins_load(inout b, ty_of_word(scalar_ty), PLAIN, ptr, 0)
+    }
+}
+
+fn hex_char(nibble: u64) -> u8 {
+    let d = nibble & 15;
+    if d < 10 {
+        wrapping_u8(wrapping_add(48, d))
+    } else {
+        wrapping_u8(wrapping_add(87, d))
+    }
+}
+
+fn drop_elems_symbol(hash: u64) -> String {
+    let mut s = String::new();
+    s.push_str(in "__vesper_drop_elems_");
+    let mut h = hash;
+    for _ in 0..16 {
+        let ch = hex_char(h >> 60);
+        let _ = s.push_char(wrapping_u32(widen_u64(ch)));
+        h = h << 4;
+    }
+    s
+}
+
+fn emit_drop_object(inout b: Builder, inout m: Module, pair: Value) eff [Ffi[Cranelift]] {
+    let table = ins_load(inout b, ty_i64(), mem_trusted(), pair, 8);
+    let has_table = ins_icmp_imm(inout b, cc_ne(), table, 0);
+    let load_drop = create_block(inout b);
+    let call_blk = create_block(inout b);
+    let done = create_block(inout b);
+    ins_brif0(inout b, has_table, load_drop, done);
+    switch_to_block(inout b, load_drop);
+    let drop = ins_load(inout b, ty_i64(), mem_trusted() | mem_readonly(), table, 0);
+    let has_drop = ins_icmp_imm(inout b, cc_ne(), drop, 0);
+    ins_brif0(inout b, has_drop, call_blk, done);
+    switch_to_block(inout b, call_blk);
+    let data = ins_load(inout b, ty_i64(), mem_trusted(), pair, 0);
+    let mut sig = sig_new(inout m, call_conv_default());
+    sig_param(inout m, sig, ty_i64());
+    let sref = import_signature(inout b, in m, sig);
+    let dargs = vals1(data);
+    ins_call_indirect(inout b, sref, drop, in dargs.as_slice());
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, done);
+}
+
+fn glue_runtime_call(inout b: Builder, inout m: Module, in name: Str, in args: Slice[u32]) eff [
+    Ffi[Cranelift]
+] {
+    let _ = runtime_call(inout b, inout m, in name, in args);
+}
+
+fn skip_drop_tree(call: u64, inout pos: u64) eff [Ffi[Cranelift]] {
+    let tag = call_arg(call, pos);
+    pos = wrapping_add(pos, 1);
+    if tag == NODE_SEQ {
+        let needs = call_arg(call, pos) != 0;
+        pos = wrapping_add(pos, 5);
+        if needs {
+            skip_drop_tree(call, inout pos);
+        }
+    } else if tag == NODE_PRODUCT {
+        let count = call_arg(call, pos);
+        pos = wrapping_add(pos, 1);
+        for _ in 0..count {
+            pos = wrapping_add(pos, 3);
+            skip_drop_tree(call, inout pos);
+        }
+    } else if tag == NODE_ENUM {
+        let vcount = call_arg(call, pos);
+        pos = wrapping_add(pos, 1);
+        for _ in 0..vcount {
+            let fcount = call_arg(call, wrapping_add(pos, 1));
+            pos = wrapping_add(pos, 2);
+            for _ in 0..fcount {
+                pos = wrapping_add(pos, 3);
+                skip_drop_tree(call, inout pos);
+            }
+        }
+    }
+}
+
+pub fn emit_drop_elements_tree(
+    call: u64,
+    inout pos: u64,
+    inout b: Builder,
+    inout m: Module,
+    data: Value,
+    count: Value,
+    stride: i64,
+    hash: u64,
+    is_agg: bool,
+    scalar_ty: u64,
+) eff [Ffi[Cranelift]] {
+    let sym = drop_elems_symbol(hash);
+    let existing = module_get_function(inout m, in sym.as_bytes());
+    let id = match existing {
+        Some(fid) => {
+            skip_drop_tree(call, inout pos);
+            fid
+        },
+        None => {
+            let mut sig = sig_new(inout m, call_conv_default());
+            sig_param(inout m, sig, ty_i64());
+            sig_param(inout m, sig, ty_i64());
+            let jit = module_kind(in m) == module_jit();
+            let lk = if jit {
+                linkage_preemptible()
+            } else {
+                linkage_local()
+            };
+            let fid = declare_function(inout m, in sym.as_bytes(), lk, sig);
+            let mut h = match builder_new(in m, sig) {
+                Some(h) => h,
+                None => {
+                    skip_drop_tree(call, inout pos);
+                    return;
+                },
+            };
+            let entry = create_block(inout h);
+            append_block_params_for_function_params(inout h, entry);
+            switch_to_block(inout h, entry);
+            seal_block(inout h, entry);
+            let p_data = block_param(inout h, entry, 0);
+            let p_count = block_param(inout h, entry, 1);
+            let head = create_block(inout h);
+            append_block_param(inout h, head, ty_i64());
+            let body = create_block(inout h);
+            let exit = create_block(inout h);
+            let z = zero(inout h);
+            let zargs = vals1(z);
+            ins_jump(inout h, head, in zargs.as_slice());
+            switch_to_block(inout h, head);
+            let i = block_param(inout h, head, 0);
+            let more = ins_icmp(inout h, cc_ult(), i, p_count);
+            ins_brif0(inout h, more, body, exit);
+            switch_to_block(inout h, body);
+            let offset = ins_imul_imm(inout h, i, stride);
+            let ptr = ins_iadd(inout h, p_data, offset);
+            let elem_val = helper_load(inout h, ptr, is_agg, scalar_ty);
+            emit_drop_tree(call, inout pos, inout h, inout m, elem_val);
+            let next = ins_iadd_imm(inout h, i, 1);
+            let nargs = vals1(next);
+            ins_jump(inout h, head, in nargs.as_slice());
+            switch_to_block(inout h, exit);
+            let empty = ChunkSeq::new[u32]();
+            ins_return(inout h, in empty.as_slice());
+            seal_all_blocks(inout h);
+            let _ = define_function(inout m, fid, h);
+            fid
+        },
+    };
+    let fref = import_function(inout b, inout m, id);
+    let cargs = vals2(data, count);
+    ins_call(inout b, fref, in cargs.as_slice());
+}
+
+pub fn emit_drop_tree(
+    call: u64,
+    inout pos: u64,
+    inout b: Builder,
+    inout m: Module,
+    value: Value
+) eff [Ffi[Cranelift]] {
+    let tag = call_arg(call, pos);
+    pos = wrapping_add(pos, 1);
+    if tag == NODE_SEQ {
+        let elem_needs = call_arg(call, pos) != 0;
+        let stride = wrapping_i64(call_arg(call, wrapping_add(pos, 1)));
+        let hash = call_arg(call, wrapping_add(pos, 2));
+        let is_agg = call_arg(call, wrapping_add(pos, 3)) != 0;
+        let scalar_ty = call_arg(call, wrapping_add(pos, 4));
+        pos = wrapping_add(pos, 5);
+        let present = ins_icmp_imm(inout b, cc_ne(), value, 0);
+        let drop_blk = create_block(inout b);
+        let done = create_block(inout b);
+        ins_brif0(inout b, present, drop_blk, done);
+        switch_to_block(inout b, drop_blk);
+        if elem_needs {
+            let len = ins_load(inout b, ty_i64(), PLAIN, value, LEN);
+            let data = ins_load(inout b, ty_i64(), PLAIN, value, DATA);
+            emit_drop_elements_tree(
+                call,
+                inout pos,
+                inout b,
+                inout m,
+                data,
+                len,
+                stride,
+                hash,
+                is_agg,
+                scalar_ty
+            );
+        }
+        let vargs = vals1(value);
+        glue_runtime_call(inout b, inout m, in "vesper_seq_free", in vargs.as_slice());
+        ins_jump0(inout b, done);
+        switch_to_block(inout b, done);
+    } else if tag == NODE_STR {
+        let vargs = vals1(value);
+        glue_runtime_call(inout b, inout m, in "vesper_str_release", in vargs.as_slice());
+    } else if tag == NODE_DYN {
+        emit_drop_object(inout b, inout m, value);
+    } else if tag == NODE_PRODUCT {
+        let count = call_arg(call, pos);
+        pos = wrapping_add(pos, 1);
+        for _ in 0..count {
+            let offset = wrapping_i64(call_arg(call, pos));
+            let is_agg = call_arg(call, wrapping_add(pos, 1)) != 0;
+            let scalar_ty = call_arg(call, wrapping_add(pos, 2));
+            pos = wrapping_add(pos, 3);
+            let ptr = ins_iadd_imm(inout b, value, offset);
+            let v = helper_load(inout b, ptr, is_agg, scalar_ty);
+            emit_drop_tree(call, inout pos, inout b, inout m, v);
+        }
+    } else if tag == NODE_ENUM {
+        let vcount = call_arg(call, pos);
+        pos = wrapping_add(pos, 1);
+        let tag_val = ins_load(inout b, ty_i64(), PLAIN, value, 0);
+        let done = create_block(inout b);
+        for _ in 0..vcount {
+            let tag_index = wrapping_i64(call_arg(call, pos));
+            let fcount = call_arg(call, wrapping_add(pos, 1));
+            pos = wrapping_add(pos, 2);
+            let this_blk = create_block(inout b);
+            let next_blk = create_block(inout b);
+            let is_v = ins_icmp_imm(inout b, cc_eq(), tag_val, tag_index);
+            ins_brif0(inout b, is_v, this_blk, next_blk);
+            switch_to_block(inout b, this_blk);
+            for _ in 0..fcount {
+                let offset = wrapping_i64(call_arg(call, pos));
+                let is_agg = call_arg(call, wrapping_add(pos, 1)) != 0;
+                let scalar_ty = call_arg(call, wrapping_add(pos, 2));
+                pos = wrapping_add(pos, 3);
+                let ptr = ins_iadd_imm(inout b, value, offset);
+                let v = helper_load(inout b, ptr, is_agg, scalar_ty);
+                emit_drop_tree(call, inout pos, inout b, inout m, v);
+            }
+            ins_jump0(inout b, done);
+            switch_to_block(inout b, next_blk);
+        }
+        ins_jump0(inout b, done);
+        switch_to_block(inout b, done);
+    }
+}
+
+pub fn emit_drop_op(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranelift]] {
+    let sub = call_arg(call, 0);
+    if sub == DROP_SLOTS_STR {
+        let storage = alloc(inout b, in m, 24);
+        let z = zero(inout b);
+        seq_set_word(inout b, storage, 0, z);
+        seq_set_word(inout b, storage, 8, z);
+        seq_set_word(inout b, storage, 16, z);
+        call_result_value(call, storage);
+    } else if sub == DROP_SLOTS_FIELDS {
+        let sz = wrapping_u32(call_arg(call, 1));
+        call_result_value(call, alloc(inout b, in m, sz));
+    } else if sub == DROP_MOVED_ZERO {
+        call_result_value(call, zero(inout b));
+    } else if sub == DROP_MOVED_CLEAR {
+        let ptr = value_of_word(call_arg(call, 1));
+        let sz = wrapping_u32(call_arg(call, 2));
+        let bound = ins_icmp_imm(inout b, cc_ne(), ptr, 0);
+        let clear = create_block(inout b);
+        let done = create_block(inout b);
+        ins_brif0(inout b, bound, clear, done);
+        switch_to_block(inout b, clear);
+        zero_words(inout b, ptr, sz);
+        ins_jump0(inout b, done);
+        switch_to_block(inout b, done);
+    } else if sub == DROP_FIELD_MOVED {
+        let ptr = value_of_word(call_arg(call, 1));
+        let sz = wrapping_u32(call_arg(call, 2));
+        zero_words(inout b, ptr, sz);
+    } else if sub == DROP_REBIND_COPY {
+        let src = value_of_word(call_arg(call, 1));
+        let dst = value_of_word(call_arg(call, 2));
+        let sz = wrapping_u32(call_arg(call, 3));
+        copy_bytes(inout b, src, dst, sz);
+    } else if sub == DROP_FREE_GUARD {
+        let value = value_of_word(call_arg(call, 1));
+        let present = ins_icmp_imm(inout b, cc_ne(), value, 0);
+        let free_blk = create_block(inout b);
+        let done = create_block(inout b);
+        ins_brif0(inout b, present, free_blk, done);
+        switch_to_block(inout b, free_blk);
+        let mut pos: u64 = 2;
+        emit_drop_tree(call, inout pos, inout b, inout m, value);
+        ins_jump0(inout b, done);
+        switch_to_block(inout b, done);
+    } else if sub == DROP_GLUE {
+        let value = value_of_word(call_arg(call, 1));
+        let mut pos: u64 = 2;
+        emit_drop_tree(call, inout pos, inout b, inout m, value);
+    }
+}

@@ -14,6 +14,7 @@
 pub(crate) use crate::port_binding as ffi;
 
 use crate::insn::{self, AluOp, AtomicOp, CallTarget, Endian, Imm64, JmpOp, RawInsn, Reg, Size};
+#[cfg(feature = "vesper-port")]
 use crate::wire::{EthIpv4TcpWire, WireError};
 
 pub use crate::insn::{
@@ -449,15 +450,18 @@ pub(crate) fn slots_from_bytes(bytes: &[u8]) -> Result<Vec<RawInsn>, insn::Decod
 
 // wire.rs
 
+#[cfg(feature = "vesper-port")]
 fn mac_word(m: [u8; 6]) -> u64 {
     m.iter().fold(0, |w, &b| (w << 8) | u64::from(b))
 }
 
+#[cfg(feature = "vesper-port")]
 fn mac_bytes(w: u64) -> [u8; 6] {
     let b = w.to_be_bytes();
     [b[2], b[3], b[4], b[5], b[6], b[7]]
 }
 
+#[cfg(feature = "vesper-port")]
 pub(crate) fn eth_encode(w: &EthIpv4TcpWire) -> Vec<u8> {
     ffi::wire_eth_encode(PortEthWire {
         dst_mac: mac_word(w.dst_mac),
@@ -484,6 +488,7 @@ pub(crate) fn eth_encode(w: &EthIpv4TcpWire) -> Vec<u8> {
     })
 }
 
+#[cfg(feature = "vesper-port")]
 pub(crate) fn eth_decode(b: &[u8]) -> Result<EthIpv4TcpWire, WireError> {
     let w = ffi::wire_eth_decode(b)?;
     Ok(EthIpv4TcpWire {
