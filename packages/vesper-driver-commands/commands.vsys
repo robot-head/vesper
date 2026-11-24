@@ -52,4 +52,6 @@ sys library HybridCommands (
         nocapture in config: CSlice[u8]
     ) -> ForeignVal[u64];
     fn hc_lint_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_proof_audit_run(nocapture in packed: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_proof_audit_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
 }

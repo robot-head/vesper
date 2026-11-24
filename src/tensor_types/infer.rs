@@ -458,6 +458,10 @@ fn signature(
 
 /// Check the whole module, elaborate it and run the core checker.
 pub fn analyze(module: &Module) -> Analysis {
+    analyze_with_elaborated(module).0
+}
+
+pub(super) fn analyze_with_elaborated(module: &Module) -> (Analysis, super::elaborate::Elaborated) {
     let mut diagnostics = vec![];
     let (wires, wire_errors) = super::wire::check(module);
     diagnostics.extend(wire_errors);
@@ -651,14 +655,15 @@ pub fn analyze(module: &Module) -> Analysis {
             expression_types: Default::default(),
         }
     };
-    Analysis {
+    let analysis = Analysis {
         checked,
         diagnostics,
         signatures: cx.sigs,
         wires: cx.wires,
         adt_kinds: cx.kinds,
-        elaborated: elaborated.module,
-    }
+        elaborated: elaborated.module.clone(),
+    };
+    (analysis, elaborated)
 }
 
 #[derive(Clone, Default)]

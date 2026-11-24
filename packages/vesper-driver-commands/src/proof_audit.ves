@@ -1,0 +1,289 @@
+// `vesper proof-audit`: CLI option parsing, validation, and `--help` in Vesper,
+// delegating Lean artifact replay and axiom-policy auditing (`src/proof_commands.rs`)
+// to `HybridCommands::hc_proof_audit_run`.
+use @vesper/driver::{
+    Args,
+    args_count,
+    eq
+};
+use super::{
+    arg,
+    byte_at,
+    print,
+    fail,
+    stdout_stream
+};
+
+fn print_proof_audit_help() eff [Ffi[HybridCommands]] {
+    print(
+        stdout_stream(),
+        in "Usage: vesper proof-audit <Module> --root <artifact-directory> --theorem <Qualified.name> [--theorem ...] [--allow-axiom <Name>] [--lean <path>] [--timeout <seconds>] [--macro-provenance <manifest.json>] [--json]\n\nReplay existing local Lean 4.35.0 artifacts through the kernel and audit named theorems.\nArtifact imports disable package environment extensions and plugins.\nThe selected Lean toolchain and artifact parser remain trusted; this is not an OS sandbox, provenance certificate or reusable proof-cache approval.\nThe default axiom policy is empty; sorryAx, compiler-trust axioms, and generated _native axioms are always forbidden.\nA theorem that depends on macro-expanded definitions (those with `$macro_provenance` markers, see `vesper forge lean`) is rejected unless --macro-provenance names the matching provenance manifest.\n"
+            .as_bytes()
+    );
+}
+
+fn is_ascii_alpha(b: u8) -> bool {
+    (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+}
+
+fn is_ascii_alnum(b: u8) -> bool {
+    is_ascii_alpha(b) || (b >= 48 && b <= 57)
+}
+
+fn name_valid(in name: Slice[u8]) -> bool {
+    if name.len() == 0 || name.len() > 1024 {
+        return false;
+    }
+    let mut part_start: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        let at_end = i == name.len();
+        if at_end || byte_at(in name, i) == 46 {
+            if i == part_start {
+                return false;
+            }
+            let first = byte_at(in name, part_start);
+            if !is_ascii_alpha(first) && first != 95 {
+                return false;
+            }
+            let mut j = part_start;
+            loop {
+                if j >= i {
+                    break;
+                }
+                let b = byte_at(in name, j);
+                if !is_ascii_alnum(b) && b != 95 && b != 39 {
+                    return false;
+                }
+                j = wrapping_add(j, 1);
+            }
+            if at_end {
+                break;
+            }
+            part_start = wrapping_add(i, 1);
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+fn forbidden_axiom(in name: Slice[u8]) -> bool {
+    if eq(in name, in "sorryAx")
+        || eq(in name, in "Lean.ofReduceBool")
+        || eq(in name, in "Lean.trustCompiler") {
+        return true;
+    }
+    let mut part_start: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        let at_end = i == name.len();
+        if at_end || byte_at(in name, i) == 46 {
+            if eq(in name[part_start..i], in "_native") {
+                return true;
+            }
+            if at_end {
+                break;
+            }
+            part_start = wrapping_add(i, 1);
+        }
+        i = wrapping_add(i, 1);
+    }
+    false
+}
+
+fn toolchain_namespace(in name: Slice[u8]) -> bool {
+    let mut first_end = name.len();
+    for i in 0..name.len() {
+        if byte_at(in name, i) == 46 {
+            first_end = i;
+            break;
+        }
+    }
+    let first = name[0..first_end];
+    eq(in first, in "Lean")
+        || eq(in first, in "Std")
+        || eq(in first, in "Init")
+        || eq(in first, in "Lake")
+}
+
+// Returns: 0 = ok, 1 = invalid integer, 2 = out of range (1..=300).
+fn parse_timeout(in text: Slice[u8]) -> u32 {
+    if text.len() == 0 {
+        return 1;
+    }
+    let mut val: u64 = 0;
+    let mut overflow = false;
+    for i in 0..text.len() {
+        let b = byte_at(in text, i);
+        if b < 48 || b > 57 {
+            return 1;
+        }
+        if val > 300 {
+            overflow = true;
+        } else {
+            val = wrapping_add(wrapping_mul(val, 10), widen_u64(wrapping_sub(b, 48)));
+        }
+    }
+    if overflow || val < 1 || val > 300 {
+        return 2;
+    }
+    0
+}
+
+fn pack_args(in args: Args, n: u64) -> ChunkSeq[u8] {
+    let mut packed: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a_buf = arg(in args, i);
+        packed.extend(in a_buf.as_slice());
+        packed.push(0);
+        i = wrapping_add(i, 1);
+    }
+    packed
+}
+
+fn run_packed(in args: Args, n: u64) -> i64 eff [Ffi[HybridCommands]] {
+    let packed = pack_args(in args, n);
+    let err_len = HybridCommands::hc_proof_audit_run(in packed.as_slice());
+    if err_len == 0 {
+        return 0;
+    }
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    err.resize(err_len, 0);
+    let actual = HybridCommands::hc_proof_audit_err(inout err.as_slice_mut());
+    if actual > err.len() {
+        err.resize(actual, 0);
+        let _got = HybridCommands::hc_proof_audit_err(inout err.as_slice_mut());
+    } else {
+        err.truncate(actual);
+    }
+    fail(in err.as_slice())
+}
+
+pub fn run_proof_audit(in args: Args) -> i64 eff [Ffi[HybridCommands]] {
+    let n = args_count(in args);
+    let mut has_module = false;
+    let mut module: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut has_root = false;
+    let mut has_theorem = false;
+    let mut has_lean = false;
+    let mut has_timeout = false;
+    let mut has_macro_prov = false;
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a_buf = arg(in args, i);
+        let a = a_buf.as_slice();
+        if eq(in a, in "--help") || eq(in a, in "-h") {
+            print_proof_audit_help();
+            return 0;
+        } else if eq(in a, in "--root") {
+            if has_root {
+                return fail(in "--root may only be specified once".as_bytes());
+            }
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail(in "--root requires a directory".as_bytes());
+            }
+            has_root = true;
+        } else if eq(in a, in "--theorem") || eq(in a, in "--allow-axiom") {
+            let is_theorem = eq(in a, in "--theorem");
+            i = wrapping_add(i, 1);
+            if i >= n {
+                let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                err.extend(in a);
+                err.extend(in " requires a name".as_bytes());
+                return fail(in err.as_slice());
+            }
+            let v_buf = arg(in args, i);
+            let v = v_buf.as_slice();
+            if !name_valid(in v) {
+                let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                err.extend(in "invalid Lean name '".as_bytes());
+                err.extend(in v);
+                err.extend(in "'; use qualified ASCII identifiers".as_bytes());
+                return fail(in err.as_slice());
+            }
+            if is_theorem {
+                has_theorem = true;
+            } else if forbidden_axiom(in v) {
+                let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                err.extend(in v);
+                err.extend(in " cannot be allowed by the audit policy".as_bytes());
+                return fail(in err.as_slice());
+            }
+        } else if eq(in a, in "--lean") {
+            if has_lean {
+                return fail(in "--lean may only be specified once".as_bytes());
+            }
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail(in "--lean requires a path".as_bytes());
+            }
+            has_lean = true;
+        } else if eq(in a, in "--timeout") {
+            if has_timeout {
+                return fail(in "--timeout may only be specified once".as_bytes());
+            }
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail(in "--timeout requires seconds".as_bytes());
+            }
+            let v_buf = arg(in args, i);
+            let status = parse_timeout(in v_buf.as_slice());
+            if status == 1 {
+                return fail(in "invalid --timeout; expected 1 to 300 seconds".as_bytes());
+            }
+            if status == 2 {
+                return fail(in "--timeout must be between 1 and 300 seconds".as_bytes());
+            }
+            has_timeout = true;
+        } else if eq(in a, in "--json") {
+            // Forwarded to `hc_proof_audit_run`.
+        } else if eq(in a, in "--macro-provenance") {
+            if has_macro_prov {
+                return fail(in "--macro-provenance may only be specified once".as_bytes());
+            }
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail(in "--macro-provenance requires a manifest file".as_bytes());
+            }
+            has_macro_prov = true;
+        } else if a.len() != 0 && byte_at(in a, 0) == 45 {
+            let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            err.extend(in "unknown proof-audit option '".as_bytes());
+            err.extend(in a);
+            err.push(39);
+            return fail(in err.as_slice());
+        } else {
+            if has_module {
+                return fail(in "proof-audit accepts one module".as_bytes());
+            }
+            has_module = true;
+            module.extend(in a);
+        }
+        i = wrapping_add(i, 1);
+    }
+    if !has_module {
+        return fail(in "missing Lean module".as_bytes());
+    }
+    let m = module.as_slice();
+    if !name_valid(in m) || toolchain_namespace(in m) {
+        return fail(
+            in "module must be a qualified ASCII identifier outside trusted toolchain namespaces"
+                .as_bytes()
+        );
+    }
+    if !has_theorem {
+        return fail(in "proof-audit requires at least one --theorem".as_bytes());
+    }
+    if !has_root {
+        return fail(in "proof-audit requires --root".as_bytes());
+    }
+    run_packed(in args, n)
+}

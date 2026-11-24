@@ -59,6 +59,9 @@ use self::kinds::{
     Ob,
     at32,
     set32,
+    elab_clear,
+    elab_insert,
+    elab_remove,
     nm,
     paramn,
     fnn,
@@ -1563,6 +1566,7 @@ fn apply(
         push_diag(inout st, code, start, end, in m);
     }
     let mut env = subst_new();
+    let mut dims = ChunkSeq::new[u32]();
     for i in 0..gnames.len() {
         if u8_at(in gkinds, i) != KD_DIM {
             continue;
@@ -1573,6 +1577,7 @@ fn apply(
         let d = sub_dim(inout st, in s, dv);
         if d != NONE && !dim_flexible(in st, d) {
             set_dim(inout env, g, d);
+            dims.push(d);
         } else {
             let mut m = ChunkSeq::new[u8]();
             put(inout m, in "cannot infer dimension '");
@@ -1612,6 +1617,7 @@ fn apply(
             require(inout st, inout cx, b, start, end);
         }
     }
+    elab_insert(inout cx, start, end, 1, in dims);
     let out = sub_ty_or(inout st, in s, result, st.unknown);
     strip_flexible(inout st, out)
 }
@@ -1776,7 +1782,7 @@ fn call(inout st: St, inout cx: Cx, in a: Ast, e: u32, expected: u32) -> u32 {
         }
         let res = mk_ty(inout st, T_ADT, adt, 0, in items);
         let obs = ChunkSeq::new[Ob]();
-        return apply(
+        let out = apply(
             inout st,
             inout cx,
             in a,
@@ -1794,6 +1800,9 @@ fn call(inout st: St, inout cx: Cx, in a: Ast, e: u32, expected: u32) -> u32 {
             args,
             expected
         );
+        let en = expr_at(in a, e);
+        elab_remove(inout cx, widen_u64(en.start), widen_u64(en.end));
+        return out;
     }
     let tys = args_none(inout st, inout cx, in a, args);
     st.unknown
@@ -2013,6 +2022,7 @@ fn tensor_op(
         if !target_shape(inout st, in cx, in a, e, op, types, expected, inout shape) {
             return st.unknown;
         }
+        elab_insert(inout cx, start, end, 2, in shape);
         return mk_ty(inout st, T_TENSOR, 0, 0, in shape);
     }
     let tys = args_none(inout st, inout cx, in a, args);
@@ -2137,6 +2147,7 @@ fn tensor_op(
             put_dim(in st, inout m, y);
             return mismatch(inout st, op, start, end, in m);
         }
+        elab_insert(inout cx, start, end, 2, in target);
         return mk_ty(inout st, T_TENSOR, d, 0, in target);
     }
     if spells(in st, op, in "transpose")
@@ -3089,6 +3100,7 @@ pub fn analyze(inout st: St, inout cx: Cx, in a: Ast) {
     let base = st.dcode.len();
     for round in 0..17 {
         diag_truncate_to(inout st, base);
+        elab_clear(inout cx);
         let mut changed = false;
         for i in 0..fns.len() {
             let f = u32_at(in fns, i);

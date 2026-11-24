@@ -109,13 +109,12 @@ branch is linked from the PR.
    `st.names.write(x, inout st.err)` directly. Element borrows (lane 1,
    #1173) were not needed: tables are read through `try_get`.
 
+## Part 2: `elaborate` (`#1761`)
+
+Ported `src/tensor_types/elaborate.rs` into `packages/vesper-check-tensor-types/src/elaborate.ves` (call elaboration tracking `el_*` in `kinds.ves` / `infer.ves`, `check_tensor_types_elaborate` in `lib.ves`, and `probe_elaborate` in `src/tensor_types.rs`).
+
+- `tests/self_host_check_tensor_types.rs` (`elaborate_agrees_with_rust`): `0` of `94` active tensor sources differ (ADTs, `$dim_*` parameters, erased types/effects, `Dims` structs, call arguments, and synthetic spans).
+
 ## What is left
 
-- **Elaboration** (`elaborate.rs`, about 470 lines). Its map is
-  `pub(super)` in `src/tensor_types`, so no test can compare against it.
-  Part 2 adds the swap point there, ports elaboration, and swaps the pass
-  into the hybrid build (`crates/vesper-hybrid`, module `tensor_types`) as
-  a non-default module, with the scoreboard row's whole-corpus numbers.
-- An ABI v4 input instead of the byte encoding, and a `vesper build --lib`
-  object that joins Linux port shard 7.
-- Callgrind instruction counts.
+- Swap `@vesper/check-tensor-types` into `crates/vesper-hybrid` (`modules/tensor_types`, ABI v4) as a non-default module, with whole-corpus numbers and callgrind instruction counts.

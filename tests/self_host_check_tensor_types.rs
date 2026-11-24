@@ -121,6 +121,11 @@ fn entry(optimize: bool) -> &'static Entry {
     cell.get_or_init(|| package().entry("check_tensor_types", optimize))
 }
 
+fn elab_entry() -> &'static Entry {
+    static E: OnceLock<Entry> = OnceLock::new();
+    E.get_or_init(|| package().entry("check_tensor_types_elaborate", true))
+}
+
 /// A parsed source.
 struct Source {
     name: String,
@@ -513,4 +518,413 @@ fn abba_against_rust() {
             })
         },
     );
+}
+
+fn fmt_ast_ty(t: &vesper::ast::Type, o: &mut String) {
+    use vesper::ast::Type;
+    match t {
+        Type::Named(n, args) => {
+            o.push_str(n);
+            if !args.is_empty() {
+                o.push('[');
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        o.push_str(", ");
+                    }
+                    fmt_ast_ty(a, o);
+                }
+                o.push(']');
+            }
+        }
+        Type::Tuple(ts) => {
+            o.push('(');
+            for (i, x) in ts.iter().enumerate() {
+                if i > 0 {
+                    o.push_str(", ");
+                }
+                fmt_ast_ty(x, o);
+            }
+            o.push(')');
+        }
+        Type::Function {
+            params,
+            result,
+            effects,
+            ..
+        } => {
+            o.push_str("fn(");
+            for (i, (_, pt)) in params.iter().enumerate() {
+                if i > 0 {
+                    o.push_str(", ");
+                }
+                fmt_ast_ty(pt, o);
+            }
+            o.push_str(") -> ");
+            fmt_ast_ty(result, o);
+            if !effects.instances.is_empty() || effects.tail.is_some() {
+                o.push_str(" with ");
+                fmt_ast_row(effects, o);
+            }
+        }
+        Type::Row(r) => fmt_ast_row(r, o),
+        _ => o.push('_'),
+    }
+}
+
+fn fmt_ast_eff(ef: &vesper::ast::Effect, o: &mut String) {
+    if let Some(l) = &ef.label {
+        o.push_str(l);
+        o.push_str(": ");
+    }
+    o.push_str(&ef.name);
+    if !ef.args.is_empty() {
+        o.push('[');
+        for (i, a) in ef.args.iter().enumerate() {
+            if i > 0 {
+                o.push_str(", ");
+            }
+            fmt_ast_ty(a, o);
+        }
+        o.push(']');
+    }
+}
+
+fn fmt_ast_row(r: &vesper::ast::Effects, o: &mut String) {
+    let mut first = true;
+    for ef in &r.instances {
+        if !first {
+            o.push_str(", ");
+        }
+        first = false;
+        fmt_ast_eff(ef, o);
+    }
+    if let Some(tail) = &r.tail {
+        if !first {
+            o.push_str(", ");
+        }
+        o.push_str("..");
+        o.push_str(tail);
+    }
+}
+
+fn fmt_ast_expr(e: &vesper::ast::Expr, o: &mut String) {
+    use vesper::ast::{ExprKind, Literal, Statement};
+    let s = e.span.start;
+    let end = e.span.end;
+    match &e.kind {
+        ExprKind::Literal(Literal::Int(v)) if s >= 1048576 => {
+            write!(o, "lit({v})@{s}..{end}").unwrap();
+        }
+        ExprKind::Name(n) if s >= 1048576 && n.starts_with("$dim_") => {
+            write!(o, "name({n})@{s}..{end}").unwrap();
+        }
+        ExprKind::Name(n) if s >= 1048576 && n == "wrapping_mul" => {
+            write!(o, "wrapping_mul@{s}..{end}").unwrap();
+        }
+        ExprKind::Literal(_) => write!(o, "E1@{s}..{end}").unwrap(),
+        ExprKind::Name(_) => write!(o, "E2@{s}..{end}").unwrap(),
+        ExprKind::Tuple(es) => {
+            o.push('(');
+            for (i, x) in es.iter().enumerate() {
+                if i > 0 {
+                    o.push_str(", ");
+                }
+                fmt_ast_expr(x, o);
+            }
+            write!(o, ")@{s}..{end}").unwrap();
+        }
+        ExprKind::Struct { name, fields } => {
+            if s >= 1048576 && name == "Dims" {
+                o.push_str("struct(Dims");
+                for (fnm, fv) in fields {
+                    write!(o, ", {fnm}: ").unwrap();
+                    fmt_ast_expr(fv, o);
+                }
+                write!(o, ")@{s}..{end}").unwrap();
+            } else {
+                write!(o, "{name}{{").unwrap();
+                for (i, (fnm, fv)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        o.push_str(", ");
+                    }
+                    write!(o, "{fnm}: ").unwrap();
+                    fmt_ast_expr(fv, o);
+                }
+                write!(o, "}}@{s}..{end}").unwrap();
+            }
+        }
+        ExprKind::Block { statements, tail } => {
+            o.push('{');
+            for (i, st) in statements.iter().enumerate() {
+                if i > 0 {
+                    o.push_str("; ");
+                }
+                match st {
+                    Statement::Let { ty, value, .. } => {
+                        o.push_str("let:");
+                        fmt_ast_ty(ty, o);
+                        o.push('=');
+                        fmt_ast_expr(value, o);
+                    }
+                    Statement::Expr(x) => fmt_ast_expr(x, o),
+                }
+            }
+            if let Some(t) = tail {
+                o.push_str("; ");
+                fmt_ast_expr(t, o);
+            }
+            write!(o, "}}@{s}..{end}").unwrap();
+        }
+        ExprKind::Call {
+            callee,
+            types,
+            args,
+        } => {
+            o.push_str("call(");
+            fmt_ast_expr(callee, o);
+            if !types.is_empty() {
+                o.push('[');
+                for (i, ty) in types.iter().enumerate() {
+                    if i > 0 {
+                        o.push_str(", ");
+                    }
+                    fmt_ast_ty(ty, o);
+                }
+                o.push(']');
+            }
+            for a in args {
+                o.push_str(", ");
+                fmt_ast_expr(&a.expr, o);
+            }
+            write!(o, ")@{s}..{end}").unwrap();
+        }
+        ExprKind::Field(x, _) => {
+            o.push_str("U7(");
+            fmt_ast_expr(x, o);
+            write!(o, ")@{s}..{end}").unwrap();
+        }
+        ExprKind::Try(x) => {
+            o.push_str("U9(");
+            fmt_ast_expr(x, o);
+            write!(o, ")@{s}..{end}").unwrap();
+        }
+        ExprKind::Loop(x) => {
+            o.push_str("U17(");
+            fmt_ast_expr(x, o);
+            write!(o, ")@{s}..{end}").unwrap();
+        }
+        ExprKind::Unary(_, x) => {
+            o.push_str("Un(");
+            fmt_ast_expr(x, o);
+            write!(o, ")@{s}..{end}").unwrap();
+        }
+        ExprKind::Index(a, b) => {
+            o.push_str("B8(");
+            fmt_ast_expr(a, o);
+            o.push_str(", ");
+            fmt_ast_expr(b, o);
+            write!(o, ")@{s}..{end}").unwrap();
+        }
+        ExprKind::Range { start, end: re, .. } => {
+            o.push_str("B19(");
+            fmt_ast_expr(start, o);
+            o.push_str(", ");
+            fmt_ast_expr(re, o);
+            write!(o, ")@{s}..{end}").unwrap();
+        }
+        ExprKind::Binary(_, a, b) => {
+            o.push_str("Op11(");
+            fmt_ast_expr(a, o);
+            o.push_str(", ");
+            fmt_ast_expr(b, o);
+            write!(o, ")@{s}..{end}").unwrap();
+        }
+        ExprKind::Assign(_, a, b) => {
+            o.push_str("Op12(");
+            fmt_ast_expr(a, o);
+            o.push_str(", ");
+            fmt_ast_expr(b, o);
+            write!(o, ")@{s}..{end}").unwrap();
+        }
+        ExprKind::If {
+            condition,
+            then,
+            otherwise,
+        } => {
+            o.push_str("if(");
+            fmt_ast_expr(condition, o);
+            o.push_str(", ");
+            fmt_ast_expr(then, o);
+            if let Some(ow) = otherwise {
+                o.push_str(", ");
+                fmt_ast_expr(ow, o);
+            }
+            write!(o, ")@{s}..{end}").unwrap();
+        }
+        ExprKind::Match { value, arms } => {
+            o.push_str("match(");
+            fmt_ast_expr(value, o);
+            for (_, body) in arms {
+                o.push_str(", ");
+                fmt_ast_expr(body, o);
+            }
+            write!(o, ")@{s}..{end}").unwrap();
+        }
+        ExprKind::For { iter, body, .. } => {
+            o.push_str("for(");
+            fmt_ast_expr(iter, o);
+            o.push_str(", ");
+            fmt_ast_expr(body, o);
+            write!(o, ")@{s}..{end}").unwrap();
+        }
+        ExprKind::Break(v) => {
+            o.push_str("J20(");
+            if let Some(x) = v {
+                fmt_ast_expr(x, o);
+            }
+            write!(o, ")@{s}..{end}").unwrap();
+        }
+        ExprKind::Return(v) => {
+            o.push_str("J21(");
+            if let Some(x) = v {
+                fmt_ast_expr(x, o);
+            }
+            write!(o, ")@{s}..{end}").unwrap();
+        }
+        ExprKind::Closure {
+            params,
+            result,
+            effects,
+            body,
+            ..
+        } => {
+            o.push_str("fn(");
+            for (i, p) in params.iter().enumerate() {
+                if i > 0 {
+                    o.push_str(", ");
+                }
+                fmt_ast_ty(&p.ty, o);
+            }
+            o.push_str(")->");
+            fmt_ast_ty(result, o);
+            if !effects.instances.is_empty() || effects.tail.is_some() {
+                o.push_str(" with ");
+                fmt_ast_row(effects, o);
+            }
+            o.push('{');
+            fmt_ast_expr(body, o);
+            write!(o, "}}@{s}..{end}").unwrap();
+        }
+        ExprKind::Handle {
+            effect,
+            state,
+            body,
+            ret,
+            ops,
+        } => {
+            o.push_str("handle(");
+            fmt_ast_eff(effect, o);
+            if let Some((_, st)) = state {
+                o.push_str(", ");
+                fmt_ast_expr(st, o);
+            }
+            o.push_str(", ");
+            fmt_ast_expr(body, o);
+            o.push_str(", ");
+            fmt_ast_expr(&ret.body, o);
+            for op in ops {
+                o.push_str(", ");
+                fmt_ast_expr(&op.body, o);
+            }
+            write!(o, ")@{s}..{end}").unwrap();
+        }
+        ExprKind::Continue => write!(o, "C@{s}..{end}").unwrap(),
+    }
+}
+
+fn rust_elaborate_report(module: &Module) -> String {
+    let Some((elab_mod, base, syn)) = tensor_types::probe_elaborate(module) else {
+        return "inactive\n".into();
+    };
+    let mut o = format!("base {base}\n");
+    for item in elab_mod.items.iter().skip(7) {
+        match item {
+            vesper::ast::Item::Adt(a) => {
+                write!(o, "ADT {}", a.name).unwrap();
+                for g in &a.generics {
+                    write!(o, " {}", g.name).unwrap();
+                }
+                o.push('\n');
+                for v in &a.variants {
+                    write!(o, " V {}", v.name).unwrap();
+                    for f in &v.fields {
+                        o.push(' ');
+                        fmt_ast_ty(&f.ty, &mut o);
+                    }
+                    o.push('\n');
+                }
+            }
+            vesper::ast::Item::Function(f) => {
+                writeln!(o, "FN {}", f.name).unwrap();
+                for g in &f.generics {
+                    writeln!(o, " G {}", g.name).unwrap();
+                }
+                for p in &f.params {
+                    write!(o, " P {}:", p.name).unwrap();
+                    fmt_ast_ty(&p.ty, &mut o);
+                    writeln!(o, "@{}..{}", p.span.start, p.span.end).unwrap();
+                }
+                o.push_str(" R ");
+                fmt_ast_ty(&f.result, &mut o);
+                o.push('\n');
+                if !f.effects.instances.is_empty() || f.effects.tail.is_some() {
+                    o.push_str(" E ");
+                    fmt_ast_row(&f.effects, &mut o);
+                    o.push('\n');
+                }
+                if let Some(b) = &f.body {
+                    o.push_str(" B ");
+                    fmt_ast_expr(b, &mut o);
+                    o.push('\n');
+                }
+            }
+            _ => {}
+        }
+    }
+    for (s, orig) in &syn {
+        writeln!(o, "SYN {s} -> @{}..{}", orig.start, orig.end).unwrap();
+    }
+    o
+}
+
+#[test]
+fn elaborate_agrees_with_rust() {
+    let f = elab_entry();
+    let mut sources = tensor_fixtures();
+    sources.extend(
+        corpus_files()
+            .into_iter()
+            .filter(|s| tensor_types::active(&s.module)),
+    );
+    let mut tested = 0usize;
+    let mut diffs = vec![];
+    for s in &sources {
+        let r = rust_elaborate_report(&s.module);
+        let v = f.text(&input(&s.text, &s.module));
+        tested += 1;
+        if r != v {
+            diffs.push((s.name.clone(), r, v));
+        }
+    }
+    assert!(tested > 0, "no active tensor sources tested");
+    if !diffs.is_empty() {
+        let mut msg = format!(
+            "{} of {tested} elaborate reports differ (first 3):\n",
+            diffs.len()
+        );
+        for (name, r, v) in diffs.iter().take(3) {
+            msg.push_str(&format!("--- {name} ---\nRUST:\n{r}\nVESPER:\n{v}\n"));
+        }
+        panic!("{msg}");
+    }
 }

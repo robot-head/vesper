@@ -1595,3 +1595,99 @@ fn test_runs_in_vesper() {
     assert_eq!(prints, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn proof_audit_matches_the_default_compiler() {
+    let hybrid = hybrid();
+    let default = default_compiler();
+    let root = scratch("vesper-cli-proof-audit-diff");
+    let cases: &[&[&str]] = &[
+        &["proof-audit", "--help"],
+        &["proof-audit", "-h"],
+        &["proof-audit"],
+        &["proof-audit", "--unknown"],
+        &["proof-audit", "--root"],
+        &["proof-audit", "--root", "a", "--root", "b"],
+        &["proof-audit", "--theorem"],
+        &["proof-audit", "--theorem", "bad..name"],
+        &["proof-audit", "--allow-axiom", "sorryAx"],
+        &["proof-audit", "--allow-axiom", "Lean.ofReduceBool"],
+        &["proof-audit", "--allow-axiom", "Foo._native.bar"],
+        &["proof-audit", "--lean", "a", "--lean", "b"],
+        &["proof-audit", "--timeout", "0"],
+        &["proof-audit", "--timeout", "301"],
+        &["proof-audit", "--timeout", "abc"],
+        &[
+            "proof-audit",
+            "--macro-provenance",
+            "a",
+            "--macro-provenance",
+            "b",
+        ],
+        &["proof-audit", "ModA", "ModB"],
+        &["proof-audit", "Lean.Init", "--root", "r", "--theorem", "t"],
+        &["proof-audit", "ModA", "--root", "r"],
+        &["proof-audit", "ModA", "--theorem", "t"],
+    ];
+    let mut diffs = vec![];
+    for argv in cases {
+        let mut results = vec![];
+        for compiler in [&default, &hybrid] {
+            let work = root.join(if compiler == &default { "d" } else { "h" });
+            let _ = std::fs::remove_dir_all(&work);
+            std::fs::create_dir_all(&work).unwrap();
+            let out = Command::new(compiler)
+                .current_dir(&work)
+                .env_remove("VESPER_HYBRID_STATS")
+                .args(*argv)
+                .output()
+                .unwrap();
+            results.push(out);
+        }
+        let d = &results[0];
+        let h = &results[1];
+        if d.status.code() != h.status.code() || d.stdout != h.stdout || d.stderr != h.stderr {
+            diffs.push(format!(
+                "{argv:?}: status {:?} vs {:?}, stdout {:?} vs {:?}, stderr {:?} vs {:?}",
+                d.status.code(),
+                h.status.code(),
+                String::from_utf8_lossy(&d.stdout),
+                String::from_utf8_lossy(&h.stdout),
+                String::from_utf8_lossy(&d.stderr),
+                String::from_utf8_lossy(&h.stderr),
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        diffs.is_empty(),
+        "Vesper `proof-audit` differs from default CLI on {} cases:\n{}",
+        diffs.len(),
+        diffs.join("\n")
+    );
+}
+
+#[test]
+fn proof_audit_runs_in_vesper() {
+    let hybrid = hybrid();
+    let dir = scratch("vesper-cli-proof-audit-runs");
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = Command::new(&hybrid)
+        .current_dir(&dir)
+        .env("VESPER_HYBRID_STATS", "1")
+        .args(["proof-audit", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let prints: u64 = stderr
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("vesper-hybrid: the command layers printed ")
+                .and_then(|s| s.strip_suffix(" times from Vesper"))
+                .and_then(|n| n.parse().ok())
+        })
+        .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
+    assert_eq!(prints, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}

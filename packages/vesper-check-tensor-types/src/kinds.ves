@@ -39,6 +39,7 @@ use @vesper/check-data::util::{
     inc,
     n32,
     u32_at,
+    u64_at,
     u8_at,
     w
 };
@@ -154,7 +155,14 @@ pub struct Cx {
     bo: ChunkSeq[Ob],
     fresh: u64,
     s_zero: u32,
-    s_one: u32
+    s_one: u32,
+    // Call elaborations: `(el_s, el_e) -> el_kind` (1 = Dims, 2 = Shape, 0 = removed).
+    el_s: ChunkSeq[u64],
+    el_e: ChunkSeq[u64],
+    el_kind: ChunkSeq[u8],
+    el_da: ChunkSeq[u32],
+    el_dn: ChunkSeq[u32],
+    el_dims: ChunkSeq[u32]
 }
 
 pub fn cx_new(inout st: St) -> Cx {
@@ -216,7 +224,65 @@ pub fn cx_new(inout st: St) -> Cx {
         bo: ChunkSeq::new[Ob](),
         fresh: 0,
         s_zero: st.names.intern(in "0".as_bytes()),
-        s_one: st.names.intern(in "1".as_bytes())
+        s_one: st.names.intern(in "1".as_bytes()),
+        el_s: ChunkSeq::new[u64](),
+        el_e: ChunkSeq::new[u64](),
+        el_kind: ChunkSeq::new[u8](),
+        el_da: ChunkSeq::new[u32](),
+        el_dn: ChunkSeq::new[u32](),
+        el_dims: ChunkSeq::new[u32]()
+    }
+}
+
+pub fn elab_clear(inout cx: Cx) {
+    cx.el_s.clear();
+    cx.el_e.clear();
+    cx.el_kind.clear();
+    cx.el_da.clear();
+    cx.el_dn.clear();
+    cx.el_dims.clear();
+}
+
+pub fn elab_find(in cx: Cx, s: u64, e: u64) -> u64 {
+    let n = cx.el_s.len();
+    for i in 0..n {
+        if u8_at(in cx.el_kind, i) != 0
+            && u64_at(in cx.el_s, i) == s
+            && u64_at(in cx.el_e, i) == e {
+            return i;
+        }
+    }
+    4294967295
+}
+
+pub fn elab_insert(inout cx: Cx, s: u64, e: u64, kind: u8, in dims: ChunkSeq[u32]) {
+    let da = n32(cx.el_dims.len());
+    let dn = n32(dims.len());
+    for i in 0..dims.len() {
+        cx.el_dims.push(u32_at(in dims, i));
+    }
+    let n = cx.el_s.len();
+    for i in 0..n {
+        if u64_at(in cx.el_s, i) == s && u64_at(in cx.el_e, i) == e {
+            let ok0 = cx.el_kind.try_set(i, kind);
+            let ok1 = cx.el_da.try_set(i, da);
+            let ok2 = cx.el_dn.try_set(i, dn);
+            return;
+        }
+    }
+    cx.el_s.push(s);
+    cx.el_e.push(e);
+    cx.el_kind.push(kind);
+    cx.el_da.push(da);
+    cx.el_dn.push(dn);
+}
+
+pub fn elab_remove(inout cx: Cx, s: u64, e: u64) {
+    let n = cx.el_s.len();
+    for i in 0..n {
+        if u64_at(in cx.el_s, i) == s && u64_at(in cx.el_e, i) == e {
+            let ok = cx.el_kind.try_set(i, 0);
+        }
     }
 }
 

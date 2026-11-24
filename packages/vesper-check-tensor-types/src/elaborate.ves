@@ -1,0 +1,853 @@
+// Lowering a checked tensor module to core syntax (src/tensor_types/elaborate.rs)
+// for `@vesper/check-tensor-types` (SH2 lane 14 part 2, #1186).
+
+use @vesper/ast::{
+    Ast,
+    ExprNode,
+    TypeNode,
+    StmtNode,
+    ArgNode,
+    ClauseNode,
+    ParamNode,
+    EffectsNode,
+    EffectNode,
+    GenericNode,
+    FieldNode,
+    VariantNode,
+    AdtNode,
+    FnNode,
+    ItemNode,
+    lit_at,
+    list_len,
+    list_at,
+    expr_at,
+    type_at
+};
+use @vesper/check-data::util::{
+    push_decimal,
+    add,
+    inc,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use self::state::{
+    St,
+    dim_exp_at,
+    dim_node,
+    dim_var_at,
+    put,
+    put_dim,
+    spells
+};
+use self::kinds::{
+    Cx,
+    at32,
+    nm,
+    paramn,
+    fnn,
+    adtn,
+    variantn,
+    fieldn,
+    genericn,
+    effectsn,
+    effectn,
+    stmtn,
+    argn,
+    clausen,
+    effdecln,
+    impln,
+    traitn,
+    confn,
+    item_at,
+    is_wire_integer,
+    elab_find
+};
+
+const NONE: u32 = 4294967295;
+const NONE64: u64 = 4294967295;
+const KD_DIM: u8 = 0;
+const KD_TYPE: u8 = 2;
+
+struct ElabOut {
+    next: u64,
+    syn_s: ChunkSeq[u64],
+    orig_s: ChunkSeq[u64],
+    orig_e: ChunkSeq[u64],
+    out: ChunkSeq[u8]
+}
+
+fn elab_out_new(base: u64) -> ElabOut {
+    ElabOut {
+        next: base,
+        syn_s: ChunkSeq::new[u64](),
+        orig_s: ChunkSeq::new[u64](),
+        orig_e: ChunkSeq::new[u64](),
+        out: ChunkSeq::new[u8]()
+    }
+}
+
+fn alloc_span(inout eo: ElabOut, os: u64, oe: u64) -> u64 {
+    let s = eo.next;
+    eo.next = add(s, 2);
+    eo.syn_s.push(s);
+    eo.orig_s.push(os);
+    eo.orig_e.push(oe);
+    s
+}
+
+fn is_erased_adt_kind(in cx: Cx, name_sym: u32, idx: u64) -> bool {
+    let row = at32(in cx.ak_row, name_sym);
+    if row == NONE {
+        return false;
+    }
+    let ka = w(u32_at(in cx.ak_a, w(row)));
+    let kn = w(u32_at(in cx.ak_n, w(row)));
+    if idx < kn {
+        return u8_at(in cx.ak_k, add(ka, idx)) != KD_TYPE;
+    }
+    false
+}
+
+fn put_raw_ty(in st: St, in a: Ast, t: u32, inout o: ChunkSeq[u8]) {
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        let name = nm(in st, n.a);
+        st.names.write(name, inout o);
+        let argc = list_len(in a, n.b);
+        if argc > 0 {
+            o.push(91);
+            for i in 0..argc {
+                if i > 0 {
+                    put(inout o, in ", ");
+                }
+                put_raw_ty(in st, in a, list_at(in a, n.b, i), inout o);
+            }
+            o.push(93);
+        }
+    } else if n.kind == 2 {
+        o.push(40);
+        let cnt = list_len(in a, n.a);
+        for i in 0..cnt {
+            if i > 0 {
+                put(inout o, in ", ");
+            }
+            put_raw_ty(in st, in a, list_at(in a, n.a, i), inout o);
+        }
+        o.push(41);
+    } else if n.kind == 5 {
+        o.push(91);
+        o.push(93);
+        o.push(91);
+        let cnt = list_len(in a, n.a);
+        for i in 0..cnt {
+            if i > 0 {
+                put(inout o, in ", ");
+            }
+            put_raw_ty(in st, in a, list_at(in a, n.a, i), inout o);
+        }
+        o.push(93);
+    } else {
+        put(inout o, in "_");
+    }
+}
+
+fn put_erased_ty(in st: St, in cx: Cx, in a: Ast, t: u32, inout o: ChunkSeq[u8]) {
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        let name = nm(in st, n.a);
+        let argc = list_len(in a, n.b);
+        if spells(in st, name, in "Tensor")
+            || spells(in st, name, in "KvPageLease")
+            || spells(in st, name, in "ActiveKvSeq") {
+            st.names.write(name, inout o);
+            return;
+        }
+        if argc == 0 && is_wire_integer(in st, name) {
+            put(inout o, in "u64");
+            return;
+        }
+        if spells(in st, name, in "ByteArray") || spells(in st, name, in "ZeroPad") {
+            put(inout o, in "()");
+            return;
+        }
+        st.names.write(name, inout o);
+        let mut first = true;
+        for i in 0..argc {
+            if is_erased_adt_kind(in cx, name, i) {
+                continue;
+            }
+            if first {
+                o.push(91);
+                first = false;
+            } else {
+                put(inout o, in ", ");
+            }
+            put_erased_ty(in st, in cx, in a, list_at(in a, n.b, i), inout o);
+        }
+        if !first {
+            o.push(93);
+        }
+    } else if n.kind == 2 {
+        o.push(40);
+        let cnt = list_len(in a, n.a);
+        for i in 0..cnt {
+            if i > 0 {
+                put(inout o, in ", ");
+            }
+            put_erased_ty(in st, in cx, in a, list_at(in a, n.a, i), inout o);
+        }
+        o.push(41);
+    } else if n.kind == 3 {
+        put(inout o, in "fn(");
+        let m = list_len(in a, n.a) >> 1;
+        for i in 0..m {
+            if i > 0 {
+                put(inout o, in ", ");
+            }
+            put_erased_ty(in st, in cx, in a, list_at(in a, n.a, inc(wrapping_mul(i, 2))), inout o);
+        }
+        put(inout o, in ") -> ");
+        put_erased_ty(in st, in cx, in a, n.b, inout o);
+        if n.c != NONE {
+            let row = effectsn(in a, n.c);
+            if list_len(in a, row.instances) > 0 || row.tail != NONE {
+                put(inout o, in " with ");
+                put_erased_row(in st, in cx, in a, n.c, inout o);
+            }
+        }
+    } else if n.kind == 4 {
+        put_erased_row(in st, in cx, in a, n.a, inout o);
+    } else {
+        put(inout o, in "_");
+    }
+}
+
+fn put_erased_effect(in st: St, in cx: Cx, in a: Ast, ei: u32, inout o: ChunkSeq[u8]) {
+    let ef = effectn(in a, ei);
+    let ename = nm(in st, ef.name);
+    if ef.label != NONE {
+        st.names.write(nm(in st, ef.label), inout o);
+        put(inout o, in ": ");
+    }
+    st.names.write(ename, inout o);
+    if !spells(in st, ename, in "KvCachePool") {
+        let argc = list_len(in a, ef.args);
+        if argc > 0 {
+            o.push(91);
+            for j in 0..argc {
+                if j > 0 {
+                    put(inout o, in ", ");
+                }
+                put_erased_ty(in st, in cx, in a, list_at(in a, ef.args, j), inout o);
+            }
+            o.push(93);
+        }
+    }
+}
+
+fn put_erased_row(in st: St, in cx: Cx, in a: Ast, r: u32, inout o: ChunkSeq[u8]) {
+    if r == NONE {
+        return;
+    }
+    let row = effectsn(in a, r);
+    let cnt = list_len(in a, row.instances);
+    let mut first = true;
+    for i in 0..cnt {
+        if !first {
+            put(inout o, in ", ");
+        }
+        first = false;
+        put_erased_effect(in st, in cx, in a, list_at(in a, row.instances, i), inout o);
+    }
+    if row.tail != NONE {
+        if !first {
+            put(inout o, in ", ");
+        }
+        put(inout o, in "..");
+        st.names.write(nm(in st, row.tail), inout o);
+    }
+}
+
+fn max_end(in a: Ast) -> u64 {
+    let mut mx: u64 = 0;
+    for i in 0..a.m_items.len() {
+        let it = item_at(in a, i);
+        let mut e: u64 = 0;
+        if it.kind == 1 {
+            e = widen_u64(adtn(in a, it.node).end);
+        } else if it.kind == 2 {
+            e = widen_u64(fnn(in a, it.node).end);
+        } else if it.kind == 3 {
+            e = widen_u64(effdecln(in a, it.node).end);
+        } else if it.kind == 4 {
+            let im = impln(in a, it.node);
+            for j in 0..list_len(in a, im.methods) {
+                let me = widen_u64(fnn(in a, list_at(in a, im.methods, j)).end);
+                if me > e {
+                    e = me;
+                }
+            }
+        } else if it.kind == 5 {
+            e = widen_u64(traitn(in a, it.node).end);
+        } else if it.kind == 6 {
+            e = widen_u64(confn(in a, it.node).end);
+        }
+        if e > mx {
+            mx = e;
+        }
+    }
+    mx
+}
+
+fn emit_dim_expr_str(in st: St, d: u32, os: u64, oe: u64, inout eo: ElabOut) -> ChunkSeq[u8] {
+    let x = dim_node(in st, d);
+    let coeff = x.coeff;
+    let vn = widen_u64(x.n);
+    let mut acc = ChunkSeq::new[u8]();
+    let mut has = false;
+    if coeff != 1 || vn == 0 {
+        let sp = alloc_span(inout eo, os, oe);
+        put(inout acc, in "lit(");
+        push_decimal(inout acc, coeff);
+        put(inout acc, in ")@");
+        push_decimal(inout acc, sp);
+        put(inout acc, in "..");
+        push_decimal(inout acc, inc(sp));
+        has = true;
+    }
+    for i in 0..vn {
+        let v = dim_var_at(in st, d, i);
+        let exp = widen_u64(dim_exp_at(in st, d, i));
+        for _ in 0..exp {
+            let sp = alloc_span(inout eo, os, oe);
+            let mut factor = ChunkSeq::new[u8]();
+            put(inout factor, in "name($dim_");
+            st.names.write(v, inout factor);
+            put(inout factor, in ")@");
+            push_decimal(inout factor, sp);
+            put(inout factor, in "..");
+            push_decimal(inout factor, inc(sp));
+            if !has {
+                acc = factor;
+                has = true;
+            } else {
+                let csp = alloc_span(inout eo, os, oe);
+                let wsp = alloc_span(inout eo, os, oe);
+                let mut next_acc = ChunkSeq::new[u8]();
+                put(inout next_acc, in "call(wrapping_mul@");
+                push_decimal(inout next_acc, csp);
+                put(inout next_acc, in "..");
+                push_decimal(inout next_acc, inc(csp));
+                put(inout next_acc, in ", ");
+                next_acc.extend(in acc.as_slice());
+                put(inout next_acc, in ", ");
+                next_acc.extend(in factor.as_slice());
+                put(inout next_acc, in ")@");
+                push_decimal(inout next_acc, wsp);
+                put(inout next_acc, in "..");
+                push_decimal(inout next_acc, inc(wsp));
+                acc = next_acc;
+            }
+        }
+    }
+    acc
+}
+
+fn emit_dims_value(in st: St, in cx: Cx, da: u64, dn: u64, os: u64, oe: u64, inout eo: ElabOut)
+    -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    let rsp = alloc_span(inout eo, os, oe);
+    put(inout o, in "struct(Dims, rank: lit(");
+    push_decimal(inout o, dn);
+    put(inout o, in ")@");
+    push_decimal(inout o, rsp);
+    put(inout o, in "..");
+    push_decimal(inout o, inc(rsp));
+    for i in 0..4 {
+        put(inout o, in ", d");
+        push_decimal(inout o, i);
+        put(inout o, in ": ");
+        if i < dn {
+            let d = u32_at(in cx.el_dims, add(da, i));
+            let ds = emit_dim_expr_str(in st, d, os, oe, inout eo);
+            o.extend(in ds.as_slice());
+        } else {
+            let sp = alloc_span(inout eo, os, oe);
+            put(inout o, in "lit(1)@");
+            push_decimal(inout o, sp);
+            put(inout o, in "..");
+            push_decimal(inout o, inc(sp));
+        }
+    }
+    let ssp = alloc_span(inout eo, os, oe);
+    put(inout o, in ")@");
+    push_decimal(inout o, ssp);
+    put(inout o, in "..");
+    push_decimal(inout o, inc(ssp));
+    o
+}
+
+fn emit_expr(in st: St, in cx: Cx, in a: Ast, e: u32, inout eo: ElabOut) {
+    let n = expr_at(in a, e);
+    let k = n.kind;
+    let es = widen_u64(n.start);
+    let ee = widen_u64(n.end);
+    if k == 1 || k == 2 {
+        put(inout eo.out, in "E");
+        push_decimal(inout eo.out, widen_u64(k));
+        put(inout eo.out, in "@");
+        push_decimal(inout eo.out, es);
+        put(inout eo.out, in "..");
+        push_decimal(inout eo.out, ee);
+        return;
+    }
+    if k == 3 {
+        put(inout eo.out, in "(");
+        let cnt = list_len(in a, n.a);
+        for i in 0..cnt {
+            if i > 0 {
+                put(inout eo.out, in ", ");
+            }
+            emit_expr(in st, in cx, in a, list_at(in a, n.a, i), inout eo);
+        }
+        put(inout eo.out, in ")@");
+        push_decimal(inout eo.out, es);
+        put(inout eo.out, in "..");
+        push_decimal(inout eo.out, ee);
+        return;
+    }
+    if k == 4 {
+        st.names.write(nm(in st, n.a), inout eo.out);
+        put(inout eo.out, in "{");
+        let m = list_len(in a, n.b) >> 1;
+        for i in 0..m {
+            if i > 0 {
+                put(inout eo.out, in ", ");
+            }
+            st.names.write(nm(in st, list_at(in a, n.b, wrapping_mul(i, 2))), inout eo.out);
+            put(inout eo.out, in ": ");
+            emit_expr(in st, in cx, in a, list_at(in a, n.b, inc(wrapping_mul(i, 2))), inout eo);
+        }
+        put(inout eo.out, in "}@");
+        push_decimal(inout eo.out, es);
+        put(inout eo.out, in "..");
+        push_decimal(inout eo.out, ee);
+        return;
+    }
+    if k == 5 {
+        put(inout eo.out, in "{");
+        for i in 0..list_len(in a, n.a) {
+            if i > 0 {
+                put(inout eo.out, in "; ");
+            }
+            let s = stmtn(in a, list_at(in a, n.a, i));
+            if s.kind == 1 {
+                put(inout eo.out, in "let:");
+                put_erased_ty(in st, in cx, in a, s.ty, inout eo.out);
+                put(inout eo.out, in "=");
+            }
+            emit_expr(in st, in cx, in a, s.value, inout eo);
+        }
+        if n.b != NONE {
+            put(inout eo.out, in "; ");
+            emit_expr(in st, in cx, in a, n.b, inout eo);
+        }
+        put(inout eo.out, in "}@");
+        push_decimal(inout eo.out, es);
+        put(inout eo.out, in "..");
+        push_decimal(inout eo.out, ee);
+        return;
+    }
+    if k == 6 {
+        let el_idx = elab_find(in cx, es, ee);
+        let el_kind = if el_idx == NONE64 {
+            0
+        } else {
+            u8_at(in cx.el_kind, el_idx)
+        };
+        put(inout eo.out, in "call(");
+        emit_expr(in st, in cx, in a, n.a, inout eo);
+        let tc = list_len(in a, n.b);
+        if el_kind == 1 {
+            let cn = expr_at(in a, n.a);
+            let mut filtered = false;
+            if cn.kind == 2 {
+                let row = at32(in cx.sg_row, nm(in st, cn.a));
+                if row != NONE {
+                    let gn = w(u32_at(in cx.sg_gn, w(row)));
+                    if tc == gn {
+                        let ga = w(u32_at(in cx.sg_ga, w(row)));
+                        let mut buf = ChunkSeq::new[u8]();
+                        let mut first = true;
+                        for i in 0..tc {
+                            if u8_at(in cx.sg_gkind, add(ga, i)) == KD_TYPE {
+                                if !first {
+                                    put(inout buf, in ", ");
+                                }
+                                first = false;
+                                put_erased_ty(in st, in cx, in a, list_at(in a, n.b, i), inout buf);
+                            }
+                        }
+                        if !first {
+                            eo.out.push(91);
+                            eo.out.extend(in buf.as_slice());
+                            eo.out.push(93);
+                        }
+                        filtered = true;
+                    }
+                }
+            }
+            if !filtered && tc > 0 {
+                put(inout eo.out, in "[");
+                for i in 0..tc {
+                    if i > 0 {
+                        put(inout eo.out, in ", ");
+                    }
+                    put_erased_ty(in st, in cx, in a, list_at(in a, n.b, i), inout eo.out);
+                }
+                put(inout eo.out, in "]");
+            }
+            let da = w(u32_at(in cx.el_da, el_idx));
+            let dn = w(u32_at(in cx.el_dn, el_idx));
+            for i in 0..dn {
+                put(inout eo.out, in ", ");
+                let ds = emit_dim_expr_str(
+                    in st,
+                    u32_at(in cx.el_dims, add(da, i)),
+                    es,
+                    ee,
+                    inout eo
+                );
+                eo.out.extend(in ds.as_slice());
+            }
+            for i in 0..list_len(in a, n.c) {
+                put(inout eo.out, in ", ");
+                emit_expr(in st, in cx, in a, argn(in a, list_at(in a, n.c, i)).expr, inout eo);
+            }
+        } else if el_kind == 2 {
+            for i in 0..list_len(in a, n.c) {
+                put(inout eo.out, in ", ");
+                emit_expr(in st, in cx, in a, argn(in a, list_at(in a, n.c, i)).expr, inout eo);
+            }
+            let da = w(u32_at(in cx.el_da, el_idx));
+            let dn = w(u32_at(in cx.el_dn, el_idx));
+            put(inout eo.out, in ", ");
+            let dv = emit_dims_value(in st, in cx, da, dn, es, ee, inout eo);
+            eo.out.extend(in dv.as_slice());
+        } else {
+            if tc > 0 {
+                put(inout eo.out, in "[");
+                for i in 0..tc {
+                    if i > 0 {
+                        put(inout eo.out, in ", ");
+                    }
+                    put_erased_ty(in st, in cx, in a, list_at(in a, n.b, i), inout eo.out);
+                }
+                put(inout eo.out, in "]");
+            }
+            for i in 0..list_len(in a, n.c) {
+                put(inout eo.out, in ", ");
+                emit_expr(in st, in cx, in a, argn(in a, list_at(in a, n.c, i)).expr, inout eo);
+            }
+        }
+        put(inout eo.out, in ")@");
+        push_decimal(inout eo.out, es);
+        put(inout eo.out, in "..");
+        push_decimal(inout eo.out, ee);
+        return;
+    }
+    if k == 7 || k == 9 || k == 17 {
+        put(inout eo.out, in "U");
+        push_decimal(inout eo.out, widen_u64(k));
+        put(inout eo.out, in "(");
+        emit_expr(in st, in cx, in a, n.a, inout eo);
+        put(inout eo.out, in ")@");
+        push_decimal(inout eo.out, es);
+        put(inout eo.out, in "..");
+        push_decimal(inout eo.out, ee);
+        return;
+    }
+    if k == 10 {
+        put(inout eo.out, in "Un(");
+        emit_expr(in st, in cx, in a, n.b, inout eo);
+        put(inout eo.out, in ")@");
+        push_decimal(inout eo.out, es);
+        put(inout eo.out, in "..");
+        push_decimal(inout eo.out, ee);
+        return;
+    }
+    if k == 8 || k == 19 {
+        put(inout eo.out, in "B");
+        push_decimal(inout eo.out, widen_u64(k));
+        put(inout eo.out, in "(");
+        emit_expr(in st, in cx, in a, n.a, inout eo);
+        put(inout eo.out, in ", ");
+        emit_expr(in st, in cx, in a, n.b, inout eo);
+        put(inout eo.out, in ")@");
+        push_decimal(inout eo.out, es);
+        put(inout eo.out, in "..");
+        push_decimal(inout eo.out, ee);
+        return;
+    }
+    if k == 11 || k == 12 {
+        put(inout eo.out, in "Op");
+        push_decimal(inout eo.out, widen_u64(k));
+        put(inout eo.out, in "(");
+        emit_expr(in st, in cx, in a, n.b, inout eo);
+        put(inout eo.out, in ", ");
+        emit_expr(in st, in cx, in a, n.c, inout eo);
+        put(inout eo.out, in ")@");
+        push_decimal(inout eo.out, es);
+        put(inout eo.out, in "..");
+        push_decimal(inout eo.out, ee);
+        return;
+    }
+    if k == 13 {
+        put(inout eo.out, in "if(");
+        emit_expr(in st, in cx, in a, n.a, inout eo);
+        put(inout eo.out, in ", ");
+        emit_expr(in st, in cx, in a, n.b, inout eo);
+        if n.c != NONE {
+            put(inout eo.out, in ", ");
+            emit_expr(in st, in cx, in a, n.c, inout eo);
+        }
+        put(inout eo.out, in ")@");
+        push_decimal(inout eo.out, es);
+        put(inout eo.out, in "..");
+        push_decimal(inout eo.out, ee);
+        return;
+    }
+    if k == 14 {
+        put(inout eo.out, in "match(");
+        emit_expr(in st, in cx, in a, n.a, inout eo);
+        let m = list_len(in a, n.b) >> 1;
+        for i in 0..m {
+            put(inout eo.out, in ", ");
+            emit_expr(in st, in cx, in a, list_at(in a, n.b, inc(wrapping_mul(i, 2))), inout eo);
+        }
+        put(inout eo.out, in ")@");
+        push_decimal(inout eo.out, es);
+        put(inout eo.out, in "..");
+        push_decimal(inout eo.out, ee);
+        return;
+    }
+    if k == 18 {
+        put(inout eo.out, in "for(");
+        emit_expr(in st, in cx, in a, n.b, inout eo);
+        put(inout eo.out, in ", ");
+        emit_expr(in st, in cx, in a, n.c, inout eo);
+        put(inout eo.out, in ")@");
+        push_decimal(inout eo.out, es);
+        put(inout eo.out, in "..");
+        push_decimal(inout eo.out, ee);
+        return;
+    }
+    if k == 20 || k == 21 {
+        put(inout eo.out, in "J");
+        push_decimal(inout eo.out, widen_u64(k));
+        put(inout eo.out, in "(");
+        if n.a != NONE {
+            emit_expr(in st, in cx, in a, n.a, inout eo);
+        }
+        put(inout eo.out, in ")@");
+        push_decimal(inout eo.out, es);
+        put(inout eo.out, in "..");
+        push_decimal(inout eo.out, ee);
+        return;
+    }
+    if k == 15 {
+        put(inout eo.out, in "fn(");
+        for i in 0..list_len(in a, n.a) {
+            if i > 0 {
+                put(inout eo.out, in ", ");
+            }
+            put_erased_ty(in st, in cx, in a, paramn(in a, list_at(in a, n.a, i)).ty, inout eo.out);
+        }
+        put(inout eo.out, in ")->");
+        put_erased_ty(in st, in cx, in a, n.c, inout eo.out);
+        if n.d != NONE {
+            let row = effectsn(in a, n.d);
+            if list_len(in a, row.instances) > 0 || row.tail != NONE {
+                put(inout eo.out, in " with ");
+                put_erased_row(in st, in cx, in a, n.d, inout eo.out);
+            }
+        }
+        put(inout eo.out, in "{");
+        emit_expr(in st, in cx, in a, n.e, inout eo);
+        put(inout eo.out, in "}@");
+        push_decimal(inout eo.out, es);
+        put(inout eo.out, in "..");
+        push_decimal(inout eo.out, ee);
+        return;
+    }
+    if k == 16 {
+        put(inout eo.out, in "handle(");
+        put_erased_effect(in st, in cx, in a, n.a, inout eo.out);
+        if n.b != NONE {
+            put(inout eo.out, in ", ");
+            emit_expr(in st, in cx, in a, n.c, inout eo);
+        }
+        put(inout eo.out, in ", ");
+        emit_expr(in st, in cx, in a, n.d, inout eo);
+        for i in 0..list_len(in a, n.e) {
+            put(inout eo.out, in ", ");
+            emit_expr(in st, in cx, in a, clausen(in a, list_at(in a, n.e, i)).body, inout eo);
+        }
+        put(inout eo.out, in ")@");
+        push_decimal(inout eo.out, es);
+        put(inout eo.out, in "..");
+        push_decimal(inout eo.out, ee);
+        return;
+    }
+    put(inout eo.out, in "C@");
+    push_decimal(inout eo.out, es);
+    put(inout eo.out, in "..");
+    push_decimal(inout eo.out, ee);
+}
+
+pub fn elaborate_report(in st: St, in cx: Cx, in a: Ast) -> ChunkSeq[u8] {
+    let base = add(max_end(in a), 1048576);
+    let mut eo = elab_out_new(base);
+    put(inout eo.out, in "base ");
+    push_decimal(inout eo.out, base);
+    eo.out.push(10);
+    for i in 0..a.m_items.len() {
+        let it = item_at(in a, i);
+        if it.kind == 1 {
+            let adt = adtn(in a, it.node);
+            let aname = nm(in st, adt.name);
+            put(inout eo.out, in "ADT ");
+            st.names.write(aname, inout eo.out);
+            let gc = list_len(in a, adt.generics);
+            for j in 0..gc {
+                if !is_erased_adt_kind(in cx, aname, j) {
+                    put(inout eo.out, in " ");
+                    let g = genericn(in a, list_at(in a, adt.generics, j));
+                    st.names.write(nm(in st, g.name), inout eo.out);
+                }
+            }
+            eo.out.push(10);
+            for vi in 0..list_len(in a, adt.variants) {
+                let v = variantn(in a, list_at(in a, adt.variants, vi));
+                put(inout eo.out, in " V ");
+                st.names.write(nm(in st, v.name), inout eo.out);
+                for fi in 0..list_len(in a, v.fields) {
+                    let f = fieldn(in a, list_at(in a, v.fields, fi));
+                    put(inout eo.out, in " ");
+                    put_erased_ty(in st, in cx, in a, f.ty, inout eo.out);
+                }
+                eo.out.push(10);
+            }
+        } else if it.kind == 2 {
+            let f = fnn(in a, it.node);
+            let fname = nm(in st, f.name);
+            put(inout eo.out, in "FN ");
+            st.names.write(fname, inout eo.out);
+            eo.out.push(10);
+            let row = at32(in cx.sg_row, fname);
+            if row == NONE {
+                for gi in 0..list_len(in a, f.generics) {
+                    let g = genericn(in a, list_at(in a, f.generics, gi));
+                    put(inout eo.out, in " G ");
+                    st.names.write(nm(in st, g.name), inout eo.out);
+                    eo.out.push(10);
+                }
+                for pi in 0..list_len(in a, f.params) {
+                    let p = paramn(in a, list_at(in a, f.params, pi));
+                    put(inout eo.out, in " P ");
+                    st.names.write(nm(in st, p.name), inout eo.out);
+                    put(inout eo.out, in ":");
+                    put_raw_ty(in st, in a, p.ty, inout eo.out);
+                    put(inout eo.out, in "@");
+                    push_decimal(inout eo.out, widen_u64(p.start));
+                    put(inout eo.out, in "..");
+                    push_decimal(inout eo.out, widen_u64(p.end));
+                    eo.out.push(10);
+                }
+                put(inout eo.out, in " R ");
+                put_raw_ty(in st, in a, f.result, inout eo.out);
+                eo.out.push(10);
+                if f.body != NONE {
+                    put(inout eo.out, in " B ");
+                    emit_expr(in st, in cx, in a, f.body, inout eo);
+                    eo.out.push(10);
+                }
+                continue;
+            }
+            let ga = w(u32_at(in cx.sg_ga, w(row)));
+            let gn = w(u32_at(in cx.sg_gn, w(row)));
+            for gi in 0..list_len(in a, f.generics) {
+                let g = genericn(in a, list_at(in a, f.generics, gi));
+                let gsym = nm(in st, g.name);
+                let mut keep = g.row;
+                if !keep {
+                    let mut gk = KD_TYPE;
+                    for k in 0..gn {
+                        if u32_at(in cx.sg_gsym, add(ga, k)) == gsym {
+                            gk = u8_at(in cx.sg_gkind, add(ga, k));
+                            break;
+                        }
+                    }
+                    keep = gk == KD_TYPE;
+                }
+                if keep {
+                    put(inout eo.out, in " G ");
+                    st.names.write(gsym, inout eo.out);
+                    eo.out.push(10);
+                }
+            }
+            for k in 0..gn {
+                if u8_at(in cx.sg_gkind, add(ga, k)) == KD_DIM {
+                    let sp = alloc_span(inout eo, widen_u64(f.start), widen_u64(f.end));
+                    put(inout eo.out, in " P $dim_");
+                    st.names.write(u32_at(in cx.sg_gsym, add(ga, k)), inout eo.out);
+                    put(inout eo.out, in ":u64@");
+                    push_decimal(inout eo.out, sp);
+                    put(inout eo.out, in "..");
+                    push_decimal(inout eo.out, inc(sp));
+                    eo.out.push(10);
+                }
+            }
+            for pi in 0..list_len(in a, f.params) {
+                let p = paramn(in a, list_at(in a, f.params, pi));
+                put(inout eo.out, in " P ");
+                st.names.write(nm(in st, p.name), inout eo.out);
+                put(inout eo.out, in ":");
+                put_erased_ty(in st, in cx, in a, p.ty, inout eo.out);
+                put(inout eo.out, in "@");
+                push_decimal(inout eo.out, widen_u64(p.start));
+                put(inout eo.out, in "..");
+                push_decimal(inout eo.out, widen_u64(p.end));
+                eo.out.push(10);
+            }
+            put(inout eo.out, in " R ");
+            put_erased_ty(in st, in cx, in a, f.result, inout eo.out);
+            eo.out.push(10);
+            if f.effects != NONE {
+                let er = effectsn(in a, f.effects);
+                if list_len(in a, er.instances) > 0 || er.tail != NONE {
+                    put(inout eo.out, in " E ");
+                    put_erased_row(in st, in cx, in a, f.effects, inout eo.out);
+                    eo.out.push(10);
+                }
+            }
+            if f.body != NONE {
+                put(inout eo.out, in " B ");
+                emit_expr(in st, in cx, in a, f.body, inout eo);
+                eo.out.push(10);
+            }
+        }
+    }
+    for i in 0..eo.syn_s.len() {
+        put(inout eo.out, in "SYN ");
+        push_decimal(inout eo.out, u64_at(in eo.syn_s, i));
+        put(inout eo.out, in " -> @");
+        push_decimal(inout eo.out, u64_at(in eo.orig_s, i));
+        put(inout eo.out, in "..");
+        push_decimal(inout eo.out, u64_at(in eo.orig_e, i));
+        eo.out.push(10);
+    }
+    eo.out
+}

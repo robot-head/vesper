@@ -196,3 +196,19 @@ pub fn check(module: &Module) -> Option<Checked> {
 pub fn analyze(module: &Module) -> Analysis {
     infer::analyze(module)
 }
+
+/// Differential probe for `tensor_types::elaborate` (`#1186`).
+#[doc(hidden)]
+pub fn probe_elaborate(
+    module: &Module,
+) -> Option<(
+    Module,
+    usize,
+    std::collections::BTreeMap<usize, crate::ast::Span>,
+)> {
+    if !active(module) {
+        return None;
+    }
+    let (_, elab) = infer::analyze_with_elaborated(module);
+    Some((elab.module, elab.base, elab.synthetic))
+}
