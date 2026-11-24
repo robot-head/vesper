@@ -226,7 +226,7 @@ pub fn seccomp_evaluate(
         let code = insn_code(w);
         let k = insn_k(w);
         if code == BPF_LD_W_ABS {
-            if k % 4 != 0 || k >= SECCOMP_DATA_BYTES {
+            if k >= SECCOMP_DATA_BYTES || k % 4 != 0 {
                 return Result::Err(
                     SeccompFault::BadLoad {
                         at: pc
