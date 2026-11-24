@@ -42,6 +42,7 @@ AETHER_PARTS = [
     "vesper/src/block.ves",
     "vesper/src/net.ves",
     "vesper/src/vsock.ves",
+    "vesper/src/vmgenid.ves",
 ]
 
 genrule(
@@ -162,5 +163,6 @@ rust_library(
         ("block_port", []),
         ("net_port", []),
         ("vsock_port", []),
+        ("vmgenid_port", []),
     ]
 ]
