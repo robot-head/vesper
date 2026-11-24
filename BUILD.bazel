@@ -1573,8 +1573,6 @@ filegroup(
     srcs = glob([
         "Cargo.toml",
         "packages/**/*.toml",
-        "crates/**/Cargo.toml",
-        "crates/**/Loom.toml",
     ]),
     visibility = ["//visibility:public"],
 )

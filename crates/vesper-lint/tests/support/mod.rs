@@ -16,6 +16,8 @@ pub fn root() -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     if manifest.join("../../Cargo.toml").is_file() {
         manifest.join("../..")
+    } else if Path::new("../../packages").is_dir() {
+        PathBuf::from("../..")
     } else {
         PathBuf::from(".")
     }
