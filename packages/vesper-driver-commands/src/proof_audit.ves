@@ -30,7 +30,7 @@ fn is_ascii_alnum(b: u8) -> bool {
     is_ascii_alpha(b) || (b >= 48 && b <= 57)
 }
 
-fn name_valid(in name: Slice[u8]) -> bool {
+pub fn name_valid(in name: Slice[u8]) -> bool {
     if name.len() == 0 || name.len() > 1024 {
         return false;
     }
@@ -67,7 +67,7 @@ fn name_valid(in name: Slice[u8]) -> bool {
     true
 }
 
-fn forbidden_axiom(in name: Slice[u8]) -> bool {
+pub fn forbidden_axiom(in name: Slice[u8]) -> bool {
     if eq(in name, in "sorryAx")
         || eq(in name, in "Lean.ofReduceBool")
         || eq(in name, in "Lean.trustCompiler") {

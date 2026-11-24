@@ -67,6 +67,9 @@ use self::lint::{
 use self::proof_audit::{
     run_proof_audit
 };
+use self::verify::{
+    run_verify
+};
 
 enum Ascii: _ {
     LineFeed = 10,
@@ -181,12 +184,15 @@ pub fn run(in args: Args)
     if eq(in c, in "proof-audit") {
         return run_proof_audit(in args);
     }
-    if eq(in c, in "verify") && has_arg(in args, in "--refute") {
-        let found = locate(in "refute".as_bytes());
-        if found.len() == 0 {
-            return missing(in "refute".as_bytes());
+    if eq(in c, in "verify") {
+        if has_arg(in args, in "--refute") {
+            let found = locate(in "refute".as_bytes());
+            if found.len() == 0 {
+                return missing(in "refute".as_bytes());
+            }
+            return run_tool(in found.as_slice(), in args);
         }
-        return run_tool(in found.as_slice(), in args);
+        return run_verify(in args);
     }
     if compiler_command(in c) {
         return delegate();
