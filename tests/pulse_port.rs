@@ -462,3 +462,101 @@ pub fn check_queue() -> u64 {
         + 10000000000;
     assert_eq!(agree(&checked, "check_queue", &MODES), expected);
 }
+
+#[test]
+fn scheduler_state_machine_invariants() {
+    let src = r#"
+use @vesper/pulse::{
+    FiberEvent, StepKind, scheduler_apply_step, scheduler_cancel_all, scheduler_completed_count,
+    scheduler_enqueue_io, scheduler_failure_count, scheduler_is_idle, scheduler_new,
+    scheduler_pop_ready, scheduler_ready_count, scheduler_spawn, scheduler_take_completed,
+    scheduler_take_failure,
+};
+
+pub fn check_scheduler() -> u64 {
+    let mut s = scheduler_new();
+    let idle0: u64 = if scheduler_is_idle(in s) { 1 } else { 0 };
+    scheduler_spawn(inout s, 10);
+    scheduler_spawn(inout s, 20);
+    let rc0 = scheduler_ready_count(in s);
+    let e1 = match scheduler_pop_ready(inout s) {
+        Option::Some(e) => if e.fiber_id == 10 {
+            match e.event {
+                FiberEvent::Start => 1,
+                _ => 0,
+            }
+        } else {
+            0
+        },
+        Option::None => 0,
+    };
+    scheduler_apply_step(inout s, StepKind::Yield(10));
+    scheduler_apply_step(inout s, StepKind::Io(1));
+    let idle1: u64 = if scheduler_is_idle(in s) { 1 } else { 0 };
+    let cancelled = scheduler_cancel_all(inout s);
+    let e2 = match scheduler_pop_ready(inout s) {
+        Option::Some(e) => if e.fiber_id == 20 {
+            match e.event {
+                FiberEvent::Cancelled => 1,
+                _ => 0,
+            }
+        } else {
+            0
+        },
+        Option::None => 0,
+    };
+    scheduler_apply_step(inout s, StepKind::Failed(7));
+    scheduler_enqueue_io(inout s, 30, true, 64, 0);
+    let _e3 = scheduler_pop_ready(inout s);
+    let e4 = match scheduler_pop_ready(inout s) {
+        Option::Some(e) => if e.fiber_id == 30 {
+            match e.event {
+                FiberEvent::IoOk(n) => if n == 64 { 1 } else { 0 },
+                _ => 0,
+            }
+        } else {
+            0
+        },
+        Option::None => 0,
+    };
+    scheduler_apply_step(inout s, StepKind::Complete(42));
+    let cc = scheduler_completed_count(in s);
+    let fc = scheduler_failure_count(in s);
+    let cval = match scheduler_take_completed(inout s) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    let fval = match scheduler_take_failure(inout s) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    };
+    let idle2: u64 = if scheduler_is_idle(in s) { 1 } else { 0 };
+    let mut acc = idle0;
+    acc = wrapping_add(acc, wrapping_mul(rc0, 10));
+    acc = wrapping_add(acc, wrapping_mul(e1, 100));
+    acc = wrapping_add(acc, wrapping_mul(idle1, 1000));
+    acc = wrapping_add(acc, wrapping_mul(cancelled, 10000));
+    acc = wrapping_add(acc, wrapping_mul(e2, 100000));
+    acc = wrapping_add(acc, wrapping_mul(e4, 1000000));
+    acc = wrapping_add(acc, wrapping_mul(cc, 10000000));
+    acc = wrapping_add(acc, wrapping_mul(fc, 100000000));
+    acc = wrapping_add(acc, wrapping_mul(cval, 1000000000));
+    acc = wrapping_add(acc, wrapping_mul(fval, 100000000000));
+    acc = wrapping_add(acc, wrapping_mul(idle2, 1000000000000));
+    acc
+}
+"#;
+    let checked = check_pulse_driver(src);
+    let expected = 1
+        + 2 * 10
+        + 100
+        + 2 * 10000
+        + 100000
+        + 1000000
+        + 10000000
+        + 100000000
+        + 42 * 1000000000
+        + 7 * 100000000000
+        + 1000000000000;
+    assert_eq!(agree(&checked, "check_scheduler", &MODES), expected);
+}

@@ -878,3 +878,184 @@ pub fn readiness_queue_complete(
 pub fn readiness_queue_take_ready(inout q: ReadinessQueue) -> ChunkSeq[CompletionSlot] {
     replace(inout q.ready, ChunkSeq::new[CompletionSlot]())
 }
+
+pub copy enum FiberEvent {
+    Start,
+    Yield,
+    IoOk(u64),
+    IoErr(u32),
+    Cancelled,
+}
+
+pub copy enum StepKind {
+    Complete(u64),
+    Failed(u32),
+    Yield(u64),
+    Io(u64),
+}
+
+pub copy struct ReadyEntry {
+    pub fiber_id: u64,
+    pub event: FiberEvent,
+}
+
+pub struct SchedulerState {
+    ready: ChunkSeq[ReadyEntry],
+    ready_head: u64,
+    completed: ChunkSeq[u64],
+    completed_head: u64,
+    failures: ChunkSeq[u32],
+    failures_head: u64,
+    in_flight: u64,
+}
+
+fn ready_at(in seq: ChunkSeq[ReadyEntry], idx: u64) -> ReadyEntry {
+    match seq.try_get(idx) {
+        Option::Some(v) => v,
+        Option::None => ReadyEntry {
+            fiber_id: 0,
+            event: FiberEvent::Start,
+        },
+    }
+}
+
+pub fn scheduler_new() -> SchedulerState {
+    SchedulerState {
+        ready: ChunkSeq::new[ReadyEntry](),
+        ready_head: 0,
+        completed: ChunkSeq::new[u64](),
+        completed_head: 0,
+        failures: ChunkSeq::new[u32](),
+        failures_head: 0,
+        in_flight: 0,
+    }
+}
+
+pub fn scheduler_spawn(inout s: SchedulerState, fiber_id: u64) -> () {
+    s
+        .ready
+        .push(
+            ReadyEntry {
+                fiber_id: fiber_id,
+                event: FiberEvent::Start,
+            }
+        );
+}
+
+pub fn scheduler_ready_count(in s: SchedulerState) -> u64 {
+    wrapping_sub(s.ready.len(), s.ready_head)
+}
+
+pub fn scheduler_completed_count(in s: SchedulerState) -> u64 {
+    wrapping_sub(s.completed.len(), s.completed_head)
+}
+
+pub fn scheduler_failure_count(in s: SchedulerState) -> u64 {
+    wrapping_sub(s.failures.len(), s.failures_head)
+}
+
+pub fn scheduler_is_idle(in s: SchedulerState) -> bool {
+    scheduler_ready_count(in s) == 0 && s.in_flight == 0
+}
+
+pub fn scheduler_cancel_all(inout s: SchedulerState) -> u64 {
+    let n = s.ready.len();
+    let mut marked: u64 = 0;
+    for i in s.ready_head..n {
+        let mut entry = ready_at(in s.ready, i);
+        entry.event = FiberEvent::Cancelled;
+        let _ok = s.ready.try_set(i, entry);
+        marked = wrapping_add(marked, 1);
+    }
+    marked
+}
+
+pub fn scheduler_pop_ready(inout s: SchedulerState) -> Option[ReadyEntry] {
+    if s.ready_head >= s.ready.len() {
+        return Option::None;
+    }
+    let entry = ready_at(in s.ready, s.ready_head);
+    s.ready_head = wrapping_add(s.ready_head, 1);
+    if s.ready_head == s.ready.len() {
+        s.ready = ChunkSeq::new[ReadyEntry]();
+        s.ready_head = 0;
+    }
+    Option::Some(entry)
+}
+
+pub fn scheduler_apply_step(inout s: SchedulerState, step: StepKind) -> () {
+    match step {
+        StepKind::Complete(val) => s.completed.push(val),
+        StepKind::Failed(code) => s.failures.push(code),
+        StepKind::Yield(fiber_id) => {
+            s
+                .ready
+                .push(
+                    ReadyEntry {
+                        fiber_id: fiber_id,
+                        event: FiberEvent::Yield,
+                    }
+                );
+        }
+        StepKind::Io(_req_id) => {
+            s.in_flight = wrapping_add(s.in_flight, 1);
+        }
+    }
+}
+
+pub fn scheduler_enqueue_io(
+    inout s: SchedulerState,
+    fiber_id: u64,
+    ok: bool,
+    bytes: u64,
+    errno: u32,
+) -> () {
+    if s.in_flight > 0 {
+        s.in_flight = wrapping_sub(s.in_flight, 1);
+    }
+    let ev = if ok {
+        FiberEvent::IoOk(bytes)
+    } else {
+        FiberEvent::IoErr(errno)
+    };
+    s
+        .ready
+        .push(
+            ReadyEntry {
+                fiber_id: fiber_id,
+                event: ev,
+            }
+        );
+}
+
+pub fn scheduler_take_completed(inout s: SchedulerState) -> Option[u64] {
+    if s.completed_head >= s.completed.len() {
+        return Option::None;
+    }
+    let v = match s.completed.try_get(s.completed_head) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    s.completed_head = wrapping_add(s.completed_head, 1);
+    if s.completed_head == s.completed.len() {
+        s.completed = ChunkSeq::new[u64]();
+        s.completed_head = 0;
+    }
+    Option::Some(v)
+}
+
+pub fn scheduler_take_failure(inout s: SchedulerState) -> Option[u32] {
+    if s.failures_head >= s.failures.len() {
+        return Option::None;
+    }
+    let v = match s.failures.try_get(s.failures_head) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    s.failures_head = wrapping_add(s.failures_head, 1);
+    if s.failures_head == s.failures.len() {
+        s.failures = ChunkSeq::new[u32]();
+        s.failures_head = 0;
+    }
+    Option::Some(v)
+}
