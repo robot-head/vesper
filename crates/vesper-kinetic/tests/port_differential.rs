@@ -414,8 +414,13 @@ fn fastmath_matches_the_rust_build() {
         1.5,
         -1.5,
     ];
-    for e in -1074..=1023 {
-        let p = 2f64.powi(e);
+    for e in -1074i64..=1023 {
+        // 2^e from its bits (powi underflows to 0 for the smallest e).
+        let p = f64::from_bits(if e >= -1022 {
+            ((e + 1023) as u64) << 52
+        } else {
+            1 << (e + 1074)
+        });
         args.extend([
             p,
             -p,
