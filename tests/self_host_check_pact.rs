@@ -2282,11 +2282,16 @@ fn deps_agrees_with_rust() {
                  impl Bad for S { fn f(in self, in x: i64) -> i64 { 0 } }",
             );
 
-            let cases: Vec<(
-                &str,
-                &str,
-                Vec<(&str, &vesper_pact_binding::PackageIdentity, &Module)>,
-            )> = vec![
+            type DepCase<'a> = (
+                &'a str,
+                &'a str,
+                Vec<(
+                    &'a str,
+                    &'a vesper_pact_binding::PackageIdentity,
+                    &'a Module,
+                )>,
+            );
+            let cases: Vec<DepCase<'_>> = vec![
                 (
                     "dep_valid_impl",
                     "struct Local { v: i64 }
@@ -2342,7 +2347,7 @@ fn deps_agrees_with_rust() {
                 (
                     "dep_duplicate",
                     "fn main() -> i64 { 0 }",
-                    vec![("a", &dep_a_id, &dep_ok_mod), ("a", &dep_b_id, &dep_ok_mod)],
+                    vec![("a", &dep_a_id, &dep_ok_mod), ("a", &dep_a_id, &dep_ok_mod)],
                 ),
                 (
                     "dep_error_forwarded",
