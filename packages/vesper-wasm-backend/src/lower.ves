@@ -1715,7 +1715,7 @@ impl L {
         body_each(in self.e.locals, in self.e.code)
     }
 
-    fn local(inout self) -> u32 {
+    pub fn local(inout self) -> u32 {
         self.e.locals.push(vt(VT_I64));
         wrapping_sub(wrapping_add(self.e.nparams, wrapping_u32(self.e.locals.len())), 1)
     }
@@ -1803,7 +1803,7 @@ impl L {
         self.subst(t2)
     }
 
-    fn load(inout self, ptr: u32, off: u64) {
+    pub fn load(inout self, ptr: u32, off: u64) {
         self.e.code.get(ptr);
         self.e.code.op(OP_I32_WRAP_I64);
         self.e.code.load(off);
@@ -1816,7 +1816,7 @@ impl L {
         self.e.code.store(off);
     }
 
-    fn alloc_block(inout self, bytes: u64) -> u32 {
+    pub fn alloc_block(inout self, bytes: u64) -> u32 {
         let x = self.local();
         self.e.code.u64_const(bytes);
         self.e.code.call(self.alloc);
@@ -1867,7 +1867,8 @@ impl L {
     }
 
     // `read_place` over path `path` (`segs`): (local, type).
-    fn read_place(inout self, root: u32, in segs: ChunkSeq[u32]) -> (u32, u32) eff [Fail[WErr]] {
+    pub fn read_place(inout self, root: u32, in segs: ChunkSeq[u32])
+        -> (u32, u32) eff [Fail[WErr]] {
         let mut v = self.read_name(root);
         let mut ty = self.local_type(root);
         for i in 0..segs.len() {
@@ -1881,7 +1882,7 @@ impl L {
         (v, ty)
     }
 
-    fn write_place(inout self, root: u32, in segs: ChunkSeq[u32], v: u32) eff [Fail[WErr]] {
+    pub fn write_place(inout self, root: u32, in segs: ChunkSeq[u32], v: u32) eff [Fail[WErr]] {
         if segs.len() == 0 {
             self.write_name(root, v);
             return;
@@ -2619,10 +2620,10 @@ impl L {
         (small_pos && lo <= 9223372036854775807) || (small_neg && lo >= 9223372036854775808)
     }
 
-    fn scalar_of(inout self, ty: u32) -> u8 eff [Fail[WErr]] {
+    pub fn scalar_of(inout self, ty: u32) -> u8 eff [Fail[WErr]] {
         let sh = self.cx.shape(ty);
         if sh.kind != SH_SCALAR {
-            Fail::raise(werr(K_UNSUPPORTED, U_GENERIC_OPERATION, 182));
+            Fail::raise(werr_syms(K_UNSUPPORTED, U_GENERIC_OPERATION, 182, self.e.inst.base, 0));
         }
         sh.scalar
     }
@@ -2728,15 +2729,22 @@ impl L {
             let vid = self.cx.ir.word(add(a, 2));
             let (root, segs) = self.split_place(place);
             if root == NONE32 {
-                Fail::raise(werr(K_INVALID, 0, 192));
+                Fail::raise(werr_syms(K_INVALID, 0, 192, self.e.inst.base, place));
             }
             let v = self.value(vid);
+            if self.has_prefix(opn, "[]") {
+                self.write_index_place(root, in segs, opn, v);
+                let d = self.dest(dv);
+                self.e.code.i64_const(0);
+                self.e.code.set(d);
+                return;
+            }
             let new = if opn == self.cx.s.eq {
                 v
             } else {
-                let base = self.strip_eq(opn);
+                let base = self.strip_eq(opn, 0);
                 if base == NONE32 {
-                    Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 193));
+                    Fail::raise(werr_syms(K_UNSUPPORTED, U_OPERATION, 193, self.e.inst.base, opn));
                 }
                 let (old, t) = self.read_place(root, in segs);
                 let s = self.scalar_of(t);
@@ -3241,14 +3249,14 @@ impl L {
         (root, segs)
     }
 
-    // `op.strip_suffix('=')`, or NONE32.
-    fn strip_eq(inout self, opn: u32) -> u32 {
+    // `op[from..len-1]` when `op` ends with `'='`, or NONE32.
+    pub fn strip_eq(inout self, opn: u32, from: u64) -> u32 {
         let n = self.cx.names.size(opn);
-        if n == 0 || self.cx.names.byte(opn, wrapping_sub(n, 1)) != 61 {
+        if n <= from || self.cx.names.byte(opn, wrapping_sub(n, 1)) != 61 {
             return NONE32;
         }
         let mut t = ChunkSeq::new[u8]();
-        for i in 0..wrapping_sub(n, 1) {
+        for i in from..wrapping_sub(n, 1) {
             t.push(self.cx.names.byte(opn, i));
         }
         self.cx.intern(in t)
@@ -3576,7 +3584,7 @@ impl L {
             }
             let key = self.callee_key(dv);
             if key == NONE32 {
-                Fail::raise(werr(K_INVALID, 0, 220));
+                Fail::raise(werr_syms(K_INVALID, 0, 220, self.e.inst.base, callee));
             }
             self.direct_call(dv, key, inc(a));
             return;
@@ -3587,7 +3595,9 @@ impl L {
             return;
         }
         if ename == NONE32 || self.cx.f.decl_of(ename) == 0 {
-            Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 221));
+            Fail::raise(
+                werr_syms(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 221, self.e.inst.base, callee)
+            );
         }
         let decl = self.cx.f.decl(wrapping_sub(self.cx.f.decl_of(ename), 1));
         let mut passes = ChunkSeq::new[u8]();
@@ -4600,7 +4610,7 @@ impl L {
         self.e.code.op(OP_UNREACHABLE);
     }
 
-    fn raise_runtime_error(inout self, variant: u32) eff [Fail[WErr]] {
+    pub fn raise_runtime_error(inout self, variant: u32) eff [Fail[WErr]] {
         let re = self.cx.s.runtime_error;
         let ty = self.cx.types.named0(re);
         let (index, is_enum, sh) = self.cx.variant_of(ty, variant);
@@ -4620,7 +4630,7 @@ impl L {
     }
 
     // `binary`: `vesper.arith.checked/1` binary operators.
-    fn binary(inout self, opn: u32, x: u32, y: u32, s1: u8, s2: u8) -> u32 eff [Fail[WErr]] {
+    pub fn binary(inout self, opn: u32, x: u32, y: u32, s1: u8, s2: u8) -> u32 eff [Fail[WErr]] {
         let d = self.local();
         if s1 == SC_F64 || s2 == SC_F64 {
             if self.is_op(opn, "%") {
