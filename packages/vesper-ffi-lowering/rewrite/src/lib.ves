@@ -21,6 +21,9 @@
 // both rewrites depend only on the row and the imports, so a row the
 // parser shares between owners gets the rewrite every Rust copy gets.
 
+use self::drops::{
+    append_drops
+};
 use @vesper/ast::{
     Ast,
     Lit,
@@ -1385,6 +1388,38 @@ fn run(in b: Slice[u8], in source: Str) -> S {
 pub fn ffi_rewrite_text(in input: Str, in source: Str) -> ChunkSeq[u64] {
     let s = run(in input.as_bytes(), in source);
     pack(in s.out)
+}
+
+// `drops::span_base` + `drops::generated` + pass-1 `Rewriter`, packed as
+// a byte length and eight bytes per word.
+pub fn ffi_drops_generated_text(in input: Str, in source: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut s = s_new();
+    let mut rd = Reader {
+        pos: 0,
+        stop: b.len()
+    };
+    let nl = rd.word(in b);
+    for i in 0..nl {
+        let handler = rd.word(in b);
+        let (a, e) = rd.text(in b);
+        read_library(in b, a, e, handler, inout s);
+    }
+    let g = generate(inout s);
+    if g.msg != NONE {
+        s.put(in "G err ");
+        put_err(inout s, g);
+        s.nl();
+        return pack(in s.out);
+    }
+    let l1 = lower_source(in source);
+    let mut ast = l1.ast;
+    append_drops(inout ast, in s);
+    let mut r = r_new(s, ast, false, in ChunkSeq::new[u64](), in ChunkSeq::new[u64]());
+    r.s.put(in "drops");
+    module(inout r);
+    report(inout r);
+    pack(in r.s.out)
 }
 
 // The same work without the text: its length, for timing.

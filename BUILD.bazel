@@ -425,6 +425,10 @@ vesper_crate(
             "tests/tree_abi.rs",
             "tests/vsys_packages.rs",
         ]),
+        # SH4 lane 13 part 2 (#1287 / #1714): FFI handle drops in Vesper.
+        "test/self_host_ffi_drops": glob([
+            "packages/**",
+        ]),
         # Self-hosting SH2 lane 9 (#1181): the region, sequence, tiled and
         # vector rules over the same corpus. Anchored globs.
         "test/self_host_check_regions_seqs": glob([
