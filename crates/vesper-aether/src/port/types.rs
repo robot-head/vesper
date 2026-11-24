@@ -287,3 +287,32 @@ impl From<SeccompFault> for crate::seccomp::SeccompError {
         }
     }
 }
+
+/// `MemError` as the Vesper guest-memory planner/locator returns it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MemFault {
+    NoRegions,
+    TooManyRegions,
+    EmptyRegion,
+    Unaligned,
+    Overflow,
+    Overlap,
+    TooLarge,
+    OutOfBounds { gpa: u64, len: u64 },
+}
+
+impl From<MemFault> for crate::guest_mem::MemError {
+    fn from(e: MemFault) -> Self {
+        use crate::guest_mem::MemError as M;
+        match e {
+            MemFault::NoRegions => M::NoRegions,
+            MemFault::TooManyRegions => M::TooManyRegions,
+            MemFault::EmptyRegion => M::EmptyRegion,
+            MemFault::Unaligned => M::Unaligned,
+            MemFault::Overflow => M::Overflow,
+            MemFault::Overlap => M::Overlap,
+            MemFault::TooLarge => M::TooLarge,
+            MemFault::OutOfBounds { gpa, len } => M::OutOfBounds { gpa, len },
+        }
+    }
+}

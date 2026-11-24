@@ -50,3 +50,5 @@ expect lib devices::queue::reference::differential::capture_matches_the_rust_cap
 # seccomp: unaligned seccomp_data load offset is rejected.
 expect seccomp malformed_programs_are_rejected -- compiled_profile_allows_exactly_the_allowlist
 expect seccomp_port validate_and_evaluate_match_rust -- compile_matches_rust
+# guest_mem: touching regions are accepted as non-overlapping.
+expect guest_mem_port layout_and_locate_match_rust -- out_of_bounds_and_overflow_match_rust

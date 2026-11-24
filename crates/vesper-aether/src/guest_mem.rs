@@ -59,6 +59,39 @@ pub struct GuestMemory {
 impl GuestMemory {
     /// `layout` is `(guest_physical_address, byte_len)` per region.
     pub fn new(layout: &[(u64, u64)]) -> Result<Self, MemError> {
+        #[cfg(feature = "vesper-port")]
+        {
+            let mut flat = Vec::with_capacity(layout.len() * 2);
+            for &(gpa, len) in layout {
+                flat.push(gpa);
+                flat.push(len);
+            }
+            let mut table = vec![0u64; layout.len() * 3];
+            let total =
+                crate::binding::guest_mem_plan(&flat, &mut table).map_err(MemError::from)?;
+            let total_usize = usize::try_from(total).map_err(|_| MemError::TooLarge)?;
+            let mut regions = Vec::with_capacity(layout.len());
+            for chunk in table.as_chunks::<3>().0 {
+                regions.push(Region {
+                    gpa: chunk[0],
+                    offset: usize::try_from(chunk[1]).map_err(|_| MemError::TooLarge)?,
+                    len: usize::try_from(chunk[2]).map_err(|_| MemError::TooLarge)?,
+                });
+            }
+            Ok(Self {
+                regions,
+                bytes: vec![0; total_usize],
+                table,
+            })
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        Self::new_reference(layout)
+    }
+
+    /// The Rust implementation of [`GuestMemory::new`], kept for differential
+    /// tests until the port flips.
+    #[doc(hidden)]
+    pub fn new_reference(layout: &[(u64, u64)]) -> Result<Self, MemError> {
         if layout.is_empty() {
             return Err(MemError::NoRegions);
         }
@@ -141,6 +174,19 @@ impl GuestMemory {
     /// The offset in `bytes` of `[gpa, gpa + len)`, which must lie inside
     /// one region.
     fn locate(&self, gpa: u64, len: u64) -> Result<usize, MemError> {
+        #[cfg(feature = "vesper-port")]
+        {
+            let off =
+                crate::binding::guest_mem_locate(&self.table, gpa, len).map_err(MemError::from)?;
+            usize::try_from(off).map_err(|_| MemError::OutOfBounds { gpa, len })
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        self.locate_reference(gpa, len)
+    }
+
+    /// The Rust implementation of `locate`, exposed for differential tests.
+    #[doc(hidden)]
+    pub fn locate_reference(&self, gpa: u64, len: u64) -> Result<usize, MemError> {
         let oob = MemError::OutOfBounds { gpa, len };
         let end = gpa.checked_add(len).ok_or(oob)?;
         for r in &self.regions {

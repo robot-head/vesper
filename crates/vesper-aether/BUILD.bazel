@@ -38,6 +38,7 @@ AETHER_PARTS = [
     "vesper/src/packed.ves",
     "vesper/src/vq.ves",
     "vesper/src/seccomp.ves",
+    "vesper/src/guest_mem.ves",
 ]
 
 genrule(
@@ -154,5 +155,6 @@ rust_library(
         ("device_features", []),
         ("seccomp", []),
         ("seccomp_port", []),
+        ("guest_mem_port", []),
     ]
 ]
