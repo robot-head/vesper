@@ -1966,6 +1966,13 @@ fn stage2_compiles_compiler_packages() {
                 CompilerExecCheck::CompileOnly,
             ),
             (
+                "egraph",
+                "@vesper/egraph",
+                "packages/vesper-egraph",
+                "egraph_math(in \"\").len()",
+                CompilerExecCheck::Exact(0),
+            ),
+            (
                 "ffi-lowering",
                 "@vesper/ffi-lowering",
                 "packages/vesper-ffi-lowering",
