@@ -137,7 +137,7 @@ rust_library(
         ) + extra,
     )
     for test, extra in [
-        ("slot_plan", ["//crates/vesper-loom-cas"]),
+        ("slot_plan", []),
         ("slot_plan_port", []),
         ("abba_slot_plan", ["//crates/vesper-bench"]),
         ("boot", []),
@@ -146,7 +146,7 @@ rust_library(
         ("hotset", []),
         ("hotset_port", []),
         ("abba_hotset", ["//crates/vesper-bench"]),
-        ("virtio_packed", ["//crates/vesper-loom-cas"]),
+        ("virtio_packed", []),
         ("packed_port", []),
         ("abba_packed", ["//crates/vesper-bench"]),
         ("virtqueue", []),
