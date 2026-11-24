@@ -687,3 +687,29 @@ fn main() -> u64 {
         "expected invariant base/scale arithmetic to hoist into brif preheader (imul_imm={imul_count}):\n{fast_body}"
     );
 }
+
+#[test]
+fn narrow_binary_ops_fold_through_ireduce() {
+    let source = "fn spread(v: u32) -> u32 {
+    let mut x = v & 1023;
+    x = (x | (x << 16)) & 50331903;
+    x = (x | (x << 8)) & 50393103;
+    x
+}
+
+fn main() -> u64 {
+    widen_u64(spread(341))
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert_eq!(agree(source), "16797701");
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("spread\n"))
+        .unwrap_or(&clif);
+    let ireduce_count = fn_clif.matches("ireduce.i32").count();
+    assert!(
+        ireduce_count == 1,
+        "expected uextend->band/ishl/bor->ireduce.i32 chain to fold to native i32 ops (ireduce_count={ireduce_count}):\n{fn_clif}"
+    );
+}

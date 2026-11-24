@@ -2021,7 +2021,28 @@ fn fold_narrow_extends(func: &mut ir::Function) {
             _ => None,
         }
     };
-    for _ in 0..3 {
+    let narrow_operand =
+        |func: &ir::Function, v: Value, dst_ty: ir::Type| -> Option<(Option<Value>, Option<i64>)> {
+            let v = func.dfg.resolve_aliases(v);
+            let ir::ValueDef::Result(d, 0) = func.dfg.value_def(v) else {
+                return None;
+            };
+            match func.dfg.insts[d] {
+                InstructionData::Unary {
+                    opcode: Opcode::Uextend | Opcode::Sextend,
+                    arg,
+                } => {
+                    let inner = func.dfg.resolve_aliases(arg);
+                    (func.dfg.value_type(inner) == dst_ty).then_some((Some(inner), None))
+                }
+                InstructionData::UnaryImm {
+                    opcode: Opcode::Iconst,
+                    imm,
+                } => Some((None, Some(imm.bits()))),
+                _ => None,
+            }
+        };
+    for _ in 0..10 {
         let mut changed = false;
         for (_, inst) in insts(func) {
             let InstructionData::Unary { opcode, arg } = func.dfg.insts[inst] else {
@@ -2125,6 +2146,80 @@ fn fold_narrow_extends(func: &mut ir::Function) {
                             opcode: Opcode::Ireduce,
                             arg: inner,
                         };
+                        changed = true;
+                    }
+                }
+                (
+                    Opcode::Ireduce,
+                    InstructionData::Binary {
+                        opcode:
+                            bin_op @ (Opcode::Band
+                            | Opcode::Bor
+                            | Opcode::Bxor
+                            | Opcode::Iadd
+                            | Opcode::Isub
+                            | Opcode::Imul
+                            | Opcode::Ishl),
+                        args: [a, b],
+                    },
+                ) => {
+                    if let Some(na) = narrow_operand(func, a, dst_ty)
+                        && let Some(nb) = narrow_operand(func, b, dst_ty)
+                        && (bin_op != Opcode::Ishl
+                            || matches!(nb, (None, Some(s)) if s >= 0 && s < i64::from(dst_ty.bits())))
+                    {
+                        use cranelift_codegen::cursor::{Cursor, FuncCursor};
+                        use cranelift_codegen::ir::InstBuilder;
+                        let materialize = |pos: &mut FuncCursor<'_>,
+                                           op: (Option<Value>, Option<i64>),
+                                           ty: ir::Type| {
+                            match op {
+                                (Some(v), _) => v,
+                                (None, Some(c)) => {
+                                    let m = mask_for(ty).unwrap_or(u64::MAX);
+                                    pos.ins().iconst(ty, ((c as u64) & m) as i64)
+                                }
+                                _ => unreachable!(),
+                            }
+                        };
+                        let (va, vb) = {
+                            let mut pos = FuncCursor::new(func).at_inst(inst);
+                            let va = materialize(&mut pos, na, dst_ty);
+                            let vb = materialize(
+                                &mut pos,
+                                nb,
+                                if bin_op == Opcode::Ishl {
+                                    types::I32
+                                } else {
+                                    dst_ty
+                                },
+                            );
+                            (va, vb)
+                        };
+                        match bin_op {
+                            Opcode::Band => {
+                                func.dfg.replace(inst).band(va, vb);
+                            }
+                            Opcode::Bor => {
+                                func.dfg.replace(inst).bor(va, vb);
+                            }
+                            Opcode::Bxor => {
+                                func.dfg.replace(inst).bxor(va, vb);
+                            }
+                            Opcode::Iadd => {
+                                func.dfg.replace(inst).iadd(va, vb);
+                            }
+                            Opcode::Isub => {
+                                func.dfg.replace(inst).isub(va, vb);
+                            }
+                            Opcode::Imul => {
+                                func.dfg.replace(inst).imul(va, vb);
+                            }
+                            Opcode::Ishl => {
+                                func.dfg.replace(inst).ishl(va, vb);
+                            }
+                            _ => unreachable!(),
+                        }
                         changed = true;
                     }
                 }
