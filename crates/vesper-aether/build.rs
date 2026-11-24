@@ -18,6 +18,7 @@ const PARTS: &[&str] = &[
     "seccomp",
     "guest_mem",
     "block",
+    "net",
 ];
 
 fn main() {
@@ -97,5 +98,10 @@ const DIVERGENT_EDITS: &[(&str, &str)] = &[
     (
         "            if sector % BLK_DISCARD_SECTOR_ALIGNMENT != 0",
         "            if false && sector % BLK_DISCARD_SECTOR_ALIGNMENT != 0",
+    ),
+    // net: TX validation accepts oversized frames.
+    (
+        "    if payload_len > max_frame {",
+        "    if false && payload_len > max_frame {",
     ),
 ];

@@ -199,6 +199,26 @@ impl NetDevice {
 
     /// One control command (§5.1.6.5): returns the ack byte.
     fn control(&mut self, readable: &[u8]) -> u8 {
+        #[cfg(feature = "vesper-port")]
+        {
+            if let Some(pairs) =
+                crate::binding::net_parse_ctrl(readable, self.features, self.max_pairs)
+            {
+                self.set_pairs(pairs);
+                self.stats.ctrl_ok += 1;
+                VIRTIO_NET_OK
+            } else {
+                self.stats.ctrl_err += 1;
+                VIRTIO_NET_ERR
+            }
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        self.control_reference(readable)
+    }
+
+    /// The Rust implementation of `control`, exposed for differential tests.
+    #[doc(hidden)]
+    pub fn control_reference(&mut self, readable: &[u8]) -> u8 {
         let ok = match readable {
             [VIRTIO_NET_CTRL_MQ, VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET, lo, hi]
                 if self.features & VIRTIO_NET_F_MQ != 0 =>
@@ -289,12 +309,49 @@ impl NetDevice {
         Ok(())
     }
 
-    fn transmit(&mut self, readable: &[u8]) {
-        let ok = readable.len() >= NET_HDR_BYTES + ETHERNET_HEADER_BYTES
+    /// Exposed for `tests/net_port.rs`.
+    #[doc(hidden)]
+    pub fn transmit_valid_reference(&self, readable: &[u8]) -> bool {
+        readable.len() >= NET_HDR_BYTES + ETHERNET_HEADER_BYTES
             && readable[0] == 0
             && readable[1] == VIRTIO_NET_HDR_GSO_NONE
             && readable.len() - NET_HDR_BYTES <= self.max_frame()
-            && self.link_up;
+            && self.link_up
+    }
+
+    /// Exposed for `tests/net_port.rs`.
+    #[doc(hidden)]
+    pub fn transmit_for_port_test(&mut self, readable: &[u8]) {
+        self.transmit(readable);
+    }
+
+    /// Exposed for `tests/net_port.rs`.
+    #[doc(hidden)]
+    pub fn control_for_port_test(&mut self, readable: &[u8]) -> u8 {
+        self.control(readable)
+    }
+
+    /// Exposed for `tests/net_port.rs`.
+    #[doc(hidden)]
+    pub fn read_config_reference(&self, offset: usize, out: &mut [u8]) {
+        let mut cfg = [0u8; CONFIG_BYTES];
+        cfg[0..6].copy_from_slice(&self.mac);
+        let status = if self.link_up {
+            VIRTIO_NET_S_LINK_UP
+        } else {
+            0
+        };
+        cfg[6..8].copy_from_slice(&status.to_le_bytes());
+        cfg[8..10].copy_from_slice(&self.max_pairs.to_le_bytes());
+        cfg[10..12].copy_from_slice(&self.mtu.to_le_bytes());
+        out.copy_from_slice(&cfg[offset..offset + out.len()]);
+    }
+
+    fn transmit(&mut self, readable: &[u8]) {
+        #[cfg(feature = "vesper-port")]
+        let ok = crate::binding::net_validate_tx(readable, self.max_frame() as u64, self.link_up);
+        #[cfg(not(feature = "vesper-port"))]
+        let ok = self.transmit_valid_reference(readable);
         if ok && self.transmitted.len() >= TX_BACKLOG {
             self.stats.tx_dropped_backlog += 1;
         } else if ok {
@@ -329,18 +386,22 @@ impl VirtioDevice for NetDevice {
         CONFIG_BYTES
     }
     fn read_config(&self, offset: usize, out: &mut [u8]) {
-        let mut cfg = [0u8; CONFIG_BYTES];
-        cfg[0..6].copy_from_slice(&self.mac);
-        let status = if self.link_up {
-            VIRTIO_NET_S_LINK_UP
-        } else {
-            0
-        };
-        cfg[6..8].copy_from_slice(&status.to_le_bytes());
-        cfg[8..10].copy_from_slice(&self.max_pairs.to_le_bytes());
-        cfg[10..12].copy_from_slice(&self.mtu.to_le_bytes());
-        out.copy_from_slice(&cfg[offset..offset + out.len()]);
+        #[cfg(feature = "vesper-port")]
+        {
+            let mut cfg = [0u8; CONFIG_BYTES];
+            crate::binding::net_config_space(
+                &self.mac,
+                self.link_up,
+                self.max_pairs,
+                self.mtu,
+                &mut cfg,
+            );
+            out.copy_from_slice(&cfg[offset..offset + out.len()]);
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        self.read_config_reference(offset, out);
     }
+
     fn activate(&mut self, features: u64) {
         self.features = features;
         self.active_pairs = 1;

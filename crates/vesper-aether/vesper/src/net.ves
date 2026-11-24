@@ -1,0 +1,89 @@
+// ---------------------------------------------------------------------------
+// virtio-net TX validation, control-queue parsing, and config space
+// (src/devices/net.rs).
+
+const NET_F_MQ: u64 = 4194304;
+const NET_CTRL_MQ: u8 = 4;
+const NET_CTRL_MQ_VQ_PAIRS_SET: u8 = 0;
+const NET_S_LINK_UP: u16 = 1;
+const NET_HDR_BYTES: u64 = 12;
+const NET_HDR_GSO_NONE: u8 = 0;
+const NET_ETHERNET_HEADER_BYTES: u64 = 14;
+const NET_CONFIG_BYTES: u64 = 12;
+
+fn net_byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn net_write_u16_le(inout out: Slice[u8], off: u64, val: u16) {
+    let v = widen_u32(val);
+    out.try_set(off, wrapping_u8(v));
+    out.try_set(wrapping_add(off, 1), wrapping_u8(v >> 8));
+}
+
+pub fn net_validate_tx(in readable: Slice[u8], max_frame: u64, link_up: bool) -> bool {
+    let rlen = readable.len();
+    let min_len = wrapping_add(NET_HDR_BYTES, NET_ETHERNET_HEADER_BYTES);
+    if rlen < min_len {
+        return false;
+    }
+    if net_byte(in readable, 0) != 0 {
+        return false;
+    }
+    if net_byte(in readable, 1) != NET_HDR_GSO_NONE {
+        return false;
+    }
+    let payload_len = wrapping_sub(rlen, NET_HDR_BYTES);
+    if payload_len > max_frame {
+        return false;
+    }
+    link_up
+}
+
+pub fn net_parse_ctrl(in readable: Slice[u8], features: u64, max_pairs: u16) -> Option[u16] {
+    if (features & NET_F_MQ) == 0 {
+        return Option::None;
+    }
+    if readable.len() != 4 {
+        return Option::None;
+    }
+    if net_byte(in readable, 0) != NET_CTRL_MQ
+        || net_byte(in readable, 1) != NET_CTRL_MQ_VQ_PAIRS_SET {
+        return Option::None;
+    }
+    let lo = widen_u32(net_byte(in readable, 2));
+    let hi = widen_u32(net_byte(in readable, 3)) << 8;
+    let pairs = wrapping_u16(lo | hi);
+    if pairs >= 1 && pairs <= max_pairs {
+        Option::Some(pairs)
+    } else {
+        Option::None
+    }
+}
+
+pub fn net_config_space(
+    in mac: Slice[u8],
+    link_up: bool,
+    max_pairs: u16,
+    mtu: u16,
+    inout out: Slice[u8]
+) -> u64 {
+    if out.len() < NET_CONFIG_BYTES || mac.len() < 6 {
+        return 0;
+    }
+    for i in 0..6 {
+        out.try_set(i, net_byte(in mac, i));
+    }
+    let status: u16 = if link_up {
+        NET_S_LINK_UP
+    } else {
+        0
+    };
+    net_write_u16_le(inout out, 6, status);
+    net_write_u16_le(inout out, 8, max_pairs);
+    net_write_u16_le(inout out, 10, mtu);
+    NET_CONFIG_BYTES
+}
