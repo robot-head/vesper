@@ -95,34 +95,24 @@ impl LogRecord {
         }
     }
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        let u64s = |out: &mut Vec<u8>, xs: &[u64]| {
-            for x in xs {
-                out.extend_from_slice(&x.to_le_bytes());
-            }
-        };
-        let bytes = |out: &mut Vec<u8>, b: &[u8]| {
-            out.extend_from_slice(&(b.len() as u32).to_le_bytes());
-            out.extend_from_slice(b);
-        };
-        match self {
-            Self::PageImage { page, bytes: image } => {
-                out.push(1);
-                u64s(&mut out, &[*page]);
-                bytes(&mut out, image);
-            }
+        let (tag, txn, prev, page, undo_next, slot, b1, b2): (
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            &[u8],
+            &[u8],
+        ) = match self {
+            Self::PageImage { page, bytes } => (1, 0, 0, *page, 0, 0, bytes, &[]),
             Self::Insert {
                 txn,
                 prev,
                 page,
                 slot,
                 after,
-            } => {
-                out.push(2);
-                u64s(&mut out, &[*txn, *prev, *page]);
-                out.extend_from_slice(&slot.to_le_bytes());
-                bytes(&mut out, after);
-            }
+            } => (2, *txn, *prev, *page, 0, u64::from(*slot), after, &[]),
             Self::Update {
                 txn,
                 prev,
@@ -130,13 +120,7 @@ impl LogRecord {
                 slot,
                 before,
                 after,
-            } => {
-                out.push(3);
-                u64s(&mut out, &[*txn, *prev, *page]);
-                out.extend_from_slice(&slot.to_le_bytes());
-                bytes(&mut out, before);
-                bytes(&mut out, after);
-            }
+            } => (3, *txn, *prev, *page, 0, u64::from(*slot), before, after),
             Self::Compensation {
                 txn,
                 prev,
@@ -144,116 +128,67 @@ impl LogRecord {
                 slot,
                 image,
                 undo_next,
-            } => {
-                out.push(4);
-                u64s(&mut out, &[*txn, *prev, *page, *undo_next]);
-                out.extend_from_slice(&slot.to_le_bytes());
-                bytes(&mut out, image);
-            }
-            Self::Commit { txn, prev } => {
-                out.push(5);
-                u64s(&mut out, &[*txn, *prev]);
-            }
-            Self::End { txn, prev } => {
-                out.push(6);
-                u64s(&mut out, &[*txn, *prev]);
-            }
-        }
+            } => (
+                4,
+                *txn,
+                *prev,
+                *page,
+                *undo_next,
+                u64::from(*slot),
+                image,
+                &[],
+            ),
+            Self::Commit { txn, prev } => (5, *txn, *prev, 0, 0, 0, &[], &[]),
+            Self::End { txn, prev } => (6, *txn, *prev, 0, 0, 0, &[], &[]),
+        };
+        let mut out = vec![0u8; 64 + b1.len() + b2.len()];
+        let len = crate::port::binding::wal_encode(
+            tag, txn, prev, page, undo_next, slot, b1, b2, &mut out,
+        ) as usize;
+        out.truncate(len);
         out
     }
     /// Strict decode: trailing bytes, unknown tags and bad lengths are errors.
     pub fn decode(payload: &[u8]) -> Result<Self, DbError> {
-        let mut r = Reader {
-            bytes: payload,
-            at: 0,
-        };
-        let tag = r.u8()?;
-        let record = match tag {
-            1 => {
-                let page = r.u64()?;
-                let bytes = r.bytes()?;
-                if bytes.len() != PAGE_SIZE {
-                    return Err(corrupt("page image length"));
-                }
-                Self::PageImage { page, bytes }
-            }
-            2 => Self::Insert {
-                txn: r.u64()?,
-                prev: r.u64()?,
-                page: r.u64()?,
-                slot: r.u16()?,
-                after: r.bytes()?,
-            },
-            3 => Self::Update {
-                txn: r.u64()?,
-                prev: r.u64()?,
-                page: r.u64()?,
-                slot: r.u16()?,
-                before: r.bytes()?,
-                after: r.bytes()?,
-            },
-            4 => {
-                let (txn, prev, page, undo_next) = (r.u64()?, r.u64()?, r.u64()?, r.u64()?);
-                Self::Compensation {
-                    txn,
-                    prev,
-                    page,
-                    undo_next,
-                    slot: r.u16()?,
-                    image: r.bytes()?,
-                }
-            }
-            5 => Self::Commit {
-                txn: r.u64()?,
-                prev: r.u64()?,
-            },
-            6 => Self::End {
-                txn: r.u64()?,
-                prev: r.u64()?,
-            },
-            _ => return Err(corrupt("unknown log record tag")),
-        };
-        if r.at != payload.len() {
-            return Err(corrupt("trailing log record bytes"));
+        let mut meta = [0u64; 10];
+        match crate::port::binding::wal_decode(payload, &mut meta) {
+            0 => {}
+            1 => return Err(corrupt("unknown log record tag")),
+            2 => return Err(corrupt("page image length")),
+            3 => return Err(corrupt("trailing log record bytes")),
+            4 => return Err(corrupt("log byte string too long")),
+            _ => return Err(corrupt("truncated log record")),
         }
-        Ok(record)
-    }
-}
-struct Reader<'a> {
-    bytes: &'a [u8],
-    at: usize,
-}
-impl Reader<'_> {
-    fn take(&mut self, n: usize) -> Result<&[u8], DbError> {
-        let end = self
-            .at
-            .checked_add(n)
-            .ok_or_else(|| corrupt("log length"))?;
-        let s = self
-            .bytes
-            .get(self.at..end)
-            .ok_or_else(|| corrupt("truncated log record"))?;
-        self.at = end;
-        Ok(s)
-    }
-    fn u8(&mut self) -> Result<u8, DbError> {
-        Ok(self.take(1)?[0])
-    }
-    fn u16(&mut self) -> Result<u16, DbError> {
-        Ok(u16::from_le_bytes(self.take(2)?.try_into().expect("2")))
-    }
-    fn u32(&mut self) -> Result<u32, DbError> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("4")))
-    }
-    fn u64(&mut self) -> Result<u64, DbError> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("8")))
-    }
-    fn bytes(&mut self) -> Result<Vec<u8>, DbError> {
-        let n = self.u32()? as usize;
-        if n > MAX_PAYLOAD {
-            return Err(corrupt("log byte string too long"));
+        let [tag, txn, prev, page, undo_next, slot, b1_off, b1_len, b2_off, b2_len] = meta;
+        let b1 = payload[b1_off as usize..(b1_off + b1_len) as usize].to_vec();
+        match tag {
+            1 => Ok(Self::PageImage { page, bytes: b1 }),
+            2 => Ok(Self::Insert {
+                txn,
+                prev,
+                page,
+                slot: slot as u16,
+                after: b1,
+            }),
+            3 => Ok(Self::Update {
+                txn,
+                prev,
+                page,
+                slot: slot as u16,
+                before: b1,
+                after: payload[b2_off as usize..(b2_off + b2_len) as usize].to_vec(),
+            }),
+            4 => Ok(Self::Compensation {
+                txn,
+                prev,
+                page,
+                slot: slot as u16,
+                image: b1,
+                undo_next,
+            }),
+            5 => Ok(Self::Commit { txn, prev }),
+            _ => Ok(Self::End { txn, prev }),
         }
-        Ok(self.take(n)?.to_vec())
     }
 }
 fn corrupt(message: &str) -> DbError {
@@ -290,15 +225,14 @@ fn encode_header(seq: u64, base_lsn: u64) -> [u8; 32] {
     h
 }
 fn decode_header(h: &[u8]) -> Option<(u64, u64)> {
-    if h.len() != 32 || &h[..8] != MAGIC || h[28..32] != [0; 4] {
+    let mut out = [0u64; 2];
+    if crate::port::binding::wal_decode_header(h, &mut out) == 0 {
         return None;
     }
     if crc32c(&h[..24]) != u32::from_le_bytes(h[24..28].try_into().ok()?) {
         return None;
     }
-    let seq = u64::from_le_bytes(h[8..16].try_into().ok()?);
-    let base = u64::from_le_bytes(h[16..24].try_into().ok()?);
-    (seq > 0 && base > 0).then_some((seq, base))
+    Some((out[0], out[1]))
 }
 fn frame_crc(seq: u64, len: u32, lsn: u64, payload: &[u8]) -> u32 {
     let mut c = crc32c_update(!0, &seq.to_le_bytes());

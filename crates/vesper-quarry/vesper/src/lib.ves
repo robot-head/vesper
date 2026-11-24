@@ -57,6 +57,11 @@ use self::page::{
     used_bytes as page_used_bytes_impl,
     validate as page_validate_impl
 };
+use self::wal::{
+    decode as wal_decode_impl,
+    decode_header as wal_decode_header_impl,
+    encode as wal_encode_impl
+};
 
 // One SQL token. kind: Word 1 (a, b = pool range of the lowercase word),
 // Param 2 (same), Int 3 (a = the i64 bits), Text 4 (a, b = pool range),
@@ -294,4 +299,26 @@ pub fn page_insert(inout b: Slice[u8], in record: Slice[u8]) -> u64 {
 pub fn page_update(inout b: Slice[u8], slot: u64, in record: Slice[u8], inout scratch: Slice[u8])
     -> u64 {
     page_update_impl(inout b, slot, in record, inout scratch)
+}
+
+pub fn wal_encode(
+    tag: u64,
+    txn: u64,
+    prev: u64,
+    page: u64,
+    undo_next: u64,
+    slot: u64,
+    in b1: Slice[u8],
+    in b2: Slice[u8],
+    inout out: Slice[u8]
+) -> u64 {
+    wal_encode_impl(tag, txn, prev, page, undo_next, slot, in b1, in b2, inout out)
+}
+
+pub fn wal_decode(in payload: Slice[u8], inout meta: Slice[u64]) -> u64 {
+    wal_decode_impl(in payload, inout meta)
+}
+
+pub fn wal_decode_header(in h: Slice[u8], inout out: Slice[u64]) -> u64 {
+    wal_decode_header_impl(in h, inout out)
 }
