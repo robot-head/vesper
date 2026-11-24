@@ -51,8 +51,7 @@ filegroup(
     output_group = "rust_binding",
 )
 
-# wire (codec + checksum) is unconditionally Vesper; seq/rtt/cc/conn stay
-# behind `vesper-port` until `transfer` clears 1.50x.
+# All ported modules (wire, seq, rtt, cc, conn) are unconditionally Vesper.
 vesper_crate(
     build_script_data = [
         ":tcp_vesper",
