@@ -80,7 +80,7 @@ CRATES = {
     "vesper-span": ("compiler", "in crate", "edits 1.68x, lookup 1.35x, index 0.32x", "edits codegen (check_edits)", "2"),
     "vesper-diagnostics": ("compiler", "in crate", "pilot", "", "2"),
     "vesper-lean-syntax": ("compiler", "in crate", "pilot", "", "2"),
-    "vesper-fmt": ("compiler", "in crate", "unmeasured", "", "2"),
+    "vesper-fmt": ("compiler", "in crate", "largest 0.38x, corpus 1.22x (flipped)", "flipped to Vesper (seed in seed/ for compiler)", "2"),
     "vesper-lint": ("compiler", "in crate", "policy 0.46x, corpus 1.24x (flipped)", "flipped to Vesper (seed in seed/ for compiler)", "2"),
     "vesper-highlight": ("partial", "in crate (lexical)", "unmeasured", "out of the compiler's closure (#1398): no seed needed; rasterizer: tiny-skia, rustybuzz, png, ttf-parser", "15"),
     "vesper-forge": ("compiler", "in crate", "unmeasured", "macro expansion #1157", "SH1-14"),
