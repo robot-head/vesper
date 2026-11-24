@@ -13,7 +13,14 @@ use vesper_core::ast::{Effect, Pass, Type};
 
 /// The repository root.
 pub fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if manifest.join("../../Cargo.toml").is_file() {
+        manifest.join("../..")
+    } else if Path::new("../../packages").is_dir() {
+        PathBuf::from("../..")
+    } else {
+        PathBuf::from(".")
+    }
 }
 
 /// Every file under the repository with extension `ext`, sorted, skipping
@@ -30,7 +37,11 @@ pub fn files(ext: &str) -> Vec<PathBuf> {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if path.is_dir() {
-                if !name.starts_with('.') && name != "target" && name != "node_modules" {
+                if !name.starts_with('.')
+                    && !name.starts_with("bazel-")
+                    && name != "target"
+                    && name != "node_modules"
+                {
                     stack.push(path);
                 }
             } else if path.extension().is_some_and(|e| e == ext) {
