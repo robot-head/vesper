@@ -129,8 +129,61 @@ fn vesper_definition(uri: &str, source: &str, at: Position) -> String {
     entry("lsp_definition").text(&input)
 }
 
-/// `lsp_definitions`: one parse, an index rebuilt per cursor.
-fn vesper_definitions(uri: &str, source: &str, cursors: &[Position]) -> Vec<String> {
+fn push_text(out: &mut Vec<u8>, s: &str) {
+    push_word(out, s.len() as u64);
+    out.extend_from_slice(s.as_bytes());
+    while !out.len().is_multiple_of(8) {
+        out.push(0);
+    }
+}
+
+/// The checker's facts the documentation-link inventory reads
+/// (doc_links.ves `read_doc_facts`): every function, generated function,
+/// ADT, effect with its operations, and trait name of the world.
+fn doc_facts(out: &mut Vec<u8>, w: &vesper::check::World) {
+    push_word(out, w.functions.len() as u64);
+    for (name, f) in &w.functions {
+        push_text(out, name);
+        push_word(out, f.span.start as u64);
+        push_word(out, f.span.end as u64);
+    }
+    push_word(out, w.elaboration.generated.len() as u64);
+    for name in w.elaboration.generated.keys() {
+        push_text(out, name);
+    }
+    push_word(out, w.adts.len() as u64);
+    for (name, a) in &w.adts {
+        push_text(out, name);
+        push_word(out, a.span.start as u64);
+        push_word(out, a.span.end as u64);
+    }
+    push_word(out, w.effects.len() as u64);
+    for (name, e) in &w.effects {
+        push_text(out, name);
+        push_word(out, e.span.start as u64);
+        push_word(out, e.span.end as u64);
+        push_word(out, e.ops.len() as u64);
+        for op in &e.ops {
+            push_text(out, &op.name);
+            push_word(out, op.span.start as u64);
+            push_word(out, op.span.end as u64);
+        }
+    }
+    push_word(out, w.elaboration.traits.len() as u64);
+    for name in &w.elaboration.traits {
+        push_text(out, name);
+    }
+}
+
+/// `lsp_definitions`: one parse, an index rebuilt per cursor. With the
+/// world, the documentation-link fallback runs too; without it those
+/// cursors answer `D`.
+fn vesper_definitions(
+    uri: &str,
+    source: &str,
+    world: Option<&vesper::check::World>,
+    cursors: &[Position],
+) -> Vec<String> {
     let mut input = vec![];
     index_words(&mut input, index_limits());
     push_word(&mut input, uri.len() as u64);
@@ -139,6 +192,10 @@ fn vesper_definitions(uri: &str, source: &str, cursors: &[Position]) -> Vec<Stri
     for p in cursors {
         push_word(&mut input, p.line as u64);
         push_word(&mut input, p.character as u64);
+    }
+    push_word(&mut input, world.is_some() as u64);
+    if let Some(w) = world {
+        doc_facts(&mut input, w);
     }
     input.extend_from_slice(uri.as_bytes());
     input.extend_from_slice(source.as_bytes());
@@ -415,6 +472,55 @@ fn generated() -> Vec<(String, String)> {
             format!("fn g(x: u64) -> u64 {blocks}\n"),
         ));
     }
+    // The link scanner's budgets: one group of 1,300 comment lines passes
+    // `max_work` through the exact-growth line vector (24 bytes a push;
+    // 1,000 lines stay under it),
+    // and 6,000 lines pass its token envelope (10,922 tokens).
+    for (name, lines) in [
+        ("doc_work_under", 1000),
+        ("doc_work", 1300),
+        ("doc_tokens", 6000),
+    ] {
+        let mut s = String::new();
+        for _ in 0..lines {
+            s.push_str("/// [f]\n");
+        }
+        s.push_str("fn f() -> u64 { 1 }\n");
+        out.push((name.into(), s));
+    }
+    // Documentation links of every target kind and the Markdown shapes
+    // the link scanner skips: code spans and fences, inline and
+    // reference-style links, images, definitions with titles, escapes,
+    // prose brackets, unknown, unsupported and `Self` paths.
+    out.push((
+        "doc_links".into(),
+        r#"/// A shape. See [area], [`Shape::grow`] and [Log::note].
+/// Code: `[not_a_link]` and ``[also `not`]``. An image ![alt][area].
+/// Inline [text](area) and [ref][area], then [ref2][area](x "t").
+/// [def]: area "title"
+///   'continued'
+/// Escaped \[area] and prose [a b c], unknown [nope], [@pkg::x],
+/// unsupported [Shape::grow[u64]] and [Self::grow], [Log], [Pair].
+enum Shape { Dot, Square(u64) }
+/// Uses [area] twice: [area].
+///
+/// ```
+/// [area] in a fence
+/// ```
+/// After the fence [Shape].
+fn area(s: Shape) -> u64 { match s { Shape::Dot => 0, Shape::Square(n) => n } }
+struct Pair { a: u64 }
+impl Shape {
+    /// Grows [Shape] by [Pair] (see [`area`] and [Shape::grow]).
+    fn grow(self) -> u64 { area(Shape::Dot) }
+}
+//! Module note: [area], [Log::note], [missing::path].
+effect Log { fn note(x: u64) -> Unit; }
+/// Unbalanced [area
+fn main() -> u64 { area(Shape::Dot) }
+"#
+        .into(),
+    ));
     // Shadowing, closures, matches, loops, handlers, effect receivers,
     // impls, traits, effects and conformance models.
     out.push((
@@ -586,6 +692,7 @@ struct Counts {
     definitions: usize,
     targets: usize,
     deferred: usize,
+    doc_targets: usize,
     workspace: usize,
     errors: BTreeMap<String, usize>,
 }
@@ -647,35 +754,82 @@ fn navigation_matches_rust() {
             );
         }
         let cursors = positions(d);
-        let batch = vesper_definitions(&d.uri, d.checked.source(), &cursors);
+        let batch = vesper_definitions(
+            &d.uri,
+            d.checked.source(),
+            Some(d.checked.world()),
+            &cursors,
+        );
         assert_eq!(batch.len(), cursors.len(), "{}", d.name);
         for (k, at) in cursors.into_iter().enumerate() {
             let rust = rust_definition(&d.uri, &d.checked, &d.index, at);
             let vesper = vesper_definition(&d.uri, d.checked.source(), at);
-            if batch[k] != vesper && differ.len() < 20 {
+            c.definitions += 1;
+            if rust.starts_with("R{") {
+                c.targets += 1;
+            }
+            if vesper == "D" {
+                // The single entry has no world, so it leaves the
+                // documentation-link fallback to the batch entry.
+                c.deferred += 1;
+                if rust.starts_with("R{") {
+                    c.doc_targets += 1;
+                }
+            } else if batch[k] != vesper && differ.len() < 20 {
                 differ.push(format!(
                     "{} definition {}:{}: batch {} single {}",
                     d.name, at.line, at.character, batch[k], vesper
                 ));
-            }
-            c.definitions += 1;
-            if vesper == "D" {
-                // The doc-link fallback: Rust answers from vesper_doc::links.
-                c.deferred += 1;
-                continue;
-            }
-            if rust.starts_with("R{") {
-                c.targets += 1;
             }
             compare(
                 &mut differ,
                 &mut c,
                 format!("{} definition {}:{}", d.name, at.line, at.character),
                 rust,
-                vesper,
+                batch[k].clone(),
             );
         }
     }
+    // Every cursor on every documentation-comment line: the
+    // documentation-link fallback answers inside the comment text.
+    let mut comment_cursors = 0usize;
+    let mut comment_targets = 0usize;
+    for d in docs {
+        let source = d.checked.source();
+        let mut cursors = vec![];
+        for (line, text) in source.split('\n').enumerate() {
+            if !(text.contains("///") || text.contains("//!")) {
+                continue;
+            }
+            let units: u32 = text.encode_utf16().count() as u32;
+            for character in 0..=units {
+                cursors.push(Position {
+                    line: line as u32,
+                    character,
+                });
+            }
+        }
+        if cursors.is_empty() {
+            continue;
+        }
+        let batch = vesper_definitions(&d.uri, source, Some(d.checked.world()), &cursors);
+        assert_eq!(batch.len(), cursors.len(), "{}", d.name);
+        for (k, at) in cursors.into_iter().enumerate() {
+            let rust = rust_definition(&d.uri, &d.checked, &d.index, at);
+            comment_cursors += 1;
+            if rust.starts_with("R{") {
+                comment_targets += 1;
+            }
+            compare(
+                &mut differ,
+                &mut c,
+                format!("{} comment definition {}:{}", d.name, at.line, at.character),
+                rust,
+                batch[k].clone(),
+            );
+        }
+    }
+    eprintln!("documentation comments: {comment_cursors} cursors, {comment_targets} with a target");
     // URIs the encoder must escape, and the URI limit.
     let first = &docs[0];
     for uri in [
@@ -768,19 +922,34 @@ fn navigation_matches_rust() {
         }
     }
     eprintln!(
-        "navigation: {} documents, {} symbol answers, {} definitions ({} targets, {} doc-link \
-         fallbacks deferred), {} workspace queries; errors {:?}; {} differ",
+        "navigation: {} documents, {} symbol answers, {} definitions ({} targets, {} in doc \
+         comments, {} of them documentation-link targets), {} workspace queries; errors {:?}; \
+         {} differ",
         docs.len(),
         c.symbols,
         c.definitions,
         c.targets,
         c.deferred,
+        c.doc_targets,
         c.workspace,
         c.errors,
         differ.len()
     );
     assert!(differ.is_empty(), "{}", differ.join("\n"));
     assert!(c.targets > 1000, "only {} definition targets", c.targets);
+}
+
+/// The Rust `size_of` values doc_links.ves charges its budgets with.
+#[test]
+fn doc_link_budget_sizes() {
+    use std::mem::size_of;
+    use vesper_doc::links::{LinkDiagnostic, LinkReference, LinkTarget};
+    assert_eq!(size_of::<LinkTarget>(), 32, "SIZE_LINK_TARGET");
+    assert_eq!(size_of::<std::ops::Range<usize>>(), 16, "SIZE_SPAN");
+    assert_eq!(size_of::<(&str, usize)>(), 24, "SIZE_LINE");
+    assert_eq!(size_of::<LinkReference>(), 96, "SIZE_REFERENCE");
+    assert_eq!(size_of::<LinkDiagnostic>(), 64, "SIZE_DIAGNOSTIC");
+    assert_eq!(size_of::<vesper_syntax::lexer::Token>(), 24, "SIZE_TOKEN");
 }
 
 /// `navigation::hover` at every cursor of every corpus document.
@@ -1184,7 +1353,13 @@ fn lsp_features_speed() {
     if !speed() {
         return;
     }
-    let docs = corpus_docs();
+    // The generated budget docs (thousands of `/// [f]` lines) measure the
+    // doc-link limits, not editor speed, so they stay out of the timings.
+    let docs: Vec<&Doc> = corpus_docs()
+        .iter()
+        .filter(|d| !d.uri.starts_with("untitled:doc_"))
+        .collect();
+    let docs = &docs[..];
     let cursors: Vec<(usize, Position)> = docs
         .iter()
         .enumerate()
@@ -1321,7 +1496,12 @@ fn lsp_features_speed() {
         &mut || {
             time(|| {
                 for (d, ps) in docs.iter().zip(&per_doc) {
-                    std::hint::black_box(vesper_definitions(&d.uri, d.checked.source(), ps));
+                    std::hint::black_box(vesper_definitions(
+                        &d.uri,
+                        d.checked.source(),
+                        Some(d.checked.world()),
+                        ps,
+                    ));
                 }
             })
         },

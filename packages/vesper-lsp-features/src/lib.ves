@@ -5,6 +5,7 @@
 //
 // - nav.ves: navigation (src/lsp/navigation.rs): the lexical index,
 //   document symbols, workspace symbols and definition.
+// - doc_links.ves: the documentation-link fallback of definition.
 // - hover.ves: hover (`navigation::hover`) over the checker's facts.
 // - json.ves: serde_json's compact writer for those responses.
 //
@@ -28,6 +29,13 @@ use @vesper/check-data::input::{
     Ctx,
     Reader as CtxReader,
     read_ctx
+};
+use self::doc_links::{
+    DocFacts,
+    WordReader,
+    doc_facts_new,
+    doc_target,
+    read_doc_facts
 };
 use self::hover::{
     Facts,
@@ -262,7 +270,15 @@ pub fn lsp_document_symbols_kept(in input: Str) -> ChunkSeq[u64] {
 
 // The answer to one definition request on `x` (after the URI check),
 // appended to `out`.
-fn definition_answer(inout out: ChunkSeq[u8], inout x: Ix, in uri: Str, line: u32, character: u32) {
+fn definition_answer(
+    inout out: ChunkSeq[u8],
+    inout x: Ix,
+    in uri: Str,
+    line: u32,
+    character: u32,
+    in facts: DocFacts,
+    has_facts: bool
+) {
     if ix_err(in x) != ERR_NONE {
         put_error_answer(inout out, ix_err(in x), ix_span_err(in x));
         return;
@@ -272,14 +288,26 @@ fn definition_answer(inout out: ChunkSeq[u8], inout x: Ix, in uri: Str, line: u3
         put_error_answer(inout out, ix_err(in x), ix_span_err(in x));
         return;
     }
-    let t = node_target(in x, at);
+    let mut t = node_target(in x, at);
     if t == 0 {
-        if in_doc_comment(in x, at) {
-            out.push(68);
-        } else {
+        if !in_doc_comment(in x, at) {
             put(inout out, in "Rnull");
+            return;
         }
-        return;
+        if !has_facts {
+            out.push(68);
+            return;
+        }
+        let mut err = ERR_NONE;
+        t = doc_target(in x, in facts, at, inout err);
+        if t == 18446744073709551615 {
+            put_error_answer(inout out, err, ix_span_err(in x));
+            return;
+        }
+        if t == 0 {
+            put(inout out, in "Rnull");
+            return;
+        }
     }
     let span = wrapping_sub(t, 1);
     let mut v = ChunkSeq::new[u8]();
@@ -324,7 +352,8 @@ pub fn lsp_definition(in input: Str) -> ChunkSeq[u64] {
     }
     let mut x = index_new(src, in l);
     let mut out = ChunkSeq::new[u8]();
-    definition_answer(inout out, inout x, in uri, line, character);
+    let none = doc_facts_new();
+    definition_answer(inout out, inout x, in uri, line, character, in none, false);
     pack(in out.as_slice())
 }
 
@@ -332,8 +361,11 @@ pub fn lsp_definition(in input: Str) -> ChunkSeq[u64] {
 // parse is kept, as the server keeps its checked snapshot: the index is
 // rebuilt (lexed and traversed) for every request, as Rust does. The input
 // is the ten index-limit words, the URI length, the source length and the
-// cursor count, then a line and a character per cursor, then the URI and
-// the source. The answers are joined by newlines.
+// cursor count, then a line and a character per cursor, a word that is 1
+// when the documentation-link facts follow (`read_doc_facts`), those facts,
+// then the URI and the source. Without the facts a cursor left to the
+// documentation-link fallback answers `D`. The answers are joined by
+// newlines.
 pub fn lsp_definitions(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
     let mut r = Reader {
@@ -347,6 +379,17 @@ pub fn lsp_definitions(in input: Str) -> ChunkSeq[u64] {
     for i in 0..wrapping_add(n, n) {
         cursors.push(word(in b, inout r));
     }
+    // 1 when the documentation-link facts follow (doc_links.ves).
+    let has_facts = word(in b, inout r) == 1;
+    let mut fr = WordReader {
+        pos: r.pos
+    };
+    let facts = if has_facts {
+        read_doc_facts(in b, inout fr)
+    } else {
+        doc_facts_new()
+    };
+    r.pos = fr.pos;
     let uri = text_at(in b, r.pos, uri_len);
     let src = text_at(in b, wrapping_add(r.pos, uri_len), src_len);
     let mut out = ChunkSeq::new[u8]();
@@ -372,7 +415,7 @@ pub fn lsp_definitions(in input: Str) -> ChunkSeq[u64] {
             Option::Some(v) => wrapping_u32(v),
             Option::None => 0,
         };
-        definition_answer(inout out, inout x, in uri, line, character);
+        definition_answer(inout out, inout x, in uri, line, character, in facts, has_facts);
     }
     pack(in out.as_slice())
 }

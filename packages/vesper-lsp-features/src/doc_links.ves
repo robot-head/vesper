@@ -1,0 +1,893 @@
+// The documentation-link fallback of `textDocument/definition`
+// (src/lsp/navigation/doc_links.rs) and the local intra-doc reference
+// analysis it runs (`vesper_doc::links::analyze`,
+// crates/vesper-doc/src/links.rs), in Vesper.
+//
+// A cursor inside a `///` or `//!` comment with no lexical target goes to
+// the declaration a local intra-doc reference such as `[Type::method]`
+// names. The declaration inventory comes from the source items, checked
+// against the checker's world (`DocFacts`); the references come from the
+// comment text. Both budgets of the Rust code are kept charge for charge,
+// with the Rust `size_of` of each value the charges count.
+
+use @vesper/ast::{
+    TypeNode,
+    list_len,
+    list_at
+};
+use @vesper/front::lex::{
+    token_end
+};
+use self::markdown::{
+    analyze
+};
+use self::links::{
+    Link,
+    SIZE_LINK_TARGET,
+    ident_byte,
+    ident_start,
+    link_new
+};
+use @vesper-std/arena::{
+    idx_from_raw
+};
+use self::json::{
+    byte
+};
+use self::nav::{
+    Ix,
+    ERR_NONE,
+    ERR_INVALID_SPAN,
+    ERR_INVALID_LIMITS,
+    ERR_DOC_INVENTORY,
+    ERR_DOC_LINK_BUDGET,
+    MAX_SOURCE_BYTES,
+    MAX_SYMBOLS,
+    adt_at,
+    conf_at,
+    effect_decl_at,
+    fn_at,
+    impl_at,
+    item_at,
+    put_name,
+    token_start,
+    trait_at,
+    u32_at,
+    u8_at,
+    w
+};
+
+const NONE: u32 = 4294967295;
+const NOT_FOUND: u64 = 18446744073709551615;
+
+// `size_of` of the Rust values the budgets count (asserted by the test).
+pub const SIZE_SPAN: u64 = 16;
+
+// doc_links.rs `MAX_WORK`, `MAX_METADATA`.
+const INV_WORK: u64 = 16777216;
+const INV_METADATA: u64 = 1048576;
+
+// `LinkLimits::default()` with doc_links.rs's overrides.
+const L_MAX_PATH_BYTES: u64 = 1024;
+
+// `TargetKind`, in its `Ord` order.
+const T_FUNCTION: u8 = 0;
+const T_TYPE: u8 = 1;
+const T_METHOD: u8 = 2;
+const T_EFFECT: u8 = 3;
+const T_OPERATION: u8 = 4;
+const T_TRAIT: u8 = 5;
+
+const TK_COMMENT: u8 = 1;
+const TK_UPPER: u8 = 3;
+const TK_LOWER: u8 = 4;
+const TK_SELF: u8 = 22;
+
+const ITEM_ADT: u8 = 1;
+const ITEM_FUNCTION: u8 = 2;
+const ITEM_EFFECT: u8 = 3;
+const ITEM_IMPL: u8 = 4;
+const ITEM_TRAIT: u8 = 5;
+
+fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// ------------------------------------------------------------ facts
+
+// The checker's facts the inventory checks declarations against: every
+// `World::functions` entry, `elaboration.generated` key, ADT, effect
+// declaration (with its operations) and `elaboration.traits` name. Names
+// live in `pool` as (offset, length).
+pub struct DocFacts {
+    pool: ChunkSeq[u8],
+    fn_s: ChunkSeq[u64],
+    fn_l: ChunkSeq[u64],
+    fn_start: ChunkSeq[u64],
+    fn_end: ChunkSeq[u64],
+    gen_s: ChunkSeq[u64],
+    gen_l: ChunkSeq[u64],
+    adt_s: ChunkSeq[u64],
+    adt_l: ChunkSeq[u64],
+    adt_start: ChunkSeq[u64],
+    adt_end: ChunkSeq[u64],
+    eff_s: ChunkSeq[u64],
+    eff_l: ChunkSeq[u64],
+    eff_start: ChunkSeq[u64],
+    eff_end: ChunkSeq[u64],
+    eff_oa: ChunkSeq[u64],
+    eff_on: ChunkSeq[u64],
+    op_s: ChunkSeq[u64],
+    op_l: ChunkSeq[u64],
+    op_start: ChunkSeq[u64],
+    op_end: ChunkSeq[u64],
+    tr_s: ChunkSeq[u64],
+    tr_l: ChunkSeq[u64]
+}
+
+pub fn doc_facts_new() -> DocFacts {
+    DocFacts {
+        pool: ChunkSeq::new[u8](),
+        fn_s: ChunkSeq::new[u64](),
+        fn_l: ChunkSeq::new[u64](),
+        fn_start: ChunkSeq::new[u64](),
+        fn_end: ChunkSeq::new[u64](),
+        gen_s: ChunkSeq::new[u64](),
+        gen_l: ChunkSeq::new[u64](),
+        adt_s: ChunkSeq::new[u64](),
+        adt_l: ChunkSeq::new[u64](),
+        adt_start: ChunkSeq::new[u64](),
+        adt_end: ChunkSeq::new[u64](),
+        eff_s: ChunkSeq::new[u64](),
+        eff_l: ChunkSeq::new[u64](),
+        eff_start: ChunkSeq::new[u64](),
+        eff_end: ChunkSeq::new[u64](),
+        eff_oa: ChunkSeq::new[u64](),
+        eff_on: ChunkSeq::new[u64](),
+        op_s: ChunkSeq::new[u64](),
+        op_l: ChunkSeq::new[u64](),
+        op_start: ChunkSeq::new[u64](),
+        op_end: ChunkSeq::new[u64](),
+        tr_s: ChunkSeq::new[u64](),
+        tr_l: ChunkSeq::new[u64]()
+    }
+}
+
+// The input words: a string is its length then its bytes, padded to 8.
+pub struct WordReader {
+    pos: u64
+}
+
+pub fn read_word(in b: Slice[u8], inout r: WordReader) -> u64 {
+    let x = match b.try_read_u64_le(r.pos) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    r.pos = wrapping_add(r.pos, 8);
+    x
+}
+
+fn read_text(in b: Slice[u8], inout r: WordReader, inout f: DocFacts) -> (u64, u64) {
+    let n = read_word(in b, inout r);
+    let s = f.pool.len();
+    f.pool.extend(in b[r.pos..wrapping_add(r.pos, n)]);
+    r.pos = wrapping_add(r.pos, wrapping_mul(wrapping_add(n, 7) / 8, 8));
+    (s, n)
+}
+
+// Reads the facts section (see tests/self_host_lsp_features.rs
+// `doc_facts`): functions, generated, ADTs, effects with operations,
+// traits, each a count then its rows.
+pub fn read_doc_facts(in b: Slice[u8], inout r: WordReader) -> DocFacts {
+    let mut f = doc_facts_new();
+    let n = read_word(in b, inout r);
+    for i in 0..n {
+        let (s, l) = read_text(in b, inout r, inout f);
+        f.fn_s.push(s);
+        f.fn_l.push(l);
+        f.fn_start.push(read_word(in b, inout r));
+        f.fn_end.push(read_word(in b, inout r));
+    }
+    let n = read_word(in b, inout r);
+    for i in 0..n {
+        let (s, l) = read_text(in b, inout r, inout f);
+        f.gen_s.push(s);
+        f.gen_l.push(l);
+    }
+    let n = read_word(in b, inout r);
+    for i in 0..n {
+        let (s, l) = read_text(in b, inout r, inout f);
+        f.adt_s.push(s);
+        f.adt_l.push(l);
+        f.adt_start.push(read_word(in b, inout r));
+        f.adt_end.push(read_word(in b, inout r));
+    }
+    let n = read_word(in b, inout r);
+    for i in 0..n {
+        let (s, l) = read_text(in b, inout r, inout f);
+        f.eff_s.push(s);
+        f.eff_l.push(l);
+        f.eff_start.push(read_word(in b, inout r));
+        f.eff_end.push(read_word(in b, inout r));
+        f.eff_oa.push(f.op_s.len());
+        let m = read_word(in b, inout r);
+        f.eff_on.push(m);
+        for j in 0..m {
+            let (os, ol) = read_text(in b, inout r, inout f);
+            f.op_s.push(os);
+            f.op_l.push(ol);
+            f.op_start.push(read_word(in b, inout r));
+            f.op_end.push(read_word(in b, inout r));
+        }
+    }
+    let n = read_word(in b, inout r);
+    for i in 0..n {
+        let (s, l) = read_text(in b, inout r, inout f);
+        f.tr_s.push(s);
+        f.tr_l.push(l);
+    }
+    f
+}
+
+// Whether pool text `s, l` equals `q`.
+fn pool_eq(in f: DocFacts, s: u64, l: u64, in q: ChunkSeq[u8]) -> bool {
+    if l != q.len() {
+        return false;
+    }
+    for i in 0..l {
+        if u8_at(in f.pool, wrapping_add(s, i)) != u8_at(in q, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// The row of `table` (offsets `ss`, lengths `ls`) spelling `q`, or
+// NOT_FOUND (`BTreeMap::get` by name).
+fn find(in f: DocFacts, in ss: ChunkSeq[u64], in ls: ChunkSeq[u64], in q: ChunkSeq[u8]) -> u64 {
+    for i in 0..ss.len() {
+        if pool_eq(in f, u64_at(in ss, i), u64_at(in ls, i), in q) {
+            return i;
+        }
+    }
+    NOT_FOUND
+}
+
+// ------------------------------------------------------------ inventory
+
+// doc_links.rs `Inventory` and its `Budget` (both count down).
+struct Inv {
+    work: u64,
+    metadata: u64,
+    err: u64,
+    // Targets: path bytes in `paths` as (offset, length), kind, selection.
+    paths: ChunkSeq[u8],
+    t_s: ChunkSeq[u64],
+    t_l: ChunkSeq[u64],
+    t_kind: ChunkSeq[u8],
+    t_sel_start: ChunkSeq[u64],
+    t_sel_end: ChunkSeq[u64],
+    // The capacities of `names` and `spans` (`Budget::reserve`).
+    names_cap: u64,
+    spans_cap: u64
+}
+
+fn inv_fail(inout v: Inv, code: u64) -> bool {
+    if v.err == ERR_NONE {
+        v.err = code;
+    }
+    false
+}
+
+fn inv_work(inout v: Inv, n: u64) -> bool {
+    if n > v.work {
+        return inv_fail(inout v, ERR_DOC_INVENTORY);
+    }
+    v.work = wrapping_sub(v.work, n);
+    true
+}
+
+fn inv_metadata(inout v: Inv, n: u64) -> bool {
+    if n > v.metadata {
+        return inv_fail(inout v, ERR_DOC_INVENTORY);
+    }
+    v.metadata = wrapping_sub(v.metadata, n);
+    inv_work(inout v, n)
+}
+
+// `Budget::lookup`: `(entries + 1) * (key_bytes + 1)` work.
+fn inv_lookup(inout v: Inv, entries: u64, key: u64) -> bool {
+    inv_work(inout v, wrapping_mul(wrapping_add(entries, 1), wrapping_add(key, 1)))
+}
+
+// `Budget::reserve` of a vector of `len` values of `size` bytes whose
+// capacity is `cap`; returns the new capacity, or NOT_FOUND on failure.
+fn inv_reserve(inout v: Inv, len: u64, cap: u64, size: u64, limit: u64) -> u64 {
+    if len >= limit {
+        inv_fail(inout v, ERR_DOC_INVENTORY);
+        return NOT_FOUND;
+    }
+    if len != cap {
+        return cap;
+    }
+    let base = if cap < 2 {
+        2
+    } else {
+        cap
+    };
+    let mut next = wrapping_mul(base, 2);
+    if next > limit {
+        next = limit;
+    }
+    if !inv_metadata(inout v, wrapping_mul(next, size)) {
+        return NOT_FOUND;
+    }
+    if !inv_work(inout v, wrapping_mul(len, size)) {
+        return NOT_FOUND;
+    }
+    next
+}
+
+fn identifier(in q: ChunkSeq[u8]) -> bool {
+    if q.len() == 0 || !ident_start(u8_at(in q, 0)) {
+        return false;
+    }
+    for i in 1..q.len() {
+        if !ident_byte(u8_at(in q, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_self(in q: ChunkSeq[u8]) -> bool {
+    q.len() == 4
+        && u8_at(in q, 0) == 83
+        && u8_at(in q, 1) == 101
+        && u8_at(in q, 2) == 108
+        && u8_at(in q, 3) == 102
+}
+
+// `Inventory::local_name`.
+fn local_name(inout v: Inv, in name: ChunkSeq[u8], inout ok: bool) -> bool {
+    if !inv_work(inout v, wrapping_add(name.len(), 1)) {
+        return false;
+    }
+    ok = !is_self(in name) && identifier(in name);
+    true
+}
+
+fn name_text(in x: Ix, sym: u32) -> ChunkSeq[u8] {
+    let mut b = ChunkSeq::new[u8]();
+    put_name(inout b, in x.ast, sym);
+    b
+}
+
+// `Inventory::path`: `owner::name` (or `name`) into `out`.
+fn inv_path(
+    inout v: Inv,
+    in owner: ChunkSeq[u8],
+    has_owner: bool,
+    in name: ChunkSeq[u8],
+    inout out: ChunkSeq[u8]
+) -> bool {
+    if !inv_work(inout v, wrapping_add(name.len(), 1)) {
+        return false;
+    }
+    let mut bytes = name.len();
+    if has_owner {
+        if !inv_work(inout v, wrapping_add(owner.len(), 1)) {
+            return false;
+        }
+        bytes = wrapping_add(wrapping_add(owner.len(), 2), name.len());
+    }
+    if bytes > L_MAX_PATH_BYTES {
+        return inv_fail(inout v, ERR_DOC_INVENTORY);
+    }
+    if !inv_metadata(inout v, bytes) {
+        return false;
+    }
+    out.clear();
+    if has_owner {
+        out.extend(in owner.as_slice());
+        out.push(58);
+        out.push(58);
+    }
+    out.extend(in name.as_slice());
+    true
+}
+
+// `Inventory::selection`: the first identifier token inside `s..e`
+// spelling `name`.
+fn selection(
+    inout v: Inv,
+    in x: Ix,
+    s: u64,
+    e: u64,
+    in name: ChunkSeq[u8],
+    inout out_s: u64,
+    inout out_e: u64
+) -> bool {
+    if s > e || e > x.src.len() {
+        return inv_fail(inout v, ERR_INVALID_SPAN);
+    }
+    if !x.src.is_char_boundary(s) || !x.src.is_char_boundary(e) {
+        return inv_fail(inout v, ERR_INVALID_SPAN);
+    }
+    let n = x.t.kind.len();
+    if !inv_work(inout v, wrapping_mul(n, 2)) {
+        return false;
+    }
+    let begin = first_from(in x, s);
+    let end = ending_by(in x, e);
+    let b = x.src.as_bytes();
+    let mut i = begin;
+    loop {
+        if i >= end {
+            break;
+        }
+        if !inv_work(inout v, 1) {
+            return false;
+        }
+        let k = u8_at(in x.t.kind, i);
+        if k == TK_LOWER || k == TK_UPPER || k == TK_SELF {
+            let ts = token_start(in x, i);
+            let te = token_end(in x.t, i);
+            if !inv_work(inout v, wrapping_add(wrapping_sub(te, ts), name.len())) {
+                return false;
+            }
+            if wrapping_sub(te, ts) == name.len() {
+                let mut same = true;
+                for j in 0..name.len() {
+                    if byte(in b, wrapping_add(ts, j)) != u8_at(in name, j) {
+                        same = false;
+                        break;
+                    }
+                }
+                if same {
+                    out_s = ts;
+                    out_e = te;
+                    return true;
+                }
+            }
+        }
+        i = wrapping_add(i, 1);
+    }
+    inv_fail(inout v, ERR_INVALID_SPAN)
+}
+
+fn first_from(in x: Ix, at: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = x.t.kind.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        if token_start(in x, mid) < at {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+fn ending_by(in x: Ix, at: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = x.t.kind.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        if token_end(in x.t, mid) <= at {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+// `Inventory::push`.
+fn inv_push(
+    inout v: Inv,
+    in x: Ix,
+    in path: ChunkSeq[u8],
+    kind: u8,
+    s: u64,
+    e: u64,
+    in leaf: ChunkSeq[u8]
+) -> bool {
+    let mut ss: u64 = 0;
+    let mut se: u64 = 0;
+    if !selection(inout v, in x, s, e, in leaf, inout ss, inout se) {
+        return false;
+    }
+    let len = v.t_s.len();
+    let nc = inv_reserve(inout v, len, v.names_cap, SIZE_LINK_TARGET, MAX_SYMBOLS);
+    if nc == NOT_FOUND {
+        return false;
+    }
+    v.names_cap = nc;
+    let sc = inv_reserve(inout v, len, v.spans_cap, SIZE_SPAN, MAX_SYMBOLS);
+    if sc == NOT_FOUND {
+        return false;
+    }
+    v.spans_cap = sc;
+    v.t_s.push(v.paths.len());
+    v.t_l.push(path.len());
+    v.paths.extend(in path.as_slice());
+    v.t_kind.push(kind);
+    v.t_sel_start.push(ss);
+    v.t_sel_end.push(se);
+    true
+}
+
+// `Inventory::function`.
+fn inv_function(
+    inout v: Inv,
+    in x: Ix,
+    in f: DocFacts,
+    fnode: u32,
+    in owner: ChunkSeq[u8],
+    has_owner: bool
+) -> bool {
+    let node = fn_at(in x.ast, fnode);
+    let name = name_text(in x, node.name);
+    let mut ok = false;
+    if !local_name(inout v, in name, inout ok) {
+        return false;
+    }
+    if !ok {
+        return true;
+    }
+    if has_owner {
+        if !local_name(inout v, in owner, inout ok) {
+            return false;
+        }
+        if !ok {
+            return true;
+        }
+    }
+    let mut path = ChunkSeq::new[u8]();
+    if !inv_path(inout v, in owner, has_owner, in name, inout path) {
+        return false;
+    }
+    if !inv_lookup(inout v, f.fn_s.len(), path.len()) {
+        return false;
+    }
+    let i = find(in f, in f.fn_s, in f.fn_l, in path);
+    if i == NOT_FOUND {
+        return inv_fail(inout v, ERR_INVALID_SPAN);
+    }
+    if u64_at(in f.fn_start, i) != w(node.start) || u64_at(in f.fn_end, i) != w(node.end) {
+        return inv_fail(inout v, ERR_INVALID_SPAN);
+    }
+    if !inv_lookup(inout v, f.gen_s.len(), path.len()) {
+        return false;
+    }
+    if find(in f, in f.gen_s, in f.gen_l, in path) != NOT_FOUND {
+        return true;
+    }
+    inv_push(
+        inout v,
+        in x,
+        in path,
+        if has_owner {
+            T_METHOD
+        } else {
+            T_FUNCTION
+        },
+        w(node.start),
+        w(node.end),
+        in name
+    )
+}
+
+fn type_node(in x: Ix, t: u32) -> TypeNode {
+    x
+        .ast
+        .types
+        .get_or(
+            idx_from_raw[TypeNode](t),
+            TypeNode {
+                kind: 5,
+                a: NONE,
+                b: NONE,
+                c: NONE,
+                d: NONE
+            }
+        )
+}
+
+// `Inventory::collect`.
+fn collect(inout v: Inv, in x: Ix, in f: DocFacts) -> bool {
+    let none = ChunkSeq::new[u8]();
+    for k in 0..x.ast.m_items.len() {
+        if !inv_work(inout v, 1) {
+            return false;
+        }
+        let it = item_at(in x.ast, u32_at(in x.ast.m_items, k));
+        if it.kind == ITEM_FUNCTION {
+            if !inv_function(inout v, in x, in f, it.node, in none, false) {
+                return false;
+            }
+        } else if it.kind == ITEM_ADT {
+            let a = adt_at(in x.ast, it.node);
+            let name = name_text(in x, a.name);
+            let mut ok = false;
+            if !local_name(inout v, in name, inout ok) {
+                return false;
+            }
+            if !ok {
+                continue;
+            }
+            if !inv_lookup(inout v, f.adt_s.len(), name.len()) {
+                return false;
+            }
+            let i = find(in f, in f.adt_s, in f.adt_l, in name);
+            if i == NOT_FOUND
+                || u64_at(in f.adt_start, i) != w(a.start)
+                || u64_at(in f.adt_end, i) != w(a.end) {
+                return inv_fail(inout v, ERR_INVALID_SPAN);
+            }
+            let mut path = ChunkSeq::new[u8]();
+            if !inv_path(inout v, in none, false, in name, inout path) {
+                return false;
+            }
+            if !inv_push(inout v, in x, in path, T_TYPE, w(a.start), w(a.end), in name) {
+                return false;
+            }
+        } else if it.kind == ITEM_EFFECT {
+            let e = effect_decl_at(in x.ast, it.node);
+            let name = name_text(in x, e.name);
+            let mut ok = false;
+            if !local_name(inout v, in name, inout ok) {
+                return false;
+            }
+            if !ok {
+                continue;
+            }
+            if !inv_lookup(inout v, f.eff_s.len(), name.len()) {
+                return false;
+            }
+            let i = find(in f, in f.eff_s, in f.eff_l, in name);
+            if i == NOT_FOUND {
+                return inv_fail(inout v, ERR_INVALID_SPAN);
+            }
+            if u64_at(in f.eff_start, i) != w(e.start) || u64_at(in f.eff_end, i) != w(e.end) {
+                return inv_fail(inout v, ERR_INVALID_SPAN);
+            }
+            let mut path = ChunkSeq::new[u8]();
+            if !inv_path(inout v, in none, false, in name, inout path) {
+                return false;
+            }
+            if !inv_push(inout v, in x, in path, T_EFFECT, w(e.start), w(e.end), in name) {
+                return false;
+            }
+            let oa = u64_at(in f.eff_oa, i);
+            let on = u64_at(in f.eff_on, i);
+            for j in 0..list_len(in x.ast, e.ops) {
+                if !inv_work(inout v, 1) {
+                    return false;
+                }
+                let op = fn_at(in x.ast, list_at(in x.ast, e.ops, j));
+                let op_name = name_text(in x, op.name);
+                if !local_name(inout v, in op_name, inout ok) {
+                    return false;
+                }
+                if !ok {
+                    continue;
+                }
+                let mut matched = false;
+                for c in 0..on {
+                    let q = wrapping_add(oa, c);
+                    let cl = u64_at(in f.op_l, q);
+                    if !inv_work(inout v, wrapping_add(wrapping_add(cl, op_name.len()), 1)) {
+                        return false;
+                    }
+                    if pool_eq(in f, u64_at(in f.op_s, q), cl, in op_name)
+                        && u64_at(in f.op_start, q) == w(op.start)
+                        && u64_at(in f.op_end, q) == w(op.end) {
+                        matched = true;
+                    }
+                }
+                if !matched {
+                    return inv_fail(inout v, ERR_INVALID_SPAN);
+                }
+                let mut op_path = ChunkSeq::new[u8]();
+                if !inv_path(inout v, in name, true, in op_name, inout op_path) {
+                    return false;
+                }
+                if !inv_push(
+                    inout v,
+                    in x,
+                    in op_path,
+                    T_OPERATION,
+                    w(op.start),
+                    w(op.end),
+                    in op_name
+                ) {
+                    return false;
+                }
+            }
+        } else if it.kind == ITEM_IMPL {
+            let im = impl_at(in x.ast, it.node);
+            // `Type::name`: a named type's name, else "".
+            let ty = type_node(in x, im.ty);
+            if ty.kind == 1 {
+                let owner = name_text(in x, ty.a);
+                if owner.len() != 0 {
+                    for j in 0..list_len(in x.ast, im.methods) {
+                        if !inv_work(inout v, 1) {
+                            return false;
+                        }
+                        if !inv_function(
+                            inout v,
+                            in x,
+                            in f,
+                            list_at(in x.ast, im.methods, j),
+                            in owner,
+                            true
+                        ) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        } else if it.kind == ITEM_TRAIT {
+            let tr = trait_at(in x.ast, it.node);
+            let name = name_text(in x, tr.name);
+            let mut ok = false;
+            if !local_name(inout v, in name, inout ok) {
+                return false;
+            }
+            if !ok {
+                continue;
+            }
+            let mut known = false;
+            for j in 0..f.tr_s.len() {
+                let tl = u64_at(in f.tr_l, j);
+                if !inv_work(inout v, wrapping_add(wrapping_add(tl, name.len()), 1)) {
+                    return false;
+                }
+                if pool_eq(in f, u64_at(in f.tr_s, j), tl, in name) {
+                    known = true;
+                }
+            }
+            if !known {
+                return inv_fail(inout v, ERR_INVALID_SPAN);
+            }
+            let mut path = ChunkSeq::new[u8]();
+            if !inv_path(inout v, in none, false, in name, inout path) {
+                return false;
+            }
+            if !inv_push(inout v, in x, in path, T_TRAIT, w(tr.start), w(tr.end), in name) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+// ------------------------------------------------------------ target
+
+// `doc_links::target` for a cursor at byte `at` of `x` that has no lexical
+// target: the selection span of the declaration the reference under the
+// cursor names, as `start << 32 | end` + 1, 0 for none, or NOT_FOUND with
+// the error code in `err`.
+pub fn doc_target(in x: Ix, in f: DocFacts, at: u64, inout err: u64) -> u64 {
+    let mut v = Inv {
+        work: INV_WORK,
+        metadata: INV_METADATA,
+        err: ERR_NONE,
+        paths: ChunkSeq::new[u8](),
+        t_s: ChunkSeq::new[u64](),
+        t_l: ChunkSeq::new[u64](),
+        t_kind: ChunkSeq::new[u8](),
+        t_sel_start: ChunkSeq::new[u64](),
+        t_sel_end: ChunkSeq::new[u64](),
+        names_cap: 0,
+        spans_cap: 0
+    };
+    if !inv_work(inout v, x.t.kind.len()) {
+        err = v.err;
+        return NOT_FOUND;
+    }
+    let i = ending_by(in x, at);
+    if i >= x.t.kind.len() {
+        return 0;
+    }
+    let s = token_start(in x, i);
+    let e = token_end(in x.t, i);
+    if u8_at(in x.t.kind, i) != TK_COMMENT || !(s <= at && at < e) {
+        return 0;
+    }
+    let b = x.src.as_bytes();
+    let l = wrapping_sub(e, s);
+    let doc = l >= 3
+        && byte(in b, s) == 47
+        && byte(in b, wrapping_add(s, 1)) == 47
+        && (
+            byte(in b, wrapping_add(s, 2)) == 33
+                || (
+                    byte(in b, wrapping_add(s, 2)) == 47
+                        && !(l >= 4 && byte(in b, wrapping_add(s, 3)) == 47)
+                )
+        );
+    if !doc {
+        return 0;
+    }
+    if !collect(inout v, in x, in f) {
+        err = v.err;
+        return NOT_FOUND;
+    }
+    let mut k = link_new();
+    if !analyze(inout k, in x, in v.paths, in v.t_s, in v.t_l, in v.t_kind) {
+        err = if k.err == 1 {
+            ERR_DOC_LINK_BUDGET
+        } else if k.err == 2 {
+            ERR_INVALID_LIMITS
+        } else {
+            ERR_INVALID_SPAN
+        };
+        return NOT_FOUND;
+    }
+    if !inv_work(inout v, k.r_start.len()) {
+        err = v.err;
+        return NOT_FOUND;
+    }
+    let mut r = NOT_FOUND;
+    for j in 0..k.r_start.len() {
+        if u64_at(in k.r_start, j) <= at && at < u64_at(in k.r_end, j) {
+            r = j;
+            break;
+        }
+    }
+    if r == NOT_FOUND {
+        return 0;
+    }
+    let target = u64_at(in k.r_target, r);
+    let ts = u64_at(in k.t_s, target);
+    let tl = u64_at(in k.t_l, target);
+    let tk = u8_at(in k.t_kind, target);
+    let mut selected: u64 = 0;
+    for j in 0..v.t_s.len() {
+        let vl = u64_at(in v.t_l, j);
+        if !inv_work(inout v, wrapping_add(wrapping_add(vl, tl), 1)) {
+            err = v.err;
+            return NOT_FOUND;
+        }
+        if vl == tl && u8_at(in v.t_kind, j) == tk {
+            let vs = u64_at(in v.t_s, j);
+            let mut same = true;
+            for q in 0..tl {
+                if u8_at(in v.paths, wrapping_add(vs, q))
+                    != u8_at(in k.paths, wrapping_add(ts, q)) {
+                    same = false;
+                    break;
+                }
+            }
+            if same {
+                if selected != 0 {
+                    err = ERR_INVALID_SPAN;
+                    return NOT_FOUND;
+                }
+                selected = wrapping_add(
+                    wrapping_shl_u64(u64_at(in v.t_sel_start, j), 32) | u64_at(in v.t_sel_end, j),
+                    1
+                );
+            }
+        }
+    }
+    if selected == 0 {
+        err = ERR_INVALID_SPAN;
+        return NOT_FOUND;
+    }
+    selected
+}

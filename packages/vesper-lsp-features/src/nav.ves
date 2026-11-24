@@ -92,6 +92,10 @@ pub const ERR_URI_BYTES: u64 = 7;
 pub const ERR_DOCUMENTS_QUERY: u64 = 8;
 pub const ERR_POSITION: u64 = 9;
 pub const ERR_SOURCE_MISMATCH: u64 = 10;
+// The documentation-link fallback's errors (doc_links.ves).
+pub const ERR_DOC_INVENTORY: u64 = 11;
+pub const ERR_DOC_LINK_BUDGET: u64 = 12;
+pub const ERR_INVALID_LIMITS: u64 = 13;
 
 // `SymbolKind` numbers the index gives its declarations.
 const KIND_FUNCTION: u8 = 12;
@@ -221,7 +225,7 @@ fn fail(inout x: Ix, code: u64) -> bool {
 
 // ------------------------------------------------------------ accessors
 
-fn item_at(in a: Ast, i: u32) -> ItemNode {
+pub fn item_at(in a: Ast, i: u32) -> ItemNode {
     a
         .items
         .get_or(
@@ -252,7 +256,7 @@ pub fn fn_at(in a: Ast, f: u32) -> FnNode {
         )
 }
 
-fn adt_at(in a: Ast, i: u32) -> AdtNode {
+pub fn adt_at(in a: Ast, i: u32) -> AdtNode {
     a
         .adts
         .get_or(
@@ -271,7 +275,7 @@ fn adt_at(in a: Ast, i: u32) -> AdtNode {
         )
 }
 
-fn effect_decl_at(in a: Ast, i: u32) -> EffectDeclNode {
+pub fn effect_decl_at(in a: Ast, i: u32) -> EffectDeclNode {
     a
         .effect_decls
         .get_or(
@@ -287,7 +291,7 @@ fn effect_decl_at(in a: Ast, i: u32) -> EffectDeclNode {
         )
 }
 
-fn impl_at(in a: Ast, i: u32) -> ImplNode {
+pub fn impl_at(in a: Ast, i: u32) -> ImplNode {
     a
         .impls
         .get_or(
@@ -300,7 +304,7 @@ fn impl_at(in a: Ast, i: u32) -> ImplNode {
         )
 }
 
-fn trait_at(in a: Ast, i: u32) -> TraitNode {
+pub fn trait_at(in a: Ast, i: u32) -> TraitNode {
     a
         .traits
         .get_or(
@@ -317,7 +321,7 @@ fn trait_at(in a: Ast, i: u32) -> TraitNode {
         )
 }
 
-fn conf_at(in a: Ast, i: u32) -> ConfNode {
+pub fn conf_at(in a: Ast, i: u32) -> ConfNode {
     a
         .confs
         .get_or(
@@ -1242,10 +1246,15 @@ pub fn put_error(inout o: ChunkSeq[u8], code: u64, span_err: SpanError) {
         put(inout o, in "\"}");
         return;
     }
-    if code == ERR_INVALID_SPAN || code == ERR_SOURCE_MISMATCH || code == ERR_NONE {
+    if code == ERR_INVALID_SPAN
+        || code == ERR_SOURCE_MISMATCH
+        || code == ERR_INVALID_LIMITS
+        || code == ERR_NONE {
         put(inout o, in "{\"code\":-32603,\"message\":\"navigation: ");
         if code == ERR_SOURCE_MISMATCH {
             put(inout o, in "SourceMismatch");
+        } else if code == ERR_INVALID_LIMITS {
+            put(inout o, in "InvalidLimits");
         } else {
             put(inout o, in "InvalidSpan");
         }
@@ -1268,6 +1277,10 @@ pub fn put_error(inout o: ChunkSeq[u8], code: u64, span_err: SpanError) {
         put(inout o, in "output bytes");
     } else if code == ERR_URI_BYTES {
         put(inout o, in "URI bytes");
+    } else if code == ERR_DOC_INVENTORY {
+        put(inout o, in "doc navigation inventory work/metadata");
+    } else if code == ERR_DOC_LINK_BUDGET {
+        put(inout o, in "doc link parser budget");
     } else {
         put(inout o, in "documents/query");
     }
