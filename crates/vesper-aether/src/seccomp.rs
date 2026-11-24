@@ -342,6 +342,42 @@ impl SeccompProfile {
 
     /// Compiles to classic BPF (see the module docs for the layout).
     pub fn compile(&self) -> Result<Vec<SockFilter>, SeccompError> {
+        #[cfg(feature = "vesper-port")]
+        {
+            let mut nrs = Vec::with_capacity(self.allowed.len());
+            for &s in &self.allowed {
+                if s == Syscall::Ioctl {
+                    return Err(SeccompError::IoctlInPlainAllowlist);
+                }
+                nrs.push(s.number(self.arch).ok_or(SeccompError::UnknownSyscall(s))?);
+            }
+            let ioctl_nr = Syscall::Ioctl
+                .number(self.arch)
+                .ok_or(SeccompError::UnknownSyscall(Syscall::Ioctl))?;
+            let mut out = vec![0u64; BPF_MAXINSNS];
+            let count = crate::binding::seccomp_compile(
+                self.arch.audit(),
+                ioctl_nr,
+                self.default.ret(),
+                &nrs,
+                &self.ioctl_requests,
+                &mut out,
+            )
+            .map_err(SeccompError::from)?;
+            Ok(out[..count as usize]
+                .iter()
+                .copied()
+                .map(unpack_filter)
+                .collect())
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        self.compile_reference()
+    }
+
+    /// The Rust implementation of [`SeccompProfile::compile`], kept for
+    /// differential tests until the port flips.
+    #[doc(hidden)]
+    pub fn compile_reference(&self) -> Result<Vec<SockFilter>, SeccompError> {
         let mut nrs = Vec::with_capacity(self.allowed.len());
         for &s in &self.allowed {
             if s == Syscall::Ioctl {
@@ -441,6 +477,18 @@ impl SeccompProfile {
 
 /// The kernel's structural checks for the subset this module emits.
 pub fn validate(program: &[SockFilter]) -> Result<(), SeccompError> {
+    #[cfg(feature = "vesper-port")]
+    {
+        let words: Vec<u64> = program.iter().copied().map(pack_filter).collect();
+        crate::binding::seccomp_validate(&words).map_err(SeccompError::from)
+    }
+    #[cfg(not(feature = "vesper-port"))]
+    validate_reference(program)
+}
+
+/// The Rust implementation of [`validate`], kept for differential tests.
+#[doc(hidden)]
+pub fn validate_reference(program: &[SockFilter]) -> Result<(), SeccompError> {
     if program.is_empty() {
         return Err(SeccompError::EmptyProgram);
     }
@@ -477,7 +525,22 @@ pub fn validate(program: &[SockFilter]) -> Result<(), SeccompError> {
 
 /// Runs a validated program on `data` and returns the seccomp action.
 pub fn evaluate(program: &[SockFilter], data: &SeccompData) -> Result<u32, SeccompError> {
-    validate(program)?;
+    #[cfg(feature = "vesper-port")]
+    {
+        let words: Vec<u64> = program.iter().copied().map(pack_filter).collect();
+        let ip_lo = data.instruction_pointer as u32;
+        let ip_hi = (data.instruction_pointer >> 32) as u32;
+        crate::binding::seccomp_evaluate(&words, data.nr, data.arch, ip_lo, ip_hi, &data.args)
+            .map_err(SeccompError::from)
+    }
+    #[cfg(not(feature = "vesper-port"))]
+    evaluate_reference(program, data)
+}
+
+/// The Rust implementation of [`evaluate`], kept for differential tests.
+#[doc(hidden)]
+pub fn evaluate_reference(program: &[SockFilter], data: &SeccompData) -> Result<u32, SeccompError> {
+    validate_reference(program)?;
     let mut acc = 0u32;
     let mut pc = 0usize;
     loop {
@@ -494,6 +557,21 @@ pub fn evaluate(program: &[SockFilter], data: &SeccompData) -> Result<u32, Secco
             BPF_RET_K => return Ok(ins.k),
             code => return Err(SeccompError::UnsupportedInstruction { at: pc, code }),
         }
+    }
+}
+
+#[cfg(feature = "vesper-port")]
+fn pack_filter(f: SockFilter) -> u64 {
+    u64::from(f.code) | (u64::from(f.jt) << 16) | (u64::from(f.jf) << 24) | (u64::from(f.k) << 32)
+}
+
+#[cfg(feature = "vesper-port")]
+fn unpack_filter(w: u64) -> SockFilter {
+    SockFilter {
+        code: w as u16,
+        jt: (w >> 16) as u8,
+        jf: (w >> 24) as u8,
+        k: (w >> 32) as u32,
     }
 }
 

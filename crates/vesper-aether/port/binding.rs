@@ -206,6 +206,51 @@ impl Abi for crate::port_types::PvhFault {
     }
 }
 
+impl Abi for crate::port_types::SeccompFault {
+    const WORDS: usize = 3;
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            crate::port_types::SeccompFault::TooLong => {
+                out[0] = 0;
+            }
+            crate::port_types::SeccompFault::EmptyProgram => {
+                out[0] = 1;
+            }
+            crate::port_types::SeccompFault::JumpOutOfRange { at: f0 } => {
+                out[0] = 2;
+                Abi::put(f0, &mut out[1..]);
+            }
+            crate::port_types::SeccompFault::BadLoad { at: f0 } => {
+                out[0] = 3;
+                Abi::put(f0, &mut out[1..]);
+            }
+            crate::port_types::SeccompFault::UnsupportedInstruction { at: f0, code: f1 } => {
+                out[0] = 4;
+                Abi::put(f0, &mut out[1..]);
+                Abi::put(f1, &mut out[2..]);
+            }
+            crate::port_types::SeccompFault::NoTerminatingReturn => {
+                out[0] = 5;
+            }
+            crate::port_types::SeccompFault::FellOff => {
+                out[0] = 6;
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => crate::port_types::SeccompFault::TooLong,
+            1 => crate::port_types::SeccompFault::EmptyProgram,
+            2 => crate::port_types::SeccompFault::JumpOutOfRange { at: Abi::get(&words[1..]) },
+            3 => crate::port_types::SeccompFault::BadLoad { at: Abi::get(&words[1..]) },
+            4 => crate::port_types::SeccompFault::UnsupportedInstruction { at: Abi::get(&words[1..]), code: Abi::get(&words[2..]) },
+            5 => crate::port_types::SeccompFault::NoTerminatingReturn,
+            6 => crate::port_types::SeccompFault::FellOff,
+            tag => panic!("invalid SeccompFault tag {tag} from Vesper"),
+        }
+    }
+}
+
 impl Abi for crate::port_types::SlotError {
     const WORDS: usize = 5;
     fn put(&self, out: &mut [u64]) {
@@ -393,15 +438,19 @@ impl Abi for crate::port_types::VqFault {
 }
 
 const _: () = assert!(<Option<crate::port_types::SlotError> as Abi>::WORDS == 6);
+const _: () = assert!(<Result<(), crate::port_types::SeccompFault> as Abi>::WORDS == 4);
 const _: () = assert!(<Result<(u32, u64), crate::port_types::PvhFault> as Abi>::WORDS == 4);
+const _: () = assert!(<Result<u32, crate::port_types::SeccompFault> as Abi>::WORDS == 4);
 const _: () = assert!(<Result<u64, crate::port_types::HotFault> as Abi>::WORDS == 3);
 const _: () = assert!(<Result<u64, crate::port_types::PackedFault> as Abi>::WORDS == 2);
+const _: () = assert!(<Result<u64, crate::port_types::SeccompFault> as Abi>::WORDS == 4);
 const _: () = assert!(<Result<u64, crate::port_types::VqFault> as Abi>::WORDS == 2);
 const _: () = assert!(<crate::port_types::HotFault as Abi>::WORDS == 2);
 const _: () = assert!(<crate::port_types::KvmHostLimits as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port_types::PackedFault as Abi>::WORDS == 1);
 const _: () = assert!(<crate::port_types::PlannedRegion as Abi>::WORDS == 5);
 const _: () = assert!(<crate::port_types::PvhFault as Abi>::WORDS == 3);
+const _: () = assert!(<crate::port_types::SeccompFault as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port_types::SlotError as Abi>::WORDS == 5);
 const _: () = assert!(<crate::port_types::VqFault as Abi>::WORDS == 1);
 
@@ -413,6 +462,9 @@ unsafe extern "C" {
     fn vesper_aether_hotset_runs(result: *mut u64, pages: *mut u64, batch: i64, out: *mut u64) -> i64;
     fn vesper_aether_packed_capture(result: *mut u64, ring: *mut u64, regions: *mut u64, size: i64, free: i64, index: i64, wrap: i64, max_desc: i64, max_bytes: i64, max_work: i64, out: *mut u64) -> i64;
     fn vesper_aether_pvh_parse(result: *mut u64, elf: *mut u64, ram: *mut u64, out: *mut u64) -> i64;
+    fn vesper_aether_seccomp_compile(result: *mut u64, audit_arch: i64, ioctl_nr: i64, default_ret: i64, nrs_in: *mut u64, reqs_in: *mut u64, out: *mut u64) -> i64;
+    fn vesper_aether_seccomp_evaluate(result: *mut u64, program: *mut u64, nr: i64, arch: i64, ip_lo: i64, ip_hi: i64, args: *mut u64) -> i64;
+    fn vesper_aether_seccomp_validate(result: *mut u64, program: *mut u64) -> i64;
     fn vesper_aether_slot_plan_verify(result: *mut u64, regions: *mut u64, limits: *mut u64) -> i64;
     fn vesper_aether_slot_plan_verify_cross_vm(result: *mut u64, vm_ids: *mut u64, regions: *mut u64, region_vm: *mut u64) -> i64;
     fn vesper_aether_vq_packed_walk(result: *mut u64, mem: *mut u64, regions: *mut u64, busy: *mut u64, desc: i64, size: i64, index: i64, wrap: i64, occupied: i64, hint: i64, indirect_ok: i64, max_desc: i64, max_bytes: i64, max_work: i64, out: *mut u64) -> i64;
@@ -469,6 +521,36 @@ pub fn pvh_parse(elf: &[u8], ram: &[u64], out: &mut [u64]) -> Result<(u32, u64),
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(elf, |view_elf| vesper_port_abi::with_slice(ram, |view_ram| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_pvh_parse(result.as_mut_ptr(), view_elf, view_ram, view_out) })));
     <Result<(u32, u64), crate::port_types::PvhFault> as Abi>::get(&result[0..])
+}
+
+/// Calls `seccomp_compile` of the Vesper library `aether` (`vesper_aether_seccomp_compile`).
+pub fn seccomp_compile(audit_arch: u32, ioctl_nr: u32, default_ret: u32, nrs_in: &[u32], reqs_in: &[u32], out: &mut [u64]) -> Result<u64, crate::port_types::SeccompFault> {
+    let mut result = [0u64; 4];
+    // SAFETY: `vesper_aether_seccomp_compile` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(nrs_in, |view_nrs_in| vesper_port_abi::with_slice(reqs_in, |view_reqs_in| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_seccomp_compile(result.as_mut_ptr(), audit_arch as i64, ioctl_nr as i64, default_ret as i64, view_nrs_in, view_reqs_in, view_out) })));
+    <Result<u64, crate::port_types::SeccompFault> as Abi>::get(&result[0..])
+}
+
+/// Calls `seccomp_evaluate` of the Vesper library `aether` (`vesper_aether_seccomp_evaluate`).
+pub fn seccomp_evaluate(program: &[u64], nr: u32, arch: u32, ip_lo: u32, ip_hi: u32, args: &[u64]) -> Result<u32, crate::port_types::SeccompFault> {
+    let mut result = [0u64; 4];
+    // SAFETY: `vesper_aether_seccomp_evaluate` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(program, |view_program| vesper_port_abi::with_slice(args, |view_args| unsafe { vesper_aether_seccomp_evaluate(result.as_mut_ptr(), view_program, nr as i64, arch as i64, ip_lo as i64, ip_hi as i64, view_args) }));
+    <Result<u32, crate::port_types::SeccompFault> as Abi>::get(&result[0..])
+}
+
+/// Calls `seccomp_validate` of the Vesper library `aether` (`vesper_aether_seccomp_validate`).
+pub fn seccomp_validate(program: &[u64]) -> Result<(), crate::port_types::SeccompFault> {
+    let mut result = [0u64; 4];
+    // SAFETY: `vesper_aether_seccomp_validate` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(program, |view_program| unsafe { vesper_aether_seccomp_validate(result.as_mut_ptr(), view_program) });
+    <Result<(), crate::port_types::SeccompFault> as Abi>::get(&result[0..])
 }
 
 /// Calls `slot_plan_verify` of the Vesper library `aether` (`vesper_aether_slot_plan_verify`).

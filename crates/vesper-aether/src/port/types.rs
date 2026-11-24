@@ -257,3 +257,33 @@ impl From<VqFault> for crate::virtio::QueueError {
         }
     }
 }
+
+/// `SeccompError` as the Vesper seccomp compiler/validator/evaluator returns it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SeccompFault {
+    TooLong,
+    EmptyProgram,
+    JumpOutOfRange { at: u64 },
+    BadLoad { at: u64 },
+    UnsupportedInstruction { at: u64, code: u16 },
+    NoTerminatingReturn,
+    FellOff,
+}
+
+impl From<SeccompFault> for crate::seccomp::SeccompError {
+    fn from(e: SeccompFault) -> Self {
+        use crate::seccomp::SeccompError as S;
+        let ix = |n: u64| usize::try_from(n).unwrap_or(usize::MAX);
+        match e {
+            SeccompFault::TooLong => S::TooLong,
+            SeccompFault::EmptyProgram => S::EmptyProgram,
+            SeccompFault::JumpOutOfRange { at } => S::JumpOutOfRange { at: ix(at) },
+            SeccompFault::BadLoad { at } => S::BadLoad { at: ix(at) },
+            SeccompFault::UnsupportedInstruction { at, code } => {
+                S::UnsupportedInstruction { at: ix(at), code }
+            }
+            SeccompFault::NoTerminatingReturn => S::NoTerminatingReturn,
+            SeccompFault::FellOff => S::FellOff,
+        }
+    }
+}

@@ -37,6 +37,7 @@ AETHER_PARTS = [
     "vesper/src/hotset.ves",
     "vesper/src/packed.ves",
     "vesper/src/vq.ves",
+    "vesper/src/seccomp.ves",
 ]
 
 genrule(
@@ -147,5 +148,7 @@ rust_library(
         ("virtqueue", []),
         ("devices", []),
         ("device_features", []),
+        ("seccomp", []),
+        ("seccomp_port", []),
     ]
 ]
