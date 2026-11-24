@@ -54,3 +54,5 @@ expect seccomp_port validate_and_evaluate_match_rust -- compile_matches_rust
 expect guest_mem_port layout_and_locate_match_rust -- out_of_bounds_and_overflow_match_rust
 # block: unaligned discard sector/count is rejected.
 expect block_port discard_and_write_zeroes_match_rust -- span_and_config_match_rust
+# net: oversized TX frames are dropped.
+expect net_port tx_and_ctrl_match_rust -- config_space_matches_rust

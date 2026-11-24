@@ -487,6 +487,7 @@ impl Abi for crate::port_types::VqFault {
 const _: () = assert!(<(u8, u64) as Abi>::WORDS == 2);
 const _: () = assert!(<Option<(u64, u64)> as Abi>::WORDS == 3);
 const _: () = assert!(<Option<crate::port_types::SlotError> as Abi>::WORDS == 6);
+const _: () = assert!(<Option<u16> as Abi>::WORDS == 2);
 const _: () = assert!(<Result<(), crate::port_types::SeccompFault> as Abi>::WORDS == 4);
 const _: () = assert!(<Result<(u32, u64), crate::port_types::PvhFault> as Abi>::WORDS == 4);
 const _: () = assert!(<Result<u32, crate::port_types::SeccompFault> as Abi>::WORDS == 4);
@@ -495,6 +496,7 @@ const _: () = assert!(<Result<u64, crate::port_types::MemFault> as Abi>::WORDS =
 const _: () = assert!(<Result<u64, crate::port_types::PackedFault> as Abi>::WORDS == 2);
 const _: () = assert!(<Result<u64, crate::port_types::SeccompFault> as Abi>::WORDS == 4);
 const _: () = assert!(<Result<u64, crate::port_types::VqFault> as Abi>::WORDS == 2);
+const _: () = assert!(<bool as Abi>::WORDS == 1);
 const _: () = assert!(<crate::port_types::HotFault as Abi>::WORDS == 2);
 const _: () = assert!(<crate::port_types::KvmHostLimits as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port_types::MemFault as Abi>::WORDS == 3);
@@ -517,6 +519,9 @@ unsafe extern "C" {
     fn vesper_aether_guest_mem_plan(result: *mut u64, layout: *mut u64, out_table: *mut u64) -> i64;
     fn vesper_aether_hotset_decode(result: *mut u64, bytes: *mut u64, expected: i64, pages: *mut u64) -> i64;
     fn vesper_aether_hotset_runs(result: *mut u64, pages: *mut u64, batch: i64, out: *mut u64) -> i64;
+    fn vesper_aether_net_config_space(mac: *mut u64, link_up: i64, max_pairs: i64, mtu: i64, out: *mut u64) -> i64;
+    fn vesper_aether_net_parse_ctrl(result: *mut u64, readable: *mut u64, features: i64, max_pairs: i64) -> i64;
+    fn vesper_aether_net_validate_tx(readable: *mut u64, max_frame: i64, link_up: i64) -> i64;
     fn vesper_aether_packed_capture(result: *mut u64, ring: *mut u64, regions: *mut u64, size: i64, free: i64, index: i64, wrap: i64, max_desc: i64, max_bytes: i64, max_work: i64, out: *mut u64) -> i64;
     fn vesper_aether_pvh_parse(result: *mut u64, elf: *mut u64, ram: *mut u64, out: *mut u64) -> i64;
     fn vesper_aether_seccomp_compile(result: *mut u64, audit_arch: i64, ioctl_nr: i64, default_ret: i64, nrs_in: *mut u64, reqs_in: *mut u64, out: *mut u64) -> i64;
@@ -607,6 +612,34 @@ pub fn hotset_runs(pages: &[u64], batch: u64, out: &mut [u64]) -> Result<u64, cr
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(pages, |view_pages| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_hotset_runs(result.as_mut_ptr(), view_pages, batch as i64, view_out) }));
     <Result<u64, crate::port_types::HotFault> as Abi>::get(&result[0..])
+}
+
+/// Calls `net_config_space` of the Vesper library `aether` (`vesper_aether_net_config_space`).
+pub fn net_config_space(mac: &[u8], link_up: bool, max_pairs: u16, mtu: u16, out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_aether_net_config_space` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(mac, |view_mac| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_net_config_space(view_mac, link_up as i64, max_pairs as i64, mtu as i64, view_out) }));
+    raw as u64
+}
+
+/// Calls `net_parse_ctrl` of the Vesper library `aether` (`vesper_aether_net_parse_ctrl`).
+pub fn net_parse_ctrl(readable: &[u8], features: u64, max_pairs: u16) -> Option<u16> {
+    let mut result = [0u64; 2];
+    // SAFETY: `vesper_aether_net_parse_ctrl` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(readable, |view_readable| unsafe { vesper_aether_net_parse_ctrl(result.as_mut_ptr(), view_readable, features as i64, max_pairs as i64) });
+    <Option<u16> as Abi>::get(&result[0..])
+}
+
+/// Calls `net_validate_tx` of the Vesper library `aether` (`vesper_aether_net_validate_tx`).
+pub fn net_validate_tx(readable: &[u8], max_frame: u64, link_up: bool) -> bool {
+    // SAFETY: `vesper_aether_net_validate_tx` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(readable, |view_readable| unsafe { vesper_aether_net_validate_tx(view_readable, max_frame as i64, link_up as i64) });
+    raw != 0
 }
 
 /// Calls `packed_capture` of the Vesper library `aether` (`vesper_aether_packed_capture`).
