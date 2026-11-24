@@ -1,0 +1,4 @@
+load("./lib/script.axl", "script_task")
+
+test = script_task("test", ["manuscript"], "docs/manuscript/test_verify.py", "python3")
+verify = script_task("verify", ["manuscript"], "docs/manuscript/verify.py", "python3")
