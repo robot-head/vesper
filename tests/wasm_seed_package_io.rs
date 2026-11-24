@@ -1525,10 +1525,17 @@ fn stage2_compiles_package_to_runnable_wasm_impl() {
         format_stage2_error("stage2_compile_dir", got, Some(&out_diag))
     );
 
-    let out_core = std::fs::read(sample_dir.join("out.wasm")).expect("read out.wasm");
+    let out_comp = std::fs::read(sample_dir.join("out.wasm")).expect("read out.wasm");
+    assert!(
+        out_comp.starts_with(b"\0asm\x0d\x00\x01\x00"),
+        "expected WASI component header from @vesper/stage2"
+    );
+    let wasmtime_got = run(&out_comp, &Ctx::default())
+        .unwrap_or_else(|e| panic!("run stage2-emitted component under Wasmtime:\n{e}"));
+    assert_eq!(wasmtime_got, 42);
     let runner_bin = seed_runner::build_runner(&dir);
     let out_file = dir.join("out.wasm");
-    std::fs::write(&out_file, &out_core).unwrap();
+    std::fs::write(&out_file, &out_comp).unwrap();
     let exec = std::process::Command::new(&runner_bin)
         .args([
             "--invoke",
@@ -1611,7 +1618,10 @@ fn stage2_compiles_vesper_ast_impl() {
     );
     let out_bytes = std::fs::read(&ast_out_path).expect("read out");
     assert_eq!(out_bytes.len(), got as usize);
-    assert!(out_bytes.starts_with(b"\0asm"), "invalid wasm header");
+    assert!(
+        out_bytes.starts_with(b"\0asm\x0d\x00\x01\x00"),
+        "invalid wasm component header"
+    );
     remove_stage2_sidecars(&ast_out_path);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -1660,19 +1670,16 @@ fn stage2_self_compilation_fixed_point_impl() {
         format_stage2_error("stage2 boot", got, Some(&stage2_path))
     );
     let stage2_bytes = std::fs::read(&stage2_path).expect("read stage2.wasm");
-    assert!(stage2_bytes.starts_with(b"\0asm"), "invalid stage2.wasm");
+    assert!(
+        stage2_bytes.starts_with(b"\0asm\x0d\x00\x01\x00"),
+        "expected WASI component header from @vesper/stage2"
+    );
 
-    // Wrap stage2.wasm (core module emitted by @vesper/stage2) into a WASI component and run it to produce stage3.wasm.
-    let program = backend_program(&checked.checked.world, &o).expect("backend_program");
-    let input = wasm_input(&checked.checked.world, &program, "main", &o).expect("wasm_input");
-    let wit = match outcome(&backend().words(&input)) {
-        Outcome::Module { wit, .. } => wit,
-        other => panic!("expected module wit, got {other:?}"),
-    };
-    let stage2_component = wrap(stage2_bytes.clone(), &wit, o.world);
+    // Stage 2 directly emits a runnable WASI component via @vesper/wit-component:
+    // instantiate stage2.wasm directly with zero Rust compiler or wrapping glue.
     let stage2_syms = sidecar_path(&stage2_path, ".syms");
     let got3 = run(
-        &stage2_component,
+        &stage2_bytes,
         &Ctx {
             args: vec!["stage2", "packages/vesper-stage2", stage3_guest, "main"],
             env: vec![("VESPER_STAGE2_SYMS", "1")],

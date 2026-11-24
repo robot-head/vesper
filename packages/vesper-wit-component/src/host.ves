@@ -1,46 +1,56 @@
-// The host interfaces a backend world imports (src/wasm_backend/host.rs:
-// wasi:cli/stdout with the wasi:io interfaces it uses,
-// wasi:clocks/monotonic-clock and vesper:beacon/trace), and the core
-// modules wit-component writes to lower them.
+// The host interfaces a backend world imports (`src/wasm_backend/host.rs`
+// and `packages/vesper-wasm-backend/src/host.ves`: wasi:cli/stdout with
+// wasi:io, wasi:clocks/monotonic-clock, vesper:beacon/trace,
+// wasi:cli/environment, and wasi:filesystem/{types,preopens} with
+// wasi:clocks/wall-clock), and the core modules wit-component writes to
+// lower them.
 //
 // wit-component encodes each imported interface as an instance type from
-// the WIT `Resolve`. The backend's host WIT is fixed (host.rs `IO_WIT`,
-// `CLI_WIT`, `CLOCKS_WIT`, `BEACON_WIT`), so their instance types are kept
-// here as wit-component writes them; tests/self_host_wit_component.rs
+// the WIT `Resolve`. The backend's host WIT is fixed (`IO_WIT`, `CLI_WIT`,
+// `CLOCKS_WIT`, `FILESYSTEM_WIT`, `BEACON_WIT`), so their instance types
+// are kept here as wit-component writes them; tests/self_host_wit_component.rs
 // compares every component with host imports against Rust's, byte for
-// byte, so a change to host.rs's WIT shows up there.
+// byte.
 
 use @vesper/check-data::util::{
     add,
     inc
 };
 
-// The world's host imports (`Wit::imports`), in host.rs `HostCapability`
-// order.
+const NONE32: u32 = 4294967295;
+
+// The world's host imports (`Wit::imports`).
 const H_STDOUT: u8 = 0;
 const H_CLOCK: u8 = 1;
 const H_TRACE: u8 = 2;
+const H_ENV: u8 = 3;
+const H_FS_TYPES: u8 = 4;
+const H_FS_PREOPENS: u8 = 5;
 
-// The instance types wit-component imports, in its order: a world import
-// of wasi:cli/stdout brings wasi:io/error and wasi:io/streams first.
+// The instance types wit-component imports, in topological order within
+// each capability dependency chain.
 const IF_ERROR: u8 = 0;
 const IF_STREAMS: u8 = 1;
 const IF_STDOUT: u8 = 2;
 const IF_CLOCK: u8 = 3;
 const IF_TRACE: u8 = 4;
-const IF_COUNT: u64 = 5;
+const IF_ENV: u8 = 5;
+const IF_WALL_CLOCK: u8 = 6;
+const IF_FS_TYPES: u8 = 7;
+const IF_FS_PREOPENS: u8 = 8;
+const IF_COUNT: u64 = 9;
 
 // How a core import lowers (`LowerKind`).
 const L_NONE: u8 = 0;
 // `canon lower` without options, straight into the core instance.
 const L_DIRECT: u8 = 1;
-// Through the shim table, lowered with the memory (results through a
-// return pointer, or lists in the parameters).
+// Through the shim table, lowered with `memory` (optionally `realloc`, `utf8`).
 const L_MEMORY: u8 = 2;
-// As L_MEMORY, with UTF-8 strings.
 const L_MEMORY_UTF8: u8 = 3;
+const L_MEMORY_REALLOC: u8 = 4;
+const L_MEMORY_REALLOC_UTF8: u8 = 5;
 // `[resource-drop]<name>`: `canon resource.drop` of the aliased type.
-const L_DROP: u8 = 4;
+const L_DROP: u8 = 6;
 
 // Core value types and type forms.
 const VT_REF_NULL: u8 = 99;
@@ -166,17 +176,69 @@ fn unhex(inout out: ChunkSeq[u8], in h: Slice[u8]) {
     }
 }
 
+fn at32(in s: Slice[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn spliced_instance_type(
+    inout out: ChunkSeq[u8],
+    in pref: Slice[u8],
+    dep_idx: u32,
+    in suff: Slice[u8]
+) {
+    unhex(inout out, in pref);
+    put_uleb(inout out, widen_u64(dep_idx));
+    unhex(inout out, in suff);
+}
+
 // ------------------------------------------------------- host interfaces
 
-// The interfaces a world import of host capability `h` brings, in order
-// (`n` of them from `first`).
+pub fn if_count() -> u64 {
+    IF_COUNT
+}
+
+pub fn needs_descriptor_alias(h: u8) -> bool {
+    h == H_FS_PREOPENS
+}
+
+pub fn lower_ok(l: u8) -> bool {
+    l != L_NONE
+}
+
+pub fn lower_is_drop(l: u8) -> bool {
+    l == L_DROP
+}
+
+pub fn lower_is_indirect(l: u8) -> bool {
+    l == L_MEMORY || l == L_MEMORY_UTF8 || l == L_MEMORY_REALLOC || l == L_MEMORY_REALLOC_UTF8
+}
+
+pub fn lower_uses_realloc(l: u8) -> bool {
+    l == L_MEMORY_REALLOC || l == L_MEMORY_REALLOC_UTF8
+}
+
+pub fn lower_uses_utf8(l: u8) -> bool {
+    l == L_MEMORY_UTF8 || l == L_MEMORY_REALLOC_UTF8
+}
+
+// The interfaces a world import of host capability `h` brings, in
+// topological order (`n` of them from `first`).
 pub fn import_ifaces(h: u8) -> (u8, u64) {
     if h == H_STDOUT {
         (IF_ERROR, 3)
     } else if h == H_CLOCK {
         (IF_CLOCK, 1)
-    } else {
+    } else if h == H_TRACE {
         (IF_TRACE, 1)
+    } else if h == H_ENV {
+        (IF_ENV, 1)
+    } else if h == H_FS_TYPES {
+        (IF_WALL_CLOCK, 2)
+    } else {
+        (IF_WALL_CLOCK, 3)
     }
 }
 
@@ -188,6 +250,12 @@ pub fn host_import(in name: Slice[u8]) -> u8 {
         H_CLOCK
     } else if eq(in name, in "vesper:beacon/trace@0.1.0".as_bytes()) {
         H_TRACE
+    } else if eq(in name, in "wasi:cli/environment@0.2.0".as_bytes()) {
+        H_ENV
+    } else if eq(in name, in "wasi:filesystem/types@0.2.0".as_bytes()) {
+        H_FS_TYPES
+    } else if eq(in name, in "wasi:filesystem/preopens@0.2.0".as_bytes()) {
+        H_FS_PREOPENS
     } else {
         255
     }
@@ -202,8 +270,16 @@ pub fn host_name(i: u8, inout out: ChunkSeq[u8]) {
         out.extend(in "wasi:cli/stdout@0.2.0".as_bytes());
     } else if i == IF_CLOCK {
         out.extend(in "wasi:clocks/monotonic-clock@0.2.0".as_bytes());
-    } else {
+    } else if i == IF_TRACE {
         out.extend(in "vesper:beacon/trace@0.1.0".as_bytes());
+    } else if i == IF_ENV {
+        out.extend(in "wasi:cli/environment@0.2.0".as_bytes());
+    } else if i == IF_WALL_CLOCK {
+        out.extend(in "wasi:clocks/wall-clock@0.2.0".as_bytes());
+    } else if i == IF_FS_TYPES {
+        out.extend(in "wasi:filesystem/types@0.2.0".as_bytes());
+    } else {
+        out.extend(in "wasi:filesystem/preopens@0.2.0".as_bytes());
     }
 }
 
@@ -220,23 +296,27 @@ pub fn iface_of(in name: Slice[u8]) -> u8 {
 }
 
 // The instance type of interface `i` (one type-section item).
-pub fn instance_type(i: u8, inout out: ChunkSeq[u8]) {
+pub fn instance_type(i: u8, in halias: Slice[u32], inout out: ChunkSeq[u8]) {
     if i == IF_ERROR {
         // (instance (export "error" (type (sub resource))))
         unhex(inout out, in "42010400056572726f720301".as_bytes());
     } else if i == IF_STREAMS {
-        // output-stream, error (outer 1), stream-error and
+        // output-stream, error (outer), stream-error and
         // [method]output-stream.blocking-write-and-flush
-        unhex(
+        spliced_instance_type(
             inout out,
-            in "420b04000d6f75747075742d73747265616d030102030201010400056572726f72030001016902017102156c6173742d6f7065726174696f6e2d6661696c656401030006636c6f736564000004000c73747265616d2d6572726f7203000401680001707d016a0001050140020473656c660608636f6e74656e747307000804002e5b6d6574686f645d6f75747075742d73747265616d2e626c6f636b696e672d77726974652d616e642d666c7573680109"
+            in "420b04000d6f75747075742d73747265616d030102030201".as_bytes(),
+            at32(in halias, widen_u64(IF_ERROR)),
+            in "0400056572726f72030001016902017102156c6173742d6f7065726174696f6e2d6661696c656401030006636c6f736564000004000c73747265616d2d6572726f7203000401680001707d016a0001050140020473656c660608636f6e74656e747307000804002e5b6d6574686f645d6f75747075742d73747265616d2e626c6f636b696e672d77726974652d616e642d666c7573680109"
                 .as_bytes()
         );
     } else if i == IF_STDOUT {
-        // output-stream (outer 3) and get-stdout
-        unhex(
+        // output-stream (outer) and get-stdout
+        spliced_instance_type(
             inout out,
-            in "4205020302010304000d6f75747075742d73747265616d030000016901014000000204000a6765742d7374646f75740103"
+            in "420502030201".as_bytes(),
+            at32(in halias, widen_u64(IF_STREAMS)),
+            in "04000d6f75747075742d73747265616d030000016901014000000204000a6765742d7374646f75740103"
                 .as_bytes()
         );
     } else if i == IF_CLOCK {
@@ -245,29 +325,65 @@ pub fn instance_type(i: u8, inout out: ChunkSeq[u8]) {
             inout out,
             in "42040177040007696e7374616e7403000001400000010400036e6f770102".as_bytes()
         );
-    } else {
+    } else if i == IF_TRACE {
         // span-context, active-span, telemetry-attr and the six functions
         unhex(
             inout out,
             in "42120172040b74726163652d69642d6869770b74726163652d69642d6c6f77077370616e2d69647705666c6167737d04000c7370616e2d636f6e7465787403000001720403637478010e706172656e742d7370616e2d6964770d73746172742d6d6f6e6f2d6e737709736368656d612d69647904000b6163746976652d7370616e030002017104076e6f2d61747472000005636f756e74017700056279746573017700087265646163746564000004000e74656c656d657472792d61747472030004014000000104000b63757272656e742d637478010601400209736368656d612d696479046e616d6573000304000a73746172742d7370616e010701400306706172656e740109736368656d612d696479046e616d6573000304000b73746172742d6368696c640108014002047370616e0308617474722d753634770100040007656d69742d6f6b0109014003047370616e03086572722d636f646579036d7367730100040008656d69742d657272010a014002047370616e030461747472050100040009656d69742d61747472010b"
                 .as_bytes()
         );
+    } else if i == IF_ENV {
+        // get-environment, get-arguments, initial-cwd
+        unhex(
+            inout out,
+            in "420a016f027373017000014000000104000f6765742d656e7669726f6e6d656e740102017073014000000304000d6765742d617267756d656e74730104016b73014000000504000b696e697469616c2d6377640106"
+                .as_bytes()
+        );
+    } else if i == IF_WALL_CLOCK {
+        // datetime
+        unhex(
+            inout out,
+            in "4202017202077365636f6e6473770b6e616e6f7365636f6e6473790400086461746574696d65030000"
+                .as_bytes()
+        );
+    } else if i == IF_FS_TYPES {
+        // descriptor, directory-entry-stream, datetime (outer), stats and methods
+        spliced_instance_type(
+            inout out,
+            in "423b04000a64657363726970746f720301016e010e73796d6c696e6b2d666f6c6c6f7704000a706174682d666c616773030001016e0406637265617465096469726563746f7279096578636c7573697665087472756e6361746504000a6f70656e2d666c616773030003016e0604726561640577726974651366696c652d696e746567726974792d73796e6313646174612d696e746567726974792d73796e63147265717565737465642d77726974652d73796e63106d75746174652d6469726563746f727904001064657363726970746f722d666c616773030005016d25066163636573730b776f756c642d626c6f636b07616c72656164790e6261642d64657363726970746f72046275737908646561646c6f636b0571756f74610565786973740e66696c652d746f6f2d6c6172676515696c6c6567616c2d627974652d73657175656e63650b696e2d70726f67726573730b696e74657272757074656407696e76616c696402696f0c69732d6469726563746f7279046c6f6f700e746f6f2d6d616e792d6c696e6b730c6d6573736167652d73697a650d6e616d652d746f6f2d6c6f6e67096e6f2d646576696365086e6f2d656e747279076e6f2d6c6f636b13696e73756666696369656e742d6d656d6f727912696e73756666696369656e742d73706163650d6e6f742d6469726563746f7279096e6f742d656d7074790f6e6f742d7265636f76657261626c650b756e737570706f72746564066e6f2d7474790e6e6f2d737563682d646576696365086f766572666c6f770d6e6f742d7065726d6974746564047069706509726561642d6f6e6c790c696e76616c69642d7365656b0e746578742d66696c652d627573790c63726f73732d64657669636504000a6572726f722d636f6465030007017704000866696c6573697a65030009016d0807756e6b6e6f776e0c626c6f636b2d646576696365106368617261637465722d646576696365096469726563746f7279046669666f0d73796d626f6c69632d6c696e6b0c726567756c61722d66696c6506736f636b657404000f64657363726970746f722d7479706503000b017704000a6c696e6b2d636f756e7403000d02030201"
+                .as_bytes(),
+            at32(in halias, widen_u64(IF_WALL_CLOCK)),
+            in "0400086461746574696d6503000f016b1001720604747970650c0a6c696e6b2d636f756e740e0473697a650a15646174612d6163636573732d74696d657374616d70111b646174612d6d6f64696669636174696f6e2d74696d657374616d7011177374617475732d6368616e67652d74696d657374616d701104000f64657363726970746f722d737461740300120400166469726563746f72792d656e7472792d73747265616d030101720204747970650c046e616d657304000f6469726563746f72792d656e74727903001501680001707d016f02187f016a011901080140030473656c6617066c656e6774680a066f66667365740a001a0400175b6d6574686f645d64657363726970746f722e72656164011b016a010a01080140030473656c66170662756666657218066f66667365740a001c0400185b6d6574686f645d64657363726970746f722e7772697465011d016914016a011e01080140010473656c6617001f0400215b6d6574686f645d64657363726970746f722e726561642d6469726563746f72790120016a0001080140010473656c661700210400175b6d6574686f645d64657363726970746f722e73796e6301220140020473656c661704706174687300210400265b6d6574686f645d64657363726970746f722e6372656174652d6469726563746f72792d61740123016a011301080140010473656c661700240400175b6d6574686f645d64657363726970746f722e7374617401250140030473656c66170a706174682d666c61677302047061746873002404001a5b6d6574686f645d64657363726970746f722e737461742d61740126016900016a012701080140050473656c66170a706174682d666c616773020470617468730a6f70656e2d666c6167730405666c61677306002804001a5b6d6574686f645d64657363726970746f722e6f70656e2d617401290400265b6d6574686f645d64657363726970746f722e72656d6f76652d6469726563746f72792d617401230140040473656c6617086f6c642d70617468730e6e65772d64657363726970746f7217086e65772d7061746873002104001c5b6d6574686f645d64657363726970746f722e72656e616d652d6174012a0400215b6d6574686f645d64657363726970746f722e756e6c696e6b2d66696c652d61740123016814016b16016a012c01080140010473656c662b002d0400335b6d6574686f645d6469726563746f72792d656e7472792d73747265616d2e726561642d6469726563746f72792d656e747279012e"
+                .as_bytes()
+        );
+    } else {
+        // descriptor (outer) and get-directories
+        spliced_instance_type(
+            inout out,
+            in "420702030201".as_bytes(),
+            at32(in halias, widen_u64(IF_FS_TYPES)),
+            in "04000a64657363726970746f72030000016901016f020273017003014000000404000f6765742d6469726563746f726965730105"
+                .as_bytes()
+        );
     }
 }
 
 // The type interface `i` exports that later interfaces alias (`error`,
-// `output-stream`); empty for none.
-pub fn aliased_type(i: u8, inout out: ChunkSeq[u8]) {
+// `output-stream`, `datetime`, `descriptor`); empty for none.
+pub fn aliased_type(i: u8, need_desc: bool, inout out: ChunkSeq[u8]) {
     if i == IF_ERROR {
         out.extend(in "error".as_bytes());
     } else if i == IF_STREAMS {
         out.extend(in "output-stream".as_bytes());
+    } else if i == IF_WALL_CLOCK {
+        out.extend(in "datetime".as_bytes());
+    } else if i == IF_FS_TYPES && need_desc {
+        out.extend(in "descriptor".as_bytes());
     }
 }
 
-// How function `f` of interface `i` lowers: whether it needs the memory
-// (results through a return pointer, or lists or strings in the
-// parameters) and UTF-8 (`LoweringInfo` of wit-component's `encoding`).
+// How function `f` of interface `i` lowers: whether it needs the memory,
+// cabi_realloc, and/or UTF-8 (`LoweringInfo` of wit-component's `encoding`).
 pub fn lower_kind(i: u8, in f: Slice[u8]) -> u8 {
     if i == IF_STDOUT {
         if eq(in f, in "get-stdout".as_bytes()) {
@@ -295,6 +411,41 @@ pub fn lower_kind(i: u8, in f: Slice[u8]) -> u8 {
         }
         if eq(in f, in "emit-ok".as_bytes()) || eq(in f, in "emit-attr".as_bytes()) {
             return L_DIRECT;
+        }
+    } else if i == IF_ENV {
+        if eq(in f, in "get-arguments".as_bytes())
+            || eq(in f, in "get-environment".as_bytes())
+            || eq(in f, in "initial-cwd".as_bytes()) {
+            return L_MEMORY_REALLOC_UTF8;
+        }
+    } else if i == IF_FS_PREOPENS {
+        if eq(in f, in "get-directories".as_bytes()) {
+            return L_MEMORY_REALLOC_UTF8;
+        }
+    } else if i == IF_FS_TYPES {
+        if eq(in f, in "[method]descriptor.read".as_bytes()) {
+            return L_MEMORY_REALLOC;
+        }
+        if eq(in f, in "[method]directory-entry-stream.read-directory-entry".as_bytes()) {
+            return L_MEMORY_REALLOC_UTF8;
+        }
+        if eq(in f, in "[method]descriptor.open-at".as_bytes())
+            || eq(in f, in "[method]descriptor.stat-at".as_bytes())
+            || eq(in f, in "[method]descriptor.create-directory-at".as_bytes())
+            || eq(in f, in "[method]descriptor.remove-directory-at".as_bytes())
+            || eq(in f, in "[method]descriptor.unlink-file-at".as_bytes())
+            || eq(in f, in "[method]descriptor.rename-at".as_bytes()) {
+            return L_MEMORY_UTF8;
+        }
+        if eq(in f, in "[method]descriptor.write".as_bytes())
+            || eq(in f, in "[method]descriptor.stat".as_bytes())
+            || eq(in f, in "[method]descriptor.sync".as_bytes())
+            || eq(in f, in "[method]descriptor.read-directory".as_bytes()) {
+            return L_MEMORY;
+        }
+        if eq(in f, in "[resource-drop]descriptor".as_bytes())
+            || eq(in f, in "[resource-drop]directory-entry-stream".as_bytes()) {
+            return L_DROP;
         }
     }
     L_NONE
@@ -537,6 +688,35 @@ fn module_head(inout out: ChunkSeq[u8]) {
     out.push(0);
 }
 
+fn same_core_sig(in c: Core, a: u64, b: u64) -> bool {
+    let sa = sig_at(in c, a);
+    let sb = sig_at(in c, b);
+    sa.pc == sb.pc
+        && sa.rc == sb.rc
+        && eq(in c.bytes[sa.p0..add(sa.p0, sa.pn)], in c.bytes[sb.p0..add(sb.p0, sb.pn)])
+        && eq(in c.bytes[sa.r0..add(sa.r0, sa.rn)], in c.bytes[sb.r0..add(sb.r0, sb.rn)])
+}
+
+fn dedup_sigs(in c: Core, in sigs: Slice[u64]) -> (ChunkSeq[u64], ChunkSeq[u64]) {
+    let mut uniq = ChunkSeq::new[u64]();
+    let mut type_of = ChunkSeq::new[u64]();
+    for k in 0..sigs.len() {
+        let s = at64(in sigs, k);
+        let mut found = uniq.len();
+        for u in 0..uniq.len() {
+            if same_core_sig(in c, at64(in uniq.as_slice(), u), s) {
+                found = u;
+                break;
+            }
+        }
+        if found == uniq.len() {
+            uniq.push(s);
+        }
+        type_of.push(found);
+    }
+    (uniq, type_of)
+}
+
 fn func_types(in c: Core, in sigs: Slice[u64], inout out: ChunkSeq[u8]) {
     put_uleb(inout out, sigs.len());
     for k in 0..sigs.len() {
@@ -557,9 +737,9 @@ fn table_type(n: u64, inout out: ChunkSeq[u8]) {
     put_uleb(inout out, n);
 }
 
-// `wit-component-shim-module`: function k (type k, the core signature of
-// the k-th indirectly lowered import) calls table slot k, which the fixup
-// module fills with the real lowering.
+// `wit-component-shim-module`: function k (type_of[k], the core signature
+// of the k-th indirectly lowered import) calls table slot k, which the
+// fixup module fills with the real lowering.
 pub fn shim_module(
     in c: Core,
     in sigs: Slice[u64],
@@ -567,14 +747,15 @@ pub fn shim_module(
     inout out: ChunkSeq[u8]
 ) {
     let n = sigs.len();
+    let (uniq, type_of) = dedup_sigs(in c, in sigs);
     module_head(inout out);
     let mut body = ChunkSeq::new[u8]();
-    func_types(in c, in sigs, inout body);
+    func_types(in c, in uniq.as_slice(), inout body);
     section(inout out, S_TYPE, in body.as_slice());
     body.clear();
     put_uleb(inout body, n);
     for k in 0..n {
-        put_uleb(inout body, k);
+        put_uleb(inout body, at64(in type_of.as_slice(), k));
     }
     section(inout out, S_FUNCTION, in body.as_slice());
     body.clear();
@@ -606,11 +787,11 @@ pub fn shim_module(
             code.push(OP_LOCAL_GET);
             put_uleb(inout code, p);
         }
-        // i32.const k; call_indirect (type k) (table 0); end
+        // i32.const k; call_indirect (type type_of[k]) (table 0); end
         code.push(OP_I32_CONST);
         put_sleb(inout code, k);
         code.push(OP_CALL_INDIRECT);
-        put_uleb(inout code, k);
+        put_uleb(inout code, at64(in type_of.as_slice(), k));
         code.push(0);
         code.push(OP_END);
         put_bytes(inout body, in code.as_slice());
@@ -628,9 +809,10 @@ pub fn fixup_module(
     inout out: ChunkSeq[u8]
 ) {
     let n = sigs.len();
+    let (uniq, type_of) = dedup_sigs(in c, in sigs);
     module_head(inout out);
     let mut body = ChunkSeq::new[u8]();
-    func_types(in c, in sigs, inout body);
+    func_types(in c, in uniq.as_slice(), inout body);
     section(inout out, S_TYPE, in body.as_slice());
     body.clear();
     put_uleb(inout body, inc(n));
@@ -640,7 +822,7 @@ pub fn fixup_module(
         put_decimal(inout name, k);
         put_bytes(inout body, in name.as_slice());
         body.push(EXTERN_FUNC);
-        put_uleb(inout body, k);
+        put_uleb(inout body, at64(in type_of.as_slice(), k));
     }
     put_bytes(inout body, in "shim".as_bytes());
     put_bytes(inout body, in "$imports".as_bytes());
