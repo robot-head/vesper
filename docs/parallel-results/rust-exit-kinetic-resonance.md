@@ -532,6 +532,85 @@ differences on 754,241 differential cases, all five ABBA workloads under
 1.50x. The existing `fastmath` divergent edit (the cosine kernel's tail
 sign) stays in `build.rs`.
 
+## Part 8: Kinetic `morton`, `lbvh` and `crmath` flipped
+
+Base: `main` `7f9b71c`, the same host and compiler as part 7; the gate
+ran before part 7's `fastmath` was stacked under it (on the stacked branch
+the seven differentials cover 1,960,401 cases, 0 differences). All three modules were above the bar in part 7; each needed a
+change in the port, not in the compiler.
+
+### Measurements
+
+`scripts/ci/flip_gate.py vesper-kinetic` (`n = 30`): **PASS**, every test
+of the port and the seed, 0 differences on 1,207,869 differential cases.
+
+| Workload | Part 7 | Now | Decision |
+|---|--:|--:|---|
+| `morton` | 2.07x | **0.77x `[0.76x, 0.77x]`** | **Flipped** |
+| `lbvh` | 1.54x `[1.53x, 1.56x]` | **1.32x `[1.31x, 1.33x]`** | **Flipped** |
+| `pile-lbvh` | 1.37x | 1.16x `[1.15x, 1.18x]` | (scene workload over `lbvh`) |
+| `crmath` | 1.92x | **1.39x `[1.38x, 1.41x]`** | **Flipped** |
+| `colorer` | 0.82x | 0.80x `[0.79x, 0.80x]` | flipped earlier |
+| `multi-colorer` | 1.30x | 1.31x `[1.30x, 1.32x]` | flipped earlier |
+| `gjk` | 1.46x | 1.41x `[1.39x, 1.41x]` | flipped earlier |
+| `sap` | 1.07x | 1.07x `[1.05x, 1.07x]` | flipped earlier |
+
+### What changed
+
+- **`morton`** was bound by the export ABI, not by its body: each call
+  passed a fail buffer and a result buffer for a ten-instruction
+  interleave. The port's exports now return one packed `u64` (the code, or
+  bit 63 with the axis and value of the error; decodes pack
+  `x | y << 10 | z << 20`), and the interleave reads generated lookup tables
+  (`MORTON_SPREAD10`, `MORTON_COMPACT_B0..B3`) in place of the magic-bits
+  shifts. The `MortonError` enum leaves the Vesper side; Rust builds the
+  typed error from the packed word. The BMI2 `pdep`/`pext` paths and the
+  bit-by-bit specification stay in `src/morton.rs`.
+- **`lbvh`**: `pairs()` pruned too late. A child is now tested before it is
+  pushed: a node whose highest leaf (the end of its right spine, filled
+  once per query into the scratch it already had) is not above the query
+  leaf can never yield a pair, so it is never visited. The leaf test
+  `q > p` goes away with it. The divergent edit moves to the push-time
+  test.
+- **`crmath`** spent its time in bignum arithmetic and allocation (about
+  40% allocation: about 242,000 sequence allocations per run against the
+  Rust build's 70,000 `malloc`s). `bignum.ves` moves from 32-bit to
+  64-bit limbs (`u128` products, two-step 32-bit small division, Knuth D
+  for long division; the constant cache keeps its 32-bit layout) and gains
+  in-place add, subtract, negate, truncating shift and small division.
+  The series loops of `exp`, `log`, `sin`/`cos`, `atan` and the constant
+  series use them, so a term no longer allocates three intermediates.
+  Instructions fell from 142.6M to 120.6M on the 64-bit limbs alone.
+- Each module's Rust body moved to `seed/src/engine/{morton,lbvh,crmath}.rs`
+  (1,122 lines); `src/` loses 1,141 lines and gains 83 (dispatch and the
+  packed-word unpacking), net **1,058 Rust lines out of the package**.
+- `tests/port_differential.rs`: `morton_matches_the_rust_build` (1,133,072
+  cases: every 16-bit value through `spread`/`compact`, edges and random
+  coordinates and codes through the checked forms, errors compared),
+  `lbvh_matches_the_rust_build` gains 12 benchmark-sized rounds with small
+  pair budgets (408 cases), and `crmath_matches_the_rust_build` (73,040
+  cases: Annex F specials, edges, random inputs in each reduction range and
+  random bit patterns, all ten functions, bit for bit).
+- Divergent edits: `lbvh` moves to the push-time test, `bignum` to the new
+  64-bit low word (`big_low_u64` keeps only its low half; the binary64 ULP
+  test fails, binary32 passes). All four of `morton`, `lbvh`, `crmath` and
+  `bignum` checked: the named test fails, the other passes.
+
+### Compiler gap found
+
+`mul_wide(a, b) -> (lo, hi)` lowers to one `mul`/`umulhi` only when it
+stays a call (`src/native.rs`); once the inliner inlines its portable
+schoolbook body it becomes four multiplies. The bignum port uses
+`wrapping_mul` on `u128` values instead, which is better but not one
+instruction. Reported for the codegen owners; not fixed here.
+
+### Checks
+
+`vesper fmt --check` on the changed `.ves` files,
+`rustfmt +1.100.0 --edition 2024 --check` on the changed Rust files,
+`cargo +1.100.0 clippy -p vesper-kinetic -p vesper-kinetic-seed
+--all-targets -- -D warnings` and `tools/bazel/sync_build_files.py --check`.
+
 ## What is left
 
 - **Resonance:** slab (1.89x) and events (8.00x) stay above the bar until codegen removes their hot-path overhead (gap 7). The Rust
@@ -540,7 +619,7 @@ sign) stays in `build.rs`.
   plan), the `rtrb` rings (`spsc.rs`) and the denormal registers are not
   ported yet. The SIMD paths are ported (part 3), but they run at 8-48x and
   are bound by gaps 2 and 6.
-- **Kinetic:** get isolated `lbvh` (now `1.54x`), `morton` (2.07x) and `crmath` (1.92x) under `1.50x` and flip them, then port `world`/`tile`, `rigid` and `rigid/**`, `soft`,
+- **Kinetic:** every isolated module is flipped (part 8). Next, port `world`/`tile`, `rigid` and `rigid/**`, `soft`,
   `articulation`, `couple`, `diff`, `rigid_diff`, `rollback`, `snapshot`,
   `detfloat`, `simd` (see `port-p3b-kinetic.md`, "Not ported yet"), then the
   speed of the ported modules (1.3-2.8x in P3b).

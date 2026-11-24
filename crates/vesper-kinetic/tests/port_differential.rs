@@ -492,6 +492,10 @@ fn fastmath_matches_the_rust_build() {
             wide(port::atan2f(f, g)),
             wide(rust::atan2f(f, g)),
         );
+    }
+    println!("flip-gate differential differences={differences} cases={cases}");
+    assert_eq!(differences, 0);
+}
 
 /// The port's 30-bit Morton codes (by lookup tables) against the frozen
 /// Rust build (magic bits): every in-range axis value through `spread`,

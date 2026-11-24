@@ -1,7 +1,8 @@
 # The flip gate for vesper-kinetic (scripts/ci/flip_gate.py, SH6 lane 1,
 # #1396; this crate's lane: SH6 lane 9, #1404). The flipped modules are the
-# constraint colouring (coloring.rs: Colorer and MultiColorer), gjk, sap and
-# the fast math (fastmath.rs). The package has only their port; the frozen
+# constraint colouring (coloring.rs: Colorer and MultiColorer), gjk, sap,
+# the fast math (fastmath.rs), morton, lbvh and the correctly rounded math
+# (crmath.rs). The package has only their port; the frozen
 # Rust is the seed's engine, which the compiler links until Stage 2.
 name = "vesper-kinetic"
 lane = "SH6-9"
