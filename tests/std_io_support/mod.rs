@@ -454,6 +454,49 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ) -> i32;
         fn CloseHandle(handle: u64) -> i32;
         fn GetLastError() -> u32;
+        fn CreateFileW(
+            lp_file_name: *const u16,
+            dw_desired_access: u32,
+            dw_share_mode: u32,
+            lp_security_attributes: *const c_void,
+            dw_creation_disposition: u32,
+            dw_flags_and_attributes: u32,
+            h_template_file: *mut c_void,
+        ) -> u64;
+        fn ReadFile(
+            h_file: u64,
+            lp_buffer: *mut c_void,
+            n_number_of_bytes_to_read: u32,
+            lp_number_of_bytes_read: *mut u32,
+            lp_overlapped: *mut c_void,
+        ) -> i32;
+        fn WriteFile(
+            h_file: u64,
+            lp_buffer: *const c_void,
+            n_number_of_bytes_to_write: u32,
+            lp_number_of_bytes_written: *mut u32,
+            lp_overlapped: *mut c_void,
+        ) -> i32;
+        fn FlushFileBuffers(h_file: u64) -> i32;
+        fn GetFileSizeEx(h_file: u64, lp_file_size: *mut i64) -> i32;
+        fn GetFileAttributesExW(
+            lp_file_name: *const u16,
+            f_info_level_id: i32,
+            lp_file_information: *mut c_void,
+        ) -> i32;
+        fn FindFirstFileW(lp_file_name: *const u16, lp_find_file_data: *mut c_void) -> u64;
+        fn FindNextFileW(h_find_file: u64, lp_find_file_data: *mut c_void) -> i32;
+        fn FindClose(h_find_file: u64) -> i32;
+        fn MoveFileExW(
+            lp_existing_file_name: *const u16,
+            lp_new_file_name: *const u16,
+            dw_flags: u32,
+        ) -> i32;
+        fn DeleteFileW(lp_file_name: *const u16) -> i32;
+        fn RemoveDirectoryW(lp_path_name: *const u16) -> i32;
+        fn CreateDirectoryW(lp_path_name: *const u16, lp_security_attributes: *const c_void)
+        -> i32;
+        fn GetCurrentProcessId() -> u32;
     }
     vec![
         ("GetCommandLineW", GetCommandLineW as *const u8),
@@ -486,6 +529,20 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ),
         ("CloseHandle", CloseHandle as *const u8),
         ("GetLastError", GetLastError as *const u8),
+        ("CreateFileW", CreateFileW as *const u8),
+        ("ReadFile", ReadFile as *const u8),
+        ("WriteFile", WriteFile as *const u8),
+        ("FlushFileBuffers", FlushFileBuffers as *const u8),
+        ("GetFileSizeEx", GetFileSizeEx as *const u8),
+        ("GetFileAttributesExW", GetFileAttributesExW as *const u8),
+        ("FindFirstFileW", FindFirstFileW as *const u8),
+        ("FindNextFileW", FindNextFileW as *const u8),
+        ("FindClose", FindClose as *const u8),
+        ("MoveFileExW", MoveFileExW as *const u8),
+        ("DeleteFileW", DeleteFileW as *const u8),
+        ("RemoveDirectoryW", RemoveDirectoryW as *const u8),
+        ("CreateDirectoryW", CreateDirectoryW as *const u8),
+        ("GetCurrentProcessId", GetCurrentProcessId as *const u8),
     ]
 }
 #[cfg(not(any(unix, windows)))]
