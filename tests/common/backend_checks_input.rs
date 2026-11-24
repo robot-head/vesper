@@ -769,3 +769,140 @@ pub fn rust_text(
         Err(e) => format!("error {e}\n"),
     }
 }
+
+struct ReportWords<'a> {
+    w: &'a [u64],
+    at: usize,
+}
+
+impl ReportWords<'_> {
+    fn next(&mut self) -> u64 {
+        let x = self.w[self.at];
+        self.at += 1;
+        x
+    }
+
+    fn string(&mut self) -> String {
+        let n = self.next() as usize;
+        let mut b = Vec::with_capacity(n + 8);
+        for _ in 0..n.div_ceil(8) {
+            b.extend(self.next().to_le_bytes());
+        }
+        b.truncate(n);
+        String::from_utf8(b).expect("utf-8")
+    }
+}
+
+fn verifier_from_bit(bit: u64) -> NativeVerifier {
+    match bit {
+        1 => NativeVerifier::ConstTime,
+        2 => NativeVerifier::Stack,
+        4 => NativeVerifier::Realtime,
+        8 => NativeVerifier::DetFloat,
+        other => panic!("unknown verifier bit {other}"),
+    }
+}
+
+/// Decodes the words returned by `backend_verify_report_bytes` into a
+/// `Result<NativeVerifierReport, String>`.
+pub fn decode_report(
+    words: &[u64],
+) -> Result<vesper::native_verifiers::NativeVerifierReport, String> {
+    use vesper::native_verifiers::{NativeFinding, NativeVerifierReport};
+    use vesper::stack_bound::{GraphOrigin, StackBoundReport, StackFinding, StackRootBound};
+
+    let mut r = ReportWords { w: words, at: 0 };
+    if r.next() != 0 {
+        let msg = r.string();
+        assert_eq!(r.at, words.len(), "trailing error report words");
+        return Err(msg);
+    }
+    let mask = r.next();
+    let mut verifiers = BTreeSet::new();
+    for (bit, v) in [
+        (1, NativeVerifier::ConstTime),
+        (2, NativeVerifier::Stack),
+        (4, NativeVerifier::Realtime),
+        (8, NativeVerifier::DetFloat),
+    ] {
+        if mask & bit != 0 {
+            verifiers.insert(v);
+        }
+    }
+    let functions = r.next() as usize;
+    let nnotes = r.next() as usize;
+    let notes = (0..nnotes).map(|_| r.string()).collect();
+    let nf = r.next() as usize;
+    let mut findings = Vec::with_capacity(nf);
+    for _ in 0..nf {
+        let verifier = verifier_from_bit(r.next());
+        let function = r.string();
+        let has_inst = r.next() != 0;
+        let inst_v = r.next();
+        let rule = r.string();
+        let message = r.string();
+        let has_span = r.next() != 0;
+        let (s0, s1) = (r.next() as usize, r.next() as usize);
+        let has_loc = r.next() != 0;
+        let loc = r.next() as usize;
+        findings.push(NativeFinding {
+            verifier,
+            function,
+            inst: has_inst.then_some(inst_v as u32),
+            rule,
+            message,
+            span: has_span.then_some((s0, s1)),
+            location: has_loc.then_some(loc),
+        });
+    }
+    let stack = if r.next() != 0 {
+        let nsr = r.next() as usize;
+        let mut roots = Vec::with_capacity(nsr);
+        for _ in 0..nsr {
+            let root = r.string();
+            let budget_bytes = r.next() as u32;
+            let has_worst = r.next() != 0;
+            let worst = r.next();
+            let within_budget = r.next() != 0;
+            let np = r.next() as usize;
+            let worst_path = (0..np).map(|_| r.string()).collect();
+            roots.push(StackRootBound {
+                root,
+                budget_bytes,
+                worst_case_bytes: has_worst.then_some(worst),
+                worst_path,
+                within_budget,
+            });
+        }
+        let nsf = r.next() as usize;
+        let mut sfindings = Vec::with_capacity(nsf);
+        for _ in 0..nsf {
+            let function = r.string();
+            let has_inst = r.next() != 0;
+            let inst_v = r.next();
+            let rule = r.string();
+            let message = r.string();
+            sfindings.push(StackFinding {
+                function,
+                inst: has_inst.then_some(inst_v as u32),
+                rule,
+                message,
+            });
+        }
+        Some(StackBoundReport {
+            origin: GraphOrigin::Cranelift,
+            roots,
+            findings: sfindings,
+        })
+    } else {
+        None
+    };
+    assert_eq!(r.at, words.len(), "trailing report words");
+    Ok(NativeVerifierReport {
+        verifiers,
+        functions,
+        findings,
+        stack,
+        notes,
+    })
+}

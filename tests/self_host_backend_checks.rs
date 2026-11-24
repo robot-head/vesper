@@ -18,7 +18,7 @@ mod check_harness;
 #[path = "common/backend_checks_input.rs"]
 mod backend_checks_input;
 
-use backend_checks_input::{Mode, encode, rust_text};
+use backend_checks_input::{Mode, decode_report, encode, rust_text};
 use check_harness::{Entry, Package, abba, first_difference, repo, speed, time};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -479,6 +479,33 @@ fn optimized_package_agrees() {
         }
     }
     report(&failures, runs);
+}
+
+#[test]
+fn structured_report_matches_rust_on_cli_fixture() {
+    let path = repo().join("tests/fixtures/integration_b/verifiers.ves");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let world = checked(&source).unwrap();
+    let report_entry = package().entry("backend_verify_report", JIT_OPT);
+    for target in TARGETS {
+        let functions = emit(&world, "float_main", target, false).unwrap();
+        for (name, verifiers, p) in cli_policies() {
+            let input = encode(
+                &world,
+                &functions,
+                Some(target),
+                &Mode::Emitted(&verifiers, &p),
+                "verifiers.ves",
+                &source,
+            );
+            let rust = nv::verify_emitted(&world, &functions, Some(target), &verifiers, &p);
+            let ves = decode_report(&report_entry.words(&input));
+            assert_eq!(
+                ves, rust,
+                "structured report mismatch for float_main {target} {name}"
+            );
+        }
+    }
 }
 
 /// ABBA timing of the verification (decoding subtracted on the Vesper side),
