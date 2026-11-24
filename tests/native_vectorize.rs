@@ -404,3 +404,58 @@ fn main() -> u64 {
     let jit = vesper::native::jit_with_options(&c.world, "main", true).unwrap();
     assert_eq!(eval.to_string(), jit.to_string());
 }
+
+#[test]
+fn widens_i8_bytes_to_scaled_f32_and_matches_every_backend() {
+    let source = "fn dequant(in block: Slice[u8], inout out: Slice[u32], scale: f32) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    for i in 0..32 {
+        let q = wrapping_i8(block[2 + i]);
+        out.set(i, to_bits_f32(widen_f32(q) * scale));
+    }
+}
+
+fn main() -> u64 {
+    let mut b = ChunkSeq::new[u8]();
+    let mut out = ChunkSeq::new[u32]();
+    for i in 0..34 {
+        b.push(wrapping_u8(wrapping_add(i, 240)));
+    }
+    for _ in 0..32 {
+        out.push(0);
+    }
+    handle Fail[ArithOverflow] in {
+        handle Fail[RuntimeError] in {
+            dequant(in b.as_slice(), inout out.as_slice_mut(), 0.25);
+            let mut sum: u64 = 0;
+            for i in 0..32 {
+                let w = match out.try_get(i) { Option::Some(x) => x, Option::None => 0 };
+                sum = wrapping_add(sum, widen_u64(w));
+            }
+            sum
+        } with {
+            return x => x,
+            raise(_, _) => 998,
+        }
+    } with {
+        return x => x,
+        raise(_, _) => 997,
+    }
+}";
+    let p = parser::parse(source);
+    assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+    let c = check::check(&p.module);
+    assert!(c.diagnostics.is_empty(), "{:#?}", c.diagnostics);
+    for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] {
+        let (_, clif) =
+            vesper::native::object_with_options(&c.world, "main", Some(target), true).unwrap();
+        assert!(
+            clif.contains("fcvt_from_sint.f32x4"),
+            "{target}: expected 4-lane i8->f32 widening vectorization:\n{clif}"
+        );
+    }
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = vesper::native::jit_with_options(&c.world, "main", true).unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+}
