@@ -19,6 +19,7 @@ const PARTS: &[&str] = &[
     "guest_mem",
     "block",
     "net",
+    "vsock",
 ];
 
 fn main() {
@@ -103,5 +104,10 @@ const DIVERGENT_EDITS: &[(&str, &str)] = &[
     (
         "    if payload_len > max_frame {",
         "    if false && payload_len > max_frame {",
+    ),
+    // vsock: peer credit wraps instead of saturating to 0.
+    (
+        "    if peer_buf_alloc >= used {",
+        "    if true || peer_buf_alloc >= used {",
     ),
 ];
