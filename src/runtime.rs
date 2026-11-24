@@ -2306,6 +2306,7 @@ impl<'a> Runtime<'a> {
         caller: &Env,
     ) -> Result<Control, String> {
         match callee {
+            #[cfg(not(target_arch = "wasm32"))]
             Value::Function(ref name)
                 if name == crate::ffi_lowering::types::PINNED_ADDRESS
                     && crate::ffi_lowering::types::is_generated_pinned(self.world) =>
