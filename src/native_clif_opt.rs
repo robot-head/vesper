@@ -2152,6 +2152,55 @@ fn fold_narrow_extends(func: &mut ir::Function) {
                 (
                     Opcode::Ireduce,
                     InstructionData::Binary {
+                        opcode: bin_op @ (Opcode::Ushr | Opcode::Sshr),
+                        args: [a, b],
+                    },
+                ) => {
+                    let a_inner = match func.dfg.value_def(func.dfg.resolve_aliases(a)) {
+                        ir::ValueDef::Result(d, 0) => match (bin_op, func.dfg.insts[d]) {
+                            (
+                                Opcode::Ushr,
+                                InstructionData::Unary {
+                                    opcode: Opcode::Uextend,
+                                    arg,
+                                },
+                            )
+                            | (
+                                Opcode::Sshr,
+                                InstructionData::Unary {
+                                    opcode: Opcode::Sextend,
+                                    arg,
+                                },
+                            ) => {
+                                let inner = func.dfg.resolve_aliases(arg);
+                                (func.dfg.value_type(inner) == dst_ty).then_some(inner)
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(va) = a_inner
+                        && let Some((None, Some(s))) = narrow_operand(func, b, dst_ty)
+                        && s >= 0
+                        && s < i64::from(dst_ty.bits())
+                    {
+                        use cranelift_codegen::cursor::{Cursor, FuncCursor};
+                        use cranelift_codegen::ir::InstBuilder;
+                        let vb = {
+                            let mut pos = FuncCursor::new(func).at_inst(inst);
+                            pos.ins().iconst(types::I32, s)
+                        };
+                        if bin_op == Opcode::Ushr {
+                            func.dfg.replace(inst).ushr(va, vb);
+                        } else {
+                            func.dfg.replace(inst).sshr(va, vb);
+                        }
+                        changed = true;
+                    }
+                }
+                (
+                    Opcode::Ireduce,
+                    InstructionData::Binary {
                         opcode:
                             bin_op @ (Opcode::Band
                             | Opcode::Bor
