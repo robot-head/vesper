@@ -1,0 +1,300 @@
+// Module authority of @vesper/forge: transitive authority closure
+// (`AuthorityGraph::requirements`, src/authority.rs, #1157).
+
+const NONE: u64 = 4294967295;
+
+fn at_s(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn at_c(in c: ChunkSeq[u64], i: u64) -> u64 {
+    match c.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+struct GraphIdx {
+    node_pkg: ChunkSeq[u64],
+    node_item: ChunkSeq[u64],
+    node_pos: ChunkSeq[u64],
+    rule_pkg: ChunkSeq[u64],
+    rule_item: ChunkSeq[u64],
+    rule_pos: ChunkSeq[u64]
+}
+
+fn find_node(in gi: GraphIdx, pkg: u64, item: u64) -> u64 {
+    let n = gi.node_pkg.len();
+    for i in 0..n {
+        if at_c(in gi.node_pkg, i) == pkg && at_c(in gi.node_item, i) == item {
+            return i;
+        }
+    }
+    NONE
+}
+
+fn find_rule(in gi: GraphIdx, pkg: u64, item: u64) -> u64 {
+    let n = gi.rule_pkg.len();
+    for i in 0..n {
+        if at_c(in gi.rule_pkg, i) == pkg && at_c(in gi.rule_item, i) == item {
+            return i;
+        }
+    }
+    NONE
+}
+
+struct Reqs {
+    auth: ChunkSeq[u64],
+    pa: ChunkSeq[u64],
+    pn: ChunkSeq[u64],
+    path_pkg: ChunkSeq[u64],
+    path_item: ChunkSeq[u64]
+}
+
+fn add_req(inout r: Reqs, auth: u64, in pp: ChunkSeq[u64], in pi: ChunkSeq[u64]) {
+    let n = r.auth.len();
+    for i in 0..n {
+        if at_c(in r.auth, i) == auth {
+            return;
+        }
+    }
+    r.auth.push(auth);
+    r.pa.push(r.path_pkg.len());
+    r.pn.push(pp.len());
+    for i in 0..pp.len() {
+        r.path_pkg.push(at_c(in pp, i));
+        r.path_item.push(at_c(in pi, i));
+    }
+}
+
+fn add_rule(
+    in g: Slice[u64],
+    in gi: GraphIdx,
+    eff_pkg: u64,
+    eff_item: u64,
+    in pp: ChunkSeq[u64],
+    in pi: ChunkSeq[u64],
+    inout r: Reqs
+) -> bool {
+    let ri = find_rule(in gi, eff_pkg, eff_item);
+    if ri == NONE {
+        return false;
+    }
+    let mut pos = at_c(in gi.rule_pos, ri);
+    let na = at_s(in g, pos);
+    pos = wrapping_add(pos, 1);
+    for _ in 0..na {
+        add_req(inout r, at_s(in g, pos), in pp, in pi);
+        pos = wrapping_add(pos, 1);
+    }
+    true
+}
+
+fn build_path(
+    in par_pkg: ChunkSeq[u64],
+    in par_item: ChunkSeq[u64],
+    in par_parent: ChunkSeq[u64],
+    idx: u64,
+    inout pp: ChunkSeq[u64],
+    inout pi: ChunkSeq[u64]
+) {
+    pp.clear();
+    pi.clear();
+    let mut rev_pkg = ChunkSeq::new[u64]();
+    let mut rev_item = ChunkSeq::new[u64]();
+    let mut cur = idx;
+    loop {
+        if cur == NONE {
+            break;
+        }
+        rev_pkg.push(at_c(in par_pkg, cur));
+        rev_item.push(at_c(in par_item, cur));
+        cur = at_c(in par_parent, cur);
+    }
+    let len = rev_pkg.len();
+    for k in 0..len {
+        let j = wrapping_sub(wrapping_sub(len, 1), k);
+        pp.push(at_c(in rev_pkg, j));
+        pi.push(at_c(in rev_item, j));
+    }
+}
+
+fn find_visited(in par_pkg: ChunkSeq[u64], in par_item: ChunkSeq[u64], pkg: u64, item: u64) -> u64 {
+    let n = par_pkg.len();
+    for i in 0..n {
+        if at_c(in par_pkg, i) == pkg && at_c(in par_item, i) == item {
+            return i;
+        }
+    }
+    NONE
+}
+
+fn push_path(inout out: ChunkSeq[u64], in pp: ChunkSeq[u64], in pi: ChunkSeq[u64]) {
+    out.push(pp.len());
+    for i in 0..pp.len() {
+        out.push(at_c(in pp, i));
+        out.push(at_c(in pi, i));
+    }
+}
+
+pub fn requirements(in g: Slice[u64], op_kind: u64, op_a: u64, op_b: u64, op_c: u64, op_d: u64)
+    -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    if op_kind == 2 {
+        out.push(1);
+        return out;
+    }
+    let n_nodes = at_s(in g, 0);
+    let n_rules = at_s(in g, 1);
+    let mut gi = GraphIdx {
+        node_pkg: ChunkSeq::with_capacity[u64](n_nodes),
+        node_item: ChunkSeq::with_capacity[u64](n_nodes),
+        node_pos: ChunkSeq::with_capacity[u64](n_nodes),
+        rule_pkg: ChunkSeq::with_capacity[u64](n_rules),
+        rule_item: ChunkSeq::with_capacity[u64](n_rules),
+        rule_pos: ChunkSeq::with_capacity[u64](n_rules)
+    };
+    let mut pos: u64 = 2;
+    for _ in 0..n_nodes {
+        gi.node_pkg.push(at_s(in g, pos));
+        gi.node_item.push(at_s(in g, wrapping_add(pos, 1)));
+        pos = wrapping_add(pos, 2);
+        gi.node_pos.push(pos);
+        let nd = at_s(in g, pos);
+        pos = wrapping_add(pos, wrapping_add(1, nd));
+        let ne = at_s(in g, pos);
+        pos = wrapping_add(pos, 1);
+        for _ in 0..ne {
+            let ek = at_s(in g, pos);
+            if ek == 0 {
+                pos = wrapping_add(pos, 3);
+            } else if ek == 1 {
+                pos = wrapping_add(pos, 5);
+            } else {
+                pos = wrapping_add(pos, 2);
+            }
+        }
+    }
+    for _ in 0..n_rules {
+        gi.rule_pkg.push(at_s(in g, pos));
+        gi.rule_item.push(at_s(in g, wrapping_add(pos, 1)));
+        pos = wrapping_add(pos, 2);
+        gi.rule_pos.push(pos);
+        let na = at_s(in g, pos);
+        pos = wrapping_add(pos, wrapping_add(1, na));
+    }
+    let mut r = Reqs {
+        auth: ChunkSeq::new[u64](),
+        pa: ChunkSeq::new[u64](),
+        pn: ChunkSeq::new[u64](),
+        path_pkg: ChunkSeq::new[u64](),
+        path_item: ChunkSeq::new[u64]()
+    };
+    let mut par_pkg = ChunkSeq::new[u64]();
+    let mut par_item = ChunkSeq::new[u64]();
+    let mut par_parent = ChunkSeq::new[u64]();
+    let mut q = ChunkSeq::new[u64]();
+    let mut pp = ChunkSeq::new[u64]();
+    let mut pi = ChunkSeq::new[u64]();
+    if op_kind == 0 {
+        par_pkg.push(op_a);
+        par_item.push(op_b);
+        par_parent.push(NONE);
+        q.push(0);
+    } else {
+        if !add_rule(in g, in gi, op_a, op_b, in pp, in pi, inout r) {
+            out.push(3);
+            out.push(op_a);
+            out.push(op_b);
+            out.push(0);
+            return out;
+        }
+        par_pkg.push(op_c);
+        par_item.push(op_d);
+        par_parent.push(NONE);
+        q.push(0);
+    }
+    let mut qhead: u64 = 0;
+    loop {
+        if qhead >= q.len() {
+            break;
+        }
+        let qi = at_c(in q, qhead);
+        qhead = wrapping_add(qhead, 1);
+        let d_pkg = at_c(in par_pkg, qi);
+        let d_item = at_c(in par_item, qi);
+        build_path(in par_pkg, in par_item, in par_parent, qi, inout pp, inout pi);
+        let ni = find_node(in gi, d_pkg, d_item);
+        if ni == NONE {
+            out.push(2);
+            out.push(d_pkg);
+            out.push(d_item);
+            push_path(inout out, in pp, in pi);
+            return out;
+        }
+        let mut np = at_c(in gi.node_pos, ni);
+        let nd = at_s(in g, np);
+        np = wrapping_add(np, 1);
+        for _ in 0..nd {
+            add_req(inout r, at_s(in g, np), in pp, in pi);
+            np = wrapping_add(np, 1);
+        }
+        let ne = at_s(in g, np);
+        np = wrapping_add(np, 1);
+        for _ in 0..ne {
+            let ek = at_s(in g, np);
+            let mut next_pkg: u64 = 0;
+            let mut next_item: u64 = 0;
+            if ek == 0 {
+                next_pkg = at_s(in g, wrapping_add(np, 1));
+                next_item = at_s(in g, wrapping_add(np, 2));
+                np = wrapping_add(np, 3);
+            } else if ek == 1 {
+                let eff_pkg = at_s(in g, wrapping_add(np, 1));
+                let eff_item = at_s(in g, wrapping_add(np, 2));
+                next_pkg = at_s(in g, wrapping_add(np, 3));
+                next_item = at_s(in g, wrapping_add(np, 4));
+                np = wrapping_add(np, 5);
+                if !add_rule(in g, in gi, eff_pkg, eff_item, in pp, in pi, inout r) {
+                    out.push(3);
+                    out.push(eff_pkg);
+                    out.push(eff_item);
+                    push_path(inout out, in pp, in pi);
+                    return out;
+                }
+            } else {
+                let note_id = at_s(in g, wrapping_add(np, 1));
+                out.push(4);
+                out.push(d_pkg);
+                out.push(d_item);
+                out.push(note_id);
+                push_path(inout out, in pp, in pi);
+                return out;
+            }
+            if find_visited(in par_pkg, in par_item, next_pkg, next_item) == NONE {
+                let nidx = par_pkg.len();
+                par_pkg.push(next_pkg);
+                par_item.push(next_item);
+                par_parent.push(qi);
+                q.push(nidx);
+            }
+        }
+    }
+    out.push(0);
+    out.push(r.auth.len());
+    for i in 0..r.auth.len() {
+        out.push(at_c(in r.auth, i));
+        let pa = at_c(in r.pa, i);
+        let pn = at_c(in r.pn, i);
+        out.push(pn);
+        for j in 0..pn {
+            let k = wrapping_add(pa, j);
+            out.push(at_c(in r.path_pkg, k));
+            out.push(at_c(in r.path_item, k));
+        }
+    }
+    out
+}

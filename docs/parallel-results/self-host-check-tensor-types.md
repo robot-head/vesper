@@ -115,6 +115,13 @@ Ported `src/tensor_types/elaborate.rs` into `packages/vesper-check-tensor-types/
 
 - `tests/self_host_check_tensor_types.rs` (`elaborate_agrees_with_rust`): `0` of `94` active tensor sources differ (ADTs, `$dim_*` parameters, erased types/effects, `Dims` structs, call arguments, and synthetic spans).
 
+## Part 3: `vesper-hybrid` swap (`#1792`)
+
+Wired `@vesper/check-tensor-types` into `crates/vesper-hybrid` (`modules/tensor_types`, ABI v4) via `TensorCheckTable` (`install_tensor_check` in `src/tensor_types.rs`) and `tests/common/tensor_words.rs` (`ast_input.ves` binary AST decoder + `check_tensor_types_diags_bytes`).
+
+- `vesper-hybrid` `differential` (`hybrid_matches_the_default_compiler`): `5/5` passed, `0` of `2,202` runs differ across `554` files (`default 203.94 s`, `hybrid 66.10 s`, `0.324x`).
+
 ## What is left
 
-- Swap `@vesper/check-tensor-types` into `crates/vesper-hybrid` (`modules/tensor_types`, ABI v4) as a non-default module, with whole-corpus numbers and callgrind instruction counts.
+- Elaboration AST return through the swap table for accepted tensor modules (currently runs Rust `elaborate` + `check_module` when `diagnostics` is empty).
+- Callgrind instruction counts.

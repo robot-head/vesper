@@ -232,3 +232,22 @@ pub fn decode_link(out: &[u8]) -> Result<VesperLinked, FreestandingError> {
         elf,
     })
 }
+
+pub fn compare_code_request(object: &[u8], symbol: &str, code: &[u8]) -> Request {
+    Request::default()
+        .bytes(object)
+        .bytes(symbol.as_bytes())
+        .bytes(code)
+}
+
+pub fn decode_compare_code(out: &[u8]) -> Result<(), FreestandingError> {
+    let mut w = Words::new(out);
+    let code = w.word();
+    let r = if code == 0 {
+        Ok(())
+    } else {
+        Err(decode_error(code, &mut w))
+    };
+    w.done();
+    r
+}

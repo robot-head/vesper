@@ -63,6 +63,11 @@ mod ebpf_backend_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/freestanding.rs"]
+mod freestanding_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/codegen_numeric.rs"]
 mod codegen_numeric_binding;
 
@@ -118,6 +123,11 @@ mod place_ir_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/tensor_types.rs"]
+mod tensor_types_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/bounds_hoist.rs"]
 mod bounds_hoist_binding;
 
@@ -160,6 +170,10 @@ mod check_words;
 #[path = "../../../tests/common/pact_words.rs"]
 mod pact_words;
 
+// The tensor type checker's AST encoder and diagnostic decoder (#1186).
+#[path = "../../../tests/common/tensor_words.rs"]
+mod tensor_words;
+
 // The stack-bound swap's encoder and decoder (#1182), shared with the root
 // package's tests/self_host_check_loops_atomics.rs.
 #[path = "../../../tests/common/stack_words.rs"]
@@ -198,6 +212,11 @@ mod wasm_words;
 #[path = "../../../tests/common/ebpf_words.rs"]
 mod ebpf_words;
 
+// The freestanding swap's encoder and decoder (#1288), shared with
+// tests/self_host_freestanding.rs.
+#[path = "../../../tests/common/freestanding_words.rs"]
+mod freestanding_words;
+
 /// Calls answered by the Vesper word-layout module.
 static LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Sources parsed by the Vesper parse module.
@@ -220,6 +239,8 @@ static WASM_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// Programs the Vesper eBPF backend compiled, and left to Rust.
 static EBPF_CALLS: AtomicU64 = AtomicU64::new(0);
 static EBPF_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// Freestanding images whose stub, linker, trap table and script ran in Vesper.
+static FREESTANDING_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Components `@vesper/wit-component` wrapped, and left to wit-component.
 static WRAP_CALLS: AtomicU64 = AtomicU64::new(0);
 static WRAP_DECLINED: AtomicU64 = AtomicU64::new(0);
@@ -720,6 +741,16 @@ const VESPER_DEPS_PASS: vesper::pact_frontend::DepsPassTable =
         },
     };
 
+/// `tensor_types::check` from `modules/tensor_types` (SH2 lane 14, `#1186`).
+const VESPER_TENSOR_CHECK: vesper::tensor_types::TensorCheckTable =
+    vesper::tensor_types::TensorCheckTable {
+        diagnostics: |module| {
+            let (names, bytes) = tensor_words::encode_tensor_module(module);
+            let words = tensor_types_binding::tensor_diags(&names, &bytes);
+            Some(tensor_words::decode_tensor_diags(&words))
+        },
+    };
+
 /// Full coherence-gated Pact session from `modules/pact` (SH2 lane 13 part 2b).
 const VESPER_PACT_SESSION: vesper::pact_frontend::PactSessionTable =
     vesper::pact_frontend::PactSessionTable {
@@ -1061,6 +1092,53 @@ fn vesper_ebpf(
     let result = ebpf_words::decode(&words, options);
     EBPF_CALLS.fetch_add(1, Relaxed);
     Some(result)
+}
+
+/// The `freestanding` hook of `vesper::codegen_swap` from `modules/freestanding`
+/// (#1288): `@vesper/codegen-freestanding` runs `compare_code`, `stub`, `link`
+/// (with trap resolution and trap-table patching) and `script`.
+fn vesper_freestanding(
+    world: &vesper::check::World,
+    entry: &str,
+    options: &vesper::native::freestanding::ImageOptions,
+) -> Option<
+    Result<
+        vesper::native::freestanding::FreestandingImage,
+        vesper::native::freestanding::FreestandingError,
+    >,
+> {
+    use vesper::native::freestanding::{FreestandingOps, LinkedImage, build_image_with};
+    let ops = FreestandingOps {
+        compare_code: &|object, symbol, code| {
+            let req = freestanding_words::compare_code_request(object, symbol, code);
+            let out = freestanding_binding::compare_code_words(&req.0);
+            freestanding_words::decode_compare_code(&out)
+        },
+        stub: &|target, board, e_flags| {
+            let req = freestanding_words::stub_request(target, board, e_flags);
+            let out = freestanding_binding::stub_words(&req.0);
+            freestanding_words::decode_stub(&out)
+        },
+        link: &|objects, link_options, traps| {
+            let req = freestanding_words::link_request(objects, link_options, traps);
+            let out = freestanding_binding::link_words(&req.0);
+            let linked = freestanding_words::decode_link(&out)?;
+            Ok(LinkedImage {
+                entry: linked.entry,
+                layout: linked.layout,
+                symbols: linked.symbols,
+                pcs: linked.pcs,
+                elf: linked.elf,
+            })
+        },
+        script: &|target, board, stack_bytes| {
+            let req = freestanding_words::script_request(target, board, stack_bytes);
+            let out = freestanding_binding::script_words(&req.0);
+            freestanding_words::decode_script(&out)
+        },
+    };
+    FREESTANDING_CALLS.fetch_add(1, Relaxed);
+    Some(build_image_with(world, entry, options, &ops))
 }
 
 /// The `component` hook of `vesper::codegen_swap` (#1334): every component
@@ -1652,6 +1730,9 @@ extern "C" fn install() {
     if vesper::stack_bound::install_stack_bound(VESPER_STACK_BOUND).is_err() {
         std::process::abort();
     }
+    if vesper::tensor_types::install_tensor_check(VESPER_TENSOR_CHECK).is_err() {
+        std::process::abort();
+    }
     // Swaps keep one input per compilation (SH4 lane 2, #1276).
     // `VESPER_HYBRID_SCOPES=0` encodes per call instead (the before side of
     // the report's measurement).
@@ -1664,6 +1745,8 @@ extern "C" fn install() {
         wasm: Some(vesper_wasm),
         ebpf: (!std::env::var_os("VESPER_HYBRID_EBPF").is_some_and(|v| v == "0"))
             .then_some(vesper_ebpf as vesper::codegen_swap::EbpfHook),
+        freestanding: (!std::env::var_os("VESPER_HYBRID_FREESTANDING").is_some_and(|v| v == "0"))
+            .then_some(vesper_freestanding as vesper::codegen_swap::FreestandingHook),
         component: Some(vesper_component),
         numeric: Some(vesper_numeric),
         seq: (!std::env::var_os("VESPER_HYBRID_SEQ").is_some_and(|v| v == "0"))
@@ -1780,6 +1863,10 @@ extern "C" fn report() {
         "vesper-hybrid: eBPF backend compiled {} programs from Vesper ({} declined)",
         EBPF_CALLS.load(Relaxed),
         EBPF_DECLINED.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: freestanding built {} images from Vesper",
+        FREESTANDING_CALLS.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: wit-component wrapped {} components from Vesper ({} declined)",

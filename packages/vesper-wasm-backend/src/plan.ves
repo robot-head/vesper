@@ -55,7 +55,8 @@ use @vesper/check-data::input::{
 };
 use self::err::{
     WErr,
-    werr
+    werr,
+    werr_syms
 };
 use self::ir::{
     EffInst,
@@ -339,10 +340,10 @@ impl Cx {
         if node.kind == TyKind::Named {
             let n = node.name;
             let s = self.s;
-            if n == s.i64_ {
+            if n == s.i64_ || n == self.k.isize_ {
                 return shape_of(SH_SCALAR, SC_I64, NO_ADT, ty);
             }
-            if n == s.u64_ {
+            if n == s.u64_ || n == self.k.usize_ {
                 return shape_of(SH_SCALAR, SC_U64, NO_ADT, ty);
             }
             if n == s.u32_ {
@@ -391,7 +392,7 @@ impl Cx {
                 return shape_of(SH_TUPLE, 0, NO_ADT, tt);
             }
             if self.is_integer_name(n) {
-                Fail::raise(werr(K_UNSUPPORTED, U_INTEGER_WIDTH, 11));
+                Fail::raise(werr_syms(K_UNSUPPORTED, U_INTEGER_WIDTH, 11, 0, n));
             }
             let a = self.world.lookup(n);
             if a == NO_ADT {
@@ -1179,7 +1180,7 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
         }
         let found = cx.ir.find(q.base);
         if found == 0 {
-            Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 41));
+            Fail::raise(werr_syms(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 41, 0, q.base));
         }
         let fi = wrapping_sub(found, 1);
         let info = cx.ir.info(fi);

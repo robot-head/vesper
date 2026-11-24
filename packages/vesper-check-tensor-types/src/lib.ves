@@ -53,6 +53,9 @@ use self::kinds::{
 use self::infer::{
     analyze,
 };
+use self::ast_input::{
+    read_ast
+};
 use self::elaborate::{
     elaborate_report
 };
@@ -312,4 +315,69 @@ pub fn check_tensor_types_elaborate(in input: Str) -> ChunkSeq[u64] {
     }
     let out = elaborate_report(in st, in cx, in a);
     pack_text(in out)
+}
+
+pub fn check_tensor_types_diags_bytes(in names: Str, in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let a = read_ast(in names, inout r, in b);
+    let mut st = st_new();
+    map_names(inout st, in a);
+    let mut cx = cx_new(inout st);
+    let mut out = ChunkSeq::new[u64]();
+    if !active(inout st, in a) {
+        out.push(0);
+        return out;
+    }
+    let nd = r.word(in b);
+    for _ in 0..nd {
+        let code = r.word(in b);
+        let start = r.word(in b);
+        let end = r.word(in b);
+        let mut m = ChunkSeq::new[u8]();
+        read_bytes(inout r, in b, inout m);
+        st.dcode.push(wrapping_u32(code));
+        st.dstart.push(start);
+        st.dend.push(end);
+        st.dma.push(st.dtext.len());
+        st.dtext.extend(in m.as_slice());
+        st.dmb.push(st.dtext.len());
+    }
+    let nw = r.word(in b);
+    for _ in 0..nw {
+        let mut name = ChunkSeq::new[u8]();
+        read_bytes(inout r, in b, inout name);
+        let s = st.names.intern(in name.as_slice());
+        let has = r.word(in b);
+        let mut m = ChunkSeq::new[u8]();
+        read_bytes(inout r, in b, inout m);
+        if has == 1 {
+            set32(inout cx.wire, s, 1);
+        } else {
+            let row = wrapping_u32(cx.wa.len());
+            cx.wa.push(cx.wtext.len());
+            cx.wtext.extend(in m.as_slice());
+            cx.wb.push(cx.wtext.len());
+            set32(inout cx.wire, s, wrapping_add(row, 2));
+        }
+    }
+    analyze(inout st, inout cx, in a);
+    out.push(1);
+    let n = st.dcode.len();
+    out.push(n);
+    for i in 0..n {
+        out.push(widen_u64(u32_at(in st.dcode, i)));
+        out.push(u64_at(in st.dstart, i));
+        out.push(u64_at(in st.dend, i));
+        let a_off = u64_at(in st.dma, i);
+        let b_off = u64_at(in st.dmb, i);
+        let mut msg = ChunkSeq::with_capacity[u8](wrapping_sub(b_off, a_off));
+        for k in a_off..b_off {
+            msg.push(u8_at(in st.dtext, k));
+        }
+        let packed = pack_text(in msg);
+        out.extend(in packed.as_slice());
+    }
+    out
 }

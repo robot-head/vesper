@@ -53,6 +53,12 @@ const MODULES: &[(&str, &str, &str)] = &[
         "modules/ebpf_backend",
         "port/ebpf_backend.rs",
     ),
+    // SH4 lane 14 (#1288): freestanding stubs, linker, trap table and scripts.
+    (
+        "hybrid_freestanding",
+        "modules/freestanding",
+        "port/freestanding.rs",
+    ),
     // SH4 lane 11 (#1285): vector and TiledSeq operations, through the
     // `numeric` hook.
     (
@@ -115,6 +121,12 @@ const MODULES: &[(&str, &str, &str)] = &[
     ),
     // SH2 lane 13 (#1185): the declaration pass of the trait frontend.
     ("hybrid_pact", "modules/pact", "port/pact.rs"),
+    // SH2 lane 14 (#1186): the tensor type checker.
+    (
+        "hybrid_tensor_types",
+        "modules/tensor_types",
+        "port/tensor_types.rs",
+    ),
     // SH5 lane 15 (#1338): the doc renderers.
     ("hybrid_doc", "modules/doc", "port/doc.rs"),
 ];

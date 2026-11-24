@@ -257,3 +257,62 @@ impl From<VqFault> for crate::virtio::QueueError {
         }
     }
 }
+
+/// `SeccompError` as the Vesper seccomp compiler/validator/evaluator returns it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SeccompFault {
+    TooLong,
+    EmptyProgram,
+    JumpOutOfRange { at: u64 },
+    BadLoad { at: u64 },
+    UnsupportedInstruction { at: u64, code: u16 },
+    NoTerminatingReturn,
+    FellOff,
+}
+
+impl From<SeccompFault> for crate::seccomp::SeccompError {
+    fn from(e: SeccompFault) -> Self {
+        use crate::seccomp::SeccompError as S;
+        let ix = |n: u64| usize::try_from(n).unwrap_or(usize::MAX);
+        match e {
+            SeccompFault::TooLong => S::TooLong,
+            SeccompFault::EmptyProgram => S::EmptyProgram,
+            SeccompFault::JumpOutOfRange { at } => S::JumpOutOfRange { at: ix(at) },
+            SeccompFault::BadLoad { at } => S::BadLoad { at: ix(at) },
+            SeccompFault::UnsupportedInstruction { at, code } => {
+                S::UnsupportedInstruction { at: ix(at), code }
+            }
+            SeccompFault::NoTerminatingReturn => S::NoTerminatingReturn,
+            SeccompFault::FellOff => S::FellOff,
+        }
+    }
+}
+
+/// `MemError` as the Vesper guest-memory planner/locator returns it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MemFault {
+    NoRegions,
+    TooManyRegions,
+    EmptyRegion,
+    Unaligned,
+    Overflow,
+    Overlap,
+    TooLarge,
+    OutOfBounds { gpa: u64, len: u64 },
+}
+
+impl From<MemFault> for crate::guest_mem::MemError {
+    fn from(e: MemFault) -> Self {
+        use crate::guest_mem::MemError as M;
+        match e {
+            MemFault::NoRegions => M::NoRegions,
+            MemFault::TooManyRegions => M::TooManyRegions,
+            MemFault::EmptyRegion => M::EmptyRegion,
+            MemFault::Unaligned => M::Unaligned,
+            MemFault::Overflow => M::Overflow,
+            MemFault::Overlap => M::Overlap,
+            MemFault::TooLarge => M::TooLarge,
+            MemFault::OutOfBounds { gpa, len } => M::OutOfBounds { gpa, len },
+        }
+    }
+}

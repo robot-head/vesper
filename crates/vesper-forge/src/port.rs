@@ -625,3 +625,134 @@ fn resolve_with(
         operations,
     })
 }
+
+pub(crate) fn graph_requirements(
+    graph: &crate::authority::AuthorityGraph,
+    op: &OperationKind,
+) -> Result<crate::authority::Requirements, crate::authority::GraphFault> {
+    use crate::authority::{Authority, AuthorityNode, GraphEdge, GraphFault, Requirements};
+    use std::collections::BTreeMap;
+
+    let (op_kind, op_a, op_b, op_c, op_d) = match *op {
+        OperationKind::Use { def } => (0, u64::from(def.package.0), u64::from(def.item), 0, 0),
+        OperationKind::Handler { effect, handler } => (
+            1,
+            u64::from(effect.package.0),
+            u64::from(effect.item),
+            u64::from(handler.package.0),
+            u64::from(handler.item),
+        ),
+        OperationKind::IndirectCall => return Err(GraphFault::UnknownCallee),
+    };
+
+    let (nodes, handler_rules) = graph.raw_tables();
+    let mut auth_list: Vec<Authority> = Vec::new();
+    let mut auth_ids: BTreeMap<Authority, u64> = BTreeMap::new();
+    let mut intern_auth = |a: &Authority| -> u64 {
+        if let Some(&id) = auth_ids.get(a) {
+            return id;
+        }
+        let id = auth_list.len() as u64;
+        auth_list.push(a.clone());
+        auth_ids.insert(a.clone(), id);
+        id
+    };
+    let mut notes: Vec<String> = Vec::new();
+
+    let mut words = Vec::new();
+    words.push(nodes.len() as u64);
+    words.push(handler_rules.len() as u64);
+    for (&def_id, node) in nodes {
+        let node: &AuthorityNode = node;
+        words.push(u64::from(def_id.package.0));
+        words.push(u64::from(def_id.item));
+        words.push(node.direct.len() as u64);
+        for a in &node.direct {
+            words.push(intern_auth(a));
+        }
+        words.push(node.edges.len() as u64);
+        for e in &node.edges {
+            match e {
+                GraphEdge::Call(c) => {
+                    words.push(0);
+                    words.push(u64::from(c.package.0));
+                    words.push(u64::from(c.item));
+                }
+                GraphEdge::Handler { effect, handler } => {
+                    words.push(1);
+                    words.push(u64::from(effect.package.0));
+                    words.push(u64::from(effect.item));
+                    words.push(u64::from(handler.package.0));
+                    words.push(u64::from(handler.item));
+                }
+                GraphEdge::Unresolved { note } => {
+                    let nid = notes.len() as u64;
+                    notes.push(note.clone());
+                    words.push(2);
+                    words.push(nid);
+                }
+            }
+        }
+    }
+    for (&eff_id, auths) in handler_rules {
+        words.push(u64::from(eff_id.package.0));
+        words.push(u64::from(eff_id.item));
+        words.push(auths.len() as u64);
+        for a in auths {
+            words.push(intern_auth(a));
+        }
+    }
+
+    let out = binding::fg_requirements(&words, op_kind, op_a, op_b, op_c, op_d);
+    let read_path = |at: &mut usize| -> Vec<DefId> {
+        let len = u(out[*at]);
+        *at += 1;
+        let mut p = Vec::with_capacity(len);
+        for _ in 0..len {
+            p.push(def(out[*at], out[*at + 1]));
+            *at += 2;
+        }
+        p
+    };
+    match out[0] {
+        0 => {
+            let n = u(out[1]);
+            let mut at = 2;
+            let mut reqs = Requirements::new();
+            for _ in 0..n {
+                let aid = u(out[at]);
+                at += 1;
+                let path = read_path(&mut at);
+                reqs.insert(auth_list[aid].clone(), path);
+            }
+            Ok(reqs)
+        }
+        1 => Err(GraphFault::UnknownCallee),
+        2 => {
+            let d = def(out[1], out[2]);
+            let mut at = 3;
+            Err(GraphFault::MissingNode {
+                def: d,
+                path: read_path(&mut at),
+            })
+        }
+        3 => {
+            let eff = def(out[1], out[2]);
+            let mut at = 3;
+            Err(GraphFault::MissingHandlerRule {
+                effect: eff,
+                path: read_path(&mut at),
+            })
+        }
+        _ => {
+            let d = def(out[1], out[2]);
+            let nid = u(out[3]);
+            let mut at = 4;
+            Err(GraphFault::Unresolved {
+                at: d,
+                note: notes[nid].clone(),
+                path: read_path(&mut at),
+            })
+        }
+    }
+}

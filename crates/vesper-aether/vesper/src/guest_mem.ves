@@ -1,0 +1,141 @@
+// ---------------------------------------------------------------------------
+// Bounded guest RAM layout planning and GPA resolution (src/guest_mem.rs).
+
+const MAX_GUEST_RAM_BYTES: u64 = 1073741824;
+const MAX_GUEST_REGIONS: u64 = 16;
+
+pub copy enum MemFault {
+    NoRegions,
+    TooManyRegions,
+    EmptyRegion,
+    Unaligned,
+    Overflow,
+    Overlap,
+    TooLarge,
+    OutOfBounds {
+        gpa: u64,
+        len: u64
+    },
+}
+
+fn slice_u64_at(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// `layout` is `(gpa, len)` pairs; writes sorted `(gpa, offset, len)` triples
+// into `out_table` and returns the total guest RAM byte length.
+pub fn guest_mem_plan(in layout: Slice[u64], inout out_table: Slice[u64]) -> Result[u64, MemFault] {
+    let count = layout.len() / 2;
+    if count == 0 {
+        return Result::Err(MemFault::NoRegions);
+    }
+    if count > MAX_GUEST_REGIONS {
+        return Result::Err(MemFault::TooManyRegions);
+    }
+    if wrapping_mul(count, 3) > out_table.len() {
+        return Result::Err(MemFault::TooManyRegions);
+    }
+
+    let mut gpas = ChunkSeq::new[u64]();
+    let mut lens = ChunkSeq::new[u64]();
+    for i in 0..count {
+        let base = wrapping_mul(i, 2);
+        gpas.push(slice_u64_at(in layout, base));
+        lens.push(slice_u64_at(in layout, wrapping_add(base, 1)));
+    }
+
+    let mut i: u64 = 1;
+    loop {
+        if i >= count {
+            break;
+        }
+        let kg = at(in gpas, i);
+        let kl = at(in lens, i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev = wrapping_sub(j, 1);
+            let pg = at(in gpas, prev);
+            if pg <= kg {
+                break;
+            }
+            gpas.try_set(j, pg);
+            lens.try_set(j, at(in lens, prev));
+            j = prev;
+        }
+        gpas.try_set(j, kg);
+        lens.try_set(j, kl);
+        i = wrapping_add(i, 1);
+    }
+
+    let mut total: u64 = 0;
+    let mut prev_end: u64 = 0;
+    for r in 0..count {
+        let gpa = at(in gpas, r);
+        let len = at(in lens, r);
+        if len == 0 {
+            return Result::Err(MemFault::EmptyRegion);
+        }
+        if !aligned_4k(gpa) || !aligned_4k(len) {
+            return Result::Err(MemFault::Unaligned);
+        }
+        if add_overflows(gpa, len) {
+            return Result::Err(MemFault::Overflow);
+        }
+        let end = wrapping_add(gpa, len);
+        if r > 0 && gpa < prev_end {
+            return Result::Err(MemFault::Overlap);
+        }
+        if add_overflows(total, len) {
+            return Result::Err(MemFault::Overflow);
+        }
+        let offset = total;
+        total = wrapping_add(total, len);
+        if total > MAX_GUEST_RAM_BYTES {
+            return Result::Err(MemFault::TooLarge);
+        }
+        prev_end = end;
+
+        let dst = wrapping_mul(r, 3);
+        out_table.try_set(dst, gpa);
+        out_table.try_set(wrapping_add(dst, 1), offset);
+        out_table.try_set(wrapping_add(dst, 2), len);
+    }
+    Result::Ok(total)
+}
+
+// Resolves `[gpa, gpa + len)` in `table` (`(gpa, offset, len)` triples) to an
+// offset in the backing host byte buffer.
+pub fn guest_mem_locate(in table: Slice[u64], gpa: u64, len: u64) -> Result[u64, MemFault] {
+    if add_overflows(gpa, len) {
+        return Result::Err(
+            MemFault::OutOfBounds {
+                gpa: gpa,
+                len: len
+            }
+        );
+    }
+    let end = wrapping_add(gpa, len);
+    let count = table.len() / 3;
+    for i in 0..count {
+        let base = wrapping_mul(i, 3);
+        let r_gpa = slice_u64_at(in table, base);
+        let r_off = slice_u64_at(in table, wrapping_add(base, 1));
+        let r_len = slice_u64_at(in table, wrapping_add(base, 2));
+        let r_end = wrapping_add(r_gpa, r_len);
+        if r_gpa <= gpa && end <= r_end {
+            return Result::Ok(wrapping_add(r_off, wrapping_sub(gpa, r_gpa)));
+        }
+    }
+    Result::Err(
+        MemFault::OutOfBounds {
+            gpa: gpa,
+            len: len
+        }
+    )
+}

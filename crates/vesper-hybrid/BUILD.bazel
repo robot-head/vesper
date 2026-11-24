@@ -195,6 +195,13 @@ vesper_hybrid(
             "//:check_pact_package",
             "//crates/vesper-pact:port_package",
         ],
+        # The tensor type checker (#1186) builds on @vesper/check-tensor-types.
+        "hybrid_tensor_types": [
+            "//:ast_package",
+            "//:check_data_package",
+            "//:check_tensor_types_package",
+            "//:std_intern_package",
+        ],
         "hybrid_parse": [
             "//:ast_package",
             "//:front_package",
@@ -213,6 +220,10 @@ vesper_hybrid(
             "//:check_data_package",
             "//:place_ir_package",
             "//:ebpf_backend_package",
+        ],
+        # The freestanding swap (#1288) builds on @vesper/codegen-freestanding.
+        "hybrid_freestanding": [
+            "//:codegen_freestanding_package",
         ],
         # Test discovery (#1337) builds on @vesper/test-runner.
         "hybrid_test_runner": [
@@ -239,9 +250,11 @@ vesper_hybrid(
         "hybrid_layout": "modules/layout",
         "hybrid_optimize": "modules/optimize",
         "hybrid_pact": "modules/pact",
+        "hybrid_tensor_types": "modules/tensor_types",
         "hybrid_parse": "modules/parse",
         "hybrid_wasm_backend": "modules/wasm_backend",
         "hybrid_ebpf_backend": "modules/ebpf_backend",
+        "hybrid_freestanding": "modules/freestanding",
         "hybrid_test_runner": "modules/test_runner",
         "hybrid_place_ir": "modules/place_ir",
         "hybrid_stack_bound": "modules/stack_bound",
