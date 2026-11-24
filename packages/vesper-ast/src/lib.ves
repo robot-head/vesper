@@ -17,15 +17,20 @@
 // against the same dump of the Rust AST on every `.ves` file of the
 // repository, the parser test corpus and a fuzzed corpus.
 
+use @vesper/check-data::util::{
+    copy_seq
+};
 use @vesper-std/arena::{
     Arena,
     Idx,
     arena_new,
+    arena_with_capacity,
     idx_from_raw
 };
 use @vesper-std/intern::{
     Interner,
     interner_new,
+    interner_with_capacity,
     symbol_from_id
 };
 use self::lower::{
@@ -420,6 +425,692 @@ pub fn ast_new() -> Ast {
         m_bounds: ChunkSeq::new[u32](),
         m_uses: ChunkSeq::new[u32](),
         m_public: ChunkSeq::new[u32]()
+    }
+}
+
+fn copy_interner(in a: Interner, inout tmp: String) -> Interner {
+    let n = a.len();
+    let mut out = interner_with_capacity(n);
+    for i in 0..n {
+        tmp.clear();
+        let _ = a.resolve_into(symbol_from_id(wrapping_u32(i)), inout tmp);
+        let _ = out.intern(in tmp.as_str());
+    }
+    out
+}
+
+pub fn ast_clone_in_heap(in a: Ast, inout tmp: String) -> Ast {
+    let mut lits = if a.lits.len() == 0 {
+        arena_new[Lit]()
+    } else {
+        arena_with_capacity[Lit](a.lits.len())
+    };
+    for i in 0..a.lits.len() {
+        match a.lits.at(i) {
+            Option::Some(v) => {
+                let _ = lits
+                    .alloc(
+                        Lit {
+                            kind: v.kind,
+                            neg: v.neg,
+                            bits: v.bits,
+                            hi: v.hi
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut exprs = if a.exprs.len() == 0 {
+        arena_new[ExprNode]()
+    } else {
+        arena_with_capacity[ExprNode](a.exprs.len())
+    };
+    for i in 0..a.exprs.len() {
+        match a.exprs.at(i) {
+            Option::Some(v) => {
+                let _ = exprs
+                    .alloc(
+                        ExprNode {
+                            kind: v.kind,
+                            start: v.start,
+                            end: v.end,
+                            a: v.a,
+                            b: v.b,
+                            c: v.c,
+                            d: v.d,
+                            e: v.e
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut pats = if a.pats.len() == 0 {
+        arena_new[PatNode]()
+    } else {
+        arena_with_capacity[PatNode](a.pats.len())
+    };
+    for i in 0..a.pats.len() {
+        match a.pats.at(i) {
+            Option::Some(v) => {
+                let _ = pats
+                    .alloc(
+                        PatNode {
+                            kind: v.kind,
+                            start: v.start,
+                            end: v.end,
+                            a: v.a,
+                            b: v.b,
+                            c: v.c
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut types = if a.types.len() == 0 {
+        arena_new[TypeNode]()
+    } else {
+        arena_with_capacity[TypeNode](a.types.len())
+    };
+    for i in 0..a.types.len() {
+        match a.types.at(i) {
+            Option::Some(v) => {
+                let _ = types
+                    .alloc(
+                        TypeNode {
+                            kind: v.kind,
+                            a: v.a,
+                            b: v.b,
+                            c: v.c,
+                            d: v.d
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut stmts = if a.stmts.len() == 0 {
+        arena_new[StmtNode]()
+    } else {
+        arena_with_capacity[StmtNode](a.stmts.len())
+    };
+    for i in 0..a.stmts.len() {
+        match a.stmts.at(i) {
+            Option::Some(v) => {
+                let _ = stmts
+                    .alloc(
+                        StmtNode {
+                            kind: v.kind,
+                            pat: v.pat,
+                            ty: v.ty,
+                            value: v.value,
+                            mutable: v.mutable
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut args = if a.args.len() == 0 {
+        arena_new[ArgNode]()
+    } else {
+        arena_with_capacity[ArgNode](a.args.len())
+    };
+    for i in 0..a.args.len() {
+        match a.args.at(i) {
+            Option::Some(v) => {
+                let _ = args
+                    .alloc(
+                        ArgNode {
+                            pass: v.pass,
+                            explicit: v.explicit,
+                            expr: v.expr
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut clauses = if a.clauses.len() == 0 {
+        arena_new[ClauseNode]()
+    } else {
+        arena_with_capacity[ClauseNode](a.clauses.len())
+    };
+    for i in 0..a.clauses.len() {
+        match a.clauses.at(i) {
+            Option::Some(v) => {
+                let _ = clauses
+                    .alloc(
+                        ClauseNode {
+                            name: v.name,
+                            pats: v.pats,
+                            body: v.body
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut params = if a.params.len() == 0 {
+        arena_new[ParamNode]()
+    } else {
+        arena_with_capacity[ParamNode](a.params.len())
+    };
+    for i in 0..a.params.len() {
+        match a.params.at(i) {
+            Option::Some(v) => {
+                let _ = params
+                    .alloc(
+                        ParamNode {
+                            name: v.name,
+                            pass: v.pass,
+                            projections: v.projections,
+                            ty: v.ty,
+                            start: v.start,
+                            end: v.end
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut effects = if a.effects.len() == 0 {
+        arena_new[EffectsNode]()
+    } else {
+        arena_with_capacity[EffectsNode](a.effects.len())
+    };
+    for i in 0..a.effects.len() {
+        match a.effects.at(i) {
+            Option::Some(v) => {
+                let _ = effects
+                    .alloc(
+                        EffectsNode {
+                            instances: v.instances,
+                            tail: v.tail
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut effect_nodes = if a.effect_nodes.len() == 0 {
+        arena_new[EffectNode]()
+    } else {
+        arena_with_capacity[EffectNode](a.effect_nodes.len())
+    };
+    for i in 0..a.effect_nodes.len() {
+        match a.effect_nodes.at(i) {
+            Option::Some(v) => {
+                let _ = effect_nodes
+                    .alloc(
+                        EffectNode {
+                            label: v.label,
+                            name: v.name,
+                            args: v.args
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut generics = if a.generics.len() == 0 {
+        arena_new[GenericNode]()
+    } else {
+        arena_with_capacity[GenericNode](a.generics.len())
+    };
+    for i in 0..a.generics.len() {
+        match a.generics.at(i) {
+            Option::Some(v) => {
+                let _ = generics
+                    .alloc(
+                        GenericNode {
+                            name: v.name,
+                            bound: v.bound,
+                            row: v.row
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut fields = if a.fields.len() == 0 {
+        arena_new[FieldNode]()
+    } else {
+        arena_with_capacity[FieldNode](a.fields.len())
+    };
+    for i in 0..a.fields.len() {
+        match a.fields.at(i) {
+            Option::Some(v) => {
+                let _ = fields
+                    .alloc(
+                        FieldNode {
+                            name: v.name,
+                            ty: v.ty,
+                            modality: v.modality,
+                            temperature: v.temperature
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut variants = if a.variants.len() == 0 {
+        arena_new[VariantNode]()
+    } else {
+        arena_with_capacity[VariantNode](a.variants.len())
+    };
+    for i in 0..a.variants.len() {
+        match a.variants.at(i) {
+            Option::Some(v) => {
+                let _ = variants
+                    .alloc(
+                        VariantNode {
+                            name: v.name,
+                            fields: v.fields,
+                            named: v.named
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut adts = if a.adts.len() == 0 {
+        arena_new[AdtNode]()
+    } else {
+        arena_with_capacity[AdtNode](a.adts.len())
+    };
+    for i in 0..a.adts.len() {
+        match a.adts.at(i) {
+            Option::Some(v) => {
+                let _ = adts
+                    .alloc(
+                        AdtNode {
+                            name: v.name,
+                            mode: v.mode,
+                            generics: v.generics,
+                            variants: v.variants,
+                            is_enum: v.is_enum,
+                            tiled: v.tiled,
+                            tile_width: v.tile_width,
+                            start: v.start,
+                            end: v.end
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut fns = if a.fns.len() == 0 {
+        arena_new[FnNode]()
+    } else {
+        arena_with_capacity[FnNode](a.fns.len())
+    };
+    for i in 0..a.fns.len() {
+        match a.fns.at(i) {
+            Option::Some(v) => {
+                let _ = fns
+                    .alloc(
+                        FnNode {
+                            name: v.name,
+                            fip: v.fip,
+                            generics: v.generics,
+                            params: v.params,
+                            result: v.result,
+                            effects: v.effects,
+                            body: v.body,
+                            start: v.start,
+                            end: v.end
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut effect_decls = if a.effect_decls.len() == 0 {
+        arena_new[EffectDeclNode]()
+    } else {
+        arena_with_capacity[EffectDeclNode](a.effect_decls.len())
+    };
+    for i in 0..a.effect_decls.len() {
+        match a.effect_decls.at(i) {
+            Option::Some(v) => {
+                let _ = effect_decls
+                    .alloc(
+                        EffectDeclNode {
+                            name: v.name,
+                            linear: v.linear,
+                            generics: v.generics,
+                            ops: v.ops,
+                            start: v.start,
+                            end: v.end
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut impls = if a.impls.len() == 0 {
+        arena_new[ImplNode]()
+    } else {
+        arena_with_capacity[ImplNode](a.impls.len())
+    };
+    for i in 0..a.impls.len() {
+        match a.impls.at(i) {
+            Option::Some(v) => {
+                let _ = impls
+                    .alloc(
+                        ImplNode {
+                            ty: v.ty,
+                            generics: v.generics,
+                            methods: v.methods
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut traits = if a.traits.len() == 0 {
+        arena_new[TraitNode]()
+    } else {
+        arena_with_capacity[TraitNode](a.traits.len())
+    };
+    for i in 0..a.traits.len() {
+        match a.traits.at(i) {
+            Option::Some(v) => {
+                let _ = traits
+                    .alloc(
+                        TraitNode {
+                            name: v.name,
+                            public: v.public,
+                            generics: v.generics,
+                            assoc: v.assoc,
+                            methods: v.methods,
+                            start: v.start,
+                            end: v.end
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut assoc_decls = if a.assoc_decls.len() == 0 {
+        arena_new[AssocDeclNode]()
+    } else {
+        arena_with_capacity[AssocDeclNode](a.assoc_decls.len())
+    };
+    for i in 0..a.assoc_decls.len() {
+        match a.assoc_decls.at(i) {
+            Option::Some(v) => {
+                let _ = assoc_decls
+                    .alloc(
+                        AssocDeclNode {
+                            name: v.name,
+                            bound: v.bound,
+                            start: v.start,
+                            end: v.end
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut trait_refs = if a.trait_refs.len() == 0 {
+        arena_new[TraitRefNode]()
+    } else {
+        arena_with_capacity[TraitRefNode](a.trait_refs.len())
+    };
+    for i in 0..a.trait_refs.len() {
+        match a.trait_refs.at(i) {
+            Option::Some(v) => {
+                let _ = trait_refs
+                    .alloc(
+                        TraitRefNode {
+                            package: v.package,
+                            name: v.name,
+                            args: v.args,
+                            start: v.start,
+                            end: v.end
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut wheres = if a.wheres.len() == 0 {
+        arena_new[WhereNode]()
+    } else {
+        arena_with_capacity[WhereNode](a.wheres.len())
+    };
+    for i in 0..a.wheres.len() {
+        match a.wheres.at(i) {
+            Option::Some(v) => {
+                let _ = wheres
+                    .alloc(
+                        WhereNode {
+                            ty: v.ty,
+                            trait_ref: v.trait_ref,
+                            start: v.start,
+                            end: v.end
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut assoc_binds = if a.assoc_binds.len() == 0 {
+        arena_new[AssocBindNode]()
+    } else {
+        arena_with_capacity[AssocBindNode](a.assoc_binds.len())
+    };
+    for i in 0..a.assoc_binds.len() {
+        match a.assoc_binds.at(i) {
+            Option::Some(v) => {
+                let _ = assoc_binds
+                    .alloc(
+                        AssocBindNode {
+                            name: v.name,
+                            ty: v.ty,
+                            start: v.start,
+                            end: v.end
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut confs = if a.confs.len() == 0 {
+        arena_new[ConfNode]()
+    } else {
+        arena_with_capacity[ConfNode](a.confs.len())
+    };
+    for i in 0..a.confs.len() {
+        match a.confs.at(i) {
+            Option::Some(v) => {
+                let _ = confs
+                    .alloc(
+                        ConfNode {
+                            model: v.model,
+                            public: v.public,
+                            generics: v.generics,
+                            trait_ref: v.trait_ref,
+                            self_ty: v.self_ty,
+                            wheres: v.wheres,
+                            assoc: v.assoc,
+                            methods: v.methods,
+                            start: v.start,
+                            end: v.end
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut items = if a.items.len() == 0 {
+        arena_new[ItemNode]()
+    } else {
+        arena_with_capacity[ItemNode](a.items.len())
+    };
+    for i in 0..a.items.len() {
+        match a.items.at(i) {
+            Option::Some(v) => {
+                let _ = items
+                    .alloc(
+                        ItemNode {
+                            kind: v.kind,
+                            node: v.node
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut model_uses = if a.model_uses.len() == 0 {
+        arena_new[ModelUseNode]()
+    } else {
+        arena_with_capacity[ModelUseNode](a.model_uses.len())
+    };
+    for i in 0..a.model_uses.len() {
+        match a.model_uses.at(i) {
+            Option::Some(v) => {
+                let _ = model_uses
+                    .alloc(
+                        ModelUseNode {
+                            model: v.model,
+                            start: v.start,
+                            end: v.end,
+                            scope_start: v.scope_start,
+                            scope_end: v.scope_end
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut bounds = if a.bounds.len() == 0 {
+        arena_new[BoundNode]()
+    } else {
+        arena_with_capacity[BoundNode](a.bounds.len())
+    };
+    for i in 0..a.bounds.len() {
+        match a.bounds.at(i) {
+            Option::Some(v) => {
+                let _ = bounds
+                    .alloc(
+                        BoundNode {
+                            param: v.param,
+                            trait_ref: v.trait_ref,
+                            start: v.start,
+                            end: v.end,
+                            owner: v.owner
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut uses = if a.uses.len() == 0 {
+        arena_new[UseNode]()
+    } else {
+        arena_with_capacity[UseNode](a.uses.len())
+    };
+    for i in 0..a.uses.len() {
+        match a.uses.at(i) {
+            Option::Some(v) => {
+                let _ = uses
+                    .alloc(
+                        UseNode {
+                            package: v.package,
+                            supers: v.supers,
+                            path: v.path,
+                            names: v.names,
+                            public: v.public,
+                            start: v.start,
+                            end: v.end
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut use_names = if a.use_names.len() == 0 {
+        arena_new[UseNameNode]()
+    } else {
+        arena_with_capacity[UseNameNode](a.use_names.len())
+    };
+    for i in 0..a.use_names.len() {
+        match a.use_names.at(i) {
+            Option::Some(v) => {
+                let _ = use_names
+                    .alloc(
+                        UseNameNode {
+                            name: v.name,
+                            alias: v.alias,
+                            start: v.start,
+                            end: v.end
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let mut lists = if a.lists.len() == 0 {
+        arena_new[ListRef]()
+    } else {
+        arena_with_capacity[ListRef](a.lists.len())
+    };
+    for i in 0..a.lists.len() {
+        match a.lists.at(i) {
+            Option::Some(v) => {
+                let _ = lists
+                    .alloc(
+                        ListRef {
+                            first: v.first,
+                            len: v.len
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    Ast {
+        names: copy_interner(in a.names, inout tmp),
+        lits: lits,
+        exprs: exprs,
+        pats: pats,
+        types: types,
+        stmts: stmts,
+        args: args,
+        clauses: clauses,
+        params: params,
+        effects: effects,
+        effect_nodes: effect_nodes,
+        generics: generics,
+        fields: fields,
+        variants: variants,
+        adts: adts,
+        fns: fns,
+        effect_decls: effect_decls,
+        impls: impls,
+        traits: traits,
+        assoc_decls: assoc_decls,
+        trait_refs: trait_refs,
+        wheres: wheres,
+        assoc_binds: assoc_binds,
+        confs: confs,
+        items: items,
+        model_uses: model_uses,
+        bounds: bounds,
+        uses: uses,
+        use_names: use_names,
+        lists: lists,
+        pool: copy_seq[u32](in a.pool),
+        m_items: copy_seq[u32](in a.m_items),
+        m_model_uses: copy_seq[u32](in a.m_model_uses),
+        m_bounds: copy_seq[u32](in a.m_bounds),
+        m_uses: copy_seq[u32](in a.m_uses),
+        m_public: copy_seq[u32](in a.m_public),
     }
 }
 

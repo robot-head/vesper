@@ -1,3 +1,11 @@
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::util::{
+    push_decimal,
+    w
+};
+
 // `WasmError` of src/wasm_backend.rs: what the backend raises (as
 // `Fail[WErr]`) when it rejects a program. The harness compares the kind
 // and, for `Unsupported`, the construct; the Rust detail texts are not
@@ -35,12 +43,121 @@ pub copy struct WErr {
     construct: u8,
     // A small number naming the site, for debugging a port difference.
     site: u64,
+    fn_sym: u32,
+    detail_sym: u32,
 }
 
 pub fn werr(kind: u8, construct: u8, site: u64) -> WErr {
     WErr {
         kind: kind,
         construct: construct,
-        site: site
+        site: site,
+        fn_sym: 0,
+        detail_sym: 0,
     }
+}
+
+pub fn werr_syms(kind: u8, construct: u8, site: u64, fn_sym: u32, detail_sym: u32) -> WErr {
+    WErr {
+        kind: kind,
+        construct: construct,
+        site: site,
+        fn_sym: fn_sym,
+        detail_sym: detail_sym,
+    }
+}
+
+pub fn werr_kind_name(k: u8) -> Str {
+    if k == K_UNSUPPORTED {
+        "Unsupported"
+    } else if k == K_ENTRY {
+        "Entry"
+    } else if k == K_LIMIT {
+        "Limit"
+    } else if k == K_INVALID {
+        "Invalid"
+    } else if k == K_ENCODE {
+        "Encode"
+    } else if k == K_NOT_PORTED {
+        "NotPorted"
+    } else {
+        "UnknownKind"
+    }
+}
+
+pub fn werr_construct_name(u: u8) -> Str {
+    if u == U_FUNCTION_VALUE {
+        "FunctionValue"
+    } else if u == U_STRING {
+        "String"
+    } else if u == U_FLOAT_REMAINDER {
+        "FloatRemainder"
+    } else if u == U_INDEX {
+        "Index"
+    } else if u == U_PROJECTION {
+        "Projection"
+    } else if u == U_GENERIC_OPERATION {
+        "GenericOperation"
+    } else if u == U_GENERIC_EFFECT_INSTANCE {
+        "GenericEffectInstance"
+    } else if u == U_LABELLED_EFFECT_ROW {
+        "LabelledEffectRow"
+    } else if u == U_INOUT_EFFECT_ARGUMENT {
+        "InoutEffectArgument"
+    } else if u == U_FIRST_CLASS_CONTINUATION {
+        "FirstClassContinuation"
+    } else if u == U_NON_TAIL_RESUMPTIVE_HANDLER {
+        "NonTailResumptiveHandler"
+    } else if u == U_EXTERNAL_FUNCTION {
+        "ExternalFunction"
+    } else if u == U_EXPORT_TYPE {
+        "ExportType"
+    } else if u == U_OPERATION {
+        "Operation"
+    } else if u == U_INTEGER_WIDTH {
+        "IntegerWidth"
+    } else if u == U_FLOAT32 {
+        "Float32"
+    } else {
+        "UnknownConstruct"
+    }
+}
+
+pub fn format_werr(in err: WErr, in names: Names, fallback_fn: u32, inout out: ChunkSeq[u8]) {
+    out.extend(in "WErr { kind=".as_bytes());
+    out.extend(in werr_kind_name(err.kind).as_bytes());
+    out.push(40);
+    push_decimal(inout out, widen_u64(err.kind));
+    out.extend(in "), ".as_bytes());
+    if err.kind == K_UNSUPPORTED {
+        out.extend(in "construct=".as_bytes());
+        out.extend(in werr_construct_name(err.construct).as_bytes());
+    } else {
+        out.extend(in "detail=".as_bytes());
+        push_decimal(inout out, widen_u64(err.construct));
+    }
+    out.extend(in ", site=".as_bytes());
+    push_decimal(inout out, err.site);
+    let f = if err.fn_sym != 0 {
+        err.fn_sym
+    } else {
+        fallback_fn
+    };
+    if f != 0 {
+        out.extend(in ", fn=".as_bytes());
+        if w(f) < names.len() {
+            names.write(f, inout out);
+        } else {
+            push_decimal(inout out, w(f));
+        }
+    }
+    if err.detail_sym != 0 {
+        out.extend(in ", sym=".as_bytes());
+        if w(err.detail_sym) < names.len() {
+            names.write(err.detail_sym, inout out);
+        } else {
+            push_decimal(inout out, w(err.detail_sym));
+        }
+    }
+    out.extend(in " }".as_bytes());
 }

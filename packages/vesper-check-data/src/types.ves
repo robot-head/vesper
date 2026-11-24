@@ -7,6 +7,7 @@
 
 use self::util::{
     add,
+    copy_seq,
     fold,
     inc,
     inc32,
@@ -155,6 +156,259 @@ fn node_hash(kind: u8, mode: u8, name: u32, in items: ChunkSeq[u32], r: u32, r2:
 }
 
 impl Types {
+    pub fn t_mask(in self) -> u64 {
+        self.mask
+    }
+
+    pub fn r_mask(in self) -> u64 {
+        self.row_mask
+    }
+
+    pub fn items_len(in self) -> u64 {
+        self.items.len()
+    }
+
+    pub fn effs_len(in self) -> u64 {
+        self.effs.len()
+    }
+
+    pub fn reserve_types(inout self, nodes_cap: u64, items_cap: u64, rows_cap: u64, effs_cap: u64) {
+        self.nodes.reserve(nodes_cap);
+        self.hashes.reserve(nodes_cap);
+        self.items.reserve(items_cap);
+        self.passes.reserve(items_cap);
+        self.rows.reserve(rows_cap);
+        self.row_hashes.reserve(rows_cap);
+        self.effs.reserve(effs_cap);
+    }
+
+    pub fn clone_tail_in_heap(sink self, n_nodes: u64, n_rows: u64, n_effs: u64) -> Types {
+        let mut s = self;
+        let mut new_nodes = ChunkSeq::new[TypeNode]();
+        let nn = wrapping_sub(s.nodes.len(), n_nodes);
+        for i in n_nodes..s.nodes.len() {
+            match s.nodes.try_get(i) {
+                Option::Some(n) => new_nodes
+                    .push(
+                        TypeNode {
+                            kind: n.kind,
+                            mode: n.mode,
+                            name: n.name,
+                            a: n.a,
+                            n: n.n,
+                            r: n.r,
+                            r2: n.r2,
+                            lit: n.lit,
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        for _ in 0..nn {
+            let _ = s.nodes.pop();
+        }
+        for i in 0..new_nodes.len() {
+            match new_nodes.try_get(i) {
+                Option::Some(n) => s
+                    .nodes
+                    .push(
+                        TypeNode {
+                            kind: n.kind,
+                            mode: n.mode,
+                            name: n.name,
+                            a: n.a,
+                            n: n.n,
+                            r: n.r,
+                            r2: n.r2,
+                            lit: n.lit,
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        let mut new_rows = ChunkSeq::new[RowNode]();
+        let rn = wrapping_sub(s.rows.len(), n_rows);
+        for i in n_rows..s.rows.len() {
+            match s.rows.try_get(i) {
+                Option::Some(r) => new_rows
+                    .push(
+                        RowNode {
+                            a: r.a,
+                            n: r.n,
+                            tail: r.tail
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        for _ in 0..rn {
+            let _ = s.rows.pop();
+        }
+        for i in 0..new_rows.len() {
+            match new_rows.try_get(i) {
+                Option::Some(r) => s
+                    .rows
+                    .push(
+                        RowNode {
+                            a: r.a,
+                            n: r.n,
+                            tail: r.tail
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        let mut new_effs = ChunkSeq::new[EffNode]();
+        let en = wrapping_sub(s.effs.len(), n_effs);
+        for i in n_effs..s.effs.len() {
+            match s.effs.try_get(i) {
+                Option::Some(e) => new_effs
+                    .push(
+                        EffNode {
+                            label: e.label,
+                            name: e.name,
+                            a: e.a,
+                            n: e.n,
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        for _ in 0..en {
+            let _ = s.effs.pop();
+        }
+        for i in 0..new_effs.len() {
+            match new_effs.try_get(i) {
+                Option::Some(e) => s
+                    .effs
+                    .push(
+                        EffNode {
+                            label: e.label,
+                            name: e.name,
+                            a: e.a,
+                            n: e.n,
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        s.clone_in_heap()
+    }
+
+    pub fn clone_in_heap(sink self) -> Types {
+        let Types {
+            nodes,
+            items,
+            passes,
+            hashes,
+            slots,
+            mask,
+            rows,
+            effs,
+            row_hashes,
+            row_slots,
+            row_mask,
+            s_dyn,
+            s_u64,
+            s_i64,
+            s_unit,
+            unit,
+            infer,
+            empty_row,
+        } = self;
+        Types {
+            nodes: nodes,
+            items: items,
+            passes: passes,
+            hashes: hashes,
+            slots: slots,
+            mask: mask,
+            rows: rows,
+            effs: effs,
+            row_hashes: row_hashes,
+            row_slots: row_slots,
+            row_mask: row_mask,
+            s_dyn: s_dyn,
+            s_u64: s_u64,
+            s_i64: s_i64,
+            s_unit: s_unit,
+            unit: unit,
+            infer: infer,
+            empty_row: empty_row,
+        }
+    }
+
+    pub fn deep_clone_in_heap(in self) -> Types {
+        let mut nodes = ChunkSeq::with_capacity[TypeNode](self.nodes.len());
+        for i in 0..self.nodes.len() {
+            match self.nodes.try_get(i) {
+                Option::Some(v) => nodes
+                    .push(
+                        TypeNode {
+                            kind: v.kind,
+                            mode: v.mode,
+                            name: v.name,
+                            a: v.a,
+                            n: v.n,
+                            r: v.r,
+                            r2: v.r2,
+                            lit: v.lit,
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        let mut rows = ChunkSeq::with_capacity[RowNode](self.rows.len());
+        for i in 0..self.rows.len() {
+            match self.rows.try_get(i) {
+                Option::Some(v) => rows
+                    .push(
+                        RowNode {
+                            a: v.a,
+                            n: v.n,
+                            tail: v.tail,
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        let mut effs = ChunkSeq::with_capacity[EffNode](self.effs.len());
+        for i in 0..self.effs.len() {
+            match self.effs.try_get(i) {
+                Option::Some(v) => effs
+                    .push(
+                        EffNode {
+                            label: v.label,
+                            name: v.name,
+                            a: v.a,
+                            n: v.n,
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        Types {
+            nodes: nodes,
+            items: copy_seq[u32](in self.items),
+            passes: copy_seq[u8](in self.passes),
+            hashes: copy_seq[u64](in self.hashes),
+            slots: copy_seq[u32](in self.slots),
+            mask: self.mask,
+            rows: rows,
+            effs: effs,
+            row_hashes: copy_seq[u64](in self.row_hashes),
+            row_slots: copy_seq[u32](in self.row_slots),
+            row_mask: self.row_mask,
+            s_dyn: self.s_dyn,
+            s_u64: self.s_u64,
+            s_i64: self.s_i64,
+            s_unit: self.s_unit,
+            unit: self.unit,
+            infer: self.infer,
+            empty_row: self.empty_row,
+        }
+    }
+
     pub fn node(in self, t: u32) -> TypeNode {
         match self.nodes.try_get(w(t)) {
             Option::Some(n) => n,
@@ -747,9 +1001,6 @@ impl Vars {
 // still runs `substitute_effects` on every function row, which drops
 // repeated instances.
 pub fn substitute(inout t: Types, ty: u32, in vars: Vars) -> u32 {
-    if vars.keys.len() == 0 {
-        return ty;
-    }
     let n = t.node(ty);
     if n.kind == TyKind::Named {
         if n.n == 0 {
@@ -799,9 +1050,6 @@ pub fn substitute(inout t: Types, ty: u32, in vars: Vars) -> u32 {
 // `ast::substitute_effects`: arguments substituted, an open tail bound to
 // a row variable spliced in, duplicates removed (first wins).
 pub fn substitute_row(inout t: Types, r: u32, in vars: Vars) -> u32 {
-    if vars.keys.len() == 0 {
-        return r;
-    }
     let row = t.row(r);
     let mut es: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
     let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();

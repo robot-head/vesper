@@ -4,18 +4,21 @@
 
 use @vesper/wasm-backend::tables::{
     stage2_heap_mark,
-    stage2_heap_reset
+    stage2_heap_reset,
+    stage2_heap_swap
 };
 use @vesper/check-core-typing::relations::{
     infer
 };
 use @vesper/check-data::names::{
-    Names
+    Names,
+    names_new
 };
 use @vesper/check-data::types::{
     TyKind,
     Types,
     Vars,
+    types_new,
     default_type,
     substitute,
     vars_new
@@ -27,10 +30,12 @@ use @vesper/check-data::util::{
     w
 };
 use @vesper/check-data::world::{
+    Known,
     SpanRow,
     World,
     constructor,
-    field_step
+    field_step,
+    world_new
 };
 use @vesper/place-ir::codes::{
     Lit,
@@ -86,6 +91,7 @@ struct Tc {
     marks: ChunkSeq[u64],
     spans: ChunkSeq[SpanRow],
     infer_ty: u32,
+    ret_ty: u32,
     unit_ty: u32,
     bool_ty: u32,
     i64_ty: u32,
@@ -119,6 +125,7 @@ fn tc_new(sink names: Names, sink types: Types, sink world: World) -> Tc {
         marks: ChunkSeq::new[u64](),
         spans: ChunkSeq::new[SpanRow](),
         infer_ty: infer_ty,
+        ret_ty: infer_ty,
         unit_ty: unit_ty,
         bool_ty: bool_ty,
         i64_ty: i64_ty,
@@ -734,9 +741,14 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         let st = check_expr(inout tc, in a, e.a, tc.u64_ty);
         let _en = check_expr(inout tc, in a, e.b, st);
         st
-    } else if e.kind == X_BREAK || e.kind == X_RETURN {
+    } else if e.kind == X_BREAK {
         if e.a != NONE64 {
             let _vt = check_expr(inout tc, in a, e.a, tc.infer_ty);
+        }
+        tc.never_ty
+    } else if e.kind == X_RETURN {
+        if e.a != NONE64 {
+            let _vt = check_expr(inout tc, in a, e.a, tc.ret_ty);
         }
         tc.never_ty
     } else if e.kind == X_CONTINUE {
@@ -1295,12 +1307,217 @@ fn sort_calls(inout calls: ChunkSeq[CallRow]) {
     };
 }
 
+fn dummy_tc(k: Known) -> Tc {
+    let mut dn = names_new();
+    let dt = types_new(inout dn);
+    let dw = world_new(k);
+    Tc {
+        names: dn,
+        types: dt,
+        world: dw,
+        env: ChunkSeq::new[Binding](),
+        marks: ChunkSeq::new[u64](),
+        spans: ChunkSeq::new[SpanRow](),
+        infer_ty: 0,
+        ret_ty: 0,
+        unit_ty: 0,
+        bool_ty: 0,
+        i64_ty: 0,
+        u64_ty: 0,
+        f64_ty: 0,
+        str_ty: 0,
+        never_ty: 0,
+        calls: ChunkSeq::new[CallRow](),
+        pairs: ChunkSeq::new[Pair](),
+        scratch1: ChunkSeq::new[u32](),
+    }
+}
+
+fn rebuild_tc(
+    sink old_tc: Tc,
+    m: u64,
+    tc_perm: u64,
+    tc_perm_end: u64,
+    n_spans: u64,
+    n_calls: u64,
+    n_pairs: u64,
+    n_nodes: u64,
+    n_rows: u64,
+    n_effs: u64
+) -> (Tc, u64) {
+    let Tc {
+        names: tc_names,
+        types: tc_types,
+        world: tc_world,
+        env: tc_env,
+        marks: tc_marks,
+        spans: tc_spans_in,
+        infer_ty: tc_infer,
+        ret_ty: tc_ret,
+        unit_ty: tc_unit,
+        bool_ty: tc_bool,
+        i64_ty: tc_i64,
+        u64_ty: tc_u64,
+        f64_ty: tc_f64,
+        str_ty: tc_str,
+        never_ty: tc_never,
+        calls: tc_calls_in,
+        pairs: tc_pairs_in,
+        scratch1: tc_scratch1,
+    } = old_tc;
+    let mut tc_spans = tc_spans_in;
+    let mut tc_calls = tc_calls_in;
+    let mut tc_pairs = tc_pairs_in;
+    let s_rb = stage2_heap_swap(tc_perm);
+    let mut new_spans = ChunkSeq::new[SpanRow]();
+    let sn = wrapping_sub(tc_spans.len(), n_spans);
+    for si in n_spans..tc_spans.len() {
+        match tc_spans.try_get(si) {
+            Option::Some(r) => new_spans
+                .push(
+                    SpanRow {
+                        start: r.start,
+                        end: r.end,
+                        ty: r.ty
+                    }
+                ),
+            Option::None => {},
+        }
+    }
+    for _ in 0..sn {
+        let _ = tc_spans.pop();
+    }
+    for si in 0..new_spans.len() {
+        match new_spans.try_get(si) {
+            Option::Some(r) => tc_spans
+                .push(
+                    SpanRow {
+                        start: r.start,
+                        end: r.end,
+                        ty: r.ty
+                    }
+                ),
+            Option::None => {},
+        }
+    }
+    let mut new_calls = ChunkSeq::new[CallRow]();
+    let cn = wrapping_sub(tc_calls.len(), n_calls);
+    for ci in n_calls..tc_calls.len() {
+        match tc_calls.try_get(ci) {
+            Option::Some(r) => new_calls
+                .push(
+                    CallRow {
+                        s0: r.s0,
+                        s1: r.s1,
+                        v0: r.v0,
+                        vn: r.vn
+                    }
+                ),
+            Option::None => {},
+        }
+    }
+    for _ in 0..cn {
+        let _ = tc_calls.pop();
+    }
+    for ci in 0..new_calls.len() {
+        match new_calls.try_get(ci) {
+            Option::Some(r) => tc_calls
+                .push(
+                    CallRow {
+                        s0: r.s0,
+                        s1: r.s1,
+                        v0: r.v0,
+                        vn: r.vn
+                    }
+                ),
+            Option::None => {},
+        }
+    }
+    let mut new_pairs = ChunkSeq::new[Pair]();
+    let pn = wrapping_sub(tc_pairs.len(), n_pairs);
+    for pi in n_pairs..tc_pairs.len() {
+        match tc_pairs.try_get(pi) {
+            Option::Some(r) => new_pairs
+                .push(
+                    Pair {
+                        name: r.name,
+                        ty: r.ty
+                    }
+                ),
+            Option::None => {},
+        }
+    }
+    for _ in 0..pn {
+        let _ = tc_pairs.pop();
+    }
+    for pi in 0..new_pairs.len() {
+        match new_pairs.try_get(pi) {
+            Option::Some(r) => tc_pairs
+                .push(
+                    Pair {
+                        name: r.name,
+                        ty: r.ty
+                    }
+                ),
+            Option::None => {},
+        }
+    }
+    let fresh_names = tc_names.clone_in_heap();
+    let fresh_types = tc_types.clone_tail_in_heap(n_nodes, n_rows, n_effs);
+    let fresh_tc = Tc {
+        names: fresh_names,
+        types: fresh_types,
+        world: tc_world,
+        env: tc_env,
+        marks: tc_marks,
+        spans: tc_spans,
+        infer_ty: tc_infer,
+        ret_ty: tc_ret,
+        unit_ty: tc_unit,
+        bool_ty: tc_bool,
+        i64_ty: tc_i64,
+        u64_ty: tc_u64,
+        f64_ty: tc_f64,
+        str_ty: tc_str,
+        never_ty: tc_never,
+        calls: tc_calls,
+        pairs: tc_pairs,
+        scratch1: tc_scratch1,
+    };
+    let next_perm = stage2_heap_swap(s_rb);
+    if next_perm < tc_perm_end {
+        stage2_heap_reset(m);
+    }
+    (fresh_tc, next_perm)
+}
+
 pub fn typecheck_ast(in a: Ast, sink names: Names, sink types: Types, sink world: World)
     -> (Names, Types, World, ChunkSeq[CallRow], ChunkSeq[Pair]) {
     let mut tc = tc_new(sink names, sink types, sink world);
-    tc.spans.reserve(131072);
-    tc.calls.reserve(65536);
-    tc.pairs.reserve(65536);
+    let mut max_spans = 262144;
+    let mut max_calls = 131072;
+    let mut max_pairs = 131072;
+    tc.spans.reserve(max_spans);
+    tc.calls.reserve(max_calls);
+    tc.pairs.reserve(max_pairs);
+    tc.env.reserve(1024);
+    tc.marks.reserve(256);
+    tc.scratch1.reserve(1024);
+    let mut max_names = wrapping_add(tc.names.len(), 16384);
+    let mut max_text = wrapping_add(tc.names.text_len(), 262144);
+    tc.names.reserve_names(max_names, max_text);
+    let mut max_nodes = wrapping_add(tc.types.nodes.len(), 16384);
+    let mut max_items = wrapping_add(tc.types.items_len(), 32768);
+    let mut max_rows = wrapping_add(tc.types.rows.len(), 8192);
+    let mut max_effs = wrapping_add(tc.types.effs_len(), 16384);
+    tc.types.reserve_types(max_nodes, max_items, max_rows, max_effs);
+    let n_env = tc.env.len();
+    let n_marks = tc.marks.len();
+    let mut tc_perm_buf = ChunkSeq::new[u8]();
+    tc_perm_buf.reserve(167772160);
+    let tc_perm_end = stage2_heap_mark();
+    let mut tc_perm = wrapping_sub(tc_perm_end, 167772160);
+    let mut m = tc_perm_end;
     tc.env.reserve(512);
     tc.marks.reserve(64);
     tc.scratch1.reserve(64);
@@ -1312,10 +1529,15 @@ pub fn typecheck_ast(in a: Ast, sink names: Names, sink types: Types, sink world
         if !f.has_body || f.body == NONE64 {
             continue;
         }
-        let m = stage2_heap_mark();
-        let n_names = tc.names.len();
+        let n_mask = tc.names.mask_val();
+        let n_tmask = tc.types.t_mask();
+        let n_rmask = tc.types.r_mask();
+        let n_spans = tc.spans.len();
+        let n_calls = tc.calls.len();
+        let n_pairs = tc.pairs.len();
         let n_nodes = tc.types.nodes.len();
         let n_rows = tc.types.rows.len();
+        let n_effs = tc.types.effs_len();
         push_scope(inout tc);
         for pi in 0..f.pn {
             match a.pms.try_get(wrapping_add(f.pa, pi)) {
@@ -1323,21 +1545,74 @@ pub fn typecheck_ast(in a: Ast, sink names: Names, sink types: Types, sink world
                 Option::None => {},
             }
         }
+        tc.ret_ty = f.result;
         let _rt = check_expr(inout tc, in a, f.body, f.result);
         pop_scope(inout tc);
-        if tc.names.len() == n_names
-            && tc.types.nodes.len() == n_nodes
-            && tc.types.rows.len() == n_rows
-            && tc.spans.len() <= 130000
-            && tc.calls.len() <= 65000
-            && tc.pairs.len() <= 65000
-            && tc.env.len() <= 500
-            && tc.marks.len() <= 60
-            && tc.scratch1.len() <= 60
-            && fi < 100 {
-            // stage2_heap_reset(m);
+        tc.scratch1.clear();
+        if tc.names.mask_val() == n_mask
+            && tc.names.len() < max_names
+            && tc.names.text_len() < max_text
+            && tc.types.t_mask() == n_tmask
+            && tc.types.r_mask() == n_rmask
+            && tc.types.nodes.len() < max_nodes
+            && tc.types.items_len() < max_items
+            && tc.types.rows.len() < max_rows
+            && tc.types.effs_len() < max_effs
+            && tc.env.len() == n_env
+            && tc.marks.len() == n_marks
+            && tc.scratch1.len() == 0
+            && tc.spans.len() < max_spans
+            && tc.calls.len() < max_calls
+            && tc.pairs.len() < max_pairs
+            && tc_perm < tc_perm_end {
+            let mut dtc = dummy_tc(tc.world.k);
+            swap(inout tc, inout dtc);
+            let (ntc, next_perm) = rebuild_tc(
+                dtc,
+                m,
+                tc_perm,
+                tc_perm_end,
+                n_spans,
+                n_calls,
+                n_pairs,
+                n_nodes,
+                n_rows,
+                n_effs
+            );
+            let mut mtc = ntc;
+            tc_perm = next_perm;
+            swap(inout tc, inout mtc);
+            if tc_perm >= tc_perm_end {
+                tc_perm = tc_perm_end;
+                m = stage2_heap_mark();
+            }
+        } else {
+            let s_pre = if tc_perm < tc_perm_end {
+                stage2_heap_swap(tc_perm)
+            } else {
+                0
+            };
+            max_spans = wrapping_add(tc.spans.len(), 131072);
+            max_calls = wrapping_add(tc.calls.len(), 65536);
+            max_pairs = wrapping_add(tc.pairs.len(), 65536);
+            tc.spans.reserve(max_spans);
+            tc.calls.reserve(max_calls);
+            tc.pairs.reserve(max_pairs);
+            max_names = wrapping_add(tc.names.len(), 16384);
+            max_text = wrapping_add(tc.names.text_len(), 262144);
+            tc.names.reserve_names(max_names, max_text);
+            max_nodes = wrapping_add(tc.types.nodes.len(), 16384);
+            max_items = wrapping_add(tc.types.items_len(), 32768);
+            max_rows = wrapping_add(tc.types.rows.len(), 8192);
+            max_effs = wrapping_add(tc.types.effs_len(), 16384);
+            tc.types.reserve_types(max_nodes, max_items, max_rows, max_effs);
+            if tc_perm < tc_perm_end {
+                tc_perm = stage2_heap_swap(s_pre);
+            }
+            m = stage2_heap_mark();
         }
     }
+    let _ = stage2_heap_swap(m);
     sort_spans(inout tc.spans);
     sort_calls(inout tc.calls);
     tc.world.expr_types = tc.spans;

@@ -8,6 +8,9 @@
 // few maps the Rust code iterates in key order are sorted by the names'
 // bytes (`cmp_syms`), as `String`'s `Ord` is.
 
+use @vesper/place-ir::{
+    program_new
+};
 use @vesper/place-ir::codes::{
     Op,
     Pat,
@@ -25,7 +28,8 @@ use @vesper/check-data::util::{
     w
 };
 use @vesper/check-data::names::{
-    Names
+    Names,
+    names_new
 };
 use @vesper/check-data::types::{
     TyKind,
@@ -35,6 +39,7 @@ use @vesper/check-data::types::{
     default_type,
     display,
     substitute,
+    types_new,
     vars_new
 };
 use @vesper/check-data::world::{
@@ -42,7 +47,8 @@ use @vesper/check-data::world::{
     Known,
     Variant,
     World,
-    set_by_symbol
+    set_by_symbol,
+    world_new
 };
 use @vesper/check-data::input::{
     Ctx
@@ -58,6 +64,8 @@ use self::ir::{
     FnInfo,
     Ir,
     Sig,
+    empty_facts,
+    ir_new,
     pattern_end
 };
 
@@ -1124,6 +1132,14 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
     qvals.reserve(131072);
     qlabels.reserve(131072);
     seen.reserve(262144);
+    let max_names = add(cx.names.len(), 32768);
+    let max_text = add(cx.names.text_len(), 524288);
+    cx.names.reserve_names(max_names, max_text);
+    let max_nodes = add(cx.types.nodes.len(), 16384);
+    let max_items = add(cx.types.items_len(), 32768);
+    let max_rows = add(cx.types.rows.len(), 8192);
+    let max_effs = add(cx.types.effs_len(), 16384);
+    cx.types.reserve_types(max_nodes, max_items, max_rows, max_effs);
     let mut scratch = ChunkSeq::new[u8]();
     scratch.reserve(33554432);
     let scratch_end = stage2_heap_mark();
@@ -1154,9 +1170,9 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
             continue;
         }
         // m moved down for bisect2
-        let n_names = cx.names.len();
-        let n_nodes = cx.types.nodes.len();
-        let n_rows = cx.types.rows.len();
+        let n_mask = cx.names.mask_val();
+        let n_tmask = cx.types.t_mask();
+        let n_rmask = cx.types.r_mask();
         set_by_symbol(inout seen, q.key, 1);
         if p_insts.len() >= cx.f.max_functions {
             Fail::raise(werr(K_LIMIT, 0, 40));
@@ -1200,10 +1216,8 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                     for k in 0..nt {
                         explicit.push(n32(cx.ir.word(add(inc(tat), k))));
                     }
-                    let s_cv = stage2_heap_swap(perm);
                     let cv = call_vars(inout cx, callee, ins.s0, ins.s1, in explicit, in vars);
                     let key = instance_name(inout cx, callee, in cv);
-                    perm = stage2_heap_swap(s_cv);
                     let s_pc = stage2_heap_swap(perm);
                     p_calls
                         .push(
@@ -1252,9 +1266,7 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                         Fail::raise(werr(K_INVALID, 0, 43));
                     }
                     check_prefix(in cx, wrapping_sub(nf, 1), in caps);
-                    let s_in = stage2_heap_swap(perm);
                     let key = instance_name(inout cx, fact.fn_, in vars);
-                    perm = stage2_heap_swap(s_in);
                     let qv0 = qkeys.len();
                     for k in 0..vars.len() {
                         qkeys.push(vars.key(k));
@@ -1399,9 +1411,15 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
         if scratch_end != 0 && stage2_heap_mark() >= scratch_end {
             Fail::raise(werr(K_LIMIT, 96, stage2_heap_mark()));
         }
-        if cx.names.len() == n_names
-            && cx.types.nodes.len() == n_nodes
-            && cx.types.rows.len() == n_rows
+        if cx.names.mask_val() == n_mask
+            && cx.names.len() < max_names
+            && cx.names.text_len() < max_text
+            && cx.types.t_mask() == n_tmask
+            && cx.types.r_mask() == n_rmask
+            && cx.types.nodes.len() < max_nodes
+            && cx.types.items_len() < max_items
+            && cx.types.rows.len() < max_rows
+            && cx.types.effs_len() < max_effs
             && p_insts.len() <= 8000
             && p_vkeys.len() <= 32000
             && p_vvals.len() <= 32000
@@ -1418,7 +1436,12 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
             && qvals.len() <= 130000
             && qlabels.len() <= 130000
             && seen.len() <= 260000 {
-            stage2_heap_reset(scratch_mark);
+            let mut dcx = dummy_cx(cx.k, cx.s);
+            swap(inout cx, inout dcx);
+            let (fcx0, next_perm) = rebuild_cx(sink dcx, scratch_mark, perm);
+            let mut fcx = fcx0;
+            perm = next_perm;
+            swap(inout cx, inout fcx);
         } else {
             scratch_mark = stage2_heap_mark();
         }
@@ -1438,6 +1461,48 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
         clauses: p_clauses,
         hw: p_hw,
     }
+}
+
+fn dummy_cx(k: Known, s: Syms) -> Cx {
+    let mut dn = names_new();
+    let dt = types_new(inout dn);
+    let dw = world_new(k);
+    let df = empty_facts(0, 1, 1, 1);
+    let di = ir_new(program_new());
+    Cx {
+        names: dn,
+        types: dt,
+        world: dw,
+        k: k,
+        f: df,
+        ir: di,
+        s: s,
+    }
+}
+
+fn rebuild_cx(sink dcx: Cx, d_mark: u64, d_perm: u64) -> (Cx, u64) {
+    let Cx {
+        names,
+        types,
+        world,
+        k,
+        f,
+        ir,
+        s,
+    } = dcx;
+    stage2_heap_reset(d_mark);
+    let s_rb = stage2_heap_swap(d_perm);
+    let fresh = Cx {
+        names: names.clone_in_heap(),
+        types: types.clone_in_heap(),
+        world: world,
+        k: k,
+        f: f,
+        ir: ir,
+        s: s,
+    };
+    let next_perm = stage2_heap_swap(s_rb);
+    (fresh, next_perm)
 }
 
 // ----- handlers --------------------------------------------------------------

@@ -38,7 +38,8 @@ use self::enc::{
 };
 use self::err::{
     WErr,
-    werr
+    werr,
+    werr_syms
 };
 use self::ir::{
     FnInfo,
@@ -79,7 +80,7 @@ use self::plan::{
     tvars_new
 };
 use self::tables::{
-    alloc_code_free,
+    alloc_code,
     stage2_heap_mark,
     stage2_heap_reset
 };
@@ -407,8 +408,6 @@ pub struct L {
     abort: u32,
     cps: u32,
     tail_mark: u32,
-    free_ptr: u32,
-    free_sz: u32,
     // the evidence globals, in key order (`env`)
     env_keys: ChunkSeq[u32],
     env_globals: ChunkSeq[u32],
@@ -553,8 +552,6 @@ pub fn lowerer_new(sink cx: Cx, sink plan: Plan, max_instructions: u64) -> L eff
     let abort = b.global(0);
     let cps = b.global(0);
     let tail_mark = b.global(0);
-    let free_ptr = b.global(0);
-    let free_sz = b.global(0);
     let mut env_keys = ChunkSeq::new[u32]();
     let mut env_globals = ChunkSeq::new[u32]();
     for i in 0..plan.keys.len() {
@@ -582,8 +579,6 @@ pub fn lowerer_new(sink cx: Cx, sink plan: Plan, max_instructions: u64) -> L eff
         abort: abort,
         cps: cps,
         tail_mark: tail_mark,
-        free_ptr: free_ptr,
-        free_sz: free_sz,
         env_keys: env_keys,
         env_globals: env_globals,
         alloc: alloc,
@@ -1035,8 +1030,8 @@ impl L {
     }
 
     pub fn define_init(inout self) {
-        let a = alloc_code_free(self.heap, self.free_ptr, self.free_sz);
-        self.b.define(self.alloc, in body_n(3, in a));
+        let a = alloc_code(self.heap);
+        self.b.define(self.alloc, in body_n(2, in a));
     }
 
     pub fn define_finish(inout self) eff [Fail[WErr]] {
@@ -1405,10 +1400,7 @@ impl L {
         for k in 0..sig.pn {
             let pm = self.cx.f.param(add(sig.p0, k));
             if pm.pass == TyPass::Inout {
-                let pn = self.cx.types.node(pm.ty);
-                if !(pn.kind == TyKind::Named && pn.n == 0 && self.cx.k.is_scalar(pn.name)) {
-                    return false;
-                }
+                return false;
             }
         }
         for k in 0..sig.en {
@@ -2102,7 +2094,6 @@ impl L {
         let ta = blk.ta;
         if blk.term == Term::Return {
             let x = self.value(self.cx.ir.word(ta));
-            self.emit_return_rewind(x);
             self.e.code.get(x);
             self.e.code.op(OP_RETURN);
         } else if blk.term == Term::Jump {
@@ -2318,15 +2309,6 @@ impl L {
         self.e.code.get(delta);
         self.e.code.op(OP_I64_SUB);
         self.e.code.global_set(heap);
-        self.e.code.global_get(self.free_ptr);
-        self.e.code.get(mark);
-        self.e.code.op(OP_I64_GE_U);
-        self.e.code.open(OP_IF);
-        self.e.code.i64_const(0);
-        self.e.code.global_set(self.free_ptr);
-        self.e.code.i64_const(0);
-        self.e.code.global_set(self.free_sz);
-        self.e.code.op(OP_END);
         self.e.code.op(OP_END);
     }
 
@@ -2708,9 +2690,11 @@ impl L {
                     return;
                 }
                 if self.cx.fn_sig(root) != 0 {
-                    Fail::raise(werr(K_UNSUPPORTED, U_FUNCTION_VALUE, 190));
+                    Fail::raise(
+                        werr_syms(K_UNSUPPORTED, U_FUNCTION_VALUE, 190, self.e.inst.key, root)
+                    );
                 }
-                Fail::raise(werr(K_INVALID, 0, 191));
+                Fail::raise(werr_syms(K_INVALID, 0, 191, self.e.inst.key, root));
             }
             let segs = self.path_names(path);
             let (v, t) = self.read_place(root, in segs);

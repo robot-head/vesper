@@ -29,6 +29,7 @@ use @vesper/check-data::util::{
     push_decimal,
     stage2_heap_mark,
     stage2_heap_reset,
+    stage2_heap_swap,
     u32_at,
     u64_at,
     u8_at,
@@ -55,7 +56,8 @@ use @vesper/check-data::world::{
     set_by_symbol
 };
 use @vesper/check-data::input::{
-    Ctx
+    Ctx,
+    ctx_new
 };
 use @vesper/place-ir::{
     BlockRow,
@@ -71,7 +73,8 @@ use self::ast::{
     FnR,
     Gn,
     Pm,
-    Pt
+    Pt,
+    ast_empty
 };
 use self::ops::{
     SeqRes,
@@ -2539,9 +2542,263 @@ fn lower_fn(inout l: L, fi: u64) {
     l.lowered = inc(l.lowered);
 }
 
+fn dummy_low() -> L {
+    let c = ctx_new();
+    let a = ast_empty();
+    let p = program_new();
+    L {
+        s_and: 0,
+        s_or: 0,
+        s_div: 0,
+        s_rem: 0,
+        s_shl: 0,
+        s_shr: 0,
+        s_eq: 0,
+        s_ne: 0,
+        s_lt: 0,
+        s_le: 0,
+        s_gt: 0,
+        s_ge: 0,
+        s_plus: 0,
+        s_set: 0,
+        s_dotdot: 0,
+        s_box_new: 0,
+        s_box_new_in_caller: 0,
+        s_seq_subslice: 0,
+        s_seq_get: 0,
+        s_seq_slice_get: 0,
+        s_fip_box_new: 0,
+        s_fip_box_new_in_caller: 0,
+        c: c,
+        a: a,
+        p: p,
+        ppath: ChunkSeq::new[u64](),
+        owner: 0,
+        next: 0,
+        cur: 0,
+        blocks: ChunkSeq::new[Bk](),
+        insts: ChunkSeq::new[In](),
+        sops: ChunkSeq::new[u64](),
+        stags: ChunkSeq::new[u8](),
+        vals: ChunkSeq::new[u32](),
+        alias: ChunkSeq::new[u32](),
+        trail: ChunkSeq::new[u64](),
+        local_ty: ChunkSeq::new[u32](),
+        locals: ChunkSeq::new[u32](),
+        cap_of: ChunkSeq::new[u32](),
+        cap_set: ChunkSeq::new[u32](),
+        loops: ChunkSeq::new[Lp](),
+        conts: ChunkSeq::new[u64](),
+        skip: false,
+        fbound: ChunkSeq::new[u32](),
+        fbt: ChunkSeq::new[u32](),
+        ffor: false,
+        fpa: 0,
+        fpn: 0,
+        fga: 0,
+        fgn: 0,
+        lowered: 0,
+        skipped: 0,
+    }
+}
+
+fn rebuild_low(
+    sink l: L,
+    m: u64,
+    low_perm: u64,
+    low_perm_end: u64,
+    n_fns: u64,
+    n_blocks: u64,
+    n_insts: u64,
+    n_paths: u64,
+    n_pool: u64,
+    n_afns: u64,
+    n_apms: u64,
+    n_nodes: u64,
+    n_rows: u64,
+    n_effs: u64
+) -> (L, u64) {
+    let L {
+        s_and,
+        s_or,
+        s_div,
+        s_rem,
+        s_shl,
+        s_shr,
+        s_eq,
+        s_ne,
+        s_lt,
+        s_le,
+        s_gt,
+        s_ge,
+        s_plus,
+        s_set,
+        s_dotdot,
+        s_box_new,
+        s_box_new_in_caller,
+        s_seq_subslice,
+        s_seq_get,
+        s_seq_slice_get,
+        s_fip_box_new,
+        s_fip_box_new_in_caller,
+        c,
+        a,
+        p,
+        ppath: _ppath,
+        owner,
+        next,
+        cur,
+        blocks: _blocks,
+        insts: _insts,
+        sops: _sops,
+        stags: _stags,
+        vals: _vals,
+        alias: _alias,
+        trail: _trail,
+        local_ty: _local_ty,
+        locals: _locals,
+        cap_of: _cap_of,
+        cap_set: _cap_set,
+        loops: _loops,
+        conts: _conts,
+        skip,
+        fbound: _fbound,
+        fbt: _fbt,
+        ffor,
+        fpa,
+        fpn,
+        fga,
+        fgn,
+        lowered,
+        skipped,
+    } = l;
+    let Ctx {
+        names,
+        types,
+        world,
+        tmap,
+        nmap,
+    } = c;
+    let saved = stage2_heap_swap(low_perm);
+    let c2 = Ctx {
+        names: names.clone_in_heap(),
+        types: types.clone_tail_in_heap(n_nodes, n_rows, n_effs),
+        world: world,
+        tmap: tmap,
+        nmap: nmap,
+    };
+    let a2 = a.clone_tail_in_heap(n_afns, n_apms);
+    let p2 = p.clone_tail_in_heap(n_fns, n_blocks, n_insts, n_paths, n_pool);
+    let next_perm = stage2_heap_swap(saved);
+    if next_perm < low_perm_end {
+        stage2_heap_reset(m);
+    }
+    let out = L {
+        s_and: s_and,
+        s_or: s_or,
+        s_div: s_div,
+        s_rem: s_rem,
+        s_shl: s_shl,
+        s_shr: s_shr,
+        s_eq: s_eq,
+        s_ne: s_ne,
+        s_lt: s_lt,
+        s_le: s_le,
+        s_gt: s_gt,
+        s_ge: s_ge,
+        s_plus: s_plus,
+        s_set: s_set,
+        s_dotdot: s_dotdot,
+        s_box_new: s_box_new,
+        s_box_new_in_caller: s_box_new_in_caller,
+        s_seq_subslice: s_seq_subslice,
+        s_seq_get: s_seq_get,
+        s_seq_slice_get: s_seq_slice_get,
+        s_fip_box_new: s_fip_box_new,
+        s_fip_box_new_in_caller: s_fip_box_new_in_caller,
+        c: c2,
+        a: a2,
+        p: p2,
+        ppath: ChunkSeq::new[u64](),
+        owner: owner,
+        next: next,
+        cur: cur,
+        blocks: ChunkSeq::new[Bk](),
+        insts: ChunkSeq::new[In](),
+        sops: ChunkSeq::new[u64](),
+        stags: ChunkSeq::new[u8](),
+        vals: ChunkSeq::new[u32](),
+        alias: ChunkSeq::new[u32](),
+        trail: ChunkSeq::new[u64](),
+        local_ty: ChunkSeq::new[u32](),
+        locals: ChunkSeq::new[u32](),
+        cap_of: ChunkSeq::new[u32](),
+        cap_set: ChunkSeq::new[u32](),
+        loops: ChunkSeq::new[Lp](),
+        conts: ChunkSeq::new[u64](),
+        skip: skip,
+        fbound: ChunkSeq::new[u32](),
+        fbt: ChunkSeq::new[u32](),
+        ffor: ffor,
+        fpa: fpa,
+        fpn: fpn,
+        fga: fga,
+        fgn: fgn,
+        lowered: lowered,
+        skipped: skipped,
+    };
+    (out, next_perm)
+}
+
 // Every world function, then the closures and handlers they nest (each
 // appended to the function table as it is prepared).
 pub fn lower_all(inout l: L) {
+    let mut low_perm_buf = ChunkSeq::new[u8]();
+    low_perm_buf.reserve(268435456);
+    let low_perm_end = stage2_heap_mark();
+    let mut low_perm = wrapping_sub(low_perm_end, 268435456);
+    let mut max_fns = wrapping_add(l.p.fns.len(), 32768);
+    let mut max_blocks = wrapping_add(l.p.blocks.len(), 131072);
+    let mut max_insts = wrapping_add(l.p.insts.len(), 524288);
+    let mut max_ops = wrapping_add(l.p.ops.len(), 2097152);
+    let mut max_tags = wrapping_add(l.p.tags.len(), 2097152);
+    let mut max_paths = wrapping_add(l.p.paths.len(), 65536);
+    let mut max_path_syms = wrapping_add(l.p.path_syms.len(), 131072);
+    let mut max_pool = wrapping_add(l.p.pool.len(), 32768);
+    let mut max_afns = wrapping_add(l.a.fns.len(), 16384);
+    let mut max_apms = wrapping_add(l.a.pms.len(), 32768);
+    let mut max_acaps = wrapping_add(l.a.caps.len(), 16384);
+    let mut max_aexts = wrapping_add(l.a.exts.len(), 16384);
+    let low_entry = stage2_heap_swap(low_perm);
+    l
+        .p
+        .reserve_lower(
+            max_fns,
+            max_blocks,
+            max_insts,
+            max_ops,
+            max_tags,
+            max_paths,
+            max_path_syms,
+            max_pool
+        );
+    l.a.reserve_lower(16384, 32768, 16384, 16384);
+    l
+        .c
+        .names
+        .reserve_names(
+            wrapping_add(l.c.names.len(), 32768),
+            wrapping_add(l.c.names.text.len(), 524288)
+        );
+    l
+        .c
+        .types
+        .reserve_types(
+            wrapping_add(l.c.types.nodes.len(), 32768),
+            wrapping_add(l.c.types.items_len(), 32768),
+            wrapping_add(l.c.types.rows.len(), 16384),
+            wrapping_add(l.c.types.effs.len(), 8192)
+        );
     for i in 0..l.a.pool_count {
         l
             .p
@@ -2553,30 +2810,21 @@ pub fn lower_all(inout l: L) {
                 }
             );
     }
-    l.p.fns.reserve(4096);
-    l.p.blocks.reserve(32768);
-    l.p.insts.reserve(262144);
-    l.p.ops.reserve(524288);
-    l.p.tags.reserve(524288);
-    l.p.paths.reserve(16384);
-    l.p.path_syms.reserve(32768);
-    l.p.pool.reserve(4096);
-    l.blocks.reserve(2048);
-    l.insts.reserve(16384);
-    l.sops.reserve(32768);
-    l.stags.reserve(32768);
-    l.vals.reserve(8192);
-    l.alias.reserve(8192);
-    l.trail.reserve(8192);
-    l.local_ty.reserve(2048);
-    l.locals.reserve(2048);
-    l.ppath.reserve(4096);
-    l.cap_of.reserve(1024);
-    l.cap_set.reserve(1024);
-    l.loops.reserve(512);
-    l.conts.reserve(512);
-    l.fbound.reserve(1024);
-    l.fbt.reserve(1024);
+    low_perm = stage2_heap_swap(low_entry);
+    let mut n_fns = l.p.fns.len();
+    let mut n_blocks = l.p.blocks.len();
+    let mut n_insts = l.p.insts.len();
+    let mut n_paths = l.p.paths.len();
+    let mut n_pool = l.p.pool.len();
+    let mut n_afns = l.a.fns.len();
+    let mut n_apms = l.a.pms.len();
+    let mut n_nodes = l.c.types.nodes.len();
+    let mut n_rows = l.c.types.rows.len();
+    let mut n_effs = l.c.types.effs.len();
+    let mut prev_nmask = l.c.names.mask;
+    let mut prev_tmask = l.c.types.mask;
+    let mut prev_rmask = l.c.types.row_mask;
+    let mut m = stage2_heap_mark();
     let mut fi: u64 = 0;
     loop {
         if fi >= l.a.fns.len() {
@@ -2584,42 +2832,139 @@ pub fn lower_all(inout l: L) {
         }
         let f = l.a.function(fi);
         if f.has_body {
-            let m = stage2_heap_mark();
-            let n_names = l.c.names.len();
-            let n_nodes = l.c.types.nodes.len();
-            let n_rows = l.c.types.rows.len();
             lower_fn(inout l, fi);
-            if l.c.names.len() == n_names
-                && l.c.types.nodes.len() == n_nodes
-                && l.c.types.rows.len() == n_rows
-                && l.p.fns.len() <= 4000
-                && l.p.blocks.len() <= 32000
-                && l.p.insts.len() <= 260000
-                && l.p.ops.len() <= 520000
-                && l.p.tags.len() <= 520000
-                && l.p.paths.len() <= 16000
-                && l.p.path_syms.len() <= 32000
-                && l.p.pool.len() <= 4000
-                && l.blocks.len() <= 2000
-                && l.insts.len() <= 16000
-                && l.sops.len() <= 32000
-                && l.stags.len() <= 32000
-                && l.vals.len() <= 8000
-                && l.alias.len() <= 8000
-                && l.trail.len() <= 8000
-                && l.local_ty.len() <= 2000
-                && l.locals.len() <= 2000
-                && l.ppath.len() <= 4000
-                && l.cap_of.len() <= 1000
-                && l.cap_set.len() <= 1000
-                && l.loops.len() <= 500
-                && l.conts.len() <= 500
-                && l.fbound.len() <= 1000
-                && l.fbt.len() <= 1000 {
-                // stage2_heap_reset(m);
+            if (fi & 1023) == 1023 {
+                if l.p.fns.len() < max_fns
+                    && l.p.blocks.len() < max_blocks
+                    && l.p.insts.len() < max_insts
+                    && l.p.ops.len() < max_ops
+                    && l.p.tags.len() < max_tags
+                    && l.p.paths.len() < max_paths
+                    && l.p.path_syms.len() < max_path_syms
+                    && l.p.pool.len() < max_pool
+                    && l.a.fns.len() < max_afns
+                    && l.a.pms.len() < max_apms
+                    && l.a.caps.len() < max_acaps
+                    && l.a.exts.len() < max_aexts
+                    && l.c.names.mask == prev_nmask
+                    && l.c.types.mask == prev_tmask
+                    && l.c.types.row_mask == prev_rmask
+                    && low_perm < low_perm_end {
+                    let mut dl = dummy_low();
+                    swap(inout l, inout dl);
+                    let (nl, next_perm) = rebuild_low(
+                        dl,
+                        m,
+                        low_perm,
+                        low_perm_end,
+                        n_fns,
+                        n_blocks,
+                        n_insts,
+                        n_paths,
+                        n_pool,
+                        n_afns,
+                        n_apms,
+                        n_nodes,
+                        n_rows,
+                        n_effs
+                    );
+                    let mut ml = nl;
+                    low_perm = next_perm;
+                    swap(inout l, inout ml);
+                    if low_perm >= low_perm_end {
+                        low_perm = low_perm_end;
+                    }
+                    m = stage2_heap_mark();
+                } else {
+                    let s_pre = if low_perm < low_perm_end {
+                        stage2_heap_swap(low_perm)
+                    } else {
+                        0
+                    };
+                    max_fns = wrapping_add(l.p.fns.len(), 32768);
+                    max_blocks = wrapping_add(l.p.blocks.len(), 131072);
+                    max_insts = wrapping_add(l.p.insts.len(), 524288);
+                    max_ops = wrapping_add(l.p.ops.len(), 2097152);
+                    max_tags = wrapping_add(l.p.tags.len(), 2097152);
+                    max_paths = wrapping_add(l.p.paths.len(), 65536);
+                    max_path_syms = wrapping_add(l.p.path_syms.len(), 131072);
+                    max_pool = wrapping_add(l.p.pool.len(), 32768);
+                    max_afns = wrapping_add(l.a.fns.len(), 16384);
+                    max_apms = wrapping_add(l.a.pms.len(), 32768);
+                    max_acaps = wrapping_add(l.a.caps.len(), 16384);
+                    max_aexts = wrapping_add(l.a.exts.len(), 16384);
+                    l
+                        .p
+                        .reserve_lower(
+                            max_fns,
+                            max_blocks,
+                            max_insts,
+                            max_ops,
+                            max_tags,
+                            max_paths,
+                            max_path_syms,
+                            max_pool
+                        );
+                    l.a.reserve_lower(16384, 32768, 16384, 16384);
+                    if low_perm < low_perm_end {
+                        low_perm = stage2_heap_swap(s_pre);
+                    }
+                    prev_nmask = l.c.names.mask;
+                    prev_tmask = l.c.types.mask;
+                    prev_rmask = l.c.types.row_mask;
+                    m = stage2_heap_mark();
+                }
+                n_fns = l.p.fns.len();
+                n_blocks = l.p.blocks.len();
+                n_insts = l.p.insts.len();
+                n_paths = l.p.paths.len();
+                n_pool = l.p.pool.len();
+                n_afns = l.a.fns.len();
+                n_apms = l.a.pms.len();
+                n_nodes = l.c.types.nodes.len();
+                n_rows = l.c.types.rows.len();
+                n_effs = l.c.types.effs.len();
             }
         }
         fi = inc(fi);
+    }
+    if l.p.fns.len() < max_fns
+        && l.p.blocks.len() < max_blocks
+        && l.p.insts.len() < max_insts
+        && l.p.ops.len() < max_ops
+        && l.p.tags.len() < max_tags
+        && l.p.paths.len() < max_paths
+        && l.p.path_syms.len() < max_path_syms
+        && l.p.pool.len() < max_pool
+        && l.a.fns.len() < max_afns
+        && l.a.pms.len() < max_apms
+        && l.a.caps.len() < max_acaps
+        && l.a.exts.len() < max_aexts
+        && l.c.names.mask == prev_nmask
+        && l.c.types.mask == prev_tmask
+        && l.c.types.row_mask == prev_rmask
+        && low_perm < low_perm_end {
+        let mut dl = dummy_low();
+        swap(inout l, inout dl);
+        let (nl, next_perm) = rebuild_low(
+            dl,
+            m,
+            low_perm,
+            low_perm_end,
+            n_fns,
+            n_blocks,
+            n_insts,
+            n_paths,
+            n_pool,
+            n_afns,
+            n_apms,
+            n_nodes,
+            n_rows,
+            n_effs
+        );
+        let mut ml = nl;
+        low_perm = next_perm;
+        swap(inout l, inout ml);
     }
 }
 

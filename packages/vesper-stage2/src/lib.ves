@@ -3,19 +3,34 @@
 use @vesper/check-data::input::{
     Ctx
 };
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    TyPass,
+    Types
+};
 use @vesper/check-data::util::{
     add,
     inc,
     n32,
+    push_decimal,
+    stage2_heap_mark,
+    stage2_heap_reset,
+    stage2_heap_swap,
     u32_at,
     u64_at,
     w
 };
 use @vesper/check-data::world::{
+    World,
     set_by_symbol
 };
 use @vesper/place-ir::{
     Program
+};
+use @vesper/place-ir-lower::ast::{
+    Ast as IrAst
 };
 use @vesper/check-names-packages::{
     AssembledModule,
@@ -24,14 +39,18 @@ use @vesper/check-names-packages::{
     assembly_metadata
 };
 use @vesper/place-ir-lower::lower::{
+    L,
     l_new,
     lower_all
 };
 use @vesper/wasm-backend::{
-    compile_with_facts
+    compile_with_facts,
+    compile_with_facts_diag
 };
 use @vesper/wasm-backend::err::{
-    WErr
+    WErr,
+    format_werr,
+    werr
 };
 use @vesper/wasm-backend::ir::{
     add_eff_decl,
@@ -41,11 +60,14 @@ use @vesper/wasm-backend::ir::{
     set_expr_handler
 };
 use @vesper/place-ir::codes::{
-    Pat
+    Op,
+    Pat,
+    PoolKind
 };
 use @vesper-std/env::{
     arg,
-    arg_count
+    arg_count,
+    var
 };
 use @vesper-std/fs::{
     IoError,
@@ -127,17 +149,166 @@ fn nested_sym(inout c: Ctx, in prefix: Str, s0: u64, s1: u64) -> u32 {
     c.names.intern(in b.as_slice())
 }
 
+fn write_sidecar(in out_wasm: Str, in suffix: Str, in data: Slice[u8]) eff [Ffi[StdFs]] {
+    let mut p = ChunkSeq::new[u8]();
+    p.extend(in out_wasm.as_bytes());
+    p.extend(in suffix.as_bytes());
+    let _ = handle Fail[IoError] in {
+        write_path(in p.as_slice(), in data);
+        0
+    } with {
+        return v => v,
+        raise(_e, _k) => 0,
+    };
+}
+
+// Mark mutable element-view `match x.try_get_mut(i)` scrutinees with `TyPass::Inout`
+// on their `Op::Seq(MakeSeq, "TryGet")` receiver operand, matching Rust's
+// `wasm_element_views` without altering `@vesper/place-ir-lower` differential output.
+fn mark_mut_element_views(inout l: L) {
+    let mut vs0 = ChunkSeq::new[u64]();
+    let mut vs1 = ChunkSeq::new[u64]();
+    vs0.reserve(512);
+    vs1.reserve(512);
+    let m_v = stage2_heap_mark();
+    let mut grew = false;
+    let ex_len = l.a.exs.len();
+    for ii in 0..ex_len {
+        let e = l.a.ex(ii);
+        if e.kind == 14 && e.a < ex_len {
+            let sc = l.a.ex(e.a);
+            if sc.kind == 11 && sc.n == 1 && sc.a < ex_len {
+                let ce = l.a.ex(sc.a);
+                if ce.kind == 5 && l.c.names.spells(n32(ce.b), in "try_get_mut".as_bytes()) {
+                    if vs0.len() >= 512 {
+                        grew = true;
+                    }
+                    vs0.push(sc.s0);
+                    vs1.push(sc.s1);
+                }
+            }
+        }
+    }
+    if vs0.len() == 0 {
+        if !grew {
+            stage2_heap_reset(m_v);
+        }
+        return;
+    }
+    for ii in 0..l.p.insts.len() {
+        let inst = match l.p.insts.try_get(ii) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        if inst.op != Op::Seq || inst.n < 3 {
+            continue;
+        }
+        let pid = u64_at(in l.p.ops, inst.a);
+        let pr = l.p.pool_row(pid);
+        if pr.kind == PoolKind::MakeSeq && l.c.names.spells(pr.label, in "TryGet".as_bytes()) {
+            for vi in 0..vs0.len() {
+                if u64_at(in vs0, vi) == inst.s0 && u64_at(in vs1, vi) == inst.s1 {
+                    let _ok = l.p.ops.try_set(add(inst.a, 2), widen_u64(TyPass::Inout));
+                    break;
+                }
+            }
+        }
+    }
+    if !grew {
+        stage2_heap_reset(m_v);
+    }
+}
+
+fn write_stage(want_syms: bool, in out_wasm: Str, in stage: Str, inout log: ChunkSeq[u8]) eff [
+    Ffi[StdFs]
+] {
+    if !want_syms {
+        return;
+    }
+    log.extend(in stage.as_bytes());
+    log.extend(in " (heap=".as_bytes());
+    push_decimal(inout log, stage2_heap_mark() >> 20);
+    log.extend(in " MiB)\n".as_bytes());
+    write_sidecar(in out_wasm, in ".stage", in log.as_slice());
+}
+
+fn write_err_header(in out_wasm: Str, in stage: Str, in detail: Slice[u8]) eff [Ffi[StdFs]] {
+    let mut msg = ChunkSeq::new[u8]();
+    msg.extend(in "stage2 error (stage=".as_bytes());
+    msg.extend(in stage.as_bytes());
+    msg.extend(in ", heap_mib=".as_bytes());
+    push_decimal(inout msg, stage2_heap_mark() >> 20);
+    msg.extend(in "): ".as_bytes());
+    msg.extend(in detail);
+    msg.push(10);
+    write_sidecar(in out_wasm, in ".err.txt", in msg.as_slice());
+}
+
+fn move_front_to_perm(
+    sink ir_ast0: IrAst,
+    sink names0: Names,
+    sink types0: Types,
+    sink world0: World,
+    front_perm: u64,
+    m_front: u64
+) -> (IrAst, Names, Types, World, u64, bool) {
+    if m_front == 0 || front_perm >= m_front {
+        return (ir_ast0, names0, types0, world0, 0, false);
+    }
+    let s_front = stage2_heap_swap(front_perm);
+    let ir_c = ir_ast0.deep_clone_in_heap();
+    let names_c = names0.deep_clone_in_heap();
+    let types_c = types0.deep_clone_in_heap();
+    let world_c = world0.deep_clone_in_heap();
+    let front_after = stage2_heap_mark();
+    let _ = stage2_heap_swap(s_front);
+    let used = wrapping_sub(front_after, front_perm);
+    if front_after < m_front {
+        (ir_c, names_c, types_c, world_c, used, true)
+    } else {
+        (ir_ast0, names0, types0, world0, used, false)
+    }
+}
+
 /// Compile a Loom package from `root_dir` to a core Wasm module at `out_wasm`
 /// with no Rust compiler calls. Returns `(ok_flag_or_code, core_len_or_site)`.
 pub fn stage2_compile_dir(in root_dir: Str, in out_wasm: Str, in entry_name: Str)
     -> (u64, u64) eff [Ffi[StdFs]] {
+    stage2_compile_dir_impl(in root_dir, in out_wasm, in entry_name, false)
+}
+
+fn stage2_compile_dir_impl(in root_dir: Str, in out_wasm: Str, in entry_name: Str, want_syms: bool)
+    -> (u64, u64) eff [Ffi[StdFs]] {
+    let mut stage_log = ChunkSeq::new[u8]();
+    stage_log.reserve(4096);
+    write_stage(want_syms, in out_wasm, in "load_package_graph", inout stage_log);
     let encoded = match load_package_graph_bytes(in root_dir.as_bytes()) {
         Option::Some(b) => b,
         Option::None => {
+            let mut d = ChunkSeq::new[u8]();
+            d.extend(in "load_package_graph_bytes returned None for root_dir=".as_bytes());
+            d.extend(in root_dir.as_bytes());
+            write_err_header(in out_wasm, in "load_package_graph", in d.as_slice());
             return (1, 1);
         },
     };
+    write_stage(want_syms, in out_wasm, in "assembly_begin", inout stage_log);
+    let has_front_perm = stage2_heap_mark() != 0;
+    let mut front_perm_buf = ChunkSeq::new[u8]();
+    let front_perm_end = if has_front_perm {
+        front_perm_buf.reserve(268435456);
+        stage2_heap_mark()
+    } else {
+        0
+    };
+    let front_perm = if has_front_perm {
+        wrapping_sub(front_perm_end, 268435456)
+    } else {
+        0
+    };
+    let m_front = front_perm_end;
     let mut a = assembly_begin_bytes(in encoded.as_slice());
+    write_stage(want_syms, in out_wasm, in "assemble_next", inout stage_log);
     let mut mods = ChunkSeq::new[AssembledModule]();
     loop {
         match assemble_next_bytes(inout a, in encoded.as_slice()) {
@@ -149,14 +320,44 @@ pub fn stage2_compile_dir(in root_dir: Str, in out_wasm: Str, in entry_name: Str
     }
     let meta = assembly_metadata(sink a);
     if meta.diagnostics.len() > 0 {
+        write_err_header(in out_wasm, in "assembly", in meta.diagnostics.as_slice());
         return (2, meta.diagnostics.len());
     }
+    write_stage(want_syms, in out_wasm, in "collect_program", inout stage_log);
     let collected = collect_program(in mods);
-    let (ir_ast, names0, types0, world0) = build_ir_ast_for_entry(
+    write_stage(want_syms, in out_wasm, in "build_ir_ast", inout stage_log);
+    let (ir_ast0, names0_in, types0_in, world0_in) = build_ir_ast_for_entry(
         sink collected,
         in mods,
         in entry_name
     );
+    write_stage(want_syms, in out_wasm, in "front_clone", inout stage_log);
+    let (ir_ast, names0, types0, world0, front_used, front_ok) = move_front_to_perm(
+        sink ir_ast0,
+        sink names0_in,
+        sink types0_in,
+        sink world0_in,
+        front_perm,
+        m_front
+    );
+    if want_syms && m_front != 0 {
+        stage_log.extend(in "front_used=".as_bytes());
+        push_decimal(inout stage_log, front_used >> 20);
+        stage_log.extend(in " MiB\n".as_bytes());
+    }
+    if front_ok {
+        stage2_heap_reset(m_front);
+        write_stage(want_syms, in out_wasm, in "typecheck_ast (front_reset=ok)", inout stage_log);
+    } else if m_front != 0 {
+        write_stage(
+            want_syms,
+            in out_wasm,
+            in "typecheck_ast (front_reset=OVERFLOW)",
+            inout stage_log
+        );
+    } else {
+        write_stage(want_syms, in out_wasm, in "typecheck_ast", inout stage_log);
+    }
     let (names, types, world, call_rows, call_pairs) = typecheck_ast(
         in ir_ast,
         sink names0,
@@ -171,11 +372,13 @@ pub fn stage2_compile_dir(in root_dir: Str, in out_wasm: Str, in entry_name: Str
         nmap: ChunkSeq::new[u32]()
     };
     let entry_sym = c.names.intern(in entry_name.as_bytes());
-    let mut facts = empty_facts(entry_sym, 65535, 65536, 10000000);
+    let mut facts = empty_facts(entry_sym, 65535, 65536, 50000000);
     facts.calls = call_rows;
     facts.pairs = call_pairs;
+    write_stage(want_syms, in out_wasm, in "lower_all", inout stage_log);
     let mut low = l_new(sink c, sink ir_ast);
     lower_all(inout low);
+    mark_mut_element_views(inout low);
     for fi in 0..low.a.fns.len() {
         match low.a.fns.try_get(fi) {
             Option::Some(f) => {
@@ -408,20 +611,45 @@ pub fn stage2_compile_dir(in root_dir: Str, in out_wasm: Str, in entry_name: Str
             Option::None => {},
         }
     }
-    handle Fail[WErr] in {
-        let (core, _wit, _fns, _handlers) = compile_with_facts(sink c2, sink prog, sink facts);
-        let clen = core.len();
-        handle Fail[IoError] in {
-            write_path(in out_wasm.as_bytes(), in core.as_slice());
-            (0, clen)
-        } with {
-            return v => v,
-            raise(_e, _k) => (4, 0),
-        }
+    write_stage(want_syms, in out_wasm, in "compile_with_facts", inout stage_log);
+    let dbg_names = c2.names.snapshot_text();
+    let (ok, err_w, core, syms_out) = handle Fail[WErr] in {
+        let (core0, _wit, _fns, _handlers, syms0) = compile_with_facts_diag(
+            sink c2,
+            sink prog,
+            sink facts,
+            want_syms
+        );
+        (true, werr(0, 0, 0), core0, syms0)
     } with {
         return v => v,
-        raise(err, _k) => (3, widen_u64(err.site)),
+        raise(err, _k) => (false, err, ChunkSeq::new[u8](), ChunkSeq::new[u8]()),
+    };
+    if !ok {
+        let mut diag_out = ChunkSeq::new[u8]();
+        format_werr(in err_w, in dbg_names, 0, inout diag_out);
+        write_err_header(in out_wasm, in "wasm_backend", in diag_out.as_slice());
+        return (3, err_w.site);
     }
+    if want_syms {
+        write_sidecar(in out_wasm, in ".syms", in syms_out.as_slice());
+    }
+    let clen = core.len();
+    let wrote = handle Fail[IoError] in {
+        write_path(in out_wasm.as_bytes(), in core.as_slice());
+        true
+    } with {
+        return v => v,
+        raise(_e, _k) => false,
+    };
+    if !wrote {
+        let mut d = ChunkSeq::new[u8]();
+        d.extend(in "IoError writing ".as_bytes());
+        d.extend(in out_wasm.as_bytes());
+        write_err_header(in out_wasm, in "write_wasm", in d.as_slice());
+        return (4, 0);
+    }
+    (0, clen)
 }
 
 /// CLI entry point for standalone Stage 2 Wasm execution (`vwasm stage2.wasm -- <pkg_dir> <out_wasm> [entry]`).
@@ -442,21 +670,27 @@ pub fn main() -> u64 eff [Ffi[StdEnv], Ffi[StdFs]] {
             return 12;
         },
     };
+    let want_syms = match var(in "VESPER_STAGE2_SYMS") {
+        Option::Some(v) => v.as_bytes().len() > 0,
+        Option::None => false,
+    };
     let (code, val) = if n >= 4 {
         match arg(3) {
-            Option::Some(s) => stage2_compile_dir(
+            Option::Some(s) => stage2_compile_dir_impl(
                 in root_dir.as_str(),
                 in out_wasm.as_str(),
-                in s.as_str()
+                in s.as_str(),
+                want_syms
             ),
-            Option::None => stage2_compile_dir(
+            Option::None => stage2_compile_dir_impl(
                 in root_dir.as_str(),
                 in out_wasm.as_str(),
-                in "main"
+                in "main",
+                want_syms
             ),
         }
     } else {
-        stage2_compile_dir(in root_dir.as_str(), in out_wasm.as_str(), in "main")
+        stage2_compile_dir_impl(in root_dir.as_str(), in out_wasm.as_str(), in "main", want_syms)
     };
     if code == 0 {
         0

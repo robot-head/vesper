@@ -2,6 +2,7 @@
 
 use self::util::{
     add,
+    copy_seq,
     fold,
     inc,
     inc32,
@@ -52,7 +53,77 @@ pub fn hash_bytes(in b: Slice[u8]) -> u64 {
 
 impl Names {
     pub fn len(in self) -> u64 {
-        self.hashes.len()
+        if self.hashes.len() > 0 {
+            self.hashes.len()
+        } else if self.starts.len() > 0 {
+            wrapping_sub(self.starts.len(), 1)
+        } else {
+            0
+        }
+    }
+
+    pub fn text_len(in self) -> u64 {
+        self.text.len()
+    }
+
+    pub fn mask_val(in self) -> u64 {
+        self.mask
+    }
+
+    pub fn reserve_names(inout self, names_cap: u64, text_cap: u64) {
+        self.text.reserve(text_cap);
+        self.starts.reserve(inc(names_cap));
+        self.hashes.reserve(names_cap);
+    }
+
+    pub fn clone_in_heap(sink self) -> Names {
+        let Names {
+            text,
+            starts,
+            hashes,
+            slots,
+            mask,
+        } = self;
+        Names {
+            text: text,
+            starts: starts,
+            hashes: hashes,
+            slots: slots,
+            mask: mask,
+        }
+    }
+
+    pub fn deep_clone_in_heap(in self) -> Names {
+        let mut text = if self.text.len() == 0 {
+            ChunkSeq::new[u8]()
+        } else {
+            let mut t = ChunkSeq::with_capacity[u8](self.text.len());
+            t.extend(in self.text.as_slice());
+            t
+        };
+        Names {
+            text: text,
+            starts: copy_seq[u64](in self.starts),
+            hashes: copy_seq[u64](in self.hashes),
+            slots: copy_seq[u32](in self.slots),
+            mask: self.mask,
+        }
+    }
+
+    pub fn snapshot_text(in self) -> Names {
+        let mut text = ChunkSeq::new[u8]();
+        text.extend(in self.text.as_slice());
+        let mut starts = ChunkSeq::new[u64]();
+        for i in 0..self.starts.len() {
+            starts.push(u64_at(in self.starts, i));
+        }
+        Names {
+            text: text,
+            starts: starts,
+            hashes: ChunkSeq::new[u64](),
+            slots: ChunkSeq::new[u32](),
+            mask: 0,
+        }
     }
 
     pub fn start(in self, s: u32) -> u64 {

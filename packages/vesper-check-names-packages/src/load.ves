@@ -29,9 +29,15 @@ use @vesper/ast::{
     list_len,
     none as ast_none
 };
+use @vesper/check-data::util::{
+    stage2_heap_mark,
+    stage2_heap_reset,
+    stage2_heap_swap
+};
 use @vesper/ast::lower::{
     L,
-    lower_source
+    lower_source,
+    lower_source_perm
 };
 use @vesper-std/arena::{
     idx_from_raw
@@ -481,6 +487,19 @@ pub fn collect_all(inout s: St, in input: Str) {
 }
 
 pub fn collect_all_bytes(inout s: St, in input: Slice[u8]) {
+    let has_perm = stage2_heap_mark() != 0;
+    let mut ast_perm_buf = ChunkSeq::new[u8]();
+    let ast_perm_end = if has_perm {
+        ast_perm_buf.reserve(268435456);
+        stage2_heap_mark()
+    } else {
+        0
+    };
+    let mut ast_perm = if has_perm {
+        wrapping_sub(ast_perm_end, 268435456)
+    } else {
+        0
+    };
     for m in 0..s.mod_pkg.len() {
         let a = s.mod_text_start.try_get(m);
         let z = s.mod_text_end.try_get(m);
@@ -492,8 +511,8 @@ pub fn collect_all_bytes(inout s: St, in input: Slice[u8]) {
             Option::None => (0, 0),
         };
         let l = match String::from_utf8(in input[x..y]) {
-            Option::Some(src) => lower_source(in src.as_str()),
-            Option::None => lower_source(in ""),
+            Option::Some(src) => lower_source_perm(in src.as_str(), inout ast_perm, ast_perm_end),
+            Option::None => lower_source_perm(in "", inout ast_perm, ast_perm_end),
         };
         begin_module(inout s);
         collect(inout s, in l.ast, n32(m));
