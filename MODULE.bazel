@@ -188,3 +188,6 @@ use_repo(toolchains, "host_cargo")
 
 cargo_workspace = use_extension("//tools/bazel:cargo_workspace.bzl", "cargo_workspace")
 use_repo(cargo_workspace, "vesper_cargo")
+
+wasmtime = use_extension("//tools/bazel:wasmtime.bzl", "wasmtime")
+use_repo(wasmtime, "wasmtime")

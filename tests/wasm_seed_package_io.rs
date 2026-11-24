@@ -307,6 +307,97 @@ fn format_stage2_error(label: &str, got: u64, base: Option<&Path>) -> String {
     format!("{label} returned {got} [{kind_desc}]{notes}")
 }
 
+fn wasmtime_cli_bin() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("WASMTIME_BIN") {
+        let path = PathBuf::from(p);
+        assert!(
+            path.is_file(),
+            "WASMTIME_BIN does not point to a file: {}",
+            path.display()
+        );
+        return Some(path);
+    }
+    let exe = if cfg!(windows) {
+        "wasmtime.exe"
+    } else {
+        "wasmtime"
+    };
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let cand = dir.join(exe);
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    if std::env::var_os("TEST_SRCDIR").is_some() {
+        panic!("hermetic @wasmtime//:wasmtime CLI binary `{exe}` missing from Bazel PATH");
+    }
+    None
+}
+
+fn run_stage2_wasmtime_cli(
+    cli: &Path,
+    stage2_wasm: &Path,
+    workspace_dir: &Path,
+    out_dir: &Path,
+    pkg_dir: &str,
+    out_wasm: &Path,
+) {
+    let ver = std::process::Command::new(cli)
+        .arg("--version")
+        .output()
+        .expect("run wasmtime --version");
+    assert!(
+        ver.status.success(),
+        "wasmtime --version failed: {}",
+        String::from_utf8_lossy(&ver.stderr)
+    );
+    let ver_str = String::from_utf8_lossy(&ver.stdout);
+    assert!(
+        ver_str.contains("wasmtime "),
+        "unexpected wasmtime --version output: {ver_str}"
+    );
+    if std::env::var_os("TEST_SRCDIR").is_some() || std::env::var_os("WASMTIME_BIN").is_some() {
+        assert!(
+            ver_str.contains("50.0.1"),
+            "expected pinned wasmtime 50.0.1 CLI, got: {ver_str}"
+        );
+    }
+
+    remove_stage2_sidecars(out_wasm);
+    let out_name = out_wasm
+        .file_name()
+        .expect("out filename")
+        .to_string_lossy()
+        .into_owned();
+    let exec = std::process::Command::new(cli)
+        .arg("run")
+        .arg("--dir")
+        .arg(format!("{}::.", workspace_dir.display()))
+        .arg("--dir")
+        .arg(format!("{}::/out", out_dir.display()))
+        .args(["--env", "VESPER_STAGE2_SYMS=1"])
+        .args(["--argv0", "stage2"])
+        .arg(stage2_wasm)
+        .args([pkg_dir, &format!("/out/{out_name}"), "main"])
+        .output()
+        .expect("run stage2 under wasmtime CLI");
+    let notes = read_stage2_sidecar_notes(out_wasm);
+    assert!(
+        exec.status.success(),
+        "wasmtime CLI stage2 failed (status={}):\nstdout={}\nstderr={}{notes}",
+        exec.status,
+        String::from_utf8_lossy(&exec.stdout),
+        String::from_utf8_lossy(&exec.stderr),
+    );
+    let err_txt = std::fs::read_to_string(sidecar_path(out_wasm, ".err.txt")).unwrap_or_default();
+    assert!(
+        err_txt.trim().is_empty(),
+        "stage2 under wasmtime CLI reported error:{notes}"
+    );
+}
+
 /// Run the nullary `main` returning `u64` under Wasmtime with WASI.
 fn run(component: &[u8], ctx: &Ctx) -> Result<u64, String> {
     use wasmtime::component::{Component, Linker, Val};
@@ -1706,6 +1797,27 @@ fn stage2_self_compilation_fixed_point_impl() {
         stage3_bytes.len()
     );
 
+    if let Some(cli) = wasmtime_cli_bin() {
+        let stage3_cli_path = dir.join("tmp_stage3_cli_fp.wasm");
+        run_stage2_wasmtime_cli(
+            &cli,
+            &stage2_path,
+            &repo(),
+            &dir,
+            "packages/vesper-stage2",
+            &stage3_cli_path,
+        );
+        let stage3_cli_bytes = std::fs::read(&stage3_cli_path).expect("read CLI stage3.wasm");
+        assert_eq!(
+            stage2_bytes,
+            stage3_cli_bytes,
+            "Stage 2 wasmtime CLI fixed point mismatch: stage2.wasm ({} bytes) != stage3_cli.wasm ({} bytes)",
+            stage2_bytes.len(),
+            stage3_cli_bytes.len()
+        );
+        remove_stage2_sidecars(&stage3_cli_path);
+    }
+
     remove_stage2_sidecars(&stage2_path);
     remove_stage2_sidecars(&stage3_path);
     let _ = std::fs::remove_file(&boot_syms_path);
@@ -1798,6 +1910,20 @@ fn stage2_compiles_package_under_seed_runner_impl() {
         String::from_utf8_lossy(&run_out.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&run_out.stdout).trim(), "42");
+
+    if let Some(cli) = wasmtime_cli_bin() {
+        let cli_out = dir.join("cli_out.wasm");
+        run_stage2_wasmtime_cli(&cli, &stage2_wasm, &dir, &dir, "sample", &cli_out);
+        let cli_bytes = std::fs::read(&cli_out).expect("read cli_out.wasm");
+        assert_eq!(cli_bytes, std::fs::read(&out_wasm).unwrap());
+        assert_eq!(
+            run(&cli_bytes, &Ctx::default())
+                .unwrap_or_else(|e| panic!("run wasmtime-CLI compiled sample:\n{e}")),
+            42
+        );
+        remove_stage2_sidecars(&cli_out);
+    }
+
     std::fs::remove_dir_all(dir).unwrap();
 }
 
