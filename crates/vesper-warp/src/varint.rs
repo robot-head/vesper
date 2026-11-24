@@ -20,7 +20,7 @@ pub enum VarIntError {
     BadLength(usize),
 }
 
-pub use crate::imp::varint::{decode, encode, encode_with_len, encoded_len, prefix_len};
+pub use crate::ported::varint::{decode, encode, encode_with_len, encoded_len, prefix_len};
 
 /// A forward-only reader over a borrowed byte slice.
 #[derive(Debug, Clone, Copy)]

@@ -67,6 +67,7 @@ use self::tyops::{
 };
 
 const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
 
 // Name kinds `collect_local` reserves (its `names` map).
 const N_TYPE: u32 = 1;
@@ -89,6 +90,15 @@ pub struct Fe {
     acc_trait: ChunkSeq[u32],
     acc_model: ChunkSeq[bool],
     acc_path: ChunkSeq[u32],
+    // Dependency support (`add_dependency`): `local_traits` is `NONE64` when
+    // all traits in `d.traits` are local; otherwise `0..local_traits` are
+    // local and `local_traits..d.traits.len()` belong to dependencies.
+    pub local_traits: u64,
+    pub dep_pkg_names: ChunkSeq[u32],
+    pub dep_trait_pkg: ChunkSeq[u32],
+    pub dep_adt_a: ChunkSeq[u32],
+    pub dep_adt_n: ChunkSeq[u32],
+    pub dep_adt_names: ChunkSeq[u32],
 }
 
 pub fn fe_new(sy: Sy) -> Fe {
@@ -100,7 +110,13 @@ pub fn fe_new(sy: Sy) -> Fe {
         acc_conf: ChunkSeq::new[u32](),
         acc_trait: ChunkSeq::new[u32](),
         acc_model: ChunkSeq::new[bool](),
-        acc_path: ChunkSeq::new[u32]()
+        acc_path: ChunkSeq::new[u32](),
+        local_traits: NONE64,
+        dep_pkg_names: ChunkSeq::new[u32](),
+        dep_trait_pkg: ChunkSeq::new[u32](),
+        dep_adt_a: ChunkSeq::new[u32](),
+        dep_adt_n: ChunkSeq::new[u32](),
+        dep_adt_names: ChunkSeq::new[u32]()
     }
 }
 
@@ -184,16 +200,58 @@ fn path_text(inout o: ChunkSeq[u8], in names: Names, in d: Decls, model: bool, n
 
 // ----------------------------------------------------------------- lookups
 
-// `Frontend::trait_key`: the accepted local trait a reference names (its
-// index), or NONE32 after a diagnostic.
-fn trait_key(in names: Names, in fe: Fe, r: TRef, inout o: ChunkSeq[u8]) -> u32 {
+fn local_trait_count(in d: Decls, in fe: Fe) -> u64 {
+    if fe.local_traits == NONE64 {
+        d.traits.len()
+    } else {
+        fe.local_traits
+    }
+}
+
+fn find_dep_pkg(in fe: Fe, pkg_sym: u32) -> u64 {
+    for i in 0..fe.dep_pkg_names.len() {
+        if u32_at(in fe.dep_pkg_names, i) == pkg_sym {
+            return i;
+        }
+    }
+    NONE64
+}
+
+fn find_dep_trait(in d: Decls, in fe: Fe, di: u64, name: u32) -> u32 {
+    let local_n = local_trait_count(in d, in fe);
+    for ti in local_n..d.traits.len() {
+        let idx = wrapping_sub(ti, local_n);
+        if w(u32_at(in fe.dep_trait_pkg, idx)) == di && d.trait_row(ti).name == name {
+            return n32(ti);
+        }
+    }
+    NONE32
+}
+
+// `Frontend::trait_key`: the accepted trait a reference names (its index),
+// or NONE32 after a diagnostic.
+fn trait_key(in names: Names, in d: Decls, in fe: Fe, r: TRef, inout o: ChunkSeq[u8]) -> u32 {
     if r.pkg != 0 {
-        head(inout o, "E0601", r.s, r.e);
-        put(inout o, "unknown dependency package '");
-        nm(inout o, in names, wrapping_sub(r.pkg, 1));
-        put(inout o, "'");
-        endl(inout o);
-        return NONE32;
+        let pkg_sym = wrapping_sub(r.pkg, 1);
+        let di = find_dep_pkg(in fe, pkg_sym);
+        if di == NONE64 {
+            head(inout o, "E0601", r.s, r.e);
+            put(inout o, "unknown dependency package '");
+            nm(inout o, in names, pkg_sym);
+            put(inout o, "'");
+            endl(inout o);
+            return NONE32;
+        }
+        let dt = find_dep_trait(in d, in fe, di, r.name);
+        if dt == NONE32 {
+            head(inout o, "E0601", r.s, r.e);
+            put(inout o, "unknown trait '");
+            nm(inout o, in names, r.name);
+            put(inout o, "'");
+            endl(inout o);
+            return NONE32;
+        }
+        return dt;
     }
     let t = at_symbol(in fe.trait_of, r.name);
     if t == 0 {
@@ -208,9 +266,13 @@ fn trait_key(in names: Names, in fe: Fe, r: TRef, inout o: ChunkSeq[u8]) -> u32 
 }
 
 // `Frontend::where_key`: like `trait_key`, without diagnostics.
-fn where_key(in fe: Fe, r: TRef) -> u32 {
+fn where_key(in d: Decls, in fe: Fe, r: TRef) -> u32 {
     if r.pkg != 0 {
-        return NONE32;
+        let di = find_dep_pkg(in fe, wrapping_sub(r.pkg, 1));
+        if di == NONE64 {
+            return NONE32;
+        }
+        return find_dep_trait(in d, in fe, di, r.name);
     }
     let t = at_symbol(in fe.trait_of, r.name);
     if t == 0 {
@@ -432,6 +494,7 @@ fn validate_conformance(
     in d: Decls,
     in fe: Fe,
     cf: Conf,
+    tr_idx: u32,
     tr: TraitRow,
     inout o: ChunkSeq[u8]
 ) {
@@ -580,6 +643,56 @@ fn validate_conformance(
             nm(inout o, in c.names, tr.name);
             put(inout o, "'");
             endl(inout o);
+        }
+    }
+    let local_n = local_trait_count(in d, in fe);
+    if w(tr_idx) >= local_n {
+        let di = w(u32_at(in fe.dep_trait_pkg, wrapping_sub(w(tr_idx), local_n)));
+        let aa = w(u32_at(in fe.dep_adt_a, di));
+        let an = w(u32_at(in fe.dep_adt_n, di));
+        for j in 0..w(tr.mn) {
+            let s = d.sig(add(w(tr.ma), j));
+            let mut foreign = false;
+            for pi in 0..w(s.pn) {
+                let p = d.par(add(w(s.pa), pi));
+                for ai in 0..an {
+                    if mentions(in c.types, p.ty, u32_at(in fe.dep_adt_names, add(aa, ai))) {
+                        foreign = true;
+                        break;
+                    }
+                }
+                if foreign {
+                    break;
+                }
+            }
+            if !foreign {
+                for ai in 0..an {
+                    if mentions(in c.types, s.result, u32_at(in fe.dep_adt_names, add(aa, ai))) {
+                        foreign = true;
+                        break;
+                    }
+                }
+            }
+            if !foreign && s.row != NONE32 {
+                for ai in 0..an {
+                    if mentions(in c.types, s.row, u32_at(in fe.dep_adt_names, add(aa, ai))) {
+                        foreign = true;
+                        break;
+                    }
+                }
+            }
+            if foreign {
+                head(inout o, "E0607", cf.s, cf.e);
+                put(inout o, "method '");
+                nm(inout o, in c.names, s.name);
+                put(inout o, "' of dependency trait '");
+                nm(inout o, in c.names, tr.name);
+                put(
+                    inout o,
+                    "' mentions dependency types; cross-package source types are not supported"
+                );
+                endl(inout o);
+            }
         }
     }
 }
@@ -820,7 +933,7 @@ fn collect_bound(in c: Ctx, in d: Decls, in fe: Fe, i: u64, inout o: ChunkSeq[u8
         endl(inout o);
         return;
     }
-    let key = trait_key(in c.names, in fe, r, inout o);
+    let key = trait_key(in c.names, in d, in fe, r, inout o);
     if key == NONE32 {
         return;
     }
@@ -917,7 +1030,8 @@ fn dto_err(in c: Ctx, in d: Decls, in fe: Fe, ga: u32, gn: u32, ty: u32, inout e
         if tn == NONE32 {
             // `unique_assoc_trait`.
             let mut count: u64 = 0;
-            for i in 0..d.traits.len() {
+            let local_n = local_trait_count(in d, in fe);
+            for i in 0..local_n {
                 let t = d.trait_row(i);
                 if at_symbol(in fe.trait_of, t.name) == n32(inc(i))
                     && trait_has_assoc(in d, t, assoc) {
@@ -1028,7 +1142,7 @@ fn lower_err(inout c: Ctx, in d: Decls, in fe: Fe, cf: Conf, tr: TraitRow, inout
     for i in 0..w(cf.wn) {
         let wh = d.where_row(add(w(cf.wa), i));
         let wr = d.tref(w(wh.tref));
-        let key = where_key(in fe, wr);
+        let key = where_key(in d, in fe, wr);
         if key == NONE32 {
             put(inout err, "unknown trait '");
             nm(inout err, in c.names, wr.name);
@@ -1113,7 +1227,8 @@ pub fn declaration_pass(inout c: Ctx, in d: Decls, inout fe: Fe, inout o: ChunkS
         let e = c.world.effect_row(n32(i));
         set_by_symbol(inout fe.kinds, e.name, N_EFFECT);
     }
-    for i in 0..d.traits.len() {
+    let local_n = local_trait_count(in d, in fe);
+    for i in 0..local_n {
         let t = d.trait_row(i);
         let prev = at_symbol(in fe.kinds, t.name);
         set_by_symbol(inout fe.kinds, t.name, N_TRAIT);
@@ -1146,7 +1261,7 @@ pub fn declaration_pass(inout c: Ctx, in d: Decls, inout fe: Fe, inout o: ChunkS
                 continue;
             }
         }
-        let key = trait_key(in c.names, in fe, d.tref(w(cf.tref)), inout o);
+        let key = trait_key(in c.names, in d, in fe, d.tref(w(cf.tref)), inout o);
         if key == NONE32 {
             continue;
         }
@@ -1177,7 +1292,7 @@ pub fn declaration_pass(inout c: Ctx, in d: Decls, inout fe: Fe, inout o: ChunkS
             endl(inout o);
             continue;
         }
-        validate_conformance(inout c, in d, in fe, cf, d.trait_row(w(key)), inout o);
+        validate_conformance(inout c, in d, in fe, cf, key, d.trait_row(w(key)), inout o);
         fe.acc_conf.push(n32(i));
         fe.acc_trait.push(key);
         fe.acc_model.push(cf.model);

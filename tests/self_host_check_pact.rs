@@ -15,6 +15,17 @@ mod check_words;
 #[path = "common/pact_words.rs"]
 mod pact_words;
 
+// Bazel runs one test per shard ("test/self_host_check_pact" has eight shards):
+// the file took over 50 minutes in one process.
+#[path = "common/corpus_shard.rs"]
+mod corpus_shard;
+
+/// Whether this Bazel shard runs test number `slot` (every test without Bazel).
+fn owned_by_shard(slot: usize) -> bool {
+    let shard = corpus_shard::Shard::from_environment();
+    slot % shard.total == shard.index
+}
+
 use check_harness::*;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
@@ -770,6 +781,9 @@ fn run(optimize: bool) -> (usize, usize, BTreeSet<String>) {
 
 #[test]
 fn declaration_pass_matches_rust() {
+    if !owned_by_shard(0) {
+        return;
+    }
     let (bad, lines, codes) = run(true);
     assert_eq!(bad, 0);
     assert!(lines > 0);
@@ -783,12 +797,18 @@ fn declaration_pass_matches_rust() {
 
 #[test]
 fn unoptimized_jit_agrees() {
+    if !owned_by_shard(1) {
+        return;
+    }
     let (bad, _, _) = run(false);
     assert_eq!(bad, 0);
 }
 
 #[test]
 fn every_message_of_the_pass_fires() {
+    if !owned_by_shard(2) {
+        return;
+    }
     // One fixed message stem per diagnostic the pass can report (the
     // `Frontend::new` part of src/pact_frontend.rs without dependencies).
     let stems = [
@@ -857,10 +877,12 @@ fn vesper_declarations(
 
 #[test]
 fn check_package_agrees_through_the_swap_point() {
+    let shard = corpus_shard::Shard::from_environment();
     // `check_package` with the Vesper pass installed answers every checker
     // test and its mutants as the Rust pass does (diagnostics compared as
     // values, so the decoder is checked too). The corpus goes through the
-    // hybrid build's suite.
+    // hybrid build's suite. Partition across Bazel shards so each shard runs
+    // ~1/4 of the ~1,450 modules instead of hitting the 1h timeout on one.
     assert_eq!(pact_frontend::default_identity().to_string(), IDENTITY);
     let mut modules = vec![];
     for (k, (name, src)) in checker_tests().into_iter().enumerate() {
@@ -870,18 +892,17 @@ fn check_package_agrees_through_the_swap_point() {
         }
         modules.push((name, m));
     }
+    let modules: Vec<_> = shard.keep(modules).collect();
     let check = |m: &Module| {
         pact_frontend::check_package(m, &pact_frontend::default_identity())
             .checked
             .diagnostics
     };
     let rust: Vec<_> = modules.iter().map(|(_, m)| check(m)).collect();
-    assert!(
-        pact_frontend::install_declaration_pass(pact_frontend::DeclarationPassTable {
-            diagnostics: vesper_declarations,
-        })
-        .is_ok()
-    );
+    // `OnceLock` may already be initialized if another shard/test ran in-process.
+    let _ = pact_frontend::install_declaration_pass(pact_frontend::DeclarationPassTable {
+        diagnostics: vesper_declarations,
+    });
     let mut bad = 0;
     let mut rejected = 0;
     for ((name, m), rust) in modules.iter().zip(&rust) {
@@ -1082,6 +1103,9 @@ fn with_large_stack<F: FnOnce() + Send + 'static>(f: F) {
 
 #[test]
 fn session_diagnostics_agree_across_corpus_and_mutants() {
+    if !owned_by_shard(4) {
+        return;
+    }
     with_large_stack(|| {
         let f = session_entry();
         let mut cases: Vec<(String, Module, String, String)> = vec![];
@@ -1258,6 +1282,9 @@ fn session_diagnostics_agree_across_corpus_and_mutants() {
 
 #[test]
 fn session_queries_and_revision_agree_with_rust() {
+    if !owned_by_shard(5) {
+        return;
+    }
     with_large_stack(|| {
         let fq = queries_entry();
         let src = r#"
@@ -1499,6 +1526,9 @@ fn main() -> i64 { 0 }
 
 #[test]
 fn resolve_call_and_normalize_agree_with_rust() {
+    if !owned_by_shard(6) {
+        return;
+    }
     std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024)
         .spawn(|| {
@@ -1888,7 +1918,110 @@ fn resolve_call_and_normalize_agree_with_rust() {
 }
 
 #[test]
+fn builtin_derive_agrees_with_rust() {
+    if !owned_by_shard(7) {
+        return;
+    }
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let entry = package().entry("check_pact_builtin_derive", true);
+
+            let ok_src = r#"
+                copy struct Point { x: u64, y: u64 }
+                struct Pair[T] { a: T, b: T }
+                struct Tagged[T, U] { val: T }
+                struct Custom { raw: f64 }
+                struct Nested { p: Point, tup: (u8, u32), pair: Pair[bool] }
+                impl Eq for Custom { fn eq(in self, in other: Custom) -> bool { true } }
+                struct WithCustom { c: Custom }
+                impl Eq for Point {}
+                impl Ord for Point {}
+                impl Hash for Point {}
+                impl[T] Eq for Pair[T] {}
+                impl[T] Ord for Pair[T] {}
+                impl[T] Hash for Pair[T] {}
+                impl[T, U] Eq for Tagged[T, U] {}
+                impl Eq for Nested {}
+                impl Eq for WithCustom {}
+            "#;
+
+            let m_ok = parse(ok_src);
+            let base_ok = base_world(&m_ok);
+            let input_ok = pact_words::encode_builtin_derive(&m_ok, &base_ok).unwrap();
+            let (diags_ok, ok_flag, impls_src) =
+                pact_words::decode_builtin_derive(&entry.words(&input_ok));
+            assert!(diags_ok.is_empty(), "{diags_ok:?}");
+            assert!(ok_flag);
+
+            // Parse the Vesper-generated derived `impl`s alongside the stripped
+            // user module + builtin prelude items and verify `declaration_pass`
+            // accepts the whole derived module cleanly (0 errors).
+            let mut combined = String::from(
+                "copy enum Ordering { Less, Equal, Greater }\n\
+                 trait Eq { fn eq(in self, in other: Self) -> bool; }\n\
+                 trait Ord { fn cmp(in self, in other: Self) -> Ordering; }\n\
+                 trait Hash { fn hash(in self) -> u64; }\n\
+                 fn vesper_builtin_hash_mix(h: u64, v: u64) -> u64 { wrapping_mul(wrapping_add(h, v), 1099511628211) }\n",
+            );
+            for line in ok_src.lines() {
+                if !line.trim_start().starts_with("impl ") && !line.trim_start().starts_with("impl[") {
+                    combined.push_str(line);
+                    combined.push('\n');
+                }
+            }
+            combined.push_str(
+                "impl Eq for Custom { fn eq(in self, in other: Custom) -> bool { true } }\n",
+            );
+            combined.push_str(&impls_src);
+            let parsed_combined = parse(&combined);
+            let (_, rust_diags) = pact_frontend::declaration_pass(&parsed_combined).unwrap();
+            assert!(
+                rust_diags.is_empty(),
+                "Vesper-derived impls failed declaration_pass: {rust_diags:?}\n{impls_src}"
+            );
+
+            // Rejected derive cases: compare `E0616` span & message 1-for-1 with Rust.
+            let err_cases = [
+                "impl Eq for i64 {}",
+                "struct Pair[A, B] { a: A, b: B }\nimpl[B, A] Eq for Pair[A, B] {}",
+                "struct BadFloat { x: f64 }\nimpl Eq for BadFloat {}",
+                "struct BadTup[T] { t: (T, u8) }\nimpl[T] Eq for BadTup[T] {}",
+                "struct MissingInner { p: Inner }\nstruct Inner { x: u64 }\nimpl Eq for MissingInner {}",
+            ];
+            for (ci, src) in err_cases.iter().enumerate() {
+                let m = parse(src);
+                let base = base_world(&m);
+                let input = pact_words::encode_builtin_derive(&m, &base).unwrap();
+                let (v_diags, v_ok, _) = pact_words::decode_builtin_derive(&entry.words(&input));
+                assert!(!v_ok, "expected derive failure on case {ci}");
+                let rust_res = pact_frontend::check_package(
+                    &m,
+                    &vesper_pact_binding::PackageIdentity::new("@local/derive_err", "0.0.0"),
+                );
+                let rust_e0616: Vec<Diagnostic> = rust_res
+                    .checked
+                    .diagnostics
+                    .into_iter()
+                    .filter(|d| d.code == "E0616")
+                    .collect();
+                assert_eq!(
+                    diagnostic_text(&v_diags),
+                    diagnostic_text(&rust_e0616),
+                    "E0616 mismatch on case {ci}"
+                );
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn mono_check_agrees_with_rust() {
+    if !owned_by_shard(8) {
+        return;
+    }
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| {
@@ -1976,6 +2109,282 @@ fn mono_check_agrees_with_rust() {
                 "mono_check: {checked} modules checked ({with_errors} with errors), 0 differ"
             );
             assert!(checked > 0);
+            assert!(with_errors > 0);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn mono_plan_agrees_with_rust() {
+    if !owned_by_shard(9) {
+        return;
+    }
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let plan_fn = package().entry("check_pact_mono_plan", true);
+            let identity = pact_frontend::default_identity();
+            let mut cases: Vec<(String, Module)> = checker_tests()
+                .into_iter()
+                .map(|(n, s)| (n, parse(&s)))
+                .collect();
+            for c in corpus() {
+                cases.push((c.name.clone(), c.module.clone()));
+            }
+            let extra_sources = [
+                (
+                    "mono_plan_poly_rec_e0615",
+                    "trait Show { fn show(in self) -> i64; }
+                     struct Box1[T] { x: T }
+                     impl Show for i64 { fn show(in self) -> i64 { self } }
+                     impl[T: Show] Show for Box1[T] { fn show(in self) -> i64 { self.x.show() } }
+                     fn rec[T: Show](in x: T, in n: i64) -> i64 {
+                         if n == 0 { x.show() } else { rec(Box1 { x }, n - 1) }
+                     }
+                     fn main() -> i64 { rec(1, 2) }",
+                ),
+                (
+                    "mono_plan_use_model_chain",
+                    "trait Show { fn show(in self) -> i64; }
+                     fn leaf[T: Show](in x: T) -> i64 { x.show() }
+                     fn mid[T: Show](in x: T) -> i64 { leaf(x) }
+                     model M1: Show for i64 { fn show(in self) -> i64 { self } }
+                     model M2: Show for i64 { fn show(in self) -> i64 { self + 10 } }
+                     fn main() -> i64 {
+                         let a = { use model M1; mid(1) };
+                         let b = { use model M2; mid(1) };
+                         a + b
+                     }",
+                ),
+            ];
+            for (name, src) in extra_sources {
+                cases.push((name.to_string(), parse(src)));
+            }
+
+            let mut checked = 0usize;
+            let mut total_clones = 0usize;
+            let mut total_rewrites = 0usize;
+            for (name, m) in &cases {
+                let Some(outcome) = pact_frontend::probe_mono_plan(m, &identity) else {
+                    continue;
+                };
+                let Some(input) = pact_words::encode_mono_plan_input(
+                    &outcome.check,
+                    pact_frontend::DEFAULT_PACKAGE,
+                    pact_frontend::DEFAULT_VERSION,
+                ) else {
+                    continue;
+                };
+                checked += 1;
+                let (s_diags, ok, v_errors, v_clones, v_rewrites) =
+                    pact_words::decode_mono_plan(&plan_fn.words(&input));
+                assert!(s_diags.is_empty(), "{name}: session diags {s_diags:?}");
+                assert!(ok, "{name}: session failed");
+                assert_eq!(v_errors, outcome.errors, "{name}: errors mismatch");
+                if outcome.errors.is_empty() {
+                    total_clones += v_clones.len();
+                    total_rewrites += v_rewrites.len();
+                    assert_eq!(v_clones, outcome.clones, "{name}: clones mismatch");
+                    assert_eq!(v_rewrites, outcome.rewrites, "{name}: rewrites mismatch");
+                }
+            }
+            eprintln!(
+                "mono_plan: {checked} modules checked ({total_clones} clones, {total_rewrites} rewrites), 0 differ"
+            );
+            assert!(checked > 0);
+            assert!(total_clones > 0);
+            assert!(total_rewrites > 0);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn builtin_wanted_agrees_with_rust() {
+    if !owned_by_shard(10) {
+        return;
+    }
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let wanted_fn = package().entry("check_pact_builtin_wanted", true);
+            let mut cases: Vec<(String, Module)> = checker_tests()
+                .into_iter()
+                .map(|(n, s)| (n, parse(&s)))
+                .collect();
+            for c in corpus() {
+                cases.push((c.name.clone(), c.module.clone()));
+            }
+            let extra = [
+                ("wanted_plain", "fn main() -> i64 { 0 }"),
+                ("wanted_user_eq", "trait Eq { fn eq(in self, in o: Self) -> bool; } fn f[T: Eq](in x: T) -> bool { true }"),
+                ("wanted_user_ordering", "enum Ordering { A } fn f() -> i64 { 0 }"),
+                ("wanted_bound_ord", "fn f[T: Ord](in x: T) -> i64 { 0 }"),
+                ("wanted_path_hash", "fn f(in x: u64) -> u64 { Hash::hash(x) }"),
+                ("wanted_ordering_ty", "fn f(in o: Ordering) -> i64 { 0 }"),
+                ("wanted_impl_eq", "struct S { x: u64 } impl Eq for S {}"),
+            ];
+            for (n, s) in extra {
+                cases.push((n.to_string(), parse(s)));
+            }
+            let mut checked = 0usize;
+            let mut yes = 0usize;
+            for (name, m) in &cases {
+                let input = pact_words::encode_builtin_wanted(m);
+                if input.len() > 512 * 1024 {
+                    continue;
+                }
+                checked += 1;
+                let rust = pact_frontend::builtin_traits_wanted(m);
+                let words = wanted_fn.words(&input);
+                let vesper = words.first().copied().unwrap_or(0) != 0;
+                if rust {
+                    yes += 1;
+                }
+                assert_eq!(vesper, rust, "{name}: wanted mismatch");
+            }
+            eprintln!("builtin_wanted: {checked} modules checked ({yes} wanted), 0 differ");
+            assert!(checked > 20);
+            assert!(yes > 0);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn deps_agrees_with_rust() {
+    if !owned_by_shard(11) {
+        return;
+    }
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let deps_fn = package().entry("check_pact_deps", true);
+            let local_id = pact_frontend::default_identity();
+            let dep_a_id = vesper_pact_binding::PackageIdentity::new("@dep/a", "0.1.0");
+            let dep_b_id = vesper_pact_binding::PackageIdentity::new("@dep/b", "0.1.0");
+
+            let dep_ok_mod = parse(
+                "trait Show { fn show(in self) -> i64; }
+                 trait WithAssoc { type Out; fn out(in self) -> i64; }",
+            );
+            let dep_adt_mod = parse(
+                "struct Foreign { x: i64 }
+                 trait BadDep { fn take(in self, in f: Foreign) -> i64; }",
+            );
+            let dep_err_mod = parse(
+                "trait Bad { fn f(in self, in x: Self) -> i64; }
+                 struct S { x: i64 }
+                 impl Bad for S { fn f(in self, in x: i64) -> i64 { 0 } }",
+            );
+
+            type DepCase<'a> = (
+                &'a str,
+                &'a str,
+                Vec<(
+                    &'a str,
+                    &'a vesper_pact_binding::PackageIdentity,
+                    &'a Module,
+                )>,
+            );
+            let cases: Vec<DepCase<'_>> = vec![
+                (
+                    "dep_valid_impl",
+                    "struct Local { v: i64 }
+                     impl a::Show for Local { fn show(in self) -> i64 { self.v } }
+                     fn main() -> i64 { 0 }",
+                    vec![("a", &dep_a_id, &dep_ok_mod)],
+                ),
+                (
+                    "dep_valid_generic_assoc",
+                    "struct Local { v: i64 }
+                     impl a::WithAssoc for Local {
+                         type Out = i64;
+                         fn out(in self) -> i64 { self.v }
+                     }
+                     fn main() -> i64 { 0 }",
+                    vec![("a", &dep_a_id, &dep_ok_mod)],
+                ),
+                (
+                    "dep_missing_method",
+                    "struct Local { v: i64 }
+                     impl a::Show for Local {}
+                     fn main() -> i64 { 0 }",
+                    vec![("a", &dep_a_id, &dep_ok_mod)],
+                ),
+                (
+                    "dep_wrong_sig",
+                    "struct Local { v: i64 }
+                     impl a::Show for Local { fn show(in self) -> bool { true } }
+                     fn main() -> i64 { 0 }",
+                    vec![("a", &dep_a_id, &dep_ok_mod)],
+                ),
+                (
+                    "dep_unknown_pkg",
+                    "struct Local { v: i64 }
+                     impl missing::Show for Local { fn show(in self) -> i64 { 0 } }
+                     fn main() -> i64 { 0 }",
+                    vec![("a", &dep_a_id, &dep_ok_mod)],
+                ),
+                (
+                    "dep_unknown_trait",
+                    "struct Local { v: i64 }
+                     impl a::Missing for Local {}
+                     fn main() -> i64 { 0 }",
+                    vec![("a", &dep_a_id, &dep_ok_mod)],
+                ),
+                (
+                    "dep_foreign_adt_e0607",
+                    "struct Local { v: i64 }
+                     impl b::BadDep for Local { fn take(in self, in f: i64) -> i64 { 0 } }
+                     fn main() -> i64 { 0 }",
+                    vec![("b", &dep_b_id, &dep_adt_mod)],
+                ),
+                (
+                    "dep_duplicate",
+                    "fn main() -> i64 { 0 }",
+                    vec![("a", &dep_a_id, &dep_ok_mod), ("a", &dep_a_id, &dep_ok_mod)],
+                ),
+                (
+                    "dep_error_forwarded",
+                    "fn main() -> i64 { 0 }",
+                    vec![("a", &dep_a_id, &dep_err_mod)],
+                ),
+            ];
+
+            let mut with_errors = 0usize;
+            for (name, local_src, deps) in cases {
+                let m = parse(local_src);
+                let base = base_world(&m);
+                let rust_deps: Vec<pact_frontend::Dependency> = deps
+                    .iter()
+                    .map(|(_, id, dm)| pact_frontend::Dependency {
+                        identity: (*id).clone(),
+                        module: (*dm).clone(),
+                    })
+                    .collect();
+                let rust = pact_frontend::probe_deps_declarations(&m, &local_id, &rust_deps);
+                if !rust.is_empty() {
+                    with_errors += 1;
+                }
+                let dep_bases: Vec<(String, String, &Module, World)> = deps
+                    .iter()
+                    .map(|(pkg, id, dm)| ((*pkg).to_string(), id.to_string(), *dm, base_world(dm)))
+                    .collect();
+                let dep_refs: Vec<(&str, &str, &Module, &World)> = dep_bases
+                    .iter()
+                    .map(|(p, i, dm, db)| (p.as_str(), i.as_str(), *dm, db))
+                    .collect();
+                let input =
+                    pact_words::encode_deps_input(&m, &base, &local_id.to_string(), &dep_refs)
+                        .unwrap();
+                let vesper = pact_words::decode_declaration_text(&deps_fn.text(&input));
+                assert_eq!(vesper, rust, "{name}: deps diagnostics mismatch");
+            }
             assert!(with_errors > 0);
         })
         .unwrap()

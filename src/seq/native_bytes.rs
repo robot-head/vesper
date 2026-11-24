@@ -143,6 +143,200 @@ impl<M: Module> Codegen<'_, '_, M> {
             .ok_or_else(|| format!("native ChunkSeq::{} lacks its element type", op.name()))?;
         let elem = crate::numeric::default_type(&elem);
         let stride = self.seq_stride(&elem)?;
+        if self.seq_hook_active() {
+            use crate::codegen_swap::{seq as sops, value_of, word};
+            let recv = arg(0)?;
+            let optimize = self.operands_only;
+            let (is_seq, inv, h_inv, c0, c1, c2, cdata) = self.seq_cached_view(recv, ty);
+            let head = |sub: u64| -> Vec<u64> {
+                vec![
+                    sub,
+                    u64::from(is_seq),
+                    u64::from(inv),
+                    u64::from(h_inv),
+                    u64::from(optimize),
+                    word(recv),
+                    c0,
+                    c1,
+                    c2,
+                    cdata,
+                ]
+            };
+            match op {
+                SeqOp::CopyFrom { total } => {
+                    let at = arg(1)?;
+                    let source = arg_types
+                        .get(2)
+                        .ok_or("native copy_from lacks its source")?;
+                    let src = arg(2)?;
+                    let (sis, sinv, shinv, sc0, sc1, sc2, scdata) =
+                        self.seq_cached_view(src, source);
+                    let mut cached: Option<[u64; 6]> = None;
+                    if !total {
+                        let mut ck = head(sops::BYTE_CHECK_COPY_FROM);
+                        ck.extend_from_slice(&[
+                            word(at),
+                            u64::from(sis),
+                            u64::from(sinv),
+                            word(src),
+                            sc0,
+                            sc1,
+                            sc2,
+                        ]);
+                        if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &ck)? {
+                            self.seq_guard(value_of(&res[..res.len().min(1)])?)?;
+                            if res.len() >= 7 {
+                                cached = Some([res[1], res[2], res[3], res[4], res[5], res[6]]);
+                            }
+                        }
+                    }
+                    let mut req = head(sops::BYTE_COPY_FROM);
+                    req.extend_from_slice(&[
+                        u64::from(total),
+                        word(at),
+                        u64::from(sis),
+                        u64::from(sinv),
+                        u64::from(shinv),
+                        word(src),
+                        sc0,
+                        sc1,
+                        sc2,
+                        scdata,
+                        stride as u64,
+                    ]);
+                    if let Some(v) = cached {
+                        req.push(1);
+                        req.extend_from_slice(&v);
+                    } else {
+                        req.push(0);
+                    }
+                    if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &req)? {
+                        return value_of(&res).map(Some);
+                    }
+                }
+                SeqOp::CopyWithin { total } => {
+                    let (lo, hi, at) = (arg(1)?, arg(2)?, arg(3)?);
+                    let mut cached: Option<[u64; 4]> = None;
+                    if !total {
+                        let mut ck = head(sops::BYTE_CHECK_COPY_WITHIN);
+                        ck.extend_from_slice(&[word(lo), word(hi), word(at)]);
+                        if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &ck)? {
+                            self.seq_guard(value_of(&res[..res.len().min(1)])?)?;
+                            if res.len() >= 5 {
+                                cached = Some([res[1], res[2], res[3], res[4]]);
+                            }
+                        }
+                    }
+                    let mut req = head(sops::BYTE_COPY_WITHIN);
+                    req.extend_from_slice(&[
+                        u64::from(total),
+                        word(lo),
+                        word(hi),
+                        word(at),
+                        stride as u64,
+                    ]);
+                    if let Some(v) = cached {
+                        req.push(1);
+                        req.extend_from_slice(&v);
+                    } else {
+                        req.push(0);
+                    }
+                    if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &req)? {
+                        return value_of(&res).map(Some);
+                    }
+                }
+                SeqOp::Fill => {
+                    let desc = self.seq_elem_desc(&elem)?;
+                    let mut req = head(sops::BYTE_FILL);
+                    req.extend_from_slice(&[word(arg(1)?), desc[0], desc[1], desc[2]]);
+                    if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &req)? {
+                        return value_of(&res).map(Some);
+                    }
+                }
+                SeqOp::FillRange { total } => {
+                    let (lo, hi, val) = (arg(1)?, arg(2)?, arg(3)?);
+                    let mut cached: Option<[u64; 3]> = None;
+                    if !total {
+                        let mut ck = head(sops::BYTE_CHECK_FILL_RANGE);
+                        ck.extend_from_slice(&[word(lo), word(hi)]);
+                        if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &ck)? {
+                            self.seq_guard(value_of(&res[..res.len().min(1)])?)?;
+                            if res.len() >= 4 {
+                                cached = Some([res[1], res[2], res[3]]);
+                            }
+                        }
+                    }
+                    let desc = self.seq_elem_desc(&elem)?;
+                    let mut req = head(sops::BYTE_FILL_RANGE);
+                    req.extend_from_slice(&[
+                        u64::from(total),
+                        word(lo),
+                        word(hi),
+                        word(val),
+                        desc[0],
+                        desc[1],
+                        desc[2],
+                    ]);
+                    if let Some(v) = cached {
+                        req.push(1);
+                        req.extend_from_slice(&v);
+                    } else {
+                        req.push(0);
+                    }
+                    if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &req)? {
+                        return value_of(&res).map(Some);
+                    }
+                }
+                SeqOp::Wide(wide) => {
+                    let at = arg(1)?;
+                    let mut cached: Option<[u64; 4]> = None;
+                    if !wide.total {
+                        let mut ck = head(sops::BYTE_CHECK_WIDE);
+                        ck.extend_from_slice(&[word(at), u64::from(wide.bytes)]);
+                        if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &ck)? {
+                            self.seq_guard(value_of(&res[..res.len().min(1)])?)?;
+                            if res.len() >= 5 {
+                                cached = Some([res[1], res[2], res[3], res[4]]);
+                            }
+                        }
+                    }
+                    let val = if wide.write { word(arg(2)?) } else { 0 };
+                    let mut req = head(sops::BYTE_WIDE);
+                    req.extend_from_slice(&[
+                        u64::from(wide.write),
+                        u64::from(wide.total),
+                        u64::from(wide.big),
+                        u64::from(wide.bytes),
+                        word(at),
+                        val,
+                    ]);
+                    let opt_meta = if !wide.write && wide.total {
+                        let int_ty = Type::named(wide.int_type());
+                        let option = Type::Named("Option".into(), vec![int_ty.clone()]);
+                        let m = self.seq_option_meta_for(&option, &int_ty)?;
+                        req.extend_from_slice(&m);
+                        Some(m)
+                    } else {
+                        req.extend_from_slice(&[0, 0, 0, 0]);
+                        None
+                    };
+                    if let Some(v) = cached {
+                        req.push(1);
+                        req.extend_from_slice(&v);
+                    } else {
+                        req.push(0);
+                    }
+                    if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &req)? {
+                        return if let Some(m) = opt_meta {
+                            self.seq_option_finish_swap(&res, m).map(Some)
+                        } else {
+                            value_of(&res).map(Some)
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
         let (h, start, len) = self.seq_view(arg(0)?, ty);
         Ok(Some(match op {
             SeqOp::CopyFrom { total } => {
@@ -529,6 +723,155 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .ok_or_else(|| format!("native ChunkSeq::{} lacks an operand", op.name()))
         };
         let (value, ty) = operand(0)?;
+        if self.seq_hook_active() {
+            use crate::codegen_swap::{seq as sops, value_of, word};
+            let optimize = self.operands_only;
+            let (is_seq, inv, h_inv, c0, c1, c2, cdata) = self.seq_cached_view(value, ty);
+            let head = |sub: u64| -> Vec<u64> {
+                vec![
+                    sub,
+                    u64::from(is_seq),
+                    u64::from(inv),
+                    u64::from(h_inv),
+                    u64::from(optimize),
+                    word(value),
+                    c0,
+                    c1,
+                    c2,
+                    cdata,
+                ]
+            };
+            match op {
+                SeqOp::SumBe16 => {
+                    let req = head(sops::BYTE_SUM_BE16);
+                    if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &req)? {
+                        return value_of(&res);
+                    }
+                }
+                SeqOp::BytesEq | SeqOp::EqIgnoreAsciiCase => {
+                    let (src, sty) = operand(1)?;
+                    let (sis, sinv, shinv, sc0, sc1, sc2, scdata) = self.seq_cached_view(src, sty);
+                    let mut req = head(sops::BYTE_BYTES_EQ);
+                    req.extend_from_slice(&[
+                        u64::from(op == SeqOp::EqIgnoreAsciiCase),
+                        u64::from(sis),
+                        u64::from(sinv),
+                        u64::from(shinv),
+                        word(src),
+                        sc0,
+                        sc1,
+                        sc2,
+                        scdata,
+                    ]);
+                    if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &req)? {
+                        return value_of(&res);
+                    }
+                }
+                SeqOp::BytesCmp => {
+                    let (src, sty) = operand(1)?;
+                    let (sis, sinv, shinv, sc0, sc1, sc2, scdata) = self.seq_cached_view(src, sty);
+                    let mut req = head(sops::BYTE_BYTES_CMP);
+                    req.extend_from_slice(&[
+                        u64::from(sis),
+                        u64::from(sinv),
+                        u64::from(shinv),
+                        word(src),
+                        sc0,
+                        sc1,
+                        sc2,
+                        scdata,
+                    ]);
+                    if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &req)? {
+                        return value_of(&res);
+                    }
+                }
+                SeqOp::FindByte | SeqOp::FindEither | SeqOp::FindNotIn => {
+                    let u64_ty = Type::named("u64");
+                    let option = Type::Named("Option".into(), vec![u64_ty.clone()]);
+                    let meta = self.seq_option_meta_for(&option, &u64_ty)?;
+                    let sub = match op {
+                        SeqOp::FindByte => sops::BYTE_FIND_BYTE,
+                        SeqOp::FindEither => sops::BYTE_FIND_EITHER,
+                        _ => sops::BYTE_FIND_NOT_IN,
+                    };
+                    let mut req = head(sub);
+                    req.extend_from_slice(&meta);
+                    req.push(word(operand(1)?.0));
+                    if op != SeqOp::FindByte {
+                        req.push(word(operand(2)?.0));
+                    }
+                    if op == SeqOp::FindNotIn {
+                        req.push(word(operand(3)?.0));
+                    }
+                    if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &req)? {
+                        return self.seq_option_finish_swap(&res, meta);
+                    }
+                }
+                SeqOp::ExtendAsciiLowercase if !self.seq_is_freestanding() => {
+                    let (h, start, _) = self.seq_view(value, ty);
+                    let zero = self.zero();
+                    let _p = self.seq_elem_addr(h, start, zero, 1);
+                    let (src, src_ty) = operand(1)?;
+                    let len = self.seq_word(h, LEN);
+                    let (sh, sstart, slen) = self.seq_view(src, src_ty);
+                    let needed = self.b.ins().iadd(len, slen);
+                    let h = self.seq_reserve(h, needed, 1, receiver)?;
+                    let (h_is_seq, h_inv2, _, hc0, hc1, hc2, hcdata) = self.seq_cached_view(h, ty);
+                    let sh_inv = self.invariant_headers.contains(&sh);
+                    let scdata = self.seq_cached_word(sh, DATA);
+                    let req = vec![
+                        sops::BYTE_EXTEND_LOWER,
+                        u64::from(h_is_seq),
+                        u64::from(h_inv2),
+                        u64::from(h_inv2),
+                        u64::from(self.operands_only),
+                        word(h),
+                        hc0,
+                        hc1,
+                        hc2,
+                        hcdata,
+                        word(len),
+                        word(needed),
+                        word(sh),
+                        word(sstart),
+                        word(slen),
+                        u64::from(sh_inv),
+                        scdata,
+                        word(zero),
+                    ];
+                    if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &req)? {
+                        return value_of(&res);
+                    }
+                }
+                SeqOp::MakeAsciiLowercase { total } => {
+                    let (lo, _) = operand(1)?;
+                    let (hi, _) = operand(2)?;
+                    let mut cached: Option<[u64; 4]> = None;
+                    if !total {
+                        let mut ck = head(sops::BYTE_CHECK_MAKE_LOWER);
+                        ck.extend_from_slice(&[word(lo), word(hi)]);
+                        if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &ck)? {
+                            self.seq_guard(value_of(&res[..res.len().min(1)])?)?;
+                            if res.len() >= 5 {
+                                cached = Some([res[1], res[2], res[3], res[4]]);
+                            }
+                        }
+                    }
+                    let mut req = head(sops::BYTE_MAKE_LOWER);
+                    req.extend_from_slice(&[u64::from(total), word(lo), word(hi)]);
+                    if let Some(v) = cached {
+                        req.push(1);
+                        req.extend_from_slice(&v);
+                    } else {
+                        req.push(0);
+                    }
+                    if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &req)? {
+                        return value_of(&res);
+                    }
+                }
+                _ => {}
+            }
+        }
         let (h, start, len) = self.seq_view(value, ty);
         let zero = self.zero();
         let p = self.seq_elem_addr(h, start, zero, 1);

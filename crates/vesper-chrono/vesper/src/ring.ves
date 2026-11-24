@@ -1,0 +1,627 @@
+// Bounded always-on flight recorder (§31.3) with overwrite-oldest semantics.
+use super::wire::{
+    InoutWriteRecord,
+    ObligationRecord,
+    decode_event_header,
+    effect_inout_write,
+    effect_obligation,
+    effect_snapshot,
+    encode_inout_write,
+    encode_obligation_record,
+    header_bytes,
+    op_tag_digest,
+    reserved_effect_base,
+};
+
+pub copy struct RecorderConfig {
+    pub ring_bytes: u64,
+    pub max_records: u64,
+    pub max_payload: u64,
+    pub snapshot_slots: u64,
+    pub snapshot_image_bytes: u64,
+}
+
+pub fn small_config() -> RecorderConfig {
+    RecorderConfig {
+        ring_bytes: 65536,
+        max_records: 4096,
+        max_payload: 1024,
+        snapshot_slots: 8,
+        snapshot_image_bytes: 4096,
+    }
+}
+
+pub copy struct Slot {
+    pub pos: u64,
+    pub len: u32,
+}
+
+pub struct FlightEvent {
+    pub lamport_seq: u64,
+    pub fiber_id: u64,
+    pub time_ns: u64,
+    pub effect_id: u16,
+    pub op_tag: u16,
+    pub digest: bool,
+    pub payload: ChunkSeq[u8],
+}
+
+pub copy struct SnapshotSlot {
+    pub epoch_id: u32,
+    pub start_seq: u64,
+    pub time_ns: u64,
+    pub len: u64,
+}
+
+pub struct SnapshotImage {
+    pub epoch_id: u32,
+    pub start_lamport_seq: u64,
+    pub time_ns: u64,
+    pub image: ChunkSeq[u8],
+}
+
+pub struct FlightRecorder {
+    pub config: RecorderConfig,
+    buf: ChunkSeq[u8],
+    head: u64,
+    tail: u64,
+    slots: ChunkSeq[Slot],
+    slot_head: u64,
+    slot_len: u64,
+    pub next_seq: u64,
+    last_time_ns: u64,
+    pub evicted_records: u64,
+    pub next_obligation: u64,
+    snapshots: ChunkSeq[SnapshotSlot],
+    snapshot_buf: ChunkSeq[u8],
+    next_snapshot_slot: u64,
+    pub next_epoch: u32,
+}
+
+fn byte_at(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn slot_at(in s: Slice[Slot], i: u64) -> Slot {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => Slot {
+            pos: 0,
+            len: 0
+        },
+    }
+}
+
+fn snap_slot_at(in s: Slice[SnapshotSlot], i: u64) -> SnapshotSlot {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => SnapshotSlot {
+            epoch_id: 0,
+            start_seq: 0,
+            time_ns: 0,
+            len: 0,
+        },
+    }
+}
+
+// Pure u64 remainder for positive divisors.
+fn rem_u64(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    let mut rem: u64 = 0;
+    let mut bit: u64 = 64;
+    loop {
+        if bit == 0 {
+            break;
+        }
+        bit = wrapping_sub(bit, 1);
+        rem = wrapping_shl_u64(rem, 1) | (wrapping_shr_u64(a, wrapping_u32(bit)) & 1);
+        if rem >= b {
+            rem = wrapping_sub(rem, b);
+        }
+    }
+    rem
+}
+
+pub fn new_recorder(config: RecorderConfig) -> Result[FlightRecorder, u32] {
+    if config.max_records == 0 {
+        return Result::Err(1);
+    }
+    let min_payload: u64 = 32;
+    if config.max_payload < min_payload || config.max_payload > 4294967295 {
+        return Result::Err(1);
+    }
+    let record_max = wrapping_add(header_bytes(), config.max_payload);
+    if config.ring_bytes < record_max {
+        return Result::Err(1);
+    }
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new();
+    let mut i: u64 = 0;
+    loop {
+        if i >= config.ring_bytes {
+            break;
+        }
+        buf.push(0);
+        i = wrapping_add(i, 1);
+    }
+    let mut slots: ChunkSeq[Slot] = ChunkSeq::new();
+    let mut s: u64 = 0;
+    loop {
+        if s >= config.max_records {
+            break;
+        }
+        slots
+            .push(
+                Slot {
+                    pos: 0,
+                    len: 0
+                }
+            );
+        s = wrapping_add(s, 1);
+    }
+    let mut snaps: ChunkSeq[SnapshotSlot] = ChunkSeq::new();
+    let mut k: u64 = 0;
+    loop {
+        if k >= config.snapshot_slots {
+            break;
+        }
+        snaps
+            .push(
+                SnapshotSlot {
+                    epoch_id: 0,
+                    start_seq: 0,
+                    time_ns: 0,
+                    len: 0,
+                }
+            );
+        k = wrapping_add(k, 1);
+    }
+    let total_snap_bytes = wrapping_mul(config.snapshot_slots, config.snapshot_image_bytes);
+    let mut snap_buf: ChunkSeq[u8] = ChunkSeq::new();
+    let mut b: u64 = 0;
+    loop {
+        if b >= total_snap_bytes {
+            break;
+        }
+        snap_buf.push(0);
+        b = wrapping_add(b, 1);
+    }
+    Result::Ok(
+        FlightRecorder {
+            config: config,
+            buf: buf,
+            head: 0,
+            tail: 0,
+            slots: slots,
+            slot_head: 0,
+            slot_len: 0,
+            next_seq: 1,
+            last_time_ns: 0,
+            evicted_records: 0,
+            next_obligation: 1,
+            snapshots: snaps,
+            snapshot_buf: snap_buf,
+            next_snapshot_slot: 0,
+            next_epoch: 1,
+        }
+    )
+}
+
+pub fn retained_len(in r: FlightRecorder) -> u64 {
+    r.slot_len
+}
+
+pub fn first_retained_seq(in r: FlightRecorder) -> u64 {
+    wrapping_sub(r.next_seq, r.slot_len)
+}
+
+pub fn bytes_used(in r: FlightRecorder) -> u64 {
+    wrapping_sub(r.tail, r.head)
+}
+
+fn check_effect(effect_id: u16, op_tag: u16) -> u32 {
+    if effect_id >= reserved_effect_base() {
+        return 3;
+    }
+    if (op_tag & op_tag_digest()) != 0 {
+        return 4;
+    }
+    0
+}
+
+fn write_u16_at(inout buf: ChunkSeq[u8], off: u64, v: u16) {
+    let w = widen_u64(widen_u32(v));
+    let _ = buf.try_set(off, wrapping_u8(w & 255));
+    let _ = buf.try_set(wrapping_add(off, 1), wrapping_u8(wrapping_shr_u64(w, 8) & 255));
+}
+
+fn write_u32_at(inout buf: ChunkSeq[u8], off: u64, v: u32) {
+    let w = widen_u64(v);
+    let _ = buf.try_set(off, wrapping_u8(w & 255));
+    let _ = buf.try_set(wrapping_add(off, 1), wrapping_u8(wrapping_shr_u64(w, 8) & 255));
+    let _ = buf.try_set(wrapping_add(off, 2), wrapping_u8(wrapping_shr_u64(w, 16) & 255));
+    let _ = buf.try_set(wrapping_add(off, 3), wrapping_u8(wrapping_shr_u64(w, 24) & 255));
+}
+
+fn write_u64_at(inout buf: ChunkSeq[u8], off: u64, v: u64) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= 8 {
+            break;
+        }
+        let _ = buf
+            .try_set(
+                wrapping_add(off, i),
+                wrapping_u8(wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8))) & 255),
+            );
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn append_record(
+    inout r: FlightRecorder,
+    fiber_id: u64,
+    time_ns: u64,
+    effect_id: u16,
+    op_tag: u16,
+    in payload: Slice[u8],
+) -> Result[u64, u32] {
+    if payload.len() > r.config.max_payload {
+        return Result::Err(2);
+    }
+    if time_ns < r.last_time_ns {
+        return Result::Err(5);
+    }
+    let seq = r.next_seq;
+    if seq == 18446744073709551615 {
+        return Result::Err(6);
+    }
+    let next_seq = wrapping_add(seq, 1);
+    let len = wrapping_add(header_bytes(), payload.len());
+    let cap = r.config.ring_bytes;
+    let mut pos: u64 = 0;
+    loop {
+        if r.slot_len == 0 {
+            let rem = rem_u64(r.tail, cap);
+            let aligned = if rem == 0 {
+                r.tail
+            } else {
+                wrapping_add(r.tail, wrapping_sub(cap, rem))
+            };
+            r.head = aligned;
+            r.tail = aligned;
+        }
+        let phys = rem_u64(r.tail, cap);
+        let avail = wrapping_sub(cap, phys);
+        let gap = if avail < len {
+            avail
+        } else {
+            0
+        };
+        let need = wrapping_add(gap, len);
+        if r.slot_len < r.config.max_records
+            && wrapping_sub(cap, wrapping_sub(r.tail, r.head)) >= need {
+            pos = wrapping_add(r.tail, gap);
+            break;
+        }
+        r.slot_head = rem_u64(wrapping_add(r.slot_head, 1), r.config.max_records);
+        r.slot_len = wrapping_sub(r.slot_len, 1);
+        r.evicted_records = wrapping_add(r.evicted_records, 1);
+        if r.slot_len == 0 {
+            r.head = r.tail;
+        } else {
+            r.head = slot_at(in r.slots.as_slice(), r.slot_head).pos;
+        }
+    }
+    let phys = rem_u64(pos, cap);
+    write_u64_at(inout r.buf, phys, seq);
+    write_u64_at(inout r.buf, wrapping_add(phys, 8), fiber_id);
+    write_u64_at(inout r.buf, wrapping_add(phys, 16), time_ns);
+    write_u16_at(inout r.buf, wrapping_add(phys, 24), effect_id);
+    write_u16_at(inout r.buf, wrapping_add(phys, 26), op_tag);
+    write_u32_at(inout r.buf, wrapping_add(phys, 28), wrapping_u32(payload.len()));
+    let mut i: u64 = 0;
+    loop {
+        if i >= payload.len() {
+            break;
+        }
+        let _ = r
+            .buf
+            .try_set(
+                wrapping_add(wrapping_add(phys, header_bytes()), i),
+                byte_at(in payload, i),
+            );
+        i = wrapping_add(i, 1);
+    }
+    let push_idx = rem_u64(wrapping_add(r.slot_head, r.slot_len), r.config.max_records);
+    let _ = r
+        .slots
+        .try_set(
+            push_idx,
+            Slot {
+                pos: pos,
+                len: wrapping_u32(len),
+            },
+        );
+    r.slot_len = wrapping_add(r.slot_len, 1);
+    r.tail = wrapping_add(pos, len);
+    r.next_seq = next_seq;
+    r.last_time_ns = time_ns;
+    Result::Ok(seq)
+}
+
+pub fn record_effect(
+    inout r: FlightRecorder,
+    fiber_id: u64,
+    time_ns: u64,
+    effect_id: u16,
+    op_tag: u16,
+    in payload: Slice[u8],
+) -> Result[u64, u32] {
+    let err = check_effect(effect_id, op_tag);
+    if err != 0 {
+        return Result::Err(err);
+    }
+    append_record(inout r, fiber_id, time_ns, effect_id, op_tag, in payload)
+}
+
+pub fn record_inout_write(
+    inout r: FlightRecorder,
+    fiber_id: u64,
+    time_ns: u64,
+    place_hash: u64,
+    source_span_id: u32,
+) -> Result[u64, u32] {
+    let payload = encode_inout_write(
+        InoutWriteRecord {
+            place_hash: place_hash,
+            source_span_id: source_span_id,
+        }
+    );
+    append_record(
+        inout r,
+        fiber_id,
+        time_ns,
+        effect_inout_write(),
+        0,
+        in payload.as_slice(),
+    )
+}
+
+pub fn mint_obligation(
+    inout r: FlightRecorder,
+    fiber_id: u64,
+    time_ns: u64,
+    source_span_id: u32,
+    has_parent: bool,
+    parent: u64,
+) -> Result[u64, u32] {
+    let id = r.next_obligation;
+    if id == 18446744073709551615 {
+        return Result::Err(7);
+    }
+    if has_parent && parent >= id {
+        return Result::Err(1);
+    }
+    let (tag, aux): (u8, u64) = if has_parent {
+        (1, parent)
+    } else {
+        (0, 0)
+    };
+    let payload = encode_obligation_record(
+        ObligationRecord {
+            obligation_id: id,
+            aux: aux,
+            source_span_id: source_span_id,
+            hop_kind_tag: tag,
+        }
+    );
+    match append_record(
+        inout r,
+        fiber_id,
+        time_ns,
+        effect_obligation(),
+        0,
+        in payload.as_slice(),
+    ) {
+        Result::Ok(_) => {
+            r.next_obligation = wrapping_add(id, 1);
+            Result::Ok(id)
+        }
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+pub fn capture_snapshot(
+    inout r: FlightRecorder,
+    time_ns: u64,
+    in image: Slice[u8],
+) -> Result[u32, u32] {
+    if r.snapshots.len() == 0 || image.len() > r.config.snapshot_image_bytes {
+        return Result::Err(9);
+    }
+    let epoch = r.next_epoch;
+    if epoch == 4294967295 {
+        return Result::Err(8);
+    }
+    let mut epoch_bytes: ChunkSeq[u8] = ChunkSeq::new();
+    let ew = widen_u64(epoch);
+    epoch_bytes.push(wrapping_u8(ew & 255));
+    epoch_bytes.push(wrapping_u8(wrapping_shr_u64(ew, 8) & 255));
+    epoch_bytes.push(wrapping_u8(wrapping_shr_u64(ew, 16) & 255));
+    epoch_bytes.push(wrapping_u8(wrapping_shr_u64(ew, 24) & 255));
+    match append_record(
+        inout r,
+        0,
+        time_ns,
+        effect_snapshot(),
+        0,
+        in epoch_bytes.as_slice(),
+    ) {
+        Result::Err(e) => Result::Err(e),
+        Result::Ok(seq) => {
+            let idx = r.next_snapshot_slot;
+            let _ = r
+                .snapshots
+                .try_set(
+                    idx,
+                    SnapshotSlot {
+                        epoch_id: epoch,
+                        start_seq: seq,
+                        time_ns: time_ns,
+                        len: image.len(),
+                    },
+                );
+            let base = wrapping_mul(idx, r.config.snapshot_image_bytes);
+            let mut i: u64 = 0;
+            loop {
+                if i >= image.len() {
+                    break;
+                }
+                let _ = r.snapshot_buf.try_set(wrapping_add(base, i), byte_at(in image, i));
+                i = wrapping_add(i, 1);
+            }
+            r.next_snapshot_slot = rem_u64(wrapping_add(idx, 1), r.snapshots.len());
+            r.next_epoch = wrapping_u32(wrapping_add(widen_u64(epoch), 1));
+            Result::Ok(epoch)
+        }
+    }
+}
+
+pub fn events(in r: FlightRecorder) -> ChunkSeq[FlightEvent] {
+    let mut out: ChunkSeq[FlightEvent] = ChunkSeq::new();
+    let mut k: u64 = 0;
+    loop {
+        if k >= r.slot_len {
+            break;
+        }
+        let slot = slot_at(
+            in r.slots.as_slice(),
+            rem_u64(wrapping_add(r.slot_head, k), r.config.max_records),
+        );
+        let phys = rem_u64(slot.pos, r.config.ring_bytes);
+        let slot_len = widen_u64(slot.len);
+        let mut rec: ChunkSeq[u8] = ChunkSeq::new();
+        let mut b: u64 = 0;
+        loop {
+            if b >= slot_len {
+                break;
+            }
+            rec.push(byte_at(in r.buf.as_slice(), wrapping_add(phys, b)));
+            b = wrapping_add(b, 1);
+        }
+        match decode_event_header(in rec.as_slice()) {
+            Option::Some(h) => {
+                let mut payload: ChunkSeq[u8] = ChunkSeq::new();
+                let p_off = header_bytes();
+                let mut i: u64 = 0;
+                loop {
+                    if i >= widen_u64(h.payload_byte_len) {
+                        break;
+                    }
+                    payload.push(byte_at(in rec.as_slice(), wrapping_add(p_off, i)));
+                    i = wrapping_add(i, 1);
+                }
+                let digest_bit = op_tag_digest();
+                out
+                    .push(
+                        FlightEvent {
+                            lamport_seq: h.lamport_seq,
+                            fiber_id: h.fiber_id,
+                            time_ns: h.ipt_tsc_anchor,
+                            effect_id: h.effect_id,
+                            op_tag: h.op_tag
+                                & wrapping_u16(wrapping_sub(65535, widen_u64(digest_bit))),
+                            digest: (h.op_tag & digest_bit) != 0,
+                            payload: payload,
+                        }
+                    );
+            }
+            Option::None => {}
+        }
+        k = wrapping_add(k, 1);
+    }
+    out
+}
+
+pub fn snapshots(in r: FlightRecorder) -> ChunkSeq[SnapshotImage] {
+    let mut order: ChunkSeq[u64] = ChunkSeq::new();
+    let mut i: u64 = 0;
+    loop {
+        if i >= r.snapshots.len() {
+            break;
+        }
+        let s = snap_slot_at(in r.snapshots.as_slice(), i);
+        if s.epoch_id != 0 {
+            order.push(i);
+        }
+        i = wrapping_add(i, 1);
+    }
+    let n = order.len();
+    let mut a: u64 = 1;
+    loop {
+        if a >= n {
+            break;
+        }
+        let mut b = a;
+        loop {
+            if b == 0 {
+                break;
+            }
+            let prev_idx = match order.try_get(wrapping_sub(b, 1)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            let cur_idx = match order.try_get(b) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            let prev_epoch = snap_slot_at(in r.snapshots.as_slice(), prev_idx).epoch_id;
+            let cur_epoch = snap_slot_at(in r.snapshots.as_slice(), cur_idx).epoch_id;
+            if prev_epoch <= cur_epoch {
+                break;
+            }
+            let _ = order.try_set(wrapping_sub(b, 1), cur_idx);
+            let _ = order.try_set(b, prev_idx);
+            b = wrapping_sub(b, 1);
+        }
+        a = wrapping_add(a, 1);
+    }
+    let mut out: ChunkSeq[SnapshotImage] = ChunkSeq::new();
+    let mut k: u64 = 0;
+    loop {
+        if k >= n {
+            break;
+        }
+        let idx = match order.try_get(k) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let s = snap_slot_at(in r.snapshots.as_slice(), idx);
+        let base = wrapping_mul(idx, r.config.snapshot_image_bytes);
+        let mut img: ChunkSeq[u8] = ChunkSeq::new();
+        let mut j: u64 = 0;
+        loop {
+            if j >= s.len {
+                break;
+            }
+            img.push(byte_at(in r.snapshot_buf.as_slice(), wrapping_add(base, j)));
+            j = wrapping_add(j, 1);
+        }
+        out
+            .push(
+                SnapshotImage {
+                    epoch_id: s.epoch_id,
+                    start_lamport_seq: s.start_seq,
+                    time_ns: s.time_ns,
+                    image: img,
+                }
+            );
+        k = wrapping_add(k, 1);
+    }
+    out
+}

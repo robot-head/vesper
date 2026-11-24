@@ -557,13 +557,17 @@ fn routing_runs_in_vesper() {
     assert_eq!(prints(&bare, &["semver", "--help"]), 1);
     assert_eq!(prints(&bare, &["highlight", "--help"]), 1);
     assert_eq!(prints(&bare, &["shot", "--help"]), 1);
+    // `vesper fmt` (part 2): its layer prints once, after every file.
+    assert_eq!(prints(&bare, &["fmt", "--help"]), 1);
+    assert_eq!(prints(&bare, &["fmt", "--bogus"]), 1);
+    assert_eq!(prints(&bare, &["fmt", "input"]), 1);
     assert_eq!(prints(&bare, &["ebpf", "--help"]), 1);
     assert_eq!(prints(&bare, &["forge", "--help"]), 1);
     assert_eq!(prints(&bare, &["graph", "--help"]), 1);
     assert_eq!(prints(&bare, &["verify", "--refute"]), 1);
+    assert_eq!(prints(&bare, &["lint", "--help"]), 1);
     // Handed back: the Rust CLI prints.
     assert_eq!(prints(&bare, &["verify", "--help"]), 0);
-    assert_eq!(prints(&bare, &["fmt", "--help"]), 0);
     assert_eq!(prints(&bare, &["check", "--fuel"]), 0);
     assert_eq!(prints(&bare, &["é"]), 0);
     let _ = std::fs::remove_dir_all(&dir);
@@ -606,6 +610,282 @@ fn full_stdout_fails_as_in_rust() {
         assert_eq!(both[1].status.code(), Some(101), "{args:?}");
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The `vesper fmt` fixture (part 2): canonical, noncanonical, damaged,
+/// oversized and non-UTF-8 sources, skipped and symlinked directories, and
+/// on Unix names JSON must escape and a name that is not UTF-8.
+fn fmt_fixture(dir: &Path) {
+    let _ = std::fs::remove_dir_all(dir);
+    let write = |rel: &str, bytes: &[u8]| {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, bytes).unwrap();
+    };
+    let messy: &[u8] = b"fn main() -> i64 {   1 }\n";
+    let canonical: &[u8] = b"fn main() -> i64 {\n    1\n}\n";
+    write("a.ves", messy);
+    write("b.ves", canonical);
+    write("bad.ves", b"fn x( ");
+    write("rec.ves", b"fn a() -> i64 {   1 }\nfn b( \n");
+    write("big.ves", &vec![b' '; 256 * 1024 + 1]);
+    write("edge.ves", &vec![b'\n'; 256 * 1024]);
+    write("latin.ves", b"fn main() -> i64 { 1 } // \xe9\n");
+    write("..ves", messy);
+    write(".ves", messy);
+    write("a.ves.bak", messy);
+    write("notes.txt", messy);
+    write("sub/c.ves", messy);
+    write("sub/b.ves", canonical);
+    write("sub/deep/d.ves", messy);
+    write("sub/a/e.ves", messy);
+    write("sub/x.txt", b"x\n");
+    write(".hidden/h.ves", messy);
+    write("target/t.ves", messy);
+    write("bazel-out/z.ves", messy);
+    write("targets/y.ves", messy);
+    std::fs::create_dir_all(dir.join("empty")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+        std::os::unix::fs::symlink("a.ves", dir.join("link.ves")).unwrap();
+        std::os::unix::fs::symlink("sub", dir.join("dirlink")).unwrap();
+        std::os::unix::fs::symlink("missing", dir.join("dangling.ves")).unwrap();
+        write("names/q\"\\\t\u{1}é.ves", messy);
+        std::fs::write(
+            dir.join("names")
+                .join(std::ffi::OsStr::from_bytes(b"\xff.ves")),
+            messy,
+        )
+        .unwrap();
+        write("ro.ves", messy);
+        std::fs::set_permissions(dir.join("ro.ves"), std::fs::Permissions::from_mode(0o444))
+            .unwrap();
+    }
+}
+
+fn fmt_vectors() -> Vec<Vec<&'static str>> {
+    let mut v: Vec<Vec<&str>> = vec![
+        vec![],
+        vec!["--check"],
+        vec!["--json"],
+        vec!["--check", "--json"],
+        vec!["--recovery"],
+        vec!["--recovery", "--check", "--json"],
+        vec!["."],
+        vec!["./"],
+        vec![".", "sub"],
+        vec!["sub"],
+        vec!["sub/"],
+        vec!["sub//", "--json"],
+        vec!["sub", "a.ves", "--check"],
+        vec!["sub", "--check", "--json"],
+        vec!["a.ves"],
+        vec!["a.ves", "--check"],
+        vec!["--json", "a.ves"],
+        vec!["--json", "--check", "a.ves"],
+        vec!["--recovery", "--json", "a.ves"],
+        vec!["a.ves", "a.ves"],
+        vec!["a.ves", "b.ves", "--json"],
+        vec!["b.ves"],
+        vec!["b.ves", "--json"],
+        vec!["bad.ves"],
+        vec!["bad.ves", "--json"],
+        vec!["bad.ves", "a.ves"],
+        vec!["rec.ves"],
+        vec!["rec.ves", "--recovery"],
+        vec!["rec.ves", "--recovery", "--json"],
+        vec!["rec.ves", "--recovery", "--check"],
+        vec!["big.ves"],
+        vec!["big.ves", "--json"],
+        vec!["edge.ves", "--json"],
+        vec!["latin.ves", "--json"],
+        vec!["notes.txt"],
+        vec!["..ves", "--json"],
+        vec!["missing.ves"],
+        vec!["missing.ves", "--json"],
+        vec!["missing.ves", "b.ves", "--json"],
+        vec!["nodir/x.ves"],
+        vec!["empty"],
+        vec!["empty", "--json"],
+        vec!["target"],
+        vec![".hidden", "--check"],
+        vec!["--bogus"],
+        vec!["--bogus", "--json"],
+        vec!["-"],
+        vec!["-", "--json"],
+        vec!["--", "--check"],
+        vec!["--", "-h"],
+        vec!["--check", "--", "a.ves"],
+        vec!["--help"],
+        vec!["-h"],
+        vec!["--bogus", "-h"],
+        vec!["a.ves", "--help"],
+        vec!["--json", "--", "--help"],
+        vec!["--", "--json", "a.ves"],
+        vec![""],
+    ];
+    if cfg!(unix) {
+        v.extend([
+            vec!["link.ves"],
+            vec!["link.ves", "--json"],
+            vec!["dirlink"],
+            vec!["dirlink", "--json"],
+            vec!["dangling.ves"],
+            vec!["names"],
+            vec!["names", "--json"],
+            vec!["names", "--check", "--json"],
+            vec!["ro.ves"],
+            vec!["ro.ves", "--json"],
+        ]);
+    }
+    v
+}
+
+/// Every file under `dir` with its contents and, on Unix, its mode;
+/// symbolic links as their targets.
+fn fmt_snapshot(dir: &Path) -> BTreeMap<String, (Vec<u8>, u32)> {
+    let mut files = BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            let meta = std::fs::symlink_metadata(&p).unwrap();
+            let rel = p.strip_prefix(dir).unwrap().display().to_string();
+            #[cfg(unix)]
+            let mode = {
+                use std::os::unix::fs::PermissionsExt;
+                meta.permissions().mode()
+            };
+            #[cfg(not(unix))]
+            let mode = u32::from(meta.permissions().readonly());
+            if meta.file_type().is_symlink() {
+                let target = std::fs::read_link(&p).unwrap();
+                files.insert(rel, (target.display().to_string().into_bytes(), 0));
+            } else if meta.is_dir() {
+                files.insert(format!("{rel}/"), (vec![], mode));
+                stack.push(p);
+            } else {
+                files.insert(rel, (std::fs::read(&p).unwrap(), mode));
+            }
+        }
+    }
+    files
+}
+
+/// `vesper fmt` runs in Vesper (part 2): every option, the single-file and
+/// workspace reports, the walk's order and skips, and every refusal agree
+/// with the default CLI on exit status, stdout, stderr and the files left.
+#[test]
+fn fmt_matches_the_default_compiler() {
+    let default = default_compiler();
+    let hybrid = hybrid();
+    let root = scratch("vesper-cli-fmt");
+    let mut mismatches = vec![];
+    let (mut d_time, mut h_time) = (Duration::ZERO, Duration::ZERO);
+    let vectors = fmt_vectors();
+    for args in &vectors {
+        let mut runs = vec![];
+        for (name, compiler) in [("default", &default), ("hybrid", &hybrid)] {
+            let dir = root.join(name);
+            fmt_fixture(&dir);
+            let start = Instant::now();
+            let output = Command::new(compiler)
+                .current_dir(&dir)
+                .arg("fmt")
+                .args(args)
+                .env("RUST_BACKTRACE", "0")
+                .env_remove("VESPER_HYBRID_STATS")
+                .output()
+                .unwrap();
+            let time = start.elapsed();
+            runs.push((output, fmt_snapshot(&dir), time));
+        }
+        let (d, h) = (&runs[0], &runs[1]);
+        d_time += d.2;
+        h_time += h.2;
+        let mut diff = vec![];
+        if d.0.status.code() != h.0.status.code() {
+            diff.push("exit status");
+        }
+        if d.0.stdout != h.0.stdout {
+            diff.push("stdout");
+        }
+        if d.0.stderr != h.0.stderr {
+            diff.push("stderr");
+        }
+        if d.1 != h.1 {
+            diff.push("files");
+        }
+        if !diff.is_empty() {
+            mismatches.push(format!(
+                "fmt {args:?}: {} (default {:?} {:?} {:?}, hybrid {:?} {:?} {:?})",
+                diff.join(", "),
+                d.0.status,
+                String::from_utf8_lossy(&d.0.stdout),
+                String::from_utf8_lossy(&d.0.stderr),
+                h.0.status,
+                String::from_utf8_lossy(&h.0.stdout),
+                String::from_utf8_lossy(&h.0.stderr),
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    eprintln!(
+        "fmt differential: {} argument vectors; default {:.2} s, hybrid {:.2} s ({:.3}x); {} differ",
+        vectors.len(),
+        d_time.as_secs_f64(),
+        h_time.as_secs_f64(),
+        h_time.as_secs_f64() / d_time.as_secs_f64(),
+        mismatches.len()
+    );
+    assert!(
+        mismatches.is_empty(),
+        "the Vesper fmt layer differs from the default CLI on {} vectors:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
+}
+
+/// The workspace walk's 200,000-entry bound holds while a directory is
+/// read (Linux, where creating the entries is quick): exactly the limit
+/// walks, one more is the bounded-walk error, on both compilers.
+#[cfg(target_os = "linux")]
+#[test]
+fn fmt_walk_limit_matches_the_default_compiler() {
+    let default = default_compiler();
+    let hybrid = hybrid();
+    let root = scratch("vesper-cli-fmt-limit");
+    let big = root.join("big");
+    std::fs::create_dir_all(&big).unwrap();
+    for i in 0..200_000 {
+        std::fs::File::create(big.join(format!("{i:06}.txt"))).unwrap();
+    }
+    let run = |compiler: &Path| {
+        Command::new(compiler)
+            .current_dir(&root)
+            .args(["fmt", "--json", "big"])
+            .env_remove("VESPER_HYBRID_STATS")
+            .output()
+            .unwrap()
+    };
+    for extra in [None, Some("zz.ves")] {
+        if let Some(name) = extra {
+            std::fs::write(big.join(name), b"fn main() -> i64 {   1 }\n").unwrap();
+        }
+        let (d, h) = (run(&default), run(&hybrid));
+        assert_eq!(d.status.code(), h.status.code(), "{extra:?}");
+        assert_eq!(d.stdout, h.stdout, "{extra:?}");
+        assert_eq!(d.stderr, h.stderr, "{extra:?}");
+        let stderr = String::from_utf8_lossy(&h.stderr);
+        assert_eq!(
+            stderr.contains("fmt visited more than 200000 directory entries"),
+            extra.is_some(),
+            "{extra:?}: {stderr}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 fn seed_ebpf_tree(dir: &Path) {
@@ -961,6 +1241,130 @@ fn graph_runs_in_vesper() {
         .current_dir(&dir)
         .env("VESPER_HYBRID_STATS", "1")
         .args(["graph", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let prints: u64 = stderr
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("vesper-hybrid: the command layers printed ")
+                .and_then(|s| s.strip_suffix(" times from Vesper"))
+                .and_then(|n| n.parse().ok())
+        })
+        .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
+    assert_eq!(prints, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn seed_lint_tree(dir: &Path) {
+    std::fs::write(
+        dir.join("Loom.toml"),
+        "[package]\nname = \"@acme/lint_test\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("src/clean.ves"),
+        "pub fn add(a: i64, b: i64) -> i64 {\n    wrapping_add(a, b)\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/unused_eff.ves"),
+        "pub fn pure_but_eff() -> i64 eff [Fail[i64]] {\n    42\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("deny.toml"),
+        "[package]\nname = \"@acme/lint_test\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[lints]\nunused_effect = \"deny\"\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn lint_matches_the_default_compiler() {
+    let default = default_compiler();
+    let hybrid = hybrid();
+    let root = scratch("vesper-cli-lint");
+    let cases: &[&[&str]] = &[
+        &["lint", "--help"],
+        &["lint", "-h"],
+        &["lint", "--unknown"],
+        &["lint", "--unknown", "--json"],
+        &["lint", "--config"],
+        &["lint", "--config", "--json"],
+        &["lint", "--config", "a", "--config", "b"],
+        &["lint", "src/clean.ves", "src/unused_eff.ves"],
+        &["lint", "missing.ves"],
+        &["lint", "missing.ves", "--json"],
+        &["lint", "src/clean.ves"],
+        &["lint", "src/clean.ves", "--json"],
+        &["lint", "src/unused_eff.ves"],
+        &["lint", "src/unused_eff.ves", "--config", "deny.toml"],
+        &[
+            "lint",
+            "src/unused_eff.ves",
+            "--config",
+            "deny.toml",
+            "--json",
+        ],
+        &["lint", "src/unused_eff.ves", "--fix"],
+        &["lint"],
+        &["lint", "--json"],
+    ];
+    let mut diffs = vec![];
+    for argv in cases {
+        let mut results = vec![];
+        let work = root.join("work");
+        for compiler in [&default, &hybrid] {
+            let _ = std::fs::remove_dir_all(&work);
+            std::fs::create_dir_all(&work).unwrap();
+            seed_lint_tree(&work);
+            let out = Command::new(compiler)
+                .current_dir(&work)
+                .env_remove("VESPER_HYBRID_STATS")
+                .args(*argv)
+                .output()
+                .unwrap();
+            results.push((out, std::fs::read(work.join("src/unused_eff.ves")).unwrap()));
+        }
+        let (d, d_file) = &results[0];
+        let (h, h_file) = &results[1];
+        if d.status.code() != h.status.code()
+            || d.stdout != h.stdout
+            || d.stderr != h.stderr
+            || d_file != h_file
+        {
+            diffs.push(format!(
+                "{argv:?}: status {:?} vs {:?}, stdout {:?} vs {:?}, stderr {:?} vs {:?}, file {}",
+                d.status.code(),
+                h.status.code(),
+                String::from_utf8_lossy(&d.stdout),
+                String::from_utf8_lossy(&h.stdout),
+                String::from_utf8_lossy(&d.stderr),
+                String::from_utf8_lossy(&h.stderr),
+                d_file == h_file,
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        diffs.is_empty(),
+        "Vesper `lint` differs from default CLI on {} cases:\n{}",
+        diffs.len(),
+        diffs.join("\n")
+    );
+}
+
+#[test]
+fn lint_runs_in_vesper() {
+    let hybrid = hybrid();
+    let dir = scratch("vesper-cli-lint-runs");
+    seed_lint_tree(&dir);
+    let out = Command::new(&hybrid)
+        .current_dir(&dir)
+        .env("VESPER_HYBRID_STATS", "1")
+        .args(["lint", "--help"])
         .output()
         .unwrap();
     assert!(out.status.success());

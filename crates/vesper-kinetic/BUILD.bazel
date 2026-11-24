@@ -64,8 +64,8 @@ filegroup(
         (
             "lbvh",
             "lbvh",
-            "if q > p {",
-            "if q > inc(p) {",
+            "(c & INDEX_MASK) > p\n",
+            "(c & INDEX_MASK) > inc(p)\n",
         ),
         (
             "sap",
@@ -82,8 +82,8 @@ filegroup(
         (
             "bignum",
             "bignum",
-            "widen_u64(g32(in a.mag.as_slice(), 0)) | (widen_u64(g32(in a.mag.as_slice(), 1)) << 32)",
-            "widen_u64(g32(in a.mag.as_slice(), 0))",
+            "    g64(in a.mag.as_slice(), 0)\n",
+            "    g64(in a.mag.as_slice(), 0) & 0xffffffff\n",
         ),
         (
             "gjk",

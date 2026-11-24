@@ -40,6 +40,15 @@ use self::cose::{
     sig_structure as cose_sig_structure_impl,
     sign1_parse as cose_sign1_parse_impl
 };
+use self::gpa::{
+    check_access as gpa_check_access_impl,
+    covers as gpa_covers_impl,
+    first_gap as gpa_first_gap_impl,
+    first_overlap as gpa_first_overlap_impl,
+    insert as gpa_insert_impl,
+    pages as gpa_pages_impl,
+    remove as gpa_remove_impl
+};
 use self::sgx::parse as sgx_parse_impl;
 use self::snp::{
     parse as snp_parse_impl,
@@ -242,4 +251,33 @@ pub fn corim_validate_cca(now_sec: u64, in w: Slice[u64], in b: Slice[u8])
 pub fn cca_appraise(in w: Slice[u64], in b: Slice[u8], inout w_out: Slice[u64])
     -> Unit eff [Fail[AtErr]] {
     cca_appraise_impl(in w, in b, inout w_out)
+}
+
+// GPA IntervalSet (module gpa).
+pub fn gpa_first_overlap(in iv: Slice[u64], count: u64, s: u64, e: u64) -> u64 {
+    gpa_first_overlap_impl(in iv, count, s, e)
+}
+
+pub fn gpa_covers(in iv: Slice[u64], count: u64, s: u64, e: u64) -> u64 {
+    gpa_covers_impl(in iv, count, s, e)
+}
+
+pub fn gpa_first_gap(in iv: Slice[u64], count: u64, s: u64, e: u64) -> u64 {
+    gpa_first_gap_impl(in iv, count, s, e)
+}
+
+pub fn gpa_insert(inout iv: Slice[u64], count: u64, s: u64, e: u64) -> u64 {
+    gpa_insert_impl(inout iv, count, s, e)
+}
+
+pub fn gpa_remove(inout iv: Slice[u64], count: u64, s: u64, e: u64) -> u64 {
+    gpa_remove_impl(inout iv, count, s, e)
+}
+
+pub fn gpa_pages(in iv: Slice[u64], count: u64) -> u64 {
+    gpa_pages_impl(in iv, count)
+}
+
+pub fn gpa_check_access(in iv: Slice[u64], count: u64, gpa: u64, len: u64) -> u64 {
+    gpa_check_access_impl(in iv, count, gpa, len)
 }

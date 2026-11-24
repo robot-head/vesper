@@ -83,9 +83,6 @@ impl<M: Module> Codegen<'_, '_, M> {
             0
         } else {
             let t = scalar(ty, &[]).ok()?;
-            if t == types::I128 {
-                return None;
-            }
             crate::codegen_swap::ty_code(t)
         };
         Some([u64::from(layout.size), u64::from(layout.aggregate()), t])

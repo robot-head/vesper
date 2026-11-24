@@ -1,0 +1,194 @@
+// `vesper lint`: CLI option parsing, `--help`, and `invalid` JSON reporting
+// in Vesper, delegating package discovery, policy loading, checked lint
+// analysis, and bounded atomic fix replacement (`src/lint_commands.rs`) to
+// `HybridCommands::hc_lint_run`.
+use @vesper/driver::{
+    Args,
+    args_count,
+    eq
+};
+use super::{
+    arg,
+    byte_at,
+    print,
+    fail,
+    stdout_stream
+};
+
+pub fn run_lint(in args: Args) -> i64 eff [Ffi[HybridCommands]] {
+    let n = args_count(in args);
+    let mut json = false;
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a_buf = arg(in args, i);
+        if eq(in a_buf.as_slice(), in "--json") {
+            json = true;
+            break;
+        }
+        i = wrapping_add(i, 1);
+    }
+    let mut has_path = false;
+    let mut path: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut has_config = false;
+    let mut config: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut fix = false;
+    let mut semver_safe = false;
+    i = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a_buf = arg(in args, i);
+        let a = a_buf.as_slice();
+        if eq(in a, in "--help") || eq(in a, in "-h") {
+            print(
+                stdout_stream(),
+                in "Usage: vesper lint [FILE|DIR] [--json] [--fix] [--semver-safe] [--config PATH]\n\nCheck actual resolved effects and supported inout field accesses.\nUnused effects (L0102) may be removed only after complete candidate reparse/recheck.\nProjection narrowing (L0101) is diagnostic-only: caller/signature changes need review.\nWith no path (or a directory), lint every .ves source of the package: the nearest\nLoom.toml at or above the directory (else the directory itself); hidden, target/, bazel-*\nand nested-package directories are skipped, symlinks are not followed and any failed file fails.\n--semver-safe requires --fix and validates exported supported interface compatibility.\nHandlers, closures, indirect/open-row/recursive calls remain conservative.\nInputs: regular UTF-8 files <=256 KiB; token/nesting/work budgets also apply.\nThe nearest package Loom.toml supplies policy; --config overrides discovery.\nAllow suppresses diagnostics and fixes; warn succeeds; remaining deny exits nonzero.\nFuture warn/allow lints are reported unavailable; future deny/plugins fail closed.\nNo arena escape, mode-relaxation, FIP, secret/Cancel or plugin-pack analysis.\n"
+                    .as_bytes()
+            );
+            return 0;
+        } else if eq(in a, in "--json") {} else if eq(in a, in "--fix") {
+            fix = true;
+        } else if eq(in a, in "--semver-safe") {
+            semver_safe = true;
+        } else if eq(in a, in "--config") {
+            if has_config {
+                return emit_invalid(
+                    json,
+                    in "--config may be specified only once".as_bytes(),
+                    has_config,
+                    in config.as_slice()
+                );
+            }
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return emit_invalid(
+                    json,
+                    in "--config requires a path".as_bytes(),
+                    has_config,
+                    in config.as_slice()
+                );
+            }
+            let v_buf = arg(in args, i);
+            let v = v_buf.as_slice();
+            if v.len() > 4096 {
+                return emit_invalid(
+                    json,
+                    in "lint config path exceeds 4096 bytes".as_bytes(),
+                    has_config,
+                    in config.as_slice()
+                );
+            }
+            if v.len() != 0 && byte_at(in v, 0) == 45 {
+                return emit_invalid(
+                    json,
+                    in "--config requires a path".as_bytes(),
+                    has_config,
+                    in config.as_slice()
+                );
+            }
+            has_config = true;
+            config.extend(in v);
+        } else if a.len() != 0 && byte_at(in a, 0) == 45 {
+            let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            err.extend(in "unknown lint option '".as_bytes());
+            err.extend(in a);
+            err.push(39);
+            return emit_invalid(json, in err.as_slice(), has_config, in config.as_slice());
+        } else {
+            if has_path {
+                return emit_invalid(
+                    json,
+                    in "lint accepts one source file or package directory".as_bytes(),
+                    has_config,
+                    in config.as_slice()
+                );
+            }
+            has_path = true;
+            path.extend(in a);
+        }
+        i = wrapping_add(i, 1);
+    }
+    let err_len = HybridCommands::hc_lint_run(
+        has_path,
+        in path.as_slice(),
+        fix,
+        semver_safe,
+        json,
+        has_config,
+        in config.as_slice()
+    );
+    if err_len == 0 {
+        return 0;
+    }
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    err.resize(err_len, 0);
+    let actual = HybridCommands::hc_lint_err(inout err.as_slice_mut());
+    if actual > err.len() {
+        err.resize(actual, 0);
+        let _got = HybridCommands::hc_lint_err(inout err.as_slice_mut());
+    } else {
+        err.truncate(actual);
+    }
+    fail(in err.as_slice())
+}
+
+fn emit_invalid(json: bool, in error: Slice[u8], has_config: bool, in config: Slice[u8])
+    -> i64 eff [Ffi[HybridCommands]] {
+    if json {
+        let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        line.extend(in "{\"config\":".as_bytes());
+        if has_config {
+            push_json_str(inout line, in config);
+        } else {
+            line.extend(in "null".as_bytes());
+        }
+        line.extend(in ",\"error\":".as_bytes());
+        push_json_str(inout line, in error);
+        line.extend(in ",\"schema_version\":1,\"status\":\"invalid\"}\n".as_bytes());
+        print(stdout_stream(), in line.as_slice());
+    }
+    fail(in error)
+}
+
+fn push_json_str(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+    out.push(34);
+    for i in 0..s.len() {
+        let b = byte_at(in s, i);
+        if b == 34 {
+            out.extend(in "\\\"".as_bytes());
+        } else if b == 92 {
+            out.extend(in "\\\\".as_bytes());
+        } else if b == 8 {
+            out.extend(in "\\b".as_bytes());
+        } else if b == 12 {
+            out.extend(in "\\f".as_bytes());
+        } else if b == 10 {
+            out.extend(in "\\n".as_bytes());
+        } else if b == 13 {
+            out.extend(in "\\r".as_bytes());
+        } else if b == 9 {
+            out.extend(in "\\t".as_bytes());
+        } else if b < 32 {
+            out.extend(in "\\u00".as_bytes());
+            let hi = b >> 4;
+            let lo = b & 15;
+            out.push(hex_digit(hi));
+            out.push(hex_digit(lo));
+        } else {
+            out.push(b);
+        }
+    }
+    out.push(34);
+}
+
+fn hex_digit(d: u8) -> u8 {
+    if d < 10 {
+        wrapping_add(48, d)
+    } else {
+        wrapping_add(97, wrapping_sub(d, 10))
+    }
+}

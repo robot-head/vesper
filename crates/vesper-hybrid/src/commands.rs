@@ -13,7 +13,9 @@ thread_local! {
     static LAST_EBPF_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LAST_FORGE_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LAST_GRAPH_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static LAST_LINT_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LAST_DOC_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static FMT_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 /// Prints of the Vesper command layers (`hc_print` and `hc_help`);
@@ -167,6 +169,74 @@ pub mod host {
         #[cfg(not(unix))]
         let ok = meta.is_file();
         u32::from(ok)
+    }
+
+    /// One file of `vesper fmt` (`fmt_commands::format_file`: the bounded
+    /// read, the formatter and the checked atomic replace). Flag 1 is
+    /// `--check`, 2 `--recovery`. The status is 0 unchanged, 1 formatted,
+    /// 2 needs formatting or 3 failed (`hc_fmt_error` has the error);
+    /// `stats` gets changed, input bytes, output bytes, whether there is an
+    /// edit count, and the edit count.
+    ///
+    /// # Safety
+    /// `path` is a lent byte slice and `stats` a lent writable slice of
+    /// `slen` words.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hc_fmt_file(
+        path: *const u8,
+        len: usize,
+        flags: u32,
+        stats: *mut u64,
+        slen: usize,
+    ) -> u32 {
+        // SAFETY: lent for the call; the bytes came from the command line
+        // or from a directory listing.
+        let path = unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(bytes(path, len)) };
+        let out: &mut [u64] = if slen == 0 || stats.is_null() {
+            &mut []
+        } else {
+            // SAFETY: as documented.
+            unsafe { std::slice::from_raw_parts_mut(stats, slen) }
+        };
+        out.iter_mut().for_each(|w| *w = 0);
+        let report =
+            match crate::fmt_commands::format_file(Path::new(path), flags & 1 != 0, flags & 2 != 0)
+            {
+                Ok(report) => report,
+                Err(error) => {
+                    super::FMT_ERROR.with(|e| *e.borrow_mut() = error);
+                    return 3;
+                }
+            };
+        let word = |key: &str| report[key].as_u64();
+        let values = [
+            u64::from(report["changed"].as_bool().unwrap_or(false)),
+            word("input_bytes").unwrap_or(0),
+            word("output_bytes").unwrap_or(0),
+            u64::from(word("edits").is_some()),
+            word("edits").unwrap_or(0),
+        ];
+        for (slot, v) in out.iter_mut().zip(values) {
+            *slot = v;
+        }
+        match report["status"].as_str() {
+            Some("formatted") => 1,
+            Some("needs_format") => 2,
+            _ => 0,
+        }
+    }
+
+    /// The error of the last failed `hc_fmt_file`.
+    ///
+    /// # Safety
+    /// `buf` is a lent writable slice.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hc_fmt_error(buf: *mut u8, len: usize) -> i64 {
+        super::FMT_ERROR.with(|e| {
+            let e = e.borrow();
+            // SAFETY: lent for the call.
+            unsafe { copy_out(Some(e.as_bytes()), buf, len) }
+        })
     }
 
     /// Run `vesper ebpf check` on `path`, printing verification/stack-bound
@@ -1133,6 +1203,419 @@ pub mod host {
         Ok(())
     }
 
+    /// Run `vesper lint` after CLI option parsing, returning `0` on success or
+    /// `err.len()` (`> 0`) on error with `LAST_LINT_ERR` set.
+    ///
+    /// # Safety
+    /// `path` and `config` are lent byte slices.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hc_lint_run(
+        has_path: bool,
+        path: *const u8,
+        path_len: usize,
+        fix: bool,
+        semver_safe: bool,
+        json: bool,
+        has_config: bool,
+        config: *const u8,
+        config_len: usize,
+    ) -> u64 {
+        // SAFETY: lent for the call.
+        let path = has_path.then(|| {
+            Path::new(unsafe {
+                std::ffi::OsStr::from_encoded_bytes_unchecked(bytes(path, path_len))
+            })
+            .to_path_buf()
+        });
+        let config = has_config.then(|| {
+            Path::new(unsafe {
+                std::ffi::OsStr::from_encoded_bytes_unchecked(bytes(config, config_len))
+            })
+            .to_path_buf()
+        });
+        match lint_run_impl(path, fix, semver_safe, json, config) {
+            Ok(()) => 0,
+            Err(err) => {
+                let bytes = err.into_bytes();
+                let n = bytes.len() as u64;
+                super::LAST_LINT_ERR.with(|cell| *cell.borrow_mut() = bytes);
+                n
+            }
+        }
+    }
+
+    /// Copy `LAST_LINT_ERR` into `buf` (copy-out protocol).
+    ///
+    /// # Safety
+    /// `buf` is a lent writable slice of `len` bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hc_lint_err(buf: *mut u8, len: usize) -> u64 {
+        super::LAST_LINT_ERR.with(|cell| {
+            let data = cell.borrow();
+            if data.len() <= len && !buf.is_null() && !data.is_empty() {
+                // SAFETY: `buf` holds `len >= data.len()` bytes.
+                unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len()) };
+            }
+            data.len() as u64
+        })
+    }
+
+    fn lint_run_impl(
+        path_opt: Option<std::path::PathBuf>,
+        fix: bool,
+        semver_safe: bool,
+        json: bool,
+        config_opt: Option<std::path::PathBuf>,
+    ) -> Result<(), String> {
+        use std::fs::{self, OpenOptions};
+        use std::io::{Read, Write};
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use vesper::tooling::doc::sources::{PackageSources, SourceLimits, discover, package_root};
+        use vesper::tooling::lint::{
+            ConfigProvenance, SourceReport, prepare_source, prepare_source_with_policy,
+        };
+        use vesper_lint::policy::{Policy, PolicyLimits};
+
+        const MAX_BYTES: usize = 262_144;
+
+        fn invalid(json: bool, error: String, config_label: Option<String>) -> Result<(), String> {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "status": "invalid",
+                        "error": error,
+                        "config": config_label
+                    })
+                );
+            }
+            Err(error)
+        }
+        fn read_source(path: &Path) -> Result<(String, fs::Permissions), String> {
+            let metadata =
+                fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            if !metadata.is_file() {
+                return Err("lint input must be a regular file without final symlinks".into());
+            }
+            let mut options = OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                options.custom_flags(0x0020_0000);
+            }
+            let file = options.open(path).map_err(|e| e.to_string())?;
+            let metadata = file.metadata().map_err(|e| e.to_string())?;
+            if !metadata.is_file() || metadata.len() > MAX_BYTES as u64 {
+                return Err("lint input is not a bounded regular file (256 KiB)".into());
+            }
+            let mut bytes = vec![];
+            file.take(MAX_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            if bytes.len() > MAX_BYTES {
+                return Err("lint source exceeds 256 KiB".into());
+            }
+            Ok((
+                String::from_utf8(bytes).map_err(|_| "lint input must be UTF-8")?,
+                metadata.permissions(),
+            ))
+        }
+        fn load_policy(path: &Path) -> Result<(Policy, ConfigProvenance), String> {
+            const MAX_CONFIG_BYTES: u64 = 65_536;
+            if path.as_os_str().len() > 4096 {
+                return Err("lint config path exceeds 4096 bytes".into());
+            }
+            if !fs::symlink_metadata(path)
+                .map_err(|e| e.to_string())?
+                .is_file()
+            {
+                return Err("lint config must be a regular file without final symlinks".into());
+            }
+            let mut options = OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                options.custom_flags(0x0020_0000);
+            }
+            let file = options.open(path).map_err(|e| e.to_string())?;
+            let metadata = file.metadata().map_err(|e| e.to_string())?;
+            if !metadata.is_file() || metadata.len() > MAX_CONFIG_BYTES {
+                return Err("lint config must be a bounded regular file (64 KiB)".into());
+            }
+            let mut bytes = vec![];
+            file.take(MAX_CONFIG_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            if bytes.len() as u64 > MAX_CONFIG_BYTES {
+                return Err("lint config exceeds 64 KiB".into());
+            }
+            let source = std::str::from_utf8(&bytes).map_err(|_| "lint config must be UTF-8")?;
+            let policy =
+                Policy::parse(source, PolicyLimits::default()).map_err(|e| e.to_string())?;
+            let absolute = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .map_err(|e| e.to_string())?
+                    .join(path)
+            };
+            let provenance = ConfigProvenance::Explicit {
+                path: absolute.display().to_string(),
+                bytes: bytes.len(),
+                blake3: blake3::hash(&bytes).to_hex().to_string(),
+            };
+            Ok((policy, provenance))
+        }
+        struct Staging(Option<PathBuf>);
+        impl Staging {
+            fn publish(&mut self, destination: &Path) -> Result<(), String> {
+                let path = self
+                    .0
+                    .as_deref()
+                    .ok_or("staging path ownership already transferred")?;
+                fs::rename(path, destination).map_err(|e| e.to_string())?;
+                self.0 = None;
+                Ok(())
+            }
+        }
+        impl Drop for Staging {
+            fn drop(&mut self) {
+                if let Some(path) = &self.0 {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+        fn replace_source(
+            path: &Path,
+            original: &str,
+            candidate: &str,
+            permissions: fs::Permissions,
+        ) -> Result<(), String> {
+            if permissions.readonly() {
+                return Err("lint refuses to replace a readonly source".into());
+            }
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            let temporary_path = parent.join(format!(
+                ".vesper-lint-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary_path).map_err(|e| e.to_string())?;
+            let mut temporary = Staging(Some(temporary_path));
+            file.write_all(candidate.as_bytes())
+                .map_err(|e| e.to_string())?;
+            file.set_permissions(permissions)
+                .map_err(|e| e.to_string())?;
+            file.sync_all().map_err(|e| e.to_string())?;
+            drop(file);
+            let (current, _) = read_source(path)?;
+            if current != original {
+                return Err(
+                    "source changed while lint was validating; original path left untouched".into(),
+                );
+            }
+            temporary.publish(path)
+        }
+        fn print_report(prefix: &str, report: &SourceReport) {
+            for finding in &report.diagnostics {
+                println!(
+                    "{prefix}{:?} {} {}:{}..{}: {}",
+                    finding.severity,
+                    finding.finding.code,
+                    finding.finding.function,
+                    finding.finding.span.start,
+                    finding.finding.span.end,
+                    finding.finding.message
+                );
+            }
+            for rule in &report.policy.unavailable {
+                println!(
+                    "{prefix}Unavailable lint {} ({:?}); not analyzed",
+                    rule.lint.as_str(),
+                    rule.severity
+                );
+            }
+            println!(
+                "{prefix}lint: {} diagnostic(s), {} conservative skip(s), changed={}, remaining deny={}",
+                report.diagnostics.len(),
+                report.skipped.len(),
+                report.changed,
+                report.outcome.remaining_denied
+            );
+        }
+
+        let mut config_label = config_opt.as_ref().map(|p| p.display().to_string());
+        let mut explicit_config = config_opt.is_some();
+        let (mut policy, mut provenance) = if let Some(config) = config_opt {
+            match load_policy(&config) {
+                Ok(v) => v,
+                Err(error) => return invalid(json, error, config_label),
+            }
+        } else {
+            (Policy::default(), ConfigProvenance::Default)
+        };
+        let package_start = match &path_opt {
+            None => Some(PathBuf::from(".")),
+            Some(path) if fs::metadata(path).is_ok_and(|m| m.is_dir()) => Some(path.clone()),
+            Some(_) => None,
+        };
+        if !explicit_config {
+            let start = package_start.as_deref().unwrap_or_else(|| {
+                path_opt
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."))
+            });
+            let manifest = match package_root(start, SourceLimits::default()) {
+                Ok((_, manifest)) => manifest,
+                Err(error) => return invalid(json, error, config_label),
+            };
+            if let Some(manifest) = manifest {
+                config_label = Some(manifest.display().to_string());
+                let (loaded_policy, loaded_prov) = match load_policy(&manifest) {
+                    Ok(value) => value,
+                    Err(error) => return invalid(json, error, config_label),
+                };
+                if let ConfigProvenance::Explicit {
+                    path,
+                    bytes,
+                    blake3,
+                } = loaded_prov
+                {
+                    provenance = ConfigProvenance::Discovered {
+                        path,
+                        bytes,
+                        blake3,
+                    };
+                }
+                policy = loaded_policy;
+                explicit_config = true;
+            }
+        }
+
+        let lint_one = |path: &Path| -> Result<(SourceReport, String), String> {
+            let (source, permissions) = read_source(path)?;
+            let prepared = if explicit_config {
+                prepare_source_with_policy(&source, fix, semver_safe, &policy, provenance.clone())?
+            } else {
+                prepare_source(&source, fix, semver_safe)?
+            };
+            let output =
+                serde_json::to_string_pretty(&prepared.report).map_err(|e| e.to_string())?;
+            if let Some(candidate) = prepared.candidate {
+                replace_source(path, &source, &candidate, permissions)?;
+            }
+            Ok((prepared.report, output))
+        };
+
+        if let Some(start) = package_start {
+            let package: PackageSources = match discover(&start, SourceLimits::default()) {
+                Ok(p) => p,
+                Err(error) => return invalid(json, error, config_label),
+            };
+            let mut files = Vec::new();
+            let mut denied = 0usize;
+            let mut failed = 0usize;
+            for file in &package.files {
+                let name = package.display(file);
+                match lint_one(file) {
+                    Ok((report, _)) => {
+                        if report.status == "denied" {
+                            denied += 1;
+                        }
+                        if !json {
+                            print_report(&format!("{name}: "), &report);
+                        }
+                        files.push(serde_json::json!({"path": name, "report": report}));
+                    }
+                    Err(error) => {
+                        failed += 1;
+                        if !json {
+                            println!("{name}: error: {error}");
+                        }
+                        files.push(serde_json::json!({"path": name, "error": error}));
+                    }
+                }
+            }
+            let status = if failed > 0 {
+                "failed"
+            } else if denied > 0 {
+                "denied"
+            } else {
+                "passed"
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "schema_version": 1,
+                        "status": status,
+                        "root": package.root.display().to_string(),
+                        "manifest": package.manifest.as_ref().map(|m| m.display().to_string()),
+                        "files": files,
+                    }))
+                    .map_err(|e| e.to_string())?
+                );
+            } else {
+                println!(
+                    "lint: {} file(s) under {}, {failed} failed, {denied} denied",
+                    package.files.len(),
+                    package.root.display()
+                );
+            }
+            return match status {
+                "passed" => Ok(()),
+                "denied" => {
+                    Err("lint policy denied remaining findings or unavailable analysis".into())
+                }
+                _ => Err(format!("lint failed on {failed} source file(s)")),
+            };
+        }
+
+        let path = path_opt.expect("explicit file path");
+        match lint_one(&path) {
+            Ok((report, output)) => {
+                if json {
+                    println!("{output}");
+                } else {
+                    print_report("", &report);
+                }
+                if report.status == "denied" {
+                    Err("lint policy denied remaining findings or unavailable analysis".into())
+                } else {
+                    Ok(())
+                }
+            }
+            Err(error) => invalid(json, error, config_label),
+        }
+    }
+
     fn truncate_doc_error(mut message: String) -> String {
         if message.len() > 4096 {
             let mut end = 4096;
@@ -1153,8 +1636,6 @@ pub mod host {
             }
             args.push(String::from_utf8_lossy(slice).into_owned());
         }
-        // `pack_args` appends a trailing NUL after each argument, so `split`
-        // yields one final empty element when `raw` is non-empty.
         if raw.ends_with(&[0]) {
             args.pop();
         }

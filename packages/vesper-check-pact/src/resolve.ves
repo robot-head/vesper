@@ -137,7 +137,7 @@ fn push_packed_outcome(inout out: ChunkSeq[u64], in r: ResolveOutcome) {
     out.extend(in p.as_slice());
 }
 
-fn trait_at(in d: Decls, i: u64) -> TraitRow {
+pub fn trait_at(in d: Decls, i: u64) -> TraitRow {
     match d.traits.try_get(i) {
         Option::Some(v) => v,
         Option::None => TraitRow {
@@ -154,7 +154,7 @@ fn trait_at(in d: Decls, i: u64) -> TraitRow {
     }
 }
 
-fn conf_at(in d: Decls, i: u64) -> Conf {
+pub fn conf_at(in d: Decls, i: u64) -> Conf {
     match d.confs.try_get(i) {
         Option::Some(v) => v,
         Option::None => Conf {
@@ -208,7 +208,7 @@ fn par_at(in d: Decls, i: u64) -> Par {
     }
 }
 
-fn gen_at(in gs: ChunkSeq[Gen], i: u64) -> Gen {
+pub fn gen_at(in gs: ChunkSeq[Gen], i: u64) -> Gen {
     match gs.try_get(i) {
         Option::Some(v) => v,
         Option::None => Gen {
@@ -219,7 +219,7 @@ fn gen_at(in gs: ChunkSeq[Gen], i: u64) -> Gen {
     }
 }
 
-fn tref_at(in d: Decls, i: u64) -> TRef {
+pub fn tref_at(in d: Decls, i: u64) -> TRef {
     match d.trefs.try_get(i) {
         Option::Some(v) => v,
         Option::None => TRef {
@@ -326,7 +326,7 @@ fn trait_has_method(in d: Decls, tr_idx: u64, method: u32) -> bool {
     false
 }
 
-fn find_trait_idx(in d: Decls, name: u32) -> u64 {
+pub fn find_trait_idx(in d: Decls, name: u32) -> u64 {
     for i in 0..d.traits.len() {
         if trait_at(in d, i).name == name {
             return i;
@@ -370,7 +370,7 @@ fn put_impl_key(in t: Types, in names: Names, in d: Decls, c: Conf, inout out: C
     key_segment(in t, in names, c.self_ty, inout out);
 }
 
-fn generated_name_for_conf(
+pub fn generated_name_for_conf(
     in t: Types,
     in names: Names,
     in d: Decls,

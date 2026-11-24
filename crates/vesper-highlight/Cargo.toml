@@ -11,13 +11,11 @@ build = "build.rs"
 # vesper-highlight-seed, same library name), instead of this package; see
 # "Crates the compiler links" in docs/maintenance/porting-a-crate.md.
 #
-# This package builds the same Rust by default. Under `vesper-port`,
-# build.rs links the Vesper port in vesper/ (the Tier 0 lexical classes)
-# and sets cfg(vesper_port), and `highlight_tier0` and
-# `highlight_tier0_tokens` forward to it (self-hosting SH1 lane 11, #1154).
+# This package builds the Vesper port in vesper/ (the Tier 0 lexical
+# classes, self-hosting SH1 lane 11, #1154) and sets cfg(vesper_port)
+# unconditionally, forwarding `highlight_tier0` and `highlight_tier0_tokens`
+# to it (falling back to Rust only past the front-end ceiling).
 # Palettes, Tier 1, the renderers, `shot` and the wasm32 module stay Rust.
-# Rust stays the default until the port matches it in function and
-# performance (docs/parallel-results/self-host-fmt-highlight.md).
 
 [dependencies]
 vesper-syntax = { path = "../vesper-syntax" }
@@ -33,7 +31,7 @@ rustybuzz = { version = "=0.20.1", optional = true }
 tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", "png-format"], optional = true }
 ttf-parser = { version = "=0.25.1", optional = true }
 
-vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+vesper-port-abi = { path = "../vesper-port-abi" }
 
 [dev-dependencies]
 # The frozen Rust build, the reference of tests/differential.rs and
@@ -48,7 +46,7 @@ vesper-bench = { path = "../vesper-bench" }
 vesper-port-harness = { path = "../vesper-port-harness" }
 
 [features]
-vesper-port = ["dep:vesper-port-abi"]
+vesper-port = []
 # Deliberately wrong Vesper builds, one edit per ported area: the port test
 # runs must fail (port/test-port.sh asserts which tests do).
 vesper-port-divergent = ["vesper-port"]
@@ -56,7 +54,6 @@ shot = ["dep:base64", "dep:blake3", "dep:png", "dep:rustybuzz", "dep:tiny-skia",
 
 [[example]]
 name = "abba"
-required-features = ["vesper-port"]
 
 [lints.rust]
 # cfg(vesper_port) is set by build.rs under `vesper-port`; the seed package

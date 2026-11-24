@@ -9,6 +9,7 @@ use self::bignum::{
     Big,
     big_abs,
     big_add,
+    big_add_assign,
     big_add_u64,
     big_bit0,
     big_bits,
@@ -17,6 +18,7 @@ use self::bignum::{
     big_div,
     big_div_small,
     big_div_u64,
+    big_div_u64_assign,
     big_from_limbs,
     big_i64,
     big_is_neg,
@@ -28,11 +30,14 @@ use self::bignum::{
     big_mul_i64,
     big_mul_small,
     big_neg,
+    big_neg_assign,
     big_shl,
     big_shr,
+    big_shr_trunc_assign,
     big_store,
     big_sqrt,
     big_sub,
+    big_sub_assign,
     big_u64,
     big_zero
 };
@@ -317,14 +322,9 @@ fn fixed_abs(e: Exact, f: u64) -> Big {
 
 // `a * b / 2^f`, truncated toward zero.
 fn mul_fix(in a: Big, in b: Big, f: u64) -> Big {
-    let p = big_mul(in a, in b);
-    if big_is_neg(in p) {
-        let m = big_neg(in p);
-        let s = big_shr(in m, f);
-        big_neg(in s)
-    } else {
-        big_shr(in p, f)
-    }
+    let mut p = big_mul(in a, in b);
+    big_shr_trunc_assign(inout p, f);
+    p
 }
 
 // ----- constants ---------------------------------------------------------------
@@ -347,11 +347,11 @@ fn arc_inv(k: u64, f: u64, hyperbolic: bool) -> Big {
         }
         let t = big_div_u64(in term, inc(wrapping_mul(2, n)));
         if hyperbolic || (n & 1) == 0 {
-            sum = big_add(in sum, in t);
+            big_add_assign(inout sum, in t);
         } else {
-            sum = big_sub(in sum, in t);
+            big_sub_assign(inout sum, in t);
         }
-        term = big_div_u64(in term, k2);
+        big_div_u64_assign(inout term, k2);
         n = inc(n);
     }
     big_shr(in sum, GUARD)
@@ -502,12 +502,12 @@ fn exp_eval(inout c: Slice[u32], e: Exact, k: i64, p: u64) -> Approx {
     let mut term = unit;
     let mut n: u64 = 1;
     loop {
-        let m = mul_fix(in term, in r, f);
-        term = big_div_u64(in m, n);
+        term = mul_fix(in term, in r, f);
+        big_div_u64_assign(inout term, n);
         if big_is_zero(in term) {
             break;
         }
-        sum = big_add(in sum, in term);
+        big_add_assign(inout sum, in term);
         n = inc(n);
     }
     Approx {
@@ -569,7 +569,7 @@ fn log_eval(inout c: Slice[u32], top: u64, den_shift: u64, e: i64, p: u64) -> Ap
             break;
         }
         let t = big_div_u64(in power, inc(wrapping_mul(2, n)));
-        sum = big_add(in sum, in t);
+        big_add_assign(inout sum, in t);
         n = inc(n);
     }
     let log_m = big_shl(in sum, 1);
@@ -635,18 +635,18 @@ fn series_terms(in r: Big, in r2: Big, f: u64, cosine: bool, inout out: Big) -> 
     let mut n: u64 = 1;
     let mut terms: u64 = 0;
     loop {
-        let m = mul_fix(in term, in r2, f);
+        term = mul_fix(in term, in r2, f);
         let d = if cosine {
             wrapping_mul(wrapping_sub(wrapping_mul(2, n), 1), wrapping_mul(2, n))
         } else {
             wrapping_mul(wrapping_mul(2, n), inc(wrapping_mul(2, n)))
         };
-        let q = big_div_u64(in m, d);
-        term = big_neg(in q);
+        big_div_u64_assign(inout term, d);
+        big_neg_assign(inout term);
         if big_is_zero(in term) {
             break;
         }
-        acc = big_add(in acc, in term);
+        big_add_assign(inout acc, in term);
         n = inc(n);
         terms = inc(terms);
     }
@@ -773,9 +773,9 @@ fn atan_le_one(in u0: Big, f: u64, inout out: Big) -> u64 {
         }
         let t = big_div_u64(in power, inc(wrapping_mul(2, n)));
         if (n & 1) == 1 {
-            sum = big_sub(in sum, in t);
+            big_sub_assign(inout sum, in t);
         } else {
-            sum = big_add(in sum, in t);
+            big_add_assign(inout sum, in t);
         }
         n = inc(n);
     }

@@ -1,0 +1,627 @@
+// Shared Cranelift emission helpers for @vesper/codegen-seq-emit.
+
+use @vesper/cranelift::{
+    Block,
+    DataId,
+    FuncId,
+    SigId,
+    Ty,
+    Value,
+    append_block_param,
+    append_block_params_for_function_params,
+    block_of_word,
+    block_param,
+    builder_new,
+    call_arg,
+    call_conv_default,
+    call_memmove,
+    call_memset,
+    call_result,
+    call_result_value,
+    create_block,
+    create_stack_slot,
+    data_align,
+    data_define,
+    data_new,
+    data_zeroinit,
+    declare_data,
+    declare_function,
+    define_data,
+    define_function,
+    import_data,
+    import_function,
+    ins_band_imm,
+    ins_bitcast,
+    ins_brif0,
+    ins_bswap,
+    ins_call,
+    ins_iadd,
+    ins_iadd_imm,
+    ins_icmp,
+    ins_icmp_imm,
+    ins_iconst,
+    ins_imul_imm,
+    ins_ireduce,
+    ins_ishl_imm,
+    ins_istore8,
+    ins_istore32,
+    ins_jump,
+    ins_jump0,
+    ins_load,
+    ins_return1,
+    ins_sextend,
+    ins_sshr_imm,
+    ins_stack_addr,
+    ins_store,
+    ins_symbol_value,
+    ins_uextend,
+    ins_uload8,
+    ins_uload32,
+    inst_result,
+    linkage_import,
+    linkage_local,
+    mem_can_move,
+    mem_readonly,
+    mem_trusted,
+    module_freestanding,
+    module_get_data,
+    module_jit,
+    module_kind,
+    module_pointer_type,
+    seal_all_blocks,
+    seal_block,
+    sig_new,
+    sig_param,
+    sig_return,
+    switch_to_block,
+    ty_i128,
+    ty_i16,
+    ty_i32,
+    ty_i64,
+    ty_i8,
+    ty_of_word,
+    vals1,
+    vals2,
+    value_of_word,
+    value_type,
+    cc_eq,
+    cc_ne,
+    cc_ugt,
+    cc_ult
+};
+
+pub const PLAIN: u32 = 0;
+pub const LEN: i32 = 0;
+pub const CAP: i32 = 8;
+pub const DATA: i32 = 16;
+pub const NO_VALUE_WORD: u64 = 18446744073709551615;
+
+pub copy struct ElemDesc {
+    pub flags: u64,
+    pub size_or_ty: u64,
+    pub stride: i64,
+}
+
+pub fn elem_from_call(call: u64, base: u64) -> ElemDesc eff [Ffi[Cranelift]] {
+    ElemDesc {
+        flags: call_arg(call, base),
+        size_or_ty: call_arg(call, wrapping_add(base, 1)),
+        stride: wrapping_i64(call_arg(call, wrapping_add(base, 2))),
+    }
+}
+
+pub fn elem_is_agg(e: ElemDesc) -> bool {
+    (e.flags & 1) != 0
+}
+pub fn elem_is_signed(e: ElemDesc) -> bool {
+    (e.flags & 2) != 0
+}
+pub fn elem_is_wide(e: ElemDesc) -> bool {
+    (e.flags & 4) != 0
+}
+pub fn elem_is_f32(e: ElemDesc) -> bool {
+    (e.flags & 8) != 0
+}
+pub fn elem_is_f64(e: ElemDesc) -> bool {
+    (e.flags & 16) != 0
+}
+pub fn elem_bits(e: ElemDesc) -> u64 {
+    (e.flags >> 8) & 255
+}
+pub fn elem_size(e: ElemDesc) -> u32 {
+    if elem_is_agg(e) {
+        wrapping_u32(e.size_or_ty)
+    } else if elem_is_wide(e) {
+        16
+    } else if elem_is_f32(e) {
+        4
+    } else {
+        let bits = elem_bits(e);
+        if bits == 8 {
+            1
+        } else if bits == 16 {
+            2
+        } else if bits == 32 {
+            4
+        } else {
+            8
+        }
+    }
+}
+
+pub fn opt_val(w: u64) -> Option[Value] {
+    if w == NO_VALUE_WORD {
+        None
+    } else {
+        Some(value_of_word(w))
+    }
+}
+
+pub fn at_val(in s: Slice[Value], i: u64) -> Value {
+    match s.try_get(i) {
+        Some(v) => v,
+        None => value_of_word(0),
+    }
+}
+
+pub fn zero(inout b: Builder) -> Value eff [Ffi[Cranelift]] {
+    ins_iconst(inout b, ty_i64(), 0)
+}
+
+pub fn alloc_uninit(inout b: Builder, in m: Module, size: u32) -> Value eff [Ffi[Cranelift]] {
+    let sz = if size < 8 {
+        8
+    } else {
+        size
+    };
+    let slot = create_stack_slot(inout b, sz, 3);
+    ins_stack_addr(inout b, module_pointer_type(in m), slot, 0)
+}
+
+pub fn alloc(inout b: Builder, in m: Module, size: u32) -> Value eff [Ffi[Cranelift]] {
+    let sz = if size < 8 {
+        8
+    } else {
+        size
+    };
+    let slot = create_stack_slot(inout b, sz, 3);
+    let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+    let mut off: u32 = 0;
+    loop {
+        if off >= sz {
+            break;
+        }
+        let z = zero(inout b);
+        ins_store(inout b, PLAIN, z, ptr, wrapping_i32(widen_u64(off)));
+        off = wrapping_add(off, 8);
+    }
+    ptr
+}
+
+pub fn copy_bytes(inout b: Builder, from: Value, to: Value, size: u32) eff [Ffi[Cranelift]] {
+    let mut off: u32 = 0;
+    loop {
+        if off >= size {
+            break;
+        }
+        let i = wrapping_i32(widen_u64(off));
+        let v = ins_load(inout b, ty_i64(), PLAIN, from, i);
+        ins_store(inout b, PLAIN, v, to, i);
+        off = wrapping_add(off, 8);
+    }
+}
+
+pub fn coerce(inout b: Builder, v: Value, e: ElemDesc, optimize: bool)
+    -> Value eff [Ffi[Cranelift]] {
+    let bits = elem_bits(e);
+    if bits == 0 {
+        return v;
+    }
+    let lane = value_type(inout b, v);
+    if elem_is_wide(e) && lane.code == ty_i64().code {
+        return if elem_is_signed(e) {
+            ins_sextend(inout b, ty_i128(), v)
+        } else {
+            ins_uextend(inout b, ty_i128(), v)
+        };
+    }
+    if !elem_is_wide(e) && lane.code == ty_i128().code {
+        let low = ins_ireduce(inout b, ty_i64(), v);
+        return coerce(inout b, low, e, optimize);
+    }
+    if bits < 64 && lane.code == ty_i64().code {
+        if optimize {
+            let narrow = if bits <= 8 {
+                ty_i8()
+            } else if bits == 16 {
+                ty_i16()
+            } else {
+                ty_i32()
+            };
+            let low = ins_ireduce(inout b, narrow, v);
+            return if elem_is_signed(e) {
+                ins_sextend(inout b, ty_i64(), low)
+            } else {
+                ins_uextend(inout b, ty_i64(), low)
+            };
+        }
+        if !elem_is_signed(e) {
+            let mask = if bits == 1 {
+                1
+            } else if bits == 8 {
+                255
+            } else if bits == 16 {
+                65535
+            } else {
+                4294967295
+            };
+            return ins_band_imm(inout b, v, mask);
+        }
+        let up = wrapping_i64(wrapping_sub(64, bits));
+        let high = ins_ishl_imm(inout b, v, up);
+        return ins_sshr_imm(inout b, high, up);
+    }
+    v
+}
+
+pub fn invariant_word(inout b: Builder, ptr: Value, offset: i32) -> Value eff [Ffi[Cranelift]] {
+    let flags = mem_trusted() | mem_readonly() | mem_can_move();
+    ins_load(inout b, ty_i64(), flags, ptr, offset)
+}
+
+pub fn seq_word(inout b: Builder, ptr: Value, offset: i32, invariant: bool)
+    -> Value eff [Ffi[Cranelift]] {
+    if invariant {
+        invariant_word(inout b, ptr, offset)
+    } else {
+        ins_load(inout b, ty_i64(), PLAIN, ptr, offset)
+    }
+}
+
+pub fn seq_word_or_cached(
+    inout b: Builder,
+    ptr: Value,
+    offset: i32,
+    invariant: bool,
+    cached: u64,
+) -> Value eff [Ffi[Cranelift]] {
+    match opt_val(cached) {
+        Some(v) => v,
+        None => seq_word(inout b, ptr, offset, invariant),
+    }
+}
+
+pub fn seq_set_word(inout b: Builder, ptr: Value, offset: i32, val: Value) eff [Ffi[Cranelift]] {
+    ins_store(inout b, PLAIN, val, ptr, offset);
+}
+
+pub fn seq_view_cached(
+    inout b: Builder,
+    receiver: Value,
+    is_seq: bool,
+    invariant: bool,
+    c0: u64,
+    c1: u64,
+    c2: u64,
+) -> (Value, Value, Value) eff [Ffi[Cranelift]] {
+    if is_seq {
+        let len = seq_word_or_cached(inout b, receiver, LEN, invariant, c2);
+        let z = zero(inout b);
+        (receiver, z, len)
+    } else {
+        let h = seq_word_or_cached(inout b, receiver, 0, invariant, c0);
+        let start = seq_word_or_cached(inout b, receiver, 8, invariant, c1);
+        let len = seq_word_or_cached(inout b, receiver, 16, invariant, c2);
+        (h, start, len)
+    }
+}
+
+pub fn seq_elem_addr(
+    inout b: Builder,
+    handle: Value,
+    start: Value,
+    i: Value,
+    stride: i64,
+    invariant: bool,
+    cached_data: u64,
+) -> Value eff [Ffi[Cranelift]] {
+    let data = seq_word_or_cached(inout b, handle, DATA, invariant, cached_data);
+    if invariant {
+        let first = ins_imul_imm(inout b, start, stride);
+        let base = ins_iadd(inout b, data, first);
+        let offset = ins_imul_imm(inout b, i, stride);
+        return ins_iadd(inout b, base, offset);
+    }
+    let at = ins_iadd(inout b, start, i);
+    let offset = ins_imul_imm(inout b, at, stride);
+    ins_iadd(inout b, data, offset)
+}
+
+pub fn seq_load_elem(inout b: Builder, in m: Module, addr: Value, e: ElemDesc, optimize: bool)
+    -> Value eff [Ffi[Cranelift]] {
+    if elem_is_agg(e) {
+        let sz = elem_size(e);
+        let copy = if optimize {
+            alloc_uninit(inout b, in m, sz)
+        } else {
+            alloc(inout b, in m, sz)
+        };
+        copy_bytes(inout b, addr, copy, sz);
+        return copy;
+    }
+    if e.stride == 1 {
+        ins_uload8(inout b, ty_i64(), PLAIN, addr, 0)
+    } else if e.stride == 4 {
+        ins_uload32(inout b, PLAIN, addr, 0)
+    } else {
+        ins_load(inout b, ty_of_word(e.size_or_ty), PLAIN, addr, 0)
+    }
+}
+
+pub fn seq_elem_for_store(inout b: Builder, in m: Module, addr: Value, e: ElemDesc, optimize: bool)
+    -> Value eff [Ffi[Cranelift]] {
+    if optimize && elem_is_agg(e) {
+        return addr;
+    }
+    seq_load_elem(inout b, in m, addr, e, optimize)
+}
+
+pub fn seq_store_elem(inout b: Builder, addr: Value, raw: Value, e: ElemDesc, optimize: bool) eff [
+    Ffi[Cranelift]
+] {
+    if elem_is_agg(e) {
+        copy_bytes(inout b, raw, addr, elem_size(e));
+        return;
+    }
+    let v = coerce(inout b, raw, e, optimize);
+    if e.stride == 1 {
+        ins_istore8(inout b, PLAIN, v, addr, 0);
+    } else if e.stride == 4 {
+        ins_istore32(inout b, PLAIN, v, addr, 0);
+    } else {
+        ins_store(inout b, PLAIN, v, addr, 0);
+    }
+}
+
+pub fn seq_slice_value(inout b: Builder, in m: Module, h: Value, start: Value, len: Value)
+    -> Value eff [Ffi[Cranelift]] {
+    let ptr = alloc(inout b, in m, 24);
+    seq_set_word(inout b, ptr, 0, h);
+    seq_set_word(inout b, ptr, 8, start);
+    seq_set_word(inout b, ptr, 16, len);
+    ptr
+}
+
+pub fn seq_store_value(inout b: Builder, ptr: Value, raw: Value, e: ElemDesc, optimize: bool) eff [
+    Ffi[Cranelift]
+] {
+    if elem_is_agg(e) {
+        copy_bytes(inout b, raw, ptr, elem_size(e));
+    } else {
+        let v = coerce(inout b, raw, e, optimize);
+        ins_store(inout b, PLAIN, v, ptr, 0);
+    }
+}
+
+pub fn seq_option_begin(
+    inout b: Builder,
+    in m: Module,
+    present: Value,
+    opt_meta: u64,
+    some_tag: i64,
+    none_tag: i64,
+    optimize: bool,
+) -> (Value, Block, Block) eff [Ffi[Cranelift]] {
+    let scalar = (opt_meta >> 32) != 0;
+    let opt_size = wrapping_u32(opt_meta & 0xffffffff);
+    if scalar {
+        let none = create_block(inout b);
+        let some = create_block(inout b);
+        let done = create_block(inout b);
+        append_block_param(inout b, done, ty_i64());
+        append_block_param(inout b, done, ty_i64());
+        ins_brif0(inout b, present, some, none);
+        switch_to_block(inout b, none);
+        let ntag = ins_iconst(inout b, ty_i64(), none_tag);
+        let z = zero(inout b);
+        let jargs = vals2(ntag, z);
+        ins_jump(inout b, done, in jargs.as_slice());
+        switch_to_block(inout b, some);
+        let _ = some_tag;
+        return (value_of_word(0), some, done);
+    }
+    let out = if optimize {
+        alloc_uninit(inout b, in m, opt_size)
+    } else {
+        alloc(inout b, in m, opt_size)
+    };
+    let none = create_block(inout b);
+    let some = create_block(inout b);
+    let done = create_block(inout b);
+    ins_brif0(inout b, present, some, none);
+    switch_to_block(inout b, none);
+    let ntag = ins_iconst(inout b, ty_i64(), none_tag);
+    seq_set_word(inout b, out, 0, ntag);
+    if optimize {
+        let mut off: u32 = 8;
+        loop {
+            if off >= opt_size {
+                break;
+            }
+            let z = zero(inout b);
+            seq_set_word(inout b, out, wrapping_i32(widen_u64(off)), z);
+            off = wrapping_add(off, 8);
+        }
+    }
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, some);
+    let _ = some_tag;
+    (out, some, done)
+}
+
+pub fn seq_option_finish(
+    inout b: Builder,
+    out: Value,
+    done: Block,
+    value: Value,
+    e: ElemDesc,
+    opt_meta: u64,
+    some_tag: i64,
+    payload_off: u32,
+    optimize: bool,
+) -> Value eff [Ffi[Cranelift]] {
+    let scalar = (opt_meta >> 32) != 0;
+    let opt_size = wrapping_u32(opt_meta & 0xffffffff);
+    if scalar {
+        let vt = value_type(inout b, value);
+        let v = if vt.code != ty_i64().code {
+            ins_uextend(inout b, ty_i64(), value)
+        } else {
+            value
+        };
+        let stag = ins_iconst(inout b, ty_i64(), some_tag);
+        let jargs = vals2(stag, v);
+        ins_jump(inout b, done, in jargs.as_slice());
+        switch_to_block(inout b, done);
+        return value_of_word(0);
+    }
+    let stag = ins_iconst(inout b, ty_i64(), some_tag);
+    seq_set_word(inout b, out, 0, stag);
+    if optimize {
+        let end = if elem_is_f32(e) {
+            payload_off
+        } else {
+            wrapping_add(payload_off, elem_size(e))
+        };
+        let mut off: u32 = 8;
+        loop {
+            if off >= opt_size {
+                break;
+            }
+            if off < payload_off || off >= end {
+                let z = zero(inout b);
+                seq_set_word(inout b, out, wrapping_i32(widen_u64(off)), z);
+            }
+            off = wrapping_add(off, 8);
+        }
+    }
+    let slot = ins_iadd_imm(inout b, out, wrapping_i64(widen_u64(payload_off)));
+    seq_store_value(inout b, slot, value, e, optimize);
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, done);
+    out
+}
+
+pub fn seq_option_answer(
+    call: u64,
+    inout b: Builder,
+    out: Value,
+    done: Block,
+    opt_meta: u64,
+) eff [Ffi[Cranelift]] {
+    if (opt_meta >> 32) != 0 {
+        call_result(call, 0);
+        call_result_value(call, block_param(inout b, done, 0));
+        call_result_value(call, block_param(inout b, done, 1));
+    } else {
+        call_result_value(call, out);
+    }
+}
+
+pub fn seq_copy(inout b: Builder, dst: Value, src: Value, bytes: Value) eff [Ffi[Cranelift]] {
+    let head = create_block(inout b);
+    let body = create_block(inout b);
+    let done = create_block(inout b);
+    append_block_param(inout b, head, ty_i64());
+    let z = zero(inout b);
+    let zargs = vals1(z);
+    ins_jump(inout b, head, in zargs.as_slice());
+    switch_to_block(inout b, head);
+    let k = block_param(inout b, head, 0);
+    let more = ins_icmp(inout b, cc_ult(), k, bytes);
+    ins_brif0(inout b, more, body, done);
+    switch_to_block(inout b, body);
+    let from = ins_iadd(inout b, src, k);
+    let byte = ins_uload8(inout b, ty_i64(), PLAIN, from, 0);
+    let to = ins_iadd(inout b, dst, k);
+    ins_istore8(inout b, PLAIN, byte, to, 0);
+    let next = ins_iadd_imm(inout b, k, 1);
+    let nargs = vals1(next);
+    ins_jump(inout b, head, in nargs.as_slice());
+    switch_to_block(inout b, done);
+}
+
+pub fn seq_set_len_if(inout b: Builder, h: Value, changed: Value, len: Value) eff [Ffi[Cranelift]] {
+    let store = create_block(inout b);
+    let done = create_block(inout b);
+    ins_brif0(inout b, changed, store, done);
+    switch_to_block(inout b, store);
+    seq_set_word(inout b, h, LEN, len);
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, done);
+}
+
+pub fn seq_has_libc(in m: Module) -> bool eff [Ffi[Cranelift]] {
+    module_kind(in m) != module_freestanding()
+}
+
+pub fn seq_copy_run(inout b: Builder, in m: Module, dst: Value, src: Value, bytes: Value) eff [
+    Ffi[Cranelift]
+] {
+    if !seq_has_libc(in m) {
+        seq_copy(inout b, dst, src, bytes);
+        return;
+    }
+    let short = create_block(inout b);
+    let long = create_block(inout b);
+    let done = create_block(inout b);
+    let small = ins_icmp_imm(inout b, cc_ult(), bytes, 16);
+    ins_brif0(inout b, small, short, long);
+    switch_to_block(inout b, short);
+    seq_copy(inout b, dst, src, bytes);
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, long);
+    call_memmove(inout b, in m, dst, src, bytes);
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, done);
+}
+
+pub fn seq_move(inout b: Builder, in m: Module, dst: Value, src: Value, bytes: Value) eff [
+    Ffi[Cranelift]
+] {
+    if seq_has_libc(in m) {
+        call_memmove(inout b, in m, dst, src, bytes);
+    } else {
+        seq_copy(inout b, dst, src, bytes);
+    }
+}
+
+pub fn sig_i64(inout m: Module, params: u64, has_ret: bool) -> SigId eff [Ffi[Cranelift]] {
+    let s = sig_new(inout m, call_conv_default());
+    for _ in 0..params {
+        sig_param(inout m, s, ty_i64());
+    }
+    if has_ret {
+        sig_return(inout m, s, ty_i64());
+    }
+    s
+}
+
+pub fn runtime_call(
+    inout b: Builder,
+    inout m: Module,
+    in name: Str,
+    in args: Slice[u32],
+) -> Value eff [Ffi[Cranelift]] {
+    let jit = module_kind(in m) == module_jit();
+    let s = sig_i64(inout m, args.len(), true);
+    let lk = if jit {
+        linkage_import()
+    } else {
+        linkage_local()
+    };
+    let id = declare_function(inout m, in name.as_bytes(), lk, s);
+    let fref = import_function(inout b, inout m, id);
+    ins_call(inout b, fref, in args);
+    inst_result(inout b, 0)
+}

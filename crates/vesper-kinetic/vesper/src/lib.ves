@@ -8,7 +8,8 @@
 use self::morton::{
     compact as m_compact,
     compact21 as m_compact21,
-    encode_masked as m_encode_masked,
+    decode_table as m_decode_table,
+    encode_table as m_encode_table,
     morton64 as m_morton64,
     spread as m_spread,
     spread21 as m_spread21
@@ -51,18 +52,11 @@ use self::fastmath::{
 // ---------------------------------------------------------------------------
 // morton.rs
 
-pub copy enum MortonError {
-    AxisOutOfRange {
-        axis: u8,
-        value: u16
-    },
-    CodeOutOfRange(u32)
-}
-
 // A 30-bit Morton code: three 10-bit axes; a code with bit 30 or 31 set
 // is out of range.
 const AXIS_MAX: u16 = 1023;
 const MORTON30_HIGH_BITS: u32 = 0xc0000000;
+const MORTON30_MASK: u32 = 0x3fffffff;
 
 pub fn morton_spread(v: u32) -> u32 {
     m_spread(v)
@@ -73,50 +67,38 @@ pub fn morton_compact(v: u32) -> u32 {
 }
 
 pub fn morton_encode_masked(x: u16, y: u16, z: u16) -> u32 {
-    m_encode_masked(x, y, z)
+    m_encode_table(x, y, z)
 }
 
-pub fn morton_encode(x: u16, y: u16, z: u16) -> u32 eff [Fail[MortonError]] {
+// encode and decode (src/morton.rs) return one word instead of writing a
+// failure record and a result tuple, since they run once per code: encode
+// gives the code, or MORTON_FAILED | axis << 16 | value; decode gives
+// x | y << 10 | z << 20, or MORTON_FAILED. The Rust wrappers unpack them.
+const MORTON_FAILED: u64 = 0x8000000000000000;
+const MORTON_AXIS_SHIFT: u64 = 16;
+
+pub fn morton_encode_packed(x: u16, y: u16, z: u16) -> u64 {
     if x > AXIS_MAX {
-        Fail::raise(
-            MortonError::AxisOutOfRange {
-                axis: 0,
-                value: x
-            }
-        );
+        return MORTON_FAILED | widen_u64(x);
     }
     if y > AXIS_MAX {
-        Fail::raise(
-            MortonError::AxisOutOfRange {
-                axis: 1,
-                value: y
-            }
-        );
+        return MORTON_FAILED | (1 << MORTON_AXIS_SHIFT) | widen_u64(y);
     }
     if z > AXIS_MAX {
-        Fail::raise(
-            MortonError::AxisOutOfRange {
-                axis: 2,
-                value: z
-            }
-        );
+        return MORTON_FAILED | (2 << MORTON_AXIS_SHIFT) | widen_u64(z);
     }
-    m_encode_masked(x, y, z)
+    widen_u64(m_encode_table(x, y, z))
 }
 
-pub fn morton_decode_masked(code: u32) -> (u16, u16, u16) {
-    (
-        wrapping_u16(m_compact(code)),
-        wrapping_u16(m_compact((code >> 1))),
-        wrapping_u16(m_compact((code >> 2)))
-    )
+pub fn morton_decode_masked_packed(code: u32) -> u32 {
+    m_decode_table(code & MORTON30_MASK)
 }
 
-pub fn morton_decode(code: u32) -> (u16, u16, u16) eff [Fail[MortonError]] {
+pub fn morton_decode_packed(code: u32) -> u64 {
     if (code & MORTON30_HIGH_BITS) != 0 {
-        Fail::raise(MortonError::CodeOutOfRange(code));
+        return MORTON_FAILED;
     }
-    morton_decode_masked(code)
+    widen_u64(m_decode_table(code))
 }
 
 // lbvh.rs

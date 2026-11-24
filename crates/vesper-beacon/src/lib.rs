@@ -37,7 +37,11 @@ mod port;
 /// Which build this is: `"vesper"` for the port-backed package
 /// `vesper-beacon`, `"rust"` for the seed copy `vesper-beacon-seed` that the
 /// compiler links.
-pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };
+pub const IMPLEMENTATION: &str = if cfg!(feature = "vesper-port") {
+    "vesper"
+} else {
+    "rust"
+};
 
 /// Payload intentionally has no `Debug`, formatting, or telemetry encoding implementation.
 /// This wrapper does not zeroize memory or prove information-flow noninterference.

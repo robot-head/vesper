@@ -1,0 +1,33 @@
+// Windows x86_64 IOCP & handle bindings for `@vesper/pulse` (#1684).
+sys library PulseSys (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "dynamic", name = "kernel32",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    const INVALID_HANDLE_VALUE: u64 = 18446744073709551615;
+    const WAIT_TIMEOUT_ERR: u32 = 258;
+    const KEY_KERNEL: u64 = 1;
+    const KEY_POSTED: u64 = 2;
+
+    fn CreateIoCompletionPort(
+        file_handle: u64,
+        existing_completion_port: u64,
+        completion_key: u64,
+        number_of_concurrent_threads: u32
+    ) -> ForeignVal[u64];
+    fn PostQueuedCompletionStatus(
+        completion_port: u64,
+        number_of_bytes_transferred: u32,
+        completion_key: u64,
+        overlapped: u64
+    ) -> ForeignVal[i32];
+    fn GetQueuedCompletionStatus(
+        completion_port: u64,
+        nocapture inout bytes_transferred: u32,
+        nocapture inout completion_key: u64,
+        nocapture inout overlapped: u64,
+        milliseconds: u32
+    ) -> ForeignVal[i32];
+    fn CloseHandle(handle: u64) -> ForeignVal[i32];
+    fn GetLastError() -> ForeignVal[u32];
+}

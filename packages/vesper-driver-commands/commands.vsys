@@ -13,6 +13,8 @@ sys library HybridCommands (
     fn hc_text(which: u32, index: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
     fn hc_io_error(word: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
     fn hc_executable(nocapture in path: CSlice[u8]) -> ForeignVal[u32];
+    fn hc_fmt_file(nocapture in path: CSlice[u8], flags: u32, nocapture inout stats: CSlice[u64]) -> ForeignVal[u32];
+    fn hc_fmt_error(nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
     fn hc_graph_run(
         nocapture in input: CSlice[u8],
         has_focus: bool,
@@ -37,4 +39,14 @@ sys library HybridCommands (
     fn hc_doc_run(nocapture in packed: CSlice[u8]) -> ForeignVal[u64];
     fn hc_doc_json_err(nocapture in message: CSlice[u8]) -> ForeignVal[u64];
     fn hc_doc_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_lint_run(
+        has_path: bool,
+        nocapture in path: CSlice[u8],
+        fix: bool,
+        semver_safe: bool,
+        json: bool,
+        has_config: bool,
+        nocapture in config: CSlice[u8]
+    ) -> ForeignVal[u64];
+    fn hc_lint_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
 }
