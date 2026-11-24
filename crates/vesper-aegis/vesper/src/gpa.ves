@@ -1,0 +1,283 @@
+// @vesper/aegis::gpa: disjoint, non-adjacent half-open page-frame intervals
+// `[s_i, e_i)` stored as `2 * count` sorted words `[s0, e0, s1, e1, ...]`.
+// `MAX_PFN` (`1 << 40`) is the sentinel for `None` (all valid PFNs are `< MAX_PFN`).
+
+const MAX_PFN: u64 = 1099511627776;
+const U64_MAX: u64 = 18446744073709551615;
+
+fn min_u64(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+fn max_u64(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+fn get_w(in iv: Slice[u64], idx: u64) -> u64 {
+    match iv.try_get(idx) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn set_w(inout iv: Slice[u64], idx: u64, v: u64) {
+    iv.try_set(idx, v);
+}
+
+fn iv_start(in iv: Slice[u64], i: u64) -> u64 {
+    get_w(in iv, i << 1)
+}
+
+fn iv_end(in iv: Slice[u64], i: u64) -> u64 {
+    get_w(in iv, wrapping_add(i << 1, 1))
+}
+
+fn set_iv(inout iv: Slice[u64], i: u64, s: u64, e: u64) {
+    let base = i << 1;
+    set_w(inout iv, base, s);
+    set_w(inout iv, wrapping_add(base, 1), e);
+}
+
+fn copy_iv(inout iv: Slice[u64], dst: u64, src: u64) {
+    set_iv(inout iv, dst, iv_start(in iv, src), iv_end(in iv, src));
+}
+
+// First index `i` in `0..count` with `iv[2 * i + 1] > s` (`count` if none).
+fn lower_end_gt(in iv: Slice[u64], count: u64, s: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi: u64 = count;
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid: u64 = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        if iv_end(in iv, mid) <= s {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+// First index `i` in `0..count` with `iv[2 * i + 1] >= s` (`count` if none).
+fn lower_end_ge(in iv: Slice[u64], count: u64, s: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi: u64 = count;
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid: u64 = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        if iv_end(in iv, mid) < s {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+// First index `i` in `start..count` with `iv[2 * i] > e` (`count` if none).
+fn upper_start_gt(in iv: Slice[u64], start: u64, count: u64, e: u64) -> u64 {
+    let mut lo: u64 = start;
+    let mut hi: u64 = count;
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid: u64 = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        if iv_start(in iv, mid) <= e {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+// First index `i` in `start..count` with `iv[2 * i] >= e` (`count` if none).
+fn upper_start_ge(in iv: Slice[u64], start: u64, count: u64, e: u64) -> u64 {
+    let mut lo: u64 = start;
+    let mut hi: u64 = count;
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid: u64 = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        if iv_start(in iv, mid) < e {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+pub fn first_overlap(in iv: Slice[u64], count: u64, s: u64, e: u64) -> u64 {
+    if s >= e {
+        return MAX_PFN;
+    }
+    let idx: u64 = lower_end_gt(in iv, count, s);
+    if idx < count && iv_start(in iv, idx) < e {
+        max_u64(s, iv_start(in iv, idx))
+    } else {
+        MAX_PFN
+    }
+}
+
+pub fn covers(in iv: Slice[u64], count: u64, s: u64, e: u64) -> u64 {
+    if s >= e {
+        return 1;
+    }
+    let idx: u64 = lower_end_gt(in iv, count, s);
+    if idx < count && iv_start(in iv, idx) <= s && e <= iv_end(in iv, idx) {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn first_gap(in iv: Slice[u64], count: u64, s: u64, e: u64) -> u64 {
+    if s >= e {
+        return MAX_PFN;
+    }
+    let idx: u64 = lower_end_gt(in iv, count, s);
+    if idx >= count || iv_start(in iv, idx) > s {
+        s
+    } else if iv_end(in iv, idx) >= e {
+        MAX_PFN
+    } else {
+        iv_end(in iv, idx)
+    }
+}
+
+pub fn insert(inout iv: Slice[u64], count: u64, s: u64, e: u64) -> u64 {
+    let lo: u64 = lower_end_ge(in iv, count, s);
+    let hi: u64 = upper_start_gt(in iv, lo, count, e);
+    if lo == hi {
+        let mut i: u64 = count;
+        loop {
+            if i <= lo {
+                break;
+            }
+            let src: u64 = wrapping_sub(i, 1);
+            copy_iv(inout iv, i, src);
+            i = src;
+        }
+        set_iv(inout iv, lo, s, e);
+        return wrapping_add(count, 1);
+    }
+    let ms: u64 = min_u64(s, iv_start(in iv, lo));
+    let me: u64 = max_u64(e, iv_end(in iv, wrapping_sub(hi, 1)));
+    set_iv(inout iv, lo, ms, me);
+    let removed: u64 = wrapping_sub(hi, lo);
+    if removed == 1 {
+        return count;
+    }
+    let shift: u64 = wrapping_sub(removed, 1);
+    let mut dst: u64 = wrapping_add(lo, 1);
+    let mut src: u64 = hi;
+    loop {
+        if src >= count {
+            break;
+        }
+        copy_iv(inout iv, dst, src);
+        dst = wrapping_add(dst, 1);
+        src = wrapping_add(src, 1);
+    }
+    wrapping_sub(count, shift)
+}
+
+pub fn remove(inout iv: Slice[u64], count: u64, s: u64, e: u64) -> u64 {
+    if s >= e {
+        return count;
+    }
+    let lo: u64 = lower_end_gt(in iv, count, s);
+    let hi: u64 = upper_start_ge(in iv, lo, count, e);
+    if lo >= hi {
+        return count;
+    }
+    if hi == wrapping_add(lo, 1) && iv_start(in iv, lo) < s && iv_end(in iv, lo) > e {
+        let old_end: u64 = iv_end(in iv, lo);
+        let mut i: u64 = count;
+        loop {
+            if i <= hi {
+                break;
+            }
+            let src: u64 = wrapping_sub(i, 1);
+            copy_iv(inout iv, i, src);
+            i = src;
+        }
+        set_w(inout iv, wrapping_add(lo << 1, 1), s);
+        set_iv(inout iv, hi, e, old_end);
+        return wrapping_add(count, 1);
+    }
+    let keep_left: bool = iv_start(in iv, lo) < s;
+    let last_idx: u64 = wrapping_sub(hi, 1);
+    let keep_right: bool = iv_end(in iv, last_idx) > e;
+    if keep_left {
+        set_w(inout iv, wrapping_add(lo << 1, 1), s);
+    }
+    if keep_right {
+        set_w(inout iv, last_idx << 1, e);
+    }
+    let out_start: u64 = if keep_left {
+        wrapping_add(lo, 1)
+    } else {
+        lo
+    };
+    let tail_src: u64 = if keep_right {
+        last_idx
+    } else {
+        hi
+    };
+    if out_start != tail_src {
+        let mut dst: u64 = out_start;
+        let mut src: u64 = tail_src;
+        loop {
+            if src >= count {
+                break;
+            }
+            copy_iv(inout iv, dst, src);
+            dst = wrapping_add(dst, 1);
+            src = wrapping_add(src, 1);
+        }
+    }
+    wrapping_add(out_start, wrapping_sub(count, tail_src))
+}
+
+pub fn pages(in iv: Slice[u64], count: u64) -> u64 {
+    let mut total: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= count {
+            break;
+        }
+        total = wrapping_add(total, wrapping_sub(iv_end(in iv, i), iv_start(in iv, i)));
+        i = wrapping_add(i, 1);
+    }
+    total
+}
+
+pub fn check_access(in iv: Slice[u64], count: u64, gpa: u64, len: u64) -> u64 {
+    if len == 0 {
+        return MAX_PFN;
+    }
+    let span: u64 = wrapping_sub(len, 1);
+    if gpa > wrapping_sub(U64_MAX, span) {
+        return gpa >> 12;
+    }
+    let last: u64 = wrapping_add(gpa, span);
+    let s: u64 = gpa >> 12;
+    let e: u64 = wrapping_add(last >> 12, 1);
+    first_gap(in iv, count, s, e)
+}

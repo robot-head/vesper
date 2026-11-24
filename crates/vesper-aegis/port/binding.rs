@@ -82,6 +82,13 @@ unsafe extern "C" {
     fn vesper_aegis_cose_key_p384(b: *mut u64, n: *mut u64, st: *mut u64, out_sec1: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_cose_sig_structure(prot: *mut u64, aad: *mut u64, pay: *mut u64, out: *mut u64) -> i64;
     fn vesper_aegis_cose_sign1_parse(b: *mut u64, s: *mut u64, n: *mut u64, st: *mut u64, w: *mut u64, field: i64, reason: i64, fail: *mut u64) -> i64;
+    fn vesper_aegis_gpa_check_access(iv: *mut u64, count: i64, gpa: i64, len: i64) -> i64;
+    fn vesper_aegis_gpa_covers(iv: *mut u64, count: i64, s: i64, e: i64) -> i64;
+    fn vesper_aegis_gpa_first_gap(iv: *mut u64, count: i64, s: i64, e: i64) -> i64;
+    fn vesper_aegis_gpa_first_overlap(iv: *mut u64, count: i64, s: i64, e: i64) -> i64;
+    fn vesper_aegis_gpa_insert(iv: *mut u64, count: i64, s: i64, e: i64) -> i64;
+    fn vesper_aegis_gpa_pages(iv: *mut u64, count: i64) -> i64;
+    fn vesper_aegis_gpa_remove(iv: *mut u64, count: i64, s: i64, e: i64) -> i64;
     fn vesper_aegis_iso8601_utc_to_unix(result: *mut u64, s: *mut u64) -> i64;
     fn vesper_aegis_sgx_parse(b: *mut u64, mode: i64, w: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_snp_etcb_parse(b: *mut u64, w: *mut u64, fail: *mut u64) -> i64;
@@ -291,6 +298,69 @@ pub fn cose_sign1_parse(b: &[u8], s: &mut [u8], n: &mut [u64], st: &mut [u64], w
         1 => Err(<AErr as Abi>::get(&fail[1..])),
         status => panic!("invalid failure status {status} from vesper_aegis_cose_sign1_parse"),
     }
+}
+
+/// Calls `gpa_check_access` of the Vesper library `aegis` (`vesper_aegis_gpa_check_access`).
+pub fn gpa_check_access(iv: &[u64], count: u64, gpa: u64, len: u64) -> u64 {
+    // SAFETY: `vesper_aegis_gpa_check_access` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(iv, |view_iv| unsafe { vesper_aegis_gpa_check_access(view_iv, count as i64, gpa as i64, len as i64) });
+    raw as u64
+}
+
+/// Calls `gpa_covers` of the Vesper library `aegis` (`vesper_aegis_gpa_covers`).
+pub fn gpa_covers(iv: &[u64], count: u64, s: u64, e: u64) -> u64 {
+    // SAFETY: `vesper_aegis_gpa_covers` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(iv, |view_iv| unsafe { vesper_aegis_gpa_covers(view_iv, count as i64, s as i64, e as i64) });
+    raw as u64
+}
+
+/// Calls `gpa_first_gap` of the Vesper library `aegis` (`vesper_aegis_gpa_first_gap`).
+pub fn gpa_first_gap(iv: &[u64], count: u64, s: u64, e: u64) -> u64 {
+    // SAFETY: `vesper_aegis_gpa_first_gap` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(iv, |view_iv| unsafe { vesper_aegis_gpa_first_gap(view_iv, count as i64, s as i64, e as i64) });
+    raw as u64
+}
+
+/// Calls `gpa_first_overlap` of the Vesper library `aegis` (`vesper_aegis_gpa_first_overlap`).
+pub fn gpa_first_overlap(iv: &[u64], count: u64, s: u64, e: u64) -> u64 {
+    // SAFETY: `vesper_aegis_gpa_first_overlap` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(iv, |view_iv| unsafe { vesper_aegis_gpa_first_overlap(view_iv, count as i64, s as i64, e as i64) });
+    raw as u64
+}
+
+/// Calls `gpa_insert` of the Vesper library `aegis` (`vesper_aegis_gpa_insert`).
+pub fn gpa_insert(iv: &mut [u64], count: u64, s: u64, e: u64) -> u64 {
+    // SAFETY: `vesper_aegis_gpa_insert` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(iv, |view_iv| unsafe { vesper_aegis_gpa_insert(view_iv, count as i64, s as i64, e as i64) });
+    raw as u64
+}
+
+/// Calls `gpa_pages` of the Vesper library `aegis` (`vesper_aegis_gpa_pages`).
+pub fn gpa_pages(iv: &[u64], count: u64) -> u64 {
+    // SAFETY: `vesper_aegis_gpa_pages` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(iv, |view_iv| unsafe { vesper_aegis_gpa_pages(view_iv, count as i64) });
+    raw as u64
+}
+
+/// Calls `gpa_remove` of the Vesper library `aegis` (`vesper_aegis_gpa_remove`).
+pub fn gpa_remove(iv: &mut [u64], count: u64, s: u64, e: u64) -> u64 {
+    // SAFETY: `vesper_aegis_gpa_remove` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(iv, |view_iv| unsafe { vesper_aegis_gpa_remove(view_iv, count as i64, s as i64, e as i64) });
+    raw as u64
 }
 
 /// Calls `iso8601_utc_to_unix` of the Vesper library `aegis` (`vesper_aegis_iso8601_utc_to_unix`).

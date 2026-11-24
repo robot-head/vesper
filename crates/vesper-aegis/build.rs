@@ -90,4 +90,10 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
         "const CCA_IMPLEMENTATION_ID_LEN: u64 = 32;",
         "const CCA_IMPLEMENTATION_ID_LEN: u64 = 31;",
     ),
+    // gpa: first_gap always reports a gap at `s`.
+    (
+        "gpa",
+        "if idx >= count || iv_start(in iv, idx) > s {",
+        "if true {",
+    ),
 ];
