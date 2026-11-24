@@ -3404,7 +3404,8 @@ fn if_convert_pure_diamonds(func: &mut ir::Function) {
                     .block_insts(arm_blk)
                     .take_while(|&i| i != arm_term)
                     .collect();
-                if arm_insts.len() > 6
+                if arm_insts.is_empty()
+                    || arm_insts.len() > 6
                     || !arm_insts
                         .iter()
                         .all(|&i| is_pure_if_convert_op(func.dfg.insts[i].opcode()))
@@ -3490,7 +3491,8 @@ fn if_convert_pure_diamonds(func: &mut ir::Function) {
                     .block_insts(f_blk)
                     .take_while(|&i| i != f_term)
                     .collect();
-                if t_insts.len() + f_insts.len() > 6
+                if (t_insts.is_empty() && f_insts.is_empty())
+                    || t_insts.len() + f_insts.len() > 6
                     || !t_insts
                         .iter()
                         .chain(&f_insts)
