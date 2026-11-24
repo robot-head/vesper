@@ -17,6 +17,7 @@ const PARTS: &[&str] = &[
     "vq",
     "seccomp",
     "guest_mem",
+    "block",
 ];
 
 fn main() {
@@ -91,5 +92,10 @@ const DIVERGENT_EDITS: &[(&str, &str)] = &[
     (
         "        if r > 0 && gpa < prev_end {",
         "        if r > 0 && gpa <= prev_end {",
+    ),
+    // block: discard accepts unaligned sector/count.
+    (
+        "            if sector % BLK_DISCARD_SECTOR_ALIGNMENT != 0",
+        "            if false && sector % BLK_DISCARD_SECTOR_ALIGNMENT != 0",
     ),
 ];

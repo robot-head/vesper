@@ -484,6 +484,8 @@ impl Abi for crate::port_types::VqFault {
     }
 }
 
+const _: () = assert!(<(u8, u64) as Abi>::WORDS == 2);
+const _: () = assert!(<Option<(u64, u64)> as Abi>::WORDS == 3);
 const _: () = assert!(<Option<crate::port_types::SlotError> as Abi>::WORDS == 6);
 const _: () = assert!(<Result<(), crate::port_types::SeccompFault> as Abi>::WORDS == 4);
 const _: () = assert!(<Result<(u32, u64), crate::port_types::PvhFault> as Abi>::WORDS == 4);
@@ -502,11 +504,15 @@ const _: () = assert!(<crate::port_types::PvhFault as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port_types::SeccompFault as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port_types::SlotError as Abi>::WORDS == 5);
 const _: () = assert!(<crate::port_types::VqFault as Abi>::WORDS == 1);
+const _: () = assert!(<u64 as Abi>::WORDS == 1);
 
 unsafe extern "C" {
     fn vesper_aether_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_aether_seq_free(seq: i64) -> i64;
     fn vesper_aether_live_allocations() -> i64;
+    fn vesper_aether_blk_config_space(disk_bytes: i64, read_only: i64, queues: i64, out: *mut u64) -> i64;
+    fn vesper_aether_blk_span(result: *mut u64, disk_bytes: i64, sector: i64, len: i64) -> i64;
+    fn vesper_aether_blk_validate_discard_or_zero(result: *mut u64, disk_bytes: i64, read_only: i64, payload: *mut u64, data_in: i64, discard: i64, out_spans: *mut u64) -> i64;
     fn vesper_aether_guest_mem_locate(result: *mut u64, table: *mut u64, gpa: i64, len: i64) -> i64;
     fn vesper_aether_guest_mem_plan(result: *mut u64, layout: *mut u64, out_table: *mut u64) -> i64;
     fn vesper_aether_hotset_decode(result: *mut u64, bytes: *mut u64, expected: i64, pages: *mut u64) -> i64;
@@ -532,6 +538,35 @@ pub const RUNTIME: vesper_port_abi::SeqRuntime = vesper_port_abi::SeqRuntime {
 pub fn live_allocations() -> i64 {
     // SAFETY: the function only reads two counters.
     unsafe { vesper_aether_live_allocations() }
+}
+
+/// Calls `blk_config_space` of the Vesper library `aether` (`vesper_aether_blk_config_space`).
+pub fn blk_config_space(disk_bytes: u64, read_only: bool, queues: u16, out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_aether_blk_config_space` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_blk_config_space(disk_bytes as i64, read_only as i64, queues as i64, view_out) });
+    raw as u64
+}
+
+/// Calls `blk_span` of the Vesper library `aether` (`vesper_aether_blk_span`).
+pub fn blk_span(disk_bytes: u64, sector: u64, len: u64) -> Option<(u64, u64)> {
+    let mut result = [0u64; 3];
+    // SAFETY: `vesper_aether_blk_span` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_blk_span(result.as_mut_ptr(), disk_bytes as i64, sector as i64, len as i64) };
+    <Option<(u64, u64)> as Abi>::get(&result[0..])
+}
+
+/// Calls `blk_validate_discard_or_zero` of the Vesper library `aether` (`vesper_aether_blk_validate_discard_or_zero`).
+pub fn blk_validate_discard_or_zero(disk_bytes: u64, read_only: bool, payload: &[u8], data_in: u64, discard: bool, out_spans: &mut [u64]) -> (u8, u64) {
+    let mut result = [0u64; 2];
+    // SAFETY: `vesper_aether_blk_validate_discard_or_zero` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(payload, |view_payload| vesper_port_abi::with_slice_mut(out_spans, |view_out_spans| unsafe { vesper_aether_blk_validate_discard_or_zero(result.as_mut_ptr(), disk_bytes as i64, read_only as i64, view_payload, data_in as i64, discard as i64, view_out_spans) }));
+    <(u8, u64) as Abi>::get(&result[0..])
 }
 
 /// Calls `guest_mem_locate` of the Vesper library `aether` (`vesper_aether_guest_mem_locate`).

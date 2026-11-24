@@ -152,6 +152,18 @@ impl BlockDevice {
 
     /// Byte range of `len` bytes starting at `sector`, if inside the disk.
     fn span(&self, sector: u64, len: u64) -> Option<std::ops::Range<usize>> {
+        #[cfg(feature = "vesper-port")]
+        {
+            crate::binding::blk_span(self.disk.len() as u64, sector, len)
+                .map(|(s, e)| (s as usize)..(e as usize))
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        self.span_reference(sector, len)
+    }
+
+    /// The Rust implementation of `span`, exposed for differential tests.
+    #[doc(hidden)]
+    pub fn span_reference(&self, sector: u64, len: u64) -> Option<std::ops::Range<usize>> {
         if !len.is_multiple_of(SECTOR_BYTES) {
             return None;
         }
@@ -161,6 +173,16 @@ impl BlockDevice {
             return None;
         }
         Some(start as usize..end as usize)
+    }
+
+    /// Exposed for `tests/block_port.rs`.
+    #[doc(hidden)]
+    pub fn handle_for_port_test(
+        &mut self,
+        readable: &[u8],
+        writable: u64,
+    ) -> Result<Vec<u8>, DeviceError> {
+        self.handle(readable, writable)
     }
 
     /// Returns the bytes to write into the chain's writable part.
@@ -261,6 +283,40 @@ impl BlockDevice {
     /// `DISCARD` / `WRITE_ZEROES` (§5.2.6.2): validates every segment, then
     /// zeroes them all.
     fn discard_or_zero(&mut self, payload: &[u8], data_in: u64, discard: bool) -> u8 {
+        #[cfg(feature = "vesper-port")]
+        {
+            let mut spans_buf = [0u64; 2 * (MAX_DISCARD_SEG as usize)];
+            let (status, count) = crate::binding::blk_validate_discard_or_zero(
+                self.disk.len() as u64,
+                self.read_only,
+                payload,
+                data_in,
+                discard,
+                &mut spans_buf,
+            );
+            if status == VIRTIO_BLK_S_OK {
+                for pair in spans_buf[..(count as usize) * 2].as_chunks::<2>().0 {
+                    self.disk[(pair[0] as usize)..(pair[1] as usize)].fill(0);
+                }
+                if discard {
+                    self.stats.discards += 1;
+                } else {
+                    self.stats.write_zeroes += 1;
+                }
+            } else if status == VIRTIO_BLK_S_UNSUPP {
+                self.stats.unsupported += 1;
+            } else {
+                self.stats.io_errors += 1;
+            }
+            status
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        self.discard_or_zero_reference(payload, data_in, discard)
+    }
+
+    /// The Rust implementation of `discard_or_zero`, exposed for differential tests.
+    #[doc(hidden)]
+    pub fn discard_or_zero_reference(&mut self, payload: &[u8], data_in: u64, discard: bool) -> u8 {
         let (max_sectors, max_seg) = if discard {
             (MAX_DISCARD_SECTORS, MAX_DISCARD_SEG)
         } else {
@@ -342,21 +398,35 @@ impl VirtioDevice for BlockDevice {
         CONFIG_BYTES
     }
     fn read_config(&self, offset: usize, out: &mut [u8]) {
-        let mut cfg = [0u8; CONFIG_BYTES];
-        cfg[0..8].copy_from_slice(&self.capacity_sectors().to_le_bytes());
-        // size_max (8) and seg_max (12) are not offered and read as zero.
-        cfg[20..24].copy_from_slice(&(SECTOR_BYTES as u32).to_le_bytes());
-        cfg[34..36].copy_from_slice(&self.num_queues().to_le_bytes());
-        if !self.read_only {
-            cfg[36..40].copy_from_slice(&MAX_DISCARD_SECTORS.to_le_bytes());
-            cfg[40..44].copy_from_slice(&MAX_DISCARD_SEG.to_le_bytes());
-            cfg[44..48].copy_from_slice(&DISCARD_SECTOR_ALIGNMENT.to_le_bytes());
-            cfg[48..52].copy_from_slice(&MAX_WRITE_ZEROES_SECTORS.to_le_bytes());
-            cfg[52..56].copy_from_slice(&MAX_WRITE_ZEROES_SEG.to_le_bytes());
-            // write_zeroes_may_unmap: zeroing never unmaps in this model.
-            cfg[56] = 0;
+        #[cfg(feature = "vesper-port")]
+        {
+            let mut cfg = [0u8; CONFIG_BYTES];
+            crate::binding::blk_config_space(
+                self.disk.len() as u64,
+                self.read_only,
+                self.num_queues(),
+                &mut cfg,
+            );
+            out.copy_from_slice(&cfg[offset..offset + out.len()]);
         }
-        out.copy_from_slice(&cfg[offset..offset + out.len()]);
+        #[cfg(not(feature = "vesper-port"))]
+        {
+            let mut cfg = [0u8; CONFIG_BYTES];
+            cfg[0..8].copy_from_slice(&self.capacity_sectors().to_le_bytes());
+            // size_max (8) and seg_max (12) are not offered and read as zero.
+            cfg[20..24].copy_from_slice(&(SECTOR_BYTES as u32).to_le_bytes());
+            cfg[34..36].copy_from_slice(&self.num_queues().to_le_bytes());
+            if !self.read_only {
+                cfg[36..40].copy_from_slice(&MAX_DISCARD_SECTORS.to_le_bytes());
+                cfg[40..44].copy_from_slice(&MAX_DISCARD_SEG.to_le_bytes());
+                cfg[44..48].copy_from_slice(&DISCARD_SECTOR_ALIGNMENT.to_le_bytes());
+                cfg[48..52].copy_from_slice(&MAX_WRITE_ZEROES_SECTORS.to_le_bytes());
+                cfg[52..56].copy_from_slice(&MAX_WRITE_ZEROES_SEG.to_le_bytes());
+                // write_zeroes_may_unmap: zeroing never unmaps in this model.
+                cfg[56] = 0;
+            }
+            out.copy_from_slice(&cfg[offset..offset + out.len()]);
+        }
     }
     fn activate(&mut self, features: u64) {
         self.features = features;

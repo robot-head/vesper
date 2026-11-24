@@ -39,6 +39,7 @@ AETHER_PARTS = [
     "vesper/src/vq.ves",
     "vesper/src/seccomp.ves",
     "vesper/src/guest_mem.ves",
+    "vesper/src/block.ves",
 ]
 
 genrule(
@@ -156,5 +157,6 @@ rust_library(
         ("seccomp", []),
         ("seccomp_port", []),
         ("guest_mem_port", []),
+        ("block_port", []),
     ]
 ]
