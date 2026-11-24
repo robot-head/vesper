@@ -1,0 +1,637 @@
+// Mapping hardware branch traces onto Chrono's effect-boundary timeline.
+
+use self::ete::{
+    EteElement,
+    EteElementAt,
+    InstructionSet
+};
+use self::ete_flow::{
+    Branch,
+    BranchKind,
+    FlowTrace
+};
+use self::replay::{
+    ReplaySession,
+    reverse_watch_inout
+};
+use self::ring::FlightEvent;
+use self::wire::TraceCursor;
+
+pub enum StepKind {
+    StepBranch(BranchKind),
+    StepAddress(InstructionSet),
+    StepAtom {
+        executed: bool,
+    },
+    StepException {
+        exception_type: u16,
+    },
+    StepExceptionReturn,
+}
+
+pub struct TraceStep {
+    pub from: u64,
+    pub to: Option[u64],
+    pub kind: StepKind,
+    pub tsc_lo: Option[u64],
+    pub tsc_hi: Option[u64],
+}
+
+pub struct EffectAnchor {
+    pub lamport_seq: u64,
+    pub tsc: u64,
+}
+
+pub enum PathError {
+    AnchorsOutOfOrder {
+        index: u64,
+    },
+    StepsOutOfOrder {
+        index: u64,
+    },
+    BadInterval {
+        index: u64,
+    },
+    UnknownSeq {
+        lamport_seq: u64,
+    },
+    Reversed {
+        from: u64,
+        to: u64,
+    },
+    NoPreviousRecord {
+        lamport_seq: u64,
+    },
+    PathReplay(u32),
+}
+
+pub struct PathSliceRange {
+    pub from: EffectAnchor,
+    pub to: EffectAnchor,
+    pub def_start: u64,
+    pub def_end: u64,
+    pub u_start_begin: u64,
+    pub u_start_end: u64,
+    pub u_end_begin: u64,
+    pub u_end_end: u64,
+}
+
+pub struct WatchPathRange {
+    pub cursor: TraceCursor,
+    pub path: PathSliceRange,
+}
+
+pub struct BranchTimeline {
+    pub anchors: ChunkSeq[EffectAnchor],
+    pub steps: ChunkSeq[TraceStep],
+}
+
+fn step_lo(in s: TraceStep) -> u64 {
+    match s.tsc_lo {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn step_hi(in s: TraceStep) -> u64 {
+    match s.tsc_hi {
+        Option::Some(v) => v,
+        Option::None => 0xffff_ffff_ffff_ffff,
+    }
+}
+
+fn copy_anchor(in a: EffectAnchor) -> EffectAnchor {
+    EffectAnchor {
+        lamport_seq: a.lamport_seq,
+        tsc: a.tsc,
+    }
+}
+
+fn anchor_at(in anchors: Slice[EffectAnchor], idx: u64) -> EffectAnchor {
+    handle Fail[RuntimeError] in {
+        copy_anchor(in anchors[idx])
+    } with {
+        return x => x,
+        raise(e, k) => EffectAnchor {
+            lamport_seq: 0,
+            tsc: 0
+        },
+    }
+}
+
+pub fn new_branch_timeline(
+    inout anchors: ChunkSeq[EffectAnchor],
+    inout steps: ChunkSeq[TraceStep],
+) -> Result[BranchTimeline, PathError] {
+    let alen = anchors.len();
+    let mut i: u64 = 1;
+    loop {
+        if i >= alen {
+            break;
+        }
+        let a0 = anchor_at(in anchors.as_slice(), wrapping_sub(i, 1));
+        let a1 = anchor_at(in anchors.as_slice(), i);
+        if a1.lamport_seq <= a0.lamport_seq || a1.tsc < a0.tsc {
+            return Result::Err(
+                PathError::AnchorsOutOfOrder {
+                    index: i
+                }
+            );
+        }
+        i = wrapping_add(i, 1);
+    }
+    let slen = steps.len();
+    let mut j: u64 = 0;
+    loop {
+        if j >= slen {
+            break;
+        }
+        let mut bad = false;
+        let _ = handle Fail[RuntimeError] in {
+            if step_lo(in steps[j]) >= step_hi(in steps[j]) {
+                bad = true;
+            }
+            0
+        } with {
+            return _ => 0,
+            raise(e, k) => {
+                bad = false;
+                0
+            },
+        };
+        if bad {
+            return Result::Err(
+                PathError::BadInterval {
+                    index: j
+                }
+            );
+        }
+        j = wrapping_add(j, 1);
+    }
+    let mut k: u64 = 1;
+    loop {
+        if k >= slen {
+            break;
+        }
+        let mut ooo = false;
+        let _ = handle Fail[RuntimeError] in {
+            let l0 = step_lo(in steps[wrapping_sub(k, 1)]);
+            let h0 = step_hi(in steps[wrapping_sub(k, 1)]);
+            let l1 = step_lo(in steps[k]);
+            let h1 = step_hi(in steps[k]);
+            if l1 < l0 || h1 < h0 {
+                ooo = true;
+            }
+            0
+        } with {
+            return _ => 0,
+            raise(e, k2) => {
+                ooo = false;
+                0
+            },
+        };
+        if ooo {
+            return Result::Err(
+                PathError::StepsOutOfOrder {
+                    index: k
+                }
+            );
+        }
+        k = wrapping_add(k, 1);
+    }
+    Result::Ok(
+        BranchTimeline {
+            anchors: replace(inout anchors, ChunkSeq::new()),
+            steps: replace(inout steps, ChunkSeq::new())
+        }
+    )
+}
+
+pub fn anchors_from_events(in events: Slice[FlightEvent]) -> ChunkSeq[EffectAnchor] {
+    let mut out: ChunkSeq[EffectAnchor] = ChunkSeq::new();
+    let mut i: u64 = 0;
+    loop {
+        if i >= events.len() {
+            break;
+        }
+        let _ = handle Fail[RuntimeError] in {
+            out
+                .push(
+                    EffectAnchor {
+                        lamport_seq: events[i].lamport_seq,
+                        tsc: events[i].time_ns,
+                    }
+                );
+            0
+        } with {
+            return _ => 0,
+            raise(e, k) => 0,
+        };
+        i = wrapping_add(i, 1);
+    }
+    out
+}
+
+fn clone_opt_u64(in o: Option[u64]) -> Option[u64] {
+    match o {
+        Option::Some(v) => Option::Some(v),
+        Option::None => Option::None,
+    }
+}
+
+fn clone_branch_kind(in k: BranchKind) -> BranchKind {
+    match k {
+        BranchKind::Conditional {
+            taken
+        } => BranchKind::Conditional {
+            taken: taken
+        },
+        BranchKind::DirectJump => BranchKind::DirectJump,
+        BranchKind::DirectCall => BranchKind::DirectCall,
+        BranchKind::IndirectJump => BranchKind::IndirectJump,
+        BranchKind::IndirectCall => BranchKind::IndirectCall,
+        BranchKind::Return {
+            compressed
+        } => BranchKind::Return {
+            compressed: compressed
+        },
+        BranchKind::Far => BranchKind::Far,
+        BranchKind::Async => BranchKind::Async,
+        BranchKind::Enable => BranchKind::Enable,
+        BranchKind::Disable => BranchKind::Disable,
+    }
+}
+
+fn clone_isa(in isa: InstructionSet) -> InstructionSet {
+    match isa {
+        InstructionSet::Is0 => InstructionSet::Is0,
+        InstructionSet::Is1 => InstructionSet::Is1,
+    }
+}
+
+fn push_pt_branch(inout out: ChunkSeq[TraceStep], in b: Branch) {
+    out
+        .push(
+            TraceStep {
+                from: b.from,
+                to: clone_opt_u64(in b.to),
+                kind: StepKind::StepBranch(clone_branch_kind(in b.kind)),
+                tsc_lo: clone_opt_u64(in b.tsc_lo),
+                tsc_hi: clone_opt_u64(in b.tsc_hi),
+            }
+        );
+}
+
+pub fn steps_from_pt(in trace: FlowTrace) -> ChunkSeq[TraceStep] {
+    let mut out: ChunkSeq[TraceStep] = ChunkSeq::new();
+    let len = trace.branches.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        let _ = handle Fail[RuntimeError] in {
+            push_pt_branch(inout out, in trace.branches[i]);
+            0
+        } with {
+            return _ => 0,
+            raise(e, k) => 0,
+        };
+        i = wrapping_add(i, 1);
+    }
+    out
+}
+
+fn flush_steps(inout open: ChunkSeq[TraceStep], inout out: ChunkSeq[TraceStep], ts: Option[u64]) {
+    let mut rev: ChunkSeq[TraceStep] = ChunkSeq::new();
+    loop {
+        match open.pop() {
+            Option::Some(s) => rev.push(s),
+            Option::None => break,
+        }
+    }
+    loop {
+        match rev.pop() {
+            Option::Some(s) => {
+                out
+                    .push(
+                        TraceStep {
+                            from: s.from,
+                            to: s.to,
+                            kind: s.kind,
+                            tsc_lo: s.tsc_lo,
+                            tsc_hi: clone_opt_u64(in ts),
+                        }
+                    );
+            }
+            Option::None => break,
+        }
+    }
+}
+
+fn push_ete_step(
+    inout open: ChunkSeq[TraceStep],
+    inout steps: ChunkSeq[TraceStep],
+    inout ts: Option[u64],
+    inout at: u64,
+    in el: EteElement,
+) {
+    match el {
+        EteElement::Timestamp {
+            timestamp,
+            cycle_count: _
+        } => {
+            flush_steps(inout open, inout steps, Option::Some(timestamp));
+            ts = Option::Some(timestamp);
+        }
+        EteElement::Address {
+            address,
+            isa
+        } => {
+            let from = at;
+            at = address;
+            open
+                .push(
+                    TraceStep {
+                        from: from,
+                        to: Option::Some(address),
+                        kind: StepKind::StepAddress(clone_isa(in isa)),
+                        tsc_lo: clone_opt_u64(in ts),
+                        tsc_hi: Option::None,
+                    }
+                );
+        }
+        EteElement::Atom {
+            executed
+        } => {
+            open
+                .push(
+                    TraceStep {
+                        from: at,
+                        to: Option::None,
+                        kind: StepKind::StepAtom {
+                            executed: executed
+                        },
+                        tsc_lo: clone_opt_u64(in ts),
+                        tsc_hi: Option::None,
+                    }
+                );
+        }
+        EteElement::Exception {
+            exception_type,
+            preferred_return,
+            isa: _
+        } => {
+            open
+                .push(
+                    TraceStep {
+                        from: preferred_return,
+                        to: Option::None,
+                        kind: StepKind::StepException {
+                            exception_type: exception_type
+                        },
+                        tsc_lo: clone_opt_u64(in ts),
+                        tsc_hi: Option::None,
+                    }
+                );
+        }
+        EteElement::ExceptionReturn => {
+            open
+                .push(
+                    TraceStep {
+                        from: at,
+                        to: Option::None,
+                        kind: StepKind::StepExceptionReturn,
+                        tsc_lo: clone_opt_u64(in ts),
+                        tsc_hi: Option::None,
+                    }
+                );
+        }
+        _ => {}
+    }
+}
+
+pub fn steps_from_ete(in elements: Slice[EteElementAt]) -> ChunkSeq[TraceStep] {
+    let mut open: ChunkSeq[TraceStep] = ChunkSeq::new();
+    let mut steps: ChunkSeq[TraceStep] = ChunkSeq::new();
+    let mut ts: Option[u64] = Option::None;
+    let mut at: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= elements.len() {
+            break;
+        }
+        let _ = handle Fail[RuntimeError] in {
+            push_ete_step(inout open, inout steps, inout ts, inout at, in elements[i].element);
+            0
+        } with {
+            return _ => 0,
+            raise(e, k) => 0,
+        };
+        i = wrapping_add(i, 1);
+    }
+    flush_steps(inout open, inout steps, Option::None);
+    steps
+}
+
+fn anchor_index(in tl: BranchTimeline, lamport_seq: u64) -> Result[u64, PathError] {
+    let mut lo: u64 = 0;
+    let mut hi = tl.anchors.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        let a = anchor_at(in tl.anchors.as_slice(), mid);
+        if a.lamport_seq == lamport_seq {
+            return Result::Ok(mid);
+        }
+        if a.lamport_seq < lamport_seq {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    Result::Err(
+        PathError::UnknownSeq {
+            lamport_seq: lamport_seq
+        }
+    )
+}
+
+fn partition_lo_le(in steps: Slice[TraceStep], tsc: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = steps.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        let mut pred = false;
+        let _ = handle Fail[RuntimeError] in {
+            pred = step_lo(in steps[mid]) <= tsc;
+            0
+        } with {
+            return _ => 0,
+            raise(e, k) => {
+                pred = false;
+                0
+            },
+        };
+        if pred {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+fn partition_hi_le(in steps: Slice[TraceStep], tsc: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = steps.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        let mut pred = false;
+        let _ = handle Fail[RuntimeError] in {
+            pred = step_hi(in steps[mid]) <= tsc;
+            0
+        } with {
+            return _ => 0,
+            raise(e, k) => {
+                pred = false;
+                0
+            },
+        };
+        if pred {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+fn partition_lo_lt(in steps: Slice[TraceStep], tsc: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = steps.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        let mut pred = false;
+        let _ = handle Fail[RuntimeError] in {
+            pred = step_lo(in steps[mid]) < tsc;
+            0
+        } with {
+            return _ => 0,
+            raise(e, k) => {
+                pred = false;
+                0
+            },
+        };
+        if pred {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+pub fn path_between(
+    in tl: BranchTimeline,
+    from_seq: u64,
+    to_seq: u64,
+) -> Result[PathSliceRange, PathError] {
+    if from_seq >= to_seq {
+        return Result::Err(
+            PathError::Reversed {
+                from: from_seq,
+                to: to_seq,
+            }
+        );
+    }
+    let ia = match anchor_index(in tl, from_seq) {
+        Result::Ok(v) => v,
+        Result::Err(e) => return Result::Err(e),
+    };
+    let ib = match anchor_index(in tl, to_seq) {
+        Result::Ok(v) => v,
+        Result::Err(e) => return Result::Err(e),
+    };
+    let a = anchor_at(in tl.anchors.as_slice(), ia);
+    let b = anchor_at(in tl.anchors.as_slice(), ib);
+    let start = partition_lo_le(in tl.steps.as_slice(), a.tsc);
+    let end_raw = partition_hi_le(in tl.steps.as_slice(), b.tsc);
+    let end = if end_raw > start {
+        end_raw
+    } else {
+        start
+    };
+    let u_start_raw = partition_hi_le(in tl.steps.as_slice(), a.tsc);
+    let u_start = if u_start_raw < start {
+        u_start_raw
+    } else {
+        start
+    };
+    let u_end_raw = partition_lo_lt(in tl.steps.as_slice(), b.tsc);
+    let u_end = if u_end_raw > end {
+        u_end_raw
+    } else {
+        end
+    };
+    Result::Ok(
+        PathSliceRange {
+            from: a,
+            to: b,
+            def_start: start,
+            def_end: end,
+            u_start_begin: u_start,
+            u_start_end: start,
+            u_end_begin: end,
+            u_end_end: u_end,
+        }
+    )
+}
+
+pub fn path_before(in tl: BranchTimeline, to_seq: u64) -> Result[PathSliceRange, PathError] {
+    let i = match anchor_index(in tl, to_seq) {
+        Result::Ok(v) => v,
+        Result::Err(e) => return Result::Err(e),
+    };
+    if i == 0 {
+        return Result::Err(
+            PathError::NoPreviousRecord {
+                lamport_seq: to_seq,
+            }
+        );
+    }
+    let prev = anchor_at(in tl.anchors.as_slice(), wrapping_sub(i, 1));
+    path_between(in tl, prev.lamport_seq, to_seq)
+}
+
+pub fn reverse_watch_path(
+    inout session: ReplaySession,
+    place_hash: u64,
+    in tl: BranchTimeline,
+) -> Result[WatchPathRange, PathError] {
+    let cursor = match reverse_watch_inout(inout session, place_hash) {
+        Result::Ok(c) => c,
+        Result::Err(code) => return Result::Err(PathError::PathReplay(code)),
+    };
+    let path = match path_before(in tl, cursor.lamport_seq) {
+        Result::Ok(p) => p,
+        Result::Err(e) => return Result::Err(e),
+    };
+    Result::Ok(
+        WatchPathRange {
+            cursor: cursor,
+            path: path,
+        }
+    )
+}
