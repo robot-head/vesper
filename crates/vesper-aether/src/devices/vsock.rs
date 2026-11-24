@@ -88,6 +88,17 @@ pub struct VsockHeader {
 }
 impl VsockHeader {
     pub fn encode(&self) -> [u8; HEADER_BYTES] {
+        #[cfg(feature = "vesper-port")]
+        {
+            let mut b = [0u8; HEADER_BYTES];
+            crate::binding::vsock_encode_hdr(*self, &mut b);
+            b
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        self.encode_reference()
+    }
+    #[doc(hidden)]
+    pub fn encode_reference(&self) -> [u8; HEADER_BYTES] {
         let mut b = [0u8; HEADER_BYTES];
         b[0..8].copy_from_slice(&self.src_cid.to_le_bytes());
         b[8..16].copy_from_slice(&self.dst_cid.to_le_bytes());
@@ -102,6 +113,13 @@ impl VsockHeader {
         b
     }
     pub fn decode(b: &[u8]) -> Option<Self> {
+        #[cfg(feature = "vesper-port")]
+        return crate::binding::vsock_decode_hdr(b);
+        #[cfg(not(feature = "vesper-port"))]
+        Self::decode_reference(b)
+    }
+    #[doc(hidden)]
+    pub fn decode_reference(b: &[u8]) -> Option<Self> {
         let b: &[u8; HEADER_BYTES] = b.get(..HEADER_BYTES)?.try_into().ok()?;
         let u64_at = |i: usize| u64::from_le_bytes(b[i..i + 8].try_into().expect("8"));
         let u32_at = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().expect("4"));
@@ -176,6 +194,17 @@ impl Conn {
     }
     /// Bytes we may still send the guest.
     fn guest_credit(&self) -> u32 {
+        #[cfg(feature = "vesper-port")]
+        return crate::binding::vsock_peer_credit(
+            self.peer_buf_alloc,
+            self.tx_cnt,
+            self.peer_fwd_cnt,
+        );
+        #[cfg(not(feature = "vesper-port"))]
+        self.guest_credit_reference()
+    }
+    #[cfg_attr(feature = "vesper-port", allow(dead_code))]
+    fn guest_credit_reference(&self) -> u32 {
         // The in-flight count wraps (sequence counters); the subtraction from
         // the advertised allocation saturates, so a shrunken allocation grants
         // no credit until the guest forwards enough bytes.
@@ -457,6 +486,13 @@ impl VsockDevice {
     }
 
     /// One guest packet. Returns false if malformed (dropped).
+    /// Exposed for `tests/vsock_port.rs`.
+    #[doc(hidden)]
+    pub fn deliver_tx_for_port_test(&mut self, bytes: &[u8]) -> Result<(), DeviceError> {
+        let _ = self.on_guest_packet(bytes);
+        Ok(())
+    }
+
     fn on_guest_packet(&mut self, bytes: &[u8]) -> bool {
         let Some(h) = VsockHeader::decode(bytes) else {
             self.stats.malformed += 1;

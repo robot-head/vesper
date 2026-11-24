@@ -1,6 +1,7 @@
 //! The Vesper port's boundary types: the crate's own where they match, and
 //! port-only ones the binding converts.
 
+pub(crate) use crate::devices::vsock::VsockHeader;
 pub(crate) use crate::slot_plan::{KvmHostLimits, PlannedRegion};
 
 /// `PlanError` as the Vesper verifier returns it (counts as u64).
