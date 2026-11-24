@@ -51,6 +51,12 @@ use self::entry::{
 use self::paths::{
     access_paths_q
 };
+use self::page::{
+    insert as page_insert_impl,
+    update as page_update_impl,
+    used_bytes as page_used_bytes_impl,
+    validate as page_validate_impl
+};
 
 // One SQL token. kind: Word 1 (a, b = pool range of the lowercase word),
 // Param 2 (same), Int 3 (a = the i64 bits), Text 4 (a, b = pool range),
@@ -271,4 +277,21 @@ pub fn set_rows(in prog: Slice[u64], in text: Slice[u8]) -> Q {
 
 pub fn access_paths(in prog: Slice[u64], in text: Slice[u8]) -> Q {
     access_paths_q(in prog, in text)
+}
+
+pub fn page_validate(in b: Slice[u8], inout seen: Slice[u64]) -> u64 {
+    page_validate_impl(in b, inout seen)
+}
+
+pub fn page_used_bytes(in b: Slice[u8]) -> u64 {
+    page_used_bytes_impl(in b)
+}
+
+pub fn page_insert(inout b: Slice[u8], in record: Slice[u8]) -> u64 {
+    page_insert_impl(inout b, in record)
+}
+
+pub fn page_update(inout b: Slice[u8], slot: u64, in record: Slice[u8], inout scratch: Slice[u8])
+    -> u64 {
+    page_update_impl(inout b, slot, in record, inout scratch)
 }

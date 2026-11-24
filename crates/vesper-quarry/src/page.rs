@@ -1,4 +1,5 @@
-//! Checked 16 KiB slotted-page codec. This is a host byte format, not a B+Tree.
+//! Checked 16 KiB slotted-page codec, backed by `@vesper/quarry::page`.
+use crate::port::binding;
 use std::{fmt, ops::Range};
 
 pub const PAGE_SIZE: usize = 16 * 1024;
@@ -6,7 +7,6 @@ pub const HEADER_SIZE: usize = 32;
 pub const SLOT_SIZE: usize = 4;
 pub const MAX_SLOTS: usize = (PAGE_SIZE - HEADER_SIZE) / (SLOT_SIZE + 1);
 pub const MAX_RECORD_SIZE: usize = PAGE_SIZE - HEADER_SIZE - SLOT_SIZE;
-const CRC_RANGE: Range<usize> = 16..20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageError {
@@ -25,6 +25,19 @@ impl fmt::Display for PageError {
     }
 }
 impl std::error::Error for PageError {}
+
+fn page_error(code: u64) -> PageError {
+    match code {
+        1 => PageError::Size,
+        2 => PageError::Checksum,
+        3 => PageError::UnsupportedHeader,
+        4 => PageError::SlotLayout,
+        5 => PageError::SlotOutOfBounds,
+        6 => PageError::RecordSize,
+        7 => PageError::Full,
+        _ => PageError::Overflow,
+    }
+}
 
 /// Exactly these fields are encoded at offsets 0,8,16,20,22,24,25,26,28.
 /// The Rust struct itself is never cast to wire bytes.
@@ -70,16 +83,8 @@ fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {
     bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
 }
 
-/// Castagnoli CRC32C (reflected 0x82f63b78, init/final XOR all ones).
-/// The checksum field itself is treated as four zero bytes.
-pub fn page_crc32c(bytes: &[u8]) -> Result<u32, PageError> {
-    if bytes.len() != PAGE_SIZE {
-        return Err(PageError::Size);
-    }
-    let mut crc = crc32c_update(!0, &bytes[..CRC_RANGE.start]);
-    crc = crc32c_update(crc, &[0; 4]);
-    Ok(!crc32c_update(crc, &bytes[CRC_RANGE.end..]))
-}
+const CRC_RANGE: Range<usize> = 16..20;
+
 const CRC_TABLE: [u32; 256] = {
     let mut table = [0u32; 256];
     let mut i = 0;
@@ -95,6 +100,18 @@ const CRC_TABLE: [u32; 256] = {
     }
     table
 };
+
+/// Castagnoli CRC32C (reflected 0x82f63b78, init/final XOR all ones).
+/// The checksum field itself is treated as four zero bytes.
+pub fn page_crc32c(bytes: &[u8]) -> Result<u32, PageError> {
+    if bytes.len() != PAGE_SIZE {
+        return Err(PageError::Size);
+    }
+    let mut crc = crc32c_update(!0, &bytes[..CRC_RANGE.start]);
+    crc = crc32c_update(crc, &[0; 4]);
+    Ok(!crc32c_update(crc, &bytes[CRC_RANGE.end..]))
+}
+
 /// Table-driven CRC32C state update; callers apply the initial and final XOR.
 pub(crate) fn crc32c_update(mut crc: u32, bytes: &[u8]) -> u32 {
     for &byte in bytes {
@@ -102,6 +119,7 @@ pub(crate) fn crc32c_update(mut crc: u32, bytes: &[u8]) -> u32 {
     }
     crc
 }
+
 /// Castagnoli CRC32C of a whole byte string (used by WAL frames and headers).
 pub fn crc32c(bytes: &[u8]) -> u32 {
     !crc32c_update(!0, bytes)
@@ -135,7 +153,18 @@ impl SlottedPage {
     }
     /// Validates borrowed bytes before copying, so failures preserve the input.
     pub fn decode(bytes: &[u8]) -> Result<Self, PageError> {
-        validate(bytes)?;
+        if bytes.len() != PAGE_SIZE {
+            return Err(PageError::Size);
+        }
+        let h = PageHeader::decode(bytes);
+        if page_crc32c(bytes)? != h.checksum_crc32c {
+            return Err(PageError::Checksum);
+        }
+        let mut seen = [0u64; 256];
+        let err = binding::page_validate(bytes, &mut seen);
+        if err != 0 {
+            return Err(page_error(err));
+        }
         let mut page = Self {
             bytes: Box::new([0; PAGE_SIZE]),
         };
@@ -158,11 +187,7 @@ impl SlottedPage {
     /// Header, directory and live record bytes; `PAGE_SIZE - used_bytes()`
     /// is what an update (which compacts) can still use.
     pub fn used_bytes(&self) -> usize {
-        let records: usize = (0..self.slot_count())
-            .filter_map(|i| slot_range(self.bytes.as_slice(), i).ok())
-            .map(|r| r.len())
-            .sum();
-        HEADER_SIZE + self.slot_count() * SLOT_SIZE + records
+        binding::page_used_bytes(self.bytes.as_slice()) as usize
     }
     pub fn read(&self, slot: u16) -> Result<&[u8], PageError> {
         if usize::from(slot) >= self.slot_count() {
@@ -172,69 +197,30 @@ impl SlottedPage {
         Ok(&self.bytes[range])
     }
     pub fn insert(&mut self, record: &[u8]) -> Result<u16, PageError> {
-        check_record(record)?;
-        let count = self.slot_count();
-        if count >= MAX_SLOTS {
-            return Err(PageError::Full);
+        let res = binding::page_insert(self.bytes.as_mut(), record);
+        if res >= 65536 {
+            Err(page_error(res - 65536))
+        } else {
+            self.refresh_crc();
+            Ok(res as u16)
         }
-        let directory_end = HEADER_SIZE
-            .checked_add(
-                (count + 1)
-                    .checked_mul(SLOT_SIZE)
-                    .ok_or(PageError::Overflow)?,
-            )
-            .ok_or(PageError::Overflow)?;
-        let start = usize::from(self.header().free_space_offset)
-            .checked_sub(record.len())
-            .ok_or(PageError::Full)?;
-        if start < directory_end {
-            return Err(PageError::Full);
-        }
-        // All fallible checks precede the first write.
-        self.bytes[start..start + record.len()].copy_from_slice(record);
-        write_slot(self.bytes.as_mut(), count, start, record.len());
-        write_u16(self.bytes.as_mut(), 20, (count + 1) as u16);
-        write_u16(self.bytes.as_mut(), 22, start as u16);
-        self.refresh_crc();
-        Ok(count as u16)
     }
     /// Rebuilds/compacts into a fresh page, retaining slot identities and metadata.
     /// A capacity or invalid-slot failure leaves the entire previous page intact.
     pub fn update(&mut self, slot: u16, record: &[u8]) -> Result<(), PageError> {
-        check_record(record)?;
-        self.read(slot)?;
-        let count = self.slot_count();
-        let mut used = HEADER_SIZE + count * SLOT_SIZE;
-        for i in 0..count {
-            let len = if i == usize::from(slot) {
-                record.len()
-            } else {
-                self.read(i as u16)?.len()
-            };
-            used = used.checked_add(len).ok_or(PageError::Overflow)?;
+        let mut scratch = Box::new([0u8; PAGE_SIZE]);
+        let err = binding::page_update(
+            self.bytes.as_mut(),
+            u64::from(slot),
+            record,
+            scratch.as_mut(),
+        );
+        if err != 0 {
+            Err(page_error(err))
+        } else {
+            self.refresh_crc();
+            Ok(())
         }
-        if used > PAGE_SIZE {
-            return Err(PageError::Full);
-        }
-        let mut next = Self {
-            bytes: Box::new([0; PAGE_SIZE]),
-        };
-        next.bytes[..HEADER_SIZE].copy_from_slice(&self.bytes[..HEADER_SIZE]);
-        let mut cursor = PAGE_SIZE;
-        for i in 0..count {
-            let data = if i == usize::from(slot) {
-                record
-            } else {
-                self.read(i as u16)?
-            };
-            cursor = cursor.checked_sub(data.len()).ok_or(PageError::Overflow)?;
-            next.bytes[cursor..cursor + data.len()].copy_from_slice(data);
-            write_slot(next.bytes.as_mut(), i, cursor, data.len());
-        }
-        write_u16(next.bytes.as_mut(), 22, cursor as u16);
-        next.refresh_crc();
-        *self = next;
-        Ok(())
     }
     pub(crate) fn set_lsn(&mut self, lsn: u64) {
         self.bytes[..8].copy_from_slice(&lsn.to_le_bytes());
@@ -244,18 +230,6 @@ impl SlottedPage {
         let checksum = page_crc32c(self.bytes.as_slice()).expect("fixed page length");
         self.bytes[CRC_RANGE].copy_from_slice(&checksum.to_le_bytes());
     }
-}
-fn check_record(record: &[u8]) -> Result<(), PageError> {
-    if record.is_empty() || record.len() > MAX_RECORD_SIZE {
-        Err(PageError::RecordSize)
-    } else {
-        Ok(())
-    }
-}
-fn write_slot(bytes: &mut [u8], slot: usize, start: usize, len: usize) {
-    let offset = HEADER_SIZE + slot * SLOT_SIZE;
-    write_u16(bytes, offset, start as u16);
-    write_u16(bytes, offset + 2, len as u16);
 }
 fn slot_range(bytes: &[u8], slot: usize) -> Result<Range<usize>, PageError> {
     let offset = HEADER_SIZE
@@ -271,48 +245,6 @@ fn slot_range(bytes: &[u8], slot: usize) -> Result<Range<usize>, PageError> {
         return Err(PageError::SlotLayout);
     }
     Ok(start..end)
-}
-fn validate(bytes: &[u8]) -> Result<(), PageError> {
-    if bytes.len() != PAGE_SIZE {
-        return Err(PageError::Size);
-    }
-    let h = PageHeader::decode(bytes);
-    if page_crc32c(bytes)? != h.checksum_crc32c {
-        return Err(PageError::Checksum);
-    }
-    if h.page_kind_tag != 1 || h.level != 0 || h.flags != 0 {
-        return Err(PageError::UnsupportedHeader);
-    }
-    let count = usize::from(h.slot_count);
-    if count > MAX_SLOTS {
-        return Err(PageError::SlotLayout);
-    }
-    let directory_end = HEADER_SIZE
-        .checked_add(count.checked_mul(SLOT_SIZE).ok_or(PageError::Overflow)?)
-        .ok_or(PageError::Overflow)?;
-    let free = usize::from(h.free_space_offset);
-    if free < directory_end || free > PAGE_SIZE {
-        return Err(PageError::SlotLayout);
-    }
-    let mut ranges = Vec::with_capacity(count);
-    for i in 0..count {
-        let range = slot_range(bytes, i)?;
-        if range.start < free {
-            return Err(PageError::SlotLayout);
-        }
-        ranges.push(range);
-    }
-    ranges.sort_unstable_by_key(|range| range.start);
-    let first = ranges.first().map_or(PAGE_SIZE, |range| range.start);
-    if first != free {
-        return Err(PageError::SlotLayout);
-    }
-    for pair in ranges.windows(2) {
-        if pair[0].end > pair[1].start {
-            return Err(PageError::SlotLayout);
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
