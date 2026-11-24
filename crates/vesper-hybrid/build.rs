@@ -53,6 +53,12 @@ const MODULES: &[(&str, &str, &str)] = &[
         "modules/ebpf_backend",
         "port/ebpf_backend.rs",
     ),
+    // SH4 lane 14 (#1288): freestanding stubs, linker, trap table and scripts.
+    (
+        "hybrid_freestanding",
+        "modules/freestanding",
+        "port/freestanding.rs",
+    ),
     // SH4 lane 11 (#1285): vector and TiledSeq operations, through the
     // `numeric` hook.
     (

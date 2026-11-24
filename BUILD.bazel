@@ -1420,6 +1420,13 @@ vesper_package(
 )
 
 vesper_package(
+    name = "codegen_freestanding_package",
+    srcs = glob(["packages/vesper-codegen-freestanding/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-freestanding/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
+vesper_package(
     name = "wit_component_package",
     srcs = glob(["packages/vesper-wit-component/src/**/*.ves"]),
     manifest = "packages/vesper-wit-component/Loom.toml",

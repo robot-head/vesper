@@ -1,0 +1,28 @@
+// @vesper/hybrid-freestanding: `vesper::native::freestanding::build_image`
+// parts served from Vesper in the hybrid Stage 2 build (SH4 lane 14, #1288),
+// through the `freestanding` hook of `vesper::codegen_swap`.
+
+// @export abi 4
+
+use @vesper/codegen-freestanding::{
+    freestanding_compare_code,
+    freestanding_link,
+    freestanding_script,
+    freestanding_stub
+};
+
+pub fn script_words(in req: Slice[u8]) -> ChunkSeq[u8] {
+    freestanding_script(in req)
+}
+
+pub fn stub_words(in req: Slice[u8]) -> ChunkSeq[u8] {
+    freestanding_stub(in req)
+}
+
+pub fn link_words(in req: Slice[u8]) -> ChunkSeq[u8] {
+    freestanding_link(in req)
+}
+
+pub fn compare_code_words(in req: Slice[u8]) -> ChunkSeq[u8] {
+    freestanding_compare_code(in req)
+}

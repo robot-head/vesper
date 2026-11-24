@@ -494,6 +494,35 @@ pub fn trap_message(code: cranelift_codegen::ir::TrapCode) -> String {
     }
 }
 
+/// Output of linking a freestanding image (used by [`FreestandingOps`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkedImage {
+    pub entry: u64,
+    pub layout: link::Layout,
+    pub symbols: Vec<link::LinkedSymbol>,
+    pub pcs: Vec<u64>,
+    pub elf: Vec<u8>,
+}
+
+pub type CompareCodeFn<'a> = dyn Fn(&[u8], &str, &[u8]) -> Result<(), FreestandingError> + 'a;
+pub type StubFn<'a> =
+    dyn Fn(FreestandingTarget, &Board, u32) -> Result<Vec<u8>, FreestandingError> + 'a;
+pub type LinkFn<'a> = dyn Fn(
+        &[(String, Vec<u8>)],
+        &link::LinkOptions,
+        &[(String, String, u64)],
+    ) -> Result<LinkedImage, FreestandingError>
+    + 'a;
+pub type ScriptFn<'a> = dyn Fn(FreestandingTarget, &Board, u32) -> String + 'a;
+
+/// Pluggable linking/stub/script/code-check operations for [`build_image_with`].
+pub struct FreestandingOps<'a> {
+    pub compare_code: &'a CompareCodeFn<'a>,
+    pub stub: &'a StubFn<'a>,
+    pub link: &'a LinkFn<'a>,
+    pub script: &'a ScriptFn<'a>,
+}
+
 /// Compile `entry` of a checked `world` into a bootable image.
 pub fn build_image(
     world: &World,
@@ -506,6 +535,56 @@ pub fn build_image(
     {
         return r;
     }
+    let ops = FreestandingOps {
+        compare_code: &checks::compare_code,
+        stub: &stub::build,
+        link: &|objects, link_options, traps| {
+            let linked = link::link(objects, link_options)?;
+            let pcs = traps
+                .iter()
+                .map(|(object, function, offset)| {
+                    linked
+                        .symbols
+                        .iter()
+                        .find(|s| s.object == *object && s.name == *function)
+                        .map(|sym| sym.address + offset)
+                        .ok_or_else(|| FreestandingError::UnresolvedSymbol {
+                            symbol: function.clone(),
+                            object: "trap table".into(),
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(LinkedImage {
+                entry: linked.entry,
+                layout: linked.layout,
+                symbols: linked.symbols,
+                pcs,
+                elf: linked.elf,
+            })
+        },
+        script: &script::linker_script,
+    };
+    build_image_with_rust_patch(world, entry, options, &ops, true)
+}
+
+/// Compile `entry` using caller-supplied linking, stub, script and code-check
+/// operations (with trap resolution and trap-table patching handled by `ops.link`).
+pub fn build_image_with(
+    world: &World,
+    entry: &str,
+    options: &ImageOptions,
+    ops: &FreestandingOps<'_>,
+) -> Result<FreestandingImage, FreestandingError> {
+    build_image_with_rust_patch(world, entry, options, ops, false)
+}
+
+fn build_image_with_rust_patch(
+    world: &World,
+    entry: &str,
+    options: &ImageOptions,
+    ops: &FreestandingOps<'_>,
+    patch_traps: bool,
+) -> Result<FreestandingImage, FreestandingError> {
     let target = options.target;
     let board = options.board.clone().unwrap_or_else(|| target.qemu_virt());
     let (kind, fail) = result_kind(world, entry)?;
@@ -554,7 +633,7 @@ pub fn build_image(
             .compile(&*isa, &mut ControlPlane::default())
             .map_err(|e| FreestandingError::Codegen(format!("{}: {:?}", f.symbol, e.inner)))?;
         let code = compiled.code_buffer().to_vec();
-        checks::compare_code(&user_object, &f.symbol, &code)?;
+        (ops.compare_code)(&user_object, &f.symbol, &code)?;
         code_sizes.insert(f.symbol.clone(), code.len());
         for t in compiled.buffer.traps() {
             traps.push((f.symbol.clone(), u64::from(t.offset), t.code));
@@ -629,7 +708,7 @@ pub fn build_image(
         });
     }
     debug_assert_eq!(trap_entries.len(), user_traps + abort_messages.len());
-    let stub = stub::build(target, &board, object_flags(&user_object)?)?;
+    let stub = (ops.stub)(target, &board, object_flags(&user_object)?)?;
 
     // Silicon: frames, worst-case depth and interrupt-mask rules.
     let analysed = checks::analyse(
@@ -653,10 +732,25 @@ pub fn build_image(
         ram_bytes: board.ram_bytes,
         stack_bytes: u64::from(options.stack_bytes),
     };
-    let mut linked = link::link(&objects, &link_options)?;
-    let sites = resolve_traps(&linked.symbols, &trap_entries, &messages)?;
-    patch_trap_table(&mut linked.elf, &linked.symbols, &linked.layout, &sites)?;
-    let linker_script = script::linker_script(target, &board, options.stack_bytes);
+    let trap_specs: Vec<(String, String, u64)> = trap_entries
+        .iter()
+        .map(|e| (e.object.to_string(), e.function.clone(), e.offset))
+        .collect();
+    let mut linked = (ops.link)(&objects, &link_options, &trap_specs)?;
+    let sites = trap_entries
+        .iter()
+        .zip(&linked.pcs)
+        .map(|(e, &pc)| TrapSite {
+            pc,
+            function: e.function.clone(),
+            code: e.code.to_string(),
+            message: messages[e.message].clone(),
+        })
+        .collect::<Vec<_>>();
+    if patch_traps {
+        patch_trap_table(&mut linked.elf, &linked.symbols, &linked.layout, &sites)?;
+    }
+    let linker_script = (ops.script)(target, &board, options.stack_bytes);
     Ok(FreestandingImage {
         target,
         board,
@@ -685,39 +779,6 @@ struct TrapEntry {
     offset: u64,
     code: cranelift_codegen::ir::TrapCode,
     message: usize,
-}
-
-fn resolve_traps(
-    symbols: &[link::LinkedSymbol],
-    entries: &[TrapEntry],
-    messages: &[String],
-) -> Result<Vec<TrapSite>, FreestandingError> {
-    entries
-        .iter()
-        .map(
-            |TrapEntry {
-                 object,
-                 function,
-                 offset,
-                 code,
-                 message,
-             }| {
-                let sym = symbols
-                    .iter()
-                    .find(|s| s.object == *object && s.name == *function)
-                    .ok_or_else(|| FreestandingError::UnresolvedSymbol {
-                        symbol: function.clone(),
-                        object: "trap table".into(),
-                    })?;
-                Ok(TrapSite {
-                    pc: sym.address + offset,
-                    function: function.clone(),
-                    code: code.to_string(),
-                    message: messages[*message].clone(),
-                })
-            },
-        )
-        .collect()
 }
 
 /// Fill the program counters of the runtime's trap table in a linked image.
