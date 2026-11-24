@@ -632,3 +632,226 @@ fn crmath_matches_the_rust_build() {
     println!("flip-gate differential differences={differences} cases={cases}");
     assert_eq!(differences, 0);
 }
+
+#[test]
+fn sleep_matches_the_rust_build() {
+    use vesper_kinetic::{
+        ColliderShape as PShape, RigidBody as PBody, RigidCollider as PCollider,
+        RigidConfig as PConfig, RigidMaterial as PMat, RigidWorld as PWorld, SleepConfig as PSleep,
+    };
+    use vesper_kinetic_rust::{
+        ColliderShape as RShape, RigidBody as RBody, RigidCollider as RCollider,
+        RigidConfig as RConfig, RigidMaterial as RMat, RigidWorld as RWorld, SleepConfig as RSleep,
+    };
+
+    let mut rng = Lcg(0x736c_6565_7031_u64);
+    let mut differences = 0usize;
+    let mut cases = 0usize;
+    for _ in 0..64 {
+        let count = 8 + (rng.next() % 8) as usize;
+        let mut pbodies = Vec::with_capacity(count);
+        let mut rbodies = Vec::with_capacity(count);
+        for i in 0..count {
+            let x = [
+                (i as f32) * 0.1 + rng.range(-0.05, 0.05) as f32,
+                0.5 + (i as f32) * 1.01,
+                rng.range(-0.05, 0.05) as f32,
+            ];
+            let v = [
+                rng.range(-0.02, 0.02) as f32,
+                rng.range(-0.02, 0.02) as f32,
+                rng.range(-0.02, 0.02) as f32,
+            ];
+            let mut pb = PBody::new(x, 1.0, [2.0, 2.0, 2.0], 0);
+            pb.vel = v;
+            pbodies.push(pb);
+            let mut rb = RBody::new(x, 1.0, [2.0, 2.0, 2.0], 0);
+            rb.vel = v;
+            rbodies.push(rb);
+        }
+        let mut pw = PWorld::new(
+            PConfig {
+                dt: 1.0 / 60.0,
+                substeps: 4,
+                ..PConfig::default()
+            },
+            &pbodies,
+            &[PCollider {
+                shape: PShape::Box {
+                    half_extents: [0.5, 0.5, 0.5],
+                },
+                material: PMat::default(),
+            }],
+        )
+        .unwrap();
+        pw.set_sleeping(Some(PSleep {
+            linear_threshold: 0.2,
+            angular_threshold: 0.2,
+            ticks: 4,
+        }))
+        .unwrap();
+
+        let mut rw = RWorld::new(
+            RConfig {
+                dt: 1.0 / 60.0,
+                substeps: 4,
+                ..RConfig::default()
+            },
+            &rbodies,
+            &[RCollider {
+                shape: RShape::Box {
+                    half_extents: [0.5, 0.5, 0.5],
+                },
+                material: RMat::default(),
+            }],
+        )
+        .unwrap();
+        rw.set_sleeping(Some(RSleep {
+            linear_threshold: 0.2,
+            angular_threshold: 0.2,
+            ticks: 4,
+        }))
+        .unwrap();
+
+        for step in 0..30 {
+            if step == 15 {
+                pw.wake(0);
+                rw.wake(0);
+            }
+            pw.step().unwrap();
+            rw.step().unwrap();
+            cases += 1;
+            if pw.hash().blake3 != rw.hash().blake3 || pw.sleeping_count() != rw.sleeping_count() {
+                differences += 1;
+            }
+        }
+    }
+    println!("sleep differential differences={differences} cases={cases}");
+    assert_eq!(differences, 0);
+}
+
+#[test]
+#[ignore = "ABBA benchmark; run in release with --ignored --nocapture"]
+fn abba_sleep() {
+    use std::hint::black_box;
+    use vesper_bench::{BenchCase, Invocation, RunConfig, run_abba};
+    use vesper_kinetic::{
+        ColliderShape as PShape, RigidBody as PBody, RigidCollider as PCollider,
+        RigidConfig as PConfig, RigidMaterial as PMat, RigidWorld as PWorld, SleepConfig as PSleep,
+    };
+    use vesper_kinetic_rust::{
+        ColliderShape as RShape, RigidBody as RBody, RigidCollider as RCollider,
+        RigidConfig as RConfig, RigidMaterial as RMat, RigidWorld as RWorld, SleepConfig as RSleep,
+    };
+
+    let body_count = 64usize;
+    let mut pbodies = Vec::with_capacity(body_count);
+    let mut rbodies = Vec::with_capacity(body_count);
+    for i in 0..body_count {
+        let x = [(i as f32) * 2.0, 0.5, 0.0];
+        pbodies.push(PBody::new(x, 1.0, [2.0, 2.0, 2.0], 0));
+        rbodies.push(RBody::new(x, 1.0, [2.0, 2.0, 2.0], 0));
+    }
+    let mut pw = PWorld::new(
+        PConfig {
+            dt: 1.0 / 60.0,
+            substeps: 2,
+            ..PConfig::default()
+        },
+        &pbodies,
+        &[PCollider {
+            shape: PShape::Box {
+                half_extents: [0.5, 0.5, 0.5],
+            },
+            material: PMat::default(),
+        }],
+    )
+    .unwrap();
+    pw.set_sleeping(Some(PSleep {
+        linear_threshold: 0.1,
+        angular_threshold: 0.1,
+        ticks: 1000,
+    }))
+    .unwrap();
+
+    let mut rw = RWorld::new(
+        RConfig {
+            dt: 1.0 / 60.0,
+            substeps: 2,
+            ..RConfig::default()
+        },
+        &rbodies,
+        &[RCollider {
+            shape: RShape::Box {
+                half_extents: [0.5, 0.5, 0.5],
+            },
+            material: RMat::default(),
+        }],
+    )
+    .unwrap();
+    rw.set_sleeping(Some(RSleep {
+        linear_threshold: 0.1,
+        angular_threshold: 0.1,
+        ticks: 1000,
+    }))
+    .unwrap();
+
+    struct StepCase<F>(F);
+    impl<F: FnMut() -> usize> BenchCase for StepCase<F> {
+        type Input = ();
+        type Output = usize;
+        type Error = std::convert::Infallible;
+        fn setup(&mut self, _: Invocation) -> Result<Self::Input, Self::Error> {
+            Ok(())
+        }
+        fn run(&mut self, _: Self::Input) -> Result<Self::Output, Self::Error> {
+            Ok(black_box((self.0)()))
+        }
+    }
+
+    let cfg = RunConfig {
+        epochs: 30,
+        warmup_epochs: 2,
+        operations_per_window: 8,
+        max_total_calls: 100_000,
+        max_elapsed_nanos: 600_000_000_000,
+        layout_seed: 1,
+    };
+    let mut r_case = StepCase(|| {
+        rw.step().unwrap();
+        rw.sleeping_count()
+    });
+    let mut p_case = StepCase(|| {
+        pw.step().unwrap();
+        pw.sleeping_count()
+    });
+    let report = run_abba(cfg, &mut r_case, &mut p_case).unwrap();
+    let pairs = report.pairs();
+    let mut ratios: Vec<f64> = pairs
+        .iter()
+        .map(|p| p.candidate_total() as f64 / p.baseline_total() as f64)
+        .collect();
+    ratios.sort_by(f64::total_cmp);
+    let mid = ratios.len() / 2;
+    let mut cdf = 0.0;
+    let mut choose = 1.0;
+    let mut k = 0usize;
+    for j in 0..ratios.len() {
+        cdf += choose * 0.5f64.powi(ratios.len() as i32);
+        if cdf > 0.025 {
+            break;
+        }
+        k = j + 1;
+        choose = choose * (ratios.len() - j) as f64 / (j + 1) as f64;
+    }
+    let i = k.saturating_sub(1).min(mid);
+    let (ci_lo, ci_hi) = (ratios[i], ratios[ratios.len() - 1 - i]);
+    println!(
+        "ABBA sleep: median {:.3}x [{ci_lo:.3}x, {ci_hi:.3}x]",
+        ratios[mid]
+    );
+    assert!(
+        ci_hi <= 1.50,
+        "ABBA 95% upper bound {ci_hi:.3}x exceeds 1.50x"
+    );
+}

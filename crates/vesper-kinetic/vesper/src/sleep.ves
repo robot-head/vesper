@@ -1,0 +1,180 @@
+// @vesper/kinetic::sleep: sleeping islands union-find and sleep state (`src/rigid/sleep.rs`).
+
+fn g8(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn s8(inout s: Slice[u8], i: u64, v: u8) {
+    s.try_set(i, v);
+}
+
+fn g32(in s: Slice[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn s32(inout s: Slice[u32], i: u64, v: u32) {
+    s.try_set(i, v);
+}
+
+fn find(inout island: Slice[u32], start: u32) -> u32 {
+    let mut i = start;
+    loop {
+        let idx = widen_u64(i);
+        let p = g32(in island, idx);
+        if p == i {
+            return i;
+        }
+        let gp = g32(in island, widen_u64(p));
+        s32(inout island, idx, gp);
+        i = p;
+    }
+}
+
+fn union(inout island: Slice[u32], a: u32, b: u32) {
+    let ra = find(inout island, a);
+    let rb = find(inout island, b);
+    if ra < rb {
+        s32(inout island, widen_u64(rb), ra);
+    } else if ra > rb {
+        s32(inout island, widen_u64(ra), rb);
+    }
+}
+
+fn build_islands(inout island: Slice[u32], in edge_a: Slice[u32], in edge_b: Slice[u32]) {
+    let n = island.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        s32(inout island, i, wrapping_u32(i));
+        i = wrapping_add(i, 1);
+    }
+    let m = edge_a.len();
+    let mut k: u64 = 0;
+    loop {
+        if k >= m {
+            break;
+        }
+        let a = g32(in edge_a, k);
+        let b = g32(in edge_b, k);
+        union(inout island, a, b);
+        k = wrapping_add(k, 1);
+    }
+}
+
+fn clear_u8(inout s: Slice[u8], n: u64) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        s8(inout s, i, 0);
+        i = wrapping_add(i, 1);
+    }
+}
+
+pub fn wake_island_pass(
+    in is_dyn: Slice[u8],
+    in edge_a: Slice[u32],
+    in edge_b: Slice[u32],
+    inout island: Slice[u32],
+    inout island_awake: Slice[u8],
+    inout asleep: Slice[u8],
+    inout sleep_ticks: Slice[u32]
+) -> bool {
+    let n = is_dyn.len();
+    build_islands(inout island, in edge_a, in edge_b);
+    clear_u8(inout island_awake, n);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        if g8(in is_dyn, i) != 0 && g8(in asleep, i) == 0 {
+            let r = widen_u64(find(inout island, wrapping_u32(i)));
+            s8(inout island_awake, r, 1);
+        }
+        i = wrapping_add(i, 1);
+    }
+    let mut woke = false;
+    i = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        if g8(in is_dyn, i) != 0 && g8(in asleep, i) != 0 {
+            let r = widen_u64(find(inout island, wrapping_u32(i)));
+            if g8(in island_awake, r) != 0 {
+                s8(inout asleep, i, 0);
+                s32(inout sleep_ticks, i, 0);
+                woke = true;
+            }
+        }
+        i = wrapping_add(i, 1);
+    }
+    woke
+}
+
+pub fn update_sleep_pass(
+    in is_dyn: Slice[u8],
+    in quiet: Slice[u8],
+    in edge_a: Slice[u32],
+    in edge_b: Slice[u32],
+    ticks: u32,
+    inout island: Slice[u32],
+    inout island_awake: Slice[u8],
+    inout asleep: Slice[u8],
+    inout sleep_ticks: Slice[u32]
+) {
+    let n = is_dyn.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        if g8(in is_dyn, i) != 0 && g8(in asleep, i) == 0 {
+            if g8(in quiet, i) != 0 {
+                let t = g32(in sleep_ticks, i);
+                if t < 0xffffffff {
+                    s32(inout sleep_ticks, i, wrapping_u32(wrapping_add(widen_u64(t), 1)));
+                }
+            } else {
+                s32(inout sleep_ticks, i, 0);
+            }
+        }
+        i = wrapping_add(i, 1);
+    }
+    build_islands(inout island, in edge_a, in edge_b);
+    clear_u8(inout island_awake, n);
+    i = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        if g8(in is_dyn, i) != 0 && g8(in asleep, i) == 0 && g32(in sleep_ticks, i) < ticks {
+            let r = widen_u64(find(inout island, wrapping_u32(i)));
+            s8(inout island_awake, r, 1);
+        }
+        i = wrapping_add(i, 1);
+    }
+    i = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        if g8(in is_dyn, i) != 0 && g8(in asleep, i) == 0 {
+            let r = widen_u64(find(inout island, wrapping_u32(i)));
+            if g8(in island_awake, r) == 0 {
+                s8(inout asleep, i, 1);
+            }
+        }
+        i = wrapping_add(i, 1);
+    }
+}
