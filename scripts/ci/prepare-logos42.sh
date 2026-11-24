@@ -8,7 +8,7 @@ if [[ $# != 1 || -z "${VESPER_LEAN:-}" ]]; then
 fi
 
 . scripts/bazel-lib.sh
-driver="$(bazel_executable //:bin/logos42)"
+driver="$(bazel_executable //crates/vesper-oracles:bin/logos42)"
 if [[ -n "${VESPER_CARGO:-}" ]]; then
   checker_cargo="$VESPER_CARGO"
 elif command -v rustup >/dev/null 2>&1; then

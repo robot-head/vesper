@@ -7,60 +7,60 @@ pub const MODULE: &str = "ResourceModel42Kernel";
 pub const ORIGINAL: &str = "ResourceModel42.Acceptance";
 pub const MARKER: &[u8] = b"VESPER_RESOURCE_KERNEL_SNAPSHOT_V1:";
 const MIB: usize = 1024 * 1024;
-const BUNDLE: &[u8] = include_bytes!("../../../tools/logos42/resource-source-manifest.json");
+const BUNDLE: &[u8] = include_bytes!("../../../../../tools/logos42/resource-source-manifest.json");
 pub(super) const TOOL: &[u8] =
-    include_bytes!("../../../tools/resource-model42/KernelSnapshot.lean");
+    include_bytes!("../../../../../tools/resource-model42/KernelSnapshot.lean");
 pub(super) const HISTORICAL: &[u8] =
-    include_bytes!("../../../docs/rfcs/resource-model42-source-manifest.json");
+    include_bytes!("../../../../../docs/rfcs/resource-model42-source-manifest.json");
 // Dependency order is fixed, not inferred from user input.
 pub(super) const SOURCES: [(&str, &[u8]); 12] = [
     (
         "MetatheoryFull",
-        include_bytes!("../../../lean/MetatheoryFull.lean"),
+        include_bytes!("../../../../../lean/MetatheoryFull.lean"),
     ),
     (
         "ResourceModel42.Syntax",
-        include_bytes!("../../../lean/ResourceModel42/Syntax.lean"),
+        include_bytes!("../../../../../lean/ResourceModel42/Syntax.lean"),
     ),
     (
         "ResourceModel42.Checker",
-        include_bytes!("../../../lean/ResourceModel42/Checker.lean"),
+        include_bytes!("../../../../../lean/ResourceModel42/Checker.lean"),
     ),
     (
         "ResourceModel42.CheckerProofs",
-        include_bytes!("../../../lean/ResourceModel42/CheckerProofs.lean"),
+        include_bytes!("../../../../../lean/ResourceModel42/CheckerProofs.lean"),
     ),
     (
         "ResourceModel42.Evaluator",
-        include_bytes!("../../../lean/ResourceModel42/Evaluator.lean"),
+        include_bytes!("../../../../../lean/ResourceModel42/Evaluator.lean"),
     ),
     (
         "ResourceModel42.ErasureProofs",
-        include_bytes!("../../../lean/ResourceModel42/ErasureProofs.lean"),
+        include_bytes!("../../../../../lean/ResourceModel42/ErasureProofs.lean"),
     ),
     (
         "ResourceModel42.LedgerProofs",
-        include_bytes!("../../../lean/ResourceModel42/LedgerProofs.lean"),
+        include_bytes!("../../../../../lean/ResourceModel42/LedgerProofs.lean"),
     ),
     (
         "ResourceModel42.MetricsProofs",
-        include_bytes!("../../../lean/ResourceModel42/MetricsProofs.lean"),
+        include_bytes!("../../../../../lean/ResourceModel42/MetricsProofs.lean"),
     ),
     (
         "ResourceModel42.EvaluatorProofs",
-        include_bytes!("../../../lean/ResourceModel42/EvaluatorProofs.lean"),
+        include_bytes!("../../../../../lean/ResourceModel42/EvaluatorProofs.lean"),
     ),
     (
         "ResourceModel42.Proofs",
-        include_bytes!("../../../lean/ResourceModel42/Proofs.lean"),
+        include_bytes!("../../../../../lean/ResourceModel42/Proofs.lean"),
     ),
     (
         "ResourceModel42",
-        include_bytes!("../../../lean/ResourceModel42.lean"),
+        include_bytes!("../../../../../lean/ResourceModel42.lean"),
     ),
     (
         "ResourceModel42.Acceptance",
-        include_bytes!("../../../lean/ResourceModel42/Acceptance.lean"),
+        include_bytes!("../../../../../lean/ResourceModel42/Acceptance.lean"),
     ),
 ];
 fn bad(detail: &str) -> Error {

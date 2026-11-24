@@ -1,0 +1,58 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+# The `*42` oracles embed the Lean models, the Logos checker recipe and the
+# resource-model manifests from the root package (`//:oracle_sources`). Their
+# tests run against the whole root package (`//:files`), as they did when
+# they were root integration tests; resource_oracle42 reads `../../lean`.
+vesper_crate(
+    copy_test_cwd = ["test/resource_oracle42"],
+    extra_compile_data = ["//:oracle_sources"],
+    extra_test_data = ["//:files"],
+    # The sealed Logos root is a fresh external input on every CI run. Only
+    # its acceptance test inherits the random path (and must rerun).
+    test_env_inherit = {
+        "test/logos42_acceptance": ["VESPER_LOGOS42_ROOT"],
+    },
+    # Reservations include subprocess overhead; they do not enforce RSS limits.
+    # `lean_replay` marks the Lean/Logos suite run by "Native and acceptance
+    # scripts" (scripts/ci/lean_replay_scope.py, docs/ci-platforms.md).
+    test_tags = {
+        "test/logos42_acceptance": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+            "lean_replay",
+        ],
+        # Serial Lean -j1/-M4096 stages plus estimated wrapper overhead (#615).
+        "test/resource_oracle42": [
+            "resources:memory:5120",
+            "resources:cpu:1",
+            "lean_replay",
+        ],
+        "test/oracle42_acceptance": [
+            "resources:memory:5120",
+            "resources:cpu:1",
+            "lean_replay",
+        ],
+    },
+    # Long, platform-neutral Lean replays run on Linux (BuildBuddy) only; see
+    # "Linux-only suites" in docs/ci-platforms.md.
+    test_target_compatible_with = {
+        # Fresh Logos replay of all three complete model import closures.
+        # Keep the external native-checker setup on the Linux lane.
+        "test/logos42_acceptance": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        "test/oracle42_acceptance": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+    },
+    test_timeouts = {
+        # Fresh replay covers both complete model import closures.
+        "test/logos42_acceptance": "eternal",
+        "test/oracle42_acceptance": "long",
+        # Serial fresh Lean endpoint sessions need the complete 900 s envelope (#574).
+        "test/resource_oracle42": "long",
+    },
+)

@@ -138,7 +138,7 @@ Kept Rust on purpose (owner, 2026-11-21: "keep oracles in rust"):
 | Rust left | Lines | Why |
 |---|--:|---|
 | `vesper-codegen-verified` (the DDC auditor) | 1.4k | Diverse double-compiling needs a second, independent implementation. Rewriting it in Vesper would compile it with the compiler it audits. |
-| `src/bin/*42` (arithmetic, resource, Lean and lexer oracles) | 10.8k | The same reason: diverse test oracles. |
+| `crates/vesper-oracles` (the `*42` arithmetic, resource, Lean and lexer oracles, formerly `src/bin`) | 12.7k | The same reason: diverse test oracles. |
 
 Everything else talks to C or the OS (libc, syscalls, io_uring, KVM,
 perf_event, AF_XDP, GTK, Vulkan, wasmtime's C API, BLAKE3's C library),
