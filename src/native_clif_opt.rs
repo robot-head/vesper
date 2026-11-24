@@ -35,8 +35,8 @@ use cranelift_codegen::cursor::Cursor as _;
 use cranelift_codegen::dominator_tree::DominatorTree;
 use cranelift_codegen::flowgraph::ControlFlowGraph;
 use cranelift_codegen::ir::{
-    self, Block, BlockArg, Inst, InstBuilder, InstructionData, Opcode, StackSlot, StackSlotKind,
-    Type, Value, types,
+    self, Block, BlockArg, BlockCall, Inst, InstBuilder, InstructionData, JumpTableData, Opcode,
+    StackSlot, StackSlotKind, Type, Value, types,
 };
 use cranelift_codegen::loop_analysis::{Loop, LoopAnalysis};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -82,6 +82,8 @@ pub fn run(func: &mut ir::Function) {
     remove_constant_params(func);
     fold_constant_branches(func);
     merge_blocks(func);
+    dense_icmp_chains_to_br_table(func);
+    remove_dead(func);
     sink_slot_inits(func);
     merge_tails(func);
     shrink_unused_slots(func);
@@ -4442,6 +4444,248 @@ fn reuse_seq_header_loads(func: &mut ir::Function) {
                 };
                 stack.push((child, child_avail));
             }
+        }
+    }
+}
+
+/// Converts dense linear chains of `icmp_imm eq key, k; brif` blocks (>= 4
+/// cases, >= 50% density, span <= 4096, zero-arg branch targets) into a
+/// Cranelift `br_table` jump table.
+fn dense_icmp_chains_to_br_table(func: &mut ir::Function) {
+    use cranelift_codegen::ir::condcodes::IntCC;
+
+    let norm_imm = |ty: Type, bits: i64| -> Option<i64> {
+        match ty {
+            types::I8 => Some(i64::from(bits as u8)),
+            types::I16 => Some(i64::from(bits as u16)),
+            types::I32 => Some(i64::from(bits as i32)),
+            types::I64 => Some(bits),
+            _ => None,
+        }
+    };
+
+    let cfg = ControlFlowGraph::with_function(func);
+    let mut use_counts: HashMap<Value, usize> = HashMap::new();
+    for (_, inst) in insts(func) {
+        for v in values_of(func, inst) {
+            *use_counts.entry(func.dfg.resolve_aliases(v)).or_default() += 1;
+        }
+    }
+
+    let match_brif_eq =
+        |func: &ir::Function, blk: Block| -> Option<(Inst, Inst, Value, Type, i64, Block, Block)> {
+            let brif_inst = func.layout.last_inst(blk)?;
+            let InstructionData::Brif {
+                arg: cond,
+                blocks: [t_call, f_call],
+                ..
+            } = func.dfg.insts[brif_inst]
+            else {
+                return None;
+            };
+            if t_call.len(&func.dfg.value_lists) != 0 || f_call.len(&func.dfg.value_lists) != 0 {
+                return None;
+            }
+            let cond = func.dfg.resolve_aliases(cond);
+            let cmp_inst = func.dfg.value_def(cond).inst()?;
+            if func.layout.inst_block(cmp_inst) != Some(blk) {
+                return None;
+            }
+            let (arg, raw_k, is_eq) = match func.dfg.insts[cmp_inst] {
+                InstructionData::IntCompareImm {
+                    opcode: Opcode::IcmpImm,
+                    cond: IntCC::Equal,
+                    arg,
+                    imm,
+                } => (arg, imm.bits(), true),
+                InstructionData::IntCompareImm {
+                    opcode: Opcode::IcmpImm,
+                    cond: IntCC::NotEqual,
+                    arg,
+                    imm,
+                } => (arg, imm.bits(), false),
+                InstructionData::IntCompare {
+                    opcode: Opcode::Icmp,
+                    cond,
+                    args: [lhs, rhs],
+                } if matches!(cond, IntCC::Equal | IntCC::NotEqual) => {
+                    let eq = cond == IntCC::Equal;
+                    if let Some(c) = constant(func, rhs, 2) {
+                        (lhs, c, eq)
+                    } else {
+                        let c = constant(func, lhs, 2)?;
+                        (rhs, c, eq)
+                    }
+                }
+                _ => return None,
+            };
+            let key = func.dfg.resolve_aliases(arg);
+            let key_ty = func.dfg.value_type(key);
+            let k = norm_imm(key_ty, raw_k)?;
+            let t_blk = t_call.block(&func.dfg.value_lists);
+            let f_blk = f_call.block(&func.dfg.value_lists);
+            if t_blk == f_blk || t_blk == blk || f_blk == blk {
+                return None;
+            }
+            let (arm_blk, next_blk) = if is_eq {
+                (t_blk, f_blk)
+            } else {
+                (f_blk, t_blk)
+            };
+            Some((brif_inst, cmp_inst, key, key_ty, k, arm_blk, next_blk))
+        };
+
+    let blocks: Vec<Block> = func.layout.blocks().collect();
+    let mut removed: HashSet<Block> = HashSet::new();
+    for head in blocks {
+        if removed.contains(&head) || !func.layout.is_block_inserted(head) {
+            continue;
+        }
+        let Some((head_brif, head_cmp, key, key_ty, k0, arm0, mut cur)) = match_brif_eq(func, head)
+        else {
+            continue;
+        };
+        let mut cases: Vec<(i64, Block)> = vec![(k0, arm0)];
+        let mut chain_nodes: Vec<Block> = Vec::new();
+        let mut seen: HashSet<Block> = HashSet::from([head]);
+
+        while !seen.contains(&cur)
+            && !removed.contains(&cur)
+            && func.layout.is_block_inserted(cur)
+            && cfg.pred_iter(cur).count() == 1
+            && func.dfg.block_params(cur).is_empty()
+        {
+            let Some((brif_inst, cmp_inst, k_val, _, ki, arm_i, next_i)) = match_brif_eq(func, cur)
+            else {
+                break;
+            };
+            if k_val != key
+                || use_counts
+                    .get(&func.dfg.first_result(cmp_inst))
+                    .copied()
+                    .unwrap_or(0)
+                    != 1
+            {
+                break;
+            }
+            let only_cmp_and_consts = func.layout.block_insts(cur).all(|i| {
+                i == brif_inst
+                    || i == cmp_inst
+                    || (func.dfg.insts[i].opcode() == Opcode::Iconst
+                        && use_counts
+                            .get(&func.dfg.first_result(i))
+                            .copied()
+                            .unwrap_or(0)
+                            == 1)
+            });
+            if !only_cmp_and_consts {
+                break;
+            }
+            seen.insert(cur);
+            cases.push((ki, arm_i));
+            chain_nodes.push(cur);
+            cur = next_i;
+        }
+
+        if cases.len() < 4 || seen.contains(&cur) || removed.contains(&cur) {
+            continue;
+        }
+        if cases
+            .iter()
+            .any(|&(_, a)| seen.contains(&a) || removed.contains(&a))
+        {
+            continue;
+        }
+        let default_blk = cur;
+
+        let mut dedup: BTreeMap<i64, Block> = BTreeMap::new();
+        for (k, arm) in cases {
+            dedup.entry(k).or_insert(arm);
+        }
+        if dedup.len() < 4 {
+            continue;
+        }
+        let min_k = *dedup.keys().next().unwrap();
+        let max_k = *dedup.keys().next_back().unwrap();
+        let span_i128 = i128::from(max_k) - i128::from(min_k) + 1;
+        if !(4..=4096).contains(&span_i128) || dedup.len() * 2 < span_i128 as usize {
+            continue;
+        }
+        let span = span_i128 as usize;
+        let Ok(neg_min) = i64::try_from(-i128::from(min_k)) else {
+            continue;
+        };
+        if (key_ty == types::I8 || key_ty == types::I16) && min_k < 0 {
+            continue;
+        }
+
+        let mut table = Vec::with_capacity(span);
+        for off in 0..span {
+            let k = min_k + off as i64;
+            let dst = dedup.get(&k).copied().unwrap_or(default_blk);
+            table.push(BlockCall::new(dst, [], &mut func.dfg.value_lists));
+        }
+
+        let jt_data = JumpTableData::new(
+            BlockCall::new(default_blk, [], &mut func.dfg.value_lists),
+            &table,
+        );
+        let mut pos = cranelift_codegen::cursor::FuncCursor::new(func).at_inst(head_brif);
+        match key_ty {
+            types::I64 => {
+                let shifted = if min_k == 0 {
+                    key
+                } else {
+                    pos.ins().iadd_imm(key, neg_min)
+                };
+                let oob =
+                    pos.ins()
+                        .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, shifted, span as i64);
+                let table_blk = pos.func.dfg.make_block();
+                pos.func.layout.insert_block_after(table_blk, head);
+                pos.ins().brif(oob, default_blk, &[], table_blk, &[]);
+                pos.goto_bottom(table_blk);
+                let idx32 = pos.ins().ireduce(types::I32, shifted);
+                let jt = pos.func.create_jump_table(jt_data);
+                pos.ins().br_table(idx32, jt);
+            }
+            types::I32 => {
+                let shifted = if min_k == 0 {
+                    key
+                } else {
+                    pos.ins().iadd_imm(key, neg_min)
+                };
+                let jt = pos.func.create_jump_table(jt_data);
+                pos.ins().br_table(shifted, jt);
+            }
+            types::I8 | types::I16 => {
+                let ext = pos.ins().uextend(types::I32, key);
+                let shifted = if min_k == 0 {
+                    ext
+                } else {
+                    pos.ins().iadd_imm(ext, neg_min)
+                };
+                let jt = pos.func.create_jump_table(jt_data);
+                pos.ins().br_table(shifted, jt);
+            }
+            _ => continue,
+        }
+
+        func.layout.remove_inst(head_brif);
+        if use_counts
+            .get(&func.dfg.first_result(head_cmp))
+            .copied()
+            .unwrap_or(0)
+            == 1
+        {
+            func.layout.remove_inst(head_cmp);
+        }
+        for blk in chain_nodes {
+            while let Some(inst) = func.layout.first_inst(blk) {
+                func.layout.remove_inst(inst);
+            }
+            func.layout.remove_block(blk);
+            removed.insert(blk);
         }
     }
 }

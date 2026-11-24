@@ -930,3 +930,57 @@ fn main() -> u64 {
         "expected try_set after try_get diamond to reuse SeqHeader loads:\n{fn_clif}"
     );
 }
+
+#[test]
+fn dense_icmp_chain_lowers_to_br_table() {
+    let source = "
+fn dispatch(x: u64, inout s: ChunkSeq[u64]) -> u64 {
+    if x == 10 {
+        s.push(1);
+        11
+    } else if x == 11 {
+        s.push(2);
+        22
+    } else if x == 12 {
+        s.push(3);
+        33
+    } else if x == 13 {
+        s.push(4);
+        44
+    } else if x == 14 {
+        s.push(5);
+        55
+    } else {
+        99
+    }
+}
+
+fn main() -> u64 {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new();
+    let mut acc = 0;
+    let mut i = 9;
+    loop {
+        if i > 15 {
+            break;
+        }
+        acc = wrapping_add(acc, dispatch(i, inout s));
+        i = wrapping_add(i, 1);
+    }
+    wrapping_add(acc, s.len())
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("dispatch\n"))
+        .unwrap_or(&clif);
+    assert!(
+        fn_clif.contains("br_table "),
+        "expected dense icmp eq chain to lower to br_table:\n{fn_clif}"
+    );
+}

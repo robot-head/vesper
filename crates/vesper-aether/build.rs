@@ -17,6 +17,9 @@ const PARTS: &[&str] = &[
     "vq",
     "seccomp",
     "guest_mem",
+    "block",
+    "net",
+    "vsock",
 ];
 
 fn main() {
@@ -91,5 +94,20 @@ const DIVERGENT_EDITS: &[(&str, &str)] = &[
     (
         "        if r > 0 && gpa < prev_end {",
         "        if r > 0 && gpa <= prev_end {",
+    ),
+    // block: discard accepts unaligned sector/count.
+    (
+        "            if sector % BLK_DISCARD_SECTOR_ALIGNMENT != 0",
+        "            if false && sector % BLK_DISCARD_SECTOR_ALIGNMENT != 0",
+    ),
+    // net: TX validation accepts oversized frames.
+    (
+        "    if payload_len > max_frame {",
+        "    if false && payload_len > max_frame {",
+    ),
+    // vsock: peer credit wraps instead of saturating to 0.
+    (
+        "    if peer_buf_alloc >= used {",
+        "    if true || peer_buf_alloc >= used {",
     ),
 ];

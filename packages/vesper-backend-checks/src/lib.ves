@@ -36,6 +36,7 @@ use self::verify::{
     run
 };
 use self::util::{
+    b8,
     g,
     put,
     putn,
@@ -366,4 +367,144 @@ pub fn backend_verify_count(in input: Str) -> u64 {
 pub fn backend_verify_decode(in input: Str) -> u64 {
     let c = read_input(in input.as_bytes());
     wrapping_add(c.insts.len(), c.nfns)
+}
+
+fn w_bytes(inout o: ChunkSeq[u64], in b: ChunkSeq[u8], at: u64, n: u64) {
+    o.push(n);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let mut word: u64 = 0;
+        let mut sh: u64 = 0;
+        loop {
+            if sh >= 64 || i >= n {
+                break;
+            }
+            let byte = wrapping_u64(b8(in b, wrapping_add(at, i)));
+            word = word | wrapping_shl_u64(byte, wrapping_u32(sh));
+            sh = wrapping_add(sh, 8);
+            i = wrapping_add(i, 1);
+        }
+        o.push(word);
+    }
+}
+
+fn w_name(inout o: ChunkSeq[u64], in nm: Names, s: u64) {
+    let id = wrapping_u32(s);
+    let n = nm.size(id);
+    o.push(n);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let mut word: u64 = 0;
+        let mut sh: u64 = 0;
+        loop {
+            if sh >= 64 || i >= n {
+                break;
+            }
+            let byte = wrapping_u64(nm.byte(id, i));
+            word = word | wrapping_shl_u64(byte, wrapping_u32(sh));
+            sh = wrapping_add(sh, 8);
+            i = wrapping_add(i, 1);
+        }
+        o.push(word);
+    }
+}
+
+// Structured report words for `vesper-hybrid`'s `codegen_swap::verifiers`
+// (#1291), matching `tests/common/backend_checks_input.rs::decode_report`.
+pub fn backend_verify_report_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut c = read_input(in b);
+    run(inout c);
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if c.err {
+        o.push(1);
+        w_bytes(inout o, in c.emsg, 0, c.emsg.len());
+        return o;
+    }
+    o.push(0);
+    o.push(c.r.verifiers);
+    o.push(c.r.functions);
+    let nnotes = c.r.notes.len() / 2;
+    o.push(nnotes);
+    for k in 0..nnotes {
+        let b0 = wrapping_mul(k, 2);
+        w_bytes(inout o, in c.r.tx, g(in c.r.notes, b0), g(in c.r.notes, wrapping_add(b0, 1)));
+    }
+    let nf = c.r.fd.len() / FDW;
+    o.push(nf);
+    for k in 0..nf {
+        let base = wrapping_mul(k, FDW);
+        o.push(g(in c.r.fd, base));
+        w_name(inout o, in c.nm, g(in c.r.fd, wrapping_add(base, 1)));
+        o.push(g(in c.r.fd, wrapping_add(base, 2)));
+        o.push(g(in c.r.fd, wrapping_add(base, 3)));
+        w_bytes(
+            inout o,
+            in c.r.tx,
+            g(in c.r.fd, wrapping_add(base, 4)),
+            g(in c.r.fd, wrapping_add(base, 5))
+        );
+        w_bytes(
+            inout o,
+            in c.r.tx,
+            g(in c.r.fd, wrapping_add(base, 6)),
+            g(in c.r.fd, wrapping_add(base, 7))
+        );
+        o.push(g(in c.r.fd, wrapping_add(base, 8)));
+        o.push(g(in c.r.fd, wrapping_add(base, 9)));
+        o.push(g(in c.r.fd, wrapping_add(base, 10)));
+        o.push(g(in c.r.fd, wrapping_add(base, 11)));
+        o.push(g(in c.r.fd, wrapping_add(base, 12)));
+    }
+    if c.r.has_stack {
+        o.push(1);
+        let nsr = c.r.sr.len() / 7;
+        o.push(nsr);
+        for k in 0..nsr {
+            let base = wrapping_mul(k, 7);
+            w_name(inout o, in c.nm, g(in c.r.sr, base));
+            o.push(g(in c.r.sr, wrapping_add(base, 1)));
+            o.push(g(in c.r.sr, wrapping_add(base, 2)));
+            o.push(g(in c.r.sr, wrapping_add(base, 3)));
+            o.push(g(in c.r.sr, wrapping_add(base, 4)));
+            let pa = g(in c.r.sr, wrapping_add(base, 5));
+            let pn = g(in c.r.sr, wrapping_add(base, 6));
+            o.push(pn);
+            for q in 0..pn {
+                w_name(inout o, in c.nm, g(in c.r.spool, wrapping_add(pa, q)));
+            }
+        }
+        let nsf = c.r.sf.len() / 7;
+        o.push(nsf);
+        for k in 0..nsf {
+            let base = wrapping_mul(k, 7);
+            w_name(inout o, in c.nm, g(in c.r.sf, base));
+            o.push(g(in c.r.sf, wrapping_add(base, 1)));
+            o.push(g(in c.r.sf, wrapping_add(base, 2)));
+            w_bytes(
+                inout o,
+                in c.r.tx,
+                g(in c.r.sf, wrapping_add(base, 3)),
+                g(in c.r.sf, wrapping_add(base, 4))
+            );
+            w_bytes(
+                inout o,
+                in c.r.tx,
+                g(in c.r.sf, wrapping_add(base, 5)),
+                g(in c.r.sf, wrapping_add(base, 6))
+            );
+        }
+    } else {
+        o.push(0);
+    }
+    o
+}
+
+pub fn backend_verify_report(in input: Str) -> ChunkSeq[u64] {
+    backend_verify_report_bytes(in input.as_bytes())
 }

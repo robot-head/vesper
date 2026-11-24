@@ -1,0 +1,119 @@
+// ---------------------------------------------------------------------------
+// virtio-vsock 44-byte header codec and credit/packet validation
+// (src/devices/vsock.rs).
+
+const VSOCK_HEADER_BYTES: u64 = 44;
+const VSOCK_HOST_CID: u64 = 2;
+const VSOCK_MAX_PAYLOAD: u64 = 65536;
+
+pub copy struct VsockHeader {
+    pub src_cid: u64,
+    pub dst_cid: u64,
+    pub src_port: u32,
+    pub dst_port: u32,
+    pub len: u32,
+    pub kind: u16,
+    pub op: u16,
+    pub flags: u32,
+    pub buf_alloc: u32,
+    pub fwd_cnt: u32,
+}
+
+fn vsock_byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn vsock_read_u16_le(in s: Slice[u8], off: u64) -> u16 {
+    let b0 = widen_u32(vsock_byte(in s, off));
+    let b1 = widen_u32(vsock_byte(in s, wrapping_add(off, 1))) << 8;
+    wrapping_u16(b0 | b1)
+}
+
+fn vsock_read_u32_le(in s: Slice[u8], off: u64) -> u32 {
+    let b0 = widen_u32(vsock_byte(in s, off));
+    let b1 = widen_u32(vsock_byte(in s, wrapping_add(off, 1))) << 8;
+    let b2 = widen_u32(vsock_byte(in s, wrapping_add(off, 2))) << 16;
+    let b3 = widen_u32(vsock_byte(in s, wrapping_add(off, 3))) << 24;
+    b0 | b1 | b2 | b3
+}
+
+fn vsock_read_u64_le(in s: Slice[u8], off: u64) -> u64 {
+    let lo = widen_u64(vsock_read_u32_le(in s, off));
+    let hi = widen_u64(vsock_read_u32_le(in s, wrapping_add(off, 4))) << 32;
+    lo | hi
+}
+
+fn vsock_write_u16_le(inout out: Slice[u8], off: u64, val: u16) {
+    let v = widen_u32(val);
+    out.try_set(off, wrapping_u8(v));
+    out.try_set(wrapping_add(off, 1), wrapping_u8(v >> 8));
+}
+
+fn vsock_write_u32_le(inout out: Slice[u8], off: u64, val: u32) {
+    out.try_set(off, wrapping_u8(val));
+    out.try_set(wrapping_add(off, 1), wrapping_u8(val >> 8));
+    out.try_set(wrapping_add(off, 2), wrapping_u8(val >> 16));
+    out.try_set(wrapping_add(off, 3), wrapping_u8(val >> 24));
+}
+
+fn vsock_write_u64_le(inout out: Slice[u8], off: u64, val: u64) {
+    vsock_write_u32_le(inout out, off, wrapping_u32(val));
+    vsock_write_u32_le(inout out, wrapping_add(off, 4), wrapping_u32(val >> 32));
+}
+
+pub fn vsock_encode_hdr(h: VsockHeader, inout out: Slice[u8]) -> u64 {
+    if out.len() < VSOCK_HEADER_BYTES {
+        return 0;
+    }
+    vsock_write_u64_le(inout out, 0, h.src_cid);
+    vsock_write_u64_le(inout out, 8, h.dst_cid);
+    vsock_write_u32_le(inout out, 16, h.src_port);
+    vsock_write_u32_le(inout out, 20, h.dst_port);
+    vsock_write_u32_le(inout out, 24, h.len);
+    vsock_write_u16_le(inout out, 28, h.kind);
+    vsock_write_u16_le(inout out, 30, h.op);
+    vsock_write_u32_le(inout out, 32, h.flags);
+    vsock_write_u32_le(inout out, 36, h.buf_alloc);
+    vsock_write_u32_le(inout out, 40, h.fwd_cnt);
+    VSOCK_HEADER_BYTES
+}
+
+pub fn vsock_decode_hdr(in b: Slice[u8]) -> Option[VsockHeader] {
+    if b.len() < VSOCK_HEADER_BYTES {
+        return Option::None;
+    }
+    Option::Some(
+        VsockHeader {
+            src_cid: vsock_read_u64_le(in b, 0),
+            dst_cid: vsock_read_u64_le(in b, 8),
+            src_port: vsock_read_u32_le(in b, 16),
+            dst_port: vsock_read_u32_le(in b, 20),
+            len: vsock_read_u32_le(in b, 24),
+            kind: vsock_read_u16_le(in b, 28),
+            op: vsock_read_u16_le(in b, 30),
+            flags: vsock_read_u32_le(in b, 32),
+            buf_alloc: vsock_read_u32_le(in b, 36),
+            fwd_cnt: vsock_read_u32_le(in b, 40),
+        }
+    )
+}
+
+pub fn vsock_peer_credit(peer_buf_alloc: u32, tx_cnt: u32, peer_fwd_cnt: u32) -> u32 {
+    let used = wrapping_sub(tx_cnt, peer_fwd_cnt);
+    if peer_buf_alloc >= used {
+        wrapping_sub(peer_buf_alloc, used)
+    } else {
+        0
+    }
+}
+
+pub fn vsock_validate_packet(h: VsockHeader, payload_len: u64, guest_cid: u64) -> bool {
+    let hlen = widen_u64(h.len);
+    if payload_len != hlen || hlen > VSOCK_MAX_PAYLOAD {
+        return false;
+    }
+    h.src_cid == guest_cid && h.dst_cid == VSOCK_HOST_CID
+}
