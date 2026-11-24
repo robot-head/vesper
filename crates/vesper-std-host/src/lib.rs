@@ -25,7 +25,6 @@
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
-pub mod fs;
 pub mod process;
 
 /// The error kinds an I/O call reports, as `IoError.kind` in Vesper
@@ -232,7 +231,5 @@ pub(crate) unsafe fn free_handle<T>(kind: HandleKind, h: *mut T) -> T {
 /// Every host function, by its `.vsys` symbol, for
 /// `ForeignChecked::jit` (the JIT never resolves symbols from the process).
 pub fn symbols() -> Vec<(&'static str, *const u8)> {
-    let mut out = fs::symbols();
-    out.extend(process::symbols());
-    out
+    process::symbols()
 }

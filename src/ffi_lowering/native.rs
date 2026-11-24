@@ -1984,8 +1984,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             )),
         }
     }
-    /// Revoke the library's protection key; returns the saved PKRU.
-    fn foreign_isolate(&mut self, library: &str) -> Result<ir::Value, String> {
+    fn foreign_isolation_data(
+        &mut self,
+        library: &str,
+    ) -> Result<cranelift_module::DataId, String> {
         let isa = self.m.isa();
         if isa.triple().architecture != target_lexicon::Architecture::X86_64
             || isa.triple().operating_system != target_lexicon::OperatingSystem::Linux
@@ -2014,6 +2016,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .define_data(data, &description)
                 .map_err(|e| e.to_string())?;
         }
+        Ok(data)
+    }
+    /// Revoke the library's protection key; returns the saved PKRU.
+    fn foreign_isolate(&mut self, library: &str) -> Result<ir::Value, String> {
+        let data = self.foreign_isolation_data(library)?;
         let global = self.m.declare_data_in_func(data, self.b.func);
         let pointer = self.m.target_config().pointer_type();
         let address = self.b.ins().symbol_value(pointer, global);
@@ -2552,11 +2559,22 @@ impl<M: Module> Codegen<'_, '_, M> {
                 c_args.insert(v.first - v.padding, zero);
             }
         }
+        let saved = if plan.handler == Handler::IsolatedMpk {
+            let data = self.foreign_isolation_data(&plan.library)?;
+            let r = self.foreign_request(
+                swap::ISOLATE,
+                &[u64::from(data.as_u32()), u64::from(pointer == types::I64)],
+            )?;
+            *r.first().ok_or("malformed ffi ISOLATE answer")?
+        } else {
+            NO_VALUE
+        };
         for &(_, data, len, stride) in &released {
             self.foreign_range_unregister(value_of_word(data)?, value_of_word(len)?, stride)?;
         }
         words.extend([
             errno,
+            saved,
             u64::from(abi.result.is_some()),
             little,
             len_word,
