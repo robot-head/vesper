@@ -22,6 +22,7 @@
 // Rust code inserts rows into a BTreeMap one at a time; the kernels merge
 // sorted inputs or sort once, and find the first failing entry only when
 // a limit is known to fail.
+use self::kafka_wire::decode_records as kw_dec_records;
 use self::util::{
     affordable,
     cell,
@@ -1090,5 +1091,29 @@ pub fn dur_nodes(
         k0,
         k1,
         inout budget
+    )
+}
+
+pub fn kw_decode_records(
+    in raw: Slice[u8],
+    count: u64,
+    base_offset: i64,
+    base_ts: i64,
+    is_control: u32,
+    inout cur: Slice[u64],
+    inout out_rec: Slice[i64],
+    inout out_hdr: Slice[u64],
+    inout out_ctrl: Slice[i64]
+) -> u64 {
+    kw_dec_records(
+        in raw,
+        count,
+        base_offset,
+        base_ts,
+        is_control,
+        inout cur,
+        inout out_rec,
+        inout out_hdr,
+        inout out_ctrl
     )
 }

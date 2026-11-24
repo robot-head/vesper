@@ -86,4 +86,10 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
         "            if n == 0 || n > max_rows {\n",
         "            if n > max_rows {\n",
     ),
+    // kafka_wire (vesper/src/kafka_wire.ves): decoded record keys are dropped.
+    (
+        "kafka_wire",
+        "        si64(inout out_rec, wrapping_add(rb, 3), klen_i);\n",
+        "        si64(inout out_rec, wrapping_add(rb, 3), -1);\n",
+    ),
 ];
