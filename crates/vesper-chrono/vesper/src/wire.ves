@@ -1,0 +1,277 @@
+// §31.2 flight-log wire records: little-endian, byte-aligned, zero implicit padding.
+pub fn reserved_effect_base() -> u16 {
+    65520
+}
+
+pub fn effect_inout_write() -> u16 {
+    65520
+}
+
+pub fn effect_obligation() -> u16 {
+    65521
+}
+
+pub fn effect_snapshot() -> u16 {
+    65522
+}
+
+pub fn effect_scheduler() -> u16 {
+    65523
+}
+
+pub fn op_tag_digest() -> u16 {
+    32768
+}
+
+pub fn header_bytes() -> u64 {
+    32
+}
+
+pub fn trace_cursor_bytes() -> u64 {
+    12
+}
+
+pub fn obligation_hop_bytes() -> u64 {
+    24
+}
+
+pub fn inout_write_bytes() -> u64 {
+    16
+}
+
+pub fn obligation_record_bytes() -> u64 {
+    24
+}
+
+pub fn digest_bytes() -> u64 {
+    32
+}
+
+pub copy struct EventHeader {
+    pub lamport_seq: u64,
+    pub fiber_id: u64,
+    pub ipt_tsc_anchor: u64,
+    pub effect_id: u16,
+    pub op_tag: u16,
+    pub payload_byte_len: u32,
+}
+
+pub copy struct TraceCursor {
+    pub epoch_id: u32,
+    pub lamport_seq: u64,
+}
+
+pub copy struct InoutWriteRecord {
+    pub place_hash: u64,
+    pub source_span_id: u32,
+}
+
+pub copy struct ObligationRecord {
+    pub obligation_id: u64,
+    pub aux: u64,
+    pub source_span_id: u32,
+    pub hop_kind_tag: u8,
+}
+
+pub copy struct ObligationHopWire {
+    pub lamport_seq: u64,
+    pub fiber_id: u64,
+    pub source_span_id: u32,
+    pub hop_kind_tag: u8,
+}
+
+fn push_u16_le(inout out: ChunkSeq[u8], v: u16) {
+    let w = widen_u64(widen_u32(v));
+    out.push(wrapping_u8(w & 255));
+    out.push(wrapping_u8(wrapping_shr_u64(w, 8) & 255));
+}
+
+fn push_u32_le(inout out: ChunkSeq[u8], v: u32) {
+    let w = widen_u64(v);
+    out.push(wrapping_u8(w & 255));
+    out.push(wrapping_u8(wrapping_shr_u64(w, 8) & 255));
+    out.push(wrapping_u8(wrapping_shr_u64(w, 16) & 255));
+    out.push(wrapping_u8(wrapping_shr_u64(w, 24) & 255));
+}
+
+fn push_u64_le(inout out: ChunkSeq[u8], v: u64) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= 8 {
+            break;
+        }
+        out.push(wrapping_u8(wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8))) & 255));
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn byte(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn read_u16_le(in b: Slice[u8], off: u64) -> u16 {
+    let lo = widen_u32(byte(in b, off));
+    let hi = widen_u32(byte(in b, wrapping_add(off, 1)));
+    wrapping_u16(widen_u64(lo | wrapping_shl_u32(hi, 8)))
+}
+
+fn read_u32_le(in b: Slice[u8], off: u64) -> u32 {
+    match b.try_read_u32_le(off) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn read_u64_le(in b: Slice[u8], off: u64) -> u64 {
+    match b.try_read_u64_le(off) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn zero_pad_ok(in b: Slice[u8], off: u64, count: u64) -> bool {
+    let mut i: u64 = 0;
+    loop {
+        if i >= count {
+            break;
+        }
+        if byte(in b, wrapping_add(off, i)) != 0 {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+pub fn encode_event_header(h: EventHeader) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new();
+    push_u64_le(inout out, h.lamport_seq);
+    push_u64_le(inout out, h.fiber_id);
+    push_u64_le(inout out, h.ipt_tsc_anchor);
+    push_u16_le(inout out, h.effect_id);
+    push_u16_le(inout out, h.op_tag);
+    push_u32_le(inout out, h.payload_byte_len);
+    out
+}
+
+pub fn decode_event_header(in bytes: Slice[u8]) -> Option[EventHeader] {
+    if bytes.len() < header_bytes() {
+        return Option::None;
+    }
+    Option::Some(
+        EventHeader {
+            lamport_seq: read_u64_le(in bytes, 0),
+            fiber_id: read_u64_le(in bytes, 8),
+            ipt_tsc_anchor: read_u64_le(in bytes, 16),
+            effect_id: read_u16_le(in bytes, 24),
+            op_tag: read_u16_le(in bytes, 26),
+            payload_byte_len: read_u32_le(in bytes, 28),
+        }
+    )
+}
+
+pub fn encode_trace_cursor(c: TraceCursor) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new();
+    push_u32_le(inout out, c.epoch_id);
+    push_u64_le(inout out, c.lamport_seq);
+    out
+}
+
+pub fn decode_trace_cursor(in bytes: Slice[u8]) -> Option[TraceCursor] {
+    if bytes.len() < trace_cursor_bytes() {
+        return Option::None;
+    }
+    Option::Some(
+        TraceCursor {
+            epoch_id: read_u32_le(in bytes, 0),
+            lamport_seq: read_u64_le(in bytes, 4),
+        }
+    )
+}
+
+pub fn encode_inout_write(r: InoutWriteRecord) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new();
+    push_u64_le(inout out, r.place_hash);
+    push_u32_le(inout out, r.source_span_id);
+    out.push(0);
+    out.push(0);
+    out.push(0);
+    out.push(0);
+    out
+}
+
+pub fn decode_inout_write(in bytes: Slice[u8]) -> Option[InoutWriteRecord] {
+    if bytes.len() < inout_write_bytes() {
+        return Option::None;
+    }
+    if !zero_pad_ok(in bytes, 12, 4) {
+        return Option::None;
+    }
+    Option::Some(
+        InoutWriteRecord {
+            place_hash: read_u64_le(in bytes, 0),
+            source_span_id: read_u32_le(in bytes, 8),
+        }
+    )
+}
+
+pub fn encode_obligation_record(r: ObligationRecord) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new();
+    push_u64_le(inout out, r.obligation_id);
+    push_u64_le(inout out, r.aux);
+    push_u32_le(inout out, r.source_span_id);
+    out.push(r.hop_kind_tag);
+    out.push(0);
+    out.push(0);
+    out.push(0);
+    out
+}
+
+pub fn decode_obligation_record(in bytes: Slice[u8]) -> Option[ObligationRecord] {
+    if bytes.len() < obligation_record_bytes() {
+        return Option::None;
+    }
+    if !zero_pad_ok(in bytes, 21, 3) {
+        return Option::None;
+    }
+    Option::Some(
+        ObligationRecord {
+            obligation_id: read_u64_le(in bytes, 0),
+            aux: read_u64_le(in bytes, 8),
+            source_span_id: read_u32_le(in bytes, 16),
+            hop_kind_tag: byte(in bytes, 20),
+        }
+    )
+}
+
+pub fn encode_obligation_hop(h: ObligationHopWire) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new();
+    push_u64_le(inout out, h.lamport_seq);
+    push_u64_le(inout out, h.fiber_id);
+    push_u32_le(inout out, h.source_span_id);
+    out.push(h.hop_kind_tag);
+    out.push(0);
+    out.push(0);
+    out.push(0);
+    out
+}
+
+pub fn decode_obligation_hop(in bytes: Slice[u8]) -> Option[ObligationHopWire] {
+    if bytes.len() < obligation_hop_bytes() {
+        return Option::None;
+    }
+    if !zero_pad_ok(in bytes, 21, 3) {
+        return Option::None;
+    }
+    Option::Some(
+        ObligationHopWire {
+            lamport_seq: read_u64_le(in bytes, 0),
+            fiber_id: read_u64_le(in bytes, 8),
+            source_span_id: read_u32_le(in bytes, 16),
+            hop_kind_tag: byte(in bytes, 20),
+        }
+    )
+}
