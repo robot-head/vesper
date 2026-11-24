@@ -55,6 +55,9 @@ use self::forge::{
 use self::ebpf::{
     run_ebpf
 };
+use self::doc::{
+    run_doc
+};
 use self::lint::{
     run_lint
 };
@@ -159,6 +162,9 @@ pub fn run(in args: Args)
     }
     if eq(in c, in "ebpf") {
         return run_ebpf(in args);
+    }
+    if eq(in c, in "doc") {
+        return run_doc(in args);
     }
     if eq(in c, in "lint") {
         return run_lint(in args);

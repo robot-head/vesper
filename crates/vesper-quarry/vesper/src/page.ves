@@ -1,0 +1,358 @@
+// @vesper/quarry::page: Castagnoli CRC32C and 16 KiB slotted-page codec (`src/page.rs`).
+
+const PAGE_SIZE: u64 = 16384;
+const HEADER_SIZE: u64 = 32;
+const SLOT_SIZE: u64 = 4;
+const MAX_SLOTS: u64 = 3270;
+const MAX_RECORD_SIZE: u64 = 16348;
+const CRC_OFF: u64 = 16;
+const MASK_32: u64 = 4294967295;
+const CRC_POLY: u64 = 2197175160;
+// 0x82f63b78
+
+// PageError codes:
+//   0 = Ok
+//   1 = Size, 2 = Checksum, 3 = UnsupportedHeader, 4 = SlotLayout,
+//   5 = SlotOutOfBounds, 6 = RecordSize, 7 = Full, 8 = Overflow
+const ERR_SIZE: u64 = 1;
+const ERR_CHECKSUM: u64 = 2;
+const ERR_UNSUPPORTED_HEADER: u64 = 3;
+const ERR_SLOT_LAYOUT: u64 = 4;
+const ERR_SLOT_OOB: u64 = 5;
+const ERR_RECORD_SIZE: u64 = 6;
+const ERR_FULL: u64 = 7;
+
+fn get_u8(in b: Slice[u8], idx: u64) -> u64 {
+    match b.try_get(idx) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn set_u8(inout b: Slice[u8], idx: u64, v: u64) {
+    b.try_set(idx, wrapping_u8(v & 255));
+}
+
+fn get_u64(in s: Slice[u64], idx: u64) -> u64 {
+    match s.try_get(idx) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn set_u64(inout s: Slice[u64], idx: u64, v: u64) {
+    s.try_set(idx, v);
+}
+
+fn rd_u16(in b: Slice[u8], off: u64) -> u64 {
+    get_u8(in b, off) | (get_u8(in b, wrapping_add(off, 1)) << 8)
+}
+
+fn rd_u32(in b: Slice[u8], off: u64) -> u64 {
+    get_u8(in b, off) | (get_u8(in b, wrapping_add(off, 1)) << 8) | (
+        get_u8(in b, wrapping_add(off, 2)) << 16
+    ) | (get_u8(in b, wrapping_add(off, 3)) << 24)
+}
+
+fn wr_u16(inout b: Slice[u8], off: u64, v: u64) {
+    set_u8(inout b, off, v & 255);
+    set_u8(inout b, wrapping_add(off, 1), (v >> 8) & 255);
+}
+
+fn wr_u32(inout b: Slice[u8], off: u64, v: u64) {
+    set_u8(inout b, off, v & 255);
+    set_u8(inout b, wrapping_add(off, 1), (v >> 8) & 255);
+    set_u8(inout b, wrapping_add(off, 2), (v >> 16) & 255);
+    set_u8(inout b, wrapping_add(off, 3), (v >> 24) & 255);
+}
+
+fn copy_bytes(inout dst: Slice[u8], dst_off: u64, in src: Slice[u8], src_off: u64, len: u64) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        set_u8(inout dst, wrapping_add(dst_off, i), get_u8(in src, wrapping_add(src_off, i)));
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn zero_bytes(inout dst: Slice[u8], off: u64, len: u64) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        set_u8(inout dst, wrapping_add(off, i), 0);
+        i = wrapping_add(i, 1);
+    }
+}
+
+// 16-entry nibble table for Castagnoli CRC32C (0x82f63b78).
+fn crc_nibble(n: u64) -> u64 {
+    match n & 15 {
+        0 => 0,
+        1 => 274646895,
+        2 => 549293790,
+        3 => 820201905,
+        4 => 1098587580,
+        5 => 1361435347,
+        6 => 1640403810,
+        7 => 1905808397,
+        8 => 2197175160,
+        9 => 2460548119,
+        10 => 2722870694,
+        11 => 2987750089,
+        12 => 3280807620,
+        13 => 3553878443,
+        14 => 3811616794,
+        _ => 4084100981,
+    }
+}
+
+fn crc_step_byte(crc_in: u64, byte: u64) -> u64 {
+    let c0 = (crc_in ^ byte) & MASK_32;
+    let c1 = (c0 >> 4) ^ crc_nibble(c0 & 15);
+    ((c1 >> 4) ^ crc_nibble(c1 & 15)) & MASK_32
+}
+
+pub fn crc32c_update(crc_init: u64, in b: Slice[u8], start: u64, end: u64) -> u64 {
+    let mut crc: u64 = crc_init & MASK_32;
+    let mut i: u64 = start;
+    loop {
+        if i >= end {
+            break;
+        }
+        crc = crc_step_byte(crc, get_u8(in b, i));
+        i = wrapping_add(i, 1);
+    }
+    crc
+}
+
+pub fn crc32c_all(in b: Slice[u8]) -> u64 {
+    (crc32c_update(MASK_32, in b, 0, b.len()) ^ MASK_32) & MASK_32
+}
+
+pub fn page_crc32c(in b: Slice[u8]) -> u64 {
+    let mut crc: u64 = crc32c_update(MASK_32, in b, 0, CRC_OFF);
+    let mut z: u64 = 0;
+    loop {
+        if z >= 4 {
+            break;
+        }
+        crc = crc_step_byte(crc, 0);
+        z = wrapping_add(z, 1);
+    }
+    crc = crc32c_update(crc, in b, 20, PAGE_SIZE);
+    (crc ^ MASK_32) & MASK_32
+}
+
+pub fn refresh_crc(inout b: Slice[u8]) {
+    let sum = page_crc32c(in b);
+    wr_u32(inout b, CRC_OFF, sum);
+}
+
+fn write_slot(inout b: Slice[u8], slot: u64, start: u64, len: u64) {
+    let off = wrapping_add(HEADER_SIZE, slot << 2);
+    wr_u16(inout b, off, start);
+    wr_u16(inout b, wrapping_add(off, 2), len);
+}
+
+fn slot_start(in b: Slice[u8], slot: u64) -> u64 {
+    rd_u16(in b, wrapping_add(HEADER_SIZE, slot << 2))
+}
+
+fn slot_len(in b: Slice[u8], slot: u64) -> u64 {
+    rd_u16(in b, wrapping_add(HEADER_SIZE, wrapping_add(slot << 2, 2)))
+}
+
+// Mark `[start, end)` in 256-word `seen` bitmap; return false if any bit already set.
+fn mark_range(inout seen: Slice[u64], start: u64, end: u64) -> bool {
+    let mut pos: u64 = start;
+    loop {
+        if pos >= end {
+            break;
+        }
+        let w = pos >> 6;
+        let bit = pos & 63;
+        let rem = wrapping_sub(end, pos);
+        let take = if wrapping_add(bit, rem) <= 64 {
+            rem
+        } else {
+            wrapping_sub(64, bit)
+        };
+        let all_ones: u64 = 18446744073709551615;
+        let one: u64 = 1;
+        let mask: u64 = if take == 64 {
+            all_ones
+        } else {
+            wrapping_shl_u64(
+                wrapping_sub(wrapping_shl_u64(one, wrapping_u32(take)), 1),
+                wrapping_u32(bit)
+            )
+        };
+        let cur = get_u64(in seen, w);
+        if (cur & mask) != 0 {
+            return false;
+        }
+        set_u64(inout seen, w, cur | mask);
+        pos = wrapping_add(pos, take);
+    }
+    true
+}
+
+pub fn validate(in b: Slice[u8], inout seen: Slice[u64]) -> u64 {
+    if b.len() != PAGE_SIZE {
+        return ERR_SIZE;
+    }
+    let kind = get_u8(in b, 24);
+    let level = get_u8(in b, 25);
+    let flags = rd_u16(in b, 26);
+    if kind != 1 || level != 0 || flags != 0 {
+        return ERR_UNSUPPORTED_HEADER;
+    }
+    let count = rd_u16(in b, 20);
+    if count > MAX_SLOTS {
+        return ERR_SLOT_LAYOUT;
+    }
+    let dir_end = wrapping_add(HEADER_SIZE, count << 2);
+    let free = rd_u16(in b, 22);
+    if free < dir_end || free > PAGE_SIZE {
+        return ERR_SLOT_LAYOUT;
+    }
+    let mut wi: u64 = 0;
+    loop {
+        if wi >= 256 {
+            break;
+        }
+        set_u64(inout seen, wi, 0);
+        wi = wrapping_add(wi, 1);
+    }
+    let mut min_start: u64 = PAGE_SIZE;
+    let mut i: u64 = 0;
+    loop {
+        if i >= count {
+            break;
+        }
+        let s = slot_start(in b, i);
+        let l = slot_len(in b, i);
+        let e = wrapping_add(s, l);
+        if l == 0 || e > PAGE_SIZE || s < free {
+            return ERR_SLOT_LAYOUT;
+        }
+        if s < min_start {
+            min_start = s;
+        }
+        if !mark_range(inout seen, s, e) {
+            return ERR_SLOT_LAYOUT;
+        }
+        i = wrapping_add(i, 1);
+    }
+    if min_start != free {
+        return ERR_SLOT_LAYOUT;
+    }
+    0
+}
+
+pub fn used_bytes(in b: Slice[u8]) -> u64 {
+    let count = rd_u16(in b, 20);
+    let mut records: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= count {
+            break;
+        }
+        let s = slot_start(in b, i);
+        let l = slot_len(in b, i);
+        if l > 0 && wrapping_add(s, l) <= PAGE_SIZE {
+            records = wrapping_add(records, l);
+        }
+        i = wrapping_add(i, 1);
+    }
+    wrapping_add(wrapping_add(HEADER_SIZE, count << 2), records)
+}
+
+// Returns slot index (`0..MAX_SLOTS`), or `0x10000 + err_code` on error.
+pub fn insert(inout b: Slice[u8], in record: Slice[u8]) -> u64 {
+    let rlen = record.len();
+    if rlen == 0 || rlen > MAX_RECORD_SIZE {
+        return wrapping_add(65536, ERR_RECORD_SIZE);
+    }
+    let count = rd_u16(in b, 20);
+    if count >= MAX_SLOTS {
+        return wrapping_add(65536, ERR_FULL);
+    }
+    let dir_end = wrapping_add(HEADER_SIZE, wrapping_add(count, 1) << 2);
+    let free = rd_u16(in b, 22);
+    if free < rlen {
+        return wrapping_add(65536, ERR_FULL);
+    }
+    let start = wrapping_sub(free, rlen);
+    if start < dir_end {
+        return wrapping_add(65536, ERR_FULL);
+    }
+    copy_bytes(inout b, start, in record, 0, rlen);
+    write_slot(inout b, count, start, rlen);
+    wr_u16(inout b, 20, wrapping_add(count, 1));
+    wr_u16(inout b, 22, start);
+    count
+}
+
+// Returns 0 on Ok, or err_code on error. `scratch` must have length `PAGE_SIZE`.
+pub fn update(inout b: Slice[u8], slot: u64, in record: Slice[u8], inout scratch: Slice[u8])
+    -> u64 {
+    let rlen = record.len();
+    if rlen == 0 || rlen > MAX_RECORD_SIZE {
+        return ERR_RECORD_SIZE;
+    }
+    let count = rd_u16(in b, 20);
+    if slot >= count {
+        return ERR_SLOT_OOB;
+    }
+    let mut used: u64 = wrapping_add(HEADER_SIZE, count << 2);
+    let mut i: u64 = 0;
+    loop {
+        if i >= count {
+            break;
+        }
+        let s = slot_start(in b, i);
+        let l = slot_len(in b, i);
+        if l == 0 || wrapping_add(s, l) > PAGE_SIZE {
+            return ERR_SLOT_LAYOUT;
+        }
+        let need = if i == slot {
+            rlen
+        } else {
+            l
+        };
+        used = wrapping_add(used, need);
+        i = wrapping_add(i, 1);
+    }
+    if used > PAGE_SIZE {
+        return ERR_FULL;
+    }
+    zero_bytes(inout scratch, 0, PAGE_SIZE);
+    copy_bytes(inout scratch, 0, in b, 0, HEADER_SIZE);
+    let mut cursor: u64 = PAGE_SIZE;
+    let mut j: u64 = 0;
+    loop {
+        if j >= count {
+            break;
+        }
+        if j == slot {
+            cursor = wrapping_sub(cursor, rlen);
+            copy_bytes(inout scratch, cursor, in record, 0, rlen);
+            write_slot(inout scratch, j, cursor, rlen);
+        } else {
+            let s = slot_start(in b, j);
+            let l = slot_len(in b, j);
+            cursor = wrapping_sub(cursor, l);
+            copy_bytes(inout scratch, cursor, in b, s, l);
+            write_slot(inout scratch, j, cursor, l);
+        }
+        j = wrapping_add(j, 1);
+    }
+    wr_u16(inout scratch, 22, cursor);
+    copy_bytes(inout b, 0, in scratch, 0, PAGE_SIZE);
+    0
+}

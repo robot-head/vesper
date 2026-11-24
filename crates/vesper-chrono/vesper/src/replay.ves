@@ -1,0 +1,346 @@
+// `ReplaySession` (§31.2 `linear effect ChronoReplay`): reverse watchpoints,
+// lineage queries, and replay-window planning from the nearest snapshot.
+use super::lineage::{
+    ObligationHop,
+    ObligationLineage,
+    chain,
+    for_truncated_log,
+    hop_from_record,
+    new_lineage,
+    record as record_lineage,
+};
+use super::redact::RedactionEntry;
+use super::ring::{
+    FlightEvent,
+    SnapshotImage
+};
+use super::timeline::{
+    ChronoTimelineIndex,
+    InOutWriteEvent,
+    SnapshotEpoch,
+    find_last_writer_before_probed,
+    nearest_snapshot,
+    new_index,
+    record_inout_write,
+    record_snapshot,
+};
+use super::wire::{
+    ObligationHopWire,
+    TraceCursor,
+    decode_inout_write,
+    decode_obligation_record,
+    effect_inout_write,
+    effect_obligation,
+    encode_obligation_hop,
+    obligation_hop_bytes,
+};
+
+pub struct ReplayBundle {
+    pub first_seq: u64,
+    pub next_seq: u64,
+    pub evicted_records: u64,
+    pub records: ChunkSeq[FlightEvent],
+    pub snapshots: ChunkSeq[SnapshotImage],
+    pub redactions: ChunkSeq[RedactionEntry],
+}
+
+pub struct ReplaySession {
+    pub bundle: ReplayBundle,
+    pub timeline: ChronoTimelineIndex,
+    pub lineage: ObligationLineage,
+    pub cursor: TraceCursor,
+}
+
+pub copy struct ReplayWindow {
+    pub err_code: u32,
+    pub err_seq: u64,
+    pub has_snapshot: bool,
+    pub snapshot_idx: u64,
+    pub from_seq: u64,
+    pub to_seq: u64,
+}
+
+// ReplayError codes:
+// 0 = Ok
+// 1 = TimelineError
+// 2 = LineageError
+// 3 = NoEarlierWrite
+// 4 = AtStart
+// 5 = SeqOutOfRange
+// 6 = HistoryEvicted
+// 7 = NotReplayable
+// 8 = Malformed
+// 9 = LimitExceeded
+
+fn cursor_at(in timeline: ChronoTimelineIndex, lamport_seq: u64) -> TraceCursor {
+    let epoch_id = match nearest_snapshot(in timeline, lamport_seq) {
+        Option::Some(s) => s.epoch_id,
+        Option::None => 0,
+    };
+    TraceCursor {
+        epoch_id: epoch_id,
+        lamport_seq: lamport_seq,
+    }
+}
+
+fn index_bundle(
+    in bundle: ReplayBundle,
+    inout timeline: ChronoTimelineIndex,
+    inout lineage: ObligationLineage,
+) -> u32 {
+    let snaps = bundle.snapshots.as_slice();
+    let mut si: u64 = 0;
+    loop {
+        if si >= snaps.len() {
+            break;
+        }
+        match snaps.try_get(si) {
+            Option::Some(sn) => {
+                let err = record_snapshot(
+                    inout timeline,
+                    SnapshotEpoch {
+                        epoch_id: sn.epoch_id,
+                        start_lamport_seq: sn.start_lamport_seq,
+                        arena_cow_offset: si,
+                    },
+                );
+                if err != 0 {
+                    return 1;
+                }
+            }
+            Option::None => {}
+        }
+        si = wrapping_add(si, 1);
+    }
+
+    let recs = bundle.records.as_slice();
+    let mut ri: u64 = 0;
+    loop {
+        if ri >= recs.len() {
+            break;
+        }
+        match recs.try_get(ri) {
+            Option::Some(rec) => {
+                if rec.effect_id == effect_inout_write() {
+                    match decode_inout_write(in rec.payload.as_slice()) {
+                        Option::Some(w) => {
+                            let err = record_inout_write(
+                                inout timeline,
+                                InOutWriteEvent {
+                                    lamport_seq: rec.lamport_seq,
+                                    fiber_id: rec.fiber_id,
+                                    place_hash: w.place_hash,
+                                    span_id: w.source_span_id,
+                                },
+                            );
+                            if err != 0 {
+                                return 1;
+                            }
+                        }
+                        Option::None => return 8,
+                    }
+                } else if rec.effect_id == effect_obligation() {
+                    match decode_obligation_record(in rec.payload.as_slice()) {
+                        Option::Some(obl) => match hop_from_record(obl) {
+                            Option::Some(kind) => {
+                                let err = record_lineage(
+                                    inout lineage,
+                                    obl.obligation_id,
+                                    ObligationHop {
+                                        lamport_seq: rec.lamport_seq,
+                                        fiber_id: rec.fiber_id,
+                                        source_span_id: obl.source_span_id,
+                                        kind: kind,
+                                    },
+                                );
+                                if err != 0 {
+                                    return 2;
+                                }
+                            }
+                            Option::None => return 8,
+                        },
+                        Option::None => return 8,
+                    }
+                }
+            }
+            Option::None => {}
+        }
+        ri = wrapping_add(ri, 1);
+    }
+    0
+}
+
+pub fn from_bundle(sink bundle: ReplayBundle) -> Result[ReplaySession, u32] {
+    let mut timeline = new_index();
+    let mut lineage = if bundle.evicted_records > 0 {
+        for_truncated_log()
+    } else {
+        new_lineage()
+    };
+    let err = index_bundle(in bundle, inout timeline, inout lineage);
+    if err != 0 {
+        return Result::Err(err);
+    }
+    let cursor = cursor_at(in timeline, bundle.next_seq);
+    Result::Ok(
+        ReplaySession {
+            bundle: bundle,
+            timeline: timeline,
+            lineage: lineage,
+            cursor: cursor,
+        }
+    )
+}
+
+pub fn seek(inout s: ReplaySession, lamport_seq: u64) -> Result[TraceCursor, u32] {
+    if lamport_seq < s.bundle.first_seq || lamport_seq > s.bundle.next_seq {
+        return Result::Err(5);
+    }
+    s.cursor = cursor_at(in s.timeline, lamport_seq);
+    Result::Ok(s.cursor)
+}
+
+pub fn step_back(inout s: ReplaySession) -> Result[TraceCursor, u32] {
+    if s.cursor.lamport_seq <= s.bundle.first_seq {
+        return Result::Err(4);
+    }
+    seek(inout s, wrapping_sub(s.cursor.lamport_seq, 1))
+}
+
+pub fn reverse_watch_inout(
+    inout s: ReplaySession,
+    place_hash: u64,
+) -> Result[TraceCursor, u32] {
+    let q = find_last_writer_before_probed(in s.timeline, place_hash, s.cursor.lamport_seq);
+    if !q.found {
+        return Result::Err(3);
+    }
+    s.cursor = cursor_at(in s.timeline, q.write.lamport_seq);
+    Result::Ok(s.cursor)
+}
+
+pub fn query_linear_lineage_into(
+    in s: ReplaySession,
+    obligation_id: u64,
+    max_scratch: u64,
+) -> Result[ChunkSeq[u8], u32] {
+    match chain(in s.lineage, obligation_id) {
+        Result::Err(_) => Result::Err(2),
+        Result::Ok(c) => {
+            let hops = c.as_slice();
+            let needed = wrapping_mul(hops.len(), obligation_hop_bytes());
+            if max_scratch < needed {
+                return Result::Err(9);
+            }
+            let mut out: ChunkSeq[u8] = ChunkSeq::new();
+            let mut i: u64 = 0;
+            loop {
+                if i >= hops.len() {
+                    break;
+                }
+                match hops.try_get(i) {
+                    Option::Some(hop) => {
+                        let encoded = encode_obligation_hop(
+                            ObligationHopWire {
+                                lamport_seq: hop.lamport_seq,
+                                fiber_id: hop.fiber_id,
+                                source_span_id: hop.source_span_id,
+                                hop_kind_tag: hop.kind.tag,
+                            }
+                        );
+                        let es = encoded.as_slice();
+                        let mut k: u64 = 0;
+                        loop {
+                            if k >= es.len() {
+                                break;
+                            }
+                            let b = match es.try_get(k) {
+                                Option::Some(v) => v,
+                                Option::None => 0,
+                            };
+                            out.push(b);
+                            k = wrapping_add(k, 1);
+                        }
+                    }
+                    Option::None => {}
+                }
+                i = wrapping_add(i, 1);
+            }
+            Result::Ok(out)
+        }
+    }
+}
+
+fn snapshot_is_redacted(in redactions: Slice[RedactionEntry], epoch_id: u32) -> bool {
+    let mut i: u64 = 0;
+    loop {
+        if i >= redactions.len() {
+            break;
+        }
+        match redactions.try_get(i) {
+            Option::Some(e) => {
+                if e.target_tag == 1 && e.target_val == widen_u64(epoch_id) {
+                    return true;
+                }
+            }
+            Option::None => {}
+        }
+        i = wrapping_add(i, 1);
+    }
+    false
+}
+
+pub fn plan_replay_window(
+    in s: ReplaySession,
+    lamport_seq: u64,
+    use_snapshots: bool,
+) -> ReplayWindow {
+    if lamport_seq >= s.bundle.next_seq {
+        return ReplayWindow {
+            err_code: 5,
+            err_seq: lamport_seq,
+            has_snapshot: false,
+            snapshot_idx: 0,
+            from_seq: 0,
+            to_seq: 0,
+        };
+    }
+    let (has_snap, snap_idx, from_seq): (bool, u64, u64) = if use_snapshots {
+        match nearest_snapshot(in s.timeline, lamport_seq) {
+            Option::Some(ep) => {
+                if snapshot_is_redacted(in s.bundle.redactions.as_slice(), ep.epoch_id) {
+                    return ReplayWindow {
+                        err_code: 7,
+                        err_seq: ep.start_lamport_seq,
+                        has_snapshot: true,
+                        snapshot_idx: ep.arena_cow_offset,
+                        from_seq: 0,
+                        to_seq: 0,
+                    };
+                }
+                (true, ep.arena_cow_offset, wrapping_add(ep.start_lamport_seq, 1))
+            }
+            Option::None => (false, 0, 1),
+        }
+    } else {
+        (false, 0, 1)
+    };
+    if from_seq < s.bundle.first_seq {
+        return ReplayWindow {
+            err_code: 6,
+            err_seq: from_seq,
+            has_snapshot: has_snap,
+            snapshot_idx: snap_idx,
+            from_seq: from_seq,
+            to_seq: lamport_seq,
+        };
+    }
+    ReplayWindow {
+        err_code: 0,
+        err_seq: 0,
+        has_snapshot: has_snap,
+        snapshot_idx: snap_idx,
+        from_seq: from_seq,
+        to_seq: lamport_seq,
+    }
+}

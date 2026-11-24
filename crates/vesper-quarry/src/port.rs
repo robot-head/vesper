@@ -41,7 +41,7 @@ use vesper_port_abi::Word;
 
 #[rustfmt::skip]
 #[path = "../port/binding.rs"]
-mod binding;
+pub(crate) mod binding;
 
 const KINDS: [ErrorKind; 10] = [
     ErrorKind::Syntax,

@@ -1,0 +1,144 @@
+// Recording a SimPulse session into a flight recorder and seed metadata helpers.
+use super::ring::{
+    FlightRecorder,
+    record_effect_internal
+};
+use super::wire::effect_scheduler;
+
+// TraceEvent kinds:
+// 0 = Spawn, 1 = Dispatch, 2 = Yield, 3 = Sleep, 4 = SubmitIo,
+// 5 = TimerElapsed, 6 = IoCompleted, 7 = CancelRequested, 8 = Finish, 9 = ClockAdvance
+pub struct SimPulseEvent {
+    pub kind: u8,
+    pub task: u64,
+    pub time_ns: u64,
+    pub payload: ChunkSeq[u8],
+}
+
+pub copy struct SimPulseTap {
+    pub copied: u64,
+    pub last_time_ns: u64,
+}
+
+pub fn new_tap() -> SimPulseTap {
+    SimPulseTap {
+        copied: 0,
+        last_time_ns: 0,
+    }
+}
+
+pub fn event_task(in ev: SimPulseEvent) -> u64 {
+    if ev.kind == 9 {
+        0
+    } else {
+        ev.task
+    }
+}
+
+pub fn event_time_ns(in ev: SimPulseEvent, last_time_ns: u64) -> u64 {
+    if ev.kind == 3 || ev.kind == 4 {
+        last_time_ns
+    } else {
+        ev.time_ns
+    }
+}
+
+pub fn drain_events(
+    inout tap: SimPulseTap,
+    in events: Slice[SimPulseEvent],
+    committed: u64,
+    inout recorder: FlightRecorder,
+) -> Result[u64, u32] {
+    if tap.copied > committed {
+        tap.copied = committed;
+    }
+    let mut n: u64 = 0;
+    loop {
+        if tap.copied >= committed {
+            break;
+        }
+        match events.try_get(tap.copied) {
+            Option::Some(ev) => {
+                let t = event_time_ns(in ev, tap.last_time_ns);
+                let task = event_task(in ev);
+                match record_effect_internal(
+                    inout recorder,
+                    task,
+                    t,
+                    effect_scheduler(),
+                    in ev.payload.as_slice(),
+                ) {
+                    Result::Ok(_) => {
+                        tap.last_time_ns = t;
+                        tap.copied = wrapping_add(tap.copied, 1);
+                        n = wrapping_add(n, 1);
+                    }
+                    Result::Err(e) => return Result::Err(e),
+                }
+            }
+            Option::None => break,
+        }
+    }
+    Result::Ok(n)
+}
+
+// Seed metadata: "simpulse-seed:" (14 bytes) followed by seed as u64le (8 bytes).
+pub fn seed_metadata(seed: u64) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new();
+    let prefix = "simpulse-seed:".as_bytes();
+    let mut i: u64 = 0;
+    loop {
+        if i >= prefix.len() {
+            break;
+        }
+        let b = match prefix.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        out.push(b);
+        i = wrapping_add(i, 1);
+    }
+    let mut k: u64 = 0;
+    loop {
+        if k >= 8 {
+            break;
+        }
+        out
+            .push(
+                wrapping_u8(
+                    wrapping_shr_u64(seed, wrapping_u32(wrapping_mul(k, 8))) & 255,
+                )
+            );
+        k = wrapping_add(k, 1);
+    }
+    out
+}
+
+pub fn seed_from_metadata(in metadata: Slice[u8]) -> Option[u64] {
+    let prefix = "simpulse-seed:".as_bytes();
+    if metadata.len() != wrapping_add(prefix.len(), 8) {
+        return Option::None;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= prefix.len() {
+            break;
+        }
+        let a = match metadata.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let b = match prefix.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if a != b {
+            return Option::None;
+        }
+        i = wrapping_add(i, 1);
+    }
+    match metadata.try_read_u64_le(prefix.len()) {
+        Option::Some(v) => Option::Some(v),
+        Option::None => Option::None,
+    }
+}

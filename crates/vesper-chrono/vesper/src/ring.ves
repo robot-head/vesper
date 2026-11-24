@@ -369,6 +369,16 @@ pub fn record_effect(
     append_record(inout r, fiber_id, time_ns, effect_id, op_tag, in payload)
 }
 
+pub fn record_effect_internal(
+    inout r: FlightRecorder,
+    fiber_id: u64,
+    time_ns: u64,
+    effect_id: u16,
+    in payload: Slice[u8],
+) -> Result[u64, u32] {
+    append_record(inout r, fiber_id, time_ns, effect_id, 0, in payload)
+}
+
 pub fn record_inout_write(
     inout r: FlightRecorder,
     fiber_id: u64,

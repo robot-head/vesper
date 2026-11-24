@@ -1,0 +1,663 @@
+// VirtualArena copy-on-write shard checkpoints (§31.1 item 2).
+use @vesper-std/hash::blake3::{
+    blake3,
+    digest_bytes
+};
+use super::ring::{
+    FlightRecorder,
+    capture_snapshot
+};
+
+// ArenaError codes:
+// 0 = Ok
+// 1 = BadGeometry
+// 2 = OutOfBounds
+// 3 = ShapeMismatch
+// 4 = EpochMismatch
+// 5 = Truncated
+// 6 = BadMagic
+// 7 = Corrupt
+// 8 = BadShard
+// 9 = TrailingBytes
+// 10 = RecordError
+// 11 = NoKeyframe
+
+pub copy struct ArenaStats {
+    pub checkpoints: u64,
+    pub shard_copies: u64,
+    pub shards_dirtied: u64,
+}
+
+// Each shard slot in ShardArena or ArenaCheckpoint points into a shard pool
+// (`pool`: flat ChunkSeq[u8] of `shard_len`-sized slices, `refcounts` per slot).
+// Wait: for clean copy-on-write without Rc, we store `shard_data: ChunkSeq[u8]`
+// (each arena/checkpoint owns its shard bytes, OR we track `shared: ChunkSeq[bool]`
+// so the first write after a checkpoint increments `shard_copies` just like Rc::strong_count > 1!).
+pub struct ShardArena {
+    pub len: u64,
+    pub shard_len: u64,
+    pub shard_count: u64,
+    data: ChunkSeq[u8],
+    shared: ChunkSeq[bool],
+    dirty: ChunkSeq[bool],
+    pub dirty_list: ChunkSeq[u32],
+    pub epoch: u64,
+    pub stats: ArenaStats,
+}
+
+pub struct ArenaCheckpoint {
+    pub epoch: u64,
+    pub len: u64,
+    pub shard_len: u64,
+    pub shard_count: u64,
+    data: ChunkSeq[u8],
+    pub dirty: ChunkSeq[u32],
+}
+
+pub struct ArenaDelta {
+    pub keyframe: bool,
+    pub epoch: u64,
+    pub len: u64,
+    pub shard_len: u32,
+    pub shard_ids: ChunkSeq[u32],
+    pub shard_bytes: ChunkSeq[u8],
+}
+
+fn is_power_of_two(x: u64) -> bool {
+    x != 0 && (x & wrapping_sub(x, 1)) == 0
+}
+
+fn byte_at(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn bool_at(in b: Slice[bool], i: u64) -> bool {
+    match b.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => false,
+    }
+}
+
+fn u32_at_seq(in s: Slice[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn div_ceil_u64(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    let mut q: u64 = 0;
+    let mut rem: u64 = 0;
+    let mut bit: u64 = 64;
+    loop {
+        if bit == 0 {
+            break;
+        }
+        bit = wrapping_sub(bit, 1);
+        rem = wrapping_shl_u64(rem, 1) | (wrapping_shr_u64(a, wrapping_u32(bit)) & 1);
+        q = wrapping_shl_u64(q, 1);
+        if rem >= b {
+            rem = wrapping_sub(rem, b);
+            q = q | 1;
+        }
+    }
+    if rem != 0 {
+        wrapping_add(q, 1)
+    } else {
+        q
+    }
+}
+
+fn div_rem_u64(a: u64, b: u64) -> (u64, u64) {
+    if b == 0 {
+        return (0, 0);
+    }
+    let mut q: u64 = 0;
+    let mut rem: u64 = 0;
+    let mut bit: u64 = 64;
+    loop {
+        if bit == 0 {
+            break;
+        }
+        bit = wrapping_sub(bit, 1);
+        rem = wrapping_shl_u64(rem, 1) | (wrapping_shr_u64(a, wrapping_u32(bit)) & 1);
+        q = wrapping_shl_u64(q, 1);
+        if rem >= b {
+            rem = wrapping_sub(rem, b);
+            q = q | 1;
+        }
+    }
+    (q, rem)
+}
+
+pub fn new_arena(len: u64, shard_len: u64) -> Result[ShardArena, u32] {
+    if !is_power_of_two(shard_len) || shard_len < 64 || shard_len > 1048576 || len == 0 {
+        return Result::Err(1);
+    }
+    let count = div_ceil_u64(len, shard_len);
+    if count > 4294967295 {
+        return Result::Err(1);
+    }
+    let total_bytes = wrapping_mul(count, shard_len);
+    let mut data: ChunkSeq[u8] = ChunkSeq::new();
+    let mut i: u64 = 0;
+    loop {
+        if i >= total_bytes {
+            break;
+        }
+        data.push(0);
+        i = wrapping_add(i, 1);
+    }
+    let mut shared: ChunkSeq[bool] = ChunkSeq::new();
+    let mut dirty: ChunkSeq[bool] = ChunkSeq::new();
+    let mut s: u64 = 0;
+    loop {
+        if s >= count {
+            break;
+        }
+        shared.push(true);
+        dirty.push(false);
+        s = wrapping_add(s, 1);
+    }
+    Result::Ok(
+        ShardArena {
+            len: len,
+            shard_len: shard_len,
+            shard_count: count,
+            data: data,
+            shared: shared,
+            dirty: dirty,
+            dirty_list: ChunkSeq::new(),
+            epoch: 0,
+            stats: ArenaStats {
+                checkpoints: 0,
+                shard_copies: 0,
+                shards_dirtied: 0,
+            },
+        }
+    )
+}
+
+fn mark_shard_dirty(inout arena: ShardArena, index: u64) {
+    if !bool_at(in arena.dirty.as_slice(), index) {
+        let _ = arena.dirty.try_set(index, true);
+        arena.dirty_list.push(wrapping_u32(index));
+        arena.stats.shards_dirtied = wrapping_add(arena.stats.shards_dirtied, 1);
+    }
+    if bool_at(in arena.shared.as_slice(), index) {
+        let _ = arena.shared.try_set(index, false);
+        arena.stats.shard_copies = wrapping_add(arena.stats.shard_copies, 1);
+    }
+}
+
+pub fn read_arena(in arena: ShardArena, offset: u64, len: u64) -> Result[ChunkSeq[u8], u32] {
+    if offset > arena.len || len > wrapping_sub(arena.len, offset) {
+        return Result::Err(2);
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new();
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        out.push(byte_at(in arena.data.as_slice(), wrapping_add(offset, i)));
+        i = wrapping_add(i, 1);
+    }
+    Result::Ok(out)
+}
+
+pub fn write_arena(inout arena: ShardArena, offset: u64, in bytes: Slice[u8]) -> u32 {
+    let n = bytes.len();
+    if offset > arena.len || n > wrapping_sub(arena.len, offset) {
+        return 2;
+    }
+    let mut done: u64 = 0;
+    loop {
+        if done >= n {
+            break;
+        }
+        let at = wrapping_add(offset, done);
+        let (idx, off) = div_rem_u64(at, arena.shard_len);
+        let avail = wrapping_sub(arena.shard_len, off);
+        let rem = wrapping_sub(n, done);
+        let chunk = if avail < rem {
+            avail
+        } else {
+            rem
+        };
+        mark_shard_dirty(inout arena, idx);
+        let mut k: u64 = 0;
+        loop {
+            if k >= chunk {
+                break;
+            }
+            let _ = arena
+                .data
+                .try_set(
+                    wrapping_add(at, k),
+                    byte_at(in bytes, wrapping_add(done, k)),
+                );
+            k = wrapping_add(k, 1);
+        }
+        done = wrapping_add(done, chunk);
+    }
+    0
+}
+
+pub fn checkpoint_arena(inout arena: ShardArena) -> ArenaCheckpoint {
+    arena.epoch = wrapping_add(arena.epoch, 1);
+    arena.stats.checkpoints = wrapping_add(arena.stats.checkpoints, 1);
+    let mut rev: ChunkSeq[u32] = ChunkSeq::new();
+    loop {
+        match arena.dirty_list.pop() {
+            Option::Some(v) => rev.push(v),
+            Option::None => break,
+        }
+    }
+    let mut dirty: ChunkSeq[u32] = ChunkSeq::new();
+    loop {
+        match rev.pop() {
+            Option::Some(v) => dirty.push(v),
+            Option::None => break,
+        }
+    }
+    let mut s: u64 = 0;
+    loop {
+        if s >= arena.shard_count {
+            break;
+        }
+        let _ = arena.dirty.try_set(s, false);
+        let _ = arena.shared.try_set(s, true);
+        s = wrapping_add(s, 1);
+    }
+    let mut snap_data: ChunkSeq[u8] = ChunkSeq::new();
+    let ds = arena.data.as_slice();
+    let mut i: u64 = 0;
+    loop {
+        if i >= ds.len() {
+            break;
+        }
+        snap_data.push(byte_at(in ds, i));
+        i = wrapping_add(i, 1);
+    }
+    ArenaCheckpoint {
+        epoch: arena.epoch,
+        len: arena.len,
+        shard_len: arena.shard_len,
+        shard_count: arena.shard_count,
+        data: snap_data,
+        dirty: dirty,
+    }
+}
+
+pub fn restore_arena(inout arena: ShardArena, in cp: ArenaCheckpoint) -> u32 {
+    if cp.len != arena.len || cp.shard_len != arena.shard_len {
+        return 3;
+    }
+    let ds = cp.data.as_slice();
+    let mut i: u64 = 0;
+    loop {
+        if i >= ds.len() {
+            break;
+        }
+        let _ = arena.data.try_set(i, byte_at(in ds, i));
+        i = wrapping_add(i, 1);
+    }
+    let mut s: u64 = 0;
+    loop {
+        if s >= arena.shard_count {
+            break;
+        }
+        let _ = arena.dirty.try_set(s, false);
+        let _ = arena.shared.try_set(s, true);
+        s = wrapping_add(s, 1);
+    }
+    arena.dirty_list = ChunkSeq::new();
+    arena.epoch = cp.epoch;
+    0
+}
+
+pub fn checkpoint_delta(in cp: ArenaCheckpoint) -> ArenaDelta {
+    let mut ids: ChunkSeq[u32] = ChunkSeq::new();
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::new();
+    let dlist = cp.dirty.as_slice();
+    let ds = cp.data.as_slice();
+    let mut k: u64 = 0;
+    loop {
+        if k >= dlist.len() {
+            break;
+        }
+        let idx = u32_at_seq(in dlist, k);
+        ids.push(idx);
+        let base = wrapping_mul(widen_u64(idx), cp.shard_len);
+        let mut i: u64 = 0;
+        loop {
+            if i >= cp.shard_len {
+                break;
+            }
+            bytes.push(byte_at(in ds, wrapping_add(base, i)));
+            i = wrapping_add(i, 1);
+        }
+        k = wrapping_add(k, 1);
+    }
+    ArenaDelta {
+        keyframe: false,
+        epoch: cp.epoch,
+        len: cp.len,
+        shard_len: wrapping_u32(cp.shard_len),
+        shard_ids: ids,
+        shard_bytes: bytes,
+    }
+}
+
+pub fn checkpoint_keyframe(in cp: ArenaCheckpoint) -> ArenaDelta {
+    let mut ids: ChunkSeq[u32] = ChunkSeq::new();
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::new();
+    let ds = cp.data.as_slice();
+    let mut k: u64 = 0;
+    loop {
+        if k >= cp.shard_count {
+            break;
+        }
+        ids.push(wrapping_u32(k));
+        k = wrapping_add(k, 1);
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= ds.len() {
+            break;
+        }
+        bytes.push(byte_at(in ds, i));
+        i = wrapping_add(i, 1);
+    }
+    ArenaDelta {
+        keyframe: true,
+        epoch: cp.epoch,
+        len: cp.len,
+        shard_len: wrapping_u32(cp.shard_len),
+        shard_ids: ids,
+        shard_bytes: bytes,
+    }
+}
+
+fn push_u32_le(inout out: ChunkSeq[u8], v: u32) {
+    let w = widen_u64(v);
+    out.push(wrapping_u8(w & 255));
+    out.push(wrapping_u8(wrapping_shr_u64(w, 8) & 255));
+    out.push(wrapping_u8(wrapping_shr_u64(w, 16) & 255));
+    out.push(wrapping_u8(wrapping_shr_u64(w, 24) & 255));
+}
+
+fn push_u64_le(inout out: ChunkSeq[u8], v: u64) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= 8 {
+            break;
+        }
+        out
+            .push(
+                wrapping_u8(
+                    wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8))) & 255,
+                )
+            );
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn read_u32_le(in b: Slice[u8], off: u64) -> u32 {
+    match b.try_read_u32_le(off) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn read_u64_le(in b: Slice[u8], off: u64) -> u64 {
+    match b.try_read_u64_le(off) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn encode_delta(in d: ArenaDelta) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new();
+    // ARENA_DELTA_MAGIC = b"VARENA\0\x02"
+    out.push(86);
+    out.push(65);
+    out.push(82);
+    out.push(69);
+    out.push(78);
+    out.push(65);
+    out.push(0);
+    out.push(2);
+    push_u64_le(inout out, d.epoch);
+    push_u64_le(inout out, d.len);
+    push_u32_le(inout out, d.shard_len);
+    push_u32_le(
+        inout out,
+        if d.keyframe {
+            1
+        } else {
+            0
+        }
+    );
+    let count = d.shard_ids.as_slice().len();
+    push_u32_le(inout out, wrapping_u32(count));
+    let slen = widen_u64(d.shard_len);
+    let ids = d.shard_ids.as_slice();
+    let sbytes = d.shard_bytes.as_slice();
+    let mut k: u64 = 0;
+    loop {
+        if k >= count {
+            break;
+        }
+        push_u32_le(inout out, u32_at_seq(in ids, k));
+        let base = wrapping_mul(k, slen);
+        let mut i: u64 = 0;
+        loop {
+            if i >= slen {
+                break;
+            }
+            out.push(byte_at(in sbytes, wrapping_add(base, i)));
+            i = wrapping_add(i, 1);
+        }
+        k = wrapping_add(k, 1);
+    }
+    let digest = blake3(in out.as_slice());
+    digest_bytes(digest, inout out);
+    out
+}
+
+pub fn decode_delta(in bytes: Slice[u8], max_shards: u64) -> Result[ArenaDelta, u32] {
+    let header_len: u64 = 36;
+    let digest_len: u64 = 32;
+    if bytes.len() < wrapping_add(header_len, digest_len) {
+        return Result::Err(5);
+    }
+    if byte_at(in bytes, 0) != 86
+        || byte_at(in bytes, 1) != 65
+        || byte_at(in bytes, 2) != 82
+        || byte_at(in bytes, 3) != 69
+        || byte_at(in bytes, 4) != 78
+        || byte_at(in bytes, 5) != 65
+        || byte_at(in bytes, 6) != 0
+        || byte_at(in bytes, 7) != 2 {
+        return Result::Err(6);
+    }
+    let body_len = wrapping_sub(bytes.len(), digest_len);
+    let mut body: ChunkSeq[u8] = ChunkSeq::new();
+    let mut bi: u64 = 0;
+    loop {
+        if bi >= body_len {
+            break;
+        }
+        body.push(byte_at(in bytes, bi));
+        bi = wrapping_add(bi, 1);
+    }
+    let expected_digest = blake3(in body.as_slice());
+    let mut exp_bytes: ChunkSeq[u8] = ChunkSeq::new();
+    digest_bytes(expected_digest, inout exp_bytes);
+    let mut di: u64 = 0;
+    loop {
+        if di >= digest_len {
+            break;
+        }
+        if byte_at(in exp_bytes.as_slice(), di) != byte_at(in bytes, wrapping_add(body_len, di)) {
+            return Result::Err(7);
+        }
+        di = wrapping_add(di, 1);
+    }
+
+    let bs = body.as_slice();
+    let epoch = read_u64_le(in bs, 8);
+    let len = read_u64_le(in bs, 16);
+    let shard_len = read_u32_le(in bs, 24);
+    let kf_raw = read_u32_le(in bs, 28);
+    if kf_raw > 1 {
+        return Result::Err(6);
+    }
+    let keyframe = kf_raw == 1;
+    let count = widen_u64(read_u32_le(in bs, 32));
+    let slen = widen_u64(shard_len);
+    if !is_power_of_two(slen) || slen < 64 || slen > 1048576 || len == 0 {
+        return Result::Err(1);
+    }
+    let total = div_ceil_u64(len, slen);
+    if count > max_shards || count > total || (keyframe && count != total) {
+        return Result::Err(8);
+    }
+    let entry = wrapping_add(4, slen);
+    let expected = wrapping_add(header_len, wrapping_mul(count, entry));
+    if body_len < expected {
+        return Result::Err(5);
+    }
+    if body_len > expected {
+        return Result::Err(9);
+    }
+    let mut seen: ChunkSeq[u32] = ChunkSeq::new();
+    let mut ids: ChunkSeq[u32] = ChunkSeq::new();
+    let mut sbytes: ChunkSeq[u8] = ChunkSeq::new();
+    let mut k: u64 = 0;
+    loop {
+        if k >= count {
+            break;
+        }
+        let at = wrapping_add(header_len, wrapping_mul(k, entry));
+        let idx = read_u32_le(in bs, at);
+        if widen_u64(idx) >= total {
+            return Result::Err(8);
+        }
+        let mut si: u64 = 0;
+        loop {
+            if si >= seen.as_slice().len() {
+                break;
+            }
+            if u32_at_seq(in seen.as_slice(), si) == idx {
+                return Result::Err(8);
+            }
+            si = wrapping_add(si, 1);
+        }
+        seen.push(idx);
+        ids.push(idx);
+        let mut j: u64 = 0;
+        loop {
+            if j >= slen {
+                break;
+            }
+            sbytes.push(byte_at(in bs, wrapping_add(wrapping_add(at, 4), j)));
+            j = wrapping_add(j, 1);
+        }
+        k = wrapping_add(k, 1);
+    }
+    Result::Ok(
+        ArenaDelta {
+            keyframe: keyframe,
+            epoch: epoch,
+            len: len,
+            shard_len: shard_len,
+            shard_ids: ids,
+            shard_bytes: sbytes,
+        }
+    )
+}
+
+pub fn apply_delta(in d: ArenaDelta, inout arena: ShardArena) -> u32 {
+    if d.len != arena.len || widen_u64(d.shard_len) != arena.shard_len {
+        return 3;
+    }
+    if d.keyframe {
+        if d.epoch == 0 {
+            return 4;
+        }
+        arena.epoch = wrapping_sub(d.epoch, 1);
+    }
+    let expected = wrapping_add(arena.epoch, 1);
+    if d.epoch != expected {
+        return 4;
+    }
+    let ids = d.shard_ids.as_slice();
+    let sbytes = d.shard_bytes.as_slice();
+    let slen = arena.shard_len;
+    let mut k: u64 = 0;
+    loop {
+        if k >= ids.len() {
+            break;
+        }
+        let idx = widen_u64(u32_at_seq(in ids, k));
+        if idx >= arena.shard_count {
+            return 8;
+        }
+        mark_shard_dirty(inout arena, idx);
+        let dst_base = wrapping_mul(idx, slen);
+        let src_base = wrapping_mul(k, slen);
+        let mut i: u64 = 0;
+        loop {
+            if i >= slen {
+                break;
+            }
+            let _ = arena
+                .data
+                .try_set(
+                    wrapping_add(dst_base, i),
+                    byte_at(in sbytes, wrapping_add(src_base, i)),
+                );
+            i = wrapping_add(i, 1);
+        }
+        k = wrapping_add(k, 1);
+    }
+    0
+}
+
+pub fn capture_arena_epoch(
+    inout recorder: FlightRecorder,
+    time_ns: u64,
+    in cp: ArenaCheckpoint,
+    keyframe_every: u64,
+) -> Result[u32, u32] {
+    if keyframe_every == 0 {
+        return Result::Err(11);
+    }
+    let (_, rem) = div_rem_u64(
+        if cp.epoch == 0 {
+            0
+        } else {
+            wrapping_sub(cp.epoch, 1)
+        },
+        keyframe_every,
+    );
+    let img = if rem == 0 {
+        checkpoint_keyframe(in cp)
+    } else {
+        checkpoint_delta(in cp)
+    };
+    let encoded = encode_delta(in img);
+    match capture_snapshot(inout recorder, time_ns, in encoded.as_slice()) {
+        Result::Ok(ep) => Result::Ok(ep),
+        Result::Err(_) => Result::Err(10),
+    }
+}
