@@ -2201,3 +2201,56 @@ fn mono_plan_agrees_with_rust() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn builtin_wanted_agrees_with_rust() {
+    if !owned_by_shard(10) {
+        return;
+    }
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let wanted_fn = package().entry("check_pact_builtin_wanted", true);
+            let mut cases: Vec<(String, Module)> = checker_tests()
+                .into_iter()
+                .map(|(n, s)| (n, parse(&s)))
+                .collect();
+            for c in corpus() {
+                cases.push((c.name.clone(), c.module.clone()));
+            }
+            let extra = [
+                ("wanted_plain", "fn main() -> i64 { 0 }"),
+                ("wanted_user_eq", "trait Eq { fn eq(in self, in o: Self) -> bool; } fn f[T: Eq](in x: T) -> bool { true }"),
+                ("wanted_user_ordering", "enum Ordering { A } fn f() -> i64 { 0 }"),
+                ("wanted_bound_ord", "fn f[T: Ord](in x: T) -> i64 { 0 }"),
+                ("wanted_path_hash", "fn f(in x: u64) -> u64 { Hash::hash(x) }"),
+                ("wanted_ordering_ty", "fn f(in o: Ordering) -> i64 { 0 }"),
+                ("wanted_impl_eq", "struct S { x: u64 } impl Eq for S {}"),
+            ];
+            for (n, s) in extra {
+                cases.push((n.to_string(), parse(s)));
+            }
+            let mut checked = 0usize;
+            let mut yes = 0usize;
+            for (name, m) in &cases {
+                let input = pact_words::encode_builtin_wanted(m);
+                if input.len() > 512 * 1024 {
+                    continue;
+                }
+                checked += 1;
+                let rust = pact_frontend::builtin_traits_wanted(m);
+                let words = wanted_fn.words(&input);
+                let vesper = words.first().copied().unwrap_or(0) != 0;
+                if rust {
+                    yes += 1;
+                }
+                assert_eq!(vesper, rust, "{name}: wanted mismatch");
+            }
+            eprintln!("builtin_wanted: {checked} modules checked ({yes} wanted), 0 differ");
+            assert!(checked > 20);
+            assert!(yes > 0);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

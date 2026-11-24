@@ -891,3 +891,55 @@ pub fn decode_mono_plan(
     }
     (session_diags, true, errors, clones, rewrites)
 }
+
+pub fn encode_builtin_wanted(m: &Module) -> Vec<u8> {
+    let mut e = Enc::default();
+    let mut decls = vec![];
+    for i in &m.items {
+        match i {
+            Item::Adt(a) => decls.push(e.name(&a.name)),
+            Item::Trait(t) => decls.push(e.name(&t.name)),
+            Item::Effect(ef) => decls.push(e.name(&ef.name)),
+            Item::Conformance(c) => {
+                if let ConformanceKind::Model { name, .. } = &c.kind {
+                    decls.push(e.name(name));
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut refs = vec![];
+    for b in &m.trait_bounds {
+        refs.push((
+            u64::from(b.trait_ref.package.is_none()),
+            e.name(&b.trait_ref.name),
+        ));
+    }
+    for i in &m.items {
+        if let Item::Conformance(c) = i {
+            refs.push((
+                u64::from(c.trait_ref.package.is_none()),
+                e.name(&c.trait_ref.name),
+            ));
+            for w in &c.where_clauses {
+                refs.push((
+                    u64::from(w.trait_ref.package.is_none()),
+                    e.name(&w.trait_ref.name),
+                ));
+            }
+        }
+    }
+    let json = serde_json::to_vec(&m.items).unwrap_or_default();
+    let mut t = vec![];
+    t.push(decls.len() as u64);
+    t.extend(decls);
+    t.push(refs.len() as u64);
+    for (p, n) in refs {
+        t.push(p);
+        t.push(n);
+    }
+    t.push(json.len() as u64);
+    let mut out = e.finish(&[], &t);
+    out.extend_from_slice(&json);
+    out
+}
