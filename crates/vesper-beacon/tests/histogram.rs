@@ -63,10 +63,9 @@ fn footprint_is_fixed() {
     );
     // The Rust build's u128 sum is 16-byte aligned; the port keeps it as
     // two words.
-    let expected = if cfg!(feature = "vesper-port") {
-        7976
-    } else {
-        7984
+    let expected = match vesper_beacon::IMPLEMENTATION {
+        "vesper" => 7976,
+        _ => 7984,
     };
     assert_eq!(FastLogHistogram::FOOTPRINT_BYTES, expected);
 }
