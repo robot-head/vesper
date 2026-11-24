@@ -23,17 +23,24 @@ use @vesper/check-data::util::{
 use self::host::{
     Core,
     Imp,
-    read_core,
-    imp_at,
-    import_ifaces,
-    host_name,
-    instance_type,
     aliased_type,
-    lower_kind,
-    shim_module,
     fixup_module,
+    host_name,
+    if_count,
+    iface_of,
+    import_ifaces,
+    imp_at,
+    instance_type,
+    lower_is_drop,
+    lower_is_indirect,
+    lower_kind,
+    lower_ok,
+    lower_uses_realloc,
+    lower_uses_utf8,
+    needs_descriptor_alias,
     put_decimal,
-    iface_of
+    read_core,
+    shim_module
 };
 use self::wit::{
     Wit,
@@ -60,14 +67,6 @@ const D_RECORD: u8 = 0;
 const P_STRING: u8 = 115;
 
 const NONE8: u8 = 255;
-
-// host.ves's constants.
-const IF_COUNT: u64 = 5;
-const L_NONE: u8 = 0;
-const L_DIRECT: u8 = 1;
-const L_MEMORY: u8 = 2;
-const L_MEMORY_UTF8: u8 = 3;
-const L_DROP: u8 = 4;
 
 // Why `encode` declines (lib.ves answers 32 + it).
 pub const X_CORE: u64 = 1;
@@ -760,9 +759,22 @@ pub fn encode(in core: Slice[u8], in w: Wit, inout out: ChunkSeq[u8]) -> u64 {
     let mut b = b_new();
     // The host interfaces: each instance type and import, and the types
     // later interfaces alias (`encode_imports`).
+    let if_n = if_count();
     let mut hinst = ChunkSeq::new[u32]();
-    for i in 0..IF_COUNT {
+    let mut halias = ChunkSeq::new[u32]();
+    for i in 0..if_n {
         hinst.push(NONE32);
+        halias.push(NONE32);
+    }
+    let mut need_desc = false;
+    for x in 0..w.imports.len() {
+        let h = match w.imports.try_get(x) {
+            Option::Some(k) => k,
+            Option::None => 0,
+        };
+        if needs_descriptor_alias(h) {
+            need_desc = true;
+        }
     }
     for x in 0..w.imports.len() {
         let h = match w.imports.try_get(x) {
@@ -772,13 +784,16 @@ pub fn encode(in core: Slice[u8], in w: Wit, inout out: ChunkSeq[u8]) -> u64 {
         let (first, n) = import_ifaces(h);
         for k in 0..n {
             let i = wrapping_add(first, wrapping_u8(k));
+            if at32(in hinst.as_slice(), widen_u64(i)) != NONE32 {
+                continue;
+            }
             let mut name = ChunkSeq::new[u8]();
             host_name(i, inout name);
             let mut tname = ChunkSeq::new[u8]();
             tname.extend(in "ty-".as_bytes());
             tname.extend(in name.as_slice());
             b.item(S_TYPE);
-            instance_type(i, inout b.cur);
+            instance_type(i, in halias.as_slice(), inout b.cur);
             let t = b.add(NS_TYPE, in tname.as_slice());
             b.item(S_IMPORT);
             b.cur.push(0);
@@ -788,10 +803,11 @@ pub fn encode(in core: Slice[u8], in w: Wit, inout out: ChunkSeq[u8]) -> u64 {
             let ii = b.add(NS_INSTANCE, in name.as_slice());
             hinst.try_set(widen_u64(i), ii);
             let mut alias = ChunkSeq::new[u8]();
-            aliased_type(i, inout alias);
+            aliased_type(i, need_desc, inout alias);
             if alias.len() > 0 {
                 alias_export(inout b, SORT_TYPE, ii, in alias.as_slice());
-                b.add(NS_TYPE, in alias.as_slice());
+                let at = b.add(NS_TYPE, in alias.as_slice());
+                halias.try_set(widen_u64(i), at);
             }
         }
     }
@@ -813,10 +829,10 @@ pub fn encode(in core: Slice[u8], in w: Wit, inout out: ChunkSeq[u8]) -> u64 {
             return X_IMPORT;
         }
         let l = lower_kind(i, in c.text[im.f0..add(im.f0, im.fl)]);
-        if l == L_NONE || im.ty >= c.sigs.len() {
+        if !lower_ok(l) || im.ty >= c.sigs.len() {
             return X_IMPORT;
         }
-        if l == L_MEMORY || l == L_MEMORY_UTF8 {
+        if lower_is_indirect(l) {
             indirect.push(k);
             sigs.push(im.ty);
         }
@@ -878,7 +894,7 @@ pub fn encode(in core: Slice[u8], in w: Wit, inout out: ChunkSeq[u8]) -> u64 {
             let l = byte(in kinds.as_slice(), j);
             let ii = at32(in hinst.as_slice(), widen_u64(i));
             let mut cf: u32 = 0;
-            if l == L_MEMORY || l == L_MEMORY_UTF8 {
+            if lower_is_indirect(l) {
                 let mut slot: u64 = 0;
                 for q in 0..indirect.len() {
                     if at64(in indirect.as_slice(), q) == j {
@@ -891,7 +907,7 @@ pub fn encode(in core: Slice[u8], in w: Wit, inout out: ChunkSeq[u8]) -> u64 {
                 let mut n = ChunkSeq::new[u8]();
                 indirect_name(in c, im, inout n);
                 cf = b.add(NS_CORE_FUNC, in n.as_slice());
-            } else if l == L_DROP {
+            } else if lower_is_drop(l) {
                 // `[resource-drop]` and the resource's name
                 alias_export(inout b, SORT_TYPE, ii, in c.text[add(im.f0, 15)..fe]);
                 let t = b.add(NS_TYPE, in c.text[add(im.f0, 15)..fe]);
@@ -933,6 +949,7 @@ pub fn encode(in core: Slice[u8], in w: Wit, inout out: ChunkSeq[u8]) -> u64 {
     b.cur.extend(in args.as_slice());
     let inst = b.add(NS_CORE_INSTANCE, in "main".as_bytes());
     let mem = memory_alias(inout b, inst);
+    let mut realloc = NONE32;
     // The fixup module fills the shim's table with the real lowerings.
     if indirect.len() > 0 {
         let mut m = ChunkSeq::new[u8]();
@@ -947,18 +964,31 @@ pub fn encode(in core: Slice[u8], in w: Wit, inout out: ChunkSeq[u8]) -> u64 {
             let ii = at32(in hinst.as_slice(), widen_u64(byte(in ifs.as_slice(), j)));
             alias_export(inout b, SORT_FUNC, ii, in c.text[im.f0..fe]);
             let fi = b.add(NS_FUNC, in c.text[im.f0..fe]);
-            let utf8 = byte(in kinds.as_slice(), j) == L_MEMORY_UTF8;
+            let k = byte(in kinds.as_slice(), j);
+            let need_realloc = lower_uses_realloc(k);
+            let utf8 = lower_uses_utf8(k);
+            if need_realloc && realloc == NONE32 {
+                alias_core_export(inout b, CORE_FUNC, inst, in "cabi_realloc".as_bytes());
+                realloc = b.add(NS_CORE_FUNC, in "cabi_realloc".as_bytes());
+            }
             b.item(S_CANON);
             b.cur.push(CANON_LOWER);
             b.cur.push(0);
             uleb(inout b.cur, widen_u64(fi));
-            if utf8 {
-                uleb(inout b.cur, 2);
-            } else {
-                uleb(inout b.cur, 1);
+            let mut opts: u64 = 1;
+            if need_realloc {
+                opts = inc(opts);
             }
+            if utf8 {
+                opts = inc(opts);
+            }
+            uleb(inout b.cur, opts);
             b.cur.push(OPT_MEMORY);
             uleb(inout b.cur, widen_u64(mem));
+            if need_realloc {
+                b.cur.push(OPT_REALLOC);
+                uleb(inout b.cur, widen_u64(realloc));
+            }
             if utf8 {
                 b.cur.push(OPT_UTF8);
             }
@@ -988,7 +1018,6 @@ pub fn encode(in core: Slice[u8], in w: Wit, inout out: ChunkSeq[u8]) -> u64 {
         uleb(inout b.cur, widen_u64(shim_inst));
         b.add(NS_CORE_INSTANCE, in "fixup".as_bytes());
     }
-    let mut realloc = NONE32;
     for x in 0..w.exports.len() {
         let kind = match w.exports.try_get(x) {
             Option::Some(k) => k,

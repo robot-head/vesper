@@ -453,7 +453,7 @@ fn declines_outside_the_subset() {
         (
             &good.replace(
                 "export entry;",
-                "export entry;\n  import wasi:filesystem/types@0.2.0;",
+                "export entry;\n  import wasi:http/types@0.2.0;",
             ),
             WasmWorld::Command,
         ),
@@ -612,6 +612,532 @@ fn flip_gate() {
     if wants("build") {
         println!("flip-gate pairs build{build_pairs}");
     }
+}
+
+#[test]
+fn std_env_and_std_fs_match_rust() {
+    use wasm_encoder::{
+        CodeSection, ExportKind, ExportSection, Function, FunctionSection, ImportSection,
+        Instruction as I, MemorySection, MemoryType, Module, TypeSection, ValType,
+    };
+
+    const CLOCKS_ALL: &str = "package wasi:clocks@0.2.0;\n\ninterface monotonic-clock {\n  type instant = u64;\n  now: func() -> instant;\n}\n\ninterface wall-clock {\n  record datetime {\n    seconds: u64,\n    nanoseconds: u32,\n  }\n}\n";
+    const CLI_ALL: &str = "package wasi:cli@0.2.0;\n\ninterface run {\n  run: func() -> result;\n}\n\ninterface stdout {\n  use wasi:io/streams@0.2.0.{output-stream};\n  get-stdout: func() -> output-stream;\n}\n\ninterface environment {\n  get-environment: func() -> list<tuple<string, string>>;\n  get-arguments: func() -> list<string>;\n  initial-cwd: func() -> option<string>;\n}\n";
+    const FS_ALL: &str = r#"package wasi:filesystem@0.2.0;
+
+interface types {
+  use wasi:clocks/wall-clock@0.2.0.{datetime};
+  type filesize = u64;
+  enum descriptor-type {
+    unknown,
+    block-device,
+    character-device,
+    directory,
+    fifo,
+    symbolic-link,
+    regular-file,
+    socket,
+  }
+  flags descriptor-flags {
+    read,
+    write,
+    file-integrity-sync,
+    data-integrity-sync,
+    requested-write-sync,
+    mutate-directory,
+  }
+  flags path-flags {
+    symlink-follow,
+  }
+  flags open-flags {
+    create,
+    directory,
+    exclusive,
+    truncate,
+  }
+  type link-count = u64;
+  record descriptor-stat {
+    %type: descriptor-type,
+    link-count: link-count,
+    size: filesize,
+    data-access-timestamp: option<datetime>,
+    data-modification-timestamp: option<datetime>,
+    status-change-timestamp: option<datetime>,
+  }
+  record directory-entry {
+    %type: descriptor-type,
+    name: string,
+  }
+  enum error-code {
+    access,
+    would-block,
+    already,
+    bad-descriptor,
+    busy,
+    deadlock,
+    quota,
+    exist,
+    file-too-large,
+    illegal-byte-sequence,
+    in-progress,
+    interrupted,
+    invalid,
+    io,
+    is-directory,
+    loop,
+    too-many-links,
+    message-size,
+    name-too-long,
+    no-device,
+    no-entry,
+    no-lock,
+    insufficient-memory,
+    insufficient-space,
+    not-directory,
+    not-empty,
+    not-recoverable,
+    unsupported,
+    no-tty,
+    no-such-device,
+    overflow,
+    not-permitted,
+    pipe,
+    read-only,
+    invalid-seek,
+    text-file-busy,
+    cross-device,
+  }
+  resource descriptor {
+    read: func(length: filesize, offset: filesize) -> result<tuple<list<u8>, bool>, error-code>;
+    write: func(buffer: list<u8>, offset: filesize) -> result<filesize, error-code>;
+    read-directory: func() -> result<directory-entry-stream, error-code>;
+    sync: func() -> result<_, error-code>;
+    create-directory-at: func(path: string) -> result<_, error-code>;
+    stat: func() -> result<descriptor-stat, error-code>;
+    stat-at: func(path-flags: path-flags, path: string) -> result<descriptor-stat, error-code>;
+    open-at: func(path-flags: path-flags, path: string, open-flags: open-flags, %flags: descriptor-flags) -> result<descriptor, error-code>;
+    remove-directory-at: func(path: string) -> result<_, error-code>;
+    rename-at: func(old-path: string, new-descriptor: borrow<descriptor>, new-path: string) -> result<_, error-code>;
+    unlink-file-at: func(path: string) -> result<_, error-code>;
+  }
+  resource directory-entry-stream {
+    read-directory-entry: func() -> result<option<directory-entry>, error-code>;
+  }
+}
+
+interface preopens {
+  use types.{descriptor};
+  get-directories: func() -> list<tuple<descriptor, string>>;
+}
+"#;
+
+    fn make_core(
+        imps: &[(&str, &str, Vec<ValType>, Vec<ValType>)],
+        with_str_param: bool,
+    ) -> Vec<u8> {
+        let mut types = TypeSection::new();
+        let mut imports = ImportSection::new();
+        for (idx, (m, f, params, results)) in imps.iter().enumerate() {
+            types.ty().function(params.clone(), results.clone());
+            imports.import(m, f, wasm_encoder::EntityType::Function(idx as u32));
+        }
+        let ti_main = imps.len() as u32;
+        if with_str_param {
+            types
+                .ty()
+                .function([ValType::I32, ValType::I32], [ValType::I64]);
+        } else {
+            types.ty().function([], [ValType::I64]);
+        }
+        let ti_run = ti_main + 1;
+        types.ty().function([], [ValType::I32]);
+        let ti_realloc = ti_main + 2;
+        types.ty().function(
+            [ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+            [ValType::I32],
+        );
+
+        let mut funcs = FunctionSection::new();
+        funcs.function(ti_main);
+        funcs.function(ti_run);
+        funcs.function(ti_realloc);
+
+        let mut mem = MemorySection::new();
+        mem.memory(MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+
+        let mut exports = ExportSection::new();
+        let base = imps.len() as u32;
+        exports.export("memory", ExportKind::Memory, 0);
+        exports.export("vesper:program/entry@0.1.0#main", ExportKind::Func, base);
+        exports.export("wasi:cli/run@0.2.0#run", ExportKind::Func, base + 1);
+        exports.export("cabi_realloc", ExportKind::Func, base + 2);
+
+        let mut code = CodeSection::new();
+        let mut f0 = Function::new([]);
+        f0.instruction(&I::I64Const(0));
+        f0.instruction(&I::End);
+        code.function(&f0);
+        let mut f1 = Function::new([]);
+        f1.instruction(&I::I32Const(0));
+        f1.instruction(&I::End);
+        code.function(&f1);
+        let mut f2 = Function::new([]);
+        f2.instruction(&I::I32Const(0));
+        f2.instruction(&I::End);
+        code.function(&f2);
+
+        let mut m = Module::new();
+        m.section(&types);
+        m.section(&imports);
+        m.section(&funcs);
+        m.section(&mem);
+        m.section(&exports);
+        m.section(&code);
+        m.finish()
+    }
+
+    fn encode_rust(core_in: &[u8], wit: &str) -> Vec<u8> {
+        let mut core = core_in.to_vec();
+        let mut resolve = wit_parser::Resolve::default();
+        for (name, source) in [
+            ("wasi-io.wit", HOST_WIT[0].1),
+            ("wasi-cli.wit", CLI_ALL),
+            ("wasi-clocks.wit", CLOCKS_ALL),
+            ("wasi-filesystem.wit", FS_ALL),
+            ("vesper-beacon.wit", HOST_WIT[3].1),
+        ] {
+            resolve.push_source(name, source).unwrap();
+        }
+        let pkg = resolve.push_source("vesper-program.wit", wit).unwrap();
+        let id = resolve.select_world(&[pkg], Some("program")).unwrap();
+        wit_component::embed_component_metadata(
+            &mut core,
+            &resolve,
+            id,
+            wit_component::StringEncoding::UTF8,
+            false,
+        )
+        .unwrap();
+        wit_component::ComponentEncoder::default()
+            .validate(true)
+            .module(&core)
+            .unwrap()
+            .encode()
+            .unwrap()
+    }
+
+    let env_imps = vec![
+        (
+            "wasi:cli/environment@0.2.0",
+            "get-arguments",
+            vec![ValType::I32],
+            vec![],
+        ),
+        (
+            "wasi:cli/environment@0.2.0",
+            "get-environment",
+            vec![ValType::I32],
+            vec![],
+        ),
+        (
+            "wasi:cli/environment@0.2.0",
+            "initial-cwd",
+            vec![ValType::I32],
+            vec![],
+        ),
+    ];
+    let fs_imps = vec![
+        (
+            "wasi:filesystem/preopens@0.2.0",
+            "get-directories",
+            vec![ValType::I32],
+            vec![],
+        ),
+        (
+            "wasi:filesystem/types@0.2.0",
+            "[method]descriptor.open-at",
+            vec![ValType::I32; 7],
+            vec![],
+        ),
+        (
+            "wasi:filesystem/types@0.2.0",
+            "[method]descriptor.read",
+            vec![ValType::I32, ValType::I64, ValType::I64, ValType::I32],
+            vec![],
+        ),
+        (
+            "wasi:filesystem/types@0.2.0",
+            "[method]descriptor.write",
+            vec![
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I64,
+                ValType::I32,
+            ],
+            vec![],
+        ),
+        (
+            "wasi:filesystem/types@0.2.0",
+            "[method]descriptor.stat",
+            vec![ValType::I32; 2],
+            vec![],
+        ),
+        (
+            "wasi:filesystem/types@0.2.0",
+            "[method]descriptor.stat-at",
+            vec![ValType::I32; 5],
+            vec![],
+        ),
+        (
+            "wasi:filesystem/types@0.2.0",
+            "[method]descriptor.sync",
+            vec![ValType::I32; 2],
+            vec![],
+        ),
+        (
+            "wasi:filesystem/types@0.2.0",
+            "[method]descriptor.create-directory-at",
+            vec![ValType::I32; 4],
+            vec![],
+        ),
+        (
+            "wasi:filesystem/types@0.2.0",
+            "[method]descriptor.remove-directory-at",
+            vec![ValType::I32; 4],
+            vec![],
+        ),
+        (
+            "wasi:filesystem/types@0.2.0",
+            "[method]descriptor.unlink-file-at",
+            vec![ValType::I32; 4],
+            vec![],
+        ),
+        (
+            "wasi:filesystem/types@0.2.0",
+            "[method]descriptor.rename-at",
+            vec![ValType::I32; 7],
+            vec![],
+        ),
+        (
+            "wasi:filesystem/types@0.2.0",
+            "[method]descriptor.read-directory",
+            vec![ValType::I32; 2],
+            vec![],
+        ),
+        (
+            "wasi:filesystem/types@0.2.0",
+            "[method]directory-entry-stream.read-directory-entry",
+            vec![ValType::I32; 2],
+            vec![],
+        ),
+        (
+            "wasi:filesystem/types@0.2.0",
+            "[resource-drop]descriptor",
+            vec![ValType::I32],
+            vec![],
+        ),
+        (
+            "wasi:filesystem/types@0.2.0",
+            "[resource-drop]directory-entry-stream",
+            vec![ValType::I32],
+            vec![],
+        ),
+    ];
+    let mut both = env_imps.clone();
+    both.extend(fs_imps.clone());
+    let mut all_five = both.clone();
+    all_five.extend([
+        (
+            "wasi:cli/stdout@0.2.0",
+            "get-stdout",
+            vec![],
+            vec![ValType::I32],
+        ),
+        (
+            "wasi:io/streams@0.2.0",
+            "[method]output-stream.blocking-write-and-flush",
+            vec![ValType::I32; 4],
+            vec![],
+        ),
+        (
+            "wasi:io/streams@0.2.0",
+            "[resource-drop]output-stream",
+            vec![ValType::I32],
+            vec![],
+        ),
+        (
+            "wasi:clocks/monotonic-clock@0.2.0",
+            "now",
+            vec![],
+            vec![ValType::I64],
+        ),
+        (
+            "vesper:beacon/trace@0.1.0",
+            "current-ctx",
+            vec![ValType::I32],
+            vec![],
+        ),
+        (
+            "vesper:beacon/trace@0.1.0",
+            "start-span",
+            vec![ValType::I32; 4],
+            vec![],
+        ),
+        (
+            "vesper:beacon/trace@0.1.0",
+            "start-child",
+            vec![
+                ValType::I64,
+                ValType::I64,
+                ValType::I64,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+            ],
+            vec![],
+        ),
+        (
+            "vesper:beacon/trace@0.1.0",
+            "emit-ok",
+            vec![
+                ValType::I64,
+                ValType::I64,
+                ValType::I64,
+                ValType::I32,
+                ValType::I64,
+                ValType::I64,
+                ValType::I32,
+                ValType::I64,
+            ],
+            vec![],
+        ),
+        (
+            "vesper:beacon/trace@0.1.0",
+            "emit-err",
+            vec![
+                ValType::I64,
+                ValType::I64,
+                ValType::I64,
+                ValType::I32,
+                ValType::I64,
+                ValType::I64,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+            ],
+            vec![],
+        ),
+        (
+            "vesper:beacon/trace@0.1.0",
+            "emit-attr",
+            vec![
+                ValType::I64,
+                ValType::I64,
+                ValType::I64,
+                ValType::I32,
+                ValType::I64,
+                ValType::I64,
+                ValType::I32,
+                ValType::I32,
+                ValType::I64,
+            ],
+            vec![],
+        ),
+    ]);
+
+    let wrap = package().entry("wit_component_wrap", true);
+    let cases = [
+        (
+            "StdEnv",
+            &env_imps[..],
+            "  import wasi:cli/environment@0.2.0;\n",
+            false,
+        ),
+        (
+            "StdEnv+StrParam",
+            &env_imps[..],
+            "  import wasi:cli/environment@0.2.0;\n",
+            true,
+        ),
+        (
+            "StdFs",
+            &fs_imps[..],
+            "  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n",
+            false,
+        ),
+        (
+            "StdEnv+StdFs",
+            &both[..],
+            "  import wasi:cli/environment@0.2.0;\n  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n",
+            false,
+        ),
+        (
+            "StdEnv+StdFs+StrParam",
+            &both[..],
+            "  import wasi:cli/environment@0.2.0;\n  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n",
+            true,
+        ),
+        (
+            "AllFive",
+            &all_five[..],
+            "  import wasi:cli/stdout@0.2.0;\n  import wasi:clocks/monotonic-clock@0.2.0;\n  import vesper:beacon/trace@0.1.0;\n  import wasi:cli/environment@0.2.0;\n  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n",
+            false,
+        ),
+        (
+            "AllFiveReversed",
+            &all_five[..],
+            "  import wasi:filesystem/preopens@0.2.0;\n  import wasi:filesystem/types@0.2.0;\n  import wasi:cli/environment@0.2.0;\n  import vesper:beacon/trace@0.1.0;\n  import wasi:clocks/monotonic-clock@0.2.0;\n  import wasi:cli/stdout@0.2.0;\n",
+            false,
+        ),
+    ];
+
+    let mut errs = vec![];
+    for (label, imps, wit_imports, with_str) in cases {
+        let core = make_core(imps, with_str);
+        let main_sig = if with_str {
+            "main: func(s: string) -> s64;"
+        } else {
+            "main: func() -> s64;"
+        };
+        let wit = format!(
+            "package vesper:program@0.1.0;\n\ninterface entry {{\n  {main_sig}\n}}\n\nworld program {{\n{wit_imports}  export wasi:cli/run@0.2.0;\n  export entry;\n}}\n"
+        );
+        let expected = encode_rust(&core, &wit);
+        match answer(&wrap.words(&wrap_input(&core, &wit, WasmWorld::Command))) {
+            Ok(actual) if actual == expected => {}
+            Ok(actual) => {
+                let pos = actual.iter().zip(&expected).position(|(a, b)| a != b);
+                let slice = |b: &[u8]| {
+                    let s = pos.unwrap_or(0).saturating_sub(8);
+                    let e = (pos.unwrap_or(0) + 24).min(b.len());
+                    b[s..e]
+                        .iter()
+                        .map(|x| format!("{x:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                errs.push(format!(
+                    "{label}: differs (actual {} vs expected {}, first byte {pos:?}\n  act: {}\n  exp: {})",
+                    actual.len(),
+                    expected.len(),
+                    slice(&actual),
+                    slice(&expected)
+                ));
+            }
+            Err(reason) => errs.push(format!("{label}: declined ({reason})")),
+        }
+    }
+    assert!(errs.is_empty(), "diffs:\n{}", errs.join("\n"));
 }
 
 /// src/wasm_backend/component.rs `encode` (the module is crate-private).

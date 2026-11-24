@@ -47,6 +47,8 @@ use @vesper/wasm-backend::{
     compile_with_facts,
     compile_with_facts_diag
 };
+use @vesper/wit-component::comp::encode as wit_encode;
+use @vesper/wit-component::wit::parse as parse_wit;
 use @vesper/wasm-backend::err::{
     WErr,
     format_werr,
@@ -613,17 +615,23 @@ fn stage2_compile_dir_impl(in root_dir: Str, in out_wasm: Str, in entry_name: St
     }
     write_stage(want_syms, in out_wasm, in "compile_with_facts", inout stage_log);
     let dbg_names = c2.names.snapshot_text();
-    let (ok, err_w, core, syms_out) = handle Fail[WErr] in {
-        let (core0, _wit, _fns, _handlers, syms0) = compile_with_facts_diag(
+    let (ok, err_w, core, wit, syms_out) = handle Fail[WErr] in {
+        let (core0, wit0, _fns, _handlers, syms0) = compile_with_facts_diag(
             sink c2,
             sink prog,
             sink facts,
             want_syms
         );
-        (true, werr(0, 0, 0), core0, syms0)
+        (true, werr(0, 0, 0), core0, wit0, syms0)
     } with {
         return v => v,
-        raise(err, _k) => (false, err, ChunkSeq::new[u8](), ChunkSeq::new[u8]()),
+        raise(err, _k) => (
+            false,
+            err,
+            ChunkSeq::new[u8](),
+            ChunkSeq::new[u8](),
+            ChunkSeq::new[u8]()
+        ),
     };
     if !ok {
         let mut diag_out = ChunkSeq::new[u8]();
@@ -634,9 +642,27 @@ fn stage2_compile_dir_impl(in root_dir: Str, in out_wasm: Str, in entry_name: St
     if want_syms {
         write_sidecar(in out_wasm, in ".syms", in syms_out.as_slice());
     }
-    let clen = core.len();
+    write_stage(want_syms, in out_wasm, in "wit_component", inout stage_log);
+    let parsed_wit = parse_wit(in wit.as_slice());
+    if parsed_wit.err != 0 {
+        let mut d = ChunkSeq::new[u8]();
+        d.extend(in "wit parse error code ".as_bytes());
+        push_dec(inout d, parsed_wit.err);
+        write_err_header(in out_wasm, in "wit_parse", in d.as_slice());
+        return (5, parsed_wit.err);
+    }
+    let mut component = ChunkSeq::new[u8]();
+    let enc_err = wit_encode(in core.as_slice(), in parsed_wit, inout component);
+    if enc_err != 0 {
+        let mut d = ChunkSeq::new[u8]();
+        d.extend(in "wit_component encode declined code ".as_bytes());
+        push_dec(inout d, enc_err);
+        write_err_header(in out_wasm, in "wit_component", in d.as_slice());
+        return (6, enc_err);
+    }
+    let clen = component.len();
     let wrote = handle Fail[IoError] in {
-        write_path(in out_wasm.as_bytes(), in core.as_slice());
+        write_path(in out_wasm.as_bytes(), in component.as_slice());
         true
     } with {
         return v => v,
