@@ -21,7 +21,7 @@ pub const MAX_PFN: u64 = 1 << 40;
 /// `@vesper/aegis::gpa` (`[s0, e0, s1, e1, ...]`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct IntervalSet {
-    words: Vec<u64>,
+    pub(crate) words: Vec<u64>,
 }
 
 impl IntervalSet {

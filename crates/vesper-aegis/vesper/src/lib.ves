@@ -49,6 +49,11 @@ use self::gpa::{
     pages as gpa_pages_impl,
     remove as gpa_remove_impl
 };
+use self::host::{
+    accept_mmap as host_accept_mmap_impl,
+    unmap as host_unmap_impl,
+    validate_clock as host_validate_clock_impl
+};
 use self::sgx::parse as sgx_parse_impl;
 use self::snp::{
     parse as snp_parse_impl,
@@ -280,4 +285,32 @@ pub fn gpa_pages(in iv: Slice[u64], count: u64) -> u64 {
 
 pub fn gpa_check_access(in iv: Slice[u64], count: u64, gpa: u64, len: u64) -> u64 {
     gpa_check_access_impl(in iv, count, gpa, len)
+}
+
+// Host validators (module host).
+pub fn host_validate_clock(has_prev: u64, prev: u64, max_step: u64, reported: u64) -> u64 {
+    host_validate_clock_impl(has_prev, prev, max_step, reported)
+}
+
+pub fn host_accept_mmap(
+    inout iv: Slice[u64],
+    count: u64,
+    win_start: u64,
+    win_end: u64,
+    addr: u64,
+    len: u64,
+    req_len: u64
+) -> u64 {
+    host_accept_mmap_impl(inout iv, count, win_start, win_end, addr, len, req_len)
+}
+
+pub fn host_unmap(
+    inout iv: Slice[u64],
+    count: u64,
+    win_start: u64,
+    win_end: u64,
+    addr: u64,
+    len: u64
+) -> u64 {
+    host_unmap_impl(inout iv, count, win_start, win_end, addr, len)
 }

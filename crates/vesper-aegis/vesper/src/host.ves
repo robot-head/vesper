@@ -1,0 +1,78 @@
+// @vesper/aegis::host: host clock and mmap Iago validators (`src/host.rs`).
+use self::gpa::{
+    covers as gpa_covers,
+    first_overlap as gpa_first_overlap,
+    insert as gpa_insert,
+    remove as gpa_remove
+};
+
+const PAGE_MASK: u64 = 4095;
+const MAX_PFN: u64 = 1099511627776;
+const U64_MAX: u64 = 18446744073709551615;
+const MMAP_ERR_INVALID: u64 = 18446744073709551615;
+const MMAP_ERR_CONFLICT: u64 = 18446744073709551614;
+
+// Returns 0 = Ok, 1 = HostTimeNonMonotonic, 2 = HostTimeJump.
+pub fn validate_clock(has_prev: u64, prev: u64, max_step: u64, reported: u64) -> u64 {
+    if has_prev != 0 {
+        if reported < prev {
+            return 1;
+        }
+        if wrapping_sub(reported, prev) > max_step {
+            return 2;
+        }
+    }
+    0
+}
+
+// Validate a host mmap reply against `[win_start, win_end)` and `mapped`,
+// inserting on success. Returns `new_count`, or `MMAP_ERR_INVALID` /
+// `MMAP_ERR_CONFLICT` (overlap).
+pub fn accept_mmap(
+    inout iv: Slice[u64],
+    count: u64,
+    win_start: u64,
+    win_end: u64,
+    addr: u64,
+    len: u64,
+    req_len: u64
+) -> u64 {
+    if len == 0 || len != req_len || (addr & PAGE_MASK) != 0 || (len & PAGE_MASK) != 0 {
+        return MMAP_ERR_INVALID;
+    }
+    if addr > wrapping_sub(U64_MAX, len) {
+        return MMAP_ERR_INVALID;
+    }
+    let end: u64 = wrapping_add(addr, len);
+    if addr < win_start || end > win_end {
+        return MMAP_ERR_INVALID;
+    }
+    let sp: u64 = addr >> 12;
+    let ep: u64 = end >> 12;
+    if gpa_first_overlap(in iv, count, sp, ep) < MAX_PFN {
+        return MMAP_ERR_CONFLICT;
+    }
+    gpa_insert(inout iv, count, sp, ep)
+}
+
+// Validate and remove a tracked host mmap range. Returns `new_count`, or
+// `MMAP_ERR_INVALID` / `MMAP_ERR_CONFLICT` (untracked).
+pub fn unmap(inout iv: Slice[u64], count: u64, win_start: u64, win_end: u64, addr: u64, len: u64)
+    -> u64 {
+    if len == 0 || (addr & PAGE_MASK) != 0 || (len & PAGE_MASK) != 0 {
+        return MMAP_ERR_INVALID;
+    }
+    if addr > wrapping_sub(U64_MAX, len) {
+        return MMAP_ERR_INVALID;
+    }
+    let end: u64 = wrapping_add(addr, len);
+    if addr < win_start || end > win_end {
+        return MMAP_ERR_INVALID;
+    }
+    let sp: u64 = addr >> 12;
+    let ep: u64 = end >> 12;
+    if gpa_covers(in iv, count, sp, ep) == 0 {
+        return MMAP_ERR_CONFLICT;
+    }
+    gpa_remove(inout iv, count, sp, ep)
+}
