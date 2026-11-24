@@ -207,16 +207,15 @@ digests equal `bootstrap/stage1.lock`.
    the host also needs `&str` views of every symbol (`HygieneHost::text`),
    which a handle's view gives only per field, not per symbol range.
 
+## Part 2: `authority` (`#1772`)
+
+Ported `AuthorityGraph::requirements` (`crates/vesper-forge/src/authority.rs`) into `crates/vesper-forge/vesper/src/authority.ves` (`fg_requirements`), wired via `crates/vesper-forge/src/port.rs` under `#[cfg(vesper_port)]`, and blessed `crates/vesper-forge/port/binding.rs`.
+
+- All `vesper-forge` (`vesper_port`) and `vesper-forge-seed` (Rust default) tests pass (`tests/authority.rs` 14/14, `tests/port_differential.rs` 2/2, `tests/hygiene.rs` 17/17, `tests/typed_quote.rs` 10/10, `tests/typed_tuple.rs` 10/10, `tests/typed_function_parameters.rs` 8/8, `tests/transport.rs` 4/4, `tests/fragment.rs` 3/3, `tests/sandbox_execution.rs` 2/2).
+
 ## What is left
 
-- Part 2: `authority.rs` (the transitive authority closure and the policy
-  checks) in Vesper, and the marshaling cuts that the numbers point to: one
-  call for parse and resolve when every path is a single token (interning is
-  then a no-op), and a Vesper-side mirror of the symbol table appended on
-  `intern`, so calls pass symbol ids instead of copying texts.
-- The quotation expansion of `host.rs` (`expand_items`, splice lookup) is
-  host state; it can move once the host's arenas do.
-- `typed_quote.rs` parses with `vesper-syntax`'s lexer, so it moves with the
-  parser swap (lane 12) rather than here.
-- `src/forge_frontend` (the `vesper forge` command) is compiler code in
-  `src/` and belongs to SH2, not to this crate's lane.
+- Marshaling cuts for `fg_parse`/`fg_resolve`: one call for parse and resolve when every path is a single token, and a Vesper-side mirror of the symbol table appended on `intern`.
+- The quotation expansion of `host.rs` (`expand_items`, splice lookup) is host state; it can move once the host's arenas do.
+- `typed_quote.rs` parses with `vesper-syntax`'s lexer, so it moves with the parser swap (lane 12) rather than here.
+- `src/forge_frontend` (the `vesper forge` command) is compiler code in `src/` and belongs to SH2, not to this crate's lane.

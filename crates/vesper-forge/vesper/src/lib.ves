@@ -9,6 +9,9 @@
 // tables, and replays the identities a kernel minted (symbols for joined
 // paths, scopes and binders) on the host in the same order, so both
 // builds leave the host in the same state, on success and on failure.
+use self::authority::{
+    requirements
+};
 use self::parse::{
     Parser,
     delimiters,
@@ -153,4 +156,9 @@ pub fn fg_resolve(in w: Slice[u64], in text: Slice[u8], in g: Slice[u64], in gt:
     let mut out = ChunkSeq::new[u64]();
     swap(inout out, inout r.out);
     out
+}
+
+pub fn fg_requirements(in g: Slice[u64], op_kind: u64, op_a: u64, op_b: u64, op_c: u64, op_d: u64)
+    -> ChunkSeq[u64] {
+    requirements(in g, op_kind, op_a, op_b, op_c, op_d)
 }
