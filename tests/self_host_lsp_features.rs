@@ -50,6 +50,7 @@ fn entry(name: &'static str) -> &'static Entry {
             "lsp_definition",
             "lsp_workspace_symbols",
             "lsp_definitions",
+            "lsp_document_symbols_kept",
         ]
         .into_iter()
         .map(|n| (n, features().entry(n, optimize())))
@@ -95,6 +96,24 @@ fn vesper_symbols(uri: &str, source: &str, hierarchical: bool) -> String {
     input.extend_from_slice(uri.as_bytes());
     input.extend_from_slice(source.as_bytes());
     entry("lsp_document_symbols").text(&input)
+}
+
+/// `lsp_document_symbols_kept`: one parse, `n` requests, an index rebuilt
+/// per request.
+fn vesper_symbols_kept(uri: &str, source: &str, hierarchical: bool, n: usize) -> Vec<String> {
+    let mut input = vec![];
+    index_words(&mut input, index_limits());
+    push_word(&mut input, hierarchical as u64);
+    push_word(&mut input, n as u64);
+    push_word(&mut input, uri.len() as u64);
+    push_word(&mut input, source.len() as u64);
+    input.extend_from_slice(uri.as_bytes());
+    input.extend_from_slice(source.as_bytes());
+    let text = entry("lsp_document_symbols_kept").text(&input);
+    if n == 0 {
+        return vec![];
+    }
+    text.split('\n').map(str::to_string).collect()
 }
 
 fn vesper_definition(uri: &str, source: &str, at: Position) -> String {
@@ -538,11 +557,23 @@ fn navigation_matches_rust() {
     for d in docs {
         for hierarchical in [true, false] {
             c.symbols += 1;
+            let rust = rust_symbols(&d.uri, &d.checked, &d.index, hierarchical);
+            let kept = vesper_symbols_kept(&d.uri, d.checked.source(), hierarchical, 3);
+            assert_eq!(kept.len(), 3, "{}", d.name);
+            for (k, answer) in kept.into_iter().enumerate() {
+                compare(
+                    &mut differ,
+                    &mut c,
+                    format!("{} symbols kept #{k} hierarchical={hierarchical}", d.name),
+                    rust.clone(),
+                    answer,
+                );
+            }
             compare(
                 &mut differ,
                 &mut c,
                 format!("{} symbols hierarchical={hierarchical}", d.name),
-                rust_symbols(&d.uri, &d.checked, &d.index, hierarchical),
+                rust,
                 vesper_symbols(&d.uri, d.checked.source(), hierarchical),
             );
         }
@@ -1059,6 +1090,41 @@ fn lsp_features_speed() {
         docs.len(),
         r / docs.len() as u32,
         v / docs.len() as u32
+    );
+    // The server shape: the parse is kept in the snapshot and the index is
+    // built per request (Rust's `Index::new` per request too). The kept
+    // entry answers `KEPT` requests on one parse.
+    const KEPT: usize = 32;
+    let (r, v) = abba(
+        "documentSymbol, parse kept per document",
+        &mut || {
+            time(|| {
+                for d in docs {
+                    for _ in 0..KEPT {
+                        std::hint::black_box(rust_symbols(&d.uri, &d.checked, &d.index, true));
+                    }
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for d in docs {
+                    std::hint::black_box(vesper_symbols_kept(
+                        &d.uri,
+                        d.checked.source(),
+                        true,
+                        KEPT,
+                    ));
+                }
+            })
+        },
+    );
+    let requests = (docs.len() * KEPT) as u32;
+    eprintln!(
+        "documentSymbol per request, parse kept ({} x {KEPT}): rust {:?} vesper {:?}",
+        docs.len(),
+        r / requests,
+        v / requests
     );
     let per_doc: Vec<Vec<Position>> = docs
         .iter()
