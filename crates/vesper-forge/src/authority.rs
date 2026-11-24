@@ -12,7 +12,9 @@
 //! authority its implementation needs. Unknown nodes, unresolved edges and
 //! handler constructions without a rule fail closed.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(not(vesper_port))]
+use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -353,7 +355,7 @@ impl AuthorityGraph {
     pub fn requirements(&self, op: &OperationKind) -> Result<Requirements, GraphFault> {
         #[cfg(vesper_port)]
         {
-            return crate::port::graph_requirements(self, op);
+            crate::port::graph_requirements(self, op)
         }
         #[cfg(not(vesper_port))]
         {
