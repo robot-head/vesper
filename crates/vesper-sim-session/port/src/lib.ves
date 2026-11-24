@@ -15,6 +15,18 @@
 // feature. Every function is total: a virtual-clock overflow is a returned
 // outcome, never a raise.
 
+use self::process::{
+    ProcessTable,
+    process_table_clone,
+    process_table_crash,
+    process_table_crashes,
+    process_table_epoch,
+    process_table_is_up,
+    process_table_len,
+    process_table_new,
+    process_table_restart,
+    validate_model_bounds
+};
 use self::sha256::{
     sha256_digest
 };
@@ -1532,4 +1544,59 @@ fn merge_range(inout out: ChunkSeq[u64], lo: u64, hi: u64) {
     }
     out.push(lo);
     out.push(hi);
+}
+
+// `process-epochs-v1` and model bounds (part 7 of #1342).
+pub fn sim_process_table_new(n: u64, max_epochs: u64) -> ProcessTable {
+    process_table_new(n, max_epochs)
+}
+
+pub fn sim_process_table_clone(in t: ProcessTable) -> ProcessTable {
+    process_table_clone(in t)
+}
+
+pub fn sim_process_table_crash(inout t: ProcessTable, p: u64) -> (u8, u64) {
+    process_table_crash(inout t, p)
+}
+
+pub fn sim_process_table_restart(inout t: ProcessTable, p: u64) -> (u8, u64) {
+    process_table_restart(inout t, p)
+}
+
+pub fn sim_process_table_is_up(in t: ProcessTable, p: u64) -> bool {
+    process_table_is_up(in t, p)
+}
+
+pub fn sim_process_table_epoch(in t: ProcessTable, p: u64) -> u64 {
+    process_table_epoch(in t, p)
+}
+
+pub fn sim_process_table_crashes(in t: ProcessTable) -> u64 {
+    process_table_crashes(in t)
+}
+
+pub fn sim_process_table_len(in t: ProcessTable) -> u64 {
+    process_table_len(in t)
+}
+
+pub fn sim_validate_model_bounds(
+    max_events: u64,
+    max_epochs: u64,
+    max_instances: u64,
+    n_processes: u64,
+    n_logs: u64,
+    n_networks: u64,
+    n_faults: u64,
+    n_failures: u64
+) -> u8 {
+    validate_model_bounds(
+        max_events,
+        max_epochs,
+        max_instances,
+        n_processes,
+        n_logs,
+        n_networks,
+        n_faults,
+        n_failures
+    )
 }
