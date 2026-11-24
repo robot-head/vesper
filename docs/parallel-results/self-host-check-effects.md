@@ -118,12 +118,15 @@ test is the harness for them, and they come with the hybrid swap.
    ABI v4 owned trees (SH1 lane 6) are the way to drop the encoder, which
    is the check-data ABI v4 follow-up.
 
+## Hybrid swap (#1802, part of #1180)
+
+- Added `EffectsCheckTable` + `install_effects_check` in `src/capability_effects.rs` (`check_world`).
+- Added `check_effects_bytes` (`write_bin` binary diagnostic output) in `packages/vesper-check-effects`, shared `tests/common/effects_words.rs` (`encode_world` / `decode_diagnostics`), and `crates/vesper-hybrid/modules/effects` (`port/effects.rs`, ABI v4) wired via `VESPER_EFFECTS_CHECK` in `crates/vesper-hybrid/src/hybrid.rs`.
+- `vesper-hybrid` `differential`: `5/5` passed, `0` of `2,202` runs differ across `554` files (default `225.08 s`, hybrid `104.35 s`, `0.464x`).
+
 ## What is left
 
-- Hybrid swap: a `check_world` swap point in `src/capability_effects.rs`
-  in the parse-swap pattern, the encoder moved into
-  `crates/vesper-hybrid` (module `effects`), the full suite on the hybrid
-  compiler, and the scoreboard's corpus numbers and callgrind counts.
+- Callgrind Ir counts for the hybrid swap and retiring the hand-encoded `effects_words` boundary once ABI v4 owned trees land.
 - `src/trace_effects/rules.rs` and the checker half of `trace_effects.rs`
   (E0750-E0758) on the same tables.
 - `capability_policies` (the Stage 5 verifier inputs): the walk is there;

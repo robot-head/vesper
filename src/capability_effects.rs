@@ -77,6 +77,20 @@ use crate::ast::*;
 use crate::check::{Checked, World};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
+
+/// Hooks supplying a Vesper implementation of capability-effect checking (`#1180`).
+#[derive(Clone, Copy)]
+pub struct EffectsCheckTable {
+    pub check_world: fn(&World) -> Vec<Diagnostic>,
+}
+
+static EFFECTS_CHECK_HOOK: OnceLock<EffectsCheckTable> = OnceLock::new();
+
+/// Install the Vesper capability-effect checking hook. Only the first call takes effect.
+pub fn install_effects_check(table: EffectsCheckTable) {
+    let _ = EFFECTS_CHECK_HOOK.set(table);
+}
 
 /// `ConstTime` (§23.2).
 pub const CONST_TIME: &str = "ConstTime";
@@ -766,6 +780,9 @@ fn summarise(world: &World) -> Summaries {
 /// Public for the differential test of its Vesper port
 /// (`tests/self_host_check_effects.rs`, self-hosting SH2 lane 8).
 pub fn check_world(world: &World) -> Vec<Diagnostic> {
+    if let Some(hook) = EFFECTS_CHECK_HOOK.get() {
+        return (hook.check_world)(world);
+    }
     let summaries = summarise(world);
     let mut diagnostics = vec![];
     let mut graph: BTreeMap<String, Vec<(String, Span)>> = BTreeMap::new();

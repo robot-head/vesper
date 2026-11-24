@@ -1,0 +1,12 @@
+// @vesper/hybrid-effects: capability effect checking (`capability_effects::check_world`)
+// served from Vesper in the hybrid Stage 2 build (SH2 lane 8, #1180).
+
+// @export abi 4
+
+use @vesper/check-effects::{
+    check_effects_bytes
+};
+
+pub fn effects_diags(in b: Slice[u8]) -> ChunkSeq[u64] {
+    check_effects_bytes(in b)
+}

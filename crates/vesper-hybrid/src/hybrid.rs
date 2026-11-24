@@ -128,6 +128,11 @@ mod tensor_types_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/effects.rs"]
+mod effects_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/bounds_hoist.rs"]
 mod bounds_hoist_binding;
 
@@ -173,6 +178,10 @@ mod pact_words;
 // The tensor type checker's AST encoder and diagnostic decoder (#1186).
 #[path = "../../../tests/common/tensor_words.rs"]
 mod tensor_words;
+
+// The capability effect checker's encoder and diagnostic decoder (#1180).
+#[path = "../../../tests/common/effects_words.rs"]
+mod effects_words;
 
 // The stack-bound swap's encoder and decoder (#1182), shared with the root
 // package's tests/self_host_check_loops_atomics.rs.
@@ -748,6 +757,16 @@ const VESPER_TENSOR_CHECK: vesper::tensor_types::TensorCheckTable =
             let (names, bytes) = tensor_words::encode_tensor_module(module);
             let words = tensor_types_binding::tensor_diags(&names, &bytes);
             Some(tensor_words::decode_tensor_diags(&words))
+        },
+    };
+
+/// `capability_effects::check_world` from `modules/effects` (SH2 lane 8, `#1180`).
+const VESPER_EFFECTS_CHECK: vesper::capability_effects::EffectsCheckTable =
+    vesper::capability_effects::EffectsCheckTable {
+        check_world: |world| {
+            let bytes = effects_words::encode_world(world);
+            let words = effects_binding::effects_diags(&bytes);
+            effects_words::decode_diagnostics(&words)
         },
     };
 
@@ -1733,6 +1752,7 @@ extern "C" fn install() {
     if vesper::tensor_types::install_tensor_check(VESPER_TENSOR_CHECK).is_err() {
         std::process::abort();
     }
+    vesper::capability_effects::install_effects_check(VESPER_EFFECTS_CHECK);
     // Swaps keep one input per compilation (SH4 lane 2, #1276).
     // `VESPER_HYBRID_SCOPES=0` encodes per call instead (the before side of
     // the report's measurement).
