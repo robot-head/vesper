@@ -1044,3 +1044,789 @@ pub fn host_order() -> ChunkSeq[DriverKind] {
     out.push(DriverKind::Iocp);
     out
 }
+
+// Deterministic work-stealing fiber pool (§12.4).
+
+pub copy struct FiberId {
+    pub bits: u64,
+}
+
+pub copy struct PoolConfig {
+    pub workers: u64,
+    pub seed: u64,
+    pub lifo_slot: bool,
+    pub driver_wakeup: bool,
+    pub pin_cores: bool,
+    pub keep_results: bool,
+}
+
+pub fn max_workers() -> u64 {
+    1024
+}
+
+pub fn default_pool_config(workers: u64) -> PoolConfig {
+    PoolConfig {
+        workers: workers,
+        seed: 0,
+        lifo_slot: true,
+        driver_wakeup: true,
+        pin_cores: false,
+        keep_results: true,
+    }
+}
+
+pub copy struct WorkerStats {
+    pub resumed: u64,
+    pub stolen: u64,
+    pub steal_attempts: u64,
+    pub submitted: u64,
+    pub parked: u64,
+    pub pinned_core: Option[u64],
+}
+
+pub copy enum TraceEvent {
+    TraceStart,
+    TraceYield,
+    TraceIo,
+    TraceCancelled,
+}
+
+pub copy struct TraceEntry {
+    pub step: u64,
+    pub worker: u64,
+    pub fiber: FiberId,
+    pub event: TraceEvent,
+    pub stolen_from: Option[u64],
+}
+
+pub copy enum PoolError {
+    InvalidWorkers(u64),
+    NoSuchWorker(u64),
+    PoolClosed,
+}
+
+pub copy struct CompletedFiber {
+    pub id: FiberId,
+    pub tag: u64,
+}
+
+pub copy struct FailedFiber {
+    pub id: FiberId,
+    pub code: u64,
+}
+
+pub struct PoolOutput {
+    pub completed: ChunkSeq[CompletedFiber],
+    pub failures: ChunkSeq[FailedFiber],
+    pub workers: ChunkSeq[WorkerStats],
+    pub trace: ChunkSeq[TraceEntry],
+    pub abandoned: u64,
+}
+
+pub copy struct Rng {
+    pub rng_state: u64,
+}
+
+pub fn rng_next(inout r: Rng) -> u64 {
+    r.rng_state = wrapping_add(r.rng_state, 0x9e37_79b9_7f4a_7c15);
+    let mut z = r.rng_state;
+    z = wrapping_mul(z ^ (z >> 30), 0xbf58_476d_1ce4_e5b9);
+    z = wrapping_mul(z ^ (z >> 27), 0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+pub fn rng_new(seed: u64, stream: u64) -> Rng {
+    let mut r = Rng {
+        rng_state: seed ^ wrapping_mul(stream, 0xa076_1d64_78bd_642f),
+    };
+    let _ = rng_next(inout r);
+    r
+}
+
+pub fn rng_below(inout r: Rng, n: u64) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    let v = rng_next(inout r);
+    handle Fail[RuntimeError] in {
+        v % n
+    } with {
+        return x => x,
+        raise(e, k) => 0,
+    }
+}
+
+pub copy struct FiberTask {
+    pub id: FiberId,
+    pub home: Option[u64],
+    pub remaining_yields: u64,
+    pub fail_on_complete: bool,
+    pub result_tag: u64,
+    pub spawn_child_yields: Option[u64],
+    pub event: TraceEvent,
+}
+
+struct WorkerState {
+    local: ChunkSeq[FiberTask],
+    pinned: ChunkSeq[FiberTask],
+    lifo: Option[FiberTask],
+    rng: Rng,
+    ticks: u64,
+    lifo_streak: u64,
+    stats: WorkerStats,
+}
+
+pub struct SeededPool {
+    pub config: PoolConfig,
+    workers: ChunkSeq[WorkerState],
+    injector: ChunkSeq[FiberTask],
+    next_id: u64,
+    live: u64,
+    cancelled: bool,
+    closed: bool,
+    trace_step: u64,
+    completed: ChunkSeq[CompletedFiber],
+    failures: ChunkSeq[FailedFiber],
+    trace: ChunkSeq[TraceEntry],
+}
+
+fn empty_stats() -> WorkerStats {
+    WorkerStats {
+        resumed: 0,
+        stolen: 0,
+        steal_attempts: 0,
+        submitted: 0,
+        parked: 0,
+        pinned_core: Option::None,
+    }
+}
+
+pub fn new_seeded_pool(config: PoolConfig) -> Result[SeededPool, PoolError] {
+    if config.workers == 0 || config.workers > max_workers() {
+        return Result::Err(PoolError::InvalidWorkers(config.workers));
+    }
+    let mut workers: ChunkSeq[WorkerState] = ChunkSeq::new();
+    let mut i: u64 = 0;
+    loop {
+        if i >= config.workers {
+            break;
+        }
+        workers
+            .push(
+                WorkerState {
+                    local: ChunkSeq::new(),
+                    pinned: ChunkSeq::new(),
+                    lifo: Option::None,
+                    rng: rng_new(config.seed, wrapping_add(i, 1)),
+                    ticks: 0,
+                    lifo_streak: 0,
+                    stats: empty_stats(),
+                }
+            );
+        i = wrapping_add(i, 1);
+    }
+    Result::Ok(
+        SeededPool {
+            config: config,
+            workers: workers,
+            injector: ChunkSeq::new(),
+            next_id: 1,
+            live: 0,
+            cancelled: false,
+            closed: false,
+            trace_step: 0,
+            completed: ChunkSeq::new(),
+            failures: ChunkSeq::new(),
+            trace: ChunkSeq::new(),
+        }
+    )
+}
+
+fn pop_front_task(inout q: ChunkSeq[FiberTask]) -> Option[FiberTask] {
+    let mut rev: ChunkSeq[FiberTask] = ChunkSeq::new();
+    loop {
+        match q.pop() {
+            Option::Some(t) => rev.push(t),
+            Option::None => break,
+        }
+    }
+    let first = rev.pop();
+    loop {
+        match rev.pop() {
+            Option::Some(t) => q.push(t),
+            Option::None => break,
+        }
+    }
+    first
+}
+
+pub fn spawn_fiber(
+    inout pool: SeededPool,
+    yields: u64,
+    fail_on_complete: bool,
+    result_tag: u64,
+    spawn_child_yields: Option[u64],
+) -> Result[FiberId, PoolError] {
+    if pool.closed {
+        return Result::Err(PoolError::PoolClosed);
+    }
+    let id = FiberId {
+        bits: pool.next_id
+    };
+    pool.next_id = wrapping_add(pool.next_id, 1);
+    pool.live = wrapping_add(pool.live, 1);
+    let ev = if pool.cancelled {
+        TraceEvent::TraceCancelled
+    } else {
+        TraceEvent::TraceStart
+    };
+    pool
+        .injector
+        .push(
+            FiberTask {
+                id: id,
+                home: Option::None,
+                remaining_yields: yields,
+                fail_on_complete: fail_on_complete,
+                result_tag: result_tag,
+                spawn_child_yields: spawn_child_yields,
+                event: ev,
+            }
+        );
+    Result::Ok(id)
+}
+
+pub fn spawn_pinned(
+    inout pool: SeededPool,
+    worker: u64,
+    yields: u64,
+    fail_on_complete: bool,
+    result_tag: u64,
+) -> Result[FiberId, PoolError] {
+    if pool.closed {
+        return Result::Err(PoolError::PoolClosed);
+    }
+    if worker >= pool.workers.len() {
+        return Result::Err(PoolError::NoSuchWorker(worker));
+    }
+    let id = FiberId {
+        bits: pool.next_id
+    };
+    pool.next_id = wrapping_add(pool.next_id, 1);
+    pool.live = wrapping_add(pool.live, 1);
+    let ev = if pool.cancelled {
+        TraceEvent::TraceCancelled
+    } else {
+        TraceEvent::TraceStart
+    };
+    let task = FiberTask {
+        id: id,
+        home: Option::Some(worker),
+        remaining_yields: yields,
+        fail_on_complete: fail_on_complete,
+        result_tag: result_tag,
+        spawn_child_yields: Option::None,
+        event: ev,
+    };
+    let _ = handle Fail[RuntimeError] in {
+        pool.workers[worker].pinned.push(task);
+        0
+    } with {
+        return x => x,
+        raise(e, k) => 0,
+    };
+    Result::Ok(id)
+}
+
+pub fn cancel_pool(inout pool: SeededPool) {
+    pool.cancelled = true;
+}
+
+fn mod_u64(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    handle Fail[RuntimeError] in {
+        a % b
+    } with {
+        return x => x,
+        raise(e, k) => 0,
+    }
+}
+
+fn div_u64(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    handle Fail[RuntimeError] in {
+        a / b
+    } with {
+        return x => x,
+        raise(e, k) => 0,
+    }
+}
+
+copy struct PickedJob {
+    found: bool,
+    task: FiberTask,
+    stolen_from: Option[u64],
+}
+
+fn empty_task() -> FiberTask {
+    FiberTask {
+        id: FiberId {
+            bits: 0
+        },
+        home: Option::None,
+        remaining_yields: 0,
+        fail_on_complete: false,
+        result_tag: 0,
+        spawn_child_yields: Option::None,
+        event: TraceEvent::TraceStart,
+    }
+}
+
+fn try_steal_from(inout pool: SeededPool, thief: u64, victim: u64) -> PickedJob {
+    let vlen = handle Fail[RuntimeError] in {
+        pool.workers[victim].local.len()
+    } with {
+        return x => x,
+        raise(e, k) => 0,
+    };
+    if vlen == 0 {
+        return PickedJob {
+            found: false,
+            task: empty_task(),
+            stolen_from: Option::None,
+        };
+    }
+    let half = div_u64(wrapping_add(vlen, 1), 2);
+    let take_n = if half > 32 {
+        32
+    } else if half == 0 {
+        1
+    } else {
+        half
+    };
+    let mut stolen_batch: ChunkSeq[FiberTask] = ChunkSeq::new();
+    let mut i: u64 = 0;
+    loop {
+        if i >= take_n {
+            break;
+        }
+        let popped = handle Fail[RuntimeError] in {
+            pop_front_task(inout pool.workers[victim].local)
+        } with {
+            return x => x,
+            raise(e, k) => Option::None,
+        };
+        match popped {
+            Option::Some(t) => stolen_batch.push(t),
+            Option::None => break,
+        }
+        i = wrapping_add(i, 1);
+    }
+    let first_opt = pop_front_task(inout stolen_batch);
+    let first = match first_opt {
+        Option::Some(t) => t,
+        Option::None => {
+            return PickedJob {
+                found: false,
+                task: empty_task(),
+                stolen_from: Option::None,
+            };
+        }
+    };
+    let mut extra: u64 = 0;
+    loop {
+        match pop_front_task(inout stolen_batch) {
+            Option::Some(t) => {
+                let _ = handle Fail[RuntimeError] in {
+                    pool.workers[thief].local.push(t);
+                    0
+                } with {
+                    return x => x,
+                    raise(e, k) => 0,
+                };
+                extra = wrapping_add(extra, 1);
+            }
+            Option::None => break,
+        }
+    }
+    let total_stolen = wrapping_add(1, extra);
+    let _ = handle Fail[RuntimeError] in {
+        pool
+            .workers[thief]
+            .stats
+            .stolen = wrapping_add(pool.workers[thief].stats.stolen, total_stolen);
+        0
+    } with {
+        return x => x,
+        raise(e, k) => 0,
+    };
+    PickedJob {
+        found: true,
+        task: first,
+        stolen_from: Option::Some(victim),
+    }
+}
+
+fn next_job(inout pool: SeededPool, w: u64) -> PickedJob {
+    let n = pool.workers.len();
+    let ticks = handle Fail[RuntimeError] in {
+        pool.workers[w].ticks = wrapping_add(pool.workers[w].ticks, 1);
+        pool.workers[w].ticks
+    } with {
+        return x => x,
+        raise(e, k) => 1,
+    };
+    if mod_u64(ticks, 61) == 0 {
+        match pop_front_task(inout pool.injector) {
+            Option::Some(t) => {
+                return PickedJob {
+                    found: true,
+                    task: t,
+                    stolen_from: Option::None,
+                };
+            }
+            Option::None => {}
+        }
+    }
+    let streak = handle Fail[RuntimeError] in {
+        pool.workers[w].lifo_streak
+    } with {
+        return x => x,
+        raise(e, k) => 0,
+    };
+    if streak < 3 {
+        let lifo_opt = handle Fail[RuntimeError] in {
+            replace(inout pool.workers[w].lifo, Option::None)
+        } with {
+            return x => x,
+            raise(e, k) => Option::None,
+        };
+        match lifo_opt {
+            Option::Some(t) => {
+                let _ = handle Fail[RuntimeError] in {
+                    pool.workers[w].lifo_streak = wrapping_add(streak, 1);
+                    0
+                } with {
+                    return x => x,
+                    raise(e, k) => 0,
+                };
+                return PickedJob {
+                    found: true,
+                    task: t,
+                    stolen_from: Option::None,
+                };
+            }
+            Option::None => {}
+        }
+    }
+    let _ = handle Fail[RuntimeError] in {
+        pool.workers[w].lifo_streak = 0;
+        0
+    } with {
+        return x => x,
+        raise(e, k) => 0,
+    };
+    let even = mod_u64(ticks, 2) == 0;
+    let first_own = if even {
+        handle Fail[RuntimeError] in {
+            pop_front_task(inout pool.workers[w].pinned)
+        } with {
+            return x => x,
+            raise(e, k) => Option::None,
+        }
+    } else {
+        handle Fail[RuntimeError] in {
+            pop_front_task(inout pool.workers[w].local)
+        } with {
+            return x => x,
+            raise(e, k) => Option::None,
+        }
+    };
+    match first_own {
+        Option::Some(t) => {
+            return PickedJob {
+                found: true,
+                task: t,
+                stolen_from: Option::None,
+            };
+        }
+        Option::None => {}
+    }
+    let second_own = if even {
+        handle Fail[RuntimeError] in {
+            pop_front_task(inout pool.workers[w].local)
+        } with {
+            return x => x,
+            raise(e, k) => Option::None,
+        }
+    } else {
+        handle Fail[RuntimeError] in {
+            pop_front_task(inout pool.workers[w].pinned)
+        } with {
+            return x => x,
+            raise(e, k) => Option::None,
+        }
+    };
+    match second_own {
+        Option::Some(t) => {
+            return PickedJob {
+                found: true,
+                task: t,
+                stolen_from: Option::None,
+            };
+        }
+        Option::None => {}
+    }
+    let lifo_fb = handle Fail[RuntimeError] in {
+        replace(inout pool.workers[w].lifo, Option::None)
+    } with {
+        return x => x,
+        raise(e, k) => Option::None,
+    };
+    match lifo_fb {
+        Option::Some(t) => {
+            return PickedJob {
+                found: true,
+                task: t,
+                stolen_from: Option::None,
+            };
+        }
+        Option::None => {}
+    }
+    match pop_front_task(inout pool.injector) {
+        Option::Some(t) => {
+            return PickedJob {
+                found: true,
+                task: t,
+                stolen_from: Option::None,
+            };
+        }
+        Option::None => {}
+    }
+    if n < 2 {
+        return PickedJob {
+            found: false,
+            task: empty_task(),
+            stolen_from: Option::None,
+        };
+    }
+    let start = handle Fail[RuntimeError] in {
+        pool
+            .workers[w]
+            .stats
+            .steal_attempts = wrapping_add(pool.workers[w].stats.steal_attempts, 1);
+        rng_below(inout pool.workers[w].rng, n)
+    } with {
+        return x => x,
+        raise(e, k) => 0,
+    };
+    let mut k: u64 = 0;
+    loop {
+        if k >= n {
+            break;
+        }
+        let victim = mod_u64(wrapping_add(start, k), n);
+        if victim != w {
+            let stolen = try_steal_from(inout pool, w, victim);
+            if stolen.found {
+                return stolen;
+            }
+        }
+        k = wrapping_add(k, 1);
+    }
+    PickedJob {
+        found: false,
+        task: empty_task(),
+        stolen_from: Option::None,
+    }
+}
+
+fn place_task(inout pool: SeededPool, w: u64, task: FiberTask, internal_spawn: bool) {
+    match task.home {
+        Option::Some(h) => {
+            let _ = handle Fail[RuntimeError] in {
+                pool.workers[h].pinned.push(task);
+                0
+            } with {
+                return x => x,
+                raise(e, k) => 0,
+            };
+        }
+        Option::None => {
+            if internal_spawn && pool.config.lifo_slot {
+                let prev_lifo = handle Fail[RuntimeError] in {
+                    replace(inout pool.workers[w].lifo, Option::Some(task))
+                } with {
+                    return x => x,
+                    raise(e, k) => Option::None,
+                };
+                match prev_lifo {
+                    Option::Some(displaced) => {
+                        let _ = handle Fail[RuntimeError] in {
+                            pool.workers[w].local.push(displaced);
+                            0
+                        } with {
+                            return x => x,
+                            raise(e, k) => 0,
+                        };
+                    }
+                    Option::None => {}
+                }
+            } else {
+                let _ = handle Fail[RuntimeError] in {
+                    pool.workers[w].local.push(task);
+                    0
+                } with {
+                    return x => x,
+                    raise(e, k) => 0,
+                };
+            }
+        }
+    }
+}
+
+fn worker_step(inout pool: SeededPool, w: u64) -> bool {
+    let job = next_job(inout pool, w);
+    if !job.found {
+        return false;
+    }
+    let t = job.task;
+    let ev = if pool.cancelled {
+        TraceEvent::TraceCancelled
+    } else {
+        t.event
+    };
+    let step_idx = pool.trace_step;
+    pool.trace_step = wrapping_add(pool.trace_step, 1);
+    pool
+        .trace
+        .push(
+            TraceEntry {
+                step: step_idx,
+                worker: w,
+                fiber: t.id,
+                event: ev,
+                stolen_from: job.stolen_from,
+            }
+        );
+    let _ = handle Fail[RuntimeError] in {
+        pool.workers[w].stats.resumed = wrapping_add(pool.workers[w].stats.resumed, 1);
+        0
+    } with {
+        return x => x,
+        raise(e, k) => 0,
+    };
+    match t.spawn_child_yields {
+        Option::Some(cy) => {
+            let cid = FiberId {
+                bits: pool.next_id
+            };
+            pool.next_id = wrapping_add(pool.next_id, 1);
+            pool.live = wrapping_add(pool.live, 1);
+            let cev = if pool.cancelled {
+                TraceEvent::TraceCancelled
+            } else {
+                TraceEvent::TraceStart
+            };
+            place_task(
+                inout pool,
+                w,
+                FiberTask {
+                    id: cid,
+                    home: Option::None,
+                    remaining_yields: cy,
+                    fail_on_complete: false,
+                    result_tag: cid.bits,
+                    spawn_child_yields: Option::None,
+                    event: cev,
+                },
+                true,
+            );
+        }
+        Option::None => {}
+    }
+    if t.remaining_yields > 0 {
+        let next_t = FiberTask {
+            id: t.id,
+            home: t.home,
+            remaining_yields: wrapping_sub(t.remaining_yields, 1),
+            fail_on_complete: t.fail_on_complete,
+            result_tag: t.result_tag,
+            spawn_child_yields: Option::None,
+            event: TraceEvent::TraceYield,
+        };
+        place_task(inout pool, w, next_t, false);
+    } else {
+        if pool.config.keep_results {
+            if t.fail_on_complete {
+                pool
+                    .failures
+                    .push(
+                        FailedFiber {
+                            id: t.id,
+                            code: t.result_tag
+                        }
+                    );
+            } else {
+                pool
+                    .completed
+                    .push(
+                        CompletedFiber {
+                            id: t.id,
+                            tag: t.result_tag
+                        }
+                    );
+            }
+        }
+        pool.live = wrapping_sub(pool.live, 1);
+    }
+    true
+}
+
+pub fn run_seeded(inout pool: SeededPool) -> PoolOutput {
+    pool.closed = true;
+    let n = pool.workers.len();
+    let mut chooser = rng_new(pool.config.seed, 0);
+    let mut idle_rounds: u64 = 0;
+    let limit = wrapping_mul(n, 4);
+    loop {
+        if pool.live == 0 {
+            break;
+        }
+        let w = rng_below(inout chooser, n);
+        if worker_step(inout pool, w) {
+            idle_rounds = 0;
+            continue;
+        }
+        idle_rounds = wrapping_add(idle_rounds, 1);
+        if idle_rounds >= limit {
+            break;
+        }
+    }
+    let mut wstats: ChunkSeq[WorkerStats] = ChunkSeq::new();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let st = handle Fail[RuntimeError] in {
+            pool.workers[i].stats
+        } with {
+            return x => x,
+            raise(e, k) => empty_stats(),
+        };
+        wstats.push(st);
+        i = wrapping_add(i, 1);
+    }
+    PoolOutput {
+        completed: replace(inout pool.completed, ChunkSeq::new()),
+        failures: replace(inout pool.failures, ChunkSeq::new()),
+        workers: wstats,
+        trace: replace(inout pool.trace, ChunkSeq::new()),
+        abandoned: pool.live,
+    }
+}
