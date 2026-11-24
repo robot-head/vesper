@@ -208,6 +208,12 @@ vesper_hybrid(
             "//:wasm_backend_package",
             "//:wit_component_package",
         ],
+        # The eBPF backend swap (#1290) builds on @vesper/ebpf-backend.
+        "hybrid_ebpf_backend": [
+            "//:check_data_package",
+            "//:place_ir_package",
+            "//:ebpf_backend_package",
+        ],
         # Test discovery (#1337) builds on @vesper/test-runner.
         "hybrid_test_runner": [
             "//:front_package",
@@ -235,6 +241,7 @@ vesper_hybrid(
         "hybrid_pact": "modules/pact",
         "hybrid_parse": "modules/parse",
         "hybrid_wasm_backend": "modules/wasm_backend",
+        "hybrid_ebpf_backend": "modules/ebpf_backend",
         "hybrid_test_runner": "modules/test_runner",
         "hybrid_place_ir": "modules/place_ir",
         "hybrid_stack_bound": "modules/stack_bound",

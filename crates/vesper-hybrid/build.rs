@@ -47,6 +47,12 @@ const MODULES: &[(&str, &str, &str)] = &[
         "modules/wasm_backend",
         "port/wasm_backend.rs",
     ),
+    // SH4 lane 16 (#1290): the eBPF backend.
+    (
+        "hybrid_ebpf_backend",
+        "modules/ebpf_backend",
+        "port/ebpf_backend.rs",
+    ),
     // SH4 lane 11 (#1285): vector and TiledSeq operations, through the
     // `numeric` hook.
     (

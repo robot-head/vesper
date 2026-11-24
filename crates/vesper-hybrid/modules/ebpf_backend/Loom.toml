@@ -1,0 +1,11 @@
+[package]
+name = "@vesper/hybrid-ebpf-backend"
+version = "0.1.0"
+edition = "2026"
+# The eBPF backend only computes bytes: no I/O, clock or network.
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/check-data" = { version = "^0.1", path = "../../../../packages/vesper-check-data" }
+"@vesper/place-ir" = { version = "^0.1", path = "../../../../packages/vesper-place-ir" }
+"@vesper/ebpf-backend" = { version = "^0.1", path = "../../../../packages/vesper-ebpf-backend" }
