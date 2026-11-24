@@ -1,0 +1,503 @@
+// `ObligationLineage` (§31.1 item 4): provenance of `Mode::Linear` obligations.
+use super::wire::ObligationRecord;
+
+// HopKind tags:
+// 0 = Mint { parent }
+// 1 = SinkMove
+// 2 = ChannelHandoff { to_fiber }
+// 3 = UnpackDischarge
+// 4 = Projection { place_hash }
+// 5 = Leak
+pub copy struct HopKind {
+    pub tag: u8,
+    pub aux: u64,
+}
+
+pub fn hop_mint(parent: u64) -> HopKind {
+    HopKind {
+        tag: 0,
+        aux: parent
+    }
+}
+
+pub fn hop_sink_move() -> HopKind {
+    HopKind {
+        tag: 1,
+        aux: 0
+    }
+}
+
+pub fn hop_channel_handoff(to_fiber: u64) -> HopKind {
+    HopKind {
+        tag: 2,
+        aux: to_fiber,
+    }
+}
+
+pub fn hop_unpack_discharge() -> HopKind {
+    HopKind {
+        tag: 3,
+        aux: 0
+    }
+}
+
+pub fn hop_projection(place_hash: u64) -> HopKind {
+    HopKind {
+        tag: 4,
+        aux: place_hash,
+    }
+}
+
+pub fn hop_leak() -> HopKind {
+    HopKind {
+        tag: 5,
+        aux: 0
+    }
+}
+
+pub fn is_terminal_hop(k: HopKind) -> bool {
+    k.tag == 3 || k.tag == 5
+}
+
+pub fn hop_from_record(r: ObligationRecord) -> Option[HopKind] {
+    if r.hop_kind_tag == 0 || r.hop_kind_tag == 2 || r.hop_kind_tag == 4 {
+        return Option::Some(
+            HopKind {
+                tag: r.hop_kind_tag,
+                aux: r.aux,
+            }
+        );
+    }
+    if r.hop_kind_tag == 1 || r.hop_kind_tag == 3 || r.hop_kind_tag == 5 {
+        if r.aux != 0 {
+            return Option::None;
+        }
+        return Option::Some(
+            HopKind {
+                tag: r.hop_kind_tag,
+                aux: 0,
+            }
+        );
+    }
+    Option::None
+}
+
+pub fn hop_to_record(k: HopKind, obligation_id: u64, source_span_id: u32) -> ObligationRecord {
+    ObligationRecord {
+        obligation_id: obligation_id,
+        aux: k.aux,
+        source_span_id: source_span_id,
+        hop_kind_tag: k.tag,
+    }
+}
+
+pub copy struct ObligationHop {
+    pub lamport_seq: u64,
+    pub fiber_id: u64,
+    pub source_span_id: u32,
+    pub kind: HopKind,
+}
+
+copy struct StoredHop {
+    obligation_id: u64,
+    hop: ObligationHop,
+}
+
+// ObligationStatus: 0 = Live, 1 = Discharged, 2 = Leaked.
+// LineageError codes:
+// 0 = Ok
+// 1 = UnknownObligation
+// 2 = CreationEvicted
+// 3 = NonMonotonicId
+// 4 = DoubleMint
+// 5 = AfterTerminal
+// 6 = UnknownParent
+// 7 = OutOfOrder
+// 8 = IdExhausted
+pub struct ObligationLineage {
+    next_id: u64,
+    minted_ids: ChunkSeq[u64],
+    hops: ChunkSeq[StoredHop],
+    truncated: ChunkSeq[u64],
+    allow_truncated_prefix: bool,
+    has_base: bool,
+    base: u64,
+    has_last_seq: bool,
+    last_seq: u64,
+}
+
+pub fn new_lineage() -> ObligationLineage {
+    ObligationLineage {
+        next_id: 1,
+        minted_ids: ChunkSeq::new(),
+        hops: ChunkSeq::new(),
+        truncated: ChunkSeq::new(),
+        allow_truncated_prefix: false,
+        has_base: false,
+        base: 0,
+        has_last_seq: false,
+        last_seq: 0,
+    }
+}
+
+pub fn for_truncated_log() -> ObligationLineage {
+    ObligationLineage {
+        next_id: 1,
+        minted_ids: ChunkSeq::new(),
+        hops: ChunkSeq::new(),
+        truncated: ChunkSeq::new(),
+        allow_truncated_prefix: true,
+        has_base: false,
+        base: 0,
+        has_last_seq: false,
+        last_seq: 0,
+    }
+}
+
+fn contains_u64(in s: Slice[u64], target: u64) -> bool {
+    let mut i: u64 = 0;
+    loop {
+        if i >= s.len() {
+            break;
+        }
+        match s.try_get(i) {
+            Option::Some(v) => {
+                if v == target {
+                    return true;
+                }
+            }
+            Option::None => {}
+        }
+        i = wrapping_add(i, 1);
+    }
+    false
+}
+
+fn max_u64(in s: Slice[u64]) -> (bool, u64) {
+    if s.len() == 0 {
+        return (false, 0);
+    }
+    let mut best: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= s.len() {
+            break;
+        }
+        match s.try_get(i) {
+            Option::Some(v) => {
+                if v > best {
+                    best = v;
+                }
+            }
+            Option::None => {}
+        }
+        i = wrapping_add(i, 1);
+    }
+    (true, best)
+}
+
+fn is_pre_window(in l: ObligationLineage, id: u64) -> bool {
+    if !l.allow_truncated_prefix {
+        return false;
+    }
+    if !l.has_base {
+        true
+    } else {
+        id < l.base
+    }
+}
+
+fn next_mint_id(in l: ObligationLineage, proposed: u64) -> u64 {
+    if !l.has_base && l.allow_truncated_prefix {
+        let (has_max, mx) = max_u64(in l.truncated.as_slice());
+        if has_max && proposed <= mx {
+            return wrapping_add(mx, 1);
+        }
+        return proposed;
+    }
+    if l.next_id < 1 {
+        1
+    } else {
+        l.next_id
+    }
+}
+
+fn last_hop_for(in l: ObligationLineage, id: u64) -> Option[ObligationHop] {
+    let s = l.hops.as_slice();
+    let mut i = s.len();
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        match s.try_get(i) {
+            Option::Some(sh) => {
+                if sh.obligation_id == id {
+                    return Option::Some(sh.hop);
+                }
+            }
+            Option::None => {}
+        }
+    }
+    Option::None
+}
+
+pub fn record(inout l: ObligationLineage, id: u64, hop: ObligationHop) -> u32 {
+    if l.has_last_seq && hop.lamport_seq <= l.last_seq {
+        return 7;
+    }
+    if id == 0 {
+        return 1;
+    }
+    if hop.kind.tag == 0 {
+        if contains_u64(in l.minted_ids.as_slice(), id)
+            || contains_u64(in l.truncated.as_slice(), id) {
+            return 4;
+        }
+        let expected = next_mint_id(in l, id);
+        if id != expected {
+            return 3;
+        }
+        let parent = hop.kind.aux;
+        if parent != 0 {
+            if parent >= id
+                || !(
+                    contains_u64(in l.minted_ids.as_slice(), parent) || is_pre_window(in l, parent)
+                ) {
+                return 6;
+            }
+        }
+        if id == 18446744073709551615 {
+            return 8;
+        }
+        if !l.has_base {
+            l.has_base = true;
+            l.base = id;
+        }
+        l.next_id = wrapping_add(id, 1);
+        l.minted_ids.push(id);
+        l
+            .hops
+            .push(
+                StoredHop {
+                    obligation_id: id,
+                    hop: hop,
+                }
+            );
+    } else {
+        if contains_u64(in l.minted_ids.as_slice(), id) {
+            match last_hop_for(in l, id) {
+                Option::Some(last) => {
+                    if is_terminal_hop(last.kind) {
+                        return 5;
+                    }
+                }
+                Option::None => {}
+            }
+            l
+                .hops
+                .push(
+                    StoredHop {
+                        obligation_id: id,
+                        hop: hop,
+                    }
+                );
+        } else if is_pre_window(in l, id) {
+            if !contains_u64(in l.truncated.as_slice(), id) {
+                l.truncated.push(id);
+            }
+        } else {
+            return 1;
+        }
+    }
+    l.has_last_seq = true;
+    l.last_seq = hop.lamport_seq;
+    0
+}
+
+pub fn mint(
+    inout l: ObligationLineage,
+    lamport_seq: u64,
+    fiber_id: u64,
+    source_span_id: u32,
+    parent: u64,
+) -> Result[u64, u32] {
+    let id = if !l.has_base && l.allow_truncated_prefix {
+        let (has_max, mx) = max_u64(in l.truncated.as_slice());
+        if has_max {
+            wrapping_add(mx, 1)
+        } else {
+            1
+        }
+    } else {
+        if l.next_id < 1 {
+            1
+        } else {
+            l.next_id
+        }
+    };
+    let err = record(
+        inout l,
+        id,
+        ObligationHop {
+            lamport_seq: lamport_seq,
+            fiber_id: fiber_id,
+            source_span_id: source_span_id,
+            kind: hop_mint(parent),
+        },
+    );
+    if err != 0 {
+        Result::Err(err)
+    } else {
+        Result::Ok(id)
+    }
+}
+
+pub fn chain(in l: ObligationLineage, id: u64) -> Result[ChunkSeq[ObligationHop], u32] {
+    if contains_u64(in l.truncated.as_slice(), id) {
+        return Result::Err(2);
+    }
+    if !contains_u64(in l.minted_ids.as_slice(), id) {
+        return Result::Err(1);
+    }
+    let mut out: ChunkSeq[ObligationHop] = ChunkSeq::new();
+    let s = l.hops.as_slice();
+    let mut i: u64 = 0;
+    loop {
+        if i >= s.len() {
+            break;
+        }
+        match s.try_get(i) {
+            Option::Some(sh) => {
+                if sh.obligation_id == id {
+                    out.push(sh.hop);
+                }
+            }
+            Option::None => {}
+        }
+        i = wrapping_add(i, 1);
+    }
+    Result::Ok(out)
+}
+
+pub fn status(in l: ObligationLineage, id: u64) -> Result[u32, u32] {
+    if contains_u64(in l.truncated.as_slice(), id) {
+        return Result::Err(2);
+    }
+    if !contains_u64(in l.minted_ids.as_slice(), id) {
+        return Result::Err(1);
+    }
+    match last_hop_for(in l, id) {
+        Option::Some(last) => {
+            if last.kind.tag == 3 {
+                Result::Ok(1)
+            } else if last.kind.tag == 5 {
+                Result::Ok(2)
+            } else {
+                Result::Ok(0)
+            }
+        }
+        Option::None => Result::Ok(0),
+    }
+}
+
+pub fn open_obligations(in l: ObligationLineage) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new();
+    let ids = l.minted_ids.as_slice();
+    let mut i: u64 = 0;
+    loop {
+        if i >= ids.len() {
+            break;
+        }
+        match ids.try_get(i) {
+            Option::Some(id) => {
+                match last_hop_for(in l, id) {
+                    Option::Some(last) => {
+                        if !is_terminal_hop(last.kind) {
+                            out.push(id);
+                        }
+                    }
+                    Option::None => out.push(id),
+                }
+            }
+            Option::None => {}
+        }
+        i = wrapping_add(i, 1);
+    }
+    out
+}
+
+pub fn leaked(in l: ObligationLineage) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new();
+    let ids = l.minted_ids.as_slice();
+    let mut i: u64 = 0;
+    loop {
+        if i >= ids.len() {
+            break;
+        }
+        match ids.try_get(i) {
+            Option::Some(id) => {
+                match last_hop_for(in l, id) {
+                    Option::Some(last) => {
+                        if last.kind.tag == 5 {
+                            out.push(id);
+                        }
+                    }
+                    Option::None => {}
+                }
+            }
+            Option::None => {}
+        }
+        i = wrapping_add(i, 1);
+    }
+    out
+}
+
+pub fn audit_complete(in l: ObligationLineage) -> bool {
+    let ids = l.minted_ids.as_slice();
+    let mut i: u64 = 0;
+    loop {
+        if i >= ids.len() {
+            break;
+        }
+        let id = match ids.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        match chain(in l, id) {
+            Result::Err(_) => return false,
+            Result::Ok(c) => {
+                let cs = c.as_slice();
+                if cs.len() == 0 {
+                    return false;
+                }
+                let first = match cs.try_get(0) {
+                    Option::Some(h) => h,
+                    Option::None => return false,
+                };
+                if first.kind.tag != 0 {
+                    return false;
+                }
+                let mut k: u64 = 1;
+                loop {
+                    if k >= cs.len() {
+                        break;
+                    }
+                    let h = match cs.try_get(k) {
+                        Option::Some(v) => v,
+                        Option::None => return false,
+                    };
+                    if h.kind.tag == 0 {
+                        return false;
+                    }
+                    if wrapping_add(k, 1) < cs.len() && is_terminal_hop(h.kind) {
+                        return false;
+                    }
+                    k = wrapping_add(k, 1);
+                }
+            }
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}

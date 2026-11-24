@@ -1,0 +1,330 @@
+// CoreSight trace formatter removal (§31.1 item 3).
+pub fn frame_len() -> u64 {
+    16
+}
+
+pub struct Deformatted {
+    stream_ids: ChunkSeq[u8],
+    stream_bytes: ChunkSeq[u8],
+    pub frames: u64,
+    pub syncs: u64,
+    pub unattributed: u64,
+    pub padding: u64,
+    pub control: u64,
+}
+
+// err_code:
+// 0 = Ok
+// 1 = PartialFrame (err_offset = offset, err_val = len)
+// 2 = NoSync
+// 3 = ReservedId (err_offset = offset, err_val = id)
+// 4 = BadAuxBit (err_offset = offset)
+// 5 = OutputBudget (err_val = limit)
+pub struct DeformatResult {
+    pub err_code: u32,
+    pub err_offset: u64,
+    pub err_val: u64,
+    pub out: Deformatted,
+}
+
+fn empty_deformatted() -> Deformatted {
+    Deformatted {
+        stream_ids: ChunkSeq::new(),
+        stream_bytes: ChunkSeq::new(),
+        frames: 0,
+        syncs: 0,
+        unattributed: 0,
+        padding: 0,
+        control: 0,
+    }
+}
+
+pub fn stream_for(in d: Deformatted, id: u8) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new();
+    let ids = d.stream_ids.as_slice();
+    let bs = d.stream_bytes.as_slice();
+    let mut i: u64 = 0;
+    loop {
+        if i >= ids.len() {
+            break;
+        }
+        let sid = match ids.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if sid == id {
+            let b = match bs.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            out.push(b);
+        }
+        i = wrapping_add(i, 1);
+    }
+    out
+}
+
+fn byte_at(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn is_fsync_at(in s: Slice[u8], at: u64) -> bool {
+    if at > s.len() || wrapping_sub(s.len(), at) < 4 {
+        return false;
+    }
+    byte_at(in s, at) == 255
+        && byte_at(in s, wrapping_add(at, 1)) == 255
+        && byte_at(in s, wrapping_add(at, 2)) == 255
+        && byte_at(in s, wrapping_add(at, 3)) == 127
+}
+
+fn is_fsync_prefix(in s: Slice[u8], at: u64) -> bool {
+    let rem = wrapping_sub(s.len(), at);
+    if rem == 0 || rem > 4 {
+        return false;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= rem {
+            break;
+        }
+        let want: u8 = if i < 3 {
+            255
+        } else {
+            127
+        };
+        if byte_at(in s, wrapping_add(at, i)) != want {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+fn find_first_fsync(in s: Slice[u8]) -> Option[u64] {
+    if s.len() < 4 {
+        return Option::None;
+    }
+    let limit = wrapping_sub(s.len(), 4);
+    let mut i: u64 = 0;
+    loop {
+        if i > limit {
+            break;
+        }
+        if is_fsync_at(in s, i) {
+            return Option::Some(i);
+        }
+        i = wrapping_add(i, 1);
+    }
+    Option::None
+}
+
+fn emit_byte(
+    inout out: Deformatted,
+    has_id: bool,
+    cur_id: u8,
+    inout total: u64,
+    max_output: u64,
+    b: u8,
+) -> u32 {
+    if !has_id {
+        out.unattributed = wrapping_add(out.unattributed, 1);
+        return 0;
+    }
+    if cur_id == 0 {
+        out.padding = wrapping_add(out.padding, 1);
+        return 0;
+    }
+    if cur_id == 123 || cur_id == 125 {
+        out.control = wrapping_add(out.control, 1);
+        return 0;
+    }
+    total = wrapping_add(total, 1);
+    if total > max_output {
+        return 5;
+    }
+    out.stream_ids.push(cur_id);
+    out.stream_bytes.push(b);
+    0
+}
+
+fn check_id(b: u8) -> (bool, u8) {
+    let id = wrapping_u8(wrapping_shr_u64(widen_u64(b), 1));
+    if id >= 112 && id <= 127 && id != 123 && id != 125 {
+        (false, id)
+    } else {
+        (true, id)
+    }
+}
+
+// mode: 0 = Frames, 1 = FrameSync.
+pub fn deformat(in bytes: Slice[u8], mode: u32, max_output: u64) -> DeformatResult {
+    let mut out = empty_deformatted();
+    let mut has_id = false;
+    let mut cur_id: u8 = 0;
+    let mut total: u64 = 0;
+    let mut at: u64 = if mode == 0 {
+        0
+    } else {
+        match find_first_fsync(in bytes) {
+            Option::Some(first) => {
+                out.syncs = wrapping_add(out.syncs, 1);
+                wrapping_add(first, 4)
+            }
+            Option::None => {
+                return DeformatResult {
+                    err_code: 2,
+                    err_offset: 0,
+                    err_val: 0,
+                    out: out,
+                };
+            }
+        }
+    };
+
+    loop {
+        if at >= bytes.len() {
+            break;
+        }
+        if mode == 1 && is_fsync_at(in bytes, at) {
+            out.syncs = wrapping_add(out.syncs, 1);
+            at = wrapping_add(at, 4);
+            continue;
+        }
+        let rem = wrapping_sub(bytes.len(), at);
+        if rem < frame_len() {
+            if mode == 1 && is_fsync_prefix(in bytes, at) {
+                break;
+            }
+            return DeformatResult {
+                err_code: 1,
+                err_offset: at,
+                err_val: rem,
+                out: out,
+            };
+        }
+        let aux = byte_at(in bytes, wrapping_add(at, 15));
+        let mut n: u64 = 0;
+        loop {
+            if n >= 7 {
+                break;
+            }
+            let off = wrapping_add(at, wrapping_mul(2, n));
+            let b = byte_at(in bytes, off);
+            let next_b = byte_at(in bytes, wrapping_add(off, 1));
+            let flag = wrapping_u8(wrapping_shr_u64(widen_u64(aux), wrapping_u32(n)) & 1);
+            if (b & 1) == 1 {
+                if flag == 1 {
+                    let e1 = emit_byte(inout out, has_id, cur_id, inout total, max_output, next_b);
+                    if e1 != 0 {
+                        return DeformatResult {
+                            err_code: 5,
+                            err_offset: 0,
+                            err_val: max_output,
+                            out: out,
+                        };
+                    }
+                    let (ok, new_id) = check_id(b);
+                    if !ok {
+                        return DeformatResult {
+                            err_code: 3,
+                            err_offset: off,
+                            err_val: widen_u64(new_id),
+                            out: out,
+                        };
+                    }
+                    has_id = true;
+                    cur_id = new_id;
+                } else {
+                    let (ok, new_id) = check_id(b);
+                    if !ok {
+                        return DeformatResult {
+                            err_code: 3,
+                            err_offset: off,
+                            err_val: widen_u64(new_id),
+                            out: out,
+                        };
+                    }
+                    has_id = true;
+                    cur_id = new_id;
+                    let e2 = emit_byte(inout out, has_id, cur_id, inout total, max_output, next_b);
+                    if e2 != 0 {
+                        return DeformatResult {
+                            err_code: 5,
+                            err_offset: 0,
+                            err_val: max_output,
+                            out: out,
+                        };
+                    }
+                }
+            } else {
+                let d0 = (b & 254) | flag;
+                let e3 = emit_byte(inout out, has_id, cur_id, inout total, max_output, d0);
+                if e3 != 0 {
+                    return DeformatResult {
+                        err_code: 5,
+                        err_offset: 0,
+                        err_val: max_output,
+                        out: out,
+                    };
+                }
+                let e4 = emit_byte(inout out, has_id, cur_id, inout total, max_output, next_b);
+                if e4 != 0 {
+                    return DeformatResult {
+                        err_code: 5,
+                        err_offset: 0,
+                        err_val: max_output,
+                        out: out,
+                    };
+                }
+            }
+            n = wrapping_add(n, 1);
+        }
+        let b14 = byte_at(in bytes, wrapping_add(at, 14));
+        let flag7 = wrapping_u8(wrapping_shr_u64(widen_u64(aux), 7) & 1);
+        if (b14 & 1) == 1 {
+            if flag7 != 0 {
+                return DeformatResult {
+                    err_code: 4,
+                    err_offset: wrapping_add(at, 15),
+                    err_val: 0,
+                    out: out,
+                };
+            }
+            let (ok, new_id) = check_id(b14);
+            if !ok {
+                return DeformatResult {
+                    err_code: 3,
+                    err_offset: wrapping_add(at, 14),
+                    err_val: widen_u64(new_id),
+                    out: out,
+                };
+            }
+            has_id = true;
+            cur_id = new_id;
+        } else {
+            let d14 = (b14 & 254) | flag7;
+            let e5 = emit_byte(inout out, has_id, cur_id, inout total, max_output, d14);
+            if e5 != 0 {
+                return DeformatResult {
+                    err_code: 5,
+                    err_offset: 0,
+                    err_val: max_output,
+                    out: out,
+                };
+            }
+        }
+        out.frames = wrapping_add(out.frames, 1);
+        at = wrapping_add(at, frame_len());
+    }
+
+    DeformatResult {
+        err_code: 0,
+        err_offset: 0,
+        err_val: 0,
+        out: out,
+    }
+}

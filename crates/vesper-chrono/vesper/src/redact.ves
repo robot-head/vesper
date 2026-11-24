@@ -1,0 +1,329 @@
+// Secret and `@pii` redaction applied before `.vchrono` serialization (§31.1 item 5).
+pub fn min_secret_bytes() -> u64 {
+    4
+}
+
+pub copy struct FieldRule {
+    pub effect_id: u16,
+    pub op_tag: u16,
+    pub offset: u64,
+    pub len: u64,
+}
+
+pub copy struct ImageRegion {
+    pub offset: u64,
+    pub len: u64,
+}
+
+// Target tag: 0 = Record(lamport_seq), 1 = Snapshot(epoch_id), 2 = Metadata(0).
+pub copy struct RedactionEntry {
+    pub target_tag: u8,
+    pub target_val: u64,
+    pub offset: u32,
+    pub len: u32,
+}
+
+copy struct SecretSpan {
+    offset: u64,
+    len: u64,
+}
+
+pub struct RedactionPolicy {
+    fields: ChunkSeq[FieldRule],
+    regions: ChunkSeq[ImageRegion],
+    secret_spans: ChunkSeq[SecretSpan],
+    secret_buf: ChunkSeq[u8],
+}
+
+pub fn new_policy() -> RedactionPolicy {
+    RedactionPolicy {
+        fields: ChunkSeq::new(),
+        regions: ChunkSeq::new(),
+        secret_spans: ChunkSeq::new(),
+        secret_buf: ChunkSeq::new(),
+    }
+}
+
+// Returns 0 = Ok, 1 = EmptyRule, 2 = SecretTooShort.
+pub fn add_pii_field(inout p: RedactionPolicy, rule: FieldRule) -> u32 {
+    if rule.len == 0 {
+        return 1;
+    }
+    p.fields.push(rule);
+    0
+}
+
+pub fn add_secret_region(inout p: RedactionPolicy, region: ImageRegion) -> u32 {
+    if region.len == 0 {
+        return 1;
+    }
+    p.regions.push(region);
+    0
+}
+
+pub fn add_secret_value(inout p: RedactionPolicy, in bytes: Slice[u8]) -> u32 {
+    if bytes.len() < min_secret_bytes() {
+        return 2;
+    }
+    let off = p.secret_buf.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= bytes.len() {
+            break;
+        }
+        let b = match bytes.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        p.secret_buf.push(b);
+        i = wrapping_add(i, 1);
+    }
+    p
+        .secret_spans
+        .push(
+            SecretSpan {
+                offset: off,
+                len: bytes.len(),
+            }
+        );
+    0
+}
+
+fn byte_at(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn find_subslice(in haystack: Slice[u8], in needle: Slice[u8], start: u64) -> Option[u64] {
+    let nlen = needle.len();
+    let hlen = haystack.len();
+    if nlen == 0 || start > hlen || nlen > wrapping_sub(hlen, start) {
+        return Option::None;
+    }
+    let limit = wrapping_sub(hlen, nlen);
+    let mut i = start;
+    loop {
+        if i > limit {
+            break;
+        }
+        let mut matched = true;
+        let mut j: u64 = 0;
+        loop {
+            if j >= nlen {
+                break;
+            }
+            if byte_at(in haystack, wrapping_add(i, j)) != byte_at(in needle, j) {
+                matched = false;
+                break;
+            }
+            j = wrapping_add(j, 1);
+        }
+        if matched {
+            return Option::Some(i);
+        }
+        i = wrapping_add(i, 1);
+    }
+    Option::None
+}
+
+fn find_secret_in(
+    in haystack: Slice[u8],
+    in secret_buf: Slice[u8],
+    span: SecretSpan,
+    start: u64,
+) -> Option[u64] {
+    let nlen = span.len;
+    let hlen = haystack.len();
+    if nlen == 0 || start > hlen || nlen > wrapping_sub(hlen, start) {
+        return Option::None;
+    }
+    let limit = wrapping_sub(hlen, nlen);
+    let mut i = start;
+    loop {
+        if i > limit {
+            break;
+        }
+        let mut matched = true;
+        let mut j: u64 = 0;
+        loop {
+            if j >= nlen {
+                break;
+            }
+            if byte_at(in haystack, wrapping_add(i, j))
+                != byte_at(in secret_buf, wrapping_add(span.offset, j)) {
+                matched = false;
+                break;
+            }
+            j = wrapping_add(j, 1);
+        }
+        if matched {
+            return Option::Some(i);
+        }
+        i = wrapping_add(i, 1);
+    }
+    Option::None
+}
+
+fn zero_range(
+    inout bytes: ChunkSeq[u8],
+    offset: u64,
+    len: u64,
+    target_tag: u8,
+    target_val: u64,
+    inout log: ChunkSeq[RedactionEntry],
+) {
+    let blen = bytes.len();
+    if offset >= blen {
+        return;
+    }
+    let avail = wrapping_sub(blen, offset);
+    let clipped = if len < avail {
+        len
+    } else {
+        avail
+    };
+    let end = wrapping_add(offset, clipped);
+    let mut i = offset;
+    loop {
+        if i >= end {
+            break;
+        }
+        let _ = bytes.try_set(i, 0);
+        i = wrapping_add(i, 1);
+    }
+    log
+        .push(
+            RedactionEntry {
+                target_tag: target_tag,
+                target_val: target_val,
+                offset: wrapping_u32(offset),
+                len: wrapping_u32(clipped),
+            }
+        );
+}
+
+fn scrub_secrets(
+    in p: RedactionPolicy,
+    inout bytes: ChunkSeq[u8],
+    target_tag: u8,
+    target_val: u64,
+    inout log: ChunkSeq[RedactionEntry],
+) {
+    let spans = p.secret_spans.as_slice();
+    let sbuf = p.secret_buf.as_slice();
+    let mut k: u64 = 0;
+    loop {
+        if k >= spans.len() {
+            break;
+        }
+        match spans.try_get(k) {
+            Option::Some(sp) => {
+                let mut start: u64 = 0;
+                loop {
+                    match find_secret_in(in bytes.as_slice(), in sbuf, sp, start) {
+                        Option::Some(at) => {
+                            zero_range(inout bytes, at, sp.len, target_tag, target_val, inout log);
+                            start = wrapping_add(at, sp.len);
+                        }
+                        Option::None => break,
+                    }
+                }
+            }
+            Option::None => {}
+        }
+        k = wrapping_add(k, 1);
+    }
+}
+
+pub fn scrub_record(
+    in p: RedactionPolicy,
+    lamport_seq: u64,
+    effect_id: u16,
+    op_tag: u16,
+    digest: bool,
+    inout payload: ChunkSeq[u8],
+    inout log: ChunkSeq[RedactionEntry],
+) {
+    let rules = p.fields.as_slice();
+    let mut i: u64 = 0;
+    loop {
+        if i >= rules.len() {
+            break;
+        }
+        match rules.try_get(i) {
+            Option::Some(rule) => {
+                if rule.effect_id == effect_id && rule.op_tag == op_tag {
+                    if digest {
+                        zero_range(inout payload, 0, payload.len(), 0, lamport_seq, inout log);
+                    } else {
+                        zero_range(
+                            inout payload,
+                            rule.offset,
+                            rule.len,
+                            0,
+                            lamport_seq,
+                            inout log,
+                        );
+                    }
+                }
+            }
+            Option::None => {}
+        }
+        i = wrapping_add(i, 1);
+    }
+    scrub_secrets(in p, inout payload, 0, lamport_seq, inout log);
+}
+
+pub fn scrub_image(
+    in p: RedactionPolicy,
+    epoch_id: u32,
+    inout image: ChunkSeq[u8],
+    inout log: ChunkSeq[RedactionEntry],
+) {
+    let regs = p.regions.as_slice();
+    let mut i: u64 = 0;
+    loop {
+        if i >= regs.len() {
+            break;
+        }
+        match regs.try_get(i) {
+            Option::Some(reg) => {
+                zero_range(
+                    inout image,
+                    reg.offset,
+                    reg.len,
+                    1,
+                    widen_u64(epoch_id),
+                    inout log,
+                );
+            }
+            Option::None => {}
+        }
+        i = wrapping_add(i, 1);
+    }
+    scrub_secrets(in p, inout image, 1, widen_u64(epoch_id), inout log);
+}
+
+pub fn verify_absent(in p: RedactionPolicy, in bundle: Slice[u8]) -> Option[u64] {
+    let spans = p.secret_spans.as_slice();
+    let sbuf = p.secret_buf.as_slice();
+    let mut k: u64 = 0;
+    loop {
+        if k >= spans.len() {
+            break;
+        }
+        match spans.try_get(k) {
+            Option::Some(sp) => {
+                match find_secret_in(in bundle, in sbuf, sp, 0) {
+                    Option::Some(off) => return Option::Some(off),
+                    Option::None => {}
+                }
+            }
+            Option::None => {}
+        }
+        k = wrapping_add(k, 1);
+    }
+    Option::None
+}
