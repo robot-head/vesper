@@ -2270,7 +2270,7 @@ fn deps_agrees_with_rust() {
 
             let dep_ok_mod = parse(
                 "trait Show { fn show(in self) -> i64; }
-                 trait Conv[T] { type Out; fn conv(in self, in x: T) -> i64; }",
+                 trait WithAssoc { type Out; fn out(in self) -> i64; }",
             );
             let dep_adt_mod = parse(
                 "struct Foreign { x: i64 }
@@ -2297,9 +2297,9 @@ fn deps_agrees_with_rust() {
                 (
                     "dep_valid_generic_assoc",
                     "struct Local { v: i64 }
-                     impl a::Conv[i64] for Local {
+                     impl a::WithAssoc for Local {
                          type Out = i64;
-                         fn conv(in self, in x: i64) -> i64 { self.v + x }
+                         fn out(in self) -> i64 { self.v }
                      }
                      fn main() -> i64 { 0 }",
                     vec![("a", &dep_a_id, &dep_ok_mod)],
