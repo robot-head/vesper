@@ -919,12 +919,5 @@ fn port_frees_its_allocations() {
 }
 
 fn live() -> i64 {
-    #[cfg(feature = "vesper-port")]
-    {
-        vesper_lint::port_live_allocations()
-    }
-    #[cfg(not(feature = "vesper-port"))]
-    {
-        0
-    }
+    vesper_lint::port_live_allocations()
 }

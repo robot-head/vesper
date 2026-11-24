@@ -87,6 +87,9 @@ vesper_crate(
         "VESPER_PORT_OBJECT": "$(execpath :lint_vesper)",
         "VESPER_PORT_GENERATED_BINDING": "$(execpath :lint_vesper_binding)",
     },
+    test_env_by_target = {
+        "test/differential": {"RUST_TEST_THREADS": "1"},
+    },
 )
 
 # The seed package (seed/) builds these same Rust sources without the port.
