@@ -397,6 +397,18 @@ fn quantize(c: f32, lo: f32, extent: f32) -> u32 {
     0
 }
 
+// Whether child word c can hold a pair reported from leaf p: a leaf after
+// p, or (when pruning) an internal node whose highest leaf is after p. The
+// left child sorts below the right one, so it is live only if the right
+// one is.
+fn live(c: u64, p: u64, prune: bool, in tk: Slice[u64]) -> bool {
+    if (c & LEAF_BIT) != 0 {
+        (c & INDEX_MASK) > p
+    } else {
+        !prune || g64(in tk, c) > p
+    }
+}
+
 // Lbvh::overlapping_pairs: every overlapping pair `(a << 32) | b`, `a < b`,
 // ascending, into `pairs`. Returns the pair count; `max_pairs` + 1 means
 // more than `max_pairs` pairs, and the length of `pairs` + 1 (when below
@@ -422,6 +434,26 @@ pub fn pairs(
     }
     let room = out.len();
     let mut len: u64 = 0;
+    // The output is sorted at the end, so any visiting order gives the same
+    // pairs. A subtree whose leaves all sort at or below p holds no pair
+    // reported from p (each pair is reported from its lower leaf), so it is
+    // skipped without testing its box: tk[k] is internal node k's highest
+    // leaf, the end of its right spine (tk is the sort's scratch, free until
+    // the sort; when it is too short every subtree is tested).
+    let inner = dec(n);
+    let prune = tk.len() >= inner;
+    if prune {
+        for k in 0..inner {
+            let mut c = g64(in right, k);
+            loop {
+                if (c & LEAF_BIT) != 0 {
+                    break;
+                }
+                c = g64(in right, c);
+            }
+            tk.try_set(k, c & INDEX_MASK);
+        }
+    }
     for p in 0..n {
         let bp = wrapping_mul(p, 6);
         let pmin0 = gf(in leaf, bp);
@@ -431,8 +463,11 @@ pub fn pairs(
         let pmax1 = gf(in leaf, wrapping_add(bp, 4));
         let pmax2 = gf(in leaf, wrapping_add(bp, 5));
         let ap = widen_u64(g32(in prims, p));
-        let mut sp: u64 = 1;
-        stack.try_set(0, 0);
+        let mut sp: u64 = 0;
+        if live(0, p, prune, in tk) {
+            stack.try_set(0, 0);
+            sp = 1;
+        }
         loop {
             if !(sp > 0) {
                 break;
@@ -441,7 +476,7 @@ pub fn pairs(
             let c = g64(in stack, sp);
             if (c & LEAF_BIT) != 0 {
                 let q = c & INDEX_MASK;
-                if q > p {
+                {
                     let bq = wrapping_mul(q, 6);
                     if pmin0 <= gf(in leaf, wrapping_add(bq, 3))
                         && gf(in leaf, bq) <= pmax0
@@ -472,9 +507,18 @@ pub fn pairs(
                     && gf(in node_box, inc(bc)) <= pmax1
                     && pmin2 <= gf(in node_box, wrapping_add(bc, 5))
                     && gf(in node_box, wrapping_add(bc, 2)) <= pmax2 {
-                    stack.try_set(sp, g64(in right, c));
-                    stack.try_set(inc(sp), g64(in left, c));
-                    sp = wrapping_add(sp, 2);
+                    // Push only the children that can hold a pair from p:
+                    // a leaf after p, or a subtree reaching past p.
+                    let r = g64(in right, c);
+                    if live(r, p, prune, in tk) {
+                        stack.try_set(sp, r);
+                        sp = inc(sp);
+                        let l = g64(in left, c);
+                        if live(l, p, prune, in tk) {
+                            stack.try_set(sp, l);
+                            sp = inc(sp);
+                        }
+                    }
                 }
             }
         }

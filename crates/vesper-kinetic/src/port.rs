@@ -13,5 +13,4 @@ pub(crate) use binding::*;
 pub use crate::coloring::ColoringError;
 pub use crate::gjk::GjkError;
 pub use crate::lbvh::LbvhError;
-pub use crate::morton::MortonError;
 pub use crate::sap::SapError;

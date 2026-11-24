@@ -375,6 +375,29 @@ fn lbvh_matches_the_rust_build() {
             }
         }
     }
+    // Benchmark-sized trees, and small pair bounds (the port's pair scratch
+    // then holds fewer entries than the tree has nodes, so the query tests
+    // every subtree instead of pruning the ones below the query leaf).
+    let mut pl = Lbvh::with_capacity(4096);
+    let mut rl = rust::Lbvh::with_capacity(4096);
+    for round in 0..12u32 {
+        let n = 2048 + (rng.next() % 2049) as usize;
+        let (pb, rb) = rand_boxes(&mut rng, n, 64.0, 0.8);
+        cases += 1;
+        if pl.build(&pb).is_ok() != rl.build(&rb).is_ok() {
+            differences += 1;
+            continue;
+        }
+        for max in [usize::MAX, 64, 1 + (rng.next() % 4096) as usize] {
+            let max = if round % 2 == 0 { max } else { max.min(n / 2) };
+            let pq = pl.overlapping_pairs(&mut po, max);
+            let rq = rl.overlapping_pairs(&mut ro, max);
+            cases += 1;
+            if format!("{pq:?}") != format!("{rq:?}") || (pq.is_ok() && po != ro) {
+                differences += 1;
+            }
+        }
+    }
     println!("flip-gate differential differences={differences} cases={cases}");
     assert_eq!(differences, 0);
 }
@@ -469,6 +492,142 @@ fn fastmath_matches_the_rust_build() {
             wide(port::atan2f(f, g)),
             wide(rust::atan2f(f, g)),
         );
+    }
+    println!("flip-gate differential differences={differences} cases={cases}");
+    assert_eq!(differences, 0);
+}
+
+/// The port's 30-bit Morton codes (by lookup tables) against the frozen
+/// Rust build (magic bits): every in-range axis value through `spread`,
+/// `compact` and the masked forms, random and out-of-range coordinates and
+/// codes through the checked forms, errors included (SH6 lane 9, #1404).
+#[test]
+fn morton_matches_the_rust_build() {
+    use vesper_kinetic::morton as port;
+    use vesper_kinetic_rust::morton as rust;
+    let mut rng = Lcg(0x1B04_0005);
+    let mut differences = 0usize;
+    let mut cases = 0usize;
+    let mut check = |same: bool| {
+        cases += 1;
+        if !same {
+            differences += 1;
+        }
+    };
+    for v in 0..=u32::from(u16::MAX) {
+        check(port::spread(v) == rust::spread(v));
+        check(port::compact(v) == rust::compact(v));
+    }
+    let edges = [0u16, 1, 511, 512, 1022, 1023, 1024, 1025, 2047, u16::MAX];
+    for &x in &edges {
+        for &y in &edges {
+            for &z in &edges {
+                check(
+                    format!("{:?}", port::encode(x, y, z))
+                        == format!("{:?}", rust::encode(x, y, z)),
+                );
+                check(port::encode_masked(x, y, z) == rust::encode_masked(x, y, z));
+            }
+        }
+    }
+    for _ in 0..200_000 {
+        let r = rng.next();
+        let (x, y, z) = (
+            r as u16 & 0x7ff,
+            (r >> 11) as u16 & 0x7ff,
+            rng.next() as u16,
+        );
+        check(format!("{:?}", port::encode(x, y, z)) == format!("{:?}", rust::encode(x, y, z)));
+        check(port::encode_masked(x, y, z) == rust::encode_masked(x, y, z));
+        let code = rng.next() ^ (rng.next() << 1);
+        check(format!("{:?}", port::decode(code)) == format!("{:?}", rust::decode(code)));
+        check(port::decode_masked(code) == rust::decode_masked(code));
+        let valid = code & port::CODE_MASK;
+        check(format!("{:?}", port::decode(valid)) == format!("{:?}", rust::decode(valid)));
+    }
+    println!("flip-gate differential differences={differences} cases={cases}");
+    assert_eq!(differences, 0);
+}
+
+/// The port's correctly rounded `sin`, `cos`, `exp`, `log` and `atan2`
+/// (Vesper bignum, 64-bit limbs) against the frozen Rust build
+/// (`num-bigint`), bit for bit in both formats: the Annex F specials and
+/// edges, then random inputs over the ranges the reductions and the
+/// over/underflow limits split (SH6 lane 9, #1404).
+#[test]
+fn crmath_matches_the_rust_build() {
+    use vesper_kinetic::crmath as port;
+    use vesper_kinetic_rust::crmath as rust;
+    let mut rng = Lcg(0x1B04_0006);
+    let mut differences = 0usize;
+    let mut cases = 0usize;
+    // Results are correctly rounded, so they agree bit for bit; NaNs are
+    // the same canonical NaN, compared as NaN.
+    let mut check64 = |a: f64, b: f64| {
+        cases += 1;
+        if a.to_bits() != b.to_bits() && !(a.is_nan() && b.is_nan()) {
+            differences += 1;
+        }
+    };
+    let mut inputs = vec![
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        0.5,
+        2.0,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+        f64::MIN_POSITIVE,
+        f64::from_bits(1),
+        f64::MAX,
+        -f64::MAX,
+        std::f64::consts::PI,
+        std::f64::consts::FRAC_PI_2,
+        std::f64::consts::LN_2,
+        709.782712893384,
+        -745.1332191019411,
+        1e300,
+        1e-300,
+    ];
+    for _ in 0..1_500 {
+        inputs.push(rng.range(-8.0, 8.0));
+        inputs.push(rng.range(-800.0, 800.0));
+        inputs.push(rng.range(-1e-3, 1e-3));
+        let bits = (u64::from(rng.next()) << 32) | u64::from(rng.next());
+        inputs.push(f64::from_bits(bits));
+    }
+    for &x in &inputs {
+        check64(port::sin(x), rust::sin(x));
+        check64(port::cos(x), rust::cos(x));
+        check64(port::exp(x), rust::exp(x));
+        check64(port::log(x), rust::log(x));
+        check64(port::log(x.abs()), rust::log(x.abs()));
+        check64(port::atan2(x, 1.5), rust::atan2(x, 1.5));
+        check64(port::atan2(-0.75, x), rust::atan2(-0.75, x));
+        let xf = x as f32;
+        let yf = (x * 0.37) as f32;
+        check64(f64::from(port::sinf(xf)), f64::from(rust::sinf(xf)));
+        check64(f64::from(port::cosf(xf)), f64::from(rust::cosf(xf)));
+        check64(f64::from(port::expf(xf)), f64::from(rust::expf(xf)));
+        check64(
+            f64::from(port::logf(xf.abs())),
+            f64::from(rust::logf(xf.abs())),
+        );
+        check64(
+            f64::from(port::atan2f(yf, xf)),
+            f64::from(rust::atan2f(yf, xf)),
+        );
+    }
+    for &y in &inputs[..20] {
+        for &x in &inputs[..20] {
+            check64(port::atan2(y, x), rust::atan2(y, x));
+            check64(
+                f64::from(port::atan2f(y as f32, x as f32)),
+                f64::from(rust::atan2f(y as f32, x as f32)),
+            );
+        }
     }
     println!("flip-gate differential differences={differences} cases={cases}");
     assert_eq!(differences, 0);
