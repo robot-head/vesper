@@ -1,0 +1,252 @@
+// Snapshot-epoch timeline index and O(log N) reverse `inout` watchpoints (§31.5).
+pub copy struct SnapshotEpoch {
+    pub epoch_id: u32,
+    pub start_lamport_seq: u64,
+    pub arena_cow_offset: u64,
+}
+
+pub copy struct InOutWriteEvent {
+    pub lamport_seq: u64,
+    pub fiber_id: u64,
+    pub place_hash: u64,
+    pub span_id: u32,
+}
+
+pub copy struct TimelineQuery {
+    pub found: bool,
+    pub has_snapshot: bool,
+    pub snapshot: SnapshotEpoch,
+    pub write: InOutWriteEvent,
+    pub probes: u32,
+}
+
+pub struct ChronoTimelineIndex {
+    pub snapshots: ChunkSeq[SnapshotEpoch],
+    writes: ChunkSeq[InOutWriteEvent],
+    pub has_last_write: bool,
+    pub last_write_seq: u64,
+    pub write_count: u64,
+}
+
+pub fn empty_snapshot() -> SnapshotEpoch {
+    SnapshotEpoch {
+        epoch_id: 0,
+        start_lamport_seq: 0,
+        arena_cow_offset: 0,
+    }
+}
+
+pub fn empty_write() -> InOutWriteEvent {
+    InOutWriteEvent {
+        lamport_seq: 0,
+        fiber_id: 0,
+        place_hash: 0,
+        span_id: 0,
+    }
+}
+
+pub fn new_index() -> ChronoTimelineIndex {
+    ChronoTimelineIndex {
+        snapshots: ChunkSeq::new(),
+        writes: ChunkSeq::new(),
+        has_last_write: false,
+        last_write_seq: 0,
+        write_count: 0,
+    }
+}
+
+fn snap_at(in snaps: Slice[SnapshotEpoch], i: u64) -> SnapshotEpoch {
+    match snaps.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => empty_snapshot(),
+    }
+}
+
+fn write_at(in writes: Slice[InOutWriteEvent], i: u64) -> InOutWriteEvent {
+    match writes.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => empty_write(),
+    }
+}
+
+// Record one write. Returns 0 = Ok, 1 = DuplicateSeq, 2 = OutOfOrder.
+pub fn record_inout_write(inout idx: ChronoTimelineIndex, ev: InOutWriteEvent) -> u32 {
+    if idx.has_last_write {
+        if ev.lamport_seq == idx.last_write_seq {
+            return 1;
+        }
+        if ev.lamport_seq < idx.last_write_seq {
+            return 2;
+        }
+    }
+    idx.writes.push(ev);
+    idx.has_last_write = true;
+    idx.last_write_seq = ev.lamport_seq;
+    idx.write_count = wrapping_add(idx.write_count, 1);
+    0
+}
+
+// Record one snapshot epoch. Returns 0 = Ok, 3 = SnapshotOutOfOrder.
+pub fn record_snapshot(inout idx: ChronoTimelineIndex, epoch: SnapshotEpoch) -> u32 {
+    let n = idx.snapshots.len();
+    if n > 0 {
+        let prev = snap_at(in idx.snapshots.as_slice(), wrapping_sub(n, 1));
+        if epoch.epoch_id <= prev.epoch_id || epoch.start_lamport_seq <= prev.start_lamport_seq {
+            return 3;
+        }
+    }
+    idx.snapshots.push(epoch);
+    0
+}
+
+fn nearest_snapshot_probed(in snaps: Slice[SnapshotEpoch], seq: u64) -> (bool, SnapshotEpoch, u32) {
+    let mut lo: u64 = 0;
+    let mut hi: u64 = snaps.len();
+    let mut probes: u32 = 0;
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_shr_u64(wrapping_sub(hi, lo), 1));
+        probes = wrapping_add(probes, 1);
+        let probes_next = probes;
+        let _ = probes_next;
+        if snap_at(in snaps, mid).start_lamport_seq <= seq {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    if lo == 0 {
+        (false, empty_snapshot(), probes)
+    } else {
+        (true, snap_at(in snaps, wrapping_sub(lo, 1)), probes)
+    }
+}
+
+pub fn nearest_snapshot(in idx: ChronoTimelineIndex, seq: u64) -> Option[SnapshotEpoch] {
+    let (has, snap, _) = nearest_snapshot_probed(in idx.snapshots.as_slice(), seq);
+    if has {
+        Option::Some(snap)
+    } else {
+        Option::None
+    }
+}
+
+pub fn find_last_writer_before_probed(
+    in idx: ChronoTimelineIndex,
+    place_hash: u64,
+    before_seq: u64,
+) -> TimelineQuery {
+    let all = idx.writes.as_slice();
+    let mut place_writes: ChunkSeq[InOutWriteEvent] = ChunkSeq::new();
+    let mut i: u64 = 0;
+    loop {
+        if i >= all.len() {
+            break;
+        }
+        let w = write_at(in all, i);
+        if w.place_hash == place_hash {
+            place_writes.push(w);
+        }
+        i = wrapping_add(i, 1);
+    }
+    let writes = place_writes.as_slice();
+    if writes.len() == 0 {
+        return TimelineQuery {
+            found: false,
+            has_snapshot: false,
+            snapshot: empty_snapshot(),
+            write: empty_write(),
+            probes: 0,
+        };
+    }
+    let mut lo: u64 = 0;
+    let mut hi: u64 = writes.len();
+    let mut probes: u32 = 0;
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_shr_u64(wrapping_sub(hi, lo), 1));
+        probes = wrapping_u32(wrapping_add(widen_u64(probes), 1));
+        if write_at(in writes, mid).lamport_seq < before_seq {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    if lo == 0 {
+        TimelineQuery {
+            found: false,
+            has_snapshot: false,
+            snapshot: empty_snapshot(),
+            write: empty_write(),
+            probes: probes,
+        }
+    } else {
+        let target = write_at(in writes, wrapping_sub(lo, 1));
+        let (has_snap, snap, snap_probes) = nearest_snapshot_probed(
+            in idx.snapshots.as_slice(),
+            target.lamport_seq
+        );
+        TimelineQuery {
+            found: true,
+            has_snapshot: has_snap,
+            snapshot: snap,
+            write: target,
+            probes: wrapping_u32(wrapping_add(widen_u64(probes), widen_u64(snap_probes))),
+        }
+    }
+}
+
+// Stable insertion sort by `lamport_seq`, returning how many input positions moved.
+pub fn sort_writes_stable(inout writes: ChunkSeq[InOutWriteEvent]) -> u64 {
+    let n = writes.len();
+    let mut orig_seqs: ChunkSeq[u64] = ChunkSeq::new();
+    let mut k: u64 = 0;
+    loop {
+        if k >= n {
+            break;
+        }
+        orig_seqs.push(write_at(in writes.as_slice(), k).lamport_seq);
+        k = wrapping_add(k, 1);
+    }
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        let key = write_at(in writes.as_slice(), i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev = write_at(in writes.as_slice(), wrapping_sub(j, 1));
+            if prev.lamport_seq <= key.lamport_seq {
+                break;
+            }
+            let _ = writes.try_set(j, prev);
+            j = wrapping_sub(j, 1);
+        }
+        let _ = writes.try_set(j, key);
+        i = wrapping_add(i, 1);
+    }
+    let mut moved: u64 = 0;
+    let mut m: u64 = 0;
+    loop {
+        if m >= n {
+            break;
+        }
+        let orig = match orig_seqs.try_get(m) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if orig != write_at(in writes.as_slice(), m).lamport_seq {
+            moved = wrapping_add(moved, 1);
+        }
+        m = wrapping_add(m, 1);
+    }
+    moved
+}

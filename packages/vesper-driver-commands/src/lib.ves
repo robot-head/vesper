@@ -55,6 +55,9 @@ use self::forge::{
 use self::ebpf::{
     run_ebpf
 };
+use self::lint::{
+    run_lint
+};
 
 enum Ascii: _ {
     LineFeed = 10,
@@ -156,6 +159,9 @@ pub fn run(in args: Args)
     }
     if eq(in c, in "ebpf") {
         return run_ebpf(in args);
+    }
+    if eq(in c, in "lint") {
+        return run_lint(in args);
     }
     if eq(in c, in "verify") && has_arg(in args, in "--refute") {
         let found = locate(in "refute".as_bytes());

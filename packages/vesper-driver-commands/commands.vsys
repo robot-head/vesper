@@ -36,4 +36,14 @@ sys library HybridCommands (
     fn hc_forge_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
     fn hc_ebpf_check(nocapture in path: CSlice[u8], load: bool, disassemble: bool, budget: u64) -> ForeignVal[u64];
     fn hc_ebpf_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_lint_run(
+        has_path: bool,
+        nocapture in path: CSlice[u8],
+        fix: bool,
+        semver_safe: bool,
+        json: bool,
+        has_config: bool,
+        nocapture in config: CSlice[u8]
+    ) -> ForeignVal[u64];
+    fn hc_lint_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
 }

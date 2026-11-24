@@ -41,6 +41,8 @@ DIVERGENT = {
     "cose": ("cose", {"const COSE_SIGN1_TAG: u64 = 18;": "const COSE_SIGN1_TAG: u64 = 19;"}),
     "corim": ("corim", {"const CORIM_TAG: u64 = 501;": "const CORIM_TAG: u64 = 502;"}),
     "corim_cca": ("corim_cca", {"const CCA_IMPLEMENTATION_ID_LEN: u64 = 32;": "const CCA_IMPLEMENTATION_ID_LEN: u64 = 31;"}),
+    "gpa": ("gpa", {"if idx >= count || iv_start(in iv, idx) > s {": "if true {"}),
+    "host": ("host", {"if wrapping_sub(reported, prev) > max_step {": "if false {"}),
 }
 
 [

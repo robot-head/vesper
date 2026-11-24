@@ -653,6 +653,26 @@ pub fn probe_mono_check(module: &Module, identity: &PackageIdentity) -> Option<M
     Some(elab.probe_mono_check_step(&pass2, &world))
 }
 
+/// Differential reference oracle for `Frontend::add_dependency` and
+/// cross-package trait declaration validation (`#1725`).
+#[doc(hidden)]
+pub fn probe_deps_declarations(
+    module: &Module,
+    identity: &PackageIdentity,
+    dependencies: &[Dependency],
+) -> Vec<Diagnostic> {
+    let base = base_module(module);
+    let (base_world, _) = World::collect(&base);
+    let options = FrontendOptions {
+        dependencies: dependencies.to_vec(),
+        ..FrontendOptions::default()
+    };
+    match Frontend::with_base(module, base, base_world, identity, &options) {
+        Ok(fe) => fe.diagnostics,
+        Err(diags) => diags,
+    }
+}
+
 /// Differential reference oracle for `builtin_traits::wanted` (`#1719`).
 #[doc(hidden)]
 pub fn builtin_traits_wanted(module: &Module) -> bool {
