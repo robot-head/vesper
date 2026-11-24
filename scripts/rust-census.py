@@ -54,7 +54,7 @@ CRATES = {
     "vesper-warp-wheel": ("partial", "in crate", "1.73-1.77x", "speed only", "4"),
     "vesper-prism": ("gone", "in crate", "0.96-1.34x", "", "5"),
     "vesper-prism-h3": ("partial", "in crate", "connection 0.97x, session 0.94x, core 0.99-1.36x", "protocol core and connection/client/session state machines flipped (part 3b); RoleCore Transport I/O glue and Warp adapter stay Rust", "5"),
-    "vesper-quarry": ("partial", "in crate", "1.39x, page 1.00x, wal 1.14x", "SQL front end, optimizer, row executor, access planner, slotted-page codec, and WAL record/header codec flipped to Vesper (#1739 + #1748; CRC32C table stays Rust); buffer pool, vectorized executor, WAL I/O/recovery left", "6"),
+    "vesper-quarry": ("partial", "in crate", "1.39x, page 1.00x, wal 1.14x, internal 1.42x", "SQL front end, optimizer, row executor, access planner, slotted-page codec, WAL record/header codec, and B+Tree internal node route/check flipped to Vesper (#1739 + #1748 + #1754; CRC32C table stays Rust); buffer pool, vectorized executor, PAX leaf/WAL I/O left", "6"),
     "vesper-flux": ("partial", "in crate", "unmeasured", "CDC, Kafka wire, durable state, cluster driver", "6"),
     "vesper-ignis": ("partial", "in crate", "0.68-3.1x", "build 2.5x, lower 2.7-3.1x", "7"),
     "vesper-grammar": ("partial", "in crate", "4.7-6.3x", "speed", "7"),

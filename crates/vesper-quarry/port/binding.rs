@@ -761,6 +761,8 @@ unsafe extern "C" {
     fn vesper_quarry_access_paths(result: *mut u64, prog: *mut u64, text: *mut u64) -> i64;
     fn vesper_quarry_ddl_apply(result: *mut u64, meta: *mut u64, text: *mut u64, revision: i64, sql: *mut u64, limits: *mut u64) -> i64;
     fn vesper_quarry_execute(result: *mut u64, prog: *mut u64, text: *mut u64) -> i64;
+    fn vesper_quarry_internal_check(b: *mut u64) -> i64;
+    fn vesper_quarry_internal_route(b: *mut u64, rowid: i64, inv_ts: i64) -> i64;
     fn vesper_quarry_optimize(result: *mut u64, plan: *mut u64) -> i64;
     fn vesper_quarry_page_insert(b: *mut u64, record: *mut u64) -> i64;
     fn vesper_quarry_page_update(b: *mut u64, slot: i64, record: *mut u64, scratch: *mut u64) -> i64;
@@ -813,6 +815,24 @@ pub fn execute(prog: &[u64], text: &[u8]) -> Q {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(prog, |view_prog| vesper_port_abi::with_slice(text, |view_text| unsafe { vesper_quarry_execute(result.as_mut_ptr(), view_prog, view_text) }));
     unsafe { Q::from_words(&result[0..]) }
+}
+
+/// Calls `internal_check` of the Vesper library `quarry` (`vesper_quarry_internal_check`).
+pub fn internal_check(b: &[u8]) -> u64 {
+    // SAFETY: `vesper_quarry_internal_check` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_quarry_internal_check(view_b) });
+    raw as u64
+}
+
+/// Calls `internal_route` of the Vesper library `quarry` (`vesper_quarry_internal_route`).
+pub fn internal_route(b: &[u8], rowid: u64, inv_ts: u64) -> u64 {
+    // SAFETY: `vesper_quarry_internal_route` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_quarry_internal_route(view_b, rowid as i64, inv_ts as i64) });
+    raw as u64
 }
 
 /// Calls `optimize` of the Vesper library `quarry` (`vesper_quarry_optimize`).
