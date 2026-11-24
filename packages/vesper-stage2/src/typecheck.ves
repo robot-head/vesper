@@ -1,0 +1,1620 @@
+// Stage 2 expression type-checker: populates `World.expr_types` (sorted by
+// `(start, end)`) for `@vesper/place-ir-lower::ast::Ast` using
+// `@vesper/check-data` and `@vesper/check-core-typing`.
+
+use @vesper/wasm-backend::tables::{
+    stage2_heap_mark,
+    stage2_heap_reset,
+    stage2_heap_swap
+};
+use @vesper/check-core-typing::relations::{
+    infer
+};
+use @vesper/check-data::names::{
+    Names,
+    names_new
+};
+use @vesper/check-data::types::{
+    TyKind,
+    Types,
+    Vars,
+    types_new,
+    default_type,
+    substitute,
+    vars_new
+};
+use @vesper/check-data::util::{
+    n32,
+    u32_at,
+    u64_at,
+    w
+};
+use @vesper/check-data::world::{
+    Known,
+    SpanRow,
+    World,
+    constructor,
+    field_step,
+    world_new
+};
+use @vesper/place-ir::codes::{
+    Lit,
+    Pat
+};
+use @vesper/wasm-backend::ir::{
+    CallRow,
+    Pair
+};
+use @vesper/place-ir-lower::ast::{
+    Ast,
+    Ex,
+    FnR,
+    Pm,
+    Pt
+};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+
+const X_LITERAL: u8 = 1;
+const X_NAME: u8 = 2;
+const X_TUPLE: u8 = 3;
+const X_STRUCT: u8 = 4;
+const X_FIELD: u8 = 5;
+const X_INDEX: u8 = 6;
+const X_UNARY: u8 = 7;
+const X_BINARY: u8 = 8;
+const X_ASSIGN: u8 = 9;
+const X_BLOCK: u8 = 10;
+const X_CALL: u8 = 11;
+const X_TRY: u8 = 12;
+const X_IF: u8 = 13;
+const X_MATCH: u8 = 14;
+const X_LOOP: u8 = 15;
+const X_FOR: u8 = 16;
+const X_RANGE: u8 = 17;
+const X_BREAK: u8 = 18;
+const X_CONTINUE: u8 = 19;
+const X_RETURN: u8 = 20;
+const X_HANDLE: u8 = 22;
+
+copy struct Binding {
+    name: u32,
+    ty: u32,
+}
+
+struct Tc {
+    names: Names,
+    types: Types,
+    world: World,
+    env: ChunkSeq[Binding],
+    marks: ChunkSeq[u64],
+    spans: ChunkSeq[SpanRow],
+    infer_ty: u32,
+    ret_ty: u32,
+    unit_ty: u32,
+    bool_ty: u32,
+    i64_ty: u32,
+    u64_ty: u32,
+    f64_ty: u32,
+    str_ty: u32,
+    never_ty: u32,
+    calls: ChunkSeq[CallRow],
+    pairs: ChunkSeq[Pair],
+    scratch1: ChunkSeq[u32],
+}
+
+fn tc_new(sink names: Names, sink types: Types, sink world: World) -> Tc {
+    let empty = ChunkSeq::new[u32]();
+    let empty_p = ChunkSeq::new[u8]();
+    let mut t = types;
+    let mut n = names;
+    let infer_ty = t.mk_with(TyKind::Infer, 0, 0, in empty, in empty_p, 0, 0, 0);
+    let unit_ty = t.named0(world.k.unit);
+    let bool_ty = t.named0(world.k.bool_);
+    let i64_ty = t.named0(world.k.i64_);
+    let u64_ty = t.named0(world.k.u64_);
+    let f64_ty = t.named0(world.k.f64_);
+    let str_ty = t.named0(world.k.str_);
+    let never_ty = t.named0(world.k.never);
+    Tc {
+        names: n,
+        types: t,
+        world: world,
+        env: ChunkSeq::new[Binding](),
+        marks: ChunkSeq::new[u64](),
+        spans: ChunkSeq::new[SpanRow](),
+        infer_ty: infer_ty,
+        ret_ty: infer_ty,
+        unit_ty: unit_ty,
+        bool_ty: bool_ty,
+        i64_ty: i64_ty,
+        u64_ty: u64_ty,
+        f64_ty: f64_ty,
+        str_ty: str_ty,
+        never_ty: never_ty,
+        calls: ChunkSeq::new[CallRow](),
+        pairs: ChunkSeq::new[Pair](),
+        scratch1: ChunkSeq::new[u32]()
+    }
+}
+
+fn named1(inout tc: Tc, name: u32, a0: u32) -> u32 {
+    tc.scratch1.clear();
+    tc.scratch1.push(a0);
+    tc.types.named(name, in tc.scratch1)
+}
+
+fn push_scope(inout tc: Tc) {
+    tc.marks.push(tc.env.len());
+}
+
+fn pop_scope(inout tc: Tc) {
+    if tc.marks.len() > 0 {
+        let top = wrapping_sub(tc.marks.len(), 1);
+        match tc.marks.try_get(top) {
+            Option::Some(n) => tc.env.truncate(n),
+            Option::None => {},
+        }
+        tc.marks.truncate(top);
+    }
+}
+
+fn bind_var(inout tc: Tc, name: u32, ty: u32) {
+    tc
+        .env
+        .push(
+            Binding {
+                name: name,
+                ty: ty
+            }
+        );
+}
+
+fn lookup_var(in tc: Tc, name: u32) -> u32 {
+    let mut i = tc.env.len();
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        match tc.env.try_get(i) {
+            Option::Some(b) => {
+                if b.name == name {
+                    return b.ty;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    NONE32
+}
+
+fn find_fn(in a: Ast, name: u32) -> Option[FnR] {
+    if w(name) < a.fn_by_key.len() {
+        let idx = u32_at(in a.fn_by_key, w(name));
+        if idx != 0 {
+            return a.fns.try_get(wrapping_sub(w(idx), 1));
+        }
+    }
+    Option::None
+}
+
+fn find_eop_result(in a: Ast, inout names: Names, cname: u32) -> u32 {
+    let (ename, opname) = split_last_colon(inout names, cname);
+    if ename == NONE32 || w(ename) >= a.eff_by_name.len() {
+        return NONE32;
+    }
+    let idx = u32_at(in a.eff_by_name, w(ename));
+    if idx == 0 {
+        return NONE32;
+    }
+    match a.effs.try_get(wrapping_sub(w(idx), 1)) {
+        Option::Some(ef) => {
+            for oi in 0..ef.on {
+                match a.eops.try_get(wrapping_add(ef.oa, oi)) {
+                    Option::Some(op) => {
+                        if op.name == opname {
+                            return op.result;
+                        }
+                    },
+                    Option::None => {},
+                }
+            }
+            NONE32
+        },
+        Option::None => NONE32,
+    }
+}
+
+fn record_span(inout tc: Tc, s0: u64, s1: u64, ty: u32) {
+    if s0 == 0 && s1 == 0 {
+        return;
+    }
+    let dt = default_type(inout tc.types, ty);
+    tc
+        .spans
+        .push(
+            SpanRow {
+                start: s0,
+                end: s1,
+                ty: dt
+            }
+        );
+}
+
+fn split_last_colon(inout names: Names, sym: u32) -> (u32, u32) {
+    let n = names.size(sym);
+    let mut split: u64 = NONE64;
+    let mut i: u64 = 0;
+    loop {
+        if wrapping_add(i, 1) >= n {
+            break;
+        }
+        if names.byte(sym, i) == 58 && names.byte(sym, wrapping_add(i, 1)) == 58 {
+            split = i;
+        }
+        i = wrapping_add(i, 1);
+    }
+    if split == NONE64 {
+        return (NONE32, sym);
+    }
+    let mut qb = ChunkSeq::new[u8]();
+    qb.reserve(split);
+    for k in 0..split {
+        qb.push(names.byte(sym, k));
+    }
+    let mut sb = ChunkSeq::new[u8]();
+    let s0 = wrapping_add(split, 2);
+    sb.reserve(wrapping_sub(n, s0));
+    for k in s0..n {
+        sb.push(names.byte(sym, k));
+    }
+    (names.intern(in qb.as_slice()), names.intern(in sb.as_slice()))
+}
+
+fn ctor_info(inout tc: Tc, cname: u32, dt: u32) -> (u32, u64, Vars) {
+    let (q_from_name, short) = split_last_colon(inout tc.names, cname);
+    let qual = if q_from_name != NONE32 {
+        q_from_name
+    } else if tc.types.kind(dt) == TyKind::Named {
+        tc.types.name(dt)
+    } else {
+        NONE32
+    };
+    let mut res = constructor(in tc.world, qual, short);
+    if res == NONE64 && qual != NONE32 {
+        res = constructor(in tc.world, NONE32, short);
+    }
+    if res == NONE64 {
+        return (NONE32, 0, vars_new());
+    }
+    let mut vars = vars_new();
+    let adt = n32(wrapping_shr_u64(res, 32));
+    let vi = res & 4294967295;
+    let a = tc.world.adt(adt);
+    if tc.types.kind(dt) == TyKind::Named && tc.types.name(dt) == a.name {
+        let ar = tc.types.arity(dt);
+        for gi in 0..w(a.gn) {
+            if gi < ar {
+                let gn = tc.world.generic(wrapping_add(w(a.ga), gi));
+                vars.set(gn.name, tc.types.arg(dt, gi));
+            }
+        }
+    }
+    (adt, vi, vars)
+}
+
+fn bind_pat(inout tc: Tc, in a: Ast, pid: u64, ty: u32) {
+    let p = match a.pts.try_get(pid) {
+        Option::Some(v) => v,
+        Option::None => return,
+    };
+    if p.kind == Pat::Bind {
+        bind_var(inout tc, n32(p.a), ty);
+        return;
+    }
+    if p.kind == Pat::Tuple {
+        let dt = default_type(inout tc.types, ty);
+        for i in 0..p.n {
+            let sub = u64_at(in a.pxs, wrapping_add(p.b, i));
+            let et = if tc.types.kind(dt) == TyKind::Tuple && i < tc.types.arity(dt) {
+                tc.types.arg(dt, i)
+            } else {
+                tc.infer_ty
+            };
+            bind_pat(inout tc, in a, sub, et);
+        }
+        return;
+    }
+    if p.kind == Pat::Constructor {
+        let dt = default_type(inout tc.types, ty);
+        let (adt, vi, vars) = ctor_info(inout tc, n32(p.a), dt);
+        if adt != NONE32 {
+            let v = tc.world.variant(vi);
+            for i in 0..p.n {
+                let fnm = n32(u64_at(in a.pxs, wrapping_add(p.b, wrapping_mul(i, 2))));
+                let sub = u64_at(in a.pxs, wrapping_add(p.b, wrapping_add(wrapping_mul(i, 2), 1)));
+                let mut fty = tc.infer_ty;
+                for fj in 0..w(v.fc) {
+                    let f = tc.world.field(wrapping_add(w(v.fa), fj));
+                    if (p.c != 0 && f.name == fnm) || (p.c == 0 && fj == i) {
+                        fty = substitute(inout tc.types, f.ty, in vars);
+                        break;
+                    }
+                }
+                bind_pat(inout tc, in a, sub, fty);
+            }
+        }
+    }
+}
+
+fn is_op(in tc: Tc, sym: u32, in lit: Str) -> bool {
+    let b = lit.as_bytes();
+    if tc.names.size(sym) != b.len() {
+        return false;
+    }
+    for i in 0..b.len() {
+        let c = match b.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if tc.names.byte(sym, i) != c {
+            return false;
+        }
+    }
+    true
+}
+
+fn join_method_sym(inout names: Names, tname: u32, mname: u32) -> u32 {
+    let mut buf = ChunkSeq::new[u8]();
+    buf.reserve(wrapping_add(wrapping_add(names.size(tname), names.size(mname)), 2));
+    for i in 0..names.size(tname) {
+        buf.push(names.byte(tname, i));
+    }
+    buf.push(58);
+    buf.push(58);
+    for i in 0..names.size(mname) {
+        buf.push(names.byte(mname, i));
+    }
+    names.intern(in buf.as_slice())
+}
+
+fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: Ex) -> u32 {
+    if f.gn == 0 {
+        let p_off: u64 = if receiver_ty != NONE32 {
+            1
+        } else {
+            0
+        };
+        for ai in 0..e.n {
+            let av = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(ai, 2), 1)));
+            let pi = wrapping_add(ai, p_off);
+            let pt = if pi < f.pn {
+                match a.pms.try_get(wrapping_add(f.pa, pi)) {
+                    Option::Some(pm) => pm.ty,
+                    Option::None => tc.infer_ty,
+                }
+            } else {
+                tc.infer_ty
+            };
+            let _at = check_expr(inout tc, in a, av, pt);
+        }
+        record_span(inout tc, ce.s0, ce.s1, f.result);
+        record_span(inout tc, e.s0, e.s1, f.result);
+        return f.result;
+    }
+    let mut vars = vars_new();
+    let mut gnames = ChunkSeq::new[u32]();
+    for gi in 0..f.gn {
+        match a.gens.try_get(wrapping_add(f.ga, gi)) {
+            Option::Some(gn) => {
+                gnames.push(gn.name);
+                if gi < e.m {
+                    let ta = n32(u64_at(in a.xs, wrapping_add(e.c, gi)));
+                    vars.set(gn.name, ta);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    let has_recv = receiver_ty != NONE32;
+    let mut p_off: u64 = 0;
+    if has_recv && f.pn > 0 {
+        match a.pms.try_get(f.pa) {
+            Option::Some(pm0) => {
+                if f.gn > 0 && e.m == 0 {
+                    infer(inout tc.types, tc.world.k, pm0.ty, receiver_ty, in gnames, inout vars);
+                }
+            },
+            Option::None => {},
+        }
+        p_off = 1;
+    }
+    for ai in 0..e.n {
+        let av = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(ai, 2), 1)));
+        let pi = wrapping_add(ai, p_off);
+        let mut pt = tc.infer_ty;
+        if pi < f.pn {
+            match a.pms.try_get(wrapping_add(f.pa, pi)) {
+                Option::Some(pm) => {
+                    pt = substitute(inout tc.types, pm.ty, in vars);
+                    let at = check_expr(inout tc, in a, av, pt);
+                    if f.gn > 0 && e.m == 0 {
+                        infer(inout tc.types, tc.world.k, pm.ty, at, in gnames, inout vars);
+                    }
+                },
+                Option::None => {
+                    let _at = check_expr(inout tc, in a, av, pt);
+                },
+            }
+        } else {
+            let _at = check_expr(inout tc, in a, av, pt);
+        }
+    }
+    if f.gn > 0 {
+        let v0 = tc.pairs.len();
+        let mut vn: u64 = 0;
+        for gi in 0..gnames.len() {
+            let gn = u32_at(in gnames, gi);
+            let vty = vars.get(gn);
+            if vty != NONE32 {
+                tc
+                    .pairs
+                    .push(
+                        Pair {
+                            name: gn,
+                            ty: vty
+                        }
+                    );
+                vn = wrapping_add(vn, 1);
+            }
+        }
+        if vn > 0 {
+            tc
+                .calls
+                .push(
+                    CallRow {
+                        s0: e.s0,
+                        s1: e.s1,
+                        v0: v0,
+                        vn: vn
+                    }
+                );
+        }
+    }
+    let rty = substitute(inout tc.types, f.result, in vars);
+    record_span(inout tc, ce.s0, ce.s1, rty);
+    record_span(inout tc, e.s0, e.s1, rty);
+    rty
+}
+
+fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
+    if eid == NONE64 {
+        return tc.unit_ty;
+    }
+    let e = match a.exs.try_get(eid) {
+        Option::Some(v) => v,
+        Option::None => return tc.unit_ty,
+    };
+    let ty = if e.kind == X_LITERAL {
+        if e.a == Lit::Bool {
+            tc.bool_ty
+        } else if e.a == Lit::Float {
+            tc.f64_ty
+        } else if e.a == Lit::String {
+            if expected == tc.types.named0(tc.world.k.string) {
+                expected
+            } else {
+                tc.str_ty
+            }
+        } else if tc.types.kind(expected) == TyKind::Named
+            && tc.world.k.is_integer(tc.types.name(expected)) {
+            expected
+        } else if e.a == Lit::Int && e.b > 9223372036854775807 && e.c == 0 {
+            tc.u64_ty
+        } else {
+            tc.i64_ty
+        }
+    } else if e.kind == X_NAME {
+        let nm = n32(e.a);
+        let lv = lookup_var(in tc, nm);
+        if lv != NONE32 {
+            lv
+        } else {
+            let dt = default_type(inout tc.types, expected);
+            let (adt, _vi, _vars) = ctor_info(inout tc, nm, dt);
+            if adt != NONE32 {
+                if tc.types.kind(dt) == TyKind::Named {
+                    dt
+                } else {
+                    tc.types.named0(tc.world.adt(adt).name)
+                }
+            } else {
+                expected
+            }
+        }
+    } else if e.kind == X_TUPLE {
+        let mut elems = ChunkSeq::new[u32]();
+        elems.reserve(e.n);
+        let dt = default_type(inout tc.types, expected);
+        for i in 0..e.n {
+            let sub = u64_at(in a.xs, wrapping_add(e.a, i));
+            let exp_i = if tc.types.kind(dt) == TyKind::Tuple && i < tc.types.arity(dt) {
+                tc.types.arg(dt, i)
+            } else {
+                expected
+            };
+            elems.push(check_expr(inout tc, in a, sub, exp_i));
+        }
+        tc.types.tuple(in elems)
+    } else if e.kind == X_STRUCT {
+        let nm = n32(e.a);
+        let dt = default_type(inout tc.types, expected);
+        let (adt, vi, vars) = ctor_info(inout tc, nm, dt);
+        for i in 0..e.n {
+            let fnm = n32(u64_at(in a.xs, wrapping_add(e.b, wrapping_mul(i, 2))));
+            let sub = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)));
+            let mut fty = tc.infer_ty;
+            if adt != NONE32 {
+                let v = tc.world.variant(vi);
+                for fj in 0..w(v.fc) {
+                    let f = tc.world.field(wrapping_add(w(v.fa), fj));
+                    if f.name == fnm {
+                        fty = substitute(inout tc.types, f.ty, in vars);
+                        break;
+                    }
+                }
+            }
+            let _t = check_expr(inout tc, in a, sub, fty);
+        }
+        if adt != NONE32
+            && tc.types.kind(dt) == TyKind::Named
+            && tc.types.name(dt) == tc.world.adt(adt).name {
+            dt
+        } else if adt != NONE32 {
+            tc.types.named0(tc.world.adt(adt).name)
+        } else {
+            tc.types.named0(nm)
+        }
+    } else if e.kind == X_FIELD {
+        let bt = check_expr(inout tc, in a, e.a, tc.infer_ty);
+        let ft = field_step(inout tc.types, inout tc.names, in tc.world, bt, n32(e.b), false);
+        if ft == NONE32 {
+            expected
+        } else {
+            ft
+        }
+    } else if e.kind == X_INDEX {
+        let bt = check_expr(inout tc, in a, e.a, tc.infer_ty);
+        let _it = check_expr(inout tc, in a, e.b, tc.infer_ty);
+        let is_rng = match a.exs.try_get(e.b) {
+            Option::Some(ix) => ix.kind == X_RANGE
+                || (ix.kind == X_BINARY && tc.names.spells(n32(ix.a), in "..".as_bytes())),
+            Option::None => false,
+        };
+        if is_rng && tc.types.arity(bt) > 0 {
+            let sl_nm = tc.names.intern(in "Slice".as_bytes());
+            named1(inout tc, sl_nm, tc.types.arg(bt, 0))
+        } else if tc.types.arity(bt) > 0 {
+            tc.types.arg(bt, 0)
+        } else if is_rng && (bt == tc.str_ty || bt == tc.types.named0(tc.world.k.string)) {
+            tc.str_ty
+        } else {
+            expected
+        }
+    } else if e.kind == X_UNARY {
+        let op = n32(e.a);
+        if is_op(in tc, op, in "!") {
+            let _t = check_expr(inout tc, in a, e.b, tc.bool_ty);
+            tc.bool_ty
+        } else if is_op(in tc, op, in "widen_u64") || is_op(in tc, op, in "wrapping_u64") {
+            let _t = check_expr(inout tc, in a, e.b, tc.infer_ty);
+            tc.u64_ty
+        } else if is_op(in tc, op, in "widen_i64") || is_op(in tc, op, in "wrapping_i64") {
+            let _t = check_expr(inout tc, in a, e.b, tc.infer_ty);
+            tc.i64_ty
+        } else if is_op(in tc, op, in "widen_u128") || is_op(in tc, op, in "wrapping_u128") {
+            let _t = check_expr(inout tc, in a, e.b, tc.infer_ty);
+            tc.types.named0(tc.world.k.u128_)
+        } else if is_op(in tc, op, in "widen_i128") || is_op(in tc, op, in "wrapping_i128") {
+            let _t = check_expr(inout tc, in a, e.b, tc.infer_ty);
+            tc.types.named0(tc.world.k.i128_)
+        } else if is_op(in tc, op, in "wrapping_u32")
+            || is_op(in tc, op, in "narrow_u32")
+            || is_op(in tc, op, in "widen_u32") {
+            let _t = check_expr(inout tc, in a, e.b, tc.infer_ty);
+            tc.types.named0(tc.world.k.u32_)
+        } else if is_op(in tc, op, in "wrapping_u8") || is_op(in tc, op, in "narrow_u8") {
+            let _t = check_expr(inout tc, in a, e.b, tc.infer_ty);
+            tc.types.named0(tc.world.k.u8_)
+        } else {
+            check_expr(inout tc, in a, e.b, expected)
+        }
+    } else if e.kind == X_BINARY {
+        let op = n32(e.a);
+        if is_op(in tc, op, in "==")
+            || is_op(in tc, op, in "!=")
+            || is_op(in tc, op, in "<")
+            || is_op(in tc, op, in ">")
+            || is_op(in tc, op, in "<=")
+            || is_op(in tc, op, in ">=")
+            || is_op(in tc, op, in "&&")
+            || is_op(in tc, op, in "||") {
+            let lt = check_expr(inout tc, in a, e.b, tc.infer_ty);
+            let _rt = check_expr(inout tc, in a, e.c, lt);
+            tc.bool_ty
+        } else {
+            let lt = check_expr(inout tc, in a, e.b, expected);
+            let rt = check_expr(inout tc, in a, e.c, lt);
+            if tc.types.kind(lt) == TyKind::Infer {
+                rt
+            } else {
+                lt
+            }
+        }
+    } else if e.kind == X_ASSIGN {
+        let lt = check_expr(inout tc, in a, e.b, tc.infer_ty);
+        let _rt = check_expr(inout tc, in a, e.c, lt);
+        tc.unit_ty
+    } else if e.kind == X_BLOCK {
+        push_scope(inout tc);
+        for i in 0..e.n {
+            let is_let = u64_at(in a.xs, wrapping_add(e.a, wrapping_mul(i, 3)));
+            let pt = u64_at(in a.xs, wrapping_add(e.a, wrapping_add(wrapping_mul(i, 3), 1)));
+            let val = u64_at(in a.xs, wrapping_add(e.a, wrapping_add(wrapping_mul(i, 3), 2)));
+            let mut exp = tc.infer_ty;
+            if is_let != 0 {
+                match a.pts.try_get(pt) {
+                    Option::Some(pv) => {
+                        if pv.kind != Pat::Literal && pv.kind != Pat::Constructor && pv.c > 0 {
+                            let ann = n32(wrapping_sub(pv.c, 1));
+                            if tc.types.kind(ann) != TyKind::Infer {
+                                exp = ann;
+                            }
+                        }
+                    },
+                    Option::None => {},
+                }
+            }
+            let vt = check_expr(inout tc, in a, val, exp);
+            if is_let != 0 {
+                bind_pat(inout tc, in a, pt, vt);
+            }
+        }
+        let tail_ty = if e.b == NONE64 {
+            tc.unit_ty
+        } else {
+            check_expr(inout tc, in a, e.b, expected)
+        };
+        pop_scope(inout tc);
+        tail_ty
+    } else if e.kind == X_IF {
+        let _ct = check_expr(inout tc, in a, e.a, tc.bool_ty);
+        let tt = check_expr(inout tc, in a, e.b, expected);
+        if e.c == NONE64 {
+            tc.unit_ty
+        } else {
+            let exp_e = if tt == tc.never_ty {
+                expected
+            } else {
+                tt
+            };
+            let et = check_expr(inout tc, in a, e.c, exp_e);
+            if tt == tc.never_ty || tc.types.kind(tt) == TyKind::Infer {
+                et
+            } else {
+                tt
+            }
+        }
+    } else if e.kind == X_MATCH {
+        let vt = check_expr(inout tc, in a, e.a, tc.infer_ty);
+        let mut res = expected;
+        for i in 0..e.n {
+            let pt = u64_at(in a.xs, wrapping_add(e.b, wrapping_mul(i, 2)));
+            let body = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)));
+            push_scope(inout tc);
+            bind_pat(inout tc, in a, pt, vt);
+            let exp_b = if res == tc.never_ty {
+                expected
+            } else {
+                res
+            };
+            let bt = check_expr(inout tc, in a, body, exp_b);
+            if (tc.types.kind(res) == TyKind::Infer || res == tc.never_ty) && bt != tc.never_ty {
+                res = bt;
+            }
+            pop_scope(inout tc);
+        }
+        res
+    } else if e.kind == X_LOOP {
+        let _bt = check_expr(inout tc, in a, e.a, tc.unit_ty);
+        expected
+    } else if e.kind == X_FOR {
+        let it = check_expr(inout tc, in a, e.b, tc.infer_ty);
+        push_scope(inout tc);
+        bind_pat(inout tc, in a, e.a, it);
+        let _bt = check_expr(inout tc, in a, e.c, tc.unit_ty);
+        pop_scope(inout tc);
+        tc.unit_ty
+    } else if e.kind == X_RANGE {
+        let st = check_expr(inout tc, in a, e.a, tc.u64_ty);
+        let _en = check_expr(inout tc, in a, e.b, st);
+        st
+    } else if e.kind == X_BREAK {
+        if e.a != NONE64 {
+            let _vt = check_expr(inout tc, in a, e.a, tc.infer_ty);
+        }
+        tc.never_ty
+    } else if e.kind == X_RETURN {
+        if e.a != NONE64 {
+            let _vt = check_expr(inout tc, in a, e.a, tc.ret_ty);
+        }
+        tc.never_ty
+    } else if e.kind == X_CONTINUE {
+        tc.never_ty
+    } else if e.kind == X_HANDLE {
+        match a.hds.try_get(e.a) {
+            Option::Some(h) => {
+                if h.has_state {
+                    let st = check_expr(inout tc, in a, h.sexpr, tc.infer_ty);
+                    bind_pat(inout tc, in a, h.spat, st);
+                }
+                let bt = check_expr(inout tc, in a, h.body, expected);
+                let mut rt = expected;
+                match a.cls.try_get(h.ret) {
+                    Option::Some(rc) => {
+                        push_scope(inout tc);
+                        if rc.pn > 0 {
+                            bind_pat(inout tc, in a, u64_at(in a.xs, rc.pa), bt);
+                        }
+                        rt = check_expr(inout tc, in a, rc.body, expected);
+                        pop_scope(inout tc);
+                    },
+                    Option::None => {},
+                }
+                for oi in 0..h.on {
+                    match a.cls.try_get(wrapping_add(h.ret, wrapping_add(oi, 1))) {
+                        Option::Some(oc) => {
+                            push_scope(inout tc);
+                            for pi in 0..oc.pn {
+                                let pty = if pi == 0 && h.tn > 0 {
+                                    n32(u64_at(in a.xs, h.ta))
+                                } else {
+                                    tc.infer_ty
+                                };
+                                bind_pat(
+                                    inout tc,
+                                    in a,
+                                    u64_at(in a.xs, wrapping_add(oc.pa, pi)),
+                                    pty
+                                );
+                            }
+                            let _ot = check_expr(inout tc, in a, oc.body, rt);
+                            pop_scope(inout tc);
+                        },
+                        Option::None => {},
+                    }
+                }
+                rt
+            },
+            Option::None => expected,
+        }
+    } else if e.kind == X_CALL {
+        match a.exs.try_get(e.a) {
+            Option::Some(ce) => {
+                if ce.kind == X_NAME {
+                    let cname = n32(ce.a);
+                    let fn_opt = match find_fn(in a, cname) {
+                        Option::Some(f) => Option::Some(f),
+                        Option::None => {
+                            let (qf, sf) = split_last_colon(inout tc.names, cname);
+                            if qf != NONE32 {
+                                find_fn(in a, sf)
+                            } else {
+                                Option::None
+                            }
+                        },
+                    };
+                    match fn_opt {
+                        Option::Some(f) => {
+                            return check_fn_call(inout tc, in a, f, NONE32, e, ce);
+                        },
+                        Option::None => {
+                            let is_builtin = is_op(in tc, cname, in "widen_u64")
+                                || is_op(in tc, cname, in "wrapping_u64")
+                                || is_op(in tc, cname, in "widen_i64")
+                                || is_op(in tc, cname, in "wrapping_i64")
+                                || is_op(in tc, cname, in "wrapping_u32")
+                                || is_op(in tc, cname, in "narrow_u32")
+                                || is_op(in tc, cname, in "widen_u32")
+                                || is_op(in tc, cname, in "inc32")
+                                || is_op(in tc, cname, in "wrapping_u8")
+                                || is_op(in tc, cname, in "narrow_u8")
+                                || is_op(in tc, cname, in "widen_u128")
+                                || is_op(in tc, cname, in "wrapping_u128")
+                                || is_op(in tc, cname, in "widen_i128")
+                                || is_op(in tc, cname, in "wrapping_i128")
+                                || is_op(in tc, cname, in "wrapping_add")
+                                || is_op(in tc, cname, in "wrapping_sub")
+                                || is_op(in tc, cname, in "wrapping_mul")
+                                || is_op(in tc, cname, in "wrapping_div")
+                                || is_op(in tc, cname, in "wrapping_rem")
+                                || is_op(in tc, cname, in "wrapping_shl_u64")
+                                || is_op(in tc, cname, in "wrapping_shr_u64")
+                                || is_op(in tc, cname, in "shr")
+                                || is_op(in tc, cname, in "shl")
+                                || is_op(in tc, cname, in "rotate_left")
+                                || is_op(in tc, cname, in "rotate_right")
+                                || is_op(in tc, cname, in "inc")
+                                || is_op(in tc, cname, in "dec")
+                                || is_op(in tc, cname, in "add")
+                                || is_op(in tc, cname, in "sub")
+                                || is_op(in tc, cname, in "mul")
+                                || is_op(in tc, cname, in "div")
+                                || is_op(in tc, cname, in "rem")
+                                || is_op(in tc, cname, in "min_u64")
+                                || is_op(in tc, cname, in "max_u64");
+                            let dt = if is_builtin {
+                                tc.infer_ty
+                            } else {
+                                default_type(inout tc.types, expected)
+                            };
+                            let (adt, vi, vars0) = if is_builtin {
+                                (NONE32, 0, vars_new())
+                            } else {
+                                ctor_info(inout tc, cname, dt)
+                            };
+                            let mut vars = vars0;
+                            let mut gnames = ChunkSeq::new[u32]();
+                            if adt != NONE32 {
+                                let ad = tc.world.adt(adt);
+                                for gi in 0..w(ad.gn) {
+                                    let gn = tc.world.generic(wrapping_add(w(ad.ga), gi));
+                                    gnames.push(gn.name);
+                                    if gi < e.m {
+                                        let ta = n32(u64_at(in a.xs, wrapping_add(e.c, gi)));
+                                        vars.set(gn.name, ta);
+                                    }
+                                }
+                            }
+                            let mut arg0_ty = tc.infer_ty;
+                            for ai in 0..e.n {
+                                let av = u64_at(
+                                    in a.xs,
+                                    wrapping_add(e.b, wrapping_add(wrapping_mul(ai, 2), 1))
+                                );
+                                let mut pt = tc.infer_ty;
+                                let mut fty_raw = tc.infer_ty;
+                                if adt == NONE32
+                                    && (
+                                        is_op(in tc, cname, in "wrapping_add")
+                                            || is_op(in tc, cname, in "wrapping_sub")
+                                            || is_op(in tc, cname, in "wrapping_mul")
+                                            || is_op(in tc, cname, in "wrapping_div")
+                                            || is_op(in tc, cname, in "wrapping_rem")
+                                            || is_op(in tc, cname, in "wrapping_shl_u64")
+                                            || is_op(in tc, cname, in "wrapping_shr_u64")
+                                            || is_op(in tc, cname, in "shr")
+                                            || is_op(in tc, cname, in "shl")
+                                            || is_op(in tc, cname, in "rotate_left")
+                                            || is_op(in tc, cname, in "rotate_right")
+                                            || is_op(in tc, cname, in "add")
+                                            || is_op(in tc, cname, in "sub")
+                                            || is_op(in tc, cname, in "mul")
+                                            || is_op(in tc, cname, in "div")
+                                            || is_op(in tc, cname, in "rem")
+                                            || is_op(in tc, cname, in "min_u64")
+                                            || is_op(in tc, cname, in "max_u64")
+                                    ) {
+                                    if ai == 0 {
+                                        pt = expected;
+                                    } else if tc.types.kind(arg0_ty) != TyKind::Infer {
+                                        pt = arg0_ty;
+                                    } else {
+                                        pt = expected;
+                                    }
+                                }
+                                if adt != NONE32 {
+                                    let v = tc.world.variant(vi);
+                                    if ai < w(v.fc) {
+                                        let f = tc.world.field(wrapping_add(w(v.fa), ai));
+                                        fty_raw = f.ty;
+                                        pt = substitute(inout tc.types, f.ty, in vars);
+                                    }
+                                }
+                                let at = check_expr(inout tc, in a, av, pt);
+                                if ai == 0 {
+                                    arg0_ty = at;
+                                }
+                                if adt != NONE32 && gnames.len() > 0 {
+                                    infer(
+                                        inout tc.types,
+                                        tc.world.k,
+                                        fty_raw,
+                                        at,
+                                        in gnames,
+                                        inout vars
+                                    );
+                                }
+                            }
+                            let rty = if adt != NONE32 {
+                                let ad = tc.world.adt(adt);
+                                let aname = ad.name;
+                                if tc.types.kind(dt) == TyKind::Named
+                                    && tc.types.name(dt) == aname {
+                                    dt
+                                } else if gnames.len() > 0 {
+                                    tc.scratch1.clear();
+                                    for gi in 0..gnames.len() {
+                                        let gnm = u32_at(in gnames, gi);
+                                        let v = vars.get(gnm);
+                                        if v != NONE32 {
+                                            tc.scratch1.push(v);
+                                        } else {
+                                            tc.scratch1.push(tc.infer_ty);
+                                        }
+                                    }
+                                    tc.types.named(aname, in tc.scratch1)
+                                } else {
+                                    tc.types.named0(aname)
+                                }
+                            } else if (
+                                is_op(in tc, cname, in "ChunkSeq::new")
+                                    || is_op(in tc, cname, in "ChunkSeq::with_capacity")
+                            )
+                                && e.m > 0 {
+                                let cs_nm = tc.names.intern(in "ChunkSeq".as_bytes());
+                                named1(inout tc, cs_nm, n32(u64_at(in a.xs, e.c)))
+                            } else if is_op(in tc, cname, in "String::new") {
+                                tc.types.named0(tc.names.intern(in "String".as_bytes()))
+                            } else if is_op(in tc, cname, in "String::from_utf8") {
+                                let st = tc.types.named0(tc.names.intern(in "String".as_bytes()));
+                                let opt_nm = tc.names.intern(in "Option".as_bytes());
+                                named1(inout tc, opt_nm, st)
+                            } else if is_op(in tc, cname, in "widen_u64")
+                                || is_op(in tc, cname, in "wrapping_u64") {
+                                tc.u64_ty
+                            } else if is_op(in tc, cname, in "widen_i64")
+                                || is_op(in tc, cname, in "wrapping_i64") {
+                                tc.i64_ty
+                            } else if is_op(in tc, cname, in "wrapping_u32")
+                                || is_op(in tc, cname, in "narrow_u32")
+                                || is_op(in tc, cname, in "widen_u32")
+                                || is_op(in tc, cname, in "inc32") {
+                                tc.types.named0(tc.world.k.u32_)
+                            } else if is_op(in tc, cname, in "wrapping_u8")
+                                || is_op(in tc, cname, in "narrow_u8") {
+                                tc.types.named0(tc.world.k.u8_)
+                            } else if is_op(in tc, cname, in "widen_u128")
+                                || is_op(in tc, cname, in "wrapping_u128") {
+                                tc.types.named0(tc.world.k.u128_)
+                            } else if is_op(in tc, cname, in "widen_i128")
+                                || is_op(in tc, cname, in "wrapping_i128") {
+                                tc.types.named0(tc.world.k.i128_)
+                            } else if is_op(in tc, cname, in "wrapping_add")
+                                || is_op(in tc, cname, in "wrapping_sub")
+                                || is_op(in tc, cname, in "wrapping_mul")
+                                || is_op(in tc, cname, in "wrapping_div")
+                                || is_op(in tc, cname, in "wrapping_rem")
+                                || is_op(in tc, cname, in "wrapping_shl_u64")
+                                || is_op(in tc, cname, in "wrapping_shr_u64")
+                                || is_op(in tc, cname, in "shr")
+                                || is_op(in tc, cname, in "shl")
+                                || is_op(in tc, cname, in "rotate_left")
+                                || is_op(in tc, cname, in "rotate_right")
+                                || is_op(in tc, cname, in "inc")
+                                || is_op(in tc, cname, in "dec")
+                                || is_op(in tc, cname, in "add")
+                                || is_op(in tc, cname, in "sub")
+                                || is_op(in tc, cname, in "mul")
+                                || is_op(in tc, cname, in "div")
+                                || is_op(in tc, cname, in "rem")
+                                || is_op(in tc, cname, in "min_u64")
+                                || is_op(in tc, cname, in "max_u64") {
+                                if tc.types.kind(arg0_ty) != TyKind::Infer {
+                                    arg0_ty
+                                } else if tc.types.kind(expected) != TyKind::Infer {
+                                    expected
+                                } else {
+                                    tc.u64_ty
+                                }
+                            } else {
+                                let eres = find_eop_result(in a, inout tc.names, cname);
+                                if eres != NONE32 {
+                                    eres
+                                } else {
+                                    expected
+                                }
+                            };
+                            record_span(inout tc, ce.s0, ce.s1, rty);
+                            record_span(inout tc, e.s0, e.s1, rty);
+                            return rty;
+                        },
+                    }
+                } else if ce.kind == X_FIELD {
+                    let bt = check_expr(inout tc, in a, ce.a, tc.infer_ty);
+                    let mname = n32(ce.b);
+                    let tname = tc.types.name(bt);
+                    let cname = join_method_sym(inout tc.names, tname, mname);
+                    match find_fn(in a, cname) {
+                        Option::Some(f) => {
+                            return check_fn_call(inout tc, in a, f, bt, e, ce);
+                        },
+                        Option::None => {
+                            for ai in 0..e.n {
+                                let av = u64_at(
+                                    in a.xs,
+                                    wrapping_add(e.b, wrapping_add(wrapping_mul(ai, 2), 1))
+                                );
+                                let mut pt = tc.infer_ty;
+                                if tc.types.arity(bt) > 0 {
+                                    if (
+                                        is_op(in tc, mname, in "push")
+                                            || is_op(in tc, mname, in "fill")
+                                    )
+                                        && ai == 0 {
+                                        pt = tc.types.arg(bt, 0);
+                                    } else if (
+                                        is_op(in tc, mname, in "try_set")
+                                            || is_op(in tc, mname, in "set")
+                                    )
+                                        && ai == 1 {
+                                        pt = tc.types.arg(bt, 0);
+                                    }
+                                }
+                                let _at = check_expr(inout tc, in a, av, pt);
+                            }
+                            let rty = if is_op(in tc, mname, in "len") {
+                                tc.u64_ty
+                            } else if is_op(in tc, mname, in "is_empty")
+                                || is_op(in tc, mname, in "try_set")
+                                || is_op(in tc, mname, in "set")
+                                || is_op(in tc, mname, in "try_fill")
+                                || is_op(in tc, mname, in "push_char") {
+                                tc.bool_ty
+                            } else if is_op(in tc, mname, in "push")
+                                || is_op(in tc, mname, in "clear")
+                                || is_op(in tc, mname, in "extend")
+                                || is_op(in tc, mname, in "resize")
+                                || is_op(in tc, mname, in "truncate")
+                                || is_op(in tc, mname, in "reserve")
+                                || is_op(in tc, mname, in "fill")
+                                || is_op(in tc, mname, in "fill_range")
+                                || is_op(in tc, mname, in "swap")
+                                || is_op(in tc, mname, in "push_str") {
+                                tc.unit_ty
+                            } else if is_op(in tc, mname, in "as_str")
+                                || is_op(in tc, mname, in "sub_str") {
+                                tc.str_ty
+                            } else if is_op(in tc, mname, in "as_bytes") {
+                                let u8t = tc.types.named0(tc.world.k.u8_);
+                                let sl_nm = tc.names.intern(in "Slice".as_bytes());
+                                named1(inout tc, sl_nm, u8t)
+                            } else if (
+                                is_op(in tc, mname, in "as_slice")
+                                    || is_op(in tc, mname, in "sub_slice")
+                            )
+                                && tc.types.arity(bt) > 0 {
+                                let a0 = tc.types.arg(bt, 0);
+                                let sl_nm = tc.names.intern(in "Slice".as_bytes());
+                                named1(inout tc, sl_nm, a0)
+                            } else if (
+                                is_op(in tc, mname, in "get_or")
+                                    || is_op(in tc, mname, in "replace")
+                            )
+                                && tc.types.arity(bt) > 0 {
+                                tc.types.arg(bt, 0)
+                            } else if is_op(in tc, mname, in "byte_at") {
+                                tc.types.named0(tc.world.k.u8_)
+                            } else if is_op(in tc, mname, in "try_byte_at") {
+                                let u8t = tc.types.named0(tc.world.k.u8_);
+                                let opt_nm = tc.names.intern(in "Option".as_bytes());
+                                named1(inout tc, opt_nm, u8t)
+                            } else if (
+                                is_op(in tc, mname, in "try_get")
+                                    || is_op(in tc, mname, in "try_get_mut")
+                                    || is_op(in tc, mname, in "get")
+                                    || is_op(in tc, mname, in "pop")
+                                    || is_op(in tc, mname, in "last")
+                            )
+                                && tc.types.arity(bt) > 0 {
+                                let a0 = tc.types.arg(bt, 0);
+                                let opt_nm = tc.names.intern(in "Option".as_bytes());
+                                named1(inout tc, opt_nm, a0)
+                            } else if is_op(in tc, mname, in "try_read_u64_le")
+                                || is_op(in tc, mname, in "try_read_u64_be")
+                                || is_op(in tc, mname, in "find_byte")
+                                || is_op(in tc, mname, in "find_either")
+                                || is_op(in tc, mname, in "find_not_in") {
+                                let opt_nm = tc.names.intern(in "Option".as_bytes());
+                                named1(inout tc, opt_nm, tc.u64_ty)
+                            } else if is_op(in tc, mname, in "try_read_u32_le")
+                                || is_op(in tc, mname, in "try_read_u32_be") {
+                                let u32t = tc.types.named0(tc.world.k.u32_);
+                                let opt_nm = tc.names.intern(in "Option".as_bytes());
+                                named1(inout tc, opt_nm, u32t)
+                            } else if is_op(in tc, mname, in "try_read_u16_le")
+                                || is_op(in tc, mname, in "try_read_u16_be") {
+                                let u16t = tc.types.named0(tc.names.intern(in "u16".as_bytes()));
+                                let opt_nm = tc.names.intern(in "Option".as_bytes());
+                                named1(inout tc, opt_nm, u16t)
+                            } else if is_op(in tc, mname, in "try_write_u16_le")
+                                || is_op(in tc, mname, in "try_write_u16_be")
+                                || is_op(in tc, mname, in "try_write_u32_le")
+                                || is_op(in tc, mname, in "try_write_u32_be")
+                                || is_op(in tc, mname, in "try_write_u64_le")
+                                || is_op(in tc, mname, in "try_write_u64_be") {
+                                tc.bool_ty
+                            } else {
+                                let eres = find_eop_result(in a, inout tc.names, cname);
+                                if eres != NONE32 {
+                                    eres
+                                } else {
+                                    expected
+                                }
+                            };
+                            record_span(inout tc, ce.s0, ce.s1, rty);
+                            record_span(inout tc, e.s0, e.s1, rty);
+                            return rty;
+                        },
+                    }
+                }
+            },
+            Option::None => {},
+        }
+        for ai in 0..e.n {
+            let av = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(ai, 2), 1)));
+            let _at = check_expr(inout tc, in a, av, tc.infer_ty);
+        }
+        expected
+    } else {
+        expected
+    };
+    record_span(inout tc, e.s0, e.s1, ty);
+    ty
+}
+
+fn span_lt(in a: SpanRow, in b: SpanRow) -> bool {
+    a.start < b.start || (a.start == b.start && a.end < b.end)
+}
+
+fn span_swap(inout s: Slice[SpanRow], i: u64, j: u64) eff [Fail[RuntimeError]] {
+    let a = s[i];
+    let b = s[j];
+    let _ok1 = s.try_set(i, b);
+    let _ok2 = s.try_set(j, a);
+}
+
+fn span_sift(inout s: Slice[SpanRow], start: u64, end: u64) eff [Fail[RuntimeError]] {
+    let mut root = start;
+    loop {
+        let left = wrapping_add(wrapping_mul(root, 2), 1);
+        if left >= end {
+            break;
+        }
+        let mut child = left;
+        let right = wrapping_add(left, 1);
+        if right < end && span_lt(in s[left], in s[right]) {
+            child = right;
+        }
+        if !span_lt(in s[root], in s[child]) {
+            break;
+        }
+        span_swap(inout s, root, child);
+        root = child;
+    }
+}
+
+fn sort_spans_slice(inout s: Slice[SpanRow]) eff [Fail[RuntimeError]] {
+    let n = s.len();
+    if n <= 1 {
+        return;
+    }
+    let mut start = n / 2;
+    loop {
+        if start == 0 {
+            break;
+        }
+        start = wrapping_sub(start, 1);
+        span_sift(inout s, start, n);
+    }
+    let mut end = n;
+    loop {
+        if end <= 1 {
+            break;
+        }
+        end = wrapping_sub(end, 1);
+        span_swap(inout s, 0, end);
+        span_sift(inout s, 0, end);
+    }
+}
+
+fn sort_spans(inout spans: ChunkSeq[SpanRow]) {
+    handle Fail[RuntimeError] in {
+        sort_spans_slice(inout spans.as_slice_mut());
+    } with {
+        return _v => {},
+        raise(e, _k) => match e {
+            _ => {},
+        },
+    };
+}
+
+fn call_lt(in a: CallRow, in b: CallRow) -> bool {
+    a.s0 < b.s0 || (a.s0 == b.s0 && a.s1 < b.s1)
+}
+
+fn call_swap(inout s: Slice[CallRow], i: u64, j: u64) eff [Fail[RuntimeError]] {
+    let a = s[i];
+    let b = s[j];
+    let _ok1 = s.try_set(i, b);
+    let _ok2 = s.try_set(j, a);
+}
+
+fn call_sift(inout s: Slice[CallRow], start: u64, end: u64) eff [Fail[RuntimeError]] {
+    let mut root = start;
+    loop {
+        let left = wrapping_add(wrapping_mul(root, 2), 1);
+        if left >= end {
+            break;
+        }
+        let mut child = left;
+        let right = wrapping_add(left, 1);
+        if right < end && call_lt(in s[left], in s[right]) {
+            child = right;
+        }
+        if !call_lt(in s[root], in s[child]) {
+            break;
+        }
+        call_swap(inout s, root, child);
+        root = child;
+    }
+}
+
+fn sort_calls_slice(inout s: Slice[CallRow]) eff [Fail[RuntimeError]] {
+    let n = s.len();
+    if n <= 1 {
+        return;
+    }
+    let mut start = n / 2;
+    loop {
+        if start == 0 {
+            break;
+        }
+        start = wrapping_sub(start, 1);
+        call_sift(inout s, start, n);
+    }
+    let mut end = n;
+    loop {
+        if end <= 1 {
+            break;
+        }
+        end = wrapping_sub(end, 1);
+        call_swap(inout s, 0, end);
+        call_sift(inout s, 0, end);
+    }
+}
+
+fn sort_calls(inout calls: ChunkSeq[CallRow]) {
+    handle Fail[RuntimeError] in {
+        sort_calls_slice(inout calls.as_slice_mut());
+    } with {
+        return _v => {},
+        raise(e, _k) => match e {
+            _ => {},
+        },
+    };
+}
+
+fn dummy_tc(k: Known) -> Tc {
+    let mut dn = names_new();
+    let dt = types_new(inout dn);
+    let dw = world_new(k);
+    Tc {
+        names: dn,
+        types: dt,
+        world: dw,
+        env: ChunkSeq::new[Binding](),
+        marks: ChunkSeq::new[u64](),
+        spans: ChunkSeq::new[SpanRow](),
+        infer_ty: 0,
+        ret_ty: 0,
+        unit_ty: 0,
+        bool_ty: 0,
+        i64_ty: 0,
+        u64_ty: 0,
+        f64_ty: 0,
+        str_ty: 0,
+        never_ty: 0,
+        calls: ChunkSeq::new[CallRow](),
+        pairs: ChunkSeq::new[Pair](),
+        scratch1: ChunkSeq::new[u32](),
+    }
+}
+
+fn rebuild_tc(
+    sink old_tc: Tc,
+    m: u64,
+    tc_perm: u64,
+    tc_perm_end: u64,
+    n_spans: u64,
+    n_calls: u64,
+    n_pairs: u64,
+    n_nodes: u64,
+    n_rows: u64,
+    n_effs: u64
+) -> (Tc, u64) {
+    let Tc {
+        names: tc_names,
+        types: tc_types,
+        world: tc_world,
+        env: tc_env,
+        marks: tc_marks,
+        spans: tc_spans_in,
+        infer_ty: tc_infer,
+        ret_ty: tc_ret,
+        unit_ty: tc_unit,
+        bool_ty: tc_bool,
+        i64_ty: tc_i64,
+        u64_ty: tc_u64,
+        f64_ty: tc_f64,
+        str_ty: tc_str,
+        never_ty: tc_never,
+        calls: tc_calls_in,
+        pairs: tc_pairs_in,
+        scratch1: tc_scratch1,
+    } = old_tc;
+    let mut tc_spans = tc_spans_in;
+    let mut tc_calls = tc_calls_in;
+    let mut tc_pairs = tc_pairs_in;
+    let s_rb = stage2_heap_swap(tc_perm);
+    let mut new_spans = ChunkSeq::new[SpanRow]();
+    let sn = wrapping_sub(tc_spans.len(), n_spans);
+    for si in n_spans..tc_spans.len() {
+        match tc_spans.try_get(si) {
+            Option::Some(r) => new_spans
+                .push(
+                    SpanRow {
+                        start: r.start,
+                        end: r.end,
+                        ty: r.ty
+                    }
+                ),
+            Option::None => {},
+        }
+    }
+    for _ in 0..sn {
+        let _ = tc_spans.pop();
+    }
+    for si in 0..new_spans.len() {
+        match new_spans.try_get(si) {
+            Option::Some(r) => tc_spans
+                .push(
+                    SpanRow {
+                        start: r.start,
+                        end: r.end,
+                        ty: r.ty
+                    }
+                ),
+            Option::None => {},
+        }
+    }
+    let mut new_calls = ChunkSeq::new[CallRow]();
+    let cn = wrapping_sub(tc_calls.len(), n_calls);
+    for ci in n_calls..tc_calls.len() {
+        match tc_calls.try_get(ci) {
+            Option::Some(r) => new_calls
+                .push(
+                    CallRow {
+                        s0: r.s0,
+                        s1: r.s1,
+                        v0: r.v0,
+                        vn: r.vn
+                    }
+                ),
+            Option::None => {},
+        }
+    }
+    for _ in 0..cn {
+        let _ = tc_calls.pop();
+    }
+    for ci in 0..new_calls.len() {
+        match new_calls.try_get(ci) {
+            Option::Some(r) => tc_calls
+                .push(
+                    CallRow {
+                        s0: r.s0,
+                        s1: r.s1,
+                        v0: r.v0,
+                        vn: r.vn
+                    }
+                ),
+            Option::None => {},
+        }
+    }
+    let mut new_pairs = ChunkSeq::new[Pair]();
+    let pn = wrapping_sub(tc_pairs.len(), n_pairs);
+    for pi in n_pairs..tc_pairs.len() {
+        match tc_pairs.try_get(pi) {
+            Option::Some(r) => new_pairs
+                .push(
+                    Pair {
+                        name: r.name,
+                        ty: r.ty
+                    }
+                ),
+            Option::None => {},
+        }
+    }
+    for _ in 0..pn {
+        let _ = tc_pairs.pop();
+    }
+    for pi in 0..new_pairs.len() {
+        match new_pairs.try_get(pi) {
+            Option::Some(r) => tc_pairs
+                .push(
+                    Pair {
+                        name: r.name,
+                        ty: r.ty
+                    }
+                ),
+            Option::None => {},
+        }
+    }
+    let fresh_names = tc_names.clone_in_heap();
+    let fresh_types = tc_types.clone_tail_in_heap(n_nodes, n_rows, n_effs);
+    let fresh_tc = Tc {
+        names: fresh_names,
+        types: fresh_types,
+        world: tc_world,
+        env: tc_env,
+        marks: tc_marks,
+        spans: tc_spans,
+        infer_ty: tc_infer,
+        ret_ty: tc_ret,
+        unit_ty: tc_unit,
+        bool_ty: tc_bool,
+        i64_ty: tc_i64,
+        u64_ty: tc_u64,
+        f64_ty: tc_f64,
+        str_ty: tc_str,
+        never_ty: tc_never,
+        calls: tc_calls,
+        pairs: tc_pairs,
+        scratch1: tc_scratch1,
+    };
+    let next_perm = stage2_heap_swap(s_rb);
+    if next_perm < tc_perm_end {
+        stage2_heap_reset(m);
+    }
+    (fresh_tc, next_perm)
+}
+
+pub fn typecheck_ast(in a: Ast, sink names: Names, sink types: Types, sink world: World)
+    -> (Names, Types, World, ChunkSeq[CallRow], ChunkSeq[Pair]) {
+    let mut tc = tc_new(sink names, sink types, sink world);
+    let mut max_spans = 262144;
+    let mut max_calls = 131072;
+    let mut max_pairs = 131072;
+    tc.spans.reserve(max_spans);
+    tc.calls.reserve(max_calls);
+    tc.pairs.reserve(max_pairs);
+    tc.env.reserve(1024);
+    tc.marks.reserve(256);
+    tc.scratch1.reserve(1024);
+    let mut max_names = wrapping_add(tc.names.len(), 16384);
+    let mut max_text = wrapping_add(tc.names.text_len(), 262144);
+    tc.names.reserve_names(max_names, max_text);
+    let mut max_nodes = wrapping_add(tc.types.nodes.len(), 16384);
+    let mut max_items = wrapping_add(tc.types.items_len(), 32768);
+    let mut max_rows = wrapping_add(tc.types.rows.len(), 8192);
+    let mut max_effs = wrapping_add(tc.types.effs_len(), 16384);
+    tc.types.reserve_types(max_nodes, max_items, max_rows, max_effs);
+    let n_env = tc.env.len();
+    let n_marks = tc.marks.len();
+    let mut tc_perm_buf = ChunkSeq::new[u8]();
+    tc_perm_buf.reserve(167772160);
+    let tc_perm_end = stage2_heap_mark();
+    let mut tc_perm = wrapping_sub(tc_perm_end, 167772160);
+    let mut m = tc_perm_end;
+    tc.env.reserve(512);
+    tc.marks.reserve(64);
+    tc.scratch1.reserve(64);
+    for fi in 0..a.fns.len() {
+        let f = match a.fns.try_get(fi) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        if !f.has_body || f.body == NONE64 {
+            continue;
+        }
+        let n_mask = tc.names.mask_val();
+        let n_tmask = tc.types.t_mask();
+        let n_rmask = tc.types.r_mask();
+        let n_spans = tc.spans.len();
+        let n_calls = tc.calls.len();
+        let n_pairs = tc.pairs.len();
+        let n_nodes = tc.types.nodes.len();
+        let n_rows = tc.types.rows.len();
+        let n_effs = tc.types.effs_len();
+        push_scope(inout tc);
+        for pi in 0..f.pn {
+            match a.pms.try_get(wrapping_add(f.pa, pi)) {
+                Option::Some(pm) => bind_var(inout tc, pm.name, pm.ty),
+                Option::None => {},
+            }
+        }
+        tc.ret_ty = f.result;
+        let _rt = check_expr(inout tc, in a, f.body, f.result);
+        pop_scope(inout tc);
+        tc.scratch1.clear();
+        if tc.names.mask_val() == n_mask
+            && tc.names.len() < max_names
+            && tc.names.text_len() < max_text
+            && tc.types.t_mask() == n_tmask
+            && tc.types.r_mask() == n_rmask
+            && tc.types.nodes.len() < max_nodes
+            && tc.types.items_len() < max_items
+            && tc.types.rows.len() < max_rows
+            && tc.types.effs_len() < max_effs
+            && tc.env.len() == n_env
+            && tc.marks.len() == n_marks
+            && tc.scratch1.len() == 0
+            && tc.spans.len() < max_spans
+            && tc.calls.len() < max_calls
+            && tc.pairs.len() < max_pairs
+            && tc_perm < tc_perm_end {
+            let mut dtc = dummy_tc(tc.world.k);
+            swap(inout tc, inout dtc);
+            let (ntc, next_perm) = rebuild_tc(
+                dtc,
+                m,
+                tc_perm,
+                tc_perm_end,
+                n_spans,
+                n_calls,
+                n_pairs,
+                n_nodes,
+                n_rows,
+                n_effs
+            );
+            let mut mtc = ntc;
+            tc_perm = next_perm;
+            swap(inout tc, inout mtc);
+            if tc_perm >= tc_perm_end {
+                tc_perm = tc_perm_end;
+                m = stage2_heap_mark();
+            }
+        } else {
+            let s_pre = if tc_perm < tc_perm_end {
+                stage2_heap_swap(tc_perm)
+            } else {
+                0
+            };
+            max_spans = wrapping_add(tc.spans.len(), 131072);
+            max_calls = wrapping_add(tc.calls.len(), 65536);
+            max_pairs = wrapping_add(tc.pairs.len(), 65536);
+            tc.spans.reserve(max_spans);
+            tc.calls.reserve(max_calls);
+            tc.pairs.reserve(max_pairs);
+            max_names = wrapping_add(tc.names.len(), 16384);
+            max_text = wrapping_add(tc.names.text_len(), 262144);
+            tc.names.reserve_names(max_names, max_text);
+            max_nodes = wrapping_add(tc.types.nodes.len(), 16384);
+            max_items = wrapping_add(tc.types.items_len(), 32768);
+            max_rows = wrapping_add(tc.types.rows.len(), 8192);
+            max_effs = wrapping_add(tc.types.effs_len(), 16384);
+            tc.types.reserve_types(max_nodes, max_items, max_rows, max_effs);
+            if tc_perm < tc_perm_end {
+                tc_perm = stage2_heap_swap(s_pre);
+            }
+            m = stage2_heap_mark();
+        }
+    }
+    let _ = stage2_heap_swap(m);
+    sort_spans(inout tc.spans);
+    sort_calls(inout tc.calls);
+    tc.world.expr_types = tc.spans;
+    (tc.names, tc.types, tc.world, tc.calls, tc.pairs)
+}

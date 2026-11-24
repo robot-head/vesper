@@ -19,8 +19,15 @@
 // that did not halt, only which tokens the recovery consumes, and those
 // paths are transliterated.
 
+use @vesper/check-data::util::{
+    copy_seq,
+    stage2_heap_mark,
+    stage2_heap_reset,
+    stage2_heap_swap
+};
 use self::{
     Ast,
+    ast_clone_in_heap,
     ast_new,
     none,
     ListRef,
@@ -4333,6 +4340,78 @@ fn syms_new(inout a: Ast) -> Syms {
 
 // Lexes and parses `source` with the front end, then lowers its tables to
 // the AST (`parse(source).module`).
+pub fn lower_source_perm(in source: Str, inout ast_perm: u64, ast_perm_end: u64) -> L {
+    if ast_perm >= ast_perm_end || wrapping_sub(ast_perm_end, ast_perm) < 16777216 {
+        return lower_source(in source);
+    }
+    let m_parse = stage2_heap_mark();
+    let raw = lower_source(in source);
+    let mut tmp = String::new();
+    let s_ast = stage2_heap_swap(ast_perm);
+    let mut ed = diags_new();
+    let et = lex(in "".as_bytes(), inout ed);
+    let ep = parse_tokens(in "".as_bytes(), et, ed, 0, 0);
+    let out_ast = ast_clone_in_heap(in raw.ast, inout tmp);
+    let out_consts = copy_seq[u32](in raw.consts);
+    let out_const_lits = copy_seq[u32](in raw.const_lits);
+    let out_const_untyped = copy_seq[u8](in raw.const_untyped);
+    let out_s = Syms {
+        error: raw.s.error,
+        empty: raw.s.empty,
+        ret: raw.s.ret,
+        region: raw.s.region,
+        region_marker: raw.s.region_marker,
+        dyn_: raw.s.dyn_,
+        shape: raw.s.shape,
+        star: raw.s.star,
+        projection: raw.s.projection,
+        any: raw.s.any,
+        splat: raw.s.splat,
+        len: raw.s.len,
+        fn_: raw.s.fn_,
+        fn_mut: raw.s.fn_mut,
+        fn_once: raw.s.fn_once,
+        brk: raw.s.brk,
+        cont: raw.s.cont,
+        for_: raw.s.for_,
+        minus: raw.s.minus,
+    };
+    let out_desync = raw.desync;
+    let out = L {
+        p: ep,
+        text: String::new(),
+        ast: out_ast,
+        symmap: ChunkSeq::new[u32](),
+        pos: 0,
+        last: 0,
+        no_struct: false,
+        vals: ChunkSeq::new[u32](),
+        vals_trail: ChunkSeq::new[u32](),
+        stk: ChunkSeq::new[u32](),
+        pending: ChunkSeq::new[u32](),
+        consts: out_consts,
+        const_lits: out_const_lits,
+        const_untyped: out_const_untyped,
+        extra: ChunkSeq::new[u32](),
+        evpos: ChunkSeq::new[u32](),
+        evc: 0,
+        desync: out_desync,
+        expansion: 0,
+        decl_public: false,
+        buf: String::new(),
+        s: out_s
+    };
+    let ast_after = stage2_heap_mark();
+    ast_perm = stage2_heap_swap(s_ast);
+    if ast_after < ast_perm_end {
+        stage2_heap_reset(m_parse);
+        out
+    } else {
+        ast_perm = ast_perm_end;
+        raw
+    }
+}
+
 pub fn lower_source(in source: Str) -> L {
     let b = source.as_bytes();
     let mut a = ast_new();

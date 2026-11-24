@@ -146,6 +146,246 @@ pub fn program_new() -> Program {
 }
 
 impl Program {
+    pub fn reserve_lower(
+        inout self,
+        fns_cap: u64,
+        blocks_cap: u64,
+        insts_cap: u64,
+        ops_cap: u64,
+        tags_cap: u64,
+        paths_cap: u64,
+        path_syms_cap: u64,
+        pool_cap: u64
+    ) {
+        self.fns.reserve(fns_cap);
+        self.blocks.reserve(blocks_cap);
+        self.insts.reserve(insts_cap);
+        self.ops.reserve(ops_cap);
+        self.tags.reserve(tags_cap);
+        self.paths.reserve(paths_cap);
+        self.path_syms.reserve(path_syms_cap);
+        self.pool.reserve(pool_cap);
+    }
+
+    pub fn clone_tail_in_heap(
+        sink self,
+        n_fns: u64,
+        n_blocks: u64,
+        n_insts: u64,
+        n_paths: u64,
+        n_pool: u64
+    ) -> Program {
+        let mut s = self;
+        let mut new_fns = ChunkSeq::new[FnRow]();
+        let fn_n = wrapping_sub(s.fns.len(), n_fns);
+        for i in n_fns..s.fns.len() {
+            match s.fns.try_get(i) {
+                Option::Some(x) => new_fns
+                    .push(
+                        FnRow {
+                            name: x.name,
+                            ha: x.ha,
+                            hn: x.hn,
+                            b0: x.b0,
+                            bc: x.bc,
+                            ta: x.ta,
+                            tn: x.tn
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        for _ in 0..fn_n {
+            let _ = s.fns.pop();
+        }
+        for i in 0..new_fns.len() {
+            match new_fns.try_get(i) {
+                Option::Some(x) => s
+                    .fns
+                    .push(
+                        FnRow {
+                            name: x.name,
+                            ha: x.ha,
+                            hn: x.hn,
+                            b0: x.b0,
+                            bc: x.bc,
+                            ta: x.ta,
+                            tn: x.tn
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        let mut new_blocks = ChunkSeq::new[BlockRow]();
+        let bk_n = wrapping_sub(s.blocks.len(), n_blocks);
+        for i in n_blocks..s.blocks.len() {
+            match s.blocks.try_get(i) {
+                Option::Some(x) => new_blocks
+                    .push(
+                        BlockRow {
+                            ha: x.ha,
+                            hn: x.hn,
+                            i0: x.i0,
+                            ic: x.ic,
+                            term: x.term,
+                            ta: x.ta,
+                            tn: x.tn
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        for _ in 0..bk_n {
+            let _ = s.blocks.pop();
+        }
+        for i in 0..new_blocks.len() {
+            match new_blocks.try_get(i) {
+                Option::Some(x) => s
+                    .blocks
+                    .push(
+                        BlockRow {
+                            ha: x.ha,
+                            hn: x.hn,
+                            i0: x.i0,
+                            ic: x.ic,
+                            term: x.term,
+                            ta: x.ta,
+                            tn: x.tn
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        let mut new_insts = ChunkSeq::new[InstRow]();
+        let in_n = wrapping_sub(s.insts.len(), n_insts);
+        for i in n_insts..s.insts.len() {
+            match s.insts.try_get(i) {
+                Option::Some(x) => new_insts
+                    .push(
+                        InstRow {
+                            dest: x.dest,
+                            ty: x.ty,
+                            s0: x.s0,
+                            s1: x.s1,
+                            has_token: x.has_token,
+                            tin: x.tin,
+                            tout: x.tout,
+                            fallible: x.fallible,
+                            op: x.op,
+                            a: x.a,
+                            n: x.n
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        for _ in 0..in_n {
+            let _ = s.insts.pop();
+        }
+        for i in 0..new_insts.len() {
+            match new_insts.try_get(i) {
+                Option::Some(x) => s
+                    .insts
+                    .push(
+                        InstRow {
+                            dest: x.dest,
+                            ty: x.ty,
+                            s0: x.s0,
+                            s1: x.s1,
+                            has_token: x.has_token,
+                            tin: x.tin,
+                            tout: x.tout,
+                            fallible: x.fallible,
+                            op: x.op,
+                            a: x.a,
+                            n: x.n
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        let mut new_paths = ChunkSeq::new[PathRow]();
+        let pt_n = wrapping_sub(s.paths.len(), n_paths);
+        for i in n_paths..s.paths.len() {
+            match s.paths.try_get(i) {
+                Option::Some(x) => new_paths
+                    .push(
+                        PathRow {
+                            a: x.a,
+                            n: x.n
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        for _ in 0..pt_n {
+            let _ = s.paths.pop();
+        }
+        for i in 0..new_paths.len() {
+            match new_paths.try_get(i) {
+                Option::Some(x) => s
+                    .paths
+                    .push(
+                        PathRow {
+                            a: x.a,
+                            n: x.n
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        let mut new_pool = ChunkSeq::new[PoolRow]();
+        let pl_n = wrapping_sub(s.pool.len(), n_pool);
+        for i in n_pool..s.pool.len() {
+            match s.pool.try_get(i) {
+                Option::Some(x) => new_pool
+                    .push(
+                        PoolRow {
+                            kind: x.kind,
+                            label: x.label
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        for _ in 0..pl_n {
+            let _ = s.pool.pop();
+        }
+        for i in 0..new_pool.len() {
+            match new_pool.try_get(i) {
+                Option::Some(x) => s
+                    .pool
+                    .push(
+                        PoolRow {
+                            kind: x.kind,
+                            label: x.label
+                        }
+                    ),
+                Option::None => {},
+            }
+        }
+        let Program {
+            fns,
+            blocks,
+            insts,
+            ops,
+            tags,
+            paths,
+            path_syms,
+            pool,
+        } = s;
+        Program {
+            fns: fns,
+            blocks: blocks,
+            insts: insts,
+            ops: ops,
+            tags: tags,
+            paths: paths,
+            path_syms: path_syms,
+            pool: pool,
+        }
+    }
+
     pub fn fn_count(in self) -> u64 {
         self.fns.len()
     }

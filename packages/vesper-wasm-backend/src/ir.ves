@@ -342,6 +342,256 @@ fn read_free(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) -> u64
 
 // The wasm section, after `read_program`; `pool` is the program's pool
 // row count.
+pub fn empty_facts(entry: u32, max_pages: u64, max_functions: u64, max_instructions: u64) -> Facts {
+    Facts {
+        plugin: false,
+        stack_switching: false,
+        max_pages: max_pages,
+        max_functions: max_functions,
+        max_instructions: max_instructions,
+        entry: entry,
+        trace_active: false,
+        caps: ChunkSeq::new[u32](),
+        sigs: ChunkSeq::new[Sig](),
+        gens: ChunkSeq::new[GenRow](),
+        params: ChunkSeq::new[ParamRow](),
+        effs: ChunkSeq::new[EffInst](),
+        tys: ChunkSeq::new[u32](),
+        fn_sig: ChunkSeq::new[u32](),
+        decls: ChunkSeq::new[EffDecl](),
+        gsyms: ChunkSeq::new[u32](),
+        ops: ChunkSeq::new[OpDecl](),
+        eff_by_sym: ChunkSeq::new[u32](),
+        calls: ChunkSeq::new[CallRow](),
+        pairs: ChunkSeq::new[Pair](),
+        exprs: ChunkSeq::new[ExprFact](),
+        free: ChunkSeq::new[u32](),
+        hops: ChunkSeq::new[u64]()
+    }
+}
+
+pub fn add_fn_sig(
+    inout f: Facts,
+    in c: Ctx,
+    name: u32,
+    in gnames: ChunkSeq[u32],
+    in grows: ChunkSeq[bool],
+    in pnames: ChunkSeq[u32],
+    in ppasses: ChunkSeq[u8],
+    in ptys: ChunkSeq[u32],
+    result: u32,
+    effects: u32
+) {
+    let g0 = f.gens.len();
+    let gn = gnames.len();
+    for i in 0..gn {
+        let nm = u32_at(in gnames, i);
+        let rw = match grows.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => false,
+        };
+        f
+            .gens
+            .push(
+                GenRow {
+                    name: nm,
+                    row: rw
+                }
+            );
+    }
+    let p0 = f.params.len();
+    let pn = pnames.len();
+    for i in 0..pn {
+        let nm = u32_at(in pnames, i);
+        let ps = match ppasses.try_get(i) {
+            Option::Some(p) => p,
+            Option::None => 0,
+        };
+        let ty = u32_at(in ptys, i);
+        f
+            .params
+            .push(
+                ParamRow {
+                    name: nm,
+                    pass: ps,
+                    ty: ty
+                }
+            );
+    }
+    let e0 = f.effs.len();
+    let row = c.types.row(effects);
+    let en = w(row.n);
+    for i in 0..en {
+        let ef = c.types.effect_at(wrapping_add(w(row.a), i));
+        let lbl = if ef.label == 0 {
+            NONE32
+        } else {
+            wrapping_sub(ef.label, 1)
+        };
+        let a0 = f.tys.len();
+        for j in 0..w(ef.n) {
+            f.tys.push(u32_at(in c.types.items, wrapping_add(w(ef.a), j)));
+        }
+        f
+            .effs
+            .push(
+                EffInst {
+                    label: lbl,
+                    name: ef.name,
+                    a0: a0,
+                    an: w(ef.n)
+                }
+            );
+    }
+    let tail = if row.tail == 0 {
+        NONE32
+    } else {
+        wrapping_sub(row.tail, 1)
+    };
+    let sidx = f.sigs.len();
+    f
+        .sigs
+        .push(
+            Sig {
+                g0: g0,
+                gn: gn,
+                p0: p0,
+                pn: pn,
+                result: result,
+                e0: e0,
+                en: en,
+                tail: tail
+            }
+        );
+    set_by_symbol(inout f.fn_sig, name, n32(inc(sidx)));
+}
+
+pub fn add_eff_decl(
+    inout f: Facts,
+    name: u32,
+    linear: bool,
+    in gnames: ChunkSeq[u32],
+    in op_names: ChunkSeq[u32],
+    in op_pa: ChunkSeq[u64],
+    in op_pn: ChunkSeq[u64],
+    in pnames: ChunkSeq[u32],
+    in ppasses: ChunkSeq[u8],
+    in ptys: ChunkSeq[u32],
+    in op_results: ChunkSeq[u32]
+) {
+    let g0 = f.gsyms.len();
+    let gn = gnames.len();
+    for i in 0..gn {
+        f.gsyms.push(u32_at(in gnames, i));
+    }
+    let o0 = f.ops.len();
+    let on = op_names.len();
+    for oi in 0..on {
+        let opa = match op_pa.try_get(oi) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let opn = match op_pn.try_get(oi) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let p0 = f.params.len();
+        for pi in 0..opn {
+            let idx = wrapping_add(opa, pi);
+            let ps = match ppasses.try_get(idx) {
+                Option::Some(p) => p,
+                Option::None => 0,
+            };
+            f
+                .params
+                .push(
+                    ParamRow {
+                        name: u32_at(in pnames, idx),
+                        pass: ps,
+                        ty: u32_at(in ptys, idx)
+                    }
+                );
+        }
+        let sidx = f.sigs.len();
+        f
+            .sigs
+            .push(
+                Sig {
+                    g0: 0,
+                    gn: 0,
+                    p0: p0,
+                    pn: opn,
+                    result: u32_at(in op_results, oi),
+                    e0: 0,
+                    en: 0,
+                    tail: NONE32
+                }
+            );
+        f
+            .ops
+            .push(
+                OpDecl {
+                    name: u32_at(in op_names, oi),
+                    sig: sidx
+                }
+            );
+    }
+    let d = f.decls.len();
+    f
+        .decls
+        .push(
+            EffDecl {
+                name: name,
+                linear: linear,
+                g0: g0,
+                gn: gn,
+                o0: o0,
+                on: on
+            }
+        );
+    set_by_symbol(inout f.eff_by_sym, name, n32(inc(d)));
+}
+
+pub fn push_hop(inout f: Facts, w: u64) {
+    f.hops.push(w);
+}
+
+pub fn set_expr_handler(inout f: Facts, pool: u64, h0: u64, in free_names: ChunkSeq[u32]) {
+    let f0 = f.free.len();
+    let fc = free_names.len();
+    for i in 0..fc {
+        f.free.push(u32_at(in free_names, i));
+    }
+    loop {
+        if f.exprs.len() > pool {
+            break;
+        }
+        f
+            .exprs
+            .push(
+                ExprFact {
+                    kind: 0,
+                    fn_: 0,
+                    f0: 0,
+                    fc: 0,
+                    h0: 0
+                }
+            );
+    }
+    f
+        .exprs
+        .try_set(
+            pool,
+            ExprFact {
+                kind: 2,
+                fn_: 0,
+                f0: f0,
+                fc: fc,
+                h0: h0
+            }
+        );
+}
+
 pub fn read_facts(inout r: Reader, in b: Slice[u8], in c: Ctx, pool: u64) -> Facts {
     let mut f = Facts {
         plugin: false,

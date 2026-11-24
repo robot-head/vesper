@@ -1,0 +1,1621 @@
+// Translates `@vesper/ast::Ast` (from `@vesper/check-names-packages`) and
+// `CollectedProgram` into `@vesper/place-ir-lower::ast::Ast`.
+
+use @vesper/ast::{
+    ArgNode,
+    Ast as SurfAst,
+    ClauseNode,
+    EffectNode,
+    ExprNode,
+    Lit as SurfLit,
+    ParamNode,
+    PatNode,
+    StmtNode,
+    list_at,
+    list_len,
+    none as ast_none
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    EffNode,
+    Types
+};
+use @vesper/check-data::util::{
+    n32,
+    u32_at,
+    w
+};
+use @vesper/check-data::world::{
+    Generic,
+    World,
+    set_by_symbol
+};
+use @vesper/check-names-packages::{
+    AssembledModule
+};
+use @vesper/place-ir::codes::{
+    Lit,
+    Pat
+};
+use @vesper/place-ir-lower::ast::{
+    Ast as IrAst,
+    Cl,
+    Ef,
+    Eop,
+    Ex,
+    FnR,
+    Gn,
+    Hd,
+    PathR,
+    Pm,
+    Pt
+};
+use @vesper-std/arena::{
+    idx_from_raw
+};
+use self::collect::{
+    CollectedProgram,
+    FnInfo,
+    ParamInfo,
+    lower_effects,
+    lower_ty,
+    translate_sym
+};
+
+const NONE64: u64 = 18446744073709551615;
+
+const X_LITERAL: u8 = 1;
+const X_NAME: u8 = 2;
+const X_TUPLE: u8 = 3;
+const X_STRUCT: u8 = 4;
+const X_FIELD: u8 = 5;
+const X_INDEX: u8 = 6;
+const X_UNARY: u8 = 7;
+const X_BINARY: u8 = 8;
+const X_ASSIGN: u8 = 9;
+const X_BLOCK: u8 = 10;
+const X_CALL: u8 = 11;
+const X_TRY: u8 = 12;
+const X_IF: u8 = 13;
+const X_MATCH: u8 = 14;
+const X_LOOP: u8 = 15;
+const X_FOR: u8 = 16;
+const X_RANGE: u8 = 17;
+const X_BREAK: u8 = 18;
+const X_CONTINUE: u8 = 19;
+const X_RETURN: u8 = 20;
+const X_CLOSURE: u8 = 21;
+const X_HANDLE: u8 = 22;
+
+struct LowerCtx {
+    ir: IrAst,
+    names: Names,
+    types: Types,
+    tmp: String,
+    caches: ChunkSeq[ChunkSeq[u32]],
+}
+
+fn sym(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, sym_id: u32) -> u32 {
+    if sym_id == ast_none() {
+        return ast_none();
+    }
+    match lc.caches.try_get_mut(mod_idx) {
+        Option::Some(cache) => translate_sym(
+            in ast,
+            sym_id,
+            inout lc.names,
+            inout cache,
+            inout lc.tmp
+        ),
+        Option::None => ast_none(),
+    }
+}
+
+fn lower_pat(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, pat_id: u32) -> u64 {
+    let p = match ast.pats.get(idx_from_raw[PatNode](pat_id)) {
+        Option::Some(v) => v,
+        Option::None => {
+            let idx = lc.ir.pts.len();
+            lc
+                .ir
+                .pts
+                .push(
+                    Pt {
+                        kind: Pat::Wild,
+                        s0: 0,
+                        s1: 0,
+                        a: 0,
+                        b: 0,
+                        c: 0,
+                        n: 0
+                    }
+                );
+            return idx;
+        },
+    };
+    let off = wrapping_shl_u64(mod_idx, 32);
+    let s0 = off | widen_u64(p.start);
+    let s1 = off | widen_u64(p.end);
+    if p.kind == 1 {
+        let idx = lc.ir.pts.len();
+        lc
+            .ir
+            .pts
+            .push(
+                Pt {
+                    kind: Pat::Wild,
+                    s0: s0,
+                    s1: s1,
+                    a: 0,
+                    b: 0,
+                    c: 0,
+                    n: 0
+                }
+            );
+        return idx;
+    }
+    if p.kind == 2 {
+        let nm = sym(inout lc, in ast, mod_idx, p.a);
+        let idx = lc.ir.pts.len();
+        lc
+            .ir
+            .pts
+            .push(
+                Pt {
+                    kind: Pat::Bind,
+                    s0: s0,
+                    s1: s1,
+                    a: widen_u64(nm),
+                    b: 0,
+                    c: 0,
+                    n: 0
+                }
+            );
+        return idx;
+    }
+    if p.kind == 3 {
+        let lit = match ast.lits.get(idx_from_raw[SurfLit](p.a)) {
+            Option::Some(l) => l,
+            Option::None => SurfLit {
+                kind: 3,
+                neg: false,
+                bits: 0,
+                hi: 0
+            },
+        };
+        let lk: u64 = if lit.kind == 1 {
+            Lit::Int
+        } else if lit.kind == 2 {
+            Lit::Float
+        } else if lit.kind == 3 {
+            Lit::Bool
+        } else if lit.kind == 4 {
+            Lit::String
+        } else {
+            Lit::Int
+        };
+        let lo = if lit.kind == 4 {
+            widen_u64(sym(inout lc, in ast, mod_idx, n32(lit.bits)))
+        } else if lit.kind == 1 && lit.neg {
+            wrapping_sub(0, lit.bits)
+        } else {
+            lit.bits
+        };
+        let hi = if lit.kind == 1 && lit.neg {
+            if lit.bits == 0 {
+                wrapping_sub(0, lit.hi)
+            } else {
+                wrapping_sub(NONE64, lit.hi)
+            }
+        } else {
+            lit.hi
+        };
+        let idx = lc.ir.pts.len();
+        lc
+            .ir
+            .pts
+            .push(
+                Pt {
+                    kind: Pat::Literal,
+                    s0: s0,
+                    s1: s1,
+                    a: lk,
+                    b: lo,
+                    c: hi,
+                    n: 0
+                }
+            );
+        return idx;
+    }
+    if p.kind == 4 {
+        let n = list_len(in ast, p.a);
+        let mut sub = ChunkSeq::new[u64]();
+        for i in 0..n {
+            sub.push(lower_pat(inout lc, in ast, mod_idx, list_at(in ast, p.a, i)));
+        }
+        let b0 = lc.ir.pxs.len();
+        for i in 0..sub.len() {
+            match sub.try_get(i) {
+                Option::Some(v) => lc.ir.pxs.push(v),
+                Option::None => {},
+            }
+        }
+        let idx = lc.ir.pts.len();
+        lc
+            .ir
+            .pts
+            .push(
+                Pt {
+                    kind: Pat::Tuple,
+                    s0: s0,
+                    s1: s1,
+                    a: 0,
+                    b: b0,
+                    c: 0,
+                    n: n
+                }
+            );
+        return idx;
+    }
+    // Pat::Constructor (kind 5)
+    let cname = sym(inout lc, in ast, mod_idx, p.a);
+    let n = list_len(in ast, p.b) / 2;
+    let mut pairs = ChunkSeq::new[u64]();
+    for i in 0..n {
+        let fnm = sym(inout lc, in ast, mod_idx, list_at(in ast, p.b, wrapping_mul(i, 2)));
+        let sub = lower_pat(
+            inout lc,
+            in ast,
+            mod_idx,
+            list_at(in ast, p.b, wrapping_add(wrapping_mul(i, 2), 1))
+        );
+        pairs.push(widen_u64(fnm));
+        pairs.push(sub);
+    }
+    let b0 = lc.ir.pxs.len();
+    for i in 0..pairs.len() {
+        match pairs.try_get(i) {
+            Option::Some(v) => lc.ir.pxs.push(v),
+            Option::None => {},
+        }
+    }
+    let idx = lc.ir.pts.len();
+    lc
+        .ir
+        .pts
+        .push(
+            Pt {
+                kind: Pat::Constructor,
+                s0: s0,
+                s1: s1,
+                a: widen_u64(cname),
+                b: b0,
+                c: widen_u64(p.c),
+                n: n
+            }
+        );
+    idx
+}
+
+const I_WRAPPING: u64 = 1;
+const I_CONVERSION: u64 = 4;
+const I_ROTATE: u64 = 8;
+
+fn name_eq(in names: Names, sym: u32, in lit: Str) -> bool {
+    let b = lit.as_bytes();
+    if names.size(sym) != b.len() {
+        return false;
+    }
+    for i in 0..b.len() {
+        let c = match b.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if names.byte(sym, i) != c {
+            return false;
+        }
+    }
+    true
+}
+
+fn name_starts(in names: Names, sym: u32, in pfx: Str) -> bool {
+    let b = pfx.as_bytes();
+    if names.size(sym) < b.len() {
+        return false;
+    }
+    for i in 0..b.len() {
+        let c = match b.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if names.byte(sym, i) != c {
+            return false;
+        }
+    }
+    true
+}
+
+fn intrinsic_class(in names: Names, sym: u32) -> u64 {
+    if name_eq(in names, sym, in "wrapping_add")
+        || name_eq(in names, sym, in "wrapping_sub")
+        || name_eq(in names, sym, in "wrapping_mul")
+        || name_eq(in names, sym, in "wrapping_div")
+        || name_eq(in names, sym, in "wrapping_rem") {
+        return I_WRAPPING;
+    }
+    if name_eq(in names, sym, in "rotate_left") || name_eq(in names, sym, in "rotate_right") {
+        return I_ROTATE;
+    }
+    if name_starts(in names, sym, in "widen_")
+        || name_starts(in names, sym, in "narrow_")
+        || name_starts(in names, sym, in "wrapping_u")
+        || name_starts(in names, sym, in "wrapping_i") {
+        return I_CONVERSION;
+    }
+    0
+}
+
+fn push_xs(inout lc: LowerCtx, in vals: ChunkSeq[u64]) -> u64 {
+    let a = lc.ir.xs.len();
+    for i in 0..vals.len() {
+        match vals.try_get(i) {
+            Option::Some(v) => lc.ir.xs.push(v),
+            Option::None => {},
+        }
+    }
+    a
+}
+
+fn lower_expr(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, expr_id: u32) -> u64 {
+    if expr_id == ast_none() {
+        return NONE64;
+    }
+    let e = match ast.exprs.get(idx_from_raw[ExprNode](expr_id)) {
+        Option::Some(v) => v,
+        Option::None => return NONE64,
+    };
+    let off = wrapping_shl_u64(mod_idx, 32);
+    let s0 = off | widen_u64(e.start);
+    let s1 = off | widen_u64(e.end);
+    if e.kind == 1 {
+        let lit = match ast.lits.get(idx_from_raw[SurfLit](e.a)) {
+            Option::Some(l) => l,
+            Option::None => SurfLit {
+                kind: 3,
+                neg: false,
+                bits: 0,
+                hi: 0
+            },
+        };
+        let lk: u64 = if lit.kind == 1 {
+            Lit::Int
+        } else if lit.kind == 2 {
+            Lit::Float
+        } else if lit.kind == 3 {
+            Lit::Bool
+        } else if lit.kind == 4 {
+            Lit::String
+        } else {
+            Lit::Int
+        };
+        let lo = if lit.kind == 4 {
+            widen_u64(sym(inout lc, in ast, mod_idx, n32(lit.bits)))
+        } else if lit.kind == 1 && lit.neg {
+            wrapping_sub(0, lit.bits)
+        } else {
+            lit.bits
+        };
+        let hi = if lit.kind == 1 && lit.neg {
+            if lit.bits == 0 {
+                wrapping_sub(0, lit.hi)
+            } else {
+                wrapping_sub(NONE64, lit.hi)
+            }
+        } else {
+            lit.hi
+        };
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_LITERAL,
+                    s0: s0,
+                    s1: s1,
+                    a: lk,
+                    b: lo,
+                    c: hi,
+                    n: 0,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 2 {
+        let nm0 = sym(inout lc, in ast, mod_idx, e.a);
+        let nm = if lc.names.has_prefix(nm0, in "StdEnv::".as_bytes())
+            || lc.names.has_prefix(nm0, in "StdFs::".as_bytes()) {
+            let mut fbuf = ChunkSeq::new[u8]();
+            fbuf.push(70);
+            fbuf.push(102);
+            fbuf.push(105);
+            fbuf.push(36);
+            lc.names.write(nm0, inout fbuf);
+            lc.names.intern(in fbuf.as_slice())
+        } else if lc.names.spells(nm0, in "checked_add_u64".as_bytes()) {
+            lc.names.intern(in "vesper__stage2__intrinsics__checked_1add_1u64".as_bytes())
+        } else if lc.names.spells(nm0, in "checked_sub_u64".as_bytes()) {
+            lc.names.intern(in "vesper__stage2__intrinsics__checked_1sub_1u64".as_bytes())
+        } else if lc.names.spells(nm0, in "checked_mul_u64".as_bytes()) {
+            lc.names.intern(in "vesper__stage2__intrinsics__checked_1mul_1u64".as_bytes())
+        } else if lc.names.spells(nm0, in "checked_add_u128".as_bytes()) {
+            lc.names.intern(in "vesper__stage2__intrinsics__checked_1add_1u128".as_bytes())
+        } else if lc.names.spells(nm0, in "checked_mul_u128".as_bytes()) {
+            lc.names.intern(in "vesper__stage2__intrinsics__checked_1mul_1u128".as_bytes())
+        } else if lc.names.spells(nm0, in "wrapping_neg_i64".as_bytes()) {
+            lc.names.intern(in "vesper__stage2__intrinsics__wrapping_1neg_1i64".as_bytes())
+        } else if lc.names.spells(nm0, in "wrapping_shl_u64".as_bytes()) {
+            lc.names.intern(in "vesper__stage2__intrinsics__wrapping_1shl_1u64".as_bytes())
+        } else if lc.names.spells(nm0, in "wrapping_shr_u64".as_bytes()) {
+            lc.names.intern(in "vesper__stage2__intrinsics__wrapping_1shr_1u64".as_bytes())
+        } else if lc.names.spells(nm0, in "wrapping_shl_u32".as_bytes()) {
+            lc.names.intern(in "vesper__stage2__intrinsics__wrapping_1shl_1u32".as_bytes())
+        } else if lc.names.spells(nm0, in "wrapping_shr_u32".as_bytes()) {
+            lc.names.intern(in "vesper__stage2__intrinsics__wrapping_1shr_1u32".as_bytes())
+        } else if lc.names.spells(nm0, in "trailing_zeros_u64".as_bytes()) {
+            lc.names.intern(in "vesper__stage2__intrinsics__trailing_1zeros_1u64".as_bytes())
+        } else {
+            nm0
+        };
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_NAME,
+                    s0: s0,
+                    s1: s1,
+                    a: widen_u64(nm),
+                    b: 0,
+                    c: 0,
+                    n: 0,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 3 {
+        let n = list_len(in ast, e.a);
+        let mut elems = ChunkSeq::new[u64]();
+        for i in 0..n {
+            elems.push(lower_expr(inout lc, in ast, mod_idx, list_at(in ast, e.a, i)));
+        }
+        let a0 = push_xs(inout lc, in elems);
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_TUPLE,
+                    s0: s0,
+                    s1: s1,
+                    a: a0,
+                    b: 0,
+                    c: 0,
+                    n: n,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 4 {
+        let sname = sym(inout lc, in ast, mod_idx, e.a);
+        let n = list_len(in ast, e.b) / 2;
+        let mut pairs = ChunkSeq::new[u64]();
+        for i in 0..n {
+            let fnm = sym(inout lc, in ast, mod_idx, list_at(in ast, e.b, wrapping_mul(i, 2)));
+            let fv = lower_expr(
+                inout lc,
+                in ast,
+                mod_idx,
+                list_at(in ast, e.b, wrapping_add(wrapping_mul(i, 2), 1))
+            );
+            pairs.push(widen_u64(fnm));
+            pairs.push(fv);
+        }
+        let b0 = push_xs(inout lc, in pairs);
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_STRUCT,
+                    s0: s0,
+                    s1: s1,
+                    a: widen_u64(sname),
+                    b: b0,
+                    c: 0,
+                    n: n,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 5 {
+        let n = list_len(in ast, e.a);
+        let mut stmts = ChunkSeq::new[u64]();
+        for i in 0..n {
+            let sid = list_at(in ast, e.a, i);
+            match ast.stmts.get(idx_from_raw[StmtNode](sid)) {
+                Option::Some(st) => {
+                    let is_let: u64 = if st.kind == 1 {
+                        1
+                    } else {
+                        0
+                    };
+                    let pat = if st.kind == 1 {
+                        let p0 = lower_pat(inout lc, in ast, mod_idx, st.pat);
+                        if st.ty != ast_none() {
+                            let lty = match lc.caches.try_get_mut(mod_idx) {
+                                Option::Some(cache) => lower_ty(
+                                    in ast,
+                                    st.ty,
+                                    inout lc.names,
+                                    inout lc.types,
+                                    inout cache,
+                                    inout lc.tmp
+                                ),
+                                Option::None => 0,
+                            };
+                            match lc.ir.pts.try_get(p0) {
+                                Option::Some(pv) => {
+                                    if pv.kind != Pat::Literal && pv.kind != Pat::Constructor {
+                                        let mut p2 = pv;
+                                        p2.c = wrapping_add(widen_u64(lty), 1);
+                                        let _ok = lc.ir.pts.try_set(p0, p2);
+                                    }
+                                },
+                                Option::None => {},
+                            }
+                        }
+                        p0
+                    } else {
+                        0
+                    };
+                    let val = lower_expr(inout lc, in ast, mod_idx, st.value);
+                    stmts.push(is_let);
+                    stmts.push(pat);
+                    stmts.push(val);
+                },
+                Option::None => {},
+            }
+        }
+        let tail = lower_expr(inout lc, in ast, mod_idx, e.b);
+        let a0 = push_xs(inout lc, in stmts);
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_BLOCK,
+                    s0: s0,
+                    s1: s1,
+                    a: a0,
+                    b: tail,
+                    c: 0,
+                    n: n,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 6 {
+        let callee = lower_expr(inout lc, in ast, mod_idx, e.a);
+        let m = list_len(in ast, e.b);
+        let c0 = if m == 0 {
+            0
+        } else {
+            let mut targs = ChunkSeq::new[u64]();
+            for i in 0..m {
+                let ty = match lc.caches.try_get_mut(mod_idx) {
+                    Option::Some(cache) => lower_ty(
+                        in ast,
+                        list_at(in ast, e.b, i),
+                        inout lc.names,
+                        inout lc.types,
+                        inout cache,
+                        inout lc.tmp
+                    ),
+                    Option::None => 0,
+                };
+                targs.push(widen_u64(ty));
+            }
+            push_xs(inout lc, in targs)
+        };
+        let n = list_len(in ast, e.c);
+        match lc.ir.exs.try_get(callee) {
+            Option::Some(ce) => {
+                if ce.kind == X_FIELD && m == 0 {
+                    if n == 0 && lc.names.spells(n32(ce.b), in "hash".as_bytes()) {
+                        let wop = widen_u64(lc.names.intern(in "widen_u64".as_bytes()));
+                        let idx = lc.ir.exs.len();
+                        lc
+                            .ir
+                            .exs
+                            .push(
+                                Ex {
+                                    kind: X_UNARY,
+                                    s0: s0,
+                                    s1: s1,
+                                    a: wop,
+                                    b: ce.a,
+                                    c: 0,
+                                    n: 0,
+                                    m: 0,
+                                    x: 0
+                                }
+                            );
+                        return idx;
+                    }
+                    if n == 1 && lc.names.spells(n32(ce.b), in "eq".as_bytes()) {
+                        let eop = widen_u64(lc.names.intern(in "==".as_bytes()));
+                        let rhs = match ast
+                            .args
+                            .get(idx_from_raw[ArgNode](list_at(in ast, e.c, 0))) {
+                            Option::Some(ag) => lower_expr(inout lc, in ast, mod_idx, ag.expr),
+                            Option::None => 0,
+                        };
+                        let idx = lc.ir.exs.len();
+                        lc
+                            .ir
+                            .exs
+                            .push(
+                                Ex {
+                                    kind: X_BINARY,
+                                    s0: s0,
+                                    s1: s1,
+                                    a: eop,
+                                    b: ce.a,
+                                    c: rhs,
+                                    n: 0,
+                                    m: 0,
+                                    x: 0
+                                }
+                            );
+                        return idx;
+                    }
+                }
+            },
+            Option::None => {},
+        }
+        let b0 = if n == 0 {
+            0
+        } else {
+            let mut args = ChunkSeq::new[u64]();
+            for i in 0..n {
+                let aid = list_at(in ast, e.c, i);
+                match ast.args.get(idx_from_raw[ArgNode](aid)) {
+                    Option::Some(ag) => {
+                        let av = lower_expr(inout lc, in ast, mod_idx, ag.expr);
+                        args.push(widen_u64(ag.pass));
+                        args.push(av);
+                    },
+                    Option::None => {},
+                }
+            }
+            push_xs(inout lc, in args)
+        };
+        let iclass: u64 = match lc.ir.exs.try_get(callee) {
+            Option::Some(ce) => if ce.kind == X_NAME {
+                intrinsic_class(in lc.names, n32(ce.a))
+            } else {
+                0
+            },
+            Option::None => 0
+        };
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_CALL,
+                    s0: s0,
+                    s1: s1,
+                    a: callee,
+                    b: b0,
+                    c: c0,
+                    n: n,
+                    m: m,
+                    x: iclass
+                }
+            );
+        return idx;
+    }
+    if e.kind == 7 {
+        let base = lower_expr(inout lc, in ast, mod_idx, e.a);
+        let fnm = sym(inout lc, in ast, mod_idx, e.b);
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_FIELD,
+                    s0: s0,
+                    s1: s1,
+                    a: base,
+                    b: widen_u64(fnm),
+                    c: 0,
+                    n: 0,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 8 {
+        let base = lower_expr(inout lc, in ast, mod_idx, e.a);
+        let iv0 = lower_expr(inout lc, in ast, mod_idx, e.b);
+        let iv = match lc.ir.exs.try_get(iv0) {
+            Option::Some(rx) => if rx.kind == X_RANGE && rx.c == 0 {
+                let dd = lc.names.intern(in "..".as_bytes());
+                let bidx = lc.ir.exs.len();
+                lc
+                    .ir
+                    .exs
+                    .push(
+                        Ex {
+                            kind: X_BINARY,
+                            s0: rx.s0,
+                            s1: rx.s1,
+                            a: widen_u64(dd),
+                            b: rx.a,
+                            c: rx.b,
+                            n: 0,
+                            m: 0,
+                            x: 0
+                        }
+                    );
+                bidx
+            } else {
+                iv0
+            },
+            Option::None => iv0,
+        };
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_INDEX,
+                    s0: s0,
+                    s1: s1,
+                    a: base,
+                    b: iv,
+                    c: 0,
+                    n: 0,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 9 {
+        let inner = lower_expr(inout lc, in ast, mod_idx, e.a);
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_TRY,
+                    s0: s0,
+                    s1: s1,
+                    a: inner,
+                    b: 0,
+                    c: 0,
+                    n: 0,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 10 {
+        let op = sym(inout lc, in ast, mod_idx, e.a);
+        let v = lower_expr(inout lc, in ast, mod_idx, e.b);
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_UNARY,
+                    s0: s0,
+                    s1: s1,
+                    a: widen_u64(op),
+                    b: v,
+                    c: 0,
+                    n: 0,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 11 || e.kind == 12 {
+        let op = sym(inout lc, in ast, mod_idx, e.a);
+        let l = lower_expr(inout lc, in ast, mod_idx, e.b);
+        let r = lower_expr(inout lc, in ast, mod_idx, e.c);
+        let k: u8 = if e.kind == 11 {
+            X_BINARY
+        } else {
+            X_ASSIGN
+        };
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: k,
+                    s0: s0,
+                    s1: s1,
+                    a: widen_u64(op),
+                    b: l,
+                    c: r,
+                    n: 0,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 13 {
+        let cond = lower_expr(inout lc, in ast, mod_idx, e.a);
+        let th = lower_expr(inout lc, in ast, mod_idx, e.b);
+        let el = lower_expr(inout lc, in ast, mod_idx, e.c);
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_IF,
+                    s0: s0,
+                    s1: s1,
+                    a: cond,
+                    b: th,
+                    c: el,
+                    n: 0,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 14 {
+        let val = lower_expr(inout lc, in ast, mod_idx, e.a);
+        let n = list_len(in ast, e.b) / 2;
+        let mut arms = ChunkSeq::new[u64]();
+        for i in 0..n {
+            let pt = lower_pat(inout lc, in ast, mod_idx, list_at(in ast, e.b, wrapping_mul(i, 2)));
+            let body = lower_expr(
+                inout lc,
+                in ast,
+                mod_idx,
+                list_at(in ast, e.b, wrapping_add(wrapping_mul(i, 2), 1))
+            );
+            arms.push(pt);
+            arms.push(body);
+        }
+        let b0 = push_xs(inout lc, in arms);
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_MATCH,
+                    s0: s0,
+                    s1: s1,
+                    a: val,
+                    b: b0,
+                    c: 0,
+                    n: n,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 16 {
+        let eff_node = match ast.effect_nodes.get(idx_from_raw[EffectNode](e.a)) {
+            Option::Some(v) => v,
+            Option::None => EffectNode {
+                label: ast_none(),
+                name: ast_none(),
+                args: 0
+            },
+        };
+        let lbl = if eff_node.label == ast_none() {
+            0
+        } else {
+            wrapping_add(sym(inout lc, in ast, mod_idx, eff_node.label), 1)
+        };
+        let ename = if eff_node.name == ast_none() {
+            0
+        } else {
+            sym(inout lc, in ast, mod_idx, eff_node.name)
+        };
+        let mut targs = ChunkSeq::new[u64]();
+        let tn = list_len(in ast, eff_node.args);
+        for ti in 0..tn {
+            let ty = match lc.caches.try_get_mut(mod_idx) {
+                Option::Some(cache) => lower_ty(
+                    in ast,
+                    list_at(in ast, eff_node.args, ti),
+                    inout lc.names,
+                    inout lc.types,
+                    inout cache,
+                    inout lc.tmp
+                ),
+                Option::None => 0,
+            };
+            targs.push(widen_u64(ty));
+        }
+        let ta = push_xs(inout lc, in targs);
+        let has_state = e.b != ast_none();
+        let spat = if has_state {
+            lower_pat(inout lc, in ast, mod_idx, e.b)
+        } else {
+            NONE64
+        };
+        let sexpr = if has_state {
+            lower_expr(inout lc, in ast, mod_idx, e.c)
+        } else {
+            NONE64
+        };
+        let body = lower_expr(inout lc, in ast, mod_idx, e.d);
+        let cn = list_len(in ast, e.e);
+        let mut cls = ChunkSeq::new[Cl]();
+        for ci in 0..cn {
+            let cid = list_at(in ast, e.e, ci);
+            let cnode = match ast.clauses.get(idx_from_raw[ClauseNode](cid)) {
+                Option::Some(v) => v,
+                Option::None => continue,
+            };
+            let cname = if cnode.name == ast_none() {
+                0
+            } else {
+                sym(inout lc, in ast, mod_idx, cnode.name)
+            };
+            let pn = list_len(in ast, cnode.pats);
+            let mut pats = ChunkSeq::new[u64]();
+            for pi in 0..pn {
+                pats.push(lower_pat(inout lc, in ast, mod_idx, list_at(in ast, cnode.pats, pi)));
+            }
+            let pa = push_xs(inout lc, in pats);
+            let cbody = lower_expr(inout lc, in ast, mod_idx, cnode.body);
+            cls
+                .push(
+                    Cl {
+                        name: cname,
+                        pa: pa,
+                        pn: pn,
+                        body: cbody
+                    }
+                );
+        }
+        let ret = lc.ir.cls.len();
+        for ci in 0..cls.len() {
+            match cls.try_get(ci) {
+                Option::Some(cl) => lc.ir.cls.push(cl),
+                Option::None => {},
+            }
+        }
+        let on = if cls.len() > 0 {
+            wrapping_sub(cls.len(), 1)
+        } else {
+            0
+        };
+        let pool = lc.ir.pool_count;
+        lc.ir.pool_count = wrapping_add(lc.ir.pool_count, 1);
+        let empty_es = ChunkSeq::new[EffNode]();
+        let empty_ea = ChunkSeq::new[u32]();
+        let empty_row = lc.types.mk_row(in empty_es, in empty_ea, 0);
+        let hidx = lc.ir.hds.len();
+        lc
+            .ir
+            .hds
+            .push(
+                Hd {
+                    pool: pool,
+                    label: lbl,
+                    eff_name: ename,
+                    ta: ta,
+                    tn: tn,
+                    has_state: has_state,
+                    spat: spat,
+                    sexpr: sexpr,
+                    body: body,
+                    ret: ret,
+                    on: on,
+                    outgoing: empty_row,
+                    ma: 0,
+                    mn: 0
+                }
+            );
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_HANDLE,
+                    s0: s0,
+                    s1: s1,
+                    a: hidx,
+                    b: 0,
+                    c: 0,
+                    n: 0,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 17 {
+        let body = lower_expr(inout lc, in ast, mod_idx, e.a);
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_LOOP,
+                    s0: s0,
+                    s1: s1,
+                    a: body,
+                    b: 0,
+                    c: 0,
+                    n: 0,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 18 {
+        let pt = lower_pat(inout lc, in ast, mod_idx, e.a);
+        let it = lower_expr(inout lc, in ast, mod_idx, e.b);
+        let body = lower_expr(inout lc, in ast, mod_idx, e.c);
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_FOR,
+                    s0: s0,
+                    s1: s1,
+                    a: pt,
+                    b: it,
+                    c: body,
+                    n: 0,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 19 {
+        let st = lower_expr(inout lc, in ast, mod_idx, e.a);
+        let en = lower_expr(inout lc, in ast, mod_idx, e.b);
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_RANGE,
+                    s0: s0,
+                    s1: s1,
+                    a: st,
+                    b: en,
+                    c: widen_u64(e.c),
+                    n: 0,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 20 || e.kind == 21 {
+        let v = lower_expr(inout lc, in ast, mod_idx, e.a);
+        let k: u8 = if e.kind == 20 {
+            X_BREAK
+        } else {
+            X_RETURN
+        };
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: k,
+                    s0: s0,
+                    s1: s1,
+                    a: v,
+                    b: 0,
+                    c: 0,
+                    n: 0,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 22 {
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_CONTINUE,
+                    s0: s0,
+                    s1: s1,
+                    a: 0,
+                    b: 0,
+                    c: 0,
+                    n: 0,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    if e.kind == 15 {
+        let pn = list_len(in ast, e.a);
+        let pa = lc.ir.pms.len();
+        for pi in 0..pn {
+            let pm = match ast.params.get(idx_from_raw[ParamNode](list_at(in ast, e.a, pi))) {
+                Option::Some(v) => v,
+                Option::None => ParamNode {
+                    name: ast_none(),
+                    pass: 0,
+                    projections: 0,
+                    ty: ast_none(),
+                    start: 0,
+                    end: 0
+                },
+            };
+            let pname = if pm.name == ast_none() {
+                0
+            } else {
+                sym(inout lc, in ast, mod_idx, pm.name)
+            };
+            let pty = if pm.ty == ast_none() {
+                0
+            } else {
+                match lc.caches.try_get_mut(mod_idx) {
+                    Option::Some(cache) => lower_ty(
+                        in ast,
+                        pm.ty,
+                        inout lc.names,
+                        inout lc.types,
+                        inout cache,
+                        inout lc.tmp
+                    ),
+                    Option::None => 0,
+                }
+            };
+            lc
+                .ir
+                .pms
+                .push(
+                    Pm {
+                        name: pname,
+                        pass: pm.pass,
+                        qa: 0,
+                        qn: 0,
+                        ty: pty,
+                        s0: widen_u64(pm.start),
+                        s1: widen_u64(pm.end)
+                    }
+                );
+        }
+        let body = if e.e == ast_none() {
+            NONE64
+        } else {
+            lower_expr(inout lc, in ast, mod_idx, e.e)
+        };
+        let pool = lc.ir.pool_count;
+        lc.ir.pool_count = wrapping_add(lc.ir.pool_count, 1);
+        let idx = lc.ir.exs.len();
+        lc
+            .ir
+            .exs
+            .push(
+                Ex {
+                    kind: X_CLOSURE,
+                    s0: s0,
+                    s1: s1,
+                    a: pool,
+                    b: pa,
+                    c: body,
+                    n: pn,
+                    m: 0,
+                    x: 0
+                }
+            );
+        return idx;
+    }
+    let idx = lc.ir.exs.len();
+    lc
+        .ir
+        .exs
+        .push(
+            Ex {
+                // X_FOREIGN (0): mark unknown surface expression kind as unsupported.
+                kind: 0,
+                s0: s0,
+                s1: s1,
+                a: 0,
+                b: 0,
+                c: 0,
+                n: 0,
+                m: 0,
+                x: 0
+            }
+        );
+    idx
+}
+
+fn last_colon_seg(inout names: Names, sym: u32) -> u32 {
+    if sym == 0 || sym == 4294967295 {
+        return 0;
+    }
+    let size = names.size(sym);
+    let mut last = NONE64;
+    let mut i: u64 = 0;
+    loop {
+        if wrapping_add(i, 1) >= size {
+            break;
+        }
+        if names.byte(sym, i) == 58 && names.byte(sym, wrapping_add(i, 1)) == 58 {
+            last = wrapping_add(i, 2);
+            i = wrapping_add(i, 2);
+        } else {
+            i = wrapping_add(i, 1);
+        }
+    }
+    if last == NONE64 {
+        return sym;
+    }
+    let mut buf = ChunkSeq::new[u8]();
+    for j in last..size {
+        buf.push(names.byte(sym, j));
+    }
+    names.intern(in buf.as_slice())
+}
+
+pub fn build_ir_ast(sink prog: CollectedProgram, in mods: ChunkSeq[AssembledModule])
+    -> (IrAst, Names, Types, World) {
+    build_ir_ast_for_entry(sink prog, in mods, in "")
+}
+
+pub fn build_ir_ast_for_entry(
+    sink prog: CollectedProgram,
+    in mods: ChunkSeq[AssembledModule],
+    in entry_name: Str
+) -> (IrAst, Names, Types, World) {
+    let mut caches = ChunkSeq::new[ChunkSeq[u32]]();
+    for _i in 0..mods.len() {
+        caches.push(sink ChunkSeq::new[u32]());
+    }
+    let ir0 = IrAst {
+        exs: ChunkSeq::new[Ex](),
+        pts: ChunkSeq::new[Pt](),
+        xs: ChunkSeq::new[u64](),
+        pxs: ChunkSeq::new[u64](),
+        psyms: ChunkSeq::new[u32](),
+        paths: ChunkSeq::new[PathR](),
+        projs: ChunkSeq::new[u64](),
+        fns: ChunkSeq::new[FnR](),
+        pms: ChunkSeq::new[Pm](),
+        gens: ChunkSeq::new[Gn](),
+        caps: ChunkSeq::new[u32](),
+        exts: ChunkSeq::new[u32](),
+        fn_by_key: ChunkSeq::new[u32](),
+        effs: ChunkSeq::new[Ef](),
+        egens: ChunkSeq::new[u32](),
+        eops: ChunkSeq::new[Eop](),
+        eff_by_name: ChunkSeq::new[u32](),
+        cls: ChunkSeq::new[Cl](),
+        hds: ChunkSeq::new[Hd](),
+        pool_count: 0
+    };
+    let mut lc = LowerCtx {
+        ir: ir0,
+        names: prog.names,
+        types: prog.types,
+        tmp: String::new(),
+        caches: caches
+    };
+    let mut ex_start = ChunkSeq::new[u64]();
+    let mut ex_end = ChunkSeq::new[u64]();
+    for fi in 0..prog.fns.len() {
+        let f = match prog.fns.try_get(fi) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        let pa = lc.ir.pms.len();
+        for pi in 0..w(f.pn) {
+            match prog.params.try_get(wrapping_add(w(f.pa), pi)) {
+                Option::Some(pm) => {
+                    lc
+                        .ir
+                        .pms
+                        .push(
+                            Pm {
+                                name: pm.name,
+                                pass: pm.pass,
+                                qa: 0,
+                                qn: 0,
+                                ty: pm.ty,
+                                s0: 0,
+                                s1: 0
+                            }
+                        );
+                },
+                Option::None => {},
+            }
+        }
+        let ga = lc.ir.gens.len();
+        for gi in 0..w(f.gn) {
+            match prog.fn_generics.try_get(wrapping_add(w(f.ga), gi)) {
+                Option::Some(gn) => {
+                    lc
+                        .ir
+                        .gens
+                        .push(
+                            Gn {
+                                name: gn.name,
+                                bound: gn.bound,
+                                row: gn.row
+                            }
+                        );
+                },
+                Option::None => {},
+            }
+        }
+        let ex0 = lc.ir.exs.len();
+        let has_b = f.body != ast_none();
+        let body_id = if !has_b {
+            NONE64
+        } else {
+            match mods.try_get(w(f.mod_idx)) {
+                Option::Some(m) => lower_expr(inout lc, in m.ast, w(f.mod_idx), f.body),
+                Option::None => NONE64,
+            }
+        };
+        let ex1 = lc.ir.exs.len();
+        ex_start.push(ex0);
+        ex_end.push(ex1);
+        let fidx = lc.ir.fns.len();
+        lc
+            .ir
+            .fns
+            .push(
+                FnR {
+                    key: f.name,
+                    name: f.name,
+                    has_body: has_b,
+                    body: body_id,
+                    pa: pa,
+                    pn: widen_u64(f.pn),
+                    result: f.result,
+                    effects: f.effects,
+                    ga: ga,
+                    gn: widen_u64(f.gn),
+                    ca: 0,
+                    cn: 0,
+                    owner: f.name,
+                    xa: 0,
+                    xn: 0
+                }
+            );
+        set_by_symbol(inout lc.ir.fn_by_key, f.name, n32(wrapping_add(fidx, 1)));
+    }
+    for ei in 0..prog.eff_decls.len() {
+        let ed = match prog.eff_decls.try_get(ei) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        let ga = lc.ir.egens.len();
+        for gi in 0..w(ed.gn) {
+            match prog.eff_gens.try_get(wrapping_add(w(ed.ga), gi)) {
+                Option::Some(gn) => lc.ir.egens.push(gn.name),
+                Option::None => {},
+            }
+        }
+        let oa = lc.ir.eops.len();
+        for oi in 0..w(ed.on) {
+            let op = match prog.eff_ops.try_get(wrapping_add(w(ed.oa), oi)) {
+                Option::Some(v) => v,
+                Option::None => continue,
+            };
+            let pa = lc.ir.pms.len();
+            for pi in 0..w(op.pn) {
+                match prog.params.try_get(wrapping_add(w(op.pa), pi)) {
+                    Option::Some(pm) => {
+                        lc
+                            .ir
+                            .pms
+                            .push(
+                                Pm {
+                                    name: pm.name,
+                                    pass: pm.pass,
+                                    qa: 0,
+                                    qn: 0,
+                                    ty: pm.ty,
+                                    s0: 0,
+                                    s1: 0
+                                }
+                            );
+                    },
+                    Option::None => {},
+                }
+            }
+            lc
+                .ir
+                .eops
+                .push(
+                    Eop {
+                        name: op.name,
+                        pa: pa,
+                        pn: widen_u64(op.pn),
+                        result: op.result
+                    }
+                );
+        }
+        let eidx = lc.ir.effs.len();
+        lc
+            .ir
+            .effs
+            .push(
+                Ef {
+                    name: ed.name,
+                    linear: ed.linear,
+                    ga: ga,
+                    gn: widen_u64(ed.gn),
+                    oa: oa,
+                    on: widen_u64(ed.on)
+                }
+            );
+        set_by_symbol(inout lc.ir.eff_by_name, ed.name, n32(wrapping_add(eidx, 1)));
+    }
+    if entry_name.len() > 0 {
+        let entry_sym = lc.names.intern(in entry_name.as_bytes());
+        let n_fns = lc.ir.fns.len();
+        let mut head = ChunkSeq::new[u32]();
+        let mut nodes_fidx = ChunkSeq::new[u64]();
+        let mut nodes_next = ChunkSeq::new[u64]();
+        for fi in 0..n_fns {
+            let f = lc.ir.function(fi);
+            if f.has_body {
+                let prev1 = u32_at(in head, w(f.name));
+                let nid1 = nodes_fidx.len();
+                nodes_fidx.push(fi);
+                nodes_next.push(w(prev1));
+                set_by_symbol(inout head, f.name, n32(wrapping_add(nid1, 1)));
+                let short = last_colon_seg(inout lc.names, f.name);
+                if short != f.name && short != 0 {
+                    let prev2 = u32_at(in head, w(short));
+                    let nid2 = nodes_fidx.len();
+                    nodes_fidx.push(fi);
+                    nodes_next.push(w(prev2));
+                    set_by_symbol(inout head, short, n32(wrapping_add(nid2, 1)));
+                }
+            }
+        }
+        let mut seen_sym = ChunkSeq::new[u32]();
+        let mut reachable = ChunkSeq::new[u32]();
+        for _i in 0..n_fns {
+            reachable.push(0);
+        }
+        let mut work = ChunkSeq::new[u64]();
+        let mut seed_syms = ChunkSeq::new[u32]();
+        seed_syms.push(entry_sym);
+        let mut wi: u64 = 0;
+        let mut si: u64 = 0;
+        loop {
+            loop {
+                if si >= seed_syms.len() {
+                    break;
+                }
+                let sym = u32_at(in seed_syms, si);
+                si = wrapping_add(si, 1);
+                if sym != 0 && sym != 4294967295 && u32_at(in seen_sym, w(sym)) == 0 {
+                    set_by_symbol(inout seen_sym, sym, 1);
+                    let mut cur = u32_at(in head, w(sym));
+                    loop {
+                        if cur == 0 {
+                            break;
+                        }
+                        let nid = wrapping_sub(w(cur), 1);
+                        let fi = match nodes_fidx.try_get(nid) {
+                            Option::Some(v) => v,
+                            Option::None => 0,
+                        };
+                        if u32_at(in reachable, fi) == 0 {
+                            let _ok = reachable.try_set(fi, 1);
+                            work.push(fi);
+                        }
+                        let nxt = match nodes_next.try_get(nid) {
+                            Option::Some(v) => v,
+                            Option::None => 0,
+                        };
+                        cur = n32(nxt);
+                    }
+                }
+            }
+            if wi >= work.len() {
+                break;
+            }
+            let fi = match work.try_get(wi) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            wi = wrapping_add(wi, 1);
+            let s0 = match ex_start.try_get(fi) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            let s1 = match ex_end.try_get(fi) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            for ei in s0..s1 {
+                let ex = lc.ir.ex(ei);
+                if ex.kind == X_NAME {
+                    let sym = n32(ex.a);
+                    seed_syms.push(sym);
+                    let short = last_colon_seg(inout lc.names, sym);
+                    if short != sym {
+                        seed_syms.push(short);
+                    }
+                } else if ex.kind == X_FIELD {
+                    seed_syms.push(n32(ex.b));
+                }
+            }
+        }
+        for fi in 0..n_fns {
+            if u32_at(in reachable, fi) == 0 {
+                let mut f = lc.ir.function(fi);
+                if f.has_body {
+                    f.has_body = false;
+                    let _ok = lc.ir.fns.try_set(fi, f);
+                }
+            }
+        }
+    }
+    (lc.ir, lc.names, lc.types, prog.world)
+}
