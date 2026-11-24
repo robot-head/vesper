@@ -18,7 +18,7 @@ installs a hook, and no Rust lowering changed.
 | Rust | Vesper | Differential | Result |
 |---|---|---|---|
 | `native::session::plan` (src/native_session.rs): binding validation, `word_buffer`, `validate_op`, `reject_suspending_recursion`, `specialized_function`, `fail_only`, `capability_only`, `contains_function`, the data-frame layout | `session.ves` | `{:?}` of the plan, or the refusal message, per case | 0 of 292 corpus worlds differ: 1,872 cases, 205 plans; plus the native-pulse examples' own bindings and 9 hand-written refusals |
-| `native_handlers::effect_key`, `Kind::of` (src/native_handlers/lower.rs) | `keys.ves` | the key of every effect instance of every row a world mentions, and the kind of every type | 0 of 292 worlds differ (25,864 lines) |
+| `native_handlers::effect_key`, `Kind::of` (src/native_handlers/lower.rs) | `keys.ves` | the key of every effect instance of every row a world mentions, and the kind of every type | 0 of 292 worlds differ (25,864 lines) | (removed with `src/native_handlers` in #1830)
 | the parts of `World` the plans read (function signatures, effect declarations with operations) | `tables.ves` | through the two above | |
 
 The session cases: every function whose row names a declared linear

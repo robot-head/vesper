@@ -160,7 +160,6 @@ MODULES = {
     "regions": ("SH2-9", "vesper-check-regions-seqs", "1.12-1.17x"),
     "trace_effects": ("SH2-8", "vesper-check-effects", ""),
     "freestanding": ("SH4-14", "", ""),
-    "native_handlers": ("SH4-10", "", ""),
     "packages": ("SH2-6", "vesper-check-names-packages", "0.72-0.87x wall"),
     "vector": ("SH4-11", "vesper-codegen-numeric", ""),
     "native_aggregates": ("SH4-8", "", ""),

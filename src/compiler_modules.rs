@@ -62,8 +62,6 @@ pub mod native_cold_outline;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_coverage;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod native_handlers;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod native_vectorize;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_verifiers;
