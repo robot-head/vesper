@@ -98,74 +98,55 @@ impl StoreRecord {
     /// Strict decode: unknown tags, bad lengths, overlapping or out-of-page
     /// ranges and trailing bytes are `Corrupt`.
     pub fn decode(payload: &[u8]) -> StoreResult<Self> {
-        let mut r = Reader {
-            bytes: payload,
-            at: 0,
-        };
-        let record = match r.u8()? {
-            1 => {
-                let page = r.u64()?;
-                let bytes = r.take(PAGE_SIZE)?.to_vec();
-                Self::PageImage { page, bytes }
-            }
-            2 => {
-                let page = r.u64()?;
-                let prev_lsn = r.u64()?;
-                let count = r.u16()? as usize;
-                let mut ranges = Vec::with_capacity(count.min(1024));
-                let mut end = 0usize;
-                for _ in 0..count {
-                    let offset = r.u16()? as usize;
-                    let len = r.u16()? as usize;
-                    if len == 0 || offset < end || offset + len > PAGE_SIZE {
-                        return Err(corrupt("page diff range"));
-                    }
-                    end = offset + len;
-                    ranges.push((offset as u16, r.take(len)?.to_vec()));
-                }
-                Self::PageDiff {
-                    page,
-                    prev_lsn,
-                    ranges,
-                }
-            }
-            3 => Self::Commit {
-                txn: r.u64()?,
-                ts: r.u64()?,
-            },
-            _ => return Err(corrupt("unknown store log record tag")),
-        };
-        if r.at != payload.len() {
-            return Err(corrupt("trailing store log record bytes"));
+        let mut hdr = [0u64; 4];
+        let mut stack_ranges = [0u64; 64 * 3];
+        let mut heap_ranges = Vec::new();
+        let mut status =
+            crate::port::binding::store_log_record_decode(payload, &mut hdr, &mut stack_ranges);
+        if status == 5 {
+            heap_ranges.resize(payload.len(), 0);
+            status =
+                crate::port::binding::store_log_record_decode(payload, &mut hdr, &mut heap_ranges);
         }
-        Ok(record)
-    }
-}
-struct Reader<'a> {
-    bytes: &'a [u8],
-    at: usize,
-}
-impl Reader<'_> {
-    fn take(&mut self, n: usize) -> StoreResult<&[u8]> {
-        let end = self
-            .at
-            .checked_add(n)
-            .ok_or_else(|| corrupt("log length"))?;
-        let s = self
-            .bytes
-            .get(self.at..end)
-            .ok_or_else(|| corrupt("truncated store log record"))?;
-        self.at = end;
-        Ok(s)
-    }
-    fn u8(&mut self) -> StoreResult<u8> {
-        Ok(self.take(1)?[0])
-    }
-    fn u16(&mut self) -> StoreResult<u16> {
-        Ok(u16::from_le_bytes(self.take(2)?.try_into().expect("2")))
-    }
-    fn u64(&mut self) -> StoreResult<u64> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("8")))
+        let ranges_buf: &[u64] = if heap_ranges.is_empty() {
+            &stack_ranges
+        } else {
+            &heap_ranges
+        };
+        match status {
+            0 => {}
+            1 => return Err(corrupt("truncated store log record")),
+            2 => return Err(corrupt("unknown store log record tag")),
+            3 => return Err(corrupt("page diff range")),
+            4 => return Err(corrupt("trailing store log record bytes")),
+            _ => return Err(corrupt("store log record")),
+        }
+        match hdr[0] {
+            1 => Ok(Self::PageImage {
+                page: hdr[1],
+                bytes: payload[9..9 + PAGE_SIZE].to_vec(),
+            }),
+            2 => {
+                let count = hdr[3] as usize;
+                let mut ranges = Vec::with_capacity(count);
+                for i in 0..count {
+                    let rb = i * 3;
+                    let off = ranges_buf[rb] as u16;
+                    let len = ranges_buf[rb + 1] as usize;
+                    let at = ranges_buf[rb + 2] as usize;
+                    ranges.push((off, payload[at..at + len].to_vec()));
+                }
+                Ok(Self::PageDiff {
+                    page: hdr[1],
+                    prev_lsn: hdr[2],
+                    ranges,
+                })
+            }
+            _ => Ok(Self::Commit {
+                txn: hdr[1],
+                ts: hdr[2],
+            }),
+        }
     }
 }
 

@@ -56,3 +56,5 @@ expect guest_mem_port layout_and_locate_match_rust -- out_of_bounds_and_overflow
 expect block_port discard_and_write_zeroes_match_rust -- span_and_config_match_rust
 # net: oversized TX frames are dropped.
 expect net_port tx_and_ctrl_match_rust -- config_space_matches_rust
+# vsock: peer credit saturates to zero on shrunken buf_alloc.
+expect vsock_port credit_saturates_on_shrunken_alloc -- header_codec_matches_rust

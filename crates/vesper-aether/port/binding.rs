@@ -484,9 +484,29 @@ impl Abi for crate::port_types::VqFault {
     }
 }
 
+impl Abi for crate::port_types::VsockHeader {
+    const WORDS: usize = 10;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.src_cid, &mut out[0..]);
+        Abi::put(&self.dst_cid, &mut out[1..]);
+        Abi::put(&self.src_port, &mut out[2..]);
+        Abi::put(&self.dst_port, &mut out[3..]);
+        Abi::put(&self.len, &mut out[4..]);
+        Abi::put(&self.kind, &mut out[5..]);
+        Abi::put(&self.op, &mut out[6..]);
+        Abi::put(&self.flags, &mut out[7..]);
+        Abi::put(&self.buf_alloc, &mut out[8..]);
+        Abi::put(&self.fwd_cnt, &mut out[9..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        crate::port_types::VsockHeader { src_cid: Abi::get(&words[0..]), dst_cid: Abi::get(&words[1..]), src_port: Abi::get(&words[2..]), dst_port: Abi::get(&words[3..]), len: Abi::get(&words[4..]), kind: Abi::get(&words[5..]), op: Abi::get(&words[6..]), flags: Abi::get(&words[7..]), buf_alloc: Abi::get(&words[8..]), fwd_cnt: Abi::get(&words[9..]) }
+    }
+}
+
 const _: () = assert!(<(u8, u64) as Abi>::WORDS == 2);
 const _: () = assert!(<Option<(u64, u64)> as Abi>::WORDS == 3);
 const _: () = assert!(<Option<crate::port_types::SlotError> as Abi>::WORDS == 6);
+const _: () = assert!(<Option<crate::port_types::VsockHeader> as Abi>::WORDS == 11);
 const _: () = assert!(<Option<u16> as Abi>::WORDS == 2);
 const _: () = assert!(<Result<(), crate::port_types::SeccompFault> as Abi>::WORDS == 4);
 const _: () = assert!(<Result<(u32, u64), crate::port_types::PvhFault> as Abi>::WORDS == 4);
@@ -506,6 +526,8 @@ const _: () = assert!(<crate::port_types::PvhFault as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port_types::SeccompFault as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port_types::SlotError as Abi>::WORDS == 5);
 const _: () = assert!(<crate::port_types::VqFault as Abi>::WORDS == 1);
+const _: () = assert!(<crate::port_types::VsockHeader as Abi>::WORDS == 10);
+const _: () = assert!(<u32 as Abi>::WORDS == 1);
 const _: () = assert!(<u64 as Abi>::WORDS == 1);
 
 unsafe extern "C" {
@@ -531,6 +553,10 @@ unsafe extern "C" {
     fn vesper_aether_slot_plan_verify_cross_vm(result: *mut u64, vm_ids: *mut u64, regions: *mut u64, region_vm: *mut u64) -> i64;
     fn vesper_aether_vq_packed_walk(result: *mut u64, mem: *mut u64, regions: *mut u64, busy: *mut u64, desc: i64, size: i64, index: i64, wrap: i64, occupied: i64, hint: i64, indirect_ok: i64, max_desc: i64, max_bytes: i64, max_work: i64, out: *mut u64) -> i64;
     fn vesper_aether_vq_split_walk(result: *mut u64, mem: *mut u64, regions: *mut u64, busy: *mut u64, desc: i64, driver: i64, size: i64, last_avail: i64, hint: i64, indirect_ok: i64, max_desc: i64, max_bytes: i64, max_work: i64, out: *mut u64) -> i64;
+    fn vesper_aether_vsock_decode_hdr(result: *mut u64, b: *mut u64) -> i64;
+    fn vesper_aether_vsock_encode_hdr(h: *mut u64, out: *mut u64) -> i64;
+    fn vesper_aether_vsock_peer_credit(peer_buf_alloc: i64, tx_cnt: i64, peer_fwd_cnt: i64) -> i64;
+    fn vesper_aether_vsock_validate_packet(h: *mut u64, payload_len: i64, guest_cid: i64) -> i64;
 }
 
 /// The sequence runtime of the Vesper library `aether`.
@@ -732,4 +758,45 @@ pub fn vq_split_walk(mem: &[u8], regions: &[u64], busy: &[u8], desc: u64, driver
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(mem, |view_mem| vesper_port_abi::with_slice(regions, |view_regions| vesper_port_abi::with_slice(busy, |view_busy| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_vq_split_walk(result.as_mut_ptr(), view_mem, view_regions, view_busy, desc as i64, driver as i64, size as i64, last_avail as i64, hint as i64, indirect_ok as i64, max_desc as i64, max_bytes as i64, max_work as i64, view_out) }))));
     <Result<u64, crate::port_types::VqFault> as Abi>::get(&result[0..])
+}
+
+/// Calls `vsock_decode_hdr` of the Vesper library `aether` (`vesper_aether_vsock_decode_hdr`).
+pub fn vsock_decode_hdr(b: &[u8]) -> Option<crate::port_types::VsockHeader> {
+    let mut result = [0u64; 11];
+    // SAFETY: `vesper_aether_vsock_decode_hdr` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_aether_vsock_decode_hdr(result.as_mut_ptr(), view_b) });
+    <Option<crate::port_types::VsockHeader> as Abi>::get(&result[0..])
+}
+
+/// Calls `vsock_encode_hdr` of the Vesper library `aether` (`vesper_aether_vsock_encode_hdr`).
+pub fn vsock_encode_hdr(h: crate::port_types::VsockHeader, out: &mut [u8]) -> u64 {
+    let mut arg_h = [0u64; <crate::port_types::VsockHeader as Abi>::WORDS];
+    Abi::put(&h, &mut arg_h);
+    // SAFETY: `vesper_aether_vsock_encode_hdr` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_vsock_encode_hdr(arg_h.as_mut_ptr(), view_out) });
+    raw as u64
+}
+
+/// Calls `vsock_peer_credit` of the Vesper library `aether` (`vesper_aether_vsock_peer_credit`).
+pub fn vsock_peer_credit(peer_buf_alloc: u32, tx_cnt: u32, peer_fwd_cnt: u32) -> u32 {
+    // SAFETY: `vesper_aether_vsock_peer_credit` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vsock_peer_credit(peer_buf_alloc as i64, tx_cnt as i64, peer_fwd_cnt as i64) };
+    raw as u32
+}
+
+/// Calls `vsock_validate_packet` of the Vesper library `aether` (`vesper_aether_vsock_validate_packet`).
+pub fn vsock_validate_packet(h: crate::port_types::VsockHeader, payload_len: u64, guest_cid: u64) -> bool {
+    let mut arg_h = [0u64; <crate::port_types::VsockHeader as Abi>::WORDS];
+    Abi::put(&h, &mut arg_h);
+    // SAFETY: `vesper_aether_vsock_validate_packet` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vsock_validate_packet(arg_h.as_mut_ptr(), payload_len as i64, guest_cid as i64) };
+    raw != 0
 }

@@ -1,0 +1,113 @@
+// @vesper/quarry::store_log: table-store WAL record decoder (`src/store/log.rs`).
+
+const PAGE_SIZE: u64 = 16384;
+
+fn gb(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn s64(inout s: Slice[u64], i: u64, v: u64) {
+    s.try_set(i, v);
+}
+
+fn le16(in b: Slice[u8], at: u64) -> u64 {
+    widen_u64(gb(in b, at)) | (widen_u64(gb(in b, wrapping_add(at, 1))) << 8)
+}
+
+fn le32(in b: Slice[u8], at: u64) -> u64 {
+    widen_u64(gb(in b, at)) | (widen_u64(gb(in b, wrapping_add(at, 1))) << 8) | (
+        widen_u64(gb(in b, wrapping_add(at, 2))) << 16
+    ) | (widen_u64(gb(in b, wrapping_add(at, 3))) << 24)
+}
+
+fn le64(in b: Slice[u8], at: u64) -> u64 {
+    le32(in b, at) | (le32(in b, wrapping_add(at, 4)) << 32)
+}
+
+// Returns 0 = Ok, 1 = truncated, 2 = unknown tag, 3 = page diff range, 4 = trailing, 5 = grow out_ranges.
+pub fn record_decode(in payload: Slice[u8], inout out_hdr: Slice[u64], inout out_ranges: Slice[u64])
+    -> u64 {
+    let plen = payload.len();
+    if plen == 0 {
+        return 1;
+    }
+    let tag = gb(in payload, 0);
+    if tag == 1 {
+        if plen < 9 {
+            return 1;
+        }
+        let page = le64(in payload, 1);
+        let need = wrapping_add(9, PAGE_SIZE);
+        if plen < need {
+            return 1;
+        }
+        if plen != need {
+            return 4;
+        }
+        s64(inout out_hdr, 0, 1);
+        s64(inout out_hdr, 1, page);
+        return 0;
+    }
+    if tag == 2 {
+        if plen < 19 {
+            return 1;
+        }
+        let page = le64(in payload, 1);
+        let prev_lsn = le64(in payload, 9);
+        let count = le16(in payload, 17);
+        if wrapping_mul(count, 3) > out_ranges.len() {
+            return 5;
+        }
+        let mut at: u64 = 19;
+        let mut end: u64 = 0;
+        let mut i: u64 = 0;
+        loop {
+            if i >= count {
+                break;
+            }
+            if wrapping_sub(plen, at) < 4 {
+                return 1;
+            }
+            let off = le16(in payload, at);
+            let len = le16(in payload, wrapping_add(at, 2));
+            at = wrapping_add(at, 4);
+            if len == 0 || off < end || wrapping_add(off, len) > PAGE_SIZE {
+                return 3;
+            }
+            if wrapping_sub(plen, at) < len {
+                return 1;
+            }
+            end = wrapping_add(off, len);
+            let rb = wrapping_mul(i, 3);
+            s64(inout out_ranges, rb, off);
+            s64(inout out_ranges, wrapping_add(rb, 1), len);
+            s64(inout out_ranges, wrapping_add(rb, 2), at);
+            at = wrapping_add(at, len);
+            i = wrapping_add(i, 1);
+        }
+        if at != plen {
+            return 4;
+        }
+        s64(inout out_hdr, 0, 2);
+        s64(inout out_hdr, 1, page);
+        s64(inout out_hdr, 2, prev_lsn);
+        s64(inout out_hdr, 3, count);
+        return 0;
+    }
+    if tag == 3 {
+        if plen < 17 {
+            return 1;
+        }
+        if plen != 17 {
+            return 4;
+        }
+        s64(inout out_hdr, 0, 3);
+        s64(inout out_hdr, 1, le64(in payload, 1));
+        s64(inout out_hdr, 2, le64(in payload, 9));
+        return 0;
+    }
+    2
+}
