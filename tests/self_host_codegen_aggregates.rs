@@ -16,7 +16,10 @@
 //!   rule of `drop_unsafe_places`;
 //! - `split_sources`: the reads that lend their storage to a split `let`;
 //! - the drop facts of each local's and value's type, and the graph's
-//!   `fip::seq_drop_plan`, `replace_drops` and `temporary_drops`.
+//!   `fip::seq_drop_plan`, `replace_drops` and `temporary_drops`;
+//! - `scalar_enums` (#1330): the small enum values and locals kept as
+//!   words, the values of their words, and the calls and returns that pass
+//!   them as words.
 //!
 //! The input is `@vesper/place-ir`'s (tests/common/ir_words.rs) followed by
 //! [`facts`]: what the decisions read from the checker's `World` that
@@ -117,6 +120,11 @@ fn put(out: &mut Vec<u8>, x: u64) {
 ///     n, n x (lent, k, k x name text)   each closure instruction, in
 ///                        instruction order: whether it is a lent closure
 ///                        (§4.2) and the names its body uses
+/// per program function, in program order:
+///     ret, n, n x words  the ABI facts of `scalar_enums`
+///                        (`aggregate_decisions::scalar_enum_facts`):
+///                        whether its result travels as enum words, and
+///                        for each call, whether the callee returns them
 /// ```
 ///
 /// A text is its byte length, then its bytes padded to 8.
@@ -174,6 +182,14 @@ pub fn facts(w: &World, program: &Program) -> Vec<u8> {
             for n in &used {
                 put_text(&mut out, n);
             }
+        }
+    }
+    for f in program.functions.values() {
+        let (ret, calls) = vesper::native::aggregate_decisions::scalar_enum_facts(w, f);
+        put(&mut out, ret as u64);
+        put(&mut out, calls.len() as u64);
+        for c in calls {
+            put(&mut out, c as u64);
         }
     }
     out
@@ -311,6 +327,10 @@ fn decisions_match_rust() {
         let (rust, n) = skip_wide(&rust, &ves);
         wide += n;
         if let Some(d) = first_difference(&rust, &ves) {
+            if let Ok(dir) = std::env::var("CODEGEN_AGGREGATES_DUMP") {
+                let _ = std::fs::write(format!("{dir}/rust.txt"), &rust);
+                let _ = std::fs::write(format!("{dir}/vesper.txt"), &ves);
+            }
             bad += 1;
             if bad <= 8 {
                 eprintln!("decisions: {} differs at {d}", c.name);
@@ -322,6 +342,10 @@ fn decisions_match_rust() {
         prepared().len()
     );
     eprintln!("decisions by kind: {kinds:?}; {wide} wide-integer graphs left to Rust");
+    assert!(
+        kinds.get("enum").is_some_and(|n| *n > 0),
+        "no graph keeps a scalar enum as words: {kinds:?}"
+    );
     let expected = corpus().len() / step() / 2;
     assert!(
         prepared().len() >= expected,
