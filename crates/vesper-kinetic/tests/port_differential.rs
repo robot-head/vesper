@@ -378,3 +378,93 @@ fn lbvh_matches_the_rust_build() {
     println!("flip-gate differential differences={differences} cases={cases}");
     assert_eq!(differences, 0);
 }
+
+/// The port's fast math (`sin`, `cos`, `atan2`, `exp`, `log` and their
+/// binary32 forms) against the frozen Rust build, bit for bit: random
+/// arguments over the fast reduction's range and beyond it (the correctly
+/// rounded fallback), every binade's edges, random bit patterns, and the
+/// special values (SH6 lane 9, #1404). A NaN result only has to be a NaN:
+/// Rust leaves the payload of an operation on two NaNs unspecified (LLVM
+/// may swap the operands of `x + y`), so the Rust build's own payload is not
+/// stable either.
+#[test]
+fn fastmath_matches_the_rust_build() {
+    use vesper_kinetic::fastmath as port;
+    use vesper_kinetic_rust::fastmath as rust;
+    let mut rng = Lcg(0x1B04_0004);
+    let mut args: Vec<f64> = vec![
+        0.0,
+        -0.0,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+        -f64::NAN,
+        f64::MIN_POSITIVE,
+        -f64::MIN_POSITIVE,
+        f64::from_bits(1),
+        f64::MAX,
+        f64::MIN,
+        std::f64::consts::FRAC_PI_4,
+        std::f64::consts::FRAC_PI_2,
+        std::f64::consts::PI,
+        1_647_099.0,
+        -1_647_099.0,
+        709.782_712_893_384,
+        -745.133_219_101_941_1,
+        1.5,
+        -1.5,
+    ];
+    for e in -1074..=1023 {
+        let p = 2f64.powi(e);
+        args.extend([
+            p,
+            -p,
+            f64::from_bits(p.to_bits() + 1),
+            f64::from_bits(p.to_bits() - 1),
+        ]);
+    }
+    for _ in 0..20_000 {
+        args.push(rng.range(-200.0, 200.0));
+        args.push(rng.range(-2.0e6, 2.0e6));
+        args.push(f64::from_bits(
+            (u64::from(rng.next()) << 33) | u64::from(rng.next()),
+        ));
+    }
+    let mut differences = 0usize;
+    let mut cases = 0usize;
+    let mut check = |what: &str, x: f64, port: f64, rust: f64| {
+        cases += 1;
+        if port.to_bits() != rust.to_bits() && !(port.is_nan() && rust.is_nan()) {
+            differences += 1;
+            println!(
+                "{what}({x:e} = {:#x}): port {:#x}, rust {:#x}",
+                x.to_bits(),
+                port.to_bits(),
+                rust.to_bits()
+            );
+        }
+    };
+    for (i, &x) in args.iter().enumerate() {
+        let other = args[(i * 7 + 3) % args.len()];
+        check("sin", x, port::sin(x), rust::sin(x));
+        check("cos", x, port::cos(x), rust::cos(x));
+        check("exp", x, port::exp(x), rust::exp(x));
+        check("log", x, port::log(x), rust::log(x));
+        check("atan2", x, port::atan2(x, 1.5), rust::atan2(x, 1.5));
+        check("atan2", x, port::atan2(x, other), rust::atan2(x, other));
+        let (f, g) = (x as f32, other as f32);
+        let wide = |v: f32| f64::from(v);
+        check("sinf", x, wide(port::sinf(f)), wide(rust::sinf(f)));
+        check("cosf", x, wide(port::cosf(f)), wide(rust::cosf(f)));
+        check("expf", x, wide(port::expf(f)), wide(rust::expf(f)));
+        check("logf", x, wide(port::logf(f)), wide(rust::logf(f)));
+        check(
+            "atan2f",
+            x,
+            wide(port::atan2f(f, g)),
+            wide(rust::atan2f(f, g)),
+        );
+    }
+    println!("flip-gate differential differences={differences} cases={cases}");
+    assert_eq!(differences, 0);
+}

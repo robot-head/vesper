@@ -3,6 +3,7 @@
 //! self-hosting Stage 2; SH6 lane 9, #1404).
 
 pub(crate) mod coloring;
+pub(crate) mod fastmath;
 // `!(x > y)` is deliberate: it is also true when `x` is NaN.
 #[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub(crate) mod gjk;
