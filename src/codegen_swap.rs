@@ -958,6 +958,8 @@ pub mod ffi {
     /// released_n, released..., args_n, args..., copies_n, (len, copy...)...]`;
     /// answers `[raw, os_error]`.
     pub const CALL_INDIRECT: u32 = 7;
+    /// `isolated(mpk)` entry guard: `[data_id, pointer_is_i64]`; answers `[saved]`.
+    pub const ISOLATE: u32 = 8;
 }
 
 /// The `numeric` family's requests (lane 11, #1285). `Op::Vector` and
