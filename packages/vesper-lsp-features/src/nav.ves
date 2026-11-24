@@ -171,32 +171,41 @@ pub struct Ix {
     n_end: ChunkSeq[u32],
     n_tstart: ChunkSeq[u32],
     n_tend: ChunkSeq[u32],
-    // The lexical environment: name symbol and target span.
+    // Hover's `Node.function` (the function node whose body holds the node)
+    // and `Node.binding.param` (the parameter node + 1, 0 when the binding
+    // is not a parameter or the node has no binding).
+    n_fn: ChunkSeq[u32],
+    n_param: ChunkSeq[u32],
+    // The lexical environment: name symbol, target span, and the parameter
+    // node + 1 (0 for a pattern binding).
     e_name: ChunkSeq[u32],
     e_start: ChunkSeq[u32],
     e_end: ChunkSeq[u32],
+    e_param: ChunkSeq[u32],
+    // The function whose body `expr` walks.
+    cur_fn: u32,
     // `Budget.left`.
     left: u64,
     err: u64,
     span_err: SpanError
 }
 
-fn w(x: u32) -> u64 {
+pub fn w(x: u32) -> u64 {
     widen_u64(x)
 }
 
-fn n32(x: u64) -> u32 {
+pub fn n32(x: u64) -> u32 {
     wrapping_u32(x)
 }
 
-fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
+pub fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
     match s.try_get(i) {
         Option::Some(v) => v,
         Option::None => NONE,
     }
 }
 
-fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
+pub fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
     match s.try_get(i) {
         Option::Some(v) => v,
         Option::None => 0,
@@ -224,7 +233,7 @@ fn item_at(in a: Ast, i: u32) -> ItemNode {
         )
 }
 
-fn fn_at(in a: Ast, f: u32) -> FnNode {
+pub fn fn_at(in a: Ast, f: u32) -> FnNode {
     a
         .fns
         .get_or(
@@ -369,7 +378,7 @@ fn clause_at(in a: Ast, c: u32) -> ClauseNode {
         )
 }
 
-fn param_at(in a: Ast, p: u32) -> ParamNode {
+pub fn param_at(in a: Ast, p: u32) -> ParamNode {
     a
         .params
         .get_or(
@@ -440,7 +449,7 @@ pub fn name_contains(in a: Ast, sym: u32, in q: Slice[u8]) -> bool {
     false
 }
 
-fn token_start(in x: Ix, i: u64) -> u64 {
+pub fn token_start(in x: Ix, i: u64) -> u64 {
     w(u32_at(in x.t.start, i))
 }
 
@@ -504,11 +513,11 @@ fn name_span(inout x: Ix, s: u64, e: u64, sym: u32, inout out: u64) -> bool {
     fail(inout x, ERR_INVALID_SPAN)
 }
 
-fn hi(v: u64) -> u32 {
+pub fn hi(v: u64) -> u32 {
     wrapping_u32(wrapping_shr_u64(v, 32))
 }
 
-fn lo(v: u64) -> u32 {
+pub fn lo(v: u64) -> u32 {
     wrapping_u32(v & 4294967295)
 }
 
@@ -621,7 +630,7 @@ fn item(inout x: Ix, it: ItemNode) -> bool {
     }
 }
 
-fn bind(inout x: Ix, name: u32, s: u32, e: u32) -> bool {
+fn bind_param(inout x: Ix, name: u32, s: u32, e: u32, param: u32) -> bool {
     let mut t: u64 = 0;
     if !name_span(inout x, w(s), w(e), name, inout t) {
         return false;
@@ -629,18 +638,24 @@ fn bind(inout x: Ix, name: u32, s: u32, e: u32) -> bool {
     x.e_name.push(name);
     x.e_start.push(hi(t));
     x.e_end.push(lo(t));
+    x.e_param.push(param);
     true
+}
+
+fn bind(inout x: Ix, name: u32, s: u32, e: u32) -> bool {
+    bind_param(inout x, name, s, e, 0)
 }
 
 fn parameter(inout x: Ix, p: u32) -> bool {
     let n = param_at(in x.ast, p);
-    bind(inout x, n.name, n.start, n.end)
+    bind_param(inout x, n.name, n.start, n.end, wrapping_add(p, 1))
 }
 
 fn truncate_env(inout x: Ix, n: u64) {
     x.e_name.truncate(n);
     x.e_start.truncate(n);
     x.e_end.truncate(n);
+    x.e_param.truncate(n);
 }
 
 // The innermost binding of `name`, as its index + 1 (0 when unbound).
@@ -710,12 +725,14 @@ fn expr(inout x: Ix, e: u32, depth: u64, resolve: bool) -> bool {
     let n = expr_at(in x.ast, e);
     let mut ts: u32 = 0;
     let mut te: u32 = 0;
+    let mut param: u32 = 0;
     if resolve && n.kind == E_NAME {
         let b = lookup(in x, n.a);
         if b != 0 {
             let at = wrapping_sub(b, 1);
             ts = wrapping_add(u32_at(in x.e_start, at), 1);
             te = wrapping_add(u32_at(in x.e_end, at), 1);
+            param = u32_at(in x.e_param, at);
         } else {
             match x.g_start.try_get(w(n.a)) {
                 Option::Some(v) => {
@@ -730,6 +747,8 @@ fn expr(inout x: Ix, e: u32, depth: u64, resolve: bool) -> bool {
     x.n_end.push(n.end);
     x.n_tstart.push(ts);
     x.n_tend.push(te);
+    x.n_fn.push(x.cur_fn);
+    x.n_param.push(param);
     let d = wrapping_add(depth, 1);
     let k = n.kind;
     if k == E_BLOCK {
@@ -904,6 +923,10 @@ fn empty_ix(sink src: String, max_work: usize) -> Ix {
         e_name: ChunkSeq::new[u32](),
         e_start: ChunkSeq::new[u32](),
         e_end: ChunkSeq::new[u32](),
+        n_fn: ChunkSeq::new[u32](),
+        n_param: ChunkSeq::new[u32](),
+        e_param: ChunkSeq::new[u32](),
+        cur_fn: NONE,
         left: MAX_NODES,
         err: ERR_NONE,
         span_err: SpanError::InvalidLimits
@@ -960,6 +983,8 @@ pub fn reindex(inout x: Ix) {
     x.n_end.clear();
     x.n_tstart.clear();
     x.n_tend.clear();
+    x.n_fn.clear();
+    x.n_param.clear();
     truncate_env(inout x, 0);
     x.left = MAX_NODES;
     x.err = ERR_NONE;
@@ -988,6 +1013,7 @@ pub fn reindex(inout x: Ix) {
             continue;
         }
         truncate_env(inout x, 0);
+        x.cur_fn = f;
         for i in 0..list_len(in x.ast, node.params) {
             if !parameter(inout x, list_at(in x.ast, node.params, i)) {
                 return;
@@ -1098,6 +1124,24 @@ pub fn decl_selection(in x: Ix, i: u64) -> (u64, u64) {
 // The target of the smallest node containing `at` (the first of equal
 // sizes), as `start << 32 | end` + 1, or 0 when that node has no target
 // or no node contains `at`.
+// The smallest node containing `at` (the first of equal sizes) + 1, or 0.
+pub fn node_at(in x: Ix, at: u64) -> u64 {
+    let mut best: u64 = 0;
+    let mut best_len: u64 = 0;
+    for i in 0..x.n_start.len() {
+        let s = w(u32_at(in x.n_start, i));
+        let e = w(u32_at(in x.n_end, i));
+        if s <= at && at < e {
+            let len = wrapping_sub(e, s);
+            if best == 0 || len < best_len {
+                best = wrapping_add(i, 1);
+                best_len = len;
+            }
+        }
+    }
+    best
+}
+
 pub fn node_target(in x: Ix, at: u64) -> u64 {
     let mut best: u64 = 0;
     let mut best_len: u64 = 0;

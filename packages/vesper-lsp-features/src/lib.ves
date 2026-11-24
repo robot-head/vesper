@@ -5,6 +5,7 @@
 //
 // - nav.ves: navigation (src/lsp/navigation.rs): the lexical index,
 //   document symbols, workspace symbols and definition.
+// - hover.ves: hover (`navigation::hover`) over the checker's facts.
 // - json.ves: serde_json's compact writer for those responses.
 //
 // Every entry takes the harness input (little-endian words, then text)
@@ -22,6 +23,18 @@ use self::json::{
     put_u64,
     put_string,
     pack
+};
+use @vesper/check-data::input::{
+    Ctx,
+    Reader as CtxReader,
+    read_ctx
+};
+use self::hover::{
+    Facts,
+    facts_new,
+    fact_function,
+    fact_param,
+    hover_answer
 };
 use self::nav::{
     Ix,
@@ -452,4 +465,98 @@ pub fn lsp_workspace_symbols(in input: Str) -> ChunkSeq[u64] {
     }
     out.push(93);
     pack(in out.as_slice())
+}
+
+// Task "hover": the checker's facts in @vesper/check-data's harness layout
+// (names, types, the world section), then the ten index-limit words, the
+// function table (count, then per function: name, start, end, whether
+// `function_results` has it and that type, the parameter count and per
+// parameter start, end, name and type), the cursor count and each cursor's
+// line and UTF-16 character, the source length, and the source. One parse;
+// the index is rebuilt per request, as the server's `Index::new` is. The
+// answers (`R<json>`, `Rnull` or `E<error>`) are joined by newlines.
+pub fn lsp_hovers(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut cr = CtxReader {
+        pos: 0
+    };
+    let ctx = read_ctx(inout cr, in b);
+    let mut r = Reader {
+        pos: cr.pos
+    };
+    let l = read_index(in b, inout r);
+    let mut f = facts_new(ctx);
+    let nf = word(in b, inout r);
+    for i in 0..nf {
+        let name = map_name(in f, word(in b, inout r));
+        let start = word(in b, inout r);
+        let end = word(in b, inout r);
+        let has = word(in b, inout r);
+        let result = map_type(in f, word(in b, inout r));
+        fact_function(
+            inout f,
+            name,
+            start,
+            end,
+            if has == 1 {
+                result
+            } else {
+                4294967295
+            }
+        );
+        let np = word(in b, inout r);
+        for j in 0..np {
+            let ps = word(in b, inout r);
+            let pe = word(in b, inout r);
+            let pn = map_name(in f, word(in b, inout r));
+            let pt = map_type(in f, word(in b, inout r));
+            fact_param(inout f, ps, pe, pn, pt);
+        }
+    }
+    let n = word(in b, inout r);
+    let mut cursors = ChunkSeq::new[u64]();
+    for i in 0..wrapping_add(n, n) {
+        cursors.push(word(in b, inout r));
+    }
+    let src_len = word(in b, inout r);
+    let src = text_at(in b, r.pos, src_len);
+    let mut out = ChunkSeq::new[u8]();
+    let mut x = index_new(src, in l);
+    for i in 0..n {
+        if i > 0 {
+            out.push(10);
+            if ix_err(in x) == ERR_NONE
+                || ix_err(in x) == ERR_POSITION
+                || ix_err(in x) == ERR_INVALID_SPAN {
+                reindex(inout x);
+            }
+        }
+        let line = match cursors.try_get(wrapping_add(i, i)) {
+            Option::Some(v) => wrapping_u32(v),
+            Option::None => 0,
+        };
+        let character = match cursors.try_get(wrapping_add(wrapping_add(i, i), 1)) {
+            Option::Some(v) => wrapping_u32(v),
+            Option::None => 0,
+        };
+        let code = hover_answer(inout out, inout x, inout f, line, character);
+        if code != ERR_NONE {
+            put_error_answer(inout out, code, ix_span_err(in x));
+        }
+    }
+    pack(in out.as_slice())
+}
+
+fn map_name(in f: Facts, i: u64) -> u32 {
+    match f.c.nmap.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 4294967295,
+    }
+}
+
+fn map_type(in f: Facts, i: u64) -> u32 {
+    match f.c.tmap.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 4294967295,
+    }
 }

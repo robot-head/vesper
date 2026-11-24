@@ -51,6 +51,7 @@ fn entry(name: &'static str) -> &'static Entry {
             "lsp_workspace_symbols",
             "lsp_definitions",
             "lsp_document_symbols_kept",
+            "lsp_hovers",
         ]
         .into_iter()
         .map(|n| (n, features().entry(n, optimize())))
@@ -148,6 +149,67 @@ fn vesper_definitions(uri: &str, source: &str, cursors: &[Position]) -> Vec<Stri
     text.split('\n').map(str::to_string).collect()
 }
 
+/// `lsp_hovers`: the checker's facts in the check-data harness layout,
+/// then one parse and an index rebuilt per cursor.
+fn vesper_hovers(s: &CheckedSource, cursors: &[Position]) -> Vec<String> {
+    let checked = s.checked();
+    let mut world = checked.world.clone();
+    world.types = checked.expression_types.clone();
+    let source_functions: std::collections::BTreeSet<&str> = s
+        .parsed()
+        .module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            vesper::ast::Item::Function(f) => Some(f.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let input = encode(&world, |e, tail| {
+        let mut words = vec![];
+        index_words(&mut words, index_limits());
+        for chunk in words.chunks(8) {
+            tail.push(u64::from_le_bytes(chunk.try_into().unwrap()));
+        }
+        let functions: Vec<_> = world
+            .functions
+            .iter()
+            .filter(|(name, _)| source_functions.contains(name.as_str()))
+            .collect();
+        tail.push(functions.len() as u64);
+        for (name, f) in functions {
+            tail.push(e.name(name));
+            tail.extend([f.span.start as u64, f.span.end as u64]);
+            match world.function_results.get(name) {
+                Some(t) => {
+                    let t = e.ty(t);
+                    tail.extend([1, t]);
+                }
+                None => tail.extend([0, 0]),
+            }
+            tail.push(f.params.len() as u64);
+            for p in &f.params {
+                tail.extend([p.span.start as u64, p.span.end as u64]);
+                let n = e.name(&p.name);
+                let t = e.ty(&p.ty);
+                tail.extend([n, t]);
+            }
+        }
+        tail.push(cursors.len() as u64);
+        for p in cursors {
+            tail.extend([p.line as u64, p.character as u64]);
+        }
+        tail.push(s.source().len() as u64);
+    });
+    let mut input = input;
+    input.extend_from_slice(s.source().as_bytes());
+    let text = entry("lsp_hovers").text(&input);
+    if cursors.is_empty() {
+        return vec![];
+    }
+    text.split('\n').map(str::to_string).collect()
+}
+
 fn vesper_workspace(docs: &[(&str, &str)], query: &str) -> String {
     let mut input = vec![];
     index_words(&mut input, index_limits());
@@ -210,6 +272,13 @@ fn rust_symbols(uri: &str, s: &CheckedSource, index: &LineIndex, hierarchical: b
 fn rust_definition(uri: &str, s: &CheckedSource, index: &LineIndex, at: Position) -> String {
     answer(
         navigation::definition(uri, s, index, at, navigation::Limits::default())
+            .map(|v| v.unwrap_or(Value::Null)),
+    )
+}
+
+fn rust_hover(s: &CheckedSource, index: &LineIndex, at: Position) -> String {
+    answer(
+        navigation::hover(s, index, at, navigation::Limits::default())
             .map(|v| v.unwrap_or(Value::Null)),
     )
 }
@@ -714,6 +783,59 @@ fn navigation_matches_rust() {
     assert!(c.targets > 1000, "only {} definition targets", c.targets);
 }
 
+/// `navigation::hover` at every cursor of every corpus document.
+#[test]
+fn hover_matches_rust() {
+    let docs = corpus_docs();
+    let mut differ = vec![];
+    let mut c = Counts::default();
+    let (mut hovers, mut values) = (0usize, 0usize);
+    // Answers that reach each part of the hover text.
+    let parts = [
+        "type mode: ",
+        "\\nparameter: ",
+        "\\ndeclared mode: ",
+        "\\nfn ",
+        "\"value\":\"fn ",
+        "integer literal",
+        " fn(",
+        "eff [",
+    ];
+    let mut reached = [0usize; 8];
+    for d in docs {
+        let cursors = positions(d);
+        let batch = vesper_hovers(&d.checked, &cursors);
+        assert_eq!(batch.len(), cursors.len(), "{}", d.name);
+        for (k, at) in cursors.into_iter().enumerate() {
+            let rust = rust_hover(&d.checked, &d.index, at);
+            hovers += 1;
+            if rust.starts_with("R{") {
+                values += 1;
+                for (n, part) in reached.iter_mut().zip(parts) {
+                    *n += rust.contains(part) as usize;
+                }
+            }
+            compare(
+                &mut differ,
+                &mut c,
+                format!("{} hover {}:{}", d.name, at.line, at.character),
+                rust,
+                batch[k].clone(),
+            );
+        }
+    }
+    eprintln!(
+        "hover: {} documents, {hovers} hovers ({values} with contents); reached {:?}; errors \
+         {:?}; {} differ",
+        docs.len(),
+        parts.iter().zip(reached).collect::<Vec<_>>(),
+        c.errors,
+        differ.len()
+    );
+    assert!(differ.is_empty(), "{}", differ.join("\n"));
+    assert!(values > 1000, "only {values} hovers with contents");
+}
+
 // ----------------------------------------------------------- sessions
 
 fn frame(body: &[u8]) -> Vec<u8> {
@@ -1125,6 +1247,36 @@ fn lsp_features_speed() {
         docs.len(),
         r / requests,
         v / requests
+    );
+    let hover_cursors: Vec<Vec<Position>> = docs
+        .iter()
+        .map(|d| positions(d).into_iter().step_by(8).collect())
+        .collect();
+    let (r, v) = abba(
+        "hover, parse and facts kept per document",
+        &mut || {
+            time(|| {
+                for (d, ps) in docs.iter().zip(&hover_cursors) {
+                    for p in ps {
+                        std::hint::black_box(rust_hover(&d.checked, &d.index, *p));
+                    }
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for (d, ps) in docs.iter().zip(&hover_cursors) {
+                    std::hint::black_box(vesper_hovers(&d.checked, ps));
+                }
+            })
+        },
+    );
+    let requests: usize = hover_cursors.iter().map(Vec::len).sum();
+    eprintln!(
+        "hover per request ({requests}): rust {:?} vesper {:?} (vesper includes encoding \
+         and decoding the facts once per document)",
+        r / requests as u32,
+        v / requests as u32
     );
     let per_doc: Vec<Vec<Position>> = docs
         .iter()
