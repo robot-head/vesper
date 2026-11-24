@@ -13,6 +13,7 @@
 
 use @vesper/cranelift::{
     Block,
+    DataId,
     FuncId,
     FuncRef,
     SigRef,
@@ -22,21 +23,26 @@ use @vesper/cranelift::{
     block_param,
     call_args,
     call_builder,
+    call_conv_default,
+    call_conv_system_v,
     call_module,
     call_op,
     call_result,
     call_result_value,
     call_return_builder,
     call_return_module,
-    call_conv_default,
     cc_eq,
     cc_ne,
     cc_sge,
     cc_ule,
     cc_ult,
     create_block,
+    data_of_word,
     declare_function,
+    define_function_bytes,
+    import_data,
     import_function,
+    ins_band_imm,
     ins_bor,
     ins_brif,
     ins_brif0,
@@ -58,6 +64,7 @@ use @vesper/cranelift::{
     ins_select,
     ins_sextend,
     ins_store,
+    ins_symbol_value,
     ins_trapnz,
     ins_trapz,
     ins_uextend,
@@ -65,6 +72,7 @@ use @vesper/cranelift::{
     inst_result,
     linkage_import,
     linkage_local,
+    module_get_function,
     module_pointer_type,
     seal_block,
     sig_new,
@@ -98,6 +106,7 @@ const CALL: u32 = 4;
 const RESULT: u32 = 5;
 const FINISH: u32 = 6;
 const CALL_INDIRECT: u32 = 7;
+const ISOLATE: u32 = 8;
 
 // `codegen_swap::NO_VALUE`.
 const NO_VALUE: u64 = 18446744073709551615;
@@ -153,6 +162,7 @@ const ERRNO_LOCATION: u64 = 1;
 const ERRNO_ERROR: u64 = 2;
 
 // `ffi::NULL_HANDLE_TRAP`, `ffi::CSTR_ALLOC_TRAP` and `ffi::MAPPING_ALLOC_TRAP`.
+const ISOLATION_TRAP: u32 = 5;
 const NULL_HANDLE_TRAP: u32 = 6;
 const CSTR_ALLOC_TRAP: u32 = 7;
 const MAPPING_ALLOC_TRAP: u32 = 8;
@@ -1261,6 +1271,82 @@ fn copy_back(inout b: Builder, in r: R, start: u64, little: bool) eff [Ffi[Crane
     }
 }
 
+fn foreign_helper_rdpkru(inout b: Builder, inout m: Module) -> FuncRef eff [Ffi[Cranelift]] {
+    let name = "vesper_bridge_rdpkru".as_bytes();
+    let defined = match module_get_function(inout m, in name) {
+        Option::Some(_) => true,
+        Option::None => false,
+    };
+    let sig = sig_new(inout m, call_conv_system_v());
+    sig_return(inout m, sig, ty_i32());
+    let id = declare_function(inout m, in name, linkage_local(), sig);
+    if !defined {
+        let mut code: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](6);
+        code.push(0x31);
+        code.push(0xc9);
+        code.push(0x0f);
+        code.push(0x01);
+        code.push(0xee);
+        code.push(0xc3);
+        let relocs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let _ = define_function_bytes(inout m, id, 16, in code.as_slice(), in relocs.as_slice());
+    }
+    import_function(inout b, inout m, id)
+}
+
+fn foreign_helper_wrpkru(inout b: Builder, inout m: Module) -> FuncRef eff [Ffi[Cranelift]] {
+    let name = "vesper_bridge_wrpkru".as_bytes();
+    let defined = match module_get_function(inout m, in name) {
+        Option::Some(_) => true,
+        Option::None => false,
+    };
+    let sig = sig_new(inout m, call_conv_system_v());
+    sig_param(inout m, sig, ty_i32());
+    let id = declare_function(inout m, in name, linkage_local(), sig);
+    if !defined {
+        let mut code: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](10);
+        code.push(0x89);
+        code.push(0xf8);
+        code.push(0x31);
+        code.push(0xc9);
+        code.push(0x31);
+        code.push(0xd2);
+        code.push(0x0f);
+        code.push(0x01);
+        code.push(0xef);
+        code.push(0xc3);
+        let relocs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let _ = define_function_bytes(inout m, id, 16, in code.as_slice(), in relocs.as_slice());
+    }
+    import_function(inout b, inout m, id)
+}
+
+fn isolate(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranelift]] {
+    let r = call_args(call);
+    let data = data_of_word(word_at(in r, 0));
+    let ptr_ty = if word_at(in r, 1) == 1 {
+        ty_i64()
+    } else {
+        ty_i32()
+    };
+    let global = import_data(inout b, in m, data);
+    let address = ins_symbol_value(inout b, ptr_ty, global);
+    let mask = ins_load(inout b, ty_i32(), PLAIN, address, 0);
+    let unset = ins_icmp_imm(inout b, cc_eq(), mask, 0);
+    let host = ins_band_imm(inout b, mask, 3);
+    let host = ins_icmp_imm(inout b, cc_ne(), host, 0);
+    let bad = ins_bor(inout b, unset, host);
+    ins_trapnz(inout b, bad, trap_user(ISOLATION_TRAP));
+    let rdpkru = foreign_helper_rdpkru(inout b, inout m);
+    let empty: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    ins_call(inout b, rdpkru, in empty.as_slice());
+    let saved = inst_result(inout b, 0);
+    let revoked = ins_bor(inout b, saved, mask);
+    let wrpkru = foreign_helper_wrpkru(inout b, inout m);
+    call1(inout b, wrpkru, revoked);
+    call_result(call, value_word(saved));
+}
+
 fn the_call(call: u64, inout b: Builder, inout m: Module, indirect: bool) eff [Ffi[Cranelift]] {
     let r = R {
         w: call_args(call),
@@ -1272,19 +1358,20 @@ fn the_call(call: u64, inout b: Builder, inout m: Module, indirect: bool) eff [F
         1
     };
     let errno = at(in r, base);
-    let returns = at(in r, wrapping_add(base, 1)) == 1;
-    let little = at(in r, wrapping_add(base, 2)) == 1;
-    let len_word = at(in r, wrapping_add(base, 3));
-    let len_meta = at(in r, wrapping_add(base, 4));
+    let saved = at(in r, wrapping_add(base, 1));
+    let returns = at(in r, wrapping_add(base, 2)) == 1;
+    let little = at(in r, wrapping_add(base, 3)) == 1;
+    let len_word = at(in r, wrapping_add(base, 4));
+    let len_meta = at(in r, wrapping_add(base, 5));
     let len_i64 = (len_meta & 1) != 0;
     let map_stride = if (len_meta >> 1) == 0 {
         1
     } else {
         len_meta >> 1
     };
-    let reg_id = at(in r, wrapping_add(base, 5));
-    let rel_n = at(in r, wrapping_add(base, 6));
-    let rel_start = wrapping_add(base, 7);
+    let reg_id = at(in r, wrapping_add(base, 6));
+    let rel_n = at(in r, wrapping_add(base, 7));
+    let rel_start = wrapping_add(base, 8);
     let n_idx = wrapping_add(rel_start, rel_n);
     let n = at(in r, n_idx);
     let args_start = wrapping_add(n_idx, 1);
@@ -1319,6 +1406,10 @@ fn the_call(call: u64, inout b: Builder, inout m: Module, indirect: bool) eff [F
         for j in 0..rel_n {
             call1(inout b, free, val(at(in r, wrapping_add(rel_start, j))));
         }
+    }
+    if saved != NO_VALUE {
+        let wrpkru = foreign_helper_wrpkru(inout b, inout m);
+        call1(inout b, wrpkru, val(saved));
     }
     let os = if errno != 0 {
         value_word(os_error(inout b, inout m, errno))
@@ -1443,20 +1534,15 @@ fn finish(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranelift]] {
 fn request(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[Cranelift]] {
     let op = call_op(call);
     if op == BEGIN {
-        // `isolated(mpk)` trampolines need machine-code helpers the shim
-        // cannot define yet: Rust emits those calls.
-        let r = call_args(call);
-        return if word_at(in r, 0) == DIRECT {
-            HANDLED
-        } else {
-            DECLINED
-        };
+        return HANDLED;
     }
     if op == ARG {
         return arg(call, inout b, inout m);
     }
     if op == REFUSE {
         refuse(call, inout b, in m);
+    } else if op == ISOLATE {
+        isolate(call, inout b, inout m);
     } else if op == CALL {
         the_call(call, inout b, inout m, false);
     } else if op == CALL_INDIRECT {
