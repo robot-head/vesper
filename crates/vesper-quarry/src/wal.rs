@@ -19,7 +19,7 @@
 //! log ends at the first torn, mismatching or out-of-sequence frame.
 use crate::device::{Device, FileId};
 use crate::durable::{DbError, DbErrorKind};
-use crate::page::{PAGE_SIZE, crc32c, crc32c_update};
+use crate::page::{crc32c, crc32c_update, PAGE_SIZE};
 
 pub const HEADER_BYTES: u64 = 64;
 const MAGIC: &[u8; 8] = b"QRYWAL01";
@@ -159,18 +159,7 @@ impl LogRecord {
             4 => return Err(corrupt("log byte string too long")),
             _ => return Err(corrupt("truncated log record")),
         }
-        let [
-            tag,
-            txn,
-            prev,
-            page,
-            undo_next,
-            slot,
-            b1_off,
-            b1_len,
-            b2_off,
-            b2_len,
-        ] = meta;
+        let [tag, txn, prev, page, undo_next, slot, b1_off, b1_len, b2_off, b2_len] = meta;
         let b1 = payload[b1_off as usize..(b1_off + b1_len) as usize].to_vec();
         match tag {
             1 => Ok(Self::PageImage { page, bytes: b1 }),
