@@ -375,3 +375,108 @@ fn exit_ends_the_process() {
     }
     let _ = lit;
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_commands_run_with_args_env_cwd_and_missing() {
+    let dir = Temp::new("std-process-win");
+    let src = r#"use @vesper-std/fs::IoError;
+use @vesper-std/process::{
+    ExitStatus, Output, command, arg, env, env_remove, env_clear, cwd, stdio, discard, spawn,
+    wait, stdout, stderr, release, output, success, id, stdout_stream, capture
+};
+
+fn mix(h: u64, b: u64) -> u64 {
+    wrapping_mul(h ^ b, 1099511628211)
+}
+
+fn hash(in s: Slice[u8]) -> u64 {
+    let mut h: u64 = 14695981039346656037;
+    for i in 0..s.len() {
+        let b = match s.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        h = mix(h, widen_u64(b));
+    }
+    mix(h, s.len())
+}
+
+fn status_word(s: ExitStatus) -> u64 {
+    let ok: u64 = if success(s) { 1 } else { 0 };
+    let exited: u64 = if s.exited { 1 } else { 0 };
+    mix(mix(mix(wrapping_u64(s.code), widen_u64(s.signal)), exited), ok)
+}
+
+fn code(e: IoError) -> u64 {
+    wrapping_add(1000, widen_u64(e.kind))
+}
+
+pub fn win_shell() -> u64 eff [Ffi[StdProcess]] {
+    handle Fail[IoError] in {
+        let mut c = command(in "cmd.exe");
+        arg(inout c, in "/C");
+        arg(inout c, in "echo %VESPER_STD_X% & cd & exit /b 3");
+        env(inout c, in "VESPER_STD_X", in "xvalue");
+        cwd(inout c, in "@DIR@");
+        let out = output(c);
+        mix(status_word(out.status), hash(in out.stdout.as_slice()))
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    }
+}
+
+pub fn win_missing_and_lifecycle() -> u64 eff [Ffi[StdProcess]] {
+    let c = command(in "C:\\nonexistent\\vesper-std-no-such-program.exe");
+    let a = match spawn(c) {
+        Result::Ok(ch) => {
+            release(ch);
+            0
+        },
+        Result::Err(e) => code(e),
+    };
+    let mut d = command(in "cmd.exe");
+    arg(inout d, in "/C");
+    arg(inout d, in "echo ok");
+    stdio(inout d, stdout_stream(), capture());
+    let mut ch = match spawn(d) {
+        Result::Ok(ch) => ch,
+        Result::Err(e) => return code(e),
+    };
+    let first = match wait(inout ch) {
+        Result::Ok(s) => status_word(s),
+        Result::Err(e) => code(e),
+    };
+    let again = match wait(inout ch) {
+        Result::Ok(s) => status_word(s),
+        Result::Err(e) => code(e),
+    };
+    let text = stdout(in ch);
+    release(ch);
+    let unused = command(in "cmd.exe");
+    discard(unused);
+    let me: u64 = if id() > 0 { 1 } else { 0 };
+    mix(mix(mix(mix(a, first), again), hash(in text.as_slice())), me)
+}
+"#
+    .replace("@DIR@", &dir.lit());
+    let checked = check_driver(&src);
+    let out = std::process::Command::new("cmd.exe")
+        .args(["/C", "echo %VESPER_STD_X% & cd & exit /b 3"])
+        .env("VESPER_STD_X", "xvalue")
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let want_shell = mix(status_word(out.status), hash(&out.stdout));
+    assert_eq!(agree(&checked, "win_shell", &MODES), want_shell);
+
+    let ok = mix(mix(mix(0, 0), 1), 1);
+    let want_life = mix(mix(mix(mix(1001, ok), 1007), hash(b"ok\r\n")), 1);
+    assert_eq!(
+        agree(&checked, "win_missing_and_lifecycle", &MODES),
+        want_life
+    );
+}
