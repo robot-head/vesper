@@ -2406,6 +2406,79 @@ fn fold_trivial_arith_and_bool_extends(func: &mut ir::Function) {
                     func.dfg.change_to_alias(dest, arg);
                     changed = true;
                 }
+                InstructionData::Binary {
+                    opcode: op,
+                    args: [lhs, rhs],
+                } if matches!(
+                    op,
+                    Opcode::Iadd
+                        | Opcode::Isub
+                        | Opcode::Imul
+                        | Opcode::Band
+                        | Opcode::Bor
+                        | Opcode::Bxor
+                        | Opcode::Ishl
+                        | Opcode::Ushr
+                        | Opcode::Sshr
+                ) =>
+                {
+                    let lhs = func.dfg.resolve_aliases(lhs);
+                    let rhs = func.dfg.resolve_aliases(rhs);
+                    let dest = func.dfg.first_result(inst);
+                    let ty = func.dfg.value_type(dest);
+                    if !matches!(ty, types::I8 | types::I16 | types::I32 | types::I64) {
+                        continue;
+                    }
+                    let lc = constant(func, lhs, 1);
+                    let rc = constant(func, rhs, 1);
+                    let alias_to = match op {
+                        Opcode::Iadd | Opcode::Bor | Opcode::Bxor => {
+                            if rc == Some(0) {
+                                Some(lhs)
+                            } else if lc == Some(0) {
+                                Some(rhs)
+                            } else {
+                                None
+                            }
+                        }
+                        Opcode::Isub | Opcode::Ishl | Opcode::Ushr | Opcode::Sshr => {
+                            if rc == Some(0) { Some(lhs) } else { None }
+                        }
+                        Opcode::Imul => {
+                            if rc == Some(1) {
+                                Some(lhs)
+                            } else if lc == Some(1) {
+                                Some(rhs)
+                            } else {
+                                None
+                            }
+                        }
+                        Opcode::Band => {
+                            if rc == Some(-1) {
+                                Some(lhs)
+                            } else if lc == Some(-1) {
+                                Some(rhs)
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(target) = alias_to {
+                        func.layout.remove_inst(inst);
+                        func.dfg.clear_results(inst);
+                        func.dfg.change_to_alias(dest, target);
+                        changed = true;
+                    } else if (op == Opcode::Imul || op == Opcode::Band)
+                        && (lc == Some(0) || rc == Some(0))
+                    {
+                        func.dfg.replace(inst).iconst(ty, 0);
+                        changed = true;
+                    } else if op == Opcode::Bor && (lc == Some(-1) || rc == Some(-1)) {
+                        func.dfg.replace(inst).iconst(ty, -1);
+                        changed = true;
+                    }
+                }
                 InstructionData::IntCompareImm {
                     opcode: Opcode::IcmpImm,
                     cond,
