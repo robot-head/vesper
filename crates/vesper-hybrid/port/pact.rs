@@ -3906,7 +3906,11 @@ unsafe extern "C" {
     fn vesper_hybrid_pact_vesper__check_2pact__session__PactSession_drop(value: *mut u64) -> i64;
     fn vesper_hybrid_pact_vesper__pact__S_drop(value: *mut u64) -> i64;
     fn vesper_hybrid_pact_format() -> i64;
+    fn vesper_hybrid_pact_pact_builtin_wanted(input: *mut u64) -> i64;
+    fn vesper_hybrid_pact_pact_deps_words(input: *mut u64) -> i64;
     fn vesper_hybrid_pact_pact_session_is_ok(s: *mut u64) -> i64;
+    fn vesper_hybrid_pact_pact_session_mono_check(s: *mut u64, input: *mut u64) -> i64;
+    fn vesper_hybrid_pact_pact_session_mono_plan(s: *mut u64, input: *mut u64) -> i64;
     fn vesper_hybrid_pact_pact_session_open(result: *mut u64, input: *mut u64) -> i64;
     fn vesper_hybrid_pact_pact_session_revision(s: *mut u64) -> i64;
     fn vesper_hybrid_pact_pact_session_solve(s: *mut u64, query: *mut u64) -> i64;
@@ -3935,6 +3939,24 @@ pub fn format() -> u64 {
     raw as u64
 }
 
+/// Calls `pact_builtin_wanted` of the Vesper library `hybrid_pact` (`vesper_hybrid_pact_pact_builtin_wanted`).
+pub fn pact_builtin_wanted(input: &[u8]) -> Vec<u64> {
+    // SAFETY: `vesper_hybrid_pact_pact_builtin_wanted` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_hybrid_pact_pact_builtin_wanted(view_input) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `pact_deps_words` of the Vesper library `hybrid_pact` (`vesper_hybrid_pact_pact_deps_words`).
+pub fn pact_deps_words(input: &[u8]) -> Vec<u64> {
+    // SAFETY: `vesper_hybrid_pact_pact_deps_words` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_hybrid_pact_pact_deps_words(view_input) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
 /// Calls `pact_session_is_ok` of the Vesper library `hybrid_pact` (`vesper_hybrid_pact_pact_session_is_ok`).
 pub fn pact_session_is_ok(s: &vesper__check_2pact__session__PactSession) -> bool {
     // SAFETY: `vesper_hybrid_pact_pact_session_is_ok` has exactly this signature in the export ABI; every
@@ -3942,6 +3964,24 @@ pub fn pact_session_is_ok(s: &vesper__check_2pact__session__PactSession) -> bool
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_hybrid_pact_pact_session_is_ok(s.words.as_ptr().cast_mut()) };
     raw != 0
+}
+
+/// Calls `pact_session_mono_check` of the Vesper library `hybrid_pact` (`vesper_hybrid_pact_pact_session_mono_check`).
+pub fn pact_session_mono_check(s: &mut vesper__check_2pact__session__PactSession, input: &[u8]) -> Vec<u64> {
+    // SAFETY: `vesper_hybrid_pact_pact_session_mono_check` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_hybrid_pact_pact_session_mono_check(s.words.as_mut_ptr(), view_input) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `pact_session_mono_plan` of the Vesper library `hybrid_pact` (`vesper_hybrid_pact_pact_session_mono_plan`).
+pub fn pact_session_mono_plan(s: &mut vesper__check_2pact__session__PactSession, input: &[u8]) -> Vec<u64> {
+    // SAFETY: `vesper_hybrid_pact_pact_session_mono_plan` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_hybrid_pact_pact_session_mono_plan(s.words.as_mut_ptr(), view_input) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }
 
 /// Calls `pact_session_open` of the Vesper library `hybrid_pact` (`vesper_hybrid_pact_pact_session_open`).

@@ -199,13 +199,16 @@ The full coherence-gated Pact session and query solver now run from Vesper in th
 | `divergent-pact` `hybrid_matches_the_default_compiler` | 120 runs differ (`examples\traits\overlap_rejected.ves` caught) |
 | Release ABBA (`CHECK_HARNESS_SPEED=1`, 34 corpus worlds, Windows x86_64 MSVC) | `320.71 ms` Rust vs `9.52 ms` Vesper with encode+decode (`0.03x`); `310.98 ms` vs `1.89 ms` pass alone (`0.01x`) |
 
+## Parts 3–8 & Hybrid Wiring (`#1736`)
+
+All remaining `@vesper/check-pact` passes (`resolve_call`, `normalize_projections`, `builtin_traits::derivable`, `builtin_traits::wanted`, `mono_check`, `mono_plan`, `deps`) have been ported and differentially verified in `tests/self_host_check_pact.rs` (`20 passed; 0 failed; 1 ignored`), and wired into `crates/vesper-hybrid` (`BuiltinWantedTable`, `DepsPassTable`, and `VesperPactSession::mono_check` via `session_mono_check_words`). Fixed `is_scalar_name` in `packages/vesper-check-pact/src/resolve.ves` to match `builtin_traits::SCALARS` (`["u8", "u32", "u64", "i64", "bool"]`) after `type_bound.ves` caught missing `impl Ord for f64 {}` derive hints.
+
+| Check | Result |
+| --- | --- |
+| `self_host_check_pact` (all 20 active differential & unit tests) | `20 passed; 0 failed` (`0` diffs across declaration, session, resolve/normalize, builtin derive/wanted, mono_check, mono_plan, deps) |
+| `vesper-hybrid` `differential` (`hybrid_matches_the_default_compiler`, Windows x86_64 MSVC, debug) | `5/5` passed, `0` of `2,202` runs differ across `554` files (`default 184.56 s`, `hybrid 90.46 s`, `0.490x`) |
+
 ## What is left
 
-- **Part 3: call resolution** (`Elaborator`: query contexts, `normalize`,
-  `TraitCalls::resolve`) and full elaboration wiring beyond `select_vesper`.
-- **Part 4: monomorphization and the builtin traits** (`mono.rs`,
-  `builtin_traits.rs`).
-- **Dependencies.** `add_dependency` and cross-package trait references
-  (the corpus checks single packages; the checker tests cover the
-  diagnostics with mutants only).
+- Full `Elaborator::monomorphize` body instantiation (`substitute_function` + `dyn_vtable` thunks) and `Frontend::build_session` for multi-package dependencies still use Rust as fallback when `dyn_boxed` or `options.dependencies` is non-empty.
 - The seed (`vesper-pact-seed`) and `vesper-pact-binding` stay until parity.

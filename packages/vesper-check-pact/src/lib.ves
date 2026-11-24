@@ -27,7 +27,7 @@ use @vesper/check-data::{
 use self::decl::{
     read_decls
 };
-use self::deps::{
+pub use self::deps::{
     deps_words
 };
 use self::tyops::{
@@ -42,12 +42,20 @@ pub use self::session::{
     session_open,
     session_solve
 };
-use self::builtin_traits::{
-    builtin_derive_words,
+pub use self::builtin_traits::{
     builtin_wanted_words
+};
+use self::builtin_traits::{
+    builtin_derive_words
+};
+pub use self::mono_check::{
+    session_mono_check_words
 };
 use self::mono_check::{
     mono_check_words
+};
+pub use self::mono_plan::{
+    session_mono_plan_words
 };
 use self::mono_plan::{
     mono_plan_words

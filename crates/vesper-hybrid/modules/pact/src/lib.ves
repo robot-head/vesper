@@ -6,8 +6,12 @@
 
 use @vesper/check-pact::{
     PactSession,
+    builtin_wanted_words,
     declarations_words,
+    deps_words,
     session_is_ok,
+    session_mono_check_words,
+    session_mono_plan_words,
     session_open,
     session_revision,
     session_solve,
@@ -41,6 +45,22 @@ pub fn pact_session_take_diagnostics(in s: PactSession) -> ChunkSeq[u64] {
 
 pub fn pact_session_solve(inout s: PactSession, in query: Slice[u8]) -> ChunkSeq[u64] {
     session_solve(inout s, in query)
+}
+
+pub fn pact_builtin_wanted(in input: Slice[u8]) -> ChunkSeq[u64] {
+    builtin_wanted_words(in input)
+}
+
+pub fn pact_deps_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    deps_words(in input)
+}
+
+pub fn pact_session_mono_check(inout s: PactSession, in input: Slice[u8]) -> ChunkSeq[u64] {
+    session_mono_check_words(inout s, in input)
+}
+
+pub fn pact_session_mono_plan(inout s: PactSession, in input: Slice[u8]) -> ChunkSeq[u64] {
+    session_mono_plan_words(inout s, in input)
 }
 
 // The divergent build's answer (build.rs `divergent-pact`): every package
