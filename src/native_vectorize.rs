@@ -1196,9 +1196,9 @@ fn emit_widen_i8_f32(func: &mut ir::Function, plan: &WidenI8F32Plan) {
         let mut pos = FuncCursor::new(func).at_bottom(pre);
         let in_bounds = pos.ins().icmp(IntCC::UnsignedLessThan, j0, plan.bound);
         let trip = pos.ins().isub(plan.bound, j0);
-        let at_least_4 = pos
+        let at_least_8 = pos
             .ins()
-            .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, trip, 4);
+            .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, trip, 8);
         let (src_end, src_ovf) = pos.ins().uadd_overflow(src0, trip);
         let four = pos.ins().iconst(types::I64, 4);
         let dst_hi = pos.ins().umulhi(trip, four);
@@ -1215,7 +1215,7 @@ fn emit_widen_i8_f32(func: &mut ir::Function, plan: &WidenI8F32Plan) {
             .ins()
             .icmp(IntCC::UnsignedLessThanOrEqual, src_end, dst0);
         let disjoint = pos.ins().bor(c1, c2);
-        let ok = pos.ins().band(in_bounds, at_least_4);
+        let ok = pos.ins().band(in_bounds, at_least_8);
         let ok = pos.ins().band(ok, no_ovf_1);
         let ok = pos.ins().band(ok, no_ovf_2);
         let ok = pos.ins().band(ok, no_ovf_3);
@@ -1232,33 +1232,37 @@ fn emit_widen_i8_f32(func: &mut ir::Function, plan: &WidenI8F32Plan) {
     let (src_v, dst_v) = emit_addrs(func, lanes, jv);
     {
         let mut pos = FuncCursor::new(func).at_bottom(lanes);
-        let w = pos.ins().load(types::I32, MemFlags::new(), src_v, 0);
-        let v_i32x4_0 = pos.ins().scalar_to_vector(types::I32X4, w);
+        let w = pos.ins().load(types::I64, MemFlags::new(), src_v, 0);
+        let v_i64x2 = pos.ins().scalar_to_vector(types::I64X2, w);
         let v_i8x16 = pos.ins().bitcast(
             types::I8X16,
             MemFlags::new().with_endianness(ir::Endianness::Little),
-            v_i32x4_0,
+            v_i64x2,
         );
         let v_i16x8 = pos.ins().swiden_low(v_i8x16);
-        let v_i32x4 = pos.ins().swiden_low(v_i16x8);
-        let mut v_f32x4 = pos.ins().fcvt_from_sint(types::F32X4, v_i32x4);
+        let lo_i32x4 = pos.ins().swiden_low(v_i16x8);
+        let hi_i32x4 = pos.ins().swiden_high(v_i16x8);
+        let mut lo_f32x4 = pos.ins().fcvt_from_sint(types::F32X4, lo_i32x4);
+        let mut hi_f32x4 = pos.ins().fcvt_from_sint(types::F32X4, hi_i32x4);
         if let Some(scale) = plan.scale {
             let s = invariants.get(&scale).copied().unwrap_or(scale);
             let v_scale = pos.ins().splat(types::F32X4, s);
-            v_f32x4 = pos.ins().fmul(v_f32x4, v_scale);
+            lo_f32x4 = pos.ins().fmul(lo_f32x4, v_scale);
+            hi_f32x4 = pos.ins().fmul(hi_f32x4, v_scale);
         }
-        pos.ins().store(MemFlags::new(), v_f32x4, dst_v, 0);
-        let j4 = pos.ins().iadd_imm(jv, 4);
-        let rem = pos.ins().isub(plan.bound, j4);
+        pos.ins().store(MemFlags::new(), lo_f32x4, dst_v, 0);
+        pos.ins().store(MemFlags::new(), hi_f32x4, dst_v, 16);
+        let j8 = pos.ins().iadd_imm(jv, 8);
+        let rem = pos.ins().isub(plan.bound, j8);
         let more = pos
             .ins()
-            .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, rem, 4);
+            .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, rem, 8);
         pos.ins().brif(
             more,
             lanes,
-            &[BlockArg::Value(j4)],
+            &[BlockArg::Value(j8)],
             plan.header,
-            &[BlockArg::Value(j4)],
+            &[BlockArg::Value(j8)],
         );
     }
 }
