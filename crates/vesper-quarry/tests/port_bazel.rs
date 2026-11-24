@@ -84,7 +84,7 @@ fn divergent_access_planner_fails_the_golden_access_paths() {
 fn divergent_page_fails_the_corrupt_header_test() {
     run(
         "VESPER_QUARRY_DIVERGENT_PAGE",
-        &["corruption_and_wrong_sizes_are_rejected_before_trusting_offsets"],
+        &["malicious_crc_valid_slot_layouts_fail_closed"],
         "exact_little_endian_header_and_actual_record_roundtrip",
     );
 }
