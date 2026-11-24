@@ -9,6 +9,7 @@ rust = [
   "crates/vesper-kinetic/seed/src/engine/coloring.rs",
   "crates/vesper-kinetic/seed/src/engine/fastmath.rs",
   "crates/vesper-kinetic/seed/src/engine/gjk.rs",
+  "crates/vesper-kinetic/seed/src/engine/morton.rs",
   "crates/vesper-kinetic/seed/src/engine/sap.rs",
 ]
 env = { CARGO_PROFILE_DEV_DEBUG = "0", CARGO_PROFILE_TEST_DEBUG = "0" }
@@ -42,3 +43,7 @@ run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate sap 5"
 [[abba]]
 workload = "fastmath"
 run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate fastmath 20"
+
+[[abba]]
+workload = "morton"
+run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate morton 20"

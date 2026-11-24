@@ -469,6 +469,54 @@ fn fastmath_matches_the_rust_build() {
             wide(port::atan2f(f, g)),
             wide(rust::atan2f(f, g)),
         );
+
+/// The port's 30-bit Morton codes (by lookup tables) against the frozen
+/// Rust build (magic bits): every in-range axis value through `spread`,
+/// `compact` and the masked forms, random and out-of-range coordinates and
+/// codes through the checked forms, errors included (SH6 lane 9, #1404).
+#[test]
+fn morton_matches_the_rust_build() {
+    use vesper_kinetic::morton as port;
+    use vesper_kinetic_rust::morton as rust;
+    let mut rng = Lcg(0x1B04_0005);
+    let mut differences = 0usize;
+    let mut cases = 0usize;
+    let mut check = |same: bool| {
+        cases += 1;
+        if !same {
+            differences += 1;
+        }
+    };
+    for v in 0..=u32::from(u16::MAX) {
+        check(port::spread(v) == rust::spread(v));
+        check(port::compact(v) == rust::compact(v));
+    }
+    let edges = [0u16, 1, 511, 512, 1022, 1023, 1024, 1025, 2047, u16::MAX];
+    for &x in &edges {
+        for &y in &edges {
+            for &z in &edges {
+                check(
+                    format!("{:?}", port::encode(x, y, z))
+                        == format!("{:?}", rust::encode(x, y, z)),
+                );
+                check(port::encode_masked(x, y, z) == rust::encode_masked(x, y, z));
+            }
+        }
+    }
+    for _ in 0..200_000 {
+        let r = rng.next();
+        let (x, y, z) = (
+            r as u16 & 0x7ff,
+            (r >> 11) as u16 & 0x7ff,
+            rng.next() as u16,
+        );
+        check(format!("{:?}", port::encode(x, y, z)) == format!("{:?}", rust::encode(x, y, z)));
+        check(port::encode_masked(x, y, z) == rust::encode_masked(x, y, z));
+        let code = rng.next() ^ (rng.next() << 1);
+        check(format!("{:?}", port::decode(code)) == format!("{:?}", rust::decode(code)));
+        check(port::decode_masked(code) == rust::decode_masked(code));
+        let valid = code & port::CODE_MASK;
+        check(format!("{:?}", port::decode(valid)) == format!("{:?}", rust::decode(valid)));
     }
     println!("flip-gate differential differences={differences} cases={cases}");
     assert_eq!(differences, 0);
