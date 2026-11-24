@@ -560,3 +560,127 @@ pub fn check_scheduler() -> u64 {
         + 1000000000000;
     assert_eq!(agree(&checked, "check_scheduler", &MODES), expected);
 }
+
+#[test]
+fn select_and_preference_match_rust() {
+    use vesper_pulse::driver::DriverKind as RustDriverKind;
+    use vesper_pulse::select::{Preference as RustPref, host_order as rust_host_order};
+
+    assert_eq!(RustPref::parse("").unwrap(), RustPref::Auto);
+    assert_eq!(RustPref::parse("  AUTO \n").unwrap(), RustPref::Auto);
+    assert_eq!(
+        RustPref::parse("epoll").unwrap(),
+        RustPref::Only(RustDriverKind::Epoll)
+    );
+    assert!(RustPref::parse("bogus").is_err());
+
+    let rust_order = rust_host_order();
+    let rust_order_code: u64 = rust_order.iter().enumerate().fold(0u64, |acc, (i, k)| {
+        let id = match k {
+            RustDriverKind::IoUring => 1u64,
+            RustDriverKind::Epoll => 2u64,
+            RustDriverKind::Kqueue => 3u64,
+            RustDriverKind::Iocp => 4u64,
+        };
+        acc + id * 10u64.pow(i as u32)
+    });
+    let rust_compiled_mask: u64 = RustDriverKind::ALL
+        .iter()
+        .enumerate()
+        .fold(0u64, |acc, (i, k)| {
+            acc + if k.compiled() { 1u64 << i } else { 0 }
+        });
+
+    let src = r#"
+use @vesper/pulse::{
+    DriverKind, Preference, SelectError, driver_kind_compiled, driver_kind_id, host_order,
+    preference_parse, select_driver_for_host,
+};
+
+fn pref_code(p: Preference) -> u64 {
+    match p {
+        Preference::Auto => 1,
+        Preference::Only(k) => wrapping_add(widen_u64(driver_kind_id(k)), 2),
+    }
+}
+
+pub fn check_select() -> u64 {
+    let p_empty = handle Fail[SelectError] in {
+        pref_code(preference_parse(in "".as_bytes()))
+    } with {
+        return x => x,
+        raise(_e, _k) => 0,
+    };
+    let p_auto = handle Fail[SelectError] in {
+        pref_code(preference_parse(in "  AUTO \n".as_bytes()))
+    } with {
+        return x => x,
+        raise(_e, _k) => 0,
+    };
+    let p_epoll = handle Fail[SelectError] in {
+        pref_code(preference_parse(in "epoll".as_bytes()))
+    } with {
+        return x => x,
+        raise(_e, _k) => 0,
+    };
+    let p_bad = handle Fail[SelectError] in {
+        let _ = preference_parse(in "bogus".as_bytes());
+        0
+    } with {
+        return x => x,
+        raise(e, _k) => match e {
+            SelectError::UnknownDriver => 9,
+            _ => 0,
+        },
+    };
+    let order = host_order();
+    let mut order_code: u64 = 0;
+    let mut mult: u64 = 1;
+    for i in 0..order.len() {
+        match order.try_get(i) {
+            Option::Some(k) => {
+                let id = wrapping_add(widen_u64(driver_kind_id(k)), 1);
+                order_code = wrapping_add(order_code, wrapping_mul(id, mult));
+                mult = wrapping_mul(mult, 10);
+            }
+            Option::None => {}
+        }
+    }
+    let mut mask: u64 = 0;
+    if driver_kind_compiled(DriverKind::IoUring) { mask = mask | 1; }
+    if driver_kind_compiled(DriverKind::Epoll) { mask = mask | 2; }
+    if driver_kind_compiled(DriverKind::Kqueue) { mask = mask | 4; }
+    if driver_kind_compiled(DriverKind::Iocp) { mask = mask | 8; }
+    let auto_sel = handle Fail[SelectError] in {
+        wrapping_add(widen_u64(driver_kind_id(select_driver_for_host(Preference::Auto))), 1)
+    } with {
+        return x => x,
+        raise(_e, _k) => 0,
+    };
+    let mut acc = p_empty;
+    acc = wrapping_add(acc, wrapping_mul(p_auto, 10));
+    acc = wrapping_add(acc, wrapping_mul(p_epoll, 100));
+    acc = wrapping_add(acc, wrapping_mul(p_bad, 1000));
+    acc = wrapping_add(acc, wrapping_mul(order_code, 10000));
+    acc = wrapping_add(acc, wrapping_mul(mask, 1000000));
+    acc = wrapping_add(acc, wrapping_mul(auto_sel, 100000000));
+    acc
+}
+"#;
+    let checked = check_pulse_driver(src);
+    let expected_auto_sel: u64 = if cfg!(target_os = "linux") {
+        1
+    } else if cfg!(target_os = "macos") {
+        3
+    } else {
+        4
+    };
+    let expected = 1
+        + 10
+        + 3 * 100
+        + 9 * 1000
+        + rust_order_code * 10000
+        + rust_compiled_mask * 1_000_000
+        + expected_auto_sel * 100_000_000;
+    assert_eq!(agree(&checked, "check_select", &MODES), expected);
+}

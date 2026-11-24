@@ -1059,3 +1059,80 @@ pub fn scheduler_take_failure(inout s: SchedulerState) -> Option[u32] {
     }
     Option::Some(v)
 }
+
+pub copy enum Preference {
+    Auto,
+    Only(DriverKind),
+}
+
+pub copy enum SelectError {
+    UnknownDriver,
+    NotCompiled(DriverKind),
+    Unavailable,
+}
+
+fn trim_ascii_bounds(in s: Slice[u8]) -> (u64, u64) {
+    let mut a: u64 = 0;
+    let mut b: u64 = s.len();
+    loop {
+        if a >= b {
+            break;
+        }
+        if !is_ascii_ws(slice_byte(in s, a)) {
+            break;
+        }
+        a = wrapping_add(a, 1);
+    }
+    loop {
+        if b <= a {
+            break;
+        }
+        if !is_ascii_ws(slice_byte(in s, wrapping_sub(b, 1))) {
+            break;
+        }
+        b = wrapping_sub(b, 1);
+    }
+    (a, b)
+}
+
+pub fn preference_parse(in value: Slice[u8]) -> Preference eff [Fail[SelectError]] {
+    let (a, b) = trim_ascii_bounds(in value);
+    if a == b || eq_trimmed_lower(in value, a, b, in "auto".as_bytes()) {
+        return Preference::Auto;
+    }
+    match driver_kind_from_name(in value) {
+        Option::Some(k) => Preference::Only(k),
+        Option::None => Fail::raise(SelectError::UnknownDriver),
+    }
+}
+
+pub fn select_driver_for_host(pref: Preference) -> DriverKind eff [Fail[SelectError]] {
+    match pref {
+        Preference::Only(k) => {
+            if !driver_kind_compiled(k) {
+                return Fail::raise(SelectError::NotCompiled(k));
+            }
+            k
+        }
+        Preference::Auto => {
+            let order = host_order();
+            match order.try_get(0) {
+                Option::Some(k) => k,
+                Option::None => Fail::raise(SelectError::Unavailable),
+            }
+        }
+    }
+}
+
+pub fn driver_kind_compiled(k: DriverKind) -> bool {
+    match k {
+        DriverKind::Kqueue => true,
+        _ => false
+    }
+}
+
+pub fn host_order() -> ChunkSeq[DriverKind] {
+    let mut out = ChunkSeq::new[DriverKind]();
+    out.push(DriverKind::Kqueue);
+    out
+}
