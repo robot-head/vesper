@@ -1197,6 +1197,48 @@ fn rewriter_matches_rust_on_the_ffi_corpus() {
 }
 
 #[test]
+fn drops_generated_matches_rust_on_the_ffi_corpus() {
+    let cases = ffi_corpus();
+    let compiled = compile("ffi_drops_generated_text", speed());
+    let mut tested = 0usize;
+    let mut bad = 0usize;
+    for case in &cases {
+        let has_drop = case
+            .libraries
+            .iter()
+            .any(|(d, _)| d.extern_types().iter().any(|t| t.drop_import().is_some()));
+        if !has_drop {
+            continue;
+        }
+        let imports = case.imports().expect("corpus libraries import");
+        let generated = match plan_probe::generated(&imports) {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
+        tested += 1;
+        let mut module = vesper::parser::parse(&case.source).module;
+        plan_probe::append_drops(&mut module, &imports);
+        let r = plan_probe::rewrite(&mut module, &imports, &generated, None);
+        let mut rust_out = String::new();
+        pass_text(&mut rust_out, "drops", &module, &r, false);
+
+        let bytes = input(case, None);
+        let vesper_out = unpack_text(&take_words(call(&compiled, &bytes, &case.source)));
+        if rust_out != vesper_out {
+            bad += 1;
+            if bad <= 3 {
+                let d = first_difference(&rust_out, &vesper_out)
+                    .unwrap_or_else(|| "texts differ in trailing bytes".into());
+                eprintln!("{} drops_generated mismatch:\n{d}", case.label);
+            }
+        }
+    }
+    eprintln!("drops_generated: {tested} cases with drop_import; {bad} differ");
+    assert!(tested > 0, "expected at least one drop_import case");
+    assert_eq!(bad, 0, "{bad} of {tested} drop_import cases differ");
+}
+
+#[test]
 fn rewriter_matches_rust_on_the_repository_sources() {
     if std::env::var_os("TEST_SRCDIR").is_some() {
         // Under Bazel the repository's sources are not all runfiles.
