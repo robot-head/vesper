@@ -20,6 +20,7 @@ const PARTS: &[&str] = &[
     "block",
     "net",
     "vsock",
+    "vmgenid",
 ];
 
 fn main() {
@@ -109,5 +110,10 @@ const DIVERGENT_EDITS: &[(&str, &str)] = &[
     (
         "    if peer_buf_alloc >= used {",
         "    if true || peer_buf_alloc >= used {",
+    ),
+    // vmgenid: allows an ID that crosses a 4 KiB page boundary.
+    (
+        "    wrapping_add(in_page, VMGENID_BYTES_LEN) <= VMGENID_PAGE_SIZE",
+        "    true || wrapping_add(in_page, VMGENID_BYTES_LEN) <= VMGENID_PAGE_SIZE",
     ),
 ];

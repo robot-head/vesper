@@ -66,10 +66,11 @@ pub struct VmGenIdDevice {
 
 impl VmGenIdDevice {
     pub fn new(gpa: u64, interrupt: u32) -> Result<Self, VmGenIdError> {
-        let end_in_page = (gpa % PAGE_SIZE_4K)
-            .checked_add(VMGENID_BYTES)
-            .ok_or(VmGenIdError::BadAddress)?;
-        if !gpa.is_multiple_of(8) || end_in_page > PAGE_SIZE_4K {
+        #[cfg(feature = "vesper-port")]
+        let valid = crate::binding::vmgenid_valid_addr(gpa);
+        #[cfg(not(feature = "vesper-port"))]
+        let valid = Self::valid_addr_reference(gpa);
+        if !valid {
             return Err(VmGenIdError::BadAddress);
         }
         Ok(Self {
@@ -81,7 +82,25 @@ impl VmGenIdDevice {
             notifications: 0,
         })
     }
+    #[doc(hidden)]
+    pub fn valid_addr_reference(gpa: u64) -> bool {
+        let Some(end_in_page) = (gpa % PAGE_SIZE_4K).checked_add(VMGENID_BYTES) else {
+            return false;
+        };
+        gpa.is_multiple_of(8) && end_in_page <= PAGE_SIZE_4K
+    }
     pub fn encode(id: VmGenId) -> [u8; 16] {
+        #[cfg(feature = "vesper-port")]
+        {
+            let mut b = [0u8; 16];
+            crate::binding::vmgenid_encode(id.lo, id.hi, &mut b);
+            b
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        Self::encode_reference(id)
+    }
+    #[doc(hidden)]
+    pub fn encode_reference(id: VmGenId) -> [u8; 16] {
         let mut b = [0u8; 16];
         b[..8].copy_from_slice(&id.lo.to_le_bytes());
         b[8..].copy_from_slice(&id.hi.to_le_bytes());

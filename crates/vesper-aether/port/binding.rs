@@ -551,6 +551,8 @@ unsafe extern "C" {
     fn vesper_aether_seccomp_validate(result: *mut u64, program: *mut u64) -> i64;
     fn vesper_aether_slot_plan_verify(result: *mut u64, regions: *mut u64, limits: *mut u64) -> i64;
     fn vesper_aether_slot_plan_verify_cross_vm(result: *mut u64, vm_ids: *mut u64, regions: *mut u64, region_vm: *mut u64) -> i64;
+    fn vesper_aether_vmgenid_encode(lo: i64, hi: i64, out: *mut u64) -> i64;
+    fn vesper_aether_vmgenid_valid_addr(gpa: i64) -> i64;
     fn vesper_aether_vq_packed_walk(result: *mut u64, mem: *mut u64, regions: *mut u64, busy: *mut u64, desc: i64, size: i64, index: i64, wrap: i64, occupied: i64, hint: i64, indirect_ok: i64, max_desc: i64, max_bytes: i64, max_work: i64, out: *mut u64) -> i64;
     fn vesper_aether_vq_split_walk(result: *mut u64, mem: *mut u64, regions: *mut u64, busy: *mut u64, desc: i64, driver: i64, size: i64, last_avail: i64, hint: i64, indirect_ok: i64, max_desc: i64, max_bytes: i64, max_work: i64, out: *mut u64) -> i64;
     fn vesper_aether_vsock_decode_hdr(result: *mut u64, b: *mut u64) -> i64;
@@ -738,6 +740,24 @@ pub fn slot_plan_verify_cross_vm(vm_ids: &[u64], regions: &[crate::port_types::P
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(vm_ids, |view_vm_ids| vesper_port_abi::with_slice(regions, |view_regions| vesper_port_abi::with_slice(region_vm, |view_region_vm| unsafe { vesper_aether_slot_plan_verify_cross_vm(result.as_mut_ptr(), view_vm_ids, view_regions, view_region_vm) })));
     <Option<crate::port_types::SlotError> as Abi>::get(&result[0..])
+}
+
+/// Calls `vmgenid_encode` of the Vesper library `aether` (`vesper_aether_vmgenid_encode`).
+pub fn vmgenid_encode(lo: u64, hi: u64, out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_aether_vmgenid_encode` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_vmgenid_encode(lo as i64, hi as i64, view_out) });
+    raw as u64
+}
+
+/// Calls `vmgenid_valid_addr` of the Vesper library `aether` (`vesper_aether_vmgenid_valid_addr`).
+pub fn vmgenid_valid_addr(gpa: u64) -> bool {
+    // SAFETY: `vesper_aether_vmgenid_valid_addr` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vmgenid_valid_addr(gpa as i64) };
+    raw != 0
 }
 
 /// Calls `vq_packed_walk` of the Vesper library `aether` (`vesper_aether_vq_packed_walk`).

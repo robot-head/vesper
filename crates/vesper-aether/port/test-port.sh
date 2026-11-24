@@ -58,3 +58,5 @@ expect block_port discard_and_write_zeroes_match_rust -- span_and_config_match_r
 expect net_port tx_and_ctrl_match_rust -- config_space_matches_rust
 # vsock: peer credit saturates to zero on shrunken buf_alloc.
 expect vsock_port credit_saturates_on_shrunken_alloc -- header_codec_matches_rust
+# vmgenid: page-crossing address is rejected.
+expect vmgenid_port address_validation_matches_rust -- encode_matches_rust

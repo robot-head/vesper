@@ -1,0 +1,35 @@
+// ---------------------------------------------------------------------------
+// VM Generation ID address validation and 128-bit ID encoding
+// (src/devices/vmgenid.rs).
+
+const VMGENID_BYTES_LEN: u64 = 16;
+const VMGENID_PAGE_SIZE: u64 = 4096;
+
+fn vmgenid_write_u32_le(inout out: Slice[u8], off: u64, val: u32) {
+    out.try_set(off, wrapping_u8(val));
+    out.try_set(wrapping_add(off, 1), wrapping_u8(val >> 8));
+    out.try_set(wrapping_add(off, 2), wrapping_u8(val >> 16));
+    out.try_set(wrapping_add(off, 3), wrapping_u8(val >> 24));
+}
+
+fn vmgenid_write_u64_le(inout out: Slice[u8], off: u64, val: u64) {
+    vmgenid_write_u32_le(inout out, off, wrapping_u32(val));
+    vmgenid_write_u32_le(inout out, wrapping_add(off, 4), wrapping_u32(val >> 32));
+}
+
+pub fn vmgenid_valid_addr(gpa: u64) -> bool {
+    if gpa % 8 != 0 {
+        return false;
+    }
+    let in_page = gpa % VMGENID_PAGE_SIZE;
+    wrapping_add(in_page, VMGENID_BYTES_LEN) <= VMGENID_PAGE_SIZE
+}
+
+pub fn vmgenid_encode(lo: u64, hi: u64, inout out: Slice[u8]) -> u64 {
+    if out.len() < VMGENID_BYTES_LEN {
+        return 0;
+    }
+    vmgenid_write_u64_le(inout out, 0, lo);
+    vmgenid_write_u64_le(inout out, 8, hi);
+    VMGENID_BYTES_LEN
+}
