@@ -8,8 +8,10 @@ pub(crate) mod ack;
 pub(crate) mod frame;
 pub(crate) mod header;
 pub(crate) mod lifecycle;
+#[cfg(feature = "vesper-port")]
 pub(crate) mod packet;
 pub(crate) mod packet_number;
+#[cfg(feature = "vesper-port")]
 pub(crate) mod recovery;
 pub(crate) mod stream;
 pub(crate) mod varint;

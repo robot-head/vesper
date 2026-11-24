@@ -8,12 +8,13 @@ publish = false
 build = "build.rs"
 
 [features]
-# Forward varint, packet_number, header, frame and ack to the Vesper port in
-# vesper/ (port wave P3b lane 4, #1066). Rust stays the default build.
-vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
+# ack and stream (RecvBuf/SendBuf) are unconditionally Vesper (part of #1399).
+# Enabling vesper-port also switches the remaining ported modules (varint,
+# packet_number, header, frame, recovery, lifecycle, packet) to Vesper.
+vesper-port = []
 # A deliberately wrong Vesper build, one change per ported module: the port
 # test runs must fail (crates/vesper-warp/port/test-port.sh asserts it).
-vesper-port-divergent = ["vesper-port"]
+vesper-port-divergent = []
 
 [dependencies]
 # Wave six (issue #247): address-validation tokens (AES-256-GCM), stateless
@@ -35,10 +36,10 @@ vesper-warp-tls = { path = "../vesper-warp-tls" }
 vesper-warp-umem = { path = "../vesper-warp-umem" }
 vesper-warp-wheel = { path = "../vesper-warp-wheel" }
 
-vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+vesper-port-abi = { path = "../vesper-port-abi" }
 
 [build-dependencies]
-vesper-port-harness = { path = "../vesper-port-harness", optional = true }
+vesper-port-harness = { path = "../vesper-port-harness" }
 
 [dev-dependencies]
 # Wave six (issue #247): interop against an independent QUIC stack, in

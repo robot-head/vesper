@@ -184,6 +184,38 @@ pub fn paths() -> u64 eff [Ffi[StdFs]] {
     }
 }
 
+// `remove_dir_all` on a tree with links in it (the test makes them): the
+// tree goes, what the links point at stays; on a link it removes the link;
+// on a file it is a `not_a_directory()` error.
+pub fn remove_trees() -> u64 eff [Ffi[StdFs]] {
+    let tree = handle Fail[IoError] in {
+        remove_dir_all(in "@DIR@/t");
+        let a: u64 = if exists(in "@DIR@/t") { 1 } else { 2 };
+        let b: u64 = if exists(in "@DIR@/outside/keep.txt") { 3 } else { 4 };
+        mix(a, b)
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    };
+    let link = handle Fail[IoError] in {
+        remove_dir_all(in "@DIR@/dlink");
+        let a: u64 = if exists(in "@DIR@/dlink") { 1 } else { 2 };
+        let b: u64 = if exists(in "@DIR@/outside/keep.txt") { 3 } else { 4 };
+        mix(a, b)
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    };
+    let file = handle Fail[IoError] in {
+        remove_dir_all(in "@DIR@/outside/keep.txt");
+        0
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    };
+    mix(mix(tree, link), file)
+}
+
 // The size, kind and modification second of a file the test made.
 pub fn meta() -> u64 eff [Ffi[StdFs]] {
     handle Fail[IoError] in {
@@ -389,7 +421,7 @@ fn bench_reading_repository_sources() {
         }
         t
     };
-    let symbols = vesper_std_host::symbols();
+    let symbols = std_io_support::symbols();
     let jit = |entry: &str| {
         let start = std::time::Instant::now();
         let v = std_io_support::word(&checked.jit(entry, &symbols).unwrap());
@@ -528,6 +560,30 @@ fn failures_raise_typed_io_errors() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn remove_dir_all_does_not_follow_links() {
+    use std::os::unix::fs::symlink;
+    let dir = Temp::new("std-fs");
+    let checked = check_driver(&source(&dir));
+    let d = dir.path();
+    let want = mix(mix(mix(2, 3), mix(2, 3)), 1004);
+    for mode in MODES {
+        fs::create_dir_all(d.join("outside")).unwrap();
+        fs::write(d.join("outside/keep.txt"), "keep").unwrap();
+        fs::create_dir_all(d.join("t/a/b")).unwrap();
+        fs::write(d.join("t/a/f"), "f").unwrap();
+        symlink(d.join("outside"), d.join("t/link")).unwrap();
+        symlink(d.join("outside/keep.txt"), d.join("t/a/b/flink")).unwrap();
+        symlink(d.join("outside"), d.join("dlink")).unwrap();
+        assert_eq!(agree(&checked, "remove_trees", &[mode]), want, "{mode:?}");
+        assert_eq!(
+            fs::read_to_string(d.join("outside/keep.txt")).unwrap(),
+            "keep"
+        );
+    }
+}
+
 #[test]
 fn directories_rename_and_metadata() {
     let dir = Temp::new("std-fs");
@@ -563,7 +619,7 @@ fn walks_are_sorted_by_path_bytes() {
         "a.b",
         "a/b.x",
         "c",
-        "B",
+        "B.txt",
         "a/b/c/e/f.ves",
         &format!("a/{long}"),
     ] {

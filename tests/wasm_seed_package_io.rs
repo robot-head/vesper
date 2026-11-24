@@ -5,7 +5,8 @@
 //! sources and writes its outputs through them.
 //!
 //! Each file-system program runs twice: natively (the JIT bound to the
-//! C-ABI shim crates/vesper-std-host) in one fresh directory, and as a
+//! reference `vstd_fs_*` host in tests/common/vstd_fs_oracle.rs) in one
+//! fresh directory, and as a
 //! wasm component under Wasmtime with another fresh directory preopened at
 //! its own absolute path. Both must return the same value, which folds in
 //! every result and error word (the shim reports Linux errnos, so the
@@ -19,6 +20,10 @@ mod check_words;
 mod ir_words;
 #[path = "common/seed_runner.rs"]
 mod seed_runner;
+#[path = "std_io_support/mod.rs"]
+mod std_io_support;
+#[path = "common/vstd_fs_oracle.rs"]
+mod vstd_fs_oracle;
 #[path = "common/wasm_words.rs"]
 mod wasm_words;
 
@@ -39,7 +44,7 @@ fn backend() -> &'static Entry {
 fn imports() -> Imports {
     let (triple, abi) = vesper::packages::vsys_target(None).expect("host target");
     let mut imports = Imports::new();
-    for lib in ["env/env-wasip2", "fs/fs"] {
+    for lib in ["env/env-wasip2", "fs/fs-wasip2-wasm32"] {
         let path = format!("packages/vesper-std/{lib}.vsys");
         let text = std::fs::read_to_string(&path).expect("read .vsys");
         let text = text.replace("@TARGET@", triple).replace("@ABI@", abi);
@@ -339,7 +344,7 @@ fn file_system_runs_like_the_native_host() {
         let native_dir = fresh(&format!("native{i}"));
         let native = check(&with_base(&src, &native_dir));
         let expected = native
-            .jit_with_options("main", &vesper::ffi_lowering::std_host_symbols(), false)
+            .jit_with_options("main", &vstd_fs_oracle::symbols(), false)
             .unwrap_or_else(|e| panic!("program {i} native: {e}"))
             .to_string();
         for optimize in [false, true] {
@@ -772,7 +777,7 @@ fn front_corpus() -> Vec<PathBuf> {
 #[test]
 fn front_end_parses_like_native() {
     if !cfg!(target_os = "linux") {
-        // The native run binds crates/vesper-std-host through the JIT.
+        // The native run binds the C library through the JIT.
         return;
     }
     let corpus = front_corpus();
@@ -802,7 +807,21 @@ fn front_end_parses_like_native() {
     )
     .expect("Loom.toml");
     std::fs::write(pkg.join("src/main.ves"), with_base(FRONT_MAIN, &base)).expect("main.ves");
-    let assembled = vesper::packages::load(&pkg).expect("load");
+    // Natively the package's `@vesper-std/fs` is the C library; in the
+    // component it is its WASI implementation (src-wasip2).
+    let native_pkg = vesper::packages::load(&pkg).expect("load");
+    assert!(
+        native_pkg.ok(),
+        "{:?} {:?}",
+        native_pkg.diagnostics,
+        native_pkg.manifest_errors
+    );
+    let native_imports = native_pkg.imports(None).unwrap();
+    let native_checked = vesper::ffi_lowering::check_module(&native_pkg.module, &native_imports)
+        .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics));
+    let assembled =
+        vesper::packages::load_for_target(&pkg, Some(vesper::wasm_backend::TARGET), false)
+            .expect("load");
     assert!(
         assembled.ok(),
         "{:?} {:?}",
@@ -813,8 +832,8 @@ fn front_end_parses_like_native() {
         .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics));
     let n = corpus.len().to_string();
 
-    let native = c
-        .jit_with_options("main", &vesper::ffi_lowering::std_host_symbols(), true)
+    let native = native_checked
+        .jit_with_options("main", &std_io_support::symbols(), true)
         .expect("native run")
         .to_string();
     assert_eq!(native, n, "native run");
@@ -976,7 +995,9 @@ fn wasm_backend_emits_runnable_core_under_seed_runner() {
     )
     .unwrap();
     std::fs::write(dir.join("src/main.ves"), WASM_BACKEND_MAIN).unwrap();
-    let assembled = vesper::packages::load(&dir).expect("load backend package");
+    let assembled =
+        vesper::packages::load_for_target(&dir, Some(vesper::wasm_backend::TARGET), false)
+            .expect("load backend package");
     assert!(
         assembled.ok(),
         "{:?} {:?}",
@@ -1145,7 +1166,9 @@ fn stage2_collects_package_under_wasi() {
     )
     .unwrap();
 
-    let assembled = vesper::packages::load(&runner_dir).expect("load");
+    let assembled =
+        vesper::packages::load_for_target(&runner_dir, Some(vesper::wasm_backend::TARGET), false)
+            .expect("load");
     assert!(assembled.ok(), "{:?}", assembled.diagnostics);
     let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports()).expect("check");
     let o = options(false);

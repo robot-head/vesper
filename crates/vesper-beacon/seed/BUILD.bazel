@@ -9,9 +9,9 @@ load("@rules_rust//rust:defs.bzl", "rust_clippy_test")
 
 rust_library(
     name = "seed",
-    srcs = ["//crates/vesper-beacon:rust_srcs"],
+    srcs = glob(["src/**/*.rs"]) + ["//crates/vesper-beacon:rust_srcs"],
     crate_name = "vesper_beacon",
-    crate_root = "//crates/vesper-beacon:src/lib.rs",
+    crate_root = "src/lib.rs",
     edition = "2021",
     rustc_env = {
         "CARGO_PKG_NAME": "vesper-beacon-seed",

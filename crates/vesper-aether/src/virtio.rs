@@ -17,6 +17,7 @@ pub const FLAG_WRITE: u16 = 2;
 pub const FLAG_INDIRECT: u16 = 4;
 pub const FLAG_AVAIL: u16 = 1 << 7;
 pub const FLAG_USED: u16 = 1 << 15;
+#[cfg(feature = "vesper-port")]
 const SUPPORTED_FLAGS: u16 = FLAG_NEXT | FLAG_WRITE | FLAG_AVAIL | FLAG_USED;
 const MAX_QUEUE_SIZE: usize = 32768;
 
@@ -156,6 +157,7 @@ pub enum DeviceAccess {
     ReadWrite,
 }
 impl DeviceAccess {
+    #[cfg(feature = "vesper-port")]
     fn reads(self) -> bool {
         matches!(self, Self::Read | Self::ReadWrite)
     }
@@ -183,14 +185,12 @@ pub struct GuestAuthorization {
     vm_id: u64,
     regions: Vec<Region>,
     /// `regions` as `(start, end, access)` words for the Vesper port.
-    #[cfg(feature = "vesper-port")]
     words: Vec<u64>,
 }
 impl GuestAuthorization {
     fn from_regions(vm_id: u64, regions: Vec<Region>) -> Self {
         Self {
             vm_id,
-            #[cfg(feature = "vesper-port")]
             words: regions
                 .iter()
                 .flat_map(|r| {
@@ -286,6 +286,7 @@ impl GuestAuthorization {
     pub fn vm_id(&self) -> u64 {
         self.vm_id
     }
+    #[cfg(feature = "vesper-port")]
     fn permits(
         &self,
         start: u64,
@@ -448,7 +449,6 @@ pub struct PackedQueue {
     reservations: VecDeque<Reservation>,
     ids_in_use: Vec<bool>,
     /// The Vesper walk's output words, `5 + 4 * min(size, max chain)`.
-    #[cfg(feature = "vesper-port")]
     walk_out: Vec<u64>,
 }
 impl PackedQueue {
@@ -481,7 +481,6 @@ impl PackedQueue {
             occupied: 0,
             reservations: VecDeque::new(),
             ids_in_use: vec![false; size],
-            #[cfg(feature = "vesper-port")]
             walk_out: vec![0; 5 + 4 * size.min(limits.max_chain_descriptors)],
         })
     }
@@ -511,8 +510,9 @@ impl PackedQueue {
     pub fn capture(&mut self, ring: &[u8]) -> Result<DescriptorLease, QueueError> {
         self.capture_with(ring, Self::walk)
     }
-    /// The Rust implementation of [`Self::capture`], kept for the
-    /// differential and ABBA tests until the port flips.
+    /// The Rust implementation of [`Self::capture`], kept only for the
+    /// `vesper-port` differential and ABBA tests.
+    #[cfg(feature = "vesper-port")]
     #[doc(hidden)]
     pub fn capture_reference(&mut self, ring: &[u8]) -> Result<DescriptorLease, QueueError> {
         self.capture_with(ring, Self::walk_reference)
@@ -571,7 +571,6 @@ impl PackedQueue {
         Ok(lease)
     }
     /// Walks one chain from the next available cursor (the Vesper port).
-    #[cfg(feature = "vesper-port")]
     fn walk(&mut self, ring: &[u8], free: usize) -> Result<Walked, QueueError> {
         let n = crate::binding::packed_capture(
             ring,
@@ -616,10 +615,7 @@ impl PackedQueue {
             },
         })
     }
-    #[cfg(not(feature = "vesper-port"))]
-    fn walk(&mut self, ring: &[u8], free: usize) -> Result<Walked, QueueError> {
-        self.walk_reference(ring, free)
-    }
+    #[cfg(feature = "vesper-port")]
     fn walk_reference(&mut self, ring: &[u8], free: usize) -> Result<Walked, QueueError> {
         let mut work = Work(self.limits.max_work);
         let mut cursor = self.available;

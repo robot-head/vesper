@@ -43,6 +43,7 @@ struct CandidateRegion {
     shared_tails: BTreeSet<ir::Block>,
     has_return: bool,
     first_trap: Option<TrapCode>,
+    max_live_ins: usize,
 }
 
 /// Outline cold regions of `func` into anonymous helpers declared on `m`.
@@ -123,10 +124,11 @@ fn find_candidate(
         let Some(kind) = classify_root(func, entry, root, &domtree, &loops, &reachable) else {
             continue;
         };
-        let Some(region) = build_closed_region(func, root, &domtree, &loops) else {
+        let Some(mut region) = build_closed_region(func, root, &domtree, &loops) else {
             continue;
         };
-        if region_worth_outlining(func, &region, kind, &loops) {
+        if let Some(max_live_ins) = region_worth_outlining(func, &region, kind, &loops) {
+            region.max_live_ins = max_live_ins;
             return Some(region);
         }
     }
@@ -210,6 +212,7 @@ fn is_fast_return_arm(
         for inst in func.layout.block_insts(b) {
             let data = &func.dfg.insts[inst];
             if data.opcode().is_call()
+                || data.opcode().can_store()
                 || matches!(
                     data.opcode(),
                     Opcode::Udiv | Opcode::Sdiv | Opcode::Urem | Opcode::Srem
@@ -236,9 +239,7 @@ fn is_fast_return_arm(
                     }
                     queue.push_back(target);
                 }
-            } else if data.opcode().is_terminator()
-                && !matches!(data.opcode(), Opcode::Return | Opcode::Trap)
-            {
+            } else if data.opcode().is_terminator() && !matches!(data.opcode(), Opcode::Return) {
                 return None;
             }
         }
@@ -347,6 +348,7 @@ fn build_closed_region(
         shared_tails,
         has_return,
         first_trap,
+        max_live_ins: MAX_LIVE_INS,
     })
 }
 
@@ -427,7 +429,7 @@ fn region_worth_outlining(
     region: &CandidateRegion,
     kind: OutlineKind,
     loops: &LoopAnalysis,
-) -> bool {
+) -> Option<usize> {
     let in_region = |b| region.owned.contains(&b) || region.shared_tails.contains(&b);
     let mut outside_slots = BTreeSet::new();
     let mut region_slots = BTreeSet::new();
@@ -464,16 +466,26 @@ fn region_worth_outlining(
     }
 
     let exclusive_slots = region_slots.difference(&outside_slots).count();
+    let max_live_ins = if kind == OutlineKind::AsymmetricTail
+        && calls == 0
+        && exclusive_slots == 0
+        && region.first_trap.is_none()
+    {
+        4
+    } else {
+        MAX_LIVE_INS
+    };
     if has_loop || calls >= 2 || (exclusive_slots > 0 && (calls > 0 || non_term_insts >= 8)) {
-        return true;
+        return Some(max_live_ins);
     }
-    match kind {
+    let worth = match kind {
         OutlineKind::ExplicitCold => calls > 0 || non_term_insts >= EXPLICIT_COLD_MIN_INSTS,
         OutlineKind::AsymmetricTail => {
             (calls > 0 || !region.has_return) && non_term_insts >= ASYM_MIN_COLD_INSTS
         }
         OutlineKind::LoopEarlyExit => calls > 0 || non_term_insts >= LOOP_EXIT_MIN_INSTS,
-    }
+    };
+    worth.then_some(max_live_ins)
 }
 
 fn extract_region<M: Module>(
@@ -541,7 +553,7 @@ fn extract_region<M: Module>(
         }
     }
 
-    if live_ins.len() + shared_slots.len() > MAX_LIVE_INS {
+    if live_ins.len() + shared_slots.len() > region.max_live_ins {
         return Ok(None);
     }
 

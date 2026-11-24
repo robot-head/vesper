@@ -43,7 +43,17 @@ use @vesper-std/fs::walk::{
     entry_count,
     entry_start,
     entry_end,
-    entry_kind
+    entry_kind,
+    list_dir_path
+};
+use self::graph::{
+    run_graph
+};
+use self::forge::{
+    run_forge
+};
+use self::ebpf::{
+    run_ebpf
 };
 
 enum Ascii: _ {
@@ -74,7 +84,7 @@ pub fn delegate() -> i64 {
     -1
 }
 
-fn stdout_stream() -> u32 {
+pub fn stdout_stream() -> u32 {
     1
 }
 
@@ -137,6 +147,22 @@ pub fn run(in args: Args)
     }
     if eq(in c, in "fmt") {
         return fmt(in args);
+    }
+    if eq(in c, in "graph") {
+        return run_graph(in args);
+    }
+    if eq(in c, in "forge") {
+        return run_forge(in args);
+    }
+    if eq(in c, in "ebpf") {
+        return run_ebpf(in args);
+    }
+    if eq(in c, in "verify") && has_arg(in args, in "--refute") {
+        let found = locate(in "refute".as_bytes());
+        if found.len() == 0 {
+            return missing(in "refute".as_bytes());
+        }
+        return run_tool(in found.as_slice(), in args);
     }
     if compiler_command(in c) {
         return delegate();
@@ -233,7 +259,7 @@ fn tool_name(in c: Slice[u8]) -> bool {
 // ---------------------------------------------------------------------------
 // Shared helpers.
 
-fn arg(in a: Args, i: u64) -> ChunkSeq[u8] {
+pub fn arg(in a: Args, i: u64) -> ChunkSeq[u8] {
     let mut v: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let s = arg_start(in a, i);
     let e = arg_end(in a, i);
@@ -241,19 +267,19 @@ fn arg(in a: Args, i: u64) -> ChunkSeq[u8] {
     v
 }
 
-fn byte_at(in s: Slice[u8], i: u64) -> u8 {
+pub fn byte_at(in s: Slice[u8], i: u64) -> u8 {
     match s.try_get(i) {
         Option::Some(b) => b,
         Option::None => 0,
     }
 }
 
-fn print(stream: u32, in text: Slice[u8]) eff [Ffi[HybridCommands]] {
+pub fn print(stream: u32, in text: Slice[u8]) eff [Ffi[HybridCommands]] {
     HybridCommands::hc_print(stream, in text);
 }
 
 // `vesper: <message>` on stderr (`main`'s `Err` arm); exit code 1.
-fn fail(in message: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
+pub fn fail(in message: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
     let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
     line.extend(in "vesper: ".as_bytes());
     line.extend(in message);
@@ -500,6 +526,17 @@ fn locate(in t: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdEnv], Ffi[HybridCommands]
         }
     }
     ChunkSeq::new[u8]()
+}
+
+fn has_arg(in args: Args, in needle: Str) -> bool {
+    let n = args_count(in args);
+    for i in 1..n {
+        let a = arg(in args, i);
+        if eq(in a.as_slice(), in needle) {
+            return true;
+        }
+    }
+    false
 }
 
 // `missing`: a known tool whose binary is not there.
@@ -879,39 +916,30 @@ fn io_word(e: IoError) -> u64 {
 // as in Rust. 0, or the error word of a directory that cannot be read.
 fn list_bounded(in dir: Slice[u8], budget: u64, inout out: Entries, inout over: bool)
     -> u64 eff [Ffi[StdFs]] {
-    let mut err: u64 = 0;
-    let mut d = match StdFs::vstd_fs_read_dir(in dir, inout err) {
-        Option::Some(d) => d,
-        Option::None => {
-            if err == 0 {
-                return 13;
+    let mut err_word: u64 = 0;
+    let listed = handle Fail[IoError] in {
+        list_dir_path(in dir)
+    } with {
+        return v => v,
+        raise(e, _k) => {
+            err_word = io_word(e);
+            Entries {
+                bytes: ChunkSeq::new[u8](),
+                ends: ChunkSeq::new[u64](),
+                kinds: ChunkSeq::new[u32](),
             }
-            return err;
         },
     };
-    let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    name.resize(256, 0);
-    loop {
-        let mut kind: u32 = 0;
-        let n = StdFs::vstd_fs_dir_next(inout d, inout name.as_slice_mut(), inout kind);
-        if n < 0 {
-            break;
-        }
-        let len = wrapping_u64(n);
-        if len > name.len() {
-            // Longer than the buffer: it was not consumed; ask again.
-            name.resize(len, 0);
-        } else {
-            if out.ends.len() >= budget {
-                over = true;
-                break;
-            }
-            out.bytes.extend(in name[0..len]);
-            out.ends.push(out.bytes.len());
-            out.kinds.push(kind);
-        }
+    if err_word != 0 {
+        return err_word;
     }
-    StdFs::vstd_fs_dir_close(d);
+    if listed.ends.len() > budget {
+        over = true;
+        return 0;
+    }
+    out.bytes.extend(in listed.bytes.as_slice());
+    out.ends.extend(in listed.ends.as_slice());
+    out.kinds.extend(in listed.kinds.as_slice());
     0
 }
 

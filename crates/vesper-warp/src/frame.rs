@@ -14,7 +14,7 @@
 
 // Constants, helpers and layouts that only the Rust implementation
 // (src/reference/) reads.
-#![cfg_attr(feature = "vesper-port", allow(dead_code))]
+#![allow(dead_code)]
 
 use crate::varint::Reader;
 use crate::{PacketType, TransportErrorCode};
@@ -89,17 +89,10 @@ impl FrameError {
     }
 }
 
-#[cfg(not(feature = "vesper-port"))]
-/// An inclusive range of acknowledged packet numbers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AckRange {
-    pub smallest: u64,
-    pub largest: u64,
-}
 /// An inclusive range of acknowledged packet numbers (the export ABI
 /// mirror of the Vesper `AckRange`, so ranges are lent to Vesper in place).
-#[cfg(feature = "vesper-port")]
 pub use crate::ported::binding::repr::AckRange;
+impl Eq for AckRange {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EcnCounts {
@@ -256,7 +249,7 @@ pub enum Frame<'a> {
     PathResponse([u8; 8]),
 }
 
-pub use crate::imp::frame::{
+pub use crate::ported::frame::{
     allowed, crypto_header_len, encode_crypto_header, encode_stream_header, parse_frame,
     stream_header_len,
 };

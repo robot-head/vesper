@@ -23,7 +23,9 @@ use @vesper/cranelift::{
     import_function,
     ins_call,
     ins_convert,
+    ins_iconcat,
     ins_iconst,
+    ins_isplit,
     ins_load,
     ins_stack_addr,
     ins_store,
@@ -105,7 +107,7 @@ pub fn region_known(call: u64) -> bool eff [Ffi[Cranelift]] {
         // The payload's type: an aggregate (0) or a one-word scalar.
         let t = r_word(call, wrapping_sub(n, 1));
         let aggregate = r_word(call, wrapping_sub(n, 2));
-        if aggregate > 1 || t == widen_u64(TyCode::I128) || (aggregate == 0 && t == 0) {
+        if aggregate > 1 || (aggregate == 0 && t == 0) {
             return false;
         }
     }
@@ -193,17 +195,24 @@ fn r_store_payload(
         }
     } else {
         let ty = value_type(inout b, value).code;
-        let w = if ty == TyCode::F64 {
-            ins_convert(inout b, Cv::Bitcast, rty(TyCode::I64), value)
-        } else if ty == TyCode::F32 {
-            let bits = ins_convert(inout b, Cv::Bitcast, rty(TyCode::I32), value);
-            ins_convert(inout b, Cv::Uextend, rty(TyCode::I64), bits)
-        } else if ty < TyCode::I64 {
-            ins_convert(inout b, Cv::Uextend, rty(TyCode::I64), value)
+        if ty == TyCode::I128 {
+            let lo = ins_isplit(inout b, value);
+            let hi = inst_result(inout b, 1);
+            words.push(lo.id);
+            words.push(hi.id);
         } else {
-            value
-        };
-        words.push(w.id);
+            let w = if ty == TyCode::F64 {
+                ins_convert(inout b, Cv::Bitcast, rty(TyCode::I64), value)
+            } else if ty == TyCode::F32 {
+                let bits = ins_convert(inout b, Cv::Bitcast, rty(TyCode::I32), value);
+                ins_convert(inout b, Cv::Uextend, rty(TyCode::I64), bits)
+            } else if ty < TyCode::I64 {
+                ins_convert(inout b, Cv::Uextend, rty(TyCode::I64), value)
+            } else {
+                value
+            };
+            words.push(w.id);
+        }
     }
     for i in 0..words.len() {
         let w = match words.try_get(i) {
@@ -243,6 +252,12 @@ fn r_load_payload(
     let index = r_iconst(inout b, 0);
     let args = r_args(id, handle, index, index, 3);
     let w = r_call(inout b, inout m, jit, in "vesper_region_load", in args.as_slice());
+    if t == TyCode::I128 {
+        let index1 = r_iconst(inout b, 1);
+        let args1 = r_args(id, handle, index1, index1, 3);
+        let high = r_call(inout b, inout m, jit, in "vesper_region_load", in args1.as_slice());
+        return ins_iconcat(inout b, w, high);
+    }
     if t == TyCode::F64 {
         ins_convert(inout b, Cv::Bitcast, rty(TyCode::F64), w)
     } else if t == TyCode::F32 {

@@ -167,6 +167,7 @@ fn staged() -> Stage {
         tool(&full, t);
     }
     tool(&full, "extra");
+    tool(&full, "refute");
     layouts.push(Layout {
         name: "tools beside",
         default: d,
@@ -185,6 +186,7 @@ fn staged() -> Stage {
     let tools = root.join("bazel/crates/vesper-tools/bin");
     tool(&tools, "semver");
     tool(&tools, "extra");
+    tool(&tools, "refute");
     layouts.push(Layout {
         name: "Bazel tree",
         default: d,
@@ -350,6 +352,9 @@ fn vectors() -> Vec<Vec<OsString>> {
         s(&["dir"]),
         s(&["hybrid", "--version"]),
         s(&["cwdtool", "--version"]),
+        s(&["verify", "--refute", "--version"]),
+        s(&["verify", "--version", "--refute"]),
+        s(&["verify", "--refute", "nope"]),
     ];
     for t in TOOLS {
         // The tools are the default compiler, so give them a command that
@@ -556,7 +561,12 @@ fn routing_runs_in_vesper() {
     assert_eq!(prints(&bare, &["fmt", "--help"]), 1);
     assert_eq!(prints(&bare, &["fmt", "--bogus"]), 1);
     assert_eq!(prints(&bare, &["fmt", "input"]), 1);
+    assert_eq!(prints(&bare, &["ebpf", "--help"]), 1);
+    assert_eq!(prints(&bare, &["forge", "--help"]), 1);
+    assert_eq!(prints(&bare, &["graph", "--help"]), 1);
+    assert_eq!(prints(&bare, &["verify", "--refute"]), 1);
     // Handed back: the Rust CLI prints.
+    assert_eq!(prints(&bare, &["verify", "--help"]), 0);
     assert_eq!(prints(&bare, &["check", "--fuel"]), 0);
     assert_eq!(prints(&bare, &["é"]), 0);
     let _ = std::fs::remove_dir_all(&dir);
@@ -875,4 +885,373 @@ fn fmt_walk_limit_matches_the_default_compiler() {
         );
     }
     let _ = std::fs::remove_dir_all(&root);
+}
+
+fn seed_ebpf_tree(dir: &Path) {
+    let prog = vesper_ebpf::mitigator::build(&Default::default()).unwrap();
+    std::fs::write(
+        dir.join("mitigator.o"),
+        vesper_ebpf::elf::write_object(&prog).unwrap(),
+    )
+    .unwrap();
+    // Valid XDP program: `r0 = 2; exit` (16-hex-digit slots).
+    std::fs::write(dir.join("ok.hex"), "b700000002000000\n9500000000000000\n").unwrap();
+    // Same instructions in raw 8-byte little-endian binary.
+    std::fs::write(
+        dir.join("ok.bin"),
+        [
+            0xb7, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x95, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ],
+    )
+    .unwrap();
+    // Invalid program: reads uninitialized r1 (`r0 = r1; exit`).
+    std::fs::write(dir.join("bad.hex"), "bf01000000000000\n9500000000000000\n").unwrap();
+    // Malformed hex line.
+    std::fs::write(dir.join("malformed.hex"), "not-hex\n").unwrap();
+}
+
+#[test]
+fn ebpf_matches_the_default_compiler() {
+    let default = default_compiler();
+    let hybrid = hybrid();
+    let root = scratch("vesper-cli-ebpf");
+    let cases: &[&[&str]] = &[
+        &["ebpf"],
+        &["ebpf", "--help"],
+        &["ebpf", "-h"],
+        &["ebpf", "check", "--help"],
+        &["ebpf", "check", "-h"],
+        &["ebpf", "verify"],
+        &["ebpf", "check"],
+        &["ebpf", "check", "--unknown"],
+        &["ebpf", "check", "--stack-budget"],
+        &["ebpf", "check", "--stack-budget", "abc", "ok.hex"],
+        &["ebpf", "check", "ok.hex", "ok.bin"],
+        &["ebpf", "check", "missing.hex"],
+        &["ebpf", "check", "malformed.hex"],
+        &["ebpf", "check", "ok.hex"],
+        &["ebpf", "check", "ok.hex", "--disassemble"],
+        &["ebpf", "check", "ok.bin"],
+        &["ebpf", "check", "bad.hex"],
+        &["ebpf", "check", "mitigator.o"],
+        &["ebpf", "check", "mitigator.o", "--load"],
+        &["ebpf", "check", "mitigator.o", "--stack-budget", "8"],
+    ];
+    let mut diffs = vec![];
+    for argv in cases {
+        let mut results = vec![];
+        for compiler in [&default, &hybrid] {
+            let work = root.join(if compiler == &default { "d" } else { "h" });
+            let _ = std::fs::remove_dir_all(&work);
+            std::fs::create_dir_all(&work).unwrap();
+            seed_ebpf_tree(&work);
+            let out = Command::new(compiler)
+                .current_dir(&work)
+                .env_remove("VESPER_HYBRID_STATS")
+                .args(*argv)
+                .output()
+                .unwrap();
+            results.push(out);
+        }
+        let d = &results[0];
+        let h = &results[1];
+        if d.status.code() != h.status.code() || d.stdout != h.stdout || d.stderr != h.stderr {
+            diffs.push(format!(
+                "{argv:?}: status {:?} vs {:?}, stdout {:?} vs {:?}, stderr {:?} vs {:?}",
+                d.status.code(),
+                h.status.code(),
+                String::from_utf8_lossy(&d.stdout),
+                String::from_utf8_lossy(&h.stdout),
+                String::from_utf8_lossy(&d.stderr),
+                String::from_utf8_lossy(&h.stderr),
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        diffs.is_empty(),
+        "Vesper `ebpf` differs from default CLI on {} cases:\n{}",
+        diffs.len(),
+        diffs.join("\n")
+    );
+}
+
+#[test]
+fn ebpf_runs_in_vesper() {
+    let hybrid = hybrid();
+    let dir = scratch("vesper-cli-ebpf-runs");
+    seed_ebpf_tree(&dir);
+    let out = Command::new(&hybrid)
+        .current_dir(&dir)
+        .env("VESPER_HYBRID_STATS", "1")
+        .args(["ebpf", "check", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let prints: u64 = stderr
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("vesper-hybrid: the command layers printed ")
+                .and_then(|s| s.strip_suffix(" times from Vesper"))
+                .and_then(|n| n.parse().ok())
+        })
+        .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
+    assert_eq!(prints, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn seed_forge_tree(dir: &Path) {
+    std::fs::write(
+        dir.join("ok.ves"),
+        "macro add1(x: Expr) -> Expr {\n    quote { $x + 1 }\n}\n\npub fn main() -> i64 {\n    add1!(41)\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("bad.ves"), "pub fn main() -> i64 {\n    1 +\n}\n").unwrap();
+    std::fs::write(dir.join("bad_policy.json"), "{not-json").unwrap();
+}
+
+#[test]
+fn forge_matches_the_default_compiler() {
+    let default = default_compiler();
+    let hybrid = hybrid();
+    let root = scratch("vesper-cli-forge");
+    let cases: &[&[&str]] = &[
+        &["forge"],
+        &["forge", "--help"],
+        &["forge", "-h"],
+        &["forge", "check", "--help"],
+        &["forge", "nope"],
+        &["forge", "check"],
+        &["forge", "check", "--unknown"],
+        &["forge", "check", "--package"],
+        &["forge", "check", "--policy"],
+        &["forge", "check", "ok.ves", "bad.ves"],
+        &["forge", "check", "missing.ves"],
+        &["forge", "check", "ok.ves", "--policy", "bad_policy.json"],
+        &["forge", "check", "ok.ves"],
+        &[
+            "forge",
+            "check",
+            "ok.ves",
+            "--json",
+            "--package",
+            "@local/test",
+        ],
+        &["forge", "check", "bad.ves"],
+        &["forge", "expand", "ok.ves"],
+        &["forge", "lean", "ok.ves"],
+        &["forge", "lean", "ok.ves", "--provenance", "prov.json"],
+        &["forge", "lean", "--provenance"],
+    ];
+    let mut diffs = vec![];
+    for argv in cases {
+        let mut results = vec![];
+        for compiler in [&default, &hybrid] {
+            let work = root.join(if compiler == &default { "d" } else { "h" });
+            let _ = std::fs::remove_dir_all(&work);
+            std::fs::create_dir_all(&work).unwrap();
+            seed_forge_tree(&work);
+            let out = Command::new(compiler)
+                .current_dir(&work)
+                .env_remove("VESPER_HYBRID_STATS")
+                .args(*argv)
+                .output()
+                .unwrap();
+            results.push(out);
+        }
+        let d = &results[0];
+        let h = &results[1];
+        let d_prov = std::fs::read(root.join("d/prov.json")).ok();
+        let h_prov = std::fs::read(root.join("h/prov.json")).ok();
+        if d.status.code() != h.status.code()
+            || d.stdout != h.stdout
+            || d.stderr != h.stderr
+            || d_prov != h_prov
+        {
+            diffs.push(format!(
+                "{argv:?}: status {:?} vs {:?}, stdout {:?} vs {:?}, stderr {:?} vs {:?}, prov {}",
+                d.status.code(),
+                h.status.code(),
+                String::from_utf8_lossy(&d.stdout),
+                String::from_utf8_lossy(&h.stdout),
+                String::from_utf8_lossy(&d.stderr),
+                String::from_utf8_lossy(&h.stderr),
+                d_prov == h_prov,
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        diffs.is_empty(),
+        "Vesper `forge` differs from default CLI on {} cases:\n{}",
+        diffs.len(),
+        diffs.join("\n")
+    );
+}
+
+#[test]
+fn forge_runs_in_vesper() {
+    let hybrid = hybrid();
+    let dir = scratch("vesper-cli-forge-runs");
+    seed_forge_tree(&dir);
+    let out = Command::new(&hybrid)
+        .current_dir(&dir)
+        .env("VESPER_HYBRID_STATS", "1")
+        .args(["forge", "check", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let prints: u64 = stderr
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("vesper-hybrid: the command layers printed ")
+                .and_then(|s| s.strip_suffix(" times from Vesper"))
+                .and_then(|n| n.parse().ok())
+        })
+        .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
+    assert_eq!(prints, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn seed_graph_tree(dir: &Path) {
+    let lock = serde_json::json!({
+        "schema_version": 1,
+        "roots": ["@acme/app"],
+        "packages": [
+            {
+                "name": "@acme/app",
+                "version": "1.0.0",
+                "source": { "kind": "path", "path": "." },
+                "digest": "0".repeat(64),
+                "features": [],
+                "capability_ceiling": ["Fail"],
+                "required_capabilities": ["Fail"],
+                "forbid_unsafe_ffi": true,
+                "dependencies": [
+                    {
+                        "package": "@acme/lib",
+                        "requirement": "^1.0",
+                        "allowed_capabilities": ["Fail"],
+                        "requested_features": ["std"]
+                    }
+                ],
+                "system_dependencies": []
+            },
+            {
+                "name": "@acme/lib",
+                "version": "1.2.0",
+                "source": { "kind": "path", "path": "lib" },
+                "digest": "1".repeat(64),
+                "features": ["std"],
+                "capability_ceiling": ["Fail"],
+                "required_capabilities": [],
+                "forbid_unsafe_ffi": true,
+                "dependencies": [],
+                "system_dependencies": []
+            }
+        ],
+        "system_packages": []
+    });
+    std::fs::write(
+        dir.join("Loom.lock"),
+        serde_json::to_vec_pretty(&lock).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(dir.join("bad.lock"), "{not-json").unwrap();
+    std::fs::write(
+        dir.join("empty.lock"),
+        r#"{"schema_version":1,"roots":[],"packages":[],"system_packages":[]}"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn graph_matches_the_default_compiler() {
+    let default = default_compiler();
+    let hybrid = hybrid();
+    let root = scratch("vesper-cli-graph");
+    let cases: &[&[&str]] = &[
+        &["graph", "--help"],
+        &["graph", "-h"],
+        &["graph", "--unknown"],
+        &["graph", "--package"],
+        &["graph", "--package", "@acme/app", "--package", "@acme/lib"],
+        &["graph", "--package", "bad", "--json", "--dot"],
+        &["graph", "--json", "--dot"],
+        &["graph", "Loom.lock", "bad.lock"],
+        &["graph", "missing.lock"],
+        &["graph", "bad.lock"],
+        &["graph", "empty.lock"],
+        &["graph", "empty.lock", "--json"],
+        &["graph"],
+        &["graph", "Loom.lock", "--json"],
+        &["graph", "Loom.lock", "--dot"],
+        &["graph", "--package", "@acme/lib", "--invert"],
+        &["graph", "--package", "@acme/missing", "--json"],
+    ];
+    let mut diffs = vec![];
+    for argv in cases {
+        let mut results = vec![];
+        for compiler in [&default, &hybrid] {
+            let work = root.join(if compiler == &default { "d" } else { "h" });
+            let _ = std::fs::remove_dir_all(&work);
+            std::fs::create_dir_all(&work).unwrap();
+            seed_graph_tree(&work);
+            let out = Command::new(compiler)
+                .current_dir(&work)
+                .env_remove("VESPER_HYBRID_STATS")
+                .args(*argv)
+                .output()
+                .unwrap();
+            results.push(out);
+        }
+        let d = &results[0];
+        let h = &results[1];
+        if d.status.code() != h.status.code() || d.stdout != h.stdout || d.stderr != h.stderr {
+            diffs.push(format!(
+                "{argv:?}: status {:?} vs {:?}, stdout {:?} vs {:?}, stderr {:?} vs {:?}",
+                d.status.code(),
+                h.status.code(),
+                String::from_utf8_lossy(&d.stdout),
+                String::from_utf8_lossy(&h.stdout),
+                String::from_utf8_lossy(&d.stderr),
+                String::from_utf8_lossy(&h.stderr),
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        diffs.is_empty(),
+        "Vesper `graph` differs from default CLI on {} cases:\n{}",
+        diffs.len(),
+        diffs.join("\n")
+    );
+}
+
+#[test]
+fn graph_runs_in_vesper() {
+    let hybrid = hybrid();
+    let dir = scratch("vesper-cli-graph-runs");
+    seed_graph_tree(&dir);
+    let out = Command::new(&hybrid)
+        .current_dir(&dir)
+        .env("VESPER_HYBRID_STATS", "1")
+        .args(["graph", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let prints: u64 = stderr
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("vesper-hybrid: the command layers printed ")
+                .and_then(|s| s.strip_suffix(" times from Vesper"))
+                .and_then(|n| n.parse().ok())
+        })
+        .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
+    assert_eq!(prints, 1);
+    let _ = std::fs::remove_dir_all(&dir);
 }

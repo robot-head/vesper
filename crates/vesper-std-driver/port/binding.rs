@@ -28,10 +28,6 @@ pub fn live_allocations() -> i64 {
 
 /// Calls `run` of the Vesper library `stddriver` (`vesper_stddriver_run`).
 pub fn run() -> u64 {
-    // Keep the crate's `StdFs` symbols linked: the Vesper object calls them.
-    let _ = core::hint::black_box([crate::fs::vstd_fs_close as *const (), crate::fs::vstd_fs_create_dir as *const (), crate::fs::vstd_fs_dir_close as *const (), crate::fs::vstd_fs_dir_next as *const (), crate::fs::vstd_fs_file_len as *const (), crate::fs::vstd_fs_metadata as *const (), crate::fs::vstd_fs_open as *const (), crate::fs::vstd_fs_parent_len as *const (), crate::fs::vstd_fs_read as *const (), crate::fs::vstd_fs_read_dir as *const (), crate::fs::vstd_fs_remove_dir as *const (), crate::fs::vstd_fs_remove_file as *const (), crate::fs::vstd_fs_rename as *const (), crate::fs::vstd_fs_sync as *const (), crate::fs::vstd_fs_sync_dir as *const (), crate::fs::vstd_fs_unique as *const (), crate::fs::vstd_fs_write as *const ()]);
-    // Keep the crate's `StdProcess` symbols linked: the Vesper object calls them.
-    let _ = core::hint::black_box([crate::process::vstd_proc_arg as *const (), crate::process::vstd_proc_child_id as *const (), crate::process::vstd_proc_command as *const (), crate::process::vstd_proc_command_free as *const (), crate::process::vstd_proc_cwd as *const (), crate::process::vstd_proc_env as *const (), crate::process::vstd_proc_env_clear as *const (), crate::process::vstd_proc_env_remove as *const (), crate::process::vstd_proc_exit as *const (), crate::process::vstd_proc_free as *const (), crate::process::vstd_proc_id as *const (), crate::process::vstd_proc_output as *const (), crate::process::vstd_proc_spawn as *const (), crate::process::vstd_proc_stdio as *const (), crate::process::vstd_proc_wait as *const ()]);
     // SAFETY: `vesper_stddriver_run` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.

@@ -35,6 +35,9 @@ use self::rules::{
     single_bindings,
     stable_place
 };
+use @vesper/check-data::types::{
+    TyPass
+};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
@@ -49,8 +52,6 @@ const OP_CALL: u8 = 9;
 const OP_SEQ: u8 = 10;
 const T_JUMP: u8 = 1;
 const T_BRANCH: u8 = 2;
-const P_IN: u8 = 0;
-const P_INOUT: u8 = 1;
 const TY_U64: u64 = 1;
 const TY_USIZE: u64 = 2;
 const TY_SLICE: u64 = 8;
@@ -427,7 +428,10 @@ impl Facts {
         for p in 0..f.params.len() {
             let q = f.param(p);
             if q.name == root
-                && (q.pass == P_IN || (q.pass == P_INOUT && whole && (q.flags & TY_SLICE) != 0)) {
+                && (
+                    q.pass == TyPass::In
+                        || (q.pass == TyPass::Inout && whole && (q.flags & TY_SLICE) != 0)
+                ) {
                 borrowed = true;
             }
         }

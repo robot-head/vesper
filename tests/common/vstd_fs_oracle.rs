@@ -1,6 +1,62 @@
-//! `sys library StdFs` (packages/vesper-std/fs/fs.vsys): files as linear
-//! handles, directory listings, metadata, renames and removal.
-use crate::*;
+//! The reference host of the WASI `StdFs` interface
+//! (packages/vesper-std/fs/fs-wasip2-wasm32.vsys) for
+//! tests/wasm_seed_package_io.rs: the `vstd_fs_*` functions over `std::fs`,
+//! which `@vesper-std/fs` called through crates/vesper-std-host before it
+//! imported the C library itself (SH6 lane 13, #1408). The test runs each
+//! program natively against these and as a wasm component against the
+//! WASI lowering in packages/vesper-wasm-backend/src/host.ves.
+#![allow(dead_code, clippy::missing_safety_doc)]
+use vesper_std_host::{error_word, os_bytes, path_of};
+
+/// Hand out a heap handle.
+fn new_handle<T>(value: T) -> *mut T {
+    Box::into_raw(Box::new(value))
+}
+
+/// Take back a handle from [`new_handle`].
+///
+/// # Safety
+/// `p` came from [`new_handle`] and is taken back once.
+unsafe fn free_handle<T>(p: *mut T) -> Box<T> {
+    // SAFETY: as documented.
+    unsafe { Box::from_raw(p) }
+}
+
+/// # Safety
+/// `err` is valid for one write, or NULL.
+unsafe fn set_err(err: *mut u64, word: u64) {
+    if !err.is_null() {
+        // SAFETY: as documented.
+        unsafe { *err = word };
+    }
+}
+
+/// # Safety
+/// `ptr` is valid for `len` bytes.
+unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
+    if len == 0 || ptr.is_null() {
+        return &[];
+    }
+    // SAFETY: as documented.
+    unsafe { std::slice::from_raw_parts(ptr, len) }
+}
+
+/// # Safety
+/// `ptr` is valid and exclusive for `len` bytes.
+unsafe fn bytes_mut<'a>(ptr: *mut u8, len: usize) -> &'a mut [u8] {
+    if len == 0 || ptr.is_null() {
+        return &mut [];
+    }
+    // SAFETY: as documented.
+    unsafe { std::slice::from_raw_parts_mut(ptr, len) }
+}
+
+fn copy_out(data: &[u8], buf: &mut [u8]) -> u64 {
+    if data.len() <= buf.len() {
+        buf[..data.len()].copy_from_slice(data);
+    }
+    data.len() as u64
+}
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::sync::atomic::AtomicU64;
@@ -77,7 +133,6 @@ unsafe fn with_path<T>(
 }
 
 /// Open `path` in `mode` ([`OPEN_READ`] and friends). NULL on error.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vstd_fs_open(
     path: *const u8,
     path_len: usize,
@@ -101,13 +156,12 @@ pub unsafe extern "C" fn vstd_fs_open(
                 }
             };
             let file = o.open(p)?;
-            Ok(new_handle(HandleKind::File, FsFile { file }))
+            Ok(new_handle(FsFile { file }))
         })
     }
 }
 
 /// The file's current length in bytes (0 if it cannot be read).
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vstd_fs_file_len(f: *const FsFile) -> u64 {
     // SAFETY: a live handle lent `in`.
     let f = unsafe { &*f };
@@ -116,7 +170,6 @@ pub unsafe extern "C" fn vstd_fs_file_len(f: *const FsFile) -> u64 {
 
 /// Read into the whole buffer, stopping early only at end of file. Returns
 /// the bytes read (fewer than the buffer only at end of file).
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vstd_fs_read(
     f: *mut FsFile,
     buf: *mut u8,
@@ -144,7 +197,6 @@ pub unsafe extern "C" fn vstd_fs_read(
 }
 
 /// Write the whole buffer. Returns 0 on success, 1 on error.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vstd_fs_write(
     f: *mut FsFile,
     buf: *const u8,
@@ -157,7 +209,6 @@ pub unsafe extern "C" fn vstd_fs_write(
 }
 
 /// Flush the file's data and metadata to storage (`fsync`).
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vstd_fs_sync(f: *mut FsFile, err: *mut u64) -> u32 {
     // SAFETY: a live handle lent `inout`.
     let f = unsafe { &mut *f };
@@ -165,10 +216,9 @@ pub unsafe extern "C" fn vstd_fs_sync(f: *mut FsFile, err: *mut u64) -> u32 {
 }
 
 /// Close the file (the finalizer of `FsFile`).
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vstd_fs_close(f: *mut FsFile) {
     // SAFETY: `sink` consumes the handle exactly once.
-    drop(unsafe { free_handle(HandleKind::File, f) });
+    drop(unsafe { free_handle(f) });
 }
 
 fn status(err: *mut u64, r: std::io::Result<()>) -> u32 {
@@ -187,7 +237,6 @@ fn status(err: *mut u64, r: std::io::Result<()>) -> u32 {
 }
 
 /// Rename `from` to `to`, replacing `to` if it exists (on Windows too).
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vstd_fs_rename(
     from: *const u8,
     from_len: usize,
@@ -204,14 +253,12 @@ pub unsafe extern "C" fn vstd_fs_rename(
 }
 
 /// Remove a file (not a directory).
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vstd_fs_remove_file(path: *const u8, len: usize, err: *mut u64) -> u32 {
     // SAFETY: lent for the call.
     unsafe { with_path(path, len, err, 1, |p| std::fs::remove_file(p).map(|()| 0)) }
 }
 
 /// Remove a directory: an empty one, or with `recursive` everything in it.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vstd_fs_remove_dir(
     path: *const u8,
     len: usize,
@@ -233,7 +280,6 @@ pub unsafe extern "C" fn vstd_fs_remove_dir(
 
 /// Create a directory, with `recursive` its missing parents too (and then
 /// an existing directory is not an error).
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vstd_fs_create_dir(
     path: *const u8,
     len: usize,
@@ -254,7 +300,6 @@ pub unsafe extern "C" fn vstd_fs_create_dir(
 }
 
 /// Metadata of `path` (following symlinks when `follow`).
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vstd_fs_metadata(
     path: *const u8,
     len: usize,
@@ -299,7 +344,6 @@ pub unsafe extern "C" fn vstd_fs_metadata(
 
 /// Flush a directory's entries to storage after a rename (Unix `fsync` on
 /// the directory; a no-op on Windows, where `MoveFileEx` is durable).
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vstd_fs_sync_dir(path: *const u8, len: usize, err: *mut u64) -> u32 {
     // SAFETY: lent for the call.
     unsafe {
@@ -317,7 +361,6 @@ pub unsafe extern "C" fn vstd_fs_sync_dir(path: *const u8, len: usize, err: *mut
 /// included: 4 for `a/b/c` (`a/b/`), 0 for a bare name. `/` separates on
 /// every platform; `\` and a drive prefix (`C:`) only on Windows, since on
 /// Unix a backslash is an ordinary name byte.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vstd_fs_parent_len(path: *const u8, len: usize) -> u64 {
     // SAFETY: lent for the call.
     let raw = unsafe { bytes(path, len) };
@@ -334,14 +377,12 @@ static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
 /// A process-unique number for temporary names: the process id in the high
 /// 32 bits and a counter in the low 32.
-#[unsafe(no_mangle)]
 pub extern "C" fn vstd_fs_unique() -> u64 {
     (u64::from(std::process::id()) << 32)
         | (UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) & 0xffff_ffff)
 }
 
 /// List a directory. NULL on error.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vstd_fs_read_dir(
     path: *const u8,
     len: usize,
@@ -356,7 +397,7 @@ pub unsafe extern "C" fn vstd_fs_read_dir(
                 let kind = e.file_type().map_or(KIND_OTHER, kind_of);
                 entries.push((os_bytes(&e.file_name()), kind));
             }
-            Ok(new_handle(HandleKind::Dir, FsDir { entries, next: 0 }))
+            Ok(new_handle(FsDir { entries, next: 0 }))
         })
     }
 }
@@ -365,7 +406,6 @@ pub unsafe extern "C" fn vstd_fs_read_dir(
 /// name's length, or -1 after the last entry. A name longer than `buf` is
 /// not consumed: its length comes back and the call can be repeated with a
 /// bigger buffer.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vstd_fs_dir_next(
     d: *mut FsDir,
     buf: *mut u8,
@@ -387,13 +427,12 @@ pub unsafe extern "C" fn vstd_fs_dir_next(
 }
 
 /// Close a listing (the finalizer of `FsDir`).
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vstd_fs_dir_close(d: *mut FsDir) {
     // SAFETY: `sink` consumes the handle exactly once.
-    drop(unsafe { free_handle(HandleKind::Dir, d) });
+    drop(unsafe { free_handle(d) });
 }
 
-pub(crate) fn symbols() -> Vec<(&'static str, *const u8)> {
+pub fn symbols() -> Vec<(&'static str, *const u8)> {
     vec![
         ("vstd_fs_open", vstd_fs_open as *const u8),
         ("vstd_fs_file_len", vstd_fs_file_len as *const u8),

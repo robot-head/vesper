@@ -559,6 +559,36 @@ pub(crate) fn request_control_builder(
     .is_some())
 }
 
+/// Dispatches a `numeric` request from a module-level runtime helper that
+/// holds only a module without a [`crate::native::Codegen`] context.
+pub(crate) fn request_numeric_module(
+    module: &mut dyn Module,
+    op: u32,
+    args: &[u64],
+) -> Result<Option<Vec<u64>>, String> {
+    if hook(Family::Numeric).is_none() {
+        return Ok(None);
+    }
+    static EMPTY_WORLD: OnceLock<World> = OnceLock::new();
+    static EMPTY_PROGRAM: OnceLock<Program> = OnceLock::new();
+    let world = EMPTY_WORLD.get_or_init(World::default);
+    let program = EMPTY_PROGRAM.get_or_init(Program::default);
+    let mut func = cranelift_codegen::ir::Function::new();
+    let mut fb_ctx = cranelift_frontend::FunctionBuilderContext::new();
+    let mut builder = cranelift_frontend::FunctionBuilder::new(&mut func, &mut fb_ctx);
+    request(
+        Family::Numeric,
+        &mut builder,
+        module,
+        world,
+        program,
+        Site::NONE,
+        op,
+        args,
+        None,
+    )
+}
+
 /// The graph walk's request for one Place IR instruction: `inst` (block
 /// `block`, index `index` of lowered function `function`), whose operands
 /// have the Cranelift values in `values`, and whose type is `ty`. `None`
@@ -857,6 +887,13 @@ pub mod control {
     /// `native_session`: switch to `violation` block and return `status`.
     /// Args `[violation_blk, status]`; no result.
     pub const SESSION_VIOLATION: u32 = 42;
+    /// `dyn_drop_helper` head: create entry block, append params, switch to
+    /// entry, load scalar if `scalar_ty != 0` else keep `data`. Args
+    /// `[scalar_ty]`; answers `[value]`.
+    pub const DYN_DROP_HELPER_HEAD: u32 = 43;
+    /// `dyn_drop_helper` tail: emit `return_(&[])` and `seal_all_blocks`.
+    /// Args `[]`; no result.
+    pub const DYN_DROP_HELPER_TAIL: u32 = 44;
 }
 
 /// The `ffi` family's requests (SH4 lane 13, #1287): one foreign (`.vsys`)
@@ -916,6 +953,11 @@ pub mod ffi {
     pub const RESULT: u32 = 5;
     /// Frees the C string buffers. Args `[buffer...]`; no result.
     pub const FINISH: u32 = 6;
+    /// Indirect call through a function pointer (`is_indirect()`):
+    /// `[sig_ref, pointer, errno, returns, little, len_word, len_i64, reg_id,
+    /// released_n, released..., args_n, args..., copies_n, (len, copy...)...]`;
+    /// answers `[raw, os_error]`.
+    pub const CALL_INDIRECT: u32 = 7;
 }
 
 /// The `numeric` family's requests (lane 11, #1285). `Op::Vector` and
@@ -1016,11 +1058,12 @@ pub mod numeric {
     /// The element address of an `Atomic[T]` receiver (`atomic_call`):
     /// `[v receiver]`. Result `[address]` (two trusted loads).
     pub const ATOMIC_CELL: u32 = 11;
-    /// One atomic operation besides `compare_exchange` (the shim has no
-    /// `atomic_cas`): `[op, type, signed, v address, v operands...]`, `op`
-    /// one of the `ATOMIC_*` codes below, `type` the narrow lane's
-    /// [`super::ty_code`] and the operands already narrowed. Result
-    /// `[value]`, the old value as a canonical lane (`0` for a store).
+    /// One atomic operation: `[op, type, signed, v address, v operands...]`,
+    /// `op` one of the `ATOMIC_*` codes below (`ATOMIC_CAS` appends
+    /// `[v out_ptr, ok_tag, err_tag, payload_offset]`), `type` the narrow
+    /// lane's [`super::ty_code`] and the operands already narrowed. Result
+    /// `[value]`, the old value as a canonical lane (`0` for a store, or
+    /// `out_ptr` for `ATOMIC_CAS`).
     pub const ATOMIC: u32 = 12;
     pub const ATOMIC_LOAD: u64 = 1;
     pub const ATOMIC_STORE: u64 = 2;
@@ -1030,9 +1073,19 @@ pub mod numeric {
     pub const ATOMIC_AND: u64 = 6;
     pub const ATOMIC_OR: u64 = 7;
     pub const ATOMIC_XOR: u64 = 8;
+    pub const ATOMIC_CAS: u64 = 9;
     /// The `vesper_parallel_for(body, data, n)` call of `parallel_for_call`:
     /// `[body FuncRef, v data, v n]`. Result `[value]` (`0`).
     pub const PARALLEL_FOR: u32 = 13;
+    /// Define an AOT runtime on the lent module (`regions::aot_runtime::define`,
+    /// `tiled::aot_runtime::define`, `fip::aot_runtime::declare_or_define[_free]`):
+    /// `[kind]` one of `RUNTIME_*`. No result; callers look up any needed
+    /// `FuncId` by symbol name on `m`.
+    pub const RUNTIME: u32 = 14;
+    pub const RUNTIME_REGIONS: u64 = 1;
+    pub const RUNTIME_TILED: u64 = 2;
+    pub const RUNTIME_BOX_ALLOC: u64 = 3;
+    pub const RUNTIME_BOX_FREE: u64 = 4;
     /// The classes of a [`FLOAT_CONVERT`] operand (`FROM_F32` and
     /// `FROM_F64` are also the float words of the other requests).
     pub const FROM_F32: u64 = 1;
@@ -1131,4 +1184,107 @@ pub mod seq {
             crate::seq::HEADER_BYTES as u64,
         ]
     }
+
+    // SH4 lane 9 part 2b (#1283): seq/str/byte/hoist/fused/drop emission ops.
+    pub const STRING_LITERAL: u32 = 2;
+    pub const STR_OP: u32 = 3;
+    pub const STR_COMPARE: u32 = 4;
+    pub const BOUNDS_GUARD: u32 = 5;
+    pub const HOISTED_ACCESS: u32 = 6;
+    pub const INVARIANT_WORD: u32 = 7;
+    pub const EMPTY_HEADER: u32 = 8;
+    pub const SEQ_OP: u32 = 9;
+    pub const BYTE_OP: u32 = 10;
+    pub const FUSED_TRY_GET: u32 = 11;
+    pub const FUSED_CONDITION: u32 = 12;
+    pub const DROP_OP: u32 = 13;
+
+    // `STR_OP` sub-ops.
+    pub const STR_LEN: u64 = 1;
+    pub const STR_BYTE_VALID: u64 = 2;
+    pub const STR_BYTE: u64 = 3;
+    pub const STR_TRY_BYTE_AT: u64 = 4;
+    pub const STR_AS_BYTES: u64 = 5;
+    pub const STR_SUB_STR: u64 = 6;
+    pub const STR_PUSH_STR: u64 = 7;
+    pub const STR_PUSH_CHAR: u64 = 8;
+    pub const STR_CLEAR: u64 = 9;
+    pub const STR_RESERVE: u64 = 10;
+
+    // `HOISTED_ACCESS` kinds.
+    pub const HOIST_GET: u64 = 0;
+    pub const HOIST_SET: u64 = 1;
+    pub const HOIST_TRY_GET: u64 = 2;
+    pub const HOIST_TRY_SET: u64 = 3;
+
+    // `SEQ_OP` sub-ops.
+    pub const SEQ_WITH_CAPACITY: u64 = 1;
+    pub const SEQ_LEN: u64 = 2;
+    pub const SEQ_SLICE_LEN: u64 = 3;
+    pub const SEQ_PUSH_TAIL: u64 = 4;
+    pub const SEQ_POP: u64 = 5;
+    pub const SEQ_GET: u64 = 6;
+    pub const SEQ_SET: u64 = 7;
+    pub const SEQ_TRY_GET: u64 = 8;
+    pub const SEQ_TRY_SET: u64 = 9;
+    pub const SEQ_LAST: u64 = 10;
+    pub const SEQ_CLEAR: u64 = 11;
+    pub const SEQ_TRUNCATE: u64 = 12;
+    pub const SEQ_EXTEND_TAIL: u64 = 13;
+    pub const SEQ_RESIZE_CMP: u64 = 14;
+    pub const SEQ_RESIZE_SHRINK: u64 = 15;
+    pub const SEQ_RESIZE_GROW_TAIL: u64 = 16;
+    pub const SEQ_EXTEND_WITHIN_TAIL: u64 = 17;
+    pub const SEQ_EXTEND_REVERSED_TAIL: u64 = 18;
+    pub const SEQ_FINISH: u64 = 19;
+    pub const SEQ_AS_SLICE: u64 = 20;
+    pub const SEQ_SUB_SLICE: u64 = 21;
+    pub const SEQ_CHECK_INDEX: u64 = 22;
+    pub const SEQ_CHECK_EXTEND_WITHIN: u64 = 23;
+    pub const SEQ_CHECK_FINISH: u64 = 24;
+    pub const SEQ_RESERVE_BEGIN: u64 = 25;
+    pub const SEQ_RESERVE_ONE: u64 = 26;
+    pub const SEQ_HOIST_HEADER: u64 = 27;
+    pub const SEQ_ELEM_ADDR: u64 = 28;
+    pub const SEQ_LOAD_ELEM: u64 = 29;
+    pub const SEQ_STORE_ELEM: u64 = 30;
+    pub const SEQ_ALLOC: u64 = 31;
+    pub const SEQ_RESERVE_GROW: u64 = 32;
+
+    // `BYTE_OP` sub-ops.
+    pub const BYTE_COPY_FROM: u64 = 1;
+    pub const BYTE_COPY_WITHIN: u64 = 2;
+    pub const BYTE_FILL: u64 = 3;
+    pub const BYTE_FILL_RANGE: u64 = 4;
+    pub const BYTE_WIDE: u64 = 5;
+    pub const BYTE_SUM_BE16: u64 = 6;
+    pub const BYTE_BYTES_EQ: u64 = 7;
+    pub const BYTE_BYTES_CMP: u64 = 8;
+    pub const BYTE_FIND_BYTE: u64 = 9;
+    pub const BYTE_FIND_EITHER: u64 = 10;
+    pub const BYTE_FIND_NOT_IN: u64 = 11;
+    pub const BYTE_EXTEND_LOWER: u64 = 12;
+    pub const BYTE_MAKE_LOWER: u64 = 13;
+    pub const BYTE_CHECK_COPY_FROM: u64 = 14;
+    pub const BYTE_CHECK_COPY_WITHIN: u64 = 15;
+    pub const BYTE_CHECK_FILL_RANGE: u64 = 16;
+    pub const BYTE_CHECK_WIDE: u64 = 17;
+    pub const BYTE_CHECK_MAKE_LOWER: u64 = 18;
+
+    // `DROP_OP` sub-ops.
+    pub const DROP_SLOTS_STR: u64 = 1;
+    pub const DROP_SLOTS_FIELDS: u64 = 2;
+    pub const DROP_MOVED_ZERO: u64 = 3;
+    pub const DROP_MOVED_CLEAR: u64 = 4;
+    pub const DROP_FIELD_MOVED: u64 = 5;
+    pub const DROP_REBIND_COPY: u64 = 6;
+    pub const DROP_FREE_GUARD: u64 = 7;
+    pub const DROP_GLUE: u64 = 8;
+
+    // `DROP_GLUE` tree node tags.
+    pub const DROP_NODE_SEQ: u64 = 1;
+    pub const DROP_NODE_STR: u64 = 2;
+    pub const DROP_NODE_DYN: u64 = 3;
+    pub const DROP_NODE_PRODUCT: u64 = 4;
+    pub const DROP_NODE_ENUM: u64 = 5;
 }

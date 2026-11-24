@@ -1,14 +1,33 @@
 // @vesper-std/fs: files and directories (self-hosting SH0 lane 3, #1125),
-// over the `.vsys` library `StdFs` (fs.vsys; the host side is
-// crates/vesper-std-host). Every operation performs `Ffi[StdFs]` and
-// raises `Fail[IoError]` when the OS refuses it. Files are linear handles
-// inside this package: each public function opens and closes its own, so
-// none escapes and every path closes it exactly once.
+// over the `.vsys` library `StdFs`: the C library itself on Linux and
+// macOS (fs-@OS@-@ARCH@.vsys and src/sys.ves, SH6 lane 13, #1408). Every
+// operation performs `Ffi[StdFs]` and raises `Fail[IoError]` when the OS
+// refuses it. Files are descriptors inside this package: each public
+// function opens and closes its own, so none escapes and every path
+// closes it exactly once.
 //
 // Paths are `in Str` in the public API and bytes underneath (`*_path`
 // variants take an `in Slice[u8]`): on Unix any bytes but NUL, on Windows
 // UTF-8. Modules:
 // - `walk`: sorted directory listings and recursive walks (`Entries`).
+// - `sys`: the operations over the C library.
+use self::sys::{
+    os_open,
+    os_close,
+    os_read,
+    os_write,
+    os_sync,
+    os_metadata,
+    os_file_len,
+    os_rename,
+    os_remove_file,
+    os_remove_dir,
+    os_create_dir,
+    os_sync_dir,
+    os_parent_len,
+    os_unique,
+    os_word_kind
+};
 
 // Why an operation failed. `kind` is one of the codes below
 // (`not_found()` and friends); `os` is the raw OS error (`errno`, or
@@ -94,7 +113,7 @@ pub fn raise_kind[T](kind: u32) -> T eff [Fail[IoError]] {
     )
 }
 
-// Open modes of `vstd_fs_open`.
+// Open modes of `sys::open`.
 fn mode_read() -> u32 {
     0
 }
@@ -147,30 +166,30 @@ pub fn read(in path: Str) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
 
 pub fn read_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
-    let mut f = match StdFs::vstd_fs_open(in path, mode_read(), inout err) {
-        Option::Some(f) => f,
-        Option::None => return raise_io(err),
-    };
-    // Read the length the file has now, then whatever it grew by since.
-    let n = StdFs::vstd_fs_file_len(in f);
+    let fd = os_open(in path, mode_read(), inout err);
+    if fd < 0 {
+        return raise_io(err);
+    }
+    // Read the length the file has now and one byte more, so a file that
+    // did not grow ends at the same `read` that finds its end; a file that
+    // grew is read on to its end.
+    let n = os_file_len(fd);
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    buf.resize(n, 0);
-    let got = StdFs::vstd_fs_read(inout f, inout buf.as_slice_mut(), inout err);
-    if err == 0 && got == n {
-        let mut more: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        more.resize(4096, 0);
+    buf.resize(wrapping_add(n, 1), 0);
+    let got = os_read(fd, inout buf, 0, inout err);
+    buf.truncate(got);
+    if err == 0 && got > n {
         loop {
-            let m = StdFs::vstd_fs_read(inout f, inout more.as_slice_mut(), inout err);
+            let at = buf.len();
+            buf.resize(wrapping_add(at, 4096), 0);
+            let m = os_read(fd, inout buf, at, inout err);
+            buf.truncate(wrapping_add(at, m));
             if m == 0 || err != 0 {
                 break;
             }
-            buf.extend(in more[0..m]);
         }
-    } else if err == 0 {
-        // The file shrank while it was read.
-        buf.truncate(got);
     }
-    StdFs::vstd_fs_close(f);
+    os_close(fd);
     if err != 0 {
         return raise_io(err);
     }
@@ -192,15 +211,15 @@ fn write_mode(in path: Slice[u8], in data: Slice[u8], mode: u32, sync: bool) eff
     Fail[IoError]
 ] {
     let mut err: u64 = 0;
-    let mut f = match StdFs::vstd_fs_open(in path, mode, inout err) {
-        Option::Some(f) => f,
-        Option::None => return raise_io(err),
-    };
-    let failed = StdFs::vstd_fs_write(inout f, in data, inout err);
-    if failed == 0 && sync {
-        let s = StdFs::vstd_fs_sync(inout f, inout err);
+    let fd = os_open(in path, mode, inout err);
+    if fd < 0 {
+        return raise_io(err);
     }
-    StdFs::vstd_fs_close(f);
+    let failed = os_write(fd, in data, inout err);
+    if failed == 0 && sync {
+        let s = os_sync(fd, inout err);
+    }
+    os_close(fd);
     if err != 0 {
         raise_io(err)
     }
@@ -255,37 +274,46 @@ pub fn replace(in path: Str, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]]
 pub fn replace_path(in path: Slice[u8], in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
     // The temporary file goes beside `path`, under a short name of its own
     // (so a target name near the file system's limit still works):
-    // "<dir>.vst-<16 hex digits>.tmp", the process id and a per-process
-    // counter. The host splits off the directory by the platform's rules.
-    let cut = StdFs::vstd_fs_parent_len(in path);
-    let mut temp: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    temp.extend(in path[0..cut]);
-    temp.push(46);
-    temp.push(118);
-    temp.push(115);
-    temp.push(116);
-    temp.push(45);
-    push_hex(inout temp, StdFs::vstd_fs_unique());
-    temp.push(46);
-    temp.push(116);
-    temp.push(109);
-    temp.push(112);
+    // "<dir>.vst-<16 hex digits>.tmp", the process id and a number, the
+    // next one when a file of that name is already there.
+    let cut = os_parent_len(in path);
     let mut err: u64 = 0;
-    let mut f = match StdFs::vstd_fs_open(in temp.as_slice(), mode_create_new(), inout err) {
-        Option::Some(f) => f,
-        Option::None => return raise_io(err),
-    };
-    let failed = StdFs::vstd_fs_write(inout f, in data, inout err);
-    if failed == 0 {
-        let s = StdFs::vstd_fs_sync(inout f, inout err);
+    let mut n: u64 = 0;
+    let mut temp: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut fd: i32 = -1;
+    loop {
+        temp.truncate(0);
+        temp.extend(in path[0..cut]);
+        temp.push(46);
+        temp.push(118);
+        temp.push(115);
+        temp.push(116);
+        temp.push(45);
+        push_hex(inout temp, os_unique(n));
+        temp.push(46);
+        temp.push(116);
+        temp.push(109);
+        temp.push(112);
+        fd = os_open(in temp.as_slice(), mode_create_new(), inout err);
+        if fd >= 0 {
+            break;
+        }
+        if os_word_kind(err) != already_exists() || n >= 4294967295 {
+            return raise_io(err);
+        }
+        n = wrapping_add(n, 1);
     }
-    StdFs::vstd_fs_close(f);
+    let failed = os_write(fd, in data, inout err);
+    if failed == 0 {
+        let s = os_sync(fd, inout err);
+    }
+    os_close(fd);
     if err == 0 {
-        let r = StdFs::vstd_fs_rename(in temp.as_slice(), in path, inout err);
+        let r = os_rename(in temp.as_slice(), in path, inout err);
     }
     if err != 0 {
         let mut ignored: u64 = 0;
-        let r = StdFs::vstd_fs_remove_file(in temp.as_slice(), inout ignored);
+        let r = os_remove_file(in temp.as_slice(), inout ignored);
         return raise_io(err);
     }
     let mut dir: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -294,7 +322,7 @@ pub fn replace_path(in path: Slice[u8], in data: Slice[u8]) eff [Ffi[StdFs], Fai
     } else {
         dir.extend(in path[0..cut]);
     }
-    let s = StdFs::vstd_fs_sync_dir(in dir.as_slice(), inout err);
+    let s = os_sync_dir(in dir.as_slice(), inout err);
     if err != 0 {
         raise_io(err)
     }
@@ -311,30 +339,30 @@ fn check(status: u32, err: u64) eff [Fail[IoError]] {
 
 pub fn rename(in from: Str, in to: Str) eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
-    check(StdFs::vstd_fs_rename(in from.as_bytes(), in to.as_bytes(), inout err), err);
+    check(os_rename(in from.as_bytes(), in to.as_bytes(), inout err), err);
 }
 
 pub fn remove_file(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
-    check(StdFs::vstd_fs_remove_file(in path.as_bytes(), inout err), err);
+    check(os_remove_file(in path.as_bytes(), inout err), err);
 }
 
 // Remove an empty directory.
 pub fn remove_dir(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
-    check(StdFs::vstd_fs_remove_dir(in path.as_bytes(), false, inout err), err);
+    check(os_remove_dir(in path.as_bytes(), false, inout err), err);
 }
 
 // Remove a directory and everything in it.
 pub fn remove_dir_all(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
-    check(StdFs::vstd_fs_remove_dir(in path.as_bytes(), true, inout err), err);
+    check(os_remove_dir(in path.as_bytes(), true, inout err), err);
 }
 
 // Create one directory; its parent must exist.
 pub fn create_dir(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
-    check(StdFs::vstd_fs_create_dir(in path.as_bytes(), false, inout err), err);
+    check(os_create_dir(in path.as_bytes(), false, inout err), err);
 }
 
 // Create a directory and any missing parents; an existing directory is
@@ -345,24 +373,16 @@ pub fn create_dir_all(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
 
 pub fn create_dir_all_path(in path: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
-    check(StdFs::vstd_fs_create_dir(in path, true, inout err), err);
+    check(os_create_dir(in path, true, inout err), err);
 }
 
 fn meta_path(in path: Slice[u8], follow: bool) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
-    let mut m = FsMeta {
-        size: 0,
-        mtime_s: 0,
-        mtime_ns: 0,
-        kind: 0,
-    };
-    check(StdFs::vstd_fs_metadata(in path, follow, inout m, inout err), err);
-    Metadata {
-        size: m.size,
-        mtime_s: m.mtime_s,
-        mtime_ns: m.mtime_ns,
-        kind: m.kind,
+    let m = os_metadata(in path, follow, inout err);
+    if err != 0 {
+        return raise_io(err);
     }
+    m
 }
 
 // The metadata of `path`, following symbolic links.
@@ -382,11 +402,6 @@ pub fn symlink_metadata(in path: Str) -> Metadata eff [Ffi[StdFs], Fail[IoError]
 // Whether `path` names anything (following symbolic links). Never fails.
 pub fn exists(in path: Str) -> bool eff [Ffi[StdFs]] {
     let mut err: u64 = 0;
-    let mut m = FsMeta {
-        size: 0,
-        mtime_s: 0,
-        mtime_ns: 0,
-        kind: 0,
-    };
-    StdFs::vstd_fs_metadata(in path.as_bytes(), true, inout m, inout err) == 0
+    let m = os_metadata(in path.as_bytes(), true, inout err);
+    err == 0
 }

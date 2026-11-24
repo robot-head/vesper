@@ -259,10 +259,24 @@ No Rust bug was found.
 - **The slice vector loads and stores** (`SeqOp::Vector`, which arrive
   through the `seq` family).
 - **After lane 3 (#1277):** the 128-bit helpers (`src/integer_widths/native.rs`).
-- **Runtime swap:** the part 1 runtimes can now be defined into the lent
-  module (lane 1 added `declarations()`), replacing `aot_runtime::define`.
 - **Mach-O and COFF:** the root crate's `object` reader is built for ELF
   only, so the part 1 runtime comparison covers the two ELF targets.
 - **Measurements** of the swapped emission, with the hybrid install.
 - **Scoreboard row:** added to the SH4 scoreboard in
   `docs/maintenance/self-hosting-plan.md` once the plan (#1293) has merged.
+
+## Part 4 (SH4 lane 11, #1285 / #1637 — AOT runtime swap)
+
+Extended `codegen_swap::numeric` (`RUNTIME = 14` with `RUNTIME_REGIONS = 1`, `RUNTIME_TILED = 2`, `RUNTIME_BOX_ALLOC = 3`, `RUNTIME_BOX_FREE = 4`) and `request_numeric_module`, wired `regions::aot_runtime::define`, `tiled::aot_runtime::define`, `fip::aot_runtime::declare_or_define`, and `fip::aot_runtime::declare_or_define_free` through the `numeric` hook, and made `define_region_runtime`, `define_tiled_runtime`, and `define_box_runtime` in `@vesper/codegen-numeric` idempotent via `module_get_function` / `module_get_data`.
+
+- `cargo +1.100.0 test --locked --release -p vesper-codegen-swap-test --test self_host_codegen_numeric_swap -- --nocapture`: `6 passed, 0 failed` (`runtime_definitions_match_the_rust_lowering`: `8` worlds / `10` functions = **0** CLIF diffs, **0** object byte diffs, runtime mask `0x1e` covering all 4 runtime kinds; plus `float`, `atomic`, `tiled`, `region`, and `vector` differentials all at **0** diffs).
+- `cargo +1.100.0 test --locked --release -p vesper-codegen-numeric-test --test self_host_codegen_numeric -- --nocapture`: `2 passed, 0 failed` (`runtime_symbols_match_the_rust_lowering`: `0 of 232` differ).
+- Rust lines deleted: `0` (hooked path only; default path unchanged; no root `Cargo.toml` or `crates/vesper-hybrid` edits).
+
+## Part 5 (SH4 lane 11, #1285 — `atomic_cas`, `isplit`, `iconcat`)
+
+Added `vcl_atomic_cas`, `vcl_isplit`, and `vcl_iconcat` to `vesper-cranelift-sys` / `@vesper/cranelift`, wired `ATOMIC_CAS = 9` (`compare_exchange`) in `src/native.rs` and `atomic_ops.ves`, and enabled 128-bit (`I128`) region payloads in `src/regions/native.rs` and `region_ops.ves` (blessed `crates/vesper-hybrid/port/*.rs`).
+
+- `cargo +1.100.0 test --locked --release -p vesper-codegen-swap-test --test self_host_codegen_numeric_swap -- --nocapture`: `5 passed, 0 failed` (`atomic`: `9` programs / `18` worlds / `235` functions = **0** CLIF/object/run diffs; `region`: `23` programs / `42` worlds / `56` functions including `region payload u128` = **0** CLIF/object/run diffs; plus `float`, `tiled`, `vector` = **0** diffs).
+- `cargo +1.100.0 check --locked -p vesper-hybrid` (unblessed after `VESPER_PORT_BLESS=1`): passed.
+- Rust lines deleted: `0` (hooked path only; default path unchanged).

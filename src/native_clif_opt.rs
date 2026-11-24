@@ -38,6 +38,7 @@ use cranelift_codegen::ir::{
     self, Block, BlockArg, Inst, InstBuilder, InstructionData, Opcode, StackSlot, StackSlotKind,
     Type, Value, types,
 };
+use cranelift_codegen::loop_analysis::{Loop, LoopAnalysis};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Run every step on `func`.
@@ -55,6 +56,7 @@ pub fn run(func: &mut ir::Function) {
     promote_slots(func);
     remove_constant_params(func);
     fold_narrow_extends(func);
+    fold_trivial_arith_and_bool_extends(func);
     sink_compares(func);
     thread_branches(func);
     thread_decided_branches(func);
@@ -63,8 +65,16 @@ pub fn run(func: &mut ir::Function) {
         fold_constant_branches(func);
         remove_unreachable(func);
     }
+    eliminate_guarded_loop_add_overflows(func);
+    for _ in 0..2 {
+        merge_blocks(func);
+        fold_constant_branches(func);
+        remove_unreachable(func);
+    }
     remove_dead(func);
+    hoist_loop_invariants(func);
     share_invariant_loads(func);
+    hoist_loop_invariants(func);
     sink_slot_inits(func);
     merge_tails(func);
     shrink_unused_slots(func);
@@ -2017,7 +2027,7 @@ fn fold_narrow_extends(func: &mut ir::Function) {
             let InstructionData::Unary { opcode, arg } = func.dfg.insts[inst] else {
                 continue;
             };
-            if !matches!(opcode, Opcode::Ireduce | Opcode::Uextend) {
+            if !matches!(opcode, Opcode::Ireduce | Opcode::Uextend | Opcode::Sextend) {
                 continue;
             }
             let dest = func.dfg.first_result(inst);
@@ -2079,6 +2089,62 @@ fn fold_narrow_extends(func: &mut ir::Function) {
                     }
                 }
                 (
+                    Opcode::Sextend,
+                    InstructionData::UnaryImm {
+                        opcode: Opcode::Iconst,
+                        imm,
+                    },
+                ) => {
+                    let shift = 64 - src_ty.bits();
+                    let v = (((imm.bits() << shift) >> shift) as u64) & dst_mask;
+                    func.dfg.replace(inst).iconst(dst_ty, v as i64);
+                    changed = true;
+                }
+                (
+                    Opcode::Ireduce,
+                    InstructionData::Unary {
+                        opcode: Opcode::Sextend,
+                        arg: inner,
+                    },
+                ) => {
+                    let inner = func.dfg.resolve_aliases(inner);
+                    let inner_ty = func.dfg.value_type(inner);
+                    if inner_ty == dst_ty {
+                        func.layout.remove_inst(inst);
+                        func.dfg.clear_results(inst);
+                        func.dfg.change_to_alias(dest, inner);
+                        changed = true;
+                    } else if inner_ty.bits() < dst_ty.bits() {
+                        func.dfg.insts[inst] = InstructionData::Unary {
+                            opcode: Opcode::Sextend,
+                            arg: inner,
+                        };
+                        changed = true;
+                    } else if mask_for(inner_ty).is_some() {
+                        func.dfg.insts[inst] = InstructionData::Unary {
+                            opcode: Opcode::Ireduce,
+                            arg: inner,
+                        };
+                        changed = true;
+                    }
+                }
+                (
+                    Opcode::Sextend,
+                    InstructionData::Unary {
+                        opcode: Opcode::Sextend,
+                        arg: inner,
+                    },
+                ) => {
+                    let inner = func.dfg.resolve_aliases(inner);
+                    if mask_for(func.dfg.value_type(inner)).is_some() {
+                        func.dfg.insts[inst] = InstructionData::Unary {
+                            opcode: Opcode::Sextend,
+                            arg: inner,
+                        };
+                        changed = true;
+                    }
+                }
+                (
                     Opcode::Uextend,
                     InstructionData::Unary {
                         opcode: Opcode::Uextend,
@@ -2115,6 +2181,969 @@ fn fold_narrow_extends(func: &mut ir::Function) {
         }
         if !changed {
             break;
+        }
+    }
+}
+
+/// Fold identity `imul_imm 1`/`0`, `iadd_imm 0`, and zero-comparisons or
+/// branches on `uextend`/`sextend` of narrower boolean values.
+fn fold_trivial_arith_and_bool_extends(func: &mut ir::Function) {
+    let unwrap_ext = |func: &ir::Function, v: Value| -> Option<(ir::Inst, Value)> {
+        let v = func.dfg.resolve_aliases(v);
+        let ir::ValueDef::Result(def, 0) = func.dfg.value_def(v) else {
+            return None;
+        };
+        if let InstructionData::Unary {
+            opcode: Opcode::Uextend | Opcode::Sextend,
+            arg,
+        } = func.dfg.insts[def]
+        {
+            Some((def, func.dfg.resolve_aliases(arg)))
+        } else {
+            None
+        }
+    };
+    for _ in 0..3 {
+        let mut changed = false;
+        for (_, inst) in insts(func) {
+            match func.dfg.insts[inst] {
+                InstructionData::BinaryImm64 {
+                    opcode: Opcode::ImulImm,
+                    arg,
+                    imm,
+                } => {
+                    let arg = func.dfg.resolve_aliases(arg);
+                    let dest = func.dfg.first_result(inst);
+                    if imm.bits() == 1 {
+                        func.layout.remove_inst(inst);
+                        func.dfg.clear_results(inst);
+                        func.dfg.change_to_alias(dest, arg);
+                        changed = true;
+                    } else if imm.bits() == 0 {
+                        let ty = func.dfg.value_type(dest);
+                        func.dfg.replace(inst).iconst(ty, 0);
+                        changed = true;
+                    }
+                }
+                InstructionData::BinaryImm64 {
+                    opcode: Opcode::IaddImm,
+                    arg,
+                    imm,
+                } if imm.bits() == 0 => {
+                    let arg = func.dfg.resolve_aliases(arg);
+                    let dest = func.dfg.first_result(inst);
+                    func.layout.remove_inst(inst);
+                    func.dfg.clear_results(inst);
+                    func.dfg.change_to_alias(dest, arg);
+                    changed = true;
+                }
+                InstructionData::IntCompareImm {
+                    opcode: Opcode::IcmpImm,
+                    cond,
+                    arg,
+                    imm,
+                } if imm.bits() == 0
+                    && matches!(
+                        cond,
+                        ir::condcodes::IntCC::Equal | ir::condcodes::IntCC::NotEqual
+                    ) =>
+                {
+                    if let Some((_, inner)) = unwrap_ext(func, arg) {
+                        let inner_is_cmp = matches!(
+                            func.dfg.value_def(inner),
+                            ir::ValueDef::Result(def, 0)
+                                if matches!(
+                                    func.dfg.insts[def],
+                                    InstructionData::IntCompare { .. }
+                                        | InstructionData::IntCompareImm { .. }
+                                )
+                        );
+                        let dest = func.dfg.first_result(inst);
+                        if cond == ir::condcodes::IntCC::NotEqual
+                            && inner_is_cmp
+                            && func.dfg.value_type(inner) == func.dfg.value_type(dest)
+                        {
+                            func.layout.remove_inst(inst);
+                            func.dfg.clear_results(inst);
+                            func.dfg.change_to_alias(dest, inner);
+                        } else {
+                            func.dfg.insts[inst] = InstructionData::IntCompareImm {
+                                opcode: Opcode::IcmpImm,
+                                cond,
+                                arg: inner,
+                                imm,
+                            };
+                        }
+                        changed = true;
+                    }
+                }
+                InstructionData::Brif {
+                    opcode: br_op,
+                    arg,
+                    blocks,
+                } => {
+                    if let Some((_, inner)) = unwrap_ext(func, arg) {
+                        func.dfg.insts[inst] = InstructionData::Brif {
+                            opcode: br_op,
+                            arg: inner,
+                            blocks,
+                        };
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+fn value_is_loop_invariant(
+    func: &ir::Function,
+    domtree: &DominatorTree,
+    loops: &LoopAnalysis,
+    lp: Loop,
+    preheader: Block,
+    v: Value,
+) -> bool {
+    let v = func.dfg.resolve_aliases(v);
+    let def_block = match func.dfg.value_def(v) {
+        ir::ValueDef::Result(d, _) => func.layout.inst_block(d),
+        ir::ValueDef::Param(pb, _) => Some(pb),
+        ir::ValueDef::Union(_, _) => None,
+    };
+    def_block.is_some_and(|db| {
+        let mut cur = loops.innermost_loop(db);
+        while let Some(l) = cur {
+            if l == lp {
+                return false;
+            }
+            cur = loops.loop_parent(l);
+        }
+        domtree.dominates(db, preheader, &func.layout)
+    })
+}
+
+/// Hoist pure loop-invariant instructions (and `notrap readonly can_move`
+/// loads when the preheader ends with an unconditional `Jump`) into the loop
+/// preheader, reassociating invariant offsets/scales out of address arithmetic.
+fn hoist_loop_invariants(func: &mut ir::Function) {
+    let cfg = ControlFlowGraph::with_function(func);
+    let domtree = DominatorTree::with_function(func, &cfg);
+    let mut loops = LoopAnalysis::new();
+    loops.compute(func, &cfg, &domtree);
+
+    let mut seen: HashSet<Loop> = HashSet::new();
+    let mut ordered: Vec<(usize, Loop)> = vec![];
+    for block in func.layout.blocks() {
+        let mut cur = loops.innermost_loop(block);
+        while let Some(lp) = cur {
+            if seen.insert(lp) {
+                let mut depth = 0usize;
+                let mut p = loops.loop_parent(lp);
+                while let Some(parent) = p {
+                    depth += 1;
+                    p = loops.loop_parent(parent);
+                }
+                ordered.push((depth, lp));
+            }
+            cur = loops.loop_parent(lp);
+        }
+    }
+    ordered.sort_by_key(|a| std::cmp::Reverse(a.0));
+
+    let in_loop = |b: Block, lp: Loop| -> bool {
+        let mut cur = loops.innermost_loop(b);
+        while let Some(l) = cur {
+            if l == lp {
+                return true;
+            }
+            cur = loops.loop_parent(l);
+        }
+        false
+    };
+
+    for (_, lp) in ordered {
+        let header = loops.loop_header(lp);
+        let mut outside_preds: Vec<Block> = cfg
+            .pred_iter(header)
+            .map(|p| p.block)
+            .filter(|&p| !in_loop(p, lp))
+            .collect();
+        outside_preds.sort_unstable();
+        outside_preds.dedup();
+        let [preheader] = outside_preds[..] else {
+            continue;
+        };
+        if !domtree.dominates(preheader, header, &func.layout) {
+            continue;
+        }
+        let Some(term) = func.layout.last_inst(preheader) else {
+            continue;
+        };
+        let is_jump_preheader = matches!(
+            func.dfg.insts[term],
+            InstructionData::Jump {
+                opcode: Opcode::Jump,
+                ..
+            }
+        );
+        let is_brif_preheader = matches!(
+            func.dfg.insts[term],
+            InstructionData::Brif {
+                opcode: Opcode::Brif,
+                ..
+            }
+        );
+        if !is_jump_preheader && !is_brif_preheader {
+            continue;
+        }
+
+        let loop_blocks: Vec<Block> = func.layout.blocks().filter(|&b| in_loop(b, lp)).collect();
+
+        for _ in 0..4 {
+            let mut changed = false;
+            for &b in &loop_blocks {
+                let body: Vec<Inst> = func.layout.block_insts(b).collect();
+                for inst in body {
+                    if func.dfg.inst_results(inst).is_empty() {
+                        continue;
+                    }
+                    let hoistable = match &func.dfg.insts[inst] {
+                        InstructionData::Load {
+                            opcode:
+                                Opcode::Load
+                                | Opcode::Uload8
+                                | Opcode::Sload8
+                                | Opcode::Uload16
+                                | Opcode::Sload16
+                                | Opcode::Uload32
+                                | Opcode::Sload32,
+                            flags,
+                            ..
+                        } => {
+                            is_jump_preheader
+                                && flags.notrap()
+                                && flags.readonly()
+                                && flags.can_move()
+                        }
+                        data => matches!(
+                            data.opcode(),
+                            Opcode::Iconst
+                                | Opcode::F32const
+                                | Opcode::F64const
+                                | Opcode::Iadd
+                                | Opcode::IaddImm
+                                | Opcode::Isub
+                                | Opcode::Imul
+                                | Opcode::ImulImm
+                                | Opcode::Ishl
+                                | Opcode::Ushr
+                                | Opcode::Sshr
+                                | Opcode::Band
+                                | Opcode::Bor
+                                | Opcode::Bxor
+                                | Opcode::Bnot
+                                | Opcode::Ineg
+                                | Opcode::Uextend
+                                | Opcode::Sextend
+                                | Opcode::Ireduce
+                                | Opcode::Fadd
+                                | Opcode::Fsub
+                                | Opcode::Fmul
+                                | Opcode::Fneg
+                                | Opcode::Fabs
+                                | Opcode::Bitcast
+                                | Opcode::FcvtFromUint
+                                | Opcode::FcvtFromSint
+                                | Opcode::Icmp
+                                | Opcode::IcmpImm
+                                | Opcode::Fcmp
+                                | Opcode::Select
+                        ),
+                    };
+                    if !hoistable {
+                        continue;
+                    }
+                    let all_outside = values_of(func, inst).into_iter().all(|v| {
+                        let def_block = match func.dfg.value_def(v) {
+                            ir::ValueDef::Result(d, _) => func.layout.inst_block(d),
+                            ir::ValueDef::Param(pb, _) => Some(pb),
+                            ir::ValueDef::Union(_, _) => None,
+                        };
+                        def_block.is_some_and(|db| {
+                            !in_loop(db, lp) && domtree.dominates(db, preheader, &func.layout)
+                        })
+                    });
+                    if !all_outside {
+                        // Reassociate `iadd(inv1, iadd(inv2, var))` -> `iadd(iadd(inv1, inv2), var)`
+                        // and distribute `imul_imm(iadd(inv, var), imm)` -> `iadd(imul_imm(inv, imm), imul_imm(var, imm))`
+                        // so invariant base offsets and scaled strides hoist into `preheader`.
+                        let term = func.layout.last_inst(preheader).unwrap();
+                        let inv_pair = match func.dfg.insts[inst] {
+                            InstructionData::Binary {
+                                opcode: Opcode::Iadd,
+                                args: [a, b],
+                            } => {
+                                let a = func.dfg.resolve_aliases(a);
+                                let b = func.dfg.resolve_aliases(b);
+                                [
+                                    (
+                                        a,
+                                        b,
+                                        value_is_loop_invariant(
+                                            func, &domtree, &loops, lp, preheader, a,
+                                        ),
+                                    ),
+                                    (
+                                        b,
+                                        a,
+                                        value_is_loop_invariant(
+                                            func, &domtree, &loops, lp, preheader, b,
+                                        ),
+                                    ),
+                                ]
+                                .into_iter()
+                                .find(|(_, _, is_inv)| *is_inv)
+                                .and_then(|(inv1, inner, _)| {
+                                    let ir::ValueDef::Result(inner_inst, 0) =
+                                        func.dfg.value_def(func.dfg.resolve_aliases(inner))
+                                    else {
+                                        return None;
+                                    };
+                                    match func.dfg.insts[inner_inst] {
+                                        InstructionData::Binary {
+                                            opcode: Opcode::Iadd,
+                                            args: [c, d],
+                                        } => {
+                                            let c = func.dfg.resolve_aliases(c);
+                                            let d = func.dfg.resolve_aliases(d);
+                                            let c_inv = value_is_loop_invariant(
+                                                func, &domtree, &loops, lp, preheader, c,
+                                            );
+                                            let d_inv = value_is_loop_invariant(
+                                                func, &domtree, &loops, lp, preheader, d,
+                                            );
+                                            if c_inv && !d_inv {
+                                                Some((inv1, Some(c), None, d))
+                                            } else if d_inv && !c_inv {
+                                                Some((inv1, Some(d), None, c))
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        InstructionData::BinaryImm64 {
+                                            opcode: Opcode::IaddImm,
+                                            arg,
+                                            imm,
+                                        } if !value_is_loop_invariant(
+                                            func, &domtree, &loops, lp, preheader, arg,
+                                        ) =>
+                                        {
+                                            Some((
+                                                inv1,
+                                                None,
+                                                Some(imm),
+                                                func.dfg.resolve_aliases(arg),
+                                            ))
+                                        }
+                                        _ => None,
+                                    }
+                                })
+                            }
+                            _ => None,
+                        };
+                        if let Some((inv1, inv2_opt, imm_opt, var)) = inv_pair {
+                            use cranelift_codegen::cursor::{Cursor, FuncCursor};
+                            use cranelift_codegen::ir::InstBuilder;
+                            let new_base = {
+                                let mut pos = FuncCursor::new(func).at_inst(term);
+                                if let Some(inv2) = inv2_opt {
+                                    if pos.func.dfg.value_type(inv1)
+                                        == pos.func.dfg.value_type(inv2)
+                                    {
+                                        Some(pos.ins().iadd(inv1, inv2))
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    imm_opt.map(|imm| pos.ins().iadd_imm(inv1, imm))
+                                }
+                            };
+                            if let Some(new_base) = new_base {
+                                func.dfg.replace(inst).iadd(new_base, var);
+                                changed = true;
+                            }
+                            continue;
+                        }
+                        if let InstructionData::BinaryImm64 {
+                            opcode: Opcode::ImulImm,
+                            arg,
+                            imm,
+                        } = func.dfg.insts[inst]
+                        {
+                            let arg = func.dfg.resolve_aliases(arg);
+                            if !value_is_loop_invariant(func, &domtree, &loops, lp, preheader, arg)
+                                && let ir::ValueDef::Result(inner_inst, 0) = func.dfg.value_def(arg)
+                                && let InstructionData::Binary {
+                                    opcode: Opcode::Iadd,
+                                    args: [c, d],
+                                } = func.dfg.insts[inner_inst]
+                            {
+                                let c = func.dfg.resolve_aliases(c);
+                                let d = func.dfg.resolve_aliases(d);
+                                let c_inv = value_is_loop_invariant(
+                                    func, &domtree, &loops, lp, preheader, c,
+                                );
+                                let d_inv = value_is_loop_invariant(
+                                    func, &domtree, &loops, lp, preheader, d,
+                                );
+                                let pair = if c_inv && !d_inv {
+                                    Some((c, d))
+                                } else if d_inv && !c_inv {
+                                    Some((d, c))
+                                } else {
+                                    None
+                                };
+                                if let Some((inv, var)) = pair {
+                                    use cranelift_codegen::cursor::{Cursor, FuncCursor};
+                                    use cranelift_codegen::ir::InstBuilder;
+                                    let inv_scaled = {
+                                        let mut pos = FuncCursor::new(func).at_inst(term);
+                                        pos.ins().imul_imm(inv, imm)
+                                    };
+                                    let var_scaled = {
+                                        let mut pos = FuncCursor::new(func).at_inst(inst);
+                                        pos.ins().imul_imm(var, imm)
+                                    };
+                                    func.dfg.replace(inst).iadd(inv_scaled, var_scaled);
+                                    changed = true;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    let term = func.layout.last_inst(preheader).unwrap();
+                    func.layout.remove_inst(inst);
+                    func.layout.insert_inst(inst, term);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+}
+
+/// Eliminate `iadd` unsigned-overflow checks (`icmp ult (iadd base, iv), base`)
+/// inside `bounds_hoist`-versioned counted loops whose preheader guard already
+/// proved `uadd_overflow(hi - 1, base) == 0`.
+fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
+    let cfg = ControlFlowGraph::with_function(func);
+    let domtree = DominatorTree::with_function(func, &cfg);
+    let mut loops = LoopAnalysis::new();
+    loops.compute(func, &cfg, &domtree);
+
+    let mut seen: HashSet<Loop> = HashSet::new();
+    let mut all_loops: Vec<Loop> = vec![];
+    for block in func.layout.blocks() {
+        let mut cur = loops.innermost_loop(block);
+        while let Some(lp) = cur {
+            if seen.insert(lp) {
+                all_loops.push(lp);
+            }
+            cur = loops.loop_parent(lp);
+        }
+    }
+
+    let in_loop = |b: Block, lp: Loop| -> bool {
+        let mut cur = loops.innermost_loop(b);
+        while let Some(l) = cur {
+            if l == lp {
+                return true;
+            }
+            cur = loops.loop_parent(l);
+        }
+        false
+    };
+
+    let def_inst = |func: &ir::Function, v: Value| -> Option<Inst> {
+        match func.dfg.value_def(func.dfg.resolve_aliases(v)) {
+            ir::ValueDef::Result(inst, 0) => Some(inst),
+            _ => None,
+        }
+    };
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    enum BaseKey {
+        Val(Value),
+        AddConst(Value, i64),
+    }
+
+    let const_val = |func: &ir::Function, v: Value| -> Option<i64> {
+        def_inst(func, v).and_then(|inst| match func.dfg.insts[inst] {
+            InstructionData::UnaryImm {
+                opcode: Opcode::Iconst,
+                imm,
+            } => Some(imm.bits()),
+            _ => None,
+        })
+    };
+
+    let base_key = |func: &ir::Function, v: Value| -> BaseKey {
+        let v = func.dfg.resolve_aliases(v);
+        let Some(inst) = def_inst(func, v) else {
+            return BaseKey::Val(v);
+        };
+        match func.dfg.insts[inst] {
+            InstructionData::BinaryImm64 {
+                opcode: Opcode::IaddImm,
+                arg,
+                imm,
+            } => BaseKey::AddConst(func.dfg.resolve_aliases(arg), imm.bits()),
+            InstructionData::Binary {
+                opcode: Opcode::Iadd,
+                args: [a, b],
+            } => {
+                if let Some(c) = const_val(func, b) {
+                    BaseKey::AddConst(func.dfg.resolve_aliases(a), c)
+                } else if let Some(c) = const_val(func, a) {
+                    BaseKey::AddConst(func.dfg.resolve_aliases(b), c)
+                } else {
+                    BaseKey::Val(v)
+                }
+            }
+            _ => BaseKey::Val(v),
+        }
+    };
+
+    let is_hi_minus_one = |func: &ir::Function, v: Value, hi: Value| -> bool {
+        let Some(inst) = def_inst(func, v) else {
+            return false;
+        };
+        match func.dfg.insts[inst] {
+            InstructionData::BinaryImm64 {
+                opcode: Opcode::IaddImm,
+                arg,
+                imm,
+            } => imm.bits() == -1 && func.dfg.resolve_aliases(arg) == hi,
+            InstructionData::Binary {
+                opcode: Opcode::Isub,
+                args: [lhs, rhs],
+            } => {
+                func.dfg.resolve_aliases(lhs) == hi
+                    && def_inst(func, rhs).is_some_and(|c| {
+                        matches!(
+                            func.dfg.insts[c],
+                            InstructionData::UnaryImm {
+                                opcode: Opcode::Iconst,
+                                imm,
+                            } if imm.bits() == 1
+                        )
+                    })
+            }
+            _ => false,
+        }
+    };
+
+    let collect_ovf_flags =
+        |func: &ir::Function,
+         flag: Value,
+         hi: Value,
+         out: &mut HashSet<BaseKey>,
+         proven_add_consts: &mut HashSet<(Value, i64)>| {
+            let mut work = vec![func.dfg.resolve_aliases(flag)];
+            let mut visited = HashSet::new();
+            let mut ovf_insts = HashSet::new();
+            while let Some(cur) = work.pop() {
+                if !visited.insert(cur) {
+                    continue;
+                }
+                match func.dfg.value_def(cur) {
+                    ir::ValueDef::Result(inst, 0) => {
+                        if let InstructionData::Binary {
+                            opcode: Opcode::Bor,
+                            args: [a, b],
+                        } = func.dfg.insts[inst]
+                        {
+                            work.push(func.dfg.resolve_aliases(a));
+                            work.push(func.dfg.resolve_aliases(b));
+                        }
+                    }
+                    ir::ValueDef::Result(inst, 1) => {
+                        if matches!(
+                            func.dfg.insts[inst],
+                            InstructionData::Binary {
+                                opcode: Opcode::UaddOverflow,
+                                ..
+                            }
+                        ) {
+                            ovf_insts.insert(inst);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let uadd_args = |v: Value| -> Option<(Value, Value)> {
+                let inst = def_inst(func, v)?;
+                if !ovf_insts.contains(&inst) {
+                    return None;
+                }
+                match func.dfg.insts[inst] {
+                    InstructionData::Binary {
+                        opcode: Opcode::UaddOverflow,
+                        args: [u, w],
+                    } => Some((func.dfg.resolve_aliases(u), func.dfg.resolve_aliases(w))),
+                    _ => None,
+                }
+            };
+            let record_hi_pair =
+                |other: Value,
+                 out: &mut HashSet<BaseKey>,
+                 proven_add_consts: &mut HashSet<(Value, i64)>| {
+                    out.insert(BaseKey::Val(other));
+                    out.insert(base_key(func, other));
+                    if let Some((u, w)) = uadd_args(other) {
+                        if let Some(c) = const_val(func, w) {
+                            out.insert(BaseKey::AddConst(u, c));
+                            proven_add_consts.insert((u, c));
+                        }
+                        if let Some(c) = const_val(func, u) {
+                            out.insert(BaseKey::AddConst(w, c));
+                            proven_add_consts.insert((w, c));
+                        }
+                    }
+                };
+            for &inst in &ovf_insts {
+                let InstructionData::Binary {
+                    opcode: Opcode::UaddOverflow,
+                    args: [a, b],
+                } = func.dfg.insts[inst]
+                else {
+                    continue;
+                };
+                let a = func.dfg.resolve_aliases(a);
+                let b = func.dfg.resolve_aliases(b);
+                if is_hi_minus_one(func, a, hi) {
+                    record_hi_pair(b, out, proven_add_consts);
+                }
+                if is_hi_minus_one(func, b, hi) {
+                    record_hi_pair(a, out, proven_add_consts);
+                }
+                for (sum_part, const_part) in [(a, b), (b, a)] {
+                    if let Some(c) = const_val(func, const_part)
+                        && let Some((u, w)) = uadd_args(sum_part)
+                    {
+                        if is_hi_minus_one(func, u, hi) {
+                            out.insert(BaseKey::AddConst(w, c));
+                            proven_add_consts.insert((w, c));
+                        }
+                        if is_hi_minus_one(func, w, hi) {
+                            out.insert(BaseKey::AddConst(u, c));
+                            proven_add_consts.insert((u, c));
+                        }
+                    }
+                }
+            }
+        };
+
+    for lp in all_loops {
+        let header = loops.loop_header(lp);
+        let mut outside_preds: Vec<Block> = cfg
+            .pred_iter(header)
+            .map(|p| p.block)
+            .filter(|&p| !in_loop(p, lp))
+            .collect();
+        outside_preds.sort_unstable();
+        outside_preds.dedup();
+        let [preheader] = outside_preds[..] else {
+            continue;
+        };
+        if !domtree.dominates(preheader, header, &func.layout) {
+            continue;
+        }
+        let Some(pre_term) = func.layout.last_inst(preheader) else {
+            continue;
+        };
+        let InstructionData::Brif {
+            blocks: pre_blocks, ..
+        } = func.dfg.insts[pre_term]
+        else {
+            continue;
+        };
+        let b0 = pre_blocks[0].block(&func.dfg.value_lists);
+        let b1 = pre_blocks[1].block(&func.dfg.value_lists);
+        if b0 != header || b1 == header {
+            continue;
+        }
+
+        let Some(hdr_term) = func.layout.last_inst(header) else {
+            continue;
+        };
+        let InstructionData::Brif {
+            arg: hdr_cmp,
+            blocks: hdr_blocks,
+            ..
+        } = func.dfg.insts[hdr_term]
+        else {
+            continue;
+        };
+        let body = hdr_blocks[0].block(&func.dfg.value_lists);
+        let exit = hdr_blocks[1].block(&func.dfg.value_lists);
+        if !in_loop(body, lp) || in_loop(exit, lp) {
+            continue;
+        }
+        let Some(hdr_cmp_inst) = def_inst(func, hdr_cmp) else {
+            continue;
+        };
+        let InstructionData::IntCompare {
+            opcode: Opcode::Icmp,
+            cond: ir::condcodes::IntCC::UnsignedLessThan,
+            args: [iv, hi],
+        } = func.dfg.insts[hdr_cmp_inst]
+        else {
+            continue;
+        };
+        let iv = func.dfg.resolve_aliases(iv);
+        let hi = func.dfg.resolve_aliases(hi);
+        let Some(iv_idx) = func.dfg.block_params(header).iter().position(|&p| p == iv) else {
+            continue;
+        };
+        let Some(BlockArg::Value(lo)) = pre_blocks[0].args(&func.dfg.value_lists).nth(iv_idx)
+        else {
+            continue;
+        };
+        let lo = func.dfg.resolve_aliases(lo);
+
+        let mut proven_bases: HashSet<BaseKey> = HashSet::new();
+        let mut proven_add_consts: HashSet<(Value, i64)> = HashSet::new();
+        // Walk up chained single-predecessor `bounds_hoist` guard blocks
+        // (`guard_1 -> join_1 -> guard_2 -> ... -> fast_header`), resolving any
+        // `Jump` block-param forwarding along the chain.
+        let mut target = header;
+        for _ in 0..16 {
+            let mut preds: Vec<Block> = cfg
+                .pred_iter(target)
+                .map(|p| p.block)
+                .filter(|&p| !in_loop(p, lp))
+                .collect();
+            preds.sort_unstable();
+            preds.dedup();
+            let [pred] = preds[..] else {
+                break;
+            };
+            if !domtree.dominates(pred, header, &func.layout) {
+                break;
+            }
+            let Some(pred_term) = func.layout.last_inst(pred) else {
+                break;
+            };
+            let resolve_guard_val = |val: Value, next_target: &mut Block| -> Option<Value> {
+                let p_val = func.dfg.resolve_aliases(val);
+                let Some(p_idx) = func.dfg.block_params(pred).iter().position(|&p| p == p_val)
+                else {
+                    return Some(p_val);
+                };
+                let mut live_incoming = vec![];
+                for edge in cfg.pred_iter(pred) {
+                    let p = edge.block;
+                    let Some(p_term) = func.layout.last_inst(p) else {
+                        continue;
+                    };
+                    for call in func.dfg.insts[p_term]
+                        .branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables)
+                    {
+                        if call.block(&func.dfg.value_lists) != pred {
+                            continue;
+                        }
+                        if let Some(BlockArg::Value(v)) =
+                            call.args(&func.dfg.value_lists).nth(p_idx)
+                        {
+                            let is_zero = def_inst(func, v).is_some_and(|vi| {
+                                matches!(
+                                    func.dfg.insts[vi],
+                                    InstructionData::UnaryImm {
+                                        opcode: Opcode::Iconst,
+                                        imm,
+                                    } if imm.bits() == 0
+                                )
+                            });
+                            if !is_zero {
+                                live_incoming.push((p, func.dfg.resolve_aliases(v)));
+                            }
+                        }
+                    }
+                }
+                let [(only_pred, only_val)] = live_incoming[..] else {
+                    return None;
+                };
+                *next_target = only_pred;
+                Some(only_val)
+            };
+
+            let mut next_target = pred;
+            let guard = match &func.dfg.insts[pred_term] {
+                InstructionData::Brif {
+                    arg,
+                    blocks: pred_blocks,
+                    ..
+                } => {
+                    let pb0 = pred_blocks[0].block(&func.dfg.value_lists);
+                    let pb1 = pred_blocks[1].block(&func.dfg.value_lists);
+                    if pb0 == target && pb1 != target {
+                        let Some(g) = resolve_guard_val(*arg, &mut next_target) else {
+                            break;
+                        };
+                        g
+                    } else if pb1 == target && pb0 != target {
+                        let resolved = func.dfg.resolve_aliases(*arg);
+                        if let Some(ci) = def_inst(func, resolved)
+                            && let InstructionData::IntCompareImm {
+                                opcode: Opcode::IcmpImm,
+                                cond: ir::condcodes::IntCC::Equal,
+                                arg: inner,
+                                imm,
+                            } = func.dfg.insts[ci]
+                            && imm.bits() == 0
+                        {
+                            let Some(g) = resolve_guard_val(inner, &mut next_target) else {
+                                break;
+                            };
+                            g
+                        } else {
+                            target = pred;
+                            continue;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                _ => break,
+            };
+
+            let mut conj = guard;
+            while let Some(gi) = def_inst(func, conj)
+                && let InstructionData::Unary {
+                    opcode: Opcode::Uextend | Opcode::Sextend,
+                    arg,
+                } = func.dfg.insts[gi]
+            {
+                conj = func.dfg.resolve_aliases(arg);
+            }
+            // Unwrap `bor(uge(lo, hi), guard_conjunction)` when present.
+            if let Some(g_inst) = def_inst(func, conj)
+                && let InstructionData::Binary {
+                    opcode: Opcode::Bor,
+                    args: [a, b],
+                } = func.dfg.insts[g_inst]
+            {
+                let is_empty_range = |v: Value| -> bool {
+                    def_inst(func, v).is_some_and(|ci| {
+                        matches!(
+                            func.dfg.insts[ci],
+                            InstructionData::IntCompare {
+                                opcode: Opcode::Icmp,
+                                cond: ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+                                args: [x, y],
+                            } if func.dfg.resolve_aliases(x) == lo
+                                && func.dfg.resolve_aliases(y) == hi
+                        )
+                    })
+                };
+                if is_empty_range(a) {
+                    conj = func.dfg.resolve_aliases(b);
+                } else if is_empty_range(b) {
+                    conj = func.dfg.resolve_aliases(a);
+                } else {
+                    target = next_target;
+                    continue;
+                }
+            }
+
+            let mut work = vec![conj];
+            let mut visited = HashSet::new();
+            while let Some(cur) = work.pop() {
+                if !visited.insert(cur) {
+                    continue;
+                }
+                let Some(inst) = def_inst(func, cur) else {
+                    continue;
+                };
+                match func.dfg.insts[inst] {
+                    InstructionData::Binary {
+                        opcode: Opcode::Band,
+                        args: [a, b],
+                    } => {
+                        work.push(func.dfg.resolve_aliases(a));
+                        work.push(func.dfg.resolve_aliases(b));
+                    }
+                    InstructionData::IntCompareImm {
+                        opcode: Opcode::IcmpImm,
+                        cond: ir::condcodes::IntCC::Equal,
+                        arg,
+                        imm,
+                    } if imm.bits() == 0 => {
+                        collect_ovf_flags(func, arg, hi, &mut proven_bases, &mut proven_add_consts);
+                    }
+                    _ => {}
+                }
+            }
+            target = next_target;
+        }
+        if proven_bases.is_empty() {
+            continue;
+        }
+
+        let loop_blocks: Vec<Block> = func
+            .layout
+            .blocks()
+            .filter(|&b| in_loop(b, lp) && b != header && domtree.dominates(body, b, &func.layout))
+            .collect();
+        for b in loop_blocks {
+            let insts_in_b: Vec<Inst> = func.layout.block_insts(b).collect();
+            for inst in insts_in_b {
+                let InstructionData::IntCompare {
+                    opcode: Opcode::Icmp,
+                    cond: ir::condcodes::IntCC::UnsignedLessThan,
+                    args: [sum, bound],
+                } = func.dfg.insts[inst]
+                else {
+                    continue;
+                };
+                let sum = func.dfg.resolve_aliases(sum);
+                let bound = func.dfg.resolve_aliases(bound);
+                let Some(sum_inst) = def_inst(func, sum) else {
+                    continue;
+                };
+                let InstructionData::Binary {
+                    opcode: Opcode::Iadd,
+                    args: [x, y],
+                } = func.dfg.insts[sum_inst]
+                else {
+                    continue;
+                };
+                let x = func.dfg.resolve_aliases(x);
+                let y = func.dfg.resolve_aliases(y);
+                if bound != x && bound != y {
+                    continue;
+                }
+                let is_proven_iv_sum = (x == iv
+                    && (proven_bases.contains(&BaseKey::Val(y))
+                        || proven_bases.contains(&base_key(func, y))))
+                    || (y == iv
+                        && (proven_bases.contains(&BaseKey::Val(x))
+                            || proven_bases.contains(&base_key(func, x))));
+                let is_proven_const_sum = matches!(
+                    base_key(func, sum),
+                    BaseKey::AddConst(base, c) if proven_add_consts.contains(&(base, c))
+                );
+                if is_proven_iv_sum || is_proven_const_sum {
+                    func.dfg.replace(inst).iconst(types::I8, 0);
+                }
+            }
         }
     }
 }
