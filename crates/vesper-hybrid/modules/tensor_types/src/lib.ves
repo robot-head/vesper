@@ -1,0 +1,12 @@
+// @vesper/hybrid-tensor-types: tensor type checking (`tensor_types::check`)
+// served from Vesper in the hybrid Stage 2 build (SH2 lane 14, #1186).
+
+// @export abi 4
+
+use @vesper/check-tensor-types::{
+    check_tensor_types_diags_bytes
+};
+
+pub fn tensor_diags(in names: Str, in b: Slice[u8]) -> ChunkSeq[u64] {
+    check_tensor_types_diags_bytes(in names, in b)
+}

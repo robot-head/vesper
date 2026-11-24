@@ -195,6 +195,13 @@ vesper_hybrid(
             "//:check_pact_package",
             "//crates/vesper-pact:port_package",
         ],
+        # The tensor type checker (#1186) builds on @vesper/check-tensor-types.
+        "hybrid_tensor_types": [
+            "//:ast_package",
+            "//:check_data_package",
+            "//:check_tensor_types_package",
+            "//:std_intern_package",
+        ],
         "hybrid_parse": [
             "//:ast_package",
             "//:front_package",
@@ -239,6 +246,7 @@ vesper_hybrid(
         "hybrid_layout": "modules/layout",
         "hybrid_optimize": "modules/optimize",
         "hybrid_pact": "modules/pact",
+        "hybrid_tensor_types": "modules/tensor_types",
         "hybrid_parse": "modules/parse",
         "hybrid_wasm_backend": "modules/wasm_backend",
         "hybrid_ebpf_backend": "modules/ebpf_backend",

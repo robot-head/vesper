@@ -118,6 +118,11 @@ mod place_ir_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/tensor_types.rs"]
+mod tensor_types_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/bounds_hoist.rs"]
 mod bounds_hoist_binding;
 
@@ -159,6 +164,10 @@ mod check_words;
 // the root package's tests/self_host_check_pact.rs.
 #[path = "../../../tests/common/pact_words.rs"]
 mod pact_words;
+
+// The tensor type checker's AST encoder and diagnostic decoder (#1186).
+#[path = "../../../tests/common/tensor_words.rs"]
+mod tensor_words;
 
 // The stack-bound swap's encoder and decoder (#1182), shared with the root
 // package's tests/self_host_check_loops_atomics.rs.
@@ -717,6 +726,16 @@ const VESPER_DEPS_PASS: vesper::pact_frontend::DepsPassTable =
             timer.lap(&stats::PACT.decode);
             PACT_CALLS.fetch_add(1, Relaxed);
             Some(diagnostics)
+        },
+    };
+
+/// `tensor_types::check` from `modules/tensor_types` (SH2 lane 14, `#1186`).
+const VESPER_TENSOR_CHECK: vesper::tensor_types::TensorCheckTable =
+    vesper::tensor_types::TensorCheckTable {
+        diagnostics: |module| {
+            let (names, bytes) = tensor_words::encode_tensor_module(module);
+            let words = tensor_types_binding::tensor_diags(&names, &bytes);
+            Some(tensor_words::decode_tensor_diags(&words))
         },
     };
 
@@ -1650,6 +1669,9 @@ extern "C" fn install() {
         std::process::abort();
     }
     if vesper::stack_bound::install_stack_bound(VESPER_STACK_BOUND).is_err() {
+        std::process::abort();
+    }
+    if vesper::tensor_types::install_tensor_check(VESPER_TENSOR_CHECK).is_err() {
         std::process::abort();
     }
     // Swaps keep one input per compilation (SH4 lane 2, #1276).

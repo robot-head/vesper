@@ -182,9 +182,38 @@ pub fn active(module: &Module) -> bool {
     !declared && infer::mentions_tensors(module)
 }
 
+/// Swap-in point for `tensor_types::check` (SH2 lane 14, `#1186`).
+/// Returns `None` to fall back to Rust, `Some(None)` when the module is
+/// inactive, or `Some(Some(diags))` when active with `diags`.
+#[derive(Clone, Copy)]
+pub struct TensorCheckTable {
+    pub diagnostics: fn(&Module) -> Option<Option<Vec<Diagnostic>>>,
+}
+
+static TENSOR_CHECK: std::sync::OnceLock<TensorCheckTable> = std::sync::OnceLock::new();
+
+pub fn install_tensor_check(table: TensorCheckTable) -> Result<(), TensorCheckTable> {
+    TENSOR_CHECK.set(table)
+}
+
 /// Check a module that uses tensor types; `None` when it does not, so the
 /// caller runs the ordinary checker unchanged.
 pub fn check(module: &Module) -> Option<Checked> {
+    if let Some(table) = TENSOR_CHECK.get()
+        && let Some(res) = (table.diagnostics)(module)
+    {
+        match res {
+            None => return None,
+            Some(diags) if !diags.is_empty() => {
+                return Some(Checked {
+                    world: Default::default(),
+                    diagnostics: diags,
+                    expression_types: Default::default(),
+                });
+            }
+            Some(_) => {}
+        }
+    }
     if !active(module) {
         return None;
     }
