@@ -347,7 +347,15 @@ vesper_crate(
         "test/wasm_seed_package_io": glob([
             "examples/**",
             "packages/**",
-        ]) + ["//bootstrap:files"],
+        ]) + [
+            "//bootstrap:files",
+            "//crates/vesper-ebpf:files",
+            "//crates/vesper-lean-syntax:files",
+            "//crates/vesper-pact:files",
+            "//crates/vesper-resonance:files",
+            "//crates/vesper-serde:files",
+            "//crates/vesper-span:files",
+        ],
         # SH5 lane 11 (#1334): @vesper/wit-component against wit-component
         # over the same programs.
         "test/self_host_wit_component": glob([

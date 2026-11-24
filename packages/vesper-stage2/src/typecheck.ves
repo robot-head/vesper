@@ -366,6 +366,104 @@ fn is_op(in tc: Tc, sym: u32, in lit: Str) -> bool {
     true
 }
 
+fn sym_slice_eq(in names: Names, sym: u32, start: u64, in lit: Str) -> bool {
+    let b = lit.as_bytes();
+    let n = names.size(sym);
+    if start > n || wrapping_sub(n, start) != b.len() {
+        return false;
+    }
+    for i in 0..b.len() {
+        let c = match b.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if names.byte(sym, wrapping_add(start, i)) != c {
+            return false;
+        }
+    }
+    true
+}
+
+fn conv_prefix_len(in names: Names, sym: u32) -> u64 {
+    if names.has_prefix(sym, in "widen_".as_bytes()) {
+        6
+    } else if names.has_prefix(sym, in "narrow_".as_bytes()) {
+        7
+    } else if names.has_prefix(sym, in "wrapping_".as_bytes()) {
+        9
+    } else {
+        0
+    }
+}
+
+/// Returns the target scalar type for `widen_*`, `narrow_*`, or `wrapping_<int_kind>`,
+/// or `NONE32` if `sym` is not an integer-width conversion builtin.
+fn conv_target_type(inout tc: Tc, sym: u32) -> u32 {
+    let off = conv_prefix_len(in tc.names, sym);
+    if off == 0 {
+        return NONE32;
+    }
+    let k = tc.world.k;
+    let ks = sym_slice_eq(in tc.names, sym, off, in "u64");
+    if ks {
+        return tc.u64_ty;
+    }
+    if sym_slice_eq(in tc.names, sym, off, in "i64") {
+        return tc.i64_ty;
+    }
+    let ksym = if sym_slice_eq(in tc.names, sym, off, in "u8") {
+        k.u8_
+    } else if sym_slice_eq(in tc.names, sym, off, in "u16") {
+        k.u16_
+    } else if sym_slice_eq(in tc.names, sym, off, in "u32") {
+        k.u32_
+    } else if sym_slice_eq(in tc.names, sym, off, in "usize") {
+        k.usize_
+    } else if sym_slice_eq(in tc.names, sym, off, in "u128") {
+        k.u128_
+    } else if sym_slice_eq(in tc.names, sym, off, in "i8") {
+        k.i8_
+    } else if sym_slice_eq(in tc.names, sym, off, in "i16") {
+        k.i16_
+    } else if sym_slice_eq(in tc.names, sym, off, in "i32") {
+        k.i32_
+    } else if sym_slice_eq(in tc.names, sym, off, in "isize") {
+        k.isize_
+    } else if sym_slice_eq(in tc.names, sym, off, in "i128") {
+        k.i128_
+    } else {
+        NONE32
+    };
+    if ksym != NONE32 {
+        tc.types.named0(ksym)
+    } else {
+        NONE32
+    }
+}
+
+fn is_same_int_op(in tc: Tc, sym: u32) -> bool {
+    is_op(in tc, sym, in "wrapping_add")
+        || is_op(in tc, sym, in "wrapping_sub")
+        || is_op(in tc, sym, in "wrapping_mul")
+        || is_op(in tc, sym, in "wrapping_div")
+        || is_op(in tc, sym, in "wrapping_rem")
+        || is_op(in tc, sym, in "wrapping_shl_u64")
+        || is_op(in tc, sym, in "wrapping_shr_u64")
+        || is_op(in tc, sym, in "shr")
+        || is_op(in tc, sym, in "shl")
+        || is_op(in tc, sym, in "rotate_left")
+        || is_op(in tc, sym, in "rotate_right")
+        || is_op(in tc, sym, in "inc")
+        || is_op(in tc, sym, in "dec")
+        || is_op(in tc, sym, in "add")
+        || is_op(in tc, sym, in "sub")
+        || is_op(in tc, sym, in "mul")
+        || is_op(in tc, sym, in "div")
+        || is_op(in tc, sym, in "rem")
+        || is_op(in tc, sym, in "min_u64")
+        || is_op(in tc, sym, in "max_u64")
+}
+
 fn join_method_sym(inout names: Names, tname: u32, mname: u32) -> u32 {
     let mut buf = ChunkSeq::new[u8]();
     buf.reserve(wrapping_add(wrapping_add(names.size(tname), names.size(mname)), 2));
@@ -608,28 +706,14 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         if is_op(in tc, op, in "!") {
             let _t = check_expr(inout tc, in a, e.b, tc.bool_ty);
             tc.bool_ty
-        } else if is_op(in tc, op, in "widen_u64") || is_op(in tc, op, in "wrapping_u64") {
-            let _t = check_expr(inout tc, in a, e.b, tc.infer_ty);
-            tc.u64_ty
-        } else if is_op(in tc, op, in "widen_i64") || is_op(in tc, op, in "wrapping_i64") {
-            let _t = check_expr(inout tc, in a, e.b, tc.infer_ty);
-            tc.i64_ty
-        } else if is_op(in tc, op, in "widen_u128") || is_op(in tc, op, in "wrapping_u128") {
-            let _t = check_expr(inout tc, in a, e.b, tc.infer_ty);
-            tc.types.named0(tc.world.k.u128_)
-        } else if is_op(in tc, op, in "widen_i128") || is_op(in tc, op, in "wrapping_i128") {
-            let _t = check_expr(inout tc, in a, e.b, tc.infer_ty);
-            tc.types.named0(tc.world.k.i128_)
-        } else if is_op(in tc, op, in "wrapping_u32")
-            || is_op(in tc, op, in "narrow_u32")
-            || is_op(in tc, op, in "widen_u32") {
-            let _t = check_expr(inout tc, in a, e.b, tc.infer_ty);
-            tc.types.named0(tc.world.k.u32_)
-        } else if is_op(in tc, op, in "wrapping_u8") || is_op(in tc, op, in "narrow_u8") {
-            let _t = check_expr(inout tc, in a, e.b, tc.infer_ty);
-            tc.types.named0(tc.world.k.u8_)
         } else {
-            check_expr(inout tc, in a, e.b, expected)
+            let conv_t = conv_target_type(inout tc, op);
+            if conv_t != NONE32 {
+                let _t = check_expr(inout tc, in a, e.b, tc.infer_ty);
+                conv_t
+            } else {
+                check_expr(inout tc, in a, e.b, expected)
+            }
         }
     } else if e.kind == X_BINARY {
         let op = n32(e.a);
@@ -654,8 +738,22 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             }
         }
     } else if e.kind == X_ASSIGN {
+        let op = n32(e.a);
         let lt = check_expr(inout tc, in a, e.b, tc.infer_ty);
-        let _rt = check_expr(inout tc, in a, e.c, lt);
+        let rhs_exp = if tc.names.has_prefix(op, in "[]".as_bytes()) {
+            let et = if tc.types.kind(lt) == TyKind::Tuple && tc.types.arity(lt) > 0 {
+                tc.types.arg(lt, 0)
+            } else {
+                tc.infer_ty
+            };
+            tc.scratch1.clear();
+            tc.scratch1.push(tc.u64_ty);
+            tc.scratch1.push(et);
+            tc.types.tuple(in tc.scratch1)
+        } else {
+            lt
+        };
+        let _rt = check_expr(inout tc, in a, e.c, rhs_exp);
         tc.unit_ty
     } else if e.kind == X_BLOCK {
         push_scope(inout tc);
@@ -821,40 +919,11 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                             return check_fn_call(inout tc, in a, f, NONE32, e, ce);
                         },
                         Option::None => {
-                            let is_builtin = is_op(in tc, cname, in "widen_u64")
-                                || is_op(in tc, cname, in "wrapping_u64")
-                                || is_op(in tc, cname, in "widen_i64")
-                                || is_op(in tc, cname, in "wrapping_i64")
-                                || is_op(in tc, cname, in "wrapping_u32")
-                                || is_op(in tc, cname, in "narrow_u32")
-                                || is_op(in tc, cname, in "widen_u32")
+                            let conv_ty = conv_target_type(inout tc, cname);
+                            let same_int = is_same_int_op(in tc, cname);
+                            let is_builtin = conv_ty != NONE32
                                 || is_op(in tc, cname, in "inc32")
-                                || is_op(in tc, cname, in "wrapping_u8")
-                                || is_op(in tc, cname, in "narrow_u8")
-                                || is_op(in tc, cname, in "widen_u128")
-                                || is_op(in tc, cname, in "wrapping_u128")
-                                || is_op(in tc, cname, in "widen_i128")
-                                || is_op(in tc, cname, in "wrapping_i128")
-                                || is_op(in tc, cname, in "wrapping_add")
-                                || is_op(in tc, cname, in "wrapping_sub")
-                                || is_op(in tc, cname, in "wrapping_mul")
-                                || is_op(in tc, cname, in "wrapping_div")
-                                || is_op(in tc, cname, in "wrapping_rem")
-                                || is_op(in tc, cname, in "wrapping_shl_u64")
-                                || is_op(in tc, cname, in "wrapping_shr_u64")
-                                || is_op(in tc, cname, in "shr")
-                                || is_op(in tc, cname, in "shl")
-                                || is_op(in tc, cname, in "rotate_left")
-                                || is_op(in tc, cname, in "rotate_right")
-                                || is_op(in tc, cname, in "inc")
-                                || is_op(in tc, cname, in "dec")
-                                || is_op(in tc, cname, in "add")
-                                || is_op(in tc, cname, in "sub")
-                                || is_op(in tc, cname, in "mul")
-                                || is_op(in tc, cname, in "div")
-                                || is_op(in tc, cname, in "rem")
-                                || is_op(in tc, cname, in "min_u64")
-                                || is_op(in tc, cname, in "max_u64");
+                                || same_int;
                             let dt = if is_builtin {
                                 tc.infer_ty
                             } else {
@@ -879,6 +948,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 }
                             }
                             let mut arg0_ty = tc.infer_ty;
+                            let is_rot = is_op(in tc, cname, in "rotate_left")
+                                || is_op(in tc, cname, in "rotate_right");
                             for ai in 0..e.n {
                                 let av = u64_at(
                                     in a.xs,
@@ -886,28 +957,10 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 );
                                 let mut pt = tc.infer_ty;
                                 let mut fty_raw = tc.infer_ty;
-                                if adt == NONE32
-                                    && (
-                                        is_op(in tc, cname, in "wrapping_add")
-                                            || is_op(in tc, cname, in "wrapping_sub")
-                                            || is_op(in tc, cname, in "wrapping_mul")
-                                            || is_op(in tc, cname, in "wrapping_div")
-                                            || is_op(in tc, cname, in "wrapping_rem")
-                                            || is_op(in tc, cname, in "wrapping_shl_u64")
-                                            || is_op(in tc, cname, in "wrapping_shr_u64")
-                                            || is_op(in tc, cname, in "shr")
-                                            || is_op(in tc, cname, in "shl")
-                                            || is_op(in tc, cname, in "rotate_left")
-                                            || is_op(in tc, cname, in "rotate_right")
-                                            || is_op(in tc, cname, in "add")
-                                            || is_op(in tc, cname, in "sub")
-                                            || is_op(in tc, cname, in "mul")
-                                            || is_op(in tc, cname, in "div")
-                                            || is_op(in tc, cname, in "rem")
-                                            || is_op(in tc, cname, in "min_u64")
-                                            || is_op(in tc, cname, in "max_u64")
-                                    ) {
-                                    if ai == 0 {
+                                if adt == NONE32 && same_int {
+                                    if is_rot && ai == 1 {
+                                        pt = tc.types.named0(tc.world.k.u32_);
+                                    } else if ai == 0 {
                                         pt = expected;
                                     } else if tc.types.kind(arg0_ty) != TyKind::Infer {
                                         pt = arg0_ty;
@@ -972,46 +1025,11 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 let st = tc.types.named0(tc.names.intern(in "String".as_bytes()));
                                 let opt_nm = tc.names.intern(in "Option".as_bytes());
                                 named1(inout tc, opt_nm, st)
-                            } else if is_op(in tc, cname, in "widen_u64")
-                                || is_op(in tc, cname, in "wrapping_u64") {
-                                tc.u64_ty
-                            } else if is_op(in tc, cname, in "widen_i64")
-                                || is_op(in tc, cname, in "wrapping_i64") {
-                                tc.i64_ty
-                            } else if is_op(in tc, cname, in "wrapping_u32")
-                                || is_op(in tc, cname, in "narrow_u32")
-                                || is_op(in tc, cname, in "widen_u32")
-                                || is_op(in tc, cname, in "inc32") {
+                            } else if conv_ty != NONE32 {
+                                conv_ty
+                            } else if is_op(in tc, cname, in "inc32") {
                                 tc.types.named0(tc.world.k.u32_)
-                            } else if is_op(in tc, cname, in "wrapping_u8")
-                                || is_op(in tc, cname, in "narrow_u8") {
-                                tc.types.named0(tc.world.k.u8_)
-                            } else if is_op(in tc, cname, in "widen_u128")
-                                || is_op(in tc, cname, in "wrapping_u128") {
-                                tc.types.named0(tc.world.k.u128_)
-                            } else if is_op(in tc, cname, in "widen_i128")
-                                || is_op(in tc, cname, in "wrapping_i128") {
-                                tc.types.named0(tc.world.k.i128_)
-                            } else if is_op(in tc, cname, in "wrapping_add")
-                                || is_op(in tc, cname, in "wrapping_sub")
-                                || is_op(in tc, cname, in "wrapping_mul")
-                                || is_op(in tc, cname, in "wrapping_div")
-                                || is_op(in tc, cname, in "wrapping_rem")
-                                || is_op(in tc, cname, in "wrapping_shl_u64")
-                                || is_op(in tc, cname, in "wrapping_shr_u64")
-                                || is_op(in tc, cname, in "shr")
-                                || is_op(in tc, cname, in "shl")
-                                || is_op(in tc, cname, in "rotate_left")
-                                || is_op(in tc, cname, in "rotate_right")
-                                || is_op(in tc, cname, in "inc")
-                                || is_op(in tc, cname, in "dec")
-                                || is_op(in tc, cname, in "add")
-                                || is_op(in tc, cname, in "sub")
-                                || is_op(in tc, cname, in "mul")
-                                || is_op(in tc, cname, in "div")
-                                || is_op(in tc, cname, in "rem")
-                                || is_op(in tc, cname, in "min_u64")
-                                || is_op(in tc, cname, in "max_u64") {
+                            } else if same_int {
                                 if tc.types.kind(arg0_ty) != TyKind::Infer {
                                     arg0_ty
                                 } else if tc.types.kind(expected) != TyKind::Infer {

@@ -38,7 +38,8 @@ use @vesper/check-data::util::{
 };
 use self::err::{
     WErr,
-    werr
+    werr,
+    werr_syms
 };
 use self::enc::{
     Code,
@@ -61,6 +62,7 @@ use self::enc::{
     OP_I64_SHR_U,
     OP_I64_SUB,
     OP_IF,
+    OP_LOOP,
     OP_RETURN,
     OP_SELECT,
     OP_UNREACHABLE,
@@ -94,8 +96,10 @@ use self::plan::{
 // Consts do not cross modules: src/err.ves, src/lower.ves.
 const K_UNSUPPORTED: u8 = 0;
 const K_INVALID: u8 = 3;
+const U_INDEX: u8 = 3;
 const U_EXTERNAL_FUNCTION: u8 = 11;
 const U_OPERATION: u8 = 13;
+const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
 
 fn lookup_word(in dests: ChunkSeq[u64], in vals: ChunkSeq[u64], v: u64) -> u64 eff [Fail[WErr]] {
@@ -729,6 +733,87 @@ impl L {
             return true;
         }
         false
+    }
+
+    pub fn write_index_place(
+        inout self,
+        root: u32,
+        in segs: ChunkSeq[u32],
+        opn: u32,
+        pair: u32
+    ) eff [Fail[WErr]] {
+        let idx = self.local();
+        self.load(pair, 0);
+        self.e.code.set(idx);
+        let rhs = self.local();
+        self.load(pair, 8);
+        self.e.code.set(rhs);
+        let (arr, arr_ty) = self.read_place(root, in segs);
+        if self.cx.types.kind(arr_ty) != TyKind::Tuple {
+            Fail::raise(werr_syms(K_UNSUPPORTED, U_INDEX, 196, self.e.inst.base, opn));
+        }
+        let n = self.cx.arity(arr_ty);
+        self.e.code.get(idx);
+        self.e.code.u64_const(n);
+        self.e.code.op(OP_I64_GE_U);
+        self.e.code.open(OP_IF);
+        let oob = self.cx.s.index_oob;
+        self.raise_runtime_error(oob);
+        self.e.code.op(OP_END);
+        let dst = self.alloc_block(wrapping_mul(8, n));
+        if n > 0 {
+            let off = self.local();
+            self.e.code.i64_const(0);
+            self.e.code.set(off);
+            self.e.code.open(OP_LOOP);
+            self.e.code.get(dst);
+            self.e.code.get(off);
+            self.e.code.op(OP_I64_ADD);
+            self.e.code.op(OP_I32_WRAP_I64);
+            self.e.code.get(arr);
+            self.e.code.get(off);
+            self.e.code.op(OP_I64_ADD);
+            self.e.code.op(OP_I32_WRAP_I64);
+            self.e.code.load(0);
+            self.e.code.store(0);
+            self.e.code.get(off);
+            self.e.code.i64_const(8);
+            self.e.code.op(OP_I64_ADD);
+            self.e.code.tee(off);
+            self.e.code.u64_const(wrapping_mul(8, n));
+            self.e.code.op(OP_I64_LT_U);
+            self.e.code.br_if(0);
+            self.e.code.op(OP_END);
+        }
+        let new_val = if self.cx.names.spells(opn, in "[]=".as_bytes()) {
+            rhs
+        } else {
+            let base = self.strip_eq(opn, 2);
+            if base == NONE32 {
+                Fail::raise(werr_syms(K_UNSUPPORTED, U_OPERATION, 193, self.e.inst.base, opn));
+            }
+            let old = self.local();
+            self.e.code.get(arr);
+            self.e.code.get(idx);
+            self.e.code.i64_const(3);
+            self.e.code.op(OP_I64_SHL);
+            self.e.code.op(OP_I64_ADD);
+            self.e.code.op(OP_I32_WRAP_I64);
+            self.e.code.load(0);
+            self.e.code.set(old);
+            let et = self.cx.types.arg(arr_ty, 0);
+            let s = self.scalar_of(et);
+            self.binary(base, old, rhs, s, s)
+        };
+        self.e.code.get(dst);
+        self.e.code.get(idx);
+        self.e.code.i64_const(3);
+        self.e.code.op(OP_I64_SHL);
+        self.e.code.op(OP_I64_ADD);
+        self.e.code.op(OP_I32_WRAP_I64);
+        self.e.code.get(new_val);
+        self.e.code.store(0);
+        self.write_place(root, in segs, dst);
     }
 }
 

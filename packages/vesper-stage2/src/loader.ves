@@ -823,6 +823,637 @@ fn try_list_dir(in dir: Slice[u8]) -> Option[Entries] eff [Ffi[StdFs]] {
     }
 }
 
+fn push_dec(inout out: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        push_dec(inout out, v / 10);
+    }
+    out.push(wrapping_u8(wrapping_add(48, v % 10)));
+}
+
+fn kind_name_of(kind_idx: u64) -> Str {
+    if kind_idx == 0 {
+        "u8"
+    } else if kind_idx == 1 {
+        "u16"
+    } else if kind_idx == 2 {
+        "u32"
+    } else if kind_idx == 3 {
+        "u64"
+    } else if kind_idx == 4 {
+        "usize"
+    } else if kind_idx == 5 {
+        "u128"
+    } else if kind_idx == 6 {
+        "i8"
+    } else if kind_idx == 7 {
+        "i16"
+    } else if kind_idx == 8 {
+        "i32"
+    } else if kind_idx == 9 {
+        "i64"
+    } else if kind_idx == 10 {
+        "isize"
+    } else {
+        "i128"
+    }
+}
+
+fn kind_bits_of(kind_idx: u64) -> u64 {
+    let k = kind_idx % 6;
+    if k == 0 {
+        8
+    } else if k == 1 {
+        16
+    } else if k == 2 {
+        32
+    } else if k == 5 {
+        128
+    } else {
+        64
+    }
+}
+
+fn kind_is_signed(kind_idx: u64) -> bool {
+    kind_idx >= 6
+}
+
+fn kind_unsigned_name(kind_idx: u64) -> Str {
+    kind_name_of(kind_idx % 6)
+}
+
+fn kind_max_str(kind_idx: u64) -> Str {
+    if kind_idx == 0 {
+        "255"
+    } else if kind_idx == 1 {
+        "65535"
+    } else if kind_idx == 2 {
+        "4294967295"
+    } else if kind_idx == 6 {
+        "127"
+    } else if kind_idx == 7 {
+        "32767"
+    } else if kind_idx == 8 {
+        "2147483647"
+    } else {
+        "9223372036854775807"
+    }
+}
+
+fn kind_min_str(kind_idx: u64) -> Str {
+    if kind_idx == 6 {
+        "-128"
+    } else if kind_idx == 7 {
+        "-32768"
+    } else {
+        "-2147483648"
+    }
+}
+
+fn parse_kind_suffix(in s: Slice[u8], start: u64) -> u64 {
+    for i in 0..12 {
+        if eq_bytes(in s[start..s.len()], in kind_name_of(i).as_bytes()) {
+            return i;
+        }
+    }
+    99
+}
+
+fn match_intrinsic_token(in tok: Slice[u8]) -> u64 {
+    if eq_bytes(in tok, in "mul_wide".as_bytes()) {
+        return 108;
+    }
+    let (fam, plen) = if tok.len() > 14 && eq_bytes(in tok[0..14], in "leading_zeros_".as_bytes()) {
+        (0, 14)
+    } else if tok.len() > 15 && eq_bytes(in tok[0..15], in "trailing_zeros_".as_bytes()) {
+        (1, 15)
+    } else if tok.len() > 11 && eq_bytes(in tok[0..11], in "count_ones_".as_bytes()) {
+        (2, 11)
+    } else if tok.len() > 13 && eq_bytes(in tok[0..13], in "wrapping_neg_".as_bytes()) {
+        (3, 13)
+    } else if tok.len() > 13 && eq_bytes(in tok[0..13], in "wrapping_shl_".as_bytes()) {
+        (4, 13)
+    } else if tok.len() > 13 && eq_bytes(in tok[0..13], in "wrapping_shr_".as_bytes()) {
+        (5, 13)
+    } else if tok.len() > 12 && eq_bytes(in tok[0..12], in "checked_add_".as_bytes()) {
+        (6, 12)
+    } else if tok.len() > 12 && eq_bytes(in tok[0..12], in "checked_sub_".as_bytes()) {
+        (7, 12)
+    } else if tok.len() > 12 && eq_bytes(in tok[0..12], in "checked_mul_".as_bytes()) {
+        (8, 12)
+    } else {
+        (99, 0)
+    };
+    if fam >= 9 {
+        return 999;
+    }
+    let ki = parse_kind_suffix(in tok, plen);
+    if ki >= 12 {
+        return 999;
+    }
+    wrapping_add(wrapping_mul(fam, 12), ki)
+}
+
+fn next_code_byte(in src: Slice[u8], pos0: u64) -> (u64, u64) {
+    let n = src.len();
+    let b = byte_at(in src, pos0);
+    if b == 47 && wrapping_add(pos0, 1) < n && byte_at(in src, wrapping_add(pos0, 1)) == 47 {
+        let nl = find_byte(in src, pos0, n, 10);
+        return (nl, 1);
+    }
+    if b == 34 {
+        let mut p = wrapping_add(pos0, 1);
+        loop {
+            if p >= n {
+                break;
+            }
+            let c = byte_at(in src, p);
+            p = wrapping_add(p, 1);
+            if c == 92 && p < n {
+                p = wrapping_add(p, 1);
+            } else if c == 34 {
+                break;
+            }
+        }
+        return (p, 1);
+    }
+    (pos0, 0)
+}
+
+fn mod_has_enum_variant(in src: Slice[u8], in variant: Slice[u8]) -> bool {
+    let n = src.len();
+    let mut pos: u64 = 0;
+    let mut in_enum = false;
+    let mut brace_depth: u64 = 0;
+    let mut paren_depth: u64 = 0;
+    let mut expect_variant = false;
+    loop {
+        if pos >= n {
+            break;
+        }
+        let (next_p, skipped) = next_code_byte(in src, pos);
+        if skipped != 0 {
+            pos = next_p;
+            continue;
+        }
+        let b = byte_at(in src, pos);
+        if is_ident_byte(b) {
+            let start = pos;
+            loop {
+                if pos >= n || !is_ident_byte(byte_at(in src, pos)) {
+                    break;
+                }
+                pos = wrapping_add(pos, 1);
+            }
+            if !in_enum && brace_depth == 0 && eq_bytes(in src[start..pos], in "enum".as_bytes()) {
+                in_enum = true;
+            } else if in_enum && brace_depth == 1 && paren_depth == 0 && expect_variant {
+                if eq_bytes(in src[start..pos], in variant) {
+                    return true;
+                }
+                expect_variant = false;
+            }
+            continue;
+        }
+        if b == 40 {
+            paren_depth = wrapping_add(paren_depth, 1);
+        } else if b == 41 {
+            if paren_depth > 0 {
+                paren_depth = wrapping_sub(paren_depth, 1);
+            }
+        } else if b == 123 {
+            brace_depth = wrapping_add(brace_depth, 1);
+            if in_enum && brace_depth == 1 {
+                expect_variant = true;
+            }
+        } else if b == 125 {
+            if brace_depth > 0 {
+                brace_depth = wrapping_sub(brace_depth, 1);
+            }
+            if brace_depth == 0 {
+                in_enum = false;
+                paren_depth = 0;
+                expect_variant = false;
+            }
+        } else if b == 44 && in_enum && brace_depth == 1 && paren_depth == 0 {
+            expect_variant = true;
+        } else if (b == 58 || b == 59) && brace_depth == 0 {
+            // `:` before `{` starts a value enum (`enum E: T`), which does not register variants.
+            in_enum = false;
+        }
+        pos = wrapping_add(pos, 1);
+    }
+    false
+}
+
+/// Checks whether any module in `mods` declares a non-value ADT enum variant
+/// named `variant` (e.g. `@vesper/serde::Kind::String`), which conflicts with
+/// `impl String` during `@vesper/check-names-packages` resolution if injected
+/// before assembly.
+fn has_enum_variant(in mods: ChunkSeq[ModEntry], in variant: Slice[u8]) -> bool {
+    for mi in 0..mods.len() {
+        let hit = match mods.try_get(mi) {
+            Option::Some(m) => mod_has_enum_variant(in m.text.as_slice(), in variant),
+            Option::None => false,
+        };
+        if hit {
+            return true;
+        }
+    }
+    false
+}
+
+fn push_swar(inout out: ChunkSeq[u8], in suf: Str) {
+    out.extend(in "let v1".as_bytes());
+    out.extend(in suf.as_bytes());
+    out.extend(in " = wrapping_sub(v0".as_bytes());
+    out.extend(in suf.as_bytes());
+    out.extend(in ", (v0".as_bytes());
+    out.extend(in suf.as_bytes());
+    out.extend(in " >> 1) & 6148914691236517205); ".as_bytes());
+    out.extend(in "let v2".as_bytes());
+    out.extend(in suf.as_bytes());
+    out.extend(in " = wrapping_add(v1".as_bytes());
+    out.extend(in suf.as_bytes());
+    out.extend(in " & 3689348814741910323, (v1".as_bytes());
+    out.extend(in suf.as_bytes());
+    out.extend(in " >> 2) & 3689348814741910323); ".as_bytes());
+    out.extend(in "let v3".as_bytes());
+    out.extend(in suf.as_bytes());
+    out.extend(in " = wrapping_add(v2".as_bytes());
+    out.extend(in suf.as_bytes());
+    out.extend(in ", v2".as_bytes());
+    out.extend(in suf.as_bytes());
+    out.extend(in " >> 4) & 1085102592571150095; ".as_bytes());
+    out.extend(in "let c".as_bytes());
+    out.extend(in suf.as_bytes());
+    out.extend(in ": u32 = wrapping_u32(wrapping_mul(v3".as_bytes());
+    out.extend(in suf.as_bytes());
+    out.extend(in ", 72340172838076673) >> 56); ".as_bytes());
+}
+
+fn push_popcount(inout out: ChunkSeq[u8], kind_idx: u64, in bits_expr: Str) {
+    let wide = kind_bits_of(kind_idx) == 128;
+    if wide {
+        out.extend(in "let w: u128 = ".as_bytes());
+        out.extend(in bits_expr.as_bytes());
+        out.extend(in "; let v0lo: u64 = wrapping_u64(w); ".as_bytes());
+        push_swar(inout out, in "lo");
+        out.extend(in "let v0hi: u64 = wrapping_u64(w >> 64); ".as_bytes());
+        push_swar(inout out, in "hi");
+        out.extend(in "let c: u32 = wrapping_add(clo, chi); ".as_bytes());
+    } else {
+        out.extend(in "let v0: u64 = widen_u64(".as_bytes());
+        out.extend(in bits_expr.as_bytes());
+        out.extend(in "); ".as_bytes());
+        push_swar(inout out, in "");
+    }
+}
+
+fn push_pattern_let(inout out: ChunkSeq[u8], ki: u64) {
+    let un = kind_unsigned_name(ki);
+    out.extend(in "let pat: ".as_bytes());
+    out.extend(in un.as_bytes());
+    if kind_is_signed(ki) {
+        out.extend(in " = wrapping_".as_bytes());
+        out.extend(in un.as_bytes());
+        out.extend(in "(x); ".as_bytes());
+    } else {
+        out.extend(in " = x; ".as_bytes());
+    }
+}
+
+fn emit_bit_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
+    let k = kind_name_of(ki);
+    let un = kind_unsigned_name(ki);
+    let bits = kind_bits_of(ki);
+    let signed = kind_is_signed(ki);
+    out.extend(in "pub fn ".as_bytes());
+    if fam == 0 {
+        out.extend(in "leading_zeros_".as_bytes());
+    } else if fam == 1 {
+        out.extend(in "trailing_zeros_".as_bytes());
+    } else if fam == 2 {
+        out.extend(in "count_ones_".as_bytes());
+    } else if fam == 3 {
+        out.extend(in "wrapping_neg_".as_bytes());
+    } else if fam == 4 {
+        out.extend(in "wrapping_shl_".as_bytes());
+    } else {
+        out.extend(in "wrapping_shr_".as_bytes());
+    }
+    out.extend(in k.as_bytes());
+    if fam == 4 || fam == 5 {
+        out.extend(in "(x: ".as_bytes());
+        out.extend(in k.as_bytes());
+        out.extend(in ", n: u32) -> ".as_bytes());
+        out.extend(in k.as_bytes());
+    } else if fam == 3 {
+        out.extend(in "(x: ".as_bytes());
+        out.extend(in k.as_bytes());
+        out.extend(in ") -> ".as_bytes());
+        out.extend(in k.as_bytes());
+    } else {
+        out.extend(in "(x: ".as_bytes());
+        out.extend(in k.as_bytes());
+        out.extend(in ") -> u32".as_bytes());
+    }
+    out.extend(in " { ".as_bytes());
+    if fam == 0 {
+        push_pattern_let(inout out, ki);
+        out.extend(in "let mut lp: ".as_bytes());
+        out.extend(in un.as_bytes());
+        out.extend(in " = pat; ".as_bytes());
+        let mut s: u64 = 1;
+        loop {
+            if s >= bits {
+                break;
+            }
+            out.extend(in "lp = lp | (lp >> ".as_bytes());
+            push_dec(inout out, s);
+            out.extend(in "); ".as_bytes());
+            s = wrapping_mul(s, 2);
+        }
+        push_popcount(inout out, ki, in "lp");
+        out.extend(in "let width: u32 = ".as_bytes());
+        push_dec(inout out, bits);
+        out.extend(in "; wrapping_sub(width, c)".as_bytes());
+    } else if fam == 1 {
+        push_pattern_let(inout out, ki);
+        push_popcount(inout out, ki, in "~pat & wrapping_sub(pat, 1)");
+        out.extend(in "c".as_bytes());
+    } else if fam == 2 {
+        push_pattern_let(inout out, ki);
+        push_popcount(inout out, ki, in "pat");
+        out.extend(in "c".as_bytes());
+    } else if fam == 3 {
+        out.extend(in "let zero: ".as_bytes());
+        out.extend(in k.as_bytes());
+        out.extend(in " = 0; wrapping_sub(zero, x)".as_bytes());
+    } else if fam == 4 {
+        out.extend(in "let one: ".as_bytes());
+        out.extend(in k.as_bytes());
+        out.extend(in " = 1; wrapping_mul(x, rotate_left(one, n))".as_bytes());
+    } else {
+        out.extend(in "let s: u32 = n & ".as_bytes());
+        push_dec(inout out, wrapping_sub(bits, 1));
+        out.extend(in "; if s == 0 { x } else { ".as_bytes());
+        push_pattern_let(inout out, ki);
+        out.extend(in "let one: ".as_bytes());
+        out.extend(in un.as_bytes());
+        out.extend(in " = 1; let keep: ".as_bytes());
+        out.extend(in un.as_bytes());
+        out.extend(in " = wrapping_sub(rotate_right(one, s), one); let r: ".as_bytes());
+        out.extend(in un.as_bytes());
+        out.extend(in " = rotate_right(pat, s) & keep; ".as_bytes());
+        if signed {
+            out.extend(in "let zero: ".as_bytes());
+            out.extend(in k.as_bytes());
+            out.extend(in " = 0; if x < zero { wrapping_".as_bytes());
+            out.extend(in k.as_bytes());
+            out.extend(in "(r | ~keep) } else { wrapping_".as_bytes());
+            out.extend(in k.as_bytes());
+            out.extend(in "(r) }".as_bytes());
+        } else {
+            out.extend(in "r".as_bytes());
+        }
+        out.extend(in " }".as_bytes());
+    }
+    out.extend(in " } ".as_bytes());
+}
+
+fn emit_checked_intrinsic(inout out: ChunkSeq[u8], fam: u64, ki: u64) {
+    let k = kind_name_of(ki);
+    let bits = kind_bits_of(ki);
+    let signed = kind_is_signed(ki);
+    out.extend(in "pub fn ".as_bytes());
+    if fam == 6 {
+        out.extend(in "checked_add_".as_bytes());
+    } else if fam == 7 {
+        out.extend(in "checked_sub_".as_bytes());
+    } else {
+        out.extend(in "checked_mul_".as_bytes());
+    }
+    out.extend(in k.as_bytes());
+    out.extend(in "(a: ".as_bytes());
+    out.extend(in k.as_bytes());
+    out.extend(in ", b: ".as_bytes());
+    out.extend(in k.as_bytes());
+    out.extend(in ") -> Option[".as_bytes());
+    out.extend(in k.as_bytes());
+    out.extend(in "] { ".as_bytes());
+    if fam == 6 && !signed {
+        out.extend(in "let s: ".as_bytes());
+        out.extend(in k.as_bytes());
+        out
+            .extend(
+                in " = wrapping_add(a, b); if s < a { Option::None } else { Option::Some(s) }"
+                    .as_bytes()
+            );
+    } else if fam == 7 && !signed {
+        out
+            .extend(
+                in "if b > a { Option::None } else { Option::Some(wrapping_sub(a, b)) }".as_bytes()
+            );
+    } else if (fam == 6 || fam == 7) && signed {
+        out.extend(in "let zero: ".as_bytes());
+        out.extend(in k.as_bytes());
+        out.extend(in " = 0; let s: ".as_bytes());
+        out.extend(in k.as_bytes());
+        if fam == 6 {
+            out
+                .extend(
+                    in " = wrapping_add(a, b); if (a < zero) == (b < zero) && (s < zero) != (a < zero) { Option::None } else { Option::Some(s) }"
+                        .as_bytes()
+                );
+        } else {
+            out
+                .extend(
+                    in " = wrapping_sub(a, b); if (a < zero) != (b < zero) && (s < zero) != (a < zero) { Option::None } else { Option::Some(s) }"
+                        .as_bytes()
+                );
+        }
+    } else if !signed && bits <= 32 {
+        out.extend(in "let p: u64 = wrapping_mul(widen_u64(a), widen_u64(b)); if p > ".as_bytes());
+        out.extend(in kind_max_str(ki).as_bytes());
+        out.extend(in " { Option::None } else { Option::Some(wrapping_".as_bytes());
+        out.extend(in k.as_bytes());
+        out.extend(in "(p)) }".as_bytes());
+    } else if signed && bits <= 32 {
+        out.extend(in "let p: i64 = wrapping_mul(widen_i64(a), widen_i64(b)); if p < ".as_bytes());
+        out.extend(in kind_min_str(ki).as_bytes());
+        out.extend(in " || p > ".as_bytes());
+        out.extend(in kind_max_str(ki).as_bytes());
+        out.extend(in " { Option::None } else { Option::Some(wrapping_".as_bytes());
+        out.extend(in k.as_bytes());
+        out.extend(in "(p)) }".as_bytes());
+    } else if !signed && bits == 128 {
+        out.extend(in "let zero: ".as_bytes());
+        out.extend(in k.as_bytes());
+        out.extend(in " = 0; if a == zero { Option::Some(zero) } else { let p: ".as_bytes());
+        out.extend(in k.as_bytes());
+        out
+            .extend(
+                in " = wrapping_mul(a, b); if p / a != b { Option::None } else { Option::Some(p) } }"
+                    .as_bytes()
+            );
+    } else if signed && bits == 128 {
+        out
+            .extend(
+                in "let zero: i128 = 0; let uzero: u128 = 0; let ua: u128 = if a < zero { wrapping_u128(wrapping_sub(zero, a)) } else { wrapping_u128(a) }; let ub: u128 = if b < zero { wrapping_u128(wrapping_sub(zero, b)) } else { wrapping_u128(b) }; if ua == uzero { Option::Some(zero) } else { let p: u128 = wrapping_mul(ua, ub); let one: u128 = 1; let limit: u128 = rotate_right(one, 1); if p / ua != ub { Option::None } else if (a < zero) != (b < zero) { if p > limit { Option::None } else { Option::Some(wrapping_i128(wrapping_sub(uzero, p))) } } else if p >= limit { Option::None } else { Option::Some(wrapping_i128(p)) } }"
+                    .as_bytes()
+            );
+    } else if !signed {
+        out
+            .extend(
+                in "let (lo, hi) = mul_wide(wrapping_u64(a), wrapping_u64(b)); if hi != 0 { Option::None } else { Option::Some(wrapping_"
+                    .as_bytes()
+            );
+        out.extend(in k.as_bytes());
+        out.extend(in "(lo)) }".as_bytes());
+    } else {
+        out.extend(in "let zero: ".as_bytes());
+        out.extend(in k.as_bytes());
+        out
+            .extend(
+                in " = 0; let ua: u64 = if a < zero { wrapping_u64(wrapping_sub(zero, a)) } else { wrapping_u64(a) }; let ub: u64 = if b < zero { wrapping_u64(wrapping_sub(zero, b)) } else { wrapping_u64(b) }; let (lo, hi) = mul_wide(ua, ub); let limit: u64 = 9223372036854775807; if hi != 0 { Option::None } else if (a < zero) != (b < zero) { if lo > wrapping_add(limit, 1) { Option::None } else { Option::Some(wrapping_"
+                    .as_bytes()
+            );
+        out.extend(in k.as_bytes());
+        out
+            .extend(
+                in "(wrapping_sub(0, lo))) } } else if lo > limit { Option::None } else { Option::Some(wrapping_"
+                    .as_bytes()
+            );
+        out.extend(in k.as_bytes());
+        out.extend(in "(lo)) }".as_bytes());
+    }
+    out.extend(in " } ".as_bytes());
+}
+
+fn scan_mod_intrinsics(in src: Slice[u8], inout need: ChunkSeq[bool], inout skip: ChunkSeq[bool]) {
+    let n = src.len();
+    let mut pos: u64 = 0;
+    let mut prev_was_fn = false;
+    loop {
+        if pos >= n {
+            break;
+        }
+        let (next_p, skipped) = next_code_byte(in src, pos);
+        if skipped != 0 {
+            pos = next_p;
+            continue;
+        }
+        let b = byte_at(in src, pos);
+        if is_ident_byte(b) {
+            let start = pos;
+            loop {
+                if pos >= n || !is_ident_byte(byte_at(in src, pos)) {
+                    break;
+                }
+                pos = wrapping_add(pos, 1);
+            }
+            let slot = match_intrinsic_token(in src[start..pos]);
+            if slot < 109 {
+                if prev_was_fn {
+                    let _ = skip.try_set(slot, true);
+                } else {
+                    let _ = need.try_set(slot, true);
+                }
+            }
+            prev_was_fn = eq_bytes(in src[start..pos], in "fn".as_bytes());
+            continue;
+        }
+        if b != 32 && b != 9 && b != 10 && b != 13 {
+            prev_was_fn = false;
+        }
+        pos = wrapping_add(pos, 1);
+    }
+}
+
+fn append_extra_intrinsics(in mods: ChunkSeq[ModEntry], inout out: ChunkSeq[u8]) {
+    let mut need = ChunkSeq::new[bool]();
+    let mut skip = ChunkSeq::new[bool]();
+    for _i in 0..109 {
+        need.push(false);
+        skip.push(false);
+    }
+    // Pre-mark the 11 functions emitted unconditionally in base `$string_prelude.ves`.
+    // fam 6 (checked_add): u64=3 (75), u128=5 (77); fam 7 (checked_sub): u64=3 (87)
+    // fam 8 (checked_mul): u64=3 (99), u128=5 (101)
+    // fam 3 (wrapping_neg): i64=9 (45)
+    // fam 4 (wrapping_shl): u32=2 (50), u64=3 (51)
+    // fam 5 (wrapping_shr): u32=2 (62), u64=3 (63)
+    // fam 1 (trailing_zeros): u64=3 (15)
+    let _ = skip.try_set(15, true);
+    let _ = skip.try_set(45, true);
+    let _ = skip.try_set(50, true);
+    let _ = skip.try_set(51, true);
+    let _ = skip.try_set(62, true);
+    let _ = skip.try_set(63, true);
+    let _ = skip.try_set(75, true);
+    let _ = skip.try_set(77, true);
+    let _ = skip.try_set(87, true);
+    let _ = skip.try_set(99, true);
+    let _ = skip.try_set(101, true);
+
+    for mi in 0..mods.len() {
+        match mods.try_get(mi) {
+            Option::Some(m) => scan_mod_intrinsics(in m.text.as_slice(), inout need, inout skip),
+            Option::None => {},
+        }
+    }
+    // 64-bit `checked_mul_k` (usize=100, i64=105, isize=106) calls `mul_wide`.
+    let need_mul_usize = match need.try_get(100) {
+        Option::Some(v) => v,
+        Option::None => false,
+    };
+    let need_mul_i64 = match need.try_get(105) {
+        Option::Some(v) => v,
+        Option::None => false,
+    };
+    let need_mul_isize = match need.try_get(106) {
+        Option::Some(v) => v,
+        Option::None => false,
+    };
+    if need_mul_usize || need_mul_i64 || need_mul_isize {
+        let _ = need.try_set(108, true);
+    }
+    let need_mw = match need.try_get(108) {
+        Option::Some(v) => v,
+        Option::None => false,
+    };
+    let skip_mw = match skip.try_get(108) {
+        Option::Some(v) => v,
+        Option::None => false,
+    };
+    if need_mw && !skip_mw {
+        out
+            .extend(
+                in "pub fn mul_wide(a: u64, b: u64) -> (u64, u64) { let m: u64 = 4294967295; let a0 = a & m; let a1 = a >> 32; let b0 = b & m; let b1 = b >> 32; let p00 = wrapping_mul(a0, b0); let p01 = wrapping_mul(a0, b1); let p10 = wrapping_mul(a1, b0); let p11 = wrapping_mul(a1, b1); let mid = wrapping_add(wrapping_add(p00 >> 32, p01 & m), p10 & m); let hi = wrapping_add(wrapping_add(wrapping_add(p11, p01 >> 32), p10 >> 32), mid >> 32); (wrapping_mul(a, b), hi) } "
+                    .as_bytes()
+            );
+    }
+    for slot in 0..108 {
+        let want = match need.try_get(slot) {
+            Option::Some(v) => v,
+            Option::None => false,
+        };
+        let already = match skip.try_get(slot) {
+            Option::Some(v) => v,
+            Option::None => false,
+        };
+        if want && !already {
+            let fam = slot / 12;
+            let ki = slot % 12;
+            if fam < 6 {
+                emit_bit_intrinsic(inout out, fam, ki);
+            } else {
+                emit_checked_intrinsic(inout out, fam, ki);
+            }
+        }
+    }
+}
+
 fn scan_dir_mods(
     pkg_idx: u64,
     in dir: Slice[u8],
@@ -1020,32 +1651,34 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
     sp_seg.extend(in "intrinsics".as_bytes());
     sp_segs.push(sink sp_seg);
     let mut sp_src = ChunkSeq::new[u8]();
-    sp_src.extend(in "impl String { fn new() -> String { \"\" } ".as_bytes());
-    sp_src
-        .extend(
-            in "fn with_capacity(n: u64) -> String { let mut s = String::new(); s.reserve(n); s } "
-                .as_bytes()
-        );
-    sp_src
-        .extend(
-            in "fn utf8_byte(in bytes: Slice[u8], i: u64) -> u32 { match bytes.try_get(i) { Option::Some(b) => widen_u32(b), Option::None => 0 } } "
-                .as_bytes()
-        );
-    sp_src
-        .extend(
-            in "fn utf8_width(in bytes: Slice[u8], i: u64) -> u64 { let b0 = String::utf8_byte(in bytes, i); let b1 = String::utf8_byte(in bytes, wrapping_add(i, 1)); let c2 = (String::utf8_byte(in bytes, wrapping_add(i, 2)) & 192) == 128; let c3 = (String::utf8_byte(in bytes, wrapping_add(i, 3)) & 192) == 128; if b0 < 128 { 1 } else if b0 < 194 { 0 } else if b0 < 224 { if (b1 & 192) == 128 { 2 } else { 0 } } else if b0 < 240 { let lo: u32 = if b0 == 224 { 160 } else { 128 }; let hi: u32 = if b0 == 237 { 159 } else { 191 }; if b1 >= lo && b1 <= hi && c2 { 3 } else { 0 } } else if b0 < 245 { let lo: u32 = if b0 == 240 { 144 } else { 128 }; let hi: u32 = if b0 == 244 { 143 } else { 191 }; if b1 >= lo && b1 <= hi && c2 && c3 { 4 } else { 0 } } else { 0 } } "
-                .as_bytes()
-        );
-    sp_src
-        .extend(
-            in "fn utf8_decode(in bytes: Slice[u8], i: u64, w: u64) -> u32 { let b0 = String::utf8_byte(in bytes, i); let c1 = String::utf8_byte(in bytes, wrapping_add(i, 1)) & 63; let c2 = String::utf8_byte(in bytes, wrapping_add(i, 2)) & 63; let c3 = String::utf8_byte(in bytes, wrapping_add(i, 3)) & 63; if w == 1 { b0 } else if w == 2 { wrapping_mul(b0 & 31, 64) | c1 } else if w == 3 { wrapping_mul(b0 & 15, 4096) | wrapping_mul(c1, 64) | c2 } else { wrapping_mul(b0 & 7, 262144) | wrapping_mul(c1, 4096) | wrapping_mul(c2, 64) | c3 } } "
-                .as_bytes()
-        );
-    sp_src
-        .extend(
-            in "fn from_utf8(in bytes: Slice[u8]) -> Option[String] { let n = bytes.len(); let mut out = String::with_capacity(n); let mut i: u64 = 0; let mut valid = true; loop { if i >= n { break; } let w = String::utf8_width(in bytes, i); if w == 0 || w > wrapping_sub(n, i) { valid = false; break; } out.push_char(String::utf8_decode(in bytes, i, w)); i = wrapping_add(i, w); } if valid { Option::Some(out) } else { Option::None } } } "
-                .as_bytes()
-        );
+    if !has_enum_variant(in mods, in "String".as_bytes()) {
+        sp_src.extend(in "impl String { fn new() -> String { \"\" } ".as_bytes());
+        sp_src
+            .extend(
+                in "fn with_capacity(n: u64) -> String { let mut s = String::new(); s.reserve(n); s } "
+                    .as_bytes()
+            );
+        sp_src
+            .extend(
+                in "fn utf8_byte(in bytes: Slice[u8], i: u64) -> u32 { match bytes.try_get(i) { Option::Some(b) => widen_u32(b), Option::None => 0 } } "
+                    .as_bytes()
+            );
+        sp_src
+            .extend(
+                in "fn utf8_width(in bytes: Slice[u8], i: u64) -> u64 { let b0 = String::utf8_byte(in bytes, i); let b1 = String::utf8_byte(in bytes, wrapping_add(i, 1)); let c2 = (String::utf8_byte(in bytes, wrapping_add(i, 2)) & 192) == 128; let c3 = (String::utf8_byte(in bytes, wrapping_add(i, 3)) & 192) == 128; if b0 < 128 { 1 } else if b0 < 194 { 0 } else if b0 < 224 { if (b1 & 192) == 128 { 2 } else { 0 } } else if b0 < 240 { let lo: u32 = if b0 == 224 { 160 } else { 128 }; let hi: u32 = if b0 == 237 { 159 } else { 191 }; if b1 >= lo && b1 <= hi && c2 { 3 } else { 0 } } else if b0 < 245 { let lo: u32 = if b0 == 240 { 144 } else { 128 }; let hi: u32 = if b0 == 244 { 143 } else { 191 }; if b1 >= lo && b1 <= hi && c2 && c3 { 4 } else { 0 } } else { 0 } } "
+                    .as_bytes()
+            );
+        sp_src
+            .extend(
+                in "fn utf8_decode(in bytes: Slice[u8], i: u64, w: u64) -> u32 { let b0 = String::utf8_byte(in bytes, i); let c1 = String::utf8_byte(in bytes, wrapping_add(i, 1)) & 63; let c2 = String::utf8_byte(in bytes, wrapping_add(i, 2)) & 63; let c3 = String::utf8_byte(in bytes, wrapping_add(i, 3)) & 63; if w == 1 { b0 } else if w == 2 { wrapping_mul(b0 & 31, 64) | c1 } else if w == 3 { wrapping_mul(b0 & 15, 4096) | wrapping_mul(c1, 64) | c2 } else { wrapping_mul(b0 & 7, 262144) | wrapping_mul(c1, 4096) | wrapping_mul(c2, 64) | c3 } } "
+                    .as_bytes()
+            );
+        sp_src
+            .extend(
+                in "fn from_utf8(in bytes: Slice[u8]) -> Option[String] { let n = bytes.len(); let mut out = String::with_capacity(n); let mut i: u64 = 0; let mut valid = true; loop { if i >= n { break; } let w = String::utf8_width(in bytes, i); if w == 0 || w > wrapping_sub(n, i) { valid = false; break; } out.push_char(String::utf8_decode(in bytes, i, w)); i = wrapping_add(i, w); } if valid { Option::Some(out) } else { Option::None } } } "
+                    .as_bytes()
+            );
+    }
     sp_src
         .extend(
             in "pub fn checked_add_u64(a: u64, b: u64) -> Option[u64] { if b > wrapping_sub(18446744073709551615, a) { Option::None } else { Option::Some(wrapping_add(a, b)) } } "
@@ -1088,9 +1721,10 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
         .extend(in "pub fn wrapping_shr_u32(x: u32, n: u32) -> u32 { x >> (n & 31) } ".as_bytes());
     sp_src
         .extend(
-            in "pub fn trailing_zeros_u64(x: u64) -> u32 { if x == 0 { 64 } else { let mut v = x; let mut c: u32 = 0; loop { if (v & 1) != 0 { break; } v = wrapping_shr_u64(v, 1); c = wrapping_add(c, 1); } c } }"
+            in "pub fn trailing_zeros_u64(x: u64) -> u32 { if x == 0 { 64 } else { let mut v = x; let mut c: u32 = 0; loop { if (v & 1) != 0 { break; } v = wrapping_shr_u64(v, 1); c = wrapping_add(c, 1); } c } } "
                 .as_bytes()
         );
+    append_extra_intrinsics(in mods, inout sp_src);
     collect_mod_files(
         0,
         in "".as_bytes(),
