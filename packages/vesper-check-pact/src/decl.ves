@@ -521,7 +521,7 @@ fn read_sigs(
     n32(n)
 }
 
-fn read_traits(
+pub fn read_traits(
     inout r: Reader,
     in b: Slice[u8],
     inout d: Decls,

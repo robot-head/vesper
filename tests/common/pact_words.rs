@@ -67,19 +67,7 @@ pub fn signature(e: &mut Enc, t: &mut Vec<u64>, f: &Function) {
 }
 
 /// The declaration section (`read_decls` in decl.ves).
-pub fn encode_declarations(
-    e: &mut Enc,
-    t: &mut Vec<u64>,
-    m: &Module,
-    base: &World,
-    identity: &str,
-) {
-    t.push(e.name(identity));
-    t.push(base.functions.len() as u64);
-    for (name, f) in &base.functions {
-        t.push(e.name(name));
-        generics(e, t, &f.generics);
-    }
+pub fn encode_traits(e: &mut Enc, t: &mut Vec<u64>, m: &Module) {
     let traits: Vec<_> = m
         .items
         .iter()
@@ -104,6 +92,16 @@ pub fn encode_declarations(
             signature(e, t, f);
         }
     }
+}
+
+fn encode_declarations(e: &mut Enc, t: &mut Vec<u64>, m: &Module, base: &World, identity: &str) {
+    t.push(e.name(identity));
+    t.push(base.functions.len() as u64);
+    for (name, f) in &base.functions {
+        t.push(e.name(name));
+        generics(e, t, &f.generics);
+    }
+    encode_traits(e, t, m);
     let confs: Vec<_> = m
         .items
         .iter()
@@ -942,4 +940,35 @@ pub fn encode_builtin_wanted(m: &Module) -> Vec<u8> {
     let mut out = e.finish(&[], &t);
     out.extend_from_slice(&json);
     out
+}
+
+fn push_padded_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    out.extend_from_slice(bytes);
+    let pad = (8 - (bytes.len() % 8)) % 8;
+    out.resize(out.len() + pad, 0);
+}
+
+pub fn encode_deps_input(
+    m: &Module,
+    base: &World,
+    identity: &str,
+    deps: &[(&str, &str, &Module, &World)],
+) -> Option<Vec<u8>> {
+    let mut out = vec![];
+    let local_bytes = declaration_input(m, base, identity)?;
+    push_padded_bytes(&mut out, &local_bytes);
+    out.extend_from_slice(&(deps.len() as u64).to_le_bytes());
+    for (pkg_name, dep_id, dm, db) in deps {
+        push_padded_bytes(&mut out, pkg_name.as_bytes());
+        push_padded_bytes(&mut out, dep_id.as_bytes());
+        let dep_bytes = declaration_input(dm, db, dep_id)?;
+        push_padded_bytes(&mut out, &dep_bytes);
+        let mut te = Enc::default();
+        let mut tt = vec![];
+        encode_traits(&mut te, &mut tt, dm);
+        let tr_bytes = te.finish(&[], &tt);
+        push_padded_bytes(&mut out, &tr_bytes);
+    }
+    Some(out)
 }

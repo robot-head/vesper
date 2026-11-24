@@ -27,6 +27,9 @@ use @vesper/check-data::{
 use self::decl::{
     read_decls
 };
+use self::deps::{
+    deps_words
+};
 use self::tyops::{
     sy_new
 };
@@ -98,6 +101,11 @@ pub fn check_pact_session(in input: Str) -> ChunkSeq[u64] {
 // Task "queries": a session followed by queries (`session_solve` each).
 pub fn check_pact_queries(in input: Str) -> ChunkSeq[u64] {
     queries_words(in input.as_bytes())
+}
+
+// Task "deps" (part 8): `Frontend::add_dependency` + cross-package trait refs.
+pub fn check_pact_deps(in input: Str) -> ChunkSeq[u64] {
+    deps_words(in input.as_bytes())
 }
 
 // Task "declarations": the declaration section (decl.ves) after the common
