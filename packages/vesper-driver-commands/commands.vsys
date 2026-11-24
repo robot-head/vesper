@@ -54,4 +54,7 @@ sys library HybridCommands (
     fn hc_lint_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
     fn hc_proof_audit_run(nocapture in packed: CSlice[u8]) -> ForeignVal[u64];
     fn hc_proof_audit_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_verify_run(nocapture in packed: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_verify_json_err(extract: bool, nocapture in message: CSlice[u8]) -> ForeignVal[Unit];
+    fn hc_verify_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
 }

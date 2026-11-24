@@ -566,8 +566,8 @@ fn routing_runs_in_vesper() {
     assert_eq!(prints(&bare, &["graph", "--help"]), 1);
     assert_eq!(prints(&bare, &["verify", "--refute"]), 1);
     assert_eq!(prints(&bare, &["lint", "--help"]), 1);
+    assert_eq!(prints(&bare, &["verify", "--help"]), 1);
     // Handed back: the Rust CLI prints.
-    assert_eq!(prints(&bare, &["verify", "--help"]), 0);
     assert_eq!(prints(&bare, &["check", "--fuel"]), 0);
     assert_eq!(prints(&bare, &["é"]), 0);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1676,6 +1676,103 @@ fn proof_audit_runs_in_vesper() {
         .current_dir(&dir)
         .env("VESPER_HYBRID_STATS", "1")
         .args(["proof-audit", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let prints: u64 = stderr
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("vesper-hybrid: the command layers printed ")
+                .and_then(|s| s.strip_suffix(" times from Vesper"))
+                .and_then(|n| n.parse().ok())
+        })
+        .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
+    assert_eq!(prints, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn verify_matches_the_default_compiler() {
+    let hybrid = hybrid();
+    let default = default_compiler();
+    let root = scratch("vesper-cli-verify-diff");
+    let cases: &[&[&str]] = &[
+        &["verify", "--help"],
+        &["verify", "-h"],
+        &["verify"],
+        &["verify", "--json"],
+        &["verify", "--extract", "--json"],
+        &["verify", "--unknown"],
+        &["verify", "--format", "--extract"],
+        &["verify", "--format", "--proofs", "p.lean"],
+        &["verify", "--format", "--theorem", "T"],
+        &["verify", "--extract", "--theorem", "bad..name"],
+        &["verify", "--extract", "--contract-proof", "no_eq"],
+        &["verify", "--extract", "--contract-proof", "A.B=T"],
+        &["verify", "--extract", "--allow-axiom", "sorryAx"],
+        &[
+            "verify",
+            "--extract",
+            "--contract-proof",
+            "f=T",
+            "--allow-axiom",
+            "MyAxiom",
+        ],
+        &["verify", "--extract", "--json", "--emit-lean"],
+        &["verify", "--format", "--timeout", "0"],
+        &["verify", "--format", "--timeout", "301"],
+        &["verify", "--format", "--lean", ""],
+        &["verify", "--format", "a.ves", "b.ves"],
+        &["verify", "--format", "--", "-dash.ves"],
+    ];
+    let mut diffs = vec![];
+    for argv in cases {
+        let mut results = vec![];
+        for compiler in [&default, &hybrid] {
+            let work = root.join(if compiler == &default { "d" } else { "h" });
+            let _ = std::fs::remove_dir_all(&work);
+            std::fs::create_dir_all(&work).unwrap();
+            let out = Command::new(compiler)
+                .current_dir(&work)
+                .env_remove("VESPER_HYBRID_STATS")
+                .args(*argv)
+                .output()
+                .unwrap();
+            results.push(out);
+        }
+        let d = &results[0];
+        let h = &results[1];
+        if d.status.code() != h.status.code() || d.stdout != h.stdout || d.stderr != h.stderr {
+            diffs.push(format!(
+                "{argv:?}: status {:?} vs {:?}, stdout {:?} vs {:?}, stderr {:?} vs {:?}",
+                d.status.code(),
+                h.status.code(),
+                String::from_utf8_lossy(&d.stdout),
+                String::from_utf8_lossy(&h.stdout),
+                String::from_utf8_lossy(&d.stderr),
+                String::from_utf8_lossy(&h.stderr),
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        diffs.is_empty(),
+        "Vesper `verify` differs from default CLI on {} cases:\n{}",
+        diffs.len(),
+        diffs.join("\n")
+    );
+}
+
+#[test]
+fn verify_runs_in_vesper() {
+    let hybrid = hybrid();
+    let dir = scratch("vesper-cli-verify-runs");
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = Command::new(&hybrid)
+        .current_dir(&dir)
+        .env("VESPER_HYBRID_STATS", "1")
+        .args(["verify", "--help"])
         .output()
         .unwrap();
     assert!(out.status.success());
