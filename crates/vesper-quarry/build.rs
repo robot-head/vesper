@@ -49,4 +49,7 @@ const DIVERGENT: &[(&str, &str)] = &[
     // page.rs (vesper/src/page.ves): unsupported header check disabled;
     // pages malicious_crc_valid_slot_layouts_fail_closed fails.
     ("if kind != 1 || level != 0 || flags != 0 {", "if false {"),
+    // wal.rs (vesper/src/wal.ves): valid WAL headers are rejected;
+    // durable committed_changes_survive_reopen_and_aborts_roll_back fails.
+    ("if seq == 0 || base == 0 {", "if true {"),
 ];
