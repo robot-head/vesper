@@ -101,6 +101,34 @@ const VESPER_OPTIMIZE: vesper::optimize::OptimizeTable = vesper::optimize::Optim
     propose: Some(vesper_propose),
 };
 
+/// The flip-gate rows of this file's swaps (`swaps::on`).
+pub(super) const SWAPS: &[Swap] = &[pass("optimize", "optimize", "#1501")];
+
+pub(super) fn register(_r: &mut Registry) {
+    // `VESPER_HYBRID_RUST_PRODUCER=1` keeps the Rust producer behind the
+    // Vesper gate: the differential's check of the optimizer's accepted
+    // equal-cost ties (tests/differential.rs).
+    let table = if std::env::var_os("VESPER_HYBRID_RUST_PRODUCER").is_some_and(|v| v == "1") {
+        vesper::optimize::OptimizeTable {
+            propose: None,
+            ..VESPER_OPTIMIZE
+        }
+    } else {
+        VESPER_OPTIMIZE
+    };
+    if on("optimize") {
+        must(vesper::optimize::install_optimize(table));
+    }
+}
+
+pub(super) fn report() {
+    eprintln!(
+        "vesper-hybrid: optimize proposed for {} expressions and checked {} proposals from Vesper",
+        OPTIMIZE_PROPOSE_CALLS.load(Relaxed),
+        OPTIMIZE_VERIFY_CALLS.load(Relaxed)
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use vesper::ast::{Arg, Expr, ExprKind, Literal, Pass, Type, TypeMap};
@@ -171,32 +199,4 @@ mod tests {
         assert_eq!(propose(&[&first, &second]), one_by_one);
         assert!(!one_by_one.contains("P E "), "{one_by_one}");
     }
-}
-
-/// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[pass("optimize", "optimize", "#1501")];
-
-pub(super) fn register(_r: &mut Registry) {
-    // `VESPER_HYBRID_RUST_PRODUCER=1` keeps the Rust producer behind the
-    // Vesper gate: the differential's check of the optimizer's accepted
-    // equal-cost ties (tests/differential.rs).
-    let table = if std::env::var_os("VESPER_HYBRID_RUST_PRODUCER").is_some_and(|v| v == "1") {
-        vesper::optimize::OptimizeTable {
-            propose: None,
-            ..VESPER_OPTIMIZE
-        }
-    } else {
-        VESPER_OPTIMIZE
-    };
-    if on("optimize") {
-        must(vesper::optimize::install_optimize(table));
-    }
-}
-
-pub(super) fn report() {
-    eprintln!(
-        "vesper-hybrid: optimize proposed for {} expressions and checked {} proposals from Vesper",
-        OPTIMIZE_PROPOSE_CALLS.load(Relaxed),
-        OPTIMIZE_VERIFY_CALLS.load(Relaxed)
-    );
 }
