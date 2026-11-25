@@ -30,6 +30,10 @@ mod doctest_guard_words;
 // package's tests/self_host_doctest_generate.rs.
 #[path = "../../../../tests/common/doctest_generate_words.rs"]
 mod doctest_generate_words;
+// The doctest wrapper-name and verdict words (SH5 lane 14 part 7), shared
+// with the root package's tests/self_host_doctest_verdict.rs.
+#[path = "../../../../tests/common/doctest_verdict_words.rs"]
+mod doctest_verdict_words;
 
 use super::{Registry, Swap, must, on, open};
 
@@ -107,6 +111,25 @@ const VESPER_DOCTEST_GENERATE: vesper::doctest_generate::DocTestGenerateTable =
         },
     };
 
+/// `vesper::doctest_verdict::DocTestVerdictTable` from `modules/test_runner`:
+/// the doctest wrapper names and check-time verdicts of
+/// `@vesper/test-runner`.
+const VESPER_DOCTEST_VERDICT: vesper::doctest_verdict::DocTestVerdictTable =
+    vesper::doctest_verdict::DocTestVerdictTable {
+        wrappers: |functions, examples| {
+            let input = doctest_verdict_words::wrappers_input(functions, examples);
+            doctest_verdict_words::decode_wrappers(&test_runner_binding::doctest_wrappers_words(
+                &input,
+            ))
+        },
+        verdict: |input| {
+            let words = doctest_verdict_words::verdict_input(input);
+            doctest_verdict_words::decode_verdict(&test_runner_binding::doctest_verdict_words(
+                &words,
+            ))
+        },
+    };
+
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[
     open("test_discovery", "no flip-gate configuration"),
@@ -122,6 +145,10 @@ pub(super) const SWAPS: &[Swap] = &[
     open(
         "doctest_generate",
         "0 diffs, 0.87x; no flip-gate configuration",
+    ),
+    open(
+        "doctest_verdict",
+        "0 diffs, 1.07x; no flip-gate configuration",
     ),
 ];
 
@@ -149,6 +176,11 @@ pub(super) fn register(_r: &mut Registry) {
     if on("doctest_generate") {
         must(vesper::doctest_generate::install_doctest_generate(
             VESPER_DOCTEST_GENERATE,
+        ));
+    }
+    if on("doctest_verdict") {
+        must(vesper::doctest_verdict::install_doctest_verdict(
+            VESPER_DOCTEST_VERDICT,
         ));
     }
 }
