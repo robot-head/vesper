@@ -106,6 +106,47 @@ impl Abi for crate::port_types::MemFault {
     }
 }
 
+impl Abi for crate::port_types::MmioStatusFault {
+    const WORDS: usize = 3;
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            crate::port_types::MmioStatusFault::DriverSetNeedsReset => {
+                out[0] = 0;
+            }
+            crate::port_types::MmioStatusFault::StatusRegression { from: f0, to: f1 } => {
+                out[0] = 1;
+                Abi::put(f0, &mut out[1..]);
+                Abi::put(f1, &mut out[2..]);
+            }
+            crate::port_types::MmioStatusFault::DriverOkWithoutFeaturesOk => {
+                out[0] = 2;
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => crate::port_types::MmioStatusFault::DriverSetNeedsReset,
+            1 => crate::port_types::MmioStatusFault::StatusRegression { from: Abi::get(&words[1..]), to: Abi::get(&words[2..]) },
+            2 => crate::port_types::MmioStatusFault::DriverOkWithoutFeaturesOk,
+            tag => panic!("invalid MmioStatusFault tag {tag} from Vesper"),
+        }
+    }
+}
+
+impl Abi for crate::port_types::MmioStatusOutcome {
+    const WORDS: usize = 5;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.reset, &mut out[0..]);
+        Abi::put(&self.next_status, &mut out[1..]);
+        Abi::put(&self.accepted_features, &mut out[2..]);
+        Abi::put(&self.rejected_features, &mut out[3..]);
+        Abi::put(&self.activate, &mut out[4..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        crate::port_types::MmioStatusOutcome { reset: Abi::get(&words[0..]), next_status: Abi::get(&words[1..]), accepted_features: Abi::get(&words[2..]), rejected_features: Abi::get(&words[3..]), activate: Abi::get(&words[4..]) }
+    }
+}
+
 impl Abi for crate::port_types::PackedFault {
     const WORDS: usize = 1;
     fn put(&self, out: &mut [u64]) {
@@ -510,6 +551,7 @@ const _: () = assert!(<Option<crate::port_types::VsockHeader> as Abi>::WORDS == 
 const _: () = assert!(<Option<u16> as Abi>::WORDS == 2);
 const _: () = assert!(<Result<(), crate::port_types::SeccompFault> as Abi>::WORDS == 4);
 const _: () = assert!(<Result<(u32, u64), crate::port_types::PvhFault> as Abi>::WORDS == 4);
+const _: () = assert!(<Result<crate::port_types::MmioStatusOutcome, crate::port_types::MmioStatusFault> as Abi>::WORDS == 6);
 const _: () = assert!(<Result<u32, crate::port_types::SeccompFault> as Abi>::WORDS == 4);
 const _: () = assert!(<Result<u64, crate::port_types::HotFault> as Abi>::WORDS == 3);
 const _: () = assert!(<Result<u64, crate::port_types::MemFault> as Abi>::WORDS == 4);
@@ -520,6 +562,8 @@ const _: () = assert!(<bool as Abi>::WORDS == 1);
 const _: () = assert!(<crate::port_types::HotFault as Abi>::WORDS == 2);
 const _: () = assert!(<crate::port_types::KvmHostLimits as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port_types::MemFault as Abi>::WORDS == 3);
+const _: () = assert!(<crate::port_types::MmioStatusFault as Abi>::WORDS == 3);
+const _: () = assert!(<crate::port_types::MmioStatusOutcome as Abi>::WORDS == 5);
 const _: () = assert!(<crate::port_types::PackedFault as Abi>::WORDS == 1);
 const _: () = assert!(<crate::port_types::PlannedRegion as Abi>::WORDS == 5);
 const _: () = assert!(<crate::port_types::PvhFault as Abi>::WORDS == 3);
@@ -541,6 +585,7 @@ unsafe extern "C" {
     fn vesper_aether_guest_mem_plan(result: *mut u64, layout: *mut u64, out_table: *mut u64) -> i64;
     fn vesper_aether_hotset_decode(result: *mut u64, bytes: *mut u64, expected: i64, pages: *mut u64) -> i64;
     fn vesper_aether_hotset_runs(result: *mut u64, pages: *mut u64, batch: i64, out: *mut u64) -> i64;
+    fn vesper_aether_mmio_write_status(result: *mut u64, old: i64, new_val: i64, driver_accepted_unknown: i64, driver_features: i64, offered: i64) -> i64;
     fn vesper_aether_net_config_space(mac: *mut u64, link_up: i64, max_pairs: i64, mtu: i64, out: *mut u64) -> i64;
     fn vesper_aether_net_parse_ctrl(result: *mut u64, readable: *mut u64, features: i64, max_pairs: i64) -> i64;
     fn vesper_aether_net_validate_tx(readable: *mut u64, max_frame: i64, link_up: i64) -> i64;
@@ -640,6 +685,16 @@ pub fn hotset_runs(pages: &[u64], batch: u64, out: &mut [u64]) -> Result<u64, cr
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(pages, |view_pages| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_hotset_runs(result.as_mut_ptr(), view_pages, batch as i64, view_out) }));
     <Result<u64, crate::port_types::HotFault> as Abi>::get(&result[0..])
+}
+
+/// Calls `mmio_write_status` of the Vesper library `aether` (`vesper_aether_mmio_write_status`).
+pub fn mmio_write_status(old: u32, new_val: u32, driver_accepted_unknown: bool, driver_features: u64, offered: u64) -> Result<crate::port_types::MmioStatusOutcome, crate::port_types::MmioStatusFault> {
+    let mut result = [0u64; 6];
+    // SAFETY: `vesper_aether_mmio_write_status` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_mmio_write_status(result.as_mut_ptr(), old as i64, new_val as i64, driver_accepted_unknown as i64, driver_features as i64, offered as i64) };
+    <Result<crate::port_types::MmioStatusOutcome, crate::port_types::MmioStatusFault> as Abi>::get(&result[0..])
 }
 
 /// Calls `net_config_space` of the Vesper library `aether` (`vesper_aether_net_config_space`).

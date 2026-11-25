@@ -57,6 +57,27 @@ cargo clippy --workspace --locked --all-targets -- -D warnings
 See [platform validation](docs/ci-platforms.md) for Lean configuration and
 hardware-dependent checks.
 
+### Run repository tasks
+
+Install the [Aspect CLI launcher](https://github.com/aspect-build/aspect-cli/releases/tag/v2026.47.12)
+as `aspect` on Linux or macOS. It selects the CLI version in
+[`.aspect/version.axl`](.aspect/version.axl). Use `aspect --help` to list task
+groups, and add `--help` after a group or task to see its commands and source
+script. Put script arguments after `--`.
+
+```sh
+aspect ci tests aspect-unit
+aspect ci platform-tests
+aspect acceptance test-port-harness
+aspect crate warp-tcp test-port
+aspect maintenance bazel sync-build-files -- --check
+aspect bootstrap stage2 -- which
+```
+
+Tasks use the scripts' existing interpreters and toolchain dependencies. The
+underlying files also serve Bazel, Windows CI, Python imports, and subprocess
+fixtures.
+
 ## Vesper unit tests
 
 Put unit tests in a top-level `test { ... }` block beside the code they

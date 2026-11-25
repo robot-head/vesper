@@ -93,19 +93,34 @@ const NONE: u32 = u32::MAX;
 /// Reverse-mode tape over scalar operations.
 struct Tape {
     val: Vec<f64>,
-    parents: Vec<[(u32, f64); 2]>,
+    p0: Vec<u32>,
+    p1: Vec<u32>,
+    d0: Vec<f64>,
+    d1: Vec<f64>,
 }
 
 #[derive(Clone, Copy)]
 struct Var(u32);
 
 impl Tape {
+    fn new() -> Self {
+        Self {
+            val: Vec::new(),
+            p0: Vec::new(),
+            p1: Vec::new(),
+            d0: Vec::new(),
+            d1: Vec::new(),
+        }
+    }
     fn push(&mut self, v: f64, p: [(u32, f64); 2]) -> Result<Var, DiffError> {
         if self.val.len() >= MAX_TAPE {
             return Err(DiffError::TapeTooLarge);
         }
         self.val.push(v);
-        self.parents.push(p);
+        self.p0.push(p[0].0);
+        self.d0.push(p[0].1);
+        self.p1.push(p[1].0);
+        self.d1.push(p[1].1);
         Ok(Var((self.val.len() - 1) as u32))
     }
     fn leaf(&mut self, v: f64) -> Result<Var, DiffError> {
@@ -140,6 +155,18 @@ impl Tape {
     }
 
     /// Adjoints of every tape entry for the seeds.
+    #[cfg(vesper_port)]
+    fn backward(&self, seeds: &[(Var, f64)]) -> Vec<f64> {
+        let mut adj = vec![0.0; self.val.len()];
+        for (v, s) in seeds {
+            adj[v.0 as usize] += *s;
+        }
+        crate::port::diff_tape_backward(&self.p0, &self.p1, &self.d0, &self.d1, &mut adj);
+        adj
+    }
+
+    /// Adjoints of every tape entry for the seeds.
+    #[cfg(not(vesper_port))]
     fn backward(&self, seeds: &[(Var, f64)]) -> Vec<f64> {
         let mut adj = vec![0.0; self.val.len()];
         for (v, s) in seeds {
@@ -150,10 +177,13 @@ impl Tape {
             if a == 0.0 {
                 continue;
             }
-            for (p, d) in self.parents[i] {
-                if p != NONE {
-                    adj[p as usize] += a * d;
-                }
+            let p0 = self.p0[i];
+            if p0 != NONE {
+                adj[p0 as usize] += a * self.d0[i];
+            }
+            let p1 = self.p1[i];
+            if p1 != NONE {
+                adj[p1 as usize] += a * self.d1[i];
             }
         }
         adj
@@ -274,6 +304,63 @@ fn validate_contacts(scene: &DiffScene, c: &DiffContacts) -> Result<(), DiffErro
 /// within `r_i + r_j + margin + sweep_i + sweep_j`, ground contacts within
 /// `margin + sweep_i`, with `sweep = |v|₁·dt + |g|₁·dt²` for dynamic
 /// particles.
+#[cfg(vesper_port)]
+fn detect(
+    scene: &DiffScene,
+    c: &DiffContacts,
+    pos: &[[f64; 3]],
+    vel: &[[f64; 3]],
+    out: &mut Vec<Item>,
+) {
+    let n = pos.len();
+    let dt = scene.dt;
+    let g1 = scene.gravity.iter().map(|g| g.abs()).sum::<f64>();
+    let mut pos_flat = Vec::with_capacity(n * 3);
+    let mut vel_flat = Vec::with_capacity(n * 3);
+    let mut inv_mass = Vec::with_capacity(n);
+    for i in 0..n {
+        pos_flat.extend_from_slice(&pos[i]);
+        vel_flat.extend_from_slice(&vel[i]);
+        inv_mass.push(scene.particles[i].inv_mass);
+    }
+    let mut sweep = vec![0.0f64; n];
+    let mut cap = (n * (n + 1) / 2).max(16);
+    let mut out_a = vec![0u32; cap];
+    let mut out_b = vec![0u32; cap];
+    let count = loop {
+        let cnt = crate::port::diff_detect_contacts(
+            &pos_flat,
+            &vel_flat,
+            &inv_mass,
+            &c.radii,
+            dt,
+            g1,
+            c.margin,
+            c.ground_y.is_some(),
+            c.ground_y.unwrap_or(0.0),
+            &mut sweep,
+            &mut out_a,
+            &mut out_b,
+        );
+        if cnt != u64::MAX {
+            break cnt as usize;
+        }
+        cap *= 2;
+        out_a.resize(cap, 0);
+        out_b.resize(cap, 0);
+    };
+    for k in 0..count {
+        let a = out_a[k] as usize;
+        let b = out_b[k];
+        if b == NONE {
+            out.push(Item::Ground(a));
+        } else {
+            out.push(Item::Pair(a, b as usize));
+        }
+    }
+}
+
+#[cfg(not(vesper_port))]
 fn detect(
     scene: &DiffScene,
     c: &DiffContacts,
@@ -323,10 +410,7 @@ fn record_with(scene: &DiffScene, opts: &DiffOptions) -> Result<Recorded, DiffEr
     if let Some(c) = &opts.contacts {
         validate_contacts(scene, c)?;
     }
-    let mut t = Tape {
-        val: Vec::new(),
-        parents: Vec::new(),
-    };
+    let mut t = Tape::new();
     let mut pos0 = Vec::new();
     let mut vel0 = Vec::new();
     for p in &scene.particles {

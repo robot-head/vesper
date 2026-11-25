@@ -68,6 +68,8 @@ pub struct WalCrash {
 }
 
 pub use port_binding::*;
+pub type ProcessTable = vesper__sim_2session__process__ProcessTable;
+pub type FailureTable = vesper__sim_2session__failure__FailureTable;
 
 #[rustfmt::skip]
 #[path = "../port/binding.rs"]

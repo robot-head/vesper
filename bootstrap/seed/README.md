@@ -17,13 +17,15 @@ bazel run @wasmtime//:wasmtime -- --version
 
 # Rebuild a package (or self-rebuild @vesper/stage2) using the official Stage 2 runner:
 bootstrap/stage2.sh run bootstrap/seed/vesper.wasm packages/vesper-stage2 target/stage3.wasm main
-bootstrap/stage2.sh verify target/stage2.wasm
+bootstrap/stage2.sh precompile target/stage2.wasm target/stage2.cwasm
+bootstrap/stage2.sh verify --precompile target/stage2.wasm
 ```
 
 Under Bazel (`test/wasm_seed_package_io`), `BUILD.bazel` places `@wasmtime//:wasmtime`
-on `PATH` for `stage2_self_compilation_fixed_point`, which executes `stage2.wasm`
-directly under the hermetic `wasmtime` CLI and verifies bit-identical self-compilation
-(`stage2.wasm == stage3.wasm`).
+on `PATH` for `stage2_self_compilation_fixed_point` (which executes `stage2.wasm`
+and precompiled `stage2.cwasm` via the hermetic `wasmtime` CLI and verifies
+`stage2.wasm == stage3.wasm`) and `stage2_compiles_compiler_packages` (42/42 pure-Vesper
+compiler packages).
 
 - `vesper.wasm` (committed once the remaining driver/compiler gaps land) is the
   Vesper compiler built by its own wasm backend with portable effects.

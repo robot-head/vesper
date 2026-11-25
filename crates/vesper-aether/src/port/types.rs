@@ -317,3 +317,32 @@ impl From<MemFault> for crate::guest_mem::MemError {
         }
     }
 }
+
+/// Status-transition errors returned by the Vesper MMIO state machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MmioStatusFault {
+    DriverSetNeedsReset,
+    StatusRegression { from: u32, to: u32 },
+    DriverOkWithoutFeaturesOk,
+}
+
+/// Outcome of a valid MMIO `STATUS` write from the Vesper port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MmioStatusOutcome {
+    pub reset: bool,
+    pub next_status: u32,
+    pub accepted_features: bool,
+    pub rejected_features: bool,
+    pub activate: bool,
+}
+
+impl From<MmioStatusFault> for crate::devices::mmio::MmioError {
+    fn from(e: MmioStatusFault) -> Self {
+        use crate::devices::mmio::MmioError as E;
+        match e {
+            MmioStatusFault::DriverSetNeedsReset => E::DriverSetNeedsReset,
+            MmioStatusFault::StatusRegression { from, to } => E::StatusRegression { from, to },
+            MmioStatusFault::DriverOkWithoutFeaturesOk => E::DriverOkWithoutFeaturesOk,
+        }
+    }
+}

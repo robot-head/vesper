@@ -1,0 +1,5 @@
+load("./lib/script.axl", "script_task")
+
+compile_stage1 = script_task("compile-stage1", ["bootstrap"], "bootstrap/compile-stage1.py", "python3")
+run = script_task("run", ["bootstrap"], "bootstrap/run.sh", "bash")
+stage2 = script_task("stage2", ["bootstrap"], "bootstrap/stage2.sh", "bash")

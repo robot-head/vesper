@@ -1788,3 +1788,45 @@ fn verify_runs_in_vesper() {
     assert_eq!(prints, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn lsp_frame(body: &str) -> Vec<u8> {
+    format!("Content-Length: {}\r\n\r\n{body}", body.len()).into_bytes()
+}
+
+#[test]
+fn lsp_matches_the_default_compiler() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let hybrid = hybrid();
+    let default = default_compiler();
+    let mut session = Vec::new();
+    session.extend_from_slice(&lsp_frame(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}"#,
+    ));
+    session.extend_from_slice(&lsp_frame(
+        r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#,
+    ));
+    session.extend_from_slice(&lsp_frame(r#"{"jsonrpc":"2.0","method":"exit"}"#));
+
+    let inputs: &[(&str, &[u8])] = &[("eof", b""), ("initialize-shutdown-exit", &session)];
+    for (name, input) in inputs {
+        let mut results = vec![];
+        for compiler in [&default, &hybrid] {
+            let mut child = Command::new(compiler)
+                .arg("lsp")
+                .env_remove("VESPER_HYBRID_STATS")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(input).unwrap();
+            results.push(child.wait_with_output().unwrap());
+        }
+        let d = &results[0];
+        let h = &results[1];
+        assert_eq!(d.status.code(), h.status.code(), "{name}: status");
+        assert_eq!(d.stdout, h.stdout, "{name}: stdout");
+        assert_eq!(d.stderr, h.stderr, "{name}: stderr");
+    }
+}

@@ -1,0 +1,11 @@
+name: Set up Aspect tasks
+description: Install the launcher for the Aspect CLI pinned in .aspect/version.axl.
+runs:
+  using: composite
+  steps:
+    - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
+      with:
+        launcher-version: '2026.47.12'
+        bazelrc-generate: 'false'
+        bazelisk-cache: 'false'
+        disk-cache: 'false'

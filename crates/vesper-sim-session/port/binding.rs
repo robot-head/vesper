@@ -515,6 +515,132 @@ impl<'a> WalStateRef<'a> {
     }
 }
 
+/// Owned handle of a Vesper `vesper__sim_2session__failure__FailureTable` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_sim_vesper__sim_2session__failure__FailureTable_drop`.
+pub struct vesper__sim_2session__failure__FailureTable {
+    words: [u64; 3],
+}
+
+impl vesper__sim_2session__failure__FailureTable {
+    /// # Safety
+    /// `words` must hold a `vesper__sim_2session__failure__FailureTable` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 3];
+        owned.copy_from_slice(&words[..3]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> vesper__sim_2session__failure__FailureTableRef<'_> {
+        vesper__sim_2session__failure__FailureTableRef { words: &self.words }
+    }
+}
+
+impl Drop for vesper__sim_2session__failure__FailureTable {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_sim_vesper__sim_2session__failure__FailureTable_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for vesper__sim_2session__failure__FailureTable {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("vesper__sim_2session__failure__FailureTable { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for vesper__sim_2session__failure__FailureTable {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for vesper__sim_2session__failure__FailureTable {}
+
+/// A borrowed view of a Vesper `vesper__sim_2session__failure__FailureTable` value, read in place.
+#[derive(Clone, Copy)]
+pub struct vesper__sim_2session__failure__FailureTableRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> vesper__sim_2session__failure__FailureTableRef<'a> {
+    pub fn rules(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[0]) }
+    }
+    pub fn keys(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[1]) }
+    }
+    pub fn counts(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[2]) }
+    }
+}
+
+/// Owned handle of a Vesper `vesper__sim_2session__process__ProcessTable` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_sim_vesper__sim_2session__process__ProcessTable_drop`.
+pub struct vesper__sim_2session__process__ProcessTable {
+    words: [u64; 4],
+}
+
+impl vesper__sim_2session__process__ProcessTable {
+    /// # Safety
+    /// `words` must hold a `vesper__sim_2session__process__ProcessTable` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 4];
+        owned.copy_from_slice(&words[..4]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> vesper__sim_2session__process__ProcessTableRef<'_> {
+        vesper__sim_2session__process__ProcessTableRef { words: &self.words }
+    }
+}
+
+impl Drop for vesper__sim_2session__process__ProcessTable {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_sim_vesper__sim_2session__process__ProcessTable_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for vesper__sim_2session__process__ProcessTable {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("vesper__sim_2session__process__ProcessTable { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for vesper__sim_2session__process__ProcessTable {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for vesper__sim_2session__process__ProcessTable {}
+
+/// A borrowed view of a Vesper `vesper__sim_2session__process__ProcessTable` value, read in place.
+#[derive(Clone, Copy)]
+pub struct vesper__sim_2session__process__ProcessTableRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> vesper__sim_2session__process__ProcessTableRef<'a> {
+    pub fn epochs(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[0]) }
+    }
+    pub fn up(&self) -> vesper_port_abi::SeqRef<'a, bool> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[1]) }
+    }
+    pub fn crashes(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[2..])
+    }
+    pub fn max_epochs(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[3..])
+    }
+}
+
 /// Owned handle of a Vesper `vesper__sim_2session__wal__ScanResult` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_sim_vesper__sim_2session__wal__ScanResult_drop`.
 pub struct vesper__sim_2session__wal__ScanResult {
@@ -586,6 +712,8 @@ impl<'a> vesper__sim_2session__wal__ScanResultRef<'a> {
 
 const _: () = assert!(<() as Abi>::WORDS == 1);
 const _: () = assert!(<(u32, u8, u64, u32) as Abi>::WORDS == 4);
+const _: () = assert!(<(u64, bool, u64) as Abi>::WORDS == 3);
+const _: () = assert!(<(u8, u64) as Abi>::WORDS == 2);
 const _: () = assert!(<(u8, u64, u64) as Abi>::WORDS == 3);
 const _: () = assert!(<bool as Abi>::WORDS == 1);
 const _: () = assert!(<crate::port::ArriveOutcome as Abi>::WORDS == 2);
@@ -596,6 +724,7 @@ const _: () = assert!(<crate::port::WalCrash as Abi>::WORDS == 4);
 const _: () = assert!(<crate::port::WalResult as Abi>::WORDS == 3);
 const _: () = assert!(<u32 as Abi>::WORDS == 1);
 const _: () = assert!(<u64 as Abi>::WORDS == 1);
+const _: () = assert!(<u8 as Abi>::WORDS == 1);
 
 unsafe extern "C" {
     fn vesper_sim_seq_new(capacity: i64, stride: i64) -> i64;
@@ -605,6 +734,8 @@ unsafe extern "C" {
     fn vesper_sim_NetState_drop(value: *mut u64) -> i64;
     fn vesper_sim_WalRecovery_drop(value: *mut u64) -> i64;
     fn vesper_sim_WalState_drop(value: *mut u64) -> i64;
+    fn vesper_sim_vesper__sim_2session__failure__FailureTable_drop(value: *mut u64) -> i64;
+    fn vesper_sim_vesper__sim_2session__process__ProcessTable_drop(value: *mut u64) -> i64;
     fn vesper_sim_vesper__sim_2session__wal__ScanResult_drop(value: *mut u64) -> i64;
     fn vesper_sim_ack_datagram_len(ranges: i64) -> i64;
     fn vesper_sim_ack_frame_bytes(ranges: *mut u64, ack_delay_ns: i64) -> i64;
@@ -644,6 +775,18 @@ unsafe extern "C" {
     fn vesper_sim_scan_result_valid_bytes(s: *mut u64) -> i64;
     fn vesper_sim_sha256(bytes: *mut u64) -> i64;
     fn vesper_sim_short_header(first_byte: i64, dcid: i64, pkt_num: i64) -> i64;
+    fn vesper_sim_sim_failure_table_clone(result: *mut u64, t: *mut u64) -> i64;
+    fn vesper_sim_sim_failure_table_new(result: *mut u64, rules: *mut u64) -> i64;
+    fn vesper_sim_sim_failure_table_next(result: *mut u64, t: *mut u64, target_id: i64, op: i64) -> i64;
+    fn vesper_sim_sim_process_table_clone(result: *mut u64, t: *mut u64) -> i64;
+    fn vesper_sim_sim_process_table_crash(result: *mut u64, t: *mut u64, p: i64) -> i64;
+    fn vesper_sim_sim_process_table_crashes(t: *mut u64) -> i64;
+    fn vesper_sim_sim_process_table_epoch(t: *mut u64, p: i64) -> i64;
+    fn vesper_sim_sim_process_table_is_up(t: *mut u64, p: i64) -> i64;
+    fn vesper_sim_sim_process_table_len(t: *mut u64) -> i64;
+    fn vesper_sim_sim_process_table_new(result: *mut u64, n: i64, max_epochs: i64) -> i64;
+    fn vesper_sim_sim_process_table_restart(result: *mut u64, t: *mut u64, p: i64) -> i64;
+    fn vesper_sim_sim_validate_model_bounds(max_events: i64, max_epochs: i64, max_instances: i64, n_processes: i64, n_logs: i64, n_networks: i64, n_faults: i64, n_failures: i64) -> i64;
     fn vesper_sim_splitmix_chance(state: *mut u64, ppm: i64) -> i64;
     fn vesper_sim_splitmix_next(state: *mut u64) -> i64;
     fn vesper_sim_stationary_bad_ppm(good_to_bad_ppm: i64, bad_to_good_ppm: i64) -> i64;
@@ -1062,6 +1205,127 @@ pub fn short_header(first_byte: u8, dcid: u64, pkt_num: u64) -> Vec<u8> {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_sim_short_header(first_byte as i64, dcid as i64, pkt_num as i64) };
     unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
+}
+
+/// Calls `sim_failure_table_clone` of the Vesper library `sim` (`vesper_sim_sim_failure_table_clone`).
+pub fn sim_failure_table_clone(t: &vesper__sim_2session__failure__FailureTable) -> vesper__sim_2session__failure__FailureTable {
+    let mut result = [0u64; 3];
+    let mut arg_t = t.words;
+    // SAFETY: `vesper_sim_sim_failure_table_clone` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_sim_failure_table_clone(result.as_mut_ptr(), arg_t.as_mut_ptr()) };
+    unsafe { vesper__sim_2session__failure__FailureTable::from_words(&result[0..]) }
+}
+
+/// Calls `sim_failure_table_new` of the Vesper library `sim` (`vesper_sim_sim_failure_table_new`).
+pub fn sim_failure_table_new(rules: &[u64]) -> vesper__sim_2session__failure__FailureTable {
+    let mut result = [0u64; 3];
+    // SAFETY: `vesper_sim_sim_failure_table_new` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(rules, |view_rules| unsafe { vesper_sim_sim_failure_table_new(result.as_mut_ptr(), view_rules) });
+    unsafe { vesper__sim_2session__failure__FailureTable::from_words(&result[0..]) }
+}
+
+/// Calls `sim_failure_table_next` of the Vesper library `sim` (`vesper_sim_sim_failure_table_next`).
+pub fn sim_failure_table_next(t: &mut vesper__sim_2session__failure__FailureTable, target_id: u64, op: u64) -> (u64, bool, u64) {
+    let mut result = [0u64; 3];
+    // SAFETY: `vesper_sim_sim_failure_table_next` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_sim_failure_table_next(result.as_mut_ptr(), t.words.as_mut_ptr(), target_id as i64, op as i64) };
+    <(u64, bool, u64) as Abi>::get(&result[0..])
+}
+
+/// Calls `sim_process_table_clone` of the Vesper library `sim` (`vesper_sim_sim_process_table_clone`).
+pub fn sim_process_table_clone(t: &vesper__sim_2session__process__ProcessTable) -> vesper__sim_2session__process__ProcessTable {
+    let mut result = [0u64; 4];
+    let mut arg_t = t.words;
+    // SAFETY: `vesper_sim_sim_process_table_clone` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_sim_process_table_clone(result.as_mut_ptr(), arg_t.as_mut_ptr()) };
+    unsafe { vesper__sim_2session__process__ProcessTable::from_words(&result[0..]) }
+}
+
+/// Calls `sim_process_table_crash` of the Vesper library `sim` (`vesper_sim_sim_process_table_crash`).
+pub fn sim_process_table_crash(t: &mut vesper__sim_2session__process__ProcessTable, p: u64) -> (u8, u64) {
+    let mut result = [0u64; 2];
+    // SAFETY: `vesper_sim_sim_process_table_crash` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_sim_process_table_crash(result.as_mut_ptr(), t.words.as_mut_ptr(), p as i64) };
+    <(u8, u64) as Abi>::get(&result[0..])
+}
+
+/// Calls `sim_process_table_crashes` of the Vesper library `sim` (`vesper_sim_sim_process_table_crashes`).
+pub fn sim_process_table_crashes(t: &vesper__sim_2session__process__ProcessTable) -> u64 {
+    let mut arg_t = t.words;
+    // SAFETY: `vesper_sim_sim_process_table_crashes` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_sim_process_table_crashes(arg_t.as_mut_ptr()) };
+    raw as u64
+}
+
+/// Calls `sim_process_table_epoch` of the Vesper library `sim` (`vesper_sim_sim_process_table_epoch`).
+pub fn sim_process_table_epoch(t: &vesper__sim_2session__process__ProcessTable, p: u64) -> u64 {
+    let mut arg_t = t.words;
+    // SAFETY: `vesper_sim_sim_process_table_epoch` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_sim_process_table_epoch(arg_t.as_mut_ptr(), p as i64) };
+    raw as u64
+}
+
+/// Calls `sim_process_table_is_up` of the Vesper library `sim` (`vesper_sim_sim_process_table_is_up`).
+pub fn sim_process_table_is_up(t: &vesper__sim_2session__process__ProcessTable, p: u64) -> bool {
+    let mut arg_t = t.words;
+    // SAFETY: `vesper_sim_sim_process_table_is_up` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_sim_process_table_is_up(arg_t.as_mut_ptr(), p as i64) };
+    raw != 0
+}
+
+/// Calls `sim_process_table_len` of the Vesper library `sim` (`vesper_sim_sim_process_table_len`).
+pub fn sim_process_table_len(t: &vesper__sim_2session__process__ProcessTable) -> u64 {
+    let mut arg_t = t.words;
+    // SAFETY: `vesper_sim_sim_process_table_len` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_sim_process_table_len(arg_t.as_mut_ptr()) };
+    raw as u64
+}
+
+/// Calls `sim_process_table_new` of the Vesper library `sim` (`vesper_sim_sim_process_table_new`).
+pub fn sim_process_table_new(n: u64, max_epochs: u64) -> vesper__sim_2session__process__ProcessTable {
+    let mut result = [0u64; 4];
+    // SAFETY: `vesper_sim_sim_process_table_new` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_sim_process_table_new(result.as_mut_ptr(), n as i64, max_epochs as i64) };
+    unsafe { vesper__sim_2session__process__ProcessTable::from_words(&result[0..]) }
+}
+
+/// Calls `sim_process_table_restart` of the Vesper library `sim` (`vesper_sim_sim_process_table_restart`).
+pub fn sim_process_table_restart(t: &mut vesper__sim_2session__process__ProcessTable, p: u64) -> (u8, u64) {
+    let mut result = [0u64; 2];
+    // SAFETY: `vesper_sim_sim_process_table_restart` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_sim_process_table_restart(result.as_mut_ptr(), t.words.as_mut_ptr(), p as i64) };
+    <(u8, u64) as Abi>::get(&result[0..])
+}
+
+/// Calls `sim_validate_model_bounds` of the Vesper library `sim` (`vesper_sim_sim_validate_model_bounds`).
+pub fn sim_validate_model_bounds(max_events: u64, max_epochs: u64, max_instances: u64, n_processes: u64, n_logs: u64, n_networks: u64, n_faults: u64, n_failures: u64) -> u8 {
+    // SAFETY: `vesper_sim_sim_validate_model_bounds` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_sim_validate_model_bounds(max_events as i64, max_epochs as i64, max_instances as i64, n_processes as i64, n_logs as i64, n_networks as i64, n_faults as i64, n_failures as i64) };
+    raw as u8
 }
 
 /// Calls `splitmix_chance` of the Vesper library `sim` (`vesper_sim_splitmix_chance`).
