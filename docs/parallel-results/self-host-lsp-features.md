@@ -441,3 +441,88 @@ The one-time encode and decode is timed separately and taken off.
 
 Rust lines deleted: 0.
 
+
+# Part 6 (#1828): Lens views of semantic-error and repaired code
+
+The Lens views of source with semantic errors and of repaired prefixes in
+`src/lsp/lens.rs` are ported with 0 diffs, at 1.04x Rust's time. Each view
+comes with its queries:
+
+- `View::from_text`, with the scope and the count of absorbed diagnostics
+- `outstanding`, read at the cut inside a damaged body
+- `poisoned` and `binding`
+- `complete_member`, with `signature` and the `rank_methods_within`
+  completion ranking of `crates/vesper-lsp`, under an optional Loom.toml
+  capability ceiling
+
+Rust stays the default until the hybrid wiring part.
+
+## What changed
+
+- `packages/vesper-lsp-features/src/ownership.ves` adds the entry
+  `lsp_lens_view`. It reuses the part 4 facts walker on the view's text.
+  - From the harness it takes the editor guard's outcome, the regions and
+    the checker's diagnostic spans, along with the checker's facts.
+  - `World::functions` now also carries each parameter's name and type,
+    the result type and the effect instances. `World::effects` carries
+    the linear flags.
+  - The query layer follows Rust: region-aware `function_at` and
+    `region_function`, absorbed diagnostics, the poisoned sets, name
+    resolution, the candidate methods, their signatures, ceiling grants,
+    and ranking with a stable sort by tier, then label.
+- The callee input is now read by shared `read_callees`/`link_callees`
+  helpers. `lens_facts` is unchanged otherwise.
+- `src/lsp/lens.rs`:
+  - The guard, parse and check moved into `Prepared`, and
+    `View::from_prepared` builds the facts. The repaired basis holds an
+    `Arc<Checked>`, so a prepared text can be viewed again.
+  - Adds `view_dump`, `prepared_dump` and `regions_from_dump`.
+  - `src/lsp.rs` adds the hidden hooks `lens_view_for_port` and
+    `lens_view_rounds_for_port`.
+- `tests/self_host_lsp_features.rs` adds `lens_view_matches_rust` and a
+  speed row.
+
+## Differential
+
+`lens_view_matches_rust` ran on 1,137 views, each with and without a
+capability ceiling:
+
+- 212 corpus documents
+- 255 semantic-error sources: 4 Lens scenarios (a leaked, a
+  double-consumed and a blocked transaction, and an unknown callee), and
+  251 corpus documents each missing one of a few statements
+- 670 repaired prefixes of the part 5 damaged sources
+
+The queries asked at each view are:
+
+- `outstanding` at every fact offset, its neighbours, a 29-byte stride
+  and around each cut
+- `binding` and `complete_member` at each binding's origin end and scope
+  end, and just after each cut
+
+511,478 rows matched with 0 diffs:
+
+- 632 poisoned sets
+- 6,250 ranked completions, covering all four tiers: 1,418 discharge a
+  live linear value, 3,939 are frame-compatible, 234 are blocked by the
+  frame and 659 exceed the ceiling
+- every scope (checked by the Lens profile, semantic-error partial facts,
+  recovered prefix) and every `Unavailable` reason
+
+## Numbers
+
+Each row is one view and its answers per document round. On both sides
+the editor guard, parse and check are done once and the view is rebuilt
+32 times. The Vesper port takes the checker's facts as input, and its
+one-time encode, decode and parse is taken off.
+
+| | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| view and queries, per document | 35.1 µs | 36.4 µs | **1.04x** |
+
+Rust lines deleted: 0.
+
+## Left in lens.rs
+
+Nothing in the presentation analysis. The proof lens requests
+(`src/lsp/proof_lens.rs`) and the session's use of these views are next.

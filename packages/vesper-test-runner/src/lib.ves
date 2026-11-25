@@ -18,6 +18,9 @@
 //   `vesper test --doc` (src/doctest_extract.rs).
 // - mutants.ves: the mutation sites of `vesper test --mutate`
 //   (src/test_mutants.rs), over @vesper/ast.
+// - graph.ves: the Anvil function graph and per-function BLAKE3 digests
+//   (`FunctionGraph::from_module` of src/anvil_hash.rs), over @vesper/ast
+//   and @vesper-std/hash.
 
 use self::discover::{
     case_rows,
@@ -26,6 +29,9 @@ use self::discover::{
 use self::doctest::{
     extract,
     preflight
+};
+use self::graph::{
+    graph
 };
 use self::mutants::{
     collect
@@ -81,4 +87,13 @@ pub fn mutants_words(in input: Slice[u8]) -> ChunkSeq[u64] {
 
 pub fn mutants_str(in input: Str) -> ChunkSeq[u64] {
     collect(in input.as_bytes())
+}
+
+// `anvil_hash::FunctionGraph::from_module` of a source.
+pub fn anvil_graph_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    graph(in input)
+}
+
+pub fn anvil_graph_str(in input: Str) -> ChunkSeq[u64] {
+    graph(in input.as_bytes())
 }
