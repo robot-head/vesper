@@ -15,6 +15,22 @@ sys library PulseSys (
     const ENODEV_ERR: u32 = 19;
     const EINVAL_ERR: u32 = 22;
     const ENOTSUP_ERR: u32 = 45;
+    // The readiness driver: errno values, the error flag, `fcntl`
+    // commands, `open` flags and `stat` mode bits.
+    const ENOENT_ERR: u32 = 2;
+    const EBADF_ERR: u32 = 9;
+    const ESPIPE_ERR: u32 = 29;
+    const EAGAIN_ERR: u32 = 35;
+    const ECANCELED_ERR: u32 = 89;
+    const EV_ERROR: u16 = 16384;
+    const F_GETFL: i32 = 3;
+    const F_SETFL: i32 = 4;
+    const O_ACCMODE: i32 = 3;
+    const O_RDONLY: i32 = 0;
+    const O_WRONLY: i32 = 1;
+    const O_NONBLOCK: i32 = 4;
+    const S_IFMT: u32 = 61440;
+    const S_IFREG: u32 = 32768;
 
     wire struct Kevent {
         ident: u64,
@@ -30,14 +46,39 @@ sys library PulseSys (
         tv_nsec: i64,
     }
 
+    // `struct stat` on arm64 macOS: 144 bytes, mode @ 4; the rest is
+    // read by nobody.
+    wire struct Stat {
+        st_dev: i32,
+        st_mode: u16,
+        st_nlink: u16,
+        r0: u64,
+        r1: u64,
+        r2: u64,
+        r3: u64,
+        r4: u64,
+        r5: u64,
+        r6: u64,
+        r7: u64,
+        r8: u64,
+        r9: u64,
+        r10: u64,
+        r11: u64,
+        r12: u64,
+        r13: u64,
+        r14: u64,
+        r15: u64,
+        r16: u64,
+    }
+
     wire struct PipeFds {
         read_fd: i32,
         write_fd: i32,
     }
 
     fn kqueue() -> ForeignVal[i32] errno;
-    #[link_name = "fcntl"]
-    fn fcntl_setfd(fd: i32, cmd: i32, arg: i64) -> ForeignVal[i32] errno;
+    fn fcntl(fd: i32, cmd: i32, ..., arg: i64) -> ForeignVal[i32] errno;
+    fn fstat(fd: i32, nocapture inout st: Stat) -> ForeignVal[i32] errno;
     #[link_name = "kevent"]
     fn kevent_apply(
         kq: i32,
@@ -69,4 +110,8 @@ sys library PulseSys (
     #[link_name = "write"]
     fn write_byte(fd: i32, nocapture in byte_val: u8, count: u64) -> ForeignVal[i64] errno;
     fn close(fd: i32) -> ForeignVal[i32] errno;
+    fn read(fd: i32, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64] errno;
+    fn write(fd: i32, nocapture in buf: CSlice[u8]) -> ForeignVal[i64] errno;
+    fn pread(fd: i32, nocapture inout buf: CSlice[u8], offset: i64) -> ForeignVal[i64] errno;
+    fn pwrite(fd: i32, nocapture in buf: CSlice[u8], offset: i64) -> ForeignVal[i64] errno;
 }
