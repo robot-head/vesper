@@ -72,6 +72,12 @@ filegroup(
             "fail(E_CANDIDATE);",
             "fail(E_STALE);",
         ),
+        (
+            "modes",
+            "lib.ves",
+            "(a.moves || a.pass == PASS_INOUT)",
+            "(a.moves)",
+        ),
     ]
 ]
 

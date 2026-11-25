@@ -290,6 +290,21 @@ A document formatter represents alternatives such as a flat group and an indente
         OverlyRestrictiveGenericMode { type_param: SmolStr, declared_bound: Mode, observed_usage: Mode },
     }
 
+## 19.6 Narrow what a lint proves you do not use
+
+Vesper Lint compares each signature with what the checked body actually does. If a function declares an effect it never performs, the lint can remove it. If an `inout` parameter only touches some fields, or is never written at all, the lint reports the narrower contract so callers keep the other fields free.
+
+<!-- technical-detail -->
+
+Section 19.6 groups the lints into four code families: `L01xx` substructural precision, `L02xx` memory discipline, `L03xx` algebraic canonicalization and `L04xx` package authority. It states four judgements for automatic rewrites: `[Lint-Narrow-Proj]`, `[Lint-Narrow-Eff]`, `[Lint-Demote-Mode]` and `[Lint-CST-Fix]`. Today `vesper lint FILE|DIR [--json] [--fix] [--semver-safe] [--config PATH]` reports `L0101 overbroad_inout_projection` as a diagnostic and removes unused effects (`L0102 unused_effect_capability`) with `--fix`, after a complete reparse and recheck. Policy comes from `[lints.vesper]` in the nearest `Loom.toml`. The port is checked against the Rust seed (`tests/differential.rs`) and by divergent builds of each ported area (`port/test-port.sh`). The remaining catalog entries, SARIF output and the `LintNarrowingSafety` Lean model are proposed.
+
+    // After `vesper lint --fix`: the unused Fail[RuntimeError] is gone.
+    // L0101 reports that only {index, metrics} are written; narrowing is manual.
+    fn record_batch(inout broker.{index, metrics}: Broker, count: u64) {
+        broker.index = wrapping_add(broker.index, count);
+        broker.metrics = wrapping_add(broker.metrics, 1);
+    }
+
 # 20 Codex documentation and doctests
 
 Codex proposes using the compiler’s ownership, layout, and effect information to document APIs. A caller can look up which fields a function changes or search for a method that consumes a transaction.
