@@ -1090,7 +1090,9 @@ vesper_crate(
         # The component wrapping differential (#1334): ~2 min release.
         "test/self_host_wit_component": "long",
         "test/self_host_codegen_scalar": "long",
-        "test/self_host_native_walk": "long",
+        # The native walk differential passed in 894 s of its 900 s on
+        # BuildBuddy (75fda7d) and timed out on unrelated PRs.
+        "test/self_host_native_walk": "eternal",
         "test/self_host_check_harness": "long",
         # The trait declaration differential (#1185) checks every corpus world.
         "test/self_host_check_pact": "eternal",
