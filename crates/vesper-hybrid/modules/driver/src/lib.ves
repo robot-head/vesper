@@ -616,7 +616,7 @@ fn build(inout s: Session, in o: Options)
     }
     let windows_host = os() == os_windows();
     let object = with_extension(in path.as_slice(), in "vesper.o", windows_host);
-    let r = write_object(inout s, in object.as_slice());
+    let r = write_object(inout s, in o, in object.as_slice());
     if r != 0 {
         return r;
     }
@@ -734,13 +734,143 @@ fn remove(inout s: Session, in object: Slice[u8]) -> i64 eff [Ffi[StdFs], Ffi[Hy
 }
 
 // Both the link and emit paths use the same bytes from native codegen.
-fn write_object(inout s: Session, in path: Slice[u8]) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
-    let r = step(inout s, step_native_object());
+fn write_object(inout s: Session, in o: Options, in path: Slice[u8])
+    -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    let mut object: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let r = native_code(inout s, in o, step_native_object(), inout object);
+    if r != 0 {
+        return r;
+    }
+    write_file(inout s, in path, in object.as_slice())
+}
+
+// The ops of a native code request `[op, has_policy, policy..]` to
+// `NativeObject` or `EmitClif` (`NATIVE_*` in src/driver/native.rs): the
+// unverified code, whether the verifiers run (1 or 0), and the verified
+// code after its report record.
+fn native_plain() -> u8 {
+    0
+}
+
+fn native_needs_verify() -> u8 {
+    1
+}
+
+fn native_verified() -> u8 {
+    2
+}
+
+fn native_request(op: u8) -> ChunkSeq[u8] {
+    let mut r: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    r.push(op);
+    r
+}
+
+// The little-endian word at `at` of `b` (0 past its end).
+fn word_at(in b: Slice[u8], at: u64) -> u64 {
+    let mut w: u64 = 0;
+    let mut k: u64 = 8;
+    loop {
+        if k == 0 {
+            break;
+        }
+        k = wrapping_sub(k, 1);
+        let byte = match b.try_get(wrapping_add(at, k)) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        w = wrapping_shl_u64(w, 8) | widen_u64(byte);
+    }
+    w
+}
+
+// The native code of pass `which` (`step_native_object` or
+// `step_emit_clif`) into `out`: 0, or the exit code of its failure.
+// When the native verifiers run (a `--verify` flag or a capability effect
+// that implies one, lane 24), this reads the `--verify-policy` file,
+// prints the report and the verified line on stderr, and fails on
+// findings, as `native_code` in src/main.rs does.
+fn native_code(inout s: Session, in o: Options, which: u32, inout out: ChunkSeq[u8])
+    -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    let mut ask = native_request(native_needs_verify());
+    ask.push(0);
+    let needs = step_with(inout s, which, in ask.as_slice());
+    if is_failure(needs) {
+        return pass_failed(in s, needs);
+    }
+    if needs == 0 {
+        let mut req = native_request(native_plain());
+        req.push(0);
+        let r = step_with(inout s, which, in req.as_slice());
+        if is_failure(r) {
+            return pass_failed(in s, r);
+        }
+        out = text(in s);
+        return 0;
+    }
+    let mut req = native_request(native_verified());
+    if has(in o, slot_policy()) {
+        let path = value(in o, slot_policy());
+        let mut policy: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let failed = handle Fail[IoError] in {
+            policy = read_path(in path.as_slice());
+            0
+        } with {
+            return v => v,
+            raise(e, _) => error_word(e),
+        };
+        if failed != 0 {
+            let mut m = path;
+            m.extend(in ": ".as_bytes());
+            let detail = io_error_text(inout s, wrapping_sub(failed, 2));
+            m.extend(in detail.as_slice());
+            return error(in m.as_slice());
+        }
+        // `fs::read_to_string`'s error for bytes that are not UTF-8.
+        match String::from_utf8(in policy.as_slice()) {
+            Option::Some(_) => {},
+            Option::None => {
+                let mut m = path;
+                m.extend(in ": stream did not contain valid UTF-8".as_bytes());
+                return error(in m.as_slice());
+            },
+        }
+        req.push(1);
+        req.extend(in policy.as_slice());
+    } else {
+        req.push(0);
+    }
+    let r = step_with(inout s, which, in req.as_slice());
     if is_failure(r) {
         return pass_failed(in s, r);
     }
-    let object = text(in s);
-    write_file(inout s, in path, in object.as_slice())
+    // The record: the rendered report and the verifier names (each a
+    // length word and its bytes), then accepted, the finding count and the
+    // function count, then the code.
+    let rec = text(in s);
+    let b = rec.as_slice();
+    let report_len = word_at(in b, 0);
+    let report_end = wrapping_add(8, report_len);
+    let names_len = word_at(in b, report_end);
+    let names_start = wrapping_add(report_end, 8);
+    let names_end = wrapping_add(names_start, names_len);
+    let accepted = word_at(in b, names_end);
+    let findings = word_at(in b, wrapping_add(names_end, 8));
+    let functions = word_at(in b, wrapping_add(names_end, 16));
+    let code_start = wrapping_add(names_end, 24);
+    print(stderr_stream(), in b[8..report_end]);
+    if accepted == 0 {
+        return count_error(wrapping_i64(findings), in "native verifier finding(s)");
+    }
+    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    line.extend(in "verified ".as_bytes());
+    write_u64(inout line, functions);
+    line.extend(in " emitted function(s): ".as_bytes());
+    line.extend(in b[names_start..names_end]);
+    line.push(10);
+    print(stderr_stream(), in line.as_slice());
+    out.extend(in b[code_start..b.len()]);
+    0
 }
 
 fn emit(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
@@ -764,10 +894,15 @@ fn emit(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDrive
             return error(in "object output requires -o <path>".as_bytes());
         }
         let output = value(in o, slot_output());
-        return write_object(inout s, in output.as_slice());
+        return write_object(inout s, in o, in output.as_slice());
     }
     if is(in o, slot_format(), in "clif") {
-        return emit_text(inout s, in o, step_emit_clif(), in "".as_bytes());
+        let mut clif: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let r = native_code(inout s, in o, step_emit_clif(), inout clif);
+        if r != 0 {
+            return r;
+        }
+        return write_output(inout s, in o, in clif.as_slice());
     }
     let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
     m.extend(in "unknown output format '".as_bytes());
@@ -782,25 +917,16 @@ fn emit_optimize() -> u8 {
     1
 }
 
-// An `emit` pass whose text goes to `-o <path>`, written here, or else to
-// stdout, which the pass prints itself (a failed stdout write fails the
-// command, as `cli()`'s `write(None, ..)` does). `head` is the pass's
-// own request bytes.
-fn emit_text(inout s: Session, in o: Options, which: u32, in head: Slice[u8])
+// An `emit` pass's text, to `-o <path>` or stdout (`write_output`).
+// `request` is the pass's own argument.
+fn emit_text(inout s: Session, in o: Options, which: u32, in request: Slice[u8])
     -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
-    let mut request: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    request.extend(in head);
-    if !has(in o, slot_output()) {
-        request.extend(in "stdout".as_bytes());
-        return pass_with(inout s, which, in request.as_slice());
-    }
-    let r = step_with(inout s, which, in request.as_slice());
+    let r = step_with(inout s, which, in request);
     if is_failure(r) {
         return pass_failed(in s, r);
     }
     let emitted = text(in s);
-    let path = value(in o, slot_output());
-    write_file(inout s, in path.as_slice(), in emitted.as_slice())
+    write_output(inout s, in o, in emitted.as_slice())
 }
 
 // Write `data` to `path`: 0, or the exit code of the error (Rust's
