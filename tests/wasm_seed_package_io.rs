@@ -1457,7 +1457,14 @@ fn front_end_parses_like_native() {
         })
         .collect();
 
-    let component = port(&c, &options(true)).expect("port");
+    // The guest heap is never freed between files, and the corpus includes
+    // the front end's own sources (parse.ves alone is ~4.7k lines since the
+    // surface profile), so the default 64 MiB is too tight.
+    let o = WasmOptions {
+        max_memory_pages: 4096,
+        ..options(true)
+    };
+    let component = port(&c, &o).expect("port");
     let ctx = Ctx {
         dirs: vec![(base.clone(), base.to_str().unwrap().to_owned())],
         fuel: Some(u64::MAX),
