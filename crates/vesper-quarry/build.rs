@@ -52,14 +52,11 @@ const DIVERGENT: &[(&str, &str)] = &[
     // wal.rs (vesper/src/wal.ves): valid WAL headers are rejected;
     // durable committed_changes_survive_reopen_and_aborts_roll_back fails.
     ("if seq == 0 || base == 0 {", "if true {"),
-    // store/pages.rs (vesper/src/internal.ves): B+Tree internal route always goes left;
-    // store_ssi threads_keep_an_invariant_that_write_skew_breaks fails.
-    ("if key_le(kr, kt, rowid, inv_ts) {", "if false {"),
-    // store/log.rs (vesper/src/store_log.ves): Commit tag rejected as unknown;
-    // store fuzzy_checkpoint_runs_while_transactions_commit fails.
-    // (wal.ves has an `if tag == 3 {` too: match the store/log one.)
-    (
-        "    if tag == 3 {\n        if plen < 17 {",
-        "    if tag == 99 {\n        if plen < 17 {",
-    ),
+    // store/pages.rs (vesper/src/internal.ves: the B+Tree internal route
+    // always goes left) and store/log.rs (vesper/src/store_log.ves: the
+    // Commit tag rejected as unknown) have their edits only in
+    // BUILD.bazel's PORT_DIVERGENT, which builds each module's edits alone.
+    // Here every edit applies at once, and a store that cannot look up an
+    // index or commit fails the planner_spec and sql tests the harness
+    // expects to pass (scripts/test-port-harness.sh).
 ];
