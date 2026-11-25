@@ -53,5 +53,3 @@ test_canonical_protocols = _suite(
     examples = ["//crates/vesper-grammar:example/" + name for name in ["protobuf", "der", "ipc"]],
     pmu = True,
 )
-test_editor = _suite("editor", examples = ["//crates/vesper-span:example/source_edits", "//crates/vesper-lsp:example/protocol_documents"])
-test_recovery = _suite("recovery", binary_env = "VESPER_RECOVERY_BINARY")

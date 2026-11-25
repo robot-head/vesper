@@ -80,8 +80,8 @@ print("child stderr", file=sys.stderr)
         self.assertIn("child stderr", result.stderr)
 
     def test_rooted_checker_runs_from_workspace_root(self):
-        self.write("scripts/check-editor.py", "from pathlib import Path\nprint(Path.cwd())\n")
-        result = self.aspect("acceptance", "check-editor")
+        self.write("scripts/check-canonical-protocols.py", "from pathlib import Path\nprint(Path.cwd())\n")
+        result = self.aspect("acceptance", "check-canonical-protocols")
         self.assertEqual(result.stdout.splitlines(), [str(self.root)])
 
     def test_resource_oracle_fixtures_pass_the_mode_and_native_status(self):
@@ -115,7 +115,6 @@ if sys.argv[-1] == "crash":
         examples = {
             "canonical-protocols": ["vesper-grammar:example/" + name for name in ("protobuf", "der", "ipc")]
             + ["vesper-bench-pmu:example/probe"],
-            "editor": ["vesper-span:example/source_edits", "vesper-lsp:example/protocol_documents"],
         }
         rows = ["//:bin/vesper bin/compiler"]
         self.write("bin/compiler", "")
@@ -130,8 +129,6 @@ if sys.argv[-1] == "crash":
 
         for task, override in (
             ("canonical-protocols", None),
-            ("editor", None),
-            ("recovery", "VESPER_RECOVERY_BINARY"),
         ):
             with self.subTest(task=task):
                 checker = f"scripts/check-{task}.py"

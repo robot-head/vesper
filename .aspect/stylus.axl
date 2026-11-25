@@ -1,7 +1,7 @@
 """Verify macro formatting, damaged-source recovery, and UTF-16 LSP edits."""
 
 load("./bounded-stdio.axl", "bounded_run", "utf8")
-load("./lib/lsp-fixture.axl", "changed", "decode_frames", "document", "error", "frame", "notice", "opened", "request", "result")
+load("./lib/lsp-fixture.axl", "apply_edits", "changed", "decode_frames", "document", "edit_offset", "error", "frame", "notice", "opened", "request", "result")
 load("./lib/process.axl", "check", "root_path", "scratch_dir")
 load("./lib/strict-json.axl", "decode_list", "decode_object")
 
@@ -11,35 +11,6 @@ _USAGE = "Pass -- --binary <vesper> [--work <directory>]."
 def _require(condition, message):
     if not condition:
         fail(message)
-
-def _offset(source, position):
-    line, character = position["line"], position["character"]
-    _require(type(line) == "int" and type(character) == "int" and line >= 0 and character >= 0, "Invalid UTF-16 position")
-    row, units = 0, 0
-    previous_cr = False
-    for index, char in enumerate(source.elems()):
-        if char == "\n" and previous_cr:
-            previous_cr = False
-            continue
-        if row == line and units == character:
-            return index
-        if char in "\r\n":
-            _require(row < line, "Edit falls outside its line")
-            row += 1
-            units = 0
-        else:
-            units += 2 if len(bytes(char)) == 4 else 1
-        previous_cr = char == "\r"
-    _require(row == line and units == character, "Edit falls inside a UTF-16 surrogate or outside its line")
-    return len(source)
-
-def _apply(source, edits):
-    spans = sorted([(_offset(source, edit["range"]["start"]), _offset(source, edit["range"]["end"]), edit["newText"]) for edit in edits])
-    _require(all([start <= end for start, end, _ in spans]), "Edit has an inverted range")
-    _require(all([left[1] <= right[0] for left, right in zip(spans, spans[1:])]), "Formatting edits overlap")
-    for start, end, text in reversed(spans):
-        source = source[:start] + text + source[end:]
-    return source
 
 def _execute(ctx, h, argv, expected = 0, input = None):
     captured = bounded_run(
@@ -183,7 +154,7 @@ def _run(ctx, root, binary, parent = ""):
     sources = ["// 😀\r\nfn damaged(){let x=;}\r\nfn main( )->i64{42}\r\n", "// 😀 updated\r\n\r\nfn damaged(){let x=;}\r\n// 🦀\r\nfn main( )->i64{41}\r\n"]
     for source, edits in zip(sources, _session(ctx, h, sources)):
         _require(bool(edits), "Expected formatting edits")
-        candidate = _apply(source, edits)
+        candidate = apply_edits(source, edits)
         _require(candidate != source and candidate.startswith(source.partition("fn main")[0]) and "fn damaged(){let x=;}" in candidate, "Edits must preserve damaged source")
         _require(_session(ctx, h, [candidate]) == [[]], "LSP formatting must be stable")
     _require(not any([entry.path.startswith(".vesper-fmt-") for entry in ctx.std.fs.read_dir(work)]), "Unexpected format scratch artifacts")
@@ -243,12 +214,12 @@ test_stylus = task(
 def _test(ctx):
     source = "a😀b\r\n🦀 c\n"
     for line, units, offset in [(0, 1, 1), (0, 3, 2), (0, 4, 3), (1, 0, 5), (1, 2, 6), (2, 0, 9)]:
-        _require(_offset(source, {"line": line, "character": units}) == offset, "Wrong UTF-16 fixture offset")
+        _require(edit_offset(source, {"line": line, "character": units}) == offset, "Wrong UTF-16 fixture offset")
     edits = [
         {"range": {"start": {"line": 1, "character": 2}, "end": {"line": 1, "character": 4}}, "newText": "x"},
         {"range": {"start": {"line": 0, "character": 3}, "end": {"line": 0, "character": 4}}, "newText": "yz"},
     ]
-    _require(_apply(source, edits) == "a😀yz\r\n🦀x\n", "Edits did not preserve original coordinates")
+    _require(apply_edits(source, edits) == "a😀yz\r\n🦀x\n", "Edits did not preserve original coordinates")
     env, binary = _cargo_config({"CARGO_BUILD_JOBS": "3", "CARGO_TARGET_DIR": "relative target", "CARGO_INCREMENTAL": ""}.get, "/root")
     _require(binary == "/root/relative target/debug/vesper" and env["CARGO_BUILD_JOBS"] == "3" and env["CARGO_INCREMENTAL"] == "0" and env["CARGO_PROFILE_DEV_DEBUG"] == "0" and env["CARGO_PROFILE_TEST_DEBUG"] == "0", "Cargo defaults or overrides changed")
     ctx.std.io.stdout.write("Passed Stylus UTF-16 edit and Cargo configuration cases\n")

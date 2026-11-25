@@ -44,7 +44,7 @@ def changed(uri, version, source):
     return notice("textDocument/didChange", {"textDocument": {"uri": uri, "version": version}, "contentChanges": [{"text": source}]})
 
 def frame(message):
-    payload = bytes(json.encode(message))
+    payload = message if type(message) == "bytes" else bytes(json.encode(message))
     return bytes("Content-Length: %d\r\n\r\n" % len(payload)) + payload
 
 def content_length(header, max_frame = _MAX_FRAME):
@@ -107,15 +107,48 @@ def error(replies, identifier, code, kind = None):
         fail("Expected JSON-RPC error kind %s for %s: %r" % (kind, identifier, failure))
     return failure
 
-def session(ctx, root, work, binary, messages):
+def session(ctx, root, work, binary, messages, stdout_limit = 8 * _MAX_FRAME):
     data = bytes([])
     for message in messages:
         data += frame(message)
     captured = bounded_run(
-        ctx, root, work, binary, ["lsp"], timeout = 45, stdout_limit = 8 * _MAX_FRAME,
+        ctx, root, work, binary, ["lsp"], timeout = 45, stdout_limit = stdout_limit,
         stderr_limit = _MAX_FRAME, label = "LSP session", input = data,
     )
     if captured.code:
         ctx.std.io.stderr.write(captured.stderr)
         fail("LSP session exited with status %d" % captured.code)
     return decode_frames(captured.stdout)
+
+def _edit_require(condition, message):
+    if not condition:
+        fail(message)
+
+def edit_offset(source, position):
+    line, character = position["line"], position["character"]
+    _edit_require(type(line) == "int" and type(character) == "int" and line >= 0 and character >= 0, "Invalid UTF-16 position")
+    row, units = 0, 0
+    previous_cr = False
+    for index, char in enumerate(source.elems()):
+        if char == "\n" and previous_cr:
+            previous_cr = False
+            continue
+        if row == line and units == character:
+            return index
+        if char in "\r\n":
+            _edit_require(row < line, "Edit falls outside its line")
+            row += 1
+            units = 0
+        else:
+            units += 2 if len(bytes(char)) == 4 else 1
+        previous_cr = char == "\r"
+    _edit_require(row == line and units == character, "Edit falls inside a UTF-16 surrogate or outside its line")
+    return len(source)
+
+def apply_edits(source, edits):
+    spans = sorted([(edit_offset(source, edit["range"]["start"]), edit_offset(source, edit["range"]["end"]), edit["newText"]) for edit in edits])
+    _edit_require(all([start <= end for start, end, _ in spans]), "Edit has an inverted range")
+    _edit_require(all([left[1] <= right[0] for left, right in zip(spans, spans[1:])]), "Formatting edits overlap")
+    for start, end, text in reversed(spans):
+        source = source[:start] + text + source[end:]
+    return source
