@@ -18,11 +18,11 @@ these families decline nothing.
 |---|---|--:|---|
 | `src/native_handlers` deleted (owner's choice, 2026-11-24) | n/a (dead code: no command reached it) | -2,293 now | #1836 |
 | `scalar_enums` decisions (#1330) ported to `@vesper/codegen-aggregates` | 0 of 354 corpus worlds differ (52,690 graphs; 15,563 enum values, 116 locals, 11,064 calls and 271 returns kept as words) | 0 now (goes at the retirement) | #1854 |
-| `scalar_enums` graph rewrite ported (`scalar_enum_rewrite`) | 0 of 54,236 graphs differ, 2,347 of them rewritten (`Debug`-equal `FunctionIr`) | 0 now (goes at the retirement) | this PR |
-| `ffi_lowering/cpu.rs` machine-code tables ported (`@vesper/ffi-lowering` `cpu.ves`) | 0 of 72 symbol and target pairs differ (every function, unknown and plain symbols, x86_64, AArch64, RISC-V) | 0 now (goes at the retirement) | this PR |
-| `ffi_lowering/buffers.rs` check pass ported (`@vesper/ffi-rewrite` `buffers.ves`) | 0 of 35 sources differ that reach the check (27 refused, with the same span and message); the foreign-memory suite, the xsk fixture and 13 hand sources | 0 now (goes at the retirement) | next PR |
-| `native_session::check_data_base_freshness` ported (`@vesper/codegen-control` `freshness.ves`) | 0 of 229 functions differ: 217 corpus session entries as emitted, and 12 hand-built ones (4 refused) | 0 now (goes at the retirement) | next PR |
-| `vector::check_world` (the `Isa` discipline, E1401-E1403) ported (`@vesper/check-regions-seqs` `isa.ves`) | 0 of 329 worlds differ (the corpus files, the vector and tiled tests' sources, 19 hand sources); 35 diagnostics: 2 E1401, 5 E1402, 28 E1403 | 0 now (goes at the retirement) | next PR |
+| `scalar_enums` graph rewrite ported (`scalar_enum_rewrite`) | 0 of 54,236 graphs differ, 2,347 of them rewritten (`Debug`-equal `FunctionIr`) | 0 now (goes at the retirement) | #1868 |
+| `ffi_lowering/cpu.rs` machine-code tables ported (`@vesper/ffi-lowering` `cpu.ves`) | 0 of 72 symbol and target pairs differ (every function, unknown and plain symbols, x86_64, AArch64, RISC-V) | 0 now (goes at the retirement) | #1868 |
+| `ffi_lowering/buffers.rs` check pass ported (`@vesper/ffi-rewrite` `buffers.ves`) | 0 of 35 sources differ that reach the check (27 refused, with the same span and message); the foreign-memory suite, the xsk fixture and 13 hand sources | 0 now (goes at the retirement) | this PR |
+| `native_session::check_data_base_freshness` ported (`@vesper/codegen-control` `freshness.ves`) | 0 of 229 functions differ: 217 corpus session entries as emitted, and 12 hand-built ones (4 refused) | 0 now (goes at the retirement) | this PR |
+| `vector::check_world` (the `Isa` discipline, E1401-E1403) ported (`@vesper/check-regions-seqs` `isa.ves`) | 0 of 329 worlds differ (the corpus files, the vector and tiled tests' sources, 19 hand sources); 35 diagnostics: 2 E1401, 5 E1402, 28 E1403 | 0 now (goes at the retirement) | this PR |
 
 ### `native_handlers`: deleted
 
