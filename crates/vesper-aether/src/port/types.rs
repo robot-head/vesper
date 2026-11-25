@@ -324,7 +324,7 @@ impl From<MemFault> for crate::guest_mem::MemError {
 pub(crate) enum MmioStatusFault {
     DriverSetNeedsReset,
     StatusRegression { from: u32, to: u32 },
-    DriverOkWithoutFeaturesOk,
+    DriverOkWithoutFeaturesOk { rejected_features: bool },
 }
 
 /// Outcome of a valid MMIO `STATUS` write from the Vesper port.
@@ -343,7 +343,7 @@ impl From<MmioStatusFault> for crate::devices::mmio::MmioError {
         match e {
             MmioStatusFault::DriverSetNeedsReset => E::DriverSetNeedsReset,
             MmioStatusFault::StatusRegression { from, to } => E::StatusRegression { from, to },
-            MmioStatusFault::DriverOkWithoutFeaturesOk => E::DriverOkWithoutFeaturesOk,
+            MmioStatusFault::DriverOkWithoutFeaturesOk { .. } => E::DriverOkWithoutFeaturesOk,
         }
     }
 }

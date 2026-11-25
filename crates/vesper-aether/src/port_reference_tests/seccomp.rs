@@ -1,8 +1,7 @@
 //! The Vesper seccomp-BPF compiler, validator, and evaluator against the
 //! Rust reference (both builds are in the crate under `vesper-port`).
-#![cfg(feature = "vesper-port")]
 
-use vesper_aether::seccomp::{
+use crate::seccomp::{
     AUDIT_ARCH_AARCH64, AUDIT_ARCH_X86_64, Arch, BPF_JMP_JA, BPF_JMP_JEQ_K, BPF_LD_W_ABS,
     BPF_MAXINSNS, BPF_RET_K, DefaultAction, SECCOMP_RET_ALLOW, SECCOMP_RET_KILL_PROCESS,
     SeccompData, SeccompProfile, SockFilter, Syscall, evaluate, evaluate_reference, validate,

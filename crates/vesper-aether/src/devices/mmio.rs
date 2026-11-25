@@ -653,7 +653,13 @@ impl<D: VirtioDevice> MmioTransport<D> {
         Ok(())
     }
 
-    fn write_status(&mut self, new: u32) -> Result<(), MmioError> {
+    /// Sets the driver's feature word directly (for the port ABBA timings).
+    #[cfg(all(test, feature = "vesper-port"))]
+    pub(crate) fn set_driver_features_for_test(&mut self, features: u64) {
+        self.driver_features = features;
+    }
+
+    pub(crate) fn write_status(&mut self, new: u32) -> Result<(), MmioError> {
         #[cfg(feature = "vesper-port")]
         {
             let outcome = crate::binding::mmio_write_status(
@@ -663,7 +669,15 @@ impl<D: VirtioDevice> MmioTransport<D> {
                 self.driver_features,
                 self.offered_features(),
             )
-            .map_err(MmioError::from)?;
+            .map_err(|fault| {
+                if let crate::port_types::MmioStatusFault::DriverOkWithoutFeaturesOk {
+                    rejected_features: true,
+                } = fault
+                {
+                    self.stats.rejected_feature_sets += 1;
+                }
+                MmioError::from(fault)
+            })?;
             if outcome.reset {
                 self.reset();
                 return Ok(());
