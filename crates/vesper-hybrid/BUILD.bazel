@@ -44,6 +44,10 @@ vesper_hybrid(
             "edit_src": "modules/ir_opt/src/lib.ves",
             "edits": {"    policy_words(in input)\n": "    divergent_words(in input)\n"},
         },
+        "hybrid_lean_extract": {
+            "edit_src": "modules/lean_extract/src/lib.ves",
+            "edits": {"(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    text\n": "(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = text;\n    let _ = t.try_set(0, 0);\n    t\n"},
+        },
         "hybrid_layout": {
             "edit_src": "modules/layout/src/lib.ves",
             "edits": {"        8\n    } else {\n        0\n": "        16\n    } else {\n        0\n"},
@@ -217,6 +221,13 @@ vesper_hybrid(
             "//:ir_opt_policy_package",
             "//:place_ir_package",
         ],
+        # Lean extraction (#1341) builds on @vesper/lean-extract.
+        "hybrid_lean_extract": [
+            "//:check_data_package",
+            "//:lean_extract_package",
+            "//:place_ir_package",
+            "//crates/vesper-lean-syntax:port_package",
+        ],
         # The AST optimizer (#1249): its producer and checker.
         "hybrid_optimize": [
             "//:ast_package",
@@ -357,6 +368,11 @@ vesper_hybrid(
             "//:bin/vesper",
         ],
         "test/swaps": [":bin/vesper-hybrid"],
+        # Lean extraction (#1341) through the CLI.
+        "test/lean_extract": [
+            ":bin/vesper-hybrid",
+            "//:bin/vesper",
+        ],
         "test/driver": [
             ":bin/vesper-hybrid",
             "//:bin/vesper",

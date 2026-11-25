@@ -133,11 +133,11 @@ CRATES = {
 # Root compiler module -> (owner lane(s), Vesper package, status note)
 MODULES = {
     "verified_codegen": ("#1886", "vesper-verified-codegen", "owner 2026-11-25: port to Vesper; parts 1-4a: slot IR, select, encoders, ELF/Mach-O/COFF containers, range certificate, plan + lowering without handlers (0 diffs: 12,488 rows, 1,034 builds over 5 targets, 13,749 certificate checks, 222 lowerings; select 0.91x, certificate 0.93x, lowering 1.07x); left: mono, handlers/evidence/regions, coverage, cli, swap"),
-    "lean": ("SH5-18", "vesper-lean-extract", "part 3a 2.37x"),
-    "lean_ir": ("SH5-18", "vesper-lean-extract", ""),
-    "lean_nodes": ("SH5-18", "vesper-lean-extract", ""),
-    "verify_commands": ("SH5-18", "", ""),
-    "proof_commands": ("SH5-18", "", ""),
+    "lean": ("SH5-18", "vesper-lean-extract", "whole module ported (head, CFG, structured, effects, ordering, fuel, contracts, proof module): 0 diffs over 363 worlds, 1.11x with lifting; `lean_extract` hybrid swap open (word encoding not yet counted); Rust kept for extract_report callers (verify, forge provenance)"),
+    "lean_ir": ("SH5-18", "vesper-lean-extract", "ported (CFG extractor, part 2)"),
+    "lean_nodes": ("SH5-18", "vesper-lean-extract", "ported (term builders)"),
+    "verify_commands": ("SH5-18", "vesper-driver-commands", "CLI parsing in Vesper; body next"),
+    "proof_commands": ("SH5-18", "vesper-driver-commands", "CLI parsing in Vesper; body next (needs a process deadline in @vesper-std)"),
     "native": ("G1-11", "vesper-codegen-base", "family hooks swapped by SH4; the walk itself ports in gap wave 1 lane 11"),
     "seq": ("SH4-9", "", ""),
     "wasm_backend": ("SH4-15, SH5-11, G1-9, G1-10", "vesper-wasm-backend, vesper-wit-component", "0 diffs (#1311); component wrap: flip gate PASS, wrap 0.05x, build 0.67x; swapped in the hybrid (`component`); the port alone lowers loops (#1492), sequences, strings, conversions, Abort/Tail handlers and bit operators (#1506), StdEnv/StdFs over WASI and Box (#1508); @vesper/place-ir builds to wasm and runs like the evaluator; @vesper/front builds to wasm and parses 28 files byte-identical to native (#1508)"),
