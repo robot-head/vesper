@@ -157,18 +157,24 @@ vesper_hybrid(
         # The driver (#1335) builds on @vesper/driver and @vesper-std I/O.
         # The command layers (#1336) add @vesper/driver-commands; the
         # front-end passes (#1893) the parse module, the front end v2, the
-        # AST and @vesper-std/toml's Debug text.
+        # AST and @vesper-std/toml's Debug text; the wasm and eBPF builds
+        # (#1895) those backends and wit-component.
         "hybrid_driver": [
             ":hybrid_parse_package",
             "//:ast_package",
+            "//:check_data_package",
             "//:driver_commands_package",
             "//:driver_package",
+            "//:ebpf_backend_package",
             "//:front_package",
+            "//:place_ir_package",
             "//:std_env_package",
             "//:std_fmt_package",
             "//:std_fs_package",
             "//:std_process_package",
             "//:std_toml_package",
+            "//:wasm_backend_package",
+            "//:wit_component_package",
         ],
         # The eBPF backend swap (#1290) builds on @vesper/ebpf-backend.
         "hybrid_ebpf_backend": [

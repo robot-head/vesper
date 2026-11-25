@@ -179,6 +179,25 @@ const OPTION_SETS: &[&[&str]] = &[
         "wasm32-wasip2",
         "--verify-stack",
     ],
+    // The wasm build in the Vesper driver (#1895).
+    &["build", "-o", "{out}", "--target", "wasm32-wasip2"],
+    &[
+        "build",
+        "-o",
+        "{out}",
+        "--target",
+        "wasm32-wasip2",
+        "--no-opt",
+    ],
+    &[
+        "build",
+        "-o",
+        "{out}",
+        "--target",
+        "wasm32-wasip2",
+        "--entry",
+        "other",
+    ],
     &["emit", "--emit", "object", "--target-features", "sse3"],
     &["build", "--lib", "-o", "{out}"],
     &["build", "--lib"],
@@ -418,4 +437,452 @@ fn help_and_version_match() {
         assert_eq!(d.stdout, h.stdout, "{args:?}");
         assert_eq!(d.stderr, h.stderr, "{args:?}");
     }
+}
+
+/// Every `.ves` file under `dir`, sorted.
+fn ves_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .map(|e| e.unwrap().path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            ves_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "ves") {
+            out.push(path);
+        }
+    }
+}
+
+/// The count the hybrid's `VESPER_HYBRID_STATS=1` report gives after
+/// `prefix`, and stderr without the report.
+fn stat(stderr: &[u8], prefix: &str, what: &str) -> (u64, Vec<u8>) {
+    let text = String::from_utf8_lossy(stderr);
+    let mut n = 0;
+    let mut rest = String::new();
+    for line in text.split_inclusive('\n') {
+        if let Some(tail) = line.strip_prefix(prefix)
+            && tail.contains(what)
+        {
+            n = tail
+                .split(' ')
+                .next()
+                .and_then(|w| w.parse().ok())
+                .unwrap_or(0);
+        } else if !line.starts_with("vesper-hybrid: ") {
+            rest.push_str(line);
+        }
+    }
+    (n, rest.into_bytes())
+}
+
+/// Files where the Vesper AST optimizer settles an equal-cost tie
+/// differently from egg (the accepted ties of tests/differential.rs), so
+/// their optimized components differ from the default compiler's.
+const OPTIMIZE_EQUAL_COST_TIES: &[&str] = &[
+    "examples/traits/shapes.ves",
+    "tests/fixtures/bounded_generics/nested.ves",
+    "tests/fixtures/native_handlers/shared_locals.ves",
+    "tests/fixtures/wide_literals.ves",
+];
+
+struct WasmRun {
+    output: Output,
+    written: Option<Vec<u8>>,
+    time: Duration,
+    out: PathBuf,
+}
+
+fn wasm_run(
+    compiler: &Path,
+    scratch: &Path,
+    name: &str,
+    input: &Path,
+    no_opt: bool,
+    env: &[(&str, &str)],
+) -> WasmRun {
+    let out = scratch.join(name);
+    let _ = std::fs::remove_file(&out);
+    let mut c = Command::new(compiler);
+    c.current_dir(scratch)
+        .env_remove("VESPER_HYBRID_STATS")
+        .env_remove("VESPER_HYBRID_DRIVER_WASM")
+        .args(["build", "--target", "wasm32-wasip2", "-o"])
+        .arg(&out);
+    if no_opt {
+        c.arg("--no-opt");
+    }
+    c.arg(input);
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    let start = Instant::now();
+    let output = c.output().unwrap();
+    let time = start.elapsed();
+    let written = std::fs::read(&out).ok();
+    let _ = std::fs::remove_file(&out);
+    WasmRun {
+        output,
+        written,
+        time,
+        out,
+    }
+}
+
+/// What differs between two runs (output paths normalized).
+fn wasm_diff(a: &WasmRun, b: &WasmRun) -> Vec<&'static str> {
+    let norm = |bytes: &[u8], out: &Path| {
+        let name = out.file_name().unwrap().to_string_lossy().into_owned();
+        String::from_utf8_lossy(bytes).replace(&name, "{out}")
+    };
+    let mut diff = vec![];
+    if a.output.status.code() != b.output.status.code() {
+        diff.push("exit status");
+    }
+    if norm(&a.output.stdout, &a.out) != norm(&b.output.stdout, &b.out) {
+        diff.push("stdout");
+    }
+    if norm(&a.output.stderr, &a.out) != norm(&b.output.stderr, &b.out) {
+        diff.push("stderr");
+    }
+    if a.written != b.written {
+        diff.push("component bytes");
+    }
+    diff
+}
+
+/// `vesper build --target wasm32-wasip2` (#1895): the Vesper driver encodes
+/// the checked world through the session, builds the component with
+/// @vesper/wasm-backend and @vesper/wit-component and writes it itself.
+///
+/// Over every corpus program with a `main` (every `VESPER_WASM_STRIDE`th
+/// under Bazel), with and without `--no-opt`:
+/// - the hybrid agrees byte for byte (exit status, stdout, stderr,
+///   component) with itself on the Rust pass (`VESPER_HYBRID_DRIVER_WASM=0`,
+///   the `wasm` swap inside `wasm_backend::compile`), which is what the
+///   driver replaces;
+/// - against the default compiler, the only differences are the two the
+///   wasm swap already has: programs the port lowers and Rust refuses
+///   (loops, wide integers; tests/self_host_wasm_backend.rs runs them) and
+///   the optimizer's accepted equal-cost ties.
+#[test]
+fn wasm_build_matches_the_rust_pass() {
+    let root = repository();
+    let default = default_compiler();
+    let hybrid = hybrid();
+    let stride: usize = std::env::var("VESPER_WASM_STRIDE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    let mut files = vec![];
+    for dir in ["bootstrap/corpus", "examples", "tests/fixtures"] {
+        ves_files(&root.join(dir), &mut files);
+    }
+    let files: Vec<PathBuf> = files
+        .into_iter()
+        .filter(|p| std::fs::read_to_string(p).is_ok_and(|t| t.contains("fn main")))
+        .step_by(stride)
+        .collect();
+    let scratch = std::env::temp_dir().join(format!("vesper-hybrid-wasm-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).unwrap();
+    let (mut runs, mut built, mut in_vesper, mut extensions, mut ties) = (0, 0, 0, 0, 0);
+    let (mut rust_time, mut vesper_time) = (Duration::ZERO, Duration::ZERO);
+    let mut mismatches = vec![];
+    for (i, input) in files.iter().enumerate() {
+        let relative = input
+            .strip_prefix(&root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        for no_opt in [false, true] {
+            runs += 1;
+            let tag = format!("{relative}{}", if no_opt { " --no-opt" } else { "" });
+            let d = wasm_run(&default, &scratch, "d.wasm", input, no_opt, &[]);
+            // ABBA: alternate which hybrid run goes first.
+            let rust_pass = |name| {
+                wasm_run(
+                    &hybrid,
+                    &scratch,
+                    name,
+                    input,
+                    no_opt,
+                    &[("VESPER_HYBRID_DRIVER_WASM", "0")],
+                )
+            };
+            let driver = |name| {
+                wasm_run(
+                    &hybrid,
+                    &scratch,
+                    name,
+                    input,
+                    no_opt,
+                    &[("VESPER_HYBRID_STATS", "1")],
+                )
+            };
+            let (r, v) = if (i + usize::from(no_opt)) % 2 == 0 {
+                let r = rust_pass("r.wasm");
+                (r, driver("v.wasm"))
+            } else {
+                let v = driver("v.wasm");
+                (rust_pass("r.wasm"), v)
+            };
+            rust_time += r.time;
+            vesper_time += v.time;
+            let (n, stderr) = stat(
+                &v.output.stderr,
+                "vesper-hybrid: driver built ",
+                " wasm components ",
+            );
+            in_vesper += n;
+            built += u64::from(v.written.is_some());
+            let v = WasmRun {
+                output: Output { stderr, ..v.output },
+                ..v
+            };
+            let diff = wasm_diff(&r, &v);
+            if !diff.is_empty() {
+                mismatches.push(format!(
+                    "{tag}: driver vs Rust pass: {} (Rust pass {:?}, driver {:?})",
+                    diff.join(", "),
+                    String::from_utf8_lossy(&r.output.stderr),
+                    String::from_utf8_lossy(&v.output.stderr),
+                ));
+            }
+            let diff = wasm_diff(&d, &v);
+            if diff.is_empty() {
+                continue;
+            }
+            let d_err = String::from_utf8_lossy(&d.output.stderr);
+            let refused = !d.output.status.success()
+                && (d_err.contains(": unsupported Operation")
+                    || d_err.contains(": unsupported IntegerWidth"));
+            if refused && v.output.status.success() {
+                extensions += 1;
+            } else if !no_opt
+                && OPTIMIZE_EQUAL_COST_TIES.contains(&relative.as_str())
+                && diff == ["component bytes"]
+            {
+                ties += 1;
+            } else {
+                mismatches.push(format!(
+                    "{tag}: driver vs default compiler: {} (default {d_err:?}, driver {:?})",
+                    diff.join(", "),
+                    String::from_utf8_lossy(&v.output.stderr),
+                ));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    eprintln!(
+        "wasm build differential: {} programs, {runs} runs, {built} components, {in_vesper} built in the Vesper driver; \
+         vs default: {extensions} port extensions, {ties} optimizer ties; \
+         Rust pass {:.2} s, Vesper driver {:.2} s ({:.3}x); {} differ",
+        files.len(),
+        rust_time.as_secs_f64(),
+        vesper_time.as_secs_f64(),
+        vesper_time.as_secs_f64() / rust_time.as_secs_f64(),
+        mismatches.len()
+    );
+    assert!(
+        mismatches.is_empty(),
+        "the Vesper wasm build differs on {} runs:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
+    assert!(in_vesper > 0, "no wasm build ran in the Vesper driver");
+}
+
+/// One `vesper build --target bpf` run in `scratch`: `-o <scratch>/<name>`
+/// unless `name` is empty (the default output, `input` with `.o`).
+fn ebpf_run(
+    compiler: &Path,
+    scratch: &Path,
+    name: &str,
+    input: &Path,
+    entry: &str,
+    env: &[(&str, &str)],
+) -> WasmRun {
+    let out = if name.is_empty() {
+        input.with_extension("o")
+    } else {
+        scratch.join(name)
+    };
+    let _ = std::fs::remove_file(&out);
+    let mut c = Command::new(compiler);
+    c.current_dir(scratch)
+        .env_remove("VESPER_HYBRID_STATS")
+        .env_remove("VESPER_HYBRID_DRIVER_EBPF")
+        .args(["build", "--target", "bpf", "--entry", entry]);
+    if !name.is_empty() {
+        c.arg("-o").arg(&out);
+    }
+    c.arg(input);
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    let start = Instant::now();
+    let output = c.output().unwrap();
+    let time = start.elapsed();
+    let written = std::fs::read(&out).ok();
+    let _ = std::fs::remove_file(&out);
+    WasmRun {
+        output,
+        written,
+        time,
+        out,
+    }
+}
+
+/// `vesper build --target bpf` (#1895): the session parses, checks and
+/// encodes the source, and @vesper/ebpf-backend compiles it, verifies it
+/// with the @vesper/ebpf verifier and writes the ELF object in the Vesper
+/// driver. Over the eBPF fixtures with every function as the entry (and
+/// the default output path), truncated fixtures and every corpus program
+/// with a `main` (every `VESPER_EBPF_STRIDE`th under Bazel), the hybrid
+/// agrees byte for byte with the default compiler and with itself on the
+/// Rust pass (`VESPER_HYBRID_DRIVER_EBPF=0`): exit status, stdout, stderr
+/// and the object.
+#[test]
+fn ebpf_build_matches_the_rust_pass() {
+    let root = repository();
+    let default = default_compiler();
+    let hybrid = hybrid();
+    let stride: usize = std::env::var("VESPER_EBPF_STRIDE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    let scratch = std::env::temp_dir().join(format!("vesper-hybrid-ebpf-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).unwrap();
+    // (input, entry, default output)
+    let mut cases: Vec<(PathBuf, String, bool)> = vec![];
+    let mut fixtures = vec![];
+    ves_files(&root.join("tests/fixtures/ebpf_backend"), &mut fixtures);
+    for (i, f) in fixtures.iter().enumerate() {
+        let text = std::fs::read_to_string(f).unwrap();
+        let copy = scratch.join(format!("fixture{i}.ves"));
+        std::fs::write(&copy, &text).unwrap();
+        cases.push((copy.clone(), "main".into(), true));
+        for line in text.lines() {
+            let Some(rest) = line.trim_start().strip_prefix("fn ") else {
+                continue;
+            };
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            cases.push((copy.clone(), name, false));
+        }
+        // Truncated sources: parse and check errors stay Rust's.
+        for cut in [text.len() / 3, text.len() / 2, text.len() * 9 / 10] {
+            let mut cut = cut;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let t = scratch.join(format!("fixture{i}-cut{cut}.ves"));
+            std::fs::write(&t, &text[..cut]).unwrap();
+            cases.push((t, "main".into(), false));
+        }
+    }
+    let mut corpus = vec![];
+    for dir in ["bootstrap/corpus", "examples", "tests/fixtures"] {
+        ves_files(&root.join(dir), &mut corpus);
+    }
+    for f in corpus
+        .into_iter()
+        .filter(|p| !p.starts_with(root.join("tests/fixtures/ebpf_backend")))
+        .filter(|p| std::fs::read_to_string(p).is_ok_and(|t| t.contains("fn main")))
+        .step_by(stride)
+    {
+        cases.push((f, "main".into(), false));
+    }
+    let (mut objects, mut in_vesper) = (0, 0);
+    let (mut rust_time, mut vesper_time) = (Duration::ZERO, Duration::ZERO);
+    let mut mismatches = vec![];
+    for (i, (input, entry, default_out)) in cases.iter().enumerate() {
+        let name = |tag: &str| {
+            if *default_out {
+                String::new()
+            } else {
+                format!("{tag}.o")
+            }
+        };
+        let tag = format!("{} --entry {entry}", input.display());
+        let d = ebpf_run(&default, &scratch, &name("d"), input, entry, &[]);
+        let rust_pass = || {
+            ebpf_run(
+                &hybrid,
+                &scratch,
+                &name("r"),
+                input,
+                entry,
+                &[("VESPER_HYBRID_DRIVER_EBPF", "0")],
+            )
+        };
+        let driver = || {
+            ebpf_run(
+                &hybrid,
+                &scratch,
+                &name("v"),
+                input,
+                entry,
+                &[("VESPER_HYBRID_STATS", "1")],
+            )
+        };
+        // ABBA: alternate which hybrid run goes first.
+        let (r, v) = if i % 2 == 0 {
+            let r = rust_pass();
+            (r, driver())
+        } else {
+            let v = driver();
+            (rust_pass(), v)
+        };
+        rust_time += r.time;
+        vesper_time += v.time;
+        let (n, stderr) = stat(
+            &v.output.stderr,
+            "vesper-hybrid: driver built ",
+            " eBPF objects ",
+        );
+        in_vesper += n;
+        objects += u64::from(v.written.is_some());
+        let v = WasmRun {
+            output: Output { stderr, ..v.output },
+            ..v
+        };
+        for (what, other) in [("Rust pass", &r), ("default compiler", &d)] {
+            let diff = wasm_diff(other, &v);
+            if !diff.is_empty() {
+                mismatches.push(format!(
+                    "{tag}: driver vs {what}: {} ({what} {:?} {:?}, driver {:?} {:?})",
+                    diff.join(", "),
+                    String::from_utf8_lossy(&other.output.stdout),
+                    String::from_utf8_lossy(&other.output.stderr),
+                    String::from_utf8_lossy(&v.output.stdout),
+                    String::from_utf8_lossy(&v.output.stderr),
+                ));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    eprintln!(
+        "eBPF build differential: {} runs, {objects} objects, {in_vesper} built in the Vesper driver; \
+         Rust pass {:.2} s, Vesper driver {:.2} s ({:.3}x); {} differ",
+        cases.len(),
+        rust_time.as_secs_f64(),
+        vesper_time.as_secs_f64(),
+        vesper_time.as_secs_f64() / rust_time.as_secs_f64(),
+        mismatches.len()
+    );
+    assert!(
+        mismatches.is_empty(),
+        "the Vesper eBPF build differs on {} runs:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
+    assert!(in_vesper > 0, "no eBPF build ran in the Vesper driver");
 }

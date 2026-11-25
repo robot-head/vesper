@@ -227,6 +227,11 @@ include!(concat!(env!("OUT_DIR"), "/swap_registry.rs"));
 /// The Vesper driver's own parse (#1893) reads back through the parse swap.
 pub(crate) use parse::{driver_parse, driver_parse_begin};
 
+// The Vesper driver's wasm and eBPF builds (#1895) take those swaps' input
+// words.
+pub(crate) use ebpf_backend::{DRIVER_EBPF_FALLBACKS, DRIVER_EBPF_INPUTS, ebpf_build_input};
+pub(crate) use wasm_backend::{DRIVER_WASM_FALLBACKS, DRIVER_WASM_INPUTS, wasm_build_input};
+
 /// Stops the process when a slot was already taken: nothing runs before
 /// the constructor, so the slots are empty.
 fn must<T, E>(installed: Result<T, E>) {
