@@ -1133,7 +1133,10 @@ vesper_crate(
         # package worlds with their dependencies included; it ran past 900 s
         # once @vesper/test-runner gained @vesper/ast (#1337).
         "test/self_host_native_walk": "eternal",
-        "test/self_host_native_walk_frame": "long",
+        # Its frame twin (#1876) compiles each sampled entry with Rust twice
+        # (optimize off and on); about 600 s of Rust compiles at step 1 in a
+        # release build, so it gets the same headroom.
+        "test/self_host_native_walk_frame": "eternal",
         "test/self_host_check_harness": "long",
         # The trait declaration differential (#1185) checks every corpus world.
         "test/self_host_check_pact": "eternal",
