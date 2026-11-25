@@ -7,11 +7,11 @@
 actions:
   - name: "Test all targets"
     container_image: "ubuntu-24.04"
-    # 22GB ran out on #1870: the VM hit 24.2GB and the kernel killed
-    # //:test/wasm_seed_package_io, whose stage2 compiles run in parallel.
+    # .bazelrc `ci_tests` budgets 18GiB of this for local tests; keep the
+    # resources:memory tags in BUILD.bazel honest so the VM stays inside it.
     resource_requests:
       cpu: 8
-      memory: 25GB
+      memory: 22GB
       disk: 60GB
     timeout: 60m
     triggers:
