@@ -96,7 +96,8 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertIn("pull_request", self.platforms["on"]["workflow_dispatch"]["inputs"])
         mac = self.platforms["jobs"]["platform"]
         windows = self.platforms["jobs"]["windows"]
-        self.assertEqual(mac["strategy"]["matrix"]["include"][0]["name"], "macOS (AArch64)")
+        self.assertTrue(mac["name"].startswith("macOS (AArch64)"))
+        self.assertNotIn("strategy", mac)
         self.assertTrue(windows["name"].startswith("Windows (x86_64 MSVC)"))
         for job in (mac, windows):
             self.assertEqual(job["needs"], "plan")
@@ -310,6 +311,24 @@ class PlatformWorkflowTests(unittest.TestCase):
             self.assertEqual(step["env"]["CHECK_HARNESS_STRIDE"], "4")
             self.assertNotIn("CODEGEN_SWAP_TARGET", step["env"])
 
+    def test_documentation_only_pull_requests_skip_the_native_jobs(self):
+        jobs = self.platforms["jobs"]
+        plan = next(s for s in jobs["plan"]["steps"] if s.get("id") == "plan")
+        self.assertEqual(plan["env"]["PULL_REQUEST"], "${{ inputs.pull_request }}")
+        for name in ("platform", "windows", "codegen-swap"):
+            self.assertIn("needs.plan.outputs.native != 'none'", jobs[name]["if"])
+        run = jobs["complete"]["steps"][0]["run"]
+        for native, mac, expected in (("none", "skipped", 0), ("all", "skipped", 1),
+                                      ("", "skipped", 1), ("none", "success", 0)):
+            with tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "outputs"
+                env = {**os.environ, "PLAN_RESULT": "success", "MAC_RESULT": mac,
+                       "WINDOWS_RESULT": mac, "SWAP_RESULT": mac, "PORTS_RESULT": "skipped",
+                       "PORTS": "none", "NATIVE": native, "CHECKED_SHA": "a" * 40,
+                       "PROFILE": "pr", "GITHUB_OUTPUT": str(output)}
+                completed = subprocess.run(["bash", "-e", "-c", run], env=env)
+                self.assertEqual(completed.returncode != 0, bool(expected))
+
     def test_hybrid_and_ports_skip_pull_requests(self):
         # Neither is required; both run on main, nightly and manual runs (#1479).
         hybrid = workflow("hybrid.yml")
@@ -411,9 +430,10 @@ class PlatformWorkflowTests(unittest.TestCase):
                         "Self-host codegen differentials", "Native and acceptance scripts"):
             self.assertIn(context, job["if"])
             self.assertIn(f'"{context}"', find)
-        self.assertIn('"$states" != 3', find)
-        self.assertIn('"$codegen" != success', find)
-        self.assertIn('"$part2" != success', find)
+        # They start alongside BuildBuddy: once the acceptance check is green
+        # and no BuildBuddy check has failed.
+        self.assertIn('"$acceptance" != success', find)
+        self.assertIn('.state == "failure" or .state == "error"', find)
         names = [s.get("uses") or s.get("name") for s in steps]
         gate = names.index("./.gate/.github/actions/merge-gate")
         dispatch = next(i for i, s in enumerate(steps) if "gh workflow run" in s.get("run", ""))

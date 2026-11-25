@@ -3,7 +3,8 @@ name: Platforms
 # macOS and Windows run only host-specific tests and native executables.
 # Run on pushes to main, nightly, on merge queue groups and by dispatch.
 # Pull requests do not trigger it directly (#1479): once a pull request can
-# merge and both BuildBuddy checks are green, `Native platform checks`
+# merge, `Native and acceptance scripts` is green and no BuildBuddy check has
+# failed, `Native platform checks`
 # (native-checks.yml) dispatches it on the PR branch with `pull_request` set,
 # and its macOS and Windows jobs report the required checks on the PR head.
 # That run skips the Linux port shards, which run on main and nightly. The
@@ -71,6 +72,8 @@ jobs:
       groups: ${{ steps.plan.outputs.groups || steps.legacy_plan.outputs.groups }}
       ports: ${{ steps.ports.outputs.crates || steps.legacy_ports.outputs.crates }}
       shards: ${{ steps.shards.outputs.shards || steps.historical_shards.outputs.shards }}
+      # `none` for a dispatched pull request that changes only documentation.
+      native: ${{ steps.plan.outputs.native }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -112,6 +115,7 @@ jobs:
         env:
           REQUESTED_PROFILE: ${{ inputs.profile || (github.event_name == 'schedule' && 'full') || 'pr' }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          PULL_REQUEST: ${{ inputs.pull_request }}
         run: aspect ci plan-platform-workflow
       - id: legacy_plan
         if: ${{ hashFiles('.aspect/platform-plan.axl') == '' }}
@@ -181,17 +185,14 @@ jobs:
           path: ${{ runner.temp }}/platform-plan.json
   # Linux owns the workspace, proof, lint and general acceptance suites.
   # These lanes exercise only host-specific implementations and native ABI.
+  # A documentation-only pull request skips them (plan output `native`).
+  # This job has no matrix: a skipped matrix job reports under its unexpanded
+  # name, so the required `macOS (AArch64)` check would never arrive.
   platform:
     needs: plan
-    if: ${{ always() && !cancelled() }}
-    name: ${{ matrix.name }}${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macOS (AArch64)
-            os: macos-latest
-    runs-on: ${{ matrix.os }}
+    if: ${{ always() && !cancelled() && needs.plan.outputs.native != 'none' }}
+    name: macOS (AArch64)${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
+    runs-on: macos-latest
     # Passing runs took 30-55 min with a debug "Test the codegen swap point",
     # so 60 timed out on many PRs on 2026-11-25. Windows has 120 (#1537).
     timeout-minutes: 120
@@ -281,7 +282,7 @@ jobs:
 
   windows:
     needs: plan
-    if: ${{ always() && !cancelled() }}
+    if: ${{ always() && !cancelled() && needs.plan.outputs.native != 'none' }}
     name: Windows (x86_64 MSVC)${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
     runs-on: windows-latest
     # The debug codegen swap tests took 35-61 minutes on windows-latest,
@@ -378,7 +379,7 @@ jobs:
   # pilot, control and walk-state swaps, every world for the others.
   codegen-swap:
     needs: plan
-    if: ${{ always() && !cancelled() && needs.plan.result == 'success' }}
+    if: ${{ always() && !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.native != 'none' }}
     name: Codegen swap point (Linux for ${{ matrix.name }})${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
     strategy:
       fail-fast: false
@@ -533,13 +534,17 @@ jobs:
           SWAP_RESULT: ${{ needs.codegen-swap.result }}
           PORTS_RESULT: ${{ needs.ports.result }}
           PORTS: ${{ needs.plan.outputs.ports }}
+          NATIVE: ${{ needs.plan.outputs.native }}
           CHECKED_SHA: ${{ needs.plan.outputs.sha }}
           PROFILE: ${{ needs.plan.outputs.profile }}
         run: |
           test "$PLAN_RESULT" = success
-          test "$MAC_RESULT" = success
-          test "$WINDOWS_RESULT" = success
-          test "$SWAP_RESULT" = success
+          # A documentation-only pull request skips the native jobs.
+          if [ "$NATIVE" != none ]; then
+            test "$MAC_RESULT" = success
+            test "$WINDOWS_RESULT" = success
+            test "$SWAP_RESULT" = success
+          fi
           # The shards are skipped only when no port is affected.
           if [ "$PORTS_RESULT" != skipped ] || [ "$PORTS" != none ]; then
             test "$PORTS_RESULT" = success

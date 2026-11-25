@@ -138,17 +138,26 @@ finished (#1321). To keep pull requests within the limit:
   regenerates the census after each push to main into one "Refresh the Rust
   census" pull request, which changes only that file.
 - `macOS (AArch64)` and `Windows (x86_64 MSVC)` start only when a pull
-  request is ready to merge. Platforms no longer runs on pull request pushes;
+  request can merge. Platforms no longer runs on pull request pushes;
   `Native platform checks` (`.github/workflows/native-checks.yml`) runs on
-  each BuildBuddy status and, once `Test all targets` and `Native and
-  acceptance scripts` are both green on the head commit and the merge gate
-  passes, dispatches Platforms on the branch with `pull_request` set. That
-  run tests `refs/pull/<n>/merge`, as pull request runs did, and reports both
-  required checks on the head commit; until then they show as expected and
-  the pull request cannot merge. A new push starts over when its own
-  BuildBuddy checks go green. To start them by hand, run Platforms from the
-  Actions tab on the branch with profile `pr`, `checkout_ref`
-  `refs/pull/<n>/merge` and `pull_request` `<n>`.
+  each BuildBuddy status and, once `Native and acceptance scripts` is green
+  on the head commit, no BuildBuddy check has failed and the merge gate
+  passes, dispatches Platforms on the branch with `pull_request` set. So
+  macOS and Windows run alongside the slower BuildBuddy checks: waiting for
+  all of them to go green added about 40 minutes (a median of 43 minutes
+  from push to the last BuildBuddy status, against 7 for the acceptance
+  check, November 2026). A BuildBuddy check that fails later leaves that run
+  going, and the next push cancels it. A pull request that changes only
+  documentation (`docs/` and top-level Markdown files) skips the macOS,
+  Windows and codegen swap jobs: the plan sets its `native` output to
+  `none`, the jobs report as skipped, and `Platform validation complete`
+  accepts that. The run tests `refs/pull/<n>/merge`,
+  as pull request runs did, and reports both required checks on the head
+  commit; until then they show as expected and the pull request cannot
+  merge. A new push starts over when its own acceptance check goes green. To
+  start them by hand, run Platforms from the Actions tab on the branch with
+  profile `pr`, `checkout_ref` `refs/pull/<n>/merge` and `pull_request`
+  `<n>`.
 
 The native executable cases are shared with `aspect acceptance test-native-host`;
 Use `aspect ci test-native-executables` on macOS. Windows CI runs
