@@ -32,6 +32,8 @@ def _platform_tests(ctx: TaskContext) -> int:
         "native-cli",
         "platform-plan-integration",
         "cargo-metadata",
+        "bazel-cli",
+        "tls-fixtures",
         "wasm-fixture-build",
         "crmath-reference",
         "rust-test-conversion",
