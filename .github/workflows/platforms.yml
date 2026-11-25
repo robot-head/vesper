@@ -79,7 +79,7 @@ jobs:
       - if: ${{ hashFiles('.aspect/version.axl') != '' }}
         uses: ./.github/actions/aspect
       - name: Check out Aspect tasks for a historical revision
-        if: ${{ hashFiles('.aspect/platform-plan.axl') == '' || hashFiles('.aspect/port-harness-selection.axl') == '' }}
+        if: ${{ hashFiles('.aspect/platform-plan.axl') == '' || hashFiles('.aspect/port-harness-selection.axl') == '' || hashFiles('.aspect/workflow-policy-test.axl') == '' }}
         uses: actions/checkout@v4
         with:
           ref: ${{ github.workflow_sha }}
@@ -88,9 +88,10 @@ jobs:
           sparse-checkout: |
             .aspect
             .github/actions/aspect
-      - if: ${{ hashFiles('.aspect/platform-plan.axl') == '' || hashFiles('.aspect/port-harness-selection.axl') == '' }}
+      - if: ${{ hashFiles('.aspect/platform-plan.axl') == '' || hashFiles('.aspect/port-harness-selection.axl') == '' || hashFiles('.aspect/workflow-policy-test.axl') == '' }}
         uses: ./.platform-legacy-tools/.github/actions/aspect
-      - uses: actions/setup-python@v5
+      - if: ${{ hashFiles('.aspect/workflow-policy-test.axl') == '' }}
+        uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - name: Verify the dispatched pull request commit
@@ -108,17 +109,18 @@ jobs:
           PLATFORM_WORKSPACE: ${{ github.workspace }}
           PR_HEAD: ${{ github.sha }}
         run: aspect ci verify-platform-dispatch
-      - name: Install workflow test dependency
-        run: python -m pip install PyYAML==6.0.2
       - name: Check the Aspect command runner
         if: ${{ hashFiles('.aspect/version.axl') != '' }}
         run: aspect ci tests aspect-unit
       - name: Check CI policy and workflow regressions
-        if: ${{ hashFiles('.aspect/version.axl') != '' }}
+        if: ${{ hashFiles('.aspect/workflow-policy-test.axl') != '' }}
         run: aspect ci platform-tests
       - name: Check CI policy and workflow regressions for a historical checkout
-        if: ${{ hashFiles('.aspect/version.axl') == '' }}
-        run: python -m unittest discover -s scripts/ci/tests -p 'test_platform*.py'
+        if: ${{ hashFiles('.aspect/workflow-policy-test.axl') == '' }}
+        working-directory: .platform-legacy-tools
+        env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
+        run: aspect ci test-historical-platform-regressions
       - id: plan
         if: ${{ hashFiles('.aspect/platform-plan.axl') != '' }}
         env:
@@ -305,14 +307,17 @@ jobs:
         env:
           EXPECTED_SHA: ${{ needs.plan.outputs.sha }}
         run: ./scripts/windows/verify-platform-checkout.ps1
-      - if: ${{ hashFiles('scripts/windows/verify-platform-checkout.ps1') == '' }}
+      - if: ${{ hashFiles('scripts/windows/verify-platform-checkout.ps1') == '' || hashFiles('scripts/windows/test-native-executables.ps1') == '' || hashFiles('scripts/windows/test-port-abi.ps1') == '' }}
         uses: actions/checkout@v4
         with:
           ref: ${{ github.workflow_sha }}
           path: .platform-verify-tools
           persist-credentials: false
+          sparse-checkout-cone-mode: false
           sparse-checkout: |
-            scripts/windows
+            /scripts/windows/
+            /scripts/native-example-cases.txt
+            /scripts/port-abi-plan.json
       - name: Verify exact historical checkout
         if: ${{ hashFiles('scripts/windows/verify-platform-checkout.ps1') == '' }}
         shell: pwsh
@@ -337,10 +342,12 @@ jobs:
         run: ./scripts/windows/test-native-executables.ps1
       - name: Validate native COFF executables in a historical checkout
         if: ${{ hashFiles('scripts/windows/test-native-executables.ps1') == '' }}
+        shell: pwsh
         env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
           VESPER_NATIVE_BINARY: target/debug/vesper.exe
           VESPER_NATIVE_SUFFIX: .exe
-        run: bash scripts/ci/test-native-executables.sh
+        run: ./.platform-verify-tools/scripts/windows/test-native-executables.ps1
       - name: Test the Cranelift C-ABI shim
         # Self-hosting SH0 lane 4 (#1126): Vesper drives Cranelift through
         # crates/vesper-cranelift-sys, links the object it builds and runs it.
@@ -363,10 +370,12 @@ jobs:
         run: ./scripts/windows/test-port-abi.ps1
       - name: Test the Vesper port export ABI in a historical checkout
         if: ${{ hashFiles('scripts/windows/test-port-abi.ps1') == '' }}
+        shell: pwsh
         env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
           VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/vesper.exe
           VESPER_PORT_HARNESS_SCOPE: abi
-        run: bash scripts/test-port-harness.sh
+        run: ./.platform-verify-tools/scripts/windows/test-port-abi.ps1
 
   # The ported crates' tests and divergence checks are platform-neutral, so
   # they run once, here (#1010). Bazel on BuildBuddy builds the same ports.

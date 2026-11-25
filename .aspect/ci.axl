@@ -3,7 +3,6 @@ load("./lib/script.axl", "command_task", "run_command", "script_task")
 
 
 tests_aspect_tasks = script_task("aspect-tasks", ["ci", "tests"], "scripts/ci/tests/test_platform_aspect_tasks.py", "python3")
-tests_workflows = script_task("workflows", ["ci", "tests"], "scripts/ci/tests/test_platform_workflows.py", "python3")
 
 def _platform_tests(ctx: TaskContext) -> int:
     root = ctx.std.env.aspect_root_dir()
@@ -29,6 +28,7 @@ def _platform_tests(ctx: TaskContext) -> int:
         "rust-census",
         "flip-gate",
         "profile-runner",
+        "workflows",
     ]:
         check(ctx, ctx.std.env.current_exe(), ["ci", "tests", suite], root)
     return run_command(ctx, "python3", ["-m", "unittest", "discover", "-s", "scripts/ci/tests", "-p", "test_platform*.py"], True, "")
@@ -39,6 +39,24 @@ platform_tests = task(
     summary = "Run the platform planning, policy and workflow tests",
     implementation = _platform_tests,
     args = {"tool_args": args.trailing_var_args(description = "Optional unittest flags for the platform tests.")},
+)
+
+def _historical_platform_tests(ctx):
+    root = ctx.std.env.var("PLATFORM_WORKSPACE")
+    if not root or root == ctx.std.env.aspect_root_dir():
+        ctx.std.process.exit(2, "Set PLATFORM_WORKSPACE to the historical checkout")
+    check(ctx, "python3", ["-m", "pip", "install", "PyYAML==6.0.2"], root)
+    if ctx.std.fs.exists(root + "/.aspect/version.axl"):
+        check(ctx, ctx.std.env.current_exe(), ["ci", "platform-tests"], root)
+    else:
+        check(ctx, "python3", ["-m", "unittest", "discover", "-s", "scripts/ci/tests", "-p", "test_platform*.py"], root)
+    return 0
+
+historical_platform_tests = task(
+    kind = "test-historical-platform-regressions",
+    group = ["ci"],
+    summary = "Run the regression suite shipped with an older release checkout",
+    implementation = _historical_platform_tests,
 )
 
 pulse_port_tests = command_task(
