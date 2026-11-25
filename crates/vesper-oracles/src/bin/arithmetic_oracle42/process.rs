@@ -13,8 +13,8 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const MODEL: &str = include_str!("../../../lean/RewriteWitness.lean");
-const DRIVER: &str = include_str!("../../../lean/ArithmeticOracle.lean");
+const MODEL: &str = include_str!("../../../../../lean/RewriteWitness.lean");
+const DRIVER: &str = include_str!("../../../../../lean/ArithmeticOracle.lean");
 #[cfg(test)]
 const MARKER: &[u8] = b"oracle42-transport-marker";
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);

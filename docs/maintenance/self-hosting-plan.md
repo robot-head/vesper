@@ -111,7 +111,7 @@ Non-test lines in `src/` (code above the first `#[cfg(test)]`, without
 | Editor and test tooling | 17,100 | `lsp`, `tooling`, `doctest`, `test_runner` | salsa | SH5 |
 | Package and front-end glue | 12,200 | `packages`, `package_graph`, `interface`, `database`, `pact_frontend`, `forge_frontend` | salsa, serde_json | SH1/SH2 |
 | CLI commands | 12,200 | `*_commands`, `main`, `lib` | serde_json | SH0-2, SH5 |
-| Test oracles | 11,700 | `src/bin/*42` | logos | stays Rust (diverse oracles) |
+| Test oracles | 11,700 | `src/bin/*42` (now `crates/vesper-oracles`, #1825) | logos | stays Rust (diverse oracles) |
 | IR and optimizer | 10,200 | `ir`, `ir_check`, `ir_opt`, `ir_inline`, `optimize`, `bounds_hoist` | egg, egglog | SH3 |
 | Other backends | 9,500 | `wasm_backend`, `ebpf_backend` | wasm-encoder, wit-component | SH4 |
 | Verified backend | 9,200 | `verified_codegen` | none | SH6 (see below) |
@@ -254,7 +254,7 @@ corpus: `vesper check` on 537 files under `bootstrap/corpus`, `examples/` and
 | `effects` (capability rules, `capability_effects::check_world`; wired into `vesper-hybrid` `EffectsCheckTable`) | SH2-8 (#1180) | 0.464x (debug hybrid, 554 files / 2,202 runs) | not measured | 0.28x wall (0.49x with input encoding) over 680 corpus, fixture and mutant worlds; 0 of 2,202 hybrid runs differ | [self-host-check-effects.md](../parallel-results/self-host-check-effects.md) |
 | `dyn` (`dyn_fn` + `dyn_trait`; differential only, swap is a follow-up) | SH2-11 (#1183) | not swapped | not swapped | 0.28x wall over 930 sources forced, 0.70x on the dyn suites | [self-host-check-dyn.md](../parallel-results/self-host-check-dyn.md) |
 | `names_packages` (package assembler: imports, re-exports, renaming; not swapped yet) | SH2-6 (#1178) | not swapped | not swapped | 0.72x-0.87x wall and 1.54x Ir of `packages::load` at first (two parses per module until SH2-1); 1.62x Ir with value enums and constants (#1310) | [self-host-check-names-packages.md](../parallel-results/self-host-check-names-packages.md) |
-| `fip` checks (`fip::check_world`; not swapped yet, part 1 of the lane) | SH2-12 (#1184) | not swapped | not swapped | 0.92x wall with decoding (0.56x checks only) over 315 worlds; encoding the input costs 2.5x of Rust's check | [self-host-check-fip.md](../parallel-results/self-host-check-fip.md) |
+| `fip` checks (`fip::check_world`; wired into `vesper-hybrid` `FipCheckTable`, part 2 of the lane) | SH2-12 (#1184) | 0.470x (debug hybrid, 554 files / 2,202 runs) | not measured | 0.92x wall with decoding (0.56x checks only) over 315 worlds; 0 of 2,202 hybrid runs differ | [self-host-check-fip.md](../parallel-results/self-host-check-fip.md) |
 | `pact` declaration pass & coherence-gated session (part 2b: `@vesper/check-pact` opens session, checks coherence, and solves `Elaborator::select` queries in the hybrid; Rust stays default) | SH2-13 (#1185) | 0.355x (debug hybrid, 554 files / 2,206 runs) | not measured | 0.03x wall with encode/decode (0.01x pass alone) over 34 corpus worlds in release; 0 of 1,808 session diffs, 0 of 2,206 hybrid runs differ | [self-host-check-pact.md](../parallel-results/self-host-check-pact.md) |
 | tensor types (`infer`, `dim`, `types`, `elaborate`; wired into `vesper-hybrid` `TensorCheckTable`) | SH2-14 (#1186) | 0.324x (debug hybrid, 554 files / 2,202 runs) | not measured | `0/2,202` hybrid runs differ; `0/94` elaborate diffs; 0.28x wall on 40 rejected fixtures, 0.49x on 852 corpus sources | [self-host-check-tensor-types.md](../parallel-results/self-host-check-tensor-types.md) |
 | bounds hoisting (`bounds_hoist::run` through the `hoist` hook; whole pass, rewrite included) | SH3-12 (#1251) | not measured (lane 14) | not measured | 1.44x wall alone, 1.50x on input bytes, 2.05x with encode and decode, over 294 corpus programs (1,225 loops versioned, 0 diffs) | [self-host-bounds-hoist.md](../parallel-results/self-host-bounds-hoist.md) |
@@ -321,5 +321,5 @@ about 2k to 6k lines of Rust in a day, including the gap reports.
 ## Not in this plan
 
 - (Superseded 2026-11-21: deletion at the 1.5x bar and the stays-Rust crates are now in [rust-exit-plan.md](rust-exit-plan.md).)
-- The test oracles in `src/bin/*42`: they are diverse oracles, like
+- The test oracles (`src/bin/*42`, now `crates/vesper-oracles`): they are diverse oracles, like
   `vesper-codegen-verified`, and keep their value by staying Rust.

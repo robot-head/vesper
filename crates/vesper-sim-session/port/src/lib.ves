@@ -15,6 +15,12 @@
 // feature. Every function is total: a virtual-clock overflow is a returned
 // outcome, never a raise.
 
+use self::failure::{
+    FailureTable,
+    failure_table_clone,
+    failure_table_new,
+    failure_table_next
+};
 use self::process::{
     ProcessTable,
     process_table_clone,
@@ -25,7 +31,10 @@ use self::process::{
     process_table_len,
     process_table_new,
     process_table_restart,
-    validate_model_bounds
+    validate_log_bounds,
+    validate_model_bounds,
+    validate_network_bounds,
+    validate_process_timeline
 };
 use self::sha256::{
     sha256_digest
@@ -1599,4 +1608,41 @@ pub fn sim_validate_model_bounds(
         n_faults,
         n_failures
     )
+}
+
+// Failure-injection occurrence counter and rule lookup (part 8 of #1342).
+pub fn sim_failure_table_new(in rules: Slice[u64]) -> FailureTable {
+    failure_table_new(in rules)
+}
+
+pub fn sim_failure_table_clone(in t: FailureTable) -> FailureTable {
+    failure_table_clone(in t)
+}
+
+pub fn sim_failure_table_next(inout t: FailureTable, target_id: u64, op: u64) -> (u64, bool, u64) {
+    failure_table_next(inout t, target_id, op)
+}
+
+pub fn sim_validate_log_bounds(max_records: u64, max_bytes: u64, max_record_bytes: u64) -> bool {
+    validate_log_bounds(max_records, max_bytes, max_record_bytes)
+}
+
+pub fn sim_validate_network_bounds(
+    max_in_flight: u64,
+    max_inbox: u64,
+    max_message_bytes: u64,
+    timeout_code: u64,
+    unreachable_code: u64
+) -> u8 {
+    validate_network_bounds(
+        max_in_flight,
+        max_inbox,
+        max_message_bytes,
+        timeout_code,
+        unreachable_code
+    )
+}
+
+pub fn sim_validate_process_timeline(in events: Slice[u64]) -> (bool, u64) {
+    validate_process_timeline(in events)
 }

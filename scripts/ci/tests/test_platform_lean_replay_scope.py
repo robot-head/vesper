@@ -30,7 +30,7 @@ class LeanReplayScope(unittest.TestCase):
     def test_lean_facing_pr_runs_replays(self):
         for path in ["lean/Foundations.lean", "tools/logos42/pins.json", "src/lean_ir.rs",
                      "tests/lean4lean_map42.rs", "MODULE.bazel", "src/optimize/witness_lean.rs",
-                     "tests/fixtures/resource_oracle42/fault_peer.py",
+                     "crates/vesper-oracles/tests/fixtures/resource_oracle42/fault_peer.py",
                      "docs/rfcs/resource-model42-source-manifest.json",
                      "scripts/ci/test-lean-replay.sh"]:
             with self.subTest(path=path):
@@ -40,13 +40,17 @@ class LeanReplayScope(unittest.TestCase):
         self.assertEqual(scope.flags(branch="feature", changed=["docs/x.md"], messages="fix\n[ci full]\n"), [])
 
     def test_every_tagged_test_has_a_trigger(self):
-        build = (ROOT / "BUILD.bazel").read_text(encoding="utf-8")
-        tagged = re.findall(r'"test/([a-z0-9_]+)": \[[^\]]*"lean_replay"', build)
+        # The root package and the `*42` oracles' crate (#1825) tag them.
+        tagged = []
+        for package in ["", "crates/vesper-oracles"]:
+            build = (ROOT / package / "BUILD.bazel").read_text(encoding="utf-8")
+            for name in re.findall(r'"test/([a-z0-9_]+)": \[[^\]]*"lean_replay"', build):
+                tagged.append(f"{package}/tests/{name}.rs".lstrip("/"))
         self.assertGreaterEqual(len(tagged), 18)
-        for name in tagged:
-            with self.subTest(test=name):
-                self.assertTrue((ROOT / "tests" / f"{name}.rs").is_file())
-                self.assertTrue(scope.triggered([f"tests/{name}.rs"]))
+        for source in tagged:
+            with self.subTest(test=source):
+                self.assertTrue((ROOT / source).is_file())
+                self.assertTrue(scope.triggered([source]))
 
 
 if __name__ == "__main__":

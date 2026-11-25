@@ -1,0 +1,13 @@
+// @vesper/hybrid-backend-checks: `vesper::native_verifiers::verify_emitted`
+// served from Vesper in the hybrid Stage 2 build (SH4 lane 17, #1291),
+// through the `verifiers` hook of `vesper::codegen_swap`.
+
+// @export abi 4
+
+use @vesper/backend-checks::{
+    backend_verify_report_bytes
+};
+
+pub fn verify_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    backend_verify_report_bytes(in input)
+}

@@ -1,0 +1,20 @@
+load("./lib/script.axl", "command_task")
+
+bazel_helpers = command_task(
+    "bazel-helpers",
+    ["maintenance"],
+    "Run a function from scripts/bazel-lib.sh (bazel_executable, bazel_exec or bazel_prebuild)",
+    "sh",
+    [
+        "-eu",
+        "-c",
+        """
+. ./scripts/bazel-lib.sh
+case "${1:-}" in
+    bazel_executable|bazel_exec|bazel_prebuild) "$@" ;;
+    *) echo "usage: aspect maintenance bazel-helpers -- {bazel_executable|bazel_exec|bazel_prebuild} [args...]" >&2; exit 2 ;;
+esac
+""",
+        "bazel-helpers",
+    ],
+)

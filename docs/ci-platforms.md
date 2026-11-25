@@ -158,8 +158,8 @@ selected, the tagged replay tests on its own runner. Both status checks
 remain required for merge and release.
 
 The Lean/Logos replay tests include `lean4lean_*42`, `logos42_acceptance`,
-`oracle42_acceptance`, `resource_oracle42`, `resource_model42` and
-`replay42_kernel`. They run on every push to `main` and on pull requests
+`oracle42_acceptance`, `resource_oracle42` (those three in
+`crates/vesper-oracles`), `resource_model42` and `replay42_kernel`. They run on every push to `main` and on pull requests
 that touch paths in `scripts/ci/lean_replay_scope.py`. Put `[ci full]` in a
 PR commit message to force a replay. The replay step queries the tagged
 test labels and builds only those targets and their dependencies.

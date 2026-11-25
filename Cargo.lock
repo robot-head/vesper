@@ -6550,6 +6550,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-oracles"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "vesper",
+]
+
+[[package]]
 name = "vesper-pact"
 version = "0.1.0"
 dependencies = [

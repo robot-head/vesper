@@ -20,54 +20,54 @@ pub const PROFILE: &str = "vesper.logos42/2";
 pub const LEAN_COMMIT: &str = "eb6cafb7290e8bd5f2937522d8d804f58f02bafc";
 pub const UPSTREAM: &str = "8ce95bd31f92a75670cc6e003c48a664b795e433";
 pub const EXPORTER: &str = "df81913eee5519d5a88ae5b0fd701b5298cc29ab";
-pub const PINS: &str = include_str!("../../../tools/logos42/pins.json");
-pub const SOURCE_MANIFEST: &str = include_str!("../../../tools/logos42/source-manifest.json");
+pub const PINS: &str = include_str!("../../../../../tools/logos42/pins.json");
+pub const SOURCE_MANIFEST: &str = include_str!("../../../../../tools/logos42/source-manifest.json");
 pub const RESOURCE_SOURCE_MANIFEST: &str =
-    include_str!("../../../tools/logos42/resource-source-manifest.json");
-pub const KNOWN_FIXES: &str = include_str!("../../../tools/logos42/known-fixes.json");
+    include_str!("../../../../../tools/logos42/resource-source-manifest.json");
+pub const KNOWN_FIXES: &str = include_str!("../../../../../tools/logos42/known-fixes.json");
 pub const PATCHES: [&[u8]; 1] = [include_bytes!(
-    "../../../tools/logos42/patches/lean435-primitives.patch"
+    "../../../../../tools/logos42/patches/lean435-primitives.patch"
 )];
 pub const ADAPTER_SOURCES: [(&str, &[u8]); 10] = [
     (
         "Cargo.toml",
-        include_bytes!("../../../tools/logos42/Cargo.toml"),
+        include_bytes!("../../../../../tools/logos42/Cargo.toml"),
     ),
     (
         "Cargo.lock",
-        include_bytes!("../../../tools/logos42/Cargo.lock"),
+        include_bytes!("../../../../../tools/logos42/Cargo.lock"),
     ),
     (
         "bridge/Cargo.toml",
-        include_bytes!("../../../tools/logos42/bridge/Cargo.toml"),
+        include_bytes!("../../../../../tools/logos42/bridge/Cargo.toml"),
     ),
     (
         "bridge/src/main.rs",
-        include_bytes!("../../../tools/logos42/bridge/src/main.rs"),
+        include_bytes!("../../../../../tools/logos42/bridge/src/main.rs"),
     ),
     (
         "Main.lean",
-        include_bytes!("../../../tools/logos42/Main.lean"),
+        include_bytes!("../../../../../tools/logos42/Main.lean"),
     ),
     (
         "lakefile.toml",
-        include_bytes!("../../../tools/logos42/lakefile.toml"),
+        include_bytes!("../../../../../tools/logos42/lakefile.toml"),
     ),
     (
         "lake-manifest.json",
-        include_bytes!("../../../tools/logos42/lake-manifest.json"),
+        include_bytes!("../../../../../tools/logos42/lake-manifest.json"),
     ),
     (
         "lean-toolchain",
-        include_bytes!("../../../tools/logos42/lean-toolchain"),
+        include_bytes!("../../../../../tools/logos42/lean-toolchain"),
     ),
     (
         "LogosControls.lean",
-        include_bytes!("../../../tools/logos42/LogosControls.lean"),
+        include_bytes!("../../../../../tools/logos42/LogosControls.lean"),
     ),
     (
         "controls/cases.json",
-        include_bytes!("../../../tools/logos42/controls/cases.json"),
+        include_bytes!("../../../../../tools/logos42/controls/cases.json"),
     ),
 ];
 

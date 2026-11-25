@@ -116,7 +116,7 @@ fn digest(value: &Value) -> [u8; 32] {
 }
 fn controls() -> Vec<ExpectedControl> {
     let manifest: Value =
-        serde_json::from_slice(include_bytes!("../tools/logos42/known-fixes.json")).unwrap();
+        serde_json::from_slice(include_bytes!("../../../tools/logos42/known-fixes.json")).unwrap();
     let controls: Vec<ExpectedControl> =
         serde_json::from_value(manifest["controls"].clone()).unwrap();
     assert_eq!(
@@ -335,16 +335,16 @@ fn genuine_positive(
     }
     assert_eq!(
         digest(&tools["pins_blake3"]),
-        *blake3::hash(include_bytes!("../tools/logos42/pins.json")).as_bytes()
+        *blake3::hash(include_bytes!("../../../tools/logos42/pins.json")).as_bytes()
     );
     assert_eq!(
         digest(&tools["known_fixes_blake3"]),
-        *blake3::hash(include_bytes!("../tools/logos42/known-fixes.json")).as_bytes()
+        *blake3::hash(include_bytes!("../../../tools/logos42/known-fixes.json")).as_bytes()
     );
     assert_eq!(
         digest(&tools["resource_bundle_blake3"]),
         *blake3::hash(include_bytes!(
-            "../tools/logos42/resource-source-manifest.json"
+            "../../../tools/logos42/resource-source-manifest.json"
         ))
         .as_bytes()
     );
@@ -435,9 +435,9 @@ fn genuine_positive(
         if index < 2 {
             assert!(target["resource"].is_null());
             let source = if index == 0 {
-                include_bytes!("../lean/RewriteWitness.lean").as_slice()
+                include_bytes!("../../../lean/RewriteWitness.lean").as_slice()
             } else {
-                include_bytes!("../lean/ArithmeticOracle.lean").as_slice()
+                include_bytes!("../../../lean/ArithmeticOracle.lean").as_slice()
             };
             assert_eq!(target["source"]["bytes"], source.len());
             assert_eq!(
@@ -532,7 +532,7 @@ fn inspect_artifacts(parent: &Path, report: &Value) {
     }
     let association = &report["targets"][2]["resource"];
     let bundle: Value = serde_json::from_slice(include_bytes!(
-        "../tools/logos42/resource-source-manifest.json"
+        "../../../tools/logos42/resource-source-manifest.json"
     ))
     .unwrap();
     assert_eq!(bundle["schema"], 1);
@@ -575,14 +575,14 @@ fn inspect_artifacts(parent: &Path, report: &Value) {
     assert_eq!(
         digest(&association["snapshot_tool"]["blake3"]),
         *blake3::hash(include_bytes!(
-            "../tools/resource-model42/KernelSnapshot.lean"
+            "../../../tools/resource-model42/KernelSnapshot.lean"
         ))
         .as_bytes()
     );
     assert_eq!(
         digest(&association["source_manifest_blake3"]),
         *blake3::hash(include_bytes!(
-            "../docs/rfcs/resource-model42-source-manifest.json"
+            "../../../docs/rfcs/resource-model42-source-manifest.json"
         ))
         .as_bytes()
     );

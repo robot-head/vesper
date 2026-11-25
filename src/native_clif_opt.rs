@@ -80,6 +80,8 @@ pub fn run(func: &mut ir::Function) {
     thread_constant_param_jumps(func);
     propagate_branch_conditions(func);
     remove_constant_params(func);
+    fold_narrow_extends(func);
+    fold_trivial_arith_and_bool_extends(func);
     fold_constant_branches(func);
     merge_blocks(func);
     dense_icmp_chains_to_br_table(func);
@@ -2354,8 +2356,68 @@ fn fold_narrow_extends(func: &mut ir::Function) {
     }
 }
 
-/// Fold identity `imul_imm 1`/`0`, `iadd_imm 0`, and zero-comparisons or
-/// branches on `uextend`/`sextend` of narrower boolean values.
+fn eval_icmp(cc: ir::condcodes::IntCC, ty: Type, a: i64, b: i64) -> Option<bool> {
+    use cranelift_codegen::ir::condcodes::IntCC;
+    let bits = ty.bits();
+    if !matches!(bits, 8 | 16 | 32 | 64) {
+        return None;
+    }
+    let mask = if bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    let ua = (a as u64) & mask;
+    let ub = (b as u64) & mask;
+    let shift = 64 - bits;
+    let sa = ((ua << shift) as i64) >> shift;
+    let sb = ((ub << shift) as i64) >> shift;
+    Some(match cc {
+        IntCC::Equal => ua == ub,
+        IntCC::NotEqual => ua != ub,
+        IntCC::UnsignedLessThan => ua < ub,
+        IntCC::UnsignedLessThanOrEqual => ua <= ub,
+        IntCC::UnsignedGreaterThan => ua > ub,
+        IntCC::UnsignedGreaterThanOrEqual => ua >= ub,
+        IntCC::SignedLessThan => sa < sb,
+        IntCC::SignedLessThanOrEqual => sa <= sb,
+        IntCC::SignedGreaterThan => sa > sb,
+        IntCC::SignedGreaterThanOrEqual => sa >= sb,
+    })
+}
+
+fn eval_binary_int(op: Opcode, ty: Type, a: i64, b: i64) -> Option<i64> {
+    let bits = ty.bits();
+    if !matches!(bits, 8 | 16 | 32 | 64) {
+        return None;
+    }
+    let mask = if bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    let ua = (a as u64) & mask;
+    let ub = (b as u64) & mask;
+    let shift = 64 - bits;
+    let sa = ((ua << shift) as i64) >> shift;
+    let shift_amt = (b as u32) & (bits - 1);
+    let res = match op {
+        Opcode::Iadd => ua.wrapping_add(ub) & mask,
+        Opcode::Isub => ua.wrapping_sub(ub) & mask,
+        Opcode::Imul => ua.wrapping_mul(ub) & mask,
+        Opcode::Band => ua & ub,
+        Opcode::Bor => ua | ub,
+        Opcode::Bxor => ua ^ ub,
+        Opcode::Ishl => ua.wrapping_shl(shift_amt) & mask,
+        Opcode::Ushr => ua.wrapping_shr(shift_amt) & mask,
+        Opcode::Sshr => (sa.wrapping_shr(shift_amt) as u64) & mask,
+        _ => return None,
+    };
+    Some(res as i64)
+}
+
+/// Fold identity/constant/same-operand integer ops, `select`, and
+/// zero-comparisons or branches on `uextend`/`sextend` of narrower boolean values.
 fn fold_trivial_arith_and_bool_extends(func: &mut ir::Function) {
     let unwrap_ext = |func: &ir::Function, v: Value| -> Option<(ir::Inst, Value)> {
         let v = func.dfg.resolve_aliases(v);
@@ -2431,12 +2493,26 @@ fn fold_trivial_arith_and_bool_extends(func: &mut ir::Function) {
                     }
                     let lc = constant(func, lhs, 1);
                     let rc = constant(func, rhs, 1);
+                    if let (Some(a), Some(b)) = (lc, rc)
+                        && let Some(folded) = eval_binary_int(op, ty, a, b)
+                    {
+                        func.dfg.replace(inst).iconst(ty, folded);
+                        changed = true;
+                        continue;
+                    }
+                    let all_ones = if ty.bits() == 64 {
+                        -1
+                    } else {
+                        (1i64 << ty.bits()) - 1
+                    };
                     let alias_to = match op {
                         Opcode::Iadd | Opcode::Bor | Opcode::Bxor => {
                             if rc == Some(0) {
                                 Some(lhs)
                             } else if lc == Some(0) {
                                 Some(rhs)
+                            } else if lhs == rhs && op == Opcode::Bor {
+                                Some(lhs)
                             } else {
                                 None
                             }
@@ -2454,9 +2530,9 @@ fn fold_trivial_arith_and_bool_extends(func: &mut ir::Function) {
                             }
                         }
                         Opcode::Band => {
-                            if rc == Some(-1) {
+                            if rc == Some(all_ones) || lhs == rhs {
                                 Some(lhs)
-                            } else if lc == Some(-1) {
+                            } else if lc == Some(all_ones) {
                                 Some(rhs)
                             } else {
                                 None
@@ -2469,13 +2545,56 @@ fn fold_trivial_arith_and_bool_extends(func: &mut ir::Function) {
                         func.dfg.clear_results(inst);
                         func.dfg.change_to_alias(dest, target);
                         changed = true;
-                    } else if (op == Opcode::Imul || op == Opcode::Band)
-                        && (lc == Some(0) || rc == Some(0))
+                    } else if ((op == Opcode::Imul || op == Opcode::Band)
+                        && (lc == Some(0) || rc == Some(0)))
+                        || (lhs == rhs && matches!(op, Opcode::Isub | Opcode::Bxor))
                     {
                         func.dfg.replace(inst).iconst(ty, 0);
                         changed = true;
-                    } else if op == Opcode::Bor && (lc == Some(-1) || rc == Some(-1)) {
-                        func.dfg.replace(inst).iconst(ty, -1);
+                    } else if op == Opcode::Bor && (lc == Some(all_ones) || rc == Some(all_ones)) {
+                        func.dfg.replace(inst).iconst(ty, all_ones);
+                        changed = true;
+                    }
+                }
+                InstructionData::Ternary {
+                    opcode: Opcode::Select,
+                    args: [cond, t, f],
+                } => {
+                    let cond = func.dfg.resolve_aliases(cond);
+                    let t = func.dfg.resolve_aliases(t);
+                    let f = func.dfg.resolve_aliases(f);
+                    let target = if t == f {
+                        Some(t)
+                    } else {
+                        constant(func, cond, 1).map(|c| if c != 0 { t } else { f })
+                    };
+                    if let Some(target) = target {
+                        let dest = func.dfg.first_result(inst);
+                        func.layout.remove_inst(inst);
+                        func.dfg.clear_results(inst);
+                        func.dfg.change_to_alias(dest, target);
+                        changed = true;
+                    }
+                }
+                InstructionData::IntCompare {
+                    opcode: Opcode::Icmp,
+                    cond,
+                    args: [lhs, rhs],
+                } => {
+                    let lhs = func.dfg.resolve_aliases(lhs);
+                    let rhs = func.dfg.resolve_aliases(rhs);
+                    let ty = func.dfg.value_type(lhs);
+                    let res = if lhs == rhs {
+                        eval_icmp(cond, ty, 0, 0)
+                    } else if let (Some(a), Some(b)) =
+                        (constant(func, lhs, 1), constant(func, rhs, 1))
+                    {
+                        eval_icmp(cond, ty, a, b)
+                    } else {
+                        None
+                    };
+                    if let Some(res) = res {
+                        func.dfg.replace(inst).iconst(types::I8, i64::from(res));
                         changed = true;
                     }
                 }
@@ -2484,13 +2603,23 @@ fn fold_trivial_arith_and_bool_extends(func: &mut ir::Function) {
                     cond,
                     arg,
                     imm,
-                } if imm.bits() == 0
-                    && matches!(
-                        cond,
-                        ir::condcodes::IntCC::Equal | ir::condcodes::IntCC::NotEqual
-                    ) =>
-                {
-                    if let Some((_, inner)) = unwrap_ext(func, arg) {
+                } => {
+                    let arg = func.dfg.resolve_aliases(arg);
+                    let ty = func.dfg.value_type(arg);
+                    if let Some(a) = constant(func, arg, 1)
+                        && let Some(res) = eval_icmp(cond, ty, a, imm.bits())
+                    {
+                        func.dfg.replace(inst).iconst(types::I8, i64::from(res));
+                        changed = true;
+                        continue;
+                    }
+                    if imm.bits() == 0
+                        && matches!(
+                            cond,
+                            ir::condcodes::IntCC::Equal | ir::condcodes::IntCC::NotEqual
+                        )
+                        && let Some((_, inner)) = unwrap_ext(func, arg)
+                    {
                         let inner_is_cmp = matches!(
                             func.dfg.value_def(inner),
                             ir::ValueDef::Result(def, 0)
@@ -3873,35 +4002,6 @@ fn propagate_branch_conditions(func: &mut ir::Function) {
     };
 
     use cranelift_codegen::ir::condcodes::IntCC;
-
-    let eval_icmp = |cc: IntCC, ty: Type, a: i64, b: i64| -> Option<bool> {
-        let bits = ty.bits();
-        if !matches!(bits, 8 | 16 | 32 | 64) {
-            return None;
-        }
-        let mask = if bits == 64 {
-            u64::MAX
-        } else {
-            (1u64 << bits) - 1
-        };
-        let ua = (a as u64) & mask;
-        let ub = (b as u64) & mask;
-        let shift = 64 - bits;
-        let sa = ((ua << shift) as i64) >> shift;
-        let sb = ((ub << shift) as i64) >> shift;
-        Some(match cc {
-            IntCC::Equal => ua == ub,
-            IntCC::NotEqual => ua != ub,
-            IntCC::UnsignedLessThan => ua < ub,
-            IntCC::UnsignedLessThanOrEqual => ua <= ub,
-            IntCC::UnsignedGreaterThan => ua > ub,
-            IntCC::UnsignedGreaterThanOrEqual => ua >= ub,
-            IntCC::SignedLessThan => sa < sb,
-            IntCC::SignedLessThanOrEqual => sa <= sb,
-            IntCC::SignedGreaterThan => sa > sb,
-            IntCC::SignedGreaterThanOrEqual => sa >= sb,
-        })
-    };
 
     type PropState = (Block, HashMap<Value, bool>, HashMap<Value, i64>);
     let mut stack: Vec<PropState> = vec![(entry, HashMap::new(), HashMap::new())];

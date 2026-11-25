@@ -128,11 +128,11 @@ CRATES = {
     "vesper-crypto-sys": ("shim", "", "", "vetted crypto C-ABI shim (SH6 lane 17)", "17"),
     "vesper-cranelift-sys": ("shim", "", "", "Cranelift C-ABI shim (owner 2026-11-19)", "-"),
     "vesper-codegen-verified": ("diverse", "", "", "DDC auditor, diverse on purpose", "owner"),
+    "vesper-oracles": ("diverse", "", "", "test oracles (*42), diverse on purpose: exempt from the flip gate; moved out of `src/bin` (#1825)", "owner"),
 }
 
 # Root compiler module -> (owner lane(s), Vesper package, status note)
 MODULES = {
-    "bin": ("owner (`diverse`)", "", "test oracles (*42), diverse on purpose: exempt from the flip gate; moved out of `src/` before the retirement"),
     "verified_codegen": ("SH6b", "", "Stage 1 guard; port with the verified-backend breadth track"),
     "lean": ("SH5-18", "vesper-lean-extract", "part 3a 2.37x"),
     "lean_ir": ("SH5-18", "vesper-lean-extract", ""),
@@ -144,16 +144,16 @@ MODULES = {
     "wasm_backend": ("SH4-15, SH5-11, G1-9, G1-10", "vesper-wasm-backend, vesper-wit-component", "0 diffs (#1311); component wrap: flip gate PASS, wrap 0.05x, build 0.67x; swapped in the hybrid (`component`); the port alone lowers loops (#1492), sequences, strings, conversions, Abort/Tail handlers and bit operators (#1506), StdEnv/StdFs over WASI and Box (#1508); @vesper/place-ir builds to wasm and runs like the evaluator; @vesper/front builds to wasm and parses 28 files byte-identical to native (#1508)"),
     "check": ("SH2-7", "vesper-check-core-typing", ""),
     "tooling": ("SH5-15, SH5-17, #1828", "", ""),
-    "lsp": ("SH5-16, SH5-17, #1828", "vesper-lsp, vesper-lsp-features", "navigation: definition 0.82x, documentSymbol 0.65x with the parse kept, 0 diffs; hover and doc links not ported"),
+    "lsp": ("SH5-16, SH5-17, #1828", "vesper-lsp, vesper-lsp-features", "navigation.rs fully ported (definition 0.85x, documentSymbol 0.64x, hover 1.18x, doc links; 0 diffs); not wired"),
     "tensor_types": ("SH2-14", "vesper-check-tensor-types", "0.28-0.49x"),
     "pact_frontend": ("SH2-13", "", "#1225 part 1"),
     "forge_frontend": ("SH1-14", "", "#1157"),
     "native_export": ("SH4-12", "vesper-codegen-export", ""),
-    "ffi_lowering": ("SH4-13", "", ""),
+    "ffi_lowering": ("SH4-13, #1830", "vesper-ffi-lowering", "plans, rewrite, drops and every emission step in Vesper (0 diffs); left: buffers.rs check pass, cpu.rs tables, eval_host.rs"),
     "optimize": ("G1-4", "vesper-optimize", "flip gate PASS: checker 1.12x, producer 0.70x, both 0.79x"),
     "fip": ("SH2-12", "vesper-check-fip", "0.92x"),
     "bounds_hoist": ("SH3-12", "vesper-bounds-hoist", "flip gate PASS: pass 1.15x, build 1.07x; swapped in the hybrid (`hoist`)"),
-    "tiled": ("SH4-11", "vesper-codegen-numeric", ""),
+    "tiled": ("SH4-11, #1830", "vesper-codegen-numeric", "swapped, 0 declined over the corpus; left: eval.rs, JIT host runtime"),
     "capability_effects": ("SH2-8", "vesper-check-effects", "0.28x"),
     "test_runner": ("SH5-14", "vesper-test-runner", "1.69x"),
     "ebpf_backend": ("SH4-16", "vesper-ebpf-backend", "0.93-1.10x with verifier"),
@@ -161,8 +161,8 @@ MODULES = {
     "trace_effects": ("SH2-8", "vesper-check-effects", ""),
     "freestanding": ("SH4-14", "", ""),
     "packages": ("SH2-6", "vesper-check-names-packages", "0.72-0.87x wall"),
-    "vector": ("SH4-11", "vesper-codegen-numeric", ""),
-    "native_aggregates": ("SH4-8", "", ""),
+    "vector": ("SH4-11, #1830", "vesper-codegen-numeric", "lane shapes + checks ported; left: eval.rs, expression typing walk"),
+    "native_aggregates": ("SH4-8, #1830", "vesper-codegen-aggregates", "decisions incl. scalar enums (#1330) at 0 diffs, emission swapped; left: the scalar-enum graph rewrite"),
     "ir_inline": ("SH3-11", "vesper-ir-inline", "0.76x, swapped"),
     "anvil_jit": ("SH5-14", "vesper-test-runner", ""),
     "integer_widths": ("SH2-7", "vesper-check-core-typing", ""),
@@ -170,7 +170,7 @@ MODULES = {
     "ir": ("SH3-13", "vesper-place-ir-lower", "0.40x"),
     "doctest": ("SH5-14", "vesper-test-runner", "fence extraction + preflight moved to doctest_extract"),
     "doctest_extract": ("SH5-14", "vesper-test-runner", "0 diffs, 1.12x; swapped in the hybrid"),
-    "native_session": ("SH4-10", "", ""),
+    "native_session": ("SH4-10, #1830", "vesper-codegen-control", "plans + park/fail/return emission swapped, 0 declined"),
     "runtime": ("SH4-17", "vesper-backend-checks", ""),
     "dyn_trait": ("SH2-11", "vesper-check-dyn", "0.28x"),
     "dyn_fn": ("SH2-11", "vesper-check-dyn", ""),
@@ -289,11 +289,9 @@ def main():
     for c, n in crates.items():
         cls = CRATES.get(c, ("unknown",))[0]
         by_class[cls] = by_class.get(cls, 0) + n
-    # The `*42` oracles in src/bin are diverse on purpose: they stay Rust and
-    # move out of `src/` before the retirement (SH6 lane 2).
-    oracles = modules.get("bin", 0)
-    by_class["compiler"] = by_class.get("compiler", 0) + sum(modules.values()) - oracles
-    by_class["diverse"] = by_class.get("diverse", 0) + oracles
+    # The `*42` oracles, diverse on purpose, left src/bin for
+    # crates/vesper-oracles (#1825): all of `src/` is now the compiler.
+    by_class["compiler"] = by_class.get("compiler", 0) + sum(modules.values())
     w("## Totals\n\n| Class | Meaning | Non-test lines |\n|---|---|--:|\n")
     for cls, meaning in CLASSES.items():
         w(f"| `{cls}` | {meaning} | {by_class.get(cls, 0):,} |\n")

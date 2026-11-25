@@ -66,4 +66,16 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
         "    let next_epoch = wrapping_add(epoch_at(in t.epochs, p), 1);",
         "    let next_epoch = epoch_at(in t.epochs, p);",
     ),
+    // failure: never returns an injected failure code.
+    (
+        "failure",
+        "            return (occ, true, word_at(in t.rules, wrapping_add(r_off, 3)));",
+        "            return (occ, false, 0);",
+    ),
+    // validate: accepts out-of-order/non-alternating crash timelines.
+    (
+        "validate",
+        "        if (has_last && last == at) || crash != expect_crash {\n            return (false, 0);\n        }",
+        "        if false {\n            return (false, 0);\n        }",
+    ),
 ];

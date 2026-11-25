@@ -1,0 +1,18 @@
+[package]
+name = "vesper-oracles"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "The diverse `*42` test oracles (arithmetic, resource model, Logos and lean4lean drivers), kept in Rust on purpose outside the compiler's src/"
+
+# The binaries keep the names, layout and module trees they had under the
+# root package's src/bin, so `cargo build --bin logos42` still works from the
+# workspace root.
+[dependencies]
+# The arithmetic oracle's worker drives the compiler's parser, checker,
+# optimizer, evaluator and native backend as its system under test.
+vesper = { path = "../.." }
+blake3 = "1.8"
+serde = { workspace = true }
+serde_json = { workspace = true }

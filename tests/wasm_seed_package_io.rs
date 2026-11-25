@@ -835,6 +835,245 @@ fn too_many_preopens_fail_every_path() {
 }
 
 #[test]
+fn preopen_name_overflow_fails_every_path() {
+    // Only 2 preopens (< 16), whose combined guest names exceed the 1,024-byte
+    // table budget, with the longer prefix second: resolves must fail with
+    // Unsupported (ENOTSUP) rather than routing to `/a`.
+    let long_guest = format!("/a/{}", "x".repeat(1024));
+    let target_guest = format!("{long_guest}/leaf.txt");
+    let prelude = PRELUDE.replace("BASE/", "");
+    let src = format!(
+        r#"{prelude}
+fn main() -> u64 eff [Ffi[StdFs]] {{
+    let mut err: u64 = 0;
+    match StdFs::vstd_fs_open(in {target_guest:?}.as_bytes(), 1, inout err) {{
+        Option::Some(f) => {{ StdFs::vstd_fs_close(f); }},
+        Option::None => {{}},
+    }}
+    err
+}}"#
+    );
+    let c = check(&src);
+    let root = fresh("preopen-names");
+    let short_dir = root.join("short");
+    let long_dir = root.join("long");
+    std::fs::create_dir_all(&short_dir).expect("short dir");
+    std::fs::create_dir_all(&long_dir).expect("long dir");
+    let component = port(&c, &options(false)).expect("port");
+    let ctx = Ctx {
+        dirs: vec![(short_dir, "/a".into()), (long_dir, long_guest)],
+        ..Ctx::default()
+    };
+    let got = run(&component, &ctx).expect("run");
+    assert_eq!(got, 11 | (95 << 32));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn sync_dir_invokes_descriptor_sync_and_propagates_errors() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use wasmtime::component::{Component, Linker, Resource, Val};
+    use wasmtime_wasi::filesystem::WasiFilesystemView;
+    use wasmtime_wasi::p2::bindings::sync::filesystem::types::{
+        Descriptor, DescriptorType, ErrorCode, Host, HostDescriptor,
+    };
+
+    let pkg = fresh("sync-dir-observe");
+    std::fs::create_dir(pkg.join("src")).unwrap();
+    let base = pkg.join("work");
+    std::fs::create_dir(&base).unwrap();
+    let fs_dep = std::fs::canonicalize("packages/vesper-std/fs").unwrap();
+    std::fs::write(
+        pkg.join("Loom.toml"),
+        format!(
+            r#"[package]
+name = "@wasm-seed/sync-observe"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Alloc", "Fail", "Ffi[StdFs]"]
+
+[dependencies]
+"@vesper-std/fs" = {{ version = "^0.1", path = {fs_dep:?} }}
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("src/main.ves"),
+        r#"use @vesper-std/fs::{ IoError, replace_path };
+
+fn run_replace() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        replace_path(in "/work/out.bin".as_bytes(), in "ok".as_bytes());
+        0
+    } with {
+        return v => v,
+        raise(e, _k) => wrapping_add(1_000_000, widen_u64(e.kind)),
+    }
+}
+
+pub fn main() -> u64 eff [Ffi[StdFs]] {
+    let r = run_replace();
+    if r != 0 {
+        return r;
+    }
+    let mut err: u64 = 0;
+    let s = StdFs::vstd_fs_sync_dir(in "/work".as_bytes(), inout err);
+    if s != 0 {
+        return wrapping_add(2_000_000, err);
+    }
+    0
+}
+"#,
+    )
+    .unwrap();
+
+    let assembled =
+        vesper::packages::load_for_target(&pkg, Some(vesper::wasm_backend::TARGET), false).unwrap();
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports())
+        .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics));
+    let component_bytes = port(&checked, &options(false)).expect("port");
+
+    let run_with_sync_hook = |fail_on_call: Option<usize>| -> (u64, usize, Vec<DescriptorType>) {
+        let mut c = wasmtime::Config::new();
+        c.wasm_component_model(true);
+        let engine = wasmtime::Engine::new(&c).expect("engine");
+        let component = Component::new(&engine, &component_bytes).expect("component");
+        let mut linker = Linker::<WasiHost>::new(&engine);
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker).expect("wasi");
+        linker.allow_shadowing(true);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_hook = Arc::clone(&calls);
+        let kinds = Arc::new(Mutex::new(Vec::new()));
+        let kinds_hook = Arc::clone(&kinds);
+        linker
+            .instance("wasi:filesystem/types@0.2.12")
+            .expect("filesystem types instance")
+            .func_wrap(
+                "[method]descriptor.sync",
+                move |mut caller: wasmtime::StoreContextMut<'_, WasiHost>,
+                      (desc,): (Resource<Descriptor>,)|
+                      -> wasmtime::Result<(Result<(), ErrorCode>,)> {
+                    let n = calls_hook.fetch_add(1, Ordering::SeqCst) + 1;
+                    let mut fs_view = WasiFilesystemView::filesystem(caller.data_mut());
+                    let kind = HostDescriptor::stat(&mut fs_view, Resource::new_borrow(desc.rep()))
+                        .expect("stat descriptor before sync")
+                        .type_;
+                    kinds_hook.lock().unwrap().push(kind);
+                    if fail_on_call == Some(n) {
+                        return Ok((Err(ErrorCode::Io),));
+                    }
+                    match HostDescriptor::sync(&mut fs_view, desc) {
+                        Ok(()) => Ok((Ok(()),)),
+                        Err(err) => {
+                            let code = Host::convert_error_code(&mut fs_view, err)?;
+                            // Windows FlushFileBuffers denies directory handles with ERROR_ACCESS_DENIED.
+                            if cfg!(windows)
+                                && kind == DescriptorType::Directory
+                                && code == ErrorCode::Access
+                            {
+                                return Ok((Ok(()),));
+                            }
+                            Ok((Err(code),))
+                        }
+                    }
+                },
+            )
+            .expect("shadow descriptor.sync");
+
+        let mut b = wasmtime_wasi::WasiCtxBuilder::new();
+        b.preopened_dir(&base, "/work", wasmtime_wasi::FsPerms::ReadWrite)
+            .expect("preopen");
+        let mut store = wasmtime::Store::new(
+            &engine,
+            WasiHost {
+                ctx: b.build(),
+                table: Default::default(),
+                limiter: MemLimiter::default(),
+            },
+        );
+        let instance = linker
+            .instantiate(&mut store, &component)
+            .expect("instantiate");
+        let iface = instance
+            .get_export_index(&mut store, None, vesper::wasm_backend::ENTRY_INTERFACE)
+            .expect("entry iface");
+        let main = instance
+            .get_export_index(&mut store, Some(&iface), "main")
+            .expect("main");
+        let func = instance.get_func(&mut store, main).expect("func");
+        let mut results = vec![Val::Bool(false)];
+        func.call(&mut store, &[], &mut results).expect("call");
+        let got = match results.first() {
+            Some(Val::U64(x)) => *x,
+            other => panic!("unexpected result: {other:?}"),
+        };
+        let recorded = kinds.lock().unwrap().clone();
+        (got, calls.load(Ordering::SeqCst), recorded)
+    };
+
+    // Pass 1: replace_path syncs the temp file (call 1) and parent dir (call 2),
+    // then direct vstd_fs_sync_dir syncs `/work` (call 3).
+    let (ok_got, ok_calls, ok_kinds) = run_with_sync_hook(None);
+    assert_eq!(ok_got, 0);
+    assert_eq!(ok_calls, 3);
+    assert_eq!(
+        ok_kinds,
+        vec![
+            DescriptorType::RegularFile,
+            DescriptorType::Directory,
+            DescriptorType::Directory,
+        ]
+    );
+    assert_eq!(std::fs::read(base.join("out.bin")).unwrap(), b"ok");
+
+    // Pass 2: inject EIO on call 2 (replace_path's directory sync after file sync + rename)
+    // and verify replace_path surfaces IoError instead of acknowledging success.
+    let (dir_fail_got, dir_fail_calls, dir_fail_kinds) = run_with_sync_hook(Some(2));
+    assert_eq!(dir_fail_calls, 2);
+    assert_eq!(
+        dir_fail_kinds,
+        vec![DescriptorType::RegularFile, DescriptorType::Directory]
+    );
+    assert!(
+        (1_000_000..2_000_000).contains(&dir_fail_got),
+        "expected Fail[IoError] from replace_path dir sync failure, got {dir_fail_got}"
+    );
+
+    // Pass 3: let replace_path succeed (calls 1..=2) and fail call 3 (direct
+    // StdFs::vstd_fs_sync_dir) with ErrorCode::Io; verify non-zero status and EIO errno (5).
+    let (raw_fail_got, raw_fail_calls, raw_fail_kinds) = run_with_sync_hook(Some(3));
+    assert_eq!(raw_fail_calls, 3);
+    assert_eq!(
+        raw_fail_kinds,
+        vec![
+            DescriptorType::RegularFile,
+            DescriptorType::Directory,
+            DescriptorType::Directory,
+        ]
+    );
+    assert!(
+        raw_fail_got >= 2_000_000,
+        "expected vstd_fs_sync_dir failure, got {raw_fail_got}"
+    );
+    let err_word = raw_fail_got - 2_000_000;
+    assert_eq!(
+        err_word >> 32,
+        5,
+        "expected Linux EIO (5), got err_word={err_word:#x}"
+    );
+
+    let _ = std::fs::remove_dir_all(&pkg);
+}
+
+#[test]
 fn env_package_selects_wasi_arguments() {
     let pkg = fresh("wasi-env");
     std::fs::create_dir(pkg.join("src")).unwrap();

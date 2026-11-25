@@ -471,6 +471,26 @@ impl Clone for PortProcessTable {
     }
 }
 
+#[cfg(feature = "vesper-port")]
+#[derive(Debug)]
+pub(crate) struct PortFailureTable(crate::port::FailureTable);
+
+#[cfg(feature = "vesper-port")]
+impl Clone for PortFailureTable {
+    fn clone(&self) -> Self {
+        Self(crate::port::sim_failure_table_clone(&self.0))
+    }
+}
+
+#[cfg(feature = "vesper-port")]
+fn fail_op_code(op: FailOp) -> u64 {
+    match op {
+        FailOp::Append => 0,
+        FailOp::Flush => 1,
+        FailOp::Send => 2,
+    }
+}
+
 /// Mutable model state. It holds no runtime owners, so a step can be computed
 /// on a copy, checked against budgets and the expected trace, then committed.
 #[derive(Debug, Clone)]
@@ -483,7 +503,12 @@ pub(crate) struct ModelState {
     pub process_table: PortProcessTable,
     pub logs: BTreeMap<String, LogState>,
     pub networks: BTreeMap<String, NetState>,
+    #[cfg(not(feature = "vesper-port"))]
     pub occurrences: BTreeMap<(String, FailOp), u64>,
+    #[cfg(feature = "vesper-port")]
+    pub failure_targets: BTreeMap<String, u64>,
+    #[cfg(feature = "vesper-port")]
+    pub failure_table: PortFailureTable,
     #[cfg(not(feature = "vesper-port"))]
     pub crashes: u32,
     pub warp: Option<warp::WarpState>,
@@ -550,6 +575,35 @@ impl ModelState {
             self.processes[p].epoch = epoch;
             self.processes[p].up = true;
             Ok(epoch)
+        }
+    }
+
+    pub fn next_failure(
+        &mut self,
+        plan: &ModelPlan,
+        target: &str,
+        op: FailOp,
+    ) -> (u64, Option<u32>) {
+        #[cfg(feature = "vesper-port")]
+        {
+            let _ = plan;
+            let target_id = self.failure_targets[target];
+            let (occ, has_code, code) = crate::port::sim_failure_table_next(
+                &mut self.failure_table.0,
+                target_id,
+                fail_op_code(op),
+            );
+            (occ, has_code.then_some(code as u32))
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        {
+            let count = self.occurrences.entry((target.into(), op)).or_insert(0);
+            *count += 1;
+            let occurrence = *count;
+            (
+                occurrence,
+                plan.failures.get(&(target.into(), op, occurrence)).copied(),
+            )
         }
     }
 
@@ -622,6 +676,24 @@ impl ModelState {
                 )
             })
             .collect();
+        #[cfg(feature = "vesper-port")]
+        let failure_targets: BTreeMap<String, u64> = spec
+            .logs
+            .iter()
+            .map(|l| l.name.clone())
+            .chain(spec.networks.iter().map(|n| n.name.clone()))
+            .enumerate()
+            .map(|(i, name)| (name, i as u64))
+            .collect();
+        #[cfg(feature = "vesper-port")]
+        let failure_table = {
+            let mut rules = Vec::with_capacity(plan.failures.len() * 4);
+            for ((target, op, occ), code) in &plan.failures {
+                let target_id = failure_targets[target];
+                rules.extend_from_slice(&[target_id, fail_op_code(*op), *occ, u64::from(*code)]);
+            }
+            PortFailureTable(crate::port::sim_failure_table_new(&rules))
+        };
         Self {
             #[cfg(not(feature = "vesper-port"))]
             processes,
@@ -631,7 +703,12 @@ impl ModelState {
             process_table,
             logs,
             networks,
+            #[cfg(not(feature = "vesper-port"))]
             occurrences: BTreeMap::new(),
+            #[cfg(feature = "vesper-port")]
+            failure_targets,
+            #[cfg(feature = "vesper-port")]
+            failure_table,
             #[cfg(not(feature = "vesper-port"))]
             crashes: 0,
             warp: spec
@@ -837,13 +914,17 @@ pub(crate) fn validate(
             ));
         }
         let l = &log.limits;
-        if l.max_records == 0
+        #[cfg(feature = "vesper-port")]
+        let log_ok =
+            crate::port::sim_validate_log_bounds(l.max_records, l.max_bytes, l.max_record_bytes);
+        #[cfg(not(feature = "vesper-port"))]
+        let log_ok = !(l.max_records == 0
             || l.max_records > MAX_LOG_RECORDS
             || l.max_bytes == 0
             || l.max_bytes > MAX_LOG_BYTES
             || l.max_record_bytes == 0
-            || l.max_record_bytes > l.max_bytes
-        {
+            || l.max_record_bytes > l.max_bytes);
+        if !log_ok {
             return fail(format!(
                 "log {} limits must be positive, records <= {MAX_LOG_RECORDS}, bytes <= {MAX_LOG_BYTES}, record bytes <= bytes",
                 log.name
@@ -851,20 +932,41 @@ pub(crate) fn validate(
         }
     }
     for network in &spec.networks {
-        if network.max_in_flight == 0
-            || network.max_in_flight > MAX_QUEUE
-            || network.max_inbox == 0
-            || network.max_inbox > MAX_QUEUE
-            || network.max_message_bytes == 0
-            || network.max_message_bytes > MAX_MESSAGE_BYTES
-        {
-            return fail(format!(
-                "network {} bounds must be positive, queues <= {MAX_QUEUE}, messages <= {MAX_MESSAGE_BYTES} bytes",
-                network.name
-            ));
+        #[cfg(feature = "vesper-port")]
+        match crate::port::sim_validate_network_bounds(
+            network.max_in_flight,
+            network.max_inbox,
+            network.max_message_bytes,
+            u64::from(network.timeout_code),
+            u64::from(network.unreachable_code),
+        ) {
+            0 => {}
+            1 => {
+                return fail(format!(
+                    "network {} bounds must be positive, queues <= {MAX_QUEUE}, messages <= {MAX_MESSAGE_BYTES} bytes",
+                    network.name
+                ));
+            }
+            _ => return fail(format!("network {} error codes exceed i32", network.name)),
         }
-        if network.timeout_code > i32::MAX as u32 || network.unreachable_code > i32::MAX as u32 {
-            return fail(format!("network {} error codes exceed i32", network.name));
+        #[cfg(not(feature = "vesper-port"))]
+        {
+            if network.max_in_flight == 0
+                || network.max_in_flight > MAX_QUEUE
+                || network.max_inbox == 0
+                || network.max_inbox > MAX_QUEUE
+                || network.max_message_bytes == 0
+                || network.max_message_bytes > MAX_MESSAGE_BYTES
+            {
+                return fail(format!(
+                    "network {} bounds must be positive, queues <= {MAX_QUEUE}, messages <= {MAX_MESSAGE_BYTES} bytes",
+                    network.name
+                ));
+            }
+            if network.timeout_code > i32::MAX as u32 || network.unreachable_code > i32::MAX as u32
+            {
+                return fail(format!("network {} error codes exceed i32", network.name));
+            }
         }
         let known = addresses.get(network.name.as_str());
         for link in &network.links {
@@ -934,21 +1036,40 @@ pub(crate) fn validate(
         ));
     }
     let mut instances = initial_tasks;
-    for (process, mut events) in timeline {
-        events.sort();
-        let mut expect_crash = true;
-        let mut last = None;
-        for (at, crash) in events {
-            if last == Some(at) || crash != expect_crash {
+    for (process, events) in timeline {
+        #[cfg(feature = "vesper-port")]
+        {
+            let mut words = Vec::with_capacity(events.len() * 2);
+            for (at, crash) in events {
+                words.push(at);
+                words.push(u64::from(crash));
+            }
+            let (ok, restarts) = crate::port::sim_validate_process_timeline(&words);
+            if !ok {
                 return fail(format!(
                     "process {process} faults must alternate crash, restart at distinct times"
                 ));
             }
-            if !crash {
-                instances += spec.processes[process_index[process]].restart.len() as u64;
+            instances += restarts * spec.processes[process_index[process]].restart.len() as u64;
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        {
+            let mut events = events;
+            events.sort();
+            let mut expect_crash = true;
+            let mut last = None;
+            for (at, crash) in events {
+                if last == Some(at) || crash != expect_crash {
+                    return fail(format!(
+                        "process {process} faults must alternate crash, restart at distinct times"
+                    ));
+                }
+                if !crash {
+                    instances += spec.processes[process_index[process]].restart.len() as u64;
+                }
+                expect_crash = !expect_crash;
+                last = Some(at);
             }
-            expect_crash = !expect_crash;
-            last = Some(at);
         }
     }
     if instances > limits.max_instances {

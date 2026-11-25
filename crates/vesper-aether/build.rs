@@ -22,6 +22,7 @@ const PARTS: &[&str] = &[
     "vsock",
     "vmgenid",
     "mmio",
+    "fork",
 ];
 
 fn main() {
@@ -121,5 +122,10 @@ const DIVERGENT_EDITS: &[(&str, &str)] = &[
     (
         "|| (driver_features & MMIO_VIRTIO_F_VERSION_1) != MMIO_VIRTIO_F_VERSION_1",
         "|| false",
+    ),
+    // fork: accepts trailing bytes in VmGenIdWire::decode.
+    (
+        "    if bytes.len() != FORK_VMGENID_WIRE_BYTES {",
+        "    if bytes.len() < FORK_VMGENID_WIRE_BYTES {",
     ),
 ];

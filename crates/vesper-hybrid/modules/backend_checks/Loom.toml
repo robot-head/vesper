@@ -1,0 +1,9 @@
+[package]
+name = "@vesper/hybrid-backend-checks"
+version = "0.1.0"
+edition = "2026"
+# Backend verifiers only compute over their input: no I/O, clock or network.
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/backend-checks" = { version = "^0.1", path = "../../../../packages/vesper-backend-checks" }

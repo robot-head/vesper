@@ -68,6 +68,16 @@ mod freestanding_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/backend_checks.rs"]
+mod backend_checks_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/codegen_walk.rs"]
+mod codegen_walk_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/codegen_numeric.rs"]
 mod codegen_numeric_binding;
 
@@ -133,6 +143,11 @@ mod effects_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/fip.rs"]
+mod fip_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/bounds_hoist.rs"]
 mod bounds_hoist_binding;
 
@@ -183,6 +198,10 @@ mod tensor_words;
 #[path = "../../../tests/common/effects_words.rs"]
 mod effects_words;
 
+// The fip checker's encoder and diagnostic decoder (#1184).
+#[path = "../../../tests/common/fip_words.rs"]
+mod fip_words;
+
 // The stack-bound swap's encoder and decoder (#1182), shared with the root
 // package's tests/self_host_check_loops_atomics.rs.
 #[path = "../../../tests/common/stack_words.rs"]
@@ -230,6 +249,16 @@ mod ebpf_words;
 #[path = "../../../tests/common/freestanding_words.rs"]
 mod freestanding_words;
 
+// The backend verifiers swap's encoder and decoder (#1291), shared with
+// tests/self_host_backend_checks.rs.
+#[path = "../../../tests/common/backend_checks_input.rs"]
+mod backend_checks_input;
+
+// The native walk swap's encoder and decoder (#1509), shared with
+// tests/self_host_native_walk.rs.
+#[path = "../../../tests/common/native_walk_words.rs"]
+mod native_walk_words;
+
 /// Calls answered by the Vesper word-layout module.
 static LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Sources parsed by the Vesper parse module.
@@ -254,6 +283,11 @@ static EBPF_CALLS: AtomicU64 = AtomicU64::new(0);
 static EBPF_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// Freestanding images whose stub, linker, trap table and script ran in Vesper.
 static FREESTANDING_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Backend verifier runs answered by Vesper (`@vesper/backend-checks`).
+static VERIFIER_CALLS: AtomicU64 = AtomicU64::new(0);
+/// `register_locals` plans answered by Vesper (`@vesper/native-walk`), and declined.
+static WALK_CALLS: AtomicU64 = AtomicU64::new(0);
+static WALK_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// Components `@vesper/wit-component` wrapped, and left to wit-component.
 static WRAP_CALLS: AtomicU64 = AtomicU64::new(0);
 static WRAP_DECLINED: AtomicU64 = AtomicU64::new(0);
@@ -774,6 +808,15 @@ const VESPER_EFFECTS_CHECK: vesper::capability_effects::EffectsCheckTable =
         },
     };
 
+/// `fip::check_world` from `modules/fip` (SH2 lane 12, `#1184`).
+const VESPER_FIP_CHECK: vesper::fip::FipCheckTable = vesper::fip::FipCheckTable {
+    check_world: |world| {
+        let bytes = fip_words::encode_world(world);
+        let words = fip_binding::fip_diags(&bytes);
+        fip_words::decode_diagnostics(&words)
+    },
+};
+
 /// Full coherence-gated Pact session from `modules/pact` (SH2 lane 13 part 2b).
 const VESPER_PACT_SESSION: vesper::pact_frontend::PactSessionTable =
     vesper::pact_frontend::PactSessionTable {
@@ -1162,6 +1205,47 @@ fn vesper_freestanding(
     };
     FREESTANDING_CALLS.fetch_add(1, Relaxed);
     Some(build_image_with(world, entry, options, &ops))
+}
+
+/// The `verifiers` hook of `vesper::codegen_swap` from `modules/backend_checks`
+/// (#1291): `@vesper/backend-checks` runs const-time, stack, realtime and
+/// detfloat verification over emitted Cranelift functions.
+fn vesper_verifiers(
+    world: &vesper::check::World,
+    functions: &[vesper::native::EmittedFunction],
+    target: Option<&str>,
+    verifiers: &std::collections::BTreeSet<vesper::native_verifiers::NativeVerifier>,
+    policy: &vesper::native_verifiers::NativeVerifierPolicy,
+) -> Option<Result<vesper::native_verifiers::NativeVerifierReport, String>> {
+    let bytes = backend_checks_input::encode(
+        world,
+        functions,
+        target,
+        &backend_checks_input::Mode::Emitted(verifiers, policy),
+        "",
+        "",
+    );
+    let words = backend_checks_binding::verify_words(&bytes);
+    VERIFIER_CALLS.fetch_add(1, Relaxed);
+    Some(backend_checks_input::decode_report(&words))
+}
+
+/// The `register_locals` hook of `vesper::codegen_swap` from `modules/codegen_walk`
+/// (#1509): `@vesper/native-walk` decides which scalar/parameter locals stay in
+/// Cranelift SSA variables. Non-encodable graphs decline to Rust.
+fn vesper_register_locals(
+    world: &vesper::check::World,
+    f: &vesper::ir::FunctionIr,
+    generics: &std::collections::BTreeMap<String, vesper::ast::Type>,
+    nested: bool,
+) -> Option<std::collections::BTreeSet<String>> {
+    let Some(bytes) = native_walk_words::function_input(world, f, generics, nested) else {
+        WALK_DECLINED.fetch_add(1, Relaxed);
+        return None;
+    };
+    let words = codegen_walk_binding::register_locals_words(&bytes);
+    WALK_CALLS.fetch_add(1, Relaxed);
+    Some(native_walk_words::decode_register_locals(&words))
 }
 
 /// The `component` hook of `vesper::codegen_swap` (#1334): every component
@@ -1776,6 +1860,7 @@ extern "C" fn install() {
         std::process::abort();
     }
     vesper::capability_effects::install_effects_check(VESPER_EFFECTS_CHECK);
+    vesper::fip::install_fip_check(VESPER_FIP_CHECK);
     // Swaps keep one input per compilation (SH4 lane 2, #1276).
     // `VESPER_HYBRID_SCOPES=0` encodes per call instead (the before side of
     // the report's measurement).
@@ -1790,6 +1875,10 @@ extern "C" fn install() {
             .then_some(vesper_ebpf as vesper::codegen_swap::EbpfHook),
         freestanding: (!std::env::var_os("VESPER_HYBRID_FREESTANDING").is_some_and(|v| v == "0"))
             .then_some(vesper_freestanding as vesper::codegen_swap::FreestandingHook),
+        verifiers: (!std::env::var_os("VESPER_HYBRID_VERIFIERS").is_some_and(|v| v == "0"))
+            .then_some(vesper_verifiers as vesper::codegen_swap::VerifierHook),
+        register_locals: (!std::env::var_os("VESPER_HYBRID_WALK").is_some_and(|v| v == "0"))
+            .then_some(vesper_register_locals as vesper::codegen_swap::RegisterLocalsHook),
         component: Some(vesper_component),
         numeric: Some(vesper_numeric),
         seq: (!std::env::var_os("VESPER_HYBRID_SEQ").is_some_and(|v| v == "0"))
@@ -1913,6 +2002,15 @@ extern "C" fn report() {
     eprintln!(
         "vesper-hybrid: freestanding built {} images from Vesper",
         FREESTANDING_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: backend verifiers ran {} times from Vesper",
+        VERIFIER_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: native walk planned register locals {} times from Vesper ({} declined)",
+        WALK_CALLS.load(Relaxed),
+        WALK_DECLINED.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: wit-component wrapped {} components from Vesper ({} declined)",
