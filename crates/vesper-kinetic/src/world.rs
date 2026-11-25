@@ -470,6 +470,53 @@ pub struct World {
     pair_backend: Option<std::sync::Mutex<Box<dyn PairBackend>>>,
     last_layer_count: usize,
     last_manifolds: usize,
+    #[cfg(vesper_port)]
+    port: PortScratch,
+}
+
+/// The port substeps' packed tick state (`World::substeps_port`), reserved
+/// at construction so a step stays allocation-free.
+#[cfg(vesper_port)]
+#[derive(Debug)]
+struct PortScratch {
+    bodies: Vec<u64>,
+    prev: Vec<u64>,
+    jf: Vec<u64>,
+    ju: Vec<u64>,
+    contacts: Vec<u64>,
+    state: Vec<u64>,
+}
+
+#[cfg(vesper_port)]
+impl PortScratch {
+    fn new(bodies: usize, joints: usize, contacts: usize) -> Self {
+        Self {
+            bodies: Vec::with_capacity(5 * bodies),
+            prev: Vec::with_capacity(4 * bodies),
+            jf: Vec::with_capacity(joints),
+            ju: Vec::with_capacity(joints),
+            contacts: Vec::with_capacity(contacts),
+            state: Vec::with_capacity(2 * contacts),
+        }
+    }
+}
+
+/// Two 32-bit lanes in one word (low, high), as the port reads them.
+#[cfg(vesper_port)]
+fn lanes(lo: u32, hi: u32) -> u64 {
+    u64::from(lo) | (u64::from(hi) << 32)
+}
+
+/// Two f32 lanes as bit patterns in one word.
+#[cfg(vesper_port)]
+fn flanes(lo: f32, hi: f32) -> u64 {
+    lanes(lo.to_bits(), hi.to_bits())
+}
+
+/// The low and high f32 lanes of a port word.
+#[cfg(vesper_port)]
+fn unlanes(w: u64) -> [f32; 2] {
+    [f32::from_bits(w as u32), f32::from_bits((w >> 32) as u32)]
 }
 
 #[derive(Debug)]
@@ -623,6 +670,8 @@ impl World {
             pair_backend: None,
             last_layer_count: 0,
             last_manifolds: 0,
+            #[cfg(vesper_port)]
+            port: PortScratch::new(bodies.len(), joints.len(), config.max_contacts),
         })
     }
 
@@ -1186,15 +1235,43 @@ impl World {
         self.last_manifolds = count;
 
         let t2 = std::time::Instant::now();
-        let mut solve = std::time::Duration::ZERO;
         // Bodies are only mutated from here on; nothing below can fail.
+        let solve = self.substeps(contacts, state);
+        self.tick = next_tick;
+        self.timings = StepTimings {
+            broadphase: t1 - t0,
+            coloring: t2 - t1,
+            solve,
+            total: t0.elapsed(),
+        };
+        Ok(self.header())
+    }
+
+    /// The tick's substeps over this tick's `contacts` (integration,
+    /// projection, velocities, restitution); returns the solver time.
+    fn substeps(&mut self, contacts: &[[u32; 2]], state: &mut [[f32; 4]]) -> std::time::Duration {
+        let mut solve = std::time::Duration::ZERO;
         let h = det::div(self.config.dt, self.config.substeps as f32);
         let inv_h = det::div(1.0, h);
         let inv_h2 = det::mul(inv_h, inv_h);
         let g = self.config.gravity;
         let n = self.bodies.len();
         let restitution = self.material.restitution > 0.0;
-        for _ in 0..self.config.substeps {
+        // The port runs the serial solvers' substeps (Batched16 performs the
+        // scalar operation sequence, colour by colour on disjoint bodies);
+        // the multi-threaded Batched16 solver stays here.
+        #[cfg(vesper_port)]
+        let substeps = if self.solver == SolverMode::Scalar || !self.parallel_worthwhile() {
+            let ts = std::time::Instant::now();
+            self.substeps_port(contacts);
+            solve += ts.elapsed();
+            0
+        } else {
+            self.config.substeps
+        };
+        #[cfg(not(vesper_port))]
+        let substeps = self.config.substeps;
+        for _ in 0..substeps {
             for i in 0..n {
                 let p = self.bodies.pos(i);
                 self.prev[i] = p;
@@ -1261,14 +1338,112 @@ impl World {
                 self.apply_restitution(h, contacts, state);
             }
         }
-        self.tick = next_tick;
-        self.timings = StepTimings {
-            broadphase: t1 - t0,
-            coloring: t2 - t1,
-            solve,
-            total: t0.elapsed(),
-        };
-        Ok(self.header())
+        solve
+    }
+
+    /// Runs the substeps of the next tick `reps` times over its contacts
+    /// (the `world-substeps` workload of examples/abba.rs); the tick
+    /// counter does not move.
+    #[doc(hidden)]
+    pub fn bench_substeps(&mut self, reps: usize) -> Result<(), StepError> {
+        let mut cells = std::mem::take(&mut self.cells_buf);
+        let mut contacts = std::mem::take(&mut self.contacts_buf);
+        let mut state = std::mem::take(&mut self.state_buf);
+        let result = self
+            .detect_contacts(&mut cells, &mut contacts)
+            .and_then(|count| {
+                self.constraint_bodies.clear();
+                for j in &self.joints {
+                    self.constraint_bodies.push(ConstraintBodies {
+                        a: j.a,
+                        b: Some(j.b),
+                    });
+                }
+                for c in &contacts[..count] {
+                    self.constraint_bodies.push(ConstraintBodies {
+                        a: c[0],
+                        b: (c[1] != GROUND).then_some(c[1]),
+                    });
+                }
+                self.colorer.color(&self.constraint_bodies)?;
+                if self.solver == SolverMode::Batched16 {
+                    self.build_plans(&contacts[..count]);
+                }
+                for _ in 0..reps {
+                    self.substeps(&contacts[..count], &mut state[..count]);
+                }
+                Ok(())
+            });
+        self.cells_buf = cells;
+        self.contacts_buf = contacts;
+        self.state_buf = state;
+        result
+    }
+
+    /// Every substep of this tick in the port (vesper/src/world.ves): the
+    /// bodies, joints, contacts and colour layers are packed once.
+    #[cfg(vesper_port)]
+    fn substeps_port(&mut self, contacts: &[[u32; 2]]) {
+        let n = self.bodies.len();
+        let p = &mut self.port;
+        p.bodies.clear();
+        for i in 0..n {
+            let [x, y, z] = self.bodies.pos(i);
+            let [u, v, w] = self.bodies.vel(i);
+            let radius = self.colliders[self.bodies.collider(i) as usize].radius;
+            p.bodies.extend([
+                flanes(x, y),
+                flanes(z, self.bodies.inv_mass(i)),
+                flanes(radius, self.bodies.compliance(i)),
+                flanes(u, v),
+                flanes(w, 0.0),
+            ]);
+        }
+        p.prev.clear();
+        p.prev.resize(4 * n, 0);
+        p.jf.clear();
+        p.ju.clear();
+        for j in &self.joints {
+            p.jf.push(flanes(j.rest_length, j.compliance));
+            p.ju.push(lanes(j.a, j.b));
+        }
+        p.contacts.clear();
+        p.contacts
+            .extend(contacts.iter().map(|&[a, b]| lanes(a, b)));
+        p.state.clear();
+        p.state.resize(2 * contacts.len(), 0);
+        let g = self.config.gravity;
+        let m = self.material;
+        let params = [
+            self.config.dt,
+            g[0],
+            g[1],
+            g[2],
+            self.config.ground_y.unwrap_or(0.0),
+            m.static_friction,
+            m.dynamic_friction,
+            m.restitution,
+        ]
+        .map(f32::to_bits);
+        let layers = self.colorer.layer_count();
+        crate::port::world_substeps(
+            self.config.substeps,
+            &mut p.bodies,
+            &p.jf,
+            &p.ju,
+            &p.contacts,
+            &self.colorer.layer_offsets[..=layers],
+            &self.colorer.sorted,
+            &params,
+            &mut p.state,
+            &mut p.prev,
+        );
+        for (i, f) in p.bodies.as_chunks::<5>().0.iter().enumerate() {
+            let ([x, y], [z, _]) = (unlanes(f[0]), unlanes(f[1]));
+            let ([u, v], [w, _]) = (unlanes(f[3]), unlanes(f[4]));
+            self.bodies.set_pos(i, [x, y, z]);
+            self.bodies.set_vel(i, [u, v, w]);
+        }
     }
 
     /// The snapshot header (tick, counts, BLAKE3 of canonical state).
