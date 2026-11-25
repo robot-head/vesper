@@ -656,6 +656,31 @@ pub mod host {
         }
     }
 
+    /// 1 when the Vesper driver parses a standalone source itself (the
+    /// parse swap is installed), else 0.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn hd_front_begin() -> u32 {
+        u32::from(crate::vesper_hybrid::driver_parse_begin())
+    }
+
+    /// `crate::write(None, ..)` of `cli()`: `text` to stdout, 0 or `FAIL`
+    /// with the write error as the session's text.
+    ///
+    /// # Safety
+    /// `s` is a live session lent `inout`; `text` a lent byte slice.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hd_write(s: *mut Session, text: *const u8, len: usize) -> i64 {
+        // SAFETY: lent for the call.
+        let (s, text) = unsafe { (&mut *s, bytes(text, len)) };
+        match crate::write(None, text) {
+            Ok(()) => 0,
+            Err(message) => {
+                s.text = message.into_bytes();
+                FAIL
+            }
+        }
+    }
+
     /// Copy the session's text into `buf` when it fits; its length.
     ///
     /// # Safety

@@ -240,9 +240,14 @@ fn front_passes_match_the_default_compiler() {
 
 /// The passes the session ran (`VESPER_HYBRID_STATS=1`).
 fn passes(args: &[&str]) -> u64 {
+    passes_with(args, "all")
+}
+
+fn passes_with(args: &[&str], swaps: &str) -> u64 {
     let output = Command::new(hybrid())
         .current_dir(repository())
         .env("VESPER_HYBRID_STATS", "1")
+        .env("VESPER_HYBRID_SWAPS", swaps)
         .args(args)
         .output()
         .expect("run vesper-hybrid");
@@ -272,4 +277,31 @@ fn emit_cst_runs_in_the_vesper_driver() {
     std::fs::write(&bad, "fn main( -> i64 {\n").unwrap();
     assert_eq!(passes(&["emit", "--emit", "cst", bad.to_str().unwrap()]), 4);
     let _ = std::fs::remove_dir_all(&scratch);
+    // The driver's parse is the parse swap's: with no swaps, the session
+    // parses and dumps.
+    assert_eq!(
+        passes_with(&["emit", "--emit", "cst", "examples/counter.ves"], "none"),
+        4
+    );
+}
+
+/// A failing stdout fails `--emit cst` with the write error, as in `cli()`.
+#[cfg(target_os = "linux")]
+#[test]
+fn emit_cst_reports_stdout_write_errors() {
+    let full = || std::fs::File::create("/dev/full").expect("open /dev/full");
+    let run = |compiler: PathBuf| {
+        Command::new(compiler)
+            .current_dir(repository())
+            .env_remove("VESPER_HYBRID_STATS")
+            .args(["emit", "--emit", "cst", "examples/counter.ves"])
+            .stdout(full())
+            .output()
+            .expect("run the compiler")
+    };
+    let d = run(default_compiler());
+    let h = run(hybrid());
+    assert_eq!(d.status.code(), Some(1));
+    assert_eq!(d.status.code(), h.status.code());
+    assert_eq!(d.stderr, h.stderr);
 }

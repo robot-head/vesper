@@ -25,6 +25,8 @@
 // |     fn hd_step(inout s: Session, step: u32, nocapture in arg: CSlice[u8]) -> ForeignVal[i64];
 // |     fn hd_text(in s: Session, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
 // |     fn hd_parsed(inout s: Session, nocapture in words: CSlice[u64]) -> ForeignVal[i64];
+// |     fn hd_front_begin() -> ForeignVal[u32];
+// |     fn hd_write(inout s: Session, nocapture in text: CSlice[u8]) -> ForeignVal[i64];
 // | }
 use @vesper/driver::{
     Args,
@@ -424,14 +426,17 @@ fn drive(inout s: Session, in o: Options)
         return pass(inout s, step_ebpf_build());
     }
     let emit_cst_format = c == cmd_emit() && is(in o, slot_format(), in "cst");
-    if emit_cst_format && !package {
+    // The driver's parse is the parse swap's: with that swap off
+    // (`VESPER_HYBRID_SWAPS`), the session parses.
+    let front = !package && HybridDriver::hd_front_begin() == 1;
+    if emit_cst_format && front {
         match cst_text(in source.as_slice()) {
             Option::Some(text) => return write_output(inout s, in o, in text.as_slice()),
             Option::None => (),
         }
     }
     let mut r = declined();
-    if !package && !o.include_tests && !emit_cst_format {
+    if front && !o.include_tests && !emit_cst_format {
         match parse_clean(in source.as_slice()) {
             Option::Some(words) => {
                 r = HybridDriver::hd_parsed(inout s, in words.as_slice());
@@ -526,7 +531,10 @@ fn declined() -> i64 {
 fn write_output(inout s: Session, in o: Options, in bytes: Slice[u8])
     -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
     if !has(in o, slot_output()) {
-        print(stdout_stream(), in bytes);
+        let r = HybridDriver::hd_write(inout s, in bytes);
+        if is_failure(r) {
+            return pass_failed(in s, r);
+        }
         return 0;
     }
     let path = value(in o, slot_output());
