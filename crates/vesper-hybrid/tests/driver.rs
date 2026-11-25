@@ -91,6 +91,31 @@ const PROGRAMS: &[(&str, &str)] = &[
         "sugar_error.ves",
         "sugar take_right: infix(`.+`, additive, left) { rule ($a:expr .+ $b:expr) => { $b } }\nfn main() -> i64 {\n    1 .+ nope\n}\n",
     ),
+    // The parts of `check::check` the driver sequences (#1900): untyped
+    // value-enum members (rewritten, and with their own diagnostics),
+    // `use` outside a package after a rewrite, the Beacon prelude and
+    // rules (tests/fixtures/trace_effects), and source tensor types
+    // (tests/fixtures/tensor_types).
+    (
+        "untyped.ves",
+        "enum Helper: _ { Trace = 6, Next = 1 << 40 }\nfn wide(x: u64) -> u64 {\n    x\n}\nfn main() -> i64 {\n    Helper::Trace + 1\n}\n",
+    ),
+    (
+        "untyped_error.ves",
+        "fn f() -> u64 {\n    3\n}\nenum E: _ { A = f() }\nfn main() -> u64 {\n    E::A + nope\n}\n",
+    ),
+    (
+        "untyped_use.ves",
+        "use self::x::y;\nenum E: _ { A = 1 }\nfn main() -> u64 {\n    E::A\n}\n",
+    ),
+    (
+        "beacon.ves",
+        "copy struct Secret[T] {\n    value: T,\n}\ncopy struct Login {\n    user_id: u64,\n    password: Secret[u64],\n}\nfn fingerprint(s: Secret[u64]) -> u64 {\n    7\n}\nimpl Telemetrable for Login {\n    fn telemetry_attr(in self) -> TelemetryAttr {\n        TelemetryAttr::Count(fingerprint(self.password))\n    }\n}\nfn main() -> u64 {\n    0\n}\n",
+    ),
+    (
+        "tensor.ves",
+        "fn rotate[D: dim](x: Tensor[F32, [1, D * 2]]) -> Tensor[F32, [1, D * 2]] eff [Tensor] {\n    Tensor::rope(x, 3)\n}\nfn f(x: Tensor[F32, [1, 4]]) -> Tensor[F32, [1, 4]] eff [Tensor] {\n    let g = rotate;\n    g(x)\n}\n",
+    ),
 ];
 
 /// Option sets, each run on every input. `{out}` is a fresh output path

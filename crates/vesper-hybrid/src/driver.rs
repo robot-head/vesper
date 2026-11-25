@@ -284,8 +284,22 @@ pub struct Session {
     source_map: Vec<vesper::forge_frontend::SourceMapSegment>,
     parsed: Option<parser::Parse>,
     checked: Option<check::Checked>,
+    /// `check::check`'s state between its parts.
+    checking: Checking,
     /// The last error message or pass result (`hd_text`).
     text: Vec<u8>,
+}
+
+/// What `check::check` keeps between the parts the Vesper driver
+/// sequences (`check` in modules/driver/src/lib.ves, #1900).
+#[derive(Default)]
+struct Checking {
+    /// The module the next part checks when the untyped value-enum members
+    /// rewrote the parse's (the latest rewrite).
+    rewritten: Option<vesper::ast::Module>,
+    /// The diagnostics of each rewrite, outermost first: `check` appends
+    /// them innermost first once the rewritten module is checked.
+    pending: Vec<Vec<vesper::ast::Diagnostic>>,
 }
 
 /// The passes (`step_*` in modules/driver/src/lib.ves).
@@ -317,9 +331,17 @@ enum Step {
     EmitLean,
     EmitClif = 26,
     IoError,
+    // `check::check`'s parts, sequenced by `check` in
+    // modules/driver/src/lib.ves (#1900).
+    CheckUntyped,
+    CheckTensor,
+    CheckFrontend,
+    CheckUses,
+    CheckFinish,
+    CheckReport,
 }
 
-const STEPS: [Step; 26] = [
+const STEPS: [Step; 32] = [
     Step::IsPackage,
     Step::Load,
     Step::EbpfBuild,
@@ -346,6 +368,12 @@ const STEPS: [Step; 26] = [
     Step::EmitLean,
     Step::EmitClif,
     Step::IoError,
+    Step::CheckUntyped,
+    Step::CheckTensor,
+    Step::CheckFrontend,
+    Step::CheckUses,
+    Step::CheckFinish,
+    Step::CheckReport,
 ];
 
 /// A pass failed; its message is the session's text.
@@ -364,6 +392,52 @@ impl Session {
         self.checked
             .as_ref()
             .ok_or_else(|| "driver: no check yet".into())
+    }
+
+    /// The module `check::check`'s next part checks: the latest rewrite, or
+    /// the parse's.
+    fn check_module(&self) -> Result<&vesper::ast::Module, String> {
+        match &self.checking.rewritten {
+            Some(m) => Ok(m),
+            None => Ok(&self.parsed()?.module),
+        }
+    }
+
+    /// Prints the check's diagnostics unless the export path reports them
+    /// (a library whose `.vsys` imports check only through the Bridge
+    /// lowering); their count when printed, else 0.
+    fn report_check(&self) -> Result<i64, String> {
+        let o = &self.o;
+        let checked = self.checked()?;
+        let lib = o.lib_flags()?;
+        let sugar_rejection = checked
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d.code.as_str(), "E0143" | "E0144"));
+        if checked.diagnostics.is_empty()
+            || !(sugar_rejection
+                || !lib.needs_module(&self.source, !self.package_vsys().is_empty()))
+        {
+            return Ok(0);
+        }
+        match &self.loaded {
+            Some(p) => {
+                let localized: Vec<_> = checked
+                    .diagnostics
+                    .iter()
+                    .map(|d| p.sources.localize(d))
+                    .collect();
+                crate::package_diagnostics(p, &localized, o.json);
+            }
+            None => crate::compiler_diagnostics(
+                o.input(),
+                &self.original,
+                &checked.diagnostics,
+                &self.source_map,
+                o.json,
+            ),
+        }
+        Ok(count(checked.diagnostics.len()))
     }
 
     fn package_vsys(&self) -> &[packages::PackageVsys] {
@@ -504,41 +578,66 @@ impl Session {
             }
             Step::Check => {
                 let checked = check::check(&self.parsed()?.module);
-                let lib = o.lib_flags()?;
-                // A library with `.vsys` imports checks only through the
-                // Bridge lowering, which the export path runs.
-                let sugar_rejection = checked
-                    .diagnostics
-                    .iter()
-                    .any(|d| matches!(d.code.as_str(), "E0143" | "E0144"));
-                let n = if !checked.diagnostics.is_empty()
-                    && (sugar_rejection
-                        || !lib.needs_module(&self.source, !self.package_vsys().is_empty()))
-                {
-                    match &self.loaded {
-                        Some(p) => {
-                            let localized: Vec<_> = checked
-                                .diagnostics
-                                .iter()
-                                .map(|d| p.sources.localize(d))
-                                .collect();
-                            crate::package_diagnostics(p, &localized, o.json);
-                        }
-                        None => crate::compiler_diagnostics(
-                            o.input(),
-                            &self.original,
-                            &checked.diagnostics,
-                            &self.source_map,
-                            o.json,
-                        ),
-                    }
-                    count(checked.diagnostics.len())
-                } else {
-                    0
-                };
                 self.checked = Some(checked);
-                Ok(n)
+                self.report_check()
             }
+            Step::CheckUntyped => {
+                let rewrite = vesper::arrays::untyped_members(self.check_module()?);
+                Ok(match rewrite {
+                    Some((module, diagnostics)) => {
+                        self.checking.rewritten = Some(module);
+                        self.checking.pending.push(diagnostics);
+                        1
+                    }
+                    None => 0,
+                })
+            }
+            Step::CheckTensor => {
+                let checked = vesper::tensor_types::check(self.check_module()?);
+                let found = checked.is_some();
+                if found {
+                    self.checked = checked;
+                }
+                Ok(i64::from(found))
+            }
+            Step::CheckFrontend => {
+                let beacon = vesper::trace_effects::with_prelude(self.check_module()?);
+                let mut checked = vesper::pact_frontend::check_module(beacon.module());
+                beacon.check(&mut checked);
+                self.checked = Some(checked);
+                Ok(0)
+            }
+            Step::CheckUses => {
+                // `use` imports resolve only through the package loader.
+                let uses: Vec<_> = self
+                    .check_module()?
+                    .uses
+                    .iter()
+                    .map(|u| u.span.clone())
+                    .collect();
+                let checked = self.checked.as_mut().ok_or("driver: no check yet")?;
+                let n = uses.len();
+                for span in uses {
+                    checked.diagnostics.push(
+                        vesper::ast::Diagnostic::new(
+                            check::USE_OUTSIDE_PACKAGE,
+                            "`use` imports need a package; check the package directory instead of one file",
+                            span,
+                        )
+                        .with_help("a package is a directory with a Loom.toml and src/**/*.ves"),
+                    );
+                }
+                Ok(count(n))
+            }
+            Step::CheckFinish => {
+                let checking = std::mem::take(&mut self.checking);
+                let checked = self.checked.as_mut().ok_or("driver: no check yet")?;
+                for diagnostics in checking.pending.into_iter().rev() {
+                    checked.diagnostics.extend(diagnostics);
+                }
+                Ok(0)
+            }
+            Step::CheckReport => self.report_check(),
             Step::LibBuild => {
                 self.lib_build()?;
                 Ok(0)
@@ -874,6 +973,7 @@ pub mod host {
                     source_map: Vec::new(),
                     parsed: None,
                     checked: None,
+                    checking: Checking::default(),
                     text: vec![],
                 }))
             }

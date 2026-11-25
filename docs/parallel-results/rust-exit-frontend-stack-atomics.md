@@ -140,8 +140,41 @@ atomics rules are not swapped into the hybrid yet: `check_world` runs
 inside the checker and needs the AST across the hybrid boundary. Rust
 lines deleted: 0.
 
+## Slice 2: `check::check` sequenced in Vesper (#1900)
+
+The hybrid driver used to run the whole semantic check as one Rust pass
+(`Step::Check`). Now `check` at the end of
+`crates/vesper-hybrid/modules/driver/src/lib.ves` runs `check::check`'s
+sequence, and each part is one `hd_step` over the session:
+
+| Step | Part | What it runs |
+|--:|---|---|
+| 28 | `CheckUntyped` | `arrays::untyped_members`. Repeats while a rewrite applies, and keeps each rewrite's diagnostics. |
+| 29 | `CheckTensor` | `tensor_types::check`. When it answers, it holds the whole check. |
+| 30 | `CheckFrontend` | The Beacon prelude, Pact elaboration plus the core checker, then the Beacon rules. |
+| 31 | `CheckUses` | `E0110` for each `use` outside a package. |
+| 32 | `CheckFinish` | Appends the rewrites' diagnostics, innermost first, as the Rust recursion does. |
+| 33 | `CheckReport` | The driver's diagnostics decision and rendering, shared with `Step::Check`. |
+
+The checked world stays in the session (`s.checked`), where EmitInterface,
+LibBuild and the passes after the check read it. That is the interface
+the driver-steps lane (#1893) builds its slice 3 on. Each later slice
+replaces one part with its Vesper port.
+
+| Check | Inputs | Differences |
+|---|--:|--:|
+| `crates/vesper-hybrid/tests/differential.rs` | the `check`/`emit` corpus | 0 |
+| `crates/vesper-hybrid/tests/driver.rs` | every CLI option set on `examples/`, the package fixtures and the programs. New programs: untyped members (clean, with errors, with `use`), Beacon, tensor types | 0 |
+
+Each part is one host call, so the change in speed is noise: a
+`vesper check` makes 6 more FFI calls than before. Rust lines deleted: 0.
+The Rust `Step::Check` stays in place until the driver-steps lane has
+moved every caller.
+
 ## What is left
 
+- Port the parts of `check::check` one at a time: the core spine
+  (#1179), effects (#1180), regions (#1181), dyn (#1183) and Pact (#1185).
 - Swap atomics and the control rules into the hybrid, once the checker's
   AST crosses the boundary (this goes with core typing's spine, #1179).
 - `read_expr` still costs about 360 instructions per node, mostly in
