@@ -28,10 +28,31 @@ pub struct Build {
     pub object: Vec<u8>,
 }
 
-/// Compiles `entry` of `world` to a host object (`vesper build`'s native
-/// path) and splits its CLIF text per function.
+/// The target the differentials build objects for: `CODEGEN_SWAP_TARGET`
+/// (a target name such as `aarch64-apple-darwin`), else the host. CI
+/// compares the macOS and Windows objects on Linux this way, and runs only
+/// the host's builds and JIT runs on those machines (docs/ci-platforms.md).
+pub fn target() -> Option<&'static str> {
+    static TARGET: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    TARGET
+        .get_or_init(|| {
+            std::env::var("CODEGEN_SWAP_TARGET")
+                .ok()
+                .filter(|t| !t.is_empty())
+        })
+        .as_deref()
+}
+
+/// Whether the objects are for another machine (`target`): then nothing
+/// is JIT-run, since a JIT build is always for the host.
+pub fn cross() -> bool {
+    target().is_some()
+}
+
+/// Compiles `entry` of `world` to an object for `target()` (`vesper
+/// build`'s native path) and splits its CLIF text per function.
 pub fn build(world: &World, entry: &str, optimize: bool) -> Result<Build, String> {
-    let (object, clif) = vesper::native::object_with_options(world, entry, None, optimize)?;
+    let (object, clif) = vesper::native::object_with_options(world, entry, target(), optimize)?;
     Ok(Build {
         clif: split_clif(&clif),
         object,
@@ -140,7 +161,8 @@ pub fn first_difference(a: &str, b: &str) -> String {
 
 /// Compares `world` built with no hook against the same build with
 /// `hooks` installed on this thread, for `optimize`. With `run`, also
-/// JIT-runs `entry` both ways and compares the printed result.
+/// JIT-runs `entry` both ways and compares the printed result, unless the
+/// objects are for another machine (`cross`).
 pub fn compare(
     name: &str,
     world: &World,
@@ -182,7 +204,7 @@ pub fn compare(
             return d;
         }
     }
-    if run {
+    if run && !cross() {
         let rust = vesper::native::jit_with_options(world, entry, optimize).map(|v| v.to_string());
         let hooked = vesper::codegen_swap::with_hooks(hooks, || {
             vesper::native::jit_with_options(world, entry, optimize).map(|v| v.to_string())

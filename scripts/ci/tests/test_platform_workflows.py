@@ -96,7 +96,8 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertIn("pull_request", self.platforms["on"]["workflow_dispatch"]["inputs"])
         mac = self.platforms["jobs"]["platform"]
         windows = self.platforms["jobs"]["windows"]
-        self.assertEqual(mac["strategy"]["matrix"]["include"][0]["name"], "macOS (AArch64)")
+        self.assertTrue(mac["name"].startswith("macOS (AArch64)"))
+        self.assertNotIn("strategy", mac)
         self.assertTrue(windows["name"].startswith("Windows (x86_64 MSVC)"))
         for job in (mac, windows):
             self.assertEqual(job["needs"], "plan")
@@ -123,6 +124,7 @@ class PlatformWorkflowTests(unittest.TestCase):
         mac_commands = "\n".join(s.get("run", "") for s in mac["steps"])
         windows_commands = "\n".join(s.get("run", "") for s in windows["steps"])
         self.assertIn("aspect ci test-native-executables", mac_commands)
+        self.assertIn("aspect ci test-pulse-port", mac_commands)
         native_step = next(s for s in windows["steps"] if s.get("name") == "Validate native COFF executables")
         self.assertEqual(native_step["shell"], "pwsh")
         self.assertIn("./scripts/windows/test-native-executables.ps1", native_step["run"])
@@ -268,9 +270,10 @@ class PlatformWorkflowTests(unittest.TestCase):
         for result in ("failure", "skipped", "cancelled"):
             with tempfile.TemporaryDirectory() as temp:
                 output = Path(temp) / "outputs"
-                for failed in ("WINDOWS_RESULT", "PORTS_RESULT"):
+                for failed in ("WINDOWS_RESULT", "SWAP_RESULT", "PORTS_RESULT"):
                     env = {**os.environ, "PLAN_RESULT": "success", "MAC_RESULT": "success",
-                           "WINDOWS_RESULT": "success", "PORTS_RESULT": "success",
+                           "WINDOWS_RESULT": "success", "SWAP_RESULT": "success",
+                           "PORTS_RESULT": "success",
                            "CHECKED_SHA": "a" * 40, "PROFILE": "full",
                            "GITHUB_OUTPUT": str(output), failed: result}
                     completed = subprocess.run(["bash", "-e", "-c", run], env=env)
@@ -285,11 +288,46 @@ class PlatformWorkflowTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as temp:
                 output = Path(temp) / "outputs"
                 env = {**os.environ, "PLAN_RESULT": "success", "MAC_RESULT": "success",
-                       "WINDOWS_RESULT": "success", "PORTS_RESULT": "skipped", "PORTS": ports,
+                       "WINDOWS_RESULT": "success", "SWAP_RESULT": "success",
+                       "PORTS_RESULT": "skipped", "PORTS": ports,
                        "CHECKED_SHA": "a" * 40, "PROFILE": "pr", "GITHUB_OUTPUT": str(output)}
                 completed = subprocess.run(["bash", "-e", "-c", run], env=env)
                 self.assertEqual(completed.returncode != 0, bool(expected))
                 self.assertEqual(output.exists(), not expected)
+
+    def test_codegen_swap_objects_compare_on_linux(self):
+        # The macOS and Windows objects of the codegen swap point compare on
+        # Linux; the native lanes keep the hooks' calls and the JIT runs.
+        jobs = self.platforms["jobs"]
+        swap = jobs["codegen-swap"]
+        self.assertEqual(swap["runs-on"], "ubuntu-latest")
+        self.assertEqual({row["target"] for row in swap["strategy"]["matrix"]["include"]},
+                         {"aarch64-apple-darwin", "x86_64-pc-windows-msvc"})
+        step = next(s for s in swap["steps"] if "vesper-codegen-swap-test" in s.get("run", ""))
+        self.assertEqual(step["env"]["CODEGEN_SWAP_TARGET"], "${{ matrix.target }}")
+        self.assertIn("codegen-swap", jobs["complete"]["needs"])
+        for job in (jobs["platform"], jobs["windows"]):
+            step = next(s for s in job["steps"] if s.get("name") == "Test the codegen swap point")
+            self.assertEqual(step["env"]["CHECK_HARNESS_STRIDE"], "4")
+            self.assertNotIn("CODEGEN_SWAP_TARGET", step["env"])
+
+    def test_documentation_only_pull_requests_skip_the_native_jobs(self):
+        jobs = self.platforms["jobs"]
+        plan = next(s for s in jobs["plan"]["steps"] if s.get("id") == "plan")
+        self.assertEqual(plan["env"]["PULL_REQUEST"], "${{ inputs.pull_request }}")
+        for name in ("platform", "windows", "codegen-swap"):
+            self.assertIn("needs.plan.outputs.native != 'none'", jobs[name]["if"])
+        run = jobs["complete"]["steps"][0]["run"]
+        for native, mac, expected in (("none", "skipped", 0), ("all", "skipped", 1),
+                                      ("", "skipped", 1), ("none", "success", 0)):
+            with tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "outputs"
+                env = {**os.environ, "PLAN_RESULT": "success", "MAC_RESULT": mac,
+                       "WINDOWS_RESULT": mac, "SWAP_RESULT": mac, "PORTS_RESULT": "skipped",
+                       "PORTS": "none", "NATIVE": native, "CHECKED_SHA": "a" * 40,
+                       "PROFILE": "pr", "GITHUB_OUTPUT": str(output)}
+                completed = subprocess.run(["bash", "-e", "-c", run], env=env)
+                self.assertEqual(completed.returncode != 0, bool(expected))
 
     def test_hybrid_and_ports_skip_pull_requests(self):
         # Neither is required; both run on main, nightly and manual runs (#1479).
@@ -299,6 +337,15 @@ class PlatformWorkflowTests(unittest.TestCase):
         include = hybrid["jobs"]["hybrid"]["strategy"]["matrix"]["include"]
         self.assertEqual([leg["os"] for leg in include],
                          ["ubuntu-latest", "macos-latest", "windows-latest"])
+        # The divergent rebuilds check the harnesses, the same code on every
+        # host, so only Linux runs them; macOS and Windows keep the tests.
+        steps = hybrid["jobs"]["hybrid"]["steps"]
+        divergent = [s for s in steps if " catches a divergent " in s.get("name", "")]
+        self.assertEqual(len(divergent), 9)
+        for s in divergent:
+            self.assertEqual(s.get("if"), "runner.os == 'Linux'", s["name"])
+        tests = next(s for s in steps if s.get("name") == "Build and test the hybrid compiler")
+        self.assertNotIn("if", tests)
         step = next(s for s in self.platforms["jobs"]["plan"]["steps"] if s.get("id") == "ports")
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp) / "outputs"
@@ -314,6 +361,12 @@ class PlatformWorkflowTests(unittest.TestCase):
         cancel = self.platforms["concurrency"]["cancel-in-progress"]
         self.assertNotIn("'push'", cancel)
         self.assertIn("inputs.pull_request != ''", cancel)
+        # A newer `pr` dispatch by hand replaces the older one on its branch;
+        # full-profile and main dispatches (releases, nightly) never cancel.
+        self.assertIn("inputs.profile == 'pr'", cancel)
+        self.assertIn("github.ref != 'refs/heads/main'", cancel)
+        self.assertIn(cancel.removeprefix("${{ ").removesuffix(" }}") + " && github.ref",
+                      self.platforms["concurrency"]["group"])
         self.assertIn("'main'", self.platforms["concurrency"]["group"])
         hybrid = workflow("hybrid.yml")["concurrency"]
         self.assertEqual(hybrid["cancel-in-progress"], "false")
@@ -392,9 +445,10 @@ class PlatformWorkflowTests(unittest.TestCase):
                         "Self-host codegen differentials", "Native and acceptance scripts"):
             self.assertIn(context, job["if"])
             self.assertIn(f'"{context}"', find)
-        self.assertIn('"$states" != 3', find)
-        self.assertIn('"$codegen" != success', find)
-        self.assertIn('"$part2" != success', find)
+        # They start alongside BuildBuddy: once the acceptance check is green
+        # and no BuildBuddy check has failed.
+        self.assertIn('"$acceptance" != success', find)
+        self.assertIn('.state == "failure" or .state == "error"', find)
         names = [s.get("uses") or s.get("name") for s in steps]
         gate = names.index("./.gate/.github/actions/merge-gate")
         dispatch = next(i for i, s in enumerate(steps) if "gh workflow run" in s.get("run", ""))

@@ -1,0 +1,1978 @@
+// @vesper/kinetic::solve: the XPBD rigid-body solver of one tick
+// (`RigidWorld::solve` in src/rigid.rs, its manifold passes, the implicit
+// gyroscopic term of src/rigid/gyro.rs and the joint passes of
+// src/rigid/joints.rs), in binary32 with the Rust build's operation order.
+//
+// The Rust wrapper lends the tick's state packed once per tick:
+// - `bodies`: BODY f32 lanes per body: x (3), q (4), v (3), w (3), inverse
+//   mass, inverse inertia (3), principal frame q (4), has frame (0 or 1).
+// - `asleep`: one byte per body (1 asleep).
+// - `mf`/`mu`: MAN f32 lanes and 3 u32 lanes (a, b or NONE, point count)
+//   per contact manifold; the f32 lanes are the normal (3), the two
+//   radii, the material (static, dynamic, restitution, rolling) and per
+//   point POINT lanes: local a (3), local b (3), vn_prev, lambda_n.
+// - `jf`/`ju`: JOINT f32 lanes and 5 u32 lanes (a, b or NONE, kind 0 ball
+//   1 hinge 2 prismatic, has limits, drive 0 none 1 velocity 2 position)
+//   per joint; the f32 lane offsets are the J_* constants.
+// - `layer_off`/`layer_idx`: the colourer's layers; an index past the
+//   manifolds is a joint.
+// - `scratch`: SCRATCH f32 lanes per body (start-of-substep pose and
+//   velocities, the integrated pose).
+use self::{
+    fastmath_atan2f,
+    fastmath_cosf,
+    fastmath_sinf
+};
+
+const BODY: u64 = 22;
+const MAN: u64 = 41;
+const POINT: u64 = 8;
+const JOINT: u64 = 37;
+const SCRATCH: u64 = 20;
+const NONE: u32 = 4294967295;
+const F32_EXP: u32 = 2139095040;
+// 0x7f800000
+const F32_ABS: u32 = 2147483647;
+const TANGENT_MIN_BITS: u32 = 814313567;
+// 1.0e-9f32 = 0x3089705f
+const PI_BITS: u32 = 1078530011;
+// 0x40490fdb
+
+const J_ANCHOR_A: u64 = 0;
+const J_ANCHOR_B: u64 = 3;
+const J_AXIS_A: u64 = 6;
+const J_AXIS_B: u64 = 9;
+const J_REF_A: u64 = 12;
+const J_REF_B: u64 = 15;
+const J_REST: u64 = 18;
+const J_COMPLIANCE: u64 = 22;
+const J_ANG_COMPLIANCE: u64 = 23;
+const J_LO: u64 = 24;
+const J_HI: u64 = 25;
+const J_LAMBDA_POS: u64 = 26;
+const J_LAMBDA_ANG: u64 = 27;
+const J_LAMBDA_LIM: u64 = 28;
+const J_LAST_LAMBDA: u64 = 29;
+const J_FRICTION: u64 = 30;
+const J_LAMBDA_DRIVE: u64 = 31;
+const J_COORD_START: u64 = 32;
+const J_TARGET: u64 = 33;
+const J_DRIVE_COMPLIANCE: u64 = 34;
+const J_DAMPING: u64 = 35;
+const J_MAX_FORCE: u64 = 36;
+
+copy struct V3 {
+    x: f32,
+    y: f32,
+    z: f32
+}
+
+copy struct Q4 {
+    x: f32,
+    y: f32,
+    z: f32,
+    w: f32
+}
+
+copy struct Pts {
+    pa: V3,
+    ra: V3,
+    pb: V3,
+    rb: V3
+}
+
+copy struct Angle {
+    phi: f32,
+    axis: V3,
+    ua: V3,
+    ub: V3
+}
+
+// ----- lent-slice access --------------------------------------------------
+
+fn gf(in s: Slice[f32], i: u64) -> f32 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0.0,
+    }
+}
+
+fn sf(inout s: Slice[f32], i: u64, v: f32) {
+    s.try_set(i, v);
+}
+
+fn gu(in s: Slice[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn g8(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn gv(in s: Slice[f32], at: u64) -> V3 {
+    V3 {
+        x: gf(in s, at),
+        y: gf(in s, wrapping_add(at, 1)),
+        z: gf(in s, wrapping_add(at, 2))
+    }
+}
+
+fn sv(inout s: Slice[f32], at: u64, v: V3) {
+    sf(inout s, at, v.x);
+    sf(inout s, wrapping_add(at, 1), v.y);
+    sf(inout s, wrapping_add(at, 2), v.z);
+}
+
+fn gq(in s: Slice[f32], at: u64) -> Q4 {
+    Q4 {
+        x: gf(in s, at),
+        y: gf(in s, wrapping_add(at, 1)),
+        z: gf(in s, wrapping_add(at, 2)),
+        w: gf(in s, wrapping_add(at, 3))
+    }
+}
+
+fn sq(inout s: Slice[f32], at: u64, q: Q4) {
+    sf(inout s, at, q.x);
+    sf(inout s, wrapping_add(at, 1), q.y);
+    sf(inout s, wrapping_add(at, 2), q.z);
+    sf(inout s, wrapping_add(at, 3), q.w);
+}
+
+// ----- binary32 vector and quaternion helpers (src/rigid.rs) ---------------
+
+fn sqrt32(x: f32) -> f32 {
+    nearest_f32(sqrt(widen_f64(x)))
+}
+
+fn abs32(x: f32) -> f32 {
+    from_bits_f32(to_bits_f32(x) & F32_ABS)
+}
+
+fn finite32(x: f32) -> bool {
+    (to_bits_f32(x) & F32_EXP) != F32_EXP
+}
+
+fn fmax(a: f32, b: f32) -> f32 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+fn zero3() -> V3 {
+    V3 {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0
+    }
+}
+
+fn identity() -> Q4 {
+    Q4 {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        w: 1.0
+    }
+}
+
+fn vadd(a: V3, b: V3) -> V3 {
+    V3 {
+        x: a.x + b.x,
+        y: a.y + b.y,
+        z: a.z + b.z
+    }
+}
+
+fn vsub(a: V3, b: V3) -> V3 {
+    V3 {
+        x: a.x - b.x,
+        y: a.y - b.y,
+        z: a.z - b.z
+    }
+}
+
+fn vscale(a: V3, s: f32) -> V3 {
+    V3 {
+        x: a.x * s,
+        y: a.y * s,
+        z: a.z * s
+    }
+}
+
+fn vdot(a: V3, b: V3) -> f32 {
+    (a.x * b.x + a.y * b.y) + a.z * b.z
+}
+
+fn vcross(a: V3, b: V3) -> V3 {
+    V3 {
+        x: a.y * b.z - a.z * b.y,
+        y: a.z * b.x - a.x * b.z,
+        z: a.x * b.y - a.y * b.x
+    }
+}
+
+fn vlength(a: V3) -> f32 {
+    sqrt32(vdot(a, a))
+}
+
+fn vne(a: V3, b: V3) -> bool {
+    a.x != b.x || a.y != b.y || a.z != b.z
+}
+
+fn qne(a: Q4, b: Q4) -> bool {
+    a.x != b.x || a.y != b.y || a.z != b.z || a.w != b.w
+}
+
+fn qv(q: Q4) -> V3 {
+    V3 {
+        x: q.x,
+        y: q.y,
+        z: q.z
+    }
+}
+
+// `q ⊗ p` (Hamilton product). The hot helpers are written on scalars:
+// the operations are those of the vector helpers, in the same order.
+fn qmul(q: Q4, p: Q4) -> Q4 {
+    Q4 {
+        x: (p.x * q.w + q.x * p.w) + (q.y * p.z - q.z * p.y),
+        y: (p.y * q.w + q.y * p.w) + (q.z * p.x - q.x * p.z),
+        z: (p.z * q.w + q.z * p.w) + (q.x * p.y - q.y * p.x),
+        w: q.w * p.w - ((q.x * p.x + q.y * p.y) + q.z * p.z)
+    }
+}
+
+fn qscale(q: Q4, s: f32) -> Q4 {
+    Q4 {
+        x: q.x * s,
+        y: q.y * s,
+        z: q.z * s,
+        w: q.w * s
+    }
+}
+
+fn conj(q: Q4) -> Q4 {
+    Q4 {
+        x: -q.x,
+        y: -q.y,
+        z: -q.z,
+        w: q.w
+    }
+}
+
+// `rotate` of (vx, vy, vz) by the quaternion (ux, uy, uz, w).
+fn rot(ux: f32, uy: f32, uz: f32, w: f32, vx: f32, vy: f32, vz: f32) -> V3 {
+    let tx = (uy * vz - uz * vy) * 2.0;
+    let ty = (uz * vx - ux * vz) * 2.0;
+    let tz = (ux * vy - uy * vx) * 2.0;
+    V3 {
+        x: (vx + tx * w) + (uy * tz - uz * ty),
+        y: (vy + ty * w) + (uz * tx - ux * tz),
+        z: (vz + tz * w) + (ux * ty - uy * tx)
+    }
+}
+
+fn rotate(q: Q4, v: V3) -> V3 {
+    rot(q.x, q.y, q.z, q.w, v.x, v.y, v.z)
+}
+
+fn rotate_inv(q: Q4, v: V3) -> V3 {
+    rot(-q.x, -q.y, -q.z, q.w, v.x, v.y, v.z)
+}
+
+fn normalize_q(q: Q4) -> Q4 {
+    let n = sqrt32(((q.x * q.x + q.y * q.y) + q.z * q.z) + q.w * q.w);
+    if !(n > 0.0) {
+        return identity();
+    }
+    qscale(q, 1.0 / n)
+}
+
+// ----- bodies --------------------------------------------------------------
+
+fn bx(in b: Slice[f32], i: u64) -> V3 {
+    gv(in b, wrapping_mul(i, BODY))
+}
+
+fn bq(in b: Slice[f32], i: u64) -> Q4 {
+    gq(in b, wrapping_add(wrapping_mul(i, BODY), 3))
+}
+
+fn bv(in b: Slice[f32], i: u64) -> V3 {
+    gv(in b, wrapping_add(wrapping_mul(i, BODY), 7))
+}
+
+fn bw(in b: Slice[f32], i: u64) -> V3 {
+    gv(in b, wrapping_add(wrapping_mul(i, BODY), 10))
+}
+
+fn bim(in b: Slice[f32], i: u64) -> f32 {
+    gf(in b, wrapping_add(wrapping_mul(i, BODY), 13))
+}
+
+fn bii(in b: Slice[f32], i: u64) -> V3 {
+    gv(in b, wrapping_add(wrapping_mul(i, BODY), 14))
+}
+
+fn set_x(inout b: Slice[f32], i: u64, v: V3) {
+    sv(inout b, wrapping_mul(i, BODY), v);
+}
+
+fn set_q(inout b: Slice[f32], i: u64, q: Q4) {
+    sq(inout b, wrapping_add(wrapping_mul(i, BODY), 3), q);
+}
+
+fn set_v(inout b: Slice[f32], i: u64, v: V3) {
+    sv(inout b, wrapping_add(wrapping_mul(i, BODY), 7), v);
+}
+
+fn set_w(inout b: Slice[f32], i: u64, v: V3) {
+    sv(inout b, wrapping_add(wrapping_mul(i, BODY), 10), v);
+}
+
+// Orientation of the principal axes in world coordinates.
+fn principal(in b: Slice[f32], i: u64) -> Q4 {
+    let base = wrapping_mul(i, BODY);
+    let q = gq(in b, wrapping_add(base, 3));
+    if gf(in b, wrapping_add(base, 21)) == 0.0 {
+        q
+    } else {
+        qmul(q, gq(in b, wrapping_add(base, 17)))
+    }
+}
+
+// `I⁻¹ x` in world coordinates, with the principal orientation (qx, qy,
+// qz, qw) of the body whose lanes start at `base`.
+fn iiw(in b: Slice[f32], base: u64, qx: f32, qy: f32, qz: f32, qw: f32, x: V3) -> V3 {
+    let l = rot(-qx, -qy, -qz, qw, x.x, x.y, x.z);
+    let ii = wrapping_add(base, 14);
+    rot(
+        qx,
+        qy,
+        qz,
+        qw,
+        l.x * gf(in b, ii),
+        l.y * gf(in b, wrapping_add(ii, 1)),
+        l.z * gf(in b, wrapping_add(ii, 2))
+    )
+}
+
+fn inv_inertia_world(in b: Slice[f32], i: u64, x: V3) -> V3 {
+    let base = wrapping_mul(i, BODY);
+    let qx = gf(in b, wrapping_add(base, 3));
+    let qy = gf(in b, wrapping_add(base, 4));
+    let qz = gf(in b, wrapping_add(base, 5));
+    let qw = gf(in b, wrapping_add(base, 6));
+    if gf(in b, wrapping_add(base, 21)) == 0.0 {
+        iiw(in b, base, qx, qy, qz, qw, x)
+    } else {
+        let p = qmul(
+            Q4 {
+                x: qx,
+                y: qy,
+                z: qz,
+                w: qw
+            },
+            gq(in b, wrapping_add(base, 17))
+        );
+        iiw(in b, base, p.x, p.y, p.z, p.w, x)
+    }
+}
+
+// `xᵀ I⁻¹ x` (see `iiw`).
+fn aw(in b: Slice[f32], base: u64, qx: f32, qy: f32, qz: f32, qw: f32, x: V3) -> f32 {
+    let l = rot(-qx, -qy, -qz, qw, x.x, x.y, x.z);
+    let ii = wrapping_add(base, 14);
+    ((l.x * l.x) * gf(in b, ii) + (l.y * l.y) * gf(in b, wrapping_add(ii, 1)))
+        + (l.z * l.z) * gf(in b, wrapping_add(ii, 2))
+}
+
+fn angular_weight(in b: Slice[f32], i: u64, x: V3) -> f32 {
+    let base = wrapping_mul(i, BODY);
+    let qx = gf(in b, wrapping_add(base, 3));
+    let qy = gf(in b, wrapping_add(base, 4));
+    let qz = gf(in b, wrapping_add(base, 5));
+    let qw = gf(in b, wrapping_add(base, 6));
+    if gf(in b, wrapping_add(base, 21)) == 0.0 {
+        aw(in b, base, qx, qy, qz, qw, x)
+    } else {
+        let p = qmul(
+            Q4 {
+                x: qx,
+                y: qy,
+                z: qz,
+                w: qw
+            },
+            gq(in b, wrapping_add(base, 17))
+        );
+        aw(in b, base, p.x, p.y, p.z, p.w, x)
+    }
+}
+
+// Rotate body `i` by the angular impulse `l`: `q += ½ [I⁻¹ l, 0] q`.
+fn turn(inout b: Slice[f32], i: u64, l: V3) {
+    let dq = inv_inertia_world(in b, i, l);
+    let base = wrapping_add(wrapping_mul(i, BODY), 3);
+    let qx = gf(in b, base);
+    let qy = gf(in b, wrapping_add(base, 1));
+    let qz = gf(in b, wrapping_add(base, 2));
+    let qw = gf(in b, wrapping_add(base, 3));
+    let zero: f32 = 0.0;
+    // `qmul([dq, 0], q)`.
+    let rx = (qx * zero + dq.x * qw) + (dq.y * qz - dq.z * qy);
+    let ry = (qy * zero + dq.y * qw) + (dq.z * qx - dq.x * qz);
+    let rz = (qz * zero + dq.z * qw) + (dq.x * qy - dq.y * qx);
+    let rw = zero * qw - ((dq.x * qx + dq.y * qy) + dq.z * qz);
+    sf(inout b, base, qx + 0.5 * rx);
+    sf(inout b, wrapping_add(base, 1), qy + 0.5 * ry);
+    sf(inout b, wrapping_add(base, 2), qz + 0.5 * rz);
+    sf(inout b, wrapping_add(base, 3), qw + 0.5 * rw);
+}
+
+fn active(in b: Slice[f32], in asleep: Slice[u8], sleeping: bool, i: u64) -> bool {
+    bim(in b, i) > 0.0 && !(sleeping && g8(in asleep, i) != 0)
+}
+
+fn live(in b: Slice[f32], in asleep: Slice[u8], sleeping: bool, a: u32, ob: u32) -> bool {
+    active(in b, in asleep, sleeping, widen_u64(a))
+        || (ob != NONE && active(in b, in asleep, sleeping, widen_u64(ob)))
+}
+
+// The positional impulse `p` at arm `ra` on `a` and `-p` at `rb` on `b`.
+fn apply_positional_to(inout b: Slice[f32], a: u32, ob: u32, ra: V3, rb: V3, p: V3) {
+    let ia = widen_u64(a);
+    let ma = bim(in b, ia);
+    if ma > 0.0 {
+        add3_scaled(inout b, wrapping_mul(ia, BODY), p.x, p.y, p.z, ma);
+        turn(inout b, ia, vcross(ra, p));
+    }
+    if ob != NONE {
+        let ib = widen_u64(ob);
+        let mb = bim(in b, ib);
+        if mb > 0.0 {
+            let np = vscale(p, -1.0);
+            add3_scaled(inout b, wrapping_mul(ib, BODY), np.x, np.y, np.z, mb);
+            turn(inout b, ib, vcross(rb, np));
+        }
+    }
+}
+
+fn apply_rotation_to(inout b: Slice[f32], a: u32, ob: u32, p: V3) {
+    let ia = widen_u64(a);
+    if bim(in b, ia) > 0.0 {
+        turn(inout b, ia, p);
+    }
+    if ob != NONE {
+        let ib = widen_u64(ob);
+        if bim(in b, ib) > 0.0 {
+            turn(inout b, ib, vscale(p, -1.0));
+        }
+    }
+}
+
+// Lanes `at..at + 3` of `b` += `d`.
+fn add3(inout b: Slice[f32], at: u64, d: V3) {
+    sf(inout b, at, gf(in b, at) + d.x);
+    sf(inout b, wrapping_add(at, 1), gf(in b, wrapping_add(at, 1)) + d.y);
+    sf(inout b, wrapping_add(at, 2), gf(in b, wrapping_add(at, 2)) + d.z);
+}
+
+// Lanes `at..at + 3` of `b` += `p · m`.
+fn add3_scaled(inout b: Slice[f32], at: u64, px: f32, py: f32, pz: f32, m: f32) {
+    sf(inout b, at, gf(in b, at) + px * m);
+    sf(inout b, wrapping_add(at, 1), gf(in b, wrapping_add(at, 1)) + py * m);
+    sf(inout b, wrapping_add(at, 2), gf(in b, wrapping_add(at, 2)) + pz * m);
+}
+
+fn apply_impulse(inout b: Slice[f32], a: u32, ob: u32, ra: V3, rb: V3, p: V3) {
+    let ia = widen_u64(a);
+    let ma = bim(in b, ia);
+    if ma > 0.0 {
+        let base = wrapping_mul(ia, BODY);
+        add3_scaled(inout b, wrapping_add(base, 7), p.x, p.y, p.z, ma);
+        add3(inout b, wrapping_add(base, 10), inv_inertia_world(in b, ia, vcross(ra, p)));
+    }
+    if ob != NONE {
+        let ib = widen_u64(ob);
+        let mb = bim(in b, ib);
+        if mb > 0.0 {
+            let np = vscale(p, -1.0);
+            let base = wrapping_mul(ib, BODY);
+            add3_scaled(inout b, wrapping_add(base, 7), np.x, np.y, np.z, mb);
+            add3(inout b, wrapping_add(base, 10), inv_inertia_world(in b, ib, vcross(rb, np)));
+        }
+    }
+}
+
+// Generalized inverse mass of bodies `a` and `b` in direction `d`.
+fn weight(in b: Slice[f32], a: u32, ob: u32, ra: V3, rb: V3, d: V3) -> f32 {
+    let ia = widen_u64(a);
+    let mut w = bim(in b, ia) + angular_weight(in b, ia, vcross(ra, d));
+    if ob != NONE {
+        let ib = widen_u64(ob);
+        w = w + (bim(in b, ib) + angular_weight(in b, ib, vcross(rb, d)));
+    }
+    w
+}
+
+// ----- the implicit gyroscopic term (src/rigid/gyro.rs) --------------------
+
+copy struct M3 {
+    a00: f32,
+    a01: f32,
+    a02: f32,
+    a10: f32,
+    a11: f32,
+    a12: f32,
+    a20: f32,
+    a21: f32,
+    a22: f32
+}
+
+fn det3(m: M3) -> f32 {
+    let c0 = m.a11 * m.a22 - m.a12 * m.a21;
+    let c1 = m.a10 * m.a22 - m.a12 * m.a20;
+    let c2 = m.a10 * m.a21 - m.a11 * m.a20;
+    (m.a00 * c0 - m.a01 * c1) + m.a02 * c2
+}
+
+fn with_col(m: M3, k: u64, c: V3) -> M3 {
+    if k == 0 {
+        M3 {
+            a00: c.x,
+            a01: m.a01,
+            a02: m.a02,
+            a10: c.y,
+            a11: m.a11,
+            a12: m.a12,
+            a20: c.z,
+            a21: m.a21,
+            a22: m.a22
+        }
+    } else if k == 1 {
+        M3 {
+            a00: m.a00,
+            a01: c.x,
+            a02: m.a02,
+            a10: m.a10,
+            a11: c.y,
+            a12: m.a12,
+            a20: m.a20,
+            a21: c.z,
+            a22: m.a22
+        }
+    } else {
+        M3 {
+            a00: m.a00,
+            a01: m.a01,
+            a02: c.x,
+            a10: m.a10,
+            a11: m.a11,
+            a12: c.y,
+            a20: m.a20,
+            a21: m.a21,
+            a22: c.z
+        }
+    }
+}
+
+fn unit_e(k: u64, s: f32) -> V3 {
+    if k == 0 {
+        V3 {
+            x: s,
+            y: 0.0,
+            z: 0.0
+        }
+    } else if k == 1 {
+        V3 {
+            x: 0.0,
+            y: s,
+            z: 0.0
+        }
+    } else {
+        V3 {
+            x: 0.0,
+            y: 0.0,
+            z: s
+        }
+    }
+}
+
+fn comp(v: V3, k: u64) -> f32 {
+    if k == 0 {
+        v.x
+    } else if k == 1 {
+        v.y
+    } else {
+        v.z
+    }
+}
+
+// Column `k` of J = I + h (skew(w) I − skew(Iw)).
+fn jcol(w: V3, iw: V3, ik: f32, k: u64, h: f32) -> V3 {
+    let a = vcross(w, unit_e(k, ik));
+    let b = vcross(iw, unit_e(k, 1.0));
+    let mut c = V3 {
+        x: h * (a.x - b.x),
+        y: h * (a.y - b.y),
+        z: h * (a.z - b.z)
+    };
+    if k == 0 {
+        c.x = c.x + ik;
+    } else if k == 1 {
+        c.y = c.y + ik;
+    } else {
+        c.z = c.z + ik;
+    }
+    c
+}
+
+fn implicit_gyroscopic(inout b: Slice[f32], i: u64, h: f32) {
+    let ii = bii(in b, i);
+    if !(ii.x > 0.0 && ii.y > 0.0 && ii.z > 0.0) {
+        return;
+    }
+    let q = principal(in b, i);
+    let w = rotate_inv(q, bw(in b, i));
+    let inertia = V3 {
+        x: 1.0 / ii.x,
+        y: 1.0 / ii.y,
+        z: 1.0 / ii.z
+    };
+    let iw = V3 {
+        x: inertia.x * w.x,
+        y: inertia.y * w.y,
+        z: inertia.z * w.z
+    };
+    let f0 = vcross(w, iw);
+    let f = V3 {
+        x: h * f0.x,
+        y: h * f0.y,
+        z: h * f0.z
+    };
+    let c0 = jcol(w, iw, inertia.x, 0, h);
+    let c1 = jcol(w, iw, inertia.y, 1, h);
+    let c2 = jcol(w, iw, inertia.z, 2, h);
+    let m = M3 {
+        a00: c0.x,
+        a01: c1.x,
+        a02: c2.x,
+        a10: c0.y,
+        a11: c1.y,
+        a12: c2.y,
+        a20: c0.z,
+        a21: c1.z,
+        a22: c2.z
+    };
+    let d = det3(m);
+    if !(finite32(d) && d != 0.0) {
+        return;
+    }
+    let d0 = det3(with_col(m, 0, f)) / d;
+    let d1 = det3(with_col(m, 1, f)) / d;
+    let d2 = det3(with_col(m, 2, f)) / d;
+    let w2 = V3 {
+        x: w.x - d0,
+        y: w.y - d1,
+        z: w.z - d2
+    };
+    if finite32(w2.x) && finite32(w2.y) && finite32(w2.z) {
+        set_w(inout b, i, rotate(q, w2));
+    }
+}
+
+// ----- contact manifolds (src/rigid.rs) ------------------------------------
+
+fn mbase(mi: u64) -> u64 {
+    wrapping_mul(mi, MAN)
+}
+
+fn pbase(mi: u64, k: u64) -> u64 {
+    wrapping_add(wrapping_add(mbase(mi), 9), wrapping_mul(k, POINT))
+}
+
+// World contact points and arms of point `k` of manifold `mi`.
+fn points_of(in b: Slice[f32], in mf: Slice[f32], a: u32, ob: u32, mi: u64, k: u64) -> Pts {
+    let base = mbase(mi);
+    let nx = gf(in mf, base);
+    let ny = gf(in mf, wrapping_add(base, 1));
+    let nz = gf(in mf, wrapping_add(base, 2));
+    let p = pbase(mi, k);
+    let ba = wrapping_mul(widen_u64(a), BODY);
+    let ua = rot(
+        gf(in b, wrapping_add(ba, 3)),
+        gf(in b, wrapping_add(ba, 4)),
+        gf(in b, wrapping_add(ba, 5)),
+        gf(in b, wrapping_add(ba, 6)),
+        gf(in mf, p),
+        gf(in mf, wrapping_add(p, 1)),
+        gf(in mf, wrapping_add(p, 2))
+    );
+    let rad_a = gf(in mf, wrapping_add(base, 3));
+    let rax = ua.x - nx * rad_a;
+    let ray = ua.y - ny * rad_a;
+    let raz = ua.z - nz * rad_a;
+    let pa = V3 {
+        x: gf(in b, ba) + rax,
+        y: gf(in b, wrapping_add(ba, 1)) + ray,
+        z: gf(in b, wrapping_add(ba, 2)) + raz
+    };
+    let lbx = gf(in mf, wrapping_add(p, 3));
+    let lby = gf(in mf, wrapping_add(p, 4));
+    let lbz = gf(in mf, wrapping_add(p, 5));
+    if ob != NONE {
+        let bb = wrapping_mul(widen_u64(ob), BODY);
+        let ub = rot(
+            gf(in b, wrapping_add(bb, 3)),
+            gf(in b, wrapping_add(bb, 4)),
+            gf(in b, wrapping_add(bb, 5)),
+            gf(in b, wrapping_add(bb, 6)),
+            lbx,
+            lby,
+            lbz
+        );
+        let rad_b = gf(in mf, wrapping_add(base, 4));
+        let rbx = ub.x + nx * rad_b;
+        let rby = ub.y + ny * rad_b;
+        let rbz = ub.z + nz * rad_b;
+        Pts {
+            pa: pa,
+            ra: V3 {
+                x: rax,
+                y: ray,
+                z: raz
+            },
+            pb: V3 {
+                x: gf(in b, bb) + rbx,
+                y: gf(in b, wrapping_add(bb, 1)) + rby,
+                z: gf(in b, wrapping_add(bb, 2)) + rbz
+            },
+            rb: V3 {
+                x: rbx,
+                y: rby,
+                z: rbz
+            }
+        }
+    } else {
+        Pts {
+            pa: pa,
+            ra: V3 {
+                x: rax,
+                y: ray,
+                z: raz
+            },
+            pb: V3 {
+                x: lbx,
+                y: lby,
+                z: lbz
+            },
+            rb: zero3()
+        }
+    }
+}
+
+// `points_of(..).pa` alone.
+fn point_a(in b: Slice[f32], in mf: Slice[f32], a: u32, mi: u64, k: u64) -> V3 {
+    let base = mbase(mi);
+    let p = pbase(mi, k);
+    let ba = wrapping_mul(widen_u64(a), BODY);
+    let ua = rot(
+        gf(in b, wrapping_add(ba, 3)),
+        gf(in b, wrapping_add(ba, 4)),
+        gf(in b, wrapping_add(ba, 5)),
+        gf(in b, wrapping_add(ba, 6)),
+        gf(in mf, p),
+        gf(in mf, wrapping_add(p, 1)),
+        gf(in mf, wrapping_add(p, 2))
+    );
+    let rad_a = gf(in mf, wrapping_add(base, 3));
+    V3 {
+        x: gf(in b, ba) + (ua.x - gf(in mf, base) * rad_a),
+        y: gf(in b, wrapping_add(ba, 1)) + (ua.y - gf(in mf, wrapping_add(base, 1)) * rad_a),
+        z: gf(in b, wrapping_add(ba, 2)) + (ua.z - gf(in mf, wrapping_add(base, 2)) * rad_a)
+    }
+}
+
+// Relative velocity of the contact points (`a` minus `b`), now or at the
+// start of the substep.
+// `v + ω × r` from the lanes v (3), ω (3) at `at`.
+fn arm_velocity(in s: Slice[f32], at: u64, r: V3) -> V3 {
+    let wx = gf(in s, wrapping_add(at, 3));
+    let wy = gf(in s, wrapping_add(at, 4));
+    let wz = gf(in s, wrapping_add(at, 5));
+    V3 {
+        x: gf(in s, at) + (wy * r.z - wz * r.y),
+        y: gf(in s, wrapping_add(at, 1)) + (wz * r.x - wx * r.z),
+        z: gf(in s, wrapping_add(at, 2)) + (wx * r.y - wy * r.x)
+    }
+}
+
+fn relative_velocity(
+    in b: Slice[f32],
+    in sc: Slice[f32],
+    a: u32,
+    ob: u32,
+    ra: V3,
+    rb: V3,
+    prev: bool
+) -> V3 {
+    let ia = widen_u64(a);
+    let rel = if prev {
+        arm_velocity(in sc, wrapping_add(wrapping_mul(ia, SCRATCH), 7), ra)
+    } else {
+        arm_velocity(in b, wrapping_add(wrapping_mul(ia, BODY), 7), ra)
+    };
+    if ob != NONE {
+        let ib = widen_u64(ob);
+        let vb = if prev {
+            arm_velocity(in sc, wrapping_add(wrapping_mul(ib, SCRATCH), 7), rb)
+        } else {
+            arm_velocity(in b, wrapping_add(wrapping_mul(ib, BODY), 7), rb)
+        };
+        V3 {
+            x: rel.x - vb.x,
+            y: rel.y - vb.y,
+            z: rel.z - vb.z
+        }
+    } else {
+        rel
+    }
+}
+
+// Arms of the patch centre now (`pa`, `pb` hold the motions of the
+// material points this substep).
+fn centroid(
+    in b: Slice[f32],
+    in sc: Slice[f32],
+    in mf: Slice[f32],
+    a: u32,
+    ob: u32,
+    count: u64,
+    mi: u64
+) -> Pts {
+    let base = mbase(mi);
+    let inv = 1.0 / nearest_f32(nearest_f64(count));
+    let mut la = zero3();
+    let mut lb = zero3();
+    for k in 0..count {
+        let p = pbase(mi, k);
+        la = vadd(la, gv(in mf, p));
+        lb = vadd(lb, gv(in mf, wrapping_add(p, 3)));
+    }
+    la = vscale(la, inv);
+    lb = vscale(lb, inv);
+    let n = gv(in mf, base);
+    let ia = widen_u64(a);
+    let qa_now = bq(in b, ia);
+    let sa = wrapping_mul(ia, SCRATCH);
+    let xa = gv(in sc, sa);
+    let qa = gq(in sc, wrapping_add(sa, 3));
+    let ra = vsub(rotate(qa_now, la), vscale(n, gf(in mf, wrapping_add(base, 3))));
+    let moved_a = vsub(vadd(bx(in b, ia), ra), vadd(xa, rotate(qa, rotate(conj(qa_now), ra))));
+    if ob != NONE {
+        let ib = widen_u64(ob);
+        let qb_now = bq(in b, ib);
+        let sbb = wrapping_mul(ib, SCRATCH);
+        let xb = gv(in sc, sbb);
+        let qb = gq(in sc, wrapping_add(sbb, 3));
+        let rb = vadd(rotate(qb_now, lb), vscale(n, gf(in mf, wrapping_add(base, 4))));
+        let moved_b = vsub(vadd(bx(in b, ib), rb), vadd(xb, rotate(qb, rotate(conj(qb_now), rb))));
+        Pts {
+            pa: moved_a,
+            ra: ra,
+            pb: moved_b,
+            rb: rb
+        }
+    } else {
+        Pts {
+            pa: moved_a,
+            ra: ra,
+            pb: zero3(),
+            rb: zero3()
+        }
+    }
+}
+
+// The arms of `centroid` alone (`pa`, `pb` zero).
+fn centroid_arms(in b: Slice[f32], in mf: Slice[f32], a: u32, ob: u32, count: u64, mi: u64) -> Pts {
+    let base = mbase(mi);
+    let inv = 1.0 / nearest_f32(nearest_f64(count));
+    let mut ax: f32 = 0.0;
+    let mut ay: f32 = 0.0;
+    let mut az: f32 = 0.0;
+    let mut bx_: f32 = 0.0;
+    let mut by_: f32 = 0.0;
+    let mut bz_: f32 = 0.0;
+    for k in 0..count {
+        let p = pbase(mi, k);
+        ax = ax + gf(in mf, p);
+        ay = ay + gf(in mf, wrapping_add(p, 1));
+        az = az + gf(in mf, wrapping_add(p, 2));
+        bx_ = bx_ + gf(in mf, wrapping_add(p, 3));
+        by_ = by_ + gf(in mf, wrapping_add(p, 4));
+        bz_ = bz_ + gf(in mf, wrapping_add(p, 5));
+    }
+    let nx = gf(in mf, base);
+    let ny = gf(in mf, wrapping_add(base, 1));
+    let nz = gf(in mf, wrapping_add(base, 2));
+    let ba = wrapping_add(wrapping_mul(widen_u64(a), BODY), 3);
+    let ua = rot(
+        gf(in b, ba),
+        gf(in b, wrapping_add(ba, 1)),
+        gf(in b, wrapping_add(ba, 2)),
+        gf(in b, wrapping_add(ba, 3)),
+        ax * inv,
+        ay * inv,
+        az * inv
+    );
+    let rad_a = gf(in mf, wrapping_add(base, 3));
+    let ra = V3 {
+        x: ua.x - nx * rad_a,
+        y: ua.y - ny * rad_a,
+        z: ua.z - nz * rad_a
+    };
+    if ob != NONE {
+        let bb = wrapping_add(wrapping_mul(widen_u64(ob), BODY), 3);
+        let ub = rot(
+            gf(in b, bb),
+            gf(in b, wrapping_add(bb, 1)),
+            gf(in b, wrapping_add(bb, 2)),
+            gf(in b, wrapping_add(bb, 3)),
+            bx_ * inv,
+            by_ * inv,
+            bz_ * inv
+        );
+        let rad_b = gf(in mf, wrapping_add(base, 4));
+        Pts {
+            pa: zero3(),
+            ra: ra,
+            pb: zero3(),
+            rb: V3 {
+                x: ub.x + nx * rad_b,
+                y: ub.y + ny * rad_b,
+                z: ub.z + nz * rad_b
+            }
+        }
+    } else {
+        Pts {
+            pa: zero3(),
+            ra: ra,
+            pb: zero3(),
+            rb: zero3()
+        }
+    }
+}
+
+fn project_manifold(
+    inout b: Slice[f32],
+    in sc: Slice[f32],
+    inout mf: Slice[f32],
+    a: u32,
+    ob: u32,
+    count: u64,
+    mi: u64
+) {
+    let base = mbase(mi);
+    let n = gv(in mf, base);
+    let mut dl_sum: f32 = 0.0;
+    for k in 0..count {
+        let pts = points_of(in b, in mf, a, ob, mi, k);
+        let depth = vdot(vsub(pts.pb, pts.pa), n);
+        if !(depth > 0.0) {
+            continue;
+        }
+        let w = weight(in b, a, ob, pts.ra, pts.rb, n);
+        if !(w > 0.0) {
+            continue;
+        }
+        let dl = depth / w;
+        let li = wrapping_add(pbase(mi, k), 7);
+        sf(inout mf, li, gf(in mf, li) + dl);
+        dl_sum = dl_sum + dl;
+        apply_positional_to(inout b, a, ob, pts.ra, pts.rb, vscale(n, dl));
+    }
+    let mu_s = gf(in mf, wrapping_add(base, 5));
+    if mu_s > 0.0 && dl_sum > 0.0 {
+        let c = centroid(in b, in sc, in mf, a, ob, count, mi);
+        let dp = vsub(c.pa, c.pb);
+        let dt_vec = vsub(dp, vscale(n, vdot(dp, n)));
+        let lt = vlength(dt_vec);
+        if lt > from_bits_f32(TANGENT_MIN_BITS) {
+            let t = vscale(dt_vec, 1.0 / lt);
+            let wt = weight(in b, a, ob, c.ra, c.rb, t);
+            if wt > 0.0 {
+                let dlt = lt / wt;
+                if dlt < mu_s * dl_sum {
+                    apply_positional_to(inout b, a, ob, c.ra, c.rb, vscale(t, -dlt));
+                }
+            }
+        }
+    }
+}
+
+fn angular_friction(inout b: Slice[f32], a: u32, ob: u32, axis: V3, bound: f32) {
+    let ia = widen_u64(a);
+    let wa = bw(in b, ia);
+    let wb = if ob != NONE {
+        bw(in b, widen_u64(ob))
+    } else {
+        zero3()
+    };
+    let rel = vdot(vsub(wa, wb), axis);
+    if rel == 0.0 || !(bound > 0.0) {
+        return;
+    }
+    let mut wsum = angular_weight(in b, ia, axis);
+    if ob != NONE {
+        wsum = wsum + angular_weight(in b, widen_u64(ob), axis);
+    }
+    if !(wsum > 0.0) {
+        return;
+    }
+    let stop = abs32(rel) / wsum;
+    let j = if stop < bound {
+        stop
+    } else {
+        bound
+    };
+    let ang = vscale(
+        axis,
+        if rel > 0.0 {
+            -j
+        } else {
+            j
+        }
+    );
+    if bim(in b, ia) > 0.0 {
+        set_w(inout b, ia, vadd(bw(in b, ia), inv_inertia_world(in b, ia, ang)));
+    }
+    if ob != NONE {
+        let ib = widen_u64(ob);
+        if bim(in b, ib) > 0.0 {
+            set_w(inout b, ib, vsub(bw(in b, ib), inv_inertia_world(in b, ib, ang)));
+        }
+    }
+}
+
+fn velocity_manifold(
+    inout b: Slice[f32],
+    in sc: Slice[f32],
+    in mf: Slice[f32],
+    a: u32,
+    ob: u32,
+    count: u64,
+    mi: u64,
+    h: f32,
+    bounce_floor: f32
+) {
+    let base = mbase(mi);
+    let n = gv(in mf, base);
+    let mu_d = gf(in mf, wrapping_add(base, 6));
+    let restitution = gf(in mf, wrapping_add(base, 7));
+    let mu_r = gf(in mf, wrapping_add(base, 8));
+    let mut lambda_sum: f32 = 0.0;
+    for k in 0..count {
+        let p = pbase(mi, k);
+        let lambda_n = gf(in mf, wrapping_add(p, 7));
+        if !(lambda_n > 0.0) {
+            continue;
+        }
+        lambda_sum = lambda_sum + lambda_n;
+        let pts = points_of(in b, in mf, a, ob, mi, k);
+        let vn = vdot(relative_velocity(in b, in sc, a, ob, pts.ra, pts.rb, false), n);
+        let vn_prev = gf(in mf, wrapping_add(p, 6));
+        let e: f32 = if abs32(vn_prev) <= bounce_floor {
+            0.0
+        } else {
+            restitution
+        };
+        let wanted = fmax(-(e * vn_prev), 0.0);
+        let dvn = wanted - vn;
+        if dvn == 0.0 {
+            continue;
+        }
+        let w = weight(in b, a, ob, pts.ra, pts.rb, n);
+        if w > 0.0 {
+            apply_impulse(inout b, a, ob, pts.ra, pts.rb, vscale(n, dvn / w));
+        }
+    }
+    if !(lambda_sum > 0.0) {
+        return;
+    }
+    let normal_impulse = lambda_sum / h;
+    if mu_d > 0.0 {
+        let c = centroid_arms(in b, in mf, a, ob, count, mi);
+        let rel = relative_velocity(in b, in sc, a, ob, c.ra, c.rb, false);
+        let vt = vsub(rel, vscale(n, vdot(rel, n)));
+        let lvt = vlength(vt);
+        if lvt > from_bits_f32(TANGENT_MIN_BITS) {
+            let t = vscale(vt, 1.0 / lvt);
+            let wt = weight(in b, a, ob, c.ra, c.rb, t);
+            if wt > 0.0 {
+                let stop = lvt / wt;
+                let limit = mu_d * normal_impulse;
+                let j = if limit < stop {
+                    limit
+                } else {
+                    stop
+                };
+                apply_impulse(inout b, a, ob, c.ra, c.rb, vscale(t, -j));
+            }
+        }
+    }
+    if mu_d > 0.0 && count > 1 {
+        let cnt = nearest_f32(nearest_f64(count));
+        let mut c = zero3();
+        for k in 0..count {
+            c = vadd(c, point_a(in b, in mf, a, mi, k));
+        }
+        c = vscale(c, 1.0 / cnt);
+        let mut radius: f32 = 0.0;
+        for k in 0..count {
+            let d = vsub(point_a(in b, in mf, a, mi, k), c);
+            radius = radius + vlength(vsub(d, vscale(n, vdot(d, n))));
+        }
+        radius = radius / cnt;
+        let bound = (mu_d * normal_impulse) * radius;
+        angular_friction(inout b, a, ob, n, bound);
+    }
+    if mu_r > 0.0 {
+        let bound = mu_r * normal_impulse;
+        let wa = bw(in b, widen_u64(a));
+        let wb = if ob != NONE {
+            bw(in b, widen_u64(ob))
+        } else {
+            zero3()
+        };
+        let rel = vsub(wa, wb);
+        let roll = vsub(rel, vscale(n, vdot(rel, n)));
+        let lr = vlength(roll);
+        if lr > from_bits_f32(TANGENT_MIN_BITS) {
+            angular_friction(inout b, a, ob, vscale(roll, 1.0 / lr), bound);
+        }
+    }
+}
+
+// ----- joints (src/rigid/joints.rs) ----------------------------------------
+
+fn jb(k: u64) -> u64 {
+    wrapping_mul(k, JOINT)
+}
+
+fn pose_q(in b: Slice[f32], ob: u32) -> Q4 {
+    if ob != NONE {
+        bq(in b, widen_u64(ob))
+    } else {
+        identity()
+    }
+}
+
+fn sinf(x: f32) -> f32 {
+    from_bits_f32(fastmath_sinf(to_bits_f32(x)))
+}
+
+fn cosf(x: f32) -> f32 {
+    from_bits_f32(fastmath_cosf(to_bits_f32(x)))
+}
+
+fn atan2f(y: f32, x: f32) -> f32 {
+    from_bits_f32(fastmath_atan2f(to_bits_f32(y), to_bits_f32(x)))
+}
+
+// World anchors and arms of joint `k`.
+fn joint_points(in b: Slice[f32], in jf: Slice[f32], a: u32, ob: u32, k: u64) -> Pts {
+    let base = jb(k);
+    let ia = widen_u64(a);
+    let ra = rotate(bq(in b, ia), gv(in jf, wrapping_add(base, J_ANCHOR_A)));
+    let pa = vadd(bx(in b, ia), ra);
+    let anchor_b = gv(in jf, wrapping_add(base, J_ANCHOR_B));
+    if ob != NONE {
+        let ib = widen_u64(ob);
+        let rb = rotate(bq(in b, ib), anchor_b);
+        Pts {
+            pa: pa,
+            ra: ra,
+            pb: vadd(bx(in b, ib), rb),
+            rb: rb
+        }
+    } else {
+        Pts {
+            pa: pa,
+            ra: ra,
+            pb: anchor_b,
+            rb: zero3()
+        }
+    }
+}
+
+fn hinge_angle(in b: Slice[f32], in jf: Slice[f32], a: u32, ob: u32, k: u64) -> Angle {
+    let base = jb(k);
+    let qa = bq(in b, widen_u64(a));
+    let qb = pose_q(in b, ob);
+    let axis = rotate(qa, gv(in jf, wrapping_add(base, J_AXIS_A)));
+    let ua = rotate(qa, gv(in jf, wrapping_add(base, J_REF_A)));
+    let ub = rotate(qb, gv(in jf, wrapping_add(base, J_REF_B)));
+    let sin = vdot(vcross(ua, ub), axis);
+    let cos = vdot(ua, ub);
+    Angle {
+        phi: atan2f(sin, cos),
+        axis: axis,
+        ua: ua,
+        ub: ub
+    }
+}
+
+fn coordinate(in b: Slice[f32], in jf: Slice[f32], a: u32, ob: u32, kind: u32, k: u64) -> f32 {
+    if kind == 1 {
+        hinge_angle(in b, in jf, a, ob, k).phi
+    } else if kind == 2 {
+        let pts = joint_points(in b, in jf, a, ob, k);
+        let qa = bq(in b, widen_u64(a));
+        vdot(vsub(pts.pb, pts.pa), rotate(qa, gv(in jf, wrapping_add(jb(k), J_AXIS_A))))
+    } else {
+        0.0
+    }
+}
+
+// Clamp `x` to ±bound (`det::max(-bound, min(x, bound))`).
+fn clamp_bound(x: f32, bound: f32) -> f32 {
+    fmax(
+        -bound,
+        if x < bound {
+            x
+        } else {
+            bound
+        }
+    )
+}
+
+// One XPBD positional part; returns the new λ.
+fn positional_part(
+    inout b: Slice[f32],
+    a: u32,
+    ob: u32,
+    ra: V3,
+    rb: V3,
+    delta: V3,
+    alpha: f32,
+    lambda: f32
+) -> f32 {
+    let c = vlength(delta);
+    if !(c > 0.0) {
+        return lambda;
+    }
+    let n = vscale(delta, 1.0 / c);
+    let w = weight(in b, a, ob, ra, rb, n);
+    let denom = w + alpha;
+    if !(denom > 0.0) {
+        return lambda;
+    }
+    let dl = (c - alpha * lambda) / denom;
+    apply_positional_to(inout b, a, ob, ra, rb, vscale(n, dl));
+    lambda + dl
+}
+
+fn rot_weight(in b: Slice[f32], a: u32, ob: u32, n: V3) -> f32 {
+    let mut w = angular_weight(in b, widen_u64(a), n);
+    if ob != NONE {
+        w = w + angular_weight(in b, widen_u64(ob), n);
+    }
+    w
+}
+
+fn angular_part(inout b: Slice[f32], a: u32, ob: u32, dq: V3, alpha: f32, lambda: f32) -> f32 {
+    let theta = vlength(dq);
+    if !(theta > 0.0) {
+        return lambda;
+    }
+    let n = vscale(dq, 1.0 / theta);
+    let denom = rot_weight(in b, a, ob, n) + alpha;
+    if !(denom > 0.0) {
+        return lambda;
+    }
+    let dl = (theta - alpha * lambda) / denom;
+    apply_rotation_to(inout b, a, ob, vscale(n, dl));
+    lambda + dl
+}
+
+fn bounded_angular_part(
+    inout b: Slice[f32],
+    a: u32,
+    ob: u32,
+    dq: V3,
+    alpha: f32,
+    bound: f32,
+    lambda: f32
+) -> f32 {
+    let theta = vlength(dq);
+    if !(theta > 0.0) {
+        return lambda;
+    }
+    let n = vscale(dq, 1.0 / theta);
+    let denom = rot_weight(in b, a, ob, n) + alpha;
+    if !(denom > 0.0) {
+        return lambda;
+    }
+    let dl = (theta - alpha * lambda) / denom;
+    let clamped = clamp_bound(lambda + dl, bound);
+    apply_rotation_to(inout b, a, ob, vscale(n, clamped - lambda));
+    clamped
+}
+
+fn bounded_positional_part(
+    inout b: Slice[f32],
+    a: u32,
+    ob: u32,
+    ra: V3,
+    rb: V3,
+    axis: V3,
+    c: f32,
+    alpha: f32,
+    bound: f32,
+    lambda: f32
+) -> f32 {
+    if c == 0.0 {
+        return lambda;
+    }
+    let w = weight(in b, a, ob, ra, rb, axis);
+    let denom = w + alpha;
+    if !(denom > 0.0) {
+        return lambda;
+    }
+    let dl = (c - alpha * lambda) / denom;
+    let clamped = clamp_bound(lambda + dl, bound);
+    apply_positional_to(inout b, a, ob, ra, rb, vscale(axis, clamped - lambda));
+    clamped
+}
+
+// `ua` turned by `angle` about `axis`.
+fn turned(ua: V3, axis: V3, angle: f32) -> V3 {
+    vadd(vscale(ua, cosf(angle)), vscale(vcross(axis, ua), sinf(angle)))
+}
+
+// Positional static friction of joint `k`; whether it acted.
+fn static_joint_friction(
+    inout b: Slice[f32],
+    in jf: Slice[f32],
+    a: u32,
+    ob: u32,
+    kind: u32,
+    k: u64,
+    h2: f32
+) -> bool {
+    let base = jb(k);
+    let bound = gf(in jf, wrapping_add(base, J_FRICTION)) * h2;
+    let coord_start = gf(in jf, wrapping_add(base, J_COORD_START));
+    let inf = from_bits_f32(F32_EXP);
+    if kind == 1 {
+        let ang = hinge_angle(in b, in jf, a, ob, k);
+        let mut delta = ang.phi - coord_start;
+        let pi = from_bits_f32(PI_BITS);
+        let two_pi = 2.0 * pi;
+        if delta > pi {
+            delta = delta - two_pi;
+        } else if delta < -pi {
+            delta = delta + two_pi;
+        }
+        if delta == 0.0 {
+            return false;
+        }
+        let w = rot_weight(in b, a, ob, ang.axis);
+        if !(w > 0.0) || abs32(delta) / w > bound {
+            return false;
+        }
+        let goal = turned(ang.ua, ang.axis, coord_start);
+        let _ = bounded_angular_part(inout b, a, ob, vcross(goal, ang.ub), 0.0, inf, 0.0);
+        true
+    } else if kind == 2 {
+        let pts = joint_points(in b, in jf, a, ob, k);
+        let ra = if ob != NONE {
+            vadd(pts.ra, vsub(pts.pb, pts.pa))
+        } else {
+            pts.ra
+        };
+        let axis = rotate(bq(in b, widen_u64(a)), gv(in jf, wrapping_add(base, J_AXIS_A)));
+        let delta = vdot(vsub(pts.pb, pts.pa), axis) - coord_start;
+        if delta == 0.0 {
+            return false;
+        }
+        let w = weight(in b, a, ob, ra, pts.rb, axis);
+        if !(w > 0.0) || abs32(delta) / w > bound {
+            return false;
+        }
+        let _ = bounded_positional_part(inout b, a, ob, ra, pts.rb, axis, delta, 0.0, inf, 0.0);
+        true
+    } else {
+        false
+    }
+}
+
+copy struct Rate {
+    rate: f32,
+    axis: V3,
+    ra: V3,
+    rb: V3
+}
+
+fn coordinate_rate(in b: Slice[f32], in jf: Slice[f32], a: u32, ob: u32, kind: u32, k: u64)
+    -> Rate {
+    let ia = widen_u64(a);
+    let axis = rotate(bq(in b, ia), gv(in jf, wrapping_add(jb(k), J_AXIS_A)));
+    if kind == 2 {
+        let pts = joint_points(in b, in jf, a, ob, k);
+        let ra = if ob != NONE {
+            vadd(pts.ra, vsub(pts.pb, pts.pa))
+        } else {
+            pts.ra
+        };
+        let va = vadd(bv(in b, ia), vcross(bw(in b, ia), ra));
+        let vb = if ob != NONE {
+            let ib = widen_u64(ob);
+            vadd(bv(in b, ib), vcross(bw(in b, ib), pts.rb))
+        } else {
+            zero3()
+        };
+        Rate {
+            rate: vdot(vsub(vb, va), axis),
+            axis: axis,
+            ra: ra,
+            rb: pts.rb
+        }
+    } else {
+        let wb = if ob != NONE {
+            bw(in b, widen_u64(ob))
+        } else {
+            zero3()
+        };
+        Rate {
+            rate: vdot(vsub(wb, bw(in b, ia)), axis),
+            axis: axis,
+            ra: zero3(),
+            rb: zero3()
+        }
+    }
+}
+
+fn coordinate_impulse(
+    inout b: Slice[f32],
+    a: u32,
+    ob: u32,
+    prismatic: bool,
+    axis: V3,
+    ra: V3,
+    rb: V3,
+    imp: f32
+) {
+    let p = vscale(axis, imp);
+    let ia = widen_u64(a);
+    let ma = bim(in b, ia);
+    if ma > 0.0 {
+        if prismatic {
+            set_v(inout b, ia, vsub(bv(in b, ia), vscale(p, ma)));
+            set_w(inout b, ia, vsub(bw(in b, ia), inv_inertia_world(in b, ia, vcross(ra, p))));
+        } else {
+            set_w(inout b, ia, vsub(bw(in b, ia), inv_inertia_world(in b, ia, p)));
+        }
+    }
+    if ob != NONE {
+        let ib = widen_u64(ob);
+        let mb = bim(in b, ib);
+        if mb > 0.0 {
+            if prismatic {
+                set_v(inout b, ib, vadd(bv(in b, ib), vscale(p, mb)));
+                set_w(inout b, ib, vadd(bw(in b, ib), inv_inertia_world(in b, ib, vcross(rb, p))));
+            } else {
+                set_w(inout b, ib, vadd(bw(in b, ib), inv_inertia_world(in b, ib, p)));
+            }
+        }
+    }
+}
+
+fn joint_velocity(
+    inout b: Slice[f32],
+    in asleep: Slice[u8],
+    sleeping: bool,
+    in jf: Slice[f32],
+    in ju: Slice[u32],
+    k: u64,
+    h: f32
+) {
+    let base = jb(k);
+    let ub = wrapping_mul(k, 5);
+    let a = gu(in ju, ub);
+    let ob = gu(in ju, wrapping_add(ub, 1));
+    let kind = gu(in ju, wrapping_add(ub, 2));
+    let drive = gu(in ju, wrapping_add(ub, 4));
+    let friction = gf(in jf, wrapping_add(base, J_FRICTION));
+    let max_force = gf(in jf, wrapping_add(base, J_MAX_FORCE));
+    let damping = gf(in jf, wrapping_add(base, J_DAMPING));
+    // The motor: a velocity drive, or a position drive's damping.
+    let motor = drive == 1 || (drive == 2 && damping > 0.0);
+    if !motor && friction == 0.0 {
+        return;
+    }
+    if sleeping && !live(in b, in asleep, sleeping, a, ob) {
+        return;
+    }
+    let prismatic = kind == 2;
+    let r = coordinate_rate(in b, in jf, a, ob, kind, k);
+    let ia = widen_u64(a);
+    let mut w = if prismatic {
+        bim(in b, ia) + angular_weight(in b, ia, vcross(r.ra, r.axis))
+    } else {
+        angular_weight(in b, ia, r.axis)
+    };
+    if ob != NONE {
+        let ib = widen_u64(ob);
+        w = w
+            + (
+                if prismatic {
+                    bim(in b, ib) + angular_weight(in b, ib, vcross(r.rb, r.axis))
+                } else {
+                    angular_weight(in b, ib, r.axis)
+                }
+            );
+    }
+    if !(w > 0.0) {
+        return;
+    }
+    let mut rate = r.rate;
+    if motor {
+        let target: f32 = if drive == 1 {
+            gf(in jf, wrapping_add(base, J_TARGET))
+        } else {
+            0.0
+        };
+        let bound = max_force * h;
+        let mut want = (target - rate) / w;
+        if drive == 2 {
+            let chw = (damping * h) * w;
+            want = want * (chw / (1.0 + chw));
+        }
+        let imp = clamp_bound(want, bound);
+        coordinate_impulse(inout b, a, ob, prismatic, r.axis, r.ra, r.rb, imp);
+        rate = coordinate_rate(in b, in jf, a, ob, kind, k).rate;
+    }
+    if friction > 0.0 && rate != 0.0 {
+        let bound = friction * h;
+        let stop = abs32(rate) / w;
+        let mag = if stop < bound {
+            stop
+        } else {
+            bound
+        };
+        let imp = if rate > 0.0 {
+            -mag
+        } else {
+            mag
+        };
+        coordinate_impulse(inout b, a, ob, prismatic, r.axis, r.ra, r.rb, imp);
+    }
+}
+
+fn project_joint(
+    inout b: Slice[f32],
+    in asleep: Slice[u8],
+    sleeping: bool,
+    inout jf: Slice[f32],
+    in ju: Slice[u32],
+    k: u64,
+    h: f32
+) {
+    let base = jb(k);
+    let ub = wrapping_mul(k, 5);
+    let a = gu(in ju, ub);
+    let ob = gu(in ju, wrapping_add(ub, 1));
+    let kind = gu(in ju, wrapping_add(ub, 2));
+    let has_limits = gu(in ju, wrapping_add(ub, 3)) != 0;
+    let drive = gu(in ju, wrapping_add(ub, 4));
+    if sleeping && !live(in b, in asleep, sleeping, a, ob) {
+        return;
+    }
+    let ia = widen_u64(a);
+    let h2 = h * h;
+    let alpha = gf(in jf, wrapping_add(base, J_COMPLIANCE)) / h2;
+    let alpha_ang = gf(in jf, wrapping_add(base, J_ANG_COMPLIANCE)) / h2;
+    if kind == 1 {
+        let qa = bq(in b, ia);
+        let qb = pose_q(in b, ob);
+        let aa = rotate(qa, gv(in jf, wrapping_add(base, J_AXIS_A)));
+        let ab = rotate(qb, gv(in jf, wrapping_add(base, J_AXIS_B)));
+        let la = wrapping_add(base, J_LAMBDA_ANG);
+        sf(inout jf, la, angular_part(inout b, a, ob, vcross(aa, ab), alpha_ang, gf(in jf, la)));
+        if has_limits {
+            let lo = gf(in jf, wrapping_add(base, J_LO));
+            let hi = gf(in jf, wrapping_add(base, J_HI));
+            let ang = hinge_angle(in b, in jf, a, ob, k);
+            let clamped = fmax(
+                lo,
+                if ang.phi < hi {
+                    ang.phi
+                } else {
+                    hi
+                }
+            );
+            if clamped != ang.phi {
+                let target = turned(ang.ua, ang.axis, clamped);
+                let ll = wrapping_add(base, J_LAMBDA_LIM);
+                sf(
+                    inout jf,
+                    ll,
+                    angular_part(inout b, a, ob, vcross(target, ang.ub), alpha_ang, gf(in jf, ll))
+                );
+            }
+        }
+    } else if kind == 2 {
+        let qa = bq(in b, ia);
+        let qb = pose_q(in b, ob);
+        let e0 = qmul(qmul(qb, gq(in jf, wrapping_add(base, J_REST))), conj(qa));
+        let e = if e0.w >= 0.0 {
+            e0
+        } else {
+            qscale(e0, -1.0)
+        };
+        let la = wrapping_add(base, J_LAMBDA_ANG);
+        sf(
+            inout jf,
+            la,
+            angular_part(
+                inout b,
+                a,
+                ob,
+                V3 {
+                    x: 2.0 * e.x,
+                    y: 2.0 * e.y,
+                    z: 2.0 * e.z
+                },
+                alpha_ang,
+                gf(in jf, la)
+            )
+        );
+    }
+    if drive == 2 {
+        let target = gf(in jf, wrapping_add(base, J_TARGET));
+        let alpha_d = gf(in jf, wrapping_add(base, J_DRIVE_COMPLIANCE)) / h2;
+        let bound = gf(in jf, wrapping_add(base, J_MAX_FORCE)) * h2;
+        let ld = wrapping_add(base, J_LAMBDA_DRIVE);
+        if kind == 1 {
+            let ang = hinge_angle(in b, in jf, a, ob, k);
+            if ang.phi != target {
+                let goal = turned(ang.ua, ang.axis, target);
+                sf(
+                    inout jf,
+                    ld,
+                    bounded_angular_part(
+                        inout b,
+                        a,
+                        ob,
+                        vcross(goal, ang.ub),
+                        alpha_d,
+                        bound,
+                        gf(in jf, ld)
+                    )
+                );
+            }
+        } else if kind == 2 {
+            let pts = joint_points(in b, in jf, a, ob, k);
+            let ra = if ob != NONE {
+                vadd(pts.ra, vsub(pts.pb, pts.pa))
+            } else {
+                pts.ra
+            };
+            let axis = rotate(bq(in b, ia), gv(in jf, wrapping_add(base, J_AXIS_A)));
+            let s = vdot(vsub(pts.pb, pts.pa), axis);
+            sf(
+                inout jf,
+                ld,
+                bounded_positional_part(
+                    inout b,
+                    a,
+                    ob,
+                    ra,
+                    pts.rb,
+                    axis,
+                    s - target,
+                    alpha_d,
+                    bound,
+                    gf(in jf, ld)
+                )
+            );
+        }
+    }
+    let pts = joint_points(in b, in jf, a, ob, k);
+    let d = vsub(pts.pb, pts.pa);
+    let mut ra = pts.ra;
+    if kind == 2 && ob != NONE {
+        ra = vadd(ra, d);
+    }
+    let delta = if kind == 2 {
+        let axis = rotate(bq(in b, ia), gv(in jf, wrapping_add(base, J_AXIS_A)));
+        let s = vdot(d, axis);
+        let along: f32 = if has_limits {
+            let lo = gf(in jf, wrapping_add(base, J_LO));
+            let hi = gf(in jf, wrapping_add(base, J_HI));
+            let c = fmax(
+                lo,
+                if s < hi {
+                    s
+                } else {
+                    hi
+                }
+            );
+            s - c
+        } else {
+            0.0
+        };
+        let perp0 = vsub(d, vscale(axis, s));
+        let perp = vsub(perp0, vscale(axis, vdot(perp0, axis)));
+        vadd(perp, vscale(axis, along))
+    } else {
+        d
+    };
+    let lp = wrapping_add(base, J_LAMBDA_POS);
+    let lambda = positional_part(inout b, a, ob, ra, pts.rb, delta, alpha, gf(in jf, lp));
+    sf(inout jf, lp, lambda);
+    sf(inout jf, wrapping_add(base, J_LAST_LAMBDA), lambda);
+    let friction = gf(in jf, wrapping_add(base, J_FRICTION));
+    for _round in 0..u(2) {
+        if !(friction > 0.0 && static_joint_friction(inout b, in jf, a, ob, kind, k, h2)) {
+            break;
+        }
+        if kind != 1 {
+            break;
+        }
+        let p2 = joint_points(in b, in jf, a, ob, k);
+        sf(
+            inout jf,
+            lp,
+            positional_part(inout b, a, ob, p2.ra, p2.rb, vsub(p2.pb, p2.pa), alpha, gf(in jf, lp))
+        );
+    }
+}
+
+fn u(n: u64) -> u64 {
+    n
+}
+
+// ----- the tick ------------------------------------------------------------
+
+pub fn solve(
+    dt: f32,
+    substeps: u32,
+    gx: f32,
+    gy: f32,
+    gz: f32,
+    sleeping: bool,
+    gyroscopic: bool,
+    inout b: Slice[f32],
+    in asleep: Slice[u8],
+    inout mf: Slice[f32],
+    in mu: Slice[u32],
+    inout jf: Slice[f32],
+    in ju: Slice[u32],
+    in layer_off: Slice[u32],
+    in layer_idx: Slice[u32],
+    inout sc: Slice[f32]
+) {
+    let nb = b.len() / BODY;
+    let nm = mu.len() / 3;
+    let nj = ju.len() / 5;
+    let layers = if layer_off.len() > 0 {
+        wrapping_sub(layer_off.len(), 1)
+    } else {
+        0
+    };
+    let h = dt / nearest_f32(widen_f64(substeps));
+    let inv_h = 1.0 / h;
+    let g = V3 {
+        x: gx,
+        y: gy,
+        z: gz
+    };
+    let g1 = (abs32(gx) + abs32(gy)) + abs32(gz);
+    let bounce_floor = (2.0 * g1) * h;
+    let mut joint_friction = false;
+    for k in 0..nj {
+        if gf(in jf, wrapping_add(jb(k), J_FRICTION)) > 0.0 {
+            joint_friction = true;
+        }
+    }
+    for _step in 0..widen_u64(substeps) {
+        if joint_friction {
+            for k in 0..nj {
+                let base = jb(k);
+                if gf(in jf, wrapping_add(base, J_FRICTION)) > 0.0 {
+                    let ub = wrapping_mul(k, 5);
+                    let c = coordinate(
+                        in b,
+                        in jf,
+                        gu(in ju, ub),
+                        gu(in ju, wrapping_add(ub, 1)),
+                        gu(in ju, wrapping_add(ub, 2)),
+                        k
+                    );
+                    sf(inout jf, wrapping_add(base, J_COORD_START), c);
+                }
+            }
+        }
+        // Integrate.
+        for i in 0..nb {
+            let s = wrapping_mul(i, SCRATCH);
+            let x0 = bx(in b, i);
+            let q0 = bq(in b, i);
+            sv(inout sc, s, x0);
+            sq(inout sc, wrapping_add(s, 3), q0);
+            sv(inout sc, wrapping_add(s, 7), bv(in b, i));
+            sv(inout sc, wrapping_add(s, 10), bw(in b, i));
+            if bim(in b, i) == 0.0 || (sleeping && g8(in asleep, i) != 0) {
+                continue;
+            }
+            if gyroscopic {
+                implicit_gyroscopic(inout b, i, h);
+            }
+            let v = vadd(bv(in b, i), vscale(g, h));
+            set_v(inout b, i, v);
+            let x = vadd(x0, vscale(v, h));
+            set_x(inout b, i, x);
+            let w = bw(in b, i);
+            let spin = qmul(
+                Q4 {
+                    x: w.x,
+                    y: w.y,
+                    z: w.z,
+                    w: 0.0
+                },
+                q0
+            );
+            let half_h = 0.5 * h;
+            let q = normalize_q(
+                Q4 {
+                    x: q0.x + half_h * spin.x,
+                    y: q0.y + half_h * spin.y,
+                    z: q0.z + half_h * spin.z,
+                    w: q0.w + half_h * spin.w
+                }
+            );
+            set_q(inout b, i, q);
+            sv(inout sc, wrapping_add(s, 13), x);
+            sq(inout sc, wrapping_add(s, 16), q);
+        }
+        // Pre-solve normal velocities for restitution.
+        for k in 0..nj {
+            let base = jb(k);
+            sf(inout jf, wrapping_add(base, J_LAMBDA_POS), 0.0);
+            sf(inout jf, wrapping_add(base, J_LAMBDA_ANG), 0.0);
+            sf(inout jf, wrapping_add(base, J_LAMBDA_LIM), 0.0);
+            sf(inout jf, wrapping_add(base, J_LAMBDA_DRIVE), 0.0);
+        }
+        for mi in 0..nm {
+            let ub = wrapping_mul(mi, 3);
+            let a = gu(in mu, ub);
+            let ob = gu(in mu, wrapping_add(ub, 1));
+            let count = widen_u64(gu(in mu, wrapping_add(ub, 2)));
+            let n = gv(in mf, mbase(mi));
+            for k in 0..count {
+                let pts = points_of(in b, in mf, a, ob, mi, k);
+                let rel = relative_velocity(in b, in sc, a, ob, pts.ra, pts.rb, true);
+                let p = pbase(mi, k);
+                sf(inout mf, wrapping_add(p, 6), vdot(rel, n));
+                sf(inout mf, wrapping_add(p, 7), 0.0);
+            }
+        }
+        // Positions, colour by colour.
+        for color in 0..layers {
+            let lo = widen_u64(gu(in layer_off, color));
+            let hi = widen_u64(gu(in layer_off, wrapping_add(color, 1)));
+            for idx in lo..hi {
+                let mi = widen_u64(gu(in layer_idx, idx));
+                if mi >= nm {
+                    project_joint(
+                        inout b,
+                        in asleep,
+                        sleeping,
+                        inout jf,
+                        in ju,
+                        wrapping_sub(mi, nm),
+                        h
+                    );
+                    continue;
+                }
+                let ub = wrapping_mul(mi, 3);
+                let a = gu(in mu, ub);
+                let ob = gu(in mu, wrapping_add(ub, 1));
+                if sleeping && !live(in b, in asleep, sleeping, a, ob) {
+                    continue;
+                }
+                let count = widen_u64(gu(in mu, wrapping_add(ub, 2)));
+                project_manifold(inout b, in sc, inout mf, a, ob, count, mi);
+            }
+        }
+        // Velocities from positions.
+        for i in 0..nb {
+            if bim(in b, i) == 0.0 || (sleeping && g8(in asleep, i) != 0) {
+                continue;
+            }
+            let s = wrapping_mul(i, SCRATCH);
+            let ix = gv(in sc, wrapping_add(s, 13));
+            let iq = gq(in sc, wrapping_add(s, 16));
+            let x = bx(in b, i);
+            if vne(x, ix) {
+                set_v(inout b, i, vadd(bv(in b, i), vscale(vsub(x, ix), inv_h)));
+            }
+            let q1 = bq(in b, i);
+            if qne(q1, iq) {
+                let q = normalize_q(q1);
+                set_q(inout b, i, q);
+                let dq0 = qmul(q, conj(iq));
+                let dq = if dq0.w >= 0.0 {
+                    dq0
+                } else {
+                    qscale(dq0, -1.0)
+                };
+                let denom = if dq.w > 0.5 {
+                    h * dq.w
+                } else {
+                    h
+                };
+                set_w(inout b, i, vadd(bw(in b, i), vscale(qv(dq), 2.0 / denom)));
+            }
+        }
+        // Velocity pass, colour by colour.
+        for color in 0..layers {
+            let lo = widen_u64(gu(in layer_off, color));
+            let hi = widen_u64(gu(in layer_off, wrapping_add(color, 1)));
+            for idx in lo..hi {
+                let mi = widen_u64(gu(in layer_idx, idx));
+                if mi >= nm {
+                    joint_velocity(
+                        inout b,
+                        in asleep,
+                        sleeping,
+                        in jf,
+                        in ju,
+                        wrapping_sub(mi, nm),
+                        h
+                    );
+                    continue;
+                }
+                let ub = wrapping_mul(mi, 3);
+                let a = gu(in mu, ub);
+                let ob = gu(in mu, wrapping_add(ub, 1));
+                if sleeping && !live(in b, in asleep, sleeping, a, ob) {
+                    continue;
+                }
+                let count = widen_u64(gu(in mu, wrapping_add(ub, 2)));
+                velocity_manifold(inout b, in sc, in mf, a, ob, count, mi, h, bounce_floor);
+            }
+        }
+    }
+}

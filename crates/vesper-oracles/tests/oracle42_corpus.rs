@@ -1,13 +1,47 @@
 //! Independent finite-profile checks; these do not supply arithmetic answers.
+mod common;
 #[path = "../src/bin/arithmetic_oracle42/mod.rs"]
 pub mod oracle;
 
+use oracle::compiler::{self, Compiler, Front, Scratch};
 use oracle::{Callee, Case, Input, Intent, Kind, Node, Op, Program, Scope, Suite, corpus::*};
+use serde_json::Value;
 use std::collections::BTreeSet;
-use vesper::{
-    ast::{ExprKind, Item, Literal, Statement},
-    check, parser,
-};
+
+/// The compiler's parsed module of `source`, which must parse and check.
+fn hir(source: &str) -> Value {
+    match front(source) {
+        Front::Module(module) => module,
+        Front::Rejected { parse, codes } => {
+            panic!("{source}: rejected (parse={parse}): {codes:?}")
+        }
+    }
+}
+
+fn front(source: &str) -> Front {
+    let scratch = Scratch::new("corpus-test").unwrap();
+    compiler::front(
+        &Compiler::new(common::vesper()),
+        &scratch.0,
+        "case.ves",
+        source,
+    )
+    .unwrap()
+}
+
+/// `source` binds to `case`: the compiler accepts it and its parsed module
+/// is exactly the case.
+fn binds(case: &Case, source: &str) -> bool {
+    match front(source) {
+        Front::Module(module) => validate_rendered(case, source, &module).is_ok(),
+        Front::Rejected { .. } => false,
+    }
+}
+
+/// `module.items[i].Function`.
+fn function(module: &mut Value, i: usize) -> &mut Value {
+    &mut module["items"][i]["Function"]
+}
 
 fn tag(k: Kind) -> usize {
     match k {
@@ -112,19 +146,8 @@ fn ci_rank_order_is_an_exact_seeded_full_subset_and_tables_follow_boundary_order
             assert!(selected.insert((tag(ci.program.kind), rank)));
             let source = render_case(&ci).unwrap();
             assert!(source.len() <= 16384);
-            let parsed = parser::parse(&source);
-            assert!(
-                parsed.diagnostics.is_empty(),
-                "{source}: {:?}",
-                parsed.diagnostics
-            );
-            validate_rendered(&ci, &source, &parsed.module).unwrap();
-            let checked = check::check(&parsed.module);
-            assert!(
-                checked.diagnostics.is_empty(),
-                "{source}: {:?}",
-                checked.diagnostics
-            );
+            // The compiler parses and checks it (`hir` panics otherwise).
+            validate_rendered(&ci, &source, &hir(&source)).unwrap();
         }
         assert_eq!(selected.len(), 128);
     }
@@ -207,17 +230,15 @@ fn isolated_negative_matrix_matches_actual_parser_or_checker_single_codes() {
         assert_eq!(c.id, 128 + n as u64);
         assert_eq!(c.intent, Intent::StaticNegative);
         let source = render_case(c).unwrap();
-        let parsed = parser::parse(&source);
-        assert!(parsed.diagnostics.is_empty());
-        validate_rendered(c, &source, &parsed.module).unwrap();
-        let checked = check::check(&parsed.module);
-        assert_eq!(
-            checked.diagnostics.len(),
-            1,
-            "{source}: {:?}",
-            checked.diagnostics
-        );
-        assert_eq!(checked.diagnostics[0].code, codes[n]);
+        // The compiler prints no parsed module for a program its checker
+        // rejects, so these bind through the diagnostic alone.
+        match front(&source) {
+            Front::Rejected {
+                parse: false,
+                codes: got,
+            } => assert_eq!(got, [codes[n]], "{source}"),
+            other => panic!("{source}: {other:?}"),
+        }
     }
     assert!(negative_cases(u64::MAX - 13).is_err());
 }
@@ -266,38 +287,15 @@ fn source_binding_rejects_wrapper_arguments_types_extra_functions_and_operator_d
         format!("{source} fn extra() -> u8 {{ 0 }}"),
     ] {
         assert_ne!(modified, source);
-        let parsed = parser::parse(&modified);
-        assert!(parsed.diagnostics.is_empty(), "{modified}");
-        assert!(
-            validate_rendered(&c, &modified, &parsed.module).is_err(),
-            "accepted {modified}"
-        );
+        // Rejected by the compiler, or parsed into something else.
+        assert!(!binds(&c, &modified), "accepted {modified}");
     }
-    let mut parsed = parser::parse(&source).module;
-    let Item::Function(main) = &mut parsed.items[1] else {
-        panic!()
-    };
-    let ExprKind::Block {
-        tail: Some(tail), ..
-    } = &mut main.body.as_mut().unwrap().kind
-    else {
-        panic!()
-    };
-    let ExprKind::Handle { body, .. } = &mut tail.kind else {
-        panic!()
-    };
-    let ExprKind::Block {
-        tail: Some(tail), ..
-    } = &mut body.kind
-    else {
-        panic!()
-    };
-    let ExprKind::Tuple(values) = &mut tail.kind else {
-        panic!()
-    };
-    let ExprKind::Call { args, .. } = &mut values[1].kind else {
-        panic!()
-    };
+    let mut parsed = hir(&source);
+    assert!(validate_rendered(&c, &source, &parsed).is_ok());
+    let handle = &mut function(&mut parsed, 1)["body"]["kind"]["Block"]["tail"]["kind"]["Handle"];
+    let args = handle["body"]["kind"]["Block"]["tail"]["kind"]["Tuple"][1]["kind"]["Call"]["args"]
+        .as_array_mut()
+        .unwrap();
     args.swap(0, 1);
     assert!(validate_rendered(&c, &source, &parsed).is_err());
 }
@@ -306,26 +304,22 @@ fn source_binding_rejects_wrapper_arguments_types_extra_functions_and_operator_d
 fn unused_strict_local_and_its_order_are_bound_and_cannot_disappear() {
     let c = case_at(Suite::Ci128, 0, 4 * 14 + 2).unwrap();
     let source = render_case(&c).unwrap();
-    let mut parsed = parser::parse(&source).module;
-    let Item::Function(f) = &mut parsed.items[0] else {
-        panic!()
-    };
-    let ExprKind::Block { statements, .. } = &mut f.body.as_mut().unwrap().kind else {
-        panic!()
-    };
-    assert!(matches!(statements[0], Statement::Let { .. }));
+    let mut parsed = hir(&source);
+    assert!(validate_rendered(&c, &source, &parsed).is_ok());
+    let statements = function(&mut parsed, 0)["body"]["kind"]["Block"]["statements"]
+        .as_array_mut()
+        .unwrap();
+    assert!(statements[0].get("Let").is_some());
     statements.clear();
     assert!(validate_rendered(&c, &source, &parsed).is_err());
     let c = case_at(Suite::Ci128, 0, 4 * 15).unwrap();
     let source = render_case(&c).unwrap();
-    let mut parsed = parser::parse(&source).module;
-    let Item::Function(f) = &mut parsed.items[0] else {
-        panic!()
-    };
-    let ExprKind::Block { statements, .. } = &mut f.body.as_mut().unwrap().kind else {
-        panic!()
-    };
-    statements.swap(0, 1);
+    let mut parsed = hir(&source);
+    assert!(validate_rendered(&c, &source, &parsed).is_ok());
+    function(&mut parsed, 0)["body"]["kind"]["Block"]["statements"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
     assert!(validate_rendered(&c, &source, &parsed).is_err());
 }
 
@@ -406,10 +400,7 @@ fn shrinking_is_bounded_deterministic_and_rebinds_real_smaller_source() {
             audit_program(&candidate.program);
             assert!(hashes.insert(semantic_fingerprint(&candidate).unwrap()));
             let source = render_case(&candidate).unwrap();
-            let parsed = parser::parse(&source);
-            assert!(parsed.diagnostics.is_empty());
-            validate_rendered(&candidate, &source, &parsed.module).unwrap();
-            assert!(check::check(&parsed.module).diagnostics.is_empty());
+            validate_rendered(&candidate, &source, &hir(&source)).unwrap();
         }
     }
 }
@@ -418,16 +409,9 @@ fn shrinking_is_bounded_deterministic_and_rebinds_real_smaller_source() {
 fn source_binding_does_not_accept_a_modified_parsed_literal_as_the_intended_case() {
     let c = case_at(Suite::Ci128, 0, 0).unwrap();
     let source = render_case(&c).unwrap();
-    let mut parsed = parser::parse(&source).module;
-    let Item::Function(f) = &mut parsed.items[0] else {
-        panic!()
-    };
-    let ExprKind::Block {
-        tail: Some(tail), ..
-    } = &mut f.body.as_mut().unwrap().kind
-    else {
-        panic!()
-    };
-    tail.kind = ExprKind::Literal(Literal::Int(43));
+    let mut parsed = hir(&source);
+    assert!(validate_rendered(&c, &source, &parsed).is_ok());
+    function(&mut parsed, 0)["body"]["kind"]["Block"]["tail"]["kind"] =
+        serde_json::json!({"Literal": {"Int": 43}});
     assert!(validate_rendered(&c, &source, &parsed).is_err());
 }

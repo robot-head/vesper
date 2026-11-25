@@ -102,19 +102,17 @@ fn sort_dedup_u32(in src: Slice[u32]) -> ChunkSeq[u32] {
         tmp.try_set(j, key);
         i = wrapping_add(i, 1);
     }
-    let mut out = ChunkSeq::new[u32]();
+    // Compact runs of equal values in place, then drop the tail.
+    let mut kept: u64 = 0;
     for k in 0..n {
         let v = u32_at(in tmp, k);
-        if out.len() == 0 {
-            out.push(v);
-        } else {
-            let last = u32_at(in out, wrapping_sub(out.len(), 1));
-            if v != last {
-                out.push(v);
-            }
+        if kept == 0 || v != u32_at(in tmp, wrapping_sub(kept, 1)) {
+            tmp.try_set(kept, v);
+            kept = wrapping_add(kept, 1);
         }
     }
-    out
+    tmp.truncate(kept);
+    tmp
 }
 
 fn validate_insn(at: u64, w: u64, len: u64) -> Option[SeccompFault] {
@@ -303,57 +301,63 @@ pub fn seccomp_compile(
         return Result::Err(SeccompFault::TooLong);
     }
 
-    let mut p = ChunkSeq::new[u64]();
-    p.push(pack_filter(BPF_LD_W_ABS, 0, 0, OFF_ARCH));
-    p.push(pack_filter(BPF_JMP_JEQ_K, 1, 0, audit_arch));
-    p.push(pack_filter(BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS));
-    p.push(pack_filter(BPF_LD_W_ABS, 0, 0, OFF_NR));
+    let mut at_idx: u64 = 0;
+    out.try_set(at_idx, pack_filter(BPF_LD_W_ABS, 0, 0, OFF_ARCH));
+    at_idx = wrapping_add(at_idx, 1);
+    out.try_set(at_idx, pack_filter(BPF_JMP_JEQ_K, 1, 0, audit_arch));
+    at_idx = wrapping_add(at_idx, 1);
+    out.try_set(at_idx, pack_filter(BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS));
+    at_idx = wrapping_add(at_idx, 1);
+    out.try_set(at_idx, pack_filter(BPF_LD_W_ABS, 0, 0, OFF_NR));
+    at_idx = wrapping_add(at_idx, 1);
 
     for i in 0..n {
-        let at_idx = p.len();
         let jt = match jump_offset(at_idx, allow) {
             Result::Ok(v) => v,
             Result::Err(e) => return Result::Err(e),
         };
-        p.push(pack_filter(BPF_JMP_JEQ_K, jt, 0, u32_at(in nrs, i)));
+        out.try_set(at_idx, pack_filter(BPF_JMP_JEQ_K, jt, 0, u32_at(in nrs, i)));
+        at_idx = wrapping_add(at_idx, 1);
     }
     if has_ioctl {
-        let at_idx = p.len();
         let jt = match jump_offset(at_idx, ioctl_block) {
             Result::Ok(v) => v,
             Result::Err(e) => return Result::Err(e),
         };
-        p.push(pack_filter(BPF_JMP_JEQ_K, jt, 0, ioctl_nr));
+        out.try_set(at_idx, pack_filter(BPF_JMP_JEQ_K, jt, 0, ioctl_nr));
+        at_idx = wrapping_add(at_idx, 1);
     }
-    p.push(pack_filter(BPF_RET_K, 0, 0, default_ret));
+    out.try_set(at_idx, pack_filter(BPF_RET_K, 0, 0, default_ret));
+    at_idx = wrapping_add(at_idx, 1);
 
     if has_ioctl {
-        p.push(pack_filter(BPF_LD_W_ABS, 0, 0, OFF_ARGS_1_LO));
+        out.try_set(at_idx, pack_filter(BPF_LD_W_ABS, 0, 0, OFF_ARGS_1_LO));
+        at_idx = wrapping_add(at_idx, 1);
         for j in 0..m {
-            let at_idx = p.len();
             let jt = match jump_offset(at_idx, allow) {
                 Result::Ok(v) => v,
                 Result::Err(e) => return Result::Err(e),
             };
-            p.push(pack_filter(BPF_JMP_JEQ_K, jt, 0, u32_at(in reqs, j)));
+            out.try_set(at_idx, pack_filter(BPF_JMP_JEQ_K, jt, 0, u32_at(in reqs, j)));
+            at_idx = wrapping_add(at_idx, 1);
         }
-        p.push(pack_filter(BPF_RET_K, 0, 0, default_ret));
+        out.try_set(at_idx, pack_filter(BPF_RET_K, 0, 0, default_ret));
+        at_idx = wrapping_add(at_idx, 1);
     }
-    p.push(pack_filter(BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW));
+    out.try_set(at_idx, pack_filter(BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW));
+    at_idx = wrapping_add(at_idx, 1);
 
-    let plen = p.len();
+    let plen = at_idx;
     for i in 0..plen {
-        let w = at(in p, i);
-        match validate_insn(i, w, plen) {
+        match validate_insn(i, u64_slice_at(in out, i), plen) {
             Option::Some(e) => return Result::Err(e),
             Option::None => {}
         }
-        out.try_set(i, w);
     }
     if plen == 0 {
         return Result::Err(SeccompFault::EmptyProgram);
     }
-    if insn_code(at(in p, wrapping_sub(plen, 1))) != BPF_RET_K {
+    if insn_code(u64_slice_at(in out, wrapping_sub(plen, 1))) != BPF_RET_K {
         return Result::Err(SeccompFault::NoTerminatingReturn);
     }
     Result::Ok(plen)

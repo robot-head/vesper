@@ -1,7 +1,7 @@
 //! The Vesper port's boundary types: the crate's own where they match, and
 //! port-only ones the binding converts.
 
-pub(crate) use crate::devices::vsock::VsockHeader;
+pub(crate) use crate::devices::vsock::{VsockHeader, VsockStats};
 pub(crate) use crate::fork::VmGenIdWire;
 pub(crate) use crate::slot_plan::{KvmHostLimits, PlannedRegion};
 
@@ -324,7 +324,7 @@ impl From<MemFault> for crate::guest_mem::MemError {
 pub(crate) enum MmioStatusFault {
     DriverSetNeedsReset,
     StatusRegression { from: u32, to: u32 },
-    DriverOkWithoutFeaturesOk,
+    DriverOkWithoutFeaturesOk { rejected_features: bool },
 }
 
 /// Outcome of a valid MMIO `STATUS` write from the Vesper port.
@@ -343,7 +343,23 @@ impl From<MmioStatusFault> for crate::devices::mmio::MmioError {
         match e {
             MmioStatusFault::DriverSetNeedsReset => E::DriverSetNeedsReset,
             MmioStatusFault::StatusRegression { from, to } => E::StatusRegression { from, to },
-            MmioStatusFault::DriverOkWithoutFeaturesOk => E::DriverOkWithoutFeaturesOk,
+            MmioStatusFault::DriverOkWithoutFeaturesOk { .. } => E::DriverOkWithoutFeaturesOk,
         }
     }
+}
+
+/// A Vesper vsock connection as the port's device state holds it (read only
+/// through the state's views).
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VsockConn {
+    pub kind: u16,
+    pub connected: bool,
+    pub peer_buf_alloc: u32,
+    pub peer_fwd_cnt: u32,
+    pub tx_cnt: u32,
+    pub rx_cnt: u32,
+    pub fwd_cnt: u32,
+    pub messages: u64,
+    pub peer_shutdown: u32,
 }

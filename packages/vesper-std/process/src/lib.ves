@@ -618,7 +618,6 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
     // child's `PATH` (Rust's `Command` searches the child's too); one with
     // the parent's `PATH` is left to `posix_spawnp`.
     let lookup = bare && path_changed(in c);
-    let search = bare && !lookup;
     let path = search_path(in envp.as_slice());
     let mut programs: ChunkSeq[u8] = if lookup {
         candidates(in c.program.as_slice(), in path.as_slice())
@@ -691,7 +690,11 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
         failed = StdProcess::ENOENT;
         for i in 0..list.len() {
             if !done && byte_at(in list, i) == 0 {
-                let r = if search {
+                // Like Rust's `Command`, a program not searched here goes to
+                // `posix_spawnp` even when it names a path: on macOS that
+                // runs a file the kernel refuses (`ENOEXEC`) with `/bin/sh`,
+                // as `execvp` does.
+                let r = if !lookup {
                     StdProcess::posix_spawnp(
                         inout pid,
                         in list[start..i],

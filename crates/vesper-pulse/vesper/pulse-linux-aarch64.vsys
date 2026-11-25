@@ -56,4 +56,115 @@ sys library PulseSys (
     fn write(fd: i32, nocapture in buf: CSlice[u8]) -> ForeignVal[i64] errno;
     fn pread(fd: i32, nocapture inout buf: CSlice[u8], offset: i64) -> ForeignVal[i64] errno;
     fn pwrite(fd: i32, nocapture in buf: CSlice[u8], offset: i64) -> ForeignVal[i64] errno;
+
+    // The io_uring driver: system calls (the same numbers on x86_64 and
+    // aarch64), mmap offsets and flags, features, opcodes and `eventfd`.
+    const SYS_IO_URING_SETUP: i64 = 425;
+    const SYS_IO_URING_ENTER: i64 = 426;
+    const SYS_IO_URING_REGISTER: i64 = 427;
+    const IORING_OFF_SQ_RING: i64 = 0;
+    const IORING_OFF_CQ_RING: i64 = 134217728;
+    const IORING_OFF_SQES: i64 = 268435456;
+    const PROT_READ_WRITE: i32 = 3;
+    const MAP_SHARED_POPULATE: i32 = 32769;
+    const IORING_FEAT_SINGLE_MMAP: u32 = 1;
+    const IORING_FEAT_NODROP: u32 = 2;
+    const IORING_ENTER_GETEVENTS: u64 = 1;
+    const IORING_SQ_CQ_OVERFLOW: u32 = 2;
+    const IORING_OP_ASYNC_CANCEL: u8 = 14;
+    const IORING_OP_READ: u8 = 22;
+    const IORING_OP_WRITE: u8 = 23;
+    const IORING_REGISTER_EVENTFD: u64 = 4;
+    const EFD_CLOEXEC_NONBLOCK: i32 = 526336;
+    const ENOMEM_ERR: u32 = 12;
+
+    // `struct io_uring_params` (120 bytes): `sq_off` from word 10, `cq_off`
+    // from word 20; each `user_addr` is two words.
+    wire struct UringParams {
+        sq_entries: u32,
+        cq_entries: u32,
+        flags: u32,
+        sq_thread_cpu: u32,
+        sq_thread_idle: u32,
+        features: u32,
+        wq_fd: u32,
+        resv0: u32,
+        resv1: u32,
+        resv2: u32,
+        sq_head: u32,
+        sq_tail: u32,
+        sq_ring_mask: u32,
+        sq_ring_entries: u32,
+        sq_flags: u32,
+        sq_dropped: u32,
+        sq_array: u32,
+        sq_resv: u32,
+        sq_user_lo: u32,
+        sq_user_hi: u32,
+        cq_head: u32,
+        cq_tail: u32,
+        cq_ring_mask: u32,
+        cq_ring_entries: u32,
+        cq_overflow: u32,
+        cq_cqes: u32,
+        cq_flags: u32,
+        cq_resv: u32,
+        cq_user_lo: u32,
+        cq_user_hi: u32,
+    }
+
+    // `struct io_uring_sqe` (64 bytes).
+    wire struct Sqe {
+        opcode: u8,
+        flags: u8,
+        ioprio: u16,
+        fd: i32,
+        off: u64,
+        addr: u64,
+        len: u32,
+        rw_flags: u32,
+        user_data: u64,
+        buf_index: u16,
+        personality: u16,
+        splice_fd_in: i32,
+        addr3: u64,
+        pad: u64,
+    }
+
+    // `struct io_uring_cqe` (16 bytes).
+    wire struct Cqe {
+        user_data: u64,
+        res: i32,
+        flags: u32,
+    }
+
+    #[link_name = "syscall"]
+    fn uring_setup(nr: i64, ..., entries: u64, nocapture inout params: UringParams) -> ForeignVal[i64] errno;
+    #[link_name = "syscall"]
+    fn uring_enter(nr: i64, ..., fd: i64, to_submit: u64, min_complete: u64, flags: u64, sig: u64, size: u64) -> ForeignVal[i64] errno;
+    #[link_name = "syscall"]
+    fn uring_register(nr: i64, ..., fd: i64, opcode: u64, nocapture in arg: i32, count: u64) -> ForeignVal[i64] errno;
+    // The rings and request buffers are addresses (u64) the driver owns:
+    // the kernel keeps them until the request's completion.
+    fn mmap(addr: u64, len: u64, prot: i32, flags: i32, fd: i32, offset: i64) -> ForeignVal[u64] errno;
+    fn munmap(addr: u64, len: u64) -> ForeignVal[i32] errno;
+    fn malloc(size: u64) -> ForeignVal[u64];
+    fn free(address: u64) -> ForeignVal[Unit];
+    fn eventfd(initval: u32, flags: i32) -> ForeignVal[i32] errno;
+    #[link_name = "memcpy"]
+    fn put_sqe(address: u64, nocapture in sqe: Sqe, size: u64) -> ForeignVal[u64];
+    #[link_name = "memcpy"]
+    fn get_cqe(nocapture inout cqe: Cqe, address: u64, size: u64) -> ForeignVal[u64];
+    #[link_name = "memcpy"]
+    fn get_word(nocapture inout word: u32, address: u64, size: u64) -> ForeignVal[u64];
+    #[link_name = "memcpy"]
+    fn put_word(address: u64, nocapture in word: u32, size: u64) -> ForeignVal[u64];
+    // Copy `buf` to `address`, and `buf.len()` bytes from `address` to `buf`.
+    #[link_name = "memcpy"]
+    fn put_bytes(address: u64, nocapture in buf: CSlice[u8]) -> ForeignVal[u64];
+    #[link_name = "bcopy"]
+    fn get_bytes(address: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[Unit];
+    // The ring barrier: `dmb ish` orders ring indices against entries.
+    #[link_name = "vstd_cpu_dmb_ish"]
+    fn ring_fence() -> ForeignVal[Unit];
 }

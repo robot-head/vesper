@@ -13,7 +13,11 @@ pub copy enum MmioStatusFault {
         from: u32,
         to: u32
     },
-    DriverOkWithoutFeaturesOk,
+    // `rejected_features`: this same write offered FEATURES_OK and the
+    // device refused it (the Rust transport counts that before failing).
+    DriverOkWithoutFeaturesOk {
+        rejected_features: bool
+    },
 }
 
 pub copy struct MmioStatusOutcome {
@@ -70,7 +74,11 @@ pub fn mmio_write_status(
     }
     if (added & MMIO_STATUS_DRIVER_OK) != 0 {
         if (next & MMIO_STATUS_FEATURES_OK) == 0 {
-            return Result::Err(MmioStatusFault::DriverOkWithoutFeaturesOk);
+            return Result::Err(
+                MmioStatusFault::DriverOkWithoutFeaturesOk {
+                    rejected_features: rejected_features,
+                }
+            );
         }
         activate = true;
     }

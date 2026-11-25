@@ -2066,19 +2066,18 @@ fn stage2_self_compilation_fixed_point_impl() {
     let _ = std::fs::remove_file(&boot_syms_path);
     let boot_component = port_with_syms(&checked, &o, &boot_syms_path)
         .expect("compile @vesper/stage2 boot component");
+    let boot = PreparedComponent::new(&boot_component).expect("prepare @vesper/stage2 boot");
 
-    let got = run(
-        &boot_component,
-        &Ctx {
+    let got = boot
+        .run(&Ctx {
             args: vec!["stage2", "packages/vesper-stage2", stage2_guest, "main"],
             env: vec![("VESPER_STAGE2_SYMS", "1")],
             dirs: vec![(repo(), ".".into()), (dir.clone(), "/out".into())],
             fuel: Some(u64::MAX),
             diag_base: Some(stage2_path.clone()),
             syms_file: Some(boot_syms_path.clone()),
-        },
-    )
-    .unwrap_or_else(|e| panic!("run @vesper/stage2 boot under WASI:\n{e}"));
+        })
+        .unwrap_or_else(|e| panic!("run @vesper/stage2 boot under WASI:\n{e}"));
     assert_eq!(
         got,
         0,
@@ -2122,10 +2121,12 @@ fn stage2_self_compilation_fixed_point_impl() {
         stage3_bytes.len()
     );
 
-    if let Some(cli) = wasmtime_cli_bin() {
+    let cli = wasmtime_cli_bin();
+    let stage2_cwasm_path = dir.join("tmp_stage2_fp.cwasm");
+    if let Some(cli) = &cli {
         let stage3_cli_path = dir.join("tmp_stage3_cli_fp.wasm");
         run_stage2_wasmtime_cli(
-            &cli,
+            cli,
             &stage2_path,
             false,
             &repo(),
@@ -2143,11 +2144,10 @@ fn stage2_self_compilation_fixed_point_impl() {
         );
         remove_stage2_sidecars(&stage3_cli_path);
 
-        let stage2_cwasm_path = dir.join("tmp_stage2_fp.cwasm");
         let stage3_cwasm_path = dir.join("tmp_stage3_cwasm_fp.wasm");
-        precompile_stage2_wasmtime_cli(&cli, &stage2_path, &stage2_cwasm_path);
+        precompile_stage2_wasmtime_cli(cli, &stage2_path, &stage2_cwasm_path);
         run_stage2_wasmtime_cli(
-            &cli,
+            cli,
             &stage2_cwasm_path,
             true,
             &repo(),
@@ -2165,8 +2165,18 @@ fn stage2_self_compilation_fixed_point_impl() {
             stage3_cwasm_bytes.len()
         );
         remove_stage2_sidecars(&stage3_cwasm_path);
-        let _ = std::fs::remove_file(&stage2_cwasm_path);
     }
+
+    let stage2 = PreparedComponent::new(&stage2_bytes).expect("prepare stage2.wasm");
+    check_compiler_packages_fixed_point(
+        &dir,
+        &boot,
+        &boot_syms_path,
+        &stage2,
+        &sidecar_path(&stage2_path, ".syms"),
+        cli.as_deref().map(|c| (c, stage2_cwasm_path.as_path())),
+    );
+    let _ = std::fs::remove_file(&stage2_cwasm_path);
 
     remove_stage2_sidecars(&stage2_path);
     remove_stage2_sidecars(&stage3_path);
@@ -2283,6 +2293,679 @@ enum CompilerExecCheck {
     NonZero,
 }
 
+/// Every compiler package Stage 2 builds: (stem, package, path, probe
+/// expression, execution check). Each probe is a one-line wrapper package
+/// whose `main` calls the expression, so Stage 2 compiles the package and
+/// every package it depends on.
+const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
+    (
+        "front",
+        "@vesper/front",
+        "packages/vesper-front",
+        "parse_tables(in \"fn main() -> u64 { 1 }\").len()",
+        CompilerExecCheck::NonZero,
+    ),
+    (
+        "backend-checks",
+        "@vesper/backend-checks",
+        "packages/vesper-backend-checks",
+        "backend_verify_count(in \"\")",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "bounds-hoist",
+        "@vesper/bounds-hoist",
+        "packages/vesper-bounds-hoist",
+        "decide_text(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "check-dyn",
+        "@vesper/check-dyn",
+        "packages/vesper-check-dyn",
+        "check_dyn_count(in \"\", 0, 0)",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "check-effects",
+        "@vesper/check-effects",
+        "packages/vesper-check-effects",
+        "check_effects(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "check-fip",
+        "@vesper/check-fip",
+        "packages/vesper-check-fip",
+        "check_fip_count(in \"\")",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "check-loops-atomics",
+        "@vesper/check-loops-atomics",
+        "packages/vesper-check-loops-atomics",
+        "check_loops_control(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "check-pact",
+        "@vesper/check-pact",
+        "packages/vesper-check-pact",
+        "check_pact_mono_plan(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "check-regions-seqs",
+        "@vesper/check-regions-seqs",
+        "packages/vesper-check-regions-seqs",
+        "regions_seqs_types(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "check-tensor-types",
+        "@vesper/check-tensor-types",
+        "packages/vesper-check-tensor-types",
+        "check_tensor_types(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "codegen-aggregates",
+        "@vesper/codegen-aggregates",
+        "packages/vesper-codegen-aggregates",
+        "aggregate_decisions(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "codegen-calls",
+        "@vesper/codegen-calls",
+        "packages/vesper-codegen-calls",
+        "codegen_calls_text(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "codegen-control",
+        "@vesper/codegen-control",
+        "packages/vesper-codegen-control",
+        "control_session_plans(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "codegen-export",
+        "@vesper/codegen-export",
+        "packages/vesper-codegen-export",
+        "export_plan(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "codegen-freestanding",
+        "@vesper/codegen-freestanding",
+        "packages/vesper-codegen-freestanding",
+        "freestanding_constants()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "codegen-scalar",
+        "@vesper/codegen-scalar",
+        "packages/vesper-codegen-scalar",
+        "codegen_scalar_decisions(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "codegen-seq",
+        "@vesper/codegen-seq",
+        "packages/vesper-codegen-seq",
+        "codegen_seq_decisions(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "codegen-walk",
+        "@vesper/codegen-walk",
+        "packages/vesper-codegen-walk",
+        "native_walk_decisions(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "driver",
+        "@vesper/driver",
+        "packages/vesper-driver",
+        "widen_u64(cmd_check())",
+        CompilerExecCheck::Exact(1),
+    ),
+    (
+        "ebpf-backend",
+        "@vesper/ebpf-backend",
+        "packages/vesper-ebpf-backend",
+        "ebpf_backend_words(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "egraph",
+        "@vesper/egraph",
+        "packages/vesper-egraph",
+        "egraph_math(in \"\").len()",
+        CompilerExecCheck::Exact(0),
+    ),
+    (
+        "ffi-lowering",
+        "@vesper/ffi-lowering",
+        "packages/vesper-ffi-lowering",
+        "{ let _ = s_new(); 0 }",
+        CompilerExecCheck::Exact(0),
+    ),
+    (
+        "ir-check",
+        "@vesper/ir-check",
+        "packages/vesper-ir-check",
+        "{ let _ = paths_new(); 0 }",
+        CompilerExecCheck::Exact(0),
+    ),
+    (
+        "ir-inline",
+        "@vesper/ir-inline",
+        "packages/vesper-ir-inline",
+        "inline_program_words(in \"\".as_bytes()).len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "ir-opt",
+        "@vesper/ir-opt",
+        "packages/vesper-ir-opt",
+        "ir_opt_words(in \"\".as_bytes()).len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "ir-opt-policy",
+        "@vesper/ir-opt-policy",
+        "packages/vesper-ir-opt-policy",
+        "ir_opt_policy_entry(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "optimize",
+        "@vesper/optimize",
+        "packages/vesper-optimize",
+        "optimize_verify(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "doc",
+        "@vesper/doc",
+        "packages/vesper-doc",
+        "format()",
+        CompilerExecCheck::Exact(1),
+    ),
+    (
+        "lsp",
+        "@vesper/lsp",
+        "packages/vesper-lsp",
+        "lsp_frames(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "lsp-features",
+        "@vesper/lsp-features",
+        "packages/vesper-lsp-features",
+        "lsp_document_symbols(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "memo",
+        "@vesper/memo",
+        "packages/vesper-memo",
+        "memo_replay(in \"\").len()",
+        CompilerExecCheck::Exact(1),
+    ),
+    (
+        "test-runner",
+        "@vesper/test-runner",
+        "packages/vesper-test-runner",
+        "case_rows_words(in \"\".as_bytes()).len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "lean-extract",
+        "@vesper/lean-extract",
+        "packages/vesper-lean-extract",
+        "extract_head_words(in \"\")",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "check-data",
+        "@vesper/check-data",
+        "packages/vesper-check-data",
+        "check_data_sizes(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "ast",
+        "@vesper/ast",
+        "packages/vesper-ast",
+        "ast_count(in \"fn main() -> u64 { 1 }\")",
+        CompilerExecCheck::NonZero,
+    ),
+    (
+        "check-layout",
+        "@vesper/check-layout",
+        "packages/vesper-check-layout",
+        "check_layout_words(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "check-core-typing",
+        "@vesper/check-core-typing",
+        "packages/vesper-check-core-typing",
+        "core_typing_exprs(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "check-names-packages",
+        "@vesper/check-names-packages",
+        "packages/vesper-check-names-packages",
+        "module_count(in \"\")",
+        CompilerExecCheck::Exact(0),
+    ),
+    (
+        "place-ir",
+        "@vesper/place-ir",
+        "packages/vesper-place-ir",
+        "place_ir_words(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "place-ir-lower",
+        "@vesper/place-ir-lower",
+        "packages/vesper-place-ir-lower",
+        "ir_lower_words(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "vsys",
+        "@vesper/vsys",
+        "packages/vesper-vsys",
+        "run_vsys_check(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "clif",
+        "@vesper/clif",
+        "packages/vesper-clif",
+        "inc(1)",
+        CompilerExecCheck::Exact(2),
+    ),
+    (
+        "cranelift",
+        "@vesper/cranelift",
+        "packages/vesper-cranelift",
+        "{ let _ = ty_i8(); 0 }",
+        CompilerExecCheck::Exact(0),
+    ),
+    (
+        "crypto",
+        "@vesper/crypto",
+        "packages/vesper-crypto",
+        "zeros(4).len()",
+        CompilerExecCheck::Exact(4),
+    ),
+    (
+        "native-cold-outline",
+        "@vesper/native-cold-outline",
+        "packages/vesper-native-cold-outline",
+        "outline_words(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "native-vectorize",
+        "@vesper/native-vectorize",
+        "packages/vesper-native-vectorize",
+        "vectorize_words(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "verified-codegen",
+        "@vesper/verified-codegen",
+        "packages/vesper-verified-codegen",
+        "select_text(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "wasm-backend",
+        "@vesper/wasm-backend",
+        "packages/vesper-wasm-backend",
+        "wasm_backend_compile(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "wit-component",
+        "@vesper/wit-component",
+        "packages/vesper-wit-component",
+        "wit_component_wrap(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+];
+
+/// Compiler packages Stage 2 cannot build yet: (stem, package, path, probe
+/// `src/lib.ves`, reason). `stage2_self_compilation_fixed_point` checks that
+/// each one still fails, so a gap that closes moves into [`COMPILER_PACKAGES`].
+const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[
+    (
+        "codegen-base",
+        "@vesper/codegen-base",
+        "packages/vesper-codegen-base",
+        "use @vesper/codegen-base::word_of;\nuse @vesper/codegen-base::arg_value;\npub fn main() -> u64 eff [Ffi[Cranelift]] { word_of(arg_value(0, 0)) }\n",
+        "native Cranelift glue: every entry point runs under Ffi[Cranelift], which a Wasm entry cannot carry (WErr Entry)",
+    ),
+    (
+        "codegen-control-emit",
+        "@vesper/codegen-control-emit",
+        "packages/vesper-codegen-control-emit",
+        "use @vesper/codegen-control-emit::control_hook;\npub fn main() -> u64 eff [Ffi[Cranelift]] { control_hook(0) }\n",
+        "native Cranelift glue over vesper-cranelift-sys: Stage 2 assembly does not resolve the cranelift.vsys handle types (E0111 no item 'Data'), and Stage 2 emits only Wasm, where Ffi[Cranelift] has no host",
+    ),
+    (
+        "codegen-numeric",
+        "@vesper/codegen-numeric",
+        "packages/vesper-codegen-numeric",
+        "use @vesper/codegen-numeric::numeric_hook;\npub fn main() -> u64 eff [Ffi[Cranelift]] { numeric_hook(0) }\n",
+        "native Cranelift glue over vesper-cranelift-sys: Stage 2 assembly does not resolve the cranelift.vsys handle types (E0111 no item 'Builder'), and Stage 2 emits only Wasm, where Ffi[Cranelift] has no host",
+    ),
+    (
+        "driver-commands",
+        "@vesper/driver-commands",
+        "packages/vesper-driver-commands",
+        "use @vesper/driver-commands::run;\nuse @vesper/driver::args_new;\npub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] { let a = args_new(); wrapping_u64(run(in a)) }\n",
+        "its printing, help and formatting go through the HybridCommands import, which only the hybrid compiler's Rust implements (crates/vesper-hybrid/src/commands.rs): the Wasm entry cannot carry Ffi[HybridCommands] (WErr Entry). @vesper-std/process builds for WASI (src-wasip2, #1928)",
+    ),
+];
+
+/// Directories under `packages/` that are neither in [`COMPILER_PACKAGES`]
+/// nor in [`STAGE2_PACKAGE_GAPS`], with where they are covered instead.
+const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
+    (
+        "vesper-compiler",
+        "Stage 1 front end, checked as one unit; bootstrap/stage1.lock (tests/stage2_seed_runner.rs)",
+    ),
+    (
+        "vesper-stage2",
+        "Stage 2 itself: stage2.wasm == stage3.wasm",
+    ),
+    (
+        "vesper-std",
+        "standard library packages, built as dependencies of the probes",
+    ),
+];
+
+#[test]
+fn stage2_fixed_point_lists_every_package() {
+    let mut listed: Vec<String> = COMPILER_PACKAGES
+        .iter()
+        .map(|(_, _, rel, _, _)| *rel)
+        .chain(STAGE2_PACKAGE_GAPS.iter().map(|(_, _, rel, _, _)| *rel))
+        .map(|rel| rel.trim_start_matches("packages/").to_string())
+        .chain(
+            STAGE2_PACKAGES_COVERED_ELSEWHERE
+                .iter()
+                .map(|(d, _)| d.to_string()),
+        )
+        .collect();
+    let n = listed.len();
+    listed.sort();
+    listed.dedup();
+    assert_eq!(n, listed.len(), "a package is listed twice");
+    let mut on_disk: Vec<String> = std::fs::read_dir(repo().join("packages"))
+        .expect("read packages/")
+        .filter_map(|e| {
+            let e = e.ok()?;
+            (e.file_type().ok()?.is_dir() && e.path().join("Loom.toml").is_file()
+                || e.file_name() == "vesper-std")
+                .then(|| e.file_name().to_string_lossy().into_owned())
+        })
+        .collect();
+    on_disk.sort();
+    assert_eq!(
+        listed, on_disk,
+        "every directory under packages/ must be in COMPILER_PACKAGES, STAGE2_PACKAGE_GAPS or STAGE2_PACKAGES_COVERED_ELSEWHERE"
+    );
+}
+
+/// The probe wrapper (Loom.toml, src/lib.ves) for one compiler package. Its
+/// dependency path is the package's guest path under `/repo`.
+fn compiler_package_probe(
+    stem: &str,
+    pkg_name: &str,
+    pkg_rel: &str,
+    expr: &str,
+) -> (String, String) {
+    let dep_guest = format!("/repo/{pkg_rel}");
+    let manifest = format!(
+        "[package]\nname = \"@vesper-test/probe-{stem}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\n\"{pkg_name}\" = {{ version = \"^0.1\", path = \"{dep_guest}\" }}\n"
+    );
+    let fn_name = expr
+        .split(&['(', ' '][..])
+        .find(|s| !s.is_empty() && *s != "{" && *s != "let" && *s != "_" && *s != "=")
+        .unwrap_or("");
+    let use_line = if expr.starts_with("widen_u64(") {
+        format!("use {pkg_name}::cmd_check;")
+    } else if expr.starts_with('{') {
+        let inner_fn = expr.split("= ").nth(1).unwrap().split('(').next().unwrap();
+        format!("use {pkg_name}::{inner_fn};")
+    } else {
+        format!("use {pkg_name}::{fn_name};")
+    };
+    let lib_src = format!("{use_line}\npub fn main() -> u64 {{ {expr} }}\n");
+    (manifest, lib_src)
+}
+
+/// Runs Stage 2 under the wasmtime CLI with the repository mapped at both
+/// `.` and `/repo`, so a probe wrapper under `/out` resolves its compiler
+/// package dependency the same way it does in process.
+fn run_stage2_probe_wasmtime_cli(cli: &Path, stage2_cwasm: &Path, out_dir: &Path, out_wasm: &Path) {
+    remove_stage2_sidecars(out_wasm);
+    let out_name = out_wasm
+        .file_name()
+        .expect("out filename")
+        .to_string_lossy()
+        .into_owned();
+    let exec = std::process::Command::new(cli)
+        .args(["run", "--allow-precompiled"])
+        .arg("--dir")
+        .arg(format!("{}::.", repo().display()))
+        .arg("--dir")
+        .arg(format!("{}::/repo", repo().display()))
+        .arg("--dir")
+        .arg(format!("{}::/out", out_dir.display()))
+        .args(["--env", "VESPER_STAGE2_SYMS=1"])
+        .args(["--argv0", "stage2"])
+        .arg(stage2_cwasm)
+        .args(["/out/wrap", &format!("/out/{out_name}"), "main"])
+        .output()
+        .expect("run stage2 under wasmtime CLI");
+    let notes = read_stage2_sidecar_notes(out_wasm);
+    assert!(
+        exec.status.success(),
+        "wasmtime CLI stage2 failed (status={}):\nstdout={}\nstderr={}{notes}",
+        exec.status,
+        String::from_utf8_lossy(&exec.stdout),
+        String::from_utf8_lossy(&exec.stderr),
+    );
+}
+
+/// Builds the probe for one compiler package with `compiler` into
+/// `<dir>/out.wasm` and returns the component bytes.
+fn build_compiler_package_probe(
+    compiler: &PreparedComponent,
+    syms: &Path,
+    dir: &Path,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    let out_wasm = dir.join("out.wasm");
+    remove_stage2_sidecars(&out_wasm);
+    let code = compiler
+        .run(&Ctx {
+            args: vec!["stage2", "/out/wrap", "/out/out.wasm", "main"],
+            env: vec![("VESPER_STAGE2_SYMS", "1")],
+            dirs: vec![
+                (repo(), ".".into()),
+                (repo(), "/repo".into()),
+                (dir.to_path_buf(), "/out".into()),
+            ],
+            fuel: Some(u64::MAX),
+            diag_base: Some(out_wasm.clone()),
+            syms_file: Some(syms.to_path_buf()),
+        })
+        .map_err(|e| format!("{label} trapped: {e}"))?;
+    if code != 0 {
+        return Err(format_stage2_error(label, code, Some(&out_wasm)));
+    }
+    let bytes = std::fs::read(&out_wasm).unwrap_or_default();
+    if !bytes.starts_with(b"\0asm\x0d\x00\x01\x00") {
+        return Err(format!(
+            "{label} wrote no component ({} bytes)",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
+}
+
+fn write_probe(wrap_dir: &Path, manifest: &str, lib_src: &str) {
+    let _ = std::fs::remove_dir_all(wrap_dir);
+    std::fs::create_dir_all(wrap_dir.join("src")).unwrap();
+    std::fs::write(wrap_dir.join("Loom.toml"), manifest).unwrap();
+    std::fs::write(wrap_dir.join("src/lib.ves"), lib_src).unwrap();
+}
+
+/// The Stage 2 fixed point over every compiler package (#1928, part of
+/// #1397).
+///
+/// `stage2.wasm == stage3.wasm` shows that `@vesper/stage2` rebuilds itself.
+/// This extends the fixed point to the packages the compiler is made of:
+/// each one in [`COMPILER_PACKAGES`] is built by the boot component (Stage 2
+/// compiled by the Rust wasm backend) and by `stage2.wasm` (Stage 2 compiled
+/// by itself), and the two components must be byte-identical. The two
+/// compilers come from different backends, so equal bytes mean neither
+/// backend miscompiled Stage 2 in a way these packages exercise. With the
+/// pinned wasmtime CLI (always present under Bazel), the precompiled
+/// `stage2.cwasm` rebuilds every package again and must match too.
+///
+/// Each package in [`STAGE2_PACKAGE_GAPS`] must still fail to build, so a
+/// gap that closes is moved into [`COMPILER_PACKAGES`] instead of going
+/// unnoticed.
+fn check_compiler_packages_fixed_point(
+    dir: &Path,
+    boot: &PreparedComponent,
+    boot_syms: &Path,
+    stage2: &PreparedComponent,
+    stage2_syms: &Path,
+    cli: Option<(&Path, &Path)>,
+) {
+    let wrap_dir = dir.join("wrap");
+    let out_wasm = dir.join("out.wasm");
+    let mut failures = Vec::new();
+    for (stem, pkg_name, pkg_rel, expr, _) in COMPILER_PACKAGES.iter() {
+        let (manifest, lib_src) = compiler_package_probe(stem, pkg_name, pkg_rel, expr);
+        write_probe(&wrap_dir, &manifest, &lib_src);
+        let by_boot = match build_compiler_package_probe(boot, boot_syms, dir, "boot stage2") {
+            Ok(b) => b,
+            Err(e) => {
+                failures.push(format!("{pkg_name}: {e}"));
+                continue;
+            }
+        };
+        match build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm") {
+            Ok(b) if b == by_boot => {}
+            Ok(b) => failures.push(format!(
+                "{pkg_name}: boot stage2 built {} bytes, stage2.wasm built {} different bytes",
+                by_boot.len(),
+                b.len()
+            )),
+            Err(e) => failures.push(format!("{pkg_name}: {e}")),
+        }
+        if let Some((cli, stage2_cwasm)) = cli {
+            run_stage2_probe_wasmtime_cli(cli, stage2_cwasm, dir, &out_wasm);
+            let by_cli = std::fs::read(&out_wasm).unwrap_or_default();
+            if by_cli != by_boot {
+                failures.push(format!(
+                    "{pkg_name}: boot stage2 built {} bytes, stage2.cwasm under the wasmtime CLI built {} different bytes",
+                    by_boot.len(),
+                    by_cli.len()
+                ));
+            }
+        }
+    }
+    for (stem, pkg_name, pkg_rel, lib_src, why) in STAGE2_PACKAGE_GAPS.iter() {
+        let (mut manifest, _) = compiler_package_probe(stem, pkg_name, pkg_rel, "");
+        // A gap probe may `use` other compiler packages to reach the code
+        // that needs the missing support; each becomes a dependency.
+        for other in lib_src
+            .split("use @vesper/")
+            .skip(1)
+            .filter_map(|rest| rest.split("::").next())
+            .filter(|other| format!("@vesper/{other}") != *pkg_name)
+        {
+            manifest.push_str(&format!(
+                "\"@vesper/{other}\" = {{ version = \"^0.1\", path = \"/repo/packages/vesper-{other}\" }}\n"
+            ));
+        }
+        write_probe(&wrap_dir, &manifest, lib_src);
+        if build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm").is_ok() {
+            failures.push(format!(
+                "{pkg_name}: Stage 2 now builds it (listed as a gap: {why}); move it from STAGE2_PACKAGE_GAPS into COMPILER_PACKAGES"
+            ));
+        }
+    }
+    // @vesper-std/process on WASI (src-wasip2): a start is refused with
+    // Unsupported (IoKind 11) and `id` is 0, built the same by both Stage 2
+    // compilers.
+    let proc_manifest = "[package]\nname = \"@vesper-test/probe-process-wasi\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\n\"@vesper-std/process\" = { version = \"^0.1\", path = \"/repo/packages/vesper-std/process\" }\n";
+    let proc_src = "use @vesper-std/process::{command, arg, spawn, release, id};\n\
+        pub fn main() -> u64 eff [Ffi[StdProcess]] {\n\
+            let mut c = command(in \"cc\");\n\
+            arg(inout c, in \"--version\");\n\
+            let r = match spawn(c) {\n\
+                Result::Ok(ch) => {\n\
+                    release(ch);\n\
+                    1000\n\
+                },\n\
+                Result::Err(e) => widen_u64(e.kind),\n\
+            };\n\
+            wrapping_add(r, id())\n\
+        }\n";
+    write_probe(&wrap_dir, proc_manifest, proc_src);
+    match (
+        build_compiler_package_probe(boot, boot_syms, dir, "boot stage2"),
+        build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm"),
+    ) {
+        (Ok(a), Ok(b)) => {
+            if a != b {
+                failures.push(format!(
+                    "@vesper-std/process (WASI probe): boot stage2 built {} bytes, stage2.wasm built {} different bytes",
+                    a.len(),
+                    b.len()
+                ));
+            }
+            match run(&b, &Ctx::default()) {
+                Ok(11) => {}
+                other => failures.push(format!(
+                    "@vesper-std/process (WASI probe): expected Unsupported (11), got {other:?}"
+                )),
+            }
+        }
+        (a, b) => failures.push(format!(
+            "@vesper-std/process (WASI probe): {:?} / {:?}",
+            a.err(),
+            b.err()
+        )),
+    }
+    remove_stage2_sidecars(&out_wasm);
+    let _ = std::fs::remove_dir_all(&wrap_dir);
+    assert!(
+        failures.is_empty(),
+        "Stage 2 package fixed point broken for {} of {} packages:\n{}",
+        failures.len(),
+        COMPILER_PACKAGES.len() + STAGE2_PACKAGE_GAPS.len(),
+        failures.join("\n")
+    );
+}
+
 #[test]
 fn stage2_compiles_compiler_packages() {
     with_large_stack(|| {
@@ -2302,302 +2985,7 @@ fn stage2_compiles_compiler_packages() {
         let boot_prepared =
             PreparedComponent::new(&boot_component).expect("prepare @vesper/stage2 boot");
 
-        let specs: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
-            (
-                "front",
-                "@vesper/front",
-                "packages/vesper-front",
-                "parse_tables(in \"fn main() -> u64 { 1 }\").len()",
-                CompilerExecCheck::NonZero,
-            ),
-            (
-                "backend-checks",
-                "@vesper/backend-checks",
-                "packages/vesper-backend-checks",
-                "backend_verify_count(in \"\")",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "bounds-hoist",
-                "@vesper/bounds-hoist",
-                "packages/vesper-bounds-hoist",
-                "decide_text(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "check-dyn",
-                "@vesper/check-dyn",
-                "packages/vesper-check-dyn",
-                "check_dyn_count(in \"\", 0, 0)",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "check-effects",
-                "@vesper/check-effects",
-                "packages/vesper-check-effects",
-                "check_effects(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "check-fip",
-                "@vesper/check-fip",
-                "packages/vesper-check-fip",
-                "check_fip_count(in \"\")",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "check-loops-atomics",
-                "@vesper/check-loops-atomics",
-                "packages/vesper-check-loops-atomics",
-                "check_loops_control(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "check-pact",
-                "@vesper/check-pact",
-                "packages/vesper-check-pact",
-                "check_pact_mono_plan(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "check-regions-seqs",
-                "@vesper/check-regions-seqs",
-                "packages/vesper-check-regions-seqs",
-                "regions_seqs_types(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "check-tensor-types",
-                "@vesper/check-tensor-types",
-                "packages/vesper-check-tensor-types",
-                "check_tensor_types(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "codegen-aggregates",
-                "@vesper/codegen-aggregates",
-                "packages/vesper-codegen-aggregates",
-                "aggregate_decisions(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "codegen-calls",
-                "@vesper/codegen-calls",
-                "packages/vesper-codegen-calls",
-                "codegen_calls_text(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "codegen-control",
-                "@vesper/codegen-control",
-                "packages/vesper-codegen-control",
-                "control_session_plans(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "codegen-export",
-                "@vesper/codegen-export",
-                "packages/vesper-codegen-export",
-                "export_plan(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "codegen-freestanding",
-                "@vesper/codegen-freestanding",
-                "packages/vesper-codegen-freestanding",
-                "freestanding_constants()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "codegen-scalar",
-                "@vesper/codegen-scalar",
-                "packages/vesper-codegen-scalar",
-                "codegen_scalar_decisions(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "codegen-seq",
-                "@vesper/codegen-seq",
-                "packages/vesper-codegen-seq",
-                "codegen_seq_decisions(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "codegen-walk",
-                "@vesper/codegen-walk",
-                "packages/vesper-codegen-walk",
-                "native_walk_decisions(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "driver",
-                "@vesper/driver",
-                "packages/vesper-driver",
-                "widen_u64(cmd_check())",
-                CompilerExecCheck::Exact(1),
-            ),
-            (
-                "ebpf-backend",
-                "@vesper/ebpf-backend",
-                "packages/vesper-ebpf-backend",
-                "ebpf_backend_words(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "egraph",
-                "@vesper/egraph",
-                "packages/vesper-egraph",
-                "egraph_math(in \"\").len()",
-                CompilerExecCheck::Exact(0),
-            ),
-            (
-                "ffi-lowering",
-                "@vesper/ffi-lowering",
-                "packages/vesper-ffi-lowering",
-                "{ let _ = s_new(); 0 }",
-                CompilerExecCheck::Exact(0),
-            ),
-            (
-                "ir-check",
-                "@vesper/ir-check",
-                "packages/vesper-ir-check",
-                "{ let _ = paths_new(); 0 }",
-                CompilerExecCheck::Exact(0),
-            ),
-            (
-                "ir-inline",
-                "@vesper/ir-inline",
-                "packages/vesper-ir-inline",
-                "inline_program_words(in \"\".as_bytes()).len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "ir-opt",
-                "@vesper/ir-opt",
-                "packages/vesper-ir-opt",
-                "ir_opt_words(in \"\".as_bytes()).len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "ir-opt-policy",
-                "@vesper/ir-opt-policy",
-                "packages/vesper-ir-opt-policy",
-                "ir_opt_policy_entry(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "optimize",
-                "@vesper/optimize",
-                "packages/vesper-optimize",
-                "optimize_verify(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "doc",
-                "@vesper/doc",
-                "packages/vesper-doc",
-                "format()",
-                CompilerExecCheck::Exact(1),
-            ),
-            (
-                "lsp",
-                "@vesper/lsp",
-                "packages/vesper-lsp",
-                "lsp_frames(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "lsp-features",
-                "@vesper/lsp-features",
-                "packages/vesper-lsp-features",
-                "lsp_document_symbols(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "memo",
-                "@vesper/memo",
-                "packages/vesper-memo",
-                "memo_replay(in \"\").len()",
-                CompilerExecCheck::Exact(1),
-            ),
-            (
-                "test-runner",
-                "@vesper/test-runner",
-                "packages/vesper-test-runner",
-                "case_rows_words(in \"\".as_bytes()).len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "lean-extract",
-                "@vesper/lean-extract",
-                "packages/vesper-lean-extract",
-                "extract_head_words(in \"\")",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "check-data",
-                "@vesper/check-data",
-                "packages/vesper-check-data",
-                "check_data_sizes(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "ast",
-                "@vesper/ast",
-                "packages/vesper-ast",
-                "ast_count(in \"fn main() -> u64 { 1 }\")",
-                CompilerExecCheck::NonZero,
-            ),
-            (
-                "check-layout",
-                "@vesper/check-layout",
-                "packages/vesper-check-layout",
-                "check_layout_words(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "check-core-typing",
-                "@vesper/check-core-typing",
-                "packages/vesper-check-core-typing",
-                "core_typing_exprs(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "check-names-packages",
-                "@vesper/check-names-packages",
-                "packages/vesper-check-names-packages",
-                "module_count(in \"\")",
-                CompilerExecCheck::Exact(0),
-            ),
-            (
-                "place-ir",
-                "@vesper/place-ir",
-                "packages/vesper-place-ir",
-                "place_ir_words(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "place-ir-lower",
-                "@vesper/place-ir-lower",
-                "packages/vesper-place-ir-lower",
-                "ir_lower_words(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "vsys",
-                "@vesper/vsys",
-                "packages/vesper-vsys",
-                "run_vsys_check(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-            (
-                "wit-component",
-                "@vesper/wit-component",
-                "packages/vesper-wit-component",
-                "wit_component_wrap(in \"\").len()",
-                CompilerExecCheck::CompileOnly,
-            ),
-        ];
+        let specs = COMPILER_PACKAGES;
 
         let wrap_dir = dir.join("wrap");
         let host_wasm = dir.join("out.wasm");
@@ -2622,24 +3010,8 @@ fn stage2_compiles_compiler_packages() {
             })
         };
 
-        for (stem, pkg_name, pkg_rel, expr, exec_check) in specs {
-            let dep_guest = format!("/repo/{pkg_rel}");
-            let manifest = format!(
-                "[package]\nname = \"@vesper-test/probe-{stem}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\n\"{pkg_name}\" = {{ version = \"^0.1\", path = \"{dep_guest}\" }}\n"
-            );
-            let fn_name = expr
-                .split(&['(', ' '][..])
-                .find(|s| !s.is_empty() && *s != "{" && *s != "let" && *s != "_" && *s != "=")
-                .unwrap_or("");
-            let use_line = if expr.starts_with("widen_u64(") {
-                format!("use {pkg_name}::cmd_check;")
-            } else if expr.starts_with('{') {
-                let inner_fn = expr.split("= ").nth(1).unwrap().split('(').next().unwrap();
-                format!("use {pkg_name}::{inner_fn};")
-            } else {
-                format!("use {pkg_name}::{fn_name};")
-            };
-            let lib_src = format!("{use_line}\npub fn main() -> u64 {{ {expr} }}\n");
+        for (stem, pkg_name, pkg_rel, expr, exec_check) in specs.iter() {
+            let (manifest, lib_src) = compiler_package_probe(stem, pkg_name, pkg_rel, expr);
             let exit_code = compile_wrap(&manifest, &lib_src)
                 .unwrap_or_else(|e| panic!("stage2 trap on {stem}: {e}"));
             let err_txt =

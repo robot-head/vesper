@@ -19,6 +19,10 @@ use super::{Registry, Swap, check_words, env_off, ir_words, on, open};
 /// Programs the Vesper eBPF backend compiled, and left to Rust.
 static EBPF_CALLS: AtomicU64 = AtomicU64::new(0);
 static EBPF_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// `vesper build --target bpf` runs the Vesper driver encoded for building
+/// in Vesper (#1895), and how many of those fell back to the Rust pass.
+pub(crate) static DRIVER_EBPF_INPUTS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static DRIVER_EBPF_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 
 /// The `ebpf` hook of `vesper::codegen_swap` from `modules/ebpf_backend`
 /// (#1290): `@vesper/ebpf-backend` compiles the world from Place IR and
@@ -39,6 +43,35 @@ fn vesper_ebpf(
     Some(result)
 }
 
+/// The `ebpf` swap's input for `vesper build --target bpf`, which the Vesper
+/// driver compiles, verifies and writes itself (#1895): the source parsed
+/// and checked as `ebpf_backend::compile_source` does. `None` when the swap
+/// is off, the source has errors or the world does not encode (the Rust
+/// step builds it and reports them). `VESPER_HYBRID_DRIVER_EBPF=0` keeps
+/// the build on the Rust step.
+pub(crate) fn ebpf_build_input(input: &str, source: &str, entry: &str) -> Option<Vec<u8>> {
+    vesper::codegen_swap::installed().ebpf?;
+    if env_off("VESPER_HYBRID_DRIVER_EBPF") {
+        return None;
+    }
+    let options = vesper::ebpf_backend::Options {
+        entry: entry.to_owned(),
+        file: std::path::Path::new(input)
+            .file_name()
+            .map_or_else(|| input.to_owned(), |f| f.to_string_lossy().into_owned()),
+        policy: Default::default(),
+    };
+    let (source, parsed) = vesper::forge_frontend::parse_compiler_source(source, false).ok()?;
+    if !parsed.diagnostics.is_empty() {
+        return None;
+    }
+    let checked = vesper::check::check(&parsed.module);
+    if !checked.diagnostics.is_empty() {
+        return None;
+    }
+    ebpf_words::input(&checked.world, Some(&source), &options)
+}
+
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[open("ebpf", "0.93-1.10x; no flip-gate configuration")];
 
@@ -49,6 +82,11 @@ pub(super) fn register(r: &mut Registry) {
 }
 
 pub(super) fn report() {
+    eprintln!(
+        "vesper-hybrid: driver built {} eBPF objects in Vesper ({} fell back to Rust)",
+        DRIVER_EBPF_INPUTS.load(Relaxed) - DRIVER_EBPF_FALLBACKS.load(Relaxed),
+        DRIVER_EBPF_FALLBACKS.load(Relaxed),
+    );
     eprintln!(
         "vesper-hybrid: eBPF backend compiled {} programs from Vesper ({} declined)",
         EBPF_CALLS.load(Relaxed),

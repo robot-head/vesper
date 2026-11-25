@@ -19,49 +19,37 @@ pub copy struct VsockHeader {
     pub fwd_cnt: u32,
 }
 
-fn vsock_byte(in s: Slice[u8], i: u64) -> u8 {
-    match s.try_get(i) {
+fn vsock_read_u16_le(in s: Slice[u8], off: u64) -> u16 {
+    match s.try_read_u16_le(off) {
         Option::Some(v) => v,
         Option::None => 0,
     }
 }
 
-fn vsock_read_u16_le(in s: Slice[u8], off: u64) -> u16 {
-    let b0 = widen_u32(vsock_byte(in s, off));
-    let b1 = widen_u32(vsock_byte(in s, wrapping_add(off, 1))) << 8;
-    wrapping_u16(b0 | b1)
-}
-
 fn vsock_read_u32_le(in s: Slice[u8], off: u64) -> u32 {
-    let b0 = widen_u32(vsock_byte(in s, off));
-    let b1 = widen_u32(vsock_byte(in s, wrapping_add(off, 1))) << 8;
-    let b2 = widen_u32(vsock_byte(in s, wrapping_add(off, 2))) << 16;
-    let b3 = widen_u32(vsock_byte(in s, wrapping_add(off, 3))) << 24;
-    b0 | b1 | b2 | b3
+    match s.try_read_u32_le(off) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
 }
 
 fn vsock_read_u64_le(in s: Slice[u8], off: u64) -> u64 {
-    let lo = widen_u64(vsock_read_u32_le(in s, off));
-    let hi = widen_u64(vsock_read_u32_le(in s, wrapping_add(off, 4))) << 32;
-    lo | hi
+    match s.try_read_u64_le(off) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
 }
 
 fn vsock_write_u16_le(inout out: Slice[u8], off: u64, val: u16) {
-    let v = widen_u32(val);
-    out.try_set(off, wrapping_u8(v));
-    out.try_set(wrapping_add(off, 1), wrapping_u8(v >> 8));
+    out.try_write_u16_le(off, val);
 }
 
 fn vsock_write_u32_le(inout out: Slice[u8], off: u64, val: u32) {
-    out.try_set(off, wrapping_u8(val));
-    out.try_set(wrapping_add(off, 1), wrapping_u8(val >> 8));
-    out.try_set(wrapping_add(off, 2), wrapping_u8(val >> 16));
-    out.try_set(wrapping_add(off, 3), wrapping_u8(val >> 24));
+    out.try_write_u32_le(off, val);
 }
 
 fn vsock_write_u64_le(inout out: Slice[u8], off: u64, val: u64) {
-    vsock_write_u32_le(inout out, off, wrapping_u32(val));
-    vsock_write_u32_le(inout out, wrapping_add(off, 4), wrapping_u32(val >> 32));
+    out.try_write_u64_le(off, val);
 }
 
 pub fn vsock_encode_hdr(h: VsockHeader, inout out: Slice[u8]) -> u64 {
@@ -116,4 +104,728 @@ pub fn vsock_validate_packet(h: VsockHeader, payload_len: u64, guest_cid: u64) -
         return false;
     }
     h.src_cid == guest_cid && h.dst_cid == VSOCK_HOST_CID
+}
+
+// ---------------------------------------------------------------------------
+// The whole virtio-vsock device (`VsockDevice`): listeners, the connection
+// table with its credit and state machine, the outbox and the event queue.
+// Rust keeps only the bytes the guest sent each connection (by slot), which
+// it appends or hands out as `vsock_guest_packet` and `vsock_forwarded`
+// say.
+
+const VSOCK_TYPE_STREAM: u16 = 1;
+const VSOCK_TYPE_SEQPACKET: u16 = 2;
+const VSOCK_F_SEQPACKET: u64 = 2;
+const VSOCK_SEQ_EOM: u32 = 1;
+const VSOCK_SEQ_EOR: u32 = 2;
+const VSOCK_HOST_PACKET_BYTES: u64 = 4096;
+const VSOCK_OP_REQUEST: u16 = 1;
+const VSOCK_OP_RESPONSE: u16 = 2;
+const VSOCK_OP_RST: u16 = 3;
+const VSOCK_OP_SHUTDOWN: u16 = 4;
+const VSOCK_OP_RW: u16 = 5;
+const VSOCK_OP_CREDIT_UPDATE: u16 = 6;
+const VSOCK_OP_CREDIT_REQUEST: u16 = 7;
+const VSOCK_SHUTDOWN_BOTH: u32 = 3;
+const VSOCK_HOST_BUF_ALLOC: u32 = 65536;
+const VSOCK_OUTBOX_LIMIT: u64 = 512;
+const VSOCK_MAX_CONNECTIONS: u64 = 1024;
+const VSOCK_MAX_QUEUED_MESSAGES: u64 = 256;
+const VSOCK_NONE: u64 = 18446744073709551615;
+
+// `VsockError` codes (0 is success).
+const VSOCK_E_PORT_IN_USE: u8 = 2;
+const VSOCK_E_NO_SUCH_CONNECTION: u8 = 3;
+const VSOCK_E_NOT_CONNECTED: u8 = 4;
+const VSOCK_E_TOO_MANY_CONNECTIONS: u8 = 5;
+const VSOCK_E_OUTBOX_FULL: u8 = 6;
+const VSOCK_E_WRONG_TYPE: u8 = 7;
+const VSOCK_E_WOULD_BLOCK: u8 = 8;
+
+// What Rust does with a guest packet's payload (`vsock_guest_packet`).
+const VSOCK_ACT_NONE: u64 = 0;
+const VSOCK_ACT_STREAM: u64 = 1;
+const VSOCK_ACT_PARTIAL: u64 = 2;
+const VSOCK_ACT_MESSAGE: u64 = 3;
+const VSOCK_ACT_MESSAGE_EOR: u64 = 4;
+const VSOCK_ACT_REMOVED: u64 = 5;
+// Set in the answer when the outbox is at its limit.
+const VSOCK_ACT_FULL: u64 = 9223372036854775808;
+
+pub copy struct VsockStats {
+    pub malformed: u64,
+    pub spoofed: u64,
+    pub resets_sent: u64,
+    pub credit_violations: u64,
+    pub message_overflows: u64,
+    pub packets_rx: u64,
+    pub packets_tx: u64,
+    pub messages_rx: u64,
+    pub messages_tx: u64,
+}
+
+copy struct VsockConn {
+    kind: u16,
+    connected: bool,
+    peer_buf_alloc: u32,
+    peer_fwd_cnt: u32,
+    tx_cnt: u32,
+    rx_cnt: u32,
+    fwd_cnt: u32,
+    // Complete seqpacket messages the host has not taken.
+    messages: u64,
+    peer_shutdown: u32,
+}
+
+struct VsockState {
+    guest_cid: u64,
+    features: u64,
+    // `port << 16 | kind`, ascending.
+    listeners: ChunkSeq[u64],
+    // `guest_port << 32 | host_port`, ascending, and each one's slot.
+    keys: ChunkSeq[u64],
+    slots: ChunkSeq[u64],
+    conns: ChunkSeq[VsockConn],
+    free: ChunkSeq[u64],
+    // Packets for the guest, `out[out_head..]`, oldest first; each `len` is
+    // its payload, the next `len` bytes of `bytes[bytes_head..]`.
+    out: ChunkSeq[VsockHeader],
+    out_head: u64,
+    bytes: ChunkSeq[u8],
+    bytes_head: u64,
+    events: u64,
+    stats: VsockStats,
+}
+
+fn vsock_zero_stats() -> VsockStats {
+    VsockStats {
+        malformed: 0,
+        spoofed: 0,
+        resets_sent: 0,
+        credit_violations: 0,
+        message_overflows: 0,
+        packets_rx: 0,
+        packets_tx: 0,
+        messages_rx: 0,
+        messages_tx: 0,
+    }
+}
+
+fn vsock_new_conn(kind: u16, connected: bool) -> VsockConn {
+    VsockConn {
+        kind: kind,
+        connected: connected,
+        peer_buf_alloc: 0,
+        peer_fwd_cnt: 0,
+        tx_cnt: 0,
+        rx_cnt: 0,
+        fwd_cnt: 0,
+        messages: 0,
+        peer_shutdown: 0,
+    }
+}
+
+pub fn vsock_state_new(guest_cid: u64) -> VsockState {
+    VsockState {
+        guest_cid: guest_cid,
+        features: 0,
+        listeners: ChunkSeq::new[u64](),
+        keys: ChunkSeq::new[u64](),
+        slots: ChunkSeq::new[u64](),
+        conns: ChunkSeq::new[VsockConn](),
+        free: ChunkSeq::new[u64](),
+        out: ChunkSeq::new[VsockHeader](),
+        out_head: 0,
+        bytes: ChunkSeq::new[u8](),
+        bytes_head: 0,
+        events: 0,
+        stats: vsock_zero_stats(),
+    }
+}
+
+fn vsock_key(guest_port: u32, host_port: u32) -> u64 {
+    wrapping_shl_u64(widen_u64(guest_port), 32) | widen_u64(host_port)
+}
+
+// The index of the first entry of `s` that is at least `x`.
+fn vsock_lower_bound(in s: ChunkSeq[u64], x: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = s.len();
+    loop {
+        if lo >= hi {
+            return lo;
+        }
+        let mid = wrapping_add(lo, wrapping_shr_u64(wrapping_sub(hi, lo), 1));
+        if at(in s, mid) < x {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+fn vsock_insert_at(inout s: ChunkSeq[u64], index: u64, x: u64) {
+    let mut i = s.len();
+    s.push(x);
+    loop {
+        if i <= index {
+            break;
+        }
+        let from = wrapping_sub(i, 1);
+        s.try_set(i, at(in s, from));
+        i = from;
+    }
+    s.try_set(index, x);
+}
+
+fn vsock_remove_at(inout s: ChunkSeq[u64], index: u64) {
+    let n = s.len();
+    for i in wrapping_add(index, 1)..n {
+        s.try_set(wrapping_sub(i, 1), at(in s, i));
+    }
+    s.truncate(wrapping_sub(n, 1));
+}
+
+// The slot of connection `key`, or `VSOCK_NONE`.
+fn vsock_find(in st: VsockState, key: u64) -> u64 {
+    let i = vsock_lower_bound(in st.keys, key);
+    if i < st.keys.len() && at(in st.keys, i) == key {
+        at(in st.slots, i)
+    } else {
+        VSOCK_NONE
+    }
+}
+
+fn vsock_conn(in st: VsockState, slot: u64) -> VsockConn {
+    match st.conns.try_get(slot) {
+        Option::Some(c) => c,
+        Option::None => vsock_new_conn(0, false),
+    }
+}
+
+fn vsock_put(inout st: VsockState, slot: u64, c: VsockConn) {
+    st.conns.try_set(slot, c);
+}
+
+fn vsock_open(inout st: VsockState, key: u64, c: VsockConn) -> u64 {
+    let slot = match st.free.try_get(wrapping_sub(st.free.len(), 1)) {
+        Option::Some(s) => {
+            st.free.truncate(wrapping_sub(st.free.len(), 1));
+            st.conns.try_set(s, c);
+            s
+        },
+        Option::None => {
+            let s = st.conns.len();
+            st.conns.push(c);
+            s
+        },
+    };
+    let i = vsock_lower_bound(in st.keys, key);
+    vsock_insert_at(inout st.keys, i, key);
+    vsock_insert_at(inout st.slots, i, slot);
+    slot
+}
+
+// Drops connection `key`; returns whether it was there.
+fn vsock_close(inout st: VsockState, key: u64) -> bool {
+    let i = vsock_lower_bound(in st.keys, key);
+    if i >= st.keys.len() || at(in st.keys, i) != key {
+        return false;
+    }
+    st.free.push(at(in st.slots, i));
+    vsock_remove_at(inout st.keys, i);
+    vsock_remove_at(inout st.slots, i);
+    true
+}
+
+fn vsock_drop_all(inout st: VsockState) {
+    st.keys.truncate(0);
+    st.slots.truncate(0);
+    st.conns.truncate(0);
+    st.free.truncate(0);
+    st.out.truncate(0);
+    st.out_head = 0;
+    st.bytes.truncate(0);
+    st.bytes_head = 0;
+}
+
+fn vsock_seqpacket(in st: VsockState) -> bool {
+    (st.features & VSOCK_F_SEQPACKET) != 0
+}
+
+pub fn vsock_outbox_len(in st: VsockState) -> u64 {
+    wrapping_sub(st.out.len(), st.out_head)
+}
+
+pub fn vsock_stats(in st: VsockState) -> VsockStats {
+    st.stats
+}
+
+pub fn vsock_activate(inout st: VsockState, features: u64) {
+    st.features = features;
+}
+
+pub fn vsock_reset(inout st: VsockState) {
+    st.features = 0;
+    vsock_drop_all(inout st);
+    st.events = 0;
+}
+
+pub fn vsock_transport_reset(inout st: VsockState) {
+    vsock_drop_all(inout st);
+    st.events = wrapping_add(st.events, 1);
+}
+
+pub fn vsock_events(in st: VsockState) -> u64 {
+    st.events
+}
+
+pub fn vsock_event_taken(inout st: VsockState) {
+    if st.events > 0 {
+        st.events = wrapping_sub(st.events, 1);
+    }
+}
+
+// 0 none, 1 connecting, 2 connected.
+pub fn vsock_connection_state(in st: VsockState, guest_port: u32, host_port: u32) -> u8 {
+    let slot = vsock_find(in st, vsock_key(guest_port, host_port));
+    if slot == VSOCK_NONE {
+        return 0;
+    }
+    if vsock_conn(in st, slot).connected {
+        2
+    } else {
+        1
+    }
+}
+
+// The open connections' keys, ascending.
+pub fn vsock_connections(in st: VsockState) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](st.keys.len());
+    out.extend(in st.keys.as_slice());
+    out
+}
+
+pub fn vsock_listen(inout st: VsockState, port: u32, kind: u16) -> u8 {
+    let p = wrapping_shl_u64(widen_u64(port), 16);
+    let i = vsock_lower_bound(in st.listeners, p);
+    if i < st.listeners.len() && wrapping_shr_u64(at(in st.listeners, i), 16) == widen_u64(port) {
+        return VSOCK_E_PORT_IN_USE;
+    }
+    vsock_insert_at(inout st.listeners, i, p | widen_u64(kind));
+    0
+}
+
+fn vsock_listener_kind(in st: VsockState, port: u32) -> u64 {
+    let p = wrapping_shl_u64(widen_u64(port), 16);
+    let i = vsock_lower_bound(in st.listeners, p);
+    if i < st.listeners.len() {
+        let e = at(in st.listeners, i);
+        if wrapping_shr_u64(e, 16) == widen_u64(port) {
+            return e & 65535;
+        }
+    }
+    VSOCK_NONE
+}
+
+fn vsock_compact(inout st: VsockState) {
+    if st.out_head == st.out.len() {
+        st.out.truncate(0);
+        st.out_head = 0;
+        st.bytes.truncate(0);
+        st.bytes_head = 0;
+        return;
+    }
+    if st.out_head >= 256 && wrapping_add(st.out_head, st.out_head) >= st.out.len() {
+        let n = st.out.len();
+        let mut j: u64 = 0;
+        for i in st.out_head..n {
+            match st.out.try_get(i) {
+                Option::Some(h) => {
+                    st.out.try_set(j, h);
+                },
+                Option::None => {},
+            }
+            j = wrapping_add(j, 1);
+        }
+        st.out.truncate(j);
+        st.out_head = 0;
+    }
+    if st.bytes_head >= 65536 && wrapping_add(st.bytes_head, st.bytes_head) >= st.bytes.len() {
+        let n = st.bytes.len();
+        let mut j: u64 = 0;
+        for i in st.bytes_head..n {
+            match st.bytes.try_get(i) {
+                Option::Some(b) => {
+                    st.bytes.try_set(j, b);
+                },
+                Option::None => {},
+            }
+            j = wrapping_add(j, 1);
+        }
+        st.bytes.truncate(j);
+        st.bytes_head = 0;
+    }
+}
+
+// `VsockDevice::push` for connection `slot` (whose key is `key`), with
+// no payload.
+fn vsock_push(inout st: VsockState, key: u64, slot: u64, op: u16, flags: u32, len: u64) {
+    let c = vsock_conn(in st, slot);
+    let h = VsockHeader {
+        src_cid: VSOCK_HOST_CID,
+        dst_cid: st.guest_cid,
+        src_port: wrapping_u32(key),
+        dst_port: wrapping_u32(wrapping_shr_u64(key, 32)),
+        len: wrapping_u32(len),
+        kind: c.kind,
+        op: op,
+        flags: flags,
+        buf_alloc: VSOCK_HOST_BUF_ALLOC,
+        fwd_cnt: c.fwd_cnt,
+    };
+    if op == VSOCK_OP_RST {
+        st.stats.resets_sent = wrapping_add(st.stats.resets_sent, 1);
+    }
+    st.out.push(h);
+}
+
+fn vsock_rst_reply(inout st: VsockState, h: VsockHeader) {
+    if h.op == VSOCK_OP_RST {
+        return;
+    }
+    let r = VsockHeader {
+        src_cid: VSOCK_HOST_CID,
+        dst_cid: st.guest_cid,
+        src_port: h.dst_port,
+        dst_port: h.src_port,
+        len: 0,
+        kind: h.kind,
+        op: VSOCK_OP_RST,
+        flags: 0,
+        buf_alloc: 0,
+        fwd_cnt: 0,
+    };
+    st.stats.resets_sent = wrapping_add(st.stats.resets_sent, 1);
+    st.out.push(r);
+}
+
+// `connect_typed`: the error code and the new connection's slot.
+pub fn vsock_connect(inout st: VsockState, host_port: u32, guest_port: u32, kind: u16)
+    -> (u8, u64) {
+    if kind == VSOCK_TYPE_SEQPACKET && !vsock_seqpacket(in st) {
+        return (VSOCK_E_WRONG_TYPE, 0);
+    }
+    let key = vsock_key(guest_port, host_port);
+    if vsock_find(in st, key) != VSOCK_NONE {
+        return (VSOCK_E_PORT_IN_USE, 0);
+    }
+    if st.keys.len() >= VSOCK_MAX_CONNECTIONS {
+        return (VSOCK_E_TOO_MANY_CONNECTIONS, 0);
+    }
+    if vsock_outbox_len(in st) >= VSOCK_OUTBOX_LIMIT {
+        return (VSOCK_E_OUTBOX_FULL, 0);
+    }
+    let slot = vsock_open(inout st, key, vsock_new_conn(kind, false));
+    vsock_push(inout st, key, slot, VSOCK_OP_REQUEST, 0, 0);
+    (0, slot)
+}
+
+// Connection `key`'s slot in the low 32 bits and its type above them, or
+// `VSOCK_NONE`.
+pub fn vsock_lookup(in st: VsockState, guest_port: u32, host_port: u32) -> u64 {
+    let slot = vsock_find(in st, vsock_key(guest_port, host_port));
+    if slot == VSOCK_NONE {
+        return VSOCK_NONE;
+    }
+    slot | wrapping_shl_u64(widen_u64(vsock_conn(in st, slot).kind), 32)
+}
+
+// The host took `n` bytes (one whole message when `message`) from
+// connection `key` in `slot`: return them as credit.
+pub fn vsock_forwarded(
+    inout st: VsockState,
+    guest_port: u32,
+    host_port: u32,
+    slot: u64,
+    n: u64,
+    message: bool
+) {
+    let mut c = vsock_conn(in st, slot);
+    c.fwd_cnt = wrapping_add(c.fwd_cnt, wrapping_u32(n));
+    if message && c.messages > 0 {
+        c.messages = wrapping_sub(c.messages, 1);
+    }
+    vsock_put(inout st, slot, c);
+    if n > 0 && vsock_outbox_len(in st) < VSOCK_OUTBOX_LIMIT {
+        vsock_push(inout st, vsock_key(guest_port, host_port), slot, VSOCK_OP_CREDIT_UPDATE, 0, 0);
+    }
+}
+
+fn vsock_sendable(in st: VsockState, slot: u64, kind: u16) -> u8 {
+    if slot == VSOCK_NONE {
+        return VSOCK_E_NO_SUCH_CONNECTION;
+    }
+    let c = vsock_conn(in st, slot);
+    if c.kind != kind {
+        return VSOCK_E_WRONG_TYPE;
+    }
+    if !c.connected || (c.peer_shutdown & 1) != 0 {
+        return VSOCK_E_NOT_CONNECTED;
+    }
+    0
+}
+
+fn vsock_credit(c: VsockConn) -> u64 {
+    widen_u64(vsock_peer_credit(c.peer_buf_alloc, c.tx_cnt, c.peer_fwd_cnt))
+}
+
+// `send_message`: the error code.
+pub fn vsock_send_message(
+    inout st: VsockState,
+    guest_port: u32,
+    host_port: u32,
+    in data: Slice[u8],
+    eor: bool
+) -> u8 {
+    let key = vsock_key(guest_port, host_port);
+    let slot = vsock_find(in st, key);
+    let e = vsock_sendable(in st, slot, VSOCK_TYPE_SEQPACKET);
+    if e != 0 {
+        return e;
+    }
+    let n = data.len();
+    let mut packets = wrapping_shr_u64(
+        wrapping_add(n, wrapping_sub(VSOCK_HOST_PACKET_BYTES, 1)),
+        12
+    );
+    if packets == 0 {
+        packets = 1;
+    }
+    let mut c = vsock_conn(in st, slot);
+    if vsock_credit(c) < n || wrapping_add(vsock_outbox_len(in st), packets) > VSOCK_OUTBOX_LIMIT {
+        return VSOCK_E_WOULD_BLOCK;
+    }
+    c.tx_cnt = wrapping_add(c.tx_cnt, wrapping_u32(n));
+    vsock_put(inout st, slot, c);
+    let last = wrapping_sub(packets, 1);
+    for i in 0..packets {
+        let start = wrapping_mul(i, VSOCK_HOST_PACKET_BYTES);
+        let end = min64(wrapping_add(start, VSOCK_HOST_PACKET_BYTES), n);
+        let flags = if i == last {
+            if eor {
+                VSOCK_SEQ_EOM | VSOCK_SEQ_EOR
+            } else {
+                VSOCK_SEQ_EOM
+            }
+        } else {
+            0
+        };
+        vsock_push(inout st, key, slot, VSOCK_OP_RW, flags, wrapping_sub(end, start));
+        st.bytes.extend(in data[start..end]);
+    }
+    st.stats.messages_tx = wrapping_add(st.stats.messages_tx, 1);
+    0
+}
+
+// `send`: the bytes queued, or the error code with the top bit set.
+pub fn vsock_send(inout st: VsockState, guest_port: u32, host_port: u32, in data: Slice[u8])
+    -> u64 {
+    let key = vsock_key(guest_port, host_port);
+    let slot = vsock_find(in st, key);
+    let e = vsock_sendable(in st, slot, VSOCK_TYPE_STREAM);
+    if e != 0 {
+        return VSOCK_ACT_FULL | widen_u64(e);
+    }
+    let total = data.len();
+    let mut sent: u64 = 0;
+    let mut c = vsock_conn(in st, slot);
+    loop {
+        if sent >= total || vsock_outbox_len(in st) >= VSOCK_OUTBOX_LIMIT {
+            break;
+        }
+        let n = min64(min64(vsock_credit(c), wrapping_sub(total, sent)), VSOCK_HOST_PACKET_BYTES);
+        if n == 0 {
+            break;
+        }
+        c.tx_cnt = wrapping_add(c.tx_cnt, wrapping_u32(n));
+        vsock_put(inout st, slot, c);
+        vsock_push(inout st, key, slot, VSOCK_OP_RW, 0, n);
+        let end = wrapping_add(sent, n);
+        st.bytes.extend(in data[sent..end]);
+        sent = end;
+    }
+    sent
+}
+
+// `shutdown`: the error code.
+pub fn vsock_shutdown(inout st: VsockState, guest_port: u32, host_port: u32) -> u8 {
+    let key = vsock_key(guest_port, host_port);
+    let slot = vsock_find(in st, key);
+    if slot == VSOCK_NONE {
+        return VSOCK_E_NO_SUCH_CONNECTION;
+    }
+    vsock_push(inout st, key, slot, VSOCK_OP_SHUTDOWN, VSOCK_SHUTDOWN_BOTH, 0);
+    0
+}
+
+fn vsock_act(code: u64, slot: u64) -> u64 {
+    code | wrapping_shl_u64(slot, 8)
+}
+
+fn vsock_guest_packet_inner(inout st: VsockState, in bytes: Slice[u8]) -> u64 {
+    let h = match vsock_decode_hdr(in bytes) {
+        Option::Some(h) => h,
+        Option::None => {
+            st.stats.malformed = wrapping_add(st.stats.malformed, 1);
+            return VSOCK_ACT_NONE;
+        },
+    };
+    let plen = wrapping_sub(bytes.len(), VSOCK_HEADER_BYTES);
+    if widen_u64(h.len) != plen || plen > VSOCK_MAX_PAYLOAD {
+        st.stats.malformed = wrapping_add(st.stats.malformed, 1);
+        return VSOCK_ACT_NONE;
+    }
+    if h.src_cid != st.guest_cid || h.dst_cid != VSOCK_HOST_CID {
+        st.stats.spoofed = wrapping_add(st.stats.spoofed, 1);
+        return VSOCK_ACT_NONE;
+    }
+    st.stats.packets_tx = wrapping_add(st.stats.packets_tx, 1);
+    if h.kind != VSOCK_TYPE_STREAM && !(h.kind == VSOCK_TYPE_SEQPACKET && vsock_seqpacket(in st)) {
+        vsock_rst_reply(inout st, h);
+        return VSOCK_ACT_NONE;
+    }
+    let key = vsock_key(h.src_port, h.dst_port);
+    let slot = vsock_find(in st, key);
+    if slot == VSOCK_NONE {
+        if h.op == VSOCK_OP_REQUEST
+            && vsock_listener_kind(in st, h.dst_port) == widen_u64(h.kind)
+            && st.keys.len() < VSOCK_MAX_CONNECTIONS {
+            let mut c = vsock_new_conn(h.kind, true);
+            c.peer_buf_alloc = h.buf_alloc;
+            c.peer_fwd_cnt = h.fwd_cnt;
+            let s = vsock_open(inout st, key, c);
+            vsock_push(inout st, key, s, VSOCK_OP_RESPONSE, 0, 0);
+            return VSOCK_ACT_NONE;
+        }
+        vsock_rst_reply(inout st, h);
+        return VSOCK_ACT_NONE;
+    }
+    let mut c = vsock_conn(in st, slot);
+    if c.kind != h.kind {
+        vsock_close(inout st, key);
+        vsock_rst_reply(inout st, h);
+        return vsock_act(VSOCK_ACT_REMOVED, slot);
+    }
+    c.peer_buf_alloc = h.buf_alloc;
+    c.peer_fwd_cnt = h.fwd_cnt;
+    if h.op == VSOCK_OP_RESPONSE && !c.connected {
+        c.connected = true;
+        vsock_put(inout st, slot, c);
+        return VSOCK_ACT_NONE;
+    }
+    if h.op == VSOCK_OP_RW && c.connected {
+        let free = widen_u64(wrapping_sub(VSOCK_HOST_BUF_ALLOC, wrapping_sub(c.rx_cnt, c.fwd_cnt)));
+        let seq = c.kind == VSOCK_TYPE_SEQPACKET;
+        let eom = (h.flags & VSOCK_SEQ_EOM) != 0;
+        if plen > free {
+            st.stats.credit_violations = wrapping_add(st.stats.credit_violations, 1);
+            vsock_close(inout st, key);
+            vsock_rst_reply(inout st, h);
+            return vsock_act(VSOCK_ACT_REMOVED, slot);
+        }
+        if seq && eom && c.messages >= VSOCK_MAX_QUEUED_MESSAGES {
+            st.stats.message_overflows = wrapping_add(st.stats.message_overflows, 1);
+            vsock_close(inout st, key);
+            vsock_rst_reply(inout st, h);
+            return vsock_act(VSOCK_ACT_REMOVED, slot);
+        }
+        c.rx_cnt = wrapping_add(c.rx_cnt, wrapping_u32(plen));
+        if !seq {
+            vsock_put(inout st, slot, c);
+            return vsock_act(VSOCK_ACT_STREAM, slot);
+        }
+        if !eom {
+            vsock_put(inout st, slot, c);
+            return vsock_act(VSOCK_ACT_PARTIAL, slot);
+        }
+        c.messages = wrapping_add(c.messages, 1);
+        vsock_put(inout st, slot, c);
+        st.stats.messages_rx = wrapping_add(st.stats.messages_rx, 1);
+        if (h.flags & VSOCK_SEQ_EOR) != 0 {
+            return vsock_act(VSOCK_ACT_MESSAGE_EOR, slot);
+        }
+        return vsock_act(VSOCK_ACT_MESSAGE, slot);
+    }
+    if h.op == VSOCK_OP_CREDIT_UPDATE {
+        vsock_put(inout st, slot, c);
+        return VSOCK_ACT_NONE;
+    }
+    if h.op == VSOCK_OP_CREDIT_REQUEST {
+        vsock_put(inout st, slot, c);
+        vsock_push(inout st, key, slot, VSOCK_OP_CREDIT_UPDATE, 0, 0);
+        return VSOCK_ACT_NONE;
+    }
+    if h.op == VSOCK_OP_SHUTDOWN {
+        c.peer_shutdown = c.peer_shutdown | (h.flags & VSOCK_SHUTDOWN_BOTH);
+        if c.peer_shutdown == VSOCK_SHUTDOWN_BOTH {
+            vsock_close(inout st, key);
+            vsock_rst_reply(inout st, h);
+            return vsock_act(VSOCK_ACT_REMOVED, slot);
+        }
+        vsock_put(inout st, slot, c);
+        return VSOCK_ACT_NONE;
+    }
+    vsock_close(inout st, key);
+    vsock_rst_reply(inout st, h);
+    vsock_act(VSOCK_ACT_REMOVED, slot)
+}
+
+// One guest transmit packet (`on_guest_packet`): what to do with its
+// payload (`VSOCK_ACT_*` in the low byte, the slot above it), with
+// `VSOCK_ACT_FULL` set when the outbox is at its limit afterwards.
+pub fn vsock_guest_packet(inout st: VsockState, in bytes: Slice[u8]) -> u64 {
+    let act = vsock_guest_packet_inner(inout st, in bytes);
+    if vsock_outbox_len(in st) >= VSOCK_OUTBOX_LIMIT {
+        act | VSOCK_ACT_FULL
+    } else {
+        act
+    }
+}
+
+// The oldest outbox packet into a receive buffer of `room` bytes: header
+// and as much payload as fits go to `out`, which must hold them. Returns
+// the bytes written (0 when the outbox is empty), with `VSOCK_ACT_FULL` set
+// when more packets wait. A packet that does not fit loses its message
+// boundaries to the part that does and keeps the rest at the front.
+pub fn vsock_rx_fill(inout st: VsockState, room: u64, inout out: Slice[u8]) -> u64 {
+    let mut h = match st.out.try_get(st.out_head) {
+        Option::Some(h) => h,
+        Option::None => return 0,
+    };
+    let plen = widen_u64(h.len);
+    let n = min64(plen, wrapping_sub(room, VSOCK_HEADER_BYTES));
+    let mut head = h;
+    head.len = wrapping_u32(n);
+    if n < plen {
+        head.flags = head.flags & 4294967292;
+    }
+    vsock_encode_hdr(head, inout out);
+    let start = st.bytes_head;
+    let _c = out.try_copy_from(VSOCK_HEADER_BYTES, in st.bytes[start..wrapping_add(start, n)]);
+    st.bytes_head = wrapping_add(start, n);
+    st.stats.packets_rx = wrapping_add(st.stats.packets_rx, 1);
+    if n < plen {
+        h.len = wrapping_u32(wrapping_sub(plen, n));
+        st.out.try_set(st.out_head, h);
+    } else {
+        st.out_head = wrapping_add(st.out_head, 1);
+        vsock_compact(inout st);
+    }
+    let written = wrapping_add(VSOCK_HEADER_BYTES, n);
+    if vsock_outbox_len(in st) > 0 {
+        written | VSOCK_ACT_FULL
+    } else {
+        written
+    }
 }

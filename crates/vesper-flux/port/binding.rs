@@ -480,6 +480,7 @@ unsafe extern "C" {
     fn vesper_flux_frontier_retire(gens: i64, holds: i64, live: *mut u64, watermark: *mut u64, slot: i64, generation: i64, timestamp: i64, fail: *mut u64) -> i64;
     fn vesper_flux_frontier_valid(gens: i64, holds: i64, live: i64, slot: i64, generation: i64, timestamp: i64) -> i64;
     fn vesper_flux_kw_decode_records(raw: *mut u64, count: i64, base_offset: i64, base_ts: i64, is_control: i64, cur: *mut u64, out_rec: *mut u64, out_hdr: *mut u64, out_ctrl: *mut u64) -> i64;
+    fn vesper_flux_kw_encode_records(data: *mut u64, meta: *mut u64, hdr: *mut u64, count: i64, base_ts: i64, out: *mut u64) -> i64;
     fn vesper_flux_log_decode(payload: *mut u64, epoch: i64, widths: *mut u64, max_rows: i64, fail: *mut u64) -> i64;
     fn vesper_flux_log_frame(epoch: i64, schema_at: i64, cells: *mut u64, counts: *mut u64, widths: *mut u64, max_rows: i64, max_frame: i64, fail: *mut u64) -> i64;
     fn vesper_flux_log_frame_ok(body: *mut u64, len: i64) -> i64;
@@ -764,6 +765,15 @@ pub fn kw_decode_records(raw: &[u8], count: u64, base_offset: i64, base_ts: i64,
     // every handle passed is owned or borrowed as its mode requires.
     let raw_ = vesper_port_abi::with_slice(raw, |view_raw| vesper_port_abi::with_slice_mut(cur, |view_cur| vesper_port_abi::with_slice_mut(out_rec, |view_out_rec| vesper_port_abi::with_slice_mut(out_hdr, |view_out_hdr| vesper_port_abi::with_slice_mut(out_ctrl, |view_out_ctrl| unsafe { vesper_flux_kw_decode_records(view_raw, count as i64, base_offset as i64, base_ts as i64, is_control as i64, view_cur, view_out_rec, view_out_hdr, view_out_ctrl) })))));
     raw_ as u64
+}
+
+/// Calls `kw_encode_records` of the Vesper library `flux` (`vesper_flux_kw_encode_records`).
+pub fn kw_encode_records(data: &[u8], meta: &[i64], hdr: &[i64], count: u64, base_ts: i64, out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_flux_kw_encode_records` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(data, |view_data| vesper_port_abi::with_slice(meta, |view_meta| vesper_port_abi::with_slice(hdr, |view_hdr| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_flux_kw_encode_records(view_data, view_meta, view_hdr, count as i64, base_ts as i64, view_out) }))));
+    raw as u64
 }
 
 /// Calls `log_decode` of the Vesper library `flux` (`vesper_flux_log_decode`).

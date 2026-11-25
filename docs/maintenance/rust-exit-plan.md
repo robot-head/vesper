@@ -170,10 +170,28 @@ gated set over the whole corpus with 0 differences. Today `gated` holds
    `bootstrap/stage2.sh`), reaches the fixed point stage2 == stage3 bit for
    bit, and `bootstrap/stage2.lock` records the digests. Checked by:
    `bootstrap/stage2.sh verify` and `.github/workflows/bootstrap-stage2.yml`
-   (manual dispatch and nightly). Today the fixed point holds for the 42
-   pure-Vesper compiler packages (#1690, #1844), not yet for the whole
-   compiler. `bootstrap/seed/runner/vwasm.c` is frozen (owner decision): it
-   is not a Stage 2 runner.
+   (manual dispatch and nightly). Today `@vesper/stage2` rebuilds itself
+   bit for bit (#1690), and every compiler package it builds (49, listed in
+   `COMPILER_PACKAGES` in `tests/wasm_seed_package_io.rs`) comes out
+   byte-identical from the boot Stage 2 (built by the Rust wasm backend),
+   from `stage2.wasm` (built by itself) and from the precompiled
+   `stage2.cwasm` under the pinned wasmtime CLI (#1928). Four packages are
+   gaps, listed in `STAGE2_PACKAGE_GAPS` with the reason: the native
+   Cranelift glue (`codegen-base`, `codegen-control-emit`,
+   `codegen-numeric`, whose `cranelift.vsys` handle types Stage 2 does not
+   resolve and whose `Ffi[Cranelift]` entry points a Wasm build cannot
+   carry; they drive the native backend over `vesper-cranelift-sys`, and
+   Stage 2 emits only Wasm) and `driver-commands`, whose printing, help and
+   formatting go through the `HybridCommands` import that only the hybrid's
+   Rust implements (item 2). `@vesper-std/process` builds for WASI
+   (`src-wasip2`: every start is refused with Unsupported, since WASI 0.2
+   cannot start a process), and the Wasm backend takes `Ffi[StdProcess]`
+   as a host capability that imports nothing. The
+   test fails when a gap closes, and `stage2_fixed_point_lists_every_package`
+   fails when a package under `packages/` is in no list. What is not yet
+   covered is the whole compiler as one program, which waits for item 2.
+   `bootstrap/seed/runner/vwasm.c` is frozen (owner decision): it is not a
+   Stage 2 runner.
 4. **The seed rebuilds the compiler with no Rust.** `bootstrap/seed/vesper.wasm`
    is committed with the script that regenerates it, and a CI job with no
    Rust toolchain builds the compiler from the seed and gets the bytes of
@@ -181,10 +199,10 @@ gated set over the whole corpus with 0 differences. Today `gated` holds
    the seed instead of Rust.
 5. **The kept Rust stands alone.** The Rust that stays builds without the
    Rust compiler:
-   - `crates/vesper-oracles` depends on the root `vesper` crate today (its
-     workers drive the parser, checker, optimizer, evaluator and native
-     backend in process). They must drive the Vesper compiler as a process
-     or through its C ABI instead.
+   - `crates/vesper-oracles` no longer depends on the root `vesper` crate
+     (#1929): the arithmetic oracle's worker drives the `vesper` binary as a
+     process (`--vesper PATH`), with `--no-ast-opt`/`--no-ir-opt` for its
+     four optimizer settings, so it tests the Vesper compiler unchanged.
    - `vesper-codegen-verified` no longer links the frozen seeds of
      `vesper-loom-calculus`, `vesper-loom-cas` and `vesper-loom-trust`
      (#1929): `src/trust.rs` is its own copy of the attestation rules,

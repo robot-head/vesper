@@ -632,6 +632,8 @@ struct GraphModule {
     package: usize,
     path: Vec<String>,
     file: usize,
+    /// Its `sugar` declarations: name and whether it is `pub`.
+    sugars: Vec<(String, bool)>,
 }
 
 #[derive(Default)]
@@ -662,6 +664,55 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(entry.path());
         }
     }
+}
+
+/// `ModuleSugar::discover`'s declarations: each `sugar` item of a module
+/// as written, by name, with whether it is `pub`. Like the loader, only a
+/// text the core parser rejects and the surface parser accepts has any.
+fn sugar_declarations(text: &str) -> Vec<(String, bool)> {
+    use vesper_syntax::lexer::{HARD_SOURCE_BYTES, HARD_TOKENS, TokenKind as K};
+    if parser::parse(text).diagnostics.is_empty() {
+        return vec![];
+    }
+    let limits = parser::ParseLimits {
+        max_source_bytes: HARD_SOURCE_BYTES,
+        max_tokens: HARD_TOKENS,
+        ..Default::default()
+    };
+    let Ok(surface) = parser::parse_surface_with_test_mode(text, limits, false) else {
+        return vec![];
+    };
+    if !surface.diagnostics.is_empty() {
+        return vec![];
+    }
+    let trivia = [K::Whitespace, K::Comment, K::BlockComment].map(|k| k as u16);
+    let mut out: Vec<(String, bool)> = vec![];
+    for item in surface
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == parser::ITEM)
+    {
+        let Some(decl) = item.children().find(|n| n.kind() == parser::SUGAR_DECL) else {
+            continue;
+        };
+        let mut words = decl
+            .descendants_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| !trivia.contains(&t.kind().0));
+        let mut public = false;
+        for token in words.by_ref() {
+            if token.text() == "sugar" {
+                break;
+            }
+            public |= token.text() == "pub";
+        }
+        if let Some(name) = words.next() {
+            // A later declaration of the same name replaces the earlier.
+            out.retain(|(n, _)| n != name.text());
+            out.push((name.text().to_owned(), public));
+        }
+    }
+    out
 }
 
 fn is_module_segment(s: &str) -> bool {
@@ -703,10 +754,12 @@ impl Graph {
             let file = self.files;
             self.files += 1;
             if segments.iter().all(|s| is_module_segment(s)) {
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
                 self.modules.push(GraphModule {
                     package: index,
                     path: segments,
                     file,
+                    sugars: sugar_declarations(&text),
                 });
             }
         }
@@ -806,6 +859,18 @@ fn encode(g: &Graph, a: &packages::Assembled) -> Vec<u8> {
     for (package, name) in foreign {
         put(&mut out, package as u64);
         put_str(&mut out, &name);
+    }
+    let sugars: Vec<_> = g
+        .modules
+        .iter()
+        .enumerate()
+        .flat_map(|(i, m)| m.sugars.iter().map(move |(n, p)| (i, n, *p)))
+        .collect();
+    put(&mut out, sugars.len() as u64);
+    for (module, name, public) in sugars {
+        put(&mut out, module as u64);
+        put_str(&mut out, name);
+        put(&mut out, public as u64);
     }
     out
 }
@@ -1125,9 +1190,10 @@ pub fn inspect(in input: Str) -> ChunkSeq[u64] {
     let entry = consumer.entry("inspect", true);
     let mut input = encode(&loaded.graph, a);
     assert_eq!(entry.words(&input), expected);
-    // The original wire format ends after the last module.
+    // The original wire format ends after the last module: drop the
+    // foreign type and sugar counts.
     assert!(a.vsys.is_empty());
-    input.truncate(input.len() - 8);
+    input.truncate(input.len() - 16);
     assert_eq!(entry.words(&input), expected);
 }
 
@@ -1285,6 +1351,95 @@ fn every_assembler_diagnostic_matches_rust() {
     eprintln!("names/packages mutants: fired {fired:?}");
     for code in ["E0111", "E0112", "E0113"] {
         assert!(fired.contains(code), "no mutant fired {code}");
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+/// Sugar imports: a dependency's `pub sugar` (direct and re-exported), a
+/// sibling module's, a private one (E0112), one imported over a local item
+/// (E0113), and a root module's `pub use` of a sugar, which exports nothing.
+#[test]
+fn sugar_imports_assemble_like_rust() {
+    const GUARD: &str = "sugar guard: stmt {\n    rule (guard let $pat:pat = $rhs:expr else $diverge:block; $..rest:stmts) => {\n        match $rhs {\n            $pat => {\n                $..rest\n            },\n            _ => $diverge,\n        }\n    }\n}\n";
+    const WHEN: &str = "sugar when: stmt {\n    rule (when let $pat:pat = $rhs:expr $body:block) => {\n        match $rhs {\n            $pat => $body,\n            _ => {},\n        }\n    }\n}\n";
+    let forms = manifest("@demo/forms", "");
+    let forms_files = [
+        (
+            "lib.ves",
+            format!("pub use self::more::{{when}};\npub {GUARD}"),
+        ),
+        ("more.ves", format!("pub {WHEN}")),
+    ];
+    let forms_files: Vec<(&str, &str)> =
+        forms_files.iter().map(|(p, t)| (*p, t.as_str())).collect();
+    let app = manifest(
+        "@demo/app",
+        "\"@demo/forms\" = { version = \"^0.1\", path = \"../forms\" }\n",
+    );
+    let first = "fn first(xs: [u64; 2]) -> u64 {\n    guard let Option::Some(a) = xs.try_get(0) else {\n        return 0;\n    };\n    a\n}\n";
+    let cases: &[(&str, Vec<(&str, String)>)] = &[
+        (
+            "imported",
+            vec![
+                (
+                    "lib.ves",
+                    format!(
+                        "use @demo/forms::{{guard, when}};\npub use self::local::{{exposed}};\n{first}fn bump(xs: [u64; 2]) -> u64 {{\n    let mut n = 0;\n    when let Option::Some(b) = xs.try_get(1) {{\n        n = b;\n    }}\n    n\n}}\n"
+                    ),
+                ),
+                (
+                    "local.ves",
+                    format!("pub {}\n{WHEN}fn twice() -> u64 {{ 2 }}\n", GUARD.replacen("guard", "exposed", 2)),
+                ),
+                (
+                    "user.ves",
+                    "use super::local::{exposed};\nfn third(xs: [u64; 2]) -> u64 {\n    exposed let Option::Some(c) = xs.try_get(1) else {\n        return 0;\n    };\n    c\n}\n".to_owned(),
+                ),
+            ],
+        ),
+        (
+            "private",
+            vec![
+                ("lib.ves", "use self::local::{when};\nfn f() -> u64 { 1 }\n".to_owned()),
+                ("local.ves", WHEN.to_owned()),
+            ],
+        ),
+        (
+            "clash",
+            vec![(
+                "lib.ves",
+                format!("use @demo/forms::{{guard}};\nfn guard() -> u64 {{ 1 }}\n{first}"),
+            )],
+        ),
+    ];
+    let mut bad = vec![];
+    let mut fired = std::collections::BTreeSet::new();
+    for (label, files) in cases {
+        let files: Vec<(&str, &str)> = files.iter().map(|(p, t)| (*p, t.as_str())).collect();
+        let t = graph(
+            &format!("sugar-{label}"),
+            &[("app", &app, &files), ("forms", &forms, &forms_files)],
+        );
+        let Some(l) = load(&t.0.join("app")) else {
+            panic!("{label}: the graph does not load");
+        };
+        assert!(
+            l.graph.modules.iter().any(|m| !m.sugars.is_empty()),
+            "{label}: no sugar declarations found"
+        );
+        for d in &l.assembled.diagnostics {
+            fired.insert(d.diagnostic.code.clone());
+            if std::env::var_os("NAMES_PACKAGES_SHOW").is_some() {
+                eprintln!("{label}: {:?} {}", d.diagnostic.span, d.diagnostic.message);
+            }
+        }
+        if let Some(d) = compare(&l) {
+            bad.push(format!("{label}: {d}"));
+        }
+    }
+    eprintln!("names/packages sugar graphs: fired {fired:?}");
+    for code in ["E0112", "E0113"] {
+        assert!(fired.contains(code), "no sugar graph fired {code}");
     }
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }

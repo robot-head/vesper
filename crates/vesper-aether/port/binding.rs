@@ -118,8 +118,9 @@ impl Abi for crate::port_types::MmioStatusFault {
                 Abi::put(f0, &mut out[1..]);
                 Abi::put(f1, &mut out[2..]);
             }
-            crate::port_types::MmioStatusFault::DriverOkWithoutFeaturesOk => {
+            crate::port_types::MmioStatusFault::DriverOkWithoutFeaturesOk { rejected_features: f0 } => {
                 out[0] = 2;
+                Abi::put(f0, &mut out[1..]);
             }
         }
     }
@@ -127,7 +128,7 @@ impl Abi for crate::port_types::MmioStatusFault {
         match words[0] {
             0 => crate::port_types::MmioStatusFault::DriverSetNeedsReset,
             1 => crate::port_types::MmioStatusFault::StatusRegression { from: Abi::get(&words[1..]), to: Abi::get(&words[2..]) },
-            2 => crate::port_types::MmioStatusFault::DriverOkWithoutFeaturesOk,
+            2 => crate::port_types::MmioStatusFault::DriverOkWithoutFeaturesOk { rejected_features: Abi::get(&words[1..]) },
             tag => panic!("invalid MmioStatusFault tag {tag} from Vesper"),
         }
     }
@@ -538,6 +539,24 @@ impl Abi for crate::port_types::VqFault {
     }
 }
 
+impl Abi for crate::port_types::VsockConn {
+    const WORDS: usize = 9;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.kind, &mut out[0..]);
+        Abi::put(&self.connected, &mut out[1..]);
+        Abi::put(&self.peer_buf_alloc, &mut out[2..]);
+        Abi::put(&self.peer_fwd_cnt, &mut out[3..]);
+        Abi::put(&self.tx_cnt, &mut out[4..]);
+        Abi::put(&self.rx_cnt, &mut out[5..]);
+        Abi::put(&self.fwd_cnt, &mut out[6..]);
+        Abi::put(&self.messages, &mut out[7..]);
+        Abi::put(&self.peer_shutdown, &mut out[8..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        crate::port_types::VsockConn { kind: Abi::get(&words[0..]), connected: Abi::get(&words[1..]), peer_buf_alloc: Abi::get(&words[2..]), peer_fwd_cnt: Abi::get(&words[3..]), tx_cnt: Abi::get(&words[4..]), rx_cnt: Abi::get(&words[5..]), fwd_cnt: Abi::get(&words[6..]), messages: Abi::get(&words[7..]), peer_shutdown: Abi::get(&words[8..]) }
+    }
+}
+
 impl Abi for crate::port_types::VsockHeader {
     const WORDS: usize = 10;
     fn put(&self, out: &mut [u64]) {
@@ -557,6 +576,126 @@ impl Abi for crate::port_types::VsockHeader {
     }
 }
 
+impl Abi for crate::port_types::VsockStats {
+    const WORDS: usize = 9;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.malformed, &mut out[0..]);
+        Abi::put(&self.spoofed, &mut out[1..]);
+        Abi::put(&self.resets_sent, &mut out[2..]);
+        Abi::put(&self.credit_violations, &mut out[3..]);
+        Abi::put(&self.message_overflows, &mut out[4..]);
+        Abi::put(&self.packets_rx, &mut out[5..]);
+        Abi::put(&self.packets_tx, &mut out[6..]);
+        Abi::put(&self.messages_rx, &mut out[7..]);
+        Abi::put(&self.messages_tx, &mut out[8..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        crate::port_types::VsockStats { malformed: Abi::get(&words[0..]), spoofed: Abi::get(&words[1..]), resets_sent: Abi::get(&words[2..]), credit_violations: Abi::get(&words[3..]), message_overflows: Abi::get(&words[4..]), packets_rx: Abi::get(&words[5..]), packets_tx: Abi::get(&words[6..]), messages_rx: Abi::get(&words[7..]), messages_tx: Abi::get(&words[8..]) }
+    }
+}
+
+/// Owned handle of a Vesper `VsockState` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_aether_VsockState_drop`.
+pub struct VsockState {
+    words: [u64; 21],
+}
+
+impl VsockState {
+    /// # Safety
+    /// `words` must hold a `VsockState` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 21];
+        owned.copy_from_slice(&words[..21]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> VsockStateRef<'_> {
+        VsockStateRef { words: &self.words }
+    }
+}
+
+impl Drop for VsockState {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_aether_VsockState_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for VsockState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("VsockState { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for VsockState {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for VsockState {}
+
+/// A borrowed view of a Vesper `VsockState` value, read in place.
+#[derive(Clone, Copy)]
+pub struct VsockStateRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> VsockStateRef<'a> {
+    pub fn guest_cid(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[0..])
+    }
+    pub fn features(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[1..])
+    }
+    pub fn listeners(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[2]) }
+    }
+    pub fn keys(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[3]) }
+    }
+    pub fn slots(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[4]) }
+    }
+    pub fn conns(&self) -> vesper_port_abi::SeqRef<'a, crate::port_types::VsockConn> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[5]) }
+    }
+    pub fn free(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[6]) }
+    }
+    pub fn out(&self) -> vesper_port_abi::SeqRef<'a, crate::port_types::VsockHeader> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[7]) }
+    }
+    pub fn out_head(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[8..])
+    }
+    pub fn bytes(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[9]) }
+    }
+    pub fn bytes_head(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[10..])
+    }
+    pub fn events(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[11..])
+    }
+    pub fn stats(&self) -> crate::port_types::VsockStats {
+        let w: &'a [u64] = self.words;
+        <crate::port_types::VsockStats as Abi>::get(&w[12..])
+    }
+}
+
+const _: () = assert!(<() as Abi>::WORDS == 1);
 const _: () = assert!(<(u8, u64) as Abi>::WORDS == 2);
 const _: () = assert!(<Option<(u64, u64)> as Abi>::WORDS == 3);
 const _: () = assert!(<Option<crate::port_types::SlotError> as Abi>::WORDS == 6);
@@ -585,14 +724,18 @@ const _: () = assert!(<crate::port_types::SeccompFault as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port_types::SlotError as Abi>::WORDS == 5);
 const _: () = assert!(<crate::port_types::VmGenIdWire as Abi>::WORDS == 4);
 const _: () = assert!(<crate::port_types::VqFault as Abi>::WORDS == 1);
+const _: () = assert!(<crate::port_types::VsockConn as Abi>::WORDS == 9);
 const _: () = assert!(<crate::port_types::VsockHeader as Abi>::WORDS == 10);
+const _: () = assert!(<crate::port_types::VsockStats as Abi>::WORDS == 9);
 const _: () = assert!(<u32 as Abi>::WORDS == 1);
 const _: () = assert!(<u64 as Abi>::WORDS == 1);
+const _: () = assert!(<u8 as Abi>::WORDS == 1);
 
 unsafe extern "C" {
     fn vesper_aether_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_aether_seq_free(seq: i64) -> i64;
     fn vesper_aether_live_allocations() -> i64;
+    fn vesper_aether_VsockState_drop(value: *mut u64) -> i64;
     fn vesper_aether_blk_config_space(disk_bytes: i64, read_only: i64, queues: i64, out: *mut u64) -> i64;
     fn vesper_aether_blk_span(result: *mut u64, disk_bytes: i64, sector: i64, len: i64) -> i64;
     fn vesper_aether_blk_validate_discard_or_zero(result: *mut u64, disk_bytes: i64, read_only: i64, payload: *mut u64, data_in: i64, discard: i64, out_spans: *mut u64) -> i64;
@@ -617,9 +760,28 @@ unsafe extern "C" {
     fn vesper_aether_vmgenid_valid_addr(gpa: i64) -> i64;
     fn vesper_aether_vq_packed_walk(result: *mut u64, mem: *mut u64, regions: *mut u64, busy: *mut u64, desc: i64, size: i64, index: i64, wrap: i64, occupied: i64, hint: i64, indirect_ok: i64, max_desc: i64, max_bytes: i64, max_work: i64, out: *mut u64) -> i64;
     fn vesper_aether_vq_split_walk(result: *mut u64, mem: *mut u64, regions: *mut u64, busy: *mut u64, desc: i64, driver: i64, size: i64, last_avail: i64, hint: i64, indirect_ok: i64, max_desc: i64, max_bytes: i64, max_work: i64, out: *mut u64) -> i64;
+    fn vesper_aether_vsock_activate(st: *mut u64, features: i64) -> i64;
+    fn vesper_aether_vsock_connect(result: *mut u64, st: *mut u64, host_port: i64, guest_port: i64, kind: i64) -> i64;
+    fn vesper_aether_vsock_connection_state(st: *mut u64, guest_port: i64, host_port: i64) -> i64;
+    fn vesper_aether_vsock_connections(st: *mut u64) -> i64;
     fn vesper_aether_vsock_decode_hdr(result: *mut u64, b: *mut u64) -> i64;
     fn vesper_aether_vsock_encode_hdr(h: *mut u64, out: *mut u64) -> i64;
+    fn vesper_aether_vsock_event_taken(st: *mut u64) -> i64;
+    fn vesper_aether_vsock_events(st: *mut u64) -> i64;
+    fn vesper_aether_vsock_forwarded(st: *mut u64, guest_port: i64, host_port: i64, slot: i64, n: i64, message: i64) -> i64;
+    fn vesper_aether_vsock_guest_packet(st: *mut u64, bytes: *mut u64) -> i64;
+    fn vesper_aether_vsock_listen(st: *mut u64, port: i64, kind: i64) -> i64;
+    fn vesper_aether_vsock_lookup(st: *mut u64, guest_port: i64, host_port: i64) -> i64;
+    fn vesper_aether_vsock_outbox_len(st: *mut u64) -> i64;
     fn vesper_aether_vsock_peer_credit(peer_buf_alloc: i64, tx_cnt: i64, peer_fwd_cnt: i64) -> i64;
+    fn vesper_aether_vsock_reset(st: *mut u64) -> i64;
+    fn vesper_aether_vsock_rx_fill(st: *mut u64, room: i64, out: *mut u64) -> i64;
+    fn vesper_aether_vsock_send(st: *mut u64, guest_port: i64, host_port: i64, data: *mut u64) -> i64;
+    fn vesper_aether_vsock_send_message(st: *mut u64, guest_port: i64, host_port: i64, data: *mut u64, eor: i64) -> i64;
+    fn vesper_aether_vsock_shutdown(st: *mut u64, guest_port: i64, host_port: i64) -> i64;
+    fn vesper_aether_vsock_state_new(result: *mut u64, guest_cid: i64) -> i64;
+    fn vesper_aether_vsock_stats(result: *mut u64, st: *mut u64) -> i64;
+    fn vesper_aether_vsock_transport_reset(st: *mut u64) -> i64;
     fn vesper_aether_vsock_validate_packet(h: *mut u64, payload_len: i64, guest_cid: i64) -> i64;
 }
 
@@ -873,6 +1035,45 @@ pub fn vq_split_walk(mem: &[u8], regions: &[u64], busy: &[u8], desc: u64, driver
     <Result<u64, crate::port_types::VqFault> as Abi>::get(&result[0..])
 }
 
+/// Calls `vsock_activate` of the Vesper library `aether` (`vesper_aether_vsock_activate`).
+pub fn vsock_activate(st: &mut VsockState, features: u64) -> () {
+    // SAFETY: `vesper_aether_vsock_activate` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vsock_activate(st.words.as_mut_ptr(), features as i64) };
+    { let _ = raw; }
+}
+
+/// Calls `vsock_connect` of the Vesper library `aether` (`vesper_aether_vsock_connect`).
+pub fn vsock_connect(st: &mut VsockState, host_port: u32, guest_port: u32, kind: u16) -> (u8, u64) {
+    let mut result = [0u64; 2];
+    // SAFETY: `vesper_aether_vsock_connect` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vsock_connect(result.as_mut_ptr(), st.words.as_mut_ptr(), host_port as i64, guest_port as i64, kind as i64) };
+    <(u8, u64) as Abi>::get(&result[0..])
+}
+
+/// Calls `vsock_connection_state` of the Vesper library `aether` (`vesper_aether_vsock_connection_state`).
+pub fn vsock_connection_state(st: &VsockState, guest_port: u32, host_port: u32) -> u8 {
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_vsock_connection_state` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vsock_connection_state(arg_st.as_mut_ptr(), guest_port as i64, host_port as i64) };
+    raw as u8
+}
+
+/// Calls `vsock_connections` of the Vesper library `aether` (`vesper_aether_vsock_connections`).
+pub fn vsock_connections(st: &VsockState) -> Vec<u64> {
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_vsock_connections` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vsock_connections(arg_st.as_mut_ptr()) };
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
 /// Calls `vsock_decode_hdr` of the Vesper library `aether` (`vesper_aether_vsock_decode_hdr`).
 pub fn vsock_decode_hdr(b: &[u8]) -> Option<crate::port_types::VsockHeader> {
     let mut result = [0u64; 11];
@@ -894,6 +1095,72 @@ pub fn vsock_encode_hdr(h: crate::port_types::VsockHeader, out: &mut [u8]) -> u6
     raw as u64
 }
 
+/// Calls `vsock_event_taken` of the Vesper library `aether` (`vesper_aether_vsock_event_taken`).
+pub fn vsock_event_taken(st: &mut VsockState) -> () {
+    // SAFETY: `vesper_aether_vsock_event_taken` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vsock_event_taken(st.words.as_mut_ptr()) };
+    { let _ = raw; }
+}
+
+/// Calls `vsock_events` of the Vesper library `aether` (`vesper_aether_vsock_events`).
+pub fn vsock_events(st: &VsockState) -> u64 {
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_vsock_events` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vsock_events(arg_st.as_mut_ptr()) };
+    raw as u64
+}
+
+/// Calls `vsock_forwarded` of the Vesper library `aether` (`vesper_aether_vsock_forwarded`).
+pub fn vsock_forwarded(st: &mut VsockState, guest_port: u32, host_port: u32, slot: u64, n: u64, message: bool) -> () {
+    // SAFETY: `vesper_aether_vsock_forwarded` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vsock_forwarded(st.words.as_mut_ptr(), guest_port as i64, host_port as i64, slot as i64, n as i64, message as i64) };
+    { let _ = raw; }
+}
+
+/// Calls `vsock_guest_packet` of the Vesper library `aether` (`vesper_aether_vsock_guest_packet`).
+pub fn vsock_guest_packet(st: &mut VsockState, bytes: &[u8]) -> u64 {
+    // SAFETY: `vesper_aether_vsock_guest_packet` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(bytes, |view_bytes| unsafe { vesper_aether_vsock_guest_packet(st.words.as_mut_ptr(), view_bytes) });
+    raw as u64
+}
+
+/// Calls `vsock_listen` of the Vesper library `aether` (`vesper_aether_vsock_listen`).
+pub fn vsock_listen(st: &mut VsockState, port: u32, kind: u16) -> u8 {
+    // SAFETY: `vesper_aether_vsock_listen` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vsock_listen(st.words.as_mut_ptr(), port as i64, kind as i64) };
+    raw as u8
+}
+
+/// Calls `vsock_lookup` of the Vesper library `aether` (`vesper_aether_vsock_lookup`).
+pub fn vsock_lookup(st: &VsockState, guest_port: u32, host_port: u32) -> u64 {
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_vsock_lookup` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vsock_lookup(arg_st.as_mut_ptr(), guest_port as i64, host_port as i64) };
+    raw as u64
+}
+
+/// Calls `vsock_outbox_len` of the Vesper library `aether` (`vesper_aether_vsock_outbox_len`).
+pub fn vsock_outbox_len(st: &VsockState) -> u64 {
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_vsock_outbox_len` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vsock_outbox_len(arg_st.as_mut_ptr()) };
+    raw as u64
+}
+
 /// Calls `vsock_peer_credit` of the Vesper library `aether` (`vesper_aether_vsock_peer_credit`).
 pub fn vsock_peer_credit(peer_buf_alloc: u32, tx_cnt: u32, peer_fwd_cnt: u32) -> u32 {
     // SAFETY: `vesper_aether_vsock_peer_credit` has exactly this signature in the export ABI; every
@@ -901,6 +1168,81 @@ pub fn vsock_peer_credit(peer_buf_alloc: u32, tx_cnt: u32, peer_fwd_cnt: u32) ->
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_aether_vsock_peer_credit(peer_buf_alloc as i64, tx_cnt as i64, peer_fwd_cnt as i64) };
     raw as u32
+}
+
+/// Calls `vsock_reset` of the Vesper library `aether` (`vesper_aether_vsock_reset`).
+pub fn vsock_reset(st: &mut VsockState) -> () {
+    // SAFETY: `vesper_aether_vsock_reset` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vsock_reset(st.words.as_mut_ptr()) };
+    { let _ = raw; }
+}
+
+/// Calls `vsock_rx_fill` of the Vesper library `aether` (`vesper_aether_vsock_rx_fill`).
+pub fn vsock_rx_fill(st: &mut VsockState, room: u64, out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_aether_vsock_rx_fill` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_vsock_rx_fill(st.words.as_mut_ptr(), room as i64, view_out) });
+    raw as u64
+}
+
+/// Calls `vsock_send` of the Vesper library `aether` (`vesper_aether_vsock_send`).
+pub fn vsock_send(st: &mut VsockState, guest_port: u32, host_port: u32, data: &[u8]) -> u64 {
+    // SAFETY: `vesper_aether_vsock_send` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(data, |view_data| unsafe { vesper_aether_vsock_send(st.words.as_mut_ptr(), guest_port as i64, host_port as i64, view_data) });
+    raw as u64
+}
+
+/// Calls `vsock_send_message` of the Vesper library `aether` (`vesper_aether_vsock_send_message`).
+pub fn vsock_send_message(st: &mut VsockState, guest_port: u32, host_port: u32, data: &[u8], eor: bool) -> u8 {
+    // SAFETY: `vesper_aether_vsock_send_message` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(data, |view_data| unsafe { vesper_aether_vsock_send_message(st.words.as_mut_ptr(), guest_port as i64, host_port as i64, view_data, eor as i64) });
+    raw as u8
+}
+
+/// Calls `vsock_shutdown` of the Vesper library `aether` (`vesper_aether_vsock_shutdown`).
+pub fn vsock_shutdown(st: &mut VsockState, guest_port: u32, host_port: u32) -> u8 {
+    // SAFETY: `vesper_aether_vsock_shutdown` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vsock_shutdown(st.words.as_mut_ptr(), guest_port as i64, host_port as i64) };
+    raw as u8
+}
+
+/// Calls `vsock_state_new` of the Vesper library `aether` (`vesper_aether_vsock_state_new`).
+pub fn vsock_state_new(guest_cid: u64) -> VsockState {
+    let mut result = [0u64; 21];
+    // SAFETY: `vesper_aether_vsock_state_new` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vsock_state_new(result.as_mut_ptr(), guest_cid as i64) };
+    unsafe { VsockState::from_words(&result[0..]) }
+}
+
+/// Calls `vsock_stats` of the Vesper library `aether` (`vesper_aether_vsock_stats`).
+pub fn vsock_stats(st: &VsockState) -> crate::port_types::VsockStats {
+    let mut result = [0u64; 9];
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_vsock_stats` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vsock_stats(result.as_mut_ptr(), arg_st.as_mut_ptr()) };
+    <crate::port_types::VsockStats as Abi>::get(&result[0..])
+}
+
+/// Calls `vsock_transport_reset` of the Vesper library `aether` (`vesper_aether_vsock_transport_reset`).
+pub fn vsock_transport_reset(st: &mut VsockState) -> () {
+    // SAFETY: `vesper_aether_vsock_transport_reset` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_vsock_transport_reset(st.words.as_mut_ptr()) };
+    { let _ = raw; }
 }
 
 /// Calls `vsock_validate_packet` of the Vesper library `aether` (`vesper_aether_vsock_validate_packet`).
@@ -912,4 +1254,11 @@ pub fn vsock_validate_packet(h: crate::port_types::VsockHeader, payload_len: u64
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_aether_vsock_validate_packet(arg_h.as_mut_ptr(), payload_len as i64, guest_cid as i64) };
     raw != 0
+}
+
+impl VsockState {
+    /// `vsock_state_new` (`vesper_aether_vsock_state_new`).
+    pub fn new(guest_cid: u64) -> VsockState {
+        vsock_state_new(guest_cid)
+    }
 }

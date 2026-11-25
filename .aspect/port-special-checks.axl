@@ -136,6 +136,8 @@ loom_cas_test_port = port_checks(
 sim_session_test_port = port_checks(
     "sim-session", "test-port",
     [
+        # The link, net and QUIC wire models are Vesper-only in both builds.
+        ["-p", "vesper-sim-session"],
         ["-p", "vesper-sim-session", "--features", "vesper-port"],
     ],
     [

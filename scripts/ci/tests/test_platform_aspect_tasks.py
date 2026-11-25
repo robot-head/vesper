@@ -603,7 +603,8 @@ sys.exit(101)
 import sys
 
 args = sys.argv[1:]
-if "--features" in args and "vesper-port" in args:
+# The plain builds (default and `vesper-port`) pass; only the divergent one fails.
+if "vesper-port-divergent" not in args:
     sys.exit(0)
 if "--lib" in args:
     print("test model::link::tests::micro_burst_builds_queue_delay_then_tail_drops ... FAILED")
@@ -961,7 +962,7 @@ else:
         })
         self.assertEqual(json.loads(result.stdout), json.loads((output / "platform-plan.json").read_text()))
         self.assertEqual(json.loads(result.stdout)["sha"], head)
-        self.assertEqual(github.read_text(), f'earlier=preserved\nprofile=pr\ngroups=["frontend"]\nsha={head}\n')
+        self.assertEqual(github.read_text(), f'earlier=preserved\nprofile=pr\ngroups=["frontend"]\nsha={head}\nnative=all\n')
         self.aspect("ci", "plan-platform-workflow", env={"GITHUB_OUTPUT": "", "RUNNER_TEMP": str(output)}, status=2)
 
         git("switch", "--orphan", "unrelated")

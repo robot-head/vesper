@@ -5,3 +5,7 @@ Never add new Python, Bash, or other shell scripts, including scripts without a 
 This rule also applies to scripts embedded in GitHub Actions workflows and other configuration files. Keep logic out of inline `run` blocks, heredocs, and interpreter command strings such as `python -c` and `bash -c`. Configure automation to invoke the Aspect task or Windows PowerShell entry point directly.
 
 When migrating an existing script, update its callers and tests to use the replacement and remove the original script.
+
+# CI runners
+
+Never start the Platforms workflow by hand, for a pull request or a branch. `Native platform checks` starts its macOS and Windows checks on its own once `Native and acceptance scripts` is green and no BuildBuddy check has failed. A hand start takes one of the account's 5 macOS runners and nine Linux port shards, and runs queued behind hand starts have waited hours. Leave reruns and hand dispatches to a maintainer.

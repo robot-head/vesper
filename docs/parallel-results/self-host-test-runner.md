@@ -297,9 +297,43 @@ tests/common/doctest_generate_words.rs.
   Rust 2.36 s, Vesper 2.06 s, **0.87x**.
 - **Swapped in the hybrid** (`doctest_generate`).
 
-## Left after part 6
+## Part 7: doctest wrapper names and verdicts
 
-- Expect-error matching, verdict keys, reports.
+`packages/vesper-test-runner/src/verdict.ves` ports the decisions
+`prepare` of src/doctest.rs makes without running an example, moved into
+the src/doctest_verdict.rs swap point (`DocTestVerdictTable`):
+
+- `wrappers`: each example's private wrapper `__vesper_doctest_{index}`,
+  lengthened with `_` until it collides with no base function, no
+  `entry=`, no identifier token of any example and no earlier wrapper
+  (error past 128 bytes). The reserved set is a `@vesper-std/intern`
+  interner probed with `lookup_view` on the input slice, so a probe
+  allocates only for a new name.
+- `verdict`: the example's line and column, each checker diagnostic placed
+  in the documented file (base diagnostics as they are, snippet
+  diagnostics through the code-line segments), and whether checking alone
+  settles it: a `compile_fail` fence matched or not, a positive example
+  that failed checking, or one whose entry the snippet does not define.
+  Line and column placement counts newlines eight bytes at a time and
+  answers all of one example's offsets in a single pass.
+
+Entries `doctest_wrappers_words`/`_str` and `doctest_verdict_words`/`_str`;
+words in tests/common/doctest_verdict_words.rs.
+
+- **Differential** (tests/self_host_doctest_verdict.rs): every `.ves` file's
+  extracted examples plus four-line stand-in windows (up to 64 per file),
+  a file of colliding names and a file that hits the name limit; each
+  example under synthetic diagnostics before, inside and after the
+  snippet, with and without a `compile_fail` code and an own entry.
+- **Numbers:** 0 diffs over 19,383 examples (35,800 diagnostics, 16,187
+  decided, 1,380 wrapper sets, 1 limit error); unoptimized build 0 diffs
+  on every 13th. ABBA: wrappers **1.15x**, verdicts **1.16x**, together
+  **1.07x** (first cut was 6.8x from per-offset rescans of the file).
+- **Swapped in the hybrid** (`doctest_verdict`).
+
+## Left after part 7
+
+- Reports.
 - A hybrid end-to-end test of `vesper test`.
 - Execution (anvil_jit, the evaluator, anvil_sim) stays Rust until the
   compiler is retired.

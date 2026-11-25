@@ -256,3 +256,29 @@ The first of Pulse's real I/O drivers moves to Vesper: `readiness.rs` over
 The Rust driver stays until the runtime's `run` step stops using it. Next:
 kqueue (macOS, needs `fstat` for the regular-file check), then io_uring
 and AFD.
+
+## Pulse: the kqueue completion driver (#1946)
+
+The macOS copy gets the same driver over kqueue, as `kqueue_driver_*`.
+
+- `fstat` sends regular files to inline `pread`/`pwrite`. A registration that answers `EINVAL`, `ENODEV` or `ENOTSUP` is also treated as always ready.
+- Streams use `EV_ADD | EV_ONESHOT`. The kernel drops a filter once it fires, so release does nothing.
+- `EV_DELETE` treats `ENOENT` as success, because the filter may have fired and been removed before the driver collected it.
+- A fired event that carries `EV_ERROR` reports its error, and the event's token is still serviced.
+- PulseSys (macOS) now declares one variadic `fcntl` in place of `fcntl_setfd`. Apple arm64 passes variadic arguments on the stack, so the old fixed-argument declaration passed them in the wrong place. It also adds `fstat` with a 144-byte `Stat`, and `read`, `write`, `pread` and `pwrite`.
+- The scenario test now runs on both Linux and macOS (`readiness_completion_driver_matches_rust`). The macOS Platforms job had never run `tests/pulse_port.rs`, including the existing kqueue roundtrip test; it runs it now.
+
+## Pulse: the io_uring completion driver (#1960)
+
+`uring.rs` is now `uring_driver_*` in the Linux copy, for x86_64 and aarch64.
+
+- **Rings.** The driver `mmap`s the rings and SQEs from the ring descriptor, as one mapping when the kernel has `IORING_FEAT_SINGLE_MMAP`. It reads and writes ring indices and entries through `memcpy`-style bindings, using the same `u64`-address pattern as `vk.vsys` and the std `fs` bindings. The ring setup and the wait for completions are libc `syscall` calls; each has its own binding with its own signature, and the native backend calls them through the symbol's address.
+- **Buffers.** Each request owns a `malloc`ed buffer until its completion: the bytes are copied in at submit and out at completion. The driver needs `IORING_FEAT_NODROP`.
+- **Behaviour carried over from Rust:**
+  - Entries are queued at submit and handed to the kernel at the next poll. The kernel also gets them when the queue is full, or at once when an outside loop waits on the eventfd.
+  - Cancellation sends `IORING_OP_ASYNC_CANCEL`. Its own completion carries the request id with bit 63 set, so it is never mistaken for the request's completion. A cancelled request that ends with `EINTR` is reported as cancelled.
+  - The eventfd, shutdown, and a drop path (`uring_driver_close`) are included. The drop path keeps any buffer the kernel may still hold.
+- **Barriers.** On aarch64, reading ring indices needs acquire and release ordering. A `.vsys` can now bind its own function name to a `@vesper-std/cpu` leaf with `#[link_name]`: the native backend and the JIT binder look up CPU leaves by link symbol (`src/ffi_lowering/native.rs`, `src/ffi_lowering.rs`). PulseSys's `ring_fence` is `dmb ish` on aarch64 and `sfence` on x86_64; x86_64 is TSO, so there the call only stops the compiler reordering memory accesses around it.
+- **Test.** `uring_completion_driver_matches_rust` covers pipe reads before and after data, file I/O at offsets, a zero-length read, an `EBADF` returned by the kernel, a cancel issued twice, stream I/O, the eventfd and shutdown. It sums each completion's hash, so the order in which completions arrive across polls doesn't matter. It passed 5 of 5 runs locally.
+
+The Rust driver stays until the runtime stops using it. Speed is not measured yet.

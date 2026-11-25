@@ -369,6 +369,11 @@ vesper_crate(
             "examples/**",
             "packages/**",
         ]) + [
+            # Packages with their own BUILD.bazel are outside the glob; the
+            # Stage 2 package fixed point (#1928) builds them too.
+            "//packages/vesper-codegen-numeric:files",
+            "//packages/vesper-cranelift:files",
+            "//packages/vesper-crypto:files",
             "//bootstrap:files",
             "//crates/vesper-ebpf:files",
             "//crates/vesper-lean-syntax:files",
@@ -717,6 +722,18 @@ vesper_crate(
         # Part 6: the generated module of a doctest example against
         # doctest_generate::rust_generate on snippets of the same files.
         "test/self_host_doctest_generate": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+            "src/doctest.rs",
+            "src/doctest_extract.rs",
+            "tests/doctest_cli.rs",
+        ]),
+        # Part 7: doctest wrapper names and verdicts against
+        # doctest_verdict::{rust_wrappers, rust_verdict} on examples of the
+        # same files.
+        "test/self_host_doctest_verdict": glob([
             "examples/**/*.ves",
             "packages/**",
             "src/**/*.ves",
@@ -1258,6 +1275,7 @@ vesper_crate(
         "test/self_host_doctest_guard": "long",
         # The doctest generate differential (#1337) runs 39k snippets twice.
         "test/self_host_doctest_generate": "long",
+        "test/self_host_doctest_verdict": "long",
         # The backend-checks differential emits every corpus program 4 times.
         "test/self_host_backend_checks": "long",
         # The optimizer policy (#1279) optimizes every corpus world three times.

@@ -17,3 +17,13 @@ platform_tests = command_task(
     "python3",
     ["-m", "unittest", "discover", "-s", "scripts/ci/tests", "-p", "test_platform*.py"],
 )
+
+pulse_port_tests = command_task(
+    "test-pulse-port",
+    ["ci"],
+    "Run the @vesper/pulse port differentials against vesper_pulse",
+    "cargo",
+    # The port-compiler profile, like the other compiler tests in the
+    # macOS Platforms job, so they share one build of the compiler.
+    ["test", "--locked", "--profile", "port-compiler", "--test", "pulse_port"],
+)
