@@ -87,11 +87,60 @@ whole `compile` is compared.
 corpus (`tests/fixtures/self_host/driver.rs`), like the other ports that use
 `use` and `pub const`.
 
+## Part 3: the range certificate
+
+### What changed
+
+- **`src/certificate.ves`** (`certificate.rs`, 1,068 lines). It contains:
+  - the Lean mirror (`supports`, `entails`, `checkRow`, `transfer`,
+    `checkConst`, `checkNode`);
+  - the trap-scope targets;
+  - the production `validate`, with every rule and rejection text of the Rust
+    validator, including the `{row:?}` Debug form of a row;
+  - the untrusted `generate`: liveness, the interprocedural forward range
+    analysis with entry and exit summaries, and the signed-constant flips;
+  - `check` (widen, generate, validate).
+
+  Facts, origins and location sets are sorted word sequences. The analysis
+  visits rows in the Rust order, so the certificates are equal word for
+  word. Label maps use `@vesper-std/collections`' `FlatTable`, a new
+  dependency of the package.
+- **`src/lib.ves`**: the harness entries `certificate_text` (a program in,
+  `check` out) and `validate_text` (a program and a certificate in, the
+  verdict out).
+- **`tests/self_host_verified_codegen.rs`**, three differentials and one
+  timing test:
+  - **Corpus:** every corpus program the Rust backend lowers.
+  - **Random programs:** 4,000 programs shaped like the lowering's output,
+    with malformed shapes now and then.
+  - **Mutated certificates:** 9,642 certificates mutated from the generated
+    ones (facts dropped or changed, duplicate facts, signed constants, post
+    facts, wrong annotation or function counts, entry preconditions,
+    retargeted jumps and calls). Each is compared through `validate`.
+  - **Timing:** the ABBA `certificate_flip_gate`.
+
+  The Lean `validateProgram` is covered transitively. `lean_check_node` is
+  a line-by-line port of the Rust mirror, which `tests/verified_codegen_lean.rs`
+  checks against Lean `#eval`.
+
+### Evidence (Linux x86_64 host, release)
+
+| Check | Result |
+|---|---|
+| Corpus programs | **0 of 107 differ** (86 accepted, 21 rejected) |
+| Random programs | **0 of 4,000 differ** (154 accepted) |
+| Mutated certificates through `validate` | **0 of 9,642 differ** (9,498 rejected) |
+| ABBA, `check` over the corpus ×5, best of 6 (Vesper includes the word encoding and text unpacking) | rust 448 ms, vesper 418 ms: **0.93x** |
+
+**Rust lines deleted:** 0. `certificate.rs` goes with the rest at the
+retirement. Its `optimize::certificate` namesake, the Place IR rewrite
+proposals, is a different module and is not part of this port.
+
+**Stage 1 guard:** unchanged, as in parts 1-2.
+
 ## Left
 
 - Optional: compare the per-arch `encoding_listing` text.
-- Part 3: `certificate` (the `validateProgram` mirror), differential against
-  Rust and Lean `#eval`.
 - Part 4: `lower`, `mono`, `fail`, `coverage`, `evidence`, `cli`, then the
   swap into the hybrid and `bootstrap/stage1.rs`, with `bootstrap/stage1.lock`
   reproduced, and the Rust deleted at the retirement.

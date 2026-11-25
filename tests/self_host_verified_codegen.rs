@@ -13,6 +13,10 @@
 //!   bytes, for every corpus `main` the Rust backend builds, under both
 //!   result protocols.
 //!
+//! - Part 3: `certificate::check` (widen, generate, validate) must give the
+//!   same certificate or rejection on the corpus and on random programs,
+//!   and `validate` the same verdict on mutated certificates.
+//!
 //! - `VERIFIED_CODEGEN_STRIDE=n` keeps every n-th corpus world.
 //! - `CHECK_HARNESS_SPEED=1` runs the ABBA timing (release build).
 #[path = "common/check_harness.rs"]
@@ -486,4 +490,573 @@ fn flip_gate() {
         let (a, b, c, d) = (rust(), vesper(), vesper(), rust());
         println!("flip-gate pairs rust={} vesper={}", a + d, b + c);
     }
+}
+
+// ------------------------------------------------------------ certificate
+//
+// Part 3: `certificate::check` (widen, generate, validate) must give the
+// same certificate word for word, or the same rejection text, on every
+// corpus program and on random structured programs; `validate` must give
+// the same verdict on certificates mutated from the generated ones.
+
+use verified::certificate::{self, Certificate};
+
+/// `Artifact::lir`: each function's name and slot-IR rows.
+type Program = Vec<(String, Vec<Lir>)>;
+
+fn loc_key(l: verified::Loc) -> u64 {
+    match l {
+        verified::Loc::Slot(i) => u64::from(i),
+        verified::Loc::Out(i) => 1 << 32 | u64::from(i),
+        verified::Loc::In(i) => 2 << 32 | u64::from(i),
+    }
+}
+
+fn fact_word(l: verified::Loc, k: verified::Kind) -> u64 {
+    loc_key(l) << 3 | k as u64
+}
+
+fn put_name(name: &str, words: &mut Vec<u64>) {
+    words.push(name.len() as u64);
+    for chunk in name.as_bytes().chunks(8) {
+        let mut b = [0u8; 8];
+        b[..chunk.len()].copy_from_slice(chunk);
+        words.push(u64::from_le_bytes(b));
+    }
+}
+
+fn program_words(program: &[(String, Vec<Lir>)], words: &mut Vec<u64>) {
+    words.push(program.len() as u64);
+    for (name, rows) in program {
+        put_name(name, words);
+        words.push(rows.len() as u64);
+        for r in rows {
+            encode_row(r, words);
+        }
+    }
+}
+
+fn cert_words(cert: &Certificate, words: &mut Vec<u64>) {
+    let facts = |a: &[(verified::Loc, verified::Kind)], words: &mut Vec<u64>| {
+        words.push(a.len() as u64);
+        words.extend(a.iter().map(|(l, k)| fact_word(*l, *k)));
+    };
+    words.push(cert.functions.len() as u64);
+    for f in &cert.functions {
+        words.push(f.annotations.len() as u64);
+        for a in &f.annotations {
+            facts(a, words);
+        }
+        facts(&f.post, words);
+        words.push(f.signed_constants.len() as u64);
+        words.extend(f.signed_constants.iter().map(|pc| *pc as u64));
+    }
+}
+
+fn bytes_of(words: &[u64]) -> Vec<u8> {
+    words.iter().flat_map(|w| w.to_le_bytes()).collect()
+}
+
+/// `put_cert` of the Vesper package.
+fn cert_text(cert: &Certificate) -> String {
+    use std::fmt::Write as _;
+    let facts = |a: &[(verified::Loc, verified::Kind)], out: &mut String| {
+        for (l, k) in a {
+            let key = loc_key(*l);
+            write!(out, " {}.{}.{}", key >> 32, key & 0xffff_ffff, *k as u64).unwrap();
+        }
+    };
+    let mut out = String::from("ok\n");
+    for (f, c) in cert.functions.iter().enumerate() {
+        writeln!(out, "fn {f}").unwrap();
+        for (pc, a) in c.annotations.iter().enumerate() {
+            write!(out, "{pc}:").unwrap();
+            facts(a, &mut out);
+            out.push('\n');
+        }
+        out.push_str("post:");
+        facts(&c.post, &mut out);
+        out.push('\n');
+        out.push_str("signed:");
+        for pc in &c.signed_constants {
+            write!(out, " {pc}").unwrap();
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn rust_check_text(program: &[(String, Vec<Lir>)]) -> String {
+    match certificate::check(program) {
+        Ok(cert) => cert_text(&cert),
+        Err(r) => format!("{r}\n"),
+    }
+}
+
+fn check_input(program: &[(String, Vec<Lir>)]) -> Vec<u8> {
+    let mut words = vec![];
+    program_words(program, &mut words);
+    bytes_of(&words)
+}
+
+/// Every corpus program the Rust backend lowers (host target), as
+/// `Artifact::lir`.
+fn corpus_programs() -> Vec<(String, Program)> {
+    let Some(target) = verified::Target::host() else {
+        return vec![];
+    };
+    let options = verified::Options::new(target);
+    corpus()
+        .iter()
+        .step_by(stride())
+        .filter_map(|case| {
+            verified::compile(&case.world, "main", &options)
+                .ok()
+                .map(|a| (case.name.clone(), a.lir))
+        })
+        .collect()
+}
+
+fn check_differs(check: &Entry, what: &str, program: &[(String, Vec<Lir>)]) -> bool {
+    let rust = rust_check_text(program);
+    let vesper = check.text(&check_input(program));
+    if rust == vesper {
+        return false;
+    }
+    if let Some(d) = first_difference(&rust, &vesper) {
+        eprintln!("verified certificate ({what}): first difference {d}");
+    }
+    true
+}
+
+#[test]
+fn certificates_match_rust_on_the_corpus() {
+    let programs = corpus_programs();
+    if verified::Target::host().is_none() {
+        eprintln!("verified certificate: no verified target for this host");
+        return;
+    }
+    assert!(
+        programs.len() > 20,
+        "only {} corpus programs lower",
+        programs.len()
+    );
+    let check = entry("certificate_text");
+    let mut bad = 0;
+    let mut accepted = 0;
+    for (name, program) in &programs {
+        if certificate::check(program).is_ok() {
+            accepted += 1;
+        }
+        if check_differs(&check, name, program) {
+            bad += 1;
+        }
+    }
+    eprintln!(
+        "verified certificate corpus: {bad} of {} programs differ ({accepted} accepted)",
+        programs.len()
+    );
+    println!(
+        "flip-gate differential differences={bad} cases={}",
+        programs.len()
+    );
+    assert_eq!(bad, 0);
+}
+
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+/// A random program shaped like the lowering's: each function is its entry
+/// label, `Enter`, then rows over few slots, `In`/`Out` words and labels
+/// (some unknown, some duplicated), and usually a `Return`.
+fn random_program(rng: &mut Rng) -> Vec<(String, Vec<Lir>)> {
+    use verified::{ArithOp, Cond, FloatOp, Kind, TrapKind, WrapOp};
+    let nfun = 1 + rng.below(4) as u32;
+    let entry = |f: u32| 4 + f;
+    // Each function's own labels; now and then another function's or an
+    // unknown one.
+    let label = |rng: &mut Rng, f: u32| match rng.below(16) {
+        0 => 4 + rng.below(u64::from(nfun) + 40) as u32,
+        _ => 16 + 4 * f + rng.below(4) as u32,
+    };
+    let mut program = vec![];
+    for f in 0..nfun {
+        let mut rows = vec![Lir::Label(entry(f)), Lir::Enter { words: 4 }];
+        // Most bodies start with every slot known, so later rows are
+        // usually established and the validator gets past them.
+        if rng.below(4) != 0 {
+            for dst in 0..6 {
+                let word = if rng.below(2) == 0 {
+                    rng.below(2)
+                } else {
+                    rng.below(1000)
+                };
+                rows.push(Lir::Const { dst, word });
+            }
+        }
+        let n = rng.below(30);
+        for _ in 0..n {
+            let s = |rng: &mut Rng| rng.below(6) as u32;
+            let r = rng.next();
+            let kinds = [
+                Kind::U8,
+                Kind::U32,
+                Kind::U64,
+                Kind::I64,
+                Kind::Bool,
+                Kind::F64,
+            ];
+            let k = kinds[(r >> 8) as usize % if r & 1 == 0 { 4 } else { 6 }];
+            let word = match rng.below(6) {
+                0 => rng.below(2),
+                1 => rng.below(300),
+                2 => rng.below(1 << 33),
+                3 => u64::MAX - rng.below(5),
+                4 => (1 << 63) + rng.below(5),
+                _ => rng.next(),
+            };
+            let row = match rng.below(26) {
+                0..=2 => Lir::Const { dst: s(rng), word },
+                3 => Lir::Move {
+                    dst: s(rng),
+                    src: s(rng),
+                },
+                4 | 5 => Lir::Arith {
+                    op: ArithOp::ALL[rng.below(5) as usize],
+                    kind: k,
+                    dst: s(rng),
+                    a: s(rng),
+                    b: s(rng),
+                },
+                6 => Lir::Wrapping {
+                    op: WrapOp::ALL[rng.below(3) as usize],
+                    kind: k,
+                    dst: s(rng),
+                    a: s(rng),
+                    b: s(rng),
+                },
+                7 => Lir::Neg {
+                    kind: k,
+                    dst: s(rng),
+                    a: s(rng),
+                },
+                8 => Lir::Not {
+                    dst: s(rng),
+                    a: s(rng),
+                },
+                9 | 10 => Lir::Compare {
+                    cond: Cond::ALL[rng.below(6) as usize],
+                    kind: k,
+                    dst: s(rng),
+                    a: s(rng),
+                    b: s(rng),
+                },
+                11 => Lir::FArith {
+                    op: FloatOp::ALL[rng.below(4) as usize],
+                    dst: s(rng),
+                    a: s(rng),
+                    b: s(rng),
+                },
+                12 => Lir::StoreOut {
+                    index: rng.below(3) as u32,
+                    src: s(rng),
+                },
+                13 => Lir::LoadOut {
+                    dst: s(rng),
+                    index: rng.below(3) as u32,
+                },
+                14 => Lir::LoadIn {
+                    dst: s(rng),
+                    index: rng.below(3) as u32,
+                },
+                15 => Lir::StoreIn {
+                    index: rng.below(3) as u32,
+                    src: s(rng),
+                },
+                16 => Lir::LoadPtr {
+                    dst: s(rng),
+                    ptr: s(rng),
+                    offset: 8,
+                },
+                17 => Lir::Call {
+                    callee: if rng.below(8) == 0 {
+                        label(rng, f)
+                    } else {
+                        entry(rng.below(u64::from(nfun)) as u32)
+                    },
+                },
+                18 | 19 => {
+                    if rng.below(8) == 0 {
+                        Lir::Label(label(rng, f))
+                    } else {
+                        Lir::Move {
+                            dst: s(rng),
+                            src: s(rng),
+                        }
+                    }
+                }
+                20 => Lir::Jump(label(rng, f)),
+                21 => Lir::BranchZero {
+                    cond: s(rng),
+                    target: label(rng, f),
+                },
+                22 => Lir::Return,
+                23 => Lir::Trap(TrapKind::ALL[rng.below(4) as usize]),
+                24 => Lir::Scope {
+                    ovf: if rng.below(2) == 0 { 0 } else { label(rng, f) },
+                    div0: if rng.below(2) == 0 { 1 } else { label(rng, f) },
+                },
+                _ => Lir::FCompare {
+                    cond: Cond::ALL[rng.below(6) as usize],
+                    dst: s(rng),
+                    a: s(rng),
+                    b: s(rng),
+                },
+            };
+            rows.push(row);
+        }
+        // Each of the function's own labels, once, somewhere in the body.
+        for l in 0..4 {
+            let at = 2 + rng.below(rows.len() as u64 - 1) as usize;
+            rows.insert(at, Lir::Label(16 + 4 * f + l));
+        }
+        if rng.below(6) != 0 {
+            rows.push(Lir::Return);
+        }
+        // Now and then a malformed shape.
+        match rng.below(40) {
+            0 => {
+                rows.remove(0);
+            }
+            1 => rows.swap(0, 1),
+            2 => rows.push(Lir::Enter { words: 1 }),
+            _ => {}
+        }
+        program.push((format!("f{f}"), rows));
+    }
+    program
+}
+
+#[test]
+fn certificates_match_rust_on_random_programs() {
+    let check = entry("certificate_text");
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    let mut bad = 0;
+    let mut accepted = 0;
+    let mut reasons = std::collections::BTreeMap::new();
+    let n = 4000;
+    for i in 0..n {
+        let program = random_program(&mut rng);
+        match certificate::check(&program) {
+            Ok(_) => accepted += 1,
+            Err(r) => {
+                let why: String = r.reason.split(['{', '(', '\'']).next().unwrap_or("").into();
+                *reasons.entry(why).or_insert(0usize) += 1;
+            }
+        }
+        if check_differs(&check, &format!("random {i}"), &program) {
+            bad += 1;
+        }
+    }
+    eprintln!("verified certificate random: {bad} of {n} programs differ ({accepted} accepted)");
+    eprintln!("verified certificate random rejections: {reasons:?}");
+    // Random rows rarely establish their operands' kinds, so most random
+    // programs exercise a rejection; the corpus covers accepted ones.
+    assert!(
+        accepted > n / 40,
+        "only {accepted} random programs accepted"
+    );
+    assert_eq!(bad, 0);
+}
+
+/// One mutation of a generated certificate (or of its program).
+fn mutate(rng: &mut Rng, program: &mut [(String, Vec<Lir>)], cert: &mut Certificate) {
+    use verified::{Kind, Loc};
+    let kinds = [
+        Kind::U8,
+        Kind::U32,
+        Kind::U64,
+        Kind::I64,
+        Kind::Bool,
+        Kind::F64,
+    ];
+    let f = rng.below(cert.functions.len() as u64) as usize;
+    let c = &mut cert.functions[f];
+    let rows = c.annotations.len() as u64;
+    if rows == 0 {
+        return;
+    }
+    match rng.below(9) {
+        0 => {
+            // Drop a fact.
+            let pc = rng.below(rows) as usize;
+            if !c.annotations[pc].is_empty() {
+                let i = rng.below(c.annotations[pc].len() as u64) as usize;
+                c.annotations[pc].remove(i);
+            }
+        }
+        1 | 2 => {
+            // Change a fact's kind, or add a fact (maybe a duplicate).
+            let pc = rng.below(rows) as usize;
+            let k = kinds[rng.below(6) as usize];
+            let a = &mut c.annotations[pc];
+            if !a.is_empty() && rng.below(2) == 0 {
+                let i = rng.below(a.len() as u64) as usize;
+                a[i].1 = k;
+            } else {
+                let l = match rng.below(3) {
+                    0 => Loc::Slot(rng.below(6) as u32),
+                    1 => Loc::Out(rng.below(3) as u32),
+                    _ => Loc::In(rng.below(3) as u32),
+                };
+                let at = rng.below(a.len() as u64 + 1) as usize;
+                a.insert(at, (l, k));
+            }
+        }
+        3 => {
+            // A signed constant on any row.
+            c.signed_constants.insert(rng.below(rows + 1) as usize);
+        }
+        4 => {
+            // A post fact.
+            let l = if rng.below(4) == 0 {
+                Loc::Slot(rng.below(6) as u32)
+            } else {
+                Loc::In(rng.below(3) as u32)
+            };
+            c.post.push((l, kinds[rng.below(6) as usize]));
+        }
+        5 => {
+            // An annotation too few or too many.
+            if rng.below(2) == 0 {
+                c.annotations.pop();
+            } else {
+                c.annotations.push(vec![]);
+            }
+        }
+        6 => {
+            // A function certificate too few.
+            cert.functions.pop();
+        }
+        7 => {
+            // An entry precondition.
+            c.annotations[0].push((Loc::In(rng.below(3) as u32), kinds[rng.below(5) as usize]));
+        }
+        _ => {
+            // Retarget a jump or call in the program.
+            let rows = &mut program[f].1;
+            let pc = rng.below(rows.len() as u64) as usize;
+            let l = rng.below(12) as u32;
+            match &mut rows[pc] {
+                Lir::Jump(t) | Lir::BranchZero { target: t, .. } | Lir::Call { callee: t } => {
+                    *t = l
+                }
+                Lir::Scope { ovf, .. } => *ovf = l,
+                _ => {}
+            }
+        }
+    }
+}
+
+#[test]
+fn validate_matches_rust_on_mutated_certificates() {
+    let validate = entry("validate_text");
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let mut cases: Vec<Vec<(String, Vec<Lir>)>> =
+        corpus_programs().into_iter().map(|(_, p)| p).collect();
+    for _ in 0..1500 {
+        cases.push(random_program(&mut rng));
+    }
+    let mut bad = 0;
+    let mut total = 0;
+    let mut rejected = 0;
+    for program in &cases {
+        let widened: Vec<(String, Vec<Lir>)> = program
+            .iter()
+            .map(|(n, rows)| (n.clone(), rows.iter().map(certificate::widen).collect()))
+            .collect();
+        let generated = certificate::generate(&widened);
+        for round in 0..6 {
+            let mut p = widened.clone();
+            let mut cert = generated.clone();
+            if !cert.functions.is_empty() {
+                for _ in 0..round.min(2) + usize::from(round > 0) {
+                    if cert.functions.is_empty() {
+                        break;
+                    }
+                    mutate(&mut rng, &mut p, &mut cert);
+                }
+            }
+            let rust = match certificate::validate(&p, &cert) {
+                Ok(()) => "ok\n".to_string(),
+                Err(r) => {
+                    rejected += 1;
+                    format!("{r}\n")
+                }
+            };
+            let mut words = vec![];
+            program_words(&p, &mut words);
+            cert_words(&cert, &mut words);
+            let vesper = validate.text(&bytes_of(&words));
+            total += 1;
+            if rust != vesper {
+                bad += 1;
+                if bad <= 6 {
+                    eprintln!("verified validate: rust {rust:?} vesper {vesper:?}");
+                }
+            }
+        }
+    }
+    eprintln!("verified validate: {bad} of {total} certificates differ ({rejected} rejected)");
+    println!("flip-gate differential differences={bad} cases={total}");
+    assert!(rejected > total / 10, "only {rejected} rejections");
+    assert_eq!(bad, 0);
+}
+
+/// ABBA: Rust's `certificate::check` against the Vesper entry with its
+/// input encoding and text unpacking, over the corpus programs.
+#[test]
+fn certificate_flip_gate() {
+    if !speed() {
+        return;
+    }
+    let programs: Vec<_> = corpus_programs().into_iter().map(|(_, p)| p).collect();
+    let inputs: Vec<Vec<u8>> = programs.iter().map(|p| check_input(p)).collect();
+    let check = entry("certificate_text");
+    let (r, v) = abba(
+        "verified certificate check",
+        &mut || {
+            time(|| {
+                for _ in 0..5 {
+                    for p in &programs {
+                        std::hint::black_box(rust_check_text(p));
+                    }
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for _ in 0..5 {
+                    for i in &inputs {
+                        std::hint::black_box(check.text(i));
+                    }
+                }
+            })
+        },
+    );
+    println!(
+        "flip-gate pairs rust={} vesper={}",
+        r.as_nanos(),
+        v.as_nanos()
+    );
 }
