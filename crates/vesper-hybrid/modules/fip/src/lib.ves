@@ -1,0 +1,12 @@
+// @vesper/hybrid-fip: fip checks (`fip::check_world`) served from Vesper
+// in the hybrid Stage 2 build (SH2 lane 12, #1184).
+
+// @export abi 4
+
+use @vesper/check-fip::{
+    check_fip_bytes
+};
+
+pub fn fip_diags(in b: Slice[u8]) -> ChunkSeq[u64] {
+    check_fip_bytes(in b)
+}

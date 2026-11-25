@@ -129,6 +129,8 @@ const MODULES: &[(&str, &str, &str)] = &[
     ),
     // SH2 lane 8 (#1180): capability effect rules (`capability_effects::check_world`).
     ("hybrid_effects", "modules/effects", "port/effects.rs"),
+    // SH2 lane 12 (#1184): fip checks (`fip::check_world`).
+    ("hybrid_fip", "modules/fip", "port/fip.rs"),
     // SH5 lane 15 (#1338): the doc renderers.
     ("hybrid_doc", "modules/doc", "port/doc.rs"),
 ];

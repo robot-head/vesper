@@ -1253,6 +1253,18 @@ vesper_package(
     ],
 )
 
+# Fip checker as a dependency of the hybrid compiler's fip module
+# (self-hosting SH2 lane 12, #1184).
+vesper_package(
+    name = "check_fip_package",
+    srcs = glob(["packages/vesper-check-fip/src/**/*.ves"]),
+    manifest = "packages/vesper-check-fip/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+    ],
+)
+
 # Capability effect checker as a dependency of the hybrid compiler's effects
 # module (self-hosting SH2 lane 8, #1180).
 vesper_package(
