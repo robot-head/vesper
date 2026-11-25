@@ -16,6 +16,7 @@ struct Options {
     seed: u64,
     jobs: u8,
     lean: PathBuf,
+    vesper: Option<PathBuf>,
     artifacts: Option<PathBuf>,
     limits: HarnessLimits,
 }
@@ -26,6 +27,7 @@ impl Default for Options {
             seed: 0,
             jobs: 1,
             lean: PathBuf::from("lean"),
+            vesper: None,
             artifacts: None,
             limits: HarnessLimits::default(),
         }
@@ -52,6 +54,7 @@ fn parse(options: &mut Options, args: impl Iterator<Item = OsString>) -> Result<
             Some("--lean") => 8,
             Some("--artifacts") => 16,
             Some("--shrink-attempts") => 32,
+            Some("--vesper") => 64,
             _ => return Err(invalid("unknown option; use --help")),
         };
         if seen & bit != 0 {
@@ -75,12 +78,14 @@ fn parse(options: &mut Options, args: impl Iterator<Item = OsString>) -> Result<
                 }
                 options.jobs = jobs as u8;
             }
-            8 | 16 => {
+            8 | 16 | 64 => {
                 if value.is_empty() || value.len() > 4096 {
                     return Err(invalid("path must contain 1 through 4096 bytes"));
                 }
                 if bit == 8 {
                     options.lean = value.into();
+                } else if bit == 64 {
+                    options.vesper = Some(value.into());
                 } else {
                     options.artifacts = Some(value.into());
                 }
@@ -141,10 +146,12 @@ fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
     let first = args.next();
     if first.as_deref() == Some(std::ffi::OsStr::new("--worker")) {
-        return if args.next().is_none() {
-            private_result(oracle::worker::worker_main())
-        } else {
-            private_result(Err(invalid("worker mode is exclusive")))
+        // `--worker <vesper>`: the parent passes the resolved compiler.
+        return match (args.next(), args.next()) {
+            (Some(compiler), None) => private_result(oracle::worker::worker_main(
+                &oracle::compiler::Compiler::new(compiler),
+            )),
+            _ => private_result(Err(invalid("worker mode takes exactly the compiler path"))),
         };
     }
     if first.as_deref() == Some(std::ffi::OsStr::new("--fault-peer")) {
@@ -158,7 +165,7 @@ fn main() -> ExitCode {
     }
     if first.as_deref() == Some(std::ffi::OsStr::new("--help")) && args.next().is_none() {
         println!(
-            "arithmetic_oracle42 [--suite 128|100000] [--seed U64] [--jobs 1..4]\n  [--lean PATH] [--artifacts DIR] [--shrink-attempts 0..64]"
+            "arithmetic_oracle42 [--suite 128|100000] [--seed U64] [--jobs 1..4]\n  [--lean PATH] [--vesper PATH] [--artifacts DIR] [--shrink-attempts 0..64]\n  --vesper: the compiler under test (default: the `vesper` beside this binary, else on PATH)"
         );
         return ExitCode::SUCCESS;
     }
@@ -170,12 +177,23 @@ fn main() -> ExitCode {
         Ok(path) => path,
         Err(error) => return preflight_failure(&options, error.into()),
     };
+    // The compiler under test: `--vesper`, else the `vesper` built beside
+    // this binary (Cargo's target directory), else `vesper` on PATH.
+    let compiler = options.vesper.clone().unwrap_or_else(|| {
+        let sibling = worker_exe.with_file_name(format!("vesper{}", std::env::consts::EXE_SUFFIX));
+        if sibling.is_file() {
+            sibling
+        } else {
+            PathBuf::from("vesper")
+        }
+    });
     let config = RunConfig {
         suite: options.suite,
         seed: options.seed,
         jobs: options.jobs,
         lean: options.lean,
         worker_exe,
+        compiler,
         artifacts: options.artifacts,
         limits: options.limits,
     };

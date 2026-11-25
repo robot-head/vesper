@@ -389,10 +389,17 @@ fn the_frame_plans_swap_matches_rust() {
                     }));
                     hooked_time += start.elapsed();
                     std::panic::set_hook(quiet);
-                    let (Ok(rust), Ok(hooked)) = (rust, hooked) else {
+                    let label = format!("{name} {entry} opt={optimize}");
+                    // A task whose Rust compile panics is unsupported; one
+                    // that panics only with the hook is a difference.
+                    let Ok(rust) = rust else {
                         continue;
                     };
-                    let label = format!("{name} {entry} opt={optimize}");
+                    let Ok(hooked) = hooked else {
+                        bad += 1;
+                        eprintln!("{label}: the hooked compile panicked");
+                        continue;
+                    };
                     match (rust, hooked) {
                         (Ok((robj, rclif)), Ok((hobj, hclif))) => {
                             compiled += 1;

@@ -1,4 +1,5 @@
 //! Runner invariants; the independent acceptance target owns the full real Lean matrix.
+mod common;
 #[path = "../src/bin/arithmetic_oracle42/mod.rs"]
 pub mod oracle;
 
@@ -273,6 +274,7 @@ fn invalid_run_limits_fail_before_any_child_is_spawned() {
         jobs: 1,
         lean: "nonexistent-lean-oracle42".into(),
         worker_exe: "nonexistent-worker-oracle42".into(),
+        compiler: "nonexistent-vesper-oracle42".into(),
         artifacts: None,
         limits: HarnessLimits::default(),
     };
@@ -304,6 +306,7 @@ fn configured_source_cap_refuses_before_oracle_request_or_compiler_worker() {
             .unwrap_or_else(|| "lean".into())
             .into(),
         worker_exe: env!("CARGO_BIN_EXE_arithmetic_oracle42").into(),
+        compiler: common::vesper(),
         artifacts: None,
         limits,
     };

@@ -31,6 +31,18 @@ pub use kafka_group::{GroupPoll, KafkaGroupConfig, KafkaGroupSource};
 mod log;
 #[path = "kafka_wire.rs"]
 mod wire;
+
+/// An uncompressed, non-transactional v2 record batch of `records` (the
+/// ABBA benchmark's `kafka_encode` workload, examples/abba.rs).
+#[doc(hidden)]
+pub fn kafka_encode_batch(records: &[KafkaRecord]) -> Result<Vec<u8>, Error> {
+    wire::encode_batch(records, KafkaCompression::None, wire::ProducerStamp::NONE).map_err(|e| {
+        match e {
+            wire::Fail::Local(e) => e,
+            _ => Error::Kafka("encode"),
+        }
+    })
+}
 pub use log::{InputLog, LogLimits, LogRecovery};
 #[path = "sink.rs"]
 mod sink;

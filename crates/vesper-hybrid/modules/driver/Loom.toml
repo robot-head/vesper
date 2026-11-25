@@ -15,6 +15,11 @@ capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdProcess]", "Ffi[Std
 "@vesper-std/fmt" = { version = "^0.1", path = "../../../../packages/vesper-std/fmt" }
 # The other commands' layers (SH5 lane 13, #1336).
 "@vesper/driver-commands" = { version = "^0.1", path = "../../../../packages/vesper-driver-commands" }
+# `vesper build --target wasm32-wasip2` in Vesper (#1895).
+"@vesper/wasm-backend" = { version = "^0.1", path = "../../../../packages/vesper-wasm-backend" }
+"@vesper/wit-component" = { version = "^0.1", path = "../../../../packages/vesper-wit-component" }
+# `vesper build --target bpf` in Vesper (#1895).
+"@vesper/ebpf-backend" = { version = "^0.1", path = "../../../../packages/vesper-ebpf-backend" }
 # The front-end passes (hd_step group 2, #1893): the parse module's word
 # stream, the front end v2 and the AST, and Rust's `str` Debug text.
 "@vesper/hybrid-parse" = { version = "^0.1", path = "../parse" }

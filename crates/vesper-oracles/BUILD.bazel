@@ -9,6 +9,9 @@ vesper_crate(
     copy_test_cwd = ["test/resource_oracle42"],
     extra_compile_data = ["//:oracle_sources"],
     extra_test_data = ["//:files"],
+    # The arithmetic oracle drives the compiler as a process (#1929); its
+    # tests find `vesper` on PATH.
+    extra_test_path_binaries = ["//:bin/vesper"],
     # The sealed Logos root is a fresh external input on every CI run. Only
     # its acceptance test inherits the random path (and must rerun).
     test_env_inherit = {

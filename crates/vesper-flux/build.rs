@@ -92,4 +92,11 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
         "        si64(inout out_rec, wrapping_add(rb, 3), klen_i);\n",
         "        si64(inout out_rec, wrapping_add(rb, 3), -1);\n",
     ),
+    // kafka_encode (vesper/src/kafka_wire.ves): timestamp deltas wrap
+    // instead of saturating.
+    (
+        "kafka_encode",
+        "        let ts_delta = sat_sub_i64(meta[m], base_ts);\n",
+        "        let ts_delta = wrapping_sub(meta[m], base_ts);\n",
+    ),
 ];
