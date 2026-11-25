@@ -17,6 +17,11 @@
 //!   same certificate or rejection on the corpus and on random programs,
 //!   and `validate` the same verdict on mutated certificates.
 //!
+//! - Part 4a: the plan and the lowering must give the same slot IR or
+//!   error text on the corpus (programs without handler sites).
+//! - Part 4b: monomorphization must give the same program (canonical dump)
+//!   or error text on the corpus.
+//!
 //! - `VERIFIED_CODEGEN_STRIDE=n` keeps every n-th corpus world.
 //! - `CHECK_HARNESS_SPEED=1` runs the ABBA timing (release build).
 #[path = "common/check_harness.rs"]
@@ -1234,6 +1239,330 @@ fn lowering_flip_gate() {
                 for _ in 0..5 {
                     for (_, _, input, _) in &cases {
                         std::hint::black_box(lower.text(input));
+                    }
+                }
+            })
+        },
+    );
+    println!(
+        "flip-gate pairs rust={} vesper={}",
+        r.as_nanos(),
+        v.as_nanos()
+    );
+}
+
+// ----- part 4b: monomorphization (mono.ves) ---------------------------------
+//
+// `mono_words` reads the world and the Place IR after ir_opt, then an extra
+// section: the entry, the instance limit, every world function's generics
+// (name, then (name, row) per generic) and `World::calls` ((start, end), then
+// (name, type) per argument). Names and types are indices into the input's
+// tables. It answers 0 and the monomorphized program's
+// words, or 1 and the error's packed text. Programs with `handle`
+// expressions are part 4c's (`not ported`).
+
+/// The input of `mono_words`, and the payload pool its program refers to.
+fn mono_input(
+    world: &vesper::check::World,
+    program: &vesper::ir::Program,
+    entry: &str,
+    max_instances: usize,
+    lowering: Option<&verified::Options>,
+) -> Option<(Vec<u8>, ir_words::Pool)> {
+    if !ir_words::encodable(world, program)
+        || !world
+            .calls
+            .values()
+            .all(|m| m.values().all(ir_words::literal_fits))
+    {
+        return None;
+    }
+    let mut t = ir_words::Tables::of(program);
+    t.label_names();
+    let section = t.section();
+    // Monomorphization reads only the ADTs of the world section (which
+    // names are types), so without the lowering the expression types and
+    // spans stay out.
+    let encoded = if lowering.is_some() {
+        t.enc.world(world)
+    } else {
+        t.enc.world(&vesper::check::World {
+            adts: world.adts.clone(),
+            effects: world.effects.clone(),
+            ..Default::default()
+        })
+    };
+    let mut words = vec![];
+    let e = t.enc.name(entry);
+    words.push(e);
+    words.push(max_instances as u64);
+    // Only functions with a body are instantiated or called by instance,
+    // and only the type arguments of the program's calls are looked up.
+    let functions: Vec<_> = world
+        .functions
+        .iter()
+        .filter(|(name, _)| program.functions.contains_key(*name))
+        .collect();
+    let spans: std::collections::BTreeSet<(usize, usize)> = program
+        .functions
+        .values()
+        .flat_map(|f| &f.blocks)
+        .flat_map(|b| &b.instructions)
+        .filter(|i| matches!(i.op, vesper::ir::Op::Call { .. }))
+        .map(|i| (i.span.start, i.span.end))
+        .collect();
+    let calls: Vec<_> = world
+        .calls
+        .iter()
+        .filter(|(k, _)| spans.contains(k))
+        .collect();
+    words.push(functions.len() as u64);
+    for (name, f) in functions {
+        let n = t.enc.name(name);
+        words.push(n);
+        words.push(f.generics.len() as u64);
+        for g in &f.generics {
+            let n = t.enc.name(&g.name);
+            words.push(n);
+            words.push(u64::from(g.row));
+        }
+    }
+    words.push(calls.len() as u64);
+    for ((start, end), args) in calls {
+        words.push(*start as u64);
+        words.push(*end as u64);
+        words.push(args.len() as u64);
+        for (k, ty) in args {
+            let n = t.enc.name(k);
+            words.push(n);
+            let i = t.enc.ty(ty);
+            words.push(i);
+        }
+    }
+    if let Some(options) = lowering {
+        // `lowering_input`'s extra section.
+        put_string(entry, &mut words);
+        words.push(options.max_functions as u64);
+        words.push(options.max_rows as u64);
+        words.push(u64::from(vesper::regions::active(world)));
+        words.push(world.functions.len() as u64);
+        for name in world.functions.keys() {
+            put_string(name, &mut words);
+        }
+    }
+    let mut bytes = t.enc.finish(&encoded, &section);
+    bytes.extend(bytes_of(&words));
+    Some((bytes, t.pool))
+}
+
+/// The text both sides compare: the program's canonical dump, or the
+/// error's text.
+fn rust_mono_text(mono: &Result<vesper::ir::Program, verified::VerifiedError>) -> String {
+    match mono {
+        Ok(p) => ir_words::dump(p),
+        Err(e) => format!("error: {e}\n"),
+    }
+}
+
+fn vesper_mono_text(words: &[u64], pool: &ir_words::Pool) -> String {
+    match words.first() {
+        Some(0) => ir_words::dump(&ir_words::decode_program(&words[1..], pool)),
+        Some(_) => unpack_text(&words[1..]),
+        None => "error: empty output\n".to_owned(),
+    }
+}
+
+/// One corpus program's monomorphization case.
+struct MonoCase {
+    name: String,
+    input: Vec<u8>,
+    pool: ir_words::Pool,
+    rust: String,
+}
+
+fn mono_cases(options: &verified::Options) -> Vec<MonoCase> {
+    let mut out = vec![];
+    for case in corpus().iter().step_by(stride()) {
+        let Ok((program, max, mono)) = verified::mono_for_test(&case.world, "main", options) else {
+            continue;
+        };
+        let Some((input, pool)) = mono_input(&case.world, &program, "main", max, None) else {
+            continue;
+        };
+        out.push(MonoCase {
+            name: case.name.clone(),
+            input,
+            pool,
+            rust: rust_mono_text(&mono),
+        });
+    }
+    out
+}
+
+#[test]
+fn mono_matches_rust_on_the_corpus() {
+    let Some(target) = verified::Target::host() else {
+        eprintln!("verified mono: no verified target for this host");
+        return;
+    };
+    let mono = entry("mono_words");
+    let mut bad = 0;
+    let mut compared = 0;
+    let mut generic = 0;
+    let mut not_ported = 0;
+    for optimize in [true, false] {
+        let mut options = verified::Options::new(target);
+        options.optimize = optimize;
+        for case in mono_cases(&options) {
+            let vesper = vesper_mono_text(&mono.words(&case.input), &case.pool);
+            if vesper.starts_with("error: not ported") {
+                not_ported += 1;
+                continue;
+            }
+            compared += 1;
+            if case.rust.contains('<') || case.rust.contains("unsupported Generic") {
+                generic += 1;
+            }
+            if vesper != case.rust {
+                bad += 1;
+                if bad <= 5 {
+                    let d = first_difference(&case.rust, &vesper);
+                    eprintln!(
+                        "verified mono ({}, optimize {optimize}): first difference {d:?}",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "verified mono corpus: {bad} of {compared} programs differ ({generic} with instances or generic errors, {not_ported} not ported)"
+    );
+    println!("flip-gate differential differences={bad} cases={compared}");
+    assert!(compared > 100, "only {compared} corpus programs compared");
+    assert_eq!(bad, 0);
+}
+
+// The front half: monomorphization and the lowering in one Vesper pass
+// (`front_text`), against Rust's monomorphization, evidence passing and
+// lowering, on the programs evidence passing leaves unchanged.
+
+/// One corpus program's front-half case.
+struct FrontCase {
+    name: String,
+    world: usize,
+    program: vesper::ir::Program,
+    input: Vec<u8>,
+    rust: String,
+}
+
+fn front_cases(options: &verified::Options) -> Vec<FrontCase> {
+    let mut out = vec![];
+    for (k, case) in corpus().iter().enumerate().step_by(stride()) {
+        let Ok((program, max, outcome)) = verified::front_for_test(&case.world, "main", options)
+        else {
+            continue;
+        };
+        let rust = match outcome {
+            Ok(o) if o.evidence_unchanged && !o.has_sites => rust_lowering_text(&o.lowered),
+            Ok(_) => continue,
+            Err(e) => format!("error: {e}\n"),
+        };
+        let Some((input, _)) = mono_input(&case.world, &program, "main", max, Some(options)) else {
+            continue;
+        };
+        out.push(FrontCase {
+            name: case.name.clone(),
+            world: k,
+            program,
+            input,
+            rust,
+        });
+    }
+    out
+}
+
+#[test]
+fn front_matches_rust_on_the_corpus() {
+    let Some(target) = verified::Target::host() else {
+        eprintln!("verified front: no verified target for this host");
+        return;
+    };
+    let front = entry("front_text");
+    let mut bad = 0;
+    let mut compared = 0;
+    let mut lowered = 0;
+    let mut not_ported = 0;
+    for optimize in [true, false] {
+        let mut options = verified::Options::new(target);
+        options.optimize = optimize;
+        for case in front_cases(&options) {
+            let vesper = front.text(&case.input);
+            if vesper.starts_with("error: not ported") {
+                not_ported += 1;
+                continue;
+            }
+            compared += 1;
+            if !case.rust.starts_with("error: ") {
+                lowered += 1;
+            }
+            if vesper != case.rust {
+                bad += 1;
+                if bad <= 5 {
+                    let d = first_difference(&case.rust, &vesper);
+                    eprintln!(
+                        "verified front ({}, optimize {optimize}): first difference {d:?}",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "verified front corpus: {bad} of {compared} programs differ ({lowered} lowered, {not_ported} not ported)"
+    );
+    println!("flip-gate differential differences={bad} cases={compared}");
+    assert!(lowered > 20, "only {lowered} corpus programs lower");
+    assert_eq!(bad, 0);
+}
+
+/// ABBA timing of the front half (`CHECK_HARNESS_SPEED=1`): Rust's
+/// monomorphization, evidence passing, plan, lowering and text against the
+/// package's decode, monomorphization, plan, lowering and text, over the
+/// corpus programs the package lowers.
+#[test]
+fn front_flip_gate() {
+    if !speed() {
+        return;
+    }
+    let Some(target) = verified::Target::host() else {
+        return;
+    };
+    let options = verified::Options::new(target);
+    let front = entry("front_text");
+    let cases: Vec<_> = front_cases(&options)
+        .into_iter()
+        .filter(|c| !front.text(&c.input).starts_with("error: not ported"))
+        .collect();
+    let (r, v) = abba(
+        "verified front",
+        &mut || {
+            time(|| {
+                for _ in 0..5 {
+                    for c in &cases {
+                        let world = &corpus()[c.world].world;
+                        let lowered =
+                            verified::front_timing_for_test(world, &c.program, "main", &options);
+                        std::hint::black_box(rust_lowering_text(&lowered));
+                    }
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for _ in 0..5 {
+                    for c in &cases {
+                        std::hint::black_box(front.text(&c.input));
                     }
                 }
             })
