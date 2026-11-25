@@ -8,7 +8,7 @@ pub const IMPLEMENTATION: &str = "rust";
 
 #[path = "engine/btf.rs"]
 pub mod btf;
-#[path = "../../src/btf_ext.rs"]
+#[path = "engine/btf_ext.rs"]
 pub mod btf_ext;
 #[path = "../../src/builder.rs"]
 pub mod builder;

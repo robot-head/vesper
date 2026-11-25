@@ -18,12 +18,12 @@ build = "build.rs"
 # with the Rust build (docs/parallel-results/port-p1-beacon.md).
 
 [features]
-# traceparent is unconditionally Vesper; histogram, exponential, and spans
-# stay behind `vesper-port` until they clear 1.50x.
+# traceparent and spans are unconditionally Vesper; histogram and
+# exponential stay behind `vesper-port` until they clear 1.50x.
 vesper-port = []
 # Deliberately wrong Vesper builds, one edit per ported module: the port
 # test runs must fail (scripts/test-port-harness.sh asserts which tests do).
-vesper-port-divergent = []
+vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
 vesper-port-abi = { path = "../vesper-port-abi" }
