@@ -9,6 +9,10 @@ use vesper::ast::{
     Arg, Clause, Diagnostic, Effects, Expr, ExprKind, Literal, Param, Pattern, PatternKind,
     Statement, Type,
 };
+use vesper::capability_effects::{
+    CapabilityPolicies, ConstDenormInput, ConstTimeInput, DetFloatInput, POLICY_SCHEMA,
+    REALTIME_FORBIDDEN, RealtimeFunction, RealtimeInput,
+};
 use vesper::check::World;
 
 const NONE: u64 = u32::MAX as u64;
@@ -404,4 +408,139 @@ pub fn decode_diagnostics(words: &[u64]) -> Vec<Diagnostic> {
         out.push(d);
     }
     out
+}
+
+fn unpack_bytes(words: &[u64]) -> Vec<u8> {
+    let byte_len = words[0] as usize;
+    let mut bytes = Vec::with_capacity(byte_len);
+    for &w in &words[1..] {
+        for shift in (0..64).step_by(8) {
+            if bytes.len() == byte_len {
+                break;
+            }
+            bytes.push(((w >> shift) & 0xff) as u8);
+        }
+    }
+    bytes
+}
+
+fn read_name(bytes: &[u8], pos: &mut usize) -> String {
+    let len = read_u32(bytes, pos) as usize;
+    read_str(bytes, pos, len)
+}
+
+fn read_name_list(bytes: &[u8], pos: &mut usize) -> Vec<String> {
+    let n = read_u32(bytes, pos) as usize;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(read_name(bytes, pos));
+    }
+    out
+}
+
+fn read_usize_list(bytes: &[u8], pos: &mut usize) -> Vec<usize> {
+    let n = read_u32(bytes, pos) as usize;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(read_u32(bytes, pos) as usize);
+    }
+    out
+}
+
+/// Decode the packed binary `CapabilityPolicies` produced by
+/// `@vesper/check-effects::policies::build_policies_bin`.
+pub fn decode_policies(words: &[u64]) -> CapabilityPolicies {
+    let bytes = unpack_bytes(words);
+    let mut pos = 0;
+
+    let ct_n = read_u32(&bytes, &mut pos) as usize;
+    let mut const_time = Vec::with_capacity(ct_n);
+    for _ in 0..ct_n {
+        let function = read_name(&bytes, &mut pos);
+        let start = read_u32(&bytes, &mut pos) as usize;
+        let end = read_u32(&bytes, &mut pos) as usize;
+        let secret_params = read_usize_list(&bytes, &mut pos);
+        let inferred_secret_params = read_usize_list(&bytes, &mut pos);
+        let secret_result = bytes[pos] != 0;
+        let declassify_gate = bytes[pos + 1] != 0;
+        pos += 2;
+        let constant_time_callees = read_name_list(&bytes, &mut pos);
+        let declassify_callees = read_name_list(&bytes, &mut pos);
+        const_time.push(ConstTimeInput {
+            function,
+            span: start..end,
+            secret_params,
+            inferred_secret_params,
+            secret_result,
+            declassify_gate,
+            constant_time_callees,
+            declassify_callees,
+        });
+    }
+
+    let rt_fn_n = read_u32(&bytes, &mut pos) as usize;
+    let mut rt_functions = Vec::with_capacity(rt_fn_n);
+    for _ in 0..rt_fn_n {
+        let function = read_name(&bytes, &mut pos);
+        let start = read_u32(&bytes, &mut pos) as usize;
+        let end = read_u32(&bytes, &mut pos) as usize;
+        let root = bytes[pos] != 0;
+        pos += 1;
+        let effects = read_name_list(&bytes, &mut pos);
+        rt_functions.push(RealtimeFunction {
+            function,
+            span: start..end,
+            root,
+            effects,
+            stack_budget_bytes: None,
+        });
+    }
+
+    let rt_call_n = read_u32(&bytes, &mut pos) as usize;
+    let mut rt_calls = Vec::with_capacity(rt_call_n);
+    for _ in 0..rt_call_n {
+        let caller = read_name(&bytes, &mut pos);
+        let callee = read_name(&bytes, &mut pos);
+        rt_calls.push((caller, callee));
+    }
+
+    let df_n = read_u32(&bytes, &mut pos) as usize;
+    let mut det_float = Vec::with_capacity(df_n);
+    for _ in 0..df_n {
+        let function = read_name(&bytes, &mut pos);
+        let start = read_u32(&bytes, &mut pos) as usize;
+        let end = read_u32(&bytes, &mut pos) as usize;
+        let allowed_float_calls = read_name_list(&bytes, &mut pos);
+        det_float.push(DetFloatInput {
+            function,
+            span: start..end,
+            allowed_float_calls,
+            allow_fma: false,
+        });
+    }
+
+    let cd_n = read_u32(&bytes, &mut pos) as usize;
+    let mut const_denorm = Vec::with_capacity(cd_n);
+    for _ in 0..cd_n {
+        let function = read_name(&bytes, &mut pos);
+        let start = read_u32(&bytes, &mut pos) as usize;
+        let end = read_u32(&bytes, &mut pos) as usize;
+        const_denorm.push(ConstDenormInput {
+            function,
+            span: start..end,
+        });
+    }
+
+    CapabilityPolicies {
+        schema: POLICY_SCHEMA,
+        const_time,
+        realtime: RealtimeInput {
+            functions: rt_functions,
+            calls: rt_calls,
+            forbidden_effects: REALTIME_FORBIDDEN.iter().map(|s| s.to_string()).collect(),
+            reject_unbounded_loops: true,
+        },
+        det_float,
+        const_denorm,
+    }
 }
