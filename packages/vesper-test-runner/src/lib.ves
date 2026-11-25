@@ -16,6 +16,8 @@
 // - discover.ves: `case_rows`, `discover` and `classify`.
 // - doctest.ves: doctest fence extraction and the token preflight of
 //   `vesper test --doc` (src/doctest_extract.rs).
+// - mutants.ves: the mutation sites of `vesper test --mutate`
+//   (src/test_mutants.rs), over @vesper/ast.
 
 use self::discover::{
     case_rows,
@@ -24,6 +26,9 @@ use self::discover::{
 use self::doctest::{
     extract,
     preflight
+};
+use self::mutants::{
+    collect
 };
 
 // The word format of the entries; tests/common/test_runner_words.rs
@@ -67,4 +72,13 @@ pub fn doctest_preflight_str(in input: Str) -> ChunkSeq[u64] {
 
 pub fn doctest_extract_str(in input: Str) -> ChunkSeq[u64] {
     extract(in input.as_bytes())
+}
+
+// `test_mutants::collect` over the input words.
+pub fn mutants_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    collect(in input)
+}
+
+pub fn mutants_str(in input: Str) -> ChunkSeq[u64] {
+    collect(in input.as_bytes())
 }
