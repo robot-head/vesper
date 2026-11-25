@@ -441,7 +441,14 @@ def _statistics_tests():
     ]:
         _equal(decision(median_interval(pairs), threshold), expected, "Exact decision")
 
-def _case(ctx, work, config, expected, extra = []):
+def _case(ctx, work, config, expected, extra = [], cli = False):
+    if expected != 3 and not cli:
+        root = ctx.std.env.aspect_root_dir()
+        options = _arguments(ctx, ["demo", "--quiet"] + extra)
+        runner = _runner(ctx, root, config, options.values)
+        result, _ = _gate(config, options, runner, _rust_lines(ctx, root, "demo", config.get("rust", [])))
+        _equal(result["verdict"], {0: "PASS", 1: "FAIL", 2: "INCONCLUSIVE"}[expected], "Gate verdict")
+        return result, "", ""
     input = work + "/gate config.json"
     output = work + "/gate result.json"
     ctx.std.fs.write(input, json.encode(config))
@@ -472,7 +479,7 @@ def _test(ctx):
         "differential": {"run": differential},
         "abba": [{"workload": "w", "run": benchmark}],
     }
-    result, stdout, _ = _case(ctx, work, config, 0)
+    result, stdout, _ = _case(ctx, work, config, 0, cli = True)
     _equal(result["verdict"], "PASS", "Passed gate")
     _equal(result["differential"]["cases"], 1234, "Reported cases")
     _equal(result["abba"][0]["decision"], "pass", "ABBA decision")

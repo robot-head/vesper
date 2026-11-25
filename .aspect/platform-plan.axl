@@ -41,59 +41,59 @@ def _rust_cases(source: str) -> dict:
             pending = False
     return cases
 
-def _load_policy(ctx: TaskContext, root: str) -> dict:
+def load_policy(ctx: TaskContext, root: str, on_error = _error) -> dict:
     policy = json.decode(ctx.std.fs.read_to_string(root + "/" + _POLICY))
     if type(policy) != "dict" or policy.get("version") != 1:
-        _error(ctx, "unsupported platform test policy version")
+        on_error(ctx, "unsupported platform test policy version")
     groups = policy.get("groups")
     if type(groups) != "dict" or not groups:
-        _error(ctx, "policy needs named escalation groups")
+        on_error(ctx, "policy needs named escalation groups")
     for name, settings in groups.items():
         if not _identifier(name) or type(settings) != "dict":
-            _error(ctx, "invalid escalation group")
+            on_error(ctx, "invalid escalation group")
         if not _path_patterns(settings.get("paths")):
-            _error(ctx, "invalid paths for " + name)
+            on_error(ctx, "invalid paths for " + name)
     if not _path_patterns(policy.get("shared_paths")):
-        _error(ctx, "invalid shared paths")
+        on_error(ctx, "invalid shared paths")
     records = policy.get("deferred_targets")
     if type(records) != "list" or not records:
-        _error(ctx, "policy needs an explicit deferred-target catalog")
+        on_error(ctx, "policy needs an explicit deferred-target catalog")
     seen = {}
     for record in records:
         if type(record) != "dict" or sorted(record) != ["bazel", "group", "package", "skip_tests", "source", "target"]:
-            _error(ctx, "invalid deferred-target record")
+            on_error(ctx, "invalid deferred-target record")
         package, target = record["package"], record["target"]
         if type(package) != "string" or not package or not all([char in _WORD + "-" for char in package.elems()]):
-            _error(ctx, "invalid Cargo package selector")
+            on_error(ctx, "invalid Cargo package selector")
         if not _identifier(target):
-            _error(ctx, "invalid Cargo test selector")
+            on_error(ctx, "invalid Cargo test selector")
         if type(record["group"]) != "string" or record["group"] not in groups:
-            _error(ctx, "target references unknown escalation group")
+            on_error(ctx, "target references unknown escalation group")
         source = record["source"]
         if type(source) != "string" or source.startswith("/") or ".." in source.split("/"):
-            _error(ctx, "source must be repository-relative")
+            on_error(ctx, "source must be repository-relative")
         package_path = "" if package == "vesper" else "crates/" + package
         prefix = package_path + "/" if package_path else ""
         if source != prefix + "tests/" + target + ".rs" or record["bazel"] != "//" + package_path + ":test/" + target:
-            _error(ctx, "Cargo/Bazel/source selectors disagree")
+            on_error(ctx, "Cargo/Bazel/source selectors disagree")
         if source in seen:
-            _error(ctx, "duplicate deferred-target selector")
+            on_error(ctx, "duplicate deferred-target selector")
         seen[source] = True
         metadata = ctx.std.fs.try_metadata(root + "/" + source)
         if metadata == None or not metadata.is_file:
-            _error(ctx, "catalog source missing: " + source)
+            on_error(ctx, "catalog source missing: " + source)
         cases = _rust_cases(ctx.std.fs.read_to_string(root + "/" + source))
         if not cases:
-            _error(ctx, "catalog source has no libtest cases: " + source)
+            on_error(ctx, "catalog source has no libtest cases: " + source)
         skipped = record["skip_tests"]
         if skipped != None:
             if type(skipped) != "list" or not skipped or not all([_identifier(case) for case in skipped]) or len({case: True for case in skipped}) != len(skipped):
-                _error(ctx, "invalid exact test-case selectors")
+                on_error(ctx, "invalid exact test-case selectors")
             missing = sorted([case for case in skipped if case not in cases])
             if missing:
-                _error(ctx, "stale test cases in %s: %r" % (source, missing))
+                on_error(ctx, "stale test cases in %s: %r" % (source, missing))
             if len(cases) == len(skipped):
-                _error(ctx, "partial exclusion leaves no PR tests in " + source)
+                on_error(ctx, "partial exclusion leaves no PR tests in " + source)
     return policy
 
 def _class_value(character: str, contents: str) -> bool:
@@ -193,7 +193,7 @@ def _commit(ctx: TaskContext, root: str, value: str) -> str:
     return result.stdout.strip() if result.status.success else ""
 
 def _make_plan(ctx: TaskContext, root: str, profile: str, base: str, head: str) -> dict:
-    policy = _load_policy(ctx, root)
+    policy = load_policy(ctx, root)
     if profile not in ["pr", "full"]:
         _error(ctx, "unknown platform test profile: " + profile)
     if not _full_sha(head):
@@ -305,7 +305,7 @@ verify_platform_dispatch = task(
 
 def _test_policy(ctx: TaskContext) -> int:
     root = ctx.std.env.aspect_root_dir()
-    policy = _load_policy(ctx, root)
+    policy = load_policy(ctx, root)
     cases = {
         "": ["README.md", "docs/design.md", "website/index.html"],
         "flux_faults": ["crates/vesper-flux/src/cluster.rs", "crates/vesper-simpulse/src/lib.rs"],

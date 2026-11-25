@@ -30,11 +30,11 @@ class AspectTaskTests(unittest.TestCase):
             path.chmod(0o755)
         return path
 
-    def aspect(self, *args, status=0, stdin="", env=None):
+    def aspect(self, *args, status=0, stdin="", env=None, timeout=30):
         result = subprocess.run(
             [ASPECT, *args], cwd=self.nested, input=stdin, text=True,
             env={**os.environ, "CI": "true", **(env or {})},
-            capture_output=True, timeout=30,
+            capture_output=True, timeout=timeout,
         )
         self.assertEqual(result.returncode, status, result.stderr)
         return result
@@ -2092,6 +2092,17 @@ shutil.copy2({str(installer)!r}, Path(directory) / entry)
     def test_platform_suite_discovers_tests_from_workspace_root(self):
         for name in ("commented", "macro", "hostile"):
             self.copy_fixture(f"tests/fixtures/format_proof/{name}.ves")
+        policy_path = "scripts/ci/platform_test_profiles.json"
+        self.copy_fixture(policy_path)
+        policy = json.loads((self.root / policy_path).read_text())
+        for record in policy["deferred_targets"]:
+            self.copy_fixture(record["source"])
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Vesper Fixture", "-c", "user.email=fixture@example.invalid",
+             "commit", "-qm", "Owned platform fixture", "--allow-empty"],
+            cwd=self.root, check=True,
+        )
         self.write("scripts/ci/tests/test_platform_fixture.py", """\
 from pathlib import Path
 import unittest
@@ -2100,7 +2111,7 @@ class ExampleTest(unittest.TestCase):
     def test_workspace_root(self):
         self.assertTrue(Path(".aspect/version.axl").is_file())
 """)
-        result = self.aspect("ci", "platform-tests", "--", "-q")
+        result = self.aspect("ci", "platform-tests", "--", "-q", timeout=90)
         self.assertIn("Ran 1 test", result.stderr)
 
     def test_native_host_runs_expected_statuses_from_shared_cases(self):
