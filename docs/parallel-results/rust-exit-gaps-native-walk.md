@@ -391,3 +391,53 @@ single-run sums, not ABBA CIs.
 
 **Rust lines deleted:** 0. `NativeAbi::plan` stays as the fallback. It
 also serves `native_export` and the compiles the hook declines.
+
+## Part 4b: instance discovery from Vesper (#1509)
+
+### Changes
+
+- **`@vesper/native-walk`**: for each instance, `frames_bytes` now also
+  writes its source function (`I <name>`) and type variables (`V <var>
+  <index>`). A task that plans every instance ends with a `W` line. It holds
+  the variables' type table as decimal words, in check-layout's `Out`
+  stream (`1`, the names, the types).
+- **`native::EntryPlans`** gains `instances`, the `InstanceMap` of the
+  compile.
+- **`src/native.rs`**: when the `entry_plans` hook is installed,
+  `compile_entry` lowers the world first, asks the hook, and takes the
+  instances from its answer in place of `instances_for_entry`. That call
+  lowered the whole world a second time. A declined answer, or one with no
+  instances, falls back to `instances_for_entry`. Without the hook, the
+  order is unchanged.
+- **`tests/common/check_words.rs`**: `decode_type_table`.
+  `tests/common/native_walk_words.rs`: `decode_entry_plans` reads the `I`,
+  `V` and `W` lines.
+
+### Results (Linux x86_64, release)
+
+| Run | Compiles | Hook asked / answered | Differ | Rust | Hooked | In the hook |
+|---|--:|--:|--:|--:|--:|--:|
+| `NATIVE_WALK_FRAME_STEP=1`, 4 entries | 1,966 | 1,980 / 1,838 | **0** | 726.0 s | 723.4 s (**0.996x**) | 16.6 s |
+| default | 614 | 622 / 580 | **0** | 59.8 s | 59.0 s (0.986x) | 1.5 s |
+
+The hooked compiles are now slightly faster than Rust's. The hook's cost
+(encoding, the package, decoding) is less than the second lowering that
+`instances_for_entry` did. Divergence check: setting every decoded
+variable to `i8` locally gives 17 differing compiles (and 4 changed
+outcomes) of 610 on the default run, so the compiles use the Vesper
+instances. (That change isn't committed.) The ratios are single-run sums,
+not ABBA CIs.
+
+**Rust lines deleted:** 0. `instances_for_entry` stays as the fallback
+(trace hosts, `native_export`, declined compiles) and is also used by
+`capability_abi_functions` and the library path.
+
+### What is left
+
+- Trace hosts (`trace_ok`): `@vesper/codegen-calls`' `check_entry` refuses
+  them.
+- `native_export` (library objects) still discovers, plans conventions and
+  plans frames in Rust.
+- With those covered, `instances_for_roots`, `NativeAbi::plan` and
+  `frame_plan` can go behind a flip gate. The emission (`Codegen`, the
+  graph walk) is still Rust, under the family hooks.
