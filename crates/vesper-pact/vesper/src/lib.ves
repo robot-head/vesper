@@ -304,15 +304,10 @@ fn new_s() -> S {
         rp_ok: false
     };
     new_arena(inout s);
-    let mut i: u64 = 0;
-    loop {
-        if i >= 64 {
-            break;
-        }
+    for i in 0..64 {
         s.cn_key.push(0);
         s.cn_val.push(0);
         s.cn_stamp.push(0);
-        i = inc(i);
     }
     s.cn_mask = 63;
     s
@@ -428,17 +423,12 @@ pub fn derivation(in words: Slice[u64]) -> S {
         w(inout s, 1);
         let n = s.de_path.len();
         w(inout s, n);
-        let mut i: u64 = 0;
-        loop {
-            if i >= n {
-                break;
-            }
+        for i in 0..n {
             let x = match s.de_path.try_get(i) {
                 Option::Some(v) => v,
                 Option::None => 0
             };
             w(inout s, x);
-            i = inc(i);
         }
         let off = s.de_off;
         w(inout s, off);

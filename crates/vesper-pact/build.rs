@@ -25,7 +25,7 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
     // fold.ves: caught by merging_duplicate_effect_labels_fails_closed.
     (
         "fold",
-        "        if a == label_key(in s, sw(in s.tmp, k)) {",
+        "        if a == label_key(in s, word_at(in s.tmp, k)) {",
         "        if a == none() {",
     ),
     // infer.ves: caught by open_row_impl_extends_rows.
@@ -37,8 +37,8 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
     // canon.ves: caught by implicit_brand_uses_lexical_model_scopes.
     (
         "canon",
-        "        if nlen(in s, sc) > 0 {",
-        "        if nlen(in s, sc) > 1 {",
+        "        if kid_count(in s, sc) > 0 {",
+        "        if kid_count(in s, sc) > 1 {",
     ),
     // mode.ves: caught by mode_bounds_follow_the_lattice.
     (
@@ -87,14 +87,14 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
     // coherence.ves: caught by coherence_violations_are_reported_deterministically.
     (
         "coherence",
-        "    if sw(in s.tr_pkg, t) == pkg {",
-        "    if sw(in s.tr_pkg, t) != pkg {",
+        "    if word_at(in s.tr_pkg, t) == pkg {",
+        "    if word_at(in s.tr_pkg, t) != pkg {",
     ),
     // deriv.ves: caught by tampered_derivations_are_rejected.
     (
         "deriv",
-        "        if nlen(in s, d) != nlen(in s, sw(in s.cf_where, ci)) {",
-        "        if nlen(in s, d) > nlen(in s, sw(in s.cf_where, ci)) {",
+        "        if kid_count(in s, d) != kid_count(in s, word_at(in s.cf_where, ci)) {",
+        "        if kid_count(in s, d) > kid_count(in s, word_at(in s.cf_where, ci)) {",
     ),
     // out.ves: caught by coinductive_cycle_is_proven_and_marked.
     (
