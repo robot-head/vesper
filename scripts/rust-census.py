@@ -63,7 +63,7 @@ CRATES = {
     "vesper-kinetic": ("partial", "in crate (+ seed)", "colorer 0.80x, multi-colorer 1.31x, gjk 1.41x, sap 1.07x, fastmath 1.08x, morton 0.77x, lbvh 1.32x, pile-lbvh 1.16x, crmath 1.39x, scene 1.18x, ccd 0.725x, manifold 1.168x, sleep 1.064x, diff 1.103x", "coloring, gjk, sap, fastmath, morton, lbvh, crmath, rigid/ccd, rigid/manifold, rigid/sleep and diff backward/detect flipped (Rust in seed/src/engine); world/tile, rigid solver/joints, soft, articulation, couple, rollback, snapshot, detfloat, simd unported", "9"),
     "vesper-resonance": ("partial", "in crate (+ seed)", "kernel 1.07x, graph 1.07x, schedule 1.02x, pid 1.27x, confine 1.35x; slab 1.89x, events 8.00x, simd 8-48x", "kernel render, PID controller, built-in graph, schedule compiler and confinement verifier flipped (Rust in seed/src/engine); slab, events, simd above the bar; clif, spsc rings, denorm, dyn CompiledGraph unported", "9"),
     "vesper-silicon": ("partial", "in crate", "unmeasured", "SVD model, stack/prologue/hazard analysis (Cranelift IR), mmio", "10"),
-    "vesper-ebpf": ("partial", "in crate (+ seed)", "0.57-1.35x (ext 1.68x, decode 1.81x)", "btf, callgraph, core, helpers, insn, interp, program, scalar, verifier flipped; btf_ext, wire, ELF, bpf() syscalls still Rust", "10"),
+    "vesper-ebpf": ("partial", "in crate (+ seed)", "0.57-1.35x (ext 1.23x, decode 1.65x)", "btf, btf_ext readers, callgraph, core, helpers, insn, interp, program, scalar, verifier flipped; wire, writers, ELF, bpf() syscalls still Rust", "10"),
     "vesper-serde": ("partial", "in crate", "4.8-5.7x", "SIMD stage 1 needs source vectors", "11"),
     "vesper-tensor": ("partial", "in crate", "unmeasured", "safetensors, memmap, simd kernels", "11"),
     "vesper-alloc": ("partial", "in crate", "unmeasured", "cache B-tree, arena keys, OS pages", "11"),
@@ -72,7 +72,7 @@ CRATES = {
     "vesper-semver": ("partial", "in crate", "1.6-2.3x", "speed: Rust encoder hash-conses every node; checker reads through try_get", "12"),
     "vesper-loom-calculus": ("gone", "in crate (+ seed)", "1.12x @8 / 0.80x @64 pkgs", "seed until Stage 2; TOML decoding in Vesper (#965), serde_json read of its output", "12"),
     "vesper-loom-audit": ("gone", "in crate (+ seed)", "1.37x @8 / 1.15x @64 / 0.96x @256 pkgs", "seed until Stage 2; size checks and BLAKE3 digests (vesper-blake3-sys)", "12"),
-    "vesper-beacon": ("partial", "in crate (+ seed)", "traceparent 0.90x; spans 1.61x, exp 2.58x, hist 3.00x", "traceparent flipped; histogram, exponential, spans still Rust (seed until Stage 2)", "12"),
+    "vesper-beacon": ("partial", "in crate (+ seed)", "traceparent 0.90x, spans 1.35x; exp 2.58x, hist 3.00x", "traceparent, spans flipped; histogram, exponential still Rust (seed until Stage 2)", "12"),
     "vesper-sim-session": ("partial", "in crate", "unmeasured", "umem, warp, JSON, driver (SH5 lane 19)", "SH5-19"),
     # The compiler's own crates.
     "vesper-syntax": ("compiler", "packages/vesper-front", "parse swap 1.03x corpus", "editor mode, lossless CST users", "SH1/2"),
@@ -133,7 +133,7 @@ CRATES = {
 
 # Root compiler module -> (owner lane(s), Vesper package, status note)
 MODULES = {
-    "verified_codegen": ("#1886", "vesper-verified-codegen", "owner 2026-11-25: port to Vesper; parts 1-3: slot IR, select, encoders, ELF/Mach-O/COFF containers, range certificate (0 diffs: 12,488 rows, 1,034 builds over 5 targets, 13,749 certificate checks; select 0.91x, certificate 0.93x); left: lowering, fail, swap"),
+    "verified_codegen": ("#1886", "vesper-verified-codegen", "owner 2026-11-25: port to Vesper; parts 1-4a: slot IR, select, encoders, ELF/Mach-O/COFF containers, range certificate, plan + lowering without handlers (0 diffs: 12,488 rows, 1,034 builds over 5 targets, 13,749 certificate checks, 222 lowerings; select 0.91x, certificate 0.93x, lowering 1.07x); left: mono, handlers/evidence/regions, coverage, cli, swap"),
     "lean": ("SH5-18", "vesper-lean-extract", "part 3a 2.37x"),
     "lean_ir": ("SH5-18", "vesper-lean-extract", ""),
     "lean_nodes": ("SH5-18", "vesper-lean-extract", ""),

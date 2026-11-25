@@ -74,7 +74,7 @@ unsafe extern "C" {
     fn vesper_tensor_attend(storage: *mut u64, pages: *mut u64, slots: *mut u64, leases: *mut u64, cfg: *mut u64, slot: i64, generation: i64, query: *mut u64, scores: *mut u64, block: *mut u64, out: *mut u64, page: *mut u64, query_heads: i64, tokens: i64, online: i64, words: i64, fail: *mut u64) -> i64;
     fn vesper_tensor_check_mxfp4_block(block: *mut u64, fail: *mut u64) -> i64;
     fn vesper_tensor_check_q4_k_block(block: *mut u64, fail: *mut u64) -> i64;
-    fn vesper_tensor_decode_bf16(bits: i64, fail: *mut u64) -> i64;
+    fn vesper_tensor_decode_bf16(bits: i64) -> i64;
     fn vesper_tensor_decode_fp16(bits: i64, fail: *mut u64) -> i64;
     fn vesper_tensor_decode_piece(format: i64, scale: i64, raw: *mut u64, out: *mut u64, fail: *mut u64) -> i64;
     fn vesper_tensor_dequantize_mxfp4_block(block: *mut u64, out: *mut u64, fail: *mut u64) -> i64;
@@ -249,17 +249,12 @@ pub fn check_q4_k_block(block: &[u8]) -> Result<bool, CheckQ4KBlockError> {
 }
 
 /// Calls `decode_bf16` of the Vesper library `tensor` (`vesper_tensor_decode_bf16`).
-pub fn decode_bf16(bits: u16) -> Result<u32, vesper_port_abi::ArithOverflow> {
-    let mut fail = [0u64; 2];
+pub fn decode_bf16(bits: u16) -> u32 {
     // SAFETY: `vesper_tensor_decode_bf16` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_tensor_decode_bf16(bits as i64, fail.as_mut_ptr()) };
-    match fail[0] {
-        0 => Ok(raw as u32),
-        1 => Err(<vesper_port_abi::ArithOverflow as Abi>::get(&fail[1..])),
-        status => panic!("invalid failure status {status} from vesper_tensor_decode_bf16"),
-    }
+    let raw = unsafe { vesper_tensor_decode_bf16(bits as i64) };
+    raw as u32
 }
 
 /// Calls `decode_fp16` of the Vesper library `tensor` (`vesper_tensor_decode_fp16`).

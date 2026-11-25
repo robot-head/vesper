@@ -160,7 +160,7 @@ pub fn encode_bf16(value: u32) -> u16 eff [Fail[ArithOverflow]] {
     h_encode_bf16(from_bits_f32(value))
 }
 
-pub fn decode_bf16(bits: u16) -> u32 eff [Fail[ArithOverflow]] {
+pub fn decode_bf16(bits: u16) -> u32 {
     to_bits_f32(h_decode_bf16(bits))
 }
 

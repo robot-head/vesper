@@ -105,7 +105,7 @@ pub fn decode_bf16(bits: u16) -> f32 {
 }
 #[cfg(vesper_port)]
 pub fn decode_bf16(bits: u16) -> f32 {
-    f32::from_bits(crate::port::must(crate::port::binding::decode_bf16(bits)))
+    f32::from_bits(crate::port::binding::decode_bf16(bits))
 }
 
 /// Encoding of a weight matrix's elements.

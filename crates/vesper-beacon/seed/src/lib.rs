@@ -9,7 +9,7 @@ mod exponential;
 mod histogram;
 #[path = "../../src/redaction.rs"]
 mod redaction;
-#[path = "../../src/spans.rs"]
+#[path = "engine/spans.rs"]
 mod spans;
 #[path = "engine/traceparent.rs"]
 mod traceparent;

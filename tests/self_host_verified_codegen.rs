@@ -21,6 +21,10 @@
 //! - `CHECK_HARNESS_SPEED=1` runs the ABBA timing (release build).
 #[path = "common/check_harness.rs"]
 mod check_harness;
+#[path = "common/check_words.rs"]
+mod check_words;
+#[path = "common/ir_words.rs"]
+mod ir_words;
 
 use check_harness::*;
 use std::sync::OnceLock;
@@ -1049,6 +1053,187 @@ fn certificate_flip_gate() {
                 for _ in 0..5 {
                     for i in &inputs {
                         std::hint::black_box(check.text(i));
+                    }
+                }
+            })
+        },
+    );
+    println!(
+        "flip-gate pairs rust={} vesper={}",
+        r.as_nanos(),
+        v.as_nanos()
+    );
+}
+
+// ----- part 4a: the lowering ---------------------------------------------------
+//
+// `lower.ves` against `lower::plan` and `lower::function`, through
+// `verified_codegen::lowering_for_test`: the program `compile` lowers (after
+// ir_opt, monomorphization and evidence passing), as ir_words encodes it,
+// then the entry, the limits, whether the region prelude is active and the
+// names of the world's functions. The package prints every planned
+// function's rows in the Rust `Debug` form, or the error's text. Programs
+// with `handle` expressions or region operations are part 4c's: the
+// package answers `not ported` for them.
+
+fn put_string(s: &str, words: &mut Vec<u64>) {
+    words.push(s.len() as u64);
+    for chunk in s.as_bytes().chunks(8) {
+        let mut b = [0u8; 8];
+        b[..chunk.len()].copy_from_slice(chunk);
+        words.push(u64::from_le_bytes(b));
+    }
+}
+
+fn lowering_input(
+    world: &vesper::check::World,
+    program: &vesper::ir::Program,
+    entry: &str,
+    options: &verified::Options,
+) -> Option<Vec<u8>> {
+    let (mut bytes, _) = ir_words::program_input(world, program)?;
+    let mut words = vec![];
+    put_string(entry, &mut words);
+    words.push(options.max_functions as u64);
+    words.push(options.max_rows as u64);
+    words.push(u64::from(vesper::regions::active(world)));
+    words.push(world.functions.len() as u64);
+    for name in world.functions.keys() {
+        put_string(name, &mut words);
+    }
+    bytes.extend(bytes_of(&words));
+    Some(bytes)
+}
+
+/// `lower_input`'s text for the Rust lowering's result.
+fn rust_lowering_text(lowered: &Result<Program, verified::VerifiedError>) -> String {
+    use std::fmt::Write as _;
+    match lowered {
+        Ok(functions) => {
+            let mut out = String::new();
+            for (name, rows) in functions {
+                writeln!(out, "fn {name}").unwrap();
+                for row in rows {
+                    writeln!(out, "{row:?}").unwrap();
+                }
+            }
+            out
+        }
+        Err(e) => format!("error: {e}\n"),
+    }
+}
+
+/// Every corpus world's lowering input and the Rust result: (name, input,
+/// Rust text), for the programs without handler sites.
+fn lowering_cases(options: &verified::Options) -> Vec<(String, Vec<u8>, String)> {
+    lowering_programs(options)
+        .into_iter()
+        .map(|(name, _, input, rust)| (name, input, rust))
+        .collect()
+}
+
+/// [`lowering_cases`] with each case's world index and program.
+#[allow(clippy::type_complexity)]
+fn lowering_programs(
+    options: &verified::Options,
+) -> Vec<(String, (usize, vesper::ir::Program), Vec<u8>, String)> {
+    let mut out = vec![];
+    for (k, case) in corpus().iter().enumerate().step_by(stride()) {
+        let Ok((program, sites, lowered)) =
+            verified::lowering_for_test(&case.world, "main", options)
+        else {
+            continue;
+        };
+        if sites {
+            continue;
+        }
+        let Some(input) = lowering_input(&case.world, &program, "main", options) else {
+            continue;
+        };
+        let rust = rust_lowering_text(&lowered);
+        out.push((case.name.clone(), (k, program), input, rust));
+    }
+    out
+}
+
+#[test]
+fn lowering_matches_rust_on_the_corpus() {
+    let Some(target) = verified::Target::host() else {
+        eprintln!("verified lowering: no verified target for this host");
+        return;
+    };
+    let lower = entry("lowering_text");
+    let mut bad = 0;
+    let mut compared = 0;
+    let mut lowered = 0;
+    let mut not_ported = 0;
+    for optimize in [true, false] {
+        let mut options = verified::Options::new(target);
+        options.optimize = optimize;
+        for (name, input, rust) in lowering_cases(&options) {
+            let vesper = lower.text(&input);
+            if vesper.starts_with("error: not ported") {
+                not_ported += 1;
+                continue;
+            }
+            compared += 1;
+            if !rust.starts_with("error: ") {
+                lowered += 1;
+            }
+            if vesper != rust {
+                bad += 1;
+                if bad <= 5 {
+                    let d = first_difference(&rust, &vesper);
+                    eprintln!(
+                        "verified lowering ({name}, optimize {optimize}): first difference {d:?}"
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "verified lowering corpus: {bad} of {compared} programs differ ({lowered} lowered, {not_ported} not ported)"
+    );
+    println!("flip-gate differential differences={bad} cases={compared}");
+    assert!(lowered > 20, "only {lowered} corpus programs lower");
+    assert_eq!(bad, 0);
+}
+
+/// ABBA timing of the lowering (`CHECK_HARNESS_SPEED=1`): the Rust plan,
+/// lowering and text against the package's decode, plan, lowering and
+/// text, over the corpus programs the package lowers.
+#[test]
+fn lowering_flip_gate() {
+    if !speed() {
+        return;
+    }
+    let Some(target) = verified::Target::host() else {
+        return;
+    };
+    let options = verified::Options::new(target);
+    let lower = entry("lowering_text");
+    let cases: Vec<_> = lowering_programs(&options)
+        .into_iter()
+        .filter(|(_, _, input, _)| !lower.text(input).starts_with("error: not ported"))
+        .collect();
+    let (r, v) = abba(
+        "verified lowering",
+        &mut || {
+            time(|| {
+                for _ in 0..5 {
+                    for (_, (k, program), _, _) in &cases {
+                        let world = &corpus()[*k].world;
+                        let lowered = verified::lower_for_test(world, program, "main", &options);
+                        std::hint::black_box(rust_lowering_text(&lowered));
+                    }
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for _ in 0..5 {
+                    for (_, _, input, _) in &cases {
+                        std::hint::black_box(lower.text(input));
                     }
                 }
             })
