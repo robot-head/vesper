@@ -59,6 +59,10 @@ use self::backend::{
     g_new,
     lower
 };
+use self::object::{
+    build_object,
+    declined_compile
+};
 
 fn put_bytes(inout o: ChunkSeq[u64], in b: ChunkSeq[u8]) {
     let n = b.len();
@@ -202,4 +206,25 @@ pub fn ebpf_backend_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
 // The harness entry: input words to result words.
 pub fn ebpf_backend_words(in input: Str) -> ChunkSeq[u64] {
     ebpf_backend_bytes(in input.as_bytes())
+}
+
+// `vesper build --target bpf` in the Vesper driver (#1895): compile,
+// verify and write the ELF object (object.ves). 0 with the object in
+// `object` and the summary after "wrote <path> (<n> bytes): " in `tail`,
+// or nonzero when Rust should build it (a compile error or anything the
+// Rust pass reports in its own words).
+pub fn ebpf_backend_build(in b: Slice[u8], inout object: ChunkSeq[u8], inout tail: ChunkSeq[u8])
+    -> u64 {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c);
+    let x = read_extra(inout r, in b, inout c.types, inout c.names);
+    let mut g = g_new();
+    if analyze(inout g, inout c, in p, in x) && lower(inout g, inout c, in p, in x) {
+        build_object(in g, in c.names, in x, inout object, inout tail)
+    } else {
+        declined_compile()
+    }
 }
