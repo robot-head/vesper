@@ -7,7 +7,7 @@ load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper
 # compiler switches to it. The compiler links neither: it links the Rust seed
 # copy, //crates/vesper-lint/seed (seed-copy rule,
 # docs/maintenance/porting-a-crate.md). The port's differential tests run in
-# Cargo (port/test-port.sh, Linux port shard 7).
+# Cargo (aspect crate lint test-port, Linux port shard 7).
 vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
@@ -36,7 +36,7 @@ filegroup(
 # The divergent builds, one per ported area (the Cargo
 # `vesper-port-divergent` feature applies the same edits from build.rs, one
 # at a time with VESPER_LINT_DIVERGE): each must keep compiling, and
-# port/test-port.sh asserts that the differential test catches it.
+# aspect crate lint test-port asserts that the differential test catches it.
 [
     vesper_port_object(
         name = "lint_vesper_divergent_" + area,
