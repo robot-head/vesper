@@ -10,6 +10,7 @@ use self::build::{
     B,
     B_EXPLICIT,
     P_BIND,
+    P_NAT,
     P_CTOR,
     P_TUPLE,
     P_WILD,
@@ -438,6 +439,14 @@ pub fn lambda(inout b: B, in binders: ChunkSeq[T], body: T) -> T {
 pub fn p_wild(inout b: B) -> T {
     let m = b.at();
     b.w(P_WILD);
+    b.since(m)
+}
+
+// `Pattern::Nat` of decimal text `v`.
+pub fn p_nat(inout b: B, in v: Str) -> T {
+    let m = b.at();
+    b.w(P_NAT);
+    b.text(in v);
     b.since(m)
 }
 

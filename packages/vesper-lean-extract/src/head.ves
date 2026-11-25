@@ -164,7 +164,7 @@ impl Graph {
 }
 
 // petgraph's `TarjanScc` state (`rootindex`, 0 for `None`).
-struct Tarjan {
+pub struct Tarjan {
     root: ChunkSeq[u64],
     index: u64,
     count: u64,
@@ -235,7 +235,7 @@ fn visit(in g: Graph, inout s: Tarjan, v: u32) {
 }
 
 // `tarjan_scc`: components as node lists (`out`, cut at `ends`).
-fn scc(in g: Graph) -> Tarjan {
+pub fn scc(in g: Graph) -> Tarjan {
     let n = g.adts.len();
     let mut s = Tarjan {
         root: ChunkSeq::with_capacity[u64](n),
