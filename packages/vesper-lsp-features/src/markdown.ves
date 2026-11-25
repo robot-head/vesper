@@ -1,0 +1,808 @@
+// The Markdown half of `vesper_doc::links::analyze`
+// (crates/vesper-doc/src/links.rs): code spans, link brackets and titles
+// over the joined doc-comment lines, charged against links.ves's budget.
+
+use @vesper/front::lex::{
+    lex_with_limits,
+    token_end
+};
+use @vesper/front::diag::{
+    diags_new
+};
+use self::json::{
+    byte
+};
+use self::nav::{
+    Ix,
+    MAX_SOURCE_BYTES,
+    u32_at,
+    u8_at,
+    w
+};
+use self::links::{
+    L_MAX_METADATA,
+    L_MAX_REFERENCES,
+    Link,
+    NOT_FOUND,
+    SIZE_DIAGNOSTIC,
+    SIZE_LINE,
+    SIZE_REFERENCE,
+    SIZE_TOKEN,
+    TK_COMMENT,
+    TK_WHITESPACE,
+    check_path,
+    has_self_segment,
+    link_fail,
+    link_inventory,
+    lmeta,
+    local_path,
+    lpush,
+    lwork,
+    u64_at
+};
+
+fn line_len(in k: Link, i: u64) -> u64 {
+    u64_at(in k.l_len, i)
+}
+
+// Byte `at` of comment line `i` (0 past its end).
+fn lb(in k: Link, in b: Slice[u8], i: u64, at: u64) -> u8 {
+    if at >= line_len(in k, i) {
+        return 0;
+    }
+    byte(in b, wrapping_add(u64_at(in k.l_start, i), at))
+}
+
+fn ascii_space(c: u8) -> bool {
+    c == 32 || c == 9 || c == 10 || c == 12 || c == 13
+}
+
+// `run`: how many `c` bytes start at `at` of line `i`.
+fn run(inout k: Link, in b: Slice[u8], i: u64, at: u64, c: u8, inout n: u64) -> bool {
+    n = 0;
+    loop {
+        if wrapping_add(at, n) >= line_len(in k, i) || lb(in k, in b, i, wrapping_add(at, n)) != c {
+            return true;
+        }
+        if !lwork(inout k, 1) {
+            return false;
+        }
+        n = wrapping_add(n, 1);
+    }
+}
+
+// Whether `b[s..e]` is empty after `str::trim` (Unicode White_Space).
+fn blank(in b: Slice[u8], s: u64, e: u64) -> bool {
+    let mut i = s;
+    loop {
+        if i >= e {
+            return true;
+        }
+        let c = byte(in b, i);
+        if c == 32 || (c >= 9 && c <= 13) {
+            i = wrapping_add(i, 1);
+        } else if c == 194 && wrapping_add(i, 1) < e {
+            let d = byte(in b, wrapping_add(i, 1));
+            if d == 133 || d == 160 {
+                i = wrapping_add(i, 2);
+            } else {
+                return false;
+            }
+        } else if c == 225 && wrapping_add(i, 2) < e {
+            if byte(in b, wrapping_add(i, 1)) == 154 && byte(in b, wrapping_add(i, 2)) == 128 {
+                i = wrapping_add(i, 3);
+            } else {
+                return false;
+            }
+        } else if c == 226 && wrapping_add(i, 2) < e {
+            let d = byte(in b, wrapping_add(i, 1));
+            let f = byte(in b, wrapping_add(i, 2));
+            let space = (d == 128 && ((f >= 128 && f <= 138) || f == 168 || f == 169 || f == 175))
+                || (d == 129 && f == 159);
+            if space {
+                i = wrapping_add(i, 3);
+            } else {
+                return false;
+            }
+        } else if c == 227 && wrapping_add(i, 2) < e {
+            if byte(in b, wrapping_add(i, 1)) == 128 && byte(in b, wrapping_add(i, 2)) == 128 {
+                i = wrapping_add(i, 3);
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+}
+
+// Line `i` from byte `at` to its end is blank.
+fn rest_blank(in k: Link, in b: Slice[u8], i: u64, at: u64) -> bool {
+    let s = u64_at(in k.l_start, i);
+    let l = line_len(in k, i);
+    if at >= l {
+        return true;
+    }
+    blank(in b, wrapping_add(s, at), wrapping_add(s, l))
+}
+
+// The ' '/'\t' indentation of line `i`.
+fn indent(in k: Link, in b: Slice[u8], i: u64) -> u64 {
+    let mut n: u64 = 0;
+    loop {
+        if n >= line_len(in k, i) {
+            return n;
+        }
+        let c = lb(in k, in b, i, n);
+        if c != 32 && c != 9 {
+            return n;
+        }
+        n = wrapping_add(n, 1);
+    }
+}
+
+fn pack2(line: u64, at: u64) -> u64 {
+    wrapping_shl_u64(line, 32) | at
+}
+
+fn line_of(v: u64) -> u64 {
+    wrapping_shr_u64(v, 32)
+}
+
+fn at_of(v: u64) -> u64 {
+    v & 4294967295
+}
+
+// `close_ticks`: the end of the run of `count` backticks closing the one
+// at line `line`, byte `at`; NOT_FOUND when unclosed.
+fn close_ticks(inout k: Link, in b: Slice[u8], line: u64, at: u64, count: u64, inout out: u64)
+    -> bool {
+    out = NOT_FOUND;
+    let n = k.l_start.len();
+    for i in line..n {
+        let len = line_len(in k, i);
+        let mut pos = if i == line {
+            wrapping_add(at, count)
+        } else {
+            0
+        };
+        loop {
+            if pos >= len {
+                break;
+            }
+            if !lwork(inout k, 1) {
+                return false;
+            }
+            if lb(in k, in b, i, pos) == 96 {
+                let mut r: u64 = 0;
+                if !run(inout k, in b, i, pos, 96, inout r) {
+                    return false;
+                }
+                if !lwork(inout k, r) {
+                    return false;
+                }
+                if r == count {
+                    out = pack2(i, wrapping_add(pos, r));
+                    return true;
+                }
+                pos = wrapping_add(pos, r);
+            } else {
+                pos = wrapping_add(pos, 1);
+            }
+        }
+    }
+    true
+}
+
+// `balanced_end`: the line and byte after the `close` matching the `open`
+// at line `line`, byte `start`; NOT_FOUND when unbalanced.
+fn balanced_end(
+    inout k: Link,
+    in b: Slice[u8],
+    line: u64,
+    start: u64,
+    open: u8,
+    close: u8,
+    inout out: u64
+) -> bool {
+    out = NOT_FOUND;
+    let mut depth: u64 = 1;
+    let mut quoting: u8 = 0;
+    let mut angle = false;
+    let mut started = false;
+    let mut separated = false;
+    let mut index = line;
+    let mut at = wrapping_add(start, 1);
+    let n = k.l_start.len();
+    loop {
+        if index >= n {
+            return true;
+        }
+        let len = line_len(in k, index);
+        if at >= len {
+            if open == 40 && started && depth == 1 && quoting == 0 && !angle {
+                separated = true;
+            }
+            index = wrapping_add(index, 1);
+            at = 0;
+            continue;
+        }
+        if !lwork(inout k, 1) {
+            return false;
+        }
+        let c = lb(in k, in b, index, at);
+        if c == 92 {
+            at = wrapping_add(at, 2);
+            if at > len {
+                at = len;
+            }
+            continue;
+        }
+        if open == 91 && c == 96 {
+            let mut r: u64 = 0;
+            if !run(inout k, in b, index, at, 96, inout r) {
+                return false;
+            }
+            if !lwork(inout k, r) {
+                return false;
+            }
+            let mut end: u64 = 0;
+            if !close_ticks(inout k, in b, index, at, r, inout end) {
+                return false;
+            }
+            if end != NOT_FOUND {
+                index = line_of(end);
+                at = at_of(end);
+            } else {
+                at = wrapping_add(at, r);
+            }
+            continue;
+        }
+        if open == 40 {
+            if quoting != 0 {
+                if c == quoting {
+                    quoting = 0;
+                }
+                at = wrapping_add(at, 1);
+                continue;
+            }
+            if angle {
+                if c == 62 {
+                    angle = false;
+                }
+                at = wrapping_add(at, 1);
+                continue;
+            }
+            if !started && ascii_space(c) {
+                at = wrapping_add(at, 1);
+                continue;
+            }
+            if !started {
+                started = true;
+                if c == 60 {
+                    angle = true;
+                    at = wrapping_add(at, 1);
+                    continue;
+                }
+            } else if depth == 1 && ascii_space(c) {
+                separated = true;
+            }
+            if separated && depth == 1 && (c == 39 || c == 34) {
+                quoting = c;
+                at = wrapping_add(at, 1);
+                continue;
+            }
+        }
+        if c == open {
+            depth = wrapping_add(depth, 1);
+        } else if c == close {
+            depth = wrapping_sub(depth, 1);
+            if depth == 0 {
+                out = pack2(index, wrapping_add(at, 1));
+                return true;
+            }
+        }
+        at = wrapping_add(at, 1);
+    }
+}
+
+// `next_markdown`: the first byte that is not ' ', '\t' or '\r' from
+// line `line`, byte `start`, on that line or the next; NOT_FOUND.
+fn next_markdown(inout k: Link, in b: Slice[u8], line: u64, start: u64, inout out: u64) -> bool {
+    out = NOT_FOUND;
+    let n = k.l_start.len();
+    let mut last = wrapping_add(line, 2);
+    if last > n {
+        last = n;
+    }
+    for i in line..last {
+        let len = line_len(in k, i);
+        let mut at = if i == line {
+            start
+        } else {
+            0
+        };
+        loop {
+            if at >= len {
+                break;
+            }
+            let c = lb(in k, in b, i, at);
+            if c != 32 && c != 9 && c != 13 {
+                break;
+            }
+            if !lwork(inout k, 1) {
+                return false;
+            }
+            at = wrapping_add(at, 1);
+        }
+        if at < len {
+            out = pack2(i, at);
+            return true;
+        }
+    }
+    true
+}
+
+// `continued_definition_title`: the line after a reference definition's
+// title that starts on line `line`, or NOT_FOUND.
+fn continued_title(inout k: Link, in b: Slice[u8], line: u64, inout out: u64) -> bool {
+    out = NOT_FOUND;
+    let n = k.l_start.len();
+    if line >= n {
+        return true;
+    }
+    let ind = indent(in k, in b, line);
+    if !lwork(inout k, wrapping_add(ind, 1)) {
+        return false;
+    }
+    if ind >= line_len(in k, line) {
+        return true;
+    }
+    let open = lb(in k, in b, line, ind);
+    if open != 39 && open != 34 && open != 40 {
+        return true;
+    }
+    let close = if open == 40 {
+        41
+    } else {
+        open
+    };
+    let mut at = wrapping_add(ind, 1);
+    let mut depth: u64 = 1;
+    for i in line..n {
+        if i != line {
+            at = 0;
+        }
+        let len = line_len(in k, i);
+        if rest_blank(in k, in b, i, 0) {
+            return true;
+        }
+        loop {
+            if at >= len {
+                break;
+            }
+            if !lwork(inout k, 1) {
+                return false;
+            }
+            let c = lb(in k, in b, i, at);
+            if c == 92 {
+                at = wrapping_add(at, 2);
+                if at > len {
+                    at = len;
+                }
+                continue;
+            }
+            if open == 40 && c == open {
+                depth = wrapping_add(depth, 1);
+            }
+            if c == close {
+                depth = wrapping_sub(depth, 1);
+                if depth == 0 {
+                    if !lwork(inout k, wrapping_sub(len, at)) {
+                        return false;
+                    }
+                    if rest_blank(in k, in b, i, wrapping_add(at, 1)) {
+                        out = wrapping_add(i, 1);
+                    }
+                    return true;
+                }
+            }
+            at = wrapping_add(at, 1);
+        }
+    }
+    true
+}
+
+// `occurrence` of the link text `b[s..e]` spanning source bytes
+// `span_s..span_e`.
+fn occurrence(inout k: Link, in b: Slice[u8], s: u64, e: u64, span_s: u64, span_e: u64) -> bool {
+    // `path`: strip one pair of backticks.
+    let mut ps = s;
+    let mut pe = e;
+    if wrapping_sub(e, s) >= 2 && byte(in b, s) == 96 && byte(in b, wrapping_sub(e, 1)) == 96 {
+        ps = wrapping_add(s, 1);
+        pe = wrapping_sub(e, 1);
+    } else if wrapping_sub(e, s) == 1 && byte(in b, s) == 96 {
+        // "`" strips to "" from the front and has no suffix left: as-is.
+    }
+    // 1 local, 2 unsupported.
+    let mut kind: u64 = 0;
+    if local_path(in b, ps, pe) {
+        if !check_path(inout k, in b, ps, pe) {
+            return false;
+        }
+        kind = if has_self_segment(in b, ps, pe) {
+            2
+        } else {
+            1
+        };
+    } else {
+        let mut bracket = NOT_FOUND;
+        for i in ps..pe {
+            if byte(in b, i) == 91 {
+                bracket = i;
+                break;
+            }
+        }
+        if (pe > ps && byte(in b, ps) == 64)
+            || (bracket != NOT_FOUND && local_path(in b, ps, bracket)) {
+            if !check_path(inout k, in b, ps, pe) {
+                return false;
+            }
+            kind = 2;
+        }
+    }
+    if kind == 0 {
+        return true;
+    }
+    if wrapping_add(k.r_start.len(), k.diagnostics) >= L_MAX_REFERENCES {
+        return link_fail(inout k, 1);
+    }
+    let mut found = NOT_FOUND;
+    let mut matches: u64 = 0;
+    if kind == 1 {
+        let plen = wrapping_sub(pe, ps);
+        for i in 0..k.t_s.len() {
+            let tl = u64_at(in k.t_l, i);
+            if !lwork(inout k, wrapping_add(wrapping_add(plen, tl), 1)) {
+                return false;
+            }
+            if tl == plen {
+                let ts = u64_at(in k.t_s, i);
+                let mut same = true;
+                for j in 0..plen {
+                    if u8_at(in k.paths, wrapping_add(ts, j)) != byte(in b, wrapping_add(ps, j)) {
+                        same = false;
+                        break;
+                    }
+                }
+                if same {
+                    found = i;
+                    matches = wrapping_add(matches, 1);
+                }
+            }
+        }
+    }
+    if matches == 1 {
+        let tl = u64_at(in k.t_l, found);
+        // `copy_target`, `anchor`, the display string, then the push.
+        if !lmeta(inout k, tl) {
+            return false;
+        }
+        if !lmeta(inout k, wrapping_mul(wrapping_add(32, wrapping_mul(tl, 2)), 4)) {
+            return false;
+        }
+        if !lmeta(inout k, wrapping_sub(e, s)) {
+            return false;
+        }
+        let cap = lpush(inout k, k.r_start.len(), k.r_cap, SIZE_REFERENCE);
+        if cap == NOT_FOUND {
+            return false;
+        }
+        k.r_cap = cap;
+        k.r_start.push(span_s);
+        k.r_end.push(span_e);
+        k.r_target.push(found);
+        return true;
+    }
+    let (code, message) = if kind == 2 {
+        (11, 37)
+    } else if matches == 0 {
+        (7, 33)
+    } else {
+        (9, 35)
+    };
+    if !lmeta(inout k, code) || !lmeta(inout k, message) {
+        return false;
+    }
+    let cap = lpush(inout k, k.diagnostics, k.d_cap, SIZE_DIAGNOSTIC);
+    if cap == NOT_FOUND {
+        return false;
+    }
+    k.d_cap = cap;
+    k.diagnostics = wrapping_add(k.diagnostics, 1);
+    true
+}
+
+// `group`: the links of one run of comment lines.
+fn group(inout k: Link, in b: Slice[u8]) -> bool {
+    let n = k.l_start.len();
+    let mut line: u64 = 0;
+    let mut at: u64 = 0;
+    let mut fence: u8 = 0;
+    let mut fence_count: u64 = 0;
+    loop {
+        if line >= n {
+            return true;
+        }
+        let len = line_len(in k, line);
+        if at == 0 {
+            let ind = indent(in k, in b, line);
+            if !lwork(inout k, wrapping_add(ind, 1)) {
+                return false;
+            }
+            let first: u8 = if ind < len {
+                lb(in k, in b, line, ind)
+            } else {
+                0
+            };
+            if fence != 0 {
+                if ind < len && first == fence {
+                    let mut r: u64 = 0;
+                    if !run(inout k, in b, line, ind, fence, inout r) {
+                        return false;
+                    }
+                    if !lwork(inout k, wrapping_add(r, wrapping_sub(wrapping_sub(len, ind), r))) {
+                        return false;
+                    }
+                    if r >= fence_count && rest_blank(in k, in b, line, wrapping_add(ind, r)) {
+                        fence = 0;
+                    }
+                }
+                line = wrapping_add(line, 1);
+                continue;
+            }
+            if ind < len && (first == 96 || first == 126) {
+                let mut r: u64 = 0;
+                if !run(inout k, in b, line, ind, first, inout r) {
+                    return false;
+                }
+                if !lwork(inout k, r) {
+                    return false;
+                }
+                if r >= 3 {
+                    fence = first;
+                    fence_count = r;
+                    line = wrapping_add(line, 1);
+                    continue;
+                }
+            }
+        }
+        if at >= len {
+            line = wrapping_add(line, 1);
+            at = 0;
+            continue;
+        }
+        if !lwork(inout k, 1) {
+            return false;
+        }
+        let c = lb(in k, in b, line, at);
+        if c == 92 {
+            at = wrapping_add(at, 2);
+            if at > len {
+                at = len;
+            }
+        } else if c == 96 {
+            let mut r: u64 = 0;
+            if !run(inout k, in b, line, at, 96, inout r) {
+                return false;
+            }
+            if !lwork(inout k, r) {
+                return false;
+            }
+            let mut end: u64 = 0;
+            if !close_ticks(inout k, in b, line, at, r, inout end) {
+                return false;
+            }
+            if end != NOT_FOUND {
+                line = line_of(end);
+                at = at_of(end);
+            } else {
+                at = wrapping_add(at, r);
+            }
+        } else if c == 91
+            || (
+                c == 33
+                    && wrapping_add(at, 1) < len
+                    && lb(in k, in b, line, wrapping_add(at, 1)) == 91
+            ) {
+            let image = c == 33;
+            let start = if image {
+                wrapping_add(at, 1)
+            } else {
+                at
+            };
+            let mut close: u64 = 0;
+            if !balanced_end(inout k, in b, line, start, 91, 93, inout close) {
+                return false;
+            }
+            if close == NOT_FOUND {
+                line = n;
+                continue;
+            }
+            let end_line = line_of(close);
+            let end = at_of(close);
+            let mut next: u64 = 0;
+            if !next_markdown(inout k, in b, end_line, end, inout next) {
+                return false;
+            }
+            let next_c = if next == NOT_FOUND {
+                0
+            } else {
+                lb(in k, in b, line_of(next), at_of(next))
+            };
+            if next != NOT_FOUND && next_c == 40 {
+                let mut p: u64 = 0;
+                if !balanced_end(inout k, in b, line_of(next), at_of(next), 40, 41, inout p) {
+                    return false;
+                }
+                if p != NOT_FOUND {
+                    line = line_of(p);
+                    at = at_of(p);
+                } else {
+                    line = n;
+                }
+            } else if next != NOT_FOUND && next_c == 91 {
+                let mut p: u64 = 0;
+                if !balanced_end(inout k, in b, line_of(next), at_of(next), 91, 93, inout p) {
+                    return false;
+                }
+                if p != NOT_FOUND {
+                    line = line_of(p);
+                    at = at_of(p);
+                    let mut url: u64 = 0;
+                    if !next_markdown(inout k, in b, line, at, inout url) {
+                        return false;
+                    }
+                    if url != NOT_FOUND && lb(in k, in b, line_of(url), at_of(url)) == 40 {
+                        let mut q: u64 = 0;
+                        if !balanced_end(inout k, in b, line_of(url), at_of(url), 40, 41, inout q) {
+                            return false;
+                        }
+                        if q != NOT_FOUND {
+                            line = line_of(q);
+                            at = at_of(q);
+                        } else {
+                            line = n;
+                        }
+                    }
+                } else {
+                    line = n;
+                }
+            } else if next != NOT_FOUND && line_of(next) == end_line && next_c == 58 {
+                let mut title: u64 = 0;
+                if !continued_title(inout k, in b, wrapping_add(end_line, 1), inout title) {
+                    return false;
+                }
+                line = if title == NOT_FOUND {
+                    wrapping_add(end_line, 1)
+                } else {
+                    title
+                };
+                at = 0;
+            } else {
+                if !image && end_line == line {
+                    let ls = u64_at(in k.l_start, line);
+                    if !occurrence(
+                        inout k,
+                        in b,
+                        wrapping_add(ls, wrapping_add(start, 1)),
+                        wrapping_add(ls, wrapping_sub(end, 1)),
+                        wrapping_add(ls, start),
+                        wrapping_add(ls, end)
+                    ) {
+                        return false;
+                    }
+                }
+                line = end_line;
+                at = end;
+            }
+        } else {
+            at = wrapping_add(at, 1);
+        }
+    }
+}
+
+// `links::analyze` of the source of `x` with the inventory's targets.
+pub fn analyze(
+    inout k: Link,
+    in x: Ix,
+    in v_paths: ChunkSeq[u8],
+    in v_s: ChunkSeq[u64],
+    in v_l: ChunkSeq[u64],
+    in v_kind: ChunkSeq[u8]
+) -> bool {
+    let len = x.src.len();
+    if len > MAX_SOURCE_BYTES {
+        return link_fail(inout k, 1);
+    }
+    if !lwork(inout k, wrapping_mul(wrapping_add(len, 1), 8)) {
+        return false;
+    }
+    if !link_inventory(inout k, in v_paths, in v_s, in v_l, in v_kind) {
+        return false;
+    }
+    let mut max_tokens = L_MAX_METADATA / 4 / SIZE_TOKEN;
+    if wrapping_add(len, 1) < max_tokens {
+        max_tokens = wrapping_add(len, 1);
+    }
+    if max_tokens == 0 {
+        max_tokens = 1;
+    }
+    if !lmeta(inout k, wrapping_add(wrapping_mul(wrapping_add(max_tokens, 1), SIZE_TOKEN), 1024)) {
+        return false;
+    }
+    let mut d = diags_new();
+    let b = x.src.as_bytes();
+    let t = lex_with_limits(in b, inout d, MAX_SOURCE_BYTES, max_tokens, 1);
+    if t.rejected || t.limited {
+        return link_fail(inout k, 1);
+    }
+    if d.code.len() != 0 {
+        return link_fail(inout k, 3);
+    }
+    for i in 0..t.kind.len() {
+        if !lwork(inout k, 1) {
+            return false;
+        }
+        let s = w(u32_at(in t.start, i));
+        let e = token_end(in t, i);
+        let kind = u8_at(in t.kind, i);
+        let l = wrapping_sub(e, s);
+        let doc = kind == TK_COMMENT
+            && l >= 3
+            && byte(in b, s) == 47
+            && byte(in b, wrapping_add(s, 1)) == 47
+            && (
+                byte(in b, wrapping_add(s, 2)) == 33
+                    || (
+                        byte(in b, wrapping_add(s, 2)) == 47
+                            && !(l >= 4 && byte(in b, wrapping_add(s, 3)) == 47)
+                    )
+            );
+        if doc {
+            let mut from = wrapping_add(s, 3);
+            if from < e && byte(in b, from) == 32 {
+                from = wrapping_add(from, 1);
+            }
+            let cap = lpush(inout k, k.l_start.len(), k.l_cap, SIZE_LINE);
+            if cap == NOT_FOUND {
+                return false;
+            }
+            k.l_cap = cap;
+            k.l_start.push(from);
+            k.l_len.push(wrapping_sub(e, from));
+        } else if kind == TK_WHITESPACE && newlines(in b, s, e) <= 1 {
+            if !lwork(inout k, l) {
+                return false;
+            }
+        } else {
+            if !group(inout k, in b) {
+                return false;
+            }
+            k.l_start.clear();
+            k.l_len.clear();
+        }
+    }
+    group(inout k, in b)
+}
+
+fn newlines(in b: Slice[u8], s: u64, e: u64) -> u64 {
+    let mut n: u64 = 0;
+    for i in s..e {
+        if byte(in b, i) == 10 {
+            n = wrapping_add(n, 1);
+        }
+    }
+    n
+}

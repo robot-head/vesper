@@ -1,0 +1,367 @@
+// `vesper_doc::links::analyze` (crates/vesper-doc/src/links.rs) in Vesper:
+// the local intra-doc references of the `///` and `//!` comments of a
+// source, against the declaration inventory doc_links.ves collects. The
+// link budget counts up, charge for charge with the Rust one, with the Rust
+// `size_of` of each value it counts.
+
+use @vesper/front::lex::{
+    lex_with_limits,
+    token_end
+};
+use @vesper/front::diag::{
+    diags_new
+};
+use self::json::{
+    byte
+};
+use self::nav::{
+    Ix,
+    MAX_SOURCE_BYTES,
+    u32_at,
+    u8_at,
+    w
+};
+
+pub const NOT_FOUND: u64 = 18446744073709551615;
+
+pub const SIZE_LINK_TARGET: u64 = 32;
+pub const SIZE_LINE: u64 = 24;
+pub const SIZE_REFERENCE: u64 = 96;
+pub const SIZE_DIAGNOSTIC: u64 = 64;
+pub const SIZE_TOKEN: u64 = 24;
+
+// `LinkLimits::default()` with doc_links.rs's overrides.
+const L_MAX_TARGETS: u64 = 1024;
+pub const L_MAX_REFERENCES: u64 = 1024;
+const L_MAX_PATH_BYTES: u64 = 1024;
+const L_MAX_PATH_SEGMENTS: u64 = 8;
+pub const L_MAX_METADATA: u64 = 1048576;
+const L_MAX_WORK: u64 = 16777216;
+
+// `TargetKind`, in its `Ord` order.
+const T_METHOD: u8 = 2;
+const T_OPERATION: u8 = 4;
+
+pub const TK_WHITESPACE: u8 = 0;
+pub const TK_COMMENT: u8 = 1;
+
+pub fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn ident_start(c: u8) -> bool {
+    (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95
+}
+
+pub fn ident_byte(c: u8) -> bool {
+    ident_start(c) || (c >= 48 && c <= 57)
+}
+
+pub fn link_new() -> Link {
+    Link {
+        work: 0,
+        metadata: 0,
+        err: 0,
+        paths: ChunkSeq::new[u8](),
+        t_s: ChunkSeq::new[u64](),
+        t_l: ChunkSeq::new[u64](),
+        t_kind: ChunkSeq::new[u8](),
+        r_start: ChunkSeq::new[u64](),
+        r_end: ChunkSeq::new[u64](),
+        r_target: ChunkSeq::new[u64](),
+        r_cap: 0,
+        diagnostics: 0,
+        d_cap: 0,
+        l_start: ChunkSeq::new[u64](),
+        l_len: ChunkSeq::new[u64](),
+        l_cap: 0
+    }
+}
+
+// ------------------------------------------------------------ analyze
+
+// `vesper_doc::links` `Budget` (counts up) and the report the fallback
+// reads: each reference's span and target, and how many diagnostics.
+pub struct Link {
+    work: u64,
+    metadata: u64,
+    // 0 none, 1 resource, 2 configuration, 3 another code.
+    err: u64,
+    // The sorted targets (`inventory`): path (offset, length) in `paths`.
+    paths: ChunkSeq[u8],
+    t_s: ChunkSeq[u64],
+    t_l: ChunkSeq[u64],
+    t_kind: ChunkSeq[u8],
+    r_start: ChunkSeq[u64],
+    r_end: ChunkSeq[u64],
+    r_target: ChunkSeq[u64],
+    r_cap: u64,
+    diagnostics: u64,
+    d_cap: u64,
+    // The comment lines of the current group: content start and length.
+    l_start: ChunkSeq[u64],
+    l_len: ChunkSeq[u64],
+    l_cap: u64
+}
+
+pub fn link_fail(inout k: Link, code: u64) -> bool {
+    if k.err == 0 {
+        k.err = code;
+    }
+    false
+}
+
+pub fn lwork(inout k: Link, n: u64) -> bool {
+    let next = wrapping_add(k.work, n);
+    if next < k.work || next > L_MAX_WORK {
+        return link_fail(inout k, 1);
+    }
+    k.work = next;
+    true
+}
+
+pub fn lmeta(inout k: Link, n: u64) -> bool {
+    let next = wrapping_add(k.metadata, n);
+    if next < k.metadata || next > L_MAX_METADATA {
+        return link_fail(inout k, 1);
+    }
+    k.metadata = next;
+    lwork(inout k, n)
+}
+
+// `Budget::push` onto a vector of `len` values of `size` with capacity
+// `cap` (grown by exactly one); returns the new capacity or NOT_FOUND.
+pub fn lpush(inout k: Link, len: u64, cap: u64, size: u64) -> u64 {
+    if !lmeta(inout k, size) {
+        return NOT_FOUND;
+    }
+    if len == cap {
+        if !lwork(inout k, wrapping_mul(len, size)) {
+            return NOT_FOUND;
+        }
+        return wrapping_add(cap, 1);
+    }
+    cap
+}
+
+// The `::` segments of `b[s..e]` (`split("::").count()`).
+fn segments(in b: Slice[u8], s: u64, e: u64) -> u64 {
+    let mut n: u64 = 1;
+    let mut i = s;
+    loop {
+        if wrapping_add(i, 1) >= e {
+            break;
+        }
+        if byte(in b, i) == 58 && byte(in b, wrapping_add(i, 1)) == 58 {
+            n = wrapping_add(n, 1);
+            i = wrapping_add(i, 2);
+        } else {
+            i = wrapping_add(i, 1);
+        }
+    }
+    n
+}
+
+// `local_path`: nonempty, and every `::` segment an identifier.
+pub fn local_path(in b: Slice[u8], s: u64, e: u64) -> bool {
+    if s >= e {
+        return false;
+    }
+    let mut seg = s;
+    let mut i = s;
+    loop {
+        if i >= e {
+            break;
+        }
+        if wrapping_add(i, 1) < e && byte(in b, i) == 58 && byte(in b, wrapping_add(i, 1)) == 58 {
+            if !ident_range(in b, seg, i) {
+                return false;
+            }
+            i = wrapping_add(i, 2);
+            seg = i;
+        } else {
+            i = wrapping_add(i, 1);
+        }
+    }
+    ident_range(in b, seg, e)
+}
+
+fn ident_range(in b: Slice[u8], s: u64, e: u64) -> bool {
+    if s >= e || !ident_start(byte(in b, s)) {
+        return false;
+    }
+    for i in wrapping_add(s, 1)..e {
+        if !ident_byte(byte(in b, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether a `::` segment of `b[s..e]` is `Self`.
+pub fn has_self_segment(in b: Slice[u8], s: u64, e: u64) -> bool {
+    let mut seg = s;
+    let mut i = s;
+    loop {
+        let at_sep = wrapping_add(i, 1) < e
+            && byte(in b, i) == 58
+            && byte(in b, wrapping_add(i, 1)) == 58;
+        if i >= e || at_sep {
+            if wrapping_sub(i, seg) == 4
+                && byte(in b, seg) == 83
+                && byte(in b, wrapping_add(seg, 1)) == 101
+                && byte(in b, wrapping_add(seg, 2)) == 108
+                && byte(in b, wrapping_add(seg, 3)) == 102 {
+                return true;
+            }
+            if i >= e {
+                return false;
+            }
+            i = wrapping_add(i, 2);
+            seg = i;
+        } else {
+            i = wrapping_add(i, 1);
+        }
+    }
+}
+
+pub fn check_path(inout k: Link, in b: Slice[u8], s: u64, e: u64) -> bool {
+    if wrapping_sub(e, s) > L_MAX_PATH_BYTES || segments(in b, s, e) > L_MAX_PATH_SEGMENTS {
+        return link_fail(inout k, 1);
+    }
+    true
+}
+
+// `inventory`: validates the targets, copies them, and sorts them.
+pub fn link_inventory(
+    inout k: Link,
+    in v_paths: ChunkSeq[u8],
+    in v_s: ChunkSeq[u64],
+    in v_l: ChunkSeq[u64],
+    in v_kind: ChunkSeq[u8]
+) -> bool {
+    let n = v_s.len();
+    if n > L_MAX_TARGETS {
+        return link_fail(inout k, 1);
+    }
+    let pb = v_paths.as_slice();
+    let mut cap: u64 = 0;
+    let mut longest: u64 = 0;
+    for i in 0..n {
+        let s = u64_at(in v_s, i);
+        let l = u64_at(in v_l, i);
+        if l > longest {
+            longest = l;
+        }
+        let e = wrapping_add(s, l);
+        if !lwork(inout k, wrapping_add(l, 1)) {
+            return false;
+        }
+        // `target_valid`.
+        if !check_path(inout k, in pb, s, e) {
+            return false;
+        }
+        let kind = u8_at(in v_kind, i);
+        let required: u64 = if kind == T_METHOD || kind == T_OPERATION {
+            2
+        } else {
+            1
+        };
+        if !local_path(in pb, s, e)
+            || segments(in pb, s, e) != required
+            || has_self_segment(in pb, s, e) {
+            return link_fail(inout k, 3);
+        }
+        for j in 0..i {
+            let ls = u64_at(in v_s, j);
+            let ll = u64_at(in v_l, j);
+            if !lwork(inout k, wrapping_add(wrapping_add(l, ll), 1)) {
+                return false;
+            }
+            if ll == l && u8_at(in v_kind, j) == kind && same_bytes(in pb, s, ls, l) {
+                return link_fail(inout k, 3);
+            }
+        }
+        // `copy_target`, then `Budget::push`.
+        if !lmeta(inout k, l) {
+            return false;
+        }
+        cap = lpush(inout k, i, cap, SIZE_LINK_TARGET);
+        if cap == NOT_FOUND {
+            return false;
+        }
+    }
+    if !lwork(inout k, wrapping_mul(wrapping_mul(n, n), wrapping_add(longest, 1))) {
+        return false;
+    }
+    // Sort (path bytes, then kind): an insertion sort of the indices.
+    let mut order = ChunkSeq::new[u64]();
+    for i in 0..n {
+        let mut at = order.len();
+        order.push(i);
+        loop {
+            if at == 0 {
+                break;
+            }
+            let prev = u64_at(in order, wrapping_sub(at, 1));
+            if !target_less(in v_paths, in v_s, in v_l, in v_kind, i, prev) {
+                break;
+            }
+            let ok = order.try_set(at, prev);
+            at = wrapping_sub(at, 1);
+        }
+        let ok = order.try_set(at, i);
+    }
+    for i in 0..n {
+        let j = u64_at(in order, i);
+        k.t_s.push(k.paths.len());
+        k.t_l.push(u64_at(in v_l, j));
+        let s = u64_at(in v_s, j);
+        k.paths.extend(in pb[s..wrapping_add(s, u64_at(in v_l, j))]);
+        k.t_kind.push(u8_at(in v_kind, j));
+    }
+    true
+}
+
+fn same_bytes(in b: Slice[u8], a: u64, c: u64, n: u64) -> bool {
+    for i in 0..n {
+        if byte(in b, wrapping_add(a, i)) != byte(in b, wrapping_add(c, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn target_less(
+    in v_paths: ChunkSeq[u8],
+    in v_s: ChunkSeq[u64],
+    in v_l: ChunkSeq[u64],
+    in v_kind: ChunkSeq[u8],
+    a: u64,
+    c: u64
+) -> bool {
+    let pb = v_paths.as_slice();
+    let (as_, al) = (u64_at(in v_s, a), u64_at(in v_l, a));
+    let (cs, cl) = (u64_at(in v_s, c), u64_at(in v_l, c));
+    let m = if al < cl {
+        al
+    } else {
+        cl
+    };
+    for i in 0..m {
+        let x = byte(in pb, wrapping_add(as_, i));
+        let y = byte(in pb, wrapping_add(cs, i));
+        if x != y {
+            return x < y;
+        }
+    }
+    if al != cl {
+        return al < cl;
+    }
+    u8_at(in v_kind, a) < u8_at(in v_kind, c)
+}
+
+// ------------------------------------------------------------ markdown
