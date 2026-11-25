@@ -17,19 +17,23 @@ def _require(condition, message: str):
     if not condition:
         fail(message)
 
-def _execute(ctx: TaskContext, harness: struct, argv: list[str], *, expected: int = 0, cwd: str = "", env: dict[str, str] = {}, timeout: int = 360) -> str:
-    stdout = harness.work + "/stdout"
-    stderr = harness.work + "/stderr"
-    cmd = command(ctx, argv[0], argv[1:], cwd or harness.root, env)
+def _run_process(ctx, argv, cwd, env, timeout, stdout, stderr):
+    cmd = command(ctx, argv[0], argv[1:], cwd, env)
     child = cmd.process_group(0).stdout(ctx.std.fs.create(stdout)).stderr(ctx.std.fs.create(stderr)).spawn()
     status = child.try_wait(timeout_ms = timeout * 1000)
     if status == None:
         child.kill()
         child.wait()
-        fail("Timed out after %d seconds: %r" % (timeout, argv))
+        return None
+    return exit_code(status)
+
+def _execute(ctx: TaskContext, harness: struct, argv: list[str], *, expected: int = 0, cwd: str = "", env: dict[str, str] = {}, timeout: int = 360) -> str:
+    stdout = harness.work + "/stdout"
+    stderr = harness.work + "/stderr"
+    actual = harness.run_process(ctx, argv, cwd or harness.root, env, timeout, stdout, stderr)
+    _require(actual != None, "Timed out after %d seconds: %r" % (timeout, argv))
     for path in [stdout, stderr]:
         _require(ctx.std.fs.metadata(path).size <= _MAX_OUTPUT, "Output exceeds 4 MiB: %r" % argv)
-    actual = exit_code(status)
     if actual != expected:
         for path in [stdout, stderr]:
             ctx.std.io.stderr.write(ctx.std.fs.open(path).read())
@@ -107,7 +111,7 @@ def _replay(ctx: TaskContext, harness: struct, lean: str, model: str, witness: s
     ctx.std.fs.write(directory + "/NoInjection.lean", "import Witness\n#check injected\n")
     _execute(ctx, harness, argv + ["NoInjection.lean"], expected = 1, cwd = directory, env = env)
 
-def _run(ctx: TaskContext, root: str, binary: str, launcher: str, model: str, parent: str = "") -> int:
+def _run(ctx: TaskContext, root: str, binary: str, launcher: str, model: str, parent: str, run_process) -> int:
     binary = root_path(root, binary)
     if ctx.std.fs.exists(binary + ".exe") and ctx.std.fs.metadata(binary + ".exe").is_file:
         binary += ".exe"
@@ -121,7 +125,7 @@ def _run(ctx: TaskContext, root: str, binary: str, launcher: str, model: str, pa
         ctx.defer(lambda: ctx.std.fs.remove_dir_all(work))
     else:
         work = scratch_dir(ctx, "vesper-format-proof-")
-    harness = struct(root = root, work = work, binary = binary, counts = {"commands": 0, "sources": 0, "kernel_reports": 0})
+    harness = struct(root = root, work = work, binary = binary, run_process = run_process, counts = {"commands": 0, "sources": 0, "kernel_reports": 0})
     prefix = _execute(ctx, harness, [launcher, "--print-prefix"], timeout = 45)
     lean = root_path(root, ctx.std.fs.read_to_string(prefix).strip()) + "/bin/lean"
     _require(ctx.std.fs.exists(lean) and ctx.std.fs.metadata(lean).is_file, "Lean executable not found: " + lean)
@@ -169,10 +173,10 @@ def _run(ctx: TaskContext, root: str, binary: str, launcher: str, model: str, pa
     }) + "\n")
     return 0
 
-def _check(ctx: TaskContext) -> int:
+def check_with(ctx: TaskContext, root: str, values: list[str], run_process = _run_process) -> int:
     options = {}
     pending = ""
-    for value in ctx.args.tool_args:
+    for value in values:
         if pending:
             if value.startswith("--"):
                 ctx.std.process.exit(2, "Missing value for " + pending)
@@ -191,31 +195,29 @@ def _check(ctx: TaskContext) -> int:
                 pending = flag
     if pending or not options.get("--binary"):
         ctx.std.process.exit(2, _USAGE)
-    root = ctx.std.env.aspect_root_dir()
     lean = options.get("--lean", ctx.std.env.var("VESPER_LEAN") or "lean")
     model = options.get("--model", ctx.std.env.var("VESPER_FORMAT_PROOF_MODEL") or _MODEL)
-    return _run(ctx, root, options["--binary"], lean, model, options.get("--work", ""))
+    return _run(ctx, root, options["--binary"], lean, model, options.get("--work", ""), run_process)
 
 check_format_proof = task(
     kind = "check-format-proof",
     group = ["acceptance"],
     summary = "Check actual Lean formatter proofs with the given compiler",
-    implementation = _check,
+    implementation = lambda ctx: check_with(ctx, ctx.std.env.aspect_root_dir(), ctx.args.tool_args),
     args = {"tool_args": args.trailing_var_args(description = _USAGE)},
 )
 
-def _test(ctx: TaskContext) -> int:
-    root = ctx.std.env.aspect_root_dir()
+def suite_with(ctx: TaskContext, root: str, run_process = _run_process) -> int:
     binary = ctx.std.env.var("VESPER_FORMAT_PROOF_BINARY") or executable(ctx, root, "//:bin/vesper")
     lean = ctx.std.env.var("VESPER_LEAN")
     lean_path = root + "/.ci-lean-path"
     if not lean and ctx.std.fs.exists(lean_path):
         lean = ctx.std.fs.read_to_string(lean_path).rstrip("\r\n")
-    return _run(ctx, root, binary, lean or "lean", ctx.std.env.var("VESPER_FORMAT_PROOF_MODEL") or _MODEL)
+    return _run(ctx, root, binary, lean or "lean", ctx.std.env.var("VESPER_FORMAT_PROOF_MODEL") or _MODEL, "", run_process)
 
 test_format_proof = task(
     kind = "test-format-proof",
     group = ["acceptance"],
     summary = "Check actual Lean formatter proofs with the workspace compiler",
-    implementation = _test,
+    implementation = lambda ctx: suite_with(ctx, ctx.std.env.aspect_root_dir()),
 )

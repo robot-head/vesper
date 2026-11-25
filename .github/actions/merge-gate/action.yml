@@ -7,8 +7,9 @@ description: >-
   Actions run for the commit, this one included, and fails with the reason.
   It runs as the first step of each job it guards (#1479), so it takes no
   runner of its own. The caller checks the pull request head out into `path`
-  first (full history, sparse is fine: .github/actions and .aspect), since
-  the job's own checkout of the merge ref fails on a conflicting pull request.
+  first (full history, sparse is fine: .github/actions and .aspect) and
+  installs Aspect with a top-level setup step so its post-job hook survives
+  the job's subsequent checkout.
   BuildBuddy checks are not GitHub Actions runs and are not cancelled here.
 inputs:
   number:
@@ -35,12 +36,6 @@ outputs:
 runs:
   using: composite
   steps:
-    - uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
-      with:
-        launcher-version: '2026.47.12'
-        bazelrc-generate: 'false'
-        bazelisk-cache: 'false'
-        disk-cache: 'false'
     - name: Check whether this pull request can merge yet
       id: gate
       shell: bash

@@ -335,8 +335,8 @@ class PlatformWorkflowTests(unittest.TestCase):
         # that queued for a runner ahead of them (#1479).
         self.assertFalse((ROOT / ".github/workflows/merge-gate.yml").exists())
         action = yaml.safe_load((ROOT / ".github/actions/merge-gate/action.yml").read_text())
-        setup, gate = action["runs"]["steps"]
-        self.assertTrue(setup["uses"].startswith("aspect-build/setup-aspect@"))
+        [gate] = action["runs"]["steps"]
+        self.assertNotIn("uses", gate)
         self.assertEqual(gate["run"], "aspect ci merge-gate-workflow")
         guarded = []
         for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
@@ -348,15 +348,17 @@ class PlatformWorkflowTests(unittest.TestCase):
             for name, job in flow["jobs"].items():
                 if "github.event_name != 'pull_request'" in job.get("if", ""):
                     continue
-                checkout, gate = job["steps"][:2]
+                checkout, setup, gate = job["steps"][:3]
                 self.assertEqual(checkout["uses"], "actions/checkout@v4", (path.name, name))
                 self.assertEqual(checkout["with"]["path"], ".gate")
                 self.assertEqual(checkout["with"]["ref"], "${{ github.event.pull_request.head.sha }}")
                 self.assertEqual(checkout["with"]["fetch-depth"], "0")
                 self.assertIn(".aspect", checkout["with"]["sparse-checkout"].splitlines())
+                self.assertTrue(setup["uses"].startswith("aspect-build/setup-aspect@"))
+                self.assertEqual(setup["with"]["launcher-version"], "2026.47.12")
                 self.assertEqual(gate["uses"], "./.gate/.github/actions/merge-gate", (path.name, name))
                 self.assertEqual(gate["with"]["head-sha"], "${{ github.event.pull_request.head.sha }}")
-                for step in (checkout, gate):
+                for step in (checkout, setup, gate):
                     self.assertEqual(step["if"], "github.event_name == 'pull_request'")
                 guarded.append(f"{path.name}:{name}")
         self.assertIn("website.yml:build", guarded)
@@ -410,6 +412,8 @@ class PlatformWorkflowTests(unittest.TestCase):
         dispatch = next(i for i, s in enumerate(steps) if s.get("run") == "aspect ci dispatch-native-checks")
         self.assertLess(find, gate)
         self.assertLess(gate, dispatch)
+        self.assertTrue(steps[gate - 1]["uses"].startswith("aspect-build/setup-aspect@"))
+        self.assertEqual(steps[gate - 1]["if"], steps[gate]["if"])
         for index in (find, dispatch):
             self.assertEqual(steps[index]["working-directory"], ".native-checks-tools")
         verify = next(s for s in self.platforms["jobs"]["plan"]["steps"]

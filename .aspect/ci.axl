@@ -17,6 +17,7 @@ def _platform_tests(ctx: TaskContext) -> int:
         "workflow-tasks",
         "platform-completion",
         "release-validation",
+        "format-proof",
         "float-json",
         "ndjson-columns",
         "doc-navigation",
