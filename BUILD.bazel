@@ -1481,6 +1481,31 @@ vesper_package(
 )
 
 vesper_package(
+    name = "codegen_aggregates_package",
+    srcs = glob(["packages/vesper-codegen-aggregates/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-aggregates/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":check_layout_package",
+        ":place_ir_package",
+    ],
+)
+
+vesper_package(
+    name = "codegen_aggregates_emit_package",
+    srcs = glob(["packages/vesper-codegen-aggregates/emit/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-aggregates/emit/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":check_layout_package",
+        ":codegen_aggregates_package",
+        "//packages/vesper-cranelift:cranelift_package",
+    ],
+)
+
+vesper_package(
     name = "wit_component_package",
     srcs = glob(["packages/vesper-wit-component/src/**/*.ves"]),
     manifest = "packages/vesper-wit-component/Loom.toml",
