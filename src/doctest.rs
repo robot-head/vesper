@@ -14,10 +14,10 @@
 use crate::doctest_extract::{self, Example, ExtractLimits, PreflightLimits};
 use crate::doctest_generate;
 use crate::doctest_guard;
+use crate::doctest_verdict::{self, location};
 use crate::{
     ast::Diagnostic,
     check,
-    lexer::{self, TokenKind as K},
     native::batch::{BatchLimits, BatchStats, NativeBatch},
     parser,
 };
@@ -171,14 +171,6 @@ pub struct DocTestReport {
     pub jit_examples: usize,
     pub evaluator_examples: usize,
 }
-fn location(source: &str, offset: usize) -> (usize, usize) {
-    let offset = offset.min(source.len());
-    let prefix = &source[..source.floor_char_boundary(offset)];
-    (
-        prefix.bytes().filter(|b| *b == b'\n').count() + 1,
-        prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1,
-    )
-}
 /// Lexer/token/declaration/nested-segment limits are checked BEFORE recursive
 /// parsing ([`doctest_extract::preflight`]).
 pub fn preflight(source: &str, limits: DocTestLimits) -> Result<(), String> {
@@ -266,18 +258,6 @@ fn generate(
     })
 }
 
-fn map_offset(e: &Example, generated: &Generated, offset: usize) -> usize {
-    for &(start, end, original) in &generated.segments {
-        if offset >= start && offset <= end {
-            return original + offset - start;
-        }
-    }
-    if offset < generated.code_start {
-        e.lines.first().map_or(e.offset, |l| l.offset)
-    } else {
-        e.lines.last().map_or(e.offset, |l| l.offset + l.text.len())
-    }
-}
 /// Fail-closed source profile, called after parsing and BEFORE checker
 /// inference ([`doctest_guard::rust_guard`]).
 pub fn source_check_guard(
@@ -746,85 +726,92 @@ fn prepare(source: &str, limits: DocTestLimits) -> Result<Prepared, String> {
     }
     let mut merged = source.to_string();
     let mut runnable = Vec::new();
-    let mut reserved: std::collections::BTreeSet<String> =
-        base_checked.world.functions.keys().cloned().collect();
-    // Private wrappers must not collide with identifiers authored in any other
-    // example either; all snippet bytes are already bounded by extraction.
-    for example in &examples {
-        if let Some(entry) = &example.entry {
-            reserved.insert(entry.clone());
-        }
-        let raw: String = example
-            .lines
-            .iter()
-            .map(|l| format!("{}\n", l.text))
-            .collect();
-        for token in lexer::lex(&raw).0 {
-            if matches!(token.kind, K::Lower | K::Upper) {
-                reserved.insert(raw[token.span].to_string());
-            }
-        }
-    }
-    for (index, example) in examples.iter().enumerate() {
-        let mut wrapper = format!("__vesper_doctest_{index}");
-        while !reserved.insert(wrapper.clone()) {
-            wrapper.push('_');
-            if wrapper.len() > 128 {
-                return Err("doctest private wrapper name limit".into());
-            }
-        }
-        let generated = generate(source, example, &wrapper, limits, &mut checked_bytes)?;
+    let functions: Vec<&str> = base_checked
+        .world
+        .functions
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let example_lines: Vec<Vec<&str>> = examples
+        .iter()
+        .map(|e| e.lines.iter().map(|l| l.text.as_str()).collect())
+        .collect();
+    let names: Vec<doctest_verdict::ExampleNames<'_>> = examples
+        .iter()
+        .zip(&example_lines)
+        .map(|(e, lines)| doctest_verdict::ExampleNames {
+            entry: e.entry.as_deref(),
+            lines,
+        })
+        .collect();
+    let wrappers = doctest_verdict::wrappers(&functions, &names)?;
+    for (index, (example, wrapper)) in examples.iter().zip(&wrappers).enumerate() {
+        let generated = generate(source, example, wrapper, limits, &mut checked_bytes)?;
         let (snippet_checked, errors) = checked(&generated.source, limits, &mut checked_bytes)?;
         let own_entry = generated.entry.as_ref().is_some_and(|entry| {
             snippet_checked.world.functions.get(entry).is_some_and(|f| {
                 f.span.start >= generated.snippet_start && f.span.end <= generated.source.len()
             })
         });
-        let (line, column) = location(source, example.offset);
-        let local_only = errors.iter().all(|d| {
-            generated
-                .segments
-                .iter()
-                .any(|(start, end, _)| d.span.start >= *start && d.span.start <= *end)
-        });
-        let diagnostics = errors
+        let lines: Vec<(usize, usize)> = example
+            .lines
             .iter()
-            .map(|d| {
-                if d.span.start < generated.snippet_start {
-                    diagnostic(source, d, d.span.start, d.span.end)
-                } else {
-                    diagnostic(
-                        source,
-                        d,
-                        map_offset(example, &generated, d.span.start),
-                        map_offset(example, &generated, d.span.end),
-                    )
-                }
+            .map(|l| (l.offset, l.text.len()))
+            .collect();
+        let segments: Vec<(usize, usize)> = generated
+            .segments
+            .iter()
+            .map(|&(start, end, _)| (start, end))
+            .collect();
+        let check_errors: Vec<doctest_verdict::CheckError<'_>> = errors
+            .iter()
+            .map(|d| doctest_verdict::CheckError {
+                code: &d.code,
+                message: &d.message,
+                start: d.span.start,
+                end: d.span.end,
             })
             .collect();
+        let v = doctest_verdict::verdict(doctest_verdict::VerdictInput {
+            source,
+            offset: example.offset,
+            lines: &lines,
+            snippet_start: generated.snippet_start,
+            code_start: generated.code_start,
+            segments: &segments,
+            errors: &check_errors,
+            expected: example.expected.as_deref(),
+            own_entry,
+        });
         let mut result = ExampleReport {
             index,
-            line,
-            column,
+            line: v.line,
+            column: v.column,
             byte_start: example.offset,
             passed: false,
             expected_code: example.expected.clone(),
             entry: generated.entry.clone(),
             result: None,
             message: String::new(),
-            diagnostics,
+            diagnostics: v
+                .diagnostics
+                .into_iter()
+                .map(|d| LocatedDiagnostic {
+                    code: d.code,
+                    message: d.message,
+                    byte_start: d.byte_start,
+                    byte_end: d.byte_end,
+                    line: d.line,
+                    column: d.column,
+                })
+                .collect(),
             simulation: None,
             engine: None,
             fallback_reason: None,
         };
-        if let Some(expected) = &example.expected {
-            result.passed =
-                !errors.is_empty() && local_only && errors.iter().all(|d| d.code == *expected);
-            result.message = if result.passed { "matched exact diagnostic code" } else { "expected exact snippet diagnostic code; unrelated/base errors cannot satisfy compile_fail" }.into();
-        } else if !errors.is_empty() {
-            result.message = "positive example failed full checking".into();
-        } else if !own_entry {
-            result.message = "positive entry must be defined by this snippet, not inherited from the base package".into();
+        if let Some((passed, message)) = v.decided {
+            result.passed = passed;
+            result.message = message;
         } else if let Some(spec) = &example.sim {
             let entry = generated.entry.as_deref().expect("positive entry");
             match simulate(&snippet_checked.world, entry, spec, limits) {

@@ -653,12 +653,18 @@ fn fmt_fixture(dir: &Path) {
         std::os::unix::fs::symlink("sub", dir.join("dirlink")).unwrap();
         std::os::unix::fs::symlink("missing", dir.join("dangling.ves")).unwrap();
         write("names/q\"\\\t\u{1}é.ves", messy);
-        std::fs::write(
+        // APFS refuses names that are not UTF-8 (`EILSEQ`), so there both
+        // compilers walk the tree without it.
+        if let Err(e) = std::fs::write(
             dir.join("names")
                 .join(std::ffi::OsStr::from_bytes(b"\xff.ves")),
             messy,
-        )
-        .unwrap();
+        ) {
+            assert!(
+                cfg!(target_vendor = "apple") && e.raw_os_error() == Some(92),
+                "{e}"
+            );
+        }
         write("ro.ves", messy);
         std::fs::set_permissions(dir.join("ro.ves"), std::fs::Permissions::from_mode(0o444))
             .unwrap();

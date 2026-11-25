@@ -1,0 +1,414 @@
+// What `vesper test --doc` decides about a file's examples without running
+// them: `rust_wrappers` and `rust_verdict` of src/doctest_verdict.rs.
+//
+// `wrappers`: each example's private wrapper `__vesper_doctest_{index}`,
+// lengthened with `_` until it collides with no reserved name (the base
+// functions, every `entry=`, every identifier token of every example and
+// every earlier wrapper), at most 128 bytes. Input words: the function
+// count and names, the example count and per example the entry (0, or 1
+// and the name), the line count and the lines. Result words: 0, the count
+// and the names, or 1 and the error.
+//
+// `verdict`: an example's line and column, its diagnostics placed in the
+// documented file, and whether checking alone settles it. Input words: the
+// source, the fence offset, the line count and each (offset, length), the
+// snippet and code starts, the segment count and each (start, end), the
+// error count and each (code, message, start, end), the expected code (0,
+// or 1 and the code) and whether the snippet defines its entry. Result
+// words: the line, the column, the diagnostic count and each (code,
+// message, start, end, line, column), and the decision (0, or 1, passed
+// and the message) (tests/common/doctest_verdict_words.rs).
+
+use @vesper-std/intern::{
+    Interner,
+    interner_new
+};
+use @vesper/front::kinds::{
+    k_lower,
+    k_upper
+};
+use self::discover::{
+    toks
+};
+use self::util::{
+    Reader,
+    add,
+    inc,
+    push_decimal,
+    push_range,
+    put_buf,
+    put_text,
+    same,
+    sub,
+    u8_at,
+    u64_at
+};
+
+// `reserved.insert(text)`: whether `text` was new.
+fn reserve(inout names: Interner, in text: Slice[u8]) -> bool {
+    match names.lookup_view(in text) {
+        Option::Some(s) => false,
+        Option::None => {
+            let s = match String::from_utf8(in text) {
+                Option::Some(x) => x,
+                Option::None => String::new(),
+            };
+            let sym = names.intern(in s.as_str());
+            true
+        },
+    }
+}
+
+fn reserve_range(inout names: Interner, in b: Slice[u8], s: u64, e: u64) -> bool {
+    reserve(inout names, in b[s..e])
+}
+
+fn error_text(in text: Str) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(1);
+    let m = text.as_bytes();
+    put_text(inout out, in m, 0, m.len());
+    out
+}
+
+// `rust_wrappers` over the input words.
+pub fn wrappers(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut names = interner_new();
+    let nf = r.word(in b);
+    for i in 0..nf {
+        let (s, e) = r.text(in b);
+        let fresh = reserve_range(inout names, in b, s, e);
+    }
+    let nx = r.word(in b);
+    let mut raw: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for x in 0..nx {
+        if r.word(in b) != 0 {
+            let (s, e) = r.text(in b);
+            let fresh = reserve_range(inout names, in b, s, e);
+        }
+        raw.clear();
+        let nl = r.word(in b);
+        for i in 0..nl {
+            let (s, e) = r.text(in b);
+            push_range(inout raw, in b, s, e);
+            raw.push(10);
+        }
+        let t = toks(in raw.as_slice());
+        let n = t.kind.len();
+        for k in 0..n {
+            let kind = u8_at(in t.kind, k);
+            if kind == k_lower() || kind == k_upper() {
+                let fresh = reserve_range(
+                    inout names,
+                    in raw.as_slice(),
+                    u64_at(in t.start, k),
+                    u64_at(in t.end, k)
+                );
+            }
+        }
+    }
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(0);
+    out.push(nx);
+    let mut w: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for x in 0..nx {
+        w.clear();
+        w.extend(in "__vesper_doctest_".as_bytes());
+        push_decimal(inout w, x);
+        loop {
+            if reserve(inout names, in w.as_slice()) {
+                break;
+            }
+            w.push(95);
+            if w.len() > 128 {
+                return error_text(in "doctest private wrapper name limit");
+            }
+        }
+        put_buf(inout out, in w);
+    }
+    out
+}
+
+// The number of `\n` bytes in `b[from..end]`, eight bytes at a time.
+fn newlines(in b: Slice[u8], from: u64, end: u64) -> u64 {
+    let ones: u64 = 0x0101010101010101;
+    let low: u64 = 0x7f7f7f7f7f7f7f7f;
+    let high: u64 = 0x8080808080808080;
+    let nl: u64 = 0x0a0a0a0a0a0a0a0a;
+    let mut count: u64 = 0;
+    let mut i = from;
+    loop {
+        if add(i, 8) > end {
+            break;
+        }
+        let x = match b.try_read_u64_le(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let y = x ^ nl;
+        // A byte of `y` is zero exactly where `x` holds `\n`.
+        let t = (wrapping_add(y & low, low) | y) ^ 0xffffffffffffffff;
+        let z = t & high;
+        if z != 0 {
+            count = add(count, wrapping_shr_u64(wrapping_mul(wrapping_shr_u64(z, 7), ones), 56));
+        }
+        i = add(i, 8);
+    }
+    loop {
+        if i >= end {
+            break;
+        }
+        let c = match b.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if c == 10 {
+            count = inc(count);
+        }
+        i = inc(i);
+    }
+    count
+}
+
+// For byte `offset` (`doctest_verdict::location`): the start of its line
+// and its 1-based column (in characters).
+fn line_start(in b: Slice[u8], offset: u64) -> (u64, u64) {
+    let n = b.len();
+    let mut end = offset;
+    if end > n {
+        end = n;
+    }
+    loop {
+        if end == 0 || end >= n {
+            break;
+        }
+        let c = match b.try_get(end) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if c < 128 || c >= 192 {
+            break;
+        }
+        end = sub(end, 1);
+    }
+    let mut column: u64 = 1;
+    let mut j = end;
+    loop {
+        if j == 0 {
+            break;
+        }
+        let c = match b.try_get(sub(j, 1)) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if c == 10 {
+            break;
+        }
+        if c < 128 || c >= 192 {
+            column = inc(column);
+        }
+        j = sub(j, 1);
+    }
+    (j, column)
+}
+
+// The (line, column) of every offset of `qs`, with one pass over `b`:
+// the queries in line-start order, each counting the newlines since the
+// previous one.
+fn place_all(in b: Slice[u8], in qs: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let n = qs.len();
+    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut order: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..n {
+        let (j, column) = line_start(in b, u64_at(in qs, i));
+        starts.push(j);
+        out.push(0);
+        out.push(column);
+        // Insertion into `order`, by line start.
+        order.push(i);
+        let mut k = i;
+        loop {
+            if k == 0 {
+                break;
+            }
+            let prev = u64_at(in order, sub(k, 1));
+            if u64_at(in starts, prev) <= j {
+                break;
+            }
+            let set = order.try_set(k, prev);
+            k = sub(k, 1);
+        }
+        let set2 = order.try_set(k, i);
+    }
+    let mut at: u64 = 0;
+    let mut lines: u64 = 1;
+    for k in 0..n {
+        let i = u64_at(in order, k);
+        let j = u64_at(in starts, i);
+        lines = add(lines, newlines(in b, at, j));
+        at = j;
+        let set = out.try_set(wrapping_mul(i, 2), lines);
+    }
+    out
+}
+
+// `map_offset`: generated offset `o` in the documented file.
+fn map_offset(in segs: ChunkSeq[u64], in lines: ChunkSeq[u64], offset: u64, code_start: u64, o: u64)
+    -> u64 {
+    let n = segs.len() / 2;
+    for i in 0..n {
+        let s = u64_at(in segs, wrapping_mul(i, 2));
+        let e = u64_at(in segs, inc(wrapping_mul(i, 2)));
+        if o >= s && o <= e {
+            return add(u64_at(in lines, wrapping_mul(i, 2)), sub(o, s));
+        }
+    }
+    let m = lines.len() / 2;
+    if m == 0 {
+        return offset;
+    }
+    if o < code_start {
+        u64_at(in lines, 0)
+    } else {
+        let k = wrapping_mul(sub(m, 1), 2);
+        add(u64_at(in lines, k), u64_at(in lines, inc(k)))
+    }
+}
+
+// `rust_verdict` over the input words.
+pub fn verdict(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let (ss, se) = r.text(in b);
+    let offset = r.word(in b);
+    let nl = r.word(in b);
+    let mut lines: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..nl {
+        lines.push(r.word(in b));
+        lines.push(r.word(in b));
+    }
+    let snippet_start = r.word(in b);
+    let code_start = r.word(in b);
+    let ns = r.word(in b);
+    let mut segs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..ns {
+        segs.push(r.word(in b));
+        segs.push(r.word(in b));
+    }
+    // Per error: code start, code end, message start, message end, start, end.
+    let ne = r.word(in b);
+    let mut errs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..ne {
+        let (cs, ce) = r.text(in b);
+        let (ms, me) = r.text(in b);
+        errs.push(cs);
+        errs.push(ce);
+        errs.push(ms);
+        errs.push(me);
+        errs.push(r.word(in b));
+        errs.push(r.word(in b));
+    }
+    let has_expected = r.word(in b) != 0;
+    let mut xs: u64 = 0;
+    let mut xe: u64 = 0;
+    if has_expected {
+        let (s, e) = r.text(in b);
+        xs = s;
+        xe = e;
+    }
+    let own_entry = r.word(in b) != 0;
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    // The fence offset and each diagnostic's placed start, placed at once.
+    let mut qs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    qs.push(offset);
+    let mut placed: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..ne {
+        let q = wrapping_mul(i, 6);
+        let start = u64_at(in errs, add(q, 4));
+        let end = u64_at(in errs, add(q, 5));
+        let (ps, pe) = if start < snippet_start {
+            (start, end)
+        } else {
+            (
+                map_offset(in segs, in lines, offset, code_start, start),
+                map_offset(in segs, in lines, offset, code_start, end)
+            )
+        };
+        placed.push(ps);
+        placed.push(pe);
+        qs.push(ps);
+    }
+    let lc = place_all(in b[ss..se], in qs);
+    out.push(u64_at(in lc, 0));
+    out.push(u64_at(in lc, 1));
+    out.push(ne);
+    let mut local_only = true;
+    let mut all_expected = true;
+    for i in 0..ne {
+        let q = wrapping_mul(i, 6);
+        let cs = u64_at(in errs, q);
+        let ce = u64_at(in errs, add(q, 1));
+        let ms = u64_at(in errs, add(q, 2));
+        let me = u64_at(in errs, add(q, 3));
+        let start = u64_at(in errs, add(q, 4));
+        let end = u64_at(in errs, add(q, 5));
+        let mut inside = false;
+        for k in 0..ns {
+            let s = u64_at(in segs, wrapping_mul(k, 2));
+            let e = u64_at(in segs, inc(wrapping_mul(k, 2)));
+            if start >= s && start <= e {
+                inside = true;
+                break;
+            }
+        }
+        if !inside {
+            local_only = false;
+        }
+        if !has_expected || !same(in b, cs, ce, in b, xs, xe) {
+            all_expected = false;
+        }
+        let ps = u64_at(in placed, wrapping_mul(i, 2));
+        let pe = u64_at(in placed, inc(wrapping_mul(i, 2)));
+        let pl = u64_at(in lc, wrapping_mul(inc(i), 2));
+        let pc = u64_at(in lc, inc(wrapping_mul(inc(i), 2)));
+        put_text(inout out, in b, cs, ce);
+        put_text(inout out, in b, ms, me);
+        out.push(ps);
+        out.push(pe);
+        out.push(pl);
+        out.push(pc);
+    }
+    if has_expected {
+        let passed = ne != 0 && local_only && all_expected;
+        out.push(1);
+        if passed {
+            out.push(1);
+            let m = "matched exact diagnostic code".as_bytes();
+            put_text(inout out, in m, 0, m.len());
+        } else {
+            out.push(0);
+            let m = "expected exact snippet diagnostic code; unrelated/base errors cannot satisfy compile_fail"
+                .as_bytes();
+            put_text(inout out, in m, 0, m.len());
+        }
+    } else if ne != 0 {
+        out.push(1);
+        out.push(0);
+        let m = "positive example failed full checking".as_bytes();
+        put_text(inout out, in m, 0, m.len());
+    } else if !own_entry {
+        out.push(1);
+        out.push(0);
+        let m = "positive entry must be defined by this snippet, not inherited from the base package"
+            .as_bytes();
+        put_text(inout out, in m, 0, m.len());
+    } else {
+        out.push(0);
+    }
+    out
+}

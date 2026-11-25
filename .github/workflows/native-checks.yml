@@ -1,11 +1,14 @@
 name: Native platform checks
 # Starts the required `macOS (AArch64)` and `Windows (x86_64 MSVC)` checks for
-# a pull request only once it is ready to merge (#1479): the merge gate passes
-# (scripts/ci/merge_gate.py, #1321) and the BuildBuddy checks, `Test all
-# targets`, `Self-host differentials`, `Self-host differentials 2` (#1882),
-# `Self-host codegen differentials` (#1519) and `Native and acceptance scripts`, are green on its head commit.
-# Before, every push queued for one of the account's 5 macOS runners at once,
-# and a pull request waited hours behind runs that later pushes replaced.
+# a pull request once it can merge (#1479): the merge gate passes
+# (scripts/ci/merge_gate.py, #1321), `Native and acceptance scripts` is green
+# on its head commit, and none of the BuildBuddy checks (`Test all targets`,
+# `Self-host differentials`, `Self-host differentials 2` (#1882), `Self-host
+# codegen differentials` (#1519) and that one) has failed. Waiting for all of
+# them to go green added about 40 minutes before macOS and Windows started.
+# Before #1479, every push queued for one of the account's 5 macOS runners at
+# once, and a pull request waited hours behind runs that later pushes
+# replaced.
 #
 # BuildBuddy reports commit statuses, so this runs on each `status` event
 # (from main's copy of this file). It dispatches Platforms (platforms.yml) on
@@ -26,8 +29,8 @@ permissions:
   pull-requests: read
   statuses: read
 
-# Both BuildBuddy checks turning green send two events; the second waits here
-# and then sees the run the first one started.
+# Several BuildBuddy checks turning green send several events; each later one
+# waits here and then sees the run the first one started.
 concurrency:
   group: native-checks-${{ github.event.sha }}
   cancel-in-progress: false
@@ -49,27 +52,20 @@ jobs:
           SHA: ${{ github.event.sha }}
         run: |
           set -euo pipefail
-          states=$(gh api "repos/$REPO/commits/$SHA/status" \
-            --jq '[.statuses[] | select(.context == "Test all targets" or .context == "Self-host differentials" or .context == "Native and acceptance scripts") | .state] | map(select(. == "success")) | length')
-          if [ "$states" != 3 ]; then
-            echo "BuildBuddy is not green on all three checks yet ($states of 3)"
+          # Start alongside the slower BuildBuddy checks: once `Native and
+          # acceptance scripts` (about 7 minutes) is green and no BuildBuddy
+          # check has failed. A later BuildBuddy failure leaves the run going;
+          # the pull request's next push cancels it.
+          statuses=$(gh api "repos/$REPO/commits/$SHA/status" \
+            --jq '[.statuses[] | select(.context == "Test all targets" or .context == "Self-host differentials" or .context == "Self-host differentials 2" or .context == "Self-host codegen differentials" or .context == "Native and acceptance scripts")]')
+          acceptance=$(jq -r '[.[] | select(.context == "Native and acceptance scripts") | .state] | first // "absent"' <<<"$statuses")
+          if [ "$acceptance" != success ]; then
+            echo "Native and acceptance scripts is $acceptance"
             exit 0
           fi
-          # A head from before the codegen split (#1519) ran those tests in
-          # `Self-host differentials` and has no codegen status; any other
-          # head must have it green.
-          codegen=$(gh api "repos/$REPO/commits/$SHA/status" \
-            --jq '[.statuses[] | select(.context == "Self-host codegen differentials") | .state] | first // "absent"')
-          if [ "$codegen" != success ] && [ "$codegen" != absent ]; then
-            echo "Self-host codegen differentials is $codegen"
-            exit 0
-          fi
-          # Likewise a head from before the second self-host split (#1882)
-          # has no `Self-host differentials 2` status.
-          part2=$(gh api "repos/$REPO/commits/$SHA/status" \
-            --jq '[.statuses[] | select(.context == "Self-host differentials 2") | .state] | first // "absent"')
-          if [ "$part2" != success ] && [ "$part2" != absent ]; then
-            echo "Self-host differentials 2 is $part2"
+          failed=$(jq -r '[.[] | select(.state == "failure" or .state == "error") | .context] | join(", ")' <<<"$statuses")
+          if [ -n "$failed" ]; then
+            echo "BuildBuddy failed: $failed"
             exit 0
           fi
           pr=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq "[.[] | select(.state == \"open\" and .head.sha == \"$SHA\" and .head.repo.full_name == \"$REPO\")] | first // empty")

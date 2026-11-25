@@ -1,7 +1,8 @@
 //! Differential and ABBA tests of the flipped aether modules (SH6 lane 14,
 //! #1409) against their Rust references, which exist only under
 //! `#[cfg(test)]`: hot sets (`hotset.ves`), the packed-ring capture
-//! (`packed.ves`) and the seccomp evaluator (`seccomp.ves`). The ABBA
+//! (`packed.ves`), the seccomp evaluator (`seccomp.ves`) and the vsock
+//! device (`vsock.ves`). The ABBA
 //! timings are ignored; run them with
 //!
 //! ```text
@@ -15,3 +16,4 @@ mod abba_seccomp;
 mod hotset;
 mod packed;
 mod seccomp;
+mod vsock;

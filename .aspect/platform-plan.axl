@@ -182,6 +182,15 @@ def _affected(paths: list[str], policy: dict) -> list[str]:
             result[record["group"]] = True
     return sorted(result)
 
+def _docs_only(paths: list[str]) -> bool:
+    # Documentation: anything under docs/ and the top-level Markdown files.
+    # No macOS or Windows test reads them (`aspect ci port-harness-selection`
+    # skips them the same way).
+    return len(paths) > 0 and all([
+        path == "docs" or path.startswith("docs/") or ("/" not in path and path != ".md" and path.endswith(".md"))
+        for path in paths
+    ])
+
 def _git(ctx: TaskContext, root: str, argv: list[str]):
     return command(ctx, "git", argv, root).stdout("piped").stderr("piped").spawn().wait_with_output()
 
@@ -228,7 +237,10 @@ def _publish(ctx: TaskContext, plan: dict, output: str, github: str):
     if github:
         groups = json.encode(plan["groups"])
         github = root_path(ctx.std.env.current_dir(), github)
-        if not ctx.std.fs.try_append(github, "profile=%s\ngroups=%s\nsha=%s\n" % (plan["profile"], groups, plan["sha"])):
+        lines = "profile=%s\ngroups=%s\nsha=%s\n" % (plan["profile"], groups, plan["sha"])
+        if "native" in plan:
+            lines = lines + "native=%s\n" % plan["native"]
+        if not ctx.std.fs.try_append(github, lines):
             _error(ctx, "could not write the platform plan to the GitHub output file")
     ctx.std.io.stdout.write(encoded)
 
@@ -270,6 +282,18 @@ def _verify_workflow_checkout(ctx: TaskContext) -> int:
     _verify_dispatch(ctx, root, head, requested)
     return 0
 
+def _native(ctx: TaskContext, root: str) -> str:
+    # A dispatched pull request that changes only documentation runs no
+    # macOS or Windows job: they report as skipped, and `Platform validation
+    # complete` accepts that. The checkout is GitHub's test merge, so its
+    # first parent is main and the merge's own diff is the pull request's.
+    if not ctx.std.env.var("PULL_REQUEST") or not _commit(ctx, root, "HEAD^2"):
+        return "all"
+    diff = _git(ctx, root, ["diff", "--name-only", "--no-renames", "-z", "HEAD^1", "HEAD", "--"])
+    if not diff.status.success:
+        return "all"
+    return "none" if _docs_only([path for path in diff.stdout.split("\x00") if path]) else "all"
+
 def _run_workflow(ctx: TaskContext) -> int:
     root = ctx.std.env.aspect_root_dir()
     head = capture(ctx, "git", ["rev-parse", "HEAD"], root).strip()
@@ -278,6 +302,7 @@ def _run_workflow(ctx: TaskContext) -> int:
     if not directory or not output:
         _error(ctx, "RUNNER_TEMP and GITHUB_OUTPUT are required")
     plan = _make_plan(ctx, root, ctx.std.env.var("REQUESTED_PROFILE") or "pr", ctx.std.env.var("BASE_SHA") or "", head)
+    plan["native"] = _native(ctx, root)
     _publish(ctx, plan, directory + "/platform-plan.json", output)
     return 0
 
@@ -344,6 +369,16 @@ def _test_policy(ctx: TaskContext) -> int:
     ]:
         if _matches(path, pattern) != expected:
             fail("Unexpected path match: %r against %r" % (path, pattern))
+    for paths, expected in [
+        (["docs/ci-platforms.md", "README.md"], True),
+        (["docs"], True),
+        ([], False),
+        (["docs/ci-platforms.md", ".github/workflows/platforms.yml"], False),
+        (["crates/vesper-pulse/README.md"], False),
+        ([".md"], False),
+    ]:
+        if _docs_only(paths) != expected:
+            fail("Unexpected documentation-only verdict for %r" % paths)
     if _rust_cases("fn helper() {}\n#[ test ]\n#[cfg(unix)]\nfn real_case() {}") != {"real_case": True}:
         fail("Only the attributed Rust function should be selected")
     print("Passed the platform selector policy and %d catalog records" % len(policy["deferred_targets"]))

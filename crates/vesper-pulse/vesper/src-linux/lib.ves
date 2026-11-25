@@ -2501,3 +2501,752 @@ pub fn epoll_driver_close(in d: EpollDriver) -> u64 eff [Ffi[PulseSys]] {
     let _ = PulseSys::close(d.poller.fd);
     n
 }
+
+// The io_uring completion driver (`uring.rs`).
+//
+// The kernel performs each request itself, so a request's buffer is an
+// allocation (`malloc`, an address) the driver owns until the request's
+// completion: the submitted bytes are copied in at submit and the result
+// copied out at completion. The submission and completion rings and the
+// submission entries are `mmap`ed from the ring descriptor; ring indices
+// and entries are read and written with `memcpy`, ordered by
+// `PulseSys::ring_fence` (acquire after reading an index the kernel
+// writes, release before publishing one). Request ids are never reused,
+// and a cancellation's own completion carries the request id with bit 63
+// set, so it never passes for the request's completion. Entries are queued
+// at submit and handed to the kernel by the next poll (or when the queue
+// is full, or at once when an outside loop waits on the eventfd).
+
+// The id bit of a cancellation's completion.
+fn uring_cancel_bit() -> u64 {
+    9223372036854775808
+}
+
+// A cancellation completion for a request with no cancellation queued.
+pub fn io_error_unexpected_cancel() -> u32 {
+    1000006
+}
+
+// The kernel lacks `IORING_FEAT_NODROP`, which exactly-once I/O needs
+// (Rust: `Unsupported`).
+pub fn io_error_unsupported() -> u32 {
+    1000007
+}
+
+// A buffer longer than `u32::MAX` bytes (Rust: `InvalidInput`).
+pub fn io_error_buffer_too_long() -> u32 {
+    1000008
+}
+
+// A request the kernel owns: `buf` is its allocation of `max(len, 1)`
+// bytes.
+copy struct UringRequest {
+    id: RequestId,
+    fd: i32,
+    op: Operation,
+    offset: u64,
+    token: u64,
+    buf: u64,
+    len: u64,
+}
+
+// One poll's completions, their buffers, and the first driver error (0 for
+// none). The completions are returned even when `error` is set.
+pub struct UringPoll {
+    pub completions: ChunkSeq[IoCompletion],
+    pub data: ChunkSeq[u8],
+    pub error: u32,
+}
+
+pub struct UringDriver {
+    fd: i32,
+    // The submission ring mapping (and the completion ring, with
+    // `IORING_FEAT_SINGLE_MMAP`), the completion ring mapping (length 0
+    // when shared) and the submission entries.
+    sq_map: u64,
+    sq_map_len: u64,
+    cq_map: u64,
+    cq_map_len: u64,
+    sqes: u64,
+    sqes_len: u64,
+    // Addresses of the ring fields.
+    sq_head: u64,
+    sq_tail: u64,
+    sq_flags: u64,
+    sq_array: u64,
+    sq_mask: u32,
+    sq_entries: u32,
+    cq_head: u64,
+    cq_tail: u64,
+    cqes: u64,
+    cq_mask: u32,
+    // The submission tail as published.
+    tail: u32,
+    next: u64,
+    // In id order.
+    requests: ChunkSeq[UringRequest],
+    // Requests with a queued cancellation, until its completion; and
+    // requests whose cancellation was issued, until their own completion
+    // (a cancelled operation io-wq was running may end with `EINTR`).
+    cancellations: ChunkSeq[u64],
+    cancel_requested: ChunkSeq[u64],
+    eventfd: i32,
+}
+
+fn uring_request_at(in seq: ChunkSeq[UringRequest], idx: u64) -> UringRequest {
+    match seq.try_get(idx) {
+        Option::Some(v) => v,
+        Option::None => UringRequest {
+            id: RequestId {
+                bits: 0
+            },
+            fd: -1,
+            op: Operation::Read,
+            offset: 0,
+            token: 0,
+            buf: 0,
+            len: 0,
+        },
+    }
+}
+
+fn uring_u64_index(in seq: ChunkSeq[u64], v: u64) -> u64 {
+    for i in 0..seq.len() {
+        if u64_at(in seq, i) == v {
+            return i;
+        }
+    }
+    seq.len()
+}
+
+// Remove `v` from `seq`, keeping the order: whether it was there.
+fn uring_u64_remove(inout seq: ChunkSeq[u64], v: u64) -> bool {
+    let i = uring_u64_index(in seq, v);
+    let n = seq.len();
+    if i >= n {
+        return false;
+    }
+    for j in i..wrapping_sub(n, 1) {
+        let _ok = seq.try_set(j, u64_at(in seq, wrapping_add(j, 1)));
+    }
+    let _popped = seq.pop();
+    true
+}
+
+fn uring_get_word(address: u64) -> u32 eff [Ffi[PulseSys]] {
+    let mut w: u32 = 0;
+    let _ = PulseSys::get_word(inout w, address, 4);
+    w
+}
+
+fn uring_put_word(address: u64, w: u32) eff [Ffi[PulseSys]] {
+    let _ = PulseSys::put_word(address, in w, 4);
+}
+
+fn uring_unmap(address: u64, len: u64) eff [Ffi[PulseSys]] {
+    if len > 0 {
+        let _ = PulseSys::munmap(address, len);
+    }
+}
+
+// A mapping of the ring descriptor at `offset`, or `Err` with the errno.
+fn uring_map(fd: i32, len: u64, offset: i64) -> Result[u64, u32] eff [Ffi[PulseSys]] {
+    let (address, e) = PulseSys::mmap(
+        0,
+        len,
+        PulseSys::PROT_READ_WRITE,
+        PulseSys::MAP_SHARED_POPULATE,
+        fd,
+        offset
+    );
+    if address == 18446744073709551615 {
+        return Result::Err(e);
+    }
+    Result::Ok(address)
+}
+
+// A driver of at least `entries` submission entries (the kernel rounds up
+// to a power of two), or `Err` with the error.
+pub fn uring_driver_new(entries: u32) -> Result[UringDriver, u32] eff [Ffi[PulseSys]] {
+    if entries == 0 {
+        return Result::Err(io_error_invalid_entries());
+    }
+    let mut p = UringParams {
+        sq_entries: 0,
+        cq_entries: 0,
+        flags: 0,
+        sq_thread_cpu: 0,
+        sq_thread_idle: 0,
+        features: 0,
+        wq_fd: 0,
+        resv0: 0,
+        resv1: 0,
+        resv2: 0,
+        sq_head: 0,
+        sq_tail: 0,
+        sq_ring_mask: 0,
+        sq_ring_entries: 0,
+        sq_flags: 0,
+        sq_dropped: 0,
+        sq_array: 0,
+        sq_resv: 0,
+        sq_user_lo: 0,
+        sq_user_hi: 0,
+        cq_head: 0,
+        cq_tail: 0,
+        cq_ring_mask: 0,
+        cq_ring_entries: 0,
+        cq_overflow: 0,
+        cq_cqes: 0,
+        cq_flags: 0,
+        cq_resv: 0,
+        cq_user_lo: 0,
+        cq_user_hi: 0,
+    };
+    let (rc, err) = PulseSys::uring_setup(
+        PulseSys::SYS_IO_URING_SETUP,
+        widen_u64(entries),
+        inout p
+    );
+    if rc < 0 {
+        return Result::Err(err);
+    }
+    let fd = wrapping_i32(rc);
+    if (p.features & PulseSys::IORING_FEAT_NODROP) == 0 {
+        let _ = PulseSys::close(fd);
+        return Result::Err(io_error_unsupported());
+    }
+    let sq_len = wrapping_add(widen_u64(p.sq_array), wrapping_mul(widen_u64(p.sq_entries), 4));
+    let cq_len = wrapping_add(widen_u64(p.cq_cqes), wrapping_mul(widen_u64(p.cq_entries), 16));
+    let single = (p.features & PulseSys::IORING_FEAT_SINGLE_MMAP) != 0;
+    let sq_map_len = if single && cq_len > sq_len {
+        cq_len
+    } else {
+        sq_len
+    };
+    let sq_map = match uring_map(fd, sq_map_len, PulseSys::IORING_OFF_SQ_RING) {
+        Result::Ok(a) => a,
+        Result::Err(e) => {
+            let _ = PulseSys::close(fd);
+            return Result::Err(e);
+        },
+    };
+    let (cq_map, cq_map_len) = if single {
+        (sq_map, 0)
+    } else {
+        match uring_map(fd, cq_len, PulseSys::IORING_OFF_CQ_RING) {
+            Result::Ok(a) => (a, cq_len),
+            Result::Err(e) => {
+                uring_unmap(sq_map, sq_map_len);
+                let _ = PulseSys::close(fd);
+                return Result::Err(e);
+            },
+        }
+    };
+    let sqes_len = wrapping_mul(widen_u64(p.sq_entries), 64);
+    let sqes = match uring_map(fd, sqes_len, PulseSys::IORING_OFF_SQES) {
+        Result::Ok(a) => a,
+        Result::Err(e) => {
+            uring_unmap(cq_map, cq_map_len);
+            uring_unmap(sq_map, sq_map_len);
+            let _ = PulseSys::close(fd);
+            return Result::Err(e);
+        },
+    };
+    let sq_tail = wrapping_add(sq_map, widen_u64(p.sq_tail));
+    let tail = uring_get_word(sq_tail);
+    Result::Ok(
+        UringDriver {
+            fd: fd,
+            sq_map: sq_map,
+            sq_map_len: sq_map_len,
+            cq_map: cq_map,
+            cq_map_len: cq_map_len,
+            sqes: sqes,
+            sqes_len: sqes_len,
+            sq_head: wrapping_add(sq_map, widen_u64(p.sq_head)),
+            sq_tail: sq_tail,
+            sq_flags: wrapping_add(sq_map, widen_u64(p.sq_flags)),
+            sq_array: wrapping_add(sq_map, widen_u64(p.sq_array)),
+            sq_mask: uring_get_word(wrapping_add(sq_map, widen_u64(p.sq_ring_mask))),
+            sq_entries: p.sq_entries,
+            cq_head: wrapping_add(cq_map, widen_u64(p.cq_head)),
+            cq_tail: wrapping_add(cq_map, widen_u64(p.cq_tail)),
+            cqes: wrapping_add(cq_map, widen_u64(p.cq_cqes)),
+            cq_mask: uring_get_word(wrapping_add(cq_map, widen_u64(p.cq_ring_mask))),
+            tail: tail,
+            next: 1,
+            requests: ChunkSeq::new[UringRequest](),
+            cancellations: ChunkSeq::new[u64](),
+            cancel_requested: ChunkSeq::new[u64](),
+            eventfd: -1,
+        }
+    )
+}
+
+// Requests the kernel owns.
+pub fn uring_driver_pending(in d: UringDriver) -> u64 {
+    d.requests.len()
+}
+
+// Queued entries the kernel has not taken yet.
+fn uring_queued(in d: UringDriver) -> u32 eff [Ffi[PulseSys]] {
+    let head = uring_get_word(d.sq_head);
+    PulseSys::ring_fence();
+    wrapping_sub(d.tail, head)
+}
+
+// Hand the queued entries to the kernel and, with `want` > 0, wait for that
+// many completions: 0 or the errno.
+fn uring_enter(in d: UringDriver, want: u64) -> u32 eff [Ffi[PulseSys]] {
+    let queued = uring_queued(in d);
+    let overflow = (uring_get_word(d.sq_flags) & PulseSys::IORING_SQ_CQ_OVERFLOW) != 0;
+    let flags = if want > 0 || overflow {
+        PulseSys::IORING_ENTER_GETEVENTS
+    } else {
+        0
+    };
+    let (rc, e) = PulseSys::uring_enter(
+        PulseSys::SYS_IO_URING_ENTER,
+        widen_i64(d.fd),
+        widen_u64(queued),
+        want,
+        flags,
+        0,
+        0
+    );
+    if rc < 0 {
+        e
+    } else {
+        0
+    }
+}
+
+// Queue `sqe`, handing the queue to the kernel first when it is full: 0,
+// the errno, or `io_error_queue_full` when it stays full.
+fn uring_push(inout d: UringDriver, sqe: Sqe) -> u32 eff [Ffi[PulseSys]] {
+    if uring_queued(in d) >= d.sq_entries {
+        let e = uring_enter(in d, 0);
+        if e != 0 {
+            return e;
+        }
+        if uring_queued(in d) >= d.sq_entries {
+            return io_error_queue_full();
+        }
+    }
+    let slot = d.tail & d.sq_mask;
+    let _ = PulseSys::put_sqe(wrapping_add(d.sqes, wrapping_mul(widen_u64(slot), 64)), in sqe, 64);
+    uring_put_word(wrapping_add(d.sq_array, wrapping_mul(widen_u64(slot), 4)), slot);
+    PulseSys::ring_fence();
+    d.tail = wrapping_add(d.tail, 1);
+    uring_put_word(d.sq_tail, d.tail);
+    0
+}
+
+fn uring_sqe(opcode: u8, fd: i32, off: u64, addr: u64, len: u32, user_data: u64) -> Sqe {
+    Sqe {
+        opcode: opcode,
+        flags: 0,
+        ioprio: 0,
+        fd: fd,
+        off: off,
+        addr: addr,
+        len: len,
+        rw_flags: 0,
+        user_data: user_data,
+        buf_index: 0,
+        personality: 0,
+        splice_fd_in: 0,
+        addr3: 0,
+        pad: 0,
+    }
+}
+
+// Signal the eventfd once.
+fn uring_signal(fd: i32) eff [Ffi[PulseSys]] {
+    let mut one: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    one.resize(8, 0);
+    let _ok = one.try_set(0, 1);
+    let _ = PulseSys::write(fd, in one.as_slice());
+}
+
+// Reset the eventfd's counter (nothing signalled is fine).
+fn uring_drain(fd: i32) eff [Ffi[PulseSys]] {
+    let mut counter: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    counter.resize(8, 0);
+    let _ = PulseSys::read(fd, inout counter[0..8]);
+}
+
+// With an outside loop waiting on the eventfd, nothing else would hand
+// queued entries to the kernel before it waits: submit them now. If that
+// fails they stay queued, and the eventfd is signalled so the loop's next
+// poll submits them again and reports the error.
+fn uring_flush_for_outside_loop(in d: UringDriver) eff [Ffi[PulseSys]] {
+    if d.eventfd < 0 {
+        return;
+    }
+    if uring_enter(in d, 0) != 0 {
+        uring_signal(d.eventfd);
+    }
+}
+
+// Submit a read into a buffer of `buffer.len()` bytes (its contents are
+// kept when the read fails) or a write of `buffer`, at `offset`. The
+// request's id, or `Err` with the error; a rejected request leaves nothing
+// behind.
+pub fn uring_driver_submit(
+    inout d: UringDriver,
+    fd: i32,
+    op: Operation,
+    in buffer: Slice[u8],
+    offset: u64,
+    token: u64,
+) -> Result[RequestId, u32] eff [Ffi[PulseSys]] {
+    let len = buffer.len();
+    if len > 4294967295 {
+        return Result::Err(io_error_buffer_too_long());
+    }
+    if uring_queued(in d) >= d.sq_entries {
+        let e = uring_enter(in d, 0);
+        if e != 0 {
+            return Result::Err(e);
+        }
+        if uring_queued(in d) >= d.sq_entries {
+            return Result::Err(io_error_queue_full());
+        }
+    }
+    if d.next >= uring_cancel_bit() {
+        return Result::Err(io_error_ids_exhausted());
+    }
+    let buf = PulseSys::malloc(
+        if len == 0 {
+            1
+        } else {
+            len
+        }
+    );
+    if buf == 0 {
+        return Result::Err(PulseSys::ENOMEM_ERR);
+    }
+    if len > 0 {
+        let _ = PulseSys::put_bytes(buf, in buffer);
+    }
+    let id = RequestId {
+        bits: d.next
+    };
+    d.next = wrapping_add(d.next, 1);
+    let opcode = if is_read(op) {
+        PulseSys::IORING_OP_READ
+    } else {
+        PulseSys::IORING_OP_WRITE
+    };
+    let pushed = uring_push(
+        inout d,
+        uring_sqe(opcode, fd, offset, buf, wrapping_u32(len), id.bits)
+    );
+    if pushed != 0 {
+        let _ = PulseSys::free(buf);
+        return Result::Err(io_error_queue_full());
+    }
+    d
+        .requests
+        .push(
+            UringRequest {
+                id: id,
+                fd: fd,
+                op: op,
+                offset: offset,
+                token: token,
+                buf: buf,
+                len: len,
+            }
+        );
+    uring_flush_for_outside_loop(in d);
+    Result::Ok(id)
+}
+
+fn uring_request_index(in d: UringDriver, id: u64) -> u64 {
+    let n = d.requests.len();
+    for i in 0..n {
+        if uring_request_at(in d.requests, i).id.bits == id {
+            return i;
+        }
+    }
+    n
+}
+
+// Queue the cancellation of request `id`: true when it is owned and not
+// already being cancelled (its completion, `ECANCELED`, comes with a later
+// poll), else false; `Err` when the cancellation cannot be queued.
+pub fn uring_driver_cancel(inout d: UringDriver, id: RequestId)
+    -> Result[bool, u32] eff [Ffi[PulseSys]] {
+    if uring_request_index(in d, id.bits) >= d.requests.len()
+        || uring_u64_index(in d.cancellations, id.bits) < d.cancellations.len() {
+        return Result::Ok(false);
+    }
+    let sqe = uring_sqe(
+        PulseSys::IORING_OP_ASYNC_CANCEL,
+        -1,
+        0,
+        id.bits,
+        0,
+        id.bits | uring_cancel_bit()
+    );
+    let e = uring_push(inout d, sqe);
+    if e != 0 {
+        return Result::Err(e);
+    }
+    d.cancellations.push(id.bits);
+    d.cancel_requested.push(id.bits);
+    uring_flush_for_outside_loop(in d);
+    Result::Ok(true)
+}
+
+// Cancel every owned request in id order, stopping at the first error: 0
+// or that error.
+pub fn uring_driver_cancel_all(inout d: UringDriver) -> u32 eff [Ffi[PulseSys]] {
+    let mut ids: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..d.requests.len() {
+        ids.push(uring_request_at(in d.requests, i).id.bits);
+    }
+    for i in 0..ids.len() {
+        let rid = RequestId {
+            bits: u64_at(in ids, i)
+        };
+        let r = uring_driver_cancel(inout d, rid);
+        match r {
+            Result::Ok(_) => {},
+            Result::Err(e) => return e,
+        }
+    }
+    0
+}
+
+// The ring's eventfd, made and registered on first use: the kernel signals
+// it for every completion it posts. It is signalled once at creation
+// (completions posted before it never signal it).
+pub fn uring_driver_eventfd(inout d: UringDriver) -> Result[i32, u32] eff [Ffi[PulseSys]] {
+    if d.eventfd >= 0 {
+        return Result::Ok(d.eventfd);
+    }
+    let (efd, e) = PulseSys::eventfd(0, PulseSys::EFD_CLOEXEC_NONBLOCK);
+    if efd < 0 {
+        return Result::Err(e);
+    }
+    let (rc, re) = PulseSys::uring_register(
+        PulseSys::SYS_IO_URING_REGISTER,
+        widen_i64(d.fd),
+        PulseSys::IORING_REGISTER_EVENTFD,
+        in efd,
+        1
+    );
+    if rc < 0 {
+        let _ = PulseSys::close(efd);
+        return Result::Err(re);
+    }
+    uring_signal(efd);
+    d.eventfd = efd;
+    Result::Ok(efd)
+}
+
+// Account for one completion (`user_data`, `res`): appends the request's
+// completion and buffer to `out`, or nothing for a cancellation's own
+// completion; 0 or the error.
+fn uring_complete(inout d: UringDriver, user_data: u64, res: i32, inout out: UringPoll)
+    -> u32 eff [Ffi[PulseSys]] {
+    if (user_data & uring_cancel_bit()) != 0 {
+        let id = user_data ^ uring_cancel_bit();
+        if !uring_u64_remove(inout d.cancellations, id) {
+            return io_error_unexpected_cancel();
+        }
+        return 0;
+    }
+    let i = uring_request_index(in d, user_data);
+    if i >= d.requests.len() {
+        return io_error_unknown_event();
+    }
+    let r = uring_request_at(in d.requests, i);
+    let n = d.requests.len();
+    for j in i..wrapping_sub(n, 1) {
+        let _ok = d.requests.try_set(j, uring_request_at(in d.requests, wrapping_add(j, 1)));
+    }
+    let _popped = d.requests.pop();
+    let interrupted = uring_u64_remove(inout d.cancel_requested, r.id.bits) && res == -4;
+    let (ok, bytes, errno) = if interrupted {
+        (false, 0, PulseSys::ECANCELED_ERR)
+    } else if res < 0 {
+        (false, 0, wrapping_u32(wrapping_sub(0, widen_i64(res))))
+    } else if wrapping_u64(widen_i64(res)) > r.len {
+        (false, 0, io_error_invalid_length())
+    } else {
+        (true, wrapping_u64(widen_i64(res)), 0)
+    };
+    let keep = if ok && is_read(r.op) {
+        bytes
+    } else {
+        r.len
+    };
+    let at = out.data.len();
+    out.data.resize(wrapping_add(at, keep), 0);
+    if keep > 0 {
+        let _ = PulseSys::get_bytes(r.buf, inout out.data[at..wrapping_add(at, keep)]);
+    }
+    let _ = PulseSys::free(r.buf);
+    out
+        .completions
+        .push(
+            IoCompletion {
+                id: r.id,
+                token: r.token,
+                op: r.op,
+                ok: ok,
+                bytes: bytes,
+                errno: errno,
+                start: at,
+                len: keep,
+            }
+        );
+    0
+}
+
+// Hand queued entries to the kernel and collect the posted completions.
+// `wait` waits for at least one when a request or cancellation is
+// outstanding. A failed wait returns no completions.
+pub fn uring_driver_poll(inout d: UringDriver, wait: bool) -> UringPoll eff [Ffi[PulseSys]] {
+    let mut out = UringPoll {
+        completions: ChunkSeq::new[IoCompletion](),
+        data: ChunkSeq::new[u8](),
+        error: 0,
+    };
+    if d.eventfd >= 0 {
+        // Reset the counter before harvesting, so a completion posted
+        // after this point signals the descriptor again.
+        uring_drain(d.eventfd);
+    }
+    let want: u64 = if wait && (d.requests.len() > 0 || d.cancellations.len() > 0) {
+        1
+    } else {
+        0
+    };
+    loop {
+        let e = uring_enter(in d, want);
+        if e == PulseSys::EINTR_ERR {
+            continue;
+        }
+        if e != 0 {
+            out.error = e;
+            return out;
+        }
+        break;
+    }
+    let head = uring_get_word(d.cq_head);
+    let tail = uring_get_word(d.cq_tail);
+    PulseSys::ring_fence();
+    let mut events: ChunkSeq[Cqe] = ChunkSeq::new[Cqe]();
+    let mut i = head;
+    loop {
+        if i == tail {
+            break;
+        }
+        let mut cqe = Cqe {
+            user_data: 0,
+            res: 0,
+            flags: 0,
+        };
+        let slot = i & d.cq_mask;
+        let _ = PulseSys::get_cqe(
+            inout cqe,
+            wrapping_add(d.cqes, wrapping_mul(widen_u64(slot), 16)),
+            16
+        );
+        events.push(cqe);
+        i = wrapping_add(i, 1);
+    }
+    PulseSys::ring_fence();
+    uring_put_word(d.cq_head, tail);
+    for k in 0..events.len() {
+        let c = match events.try_get(k) {
+            Option::Some(c) => c,
+            Option::None => Cqe {
+                user_data: 0,
+                res: 0,
+                flags: 0,
+            },
+        };
+        let e = uring_complete(inout d, c.user_data, c.res, inout out);
+        if e != 0 && out.error == 0 {
+            out.error = e;
+        }
+    }
+    out
+}
+
+// Cancel and collect every request: the completions (each cancelled one
+// `ECANCELED`) and the first error, at which it stops.
+pub fn uring_driver_shutdown(inout d: UringDriver) -> UringPoll eff [Ffi[PulseSys]] {
+    let mut all = UringPoll {
+        completions: ChunkSeq::new[IoCompletion](),
+        data: ChunkSeq::new[u8](),
+        error: 0,
+    };
+    let e = uring_driver_cancel_all(inout d);
+    if e != 0 {
+        all.error = e;
+        return all;
+    }
+    loop {
+        if d.requests.len() == 0 && d.cancellations.len() == 0 {
+            return all;
+        }
+        let p = uring_driver_poll(inout d, true);
+        for k in 0..p.completions.len() {
+            let mut c = match p.completions.try_get(k) {
+                Option::Some(c) => c,
+                Option::None => return all,
+            };
+            let at = all.data.len();
+            all.data.extend(in p.data[c.start..wrapping_add(c.start, c.len)]);
+            c.start = at;
+            all.completions.push(c);
+        }
+        if p.error != 0 {
+            all.error = p.error;
+            return all;
+        }
+    }
+}
+
+// Release the driver (Rust's drop path): cancel and wait out every
+// request, then unmap the rings and close the descriptors. When a wait
+// fails the kernel may still hold the remaining buffers, which are kept
+// (not freed); the result is how many.
+pub fn uring_driver_close(inout d: UringDriver) -> u64 eff [Ffi[PulseSys]] {
+    let mut ids: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..d.requests.len() {
+        ids.push(uring_request_at(in d.requests, i).id.bits);
+    }
+    for i in 0..ids.len() {
+        let rid = RequestId {
+            bits: u64_at(in ids, i)
+        };
+        let _ = uring_driver_cancel(inout d, rid);
+    }
+    loop {
+        if d.requests.len() == 0 {
+            break;
+        }
+        let p = uring_driver_poll(inout d, true);
+        if p.error != 0 {
+            break;
+        }
+    }
+    let kept = d.requests.len();
+    uring_unmap(d.sqes, d.sqes_len);
+    uring_unmap(d.cq_map, d.cq_map_len);
+    uring_unmap(d.sq_map, d.sq_map_len);
+    if d.eventfd >= 0 {
+        let _ = PulseSys::close(d.eventfd);
+    }
+    let _ = PulseSys::close(d.fd);
+    kept
+}

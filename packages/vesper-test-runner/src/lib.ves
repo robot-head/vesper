@@ -23,6 +23,8 @@
 //   and @vesper-std/hash.
 // - generate.ves: the generated module of a doctest example
 //   (src/doctest_generate.rs), over @vesper/ast and @vesper/front.
+// - verdict.ves: the doctest wrapper names and per-example verdicts
+//   before execution (src/doctest_verdict.rs).
 // - guard.ves: the fail-closed source profile a doctest module passes
 //   before checking (src/doctest_guard.rs), over @vesper/ast.
 
@@ -42,6 +44,10 @@ use self::generate::{
 };
 use self::guard::{
     guard
+};
+use self::verdict::{
+    verdict,
+    wrappers
 };
 use self::mutants::{
     collect
@@ -124,4 +130,22 @@ pub fn doctest_generate_words(in input: Slice[u8]) -> ChunkSeq[u64] {
 
 pub fn doctest_generate_str(in input: Str) -> ChunkSeq[u64] {
     generate(in input.as_bytes())
+}
+
+// `doctest_verdict::rust_wrappers` of a file's examples.
+pub fn doctest_wrappers_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    wrappers(in input)
+}
+
+pub fn doctest_wrappers_str(in input: Str) -> ChunkSeq[u64] {
+    wrappers(in input.as_bytes())
+}
+
+// `doctest_verdict::rust_verdict` of one checked example.
+pub fn doctest_verdict_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    verdict(in input)
+}
+
+pub fn doctest_verdict_str(in input: Str) -> ChunkSeq[u64] {
+    verdict(in input.as_bytes())
 }

@@ -94,9 +94,11 @@ const U_EXTERNAL_FUNCTION: u8 = 11;
 const NONE32: u32 = 4294967295;
 const MASK32: u64 = 4294967295;
 
-// `Plan.host` codes of the two libraries.
+// `Plan.host` codes of the libraries. StdProcess (5) has no functions on
+// WASI and imports nothing.
 pub const HOST_ENV: u8 = 3;
 pub const HOST_FS: u8 = 4;
+pub const HOST_PROC: u8 = 5;
 
 // The operations, by index (`op_index`).
 pub const ENV_ARG_COUNT: u64 = 0;
