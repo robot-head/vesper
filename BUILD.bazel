@@ -461,6 +461,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # #1886: @vesper/verified-codegen against src/verified_codegen on the
+        # selection table and the slot IR of the corpus mains.
+        "test/self_host_verified_codegen": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # #1829: @vesper/native-cold-outline against src/native_cold_outline.rs;
         # its kernels are the programs of tests/native_cold_outline.rs.
         "test/self_host_native_cold_outline": glob([
@@ -1122,6 +1129,8 @@ vesper_crate(
         "test/self_host_bounds_hoist_pass": "eternal",
         "test/self_host_native_vectorize": "eternal",
         "test/self_host_native_cold_outline": "eternal",
+        # #1886: the verified backend lowers every corpus main.
+        "test/self_host_verified_codegen": "eternal",
         "test/self_host_bounds_hoist_jit": "eternal",
         # The dyn differential runs both passes over every .ves source twice.
         "test/self_host_check_dyn": "long",

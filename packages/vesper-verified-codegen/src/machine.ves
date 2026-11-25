@@ -1,0 +1,691 @@
+// The slot IR (`Lir`), the abstract target instruction subset (`M`) and
+// the instruction-selection table between them: src/verified_codegen/
+// machine.rs in Vesper (#1886, part 1).
+//
+// `select` is a total function from one `Lir` row to a fixed sequence of
+// `M` instructions. Every row kind has a Lean counterpart in
+// lean/VerifiedCodegen.lean (`select`), and `table_listing` renders the
+// table in the exact text the Lean file prints, so tests can check that
+// the Lean table, the Rust table and this one are the same.
+//
+// Rows and instructions are copy structs of small codes (below), so they
+// cross the harness as words and can be kept in sequences.
+
+// `Kind`: the machine representation of a scalar.
+pub const K_U8: u8 = 0;
+pub const K_U32: u8 = 1;
+pub const K_U64: u8 = 2;
+pub const K_I64: u8 = 3;
+pub const K_BOOL: u8 = 4;
+pub const K_F64: u8 = 5;
+
+// `ArithOp` (checked), `WrapOp`, `FloatOp`: add, sub, mul, div, rem in
+// this order (`WrapOp` stops at mul, `FloatOp` at div).
+pub const OP_ADD: u8 = 0;
+pub const OP_SUB: u8 = 1;
+pub const OP_MUL: u8 = 2;
+pub const OP_DIV: u8 = 3;
+pub const OP_REM: u8 = 4;
+
+// `Cond`.
+pub const C_EQ: u8 = 0;
+pub const C_NE: u8 = 1;
+pub const C_LT: u8 = 2;
+pub const C_LE: u8 = 3;
+pub const C_GT: u8 = 4;
+pub const C_GE: u8 = 5;
+
+// `Sign`.
+pub const S_S: u8 = 0;
+pub const S_U: u8 = 1;
+
+// `TrapKind`; its value is also its shared abort label.
+pub const T_OVERFLOW: u8 = 0;
+pub const T_DIV0: u8 = 1;
+pub const T_UNREACHABLE: u8 = 2;
+pub const T_REGION: u8 = 3;
+
+// `Reg`.
+pub const R0: u8 = 0;
+pub const R1: u8 = 1;
+pub const R2: u8 = 2;
+
+// `Loc`: a local slot, the outgoing call area or the incoming area.
+pub const L_SLOT: u8 = 0;
+pub const L_OUT: u8 = 1;
+pub const L_IN: u8 = 2;
+
+// `Lir` rows, in the order of the Rust enum.
+pub const LIR_CONST: u8 = 0;
+pub const LIR_MOVE: u8 = 1;
+pub const LIR_ARITH: u8 = 2;
+pub const LIR_WRAPPING: u8 = 3;
+pub const LIR_NEG: u8 = 4;
+pub const LIR_NOT: u8 = 5;
+pub const LIR_COMPARE: u8 = 6;
+pub const LIR_FARITH: u8 = 7;
+pub const LIR_FNEG: u8 = 8;
+pub const LIR_FCOMPARE: u8 = 9;
+pub const LIR_STORE_OUT: u8 = 10;
+pub const LIR_LOAD_OUT: u8 = 11;
+pub const LIR_LOAD_IN: u8 = 12;
+pub const LIR_STORE_IN: u8 = 13;
+pub const LIR_LOAD_PTR: u8 = 14;
+pub const LIR_STORE_PTR: u8 = 15;
+pub const LIR_CALL: u8 = 16;
+pub const LIR_LABEL: u8 = 17;
+pub const LIR_JUMP: u8 = 18;
+pub const LIR_BRANCH_ZERO: u8 = 19;
+pub const LIR_ENTER: u8 = 20;
+pub const LIR_RETURN: u8 = 21;
+pub const LIR_TRAP: u8 = 22;
+pub const LIR_SCOPE: u8 = 23;
+
+// One slot-IR row. `op` is the row's ArithOp, WrapOp, FloatOp, Cond or
+// TrapKind and `kind` its Kind, where it has them. The word fields hold the
+// Rust variant's other fields in declaration order: `Const { dst, word }`
+// is `f1 = dst, f2 = word`, `StorePtr { ptr, offset, src }` is
+// `f1 = ptr, f2 = offset, f3 = src`, `Scope { ovf, div0 }` is
+// `f1 = ovf, f2 = div0`, and so on.
+pub copy struct Lir {
+    tag: u8,
+    op: u8,
+    kind: u8,
+    f1: u64,
+    f2: u64,
+    f3: u64,
+}
+
+// `M` instructions, in the order of the Rust enum.
+pub const M_LD: u8 = 0;
+pub const M_ST: u8 = 1;
+pub const M_IMM: u8 = 2;
+pub const M_ADD_CHK: u8 = 3;
+pub const M_SUB_CHK: u8 = 4;
+pub const M_MUL_CHK: u8 = 5;
+pub const M_WRAP: u8 = 6;
+pub const M_AND_R2: u8 = 7;
+pub const M_TRAP_GT_U: u8 = 8;
+pub const M_TRAP_ZERO: u8 = 9;
+pub const M_TRAP_DIV_OVF: u8 = 10;
+pub const M_DIV: u8 = 11;
+pub const M_REM: u8 = 12;
+pub const M_NEG_CHK: u8 = 13;
+pub const M_XOR_ONE: u8 = 14;
+pub const M_CMP: u8 = 15;
+pub const M_FOP: u8 = 16;
+pub const M_FNEG: u8 = 17;
+pub const M_FCMP: u8 = 18;
+pub const M_LDH: u8 = 19;
+pub const M_STH: u8 = 20;
+pub const M_LABEL: u8 = 21;
+pub const M_JMP: u8 = 22;
+pub const M_BZ: u8 = 23;
+pub const M_CALL: u8 = 24;
+pub const M_ENTER: u8 = 25;
+pub const M_LEAVE: u8 = 26;
+pub const M_TRAP: u8 = 27;
+pub const M_SCOPE: u8 = 28;
+
+// One abstract instruction. `a` is its register, Sign, WrapOp, FloatOp,
+// Cond or TrapKind; `b` the Sign of `Cmp` or the Loc kind of `Ld`/`St`;
+// `n` the Loc index, immediate, heap offset, label or frame words; `n2`
+// the second label of `Scope`.
+pub copy struct M {
+    op: u8,
+    a: u8,
+    b: u8,
+    n: u64,
+    n2: u64,
+}
+
+fn m0(op: u8) -> M {
+    M {
+        op: op,
+        a: 0,
+        b: 0,
+        n: 0,
+        n2: 0
+    }
+}
+
+fn m1(op: u8, a: u8) -> M {
+    M {
+        op: op,
+        a: a,
+        b: 0,
+        n: 0,
+        n2: 0
+    }
+}
+
+fn mn(op: u8, n: u64) -> M {
+    M {
+        op: op,
+        a: 0,
+        b: 0,
+        n: n,
+        n2: 0
+    }
+}
+
+fn ld(r: u8, loc: u8, n: u64) -> M {
+    M {
+        op: M_LD,
+        a: r,
+        b: loc,
+        n: n,
+        n2: 0
+    }
+}
+
+fn st(loc: u8, n: u64, r: u8) -> M {
+    M {
+        op: M_ST,
+        a: r,
+        b: loc,
+        n: n,
+        n2: 0
+    }
+}
+
+fn imm(r: u8, w: u64) -> M {
+    M {
+        op: M_IMM,
+        a: r,
+        b: 0,
+        n: w,
+        n2: 0
+    }
+}
+
+// `Kind::signed`, then `Kind::sign`.
+fn sign(kind: u8) -> u8 {
+    if kind == K_I64 {
+        S_S
+    } else {
+        S_U
+    }
+}
+
+// `Kind::narrow_mask`: the largest value of a narrow unsigned kind, whose
+// results need an explicit range check; 0 for the wider kinds.
+fn narrow_mask(kind: u8) -> u64 {
+    if kind == K_U8 {
+        255
+    } else if kind == K_U32 {
+        4294967295
+    } else {
+        0
+    }
+}
+
+// `ld r0 a; ld r1 b; <body>; st dst r0` (`binary`).
+fn binary(inout out: ChunkSeq[M], a: u64, b: u64, in body: ChunkSeq[M], dst: u64) {
+    out.push(ld(R0, L_SLOT, a));
+    out.push(ld(R1, L_SLOT, b));
+    for i in 0..body.len() {
+        match body.try_get(i) {
+            Option::Some(m) => out.push(m),
+            Option::None => {}
+        }
+    }
+    out.push(st(L_SLOT, dst, R0));
+}
+
+// `m`, then the narrow range check of `kind` when it has one.
+fn ranged(inout body: ChunkSeq[M], m: M, kind: u8) {
+    body.push(m);
+    let mask = narrow_mask(kind);
+    if mask != 0 {
+        body.push(imm(R2, mask));
+        body.push(m0(M_TRAP_GT_U));
+    }
+}
+
+// The instruction-selection table: one fixed `M` sequence per row,
+// appended to `out`. Total: every row tag has exactly one entry.
+pub fn select(in row: Lir, inout out: ChunkSeq[M]) {
+    let t = row.tag;
+    if t == LIR_CONST {
+        out.push(imm(R0, row.f2));
+        out.push(st(L_SLOT, row.f1, R0));
+    } else if t == LIR_MOVE {
+        out.push(ld(R0, L_SLOT, row.f2));
+        out.push(st(L_SLOT, row.f1, R0));
+    } else if t == LIR_ARITH {
+        let s = sign(row.kind);
+        let mut body = ChunkSeq::new[M]();
+        if row.op == OP_ADD {
+            ranged(inout body, m1(M_ADD_CHK, s), row.kind);
+        } else if row.op == OP_SUB {
+            // A narrow unsigned difference is never above its minuend.
+            body.push(m1(M_SUB_CHK, s));
+        } else if row.op == OP_MUL {
+            ranged(inout body, m1(M_MUL_CHK, s), row.kind);
+        } else if row.op == OP_DIV {
+            body.push(m0(M_TRAP_ZERO));
+            if row.kind == K_I64 {
+                body.push(m0(M_TRAP_DIV_OVF));
+            }
+            body.push(m1(M_DIV, s));
+        } else {
+            body.push(m0(M_TRAP_ZERO));
+            body.push(m1(M_REM, s));
+        }
+        binary(inout out, row.f2, row.f3, in body, row.f1);
+    } else if t == LIR_WRAPPING {
+        let mut body = ChunkSeq::new[M]();
+        body.push(m1(M_WRAP, row.op));
+        let mask = narrow_mask(row.kind);
+        if mask != 0 {
+            body.push(imm(R2, mask));
+            body.push(m0(M_AND_R2));
+        }
+        binary(inout out, row.f2, row.f3, in body, row.f1);
+    } else if t == LIR_NEG {
+        out.push(ld(R0, L_SLOT, row.f2));
+        out.push(m1(M_NEG_CHK, sign(row.kind)));
+        out.push(st(L_SLOT, row.f1, R0));
+    } else if t == LIR_NOT {
+        out.push(ld(R0, L_SLOT, row.f2));
+        out.push(m0(M_XOR_ONE));
+        out.push(st(L_SLOT, row.f1, R0));
+    } else if t == LIR_COMPARE {
+        let mut body = ChunkSeq::new[M]();
+        body
+            .push(
+                M {
+                    op: M_CMP,
+                    a: row.op,
+                    b: sign(row.kind),
+                    n: 0,
+                    n2: 0
+                }
+            );
+        binary(inout out, row.f2, row.f3, in body, row.f1);
+    } else if t == LIR_FARITH {
+        let mut body = ChunkSeq::new[M]();
+        body.push(m1(M_FOP, row.op));
+        binary(inout out, row.f2, row.f3, in body, row.f1);
+    } else if t == LIR_FNEG {
+        out.push(ld(R0, L_SLOT, row.f2));
+        out.push(m0(M_FNEG));
+        out.push(st(L_SLOT, row.f1, R0));
+    } else if t == LIR_FCOMPARE {
+        let mut body = ChunkSeq::new[M]();
+        body.push(m1(M_FCMP, row.op));
+        binary(inout out, row.f2, row.f3, in body, row.f1);
+    } else if t == LIR_STORE_OUT {
+        // `StoreOut { index, src }`
+        out.push(ld(R0, L_SLOT, row.f2));
+        out.push(st(L_OUT, row.f1, R0));
+    } else if t == LIR_LOAD_OUT {
+        // `LoadOut { dst, index }`
+        out.push(ld(R0, L_OUT, row.f2));
+        out.push(st(L_SLOT, row.f1, R0));
+    } else if t == LIR_LOAD_IN {
+        out.push(ld(R0, L_IN, row.f2));
+        out.push(st(L_SLOT, row.f1, R0));
+    } else if t == LIR_STORE_IN {
+        out.push(ld(R0, L_SLOT, row.f2));
+        out.push(st(L_IN, row.f1, R0));
+    } else if t == LIR_LOAD_PTR {
+        // `LoadPtr { dst, ptr, offset }`
+        out.push(ld(R1, L_SLOT, row.f2));
+        out.push(mn(M_LDH, row.f3));
+        out.push(st(L_SLOT, row.f1, R0));
+    } else if t == LIR_STORE_PTR {
+        // `StorePtr { ptr, offset, src }`
+        out.push(ld(R1, L_SLOT, row.f1));
+        out.push(ld(R0, L_SLOT, row.f3));
+        out.push(mn(M_STH, row.f2));
+    } else if t == LIR_CALL {
+        out.push(mn(M_CALL, row.f1));
+    } else if t == LIR_LABEL {
+        out.push(mn(M_LABEL, row.f1));
+    } else if t == LIR_JUMP {
+        out.push(mn(M_JMP, row.f1));
+    } else if t == LIR_BRANCH_ZERO {
+        // `BranchZero { cond, target }`
+        out.push(ld(R0, L_SLOT, row.f1));
+        out.push(mn(M_BZ, row.f2));
+    } else if t == LIR_ENTER {
+        out.push(mn(M_ENTER, row.f1));
+    } else if t == LIR_RETURN {
+        out.push(m0(M_LEAVE));
+    } else if t == LIR_TRAP {
+        out.push(m1(M_TRAP, row.op));
+    } else {
+        out
+            .push(
+                M {
+                    op: M_SCOPE,
+                    a: 0,
+                    b: 0,
+                    n: row.f1,
+                    n2: row.f2
+                }
+            );
+    }
+}
+
+fn put(inout out: ChunkSeq[u8], in s: Str) {
+    out.extend(in s.as_bytes());
+}
+
+pub fn put_decimal(inout out: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_decimal(inout out, v / 10);
+    }
+    out.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+fn put_kind(inout out: ChunkSeq[u8], k: u8) {
+    if k == K_U8 {
+        put(inout out, "u8");
+    } else if k == K_U32 {
+        put(inout out, "u32");
+    } else if k == K_U64 {
+        put(inout out, "u64");
+    } else if k == K_I64 {
+        put(inout out, "i64");
+    } else if k == K_BOOL {
+        put(inout out, "bool");
+    } else {
+        put(inout out, "f64");
+    }
+}
+
+// The name of an ArithOp, WrapOp or FloatOp.
+fn put_op(inout out: ChunkSeq[u8], op: u8) {
+    if op == OP_ADD {
+        put(inout out, "add");
+    } else if op == OP_SUB {
+        put(inout out, "sub");
+    } else if op == OP_MUL {
+        put(inout out, "mul");
+    } else if op == OP_DIV {
+        put(inout out, "div");
+    } else {
+        put(inout out, "rem");
+    }
+}
+
+fn put_cond(inout out: ChunkSeq[u8], c: u8) {
+    if c == C_EQ {
+        put(inout out, "eq");
+    } else if c == C_NE {
+        put(inout out, "ne");
+    } else if c == C_LT {
+        put(inout out, "lt");
+    } else if c == C_LE {
+        put(inout out, "le");
+    } else if c == C_GT {
+        put(inout out, "gt");
+    } else {
+        put(inout out, "ge");
+    }
+}
+
+fn put_sign(inout out: ChunkSeq[u8], s: u8) {
+    if s == S_S {
+        put(inout out, "s");
+    } else {
+        put(inout out, "u");
+    }
+}
+
+fn put_trap(inout out: ChunkSeq[u8], k: u8) {
+    if k == T_OVERFLOW {
+        put(inout out, "ovf");
+    } else if k == T_DIV0 {
+        put(inout out, "div0");
+    } else if k == T_UNREACHABLE {
+        put(inout out, "unreachable");
+    } else {
+        put(inout out, "region");
+    }
+}
+
+fn put_reg(inout out: ChunkSeq[u8], r: u8) {
+    out.push(114);
+    out.push(wrapping_add(r, 48));
+}
+
+fn put_loc(inout out: ChunkSeq[u8], loc: u8, n: u64) {
+    if loc == L_SLOT {
+        out.push(115);
+    } else if loc == L_OUT {
+        out.push(111);
+    } else {
+        out.push(105);
+    }
+    put_decimal(inout out, n);
+}
+
+fn put_label(inout out: ChunkSeq[u8], l: u64) {
+    out.push(76);
+    put_decimal(inout out, l);
+}
+
+// `M`'s `Display`: the text lean/VerifiedCodegen.lean prints.
+pub fn put_m(inout out: ChunkSeq[u8], in m: M) {
+    let o = m.op;
+    if o == M_LD {
+        put(inout out, "ld ");
+        put_reg(inout out, m.a);
+        out.push(32);
+        put_loc(inout out, m.b, m.n);
+    } else if o == M_ST {
+        put(inout out, "st ");
+        put_loc(inout out, m.b, m.n);
+        out.push(32);
+        put_reg(inout out, m.a);
+    } else if o == M_IMM {
+        put(inout out, "li ");
+        put_reg(inout out, m.a);
+        out.push(32);
+        put_decimal(inout out, m.n);
+    } else if o == M_ADD_CHK {
+        put(inout out, "addchk ");
+        put_sign(inout out, m.a);
+    } else if o == M_SUB_CHK {
+        put(inout out, "subchk ");
+        put_sign(inout out, m.a);
+    } else if o == M_MUL_CHK {
+        put(inout out, "mulchk ");
+        put_sign(inout out, m.a);
+    } else if o == M_WRAP {
+        put(inout out, "wrap ");
+        put_op(inout out, m.a);
+    } else if o == M_AND_R2 {
+        put(inout out, "andr2");
+    } else if o == M_TRAP_GT_U {
+        put(inout out, "trapgtu");
+    } else if o == M_TRAP_ZERO {
+        put(inout out, "trapzero");
+    } else if o == M_TRAP_DIV_OVF {
+        put(inout out, "trapdivovf");
+    } else if o == M_DIV {
+        put(inout out, "div ");
+        put_sign(inout out, m.a);
+    } else if o == M_REM {
+        put(inout out, "rem ");
+        put_sign(inout out, m.a);
+    } else if o == M_NEG_CHK {
+        put(inout out, "negchk ");
+        put_sign(inout out, m.a);
+    } else if o == M_XOR_ONE {
+        put(inout out, "xorone");
+    } else if o == M_CMP {
+        put(inout out, "cmp ");
+        put_cond(inout out, m.a);
+        out.push(32);
+        put_sign(inout out, m.b);
+    } else if o == M_FOP {
+        put(inout out, "fop ");
+        put_op(inout out, m.a);
+    } else if o == M_FNEG {
+        put(inout out, "fneg");
+    } else if o == M_FCMP {
+        put(inout out, "fcmp ");
+        put_cond(inout out, m.a);
+    } else if o == M_LDH {
+        put(inout out, "ldh ");
+        put_decimal(inout out, m.n);
+    } else if o == M_STH {
+        put(inout out, "sth ");
+        put_decimal(inout out, m.n);
+    } else if o == M_LABEL {
+        put(inout out, "label ");
+        put_label(inout out, m.n);
+    } else if o == M_JMP {
+        put(inout out, "jmp ");
+        put_label(inout out, m.n);
+    } else if o == M_BZ {
+        put(inout out, "bz ");
+        put_label(inout out, m.n);
+    } else if o == M_CALL {
+        put(inout out, "call ");
+        put_label(inout out, m.n);
+    } else if o == M_ENTER {
+        put(inout out, "enter ");
+        put_decimal(inout out, m.n);
+    } else if o == M_LEAVE {
+        put(inout out, "leave");
+    } else if o == M_TRAP {
+        put(inout out, "trap ");
+        put_trap(inout out, m.a);
+    } else {
+        put(inout out, "scope ");
+        put_label(inout out, m.n);
+        out.push(32);
+        put_label(inout out, m.n2);
+    }
+}
+
+// The selected sequence of `row`, as `<m>; <m>; ...`.
+pub fn put_selected(inout out: ChunkSeq[u8], in row: Lir) {
+    let mut ms = ChunkSeq::new[M]();
+    select(in row, inout ms);
+    for i in 0..ms.len() {
+        if i > 0 {
+            out.push(59);
+            out.push(32);
+        }
+        match ms.try_get(i) {
+            Option::Some(m) => put_m(inout out, in m),
+            Option::None => {}
+        }
+    }
+}
+
+fn row(tag: u8, op: u8, kind: u8, f1: u64, f2: u64, f3: u64) -> Lir {
+    Lir {
+        tag: tag,
+        op: op,
+        kind: kind,
+        f1: f1,
+        f2: f2,
+        f3: f3
+    }
+}
+
+fn line(inout out: ChunkSeq[u8], in r: Lir) {
+    put(inout out, ": ");
+    put_selected(inout out, in r);
+    out.push(10);
+}
+
+// `table_listing`: every row kind at fixed slots (`dst = 0`, `a = 1`,
+// `b = 2`), in the canonical order of `table_rows`, one
+// `<row>: <m>; <m>; ...` line each.
+pub fn table_listing(inout out: ChunkSeq[u8]) {
+    put(inout out, "const");
+    line(inout out, in row(LIR_CONST, 0, 0, 0, 7, 0));
+    put(inout out, "move");
+    line(inout out, in row(LIR_MOVE, 0, 0, 0, 1, 0));
+    for op in 0..5 {
+        for kind in 0..4 {
+            put(inout out, "arith ");
+            put_op(inout out, wrapping_u8(op));
+            out.push(32);
+            put_kind(inout out, wrapping_u8(kind));
+            line(inout out, in row(LIR_ARITH, wrapping_u8(op), wrapping_u8(kind), 0, 1, 2));
+        }
+    }
+    for op in 0..3 {
+        for kind in 0..4 {
+            put(inout out, "wrapping ");
+            put_op(inout out, wrapping_u8(op));
+            out.push(32);
+            put_kind(inout out, wrapping_u8(kind));
+            line(inout out, in row(LIR_WRAPPING, wrapping_u8(op), wrapping_u8(kind), 0, 1, 2));
+        }
+    }
+    for kind in 0..4 {
+        put(inout out, "neg ");
+        put_kind(inout out, wrapping_u8(kind));
+        line(inout out, in row(LIR_NEG, 0, wrapping_u8(kind), 0, 1, 0));
+    }
+    put(inout out, "not");
+    line(inout out, in row(LIR_NOT, 0, 0, 0, 1, 0));
+    for cond in 0..6 {
+        for kind in 0..5 {
+            put(inout out, "compare ");
+            put_cond(inout out, wrapping_u8(cond));
+            out.push(32);
+            put_kind(inout out, wrapping_u8(kind));
+            line(inout out, in row(LIR_COMPARE, wrapping_u8(cond), wrapping_u8(kind), 0, 1, 2));
+        }
+    }
+    for op in 0..4 {
+        put(inout out, "farith ");
+        put_op(inout out, wrapping_u8(op));
+        line(inout out, in row(LIR_FARITH, wrapping_u8(op), 0, 0, 1, 2));
+    }
+    put(inout out, "fneg");
+    line(inout out, in row(LIR_FNEG, 0, 0, 0, 1, 0));
+    for cond in 0..6 {
+        put(inout out, "fcompare ");
+        put_cond(inout out, wrapping_u8(cond));
+        line(inout out, in row(LIR_FCOMPARE, wrapping_u8(cond), 0, 0, 1, 2));
+    }
+    put(inout out, "storeout");
+    line(inout out, in row(LIR_STORE_OUT, 0, 0, 3, 1, 0));
+    put(inout out, "loadout");
+    line(inout out, in row(LIR_LOAD_OUT, 0, 0, 0, 3, 0));
+    put(inout out, "loadin");
+    line(inout out, in row(LIR_LOAD_IN, 0, 0, 0, 3, 0));
+    put(inout out, "storein");
+    line(inout out, in row(LIR_STORE_IN, 0, 0, 3, 1, 0));
+    put(inout out, "branchzero");
+    line(inout out, in row(LIR_BRANCH_ZERO, 0, 0, 1, 9, 0));
+    put(inout out, "jump");
+    line(inout out, in row(LIR_JUMP, 0, 0, 9, 0, 0));
+    put(inout out, "label");
+    line(inout out, in row(LIR_LABEL, 0, 0, 9, 0, 0));
+    put(inout out, "call");
+    line(inout out, in row(LIR_CALL, 0, 0, 9, 0, 0));
+    put(inout out, "enter");
+    line(inout out, in row(LIR_ENTER, 0, 0, 4, 0, 0));
+    put(inout out, "return");
+    line(inout out, in row(LIR_RETURN, 0, 0, 0, 0, 0));
+    put(inout out, "trap ovf");
+    line(inout out, in row(LIR_TRAP, T_OVERFLOW, 0, 0, 0, 0));
+    put(inout out, "trap div0");
+    line(inout out, in row(LIR_TRAP, T_DIV0, 0, 0, 0, 0));
+    put(inout out, "trap unreachable");
+    line(inout out, in row(LIR_TRAP, T_UNREACHABLE, 0, 0, 0, 0));
+    // Milestone 8 (regions): heap rows and the region abort.
+    put(inout out, "loadptr");
+    line(inout out, in row(LIR_LOAD_PTR, 0, 0, 0, 1, 3));
+    put(inout out, "storeptr");
+    line(inout out, in row(LIR_STORE_PTR, 0, 0, 1, 3, 2));
+    put(inout out, "trap region");
+    line(inout out, in row(LIR_TRAP, T_REGION, 0, 0, 0, 0));
+    // Milestone 7 (abort-only `Fail[E]`).
+    put(inout out, "scope");
+    line(inout out, in row(LIR_SCOPE, 0, 0, 9, 10, 0));
+}

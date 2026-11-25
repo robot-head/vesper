@@ -133,7 +133,7 @@ CRATES = {
 
 # Root compiler module -> (owner lane(s), Vesper package, status note)
 MODULES = {
-    "verified_codegen": ("SH6b", "", "Stage 1 guard; port with the verified-backend breadth track"),
+    "verified_codegen": ("#1886", "vesper-verified-codegen", "owner 2026-11-25: port to Vesper; parts 1-2: slot IR, select, encoders and ELF/Mach-O/COFF containers (0 diffs: 12,488 rows, 1,034 builds over 5 targets; select 0.91x); left: certificate, lowering, fail, swap"),
     "lean": ("SH5-18", "vesper-lean-extract", "part 3a 2.37x"),
     "lean_ir": ("SH5-18", "vesper-lean-extract", ""),
     "lean_nodes": ("SH5-18", "vesper-lean-extract", ""),

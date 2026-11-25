@@ -1,0 +1,97 @@
+# The verified direct code generator in Vesper (#1886)
+
+Owner decision (2026-11-25): port `src/verified_codegen` (about 9.3k lines)
+to Vesper, so that the Stage 2 retirement can delete it (checklist item 5 in
+`docs/maintenance/rust-exit-plan.md`). The package is
+`packages/vesper-verified-codegen` (`@vesper/verified-codegen`).
+
+## Part 1: the slot IR and instruction selection
+
+Base: `main` after #1884.
+
+### What changed
+
+- **`src/machine.ves`**: `machine.rs` in Vesper. It has the slot IR rows
+  (`Lir`) and the abstract instructions (`M`) as copy structs of small
+  codes. It also has `select` (one fixed `M` sequence per row), `M`'s
+  display text and `table_listing`. Every row kind has its Lean counterpart
+  in `lean/VerifiedCodegen.lean`. No Lean file changed.
+- **`src/lib.ves`**: the harness entries `table_listing_text` and
+  `select_text`. The second takes a row count and then four words per row.
+- **`tests/self_host_verified_codegen.rs`**:
+  - The Vesper table listing equals `verified_codegen::table_listing()`
+    byte for byte. `tests/verified_codegen_lean.rs` already checks that
+    listing against the Lean table.
+  - `select` gives the same text on the table rows, on 20,000 random rows
+    over every field's range, and on every slot-IR row that the Rust
+    backend lowers from the corpus `main`s.
+
+### Evidence (Linux x86_64, release)
+
+| Check | Result |
+|---|---|
+| Table listing | identical (97 rows) |
+| Random rows | 0 of 20,000 differ |
+| Corpus | **0 of 12,488 rows differ** over 107 programs |
+| ABBA, `select` + display over the corpus rows ×20 (Vesper includes the word encoding and text unpacking) | Vesper/Rust per epoch 0.82x-0.96x, median 0.91x, n=12 |
+
+**Rust lines deleted:** 0. `machine.rs` (668 lines) goes when the Rust
+backend's callers use the port (part 4).
+
+**Stage 1 guard:** nothing under `src/verified_codegen/**`, `lean/**` or
+`bootstrap/stage1*` changed.
+
+## Part 2: the assembler, the encoders and the containers
+
+### What changed
+
+- **`src/asm.ves`** (`asm.rs`): the label-resolving buffer. It handles
+  labels, fixups (rel32, imm26, imm19, `jal`, `auipc`+`jalr`), the copies of
+  the abort exits with nearest-copy resolution, trap scopes and the Windows
+  prologue and external records.
+- **`src/x86_64.ves`**, **`src/aarch64.ves`**, **`src/riscv64.ves`**: `emit`
+  for every `M`, plus `start`/`start_windows` and the between-function
+  `exits` copies (the 256 KiB `EXIT_SPACING`).
+- **`src/container.ves`** (`container.rs`): the static Linux ELF executable
+  (with the heap segment when regions use it), the Mach-O AArch64 object,
+  and the x86-64 COFF object with `.xdata` `UNWIND_INFO`, `.pdata` and its
+  relocations.
+- **`src/lib.ves`**: `build_words`, the back half of
+  `verified_codegen::compile`. The input is the target, the protocol, the
+  entry and every function's slot-IR rows; the output is the container's
+  bytes, or the Rust error kind.
+- **`tests/self_host_verified_codegen.rs`**: every corpus `main` the Rust
+  backend builds, under both result protocols, goes through `build_words`
+  from the Rust backend's own slot IR, and the bytes must be identical.
+
+### Evidence (Linux x86_64 host, release)
+
+| Target | Container | Differ |
+|---|---|---|
+| x86_64-unknown-linux-gnu | ELF executable | **0 of 214** |
+| aarch64-unknown-linux-gnu | ELF executable | **0 of 214** |
+| riscv64gc-unknown-linux-gnu | ELF executable | **0 of 214** |
+| aarch64-apple-darwin | Mach-O object | **0 of 196** |
+| x86_64-pc-windows-msvc | COFF object | **0 of 196** |
+
+The macOS and Windows counts are lower because programs that need the
+program heap are a Linux-only target error in both builds. No speed is
+measured for part 2 yet. The ABBA comes with the swap (part 4), when the
+whole `compile` is compared.
+
+**Rust lines deleted:** 0. `asm.rs`, the three encoders and `container.rs`
+(1,923 lines) go with the rest at the retirement.
+
+**Stage 1 guard:** nothing under `src/verified_codegen/**`, `lean/**` or
+`bootstrap/stage1*` changed. The package is left out of the Stage 1 parser
+corpus (`tests/fixtures/self_host/driver.rs`), like the other ports that use
+`use` and `pub const`.
+
+## Left
+
+- Optional: compare the per-arch `encoding_listing` text.
+- Part 3: `certificate` (the `validateProgram` mirror), differential against
+  Rust and Lean `#eval`.
+- Part 4: `lower`, `mono`, `fail`, `coverage`, `evidence`, `cli`, then the
+  swap into the hybrid and `bootstrap/stage1.rs`, with `bootstrap/stage1.lock`
+  reproduced, and the Rust deleted at the retirement.
