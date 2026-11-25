@@ -335,6 +335,11 @@ vesper_crate(
             "examples/**",
             "packages/**",
         ]) + [
+            # Packages with their own BUILD.bazel are outside the glob; the
+            # Stage 2 package fixed point (#1928) builds them too.
+            "//packages/vesper-codegen-numeric:files",
+            "//packages/vesper-cranelift:files",
+            "//packages/vesper-crypto:files",
             "//bootstrap:files",
             "//crates/vesper-ebpf:files",
             "//crates/vesper-lean-syntax:files",
