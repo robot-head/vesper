@@ -132,14 +132,44 @@ None blocked the port. Worth knowing:
   unprintable character (a format character such as U+200B, a private-use
   character) would be quoted differently in `pinned_cases`.
 
-## What is left (part 2)
+## What is left
 
 - Expect-error matching (`verify_expect_error` and its outcome text), the
   verdict cache keys and records, the obligation ledger and the reports
   (text and `--json`) of `src/test_runner.rs` and `crates/vesper-test`.
 - Mutant candidates (`collect_mutants_in_fn`) and the mutation report.
-- Doctest extraction (`src/doctest.rs`: fences, attributes, `extract`,
-  `generate`).
+- Doctest `generate` (the wrapper source of each example; it needs a
+  parse of the snippet) and `nominal_expansion` (an AST walk).
 - An end-to-end differential of `vesper test` and `vesper test --mutate`
   (reports and exit codes) between the default and hybrid builds, in
   `crates/vesper-hybrid/tests`.
+
+## Part 2: doctest fence extraction and the token preflight
+
+`src/doctest_extract.rs` is the new swap point: `rust_extract` (the
+`vesper` fences of `///` and `//!` blocks, their `compile_fail`, `entry=`
+and `sim(...)` attributes, `SimSpec::parse` included) and `rust_preflight`
+(the token, declaration, nesting and expression-segment limits), moved
+unchanged from `src/doctest.rs`. `packages/vesper-test-runner/src/doctest.ves`
+implements both over `@vesper/front`'s `lex_raw`; the hybrid build installs
+it (`VESPER_DOCTEST_EXTRACT` in crates/vesper-hybrid/src/hybrid.rs). Words:
+tests/common/doctest_extract_words.rs.
+
+- **Differential** (tests/self_host_doctest_extract.rs): every `.ves` file of
+  the repository, 58 doc blocks on their own and three mutants per source
+  that insert them (good and bad fences, attributes, sim seeds, devices,
+  unterminated, nested and tilde fences, `//!` and `////`), run with the
+  default limits and with small ones; then the preflight of every extracted
+  example's code. 4,935 sources, 1,402 examples, 28 distinct error
+  messages: **0 diffs** (optimized), 0 diffs unoptimized (every 13th).
+- **Speed**: both functions over the corpus, best of six ABBA rounds:
+  Rust 474 ms, Vesper 533 ms, **1.12x** (under the 1.5x bar).
+- **End to end**: `vesper test --doc --json` against `vesper-hybrid` on the
+  repository's files with examples and hand-made files (examples, a bad
+  `sim` attribute, an unterminated fence): identical output.
+- Rust stays the default in the Rust build; the Rust copy goes at the
+  compiler retirement with the rest of `src/`.
+
+The preflight keeps a running sum of the open groups' outer segments
+instead of Rust's per-token fold over the stack (same value; the depth is
+bounded by `max_nesting` anyway).

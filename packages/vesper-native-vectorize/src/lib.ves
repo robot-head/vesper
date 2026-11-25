@@ -1,0 +1,1611 @@
+// @vesper/native-vectorize: src/native_vectorize.rs (the two-lane and
+// i8 -> f32 widening vectorizer of the native optimize path, #1474) in
+// Vesper (#1829).
+//
+// The pass reads one function in the words of tests/common/clif_words.rs
+// into @vesper/clif tables and runs `native_vectorize::run` on them: the
+// same headers, the same plans (`plan`, `plan_widen`) and the same
+// emission, call for call. Its answer is the number of loops vectorized,
+// then the edit script that `clif_words::apply` replays on the Rust
+// function. `VESPER_VECTORIZE` stays with the caller; the `debug` verifier
+// run is the caller's too.
+
+use @vesper/clif::{
+    Func,
+    n32,
+    read_func,
+    u32_at,
+    w
+};
+use @vesper/clif::codes::{
+    CC_EQ,
+    CC_NE,
+    CC_UGE,
+    CC_UGT,
+    CC_ULE,
+    CC_ULT,
+    M_CAN_MOVE,
+    M_ENDIAN,
+    M_LITTLE,
+    M_READONLY,
+    NONE,
+    OP_BAND,
+    OP_BITCAST,
+    OP_BNOT,
+    OP_BOR,
+    OP_BRIF,
+    OP_BXOR,
+    OP_F32CONST,
+    OP_FCVT_FROM_SINT,
+    OP_FMUL,
+    OP_IADD,
+    OP_IADD_IMM,
+    OP_ICMP,
+    OP_ICMP_IMM,
+    OP_ICONST,
+    OP_IMUL,
+    OP_IMUL_IMM,
+    OP_IREDUCE,
+    OP_IRSUB_IMM,
+    OP_ISHL,
+    OP_ISHL_IMM,
+    OP_ISTORE32,
+    OP_ISUB,
+    OP_JUMP,
+    OP_LOAD,
+    OP_SCALAR_TO_VECTOR,
+    OP_SELECT,
+    OP_SEXTEND,
+    OP_SLOAD8,
+    OP_SPLAT,
+    OP_STORE,
+    OP_SWIDEN_HIGH,
+    OP_SWIDEN_LOW,
+    OP_UADD_OVERFLOW,
+    OP_UEXTEND,
+    OP_ULOAD8,
+    OP_UMULHI,
+    OP_USHR,
+    OP_USHR_IMM,
+    OP_BAND_IMM,
+    OP_BOR_IMM,
+    OP_BXOR_IMM,
+    TY_F32,
+    TY_F32X4,
+    TY_I32,
+    TY_I64,
+    TY_I64X2,
+    TY_I8,
+    TY_I8X16,
+    TY_OTHER
+};
+
+// Kinds (`Kind`): 0 for none.
+const K_NONE: u64 = 0;
+const K_INV: u64 = 1;
+const K_SCALAR: u64 = 2;
+const K_LANE: u64 = 3;
+const K_STORE: u64 = 4;
+
+// Widening stages (`WidenStage`): 0 for none.
+const S_U8: u64 = 1;
+const S_I8: u64 = 2;
+const S_SINT: u64 = 3;
+const S_F32: u64 = 4;
+const S_BITS: u64 = 5;
+
+// The step of a scalar with no known step.
+const NO_STEP: i64 = -9223372036854775808;
+
+fn add(a: u64, b: u64) -> u64 {
+    wrapping_add(a, b)
+}
+
+fn inc(a: u64) -> u64 {
+    wrapping_add(a, 1)
+}
+
+fn i64_of(x: u64) -> i64 {
+    wrapping_i64(x)
+}
+
+fn u64_of(x: i64) -> u64 {
+    wrapping_u64(x)
+}
+
+// Per-value tables of one plan: a kind and a step, or a widening stage and
+// its scale.
+pub struct Kinds {
+    kind: ChunkSeq[u8],
+    step: ChunkSeq[i64],
+    // whether step is known
+    known: ChunkSeq[u8],
+    stage: ChunkSeq[u8],
+    scale: ChunkSeq[u32],
+}
+
+fn new_kinds(n: u64) -> Kinds {
+    let mut k = Kinds {
+        kind: ChunkSeq::new[u8](),
+        step: ChunkSeq::new[i64](),
+        known: ChunkSeq::new[u8](),
+        stage: ChunkSeq::new[u8](),
+        scale: ChunkSeq::new[u32]()
+    };
+    k.kind.resize(n, 0);
+    k.step.resize(n, 0);
+    k.known.resize(n, 0);
+    k.stage.resize(n, 0);
+    k.scale.resize(n, NONE);
+    k
+}
+
+impl Kinds {
+    fn get(in self, v: u32) -> u64 {
+        match self.kind.try_get(w(v)) {
+            Option::Some(x) => widen_u64(x),
+            Option::None => K_NONE,
+        }
+    }
+
+    fn known_step(in self, v: u32) -> bool {
+        match self.known.try_get(w(v)) {
+            Option::Some(x) => x != 0,
+            Option::None => false,
+        }
+    }
+
+    fn step_of(in self, v: u32) -> i64 {
+        match self.step.try_get(w(v)) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        }
+    }
+
+    fn set(inout self, v: u32, kind: u64, known: bool, step: i64) {
+        let a = self.kind.try_set(w(v), wrapping_u8(kind));
+        let b = self
+            .known
+            .try_set(
+                w(v),
+                if known {
+                    1
+                } else {
+                    0
+                }
+            );
+        let c = self.step.try_set(w(v), step);
+    }
+
+    fn stage_of(in self, v: u32) -> u64 {
+        match self.stage.try_get(w(v)) {
+            Option::Some(x) => widen_u64(x),
+            Option::None => 0,
+        }
+    }
+
+    fn scale_of(in self, v: u32) -> u32 {
+        match self.scale.try_get(w(v)) {
+            Option::Some(x) => x,
+            Option::None => NONE,
+        }
+    }
+
+    fn set_stage(inout self, v: u32, stage: u64, scale: u32) {
+        let a = self.stage.try_set(w(v), wrapping_u8(stage));
+        let b = self.scale.try_set(w(v), scale);
+    }
+}
+
+// A value map (`HashMap<Value, Value>`): NONE for no entry.
+pub struct Map {
+    to: ChunkSeq[u32],
+}
+
+fn new_map(n: u64) -> Map {
+    let mut m = Map {
+        to: ChunkSeq::new[u32]()
+    };
+    m.to.resize(n, NONE);
+    m
+}
+
+fn copy_map(in m: Map) -> Map {
+    let mut c = Map {
+        to: ChunkSeq::with_capacity[u32](m.to.len())
+    };
+    c.to.extend(in m.to.as_slice());
+    c
+}
+
+impl Map {
+    fn get(in self, v: u32) -> u32 {
+        match self.to.try_get(w(v)) {
+            Option::Some(x) => x,
+            Option::None => NONE,
+        }
+    }
+
+    // `map.get(&v).copied().unwrap_or(v)`.
+    fn or(in self, v: u32) -> u32 {
+        let x = self.get(v);
+        if x == NONE {
+            v
+        } else {
+            x
+        }
+    }
+
+    fn put(inout self, k: u32, v: u32) {
+        if w(k) >= self.to.len() {
+            self.to.resize(inc(w(k)), NONE);
+        }
+        let ok = self.to.try_set(w(k), v);
+    }
+}
+
+pub struct Plan {
+    header: u32,
+    j: u32,
+    // NONE counting down
+    bound: u32,
+    delta: i64,
+    insts: ChunkSeq[u32],
+    kinds: ChunkSeq[u8],
+    direction: i64,
+    entries: ChunkSeq[u32],
+}
+
+pub struct WidenPlan {
+    header: u32,
+    j: u32,
+    bound: u32,
+    entries: ChunkSeq[u32],
+    invariants: ChunkSeq[u32],
+    scalars: ChunkSeq[u32],
+    src_addr: u32,
+    src_offset: u64,
+    dst_addr: u32,
+    dst_offset: u64,
+    scale: u32,
+}
+
+// `strip_condition`: `c` with `uextend` and `icmp_imm ne _, 0` taken off.
+fn strip_condition(in f: Func, c0: u32) -> u32 {
+    let mut c = c0;
+    loop {
+        c = f.resolve(c);
+        let i = f.def_inst(c);
+        if i == NONE || f.def_num(c) != 0 {
+            return c;
+        }
+        let row = f.inst(w(i));
+        if row.op == OP_UEXTEND {
+            c = f.arg(i, 0);
+        } else if row.op == OP_ICMP_IMM && row.cond == CC_NE && row.imm == 0 {
+            c = f.arg(i, 0);
+        } else {
+            return c;
+        }
+    }
+}
+
+// `compare`: the icmp instruction `c` is the result of, or NONE.
+fn compare(in f: Func, c: u32) -> u32 {
+    let i = f.def_inst(c);
+    if i == NONE || f.def_num(c) != 0 {
+        return NONE;
+    }
+    if f.op(i) == OP_ICMP {
+        i
+    } else {
+        NONE
+    }
+}
+
+// `constant`: whether `v` is an `iconst` (and `out` its value).
+fn constant(in f: Func, v: u32, inout out: i64) -> bool {
+    let i = f.def_inst(v);
+    if i == NONE || f.def_num(v) != 0 {
+        return false;
+    }
+    let row = f.inst(w(i));
+    if row.op == OP_ICONST {
+        out = i64_of(row.imm);
+        true
+    } else {
+        false
+    }
+}
+
+// `is_step`: whether `v` is `j + delta`.
+fn is_step(in f: Func, v: u32, j: u32, delta: i64) -> bool {
+    let i = f.def_inst(v);
+    if i == NONE || f.def_num(v) != 0 {
+        return false;
+    }
+    let row = f.inst(w(i));
+    if row.op == OP_IADD_IMM {
+        return f.resolve(f.arg(i, 0)) == j && i64_of(row.imm) == delta;
+    }
+    let mut c: i64 = 0;
+    if row.op == OP_IADD {
+        let a = f.resolve(f.arg(i, 0));
+        let b = f.resolve(f.arg(i, 1));
+        if a == j && constant(in f, b, inout c) && c == delta {
+            return true;
+        }
+        return b == j && constant(in f, a, inout c) && c == delta;
+    }
+    if row.op == OP_ISUB {
+        let a = f.resolve(f.arg(i, 0));
+        let b = f.resolve(f.arg(i, 1));
+        if a != j || !constant(in f, b, inout c) {
+            return false;
+        }
+        return match checked_sub_i64(0, c) {
+            Option::Some(n) => n == delta,
+            Option::None => false,
+        };
+    }
+    false
+}
+
+// `plain`: no explicit endianness, not read-only.
+fn plain(mem: u64) -> bool {
+    (mem & M_ENDIAN) == 0 && (mem & M_READONLY) == 0
+}
+
+fn readonly_can_move(mem: u64) -> bool {
+    (mem & M_READONLY) != 0 && (mem & M_CAN_MOVE) != 0
+}
+
+// `pure`.
+fn pure(op: u64) -> bool {
+    op == OP_ICONST
+        || op == OP_IADD
+        || op == OP_IADD_IMM
+        || op == OP_ISUB
+        || op == OP_IRSUB_IMM
+        || op == OP_IMUL
+        || op == OP_IMUL_IMM
+        || op == OP_ISHL
+        || op == OP_ISHL_IMM
+        || op == OP_USHR
+        || op == OP_USHR_IMM
+        || op == OP_BAND
+        || op == OP_BAND_IMM
+        || op == OP_BOR
+        || op == OP_BOR_IMM
+        || op == OP_BXOR
+        || op == OP_BXOR_IMM
+        || op == OP_ICMP
+        || op == OP_ICMP_IMM
+        || op == OP_UEXTEND
+        || op == OP_SEXTEND
+        || op == OP_IREDUCE
+        || op == OP_SELECT
+}
+
+// The opcodes a loop header may hold besides its branch.
+fn header_op(op: u64) -> bool {
+    op == OP_ICMP || op == OP_ICMP_IMM || op == OP_UEXTEND || op == OP_ICONST
+}
+
+// `same_direction`: 0 for `None`.
+fn same_direction(direction: i64, step: i64) -> i64 {
+    let d: i64 = if step == 8 {
+        1
+    } else if step == -8 {
+        -1
+    } else {
+        return 0;
+    };
+    if direction == 0 || direction == d {
+        d
+    } else {
+        0
+    }
+}
+
+// The `s(k)` of `step`: whether the kind has a step (into `out`).
+fn kind_step(kind: u64, known: bool, st: i64, inout out: i64) -> bool {
+    if kind == K_INV {
+        out = 0;
+        true
+    } else if kind == K_SCALAR && known {
+        out = st;
+        true
+    } else {
+        false
+    }
+}
+
+// `step`: how much an operation of `j` grows per iteration, when it is
+// affine; whether it is (into `out`). `ks`, `kn`, `kv` are the arguments'
+// kinds, known flags and steps.
+fn step(
+    in f: Func,
+    i: u32,
+    in args: ChunkSeq[u32],
+    in ks: ChunkSeq[u64],
+    in kn: ChunkSeq[u8],
+    in kv: ChunkSeq[i64],
+    inout out: i64
+) -> bool {
+    let row = f.inst(w(i));
+    let op = row.op;
+    let binary = op == OP_IADD
+        || op == OP_ISUB
+        || op == OP_IMUL
+        || op == OP_ISHL
+        || op == OP_USHR
+        || op == OP_BAND
+        || op == OP_BOR
+        || op == OP_BXOR
+        || op == OP_ICMP;
+    let imm64 = op == OP_IADD_IMM
+        || op == OP_IRSUB_IMM
+        || op == OP_IMUL_IMM
+        || op == OP_ISHL_IMM
+        || op == OP_USHR_IMM
+        || op == OP_BAND_IMM
+        || op == OP_BOR_IMM
+        || op == OP_BXOR_IMM;
+    let mut a: i64 = 0;
+    let mut b: i64 = 0;
+    if binary && op != OP_ICMP {
+        if !kind_step(at64(in ks, 0), at8(in kn, 0) != 0, at_i(in kv, 0), inout a) {
+            return false;
+        }
+        if !kind_step(at64(in ks, 1), at8(in kn, 1) != 0, at_i(in kv, 1), inout b) {
+            return false;
+        }
+        let r = if op == OP_IADD {
+            checked_add_i64(a, b)
+        } else if op == OP_ISUB {
+            checked_sub_i64(a, b)
+        } else if op == OP_IMUL && at64(in ks, 1) == K_INV {
+            let mut c: i64 = 0;
+            if !constant(in f, u32_at(in args, 1), inout c) {
+                return false;
+            }
+            checked_mul_i64(a, c)
+        } else if op == OP_IMUL && at64(in ks, 0) == K_INV {
+            let mut c: i64 = 0;
+            if !constant(in f, u32_at(in args, 0), inout c) {
+                return false;
+            }
+            checked_mul_i64(b, c)
+        } else {
+            Option::None
+        };
+        return match r {
+            Option::Some(x) => {
+                out = x;
+                true
+            }
+            Option::None => false,
+        };
+    }
+    if imm64 {
+        if !kind_step(at64(in ks, 0), at8(in kn, 0) != 0, at_i(in kv, 0), inout a) {
+            return false;
+        }
+        let imm = i64_of(row.imm);
+        let r = if op == OP_IADD_IMM {
+            Option::Some(a)
+        } else if op == OP_IRSUB_IMM {
+            checked_sub_i64(0, a)
+        } else if op == OP_IMUL_IMM {
+            checked_mul_i64(a, imm)
+        } else if op == OP_ISHL_IMM && imm >= 0 && imm < 32 {
+            checked_mul_i64(a, wrapping_i64(wrapping_shl_u64(1, wrapping_u32(row.imm))))
+        } else {
+            Option::None
+        };
+        return match r {
+            Option::Some(x) => {
+                out = x;
+                true
+            }
+            Option::None => false,
+        };
+    }
+    false
+}
+
+fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn at8(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn at_i(in s: ChunkSeq[i64], i: u64) -> i64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Whether block `b` is one of the loop's (`looped`).
+fn looped(b: u32, h: u32, body: u32, latch: u32) -> bool {
+    b != NONE && (b == h || b == body || b == latch)
+}
+
+// `kind_of`: the kind of `v` (resolved), K_NONE when it has none (a value
+// defined in the loop that no kind covers, or one with no block).
+fn kind_of(in f: Func, in k: Kinds, v0: u32, h: u32, body: u32, latch: u32) -> u64 {
+    let v = f.resolve(v0);
+    let x = k.get(v);
+    if x != K_NONE {
+        return x;
+    }
+    let db = f.def_block(v);
+    if db == NONE || looped(db, h, body, latch) {
+        K_NONE
+    } else {
+        K_INV
+    }
+}
+
+// `plan`: whether the loop at `h` qualifies (into `p`).
+fn plan(in f: Func, h: u32, inout p: Plan) -> bool {
+    let j = f.resolve(f.param(h, 0));
+    if f.value_type(j) != TY_I64 {
+        return false;
+    }
+    let term = f.last_inst(h);
+    if term == NONE || f.op(term) != OP_BRIF {
+        return false;
+    }
+    let cmp = compare(in f, strip_condition(in f, f.arg(term, 0)));
+    if cmp == NONE {
+        return false;
+    }
+    let cond = f.inst(w(cmp)).cond;
+    let lhs = f.resolve(f.arg(cmp, 0));
+    let rhs = f.resolve(f.arg(cmp, 1));
+    let mut zero: i64 = 0;
+    let mut bk: u64 = 0;
+    let mut ek: u64 = 1;
+    let mut bound = NONE;
+    let mut delta: i64 = 1;
+    if cond == CC_ULT || cond == CC_ULE {
+        bound = rhs;
+    } else if cond == CC_EQ && constant(in f, rhs, inout zero) && zero == 0 {
+        bk = 1;
+        ek = 0;
+        delta = -1;
+    } else {
+        return false;
+    }
+    if lhs != j {
+        return false;
+    }
+    let body = f.dest_block(term, bk);
+    let exit = f.dest_block(term, ek);
+    if f.dest_nargs(term, bk) != 0 || f.dest_nargs(term, ek) != 0 || body == h || exit == h {
+        return false;
+    }
+    let mut i = f.first_inst(h);
+    loop {
+        if i == NONE {
+            break;
+        }
+        if i != term && !header_op(f.op(i)) {
+            return false;
+        }
+        i = f.next_inst(i);
+    }
+    if f.nparams(body) != 0 {
+        return false;
+    }
+    let body_term = f.last_inst(body);
+    if body_term == NONE {
+        return false;
+    }
+    // NONE when the body jumps back to the header itself.
+    let mut latch = NONE;
+    let bop = f.op(body_term);
+    if bop == OP_JUMP {
+        let l = f.dest_block(body_term, 0);
+        let n = f.dest_nargs(body_term, 0);
+        if n == 0 {
+            latch = l;
+        } else if n == 1 && l == h {
+            let next = f.dest_arg(body_term, 0, 0);
+            if next == NONE || !is_step(in f, next, j, delta) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    } else if bop == OP_BRIF {
+        let out = f.dest_block(body_term, 0);
+        let l = f.dest_block(body_term, 1);
+        let c2 = compare(in f, strip_condition(in f, f.arg(body_term, 0)));
+        if c2 == NONE {
+            return false;
+        }
+        let x = f.resolve(f.arg(c2, 0));
+        let y = f.resolve(f.arg(c2, 1));
+        if out != exit
+            || f.dest_nargs(body_term, 0) != 0
+            || f.dest_nargs(body_term, 1) != 0
+            || f.inst(w(c2)).cond != CC_EQ
+            || x != j
+            || bound == NONE
+            || y != bound {
+            return false;
+        }
+        latch = l;
+    } else {
+        return false;
+    }
+    if latch != NONE {
+        if latch == h || latch == body || f.nparams(latch) != 0 {
+            return false;
+        }
+        let lt = f.last_inst(latch);
+        if lt == NONE || f.op(lt) != OP_JUMP {
+            return false;
+        }
+        let back = f.dest_block(lt, 0);
+        if f.dest_nargs(lt, 0) != 1 {
+            return false;
+        }
+        let next = f.dest_arg(lt, 0, 0);
+        if next == NONE || back != h || !is_step(in f, next, j, delta) {
+            return false;
+        }
+        let mut q = f.first_inst(latch);
+        loop {
+            if q == NONE {
+                break;
+            }
+            let o = f.op(q);
+            if q != lt && o != OP_ICONST && o != OP_IADD && o != OP_IADD_IMM {
+                return false;
+            }
+            q = f.next_inst(q);
+        }
+    }
+    let back_edge = if latch != NONE {
+        latch
+    } else {
+        body
+    };
+    let mut pb = ChunkSeq::new[u32]();
+    let mut pi = ChunkSeq::new[u32]();
+    f.preds(body, inout pb, inout pi);
+    for k in 0..pb.len() {
+        if u32_at(in pb, k) != h {
+            return false;
+        }
+    }
+    if latch != NONE {
+        f.preds(latch, inout pb, inout pi);
+        for k in 0..pb.len() {
+            if u32_at(in pb, k) != body {
+                return false;
+            }
+        }
+    }
+    p.entries.clear();
+    f.preds(h, inout pb, inout pi);
+    for k in 0..pb.len() {
+        let q = u32_at(in pb, k);
+        if q == back_edge {
+            continue;
+        }
+        if q == h || q == body {
+            return false;
+        }
+        p.entries.push(u32_at(in pi, k));
+    }
+    if p.entries.len() == 0 {
+        return false;
+    }
+    if bound != NONE {
+        let db = f.def_block(bound);
+        if db == NONE || looped(db, h, body, latch) {
+            return false;
+        }
+    }
+    // The body's instructions.
+    let mut kinds = new_kinds(f.nvalues());
+    kinds.set(j, K_SCALAR, true, delta);
+    p.insts.clear();
+    p.kinds.clear();
+    let mut direction: i64 = 0;
+    let mut stores = false;
+    let mut args = ChunkSeq::new[u32]();
+    let mut ks = ChunkSeq::new[u64]();
+    let mut kn = ChunkSeq::new[u8]();
+    let mut kv = ChunkSeq::new[i64]();
+    let mut i = f.first_inst(body);
+    loop {
+        if i == NONE || i == body_term {
+            break;
+        }
+        args.clear();
+        ks.clear();
+        kn.clear();
+        kv.clear();
+        for a in 0..f.nargs(i) {
+            let v = f.resolve(f.arg(i, a));
+            let k = kind_of(in f, in kinds, v, h, body, latch);
+            if k == K_NONE {
+                return false;
+            }
+            args.push(v);
+            ks.push(k);
+            kn
+                .push(
+                    if kinds.known_step(v) {
+                        1
+                    } else {
+                        0
+                    }
+                );
+            kv.push(kinds.step_of(v));
+        }
+        let row = f.inst(w(i));
+        let op = row.op;
+        let nres = f.nresults(i);
+        let mut kind = K_NONE;
+        let mut known = false;
+        let mut st: i64 = 0;
+        if op == OP_LOAD {
+            let ty = f.value_type(f.result(i, 0));
+            if at64(in ks, 0) == K_INV && readonly_can_move(row.mem) {
+                kind = K_INV;
+            } else if ty == TY_I64 && !stores && plain(row.mem) {
+                if at64(in ks, 0) != K_SCALAR || at8(in kn, 0) == 0 {
+                    return false;
+                }
+                direction = same_direction(direction, at_i(in kv, 0));
+                if direction == 0 {
+                    return false;
+                }
+                kind = K_LANE;
+            } else {
+                return false;
+            }
+        } else if op == OP_STORE {
+            let ty = f.value_type(u32_at(in args, 0));
+            if at64(in ks, 1) != K_SCALAR || at8(in kn, 1) == 0 {
+                return false;
+            }
+            let k0 = at64(in ks, 0);
+            if ty != TY_I64 || !plain(row.mem) || k0 == K_STORE {
+                return false;
+            }
+            if k0 != K_LANE && k0 != K_INV {
+                return false;
+            }
+            direction = same_direction(direction, at_i(in kv, 1));
+            if direction == 0 {
+                return false;
+            }
+            stores = true;
+            kind = K_STORE;
+        } else {
+            if nres != 1 || !pure(op) {
+                return false;
+            }
+            let mut all_inv = true;
+            let mut any_lane = false;
+            let mut operands_ok = true;
+            for a in 0..ks.len() {
+                let k = at64(in ks, a);
+                if k != K_INV {
+                    all_inv = false;
+                }
+                if k == K_LANE {
+                    any_lane = true;
+                }
+                if k != K_LANE && k != K_INV {
+                    operands_ok = false;
+                }
+            }
+            if all_inv {
+                kind = K_INV;
+            } else if any_lane {
+                let lane_op = op == OP_IADD
+                    || op == OP_ISUB
+                    || op == OP_BAND
+                    || op == OP_BOR
+                    || op == OP_BXOR;
+                if !lane_op || !operands_ok || f.value_type(f.result(i, 0)) != TY_I64 {
+                    return false;
+                }
+                kind = K_LANE;
+            } else {
+                kind = K_SCALAR;
+                known = step(in f, i, in args, in ks, in kn, in kv, inout st);
+            }
+        }
+        if nres > 0 {
+            kinds.set(f.resolve(f.result(i, 0)), kind, known, st);
+        }
+        p.insts.push(i);
+        p.kinds.push(wrapping_u8(kind));
+        i = f.next_inst(i);
+    }
+    if !stores || direction == 0 {
+        return false;
+    }
+    // Lane values stay in the body: nothing else may read them.
+    for z in 0..2 {
+        let b = if z == 0 {
+            h
+        } else {
+            latch
+        };
+        if b == NONE {
+            continue;
+        }
+        let mut q = f.first_inst(b);
+        loop {
+            if q == NONE {
+                break;
+            }
+            for a in 0..f.nargs(q) {
+                let v = f.resolve(f.arg(q, a));
+                let k = kinds.get(v);
+                if (k == K_LANE || k == K_SCALAR) && v != j {
+                    return false;
+                }
+            }
+            q = f.next_inst(q);
+        }
+    }
+    p.header = h;
+    p.j = j;
+    p.bound = bound;
+    p.delta = delta;
+    p.direction = direction;
+    true
+}
+
+fn ins1(inout f: Func, b: u32, op: u64, ty: u64, cond: u64, imm: u64, in a: ChunkSeq[u32]) -> u32 {
+    let none = ChunkSeq::new[u32]();
+    let i = f.ins(b, op, ty, cond, imm, 0, 0, in a, in none);
+    f.result(i, 0)
+}
+
+fn one(x: u32) -> ChunkSeq[u32] {
+    let mut a = ChunkSeq::with_capacity[u32](1);
+    a.push(x);
+    a
+}
+
+fn two(x: u32, y: u32) -> ChunkSeq[u32] {
+    let mut a = ChunkSeq::with_capacity[u32](2);
+    a.push(x);
+    a.push(y);
+    a
+}
+
+fn iadd_imm(inout f: Func, b: u32, x: u32, imm: i64) -> u32 {
+    ins1(inout f, b, OP_IADD_IMM, TY_OTHER, 0, u64_of(imm), in one(x))
+}
+
+fn icmp(inout f: Func, b: u32, cond: u64, x: u32, y: u32) -> u32 {
+    ins1(inout f, b, OP_ICMP, TY_OTHER, cond, 0, in two(x, y))
+}
+
+fn icmp_imm(inout f: Func, b: u32, cond: u64, x: u32, imm: i64) -> u32 {
+    ins1(inout f, b, OP_ICMP_IMM, TY_OTHER, cond, u64_of(imm), in one(x))
+}
+
+fn bin(inout f: Func, b: u32, op: u64, x: u32, y: u32) -> u32 {
+    ins1(inout f, b, op, TY_OTHER, 0, 0, in two(x, y))
+}
+
+fn un(inout f: Func, b: u32, op: u64, ty: u64, x: u32) -> u32 {
+    ins1(inout f, b, op, ty, 0, 0, in one(x))
+}
+
+fn load(inout f: Func, b: u32, ty: u64, mem: u64, addr: u32) -> u32 {
+    let none = ChunkSeq::new[u32]();
+    let i = f.ins(b, OP_LOAD, ty, 0, 0, 0, mem, in one(addr), in none);
+    f.result(i, 0)
+}
+
+fn store(inout f: Func, b: u32, v: u32, addr: u32, off: i64) {
+    let none = ChunkSeq::new[u32]();
+    let i = f.ins(b, OP_STORE, TY_OTHER, 0, 0, u64_of(off), 0, in two(v, addr), in none);
+}
+
+// `brif c, yes(x), no(x)`.
+fn brif(inout f: Func, b: u32, c: u32, yes: u32, no: u32, x: u32) {
+    let mut d = ChunkSeq::with_capacity[u32](6);
+    d.push(yes);
+    d.push(1);
+    d.push(x);
+    d.push(no);
+    d.push(1);
+    d.push(x);
+    let i = f.ins(b, OP_BRIF, TY_OTHER, 0, 0, 0, 0, in one(c), in d);
+}
+
+// `copy_inst`: `i` at the bottom of `b` with its values mapped (each
+// resolved, then through `m`); the copy's first result, or NONE.
+fn copy_inst(inout f: Func, b: u32, i: u32, in m: Map) -> u32 {
+    let mut vals = ChunkSeq::new[u32]();
+    for a in 0..f.nargs(i) {
+        vals.push(m.or(f.resolve(f.arg(i, a))));
+    }
+    for d in 0..f.ndests(i) {
+        for a in 0..f.dest_nargs(i, d) {
+            vals.push(m.or(f.resolve(f.dest_arg(i, d, a))));
+        }
+    }
+    let new = f.clone_at_bottom(b, i, in vals);
+    f.result(new, 0)
+}
+
+// `addresses`: the effective addresses of the body's loads and stores,
+// with one iteration's scalars emitted at the bottom of `b` under `m`.
+fn addresses(
+    inout f: Func,
+    in p: Plan,
+    b: u32,
+    inout m: Map,
+    inout loads: ChunkSeq[u32],
+    inout stores: ChunkSeq[u32]
+) {
+    loads.clear();
+    stores.clear();
+    for q in 0..p.insts.len() {
+        let i = u32_at(in p.insts, q);
+        let kind = widen_u64(at8(in p.kinds, q));
+        if kind == K_SCALAR {
+            let old = f.resolve(f.result(i, 0));
+            let new = copy_inst(inout f, b, i, in m);
+            m.put(old, new);
+        } else if kind == K_LANE || kind == K_STORE {
+            let op = f.op(i);
+            let addr0 = if op == OP_LOAD {
+                f.arg(i, 0)
+            } else if op == OP_STORE {
+                f.arg(i, 1)
+            } else {
+                continue;
+            };
+            let off = i64_of(f.inst(w(i)).off);
+            let addr = m.or(f.resolve(addr0));
+            let e = if off == 0 {
+                addr
+            } else {
+                iadd_imm(inout f, b, addr, off)
+            };
+            if kind == K_LANE {
+                loads.push(e);
+            } else {
+                stores.push(e);
+            }
+        }
+    }
+}
+
+// The new blocks `pre` and `lanes` (each with an i64 parameter) in front
+// of `header`, entered from `entries` instead of it; into `out`: pre, j0,
+// lanes, jv.
+fn front(inout f: Func, header: u32, in entries: ChunkSeq[u32], inout out: ChunkSeq[u32]) {
+    let pre = f.make_block();
+    let j0 = f.append_param(pre, TY_I64);
+    let lanes = f.make_block();
+    let jv = f.append_param(lanes, TY_I64);
+    f.insert_block(pre, header);
+    f.insert_block(lanes, header);
+    for k in 0..entries.len() {
+        f.retarget(u32_at(in entries, k), header, pre);
+    }
+    out.clear();
+    out.push(pre);
+    out.push(j0);
+    out.push(lanes);
+    out.push(jv);
+}
+
+// `emit`: the two-lane loop in front of the header.
+fn emit(inout f: Func, in p: Plan) {
+    let mut fr = ChunkSeq::new[u32]();
+    front(inout f, p.header, in p.entries, inout fr);
+    let pre = u32_at(in fr, 0);
+    let j0 = u32_at(in fr, 1);
+    let lanes = u32_at(in fr, 2);
+    let jv = u32_at(in fr, 3);
+    let mut invariants = new_map(f.nvalues());
+    for q in 0..p.insts.len() {
+        if widen_u64(at8(in p.kinds, q)) == K_INV {
+            let i = u32_at(in p.insts, q);
+            let old = if f.nresults(i) > 0 {
+                f.resolve(f.result(i, 0))
+            } else {
+                NONE
+            };
+            let new = copy_inst(inout f, pre, i, in invariants);
+            if old != NONE && new != NONE {
+                invariants.put(old, new);
+            }
+        }
+    }
+    let mut first = copy_map(in invariants);
+    first.put(p.j, j0);
+    let mut loads0 = ChunkSeq::new[u32]();
+    let mut stores0 = ChunkSeq::new[u32]();
+    addresses(inout f, in p, pre, inout first, inout loads0, inout stores0);
+    let j01 = iadd_imm(inout f, pre, j0, p.delta);
+    let mut second = copy_map(in invariants);
+    second.put(p.j, j01);
+    let mut loads1 = ChunkSeq::new[u32]();
+    let mut stores1 = ChunkSeq::new[u32]();
+    addresses(inout f, in p, pre, inout second, inout loads1, inout stores1);
+    let mut ok = if p.bound != NONE {
+        let a = icmp(inout f, pre, CC_ULT, j0, p.bound);
+        let b = icmp(inout f, pre, CC_ULT, j01, p.bound);
+        bin(inout f, pre, OP_BAND, a, b)
+    } else {
+        icmp_imm(inout f, pre, CC_UGE, j0, 2)
+    };
+    let mut pa = ChunkSeq::new[u32]();
+    let mut pz = ChunkSeq::new[u32]();
+    for s in 0..stores0.len() {
+        for l in 0..loads1.len() {
+            pa.push(u32_at(in stores0, s));
+            pz.push(u32_at(in loads1, l));
+        }
+    }
+    for y in 0..stores0.len() {
+        for e in 0..y {
+            pa.push(u32_at(in stores0, y));
+            pz.push(u32_at(in stores1, e));
+        }
+    }
+    for k in 0..pa.len() {
+        let gap = bin(inout f, pre, OP_ISUB, u32_at(in pa, k), u32_at(in pz, k));
+        let gap7 = iadd_imm(inout f, pre, gap, 7);
+        let apart = icmp_imm(inout f, pre, CC_UGT, gap7, 14);
+        ok = bin(inout f, pre, OP_BAND, ok, apart);
+    }
+    brif(inout f, pre, ok, lanes, p.header, j0);
+    let mut lane0 = copy_map(in invariants);
+    lane0.put(p.j, jv);
+    let mut loads = ChunkSeq::new[u32]();
+    let mut stores = ChunkSeq::new[u32]();
+    addresses(inout f, in p, lanes, inout lane0, inout loads, inout stores);
+    let mut vectors = new_map(f.nvalues());
+    let mut splats = new_map(f.nvalues());
+    let mut li: u64 = 0;
+    let mut si: u64 = 0;
+    for q in 0..p.insts.len() {
+        let i = u32_at(in p.insts, q);
+        let kind = widen_u64(at8(in p.kinds, q));
+        if kind == K_LANE {
+            let result = f.resolve(f.result(i, 0));
+            let op = f.op(i);
+            let v = if op == OP_LOAD {
+                let addr = lower(inout f, p.direction, lanes, u32_at(in loads, li));
+                li = inc(li);
+                load(inout f, lanes, TY_I64X2, 0, addr)
+            } else {
+                let a = operand(inout f, lanes, in vectors, inout splats, in lane0, f.arg(i, 0));
+                let b = operand(inout f, lanes, in vectors, inout splats, in lane0, f.arg(i, 1));
+                bin(inout f, lanes, op, a, b)
+            };
+            vectors.put(result, v);
+        } else if kind == K_STORE {
+            let value = f.arg(i, 0);
+            let v = operand(inout f, lanes, in vectors, inout splats, in lane0, value);
+            let addr = lower(inout f, p.direction, lanes, u32_at(in stores, si));
+            si = inc(si);
+            store(inout f, lanes, v, addr, 0);
+        }
+    }
+    let j2 = iadd_imm(inout f, lanes, jv, wrapping_mul(2, p.delta));
+    let more = if p.bound != NONE {
+        let j3 = iadd_imm(inout f, lanes, jv, 3);
+        let a = icmp(inout f, lanes, CC_ULT, j2, p.bound);
+        let b = icmp(inout f, lanes, CC_ULT, j3, p.bound);
+        bin(inout f, lanes, OP_BAND, a, b)
+    } else {
+        icmp_imm(inout f, lanes, CC_UGE, j2, 2)
+    };
+    brif(inout f, lanes, more, lanes, p.header, j2);
+}
+
+// `lower`: the vector's lower element address.
+fn lower(inout f: Func, direction: i64, lanes: u32, e: u32) -> u32 {
+    if direction > 0 {
+        e
+    } else {
+        iadd_imm(inout f, lanes, e, -8)
+    }
+}
+
+// A lane operand: its vector, or the splat of its scalar (made once).
+fn operand(inout f: Func, lanes: u32, in vectors: Map, inout splats: Map, in lane0: Map, v0: u32)
+    -> u32 {
+    let v = f.resolve(v0);
+    let x = vectors.get(v);
+    if x != NONE {
+        return x;
+    }
+    let scalar = lane0.or(v);
+    let s = splats.get(scalar);
+    if s != NONE {
+        return s;
+    }
+    let made = un(inout f, lanes, OP_SPLAT, TY_I64X2, scalar);
+    splats.put(scalar, made);
+    made
+}
+
+// `plan_widen_i8_f32`.
+fn plan_widen(in f: Func, h: u32, inout p: WidenPlan) -> bool {
+    let j = f.resolve(f.param(h, 0));
+    if f.value_type(j) != TY_I64 {
+        return false;
+    }
+    let term = f.last_inst(h);
+    if term == NONE || f.op(term) != OP_BRIF {
+        return false;
+    }
+    let cmp = compare(in f, strip_condition(in f, f.arg(term, 0)));
+    if cmp == NONE {
+        return false;
+    }
+    let lhs = f.resolve(f.arg(cmp, 0));
+    let bound = f.resolve(f.arg(cmp, 1));
+    if f.inst(w(cmp)).cond != CC_ULT || lhs != j {
+        return false;
+    }
+    let body = f.dest_block(term, 0);
+    let exit = f.dest_block(term, 1);
+    if f.dest_nargs(term, 0) != 0 || f.dest_nargs(term, 1) != 0 || body == h || exit == h {
+        return false;
+    }
+    let mut i = f.first_inst(h);
+    loop {
+        if i == NONE {
+            break;
+        }
+        if i != term && !header_op(f.op(i)) {
+            return false;
+        }
+        i = f.next_inst(i);
+    }
+    if f.nparams(body) != 0 {
+        return false;
+    }
+    let body_term = f.last_inst(body);
+    if body_term == NONE || f.op(body_term) != OP_JUMP {
+        return false;
+    }
+    let back = f.dest_block(body_term, 0);
+    if f.dest_nargs(body_term, 0) != 1 {
+        return false;
+    }
+    let next = f.dest_arg(body_term, 0, 0);
+    if next == NONE || back != h || !is_step(in f, next, j, 1) {
+        return false;
+    }
+    let mut pb = ChunkSeq::new[u32]();
+    let mut pi = ChunkSeq::new[u32]();
+    f.preds(body, inout pb, inout pi);
+    for k in 0..pb.len() {
+        if u32_at(in pb, k) != h {
+            return false;
+        }
+    }
+    p.entries.clear();
+    f.preds(h, inout pb, inout pi);
+    for k in 0..pb.len() {
+        let q = u32_at(in pb, k);
+        if q == body {
+            continue;
+        }
+        if q == h {
+            return false;
+        }
+        p.entries.push(u32_at(in pi, k));
+    }
+    if p.entries.len() == 0 {
+        return false;
+    }
+    let db = f.def_block(bound);
+    if db == NONE || looped(db, h, body, NONE) {
+        return false;
+    }
+    let mut kinds = new_kinds(f.nvalues());
+    kinds.set(j, K_SCALAR, true, 1);
+    p.invariants.clear();
+    p.scalars.clear();
+    let mut src_addr = NONE;
+    let mut src_offset: u64 = 0;
+    let mut have_dst = false;
+    let mut dst_addr = NONE;
+    let mut dst_offset: u64 = 0;
+    let mut scale = NONE;
+    let mut args = ChunkSeq::new[u32]();
+    let mut ks = ChunkSeq::new[u64]();
+    let mut kn = ChunkSeq::new[u8]();
+    let mut kv = ChunkSeq::new[i64]();
+    let mut i = f.first_inst(body);
+    loop {
+        if i == NONE || i == body_term {
+            break;
+        }
+        args.clear();
+        for a in 0..f.nargs(i) {
+            args.push(f.resolve(f.arg(i, a)));
+        }
+        let row = f.inst(w(i));
+        let op = row.op;
+        if op == OP_ULOAD8 || op == OP_SLOAD8 {
+            if src_addr != NONE || have_dst || !plain(row.mem) {
+                return false;
+            }
+            let a0 = u32_at(in args, 0);
+            if kind_of(in f, in kinds, a0, h, body, NONE) != K_SCALAR
+                || !kinds.known_step(a0)
+                || kinds.step_of(a0) != 1 {
+                return false;
+            }
+            src_addr = a0;
+            src_offset = row.off;
+            let stage = if op == OP_SLOAD8 {
+                S_SINT
+            } else {
+                S_U8
+            };
+            kinds.set_stage(f.resolve(f.result(i, 0)), stage, NONE);
+            i = f.next_inst(i);
+            continue;
+        }
+        if op == OP_LOAD {
+            if kind_of(in f, in kinds, u32_at(in args, 0), h, body, NONE) == K_INV
+                && readonly_can_move(row.mem) {
+                kinds.set(f.resolve(f.result(i, 0)), K_INV, false, 0);
+                p.invariants.push(i);
+                i = f.next_inst(i);
+                continue;
+            }
+            return false;
+        }
+        if op == OP_ISTORE32 {
+            if src_addr == NONE || have_dst || !plain(row.mem) {
+                return false;
+            }
+            let a1 = u32_at(in args, 1);
+            if kind_of(in f, in kinds, a1, h, body, NONE) != K_SCALAR
+                || !kinds.known_step(a1)
+                || kinds.step_of(a1) != 4 {
+                return false;
+            }
+            let a0 = u32_at(in args, 0);
+            let st = kinds.stage_of(a0);
+            if st != S_BITS && st != S_F32 {
+                return false;
+            }
+            scale = kinds.scale_of(a0);
+            have_dst = true;
+            dst_addr = a1;
+            dst_offset = row.off;
+            i = f.next_inst(i);
+            continue;
+        }
+        let extra = op == OP_FCVT_FROM_SINT
+            || op == OP_FMUL
+            || op == OP_BITCAST
+            || op == OP_F32CONST;
+        if f.nresults(i) != 1 || (!pure(op) && !extra) {
+            return false;
+        }
+        let r = f.resolve(f.result(i, 0));
+        let r_ty = f.value_type(r);
+        let st0 = if args.len() > 0 {
+            kinds.stage_of(u32_at(in args, 0))
+        } else {
+            0
+        };
+        if st0 != 0 {
+            let s0 = kinds.scale_of(u32_at(in args, 0));
+            let a1 = u32_at(in args, 1);
+            if op == OP_IREDUCE && st0 == S_U8 && r_ty == TY_I8 {
+                kinds.set_stage(r, S_I8, NONE);
+            } else if op == OP_SEXTEND && st0 == S_I8 {
+                kinds.set_stage(r, S_SINT, NONE);
+            } else if op == OP_FCVT_FROM_SINT && st0 == S_SINT && r_ty == TY_F32 {
+                kinds.set_stage(r, S_F32, NONE);
+            } else if op == OP_FMUL
+                && st0 == S_F32
+                && s0 == NONE
+                && args.len() == 2
+                && kind_of(in f, in kinds, a1, h, body, NONE) == K_INV
+                && f.value_type(a1) == TY_F32 {
+                kinds.set_stage(r, S_F32, a1);
+            } else if op == OP_BITCAST && st0 == S_F32 && r_ty == TY_I32 {
+                kinds.set_stage(r, S_BITS, s0);
+            } else if op == OP_UEXTEND && st0 == S_BITS && r_ty == TY_I64 {
+                kinds.set_stage(r, S_BITS, s0);
+            } else {
+                return false;
+            }
+            i = f.next_inst(i);
+            continue;
+        }
+        if op == OP_FMUL && args.len() == 2 {
+            let a0 = u32_at(in args, 0);
+            let a1 = u32_at(in args, 1);
+            if kind_of(in f, in kinds, a0, h, body, NONE) == K_INV
+                && f.value_type(a0) == TY_F32
+                && kinds.stage_of(a1) == S_F32
+                && kinds.scale_of(a1) == NONE {
+                kinds.set_stage(r, S_F32, a0);
+                i = f.next_inst(i);
+                continue;
+            }
+        }
+        ks.clear();
+        kn.clear();
+        kv.clear();
+        let mut all_inv = true;
+        for a in 0..args.len() {
+            let v = u32_at(in args, a);
+            let k = kind_of(in f, in kinds, v, h, body, NONE);
+            if k == K_NONE {
+                return false;
+            }
+            if k != K_INV {
+                all_inv = false;
+            }
+            ks.push(k);
+            kn
+                .push(
+                    if kinds.known_step(v) {
+                        1
+                    } else {
+                        0
+                    }
+                );
+            kv.push(kinds.step_of(v));
+        }
+        if all_inv {
+            kinds.set(r, K_INV, false, 0);
+            p.invariants.push(i);
+        } else {
+            let mut st: i64 = 0;
+            let known = step(in f, i, in args, in ks, in kn, in kv, inout st);
+            kinds.set(r, K_SCALAR, known, st);
+            p.scalars.push(i);
+        }
+        i = f.next_inst(i);
+    }
+    if src_addr == NONE || !have_dst {
+        return false;
+    }
+    let mut q = f.first_inst(h);
+    loop {
+        if q == NONE {
+            break;
+        }
+        for a in 0..f.nargs(q) {
+            let rv = f.resolve(f.arg(q, a));
+            if rv != j && (kinds.get(rv) != K_NONE || kinds.stage_of(rv) != 0) {
+                return false;
+            }
+        }
+        q = f.next_inst(q);
+    }
+    let mut b = f.first_block();
+    loop {
+        if b == NONE {
+            break;
+        }
+        if b != h && b != body {
+            let mut q = f.first_inst(b);
+            loop {
+                if q == NONE {
+                    break;
+                }
+                for a in 0..f.nargs(q) {
+                    let rv = f.resolve(f.arg(q, a));
+                    if kinds.get(rv) != K_NONE || kinds.stage_of(rv) != 0 {
+                        return false;
+                    }
+                }
+                q = f.next_inst(q);
+            }
+        }
+        b = f.next_block(b);
+    }
+    p.header = h;
+    p.j = j;
+    p.bound = bound;
+    p.src_addr = src_addr;
+    p.src_offset = src_offset;
+    p.dst_addr = dst_addr;
+    p.dst_offset = dst_offset;
+    p.scale = scale;
+    true
+}
+
+// The `emit_addrs` of `emit_widen_i8_f32`: (src, dst) into `out`.
+fn widen_addrs(
+    inout f: Func,
+    in p: WidenPlan,
+    in invariants: Map,
+    b: u32,
+    jval: u32,
+    inout out: ChunkSeq[u32]
+) {
+    let mut m = copy_map(in invariants);
+    m.put(p.j, jval);
+    for q in 0..p.scalars.len() {
+        let i = u32_at(in p.scalars, q);
+        let old = f.resolve(f.result(i, 0));
+        let new = copy_inst(inout f, b, i, in m);
+        m.put(old, new);
+    }
+    let src0 = m.or(p.src_addr);
+    let src = if p.src_offset == 0 {
+        src0
+    } else {
+        iadd_imm(inout f, b, src0, i64_of(p.src_offset))
+    };
+    let dst0 = m.or(p.dst_addr);
+    let dst = if p.dst_offset == 0 {
+        dst0
+    } else {
+        iadd_imm(inout f, b, dst0, i64_of(p.dst_offset))
+    };
+    out.clear();
+    out.push(src);
+    out.push(dst);
+}
+
+// `emit_widen_i8_f32`.
+fn emit_widen(inout f: Func, in p: WidenPlan) {
+    let mut fr = ChunkSeq::new[u32]();
+    front(inout f, p.header, in p.entries, inout fr);
+    let pre = u32_at(in fr, 0);
+    let j0 = u32_at(in fr, 1);
+    let lanes = u32_at(in fr, 2);
+    let jv = u32_at(in fr, 3);
+    let mut invariants = new_map(f.nvalues());
+    for q in 0..p.invariants.len() {
+        let i = u32_at(in p.invariants, q);
+        let old = f.resolve(f.result(i, 0));
+        let new = copy_inst(inout f, pre, i, in invariants);
+        if new != NONE {
+            invariants.put(old, new);
+        }
+    }
+    let mut sd = ChunkSeq::new[u32]();
+    widen_addrs(inout f, in p, in invariants, pre, j0, inout sd);
+    let src0 = u32_at(in sd, 0);
+    let dst0 = u32_at(in sd, 1);
+    let in_bounds = icmp(inout f, pre, CC_ULT, j0, p.bound);
+    let trip = bin(inout f, pre, OP_ISUB, p.bound, j0);
+    let at_least_8 = icmp_imm(inout f, pre, CC_UGE, trip, 8);
+    let none = ChunkSeq::new[u32]();
+    let so = f.ins(pre, OP_UADD_OVERFLOW, TY_OTHER, 0, 0, 0, 0, in two(src0, trip), in none);
+    let src_end = f.result(so, 0);
+    let src_ovf = f.result(so, 1);
+    let four = f.ins(pre, OP_ICONST, TY_I64, 0, 4, 0, 0, in none, in none);
+    let four_v = f.result(four, 0);
+    let dst_hi = bin(inout f, pre, OP_UMULHI, trip, four_v);
+    let dst_mul_ovf = icmp_imm(inout f, pre, CC_NE, dst_hi, 0);
+    let dst_bytes = ins1(inout f, pre, OP_IMUL_IMM, TY_OTHER, 0, 4, in one(trip));
+    let dov = f.ins(pre, OP_UADD_OVERFLOW, TY_OTHER, 0, 0, 0, 0, in two(dst0, dst_bytes), in none);
+    let dst_end = f.result(dov, 0);
+    let dst_ovf = f.result(dov, 1);
+    let no_ovf_1 = icmp_imm(inout f, pre, CC_EQ, src_ovf, 0);
+    let no_ovf_2 = icmp_imm(inout f, pre, CC_EQ, dst_ovf, 0);
+    let no_ovf_3 = un(inout f, pre, OP_BNOT, TY_OTHER, dst_mul_ovf);
+    let c1 = icmp(inout f, pre, CC_ULE, dst_end, src0);
+    let c2 = icmp(inout f, pre, CC_ULE, src_end, dst0);
+    let disjoint = bin(inout f, pre, OP_BOR, c1, c2);
+    let ok1 = bin(inout f, pre, OP_BAND, in_bounds, at_least_8);
+    let ok2 = bin(inout f, pre, OP_BAND, ok1, no_ovf_1);
+    let ok3 = bin(inout f, pre, OP_BAND, ok2, no_ovf_2);
+    let ok4 = bin(inout f, pre, OP_BAND, ok3, no_ovf_3);
+    let ok = bin(inout f, pre, OP_BAND, ok4, disjoint);
+    brif(inout f, pre, ok, lanes, p.header, j0);
+    widen_addrs(inout f, in p, in invariants, lanes, jv, inout sd);
+    let src_v = u32_at(in sd, 0);
+    let dst_v = u32_at(in sd, 1);
+    let wv = load(inout f, lanes, TY_I64, 0, src_v);
+    let v_i64x2 = un(inout f, lanes, OP_SCALAR_TO_VECTOR, TY_I64X2, wv);
+    let v_i8x16 = f
+        .ins(lanes, OP_BITCAST, TY_I8X16, 0, 0, 0, M_ENDIAN | M_LITTLE, in one(v_i64x2), in none);
+    let v_i16x8 = un(inout f, lanes, OP_SWIDEN_LOW, TY_OTHER, f.result(v_i8x16, 0));
+    let lo_i32x4 = un(inout f, lanes, OP_SWIDEN_LOW, TY_OTHER, v_i16x8);
+    let hi_i32x4 = un(inout f, lanes, OP_SWIDEN_HIGH, TY_OTHER, v_i16x8);
+    let mut lo = un(inout f, lanes, OP_FCVT_FROM_SINT, TY_F32X4, lo_i32x4);
+    let mut hi = un(inout f, lanes, OP_FCVT_FROM_SINT, TY_F32X4, hi_i32x4);
+    if p.scale != NONE {
+        let s = invariants.or(p.scale);
+        let vs = un(inout f, lanes, OP_SPLAT, TY_F32X4, s);
+        lo = bin(inout f, lanes, OP_FMUL, lo, vs);
+        hi = bin(inout f, lanes, OP_FMUL, hi, vs);
+    }
+    store(inout f, lanes, lo, dst_v, 0);
+    store(inout f, lanes, hi, dst_v, 16);
+    let j8 = iadd_imm(inout f, lanes, jv, 8);
+    let rem = bin(inout f, lanes, OP_ISUB, p.bound, j8);
+    let more = icmp_imm(inout f, lanes, CC_UGE, rem, 8);
+    brif(inout f, lanes, more, lanes, p.header, j8);
+}
+
+// `native_vectorize::run` on the function the input encodes: the number of
+// loops vectorized, then the edit script.
+pub fn vectorize_words(in input: Str) -> ChunkSeq[u64] {
+    let mut f = read_func(in input.as_bytes());
+    let mut done: u64 = 0;
+    if f.simd {
+        let mut headers = ChunkSeq::new[u32]();
+        let mut b = f.first_block();
+        loop {
+            if b == NONE {
+                break;
+            }
+            if f.nparams(b) == 1 {
+                headers.push(b);
+            }
+            b = f.next_block(b);
+        }
+        let mut p = Plan {
+            header: NONE,
+            j: NONE,
+            bound: NONE,
+            delta: 0,
+            insts: ChunkSeq::new[u32](),
+            kinds: ChunkSeq::new[u8](),
+            direction: 0,
+            entries: ChunkSeq::new[u32]()
+        };
+        let mut wp = WidenPlan {
+            header: NONE,
+            j: NONE,
+            bound: NONE,
+            entries: ChunkSeq::new[u32](),
+            invariants: ChunkSeq::new[u32](),
+            scalars: ChunkSeq::new[u32](),
+            src_addr: NONE,
+            src_offset: 0,
+            dst_addr: NONE,
+            dst_offset: 0,
+            scale: NONE
+        };
+        for k in 0..headers.len() {
+            let h = u32_at(in headers, k);
+            if plan(in f, h, inout p) {
+                emit(inout f, in p);
+                done = inc(done);
+            } else if plan_widen(in f, h, inout wp) {
+                emit_widen(inout f, in wp);
+                done = inc(done);
+            }
+        }
+    }
+    let script = f.script();
+    let mut out = ChunkSeq::with_capacity[u64](inc(script.len()));
+    out.push(done);
+    out.extend(in script.as_slice());
+    out
+}

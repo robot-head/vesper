@@ -1,0 +1,979 @@
+// @vesper/clif: one Cranelift function as tables, read from the words of
+// tests/common/clif_words.rs (`encode`), for the Vesper ports of the
+// native CLIF passes (#1829): src/native_vectorize.rs first, then
+// src/native_cold_outline.rs.
+//
+// Entities keep Cranelift's numbers. A pass changes the tables only
+// through the edit functions at the end of this file (`make_block`,
+// `append_param`, `insert_block`, `retarget`, `clone_at_bottom`, `ins`),
+// each of which also writes the edit op that `clif_words::apply` replays
+// on the Rust function with the same Cranelift calls, in the same order.
+// So every entity a pass makes here has the number Cranelift gives it
+// there, and the Rust side checks that it does.
+//
+// - codes.ves: the opcode, type, condition and flag codes of
+//   clif_words.rs.
+
+use self::codes::{
+    E_BLOCK,
+    E_CLONE,
+    E_END,
+    E_INS,
+    E_PARAM,
+    E_PLACE,
+    E_RETARGET,
+    F_CALL,
+    F_RETURN,
+    F_SIDE_EFFECTS,
+    F_STACK_SLOT,
+    F_TERMINATOR,
+    F_TRAP,
+    F_TRAP_CODE,
+    H_NO_OUTLINE,
+    H_SIMD,
+    NONE,
+    NONE64,
+    OP_BITCAST,
+    OP_BRIF,
+    OP_CALL,
+    OP_FCVT_FROM_SINT,
+    OP_ICMP,
+    OP_ICMP_IMM,
+    OP_ICONST,
+    OP_JUMP,
+    OP_LOAD,
+    OP_RETURN,
+    OP_SCALAR_TO_VECTOR,
+    OP_SPLAT,
+    OP_STACK_ADDR,
+    OP_STORE,
+    OP_SWIDEN_HIGH,
+    OP_SWIDEN_LOW,
+    OP_TRAP,
+    OP_UADD_OVERFLOW,
+    TY_I16X8,
+    TY_I32X4,
+    TY_I64X2,
+    TY_I8,
+    TY_I8X16,
+    TY_OTHER,
+    V_ALIAS,
+    V_PARAM,
+    V_RESULT
+};
+
+pub copy struct Val {
+    kind: u64,
+    a: u32,
+    b: u32,
+    ty: u64,
+}
+
+pub copy struct Blk {
+    // params: params[p0..p0+pn]
+    p0: u32,
+    pn: u32,
+    first: u32,
+    last: u32,
+    prev: u32,
+    next: u32,
+    placed: bool,
+    cold: bool,
+}
+
+pub copy struct Ins {
+    op: u64,
+    eff: u64,
+    cond: u64,
+    imm: u64,
+    off: u64,
+    mem: u64,
+    // args[a0..a0+an], results[r0..r0+rn], dests[d0..d0+dn]
+    a0: u32,
+    an: u32,
+    r0: u32,
+    rn: u32,
+    d0: u32,
+    dn: u32,
+    block: u32,
+    prev: u32,
+    next: u32,
+}
+
+// A branch destination: the block, its arguments args[a0..a0+an].
+pub copy struct Dst {
+    block: u32,
+    a0: u32,
+    an: u32,
+}
+
+pub struct Func {
+    simd: bool,
+    // dynamic stack slots, exception tables or a special signature purpose
+    no_outline: bool,
+    // the module's pointer type (TY_OTHER when not given)
+    ptr_ty: u64,
+    // the signature's return types
+    returns: ChunkSeq[u64],
+    vals: ChunkSeq[Val],
+    blks: ChunkSeq[Blk],
+    insts: ChunkSeq[Ins],
+    params: ChunkSeq[u32],
+    args: ChunkSeq[u32],
+    results: ChunkSeq[u32],
+    dests: ChunkSeq[Dst],
+    lfirst: u32,
+    llast: u32,
+    // the edit script so far
+    out: ChunkSeq[u64],
+}
+
+pub struct Reader {
+    pos: u64,
+}
+
+impl Reader {
+    pub fn word(inout self, in b: Slice[u8]) -> u64 {
+        let x = match b.try_read_u64_le(self.pos) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        self.pos = wrapping_add(self.pos, 8);
+        x
+    }
+}
+
+pub fn w(x: u32) -> u64 {
+    widen_u64(x)
+}
+
+pub fn n32(x: u64) -> u32 {
+    wrapping_u32(x)
+}
+
+pub fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+pub fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => NONE,
+    }
+}
+
+pub fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn set_u32(inout s: ChunkSeq[u32], i: u64, x: u32) {
+    let ok = s.try_set(i, x);
+}
+
+pub fn set_u64(inout s: ChunkSeq[u64], i: u64, x: u64) {
+    let ok = s.try_set(i, x);
+}
+
+fn no_val() -> Val {
+    Val {
+        kind: V_ALIAS,
+        a: NONE,
+        b: 0,
+        ty: TY_OTHER
+    }
+}
+
+fn no_blk() -> Blk {
+    Blk {
+        p0: 0,
+        pn: 0,
+        first: NONE,
+        last: NONE,
+        prev: NONE,
+        next: NONE,
+        placed: false,
+        cold: false
+    }
+}
+
+fn no_ins() -> Ins {
+    Ins {
+        op: 0,
+        eff: 0,
+        cond: 0,
+        imm: 0,
+        off: 0,
+        mem: 0,
+        a0: 0,
+        an: 0,
+        r0: 0,
+        rn: 0,
+        d0: 0,
+        dn: 0,
+        block: NONE,
+        prev: NONE,
+        next: NONE
+    }
+}
+
+fn read_list(inout r: Reader, in b: Slice[u8], inout pool: ChunkSeq[u32]) -> u32 {
+    let n = r.word(in b);
+    for k in 0..n {
+        pool.push(n32(r.word(in b)));
+    }
+    n32(n)
+}
+
+// Reads the words of `clif_words::encode`.
+pub fn read_func(in b: Slice[u8]) -> Func {
+    let mut r = Reader {
+        pos: 0
+    };
+    let version = r.word(in b);
+    let flags = r.word(in b);
+    let nv = r.word(in b);
+    let ni = r.word(in b);
+    let nb = r.word(in b);
+    let ptr = r.word(in b);
+    let nr = r.word(in b);
+    let mut rets = ChunkSeq::with_capacity[u64](nr);
+    for k in 0..nr {
+        rets.push(r.word(in b));
+    }
+    let mut f = Func {
+        simd: (flags & H_SIMD) != 0,
+        no_outline: (flags & H_NO_OUTLINE) != 0,
+        ptr_ty: ptr,
+        returns: rets,
+        vals: ChunkSeq::with_capacity[Val](nv),
+        blks: ChunkSeq::with_capacity[Blk](nb),
+        insts: ChunkSeq::with_capacity[Ins](ni),
+        params: ChunkSeq::new[u32](),
+        args: ChunkSeq::new[u32](),
+        results: ChunkSeq::new[u32](),
+        dests: ChunkSeq::new[Dst](),
+        lfirst: NONE,
+        llast: NONE,
+        out: ChunkSeq::new[u64]()
+    };
+    for v in 0..nv {
+        let k = r.word(in b);
+        let a = n32(r.word(in b));
+        let bb = n32(r.word(in b));
+        f
+            .vals
+            .push(
+                Val {
+                    kind: k & 255,
+                    a: a,
+                    b: bb,
+                    ty: k >> 8
+                }
+            );
+    }
+    for i in 0..nb {
+        f.blks.push(no_blk());
+    }
+    for i in 0..ni {
+        f.insts.push(no_ins());
+    }
+    let nl = r.word(in b);
+    for k in 0..nl {
+        let blk = r.word(in b);
+        let mut row = f.blk(blk);
+        row.cold = r.word(in b) != 0;
+        row.p0 = n32(f.params.len());
+        row.pn = read_list(inout r, in b, inout f.params);
+        row.placed = true;
+        row.prev = f.llast;
+        if f.llast == NONE {
+            f.lfirst = n32(blk);
+        } else {
+            let mut p = f.blk(w(f.llast));
+            p.next = n32(blk);
+            f.put_blk(w(f.llast), p);
+        }
+        f.llast = n32(blk);
+        let n = r.word(in b);
+        let mut prev = NONE;
+        for q in 0..n {
+            let i = r.word(in b);
+            let mut row_i = f.inst(i);
+            row_i.block = n32(blk);
+            row_i.prev = prev;
+            f.put_inst(i, row_i);
+            if prev == NONE {
+                row.first = n32(i);
+            } else {
+                let mut p = f.inst(w(prev));
+                p.next = n32(i);
+                f.put_inst(w(prev), p);
+            }
+            prev = n32(i);
+        }
+        row.last = prev;
+        f.put_blk(blk, row);
+    }
+    for i in 0..ni {
+        let mut row = f.inst(i);
+        row.op = r.word(in b);
+        row.eff = r.word(in b);
+        row.cond = r.word(in b);
+        row.imm = r.word(in b);
+        row.off = r.word(in b);
+        row.mem = r.word(in b);
+        row.a0 = n32(f.args.len());
+        row.an = read_list(inout r, in b, inout f.args);
+        row.r0 = n32(f.results.len());
+        row.rn = read_list(inout r, in b, inout f.results);
+        row.d0 = n32(f.dests.len());
+        let nd = r.word(in b);
+        row.dn = n32(nd);
+        for k in 0..nd {
+            let blk = n32(r.word(in b));
+            let a0 = n32(f.args.len());
+            let an = read_list(inout r, in b, inout f.args);
+            f
+                .dests
+                .push(
+                    Dst {
+                        block: blk,
+                        a0: a0,
+                        an: an
+                    }
+                );
+        }
+        f.put_inst(i, row);
+    }
+    f
+}
+
+impl Func {
+    pub fn nvalues(in self) -> u64 {
+        self.vals.len()
+    }
+
+    pub fn ninsts(in self) -> u64 {
+        self.insts.len()
+    }
+
+    pub fn nblocks(in self) -> u64 {
+        self.blks.len()
+    }
+
+    pub fn val(in self, v: u64) -> Val {
+        match self.vals.try_get(v) {
+            Option::Some(x) => x,
+            Option::None => no_val(),
+        }
+    }
+
+    pub fn blk(in self, b: u64) -> Blk {
+        match self.blks.try_get(b) {
+            Option::Some(x) => x,
+            Option::None => no_blk(),
+        }
+    }
+
+    pub fn inst(in self, i: u64) -> Ins {
+        match self.insts.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => no_ins(),
+        }
+    }
+
+    pub fn dest_row(in self, d: u64) -> Dst {
+        match self.dests.try_get(d) {
+            Option::Some(x) => x,
+            Option::None => Dst {
+                block: NONE,
+                a0: 0,
+                an: 0
+            },
+        }
+    }
+
+    fn put_blk(inout self, b: u64, row: Blk) {
+        let ok = self.blks.try_set(b, row);
+    }
+
+    fn put_inst(inout self, i: u64, row: Ins) {
+        let ok = self.insts.try_set(i, row);
+    }
+
+    // `resolve_aliases`.
+    pub fn resolve(in self, v: u32) -> u32 {
+        let x = self.val(w(v));
+        if x.kind == V_ALIAS && x.a != NONE {
+            x.a
+        } else {
+            v
+        }
+    }
+
+    pub fn value_type(in self, v: u32) -> u64 {
+        self.val(w(v)).ty
+    }
+
+    // The instruction whose result `v` (resolved) is, and which result; NONE
+    // when it is not an instruction result.
+    pub fn def_inst(in self, v: u32) -> u32 {
+        let x = self.val(w(self.resolve(v)));
+        if x.kind == V_RESULT {
+            x.a
+        } else {
+            NONE
+        }
+    }
+
+    pub fn def_num(in self, v: u32) -> u32 {
+        self.val(w(self.resolve(v))).b
+    }
+
+    // The block that defines `v`, or NONE (`def_block` of the passes: an
+    // instruction outside the layout or a union has none).
+    pub fn def_block(in self, v: u32) -> u32 {
+        let x = self.val(w(self.resolve(v)));
+        if x.kind == V_RESULT {
+            self.inst(w(x.a)).block
+        } else if x.kind == V_PARAM {
+            x.a
+        } else {
+            NONE
+        }
+    }
+
+    pub fn nparams(in self, b: u32) -> u64 {
+        w(self.blk(w(b)).pn)
+    }
+
+    pub fn param(in self, b: u32, k: u64) -> u32 {
+        let row = self.blk(w(b));
+        u32_at(in self.params, wrapping_add(w(row.p0), k))
+    }
+
+    pub fn first_block(in self) -> u32 {
+        self.lfirst
+    }
+
+    pub fn next_block(in self, b: u32) -> u32 {
+        self.blk(w(b)).next
+    }
+
+    pub fn first_inst(in self, b: u32) -> u32 {
+        self.blk(w(b)).first
+    }
+
+    pub fn last_inst(in self, b: u32) -> u32 {
+        self.blk(w(b)).last
+    }
+
+    pub fn next_inst(in self, i: u32) -> u32 {
+        self.inst(w(i)).next
+    }
+
+    pub fn op(in self, i: u32) -> u64 {
+        self.inst(w(i)).op
+    }
+
+    pub fn nargs(in self, i: u32) -> u64 {
+        w(self.inst(w(i)).an)
+    }
+
+    // Argument `k` of `i`, unresolved.
+    pub fn arg(in self, i: u32, k: u64) -> u32 {
+        let row = self.inst(w(i));
+        if k >= w(row.an) {
+            return NONE;
+        }
+        u32_at(in self.args, wrapping_add(w(row.a0), k))
+    }
+
+    pub fn nresults(in self, i: u32) -> u64 {
+        w(self.inst(w(i)).rn)
+    }
+
+    pub fn result(in self, i: u32, k: u64) -> u32 {
+        let row = self.inst(w(i));
+        if k >= w(row.rn) {
+            return NONE;
+        }
+        u32_at(in self.results, wrapping_add(w(row.r0), k))
+    }
+
+    pub fn ndests(in self, i: u32) -> u64 {
+        w(self.inst(w(i)).dn)
+    }
+
+    pub fn dest_block(in self, i: u32, k: u64) -> u32 {
+        let row = self.inst(w(i));
+        if k >= w(row.dn) {
+            return NONE;
+        }
+        self.dest_row(wrapping_add(w(row.d0), k)).block
+    }
+
+    pub fn dest_nargs(in self, i: u32, k: u64) -> u64 {
+        let row = self.inst(w(i));
+        if k >= w(row.dn) {
+            return 0;
+        }
+        w(self.dest_row(wrapping_add(w(row.d0), k)).an)
+    }
+
+    // Block argument `a` of destination `k` of `i` (NONE when it is not a
+    // value).
+    pub fn dest_arg(in self, i: u32, k: u64, a: u64) -> u32 {
+        let row = self.inst(w(i));
+        let d = self.dest_row(wrapping_add(w(row.d0), k));
+        if a >= w(d.an) {
+            return NONE;
+        }
+        u32_at(in self.args, wrapping_add(w(d.a0), a))
+    }
+
+    // The predecessors of `b` as (block, branch) pairs: every instruction
+    // that has `b` among its destinations, once (`ControlFlowGraph`).
+    pub fn preds(in self, b: u32, inout pb: ChunkSeq[u32], inout pi: ChunkSeq[u32]) {
+        pb.clear();
+        pi.clear();
+        let mut blk = self.lfirst;
+        loop {
+            if blk == NONE {
+                break;
+            }
+            let t = self.last_inst(blk);
+            if t != NONE {
+                let n = self.ndests(t);
+                for k in 0..n {
+                    if self.dest_block(t, k) == b {
+                        pb.push(blk);
+                        pi.push(t);
+                        break;
+                    }
+                }
+            }
+            blk = self.next_block(blk);
+        }
+    }
+
+    // ----- edits ------------------------------------------------------------
+
+    fn new_value(inout self, kind: u64, a: u32, b: u32, ty: u64) -> u32 {
+        let v = n32(self.vals.len());
+        self
+            .vals
+            .push(
+                Val {
+                    kind: kind,
+                    a: a,
+                    b: b,
+                    ty: ty
+                }
+            );
+        v
+    }
+
+    // `make_block`.
+    pub fn make_block(inout self) -> u32 {
+        let b = n32(self.blks.len());
+        self.blks.push(no_blk());
+        self.out.push(E_BLOCK);
+        self.out.push(w(b));
+        b
+    }
+
+    // `append_block_param`.
+    pub fn append_param(inout self, b: u32, ty: u64) -> u32 {
+        let mut row = self.blk(w(b));
+        let end = wrapping_add(w(row.p0), w(row.pn));
+        if row.pn != 0 && end != self.params.len() {
+            // Move the block's parameters to the end so they can grow.
+            let p0 = self.params.len();
+            for k in 0..w(row.pn) {
+                let p = u32_at(in self.params, wrapping_add(w(row.p0), k));
+                self.params.push(p);
+            }
+            row.p0 = n32(p0);
+        } else if row.pn == 0 {
+            row.p0 = n32(self.params.len());
+        }
+        let v = self.new_value(V_PARAM, b, row.pn, ty);
+        self.params.push(v);
+        row.pn = wrapping_add(row.pn, 1);
+        self.put_blk(w(b), row);
+        self.out.push(E_PARAM);
+        self.out.push(w(b));
+        self.out.push(ty);
+        self.out.push(w(v));
+        v
+    }
+
+    // `layout.insert_block(b, before)`.
+    pub fn insert_block(inout self, b: u32, before: u32) {
+        let mut row = self.blk(w(b));
+        let mut at = self.blk(w(before));
+        row.prev = at.prev;
+        row.next = before;
+        row.placed = true;
+        if at.prev == NONE {
+            self.lfirst = b;
+        } else {
+            let mut p = self.blk(w(at.prev));
+            p.next = b;
+            self.put_blk(w(at.prev), p);
+        }
+        at.prev = b;
+        self.put_blk(w(before), at);
+        self.put_blk(w(b), row);
+        self.out.push(E_PLACE);
+        self.out.push(w(b));
+        self.out.push(w(before));
+    }
+
+    // Every destination of `i` at `from` goes to `to`.
+    pub fn retarget(inout self, i: u32, from: u32, to: u32) {
+        let row = self.inst(w(i));
+        for k in 0..w(row.dn) {
+            let d = wrapping_add(w(row.d0), k);
+            let mut x = self.dest_row(d);
+            if x.block == from {
+                x.block = to;
+                let ok = self.dests.try_set(d, x);
+            }
+        }
+        self.out.push(E_RETARGET);
+        self.out.push(w(i));
+        self.out.push(w(from));
+        self.out.push(w(to));
+    }
+
+    fn append_inst(inout self, b: u32, i: u32) {
+        let mut row = self.inst(w(i));
+        let mut br = self.blk(w(b));
+        row.block = b;
+        row.prev = br.last;
+        row.next = NONE;
+        if br.last == NONE {
+            br.first = i;
+        } else {
+            let mut p = self.inst(w(br.last));
+            p.next = i;
+            self.put_inst(w(br.last), p);
+        }
+        br.last = i;
+        self.put_inst(w(i), row);
+        self.put_blk(w(b), br);
+    }
+
+    // `clone_inst(i)` with its values (`inst_values` order: arguments, then
+    // each destination's arguments) replaced by `vals`, at the bottom of
+    // `b`. Returns the new instruction.
+    pub fn clone_at_bottom(inout self, b: u32, i: u32, in vals: ChunkSeq[u32]) -> u32 {
+        let src = self.inst(w(i));
+        let new = n32(self.insts.len());
+        let mut row = src;
+        row.a0 = n32(self.args.len());
+        let mut k: u64 = 0;
+        for q in 0..w(src.an) {
+            self.args.push(u32_at(in vals, k));
+            k = inc(k);
+        }
+        row.d0 = n32(self.dests.len());
+        for q in 0..w(src.dn) {
+            let d = self.dest_row(wrapping_add(w(src.d0), q));
+            let a0 = n32(self.args.len());
+            for z in 0..w(d.an) {
+                self.args.push(u32_at(in vals, k));
+                k = inc(k);
+            }
+            self
+                .dests
+                .push(
+                    Dst {
+                        block: d.block,
+                        a0: a0,
+                        an: d.an
+                    }
+                );
+        }
+        row.r0 = n32(self.results.len());
+        row.block = NONE;
+        row.prev = NONE;
+        row.next = NONE;
+        self.insts.push(row);
+        for q in 0..w(src.rn) {
+            let old = u32_at(in self.results, wrapping_add(w(src.r0), q));
+            let ty = self.value_type(old);
+            let v = self.new_value(V_RESULT, new, n32(q), ty);
+            self.results.push(v);
+        }
+        self.append_inst(b, new);
+        self.out.push(E_CLONE);
+        self.out.push(w(b));
+        self.out.push(w(i));
+        self.out.push(w(new));
+        self.out.push(k);
+        for q in 0..k {
+            self.out.push(w(u32_at(in vals, q)));
+        }
+        new
+    }
+
+    // One builder call at the bottom of `b` (`build` of clif_words.rs):
+    // `ty` is the type the builder takes, if any; `dests` are rows of
+    // (block, n, args...) in `dws`. Returns the new instruction; its
+    // results are `result(i, k)`.
+    pub fn ins(
+        inout self,
+        b: u32,
+        op: u64,
+        ty: u64,
+        cond: u64,
+        imm: u64,
+        off: u64,
+        mem: u64,
+        in a: ChunkSeq[u32],
+        in dws: ChunkSeq[u32]
+    ) -> u32 {
+        let new = n32(self.insts.len());
+        let mut row = no_ins();
+        row.op = op;
+        row.cond = cond;
+        row.imm = imm;
+        row.off = off;
+        row.mem = mem;
+        row.a0 = n32(self.args.len());
+        row.an = n32(a.len());
+        for k in 0..a.len() {
+            self.args.push(u32_at(in a, k));
+        }
+        row.d0 = n32(self.dests.len());
+        let mut at: u64 = 0;
+        let mut nd: u32 = 0;
+        loop {
+            if at >= dws.len() {
+                break;
+            }
+            let blk = u32_at(in dws, at);
+            let n = w(u32_at(in dws, inc(at)));
+            let a0 = n32(self.args.len());
+            for k in 0..n {
+                self.args.push(u32_at(in dws, wrapping_add(wrapping_add(at, 2), k)));
+            }
+            self
+                .dests
+                .push(
+                    Dst {
+                        block: blk,
+                        a0: a0,
+                        an: n32(n)
+                    }
+                );
+            nd = wrapping_add(nd, 1);
+            at = wrapping_add(wrapping_add(at, 2), n);
+        }
+        row.dn = nd;
+        row.r0 = n32(self.results.len());
+        self.insts.push(row);
+        // The results the builder makes.
+        let a0t = if a.len() > 0 {
+            self.value_type(u32_at(in a, 0))
+        } else {
+            TY_OTHER
+        };
+        let mut rn: u32 = 0;
+        if op == OP_ICMP || op == OP_ICMP_IMM {
+            self.result_of(new, 0, TY_I8);
+            rn = 1;
+        } else if op == OP_UADD_OVERFLOW {
+            self.result_of(new, 0, a0t);
+            self.result_of(new, 1, TY_I8);
+            rn = 2;
+        } else if op == OP_ICONST
+            || op == OP_SPLAT
+            || op == OP_SCALAR_TO_VECTOR
+            || op == OP_FCVT_FROM_SINT
+            || op == OP_BITCAST
+            || op == OP_LOAD {
+            self.result_of(new, 0, ty);
+            rn = 1;
+        } else if op == OP_SWIDEN_LOW || op == OP_SWIDEN_HIGH {
+            let t = if a0t == TY_I8X16 {
+                TY_I16X8
+            } else if a0t == TY_I16X8 {
+                TY_I32X4
+            } else {
+                TY_I64X2
+            };
+            self.result_of(new, 0, t);
+            rn = 1;
+        } else if !is_sink(op) {
+            self.result_of(new, 0, a0t);
+            rn = 1;
+        }
+        let mut fin = self.inst(w(new));
+        fin.rn = rn;
+        self.put_inst(w(new), fin);
+        self.append_inst(b, new);
+        self.out.push(E_INS);
+        self.out.push(w(b));
+        self.out.push(op);
+        self.out.push(ty);
+        self.out.push(cond);
+        self.out.push(imm);
+        self.out.push(off);
+        self.out.push(mem);
+        self.out.push(a.len());
+        for k in 0..a.len() {
+            self.out.push(w(u32_at(in a, k)));
+        }
+        self.out.push(w(nd));
+        for k in 0..dws.len() {
+            self.out.push(w(u32_at(in dws, k)));
+        }
+        self.out.push(w(new));
+        new
+    }
+
+    // ----- the cold outliner's stub (made by `clif_words::apply`, not by an
+    // edit op of its own: these only keep the tables in step) -------------
+
+    pub fn set_cold(inout self, b: u32) {
+        let mut row = self.blk(w(b));
+        row.cold = true;
+        self.put_blk(w(b), row);
+    }
+
+    // `layout.remove_inst` of every instruction of `b`.
+    pub fn clear_block(inout self, b: u32) {
+        let mut row = self.blk(w(b));
+        let mut i = row.first;
+        loop {
+            if i == NONE {
+                break;
+            }
+            let mut x = self.inst(w(i));
+            let next = x.next;
+            x.block = NONE;
+            x.prev = NONE;
+            x.next = NONE;
+            self.put_inst(w(i), x);
+            i = next;
+        }
+        row.first = NONE;
+        row.last = NONE;
+        self.put_blk(w(b), row);
+    }
+
+    // `layout.remove_block(b)`.
+    pub fn remove_block(inout self, b: u32) {
+        let mut row = self.blk(w(b));
+        if row.prev == NONE {
+            self.lfirst = row.next;
+        } else {
+            let mut p = self.blk(w(row.prev));
+            p.next = row.next;
+            self.put_blk(w(row.prev), p);
+        }
+        if row.next == NONE {
+            self.llast = row.prev;
+        } else {
+            let mut n = self.blk(w(row.next));
+            n.prev = row.prev;
+            self.put_blk(w(row.next), n);
+        }
+        row.prev = NONE;
+        row.next = NONE;
+        row.placed = false;
+        self.put_blk(w(b), row);
+    }
+
+    // `make_inst` + `make_inst_results` + `layout.append_inst` of an
+    // instruction with no destinations.
+    fn stub_inst(
+        inout self,
+        b: u32,
+        op: u64,
+        eff: u64,
+        imm: u64,
+        in a: ChunkSeq[u32],
+        in tys: ChunkSeq[u64]
+    ) -> u32 {
+        let new = n32(self.insts.len());
+        let mut row = no_ins();
+        row.op = op;
+        row.eff = eff;
+        row.imm = imm;
+        row.a0 = n32(self.args.len());
+        row.an = n32(a.len());
+        for k in 0..a.len() {
+            self.args.push(u32_at(in a, k));
+        }
+        row.d0 = n32(self.dests.len());
+        row.r0 = n32(self.results.len());
+        row.rn = n32(tys.len());
+        self.insts.push(row);
+        for k in 0..tys.len() {
+            self.result_of(new, n32(k), u64_at(in tys, k));
+        }
+        self.append_inst(b, new);
+        new
+    }
+
+    // `stack_addr ptr, slot`: its value.
+    pub fn stub_stack_addr(inout self, b: u32, slot: u32) -> u32 {
+        let none = ChunkSeq::new[u32]();
+        let mut tys = ChunkSeq::new[u64]();
+        tys.push(self.ptr_ty);
+        let i = self.stub_inst(b, OP_STACK_ADDR, F_STACK_SLOT, w(slot), in none, in tys);
+        self.result(i, 0)
+    }
+
+    // The call of the helper; it returns the signature's returns when
+    // `returns`.
+    pub fn stub_call(inout self, b: u32, in a: ChunkSeq[u32], returns: bool) -> u32 {
+        let mut tys = ChunkSeq::new[u64]();
+        if returns {
+            tys.extend(in self.returns.as_slice());
+        }
+        self.stub_inst(b, OP_CALL, F_CALL | F_SIDE_EFFECTS, 0, in a, in tys)
+    }
+
+    pub fn stub_return(inout self, b: u32, call: u32) {
+        let mut a = ChunkSeq::new[u32]();
+        for k in 0..self.nresults(call) {
+            a.push(self.result(call, k));
+        }
+        let none = ChunkSeq::new[u64]();
+        let i = self.stub_inst(b, OP_RETURN, F_TERMINATOR | F_RETURN, 0, in a, in none);
+    }
+
+    pub fn stub_trap(inout self, b: u32, code: u64) {
+        let a = ChunkSeq::new[u32]();
+        let none = ChunkSeq::new[u64]();
+        let i = self
+            .stub_inst(b, OP_TRAP, F_TERMINATOR | F_TRAP | F_TRAP_CODE, code, in a, in none);
+    }
+
+    fn result_of(inout self, i: u32, k: u32, ty: u64) {
+        let v = self.new_value(V_RESULT, i, k, ty);
+        self.results.push(v);
+    }
+
+    // The edit script, ended.
+    pub fn script(inout self) -> ChunkSeq[u64] {
+        self.out.push(E_END);
+        let mut o = ChunkSeq::with_capacity[u64](self.out.len());
+        o.extend(in self.out.as_slice());
+        o
+    }
+}
+
+// Opcodes the builder makes with no result.
+fn is_sink(op: u64) -> bool {
+    op == OP_STORE || op == OP_BRIF || op == OP_JUMP
+}

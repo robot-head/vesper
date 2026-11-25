@@ -1,0 +1,425 @@
+// The analyses the cold outliner asks Cranelift for, on @vesper/clif
+// tables: successors (`block_succs`), the CFG's predecessors, the
+// dominator tree (`DominatorTree::with_function`, `dominates`) and the loop
+// forest (`LoopAnalysis::compute`, `innermost_loop`, `loop_header`,
+// `loop_parent`), each the way Cranelift 0.125 computes it:
+//
+// - successors are the destinations of a block's last instruction, in
+//   order (repeats kept);
+// - a block's predecessors are the branches that name it, once per
+//   branch, ordered by instruction number (the CFG's bforest map);
+// - the spanning-tree DFS from the entry pushes successors in reverse and
+//   skips the ones already numbered, so its post-order (and the reverse
+//   post-order the loop analysis walks) is Cranelift's;
+// - `dominates` compares dominator-tree preorder numbers, which are 0 for
+//   an unreachable block, so an unreachable block "dominates" another
+//   unreachable one and no reachable block dominates an unreachable one.
+
+use @vesper/clif::{
+    Func,
+    u32_at,
+    w
+};
+use @vesper/clif::codes::{
+    NONE
+};
+
+pub struct Graph {
+    // per block: successors succ[s0..s0+sn]
+    s0: ChunkSeq[u32],
+    sn: ChunkSeq[u32],
+    succ: ChunkSeq[u32],
+    // per block: predecessors (block, branch) at p0..p0+pn
+    p0: ChunkSeq[u32],
+    pn: ChunkSeq[u32],
+    pblock: ChunkSeq[u32],
+    pinst: ChunkSeq[u32],
+    // the entry, NONE for an empty layout
+    entry: u32,
+    // the DFS post-order (reachable blocks)
+    post: ChunkSeq[u32],
+    // per block: its reverse post-order number + 1, 0 when unreachable
+    rpo_num: ChunkSeq[u32],
+    idom: ChunkSeq[u32],
+    // per block: its innermost loop, NONE for none
+    loop_of: ChunkSeq[u32],
+    // per loop
+    lheader: ChunkSeq[u32],
+    lparent: ChunkSeq[u32],
+}
+
+fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+fn put(inout s: ChunkSeq[u32], i: u64, x: u32) {
+    let ok = s.try_set(i, x);
+}
+
+impl Graph {
+    pub fn nsuccs(in self, b: u32) -> u64 {
+        w(u32_at(in self.sn, w(b)))
+    }
+
+    pub fn succ_at(in self, b: u32, k: u64) -> u32 {
+        u32_at(in self.succ, wrapping_add(w(u32_at(in self.s0, w(b))), k))
+    }
+
+    pub fn has_succ(in self, b: u32, s: u32) -> bool {
+        let n = self.nsuccs(b);
+        for k in 0..n {
+            if self.succ_at(b, k) == s {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn npreds(in self, b: u32) -> u64 {
+        w(u32_at(in self.pn, w(b)))
+    }
+
+    pub fn pred_block(in self, b: u32, k: u64) -> u32 {
+        u32_at(in self.pblock, wrapping_add(w(u32_at(in self.p0, w(b))), k))
+    }
+
+    pub fn reachable(in self, b: u32) -> bool {
+        b != NONE && u32_at(in self.rpo_num, w(b)) != 0 && u32_at(in self.rpo_num, w(b)) != NONE
+    }
+
+    // `domtree.dominates(a, b)` for blocks.
+    pub fn dominates(in self, a: u32, b: u32) -> bool {
+        let ra = self.reachable(a);
+        let rb = self.reachable(b);
+        if !ra || !rb {
+            return !ra && !rb;
+        }
+        let mut x = b;
+        loop {
+            if x == a {
+                return true;
+            }
+            if x == self.entry || x == NONE {
+                return false;
+            }
+            x = u32_at(in self.idom, w(x));
+        }
+    }
+
+    pub fn innermost(in self, b: u32) -> u32 {
+        u32_at(in self.loop_of, w(b))
+    }
+
+    pub fn header(in self, lp: u32) -> u32 {
+        u32_at(in self.lheader, w(lp))
+    }
+
+    pub fn parent(in self, lp: u32) -> u32 {
+        u32_at(in self.lparent, w(lp))
+    }
+}
+
+// The common dominator of `a` and `b` in the idoms so far (by reverse
+// post-order numbers).
+fn intersect(in g: Graph, a0: u32, b0: u32) -> u32 {
+    let mut a = a0;
+    let mut b = b0;
+    loop {
+        if a == b {
+            return a;
+        }
+        let na = u32_at(in g.rpo_num, w(a));
+        let nb = u32_at(in g.rpo_num, w(b));
+        if na > nb {
+            a = u32_at(in g.idom, w(a));
+        } else {
+            b = u32_at(in g.idom, w(b));
+        }
+    }
+}
+
+// The graph of `f` as it stands.
+pub fn graph(in f: Func) -> Graph {
+    let nb = f.nblocks();
+    let mut g = Graph {
+        s0: ChunkSeq::new[u32](),
+        sn: ChunkSeq::new[u32](),
+        succ: ChunkSeq::new[u32](),
+        p0: ChunkSeq::new[u32](),
+        pn: ChunkSeq::new[u32](),
+        pblock: ChunkSeq::new[u32](),
+        pinst: ChunkSeq::new[u32](),
+        entry: f.first_block(),
+        post: ChunkSeq::new[u32](),
+        rpo_num: ChunkSeq::new[u32](),
+        idom: ChunkSeq::new[u32](),
+        loop_of: ChunkSeq::new[u32](),
+        lheader: ChunkSeq::new[u32](),
+        lparent: ChunkSeq::new[u32]()
+    };
+    g.s0.resize(nb, 0);
+    g.sn.resize(nb, 0);
+    g.p0.resize(nb, 0);
+    g.pn.resize(nb, 0);
+    g.rpo_num.resize(nb, 0);
+    g.idom.resize(nb, NONE);
+    g.loop_of.resize(nb, NONE);
+    // Successors, and (block, branch, target) edges once per branch.
+    let mut eb = ChunkSeq::new[u32]();
+    let mut ei = ChunkSeq::new[u32]();
+    let mut et = ChunkSeq::new[u32]();
+    let mut b = f.first_block();
+    loop {
+        if b == NONE {
+            break;
+        }
+        put(inout g.s0, w(b), wrapping_u32(g.succ.len()));
+        let t = f.last_inst(b);
+        if t != NONE {
+            let n = f.ndests(t);
+            put(inout g.sn, w(b), wrapping_u32(n));
+            for k in 0..n {
+                let d = f.dest_block(t, k);
+                g.succ.push(d);
+                let mut seen = false;
+                for q in 0..k {
+                    if f.dest_block(t, q) == d {
+                        seen = true;
+                    }
+                }
+                if !seen {
+                    eb.push(b);
+                    ei.push(t);
+                    et.push(d);
+                }
+            }
+        }
+        b = f.next_block(b);
+    }
+    // Predecessors, by branch number: count, then place in order.
+    let mut order = ChunkSeq::new[u64]();
+    for k in 0..eb.len() {
+        order.push(k);
+    }
+    sort_by_inst(inout order, in ei);
+    let mut counts = ChunkSeq::new[u32]();
+    counts.resize(nb, 0);
+    for k in 0..et.len() {
+        let t = w(u32_at(in et, k));
+        put(inout counts, t, wrapping_add(u32_at(in counts, t), 1));
+    }
+    let mut at: u32 = 0;
+    for x in 0..nb {
+        put(inout g.p0, x, at);
+        at = wrapping_add(at, u32_at(in counts, x));
+    }
+    g.pblock.resize(et.len(), NONE);
+    g.pinst.resize(et.len(), NONE);
+    let mut fill = ChunkSeq::new[u32]();
+    fill.resize(nb, 0);
+    for q in 0..order.len() {
+        let k = match order.try_get(q) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let t = w(u32_at(in et, k));
+        let slot = wrapping_add(w(u32_at(in g.p0, t)), w(u32_at(in fill, t)));
+        put(inout g.pblock, slot, u32_at(in eb, k));
+        put(inout g.pinst, slot, u32_at(in ei, k));
+        put(inout fill, t, wrapping_add(u32_at(in fill, t), 1));
+    }
+    for x in 0..nb {
+        put(inout g.pn, x, u32_at(in fill, x));
+    }
+    if g.entry == NONE {
+        return g;
+    }
+    // The spanning-tree DFS: (enter?, block) events.
+    let mut visited = ChunkSeq::new[u8]();
+    visited.resize(nb, 0);
+    let mut ev_enter = ChunkSeq::new[u8]();
+    let mut ev_block = ChunkSeq::new[u32]();
+    ev_enter.push(1);
+    ev_block.push(g.entry);
+    loop {
+        let n = ev_block.len();
+        if n == 0 {
+            break;
+        }
+        let last = wrapping_sub(n, 1);
+        let enter = match ev_enter.try_get(last) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let blk = u32_at(in ev_block, last);
+        ev_enter.truncate(last);
+        ev_block.truncate(last);
+        if enter == 0 {
+            g.post.push(blk);
+            continue;
+        }
+        let seen = match visited.try_get(w(blk)) {
+            Option::Some(v) => v != 0,
+            Option::None => true,
+        };
+        if seen {
+            continue;
+        }
+        let ok = visited.try_set(w(blk), 1);
+        ev_enter.push(0);
+        ev_block.push(blk);
+        let ns = g.nsuccs(blk);
+        let mut k = ns;
+        loop {
+            if k == 0 {
+                break;
+            }
+            k = wrapping_sub(k, 1);
+            let s = g.succ_at(blk, k);
+            let sv = match visited.try_get(w(s)) {
+                Option::Some(v) => v != 0,
+                Option::None => true,
+            };
+            if !sv {
+                ev_enter.push(1);
+                ev_block.push(s);
+            }
+        }
+    }
+    // Reverse post-order numbers (1 up).
+    let np = g.post.len();
+    for q in 0..np {
+        let blk = u32_at(in g.post, wrapping_sub(wrapping_sub(np, 1), q));
+        put(inout g.rpo_num, w(blk), wrapping_u32(inc(q)));
+    }
+    // Immediate dominators (Cooper, Harvey and Kennedy; the tree is unique,
+    // so it is Semi-NCA's).
+    put(inout g.idom, w(g.entry), g.entry);
+    let mut changed = true;
+    loop {
+        if !changed {
+            break;
+        }
+        changed = false;
+        for q in 1..np {
+            let blk = u32_at(in g.post, wrapping_sub(wrapping_sub(np, 1), q));
+            let mut new = NONE;
+            for k in 0..g.npreds(blk) {
+                let p = g.pred_block(blk, k);
+                if !g.reachable(p) || u32_at(in g.idom, w(p)) == NONE {
+                    continue;
+                }
+                if new == NONE {
+                    new = p;
+                } else {
+                    new = intersect(in g, p, new);
+                }
+            }
+            if new != u32_at(in g.idom, w(blk)) {
+                put(inout g.idom, w(blk), new);
+                changed = true;
+            }
+        }
+    }
+    // Loops: headers in reverse post-order.
+    for q in 0..np {
+        let blk = u32_at(in g.post, wrapping_sub(wrapping_sub(np, 1), q));
+        let mut header = false;
+        for k in 0..g.npreds(blk) {
+            if g.dominates(blk, g.pred_block(blk, k)) {
+                header = true;
+            }
+        }
+        if header {
+            let lp = wrapping_u32(g.lheader.len());
+            g.lheader.push(blk);
+            g.lparent.push(NONE);
+            put(inout g.loop_of, w(blk), lp);
+        }
+    }
+    // Loop blocks, the last loop first.
+    let mut stack = ChunkSeq::new[u32]();
+    let nl = g.lheader.len();
+    let mut li = nl;
+    loop {
+        if li == 0 {
+            break;
+        }
+        li = wrapping_sub(li, 1);
+        let lp = wrapping_u32(li);
+        let h = g.header(lp);
+        for k in 0..g.npreds(h) {
+            let p = g.pred_block(h, k);
+            if g.dominates(h, p) {
+                stack.push(p);
+            }
+        }
+        loop {
+            let n = stack.len();
+            if n == 0 {
+                break;
+            }
+            let node = u32_at(in stack, wrapping_sub(n, 1));
+            stack.truncate(wrapping_sub(n, 1));
+            let mut cont = NONE;
+            let nl0 = g.innermost(node);
+            if nl0 == NONE {
+                put(inout g.loop_of, w(node), lp);
+                cont = node;
+            } else {
+                let mut node_loop = nl0;
+                let mut par = g.parent(node_loop);
+                loop {
+                    if par == NONE {
+                        break;
+                    }
+                    if par == lp {
+                        break;
+                    }
+                    node_loop = par;
+                    par = g.parent(node_loop);
+                }
+                if par == NONE {
+                    if node_loop != lp {
+                        put(inout g.lparent, w(node_loop), lp);
+                        cont = g.header(node_loop);
+                    }
+                }
+            }
+            if cont != NONE {
+                for k in 0..g.npreds(cont) {
+                    stack.push(g.pred_block(cont, k));
+                }
+            }
+        }
+    }
+    g
+}
+
+// Sorts the edge indices `order` by their branch number (stable).
+fn sort_by_inst(inout order: ChunkSeq[u64], in ei: ChunkSeq[u32]) {
+    let n = order.len();
+    for i in 1..n {
+        let x = match order.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let key = u32_at(in ei, x);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let y = match order.try_get(wrapping_sub(j, 1)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            if u32_at(in ei, y) <= key {
+                break;
+            }
+            let ok = order.try_set(j, y);
+            j = wrapping_sub(j, 1);
+        }
+        let ok = order.try_set(j, x);
+    }
+}

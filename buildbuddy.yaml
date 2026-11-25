@@ -7,9 +7,11 @@
 actions:
   - name: "Test all targets"
     container_image: "ubuntu-24.04"
+    # 22GB ran out on #1870: the VM hit 24.2GB and the kernel killed
+    # //:test/wasm_seed_package_io, whose stage2 compiles run in parallel.
     resource_requests:
       cpu: 8
-      memory: 22GB
+      memory: 25GB
       disk: 60GB
     timeout: 60m
     triggers:
@@ -55,7 +57,7 @@ actions:
     container_image: "ubuntu-24.04"
     resource_requests:
       cpu: 8
-      memory: 22GB
+      memory: 25GB
       disk: 60GB
     timeout: 60m
     triggers:

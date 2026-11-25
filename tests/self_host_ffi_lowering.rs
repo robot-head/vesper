@@ -1368,3 +1368,53 @@ fn type_mapping_speed() {
         v.as_secs_f64() / r.as_secs_f64()
     );
 }
+
+/// The machine code of `@vesper-std/cpu`'s functions (audit gap G4,
+/// src/ffi_lowering/cpu.rs) against packages/vesper-ffi-lowering/src/cpu.ves:
+/// `code_for` of every function, an unknown `vstd_cpu_` symbol and a plain
+/// one, for an x86_64, an AArch64 and a RISC-V target: the same
+/// architecture, bytes and error message.
+#[test]
+fn cpu_code_matches_rust() {
+    use target_lexicon::{Aarch64Architecture, Architecture, Riscv64Architecture};
+    use vesper::ffi_lowering::cpu;
+    let entry = compile("ffi_cpu_code", false);
+    let names = [
+        "cpuid", "rdtsc", "rdpmc", "rdrand64", "rdpkru", "wrpkru", "lfence", "mfence", "sfence",
+        "cntvct", "pmccntr", "pmevcntr", "rndr", "isb", "dmb_ish", "dsb_sy", "rdpor", "wrpor",
+        "nope", "", "isbx",
+    ];
+    let mut symbols: Vec<String> = names
+        .iter()
+        .map(|n| format!("{}{n}", cpu::PREFIX))
+        .collect();
+    symbols.extend(["getpid".into(), "vstd_cp".into(), "isb".into()]);
+    let targets = [
+        (0u8, Architecture::X86_64),
+        (1, Architecture::Aarch64(Aarch64Architecture::Aarch64)),
+        (2, Architecture::Riscv64(Riscv64Architecture::Riscv64gc)),
+    ];
+    let mut checked = 0;
+    for (code, arch) in targets {
+        let name = arch.to_string();
+        for symbol in &symbols {
+            let mut input = vec![code, name.len() as u8];
+            input.extend(name.as_bytes());
+            input.extend(symbol.as_bytes());
+            let out = entry.words(&input);
+            let n = out[1] as usize;
+            let bytes: Vec<u8> = out[2..2 + n].iter().map(|b| *b as u8).collect();
+            let m = out[2 + n] as usize;
+            let error: Vec<u8> = out[3 + n..3 + n + m].iter().map(|b| *b as u8).collect();
+            let vesper = match (out[0], error.is_empty()) {
+                (0, _) => Ok(Some((cpu::Arch::X86_64, bytes))),
+                (1, _) => Ok(Some((cpu::Arch::Aarch64, bytes))),
+                (_, true) => Ok(None),
+                (_, false) => Err(String::from_utf8(error).unwrap()),
+            };
+            assert_eq!(cpu::code_for(symbol, arch), vesper, "{symbol} on {name}");
+            checked += 1;
+        }
+    }
+    eprintln!("cpu: {checked} symbol and target pairs equal");
+}

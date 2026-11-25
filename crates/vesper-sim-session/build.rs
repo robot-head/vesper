@@ -78,4 +78,10 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
         "        if (has_last && last == at) || crash != expect_crash {\n            return (false, 0);\n        }",
         "        if false {\n            return (false, 0);\n        }",
     ),
+    // warp_bounds: refuses every ingress datagram at the admit budget check.
+    (
+        "warp_bounds",
+        "    wrapping_add(in_flight, egress_in_flight) < max_in_flight",
+        "    false",
+    ),
 ];

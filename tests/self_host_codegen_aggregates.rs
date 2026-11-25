@@ -19,7 +19,9 @@
 //!   `fip::seq_drop_plan`, `replace_drops` and `temporary_drops`;
 //! - `scalar_enums` (#1330): the small enum values and locals kept as
 //!   words, the values of their words, and the calls and returns that pass
-//!   them as words.
+//!   them as words;
+//! - and the graph `scalar_enums` rewrites with those words
+//!   ([`rewrite_matches_rust`]).
 //!
 //! The input is `@vesper/place-ir`'s (tests/common/ir_words.rs) followed by
 //! [`facts`]: what the decisions read from the checker's `World` that
@@ -355,6 +357,61 @@ fn decisions_match_rust() {
     assert_eq!(bad, 0);
 }
 
+/// The scalar-enum rewrite (#1330): every graph the native path plans,
+/// rewritten by the package's `scalar_enum_rewrite` entry, against the
+/// graph `scalar_enums` returns (`aggregate_decisions::scalar_enum_rewrite`),
+/// `Debug`-equal function by function. The entry's output is the indices
+/// of the wide-integer graphs it leaves to Rust, then the program.
+#[test]
+fn rewrite_matches_rust() {
+    let entry = package().entry("scalar_enum_rewrite", true);
+    let (mut bad, mut skipped, mut rewritten, mut functions) = (0, 0, 0, 0);
+    for c in prepared() {
+        let Some((mut bytes, pool)) = ir_words::program_input(c.world, &c.program) else {
+            skipped += 1;
+            continue;
+        };
+        bytes.extend(facts(c.world, &c.program));
+        let out = entry.words(&bytes);
+        let nw = out[0] as usize;
+        let wide: BTreeSet<usize> = out[1..1 + nw].iter().map(|x| *x as usize).collect();
+        let theirs = ir_words::decode_program(&out[1 + nw..], &pool);
+        for (i, (name, f)) in c.program.functions.iter().enumerate() {
+            if wide.contains(&i) || c.world.functions.get(name).is_some_and(|src| src.fip) {
+                continue;
+            }
+            functions += 1;
+            let ours = vesper::native::aggregate_decisions::scalar_enum_rewrite(c.world, f);
+            rewritten += ours.is_some() as usize;
+            let ours = ours.unwrap_or_else(|| f.clone());
+            let Some(g) = theirs.functions.get(name) else {
+                bad += 1;
+                eprintln!("rewrite: {} {name}: missing", c.name);
+                continue;
+            };
+            let (a, b) = (format!("{ours:#?}"), format!("{g:#?}"));
+            if a != b {
+                bad += 1;
+                if bad <= 8 {
+                    let line = a
+                        .lines()
+                        .zip(b.lines())
+                        .enumerate()
+                        .find(|(_, (x, y))| x != y)
+                        .map(|(i, (x, y))| format!("line {i}:\n    rust:   {x}\n    vesper: {y}"))
+                        .unwrap_or_else(|| "lengths differ".into());
+                    eprintln!("rewrite: {} {name} differs at {line}", c.name);
+                }
+            }
+        }
+    }
+    eprintln!(
+        "rewrite: {bad} of {functions} graphs differ ({rewritten} rewritten), {skipped} worlds not encodable"
+    );
+    assert!(rewritten > 0, "no graph was rewritten");
+    assert_eq!(bad, 0);
+}
+
 /// The cost of the decisions over the corpus, best of 5: Rust's decision
 /// functions, the input's encoding, and the package's entry (decoding the
 /// input, the decisions and the text).
@@ -389,6 +446,47 @@ fn decisions_cost() {
     });
     eprintln!(
         "decisions cost over {} worlds: Rust {rust:?}, encode {encode:?}, Vesper {vesper:?} ({:.2}x)",
+        inputs.len(),
+        vesper.as_secs_f64() / rust.as_secs_f64()
+    );
+}
+
+/// The cost of the scalar-enum rewrite over the corpus, best of 5: Rust's
+/// `scalar_enums` of every graph the native path plans, and the package's
+/// `scalar_enum_rewrite` entry (decoding the input, the decisions, the
+/// rewrite and the program's words); the input's encoding and the words'
+/// decoding are timed apart.
+#[test]
+#[ignore = "timing; CHECK_HARNESS_SPEED=1"]
+fn rewrite_cost() {
+    if !speed() {
+        return;
+    }
+    let entry = package().entry("scalar_enum_rewrite", true);
+    let inputs: Vec<(&Prepared, Vec<u8>)> = prepared()
+        .iter()
+        .filter_map(|c| Some((c, input(c)?)))
+        .collect();
+    let best = |f: &mut dyn FnMut()| (0..5).map(|_| time(&mut *f)).min().unwrap();
+    let rust = best(&mut || {
+        for (c, _) in &inputs {
+            for (name, f) in &c.program.functions {
+                if c.world.functions.get(name).is_some_and(|src| src.fip) {
+                    continue;
+                }
+                std::hint::black_box(vesper::native::aggregate_decisions::scalar_enum_rewrite(
+                    c.world, f,
+                ));
+            }
+        }
+    });
+    let vesper = best(&mut || {
+        for (_, bytes) in &inputs {
+            std::hint::black_box(entry.words(bytes));
+        }
+    });
+    eprintln!(
+        "rewrite cost over {} worlds: Rust {rust:?}, Vesper {vesper:?} ({:.2}x)",
         inputs.len(),
         vesper.as_secs_f64() / rust.as_secs_f64()
     );

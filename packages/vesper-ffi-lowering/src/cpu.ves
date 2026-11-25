@@ -1,0 +1,247 @@
+// The CPU instructions Cranelift has no instruction for (audit gap G4,
+// src/ffi_lowering/cpu.rs): the functions of `@vesper-std/cpu`'s `.vsys`
+// library `StdCpu`. No library provides their symbols; the native backend
+// defines each `vstd_cpu_*` function it calls as a local leaf function of
+// the machine code below. A function of the other architecture is a
+// compile error.
+//
+// The x86_64 functions use the System V convention on every operating
+// system (argument in `edi`/`rdi`, result in `rax`); the AArch64 ones take
+// `w0`/`x0` and return `x0`.
+
+// The architecture of a function's code (`cpu::Arch`).
+pub const ARCH_X86_64: u64 = 0;
+pub const ARCH_AARCH64: u64 = 1;
+// No architecture: the symbol is not a CPU function.
+pub const ARCH_NONE: u64 = 2;
+
+// AArch64 instruction words.
+const ISB: u64 = 0xd5033fdf;
+// `dmb ish`
+const DMB_ISH: u64 = 0xd5033bbf;
+// `dsb sy`
+const DSB_SY: u64 = 0xd5033f9f;
+// `mrs x0, por_el0` (S3_3_C10_C2_4, FEAT_S1POE)
+const MRS_POR: u64 = 0xd53ba280;
+// `msr por_el0, x0`
+const MSR_POR: u64 = 0xd51ba280;
+const RET: u64 = 0xd65f03c0;
+// `mrs x0, cntvct_el0`
+const MRS_CNTVCT: u64 = 0xd53be040;
+// `mrs x0, pmccntr_el0`
+const MRS_PMCCNTR: u64 = 0xd53b9d00;
+// `mov w0, w0` (zero the upper word of the index)
+const MOV_W0_W0: u64 = 0x2a0003e0;
+// `msr pmselr_el0, x0`
+const MSR_PMSELR: u64 = 0xd51b9ca0;
+// `mrs x0, pmxevcntr_el0`
+const MRS_PMXEVCNTR: u64 = 0xd53b9d40;
+// `mrs x1, rndr` (NZCV is 0b0100 when no word was ready)
+const MRS_RNDR_X1: u64 = 0xd53b2401;
+// `str x1, [x0]`
+const STR_X1_X0: u64 = 0xf9000001;
+// `cset w0, ne`
+const CSET_W0_NE: u64 = 0x1a9f07e0;
+
+// The length of `vstd_cpu_`, the prefix of the symbols this module
+// defines (`cpu::PREFIX`).
+const PREFIX_LEN: u64 = 9;
+
+fn at(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Whether `b[a..]` is `text`.
+fn rest_is(in b: Slice[u8], a: u64, in text: Str) -> bool {
+    let t = text.as_bytes();
+    if wrapping_sub(b.len(), a) != t.len() || a > b.len() {
+        return false;
+    }
+    for i in 0..t.len() {
+        if at(in b, wrapping_add(a, i)) != at(in t, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether `b` starts with `vstd_cpu_`.
+pub fn has_prefix(in b: Slice[u8]) -> bool {
+    let text = "vstd_cpu_";
+    let p = text.as_bytes();
+    if b.len() < p.len() {
+        return false;
+    }
+    for i in 0..p.len() {
+        if at(in b, i) != at(in p, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn hex_digit(c: u8) -> u8 {
+    if c >= 97 {
+        wrapping_u8(wrapping_add(wrapping_sub(widen_u64(c), 97), 10))
+    } else {
+        wrapping_u8(wrapping_sub(widen_u64(c), 48))
+    }
+}
+
+// The bytes written as hex pairs in `text`.
+fn hex(inout o: ChunkSeq[u8], in text: Str) {
+    let t = text.as_bytes();
+    let mut i: u64 = 0;
+    loop {
+        if wrapping_add(i, 1) >= t.len() {
+            break;
+        }
+        let hi = hex_digit(at(in t, i));
+        let lo = hex_digit(at(in t, wrapping_add(i, 1)));
+        o.push(wrapping_u8(wrapping_add(widen_u64(hi) << 4, widen_u64(lo))));
+        i = wrapping_add(i, 2);
+    }
+}
+
+// An AArch64 instruction word, little-endian.
+fn word(inout o: ChunkSeq[u8], x: u64) {
+    o.push(wrapping_u8(x & 255));
+    o.push(wrapping_u8((x >> 8) & 255));
+    o.push(wrapping_u8((x >> 16) & 255));
+    o.push(wrapping_u8((x >> 24) & 255));
+}
+
+// The architecture and machine code of `symbol` (`cpu::function`): the
+// code is appended to `code`; ARCH_NONE when it is not one of this
+// module's functions.
+pub fn cpu_function(in symbol: Slice[u8], inout code: ChunkSeq[u8]) -> u64 {
+    if !has_prefix(in symbol) {
+        return ARCH_NONE;
+    }
+    let a = PREFIX_LEN;
+    if rest_is(in symbol, a, "cpuid") {
+        // mov r8, rdx; mov r9, rbx; mov eax, edi; mov ecx, esi; cpuid;
+        // mov [r8], eax; mov [r8+4], ebx; mov [r8+8], ecx;
+        // mov [r8+12], edx; mov rbx, r9; ret. `cpuid` clobbers the
+        // callee-saved `rbx`, kept in the volatile `r9`.
+        hex(inout code, "4989d04989d989f889f10fa241890041895804418948084189500c4c89cbc3");
+        return ARCH_X86_64;
+    }
+    if rest_is(in symbol, a, "rdtsc") {
+        // lfence; rdtsc; shl rdx, 32; or rax, rdx; ret
+        hex(inout code, "0faee80f3148c1e2204809d0c3");
+        return ARCH_X86_64;
+    }
+    if rest_is(in symbol, a, "rdpmc") {
+        // mov ecx, edi; lfence; rdpmc; lfence; shl rdx, 32; or rax, rdx; ret
+        hex(inout code, "89f90faee80f330faee848c1e2204809d0c3");
+        return ARCH_X86_64;
+    }
+    if rest_is(in symbol, a, "rdrand64") {
+        // rdrand rax; setc cl; mov [rdi], rax; movzx eax, cl; ret
+        hex(inout code, "480fc7f00f92c14889070fb6c1c3");
+        return ARCH_X86_64;
+    }
+    if rest_is(in symbol, a, "rdpkru") {
+        // xor ecx, ecx; rdpkru; ret
+        hex(inout code, "31c90f01eec3");
+        return ARCH_X86_64;
+    }
+    if rest_is(in symbol, a, "wrpkru") {
+        // mov eax, edi; xor ecx, ecx; xor edx, edx; wrpkru; ret
+        hex(inout code, "89f831c931d20f01efc3");
+        return ARCH_X86_64;
+    }
+    if rest_is(in symbol, a, "lfence") {
+        hex(inout code, "0faee8c3");
+        return ARCH_X86_64;
+    }
+    if rest_is(in symbol, a, "mfence") {
+        hex(inout code, "0faef0c3");
+        return ARCH_X86_64;
+    }
+    if rest_is(in symbol, a, "sfence") {
+        hex(inout code, "0faef8c3");
+        return ARCH_X86_64;
+    }
+    if rest_is(in symbol, a, "isb") {
+        word(inout code, ISB);
+    } else if rest_is(in symbol, a, "dmb_ish") {
+        word(inout code, DMB_ISH);
+    } else if rest_is(in symbol, a, "dsb_sy") {
+        word(inout code, DSB_SY);
+    } else if rest_is(in symbol, a, "rdpor") {
+        word(inout code, MRS_POR);
+    } else if rest_is(in symbol, a, "wrpor") {
+        word(inout code, MSR_POR);
+        word(inout code, ISB);
+    } else if rest_is(in symbol, a, "cntvct") {
+        word(inout code, ISB);
+        word(inout code, MRS_CNTVCT);
+    } else if rest_is(in symbol, a, "pmccntr") {
+        word(inout code, ISB);
+        word(inout code, MRS_PMCCNTR);
+        word(inout code, ISB);
+    } else if rest_is(in symbol, a, "pmevcntr") {
+        word(inout code, MOV_W0_W0);
+        word(inout code, MSR_PMSELR);
+        word(inout code, ISB);
+        word(inout code, MRS_PMXEVCNTR);
+        word(inout code, ISB);
+    } else if rest_is(in symbol, a, "rndr") {
+        word(inout code, MRS_RNDR_X1);
+        word(inout code, STR_X1_X0);
+        word(inout code, CSET_W0_NE);
+    } else {
+        return ARCH_NONE;
+    }
+    word(inout code, RET);
+    ARCH_AARCH64
+}
+
+fn put(inout o: ChunkSeq[u8], in s: Slice[u8]) {
+    for i in 0..s.len() {
+        o.push(at(in s, i));
+    }
+}
+
+// `cpu::code_for`: the code of `symbol` for a target whose architecture
+// is `target` (ARCH_X86_64, ARCH_AARCH64, or ARCH_NONE for another, named
+// `target_name`). The architecture and code, appended to `code`; ARCH_NONE
+// when it is not a CPU function. An error (a `vstd_cpu_` symbol that is not
+// one, or one of another architecture) appends its message to `error`.
+pub fn code_for(
+    in symbol: Slice[u8],
+    target: u64,
+    in target_name: Slice[u8],
+    inout code: ChunkSeq[u8],
+    inout error: ChunkSeq[u8]
+) -> u64 {
+    let want = cpu_function(in symbol, inout code);
+    if want == ARCH_NONE {
+        if has_prefix(in symbol) {
+            error.push(39);
+            put(inout error, in symbol);
+            put(inout error, in "' is not a @vesper-std/cpu function".as_bytes());
+        }
+        return ARCH_NONE;
+    }
+    if target != want {
+        code.clear();
+        error.push(39);
+        put(inout error, in symbol);
+        put(inout error, in "' is an ".as_bytes());
+        if want == ARCH_X86_64 {
+            put(inout error, in "x86_64".as_bytes());
+        } else {
+            put(inout error, in "aarch64".as_bytes());
+        }
+        put(inout error, in " instruction; this target is ".as_bytes());
+        put(inout error, in target_name);
+        return ARCH_NONE;
+    }
+    want
+}

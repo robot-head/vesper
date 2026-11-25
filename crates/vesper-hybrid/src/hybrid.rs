@@ -78,6 +78,11 @@ mod codegen_walk_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/codegen_drops.rs"]
+mod codegen_drops_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/codegen_numeric.rs"]
 mod codegen_numeric_binding;
 
@@ -211,6 +216,10 @@ mod stack_words;
 // shared with the root package's tests/self_host_test_runner.rs.
 #[path = "../../../tests/common/test_runner_words.rs"]
 mod test_runner_words;
+// The doctest extraction words (SH5 lane 14 part 2), shared with the root
+// package's tests/self_host_doctest_extract.rs.
+#[path = "../../../tests/common/doctest_extract_words.rs"]
+mod doctest_extract_words;
 
 // The inliner swap's encoder and decoder (#1250), shared with the root
 // package's tests/self_host_ir_inline.rs.
@@ -268,6 +277,9 @@ static STACK_BOUND_CALLS: AtomicU64 = AtomicU64::new(0);
 /// `aggregate` requests the Vesper codegen module emitted, and declined.
 static CODEGEN_CALLS: AtomicU64 = AtomicU64::new(0);
 static CODEGEN_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// `drops` requests (`DROP_BOX`) the Vesper module emitted, and declined.
+static DROPS_CALLS: AtomicU64 = AtomicU64::new(0);
+static DROPS_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// `call` requests the Vesper codegen_calls module emitted, and declined.
 static CALLS_EMITTED: AtomicU64 = AtomicU64::new(0);
 static CALLS_DECLINED: AtomicU64 = AtomicU64::new(0);
@@ -1383,6 +1395,17 @@ fn vesper_ffi(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, Str
     )
 }
 
+/// The `drops` hook of `vesper::codegen_swap` from `modules/codegen_drops` (#1282).
+fn vesper_drops(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, String> {
+    lend_codegen_op(
+        lent,
+        "drops",
+        codegen_drops_binding::drops,
+        &DROPS_CALLS,
+        &DROPS_DECLINED,
+    )
+}
+
 /// `scalar_hook`'s request numbers past the plan's (1-10) for the typed
 /// requests of `codegen_swap::scalar` (@vesper/codegen-scalar-emit).
 fn scalar_request(op: u32) -> Option<u32> {
@@ -1623,6 +1646,25 @@ const VESPER_TEST_DISCOVERY: vesper::test_discovery::TestDiscoveryTable =
         },
     };
 
+/// `vesper::doctest_extract::DocTestExtractTable` from `modules/test_runner`:
+/// the doctest fence extraction and token preflight of `@vesper/test-runner`.
+const VESPER_DOCTEST_EXTRACT: vesper::doctest_extract::DocTestExtractTable =
+    vesper::doctest_extract::DocTestExtractTable {
+        preflight: |source, limits| {
+            let input = doctest_extract_words::preflight_input(source, limits);
+            doctest_extract_words::decode_preflight(&test_runner_binding::doctest_preflight_words(
+                &input,
+            ))
+        },
+        extract: |source, limits| {
+            let input = doctest_extract_words::extract_input(source, limits);
+            doctest_extract_words::decode_extract(
+                source,
+                &test_runner_binding::doctest_extract_words(&input),
+            )
+        },
+    };
+
 /// `ir_swap`'s `inline` hook from `modules/ir_inline`: the inliner of
 /// `@vesper/ir-inline`. The package decides and splices; the hook encodes
 /// the world's answers and the program, and reads the report and the
@@ -1846,6 +1888,8 @@ extern "C" fn install() {
     }
     let hooks = vesper::codegen_swap::CodegenHooks {
         aggregate: Some(vesper_aggregate),
+        drops: (!std::env::var_os("VESPER_HYBRID_DROPS").is_some_and(|v| v == "0"))
+            .then_some(vesper_drops as vesper::codegen_swap::Hook),
         call: Some(vesper_call),
         wasm: Some(vesper_wasm),
         ebpf: (!std::env::var_os("VESPER_HYBRID_EBPF").is_some_and(|v| v == "0"))
@@ -1871,12 +1915,14 @@ extern "C" fn install() {
         export: Some(vesper_export),
         plan: Some(vesper_plan),
         interface_json: Some(vesper_interface_json),
-        ..Default::default()
     };
     if vesper::codegen_swap::install(hooks).is_err() {
         std::process::abort();
     }
     if vesper::test_discovery::install_test_discovery(VESPER_TEST_DISCOVERY).is_err() {
+        std::process::abort();
+    }
+    if vesper::doctest_extract::install_doctest_extract(VESPER_DOCTEST_EXTRACT).is_err() {
         std::process::abort();
     }
     if vesper::ir_swap::install(VESPER_IR_PASSES).is_err() {
@@ -1957,6 +2003,11 @@ extern "C" fn report() {
         "vesper-hybrid: codegen emitted {} aggregate requests from Vesper ({} declined)",
         CODEGEN_CALLS.load(Relaxed),
         CODEGEN_DECLINED.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: codegen emitted {} drops requests from Vesper ({} declined)",
+        DROPS_CALLS.load(Relaxed),
+        DROPS_DECLINED.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: codegen_calls emitted {} calls from Vesper ({} declined)",

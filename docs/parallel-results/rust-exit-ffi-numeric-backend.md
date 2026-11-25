@@ -17,7 +17,9 @@ these families decline nothing.
 | Change | Differential | Rust lines | PR |
 |---|---|--:|---|
 | `src/native_handlers` deleted (owner's choice, 2026-11-24) | n/a (dead code: no command reached it) | -2,293 now | #1836 |
-| `scalar_enums` decisions (#1330) ported to `@vesper/codegen-aggregates` | 0 of 354 corpus worlds differ (52,690 graphs; 15,563 enum values, 116 locals, 11,064 calls and 271 returns kept as words) | 0 now (goes at the retirement) | this PR |
+| `scalar_enums` decisions (#1330) ported to `@vesper/codegen-aggregates` | 0 of 354 corpus worlds differ (52,690 graphs; 15,563 enum values, 116 locals, 11,064 calls and 271 returns kept as words) | 0 now (goes at the retirement) | #1854 |
+| `scalar_enums` graph rewrite ported (`scalar_enum_rewrite`) | 0 of 54,236 graphs differ, 2,347 of them rewritten (`Debug`-equal `FunctionIr`) | 0 now (goes at the retirement) | this PR |
+| `ffi_lowering/cpu.rs` machine-code tables ported (`@vesper/ffi-lowering` `cpu.ves`) | 0 of 72 symbol and target pairs differ (every function, unknown and plain symbols, x86_64, AArch64, RISC-V) | 0 now (goes at the retirement) | this PR |
 
 ### `native_handlers`: deleted
 
@@ -69,10 +71,43 @@ Found on the way: an inlined graph can repeat a call's destination value,
 so the Vesper side prints each `enumcall`/`enumret` value once, as Rust's
 map does.
 
-Not ported yet: the graph rewrite itself (the new `FunctionIr` with tag and
-field words, `$wordN` locals and literal match arms). It is mechanical once
-the decisions are known; it needs `@vesper/place-ir` rows built in Vesper,
-as the inliner and bounds hoisting do.
+### The scalar-enum rewrite
+
+`rewrite_scalar_enums` makes the graph `scalar_enums` returns on the
+`@vesper/place-ir` tables, from the decisions above (`scalar_plan`): a kept
+constructor becomes the constants of its tag and of the words its variant
+leaves unused, a read of a kept local reads its `$wordN` locals, a binding
+binds the words (a unit when it binds none), block parameters and jump
+arguments carry the words, and a `match` on a kept value tests its tag word
+with literal arms. The tables only grow, as in bounds hoisting: the function
+row points at a new header (the value table gains the fresh words and
+bindings, the locals table the `$wordN` locals) and new blocks, and an
+instruction that stays keeps its operand words. The entry writes the indices
+of the wide-integer graphs it leaves to Rust, then the program
+(`put_program`); `rewrite_matches_rust` decodes it and compares every other
+graph with `aggregate_decisions::scalar_enum_rewrite` (the real
+`scalar_enums(..).f`), `Debug` for `Debug`.
+
+Cost (`rewrite_cost`, `CHECK_HARNESS_SPEED=1`, release, every 4th corpus
+world, best of 5): over 90 worlds, Rust's `scalar_enums` of every planned
+graph 1.69 s, the Vesper entry 1.56 s, **0.92x**. The Vesper time includes
+what Rust does not do here: decoding the input, every graph's decisions and
+writing the whole program back as words. This is the pass alone, on a
+4-core cloud host, not an ABBA of the whole compile.
+
+The emission side of scalar enums (`enum_words` and the split-local reads and
+writes in `Codegen`) stays with the native walk (#1509), like the rest of
+the instruction walk.
+
+### CPU instruction tables
+
+`cpu.ves` holds the machine code of `@vesper-std/cpu`'s functions
+(`cpu::function`) and `code_for`'s architecture check, with its error
+messages. `cpu_code_matches_rust` (tests/self_host_ffi_lowering.rs) runs
+`code_for` on both sides for every function, an unknown `vstd_cpu_` symbol
+and a plain symbol, on x86_64, AArch64 and RISC-V targets. The callee
+declaration that uses it is still Rust's (`foreign_perform` keeps the
+callee's declaration; the hook emits the rest).
 
 ## Hybrid swap coverage
 
@@ -105,9 +140,9 @@ side stands:
 | `ffi_lowering/native.rs` | 2,555 | `@vesper/ffi-emit` (every step swapped) | the walk's orchestration (native walk port, #1509) |
 | `ffi_lowering/drops.rs` | 533 | `@vesper/ffi-drops` | |
 | `ffi_lowering/buffers.rs` | 523 | none | the foreign-memory check pass (§16.3 pinned buffers) |
-| `ffi_lowering/cpu.rs` | 99 | none | the `vstd_cpu_*` machine-code tables (G4) |
+| `ffi_lowering/cpu.rs` | 99 | `@vesper/ffi-lowering` `cpu.ves` (0 diffs) | the call that picks it in `foreign_perform` |
 | `ffi_lowering/eval_host.rs` | 596 | none | the evaluator's foreign-call host (`vesper run`) |
-| `src/native_aggregates.rs` | 1,746 | `@vesper/codegen-aggregates` (decisions, now with scalar enums), `@vesper/codegen-base` and `@vesper/codegen-aggregates-emit` (emission) | the scalar-enum graph rewrite, `enum_words`, the split-local reads and writes |
+| `src/native_aggregates.rs` | 1,746 | `@vesper/codegen-aggregates` (decisions and the scalar-enum rewrite), `@vesper/codegen-base` and `@vesper/codegen-aggregates-emit` (emission) | `enum_words` and the split-local reads and writes (the native walk, #1509) |
 | `src/native_session.rs` | 1,478 | `codegen-control/session.ves` (plans), `codegen-control-emit` (ops 38-42) | `copy_bytes`/`store_constructor`, the session object and entry symbol glue |
 | `src/tiled.rs`, `tiled/native.rs`, `tiled/aot_runtime.rs` | 468 + 612 + 697 | `@vesper/codegen-numeric` (`tiled.ves`, `tiled_ops.ves`, AOT runtime) | |
 | `tiled/check.rs`, `src/vector/check.rs` | 577 + 441 | `@vesper/check-regions-seqs` (`tiled.ves`, `vector.ves`) | |
@@ -119,5 +154,7 @@ side stands:
 ## Checks
 
 - `CODEGEN_AGGREGATES_STEP=1 cargo +1.100.0 test --locked --release -p vesper --test self_host_codegen_aggregates`: 2 passed; `decisions: 0 of 354 worlds differ, 0 not encodable, 52690 functions, 1983283 lines` (265 wide-integer graphs left to Rust, as before)
-- `vesper check` and `vesper fmt --check` on `packages/vesper-codegen-aggregates`, `packages/vesper-codegen-control`.
+- `CODEGEN_AGGREGATES_STEP=1 ... --test self_host_codegen_aggregates rewrite_matches_rust`: `rewrite: 0 of 54236 graphs differ (2347 rewritten), 0 worlds not encodable`
+- `cargo +1.100.0 test --locked --release -p vesper --test self_host_ffi_lowering cpu_code_matches_rust`: `cpu: 72 symbol and target pairs equal`
+- `vesper check` and `vesper fmt --check` on `packages/vesper-codegen-aggregates`, `packages/vesper-codegen-control`, `packages/vesper-ffi-lowering`.
 - `cargo +1.100.0 clippy --locked -p vesper --lib --test self_host_codegen_aggregates -- -D warnings`, `rustfmt +1.100.0 --edition 2024 --check` on changed files, `tools/bazel/sync_build_files.py --check`.

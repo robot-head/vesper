@@ -401,7 +401,7 @@ pub fn extract_structured_functions(in input: Str) -> ChunkSeq[u64] {
             b.failed = false;
             b.err.clear();
             b.quiet = 0;
-            if taken || f.polymorphic {
+            if taken {
                 status.push(ST_NONE);
                 starts.push(0);
                 ends.push(0);
