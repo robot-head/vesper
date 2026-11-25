@@ -53,7 +53,7 @@ class AspectTaskTests(unittest.TestCase):
         self.write(path, (ROOT / path).read_text())
 
     def test_script_task_preserves_argv_cwd_environment_and_standard_streams(self):
-        self.write("scripts/ci/platform_test_plan.py", """\
+        self.write("scripts/ci/merge_gate.py", """\
 import json
 import os
 from pathlib import Path
@@ -68,7 +68,7 @@ print("child stderr", file=sys.stderr)
 """)
         args = ["--help", "", "two words", "$HOME", "*.py", "--", "line\nbreak"]
         result = self.aspect(
-            "ci", "platform-test-plan", "--", *args,
+            "ci", "merge-gate", "--", *args,
             stdin="input with spaces\n", env={"VESPER_TASK_TEST_VALUE": "value with spaces"},
         )
         self.assertEqual(json.loads(result.stdout), {
@@ -860,6 +860,124 @@ else:
                 self.assertEqual(order.read_text().splitlines(), ["emit", "assemble", "link", "emulate"])
                 self.assertFalse(Path((self.root / "scratch").read_text()).exists())
                 self.assertEqual("9600 scalar-reference comparisons passed" in result.stdout, status == 0)
+
+    def test_platform_plan_binds_the_checkout_and_preserves_exact_git_paths(self):
+        def git(*arguments):
+            return subprocess.check_output(["git", *arguments], cwd=self.root, text=True, stderr=subprocess.DEVNULL).strip()
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.name", "Fixture")
+        git("config", "user.email", "fixture@example.invalid")
+        git("config", "commit.gpgsign", "false")
+        self.write("scripts/ci/platform_test_profiles.json", json.dumps({
+            "version": 1, "shared_paths": ["Cargo.*"],
+            "groups": {"frontend": {"paths": ["src/native*"]}, "proof": {"paths": ["lean/**"]}},
+            "deferred_targets": [{"package": "vesper", "target": "suite", "bazel": "//:test/suite",
+                                  "group": "proof", "source": "tests/suite.rs", "skip_tests": ["slow"]}],
+        }))
+        self.write("tests/suite.rs", "#[test]\n#[cfg(unix)]\nfn slow() {}\n#[test]\nfn fast() {}\n")
+        git("add", ".")
+        git("commit", "-qm", "base")
+        base = git("rev-parse", "HEAD")
+        command = ("ci", "platform-test-plan", "--", "plan")
+        empty = json.loads(self.aspect(*command, "--profile=pr", "--base", base, "--head", base).stdout)
+        self.assertEqual(empty["groups"], [])
+        self.assertEqual(empty["changed_paths"], [])
+        branch_path = "src/native part λ\nodd.rs"
+        git("switch", "-qc", "feature")
+        self.write(branch_path, "fixture\n")
+        git("add", "src")
+        git("commit", "-qm", "feature")
+        feature = git("rev-parse", "HEAD")
+        body = json.loads(self.aspect(*command, "--profile", "pr", "--head", feature, "--base", base).stdout)
+        self.assertEqual(body, {"profile": "pr", "groups": ["frontend"], "sha": feature,
+                                "reason": "groups selected from changed paths", "changed_paths": [branch_path]})
+        for unavailable in ("", "f" * 40, "bad-ref"):
+            result = json.loads(self.aspect(*command, "--profile", "pr", "--head", feature, "--base", unavailable).stdout)
+            self.assertEqual(result["groups"], ["frontend", "proof"])
+            self.assertEqual(result["reason"], "base unavailable; full coverage selected")
+        invalid = self.aspect(*command, "--profile", "full", "--head", "HEAD", status=2)
+        self.assertIn("full 40-hex SHA", invalid.stderr)
+        unavailable = self.aspect(*command, "--profile", "full", "--head", "f" * 40, status=2)
+        self.assertIn("commit unavailable", unavailable.stderr)
+        wrong_sha = self.aspect(*command, "--profile", "full", "--head", base, status=2)
+        self.assertIn("checked-out commit", wrong_sha.stderr)
+        self.aspect(*command, "--profile", "quick", "--head", feature, status=2)
+        self.aspect(*command, "--profile", "full", "--head", status=2)
+        self.aspect("ci", "verify-platform-dispatch", env={"PR_HEAD": feature})
+        self.aspect("ci", "verify-platform-checkout", env={"EXPECTED_SHA": feature})
+        self.aspect("ci", "verify-platform-checkout", env={"EXPECTED_SHA": base}, status=2)
+        self.aspect("ci", "verify-platform-checkout", env={"EXPECTED_SHA": ""}, status=2)
+        rejected = self.aspect("ci", "verify-platform-dispatch", env={"PR_HEAD": base}, status=2)
+        self.assertIn("neither the dispatched PR head nor its test merge", rejected.stderr)
+        self.aspect("ci", "verify-platform-dispatch", env={"PR_HEAD": ""}, status=2)
+        git("switch", "-q", "main")
+        git("merge", "--no-ff", "-qm", "test merge", "feature")
+        self.aspect("ci", "verify-platform-dispatch", env={"PR_HEAD": feature})
+        head = git("rev-parse", "HEAD")
+        github = self.write("github output", "earlier=preserved\n")
+        output = self.root / "runner temp"
+        result = self.aspect("ci", "plan-platform-workflow", env={
+            "GITHUB_OUTPUT": str(github), "RUNNER_TEMP": str(output), "REQUESTED_PROFILE": "pr", "BASE_SHA": base,
+        })
+        self.assertEqual(json.loads(result.stdout), json.loads((output / "platform-plan.json").read_text()))
+        self.assertEqual(json.loads(result.stdout)["sha"], head)
+        self.assertEqual(github.read_text(), f'earlier=preserved\nprofile=pr\ngroups=["frontend"]\nsha={head}\n')
+        self.aspect("ci", "plan-platform-workflow", env={"GITHUB_OUTPUT": "", "RUNNER_TEMP": str(output)}, status=2)
+
+        git("switch", "--orphan", "unrelated")
+        git("commit", "--allow-empty", "-qm", "unrelated root")
+        unrelated = git("rev-parse", "HEAD")
+        git("switch", "-q", "main")
+        result = json.loads(self.aspect(*command, "--profile", "pr", "--head", head, "--base", unrelated).stdout)
+        self.assertEqual(result["reason"], "diff unavailable; full coverage selected")
+        self.assertEqual(result["groups"], ["frontend", "proof"])
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell unavailable")
+    def test_windows_platform_checkout_checks_the_exact_commit_from_any_directory(self):
+        script = "scripts/windows/verify-platform-checkout.ps1"
+        self.copy_fixture(script)
+        def git(*args):
+            return subprocess.check_output(["git", *args], cwd=self.root, text=True).strip()
+        git("init", "-q")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "base")
+        head = git("rev-parse", "HEAD")
+        self.powershell(script, env={"EXPECTED_SHA": head})
+        mismatch = self.powershell(script, env={"EXPECTED_SHA": "f" * 40}, status=2)
+        self.assertIn(f"found {head}", mismatch.stderr)
+        self.powershell(script, env={"EXPECTED_SHA": ""}, status=2)
+
+    def test_platform_plan_refuses_invalid_or_stale_catalog_entries(self):
+        git = lambda *args: subprocess.check_output(["git", *args], cwd=self.root, text=True).strip()
+        git("init", "-q")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "base")
+        head = git("rev-parse", "HEAD")
+        command = ("ci", "platform-test-plan", "--", "--profile", "full", "--head", head)
+        source = self.write("tests/suite.rs", "#[test]\nfn slow() {}\n#[test]\nfn fast() {}\n")
+        good = {"package": "vesper", "target": "suite", "bazel": "//:test/suite", "group": "proof",
+                "source": "tests/suite.rs", "skip_tests": ["slow"]}
+        policy = {"version": 1, "shared_paths": ["Cargo.lock"], "groups": {"proof": {"paths": ["lean/**"]}},
+                  "deferred_targets": [good]}
+        def reject(message, **overrides):
+            self.write("scripts/ci/platform_test_profiles.json", json.dumps({**policy, **overrides}))
+            output = self.aspect(*command, status=2)
+            self.assertEqual(output.stdout, "")
+            self.assertIn(message, output.stderr)
+        reject("unsupported platform test policy version", version=2)
+        reject("policy needs named escalation groups", groups={})
+        reject("invalid paths for proof", groups={"proof": {"paths": [""]}})
+        reject("invalid shared paths", shared_paths=[1])
+        reject("invalid deferred-target record", deferred_targets=[{}])
+        reject("unknown escalation group", deferred_targets=[{**good, "group": "missing"}])
+        reject("selectors disagree", deferred_targets=[{**good, "bazel": "//:test/other"}])
+        reject("duplicate deferred-target selector", deferred_targets=[good, good])
+        reject("invalid exact test-case selectors", deferred_targets=[{**good, "skip_tests": ["slow", "slow"]}])
+        reject("stale test cases", deferred_targets=[{**good, "skip_tests": ["renamed"]}])
+        reject("partial exclusion leaves no PR tests", deferred_targets=[{**good, "skip_tests": ["slow", "fast"]}])
+        source.unlink()
+        reject("catalog source missing")
 
     def test_native_port_selection_handles_diff_failures_renames_and_workflow_output(self):
         def git(*arguments):
@@ -1957,14 +2075,14 @@ shutil.copy2({str(installer)!r}, Path(directory) / entry)
             ("import os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n", 128 + signal.SIGTERM),
         ):
             with self.subTest(status=status):
-                self.write("scripts/ci/platform_test_plan.py", body)
-                result = self.aspect("ci", "platform-test-plan", status=status)
+                self.write("scripts/ci/merge_gate.py", body)
+                result = self.aspect("ci", "merge-gate", status=status)
                 self.assertEqual(result.stdout, "")
 
     def test_missing_script_has_a_nonzero_status_and_diagnostic(self):
-        result = self.aspect("ci", "platform-test-plan", status=2)
+        result = self.aspect("ci", "merge-gate", status=2)
         self.assertEqual(result.stdout, "")
-        self.assertIn("platform_test_plan.py", result.stderr)
+        self.assertIn("merge_gate.py", result.stderr)
 
     def test_platform_suite_discovers_tests_from_workspace_root(self):
         self.write("scripts/ci/tests/test_platform_fixture.py", """\

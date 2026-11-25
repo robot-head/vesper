@@ -39,6 +39,25 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertIn("== ''", steps["legacy_ports"]["if"])
         self.assertEqual(plan["outputs"]["ports"], "${{ steps.ports.outputs.crates || steps.legacy_ports.outputs.crates }}")
 
+    @unittest.skipUnless(shutil.which("aspect"), "Aspect unavailable")
+    def test_native_platform_catalog_and_path_patterns(self):
+        result = subprocess.run(["aspect", "ci", "tests", "test-plan"], cwd=ROOT, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_platform_workflow_checks_identity_and_plans_before_test_lanes(self):
+        plan = self.platforms["jobs"]["plan"]
+        steps = plan["steps"]
+        native = next(i for i, step in enumerate(steps) if step.get("run") == "aspect ci verify-platform-dispatch")
+        tests = next(i for i, step in enumerate(steps) if step.get("run") == "aspect ci platform-tests")
+        report = next(step for step in steps if step.get("id") == "plan")
+        self.assertLess(native, tests)
+        self.assertEqual(report["run"], "aspect ci plan-platform-workflow")
+        self.assertIn("!= ''", report["if"])
+        self.assertIn("== ''", next(step["if"] for step in steps if step.get("id") == "legacy_plan"))
+        for name in ("sha", "profile", "groups"):
+            self.assertEqual(plan["outputs"][name],
+                             "${{ steps.plan.outputs." + name + " || steps.legacy_plan.outputs." + name + " }}")
+
     @unittest.skipUnless(shutil.which("aspect"), "Aspect CLI unavailable")
     def test_all_repository_scripts_have_discoverable_aspect_tasks(self):
         scripts = subprocess.check_output(
@@ -84,6 +103,12 @@ class PlatformWorkflowTests(unittest.TestCase):
             self.assertTrue(any(s.get("name") == "Verify exact checkout" for s in job["steps"]))
         self.assertEqual(mac["timeout-minutes"], "60")
         self.assertEqual(windows["timeout-minutes"], "120")
+        for job, command in [(mac, "aspect ci verify-platform-checkout"),
+                             (windows, "./scripts/windows/verify-platform-checkout.ps1")]:
+            check = next(s for s in job["steps"] if s.get("name") == "Verify exact checkout")
+            self.assertEqual(check["run"], command)
+            self.assertIn("!= ''", check["if"])
+            self.assertTrue(all("\n" not in step.get("run", "") for step in job["steps"]))
         for job in (mac, windows):
             commands = "\n".join(s.get("run", "") for s in job["steps"])
             self.assertNotIn("--workspace", commands)

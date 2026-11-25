@@ -9,6 +9,7 @@
     "rust-toolchain*",
     "lean-toolchain",
     ".github/**",
+    ".aspect/platform-plan.axl",
     "scripts/ci/**",
     "tools/bazel/**",
     "BUILD.bazel"
