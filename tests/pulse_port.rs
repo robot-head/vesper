@@ -1209,8 +1209,12 @@ fn uring_completion_driver_matches_rust() {
             }
         }
     }
+    // A poll's error is chained only when there is one: completions may
+    // take a different number of polls run to run.
     fn fold(s: &mut State, done: &[Completion<u32>], error: u64) {
-        s.h = mix(s.h, error);
+        if error != 0 {
+            s.h = mix(s.h, error);
+        }
         for c in done {
             let mut x = mix(14695981039346656037, c.id.get());
             x = match &c.result {
@@ -1347,7 +1351,11 @@ fn submitted(s: State, r: Result[RequestId, u32]) -> State {
 }
 
 fn folded(s: State, in p: UringPoll) -> State {
-    let h = mix(s.h, widen_u64(p.error));
+    let h = if p.error != 0 {
+        mix(s.h, widen_u64(p.error))
+    } else {
+        s.h
+    };
     let mut sum = s.sum;
     for k in 0..p.completions.len() {
         let c = match p.completions.try_get(k) {
