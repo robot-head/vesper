@@ -144,7 +144,7 @@ switch ($mode) {
         Invoke-Stage2 $binary $source 'packages/vesper-stage2' $stage3 'main' $precompiled $symbols
         $expected = [IO.File]::ReadAllBytes([IO.Path]::GetFullPath($original, $cwd))
         $actual = [IO.File]::ReadAllBytes($stage3)
-        if (![Linq.Enumerable]::SequenceEqual[byte]($expected, $actual)) {
+        if (![Linq.Enumerable]::SequenceEqual($expected, $actual)) {
             Stop-Stage2 "stage2 fixed-point mismatch: $original differs from $stage3"
         }
         "== Stage 2 fixed-point verified under wasmtime: stage2 == stage3 ($($actual.Length) bytes)"
