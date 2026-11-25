@@ -1,4 +1,4 @@
-//! Bootstrap driver helper used by `bootstrap/run.sh`.
+//! Bootstrap driver helper used by `aspect bootstrap run`.
 //!
 //! - `seed-lock --base-commit C --rustc V --profile P --epoch N --seed-a F --seed-b F
 //!   --objects-a DIR --objects-b DIR --results-a F --results-b F --lean V --cc V --out F`

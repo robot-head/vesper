@@ -126,6 +126,17 @@ class PlatformWorkflowTests(unittest.TestCase):
                 else:
                     self.assertIn(f"{launcher} acceptance test-format-proof", steps)
 
+    def test_bootstrap_workflows_invoke_native_tasks(self):
+        stage1 = workflow("bootstrap-stage1.yml")["jobs"]
+        stage2 = workflow("bootstrap-stage2.yml")["jobs"]["bootstrap"]
+        for job in [*stage1.values(), stage2]:
+            self.assertTrue(all("\n" not in step.get("run", "") for step in job["steps"]))
+        self.assertIn("aspect ci stage1-cross-backend", [step.get("run") for step in stage1["stage1"]["steps"]])
+        self.assertIn("aspect ci install-lean", [step.get("run") for step in stage1["stage0-two-seed"]["steps"]])
+        self.assertIn("aspect ci install-wasmtime", [step.get("run") for step in stage2["steps"]])
+        verified = next(step for step in stage2["steps"] if step.get("run") == "aspect bootstrap stage2 -- which")
+        self.assertEqual(verified["env"]["WASMTIME_BIN"], "${{ runner.temp }}/wasmtime/wasmtime")
+
     def test_port_harness_runs_once_on_linux(self):
         # macOS and Windows run only the export ABI tier; the ported crates
         # are platform-neutral and run once in the Linux job (#1010).

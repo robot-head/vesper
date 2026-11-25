@@ -32,6 +32,7 @@ on:
       - 'packages/vesper-compiler/**'
       - 'src/verified_codegen.rs'
       - 'src/verified_codegen/**'
+      - '.aspect/bootstrap.axl'
       - '.github/workflows/bootstrap-stage1.yml'
   pull_request:
     paths:
@@ -40,6 +41,7 @@ on:
       - 'packages/vesper-compiler/**'
       - 'src/verified_codegen.rs'
       - 'src/verified_codegen/**'
+      - '.aspect/bootstrap.axl'
       - '.github/workflows/bootstrap-stage1.yml'
 
 permissions:
@@ -86,10 +88,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/aspect
       - name: Install the pinned Rust toolchain
-        run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          rustup default "$RUST_TOOLCHAIN"
-          rustc -vV
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+      - run: rustup default "$RUST_TOOLCHAIN"
+      - run: rustc -vV
       - name: Two clean builds, then ratchet against the committed lock
         env:
           WORK: ${{ runner.temp }}/stage1
@@ -97,17 +98,7 @@ jobs:
       - name: Strict cross-backend gate
         env:
           WORK: ${{ runner.temp }}/stage1
-        run: |
-          cargo build --locked -p vesper-codegen-verified --bin vesper-bootstrap
-          gate=target/debug/vesper-bootstrap
-          if "$gate" check-stage1-lock bootstrap/stage1.lock; then
-            echo "committed lock is strict; the fresh lock must be too"
-            "$gate" check-stage1-lock "$WORK/stage1.fresh.lock"
-          elif "$gate" check-stage1-lock "$WORK/stage1.fresh.lock"; then
-            echo "::notice::the fresh Stage 1 lock passes the strict gate; re-record bootstrap/stage1.lock"
-          else
-            echo "::notice::strict Stage 1 gate not yet satisfiable (verified backend refuses part of the frontend)"
-          fi
+        run: aspect ci stage1-cross-backend
       - name: Keep the measured locks
         if: always()
         uses: actions/upload-artifact@v4
@@ -145,13 +136,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/aspect
       - name: Install the pinned Rust toolchain
-        run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          rustup default "$RUST_TOOLCHAIN"
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+      - run: rustup default "$RUST_TOOLCHAIN"
       - name: Install Lean
-        run: |
-          aspect ci install-lean
-          echo "VESPER_LEAN=$(cat .ci-lean-path)" >> "$GITHUB_ENV"
+        run: aspect ci install-lean
       - name: Two clean seed builds compile the corpus bit-identically
         run: >-
           cargo test --locked --release -p vesper-codegen-verified --test model --

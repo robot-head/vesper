@@ -84,23 +84,13 @@ print("child stderr", file=sys.stderr)
         result = self.aspect("acceptance", "check-doc-links")
         self.assertEqual(result.stdout.splitlines(), [str(self.root)])
 
-    def test_shell_tasks_select_the_registered_interpreter(self):
-        for shell in ("sh", "bash"):
-            self.write(
-                f"bin/{shell}",
-                f'#!/bin/sh\nVESPER_TASK_TEST_SHELL={shell} exec /bin/sh "$@"\n',
-                executable=True,
-            )
+    def test_legacy_shell_task_selects_the_registered_interpreter(self):
+        self.write("bin/sh", '#!/bin/sh\nVESPER_TASK_TEST_SHELL=sh exec /bin/sh "$@"\n', executable=True)
         env = {"PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]])}
-        for task, path, shell in (
-            (("fixture", "resource-oracle42", "bye-eof-stall"),
-             "crates/vesper-oracles/tests/fixtures/resource_oracle42/bye_eof_stall.sh", "sh"),
-            (("bootstrap", "run"), "bootstrap/run.sh", "bash"),
-        ):
-            with self.subTest(task=task):
-                self.write(path, 'printf "%s|%s\\n" "$VESPER_TASK_TEST_SHELL" "$1"\n')
-                result = self.aspect(*task, "--", "two words", env=env)
-                self.assertEqual(result.stdout, f"{shell}|two words\n")
+        path = "crates/vesper-oracles/tests/fixtures/resource_oracle42/bye_eof_stall.sh"
+        self.write(path, 'printf "%s|%s\\n" "$VESPER_TASK_TEST_SHELL" "$1"\n')
+        result = self.aspect("fixture", "resource-oracle42", "bye-eof-stall", "--", "two words", env=env)
+        self.assertEqual(result.stdout, "sh|two words\n")
 
     def test_acceptance_suites_forward_binary_root_and_scratch_and_run_examples(self):
         env = {
@@ -860,6 +850,404 @@ else:
                 self.assertEqual(order.read_text().splitlines(), ["emit", "assemble", "link", "emulate"])
                 self.assertFalse(Path((self.root / "scratch").read_text()).exists())
                 self.assertEqual("9600 scalar-reference comparisons passed" in result.stdout, status == 0)
+
+    def test_stage1_compiles_and_reproduces_with_distinct_clean_targets(self):
+        self.write("bootstrap/stage1.rs", "fixture")
+        tools = self.write("bin/cargo", """\
+#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import shutil
+import sys
+
+name = Path(sys.argv[0]).name
+args = sys.argv[1:]
+with (Path(os.environ["FIXTURE_ROOT"]) / "stage1.log").open("a") as log:
+    print(json.dumps([name, args, os.getenv("CARGO_ENCODED_RUSTFLAGS"), os.getenv("SOURCE_DATE_EPOCH")]), file=log)
+if name == "cargo":
+    assert args[:4] == ["build", "--locked", "--profile", "dev"]
+    assert args[6:] == ["--lib", "-p", "vesper", "-p", "vesper-codegen-verified"]
+    target = Path(args[5])
+    assert not (target / "stale").exists()
+    for file in ("debug/libvesper.rlib", "debug/libvesper_codegen_verified.rlib",
+                 "debug/deps/foo.rmeta", "debug/deps/lib.so", "debug/build/pkg/out/libbar.rlib",
+                 "debug/apple/lib.dylib", "debug/windows/lib.dll",
+                 "debug/unrelated/not-an-artifact.txt"):
+        artifact = target / file
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.touch()
+elif name == "rustc":
+    if args == ["-vV"]:
+        print("rustc fixture")
+        print("host: fixture-host")
+    else:
+        assert args[:3] == ["--edition=2024", "-O", str(Path(sys.argv[0]).parent.parent / "bootstrap/stage1.rs")]
+        assert args[3] == "-o"
+        shutil.copy2(Path(sys.argv[0]), args[4])
+else:
+    assert name == "stage1-runner" and args[2] == "fixture-host"
+    if args[4:] == ["--record"]:
+        lock = Path(args[3])
+        mismatch = os.getenv("REPRO_MISMATCH") and "repro-b" in str(lock)
+        lock.write_text("changed" if mismatch else "same lock")
+    else:
+        sys.exit(int(os.getenv("FINAL_RUNNER_STATUS", "0")))
+""", executable=True)
+        (self.root / "bin/rustc").symlink_to(tools)
+        env = {"PATH": os.pathsep.join([str(tools.parent), os.environ["PATH"]]),
+               "FIXTURE_ROOT": str(self.root), "WORK": "work scratch", "OUT": "my lock", "PROFILE": "dev",
+               "CARGO_HOME": "cargo home", "CARGO_TARGET_DIR": "other target",
+               "SOURCE_DATE_EPOCH": "", "CARGO_ENCODED_RUSTFLAGS": ""}
+        work = self.root / "work scratch"
+        self.write("work scratch/repro-a/target/stale", "")
+        command = ("bootstrap", "run", "--", "stage1")
+        result = self.aspect(*command, "--reproduce", "--outcome", "--require-cross-backend",
+                             status=36, env={**env, "FINAL_RUNNER_STATUS": "36"})
+        self.assertIn("two clean builds recorded identical locks", result.stdout)
+        log = self.root / "stage1.log"
+        rows = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual([row[0] for row in rows],
+                         ["rustc", "cargo", "rustc", "stage1-runner", "cargo", "rustc", "stage1-runner", "stage1-runner"])
+        for side, cargo, rustc, runner in (("a", *rows[1:4]), ("b", *rows[4:7])):
+            directory = work / f"repro-{side}"
+            target = directory / "target"
+            self.assertFalse(target.exists())
+            self.assertEqual(cargo[1][5], str(target))
+            self.assertEqual(cargo[2].split("\x1f"), [
+                f"--remap-path-prefix={self.root}=/vesper",
+                f"--remap-path-prefix={self.root / 'cargo home'}=/cargo",
+                f"--remap-path-prefix={target}=/target",
+            ])
+            self.assertEqual(cargo[3], "1794650795")
+            profile = str(target / "debug")
+            self.assertEqual(rustc[1][5:], [
+                f"--remap-path-prefix={self.root}=/vesper", f"--remap-path-prefix={target}=/target",
+                "--extern", f"vesper={profile}/libvesper.rlib",
+                "--extern", f"vesper_codegen_verified={profile}/libvesper_codegen_verified.rlib",
+                "-L", f"dependency={profile}", "-L", f"dependency={profile}/apple",
+                "-L", f"dependency={profile}/build/pkg/out", "-L", f"dependency={profile}/deps",
+                "-L", f"dependency={profile}/windows",
+            ])
+            self.assertEqual(runner[1], [str(self.root), str(directory / "work"), "fixture-host",
+                                         str(directory / "stage1.lock"), "--record"])
+        self.assertEqual(rows[-1][1], [str(self.root), str(work), "fixture-host", "my lock",
+                                       "--outcome", "--require-cross-backend"])
+        mismatch = self.aspect(*command, "--reproduce", "--outcome", env={**env, "REPRO_MISMATCH": "1"}, status=1)
+        self.assertIn("ReproducibilityMismatch", mismatch.stderr)
+        log.unlink()
+        self.aspect(*command, "--record", env=env)
+        rows = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(rows[1][1][5], str(self.root / "other target"))
+        self.assertEqual(rows[-1][1][-1], "--record")
+        self.aspect("bootstrap", "compile-stage1", "--", str(self.root / "other target/debug"),
+                    str(self.root / "bootstrap/stage1.rs"), "adapter", "--test", env=env)
+        self.assertIn("--test", json.loads(log.read_text().splitlines()[-1])[1])
+        self.aspect(*command, "--unknown", env=env, status=2)
+        self.aspect(*command, env={**env, "PROFILE": "invalid"}, status=2)
+        self.aspect("bootstrap", "compile-stage1", "--", "p", "s", "o", "--invalid", env=env, status=2)
+
+    def test_stage0_builds_two_seeds_and_compares_the_paths_via_seed_lock(self):
+        tool = self.write("bin/cargo", """\
+#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import shutil
+import sys
+
+name = Path(sys.argv[0]).name
+args = sys.argv[1:]
+root = Path(os.environ["FIXTURE_ROOT"])
+with (root / "stage0.log").open("a") as log:
+    print(json.dumps([name, args, os.getenv("SOURCE_DATE_EPOCH"), os.getenv("CARGO_ENCODED_RUSTFLAGS")]), file=log)
+if name == "cargo":
+    if args[0] == "build":
+        assert args[1:6] == ["--locked", "--profile", "dev", "--bin", "vesper"]
+        target = Path(args[7])
+        assert not target.exists()
+        output = target / "debug/vesper"
+        output.parent.mkdir(parents=True)
+        shutil.copy2(sys.argv[0], output)
+    else:
+        assert args[:2] == ["run", "--quiet"] and "seed-lock" in args
+        opts = dict(zip(args[args.index("seed-lock") + 1::2], args[args.index("seed-lock") + 2::2]))
+        assert Path(opts["--results-a"]).read_text() == Path(opts["--results-b"]).read_text() == "a 3\\nb 7\\n"
+        assert [p.name for p in Path(opts["--objects-a"]).iterdir()] == [p.name for p in Path(opts["--objects-b"]).iterdir()]
+        Path(opts["--out"]).write_text(json.dumps(opts))
+elif name in ("seed-a", "seed-b"):
+    output = Path(args[-1])
+    if args[0] == "emit":
+        assert args[2:5] == ["--emit", "object", "-o"]
+        output.write_text(args[1])
+    else:
+        assert args[0] == "build"
+        shutil.copy2(sys.argv[0], output)
+elif name in ("a", "b"):
+    sys.exit({"a": 3, "b": 7}[name])
+elif name == "lean":
+    if args == ["--print-prefix"]:
+        print(root / "lean toolchain")
+    elif args == ["--version"]:
+        print("Lean (version 4.35.0, Release)")
+    else:
+        assert args[0] == "-c" and args[2] == "BootstrapDdc/Reference.lean"
+        assert Path.cwd() == root / "lean"
+        Path(args[1]).write_text("C source")
+elif name == "gcc":
+    if args == ["--version"]:
+        print("gcc fixture\\nsecond line")
+    else:
+        path_b = root / "seed scratch/path-b"
+        toolchain = root / "lean toolchain"
+        if args[0].startswith("-O"):
+            assert args == ["-O2", "-I" + str(toolchain / "include"), "-c",
+                            str(path_b / "reference.c"), "-o", str(path_b / "reference.o")]
+        else:
+            library = str(toolchain / "lib/lean")
+            assert args == [str(path_b / "reference.o"), "-L" + library, "-lleanshared",
+                            "-Wl,-rpath," + library, "-o", str(path_b / "vesperc-lean-ddc")]
+        shutil.copy2(sys.argv[0], args[-1])
+elif name == "rustc":
+    print("rustc 1.100.0 (fixture)")
+else:
+    assert name == "vesperc-lean-ddc" and args == ["bootstrap/corpus/a.ves", "bootstrap/corpus/b.ves"]
+    print("a 3\\nb 7")
+""", executable=True)
+        for binary in ("lean", "gcc", "rustc"):
+            (tool.parent / binary).symlink_to(tool)
+        self.write(".ci-lean-path", str(tool.parent / "lean") + "\n")
+        self.write("bootstrap/corpus/b.ves", "b")
+        self.write("bootstrap/corpus/a.ves", "a")
+        self.write("lean/BootstrapDdc/Reference.lean", "fixture")
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                        "-c", "commit.gpgsign=false", "commit", "-qm", "base", "--allow-empty"],
+                       cwd=self.root, check=True)
+        env = {"PATH": os.pathsep.join([str(tool.parent), os.environ["PATH"]]),
+               "FIXTURE_ROOT": str(self.root), "WORK": "seed scratch", "OUT": "recorded lock",
+               "PROFILE": "dev", "SOURCE_DATE_EPOCH": "1717", "CC_B": "gcc", "VESPER_LEAN": ""}
+        self.aspect("bootstrap", "run", env=env)
+        self.assertFalse((self.root / "seed scratch/target").exists())
+        lock = json.loads((self.root / "recorded lock").read_text())
+        self.assertEqual({name: lock[name] for name in ("--rustc", "--profile", "--epoch", "--lean", "--cc")}, {
+            "--rustc": "rustc 1.100.0", "--profile": "dev", "--epoch": "1717",
+            "--lean": "Lean 4.35.0", "--cc": "gcc fixture",
+        })
+        rows = [json.loads(row) for row in (self.root / "stage0.log").read_text().splitlines()]
+        self.assertEqual([row[0] for row in rows], [
+            "lean", "cargo", "cargo", "seed-a", "seed-b", "seed-a", "a", "seed-a", "seed-b", "seed-a", "b",
+            "lean", "gcc", "gcc", "vesperc-lean-ddc", "rustc", "lean", "gcc", "cargo",
+        ])
+        self.assertTrue(all(row[2] == "1717" for row in rows))
+        self.assertIn(f"--remap-path-prefix={self.root}=/vesper", rows[1][3].split("\x1f"))
+        self.aspect("bootstrap", "run", env={**env, "VESPER_LEAN": "missing-lean"}, status=2)
+        self.aspect("bootstrap", "run", env={**env, "CC_B": "missing-cc"}, status=2)
+
+    def test_stage1_cross_backend_ratchet_enforces_only_a_strict_baseline(self):
+        cargo = self.write("bin/cargo", """\
+#!/usr/bin/env python3
+import sys
+assert sys.argv[1:] == ["build", "--locked", "-p", "vesper-codegen-verified", "--bin", "vesper-bootstrap"]
+""", executable=True)
+        self.write("custom target/debug/vesper-bootstrap", """\
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+assert sys.argv[1] == "check-stage1-lock"
+with open("gate.log", "a") as log:
+    print(sys.argv[2], file=log)
+code = "COMMITTED_STATUS" if Path(sys.argv[2]).name == "stage1.lock" else "FRESH_STATUS"
+sys.exit(int(os.environ[code]))
+""", executable=True)
+        env = {"PATH": os.pathsep.join([str(cargo.parent), os.environ["PATH"]]),
+               "WORK": "gate scratch", "CARGO_TARGET_DIR": "custom target"}
+        for baseline, fresh, status, message in (
+            ("0", "39", 39, "the fresh lock must be too"),
+            ("1", "0", 0, "passes the strict gate"),
+            ("1", "1", 0, "not yet satisfiable"),
+        ):
+            result = self.aspect("ci", "stage1-cross-backend", status=status,
+                                 env={**env, "COMMITTED_STATUS": baseline, "FRESH_STATUS": fresh})
+            self.assertIn(message, result.stdout)
+        self.assertEqual((self.root / "gate.log").read_text().splitlines(),
+                         ["bootstrap/stage1.lock", str(self.root / "gate scratch/stage1.fresh.lock")] * 3)
+
+    def test_stage2_wasmtime_modes_keep_paths_preopens_and_sidecars(self):
+        self.check_stage2_modes(lambda *args, **kwargs: self.aspect("bootstrap", "stage2", "--", *args, **kwargs))
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell unavailable")
+    def test_windows_stage2_preserves_the_same_wasmtime_contract(self):
+        script = "scripts/windows/bootstrap-stage2.ps1"
+        self.copy_fixture(script)
+        self.check_stage2_modes(lambda *args, **kwargs: self.powershell(script, *args, **kwargs))
+
+    def check_stage2_modes(self, run):
+        tool = self.write("bin/wt", """\
+#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+with open("wasmtime.log", "a") as log:
+    print(json.dumps(args), file=log)
+mode = os.environ.get("TEST_STAGE2_MODE")
+if args == ["--version"]:
+    print("wasmtime " + os.environ.get("TEST_WASMTIME_VERSION", "50.0.1"))
+elif args[0] == "compile":
+    assert args[2] == "-o" and not Path(args[3]).exists()
+    Path(args[3]).write_bytes(Path(args[1]).read_bytes())
+else:
+    assert args[0] == "run"
+    preopens = [args[index + 1] for index, value in enumerate(args) if value == "--dir"]
+    assert preopens[0] == str(Path.cwd().parent) + "::."
+    filename = args[-2].removeprefix("/out/")
+    output = Path(preopens[1].removesuffix("::/out")) / filename
+    suffixes = ["", ".err.txt", ".stage", ".syms"]
+    assert all(not Path(str(output) + suffix).exists() for suffix in suffixes)
+    if mode == "diagnostic":
+        Path(str(output) + ".err.txt").write_text("compiler diagnostic")
+    elif mode == "empty":
+        Path(str(output) + ".stage").write_text("reached lowering")
+        output.touch()
+    elif mode == "wasmtime-failure":
+        sys.exit(43)
+    else:
+        output.write_bytes(b"changed" if mode == "different" else Path(args[-4]).read_bytes())
+""", executable=True)
+        self.write("nested directory/input wasm.wasm", "wasm test bytes")
+        env = {"WASMTIME_BIN": "../bin/wt", "WASMTIME": "/unused", "VESPER_STAGE2_SYMS": "",
+               "VESPER_ALLOW_UNPINNED_WASMTIME": ""}
+        expected = self.nested / "input wasm.cwasm"
+        expected.write_text("stale")
+        self.assertIn("../bin/wt", run("which", env=env).stdout)
+        rejected = run("which", env={**env, "TEST_WASMTIME_VERSION": "50.0.10"}, status=1)
+        self.assertIn("Expected wasmtime 50.0.1", rejected.stderr)
+        run("which", env={
+            **env, "WASMTIME_BIN": "", "WASMTIME": str(tool), "TEST_WASMTIME_VERSION": "50.0.10",
+            "VESPER_ALLOW_UNPINNED_WASMTIME": "1",
+        })
+        compiled = run("precompile", "input wasm.wasm", env=env)
+        self.assertEqual(compiled.stdout, "input wasm.cwasm\n")
+        self.assertEqual(expected.read_text(), "wasm test bytes")
+        output = "output space/stage3.wasm"
+        for suffix in ("", ".err.txt", ".stage", ".syms"):
+            self.write("nested directory/" + output + suffix, "stale")
+        run("run", "--precompiled", "--", str(expected), "package path", output, "custom entry",
+            env={**env, "VESPER_STAGE2_SYMS": "2"})
+        log = self.nested / "wasmtime.log"
+        argv = json.loads(log.read_text().splitlines()[-1])
+        self.assertEqual(argv, ["run", "--allow-precompiled", "--dir", f"{self.root}::.", "--dir",
+                                f"{self.nested / 'output space'}::/out", "--env", "VESPER_STAGE2_SYMS=2",
+                                "--argv0", "stage2", str(expected), "package path", "/out/stage3.wasm", "custom entry"])
+        for mode, status, diagnostic in (
+            ("diagnostic", 1, "compiler diagnostic"), ("empty", 1, "reached lowering"),
+            ("wasmtime-failure", 43, "failed"),
+        ):
+            with self.subTest(mode=mode):
+                result = run("run", str(expected), "package", output, status=status,
+                             env={**env, "TEST_STAGE2_MODE": mode})
+                self.assertIn(diagnostic, result.stderr)
+        for mode, flags in (("verify", []), ("fixed-point", ["--precompile"])):
+            result = run(mode, *flags, "input wasm.wasm", "verify scratch", env=env)
+            self.assertIn("stage2 == stage3 (15 bytes)", result.stdout)
+            args = json.loads(log.read_text().splitlines()[-1])
+            self.assertEqual("--allow-precompiled" in args, bool(flags))
+            self.assertEqual(args[-3:], ["packages/vesper-stage2", "/out/stage3.wasm", "main"])
+            self.assertIn("VESPER_STAGE2_SYMS=1", args)
+        mismatch = run("verify", "input wasm.wasm", status=1, env={**env, "TEST_STAGE2_MODE": "different"})
+        self.assertIn("fixed-point mismatch", mismatch.stderr)
+        for args in ((), ("run", "--unknown"), ("run", "only one"), ("verify",), ("precompile",)):
+            run(*args, env=env, status=2)
+
+    def test_stage2_discovers_wasmtime_on_path_with_bazel_and_in_runfiles(self):
+        self.check_stage2_discovery(lambda **kwargs: self.aspect("bootstrap", "stage2", "--", "which", **kwargs))
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell unavailable")
+    def test_windows_stage2_discovers_wasmtime_on_path_with_bazel_and_in_runfiles(self):
+        script = "scripts/windows/bootstrap-stage2.ps1"
+        self.copy_fixture(script)
+        self.check_stage2_discovery(lambda **kwargs: self.powershell(script, "which", **kwargs))
+
+    def check_stage2_discovery(self, find_wasmtime):
+        tools = self.root / "bin"
+        tools.mkdir()
+        for name in ("git", "python3"):
+            (tools / name).symlink_to(shutil.which(name))
+        env = {"PATH": str(tools), "WASMTIME": "", "WASMTIME_BIN": ""}
+        missing = find_wasmtime(env=env, status=1)
+        self.assertIn("Could not find Wasmtime", missing.stderr)
+        contents = "#!/usr/bin/env python3\nprint('wasmtime 50.0.1')\n"
+        wasmtime = self.write("bin/wasmtime", contents, executable=True)
+        self.assertEqual(find_wasmtime(env=env).stdout, str(wasmtime) + "\n")
+        wasmtime.unlink()
+        queried = self.write("built wasmtime/bin", contents, executable=True)
+        self.write("bin/bazelisk", """\
+#!/usr/bin/env python3
+from pathlib import Path
+import sys
+args = sys.argv[1:]
+assert args[-1] == "@wasmtime//:wasmtime"
+assert (Path.cwd() / ".aspect").is_dir()
+if args[0] == "build":
+    print("building")
+else:
+    assert args == ["cquery", "--output=files", "@wasmtime//:wasmtime"]
+    print("built wasmtime/bin")
+""", executable=True)
+        result = find_wasmtime(env=env)
+        self.assertEqual(result.stdout, str(queried) + "\n")
+        self.assertIn("building", result.stderr)
+        queried.unlink()
+        cached = self.write("bazel-bin/external/+wasmtime+wasmtime_test/wasmtime", contents, executable=True)
+        self.assertEqual(find_wasmtime(env=env).stdout, str(cached) + "\n")
+
+    def test_ci_wasmtime_installer_checks_archive_before_extraction(self):
+        tool = self.write("bin/curl", """\
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import shutil
+import sys
+
+args = sys.argv[1:]
+name = Path(sys.argv[0]).name
+if name == "curl":
+    assert args[:3] == ["-fsSL", "https://github.com/bytecodealliance/wasmtime/releases/download/v50.0.1/wasmtime-v50.0.1-x86_64-linux.tar.xz", "-o"]
+    Path(args[3]).write_text("archive fixture")
+elif name == "sha256sum":
+    assert Path(args[0]).read_text() == "archive fixture"
+    digest = os.environ.get("TEST_ARCHIVE_DIGEST", "685466455dd42a14774a86c36c8f2e45cbb9bd6d92a850139315df60a75498a5")
+    print(digest, args[0])
+elif name == "tar":
+    assert args[0] == "-xJf" and args[2:4] == ["--strip-components=1", "-C"]
+    assert Path(args[1]).parent == Path(args[4])
+    Path("extracted").touch()
+    shutil.copy2(sys.argv[0], Path(args[4]) / "wasmtime")
+else:
+    assert name == "wasmtime" and args == ["--version"]
+    print("wasmtime " + os.environ.get("TEST_WASMTIME_VERSION", "50.0.1"))
+""", executable=True)
+        for name in ("sha256sum", "tar"):
+            (tool.parent / name).symlink_to(tool)
+        stale = self.write("runner temp/wasmtime/wasmtime", "previous good install")
+        env = {"PATH": os.pathsep.join([str(tool.parent), os.environ["PATH"]]),
+               "RUNNER_TEMP": "runner temp", "VESPER_ALLOW_UNPINNED_WASMTIME": ""}
+        command = ("ci", "install-wasmtime")
+        self.aspect(*command, env={**env, "RUNNER_TEMP": ""}, status=2)
+        bad_hash = self.aspect(*command, env={**env, "TEST_ARCHIVE_DIGEST": "bad"}, status=1)
+        self.assertIn("archive checksum mismatch", bad_hash.stderr)
+        self.assertFalse((self.root / "extracted").exists())
+        self.assertEqual(stale.read_text(), "previous good install")
+        self.aspect(*command, env={**env, "TEST_WASMTIME_VERSION": "49.0.0"}, status=1)
+        self.assertTrue((self.root / "extracted").exists())
+        self.assertEqual(stale.read_text(), "previous good install")
+        self.aspect(*command, env=env)
+        self.assertTrue(os.access(stale, os.X_OK))
+        self.aspect("bootstrap", "stage2", "--", "which", env={**env, "WASMTIME_BIN": str(stale)})
 
     def test_native_disk_cleanup_preserves_ownership_depth_and_symlink_targets(self):
         outside = self.write("outside/keep", "outside scratch")
