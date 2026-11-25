@@ -5,7 +5,6 @@ check_diagnostics = script_task("check-diagnostics", ["acceptance"], "scripts/ch
 check_doc_links = script_task("check-doc-links", ["acceptance"], "scripts/check-doc-links.py", "python3", from_root = True)
 check_doc_navigation = script_task("check-doc-navigation", ["acceptance"], "scripts/check-doc-navigation.py", "python3", from_root = True)
 check_editor = script_task("check-editor", ["acceptance"], "scripts/check-editor.py", "python3", from_root = True)
-check_float_json = script_task("check-float-json", ["acceptance"], "scripts/check-float-json.py", "python3", from_root = True)
 check_macro_preview = script_task("check-macro-preview", ["acceptance"], "scripts/check-macro-preview.py", "python3", from_root = True)
 check_ndjson_columns = script_task("check-ndjson-columns", ["acceptance"], "scripts/check-ndjson-columns.py", "python3", from_root = True)
 check_recovery = script_task("check-recovery", ["acceptance"], "scripts/check-recovery.py", "python3", from_root = True)

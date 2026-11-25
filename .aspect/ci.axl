@@ -11,7 +11,7 @@ tests_workflows = script_task("workflows", ["ci", "tests"], "scripts/ci/tests/te
 
 def _platform_tests(ctx: TaskContext) -> int:
     root = ctx.std.env.aspect_root_dir()
-    for suite in ["merge-gate", "hardware-ci", "workflow-tasks", "platform-completion", "release-validation"]:
+    for suite in ["merge-gate", "hardware-ci", "workflow-tasks", "platform-completion", "release-validation", "float-json"]:
         check(ctx, ctx.std.env.current_exe(), ["ci", "tests", suite], root)
     return run_command(ctx, "python3", ["-m", "unittest", "discover", "-s", "scripts/ci/tests", "-p", "test_platform*.py"], True, "")
 
