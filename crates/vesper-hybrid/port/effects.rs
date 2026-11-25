@@ -18,6 +18,7 @@ unsafe extern "C" {
     fn vesper_hybrid_effects_live_allocations() -> i64;
     fn vesper_hybrid_effects_box_new(size: i64) -> i64;
     fn vesper_hybrid_effects_effects_diags(b: *mut u64) -> i64;
+    fn vesper_hybrid_effects_effects_policies(b: *mut u64) -> i64;
 }
 
 /// The sequence runtime of the Vesper library `hybrid_effects`.
@@ -38,5 +39,14 @@ pub fn effects_diags(b: &[u8]) -> Vec<u64> {
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_hybrid_effects_effects_diags(view_b) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `effects_policies` of the Vesper library `hybrid_effects` (`vesper_hybrid_effects_effects_policies`).
+pub fn effects_policies(b: &[u8]) -> Vec<u64> {
+    // SAFETY: `vesper_hybrid_effects_effects_policies` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_hybrid_effects_effects_policies(view_b) });
     unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }
