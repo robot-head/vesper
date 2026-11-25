@@ -1,5 +1,6 @@
 // @vesper/hybrid-test-runner: `vesper::test_discovery`,
-// `vesper::doctest_extract` and `vesper::test_mutants` served from Vesper in the hybrid Stage 2 build
+// `vesper::doctest_extract`, `vesper::test_mutants` and
+// `vesper::doctest_guard` served from Vesper in the hybrid Stage 2 build
 // (self-hosting SH5 lane 14, #1337).
 //
 // `case_rows_words` and `discover_words` take one call's input as the
@@ -8,7 +9,8 @@
 // words that `decode_case_rows` and `decode_discover` read back.
 // `doctest_preflight_words` and `doctest_extract_words` take and return the
 // words of tests/common/doctest_extract_words.rs, and `mutants_words`
-// those of tests/common/test_mutants_words.rs.
+// those of tests/common/test_mutants_words.rs, and `doctest_guard_words`
+// those of tests/common/doctest_guard_words.rs.
 
 // @export abi 4
 
@@ -16,6 +18,7 @@ use @vesper/test-runner::{
     case_rows_words as rows,
     discover_words as tests,
     doctest_extract_words as fences,
+    doctest_guard_words as profile,
     doctest_preflight_words as limits,
     format as words_format,
     mutants_words as sites
@@ -45,4 +48,8 @@ pub fn doctest_extract_words(in input: Slice[u8]) -> ChunkSeq[u64] {
 
 pub fn mutants_words(in input: Slice[u8]) -> ChunkSeq[u64] {
     sites(in input)
+}
+
+pub fn doctest_guard_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    profile(in input)
 }

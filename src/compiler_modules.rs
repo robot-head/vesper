@@ -25,6 +25,8 @@ pub mod database;
 pub mod doctest;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod doctest_extract;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod doctest_guard;
 pub mod dyn_fn;
 pub mod dyn_trait;
 #[cfg(not(target_arch = "wasm32"))]
