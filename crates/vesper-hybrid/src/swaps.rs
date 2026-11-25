@@ -17,7 +17,8 @@
 //! (`driver.rs`, `commands.rs`) are the hybrid's entry, not a module swap,
 //! and run in every set.
 //!
-//! A swap is promoted by changing its row to [`Gate::Pass`] in the PR that
+//! Each swap's row is in its own file under `src/swap/` (its `SWAPS`). A
+//! swap is promoted by changing its row to [`Gate::Pass`] in the PR that
 //! adds its gate configuration and scoreboard row; `tests/swaps.rs` checks
 //! that both exist.
 
@@ -39,75 +40,25 @@ pub(crate) struct Swap {
     pub(crate) gate: Gate,
 }
 
-const fn open(name: &'static str, why: &'static str) -> Swap {
+pub(crate) const fn open(name: &'static str, why: &'static str) -> Swap {
     Swap {
         name,
         gate: Gate::Open(why),
     }
 }
 
-const fn pass(name: &'static str, config: &'static str, pr: &'static str) -> Swap {
+pub(crate) const fn pass(name: &'static str, config: &'static str, pr: &'static str) -> Swap {
     Swap {
         name,
         gate: Gate::Pass { config, pr },
     }
 }
 
-/// Every swap `install` can install, in install order.
-pub(crate) const SWAPS: &[Swap] = &[
-    open("word_layout", "0 diffs; no flip-gate configuration"),
-    open("parse", "0 diffs; no flip-gate configuration"),
-    open("layout", "0 diffs; no flip-gate configuration"),
-    open("ir_check", "0 diffs, 0.53x; no flip-gate configuration"),
-    open("stack_bound", "2.54x, above the bar"),
-    open("tensor_check", "0.28-0.49x; no flip-gate configuration"),
-    open("effects", "0.28x; no flip-gate configuration"),
-    open("fip", "0.92x; no flip-gate configuration"),
-    open("aggregate", "0 diffs; no flip-gate configuration"),
-    open("drops", "0 diffs; no flip-gate configuration"),
-    open("call", "0 diffs; no flip-gate configuration"),
-    open("wasm", "0 diffs; no flip-gate configuration"),
-    open("ebpf", "0.93-1.10x; no flip-gate configuration"),
-    open("freestanding", "no flip-gate configuration"),
-    open("verifiers", "no flip-gate configuration"),
-    open("register_locals", "0 diffs; no flip-gate configuration"),
-    pass("component", "wit-component", "#1334"),
-    open("numeric", "0 declined; no flip-gate configuration"),
-    open("seq", "0 diffs; no flip-gate configuration"),
-    open("control", "0 declined; no flip-gate configuration"),
-    open("ffi", "0 diffs; no flip-gate configuration"),
-    open("scalar", "0 diffs; no flip-gate configuration"),
-    open("export", "no flip-gate configuration"),
-    open("plan", "no flip-gate configuration"),
-    open("interface_json", "no flip-gate configuration"),
-    open("test_discovery", "no flip-gate configuration"),
-    open(
-        "doctest_extract",
-        "0 diffs, 1.12x; no flip-gate configuration",
-    ),
-    open("test_mutants", "0 diffs, 0.48x; no flip-gate configuration"),
-    open(
-        "doctest_guard",
-        "0 diffs, 0.39x; no flip-gate configuration",
-    ),
-    open(
-        "doctest_generate",
-        "0 diffs, 0.87x; no flip-gate configuration",
-    ),
-    open("ir_lower", "0.40x; no flip-gate configuration"),
-    open("ir_opt", "0.0036x; no flip-gate configuration"),
-    open("inline", "0.76x; no flip-gate configuration"),
-    pass("hoist", "bounds-hoist", "#1251"),
-    open(
-        "doc",
-        "0 byte diffs, 0.76-0.87x; no flip-gate configuration",
-    ),
-    pass("optimize", "optimize", "#1501"),
-    open("declaration_pass", "no flip-gate configuration"),
-    open("pact_session", "no flip-gate configuration"),
-    open("builtin_wanted", "no flip-gate configuration"),
-    open("deps_pass", "no flip-gate configuration"),
-];
+/// Every swap `install` can install: each `src/swap/` file's `SWAPS`
+/// rows, in file-name order.
+pub(crate) fn all() -> impl Iterator<Item = &'static Swap> {
+    super::SWAP_FILES.iter().flat_map(|f| f.swaps)
+}
 
 /// The set `VESPER_HYBRID_SWAPS` names.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -166,10 +117,10 @@ pub(crate) fn set() -> Set {
 }
 
 /// Whether the swap `name` is in the set. `name` must be a row of
-/// [`SWAPS`].
+/// [`all`].
 pub(crate) fn on(name: &str) -> bool {
-    let Some(swap) = SWAPS.iter().find(|s| s.name == name) else {
-        eprintln!("vesper-hybrid: `{name}` is not a row of swaps::SWAPS");
+    let Some(swap) = all().find(|s| s.name == name) else {
+        eprintln!("vesper-hybrid: `{name}` is not a row of any src/swap/ file's SWAPS");
         std::process::abort();
     };
     match set() {
@@ -183,13 +134,13 @@ pub(crate) fn on(name: &str) -> bool {
 /// one per swap (`tests/swaps.rs` reads them).
 pub(crate) fn report() {
     let set = set();
-    let n = SWAPS.iter().filter(|s| on(s.name)).count();
+    let n = all().filter(|s| on(s.name)).count();
     eprintln!(
         "vesper-hybrid: swaps ({}): {n} of {} on",
         set.name(),
-        SWAPS.len()
+        all().count()
     );
-    for s in SWAPS {
+    for s in all() {
         let state = if on(s.name) { "on" } else { "off" };
         match s.gate {
             Gate::Pass { config, pr } => eprintln!(
@@ -209,9 +160,10 @@ mod tests {
 
     #[test]
     fn names_are_unique() {
-        for (i, s) in SWAPS.iter().enumerate() {
+        let swaps: Vec<_> = all().collect();
+        for (i, s) in swaps.iter().enumerate() {
             assert!(
-                SWAPS[..i].iter().all(|t| t.name != s.name),
+                swaps[..i].iter().all(|t| t.name != s.name),
                 "{} is listed twice",
                 s.name
             );

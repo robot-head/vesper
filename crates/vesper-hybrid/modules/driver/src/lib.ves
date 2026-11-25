@@ -96,6 +96,9 @@ use self::front::{
     parse_clean,
     cst_text
 };
+use self::interface::{
+    interface_json
+};
 
 // `main_code`'s result when the Rust CLI should run the command instead.
 pub fn delegate() -> i64 {
@@ -157,6 +160,10 @@ fn step_emit_interface() -> u32 {
 
 fn step_optimize() -> u32 {
     12
+}
+
+fn step_interface_write() -> u32 {
+    40
 }
 
 fn step_run() -> u32 {
@@ -500,7 +507,15 @@ fn drive(inout s: Session, in o: Options)
         return 0;
     }
     if c == cmd_emit() && is(in o, slot_format(), in "interface") {
-        return pass(inout s, step_emit_interface());
+        // The session hands over the world's declarations; the export and
+        // its JSON are Vesper's (interface.ves).
+        let r = step(inout s, step_emit_interface());
+        if is_failure(r) {
+            return pass_failed(in s, r);
+        }
+        let world = text(in s);
+        let json = interface_json(in world.as_slice());
+        return pass_with(inout s, step_interface_write(), in json.as_slice());
     }
     if o.optimize {
         let r = step(inout s, step_optimize());

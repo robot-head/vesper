@@ -200,3 +200,97 @@ Bazel test entry), so the Stage 1 lock is unaffected.
 - Rust compiler deletion: 0 lines deleted in `src/native.rs` (Part 2 installs
   the swap point and keeps `register_locals` as the unhooked path/oracle until
   the remaining graph walk and hybrid wiring land in Parts 3-4).
+
+
+## Part 3a: the entry-block plan (#1876)
+
+Base: origin/main `907e9782`.
+
+Before the walk lowers an instance's graph, `define_instances_observed_with_trace`
+splits the entry block's parameters and seeds the body's state. Part 3a
+separates those decisions from the emission and ports them.
+
+### Changes
+
+- **`src/native.rs`**: new `pub fn frame_plan` and `pub struct FramePlan`
+  (with `FrameResult` and `FramePlan::text`). They make the same decisions
+  the function setup made inline:
+  - which trailing block parameters are the trace flag, the failure record
+    (`fail_only`) and the caller slot (`fip::uses_caller_slot`);
+  - where the result is built: a scalar value, the leading result pointer
+    (`sret`), a register-result buffer of N words, or N words the body keeps
+    (the direct small enum on the optimize path);
+  - for each parameter, whether its block parameter is the value or the
+    address of an `inout` scalar loaded as a given type (whose address then
+    keeps a variable of its own);
+  - the function-value parameters the instance binds to top-level functions
+    (`function_arguments`);
+  - the capability identities the body starts with (the Fail record's exits
+    and the trace host).
+
+  `define_instances_observed_with_trace` now emits from the plan. The
+  refactor keeps the emission order and the order the capability map is
+  filled in (after the function-value bindings, whose evidence reads it).
+  `EmittedFunction` gains `frame: Option<FramePlan>` (`None` for outlined
+  cold helpers), so observers see the plan each function was lowered with.
+- **`packages/vesper-codegen-walk/src/frame.ves`** (`@vesper/native-walk`):
+  `frame_plan` in Vesper, on `@vesper/codegen-calls`' discovery, `concrete`,
+  `NativeAbi::internal`, `scalar` and `layout_facts` (`scalar` and `internal`
+  are now `pub` there). It also has its own `enum_shape` word count and
+  `mentions_box` over check-layout, plus `numeric::instance_key`. The dump
+  entry is `native_walk_frames`. Its input is `@vesper/codegen-calls`'.
+- **`tests/self_host_native_walk_frame.rs`**: the differential. The Rust side
+  is `EmittedFunction::frame` from `native::object_with_observer`. The input
+  encoder of tests/self_host_codegen_calls.rs moved to
+  `tests/common/codegen_calls_words.rs` so both tests share it.
+
+### Results (Linux x86_64, release)
+
+| Test | Worlds | Tasks (entry, optimize) | Plans compared | Differ |
+|---|--:|--:|--:|--:|
+| `frame_plans_match_rust` (`NATIVE_WALK_FRAME_STEP=1`, 4 entries) | 339 (17 not encodable) | 1,976: 1,404 complete, 1 prefix, 562 refused alike, 9 unverified | 5,629 | **0** |
+| `frame_plans_match_rust_on_test_sources` (4 entries) | 154 (12 not encodable) | 562: 422 complete, 138 refused alike, 2 unverified | 756 | **0** |
+
+The corpus plans cover 112 failure records, 923 `sret` results, 60 register
+buffers, 21 direct enum results, 314 `inout` scalar loads, 2 function-value
+bindings and 380 capability identities. On the test sources they cover 66
+failure records, 2 caller slots, 103 `sret`, 7 buffers, 2 direct enums,
+4 loads, 4 bindings and 198 identities.
+
+The Vesper half takes 426 ms over the corpus. That includes decoding the
+world, program and calls sections for every world. Rust needs 598 s for the
+same tasks, but that is whole compiles, so the two times don't compare.
+They aren't a speed ratio. The build-time ratio comes once the walk is
+swapped (part 3b).
+
+The native feature tests that exercise the setup still pass:
+`native_fail_status` 21, `native_block_param_homes` 20, `fip` 14,
+`capability_effects` 6, `native_hoist_calls` 11, `checked_arithmetic` 3
+(release). tests/self_host_codegen_calls.rs is still at 0 diffs on the shared
+encoder.
+
+**Rust lines deleted:** 0. The plan is the oracle and the emission is still
+Rust until part 3b.
+
+### Stage 1 guard
+
+No file under `src/verified_codegen/**`, `src/ir.rs`, `ir_opt::optimize`,
+`lean/**`, `bootstrap/stage1*` or `packages/vesper-compiler/**` changed. The
+`src/native.rs` change is a refactor that leaves the emitted code the same.
+
+### Gaps found
+
+- Trace entries (`compile_entry`'s `trace_ok`) can't be planned in Vesper
+  yet. Their discovery includes the entry, and `@vesper/codegen-calls`
+  refuses them (`check_entry` models `EntryEffects::Handled` only). So every
+  Vesper plan has `trace=0` and no trace-host identity. The Rust plan covers
+  both, and no compared task used them.
+
+### What is left
+
+- Part 3b: emit the entry block from the plan on the lent builder, through a
+  walk hook installed in the hybrid (serialized behind the merge captain).
+  The CLIF/object differential must be at 0. Then the variable and home maps.
+- Part 4: the compile drivers, then `native_clif_opt` once #1426 calls it
+  stable. `@vesper/clif` (the #1829 tables) already gives a pass read and
+  rewrite access to a finished function.

@@ -317,6 +317,34 @@ vesper_crate(
             "tests/vector_f32.rs",
             "tests/wide_integers.rs",
         ],
+        # Rust exit gap wave 1 lane 11, part 3a (#1876): @vesper/native-walk's
+        # entry-block plans against `native::frame_plan` over the corpus and
+        # the calls test's source strings. Anchored globs.
+        "test/self_host_native_walk_frame": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + [
+            "tests/arrays.rs",
+            "tests/capability_effects.rs",
+            "tests/capability_verifiers.rs",
+            "tests/checked_arithmetic.rs",
+            "tests/dyn_box.rs",
+            "tests/dyn_effects.rs",
+            "tests/dyn_fn.rs",
+            "tests/dyn_trait.rs",
+            "tests/ffi_handles.rs",
+            "tests/fip.rs",
+            "tests/floats.rs",
+            "tests/integer_widths.rs",
+            "tests/native_block_param_homes.rs",
+            "tests/native_export_f32.rs",
+            "tests/native_fail_status.rs",
+            "tests/native_hoist_calls.rs",
+            "tests/native_spans.rs",
+            "tests/vector_f32.rs",
+            "tests/wide_integers.rs",
+        ],
         # SH4 lane 15 (#1289): @vesper/wasm-backend against src/wasm_backend
         # over the tests/wasm_backend.rs programs and the corpus.
         "test/self_host_wasm_backend": glob([
@@ -1149,6 +1177,10 @@ vesper_crate(
         # package worlds with their dependencies included; it ran past 900 s
         # once @vesper/test-runner gained @vesper/ast (#1337).
         "test/self_host_native_walk": "eternal",
+        # Its frame twin (#1876) compiles each sampled entry with Rust twice
+        # (optimize off and on); about 600 s of Rust compiles at step 1 in a
+        # release build, so it gets the same headroom.
+        "test/self_host_native_walk_frame": "eternal",
         "test/self_host_check_harness": "long",
         # The trait declaration differential (#1185) checks every corpus world.
         "test/self_host_check_pact": "eternal",

@@ -1,0 +1,619 @@
+// The entry-block plan of each native instance: `native::frame_plan` of
+// src/native.rs (Rust-exit gap wave 1, lane 11, part 3a, #1876).
+//
+// Before the walk lowers an instance's graph, `define_instances` splits the
+// entry block's parameters: the trailing trace flag, failure record and
+// caller slot, the leading result pointer or a local register-result
+// buffer, and each source parameter's variable (an `inout` scalar is
+// loaded through its address, which keeps a variable of its own). It binds
+// the function-value parameters the instance fixes to top-level functions
+// and seeds the capability identities of the Fail record's exits. This
+// module makes the same decisions over @vesper/codegen-calls' discovery
+// and ABI, so the walk port reads one plan per instance.
+//
+// `frames_text` (lib.ves: `native_walk_frames`) is the harness dump (tests/self_host_native_walk_frame.rs):
+// the input is @vesper/codegen-calls' (check-data's names, types and world,
+// the place-ir program section, the calls section); per task a block
+// `E <entry> <0|1>`, then per instance `F <key>` and the plan's lines
+// (`FramePlan::text`), or `X <message>` where Rust would refuse.
+//
+// Trace entries (`trace_ok` of `compile_entry`) are out of scope: their
+// discovery includes the entry and the calls family refuses them
+// (`check_entry`), so every plan here has no trace flag and no trace-host
+// identity.
+
+use @vesper/check-data::pack_text;
+use @vesper/check-data::util::{
+    add,
+    inc,
+    push_decimal,
+    u32_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    TyKind,
+    TyPass,
+    Types,
+    default_type,
+    display
+};
+use @vesper/check-data::world::{
+    World
+};
+use @vesper/check-data::input::{
+    Reader,
+    read_ctx
+};
+use @vesper/check-layout::{
+    L_ENUM,
+    Layouts,
+    layout_of,
+    layouts_new
+};
+use @vesper/place-ir::{
+    read_program
+};
+use @vesper/codegen-calls::data::{
+    Calls,
+    read_calls
+};
+use @vesper/codegen-calls::instances::{
+    Conc,
+    IVars,
+    Syms,
+    concrete,
+    discover,
+    fail_only,
+    program_facts,
+    syms_new
+};
+use @vesper/codegen-calls::abi::{
+    Errs,
+    FnAbi,
+    V_F32,
+    V_F64,
+    V_I128,
+    check_entry,
+    declare,
+    default_abi,
+    internal,
+    layout_facts,
+    scalar,
+    uses_caller_slot
+};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+// `scalar` refused.
+const V_NONE: u8 = 255;
+// `native_aggregates::MAX_ENUM_WORDS`.
+const MAX_ENUM_WORDS: u64 = 4;
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn bit(inout o: ChunkSeq[u8], b: bool) {
+    if b {
+        o.push(49);
+    } else {
+        o.push(48);
+    }
+}
+
+fn put_value_type(inout o: ChunkSeq[u8], v: u8) {
+    if v == V_I128 {
+        put(inout o, "i128");
+    } else if v == V_F64 {
+        put(inout o, "f64");
+    } else if v == V_F32 {
+        put(inout o, "f32");
+    } else {
+        put(inout o, "i64");
+    }
+}
+
+// ----- the result's words ---------------------------------------------------------
+
+// `fip::mentions_box` once Box is active: `Box` anywhere in `ty`.
+fn mentions_box(in t: Types, in wd: World, ty: u32, depth: u64) -> bool {
+    if depth > 256 {
+        return false;
+    }
+    let n = t.node(ty);
+    if n.kind == TyKind::Named && n.name == wd.k.box_ {
+        return true;
+    }
+    if n.kind == TyKind::Named || n.kind == TyKind::Tuple || n.kind == TyKind::Fn {
+        for i in 0..w(n.n) {
+            if mentions_box(in t, in wd, u32_at(in t.items, add(w(n.a), i)), inc(depth)) {
+                return true;
+            }
+        }
+    }
+    if n.kind == TyKind::Fn && mentions_box(in t, in wd, n.r, inc(depth)) {
+        return true;
+    }
+    if n.kind == TyKind::Fn || n.kind == TyKind::Row {
+        let row = t.row(n.r2);
+        for i in 0..w(row.n) {
+            let ef = t.effect_at(add(w(row.a), i));
+            for j in 0..w(ef.n) {
+                if mentions_box(in t, in wd, u32_at(in t.items, add(w(ef.a), j)), inc(depth)) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+// `native_aggregates::word_type`: a non-wide integer or `bool`.
+fn word_type(in t: Types, in wd: World, ty: u32) -> bool {
+    let n = t.node(ty);
+    if n.kind != TyKind::Named || n.n != 0 {
+        return false;
+    }
+    (wd.k.is_integer(n.name) && !wd.k.is_wide(n.name)) || n.name == wd.k.bool_
+}
+
+// The word count of `native_aggregates::enum_shape(ty)`: the tag word plus
+// one per field of every variant, or NONE64 when `ty` has no shape.
+fn enum_words(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty0: u32)
+    -> u64 {
+    let ty = default_type(inout t, ty0);
+    if wd.box_active && mentions_box(in t, in wd, ty, 0) {
+        return NONE64;
+    }
+    let m = ls.mark();
+    let l = layout_of(inout ls, inout t, inout names, in wd, ty);
+    if l == NONE32 {
+        ls.reset(m);
+        return NONE64;
+    }
+    let node = ls.node(l);
+    if node.kind != L_ENUM {
+        ls.reset(m);
+        return NONE64;
+    }
+    let mut words: u64 = 1;
+    for v in 0..w(node.n) {
+        let var = ls.lvariant(add(w(node.a), v));
+        for i in 0..w(var.fc) {
+            let f = ls.lfield(add(w(var.fa), i));
+            let ft = default_type(inout t, f.ty);
+            if !word_type(in t, in wd, ft) {
+                ls.reset(m);
+                return NONE64;
+            }
+            words = inc(words);
+        }
+    }
+    ls.reset(m);
+    if words > MAX_ENUM_WORDS {
+        return NONE64;
+    }
+    words
+}
+
+// ----- capability identities --------------------------------------------------------
+
+// A `BTreeMap<String, String>` under construction: entry i's key is
+// text[ka[i]..ke[i]], its identity text[ia[i]..ie[i]].
+struct Caps {
+    text: ChunkSeq[u8],
+    ka: ChunkSeq[u64],
+    ke: ChunkSeq[u64],
+    ia: ChunkSeq[u64],
+    ie: ChunkSeq[u64],
+}
+
+fn caps_new() -> Caps {
+    Caps {
+        text: ChunkSeq::new[u8](),
+        ka: ChunkSeq::new[u64](),
+        ke: ChunkSeq::new[u64](),
+        ia: ChunkSeq::new[u64](),
+        ie: ChunkSeq::new[u64](),
+    }
+}
+
+fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn at8(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+impl Caps {
+    // The byte order of keys i and j (Rust `str` order): -1, 0 or 1.
+    fn cmp(in self, i: u64, j: u64) -> i32 {
+        let a = at64(in self.ka, i);
+        let an = wrapping_sub(at64(in self.ke, i), a);
+        let b = at64(in self.ka, j);
+        let bn = wrapping_sub(at64(in self.ke, j), b);
+        let n = if an < bn {
+            an
+        } else {
+            bn
+        };
+        for k in 0..n {
+            let x = at8(in self.text, add(a, k));
+            let y = at8(in self.text, add(b, k));
+            if x < y {
+                return -1;
+            }
+            if x > y {
+                return 1;
+            }
+        }
+        if an < bn {
+            -1
+        } else if an > bn {
+            1
+        } else {
+            0
+        }
+    }
+
+    // `BTreeMap::insert(key, identity)`, both already appended to `text`
+    // as the spans [key_a, key_e) and [id_a, id_e).
+    fn insert(inout self, key_a: u64, key_e: u64, id_a: u64, id_e: u64) {
+        let n = self.ka.len();
+        self.ka.push(key_a);
+        self.ke.push(key_e);
+        self.ia.push(id_a);
+        self.ie.push(id_e);
+        for i in 0..n {
+            if self.cmp(i, n) == 0 {
+                let ok1 = self.ia.try_set(i, id_a);
+                let ok2 = self.ie.try_set(i, id_e);
+                self.ka.truncate(n);
+                self.ke.truncate(n);
+                self.ia.truncate(n);
+                self.ie.truncate(n);
+                return;
+            }
+        }
+    }
+
+    // The `K <key> <identity>` lines, in key order.
+    fn write(in self, inout o: ChunkSeq[u8]) {
+        let n = self.ka.len();
+        let mut order: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+        for i in 0..n {
+            order.push(i);
+        }
+        // Insertion sort: a function has a handful of identities.
+        for i in 1..n {
+            let mut j = i;
+            loop {
+                if j == 0 {
+                    break;
+                }
+                let x = at64(in order, wrapping_sub(j, 1));
+                let y = at64(in order, j);
+                if self.cmp(x, y) <= 0 {
+                    break;
+                }
+                let ok1 = order.try_set(wrapping_sub(j, 1), y);
+                let ok2 = order.try_set(j, x);
+                j = wrapping_sub(j, 1);
+            }
+        }
+        for k in 0..n {
+            let i = at64(in order, k);
+            put(inout o, "K ");
+            for b in at64(in self.ka, i)..at64(in self.ke, i) {
+                o.push(at8(in self.text, b));
+            }
+            o.push(32);
+            for b in at64(in self.ia, i)..at64(in self.ie, i) {
+                o.push(at8(in self.text, b));
+            }
+            o.push(10);
+        }
+    }
+}
+
+// `numeric::open`: a type an effect instance key cannot name.
+fn open(in t: Types, ty: u32, depth: u64) -> bool {
+    if depth > 256 {
+        return true;
+    }
+    let n = t.node(ty);
+    if n.kind == TyKind::Infer || n.kind == TyKind::Row || n.kind == TyKind::Fn {
+        return true;
+    }
+    if n.kind == TyKind::Named || n.kind == TyKind::Tuple {
+        for i in 0..w(n.n) {
+            if open(in t, u32_at(in t.items, add(w(n.a), i)), inc(depth)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// The identities of the Fail record's exits: for the i-th `Fail` effect of
+// the row (at row index `index`), `native-fail-exit:<i>` under
+// `$effect:Fail`, `$static:$fncap:<name>:<index>` and the effect's
+// `numeric::instance_key`.
+fn fail_identities(
+    inout t: Types,
+    in names: Names,
+    k: Syms,
+    name: u32,
+    row: u32,
+    inout caps: Caps
+) {
+    let r = t.row(row);
+    let mut fails: u64 = 0;
+    for index in 0..w(r.n) {
+        let e = t.effect_at(add(w(r.a), index));
+        if e.name != k.fail {
+            continue;
+        }
+        let id_a = caps.text.len();
+        put(inout caps.text, "native-fail-exit:");
+        push_decimal(inout caps.text, fails);
+        let id_e = caps.text.len();
+        fails = inc(fails);
+        let k1 = caps.text.len();
+        put(inout caps.text, "$effect:");
+        names.write(e.name, inout caps.text);
+        let k1e = caps.text.len();
+        caps.insert(k1, k1e, id_a, id_e);
+        let k2 = caps.text.len();
+        put(inout caps.text, "$static:$fncap:");
+        names.write(name, inout caps.text);
+        caps.text.push(58);
+        push_decimal(inout caps.text, index);
+        let k2e = caps.text.len();
+        caps.insert(k2, k2e, id_a, id_e);
+        let mut keyed = e.n > 0;
+        for j in 0..w(e.n) {
+            if open(in t, u32_at(in t.items, add(w(e.a), j)), 0) {
+                keyed = false;
+            }
+        }
+        if keyed {
+            let k3 = caps.text.len();
+            put(inout caps.text, "$effect:");
+            names.write(e.name, inout caps.text);
+            caps.text.push(91);
+            for j in 0..w(e.n) {
+                if j > 0 {
+                    put(inout caps.text, ", ");
+                }
+                let arg = default_type(inout t, u32_at(in t.items, add(w(e.a), j)));
+                display(in t, in names, arg, inout caps.text);
+            }
+            caps.text.push(93);
+            let k3e = caps.text.len();
+            caps.insert(k3, k3e, id_a, id_e);
+        }
+    }
+}
+
+// ----- the plan ---------------------------------------------------------------------
+
+// `frame_plan` of instance `name` (`f`) under `abi`, written as
+// `FramePlan::text`; false with the message in `err` when a layout or
+// `scalar` refuses.
+pub fn frame_plan(
+    inout ls: Layouts,
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    in d: Calls,
+    k: Syms,
+    name: u32,
+    in f: Conc,
+    in vars: IVars,
+    abi: FnAbi,
+    operands_only: bool,
+    inout o: ChunkSeq[u8],
+    inout err: Errs
+) -> bool {
+    let info = d.fn_info(f.f);
+    let fail_record = fail_only(inout t, in names, in wd, k, in f);
+    let caller_slot = uses_caller_slot(in d, info);
+    let result = layout_facts(inout ls, inout t, inout names, in wd, f.result, inout err);
+    if !result.ok {
+        return false;
+    }
+    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put(inout line, "trace=0 fail=");
+    bit(inout line, fail_record);
+    put(inout line, " caller=");
+    bit(inout line, caller_slot);
+    put(inout line, " result=");
+    if abi.result_words != 0 {
+        let words = w(abi.result_words);
+        let direct = operands_only
+            && !info.fip
+            && enum_words(inout ls, inout t, inout names, in wd, f.result) == words;
+        if direct {
+            put(inout line, "words ");
+        } else {
+            put(inout line, "buffer ");
+        }
+        push_decimal(inout line, words);
+    } else if result.aggregate {
+        put(inout line, "sret");
+    } else {
+        put(inout line, "value");
+    }
+    line.push(10);
+    for i in 0..f.params.len() {
+        let p = f.param(i);
+        let l = layout_facts(inout ls, inout t, inout names, in wd, p.ty, inout err);
+        if !l.ok {
+            return false;
+        }
+        put(inout line, "P ");
+        names.write(p.name, inout line);
+        if p.pass == TyPass::Inout && !l.aggregate {
+            let v = scalar(in t, in names, in d, k, info, p.ty, inout err);
+            if v == V_NONE {
+                return false;
+            }
+            put(inout line, " load ");
+            put_value_type(inout line, v);
+        } else {
+            put(inout line, " value");
+        }
+        line.push(10);
+    }
+    // `function_arguments`: the `$fn:<param>` bindings, in parameter order
+    // (the substitution is sorted by key, and every key shares the prefix).
+    for i in 0..vars.len() {
+        let key = vars.key(i);
+        if !names.has_prefix(key, in "$fn:".as_bytes()) {
+            continue;
+        }
+        put(inout line, "A ");
+        for b in 4..names.size(key) {
+            line.push(names.byte(key, b));
+        }
+        line.push(32);
+        names.write(t.name(vars.ty(i)), inout line);
+        line.push(10);
+    }
+    if fail_record {
+        let mut caps = caps_new();
+        fail_identities(inout t, in names, k, name, f.row, inout caps);
+        caps.write(inout line);
+    }
+    o.extend(in line.as_slice());
+    true
+}
+
+// The harness dump: see the header.
+pub fn frames_text(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c);
+    let d = read_calls(inout r, in b, in c);
+    let k = syms_new(inout c.names);
+    let facts = program_facts(in c.names, in d, in p);
+    let mut ls = layouts_new();
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for ti in 0..d.tasks.len() {
+        let task = d.task(ti);
+        put(inout o, "E ");
+        c.names.write(task.entry, inout o);
+        if task.optimize {
+            put(inout o, " 1\n");
+        } else {
+            put(inout o, " 0\n");
+        }
+        let found = discover(
+            inout c.types,
+            inout c.names,
+            in c.world,
+            in d,
+            in facts,
+            k,
+            task.entry
+        );
+        let mut err = Errs {
+            text: ChunkSeq::new[u8]()
+        };
+        // The declarations (`declare_instances_with_trace`) come first: a
+        // signature that refuses stops the build before any frame.
+        let mut scratch: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let declared = check_entry(
+            inout c.types,
+            in c.names,
+            in c.world,
+            in d,
+            task.entry,
+            inout err
+        )
+            && found.err.len() == 0
+            && declare(
+                inout ls,
+                inout c.types,
+                inout c.names,
+                in c.world,
+                in d,
+                k,
+                in found,
+                task.entry,
+                task.optimize,
+                inout scratch,
+                inout err
+            );
+        let mut ok = declared;
+        if ok {
+            for i in 0..found.insts.len() {
+                let x = found.inst(i);
+                let vars = found.vars_of(x);
+                let f = concrete(inout c.types, inout c.names, in d, x.name, in vars);
+                let mut abi = default_abi();
+                if task.optimize && x.key != task.entry {
+                    if !internal(
+                        inout ls,
+                        inout c.types,
+                        inout c.names,
+                        in c.world,
+                        in d,
+                        k,
+                        in f,
+                        inout abi,
+                        inout err
+                    ) {
+                        ok = false;
+                        break;
+                    }
+                }
+                put(inout o, "F ");
+                c.names.write(x.key, inout o);
+                o.push(10);
+                if !frame_plan(
+                    inout ls,
+                    inout c.types,
+                    inout c.names,
+                    in c.world,
+                    in d,
+                    k,
+                    x.name,
+                    in f,
+                    in vars,
+                    abi,
+                    task.optimize,
+                    inout o,
+                    inout err
+                ) {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            put(inout o, "X ");
+            if err.failed() {
+                o.extend(in err.text.as_slice());
+            } else {
+                o.extend(in found.err.as_slice());
+            }
+            o.push(10);
+        }
+    }
+    pack_text(in o)
+}

@@ -360,7 +360,7 @@ fn pattern(n: u64) -> Vec<u8> {
 }
 
 fn code(e: &std::io::Error) -> u64 {
-    1000 + vesper_std_host::IoKind::of(e) as u64
+    1000 + std_io_support::oracle::IoKind::of(e) as u64
 }
 
 fn source(dir: &Temp) -> String {

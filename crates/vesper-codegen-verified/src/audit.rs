@@ -1,10 +1,11 @@
 //! The §42.5 fixed-point and DDC gate over a validated lock and its evidence.
 
+use crate::trust::{
+    AttestationBundle, BuildIdentity, BuilderPolicy, Domain, ObjectId, ObjectKind, PackageName,
+    blob_id, verify_attestations,
+};
 use crate::{BootstrapLock, BootstrapVerifyError};
 use std::collections::BTreeSet;
-use vesper_loom_calculus::PackageName;
-use vesper_loom_cas::{Digest, Domain, ObjectId, ObjectKind, blob_id};
-use vesper_loom_trust::{AttestationBundle, BuildIdentity, BuilderPolicy, verify_attestations};
 
 /// TEE evidence for `aegis_tdx_snp_attested = true` locks.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,12 +84,8 @@ pub fn expected_build_identity(
     Ok(BuildIdentity {
         package,
         version: lock.bootstrap.version.clone(),
-        source_tree: ObjectId::new(
-            Domain::Source,
-            ObjectKind::Tree,
-            Digest(*source_root.as_bytes()),
-        )
-        .to_string(),
+        source_tree: ObjectId::new(Domain::Source, ObjectKind::Tree, *source_root.as_bytes())
+            .to_string(),
         derivation: builders.derivation.to_owned(),
         target: builders.target.to_owned(),
         builder_blake3: stage2.to_hex().to_string(),
