@@ -1,0 +1,99 @@
+"""Exact rational conversions for numeric reference fixtures."""
+
+F32 = struct(fraction = 23, exponent = 8, bias = 127, sign = 2147483648)
+F64 = struct(fraction = 52, exponent = 11, bias = 1023, sign = 1 << 63)
+_HEX = "0123456789abcdef"
+
+def bit_length(value):
+    if not value:
+        return 0
+    low, high = 0, len(str(value)) * 4 + 1
+    for _ in range(32):
+        if high - low == 1:
+            break
+        middle = (low + high) // 2
+        if value >> middle:
+            low = middle
+        else:
+            high = middle
+    return high
+
+def _shift(value, amount):
+    # Use the arbitrary-precision shift path even for a machine-sized input.
+    return (value << (amount + 32)) >> 32
+
+def dyadic(value, fmt):
+    mantissa = value & ((1 << fmt.fraction) - 1)
+    exponent = (value >> fmt.fraction) & ((1 << fmt.exponent) - 1)
+    if exponent:
+        mantissa |= 1 << fmt.fraction
+    power = max(exponent, 1) - fmt.bias - fmt.fraction
+    return (-mantissa if value & fmt.sign else mantissa), power
+
+def add(left, right):
+    exponent = min(left[1], right[1])
+    return _shift(left[0], left[1] - exponent) + _shift(right[0], right[1] - exponent), exponent
+
+def rounded(numerator, denominator, power, fmt, negative_zero = False):
+    sign = fmt.sign if numerator < 0 or negative_zero else 0
+    numerator = abs(numerator)
+    if not numerator:
+        return sign
+    integer_exponent = bit_length(numerator) - bit_length(denominator)
+    if integer_exponent >= 0:
+        if numerator < _shift(denominator, integer_exponent):
+            integer_exponent -= 1
+    elif _shift(numerator, -integer_exponent) < denominator:
+        integer_exponent -= 1
+    exponent = integer_exponent + power
+    infinity = ((1 << fmt.exponent) - 1) << fmt.fraction
+    if exponent > fmt.bias:
+        return sign | infinity
+    # Subnormals share the minimum normal exponent and lack its hidden bit.
+    scale = max(exponent, 1 - fmt.bias) - fmt.fraction - power
+    if scale < 0:
+        numerator = _shift(numerator, -scale)
+    else:
+        denominator = _shift(denominator, scale)
+    quotient, remainder = numerator // denominator, numerator % denominator
+    if remainder * 2 > denominator or (remainder * 2 == denominator and quotient & 1):
+        quotient += 1
+    if quotient >= 2 << fmt.fraction:
+        quotient >>= 1
+        exponent += 1
+        if exponent > fmt.bias:
+            return sign | infinity
+    if quotient < 1 << fmt.fraction:
+        return sign | quotient
+    biased = max(exponent, 1 - fmt.bias) + fmt.bias
+    return sign | (biased << fmt.fraction) | (quotient & ((1 << fmt.fraction) - 1))
+
+def pack(value, fmt):
+    return rounded(value[0], 1, value[1], fmt)
+
+def _pow10(n):
+    power, result = 10, 1
+    for _ in range(bit_length(n)):
+        if n & 1:
+            result *= power
+        n >>= 1
+        power *= power
+    return result
+
+def literal(text, fmt):
+    negative = text.startswith("-")
+    coefficient, e, exponent = text.removeprefix("-").partition("e")
+    whole, _, fraction = coefficient.partition(".")
+    magnitude = int(whole + fraction)
+    scale = len(fraction) - (int(exponent.removeprefix("+")) if e else 0)
+    n, d = (magnitude * _pow10(-scale), 1) if scale < 0 else (magnitude, _pow10(scale))
+    return rounded(-n if negative else n, d, 0, fmt)
+
+def hex_bits(value):
+    if not value:
+        return "0"
+    digits = []
+    for _ in range((bit_length(value) + 3) // 4):
+        digits.append(_HEX[value & 15])
+        value >>= 4
+    return "".join(reversed(digits))
