@@ -2508,6 +2508,18 @@ impl<M: Module> Codegen<'_, '_, M> {
                 ),
             }
         };
+        // The length word is taken before any variadic padding shifts the
+        // argument positions, and the padding is emitted before the
+        // refusal, where `foreign_call` emits it (Apple arm64 passes
+        // variadic arguments on the stack: zero words fill the remaining
+        // argument registers first).
+        let length = mapping_length.map(|i| c_args[i]);
+        if let Some(v) = abi.variadic {
+            for _ in 0..v.padding {
+                let zero = self.b.ins().iconst(types::I64, 0);
+                c_args.insert(v.first - v.padding, zero);
+            }
+        }
         let refusal = if strings.is_empty() {
             None
         } else {
@@ -2534,9 +2546,8 @@ impl<M: Module> Codegen<'_, '_, M> {
         } else {
             0
         };
-        let (len_word, len_i64, reg_id) = match mapping_length {
-            Some(idx) => {
-                let v = c_args[idx];
+        let (len_word, len_i64, reg_id) = match length {
+            Some(v) => {
                 let (reg_id, _) = self.foreign_range_helpers()?;
                 let elem_bytes = match plan.function.result() {
                     ValueType::Handle { handle, .. } => handle
@@ -2553,12 +2564,6 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             None => (NO_VALUE, 0, NO_VALUE),
         };
-        if let Some(v) = abi.variadic {
-            for _ in 0..v.padding {
-                let zero = self.b.ins().iconst(types::I64, 0);
-                c_args.insert(v.first - v.padding, zero);
-            }
-        }
         let saved = if plan.handler == Handler::IsolatedMpk {
             let data = self.foreign_isolation_data(&plan.library)?;
             let r = self.foreign_request(

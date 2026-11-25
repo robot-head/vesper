@@ -2,7 +2,8 @@
 use @vesper-std/fs::{
     IoError,
     error_of,
-    invalid_input
+    invalid_input,
+    not_found
 };
 
 pub copy struct ExitStatus {
@@ -533,6 +534,326 @@ fn open_nul_handle(for_write: bool) -> u64 eff [Ffi[StdProcess]] {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The program search of Rust's `Command` on Windows (`resolve_exe` in
+// library/std/src/sys/process/windows.rs), so `CreateProcessW` gets an
+// application name and never runs its own search, which would also look in
+// the current directory. A bare file name is searched along the child's
+// `PATH` (when the command changed it), the executable's directory, the
+// system and Windows directories, then the parent's `PATH`, skipping empty
+// entries, with `.exe` appended when the name has no `.`. A name with a
+// separator is used as given, or with `.exe` when that file exists.
+
+fn is_sep16(u: u16) -> bool {
+    u == 47 || u == 92
+}
+
+fn ascii_letter16(u: u16) -> bool {
+    (u >= 65 && u <= 90) || (u >= 97 && u <= 122)
+}
+
+// `X:` and nothing else (`Prefix::Disk`, the only `is_drive()` prefix).
+fn bare_drive16(in p: Slice[u16]) -> bool {
+    p.len() == 2 && ascii_letter16(get16(in p, 0)) && get16(in p, 1) == 58
+}
+
+fn starts_with_drive16(in p: Slice[u16]) -> bool {
+    p.len() >= 2 && ascii_letter16(get16(in p, 0)) && get16(in p, 1) == 58
+}
+
+fn get32(in s: Slice[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// The first `n` UTF-16 units of a buffer packed two per `u32`.
+fn unpack_u16(in src: Slice[u32], n: u64) -> ChunkSeq[u16] {
+    let mut out: ChunkSeq[u16] = ChunkSeq::with_capacity[u16](n);
+    for i in 0..n {
+        let w = get32(in src, wrapping_shr_u64(i, 1));
+        let u = if (i & 1) == 0 {
+            wrapping_u16(widen_u64(w & 65535))
+        } else {
+            wrapping_u16(widen_u64(wrapping_shr_u32(w, 16)))
+        };
+        out.push(u);
+    }
+    out
+}
+
+// 0: the executable's path, 1: the system directory, 2: the Windows
+// directory; empty when the call fails.
+fn host_dir16(which: u8) -> ChunkSeq[u16] eff [Ffi[StdProcess]] {
+    let mut buf: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    buf.resize(260, 0);
+    loop {
+        let n = if which == 0 {
+            StdProcess::GetModuleFileNameW(0, inout buf.as_slice_mut())
+        } else if which == 1 {
+            StdProcess::GetSystemDirectoryW(inout buf.as_slice_mut())
+        } else {
+            StdProcess::GetWindowsDirectoryW(inout buf.as_slice_mut())
+        };
+        if n == 0 {
+            return ChunkSeq::new[u16]();
+        }
+        let nu = widen_u64(n);
+        if nu < buf.len() {
+            return unpack_u16(in buf.as_slice(), nu);
+        }
+        if buf.len() >= 32768 {
+            return ChunkSeq::new[u16]();
+        }
+        buf.resize(wrapping_mul(buf.len(), 2), 0);
+    }
+    ChunkSeq::new[u16]()
+}
+
+// `PathBuf::pop` of the executable's path: its directory.
+fn parent16(in p: Slice[u16]) -> ChunkSeq[u16] {
+    let mut out: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    let mut last: u64 = p.len();
+    for i in 0..p.len() {
+        if is_sep16(get16(in p, i)) {
+            last = i;
+        }
+    }
+    if last == p.len() {
+        return out;
+    }
+    // Keep the root separator (`C:\vesper.exe` pops to `C:\`).
+    let end = if (last == 2 && starts_with_drive16(in p)) || last == 0 {
+        wrapping_add(last, 1)
+    } else {
+        last
+    };
+    for i in 0..end {
+        out.push(get16(in p, i));
+    }
+    out
+}
+
+fn parent_path16() -> Option[ChunkSeq[u16]] eff [Ffi[StdProcess]] {
+    let mut name: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    name.push(80);
+    name.push(65);
+    name.push(84);
+    name.push(72);
+    let mut buf: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    buf.resize(1024, 0);
+    loop {
+        let n = match StdProcess::GetEnvironmentVariableW(
+            in name.as_slice(),
+            inout buf.as_slice_mut()
+        ) {
+            Result::Ok(n) => n,
+            Result::Err(_) => 0,
+        };
+        if n == 0 {
+            return Option::None;
+        }
+        let nu = widen_u64(n);
+        if nu < buf.len() {
+            return Option::Some(unpack_u16(in buf.as_slice(), nu));
+        }
+        buf.resize(nu, 0);
+    }
+    Option::None
+}
+
+// The child's `PATH` when the command changed it: `Some(None)` when it
+// removed it (or cleared the environment without setting it).
+fn child_path16(in c: ProcCommand) -> Option[Option[ChunkSeq[u16]]] {
+    let n = c.env_ops.len();
+    let mut i = n;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let (a, b) = env_key_bounds(in c, i);
+        if slice_eq_nocase(in c.env_keys[a..b], in "PATH".as_bytes()) {
+            if byte(in c.env_ops.as_slice(), i) != 1 {
+                return Option::Some(Option::None);
+            }
+            let (va, vb) = env_val_bounds(in c, i);
+            let mut w: ChunkSeq[u16] = ChunkSeq::new[u16]();
+            if !utf8_to_utf16(in c.env_vals[va..vb], inout w) {
+                return Option::Some(Option::None);
+            }
+            return Option::Some(Option::Some(w));
+        }
+    }
+    if c.env_cleared {
+        return Option::Some(Option::None);
+    }
+    Option::None
+}
+
+// `PathBuf::push(name)` then `.exe` when `name` has no `.`.
+fn candidate16(in dir: Slice[u16], in name: Slice[u16], has_extension: bool) -> ChunkSeq[u16] {
+    let mut p: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    // A name with a drive prefix (`C:tool`) replaces the directory.
+    if !starts_with_drive16(in name) {
+        p.extend(in dir);
+        let n = dir.len();
+        if n != 0 && !is_sep16(get16(in dir, wrapping_sub(n, 1))) && !bare_drive16(in dir) {
+            p.push(92);
+        }
+    }
+    p.extend(in name);
+    if !has_extension {
+        p.push(46);
+        p.push(101);
+        p.push(120);
+        p.push(101);
+    }
+    p
+}
+
+fn exists16(in path: Slice[u16]) -> bool eff [Ffi[StdProcess]] {
+    match StdProcess::GetFileAttributesW(in path) {
+        Result::Ok(a) => a != StdProcess::INVALID_FILE_ATTRIBUTES,
+        Result::Err(_) => false,
+    }
+}
+
+// The first `dir\name` that exists, over the `;`-separated entries of
+// `paths` (quotes stripped, empty entries skipped), or empty.
+fn search16(in paths: Slice[u16], in name: Slice[u16], has_extension: bool)
+    -> ChunkSeq[u16] eff [Ffi[StdProcess]] {
+    let mut dir: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    let mut quoted = false;
+    let n = paths.len();
+    for i in 0..wrapping_add(n, 1) {
+        let u = get16(in paths, i);
+        if i < n && u == 34 {
+            quoted = !quoted;
+        } else if i == n || (!quoted && u == 59) {
+            if dir.len() != 0 {
+                let c = candidate16(in dir.as_slice(), in name, has_extension);
+                if exists16(in c.as_slice()) {
+                    return c;
+                }
+            }
+            dir.clear();
+        } else {
+            dir.push(u);
+        }
+    }
+    ChunkSeq::new[u16]()
+}
+
+fn lower16(u: u16) -> u16 {
+    if u >= 65 && u <= 90 {
+        wrapping_u16(wrapping_add(widen_u64(u), 32))
+    } else {
+        u
+    }
+}
+
+fn ends_with_exe16(in p: Slice[u16]) -> bool {
+    let n = p.len();
+    if n < 4 {
+        return false;
+    }
+    let base = wrapping_sub(n, 4);
+    lower16(get16(in p, base)) == 46
+        && lower16(get16(in p, wrapping_add(base, 1))) == 101
+        && lower16(get16(in p, wrapping_add(base, 2))) == 120
+        && lower16(get16(in p, wrapping_add(base, 3))) == 101
+}
+
+fn io_err(kind: u32) -> IoError {
+    IoError {
+        kind: kind,
+        os: 0
+    }
+}
+
+// The application name `CreateProcessW` gets for `c.program`.
+fn resolve_exe(in c: ProcCommand) -> Result[ChunkSeq[u16], IoError] eff [Ffi[StdProcess]] {
+    let mut exe: ChunkSeq[u16] = ChunkSeq::new[u16]();
+    if !utf8_to_utf16(in c.program.as_slice(), inout exe) {
+        return Result::Err(io_err(invalid_input()));
+    }
+    let n = exe.len();
+    if n == 0 {
+        return Result::Err(io_err(invalid_input()));
+    }
+    let last = get16(in exe.as_slice(), wrapping_sub(n, 1));
+    let verbatim = n >= 4
+        && get16(in exe.as_slice(), 0) == 92
+        && get16(in exe.as_slice(), 1) == 92
+        && get16(in exe.as_slice(), 2) == 63
+        && get16(in exe.as_slice(), 3) == 92;
+    if last == 92 || (!verbatim && last == 47) {
+        return Result::Err(io_err(invalid_input()));
+    }
+    let mut file_name = true;
+    let mut has_extension = false;
+    for i in 0..n {
+        let u = get16(in exe.as_slice(), i);
+        if is_sep16(u) {
+            file_name = false;
+        }
+        if u == 46 {
+            has_extension = true;
+        }
+    }
+    if !file_name {
+        if ends_with_exe16(in exe.as_slice()) {
+            return Result::Ok(exe);
+        }
+        let mut with_exe: ChunkSeq[u16] = ChunkSeq::new[u16]();
+        with_exe.extend(in exe.as_slice());
+        with_exe.push(46);
+        with_exe.push(101);
+        with_exe.push(120);
+        with_exe.push(101);
+        if exists16(in with_exe.as_slice()) {
+            return Result::Ok(with_exe);
+        }
+        return Result::Ok(exe);
+    }
+    // 1. The child's `PATH`, when the command changed it.
+    match child_path16(in c) {
+        Option::Some(Option::Some(paths)) => {
+            let found = search16(in paths.as_slice(), in exe.as_slice(), has_extension);
+            if found.len() != 0 {
+                return Result::Ok(found);
+            }
+        },
+        _ => {},
+    }
+    // 2. The application's directory; 3 and 4. the system directories.
+    for which in 0..3 {
+        let mut dir = host_dir16(wrapping_u8(which));
+        if which == 0 {
+            dir = parent16(in dir.as_slice());
+        }
+        if dir.len() != 0 {
+            let c16 = candidate16(in dir.as_slice(), in exe.as_slice(), has_extension);
+            if exists16(in c16.as_slice()) {
+                return Result::Ok(c16);
+            }
+        }
+    }
+    // 5. The parent's `PATH`.
+    match parent_path16() {
+        Option::Some(paths) => {
+            let found = search16(in paths.as_slice(), in exe.as_slice(), has_extension);
+            if found.len() != 0 {
+                return Result::Ok(found);
+            }
+        },
+        Option::None => {},
+    }
+    Result::Err(io_err(not_found()))
+}
+
 pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProcess]] {
     if contains_byte(in c.program.as_slice(), 0) {
         return Result::Err(
@@ -542,6 +863,10 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
             }
         );
     }
+    let app = match resolve_exe(in c) {
+        Result::Ok(a) => a,
+        Result::Err(e) => return Result::Err(e),
+    };
     let mut cmd_w: ChunkSeq[u16] = ChunkSeq::new[u16]();
     if !build_cmd_line(in c, inout cmd_w) {
         return Result::Err(
@@ -657,8 +982,9 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
     } else {
         0
     };
+    let app_ptr = alloc_utf16_bytes(in app.as_slice(), false);
     let res = StdProcess::CreateProcessW(
-        0,
+        app_ptr,
         in cmd_w.as_slice(),
         0,
         0,
@@ -669,6 +995,7 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
         in si,
         inout pi
     );
+    free_heap_ptr(app_ptr);
     free_heap_ptr(env_ptr);
     free_heap_ptr(cwd_ptr);
     close_handle_if(out_w);
