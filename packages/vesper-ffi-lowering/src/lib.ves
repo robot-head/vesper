@@ -20,6 +20,10 @@
 // - `op_plan`, `target_support` and each function's ABI signature
 //   (`FunctionDescriptor::abi`): what the native lowering reads.
 // - `ffi_plan_text`: the harness entry.
+// - cpu.ves: the machine code of `@vesper-std/cpu`'s functions
+//   (src/ffi_lowering/cpu.rs), with its entry `ffi_cpu_code`.
+
+use self::cpu::code_for;
 
 const NONE: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
@@ -3462,4 +3466,35 @@ fn pack(in text: ChunkSeq[u8]) -> ChunkSeq[u64] {
         out.push(x);
     }
     out
+}
+
+// The harness entry of cpu.ves (tests/self_host_ffi_cpu.rs): the input is
+// the target's architecture code, the length of its name, the name and the
+// symbol; the result is `code_for`'s architecture, then the code and the
+// error message, each a count and a word per byte.
+pub fn ffi_cpu_code(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let target = widen_u64(byte(in b, 0));
+    let n = widen_u64(byte(in b, 1));
+    let name_end = add(2, n);
+    let mut code: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut error: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let arch = code_for(
+        in b[name_end..b.len()],
+        target,
+        in b[2..name_end],
+        inout code,
+        inout error
+    );
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    o.push(arch);
+    o.push(code.len());
+    for i in 0..code.len() {
+        o.push(widen_u64(u8_at(in code, i)));
+    }
+    o.push(error.len());
+    for i in 0..error.len() {
+        o.push(widen_u64(u8_at(in error, i)));
+    }
+    o
 }

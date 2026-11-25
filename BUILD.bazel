@@ -629,6 +629,14 @@ vesper_crate(
             "tests/imported_source_tests.rs",
             "tests/test_runner_cli.rs",
         ]) + ["//crates/vesper-syntax:files"],
+        # Part 2: doctest fence extraction and the token preflight against
+        # doctest_extract on the same .ves files and their mutants.
+        "test/self_host_doctest_extract": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+        ]),
         # Self-hosting SH4 lane 17 (#1291): @vesper/backend-checks against
         # native_verifiers on the verifier fixtures and the corpus. Anchored
         # globs; @vesper/resonance comes from its crate's package.
@@ -1129,6 +1137,9 @@ vesper_crate(
         # The test runner discovery differential (#1337) JIT-compiles the port
         # and runs the corpus and its mutants: 5-10 min in a debug build.
         "test/self_host_test_runner": "long",
+        # The doctest extraction differential (#1337) runs the corpus and its
+        # mutants with two limit sets.
+        "test/self_host_doctest_extract": "long",
         # The backend-checks differential emits every corpus program 4 times.
         "test/self_host_backend_checks": "long",
         # The optimizer policy (#1279) optimizes every corpus world three times.

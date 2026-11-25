@@ -11,6 +11,7 @@
 //! which engine ran and why it fell back. Coverage is decided by compiling a
 //! probe module per example; probe modules are never executed and are
 //! counted separately from the shared module.
+use crate::doctest_extract::{self, Example, ExtractLimits, PreflightLimits};
 use crate::{
     ast::Diagnostic,
     check,
@@ -168,23 +169,38 @@ pub struct DocTestReport {
     pub jit_examples: usize,
     pub evaluator_examples: usize,
 }
-struct Line {
-    text: String,
-    offset: usize,
-}
-struct Example {
-    lines: Vec<Line>,
-    offset: usize,
-    expected: Option<String>,
-    entry: Option<String>,
-    sim: Option<SimSpec>,
-}
 fn location(source: &str, offset: usize) -> (usize, usize) {
     let offset = offset.min(source.len());
     let prefix = &source[..source.floor_char_boundary(offset)];
     (
         prefix.bytes().filter(|b| *b == b'\n').count() + 1,
         prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1,
+    )
+}
+/// Lexer/token/declaration/nested-segment limits are checked BEFORE recursive
+/// parsing ([`doctest_extract::preflight`]).
+pub fn preflight(source: &str, limits: DocTestLimits) -> Result<(), String> {
+    limits.validate()?;
+    if source.len() > limits.max_combined_bytes {
+        return Err("doctest combined source byte limit".into());
+    }
+    doctest_extract::preflight(
+        source,
+        PreflightLimits {
+            max_tokens: limits.max_tokens,
+            max_nesting: limits.max_nesting,
+            max_segment_tokens: limits.max_segment_tokens,
+            max_declarations: limits.max_declarations,
+        },
+    )
+}
+fn extract(source: &str, limits: DocTestLimits) -> Result<Vec<Example>, String> {
+    doctest_extract::extract(
+        source,
+        ExtractLimits {
+            max_snippet_bytes: limits.max_snippet_bytes,
+            max_examples: limits.max_examples,
+        },
     )
 }
 fn diagnostic(source: &str, d: &Diagnostic, start: usize, end: usize) -> LocatedDiagnostic {
@@ -197,245 +213,6 @@ fn diagnostic(source: &str, d: &Diagnostic, start: usize, end: usize) -> Located
         line,
         column,
     }
-}
-/// Lexer/token/declaration/nested-segment limits are checked BEFORE recursive
-/// parsing. Segment weight includes unfinished outer groups, preventing long
-/// Pratt/operator spines hidden inside nested blocks from evading the guard.
-pub fn preflight(source: &str, limits: DocTestLimits) -> Result<(), String> {
-    limits.validate()?;
-    if source.len() > limits.max_combined_bytes {
-        return Err("doctest combined source byte limit".into());
-    }
-    let (tokens, _) = lexer::lex(source);
-    let mut count = 0usize;
-    let mut declarations = 0usize;
-    // (unfinished outer segment, maximum completed statement, opener).
-    let mut stack: Vec<(usize, usize, K)> = Vec::new();
-    let mut segment = 0usize;
-    let mut top_item = false;
-    for token in tokens {
-        if matches!(
-            token.kind,
-            K::Whitespace | K::Comment | K::BlockComment | K::Eof
-        ) {
-            continue;
-        }
-        count = count.checked_add(1).ok_or("token count overflow")?;
-        if matches!(
-            token.kind,
-            K::Fn | K::Struct | K::Enum | K::Effect | K::Impl
-        ) {
-            declarations += 1;
-        }
-        if count > limits.max_tokens || declarations > limits.max_declarations {
-            return Err("doctest token/declaration limit".into());
-        }
-        if stack.is_empty()
-            && (matches!(
-                token.kind,
-                K::Fn | K::Struct | K::Enum | K::Effect | K::Impl | K::Copy | K::Affine | K::Linear
-            ) || token.kind == K::Lower
-                && matches!(&source[token.span.clone()], "trait" | "model" | "pub"))
-        {
-            top_item = true;
-        }
-        let mut completed_item = false;
-        match token.kind {
-            K::LParen | K::LBrace | K::LBracket => {
-                stack.push((segment, 0, token.kind));
-                segment = 0;
-            }
-            K::RParen | K::RBrace | K::RBracket => {
-                let (outer, peak, opener) = stack.pop().unwrap_or((0, 0, token.kind));
-                segment = outer
-                    .checked_add(segment.max(peak))
-                    .and_then(|n| n.checked_add(1))
-                    .ok_or("segment overflow")?;
-                completed_item =
-                    stack.is_empty() && top_item && opener == K::LBrace && token.kind == K::RBrace;
-            }
-            K::Semi => {
-                if let Some((_, peak, _)) = stack.last_mut() {
-                    *peak = (*peak).max(segment);
-                }
-                segment = 0;
-                if stack.is_empty() {
-                    top_item = false;
-                }
-            }
-            _ => segment = segment.checked_add(1).ok_or("segment overflow")?,
-        }
-        let weighted = stack.iter().try_fold(segment, |n, (outer, _, _)| {
-            n.checked_add(*outer).ok_or("segment overflow")
-        })?;
-        if stack.len() > limits.max_nesting || weighted > limits.max_segment_tokens {
-            return Err("doctest nesting/expression-segment limit".into());
-        }
-        if completed_item {
-            segment = 0;
-            top_item = false;
-        }
-    }
-    Ok(())
-}
-fn fence(text: &str) -> Option<(char, usize, &str)> {
-    let text = text.trim();
-    let first = text.chars().next()?;
-    if first != '`' && first != '~' {
-        return None;
-    }
-    let count = text.chars().take_while(|c| *c == first).count();
-    (count >= 3).then_some((first, count, text[count..].trim()))
-}
-/// Split fence info on commas outside parentheses.
-fn attribute_parts(info: &str) -> Result<Vec<&str>, String> {
-    let mut parts = Vec::new();
-    let (mut depth, mut start) = (0usize, 0usize);
-    for (i, c) in info.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
-                depth = depth
-                    .checked_sub(1)
-                    .ok_or("unbalanced doctest fence attribute")?
-            }
-            ',' if depth == 0 => {
-                parts.push(info[start..i].trim());
-                start = i + 1;
-            }
-            _ => (),
-        }
-    }
-    if depth != 0 {
-        return Err("unbalanced doctest fence attribute".into());
-    }
-    parts.push(info[start..].trim());
-    Ok(parts)
-}
-type Attributes = (Option<String>, Option<String>, Option<SimSpec>);
-fn attributes(info: &str) -> Result<Attributes, String> {
-    let mut expected = None;
-    let mut entry = None;
-    let mut simulated = None;
-    for part in attribute_parts(info)?.into_iter().skip(1) {
-        if let Some(code) = part
-            .strip_prefix("compile_fail(")
-            .and_then(|s| s.strip_suffix(')'))
-        {
-            if expected.is_some()
-                || code.len() != 5
-                || !code.starts_with('E')
-                || !code[1..].bytes().all(|b| b.is_ascii_digit())
-            {
-                return Err("invalid doctest diagnostic code".into());
-            }
-            expected = Some(code.to_string());
-        } else if let Some(name) = part.strip_prefix("entry=") {
-            if entry.is_some()
-                || name.is_empty()
-                || name.len() > 128
-                || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                || name.as_bytes()[0].is_ascii_digit()
-            {
-                return Err("invalid doctest entry".into());
-            }
-            entry = Some(name.to_string());
-        } else if let Some(inner) = part.strip_prefix("sim(").and_then(|s| s.strip_suffix(')')) {
-            if simulated.is_some() {
-                return Err("duplicate sim doctest attribute".into());
-            }
-            simulated = Some(SimSpec::parse(inner).map_err(|e| e.to_string())?);
-        } else {
-            return Err(format!(
-                "unsupported Vesper doctest fence attribute '{part}'"
-            ));
-        }
-    }
-    if expected.is_some() && entry.is_some() {
-        return Err("compile_fail doctest cannot request execution entry".into());
-    }
-    if expected.is_some() && simulated.is_some() {
-        return Err("compile_fail doctest cannot request simulated execution".into());
-    }
-    Ok((expected, entry, simulated))
-}
-fn extract(source: &str, limits: DocTestLimits) -> Result<Vec<Example>, String> {
-    let (tokens, _) = lexer::lex(source);
-    let mut blocks: Vec<Vec<Line>> = Vec::new();
-    let mut previous = None;
-    for t in tokens {
-        if t.kind != K::Comment {
-            continue;
-        }
-        let raw = &source[t.span.clone()];
-        if !(raw.starts_with("///") && !raw.starts_with("////") || raw.starts_with("//!")) {
-            previous = None;
-            continue;
-        }
-        let offset = t.span.start + 3 + usize::from(raw[3..].starts_with(' '));
-        if previous.is_none_or(|end| !source[end..t.span.start].chars().all(char::is_whitespace)) {
-            blocks.push(Vec::new());
-        }
-        blocks.last_mut().expect("new doc block").push(Line {
-            text: source[offset..t.span.end].to_string(),
-            offset,
-        });
-        previous = Some(t.span.end);
-    }
-    let mut examples = Vec::new();
-    for block in blocks {
-        let mut active: Option<(char, usize, Option<Example>)> = None;
-        let mut code_bytes = 0usize;
-        for line in block {
-            if let Some((kind, width, example)) = &mut active {
-                if fence(&line.text)
-                    .is_some_and(|(c, n, info)| c == *kind && n >= *width && info.is_empty())
-                {
-                    if let Some(e) = example.take() {
-                        examples.push(e);
-                        if examples.len() > limits.max_examples {
-                            return Err("doctest example limit".into());
-                        }
-                    }
-                    active = None;
-                    continue;
-                }
-                if let Some(e) = example {
-                    code_bytes = code_bytes
-                        .checked_add(line.text.len())
-                        .and_then(|n| n.checked_add(1))
-                        .ok_or("snippet byte overflow")?;
-                    if code_bytes > limits.max_snippet_bytes {
-                        return Err("doctest snippet byte limit".into());
-                    }
-                    e.lines.push(line);
-                }
-            } else if let Some((kind, width, info)) = fence(&line.text) {
-                let language = info.split(',').next().unwrap_or("").trim();
-                if language != "vesper" && language.split_whitespace().next() == Some("vesper") {
-                    return Err("unsupported Vesper doctest fence metadata (use comma-separated attributes)".into());
-                }
-                let example = if language == "vesper" {
-                    let (expected, entry, sim) = attributes(info)?;
-                    Some(Example {
-                        lines: Vec::new(),
-                        offset: line.offset,
-                        expected,
-                        entry,
-                        sim,
-                    })
-                } else {
-                    None
-                };
-                code_bytes = 0;
-                active = Some((kind, width, example));
-            }
-        }
-        if active.is_some_and(|(_, _, e)| e.is_some()) {
-            return Err("unterminated Vesper doctest fence".into());
-        }
-    }
-    Ok(examples)
 }
 struct Generated {
     source: String,
