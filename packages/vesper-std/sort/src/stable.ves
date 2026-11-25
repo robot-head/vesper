@@ -3,7 +3,7 @@ use self::unstable::{
     lt,
     insertion
 };
-use self::sugar::{
+use @vesper-std/sugar::{
     guard,
     when
 };

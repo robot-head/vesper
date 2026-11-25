@@ -1290,6 +1290,16 @@ vesper_package(
     srcs = glob(["packages/vesper-std/sort/src/**/*.ves"]),
     manifest = "packages/vesper-std/sort/Loom.toml",
     visibility = ["//visibility:public"],
+    deps = [":std_sugar_package"],
+)
+
+# @vesper-std/sugar, the `guard` and `when` sugars, as a path dependency of
+# @vesper-std/sort and any port package that imports them.
+vesper_package(
+    name = "std_sugar_package",
+    srcs = glob(["packages/vesper-std/sugar/src/**/*.ves"]),
+    manifest = "packages/vesper-std/sugar/Loom.toml",
+    visibility = ["//visibility:public"],
 )
 
 # The front end v2 and @vesper-std/hash(-sys) as dependencies of the fmt and

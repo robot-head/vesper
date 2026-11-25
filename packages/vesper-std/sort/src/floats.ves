@@ -4,7 +4,7 @@ use self::unstable::{
     is_sorted
 };
 use self::stable::stable_sort;
-use self::sugar::{
+use @vesper-std/sugar::{
     guard,
     when
 };

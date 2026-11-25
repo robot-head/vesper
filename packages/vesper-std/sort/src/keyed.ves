@@ -4,7 +4,7 @@ use self::unstable::{
     swap_at,
     depth_limit
 };
-use self::sugar::{
+use @vesper-std/sugar::{
     guard,
     when
 };
