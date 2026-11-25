@@ -1335,9 +1335,39 @@ impl Lowered {
     }
 }
 
+/// Swap-in point for [`lower`] (front-end wiring slice 4, `#1976`): the
+/// hybrid fills it from `@vesper/check-dyn`. `None` falls back to Rust.
+#[derive(Clone, Copy)]
+pub struct DynFnTable {
+    pub lower: fn(&Module) -> Option<Result<Lowered, Vec<Diagnostic>>>,
+}
+
+static DYN_FN: std::sync::OnceLock<DynFnTable> = std::sync::OnceLock::new();
+
+pub fn install_dyn_fn(table: DynFnTable) -> Result<(), DynFnTable> {
+    DYN_FN.set(table)
+}
+
 pub fn lower(module: &Module) -> Result<Lowered, Vec<Diagnostic>> {
+    if let Some(table) = DYN_FN.get()
+        && let Some(lowered) = (table.lower)(module)
+    {
+        return lowered;
+    }
+    rust_lower(module)
+}
+
+/// The first synthetic span start's lower bound: `serde_json`'s length of
+/// `module` plus 1,000,000 ([`Lowered::base`]).
+pub fn span_base(module: &Module) -> usize {
+    serde_json::to_string(module).map(|s| s.len()).unwrap_or(0) + 1_000_000
+}
+
+/// The Rust [`lower`].
+#[doc(hidden)]
+pub fn rust_lower(module: &Module) -> Result<Lowered, Vec<Diagnostic>> {
     let decls = Decls::of(module);
-    let base = serde_json::to_string(module).map(|s| s.len()).unwrap_or(0) + 1_000_000;
+    let base = span_base(module);
     let mut l = Lowering {
         decls: &decls,
         traits: BTreeMap::new(),

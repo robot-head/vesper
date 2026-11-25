@@ -128,6 +128,40 @@ pub fn decode(source: &str, words: &[u64]) -> Parse {
     }
 }
 
+/// An `ast` section read on its own (the checker swaps' results, #1976):
+/// the module, and the names its symbols index for the side tables that
+/// follow the section. The parse swap includes this file too and reads
+/// only whole streams, hence `allow(dead_code)`.
+#[allow(dead_code)]
+pub struct AstSection {
+    pub module: Module,
+    text: String,
+    starts: Vec<u64>,
+}
+
+#[allow(dead_code)]
+impl AstSection {
+    /// The text of symbol `sym`.
+    pub fn name(&self, sym: u64) -> &str {
+        let sym = sym as usize;
+        &self.text[self.starts[sym] as usize..self.starts[sym + 1] as usize]
+    }
+}
+
+/// Reads the `ast` section at `words[*at..]` and moves `at` past it.
+#[allow(dead_code)]
+pub fn read_ast_section(words: &[u64], at: &mut usize) -> AstSection {
+    let mut r = Words { w: words, at: *at };
+    let ast = Ast::read(&mut r);
+    *at = r.at;
+    let module = ast.module();
+    AstSection {
+        module,
+        starts: ast.starts.to_vec(),
+        text: ast.text,
+    }
+}
+
 /// The arenas of `@vesper/ast`'s `Ast`, in the stream's order.
 struct Ast<'a> {
     text: String,
