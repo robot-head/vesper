@@ -711,6 +711,7 @@ impl<'a> vesper__sim_2session__wal__ScanResultRef<'a> {
 }
 
 const _: () = assert!(<() as Abi>::WORDS == 1);
+const _: () = assert!(<(bool, u64) as Abi>::WORDS == 2);
 const _: () = assert!(<(u32, u8, u64, u32) as Abi>::WORDS == 4);
 const _: () = assert!(<(u64, bool, u64) as Abi>::WORDS == 3);
 const _: () = assert!(<(u8, u64) as Abi>::WORDS == 2);
@@ -786,7 +787,10 @@ unsafe extern "C" {
     fn vesper_sim_sim_process_table_len(t: *mut u64) -> i64;
     fn vesper_sim_sim_process_table_new(result: *mut u64, n: i64, max_epochs: i64) -> i64;
     fn vesper_sim_sim_process_table_restart(result: *mut u64, t: *mut u64, p: i64) -> i64;
+    fn vesper_sim_sim_validate_log_bounds(max_records: i64, max_bytes: i64, max_record_bytes: i64) -> i64;
     fn vesper_sim_sim_validate_model_bounds(max_events: i64, max_epochs: i64, max_instances: i64, n_processes: i64, n_logs: i64, n_networks: i64, n_faults: i64, n_failures: i64) -> i64;
+    fn vesper_sim_sim_validate_network_bounds(max_in_flight: i64, max_inbox: i64, max_message_bytes: i64, timeout_code: i64, unreachable_code: i64) -> i64;
+    fn vesper_sim_sim_validate_process_timeline(result: *mut u64, events: *mut u64) -> i64;
     fn vesper_sim_splitmix_chance(state: *mut u64, ppm: i64) -> i64;
     fn vesper_sim_splitmix_next(state: *mut u64) -> i64;
     fn vesper_sim_stationary_bad_ppm(good_to_bad_ppm: i64, bad_to_good_ppm: i64) -> i64;
@@ -1319,6 +1323,15 @@ pub fn sim_process_table_restart(t: &mut vesper__sim_2session__process__ProcessT
     <(u8, u64) as Abi>::get(&result[0..])
 }
 
+/// Calls `sim_validate_log_bounds` of the Vesper library `sim` (`vesper_sim_sim_validate_log_bounds`).
+pub fn sim_validate_log_bounds(max_records: u64, max_bytes: u64, max_record_bytes: u64) -> bool {
+    // SAFETY: `vesper_sim_sim_validate_log_bounds` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_sim_validate_log_bounds(max_records as i64, max_bytes as i64, max_record_bytes as i64) };
+    raw != 0
+}
+
 /// Calls `sim_validate_model_bounds` of the Vesper library `sim` (`vesper_sim_sim_validate_model_bounds`).
 pub fn sim_validate_model_bounds(max_events: u64, max_epochs: u64, max_instances: u64, n_processes: u64, n_logs: u64, n_networks: u64, n_faults: u64, n_failures: u64) -> u8 {
     // SAFETY: `vesper_sim_sim_validate_model_bounds` has exactly this signature in the export ABI; every
@@ -1326,6 +1339,25 @@ pub fn sim_validate_model_bounds(max_events: u64, max_epochs: u64, max_instances
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_sim_sim_validate_model_bounds(max_events as i64, max_epochs as i64, max_instances as i64, n_processes as i64, n_logs as i64, n_networks as i64, n_faults as i64, n_failures as i64) };
     raw as u8
+}
+
+/// Calls `sim_validate_network_bounds` of the Vesper library `sim` (`vesper_sim_sim_validate_network_bounds`).
+pub fn sim_validate_network_bounds(max_in_flight: u64, max_inbox: u64, max_message_bytes: u64, timeout_code: u64, unreachable_code: u64) -> u8 {
+    // SAFETY: `vesper_sim_sim_validate_network_bounds` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_sim_validate_network_bounds(max_in_flight as i64, max_inbox as i64, max_message_bytes as i64, timeout_code as i64, unreachable_code as i64) };
+    raw as u8
+}
+
+/// Calls `sim_validate_process_timeline` of the Vesper library `sim` (`vesper_sim_sim_validate_process_timeline`).
+pub fn sim_validate_process_timeline(events: &[u64]) -> (bool, u64) {
+    let mut result = [0u64; 2];
+    // SAFETY: `vesper_sim_sim_validate_process_timeline` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(events, |view_events| unsafe { vesper_sim_sim_validate_process_timeline(result.as_mut_ptr(), view_events) });
+    <(bool, u64) as Abi>::get(&result[0..])
 }
 
 /// Calls `splitmix_chance` of the Vesper library `sim` (`vesper_sim_splitmix_chance`).

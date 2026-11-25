@@ -9,6 +9,11 @@ const MAX_FAILURES: u64 = 256;
 const MAX_EVENTS: u64 = 1000000;
 const MAX_EPOCHS: u64 = 64;
 const MAX_INSTANCES: u64 = 256;
+const MAX_LOG_BYTES: u64 = 1048576;
+const MAX_LOG_RECORDS: u64 = 65536;
+const MAX_QUEUE: u64 = 4096;
+const MAX_MESSAGE_BYTES: u64 = 65536;
+const I32_MAX: u64 = 2147483647;
 
 pub struct ProcessTable {
     epochs: ChunkSeq[u64],
@@ -151,4 +156,111 @@ pub fn validate_model_bounds(
         return 4;
     }
     0
+}
+
+pub fn validate_log_bounds(max_records: u64, max_bytes: u64, max_record_bytes: u64) -> bool {
+    max_records > 0
+        && max_records <= MAX_LOG_RECORDS
+        && max_bytes > 0
+        && max_bytes <= MAX_LOG_BYTES
+        && max_record_bytes > 0
+        && max_record_bytes <= max_bytes
+}
+
+pub fn validate_network_bounds(
+    max_in_flight: u64,
+    max_inbox: u64,
+    max_message_bytes: u64,
+    timeout_code: u64,
+    unreachable_code: u64
+) -> u8 {
+    if max_in_flight == 0
+        || max_in_flight > MAX_QUEUE
+        || max_inbox == 0
+        || max_inbox > MAX_QUEUE
+        || max_message_bytes == 0
+        || max_message_bytes > MAX_MESSAGE_BYTES {
+        return 1;
+    }
+    if timeout_code > I32_MAX || unreachable_code > I32_MAX {
+        return 2;
+    }
+    0
+}
+
+fn slice_at(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn validate_process_timeline(in events: Slice[u64]) -> (bool, u64) {
+    let n = events.len() / 2;
+    let mut times = ChunkSeq::new[u64]();
+    let mut crashes = ChunkSeq::new[u64]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let off = wrapping_mul(i, 2);
+        times.push(slice_at(in events, off));
+        crashes.push(slice_at(in events, wrapping_add(off, 1)));
+        i = wrapping_add(i, 1);
+    }
+    // Insertion sort by `(at_ns, is_crash)` ascending.
+    let mut k: u64 = 1;
+    loop {
+        if k >= n {
+            break;
+        }
+        let kt = epoch_at(in times, k);
+        let kc = epoch_at(in crashes, k);
+        let mut j = k;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev = wrapping_sub(j, 1);
+            let pt = epoch_at(in times, prev);
+            let pc = epoch_at(in crashes, prev);
+            if pt < kt || (pt == kt && pc <= kc) {
+                break;
+            }
+            let _ = times.try_set(j, pt);
+            let _ = crashes.try_set(j, pc);
+            j = prev;
+        }
+        let _ = times.try_set(j, kt);
+        let _ = crashes.try_set(j, kc);
+        k = wrapping_add(k, 1);
+    }
+    let mut expect_crash: u64 = 1;
+    let mut has_last = false;
+    let mut last: u64 = 0;
+    let mut restarts: u64 = 0;
+    let mut m: u64 = 0;
+    loop {
+        if m >= n {
+            break;
+        }
+        let at = epoch_at(in times, m);
+        let crash = epoch_at(in crashes, m);
+        if (has_last && last == at) || crash != expect_crash {
+            return (false, 0);
+        }
+        if crash == 0 {
+            restarts = wrapping_add(restarts, 1);
+        }
+        expect_crash = if expect_crash == 1 {
+            0
+        } else {
+            1
+        };
+        has_last = true;
+        last = at;
+        m = wrapping_add(m, 1);
+    }
+    (true, restarts)
 }

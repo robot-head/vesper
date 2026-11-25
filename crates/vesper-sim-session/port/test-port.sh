@@ -40,4 +40,5 @@ expect quic --lib "test model::umem::tests::header_errors_bounds_and_a_dropping_
 expect quic "--test self_host_sim_session" "^quic_wire: "
 expect process "--test models" "test stale_host_completions_are_rejected_without_losing_the_response ... FAILED"
 expect failure "--test models" "test partitions_heal_and_delayed_failures_replay_exactly ... FAILED"
-echo "divergent sim-session port detected (link, WAL codec, net, WAL state machine, QUIC wire, process epochs and failure injection each caught)"
+expect validate "--test models" "test model_scenarios_are_validated_at_load ... FAILED"
+echo "divergent sim-session port detected (link, WAL codec, net, WAL state machine, QUIC wire, process epochs, failure injection and model validator each caught)"
