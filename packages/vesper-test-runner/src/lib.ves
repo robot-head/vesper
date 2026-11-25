@@ -14,10 +14,16 @@
 // - big.ves: the `i128` of integer attribute values.
 // - attrs.ves: `extract_test_attrs`.
 // - discover.ves: `case_rows`, `discover` and `classify`.
+// - doctest.ves: doctest fence extraction and the token preflight of
+//   `vesper test --doc` (src/doctest_extract.rs).
 
 use self::discover::{
     case_rows,
     discover
+};
+use self::doctest::{
+    extract,
+    preflight
 };
 
 // The word format of the entries; tests/common/test_runner_words.rs
@@ -43,4 +49,22 @@ pub fn case_rows_str(in input: Str) -> ChunkSeq[u64] {
 
 pub fn discover_str(in input: Str) -> ChunkSeq[u64] {
     discover(in input.as_bytes())
+}
+
+// `doctest_extract::preflight` over the input words.
+pub fn doctest_preflight_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    preflight(in input)
+}
+
+// `doctest_extract::extract` over the input words.
+pub fn doctest_extract_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    extract(in input)
+}
+
+pub fn doctest_preflight_str(in input: Str) -> ChunkSeq[u64] {
+    preflight(in input.as_bytes())
+}
+
+pub fn doctest_extract_str(in input: Str) -> ChunkSeq[u64] {
+    extract(in input.as_bytes())
 }

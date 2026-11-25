@@ -23,6 +23,8 @@ pub mod codegen_swap;
 pub mod database;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod doctest;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod doctest_extract;
 pub mod dyn_fn;
 pub mod dyn_trait;
 #[cfg(not(target_arch = "wasm32"))]

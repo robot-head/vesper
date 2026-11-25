@@ -211,6 +211,10 @@ mod stack_words;
 // shared with the root package's tests/self_host_test_runner.rs.
 #[path = "../../../tests/common/test_runner_words.rs"]
 mod test_runner_words;
+// The doctest extraction words (SH5 lane 14 part 2), shared with the root
+// package's tests/self_host_doctest_extract.rs.
+#[path = "../../../tests/common/doctest_extract_words.rs"]
+mod doctest_extract_words;
 
 // The inliner swap's encoder and decoder (#1250), shared with the root
 // package's tests/self_host_ir_inline.rs.
@@ -1623,6 +1627,25 @@ const VESPER_TEST_DISCOVERY: vesper::test_discovery::TestDiscoveryTable =
         },
     };
 
+/// `vesper::doctest_extract::DocTestExtractTable` from `modules/test_runner`:
+/// the doctest fence extraction and token preflight of `@vesper/test-runner`.
+const VESPER_DOCTEST_EXTRACT: vesper::doctest_extract::DocTestExtractTable =
+    vesper::doctest_extract::DocTestExtractTable {
+        preflight: |source, limits| {
+            let input = doctest_extract_words::preflight_input(source, limits);
+            doctest_extract_words::decode_preflight(&test_runner_binding::doctest_preflight_words(
+                &input,
+            ))
+        },
+        extract: |source, limits| {
+            let input = doctest_extract_words::extract_input(source, limits);
+            doctest_extract_words::decode_extract(
+                source,
+                &test_runner_binding::doctest_extract_words(&input),
+            )
+        },
+    };
+
 /// `ir_swap`'s `inline` hook from `modules/ir_inline`: the inliner of
 /// `@vesper/ir-inline`. The package decides and splices; the hook encodes
 /// the world's answers and the program, and reads the report and the
@@ -1877,6 +1900,9 @@ extern "C" fn install() {
         std::process::abort();
     }
     if vesper::test_discovery::install_test_discovery(VESPER_TEST_DISCOVERY).is_err() {
+        std::process::abort();
+    }
+    if vesper::doctest_extract::install_doctest_extract(VESPER_DOCTEST_EXTRACT).is_err() {
         std::process::abort();
     }
     if vesper::ir_swap::install(VESPER_IR_PASSES).is_err() {
