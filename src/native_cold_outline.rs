@@ -51,11 +51,16 @@ struct CandidateRegion {
 /// Returns `(cold_func_id, cold_key, cold_ir_function)` for each outlined
 /// helper. Callers should observe (if needed) and define each returned helper
 /// on `m`.
-pub(crate) fn outline<M: Module>(
+pub fn outline<M: Module>(
     m: &mut M,
     parent_key: &str,
     func: &mut ir::Function,
 ) -> Result<Vec<(FuncId, String, ir::Function)>, String> {
+    CAPTURED.with(|c| {
+        if let Some(c) = c.borrow_mut().as_mut() {
+            c.push((parent_key.to_string(), func.clone()));
+        }
+    });
     if func.layout.blocks().count() < 3
         || !func.dynamic_stack_slots.is_empty()
         || !func.dfg.exception_tables.is_empty()
@@ -80,24 +85,73 @@ pub(crate) fn outline<M: Module>(
         let Some(candidate) = find_candidate(func, &stub_blocks) else {
             break;
         };
-        let cold_key = format!("{parent_key}::cold#{idx}");
         let root = candidate.root;
-        let Some((cold_id, cold_func)) = extract_region(m, func, &candidate)? else {
-            stub_blocks.insert(root);
+        stub_blocks.insert(root);
+        let Some(plan) = plan_extraction(func, &candidate) else {
             continue;
         };
-        let flags = cranelift_codegen::settings::Flags::new(cranelift_codegen::settings::builder());
-        if let Err(errors) = cranelift_codegen::verify_function(&cold_func, &flags) {
-            return Err(format!(
-                "cold outline '{cold_key}' verifier errors:\n{errors}\n{}",
-                cold_func.display()
-            ));
-        }
-        stub_blocks.insert(root);
-        outlined.push((cold_id, cold_key, cold_func));
+        outlined.push(apply_extraction(m, parent_key, idx, func, &plan)?);
     }
 
     Ok(outlined)
+}
+
+thread_local! {
+    static CAPTURED: std::cell::RefCell<Option<Vec<(String, ir::Function)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` and returns, with its result, every `(parent_key, function)`
+/// this pass was given on this thread meanwhile (as it was before the
+/// pass). The `@vesper/native-cold-outline` differential (#1829) compares
+/// the port on exactly these inputs.
+pub fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<(String, ir::Function)>) {
+    let outer = CAPTURED.with(|c| c.borrow_mut().replace(Vec::new()));
+    let r = f();
+    let got = CAPTURED.with(|c| std::mem::replace(&mut *c.borrow_mut(), outer));
+    (r, got.unwrap_or_default())
+}
+
+/// Every decision of one outlining (the analysis half of the extraction):
+/// what `@vesper/native-cold-outline` answers with, and what
+/// [`apply_extraction`] builds the helper and the parent's stub from.
+pub struct Extraction {
+    /// The region's root, which becomes the stub.
+    pub root: ir::Block,
+    /// The blocks `root` dominates; removed from the parent.
+    pub owned: BTreeSet<ir::Block>,
+    pub has_return: bool,
+    pub first_trap: Option<TrapCode>,
+    /// The helper's leading parameters, in order.
+    pub live_ins: Vec<ir::Value>,
+    /// Values the helper recomputes at its entry, with their definitions.
+    pub remat: Vec<(ir::Value, ir::Inst)>,
+    /// Slots the parent keeps and passes by address, then the slots moved.
+    pub shared_slots: Vec<StackSlot>,
+    pub exclusive_slots: Vec<StackSlot>,
+    /// The region's other blocks, in reverse post-order from `root`.
+    pub ordered_blocks: Vec<ir::Block>,
+}
+
+/// Builds and verifies outlining number `idx` of `func` (its helper is
+/// `{parent_key}::cold#{idx}`) and puts the stub in `func`.
+pub fn apply_extraction<M: Module>(
+    m: &mut M,
+    parent_key: &str,
+    idx: usize,
+    func: &mut ir::Function,
+    plan: &Extraction,
+) -> Result<(FuncId, String, ir::Function), String> {
+    let cold_key = format!("{parent_key}::cold#{idx}");
+    let (cold_id, cold_func) = build_extraction(m, func, plan)?;
+    let flags = cranelift_codegen::settings::Flags::new(cranelift_codegen::settings::builder());
+    if let Err(errors) = cranelift_codegen::verify_function(&cold_func, &flags) {
+        return Err(format!(
+            "cold outline '{cold_key}' verifier errors:\n{errors}\n{}",
+            cold_func.display()
+        ));
+    }
+    Ok((cold_id, cold_key, cold_func))
 }
 
 fn find_candidate(
@@ -488,11 +542,9 @@ fn region_worth_outlining(
     worth.then_some(max_live_ins)
 }
 
-fn extract_region<M: Module>(
-    m: &mut M,
-    func: &mut ir::Function,
-    region: &CandidateRegion,
-) -> Result<Option<(FuncId, ir::Function)>, String> {
+/// The analysis half of the extraction: `None` when the region cannot go
+/// (a live-in that is not a portable scalar, or too many live-ins).
+fn plan_extraction(func: &ir::Function, region: &CandidateRegion) -> Option<Extraction> {
     let root = region.root;
     let region_blocks: BTreeSet<ir::Block> =
         region.owned.union(&region.shared_tails).copied().collect();
@@ -544,7 +596,7 @@ fn extract_region<M: Module>(
                 }
                 let ty = func.dfg.value_type(v);
                 if !is_portable_scalar_param(ty) {
-                    return Ok(None);
+                    return None;
                 }
                 if live_in_seen.insert(v) {
                     live_ins.push(v);
@@ -554,9 +606,39 @@ fn extract_region<M: Module>(
     }
 
     if live_ins.len() + shared_slots.len() > region.max_live_ins {
-        return Ok(None);
+        return None;
     }
+    // Visit `region_blocks \ {root}` in reverse postorder from `root` so
+    // dominating definitions are always cloned before their uses.
+    let ordered_blocks: Vec<ir::Block> = rpo_order(func, root, &region_blocks)
+        .into_iter()
+        .filter(|b| *b != root)
+        .collect();
+    Some(Extraction {
+        root,
+        owned: region.owned.clone(),
+        has_return: region.has_return,
+        first_trap: region.first_trap,
+        live_ins,
+        remat: remat_insts,
+        shared_slots,
+        exclusive_slots,
+        ordered_blocks,
+    })
+}
 
+/// The building half: the helper from `plan`'s decisions, and the stub.
+fn build_extraction<M: Module>(
+    m: &mut M,
+    func: &mut ir::Function,
+    plan: &Extraction,
+) -> Result<(FuncId, ir::Function), String> {
+    let root = plan.root;
+    let live_ins = plan.live_ins.clone();
+    let shared_slots = plan.shared_slots.clone();
+    let exclusive_slots = plan.exclusive_slots.clone();
+    let ordered_blocks = plan.ordered_blocks.clone();
+    let remat_insts = plan.remat.clone();
     let ptr_ty = m.target_config().pointer_type();
     let mut cold_sig = m.make_signature();
     cold_sig.call_conv = func.signature.call_conv;
@@ -566,7 +648,7 @@ fn extract_region<M: Module>(
     for _ in &shared_slots {
         cold_sig.params.push(AbiParam::new(ptr_ty));
     }
-    if region.has_return {
+    if plan.has_return {
         cold_sig.returns = func.signature.returns.clone();
     }
 
@@ -596,10 +678,6 @@ fn extract_region<M: Module>(
 
     let mut block_map: BTreeMap<ir::Block, ir::Block> = BTreeMap::new();
     block_map.insert(root, cold_entry);
-    // Visit `region_blocks \ {root}` in reverse postorder from `root` so
-    // dominating definitions are always cloned before their uses.
-    let rpo_blocks = rpo_order(func, root, &region_blocks);
-    let ordered_blocks: Vec<ir::Block> = rpo_blocks.into_iter().filter(|b| *b != root).collect();
     for &b in &ordered_blocks {
         let new_b = cold_func.dfg.make_block();
         cold_func.layout.append_block(new_b);
@@ -669,7 +747,7 @@ fn extract_region<M: Module>(
     func.layout.append_inst(call_inst, root);
     func.set_srcloc(call_inst, stub_loc);
 
-    if region.has_return {
+    if plan.has_return {
         let results: Vec<ir::Value> = func.dfg.inst_results(call_inst).to_vec();
         let mut ret_list = ValueList::default();
         ret_list.extend(results, &mut func.dfg.value_lists);
@@ -681,9 +759,7 @@ fn extract_region<M: Module>(
         func.layout.append_inst(ret_inst, root);
         func.set_srcloc(ret_inst, stub_loc);
     } else {
-        let code = region
-            .first_trap
-            .unwrap_or_else(|| TrapCode::unwrap_user(1));
+        let code = plan.first_trap.unwrap_or_else(|| TrapCode::unwrap_user(1));
         let trap_inst = func.dfg.make_inst(InstructionData::Trap {
             opcode: Opcode::Trap,
             code,
@@ -699,7 +775,7 @@ fn extract_region<M: Module>(
         func.sized_stack_slots[ss].size = 0;
         func.sized_stack_slots[ss].align_shift = 0;
     }
-    for &b in &region.owned {
+    for &b in &plan.owned {
         if b == root {
             continue;
         }
@@ -710,7 +786,7 @@ fn extract_region<M: Module>(
         func.layout.remove_block(b);
     }
 
-    Ok(Some((cold_id, cold_func)))
+    Ok((cold_id, cold_func))
 }
 
 struct Cloner<'a> {
