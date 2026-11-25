@@ -88,7 +88,7 @@ scratch printer inline and returns early (the `args_error` helper is gone).
 `crates/vesper-span/vesper/**` had no workaround for gaps 1-3 (its gaps were
 4, 5 and 7), so it is unchanged.
 
-`crates/vesper-lean-syntax/port/test-port.sh` passes (crate tests on the
+`aspect crate lean-syntax test-port` passes (crate tests on the
 port and the seed, differential, all three divergence checks), and
 `tests/port_memory.rs` (`port_calls_do_not_leak`, which covers the error
 paths) passes with the workarounds gone.

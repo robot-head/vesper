@@ -79,7 +79,7 @@ with Lean `leanprover/lean4:v4.24.0`, compiler commit
 `8da40b72fece29b7d3fe3d768bac4c8910ce9bee`. Full final patch identities remain
 pending the release gate above. Both lakefile and lake-manifest must agree.
 
-`python3 tools/lean4lean42/setup.py --directory NEW_DIRECTORY --lean PATH
+`aspect maintenance lean4lean42 setup -- --directory NEW_DIRECTORY --lean PATH
 --lake PATH --git PATH` is an explicit build operation. The destination must
 not exist. Use argument vectors, no shell interpolation. Obtain immutable
 commits, verify their trees and full identities, apply the exact reviewed patch

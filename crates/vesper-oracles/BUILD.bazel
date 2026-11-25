@@ -16,7 +16,7 @@ vesper_crate(
     },
     # Reservations include subprocess overhead; they do not enforce RSS limits.
     # `lean_replay` marks the Lean/Logos suite run by "Native and acceptance
-    # scripts" (scripts/ci/lean_replay_scope.py, docs/ci-platforms.md).
+    # scripts" (.aspect/lean-replay-scope.axl, docs/ci-platforms.md).
     test_tags = {
         "test/logos42_acceptance": [
             "resources:memory:9216",

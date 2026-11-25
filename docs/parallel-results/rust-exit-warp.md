@@ -156,7 +156,7 @@ Port-side changes made while measuring:
    against 0.21 M for the Rust build, at 1.23x the instructions. The largest
    functions are `on_synchronized` (17 KB, 2,979 instructions),
    `tcb_on_segment` (12 KB) and `tcb_poll_transmit` (10.5 KB). Repro: build
-   the transfer worker both ways (`crates/vesper-warp-tcp/scripts/bench.sh`
+   the transfer worker both ways (`aspect crate warp-tcp bench`
    builds them), then
    `seq 1 300 | sed 's/^/go /' | valgrind --tool=cachegrind --cache-sim=yes <worker> worker transfer`.
    Contributing patterns visible in the disassembly: every `ChunkSeq`

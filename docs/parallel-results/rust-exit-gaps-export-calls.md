@@ -164,7 +164,7 @@ this PR.
 - `tests/self_host_ir_inline.rs`: the Vesper inliner's decisions and
   programs match Rust over the corpus (5 tests).
 - `tests/native_inline*.rs`, `cargo test -p vesper-port-abi`,
-  `cargo test -p vesper-span`, `crates/vesper-span/port/test-port.sh`.
+  `cargo test -p vesper-span`, `aspect crate span test-port`.
 
 ## Part 2: callback handles in exported values (graphics gap 10)
 

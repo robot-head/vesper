@@ -151,6 +151,12 @@ vesper_crate(
             "packages/vesper-front/**",
             "tests/self_host_parse.rs",
             "tests/self_host_front_end.rs",
+            # The surface profile's sugar corpus (#1157).
+            "src/forge_frontend/sugar.rs",
+            "src/packages/sugar.rs",
+            "tests/forge_cli.rs",
+            "tests/fmt_cli.rs",
+            "tests/package_paths.rs",
         ]) + ["//crates/vesper-syntax:files"],
         # Self-hosting SH1 lane 9 (#1152): the Vesper AST against vesper_core::ast
         # on the same corpus as the front end v2 differential. Anchored globs.
@@ -293,6 +299,34 @@ vesper_crate(
         # native backend's declarations over the corpus and the source strings
         # of the feature test files it reads. Anchored globs.
         "test/self_host_codegen_calls": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + [
+            "tests/arrays.rs",
+            "tests/capability_effects.rs",
+            "tests/capability_verifiers.rs",
+            "tests/checked_arithmetic.rs",
+            "tests/dyn_box.rs",
+            "tests/dyn_effects.rs",
+            "tests/dyn_fn.rs",
+            "tests/dyn_trait.rs",
+            "tests/ffi_handles.rs",
+            "tests/fip.rs",
+            "tests/floats.rs",
+            "tests/integer_widths.rs",
+            "tests/native_block_param_homes.rs",
+            "tests/native_export_f32.rs",
+            "tests/native_fail_status.rs",
+            "tests/native_hoist_calls.rs",
+            "tests/native_spans.rs",
+            "tests/vector_f32.rs",
+            "tests/wide_integers.rs",
+        ],
+        # Rust exit gap wave 1 lane 11, part 3a (#1876): @vesper/native-walk's
+        # entry-block plans against `native::frame_plan` over the corpus and
+        # the calls test's source strings. Anchored globs.
+        "test/self_host_native_walk_frame": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
@@ -680,6 +714,17 @@ vesper_crate(
             "src/doctest.rs",
             "tests/doctest_cli.rs",
         ]),
+        # Part 6: the generated module of a doctest example against
+        # doctest_generate::rust_generate on snippets of the same files.
+        "test/self_host_doctest_generate": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+            "src/doctest.rs",
+            "src/doctest_extract.rs",
+            "tests/doctest_cli.rs",
+        ]),
         # Self-hosting SH4 lane 17 (#1291): @vesper/backend-checks against
         # native_verifiers on the verifier fixtures and the corpus. Anchored
         # globs; @vesper/resonance comes from its crate's package.
@@ -852,7 +897,7 @@ vesper_crate(
     # Reservations include subprocess overhead; they do not enforce RSS limits.
     # `lean_replay` marks the Lean/Logos suite run by "Native and acceptance
     # scripts" when Lean-facing paths change and on pushes to main
-    # (scripts/ci/lean_replay_scope.py, docs/ci-platforms.md "PR test tiers").
+    # (.aspect/lean-replay-scope.axl, docs/ci-platforms.md "PR test tiers").
     test_tags = {
         # These harnesses can run several compiler/evaluator cases in parallel.
         "vesper_unit_test": [
@@ -1138,6 +1183,10 @@ vesper_crate(
         # package worlds with their dependencies included; it ran past 900 s
         # once @vesper/test-runner gained @vesper/ast (#1337).
         "test/self_host_native_walk": "eternal",
+        # Its frame twin (#1876) compiles each sampled entry with Rust twice
+        # (optimize off and on); about 600 s of Rust compiles at step 1 in a
+        # release build, so it gets the same headroom.
+        "test/self_host_native_walk_frame": "eternal",
         "test/self_host_check_harness": "long",
         # The trait declaration differential (#1185) checks every corpus world.
         "test/self_host_check_pact": "eternal",
@@ -1207,6 +1256,8 @@ vesper_crate(
         # The doctest guard differential (#1337) runs the corpus and every
         # top-level function under four limit sets, twice.
         "test/self_host_doctest_guard": "long",
+        # The doctest generate differential (#1337) runs 39k snippets twice.
+        "test/self_host_doctest_generate": "long",
         # The backend-checks differential emits every corpus program 4 times.
         "test/self_host_backend_checks": "long",
         # The optimizer policy (#1279) optimizes every corpus world three times.

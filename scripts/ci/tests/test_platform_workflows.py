@@ -23,6 +23,47 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.platforms = workflow("platforms.yml")
         self.release = workflow("platform-release.yml")
 
+    @unittest.skipUnless(shutil.which("aspect") and shutil.which("cargo"), "Aspect or Cargo unavailable")
+    def test_native_port_selection_rules_and_tracked_harness_plan(self):
+        result = subprocess.run(
+            ["aspect", "ci", "tests", "port-selection"],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("aspect") and shutil.which("cargo"), "Aspect or Cargo unavailable")
+    def test_divergent_features_link_the_port_in_the_current_workspace(self):
+        result = subprocess.run(["aspect", "ci", "tests", "port-divergent-features"],
+                                cwd=ROOT, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_platform_workflow_selects_ports_natively_with_historical_fallback(self):
+        plan = self.platforms["jobs"]["plan"]
+        steps = {step.get("id"): step for step in plan["steps"]}
+        self.assertEqual(steps["ports"]["run"], "aspect ci choose-platform-ports")
+        self.assertIn("!= ''", steps["ports"]["if"])
+        self.assertIn("== ''", steps["legacy_ports"]["if"])
+        self.assertEqual(plan["outputs"]["ports"], "${{ steps.ports.outputs.crates || steps.legacy_ports.outputs.crates }}")
+
+    @unittest.skipUnless(shutil.which("aspect"), "Aspect unavailable")
+    def test_native_platform_catalog_and_path_patterns(self):
+        result = subprocess.run(["aspect", "ci", "tests", "test-plan"], cwd=ROOT, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_platform_workflow_checks_identity_and_plans_before_test_lanes(self):
+        plan = self.platforms["jobs"]["plan"]
+        steps = plan["steps"]
+        native = next(i for i, step in enumerate(steps) if step.get("run") == "aspect ci verify-platform-dispatch")
+        tests = next(i for i, step in enumerate(steps) if step.get("run") == "aspect ci platform-tests")
+        report = next(step for step in steps if step.get("id") == "plan")
+        self.assertLess(native, tests)
+        self.assertEqual(report["run"], "aspect ci plan-platform-workflow")
+        self.assertIn("!= ''", report["if"])
+        self.assertIn("== ''", next(step["if"] for step in steps if step.get("id") == "legacy_plan"))
+        for name in ("sha", "profile", "groups"):
+            self.assertEqual(plan["outputs"][name],
+                             "${{ steps.plan.outputs." + name + " || steps.legacy_plan.outputs." + name + " }}")
+
     @unittest.skipUnless(shutil.which("aspect"), "Aspect CLI unavailable")
     def test_all_repository_scripts_have_discoverable_aspect_tasks(self):
         scripts = subprocess.check_output(
@@ -37,6 +78,14 @@ class PlatformWorkflowTests(unittest.TestCase):
                                    command["summary"])
         ]
         self.assertCountEqual(paths, scripts)
+
+    @unittest.skipUnless(shutil.which("aspect"), "Aspect CLI unavailable")
+    def test_native_lean_replay_scope_rules_and_bazel_targets(self):
+        result = subprocess.run(
+            ["aspect", "ci", "tests", "lean-replay-scope"],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_required_check_names_and_events_are_preserved(self):
         self.assertTrue({"push", "merge_group", "schedule",
@@ -60,6 +109,12 @@ class PlatformWorkflowTests(unittest.TestCase):
             self.assertTrue(any(s.get("name") == "Verify exact checkout" for s in job["steps"]))
         self.assertEqual(mac["timeout-minutes"], "120")
         self.assertEqual(windows["timeout-minutes"], "120")
+        for job, command in [(mac, "aspect ci verify-platform-checkout"),
+                             (windows, "./scripts/windows/verify-platform-checkout.ps1")]:
+            check = next(s for s in job["steps"] if s.get("name") == "Verify exact checkout")
+            self.assertEqual(check["run"], command)
+            self.assertIn("!= ''", check["if"])
+            self.assertTrue(all("\n" not in step.get("run", "") for step in job["steps"]))
         for job in (mac, windows):
             commands = "\n".join(s.get("run", "") for s in job["steps"])
             self.assertNotIn("--workspace", commands)
@@ -68,7 +123,18 @@ class PlatformWorkflowTests(unittest.TestCase):
         mac_commands = "\n".join(s.get("run", "") for s in mac["steps"])
         windows_commands = "\n".join(s.get("run", "") for s in windows["steps"])
         self.assertIn("aspect ci test-native-executables", mac_commands)
-        self.assertIn("scripts/ci/test-native-executables.sh", windows_commands)
+        native_step = next(s for s in windows["steps"] if s.get("name") == "Validate native COFF executables")
+        self.assertEqual(native_step["shell"], "pwsh")
+        self.assertIn("./scripts/windows/test-native-executables.ps1", native_step["run"])
+        hybrid = workflow("hybrid.yml")["jobs"]["hybrid"]
+        hybrid_step = next(s for s in hybrid["steps"]
+                           if s.get("name") == "The CLI suites on the hybrid (Windows)")
+        self.assertEqual(hybrid_step["shell"], "pwsh")
+        self.assertEqual(hybrid_step["run"], "./scripts/windows/test-hybrid-cli.ps1")
+        self.assertEqual({row["os"]: row["compiler"] for row in hybrid["strategy"]["matrix"]["include"]},
+                         {"ubuntu-latest": "vesper", "macos-latest": "vesper", "windows-latest": "vesper.exe"})
+        for variable in ("VESPER_PORT_COMPILER", "VESPER_DEFAULT_COMPILER"):
+            self.assertEqual(hybrid["env"][variable], "${{ github.workspace }}/target/debug/${{ matrix.compiler }}")
         self.assertIn("--test platform", mac_commands)
         self.assertIn("--test windows_platform", windows_commands)
         self.assertIn("--test windows", windows_commands)
@@ -76,14 +142,76 @@ class PlatformWorkflowTests(unittest.TestCase):
             self.assertIn("--test drivers", commands)
             self.assertIn("--test pool", commands)
 
+    def test_buildbuddy_reclaims_disk_and_runs_bazel_via_aspect(self):
+        config = yaml.load((ROOT / "buildbuddy.yaml").read_text(), Loader=yaml.BaseLoader)
+        launcher = "./.git/vesper-aspect/aspect"
+        checksum = (ROOT / ".aspect/launcher-linux-x86_64.sha256").read_text().split()
+        self.assertEqual(checksum[1:], [launcher])
+        self.assertRegex(checksum[0], r"^[a-f0-9]{64}$")
+        lanes = {
+            "Test all targets": "--test_tag_filters=-lean_replay,-self_host",
+            "Self-host differentials": "--test_tag_filters=self_host,-self_host_codegen,-self_host_part2,-lean_replay",
+            "Self-host differentials 2": "--test_tag_filters=self_host_part2,-lean_replay",
+            "Self-host codegen differentials": "--test_tag_filters=self_host_codegen,-lean_replay",
+            "Native and acceptance scripts": "",
+        }
+        self.assertCountEqual([action["name"] for action in config["actions"]], lanes.keys())
+        for action in config["actions"]:
+            with self.subTest(action=action["name"]):
+                steps = [step["run"] for step in action["steps"]]
+                self.assertTrue(all("\n" not in step for step in steps))
+                self.assertEqual(steps[0], "mkdir -p ./.git/vesper-aspect")
+                self.assertTrue(steps[1].startswith("curl --fail "))
+                self.assertTrue(steps[1].endswith(f" -o {launcher}"))
+                self.assertEqual(steps[2:5], [
+                    "sha256sum --check .aspect/launcher-linux-x86_64.sha256",
+                    f"chmod +x {launcher}", f"{launcher} ci reclaim-disk",
+                ])
+                lane = lanes[action["name"]]
+                if lane:
+                    [tests] = [step for step in steps if step.startswith(f"{launcher} ci bazel-tests -- ")]
+                    self.assertIn("--config=ci --config=rbe_build --config=ci_tests", tests)
+                    self.assertIn("--remote_download_outputs=minimal", tests)
+                    self.assertIn(lane, tests.split())
+                    self.assertTrue(tests.endswith(" //..."))
+                    self.assertLess(steps.index(f"{launcher} ci install-lean"), steps.index(tests))
+                else:
+                    self.assertIn(f"{launcher} acceptance test-format-proof", steps)
+
+    def test_bazel_setup_selects_native_configuration_by_host(self):
+        action = yaml.load((ROOT / ".github/actions/bazel/action.yml").read_text(), Loader=yaml.BaseLoader)
+        setup, aspect, unix, windows = action["runs"]["steps"]
+        self.assertIn("inputs.buildbuddy-api-key == ''", setup["with"]["disk-cache"])
+        self.assertEqual(aspect["uses"], "./.github/actions/aspect")
+        self.assertEqual(aspect["if"], "runner.os != 'Windows'")
+        self.assertEqual(unix["if"], aspect["if"])
+        self.assertEqual(unix["run"], "aspect ci configure-bazel")
+        self.assertEqual(windows["if"], "runner.os == 'Windows'")
+        self.assertEqual(windows["shell"], "pwsh")
+        self.assertEqual(windows["run"], "./scripts/windows/configure-bazel.ps1")
+        self.assertEqual(unix["env"], windows["env"])
+
+    def test_bootstrap_workflows_invoke_native_tasks(self):
+        stage1 = workflow("bootstrap-stage1.yml")["jobs"]
+        stage2 = workflow("bootstrap-stage2.yml")["jobs"]["bootstrap"]
+        for job in [*stage1.values(), stage2]:
+            self.assertTrue(all("\n" not in step.get("run", "") for step in job["steps"]))
+        self.assertIn("aspect ci stage1-cross-backend", [step.get("run") for step in stage1["stage1"]["steps"]])
+        self.assertIn("aspect ci install-lean", [step.get("run") for step in stage1["stage0-two-seed"]["steps"]])
+        self.assertIn("aspect ci install-wasmtime", [step.get("run") for step in stage2["steps"]])
+        verified = next(step for step in stage2["steps"] if step.get("run") == "aspect bootstrap stage2 -- which")
+        self.assertEqual(verified["env"]["WASMTIME_BIN"], "${{ runner.temp }}/wasmtime/wasmtime")
+
     def test_port_harness_runs_once_on_linux(self):
         # macOS and Windows run only the export ABI tier; the ported crates
         # are platform-neutral and run once in the Linux job (#1010).
         jobs = self.platforms["jobs"]
-        for job, command in (("platform", "aspect acceptance test-port-harness"),
-                             ("windows", "scripts/test-port-harness.sh")):
+        for job, command in (("platform", "aspect ci test-port-abi"),
+                             ("windows", "./scripts/windows/test-port-abi.ps1")):
             step = next(s for s in jobs[job]["steps"] if command in s.get("run", ""))
             self.assertEqual(step["env"]["VESPER_PORT_HARNESS_SCOPE"], "abi")
+            if job == "windows":
+                self.assertEqual(step["shell"], "pwsh")
         ports = jobs["ports"]
         self.assertEqual(ports["runs-on"], "ubuntu-latest")
         self.assertEqual(ports["needs"], ["plan", "ports-compiler"])
@@ -98,27 +226,34 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertEqual(step["env"]["VESPER_PORT_COMPILER"], "${{ runner.temp }}/port-compiler/vesper")
         self.assertEqual(step["env"]["VESPER_PORT_HARNESS_CRATES"], "${{ needs.plan.outputs.ports }}")
         self.assertNotIn("cargo build", "\n".join(s.get("run", "") for s in ports["steps"]))
-        # Seven shards (#1019, #1100), each running its own part of the harness.
-        shards = [str(n) for n in range(1, 8)]
-        self.assertEqual(ports["strategy"]["matrix"]["shard"], shards)
+        # Nine shards (#1019, #1100, #1924), each running its own part of the harness.
+        shards = [str(n) for n in range(1, 10)]
+        self.assertEqual(ports["strategy"]["matrix"]["shard"], "${{ fromJSON(needs.plan.outputs.shards || '[1]') }}")
+        plan = self.platforms["jobs"]["plan"]
+        self.assertEqual(plan["outputs"]["shards"], "${{ steps.shards.outputs.shards || steps.historical_shards.outputs.shards }}")
+        steps = {step.get("id"): step for step in plan["steps"]}
+        self.assertEqual(steps["shards"]["run"], "aspect ci port-shard-matrix")
+        self.assertIn("!= ''", steps["shards"]["if"])
+        self.assertIn("== ''", steps["historical_shards"]["if"])
+        self.assertEqual(steps["historical_shards"]["env"]["PORT_HARNESS_ROOT"], "${{ github.workspace }}")
         self.assertEqual(ports["strategy"]["fail-fast"], "false")
         self.assertEqual(step["env"]["VESPER_PORT_HARNESS_SHARD"], "${{ matrix.shard }}")
         self.assertIn("ports", jobs["complete"]["needs"])
-        script = (ROOT / "scripts/test-port-harness.sh").read_text()
-        tier_end = script.index('echo "export ABI tier done')
-        abi_tier = script[:tier_end]
+        plan = json.loads((ROOT / "scripts/port-abi-plan.json").read_text())
+        abi_tier = "\n".join(" ".join(case["args"]) for group in plan for case in group["checks"])
         for check in ("-p vesper-port-abi", "-p vesper-port-harness", "--test kit",
                       "--test kit_memory", "-p vesper-port-pilot --features vesper-port",
                       "-p vesper-port-build --features divergent"):
             self.assertIn(check, abi_tier)
-        self.assertNotIn("vesper-beacon", abi_tier.split("set -eu", 1)[1])
-        # Every shard is reached, and later ports land in the last one.
-        self.assertIn(f"shards={shards[-1]}\n", script)
-        for n in shards[:-1]:
-            self.assertIn(f"if part {n}; then", script)
-        self.assertIn(f"part {shards[-1]} || exit 0", script)
-        tail = script.split(f"part {shards[-1]} || exit 0", 1)[1]
-        self.assertNotIn("\nfi\n", tail.replace("\n    fi", ""))
+        self.assertNotIn("vesper-beacon", abi_tier)
+        # Every configured shard has work, and later ports land in the last one.
+        shards_plan = json.loads((ROOT / "scripts/port-harness-plan.json").read_text())
+        self.assertEqual(len(shards_plan), len(shards))
+        self.assertTrue(all(shards_plan))
+        self.assertEqual(shards_plan[-1][-1]["task"], ["crate", "vault", "check"])
+        self.assertEqual(shards_plan[6][-1]["task"], ["crate", "diagnostics", "test-port"])
+        self.assertEqual(shards_plan[7][-1]["task"], ["crate", "lint", "test-port"])
+        self.assertEqual(shards_plan[8][0]["task"], ["crate", "sim-session", "test-port"])
 
     def test_plan_failure_fails_required_jobs(self):
         for result in ("failure", "cancelled", "skipped", ""):
@@ -279,11 +414,15 @@ class PlatformWorkflowTests(unittest.TestCase):
         source_steps = source["jobs"]["native-tier1-source"]["steps"]
         commands = "\n".join(s.get("run", "") for s in source_steps)
         self.assertIn("--no-default-features", commands)
-        self.assertIn("cargo tree --locked", commands)
         self.assertIn("--test forge_authority", commands)
         self.assertIn("structured-component-foundation", source["jobs"])
-        self.assertEqual(workflow("stylus.yml")["jobs"]["native-stylus"]["strategy"]["matrix"]["os"],
-                         ["ubuntu-latest"])
+        stylus = workflow("stylus.yml")["jobs"]["native-stylus"]
+        self.assertEqual(stylus["strategy"]["matrix"]["os"], ["ubuntu-latest"])
+        for steps in (source_steps, stylus["steps"]):
+            runner = next(i for i, step in enumerate(steps) if step.get("uses") == "./.github/actions/aspect")
+            graph = next(i for i, step in enumerate(steps) if step.get("run") == "aspect ci check-default-cli-dependencies")
+            self.assertLess(runner, graph)
+            self.assertTrue(all("python -c" not in step.get("run", "") for step in steps))
 
     def test_release_is_read_only_full_validation_before_ready(self):
         self.assertEqual(set(self.release["on"]), {"workflow_dispatch"})

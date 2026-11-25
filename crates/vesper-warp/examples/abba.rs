@@ -13,7 +13,7 @@
 //! agree.
 //!
 //! ```text
-//! crates/vesper-warp/port/bench.sh                 # builds both, runs every workload
+//! aspect crate warp bench                 # builds both, runs every workload
 //! abba worker <frames|ack|recovery|buffers|transfer>                # one arm
 //! abba drive <frames|ack|recovery|buffers|transfer> <rust-worker> <vesper-worker>
 //! abba once <frames|ack|recovery|buffers|transfer> <batches>        # for callgrind

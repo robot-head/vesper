@@ -255,7 +255,12 @@ pub struct Options {
     pub item_end: ChunkSeq[u64],
     pub include_tests: bool,
     pub json: bool,
+    // The IR optimizer (evaluator, JIT and backends); `ast_optimize` is the
+    // AST optimizer before them. `--no-opt` turns off both.
     pub optimize: bool,
+    pub ast_optimize: bool,
+    // `--no-ast-opt` or `--no-ir-opt` was given.
+    pub split_optimize: bool,
     pub tee: bool,
     pub lib: bool,
     pub verifiers: u64,
@@ -274,6 +279,8 @@ fn options_new(command: u32) -> Options {
         include_tests: false,
         json: false,
         optimize: true,
+        ast_optimize: true,
+        split_optimize: false,
         tee: false,
         lib: false,
         verifiers: 0,
@@ -743,6 +750,17 @@ pub fn parse(in args: Args) -> Parsed {
         }
         if eq(in a, in "--no-opt") {
             o.optimize = false;
+            o.ast_optimize = false;
+            continue;
+        }
+        if eq(in a, in "--no-ast-opt") {
+            o.ast_optimize = false;
+            o.split_optimize = true;
+            continue;
+        }
+        if eq(in a, in "--no-ir-opt") {
+            o.optimize = false;
+            o.split_optimize = true;
             continue;
         }
         if eq(in a, in "--tee") {
@@ -809,6 +827,9 @@ pub fn parse(in args: Args) -> Parsed {
 // The checks after the argument loop, in the Rust CLI's order.
 fn validate(sink o: Options) -> Parsed {
     let c = o.command;
+    if o.split_optimize && !(c == cmd_run() || c == cmd_jit() || c == cmd_emit()) {
+        return fail_str(o, in "--no-ast-opt and --no-ir-opt require run, jit or emit");
+    }
     if o.include_tests && !(c == cmd_check() || c == cmd_run() || c == cmd_jit()) {
         return fail_str(o, in "--include-tests requires check, run, or jit");
     }
@@ -995,7 +1016,8 @@ pub fn with_extension(in path: Slice[u8], in ext: Str, windows: bool) -> ChunkSe
 // The record the hybrid's Rust passes read (`Session::decode` in
 // crates/vesper-hybrid/src/driver.rs): little-endian words, then bytes.
 //
-//     command, flags (include_tests 1, json 2, optimize 4, tee 8, lib 16),
+//     command, flags (include_tests 1, json 2, optimize 4, tee 8, lib 16,
+//     ast_optimize 32),
 //     verifiers, fuel,
 //     for each slot: present (0/1), length, bytes
 //     item count, then each: kind, length, bytes
@@ -1006,10 +1028,11 @@ enum RecordFlag: _ {
     Optimize = 4,
     Tee = 8,
     Lib = 16,
+    AstOptimize = 32,
 }
 
 pub fn record_format() -> u64 {
-    2
+    3
 }
 
 fn push_word(inout out: ChunkSeq[u8], v: u64) {
@@ -1043,6 +1066,9 @@ pub fn record(in o: Options) -> ChunkSeq[u8] {
     }
     if o.lib {
         flags = flags | RecordFlag::Lib;
+    }
+    if o.ast_optimize {
+        flags = flags | RecordFlag::AstOptimize;
     }
     push_word(inout out, flags);
     push_word(inout out, o.verifiers);

@@ -1068,6 +1068,15 @@ fn compile_entry<M: Module>(
     }
     let instances = instances_for_entry(world, entry, trace_ok)?;
     let mut program = crate::ir_swap::lower(world);
+    // The entry-block plans from the `frame_plans` swap hook (#1509 part
+    // 3b), from the first lowering; a trace host keeps the Rust plans.
+    let frames = if trace_ok {
+        None
+    } else {
+        crate::codegen_swap::installed()
+            .frame_plans
+            .and_then(|hook| hook(world, &program, entry, optimize))
+    };
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
     wide_native::refine_wide_tuples(&mut program);
     let mut inlined_into = BTreeMap::new();
@@ -1125,6 +1134,7 @@ fn compile_entry<M: Module>(
         trace_entry,
         optimize,
         &abi,
+        frames.as_ref(),
     )?;
     let mut abi = Vec::new();
     for (key, (name, vars)) in &instances {
@@ -1153,6 +1163,211 @@ fn compile_entry<M: Module>(
             .map_err(|e| e.to_string())?;
     }
     Ok((ids, clif))
+}
+/// How a function's entry block hands its parameters to the body
+/// ([`frame_plan`]): what the walk does with the block's parameters before
+/// it lowers the graph (Rust-exit gap wave 1, lane 11 part 3a, #1876).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FramePlan {
+    /// The last parameter is the trace-fail flag ([`uses_trace_fail`]).
+    pub trace_fail: bool,
+    /// The parameter before it is the failure record ([`fail_only`]).
+    pub fail_record: bool,
+    /// The parameter before that is the caller's reuse slot
+    /// ([`crate::fip::uses_caller_slot`]).
+    pub caller_slot: bool,
+    pub result: FrameResult,
+    /// Each source parameter, in order, with the type its value is loaded
+    /// as when it is an `inout` scalar passed by address (its address then
+    /// gets a variable of its own), or `None` when the block parameter is
+    /// the value.
+    pub params: Vec<(String, Option<ir::Type>)>,
+    /// Function-value parameters this instance binds to top-level functions
+    /// ([`function_arguments`]), by parameter name.
+    pub function_args: Vec<(String, String)>,
+    /// The capability identities the body starts with: the Fail record's
+    /// exits and the trace host.
+    pub capabilities: BTreeMap<String, String>,
+}
+/// Where a function builds its result ([`FramePlan::result`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FrameResult {
+    /// A scalar result: the body returns it.
+    #[default]
+    Value,
+    /// An aggregate result written through the leading pointer parameter.
+    Sret,
+    /// A register result built in a local buffer of this many words.
+    Buffer(u32),
+    /// A register result of this many words that the body keeps as words
+    /// (a small enum on the optimize path).
+    Words(u32),
+}
+impl FramePlan {
+    /// The plan as text, one line per fact (the self-hosting differential,
+    /// tests/self_host_native_walk_frame.rs).
+    pub fn text(&self) -> String {
+        let result = match self.result {
+            FrameResult::Value => "value".to_string(),
+            FrameResult::Sret => "sret".to_string(),
+            FrameResult::Buffer(n) => format!("buffer {n}"),
+            FrameResult::Words(n) => format!("words {n}"),
+        };
+        let mut s = format!(
+            "trace={} fail={} caller={} result={result}\n",
+            self.trace_fail as u8, self.fail_record as u8, self.caller_slot as u8
+        );
+        for (name, load) in &self.params {
+            match load {
+                Some(t) => s.push_str(&format!("P {name} load {t}\n")),
+                None => s.push_str(&format!("P {name} value\n")),
+            }
+        }
+        for (param, function) in &self.function_args {
+            s.push_str(&format!("A {param} {function}\n"));
+        }
+        for (key, identity) in &self.capabilities {
+            s.push_str(&format!("K {key} {identity}\n"));
+        }
+        s
+    }
+    /// The plan [`FramePlan::text`] wrote, or `None` when `text` is not one
+    /// (the `frame_plans` swap hook's answer, part 3b of #1509).
+    pub fn parse(text: &str) -> Option<FramePlan> {
+        let mut lines = text.lines();
+        let mut plan = FramePlan::default();
+        let mut head = lines.next()?.split(' ');
+        let flag = |field: Option<&str>, name: &str| match field?.strip_prefix(name)? {
+            "0" => Some(false),
+            "1" => Some(true),
+            _ => None,
+        };
+        plan.trace_fail = flag(head.next(), "trace=")?;
+        plan.fail_record = flag(head.next(), "fail=")?;
+        plan.caller_slot = flag(head.next(), "caller=")?;
+        let words = |n: Option<&str>| n?.parse::<u32>().ok();
+        plan.result = match head.next()?.strip_prefix("result=")? {
+            "value" => FrameResult::Value,
+            "sret" => FrameResult::Sret,
+            "buffer" => FrameResult::Buffer(words(head.next())?),
+            "words" => FrameResult::Words(words(head.next())?),
+            _ => return None,
+        };
+        if head.next().is_some() {
+            return None;
+        }
+        for line in lines {
+            if let Some(rest) = line.strip_prefix("P ") {
+                let (name, how) = rest.split_once(' ')?;
+                let load = match how {
+                    "value" => None,
+                    _ => Some(scalar_type_named(how.strip_prefix("load ")?)?),
+                };
+                plan.params.push((name.to_string(), load));
+            } else if let Some(rest) = line.strip_prefix("A ") {
+                let (param, function) = rest.split_once(' ')?;
+                plan.function_args
+                    .push((param.to_string(), function.to_string()));
+            } else {
+                let (key, identity) = line.strip_prefix("K ")?.rsplit_once(' ')?;
+                plan.capabilities
+                    .insert(key.to_string(), identity.to_string());
+            }
+        }
+        Some(plan)
+    }
+}
+/// The scalar Cranelift type `name` (`Display` of [`ir::Type`]) that an
+/// `inout` scalar parameter loads as ([`FramePlan::parse`]).
+fn scalar_type_named(name: &str) -> Option<ir::Type> {
+    use ir::types::*;
+    [I8, I16, I32, I64, I128, F32, F64]
+        .into_iter()
+        .find(|t| t.to_string() == name)
+}
+/// The entry-block plan of instance `name` (`f`, already [`concrete`]) whose
+/// ABI returns `result_words` register words ([`NativeAbi`]): which trailing block parameters are the trace flag, the
+/// failure record and the caller slot, where the result is built, how each
+/// parameter reaches its variable, the function-value parameters the
+/// instance binds and the capability identities the body starts with.
+#[allow(clippy::too_many_arguments)]
+pub fn frame_plan(
+    world: &World,
+    name: &str,
+    f: &Function,
+    generic_vars: &BTreeMap<String, Type>,
+    result_words: Option<u32>,
+    operands_only: bool,
+    pass_trace: bool,
+    trace_host: bool,
+) -> Result<FramePlan, String> {
+    let fail_record = fail_only(world, f);
+    let caller_slot = crate::fip::uses_caller_slot(world, f);
+    let result_layout = Layout::of(world, &f.result)?;
+    let result = if let Some(words) = result_words {
+        let direct_enum = operands_only
+            && !f.fip
+            && aggregates::enum_shape(world, &f.result)
+                .is_some_and(|shape| shape.words.len() as u32 == words);
+        if direct_enum {
+            FrameResult::Words(words)
+        } else {
+            FrameResult::Buffer(words)
+        }
+    } else if result_layout.aggregate() {
+        FrameResult::Sret
+    } else {
+        FrameResult::Value
+    };
+    let mut params = Vec::with_capacity(f.params.len());
+    for p in &f.params {
+        let layout = Layout::of(world, &p.ty)?;
+        let load = if p.pass == Pass::Inout && !layout.aggregate() {
+            Some(scalar(&p.ty, &f.generics)?)
+        } else {
+            None
+        };
+        params.push((p.name.clone(), load));
+    }
+    let function_args = function_arguments(generic_vars).into_iter().collect();
+    let mut capabilities = BTreeMap::new();
+    if fail_record {
+        let mut fails = 0;
+        for (index, effect) in f.effects.instances.iter().enumerate() {
+            if effect.name != "Fail" {
+                // A capability effect: no operations, no evidence.
+                continue;
+            }
+            let identity = format!("native-fail-exit:{fails}");
+            fails += 1;
+            capabilities.insert(format!("$effect:{}", effect.name), identity.clone());
+            capabilities.insert(format!("$static:$fncap:{name}:{index}"), identity.clone());
+            if let Some(key) = crate::numeric::instance_key(&effect.name, &effect.args) {
+                capabilities.insert(key, identity);
+            }
+        }
+    }
+    if trace_host && crate::trace_effects::active(world) {
+        for (index, effect) in f.effects.instances.iter().enumerate() {
+            if effect.name == crate::trace_effects::TRACE
+                && effect.label.is_none()
+                && effect.args.is_empty()
+            {
+                let identity = "native-trace-host".to_string();
+                capabilities.insert(format!("$effect:{}", effect.name), identity.clone());
+                capabilities.insert(format!("$static:$fncap:{name}:{index}"), identity.clone());
+            }
+        }
+    }
+    Ok(FramePlan {
+        trace_fail: pass_trace,
+        fail_record,
+        caller_slot,
+        result,
+        params,
+        function_args,
+        capabilities,
+    })
 }
 /// Lane-23 instrumentation hook ([`crate::native_coverage`]): rewrites each
 /// finalized function, by instance key, before the CLIF text, the observer
@@ -1191,6 +1406,9 @@ pub struct EmittedFunction {
     /// through other inlined callees ([`crate::ir_inline::Report`]). Policy
     /// facts declared for them apply to this function too (#959).
     pub inlined: std::collections::BTreeSet<String>,
+    /// The entry-block plan the walk followed ([`frame_plan`]); `None` for
+    /// a function the walk did not lower (an outlined cold helper).
+    pub frame: Option<FramePlan>,
 }
 impl EmittedFunction {
     /// The source function with this instance's generic arguments
@@ -1319,6 +1537,7 @@ fn define_instances<M: Module>(
         None,
         optimize,
         &DEFAULT_ABI,
+        None,
     )
 }
 #[allow(clippy::too_many_arguments)]
@@ -1336,6 +1555,7 @@ fn define_instances_observed_with_trace<M: Module>(
     trace_entry: Option<(&str, FuncId)>,
     operands_only: bool,
     abi: &NativeAbi,
+    frames: Option<&BTreeMap<String, FramePlan>>,
 ) -> Result<String, String> {
     let _module_kind = crate::codegen_swap::module_kind_scope(
         std::any::type_name::<M>().ends_with("JITModule"),
@@ -1358,6 +1578,24 @@ fn define_instances_observed_with_trace<M: Module>(
         let mut ctx = m.make_context();
         let own_abi = abi.of(key);
         ctx.func.signature = signature_with_abi(m, world, &f, pass_trace, own_abi)?;
+        // A plan from the `frame_plans` hook stands in for the Rust one
+        // when it covers every parameter.
+        let frame = match frames
+            .and_then(|plans| plans.get(key))
+            .filter(|plan| plan.params.len() == f.params.len())
+        {
+            Some(plan) => plan.clone(),
+            None => frame_plan(
+                world,
+                name,
+                &f,
+                generic_vars,
+                own_abi.result_words,
+                operands_only,
+                pass_trace,
+                trace_host,
+            )?,
+        };
         let mut fbctx = FunctionBuilderContext::new();
         let wide_divisions = {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
@@ -1365,29 +1603,20 @@ fn define_instances_observed_with_trace<M: Module>(
             b.append_block_params_for_function_params(entry);
             b.switch_to_block(entry);
             let mut values = b.block_params(entry).to_vec();
-            let trace_fail = if pass_trace { values.pop() } else { None };
-            let fail_record = if fail_only(world, &f) {
+            let trace_fail = if frame.trace_fail { values.pop() } else { None };
+            let fail_record = if frame.fail_record {
                 values.pop()
             } else {
                 None
             };
-            let caller_slot = if crate::fip::uses_caller_slot(world, &f) {
+            let caller_slot = if frame.caller_slot {
                 values.pop()
             } else {
                 None
             };
-            let result_layout = Layout::of(world, &f.result)?;
-            let own_abi = abi.of(key);
-            let direct_enum = own_abi.result_words.is_some_and(|words| {
-                operands_only
-                    && !f.fip
-                    && aggregates::enum_shape(world, &f.result)
-                        .is_some_and(|shape| shape.words.len() as u32 == words)
-            });
-            let sret = if let Some(words) = own_abi.result_words {
-                if direct_enum {
-                    None
-                } else {
+            let sret = match frame.result {
+                FrameResult::Value | FrameResult::Words(_) => None,
+                FrameResult::Buffer(words) => {
                     // Register result: build the value in a local buffer and
                     // return its words.
                     let slot = b.create_sized_stack_slot(ir::StackSlotData::new(
@@ -1400,28 +1629,22 @@ fn define_instances_observed_with_trace<M: Module>(
                             .stack_addr(m.target_config().pointer_type(), slot, 0),
                     )
                 }
-            } else if result_layout.aggregate() {
-                Some(values.remove(0))
-            } else {
-                None
+                FrameResult::Sret => Some(values.remove(0)),
             };
             let mut vars = BTreeMap::new();
             let mut local_types = BTreeMap::new();
             let mut pointers = BTreeMap::new();
-            for (p, v) in f.params.iter().zip(values) {
+            for ((p, (_, load)), v) in f.params.iter().zip(&frame.params).zip(values) {
                 let pointer = v;
-                let layout = Layout::of(world, &p.ty)?;
-                let value = if p.pass == Pass::Inout && !layout.aggregate() {
-                    b.ins()
-                        .load(scalar(&p.ty, &f.generics)?, ir::MemFlags::new(), pointer, 0)
-                } else {
-                    v
+                let value = match load {
+                    Some(ty) => b.ins().load(*ty, ir::MemFlags::new(), pointer, 0),
+                    None => v,
                 };
                 let var = b.declare_var(b.func.dfg.value_type(value));
                 b.def_var(var, value);
                 vars.insert(p.name.clone(), var);
                 local_types.insert(p.name.clone(), p.ty.clone());
-                if p.pass == Pass::Inout && !layout.aggregate() {
+                if load.is_some() {
                     let address = b.declare_var(b.func.dfg.value_type(pointer));
                     b.def_var(address, pointer);
                     pointers.insert(var.as_u32(), address);
@@ -1485,7 +1708,7 @@ fn define_instances_observed_with_trace<M: Module>(
             // Function-value parameters bound to top-level functions by
             // this instance: bind each to that function's tag, as an
             // inlining caller would have.
-            for (param, function) in function_arguments(generic_vars) {
+            for (param, function) in frame.function_args.iter().cloned() {
                 let ty = world.functions[name]
                     .params
                     .iter()
@@ -1498,38 +1721,9 @@ fn define_instances_observed_with_trace<M: Module>(
                 c.vars.insert(param.clone(), var);
                 c.local_types.insert(param, ty);
             }
-            if fail_record.is_some() {
-                let mut fails = 0;
-                for (index, effect) in f.effects.instances.iter().enumerate() {
-                    if effect.name != "Fail" {
-                        // A capability effect: no operations, no evidence.
-                        continue;
-                    }
-                    let identity = format!("native-fail-exit:{fails}");
-                    fails += 1;
-                    c.capabilities
-                        .insert(format!("$effect:{}", effect.name), identity.clone());
-                    c.capabilities
-                        .insert(format!("$static:$fncap:{name}:{index}"), identity.clone());
-                    if let Some(key) = crate::numeric::instance_key(&effect.name, &effect.args) {
-                        c.capabilities.insert(key, identity);
-                    }
-                }
-            }
-            if trace_host && crate::trace_effects::active(world) {
-                for (index, effect) in f.effects.instances.iter().enumerate() {
-                    if effect.name == crate::trace_effects::TRACE
-                        && effect.label.is_none()
-                        && effect.args.is_empty()
-                    {
-                        let identity = "native-trace-host".to_string();
-                        c.capabilities
-                            .insert(format!("$effect:{}", effect.name), identity.clone());
-                        c.capabilities
-                            .insert(format!("$static:$fncap:{name}:{index}"), identity.clone());
-                    }
-                }
-            }
+            // The Fail record's exits and the trace host, after the
+            // function-value bindings above (whose evidence reads the map).
+            c.capabilities.extend(frame.capabilities.clone());
             c.ir_function(
                 program
                     .functions
@@ -1566,6 +1760,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 generic_vars.clone(),
                 is_const_time,
                 ctx,
+                frame,
             ));
             continue;
         }
@@ -1610,13 +1805,14 @@ fn define_instances_observed_with_trace<M: Module>(
                 vars: generic_vars.clone(),
                 optimized: operands_only,
                 inlined: Default::default(),
+                frame: Some(frame.clone()),
             });
         }
         m.define_function(define_id, &mut ctx)
             .map_err(|e| format!("native codegen '{name}': {e}"))?;
         m.clear_context(&mut ctx);
     }
-    for (define_id, key, name, generic_vars, is_const_time, mut ctx) in deferred_defs {
+    for (define_id, key, name, generic_vars, is_const_time, mut ctx, frame) in deferred_defs {
         let cold_helpers = if !is_const_time {
             crate::native_cold_outline::outline(m, &key, &mut ctx.func)?
         } else {
@@ -1664,6 +1860,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 vars: generic_vars.clone(),
                 optimized: operands_only,
                 inlined: Default::default(),
+                frame: Some(frame.clone()),
             });
             for (cold_id, cold_key, cold_func) in &cold_helpers {
                 let callees = user_callees(cold_func);
@@ -1681,6 +1878,7 @@ fn define_instances_observed_with_trace<M: Module>(
                     vars: generic_vars.clone(),
                     optimized: operands_only,
                     inlined: Default::default(),
+                    frame: None,
                 });
             }
         }

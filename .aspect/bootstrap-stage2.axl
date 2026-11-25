@@ -1,0 +1,174 @@
+"""Run Stage 2 Wasm packages with the pinned Wasmtime CLI."""
+
+load("./lib/process.axl", "capture", "check", "command", "root_path", "scratch_dir")
+
+_VERSION = "50.0.1"
+_TARGET = "@wasmtime//:wasmtime"
+_USAGE = "usage: aspect bootstrap stage2 -- <which|precompile|run|verify> ..."
+
+def _parent(path: str) -> str:
+    return path.rpartition("/")[0] or ("/" if path.startswith("/") else ".")
+
+def _executable(ctx: TaskContext, path: str) -> bool:
+    metadata = ctx.std.fs.try_metadata(path)
+    return metadata != None and metadata.is_file and metadata.executable
+
+def _wasmtime(ctx: TaskContext, root: str, cwd: str) -> str:
+    override = ctx.std.env.var("WASMTIME_BIN") or ctx.std.env.var("WASMTIME")
+    if override:
+        return root_path(cwd, override) if "/" in override else override
+    binary = ctx.std.process.which("wasmtime")
+    if binary:
+        return binary
+    bazel = ctx.std.process.which("bazel") or ctx.std.process.which("bazelisk")
+    if bazel:
+        built = capture(ctx, bazel, ["build", _TARGET], root)
+        ctx.std.io.stderr.write(built)
+        queried = command(ctx, bazel, ["cquery", "--output=files", _TARGET], root).stdout("piped").stderr("null").spawn().wait_with_output()
+        outputs = queried.stdout.splitlines()
+        if queried.status.success and outputs:
+            candidate = root_path(root, outputs[0])
+            if _executable(ctx, candidate):
+                return candidate
+    external = root + "/bazel-bin/external"
+    directories = sorted([entry.path for entry in ctx.std.fs.try_read_dir(external) if entry.path.startswith("+wasmtime+wasmtime_")])
+    for executable in ["wasmtime.exe", "wasmtime"]:
+        for directory in directories:
+            candidate = external + "/" + directory + "/" + executable
+            if _executable(ctx, candidate):
+                return candidate
+    ctx.std.process.exit(1, "Could not find Wasmtime (set WASMTIME_BIN, put wasmtime on PATH, or use Bazel)")
+
+def _version(ctx: TaskContext, binary: str, cwd: str) -> str:
+    version = capture(ctx, binary, ["--version"], cwd).strip()
+    fields = version.split()
+    if (len(fields) < 2 or fields[1] != _VERSION) and ctx.std.env.var("VESPER_ALLOW_UNPINNED_WASMTIME") != "1":
+        ctx.std.process.exit(1, "Expected wasmtime %s, got: %s (set VESPER_ALLOW_UNPINNED_WASMTIME=1 to override)" % (_VERSION, version))
+    return version
+
+def _precompile(ctx: TaskContext, binary: str, cwd: str, source: str, output: str):
+    ctx.std.fs.create_dir_all(_parent(root_path(cwd, output)))
+    check(ctx, "rm", ["-f", "--", output], cwd)
+    check(ctx, binary, ["compile", source, "-o", output], cwd)
+
+def _nonempty(ctx: TaskContext, path: str) -> bool:
+    metadata = ctx.std.fs.try_metadata(path)
+    return metadata != None and metadata.is_file and metadata.size > 0
+
+def _run(ctx: TaskContext, binary: str, root: str, cwd: str, source: str, package: str, output: str, entry: str, options: list[str], syms: str):
+    output = root_path(cwd, output)
+    directory = _parent(output)
+    ctx.std.fs.create_dir_all(directory)
+    check(ctx, "rm", ["-f", "--", output, output + ".err.txt", output + ".stage", output + ".syms"], cwd)
+    flags = options + ["--dir", root + "::.", "--dir", directory + "::/out"]
+    if syms:
+        flags.extend(["--env", "VESPER_STAGE2_SYMS=" + syms])
+    check(ctx, binary, ["run"] + flags + ["--argv0", "stage2", source, package, "/out/" + output.rpartition("/")[2], entry], cwd)
+    diagnostic = output + ".err.txt"
+    if _nonempty(ctx, diagnostic):
+        ctx.std.io.stderr.write("stage2 error diagnostic (" + diagnostic + "):\n" + ctx.std.fs.read_to_string(diagnostic))
+        ctx.std.process.exit(1, "Stage 2 reported a diagnostic")
+    if not _nonempty(ctx, output):
+        stage = ctx.std.fs.try_read_to_string(output + ".stage")
+        if stage != None:
+            ctx.std.io.stderr.write("stage log:\n" + stage)
+        ctx.std.process.exit(1, "stage2 produced no output component at " + output)
+
+def _parse(ctx: TaskContext, argv: list[str], mode: str, flag: str, minimum: int, maximum: int):
+    options = []
+    index = 0
+    for value in argv:
+        if value == flag:
+            options.append("--allow-precompiled")
+        elif mode == "run" and value == "--":
+            index += 1
+            break
+        elif value.startswith("-"):
+            ctx.std.process.exit(2, "unknown option: " + value)
+        else:
+            break
+        index += 1
+    values = argv[index:]
+    if len(values) < minimum or len(values) > maximum:
+        ctx.std.process.exit(2, _USAGE + " (" + mode + ")")
+    return options, values
+
+def _stage2(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    cwd = ctx.std.env.current_dir()
+    argv = ctx.args.tool_args
+    mode = argv[0] if argv else ""
+    values = argv[1:]
+    syms = ctx.std.env.var("VESPER_STAGE2_SYMS") or ""
+    if mode == "which" and not values:
+        binary = _wasmtime(ctx, root, cwd)
+        _version(ctx, binary, cwd)
+        ctx.std.io.stdout.write(binary + "\n")
+    elif mode == "precompile" and len(values) in [1, 2]:
+        binary = _wasmtime(ctx, root, cwd)
+        _version(ctx, binary, cwd)
+        output = values[1] if len(values) == 2 else values[0].removesuffix(".wasm") + ".cwasm"
+        _precompile(ctx, binary, cwd, values[0], output)
+        ctx.std.io.stdout.write(output + "\n")
+    elif mode == "run":
+        options, values = _parse(ctx, values, mode, "--precompiled", 3, 4)
+        binary = _wasmtime(ctx, root, cwd)
+        _run(ctx, binary, root, cwd, values[0], values[1], values[2], (values[3] or "main") if len(values) == 4 else "main", options, syms)
+    elif mode in ["verify", "fixed-point"]:
+        options, values = _parse(ctx, values, mode, "--precompile", 1, 2)
+        original = values[0]
+        work = root_path(cwd, values[1]) if len(values) == 2 else root + "/target/bootstrap-stage2"
+        binary = _wasmtime(ctx, root, cwd)
+        ctx.std.io.stdout.write("== Using %s (%s)\n" % (_version(ctx, binary, cwd), binary))
+        source = original
+        if options:
+            source = work + "/stage2.cwasm"
+            _precompile(ctx, binary, cwd, original, source)
+        stage3 = work + "/stage3.wasm"
+        _run(ctx, binary, root, cwd, source, "packages/vesper-stage2", stage3, "main", options, syms or "1")
+        if not command(ctx, "cmp", ["-s", "--", original, stage3], cwd).status().success:
+            ctx.std.process.exit(1, "stage2 fixed-point mismatch: %s differs from %s" % (original, stage3))
+        ctx.std.io.stdout.write("== Stage 2 fixed-point verified under wasmtime: stage2 == stage3 (%d bytes)\n" % ctx.std.fs.metadata(stage3).size)
+    else:
+        ctx.std.process.exit(2, _USAGE)
+    return 0
+
+stage2 = task(
+    kind = "stage2",
+    group = ["bootstrap"],
+    summary = "Run, precompile, or verify Stage 2 using Wasmtime",
+    implementation = _stage2,
+    args = {"tool_args": args.trailing_var_args(description = "Stage 2 subcommand and its flags and paths.")},
+)
+
+_ARCHIVE_SHA = "685466455dd42a14774a86c36c8f2e45cbb9bd6d92a850139315df60a75498a5"
+
+def _install_wasmtime(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    runner = ctx.std.env.var("RUNNER_TEMP")
+    if not runner:
+        ctx.std.process.exit(2, "RUNNER_TEMP is required to install the CI Wasmtime binary")
+    work = scratch_dir(ctx, "vesper-wasmtime-")
+    archive = work + "/wasmtime.tar.xz"
+    release = "v" + _VERSION
+    url = "https://github.com/bytecodealliance/wasmtime/releases/download/" + release + "/wasmtime-" + release + "-x86_64-linux.tar.xz"
+    check(ctx, "curl", ["-fsSL", url, "-o", archive], root)
+    digest = capture(ctx, "sha256sum", [archive], root).split()
+    if not digest or digest[0] != _ARCHIVE_SHA:
+        ctx.std.process.exit(1, "Wasmtime archive checksum mismatch")
+    check(ctx, "tar", ["-xJf", archive, "--strip-components=1", "-C", work], root)
+    _version(ctx, work + "/wasmtime", root)
+    destination = root_path(root, runner) + "/wasmtime"
+    ctx.std.fs.create_dir_all(destination)
+    pending = ctx.std.fs.mkdtemp(parent = destination, prefix = ".install-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(pending))
+    ctx.std.fs.copy(work + "/wasmtime", pending + "/wasmtime")
+    ctx.std.fs.rename(pending + "/wasmtime", destination + "/wasmtime")
+    return 0
+
+install_wasmtime = task(
+    kind = "install-wasmtime",
+    group = ["ci"],
+    summary = "Install the verified Wasmtime CLI for the Linux Stage 2 workflow",
+    implementation = _install_wasmtime,
+)

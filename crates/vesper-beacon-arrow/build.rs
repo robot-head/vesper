@@ -13,7 +13,7 @@ fn main() {
 }
 
 /// The divergence check (mirrored in BUILD.bazel and asserted by
-/// crates/vesper-beacon-arrow/port/test-port.sh).
+/// aspect crate beacon-arrow test-port).
 #[cfg(feature = "vesper-port-divergent")]
 const EDITS: &[(&str, &str)] = &[
     // spans.ves: every u64 column is shifted up by one row.

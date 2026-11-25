@@ -327,6 +327,10 @@ pub fn k_shl() -> u8 {
     79
 }
 
+pub fn k_backtick() -> u8 {
+    81
+}
+
 pub fn k_shr() -> u8 {
     80
 }
@@ -416,6 +420,7 @@ pub fn kind_name(k: u8) -> Str {
         78 => "Caret",
         79 => "Shl",
         80 => "Shr",
+        81 => "Backtick",
         _ => "Error",
     }
 }

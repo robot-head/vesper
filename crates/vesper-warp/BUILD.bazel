@@ -43,7 +43,7 @@ vesper_crate(
 # The divergent builds, one per ported module (the Cargo
 # `vesper-port-divergent` feature applies the same edits from build.rs, one
 # at a time with VESPER_WARP_DIVERGE): each must keep compiling, and
-# crates/vesper-warp/port/check.sh asserts which test catches it.
+# aspect crate warp check asserts which test catches it.
 [
     vesper_port_object(
         name = "warp_vesper_divergent_" + module,
@@ -117,7 +117,7 @@ rust_test(
 
 # The test files of the ported modules against the port. Every other test
 # file (the endpoint, streams, quinn interop) runs against the port in
-# Cargo, in the Linux "Vesper ports" job (crates/vesper-warp/port/check.sh).
+# Cargo, in the Linux "Vesper ports" job (aspect crate warp check).
 [
     rust_test(
         name = "port_%s_test" % test,

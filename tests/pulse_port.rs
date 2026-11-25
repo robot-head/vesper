@@ -883,3 +883,253 @@ pub fn check_pool() -> u64 {
     let checked = check_pulse_driver(src);
     assert_eq!(agree(&checked, "check_pool", &MODES), h);
 }
+
+/// The epoll completion driver (#1938): the same scenario through
+/// `@vesper/pulse`'s `EpollDriver` and `vesper_pulse::epoll::EpollDriver`,
+/// over a pipe and a regular file: a read that waits for data, immediate
+/// zero-length and wrong-direction completions, a stream offset refused
+/// with `ESPIPE`, inline positional I/O on a file, cancellation, a stream
+/// write, and a full queue.
+#[cfg(target_os = "linux")]
+#[test]
+fn epoll_completion_driver_matches_rust() {
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, OwnedFd};
+    use vesper_pulse::driver::{
+        Completion, CompletionDriver, Operation, PollError, Request, RequestId,
+    };
+    use vesper_pulse::epoll::EpollDriver;
+
+    const QUEUE_FULL: u64 = 1000001;
+    fn mix(h: u64, v: u64) -> u64 {
+        (h ^ v).wrapping_mul(1099511628211)
+    }
+    fn hash(s: &[u8]) -> u64 {
+        s.iter()
+            .fold(14695981039346656037, |h, &b| mix(h, u64::from(b)))
+    }
+    fn code(e: &std::io::Error) -> u64 {
+        match e.raw_os_error() {
+            Some(c) => c as u64,
+            None if e.kind() == std::io::ErrorKind::WouldBlock => QUEUE_FULL,
+            None => 999,
+        }
+    }
+    type Driver = EpollDriver<u32>;
+    fn submit(
+        h: u64,
+        d: &mut Driver,
+        file: &std::fs::File,
+        operation: Operation,
+        buffer: &[u8],
+        offset: u64,
+    ) -> (u64, Option<RequestId>) {
+        let request = Request {
+            file: file.try_clone().unwrap(),
+            buffer: buffer.to_vec(),
+            continuation: 0,
+            operation,
+            offset,
+        };
+        match d.submit(request) {
+            Ok(id) => (mix(mix(h, 1), id.get()), Some(id)),
+            Err((e, _)) => (mix(mix(h, 2), code(&e)), None),
+        }
+    }
+    fn completions(mut h: u64, done: &[Completion<u32>], error: u64) -> u64 {
+        h = mix(mix(h, done.len() as u64), error);
+        for c in done {
+            h = mix(h, c.id.get());
+            h = match &c.result {
+                Ok(n) => mix(mix(mix(h, 1), *n as u64), 0),
+                Err(e) => mix(mix(mix(h, 0), 0), code(e)),
+            };
+            h = mix(h, hash(&c.request.buffer));
+        }
+        h
+    }
+    fn poll(h: u64, d: &mut Driver, wait: bool) -> u64 {
+        match d.poll(wait) {
+            Ok(done) => completions(h, &done, 0),
+            Err(PollError { error, completed }) => completions(h, &completed, code(&error)),
+        }
+    }
+    fn pipe() -> (std::fs::File, std::fs::File) {
+        let (r, w) = std::io::pipe().unwrap();
+        (
+            std::fs::File::from(OwnedFd::from(r)),
+            std::fs::File::from(OwnedFd::from(w)),
+        )
+    }
+
+    let dir = Temp::new("pulse-epoll-driver");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .read(true)
+        .write(true)
+        .open(dir.path().join("data"))
+        .unwrap();
+
+    // The scenario, in Rust.
+    let mut h: u64 = 14695981039346656037;
+    let mut d = Driver::new(8).unwrap();
+    let (r, mut w) = pipe();
+    (h, _) = submit(h, &mut d, &r, Operation::Read, &[0; 8], 0);
+    h = poll(h, &mut d, false);
+    w.write_all(b"hi").unwrap();
+    h = poll(h, &mut d, true);
+    (h, _) = submit(h, &mut d, &r, Operation::Write, &[0], 0);
+    (h, _) = submit(h, &mut d, &r, Operation::Read, &[], 0);
+    (h, _) = submit(h, &mut d, &r, Operation::Read, &[0; 8], 5);
+    (h, _) = submit(h, &mut d, &file, Operation::Write, b"abc", 3);
+    (h, _) = submit(h, &mut d, &file, Operation::Read, &[0; 6], 0);
+    h = poll(h, &mut d, false);
+    let id;
+    (h, id) = submit(h, &mut d, &r, Operation::Read, &[0; 4], 0);
+    let id = id.unwrap();
+    let cancelled = matches!((d.cancel(id), d.cancel(id)), (Ok(true), Ok(false)));
+    h = mix(h, u64::from(cancelled));
+    h = poll(h, &mut d, false);
+    (h, _) = submit(h, &mut d, &w, Operation::Write, b"xyz", 0);
+    h = poll(h, &mut d, true);
+    (h, _) = submit(h, &mut d, &r, Operation::Read, &[0; 8], 0);
+    h = poll(h, &mut d, true);
+    h = mix(h, d.pending() as u64);
+    let mut d2 = Driver::new(1).unwrap();
+    (h, _) = submit(h, &mut d2, &r, Operation::Read, &[0; 8], 0);
+    (h, _) = submit(h, &mut d2, &w, Operation::Write, &[0], 0);
+    h = mix(h, d2.pending() as u64);
+    drop(d2);
+    drop(d);
+    let want = h;
+
+    let src = r#"
+use @vesper/pulse::{
+    EpollPoll, Operation, RequestId, epoll_driver_new,
+    epoll_driver_submit, epoll_driver_poll, epoll_driver_cancel, epoll_driver_close,
+    epoll_driver_pending
+};
+
+fn mix(h: u64, v: u64) -> u64 {
+    wrapping_mul(h ^ v, 1099511628211)
+}
+
+fn hash(in s: Slice[u8]) -> u64 {
+    let mut h: u64 = 14695981039346656037;
+    for i in 0..s.len() {
+        let b = match s.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        h = mix(h, widen_u64(b));
+    }
+    h
+}
+
+fn zeros(n: u64) -> ChunkSeq[u8] {
+    let mut z: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    z.resize(n, 0);
+    z
+}
+
+fn submitted(h: u64, r: Result[RequestId, u32]) -> u64 {
+    match r {
+        Result::Ok(id) => mix(mix(h, 1), id.bits),
+        Result::Err(e) => mix(mix(h, 2), widen_u64(e)),
+    }
+}
+
+fn polled(h: u64, in p: EpollPoll) -> u64 {
+    let mut h = mix(mix(h, p.completions.len()), widen_u64(p.error));
+    for k in 0..p.completions.len() {
+        let c = match p.completions.try_get(k) {
+            Option::Some(c) => c,
+            Option::None => return 0,
+        };
+        h = mix(h, c.id.bits);
+        h = if c.ok {
+            mix(mix(mix(h, 1), c.bytes), 0)
+        } else {
+            mix(mix(mix(h, 0), 0), widen_u64(c.errno))
+        };
+        h = mix(h, hash(in p.data[c.start..wrapping_add(c.start, c.len)]));
+    }
+    h
+}
+
+pub fn scenario() -> u64 eff [Ffi[PulseSys]] {
+    let file: i32 = @FD@;
+    let mut h: u64 = 14695981039346656037;
+    let mut d = match epoll_driver_new(8) {
+        Result::Ok(d) => d,
+        Result::Err(_) => return 1,
+    };
+    let mut fds = PipeFds {
+        read_fd: -1,
+        write_fd: -1,
+    };
+    let _ = PulseSys::pipe2(inout fds, 524288);
+    let r = fds.read_fd;
+    let w = fds.write_fd;
+    let z0 = zeros(0);
+    let z1 = zeros(1);
+    let z4 = zeros(4);
+    let z6 = zeros(6);
+    let z8 = zeros(8);
+    h = submitted(h, epoll_driver_submit(inout d, r, Operation::Read, in z8.as_slice(), 0, 1));
+    h = polled(h, in epoll_driver_poll(inout d, false));
+    let _ = PulseSys::write(w, in "hi".as_bytes());
+    h = polled(h, in epoll_driver_poll(inout d, true));
+    h = submitted(h, epoll_driver_submit(inout d, r, Operation::Write, in z1.as_slice(), 0, 2));
+    h = submitted(h, epoll_driver_submit(inout d, r, Operation::Read, in z0.as_slice(), 0, 3));
+    h = submitted(h, epoll_driver_submit(inout d, r, Operation::Read, in z8.as_slice(), 5, 4));
+    h = submitted(h, epoll_driver_submit(inout d, file, Operation::Write, in "abc".as_bytes(), 3, 5));
+    h = submitted(h, epoll_driver_submit(inout d, file, Operation::Read, in z6.as_slice(), 0, 6));
+    h = polled(h, in epoll_driver_poll(inout d, false));
+    let (h7, id) = match epoll_driver_submit(inout d, r, Operation::Read, in z4.as_slice(), 0, 7) {
+        Result::Ok(i) => (mix(mix(h, 1), i.bits), i.bits),
+        Result::Err(e) => (mix(mix(h, 2), widen_u64(e)), 0),
+    };
+    h = h7;
+    let rid = RequestId {
+        bits: id,
+    };
+    let first = epoll_driver_cancel(inout d, rid);
+    let again = epoll_driver_cancel(inout d, rid);
+    let cancelled: u64 = match (first, again) {
+        (Result::Ok(true), Result::Ok(false)) => 1,
+        _ => 0,
+    };
+    h = mix(h, cancelled);
+    h = polled(h, in epoll_driver_poll(inout d, false));
+    h = submitted(h, epoll_driver_submit(inout d, w, Operation::Write, in "xyz".as_bytes(), 0, 8));
+    h = polled(h, in epoll_driver_poll(inout d, true));
+    h = submitted(h, epoll_driver_submit(inout d, r, Operation::Read, in z8.as_slice(), 0, 9));
+    h = polled(h, in epoll_driver_poll(inout d, true));
+    h = mix(h, epoll_driver_pending(in d));
+    let mut d2 = match epoll_driver_new(1) {
+        Result::Ok(d) => d,
+        Result::Err(_) => return 2,
+    };
+    h = submitted(h, epoll_driver_submit(inout d2, r, Operation::Read, in z8.as_slice(), 0, 10));
+    h = submitted(h, epoll_driver_submit(inout d2, w, Operation::Write, in z1.as_slice(), 0, 11));
+    h = mix(h, epoll_driver_pending(in d2));
+    let _ = epoll_driver_close(in d2);
+    let _ = epoll_driver_close(in d);
+    let _ = PulseSys::close(r);
+    let _ = PulseSys::close(w);
+    h
+}
+"#
+    .replace("@FD@", &file.as_raw_fd().to_string());
+    let checked = check_pulse_driver(&src);
+    assert_eq!(
+        agree(
+            &checked,
+            "scenario",
+            &[std_io_support::Mode::Jit, std_io_support::Mode::JitNoOpt]
+        ),
+        want
+    );
+}

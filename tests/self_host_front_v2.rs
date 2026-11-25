@@ -110,6 +110,7 @@ struct Front {
     counts: native::WordFunction,
     lex: native::WordFunction,
     editor: native::WordFunction,
+    surface: native::WordFunction,
 }
 
 fn front() -> &'static Front {
@@ -139,6 +140,7 @@ fn front() -> &'static Front {
             counts: compile("parse_counts"),
             lex: compile("lex_count"),
             editor: compile("parse_editor_tables"),
+            surface: compile("parse_surface_tables"),
         }
     })
 }
@@ -1607,4 +1609,425 @@ fn editor_parsing_frees_its_tables() {
             "live sequences before and after an editor parse"
         );
     }
+}
+
+// ------------------------------------------------------- surface profile
+
+/// The limits `sugar_expand` parses with (`sugar_expand::parse`).
+fn sugar_limits() -> parser::ParseLimits {
+    parser::ParseLimits {
+        max_source_bytes: vesper_syntax::lexer::HARD_SOURCE_BYTES,
+        max_tokens: vesper_syntax::lexer::HARD_TOKENS,
+        ..Default::default()
+    }
+}
+
+/// `parser::parse_surface_cst` as rows; an `Err(LexLimit)` as in
+/// [`rust_tables_with_limits`].
+fn rust_surface(source: &str, limits: parser::ParseLimits, include_tests: bool) -> Tables {
+    match parser::parse_surface_cst(source, limits, include_tests) {
+        Ok(parse) => parse_rows(&parse),
+        Err(limit) => Tables {
+            diagnostics: vec![(3, 0, 0, limit.to_string())],
+            ..Tables::default()
+        },
+    }
+}
+
+fn vesper_surface(source: &str, limits: parser::ParseLimits, include_tests: bool) -> Tables {
+    let bytes = limits.max_source_bytes as u64 | u64::from(include_tests) << 32;
+    let counts = limits.max_tokens as u64 | (limits.max_diagnostics as u64) << 32;
+    tables_from_words(&call_words(&front().surface, source, &[bytes, counts]))
+}
+
+fn compare_surface(
+    source: &str,
+    limits: parser::ParseLimits,
+    include_tests: bool,
+) -> Option<String> {
+    let rust = rust_surface(source, limits, include_tests);
+    let vesper = vesper_surface(source, limits, include_tests);
+    (rust != vesper).then(|| first_difference(source, &rust, &vesper))
+}
+
+/// Sources that exercise the surface grammar: sugar declarations with
+/// every sort, hole and repetition form, phrases with heads,
+/// continuations and `ghost`, pattern phrases, pipelines with
+/// placeholders, dotted operators, tagged literals and expression macros,
+/// with their error paths.
+const SURFACE_CASES: &[&str] = &[
+    "sugar unless: stmt { rule (unless $c:expr $body:block) => { if !$c $body } }\nfn f(x: bool) { unless x { g(); } }",
+    "pub sugar twice: expr { rule (twice $e:expr) => { $e + $e } } fn f() -> i64 { twice 3 }",
+    "@lean_notation sugar n: expr { rule (n $x:ident) => { $x } }",
+    "@other sugar n: expr { rule (n $x:ident) => { $x } }",
+    "sugar s: bogus { rule (s) => { } }",
+    "sugar s: stmt { }",
+    "sugar s: stmt { rule () => { } }",
+    "sugar s: stmt emits eff [IO] { rule (s $e:expr) => { $e } }",
+    "sugar s: stmt emits [IO] { rule (s $e:expr) => { $e } }",
+    "sugar each: stmt { rule (each $( $x:expr ),* ) => { $( g($x); )* } }",
+    "sugar each: stmt { rule (each $( $x:expr );+ ) => { } }",
+    "sugar each: stmt { rule (each $( $x:expr ) ) => { } }",
+    "sugar each: stmt { rule (each in $( $x:expr )* ) => { } }",
+    "sugar seq: stmt { rule (seq $..body:stmts) => { $body } }",
+    "sugar seq: stmt { rule (seq in $..body:stmts) => { } }",
+    "sugar seq: stmt { rule (seq $..body:wrong) => { } }",
+    "sugar h: stmt { rule (h $:expr) => { } }",
+    "sugar h: stmt { rule (h $x:nonsense) => { } }",
+    "sugar h: stmt { rule (h inout $x:place out $y:ident sink $z:expr) => { } }",
+    "sugar h: stmt { rule (h [$x:ty] {$b:block} ($p:pat)) => { [ ( { } ) ] } }",
+    "sugar h: stmt { rule (h ($x:ty) => { }",
+    "sugar h: stmt { rule (h $Src:ident) => { } rule (h $x:scope) => { } }",
+    "sugar pipe: infix(`|>`, pipeline, left) { rule ($a:expr |> $b:expr) => { $b($a) } }",
+    "sugar dot: infix(`.+`, additive, right) { rule ($a:expr .+ $b:expr) => { $a + $b } }",
+    "sugar bad: infix(`+`, additive, left) { rule ($a:expr) => { } }",
+    "sugar bad: infix(`.*`, mult, sideways) { rule ($a:expr) => { } }",
+    "sugar bad: infix(.*, additive, none) { rule ($a:expr) => { } }",
+    "fn f() { with_lock m { g(); } }",
+    "fn f() { with_lock(m) { g(); } else { h(); } }",
+    "fn f() { retry 3 times { g(); } else { h(); } }",
+    "fn f() { retry 3 times { g(); }\n else { h(); } }",
+    "fn f() { guard x > 0 else { return; } }",
+    "fn f() { guard table[i] > 0 { } }",
+    "fn f() { scratch tmp[256] { use_it(tmp); } }",
+    "fn f() { scratch tmp[256][4] { } }",
+    "fn f() { ghost assert x { } }",
+    "fn f() { ghost { } }",
+    "fn f() { defer cleanup(); }",
+    "fn f() { defer cleanup() }",
+    "fn f() { atomically let x = load(p) in inout q { } }",
+    "fn f() { use_buf out b { } }",
+    "fn f() -> i64 { let v = measure { 1 + 2 }; v }",
+    "fn f() -> i64 { measure x }",
+    "fn f() { for x in xs { } loop { break; } region r { } }",
+    "fn f() { if cond { } else { } }",
+    "fn f() { handle E state s = with_lock m { 0 } in { } with { return x => x } }",
+    "fn f() { handle E state s = 0 in { } with { return x => x } }",
+    "fn f() { match v { point x y => 0, some(x) => 1, tagged{ a } => 2, -1 => 3, _ => 4 } }",
+    "fn f() { match v { pair \"a\" => 0, pair (x, y) => 1, w 3 2.5 true false Upper => 2 } }",
+    "fn f() { match v { x => 0 } }",
+    "fn f() { let point x y = v; }",
+    "fn f() -> i64 { xs |> map(_, g) |> sum() }",
+    "fn f() -> i64 { xs |?> parse(_) }",
+    "fn f() -> i64 { xs | > g(_) }",
+    "fn f() -> i64 { g(_) }",
+    "fn f() -> i64 { xs |> g(in _, _) }",
+    "fn f() -> i64 { xs |> g(_ + 1) }",
+    "fn f() -> i64 { a .+ b .* c .== d .< e }",
+    "fn f() -> i64 { a .+= b .-> c .|| d .&& e ./ f .% g .^ h .<< i .>> j .| k .& l }",
+    "fn f() -> i64 { a . + b }",
+    "fn f() -> i64 { a.+?!~b }",
+    "fn f() -> i64 { a.b.+c.d() }",
+    "fn f() -> i64 { x = a .+ b |> g() }",
+    "fn f() -> i64 { -a .+ b }",
+    "fn f() -> i64 { sql\"select 1\" }",
+    "fn f() -> i64 { json{ a: 1 } }",
+    "fn f() -> i64 { json {a} }",
+    "fn f() -> i64 { if json{ a } { } }",
+    "fn f() -> i64 { g(json{ a }) }",
+    "macro twice(x: Expr) -> expr { x + x }\nfn f() -> i64 { twice!(3) }",
+    "macro twice(x: Expr -> expr { x }",
+    "macro twice(x: Expr) -> expr { x",
+    "fn f() -> i64 { twice!(1, 2,) }",
+    "fn f() -> i64 { twice!(1, (2, 3), [4]) }",
+    "fn f() -> i64 { twice!(if c { 1 } else { 2 }) }",
+    "fn f() -> i64 { twice! 3 }",
+    "fn f() { if twice!(x) { } }",
+    "fn f() { for x in a |> g(_) { } }",
+    "fn f() { for x in 0..n |> g(_) { } }",
+    "fn f() -> i64 { [measure { 1 }, json{ 2 }] }",
+    "fn f() -> i64 { (measure { 1 }, 2) }",
+    "fn f() -> i64 { xs[measure { 0 }] }",
+    "fn f() -> i64 { xs[a..measure { 0 }] }",
+    "with_tracing span { fn g() {} }",
+    "pub fn g() {} model m { } trait t { }",
+    "sugar a: item { rule (a) => { } }\nsugar b: tag { rule (b) => { } }",
+    "test { sugar t: stmt { rule (t) => { } } fn g() { t { } } }\nfn f() {}",
+    "test { test { fn g() {} } }",
+    "test { fn break() {} }\nfn f() { break; }",
+    "fn f() { `x` }",
+    "fn f() { a ` b }",
+    "sugar s: stmt { rule (s `x` $e:expr) => { `y` } }",
+    "fn f() { defer { }",
+    "fn f() { defer ( }",
+    "fn f() { with_lock m { ( } ] }",
+    "fn f() { g(]) }",
+    "fn _() { _ }",
+    "fn f() { let x = _; }",
+    "fn f() { linear x { } state y { } with z { } eff w { } }",
+];
+
+/// The surface profile of `@vesper/front` against the Rust surface
+/// parser on the sugar corpus, with and without test blocks.
+#[test]
+fn surface_profile_matches_on_the_sugar_corpus() {
+    let mut cases: Vec<String> = SURFACE_CASES.iter().map(|s| s.to_string()).collect();
+    for file in [
+        "crates/vesper-syntax/tests/sugar_expand.rs",
+        "crates/vesper-syntax/tests/sugar_surface.rs",
+        "crates/vesper-syntax/tests/source_macro_syntax.rs",
+        "crates/vesper-syntax/tests/recovery_parser.rs",
+        "crates/vesper-syntax/src/sugar_expand.rs",
+        "crates/vesper-syntax/src/sugar_expand/hygiene.rs",
+        "crates/vesper-syntax/src/sugar_expand/matcher.rs",
+        "crates/vesper-syntax/src/sugar_expand/scope.rs",
+        "crates/vesper-syntax/src/sugar_expand/template.rs",
+        "crates/vesper-syntax/src/macro_source.rs",
+        "src/forge_frontend/sugar.rs",
+        "src/packages/sugar.rs",
+        "tests/forge_cli.rs",
+        "tests/fmt_cli.rs",
+        "tests/package_paths.rs",
+    ] {
+        if let Ok(text) = std::fs::read_to_string(root().join(file)) {
+            cases.extend(rust_string_literals(&text));
+        }
+    }
+    // Each surface node kind (208-226 but 219) occurs in the corpus.
+    let mut seen = std::collections::BTreeSet::new();
+    for source in &cases {
+        for row in rust_surface(source, sugar_limits(), true).nodes {
+            seen.insert(row[0]);
+        }
+    }
+    let missing: Vec<u64> = (208..=226)
+        .filter(|k| *k != 219 && !seen.contains(k))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "surface node kinds never parsed: {missing:?}"
+    );
+    let mut failures = vec![];
+    for (i, source) in cases.iter().enumerate() {
+        for include_tests in [false, true] {
+            if let Some(d) = compare_surface(source, sugar_limits(), include_tests) {
+                let shown: String = source.chars().take(160).collect();
+                failures.push(format!("case {i} (tests: {include_tests}) {shown:?}: {d}"));
+            }
+        }
+    }
+    if !under_bazel() {
+        assert!(cases.len() >= 300, "{} surface sources", cases.len());
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Every repository `.ves` file parses the same in the surface profile.
+#[test]
+fn surface_profile_matches_on_repository_sources() {
+    let files = repository_sources();
+    let mut failures = vec![];
+    for (i, path) in files.iter().enumerate() {
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if let Some(d) = compare_surface(&source, sugar_limits(), i % 2 == 0) {
+            failures.push(format!(
+                "{}: {d}",
+                path.strip_prefix(root()).unwrap_or(path).display()
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} sources differ:\n{}",
+        failures.len(),
+        files.len(),
+        failures.join("\n")
+    );
+}
+
+/// Surface fragments for the fuzzed corpus: sugar words, holes, quoted
+/// operators, pipelines and macro calls.
+const SURFACE_FRAGMENTS: &[&str] = &[
+    "sugar",
+    "rule",
+    "=>",
+    "$",
+    "$x:expr",
+    "$..b:stmts",
+    "$(",
+    ")*",
+    ")+",
+    "`",
+    "`|>`",
+    "|>",
+    "|?>",
+    ".+",
+    ".*",
+    ".==",
+    "_",
+    "m!(",
+    "macro",
+    "ghost",
+    "infix(",
+    "emits",
+    "json{",
+    "sql\"q\"",
+    "with_lock m {",
+    "retry 3 {",
+    "} else {",
+    "\n",
+    "{",
+    "}",
+    "(",
+    ")",
+    "[",
+    "]",
+    ";",
+    ",",
+    "let",
+    "in",
+    "out",
+    "sink",
+    "inout",
+    "test {",
+    "pub",
+    "@lean_notation",
+];
+
+/// Edited sugar sources and surface token soup.
+#[test]
+fn surface_profile_matches_on_the_fuzzed_corpus() {
+    let mut bases: Vec<String> = SURFACE_CASES.iter().map(|s| s.to_string()).collect();
+    for file in [
+        "crates/vesper-syntax/tests/sugar_expand.rs",
+        "crates/vesper-syntax/tests/sugar_surface.rs",
+    ] {
+        if let Ok(text) = std::fs::read_to_string(root().join(file)) {
+            bases.extend(rust_string_literals(&text));
+        }
+    }
+    let rounds: usize = std::env::var("VESPER_FRONT_FUZZ")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3000);
+    let mut rng = Rng(0x5355_5246_4143_4531);
+    let mut failures = vec![];
+    for round in 0..rounds {
+        let source = match round % 4 {
+            3 => {
+                let n = 1 + rng.below(60);
+                let mut s = String::new();
+                for _ in 0..n {
+                    s.push_str(SURFACE_FRAGMENTS[rng.below(SURFACE_FRAGMENTS.len())]);
+                    if rng.below(3) != 0 {
+                        s.push(' ');
+                    }
+                }
+                s
+            }
+            _ => {
+                let base = rng.below(bases.len());
+                let mut s = mutate(&mut rng, &bases[base]);
+                if rng.below(2) == 0 {
+                    let at = rng.below(s.len() + 1);
+                    if s.is_char_boundary(at) {
+                        s.insert_str(at, SURFACE_FRAGMENTS[rng.below(SURFACE_FRAGMENTS.len())]);
+                    }
+                }
+                s
+            }
+        };
+        let include_tests = round % 3 == 0;
+        if let Some(d) = compare_surface(&source, sugar_limits(), include_tests) {
+            let shown: String = source.chars().take(200).collect();
+            failures.push(format!(
+                "round {round} (tests: {include_tests}) {shown:?}: {d}"
+            ));
+            if failures.len() >= 10 {
+                break;
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Explicit limits in the surface profile: out of range, an oversized
+/// source, and token, diagnostic and depth caps.
+#[test]
+fn surface_profile_matches_under_explicit_limits() {
+    let deep = format!("fn f() {{ with_lock m {} }}", "{ ".repeat(140));
+    let many = "fn f() { defer ( }\n".repeat(200);
+    let sources = [
+        SURFACE_CASES[0],
+        SURFACE_CASES[9],
+        deep.as_str(),
+        many.as_str(),
+        "",
+    ];
+    let grid = [
+        (16usize, 8usize, 4usize),
+        (1 << 20, 3, 2),
+        (1 << 20, 65_536, 1),
+        (1 << 20, 65_536, 128),
+        (0, 65_536, 128),
+        (1 << 24, 65_536, 128),
+        (1 << 20, 0, 128),
+    ];
+    let mut failures = vec![];
+    for source in sources {
+        for (bytes, tokens, diagnostics) in grid {
+            let limits = parser::ParseLimits {
+                max_source_bytes: bytes,
+                max_tokens: tokens,
+                max_diagnostics: diagnostics,
+                ..Default::default()
+            };
+            if let Some(d) = compare_surface(source, limits, false) {
+                let shown: String = source.chars().take(80).collect();
+                failures.push(format!("{shown:?} {bytes}/{tokens}/{diagnostics}: {d}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Surface profile speed over the repository sources and the sugar corpus:
+/// Rust (`parse_surface_cst` and its rows) against the Vesper tables, in
+/// alternating rounds. Run with `--ignored --nocapture` on a release build.
+#[test]
+#[ignore]
+fn surface_profile_speed() {
+    let mut sources: Vec<String> = repository_sources()
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .collect();
+    sources.extend(SURFACE_CASES.iter().map(|s| s.to_string()));
+    let limits = sugar_limits();
+    let time = |rust: bool| {
+        let start = std::time::Instant::now();
+        let mut n = 0usize;
+        for s in &sources {
+            let t = if rust {
+                rust_surface(s, limits, false)
+            } else {
+                vesper_surface(s, limits, false)
+            };
+            n += t.nodes.len();
+        }
+        std::hint::black_box(n);
+        start.elapsed().as_secs_f64()
+    };
+    time(true);
+    time(false);
+    let mut ratios = vec![];
+    for round in 0..20 {
+        let (r, v) = if round % 2 == 0 {
+            let r = time(true);
+            (r, time(false))
+        } else {
+            let v = time(false);
+            (time(true), v)
+        };
+        ratios.push(v / r);
+    }
+    ratios.sort_by(f64::total_cmp);
+    println!(
+        "surface profile, {} sources: Vesper/Rust median {:.3}x, range {:.3}x..{:.3}x",
+        sources.len(),
+        ratios[ratios.len() / 2],
+        ratios[0],
+        ratios[ratios.len() - 1]
+    );
 }

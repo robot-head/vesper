@@ -120,7 +120,7 @@ No `f32`/`f64` divergence was found.
 
 ## Divergence checks
 
-`crates/vesper-kinetic/port/check.sh` (sourced by
+`aspect crate kinetic check` (sourced by
 `scripts/test-port-harness.sh`, shard 3) applies one edit at a time
 (`EDITS` in `build.rs`, the same edits as the Bazel
 `kinetic_vesper_divergent_*` objects) and asserts that a test of its module

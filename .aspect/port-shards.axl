@@ -1,0 +1,37 @@
+"""Publish the port shard matrix for the selected checkout."""
+
+def _shard_count(ctx: TaskContext, root: str) -> int:
+    plan = ctx.std.fs.try_read_to_string(root + "/scripts/port-harness-plan.json")
+    if plan:
+        shards = json.decode(plan)
+        if type(shards) != "list":
+            ctx.std.process.exit(1, "Expected a list of port harness shards")
+        return len(shards)
+    historical = ctx.std.fs.try_read_to_string(root + "/scripts/test-port-harness.sh") or ""
+    for line in historical.splitlines():
+        if line.startswith("shards="):
+            value = line.removeprefix("shards=").strip()
+            if value.isdigit():
+                return int(value)
+    ctx.std.process.exit(1, "Could not determine the port harness shard count")
+
+def _publish_matrix(ctx: TaskContext) -> int:
+    root = ctx.std.env.var("PORT_HARNESS_ROOT") or ctx.std.env.aspect_root_dir()
+    output = ctx.std.env.var("GITHUB_OUTPUT")
+    if not output:
+        ctx.std.process.exit(2, "GITHUB_OUTPUT is required")
+    count = _shard_count(ctx, root)
+    if count < 1 or count > 256:
+        ctx.std.process.exit(1, "The port harness needs between 1 and 256 shards")
+    matrix = json.encode(list(range(1, count + 1)))
+    if not ctx.std.fs.try_append(output, "shards=" + matrix + "\n"):
+        ctx.std.process.exit(1, "Could not write the port shard matrix to GITHUB_OUTPUT")
+    ctx.std.io.stdout.write(matrix + "\n")
+    return 0
+
+port_shard_matrix = task(
+    kind = "port-shard-matrix",
+    group = ["ci"],
+    summary = "Publish the Linux port shard numbers for a current or historical checkout",
+    implementation = _publish_matrix,
+)

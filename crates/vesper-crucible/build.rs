@@ -23,7 +23,7 @@ fn main() {
 }
 
 /// The divergence checks, one per ported area (mirrored in BUILD.bazel and
-/// asserted by scripts/test-port-harness.sh, crates/vesper-crucible/port/check.sh).
+/// asserted by scripts/test-port-harness.sh, aspect crate crucible check).
 #[cfg(feature = "vesper-port-divergent")]
 const EDITS: &[(&str, &str)] = &[
     // rng.rs: a different SplitMix64 increment.

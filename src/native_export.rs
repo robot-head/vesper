@@ -1359,6 +1359,7 @@ fn compile_exports<M: Module>(
         None,
         optimize,
         &abi,
+        None,
     )?;
     for (export, inner, sig) in &wide_entries {
         define_wide_entry(m, export, *inner, sig)?;

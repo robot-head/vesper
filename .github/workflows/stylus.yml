@@ -21,10 +21,11 @@ on:
       - 'tests/recovery_cli.rs'
       - 'tests/fixtures/stylus/**'
       - 'scripts/check-stylus.py'
-      - 'scripts/test-stylus.sh'
+      - '.aspect/acceptance-suites.axl'
       - '.github/workflows/stylus.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.aspect/default-cli.axl'
   pull_request:
     paths:
       - 'crates/vesper-fmt/**'
@@ -43,10 +44,11 @@ on:
       - 'tests/recovery_cli.rs'
       - 'tests/fixtures/stylus/**'
       - 'scripts/check-stylus.py'
-      - 'scripts/test-stylus.sh'
+      - '.aspect/acceptance-suites.axl'
       - '.github/workflows/stylus.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.aspect/default-cli.axl'
 
 permissions:
   contents: read
@@ -103,9 +105,6 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
       # cargo-fmt hands every workspace target root to one rustfmt command,
       # which is longer than Windows allows (os error 206). Formatting does
       # not depend on the host, so the Linux leg checks it for everyone.
@@ -113,9 +112,7 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
       - name: Assert default CLI does not require the Wasmtime engine
-        run: >-
-          cargo tree --locked -p vesper --edges normal --prefix none |
-          python -c 'import sys; names={line.split()[0] for line in sys.stdin if line.strip()}; assert not names.intersection({"wasmtime", "wasmtime-wasi", "vesper-loom-sandbox"})'
+        run: aspect ci check-default-cli-dependencies
       - name: Test actual formatter with macro and complete-function recovery sources
         run: cargo test --locked -p vesper-fmt --all-targets
       - name: Test actual CLI, current editor actions and original-buffer recovery

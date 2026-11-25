@@ -53,3 +53,33 @@ Rust lines deleted from the crates' own sources: 498. The seed copies
   the enum match lowering (gaps 3 and 4 of rust-exit-silicon-ebpf.md).
 - `vesper-warp-wheel` (1.54x, 1.52..1.55): bounds-checked loads from seven
   parallel sequences in `open_tick`, `place` and `next_work_tick`.
+
+## Part 2: warp-wheel speed-ups (no flip yet)
+
+Measured on main aba7689, same box and settings (release, `-C target-cpu=native`,
+30 ABBA epochs), 95% CI of the Vesper/Rust ratio:
+
+| Run | 95% CI | Bar (upper <= 1.50x) |
+| --- | --- | --- |
+| 1 | [1.469, 1.510] | fail |
+| 2 | [1.457, 1.483] | pass |
+| 3 | [1.435, 1.480] | pass |
+
+Before these changes the port measured 1.54x [1.52, 1.55]. Two of three runs
+now pass, which is not reliable enough to delete the Rust, so Rust stays the
+default. 0 diffs; divergence checks pass.
+
+Changes in `crates/vesper-warp-wheel/vesper/src/`:
+
+- The seven parallel entry sequences are one `ChunkSeq[u64]` with stride 8
+  (deadline, tick, seq, generation, prev, next, list) and list heads/tails are
+  one sequence with stride 2, so each entry touch loads one header.
+- `place` finds the level with `leading_zeros_u64` and a 64-entry
+  `level_of_bit` table instead of a loop over level spans.
+- `next_work_tick` and `open_tick` use wrapping shift helpers (`shl_in`,
+  `shr_in`) that need no range check.
+- `sort_chain` returns early for single-entry chains.
+
+Remaining cost is codegen (#1426): seq header reloads after stores, the
+`try_get` bounds branch, callee-saved register saves, and `poll` returning its
+result through memory. Rust lines deleted: 0.

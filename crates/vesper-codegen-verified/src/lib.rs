@@ -3,8 +3,9 @@
 //! This crate validates `bootstrap/stage3_ddc.lock` (§42.2), compares the
 //! Path A Stage 2 / Stage 3 artifacts and the Path B (Lean reference) artifact,
 //! and enforces the clean-room builder quorum through the configured-key
-//! Ed25519 verifier in `vesper-loom-trust`. Every divergence is a typed
-//! [`BootstrapVerifyError`].
+//! Ed25519 verifier in [`trust`], the auditor's own copy of the
+//! `vesper-loom-trust` rules (it links no Vesper library and no part of the
+//! compiler it audits). Every divergence is a typed [`BootstrapVerifyError`].
 //!
 //! What this crate does not do:
 //! - It does not check equational rewrite certificates. That checker belongs to
@@ -24,6 +25,7 @@ mod digest;
 mod lock;
 pub mod seed;
 pub mod stage1;
+pub mod trust;
 
 pub use audit::{
     AuditReport, BootstrapEvidence, BuilderEvidence, RewriteEvidence, TeeEvidence,
@@ -79,7 +81,7 @@ pub enum BootstrapVerifyError {
     },
     /// Too few distinct configured builder operators attested the fixed point.
     InsufficientLilaBuilderQuorum { actual: usize, min_required: usize },
-    /// The attestation bundle or policy was rejected; codes from `vesper-loom-trust`.
+    /// The attestation bundle or policy was rejected; codes from [`trust::verify_attestations`].
     BuilderSignatureRejected { codes: Vec<String> },
     /// The lock requires a TEE attestation and none was supplied.
     MissingTeeAttestation,

@@ -254,15 +254,15 @@ impl Abi for crate::WheelConfigError {
 /// Owned handle of a Vesper `EdtCore` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_wheel_EdtCore_drop`.
 pub struct EdtCore {
-    words: [u64; 25],
+    words: [u64; 18],
 }
 
 impl EdtCore {
     /// # Safety
     /// `words` must hold a `EdtCore` value of this library that the caller owns.
     unsafe fn from_words(words: &[u64]) -> Self {
-        let mut owned = [0u64; 25];
-        owned.copy_from_slice(&words[..25]);
+        let mut owned = [0u64; 18];
+        owned.copy_from_slice(&words[..18]);
         Self { words: owned }
     }
 
@@ -300,30 +300,30 @@ pub struct EdtCoreRef<'a> {
 impl<'a> EdtCoreRef<'a> {
     pub fn wheel(&self) -> WheelCoreRef<'a> {
         let w: &'a [u64] = self.words;
-        WheelCoreRef { words: &w[0..22] }
+        WheelCoreRef { words: &w[0..15] }
     }
     pub fn horizon_ns(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[22..])
+        <u64 as Abi>::get(&w[15..])
     }
     pub fn last_released_ns(&self) -> Option<u64> {
         let w: &'a [u64] = self.words;
-        <Option<u64> as Abi>::get(&w[23..])
+        <Option<u64> as Abi>::get(&w[16..])
     }
 }
 
 /// Owned handle of a Vesper `LeaseCore` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_wheel_LeaseCore_drop`.
 pub struct LeaseCore {
-    words: [u64; 29],
+    words: [u64; 22],
 }
 
 impl LeaseCore {
     /// # Safety
     /// `words` must hold a `LeaseCore` value of this library that the caller owns.
     unsafe fn from_words(words: &[u64]) -> Self {
-        let mut owned = [0u64; 29];
-        owned.copy_from_slice(&words[..29]);
+        let mut owned = [0u64; 22];
+        owned.copy_from_slice(&words[..22]);
         Self { words: owned }
     }
 
@@ -361,50 +361,50 @@ pub struct LeaseCoreRef<'a> {
 impl<'a> LeaseCoreRef<'a> {
     pub fn wheel(&self) -> WheelCoreRef<'a> {
         let w: &'a [u64] = self.words;
-        WheelCoreRef { words: &w[0..22] }
+        WheelCoreRef { words: &w[0..15] }
     }
     pub fn k_space(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[22]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[15]) }
     }
     pub fn k_pn(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[23]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[16]) }
     }
     pub fn s_space(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[24]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[17]) }
     }
     pub fn s_pn(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[25]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[18]) }
     }
     pub fn s_index(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[26]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[19]) }
     }
     pub fn s_generation(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[27]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[20]) }
     }
     pub fn mask(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[28..])
+        <u64 as Abi>::get(&w[21..])
     }
 }
 
 /// Owned handle of a Vesper `WheelCore` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_wheel_WheelCore_drop`.
 pub struct WheelCore {
-    words: [u64; 22],
+    words: [u64; 15],
 }
 
 impl WheelCore {
     /// # Safety
     /// `words` must hold a `WheelCore` value of this library that the caller owns.
     unsafe fn from_words(words: &[u64]) -> Self {
-        let mut owned = [0u64; 22];
-        owned.copy_from_slice(&words[..22]);
+        let mut owned = [0u64; 15];
+        owned.copy_from_slice(&words[..15]);
         Self { words: owned }
     }
 
@@ -440,93 +440,65 @@ pub struct WheelCoreRef<'a> {
 }
 
 impl<'a> WheelCoreRef<'a> {
-    pub fn e_deadline(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn e(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[0]) }
     }
-    pub fn e_tick(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn l(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[1]) }
     }
-    pub fn e_seq(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn occupied(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[2]) }
     }
-    pub fn e_generation(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn level_of_bit(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[3]) }
     }
-    pub fn e_prev(&self) -> vesper_port_abi::SeqRef<'a, u64> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[4]) }
-    }
-    pub fn e_next(&self) -> vesper_port_abi::SeqRef<'a, u64> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[5]) }
-    }
-    pub fn e_list(&self) -> vesper_port_abi::SeqRef<'a, u64> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[6]) }
-    }
-    pub fn l_head(&self) -> vesper_port_abi::SeqRef<'a, u64> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[7]) }
-    }
-    pub fn l_tail(&self) -> vesper_port_abi::SeqRef<'a, u64> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[8]) }
-    }
-    pub fn occupied(&self) -> vesper_port_abi::SeqRef<'a, u64> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[9]) }
-    }
-    pub fn l_span(&self) -> vesper_port_abi::SeqRef<'a, u64> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[10]) }
-    }
     pub fn tick_ns(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[11..])
+        <u64 as Abi>::get(&w[4..])
     }
     pub fn slot_bits(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[12..])
+        <u64 as Abi>::get(&w[5..])
     }
     pub fn levels(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[13..])
+        <u64 as Abi>::get(&w[6..])
     }
     pub fn slots(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[14..])
+        <u64 as Abi>::get(&w[7..])
     }
     pub fn capacity(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[15..])
+        <u64 as Abi>::get(&w[8..])
     }
     pub fn free_head(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[16..])
+        <u64 as Abi>::get(&w[9..])
     }
     pub fn len(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[17..])
+        <u64 as Abi>::get(&w[10..])
     }
     pub fn cursor(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[18..])
+        <u64 as Abi>::get(&w[11..])
     }
     pub fn now_ns(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[19..])
+        <u64 as Abi>::get(&w[12..])
     }
     pub fn next_seq(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[20..])
+        <u64 as Abi>::get(&w[13..])
     }
     pub fn overflow_min_tick(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[21..])
+        <u64 as Abi>::get(&w[14..])
     }
 }
 
@@ -677,7 +649,7 @@ pub fn edt_core_len(q: &EdtCore) -> u64 {
 
 /// Calls `edt_core_new` of the Vesper library `wheel` (`vesper_wheel_edt_core_new`).
 pub fn edt_core_new(config: crate::WheelConfig, horizon_ns: u64) -> Result<EdtCore, crate::WheelConfigError> {
-    let mut result = [0u64; 25];
+    let mut result = [0u64; 18];
     let mut arg_config = [0u64; <crate::WheelConfig as Abi>::WORDS];
     Abi::put(&config, &mut arg_config);
     let mut fail = [0u64; 3];
@@ -777,7 +749,7 @@ pub fn lease_core_len(l: &LeaseCore) -> u64 {
 
 /// Calls `lease_core_new` of the Vesper library `wheel` (`vesper_wheel_lease_core_new`).
 pub fn lease_core_new(config: crate::WheelConfig) -> Result<LeaseCore, crate::WheelConfigError> {
-    let mut result = [0u64; 29];
+    let mut result = [0u64; 22];
     let mut arg_config = [0u64; <crate::WheelConfig as Abi>::WORDS];
     Abi::put(&config, &mut arg_config);
     let mut fail = [0u64; 3];
@@ -935,7 +907,7 @@ pub fn wheel_core_len(w: &WheelCore) -> u64 {
 
 /// Calls `wheel_core_new` of the Vesper library `wheel` (`vesper_wheel_wheel_core_new`).
 pub fn wheel_core_new(config: crate::WheelConfig) -> Result<WheelCore, crate::WheelConfigError> {
-    let mut result = [0u64; 22];
+    let mut result = [0u64; 15];
     let mut arg_config = [0u64; <crate::WheelConfig as Abi>::WORDS];
     Abi::put(&config, &mut arg_config);
     let mut fail = [0u64; 3];

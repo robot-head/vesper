@@ -1,5 +1,5 @@
 //! End-to-end tests that execute the committed fixture component
-//! (`fixtures/guest`, rebuilt by `fixtures/build.sh`) inside the sandbox.
+//! (`fixtures/guest`, rebuilt by `aspect crate loom-sandbox build`) inside the sandbox.
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -120,7 +120,7 @@ fn fixtures_match_recorded_checksums() {
         let line = format!("{digest}  {name}");
         assert!(
             SUMS.lines().any(|l| l == line),
-            "{name} does not match SHA256SUMS; rerun fixtures/build.sh"
+            "{name} does not match SHA256SUMS; rerun aspect crate loom-sandbox build"
         );
     }
 }

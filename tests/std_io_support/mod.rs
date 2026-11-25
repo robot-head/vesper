@@ -4,15 +4,17 @@
 //! `.vsys` imports, and run
 //!
 //! * in the JIT with the native optimizer on and off, the imports bound to
-//!   the real host shim (`vesper_std_host::symbols`), and
+//!   the C library's own functions (libc on Unix, kernel32 on Windows), and
 //! * in the evaluator, through the compiler's `ffi_lowering::EvalHost`
 //!   (the host of `vesper run`): it marshals each foreign call's source
 //!   values into the `.vsys` C ABI (driven by the parsed library
 //!   descriptors) and calls the same host functions, so both paths touch
 //!   the real file system.
-//!
-//! Each run must leave no live host handle behind (the leak check).
 #![allow(dead_code)]
+
+/// The Rust oracles' error codes and byte forms (tests/common).
+#[path = "../common/std_io_oracle.rs"]
+pub mod oracle;
 
 use std::{
     fs,
@@ -213,6 +215,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn open(path: *const c_char, flags: i32, ...) -> i32;
         fn read(fd: i32, buf: *mut c_void, n: usize) -> isize;
         fn write(fd: i32, buf: *const c_void, n: usize) -> isize;
+        fn pread(fd: i32, buf: *mut c_void, n: usize, offset: i64) -> isize;
+        fn pwrite(fd: i32, buf: *const c_void, n: usize, offset: i64) -> isize;
         fn fsync(fd: i32) -> i32;
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
         fn close(fd: i32) -> i32;
@@ -325,6 +329,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("readdir", readdir as *const u8),
         ("closedir", closedir as *const u8),
         ("bcopy", bcopy as *const u8),
+        ("pread", pread as *const u8),
+        ("pwrite", pwrite as *const u8),
         ("openat", openat as *const u8),
         ("unlinkat", unlinkat as *const u8),
         ("fdopendir", fdopendir as *const u8),
@@ -526,6 +532,10 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn HeapAlloc(h_heap: *mut c_void, dw_flags: u32, dw_bytes: usize) -> *mut c_void;
         fn HeapFree(h_heap: *mut c_void, dw_flags: u32, lp_mem: *mut c_void) -> i32;
         fn RtlMoveMemory(dst: *mut c_void, src: *const c_void, len: usize);
+        fn GetFileAttributesW(lp_file_name: *const u16) -> u32;
+        fn GetModuleFileNameW(h_module: *mut c_void, lp_filename: *mut u16, n_size: u32) -> u32;
+        fn GetSystemDirectoryW(lp_buffer: *mut u16, u_size: u32) -> u32;
+        fn GetWindowsDirectoryW(lp_buffer: *mut u16, u_size: u32) -> u32;
     }
     vec![
         ("GetCommandLineW", GetCommandLineW as *const u8),
@@ -585,6 +595,10 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("HeapAlloc", HeapAlloc as *const u8),
         ("HeapFree", HeapFree as *const u8),
         ("RtlMoveMemory", RtlMoveMemory as *const u8),
+        ("GetFileAttributesW", GetFileAttributesW as *const u8),
+        ("GetModuleFileNameW", GetModuleFileNameW as *const u8),
+        ("GetSystemDirectoryW", GetSystemDirectoryW as *const u8),
+        ("GetWindowsDirectoryW", GetWindowsDirectoryW as *const u8),
     ]
 }
 #[cfg(not(any(unix, windows)))]
@@ -592,19 +606,14 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
     vec![]
 }
 
-/// Every symbol the three libraries import on this host: the host shim's
-/// and the C library's.
+/// Every symbol the three libraries import on this host: the C library's.
 pub fn symbols() -> Vec<(&'static str, *const u8)> {
-    let mut s = vesper_std_host::symbols();
-    s.extend(libc_symbols());
-    s
+    libc_symbols()
 }
 
-/// Run `entry` in `mode`; panics with the error. Checks that every host
-/// handle the run created was finalized.
+/// Run `entry` in `mode`; panics with the error.
 pub fn run(checked: &ForeignChecked, entry: &str, mode: Mode) -> Value {
-    let before = vesper_std_host::live_handles();
-    let got = match mode {
+    match mode {
         Mode::Jit | Mode::JitNoOpt => checked
             .jit_with_options(entry, &symbols(), mode == Mode::Jit)
             .unwrap_or_else(|e| panic!("{entry} ({mode:?}): {e}")),
@@ -615,13 +624,7 @@ pub fn run(checked: &ForeignChecked, entry: &str, mode: Mode) -> Value {
                 .evaluate(entry, |call| host.call(call))
                 .unwrap_or_else(|e| panic!("{entry} ({mode:?}): {e}"))
         }
-    };
-    assert_eq!(
-        vesper_std_host::live_handles(),
-        before,
-        "{entry} ({mode:?}): live handles [file, dir, command, child]"
-    );
-    got
+    }
 }
 
 /// The u64 an entry returned.

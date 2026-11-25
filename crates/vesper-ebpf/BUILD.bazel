@@ -66,7 +66,7 @@ filegroup(
 # The divergent builds, one per ported module (the Cargo
 # `vesper-port-divergent` feature applies the same edits from build.rs, one
 # at a time with VESPER_EBPF_DIVERGENT): each must keep compiling, and
-# crates/vesper-ebpf/port/check.sh asserts which test catches it.
+# aspect crate ebpf check asserts which test catches it.
 [
     vesper_port_object(
         name = "ebpf_vesper_divergent_" + module,
@@ -116,7 +116,7 @@ rust_library(
 
 # The pure test files against the port. The rest (ELF objects, the kernel,
 # Lean and the builders over them) run against the port in Cargo, in the
-# Linux "Vesper ports" job (crates/vesper-ebpf/port/check.sh).
+# Linux "Vesper ports" job (aspect crate ebpf check).
 [
     rust_test(
         name = "port_%s_test" % test,

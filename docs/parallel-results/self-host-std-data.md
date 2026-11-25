@@ -58,8 +58,8 @@ Design notes:
   as a view.
 - **BLAKE3 two ways.** `@vesper-std/hash::blake3` is a port of the
   reference implementation (chunk state, chaining-value stack, XOF). The
-  compression function is generated (`hash/gen/blake3_gen.py`, checked by
-  `compress_is_generated`): 7 rounds of 8 calls of a quarter round `g` over
+  compression function is generated (`aspect maintenance gen-blake3`, checked by
+  the Aspect task integration tests): 7 rounds of 8 calls of a quarter round `g` over
   the state in the output slice, with the message schedule applied to the
   arguments. The obvious shape, one straight-line function over 16 locals,
   hits compiler gaps 1 and 6. `@vesper-std/hash-sys` calls the crate. A `Hasher` is a
@@ -178,7 +178,7 @@ Notes:
 ## Compiler gaps
 
 1. **Optimized code rematerializes shared values at each store.**
-   Repro: `python3 packages/vesper-std/hash/gen/blake3_gen.py out.ves
+   Repro: `aspect maintenance gen-blake3 -- out.ves
    --straight-line` writes the compression as 16 `u32` locals updated by
    224 `rotate_right`s, then 16 `out.try_set(i, ...)` calls. Optimized
    `vesper build` emits 3,352 `ror` instructions and runs 30,665

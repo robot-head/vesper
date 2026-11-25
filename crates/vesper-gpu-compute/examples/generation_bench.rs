@@ -1,5 +1,5 @@
 //! One timed run of the decoding workload, for the ABBA comparison that
-//! `port/bench-abba.sh generation` drives against the Rust tensor driver at
+//! `aspect crate gpu-compute bench-abba -- generation` drives against the Rust tensor driver at
 //! its last commit. Prints a label, the elapsed nanoseconds and a digest of
 //! the tokens, so both arms are seen to compute the same thing.
 //!

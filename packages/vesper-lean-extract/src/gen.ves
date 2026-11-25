@@ -97,6 +97,7 @@ use self::build::{
     B_IMPLICIT,
     B_INSTANCE,
     D_DEF,
+    K_DEF,
     K_PARTIAL,
     OP_ADD,
     OP_BOOL_AND,
@@ -170,6 +171,7 @@ use self::tm::{
     p_tuple,
     p_wild,
     p_bind,
+    p_nat,
     pos,
     product,
     project,
@@ -385,6 +387,8 @@ pub struct G {
     paths: ChunkSeq[u32],
     // fuel companions (part 3c): symbol -> 1 for the recursive family
     family: ChunkSeq[u32],
+    // generating the total `f$fuel` companions (`Generator::fuel`)
+    fuel: bool,
 }
 
 pub fn gen_new() -> G {
@@ -423,6 +427,7 @@ pub fn gen_new() -> G {
         abinds: ChunkSeq::new[ABind](),
         paths: ChunkSeq::new[u32](),
         family: ChunkSeq::new[u32](),
+        fuel: false,
     }
 }
 
@@ -963,7 +968,7 @@ fn adapt_callable(inout b: B, in t: Types, in g: G, value: T, ty: u32, depth: u6
 }
 
 // `inferred(names, body)`: a lambda over `_`-typed binders.
-fn inferred(inout b: B, in names: ChunkSeq[u32], body: T) -> T {
+pub fn inferred(inout b: B, in names: ChunkSeq[u32], body: T) -> T {
     let mut bs = empty();
     for i in 0..names.len() {
         let it = infer(inout b);
@@ -2412,8 +2417,41 @@ fn name_expr(inout b: B, inout t: Types, in y: Y, inout g: G, n: u32) -> T {
         return adapt_callable(inout b, in t, in g, r, l.ty, l.depth);
     }
     if g.in_family(n) {
-        skip(inout b, inout g);
-        return unit(inout b);
+        let fi = y.a.fn_index(n);
+        let s0 = y.x.fx.sig(w(y.x.fx.find(n)));
+        let mut labeled = false;
+        if fi != NONE {
+            let reqs = requirements(in t, in y, fi);
+            for index in 0..reqs.len() {
+                if t.effect_at(u64_at(in reqs, index)).label != 0 {
+                    labeled = true;
+                }
+            }
+        }
+        if fi == NONE || !fn_effectful(in t, in y, fi) || s0.gn != 0 || g.monad_id || labeled {
+            fail_with_name(
+                inout b,
+                in "a fuel companion cannot pass the recursive function '",
+                n,
+                in "' as a value unless it is effectful, non-generic, unlabeled and in a monadic context"
+            );
+            return unit(inout b);
+        }
+        let fv = named(inout b, in FUEL);
+        let fa = named_arg(inout b, in FUEL, fv);
+        let mut fargs = empty();
+        fargs.push(fa);
+        let fr = fuel_ref(inout b, n);
+        let value = app_args(inout b, fr, in fargs);
+        if s0.pn == 0 {
+            let gu = global(inout b, in "Unit");
+            let us = b.intern(in "$unit");
+            let bd = explicit(inout b, us, gu);
+            let mut bs = empty();
+            bs.push(bd);
+            return lambda(inout b, in bs, value);
+        }
+        return value;
     }
     let si = y.x.fx.find(n);
     if si != NONE32 && y.x.fx.sig(w(si)).pn == 0 {
@@ -3489,11 +3527,27 @@ fn call(
             arguments.push(na);
         }
     }
-    if g.in_family(n) {
-        skip(inout b, inout g);
+    if g.in_family(n) && g.monad_id {
+        fail_with_name(
+            inout b,
+            in "a fuel companion cannot call the recursive function '",
+            n,
+            in "' inside a pure closure"
+        );
         return unit(inout b);
     }
-    let f = sref(inout b, n);
+    let mut f = no_t();
+    if g.in_family(n) {
+        let fv = named(inout b, in FUEL);
+        let fa = named_arg(inout b, in FUEL, fv);
+        let mut with_fuel = empty();
+        with_fuel.push(fa);
+        extend(inout with_fuel, in arguments);
+        arguments = with_fuel;
+        f = fuel_ref(inout b, n);
+    } else {
+        f = sref(inout b, n);
+    }
     let callt = app_args(inout b, f, in arguments);
     let mut result = no_t();
     if fi != NONE && callee_effectful(in t, in y, in g, fi) {
@@ -3507,6 +3561,15 @@ fn call(
         result = lref(inout b, tmp);
     }
     restore_states(inout b, inout t, in y, inout g, result, in states, in vars, inout out)
+}
+
+// `$fuel`: the fuel binder of total companions.
+const FUEL: Str = "$fuel";
+
+// `Term::Ref(fuel_name(n))`: `n$fuel`.
+fn fuel_ref(inout b: B, n: u32) -> T {
+    let s = b.joined(in "", n, in FUEL);
+    sref(inout b, s)
 }
 
 // `eff::op` split at the first `::`.
@@ -5426,7 +5489,8 @@ pub fn function(inout b: B, inout t: Types, in y: Y, inout g: G, fi: u64) -> T {
     let f = y.a.function(fi);
     let si = y.x.fx.find(f.name);
     let s = y.x.fx.sig(w(si));
-    let polymorphic = f.polymorphic;
+    // A fuel companion is always over `m` (`Generator::new(world, m)`).
+    let polymorphic = f.polymorphic || g.fuel;
     if polymorphic {
         g.monad = named(inout b, in "m");
         g.monad_id = false;
@@ -5454,6 +5518,19 @@ pub fn function(inout b: B, inout t: Types, in y: Y, inout g: G, fi: u64) -> T {
         let m2 = b.at();
         b.monad_instance();
         binders.push(b.since(m2));
+        // `f$fuel`: `[VesperDiverge m] ($fuel : Nat)` after the first instance
+        if g.in_family(f.name) {
+            let vd = b.intern(in "VesperDiverge");
+            let vr = sref(inout b, vd);
+            let mv = named(inout b, in "m");
+            let vt = app1(inout b, vr, mv);
+            let ib = anonymous(inout b, B_INSTANCE, vt);
+            binders.push(ib);
+            let fs = b.intern(in FUEL);
+            let nat = global(inout b, in "Nat");
+            let fb = explicit(inout b, fs, nat);
+            binders.push(fb);
+        }
         let reqs = requirements(in t, in y, fi);
         for index in 0..reqs.len() {
             let variable = b.numbered(in "$cap", index);
@@ -5572,18 +5649,49 @@ pub fn function(inout b: B, inout t: Types, in y: Y, inout g: G, fi: u64) -> T {
     let tp = tuple(inout b, in values);
     let pr = pure(inout b, tp);
     let body0 = sequence(inout b, in out, pr);
-    let body = if effectful {
+    let mut body = if effectful {
         body0
     } else {
         gapp1(inout b, in "Id", in "run", body0)
     };
+    let fuel = g.in_family(f.name);
+    if fuel {
+        // structurally recursive on `$fuel`; running out is `VesperDiverge`
+        let scrutinee = named(inout b, in FUEL);
+        let zero = p_nat(inout b, in "0");
+        let dv = b.at();
+        b.w(T_REF);
+        b.w(0);
+        b.w(2);
+        b.text(in "VesperDiverge");
+        b.text(in "diverge");
+        let diverge = b.since(dv);
+        let a0 = arm(inout b, zero, diverge);
+        let succ = rooted2(inout b, in "Nat", in "succ");
+        let fs = b.intern(in FUEL);
+        let pb = p_bind(inout b, fs);
+        let mut ps = empty();
+        ps.push(pb);
+        let sp = p_ctor(inout b, succ, in ps);
+        let a1 = arm(inout b, sp, body);
+        let mut arms = empty();
+        arms.push(a0);
+        arms.push(a1);
+        body = match_term(inout b, scrutinee, in arms);
+    }
     // the declaration: imports 0, one declaration
     let m = b.at();
     b.w(0);
     b.w(1);
     b.w(D_DEF);
-    b.w(K_PARTIAL);
-    b.name(f.name);
+    if fuel {
+        b.w(K_DEF);
+        let fname = b.joined(in "", f.name, in FUEL);
+        b.name(fname);
+    } else {
+        b.w(K_PARTIAL);
+        b.name(f.name);
+    }
     b.w(binders.len());
     for i in 0..binders.len() {
         b.put(get(in binders, i));

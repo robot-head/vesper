@@ -12,7 +12,7 @@ The native lanes run only host-specific coverage:
   executables built and run on Apple silicon.
 - Windows runs its direct-fiber and IOCP suites, Pulse's host-driver and pool
   tests against IOCP, and COFF executables linked with MSVC and run on Windows.
-- Both run the export ABI tier of `scripts/test-port-harness.sh`
+- Both run the export ABI tier from `scripts/port-abi-plan.json`
   (`VESPER_PORT_HARNESS_SCOPE=abi`): the port pilot's export ABI v2 kit and
   v3 gauge against their Rust builds, their divergence and leak checks,
   `vesper-port-build` package linking, and the port closure guard. These
@@ -21,7 +21,7 @@ The native lanes run only host-specific coverage:
 
 The rest of the port harness, every ported crate's tests against both builds
 and its divergence checks, is platform-neutral once the ABI tier passes. It
-runs once, in the `Vesper ports (Linux n/7)` jobs of the same workflow, on
+runs once, in the `Vesper ports (Linux n/9)` jobs of the same workflow, on
 `ubuntu-latest` (#1010). Before that, macOS and Windows each ran the whole
 harness, which took 27 and 39 minutes of 34 and 50 minute jobs on main
 (November 2026). Some divergence assertions exist only in this Cargo run (the
@@ -30,17 +30,19 @@ them), so the Linux job is not a duplicate of BuildBuddy. `Platform
 validation complete` requires it. A new port appends its lines after the ABI
 tier, so it runs on Linux only.
 
-The Linux job runs as seven parallel shards, `Vesper ports (Linux 1/7)` to
-`(Linux 7/7)` (`VESPER_PORT_HARNESS_SHARD`, #1019, #1100). With one job, a run
+The Linux job runs as nine parallel shards, `Vesper ports (Linux 1/9)` to
+`(Linux 9/9)` (`VESPER_PORT_HARNESS_SHARD`, #1019, #1100, #1924). With one job, a run
 took 52 minutes and others hit the 60 minute limit once Loom, Crucible and
 serde landed; with three, the last shard ran past its 90 minute limit once
 the P3a ports landed. Each shard is a run of consecutive blocks of the
 script: 1 the ABI tier through Ignis, 2 Quarry through pact, 3 semver through
-Crucible, 4 serde, 5 aegis through bench, 6 eBPF and silicon, and 7 prism-h3
-and every port appended after it. Each takes about 10-30 minutes after a 2-4
+Crucible, 4 serde, 5 aegis through bench, 6 eBPF and silicon, 7 Warp through
+diagnostics, 8 fmt through lint, and 9 sim-session and every port appended
+after it. Each takes about 10-30 minutes after a 2-4
 minute compiler build; the 60 minute job timeout is a backstop. When a shard
-passes about 35 minutes, move a shard boundary in the script, or add a shard
-there and in the `ports` matrix.
+passes about 35 minutes, move a shard boundary or add a shard in
+`scripts/port-harness-plan.json`. The workflow gets the shard count from the
+selected checkout so it can also run older revisions with seven shards.
 
 Nearly all of the harness's time is the compiler compiling Vesper sources:
 the Rust tests themselves finish in seconds. So one `Vesper ports compiler`
@@ -50,7 +52,7 @@ and every shard downloads that binary instead of building a debug compiler
 of its own (#1103).
 
 On pull requests the plan job also picks the ports to test
-(`scripts/ci/port_harness_selection.py`, `VESPER_PORT_HARNESS_CRATES`). If
+(`aspect ci port-harness-selection`, `VESPER_PORT_HARNESS_CRATES`). If
 every changed file is documentation or sits inside workspace crates outside
 the compiler's dependency closure, only those crates' blocks of the harness
 and the blocks of the crates that depend on them run; a documentation-only
@@ -63,7 +65,7 @@ ports to `none`. The selection still applies to manual `pr` runs.
 Each block of the script names its crate directory with `if ported vesper-x;
 then ... fi` or `skip_port vesper-x || ...`; a line without a guard always
 runs.
-When the plan names no port, the seven shard jobs are skipped as jobs, so
+When the plan names no port, the nine shard jobs are skipped as jobs, so
 they take no runners, and `Platform validation complete` accepts that skip
 (#1321).
 
@@ -75,7 +77,7 @@ runs queued and every Platforms run cancelled by the next push before it
 finished (#1321). To keep pull requests within the limit:
 
 - `Hybrid compiler` and the `Vesper ports` jobs (the compiler build and its
-  seven shards, about nine Linux runners) run only on pushes to main, the
+  nine shards, about eleven Linux runners) run only on pushes to main, the
   nightly schedule and manual runs, not on pull requests (#1479). Neither is
   a required check, and Bazel builds and tests both crates on every pull
   request.
@@ -116,8 +118,9 @@ finished (#1321). To keep pull requests within the limit:
   Actions tab on the branch with profile `pr`, `checkout_ref`
   `refs/pull/<n>/merge` and `pull_request` `<n>`.
 
-The native executable cases are shared with `scripts/test-native-host.sh`;
-`scripts/ci/test-native-executables.sh` runs them with the Cargo-built compiler.
+The native executable cases are shared with `aspect acceptance test-native-host`;
+Use `aspect ci test-native-executables` on macOS. Windows CI runs
+`scripts/windows/test-native-executables.ps1` with the Cargo-built compiler.
 Linux retains general source-macro, formatting, proof, and workspace tests.
 The native lanes no longer compile or run the entire workspace, Lean proofs,
 Clippy, generic acceptance scripts, or doctests. Tests for other host-sensitive
@@ -136,8 +139,8 @@ fails the corresponding required check.
 BuildBuddy reuses workflow runners between runs, disk included. Tests write
 their scratch roots under `/tmp` (Bazel sets no `TMPDIR` for tests), and the
 replay job builds the Logos42 checker there. A killed or failed run can
-leave those files behind. Both BuildBuddy actions start with
-`scripts/ci/reclaim-disk.sh`, which removes earlier runs' temporary files
+leave those files behind. Each BuildBuddy action runs
+`aspect ci reclaim-disk`, which removes earlier runs' temporary files
 and runs `bazel clean` when less than 20 GB is free. The Bazel test steps log
 free space every two minutes. The replay step removes its temporary
 checker when it exits.
@@ -164,7 +167,7 @@ remain required for merge and release.
 The Lean/Logos replay tests include `lean4lean_*42`, `logos42_acceptance`,
 `oracle42_acceptance`, `resource_oracle42` (those three in
 `crates/vesper-oracles`), `resource_model42` and `replay42_kernel`. They run on every push to `main` and on pull requests
-that touch paths in `scripts/ci/lean_replay_scope.py`. Put `[ci full]` in a
+that touch paths in `.aspect/lean-replay-scope.axl`. Put `[ci full]` in a
 PR commit message to force a replay. The replay step queries the tagged
 test labels and builds only those targets and their dependencies.
 

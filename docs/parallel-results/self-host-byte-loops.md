@@ -150,7 +150,7 @@ Callgrind Ir on the cloud container (Linux x86-64, 4 vCPU). "main" is a
 release `vesper` at `e29e63d`, "branch" is this PR. Ports are built
 through `VESPER_PORT_COMPILER`.
 
-### Span lookup (`crates/vesper-span/scripts/bench.sh` method, 5 batches)
+### Span lookup (`aspect crate span bench` method, 5 batches)
 
 | | main | branch | Rust |
 |---|--:|--:|--:|

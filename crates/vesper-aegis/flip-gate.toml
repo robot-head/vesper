@@ -18,40 +18,40 @@ run = "cargo test --locked --release -p vesper-aegis"
 run = "cargo test --locked --release -p vesper-aegis --test port_differential"
 
 # The harness times both arms (A B B A per epoch; the Rust arm is the
-# example built at the last Rust commit, see bench-abba.sh) and prints the
+# example built at the last Rust commit, see the benchmark task) and prints the
 # gate's pairs line.
 [[abba]]
 workload = "snp"
-run = "crates/vesper-aegis/bench-abba.sh flip-gate snp"
+run = "aspect crate aegis bench-abba -- flip-gate snp"
 
 [[abba]]
 workload = "tdx"
-run = "crates/vesper-aegis/bench-abba.sh flip-gate tdx"
+run = "aspect crate aegis bench-abba -- flip-gate tdx"
 
 [[abba]]
 workload = "sgx"
-run = "crates/vesper-aegis/bench-abba.sh flip-gate sgx"
+run = "aspect crate aegis bench-abba -- flip-gate sgx"
 
 [[abba]]
 workload = "policy"
-run = "crates/vesper-aegis/bench-abba.sh flip-gate policy"
+run = "aspect crate aegis bench-abba -- flip-gate policy"
 
 [[abba]]
 workload = "cca_claims"
-run = "crates/vesper-aegis/bench-abba.sh flip-gate cca_claims"
+run = "aspect crate aegis bench-abba -- flip-gate cca_claims"
 
 [[abba]]
 workload = "cca_token"
-run = "crates/vesper-aegis/bench-abba.sh flip-gate cca_token"
+run = "aspect crate aegis bench-abba -- flip-gate cca_token"
 
 [[abba]]
 workload = "corim"
-run = "crates/vesper-aegis/bench-abba.sh flip-gate corim"
+run = "aspect crate aegis bench-abba -- flip-gate corim"
 
 [[abba]]
 workload = "corim_store"
-run = "crates/vesper-aegis/bench-abba.sh flip-gate corim_store"
+run = "aspect crate aegis bench-abba -- flip-gate corim_store"
 
 [[abba]]
 workload = "appraise_cca"
-run = "crates/vesper-aegis/bench-abba.sh flip-gate appraise_cca"
+run = "aspect crate aegis bench-abba -- flip-gate appraise_cca"
