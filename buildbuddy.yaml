@@ -55,7 +55,7 @@ actions:
     container_image: "ubuntu-24.04"
     resource_requests:
       cpu: 8
-      memory: 22GB
+      memory: 25GB
       disk: 60GB
     timeout: 60m
     triggers:
