@@ -149,7 +149,7 @@ MODULES = {
     "pact_frontend": ("SH2-13", "", "#1225 part 1"),
     "forge_frontend": ("SH1-14", "", "#1157"),
     "native_export": ("SH4-12", "vesper-codegen-export", ""),
-    "ffi_lowering": ("SH4-13, #1830", "vesper-ffi-lowering", "plans, rewrite, drops, cpu.rs tables and every emission step in Vesper (0 diffs); left: buffers.rs check pass, eval_host.rs"),
+    "ffi_lowering": ("SH4-13, #1830", "vesper-ffi-lowering", "plans, rewrite, drops, cpu.rs tables, buffers.rs check and every emission step in Vesper (0 diffs); left: eval_host.rs (evaluator host)"),
     "optimize": ("G1-4", "vesper-optimize", "flip gate PASS: checker 1.12x, producer 0.70x, both 0.79x"),
     "fip": ("SH2-12", "vesper-check-fip", "0.92x"),
     "bounds_hoist": ("SH3-12", "vesper-bounds-hoist", "flip gate PASS: pass 1.15x, build 1.07x; swapped in the hybrid (`hoist`)"),

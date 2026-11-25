@@ -20,6 +20,7 @@ these families decline nothing.
 | `scalar_enums` decisions (#1330) ported to `@vesper/codegen-aggregates` | 0 of 354 corpus worlds differ (52,690 graphs; 15,563 enum values, 116 locals, 11,064 calls and 271 returns kept as words) | 0 now (goes at the retirement) | #1854 |
 | `scalar_enums` graph rewrite ported (`scalar_enum_rewrite`) | 0 of 54,236 graphs differ, 2,347 of them rewritten (`Debug`-equal `FunctionIr`) | 0 now (goes at the retirement) | this PR |
 | `ffi_lowering/cpu.rs` machine-code tables ported (`@vesper/ffi-lowering` `cpu.ves`) | 0 of 72 symbol and target pairs differ (every function, unknown and plain symbols, x86_64, AArch64, RISC-V) | 0 now (goes at the retirement) | this PR |
+| `ffi_lowering/buffers.rs` check pass ported (`@vesper/ffi-rewrite` `buffers.ves`) | 0 of 35 sources differ that reach the check (27 refused, with the same span and message); the foreign-memory suite, the xsk fixture and 13 hand sources | 0 now (goes at the retirement) | next PR |
 
 ### `native_handlers`: deleted
 
@@ -109,6 +110,23 @@ and a plain symbol, on x86_64, AArch64 and RISC-V targets. The callee
 declaration that uses it is still Rust's (`foreign_perform` keeps the
 callee's declaration; the hook emits the rest).
 
+## The buffer check
+
+`buffers.ves` ports the foreign-memory check pass (§16.3): after the
+checker, a buffer of a `linear extern struct` or `Pinned[T]` must not be
+resized, moved or viewed across a call that may reach a foreign import.
+The entry `ffi_buffer_text` runs pass 2 of the source rewrite in Vesper,
+then walks the result with the checker's recorded types, which the Rust
+side passes as input (the checker is not part of this port). It prints
+`ok` or the refusal's span and message.
+
+- Differential `buffer_check_matches_rust`: 35 sources reach the check,
+  27 refused, 0 differ.
+- Cost (`buffer_check_cost`, ABBA): Rust 28.1 ms, Vesper 2.3 ms over the
+  35 sources. This is not a like-for-like ratio: Rust's probe also runs
+  the type checker, which the Vesper entry takes as input. It shows the
+  walk is not a bottleneck.
+
 ## Hybrid swap coverage
 
 The release `vesper-hybrid` against the release default compiler, `emit
@@ -139,7 +157,7 @@ side stands:
 | `src/ffi_lowering.rs`, `ffi_lowering/types.rs` | 1,830 + 840 | `@vesper/ffi-lowering` (plans, type mapping), `@vesper/ffi-rewrite` (the source rewrite) | |
 | `ffi_lowering/native.rs` | 2,555 | `@vesper/ffi-emit` (every step swapped) | the walk's orchestration (native walk port, #1509) |
 | `ffi_lowering/drops.rs` | 533 | `@vesper/ffi-drops` | |
-| `ffi_lowering/buffers.rs` | 523 | none | the foreign-memory check pass (§16.3 pinned buffers) |
+| `ffi_lowering/buffers.rs` | 583 | `@vesper/ffi-rewrite` `buffers.ves` (0 diffs) | the call that runs it after `check::check` |
 | `ffi_lowering/cpu.rs` | 99 | `@vesper/ffi-lowering` `cpu.ves` (0 diffs) | the call that picks it in `foreign_perform` |
 | `ffi_lowering/eval_host.rs` | 596 | none | the evaluator's foreign-call host (`vesper run`) |
 | `src/native_aggregates.rs` | 1,746 | `@vesper/codegen-aggregates` (decisions and the scalar-enum rewrite), `@vesper/codegen-base` and `@vesper/codegen-aggregates-emit` (emission) | `enum_words` and the split-local reads and writes (the native walk, #1509) |
