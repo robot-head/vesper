@@ -943,50 +943,6 @@ sys.exit(int(os.environ.get("BAZEL_CODE", "0")))
         absent = self.aspect(*command, "--", "--check", env=env, status=1)
         self.assertIn("without working Cargo or Bazel", absent.stderr)
 
-    def test_bazel_configuration_preserves_cache_modes(self):
-        self.check_bazel_configuration(lambda **kwargs: self.aspect("ci", "configure-bazel", **kwargs), windows=False)
-
-    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell unavailable")
-    def test_windows_bazel_configuration_preserves_cache_modes_and_runtime_settings(self):
-        script = "scripts/windows/configure-bazel.ps1"
-        self.copy_fixture(script)
-        self.check_bazel_configuration(lambda **kwargs: self.powershell(script, **kwargs), windows=True)
-
-    def check_bazel_configuration(self, run, *, windows):
-        path = self.root / "user.bazelrc"
-        key = "fixture-api-key"
-        lines = ["common --config=ci"]
-        if windows:
-            lines += ["startup --output_user_root=C:/_bzl",
-                      "common --repo_env=BAZEL_MSVC_RUNTIME_VISUAL_STUDIO_EULA=1"]
-        enabled = run(env={"BUILDBUDDY_API_KEY": key})
-        self.assertIn("BuildBuddy: enabled", enabled.stdout)
-        self.assertNotIn(key, enabled.stdout + enabled.stderr)
-        self.assertEqual(path.read_bytes(), ("\n".join(lines + [
-            "common --config=buildbuddy", f"common --remote_header=x-buildbuddy-api-key={key}",
-            "common --build_metadata=ROLE=CI",
-        ]) + "\n").encode())
-        disabled = run(env={"BUILDBUDDY_API_KEY": ""})
-        self.assertIn("using the GitHub Actions disk cache", disabled.stdout)
-        self.assertEqual(path.read_bytes(), ("\n".join(lines) + "\n").encode())
-
-    def test_blake3_generator_preserves_both_source_forms(self):
-        command = ("maintenance", "gen-blake3", "--")
-        self.aspect(*command, "rounds output.ves")
-        committed = ROOT / "packages/vesper-std/hash/src/compress.ves"
-        self.assertEqual((self.nested / "rounds output.ves").read_text(), committed.read_text())
-        straight = self.nested / "straight output.ves"
-        self.aspect(*command, str(straight), "--straight-line")
-        self.assertEqual(hashlib.sha256(straight.read_bytes()).hexdigest(),
-                         "f476483c6221f76bc39a7cb07084800277c0a3205c4231af8b4d58d4a66c005c")
-        self.aspect(*command, status=2)
-        self.aspect(*command, str(straight), "--unsupported", status=2)
-
-    def test_serde_lean_generator_matches_the_committed_model(self):
-        model = ROOT / "crates/vesper-serde/lean/SimdJsonQuotes.lean"
-        result = self.aspect("crate", "serde", "gen-lean-quotes")
-        self.assertEqual(result.stdout.encode("utf-8"), model.read_bytes())
-
     def test_default_cli_dependency_check_reports_exact_forbidden_packages(self):
         cargo = self.write("bin/cargo", """\
 #!/usr/bin/env python3
@@ -1012,26 +968,6 @@ if os.environ.get("FIXTURE_CARGO_FAILURE"):
         self.assertIn("forbidden normal dependencies: vesper-loom-sandbox, wasmtime\n", result.stderr)
         result = self.aspect(*command, env={**env, "FIXTURE_CARGO_TREE": "", "FIXTURE_CARGO_FAILURE": "1"}, status=29)
         self.assertIn("failed to load dependency graph", result.stderr)
-
-    def test_native_tcp_fixture_matches_committed_bytes_and_reported_packets(self):
-        import struct
-
-        path = Path("crates/vesper-warp-tcp/fixtures/tcp_fixtures.pcap")
-        (self.root / path.parent).mkdir(parents=True)
-        result = self.aspect("crate", "warp-tcp", "gen-fixtures")
-        data = (self.root / path).read_bytes()
-        self.assertEqual(data, (ROOT / path).read_bytes())
-        heading, *packets = result.stdout.splitlines()
-        self.assertEqual(heading, f"{self.root / path} 8 packets")
-        self.assertEqual(len(packets), 8)
-        offset = 24
-        for index, reported in enumerate(packets):
-            timestamp, micros, captured, length = struct.unpack_from("<4I", data, offset)
-            self.assertEqual((timestamp, micros, captured), (1_700_000_000 + index, 0, length))
-            offset += 16
-            self.assertEqual(bytes.fromhex(reported), data[offset:offset + length])
-            offset += length
-        self.assertEqual(offset, len(data))
 
     def test_stage1_compiles_and_reproduces_with_distinct_clean_targets(self):
         self.write("bootstrap/stage1.rs", "fixture")

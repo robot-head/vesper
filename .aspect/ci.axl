@@ -28,6 +28,7 @@ def _platform_tests(ctx: TaskContext) -> int:
         "arrow-fixtures",
         "tensor-interop-fixtures",
         "tensor-reference-fixtures",
+        "generated-assets",
         "crmath-reference",
         "rust-test-conversion",
         "rust-census",
