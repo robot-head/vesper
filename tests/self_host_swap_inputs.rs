@@ -230,11 +230,12 @@ fn layout_parts_match_rust() {
 #[test]
 fn ir_check_parts_match_rust() {
     let f = ir_package().entry("check_ir_parts", true);
-    let cases = ir_cases(IR_MUTANTS);
     let shard = corpus_shard::Shard::from_environment();
-    let mut stepped = 0;
+    // Lower only the worlds this shard checks (every `step(5)`-th, then
+    // this shard's share): all of them and their mutants take over 14 GiB.
+    let every = step(5);
+    let cases = ir_cases_where(IR_MUTANTS, |i| i % every == 0 && shard.contains(i / every));
     let (mut bad, mut checked, mut diags) = (0, 0, 0);
-    let mut worlds = 0;
     let mut i = 0;
     while i < cases.len() {
         let w = cases[i].world;
@@ -244,14 +245,6 @@ fn ir_check_parts_match_rust() {
         }
         let group = &cases[i..j];
         i = j;
-        worlds += 1;
-        if (worlds - 1) % step(5) != 0 {
-            continue;
-        }
-        stepped += 1;
-        if !shard.contains(stepped - 1) {
-            continue;
-        }
         let mut log = WorldLog::new(w);
         let mut cur = Cursor::default();
         // Programs the encoder refuses (element-view worlds, as on #1232's

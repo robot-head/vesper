@@ -24,6 +24,9 @@
 // |     fn hd_free(sink s: Session) -> ForeignVal[Unit];
 // |     fn hd_step(inout s: Session, step: u32, nocapture in arg: CSlice[u8]) -> ForeignVal[i64];
 // |     fn hd_text(in s: Session, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
+// |     fn hd_parsed(inout s: Session, nocapture in words: CSlice[u64]) -> ForeignVal[i64];
+// |     fn hd_front_begin() -> ForeignVal[u32];
+// |     fn hd_write(inout s: Session, nocapture in text: CSlice[u8]) -> ForeignVal[i64];
 // | }
 use @vesper/driver::{
     Args,
@@ -99,6 +102,11 @@ use @vesper-std/fmt::{
 // SH5 lane 13 (#1336): the layers of the commands off the compile path.
 use @vesper/driver-commands::{
     run as run_command
+};
+// hd_step group 2 (#1893): the front-end passes in Vesper.
+use self::front::{
+    parse_clean,
+    cst_text
 };
 
 // `main_code`'s result when the Rust CLI should run the command instead.
@@ -381,11 +389,15 @@ pub fn main_code()
 
 // A package is assembled by the package loader. For a standalone file, pass
 // the source bytes to the Rust session that still holds the parse and world.
-fn load_input(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+// `source` receives a standalone file's bytes; `package` is set for a
+// package.
+fn load_input(inout s: Session, in o: Options, inout source: ChunkSeq[u8], inout package: bool)
+    -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
     let r = step(inout s, step_is_package());
     if is_failure(r) {
         return pass_failed(in s, r);
     }
+    package = r == 1;
     let r = if r == 1 {
         let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
         package_checks(in o, inout err);
@@ -395,7 +407,6 @@ fn load_input(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[Hybri
         step(inout s, step_load())
     } else {
         let input = value(in o, slot_input());
-        let mut source: ChunkSeq[u8] = ChunkSeq::new[u8]();
         let failed = handle Fail[IoError] in {
             source = read_path(in input.as_slice());
             0
@@ -425,18 +436,44 @@ fn load_input(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[Hybri
 fn drive(inout s: Session, in o: Options)
     -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver]] {
     let c = o.command;
-    let loaded = load_input(inout s, in o);
+    let mut source: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut package = false;
+    let loaded = load_input(inout s, in o, inout source, inout package);
     if loaded != 0 {
         return loaded;
     }
     if c == cmd_build() && is(in o, slot_target(), in "bpf") {
         return ebpf_build(inout s, in o);
     }
-    let r = step(inout s, step_parse());
+    let emit_cst_format = c == cmd_emit() && is(in o, slot_format(), in "cst");
+    // The driver's parse is the parse swap's: with that swap off
+    // (`VESPER_HYBRID_SWAPS`), the session parses.
+    let front = !package && HybridDriver::hd_front_begin() == 1;
+    if emit_cst_format && front {
+        match cst_text(in source.as_slice()) {
+            Option::Some(text) => return write_output(inout s, in o, in text.as_slice()),
+            Option::None => (),
+        }
+    }
+    let mut r = declined();
+    if front && !o.include_tests && !emit_cst_format {
+        match parse_clean(in source.as_slice()) {
+            Option::Some(words) => {
+                r = HybridDriver::hd_parsed(inout s, in words.as_slice());
+                if is_failure(r) {
+                    return pass_failed(in s, r);
+                }
+            },
+            Option::None => (),
+        }
+    }
+    if r == declined() {
+        r = step(inout s, step_parse());
+    }
     if is_failure(r) {
         return pass_failed(in s, r);
     }
-    if c == cmd_emit() && is(in o, slot_format(), in "cst") {
+    if emit_cst_format {
         return pass(inout s, step_emit_cst());
     }
     if r > 0 {
@@ -492,7 +529,7 @@ fn drive(inout s: Session, in o: Options)
         }
     }
     if c == cmd_run() {
-        return pass(inout s, step_run());
+        return run(inout s, in o);
     }
     if c == cmd_jit() {
         return pass(inout s, step_jit());
@@ -501,6 +538,38 @@ fn drive(inout s: Session, in o: Options)
         return build(inout s, in o);
     }
     emit(inout s, in o)
+}
+
+// A front-end pass the driver ran itself (`front.ves`) left the session's
+// pass to run.
+fn declined() -> i64 {
+    -3
+}
+
+// `crate::write` of `cli()`: the command's output to `-o`'s path, or to
+// stdout; 0, or the exit code of the write error.
+fn write_output(inout s: Session, in o: Options, in bytes: Slice[u8])
+    -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    if !has(in o, slot_output()) {
+        let r = HybridDriver::hd_write(inout s, in bytes);
+        if is_failure(r) {
+            return pass_failed(in s, r);
+        }
+        return 0;
+    }
+    let path = value(in o, slot_output());
+    let failed = handle Fail[IoError] in {
+        write_path(in path.as_slice(), in bytes);
+        0
+    } with {
+        return v => v,
+        raise(e, _) => error_word(e),
+    };
+    if failed == 0 {
+        return 0;
+    }
+    let m = io_error_text(inout s, wrapping_sub(failed, 2));
+    error(in m.as_slice())
 }
 
 // Run a pass that ends the command: its exit code.
@@ -564,7 +633,8 @@ fn build(inout s: Session, in o: Options)
     }
     let mut built = path;
     if r == 1 {
-        let q = step_with(inout s, step_windows_link(), in object.as_slice());
+        let request = windows_link_request(in object.as_slice(), in built.as_slice(), in o);
+        let q = step_with(inout s, step_windows_link(), in request.as_slice());
         if is_failure(q) {
             return pass_failed(in s, q);
         }
@@ -771,8 +841,75 @@ fn write_object(inout s: Session, in path: Slice[u8]) -> i64 eff [Ffi[StdFs], Ff
         return pass_failed(in s, r);
     }
     let object = text(in s);
+    write_file(inout s, in path, in object.as_slice())
+}
+
+fn emit(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    if is(in o, slot_format(), in "hir") {
+        return pass(inout s, step_emit_hir());
+    }
+    if is(in o, slot_format(), in "ir") {
+        let mut flags: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        if o.optimize {
+            flags.push(emit_optimize());
+        } else {
+            flags.push(0);
+        }
+        return emit_text(inout s, in o, step_emit_ir(), in flags.as_slice());
+    }
+    if is(in o, slot_format(), in "lean") {
+        return emit_text(inout s, in o, step_emit_lean(), in "".as_bytes());
+    }
+    if is(in o, slot_format(), in "object") {
+        if !has(in o, slot_output()) {
+            return error(in "object output requires -o <path>".as_bytes());
+        }
+        let output = value(in o, slot_output());
+        return write_object(inout s, in output.as_slice());
+    }
+    if is(in o, slot_format(), in "clif") {
+        return emit_text(inout s, in o, step_emit_clif(), in "".as_bytes());
+    }
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m.extend(in "unknown output format '".as_bytes());
+    let format = value(in o, slot_format());
+    m.extend(in format.as_slice());
+    m.extend(in "'".as_bytes());
+    error(in m.as_slice())
+}
+
+// `EmitIr`'s flag bit (`EMIT_OPTIMIZE` in src/driver/native.rs): run the IR optimizer.
+fn emit_optimize() -> u8 {
+    1
+}
+
+// An `emit` pass whose text goes to `-o <path>`, written here, or else to
+// stdout, which the pass prints itself (a failed stdout write fails the
+// command, as `cli()`'s `write(None, ..)` does). `head` is the pass's
+// own request bytes.
+fn emit_text(inout s: Session, in o: Options, which: u32, in head: Slice[u8])
+    -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    let mut request: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    request.extend(in head);
+    if !has(in o, slot_output()) {
+        request.extend(in "stdout".as_bytes());
+        return pass_with(inout s, which, in request.as_slice());
+    }
+    let r = step_with(inout s, which, in request.as_slice());
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    let emitted = text(in s);
+    let path = value(in o, slot_output());
+    write_file(inout s, in path.as_slice(), in emitted.as_slice())
+}
+
+// Write `data` to `path`: 0, or the exit code of the error (Rust's
+// `Display` of the `io::Error`, as `fs::write`'s error reads).
+fn write_file(inout s: Session, in path: Slice[u8], in data: Slice[u8])
+    -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
     let failed = handle Fail[IoError] in {
-        write_path(in path, in object.as_slice());
+        write_path(in path, in data);
         0
     } with {
         return v => v,
@@ -785,32 +922,54 @@ fn write_object(inout s: Session, in path: Slice[u8]) -> i64 eff [Ffi[StdFs], Ff
     error(in message.as_slice())
 }
 
-fn emit(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
-    if is(in o, slot_format(), in "hir") {
-        return pass(inout s, step_emit_hir());
+// `vesper run`: the entry's checks, then the evaluator (the pass prints
+// the value).
+fn run(inout s: Session, in o: Options) -> i64 eff [Ffi[HybridDriver]] {
+    let shape = step_with(inout s, step_run(), in "entry".as_bytes());
+    if is_failure(shape) {
+        return pass_failed(in s, shape);
     }
-    if is(in o, slot_format(), in "ir") {
-        return pass(inout s, step_emit_ir());
+    if shape == run_entry_missing() {
+        return error(in "missing entry function".as_bytes());
     }
-    if is(in o, slot_format(), in "lean") {
-        return pass(inout s, step_emit_lean());
+    if shape == run_entry_params() {
+        return error(in "entry function must take no arguments".as_bytes());
     }
-    if is(in o, slot_format(), in "object") {
-        if !has(in o, slot_output()) {
-            return error(in "object output requires -o <path>".as_bytes());
-        }
-        let output = value(in o, slot_output());
-        return write_object(inout s, in output.as_slice());
+    if shape == run_entry_effects() {
+        return error(in "entry must handle all effects".as_bytes());
     }
-    if is(in o, slot_format(), in "clif") {
-        return pass(inout s, step_emit_clif());
+    pass(inout s, step_run())
+}
+
+// The `Run` pass's `entry` answers (src/driver/native.rs): no such function, it takes
+// parameters, or it leaves effects unhandled; 0 when it can run.
+fn run_entry_missing() -> i64 {
+    1
+}
+
+fn run_entry_params() -> i64 {
+    2
+}
+
+fn run_entry_effects() -> i64 {
+    3
+}
+
+// `<object>\0<executable>\0<linker>` for the `WindowsLink` pass: the
+// linker is `=<path>` when one was named, or empty for the default `cc`,
+// which on a Windows target means "find the MSVC linker" (lane 24, #347).
+fn windows_link_request(in object: Slice[u8], in path: Slice[u8], in o: Options) -> ChunkSeq[u8] {
+    let mut request: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    request.extend(in object);
+    request.push(0);
+    request.extend(in path);
+    request.push(0);
+    if !is(in o, slot_linker(), in "cc") {
+        request.push(61);
+        let linker = value(in o, slot_linker());
+        request.extend(in linker.as_slice());
     }
-    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    m.extend(in "unknown output format '".as_bytes());
-    let format = value(in o, slot_format());
-    m.extend(in format.as_slice());
-    m.extend(in "'".as_bytes());
-    error(in m.as_slice())
+    request
 }
 
 // The version of the options record (`record_format` of @vesper/driver);

@@ -440,6 +440,9 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     || path.ends_with("packages/vesper-clif")
                     || path.ends_with("packages/vesper-native-vectorize")
                     || path.ends_with("packages/vesper-native-cold-outline")
+                    // Claim #1886: the verified codegen port uses `use` (#880)
+                    // and `pub const`.
+                    || path.ends_with("packages/vesper-verified-codegen")
                 {
                     continue;
                 }

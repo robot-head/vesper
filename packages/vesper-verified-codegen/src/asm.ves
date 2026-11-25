@@ -1,0 +1,309 @@
+// The label-resolving assembler buffer the encoders share:
+// src/verified_codegen/asm.rs in Vesper (#1886, part 2).
+//
+// Labels are small numbers (the abort exits are 0-3, then one per function
+// entry and block), so `labels` is indexed by label and holds the bound
+// position plus one (0: unbound). A failure (a label bound twice, an
+// unbound label, a branch out of range) is kept in `err` and the code is
+// then not used.
+
+// `Fix`: how a label reference is patched.
+pub const FIX_REL32: u8 = 0;
+pub const FIX_IMM26: u8 = 1;
+pub const FIX_IMM19: u8 = 2;
+pub const FIX_JAL: u8 = 3;
+pub const FIX_AUIPC_JALR: u8 = 4;
+
+// `err` values, in the order of `VerifiedError`'s kinds the harness
+// compares: none, `Invalid` and `Limit`.
+pub const ERR_NONE: u8 = 0;
+pub const ERR_INVALID: u8 = 1;
+pub const ERR_LIMIT: u8 = 2;
+
+pub copy struct Fixup {
+    at: u64,
+    label: u64,
+    kind: u8,
+}
+
+pub copy struct Copy {
+    label: u64,
+    at: u64,
+}
+
+// A function's prologue, for the Windows unwind tables: where it starts,
+// the offsets of the end of `push rbp` and of `sub rsp, frame`, the frame,
+// and where its unwind range ends when that is not the next prologue's
+// start (`has_end`).
+pub copy struct Prologue {
+    start: u64,
+    push_end: u8,
+    alloc_end: u8,
+    frame: u32,
+    has_end: bool,
+    end: u64,
+}
+
+// The external symbols a Windows build calls, in name order.
+pub const EXT_EXIT_PROCESS: u8 = 0;
+pub const EXT_GET_STD_HANDLE: u8 = 1;
+pub const EXT_WRITE_FILE: u8 = 2;
+
+// A `rel32` field at `at` that calls the external symbol `name`.
+pub copy struct External {
+    at: u64,
+    name: u8,
+}
+
+pub struct Asm {
+    code: ChunkSeq[u8],
+    labels: ChunkSeq[u64],
+    // Further copies of the abort exits: a branch to one resolves to the
+    // nearest copy.
+    copies: ChunkSeq[Copy],
+    fixups: ChunkSeq[Fixup],
+    // Emit for Windows x64.
+    windows: bool,
+    // The frame of the function being emitted (Windows epilogues).
+    frame: u32,
+    prologues: ChunkSeq[Prologue],
+    externals: ChunkSeq[External],
+    // The trap scope set by the last `M::Scope` (`scoped` false: the
+    // program-wide abort exits).
+    scoped: bool,
+    scope_ovf: u64,
+    scope_div0: u64,
+    err: u8,
+}
+
+pub fn asm() -> Asm {
+    Asm {
+        code: ChunkSeq::new[u8](),
+        labels: ChunkSeq::new[u64](),
+        copies: ChunkSeq::new[Copy](),
+        fixups: ChunkSeq::new[Fixup](),
+        windows: false,
+        frame: 0,
+        prologues: ChunkSeq::new[Prologue](),
+        externals: ChunkSeq::new[External](),
+        scoped: false,
+        scope_ovf: 0,
+        scope_div0: 0,
+        err: ERR_NONE
+    }
+}
+
+pub fn byte(inout a: Asm, b: u8) {
+    a.code.push(b);
+}
+
+pub fn put_u32(inout a: Asm, w: u32) {
+    let x = widen_u64(w);
+    for i in 0..4 {
+        a.code.push(wrapping_u8(wrapping_shr_u64(x, wrapping_u32(wrapping_mul(i, 8))) & 255));
+    }
+}
+
+pub fn put_u64(inout a: Asm, x: u64) {
+    for i in 0..8 {
+        a.code.push(wrapping_u8(wrapping_shr_u64(x, wrapping_u32(wrapping_mul(i, 8))) & 255));
+    }
+}
+
+pub fn here(in a: Asm) -> u64 {
+    a.code.len()
+}
+
+// Where an abort of kind `k` jumps in the current trap scope (`trap_label`).
+pub fn trap_label(in a: Asm, k: u8) -> u64 {
+    if a.scoped && k == 0 {
+        a.scope_ovf
+    } else if a.scoped && k == 1 {
+        a.scope_div0
+    } else {
+        widen_u64(k)
+    }
+}
+
+// `set_scope`: the default labels clear it.
+pub fn set_scope(inout a: Asm, ovf: u64, div0: u64) {
+    a.scoped = ovf != 0 || div0 != 1;
+    a.scope_ovf = ovf;
+    a.scope_div0 = div0;
+}
+
+pub fn bind_copy(inout a: Asm, l: u64) {
+    let at = a.code.len();
+    a
+        .copies
+        .push(
+            Copy {
+                label: l,
+                at: at
+            }
+        );
+}
+
+// Where the last copy of the abort exits was bound.
+pub fn last_exits(in a: Asm) -> u64 {
+    let mut m: u64 = 0;
+    for i in 0..a.copies.len() {
+        match a.copies.try_get(i) {
+            Option::Some(c) => {
+                if c.at > m {
+                    m = c.at;
+                }
+            },
+            Option::None => {}
+        }
+    }
+    for l in 0..4 {
+        let p = label_at(in a, l);
+        if p != 0 && wrapping_sub(p, 1) > m {
+            m = wrapping_sub(p, 1);
+        }
+    }
+    m
+}
+
+fn label_at(in a: Asm, l: u64) -> u64 {
+    match a.labels.try_get(l) {
+        Option::Some(p) => p,
+        Option::None => 0,
+    }
+}
+
+pub fn bind(inout a: Asm, l: u64) {
+    loop {
+        if a.labels.len() > l {
+            break;
+        }
+        a.labels.push(0);
+    }
+    if label_at(in a, l) != 0 {
+        a.err = ERR_INVALID;
+        return;
+    }
+    let at = wrapping_add(a.code.len(), 1);
+    let ok = a.labels.try_set(l, at);
+}
+
+pub fn fixup(inout a: Asm, at: u64, l: u64, kind: u8) {
+    a
+        .fixups
+        .push(
+            Fixup {
+                at: at,
+                label: l,
+                kind: kind
+            }
+        );
+}
+
+fn read32(in a: Asm, at: u64) -> u32 {
+    match a.code.try_read_u32_le(at) {
+        Option::Some(w) => w,
+        Option::None => 0,
+    }
+}
+
+fn or32(inout a: Asm, at: u64, field: u32) {
+    let w = read32(in a, at) | field;
+    let ok = a.code.try_write_u32_le(at, w);
+}
+
+// |x - y| on positions.
+fn dist(x: u64, y: u64) -> u64 {
+    if x >= y {
+        wrapping_sub(x, y)
+    } else {
+        wrapping_sub(y, x)
+    }
+}
+
+// Whether the two's-complement `rel` lies in [-2^(bits-1), 2^(bits-1)).
+fn fits(rel: u64, bits: u32) -> bool {
+    wrapping_add(rel, wrapping_shl_u64(1, wrapping_sub(bits, 1))) < wrapping_shl_u64(1, bits)
+}
+
+// Resolve every label reference (`finish`).
+pub fn finish(inout a: Asm) {
+    for i in 0..a.fixups.len() {
+        let f = match a.fixups.try_get(i) {
+            Option::Some(f) => f,
+            Option::None => Fixup {
+                at: 0,
+                label: 0,
+                kind: 0
+            },
+        };
+        let bound = label_at(in a, f.label);
+        if bound == 0 {
+            a.err = ERR_INVALID;
+            return;
+        }
+        let mut target = wrapping_sub(bound, 1);
+        // The nearest copy of an abort exit.
+        for j in 0..a.copies.len() {
+            match a.copies.try_get(j) {
+                Option::Some(c) => {
+                    if c.label == f.label && dist(c.at, f.at) < dist(target, f.at) {
+                        target = c.at;
+                    }
+                },
+                Option::None => {}
+            }
+        }
+        if f.kind == FIX_REL32 {
+            let rel = wrapping_sub(target, wrapping_add(f.at, 4));
+            if !fits(rel, 32) {
+                a.err = ERR_LIMIT;
+                return;
+            }
+            let ok = a.code.try_write_u32_le(f.at, wrapping_u32(rel));
+        } else if f.kind == FIX_JAL {
+            let rel = wrapping_sub(target, f.at);
+            if !fits(rel, 21) {
+                a.err = ERR_LIMIT;
+                return;
+            }
+            let imm = wrapping_u32(rel);
+            let field = (wrapping_shr_u32(imm, 20) & 1)
+                << 31 | (wrapping_shr_u32(imm, 1) & 1023)
+                << 21 | (wrapping_shr_u32(imm, 11) & 1)
+                << 20 | (wrapping_shr_u32(imm, 12) & 255)
+                << 12;
+            or32(inout a, f.at, field);
+        } else if f.kind == FIX_AUIPC_JALR {
+            let rel = wrapping_sub(target, f.at);
+            // hi = (rel + 0x800) >> 12 (arithmetic), lo = rel - (hi << 12).
+            let hi = wrapping_u64(wrapping_i64(wrapping_add(rel, 2048)) >> 12);
+            let lo = wrapping_sub(rel, wrapping_shl_u64(hi, 12));
+            if !fits(hi, 20) {
+                a.err = ERR_LIMIT;
+                return;
+            }
+            or32(inout a, f.at, (wrapping_u32(hi) & 1048575) << 12);
+            or32(inout a, wrapping_add(f.at, 4), (wrapping_u32(lo) & 4095) << 20);
+        } else {
+            // Imm26 and Imm19: a word offset.
+            let words = wrapping_u64(wrapping_i64(wrapping_sub(target, f.at)) / 4);
+            let bits: u32 = if f.kind == FIX_IMM26 {
+                26
+            } else {
+                19
+            };
+            let shift: u32 = if f.kind == FIX_IMM26 {
+                0
+            } else {
+                5
+            };
+            if !fits(words, bits) {
+                a.err = ERR_LIMIT;
+                return;
+            }
+            let mask = wrapping_sub(wrapping_shl_u64(1, bits), 1);
+            or32(inout a, f.at, wrapping_shl_u32(wrapping_u32(words & mask), shift));
+        }
+    }
+}

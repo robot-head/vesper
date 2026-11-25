@@ -111,6 +111,14 @@ const OPTION_SETS: &[&[&str]] = &[
     &["emit", "--emit", "cst"],
     &["emit", "--emit", "lean"],
     &["emit", "--emit", "clif"],
+    // Group 3 of #1367 (#1894): the driver writes emitted text itself.
+    &["emit", "--emit", "ir", "-o", "{out}"],
+    &["emit", "--emit", "ir", "--no-opt", "-o", "{out}"],
+    &["emit", "--emit", "lean", "-o", "{out}"],
+    &["emit", "--emit", "clif", "-o", "{out}"],
+    &["emit", "--emit", "ir", "-o", "{dir}/a.out"],
+    &["emit", "--emit", "clif", "-o", "{dir}/a.out"],
+    &["run", "--entry", "missing"],
     &["emit", "--emit", "object", "-o", "{out}"],
     &["emit", "--emit", "object"],
     &[

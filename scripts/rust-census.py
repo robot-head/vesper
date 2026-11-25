@@ -133,7 +133,7 @@ CRATES = {
 
 # Root compiler module -> (owner lane(s), Vesper package, status note)
 MODULES = {
-    "verified_codegen": ("SH6b", "", "Stage 1 guard; port with the verified-backend breadth track"),
+    "verified_codegen": ("#1886", "vesper-verified-codegen", "owner 2026-11-25: port to Vesper; parts 1-3: slot IR, select, encoders, ELF/Mach-O/COFF containers, range certificate (0 diffs: 12,488 rows, 1,034 builds over 5 targets, 13,749 certificate checks; select 0.91x, certificate 0.93x); left: lowering, fail, swap"),
     "lean": ("SH5-18", "vesper-lean-extract", "part 3a 2.37x"),
     "lean_ir": ("SH5-18", "vesper-lean-extract", ""),
     "lean_nodes": ("SH5-18", "vesper-lean-extract", ""),
@@ -144,7 +144,7 @@ MODULES = {
     "wasm_backend": ("SH4-15, SH5-11, G1-9, G1-10", "vesper-wasm-backend, vesper-wit-component", "0 diffs (#1311); component wrap: flip gate PASS, wrap 0.05x, build 0.67x; swapped in the hybrid (`component`); the port alone lowers loops (#1492), sequences, strings, conversions, Abort/Tail handlers and bit operators (#1506), StdEnv/StdFs over WASI and Box (#1508); @vesper/place-ir builds to wasm and runs like the evaluator; @vesper/front builds to wasm and parses 28 files byte-identical to native (#1508)"),
     "check": ("SH2-7", "vesper-check-core-typing", ""),
     "tooling": ("SH5-15, SH5-17, #1828", "", ""),
-    "lsp": ("SH5-16, SH5-17, #1828", "vesper-lsp, vesper-lsp-features", "navigation.rs fully ported (definition 0.85x, documentSymbol 0.64x, hover 1.18x, doc links; 0 diffs); proof_model.rs ported (0.96x with hash-sys BLAKE3, 0 diffs); lens.rs ownership facts and live obligations (0.76x) and repair (0.92x) ported, 0 diffs; not wired"),
+    "lsp": ("SH5-16, SH5-17, #1828", "vesper-lsp, vesper-lsp-features", "navigation.rs fully ported (definition 0.85x, documentSymbol 0.64x, hover 1.18x, doc links; 0 diffs); proof_model.rs ported (0.96x with hash-sys BLAKE3, 0 diffs); lens.rs ownership facts and live obligations (0.76x), repair (0.92x) and semantic/repaired views with completion ranking (1.12x) ported, 0 diffs; not wired"),
     "tensor_types": ("SH2-14", "vesper-check-tensor-types", "0.28-0.49x"),
     "pact_frontend": ("SH2-13", "", "#1225 part 1"),
     "forge_frontend": ("SH1-14", "", "#1157"),
@@ -180,7 +180,7 @@ MODULES = {
     "native_coverage": ("SH4-17, 3", "", "links the crucible seed; only `vesper fuzz` (a tool) uses it"),
     "main": ("SH5-12", "vesper-driver", "#1367"),
     "arrays": ("SH2-9", "", ""),
-    "anvil_hash": ("SH5-14", "", ""),
+    "anvil_hash": ("SH5-14", "vesper-test-runner", "0 diffs, 0.74x; source graph, no swap until Stage 2"),
     "atomics": ("SH2-10", "vesper-check-loops-atomics", "2.31x"),
     "anvil_sim": ("SH5-14", "", ""),
     "native_freestanding": ("SH4-14", "", ""),
