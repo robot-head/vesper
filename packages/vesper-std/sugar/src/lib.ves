@@ -9,6 +9,10 @@
 // `$rhs` runs once, and `$body` or `$diverge` only on its own arm, so the
 // expansion has exactly the effects and cost of the hand-written `match`.
 //
+// Until the self-hosted package assembler resolves imported sugar names,
+// packages it checks against the Rust loader (the self-host corpus) do not
+// import these yet.
+//
 // There is no `while` here: Forge binds an expression hole used inside a
 // template `loop` once, before the loop, so a condition could not re-run.
 

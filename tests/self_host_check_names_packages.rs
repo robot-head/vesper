@@ -911,11 +911,19 @@ fn load(dir: &Path) -> Option<Loaded> {
     }
     let mut graph = Graph::default();
     graph.package(dir, &mut vec![])?;
-    assert_eq!(
+    // Sugar expansion keeps each expanded module's text as written in one
+    // more file after every loaded one, under the same display name (its
+    // call-site labels point there), so only those may follow the mirror's.
+    let files = &assembled.sources.files;
+    assert!(
+        graph.files <= files.len()
+            && files[graph.files..]
+                .iter()
+                .all(|f| files[..graph.files].iter().any(|g| g.display == f.display)),
+        "{}: the mirrored loader found other files ({} mirrored, {} loaded)",
+        dir.display(),
         graph.files,
-        assembled.sources.files.len(),
-        "{}: the mirrored loader found other files",
-        dir.display()
+        files.len()
     );
     Some(Loaded { graph, assembled })
 }

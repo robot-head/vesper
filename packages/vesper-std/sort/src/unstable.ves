@@ -2,9 +2,6 @@
 //
 // Element reads use `try_get`, whose `None` arm no index here reaches, so
 // the functions are total and raise nothing.
-use @vesper-std/sugar::{
-    guard
-};
 
 // Whether `a` sorts before `b`.
 pub fn lt[T: mod copy + Ord](a: T, b: T) -> bool {
@@ -16,25 +13,27 @@ pub fn lt[T: mod copy + Ord](a: T, b: T) -> bool {
 
 // Whether `s[i] < s[j]`.
 fn lt_at[T: mod copy + Ord](in s: Slice[T], i: u64, j: u64) -> bool {
-    guard let Option::Some(a) = s.try_get(i) else {
-        return false;
-    };
-    guard let Option::Some(b) = s.try_get(j) else {
-        return false;
-    };
-    lt(a, b)
+    match s.try_get(i) {
+        Option::Some(a) => match s.try_get(j) {
+            Option::Some(b) => lt(a, b),
+            Option::None => false,
+        },
+        Option::None => false,
+    }
 }
 
 // Exchanges `s[i]` and `s[j]`.
 pub fn swap_at[T: mod copy](inout s: Slice[T], i: u64, j: u64) {
-    guard let Option::Some(a) = s.try_get(i) else {
-        return;
-    };
-    guard let Option::Some(b) = s.try_get(j) else {
-        return;
-    };
-    s.try_set(i, b);
-    s.try_set(j, a);
+    match s.try_get(i) {
+        Option::Some(a) => match s.try_get(j) {
+            Option::Some(b) => {
+                s.try_set(i, b);
+                s.try_set(j, a);
+            },
+            Option::None => {},
+        },
+        Option::None => {},
+    }
 }
 
 // Whether no element of `s` is smaller than the one before it.

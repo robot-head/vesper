@@ -17,10 +17,8 @@
 //   < +inf < +NaN), and `sort_f32_bits` for `f32` values held as their bit
 //   patterns in a `Slice[u32]` (as the export ABI passes them).
 //
-// Optional reads use `guard let .. else` and `when let` from
-// `@vesper-std/sugar`. Saturating arithmetic is in
-// `@vesper-std/core::saturating`, and `all_zero` and `ct_eq` in
-// `@vesper-std/bytes::ct`.
+// Saturating arithmetic is in `@vesper-std/core::saturating`, and
+// `all_zero` and `ct_eq` in `@vesper-std/bytes::ct`.
 //
 // Every element type is a `copy` type with the builtin `Ord`: the scalars
 // that bounded generics resolve today (`u8`, `u32`, `u64`, `i64`, `bool`),
