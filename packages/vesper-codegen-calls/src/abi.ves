@@ -125,8 +125,15 @@ pub fn layout_facts(
 }
 
 // `scalar(t, generics)`.
-fn scalar(in t: Types, in names: Names, in d: Calls, k: Syms, f: FnInfo, ty: u32, inout err: Errs)
-    -> u8 {
+pub fn scalar(
+    in t: Types,
+    in names: Names,
+    in d: Calls,
+    k: Syms,
+    f: FnInfo,
+    ty: u32,
+    inout err: Errs
+) -> u8 {
     let n = t.node(ty);
     if n.kind == TyKind::Lit {
         return V_I64;
@@ -273,7 +280,7 @@ fn register_result_words(
 
 // `NativeAbi::internal`: the convention of a non-boundary function; false
 // with the message in `err` when its result layout refuses.
-fn internal(
+pub fn internal(
     inout ls: Layouts,
     inout t: Types,
     inout names: Names,
