@@ -26,7 +26,8 @@ use self::sys::{
     os_sync_dir,
     os_parent_len,
     os_unique,
-    os_word_kind
+    os_word_kind,
+    os_error_message
 };
 
 // Why an operation failed. `kind` is one of the codes below
@@ -404,4 +405,84 @@ pub fn exists(in path: Str) -> bool eff [Ffi[StdFs]] {
     let mut err: u64 = 0;
     let m = os_metadata(in path.as_bytes(), true, inout err);
     err == 0
+}
+
+// `Path::is_dir`: whether `path` names a directory, following symbolic
+// links. Never fails.
+pub fn is_dir_path(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    let mut err: u64 = 0;
+    let m = os_metadata(in path, true, inout err);
+    err == 0 && m.kind == kind_dir()
+}
+
+// `Path::is_file`: whether `path` names a regular file, following
+// symbolic links. Never fails.
+pub fn is_file_path(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    let mut err: u64 = 0;
+    let m = os_metadata(in path, true, inout err);
+    err == 0 && m.kind == kind_file()
+}
+
+// ---------------------------------------------------------------------------
+// Error text.
+
+// Rust's `Display` of the `io::Error` that `e` stands for (#1896): the OS
+// error's message and number (`No such file or directory (os error 2)`)
+// when it has one, else its kind's text (`entity not found`).
+pub fn error_text(e: IoError) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if e.os != 0 {
+        os_error_message(inout out, e.os);
+        os_error_suffix(inout out, e.os);
+        return out;
+    }
+    out.extend(in kind_text(e.kind).as_bytes());
+    out
+}
+
+// ` (os error <n>)`, with the number as Rust's `i32`.
+fn os_error_suffix(inout out: ChunkSeq[u8], os: u32) {
+    out.extend(in " (os error ".as_bytes());
+    let mut n = widen_u64(os);
+    if os >= 2147483648 {
+        out.push(45);
+        n = wrapping_sub(4294967296, n);
+    }
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    loop {
+        digits.push(wrapping_u8(wrapping_add(48, n % 10)));
+        n = n / 10;
+        if n == 0 {
+            break;
+        }
+    }
+    let len = digits.len();
+    for i in 0..len {
+        match digits.try_get(wrapping_sub(wrapping_sub(len, 1), i)) {
+            Option::Some(d) => out.push(d),
+            Option::None => (),
+        }
+    }
+    out.push(41);
+}
+
+// `ErrorKind::as_str` of the kind the hybrid's error words decode to
+// (`io_error` in crates/vesper-hybrid/src/driver.rs): every other code is
+// `Other`.
+fn kind_text(kind: u32) -> Str {
+    match kind {
+        1 => "entity not found",
+        2 => "permission denied",
+        3 => "entity already exists",
+        4 => "not a directory",
+        5 => "is a directory",
+        6 => "directory not empty",
+        7 => "invalid input parameter",
+        8 => "operation interrupted",
+        9 => "unexpected end of file",
+        10 => "write zero",
+        11 => "unsupported",
+        12 => "out of memory",
+        _ => "other error",
+    }
 }

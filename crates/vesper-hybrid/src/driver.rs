@@ -281,7 +281,6 @@ impl Reader<'_> {
 /// What the passes keep between calls: the state `cli()` keeps in locals.
 pub struct Session {
     o: Options,
-    package: bool,
     loaded: Option<packages::Assembled>,
     /// The input as read (`original` in `cli()`).
     original: String,
@@ -322,47 +321,47 @@ struct Checking {
 /// (driver/backends.rs, #1895), 70-79 session and I/O (this file, #1896).
 #[derive(Clone, Copy)]
 enum Step {
-    IsPackage = 1,
-    Load,
-    EbpfBuild,
-    Parse,
-    EmitCst,
-    ReportSyntax,
-    PackageVsys,
-    VsysRun,
-    Check,
-    LibBuild,
-    EmitInterface,
-    Optimize,
-    Run,
-    Jit,
-    VerifiedBuild,
-    WasmBuild,
-    CheckMain,
-    NativeObject,
-    IsWindowsTarget,
-    WindowsLink,
-    Tee,
-    EmitHir,
-    EmitIr,
-    EmitLean,
+    // 1 (`IsPackage`), 19 (`IsWindowsTarget`), 21 (`Tee`) and 27
+    // (`IoError`) moved to the Vesper driver (#1896); numbers are not
+    // reused.
+    Load = 2,
+    EbpfBuild = 3,
+    Parse = 4,
+    EmitCst = 5,
+    ReportSyntax = 6,
+    PackageVsys = 7,
+    VsysRun = 8,
+    Check = 9,
+    LibBuild = 10,
+    EmitInterface = 11,
+    Optimize = 12,
+    Run = 13,
+    Jit = 14,
+    VerifiedBuild = 15,
+    WasmBuild = 16,
+    CheckMain = 17,
+    NativeObject = 18,
+    WindowsLink = 20,
+    EmitHir = 22,
+    EmitIr = 23,
+    EmitLean = 24,
     EmitClif = 26,
-    IoError,
     // `check::check`'s parts, sequenced by `check` in
     // modules/driver/src/lib.ves (#1900).
-    CheckUntyped,
-    CheckTensor,
-    CheckFrontend,
-    CheckUses,
-    CheckFinish,
-    CheckReport,
+    CheckUntyped = 28,
+    CheckTensor = 29,
+    CheckFrontend = 30,
+    CheckUses = 31,
+    CheckFinish = 32,
+    CheckReport = 33,
     InterfaceWrite = 40,
     WasmInput = 60,
-    EbpfInput,
+    EbpfInput = 61,
+    /// Load the package the Vesper driver found at the input (#1896).
+    LoadPackage = 70,
 }
 
-const STEPS: [Step; 35] = [
-    Step::IsPackage,
+const STEPS: [Step; 32] = [
     Step::Load,
     Step::EbpfBuild,
     Step::Parse,
@@ -380,14 +379,11 @@ const STEPS: [Step; 35] = [
     Step::WasmBuild,
     Step::CheckMain,
     Step::NativeObject,
-    Step::IsWindowsTarget,
     Step::WindowsLink,
-    Step::Tee,
     Step::EmitHir,
     Step::EmitIr,
     Step::EmitLean,
     Step::EmitClif,
-    Step::IoError,
     Step::CheckUntyped,
     Step::CheckTensor,
     Step::CheckFrontend,
@@ -397,6 +393,7 @@ const STEPS: [Step; 35] = [
     Step::InterfaceWrite,
     Step::WasmInput,
     Step::EbpfInput,
+    Step::LoadPackage,
 ];
 
 /// A pass failed; its message is the session's text.
@@ -424,26 +421,23 @@ impl Session {
     fn step(&mut self, step: Step, arg: &[u8]) -> Result<i64, String> {
         let o = &self.o;
         match step {
-            Step::IsPackage => {
-                self.package = packages::is_package(Path::new(o.input()));
-                Ok(i64::from(self.package))
-            }
-            Step::Load => {
-                let input = o.input();
-                if self.package {
-                    let path = Path::new(input);
-                    let assembled = packages::load_for_target(path, o.target(), o.include_tests)?;
-                    if !assembled.ok() {
-                        crate::package_diagnostics(&assembled, &assembled.diagnostics, o.json);
-                        return Ok(count(
-                            assembled.diagnostics.len() + assembled.manifest_errors.len(),
-                        ));
-                    }
-                    self.original = assembled.sources.combined();
-                    self.loaded = Some(assembled);
-                } else {
-                    self.original = io::read_to_string(arg).map_err(|e| format!("{input}: {e}"))?;
+            Step::LoadPackage => {
+                let path = Path::new(o.input());
+                let assembled = packages::load_for_target(path, o.target(), o.include_tests)?;
+                if !assembled.ok() {
+                    crate::package_diagnostics(&assembled, &assembled.diagnostics, o.json);
+                    return Ok(count(
+                        assembled.diagnostics.len() + assembled.manifest_errors.len(),
+                    ));
                 }
+                self.original = assembled.sources.combined();
+                self.loaded = Some(assembled);
+                Ok(0)
+            }
+            // The standalone source the Vesper driver read.
+            Step::Load => {
+                self.original =
+                    io::read_to_string(arg).map_err(|e| format!("{}: {e}", o.input()))?;
                 Ok(0)
             }
             Step::PackageVsys => Ok(count(self.package_vsys().len())),
@@ -485,17 +479,6 @@ impl Session {
                 }
                 Ok(0)
             }
-            Step::IsWindowsTarget => Ok(i64::from(native::windows::is_windows_target(o.target()))),
-            Step::Tee => {
-                crate::measure_tee(Path::new(utf8(arg)?))?;
-                Ok(0)
-            }
-            Step::IoError => {
-                let word =
-                    u64::from_le_bytes(arg.try_into().map_err(|_| "driver: bad error word")?);
-                self.text = io_error(word).to_string().into_bytes();
-                Ok(0)
-            }
             Step::Parse
             | Step::EmitCst
             | Step::ReportSyntax
@@ -533,32 +516,6 @@ fn count(n: usize) -> i64 {
 
 fn utf8(arg: &[u8]) -> Result<&str, String> {
     std::str::from_utf8(arg).map_err(|e| format!("driver: {e}"))
-}
-
-/// The `io::Error` of a `@vesper-std` error word: the OS error when there
-/// is one, else its kind.
-fn io_error(word: u64) -> io::Error {
-    use io::ErrorKind as K;
-    let os = (word >> 32) as u32;
-    if os != 0 {
-        return io::Error::from_raw_os_error(os as i32);
-    }
-    let kind = match word & 0xff {
-        1 => K::NotFound,
-        2 => K::PermissionDenied,
-        3 => K::AlreadyExists,
-        4 => K::NotADirectory,
-        5 => K::IsADirectory,
-        6 => K::DirectoryNotEmpty,
-        7 => K::InvalidInput,
-        8 => K::Interrupted,
-        9 => K::UnexpectedEof,
-        10 => K::WriteZero,
-        11 => K::Unsupported,
-        12 => K::OutOfMemory,
-        _ => K::Other,
-    };
-    io::Error::from(kind)
 }
 
 /// The `HybridDriver` import's symbols (the `// @export vsys direct
@@ -620,7 +577,6 @@ pub mod host {
                 }
                 Box::into_raw(Box::new(Session {
                     o,
-                    package: false,
                     loaded: None,
                     original: String::new(),
                     source: String::new(),

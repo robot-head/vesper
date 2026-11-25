@@ -73,4 +73,6 @@ sys library StdFs (
     // Copy `buf.len()` bytes from `address` into `buf`.
     #[link_name = "bcopy"]
     fn copy_from(address: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[Unit];
+    // `std`'s OS error message.
+    fn strerror_r(errnum: i32, nocapture inout buf: CSlice[u8]) -> ForeignVal[i32];
 }
