@@ -4,42 +4,54 @@ use self::unstable::{
     insertion
 };
 
+// The length of the runs `stable_sort` insertion sorts before merging.
+const RUN: u64 = 16;
+
+// `a` or `b`, whichever is smaller.
+fn min_u64(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
 // Merges the sorted runs `src[lo..mid]` and `src[mid..hi]` into
 // `dst[lo..hi]`. On equal elements the left run's comes first. Once one run
 // is used up, the rest of the other is copied in one block.
 fn merge[T: mod copy + Ord](in src: Slice[T], inout dst: Slice[T], lo: u64, mid: u64, hi: u64) {
-    let mut i = lo;
-    let mut j = mid;
-    let mut k = lo;
+    let mut left = lo;
+    let mut right = mid;
+    let mut out = lo;
     loop {
-        if i >= mid || j >= hi {
+        if left >= mid || right >= hi {
             break;
         }
-        match src.try_get(i) {
-            Option::Some(a) => match src.try_get(j) {
+        match src.try_get(left) {
+            Option::Some(a) => match src.try_get(right) {
                 Option::Some(b) => {
                     if lt(b, a) {
-                        dst.try_set(k, b);
-                        j = wrapping_add(j, 1);
+                        dst.try_set(out, b);
+                        right = wrapping_add(right, 1);
                     } else {
-                        dst.try_set(k, a);
-                        i = wrapping_add(i, 1);
+                        dst.try_set(out, a);
+                        left = wrapping_add(left, 1);
                     }
-                    k = wrapping_add(k, 1);
+                    out = wrapping_add(out, 1);
                 },
                 Option::None => {
-                    j = hi;
+                    right = hi;
                 },
             },
             Option::None => {
-                i = mid;
+                left = mid;
             },
         }
     }
-    if i < mid {
-        dst.try_copy_from(k, in src[i..mid]);
-    } else if j < hi {
-        dst.try_copy_from(k, in src[j..hi]);
+    if left < mid {
+        dst.try_copy_from(out, in src[left..mid]);
+    } else if right < hi {
+        dst.try_copy_from(out, in src[right..hi]);
     }
 }
 
@@ -51,15 +63,11 @@ fn pass[T: mod copy + Ord](in src: Slice[T], inout dst: Slice[T], n: u64, width:
         if lo >= n {
             break;
         }
-        let mid0 = wrapping_add(lo, width);
-        let mid = if mid0 < n {
-            mid0
-        } else {
-            n
-        };
-        let hi0 = wrapping_add(mid, width);
-        let hi = if hi0 < n && hi0 > mid {
-            hi0
+        let mid = min_u64(wrapping_add(lo, width), n);
+        // `hi` wraps past the end only when `width` is near `u64::MAX`.
+        let hi_unclamped = wrapping_add(mid, width);
+        let hi = if hi_unclamped < n && hi_unclamped > mid {
+            hi_unclamped
         } else {
             n
         };
@@ -69,33 +77,27 @@ fn pass[T: mod copy + Ord](in src: Slice[T], inout dst: Slice[T], n: u64, width:
 }
 
 // Sorts `s` in place, ascending, keeping equal elements in their order.
-// Runs of 16 are insertion sorted in place, then merged in passes between
+// Runs of `RUN` are insertion sorted in place, then merged in passes between
 // `s` and one scratch sequence of `s.len()` elements.
 pub fn stable_sort[T: mod copy + Ord](inout s: Slice[T]) {
     let n = s.len();
     if n < 2 {
         return;
     }
-    let run: u64 = 16;
     let mut lo: u64 = 0;
     loop {
         if lo >= n {
             break;
         }
-        let hi0 = wrapping_add(lo, run);
-        let hi = if hi0 < n {
-            hi0
-        } else {
-            n
-        };
+        let hi = min_u64(wrapping_add(lo, RUN), n);
         insertion(inout s, lo, hi);
         lo = hi;
     }
-    if n <= run {
+    if n <= RUN {
         return;
     }
     match s.try_get(0) {
-        Option::Some(first) => merge_runs(inout s, n, run, first),
+        Option::Some(first) => merge_runs(inout s, n, RUN, first),
         Option::None => {},
     }
 }
