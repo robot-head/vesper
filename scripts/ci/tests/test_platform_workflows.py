@@ -23,6 +23,22 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.platforms = workflow("platforms.yml")
         self.release = workflow("platform-release.yml")
 
+    @unittest.skipUnless(shutil.which("aspect") and shutil.which("cargo"), "Aspect or Cargo unavailable")
+    def test_native_port_selection_rules_and_tracked_harness_plan(self):
+        result = subprocess.run(
+            ["aspect", "ci", "tests", "port-selection"],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_platform_workflow_selects_ports_natively_with_historical_fallback(self):
+        plan = self.platforms["jobs"]["plan"]
+        steps = {step.get("id"): step for step in plan["steps"]}
+        self.assertEqual(steps["ports"]["run"], "aspect ci choose-platform-ports")
+        self.assertIn("!= ''", steps["ports"]["if"])
+        self.assertIn("== ''", steps["legacy_ports"]["if"])
+        self.assertEqual(plan["outputs"]["ports"], "${{ steps.ports.outputs.crates || steps.legacy_ports.outputs.crates }}")
+
     @unittest.skipUnless(shutil.which("aspect"), "Aspect CLI unavailable")
     def test_all_repository_scripts_have_discoverable_aspect_tasks(self):
         scripts = subprocess.check_output(

@@ -1,7 +1,6 @@
 load("./lib/script.axl", "script_task")
 
 convert_rust_tests = script_task("convert-rust-tests", ["maintenance"], "scripts/convert-rust-tests.py", "python3")
-gen_blake3 = script_task("gen-blake3", ["maintenance"], "packages/vesper-std/hash/gen/blake3_gen.py", "python3")
 rust_census = script_task("rust-census", ["maintenance"], "scripts/rust-census.py", "python3")
 
 bazel_sync_build_files = script_task("sync-build-files", ["maintenance", "bazel"], "tools/bazel/sync_build_files.py", "python3")

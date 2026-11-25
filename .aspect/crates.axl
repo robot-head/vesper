@@ -13,7 +13,6 @@ kinetic_gen_crmath_refs = script_task("gen-crmath-refs", ["crate", "kinetic"], "
 
 
 
-serde_gen_lean_quotes = script_task("gen-lean-quotes", ["crate", "serde"], "crates/vesper-serde/tools/gen_lean_quotes.py", "python3")
 
 
 tensor_make_interop = script_task("make-interop", ["crate", "tensor"], "crates/vesper-tensor/fixtures/make_interop.py", "python3")

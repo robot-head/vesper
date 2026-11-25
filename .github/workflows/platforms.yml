@@ -69,7 +69,7 @@ jobs:
       sha: ${{ steps.plan.outputs.sha }}
       profile: ${{ steps.plan.outputs.profile }}
       groups: ${{ steps.plan.outputs.groups }}
-      ports: ${{ steps.ports.outputs.crates }}
+      ports: ${{ steps.ports.outputs.crates || steps.legacy_ports.outputs.crates }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -113,6 +113,16 @@ jobs:
             --github-output "$GITHUB_OUTPUT" --output "$RUNNER_TEMP/platform-plan.json"
       - id: ports
         name: Choose the ports to test
+        if: ${{ hashFiles('.aspect/port-harness-selection.axl') != '' }}
+        env:
+          REQUESTED_PROFILE: ${{ inputs.profile || (github.event_name == 'schedule' && 'full') || 'pr' }}
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PULL_REQUEST: ${{ inputs.pull_request }}
+        run: aspect ci choose-platform-ports
+      - id: legacy_ports
+        name: Choose the ports for a historical checkout
+        if: ${{ hashFiles('.aspect/port-harness-selection.axl') == '' }}
         env:
           REQUESTED_PROFILE: ${{ inputs.profile || (github.event_name == 'schedule' && 'full') || 'pr' }}
           EVENT: ${{ github.event_name }}
@@ -313,7 +323,7 @@ jobs:
 
   # Seven parallel shards of the harness (#1019, #1100) keep each near 30
   # min; with three, the last one ran past 90 min. On pull requests the plan
-  # names the affected ports (scripts/ci/port_harness_selection.py): a change
+  # names the affected ports (aspect ci port-harness-selection): a change
   # inside some ports' crates tests only those ports and their dependents;
   # anything else, and every push to main and nightly, tests them all.
   # When the plan names no affected port, the shards are skipped as jobs, so

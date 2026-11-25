@@ -1,21 +1,23 @@
-import sys
-WS=[0x20,100,100,100,17,100,113,2,100,9,10,112,100,13,100,100]
-OP=[0,0,0,0,0,0,0,0,0,0,ord(':'),ord('{'),ord(','),ord('}'),0,0]
-def table(name, vals, doc):
-    lines=[f"/-- {doc} -/", f"def {name} (n : BitVec 8) : BitVec 8 :="]
-    for i,v in enumerate(vals[:-1]):
-        kw = "if" if i==0 else "else if"
-        lines.append(f"  {kw} n = {i}#8 then {v}#8")
-    lines.append(f"  else {vals[-1]}#8")
+"""Generate the Lean Stage 1 SIMD quote and byte-classification model."""
+
+_WHITESPACE = [0x20, 100, 100, 100, 17, 100, 113, 2, 100, 9, 10, 112, 100, 13, 100, 100]
+_OPERATORS = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 58, 123, 44, 125, 0, 0]
+
+def _table(name: str, values: list[int], documentation: str) -> str:
+    lines = ["/-- %s -/" % documentation, "def %s (n : BitVec 8) : BitVec 8 :=" % name]
+    for index, value in enumerate(values[:-1]):
+        condition = "if" if index == 0 else "else if"
+        lines.append("  %s n = %d#8 then %d#8" % (condition, index, value))
+    lines.append("  else %d#8" % values[-1])
     return "\n".join(lines)
-def nest(ts):
-    out = ts[-1]
-    for t in reversed(ts[:-1]):
-        out = f"{t} ^^^\n    ({out})"
-    return out
-clmul_terms = nest([f"(if y.getLsbD {j} then x <<< {j} else 0#64)" for j in range(64)])
-xor_terms = nest([f"x <<< {j}" for j in range(64)])
-out = f'''/-
+
+def _nest(terms: list[str]) -> str:
+    result = terms[-1]
+    for term in reversed(terms[:-1]):
+        result = "%s ^^^\n    (%s)" % (term, result)
+    return result
+
+_MODEL = """/-
 Stage 1 quote parity and byte classification of design §20.3, for the
 kernels in `crates/vesper-serde/src/simd/` (`mod.rs` and `kernels.rs`).
 
@@ -33,7 +35,7 @@ kernels in `crates/vesper-serde/src/simd/` (`mod.rs` and `kernels.rs`).
    operator tables (`WS_TABLE`, `OP_TABLE`) with x86 `pshufb` semantics
    (index bit 7 set gives 0) and with AArch64 `tbl` on the low nibble, plus
    the control-byte test, classify exactly space, tab, line feed and
-   carriage return; exactly `{{ }} [ ] : ,` once control bytes are masked out;
+   carriage return; exactly `{ } [ ] : ,` once control bytes are masked out;
    and exactly bytes 0x00..=0x1f.
 
 These are theorems about the Lean definitions only. They are not theorems
@@ -50,11 +52,11 @@ def allOnes : BitVec 64 := 0xffffffffffffffff#64
 /-- Low 64 bits of the carry-less product: xor of `x <<< j` for set bits `j`
 of `y`. -/
 def clmulLow (x y : BitVec 64) : BitVec 64 :=
-    {clmul_terms}
+    %s
 
 /-- The carry-less product by all ones, written out: xor of every shift. -/
 def xorShifts (x : BitVec 64) : BitVec 64 :=
-    {xor_terms}
+    %s
 
 /-- `prefix_xor_shifts` in `mod.rs`. -/
 def prefixXorShifts (x : BitVec 64) : BitVec 64 :=
@@ -115,9 +117,9 @@ theorem in_string_carry_out (q c : BitVec 64) (hc : c = 0#64 ∨ c = allOnes) :
   simp only [prefixXorShifts, allOnes] at *
   bv_decide
 
-{table("wsTable", WS, "`WS_TABLE` in `kernels.rs`.")}
+%s
 
-{table("opTable", OP, "`OP_TABLE` in `kernels.rs`.")}
+%s
 
 /-- x86 `pshufb` on one byte: index bit 7 set selects zero. -/
 def pshufb (t : BitVec 8 → BitVec 8) (idx : BitVec 8) : BitVec 8 :=
@@ -168,5 +170,19 @@ theorem operator_table_alone_matches_two_controls :
   decide
 
 end SimdJsonQuotes
-'''
-sys.stdout.write(out)
+"""
+
+def _generate(ctx: TaskContext) -> int:
+    products = _nest(["(if y.getLsbD %d then x <<< %d else 0#64)" % (bit, bit) for bit in range(64)])
+    shifts = _nest(["x <<< %d" % bit for bit in range(64)])
+    whitespace = _table("wsTable", _WHITESPACE, "`WS_TABLE` in `kernels.rs`.")
+    operators = _table("opTable", _OPERATORS, "`OP_TABLE` in `kernels.rs`.")
+    ctx.std.io.stdout.write(_MODEL % (products, shifts, whitespace, operators))
+    return 0
+
+serde_gen_lean_quotes = task(
+    kind = "gen-lean-quotes",
+    group = ["crate", "serde"],
+    summary = "Generate the Lean SIMD quote and byte-classification model",
+    implementation = _generate,
+)

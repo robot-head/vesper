@@ -1,0 +1,210 @@
+"""Choose Linux port coverage from Cargo workspace ownership and Git changes."""
+
+load("./lib/process.axl", "capture", "command")
+
+_USAGE = "usage: aspect ci port-harness-selection -- --profile {pr|full} --head REF [--event EVENT] [--base REF]"
+_LINK_TARGETS = ["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro", "bin", "custom-build"]
+
+def _normalize(path: str) -> str:
+    parts = []
+    for part in path.split("/"):
+        if part == ".." and parts:
+            parts.pop()
+        elif part not in ["", "."]:
+            parts.append(part)
+    return ("/" if path.startswith("/") else "") + "/".join(parts)
+
+def _parent(path: str) -> str:
+    return path.rpartition("/")[0]
+
+def _workspace(ctx: TaskContext, root: str):
+    data = json.decode(capture(ctx, "cargo", ["metadata", "--locked", "--no-deps", "--format-version", "1"], root))
+    workspace_root = _normalize(data["workspace_root"])
+    by_path = {}
+    directories = {}
+    for package in data["packages"]:
+        path = _normalize(_parent(package["manifest_path"]))
+        by_path[path] = package["name"]
+        directories[package["name"]] = path.removeprefix(workspace_root).lstrip("/")
+    compiler = by_path[workspace_root]
+    linked = {}
+    dependents = {}
+    sources = {}
+    for package in data["packages"]:
+        name = package["name"]
+        linked[name] = {}
+        directories_for_package = {directories[name]: True}
+        for target in package["targets"]:
+            if any([kind in _LINK_TARGETS for kind in target["kind"]]):
+                path = _normalize(_parent(target["src_path"]))
+                if path.startswith(workspace_root + "/"):
+                    directories_for_package[path[len(workspace_root) + 1:]] = True
+        sources[name] = directories_for_package
+        for dependency in package["dependencies"]:
+            path = dependency.get("path")
+            member = by_path.get(_normalize(path)) if path else None
+            if member:
+                if dependency.get("kind") != "dev":
+                    linked[name][member] = True
+                dependents.setdefault(member, {})[name] = True
+    return struct(compiler = compiler, directories = directories, linked = linked, sources = sources, dependents = dependents)
+
+def _closure(seeds: dict, edges: dict) -> dict:
+    seen = dict(seeds)
+    frontier = seeds
+    for _ in range(len(edges)):
+        following = {}
+        for node in frontier:
+            for neighbor in edges.get(node, {}):
+                if neighbor not in seen:
+                    seen[neighbor] = True
+                    following[neighbor] = True
+        if not following:
+            break
+        frontier = following
+    return seen
+
+def _select(workspace, changed: list[str]) -> str:
+    compiler_closure = _closure({workspace.compiler: True}, workspace.linked)
+    touched = {}
+    for path in changed:
+        if path == "docs" or path.startswith("docs/") or ("/" not in path and path != ".md" and path.endswith(".md")):
+            continue
+        owners = []
+        for name, directories in workspace.sources.items():
+            if name != workspace.compiler and any([directory and (path == directory or path.startswith(directory + "/")) for directory in directories]):
+                owners.append(name)
+        if not owners or any([name in compiler_closure for name in owners]):
+            return "all"
+        for name in owners:
+            touched[name] = True
+    selected = _closure(touched, workspace.dependents)
+    crates = {}
+    for name in selected:
+        directory = workspace.directories[name]
+        if directory.startswith("crates/"):
+            crates[directory.split("/")[1]] = True
+    return " ".join(sorted(crates)) or "none"
+
+def _scope(ctx: TaskContext, root: str, profile: str, event: str, base: str, head: str) -> str:
+    if profile == "full" or event != "pull_request" or not base:
+        return "all"
+    if base.startswith("-") or head.startswith("-"):
+        return "all"
+    diff = command(ctx, "git", ["diff", "--name-only", "-z", "--no-renames", base + "..." + head, "--"], root).stdout("piped").stderr("piped").spawn().wait_with_output()
+    changed = [path for path in diff.stdout.split("\x00") if path]
+    if not diff.status.success or not changed:
+        return "all"
+    return _select(_workspace(ctx, root), changed)
+
+def _options(ctx: TaskContext, argv: list[str]) -> dict[str, str]:
+    options = {"--event": "pull_request", "--base": ""}
+    skip = -1
+    for i, arg in enumerate(argv):
+        if i == skip:
+            continue
+        flag, equals, value = arg.partition("=")
+        if flag not in ["--event", "--base", "--profile", "--head"]:
+            ctx.std.process.exit(2, _USAGE)
+        if not equals:
+            if i + 1 >= len(argv) or argv[i + 1].startswith("--"):
+                ctx.std.process.exit(2, _USAGE)
+            skip = i + 1
+            value = argv[skip]
+        options[flag] = value
+    if options.get("--profile") not in ["pr", "full"] or "--head" not in options:
+        ctx.std.process.exit(2, _USAGE)
+    return options
+
+def _run_cli(ctx: TaskContext) -> int:
+    options = _options(ctx, ctx.args.tool_args)
+    crates = _scope(ctx, ctx.std.env.aspect_root_dir(), options["--profile"], options["--event"], options["--base"], options["--head"])
+    ctx.std.io.stdout.write(crates + "\n")
+    return 0
+
+port_harness_selection = task(
+    kind = "port-harness-selection",
+    group = ["ci"],
+    summary = "Select port harness tests from workspace ownership and Git changes",
+    implementation = _run_cli,
+    args = {"tool_args": args.trailing_var_args(description = "Profile, event and Git revisions.")},
+)
+
+def _run_workflow(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    output = ctx.std.env.var("GITHUB_OUTPUT")
+    if not output:
+        ctx.std.process.exit(2, "GITHUB_OUTPUT is required")
+    if ctx.std.env.var("PULL_REQUEST"):
+        # Dispatched PRs leave port shards to main and nightly.
+        crates = "none"
+    else:
+        profile = ctx.std.env.var("REQUESTED_PROFILE") or "pr"
+        if profile not in ["pr", "full"]:
+            ctx.std.process.exit(2, "Unknown platform profile: " + profile)
+        event = ctx.std.env.var("EVENT") or "pull_request"
+        base = ctx.std.env.var("BASE_SHA") or ""
+        crates = _scope(ctx, root, profile, event, base, "HEAD")
+    ctx.std.io.stdout.write("ports to test: " + crates + "\n")
+    if not ctx.std.fs.try_append(output, "crates=" + crates + "\n"):
+        ctx.std.process.exit(1, "Could not write platform port selection to GITHUB_OUTPUT")
+    return 0
+
+choose_platform_ports = task(
+    kind = "choose-platform-ports",
+    group = ["ci"],
+    summary = "Set the GitHub Actions port coverage output",
+    implementation = _run_workflow,
+)
+
+def _test_selection(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    workspace = _workspace(ctx, root)
+    for path in [
+        "src/lib.rs", "tests/fixtures/self_host/driver.rs", "Cargo.lock", "Cargo.toml",
+        "scripts/port-harness-plan.json", ".github/workflows/platforms.yml",
+        "packages/vesper-std/src/lib.ves", "crates/vesper-syntax/src/lib.rs",
+        "crates/vesper-alloc/src/lib.rs",
+    ]:
+        if _select(workspace, [path]) != "all":
+            fail("Expected all ports for " + path)
+    for changed, expected in [
+        (["docs/ci-platforms.md", "README.md"], "none"),
+        (["crates/vesper-alloc/vesper/src/region.ves"], "vesper-alloc"),
+        (["crates/vesper-prism-h3/vesper/src/message.ves"], "vesper-prism-h3"),
+    ]:
+        result = _select(workspace, changed)
+        if result != expected:
+            fail("Expected port selection %r for %r, got %r" % (expected, changed, result))
+
+    seeds = sorted([name for name in _closure({workspace.compiler: True}, workspace.linked) if name.endswith("-seed")])
+    if not seeds or _select(workspace, [workspace.directories[seeds[0]] + "/src/lib.rs"]) != "all":
+        fail("Expected all ports for a compiler seed")
+    picked = _select(workspace, ["crates/vesper-beacon/tests/behavior.rs", "docs/x.md"]).split()
+    if "vesper-beacon" not in picked or "vesper-beacon-arrow" not in picked:
+        fail("Expected the Beacon port and its dependent")
+    picked = _select(workspace, ["crates/vesper-port-harness/src/lib.rs"]).split()
+    for crate in ["vesper-ebpf", "vesper-ignis", "vesper-serde", "vesper-port-pilot"]:
+        if crate not in picked:
+            fail("Expected a harness-library change to select " + crate)
+
+    plan = json.decode(ctx.std.fs.read_to_string(root + "/scripts/port-harness-plan.json"))
+    names = {}
+    for shard in plan:
+        for suite in shard:
+            for crate in suite["crates"]:
+                names[crate] = True
+                manifest = ctx.std.fs.try_metadata(root + "/crates/" + crate + "/Cargo.toml")
+                if manifest == None or not manifest.is_file:
+                    fail("Unknown port harness crate: " + crate)
+    if len(names) <= 20:
+        fail("Expected more than twenty crates in the port harness plan")
+    print("Passed port-selection tests for %d workspace packages" % len(workspace.directories))
+    return 0
+
+test_port_selection = task(
+    kind = "port-selection",
+    group = ["ci", "tests"],
+    summary = "Verify port ownership, dependency closure and the tracked harness plan",
+    implementation = _test_selection,
+)

@@ -50,7 +50,7 @@ and every shard downloads that binary instead of building a debug compiler
 of its own (#1103).
 
 On pull requests the plan job also picks the ports to test
-(`scripts/ci/port_harness_selection.py`, `VESPER_PORT_HARNESS_CRATES`). If
+(`aspect ci port-harness-selection`, `VESPER_PORT_HARNESS_CRATES`). If
 every changed file is documentation or sits inside workspace crates outside
 the compiler's dependency closure, only those crates' blocks of the harness
 and the blocks of the crates that depend on them run; a documentation-only

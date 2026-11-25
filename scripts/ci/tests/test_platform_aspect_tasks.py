@@ -861,6 +861,88 @@ else:
                 self.assertFalse(Path((self.root / "scratch").read_text()).exists())
                 self.assertEqual("9600 scalar-reference comparisons passed" in result.stdout, status == 0)
 
+    def test_native_port_selection_handles_diff_failures_renames_and_workflow_output(self):
+        def git(*arguments):
+            return subprocess.check_output(["git", *arguments], cwd=self.root, text=True).strip()
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.name", "Fixture")
+        git("config", "user.email", "fixture@example.invalid")
+        git("config", "commit.gpgsign", "false")
+        self.write("crates/source/file with spaces λ.rs", "fixture\n")
+        git("add", ".")
+        git("commit", "-qm", "base")
+        base = git("rev-parse", "HEAD")
+        cargo = self.write("bin/cargo", """\
+#!/usr/bin/env python3
+from pathlib import Path
+import sys
+assert sys.argv[1:] == ["metadata", "--locked", "--no-deps", "--format-version", "1"]
+print(Path("metadata.json").read_text())
+""", executable=True)
+        env = {"PATH": os.pathsep.join([str(cargo.parent), os.environ["PATH"]])}
+        def package(name, path, dependencies=(), targets=()):
+            return {"name": name, "manifest_path": str(self.root / path / "Cargo.toml"),
+                    "dependencies": [{"path": str(self.root / directory), "kind": kind}
+                                     for directory, kind in dependencies],
+                    "targets": [{"src_path": str(self.root / file), "kind": [kind]} for file, kind in targets]}
+        self.write("metadata.json", json.dumps({"workspace_root": str(self.root), "packages": [
+            package("compiler", "", [("crates/seed", "build"), ("crates/source", "dev")]),
+            package("source", "crates/source"),
+            package("seed", "crates/seed", targets=[("crates/seed/../linked/src/lib.rs", "lib")]),
+            package("linked", "crates/linked"),
+            package("middle", "crates/middle", [("crates/source", "dev")]),
+            package("last", "crates/last", [("crates/middle", "build")]),
+        ]}))
+        command = ("ci", "port-harness-selection", "--")
+        for flags in (("--profile", "full"), ("--profile=pr", "--event=push"), ("--profile", "pr")):
+            self.assertEqual(self.aspect(*command, *flags, "--head", "HEAD", env=env).stdout, "all\n")
+        scoped = (*command, "--profile", "pr", "--base", base, "--head", "HEAD")
+        self.assertEqual(self.aspect(*scoped, env=env).stdout, "all\n")
+        self.assertEqual(self.aspect(*command, "--profile", "pr", "--base", "missing", "--head", "HEAD", env=env).stdout, "all\n")
+        self.aspect(*command, "--profile", "invalid", "--head", "HEAD", env=env, status=2)
+        self.aspect(*command, "--profile", "--head", "HEAD", env=env, status=2)
+
+        self.write("crates/source/file with spaces λ.rs", "changed\n")
+        git("commit", "-qam", "change a port")
+        self.assertEqual(self.aspect(*scoped, env=env).stdout, "last middle source\n")
+        output = self.write("step-output", "earlier=record\n")
+        workflow_env = {**env, "GITHUB_OUTPUT": str(output), "PULL_REQUEST": "", "BASE_SHA": base,
+                        "REQUESTED_PROFILE": "pr", "EVENT": "pull_request"}
+        self.aspect("ci", "choose-platform-ports", env=workflow_env)
+        self.aspect("ci", "choose-platform-ports", env={**workflow_env, "PULL_REQUEST": "42"})
+        self.assertEqual(output.read_text(), "earlier=record\ncrates=last middle source\ncrates=none\n")
+        self.aspect("ci", "choose-platform-ports", env={**workflow_env, "GITHUB_OUTPUT": ""}, status=2)
+        self.aspect("ci", "choose-platform-ports", env={**workflow_env, "GITHUB_OUTPUT": str(output / "unwritable")}, status=1)
+        self.aspect("ci", "choose-platform-ports", env={**workflow_env, "REQUESTED_PROFILE": "other"}, status=2)
+
+        self.write("crates/linked/src/lib.rs", "linked library\n")
+        git("add", "crates/linked")
+        git("commit", "-qm", "change a compiler-linked file")
+        self.assertEqual(self.aspect(*scoped, env=env).stdout, "all\n")
+        git("reset", "--hard", base)
+        (self.root / "docs").mkdir()
+        git("mv", "crates/source/file with spaces λ.rs", "docs/renamed.md")
+        git("commit", "-qm", "move a port file to documentation")
+        self.assertEqual(self.aspect(*scoped, env=env).stdout, "last middle source\n")
+
+    def test_blake3_generator_preserves_both_source_forms(self):
+        command = ("maintenance", "gen-blake3", "--")
+        self.aspect(*command, "rounds output.ves")
+        committed = ROOT / "packages/vesper-std/hash/src/compress.ves"
+        self.assertEqual((self.nested / "rounds output.ves").read_text(), committed.read_text())
+        straight = self.nested / "straight output.ves"
+        self.aspect(*command, str(straight), "--straight-line")
+        self.assertEqual(hashlib.sha256(straight.read_bytes()).hexdigest(),
+                         "f476483c6221f76bc39a7cb07084800277c0a3205c4231af8b4d58d4a66c005c")
+        self.aspect(*command, status=2)
+        self.aspect(*command, str(straight), "--unsupported", status=2)
+
+    def test_serde_lean_generator_matches_the_committed_model(self):
+        model = ROOT / "crates/vesper-serde/lean/SimdJsonQuotes.lean"
+        result = self.aspect("crate", "serde", "gen-lean-quotes")
+        self.assertEqual(result.stdout.encode("utf-8"), model.read_bytes())
+
     def test_default_cli_dependency_check_reports_exact_forbidden_packages(self):
         cargo = self.write("bin/cargo", """\
 #!/usr/bin/env python3
