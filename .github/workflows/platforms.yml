@@ -154,10 +154,10 @@ jobs:
           echo "ports to test: $crates"
           echo "crates=$crates" >> "$GITHUB_OUTPUT"
       - id: shards
-        if: ${{ hashFiles('.aspect/port-shards.axl') != '' }}
+        if: ${{ (steps.ports.outputs.crates || steps.legacy_ports.outputs.crates) != 'none' && hashFiles('.aspect/port-shards.axl') != '' }}
         run: aspect ci port-shard-matrix
       - name: Check out shard planning tools for a historical revision
-        if: ${{ hashFiles('.aspect/port-shards.axl') == '' }}
+        if: ${{ (steps.ports.outputs.crates || steps.legacy_ports.outputs.crates) != 'none' && hashFiles('.aspect/port-shards.axl') == '' }}
         uses: actions/checkout@v4
         with:
           ref: ${{ github.workflow_sha }}
@@ -166,10 +166,10 @@ jobs:
           sparse-checkout: |
             .aspect
             .github/actions/aspect
-      - if: ${{ hashFiles('.aspect/port-shards.axl') == '' }}
+      - if: ${{ (steps.ports.outputs.crates || steps.legacy_ports.outputs.crates) != 'none' && hashFiles('.aspect/port-shards.axl') == '' }}
         uses: ./.platform-shard-tools/.github/actions/aspect
       - id: historical_shards
-        if: ${{ hashFiles('.aspect/port-shards.axl') == '' }}
+        if: ${{ (steps.ports.outputs.crates || steps.legacy_ports.outputs.crates) != 'none' && hashFiles('.aspect/port-shards.axl') == '' }}
         working-directory: .platform-shard-tools
         env:
           PORT_HARNESS_ROOT: ${{ github.workspace }}
