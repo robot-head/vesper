@@ -1,6 +1,7 @@
 //! Bounded developer arithmetic oracle. The reference is the static Lean process.
 #![forbid(unsafe_code)]
 
+pub mod compiler;
 pub mod corpus;
 pub mod process;
 pub mod protocol;
@@ -374,6 +375,8 @@ pub struct RunConfig {
     pub jobs: u8,
     pub lean: PathBuf,
     pub worker_exe: PathBuf,
+    /// The `vesper` binary under test, which the workers drive as a process.
+    pub compiler: PathBuf,
     pub artifacts: Option<PathBuf>,
     pub limits: HarnessLimits,
 }
@@ -513,6 +516,8 @@ pub struct RunReport {
     pub model_blake3: [u8; 32],
     pub driver_blake3: [u8; 32],
     pub worker_blake3: [u8; 32],
+    /// The `vesper` binary under test.
+    pub compiler_blake3: [u8; 32],
     pub corpus_blake3: [u8; 32],
     pub requests_blake3: [u8; 32],
     pub responses_blake3: [u8; 32],
@@ -569,6 +574,7 @@ impl RunReport {
             model_blake3: [0; 32],
             driver_blake3: [0; 32],
             worker_blake3: [0; 32],
+            compiler_blake3: [0; 32],
             corpus_blake3: [0; 32],
             requests_blake3: [0; 32],
             responses_blake3: [0; 32],

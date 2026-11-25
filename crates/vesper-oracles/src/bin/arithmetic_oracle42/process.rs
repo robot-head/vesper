@@ -501,6 +501,7 @@ struct Engine {
     lean: Session,
     _root: TempRoot,
     worker_path: PathBuf,
+    compiler_path: PathBuf,
     workers: Vec<Option<WorkerSlot>>,
     started: Vec<bool>,
     requests: blake3::Hasher,
@@ -519,6 +520,8 @@ impl Engine {
         }
         let worker_path = resolve_executable(&config.worker_exe)?;
         report.worker_blake3 = file_hash(&worker_path)?;
+        let compiler_path = resolve_executable(&config.compiler)?;
+        report.compiler_blake3 = file_hash(&compiler_path)?;
         let configured = resolve_invocation(&config.lean)?;
         let mut cmd = command(&configured, None);
         cmd.arg("--version");
@@ -598,6 +601,7 @@ impl Engine {
             lean: server,
             _root: root,
             worker_path,
+            compiler_path,
             workers: (0..config.jobs).map(|_| None).collect(),
             started: vec![false; usize::from(config.jobs)],
             requests: blake3::Hasher::new(),
@@ -690,7 +694,7 @@ impl Engine {
     ) -> Result<(), HarnessError> {
         if self.workers[index].is_none() {
             let mut cmd = command(&self.worker_path, None);
-            cmd.arg("--worker");
+            cmd.arg("--worker").arg(&self.compiler_path);
             let session =
                 Session::spawn(cmd, FRAME_CAP, config.limits.stderr_bytes, ReadMode::Framed)?;
             report.rust_worker_spawns += 1;
@@ -1164,7 +1168,7 @@ fn shrink(
             let (oracle, request, response) = engine.oracle(&case, config, report, true)?;
             evidence.shrink_log[index]["status"] = serde_json::json!("oracle_answered");
             let mut cmd = command(&engine.worker_path, None);
-            cmd.arg("--worker");
+            cmd.arg("--worker").arg(&engine.compiler_path);
             let mut child =
                 Session::spawn(cmd, FRAME_CAP, config.limits.stderr_bytes, ReadMode::Framed)?;
             spawned = true;
@@ -1540,6 +1544,7 @@ mod tests {
             jobs: 1,
             lean: "unused".into(),
             worker_exe: "unused".into(),
+            compiler: "unused".into(),
             artifacts: Some(output.clone()),
             limits: HarnessLimits::default(),
         };
