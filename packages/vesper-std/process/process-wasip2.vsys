@@ -1,10 +1,13 @@
 // @vesper-std/process's import on wasm32-wasip2 (#1928): none. WASI 0.2
 // cannot start a process, so src-wasip2/lib.ves refuses every start
 // itself and calls no function of this library; it is here so that
-// `Ffi[StdProcess]` names the same library on every target.
+// `Ffi[StdProcess]` names the same library on every target. A library
+// declares at least one item, so it carries the OS number the native
+// files carry too (0: wasm is no particular platform, as `vstd_env_os`).
 sys library StdProcess (
     target = "@TARGET@", abi = "@ABI@",
     link = "static", name = "vesper_std_host",
     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
 ) {
+    const OS: u32 = 0;
 }
