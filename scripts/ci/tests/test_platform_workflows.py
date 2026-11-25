@@ -224,15 +224,23 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertIn("--build_tag_filters=-lean_replay,-self_host", everything)
         self_host = command("Self-host differentials")
         self.assertIn("--build_tests_only", self_host)
-        self.assertIn("--test_tag_filters=self_host,-self_host_codegen,-lean_replay", self_host)
+        self.assertIn("--test_tag_filters=self_host,-self_host_codegen,-self_host_part2,-lean_replay", self_host)
+        # #1882: the non-codegen differentials neared the hour on one runner.
+        part2 = command("Self-host differentials 2")
+        self.assertIn("--build_tests_only", part2)
+        self.assertIn("--test_tag_filters=self_host_part2,-lean_replay", part2)
         codegen = command("Self-host codegen differentials")
         self.assertIn("--build_tests_only", codegen)
         self.assertIn("--test_tag_filters=self_host_codegen,-lean_replay", codegen)
-        for name in ("Self-host differentials", "Self-host codegen differentials"):
+        for name in ("Self-host differentials", "Self-host differentials 2", "Self-host codegen differentials"):
             self.assertEqual(actions[name]["timeout"], "60m")
+            # Per-target times, to balance the split on.
+            self.assertIn("--test_summary=short", command(name))
         defs = (ROOT / "tools/bazel/defs.bzl").read_text()
         self.assertIn('startswith("self_host_")', defs)
         self.assertIn('"self_host_codegen"', defs)
+        self.assertIn('"self_host_part2"', defs)
+        self.assertIn("_SELF_HOST_PART2 = (", defs)
         # Three "Self-host differentials" tests at a time fit the runner (#1519).
         self.assertIn('_SELF_HOST_MEMORY = "resources:memory:6144"', defs)
         self.assertIn("--local_resources=memory=18432", (ROOT / ".bazelrc").read_text())
@@ -245,12 +253,13 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertEqual(job["runs-on"], "ubuntu-latest")
         steps = job["steps"]
         find = steps[0]["run"]
-        for context in ("Test all targets", "Self-host differentials", "Self-host codegen differentials",
-                        "Native and acceptance scripts"):
+        for context in ("Test all targets", "Self-host differentials", "Self-host differentials 2",
+                        "Self-host codegen differentials", "Native and acceptance scripts"):
             self.assertIn(context, job["if"])
             self.assertIn(f'"{context}"', find)
         self.assertIn('"$states" != 3', find)
         self.assertIn('"$codegen" != success', find)
+        self.assertIn('"$part2" != success', find)
         names = [s.get("uses") or s.get("name") for s in steps]
         gate = names.index("./.gate/.github/actions/merge-gate")
         dispatch = next(i for i, s in enumerate(steps) if "gh workflow run" in s.get("run", ""))
@@ -294,7 +303,8 @@ class PlatformWorkflowTests(unittest.TestCase):
             statuses = [{"id": 1, "context": "Test all targets", "state": "success"},
                         {"id": 2, "context": "Native and acceptance scripts", "state": "success"},
                         {"id": 4, "context": "Self-host differentials", "state": "success"},
-                        {"id": 6, "context": "Self-host codegen differentials", "state": "success"}]
+                        {"id": 6, "context": "Self-host codegen differentials", "state": "success"},
+                        {"id": 8, "context": "Self-host differentials 2", "state": "success"}]
         job = self.release["jobs"][which]
         step = next(s for s in job["steps"] if s.get("uses") == "actions/github-script@v7")
         code = step["with"]["script"]
@@ -356,13 +366,16 @@ const fn = new Function("github", "context", "core", "process", "require",
         good = [{"id": 1, "context": "Test all targets", "state": "success"},
                 {"id": 2, "context": "Native and acceptance scripts", "state": "success"},
                 {"id": 4, "context": "Self-host differentials", "state": "success"},
-                {"id": 6, "context": "Self-host codegen differentials", "state": "success"}]
+                {"id": 6, "context": "Self-host codegen differentials", "state": "success"},
+                {"id": 8, "context": "Self-host differentials 2", "state": "success"}]
         for which in ("linux", "ready"):
             for state in ("failure", "error", "pending"):
-                for context in ("Test all targets", "Self-host differentials", "Self-host codegen differentials"):
-                    statuses = good + [{"id": 7, "context": context, "state": state}]
+                for context in ("Test all targets", "Self-host differentials", "Self-host codegen differentials",
+                                "Self-host differentials 2"):
+                    statuses = good + [{"id": 9, "context": context, "state": state}]
                     self.assertFalse(self.gate(which, statuses=statuses)["ok"])
-            # A candidate without the self-host check (#1519) is not ready.
+            # A candidate without every self-host check (#1519, #1882) is not ready.
+            self.assertFalse(self.gate(which, statuses=good[:4])["ok"])
             self.assertFalse(self.gate(which, statuses=good[:3])["ok"])
             self.assertFalse(self.gate(which, statuses=good[:2])["ok"])
             self.assertFalse(self.gate(which, statuses=good[:1])["ok"])
