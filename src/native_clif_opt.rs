@@ -2416,6 +2416,31 @@ fn eval_binary_int(op: Opcode, ty: Type, a: i64, b: i64) -> Option<i64> {
     Some(res as i64)
 }
 
+fn is_bool_i8(func: &ir::Function, v: Value, depth: u32) -> bool {
+    if depth > 4 {
+        return false;
+    }
+    let v = func.dfg.resolve_aliases(v);
+    if func.dfg.value_type(v) != types::I8 {
+        return false;
+    }
+    let ir::ValueDef::Result(def, 0) = func.dfg.value_def(v) else {
+        return false;
+    };
+    match func.dfg.insts[def] {
+        InstructionData::IntCompare { .. } | InstructionData::IntCompareImm { .. } => true,
+        InstructionData::UnaryImm {
+            opcode: Opcode::Iconst,
+            imm,
+        } => matches!(imm.bits(), 0 | 1),
+        InstructionData::Binary {
+            opcode: Opcode::Band | Opcode::Bor | Opcode::Bxor,
+            args: [a, b],
+        } => is_bool_i8(func, a, depth + 1) && is_bool_i8(func, b, depth + 1),
+        _ => false,
+    }
+}
+
 /// Fold identity/constant/same-operand integer ops, `select`, and
 /// zero-comparisons or branches on `uextend`/`sextend` of narrower boolean values.
 fn fold_trivial_arith_and_bool_extends(func: &mut ir::Function) {
@@ -2438,35 +2463,114 @@ fn fold_trivial_arith_and_bool_extends(func: &mut ir::Function) {
         let mut changed = false;
         for (_, inst) in insts(func) {
             match func.dfg.insts[inst] {
-                InstructionData::BinaryImm64 {
-                    opcode: Opcode::ImulImm,
+                InstructionData::Unary {
+                    opcode: op @ (Opcode::Bnot | Opcode::Ineg),
                     arg,
-                    imm,
                 } => {
                     let arg = func.dfg.resolve_aliases(arg);
                     let dest = func.dfg.first_result(inst);
-                    if imm.bits() == 1 {
+                    let ty = func.dfg.value_type(dest);
+                    if !matches!(ty, types::I8 | types::I16 | types::I32 | types::I64) {
+                        continue;
+                    }
+                    let mask = if ty.bits() == 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << ty.bits()) - 1
+                    };
+                    if let Some(a) = constant(func, arg, 1) {
+                        let ua = (a as u64) & mask;
+                        let res = if op == Opcode::Bnot {
+                            (!ua) & mask
+                        } else {
+                            ua.wrapping_neg() & mask
+                        };
+                        func.dfg.replace(inst).iconst(ty, res as i64);
+                        changed = true;
+                    } else if let ir::ValueDef::Result(def, 0) = func.dfg.value_def(arg)
+                        && let InstructionData::Unary {
+                            opcode: inner_op,
+                            arg: inner,
+                        } = func.dfg.insts[def]
+                        && inner_op == op
+                    {
+                        let inner = func.dfg.resolve_aliases(inner);
                         func.layout.remove_inst(inst);
                         func.dfg.clear_results(inst);
-                        func.dfg.change_to_alias(dest, arg);
-                        changed = true;
-                    } else if imm.bits() == 0 {
-                        let ty = func.dfg.value_type(dest);
-                        func.dfg.replace(inst).iconst(ty, 0);
+                        func.dfg.change_to_alias(dest, inner);
                         changed = true;
                     }
                 }
                 InstructionData::BinaryImm64 {
-                    opcode: Opcode::IaddImm,
+                    opcode: imm_op,
                     arg,
                     imm,
-                } if imm.bits() == 0 => {
+                } if matches!(
+                    imm_op,
+                    Opcode::IaddImm
+                        | Opcode::ImulImm
+                        | Opcode::BandImm
+                        | Opcode::BorImm
+                        | Opcode::BxorImm
+                        | Opcode::IshlImm
+                        | Opcode::UshrImm
+                        | Opcode::SshrImm
+                ) =>
+                {
+                    let bin_op = match imm_op {
+                        Opcode::IaddImm => Opcode::Iadd,
+                        Opcode::ImulImm => Opcode::Imul,
+                        Opcode::BandImm => Opcode::Band,
+                        Opcode::BorImm => Opcode::Bor,
+                        Opcode::BxorImm => Opcode::Bxor,
+                        Opcode::IshlImm => Opcode::Ishl,
+                        Opcode::UshrImm => Opcode::Ushr,
+                        Opcode::SshrImm => Opcode::Sshr,
+                        _ => unreachable!(),
+                    };
                     let arg = func.dfg.resolve_aliases(arg);
                     let dest = func.dfg.first_result(inst);
-                    func.layout.remove_inst(inst);
-                    func.dfg.clear_results(inst);
-                    func.dfg.change_to_alias(dest, arg);
-                    changed = true;
+                    let ty = func.dfg.value_type(dest);
+                    if !matches!(ty, types::I8 | types::I16 | types::I32 | types::I64) {
+                        continue;
+                    }
+                    if let Some(a) = constant(func, arg, 1)
+                        && let Some(folded) = eval_binary_int(bin_op, ty, a, imm.bits())
+                    {
+                        func.dfg.replace(inst).iconst(ty, folded);
+                        changed = true;
+                        continue;
+                    }
+                    let mask = if ty.bits() == 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << ty.bits()) - 1
+                    };
+                    let all_ones = mask as i64;
+                    let imm_bits = ((imm.bits() as u64) & mask) as i64;
+                    let is_identity = match imm_op {
+                        Opcode::IaddImm
+                        | Opcode::BorImm
+                        | Opcode::BxorImm
+                        | Opcode::IshlImm
+                        | Opcode::UshrImm
+                        | Opcode::SshrImm => imm_bits == 0,
+                        Opcode::ImulImm => imm_bits == 1,
+                        Opcode::BandImm => imm_bits == all_ones,
+                        _ => false,
+                    };
+                    if is_identity {
+                        func.layout.remove_inst(inst);
+                        func.dfg.clear_results(inst);
+                        func.dfg.change_to_alias(dest, arg);
+                        changed = true;
+                    } else if matches!(imm_op, Opcode::ImulImm | Opcode::BandImm) && imm_bits == 0 {
+                        func.dfg.replace(inst).iconst(ty, 0);
+                        changed = true;
+                    } else if imm_op == Opcode::BorImm && imm_bits == all_ones {
+                        func.dfg.replace(inst).iconst(ty, all_ones);
+                        changed = true;
+                    }
                 }
                 InstructionData::Binary {
                     opcode: op,
@@ -2530,9 +2634,14 @@ fn fold_trivial_arith_and_bool_extends(func: &mut ir::Function) {
                             }
                         }
                         Opcode::Band => {
-                            if rc == Some(all_ones) || lhs == rhs {
+                            if rc == Some(all_ones)
+                                || lhs == rhs
+                                || (ty == types::I8 && rc == Some(1) && is_bool_i8(func, lhs, 0))
+                            {
                                 Some(lhs)
-                            } else if lc == Some(all_ones) {
+                            } else if lc == Some(all_ones)
+                                || (ty == types::I8 && lc == Some(1) && is_bool_i8(func, rhs, 0))
+                            {
                                 Some(rhs)
                             } else {
                                 None
@@ -2563,16 +2672,46 @@ fn fold_trivial_arith_and_bool_extends(func: &mut ir::Function) {
                     let cond = func.dfg.resolve_aliases(cond);
                     let t = func.dfg.resolve_aliases(t);
                     let f = func.dfg.resolve_aliases(f);
+                    let dest = func.dfg.first_result(inst);
+                    let cond_is_cmp = matches!(
+                        func.dfg.value_def(cond),
+                        ir::ValueDef::Result(def, 0)
+                            if matches!(
+                                func.dfg.insts[def],
+                                InstructionData::IntCompare { .. }
+                                    | InstructionData::IntCompareImm { .. }
+                            )
+                    );
+                    let tc = constant(func, t, 1);
+                    let fc = constant(func, f, 1);
+                    let dest_ty = func.dfg.value_type(dest);
                     let target = if t == f {
                         Some(t)
+                    } else if let Some(c) = constant(func, cond, 1) {
+                        Some(if c != 0 { t } else { f })
+                    } else if cond_is_cmp && dest_ty == types::I8 && tc == Some(1) && fc == Some(0)
+                    {
+                        Some(cond)
                     } else {
-                        constant(func, cond, 1).map(|c| if c != 0 { t } else { f })
+                        None
                     };
                     if let Some(target) = target {
-                        let dest = func.dfg.first_result(inst);
                         func.layout.remove_inst(inst);
                         func.dfg.clear_results(inst);
                         func.dfg.change_to_alias(dest, target);
+                        changed = true;
+                    } else if cond_is_cmp
+                        && matches!(dest_ty, types::I16 | types::I32 | types::I64)
+                        && tc == Some(1)
+                        && fc == Some(0)
+                    {
+                        func.dfg.replace(inst).uextend(dest_ty, cond);
+                        changed = true;
+                    } else if cond_is_cmp && dest_ty == types::I8 && tc == Some(0) && fc == Some(1)
+                    {
+                        func.dfg
+                            .replace(inst)
+                            .icmp_imm(ir::condcodes::IntCC::Equal, cond, 0);
                         changed = true;
                     }
                 }
@@ -3092,6 +3231,11 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
     };
 
     let is_hi_minus_one = |func: &ir::Function, v: Value, hi: Value| -> bool {
+        if let (Some(vc), Some(hc)) = (const_val(func, v), const_val(func, hi))
+            && (hc as u64).wrapping_sub(1) == (vc as u64)
+        {
+            return true;
+        }
         let Some(inst) = def_inst(func, v) else {
             return false;
         };
