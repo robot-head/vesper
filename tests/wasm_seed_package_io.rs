@@ -2659,21 +2659,21 @@ const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[
         "@vesper/codegen-control-emit",
         "packages/vesper-codegen-control-emit",
         "use @vesper/codegen-control-emit::control_hook;\npub fn main() -> u64 eff [Ffi[Cranelift]] { control_hook(0) }\n",
-        "Stage 2 assembly does not resolve the cranelift.vsys handle types (E0111 no item 'Data')",
+        "native Cranelift glue over vesper-cranelift-sys: Stage 2 assembly does not resolve the cranelift.vsys handle types (E0111 no item 'Data'), and Stage 2 emits only Wasm, where Ffi[Cranelift] has no host",
     ),
     (
         "codegen-numeric",
         "@vesper/codegen-numeric",
         "packages/vesper-codegen-numeric",
         "use @vesper/codegen-numeric::numeric_hook;\npub fn main() -> u64 eff [Ffi[Cranelift]] { numeric_hook(0) }\n",
-        "Stage 2 assembly does not resolve the cranelift.vsys handle types (E0111 no item 'Builder')",
+        "native Cranelift glue over vesper-cranelift-sys: Stage 2 assembly does not resolve the cranelift.vsys handle types (E0111 no item 'Builder'), and Stage 2 emits only Wasm, where Ffi[Cranelift] has no host",
     ),
     (
         "driver-commands",
         "@vesper/driver-commands",
         "packages/vesper-driver-commands",
-        "use @vesper/driver-commands::stdout_stream;\npub fn main() -> u64 { let _ = stdout_stream(); 0 }\n",
-        "Stage 2 assembly does not find the @vesper-std/fs::sys submodule (E0111 no module)",
+        "use @vesper/driver-commands::run;\nuse @vesper/driver::args_new;\npub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] { let a = args_new(); wrapping_u64(run(in a)) }\n",
+        "its printing, help and formatting go through the HybridCommands import, which only the hybrid compiler's Rust implements (crates/vesper-hybrid/src/commands.rs): the Wasm entry cannot carry Ffi[HybridCommands] (WErr Entry). @vesper-std/process builds for WASI (src-wasip2, #1928)",
     ),
 ];
 
@@ -2892,13 +2892,68 @@ fn check_compiler_packages_fixed_point(
         }
     }
     for (stem, pkg_name, pkg_rel, lib_src, why) in STAGE2_PACKAGE_GAPS.iter() {
-        let (manifest, _) = compiler_package_probe(stem, pkg_name, pkg_rel, "");
+        let (mut manifest, _) = compiler_package_probe(stem, pkg_name, pkg_rel, "");
+        // A gap probe may `use` other compiler packages to reach the code
+        // that needs the missing support; each becomes a dependency.
+        for other in lib_src
+            .split("use @vesper/")
+            .skip(1)
+            .filter_map(|rest| rest.split("::").next())
+            .filter(|other| format!("@vesper/{other}") != *pkg_name)
+        {
+            manifest.push_str(&format!(
+                "\"@vesper/{other}\" = {{ version = \"^0.1\", path = \"/repo/packages/vesper-{other}\" }}\n"
+            ));
+        }
         write_probe(&wrap_dir, &manifest, lib_src);
         if build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm").is_ok() {
             failures.push(format!(
                 "{pkg_name}: Stage 2 now builds it (listed as a gap: {why}); move it from STAGE2_PACKAGE_GAPS into COMPILER_PACKAGES"
             ));
         }
+    }
+    // @vesper-std/process on WASI (src-wasip2): a start is refused with
+    // Unsupported (IoKind 11) and `id` is 0, built the same by both Stage 2
+    // compilers.
+    let proc_manifest = "[package]\nname = \"@vesper-test/probe-process-wasi\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\n\"@vesper-std/process\" = { version = \"^0.1\", path = \"/repo/packages/vesper-std/process\" }\n";
+    let proc_src = "use @vesper-std/process::{command, arg, spawn, release, id};\n\
+        pub fn main() -> u64 eff [Ffi[StdProcess]] {\n\
+            let mut c = command(in \"cc\");\n\
+            arg(inout c, in \"--version\");\n\
+            let r = match spawn(c) {\n\
+                Result::Ok(ch) => {\n\
+                    release(ch);\n\
+                    1000\n\
+                },\n\
+                Result::Err(e) => widen_u64(e.kind),\n\
+            };\n\
+            wrapping_add(r, id())\n\
+        }\n";
+    write_probe(&wrap_dir, proc_manifest, proc_src);
+    match (
+        build_compiler_package_probe(boot, boot_syms, dir, "boot stage2"),
+        build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm"),
+    ) {
+        (Ok(a), Ok(b)) => {
+            if a != b {
+                failures.push(format!(
+                    "@vesper-std/process (WASI probe): boot stage2 built {} bytes, stage2.wasm built {} different bytes",
+                    a.len(),
+                    b.len()
+                ));
+            }
+            match run(&b, &Ctx::default()) {
+                Ok(11) => {}
+                other => failures.push(format!(
+                    "@vesper-std/process (WASI probe): expected Unsupported (11), got {other:?}"
+                )),
+            }
+        }
+        (a, b) => failures.push(format!(
+            "@vesper-std/process (WASI probe): {:?} / {:?}",
+            a.err(),
+            b.err()
+        )),
     }
     remove_stage2_sidecars(&out_wasm);
     let _ = std::fs::remove_dir_all(&wrap_dir);
