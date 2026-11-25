@@ -440,6 +440,12 @@ impl B {
         self.type0();
     }
 
+    // `{m : Type → Type}`.
+    pub fn implicit_type_m(inout self) {
+        self.binder(B_IMPLICIT, in "m");
+        self.monad_ty();
+    }
+
     // `[Monad m]`.
     pub fn monad_instance(inout self) {
         self.instance_binder();

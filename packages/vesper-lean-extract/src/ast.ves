@@ -9,8 +9,13 @@ use @vesper/check-data::input::{
 };
 use @vesper/check-data::util::{
     add,
+    inc,
+    n32,
     u32_at,
     u64_at
+};
+use @vesper/check-data::world::{
+    set_by_symbol
 };
 
 pub const NONE: u64 = 18446744073709551615;
@@ -88,6 +93,43 @@ pub copy struct SrcFn {
     pn: u64,
     result: u32,
     polymorphic: bool,
+    // `() -> Unit / effects` holding the function's effects row
+    row: u32,
+    // the result type as `function_requirements` reads it
+    req_result: u32,
+}
+
+// An effect declaration (the effect section at the end of the AST input).
+pub copy struct EffDecl {
+    name: u32,
+    linear: bool,
+    // generic names: egens[ga..ga+gn]
+    ga: u64,
+    gn: u64,
+    // operations: eops[oa..oa+on]
+    oa: u64,
+    on: u64,
+}
+
+pub copy struct EffOp {
+    name: u32,
+    // parameters: eparams[pa..pa+pn]
+    pa: u64,
+    pn: u64,
+    result: u32,
+}
+
+pub copy struct EffParam {
+    pass: u64,
+    // projections: eprojs[qa..qa+qn], each a range of eproj_syms
+    qa: u64,
+    qn: u64,
+    ty: u32,
+}
+
+pub copy struct Range {
+    a: u64,
+    n: u64,
 }
 
 pub struct Ast {
@@ -103,6 +145,16 @@ pub struct Ast {
     expr_at: ChunkSeq[u64],
     nmap: ChunkSeq[u32],
     tmap: ChunkSeq[u32],
+    // symbol -> function index + 1
+    fn_by_name: ChunkSeq[u32],
+    effs: ChunkSeq[EffDecl],
+    egens: ChunkSeq[u32],
+    eops: ChunkSeq[EffOp],
+    eparams: ChunkSeq[EffParam],
+    eprojs: ChunkSeq[Range],
+    eproj_syms: ChunkSeq[u32],
+    // symbol -> effect index + 1
+    eff_by_name: ChunkSeq[u32],
 }
 
 fn copy_words(inout r: Reader, in b: Slice[u8], n: u64, inout out: ChunkSeq[u64]) {
@@ -181,7 +233,7 @@ fn expr_row(inout r: Reader, in b: Slice[u8], inout out: ChunkSeq[u64]) {
         copy_words(inout r, in b, 1, inout out);
         count_then(inout r, in b, 2, inout out);
         count_then(inout r, in b, 1, inout out);
-        copy_words(inout r, in b, 10, inout out);
+        copy_words(inout r, in b, 11, inout out);
     } else if kind == X_MATCH {
         copy_words(inout r, in b, 1, inout out);
         count_then(inout r, in b, 2, inout out);
@@ -190,6 +242,43 @@ fn expr_row(inout r: Reader, in b: Slice[u8], inout out: ChunkSeq[u64]) {
         count_then(inout r, in b, 1, inout out);
         copy_words(inout r, in b, 1, inout out);
         count_then(inout r, in b, 1, inout out);
+        copy_words(inout r, in b, 1, inout out);
+    } else if kind == X_HANDLE {
+        copy_words(inout r, in b, 2, inout out);
+        count_then(inout r, in b, 1, inout out);
+        copy_words(inout r, in b, 4, inout out);
+        clause_row(inout r, in b, false, inout out);
+        let n = r.word(in b);
+        out.push(n);
+        for i in 0..n {
+            clause_row(inout r, in b, true, inout out);
+        }
+        count_then(inout r, in b, 1, inout out);
+        copy_words(inout r, in b, 1, inout out);
+        let m = r.word(in b);
+        out.push(m);
+        for i in 0..m {
+            let k = r.word(in b);
+            out.push(k);
+            copy_words(inout r, in b, 1, inout out);
+            if k == 1 {
+                copy_words(inout r, in b, 1, inout out);
+            } else if k == 2 {
+                count_then(inout r, in b, 1, inout out);
+            }
+        }
+    }
+}
+
+// A handler clause: name, patterns, body, free names (then, for operation
+// clauses, the body's names with their spans).
+fn clause_row(inout r: Reader, in b: Slice[u8], names: bool, inout out: ChunkSeq[u64]) {
+    copy_words(inout r, in b, 1, inout out);
+    count_then(inout r, in b, 1, inout out);
+    copy_words(inout r, in b, 1, inout out);
+    count_then(inout r, in b, 1, inout out);
+    if names {
+        count_then(inout r, in b, 3, inout out);
     }
 }
 
@@ -207,6 +296,14 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
         expr_at: ChunkSeq::new[u64](),
         nmap: ChunkSeq::new[u32](),
         tmap: ChunkSeq::new[u32](),
+        fn_by_name: ChunkSeq::new[u32](),
+        effs: ChunkSeq::new[EffDecl](),
+        egens: ChunkSeq::new[u32](),
+        eops: ChunkSeq::new[EffOp](),
+        eparams: ChunkSeq::new[EffParam](),
+        eprojs: ChunkSeq::new[Range](),
+        eproj_syms: ChunkSeq::new[u32](),
+        eff_by_name: ChunkSeq::new[u32](),
     };
     for i in 0..nmap.len() {
         a.nmap.push(u32_at(in nmap, i));
@@ -230,6 +327,8 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
         }
         let result = u32_at(in a.tmap, r.word(in b));
         let polymorphic = r.word(in b) != 0;
+        let row = u32_at(in a.tmap, r.word(in b));
+        let req_result = u32_at(in a.tmap, r.word(in b));
         a
             .fns
             .push(
@@ -239,9 +338,12 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
                     pa: pa,
                     pn: pn,
                     result: result,
-                    polymorphic: polymorphic
+                    polymorphic: polymorphic,
+                    row: row,
+                    req_result: req_result
                 }
             );
+        set_by_symbol(inout a.fn_by_name, name, n32(inc(i)));
     }
     let np = r.word(in b);
     for i in 0..np {
@@ -252,6 +354,80 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
     for i in 0..ne {
         a.expr_at.push(a.ew.len());
         expr_row(inout r, in b, inout a.ew);
+    }
+    let neff = r.word(in b);
+    for i in 0..neff {
+        let name = u32_at(in a.nmap, r.word(in b));
+        let linear = r.word(in b) != 0;
+        let ga = a.egens.len();
+        let gn = r.word(in b);
+        for j in 0..gn {
+            let g = u32_at(in a.nmap, r.word(in b));
+            a.egens.push(g);
+        }
+        let oa = a.eops.len();
+        let on = r.word(in b);
+        for j in 0..on {
+            let op = u32_at(in a.nmap, r.word(in b));
+            let pa = a.eparams.len();
+            let pn = r.word(in b);
+            for k in 0..pn {
+                let pass = r.word(in b);
+                let qa = a.eprojs.len();
+                let qn = r.word(in b);
+                for q in 0..qn {
+                    let sa = a.eproj_syms.len();
+                    let sn = r.word(in b);
+                    for z in 0..sn {
+                        let s = u32_at(in a.nmap, r.word(in b));
+                        a.eproj_syms.push(s);
+                    }
+                    a
+                        .eprojs
+                        .push(
+                            Range {
+                                a: sa,
+                                n: sn
+                            }
+                        );
+                }
+                let ty = u32_at(in a.tmap, r.word(in b));
+                a
+                    .eparams
+                    .push(
+                        EffParam {
+                            pass: pass,
+                            qa: qa,
+                            qn: qn,
+                            ty: ty
+                        }
+                    );
+            }
+            let result = u32_at(in a.tmap, r.word(in b));
+            a
+                .eops
+                .push(
+                    EffOp {
+                        name: op,
+                        pa: pa,
+                        pn: pn,
+                        result: result
+                    }
+                );
+        }
+        a
+            .effs
+            .push(
+                EffDecl {
+                    name: name,
+                    linear: linear,
+                    ga: ga,
+                    gn: gn,
+                    oa: oa,
+                    on: on
+                }
+            );
+        set_by_symbol(inout a.eff_by_name, name, n32(inc(i)));
     }
     a
 }
@@ -266,9 +442,103 @@ impl Ast {
                 pa: 0,
                 pn: 0,
                 result: 0,
-                polymorphic: false
+                polymorphic: false,
+                row: 0,
+                req_result: 0
             },
         }
+    }
+
+    // The function named `n`, or NONE.
+    pub fn fn_index(in self, n: u32) -> u64 {
+        let k = u32_at(in self.fn_by_name, widen_u64(n));
+        if k == 0 {
+            NONE
+        } else {
+            wrapping_sub(widen_u64(k), 1)
+        }
+    }
+
+    // The effect declaration named `n`, or NONE.
+    pub fn eff_index(in self, n: u32) -> u64 {
+        let k = u32_at(in self.eff_by_name, widen_u64(n));
+        if k == 0 {
+            NONE
+        } else {
+            wrapping_sub(widen_u64(k), 1)
+        }
+    }
+
+    pub fn eff(in self, i: u64) -> EffDecl {
+        match self.effs.try_get(i) {
+            Option::Some(e) => e,
+            Option::None => EffDecl {
+                name: 0,
+                linear: false,
+                ga: 0,
+                gn: 0,
+                oa: 0,
+                on: 0
+            },
+        }
+    }
+
+    pub fn eff_generic(in self, e: EffDecl, i: u64) -> u32 {
+        u32_at(in self.egens, add(e.ga, i))
+    }
+
+    pub fn eff_op(in self, e: EffDecl, i: u64) -> EffOp {
+        match self.eops.try_get(add(e.oa, i)) {
+            Option::Some(o) => o,
+            Option::None => EffOp {
+                name: 0,
+                pa: 0,
+                pn: 0,
+                result: 0
+            },
+        }
+    }
+
+    // The operation of `e` named `op`, or an operation with name 0.
+    pub fn find_op(in self, e: EffDecl, op: u32) -> EffOp {
+        for i in 0..e.on {
+            let o = self.eff_op(e, i);
+            if o.name == op {
+                return o;
+            }
+        }
+        EffOp {
+            name: 0,
+            pa: 0,
+            pn: 0,
+            result: 0
+        }
+    }
+
+    pub fn op_param(in self, o: EffOp, i: u64) -> EffParam {
+        match self.eparams.try_get(add(o.pa, i)) {
+            Option::Some(p) => p,
+            Option::None => EffParam {
+                pass: 0,
+                qa: 0,
+                qn: 0,
+                ty: 0
+            },
+        }
+    }
+
+    pub fn proj(in self, p: EffParam, q: u64) -> Range {
+        match self.eprojs.try_get(add(p.qa, q)) {
+            Option::Some(x) => x,
+            Option::None => Range {
+                a: 0,
+                n: 0
+            },
+        }
+    }
+
+    pub fn proj_sym(in self, r: Range, j: u64) -> u32 {
+        u32_at(in self.eproj_syms, add(r.a, j))
     }
 
     pub fn param_name(in self, f: SrcFn, i: u64) -> u32 {

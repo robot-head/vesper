@@ -21,6 +21,7 @@ use self::build::{
     S_LET,
     T,
     T_APP,
+    T_ARROW,
     T_ASCRIBE,
     T_BINARY,
     T_DO,
@@ -573,4 +574,50 @@ pub fn extend(inout out: ChunkSeq[T], in more: ChunkSeq[T]) {
     for i in 0..more.len() {
         out.push(t_at(in more, i));
     }
+}
+
+// `DS::Match` with two arms.
+pub fn match_stmt2(inout b: B, scrutinee: T, p1: T, in s1: ChunkSeq[T], p2: T, in s2: ChunkSeq[T])
+    -> T {
+    let m = b.at();
+    b.w(7);
+    b.w(2);
+    b.put(scrutinee);
+    b.put(p1);
+    b.w(s1.len());
+    put_all(inout b, in s1);
+    b.put(p2);
+    b.w(s2.len());
+    put_all(inout b, in s2);
+    b.since(m)
+}
+
+// `DS::LetInstance { name: None, ty, value }`.
+pub fn let_instance(inout b: B, ty: T, value: T) -> T {
+    let m = b.at();
+    b.w(5);
+    b.w(0);
+    b.put(ty);
+    b.put(value);
+    b.since(m)
+}
+
+// `arrow(a, c)`.
+pub fn arrow(inout b: B, a: T, c: T) -> T {
+    let m = b.at();
+    b.w(T_ARROW);
+    b.put(a);
+    b.put(c);
+    b.since(m)
+}
+
+// `arrows(args, result)`.
+pub fn arrows(inout b: B, in args: ChunkSeq[T], result: T) -> T {
+    let m = b.at();
+    for i in 0..args.len() {
+        b.w(T_ARROW);
+        b.put(t_at(in args, i));
+    }
+    b.put(result);
+    b.since(m)
 }

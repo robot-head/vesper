@@ -46,8 +46,10 @@ that use no effects:
 | the term builders of `lean_nodes` | `src/tm.ves` |
 | `Generator` (scope, names, places, patterns, every expression form, sequence and tiled calls, closures) | `src/gen.ves` |
 
-Handlers, effect operations and effectful closures, calls and types come
-out as `skip`; the effects part ports them.
+Part 3b ports the effects part of `Generator`: functions polymorphic in
+their monad `m`, effect operations, handlers (`HandlerCPS` layers, lifts,
+evidence, resumptions), effectful closures and calls. Nothing comes out as
+`skip` any more.
 
 ## Input
 
@@ -67,9 +69,10 @@ needs no lowering of its own. It returns, per source function, `none`, the
 error, or the definitions as a module.
 
 The entry `extract_structured_functions` reads the same input followed by
-the AST section (`src/ast.ves`). It runs the CFG extractor as the gate and
-returns, per source function, `none` (CFG path or polymorphic), `skip`,
-the error, or the definition as a module.
+the AST section (`src/ast.ves`, with the handlers and the effect
+declarations). It runs the CFG extractor as the gate and returns, per
+source function, `none` (CFG path), the error, or the definition as a
+module.
 
 ## Test
 
@@ -90,5 +93,6 @@ functions to names Lean cannot spell.
 For part 3a, `structured_functions_match_rust_on_the_corpus` and
 `structured_functions_match_rust_on_test_sources` compare
 `extract_structured_functions` with `lean::structured_function_nodes`
-(a hidden hook over `Generator::function` with the `Id` monad). Skipped
-functions take Rust's text.
+(a hidden hook over `Generator::function` with `Id` or `m`). A function
+the port writes as `skip` would take Rust's text; since part 3b there are
+none.
