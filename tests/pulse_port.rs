@@ -1148,3 +1148,342 @@ pub fn scenario() -> u64 eff [Ffi[PulseSys]] {
         want
     );
 }
+
+/// `@vesper/pulse`'s io_uring driver against `vesper_pulse::uring::IoDriver`
+/// on one scenario: a pipe read before and after data, file write and read
+/// at offsets, zero length, a wrong-direction write (`EBADF` from the
+/// kernel), cancellation (twice), a stream write and read, the eventfd, and
+/// shutdown. Completions may split across polls differently run to run, so
+/// each completion's hash is summed (order-free); submits, cancels and
+/// pending counts are chained.
+#[cfg(target_os = "linux")]
+#[test]
+fn uring_completion_driver_matches_rust() {
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, OwnedFd};
+    use vesper_pulse::driver::{Completion, Operation, PollError, Request, RequestId};
+    use vesper_pulse::uring::IoDriver;
+
+    fn mix(h: u64, v: u64) -> u64 {
+        (h ^ v).wrapping_mul(1099511628211)
+    }
+    fn hash(s: &[u8]) -> u64 {
+        s.iter()
+            .fold(14695981039346656037, |h, &b| mix(h, u64::from(b)))
+    }
+    fn code(e: &std::io::Error) -> u64 {
+        match e.raw_os_error() {
+            Some(c) => c as u64,
+            None if e.kind() == std::io::ErrorKind::WouldBlock => 1000001,
+            None => 999,
+        }
+    }
+    type Driver = IoDriver<u32>;
+    struct State {
+        h: u64,
+        sum: u64,
+    }
+    fn submit(
+        s: &mut State,
+        d: &mut Driver,
+        file: &std::fs::File,
+        operation: Operation,
+        buffer: &[u8],
+        offset: u64,
+    ) -> Option<RequestId> {
+        let request = Request {
+            file: file.try_clone().unwrap(),
+            buffer: buffer.to_vec(),
+            continuation: 0,
+            operation,
+            offset,
+        };
+        match d.submit(request) {
+            Ok(id) => {
+                s.h = mix(mix(s.h, 1), id.get());
+                Some(id)
+            }
+            Err((e, _)) => {
+                s.h = mix(mix(s.h, 2), code(&e));
+                None
+            }
+        }
+    }
+    fn fold(s: &mut State, done: &[Completion<u32>], error: u64) {
+        s.h = mix(s.h, error);
+        for c in done {
+            let mut x = mix(14695981039346656037, c.id.get());
+            x = match &c.result {
+                Ok(n) => mix(mix(x, 1), *n as u64),
+                Err(e) => mix(mix(x, 0), code(e)),
+            };
+            x = mix(x, hash(&c.request.buffer));
+            s.sum = s.sum.wrapping_add(x);
+        }
+    }
+    fn poll(s: &mut State, d: &mut Driver, wait: bool) {
+        match d.poll(wait) {
+            Ok(done) => fold(s, &done, 0),
+            Err(PollError { error, completed }) => fold(s, &completed, code(&error)),
+        }
+    }
+    fn settle(s: &mut State, d: &mut Driver) {
+        while d.pending() > 0 {
+            poll(s, d, true);
+        }
+    }
+    fn pipe() -> (std::fs::File, std::fs::File) {
+        let (r, w) = std::io::pipe().unwrap();
+        (
+            std::fs::File::from(OwnedFd::from(r)),
+            std::fs::File::from(OwnedFd::from(w)),
+        )
+    }
+
+    let mut d = match Driver::new(8) {
+        Ok(d) => d,
+        Err(e) if matches!(e.raw_os_error(), Some(1 | 38 | 95)) => {
+            eprintln!("io_uring unavailable: {e}");
+            return;
+        }
+        Err(e) => panic!("io_uring setup failed: {e}"),
+    };
+    let dir = Temp::new("pulse-uring-driver");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .read(true)
+        .write(true)
+        .open(dir.path().join("data"))
+        .unwrap();
+
+    // The scenario, in Rust.
+    let mut s = State {
+        h: 14695981039346656037,
+        sum: 0,
+    };
+    let (r, mut w) = pipe();
+    s.h = mix(s.h, u64::from(d.eventfd().is_ok()));
+    submit(&mut s, &mut d, &r, Operation::Read, &[0; 8], 0);
+    poll(&mut s, &mut d, false);
+    s.h = mix(s.h, d.pending() as u64);
+    w.write_all(b"hi").unwrap();
+    settle(&mut s, &mut d);
+    submit(&mut s, &mut d, &file, Operation::Write, b"abc", 3);
+    settle(&mut s, &mut d);
+    submit(&mut s, &mut d, &file, Operation::Read, &[0; 6], 0);
+    settle(&mut s, &mut d);
+    submit(&mut s, &mut d, &file, Operation::Read, &[], 0);
+    submit(&mut s, &mut d, &r, Operation::Write, &[0], 0);
+    settle(&mut s, &mut d);
+    let id = submit(&mut s, &mut d, &r, Operation::Read, &[0; 4], 0).unwrap();
+    poll(&mut s, &mut d, false);
+    let first = d.cancel(id).map_err(|e| code(&e));
+    let again = d.cancel(id).map_err(|e| code(&e));
+    s.h = mix(
+        s.h,
+        u64::from(matches!((first, again), (Ok(true), Ok(false)))),
+    );
+    settle(&mut s, &mut d);
+    submit(&mut s, &mut d, &w, Operation::Write, b"xyz", 0);
+    settle(&mut s, &mut d);
+    submit(&mut s, &mut d, &r, Operation::Read, &[0; 8], 0);
+    settle(&mut s, &mut d);
+    submit(&mut s, &mut d, &r, Operation::Read, &[0; 8], 0);
+    submit(&mut s, &mut d, &r, Operation::Read, &[0; 2], 0);
+    poll(&mut s, &mut d, false);
+    s.h = mix(s.h, d.pending() as u64);
+    match d.shutdown() {
+        Ok(done) => fold(&mut s, &done, 0),
+        Err(e) => fold(&mut s, &e.completed, code(&e.error)),
+    }
+    let want = mix(s.h, s.sum);
+
+    let src = r#"
+use @vesper/pulse::{
+    UringPoll, Operation, RequestId, uring_driver_new, uring_driver_submit,
+    uring_driver_poll, uring_driver_cancel, uring_driver_shutdown,
+    uring_driver_close, uring_driver_pending, uring_driver_eventfd
+};
+
+fn mix(h: u64, v: u64) -> u64 {
+    wrapping_mul(h ^ v, 1099511628211)
+}
+
+fn hash(in s: Slice[u8]) -> u64 {
+    let mut h: u64 = 14695981039346656037;
+    for i in 0..s.len() {
+        let b = match s.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        h = mix(h, widen_u64(b));
+    }
+    h
+}
+
+fn zeros(n: u64) -> ChunkSeq[u8] {
+    let mut z: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    z.resize(n, 0);
+    z
+}
+
+copy struct State {
+    h: u64,
+    sum: u64,
+}
+
+fn submitted(s: State, r: Result[RequestId, u32]) -> State {
+    match r {
+        Result::Ok(id) => State {
+            h: mix(mix(s.h, 1), id.bits),
+            sum: s.sum,
+        },
+        Result::Err(e) => State {
+            h: mix(mix(s.h, 2), widen_u64(e)),
+            sum: s.sum,
+        },
+    }
+}
+
+fn folded(s: State, in p: UringPoll) -> State {
+    let h = mix(s.h, widen_u64(p.error));
+    let mut sum = s.sum;
+    for k in 0..p.completions.len() {
+        let c = match p.completions.try_get(k) {
+            Option::Some(c) => c,
+            Option::None => return s,
+        };
+        let mut x = mix(14695981039346656037, c.id.bits);
+        x = if c.ok {
+            mix(mix(x, 1), c.bytes)
+        } else {
+            mix(mix(x, 0), widen_u64(c.errno))
+        };
+        x = mix(x, hash(in p.data[c.start..wrapping_add(c.start, c.len)]));
+        sum = wrapping_add(sum, x);
+    }
+    State {
+        h: h,
+        sum: sum,
+    }
+}
+
+pub fn scenario() -> u64 eff [Ffi[PulseSys]] {
+    let file: i32 = @FD@;
+    let mut d = match uring_driver_new(8) {
+        Result::Ok(d) => d,
+        Result::Err(_) => return 1,
+    };
+    let mut fds = PipeFds {
+        read_fd: -1,
+        write_fd: -1,
+    };
+    let _ = PulseSys::pipe2(inout fds, 524288);
+    let r = fds.read_fd;
+    let w = fds.write_fd;
+    let z0 = zeros(0);
+    let z1 = zeros(1);
+    let z2 = zeros(2);
+    let z4 = zeros(4);
+    let z6 = zeros(6);
+    let z8 = zeros(8);
+    let mut s = State {
+        h: 14695981039346656037,
+        sum: 0,
+    };
+    let efd: u64 = match uring_driver_eventfd(inout d) {
+        Result::Ok(_) => 1,
+        Result::Err(_) => 0,
+    };
+    s.h = mix(s.h, efd);
+    s = submitted(s, uring_driver_submit(inout d, r, Operation::Read, in z8.as_slice(), 0, 1));
+    s = folded(s, in uring_driver_poll(inout d, false));
+    s.h = mix(s.h, uring_driver_pending(in d));
+    let _ = PulseSys::write(w, in "hi".as_bytes());
+    loop {
+        if uring_driver_pending(in d) == 0 {
+            break;
+        }
+        s = folded(s, in uring_driver_poll(inout d, true));
+    }
+    s = submitted(s, uring_driver_submit(inout d, file, Operation::Write, in "abc".as_bytes(), 3, 2));
+    loop {
+        if uring_driver_pending(in d) == 0 {
+            break;
+        }
+        s = folded(s, in uring_driver_poll(inout d, true));
+    }
+    s = submitted(s, uring_driver_submit(inout d, file, Operation::Read, in z6.as_slice(), 0, 3));
+    loop {
+        if uring_driver_pending(in d) == 0 {
+            break;
+        }
+        s = folded(s, in uring_driver_poll(inout d, true));
+    }
+    s = submitted(s, uring_driver_submit(inout d, file, Operation::Read, in z0.as_slice(), 0, 4));
+    s = submitted(s, uring_driver_submit(inout d, r, Operation::Write, in z1.as_slice(), 0, 5));
+    loop {
+        if uring_driver_pending(in d) == 0 {
+            break;
+        }
+        s = folded(s, in uring_driver_poll(inout d, true));
+    }
+    let (h7, id) = match uring_driver_submit(inout d, r, Operation::Read, in z4.as_slice(), 0, 6) {
+        Result::Ok(i) => (mix(mix(s.h, 1), i.bits), i.bits),
+        Result::Err(e) => (mix(mix(s.h, 2), widen_u64(e)), 0),
+    };
+    s.h = h7;
+    s = folded(s, in uring_driver_poll(inout d, false));
+    let rid = RequestId {
+        bits: id
+    };
+    let first = uring_driver_cancel(inout d, rid);
+    let again = uring_driver_cancel(inout d, rid);
+    let cancelled: u64 = match (first, again) {
+        (Result::Ok(true), Result::Ok(false)) => 1,
+        _ => 0,
+    };
+    s.h = mix(s.h, cancelled);
+    loop {
+        if uring_driver_pending(in d) == 0 {
+            break;
+        }
+        s = folded(s, in uring_driver_poll(inout d, true));
+    }
+    s = submitted(s, uring_driver_submit(inout d, w, Operation::Write, in "xyz".as_bytes(), 0, 7));
+    loop {
+        if uring_driver_pending(in d) == 0 {
+            break;
+        }
+        s = folded(s, in uring_driver_poll(inout d, true));
+    }
+    s = submitted(s, uring_driver_submit(inout d, r, Operation::Read, in z8.as_slice(), 0, 8));
+    loop {
+        if uring_driver_pending(in d) == 0 {
+            break;
+        }
+        s = folded(s, in uring_driver_poll(inout d, true));
+    }
+    s = submitted(s, uring_driver_submit(inout d, r, Operation::Read, in z8.as_slice(), 0, 9));
+    s = submitted(s, uring_driver_submit(inout d, r, Operation::Read, in z2.as_slice(), 0, 10));
+    s = folded(s, in uring_driver_poll(inout d, false));
+    s.h = mix(s.h, uring_driver_pending(in d));
+    s = folded(s, in uring_driver_shutdown(inout d));
+    let _ = uring_driver_close(inout d);
+    let _ = PulseSys::close(r);
+    let _ = PulseSys::close(w);
+    mix(s.h, s.sum)
+}
+"#
+    .replace("@FD@", &file.as_raw_fd().to_string());
+    let checked = check_pulse_driver(&src);
+    assert_eq!(
+        agree(
+            &checked,
+            "scenario",
+            &[std_io_support::Mode::Jit, std_io_support::Mode::JitNoOpt]
+        ),
+        want
+    );
+}
