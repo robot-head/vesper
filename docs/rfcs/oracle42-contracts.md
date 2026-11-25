@@ -482,9 +482,16 @@ lower bounds where interrupted_worker_cases is nonzero.
 
 Thin coordinator CLI:
 `arithmetic_oracle42 [--suite 128|100000] [--seed U64] [--jobs 1..4]`
-`[--lean PATH] [--artifacts DIR] [--shrink-attempts 0..64]`.
-Defaults: suite128, seed0, jobs1, lean=`lean`, no artifacts, no shrink.
+`[--lean PATH] [--vesper PATH] [--artifacts DIR] [--shrink-attempts 0..64]`.
+Defaults: suite128, seed0, jobs1, lean=`lean`, vesper=the `vesper` beside the
+oracle binary (else `vesper` on PATH), no artifacts, no shrink.
 CLI sets worker_exe=current_exe; tests set the genuine Cargo binary path.
+Since #1929 the worker links no compiler crate: it runs the `vesper` binary
+(`--worker <vesper>`) as a process per step: `emit --emit hir --no-opt
+--json` for diagnostics and the parsed module it binds to the case, then
+`run --fuel N` and `jit` with `--no-opt`, `--no-ast-opt`, `--no-ir-opt` or no
+flag for the four optimizer settings. A program the checker rejects has no
+printed module, so static negatives bind through their diagnostic codes.
 Cargo's CARGO_BIN_EXE value may be a bare executable name under Bazel, located
 on PATH rather than the working directory. Resolve a bare name by searching
 the inherited PATH in order, with Windows .exe handling when no extension is

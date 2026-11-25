@@ -70,4 +70,9 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // diff.rs: backward sweep skips nonzero adjoints.
     ("if a != 0.0 {", "if a == 0.0 {"),
+    // rigid.rs (solve): a joint motor drives the coordinate rate to zero.
+    (
+        "let target: f32 = if drive == 1 {",
+        "let target: f32 = if drive == 3 {",
+    ),
 ];

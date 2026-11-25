@@ -23,6 +23,11 @@ static WASM_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// Components `@vesper/wit-component` wrapped, and left to wit-component.
 static WRAP_CALLS: AtomicU64 = AtomicU64::new(0);
 static WRAP_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// `vesper build --target wasm32-wasip2` runs the Vesper driver encoded for
+/// building in Vesper (#1895), and how many of those fell back to the Rust
+/// pass.
+pub(crate) static DRIVER_WASM_INPUTS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static DRIVER_WASM_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 
 /// The `wasm` hook of `vesper::codegen_swap` from `modules/wasm_backend`:
 /// `@vesper/wasm-backend` writes the core module and the WIT, and
@@ -167,6 +172,27 @@ fn wrap_component(
 }
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
+/// The `wasm` swap's input for `vesper build --target wasm32-wasip2`, which
+/// the Vesper driver compiles and wraps itself (#1895): `None` when the
+/// swap is off or the world does not encode (the Rust step builds it).
+/// `VESPER_HYBRID_DRIVER_WASM=0` keeps the build on the Rust step (the
+/// differential's baseline).
+pub(crate) fn wasm_build_input(
+    w: &vesper::check::World,
+    entry: &str,
+    o: &vesper::wasm_backend::WasmOptions,
+) -> Option<Vec<u8>> {
+    vesper::codegen_swap::installed().wasm?;
+    if super::env_off("VESPER_HYBRID_DRIVER_WASM") {
+        return None;
+    }
+    if !w.functions.contains_key(entry) {
+        return None;
+    }
+    let program = wasm_words::backend_program(w, o)?;
+    wasm_words::wasm_input(w, &program, entry, o)
+}
+
 pub(super) const SWAPS: &[Swap] = &[
     open("wasm", "0 diffs; no flip-gate configuration"),
     pass("component", "wit-component", "#1334"),
@@ -186,6 +212,11 @@ pub(super) fn report() {
         "vesper-hybrid: wasm backend compiled {} programs from Vesper ({} declined)",
         WASM_CALLS.load(Relaxed),
         WASM_DECLINED.load(Relaxed),
+    );
+    eprintln!(
+        "vesper-hybrid: driver built {} wasm components in Vesper ({} fell back to Rust)",
+        DRIVER_WASM_INPUTS.load(Relaxed) - DRIVER_WASM_FALLBACKS.load(Relaxed),
+        DRIVER_WASM_FALLBACKS.load(Relaxed),
     );
     eprintln!(
         "vesper-hybrid: wit-component wrapped {} components from Vesper ({} declined)",

@@ -357,6 +357,31 @@ of a Warp session's time, since the evaluator dominates.
 - **Part 9 (`#1856` / `#1857`)**: ported `validate_log_bounds`, `validate_network_bounds`, and `validate_process_timeline` (insertion sort + alternating crash/restart check) into `port/src/process.ves`. Divergent edit `"validate"` caught by `model_scenarios_are_validated_at_load`.
 - **Part 10 (`#1862`)**: ported `validate_warp_bounds`, `validate_warp_link_params`, and `warp_admit_allows` from `src/model/warp.rs` into `port/src/process.ves`. Divergent edit `"warp_bounds"` caught by `bulk_ingress_under_burst_loss_and_rebinding_conserves_every_frame` in `tests/warp.rs`.
 
+## Part 11: the link, net-v1 and QUIC wire models flip to Vesper
+
+Taken over on 2026-11-25 from the paused agent. On that day's main, the
+three ported models that the session spends its time in are within the
+1.5x bar, so they are Vesper-only in every build and their Rust is gone
+(`src/model/link.rs`, `src/model/net.rs`, the QUIC wire functions of
+`src/model/umem.rs` and `record_pn`/`ack_datagram_len` of
+`src/model/warp.rs`; about 500 lines). build.rs links the port in every
+build, and Bazel builds it (`:sim_vesper`, from the Loom package in
+`port/`). The WAL, SHA-256, process epochs, failure injection and the
+model validators stay behind `vesper-port`.
+
+Gate (`scripts/ci/flip_gate.py` with the two release test binaries of
+`tests/self_host_sim_session.rs`, Rust build against `vesper-port` build,
+30 ABBA epochs of the ignored throughput tests, `-C target-cpu=native`):
+
+```text
+differential 0 differences | ABBA vesper/rust link 0.98x [0.93x, 1.00x] n=30; net 1.12x [1.09x, 1.14x] n=30; quic 1.36x [1.22x, 1.44x] n=30
+```
+
+The transcript differential (12 fixtures blessed from Rust) still finds
+0 differences, now in the default build too. `wal_ops_throughput` is
+3.7x (2,656 vs 709 ns/op): the Rust build hashes with SHA-NI, so the WAL
+stays Rust by default.
+
 ## What is left (later parts of #1342)
 
 - Hardware SHA-256 (gap 8), and building WAL frames at flush rather than
@@ -373,5 +398,6 @@ of a Warp session's time, since the evaluator dominates.
 - The session driver itself, which steps the compiler's reference evaluator,
   waits until the evaluator is reachable from Vesper (after the SH4 swap
   points).
-- A Bazel target for the port build. Linux Bazel builds and tests the Rust
-  build. The port runs under Cargo in port-harness shard 7.
+- The `vesper-port` modules under Bazel: Bazel builds the port object
+  (part 11) but runs only the default build; the WAL, SHA-256, process and
+  failure ports run under Cargo in the port harness.

@@ -241,6 +241,7 @@ pub struct SeccompData {
     pub args: [u64; 6],
 }
 impl SeccompData {
+    #[cfg(test)]
     fn word(&self, offset: u32) -> Option<u32> {
         if !offset.is_multiple_of(4) || offset >= SECCOMP_DATA_BYTES {
             return None;
@@ -354,7 +355,10 @@ impl SeccompProfile {
             let ioctl_nr = Syscall::Ioctl
                 .number(self.arch)
                 .ok_or(SeccompError::UnknownSyscall(Syscall::Ioctl))?;
-            let mut out = vec![0u64; BPF_MAXINSNS];
+            // The layout needs at most `n + m + 9` instructions (see
+            // `compile_reference`); longer profiles fail with `TooLong`.
+            let bound = (nrs.len() + self.ioctl_requests.len() + 9).min(BPF_MAXINSNS);
+            let mut out = vec![0u64; bound];
             let count = crate::binding::seccomp_compile(
                 self.arch.audit(),
                 ioctl_nr,
@@ -524,22 +528,23 @@ pub fn validate_reference(program: &[SockFilter]) -> Result<(), SeccompError> {
 }
 
 /// Runs a validated program on `data` and returns the seccomp action.
+///
+/// The evaluator is the Vesper port's (`vesper/src/seccomp.ves`, SH6 lane 14,
+/// #1409); the Rust one is kept only as the tests' reference.
 pub fn evaluate(program: &[SockFilter], data: &SeccompData) -> Result<u32, SeccompError> {
-    #[cfg(feature = "vesper-port")]
-    {
-        let words: Vec<u64> = program.iter().copied().map(pack_filter).collect();
-        let ip_lo = data.instruction_pointer as u32;
-        let ip_hi = (data.instruction_pointer >> 32) as u32;
-        crate::binding::seccomp_evaluate(&words, data.nr, data.arch, ip_lo, ip_hi, &data.args)
-            .map_err(SeccompError::from)
-    }
-    #[cfg(not(feature = "vesper-port"))]
-    evaluate_reference(program, data)
+    let words: Vec<u64> = program.iter().copied().map(pack_filter).collect();
+    let ip_lo = data.instruction_pointer as u32;
+    let ip_hi = (data.instruction_pointer >> 32) as u32;
+    crate::binding::seccomp_evaluate(&words, data.nr, data.arch, ip_lo, ip_hi, &data.args)
+        .map_err(SeccompError::from)
 }
 
 /// The Rust implementation of [`evaluate`], kept for differential tests.
-#[doc(hidden)]
-pub fn evaluate_reference(program: &[SockFilter], data: &SeccompData) -> Result<u32, SeccompError> {
+#[cfg(test)]
+pub(crate) fn evaluate_reference(
+    program: &[SockFilter],
+    data: &SeccompData,
+) -> Result<u32, SeccompError> {
     validate_reference(program)?;
     let mut acc = 0u32;
     let mut pc = 0usize;
@@ -560,7 +565,6 @@ pub fn evaluate_reference(program: &[SockFilter], data: &SeccompData) -> Result<
     }
 }
 
-#[cfg(feature = "vesper-port")]
 fn pack_filter(f: SockFilter) -> u64 {
     u64::from(f.code) | (u64::from(f.jt) << 16) | (u64::from(f.jf) << 24) | (u64::from(f.k) << 32)
 }

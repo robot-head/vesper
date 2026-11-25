@@ -117,6 +117,15 @@ fn divergent_store_log_fails_store_reopen_test() {
 }
 
 #[test]
+fn divergent_leaf_check_fails_store_ssi_test() {
+    run(
+        "VESPER_QUARRY_DIVERGENT_LEAF",
+        &["write_skew_on_call_doctors_is_rejected"],
+        "phantom_write_skew_through_an_index_range_is_rejected",
+    );
+}
+
+#[test]
 fn committed_binding_is_current() {
     let Some(generated) = std::env::var_os("VESPER_QUARRY_BINDING") else {
         return;

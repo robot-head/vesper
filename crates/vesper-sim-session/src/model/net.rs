@@ -17,8 +17,6 @@
 //!   anything is retained, never a silent drop.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-#[cfg(not(feature = "vesper-port"))]
-use std::collections::{BTreeSet, VecDeque};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,16 +50,6 @@ pub struct NetLimits {
     pub max_message_bytes: u64,
 }
 
-#[cfg(not(feature = "vesper-port"))]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Endpoint {
-    inbox: VecDeque<Message>,
-    /// Waiting receive requests, oldest first.
-    waiters: VecDeque<u64>,
-    /// Messages in flight to this endpoint.
-    reserved: u64,
-}
-
 /// What a send did, before the caller schedules any arrival.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sent {
@@ -78,213 +66,19 @@ pub enum Arrival {
     Dropped(Message, DropReason),
 }
 
-#[cfg(not(feature = "vesper-port"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Network {
-    limits: NetLimits,
-    default_delay_ns: u64,
-    delays: BTreeMap<(u64, u64), u64>,
-    endpoints: BTreeMap<u64, Endpoint>,
-    partitions: BTreeSet<(u64, u64)>,
-    in_flight: BTreeMap<u64, Message>,
-    next_message: u64,
-}
-
-#[cfg(not(feature = "vesper-port"))]
-fn link(a: u64, b: u64) -> (u64, u64) {
-    (a.min(b), a.max(b))
-}
-
-#[cfg(not(feature = "vesper-port"))]
-impl Network {
-    pub fn new(
-        limits: NetLimits,
-        default_delay_ns: u64,
-        delays: BTreeMap<(u64, u64), u64>,
-        endpoints: impl IntoIterator<Item = u64>,
-    ) -> Self {
-        Self {
-            limits,
-            default_delay_ns,
-            delays,
-            endpoints: endpoints
-                .into_iter()
-                .map(|e| (e, Endpoint::default()))
-                .collect(),
-            partitions: BTreeSet::new(),
-            in_flight: BTreeMap::new(),
-            next_message: 1,
-        }
-    }
-    pub fn has_endpoint(&self, endpoint: u64) -> bool {
-        self.endpoints.contains_key(&endpoint)
-    }
-    /// In-flight messages, by ascending id.
-    pub fn in_flight(&self) -> Vec<Message> {
-        self.in_flight.values().cloned().collect()
-    }
-    /// The destination of an in-flight message.
-    pub fn in_flight_to(&self, id: u64) -> Option<u64> {
-        self.in_flight.get(&id).map(|m| m.to)
-    }
-    /// Each endpoint's queued messages, oldest first.
-    pub fn inboxes(&self) -> BTreeMap<u64, Vec<Message>> {
-        self.endpoints
-            .iter()
-            .map(|(e, s)| (*e, s.inbox.iter().cloned().collect()))
-            .collect()
-    }
-    /// Each endpoint's waiting receive requests, oldest first.
-    pub fn waiting(&self) -> BTreeMap<u64, Vec<u64>> {
-        self.endpoints
-            .iter()
-            .map(|(e, s)| (*e, s.waiters.iter().copied().collect()))
-            .collect()
-    }
-    /// Partitioned links as (min, max) pairs, ascending.
-    pub fn partitions(&self) -> Vec<(u64, u64)> {
-        self.partitions.iter().copied().collect()
-    }
-    pub fn is_partitioned(&self, a: u64, b: u64) -> bool {
-        self.partitions.contains(&link(a, b))
-    }
-    pub fn delay(&self, from: u64, to: u64) -> u64 {
-        self.delays
-            .get(&(from, to))
-            .copied()
-            .unwrap_or(self.default_delay_ns)
-    }
-    /// Returns whether the partition is new.
-    pub fn partition(&mut self, a: u64, b: u64) -> bool {
-        self.partitions.insert(link(a, b))
-    }
-    /// Returns whether a partition was removed.
-    pub fn heal(&mut self, a: u64, b: u64) -> bool {
-        self.partitions.remove(&link(a, b))
-    }
-
-    /// Validate bounds and either put the message in flight or drop it.
-    /// `to` must be a known endpoint; `destination_up` is its process state.
-    pub fn send(
-        &mut self,
-        from: u64,
-        to: u64,
-        payload: String,
-        now_ns: u64,
-        destination_up: bool,
-    ) -> Result<Sent, NetError> {
-        let bytes = payload.len() as u64;
-        if bytes > self.limits.max_message_bytes {
-            return Err(NetError::MessageTooLarge {
-                bytes,
-                limit: self.limits.max_message_bytes,
-            });
-        }
-        let id = self.next_message;
-        let deliver_at_ns = now_ns.saturating_add(self.delay(from, to));
-        let message = Message {
-            id,
-            from,
-            to,
-            payload,
-            deliver_at_ns,
-        };
-        let drop = if self.is_partitioned(from, to) {
-            Some(DropReason::Partitioned)
-        } else if !destination_up {
-            Some(DropReason::DestinationDown)
-        } else {
-            None
-        };
-        if let Some(reason) = drop {
-            self.next_message += 1;
-            return Ok(Sent::Dropped(message, reason));
-        }
-        if self.in_flight.len() as u64 >= self.limits.max_in_flight {
-            return Err(NetError::InFlightFull {
-                limit: self.limits.max_in_flight,
-            });
-        }
-        let endpoint = &self.endpoints[&to];
-        if endpoint.reserved + endpoint.inbox.len() as u64 >= self.limits.max_inbox {
-            return Err(NetError::InboxFull {
-                endpoint: to,
-                limit: self.limits.max_inbox,
-            });
-        }
-        self.next_message += 1;
-        self.endpoints.get_mut(&to).unwrap().reserved += 1;
-        self.in_flight.insert(id, message.clone());
-        Ok(Sent::InFlight(message))
-    }
-
-    /// The message's link delay elapsed. Returns `None` for an unknown id.
-    pub fn arrive(&mut self, id: u64, destination_up: bool) -> Option<Arrival> {
-        let message = self.in_flight.remove(&id)?;
-        let partitioned = self.is_partitioned(message.from, message.to);
-        let endpoint = self.endpoints.get_mut(&message.to).unwrap();
-        endpoint.reserved -= 1;
-        Some(if partitioned {
-            Arrival::Dropped(message, DropReason::Partitioned)
-        } else if !destination_up {
-            Arrival::Dropped(message, DropReason::DestinationDown)
-        } else if let Some(request) = endpoint.waiters.pop_front() {
-            Arrival::Delivered(message, request)
-        } else {
-            endpoint.inbox.push_back(message.clone());
-            Arrival::Queued(message)
-        })
-    }
-
-    /// Take the oldest queued message for an immediate receive.
-    pub fn take_queued(&mut self, endpoint: u64) -> Option<Message> {
-        self.endpoints.get_mut(&endpoint)?.inbox.pop_front()
-    }
-    pub fn wait(&mut self, endpoint: u64, request: u64) {
-        self.endpoints
-            .get_mut(&endpoint)
-            .unwrap()
-            .waiters
-            .push_back(request);
-    }
-    /// Remove a waiting request (for a timeout). Returns whether it waited.
-    pub fn cancel_wait(&mut self, endpoint: u64, request: u64) -> bool {
-        let waiters = &mut self.endpoints.get_mut(&endpoint).unwrap().waiters;
-        match waiters.iter().position(|r| *r == request) {
-            Some(i) => {
-                waiters.remove(i);
-                true
-            }
-            None => false,
-        }
-    }
-    /// Crash: drop the endpoint's inbox and waiters; returns both.
-    pub fn crash(&mut self, endpoint: u64) -> (Vec<Message>, Vec<u64>) {
-        let e = self.endpoints.get_mut(&endpoint).unwrap();
-        (
-            std::mem::take(&mut e.inbox).into(),
-            std::mem::take(&mut e.waiters).into(),
-        )
-    }
-}
-
-/// Under `vesper-port` the Vesper state (port/src/lib.ves) makes every
+/// The Vesper state (port/src/lib.ves) makes every
 /// decision; this wrapper keeps the payloads of in-flight and queued
 /// messages, keyed by id.
-#[cfg(feature = "vesper-port")]
 pub struct Network {
     limits: NetLimits,
     state: port::NetState,
     messages: BTreeMap<u64, Message>,
 }
 
-#[cfg(feature = "vesper-port")]
 use crate::port;
 
-#[cfg(feature = "vesper-port")]
 const DROP_REASONS: [DropReason; 2] = [DropReason::Partitioned, DropReason::DestinationDown];
 
-#[cfg(feature = "vesper-port")]
 impl Clone for Network {
     fn clone(&self) -> Self {
         Self {
@@ -295,7 +89,6 @@ impl Clone for Network {
     }
 }
 
-#[cfg(feature = "vesper-port")]
 impl PartialEq for Network {
     fn eq(&self, other: &Self) -> bool {
         self.limits == other.limits
@@ -304,10 +97,8 @@ impl PartialEq for Network {
     }
 }
 
-#[cfg(feature = "vesper-port")]
 impl Eq for Network {}
 
-#[cfg(feature = "vesper-port")]
 impl std::fmt::Debug for Network {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Network")
@@ -320,7 +111,6 @@ impl std::fmt::Debug for Network {
     }
 }
 
-#[cfg(feature = "vesper-port")]
 impl Network {
     pub fn new(
         limits: NetLimits,
@@ -379,7 +169,9 @@ impl Network {
     /// Partitioned links as (min, max) pairs, ascending.
     pub fn partitions(&self) -> Vec<(u64, u64)> {
         port::net_state_partitions(&self.state)
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|p| (p[0], p[1]))
             .collect()
     }

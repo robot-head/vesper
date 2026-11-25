@@ -23,6 +23,7 @@
 // sorted inputs or sort once, and find the first failing entry only when
 // a limit is known to fail.
 use self::kafka_wire::decode_records as kw_dec_records;
+use self::kafka_wire::encode_records as kw_enc_records;
 use self::util::{
     affordable,
     cell,
@@ -1116,4 +1117,17 @@ pub fn kw_decode_records(
         inout out_hdr,
         inout out_ctrl
     )
+}
+
+// Kafka v2 record encoding (`encode_batch` in src/kafka_wire.rs): the
+// records of one batch, packed by the Rust wrapper.
+pub fn kw_encode_records(
+    in data: Slice[u8],
+    in meta: Slice[i64],
+    in hdr: Slice[i64],
+    count: u64,
+    base_ts: i64,
+    inout out: Slice[u8]
+) -> u64 {
+    kw_enc_records(in data, in meta, in hdr, count, base_ts, inout out)
 }

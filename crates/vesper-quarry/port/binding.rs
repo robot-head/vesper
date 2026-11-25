@@ -763,6 +763,7 @@ unsafe extern "C" {
     fn vesper_quarry_execute(result: *mut u64, prog: *mut u64, text: *mut u64) -> i64;
     fn vesper_quarry_internal_check(b: *mut u64) -> i64;
     fn vesper_quarry_internal_route(b: *mut u64, rowid: i64, inv_ts: i64) -> i64;
+    fn vesper_quarry_leaf_check(b: *mut u64, seen: *mut u64, mask: *mut u64, cols: *mut u64) -> i64;
     fn vesper_quarry_optimize(result: *mut u64, plan: *mut u64) -> i64;
     fn vesper_quarry_page_insert(b: *mut u64, record: *mut u64) -> i64;
     fn vesper_quarry_page_update(b: *mut u64, slot: i64, record: *mut u64, scratch: *mut u64) -> i64;
@@ -833,6 +834,15 @@ pub fn internal_route(b: &[u8], rowid: u64, inv_ts: u64) -> u64 {
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_quarry_internal_route(view_b, rowid as i64, inv_ts as i64) });
+    raw as u64
+}
+
+/// Calls `leaf_check` of the Vesper library `quarry` (`vesper_quarry_leaf_check`).
+pub fn leaf_check(b: &[u8], seen: &mut [u8], mask: &mut [u64], cols: &mut [u64]) -> u64 {
+    // SAFETY: `vesper_quarry_leaf_check` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(seen, |view_seen| vesper_port_abi::with_slice_mut(mask, |view_mask| vesper_port_abi::with_slice_mut(cols, |view_cols| unsafe { vesper_quarry_leaf_check(view_b, view_seen, view_mask, view_cols) }))));
     raw as u64
 }
 
