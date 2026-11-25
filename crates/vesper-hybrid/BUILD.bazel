@@ -357,12 +357,16 @@ vesper_hybrid(
         # The gated differential (#1397) runs every 4th corpus file here;
         # Cargo runs them all.
         "VESPER_GATED_STRIDE": "4",
+        # The interface export differential (#1893) runs every 8th source
+        # and package here; Cargo runs them all.
+        "VESPER_DRIVER_INTERFACE_STRIDE": "8",
     },
     # 51 libraries, each built by both compilers.
     # The differential runs the corpus twice since the gated set (#1397).
     test_timeouts = {
         "test/codegen_export": "long",
         "test/differential": "long",
+        "test/driver_front": "long",
     },
     test_path_binaries = {
         "test/codegen_export": [

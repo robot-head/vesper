@@ -7,7 +7,9 @@
 //! plus a few sources written for the dump's edge cases, and must agree
 //! on exit status, stdout, stderr and the file written.
 //!
-//! `VESPER_DRIVER_FRONT_STRIDE=<n>` runs every n-th file (default 1).
+//! `VESPER_DRIVER_FRONT_STRIDE=<n>` runs every n-th file (default 1), and
+//! `VESPER_DRIVER_INTERFACE_STRIDE=<n>` every n-th source and package of the
+//! interface export (default 1).
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -354,7 +356,7 @@ fn interface_export_matches_the_default_compiler() {
         std::env::temp_dir().join(format!("vesper-driver-interface-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch).unwrap();
-    let stride: usize = std::env::var("VESPER_DRIVER_FRONT_STRIDE")
+    let stride: usize = std::env::var("VESPER_DRIVER_INTERFACE_STRIDE")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1)
