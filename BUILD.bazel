@@ -94,6 +94,7 @@ vesper_crate(
     binary_data = {"vesper": _TOOLS},
     remote_tests = ["test/self_host_front_end"],
     test_data_by_target = {
+        "test/verified_codegen_rv64_sem": ["scripts/lean-model-plan.json"],
         "test/lean4lean_foundations42": [":proof_packet_data"],
         "test/lean4lean_construction42": [":proof_packet_data"],
         "test/lean4lean_order42": [":proof_packet_data"],

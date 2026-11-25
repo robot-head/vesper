@@ -93,8 +93,9 @@ print("child stderr", file=sys.stderr)
             )
         env = {"PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]])}
         for task, path, shell in (
-            (("crate", "warp-tls", "gen"), "crates/vesper-warp-tls/tests/fixtures/gen.sh", "sh"),
-            (("ci", "check-lean-models"), "scripts/ci/check-lean-models.sh", "bash"),
+            (("fixture", "resource-oracle42", "bye-eof-stall"),
+             "crates/vesper-oracles/tests/fixtures/resource_oracle42/bye_eof_stall.sh", "sh"),
+            (("ci", "reclaim-disk"), "scripts/ci/reclaim-disk.sh", "bash"),
         ):
             with self.subTest(task=task):
                 self.write(path, 'printf "%s|%s\\n" "$VESPER_TASK_TEST_SHELL" "$1"\n')
@@ -412,6 +413,62 @@ sys.exit(9)
         self.assertEqual(no_report.stdout, "")
         missing = self.aspect("ci", "logos-sweep", "--", "only one arg", status=2, env=env)
         self.assertIn("SEALED_ROOT REPORT", missing.stderr)
+
+    def test_logos_workflow_replays_with_the_pinned_tools_and_retains_the_report(self):
+        self.write(".ci-lean-path", "/installed lean/bin/lean\r\n")
+        self.write(".ci-logos-cargo-path", "/pinned cargo/bin/cargo\n")
+        self.write("tools/logos42/setup.py", """\
+import json
+import os
+from pathlib import Path
+import sys
+
+args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
+Path("setup.json").write_text(json.dumps(args))
+if os.environ.get("SETUP_FAILURE"):
+    sys.exit(17)
+Path(args["--directory"]).mkdir()
+""")
+        self.write("tools/logos-sweep/sweep.py", """\
+import json
+from pathlib import Path
+import sys
+
+args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
+assert Path(args["--root"]).is_dir()
+Path("sweep.json").write_text(json.dumps(args))
+Path(args["--report"]).write_text(json.dumps({
+    "status": "failed", "modules": 3, "batches": [], "total_seconds": 1,
+    "declined": [], "problems": ["fixture problem"],
+}))
+sys.exit(9)
+""")
+        command = ("ci", "replay-logos-models")
+        no_temp = self.aspect(*command, env={"RUNNER_TEMP": ""}, status=2)
+        self.assertIn("RUNNER_TEMP is required", no_temp.stderr)
+        env = {"RUNNER_TEMP": "runner scratch", "LOGOS_SWEEP_BATCH_JOBS": "99"}
+        self.aspect(*command, env={**env, "SETUP_FAILURE": "1"}, status=17)
+        self.assertFalse((self.root / "sweep.json").exists())
+        result = self.aspect(*command, env=env, status=9)
+        temp = self.root / "runner scratch"
+        checker = temp / "logos42/checker"
+        driver = self.root / "target/debug/logos42"
+        report = temp / "logos-sweep-report.json"
+        self.assertEqual(json.loads((self.root / "setup.json").read_text()), {
+            "--directory": str(checker), "--driver": str(driver),
+            "--lean": "/installed lean/bin/lean", "--lake": "/installed lean/bin/lake",
+            "--cargo": "/pinned cargo/bin/cargo", "--git": shutil.which("git"),
+        })
+        self.assertEqual(json.loads((self.root / "sweep.json").read_text()), {
+            "--root": str(checker), "--driver": str(driver),
+            "--vesper": str(self.root / "target/debug/vesper"), "--lean": "/installed lean/bin/lean",
+            "--batch-jobs": "2", "--report": str(report),
+        })
+        self.assertIn("PROBLEM: fixture problem", result.stdout)
+        self.assertTrue(report.is_file())
+        self.write(".ci-logos-cargo-path", "\n")
+        missing_cargo = self.aspect(*command, env=env, status=1)
+        self.assertIn("The CI Lean and Cargo executable paths are required", missing_cargo.stderr)
 
     def test_native_port_check_requires_expected_failure_and_passing_control(self):
         self.write("bin/cargo", """\
@@ -806,6 +863,7 @@ else:
 
     def test_native_lean_replay_preserves_scope_and_cleans_up_on_failure(self):
         (self.root / ".aspect/ci.axl").unlink()
+        (self.root / ".aspect/lean-ci.axl").unlink()
         self.write(".aspect/replay-fixture.axl", """
 def _scope(ctx):
     if ctx.std.env.var("VESPER_TEST_REPLAY_MODE") == "skip":
@@ -893,6 +951,285 @@ sys.exit(23 if mode == "test-fail" else 0)
                     if scratch.parent == Path("/tmp") and scratch.name.startswith("vesper-logos42-ci-"):
                         self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
                     self.assertEqual((self.root / "report-clean").read_text(), "True")
+
+    def test_lean_model_plan_checks_order_version_and_private_imports(self):
+        self.copy_fixture("lean-toolchain")
+        self.copy_fixture("scripts/lean-model-plan.json")
+        elan_home = self.root / "elan home"
+        self.write("elan home/bin/lean", """\
+#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+with open("lean.log", "a") as out:
+    print(json.dumps([args, os.environ.get("LEAN_PATH")]), file=out)
+if args == ["--version"]:
+    print("Lean (version " + os.environ["VESPER_TEST_LEAN_VERSION"] + ", fixture)")
+    sys.exit(0)
+if args[0] == "-o":
+    output = Path(args[1])
+    assert output.parent.is_dir()
+    output.touch()
+if args[-1] == os.environ.get("VESPER_TEST_LEAN_FAIL"):
+    sys.exit(23)
+""", executable=True)
+        env = {
+            "ELAN_HOME": str(elan_home), "LEAN_PATH": "/inherited/path",
+            "VESPER_TEST_LEAN_VERSION": "4.35.0",
+        }
+        command = ("ci", "check-lean-models")
+        self.aspect(*command, env={**env, "VESPER_TEST_LEAN_VERSION": "4.35.01"}, status=1)
+        log = self.root / "lean.log"
+        self.assertEqual(len(log.read_text().splitlines()), 1)
+        log.unlink()
+        self.aspect(*command, env=env)
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        plan = json.loads((self.root / "scripts/lean-model-plan.json").read_text())
+        models = ["lean/" + model + ".lean" for model in plan["standalone"]]
+        self.assertEqual(calls[:1 + len(models)],
+                         [[["--version"], "/inherited/path"], *[[[path], "/inherited/path"] for path in models]])
+        dependencies = calls[1 + len(models):]
+        self.assertEqual(len(dependencies), len(plan["dependencies"]))
+        self.assertEqual(dependencies[0][0][0], "-o")
+        scratch = Path(dependencies[0][0][1]).parent
+        self.assertFalse(scratch.exists())
+        for (argv, imports), row in zip(dependencies, plan["dependencies"], strict=True):
+            model = row["model"]
+            expected = ["-o", str(scratch / (model + ".olean"))] if row.get("compile") else []
+            self.assertEqual(argv, expected + ["lean/" + model + ".lean"])
+            self.assertEqual(imports, str(scratch) if row.get("imports") else "/inherited/path")
+        encoding = next(i for i, (args, _) in enumerate(dependencies) if args[-1] == "lean/CodegenRv64Encoding.lean")
+        semantics = next(i for i, (args, _) in enumerate(dependencies) if args[-1] == "lean/CodegenRv64Semantics.lean")
+        self.assertLess(encoding, semantics)
+        log.unlink()
+        self.aspect(*command, env={**env, "VESPER_TEST_LEAN_FAIL": "lean/ArithmeticOracle.lean"}, status=23)
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(calls[-1][0][-1], "lean/ArithmeticOracle.lean")
+        self.assertFalse(Path(calls[-1][1]).exists())
+
+    def test_ci_toolchain_installers_publish_paths_only_after_success(self):
+        tools = self.write("fixtures/tool", """\
+#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+name = Path(sys.argv[0]).name
+args = sys.argv[1:]
+config = os.environ["ELAN_HOME"] if name in ("elan", "lean") else os.environ["CARGO_HOME"]
+assert os.environ["PATH"].split(os.pathsep)[0] == str(Path(config) / "bin")
+with open("toolchain.log", "a") as out:
+    print(json.dumps([name, args]), file=out)
+if name == "elan":
+    assert args == ["which", "lean"]
+    if os.environ.get("VESPER_TEST_EMPTY_LEAN") != "1":
+        print("/fixture/lean binary")
+elif name == "rustup":
+    assert args in (["toolchain", "install", "1.99.0", "--profile", "minimal"],
+                    ["which", "--toolchain", "1.99.0", "cargo"])
+    if args[0] == "which" and os.environ.get("VESPER_TEST_EMPTY_CARGO") != "1":
+        print(Path(config) / "bin" / "cargo")
+else:
+    assert args == ["--version"]
+    if os.environ.get("VESPER_TEST_FAIL_VERSION") == name:
+        sys.exit(17)
+    print(name + " fixture version")
+""", executable=True)
+        for directory, commands in (("elan home", ("lean", "elan")), ("cargo home", ("rustup", "cargo"))):
+            (self.root / directory / "bin").mkdir(parents=True)
+            for name in commands:
+                (self.root / directory / "bin" / name).symlink_to(tools)
+        env = {
+            "ELAN_HOME": str(self.root / "elan home"),
+            "CARGO_HOME": str(self.root / "cargo home"),
+        }
+        self.aspect("ci", "install-lean", env=env)
+        self.aspect("ci", "install-logos-rust", env=env)
+        self.assertEqual((self.root / ".ci-lean-path").read_text(), "/fixture/lean binary\n")
+        cargo = self.root / "cargo home/bin/cargo"
+        self.assertEqual((self.root / ".ci-logos-cargo-path").read_text(), str(cargo) + "\n")
+        log = [json.loads(line) for line in (self.root / "toolchain.log").read_text().splitlines()]
+        self.assertEqual(log, [
+            ["lean", ["--version"]],
+            ["elan", ["which", "lean"]],
+            ["rustup", ["toolchain", "install", "1.99.0", "--profile", "minimal"]],
+            ["rustup", ["which", "--toolchain", "1.99.0", "cargo"]],
+            ["cargo", ["--version"]],
+        ])
+        for task, path, expected_error, override in (
+            ("install-lean", ".ci-lean-path", 17, {"VESPER_TEST_FAIL_VERSION": "lean"}),
+            ("install-lean", ".ci-lean-path", 1, {"VESPER_TEST_EMPTY_LEAN": "1"}),
+            ("install-logos-rust", ".ci-logos-cargo-path", 17, {"VESPER_TEST_FAIL_VERSION": "cargo"}),
+            ("install-logos-rust", ".ci-logos-cargo-path", 1, {"VESPER_TEST_EMPTY_CARGO": "1"}),
+        ):
+            with self.subTest(task=task, override=override):
+                published_path = self.root / path
+                published_path.write_text("previous good path\n")
+                self.aspect("ci", task, status=expected_error, env={**env, **override})
+                self.assertEqual(published_path.read_text(), "previous good path\n")
+
+    def test_missing_toolchains_use_native_release_installers(self):
+        import platform
+        import sys
+
+        installer = self.write("fixtures/installer", """\
+#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import shutil
+import sys
+
+name = Path(sys.argv[0]).name
+args = sys.argv[1:]
+if name == "elan-init":
+    assert args == ["-y", "--default-toolchain", "none"]
+    destination = Path(os.environ["ELAN_HOME"]) / "bin"
+    tools = ["elan", "lean"]
+else:
+    assert name == "rustup-init"
+    assert args == ["-y", "--no-modify-path", "--profile", "minimal", "--default-toolchain", "1.99.0"]
+    destination = Path(os.environ["CARGO_HOME"]) / "bin"
+    tools = ["rustup", "cargo"]
+destination.mkdir(parents=True)
+for tool in tools:
+    shutil.copy2("fixtures/installed-tool", destination / tool)
+with open("installers.log", "a") as log:
+    print(json.dumps([name, str(Path(sys.argv[0]).parent)]), file=log)
+""", executable=True)
+        self.write("fixtures/installed-tool", """\
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+
+name = Path(sys.argv[0]).name
+args = sys.argv[1:]
+if name == "elan":
+    assert args == ["which", "lean"]
+    print(Path(os.environ["ELAN_HOME"]) / "bin/lean")
+elif name == "rustup":
+    assert args == ["which", "--toolchain", "1.99.0", "cargo"]
+    print(Path(os.environ["CARGO_HOME"]) / "bin/cargo")
+else:
+    assert args == ["--version"]
+""", executable=True)
+        self.write("bin/curl", """\
+#!/usr/bin/env python3
+from pathlib import Path
+import shutil
+import sys
+
+args = sys.argv[1:]
+assert args[:4] == ["--proto", "=https", "--tlsv1.2", "-fsSL"]
+url, flag, output = args[4:]
+assert flag == "-o"
+with open("downloads", "a") as log:
+    print(url, file=log)
+if output.endswith("elan.tar.gz"):
+    Path(output).write_text("fake native archive")
+else:
+    shutil.copyfile("fixtures/installer", output)
+""", executable=True)
+        self.write("bin/tar", f"""\
+#!/usr/bin/env python3
+from pathlib import Path
+import shutil
+import sys
+
+archive, flag, directory, entry = sys.argv[2:]
+assert sys.argv[1] == "-xzf" and flag == "-C" and entry == "elan-init"
+assert Path(archive).read_text() == "fake native archive"
+shutil.copy2({str(installer)!r}, Path(directory) / entry)
+""", executable=True)
+        (self.root / "bin/python3").symlink_to(shutil.which("python3"))
+        (self.root / "bin/git").symlink_to(shutil.which("git"))
+        env = {
+            "PATH": str(self.root / "bin"), "ELAN_HOME": str(self.root / "new elan"),
+            "CARGO_HOME": str(self.root / "new cargo"),
+            "RUSTUP_UPDATE_ROOT": "https://fixture.invalid/rustup/", "RUSTUP_VERSION": "3.1.4",
+        }
+        self.aspect("ci", "install-lean", env=env)
+        self.aspect("ci", "install-logos-rust", env=env)
+        self.aspect("ci", "install-logos-rust", env={
+            **env, "CARGO_HOME": str(self.root / "default rustup channel"),
+            "RUSTUP_UPDATE_ROOT": "", "RUSTUP_VERSION": "",
+        })
+        arch = "aarch64" if platform.machine() == "arm64" else platform.machine()
+        triple = arch + ("-apple-darwin" if sys.platform == "darwin" else "-unknown-linux-gnu")
+        self.assertEqual((self.root / "downloads").read_text().splitlines(), [
+            "https://github.com/leanprover/elan/releases/latest/download/elan-" + triple + ".tar.gz",
+            "https://fixture.invalid/rustup/archive/3.1.4/" + triple + "/rustup-init",
+            "https://static.rust-lang.org/rustup/dist/" + triple + "/rustup-init",
+        ])
+        installers = [json.loads(line) for line in (self.root / "installers.log").read_text().splitlines()]
+        self.assertEqual([name for name, _ in installers], ["elan-init", "rustup-init", "rustup-init"])
+        self.assertTrue(all(not Path(path).exists() for _, path in installers))
+
+    @unittest.skipUnless(shutil.which("openssl"), "OpenSSL unavailable")
+    def test_native_tls_fixtures_preserve_names_keys_and_trust(self):
+        def openssl(*args, status=0):
+            result = subprocess.run(["openssl", *args], capture_output=True)
+            self.assertEqual(result.returncode, status, result.stderr.decode())
+            return result.stdout
+
+        chorus = [(f"node{node}", f"node{node}.chorus.test", f"node{node}.chorus.test",
+                   "chorus-ca") for node in range(16)]
+        chorus.append(("rogue-node1", "node1.chorus.test", "node1.chorus.test", "rogue-ca"))
+        for crate, directory, trusted, leaves in (
+            ("chorus", "pki", "chorus-ca", chorus),
+            ("warp-tls", "", "test-ca", [
+                ("server", "server", "warp.test", "test-ca"),
+                ("rogue-server", "rogue-server", "warp.test", "rogue-ca"),
+            ]),
+        ):
+            with self.subTest(crate=crate):
+                out = self.root / f"crates/vesper-{crate}/tests/fixtures" / directory
+                self.aspect("crate", crate, "gen")
+                self.assertEqual({file.name for file in out.iterdir()}, {
+                    f"{trusted}.der", "rogue-ca.der",
+                    *(f"{leaf[0]}{suffix}" for leaf in leaves for suffix in (".der", ".key.der")),
+                })
+                auxiliary = self.root / f"{crate} verification"
+                auxiliary.mkdir()
+                for authority in (trusted, "rogue-ca"):
+                    ca = out / f"{authority}.der"
+                    details = openssl("x509", "-inform", "DER", "-in", ca, "-noout", "-text")
+                    self.assertIn(b"CA:TRUE", details)
+                    self.assertIn(b"Certificate Sign, CRL Sign", details)
+                    openssl("x509", "-inform", "DER", "-in", ca, "-out", auxiliary / f"{authority}.pem")
+                for name, subject, host, authority in leaves:
+                    cert = out / f"{name}.der"
+                    key = out / f"{name}.key.der"
+                    details = openssl("x509", "-inform", "DER", "-in", cert, "-noout", "-text")
+                    self.assertRegex(details, rb"Subject: CN\s*=\s*" + subject.encode() + rb"\n")
+                    self.assertIn(f"DNS:{host}".encode(), details)
+                    self.assertIn(b"CA:FALSE", details)
+                    self.assertIn(b"Digital Signature", details)
+                    self.assertIn(b"TLS Web Server Authentication, TLS Web Client Authentication", details)
+                    self.assertIn(b"ASN1 OID: prime256v1", details)
+                    self.assertEqual(
+                        openssl("pkey", "-inform", "DER", "-in", key, "-pubout"),
+                        openssl("x509", "-inform", "DER", "-in", cert, "-pubkey", "-noout"),
+                    )
+                    pem = auxiliary / f"{name}.pem"
+                    openssl("x509", "-inform", "DER", "-in", cert, "-out", pem)
+                    openssl("verify", "-CAfile", auxiliary / f"{authority}.pem", pem)
+                    if authority == "rogue-ca":
+                        openssl("verify", "-CAfile", auxiliary / f"{trusted}.pem", pem, status=2)
+
+    def test_native_tls_fixtures_leave_existing_files_on_openssl_failure(self):
+        path = "crates/vesper-warp-tls/tests/fixtures/test-ca.der"
+        prior = self.write(path, "previous certificate")
+        self.write("bin/openssl", "#!/bin/sh\nexit 23\n", executable=True)
+        env = {"PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]])}
+        self.aspect("crate", "warp-tls", "gen", env=env, status=23)
+        self.assertEqual(list(prior.parent.iterdir()), [prior])
+        self.assertEqual(prior.read_text(), "previous certificate")
 
     def test_script_exit_codes_and_signals_reach_the_cli(self):
         for body, status in (

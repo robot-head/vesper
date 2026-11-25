@@ -1,7 +1,6 @@
 load("./lib/script.axl", "script_task")
 
 
-chorus_gen = script_task("gen", ["crate", "chorus"], "crates/vesper-chorus/tests/fixtures/pki/gen.sh", "sh")
 
 
 
@@ -22,5 +21,3 @@ tensor_make_reference = script_task("make-reference", ["crate", "tensor"], "crat
 
 
 warp_tcp_gen_fixtures = script_task("gen-fixtures", ["crate", "warp-tcp"], "crates/vesper-warp-tcp/fixtures/gen_fixtures.py", "python3")
-
-warp_tls_gen = script_task("gen", ["crate", "warp-tls"], "crates/vesper-warp-tls/tests/fixtures/gen.sh", "sh")
