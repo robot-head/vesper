@@ -37,6 +37,9 @@ use self::doc_links::{
     doc_target,
     read_doc_facts
 };
+use self::proof::{
+    proof_models
+};
 use self::hover::{
     Facts,
     facts_new,
@@ -602,4 +605,10 @@ fn map_type(in f: Facts, i: u64) -> u32 {
         Option::Some(v) => v,
         Option::None => 4294967295,
     }
+}
+
+// `proof_model::all` (src/lsp/proof_model.rs): the proof-lens model of
+// every checked function with a body (proof.ves).
+pub fn lsp_proof_models(in input: Str) -> ChunkSeq[u64] {
+    proof_models(in input)
 }
