@@ -100,7 +100,6 @@ impl HotSet {
     }
     /// Maximal contiguous runs, each split to at most `batch` pages.
     pub fn runs(&self, batch: usize) -> Result<Vec<PageRun>, HotSetError> {
-        #[cfg(feature = "vesper-port")]
         {
             let pages: Vec<u64> = self.pages.iter().map(|&p| p as u64).collect();
             let mut out = vec![0u64; 2 * pages.len()];
@@ -117,13 +116,11 @@ impl HotSet {
                 })
                 .collect())
         }
-        #[cfg(not(feature = "vesper-port"))]
-        self.runs_reference(batch)
     }
-    /// The Rust implementation of [`Self::runs`], kept for the differential
-    /// and ABBA tests until the port flips.
-    #[doc(hidden)]
-    pub fn runs_reference(&self, batch: usize) -> Result<Vec<PageRun>, HotSetError> {
+    /// The Rust implementation of [`Self::runs`], kept only for the
+    /// differential and ABBA tests (the Vesper port is the implementation).
+    #[cfg(test)]
+    pub(crate) fn runs_reference(&self, batch: usize) -> Result<Vec<PageRun>, HotSetError> {
         if batch == 0 {
             return Err(HotSetError::BadBatch);
         }
@@ -149,7 +146,6 @@ impl HotSet {
         out
     }
     pub fn decode(bytes: &[u8], expected_page_count: usize) -> Result<Self, HotSetError> {
-        #[cfg(feature = "vesper-port")]
         {
             // Room for the header's count, bounded by what the body can hold
             // and by MAX_HOT_PAGES. This only sizes the buffer: the port
@@ -169,13 +165,14 @@ impl HotSet {
                 pages: out[..n as usize].iter().map(|&p| p as usize).collect(),
             })
         }
-        #[cfg(not(feature = "vesper-port"))]
-        Self::decode_reference(bytes, expected_page_count)
     }
-    /// The Rust implementation of [`Self::decode`], kept for the
-    /// differential and ABBA tests until the port flips.
-    #[doc(hidden)]
-    pub fn decode_reference(bytes: &[u8], expected_page_count: usize) -> Result<Self, HotSetError> {
+    /// The Rust implementation of [`Self::decode`], kept only for the
+    /// differential and ABBA tests (the Vesper port is the implementation).
+    #[cfg(test)]
+    pub(crate) fn decode_reference(
+        bytes: &[u8],
+        expected_page_count: usize,
+    ) -> Result<Self, HotSetError> {
         if bytes.len() < HEADER_BYTES {
             return Err(HotSetError::Truncated);
         }

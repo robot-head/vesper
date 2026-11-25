@@ -146,7 +146,7 @@ impl NetDevice {
     pub fn stats(&self) -> NetStats {
         self.stats
     }
-    fn max_frame(&self) -> usize {
+    pub(crate) fn max_frame(&self) -> usize {
         usize::from(self.mtu) + ETHERNET_HEADER_BYTES
     }
     /// Queues a frame for the guest on pair 1; returns false (and counts) if
@@ -198,7 +198,7 @@ impl NetDevice {
     }
 
     /// One control command (§5.1.6.5): returns the ack byte.
-    fn control(&mut self, readable: &[u8]) -> u8 {
+    pub(crate) fn control(&mut self, readable: &[u8]) -> u8 {
         #[cfg(feature = "vesper-port")]
         {
             if let Some(pairs) =

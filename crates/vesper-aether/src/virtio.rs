@@ -17,7 +17,7 @@ pub const FLAG_WRITE: u16 = 2;
 pub const FLAG_INDIRECT: u16 = 4;
 pub const FLAG_AVAIL: u16 = 1 << 7;
 pub const FLAG_USED: u16 = 1 << 15;
-#[cfg(feature = "vesper-port")]
+#[cfg(test)]
 const SUPPORTED_FLAGS: u16 = FLAG_NEXT | FLAG_WRITE | FLAG_AVAIL | FLAG_USED;
 const MAX_QUEUE_SIZE: usize = 32768;
 
@@ -157,7 +157,7 @@ pub enum DeviceAccess {
     ReadWrite,
 }
 impl DeviceAccess {
-    #[cfg(feature = "vesper-port")]
+    #[cfg(test)]
     fn reads(self) -> bool {
         matches!(self, Self::Read | Self::ReadWrite)
     }
@@ -286,7 +286,7 @@ impl GuestAuthorization {
     pub fn vm_id(&self) -> u64 {
         self.vm_id
     }
-    #[cfg(feature = "vesper-port")]
+    #[cfg(test)]
     fn permits(
         &self,
         start: u64,
@@ -511,10 +511,9 @@ impl PackedQueue {
         self.capture_with(ring, Self::walk)
     }
     /// The Rust implementation of [`Self::capture`], kept only for the
-    /// `vesper-port` differential and ABBA tests.
-    #[cfg(feature = "vesper-port")]
-    #[doc(hidden)]
-    pub fn capture_reference(&mut self, ring: &[u8]) -> Result<DescriptorLease, QueueError> {
+    /// differential and ABBA tests (`src/port_reference_tests`).
+    #[cfg(test)]
+    pub(crate) fn capture_reference(&mut self, ring: &[u8]) -> Result<DescriptorLease, QueueError> {
         self.capture_with(ring, Self::walk_reference)
     }
     fn capture_with(
@@ -615,7 +614,7 @@ impl PackedQueue {
             },
         })
     }
-    #[cfg(feature = "vesper-port")]
+    #[cfg(test)]
     fn walk_reference(&mut self, ring: &[u8], free: usize) -> Result<Walked, QueueError> {
         let mut work = Work(self.limits.max_work);
         let mut cursor = self.available;

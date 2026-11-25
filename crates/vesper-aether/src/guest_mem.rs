@@ -173,7 +173,7 @@ impl GuestMemory {
 
     /// The offset in `bytes` of `[gpa, gpa + len)`, which must lie inside
     /// one region.
-    fn locate(&self, gpa: u64, len: u64) -> Result<usize, MemError> {
+    pub(crate) fn locate(&self, gpa: u64, len: u64) -> Result<usize, MemError> {
         #[cfg(feature = "vesper-port")]
         {
             let off =
