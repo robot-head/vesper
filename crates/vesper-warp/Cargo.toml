@@ -14,7 +14,7 @@ build = "build.rs"
 vesper-port = []
 # A deliberately wrong Vesper build, one change per ported module: the port
 # test runs must fail (crates/vesper-warp/port/test-port.sh asserts it).
-vesper-port-divergent = []
+vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
 # Wave six (issue #247): address-validation tokens (AES-256-GCM), stateless

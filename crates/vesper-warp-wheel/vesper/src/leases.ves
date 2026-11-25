@@ -231,7 +231,7 @@ impl LeaseCore {
         // wheel is drained here directly rather than through its pairs.
         let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](self.wheel.len);
         for index in 0..self.wheel.capacity {
-            if at(in self.wheel.e_list, index) != nil() {
+            if at(in self.wheel.e, ix(index, 6)) != nil() {
                 self.wheel.unlink(index);
                 self.wheel.release(index);
                 out.push(index);

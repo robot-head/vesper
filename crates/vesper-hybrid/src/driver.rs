@@ -356,11 +356,12 @@ enum Step {
     CheckUses,
     CheckFinish,
     CheckReport,
+    InterfaceWrite = 40,
     WasmInput = 60,
     EbpfInput,
 }
 
-const STEPS: [Step; 34] = [
+const STEPS: [Step; 35] = [
     Step::IsPackage,
     Step::Load,
     Step::EbpfBuild,
@@ -393,6 +394,7 @@ const STEPS: [Step; 34] = [
     Step::CheckUses,
     Step::CheckFinish,
     Step::CheckReport,
+    Step::InterfaceWrite,
     Step::WasmInput,
     Step::EbpfInput,
 ];
@@ -506,7 +508,8 @@ impl Session {
             | Step::CheckReport
             | Step::EmitHir
             | Step::EmitInterface
-            | Step::LibBuild => self.front_step(step),
+            | Step::InterfaceWrite
+            | Step::LibBuild => self.front_step(step, arg),
             Step::Optimize
             | Step::EmitIr
             | Step::EmitClif

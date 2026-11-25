@@ -2,12 +2,11 @@
 //! own typed error.
 
 use ed25519_dalek::{Signer, SigningKey};
-use vesper_codegen_verified::*;
-use vesper_loom_cas::{DerivationInputs, Domain, ObjectId, ObjectKind};
-use vesper_loom_trust::{
+use vesper_codegen_verified::trust::{
     Attestation, AttestationBundle, BuilderPolicy, Statement, TrustedBuilder,
-    canonical_signing_bytes,
+    canonical_signing_bytes, derivation_id,
 };
+use vesper_codegen_verified::*;
 
 const STAGE: &[u8] = b"\x7fELF stage-2 == stage-3 == stage-3' compiler image";
 const SPEC: &[u8] = b"VesperMetatheory.olean interface bytes";
@@ -22,18 +21,10 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// A canonical `drv:b3v1:` id; the gate checks its form and that the
+/// builders signed it, not how it was derived.
 fn derivation() -> String {
-    let source = ObjectId::new(
-        Domain::Source,
-        ObjectKind::Tree,
-        vesper_loom_cas::Digest(*source_merkle(&SOURCES).unwrap().as_bytes()),
-    );
-    DerivationInputs::new(Domain::Artifact, "vesperc-vsp-2", "stage2")
-        .with_target(TARGET)
-        .with_input("source", source)
-        .key()
-        .unwrap()
-        .to_string()
+    derivation_id(blake3::hash(b"vesperc-vsp-2 stage2 x86_64-unknown-linux-gnu").as_bytes())
 }
 
 fn honest_lock(quorum: usize, tee: bool) -> BootstrapLock {

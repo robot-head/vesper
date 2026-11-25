@@ -1,12 +1,12 @@
 //! The reference host of the WASI `StdFs` interface
 //! (packages/vesper-std/fs/fs-wasip2-wasm32.vsys) for
 //! tests/wasm_seed_package_io.rs: the `vstd_fs_*` functions over `std::fs`,
-//! which `@vesper-std/fs` called through crates/vesper-std-host before it
+//! which `@vesper-std/fs` called through a Rust host shim before it
 //! imported the C library itself (SH6 lane 13, #1408). The test runs each
 //! program natively against these and as a wasm component against the
 //! WASI lowering in packages/vesper-wasm-backend/src/host.ves.
 #![allow(dead_code, clippy::missing_safety_doc)]
-use vesper_std_host::{error_word, os_bytes, path_of};
+use crate::std_io_support::oracle::{error_word, os_bytes, path_of};
 
 /// Hand out a heap handle.
 fn new_handle<T>(value: T) -> *mut T {

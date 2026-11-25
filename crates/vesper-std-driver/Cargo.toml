@@ -7,10 +7,6 @@ license = "MIT OR Apache-2.0"
 publish = false
 build = "build.rs"
 
-# A separate package from vesper-std-host: its build script runs the port
-# harness, which links the compiler, and the root package's tests depend on
-# vesper-std-host, so one package holding both would be a Bazel cycle.
-
 [features]
 # Link the sample driver (vesper/, a Loom package over @vesper-std/fs,
 # process and env) as an executable-path Vesper object and run it from
@@ -19,9 +15,6 @@ vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
 
 [dependencies]
 vesper-port-abi = { path = "../vesper-port-abi", optional = true }
-
-[dev-dependencies]
-vesper-std-host = { path = "../vesper-std-host" }
 
 [build-dependencies]
 vesper-port-harness = { path = "../vesper-port-harness", optional = true }

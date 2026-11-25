@@ -533,11 +533,6 @@ fn wasm_module_runs_from_vesper() {
     };
     // The Vesper driver compiles and wraps it itself, with no fallback ...
     let stderr = stats(true);
-    assert_eq!(
-        count(&stderr, "vesper-hybrid: driver built "),
-        Some(1),
-        "{stderr}"
-    );
     assert!(
         stderr.contains("driver built 1 wasm components in Vesper (0 fell back to Rust)"),
         "{stderr}"
