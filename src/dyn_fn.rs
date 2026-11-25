@@ -1337,9 +1337,12 @@ impl Lowered {
 
 /// Swap-in point for [`lower`] (front-end wiring slice 4, `#1976`): the
 /// hybrid fills it from `@vesper/check-dyn`. `None` falls back to Rust.
+/// What [`lower`] returns.
+pub type LowerResult = Result<Lowered, Vec<Diagnostic>>;
+
 #[derive(Clone, Copy)]
 pub struct DynFnTable {
-    pub lower: fn(&Module) -> Option<Result<Lowered, Vec<Diagnostic>>>,
+    pub lower: fn(&Module) -> Option<LowerResult>,
 }
 
 static DYN_FN: std::sync::OnceLock<DynFnTable> = std::sync::OnceLock::new();
