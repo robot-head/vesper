@@ -257,6 +257,47 @@ corim_store:  1.12x [1.03x, 1.17x] n=30 decision=pass
 appraise_cca: 0.55x [0.52x, 0.56x] n=30 decision=pass
 ```
 
+## Part 3a: the deprecated Rust-keyed gate is retired
+
+`gate.rs` held two gates. `EnclaveGate` kept its ChaCha20-Poly1305 keys in
+the gate itself. It was deprecated in favour of `VaultEnclaveGate` and was
+to be kept "until the end of wave six", which ended long ago. This part
+deletes it:
+
+- `EnclaveGate` and its `EnclaveError`, `NonceSequence` and `NonceTicket`;
+- the `tenant_seal_frame` and `tenant_open_frame` helpers;
+- the `nonce || ciphertext || tag` frame (`host::SealedFrame`,
+  `CiphertextSlice::from_sealed`);
+- the crate's direct `chacha20poly1305` dependency.
+
+`gate.rs` drops from 526 to 251 lines.
+
+The TOCTOU tests (`tests/toctou.rs`) now run on `VaultEnclaveGate`:
+
+- the round trip;
+- every error path scrubbing and releasing the grant;
+- a rewrite after the snapshot;
+- a concurrent hypervisor race, which uses a fresh gate per request so the
+  replay window never rejects a frame the race replays.
+
+The allocation test keeps only its Vault-gate case.
+
+`VaultEnclaveGate` stays Rust for now. Its own logic is a few checks
+around Rust-owned parts:
+
+- Vault's `AeadOpener` and `AeadSealer`, whose AEAD already runs in Vesper
+  over the crypto shim but whose keys live in Rust `SecretSlot`s (lane 3);
+- the bounce aperture's grants and ledger (atomics, #1037);
+- the caller's `evaluate` callback, and Vesper cannot call back into Rust
+  (G5).
+
+Moving only the checks would add a crossing and delete no Rust. The gate
+moves when Vault's slots and the aperture are in Vesper.
+
+The manuscript's §33.3 example still spells the egress constructor
+`CiphertextSlice::from_sealed`. That is the language-level API, and it is
+left for the owner's review.
+
 ## What is left
 
 The crate's remaining Rust, by the part that will move it:
@@ -264,7 +305,7 @@ The crate's remaining Rust, by the part that will move it:
 | Rust | Lines | Part | Needs |
 | --- | --: | --- | --- |
 | `cca.rs`, `corim.rs` rest: public types, ECDSA `verify_sign1`, `ec_public_key_from_pem`, test encoders, adapters | 1,153 | part 4 | SHA-2 and ECDSA behind lane 17's shim |
-| `gate.rs`: frame and ring logic | 497 | part 3 | ChaCha20-Poly1305 behind lane 17's shim; the evaluator callbacks stay as Rust adapters while callers are Rust |
+| `gate.rs`: the Vault-keyed gate | 251 | part 3b | Vault `SecretSlot`s in Vesper (lane 3), the aperture (#1037), callbacks (G5) |
 | `gpa.rs`, `host.rs`, `linear.rs` | 1,012 | part 3 | atomics in source (#1037) for the leak ledger |
 | `intel.rs`, `amd.rs`: collateral, TCB status, CRL floors | 1,655 | part 4 | JSON collateral in Vesper; X.509 and ECDSA behind lane 17's shim |
 | `chain.rs`, `roots.rs`: X.509 paths, PKIX PEM keys, pinned roots | 772 | part 4 | lane 17's shim (vetted crypto, never hand-rolled) |
