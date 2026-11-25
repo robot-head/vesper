@@ -90,6 +90,10 @@ pub(crate) const SWAPS: &[Swap] = &[
         "doctest_guard",
         "0 diffs, 0.39x; no flip-gate configuration",
     ),
+    open(
+        "doctest_generate",
+        "0 diffs, 0.87x; no flip-gate configuration",
+    ),
     open("ir_lower", "0.40x; no flip-gate configuration"),
     open("ir_opt", "0.0036x; no flip-gate configuration"),
     open("inline", "0.76x; no flip-gate configuration"),

@@ -12,6 +12,7 @@
 //! probe module per example; probe modules are never executed and are
 //! counted separately from the shared module.
 use crate::doctest_extract::{self, Example, ExtractLimits, PreflightLimits};
+use crate::doctest_generate;
 use crate::doctest_guard;
 use crate::{
     ast::Diagnostic,
@@ -229,79 +230,39 @@ fn generate(
     limits: DocTestLimits,
     used: &mut usize,
 ) -> Result<Generated, String> {
-    let mut source = format!("{base}\n");
-    let snippet_start = source.len();
-    let raw: String = e.lines.iter().map(|l| format!("{}\n", l.text)).collect();
+    let raw_len: usize = e.lines.iter().map(|l| l.text.len() + 1).sum();
     *used = used
-        .checked_add(raw.len())
+        .checked_add(raw_len)
         .ok_or("doctest check-byte overflow")?;
     if *used > limits.max_total_check_bytes {
         return Err("doctest total check-byte limit".into());
     }
+    let raw: String = e.lines.iter().map(|l| format!("{}\n", l.text)).collect();
     preflight(&raw, limits)?;
-    let (tokens, _) = lexer::lex(&raw);
-    // Try the actual module grammar as well as recognizing malformed declaration
-    // prefixes. Contextual trait/model/pub and leading use-model declarations
-    // must never acquire artificial block-parser errors from a wrapper.
-    let raw_module = parser::parse(&raw);
-    let declaration = raw_module.diagnostics.is_empty()
-        && (!raw_module.module.items.is_empty() || !raw_module.module.model_uses.is_empty())
-        || tokens
-            .iter()
-            .find(|t| {
-                !matches!(
-                    t.kind,
-                    K::Whitespace | K::Comment | K::BlockComment | K::Eof
-                )
-            })
-            .is_some_and(|t| {
-                matches!(
-                    t.kind,
-                    K::Fn
-                        | K::Copy
-                        | K::Affine
-                        | K::Linear
-                        | K::Struct
-                        | K::Enum
-                        | K::Effect
-                        | K::Impl
-                ) || t.kind == K::Lower && matches!(&raw[t.span.clone()], "trait" | "model" | "pub")
-            });
-    let entry = if e.expected.is_some() {
-        None
-    } else if declaration {
-        Some(e.entry.clone().unwrap_or_else(|| "main".into()))
-    } else {
-        Some(e.entry.clone().unwrap_or_else(|| wrapper.to_string()))
-    };
-    if !declaration {
-        // A simulated body fence may use exactly the devices it declared.
-        let row = e.sim.as_ref().map_or(String::new(), |spec| {
-            let names: Vec<_> = spec.devices.iter().map(|d| d.effect()).collect();
-            format!(" eff [{}]", names.join(", "))
-        });
-        source.push_str(&format!(
-            "fn {}(){row} {{\n",
-            entry.as_deref().unwrap_or(wrapper)
-        ));
-    }
-    let code_start = source.len();
-    let mut segments = Vec::new();
-    for line in &e.lines {
-        let start = source.len();
-        source.push_str(&line.text);
-        segments.push((start, source.len(), line.offset));
-        source.push('\n');
-    }
-    if !declaration {
-        source.push_str("}\n");
-    }
+    let lines: Vec<&str> = e.lines.iter().map(|l| l.text.as_str()).collect();
+    let effects: Option<Vec<&str>> = e
+        .sim
+        .as_ref()
+        .map(|spec| spec.devices.iter().map(|d| d.effect()).collect());
+    let g = doctest_generate::generate(doctest_generate::GenerateInput {
+        base,
+        lines: &lines,
+        wrapper,
+        entry: e.entry.as_deref(),
+        expected: e.expected.is_some(),
+        sim_effects: effects.as_deref(),
+    });
     Ok(Generated {
-        source,
-        snippet_start,
-        code_start,
-        segments,
-        entry,
+        source: g.source,
+        snippet_start: g.snippet_start,
+        code_start: g.code_start,
+        segments: g
+            .segments
+            .into_iter()
+            .zip(&e.lines)
+            .map(|((start, end), line)| (start, end, line.offset))
+            .collect(),
+        entry: g.entry,
     })
 }
 
