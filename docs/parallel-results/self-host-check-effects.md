@@ -120,17 +120,16 @@ test is the harness for them, and they come with the hybrid swap.
 
 ## Hybrid swap (#1802, part of #1180)
 
-- Added `EffectsCheckTable` + `install_effects_check` in `src/capability_effects.rs` (`check_world`).
-- Added `check_effects_bytes` (`write_bin` binary diagnostic output) in `packages/vesper-check-effects`, shared `tests/common/effects_words.rs` (`encode_world` / `decode_diagnostics`), and `crates/vesper-hybrid/modules/effects` (`port/effects.rs`, ABI v4) wired via `VESPER_EFFECTS_CHECK` in `crates/vesper-hybrid/src/hybrid.rs`.
+- Added `EffectsCheckTable` + `install_effects_check` in `src/capability_effects.rs` (`check_world` + `capability_policies`, `#1802` + `#1864`).
+- Added `check_effects_bytes` (`write_bin`) and `check_policies_bytes` (`build_policies_bin` in `policies.ves`) in `packages/vesper-check-effects`, shared `tests/common/effects_words.rs` (`encode_world` / `decode_diagnostics` / `decode_policies`), and `crates/vesper-hybrid/modules/effects` (`port/effects.rs`, ABI v4) wired via `VESPER_EFFECTS_CHECK` in `crates/vesper-hybrid/src/hybrid.rs`.
 - `vesper-hybrid` `differential`: `5/5` passed, `0` of `2,202` runs differ across `554` files (default `225.08 s`, hybrid `104.35 s`, `0.464x`).
+- `policies_match_rust_on_corpus_and_fixtures`: `0` of `418` corpus & fixture worlds differ.
 
 ## What is left
 
 - Callgrind Ir counts for the hybrid swap and retiring the hand-encoded `effects_words` boundary once ABI v4 owned trees land.
 - `src/trace_effects/rules.rs` and the checker half of `trace_effects.rs`
   (E0750-E0758) on the same tables.
-- `capability_policies` (the Stage 5 verifier inputs): the walk is there;
-  it needs the policy output and its differential.
 - The small helpers `check.rs` calls (`secret_prelude`, `used_names`,
   `reserved_declaration`, `row_entry`, `handler_rejected`) move with the
   checker module that calls them.
