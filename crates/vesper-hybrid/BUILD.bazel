@@ -342,9 +342,16 @@ vesper_hybrid(
     test_env = {
         "VESPER_DEFAULT_COMPILER": "vesper",
         "VESPER_DOC_STRIDE": "8",
+        # The gated differential (#1397) runs every 4th corpus file here;
+        # Cargo runs them all.
+        "VESPER_GATED_STRIDE": "4",
     },
     # 51 libraries, each built by both compilers.
-    test_timeouts = {"test/codegen_export": "long"},
+    # The differential runs the corpus twice since the gated set (#1397).
+    test_timeouts = {
+        "test/codegen_export": "long",
+        "test/differential": "long",
+    },
     test_path_binaries = {
         "test/codegen_export": [
             ":bin/vesper-hybrid",
@@ -358,6 +365,7 @@ vesper_hybrid(
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],
+        "test/swaps": [":bin/vesper-hybrid"],
         "test/driver": [
             ":bin/vesper-hybrid",
             "//:bin/vesper",
