@@ -1,0 +1,207 @@
+// The generated module of one doctest example: `rust_generate` of
+// src/doctest_generate.rs. The snippet is appended to the file's base
+// source; unless it declares items it is wrapped in the entry function
+// (with the device effect row of a `sim(...)` fence). A snippet declares
+// items when it parses (@vesper/ast) without diagnostics into a module
+// with items or model uses, or when its first token starts a declaration
+// (@vesper/front's lexer).
+//
+// Input words: the base, the line count and the lines, the wrapper, the
+// entry (0, or 1 and the name), `expected` (0 or 1) and the sim effects
+// (0, or 1, their count and the names). Result words: 0, the source, the
+// snippet and code starts, the segment count and each (start, end), and
+// the entry (0, or 1 and the name) (tests/common/doctest_generate_words.rs).
+
+use @vesper/ast::lower::{
+    lower_source
+};
+use @vesper/front::kinds::{
+    k_affine,
+    k_block_comment,
+    k_comment,
+    k_copy,
+    k_effect,
+    k_enum,
+    k_eof,
+    k_fn,
+    k_impl,
+    k_linear,
+    k_lower,
+    k_struct,
+    k_whitespace
+};
+use self::discover::{
+    toks
+};
+use self::util::{
+    Reader,
+    inc,
+    is_text,
+    push_range,
+    put_buf,
+    u8_at,
+    u64_at
+};
+
+// Whether the first non-trivia token of `raw` starts a declaration.
+fn declaration_token(in raw: Slice[u8]) -> bool {
+    let t = toks(in raw);
+    let n = t.kind.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            return false;
+        }
+        let k = u8_at(in t.kind, i);
+        if k != k_whitespace() && k != k_comment() && k != k_block_comment() && k != k_eof() {
+            break;
+        }
+        i = inc(i);
+    }
+    let k = u8_at(in t.kind, i);
+    if k == k_fn()
+        || k == k_copy()
+        || k == k_affine()
+        || k == k_linear()
+        || k == k_struct()
+        || k == k_enum()
+        || k == k_effect()
+        || k == k_impl() {
+        return true;
+    }
+    if k != k_lower() {
+        return false;
+    }
+    let s = u64_at(in t.start, i);
+    let e = u64_at(in t.end, i);
+    is_text(in raw, s, e, in "trait")
+        || is_text(in raw, s, e, in "model")
+        || is_text(in raw, s, e, in "pub")
+}
+
+// `doctest_generate::declaration`.
+fn declaration(in raw: ChunkSeq[u8]) -> bool {
+    let text = match String::from_utf8(in raw.as_slice()) {
+        Option::Some(x) => x,
+        Option::None => String::new(),
+    };
+    let l = lower_source(in text.as_str());
+    if l.p.d.code.len() == 0 && (l.ast.m_items.len() != 0 || l.ast.m_model_uses.len() != 0) {
+        return true;
+    }
+    declaration_token(in raw.as_slice())
+}
+
+fn push_str(inout out: ChunkSeq[u8], in s: Str) {
+    out.extend(in s.as_bytes());
+}
+
+// `rust_generate` over the input words.
+pub fn generate(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let (bs, be) = r.text(in b);
+    let nlines = r.word(in b);
+    // The lines' ranges in `b`.
+    let mut ls: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut raw: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..nlines {
+        let (s, e) = r.text(in b);
+        ls.push(s);
+        ls.push(e);
+        push_range(inout raw, in b, s, e);
+        raw.push(10);
+    }
+    let (ws, we) = r.text(in b);
+    let has_entry = r.word(in b) != 0;
+    let mut es: u64 = 0;
+    let mut ee: u64 = 0;
+    if has_entry {
+        let (s, e) = r.text(in b);
+        es = s;
+        ee = e;
+    }
+    let expected = r.word(in b) != 0;
+    let has_sim = r.word(in b) != 0;
+    // The sim effect names' ranges in `b`.
+    let mut sims: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if has_sim {
+        let n = r.word(in b);
+        for i in 0..n {
+            let (s, e) = r.text(in b);
+            sims.push(s);
+            sims.push(e);
+        }
+    }
+    let mut src: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push_range(inout src, in b, bs, be);
+    src.push(10);
+    let snippet_start = src.len();
+    let decl = declaration(in raw);
+    // The entry: (present, from `b` or "main").
+    let mut entry: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let has_result_entry = !expected;
+    if !expected {
+        if has_entry {
+            push_range(inout entry, in b, es, ee);
+        } else if decl {
+            push_str(inout entry, in "main");
+        } else {
+            push_range(inout entry, in b, ws, we);
+        }
+    }
+    if !decl {
+        push_str(inout src, in "fn ");
+        if has_result_entry {
+            src.extend(in entry.as_slice());
+        } else {
+            push_range(inout src, in b, ws, we);
+        }
+        push_str(inout src, in "()");
+        if has_sim {
+            push_str(inout src, in " eff [");
+            let n = sims.len() / 2;
+            for i in 0..n {
+                if i != 0 {
+                    push_str(inout src, in ", ");
+                }
+                let s = u64_at(in sims, wrapping_mul(i, 2));
+                let e = u64_at(in sims, inc(wrapping_mul(i, 2)));
+                push_range(inout src, in b, s, e);
+            }
+            push_str(inout src, in "]");
+        }
+        push_str(inout src, in " {\n");
+    }
+    let code_start = src.len();
+    let mut segs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..nlines {
+        let s = u64_at(in ls, wrapping_mul(i, 2));
+        let e = u64_at(in ls, inc(wrapping_mul(i, 2)));
+        segs.push(src.len());
+        push_range(inout src, in b, s, e);
+        segs.push(src.len());
+        src.push(10);
+    }
+    if !decl {
+        push_str(inout src, in "}\n");
+    }
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(0);
+    put_buf(inout out, in src);
+    out.push(snippet_start);
+    out.push(code_start);
+    out.push(nlines);
+    let m = segs.len();
+    for i in 0..m {
+        out.push(u64_at(in segs, i));
+    }
+    if has_result_entry {
+        out.push(1);
+        put_buf(inout out, in entry);
+    } else {
+        out.push(0);
+    }
+    out
+}
