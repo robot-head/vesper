@@ -79,10 +79,15 @@ class PlatformWorkflowTests(unittest.TestCase):
         native_step = next(s for s in windows["steps"] if s.get("name") == "Validate native COFF executables")
         self.assertEqual(native_step["shell"], "pwsh")
         self.assertIn("./scripts/windows/test-native-executables.ps1", native_step["run"])
-        hybrid_step = next(s for s in workflow("hybrid.yml")["jobs"]["hybrid"]["steps"]
+        hybrid = workflow("hybrid.yml")["jobs"]["hybrid"]
+        hybrid_step = next(s for s in hybrid["steps"]
                            if s.get("name") == "The CLI suites on the hybrid (Windows)")
         self.assertEqual(hybrid_step["shell"], "pwsh")
         self.assertEqual(hybrid_step["run"], "./scripts/windows/test-hybrid-cli.ps1")
+        self.assertEqual({row["os"]: row["compiler"] for row in hybrid["strategy"]["matrix"]["include"]},
+                         {"ubuntu-latest": "vesper", "macos-latest": "vesper", "windows-latest": "vesper.exe"})
+        for variable in ("VESPER_PORT_COMPILER", "VESPER_DEFAULT_COMPILER"):
+            self.assertEqual(hybrid["env"][variable], "${{ github.workspace }}/target/debug/${{ matrix.compiler }}")
         self.assertIn("--test platform", mac_commands)
         self.assertIn("--test windows_platform", windows_commands)
         self.assertIn("--test windows", windows_commands)

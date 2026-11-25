@@ -72,15 +72,18 @@ jobs:
         include:
           - name: Linux x86_64
             os: ubuntu-latest
+            compiler: vesper
           - name: macOS AArch64
             os: macos-latest
+            compiler: vesper
           - name: Windows x86_64 MSVC
             os: windows-latest
+            compiler: vesper.exe
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
-    defaults:
-      run:
-        shell: bash
+    env:
+      VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/${{ matrix.compiler }}
+      VESPER_DEFAULT_COMPILER: ${{ github.workspace }}/target/debug/${{ matrix.compiler }}
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
@@ -89,12 +92,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build the default compiler
-        run: |
-          cargo build --locked --bin vesper
-          exe=vesper
-          if [ "$RUNNER_OS" = Windows ]; then exe=vesper.exe; fi
-          echo "VESPER_PORT_COMPILER=$GITHUB_WORKSPACE/target/debug/$exe" >> "$GITHUB_ENV"
-          echo "VESPER_DEFAULT_COMPILER=$GITHUB_WORKSPACE/target/debug/$exe" >> "$GITHUB_ENV"
+        run: cargo build --locked --bin vesper
       - name: Build and test the hybrid compiler
         run: cargo test --locked -p vesper-hybrid -- --nocapture
       - name: The CLI suites on the hybrid (its main is the Vesper driver)
