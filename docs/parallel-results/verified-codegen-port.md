@@ -138,9 +138,48 @@ proposals, is a different module and is not part of this port.
 
 **Stage 1 guard:** unchanged, as in parts 1-2.
 
+## Part 4a: the plan and the lowering
+
+### What changed
+
+- `packages/vesper-verified-codegen/src/lower.ves` ports `lower::plan` and
+  `lower::function` of `src/verified_codegen/lower.rs`, together with the
+  failure codes and raise sets of `fail.rs`. It covers:
+  - shapes and variant layouts;
+  - the status protocol, `?`, `Fail::raise` and implicit trap stubs;
+  - pattern binding and `match` dispatch;
+  - tuple indexing and tail self calls.
+
+  Every error has the Rust `VerifiedError` text.
+- It reads the world and the Place IR that `compile` lowers, after ir_opt,
+  monomorphization and evidence passing. The input is encoded by
+  `tests/common/ir_words.rs`, then a short extra section: the entry, the
+  limits, whether the region prelude is active and the world's function
+  names. Its output is every planned function's rows in the Rust `Debug`
+  form.
+- `src/verified_codegen.rs` gains `#[doc(hidden)]` test hooks:
+  - `lowering_for_test`: the lowered program and the Rust result.
+  - `lower_for_test`: the lowering alone, for timing.
+
+  `compile` is split into `prepare` and `lower_program`, which do the same
+  steps in the same order. The behaviour does not change: the Stage 1 lock
+  hashes artifacts, not source.
+- Not ported yet (part 4c): `handle` expressions (non-resuming `Fail`
+  handlers and region blocks) and region operations. For a program that
+  has one, the package answers `not ported` and the test counts it apart.
+
+### Evidence (Linux x86_64 host, release)
+
+| Check | Result |
+|---|---|
+| Corpus programs without handler sites, optimized and not | **0 of 222 differ** (150 lowered, 72 rejected with the same error text; 82 not ported) |
+| ABBA, plan + lowering + text over the corpus ×5 (Vesper includes the decode) | rust 22.4 ms, vesper 23.9 ms: **1.07x** |
+
+**Rust lines deleted:** 0. `lower.rs` and `fail.rs` go at the retirement.
+
 ## Left
 
 - Optional: compare the per-arch `encoding_listing` text.
-- Part 4: `lower`, `mono`, `fail`, `coverage`, `evidence`, `cli`, then the
-  swap into the hybrid and `bootstrap/stage1.rs`, with `bootstrap/stage1.lock`
+- Part 4b: `mono`. Part 4c: handlers, `evidence` and regions. Part 4d:
+  `coverage`, `cli`, then the swap into the hybrid and `bootstrap/stage1.rs`, with `bootstrap/stage1.lock`
   reproduced, and the Rust deleted at the retirement.

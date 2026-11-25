@@ -30,6 +30,9 @@ use self::certificate::{
     check_input,
     validate_input
 };
+use self::lower::{
+    lower_input
+};
 use self::container::{
     EM_AARCH64,
     EM_RISCV,
@@ -280,5 +283,12 @@ pub fn certificate_text(in input: Str) -> ChunkSeq[u64] {
 pub fn validate_text(in input: Str) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u8]();
     validate_input(in input.as_bytes(), inout out);
+    pack_text(in out)
+}
+
+// The slot IR of every function the harness input's entry reaches
+// (lower.ves), or the lowering's error, as text.
+pub fn lowering_text(in input: Str) -> ChunkSeq[u64] {
+    let out = lower_input(in input.as_bytes());
     pack_text(in out)
 }
