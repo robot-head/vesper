@@ -1,0 +1,2510 @@
+// Range certificates for the slot IR and the production validator that
+// checks them before any machine code is emitted:
+// src/verified_codegen/certificate.rs in Vesper (#1886, part 3).
+//
+// `generate` (untrusted) computes a certificate for every lowered function
+// by a forward range analysis over the slot IR, with an entry summary (`In`
+// facts every caller establishes) and an exit summary (`In` facts at every
+// `Return`) per function. `validate` (the trusted part) re-checks it: every
+// row the Lean model covers goes through `lean_check_node`, the mirror of
+// `checkNode` in lean/CodegenFlowValidation.lean, and the rows outside it
+// through the conservative rules of the Rust module's header (calls,
+// prologues, returns, labels, trap scopes). `check` widens every comparison
+// to the widest kind of its signedness first.
+//
+// Representation (the Rust module uses ordered maps and sets):
+//
+// - A location (`Loc`) is the key `tag << 32 | index`, with the `L_*` tags
+//   in the order of the Rust enum, so keys sort as `Loc`s do.
+// - Facts (`Facts`, `Annotation`) are entries `key << 3 | kind`; a facts
+//   map is a sequence of them sorted by key with one entry a key.
+// - Origins (the large constants a location may hold) are pairs of words
+//   `key, f << 32 | pc`, sorted by key and then constant.
+// - Location sets and constant sets are sorted sequences of words.
+//
+// The analysis visits rows in the same order as the Rust one (a stack
+// worklist, successors in the same order), so the certificates are equal
+// word for word, not just equally valid.
+
+use @vesper-std/collections::flat_table::{
+    FlatTable,
+    flat_table_new
+};
+use self::machine::{
+    K_BOOL,
+    K_F64,
+    K_I64,
+    K_U32,
+    K_U64,
+    K_U8,
+    LIR_ARITH,
+    LIR_BRANCH_ZERO,
+    LIR_CALL,
+    LIR_COMPARE,
+    LIR_CONST,
+    LIR_ENTER,
+    LIR_FARITH,
+    LIR_FCOMPARE,
+    LIR_FNEG,
+    LIR_JUMP,
+    LIR_LABEL,
+    LIR_LOAD_IN,
+    LIR_LOAD_OUT,
+    LIR_LOAD_PTR,
+    LIR_MOVE,
+    LIR_NEG,
+    LIR_NOT,
+    LIR_RETURN,
+    LIR_SCOPE,
+    LIR_STORE_IN,
+    LIR_STORE_OUT,
+    LIR_STORE_PTR,
+    LIR_TRAP,
+    LIR_WRAPPING,
+    L_IN,
+    L_OUT,
+    L_SLOT,
+    Lir,
+    T_DIV0,
+    T_OVERFLOW,
+    put_decimal
+};
+
+// No kind (a location without a fact).
+const NONE: u8 = 255;
+const MISSING: u64 = 18446744073709551615;
+const LOW32: u64 = 4294967295;
+const TWO_63: u64 = 9223372036854775808;
+
+// ---------------------------------------------------------------------------
+// Small sequence helpers.
+
+fn at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn at_bool(in s: ChunkSeq[bool], i: u64) -> bool {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => false,
+    }
+}
+
+fn copy_of(in s: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let mut c = ChunkSeq::with_capacity[u64](s.len());
+    c.extend(in s.as_slice());
+    c
+}
+
+fn seq_eq(in a: ChunkSeq[u64], in b: ChunkSeq[u64]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if at(in a, i) != at(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn set_seq(inout s: ChunkSeq[ChunkSeq[u64]], i: u64, sink v: ChunkSeq[u64]) {
+    match s.try_get_mut(i) {
+        Option::Some(slot) => {
+            let _old = replace(inout slot, v);
+        }
+        Option::None => {}
+    }
+}
+
+fn insert_at(inout s: ChunkSeq[u64], i: u64, v: u64) {
+    s.push(v);
+    let mut j = wrapping_sub(s.len(), 1);
+    loop {
+        if !(j > i) {
+            break;
+        }
+        let x = at(in s, wrapping_sub(j, 1));
+        let ok = s.try_set(j, x);
+        j = wrapping_sub(j, 1);
+    }
+    let ok = s.try_set(i, v);
+}
+
+fn remove_at(inout s: ChunkSeq[u64], i: u64) {
+    let n = s.len();
+    let mut j = i;
+    loop {
+        if !(wrapping_add(j, 1) < n) {
+            break;
+        }
+        let x = at(in s, wrapping_add(j, 1));
+        let ok = s.try_set(j, x);
+        j = wrapping_add(j, 1);
+    }
+    s.truncate(wrapping_sub(n, 1));
+}
+
+// Sorted sets of words.
+
+fn set_lower(in s: ChunkSeq[u64], k: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = s.len();
+    loop {
+        if !(lo < hi) {
+            break;
+        }
+        let mid = wrapping_add(lo, hi) >> 1;
+        if at(in s, mid) < k {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+fn set_contains(in s: ChunkSeq[u64], k: u64) -> bool {
+    let i = set_lower(in s, k);
+    i < s.len() && at(in s, i) == k
+}
+
+fn set_insert(inout s: ChunkSeq[u64], k: u64) {
+    let i = set_lower(in s, k);
+    if i < s.len() && at(in s, i) == k {
+        return;
+    }
+    insert_at(inout s, i, k);
+}
+
+fn set_remove(inout s: ChunkSeq[u64], k: u64) -> bool {
+    let i = set_lower(in s, k);
+    if i < s.len() && at(in s, i) == k {
+        remove_at(inout s, i);
+        return true;
+    }
+    false
+}
+
+// `a` gets every element of `b`.
+fn set_union_into(inout a: ChunkSeq[u64], in b: ChunkSeq[u64]) {
+    if b.len() == 0 {
+        return;
+    }
+    if a.len() == 0 {
+        a.extend(in b.as_slice());
+        return;
+    }
+    let mut out = ChunkSeq::with_capacity[u64](wrapping_add(a.len(), b.len()));
+    let mut i: u64 = 0;
+    let mut j: u64 = 0;
+    loop {
+        if !(i < a.len() || j < b.len()) {
+            break;
+        }
+        if j >= b.len() {
+            out.push(at(in a, i));
+            i = wrapping_add(i, 1);
+        } else if i >= a.len() {
+            out.push(at(in b, j));
+            j = wrapping_add(j, 1);
+        } else {
+            let x = at(in a, i);
+            let y = at(in b, j);
+            if x < y {
+                out.push(x);
+                i = wrapping_add(i, 1);
+            } else if y < x {
+                out.push(y);
+                j = wrapping_add(j, 1);
+            } else {
+                out.push(x);
+                i = wrapping_add(i, 1);
+                j = wrapping_add(j, 1);
+            }
+        }
+    }
+    a.clear();
+    a.extend(in out.as_slice());
+}
+
+// ---------------------------------------------------------------------------
+// Locations, kinds and facts.
+
+fn loc(tag: u8, index: u64) -> u64 {
+    (widen_u64(tag) << 32) | (index & LOW32)
+}
+
+fn loc_tag(key: u64) -> u8 {
+    wrapping_u8(key >> 32)
+}
+
+fn is_in(key: u64) -> bool {
+    loc_tag(key) == L_IN
+}
+
+fn is_out(key: u64) -> bool {
+    loc_tag(key) == L_OUT
+}
+
+fn fact(key: u64, k: u8) -> u64 {
+    (key << 3) | widen_u64(k)
+}
+
+fn fact_key(e: u64) -> u64 {
+    e >> 3
+}
+
+fn fact_kind(e: u64) -> u8 {
+    wrapping_u8(e & 7)
+}
+
+// Whether `kind` exists in the Lean model (`Kind`).
+fn lean_kind(k: u8) -> bool {
+    k != K_F64
+}
+
+// `Kind.lo` is -2^63 for `i64` and 0 for every other kind.
+fn lo_neg(k: u8) -> bool {
+    k == K_I64
+}
+
+// `Kind.hi` in increasing order: f64 (-1), bool, u8, u32, i64, u64.
+fn hi_rank(k: u8) -> u8 {
+    if k == K_F64 {
+        0
+    } else if k == K_BOOL {
+        1
+    } else if k == K_U8 {
+        2
+    } else if k == K_U32 {
+        3
+    } else if k == K_I64 {
+        4
+    } else {
+        5
+    }
+}
+
+// The kinds `constantKind` and `join_kind` try, narrowest first.
+fn candidate(i: u64) -> u8 {
+    if i == 0 {
+        K_BOOL
+    } else if i == 1 {
+        K_U8
+    } else if i == 2 {
+        K_U32
+    } else if i == 3 {
+        K_U64
+    } else {
+        K_I64
+    }
+}
+
+// `fits kind value` for the Lean integer of a `Const` row: `word`, or
+// `word - 2^64` when `neg` (the row is read as signed).
+fn fits(k: u8, word: u64, neg: bool) -> bool {
+    if neg {
+        k == K_I64 && word >= TWO_63
+    } else if k == K_U8 {
+        word <= 255
+    } else if k == K_U32 {
+        word <= LOW32
+    } else if k == K_U64 {
+        true
+    } else if k == K_I64 {
+        word < TWO_63
+    } else if k == K_BOOL {
+        word <= 1
+    } else {
+        false
+    }
+}
+
+// `constantKind`.
+fn constant_kind(word: u64, neg: bool) -> u8 {
+    for i in 0..5 {
+        let k = candidate(i);
+        if fits(k, word, neg) {
+            return k;
+        }
+    }
+    NONE
+}
+
+// The narrowest Lean kind containing both ranges.
+fn join_kind(a: u8, b: u8) -> u8 {
+    let l_neg = lo_neg(a) || lo_neg(b);
+    let ha = hi_rank(a);
+    let hb = hi_rank(b);
+    let h = if ha > hb {
+        ha
+    } else {
+        hb
+    };
+    for i in 0..5 {
+        let k = candidate(i);
+        if (lo_neg(k) || !l_neg) && h <= hi_rank(k) {
+            return k;
+        }
+    }
+    NONE
+}
+
+fn fact_lower(in f: ChunkSeq[u64], key: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = f.len();
+    loop {
+        if !(lo < hi) {
+            break;
+        }
+        let mid = wrapping_add(lo, hi) >> 1;
+        if fact_key(at(in f, mid)) < key {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+fn get_kind(in f: ChunkSeq[u64], key: u64) -> u8 {
+    let i = fact_lower(in f, key);
+    match f.try_get(i) {
+        Option::Some(e) => {
+            if fact_key(e) == key {
+                fact_kind(e)
+            } else {
+                NONE
+            }
+        }
+        Option::None => NONE,
+    }
+}
+
+// `put`: `NONE` removes the fact.
+fn put_fact(inout f: ChunkSeq[u64], key: u64, k: u8) {
+    let i = fact_lower(in f, key);
+    let present = match f.try_get(i) {
+        Option::Some(e) => fact_key(e) == key,
+        Option::None => false,
+    };
+    if present {
+        if k == NONE {
+            remove_at(inout f, i);
+        } else {
+            let ok = f.try_set(i, fact(key, k));
+        }
+    } else if k != NONE {
+        insert_at(inout f, i, fact(key, k));
+    }
+}
+
+// `supports`.
+fn supports(in f: ChunkSeq[u64], key: u64, k: u8) -> bool {
+    let known = get_kind(in f, key);
+    if known == NONE {
+        return false;
+    }
+    lean_kind(k)
+        && lean_kind(known)
+        && (lo_neg(k) || !lo_neg(known))
+        && hi_rank(known) <= hi_rank(k)
+}
+
+// `entails` for the annotation `list[lo..hi]`.
+fn entails(in f: ChunkSeq[u64], in list: ChunkSeq[u64], lo: u64, hi: u64) -> bool {
+    let mut i = lo;
+    loop {
+        if !(i < hi) {
+            break;
+        }
+        let e = at(in list, i);
+        if !supports(in f, fact_key(e), fact_kind(e)) {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+// `factsOf`: the first fact for a location wins.
+fn facts_of(in list: ChunkSeq[u64], lo: u64, hi: u64) -> ChunkSeq[u64] {
+    let mut f = ChunkSeq::new[u64]();
+    let mut i = lo;
+    loop {
+        if !(i < hi) {
+            break;
+        }
+        let e = at(in list, i);
+        if get_kind(in f, fact_key(e)) == NONE {
+            put_fact(inout f, fact_key(e), fact_kind(e));
+        }
+        i = wrapping_add(i, 1);
+    }
+    f
+}
+
+fn retain_in(inout f: ChunkSeq[u64]) {
+    let mut out = ChunkSeq::with_capacity[u64](f.len());
+    for i in 0..f.len() {
+        let e = at(in f, i);
+        if is_in(fact_key(e)) {
+            out.push(e);
+        }
+    }
+    f.clear();
+    f.extend(in out.as_slice());
+}
+
+fn retain_not_out(inout f: ChunkSeq[u64]) {
+    let mut out = ChunkSeq::with_capacity[u64](f.len());
+    for i in 0..f.len() {
+        let e = at(in f, i);
+        if !is_out(fact_key(e)) {
+            out.push(e);
+        }
+    }
+    f.clear();
+    f.extend(in out.as_slice());
+}
+
+// ---------------------------------------------------------------------------
+// Programs and certificates.
+
+// The functions in `Artifact::lir` order: function `f`'s rows are
+// `rows[starts[f]..starts[f + 1]]` and its name `names[name_at[f]..]`.
+struct Prog {
+    rows: ChunkSeq[Lir],
+    starts: ChunkSeq[u64],
+    names: ChunkSeq[u8],
+    name_at: ChunkSeq[u64]
+}
+
+fn no_row() -> Lir {
+    Lir {
+        tag: 255,
+        op: 0,
+        kind: 0,
+        f1: 0,
+        f2: 0,
+        f3: 0
+    }
+}
+
+fn nfun(in p: Prog) -> u64 {
+    wrapping_sub(p.starts.len(), 1)
+}
+
+fn first_row(in p: Prog, f: u64) -> u64 {
+    at(in p.starts, f)
+}
+
+fn row_count(in p: Prog, f: u64) -> u64 {
+    wrapping_sub(at(in p.starts, wrapping_add(f, 1)), at(in p.starts, f))
+}
+
+fn row_at(in p: Prog, i: u64) -> Lir {
+    match p.rows.try_get(i) {
+        Option::Some(r) => r,
+        Option::None => no_row(),
+    }
+}
+
+// Row `pc` of function `f` (`no_row()` past its end).
+fn row_of(in p: Prog, f: u64, pc: u64) -> Lir {
+    if pc >= row_count(in p, f) {
+        return no_row();
+    }
+    row_at(in p, wrapping_add(first_row(in p, f), pc))
+}
+
+// A certificate: function `f`'s annotations are numbers
+// `fa[f]..fa[f + 1]`, annotation `a` the facts `ann[ann_at[a]..ann_at[a + 1]]`;
+// its exit summary `post[post_at[f]..]` and its signed constants (rows)
+// `signed[signed_at[f]..]`, ascending.
+struct Cert {
+    fa: ChunkSeq[u64],
+    ann_at: ChunkSeq[u64],
+    ann: ChunkSeq[u64],
+    post_at: ChunkSeq[u64],
+    post: ChunkSeq[u64],
+    signed_at: ChunkSeq[u64],
+    signed: ChunkSeq[u64]
+}
+
+fn cert_new() -> Cert {
+    let mut ann_at = ChunkSeq::new[u64]();
+    ann_at.push(0);
+    let mut post_at = ChunkSeq::new[u64]();
+    post_at.push(0);
+    let mut signed_at = ChunkSeq::new[u64]();
+    signed_at.push(0);
+    Cert {
+        fa: ChunkSeq::new[u64](),
+        ann_at: ann_at,
+        ann: ChunkSeq::new[u64](),
+        post_at: post_at,
+        post: ChunkSeq::new[u64](),
+        signed_at: signed_at,
+        signed: ChunkSeq::new[u64]()
+    }
+}
+
+fn cert_clear(inout c: Cert) {
+    c.fa.clear();
+    c.ann_at.clear();
+    c.ann_at.push(0);
+    c.ann.clear();
+    c.post_at.clear();
+    c.post_at.push(0);
+    c.post.clear();
+    c.signed_at.clear();
+    c.signed_at.push(0);
+    c.signed.clear();
+}
+
+// Start the next function's annotations.
+fn begin_function(inout c: Cert) {
+    c.fa.push(wrapping_sub(c.ann_at.len(), 1));
+}
+
+fn end_annotation(inout c: Cert) {
+    c.ann_at.push(c.ann.len());
+}
+
+// After the last function: close `fa`.
+fn finish_cert(inout c: Cert) {
+    c.fa.push(wrapping_sub(c.ann_at.len(), 1));
+}
+
+fn cert_functions(in c: Cert) -> u64 {
+    wrapping_sub(c.fa.len(), 1)
+}
+
+fn annotation_count(in c: Cert, f: u64) -> u64 {
+    wrapping_sub(at(in c.fa, wrapping_add(f, 1)), at(in c.fa, f))
+}
+
+// The bounds in `ann` of function `f`'s annotation of row `pc` (empty past
+// the last row, as `annotation` reads a missing one).
+fn ann_lo(in c: Cert, f: u64, pc: u64) -> u64 {
+    if pc >= annotation_count(in c, f) {
+        return 0;
+    }
+    at(in c.ann_at, wrapping_add(at(in c.fa, f), pc))
+}
+
+fn ann_hi(in c: Cert, f: u64, pc: u64) -> u64 {
+    if pc >= annotation_count(in c, f) {
+        return 0;
+    }
+    at(in c.ann_at, wrapping_add(wrapping_add(at(in c.fa, f), pc), 1))
+}
+
+fn signed_has(in c: Cert, f: u64, pc: u64) -> bool {
+    let mut i = at(in c.signed_at, f);
+    let hi = at(in c.signed_at, wrapping_add(f, 1));
+    loop {
+        if !(i < hi) {
+            break;
+        }
+        if at(in c.signed, i) == pc {
+            return true;
+        }
+        i = wrapping_add(i, 1);
+    }
+    false
+}
+
+// The label resolver: `f << 32 | label` to the row of the label's first
+// `Label` row in `f` (`labels_of`).
+fn labels_of(in p: Prog) -> FlatTable[u64, u64] {
+    let mut t: FlatTable[u64, u64] = flat_table_new[u64, u64]();
+    for f in 0..nfun(in p) {
+        let s = first_row(in p, f);
+        for pc in 0..row_count(in p, f) {
+            let r = row_at(in p, wrapping_add(s, pc));
+            if r.tag == LIR_LABEL {
+                let k = (f << 32) | r.f1;
+                if !t.contains_key(k) {
+                    let _ = t.insert(k, pc);
+                }
+            }
+        }
+    }
+    t
+}
+
+fn label_row(in t: FlatTable[u64, u64], f: u64, l: u64) -> u64 {
+    match t.get((f << 32) | l) {
+        Option::Some(pc) => pc,
+        Option::None => MISSING,
+    }
+}
+
+// `caught_targets`: the handler labels each row (by global row) can jump to
+// when it fails, under the trap scope of the last `Scope` row before it in
+// emission order, across functions. Up to two a row (`MISSING`: none).
+fn caught_targets(in p: Prog, inout c1: ChunkSeq[u64], inout c2: ChunkSeq[u64]) {
+    let ovf_exit = widen_u64(T_OVERFLOW);
+    let div0_exit = widen_u64(T_DIV0);
+    let mut s_ovf = ovf_exit;
+    let mut s_div0 = div0_exit;
+    for i in 0..p.rows.len() {
+        let r = row_at(in p, i);
+        let ovf = if s_ovf != ovf_exit {
+            s_ovf
+        } else {
+            MISSING
+        };
+        let div0 = if s_div0 != div0_exit {
+            s_div0
+        } else {
+            MISSING
+        };
+        let mut a = MISSING;
+        let mut b = MISSING;
+        if r.tag == LIR_ARITH {
+            if ovf != MISSING {
+                a = ovf;
+                b = div0;
+            } else {
+                a = div0;
+            }
+        } else if r.tag == LIR_NEG || (r.tag == LIR_TRAP && r.op == T_OVERFLOW) {
+            a = ovf;
+        } else if r.tag == LIR_TRAP && r.op == T_DIV0 {
+            a = div0;
+        }
+        c1.push(a);
+        c2.push(b);
+        if r.tag == LIR_SCOPE {
+            s_ovf = r.f1;
+            s_div0 = r.f2;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The Lean mirror (`CodegenValidation`, `CodegenFlowValidation`).
+
+// The operands a row requires (`checkRow`): up to two `(key, kind)`, as
+// facts (`MISSING`: none).
+fn required(in r: Lir, which: u64) -> u64 {
+    let t = r.tag;
+    if t == LIR_ARITH || t == LIR_WRAPPING || t == LIR_COMPARE {
+        if which == 0 {
+            fact(loc(L_SLOT, r.f2), r.kind)
+        } else {
+            fact(loc(L_SLOT, r.f3), r.kind)
+        }
+    } else if which != 0 {
+        MISSING
+    } else if t == LIR_NEG {
+        fact(loc(L_SLOT, r.f2), r.kind)
+    } else if t == LIR_NOT {
+        fact(loc(L_SLOT, r.f2), K_BOOL)
+    } else if t == LIR_BRANCH_ZERO {
+        fact(loc(L_SLOT, r.f1), K_BOOL)
+    } else {
+        MISSING
+    }
+}
+
+// The slot a value row writes (`destination`), `MISSING` for the others.
+fn destination(in r: Lir) -> u64 {
+    let t = r.tag;
+    if t == LIR_ARITH
+        || t == LIR_WRAPPING
+        || t == LIR_NEG
+        || t == LIR_NOT
+        || t == LIR_COMPARE
+        || t == LIR_FARITH
+        || t == LIR_FNEG
+        || t == LIR_FCOMPARE {
+        r.f1
+    } else {
+        MISSING
+    }
+}
+
+// `checkRow`. `Call` and `Enter` are rejected, as in Lean.
+fn check_row(in f: ChunkSeq[u64], in r: Lir) -> bool {
+    let t = r.tag;
+    if t == LIR_ARITH || t == LIR_WRAPPING {
+        r.kind != K_BOOL
+            && supports(in f, loc(L_SLOT, r.f2), r.kind)
+            && supports(in f, loc(L_SLOT, r.f3), r.kind)
+    } else if t == LIR_NEG {
+        r.kind != K_BOOL && supports(in f, loc(L_SLOT, r.f2), r.kind)
+    } else if t == LIR_NOT {
+        supports(in f, loc(L_SLOT, r.f2), K_BOOL)
+    } else if t == LIR_COMPARE {
+        supports(in f, loc(L_SLOT, r.f2), r.kind) && supports(in f, loc(L_SLOT, r.f3), r.kind)
+    } else if t == LIR_BRANCH_ZERO
+        || t == LIR_JUMP
+        || t == LIR_LABEL
+        || t == LIR_CALL
+        || t == LIR_ENTER
+        || t == LIR_RETURN {
+        false
+    } else {
+        true
+    }
+}
+
+// Copy the fact of `src` to `dst` (`put dst (facts src)`).
+fn copy_fact(inout f: ChunkSeq[u64], dst: u64, src: u64) {
+    let k = get_kind(in f, src);
+    put_fact(inout f, dst, k);
+}
+
+// `transfer` for every row but `Const` (which the callers handle).
+fn transfer(inout f: ChunkSeq[u64], in r: Lir) {
+    let t = r.tag;
+    if t == LIR_MOVE {
+        copy_fact(inout f, loc(L_SLOT, r.f1), loc(L_SLOT, r.f2));
+    } else if t == LIR_ARITH || t == LIR_WRAPPING || t == LIR_NEG {
+        put_fact(inout f, loc(L_SLOT, r.f1), r.kind);
+    } else if t == LIR_NOT || t == LIR_COMPARE || t == LIR_FCOMPARE {
+        put_fact(inout f, loc(L_SLOT, r.f1), K_BOOL);
+    } else if t == LIR_FARITH || t == LIR_FNEG {
+        put_fact(inout f, loc(L_SLOT, r.f1), NONE);
+    } else if t == LIR_STORE_OUT {
+        copy_fact(inout f, loc(L_OUT, r.f1), loc(L_SLOT, r.f2));
+    } else if t == LIR_LOAD_OUT {
+        copy_fact(inout f, loc(L_SLOT, r.f1), loc(L_OUT, r.f2));
+    } else if t == LIR_LOAD_IN {
+        copy_fact(inout f, loc(L_SLOT, r.f1), loc(L_IN, r.f2));
+    } else if t == LIR_STORE_IN {
+        copy_fact(inout f, loc(L_IN, r.f1), loc(L_SLOT, r.f2));
+    } else if t == LIR_LOAD_PTR {
+        // A heap load knows nothing; this mirror tracks no heap words.
+        put_fact(inout f, loc(L_SLOT, r.f1), NONE);
+    }
+}
+
+// `checkJump`: an unknown label is the modelled unreachable abort.
+fn check_jump(in t: FlatTable[u64, u64], in c: Cert, f: u64, in facts: ChunkSeq[u64], l: u64)
+    -> bool {
+    let target = label_row(in t, f, l);
+    if target == MISSING {
+        return true;
+    }
+    entails(in facts, in c.ann, ann_lo(in c, f, target), ann_hi(in c, f, target))
+}
+
+// `checkConst`: the destination may get any kind containing the value.
+fn check_const(
+    in facts: ChunkSeq[u64],
+    dst: u64,
+    word: u64,
+    neg: bool,
+    in c: Cert,
+    lo: u64,
+    hi: u64
+) -> bool {
+    let d = loc(L_SLOT, dst);
+    let mut i = lo;
+    loop {
+        if !(i < hi) {
+            break;
+        }
+        let e = at(in c.ann, i);
+        let ok = if fact_key(e) == d {
+            lean_kind(fact_kind(e)) && fits(fact_kind(e), word, neg)
+        } else {
+            supports(in facts, fact_key(e), fact_kind(e))
+        };
+        if !ok {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+// `checkNode`.
+fn lean_check_node(in t: FlatTable[u64, u64], in c: Cert, f: u64, pc: u64, in r: Lir) -> bool {
+    let facts = facts_of(in c.ann, ann_lo(in c, f, pc), ann_hi(in c, f, pc));
+    let next = wrapping_add(pc, 1);
+    let nlo = ann_lo(in c, f, next);
+    let nhi = ann_hi(in c, f, next);
+    let tag = r.tag;
+    if tag == LIR_BRANCH_ZERO {
+        supports(in facts, loc(L_SLOT, r.f1), K_BOOL)
+            && entails(in facts, in c.ann, nlo, nhi)
+            && check_jump(in t, in c, f, in facts, r.f2)
+    } else if tag == LIR_JUMP {
+        check_jump(in t, in c, f, in facts, r.f1)
+    } else if tag == LIR_LABEL {
+        entails(in facts, in c.ann, nlo, nhi)
+    } else if tag == LIR_CONST {
+        check_const(in facts, r.f1, r.f2, signed_has(in c, f, pc), in c, nlo, nhi)
+    } else if tag == LIR_TRAP {
+        // An abort has no successor.
+        check_row(in facts, in r)
+    } else if tag == LIR_RETURN {
+        true
+    } else {
+        if !check_row(in facts, in r) {
+            return false;
+        }
+        let mut after = copy_of(in facts);
+        transfer(inout after, in r);
+        entails(in after, in c.ann, nlo, nhi)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Text.
+
+fn puts(inout out: ChunkSeq[u8], in s: Str) {
+    out.extend(in s.as_bytes());
+}
+
+fn put_name(inout out: ChunkSeq[u8], in p: Prog, f: u64) {
+    if f >= nfun(in p) {
+        return;
+    }
+    let lo = at(in p.name_at, f);
+    let hi = at(in p.name_at, wrapping_add(f, 1));
+    let mut i = lo;
+    loop {
+        if !(i < hi) {
+            break;
+        }
+        match p.names.try_get(i) {
+            Option::Some(b) => out.push(b),
+            Option::None => {}
+        }
+        i = wrapping_add(i, 1);
+    }
+}
+
+// `Rejection`'s display up to the reason.
+fn reject(inout out: ChunkSeq[u8], in p: Prog, f: u64, pc: u64) {
+    puts(inout out, "range certificate rejected in '");
+    put_name(inout out, in p, f);
+    puts(inout out, "' at row ");
+    put_decimal(inout out, pc);
+    puts(inout out, ": ");
+}
+
+fn put_debug_kind(inout out: ChunkSeq[u8], k: u8) {
+    if k == K_U8 {
+        puts(inout out, "U8");
+    } else if k == K_U32 {
+        puts(inout out, "U32");
+    } else if k == K_U64 {
+        puts(inout out, "U64");
+    } else if k == K_I64 {
+        puts(inout out, "I64");
+    } else if k == K_BOOL {
+        puts(inout out, "Bool");
+    } else {
+        puts(inout out, "F64");
+    }
+}
+
+// `ArithOp`, `WrapOp` and `FloatOp` share their names' order.
+fn put_debug_op(inout out: ChunkSeq[u8], op: u8) {
+    if op == 0 {
+        puts(inout out, "Add");
+    } else if op == 1 {
+        puts(inout out, "Sub");
+    } else if op == 2 {
+        puts(inout out, "Mul");
+    } else if op == 3 {
+        puts(inout out, "Div");
+    } else {
+        puts(inout out, "Rem");
+    }
+}
+
+fn put_debug_cond(inout out: ChunkSeq[u8], c: u8) {
+    if c == 0 {
+        puts(inout out, "Eq");
+    } else if c == 1 {
+        puts(inout out, "Ne");
+    } else if c == 2 {
+        puts(inout out, "Lt");
+    } else if c == 3 {
+        puts(inout out, "Le");
+    } else if c == 4 {
+        puts(inout out, "Gt");
+    } else {
+        puts(inout out, "Ge");
+    }
+}
+
+fn put_debug_trap(inout out: ChunkSeq[u8], k: u8) {
+    if k == 0 {
+        puts(inout out, "Overflow");
+    } else if k == 1 {
+        puts(inout out, "DivisionByZero");
+    } else if k == 2 {
+        puts(inout out, "Unreachable");
+    } else {
+        puts(inout out, "Region");
+    }
+}
+
+fn field(inout out: ChunkSeq[u8], in name: Str, v: u64, last: bool) {
+    puts(inout out, name);
+    puts(inout out, ": ");
+    put_decimal(inout out, v);
+    if last {
+        puts(inout out, " }");
+    } else {
+        puts(inout out, ", ");
+    }
+}
+
+// `{row:?}` of the Rust `Lir`.
+fn put_debug(inout out: ChunkSeq[u8], in r: Lir) {
+    let t = r.tag;
+    if t == LIR_CONST {
+        puts(inout out, "Const { ");
+        field(inout out, "dst", r.f1, false);
+        field(inout out, "word", r.f2, true);
+    } else if t == LIR_MOVE {
+        puts(inout out, "Move { ");
+        field(inout out, "dst", r.f1, false);
+        field(inout out, "src", r.f2, true);
+    } else if t == LIR_ARITH || t == LIR_WRAPPING {
+        if t == LIR_ARITH {
+            puts(inout out, "Arith { op: ");
+        } else {
+            puts(inout out, "Wrapping { op: ");
+        }
+        put_debug_op(inout out, r.op);
+        puts(inout out, ", kind: ");
+        put_debug_kind(inout out, r.kind);
+        puts(inout out, ", ");
+        field(inout out, "dst", r.f1, false);
+        field(inout out, "a", r.f2, false);
+        field(inout out, "b", r.f3, true);
+    } else if t == LIR_NEG {
+        puts(inout out, "Neg { kind: ");
+        put_debug_kind(inout out, r.kind);
+        puts(inout out, ", ");
+        field(inout out, "dst", r.f1, false);
+        field(inout out, "a", r.f2, true);
+    } else if t == LIR_NOT || t == LIR_FNEG {
+        if t == LIR_NOT {
+            puts(inout out, "Not { ");
+        } else {
+            puts(inout out, "FNeg { ");
+        }
+        field(inout out, "dst", r.f1, false);
+        field(inout out, "a", r.f2, true);
+    } else if t == LIR_COMPARE {
+        puts(inout out, "Compare { cond: ");
+        put_debug_cond(inout out, r.op);
+        puts(inout out, ", kind: ");
+        put_debug_kind(inout out, r.kind);
+        puts(inout out, ", ");
+        field(inout out, "dst", r.f1, false);
+        field(inout out, "a", r.f2, false);
+        field(inout out, "b", r.f3, true);
+    } else if t == LIR_FARITH {
+        puts(inout out, "FArith { op: ");
+        put_debug_op(inout out, r.op);
+        puts(inout out, ", ");
+        field(inout out, "dst", r.f1, false);
+        field(inout out, "a", r.f2, false);
+        field(inout out, "b", r.f3, true);
+    } else if t == LIR_FCOMPARE {
+        puts(inout out, "FCompare { cond: ");
+        put_debug_cond(inout out, r.op);
+        puts(inout out, ", ");
+        field(inout out, "dst", r.f1, false);
+        field(inout out, "a", r.f2, false);
+        field(inout out, "b", r.f3, true);
+    } else if t == LIR_STORE_OUT || t == LIR_STORE_IN {
+        if t == LIR_STORE_OUT {
+            puts(inout out, "StoreOut { ");
+        } else {
+            puts(inout out, "StoreIn { ");
+        }
+        field(inout out, "index", r.f1, false);
+        field(inout out, "src", r.f2, true);
+    } else if t == LIR_LOAD_OUT || t == LIR_LOAD_IN {
+        if t == LIR_LOAD_OUT {
+            puts(inout out, "LoadOut { ");
+        } else {
+            puts(inout out, "LoadIn { ");
+        }
+        field(inout out, "dst", r.f1, false);
+        field(inout out, "index", r.f2, true);
+    } else if t == LIR_LOAD_PTR {
+        puts(inout out, "LoadPtr { ");
+        field(inout out, "dst", r.f1, false);
+        field(inout out, "ptr", r.f2, false);
+        field(inout out, "offset", r.f3, true);
+    } else if t == LIR_STORE_PTR {
+        puts(inout out, "StorePtr { ");
+        field(inout out, "ptr", r.f1, false);
+        field(inout out, "offset", r.f2, false);
+        field(inout out, "src", r.f3, true);
+    } else if t == LIR_CALL {
+        puts(inout out, "Call { ");
+        field(inout out, "callee", r.f1, true);
+    } else if t == LIR_LABEL || t == LIR_JUMP {
+        if t == LIR_LABEL {
+            puts(inout out, "Label(");
+        } else {
+            puts(inout out, "Jump(");
+        }
+        put_decimal(inout out, r.f1);
+        puts(inout out, ")");
+    } else if t == LIR_BRANCH_ZERO {
+        puts(inout out, "BranchZero { ");
+        field(inout out, "cond", r.f1, false);
+        field(inout out, "target", r.f2, true);
+    } else if t == LIR_ENTER {
+        puts(inout out, "Enter { ");
+        field(inout out, "words", r.f1, true);
+    } else if t == LIR_RETURN {
+        puts(inout out, "Return");
+    } else if t == LIR_TRAP {
+        puts(inout out, "Trap(");
+        put_debug_trap(inout out, r.op);
+        puts(inout out, ")");
+    } else {
+        puts(inout out, "Scope { ");
+        field(inout out, "ovf", r.f1, false);
+        field(inout out, "div0", r.f2, true);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The production validator.
+
+// Whether `ann[lo..hi]` names only `In` words.
+fn only_in(in list: ChunkSeq[u64], lo: u64, hi: u64) -> bool {
+    let mut i = lo;
+    loop {
+        if !(i < hi) {
+            break;
+        }
+        if !is_in(fact_key(at(in list, i))) {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+fn names_f64(in list: ChunkSeq[u64], lo: u64, hi: u64) -> bool {
+    let mut i = lo;
+    loop {
+        if !(i < hi) {
+            break;
+        }
+        if !lean_kind(fact_kind(at(in list, i))) {
+            return true;
+        }
+        i = wrapping_add(i, 1);
+    }
+    false
+}
+
+// `entails facts (in_to_out list[lo..hi])`.
+fn entails_out(in facts: ChunkSeq[u64], in list: ChunkSeq[u64], lo: u64, hi: u64) -> bool {
+    let mut i = lo;
+    loop {
+        if !(i < hi) {
+            break;
+        }
+        let e = at(in list, i);
+        let key = fact_key(e);
+        if is_in(key) && !supports(in facts, loc(L_OUT, key & LOW32), fact_kind(e)) {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+// Validate `c` for `p`; a rejection is written to `out` as `Rejection`
+// displays.
+fn validate(in p: Prog, in c: Cert, inout out: ChunkSeq[u8]) -> bool {
+    let n = nfun(in p);
+    if cert_functions(in c) != n {
+        reject(inout out, in p, 0, 0);
+        puts(inout out, "one function certificate per function");
+        return false;
+    }
+    let mut entries: FlatTable[u64, u64] = flat_table_new[u64, u64]();
+    let mut all: FlatTable[u64, u8] = flat_table_new[u64, u8]();
+    for f in 0..n {
+        let r0 = row_of(in p, f, 0);
+        if r0.tag != LIR_LABEL {
+            reject(inout out, in p, f, 0);
+            puts(inout out, "row 0 is not the entry label");
+            return false;
+        }
+        let _ = entries.insert(r0.f1, f);
+        for pc in 0..row_count(in p, f) {
+            let r = row_of(in p, f, pc);
+            if r.tag == LIR_LABEL {
+                if all.contains_key(r.f1) {
+                    reject(inout out, in p, f, pc);
+                    puts(inout out, "label ");
+                    put_decimal(inout out, r.f1);
+                    puts(inout out, " is defined twice");
+                    return false;
+                }
+                let _ = all.insert(r.f1, 0);
+            }
+        }
+    }
+    // Every shape first: a call reads its callee's entry annotation.
+    for f in 0..n {
+        if annotation_count(in c, f) != row_count(in p, f) {
+            reject(inout out, in p, f, 0);
+            puts(inout out, "one annotation per row");
+            return false;
+        }
+    }
+    let mut c1 = ChunkSeq::new[u64]();
+    let mut c2 = ChunkSeq::new[u64]();
+    caught_targets(in p, inout c1, inout c2);
+    let labels = labels_of(in p);
+    for f in 0..n {
+        let rows = row_count(in p, f);
+        let mut i = at(in c.signed_at, f);
+        let shi = at(in c.signed_at, wrapping_add(f, 1));
+        loop {
+            if !(i < shi) {
+                break;
+            }
+            let pc = at(in c.signed, i);
+            if row_of(in p, f, pc).tag != LIR_CONST {
+                reject(inout out, in p, f, pc);
+                puts(inout out, "signed constant on a non-constant row");
+                return false;
+            }
+            i = wrapping_add(i, 1);
+        }
+        let plo = at(in c.post_at, f);
+        let phi = at(in c.post_at, wrapping_add(f, 1));
+        let alo = ann_lo(in c, f, 0);
+        let ahi = ann_hi(in c, f, wrapping_sub(rows, 1));
+        if names_f64(in c.ann, alo, ahi) || names_f64(in c.post, plo, phi) {
+            reject(inout out, in p, f, 0);
+            puts(inout out, "an annotation names f64");
+            return false;
+        }
+        let elo = ann_lo(in c, f, 0);
+        let ehi = ann_hi(in c, f, 0);
+        if !only_in(in c.ann, elo, ehi) || !only_in(in c.post, plo, phi) {
+            reject(inout out, in p, f, 0);
+            puts(inout out, "a summary names a non-incoming word");
+            return false;
+        }
+        if f == 0 && ehi > elo {
+            reject(inout out, in p, f, 0);
+            puts(inout out, "the program entry has a precondition");
+            return false;
+        }
+        let entry = row_of(in p, f, 0).f1;
+        let base = first_row(in p, f);
+        for pc in 0..rows {
+            let r = row_of(in p, f, pc);
+            if r.tag == LIR_ENTER && pc != 1 {
+                reject(inout out, in p, f, pc);
+                puts(inout out, "Enter outside the prologue");
+                return false;
+            }
+            if pc == 1 && r.tag != LIR_ENTER {
+                reject(inout out, in p, f, pc);
+                puts(inout out, "row 1 is not Enter");
+                return false;
+            }
+            if r.tag == LIR_JUMP || r.tag == LIR_BRANCH_ZERO {
+                let l = if r.tag == LIR_JUMP {
+                    r.f1
+                } else {
+                    r.f2
+                };
+                if l == entry || label_row(in labels, f, l) == MISSING {
+                    reject(inout out, in p, f, pc);
+                    puts(inout out, "jump to label ");
+                    put_decimal(inout out, l);
+                    puts(inout out, " outside the body");
+                    return false;
+                }
+            }
+            let lo = ann_lo(in c, f, pc);
+            let hi = ann_hi(in c, f, pc);
+            let nlo = ann_lo(in c, f, wrapping_add(pc, 1));
+            let nhi = ann_hi(in c, f, wrapping_add(pc, 1));
+            for k in 0..2 {
+                let t = if k == 0 {
+                    at(in c1, wrapping_add(base, pc))
+                } else {
+                    at(in c2, wrapping_add(base, pc))
+                };
+                if t != MISSING {
+                    let target = label_row(in labels, f, t);
+                    if target != MISSING && t != entry {
+                        let facts = facts_of(in c.ann, lo, hi);
+                        let tlo = ann_lo(in c, f, target);
+                        let thi = ann_hi(in c, f, target);
+                        if !entails(in facts, in c.ann, tlo, thi) {
+                            reject(inout out, in p, f, pc);
+                            puts(inout out, "the handler at label ");
+                            put_decimal(inout out, t);
+                            puts(inout out, " is not established");
+                            return false;
+                        }
+                    } else {
+                        reject(inout out, in p, f, pc);
+                        puts(inout out, "trap scope label ");
+                        put_decimal(inout out, t);
+                        puts(inout out, " outside the body");
+                        return false;
+                    }
+                }
+            }
+            let accepted = if r.tag == LIR_ENTER {
+                let mut facts = facts_of(in c.ann, lo, hi);
+                retain_in(inout facts);
+                entails(in facts, in c.ann, nlo, nhi)
+            } else if r.tag == LIR_CALL {
+                let g = match entries.get(r.f1) {
+                    Option::Some(g) => g,
+                    Option::None => {
+                        reject(inout out, in p, f, pc);
+                        puts(inout out, "call to non-entry label ");
+                        put_decimal(inout out, r.f1);
+                        return false;
+                    }
+                };
+                let mut facts = facts_of(in c.ann, lo, hi);
+                if !entails_out(in facts, in c.ann, ann_lo(in c, g, 0), ann_hi(in c, g, 0)) {
+                    reject(inout out, in p, f, pc);
+                    puts(inout out, "arguments do not establish the entry of '");
+                    put_name(inout out, in p, g);
+                    puts(inout out, "'");
+                    return false;
+                }
+                retain_not_out(inout facts);
+                // `facts_of (in_to_out post)`: the first fact a word wins.
+                let mut results = ChunkSeq::new[u64]();
+                let mut j = at(in c.post_at, g);
+                let jhi = at(in c.post_at, wrapping_add(g, 1));
+                loop {
+                    if !(j < jhi) {
+                        break;
+                    }
+                    let e = at(in c.post, j);
+                    if is_in(fact_key(e)) {
+                        let key = loc(L_OUT, fact_key(e) & LOW32);
+                        if get_kind(in results, key) == NONE {
+                            put_fact(inout results, key, fact_kind(e));
+                        }
+                    }
+                    j = wrapping_add(j, 1);
+                }
+                for j in 0..results.len() {
+                    let e = at(in results, j);
+                    put_fact(inout facts, fact_key(e), fact_kind(e));
+                }
+                entails(in facts, in c.ann, nlo, nhi)
+            } else if r.tag == LIR_RETURN {
+                let facts = facts_of(in c.ann, lo, hi);
+                entails(in facts, in c.post, plo, phi)
+            } else {
+                lean_check_node(in labels, in c, f, pc, in r)
+            };
+            if !accepted {
+                reject(inout out, in p, f, pc);
+                put_debug(inout out, in r);
+                puts(inout out, " is not established");
+                return false;
+            }
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// The generator (untrusted: everything it produces is validated).
+//
+// A state is a facts map and the origins of its large constants. `Summ`
+// holds one optional state per row or per function.
+
+struct Summ {
+    f: ChunkSeq[ChunkSeq[u64]],
+    o: ChunkSeq[ChunkSeq[u64]],
+    h: ChunkSeq[bool]
+}
+
+fn summ_new(n: u64) -> Summ {
+    let mut f = ChunkSeq::new[ChunkSeq[u64]]();
+    let mut o = ChunkSeq::new[ChunkSeq[u64]]();
+    let mut h = ChunkSeq::new[bool]();
+    for i in 0..n {
+        f.push(ChunkSeq::new[u64]());
+        o.push(ChunkSeq::new[u64]());
+        h.push(false);
+    }
+    Summ {
+        f: f,
+        o: o,
+        h: h
+    }
+}
+
+fn summ_facts(in s: Summ, i: u64) -> ChunkSeq[u64] {
+    match s.f.try_get(i) {
+        Option::Some(x) => copy_of(in x),
+        Option::None => ChunkSeq::new[u64](),
+    }
+}
+
+fn summ_origins(in s: Summ, i: u64) -> ChunkSeq[u64] {
+    match s.o.try_get(i) {
+        Option::Some(x) => copy_of(in x),
+        Option::None => ChunkSeq::new[u64](),
+    }
+}
+
+// The first origin pair (as a pair index) whose location is not below
+// `key`, and the first above it.
+fn origin_lower(in o: ChunkSeq[u64], key: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = o.len() >> 1;
+    loop {
+        if !(lo < hi) {
+            break;
+        }
+        let mid = wrapping_add(lo, hi) >> 1;
+        if at(in o, wrapping_mul(mid, 2)) < key {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+fn origin_upper(in o: ChunkSeq[u64], key: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = o.len() >> 1;
+    loop {
+        if !(lo < hi) {
+            break;
+        }
+        let mid = wrapping_add(lo, hi) >> 1;
+        if at(in o, wrapping_mul(mid, 2)) <= key {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+// `o` without `key`'s origins, with `ids` (sorted, maybe empty) in their
+// place.
+fn origins_set(inout o: ChunkSeq[u64], key: u64, in ids: ChunkSeq[u64]) {
+    let lo = origin_lower(in o, key);
+    let hi = origin_upper(in o, key);
+    if lo == hi && ids.len() == 0 {
+        return;
+    }
+    let mut out = ChunkSeq::with_capacity[u64](wrapping_add(o.len(), wrapping_mul(ids.len(), 2)));
+    for i in 0..wrapping_mul(lo, 2) {
+        out.push(at(in o, i));
+    }
+    for i in 0..ids.len() {
+        out.push(key);
+        out.push(at(in ids, i));
+    }
+    for i in wrapping_mul(hi, 2)..o.len() {
+        out.push(at(in o, i));
+    }
+    o.clear();
+    o.extend(in out.as_slice());
+}
+
+fn origins_of(in o: ChunkSeq[u64], key: u64) -> ChunkSeq[u64] {
+    let mut ids = ChunkSeq::new[u64]();
+    let lo = origin_lower(in o, key);
+    let hi = origin_upper(in o, key);
+    for i in lo..hi {
+        ids.push(at(in o, wrapping_add(wrapping_mul(i, 2), 1)));
+    }
+    ids
+}
+
+// `State::copy`.
+fn state_copy(inout f: ChunkSeq[u64], inout o: ChunkSeq[u64], dst: u64, src: u64) {
+    copy_fact(inout f, dst, src);
+    if dst == src || (o.len() == 0) {
+        return;
+    }
+    let ids = origins_of(in o, src);
+    origins_set(inout o, dst, in ids);
+}
+
+// `State::set`.
+fn state_set(inout f: ChunkSeq[u64], inout o: ChunkSeq[u64], dst: u64, k: u8) {
+    put_fact(inout f, dst, k);
+    if o.len() != 0 {
+        let none = ChunkSeq::new[u64]();
+        origins_set(inout o, dst, in none);
+    }
+}
+
+// Keep the locations in the sorted set `keep`.
+fn retain_set(inout f: ChunkSeq[u64], inout o: ChunkSeq[u64], in keep: ChunkSeq[u64]) {
+    let mut nf = ChunkSeq::with_capacity[u64](f.len());
+    for i in 0..f.len() {
+        let e = at(in f, i);
+        if set_contains(in keep, fact_key(e)) {
+            nf.push(e);
+        }
+    }
+    f.clear();
+    f.extend(in nf.as_slice());
+    if o.len() == 0 {
+        return;
+    }
+    let mut no = ChunkSeq::with_capacity[u64](o.len());
+    let mut i: u64 = 0;
+    loop {
+        if !(i < o.len()) {
+            break;
+        }
+        let key = at(in o, i);
+        if set_contains(in keep, key) {
+            no.push(key);
+            no.push(at(in o, wrapping_add(i, 1)));
+        }
+        i = wrapping_add(i, 2);
+    }
+    o.clear();
+    o.extend(in no.as_slice());
+}
+
+// Keep the locations whose tag is (`keep_in`) or is not (otherwise) `In`
+// / `Out`: `which` 0 keeps `In`, 1 drops `Out`.
+fn retain_tag(inout f: ChunkSeq[u64], inout o: ChunkSeq[u64], which: u8) {
+    if which == 0 {
+        retain_in(inout f);
+    } else {
+        retain_not_out(inout f);
+    }
+    if o.len() == 0 {
+        return;
+    }
+    let mut no = ChunkSeq::with_capacity[u64](o.len());
+    let mut i: u64 = 0;
+    loop {
+        if !(i < o.len()) {
+            break;
+        }
+        let key = at(in o, i);
+        let keep = if which == 0 {
+            is_in(key)
+        } else {
+            !is_out(key)
+        };
+        if keep {
+            no.push(key);
+            no.push(at(in o, wrapping_add(i, 1)));
+        }
+        i = wrapping_add(i, 2);
+    }
+    o.clear();
+    o.extend(in no.as_slice());
+}
+
+// `State::rename` from the tag `from` to the tag `to`, dropping the others.
+fn rename(
+    in f: ChunkSeq[u64],
+    in o: ChunkSeq[u64],
+    from: u8,
+    to: u8,
+    inout nf: ChunkSeq[u64],
+    inout no: ChunkSeq[u64]
+) {
+    for i in 0..f.len() {
+        let e = at(in f, i);
+        let key = fact_key(e);
+        if loc_tag(key) == from {
+            nf.push(fact(loc(to, key & LOW32), fact_kind(e)));
+        }
+    }
+    let mut i: u64 = 0;
+    loop {
+        if !(i < o.len()) {
+            break;
+        }
+        let key = at(in o, i);
+        if loc_tag(key) == from {
+            no.push(loc(to, key & LOW32));
+            no.push(at(in o, wrapping_add(i, 1)));
+        }
+        i = wrapping_add(i, 2);
+    }
+}
+
+// `State::join`'s facts.
+fn join_facts(in a: ChunkSeq[u64], in b: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::with_capacity[u64](a.len());
+    let mut j: u64 = 0;
+    for i in 0..a.len() {
+        let e = at(in a, i);
+        let key = fact_key(e);
+        loop {
+            if !(j < b.len() && fact_key(at(in b, j)) < key) {
+                break;
+            }
+            j = wrapping_add(j, 1);
+        }
+        if j < b.len() && fact_key(at(in b, j)) == key {
+            let k = join_kind(fact_kind(e), fact_kind(at(in b, j)));
+            if k != NONE {
+                out.push(fact(key, k));
+            }
+        }
+    }
+    out
+}
+
+fn pair_lt(a0: u64, a1: u64, b0: u64, b1: u64) -> bool {
+    a0 < b0 || (a0 == b0 && a1 < b1)
+}
+
+// `State::join`'s origins: the union of the pairs.
+fn join_origins(in a: ChunkSeq[u64], in b: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    if b.len() == 0 {
+        return copy_of(in a);
+    }
+    if a.len() == 0 {
+        return copy_of(in b);
+    }
+    let mut out = ChunkSeq::with_capacity[u64](wrapping_add(a.len(), b.len()));
+    let mut i: u64 = 0;
+    let mut j: u64 = 0;
+    loop {
+        if !(i < a.len() || j < b.len()) {
+            break;
+        }
+        if j >= b.len() {
+            out.push(at(in a, i));
+            out.push(at(in a, wrapping_add(i, 1)));
+            i = wrapping_add(i, 2);
+        } else if i >= a.len() {
+            out.push(at(in b, j));
+            out.push(at(in b, wrapping_add(j, 1)));
+            j = wrapping_add(j, 2);
+        } else {
+            let a0 = at(in a, i);
+            let a1 = at(in a, wrapping_add(i, 1));
+            let b0 = at(in b, j);
+            let b1 = at(in b, wrapping_add(j, 1));
+            if pair_lt(a0, a1, b0, b1) {
+                out.push(a0);
+                out.push(a1);
+                i = wrapping_add(i, 2);
+            } else if pair_lt(b0, b1, a0, a1) {
+                out.push(b0);
+                out.push(b1);
+                j = wrapping_add(j, 2);
+            } else {
+                out.push(a0);
+                out.push(a1);
+                i = wrapping_add(i, 2);
+                j = wrapping_add(j, 2);
+            }
+        }
+    }
+    out
+}
+
+// `join_into`: whether slot `i` of `s` changed.
+fn join_into(inout s: Summ, i: u64, in nf: ChunkSeq[u64], in no: ChunkSeq[u64]) -> bool {
+    if !at_bool(in s.h, i) {
+        set_seq(inout s.f, i, copy_of(in nf));
+        set_seq(inout s.o, i, copy_of(in no));
+        let ok = s.h.try_set(i, true);
+        return true;
+    }
+    let jf = match s.f.try_get(i) {
+        Option::Some(old) => join_facts(in old, in nf),
+        Option::None => ChunkSeq::new[u64](),
+    };
+    let same_f = match s.f.try_get(i) {
+        Option::Some(old) => seq_eq(in old, in jf),
+        Option::None => true,
+    };
+    let jo = match s.o.try_get(i) {
+        Option::Some(old) => join_origins(in old, in no),
+        Option::None => ChunkSeq::new[u64](),
+    };
+    let same_o = match s.o.try_get(i) {
+        Option::Some(old) => seq_eq(in old, in jo),
+        Option::None => true,
+    };
+    if same_f && same_o {
+        return false;
+    }
+    set_seq(inout s.f, i, jf);
+    set_seq(inout s.o, i, jo);
+    true
+}
+
+// `live_locations`: per row of `f` (appended to `live` by global row), the
+// locations whose facts the row or a later one can still need.
+fn live_locations(
+    in p: Prog,
+    f: u64,
+    in labels: FlatTable[u64, u64],
+    in c1: ChunkSeq[u64],
+    in c2: ChunkSeq[u64],
+    inout live: ChunkSeq[ChunkSeq[u64]]
+) {
+    let base = first_row(in p, f);
+    let n = row_count(in p, f);
+    let mut ins = ChunkSeq::new[u64]();
+    let mut outs = ChunkSeq::new[u64]();
+    for pc in 0..n {
+        let r = row_at(in p, wrapping_add(base, pc));
+        if r.tag == LIR_LOAD_IN {
+            set_insert(inout ins, loc(L_IN, r.f2));
+        } else if r.tag == LIR_STORE_IN {
+            set_insert(inout ins, loc(L_IN, r.f1));
+        } else if r.tag == LIR_LOAD_OUT {
+            set_insert(inout outs, loc(L_OUT, r.f2));
+        } else if r.tag == LIR_STORE_OUT {
+            set_insert(inout outs, loc(L_OUT, r.f1));
+        }
+    }
+    let mut mine = ChunkSeq::new[ChunkSeq[u64]]();
+    for pc in 0..n {
+        mine.push(ChunkSeq::new[u64]());
+    }
+    loop {
+        let mut changed = false;
+        let mut pc = n;
+        loop {
+            if !(pc > 0) {
+                break;
+            }
+            pc = wrapping_sub(pc, 1);
+            let r = row_at(in p, wrapping_add(base, pc));
+            let mut after = ChunkSeq::new[u64]();
+            // The successors.
+            let next = wrapping_add(pc, 1);
+            let t = r.tag;
+            if t == LIR_JUMP {
+                let s = label_row(in labels, f, r.f1);
+                if s != MISSING {
+                    match mine.try_get(s) {
+                        Option::Some(l) => set_union_into(inout after, in l),
+                        Option::None => {}
+                    }
+                }
+            } else if t == LIR_BRANCH_ZERO {
+                let s = label_row(in labels, f, r.f2);
+                if s != MISSING {
+                    match mine.try_get(s) {
+                        Option::Some(l) => set_union_into(inout after, in l),
+                        Option::None => {}
+                    }
+                }
+                if next < n {
+                    match mine.try_get(next) {
+                        Option::Some(l) => set_union_into(inout after, in l),
+                        Option::None => {}
+                    }
+                }
+            } else if t == LIR_RETURN || t == LIR_TRAP {} else if next < n {
+                match mine.try_get(next) {
+                    Option::Some(l) => set_union_into(inout after, in l),
+                    Option::None => {}
+                }
+            }
+            if t == LIR_MOVE {
+                if set_remove(inout after, loc(L_SLOT, r.f1)) {
+                    set_insert(inout after, loc(L_SLOT, r.f2));
+                }
+            } else if t == LIR_STORE_OUT {
+                if set_remove(inout after, loc(L_OUT, r.f1)) {
+                    set_insert(inout after, loc(L_SLOT, r.f2));
+                }
+            } else if t == LIR_LOAD_OUT {
+                if set_remove(inout after, loc(L_SLOT, r.f1)) {
+                    set_insert(inout after, loc(L_OUT, r.f2));
+                }
+            } else if t == LIR_LOAD_IN {
+                if set_remove(inout after, loc(L_SLOT, r.f1)) {
+                    set_insert(inout after, loc(L_IN, r.f2));
+                }
+            } else if t == LIR_STORE_IN {
+                if set_remove(inout after, loc(L_IN, r.f1)) {
+                    set_insert(inout after, loc(L_SLOT, r.f2));
+                }
+            } else if t == LIR_RETURN {
+                set_union_into(inout after, in ins);
+            } else if t == LIR_CALL {
+                let mut kept = ChunkSeq::with_capacity[u64](after.len());
+                for i in 0..after.len() {
+                    let k = at(in after, i);
+                    if !is_out(k) {
+                        kept.push(k);
+                    }
+                }
+                after.clear();
+                after.extend(in kept.as_slice());
+                set_union_into(inout after, in outs);
+            } else if t == LIR_ENTER {
+                let mut kept = ChunkSeq::with_capacity[u64](after.len());
+                for i in 0..after.len() {
+                    let k = at(in after, i);
+                    if is_in(k) {
+                        kept.push(k);
+                    }
+                }
+                after.clear();
+                after.extend(in kept.as_slice());
+            } else {
+                if t == LIR_CONST {
+                    let _ = set_remove(inout after, loc(L_SLOT, r.f1));
+                }
+                let d = destination(in r);
+                if d != MISSING {
+                    let _ = set_remove(inout after, loc(L_SLOT, d));
+                }
+                for w in 0..2 {
+                    let e = required(in r, w);
+                    if e != MISSING {
+                        set_insert(inout after, fact_key(e));
+                    }
+                }
+            }
+            // A caught failure carries the row's incoming facts.
+            for w in 0..2 {
+                let l = if w == 0 {
+                    at(in c1, wrapping_add(base, pc))
+                } else {
+                    at(in c2, wrapping_add(base, pc))
+                };
+                if l != MISSING {
+                    let s = label_row(in labels, f, l);
+                    if s != MISSING {
+                        match mine.try_get(s) {
+                            Option::Some(x) => set_union_into(inout after, in x),
+                            Option::None => {}
+                        }
+                    }
+                }
+            }
+            let same = match mine.try_get(pc) {
+                Option::Some(old) => seq_eq(in old, in after),
+                Option::None => true,
+            };
+            if !same {
+                set_seq(inout mine, pc, after);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for pc in 0..n {
+        match mine.try_get_mut(pc) {
+            Option::Some(slot) => {
+                let l = replace(inout slot, ChunkSeq::new[u64]());
+                live.push(l);
+            }
+            Option::None => live.push(ChunkSeq::new[u64]()),
+        }
+    }
+}
+
+struct Gen {
+    labels: FlatTable[u64, u64],
+    entries: FlatTable[u64, u64],
+    c1: ChunkSeq[u64],
+    c2: ChunkSeq[u64],
+    live: ChunkSeq[ChunkSeq[u64]],
+    pre: Summ,
+    post: Summ,
+    flips: ChunkSeq[u64],
+    signed: ChunkSeq[u64]
+}
+
+// Pass a successor state on to row `target` (`s.retain(live)`, then
+// `join_into`, then the worklist).
+fn succ(
+    inout st: Summ,
+    inout queued: ChunkSeq[bool],
+    inout work: ChunkSeq[u64],
+    in live: ChunkSeq[ChunkSeq[u64]],
+    base: u64,
+    n: u64,
+    target: u64,
+    inout sf: ChunkSeq[u64],
+    inout so: ChunkSeq[u64]
+) {
+    if target >= n {
+        return;
+    }
+    match live.try_get(wrapping_add(base, target)) {
+        Option::Some(l) => retain_set(inout sf, inout so, in l),
+        Option::None => {}
+    }
+    if join_into(inout st, target, in sf, in so) && !at_bool(in queued, target) {
+        let ok = queued.try_set(target, true);
+        work.push(target);
+    }
+}
+
+// Write function `f`'s annotations from its row states.
+fn write_annotations(inout c: Cert, in st: Summ, n: u64) {
+    begin_function(inout c);
+    for pc in 0..n {
+        if at_bool(in st.h, pc) {
+            match st.f.try_get(pc) {
+                Option::Some(x) => {
+                    for i in 0..x.len() {
+                        let e = at(in x, i);
+                        // The program entry needs nothing; summaries are `In` only.
+                        if pc != 0 || is_in(fact_key(e)) {
+                            c.ann.push(e);
+                        }
+                    }
+                }
+                Option::None => {}
+            }
+        }
+        end_annotation(inout c);
+    }
+}
+
+// Analyse function `f` under the current summaries, writing the state
+// before each row as its annotation; whether a summary changed.
+fn analyse(in p: Prog, inout g: Gen, inout cert: Cert, f: u64) -> bool {
+    let base = first_row(in p, f);
+    let n = row_count(in p, f);
+    let mut st = summ_new(n);
+    let mut changed = false;
+    if !at_bool(in g.pre.h, f) || n == 0 {
+        write_annotations(inout cert, in st, n);
+        return false;
+    }
+    let mut written = ChunkSeq::new[u64]();
+    for pc in 0..n {
+        let r = row_at(in p, wrapping_add(base, pc));
+        if r.tag == LIR_STORE_IN {
+            set_insert(inout written, loc(L_IN, r.f1));
+        }
+    }
+    let mut pf = summ_facts(in g.pre, f);
+    let mut po = summ_origins(in g.pre, f);
+    match g.live.try_get(base) {
+        Option::Some(l) => retain_set(inout pf, inout po, in l),
+        Option::None => {}
+    }
+    let _ = join_into(inout st, 0, in pf, in po);
+    let mut work = ChunkSeq::new[u64]();
+    work.push(0);
+    let mut queued = ChunkSeq::new[bool]();
+    for pc in 0..n {
+        queued.push(pc == 0);
+    }
+    // Rows the entry does not reach are analysed from an empty state once
+    // the reachable part is done; their returns and calls feed no summary.
+    let mut seeded = false;
+    loop {
+        loop {
+            let pc = match work.pop() {
+                Option::Some(pc) => pc,
+                Option::None => break,
+            };
+            let ok = queued.try_set(pc, false);
+            let mut sf = summ_facts(in st, pc);
+            let mut so = summ_origins(in st, pc);
+            let r = row_at(in p, wrapping_add(base, pc));
+            for w in 0..2 {
+                let e = required(in r, w);
+                if e != MISSING && fact_kind(e) == K_I64 && !supports(in sf, fact_key(e), K_I64) {
+                    let ids = origins_of(in so, fact_key(e));
+                    for i in 0..ids.len() {
+                        set_insert(inout g.flips, at(in ids, i));
+                    }
+                }
+            }
+            for w in 0..2 {
+                let l = if w == 0 {
+                    at(in g.c1, wrapping_add(base, pc))
+                } else {
+                    at(in g.c2, wrapping_add(base, pc))
+                };
+                if l != MISSING {
+                    let target = label_row(in g.labels, f, l);
+                    if target != MISSING {
+                        let mut cf = copy_of(in sf);
+                        let mut co = copy_of(in so);
+                        succ(
+                            inout st,
+                            inout queued,
+                            inout work,
+                            in g.live,
+                            base,
+                            n,
+                            target,
+                            inout cf,
+                            inout co
+                        );
+                    }
+                }
+            }
+            let next = wrapping_add(pc, 1);
+            let t = r.tag;
+            if t == LIR_JUMP {
+                let target = label_row(in g.labels, f, r.f1);
+                if target != MISSING {
+                    succ(
+                        inout st,
+                        inout queued,
+                        inout work,
+                        in g.live,
+                        base,
+                        n,
+                        target,
+                        inout sf,
+                        inout so
+                    );
+                }
+            } else if t == LIR_BRANCH_ZERO {
+                let target = label_row(in g.labels, f, r.f2);
+                if target != MISSING {
+                    let mut cf = copy_of(in sf);
+                    let mut co = copy_of(in so);
+                    succ(
+                        inout st,
+                        inout queued,
+                        inout work,
+                        in g.live,
+                        base,
+                        n,
+                        target,
+                        inout cf,
+                        inout co
+                    );
+                }
+                succ(
+                    inout st,
+                    inout queued,
+                    inout work,
+                    in g.live,
+                    base,
+                    n,
+                    next,
+                    inout sf,
+                    inout so
+                );
+            } else if t == LIR_TRAP {} else if t == LIR_RETURN {
+                if !seeded {
+                    // Only the words this function writes back (results,
+                    // `inout` parameters) are its callers' business.
+                    let mut xf = ChunkSeq::new[u64]();
+                    let mut xo = ChunkSeq::new[u64]();
+                    rename(in sf, in so, L_IN, L_IN, inout xf, inout xo);
+                    retain_set(inout xf, inout xo, in written);
+                    if join_into(inout g.post, f, in xf, in xo) {
+                        changed = true;
+                    }
+                }
+            } else if t == LIR_ENTER {
+                retain_tag(inout sf, inout so, 0);
+                succ(
+                    inout st,
+                    inout queued,
+                    inout work,
+                    in g.live,
+                    base,
+                    n,
+                    next,
+                    inout sf,
+                    inout so
+                );
+            } else if t == LIR_CALL {
+                match g.entries.get(r.f1) {
+                    Option::Some(callee) => {
+                        if !seeded {
+                            let mut af = ChunkSeq::new[u64]();
+                            let mut ao = ChunkSeq::new[u64]();
+                            rename(in sf, in so, L_OUT, L_IN, inout af, inout ao);
+                            if join_into(inout g.pre, callee, in af, in ao) {
+                                changed = true;
+                            }
+                        }
+                        if at_bool(in g.post.h, callee) {
+                            retain_tag(inout sf, inout so, 1);
+                            let pf = summ_facts(in g.post, callee);
+                            let po = summ_origins(in g.post, callee);
+                            let mut rf = ChunkSeq::new[u64]();
+                            let mut ro = ChunkSeq::new[u64]();
+                            rename(in pf, in po, L_IN, L_OUT, inout rf, inout ro);
+                            for i in 0..rf.len() {
+                                let e = at(in rf, i);
+                                put_fact(inout sf, fact_key(e), fact_kind(e));
+                            }
+                            if ro.len() != 0 {
+                                let joined = join_origins(in so, in ro);
+                                so.clear();
+                                so.extend(in joined.as_slice());
+                            }
+                            succ(
+                                inout st,
+                                inout queued,
+                                inout work,
+                                in g.live,
+                                base,
+                                n,
+                                next,
+                                inout sf,
+                                inout so
+                            );
+                        }
+                    }
+                    Option::None => {}
+                }
+            } else if t == LIR_CONST {
+                // A flagged constant is read as an `i64` (wrapping words at
+                // or above 2^63); the others get `constantKind` and remember
+                // their row if an `i64` use could need the flag.
+                let id = (f << 32) | pc;
+                let flagged = set_contains(in g.signed, id);
+                let neg = flagged && r.f2 >= TWO_63;
+                let k = if flagged && fits(K_I64, r.f2, neg) {
+                    K_I64
+                } else {
+                    constant_kind(r.f2, neg)
+                };
+                let d = loc(L_SLOT, r.f1);
+                state_set(inout sf, inout so, d, k);
+                if !flagged && r.f2 > LOW32 {
+                    let mut ids = ChunkSeq::new[u64]();
+                    ids.push(id);
+                    origins_set(inout so, d, in ids);
+                }
+                succ(
+                    inout st,
+                    inout queued,
+                    inout work,
+                    in g.live,
+                    base,
+                    n,
+                    next,
+                    inout sf,
+                    inout so
+                );
+            } else if t == LIR_MOVE {
+                state_copy(inout sf, inout so, loc(L_SLOT, r.f1), loc(L_SLOT, r.f2));
+                succ(
+                    inout st,
+                    inout queued,
+                    inout work,
+                    in g.live,
+                    base,
+                    n,
+                    next,
+                    inout sf,
+                    inout so
+                );
+            } else if t == LIR_STORE_OUT {
+                state_copy(inout sf, inout so, loc(L_OUT, r.f1), loc(L_SLOT, r.f2));
+                succ(
+                    inout st,
+                    inout queued,
+                    inout work,
+                    in g.live,
+                    base,
+                    n,
+                    next,
+                    inout sf,
+                    inout so
+                );
+            } else if t == LIR_LOAD_OUT {
+                state_copy(inout sf, inout so, loc(L_SLOT, r.f1), loc(L_OUT, r.f2));
+                succ(
+                    inout st,
+                    inout queued,
+                    inout work,
+                    in g.live,
+                    base,
+                    n,
+                    next,
+                    inout sf,
+                    inout so
+                );
+            } else if t == LIR_LOAD_IN {
+                state_copy(inout sf, inout so, loc(L_SLOT, r.f1), loc(L_IN, r.f2));
+                succ(
+                    inout st,
+                    inout queued,
+                    inout work,
+                    in g.live,
+                    base,
+                    n,
+                    next,
+                    inout sf,
+                    inout so
+                );
+            } else if t == LIR_STORE_IN {
+                state_copy(inout sf, inout so, loc(L_IN, r.f1), loc(L_SLOT, r.f2));
+                succ(
+                    inout st,
+                    inout queued,
+                    inout work,
+                    in g.live,
+                    base,
+                    n,
+                    next,
+                    inout sf,
+                    inout so
+                );
+            } else {
+                transfer(inout sf, in r);
+                let d = destination(in r);
+                if d != MISSING && so.len() != 0 {
+                    let none = ChunkSeq::new[u64]();
+                    origins_set(inout so, loc(L_SLOT, d), in none);
+                }
+                succ(
+                    inout st,
+                    inout queued,
+                    inout work,
+                    in g.live,
+                    base,
+                    n,
+                    next,
+                    inout sf,
+                    inout so
+                );
+            }
+        }
+        let mut first = MISSING;
+        for pc in 0..n {
+            if first == MISSING && !at_bool(in st.h, pc) {
+                first = pc;
+            }
+        }
+        if first == MISSING {
+            break;
+        }
+        seeded = true;
+        let none_f = ChunkSeq::new[u64]();
+        let none_o = ChunkSeq::new[u64]();
+        let _ = join_into(inout st, first, in none_f, in none_o);
+        let ok = queued.try_set(first, true);
+        work.push(first);
+    }
+    write_annotations(inout cert, in st, n);
+    changed
+}
+
+// `generate`: a certificate for `p` (function 0 is the program entry).
+// Rows the analysis never reaches get empty annotations.
+fn generate(in p: Prog) -> Cert {
+    let n = nfun(in p);
+    let mut entries: FlatTable[u64, u64] = flat_table_new[u64, u64]();
+    for f in 0..n {
+        let r0 = row_of(in p, f, 0);
+        if r0.tag == LIR_LABEL && !entries.contains_key(r0.f1) {
+            let _ = entries.insert(r0.f1, f);
+        }
+    }
+    let labels = labels_of(in p);
+    let mut c1 = ChunkSeq::new[u64]();
+    let mut c2 = ChunkSeq::new[u64]();
+    caught_targets(in p, inout c1, inout c2);
+    let mut live = ChunkSeq::new[ChunkSeq[u64]]();
+    for f in 0..n {
+        live_locations(in p, f, in labels, in c1, in c2, inout live);
+    }
+    let mut g = Gen {
+        labels: labels,
+        entries: entries,
+        c1: c1,
+        c2: c2,
+        live: live,
+        pre: summ_new(n),
+        post: summ_new(n),
+        flips: ChunkSeq::new[u64](),
+        signed: ChunkSeq::new[u64]()
+    };
+    let mut cert = cert_new();
+    loop {
+        g.pre = summ_new(n);
+        g.post = summ_new(n);
+        if n > 0 {
+            let none_f = ChunkSeq::new[u64]();
+            let none_o = ChunkSeq::new[u64]();
+            let _ = join_into(inout g.pre, 0, in none_f, in none_o);
+        }
+        loop {
+            let mut changed = false;
+            cert_clear(inout cert);
+            g.flips.clear();
+            for f in 0..n {
+                if analyse(in p, inout g, inout cert, f) {
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut new = false;
+        for i in 0..g.flips.len() {
+            if !set_contains(in g.signed, at(in g.flips, i)) {
+                new = true;
+            }
+        }
+        if !new {
+            break;
+        }
+        let flips = copy_of(in g.flips);
+        set_union_into(inout g.signed, in flips);
+    }
+    finish_cert(inout cert);
+    for f in 0..n {
+        if at_bool(in g.post.h, f) {
+            match g.post.f.try_get(f) {
+                Option::Some(x) => cert.post.extend(in x.as_slice()),
+                Option::None => {}
+            }
+        }
+        cert.post_at.push(cert.post.len());
+        for i in 0..g.signed.len() {
+            let id = at(in g.signed, i);
+            if (id >> 32) == f {
+                let pc = id & LOW32;
+                let r = row_of(in p, f, pc);
+                if r.tag == LIR_CONST && r.f2 >= TWO_63 {
+                    cert.signed.push(pc);
+                }
+            }
+        }
+        cert.signed_at.push(cert.signed.len());
+    }
+    cert
+}
+
+// `widen`: a comparison at the widest kind of the same signedness.
+fn widen(r: Lir) -> Lir {
+    if r.tag == LIR_COMPARE && lean_kind(r.kind) {
+        let k = if r.kind == K_I64 {
+            K_I64
+        } else {
+            K_U64
+        };
+        return Lir {
+            tag: r.tag,
+            op: r.op,
+            kind: k,
+            f1: r.f1,
+            f2: r.f2,
+            f3: r.f3
+        };
+    }
+    r
+}
+
+// ---------------------------------------------------------------------------
+// The harness: programs and certificates as little-endian words.
+
+fn word_at(in b: Slice[u8], i: u64) -> u64 {
+    match b.try_read_u64_le(wrapping_mul(i, 8)) {
+        Option::Some(w) => w,
+        Option::None => 0,
+    }
+}
+
+fn read_row(in b: Slice[u8], at: u64) -> Lir {
+    let head = word_at(in b, at);
+    Lir {
+        tag: wrapping_u8(head & 255),
+        op: wrapping_u8((head >> 8) & 255),
+        kind: wrapping_u8((head >> 16) & 255),
+        f1: word_at(in b, wrapping_add(at, 1)),
+        f2: word_at(in b, wrapping_add(at, 2)),
+        f3: word_at(in b, wrapping_add(at, 3))
+    }
+}
+
+// The function count, then per function its name's byte count, the name
+// eight bytes a word, its row count and its rows (four words a row).
+fn read_program(in b: Slice[u8], inout pos: u64, widened: bool) -> Prog {
+    let mut p = Prog {
+        rows: ChunkSeq::new[Lir](),
+        starts: ChunkSeq::new[u64](),
+        names: ChunkSeq::new[u8](),
+        name_at: ChunkSeq::new[u64]()
+    };
+    let n = word_at(in b, pos);
+    pos = wrapping_add(pos, 1);
+    for f in 0..n {
+        p.name_at.push(p.names.len());
+        let len = word_at(in b, pos);
+        pos = wrapping_add(pos, 1);
+        for i in 0..len {
+            match b.try_get(wrapping_add(wrapping_mul(pos, 8), i)) {
+                Option::Some(c) => p.names.push(c),
+                Option::None => {}
+            }
+        }
+        pos = wrapping_add(pos, wrapping_add(len, 7) >> 3);
+        p.starts.push(p.rows.len());
+        let rows = word_at(in b, pos);
+        pos = wrapping_add(pos, 1);
+        for i in 0..rows {
+            let r = read_row(in b, wrapping_add(pos, wrapping_mul(i, 4)));
+            if widened {
+                p.rows.push(widen(r));
+            } else {
+                p.rows.push(r);
+            }
+        }
+        pos = wrapping_add(pos, wrapping_mul(rows, 4));
+    }
+    p.starts.push(p.rows.len());
+    p.name_at.push(p.names.len());
+    p
+}
+
+// The function count, then per function its annotation count, each
+// annotation's fact count and facts (`key << 3 | kind`), its exit summary
+// (count, facts) and its signed constants (count, rows, ascending).
+fn read_cert(in b: Slice[u8], inout pos: u64) -> Cert {
+    let mut c = cert_new();
+    let n = word_at(in b, pos);
+    pos = wrapping_add(pos, 1);
+    for f in 0..n {
+        begin_function(inout c);
+        let anns = word_at(in b, pos);
+        pos = wrapping_add(pos, 1);
+        for a in 0..anns {
+            let k = word_at(in b, pos);
+            pos = wrapping_add(pos, 1);
+            for i in 0..k {
+                c.ann.push(word_at(in b, wrapping_add(pos, i)));
+            }
+            pos = wrapping_add(pos, k);
+            end_annotation(inout c);
+        }
+        let k = word_at(in b, pos);
+        pos = wrapping_add(pos, 1);
+        for i in 0..k {
+            c.post.push(word_at(in b, wrapping_add(pos, i)));
+        }
+        pos = wrapping_add(pos, k);
+        c.post_at.push(c.post.len());
+        let k = word_at(in b, pos);
+        pos = wrapping_add(pos, 1);
+        for i in 0..k {
+            c.signed.push(word_at(in b, wrapping_add(pos, i)));
+        }
+        pos = wrapping_add(pos, k);
+        c.signed_at.push(c.signed.len());
+    }
+    finish_cert(inout c);
+    c
+}
+
+fn put_facts(inout out: ChunkSeq[u8], in list: ChunkSeq[u64], lo: u64, hi: u64) {
+    let mut i = lo;
+    loop {
+        if !(i < hi) {
+            break;
+        }
+        let e = at(in list, i);
+        let key = fact_key(e);
+        out.push(32);
+        put_decimal(inout out, widen_u64(loc_tag(key)));
+        out.push(46);
+        put_decimal(inout out, key & LOW32);
+        out.push(46);
+        put_decimal(inout out, widen_u64(fact_kind(e)));
+        i = wrapping_add(i, 1);
+    }
+}
+
+// `ok`, then per function `fn <f>`, one `<pc>: <facts>` line a row,
+// `post: <facts>` and `signed: <rows>`; a fact is `tag.index.kind`.
+fn put_cert(inout out: ChunkSeq[u8], in c: Cert) {
+    puts(inout out, "ok\n");
+    for f in 0..cert_functions(in c) {
+        puts(inout out, "fn ");
+        put_decimal(inout out, f);
+        out.push(10);
+        for pc in 0..annotation_count(in c, f) {
+            put_decimal(inout out, pc);
+            out.push(58);
+            put_facts(inout out, in c.ann, ann_lo(in c, f, pc), ann_hi(in c, f, pc));
+            out.push(10);
+        }
+        puts(inout out, "post:");
+        put_facts(inout out, in c.post, at(in c.post_at, f), at(in c.post_at, wrapping_add(f, 1)));
+        out.push(10);
+        puts(inout out, "signed:");
+        let mut i = at(in c.signed_at, f);
+        let hi = at(in c.signed_at, wrapping_add(f, 1));
+        loop {
+            if !(i < hi) {
+                break;
+            }
+            out.push(32);
+            put_decimal(inout out, at(in c.signed, i));
+            i = wrapping_add(i, 1);
+        }
+        out.push(10);
+    }
+}
+
+// `check` (widen, generate, validate): the certificate as `put_cert`
+// writes it, or the rejection's display and a newline.
+pub fn check_input(in b: Slice[u8], inout out: ChunkSeq[u8]) {
+    let mut pos: u64 = 0;
+    let p = read_program(in b, inout pos, true);
+    let c = generate(in p);
+    let mut why = ChunkSeq::new[u8]();
+    if validate(in p, in c, inout why) {
+        put_cert(inout out, in c);
+    } else {
+        out.extend(in why.as_slice());
+        out.push(10);
+    }
+}
+
+// `validate` of a given certificate: `ok` or the rejection, and a newline.
+pub fn validate_input(in b: Slice[u8], inout out: ChunkSeq[u8]) {
+    let mut pos: u64 = 0;
+    let p = read_program(in b, inout pos, false);
+    let c = read_cert(in b, inout pos);
+    let mut why = ChunkSeq::new[u8]();
+    if validate(in p, in c, inout why) {
+        puts(inout out, "ok");
+    } else {
+        out.extend(in why.as_slice());
+    }
+    out.push(10);
+}

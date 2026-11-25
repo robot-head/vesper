@@ -661,6 +661,61 @@ pub mod host {
         }
     }
 
+    /// The session's `Parse` from a parse the Vesper driver ran over the
+    /// source `Load` read (`front.ves` `parse_source`): its diagnostic
+    /// count. The text compiled is the source as read, with no sugar map.
+    ///
+    /// # Safety
+    /// `s` is a live session lent `inout`; `words` a lent word slice.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hd_parsed(s: *mut Session, words: *const u64, len: usize) -> i64 {
+        // SAFETY: lent for the call.
+        let s = unsafe { &mut *s };
+        let words = if len == 0 || words.is_null() {
+            &[][..]
+        } else {
+            // SAFETY: `words` is valid for `len` words for the call.
+            unsafe { std::slice::from_raw_parts(words, len) }
+        };
+        PASSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        match panic::catch_unwind(AssertUnwindSafe(|| {
+            let parsed = crate::vesper_hybrid::driver_parse(&s.original, words);
+            let n = count(parsed.diagnostics.len());
+            s.source = s.original.clone();
+            s.source_map = Vec::new();
+            s.parsed = Some(parsed);
+            n
+        })) {
+            Ok(n) => n,
+            Err(_) => PANIC,
+        }
+    }
+
+    /// 1 when the Vesper driver parses a standalone source itself (the
+    /// parse swap is installed), else 0.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn hd_front_begin() -> u32 {
+        u32::from(crate::vesper_hybrid::driver_parse_begin())
+    }
+
+    /// `crate::write(None, ..)` of `cli()`: `text` to stdout, 0 or `FAIL`
+    /// with the write error as the session's text.
+    ///
+    /// # Safety
+    /// `s` is a live session lent `inout`; `text` a lent byte slice.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hd_write(s: *mut Session, text: *const u8, len: usize) -> i64 {
+        // SAFETY: lent for the call.
+        let (s, text) = unsafe { (&mut *s, bytes(text, len)) };
+        match crate::write(None, text) {
+            Ok(()) => 0,
+            Err(message) => {
+                s.text = message.into_bytes();
+                FAIL
+            }
+        }
+    }
+
     /// Copy the session's text into `buf` when it fits; its length.
     ///
     /// # Safety

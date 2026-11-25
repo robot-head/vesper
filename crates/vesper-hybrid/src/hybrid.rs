@@ -383,6 +383,45 @@ const VESPER_WORD_LAYOUT: vesper::layout::WordLayout = vesper::layout::WordLayou
     },
 };
 
+thread_local! {
+    /// When the Vesper driver started its own parse (`driver_parse_begin`),
+    /// with stats on.
+    static DRIVER_PARSE_START: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Whether the Vesper driver parses a standalone source itself: only with
+/// the parse swap installed (`VESPER_HYBRID_SWAPS`), since its parse is the
+/// swap's. Starts the clock of the parse's Vesper time when stats are on.
+pub(crate) fn driver_parse_begin() -> bool {
+    let on = swaps::on("parse");
+    if on && stats::level() > 0 {
+        DRIVER_PARSE_START.with(|t| t.set(Some(std::time::Instant::now())));
+    }
+    on
+}
+
+/// A parse the Vesper driver ran (`modules/driver/src/front.ves`), read
+/// back from its `parse_words` stream like the parse swap's; its Vesper
+/// time runs from `driver_parse_begin`.
+pub(crate) fn driver_parse(source: &str, words: &[u64]) -> vesper_syntax::parser::Parse {
+    PARSE_CALLS.fetch_add(1, Relaxed);
+    if let Some(start) = DRIVER_PARSE_START.with(|t| t.take()) {
+        stats::PARSE
+            .vesper
+            .fetch_add(start.elapsed().as_nanos() as u64, Relaxed);
+    }
+    let timer = stats::Timer::start();
+    let parsed = parse_words::decode(source, words);
+    timer.lap(&stats::PARSE.decode);
+    stats::PARSE.call(
+        false,
+        || vesper_syntax::parser::rust_parse(source),
+        |rust| *rust == parsed,
+    );
+    parsed
+}
+
 /// `vesper_syntax::parser::ParseTable` from `modules/parse`: the front end
 /// v2 and the AST of `@vesper/ast`, read back by `parse_words::decode`.
 const VESPER_PARSE: vesper_syntax::parser::ParseTable = vesper_syntax::parser::ParseTable {
