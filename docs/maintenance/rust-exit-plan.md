@@ -197,10 +197,11 @@ gated set over the whole corpus with 0 differences. Today `gated` holds
      workers drive the parser, checker, optimizer, evaluator and native
      backend in process). They must drive the Vesper compiler as a process
      or through its C ABI instead.
-   - `vesper-codegen-verified` links the frozen seeds of
-     `vesper-loom-calculus`, `vesper-loom-cas` and `vesper-loom-trust`; those
-     seeds go at the retirement, so it needs its own copy of what it uses
-     or a call into the Vesper libraries.
+   - `vesper-codegen-verified` no longer links the frozen seeds of
+     `vesper-loom-calculus`, `vesper-loom-cas` and `vesper-loom-trust`
+     (#1929): `src/trust.rs` is its own copy of the attestation rules,
+     pinned to the seeds' behaviour by `tests/trust_vectors.rs`. It must not
+     call the Vesper libraries instead, which the compiler it audits builds.
    - `src/verified_codegen` (the Stage 1 guard) is in `src/`. Owner
      decision (2026-11-25): it is ported to Vesper (#1886,
      `@vesper/verified-codegen`), and `bootstrap/stage1.rs` uses the port
