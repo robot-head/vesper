@@ -1090,7 +1090,10 @@ vesper_crate(
         # The component wrapping differential (#1334): ~2 min release.
         "test/self_host_wit_component": "long",
         "test/self_host_codegen_scalar": "long",
-        "test/self_host_native_walk": "long",
+        # The native walk differential (#1509) lowers every 4th corpus world,
+        # package worlds with their dependencies included; it ran past 900 s
+        # once @vesper/test-runner gained @vesper/ast (#1337).
+        "test/self_host_native_walk": "eternal",
         "test/self_host_check_harness": "long",
         # The trait declaration differential (#1185) checks every corpus world.
         "test/self_host_check_pact": "eternal",
