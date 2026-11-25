@@ -1630,3 +1630,59 @@ fn loops_atomics_speed() {
         },
     );
 }
+
+/// ABBA timing of the stack bound alone (`CHECK_HARNESS_SPEED=1`; ignored
+/// by default): Rust's report against the text entry, the hybrid's word
+/// entry (also with the flip gate's 95% interval), and the hybrid's whole
+/// path (encode in Rust, Vesper, decode in Rust).
+#[test]
+#[ignore]
+fn stack_bound_speed() {
+    if !speed() {
+        return;
+    }
+    let cases = stack_cases();
+    let rust = &mut || {
+        time(|| {
+            for (g, p) in &cases {
+                std::hint::black_box(vesper::stack_bound::rust_stack_bound_report(g, p).ok());
+            }
+        })
+    };
+    let inputs: Vec<Vec<u8>> = cases.iter().map(|(g, p)| stack_input(g, p)).collect();
+    let f = stack_entry();
+    abba("stack bound (text entry)", rust, &mut || {
+        time(|| {
+            for i in &inputs {
+                std::hint::black_box(f.words(i));
+            }
+        })
+    });
+    let inputs: Vec<Vec<u8>> = cases
+        .iter()
+        .map(|(g, p)| stack_words::stack_input(g, p))
+        .collect();
+    let f = stack_words_entry();
+    abba("stack bound (word entry)", rust, &mut || {
+        time(|| {
+            for i in &inputs {
+                std::hint::black_box(f.words(i));
+            }
+        })
+    });
+    abba_ci("stack bound (word entry)", 20, rust, &mut || {
+        time(|| {
+            for i in &inputs {
+                std::hint::black_box(f.words(i));
+            }
+        })
+    });
+    abba_ci("stack bound (hybrid path)", 20, rust, &mut || {
+        time(|| {
+            for (g, p) in &cases {
+                let words = f.words(&stack_words::stack_input(g, p));
+                std::hint::black_box(stack_words::decode_stack_report(g.origin, &words).ok());
+            }
+        })
+    });
+}

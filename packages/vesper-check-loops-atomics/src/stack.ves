@@ -15,6 +15,9 @@ use @vesper/check-data::names::{
 use @vesper/check-data::input::{
     Reader
 };
+use @vesper/check-data::util::{
+    put_text_words
+};
 use self::out::{
     put,
     put_u64
@@ -90,6 +93,7 @@ pub fn read_graph(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> G
         targets: ChunkSeq::new[u32]()
     };
     let n = r.word(in b);
+    g.fns.reserve(n);
     for i in 0..n {
         let id = wrapping_u32(r.word(in b));
         let name = sym(in nmap, r.word(in b));
@@ -105,6 +109,7 @@ pub fn read_graph(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> G
             );
     }
     let n = r.word(in b);
+    g.calls.reserve(wrapping_mul(n, 2));
     for i in 0..n {
         let a = r.word(in b);
         let c = r.word(in b);
@@ -112,6 +117,7 @@ pub fn read_graph(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> G
         g.calls.push(c);
     }
     let n = r.word(in b);
+    g.indirect.reserve(n);
     for i in 0..n {
         let caller = wrapping_u32(r.word(in b));
         let inst = opt(r.word(in b));
@@ -126,6 +132,7 @@ pub fn read_graph(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> G
             );
     }
     let n = r.word(in b);
+    g.external.reserve(n);
     for i in 0..n {
         let caller = wrapping_u32(r.word(in b));
         let symbol = sym(in nmap, r.word(in b));
@@ -443,10 +450,10 @@ fn tarjan(
     low.resize(n, 0);
     let mut on_stack: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
     on_stack.resize(n, 0);
-    let mut stack: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut stack: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
     let mut next: u64 = 0;
     // work items: vertex and child position, two words each
-    let mut work: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut work: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_mul(n, 2));
     for start in 0..n {
         if u64_at(in index, start) != NONE64 {
             continue;
@@ -493,22 +500,34 @@ fn tarjan(
                 }
             }
             if u64_at(in low, v) == u64_at(in index, v) {
-                let mut scc: ChunkSeq[u64] = ChunkSeq::new[u64]();
+                // The SCC is popped straight into `members` and sorted
+                // there (insertion sort: most SCCs are one vertex).
+                let a = members.len();
+                starts.push(a);
                 loop {
                     let w = match stack.pop() {
                         Option::Some(w) => w,
                         Option::None => break,
                     };
                     set64(inout on_stack, w, 0);
-                    scc.push(w);
+                    let x = wrapping_u32(w);
+                    members.push(x);
+                    let mut j = wrapping_sub(members.len(), 1);
+                    loop {
+                        if j == a {
+                            break;
+                        }
+                        let y = u32_at(in members, wrapping_sub(j, 1));
+                        if y <= x {
+                            break;
+                        }
+                        set32(inout members, j, y);
+                        j = wrapping_sub(j, 1);
+                    }
+                    set32(inout members, j, x);
                     if w == v {
                         break;
                     }
-                }
-                sort_u64(inout scc);
-                starts.push(members.len());
-                for i in 0..scc.len() {
-                    members.push(wrapping_u32(u64_at(in scc, i)));
                 }
             }
         }
@@ -520,17 +539,21 @@ fn tarjan(
 pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
     let n = g.fns.len();
     let mut rep = Report {
-        findings: ChunkSeq::new[u8](),
-        rows: ChunkSeq::new[FindingRow](),
-        roots: ChunkSeq::new[RootRow](),
-        paths: ChunkSeq::new[u32]()
+        findings: ChunkSeq::with_capacity[u8](512),
+        rows: ChunkSeq::with_capacity[FindingRow](8),
+        roots: ChunkSeq::with_capacity[RootRow](g.roots.len()),
+        paths: ChunkSeq::with_capacity[u32](wrapping_mul(g.roots.len(), 8))
     };
     let mut unbounded_here: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
     unbounded_here.resize(n, 0);
     // Function successors as (caller << 32 | callee), bounded ones as
     // (caller << 32 | symbol) in a second array, each sorted and unique.
-    let mut fn_edges: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let mut bounded: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut fn_edges: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](
+        wrapping_add(wrapping_div_pairs(g.calls.len()), g.targets.len())
+    );
+    let mut bounded: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](
+        wrapping_add(g.external.len(), g.targets.len())
+    );
     for i in 0..wrapping_div_pairs(g.calls.len()) {
         let a = u64_at(in g.calls, wrapping_mul(i, 2));
         let c = u64_at(in g.calls, wrapping_add(wrapping_mul(i, 2), 1));
@@ -622,7 +645,7 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
     sort_u64(inout fn_edges);
     // Adjacency: unique callees of each caller, ascending.
     let mut adj_start: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_add(n, 1));
-    let mut adj: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut adj: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](fn_edges.len());
     let mut k: u64 = 0;
     for v in 0..n {
         adj_start.push(adj.len());
@@ -693,8 +716,8 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
         }
     }
     bstart.push(bsyms.len());
-    let mut members: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut members: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    let mut starts: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_add(n, 1));
     tarjan(n, in adj_start, in adj, inout members, inout starts);
     let sccs = wrapping_sub(starts.len(), 1);
     let mut cyclic: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
@@ -1197,31 +1220,15 @@ pub fn write_report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) {
 // Bytes `a..b` of `text` as words: the byte length, then the bytes eight
 // per word, little-endian (`Words::text` in tests/common/check_words.rs).
 fn put_bytes(inout o: ChunkSeq[u64], in text: ChunkSeq[u8], a: u64, b: u64) {
-    o.push(wrapping_sub(b, a));
-    let mut acc: u64 = 0;
-    let mut k: u32 = 0;
-    for i in a..b {
-        let byte = match text.try_get(i) {
-            Option::Some(x) => widen_u64(x),
-            Option::None => 0,
-        };
-        acc = acc | wrapping_shl_u64(byte, wrapping_mul(k, 8));
-        k = wrapping_add(k, 1);
-        if k == 8 {
-            o.push(acc);
-            acc = 0;
-            k = 0;
-        }
-    }
-    if k != 0 {
-        o.push(acc);
+    if a < b && b <= text.len() {
+        put_text_words(inout o, in text[a..b]);
+    } else {
+        o.push(0);
     }
 }
 
 fn put_name(inout o: ChunkSeq[u64], in names: Names, s: u32) {
-    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    names.write(s, inout text);
-    put_bytes(inout o, in text, 0, text.len());
+    names.put_words(s, inout o);
 }
 
 // The report as words, for the hybrid swap of `stack_bound_report`
@@ -1239,6 +1246,15 @@ pub fn report_words(inout o: ChunkSeq[u64], in names: Names, in g: Graph) {
         return;
     }
     let rep = report(inout text, in names, in g);
+    // About a word per eight bytes of findings text, plus a few per row,
+    // root and path step.
+    o
+        .reserve(
+            wrapping_add(
+                wrapping_add(rep.findings.len() >> 3, wrapping_mul(rep.rows.len(), 8)),
+                wrapping_add(wrapping_mul(rep.roots.len(), 8), wrapping_mul(rep.paths.len(), 3))
+            )
+        );
     o.push(0);
     o.push(rep.roots.len());
     for i in 0..rep.roots.len() {

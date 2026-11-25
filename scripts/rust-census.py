@@ -196,7 +196,7 @@ MODULES = {
     "interface": ("SH2-6", "", ""),
     "codegen_swap": ("2", "", "goes with the hybrid"),
     "ir_swap": ("2", "", "goes with the hybrid"),
-    "stack_bound": ("SH2-10", "vesper-check-loops-atomics", "2.54x"),
+    "stack_bound": ("SH2-10, #1875", "vesper-check-loops-atomics", "flip gate PASS: hybrid path 1.20x (95% CI 1.18-1.26x), port 1.08x; swapped in the hybrid"),
     "io_session": ("SH2-10", "", ""),
     "native_arrays": ("SH4-8", "", ""),
     "lib": ("SH5-12", "", ""),
