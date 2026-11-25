@@ -33,5 +33,6 @@ log differential::input_log_codec_matches_the_rust_codec differential::cdc_decod
 image circuit::checkpoint::differential::checkpoint_codec_matches_the_rust_codec differential::input_log_codec_matches_the_rust_codec
 spine circuit::checkpoint::differential::durable_codecs_match_the_rust_codecs circuit::checkpoint::differential::checkpoint_codec_matches_the_rust_codec
 kafka_wire circuit::wire::tests::batches_round_trip_in_every_codec circuit::checkpoint::differential::checkpoint_codec_matches_the_rust_codec
+kafka_encode circuit::wire::tests::record_encoder_matches_the_rust_encoder circuit::wire::tests::batches_round_trip_in_every_codec
 CHECKS
 unset VESPER_FLUX_DIVERGE

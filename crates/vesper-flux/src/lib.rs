@@ -19,6 +19,8 @@ mod frontier;
 mod port;
 mod zset;
 
+#[doc(hidden)]
+pub use circuit::kafka_encode_batch;
 pub use circuit::{
     BINS, CdcHeader, CdcPolicy, CheckpointLimits, CheckpointMode, CheckpointPhase, Circuit,
     CircuitBuilder, ClusterConfig, ClusterRun, CommitRecord, CommitSink, CommittedCheckpoint,

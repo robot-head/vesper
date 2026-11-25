@@ -55,7 +55,7 @@ CRATES = {
     "vesper-prism": ("gone", "in crate", "0.96-1.34x", "", "5"),
     "vesper-prism-h3": ("partial", "in crate", "connection 0.97x, session 0.94x, core 0.99-1.36x", "protocol core and connection/client/session state machines flipped (part 3b); RoleCore Transport I/O glue and Warp adapter stay Rust", "5"),
     "vesper-quarry": ("partial", "in crate", "1.39x, page 1.00x, wal 1.14x, internal 1.42x, store_log 1.06x", "SQL front end, optimizer, row executor, access planner, slotted-page codec, WAL record/header codec, B+Tree internal node route/check, and store/log record decoder flipped to Vesper (#1739 + #1748 + #1754 + #1804; CRC32C table stays Rust); buffer pool, vectorized executor, PAX leaf/WAL I/O left", "6"),
-    "vesper-flux": ("partial", "in crate", "kafka_wire_decode 1.093x", "Z-set kernels, frontier, accumulator, CDC, input log, checkpoint image/spine and kafka_wire record decoder flipped (#1069 + #1401); kafka_wire encoder/TLS/SASL, durable state, cluster driver remain", "6"),
+    "vesper-flux": ("partial", "in crate", "kafka_wire_decode 1.093x, kafka_encode 0.86x", "Z-set kernels, frontier, accumulator, CDC, input log, checkpoint image/spine and kafka_wire record decoder and encoder flipped (#1069 + #1401; CRC-32C and compression stay Rust); kafka_wire request framing/TLS/SASL, durable state, cluster driver remain", "6"),
     "vesper-ignis": ("partial", "in crate", "0.68-3.1x", "build 2.5x, lower 2.7-3.1x", "7"),
     "vesper-grammar": ("partial", "in crate", "4.7-6.3x", "speed", "7"),
     "vesper-bench": ("partial", "in crate", "2.2-3.2x", "timers via bench-pmu", "7"),

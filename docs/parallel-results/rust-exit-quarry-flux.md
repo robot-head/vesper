@@ -236,3 +236,25 @@ deleted: 1,259 Rust lines deleted, 29 insertions). On `main` (`53c9bf6e`),
 vectorized executor and durable layer remain Rust.
 
 The census row (`scripts/rust-census.py`) is updated for `vesper-quarry`.
+
+## Flux Kafka record encoder (2026-11-25)
+
+The record loop of `encode_batch` (`encode_record` in
+`crates/vesper-flux/src/kafka_wire.rs`) is now `kw_encode_records` in
+`vesper/src/kafka_wire.ves`. The Rust wrapper packs each batch's keys,
+values and headers into one byte buffer plus per-record lengths; the port
+computes each record body's length first and writes the length varint,
+attributes, timestamp and offset deltas, key, value and headers straight
+into the output (one copy, no per-record buffer). The batch header, CRC-32C
+and compression stay Rust.
+
+- Differential: `circuit::wire::tests::record_encoder_matches_the_rust_encoder`
+  compares the port's bytes with the old Rust encoder (kept in the test
+  module) over 203 record sets (absent and empty fields, 20 KB values,
+  timestamps at both ends of `i64`) at four base timestamps: 0 diffs.
+- Divergence `kafka_encode` (timestamp deltas wrap instead of saturating)
+  fails that test while `batches_round_trip_in_every_codec` passes.
+- ABBA (`examples/abba.rs` workload `kafka_encode`, 64 batches of 500
+  CDC-shaped records per request, `RUSTFLAGS="-C target-cpu=native"`,
+  release; Rust arm built from `main` with the same example): Vesper/Rust
+  median **0.86x**, 95% CI 0.808x..0.928x, 12 epochs, digests agree.
