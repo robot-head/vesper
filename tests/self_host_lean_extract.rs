@@ -812,6 +812,24 @@ fn cfg_mutants() -> Vec<(String, World)> {
          fn cg(in s: TiledSeq[P], in v: ChunkSeq[u64]) -> bool { s.col_get[m](0) == v.len() }",
         "copy struct Q { a: u64, b: u64, }
          fn rp(q: Q, in v: ChunkSeq[u64]) -> bool { let Q { a, b } = q; a == v.len() }",
+        // A handler nested in an operation clause of the same operation:
+        // the outer computation's `inc` is the outer clause's.
+        "linear effect Inc { fn inc(inout x: i64); }
+         fn main() -> i64 {
+             let mut x = 40;
+             handle Inc in { Inc::inc(inout x); x } with {
+                 return n => n,
+                 inc(n, k) => {
+                     let mut z = 1;
+                     let w = handle Inc in { Inc::inc(inout z); z } with {
+                         return m => m,
+                         inc(m, j) => { m = wrapping_add(m, 3); j(()) },
+                     };
+                     n = wrapping_add(n, w);
+                     k(())
+                 },
+             }
+         }",
     ];
     let mut out = vec![];
     for src in sources {
@@ -1236,8 +1254,11 @@ impl Ast<'_> {
     /// - match: value, n, n x (pattern, body);
     /// - loops, ranges, break, continue and return (kind 15): nothing;
     /// - closure: arrow type or NONE, n, n param names, body, k, k free
-    ///   names (`check::free_names` without the parameters);
-    /// - handle: nothing.
+    ///   names (`check::free_names` without the parameters), the declared
+    ///   effects (a row holder, [`Ast::row_holder`]);
+    /// - handle: see [`Ast::handle`].
+    ///
+    /// Calls end with the `instance_key` of an `E::op` callee or NONE.
     fn expr(&mut self, e: &vesper::ast::Expr) -> u64 {
         use vesper::ast::{ExprKind, Statement};
         let mut w: Vec<u64> = vec![];
@@ -1385,6 +1406,16 @@ impl Ast<'_> {
                     ExprKind::Name(n) => self.name_class(n, &mut w),
                     _ => w.extend([NONE, 0, NONE, 0]),
                 }
+                // `instance_key` of an unlabeled `E::op(...)` with explicit
+                // types (the typed layer search of `Generator::call`).
+                let key = match &callee.kind {
+                    ExprKind::Name(n) => n
+                        .split_once("::")
+                        .filter(|(eff, _)| self.world.effects.contains_key(*eff))
+                        .and_then(|(eff, _)| vesper::numeric::instance_key(eff, types)),
+                    _ => None,
+                };
+                w.push(key.map_or(NONE, |k| self.name(&k)));
                 X_CALL
             }
             ExprKind::Try(v) => {
@@ -1445,9 +1476,23 @@ impl Ast<'_> {
                 for n in &free {
                     w.push(self.name(n));
                 }
+                let declared = match &e.kind {
+                    ExprKind::Closure { effects, .. } => effects.clone(),
+                    _ => unreachable!(),
+                };
+                w.push(self.row_holder(&declared));
                 X_CLOSURE
             }
-            ExprKind::Handle { .. } => X_HANDLE,
+            ExprKind::Handle {
+                effect,
+                state,
+                body,
+                ret,
+                ops,
+            } => {
+                self.handle(effect, state, body, ret, ops, &mut w);
+                X_HANDLE
+            }
         };
         let ty = self.type_of(e).map_or(NONE, |t| self.ty(&t));
         self.exprs
@@ -1476,12 +1521,198 @@ impl Ast<'_> {
                 || effectful_arrow(&f.result)
                 || f.params.iter().any(|p| effectful_arrow(&p.ty));
             out.push(polymorphic as u64);
+            out.push(self.row_holder(&f.effects));
+            out.push(self.ty(&f.result));
         }
         out.push(self.pat_count);
         out.extend(&self.pats);
         out.push(self.expr_count);
         out.extend(&self.exprs);
+        // The effect declarations (name order): name, linear, generics,
+        // and per operation its name, parameters (pass, projections, type)
+        // and result.
+        out.push(world.effects.len() as u64);
+        for e in world.effects.values() {
+            out.push(self.name(&e.name));
+            out.push(e.linear as u64);
+            out.push(e.generics.len() as u64);
+            for g in &e.generics {
+                out.push(self.name(&g.name));
+            }
+            out.push(e.ops.len() as u64);
+            for op in &e.ops {
+                out.push(self.name(&op.name));
+                out.push(op.params.len() as u64);
+                for p in &op.params {
+                    out.push(check_words::pass_word(p.pass));
+                    out.push(p.projections.len() as u64);
+                    for q in &p.projections {
+                        out.push(q.len() as u64);
+                        for n in q {
+                            out.push(self.name(n));
+                        }
+                    }
+                    out.push(self.ty(&p.ty));
+                }
+                out.push(self.ty(&op.result));
+            }
+        }
         out
+    }
+
+    /// A row as the arrow type `() -> Unit / effects`, whose row the port
+    /// reads (the input has no row values of their own).
+    fn row_holder(&mut self, effects: &Effects) -> u64 {
+        self.ty(&Type::Function {
+            params: vec![],
+            result: Box::new(Type::unit()),
+            effects: effects.clone(),
+            mode: Mode::Affine,
+        })
+    }
+
+    fn clause(&mut self, c: &vesper::ast::Clause, names: bool, w: &mut Vec<u64>) {
+        let pats: Vec<u64> = c.pats.iter().map(|p| self.pattern(p)).collect();
+        let body = self.expr(&c.body);
+        w.push(self.name(&c.name));
+        w.push(pats.len() as u64);
+        w.extend(pats);
+        w.push(body);
+        let free = vesper::check::clause_free_names(c);
+        w.push(free.len() as u64);
+        for n in &free {
+            w.push(self.name(n));
+        }
+        if names {
+            // The names the body mentions with their spans
+            // (`post_resume_access`).
+            let mut found = vec![];
+            vesper::lean::visit_exprs(&c.body, &mut |x| {
+                if let ExprKind::Name(n) = &x.kind {
+                    found.push((n.clone(), x.span.start, x.span.end));
+                }
+            });
+            w.push(found.len() as u64);
+            for (n, a, b) in found {
+                w.extend([self.name(&n), a as u64, b as u64]);
+            }
+        }
+    }
+
+    /// A handler's payload: the effect (name, label or NONE, n, n types,
+    /// `instance_key` or NONE), the state pattern and expression (or NONE
+    /// twice), the body, the return clause and n operation clauses (name, n,
+    /// n patterns, body, k, k free names; operation clauses then add m, m x
+    /// (name, start, end) of the body's names), the body's written names,
+    /// and what `handler` needs for `routes`: whether the body has a closure,
+    /// then n call entries (1: a named callee, its function or NONE and
+    /// whether its checked type is an effectful arrow; 2: a method callee,
+    /// its receiver name or NONE and the functions named `*::method`; 3:
+    /// any other callee).
+    fn handle(
+        &mut self,
+        effect: &vesper::ast::Effect,
+        state: &Option<(vesper::ast::Pattern, Box<vesper::ast::Expr>)>,
+        body: &vesper::ast::Expr,
+        ret: &vesper::ast::Clause,
+        ops: &[vesper::ast::Clause],
+        w: &mut Vec<u64>,
+    ) {
+        let (sp, se) = match state {
+            Some((p, e)) => (self.pattern(p), self.expr(e)),
+            None => (NONE, NONE),
+        };
+        let b = self.expr(body);
+        w.push(self.name(&effect.name));
+        w.push(effect.label.as_ref().map_or(NONE, |l| self.name(l)));
+        w.push(effect.args.len() as u64);
+        for t in &effect.args {
+            let t = self.ty(t);
+            w.push(t);
+        }
+        let key = vesper::numeric::instance_key(&effect.name, &effect.args);
+        w.push(key.map_or(NONE, |k| self.name(&k)));
+        w.extend([sp, se, b]);
+        self.clause(ret, false, w);
+        w.push(ops.len() as u64);
+        for c in ops {
+            self.clause(c, true, w);
+        }
+        let written = vesper::lean::handler_written_names(self.world, body);
+        w.push(written.len() as u64);
+        for n in &written {
+            w.push(self.name(n));
+        }
+        let mut lexical = std::collections::BTreeSet::new();
+        vesper::lean::visit_exprs(body, &mut |x| {
+            if let ExprKind::Handle { effect, ops, .. } = &x.kind {
+                lexical.extend(effect.label.clone());
+                for c in ops {
+                    if let Some(vesper::ast::Pattern {
+                        kind: vesper::ast::PatternKind::Bind(k),
+                        ..
+                    }) = c.pats.last()
+                    {
+                        lexical.insert(k.clone());
+                    }
+                }
+            }
+        });
+        let mut closure = false;
+        let mut entries: Vec<(u64, Option<String>, Vec<String>, bool)> = vec![];
+        let world = self.world;
+        vesper::lean::visit_exprs(body, &mut |x| match &x.kind {
+            ExprKind::Closure { .. } => closure = true,
+            ExprKind::Call { callee, .. } => match &callee.kind {
+                ExprKind::Name(n)
+                    if lexical.contains(n)
+                        || n.split_once("::")
+                            .is_some_and(|(e, _)| world.effects.contains_key(e)) => {}
+                ExprKind::Name(n) => {
+                    let arrow = world
+                        .types
+                        .get(&(callee.span.start, callee.span.end))
+                        .is_some_and(|t| matches!(t, Type::Function { effects, .. } if !effects.instances.is_empty() || effects.tail.is_some()));
+                    let f = world.functions.contains_key(n).then(|| n.clone());
+                    entries.push((1, f, vec![], arrow));
+                }
+                ExprKind::Field(base, m) => {
+                    let label = match &base.kind {
+                        ExprKind::Name(l) => {
+                            if lexical.contains(l) || effect.label.as_deref() == Some(l.as_str()) {
+                                return;
+                            }
+                            Some(l.clone())
+                        }
+                        _ => None,
+                    };
+                    let suffix = format!("::{m}");
+                    let fs = world
+                        .functions
+                        .keys()
+                        .filter(|n| n.ends_with(&suffix))
+                        .cloned()
+                        .collect();
+                    entries.push((2, label, fs, false));
+                }
+                _ => entries.push((3, None, vec![], false)),
+            },
+            _ => {}
+        });
+        w.push(closure as u64);
+        w.push(entries.len() as u64);
+        for (kind, n, fs, arrow) in entries {
+            w.push(kind);
+            w.push(n.map_or(NONE, |n| self.name(&n)));
+            if kind == 1 {
+                w.push(arrow as u64);
+            } else if kind == 2 {
+                w.push(fs.len() as u64);
+                for f in &fs {
+                    w.push(self.name(f));
+                }
+            }
+        }
     }
 }
 
@@ -1613,7 +1844,7 @@ fn structured_functions_match_rust_on_the_corpus() {
         },
     );
     eprintln!(
-        "lean structured: {functions} functions, {generated} generated and {errors} refused by the structured extractor over Id; {skips} skipped by the port; {unencodable} worlds not encodable"
+        "lean structured: {functions} functions, {generated} generated and {errors} refused by the structured extractor; {skips} skipped by the port; {unencodable} worlds not encodable"
     );
     assert_eq!(bad, 0);
 }

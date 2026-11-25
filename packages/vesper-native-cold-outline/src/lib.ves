@@ -1,0 +1,854 @@
+// @vesper/native-cold-outline: the decisions of src/native_cold_outline.rs
+// (cold-region outlining on the native optimize path) in Vesper (#1829).
+//
+// The pass reads one function in the words of tests/common/clif_words.rs
+// (`encode_with`, with the module's pointer type) into @vesper/clif tables
+// and runs `native_cold_outline::outline` on them: up to 16 rounds of
+// `find_candidate` (classify a root, close its region, weigh it) and the
+// analysis half of `extract_region` (stack slots, live-ins, values to
+// rematerialize, the helper's block order). Each round that outlines
+// writes one E_OUTLINE op with every decision; `clif_words::apply_outline`
+// builds the helper from them (the entity copying of `Cloner`: names,
+// signatures, global values, jump tables, constants, source locations)
+// and the same stub in the parent. The tables get the same stub, so the
+// next round decides on the function Cranelift has by then.
+//
+// - graph.ves: successors, predecessors, dominators and loops.
+
+use self::graph::{
+    Graph,
+    graph
+};
+use @vesper/clif::{
+    Func,
+    read_func,
+    u32_at,
+    w
+};
+use @vesper/clif::codes::{
+    E_END,
+    E_OUTLINE,
+    E_SKIP,
+    F_BRANCH,
+    F_CALL,
+    F_PURE_GV,
+    F_STACK_SLOT,
+    F_STORE,
+    F_TERMINATOR,
+    F_UNARY_CONST,
+    NONE,
+    OP_BRIF,
+    OP_BR_TABLE,
+    OP_DYNAMIC_STACK_LOAD,
+    OP_DYNAMIC_STACK_STORE,
+    OP_F128CONST,
+    OP_F32CONST,
+    OP_F64CONST,
+    OP_FUNC_ADDR,
+    OP_GET_FRAME_POINTER,
+    OP_GET_RETURN_ADDRESS,
+    OP_GET_STACK_POINTER,
+    OP_ICONST,
+    OP_JUMP,
+    OP_NOP,
+    OP_RETURN,
+    OP_RETURN_CALL,
+    OP_RETURN_CALL_INDIRECT,
+    OP_SDIV,
+    OP_SREM,
+    OP_SYMBOL_VALUE,
+    OP_TRAP,
+    OP_TRY_CALL,
+    OP_TRY_CALL_INDIRECT,
+    OP_UDIV,
+    OP_UREM,
+    OP_VCONST,
+    TY_F16,
+    TY_F32,
+    TY_F64,
+    TY_I16,
+    TY_I32,
+    TY_I64,
+    TY_I8,
+    V_PARAM,
+    V_RESULT
+};
+
+const MAX_REGIONS_PER_FN: u64 = 16;
+const MAX_SHARED_TERMINALS: u64 = 4;
+const MAX_SHARED_TERM_INSTS: u64 = 12;
+const MAX_LIVE_INS: u64 = 16;
+const FAST_RETURN_MAX_NON_CONST: u64 = 28;
+const FAST_RETURN_MAX_TOTAL: u64 = 48;
+const EXPLICIT_COLD_MIN_INSTS: u64 = 12;
+const ASYM_MIN_COLD_INSTS: u64 = 16;
+const LOOP_EXIT_MIN_INSTS: u64 = 16;
+
+// OutlineKind (0: none).
+const K_EXPLICIT: u64 = 1;
+const K_ASYM: u64 = 2;
+const K_LOOP_EXIT: u64 = 3;
+
+fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+// ----- sorted u32 sets -------------------------------------------------------
+
+fn has(in s: ChunkSeq[u32], x: u32) -> bool {
+    let mut lo: u64 = 0;
+    let mut hi = s.len();
+    loop {
+        if lo >= hi {
+            return false;
+        }
+        let mid = wrapping_add(lo, hi) >> 1;
+        let v = u32_at(in s, mid);
+        if v == x {
+            return true;
+        }
+        if v < x {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+// Inserts `x` into the sorted `s`; whether it was new.
+fn insert(inout s: ChunkSeq[u32], x: u32) -> bool {
+    let mut lo: u64 = 0;
+    let mut hi = s.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, hi) >> 1;
+        let v = u32_at(in s, mid);
+        if v == x {
+            return false;
+        }
+        if v < x {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+    s.push(0);
+    let mut i = wrapping_sub(s.len(), 1);
+    loop {
+        if i <= lo {
+            break;
+        }
+        let prev = u32_at(in s, wrapping_sub(i, 1));
+        let ok = s.try_set(i, prev);
+        i = wrapping_sub(i, 1);
+    }
+    let ok = s.try_set(lo, x);
+    true
+}
+
+// ----- instruction classes ---------------------------------------------------
+
+fn eff(in f: Func, i: u32) -> u64 {
+    f.inst(w(i)).eff
+}
+
+fn is_call(in f: Func, i: u32) -> bool {
+    (eff(in f, i) & F_CALL) != 0
+}
+
+fn is_division(op: u64) -> bool {
+    op == OP_UDIV || op == OP_SDIV || op == OP_UREM || op == OP_SREM
+}
+
+// `is_terminator_or_nop`.
+fn term_or_nop(in f: Func, i: u32) -> bool {
+    (eff(in f, i) & F_TERMINATOR) != 0 || f.op(i) == OP_NOP
+}
+
+// `is_const_op`.
+fn const_op(op: u64) -> bool {
+    op == OP_ICONST
+        || op == OP_F32CONST
+        || op == OP_F64CONST
+        || op == OP_F128CONST
+        || op == OP_VCONST
+        || op == OP_SYMBOL_VALUE
+        || op == OP_FUNC_ADDR
+}
+
+// `can_rematerialize`.
+fn can_remat(in f: Func, i: u32) -> bool {
+    let op = f.op(i);
+    let e = eff(in f, i);
+    op == OP_ICONST
+        || op == OP_F32CONST
+        || op == OP_F64CONST
+        || (e & F_UNARY_CONST) != 0
+        || op == OP_FUNC_ADDR
+        || (e & F_PURE_GV) != 0
+}
+
+// `is_portable_scalar_param`.
+fn portable(ty: u64) -> bool {
+    ty == TY_I8
+        || ty == TY_I16
+        || ty == TY_I32
+        || ty == TY_I64
+        || ty == TY_F16
+        || ty == TY_F32
+        || ty == TY_F64
+}
+
+// The stack slot of a stack access, or NONE.
+fn slot_of(in f: Func, i: u32) -> u32 {
+    let row = f.inst(w(i));
+    if (row.eff & F_STACK_SLOT) != 0 {
+        wrapping_u32(row.imm)
+    } else {
+        NONE
+    }
+}
+
+// ----- candidates ------------------------------------------------------------
+
+pub struct Region {
+    root: u32,
+    kind: u64,
+    owned: ChunkSeq[u32],
+    shared: ChunkSeq[u32],
+    has_return: bool,
+    // the trap code's byte, 0 for none
+    first_trap: u64,
+    max_live_ins: u64,
+}
+
+// `bfs_reachable` from `start`, as a sorted set.
+fn bfs(in g: Graph, start: u32) -> ChunkSeq[u32] {
+    let mut seen = ChunkSeq::new[u32]();
+    let mut queue = ChunkSeq::new[u32]();
+    let ok = insert(inout seen, start);
+    queue.push(start);
+    let mut at: u64 = 0;
+    loop {
+        if at >= queue.len() {
+            break;
+        }
+        let b = u32_at(in queue, at);
+        at = inc(at);
+        for k in 0..g.nsuccs(b) {
+            let s = g.succ_at(b, k);
+            if insert(inout seen, s) {
+                queue.push(s);
+            }
+        }
+    }
+    seen
+}
+
+// `is_fast_return_arm`: whether `start` reaches a return cleanly.
+fn fast_return_arm(in f: Func, in g: Graph, start: u32) -> bool {
+    let mut seen = ChunkSeq::new[u32]();
+    let mut queue = ChunkSeq::new[u32]();
+    queue.push(start);
+    let mut at: u64 = 0;
+    let mut non_const: u64 = 0;
+    let mut total: u64 = 0;
+    loop {
+        if at >= queue.len() {
+            break;
+        }
+        let b = u32_at(in queue, at);
+        at = inc(at);
+        if !insert(inout seen, b) || seen.len() > 4 || g.innermost(b) != NONE {
+            return false;
+        }
+        let mut i = f.first_inst(b);
+        loop {
+            if i == NONE {
+                break;
+            }
+            let op = f.op(i);
+            let e = eff(in f, i);
+            if (e & F_CALL) != 0 || (e & F_STORE) != 0 || is_division(op) {
+                return false;
+            }
+            if !term_or_nop(in f, i) {
+                total = inc(total);
+                if !const_op(op) {
+                    non_const = inc(non_const);
+                }
+                if total > FAST_RETURN_MAX_TOTAL || non_const > FAST_RETURN_MAX_NON_CONST {
+                    return false;
+                }
+            }
+            if (e & F_BRANCH) != 0 {
+                for k in 0..f.ndests(i) {
+                    let t = f.dest_block(i, k);
+                    if t == b {
+                        return false;
+                    }
+                    queue.push(t);
+                }
+            } else if (e & F_TERMINATOR) != 0 && op != OP_RETURN {
+                return false;
+            }
+            i = f.next_inst(i);
+        }
+    }
+    non_const >= 2
+}
+
+// `classify_root`: the kind, 0 for none.
+fn classify_root(in f: Func, in g: Graph, entry: u32, root: u32) -> u64 {
+    if f.blk(w(root)).cold {
+        return K_EXPLICIT;
+    }
+    let mut pred = NONE;
+    let mut npred: u64 = 0;
+    let mut b = f.first_block();
+    loop {
+        if b == NONE {
+            break;
+        }
+        if g.reachable(b) && g.has_succ(b, root) {
+            pred = b;
+            npred = inc(npred);
+        }
+        b = f.next_block(b);
+    }
+    if npred != 1 {
+        return 0;
+    }
+    if !g.dominates(pred, root) {
+        return 0;
+    }
+    let last = f.last_inst(pred);
+    if last == NONE || f.op(last) != OP_BRIF {
+        return 0;
+    }
+    let b0 = f.dest_block(last, 0);
+    let b1 = f.dest_block(last, 1);
+    let fast = if b0 == root && b1 != root {
+        b1
+    } else if b1 == root && b0 != root {
+        b0
+    } else {
+        return 0;
+    };
+    if fast == entry || f.blk(w(fast)).cold {
+        return 0;
+    }
+    let lp = g.innermost(pred);
+    if lp != NONE && g.header(lp) != pred && g.innermost(fast) == lp {
+        return K_LOOP_EXIT;
+    }
+    if g.innermost(fast) == NONE && fast_return_arm(in f, in g, fast) {
+        return K_ASYM;
+    }
+    0
+}
+
+// `check_block_supported`.
+fn block_supported(in f: Func, b: u32, shared: bool, inout r: Region) -> bool {
+    let last = f.last_inst(b);
+    if last == NONE {
+        return false;
+    }
+    let mut count: u64 = 0;
+    let mut i = f.first_inst(b);
+    loop {
+        if i == NONE {
+            break;
+        }
+        let op = f.op(i);
+        if op == OP_GET_FRAME_POINTER
+            || op == OP_GET_STACK_POINTER
+            || op == OP_GET_RETURN_ADDRESS
+            || op == OP_RETURN_CALL
+            || op == OP_RETURN_CALL_INDIRECT
+            || op == OP_TRY_CALL
+            || op == OP_TRY_CALL_INDIRECT
+            || op == OP_DYNAMIC_STACK_LOAD
+            || op == OP_DYNAMIC_STACK_STORE {
+            return false;
+        }
+        if shared {
+            if is_call(in f, i) {
+                return false;
+            }
+            if !term_or_nop(in f, i) {
+                count = inc(count);
+                if count > MAX_SHARED_TERM_INSTS {
+                    return false;
+                }
+            }
+        }
+        i = f.next_inst(i);
+    }
+    let op = f.op(last);
+    if op == OP_RETURN {
+        r.has_return = true;
+        true
+    } else if op == OP_TRAP {
+        if r.first_trap == 0 {
+            r.first_trap = f.inst(w(last)).imm;
+        }
+        true
+    } else if op == OP_JUMP {
+        true
+    } else if (op == OP_BRIF || op == OP_BR_TABLE) && !shared {
+        true
+    } else {
+        false
+    }
+}
+
+// `build_closed_region`.
+fn closed_region(in f: Func, in g: Graph, root: u32, inout r: Region) -> bool {
+    let reach = bfs(in g, root);
+    for k in 0..reach.len() {
+        let b = u32_at(in reach, k);
+        if b != root && g.has_succ(b, root) {
+            return false;
+        }
+        let mut lp = g.innermost(b);
+        loop {
+            if lp == NONE {
+                break;
+            }
+            if !g.dominates(root, g.header(lp)) {
+                return false;
+            }
+            lp = g.parent(lp);
+        }
+    }
+    r.owned.clear();
+    r.shared.clear();
+    for k in 0..reach.len() {
+        let b = u32_at(in reach, k);
+        if g.dominates(root, b) {
+            r.owned.push(b);
+        } else {
+            r.shared.push(b);
+        }
+    }
+    if r.shared.len() > MAX_SHARED_TERMINALS {
+        return false;
+    }
+    let mut b = f.first_block();
+    loop {
+        if b == NONE {
+            break;
+        }
+        if !has(in r.owned, b) {
+            for k in 0..g.nsuccs(b) {
+                let s = g.succ_at(b, k);
+                if s != root && has(in r.owned, s) {
+                    return false;
+                }
+            }
+        }
+        b = f.next_block(b);
+    }
+    for q in 0..r.shared.len() {
+        let t = u32_at(in r.shared, q);
+        if g.innermost(t) != NONE {
+            return false;
+        }
+        for k in 0..g.nsuccs(t) {
+            if !has(in r.shared, g.succ_at(t, k)) {
+                return false;
+            }
+        }
+        let mut i = f.first_inst(t);
+        loop {
+            if i == NONE {
+                break;
+            }
+            if is_division(f.op(i)) {
+                return false;
+            }
+            i = f.next_inst(i);
+        }
+    }
+    r.has_return = false;
+    r.first_trap = 0;
+    for q in 0..r.owned.len() {
+        if !block_supported(in f, u32_at(in r.owned, q), false, inout r) {
+            return false;
+        }
+    }
+    for q in 0..r.shared.len() {
+        if !block_supported(in f, u32_at(in r.shared, q), true, inout r) {
+            return false;
+        }
+    }
+    r.root = root;
+    r.max_live_ins = MAX_LIVE_INS;
+    true
+}
+
+// The stack slots region blocks use, and the ones blocks outside the owned
+// set use, as sorted sets.
+fn slots(
+    in f: Func,
+    in r: Region,
+    inout region_slots: ChunkSeq[u32],
+    inout outside: ChunkSeq[u32]
+) {
+    region_slots.clear();
+    outside.clear();
+    let mut b = f.first_block();
+    loop {
+        if b == NONE {
+            break;
+        }
+        let inside = has(in r.owned, b) || has(in r.shared, b);
+        let owned = has(in r.owned, b);
+        let mut i = f.first_inst(b);
+        loop {
+            if i == NONE {
+                break;
+            }
+            let ss = slot_of(in f, i);
+            if ss != NONE {
+                if inside {
+                    let a = insert(inout region_slots, ss);
+                }
+                if !owned {
+                    let a = insert(inout outside, ss);
+                }
+            }
+            i = f.next_inst(i);
+        }
+        b = f.next_block(b);
+    }
+}
+
+// `region_worth_outlining`: whether it is (and `r.max_live_ins`).
+fn worth(in f: Func, in g: Graph, inout r: Region) -> bool {
+    let mut calls: u64 = 0;
+    let mut non_term: u64 = 0;
+    let mut has_loop = false;
+    let mut b = f.first_block();
+    loop {
+        if b == NONE {
+            break;
+        }
+        let inside = has(in r.owned, b) || has(in r.shared, b);
+        if inside {
+            if g.innermost(b) != NONE {
+                has_loop = true;
+            }
+            let mut i = f.first_inst(b);
+            loop {
+                if i == NONE {
+                    break;
+                }
+                if is_call(in f, i) {
+                    calls = inc(calls);
+                }
+                if !term_or_nop(in f, i) && !const_op(f.op(i)) {
+                    non_term = inc(non_term);
+                }
+                i = f.next_inst(i);
+            }
+        }
+        b = f.next_block(b);
+    }
+    let mut region_slots = ChunkSeq::new[u32]();
+    let mut outside = ChunkSeq::new[u32]();
+    slots(in f, in r, inout region_slots, inout outside);
+    let mut exclusive: u64 = 0;
+    for k in 0..region_slots.len() {
+        if !has(in outside, u32_at(in region_slots, k)) {
+            exclusive = inc(exclusive);
+        }
+    }
+    r.max_live_ins = if r.kind == K_ASYM && calls == 0 && exclusive == 0 && r.first_trap == 0 {
+        4
+    } else {
+        MAX_LIVE_INS
+    };
+    if has_loop || calls >= 2 || (exclusive > 0 && (calls > 0 || non_term >= 8)) {
+        return true;
+    }
+    if r.kind == K_EXPLICIT {
+        calls > 0 || non_term >= EXPLICIT_COLD_MIN_INSTS
+    } else if r.kind == K_ASYM {
+        (calls > 0 || !r.has_return) && non_term >= ASYM_MIN_COLD_INSTS
+    } else {
+        calls > 0 || non_term >= LOOP_EXIT_MIN_INSTS
+    }
+}
+
+// `find_candidate`: whether one is found (into `r`).
+fn find_candidate(in f: Func, in stubs: ChunkSeq[u32], inout r: Region) -> bool {
+    let entry = f.first_block();
+    if entry == NONE {
+        return false;
+    }
+    let g = graph(in f);
+    let mut root = f.first_block();
+    loop {
+        if root == NONE {
+            break;
+        }
+        if root != entry && !has(in stubs, root) && g.reachable(root) && g.innermost(root) == NONE {
+            let kind = classify_root(in f, in g, entry, root);
+            if kind != 0 {
+                r.kind = kind;
+                if closed_region(in f, in g, root, inout r) {
+                    if worth(in f, in g, inout r) {
+                        return true;
+                    }
+                }
+            }
+        }
+        root = f.next_block(root);
+    }
+    false
+}
+
+// ----- extraction ------------------------------------------------------------
+
+// `is_defined_inside_region` of the resolved `v`.
+fn defined_inside(in f: Func, v: u32, root: u32, in region: ChunkSeq[u32]) -> bool {
+    let x = f.val(w(v));
+    if x.kind == V_PARAM {
+        x.a != root && has(in region, x.a)
+    } else if x.kind == V_RESULT {
+        let b = f.inst(w(x.a)).block;
+        b != NONE && has(in region, b)
+    } else {
+        false
+    }
+}
+
+// `rpo_order` from `root` within `region`.
+fn rpo(in f: Func, in g: Graph, root: u32, in region: ChunkSeq[u32]) -> ChunkSeq[u32] {
+    let mut seen = ChunkSeq::new[u32]();
+    let mut post = ChunkSeq::new[u32]();
+    // An explicit stack of (block, next successor index).
+    let mut sb = ChunkSeq::new[u32]();
+    let mut sk = ChunkSeq::new[u64]();
+    let a = insert(inout seen, root);
+    sb.push(root);
+    sk.push(0);
+    loop {
+        let n = sb.len();
+        if n == 0 {
+            break;
+        }
+        let top = wrapping_sub(n, 1);
+        let b = u32_at(in sb, top);
+        let k = match sk.try_get(top) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if k >= g.nsuccs(b) {
+            post.push(b);
+            sb.truncate(top);
+            sk.truncate(top);
+            continue;
+        }
+        let ok = sk.try_set(top, inc(k));
+        let s = g.succ_at(b, k);
+        if has(in region, s) && insert(inout seen, s) {
+            sb.push(s);
+            sk.push(0);
+        }
+    }
+    let mut out = ChunkSeq::with_capacity[u32](post.len());
+    let np = post.len();
+    for q in 0..np {
+        out.push(u32_at(in post, wrapping_sub(wrapping_sub(np, 1), q)));
+    }
+    out
+}
+
+fn push_list(inout out: ChunkSeq[u64], in s: ChunkSeq[u32]) {
+    out.push(s.len());
+    for k in 0..s.len() {
+        out.push(w(u32_at(in s, k)));
+    }
+}
+
+// The analysis half of `extract_region`: writes E_OUTLINE and changes the
+// tables as the stub does, or writes E_SKIP when the region is refused
+// (`Ok(None)`). Whether it outlined.
+fn extract(inout f: Func, in r: Region, idx: u64) -> bool {
+    let root = r.root;
+    let mut region = ChunkSeq::new[u32]();
+    region.extend(in r.owned.as_slice());
+    for k in 0..r.shared.len() {
+        let a = insert(inout region, u32_at(in r.shared, k));
+    }
+    let mut region_slots = ChunkSeq::new[u32]();
+    let mut outside = ChunkSeq::new[u32]();
+    slots(in f, in r, inout region_slots, inout outside);
+    let mut shared_slots = ChunkSeq::new[u32]();
+    let mut exclusive_slots = ChunkSeq::new[u32]();
+    for k in 0..region_slots.len() {
+        let ss = u32_at(in region_slots, k);
+        if has(in outside, ss) {
+            shared_slots.push(ss);
+        } else {
+            exclusive_slots.push(ss);
+        }
+    }
+    let mut live_ins = ChunkSeq::new[u32]();
+    let mut live_seen = ChunkSeq::new[u32]();
+    let mut remat_v = ChunkSeq::new[u32]();
+    let mut remat_i = ChunkSeq::new[u32]();
+    let mut remat_seen = ChunkSeq::new[u32]();
+    let mut uses = ChunkSeq::new[u32]();
+    for q in 0..region.len() {
+        let b = u32_at(in region, q);
+        let mut i = f.first_inst(b);
+        loop {
+            if i == NONE {
+                break;
+            }
+            uses.clear();
+            for a in 0..f.nargs(i) {
+                uses.push(f.arg(i, a));
+            }
+            for d in 0..f.ndests(i) {
+                for a in 0..f.dest_nargs(i, d) {
+                    let v = f.dest_arg(i, d, a);
+                    if v != NONE {
+                        uses.push(v);
+                    }
+                }
+            }
+            for u in 0..uses.len() {
+                let v = f.resolve(u32_at(in uses, u));
+                if defined_inside(in f, v, root, in region) {
+                    continue;
+                }
+                let di = f.def_inst(v);
+                if di != NONE && f.def_num(v) == 0 && can_remat(in f, di) {
+                    if insert(inout remat_seen, v) {
+                        remat_v.push(v);
+                        remat_i.push(di);
+                    }
+                    continue;
+                }
+                if !portable(f.value_type(v)) {
+                    f.out.push(E_SKIP);
+                    return false;
+                }
+                if insert(inout live_seen, v) {
+                    live_ins.push(v);
+                }
+            }
+            i = f.next_inst(i);
+        }
+    }
+    if wrapping_add(live_ins.len(), shared_slots.len()) > r.max_live_ins {
+        f.out.push(E_SKIP);
+        return false;
+    }
+    let g = graph(in f);
+    let order = rpo(in f, in g, root, in region);
+    // The op.
+    f.out.push(E_OUTLINE);
+    f.out.push(idx);
+    f.out.push(w(root));
+    push_list(inout f.out, in r.owned);
+    push_list(inout f.out, in r.shared);
+    f
+        .out
+        .push(
+            if r.has_return {
+                1
+            } else {
+                0
+            }
+        );
+    f.out.push(r.first_trap);
+    push_list(inout f.out, in live_ins);
+    f.out.push(remat_v.len());
+    for k in 0..remat_v.len() {
+        f.out.push(w(u32_at(in remat_v, k)));
+        f.out.push(w(u32_at(in remat_i, k)));
+    }
+    push_list(inout f.out, in shared_slots);
+    push_list(inout f.out, in exclusive_slots);
+    let mut rest = ChunkSeq::new[u32]();
+    for k in 0..order.len() {
+        let b = u32_at(in order, k);
+        if b != root {
+            rest.push(b);
+        }
+    }
+    push_list(inout f.out, in rest);
+    // The stub: root's instructions go, then a `stack_addr` of each shared
+    // slot, the call, and a return of its results or a trap.
+    f.clear_block(root);
+    let mut args = ChunkSeq::new[u32]();
+    args.extend(in live_ins.as_slice());
+    for k in 0..shared_slots.len() {
+        let v = f.stub_stack_addr(root, u32_at(in shared_slots, k));
+        args.push(v);
+    }
+    let call = f.stub_call(root, in args, r.has_return);
+    if r.has_return {
+        f.stub_return(root, call);
+    } else {
+        // `TrapCode::unwrap_user(1)` is the byte 1.
+        let code = if r.first_trap == 0 {
+            1
+        } else {
+            r.first_trap
+        };
+        f.stub_trap(root, code);
+    }
+    f.set_cold(root);
+    for k in 0..r.owned.len() {
+        let b = u32_at(in r.owned, k);
+        if b != root {
+            f.clear_block(b);
+            f.remove_block(b);
+        }
+    }
+    true
+}
+
+// `native_cold_outline::outline` on the function the input encodes: the
+// edit script (one E_OUTLINE or E_SKIP per round that found a candidate).
+pub fn outline_words(in input: Str) -> ChunkSeq[u64] {
+    let mut f = read_func(in input.as_bytes());
+    let mut nlayout: u64 = 0;
+    let mut b = f.first_block();
+    loop {
+        if b == NONE {
+            break;
+        }
+        nlayout = inc(nlayout);
+        b = f.next_block(b);
+    }
+    if nlayout >= 3 && !f.no_outline {
+        let mut stubs = ChunkSeq::new[u32]();
+        let mut r = Region {
+            root: NONE,
+            kind: 0,
+            owned: ChunkSeq::new[u32](),
+            shared: ChunkSeq::new[u32](),
+            has_return: false,
+            first_trap: 0,
+            max_live_ins: MAX_LIVE_INS
+        };
+        for idx in 0..MAX_REGIONS_PER_FN {
+            if !find_candidate(in f, in stubs, inout r) {
+                break;
+            }
+            let did = extract(inout f, in r, idx);
+            let a = insert(inout stubs, r.root);
+        }
+    }
+    f.script()
+}
