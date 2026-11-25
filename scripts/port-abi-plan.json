@@ -40,7 +40,7 @@
     ]
   },
   {
-    "crates": ["vesper-std-driver", "vesper-std-host"],
+    "crates": ["vesper-std-driver"],
     "checks": [
       {
         "args": ["-p", "vesper-std-driver", "--features", "vesper-port"]

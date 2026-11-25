@@ -122,7 +122,9 @@ every box below is ticked. Each box names how it is checked.
 ### The default switch
 
 The hybrid installs its swaps in one of three sets
-(`crates/vesper-hybrid/src/swaps.rs`, `VESPER_HYBRID_SWAPS`):
+(`crates/vesper-hybrid/src/swaps.rs`, `VESPER_HYBRID_SWAPS`; each swap's
+flip-gate row is in its own file, `crates/vesper-hybrid/src/swap/<file>.rs`,
+#1897):
 
 | Set | What runs from Vesper | Use |
 |---|---|---|
@@ -132,7 +134,7 @@ The hybrid installs its swaps in one of three sets
 
 A swap joins `gated` in the PR that passes its gate: that PR adds the gate
 configuration (`scripts/ci/flip-gate/<name>.toml`), the scoreboard row
-below, and changes the swap's row in `swaps.rs` to `pass(...)`.
+below, and changes the swap's row in its `src/swap/` file to `pass(...)`.
 `crates/vesper-hybrid/tests/swaps.rs` checks that every `gated` swap has
 both and that the others really stay on Rust, and
 `gated_hybrid_matches_the_default_compiler` (tests/differential.rs) runs the
@@ -145,7 +147,7 @@ gated set over the whole corpus with 0 differences. Today `gated` holds
    root-compiler section and every crate of class `compiler` has a PASS row
    in the scoreboard (0 differences, ABBA upper end at or below 1.5x, its
    tests pass against the Vesper build). Checked by: `gated` equals `all`
-   in `swaps.rs` (no `open(...)` row left), and no module of the census is
+   in `src/swap/` (no `open(...)` row left), and no module of the census is
    still answered by Rust in the default compiler. Open today, largest
    first: the native walk and the CLIF passes (`native`, `native_clif_opt`,
    `native_cold_outline`, `native_vectorize`; #1509, #1829); the front-end
@@ -156,7 +158,7 @@ gated set over the whole corpus with 0 differences. Today `gated` holds
    `verify_commands`, `proof_commands` (#1341); `ffi_lowering`, `tiled`,
    `vector`, `native_vector` (#1830); `native_session`, `native_aggregates`;
    `seq`; and every swap that has a differential but no gate configuration
-   yet (each `open(...)` row of `swaps.rs` says which).
+   yet (each `open(...)` row of `src/swap/` says which).
 2. **The driver runs no Rust pass.** `HybridDriver::hd_step`
    (`crates/vesper-hybrid/src/driver.rs`) is gone: package loading,
    checking and artifact emission run in Vesper, so the Vesper compiler is
@@ -183,10 +185,11 @@ gated set over the whole corpus with 0 differences. Today `gated` holds
      workers drive the parser, checker, optimizer, evaluator and native
      backend in process). They must drive the Vesper compiler as a process
      or through its C ABI instead.
-   - `vesper-codegen-verified` links the frozen seeds of
-     `vesper-loom-calculus`, `vesper-loom-cas` and `vesper-loom-trust`; those
-     seeds go at the retirement, so it needs its own copy of what it uses
-     or a call into the Vesper libraries.
+   - `vesper-codegen-verified` no longer links the frozen seeds of
+     `vesper-loom-calculus`, `vesper-loom-cas` and `vesper-loom-trust`
+     (#1929): `src/trust.rs` is its own copy of the attestation rules,
+     pinned to the seeds' behaviour by `tests/trust_vectors.rs`. It must not
+     call the Vesper libraries instead, which the compiler it audits builds.
    - `src/verified_codegen` (the Stage 1 guard) is in `src/`. Owner
      decision (2026-11-25): it is ported to Vesper (#1886,
      `@vesper/verified-codegen`), and `bootstrap/stage1.rs` uses the port

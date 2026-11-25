@@ -207,8 +207,8 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertEqual(step["env"]["VESPER_PORT_COMPILER"], "${{ runner.temp }}/port-compiler/vesper")
         self.assertEqual(step["env"]["VESPER_PORT_HARNESS_CRATES"], "${{ needs.plan.outputs.ports }}")
         self.assertNotIn("cargo build", "\n".join(s.get("run", "") for s in ports["steps"]))
-        # Seven shards (#1019, #1100), each running its own part of the harness.
-        shards = [str(n) for n in range(1, 8)]
+        # Nine shards (#1019, #1100, #1924), each running its own part of the harness.
+        shards = [str(n) for n in range(1, 10)]
         self.assertEqual(ports["strategy"]["matrix"]["shard"], shards)
         self.assertEqual(ports["strategy"]["fail-fast"], "false")
         self.assertEqual(step["env"]["VESPER_PORT_HARNESS_SHARD"], "${{ matrix.shard }}")

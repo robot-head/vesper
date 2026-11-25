@@ -818,8 +818,8 @@ sys.exit(99)
         failed = self.aspect(*command, status=27, env={**env, "VESPER_TEST_FAIL_PORT": "prism"})
         self.assertEqual(ports(failed), ["beacon check", "prism test-port"])
         for config, error in (
-            ({"VESPER_PORT_HARNESS_SHARD": "01"}, "must be 1 to 7"),
-            ({"VESPER_PORT_HARNESS_SHARD": "8"}, "must be 1 to 7"),
+            ({"VESPER_PORT_HARNESS_SHARD": "01"}, "must be 1 to 9"),
+            ({"VESPER_PORT_HARNESS_SHARD": "10"}, "must be 1 to 9"),
             ({"VESPER_PORT_HARNESS_SCOPE": "abi", "VESPER_PORT_HARNESS_SHARD": "1"}, "abi takes no shard"),
         ):
             result = self.aspect(*command, status=1, env={**env, **config})

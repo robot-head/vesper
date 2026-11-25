@@ -5627,7 +5627,6 @@ dependencies = [
  "vesper-silicon-seed",
  "vesper-simd",
  "vesper-span-seed",
- "vesper-std-host",
  "vesper-syntax",
  "vesper-tensor-seed",
  "vesper-test",
@@ -5828,11 +5827,10 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
+ "semver",
  "serde",
+ "serde_json",
  "toml 0.8.23",
- "vesper-loom-calculus-seed",
- "vesper-loom-cas-seed",
- "vesper-loom-trust-seed",
 ]
 
 [[package]]
@@ -6210,7 +6208,6 @@ dependencies = [
  "vesper-silicon-seed",
  "vesper-simd",
  "vesper-span-seed",
- "vesper-std-host",
  "vesper-syntax",
  "vesper-tensor-seed",
  "vesper-test",
@@ -6828,12 +6825,7 @@ version = "0.1.0"
 dependencies = [
  "vesper-port-abi",
  "vesper-port-harness",
- "vesper-std-host",
 ]
-
-[[package]]
-name = "vesper-std-host"
-version = "0.1.0"
 
 [[package]]
 name = "vesper-syntax"

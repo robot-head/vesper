@@ -1,24 +1,32 @@
 // ---------------------------------------------------------------------------
 // The timing wheel.
 //
-// Entry `i` is the `i`-th element of every `e_*` sequence. Lists
-// `0 .. levels * slots` are the wheel slots, then the overflow list, then
-// the sorted ready list. See src/reference/wheel.rs for the model.
+// Entry `i` is the eight words at `ix(i, 0)` of `e`: deadline, tick,
+// sequence, generation, prev, next, list and a pad word, so one entry is
+// one cache line, as in the Rust build's `Vec<Entry>`. List `l` is the two
+// words at `lx(l, 0)` of `l`: head and tail. Lists `0 .. levels * slots`
+// are the wheel slots, then the overflow list, then the sorted ready list.
+// See src/reference/wheel.rs for the model.
+
+// Word `field` of entry `index` (fields: 0 deadline, 1 tick, 2 sequence,
+// 3 generation, 4 prev, 5 next, 6 list).
+fn ix(index: u64, field: u64) -> u64 {
+    wrapping_add(wrapping_mul(index, 8), field)
+}
+
+// Word `end` of list `list` (0 head, 1 tail).
+fn lx(list: u64, end: u64) -> u64 {
+    wrapping_add(wrapping_mul(list, 2), end)
+}
 
 struct WheelCore {
-    e_deadline: ChunkSeq[u64],
-    e_tick: ChunkSeq[u64],
-    e_seq: ChunkSeq[u64],
-    e_generation: ChunkSeq[u64],
-    e_prev: ChunkSeq[u64],
-    e_next: ChunkSeq[u64],
-    e_list: ChunkSeq[u64],
-    l_head: ChunkSeq[u64],
-    l_tail: ChunkSeq[u64],
+    e: ChunkSeq[u64],
+    l: ChunkSeq[u64],
     occupied: ChunkSeq[u64],
-    // `l_span[l] = 2^((l + 1) * slot_bits)`, the first tick distance level
-    // `l` cannot hold (see `place`).
-    l_span: ChunkSeq[u64],
+    // `level_of_bit[b] = min(b / slot_bits, levels)`: the level of a tick
+    // distance whose highest set bit is `b` (`levels` is overflow; see
+    // `place`).
+    level_of_bit: ChunkSeq[u64],
     tick_ns: u64,
     slot_bits: u64,
     levels: u64,
@@ -57,33 +65,28 @@ fn build_wheel(config: WheelConfig) -> WheelCore {
     let levels = widen_u64(config.levels);
     let slots = shl(1, slot_bits);
     let cap = widen_u64(config.capacity);
-    let mut next: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](cap);
+    // cap <= max_capacity() (a u32), so cap * 8 cannot wrap.
+    let mut e: ChunkSeq[u64] = filled(wrapping_mul(cap, 8), 0);
     for i in 0..cap {
         let after = wrapping_add(i, 1);
+        e.try_set(ix(i, 4), nil());
         if after < cap {
-            next.push(after);
+            e.try_set(ix(i, 5), after);
         } else {
-            next.push(nil());
+            e.try_set(ix(i, 5), nil());
         }
+        e.try_set(ix(i, 6), nil());
     }
     let lists = wrapping_add(wrapping_mul(levels, slots), 2);
-    let mut span: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](levels);
-    for l in 0..levels {
-        // (l + 1) * slot_bits <= levels * slot_bits <= 63.
-        span.push(shl(1, wrapping_mul(wrapping_add(l, 1), slot_bits)));
+    let mut level_of_bit: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](64);
+    for b in 0..64 {
+        level_of_bit.push(min(div(b, slot_bits), levels));
     }
     WheelCore {
-        e_deadline: filled(cap, 0),
-        e_tick: filled(cap, 0),
-        e_seq: filled(cap, 0),
-        e_generation: filled(cap, 0),
-        e_prev: filled(cap, nil()),
-        e_next: next,
-        e_list: filled(cap, nil()),
-        l_head: filled(lists, nil()),
-        l_tail: filled(lists, nil()),
+        e: e,
+        l: filled(wrapping_mul(lists, 2), nil()),
         occupied: filled(levels, 0),
-        l_span: span,
+        level_of_bit: level_of_bit,
         tick_ns: config.tick_ns,
         slot_bits: slot_bits,
         levels: levels,
@@ -112,23 +115,23 @@ impl WheelCore {
     }
 
     fn deadline_of(in self, index: u64) -> u64 {
-        at(in self.e_deadline, index)
+        at(in self.e, ix(index, 0))
     }
 
     fn next_of(in self, index: u64) -> u64 {
-        at(in self.e_next, index)
+        at(in self.e, ix(index, 5))
     }
 
     fn prev_of(in self, index: u64) -> u64 {
-        at(in self.e_prev, index)
+        at(in self.e, ix(index, 4))
     }
 
     fn head_of(in self, list: u64) -> u64 {
-        at(in self.l_head, list)
+        at(in self.l, lx(list, 0))
     }
 
     fn tail_of(in self, list: u64) -> u64 {
-        at(in self.l_tail, list)
+        at(in self.l, lx(list, 1))
     }
 
     // `(deadline, sequence)` of `a` is `<=` that of `b`.
@@ -138,7 +141,7 @@ impl WheelCore {
         if da != db {
             da < db
         } else {
-            at(in self.e_seq, a) <= at(in self.e_seq, b)
+            at(in self.e, ix(a, 2)) <= at(in self.e, ix(b, 2))
         }
     }
 
@@ -164,7 +167,7 @@ impl WheelCore {
         if index >= self.capacity {
             return Option::Some(HandleError::Foreign);
         }
-        if at(in self.e_list, index) == nil() || at(in self.e_generation, index) != generation {
+        if at(in self.e, ix(index, 6)) == nil() || at(in self.e, ix(index, 3)) != generation {
             return Option::Some(HandleError::Stale);
         }
         Option::None
@@ -184,21 +187,21 @@ impl WheelCore {
         self.next_seq = wrapping_add(seq, 1);
         let tick = div(deadline_ns, self.tick_ns);
         self.free_head = self.next_of(index);
-        self.e_deadline.try_set(index, deadline_ns);
-        self.e_tick.try_set(index, tick);
-        self.e_seq.try_set(index, seq);
-        let generation = at(in self.e_generation, index);
+        self.e.try_set(ix(index, 0), deadline_ns);
+        self.e.try_set(ix(index, 1), tick);
+        self.e.try_set(ix(index, 2), seq);
+        let generation = at(in self.e, ix(index, 3));
         self.len = wrapping_add(self.len, 1);
         self.place(index);
         Result::Ok((index, generation))
     }
 
     fn release(inout self, index: u64) {
-        let generation = at(in self.e_generation, index);
-        self.e_generation.try_set(index, wrapping_add(generation, 1));
-        self.e_list.try_set(index, nil());
-        self.e_prev.try_set(index, nil());
-        self.e_next.try_set(index, self.free_head);
+        let generation = at(in self.e, ix(index, 3));
+        self.e.try_set(ix(index, 3), wrapping_add(generation, 1));
+        self.e.try_set(ix(index, 6), nil());
+        self.e.try_set(ix(index, 4), nil());
+        self.e.try_set(ix(index, 5), self.free_head);
         self.free_head = index;
         self.len = wrapping_sub(self.len, 1);
     }
@@ -275,7 +278,7 @@ impl WheelCore {
     fn drain(inout self) -> ChunkSeq[u64] {
         let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
         for index in 0..self.capacity {
-            if at(in self.e_list, index) != nil() {
+            if at(in self.e, ix(index, 6)) != nil() {
                 let deadline = self.deadline_of(index);
                 self.unlink(index);
                 self.release(index);

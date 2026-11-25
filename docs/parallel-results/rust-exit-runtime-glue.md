@@ -211,3 +211,25 @@ are updated in the first port PR after #1415 merges.
 
 - **PR #1629 (`@vesper/vsys`, `#1627`):** Ported `vesper-ffi::sys` (`.vsys` lexer, `wire struct` layout compiler, canonical byte encoder, and library validator) to `packages/vesper-vsys`, verified byte-for-byte against `vesper_ffi::sys::parse` across all `.vsys` files in the repository (`tests/self_host_vsys.rs`).
 - **PR (`@vesper-std/env` Windows, `#1633`):** Replaced `vesper_std_host` in `packages/vesper-std/env/env-windows.vsys` with direct `kernel32` bindings (`GetCommandLineW`, `GetCurrentDirectoryW`, `GetEnvironmentVariableW`, `GetEnvironmentStringsW`, `FreeEnvironmentStringsW`, `lstrlenW`, `WideCharToMultiByte`) and `packages/vesper-std/env/src-windows/lib.ves` (`CWStr` + UTF-8/UTF-16). `@vesper-std/env` now uses zero `vesper_std_host` across Linux, macOS, and Windows.
+
+## Update (#1712): `vesper-std-host` deleted
+
+With Windows fs on kernel32 (#1701) and Windows process on kernel32 (#1716),
+no `.vsys` library linked the shim any more; only test helpers and a fixture
+symbol were left (131 lines). This PR deletes the crate:
+
+- The test oracles' helpers (`IoKind`, `error_word`, `os_bytes`, `path_of`)
+  move to `tests/common/std_io_oracle.rs` (oracles stay Rust, owner call
+  2026-11-21); the std tests bind only libc or kernel32.
+- The `live_handles()` leak counters, constant zeros since the shims went,
+  are dropped from tests/std_io_support and the std-driver test.
+- `vesper jit`, `run` and `test` no longer bind a compiler-hosted
+  `vesper_std_host`: every library comes from the shared library its link
+  name names (`src/vsys_commands.rs`; manuscript §16.3 updated). The
+  `vesper test` fixture in tests/test_runner_cli.rs calls libc's `abs`.
+- The root package, vesper-hybrid and vesper-std-driver drop the dependency;
+  the census row goes.
+
+Only the WASI views (`fs-wasip2-wasm32.vsys`, `env-wasip2.vsys`) still carry
+the link name `vesper_std_host`; the wasm backend lowers them to WASI 0.2 and
+nothing links them.
