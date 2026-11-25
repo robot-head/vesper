@@ -37,18 +37,10 @@ vesper_port_object(
     target = VESPER_TARGET,
 )
 
+# The build script does not take the object (as Beacon's does): //:bin/vesper
+# builds it, and //:bin/vesper's run-time tools link this crate, so that
+# would be a dependency cycle.
 vesper_crate(
-    # The build script links this object only under `vesper-port`; passing
-    # it keeps the port in this package's dependency graph.
-    build_script_data = [
-        ":simd_vesper",
-        ":simd_vesper_binding",
-    ],
-    build_script_env = {
-        # rules_rust already makes these execpaths absolute.
-        "VESPER_PORT_OBJECT": "$(execpath :simd_vesper)",
-        "VESPER_PORT_GENERATED_BINDING": "$(execpath :simd_vesper_binding)",
-    },
     # Lean resolves symlinked runfiles to the source tree and then rejects
     # them as outside --root, so these run in a copy of regular files.
     copy_test_cwd = ["test/model"],
