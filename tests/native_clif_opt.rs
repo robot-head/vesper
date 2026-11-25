@@ -984,3 +984,50 @@ fn main() -> u64 {
         "expected dense icmp eq chain to lower to br_table:\n{fn_clif}"
     );
 }
+
+#[test]
+fn folds_post_propagation_arith_select_and_icmp() {
+    let source = "
+fn compute(x: u64, inout s: ChunkSeq[u64]) -> u64 {
+    if x == 3 {
+        s.push(1);
+        let z = wrapping_sub(x, x);
+        let b = if x > 1 { 7 } else { 9 };
+        let c = x & x;
+        let d = (x ^ x) | (x & 0);
+        wrapping_add(wrapping_add(z, b), wrapping_add(c, d))
+    } else {
+        s.push(2);
+        wrapping_add(x, 1)
+    }
+}
+
+fn main() -> u64 {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new();
+    let mut acc = 0;
+    let mut i = 0;
+    loop {
+        if i > 5 {
+            break;
+        }
+        acc = wrapping_add(acc, compute(i, inout s));
+        i = wrapping_add(i, 1);
+    }
+    wrapping_add(acc, s.len())
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("compute\n"))
+        .unwrap_or(&clif);
+    assert!(
+        !fn_clif.contains("isub") && !fn_clif.contains("bxor") && !fn_clif.contains("select "),
+        "expected same-operand and post-propagation constant ops to fold in compute:\n{fn_clif}"
+    );
+}

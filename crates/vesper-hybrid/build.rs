@@ -59,6 +59,18 @@ const MODULES: &[(&str, &str, &str)] = &[
         "modules/freestanding",
         "port/freestanding.rs",
     ),
+    // SH4 lane 17 (#1291): backend verifiers (const-time, stack, realtime, detfloat).
+    (
+        "hybrid_backend_checks",
+        "modules/backend_checks",
+        "port/backend_checks.rs",
+    ),
+    // Rust-exit gap wave 1 lane 11 (#1509): native walk register_locals plan.
+    (
+        "hybrid_codegen_walk",
+        "modules/codegen_walk",
+        "port/codegen_walk.rs",
+    ),
     // SH4 lane 11 (#1285): vector and TiledSeq operations, through the
     // `numeric` hook.
     (
@@ -129,6 +141,8 @@ const MODULES: &[(&str, &str, &str)] = &[
     ),
     // SH2 lane 8 (#1180): capability effect rules (`capability_effects::check_world`).
     ("hybrid_effects", "modules/effects", "port/effects.rs"),
+    // SH2 lane 12 (#1184): fip checks (`fip::check_world`).
+    ("hybrid_fip", "modules/fip", "port/fip.rs"),
     // SH5 lane 15 (#1338): the doc renderers.
     ("hybrid_doc", "modules/doc", "port/doc.rs"),
 ];

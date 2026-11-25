@@ -6,17 +6,20 @@ runs `src/lsp`, and this package is checked against it by
 `tests/self_host_lsp_features.rs`.
 
 Part 1 ports navigation (`src/lsp/navigation.rs`); part 1b (#1828) brings it
-under the 1.5x bar:
+under the 1.5x bar, and part 2 adds hover and the documentation links:
 
 - `textDocument/documentSymbol`, in both the hierarchical and the legacy
   (`SymbolInformation`) shape;
 - `workspace/symbol`;
 - `textDocument/definition` by lexical resolution. A cursor inside a `///`
   or `//!` comment with no lexical target is the documentation-link
-  fallback (`navigation/doc_links.rs`), which needs `vesper_doc::links`;
-  the entry reports it as deferred;
+  fallback (`navigation/doc_links.rs` over `vesper_doc::links`), in
+  `doc_links.ves`, `links.ves` and `markdown.ves`. It needs the
+  declaration facts, so the single entry reports it as deferred;
 - `lsp_definitions`, many definition requests on one document with the
-  parse kept, as the server keeps its checked snapshot.
+  parse kept, as the server keeps its checked snapshot, with the doc facts;
+- `textDocument/hover` (`lsp_hovers`, `hover.ves`) over the checker's facts
+  in the `@vesper/check-data` harness layout.
 
 The source is parsed with `@vesper/front` and `@vesper/ast`, positions use
 `@vesper/span`, and the JSON is written byte for byte as serde_json writes

@@ -22,6 +22,20 @@ use crate::{
     layout::Layout,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
+
+/// Hooks supplying a Vesper implementation of fip checking (`#1184`).
+#[derive(Clone, Copy)]
+pub struct FipCheckTable {
+    pub check_world: fn(&World) -> Vec<Diagnostic>,
+}
+
+static FIP_CHECK_HOOK: OnceLock<FipCheckTable> = OnceLock::new();
+
+/// Install the Vesper fip checking hook. Only the first call takes effect.
+pub fn install_fip_check(table: FipCheckTable) {
+    let _ = FIP_CHECK_HOOK.set(table);
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod aot_runtime;
@@ -1571,6 +1585,9 @@ impl<'a> FipChecker<'a> {
 /// Static verification of `@fip` functions, `Box::new` reuse pairing,
 /// `Box::new_in_caller`, and forbidden `Alloc` effects.
 pub fn check_world(world: &World) -> Vec<Diagnostic> {
+    if let Some(hook) = FIP_CHECK_HOOK.get() {
+        return (hook.check_world)(world);
+    }
     let caller_slot_fns = caller_slot_functions(world);
     let unsafe_non_fip = unsafe_non_fip_functions(world, &caller_slot_fns);
     let mut checker = FipChecker {

@@ -27,8 +27,8 @@
         "src/audit*",
         "src/replay*",
         "src/kernel*",
-        "src/bin/lean4lean42*",
-        "src/bin/arithmetic_oracle42*",
+        "crates/vesper-oracles/src/bin/lean4lean42*",
+        "crates/vesper-oracles/src/bin/arithmetic_oracle42*",
         "src/lsp/proof_*",
         "src/optimize/witness_lean.rs",
         "src/format*",
@@ -41,7 +41,7 @@
         "scripts/check-format-proof.py",
         "scripts/test-format-proof.sh",
         "tools/logos42/**",
-        "src/bin/logos42*"
+        "crates/vesper-oracles/src/bin/logos42*"
       ]
     },
     "flux_faults": {
@@ -165,11 +165,11 @@
       "skip_tests": null
     },
     {
-      "package": "vesper",
+      "package": "vesper-oracles",
       "target": "oracle42_acceptance",
-      "bazel": "//:test/oracle42_acceptance",
+      "bazel": "//crates/vesper-oracles:test/oracle42_acceptance",
       "group": "proof",
-      "source": "tests/oracle42_acceptance.rs",
+      "source": "crates/vesper-oracles/tests/oracle42_acceptance.rs",
       "skip_tests": null
     },
     {

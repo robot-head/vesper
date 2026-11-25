@@ -119,6 +119,8 @@ members = [
     # package cannot depend on the shim (the shim's tests depend on it).
     "crates/vesper-codegen-swap-test",
     "crates/vesper-codegen-numeric-test",
+    # The `*42` test oracles, moved out of src/bin so src/ can retire (#1825).
+    "crates/vesper-oracles",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
 default-members = [
@@ -231,6 +233,7 @@ default-members = [
     "crates/vesper-std-host",
     "crates/vesper-tools",
     "experiments/native-pulse",
+    "crates/vesper-oracles",
 ]
 
 exclude = [

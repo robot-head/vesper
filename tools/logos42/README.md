@@ -28,7 +28,7 @@ python3 tools/logos42/setup.py \
   --cargo "$(rustup which cargo)" --git "$(command -v git)"
 
 VESPER_LOGOS42_ROOT=/absolute/path/to/NEW_LOGOS_ROOT \
-  cargo test --locked -p vesper --test logos42_acceptance -- --test-threads=1
+  cargo test --locked -p vesper-oracles --test logos42_acceptance -- --test-threads=1
 ```
 
 The `lean4lean42` binary and the old setup entry points are compatibility

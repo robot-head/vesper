@@ -1,0 +1,8 @@
+[package]
+name = "@vesper/hybrid-fip"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/check-fip" = { version = "^0.1", path = "../../../../packages/vesper-check-fip" }

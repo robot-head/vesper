@@ -207,6 +207,11 @@ vesper_hybrid(
             "//:check_data_package",
             "//:check_effects_package",
         ],
+        # The fip checker (#1184) builds on @vesper/check-fip.
+        "hybrid_fip": [
+            "//:check_data_package",
+            "//:check_fip_package",
+        ],
         "hybrid_parse": [
             "//:ast_package",
             "//:front_package",
@@ -229,6 +234,14 @@ vesper_hybrid(
         # The freestanding swap (#1288) builds on @vesper/codegen-freestanding.
         "hybrid_freestanding": [
             "//:codegen_freestanding_package",
+        ],
+        # The backend verifiers swap (#1291) builds on @vesper/backend-checks.
+        "hybrid_backend_checks": [
+            "//:backend_checks_package",
+        ],
+        # The native walk swap (#1509) builds on @vesper/native-walk.
+        "hybrid_codegen_walk": [
+            "//:codegen_walk_package",
         ],
         # Test discovery (#1337) builds on @vesper/test-runner.
         "hybrid_test_runner": [
@@ -256,11 +269,14 @@ vesper_hybrid(
         "hybrid_optimize": "modules/optimize",
         "hybrid_pact": "modules/pact",
         "hybrid_effects": "modules/effects",
+        "hybrid_fip": "modules/fip",
         "hybrid_tensor_types": "modules/tensor_types",
         "hybrid_parse": "modules/parse",
         "hybrid_wasm_backend": "modules/wasm_backend",
         "hybrid_ebpf_backend": "modules/ebpf_backend",
         "hybrid_freestanding": "modules/freestanding",
+        "hybrid_backend_checks": "modules/backend_checks",
+        "hybrid_codegen_walk": "modules/codegen_walk",
         "hybrid_test_runner": "modules/test_runner",
         "hybrid_place_ir": "modules/place_ir",
         "hybrid_stack_bound": "modules/stack_bound",

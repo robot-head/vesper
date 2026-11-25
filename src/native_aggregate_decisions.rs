@@ -122,6 +122,108 @@ pub fn function_decisions(world: &World, f: &FunctionIr, out: &mut String) {
     for (v, n) in aggregates::split_sources(f, &split) {
         let _ = writeln!(out, "source v{v} {n}");
     }
+    scalar_enum_decisions(world, f, out);
+}
+
+/// The ABI facts `scalar_enums` reads from the `Codegen`, for a top-level
+/// graph of an optimized build whose entry is `main`: whether the graph's
+/// own result travels as the words of its enum shape (`returns`), and for
+/// each `Op::Call` instruction, in program order, whether the callee
+/// returns the words of the call's result shape (`call_words`; `false`
+/// when the result has no shape).
+pub fn scalar_enum_facts(world: &World, f: &FunctionIr) -> (bool, Vec<bool>) {
+    let none = BTreeMap::new();
+    let returns = world.functions.contains_key(&f.name)
+        && result_words(world, &f.name, &none).is_some_and(|words| {
+            let ty = crate::numeric::default_type(&f.result);
+            aggregates::enum_shape(world, &ty).is_some_and(|s| s.words.len() as u32 == words)
+        });
+    let mut calls = vec![];
+    for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+        let crate::ir::Op::Call { callee, types, .. } = &inst.op else {
+            continue;
+        };
+        let ty = f.values.get(&inst.dest).map(crate::numeric::default_type);
+        let shape = ty.and_then(|t| aggregates::enum_shape(world, &t));
+        calls.push(shape.is_some_and(|shape| call_words(world, callee, types, &shape)));
+    }
+    (returns, calls)
+}
+
+/// The register-result words of instance `name` with `vars` (`None` for
+/// the entry `main`, a boundary with the default convention).
+fn result_words(
+    world: &World,
+    name: &str,
+    vars: &BTreeMap<String, crate::ast::Type>,
+) -> Option<u32> {
+    if name == "main" {
+        return None;
+    }
+    let g = super::concrete(world, name, vars).ok()?;
+    super::NativeAbi::internal(world, &g).ok()?.result_words
+}
+
+/// `Codegen::ir_graph_at`'s `call_words` for a top-level graph.
+fn call_words(
+    world: &World,
+    callee: &str,
+    types: &[crate::ast::Type],
+    shape: &aggregates::EnumShape,
+) -> bool {
+    let Some(g) = world.functions.get(callee) else {
+        return false;
+    };
+    if super::specialized_function(world, g) {
+        return true;
+    }
+    if world.dyn_objects.stubs.contains_key(callee) {
+        return false;
+    }
+    let mut vars = BTreeMap::new();
+    for (p, t) in g.generics.iter().zip(types) {
+        vars.insert(p.name.clone(), crate::numeric::default_type(t));
+    }
+    result_words(world, callee, &vars) == Some(shape.words.len() as u32)
+}
+
+/// The small enums `scalar_enums` keeps as words (#1330), with the
+/// [`scalar_enum_facts`]: `enum vV W..` for each value and the values of
+/// its words, `enumlocal L` for each local, `enumcall vV` for each call
+/// whose result the graph keeps as words and `enumret vV` for each
+/// returned word value. Nothing when the graph keeps its enums in memory.
+fn scalar_enum_decisions(world: &World, f: &FunctionIr, out: &mut String) {
+    let (returns, _) = scalar_enum_facts(world, f);
+    let returns = returns
+        .then(|| aggregates::enum_shape(world, &crate::numeric::default_type(&f.result)))
+        .flatten();
+    let none = BTreeMap::new();
+    let Some(s) = aggregates::scalar_enums(
+        world,
+        f,
+        &none,
+        returns.as_ref(),
+        &|callee, types, shape| call_words(world, callee, types, shape),
+        &std::collections::BTreeSet::new(),
+    ) else {
+        return;
+    };
+    for (v, ws) in &s.words {
+        let _ = write!(out, "enum v{v}");
+        for w in ws {
+            let _ = write!(out, " v{w}");
+        }
+        out.push('\n');
+    }
+    for n in &s.locals {
+        let _ = writeln!(out, "enumlocal {n}");
+    }
+    for v in s.calls.keys() {
+        let _ = writeln!(out, "enumcall v{v}");
+    }
+    for v in s.returns.keys() {
+        let _ = writeln!(out, "enumret v{v}");
+    }
 }
 
 /// [`function_decisions`] of every function of `program` the native

@@ -18,23 +18,23 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const SOURCES: [(&str, &str); 5] = [
     (
         "MetatheoryFull.lean",
-        include_str!("../../../lean/MetatheoryFull.lean"),
+        include_str!("../../../../../lean/MetatheoryFull.lean"),
     ),
     (
         "ResourceModel42/Syntax.lean",
-        include_str!("../../../lean/ResourceModel42/Syntax.lean"),
+        include_str!("../../../../../lean/ResourceModel42/Syntax.lean"),
     ),
     (
         "ResourceModel42/Checker.lean",
-        include_str!("../../../lean/ResourceModel42/Checker.lean"),
+        include_str!("../../../../../lean/ResourceModel42/Checker.lean"),
     ),
     (
         "ResourceModel42/Evaluator.lean",
-        include_str!("../../../lean/ResourceModel42/Evaluator.lean"),
+        include_str!("../../../../../lean/ResourceModel42/Evaluator.lean"),
     ),
     (
         "ResourceOracle42.lean",
-        include_str!("../../../lean/ResourceOracle42.lean"),
+        include_str!("../../../../../lean/ResourceOracle42.lean"),
     ),
 ];
 const MAX_FILES: usize = 128;

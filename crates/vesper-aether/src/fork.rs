@@ -77,6 +77,17 @@ pub struct VmGenIdWire {
 }
 impl VmGenIdWire {
     pub fn encode(&self) -> [u8; VMGENID_WIRE_BYTES] {
+        #[cfg(feature = "vesper-port")]
+        {
+            let mut out = [0u8; VMGENID_WIRE_BYTES];
+            crate::binding::fork_encode_vmgenid_wire(*self, &mut out);
+            out
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        self.encode_reference()
+    }
+    #[doc(hidden)]
+    pub fn encode_reference(&self) -> [u8; VMGENID_WIRE_BYTES] {
         let mut out = [0u8; VMGENID_WIRE_BYTES];
         out[0..8].copy_from_slice(&self.vm_gen_lo.to_le_bytes());
         out[8..16].copy_from_slice(&self.vm_gen_hi.to_le_bytes());
@@ -85,6 +96,13 @@ impl VmGenIdWire {
         out
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, ForkError> {
+        #[cfg(feature = "vesper-port")]
+        return crate::binding::fork_decode_vmgenid_wire(bytes).ok_or(ForkError::WrongLength);
+        #[cfg(not(feature = "vesper-port"))]
+        Self::decode_reference(bytes)
+    }
+    #[doc(hidden)]
+    pub fn decode_reference(bytes: &[u8]) -> Result<Self, ForkError> {
         let b: &[u8; VMGENID_WIRE_BYTES] = bytes.try_into().map_err(|_| ForkError::WrongLength)?;
         let u64_at = |i: usize| {
             let mut w = [0u8; 8];

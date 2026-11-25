@@ -43,6 +43,19 @@ pub fn check_fip(in input: Str) -> ChunkSeq[u64] {
     pack_text(in cx.out)
 }
 
+// Binary entrypoint for `vesper-hybrid`: takes the encoded world+task bytes
+// directly and returns packed diagnostic lines (`pack_text`).
+pub fn check_fip_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let ast = read_ast(inout r, in b, in c.nmap, in c.tmap);
+    let mut cx = fip_new(c, ast);
+    cx.check_world();
+    pack_text(in cx.out)
+}
+
 // The number of diagnostics only (for timing without the text copy).
 pub fn check_fip_count(in input: Str) -> u64 {
     let b = input.as_bytes();

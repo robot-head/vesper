@@ -201,3 +201,51 @@ the Vesper kept entries do the same (one parse, one index per request). The
   `World.expr_types` (Stage 2) is the candidate source.
 - The documentation-link fallback (`navigation/doc_links.rs`) over
   `vesper_doc::links` (crates/vesper-doc/src/links.rs, not ported).
+
+# Part 2 (#1828): hover and documentation links
+
+navigation.rs is now fully ported. Hover and the doc-comment link fallback
+answer in Vesper with 0 diffs, and every request is within the 1.5x bar.
+Rust stays the default until the hybrid wiring part.
+
+## What changed
+
+- `packages/vesper-lsp-features/src/hover.ves`: `hover_answer` over the
+  checker's facts. The facts are the `@vesper/check-data` harness context
+  (types, World), plus the expression types and a table of the source's
+  functions and parameters. It covers the type and effect printers, ADT
+  modes with the Rust work budget charge for charge, signatures, selectors
+  and `///` docs.
+- `doc_links.ves`, `links.ves`, `markdown.ves`: `navigation/doc_links.rs`
+  and `vesper_doc::links::analyze`. They include the declaration inventory
+  with its counting-down budget, and the Markdown scan with the counting-up
+  link budget. Each budget charges the Rust `size_of` of every value and
+  the exact capacity growth, so budget errors match too. The code is split
+  across three files because `vesper fmt` has a per-file token limit.
+- New entries: `lsp_hovers` (facts, then n cursors), and `lsp_definitions`
+  now takes doc facts. The single `lsp_definition` entry answers `D`
+  (defer) on a doc comment when it has no facts.
+- The test encodes the facts from `CheckedSource`, and checks every UTF-16
+  position on every doc-comment line. A `doc_link_budget_sizes` test pins
+  the Rust sizes that the budgets charge. Generated `doc_*` sources reach
+  the work, metadata and token limits; they stay out of the speed corpus.
+
+## Differential
+
+`cargo test --release --test self_host_lsp_features`: 4 passed, 0 diffs.
+
+| Test | Compared | Differences |
+|---|--:|--:|
+| `hover_matches_rust` | 52,991 hovers (29,665 with contents) | 0 |
+| `navigation_matches_rust` | 68,796 doc-comment cursors (282 with targets), 52,350 budget errors, plus the part 1b set | 0 |
+
+## Numbers
+
+| Request (parse kept) | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| `hover` (includes encoding and decoding the facts once per document) | 14.3 µs | 16.8 µs | **1.18x** |
+| `definition` | 11.6 µs | 9.9 µs | **0.85x** |
+| `documentSymbol` | 60.4 µs | 38.7 µs | **0.64x** |
+
+Rust lines deleted: 0. Rust code is deleted only after the hybrid swap
+(session and dispatch part).

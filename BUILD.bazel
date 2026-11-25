@@ -34,14 +34,6 @@ _TOOLS = [
 # The root package also owns docs/, examples/, lean/, scripts/ and tools/
 # (directories without their own BUILD.bazel), which the CLI and its tests read.
 vesper_crate(
-    # CLI checkers embed their own source identities; keep those inputs out of
-    # the library compilation used by every crate and integration test.
-    binary_compile_data = [
-        "lean/**",
-        "tools/logos42/**",
-        "tools/resource-model42/KernelSnapshot.lean",
-        "docs/rfcs/resource-model42-source-manifest.json",
-    ],
     # Only files embedded by library/binary sources, including cfg(test) code.
     # Runtime docs, website pages and proof packets must not rebuild the compiler.
     compile_data = [
@@ -67,7 +59,6 @@ vesper_crate(
         "test/lean4lean_reconstruction42",
         "test/lean4lean_normalized_completion42",
         "test/lean4lean_map_tree42",
-        "test/resource_oracle42",
         "test/wasm_seed_package_io",
     ],
     extra_integration_compile_data = [
@@ -92,10 +83,7 @@ vesper_crate(
         "examples/**",
         "assets/fonts/**",
         "website/brand/**",
-        "tools/logos42/**",
         "tools/proof-audit/**",
-        "tools/resource-model42/KernelSnapshot.lean",
-        "docs/rfcs/resource-model42-source-manifest.json",
         "lean/**",
     ],
     # `vesper <tool>` runs `vesper-<tool>` (crates/vesper-tools, self-hosting
@@ -764,14 +752,11 @@ vesper_crate(
         # With its own PLACE_IR_STEP of 4: every 16th world.
         "test/self_host_place_ir": {"CHECK_HARNESS_STRIDE": "4"},
     },
-    # The sealed Logos root is a fresh external input on every CI run. Only
-    # its acceptance test inherits the random path (and must rerun).
     # The doc differential (#1338) documents every 4th corpus file here;
     # Cargo (Platforms, Test all targets' Cargo legs) runs them all. Only
     # tests/self_host_doc.rs reads it.
     test_env = {"VESPER_DOC_STRIDE": "4"},
     test_env_inherit = {
-        "test/logos42_acceptance": ["VESPER_LOGOS42_ROOT"],
         "test/self_host_front_end": ["SELF_HOST_TRACE"],
     },
     test_exec_properties = {
@@ -866,24 +851,8 @@ vesper_crate(
             "resources:cpu:1",
             "lean_replay",
         ],
-        "test/logos42_acceptance": [
-            "resources:memory:9216",
-            "resources:cpu:1",
-            "lean_replay",
-        ],
-        # Serial Lean -j1/-M4096 stages plus estimated wrapper overhead (#615).
-        "test/resource_oracle42": [
-            "resources:memory:5120",
-            "resources:cpu:1",
-            "lean_replay",
-        ],
         "test/resource_model42": [
             "resources:memory:9216",
-            "resources:cpu:1",
-            "lean_replay",
-        ],
-        "test/oracle42_acceptance": [
-            "resources:memory:5120",
             "resources:cpu:1",
             "lean_replay",
         ],
@@ -931,12 +900,6 @@ vesper_crate(
     # Long, platform-neutral Lean replays run on Linux (BuildBuddy) only; see
     # "Linux-only suites" in docs/ci-platforms.md.
     test_target_compatible_with = {
-        # Fresh Logos replay of all three complete model import closures.
-        # Keep the external native-checker setup on the Linux lane.
-        "test/logos42_acceptance": select({
-            "@platforms//os:macos": ["@platforms//:incompatible"],
-            "//conditions:default": [],
-        }),
         # Six tests run serially, each kernel-replaying Lean's Std; on macOS
         # runners the target needs well over 15 minutes.
         "test/proof_audit_cli": select({
@@ -957,10 +920,6 @@ vesper_crate(
         }),
         # Same serial Std kernel-replay pattern as proof_audit_cli and format_proof_cli.
         "test/verify_extract_cli": select({
-            "@platforms//os:macos": ["@platforms//:incompatible"],
-            "//conditions:default": [],
-        }),
-        "test/oracle42_acceptance": select({
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
         }),
@@ -1055,14 +1014,9 @@ vesper_crate(
         "test/verify_extract_cli": "long",
         # Front-end and AST tests check and lower their full package closures.
         "test/imported_source_tests": "long",
-        # Fresh replay covers both complete model import closures.
-        "test/logos42_acceptance": "eternal",
-        "test/oracle42_acceptance": "long",
         "test/replay42_kernel": "long",
         # Fresh model compilation, 285 theorem roots and actual negative controls.
         "test/resource_model42": "long",
-        # Serial fresh Lean endpoint sessions need the complete 900 s envelope (#574).
-        "test/resource_oracle42": "long",
         # Runs the Vesper-source front end on every repository source; about
         # 2.5 min on a 4-core Linux host, over 300 s on the macOS runner.
         "test/self_host_front_end": "long",
@@ -1299,6 +1253,18 @@ vesper_package(
     ],
 )
 
+# Fip checker as a dependency of the hybrid compiler's fip module
+# (self-hosting SH2 lane 12, #1184).
+vesper_package(
+    name = "check_fip_package",
+    srcs = glob(["packages/vesper-check-fip/src/**/*.ves"]),
+    manifest = "packages/vesper-check-fip/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+    ],
+)
+
 # Capability effect checker as a dependency of the hybrid compiler's effects
 # module (self-hosting SH2 lane 8, #1180).
 vesper_package(
@@ -1449,6 +1415,42 @@ vesper_package(
     srcs = glob(["packages/vesper-codegen-freestanding/src/**/*.ves"]),
     manifest = "packages/vesper-codegen-freestanding/Loom.toml",
     visibility = ["//visibility:public"],
+)
+
+vesper_package(
+    name = "backend_checks_package",
+    srcs = glob(["packages/vesper-backend-checks/src/**/*.ves"]),
+    manifest = "packages/vesper-backend-checks/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        "//crates/vesper-resonance:port_package",
+    ],
+)
+
+vesper_package(
+    name = "codegen_calls_package",
+    srcs = glob(["packages/vesper-codegen-calls/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-calls/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":check_layout_package",
+        ":place_ir_package",
+    ],
+)
+
+vesper_package(
+    name = "codegen_walk_package",
+    srcs = glob(["packages/vesper-codegen-walk/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-walk/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":check_layout_package",
+        ":codegen_calls_package",
+        ":place_ir_package",
+    ],
 )
 
 vesper_package(
@@ -1677,6 +1679,19 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# What the `*42` oracles (crates/vesper-oracles, #1825) embed: the Lean models,
+# the Logos checker recipe and the resource-model source manifests.
+filegroup(
+    name = "oracle_sources",
+    srcs = glob([
+        "lean/**",
+        "tools/logos42/**",
+        "tools/resource-model42/KernelSnapshot.lean",
+        "docs/rfcs/resource-model42-source-manifest.json",
+    ]),
+    visibility = ["//crates/vesper-oracles:__pkg__"],
+)
+
 filegroup(
     name = "lean",
     srcs = glob(["lean/**"]),
@@ -1690,12 +1705,6 @@ filegroup(
 )
 
 # Guard test-cache scope and embedded compiler inputs.
-environment_test(
-    name = "logos_environment_test",
-    expected = ["VESPER_LOGOS42_ROOT"],
-    target_under_test = "//:test/logos42_acceptance",
-)
-
 environment_test(
     name = "ordinary_environment_test",
     expected = [],
@@ -1726,7 +1735,7 @@ compile_inputs_test(
 compile_inputs_test(
     name = "integration_inputs_test",
     forbidden = [
-        "tests/logos42_acceptance.rs",
+        "crates/vesper-oracles/tests/logos42_acceptance.rs",
         "docs/bazel.md",
         "MODULE.bazel.lock",
     ],
@@ -1745,8 +1754,9 @@ test_suite(
         ":frontend_environment_test",
         ":frontend_runfiles_test",
         ":integration_inputs_test",
-        ":logos_environment_test",
         ":ordinary_environment_test",
+        # The Logos acceptance test's environment scope (#1825).
+        "//crates/vesper-oracles:logos_environment_test",
         ":proof_packet_runfiles_test",
     ],
 )
@@ -1772,7 +1782,7 @@ runfiles_test(
     forbidden = [
         "docs/bazel.md",
         "README.md",
-        "bin/logos42",
+        "crates/vesper-oracles/bin/logos42",
         "bin/vesper",
     ],
     required = [

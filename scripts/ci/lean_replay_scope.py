@@ -27,10 +27,8 @@ TRIGGERS = (
     "tools/lean4lean*",
     "tools/logos42/*",
     "tools/resource-model42/*",
-    "src/bin/logos42*",
-    "src/bin/arithmetic_oracle42*",
-    "src/bin/resource_oracle42*",
-    "src/bin/lean4lean42*",
+    # The `*42` oracles and their suites (#1825).
+    "crates/vesper-oracles/*",
     # Compiler modules the replay tests import or that emit Lean.
     "src/lean.rs",
     "src/lean_*.rs",
@@ -39,13 +37,9 @@ TRIGGERS = (
     "crates/vesper-lean-syntax/*",
     # The tests themselves.
     "tests/lean4lean_*42.rs",
-    "tests/logos42_acceptance.rs",
-    "tests/oracle42_acceptance.rs",
-    "tests/resource_oracle42.rs",
     "tests/resource_model42.rs",
     "tests/replay42_kernel.rs",
     "tests/common/lean4lean*",
-    "tests/fixtures/resource_oracle42/*",
     "docs/rfcs/resource-model42*",
     # Toolchain, Bazel and CI configuration.
     "BUILD.bazel",

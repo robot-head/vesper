@@ -1,0 +1,9 @@
+[package]
+name = "@vesper/hybrid-codegen-walk"
+version = "0.1.0"
+edition = "2026"
+# Native lowering decisions only compute: no I/O, clock or network.
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/native-walk" = { version = "^0.1", path = "../../../../packages/vesper-codegen-walk" }
