@@ -3,7 +3,7 @@
 load("./lib/process.axl", "capture", "command", "scratch_dir")
 
 _USAGE = "aspect ci check-automation-policy -- --base REF [--head REF]"
-_SCRIPT_SUFFIXES = [".py", ".pyw", ".pyi", ".py3", ".sh", ".bash", ".zsh", ".fish", ".ksh", ".dash", ".ash", ".csh", ".tcsh", ".bats", ".command"]
+_SCRIPT_SUFFIXES = [".py", ".pyw", ".pyi", ".py3", ".sh", ".bash", ".zsh", ".fish", ".ksh", ".dash", ".ash", ".csh", ".tcsh", ".bats", ".command", ".bat", ".cmd"]
 _SCRIPT_NAMES = [".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".zshenv", ".profile"]
 _SHELLS = ["sh", "bash", "zsh", "ksh", "dash", "ash", "fish", "csh", "tcsh", "mksh"]
 _INTERPRETERS = _SHELLS + ["python", "python2", "python3", "pypy", "pypy3", "perl", "ruby", "node", "deno", "bun", "lua", "awk", "rscript"]
@@ -120,7 +120,7 @@ def _words(text):
         words.append("".join(word))
     return words
 
-def _argv_reason(words, workflow = False):
+def _argv_reason(words):
     if not words:
         return None
     names = [_basename(word.strip("\"'")) for word in words]
@@ -135,35 +135,50 @@ def _argv_reason(words, workflow = False):
                 return "inline interpreter command"
             if name == "uv" and flags[:1] == ["run"] and "--script" in flags:
                 return "Python script invocation"
-    first = names[0]
-    if first == "exit" and len(names) == 2 and names[1].isdigit():
+    direct = names
+    if direct[0] == "env":
+        index = 1
+        for word in words[1:]:
+            if word != "--" and "=" not in word:
+                break
+            index += 1
+        direct = direct[index:]
+        if not direct:
+            return None
+    first = direct[0]
+    if first == "exit" and len(direct) == 2 and direct[1].isdigit():
         # A standalone status is useful for workflow failure gates.
         return None
-    if first == "&" and len(names) > 1:
-        if not names[1].endswith(".ps1"):
+    if first == "&" and len(direct) > 1:
+        if not direct[1].endswith(".ps1"):
             return "inline PowerShell invocation"
-        first = names[1]
+        first = direct[1]
     if first in _SHELL_START or first == "&":
         return "inline shell control or state"
-    if workflow and (first in _SHELLS or _python(first)):
+    if first in _SHELLS or _python(first) or first == "cmd":
         return "direct shell or Python interpreter"
-    if workflow and first in _POWERSHELL and not any([name.endswith(".ps1") for name in names[1:]]) and not any([name in ["--version", "-version", "-v"] for name in names[1:]]):
+    if first in _INTERPRETERS and any([not name.startswith("-") for name in direct[1:]]):
+        return "unsupported scripting interpreter"
+    if first in _POWERSHELL and not any([name.endswith(".ps1") for name in direct[1:]]) and not any([name in ["--version", "-version", "-v"] for name in direct[1:]]):
         return "PowerShell steps must invoke a .ps1 file"
     if _forbidden_path(first):
         return "script file invocation"
     return None
 
-def _command_reason(text, workflow):
+def _command_reason(text):
     if "\n" in text.rstrip("\r\n") or "\r" in text.rstrip("\r\n"):
         return "multi-line command"
     text = text.strip()
     if not text:
         return None
-    return _syntax(text) or _argv_reason(_words(_without_actions_expression(text)), workflow)
+    return _syntax(text) or _argv_reason(_words(_without_actions_expression(text)))
 
 def _record(out, reason, text):
     key = (reason, " ".join(text.split()))
     out[key] = out.get(key, 0) + 1
+
+def _command_key(key):
+    return key in _COMMAND_KEYS or key.endswith("_command") or key.endswith("-command")
 
 def _structured_violations(data, workflow, budget):
     out = {}
@@ -175,10 +190,11 @@ def _structured_violations(data, workflow, budget):
         if type(node) == "dict":
             pending.extend([(value, "command" if key == "scripts" else str(name).lower()) for name, value in node.items()])
         elif type(node) == "list":
-            if node and all([type(item) == "string" for item in node]):
-                reason = _argv_reason(node, workflow)
+            if _command_key(key) and node and all([type(item) == "string" for item in node]):
+                reason = _argv_reason(node)
                 if reason:
                     _record(out, reason, json.encode(node))
+                    continue
             pending.extend([(item, key) for item in node])
         elif type(node) == "string":
             if not node.strip():
@@ -186,8 +202,8 @@ def _structured_violations(data, workflow, budget):
             if workflow and key == "script":
                 _record(out, "inline workflow script", node)
                 continue
-            if key in _COMMAND_KEYS or (key.endswith("_command") or key.endswith("-command")):
-                reason = _command_reason(node, workflow)
+            if _command_key(key):
+                reason = _command_reason(node)
                 if reason:
                     _record(out, reason, node)
     fail("Configuration nesting exceeded its parsed size")
@@ -201,9 +217,9 @@ def _text_violations(text):
         word, _, tail = stripped.partition(" ")
         name = word.lower()
         if name in ["run", "cmd", "entrypoint"] and tail:
-            reason = _command_reason(tail, False)
+            reason = _command_reason(tail)
         elif line.startswith("\t"):
-            reason = _command_reason(stripped.lstrip("@+-"), False)
+            reason = _command_reason(stripped.lstrip("@+-"))
         else:
             reason = None
         if reason:
@@ -381,6 +397,7 @@ def _test(ctx):
 
     _fixture_blob(ctx, root, "scripts/new test.PY", "")
     _fixture_blob(ctx, root, "scripts/new.zsh", "")
+    _fixture_blob(ctx, root, "scripts/windows/legacy.cmd", "")
     _fixture_blob(ctx, root, "tools/no extension", "#!" + "/usr/bin/env -S python3.13 -I\n")
     _fixture_blob(ctx, root, "tools/no shebang", "set -eu\n", "100755")
     _fixture_blob(ctx, root, "tools/plain wrapper", "printf example\n", "100755")
@@ -388,6 +405,8 @@ def _test(ctx):
     _fixture_blob(ctx, root, "tools/powershell", "#!" + "/usr/bin/env pwsh\n")
     _fixture_blob(ctx, root, "scripts/lint.conf", "[run]\ncommand=python3 -I -c 'print(1)'\n")
     _fixture_blob(ctx, root, "task.toml", 'run = ["/bin/bash", "-lc", "echo bad"]\n')
+    _fixture_blob(ctx, root, "portable.toml", 'command = ["python3.13", "extensionless"]\n')
+    _fixture_blob(ctx, root, "container.yml", 'command: env TEST=1 sh extensionless\n')
     _fixture_blob(ctx, root, "package.json", '{"scripts":{"build":"node -p 42"}}')
     _fixture_blob(ctx, root, "Dockerfile", "FROM scratch\nRUN echo one > generated\n")
     _fixture_blob(ctx, root, "buildbuddy.yaml", "actions: [{steps: [{run: 'echo " + "$" + "(git rev-parse HEAD)'}]}]")
@@ -412,9 +431,11 @@ runs:
     invalid = _fixture_commit(ctx, root, "Prohibited automation")
     found = _inspect(ctx, root, valid, invalid, root)
     want = {
-        "scripts/new test.PY": 1, "scripts/new.zsh": 1, "tools/no extension": 1, "tools/no shebang": 1,
+        "scripts/new test.PY": 1, "scripts/new.zsh": 1, "scripts/windows/legacy.cmd": 1,
+        "tools/no extension": 1, "tools/no shebang": 1,
         "tools/plain wrapper": 1, "tools/entrypoint.dat": 1, "tools/powershell": 1, "scripts/lint.conf": 1,
-        "task.toml": 1, "package.json": 1, "Dockerfile": 1, "buildbuddy.yaml": 1, ".github/actions/nested/action.yml": 5,
+        "task.toml": 1, "portable.toml": 1, "container.yml": 1, "package.json": 1, "Dockerfile": 1,
+        "buildbuddy.yaml": 1, ".github/actions/nested/action.yml": 5,
     }
     actual = {}
     for path, _, _ in found:
