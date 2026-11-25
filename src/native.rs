@@ -676,12 +676,12 @@ fn fail_record_size(world: &World, f: &Function) -> Result<u32, String> {
 }
 /// How one instance is called, beyond the default ABI ([`NativeAbi`]).
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-struct FnAbi {
+pub struct FnAbi {
     /// Register-status Fail ABI: the failure status is the last return value.
-    status: bool,
+    pub status: bool,
     /// Register-result ABI: the aggregate result is returned as this many
     /// `i64` words (1 or 2) instead of through a leading result pointer.
-    result_words: Option<u32>,
+    pub result_words: Option<u32>,
 }
 /// The internal calling conventions of one compilation (Stage 1 perf lane
 /// 5, #935). Only optimized builds use them (a native-only change behind
@@ -1068,13 +1068,14 @@ fn compile_entry<M: Module>(
     }
     let instances = instances_for_entry(world, entry, trace_ok)?;
     let mut program = crate::ir_swap::lower(world);
-    // The entry-block plans from the `frame_plans` swap hook (#1509 part
-    // 3b), from the first lowering; a trace host keeps the Rust plans.
-    let frames = if trace_ok {
+    // The entry-block plans and internal conventions from the
+    // `entry_plans` swap hook (#1509 parts 3b and 4a), from the first
+    // lowering; a trace host keeps the Rust plans.
+    let plans = if trace_ok {
         None
     } else {
         crate::codegen_swap::installed()
-            .frame_plans
+            .entry_plans
             .and_then(|hook| hook(world, &program, entry, optimize))
     };
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
@@ -1097,7 +1098,20 @@ fn compile_entry<M: Module>(
         // Native only, never the verified backend (Stage 1 perf lane 3).
         crate::ir_swap::hoist(&mut program);
     }
-    let abi = NativeAbi::plan(world, &instances, optimize, |key| key == entry)?;
+    // The hook's conventions stand in for `NativeAbi::plan` when it planned
+    // exactly the instances Rust discovered.
+    let abi = match &plans {
+        Some(p) if p.frames.keys().eq(instances.keys()) => NativeAbi {
+            functions: p
+                .abi
+                .iter()
+                .filter(|(key, abi)| optimize && *key != entry && **abi != FnAbi::default())
+                .map(|(key, abi)| (key.clone(), *abi))
+                .collect(),
+            optimize,
+        },
+        _ => NativeAbi::plan(world, &instances, optimize, |key| key == entry)?,
+    };
     let (ids, trace_entry_id) =
         declare_instances_with_trace(m, world, entry, &instances, linkage, trace_ok, &abi)?;
     let trace_entry = trace_entry_id.map(|id| (entry, id));
@@ -1134,7 +1148,7 @@ fn compile_entry<M: Module>(
         trace_entry,
         optimize,
         &abi,
-        frames.as_ref(),
+        plans.as_ref().map(|p| &p.frames),
     )?;
     let mut abi = Vec::new();
     for (key, (name, vars)) in &instances {
@@ -1189,6 +1203,16 @@ pub struct FramePlan {
     /// exits and the trace host.
     pub capabilities: BTreeMap<String, String>,
 }
+/// What the `entry_plans` swap hook answers for one entry compile
+/// (#1509 parts 3b and 4a), by instance key.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EntryPlans {
+    /// Each instance's entry-block plan ([`frame_plan`]).
+    pub frames: BTreeMap<String, FramePlan>,
+    /// Each instance's internal convention ([`NativeAbi::plan`] before the
+    /// boundary and optimize filters).
+    pub abi: BTreeMap<String, FnAbi>,
+}
 /// Where a function builds its result ([`FramePlan::result`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum FrameResult {
@@ -1232,7 +1256,7 @@ impl FramePlan {
         s
     }
     /// The plan [`FramePlan::text`] wrote, or `None` when `text` is not one
-    /// (the `frame_plans` swap hook's answer, part 3b of #1509).
+    /// (the `entry_plans` swap hook's answer, part 3b of #1509).
     pub fn parse(text: &str) -> Option<FramePlan> {
         let mut lines = text.lines();
         let mut plan = FramePlan::default();
@@ -1578,7 +1602,7 @@ fn define_instances_observed_with_trace<M: Module>(
         let mut ctx = m.make_context();
         let own_abi = abi.of(key);
         ctx.func.signature = signature_with_abi(m, world, &f, pass_trace, own_abi)?;
-        // A plan from the `frame_plans` hook stands in for the Rust one
+        // A plan from the `entry_plans` hook stands in for the Rust one
         // when it covers every parameter.
         let frame = match frames
             .and_then(|plans| plans.get(key))

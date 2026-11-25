@@ -24,6 +24,8 @@ unsafe extern "C" {
     fn vesper_hybrid_test_runner_doctest_generate_words(input: *mut u64) -> i64;
     fn vesper_hybrid_test_runner_doctest_guard_words(input: *mut u64) -> i64;
     fn vesper_hybrid_test_runner_doctest_preflight_words(input: *mut u64) -> i64;
+    fn vesper_hybrid_test_runner_doctest_verdict_words(input: *mut u64) -> i64;
+    fn vesper_hybrid_test_runner_doctest_wrappers_words(input: *mut u64) -> i64;
     fn vesper_hybrid_test_runner_format() -> i64;
     fn vesper_hybrid_test_runner_mutants_words(input: *mut u64) -> i64;
 }
@@ -91,6 +93,24 @@ pub fn doctest_preflight_words(input: &[u8]) -> Vec<u64> {
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_hybrid_test_runner_doctest_preflight_words(view_input) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `doctest_verdict_words` of the Vesper library `hybrid_test_runner` (`vesper_hybrid_test_runner_doctest_verdict_words`).
+pub fn doctest_verdict_words(input: &[u8]) -> Vec<u64> {
+    // SAFETY: `vesper_hybrid_test_runner_doctest_verdict_words` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_hybrid_test_runner_doctest_verdict_words(view_input) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `doctest_wrappers_words` of the Vesper library `hybrid_test_runner` (`vesper_hybrid_test_runner_doctest_wrappers_words`).
+pub fn doctest_wrappers_words(input: &[u8]) -> Vec<u64> {
+    // SAFETY: `vesper_hybrid_test_runner_doctest_wrappers_words` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_hybrid_test_runner_doctest_wrappers_words(view_input) });
     unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }
 

@@ -73,9 +73,9 @@ use @vesper/pact::term::{
     b_named,
     b_var,
     d_node,
-    fa,
-    fb,
-    fc,
+    field_a,
+    field_b,
+    field_c,
     g_impl,
     g_mode,
     g_peq,
@@ -84,10 +84,10 @@ use @vesper/pact::term::{
     kd_row,
     kd_type,
     kid,
+    kid_count,
     l_eff,
     m_const,
     m_var,
-    nlen,
     none,
     q_ambig,
     q_nosol,
@@ -103,18 +103,18 @@ use @vesper/pact::term::{
     st_passume,
     st_pconf,
     st_rigid,
-    sw,
     t_ctor,
     t_proj,
     t_var,
-    tg,
+    tag_of,
     un_dup,
     un_mixed,
     vbound,
     vidx,
     vinf,
     vkind,
-    vph
+    vph,
+    word_at
 };
 use self::decl::{
     Conf,
@@ -1106,15 +1106,15 @@ fn subject_span_and_info(in tb: Tables, sv: u64, sa: u64) -> (u64, u64, bool, u8
 fn format_pact_diags(in s: S, base: u64, in tb: Tables, in names: Names, inout out: ChunkSeq[u8]) {
     let n = s.dg_code.len();
     for i in base..n {
-        let off = sw(in s.dg_off, i);
-        let len = sw(in s.dg_len, i);
+        let off = word_at(in s.dg_off, i);
+        let len = word_at(in s.dg_len, i);
         let raw_slice = s.txt[off..add(off, len)];
         let mut msg: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](len);
         rename_ids(in raw_slice, in tb, in names, inout msg);
-        let sv = sw(in s.dg_sv, i);
-        let sa = sw(in s.dg_sa, i);
+        let sv = word_at(in s.dg_sv, i);
+        let sa = word_at(in s.dg_sa, i);
         let (sp_s, sp_e, has_s, sk, spkg, sname) = subject_span_and_info(in tb, sv, sa);
-        let pcode = diag_code_str(sw(in s.dg_code, i));
+        let pcode = diag_code_str(word_at(in s.dg_code, i));
         emit_line(
             inout out,
             "E0605",
@@ -1552,11 +1552,11 @@ fn lower_q_goal(
 }
 
 fn subst_node(in s: S, val_list: u64, in_val: bool, node: u64) -> u64 {
-    if !in_val && tg(in s, node) == t_var() {
-        let v = fa(in s, node);
+    if !in_val && tag_of(in s, node) == t_var() {
+        let v = field_a(in s, node);
         if vkind(v) == 2 {
             let idx = vidx(v);
-            if idx < nlen(in s, val_list) {
+            if idx < kid_count(in s, val_list) {
                 return kid(in s, val_list, idx);
             }
         }
@@ -1574,16 +1574,16 @@ fn subst_upper_mode(
 ) -> u8 {
     let eff_node = subst_node(in s, val_list, in_val, ty);
     let next_in_val = in_val || (eff_node != ty);
-    let t = tg(in s, eff_node);
+    let t = tag_of(in s, eff_node);
     if t == t_ctor() {
-        let ctor = fa(in s, eff_node);
+        let ctor = field_a(in s, eff_node);
         if ctor >= tb.ty_name.len() {
             return UNKNOWN_MODE;
         }
         let mut m = u8_at(in tb.ty_base, ctor);
         let ja = w(u32_at(in tb.ty_ja, ctor));
         let jn = w(u32_at(in tb.ty_jn, ctor));
-        let nk = nlen(in s, eff_node);
+        let nk = kid_count(in s, eff_node);
         for ji in 0..jn {
             let pidx = w(u32_at(in tb.ty_joins, add(ja, ji)));
             if pidx >= nk {
@@ -1607,7 +1607,7 @@ fn subst_upper_mode(
         return m;
     }
     if t == t_var() {
-        let v = fa(in s, eff_node);
+        let v = field_a(in s, eff_node);
         if vkind(v) == 1 {
             let i = vidx(v);
             if i < ph_bounds.len() {
@@ -1629,13 +1629,13 @@ fn wf_subst_node(
 ) -> bool {
     let eff = subst_node(in s, val_list, in_val, node);
     let next_val = in_val || (eff != node);
-    let t = tg(in s, eff);
+    let t = tag_of(in s, eff);
     if t == t_ctor() {
-        let ctor = fa(in s, eff);
+        let ctor = field_a(in s, eff);
         if ctor >= tb.ty_name.len() {
             return false;
         }
-        let nk = nlen(in s, eff);
+        let nk = kid_count(in s, eff);
         let pa = w(u32_at(in tb.ty_pa, ctor));
         let n_src = w(u32_at(in tb.ty_pn, ctor));
         for i in 0..nk {
@@ -1664,11 +1664,11 @@ fn wf_subst_node(
         return true;
     }
     if t == t_proj() {
-        let tr = fa(in s, eff);
-        if !wf_subst_node(in s, in tb, in ph_bounds, val_list, next_val, fb(in s, tr)) {
+        let tr = field_a(in s, eff);
+        if !wf_subst_node(in s, in tb, in ph_bounds, val_list, next_val, field_b(in s, tr)) {
             return false;
         }
-        for i in 0..nlen(in s, tr) {
+        for i in 0..kid_count(in s, tr) {
             if !wf_subst_node(in s, in tb, in ph_bounds, val_list, next_val, kid(in s, tr, i)) {
                 return false;
             }
@@ -1676,14 +1676,14 @@ fn wf_subst_node(
         return true;
     }
     if t == g_row() {
-        for i in 0..nlen(in s, eff) {
+        for i in 0..kid_count(in s, eff) {
             let l = kid(in s, eff, i);
-            if tg(in s, l) == l_eff() {
-                let eid = fa(in s, l);
+            if tag_of(in s, l) == l_eff() {
+                let eid = field_a(in s, l);
                 if eid >= tb.ef_name.len() {
                     return false;
                 }
-                let nk = nlen(in s, l);
+                let nk = kid_count(in s, l);
                 for j in 0..nk {
                     if !wf_subst_node(
                         in s,
@@ -1721,11 +1721,11 @@ fn wf_subst_node(
         return true;
     }
     if t == g_impl() {
-        let tr = fa(in s, eff);
-        if !wf_subst_node(in s, in tb, in ph_bounds, val_list, next_val, fb(in s, tr)) {
+        let tr = field_a(in s, eff);
+        if !wf_subst_node(in s, in tb, in ph_bounds, val_list, next_val, field_b(in s, tr)) {
             return false;
         }
-        for i in 0..nlen(in s, tr) {
+        for i in 0..kid_count(in s, tr) {
             if !wf_subst_node(in s, in tb, in ph_bounds, val_list, next_val, kid(in s, tr, i)) {
                 return false;
             }
@@ -1954,9 +1954,9 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
             if i > dbase {
                 put_str(inout msg, "\n  ");
             }
-            let doff = sw(in sess.s.dg_off, i);
-            let dlen = sw(in sess.s.dg_len, i);
-            put_str(inout msg, in diag_code_str(sw(in sess.s.dg_code, i)));
+            let doff = word_at(in sess.s.dg_off, i);
+            let dlen = word_at(in sess.s.dg_len, i);
+            put_str(inout msg, in diag_code_str(word_at(in sess.s.dg_code, i)));
             put_str(inout msg, ": ");
             render_query_text(
                 in sess.s.txt[doff..add(doff, dlen)],
@@ -1974,28 +1974,28 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
         };
     }
 
-    let tag = tg(in sess.s, o);
+    let tag = tag_of(in sess.s, o);
     if tag == q_proven() {
-        let val_list = fb(in sess.s, o);
+        let val_list = field_b(in sess.s, o);
         if !wf_subst_node(in sess.s, in sess.tb, in ph_bounds, val_list, false, goal_node) {
             return outcome_str(1, 0, "solution is not a well-formed instantiation");
         }
-        let mut drv = fc(in sess.s, o);
+        let mut drv = field_c(in sess.s, o);
         loop {
-            let step = fb(in sess.s, drv);
-            if tg(in sess.s, step) != st_norm() {
+            let step = field_b(in sess.s, drv);
+            if tag_of(in sess.s, step) != st_norm() {
                 break;
             }
-            let nk = nlen(in sess.s, drv);
+            let nk = kid_count(in sess.s, drv);
             if nk == 0 {
                 break;
             }
             drv = kid(in sess.s, drv, wrapping_sub(nk, 1));
         }
-        let step = fb(in sess.s, drv);
-        let st = tg(in sess.s, step);
+        let step = field_b(in sess.s, drv);
+        let st = tag_of(in sess.s, step);
         if st == st_conf() || st == st_pconf() {
-            let source = fa(in sess.s, step);
+            let source = field_a(in sess.s, step);
             let is_model = (source & 1) != 0;
             let raw_id = source >> 1;
             let conf_idx = if is_model {
@@ -2009,7 +2009,7 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
             } else {
                 r_id(inout sess.s, "impl", raw_id);
             }
-            let nk = nlen(in sess.s, step);
+            let nk = kid_count(in sess.s, step);
             if nk > 0 {
                 sess.s.txt.push(91);
                 for ai in 0..nk {
@@ -2038,7 +2038,7 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
         let t0 = sess.s.txt.len();
         if st == st_alias() {
             lit(inout sess.s, "the obligation is discharged by alias bound ");
-            num(inout sess.s, fa(in sess.s, step));
+            num(inout sess.s, field_a(in sess.s, step));
             lit(inout sess.s, ", which needs generic dictionary dispatch");
         } else if st == st_rigid() || st == st_norm() {
             lit(
@@ -2066,7 +2066,7 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
 
     if tag == q_nosol() {
         let t0 = sess.s.txt.len();
-        r_failure(inout sess.s, fa(in sess.s, o), 0);
+        r_failure(inout sess.s, field_a(in sess.s, o), 0);
         let msg = render_from_s_txt(inout sess, t0, in ph_names);
         return SolveOutcome {
             status: 1,
@@ -2076,15 +2076,15 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
     }
 
     if tag == q_ambig() {
-        let a = fa(in sess.s, o);
-        let at = tg(in sess.s, a);
+        let a = field_a(in sess.s, o);
+        let at = tag_of(in sess.s, a);
         let t0 = sess.s.txt.len();
         if at == am_self() {
             lit(inout sess.s, "the self type is not yet known");
         } else if at == am_multi() {
             lit(inout sess.s, "several candidates apply: ");
-            let list = fa(in sess.s, a);
-            let nl = nlen(in sess.s, list);
+            let list = field_a(in sess.s, a);
+            let nl = kid_count(in sess.s, list);
             for i in 0..nl {
                 if i > 0 {
                     lit(inout sess.s, ", ");
@@ -2093,8 +2093,8 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
             }
         } else if at == am_scoped() {
             lit(inout sess.s, "conflicting `use model` scope: ");
-            let list = fa(in sess.s, a);
-            let nl = nlen(in sess.s, list);
+            let list = field_a(in sess.s, a);
+            let nl = kid_count(in sess.s, list);
             for i in 0..nl {
                 if i > 0 {
                     lit(inout sess.s, ", ");
@@ -2107,7 +2107,7 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
             lit(inout sess.s, "two rigid projections cannot be equated");
         } else {
             lit(inout sess.s, "no progress on ");
-            r_goal(inout sess.s, fa(in sess.s, a));
+            r_goal(inout sess.s, field_a(in sess.s, a));
         }
         let msg = render_from_s_txt(inout sess, t0, in ph_names);
         return SolveOutcome {
@@ -2118,7 +2118,7 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
     }
 
     if tag == q_over() {
-        let k = fa(in sess.s, o);
+        let k = field_a(in sess.s, o);
         let msg = if k == 0 {
             "Depth"
         } else if k == 1 {
@@ -2130,12 +2130,12 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
     }
 
     // `q_unsup`
-    let u = fa(in sess.s, o);
-    let ut = tg(in sess.s, u);
+    let u = field_a(in sess.s, o);
+    let ut = tag_of(in sess.s, u);
     let t0 = sess.s.txt.len();
     if ut == un_dup() {
         lit(inout sess.s, "merging effect rows repeats ");
-        let dk = fa(in sess.s, u);
+        let dk = field_a(in sess.s, u);
         if dk < 17179869184 {
             r_id(inout sess.s, "effect", dk);
         } else {
@@ -2144,7 +2144,7 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
         }
         lit(inout sess.s, "; duplicate labels are outside Pact's fragment");
     } else if ut == un_mixed() {
-        r_goal(inout sess.s, fa(in sess.s, u));
+        r_goal(inout sess.s, field_a(in sess.s, u));
         lit(inout sess.s, " is reached through mixed coinductive/inductive cycles");
     } else {
         lit(inout sess.s, "internal solver limitation");

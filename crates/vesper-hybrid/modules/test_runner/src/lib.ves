@@ -1,6 +1,7 @@
 // @vesper/hybrid-test-runner: `vesper::test_discovery`,
 // `vesper::doctest_extract`, `vesper::test_mutants`,
-// `vesper::doctest_guard` and `vesper::doctest_generate` served from Vesper in the hybrid Stage 2 build
+// `vesper::doctest_guard`, `vesper::doctest_generate` and
+// `vesper::doctest_verdict` served from Vesper in the hybrid Stage 2 build
 // (self-hosting SH5 lane 14, #1337).
 //
 // `case_rows_words` and `discover_words` take one call's input as the
@@ -11,7 +12,9 @@
 // words of tests/common/doctest_extract_words.rs, and `mutants_words`
 // those of tests/common/test_mutants_words.rs, and `doctest_guard_words`
 // those of tests/common/doctest_guard_words.rs, and
-// `doctest_generate_words` those of tests/common/doctest_generate_words.rs.
+// `doctest_generate_words` those of tests/common/doctest_generate_words.rs,
+// and `doctest_wrappers_words` and `doctest_verdict_words` those of
+// tests/common/doctest_verdict_words.rs.
 
 // @export abi 4
 
@@ -22,6 +25,8 @@ use @vesper/test-runner::{
     doctest_generate_words as wrap,
     doctest_guard_words as profile,
     doctest_preflight_words as limits,
+    doctest_verdict_words as decide,
+    doctest_wrappers_words as names,
     format as words_format,
     mutants_words as sites
 };
@@ -58,4 +63,12 @@ pub fn doctest_guard_words(in input: Slice[u8]) -> ChunkSeq[u64] {
 
 pub fn doctest_generate_words(in input: Slice[u8]) -> ChunkSeq[u64] {
     wrap(in input)
+}
+
+pub fn doctest_wrappers_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    names(in input)
+}
+
+pub fn doctest_verdict_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    decide(in input)
 }
