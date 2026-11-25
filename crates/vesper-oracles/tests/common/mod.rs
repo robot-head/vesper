@@ -13,7 +13,8 @@ fn which(name: &Path) -> Option<PathBuf> {
 }
 
 /// `VESPER_ORACLE42_COMPILER`, else the `vesper` beside the oracle binary
-/// (Cargo's target directory, built here if missing), else `vesper` on PATH
+/// (Cargo's target directory, rebuilt here so the tests never run a stale
+/// compiler: this crate does not depend on it), else `vesper` on PATH
 /// (Bazel puts `//:bin/vesper` there).
 pub fn vesper() -> PathBuf {
     static PATH: OnceLock<PathBuf> = OnceLock::new();
@@ -27,18 +28,16 @@ pub fn vesper() -> PathBuf {
             return which(Path::new("vesper")).expect("vesper on PATH");
         }
         let sibling = oracle.with_file_name(format!("vesper{}", std::env::consts::EXE_SUFFIX));
-        if !sibling.is_file() {
-            let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-            let mut cargo = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
-            cargo
-                .current_dir(root)
-                .args(["build", "-p", "vesper", "--bin", "vesper"]);
-            if oracle.parent().and_then(Path::file_name) == Some("release".as_ref()) {
-                cargo.arg("--release");
-            }
-            let status = cargo.status().expect("run cargo build --bin vesper");
-            assert!(status.success(), "cargo build --bin vesper failed");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut cargo = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+        cargo
+            .current_dir(root)
+            .args(["build", "-p", "vesper", "--bin", "vesper"]);
+        if oracle.parent().and_then(Path::file_name) == Some("release".as_ref()) {
+            cargo.arg("--release");
         }
+        let status = cargo.status().expect("run cargo build --bin vesper");
+        assert!(status.success(), "cargo build --bin vesper failed");
         assert!(sibling.is_file(), "{} is missing", sibling.display());
         sibling
     })
