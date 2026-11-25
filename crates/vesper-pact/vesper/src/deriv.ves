@@ -12,23 +12,23 @@ use self::term::{
     b_canon,
     b_named,
     dec,
-    fa,
-    fb,
-    fc,
+    field_a,
+    field_b,
+    field_c,
     g_impl,
     g_mode,
     g_peq,
     g_row,
     inc,
+    intern,
+    intern0,
+    intern1,
+    intern2,
+    intern_with_kids,
     k_list,
     kid,
+    kid_count,
     l_eff,
-    mk,
-    mk0,
-    mk1,
-    mk2,
-    mkl,
-    nlen,
     none,
     push_kids,
     st_alias,
@@ -41,13 +41,13 @@ use self::term::{
     st_pconf,
     st_rigid,
     sub,
-    sw,
     t_ctor,
     t_proj,
     t_ref,
     t_var,
-    tg,
-    vkind
+    tag_of,
+    vkind,
+    word_at
 };
 use self::fold::{
     inst
@@ -88,14 +88,9 @@ fn begin_fail(inout s: S) {
     s.de_failed = true;
     s.de_path.clear();
     let n = s.path.len();
-    let mut i: u64 = 0;
-    loop {
-        if i >= n {
-            break;
-        }
-        let x = sw(in s.path, i);
+    for i in 0..n {
+        let x = word_at(in s.path, i);
         s.de_path.push(x);
-        i = inc(i);
     }
     s.de_off = s.txt.len();
 }
@@ -131,9 +126,9 @@ fn conformance(in s: S, source: u64) -> u64 {
 }
 
 fn kinds_match(in s: S, ci: u64, step: u64) -> bool {
-    let params = sw(in s.cf_params, ci);
-    let n = nlen(in s, params);
-    if n != nlen(in s, step) {
+    let params = word_at(in s.cf_params, ci);
+    let n = kid_count(in s, params);
+    if n != kid_count(in s, step) {
         return false;
     }
     let mut i: u64 = 0;
@@ -151,14 +146,14 @@ fn kinds_match(in s: S, ci: u64, step: u64) -> bool {
 fn args_list(inout s: S, step: u64) -> u64 {
     let from = s.tmp.len();
     push_kids(inout s, step);
-    mkl(inout s, k_list(), 0, 0, 0, from)
+    intern_with_kids(inout s, k_list(), 0, 0, 0, from)
 }
 
 // The where-clause children d[from .. from + n] against ci's clauses.
 fn where_children(inout s: S, ci: u64, args: u64, d: u64) -> bool {
-    let wh = sw(in s.cf_where, ci);
-    let n = nlen(in s, wh);
-    let nc = nlen(in s, d);
+    let wh = word_at(in s.cf_where, ci);
+    let n = kid_count(in s, wh);
+    let nc = kid_count(in s, d);
     let mut i: u64 = 0;
     loop {
         if i >= n || i >= nc {
@@ -170,7 +165,7 @@ fn where_children(inout s: S, ci: u64, args: u64, d: u64) -> bool {
             return fail(inout s, "ill-formed where-clause");
         }
         let c = kid(in s, d, i);
-        let cg = fa(in s, c);
+        let cg = field_a(in s, c);
         if expected != cg {
             begin_fail(inout s);
             lit(inout s, "where-clause child proves `");
@@ -186,17 +181,17 @@ fn where_children(inout s: S, ci: u64, args: u64, d: u64) -> bool {
 
 fn expected_brand(inout s: S, source: u64) -> u64 {
     if (source & 1) == 0 {
-        mk0(inout s, b_canon())
+        intern0(inout s, b_canon())
     } else {
-        mk1(inout s, b_named(), source >> 1)
+        intern1(inout s, b_named(), source >> 1)
     }
 }
 
 fn single_trait_child(inout s: S, d: u64, p: u64) -> bool {
-    let tr = fa(in s, p);
-    let b = fb(in s, p);
-    let expected = mk2(inout s, g_impl(), tr, b);
-    if nlen(in s, d) == 1 && fa(in s, kid(in s, d, 0)) == expected {
+    let tr = field_a(in s, p);
+    let b = field_b(in s, p);
+    let expected = intern2(inout s, g_impl(), tr, b);
+    if kid_count(in s, d) == 1 && field_a(in s, kid(in s, d, 0)) == expected {
         return true;
     }
     fail(inout s, "expected one child proving the projection's trait")
@@ -207,77 +202,67 @@ fn single_trait_child(inout s: S, d: u64, p: u64) -> bool {
 
 fn rp_args(inout s: S, n: u64) -> u64 {
     let from = s.tmp.len();
-    let len = nlen(in s, n);
-    let mut i: u64 = 0;
-    loop {
-        if i >= len {
-            break;
-        }
+    let len = kid_count(in s, n);
+    for i in 0..len {
         let a = kid(in s, n, i);
         let x = rp_arg(inout s, a);
         s.tmp.push(x);
-        i = inc(i);
     }
     from
 }
 
 fn rp_arg(inout s: S, a: u64) -> u64 {
-    let t = tg(in s, a);
+    let t = tag_of(in s, a);
     if t <= t_proj() {
         return rp_ty(inout s, a);
     }
     if t == g_row() {
         let from = s.tmp.len();
-        let len = nlen(in s, a);
-        let mut i: u64 = 0;
-        loop {
-            if i >= len {
-                break;
-            }
+        let len = kid_count(in s, a);
+        for i in 0..len {
             let l = kid(in s, a, i);
-            if tg(in s, l) == l_eff() {
+            if tag_of(in s, l) == l_eff() {
                 let f2 = rp_args(inout s, l);
-                let e = fa(in s, l);
-                let x = mkl(inout s, l_eff(), e, 0, 0, f2);
+                let e = field_a(in s, l);
+                let x = intern_with_kids(inout s, l_eff(), e, 0, 0, f2);
                 s.tmp.push(x);
             } else {
                 s.tmp.push(l);
             }
-            i = inc(i);
         }
-        let tail = fa(in s, a);
-        return mkl(inout s, g_row(), tail, 0, 0, from);
+        let tail = field_a(in s, a);
+        return intern_with_kids(inout s, g_row(), tail, 0, 0, from);
     }
     a
 }
 
 fn rp_tref(inout s: S, tr: u64) -> u64 {
-    let st = fb(in s, tr);
+    let st = field_b(in s, tr);
     let st2 = rp_ty(inout s, st);
     let from = rp_args(inout s, tr);
-    let t = fa(in s, tr);
-    mkl(inout s, t_ref(), t, st2, 0, from)
+    let t = field_a(in s, tr);
+    intern_with_kids(inout s, t_ref(), t, st2, 0, from)
 }
 
 fn rp_ty(inout s: S, t: u64) -> u64 {
-    let tag = tg(in s, t);
+    let tag = tag_of(in s, t);
     if tag == t_ctor() {
         let from = rp_args(inout s, t);
-        let c = fa(in s, t);
-        return mkl(inout s, t_ctor(), c, 0, 0, from);
+        let c = field_a(in s, t);
+        return intern_with_kids(inout s, t_ctor(), c, 0, 0, from);
     }
     if tag == t_proj() {
-        let tr = fa(in s, t);
+        let tr = field_a(in s, t);
         let tr2 = rp_tref(inout s, tr);
-        let b = fb(in s, t);
-        let assoc = fc(in s, t);
-        let inner = mk(inout s, t_proj(), tr2, b, assoc);
+        let b = field_b(in s, t);
+        let assoc = field_c(in s, t);
+        let inner = intern(inout s, t_proj(), tr2, b, assoc);
         if s.rp_next < s.rp_end {
             let nd = kid(in s, s.rp_d, s.rp_next);
-            let g = fa(in s, nd);
-            if tg(in s, g) == g_peq() && fa(in s, g) == inner {
+            let g = field_a(in s, nd);
+            if tag_of(in s, g) == g_peq() && field_a(in s, g) == inner {
                 s.rp_next = inc(s.rp_next);
-                return fb(in s, g);
+                return field_b(in s, g);
             }
         }
         s.rp_ok = false;
@@ -287,23 +272,23 @@ fn rp_ty(inout s: S, t: u64) -> u64 {
 }
 
 fn rp_goal(inout s: S, g: u64) -> u64 {
-    let t = tg(in s, g);
-    let a = fa(in s, g);
-    let b = fb(in s, g);
+    let t = tag_of(in s, g);
+    let a = field_a(in s, g);
+    let b = field_b(in s, g);
     if t == g_impl() {
         let tr = rp_tref(inout s, a);
-        mk2(inout s, g_impl(), tr, b)
+        intern2(inout s, g_impl(), tr, b)
     } else if t == g_peq() {
-        let tr = fa(in s, a);
+        let tr = field_a(in s, a);
         let tr2 = rp_tref(inout s, tr);
-        let pb = fb(in s, a);
-        let assoc = fc(in s, a);
-        let p = mk(inout s, t_proj(), tr2, pb, assoc);
+        let pb = field_b(in s, a);
+        let assoc = field_c(in s, a);
+        let p = intern(inout s, t_proj(), tr2, pb, assoc);
         let ty = rp_ty(inout s, b);
-        mk2(inout s, g_peq(), p, ty)
+        intern2(inout s, g_peq(), p, ty)
     } else {
         let ty = rp_ty(inout s, a);
-        mk2(inout s, g_mode(), ty, b)
+        intern2(inout s, g_mode(), ty, b)
     }
 }
 
@@ -327,12 +312,12 @@ fn alpha(inout s: S, g: u64) -> u64 {
 // ---------------------------------------------------------------------------
 
 fn node(inout s: S, env: u64, d: u64) -> bool {
-    let st = fb(in s, d);
-    let g = fa(in s, d);
-    let stt = tg(in s, st);
-    let gt = tg(in s, g);
+    let st = field_b(in s, d);
+    let g = field_a(in s, d);
+    let stt = tag_of(in s, st);
+    let gt = tag_of(in s, g);
     if stt == st_conf() && gt == g_impl() {
-        let source = fa(in s, st);
+        let source = field_a(in s, st);
         let ci = conformance(in s, source);
         if ci == none() {
             begin_fail(inout s);
@@ -344,7 +329,7 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
             return fail(inout s, "conformance arguments do not match parameter kinds");
         }
         let eb = expected_brand(inout s, source);
-        let brand = fb(in s, g);
+        let brand = field_b(in s, g);
         if brand != eb {
             begin_fail(inout s);
             lit(inout s, "brand ");
@@ -354,72 +339,74 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
             return false;
         }
         let args = args_list(inout s, st);
-        let ctr = sw(in s.cf_tref, ci);
+        let ctr = word_at(in s.cf_tref, ci);
         let head = inst(inout s, ctr, args);
         if head == 0 {
             return fail(inout s, "ill-formed head");
         }
-        if head != fa(in s, g) {
+        if head != field_a(in s, g) {
             begin_fail(inout s);
             lit(inout s, "head `");
             r_trait_ref(inout s, head);
             lit(inout s, "` does not match goal");
             return false;
         }
-        if nlen(in s, d) != nlen(in s, sw(in s.cf_where, ci)) {
+        if kid_count(in s, d) != kid_count(in s, word_at(in s.cf_where, ci)) {
             return fail(inout s, "wrong number of where-clause proofs");
         }
         return where_children(inout s, ci, args, d);
     }
     if (stt == st_assume() && gt == g_impl()) || (stt == st_passume() && gt == g_peq()) {
-        let index = fa(in s, st);
-        let asm = fb(in s, env);
-        if index >= nlen(in s, asm) || kid(in s, asm, index) != g {
+        let index = field_a(in s, st);
+        let asm = field_b(in s, env);
+        if index >= kid_count(in s, asm) || kid(in s, asm, index) != g {
             begin_fail(inout s);
             lit(inout s, "assumption ");
             num(inout s, index);
             lit(inout s, " does not state the goal");
             return false;
         }
-        if nlen(in s, d) != 0 {
+        if kid_count(in s, d) != 0 {
             return fail(inout s, "assumption has children");
         }
         return true;
     }
     if stt == st_alias() && gt == g_impl() {
-        let tr = fa(in s, g);
-        let p = fb(in s, tr);
-        if tg(in s, p) != t_proj() {
+        let tr = field_a(in s, g);
+        let p = field_b(in s, tr);
+        if tag_of(in s, p) != t_proj() {
             return fail(inout s, "alias bound on a non-projection self type");
         }
-        let ptr = fa(in s, p);
-        let pt = fa(in s, ptr);
-        let at = add(sw(in s.tr_as_at, pt), fc(in s, p));
-        let bound = fa(in s, st);
-        if bound >= sw(in s.as_bd_n, at) {
+        let ptr = field_a(in s, p);
+        let pt = field_a(in s, ptr);
+        let at = add(word_at(in s.tr_as_at, pt), field_c(in s, p));
+        let bound = field_a(in s, st);
+        if bound >= word_at(in s.as_bd_n, at) {
             return fail(inout s, "unknown alias bound");
         }
-        let bi = add(sw(in s.as_bd_at, at), bound);
+        let bi = add(word_at(in s.as_bd_at, at), bound);
         let from = s.tmp.len();
-        let pst = fb(in s, ptr);
+        let pst = field_b(in s, ptr);
         s.tmp.push(pst);
         push_kids(inout s, ptr);
-        let binder = mkl(inout s, k_list(), 0, 0, 0, from);
-        let bargs = sw(in s.bd_args, bi);
+        let binder = intern_with_kids(inout s, k_list(), 0, 0, 0, from);
+        let bargs = word_at(in s.bd_args, bi);
         let args = inst(inout s, bargs, binder);
         if args == 0 {
             return fail(inout s, "ill-formed bound");
         }
         let targs = args_list(inout s, tr);
-        let bb = sw(in s.bd_brand, bi);
+        let bb = word_at(in s.bd_brand, bi);
         let ib = inst(inout s, bb, binder);
-        if sw(in s.bd_trait, bi) != fa(in s, tr) || args != targs || ib != fb(in s, g) {
+        if word_at(in s.bd_trait, bi) != field_a(in s, tr)
+            || args != targs
+            || ib != field_b(in s, g) {
             return fail(inout s, "alias bound does not state the goal");
         }
         return single_trait_child(inout s, d, p);
     }
     if stt == st_pconf() && gt == g_peq() {
-        let source = fa(in s, st);
+        let source = field_a(in s, st);
         let ci = conformance(in s, source);
         if ci == none() {
             begin_fail(inout s);
@@ -430,32 +417,32 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
         if !kinds_match(in s, ci, st) {
             return fail(inout s, "conformance arguments do not match parameter kinds");
         }
-        let p = fa(in s, g);
-        let ty = fb(in s, g);
+        let p = field_a(in s, g);
+        let ty = field_b(in s, g);
         let eb = expected_brand(inout s, source);
-        if fb(in s, p) != eb {
+        if field_b(in s, p) != eb {
             return fail(inout s, "projection brand does not match source");
         }
         let args = args_list(inout s, st);
-        let ctr = sw(in s.cf_tref, ci);
+        let ctr = word_at(in s.cf_tref, ci);
         let head = inst(inout s, ctr, args);
         if head == 0 {
             return fail(inout s, "ill-formed head");
         }
-        if head != fa(in s, p) {
+        if head != field_a(in s, p) {
             return fail(inout s, "head does not match projection");
         }
-        let n = nlen(in s, sw(in s.cf_where, ci));
-        let k = fb(in s, st);
-        if nlen(in s, d) != add(n, k) {
+        let n = kid_count(in s, word_at(in s.cf_where, ci));
+        let k = field_b(in s, st);
+        if kid_count(in s, d) != add(n, k) {
             return fail(inout s, "wrong number of children");
         }
         if !where_children(inout s, ci, args, d) {
             return false;
         }
-        let vals = sw(in s.cf_vals, ci);
-        let assoc = fc(in s, p);
-        if assoc >= nlen(in s, vals) {
+        let vals = word_at(in s.cf_vals, ci);
+        let assoc = field_c(in s, p);
+        if assoc >= kid_count(in s, vals) {
             return fail(inout s, "missing associated value");
         }
         let raw = kid(in s, vals, assoc);
@@ -463,7 +450,7 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
         if value == 0 {
             return fail(inout s, "ill-formed value");
         }
-        let h2 = nlen(in s, d);
+        let h2 = kid_count(in s, d);
         rp_begin(inout s, d, n, h2);
         let replayed = rp_ty(inout s, value);
         if !s.rp_ok || s.rp_next != s.rp_end {
@@ -481,35 +468,35 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
         return true;
     }
     if stt == st_rigid() && gt == g_peq() {
-        let p = fa(in s, g);
-        let ty = fb(in s, g);
+        let p = field_a(in s, g);
+        let ty = field_b(in s, g);
         if ty != p {
             return fail(inout s, "rigid projection must equal itself");
         }
-        let pst = fb(in s, fa(in s, p));
-        let pt = tg(in s, pst);
-        if !((pt == t_var() && vkind(fa(in s, pst)) == 1) || pt == t_proj()) {
+        let pst = field_b(in s, field_a(in s, p));
+        let pt = tag_of(in s, pst);
+        if !((pt == t_var() && vkind(field_a(in s, pst)) == 1) || pt == t_proj()) {
             return fail(inout s, "rigid projection needs a rigid self type");
         }
         return single_trait_child(inout s, d, p);
     }
     if stt == st_mode() && gt == g_mode() {
         let from = s.atoms.len();
-        let ty = fa(in s, g);
+        let ty = field_a(in s, g);
         mode_atoms(inout s, env, ty);
-        let b = fb(in s, g);
+        let b = field_b(in s, g);
         let v = decide(inout s, from, b);
         s.atoms.truncate(from);
         if v != 0 {
             return fail(inout s, "mode bound does not hold");
         }
-        if nlen(in s, d) != 0 {
+        if kid_count(in s, d) != 0 {
             return fail(inout s, "mode step has children");
         }
         return true;
     }
     if stt == st_norm() {
-        let n = nlen(in s, d);
+        let n = kid_count(in s, d);
         if n == 0 {
             return fail(inout s, "normalization without a normalized goal");
         }
@@ -519,7 +506,7 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
         if !s.rp_ok || s.rp_next != s.rp_end {
             return fail(inout s, "normalizations do not replay");
         }
-        let lg = fa(in s, last);
+        let lg = field_a(in s, last);
         if replayed != lg {
             begin_fail(inout s);
             lit(inout s, "normalized goal `");
@@ -532,7 +519,7 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
         return true;
     }
     if stt == st_cohyp() {
-        if nlen(in s, d) != 0 {
+        if kid_count(in s, d) != 0 {
             return fail(inout s, "coinductive hypothesis has children");
         }
         let key = alpha(inout s, g);
@@ -544,7 +531,7 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
                 break;
             }
             i = dec(i);
-            let a = sw(in s.anc, i);
+            let a = word_at(in s.anc, i);
             if alpha(inout s, a) == key {
                 pos = i;
                 break;
@@ -561,9 +548,10 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
             let a = if j == na {
                 g
             } else {
-                sw(in s.anc, j)
+                word_at(in s.anc, j)
             };
-            let ok = tg(in s, a) == g_impl() && sw(in s.tr_coind, fa(in s, fa(in s, a))) != 0;
+            let ok = tag_of(in s, a) == g_impl()
+                && word_at(in s.tr_coind, field_a(in s, field_a(in s, a))) != 0;
             if !ok {
                 begin_fail(inout s);
                 lit(inout s, "cycle passes through non-coinductive goal `");
@@ -588,17 +576,13 @@ fn check(inout s: S, env: u64, d: u64) -> bool {
     if !node(inout s, env, d) {
         return false;
     }
-    if tg(in s, fb(in s, d)) == st_cohyp() {
+    if tag_of(in s, field_b(in s, d)) == st_cohyp() {
         return true;
     }
-    let g = fa(in s, d);
+    let g = field_a(in s, d);
     s.anc.push(g);
-    let n = nlen(in s, d);
-    let mut i: u64 = 0;
-    loop {
-        if i >= n {
-            break;
-        }
+    let n = kid_count(in s, d);
+    for i in 0..n {
         s.path.push(i);
         let c = kid(in s, d, i);
         if !check(inout s, env, c) {
@@ -606,7 +590,6 @@ fn check(inout s: S, env: u64, d: u64) -> bool {
         }
         let k = dec(s.path.len());
         s.path.truncate(k);
-        i = inc(i);
     }
     let k = dec(s.anc.len());
     s.anc.truncate(k);
@@ -618,22 +601,17 @@ fn check(inout s: S, env: u64, d: u64) -> bool {
 fn validate_nodes(inout s: S, env: u64, binders: u64, d: u64) -> bool {
     let base = s.dg_code.len();
     s.sc_kind = 1;
-    s.sc_phs = fa(in s, env);
+    s.sc_phs = field_a(in s, env);
     s.sc_binders = binders;
-    let g = fa(in s, d);
+    let g = field_a(in s, d);
     v_goal(inout s, g, 7, 0, 0);
-    let st = fb(in s, d);
-    let stt = tg(in s, st);
+    let st = field_b(in s, d);
+    let stt = tag_of(in s, st);
     if stt == st_conf() || stt == st_pconf() {
-        let n = nlen(in s, st);
-        let mut i: u64 = 0;
-        loop {
-            if i >= n {
-                break;
-            }
+        let n = kid_count(in s, st);
+        for i in 0..n {
             let a = kid(in s, st, i);
             v_arg(inout s, a, 7, 0, 0);
-            i = inc(i);
         }
     }
     if s.dg_code.len() != base {
@@ -642,12 +620,8 @@ fn validate_nodes(inout s: S, env: u64, binders: u64, d: u64) -> bool {
         truncate_diags(inout s, base);
         return false;
     }
-    let n = nlen(in s, d);
-    let mut i: u64 = 0;
-    loop {
-        if i >= n {
-            break;
-        }
+    let n = kid_count(in s, d);
+    for i in 0..n {
         s.path.push(i);
         let c = kid(in s, d, i);
         if !validate_nodes(inout s, env, binders, c) {
@@ -655,7 +629,6 @@ fn validate_nodes(inout s: S, env: u64, binders: u64, d: u64) -> bool {
         }
         let k = dec(s.path.len());
         s.path.truncate(k);
-        i = inc(i);
     }
     true
 }
@@ -672,7 +645,7 @@ pub fn check_derivation(inout s: S, env: u64, d: u64) -> bool {
     }
     let binders = binders_slist(inout s);
     let base = s.dg_code.len();
-    let g = fa(in s, c);
+    let g = field_a(in s, c);
     if !validate_query(inout s, 0, 1, env, binders, g) {
         begin_fail(inout s);
         render_diags(inout s, base);

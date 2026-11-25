@@ -12,12 +12,12 @@ use self::{
 };
 use self::term::{
     add,
-    bt,
+    byte_at,
     dec,
     inc,
-    setw,
+    set_word,
     sub,
-    sw
+    word_at
 };
 use self::render::{
     byte,
@@ -47,8 +47,8 @@ fn cmp_txt(in s: S, ao: u64, al: u64, bo: u64, bl: u64) -> u64 {
         if i >= al || i >= bl {
             break;
         }
-        let x = bt(in s.txt, add(ao, i));
-        let y = bt(in s.txt, add(bo, i));
+        let x = byte_at(in s.txt, add(ao, i));
+        let y = byte_at(in s.txt, add(bo, i));
         if x < y {
             return 0;
         }
@@ -78,30 +78,36 @@ fn cmp3(a: u64, b: u64) -> u64 {
 
 // Compares diagnostics i and j.
 fn cmp_diag(in s: S, i: u64, j: u64) -> u64 {
-    let c = cmp3(sw(in s.dg_code, i), sw(in s.dg_code, j));
+    let c = cmp3(word_at(in s.dg_code, i), word_at(in s.dg_code, j));
     if c != 1 {
         return c;
     }
-    let c = cmp3(sw(in s.dg_sv, i), sw(in s.dg_sv, j));
+    let c = cmp3(word_at(in s.dg_sv, i), word_at(in s.dg_sv, j));
     if c != 1 {
         return c;
     }
-    let c = cmp3(sw(in s.dg_sa, i), sw(in s.dg_sa, j));
+    let c = cmp3(word_at(in s.dg_sa, i), word_at(in s.dg_sa, j));
     if c != 1 {
         return c;
     }
-    let c = cmp3(sw(in s.dg_sb, i), sw(in s.dg_sb, j));
+    let c = cmp3(word_at(in s.dg_sb, i), word_at(in s.dg_sb, j));
     if c != 1 {
         return c;
     }
-    cmp_txt(in s, sw(in s.dg_off, i), sw(in s.dg_len, i), sw(in s.dg_off, j), sw(in s.dg_len, j))
+    cmp_txt(
+        in s,
+        word_at(in s.dg_off, i),
+        word_at(in s.dg_len, i),
+        word_at(in s.dg_off, j),
+        word_at(in s.dg_len, j)
+    )
 }
 
 fn swap1(inout q: ChunkSeq[u64], i: u64, j: u64) {
-    let x = sw(in q, i);
-    let y = sw(in q, j);
-    setw(inout q, i, y);
-    setw(inout q, j, x);
+    let x = word_at(in q, i);
+    let y = word_at(in q, j);
+    set_word(inout q, i, y);
+    set_word(inout q, j, x);
 }
 
 fn swap_diag(inout s: S, i: u64, j: u64) {
@@ -114,18 +120,18 @@ fn swap_diag(inout s: S, i: u64, j: u64) {
 }
 
 fn copy_diag(inout s: S, from: u64, to: u64) {
-    let x = sw(in s.dg_code, from);
-    setw(inout s.dg_code, to, x);
-    let x = sw(in s.dg_sv, from);
-    setw(inout s.dg_sv, to, x);
-    let x = sw(in s.dg_sa, from);
-    setw(inout s.dg_sa, to, x);
-    let x = sw(in s.dg_sb, from);
-    setw(inout s.dg_sb, to, x);
-    let x = sw(in s.dg_off, from);
-    setw(inout s.dg_off, to, x);
-    let x = sw(in s.dg_len, from);
-    setw(inout s.dg_len, to, x);
+    let x = word_at(in s.dg_code, from);
+    set_word(inout s.dg_code, to, x);
+    let x = word_at(in s.dg_sv, from);
+    set_word(inout s.dg_sv, to, x);
+    let x = word_at(in s.dg_sa, from);
+    set_word(inout s.dg_sa, to, x);
+    let x = word_at(in s.dg_sb, from);
+    set_word(inout s.dg_sb, to, x);
+    let x = word_at(in s.dg_off, from);
+    set_word(inout s.dg_off, to, x);
+    let x = word_at(in s.dg_len, from);
+    set_word(inout s.dg_len, to, x);
 }
 
 pub fn truncate_diags(inout s: S, n: u64) {
@@ -210,37 +216,27 @@ pub fn r_subject(inout s: S, v: u64, a: u64, b: u64) {
 
 // Copies txt[off .. off + len] to the end of txt.
 pub fn copy_txt(inout s: S, off: u64, len: u64) {
-    let mut i: u64 = 0;
-    loop {
-        if i >= len {
-            break;
-        }
-        let b = bt(in s.txt, add(off, i));
+    for i in 0..len {
+        let b = byte_at(in s.txt, add(off, i));
         s.txt.push(b);
-        i = inc(i);
     }
 }
 
 // `diag::render` of the diagnostics from base on, appended to txt.
 pub fn render_diags(inout s: S, base: u64) {
     let n = s.dg_code.len();
-    let mut i = base;
-    loop {
-        if i >= n {
-            break;
-        }
-        let c = sw(in s.dg_code, i);
+    for i in base..n {
+        let c = word_at(in s.dg_code, i);
         code_str(inout s, c);
         lit(inout s, " [");
-        let v = sw(in s.dg_sv, i);
-        let a = sw(in s.dg_sa, i);
-        let b = sw(in s.dg_sb, i);
+        let v = word_at(in s.dg_sv, i);
+        let a = word_at(in s.dg_sa, i);
+        let b = word_at(in s.dg_sb, i);
         r_subject(inout s, v, a, b);
         lit(inout s, "] ");
-        let off = sw(in s.dg_off, i);
-        let len = sw(in s.dg_len, i);
+        let off = word_at(in s.dg_off, i);
+        let len = word_at(in s.dg_len, i);
         copy_txt(inout s, off, len);
         byte(inout s, NEWLINE);
-        i = inc(i);
     }
 }

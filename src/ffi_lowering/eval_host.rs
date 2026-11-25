@@ -58,7 +58,7 @@ impl EvalHost {
             }
             for f in library.functions() {
                 // `@vesper-std/cpu`'s instructions exist only in native code.
-                if super::cpu::function(f.symbol()).is_some() {
+                if super::cpu::function(f.link_symbol()).is_some() {
                     continue;
                 }
                 // A callback type's call goes through the pointer it is

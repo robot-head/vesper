@@ -19,17 +19,37 @@ The native lanes run only host-specific coverage:
   link Vesper-compiled Mach-O or COFF objects into Rust, so they depend on the
   host's object format and calling convention.
 
-The codegen swap point tests (`vesper-codegen-swap-test`, every fourth
-corpus world on these hosts) build with the `port-compiler` Cargo profile:
-release optimizations with debug assertions and overflow checks kept on.
-Nearly all of their time is the compiler compiling corpus worlds. Built for
-debug they took about 55 minutes of a 60 minute macOS job and 35-61 minutes
-on Windows (November 2026). On a 4-core Linux machine,
-`self_host_codegen_seq` ran in 97 s optimized against 319 s for debug, and
-`self_host_codegen_calls_emit` in 100 s against 347 s; building the
-optimized test binaries from scratch took 7 minutes there against 4 for
-debug. The other steps still use the debug compiler, and Linux still runs
-every world unoptimized under Bazel.
+Both lanes build the compiler and every test above it with the
+`port-compiler` Cargo profile: release optimizations with debug assertions
+and overflow checks kept on, and so does the macOS Pulse port test. The
+fiber, `vesper-pulse` and Loom tests and the port ABI tier's Rust tests
+build for debug.
+
+The codegen swap point tests (`vesper-codegen-swap-test`) compare each
+corpus world built by the Rust emitters with the same world built through a
+Vesper hook: CLIF text and object bytes, and for sampled worlds a JIT run.
+Only the hooks' calls and the JIT runs need the host. An object for another
+target needs no machine of that kind, so the comparisons for the macOS and
+Windows objects run on `ubuntu-latest`, in `Codegen swap point (Linux for
+macOS)` and `(Linux for Windows)` (`CODEGEN_SWAP_TARGET`, which skips the JIT
+runs). They keep the sweep the native lanes ran: every fourth world for the
+pilot, control and walk-state swaps (`CODEGEN_SWAP_STEP=4`), every world for
+the others. `Platform validation complete` requires both. The native lanes
+then run the suite over every fourth corpus file (`CHECK_HARNESS_STRIDE=4`),
+skipping the two tests whose corpus worlds a quarter may lack
+(`a_divergent_hook_is_caught` and `box_drops_match_the_rust_emitter`, which
+check the harness and the Linux jobs run). So the drops, calls, scalar and
+sequence sweeps JIT-run about a quarter as many corpus worlds on macOS and
+Windows as before; the pilot, control and walk-state sweeps run as many.
+
+Checking the corpus, not comparing it, is most of each test binary's time.
+Built for debug, the suite took about 55 minutes of a 60 minute macOS job
+and 35-61 minutes on Windows (November 2026). On a 4-core Linux machine the
+whole sweep took 13.7 minutes optimized, and `self_host_codegen_seq` alone
+97 s against 319 s for debug; building the optimized test binaries from
+scratch took 7 minutes against 4 for debug. Over a quarter of the corpus the
+suite took 4.5 minutes. Bazel also runs the suite, unoptimized and for
+Linux objects, in `Self-host codegen differentials`.
 
 The rest of the port harness, every ported crate's tests against both builds
 and its divergence checks, is platform-neutral once the ABI tier passes. It
@@ -99,10 +119,20 @@ finished (#1321). To keep pull requests within the limit:
 - A push to main cancels the older main run of the same workflow, except
   Platforms and `Hybrid compiler`: pull requests skip the port shards and the
   hybrid job, so their main runs must finish. They run one at a time on main,
-  and a burst of merges waits as a single newest run (#1479). A pull request
-  that wants the port shards before merging can dispatch Platforms on its
-  branch with profile `pr` and `pull_request` left empty; that runs every
-  port shard.
+  and a burst of merges waits as a single newest run (#1479). A maintainer
+  who wants a pull request's port shards before it merges can dispatch
+  Platforms on its branch with profile `pr` and `pull_request` left empty;
+  that runs every port shard. Agents never start Platforms by hand
+  (AGENTS.md). A newer such dispatch, or the automatic one for a newer push,
+  cancels the older run on that branch, so dispatching again does not queue
+  a second macOS job. On 2026-11-25 twelve of the fifteen Platforms runs
+  queued for a macOS runner were hand dispatches, three of them for one
+  branch.
+- `Hybrid compiler` runs its nine divergent rebuilds (the checks that its
+  harnesses catch a wrong layout, parse, IR check, inliner, optimizers, trait
+  pass, doc pages or stack bound) on Linux only. The harnesses are the same
+  code on every host; macOS and Windows still build the hybrid and run its
+  tests, the CLI suites included.
 - The merge gate (`.github/actions/merge-gate`, `scripts/ci/merge_gate.py`)
   enforces the project rule that pull requests which cannot merge yet get no
   CI: when a pull request's base is not main, its branch carries another open
@@ -118,17 +148,26 @@ finished (#1321). To keep pull requests within the limit:
   regenerates the census after each push to main into one "Refresh the Rust
   census" pull request, which changes only that file.
 - `macOS (AArch64)` and `Windows (x86_64 MSVC)` start only when a pull
-  request is ready to merge. Platforms no longer runs on pull request pushes;
+  request can merge. Platforms no longer runs on pull request pushes;
   `Native platform checks` (`.github/workflows/native-checks.yml`) runs on
-  each BuildBuddy status and, once `Test all targets` and `Native and
-  acceptance scripts` are both green on the head commit and the merge gate
-  passes, dispatches Platforms on the branch with `pull_request` set. That
-  run tests `refs/pull/<n>/merge`, as pull request runs did, and reports both
-  required checks on the head commit; until then they show as expected and
-  the pull request cannot merge. A new push starts over when its own
-  BuildBuddy checks go green. To start them by hand, run Platforms from the
-  Actions tab on the branch with profile `pr`, `checkout_ref`
-  `refs/pull/<n>/merge` and `pull_request` `<n>`.
+  each BuildBuddy status and, once `Native and acceptance scripts` is green
+  on the head commit, no BuildBuddy check has failed and the merge gate
+  passes, dispatches Platforms on the branch with `pull_request` set. So
+  macOS and Windows run alongside the slower BuildBuddy checks: waiting for
+  all of them to go green added about 40 minutes (a median of 43 minutes
+  from push to the last BuildBuddy status, against 7 for the acceptance
+  check, November 2026). A BuildBuddy check that fails later leaves that run
+  going, and the next push cancels it. A pull request that changes only
+  documentation (`docs/` and top-level Markdown files) skips the macOS,
+  Windows and codegen swap jobs: the plan sets its `native` output to
+  `none`, the jobs report as skipped, and `Platform validation complete`
+  accepts that. The run tests `refs/pull/<n>/merge`,
+  as pull request runs did, and reports both required checks on the head
+  commit; until then they show as expected and the pull request cannot
+  merge. A new push starts over when its own acceptance check goes green. To
+  start them by hand, run Platforms from the Actions tab on the branch with
+  profile `pr`, `checkout_ref` `refs/pull/<n>/merge` and `pull_request`
+  `<n>`.
 
 The native executable cases are shared with `aspect acceptance test-native-host`;
 Use `aspect ci test-native-executables` on macOS. Windows CI runs

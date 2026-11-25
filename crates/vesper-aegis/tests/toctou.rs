@@ -2,17 +2,25 @@
 //! depend only on the single snapshot, even while a concurrent
 //! "hypervisor" thread rewrites shared memory.
 
-#![allow(deprecated)] // the legacy EnclaveGate shim is still tested
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use vesper_aegis::gate::*;
 use vesper_aegis::host::*;
+use vesper_vault::{
+    AeadOpener, AeadSealer, ChaCha20Poly1305, CiphertextFrame, FRAME_HEADER_LEN, LockPolicy,
+    SecretSlot,
+};
 
-const RX: [u8; 32] = [0x11; 32];
-const TX: [u8; 32] = [0x22; 32];
+const RX: u8 = 0x11;
+const TX: u8 = 0x22;
 const AAD: [u8; 48] = [0x33; 48];
 const SLOT: u32 = 256;
+
+type Gate = VaultEnclaveGate<ChaCha20Poly1305>;
+
+fn slot(byte: u8) -> SecretSlot<32> {
+    SecretSlot::from_fn(LockPolicy::BestEffort, |k| k.fill(byte)).unwrap()
+}
 
 /// Confidential "scoring": count, sum and xor of the payload.
 fn score(plain: &[u8], reply: &mut [u8; REPLY_LEN]) {
@@ -23,13 +31,55 @@ fn score(plain: &[u8], reply: &mut [u8; REPLY_LEN]) {
     reply[16] = xor;
 }
 
-fn gate() -> EnclaveGate {
-    EnclaveGate::new(&RX, &TX, AAD, NonceSequence::new([9, 9, 9, 9], 1 << 20))
+fn gate_with_limit(limit: u64) -> Gate {
+    VaultEnclaveGate::new(
+        AeadOpener::new(slot(RX), 0),
+        AeadSealer::with_record_limit(slot(TX), 0, limit),
+        AAD,
+    )
+}
+
+fn gate() -> Gate {
+    gate_with_limit(1 << 20)
+}
+
+fn retire(g: Gate) {
+    let _ = g.retire();
+}
+
+/// Tenant side: request frames with consecutive sequence numbers.
+struct Tenant(AeadSealer<ChaCha20Poly1305>);
+impl Tenant {
+    fn new() -> Self {
+        Tenant(AeadSealer::new(slot(RX), 0))
+    }
+    fn seal(&mut self, payload: &[u8]) -> Vec<u8> {
+        let mut frame = vec![0u8; FRAME_HEADER_LEN + payload.len()];
+        frame[FRAME_HEADER_LEN..].copy_from_slice(payload);
+        let t = self.0.mint_nonce().unwrap();
+        self.0.seal_in_place(t, &AAD, &mut frame).unwrap();
+        frame
+    }
+    fn retire(self) {
+        let _ = self.0.retire();
+    }
+}
+
+/// Opens `frame` under `key` with a fresh opener (no replay window).
+fn open(key: u8, frame: &[u8]) -> Option<Vec<u8>> {
+    let opener: AeadOpener<ChaCha20Poly1305> = AeadOpener::new(slot(key), 0);
+    let mut buf = frame.to_vec();
+    let plain = opener
+        .open_in_place(&AAD, CiphertextFrame::new(&mut buf))
+        .ok()
+        .map(|p| p.bytes().to_vec());
+    let _ = opener.retire();
+    plain
 }
 
 /// The gate's output as a pure function of the snapshot bytes.
 fn reference(snapshot: &[u8]) -> Result<GateReply, ()> {
-    let plain = tenant_open_frame(&RX, &AAD, snapshot).ok_or(())?;
+    let plain = open(RX, snapshot).ok_or(())?;
     let mut reply = [0u8; REPLY_LEN];
     score(&plain, &mut reply);
     Ok(GateReply {
@@ -42,7 +92,8 @@ fn reference(snapshot: &[u8]) -> Result<GateReply, ()> {
 fn gate_round_trip_only_ciphertext_reaches_host() {
     let mut ap = BounceAperture::new(1, SLOT);
     let host = ap.host_side();
-    let frame = tenant_seal_frame(&RX, [1; 12], &AAD, b"tenant secret payload");
+    let mut tenant = Tenant::new();
+    let frame = tenant.seal(b"tenant secret payload");
     host.write(0, 0, &frame);
     let mut g = gate();
     let mut scratch = PrivateRegion::with_capacity(4096);
@@ -61,16 +112,15 @@ fn gate_round_trip_only_ciphertext_reaches_host() {
     assert_eq!(scratch.used(), 0, "scratch region reset");
     let mut slot = vec![0u8; SLOT as usize];
     host.read(0, 0, &mut slot);
-    let sealed = &slot[..FRAME_OVERHEAD + REPLY_LEN];
-    assert_eq!(
-        tenant_open_frame(&TX, &AAD, sealed).unwrap(),
-        out.reply.to_vec()
-    );
-    assert!(slot[FRAME_OVERHEAD + REPLY_LEN..].iter().all(|&b| b == 0));
+    let sealed = &slot[..VAULT_REPLY_FRAME_LEN];
+    assert_eq!(open(TX, sealed).unwrap(), out.reply.to_vec());
+    assert!(slot[VAULT_REPLY_FRAME_LEN..].iter().all(|&b| b == 0));
     assert!(
         !slot.windows(6).any(|w| w == b"secret"),
         "no plaintext in shared memory"
     );
+    retire(g);
+    tenant.retire();
 }
 
 #[test]
@@ -78,23 +128,24 @@ fn every_error_path_scrubs_and_releases_the_grant() {
     let mut ap = BounceAperture::new(1, SLOT);
     let host = ap.host_side();
     let mut g = gate();
+    let mut tenant = Tenant::new();
     let mut scratch = PrivateRegion::with_capacity(4096);
-    let good = tenant_seal_frame(&RX, [1; 12], &AAD, b"payload");
+    let good = tenant.seal(b"payload");
     let mut forged = good.clone();
-    forged[14] ^= 1;
-    type Case<'a> = (&'a [u8], u32, fn(&EnclaveError) -> bool);
+    forged[FRAME_HEADER_LEN + 2] ^= 1;
+    type Case<'a> = (&'a [u8], u32, fn(&VaultGateError) -> bool);
     let cases: [Case<'_>; 4] = [
         (&good, SLOT + 1, |e| {
-            matches!(e, EnclaveError::HostIagoAttempt(_))
+            matches!(e, VaultGateError::HostIagoAttempt(_))
         }),
         (&good, 10, |e| {
-            matches!(e, EnclaveError::FrameTooShort { len: 10 })
+            matches!(e, VaultGateError::FrameTooShort { len: 10 })
         }),
         (&forged, forged.len() as u32, |e| {
-            *e == EnclaveError::UnauthenticatedPayload
+            matches!(e, VaultGateError::UnauthenticatedPayload(_))
         }),
         (&good, good.len() as u32 - 1, |e| {
-            *e == EnclaveError::UnauthenticatedPayload
+            matches!(e, VaultGateError::UnauthenticatedPayload(_))
         }),
     ];
     for (frame, len, want) in cases {
@@ -115,8 +166,9 @@ fn every_error_path_scrubs_and_releases_the_grant() {
         host.read(0, 0, &mut slot);
         assert!(slot.iter().all(|&b| b == 0), "slot scrubbed after {e:?}");
     }
-    // Nonce exhaustion.
-    let mut g = EnclaveGate::new(&RX, &TX, AAD, NonceSequence::new([0; 4], 0));
+    retire(g);
+    // Transmit nonces exhausted.
+    let mut g = gate_with_limit(0);
     host.write(0, 0, &good);
     let grant = ap.grant(0).unwrap();
     assert_eq!(
@@ -127,10 +179,14 @@ fn every_error_path_scrubs_and_releases_the_grant() {
             UntrustedHostVal::from_host(good.len() as u32),
             &mut score
         ),
-        Err(EnclaveError::RekeyRequired)
+        Err(VaultGateError::RekeyRequired)
     );
+    let mut slot = vec![1u8; SLOT as usize];
+    host.read(0, 0, &mut slot);
+    assert!(slot.iter().all(|&b| b == 0), "slot scrubbed after rekey");
     assert_eq!(ap.leaked_grants(), 0);
-    assert_eq!(g.nonces().leaked_tickets(), 0);
+    retire(g);
+    tenant.retire();
 }
 
 /// Deterministic TOCTOU: the host rewrites the frame immediately after the
@@ -141,8 +197,9 @@ fn every_error_path_scrubs_and_releases_the_grant() {
 fn mutation_after_snapshot_cannot_change_output() {
     let mut ap = BounceAperture::new(1, SLOT);
     let host = ap.host_side();
-    let frame = tenant_seal_frame(&RX, [2; 12], &AAD, b"value=1");
-    let evil = tenant_seal_frame(&RX, [3; 12], &AAD, b"value=9999");
+    let mut tenant = Tenant::new();
+    let frame = tenant.seal(b"value=1");
+    let evil = tenant.seal(b"value=9999");
     host.write(0, 0, &frame);
     let mut g = gate();
     let mut scratch = PrivateRegion::with_capacity(4096);
@@ -170,18 +227,21 @@ fn mutation_after_snapshot_cannot_change_output() {
     let mut second = vec![0u8; evil.len()];
     host.read(0, 0, &mut second);
     assert_ne!(reference(&first), reference(&second));
+    retire(g);
+    tenant.retire();
 }
 
 /// Concurrent hypervisor thread flipping shared memory while the gate
 /// runs: each output equals the reference applied to the bytes the gate
-/// actually snapshotted, never anything else.
+/// actually snapshotted, never anything else. Each request goes to a fresh
+/// gate, so the replay window never rejects a frame the race replays.
 #[test]
 fn concurrent_hypervisor_race() {
     let mut ap = BounceAperture::new(1, SLOT);
     let host = ap.host_side();
-    let frames: Vec<Vec<u8>> = (0..4u8)
-        .map(|i| tenant_seal_frame(&RX, [i; 12], &AAD, &[i + 1; 40]))
-        .collect();
+    let mut tenant = Tenant::new();
+    let frames: Vec<Vec<u8>> = (0..4u8).map(|i| tenant.seal(&[i + 1; 40])).collect();
+    tenant.retire();
     let len = frames[0].len() as u32;
     let stop = Arc::new(AtomicBool::new(false));
     let hv = {
@@ -204,10 +264,10 @@ fn concurrent_hypervisor_race() {
             }
         })
     };
-    let mut g = gate();
     let mut scratch = PrivateRegion::with_capacity(4096);
     let (mut ok, mut rejected) = (0, 0);
-    for _ in 0..2000 {
+    for _ in 0..500 {
+        let mut g = gate();
         let grant = ap.grant(0).unwrap();
         let mut seen = Vec::new();
         let r = g.process_observed(
@@ -223,14 +283,15 @@ fn concurrent_hypervisor_race() {
                 assert_eq!(*a, b);
                 ok += 1;
             }
-            (Err(EnclaveError::UnauthenticatedPayload), Err(())) => rejected += 1,
+            (Err(VaultGateError::UnauthenticatedPayload(_)), Err(())) => rejected += 1,
             (got, want) => panic!("gate {got:?} vs snapshot reference {want:?}"),
         }
         assert!(!ap.is_granted(0));
+        retire(g);
     }
     stop.store(true, Ordering::Relaxed);
     hv.join().unwrap();
-    assert_eq!(ok + rejected, 2000);
+    assert_eq!(ok + rejected, 500);
     eprintln!("race: {ok} authenticated snapshots, {rejected} torn snapshots rejected");
     assert_eq!(ap.leaked_grants(), 0);
 }

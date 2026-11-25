@@ -41,25 +41,29 @@ pub fn sub(a: u64, b: u64) -> u64 {
     wrapping_sub(a, b)
 }
 
-pub fn sw(in q: ChunkSeq[u64], i: u64) -> u64 {
+// Word `i` of `q`, or 0 past its end.
+pub fn word_at(in q: ChunkSeq[u64], i: u64) -> u64 {
     match q.try_get(i) {
         Option::Some(x) => x,
         Option::None => 0,
     }
 }
 
-pub fn setw(inout q: ChunkSeq[u64], i: u64, v: u64) {
+// Sets word `i` of `q` to `v`; a write past the end does nothing.
+pub fn set_word(inout q: ChunkSeq[u64], i: u64, v: u64) {
     let _ = q.try_set(i, v);
 }
 
-pub fn iw(in q: Slice[u64], i: u64) -> u64 {
+// Word `i` of the slice `q`, or 0 past its end.
+pub fn slice_word_at(in q: Slice[u64], i: u64) -> u64 {
     match q.try_get(i) {
         Option::Some(x) => x,
         Option::None => 0,
     }
 }
 
-pub fn bt(in q: ChunkSeq[u8], i: u64) -> u8 {
+// Byte `i` of `q`, or 0 past its end.
+pub fn byte_at(in q: ChunkSeq[u8], i: u64) -> u8 {
     match q.try_get(i) {
         Option::Some(x) => x,
         Option::None => 0,
@@ -387,35 +391,36 @@ pub fn kind_of(tag: u64) -> u64 {
 // ---------------------------------------------------------------------------
 // Accessors.
 
-pub fn tg(in s: S, n: u64) -> u64 {
-    sw(in s.tg, n)
+// The tag, fields `a`, `b` and `c`, kid count and flags of node `n`.
+pub fn tag_of(in s: S, n: u64) -> u64 {
+    word_at(in s.tg, n)
 }
-pub fn fa(in s: S, n: u64) -> u64 {
-    sw(in s.fa, n)
+pub fn field_a(in s: S, n: u64) -> u64 {
+    word_at(in s.fa, n)
 }
-pub fn fb(in s: S, n: u64) -> u64 {
-    sw(in s.fb, n)
+pub fn field_b(in s: S, n: u64) -> u64 {
+    word_at(in s.fb, n)
 }
-pub fn fc(in s: S, n: u64) -> u64 {
-    sw(in s.fc, n)
+pub fn field_c(in s: S, n: u64) -> u64 {
+    word_at(in s.fc, n)
 }
-pub fn nlen(in s: S, n: u64) -> u64 {
-    sw(in s.ln, n)
+pub fn kid_count(in s: S, n: u64) -> u64 {
+    word_at(in s.ln, n)
 }
 pub fn flags(in s: S, n: u64) -> u64 {
-    sw(in s.fl, n)
+    word_at(in s.fl, n)
 }
 // Kid i of node n.
 pub fn kid(in s: S, n: u64, i: u64) -> u64 {
-    sw(in s.kids, add(sw(in s.ls, n), i))
+    word_at(in s.kids, add(word_at(in s.ls, n), i))
 }
 
 // Label key: an effect id, or `1 << 34 | var` for a capability label.
 pub fn label_key(in s: S, l: u64) -> u64 {
-    if tg(in s, l) == l_eff() {
-        fa(in s, l)
+    if tag_of(in s, l) == l_eff() {
+        field_a(in s, l)
     } else {
-        17179869184 | fa(in s, l)
+        17179869184 | field_a(in s, l)
     }
 }
 
@@ -461,7 +466,7 @@ fn node_flags(in s: S, tag: u64, a: u64, b: u64, c: u64, from: u64) -> u64 {
             if i >= n {
                 break;
             }
-            let k = sw(in s.tmp, i);
+            let k = word_at(in s.tmp, i);
             f = f | flags(in s, k);
             if tag == g_row() {
                 let key = label_key(in s, k);
@@ -482,73 +487,53 @@ fn node_flags(in s: S, tag: u64, a: u64, b: u64, c: u64, from: u64) -> u64 {
 fn grow(inout s: S) {
     let cap = wrapping_mul(inc(s.hmask), 2);
     s.ht.clear();
-    let mut i: u64 = 0;
-    loop {
-        if i >= cap {
-            break;
-        }
+    for i in 0..cap {
         s.ht.push(0);
-        i = inc(i);
     }
     s.hmask = dec(cap);
     let n = s.tg.len();
-    let mut j: u64 = 0;
-    loop {
-        if j >= n {
-            break;
-        }
-        let mut at = sw(in s.hs, j) & s.hmask;
+    for j in 0..n {
+        let mut at = word_at(in s.hs, j) & s.hmask;
         loop {
-            if sw(in s.ht, at) == 0 {
-                setw(inout s.ht, at, inc(j));
+            if word_at(in s.ht, at) == 0 {
+                set_word(inout s.ht, at, inc(j));
                 break;
             }
             at = inc(at) & s.hmask;
         }
-        j = inc(j);
     }
 }
 
 // Interns the node (tag, a, b, c) whose kids are `tmp[from ..]`, and pops
 // the kids off `tmp`.
-pub fn mkl(inout s: S, tag: u64, a: u64, b: u64, c: u64, from: u64) -> u64 {
+pub fn intern_with_kids(inout s: S, tag: u64, a: u64, b: u64, c: u64, from: u64) -> u64 {
     let n = s.tmp.len();
     let len = sub(n, from);
     let mut h = mix(mix(mix(mix(FNV_OFFSET, tag), a), b), c);
-    let mut i = from;
-    loop {
-        if i >= n {
-            break;
-        }
-        h = mix(h, sw(in s.tmp, i));
-        i = inc(i);
+    for i in from..n {
+        h = mix(h, word_at(in s.tmp, i));
     }
     h = finish(h);
     let mut at = h & s.hmask;
     loop {
-        let e = sw(in s.ht, at);
+        let e = word_at(in s.ht, at);
         if e == 0 {
             break;
         }
         let m = dec(e);
-        if sw(in s.hs, m) == h
-            && sw(in s.tg, m) == tag
-            && sw(in s.fa, m) == a
-            && sw(in s.fb, m) == b
-            && sw(in s.fc, m) == c
-            && sw(in s.ln, m) == len {
-            let base = sw(in s.ls, m);
+        if word_at(in s.hs, m) == h
+            && word_at(in s.tg, m) == tag
+            && word_at(in s.fa, m) == a
+            && word_at(in s.fb, m) == b
+            && word_at(in s.fc, m) == c
+            && word_at(in s.ln, m) == len {
+            let base = word_at(in s.ls, m);
             let mut same = true;
-            let mut j: u64 = 0;
-            loop {
-                if j >= len {
-                    break;
-                }
-                if sw(in s.kids, add(base, j)) != sw(in s.tmp, add(from, j)) {
+            for j in 0..len {
+                if word_at(in s.kids, add(base, j)) != word_at(in s.tmp, add(from, j)) {
                     same = false;
                     break;
                 }
-                j = inc(j);
             }
             if same {
                 s.tmp.truncate(from);
@@ -567,17 +552,12 @@ pub fn mkl(inout s: S, tag: u64, a: u64, b: u64, c: u64, from: u64) -> u64 {
     s.ln.push(len);
     s.fl.push(f);
     s.hs.push(h);
-    let mut k = from;
-    loop {
-        if k >= n {
-            break;
-        }
-        let w = sw(in s.tmp, k);
+    for k in from..n {
+        let w = word_at(in s.tmp, k);
         s.kids.push(w);
-        k = inc(k);
     }
     s.tmp.truncate(from);
-    setw(inout s.ht, at, inc(id));
+    set_word(inout s.ht, at, inc(id));
     s.hcount = inc(s.hcount);
     if wrapping_mul(s.hcount, 2) > s.hmask {
         grow(inout s);
@@ -585,85 +565,77 @@ pub fn mkl(inout s: S, tag: u64, a: u64, b: u64, c: u64, from: u64) -> u64 {
     id
 }
 
-pub fn mk(inout s: S, tag: u64, a: u64, b: u64, c: u64) -> u64 {
+// Interns the node (tag, a, b, c) with no kids; `intern0`, `intern1` and
+// `intern2` leave the trailing fields 0.
+pub fn intern(inout s: S, tag: u64, a: u64, b: u64, c: u64) -> u64 {
     let from = s.tmp.len();
-    mkl(inout s, tag, a, b, c, from)
+    intern_with_kids(inout s, tag, a, b, c, from)
 }
 
-pub fn mk0(inout s: S, tag: u64) -> u64 {
-    mk(inout s, tag, 0, 0, 0)
+pub fn intern0(inout s: S, tag: u64) -> u64 {
+    intern(inout s, tag, 0, 0, 0)
 }
 
-pub fn mk1(inout s: S, tag: u64, a: u64) -> u64 {
-    mk(inout s, tag, a, 0, 0)
+pub fn intern1(inout s: S, tag: u64, a: u64) -> u64 {
+    intern(inout s, tag, a, 0, 0)
 }
 
-pub fn mk2(inout s: S, tag: u64, a: u64, b: u64) -> u64 {
-    mk(inout s, tag, a, b, 0)
+pub fn intern2(inout s: S, tag: u64, a: u64, b: u64) -> u64 {
+    intern(inout s, tag, a, b, 0)
 }
 
 // Pushes the kids of n onto tmp.
 pub fn push_kids(inout s: S, n: u64) {
-    let len = nlen(in s, n);
-    let base = sw(in s.ls, n);
-    let mut i: u64 = 0;
-    loop {
-        if i >= len {
-            break;
-        }
-        let w = sw(in s.kids, add(base, i));
+    let len = kid_count(in s, n);
+    let base = word_at(in s.ls, n);
+    for i in 0..len {
+        let w = word_at(in s.kids, add(base, i));
         s.tmp.push(w);
-        i = inc(i);
     }
 }
 
 // The empty list and slist.
 pub fn nil(inout s: S) -> u64 {
-    mk0(inout s, k_list())
+    intern0(inout s, k_list())
 }
 
 pub fn snil(inout s: S) -> u64 {
-    mk0(inout s, k_slist())
+    intern0(inout s, k_slist())
 }
 
 // The bare variable of a kind as an argument node.
 pub fn var_arg(inout s: S, kind: u64, v: u64) -> u64 {
     if kind == kd_type() {
-        mk1(inout s, t_var(), v)
+        intern1(inout s, t_var(), v)
     } else if kind == kd_mode() {
-        mk1(inout s, m_var(), v)
+        intern1(inout s, m_var(), v)
     } else if kind == kd_row() {
-        mk(inout s, g_row(), v, 0, 0)
+        intern(inout s, g_row(), v, 0, 0)
     } else if kind == kd_brand() {
-        mk1(inout s, b_var(), v)
+        intern1(inout s, b_var(), v)
     } else {
-        mk1(inout s, g_cap(), v)
+        intern1(inout s, g_cap(), v)
     }
 }
 
 // The kind of an argument node.
 pub fn arg_kind(in s: S, n: u64) -> u64 {
-    kind_of(tg(in s, n))
+    kind_of(tag_of(in s, n))
 }
 
 pub fn goal_impl(inout s: S, tref: u64, brand: u64) -> u64 {
-    mk2(inout s, g_impl(), tref, brand)
+    intern2(inout s, g_impl(), tref, brand)
 }
 
 pub fn der_leaf(inout s: S, goal: u64, step: u64) -> u64 {
-    mk2(inout s, d_node(), goal, step)
+    intern2(inout s, d_node(), goal, step)
 }
 
 pub fn new_arena(inout s: S) {
-    let mut i: u64 = 0;
-    loop {
-        if i >= 1024 {
-            break;
-        }
+    for i in 0..1024 {
         s.ht.push(0);
-        i = inc(i);
     }
     s.hmask = 1023;
     // Node 0 is a sentinel, so no real node has id 0.
-    let _ = mk(inout s, 0, 0, 0, 0);
+    let _ = intern(inout s, 0, 0, 0, 0);
 }

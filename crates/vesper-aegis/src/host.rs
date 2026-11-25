@@ -499,14 +499,6 @@ impl PrivateRegion {
     }
 }
 
-/// AEAD output: the only thing allowed to cross into shared memory.
-#[derive(Debug)]
-pub struct SealedFrame<'a> {
-    pub(crate) nonce: [u8; 12],
-    pub(crate) ciphertext: &'a [u8],
-    pub(crate) tag: [u8; 16],
-}
-
 /// A Vault-sealed frame (§23.3 `EncryptedFrameWireHeader` then
 /// ciphertext). Only [`crate::gate::VaultEnclaveGate`] builds one, from a
 /// successful `AeadSealer::seal_in_place`.
@@ -516,51 +508,29 @@ pub struct SealedVaultFrame<'a> {
     pub(crate) ciphertext: &'a [u8],
 }
 
-/// Borrowed view of sealed output for egress: `head || ciphertext || tail`.
+/// Borrowed view of sealed output for egress: `header || ciphertext`, the
+/// only thing allowed to cross into shared memory.
 #[derive(Clone, Copy, Debug)]
 pub struct CiphertextSlice<'a> {
     head: [u8; vesper_vault::FRAME_HEADER_LEN],
-    head_len: usize,
     ciphertext: &'a [u8],
-    tail: [u8; 16],
-    tail_len: usize,
 }
 
 impl<'a> CiphertextSlice<'a> {
-    /// `nonce[12] || ciphertext || tag[16]`.
-    pub fn from_sealed(frame: &SealedFrame<'a>) -> Self {
-        let mut head = [0u8; vesper_vault::FRAME_HEADER_LEN];
-        head[..12].copy_from_slice(&frame.nonce);
-        CiphertextSlice {
-            head,
-            head_len: 12,
-            ciphertext: frame.ciphertext,
-            tail: frame.tag,
-            tail_len: 16,
-        }
-    }
-
     /// `header[28] || ciphertext` (Vault frame layout).
     pub fn from_vault_sealed(frame: &SealedVaultFrame<'a>) -> Self {
         CiphertextSlice {
             head: frame.header,
-            head_len: vesper_vault::FRAME_HEADER_LEN,
             ciphertext: frame.ciphertext,
-            tail: [0; 16],
-            tail_len: 0,
         }
     }
 
-    fn parts(&self) -> [&[u8]; 3] {
-        [
-            &self.head[..self.head_len],
-            self.ciphertext,
-            &self.tail[..self.tail_len],
-        ]
+    fn parts(&self) -> [&[u8]; 2] {
+        [&self.head[..], self.ciphertext]
     }
 
     pub fn len(&self) -> usize {
-        self.head_len + self.ciphertext.len() + self.tail_len
+        self.head.len() + self.ciphertext.len()
     }
 
     pub fn is_empty(&self) -> bool {

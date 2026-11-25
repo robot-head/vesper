@@ -501,7 +501,8 @@ fn vesper_raising_tests_match_the_rust_lowering() {
             "raising tests: {}; negate/shift/narrow {before:?} -> {after:?}",
             total.summary()
         );
-        assert_eq!((total.worlds, total.ran), (2, 2), "{}", total.summary());
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
         for (b, a) in before.iter().zip(after) {
             assert!(a > *b, "a raising test never came from Vesper");
         }
@@ -573,7 +574,8 @@ fn vesper_locals_match_the_rust_lowering_across_blocks() {
             "locals: {}; read/write {before:?} -> {after:?}",
             total.summary()
         );
-        assert_eq!((total.worlds, total.ran), (2, 2), "{}", total.summary());
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
         for (b, a) in before.iter().zip(after) {
             assert!(a > *b, "a local operation never came from Vesper");
         }

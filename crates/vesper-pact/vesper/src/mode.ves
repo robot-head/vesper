@@ -6,26 +6,26 @@ use self::{
 };
 use self::term::{
     add,
-    fa,
-    fb,
-    fc,
+    field_a,
+    field_b,
+    field_c,
     inc,
+    intern1,
+    intern_with_kids,
     is_inf,
     k_list,
     kid,
+    kid_count,
     m_const,
     m_var,
-    mk1,
-    mkl,
-    nlen,
     none,
     push_kids,
-    sw,
     t_ctor,
     t_var,
-    tg,
+    tag_of,
     vidx,
-    vkind
+    vkind,
+    word_at
 };
 use self::fold::{
     inst
@@ -33,52 +33,47 @@ use self::fold::{
 
 // Pushes the atoms of a resolved, normalized type onto s.atoms.
 pub fn mode_atoms(inout s: S, env: u64, ty: u64) {
-    let t = tg(in s, ty);
+    let t = tag_of(in s, ty);
     if t == t_ctor() {
-        let c = fa(in s, ty);
-        let base = sw(in s.ct_base, c);
-        let m = mk1(inout s, m_const(), base);
+        let c = field_a(in s, ty);
+        let base = word_at(in s.ct_base, c);
+        let m = intern1(inout s, m_const(), base);
         s.atoms.push(m);
-        let joins = sw(in s.ct_joins, c);
-        let nj = nlen(in s, joins);
-        let mut i: u64 = 0;
-        loop {
-            if i >= nj {
-                break;
-            }
+        let joins = word_at(in s.ct_joins, c);
+        let nj = kid_count(in s, joins);
+        for i in 0..nj {
             let j = kid(in s, joins, i);
             let a = kid(in s, ty, j);
-            if tg(in s, a) <= 3 {
+            if tag_of(in s, a) <= 3 {
                 mode_atoms(inout s, env, a);
             }
-            i = inc(i);
         }
     } else if t == t_var() {
-        let v = fa(in s, ty);
+        let v = field_a(in s, ty);
         if vkind(v) == 1 {
-            let phs = fa(in s, env);
+            let phs = field_a(in s, env);
             let p = kid(in s, phs, vidx(v));
-            let mut b = fb(in s, p);
+            let mut b = field_b(in s, p);
             if b == none() {
                 b = 2;
             }
-            let m = mk1(inout s, m_const(), b);
+            let m = intern1(inout s, m_const(), b);
             s.atoms.push(m);
         } else {
             s.atoms.push(none());
         }
     } else {
-        let tr = fa(in s, ty);
-        let tid = fa(in s, tr);
-        let at = add(sw(in s.tr_as_at, tid), fc(in s, ty));
-        let mb = sw(in s.as_mode, at);
+        let tr = field_a(in s, ty);
+        let tid = field_a(in s, tr);
+        let at = add(word_at(in s.tr_as_at, tid), field_c(in s, ty));
+        let mb = word_at(in s.as_mode, at);
         let from = s.tmp.len();
-        let st = fb(in s, tr);
+        let st = field_b(in s, tr);
         s.tmp.push(st);
         push_kids(inout s, tr);
-        let binder = mkl(inout s, k_list(), 0, 0, 0, from);
+        let binder = intern_with_kids(inout s, k_list(), 0, 0, 0, from);
         let b = inst(inout s, mb, binder);
-        if tg(in s, b) == m_var() && is_inf(fa(in s, b)) {
+        if tag_of(in s, b) == m_var() && is_inf(field_a(in s, b)) {
             s.atoms.push(none());
         } else {
             s.atoms.push(b);
@@ -89,25 +84,25 @@ pub fn mode_atoms(inout s: S, env: u64, ty: u64) {
 // Decides `atoms[from ..] <= bound`: 0 holds, 1 fails (the atom in
 // s.vatom), 2 unknown.
 pub fn decide(inout s: S, from: u64, bound: u64) -> u64 {
-    let lin = mk1(inout s, m_const(), 2);
+    let lin = intern1(inout s, m_const(), 2);
     let n = s.atoms.len();
-    let bt = tg(in s, bound);
-    let bv = fa(in s, bound);
+    let bt = tag_of(in s, bound);
+    let bv = field_a(in s, bound);
     let mut unknown = false;
     let mut i = from;
     loop {
         if i >= n {
             break;
         }
-        let a = sw(in s.atoms, i);
+        let a = word_at(in s.atoms, i);
         i = inc(i);
         if a == none() {
             if bound != lin {
                 unknown = true;
             }
         } else {
-            let at = tg(in s, a);
-            let av = fa(in s, a);
+            let at = tag_of(in s, a);
+            let av = field_a(in s, a);
             // 0 false, 1 true, 2 unknown
             let ok = if at == m_const() && av == 0 {
                 1

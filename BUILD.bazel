@@ -741,6 +741,18 @@ vesper_crate(
             "src/doctest_extract.rs",
             "tests/doctest_cli.rs",
         ]),
+        # Part 7: doctest wrapper names and verdicts against
+        # doctest_verdict::{rust_wrappers, rust_verdict} on examples of the
+        # same files.
+        "test/self_host_doctest_verdict": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+            "src/doctest.rs",
+            "src/doctest_extract.rs",
+            "tests/doctest_cli.rs",
+        ]),
         # Self-hosting SH4 lane 17 (#1291): @vesper/backend-checks against
         # native_verifiers on the verifier fixtures and the corpus. Anchored
         # globs; @vesper/resonance comes from its crate's package.
@@ -1274,6 +1286,7 @@ vesper_crate(
         "test/self_host_doctest_guard": "long",
         # The doctest generate differential (#1337) runs 39k snippets twice.
         "test/self_host_doctest_generate": "long",
+        "test/self_host_doctest_verdict": "long",
         # The backend-checks differential emits every corpus program 4 times.
         "test/self_host_backend_checks": "long",
         # The optimizer policy (#1279) optimizes every corpus world three times.
