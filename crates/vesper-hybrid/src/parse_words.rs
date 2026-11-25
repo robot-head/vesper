@@ -349,6 +349,11 @@ impl<'a> Ast<'a> {
             },
             4 => Type::Row(self.effects(r[1])),
             5 => Type::Infer,
+            // Never parsed; a checker rewrite's (tests/common/ast_words.rs).
+            6 => match self.lit(r[1]) {
+                Literal::Int(n) => Type::IntLiteral(n),
+                other => panic!("vesper-hybrid: integer literal type {other:?}"),
+            },
             other => panic!("vesper-hybrid: type kind {other}"),
         }
     }

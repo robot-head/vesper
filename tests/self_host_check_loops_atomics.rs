@@ -1630,3 +1630,177 @@ fn loops_atomics_speed() {
         },
     );
 }
+
+/// ABBA timing of the stack bound alone (`CHECK_HARNESS_SPEED=1`; ignored
+/// by default): Rust's report against the text entry, the hybrid's word
+/// entry (also with the flip gate's 95% interval), and the hybrid's whole
+/// path (encode in Rust, Vesper, decode in Rust).
+#[test]
+#[ignore]
+fn stack_bound_speed() {
+    if !speed() {
+        return;
+    }
+    let cases = stack_cases();
+    let rust = &mut || {
+        time(|| {
+            for (g, p) in &cases {
+                std::hint::black_box(vesper::stack_bound::rust_stack_bound_report(g, p).ok());
+            }
+        })
+    };
+    let inputs: Vec<Vec<u8>> = cases.iter().map(|(g, p)| stack_input(g, p)).collect();
+    let f = stack_entry();
+    abba("stack bound (text entry)", rust, &mut || {
+        time(|| {
+            for i in &inputs {
+                std::hint::black_box(f.words(i));
+            }
+        })
+    });
+    let inputs: Vec<Vec<u8>> = cases
+        .iter()
+        .map(|(g, p)| stack_words::stack_input(g, p))
+        .collect();
+    let f = stack_words_entry();
+    abba("stack bound (word entry)", rust, &mut || {
+        time(|| {
+            for i in &inputs {
+                std::hint::black_box(f.words(i));
+            }
+        })
+    });
+    abba_ci("stack bound (word entry)", 20, rust, &mut || {
+        time(|| {
+            for i in &inputs {
+                std::hint::black_box(f.words(i));
+            }
+        })
+    });
+    abba_ci("stack bound (hybrid path)", 20, rust, &mut || {
+        time(|| {
+            for (g, p) in &cases {
+                let words = f.words(&stack_words::stack_input(g, p));
+                std::hint::black_box(stack_words::decode_stack_report(g.origin, &words).ok());
+            }
+        })
+    });
+}
+
+/// ABBA timing of the atomics task alone, with the flip gate's 95%
+/// interval (`CHECK_HARNESS_SPEED=1`; ignored by default). Vesper times
+/// include decoding the input, not encoding it.
+#[test]
+#[ignore]
+fn atomics_speed() {
+    if !speed() {
+        return;
+    }
+    let corpus = corpus();
+    let programs: Vec<Option<vesper::ir::Program>> =
+        corpus.iter().map(|c| lower(&c.world)).collect();
+    let inputs: Vec<Vec<u8>> = corpus
+        .iter()
+        .zip(&programs)
+        .map(|(c, p)| {
+            encode(&c.world, |e, t| {
+                t.push(u64::from(c.world.atomic_prelude));
+                t.push(u64::from(c.world.workers_prelude));
+                world_functions(e, t, &c.world);
+                module_items(e, t, &c.module);
+                ir_section(e, t, p.as_ref());
+            })
+        })
+        .collect();
+    if let Some(path) = std::env::var_os("ATOMICS_DUMP") {
+        let mut out = vec![];
+        for i in &inputs {
+            out.extend((i.len() as u64).to_le_bytes());
+            out.extend(i);
+        }
+        std::fs::write(path, out).unwrap();
+    }
+    let f = atomics_entry();
+    abba_ci(
+        "atomics",
+        10,
+        &mut || {
+            time(|| {
+                for (c, p) in corpus.iter().zip(&programs) {
+                    std::hint::black_box(vesper::atomics::needs_prelude(&c.module));
+                    std::hint::black_box(vesper::atomics::needs_workers(&c.module));
+                    std::hint::black_box(vesper::atomics::check_world(&c.world));
+                    if let Some(p) = p {
+                        std::hint::black_box(vesper::atomics::check_program(&c.world, p));
+                    }
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for i in &inputs {
+                    std::hint::black_box(f.words(i));
+                }
+            })
+        },
+    );
+}
+
+/// A corrupt or truncated result stream decodes to an error or garbage,
+/// never a panic.
+#[test]
+fn stack_words_decode_truncated_streams() {
+    for words in [
+        &[][..],
+        &[1],
+        &[1, 100],
+        &[0],
+        &[0, 1],
+        &[0, 1, 9],
+        &[0, 0, 1, 3],
+    ] {
+        let _ = stack_words::decode_stack_report(GraphOrigin::Cranelift, words);
+    }
+}
+
+/// Graphs far larger than the generated ones: a 3,000-function call ring
+/// (one SCC, sorted beyond the insertion-sort size) and a 3,000-deep chain,
+/// on the hybrid's word path.
+#[test]
+fn stack_bound_words_match_rust_on_large_graphs() {
+    let n = 3000u32;
+    let functions: Vec<StackFn> = (0..n)
+        .map(|i| StackFn {
+            id: i,
+            name: format!("f{i}"),
+            frame_bytes: 16 + i % 7,
+        })
+        .collect();
+    let policy = StackBoundPolicy {
+        roots: vec![vesper::stack_bound::StackBudget {
+            function: "f0".into(),
+            budget_bytes: 1 << 20,
+        }],
+        ..Default::default()
+    };
+    for ring in [true, false] {
+        let mut calls: Vec<(u32, u32)> = (0..n - 1).map(|i| (i, i + 1)).collect();
+        if ring {
+            calls.push((n - 1, 0));
+        }
+        let g = StackGraph {
+            origin: GraphOrigin::Cranelift,
+            functions: functions.clone(),
+            calls,
+            indirect: vec![],
+            external: vec![],
+        };
+        let rust = vesper::stack_bound::rust_stack_bound_report(&g, &policy);
+        let words = stack_words_entry().words(&stack_words::stack_input(&g, &policy));
+        assert_eq!(
+            stack_words::decode_stack_report(g.origin, &words),
+            rust,
+            "ring {ring}"
+        );
+    }
+}

@@ -22,6 +22,10 @@ mod doctest_extract_words;
 // package's tests/self_host_test_mutants.rs.
 #[path = "../../../../tests/common/test_mutants_words.rs"]
 mod test_mutants_words;
+// The doctest source guard words (SH5 lane 14 part 5), shared with the
+// root package's tests/self_host_doctest_guard.rs.
+#[path = "../../../../tests/common/doctest_guard_words.rs"]
+mod doctest_guard_words;
 
 use super::{Registry, Swap, must, on, open};
 
@@ -75,6 +79,17 @@ const VESPER_TEST_MUTANTS: vesper::test_mutants::TestMutantsTable =
         },
     };
 
+/// `vesper::doctest_guard::DocTestGuardTable` from `modules/test_runner`:
+/// the doctest source profile of `@vesper/test-runner`, which parses the
+/// source again with `@vesper/ast`.
+const VESPER_DOCTEST_GUARD: vesper::doctest_guard::DocTestGuardTable =
+    vesper::doctest_guard::DocTestGuardTable {
+        guard: |source, _, limits| {
+            let input = doctest_guard_words::guard_input(source, limits);
+            doctest_guard_words::decode_guard(&test_runner_binding::doctest_guard_words(&input))
+        },
+    };
+
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[
     open("test_discovery", "no flip-gate configuration"),
@@ -83,6 +98,10 @@ pub(super) const SWAPS: &[Swap] = &[
         "0 diffs, 1.12x; no flip-gate configuration",
     ),
     open("test_mutants", "0 diffs, 0.48x; no flip-gate configuration"),
+    open(
+        "doctest_guard",
+        "0 diffs, 0.39x; no flip-gate configuration",
+    ),
 ];
 
 pub(super) fn register(_r: &mut Registry) {
@@ -99,6 +118,11 @@ pub(super) fn register(_r: &mut Registry) {
     if on("test_mutants") {
         must(vesper::test_mutants::install_test_mutants(
             VESPER_TEST_MUTANTS,
+        ));
+    }
+    if on("doctest_guard") {
+        must(vesper::doctest_guard::install_doctest_guard(
+            VESPER_DOCTEST_GUARD,
         ));
     }
 }

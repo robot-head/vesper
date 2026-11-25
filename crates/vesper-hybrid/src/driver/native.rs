@@ -6,6 +6,10 @@
 
 use super::*;
 
+/// `EmitIr`'s flag bit: run the IR optimizer (`emit_optimize` in
+/// modules/driver/src/lib.ves).
+const EMIT_OPTIMIZE: u8 = 1;
+
 impl Session {
     pub(super) fn native_step(&mut self, step: Step, arg: &[u8]) -> Result<i64, String> {
         let o = &self.o;
@@ -31,12 +35,15 @@ impl Session {
             Step::Run => {
                 let world = &self.checked()?.world;
                 let entry = o.entry();
-                let f = world.functions.get(entry).ok_or("missing entry function")?;
-                if !f.params.is_empty() {
-                    return Err("entry function must take no arguments".into());
-                }
-                if !f.effects.instances.is_empty() || f.effects.tail.is_some() {
-                    return Err("entry must handle all effects".into());
+                // `entry`: the entry's shape, which the Vesper driver checks
+                // (`run_entry_*` in modules/driver/src/lib.ves).
+                if arg == b"entry" {
+                    return Ok(match world.functions.get(entry) {
+                        None => 1,
+                        Some(f) if !f.params.is_empty() => 2,
+                        Some(f) if !f.effects.instances.is_empty() || f.effects.tail.is_some() => 3,
+                        Some(_) => 0,
+                    });
                 }
                 let mut runtime = Runtime::new(world);
                 runtime.fuel = o.fuel;
@@ -57,42 +64,56 @@ impl Session {
                 Ok(0)
             }
             Step::WindowsLink => {
-                let object = PathBuf::from(utf8(arg)?);
-                let path = o.output().unwrap_or_else(|| PathBuf::from("a.out"));
-                let linker = o.linker();
-                let explicit = (linker != "cc").then(|| PathBuf::from(linker));
-                let path = native::windows::link_executable(&object, &path, explicit.as_deref())?;
+                // `<object>\0<executable>\0<linker>`: the driver chose the
+                // executable and the linker (`=<path>`, or empty to find the
+                // MSVC linker).
+                let mut parts = utf8(arg)?.split('\0');
+                let (Some(object), Some(path), Some(linker), None) =
+                    (parts.next(), parts.next(), parts.next(), parts.next())
+                else {
+                    return Err("driver: bad link request".into());
+                };
+                let explicit = linker.strip_prefix('=').map(Path::new);
+                let path =
+                    native::windows::link_executable(Path::new(object), Path::new(path), explicit)?;
                 self.text = path.display().to_string().into_bytes();
                 Ok(0)
             }
             Step::EmitIr => {
+                // The flag byte: optimize, as the driver decided.
+                let (&flag, out) = arg.split_first().ok_or("driver: bad emit request")?;
                 let checked = self.checked()?;
                 let mut program = ir::lower(checked);
-                if o.optimize {
-                    vesper::ir_opt_policy::optimize(&checked.world, &mut program)?;
+                if flag & EMIT_OPTIMIZE != 0 {
+                    // The native path's optimizer, which the hybrid swaps
+                    // for `@vesper/ir-opt` (`modules/ir_opt`).
+                    vesper::ir_swap::optimize(&checked.world, &mut program)?;
                 }
-                crate::write(
-                    o.output(),
-                    serde_json::to_string_pretty(&program)
-                        .map_err(|e| e.to_string())?
-                        .as_bytes(),
-                )?;
-                Ok(0)
+                let text = serde_json::to_string_pretty(&program).map_err(|e| e.to_string())?;
+                self.emitted(out, text.into_bytes())
             }
             Step::EmitLean => {
-                crate::write(
-                    o.output(),
-                    lean::extract(&self.checked()?.world)?.as_bytes(),
-                )?;
-                Ok(0)
+                let text = lean::extract(&self.checked()?.world)?;
+                self.emitted(arg, text.into_bytes())
             }
             Step::EmitClif => {
                 let (_, clif) = self.native_code()?;
-                crate::write(o.output(), clif.as_bytes())?;
-                Ok(0)
+                self.emitted(arg, clif.into_bytes())
             }
             _ => Err(format!("driver: step {} is not a native step", step as u32)),
         }
+    }
+
+    /// An emitted text: printed to stdout for `stdout` (`emit_stdout` in
+    /// the driver, as `cli()`'s `write(None, ..)` does, failing on a write
+    /// error), else kept as the session's text for the driver to write.
+    fn emitted(&mut self, to: &[u8], bytes: Vec<u8>) -> Result<i64, String> {
+        match to {
+            b"stdout" => crate::write(None, &bytes)?,
+            b"" => self.text = bytes,
+            _ => return Err("driver: bad emit request".into()),
+        }
+        Ok(0)
     }
 
     fn native_code(&self) -> Result<(Vec<u8>, String), String> {

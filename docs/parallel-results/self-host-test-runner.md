@@ -231,9 +231,44 @@ the same key replaces the digest and callees; callers gather every edge).
   calls the graph on the source; until then Rust stays, and the Rust is
   deleted with src/ at retirement.
 
-## Left after part 4
+## Part 5: the doctest source guard
 
-- doctest `generate` and `nominal_expansion`.
+`packages/vesper-test-runner/src/guard.ves` ports the fail-closed source
+profile that `vesper test --doc` applies to a doctest module after it
+parses without diagnostics and before the checker runs: the item limit,
+the AST volume (16,384 nodes) and depth (64) limits, the constructs whose
+checking grows inferred composites (generic functions, ADTs, effects and
+impls, traits and models, nonempty tuples and tuple types and patterns,
+generic type applications and calls, builtin generic constructors,
+closures, handlers, inferred signatures), and `nominal_expansion` (the
+global unfolding budget, depth 48, recursive nominal types). The walk keeps
+Rust's explicit last-first stack, so the first error found is the same.
+The Rust moved unchanged from src/doctest.rs into src/doctest_guard.rs,
+now a swap point (`DocTestGuardTable`, given the source and the parsed
+module); `DocTestLimits::validate` stays in `checked` before the swap.
+Entries `doctest_guard_words` and `doctest_guard_str`; words in
+tests/common/doctest_guard_words.rs.
+
+- **Differential** (tests/self_host_doctest_guard.rs): every `.ves` file
+  and each of its top-level functions on its own (so an early generic
+  function does not hide the rest of a file), the inline sources of
+  src/doctest.rs and tests/doctest_cli.rs, 35 rows and 24 generated rows
+  (depth, volume, nominal width and depth at and around each limit), and 3
+  mutants per whole source, keeping only sources that parse without
+  diagnostics, under four limit sets (256/32768, the defaults 128/8192,
+  4/6 and 1/1). The test requires every one of the 20 reachable errors to
+  occur.
+- **Numbers:** 0 diffs over 14,728 sources (58,912 runs, about 20,700
+  passing). Unoptimized build 0 diffs on every 13th source. ABBA best of
+  six under the default limits, Rust parse and guard against Vesper
+  lowering and guard: Rust 5.77 s, Vesper 2.22 s, **0.39x**.
+- **Swapped in the hybrid** (`doctest_guard`, registered in swaps.rs). The
+  Vesper side parses the source again; the Rust side reuses the module
+  `checked` already parsed. That parse is inside the measured 0.39x.
+
+## Left after part 5
+
+- doctest `generate`.
 - Expect-error matching, verdict keys, reports.
 - A hybrid end-to-end test of `vesper test`.
 - Execution (anvil_jit, the evaluator, anvil_sim) stays Rust until the
