@@ -224,6 +224,9 @@ struct SwapFile {
 // order (build.rs `swap_registry`).
 include!(concat!(env!("OUT_DIR"), "/swap_registry.rs"));
 
+/// The Vesper driver's own parse (#1893) reads back through the parse swap.
+pub(crate) use parse::{driver_parse, driver_parse_begin};
+
 /// Stops the process when a slot was already taken: nothing runs before
 /// the constructor, so the slots are empty.
 fn must<T, E>(installed: Result<T, E>) {

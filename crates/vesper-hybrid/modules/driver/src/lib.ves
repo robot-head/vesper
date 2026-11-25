@@ -24,6 +24,9 @@
 // |     fn hd_free(sink s: Session) -> ForeignVal[Unit];
 // |     fn hd_step(inout s: Session, step: u32, nocapture in arg: CSlice[u8]) -> ForeignVal[i64];
 // |     fn hd_text(in s: Session, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
+// |     fn hd_parsed(inout s: Session, nocapture in words: CSlice[u64]) -> ForeignVal[i64];
+// |     fn hd_front_begin() -> ForeignVal[u32];
+// |     fn hd_write(inout s: Session, nocapture in text: CSlice[u8]) -> ForeignVal[i64];
 // | }
 use @vesper/driver::{
     Args,
@@ -87,6 +90,11 @@ use @vesper-std/fmt::{
 // SH5 lane 13 (#1336): the layers of the commands off the compile path.
 use @vesper/driver-commands::{
     run as run_command
+};
+// hd_step group 2 (#1893): the front-end passes in Vesper.
+use self::front::{
+    parse_clean,
+    cst_text
 };
 
 // `main_code`'s result when the Rust CLI should run the command instead.
@@ -361,11 +369,15 @@ pub fn main_code()
 
 // A package is assembled by the package loader. For a standalone file, pass
 // the source bytes to the Rust session that still holds the parse and world.
-fn load_input(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+// `source` receives a standalone file's bytes; `package` is set for a
+// package.
+fn load_input(inout s: Session, in o: Options, inout source: ChunkSeq[u8], inout package: bool)
+    -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
     let r = step(inout s, step_is_package());
     if is_failure(r) {
         return pass_failed(in s, r);
     }
+    package = r == 1;
     let r = if r == 1 {
         let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
         package_checks(in o, inout err);
@@ -375,7 +387,6 @@ fn load_input(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[Hybri
         step(inout s, step_load())
     } else {
         let input = value(in o, slot_input());
-        let mut source: ChunkSeq[u8] = ChunkSeq::new[u8]();
         let failed = handle Fail[IoError] in {
             source = read_path(in input.as_slice());
             0
@@ -405,18 +416,44 @@ fn load_input(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[Hybri
 fn drive(inout s: Session, in o: Options)
     -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver]] {
     let c = o.command;
-    let loaded = load_input(inout s, in o);
+    let mut source: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut package = false;
+    let loaded = load_input(inout s, in o, inout source, inout package);
     if loaded != 0 {
         return loaded;
     }
     if c == cmd_build() && is(in o, slot_target(), in "bpf") {
         return pass(inout s, step_ebpf_build());
     }
-    let r = step(inout s, step_parse());
+    let emit_cst_format = c == cmd_emit() && is(in o, slot_format(), in "cst");
+    // The driver's parse is the parse swap's: with that swap off
+    // (`VESPER_HYBRID_SWAPS`), the session parses.
+    let front = !package && HybridDriver::hd_front_begin() == 1;
+    if emit_cst_format && front {
+        match cst_text(in source.as_slice()) {
+            Option::Some(text) => return write_output(inout s, in o, in text.as_slice()),
+            Option::None => (),
+        }
+    }
+    let mut r = declined();
+    if front && !o.include_tests && !emit_cst_format {
+        match parse_clean(in source.as_slice()) {
+            Option::Some(words) => {
+                r = HybridDriver::hd_parsed(inout s, in words.as_slice());
+                if is_failure(r) {
+                    return pass_failed(in s, r);
+                }
+            },
+            Option::None => (),
+        }
+    }
+    if r == declined() {
+        r = step(inout s, step_parse());
+    }
     if is_failure(r) {
         return pass_failed(in s, r);
     }
-    if c == cmd_emit() && is(in o, slot_format(), in "cst") {
+    if emit_cst_format {
         return pass(inout s, step_emit_cst());
     }
     if r > 0 {
@@ -481,6 +518,38 @@ fn drive(inout s: Session, in o: Options)
         return build(inout s, in o);
     }
     emit(inout s, in o)
+}
+
+// A front-end pass the driver ran itself (`front.ves`) left the session's
+// pass to run.
+fn declined() -> i64 {
+    -3
+}
+
+// `crate::write` of `cli()`: the command's output to `-o`'s path, or to
+// stdout; 0, or the exit code of the write error.
+fn write_output(inout s: Session, in o: Options, in bytes: Slice[u8])
+    -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    if !has(in o, slot_output()) {
+        let r = HybridDriver::hd_write(inout s, in bytes);
+        if is_failure(r) {
+            return pass_failed(in s, r);
+        }
+        return 0;
+    }
+    let path = value(in o, slot_output());
+    let failed = handle Fail[IoError] in {
+        write_path(in path.as_slice(), in bytes);
+        0
+    } with {
+        return v => v,
+        raise(e, _) => error_word(e),
+    };
+    if failed == 0 {
+        return 0;
+    }
+    let m = io_error_text(inout s, wrapping_sub(failed, 2));
+    error(in m.as_slice())
 }
 
 // Run a pass that ends the command: its exit code.
