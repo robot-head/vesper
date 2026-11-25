@@ -321,12 +321,15 @@ impl L {
         out
     }
 
-    // A host capability of the plan (`plan.host`): the WASI libraries.
+    // A host capability of the plan (`plan.host`): the WASI libraries
+    // (StdProcess imports nothing).
     pub fn host_effect(in self, name: u32) -> bool {
         let code: u8 = if name == self.cx.s.ffi_env {
             3
         } else if name == self.cx.s.ffi_fs {
             4
+        } else if name == self.cx.s.ffi_proc {
+            5
         } else {
             return false;
         };

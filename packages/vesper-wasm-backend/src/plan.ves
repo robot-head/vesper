@@ -149,6 +149,7 @@ pub copy struct Syms {
     // (`ffi_lowering::effect_name`), lowered over WASI (src/host.ves)
     ffi_env: u32,
     ffi_fs: u32,
+    ffi_proc: u32,
     eq: u32,
     empty: u32,
     chunkseq: u32,
@@ -184,6 +185,7 @@ pub fn syms_new(inout n: Names) -> Syms {
         trace: n.intern(in "Trace".as_bytes()),
         ffi_env: n.intern(in "Ffi$StdEnv".as_bytes()),
         ffi_fs: n.intern(in "Ffi$StdFs".as_bytes()),
+        ffi_proc: n.intern(in "Ffi$StdProcess".as_bytes()),
         eq: n.intern(in "=".as_bytes()),
         empty: n.intern(in "".as_bytes()),
         chunkseq: n.intern(in "ChunkSeq".as_bytes()),
@@ -770,7 +772,8 @@ pub struct Plan {
     keys: ChunkSeq[u32],
     max_arity: u64,
     // host capabilities, sorted: 0 Stdout, 1 Clock, 2 Trace, 3 the
-    // StdEnv library, 4 the StdFs library (`host::HOST_ENV`, `HOST_FS`)
+    // StdEnv library, 4 the StdFs library, 5 the StdProcess library
+    // (`host::HOST_ENV`, `HOST_FS`, `HOST_PROC`)
     host: ChunkSeq[u8],
     handlers: ChunkSeq[Handler],
     clauses: ChunkSeq[HClause],
@@ -966,11 +969,15 @@ fn capabilities(inout cx: Cx, inout out: ChunkSeq[u8], entry: u32) eff [Fail[WEr
             continue;
         }
         // The standard I/O libraries become WASI calls (src/host.ves).
-        if e.name == cx.s.ffi_env || e.name == cx.s.ffi_fs {
+        // StdProcess has no functions on WASI (@vesper-std/process's
+        // src-wasip2 refuses every start itself), so it imports nothing.
+        if e.name == cx.s.ffi_env || e.name == cx.s.ffi_fs || e.name == cx.s.ffi_proc {
             let code: u8 = if e.name == cx.s.ffi_env {
                 3
-            } else {
+            } else if e.name == cx.s.ffi_fs {
                 4
+            } else {
+                5
             };
             let mut seen = false;
             for k in 0..out.len() {

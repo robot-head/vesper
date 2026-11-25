@@ -962,7 +962,7 @@ else:
         })
         self.assertEqual(json.loads(result.stdout), json.loads((output / "platform-plan.json").read_text()))
         self.assertEqual(json.loads(result.stdout)["sha"], head)
-        self.assertEqual(github.read_text(), f'earlier=preserved\nprofile=pr\ngroups=["frontend"]\nsha={head}\n')
+        self.assertEqual(github.read_text(), f'earlier=preserved\nprofile=pr\ngroups=["frontend"]\nsha={head}\nnative=all\n')
         self.aspect("ci", "plan-platform-workflow", env={"GITHUB_OUTPUT": "", "RUNNER_TEMP": str(output)}, status=2)
 
         git("switch", "--orphan", "unrelated")
