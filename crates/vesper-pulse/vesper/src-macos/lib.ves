@@ -2307,6 +2307,13 @@ pub fn kqueue_driver_submit(
         d.ready.push(c);
         return Result::Ok(id);
     }
+    // kqueue keys a filter by (descriptor, filter): a second `EV_ADD` would
+    // take over the first request's registration and strand it. Rust's
+    // requests own distinct descriptors; raw ones can repeat, so refuse.
+    if io_waiting_on(in d, fd, op) {
+        d.arena.truncate(start);
+        return Result::Err(PulseSys::EEXIST_ERR);
+    }
     let armed = io_arm(in d, fd, op, id.bits);
     if armed.status == 2 {
         d.arena.truncate(start);
@@ -2343,6 +2350,17 @@ pub fn kqueue_driver_submit(
 }
 
 // The index of waiting request `id`, or the waiting count.
+// Whether a waiting request already holds the `op` filter of `fd`.
+fn io_waiting_on(in d: KqueueDriver, fd: i32, op: Operation) -> bool {
+    for i in 0..d.waiting.len() {
+        let r = io_request_at(in d.waiting, i);
+        if r.fd == fd && is_read(r.op) == is_read(op) {
+            return true;
+        }
+    }
+    false
+}
+
 fn io_waiting_index(in d: KqueueDriver, id: u64) -> u64 {
     let n = d.waiting.len();
     for i in 0..n {

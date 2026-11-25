@@ -18,6 +18,7 @@ sys library PulseSys (
     // The readiness driver: errno values, the error flag, `fcntl`
     // commands, `open` flags and `stat` mode bits.
     const ENOENT_ERR: u32 = 2;
+    const EEXIST_ERR: u32 = 17;
     const EBADF_ERR: u32 = 9;
     const ESPIPE_ERR: u32 = 29;
     const EAGAIN_ERR: u32 = 35;
