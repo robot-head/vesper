@@ -119,10 +119,11 @@ finished (#1321). To keep pull requests within the limit:
 - A push to main cancels the older main run of the same workflow, except
   Platforms and `Hybrid compiler`: pull requests skip the port shards and the
   hybrid job, so their main runs must finish. They run one at a time on main,
-  and a burst of merges waits as a single newest run (#1479). A pull request
-  that wants the port shards before merging can dispatch Platforms on its
-  branch with profile `pr` and `pull_request` left empty; that runs every
-  port shard. A newer such dispatch, or the automatic one for a newer push,
+  and a burst of merges waits as a single newest run (#1479). A maintainer
+  who wants a pull request's port shards before it merges can dispatch
+  Platforms on its branch with profile `pr` and `pull_request` left empty;
+  that runs every port shard. Agents never start Platforms by hand
+  (AGENTS.md). A newer such dispatch, or the automatic one for a newer push,
   cancels the older run on that branch, so dispatching again does not queue
   a second macOS job. On 2026-11-25 twelve of the fifteen Platforms runs
   queued for a macOS runner were hand dispatches, three of them for one
