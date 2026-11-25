@@ -68,9 +68,29 @@ fn model(root: &Path, cc: &str) -> String {
             )
             .unwrap();
         }
-        Err(e) => writeln!(out, "cc error {}", vesper_std_host::IoKind::of(&e) as u64).unwrap(),
+        Err(e) => writeln!(out, "cc error {}", io_kind(&e)).unwrap(),
     }
     out
+}
+
+/// `IoError.kind` of `e`, as `@vesper-std/fs` numbers the kinds.
+fn io_kind(e: &std::io::Error) -> u64 {
+    use std::io::ErrorKind as K;
+    match e.kind() {
+        K::NotFound => 1,
+        K::PermissionDenied => 2,
+        K::AlreadyExists => 3,
+        K::NotADirectory => 4,
+        K::IsADirectory => 5,
+        K::DirectoryNotEmpty => 6,
+        K::InvalidInput | K::InvalidData | K::InvalidFilename => 7,
+        K::Interrupted => 8,
+        K::UnexpectedEof => 9,
+        K::WriteZero => 10,
+        K::Unsupported => 11,
+        K::OutOfMemory => 12,
+        _ => 13,
+    }
 }
 
 fn repo() -> PathBuf {
@@ -95,9 +115,7 @@ fn driver_walks_reads_spawns_and_writes_atomically() {
             std::env::set_var("VESPER_STD_DRIVER_OUT", &out);
             std::env::set_var("VESPER_STD_DRIVER_CC", "cc");
         }
-        let before = vesper_std_host::live_handles();
         let files = vesper_std_driver::driver::run();
-        assert_eq!(vesper_std_host::live_handles(), before, "{package}");
         assert_eq!(
             vesper_std_driver::driver::live_allocations(),
             0,

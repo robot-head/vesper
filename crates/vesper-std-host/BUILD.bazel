@@ -1,3 +1,0 @@
-load("//tools/bazel:defs.bzl", "vesper_crate")
-
-vesper_crate()

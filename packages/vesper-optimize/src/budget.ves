@@ -62,7 +62,7 @@ pub fn limit(value: u64, max: u64) -> u8 {
 // overflows nor builds an `Option`: when `work <= max_work`, the sum fits
 // exactly when `amount <= max_work - work`, and when `work > max_work` every
 // charge fails.
-pub fn work(inout b: Budget, amount: u64) -> u8 {
+pub fn work(inout b.{work, max_work}: Budget, amount: u64) -> u8 {
     let w = b.work;
     let m = b.max_work;
     if w > m || amount > wrapping_sub(m, w) {
@@ -75,7 +75,7 @@ pub fn work(inout b: Budget, amount: u64) -> u8 {
 // `count` calls of `work(b, 1)` that stop at the first refusal: the counter
 // ends where those calls leave it (at `max_work` when one refuses after
 // others passed, unchanged when the first refuses).
-pub fn work_units(inout b: Budget, count: u64) -> u8 {
+pub fn work_units(inout b.{work, max_work}: Budget, count: u64) -> u8 {
     if count == 0 {
         return 0;
     }
@@ -93,7 +93,7 @@ pub fn work_units(inout b: Budget, count: u64) -> u8 {
 }
 
 // `WitnessBudget::metadata`: the bytes count as work too.
-pub fn metadata(inout b: Budget, amount: u64) -> u8 {
+pub fn metadata(inout b.{work, max_work, metadata, max_metadata_bytes}: Budget, amount: u64) -> u8 {
     let x = b.metadata;
     let m = b.max_metadata_bytes;
     if x > m || amount > wrapping_sub(m, x) {
@@ -108,7 +108,7 @@ pub fn metadata(inout b: Budget, amount: u64) -> u8 {
 }
 
 // `WitnessBudget::names`: the bytes count as work too.
-pub fn names(inout b: Budget, amount: u64) -> u8 {
+pub fn names(inout b.{work, max_work, names, max_name_bytes}: Budget, amount: u64) -> u8 {
     let x = b.names;
     let m = b.max_name_bytes;
     if x > m || amount > wrapping_sub(m, x) {
@@ -126,7 +126,13 @@ pub fn names(inout b: Budget, amount: u64) -> u8 {
 // elements of `size` bytes and capacity `cap`: a growth asks for the larger
 // of the requirement, twice the capacity and one element, and charges its
 // bytes before it happens. `cap` becomes the new capacity.
-pub fn reserve(inout b: Budget, len: u64, inout cap: u64, additional: u64, size: u64) -> u8 {
+pub fn reserve(
+    inout b.{max_metadata_bytes, max_work, metadata, work}: Budget,
+    len: u64,
+    inout cap: u64,
+    additional: u64,
+    size: u64
+) -> u8 {
     // The common case, room left, is small enough to inline.
     if additional <= cap && len <= wrapping_sub(cap, additional) {
         0
@@ -136,7 +142,13 @@ pub fn reserve(inout b: Budget, len: u64, inout cap: u64, additional: u64, size:
 }
 
 // `reserve` when the vector grows.
-fn grow(inout b: Budget, len: u64, inout cap: u64, additional: u64, size: u64) -> u8 {
+fn grow(
+    inout b.{max_metadata_bytes, max_work, metadata, work}: Budget,
+    len: u64,
+    inout cap: u64,
+    additional: u64,
+    size: u64
+) -> u8 {
     // Below these bounds no step overflows (the bytes stay under 2^50), so
     // the plain operations give the checked ones' values.
     if len >= SMALL || additional >= SMALL || cap >= SMALL || size >= SMALL_SIZE {
@@ -166,7 +178,13 @@ const SMALL: u64 = 4294967296;
 const SMALL_SIZE: u64 = 65536;
 
 // `grow` with every step checked.
-fn grow_checked(inout b: Budget, len: u64, inout cap: u64, additional: u64, size: u64) -> u8 {
+fn grow_checked(
+    inout b.{work, max_work, metadata, max_metadata_bytes}: Budget,
+    len: u64,
+    inout cap: u64,
+    additional: u64,
+    size: u64
+) -> u8 {
     let required = match checked_add_u64(len, additional) {
         Option::Some(v) => v,
         Option::None => return E_LIMIT,

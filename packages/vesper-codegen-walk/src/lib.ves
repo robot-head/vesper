@@ -14,7 +14,9 @@
 //
 // `native_walk_decisions` is the harness dump entry (signature + plan
 // lines); `native_walk_register_locals` answers one `ir_graph_at` graph's
-// `register_locals` plan for the `codegen_swap` hook.
+// `register_locals` plan for the `codegen_swap` hook. Part 3a (#1876) adds
+// each instance's entry-block plan (frame.ves, `native::frame_plan`), dumped
+// by `native_walk_frames`.
 
 use @vesper/check-data::pack_text;
 use @vesper/check-data::util::{
@@ -63,6 +65,9 @@ use @vesper/place-ir::{
     InstRow,
     Program,
     read_program
+};
+use self::frame::{
+    frames_text
 };
 use @vesper/place-ir::codes::{
     Op,
@@ -953,4 +958,9 @@ pub fn native_walk_register_locals_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
 
 pub fn native_walk_register_locals(in input: Str) -> ChunkSeq[u64] {
     native_walk_register_locals_bytes(in input.as_bytes())
+}
+
+// Part 3a: per task, each instance's entry-block plan (frame.ves).
+pub fn native_walk_frames(in input: Str) -> ChunkSeq[u64] {
+    frames_text(in input)
 }
