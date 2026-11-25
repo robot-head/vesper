@@ -5642,7 +5642,6 @@ dependencies = [
 name = "vesper-aegis"
 version = "0.1.0"
 dependencies = [
- "chacha20poly1305",
  "coset",
  "rcgen",
  "ring",

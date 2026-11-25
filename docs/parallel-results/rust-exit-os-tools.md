@@ -477,6 +477,46 @@ caller. They reach the bar only when their callers are in Vesper too: the
 devices (`devices/{block,net,vsock,vmgenid}.rs`) and the transport's
 register file as whole units, not their helpers.
 
+## Part 2g: the whole vsock device flips to Vesper
+
+Part 2f measured the vsock header codec at 27x: one crossing per 44-byte
+header. Ported as a whole device, the same crossing pays for a whole
+packet's worth of work, and the device passes the bar.
+
+`vesper/src/vsock.ves` now holds the device state as one Vesper value
+(`VsockState`):
+
+- the listeners;
+- the connection table (sorted keys over stable slots);
+- credit and the seqpacket message counts;
+- the connection state machine;
+- the outbox (headers plus one payload byte FIFO);
+- the event queue and the stats.
+
+`src/devices/vsock.rs` keeps the public API, the virtio queue loops, and the
+bytes each connection received until the host takes them, stored by slot.
+
+Each event costs one crossing:
+
+- a guest transmit packet: `vsock_guest_packet` validates it, runs the state
+  machine and says what to do with its payload;
+- a receive buffer: `vsock_rx_fill` writes the header and as much payload as
+  fits;
+- a host socket call: one call each.
+
+The Rust device moved to `src/devices/vsock/reference.rs` and exists only
+under `#[cfg(test)]`.
+
+| Check | Result |
+|---|---|
+| Differential (`port_reference_tests::vsock`): 300 seeds x 400 events of guest packets (valid, malformed, spoofed, oversized, wrong type), host connect/send/recv/message/shutdown/listen calls, receive steps at random buffer sizes, transport resets and device resets | 0 diffs in results, received bytes, stats, connection tables and outbox length |
+| Device tests (`tests/devices.rs`, `device_features.rs`, `vsock_port.rs`) on the Vesper device | pass, with and without `vesper-port` |
+| ABBA `vsock_device`: 64 stream connections, 16 rounds of 512-byte guest packets, host reads with credit updates, 1 KiB replies, receive drain | 0.94x, 95% CI [0.92, 0.96] |
+
+The header codec (`VsockHeader::encode`/`decode`) is still Rust by default.
+It is now only a host convenience: the device itself decodes and encodes in
+Vesper.
+
 ## Compiler gaps (for the coordinator)
 
 | Gap | Blocks | Owner of the fix |
@@ -494,6 +534,7 @@ register file as whole units, not their helpers.
 
 `vesper-aether` stays "c-api" (KVM ioctls and userfaultfd are its Rust
 wrappers over the OS). Its virtqueue walks are Vesper-only since part 2d,
-and hot sets, the packed capture and the seccomp evaluator since part 2f;
+hot sets, the packed capture and the seccomp evaluator since part 2f, and
+the vsock device since part 2g;
 slot plans and PVH parsing wait on G10, and the small device codecs on
 porting their callers.
