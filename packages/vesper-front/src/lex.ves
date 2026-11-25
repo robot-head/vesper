@@ -24,6 +24,7 @@ use self::kinds::{
     k_int,
     k_string,
     k_error,
+    k_backtick,
     k_eof,
     k_self_kw,
     k_state,
@@ -808,12 +809,12 @@ pub fn max_diagnostics() -> u64 {
 // byte budget. A token or diagnostic overflow ends the stream with one
 // opaque Error tail and E0003 and sets `limited`.
 pub fn lex_raw(in b: Slice[u8], inout d: Diags) -> Tokens {
-    lex_tokens(in b, inout d, false, max_tokens(), max_diagnostics())
+    lex_tokens(in b, inout d, false, false, max_tokens(), max_diagnostics())
 }
 
 // `lex_raw` with each identifier's contextual word and symbol.
 pub fn lex(in b: Slice[u8], inout d: Diags) -> Tokens {
-    lex_tokens(in b, inout d, true, max_tokens(), max_diagnostics())
+    lex_tokens(in b, inout d, true, false, max_tokens(), max_diagnostics())
 }
 
 // Hard ceilings of `LexLimits` (`HARD_SOURCE_BYTES`, `HARD_TOKENS`,
@@ -877,7 +878,26 @@ pub fn lex_with_limits(
         t.rejected = true;
         return t;
     }
-    lex_tokens(in b, inout d, true, max_tok, max_diag)
+    lex_tokens(in b, inout d, true, false, max_tok, max_diag)
+}
+
+// `lex_with_limits` in the sugar surface profile (`sugar_lex_with_limits`):
+// a lone backtick is a `Backtick` token instead of an invalid one.
+pub fn lex_sugar_with_limits(
+    in b: Slice[u8],
+    inout d: Diags,
+    max_source_bytes: u64,
+    max_tok: u64,
+    max_diag: u64
+) -> Tokens {
+    let mut m = ChunkSeq::new[u8]();
+    if lex_preflight(inout m, b.len(), max_source_bytes, max_tok, max_diag) != 0 {
+        diag_push(inout d, 3, 0, 0, in m.as_slice());
+        let mut t = tokens_new(0);
+        t.rejected = true;
+        return t;
+    }
+    lex_tokens(in b, inout d, true, true, max_tok, max_diag)
 }
 
 // Identifier kinds that get a symbol: Upper, Lower and the keywords the
@@ -888,8 +908,14 @@ fn named_kind(k: u8) -> bool {
     k < 32 && (wrapping_shr_u64(54591512, widen_u32(k)) & 1) != 0
 }
 
-fn lex_tokens(in b: Slice[u8], inout d: Diags, classify: bool, max_tok: u64, max_diag: u64)
-    -> Tokens {
+fn lex_tokens(
+    in b: Slice[u8],
+    inout d: Diags,
+    classify: bool,
+    sugar: bool,
+    max_tok: u64,
+    max_diag: u64
+) -> Tokens {
     let n = b.len();
     let mut t = tokens_new(n);
     let mut at: u64 = 0;
@@ -902,7 +928,7 @@ fn lex_tokens(in b: Slice[u8], inout d: Diags, classify: bool, max_tok: u64, max
         let w = word_at(in b, at, 8);
         let info = BYTE_INFO[w & 255];
         let class = wrapping_u8(info);
-        let (kind, end) = if class == 3 {
+        let (scanned, end) = if class == 3 {
             lower(in b, at, w)
         } else if class == 7 {
             punct(at, info, byte_of(w, 1))
@@ -910,6 +936,11 @@ fn lex_tokens(in b: Slice[u8], inout d: Diags, classify: bool, max_tok: u64, max
             (k_whitespace(), run_from(in b, at, non_space(w), space_class(), 0))
         } else {
             next_token_rest(in b, at, w, info)
+        };
+        let kind = if sugar && scanned == k_error() && (w & 255) == 96 {
+            k_backtick()
+        } else {
+            scanned
         };
         if t.kind.len() >= max_tok {
             let last = wrapping_sub(t.kind.len(), 1);

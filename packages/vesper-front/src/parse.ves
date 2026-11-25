@@ -88,6 +88,10 @@ use self::kinds::{
     k_caret,
     k_shl,
     k_shr,
+    k_amp_eq,
+    k_backtick,
+    k_dollar,
+    k_pipe_eq,
     kind_name
 };
 use self::words::{
@@ -1083,6 +1087,17 @@ fn pass_in(inout p: P, params: bool) {
     }
 }
 
+// `pass_in`, and whether it read an explicit pass mode.
+fn pass_in_explicit(inout p: P, params: bool) -> bool {
+    let k = kind(in p);
+    if k == k_in() || ((k == k_inout() || k == k_sink()) && pass_word_is_mode(in p, params)) {
+        bump(inout p);
+        true
+    } else {
+        false
+    }
+}
+
 // ---------------------------------------------------------------- items
 
 // `Parser::generics`. Pushes the symbol of each row parameter on `binds`.
@@ -1287,8 +1302,15 @@ fn skip_test_block(inout p: P) {
 
 // `Parser::declaration`: whether it produced an item.
 fn declaration(inout p: P) -> bool {
+    if p.surface && surface_declaration(inout p) {
+        return false;
+    }
     if at_word(in p, 0, w_test()) && nth(in p, 1) == k_l_brace() {
         skip_test_block(inout p);
+        return false;
+    }
+    if p.surface && at_item_phrase(in p) {
+        sugar_phrase(inout p, NodeKind::SugarItem);
         return false;
     }
     if at_word(in p, 0, w_use()) && at_word(in p, 1, w_model()) {
@@ -2237,6 +2259,10 @@ fn block_inner(inout p: P) -> Ex {
             use_model(inout p);
             continue;
         }
+        if p.surface && at_sugar_phrase(in p) {
+            sugar_phrase(inout p, NodeKind::SugarStmt);
+            continue;
+        }
         if eat(inout p, k_let()) {
             if at_word(in p, 0, w_mut()) && nth(in p, 1) != k_colon() {
                 bump(inout p);
@@ -2415,6 +2441,8 @@ fn expr_inner(inout p: P) -> Ex {
         jump_expr(inout p, true)
     } else if k == k_pipe() || k == k_or() {
         closure(inout p)
+    } else if p.surface && at_sugar_phrase(in p) {
+        sugar_phrase(inout p, NodeKind::SugarExpr)
     } else {
         binary(inout p, 0)
     };
@@ -2451,11 +2479,11 @@ fn for_expr(inout p: P) -> Ex {
     expect(inout p, k_in());
     let old = p.no_struct;
     p.no_struct = true;
-    let first = binary(inout p, 2);
+    let first = binary(inout p, 3);
     let k = kind(in p);
     let iter = if k == k_dot_dot() || k == k_dot_dot_eq() {
         bump(inout p);
-        let end = binary(inout p, 2);
+        let end = binary(inout p, 3);
         let r = ex(x_range(), widen_u64(first.start), widen_u64(end.end), hmax(first.h, end.h));
         record(inout p, r)
     } else {
@@ -2625,7 +2653,10 @@ fn handle_expr(inout p: P) -> Ex {
         pattern(inout p);
         p.binds.truncate(mark);
         expect(inout p, k_eq());
+        let outer = p.before_handler_in;
+        p.before_handler_in = p.surface;
         let s = expr(inout p);
+        p.before_handler_in = outer;
         h = s.h;
     }
     expect(inout p, k_in());
@@ -2683,12 +2714,21 @@ fn region(inout p: P) -> Ex {
     ex(x_handle(), start, last_end(in p), hmax(body.h, 1))
 }
 
+// `Parser::binary`. Levels are the Rust parser's (`sugar_ops::
+// core_operator`): twice `precedence`, which leaves 3 for the surface
+// pipeline operators.
 fn binary(inout p: P, min: u64) -> Ex {
+    binary_operand(inout p, min, false)
+}
+
+// `Parser::binary_operand`: `pipe` is set for the right operand of a
+// pipeline operator, whose call arguments may be a bare `_`.
+fn binary_operand(inout p: P, min: u64, pipe: bool) -> Ex {
     let previous = p.depth;
     if !enter(inout p) {
         return placeholder(in p);
     }
-    let e = binary_inner(inout p, min);
+    let e = binary_inner(inout p, min, pipe);
     p.depth = previous;
     record(inout p, e)
 }
@@ -2830,12 +2870,13 @@ fn precedence(k: u8) -> u64 {
     PRECEDENCE[k & 127]
 }
 
-fn binary_inner(inout p: P, min: u64) -> Ex {
+fn binary_inner(inout p: P, min: u64, pipe: bool) -> Ex {
+    let checkpoint = p.ev.len();
     let k0 = kind(in p);
     let mut lhs = if k0 == k_minus() || k0 == k_bang() || k0 == k_tilde() {
         let start = cur_start(in p);
         bump(inout p);
-        let v = binary(inout p, 12);
+        let v = binary(inout p, 24);
         let mut u = if k0 == k_minus() && v.k == x_int() {
             ex(x_int(), start, last_end(in p), 0)
         } else {
@@ -2844,10 +2885,16 @@ fn binary_inner(inout p: P, min: u64) -> Ex {
         u.pure = v.k == x_int() || v.pure;
         u
     } else {
-        postfix(inout p)
+        postfix(inout p, pipe)
     };
     loop {
-        let prec = precedence(kind(in p));
+        // A surface operator (`|>`, `|?>`, `.+` ..): its level and end.
+        let (custom, custom_end) = surface_operator(in p);
+        let prec = if custom != 0 {
+            custom
+        } else {
+            shl(precedence(kind(in p)), 1)
+        };
         if prec == 0 || prec < min {
             break;
         }
@@ -2858,14 +2905,19 @@ fn binary_inner(inout p: P, min: u64) -> Ex {
         if !enter(inout p) {
             break;
         }
-        bump(inout p);
-        let rhs = if prec == 1 {
+        if custom != 0 {
+            consume_sugar_operator(inout p, custom_end);
+        } else {
+            bump(inout p);
+        }
+        let right = custom == 0 && prec == 2;
+        let rhs = if right {
             expr(inout p)
         } else {
-            binary(inout p, inc(prec))
+            binary_operand(inout p, inc(prec), custom == 3)
         };
         let mut e = ex(
-            if prec == 1 {
+            if right {
                 x_assign()
             } else {
                 x_binary()
@@ -2874,18 +2926,30 @@ fn binary_inner(inout p: P, min: u64) -> Ex {
             widen_u64(rhs.end),
             hmax(lhs.h, rhs.h)
         );
-        e.pure = prec != 1 && lhs.pure && rhs.pure;
+        e.pure = !right && lhs.pure && rhs.pure;
+        if custom != 0 {
+            start_node_at(
+                inout p,
+                checkpoint,
+                if custom == 3 {
+                    NodeKind::PipeExpr
+                } else {
+                    NodeKind::DottedExpr
+                }
+            );
+            finish_node(inout p);
+        }
         lhs = record(inout p, e);
     }
     lhs
 }
 
-fn postfix(inout p: P) -> Ex {
+fn postfix(inout p: P, pipe: bool) -> Ex {
     let previous = p.depth;
     if !enter(inout p) {
         return placeholder(in p);
     }
-    let e = postfix_inner(inout p);
+    let e = postfix_inner(inout p, pipe);
     p.depth = previous;
     record(inout p, e)
 }
@@ -2918,13 +2982,19 @@ fn generic_call(in p: P, e: Ex) -> bool {
         )
 }
 
-fn postfix_inner(inout p: P) -> Ex {
+fn postfix_inner(inout p: P, pipe: bool) -> Ex {
     let checkpoint = p.ev.len();
     let mut e = primary(inout p);
     loop {
         let k = kind(in p);
         if !(k == k_l_paren() || k == k_l_bracket() || k == k_dot() || k == k_question()) {
             break;
+        }
+        if k == k_dot() && p.surface {
+            let (level, _) = surface_operator(in p);
+            if level != 0 {
+                break;
+            }
         }
         if widen_u64(e.h) >= p.max_depth {
             exhaust(inout p, 3, p.max_depth);
@@ -2936,14 +3006,14 @@ fn postfix_inner(inout p: P) -> Ex {
         let start = widen_u64(e.start);
         let next = if k == k_l_paren() {
             bump(inout p);
-            let a = args(inout p);
+            let a = args(inout p, pipe);
             expect(inout p, k_r_paren());
             ex(x_call(), start, last_end(in p), hmax(e.h, a))
         } else if k == k_l_bracket() {
             if generic_call(in p, e) {
                 type_args(inout p);
                 expect(inout p, k_l_paren());
-                let a = args(inout p);
+                let a = args(inout p, pipe);
                 expect(inout p, k_r_paren());
                 ex(x_call(), start, last_end(in p), hmax(e.h, a))
             } else {
@@ -2953,14 +3023,14 @@ fn postfix_inner(inout p: P) -> Ex {
                     let none = placeholder(in p);
                     open_interval(inout p, e, false, none)
                 } else {
-                    let lo = expr(inout p);
+                    let lo = dexpr(inout p);
                     if !at(in p, k_dot_dot()) {
                         lo
                     } else if nth(in p, 1) == k_r_bracket() {
                         open_interval(inout p, e, true, lo)
                     } else {
                         bump(inout p);
-                        let hi = expr(inout p);
+                        let hi = dexpr(inout p);
                         let b = ex(
                             x_binary(),
                             widen_u64(lo.start),
@@ -3038,7 +3108,7 @@ fn open_interval(inout p: P, base: Ex, has_lo: bool, lo: Ex) -> Ex {
             (widen_u64(ph.end), 1)
         }
     } else {
-        let hi = expr(inout p);
+        let hi = dexpr(inout p);
         (widen_u64(hi.end), hi.h)
     };
     let start = if lo_start < dots {
@@ -3050,15 +3120,23 @@ fn open_interval(inout p: P, base: Ex, has_lo: bool, lo: Ex) -> Ex {
     record(inout p, b)
 }
 
-// `Parser::args`: the height of the highest argument (0 for none).
-fn args(inout p: P) -> u32 {
+// `Parser::args`: the height of the highest argument (0 for none). On the
+// right of a pipeline (`pipe`) a bare `_` argument is the placeholder.
+fn args(inout p: P, pipe: bool) -> u32 {
     let mut h: u32 = 0;
     loop {
         if at(in p, k_r_paren()) || at(in p, k_eof()) {
             return h;
         }
-        pass_in(inout p, false);
-        let a = expr(inout p);
+        let explicit = pass_in_explicit(inout p, false);
+        let a = if pipe
+            && !explicit
+            && at_word(in p, 0, w_underscore())
+            && (nth(in p, 1) == k_comma() || nth(in p, 1) == k_r_paren()) {
+            pipeline_placeholder(inout p)
+        } else {
+            dexpr(inout p)
+        };
         h = hmax(h, a.h);
         if !eat(inout p, k_comma()) {
             return h;
@@ -3092,6 +3170,24 @@ fn primary_inner(inout p: P) -> Ex {
         );
         l.pure = true;
         return l;
+    }
+    if p.surface {
+        if at_word(in p, 0, w_underscore()) {
+            err(inout p, in "pipeline placeholder must be a bare argument of the right-hand call");
+            let i = bump(inout p);
+            let mut e = ex(x_name(), start, last_end(in p), 0);
+            e.sym = tsym(in p, i);
+            e.path = 1;
+            e.pure = true;
+            e.rcv = narrow(inc(i));
+            return e;
+        }
+        if at(in p, k_lower()) && nth(in p, 1) == k_bang() {
+            return surface_macro_call(inout p, start);
+        }
+        if at_tagged_literal(in p) {
+            return tagged_literal(inout p, start);
+        }
     }
     if at_path_root(in p) {
         // `self::m::f`, `super::m::T { .. }`, `@scope/name::m::E::V`.
@@ -3159,7 +3255,7 @@ fn primary_inner(inout p: P) -> Ex {
             if at(in p, k_r_paren()) || at(in p, k_eof()) {
                 break;
             }
-            let v = expr(inout p);
+            let v = dexpr(inout p);
             values = inc(values);
             if values == 1 {
                 only = v;
@@ -3231,7 +3327,7 @@ fn array_literal(inout p: P, start: u64) -> Ex {
         if at(in p, k_r_bracket()) || at(in p, k_eof()) {
             break;
         }
-        let v = expr(inout p);
+        let v = dexpr(inout p);
         if values == 0 && eat(inout p, k_semi()) {
             let mut n = array_length(inout p);
             expect(inout p, k_r_bracket());
@@ -3321,6 +3417,11 @@ fn pattern(inout p: P) {
 fn pattern_inner(inout p: P) {
     start_node(inout p, NodeKind::Pattern);
     let negative = eat(inout p, k_minus());
+    if !negative && p.surface && at_pattern_phrase(in p) {
+        pattern_phrase(inout p);
+        finish_node(inout p);
+        return;
+    }
     let class = if at(in p, k_int()) {
         int_class(in p, idx(in p, 0))
     } else {
@@ -3482,7 +3583,10 @@ fn parse_tokens_new(
         hdr: ChunkSeq::new[u64](),
         hdr_syms: ChunkSeq::new[u32](),
         item_start: 0,
-        expansion: 0
+        expansion: 0,
+        surface: false,
+        before_handler_in: false,
+        group_end: ChunkSeq::new[u32]()
     };
     p.src.extend(in source);
     p.rows.resize(nsyms, 0);
@@ -3504,13 +3608,20 @@ fn index_tokens(inout p: P) {
 
 // `contextual_item_names`: `fn break()` and friends keep the word a name.
 fn contextual_item_names(inout p: P) {
+    item_names(inout p, false);
+}
+
+// `contextual_item_names(tokens, source, include_tests)`: with
+// `include_tests` the functions of test blocks count too.
+fn item_names(inout p: P, include_tests: bool) {
     let mut previous: u8 = TokenSentinel::Missing;
     let mut depth: u64 = 0;
     let mut skipping_test = false;
     for j in 0..p.sig.len() {
         let i = w32(in p.sig, j);
         let k = tk(in p, i);
-        if depth == 0
+        if !include_tests
+            && depth == 0
             && k == k_lower()
             && tword(in p, i) == w_test()
             && inc(j) < p.sig.len()
@@ -3607,4 +3718,950 @@ pub fn editor_parser(
     p.editor = true;
     p.site_limit = max_sites;
     p
+}
+
+// ------------------------------------------------------- surface profile
+
+// The sugar surface profile of crates/vesper-syntax/src/parser.rs
+// (`parse_module_profile` with `surface`, which `parse_expansion_scopes`
+// uses): sugar declarations (parser/sugar_decl.rs), sugar phrases and
+// pattern phrases (parser/sugar_phrase.rs), pipeline and dotted operators
+// and tagged literals (parser/sugar_ops.rs) and expression macro
+// declarations and calls (parser/surface_macro.rs). The batch profile never
+// reaches this code: every hook above checks `p.surface` first.
+
+const NO_GROUP: u32 = 4294967295;
+
+// The level of the pipeline operators `|>` and `|?>`.
+const PIPELINE: u64 = 3;
+
+const NO_TOKEN: u64 = 18446744073709551615;
+
+// Whether token `i` is spelled `w` (`Parser::text`).
+fn tok_is(in p: P, i: u64, in w: String) -> bool {
+    let s = tstart(in p, i);
+    token_text_is(in p.src.as_slice(), s, wrapping_sub(tend(in p, i), s), in w.as_bytes())
+}
+
+fn at_text(in p: P, n: u64, in w: String) -> bool {
+    tok_is(in p, idx(in p, n), in w)
+}
+
+// `Parser::at_word` with a spelling.
+fn at_lower(in p: P, n: u64, in w: String) -> bool {
+    nth(in p, n) == k_lower() && at_text(in p, n, in w)
+}
+
+fn closing(k: u8) -> u8 {
+    if k == k_l_paren() {
+        k_r_paren()
+    } else if k == k_l_bracket() {
+        k_r_bracket()
+    } else if k == k_l_brace() {
+        k_r_brace()
+    } else {
+        0
+    }
+}
+
+fn is_closer(k: u8) -> bool {
+    k == k_r_paren() || k == k_r_bracket() || k == k_r_brace()
+}
+
+// `sugar_phrase::group_ends`: for each opening token the index of the
+// token that closes it; a mismatched closer forgets every open group.
+fn compute_group_ends(inout p: P) {
+    let n = p.ntok;
+    p.group_end.clear();
+    p.group_end.resize(n, NO_GROUP);
+    let mut open = ChunkSeq::new[u64]();
+    for i in 0..n {
+        let k = tk(in p, i);
+        let c = closing(k);
+        if c != 0 {
+            open.push(shl(i, 8) | widen_u64(c));
+        } else if is_closer(k) && open.len() > 0 {
+            let top = match open.try_get(wrapping_sub(open.len(), 1)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            open.truncate(wrapping_sub(open.len(), 1));
+            if (top & 255) == widen_u64(k) {
+                p.group_end.try_set(top >> 8, narrow(i));
+            } else {
+                open.clear();
+            }
+        }
+    }
+}
+
+fn group_end_of(in p: P, i: u64) -> u32 {
+    match p.group_end.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => NO_GROUP,
+    }
+}
+
+// `Parser::after_phrase_group`: the first non-trivia token after the group
+// opened at `open`, or u64::MAX when the group is not closed.
+fn after_phrase_group(in p: P, open: u64) -> u64 {
+    let close = group_end_of(in p, open);
+    if close == NO_GROUP {
+        return NO_TOKEN;
+    }
+    let mut j = inc(widen_u64(close));
+    loop {
+        if j >= p.ntok || !trivia_kind(tk(in p, j)) {
+            return j;
+        }
+        j = inc(j);
+    }
+}
+
+fn head_word(k: u8) -> bool {
+    k == k_lower() || k == k_state() || k == k_with() || k == k_linear() || k == k_eff()
+}
+
+// `sugar_ops::core_operator`: the Rust level of a core infix operator.
+fn core_level(k: u8) -> u64 {
+    shl(precedence(k), 1)
+}
+
+// `sugar_ops::sugar_operator` at token `start`: (level, end) of an
+// unbroken `|>`, `|?>` or dotted operator, else (0, 0).
+fn sugar_operator_at(in p: P, start: u64) -> (u64, u64) {
+    if inc(start) >= p.ntok {
+        return (0, 0);
+    }
+    let head = tk(in p, start);
+    let next = tk(in p, inc(start));
+    if tend(in p, start) != tstart(in p, inc(start)) {
+        return (0, 0);
+    }
+    if head == k_pipe() {
+        if next == k_gt() {
+            return (PIPELINE, add(start, 2));
+        }
+        if next == k_question() {
+            let last = add(start, 2);
+            if last < p.ntok
+                && tk(in p, last) == k_gt()
+                && tend(in p, inc(start)) == tstart(in p, last) {
+                return (PIPELINE, add(start, 3));
+            }
+        }
+        return (0, 0);
+    }
+    if head != k_dot() {
+        return (0, 0);
+    }
+    let level: u64 = if next == k_eq_eq() || next == k_ne() {
+        8
+    } else if next == k_lt()
+        || next == k_le()
+        || next == k_shl()
+        || next == k_gt()
+        || next == k_ge()
+        || next == k_shr() {
+        10
+    } else if next == k_pipe() || next == k_pipe_eq() || next == k_or() {
+        12
+    } else if next == k_caret() {
+        14
+    } else if next == k_amp() || next == k_amp_eq() || next == k_and() {
+        16
+    } else if next == k_plus()
+        || next == k_minus()
+        || next == k_plus_eq()
+        || next == k_minus_eq()
+        || next == k_arrow() {
+        20
+    } else if next == k_star()
+        || next == k_slash()
+        || next == k_percent()
+        || next == k_star_eq()
+        || next == k_slash_eq()
+        || next == k_percent_eq() {
+        22
+    } else {
+        return (0, 0);
+    };
+    let mut end = add(start, 2);
+    loop {
+        if end >= p.ntok {
+            break;
+        }
+        let k = tk(in p, end);
+        let symbol = k == k_dot()
+            || k == k_dot_dot()
+            || k == k_dot_dot_eq()
+            || k == k_question()
+            || k == k_tilde()
+            || k == k_bang()
+            || k == k_fat_arrow()
+            || k == k_arrow()
+            || k == k_pipe_eq()
+            || k == k_amp_eq()
+            || precedence(k) != 0;
+        if !symbol || tend(in p, wrapping_sub(end, 1)) != tstart(in p, end) {
+            break;
+        }
+        end = inc(end);
+    }
+    (level, end)
+}
+
+// `Parser::surface_operator`.
+fn surface_operator(in p: P) -> (u64, u64) {
+    if !p.surface {
+        return (0, 0);
+    }
+    sugar_operator_at(in p, idx(in p, 0))
+}
+
+fn consume_sugar_operator(inout p: P, end: u64) {
+    trivia(inout p);
+    start_node(inout p, NodeKind::SugarOperator);
+    loop {
+        if p.pos >= end {
+            break;
+        }
+        bump(inout p);
+    }
+    finish_node(inout p);
+}
+
+// `Parser::delimited_expr`: a brace inside a call argument, tuple or index
+// cannot close an outer header.
+fn dexpr(inout p: P) -> Ex {
+    let header = p.no_struct;
+    if p.surface {
+        p.no_struct = false;
+    }
+    let e = expr(inout p);
+    p.no_struct = header;
+    e
+}
+
+// `Parser::pipeline_placeholder`: a bare `_` argument on the right of a
+// pipeline.
+fn pipeline_placeholder(inout p: P) -> Ex {
+    let i = idx(in p, 0);
+    let start = tstart(in p, i);
+    let end = tend(in p, i);
+    start_node(inout p, NodeKind::Expr);
+    let j = bump(inout p);
+    finish_node(inout p);
+    let mut e = ex(x_name(), start, end, 0);
+    e.sym = tsym(in p, j);
+    e.path = 1;
+    e.pure = true;
+    e.rcv = narrow(inc(j));
+    e
+}
+
+// `Parser::at_tagged_literal`: a name followed without a gap by a string
+// or a brace.
+fn at_tagged_literal(in p: P) -> bool {
+    if !p.surface || !(at(in p, k_lower()) || at_contextual_name(in p)) {
+        return false;
+    }
+    let word = idx(in p, 0);
+    let d = inc(word);
+    if d >= p.ntok || tstart(in p, d) != tend(in p, word) {
+        return false;
+    }
+    let k = tk(in p, d);
+    k == k_string() || (k == k_l_brace() && !p.no_struct)
+}
+
+fn tagged_literal(inout p: P, start: u64) -> Ex {
+    trivia(inout p);
+    start_node(inout p, NodeKind::TaggedLiteral);
+    bump(inout p);
+    if at(in p, k_string()) {
+        bump(inout p);
+    } else {
+        sugar_group(inout p);
+    }
+    finish_node(inout p);
+    ex(x_tuple(), start, last_end(in p), 0)
+}
+
+// `Parser::macro_delimited_tokens`.
+fn macro_delimited_tokens(inout p: P, open: u8) {
+    if !at(in p, open) {
+        expect(inout p, open);
+        return;
+    }
+    let close = group_end_of(in p, idx(in p, 0));
+    if close == NO_GROUP {
+        err(inout p, in "unclosed macro delimiter");
+        bump(inout p);
+        return;
+    }
+    loop {
+        if p.pos > widen_u64(close) {
+            break;
+        }
+        bump(inout p);
+    }
+}
+
+fn surface_macro_decl(inout p: P) {
+    trivia(inout p);
+    start_node(inout p, NodeKind::SurfaceMacroDecl);
+    bump(inout p);
+    expect(inout p, k_lower());
+    macro_delimited_tokens(inout p, k_l_paren());
+    expect(inout p, k_arrow());
+    expect(inout p, k_lower());
+    macro_delimited_tokens(inout p, k_l_brace());
+    finish_node(inout p);
+}
+
+// `Parser::surface_macro_call`: the tuple of its arguments.
+fn surface_macro_call(inout p: P, start: u64) -> Ex {
+    trivia(inout p);
+    start_node(inout p, NodeKind::SurfaceMacroCall);
+    bump(inout p);
+    expect(inout p, k_bang());
+    expect(inout p, k_l_paren());
+    let mut h: u32 = 0;
+    let mut sum: u64 = 0;
+    loop {
+        if at(in p, k_r_paren()) || at(in p, k_eof()) {
+            break;
+        }
+        trivia(inout p);
+        start_node(inout p, NodeKind::SurfaceMacroArg);
+        let a = dexpr(inout p);
+        finish_node(inout p);
+        h = hmax(h, a.h);
+        sum = add(sum, a.leaves);
+        if !eat(inout p, k_comma()) {
+            break;
+        }
+        if at(in p, k_r_paren()) {
+            err(inout p, in "expression macro arguments cannot end with a trailing comma");
+        }
+    }
+    expect(inout p, k_r_paren());
+    finish_node(inout p);
+    let mut t = ex(x_tuple(), start, last_end(in p), h);
+    t.leaves = max64(sum, 1);
+    t
+}
+
+// The surface checks of `Parser::item` before test blocks: an expression
+// macro or a sugar declaration. Whether it read one.
+fn surface_declaration(inout p: P) -> bool {
+    if at_lower(in p, 0, in "macro") && nth(in p, 2) == k_l_paren() {
+        surface_macro_decl(inout p);
+        return true;
+    }
+    if at_lower(in p, 0, in "sugar")
+        || (at_lower(in p, 0, in "pub") && at_lower(in p, 1, in "sugar"))
+        || (at(in p, k_at()) && at_lower(in p, 1, in "lean_notation")) {
+        sugar_decl(inout p);
+        return true;
+    }
+    false
+}
+
+// The item phrase check of `Parser::item`.
+fn at_item_phrase(in p: P) -> bool {
+    if !at_sugar_phrase(in p) {
+        return false;
+    }
+    !(
+        at_text(in p, 0, in "pub")
+            || at_text(in p, 0, in "use")
+            || at_text(in p, 0, in "const")
+            || at_text(in p, 0, in "tiled")
+            || at_text(in p, 0, in "wire")
+            || at_text(in p, 0, in "macro")
+            || at_text(in p, 0, in "trait")
+            || at_text(in p, 0, in "model")
+    )
+}
+
+fn at_sugar_phrase(in p: P) -> bool {
+    phrase_entry(in p, false)
+}
+
+// `Parser::phrase_entry`.
+fn phrase_entry(in p: P, continuation: bool) -> bool {
+    if p.no_struct || !head_word(kind(in p)) || at_tagged_literal(in p) {
+        return false;
+    }
+    let cur = idx(in p, 0);
+    if (at_word(in p, 0, w_for()) && for_header(in p, cur))
+        || (at_word(in p, 0, w_loop()) && nth(in p, 1) == k_l_brace())
+        || (
+            at_word(in p, 0, w_region())
+                && nth(in p, 1) == k_lower()
+                && (nth(in p, 2) == k_l_paren() || nth(in p, 2) == k_l_brace())
+        )
+        || (at_word(in p, 0, w_break()) && !bound(in p, tsym(in p, cur)))
+        || (
+            at_word(in p, 0, w_continue())
+                && !bound(in p, tsym(in p, cur))
+                && jump_end(nth(in p, 1))
+        ) {
+        return false;
+    }
+    let ghost: u64 = if at_lower(in p, 0, in "ghost") && head_word(nth(in p, 1)) {
+        1
+    } else {
+        0
+    };
+    let word = idx(in p, ghost);
+    let mut next = idx(in p, inc(ghost));
+    let mut last = word;
+    if tk(in p, next) == k_l_paren() {
+        let after = after_phrase_group(in p, next);
+        if after == NO_TOKEN {
+            return false;
+        }
+        last = widen_u64(group_end_of(in p, next));
+        next = after;
+    }
+    let k = tk(in p, next);
+    if p.before_handler_in && k == k_in() {
+        return false;
+    }
+    if k == k_l_brace() {
+        return tend(in p, last) < tstart(in p, next) || (continuation && last != word);
+    }
+    if k == k_string() {
+        return last != word || tend(in p, last) < tstart(in p, next);
+    }
+    k == k_lower()
+        || k == k_upper()
+        || k == k_int()
+        || k == k_float()
+        || k == k_true()
+        || k == k_false()
+        || k == k_let()
+        || k == k_else()
+        || k == k_in()
+        || k == k_inout()
+        || k == k_sink()
+        || k == k_with()
+        || k == k_state()
+        || k == k_eff()
+        || k == k_linear()
+}
+
+// `Parser::at_pattern_phrase`.
+fn at_pattern_phrase(in p: P) -> bool {
+    if p.no_struct || !head_word(kind(in p)) || at_word(in p, 0, w_underscore()) {
+        return false;
+    }
+    let k = nth(in p, 1);
+    if k == k_l_brace() || k == k_string() {
+        return tend(in p, idx(in p, 0)) < tstart(in p, idx(in p, 1));
+    }
+    head_word(k)
+        || k == k_upper()
+        || k == k_l_paren()
+        || k == k_int()
+        || k == k_float()
+        || k == k_true()
+        || k == k_false()
+}
+
+// `Parser::pattern_phrase`. Its operand patterns bind nothing (the phrase
+// is a wildcard to the core parser).
+fn pattern_phrase(inout p: P) {
+    let mark = p.binds.len();
+    trivia(inout p);
+    start_node(inout p, NodeKind::SugarPat);
+    bump(inout p);
+    loop {
+        let k = kind(in p);
+        if k == k_l_brace() {
+            sugar_group(inout p);
+            break;
+        } else if k == k_l_paren() {
+            bump(inout p);
+            pattern_list(inout p, k_r_paren());
+            expect(inout p, k_r_paren());
+        } else if head_word(k)
+            || k == k_upper()
+            || k == k_int()
+            || k == k_float()
+            || k == k_string()
+            || k == k_true()
+            || k == k_false()
+            || k == k_minus() {
+            let outer = p.no_struct;
+            p.no_struct = true;
+            pattern(inout p);
+            p.no_struct = outer;
+        } else {
+            break;
+        }
+    }
+    finish_node(inout p);
+    p.binds.truncate(mark);
+}
+
+// `Parser::sugar_group`: a balanced token group.
+fn sugar_group(inout p: P) {
+    let end = closing(kind(in p));
+    if end == 0 {
+        err(inout p, in "expected a sugar token group");
+        return;
+    }
+    if !enter(inout p) {
+        return;
+    }
+    trivia(inout p);
+    start_node(inout p, NodeKind::SugarGroup);
+    bump(inout p);
+    loop {
+        if at(in p, end) || at(in p, k_eof()) {
+            break;
+        }
+        let k = kind(in p);
+        if closing(k) != 0 {
+            sugar_group(inout p);
+        } else if is_closer(k) {
+            break;
+        } else {
+            bump(inout p);
+        }
+    }
+    expect(inout p, end);
+    finish_node(inout p);
+    p.depth = wrapping_sub(p.depth, 1);
+}
+
+// Whether no line break separates the last consumed token from the next
+// one (`!self.source[self.end()..self.start()].contains(['\n', '\r'])`).
+fn same_line(in p: P) -> bool {
+    let from = last_end(in p);
+    let to = cur_start(in p);
+    let b = p.src.as_slice();
+    let mut i = from;
+    loop {
+        if i >= to {
+            return true;
+        }
+        let c = u8_at_slice(in b, i);
+        if c == 10 || c == 13 {
+            return false;
+        }
+        i = inc(i);
+    }
+}
+
+// `Parser::sugar_phrase`: a phrase in the `slot` node, an empty tuple to
+// the core parser.
+fn sugar_phrase(inout p: P, slot: u32) -> Ex {
+    let start = cur_start(in p);
+    trivia(inout p);
+    start_node(inout p, slot);
+    if at_lower(in p, 0, in "ghost") && head_word(nth(in p, 1)) {
+        bump(inout p);
+    }
+    bump(inout p);
+    sugar_heads(inout p);
+    if at(in p, k_l_brace()) {
+        sugar_group(inout p);
+        loop {
+            if slot == NodeKind::SugarItem
+                || !same_line(in p)
+                || !(at(in p, k_else()) || phrase_entry(in p, true)) {
+                break;
+            }
+            trivia(inout p);
+            start_node(inout p, NodeKind::SugarContinuation);
+            bump(inout p);
+            sugar_heads(inout p);
+            sugar_group(inout p);
+            finish_node(inout p);
+        }
+        if slot == NodeKind::SugarStmt {
+            eat(inout p, k_semi());
+        }
+    } else if slot == NodeKind::SugarStmt {
+        expect(inout p, k_semi());
+    } else {
+        err(inout p, in "expected a braced group after the sugar phrase");
+    }
+    finish_node(inout p);
+    ex(x_tuple(), start, last_end(in p), 0)
+}
+
+// `Parser::at_bracketed_head_word`: `scratch tmp[256]` (a head word with
+// bracketed token trees), not `guard table[i] > 0`.
+fn at_bracketed_head_word(in p: P) -> bool {
+    if !head_word(kind(in p)) || nth(in p, 1) != k_l_bracket() {
+        return false;
+    }
+    let mut next = idx(in p, 1);
+    loop {
+        if tk(in p, next) != k_l_bracket() {
+            break;
+        }
+        let after = after_phrase_group(in p, next);
+        if after == NO_TOKEN {
+            return false;
+        }
+        next = after;
+    }
+    let k = tk(in p, next);
+    !(k == k_l_paren() || k == k_dot() || k == k_question()) && precedence(k) == 0
+}
+
+// `Parser::sugar_heads`.
+fn sugar_heads(inout p: P) {
+    loop {
+        let k = kind(in p);
+        if k == k_l_brace()
+            || k == k_semi()
+            || k == k_eof()
+            || k == k_r_brace()
+            || k == k_r_paren()
+            || k == k_r_bracket()
+            || k == k_comma() {
+            return;
+        }
+        let before = p.pos;
+        if k == k_let() {
+            bump(inout p);
+            let mark = p.binds.len();
+            pattern(inout p);
+            p.binds.truncate(mark);
+            expect(inout p, k_eq());
+            restricted(inout p);
+        } else if k == k_in() || k == k_inout() || k == k_sink() || at_lower(in p, 0, in "out") {
+            bump(inout p);
+            let old = p.no_struct;
+            p.no_struct = true;
+            postfix(inout p, false);
+            p.no_struct = old;
+        } else if k == k_l_paren() {
+            bump(inout p);
+            args(inout p, false);
+            expect(inout p, k_r_paren());
+        } else if k == k_l_bracket() {
+            sugar_group(inout p);
+        } else if k == k_else() || at_bracketed_head_word(in p) {
+            bump(inout p);
+        } else {
+            restricted(inout p);
+        }
+        if p.pos == before {
+            return;
+        }
+    }
+}
+
+// `Parser::sugar_decl` (manuscript §§2.2, 7.5).
+fn sugar_decl(inout p: P) {
+    trivia(inout p);
+    start_node(inout p, NodeKind::SugarDecl);
+    if eat(inout p, k_at()) {
+        if !at_text(in p, 0, in "lean_notation") {
+            err(inout p, in "expected sugar annotation (lean_notation)");
+        }
+        if at(in p, k_lower()) {
+            bump(inout p);
+        }
+    }
+    if at_lower(in p, 0, in "pub") {
+        bump(inout p);
+    }
+    if !at_text(in p, 0, in "sugar") {
+        err(inout p, in "expected declaration keyword (sugar)");
+    }
+    if at(in p, k_lower()) {
+        bump(inout p);
+    }
+    lower(inout p);
+    expect(inout p, k_colon());
+    if at_lower(in p, 0, in "infix") {
+        sugar_infix_sort(inout p);
+    } else {
+        if !(
+            at_text(in p, 0, in "stmt")
+                || at_text(in p, 0, in "expr")
+                || at_text(in p, 0, in "pat")
+                || at_text(in p, 0, in "tag")
+                || at_text(in p, 0, in "item")
+        ) {
+            err(inout p, in "expected sugar sort (stmt, expr, pat, tag, item)");
+        }
+        if at(in p, k_lower()) {
+            bump(inout p);
+        }
+    }
+    if at_lower(in p, 0, in "emits") {
+        bump(inout p);
+        if at(in p, k_eff()) {
+            effects(inout p);
+        } else {
+            err(inout p, in "expected an effect row after `emits`");
+        }
+    }
+    expect(inout p, k_l_brace());
+    if !at_lower(in p, 0, in "rule") {
+        err(inout p, in "a sugar declaration requires at least one rule");
+    }
+    loop {
+        if !at_lower(in p, 0, in "rule") {
+            break;
+        }
+        trivia(inout p);
+        start_node(inout p, NodeKind::SugarRule);
+        bump(inout p);
+        trivia(inout p);
+        start_node(inout p, NodeKind::SugarPattern);
+        sugar_decl_group(inout p, k_l_paren(), true, true);
+        finish_node(inout p);
+        expect(inout p, k_fat_arrow());
+        trivia(inout p);
+        start_node(inout p, NodeKind::SugarTemplate);
+        sugar_decl_group(inout p, k_l_brace(), false, false);
+        finish_node(inout p);
+        finish_node(inout p);
+    }
+    expect(inout p, k_r_brace());
+    finish_node(inout p);
+}
+
+// `Parser::sugar_infix_sort`: `infix(`op`, band, associativity)`.
+fn sugar_infix_sort(inout p: P) {
+    bump(inout p);
+    expect(inout p, k_l_paren());
+    expect(inout p, k_backtick());
+    let (level, end) = sugar_operator_at(in p, idx(in p, 0));
+    if level != 0 {
+        consume_sugar_operator(inout p, end);
+    } else {
+        err(inout p, in "expected a pipeline or dotted operator");
+    }
+    expect(inout p, k_backtick());
+    expect(inout p, k_comma());
+    if !(
+        at_text(in p, 0, in "pipeline")
+            || at_text(in p, 0, in "logical")
+            || at_text(in p, 0, in "compare")
+            || at_text(in p, 0, in "additive")
+            || at_text(in p, 0, in "multiplicative")
+    ) {
+        err(
+            inout p,
+            in "expected precedence band (pipeline, logical, compare, additive, multiplicative)"
+        );
+    }
+    if at(in p, k_lower()) {
+        bump(inout p);
+    }
+    expect(inout p, k_comma());
+    if !(
+        at_text(in p, 0, in "left") || at_text(in p, 0, in "right") || at_text(in p, 0, in "none")
+    ) {
+        err(inout p, in "expected associativity (left, right, none)");
+    }
+    if at(in p, k_lower()) {
+        bump(inout p);
+    }
+    expect(inout p, k_r_paren());
+}
+
+// `Parser::sugar_decl_group`: a balanced group of a rule's pattern or
+// template; holes only in patterns.
+fn sugar_decl_group(inout p: P, open: u8, pattern: bool, nonempty: bool) {
+    if !at(in p, open) {
+        expect(inout p, open);
+        return;
+    }
+    if !enter(inout p) {
+        return;
+    }
+    bump(inout p);
+    let close = closing(open);
+    if nonempty && at(in p, close) {
+        err(inout p, in "empty sugar pattern or repetition");
+    }
+    loop {
+        let k = kind(in p);
+        if k == k_eof() || is_closer(k) {
+            break;
+        }
+        if closing(k) != 0 {
+            sugar_decl_group(inout p, k, pattern, false);
+        } else if k == k_dollar() && pattern {
+            sugar_hole(inout p, false);
+        } else if pattern
+            && (k == k_in() || k == k_inout() || k == k_sink() || at_lower(in p, 0, in "out"))
+            && nth(in p, 1) == k_dollar() {
+            sugar_hole(inout p, true);
+        } else {
+            bump(inout p);
+        }
+    }
+    expect(inout p, close);
+    p.depth = wrapping_sub(p.depth, 1);
+}
+
+// Whether every byte of the current token is ASCII punctuation other than
+// a delimiter, a quote or a backtick (the separator of a repetition).
+fn at_separator_text(in p: P) -> bool {
+    let i = idx(in p, 0);
+    let b = p.src.as_slice();
+    for j in tstart(in p, i)..tend(in p, i) {
+        let c = u8_at_slice(in b, j);
+        let punct = (c >= 33 && c <= 47)
+            || (c >= 58 && c <= 64)
+            || (c >= 91 && c <= 96)
+            || (c >= 123 && c <= 126);
+        if !punct
+            || c == 40
+            || c == 41
+            || c == 91
+            || c == 93
+            || c == 123
+            || c == 125
+            || c == 34
+            || c == 96 {
+            return false;
+        }
+    }
+    true
+}
+
+// `Parser::sugar_hole`: `$name: sort`, `$..name: sort`, `$( .. ) sep? *`
+// or a pass-mode hole.
+fn sugar_hole(inout p: P, pass: bool) {
+    trivia(inout p);
+    start_node(inout p, NodeKind::SugarHole);
+    if pass {
+        bump(inout p);
+    }
+    expect(inout p, k_dollar());
+    if at(in p, k_l_paren()) {
+        if pass {
+            err(inout p, in "a repetition cannot have a pass mode");
+        }
+        sugar_decl_group(inout p, k_l_paren(), true, true);
+        let k = kind(in p);
+        let k1 = nth(in p, 1);
+        if !(k == k_plus() || k == k_star())
+            && (k1 == k_plus() || k1 == k_star())
+            && !at(in p, k_eof())
+            && at_separator_text(in p) {
+            bump(inout p);
+        }
+        if !(eat(inout p, k_star()) || eat(inout p, k_plus())) {
+            err(inout p, in "expected `*` or `+` after a sugar repetition");
+        }
+    } else {
+        let sequence = eat(inout p, k_dot_dot());
+        if sequence && pass {
+            err(inout p, in "a sequence hole cannot have a pass mode");
+        }
+        if at(in p, k_lower()) || at(in p, k_upper()) {
+            bump(inout p);
+        } else {
+            err(inout p, in "expected a sugar hole name");
+        }
+        expect(inout p, k_colon());
+        if sequence {
+            if !(
+                at_text(in p, 0, in "stmts")
+                    || at_text(in p, 0, in "scope")
+                    || at_text(in p, 0, in "args")
+                    || at_text(in p, 0, in "items")
+                    || at_text(in p, 0, in "pats")
+            ) {
+                err(inout p, in "expected sequence hole sort (stmts, scope, args, items, pats)");
+            }
+        } else if !(
+            at_text(in p, 0, in "ident")
+                || at_text(in p, 0, in "pat")
+                || at_text(in p, 0, in "ty")
+                || at_text(in p, 0, in "expr")
+                || at_text(in p, 0, in "place")
+                || at_text(in p, 0, in "block")
+                || at_text(in p, 0, in "scope")
+        ) {
+            err(inout p, in "expected hole sort (ident, pat, ty, expr, place, block, scope)");
+        }
+        if at(in p, k_lower()) {
+            bump(inout p);
+        }
+    }
+    finish_node(inout p);
+}
+
+// `parse_expansion_scopes` without its expression macro validation
+// (`macro_source::validate_surface`): the surface profile over `t`, with
+// test blocks parsed (`include_tests`) or kept as opaque tokens.
+pub fn parse_surface_tokens(
+    in source: Slice[u8],
+    sink t: Tokens,
+    sink d: Diags,
+    max_diag: u64,
+    max_depth: u64,
+    include_tests: bool
+) -> P {
+    let nsyms = inc(t.sym_start.len());
+    let mut p = parse_tokens_new(in source, t, d, nsyms, max_diag, max_depth);
+    p.surface = true;
+    start_node(inout p, NodeKind::Module);
+    let ntok = p.ntok;
+    if p.t.limited {
+        for i in 0..wrapping_sub(ntok, 1) {
+            p.ev.push(narrow(i));
+        }
+        p.pos = wrapping_sub(ntok, 1);
+        finish_node(inout p);
+        return p;
+    }
+    item_names(inout p, include_tests);
+    compute_group_ends(inout p);
+    loop {
+        if at(in p, k_eof()) {
+            break;
+        }
+        if include_tests && at_word(in p, 0, w_test()) && nth(in p, 1) == k_l_brace() {
+            start_node(inout p, NodeKind::Item);
+            bump(inout p);
+            bump(inout p);
+            loop {
+                if at(in p, k_r_brace()) || at(in p, k_eof()) {
+                    break;
+                }
+                if at_word(in p, 0, w_test()) && nth(in p, 1) == k_l_brace() {
+                    err(inout p, in "test blocks must be at module scope");
+                }
+                push_item(inout p);
+            }
+            expect(inout p, k_r_brace());
+            finish_node(inout p);
+        } else {
+            push_item(inout p);
+        }
+    }
+    trivia(inout p);
+    finish_node(inout p);
+    p
+}
+
+// `Parser::push_item`.
+fn push_item(inout p: P) {
+    let before = p.pos;
+    start_node(inout p, NodeKind::Item);
+    declaration(inout p);
+    finish_node(inout p);
+    if p.pos == before {
+        err(inout p, in "expected a declaration");
+        bump(inout p);
+    }
 }
