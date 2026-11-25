@@ -579,8 +579,22 @@ fn soup(rng: &mut Rng) -> String {
 
 /// Edited repository sources and token soup from a fixed seed (the
 /// front end v2 fuzzer's generator; `VESPER_AST_FUZZ` sets the count).
+///
+/// The rounds run on a 64 MiB thread: in debug builds the Rust lexer
+/// (logos) recurses once per byte of a token, and a mutated input can hold
+/// a token tens of KiB long, which overflows a 2 MiB test thread's stack on
+/// Windows (#1944; locally, `RUST_MIN_STACK=1048576` reproduces it).
 #[test]
 fn fuzzed_corpus_parses_the_same() {
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(fuzzed_corpus)
+        .expect("spawn the fuzz thread")
+        .join()
+        .unwrap_or_else(|e| std::panic::resume_unwind(e));
+}
+
+fn fuzzed_corpus() {
     let mut files = repository_sources();
     files.retain(|p| std::fs::metadata(p).is_ok_and(|m| m.len() < 64 * 1024));
     let sources: Vec<String> = files

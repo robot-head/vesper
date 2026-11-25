@@ -356,3 +356,38 @@ library export path), and the swap passes its flip gate.
 - Part 4: the compile drivers (JIT/object), then `native_clif_opt` after
   #1426.
 - A flip-gate configuration for `frame_plans` and `register_locals`.
+
+## Part 4a: internal calling conventions from Vesper (#1509)
+
+### Changes
+
+- The part 3b hook is now `entry_plans` (`EntryPlansHook`). It answers
+  `native::EntryPlans`: the entry-block plans as before, and each
+  instance's internal convention (`FnAbi`, now `pub`: register status and
+  register-result words).
+- **`src/native.rs`**: `compile_entry` builds its `NativeAbi` from the
+  hook's conventions in place of `NativeAbi::plan`, but only when the hook's
+  frames cover exactly the instances Rust discovered. It keeps
+  `NativeAbi::plan`'s filters: optimized builds only, never the entry, no
+  default entries. The library export path still plans in Rust.
+- **`@vesper/native-walk`**: `frames_bytes` writes a `B <key> <status>
+  <words>` line before each instance's plan, from `@vesper/codegen-calls`'
+  `internal`, the same decision part 3a's plans already used.
+- `tests/common/native_walk_words.rs`: `decode_entry_plans` replaces
+  `decode_frames`. vesper-hybrid's swap row is renamed to `entry_plans`.
+  The export stays `frame_plans_words`, so the binding is unchanged.
+
+### Results (Linux x86_64, release)
+
+| Run | Compiles | Hook asked / answered | Differ | Rust | Hooked | In the hook |
+|---|--:|--:|--:|--:|--:|--:|
+| `NATIVE_WALK_FRAME_STEP=1`, 4 entries | 1,966 | 1,980 / 1,838 | **0** | 725.6 s | 743.8 s (**1.025x**) | 17.2 s |
+| default | 614 | 622 / 580 | **0** | 63.5 s | 64.1 s (1.011x) | 1.5 s |
+
+Divergence check: flipping the decoded register-status bit locally gives
+115 differing compiles of 587 on the default run, so the compiles really
+use the Vesper conventions. (The flip isn't committed.) The ratios are
+single-run sums, not ABBA CIs.
+
+**Rust lines deleted:** 0. `NativeAbi::plan` stays as the fallback. It
+also serves `native_export` and the compiles the hook declines.
