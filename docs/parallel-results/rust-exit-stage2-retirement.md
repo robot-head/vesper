@@ -141,9 +141,14 @@ Besides the compiler rows that have not passed the gate (checklist item
 3. **`src/verified_codegen`** (the Stage 1 guard) lives in `src/`. Owner
    decision (2026-11-25): port it to Vesper (#1886).
 4. **The Stage 2 fixed point is of `@vesper/stage2`**, the standalone
-   compiler package, not of the compiler the hybrid runs. The seed has to be
-   the complete compiler (driver, checker, backends), which needs items 1
-   and 2 of the checklist first.
+   compiler package, not of the compiler the hybrid runs. #1928 extends it
+   to the packages: every compiler package Stage 2 builds (49) comes out
+   byte-identical from the boot Stage 2, from the self-built `stage2.wasm`
+   and from `stage2.cwasm` under the pinned wasmtime CLI, and the four that
+   it cannot build yet are listed with the reason
+   (`STAGE2_PACKAGE_GAPS` in `tests/wasm_seed_package_io.rs`). The seed
+   still has to be the complete compiler (driver, checker, backends) as one
+   program, which needs items 1 and 2 of the checklist first.
 
 ## Left
 

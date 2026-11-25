@@ -49,7 +49,7 @@ jobs:
           echo "VESPER_DEFAULT_COMPILER=$GITHUB_WORKSPACE/target/debug/vesper" >> "$GITHUB_ENV"
       - name: Compare the C seed runner with Wasmtime and the Stage 1 lock
         run: cargo test --locked -p vesper --test stage2_seed_runner -- --test-threads=1
-      - name: Exercise Wasm packages and verify the backend fixed point
+      - name: Exercise Wasm packages and verify the Stage 2 and per-package fixed points
         run: cargo test --locked -p vesper --test wasm_seed_breadth --test wasm_seed_package_io -- --test-threads=1
       - name: Compare Vesper package assembly with the bootstrap loader
         run: cargo test --locked -p vesper --test self_host_check_names_packages -- --test-threads=1
