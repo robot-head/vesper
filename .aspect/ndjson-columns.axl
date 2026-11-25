@@ -1,0 +1,258 @@
+"""Check the batch-to-column example against an independent NDJSON corpus."""
+
+load("./lib/process.axl", "command", "exit_code", "root_path", "scratch_dir")
+load("./lib/strict-json.axl", "decode_object")
+
+_MAX_OUTPUT = 128 * 8193
+_STDERR_MAX = 65536
+_U64_MAX = (1 << 64) - 1
+
+def _ascii(line):
+    for char, escape in [("é", "\\u00e9"), ("🦀", "\\ud83e\\udd80"), ("́", "\\u0301"), ("\u2028", "\\u2028"), ("\u2029", "\\u2029")]:
+        line = line.replace(char, escape)
+    return line
+
+def _corpus():
+    sources = []
+    expected = []
+    state = 0x510E527FADE682D1
+    for i in range(96):
+        state = (state * 6364136223846793005 + 1442695040888963407) & _U64_MAX
+        identifier = [0, _U64_MAX, (1 << 53) + 1, (1 << 32) - 1][i] if i < 4 else state
+        topic = ["é🦀", "line\n\x00\"\\", "é", "\u2028\u2029", ""][i % 5] + str(i)
+        metadata = [
+            None,
+            True,
+            [i, {"wide": _U64_MAX, "text": "raw🦀"}],
+            {"fraction": 1.25, "negative_zero": -0.0},
+            "unescaped é and escaped \\ text",
+            -(1 << 63),
+        ][i % 6]
+        row = {"id": identifier, "topic": topic, "raw_meta": metadata}
+        text = json.encode(dict(row, ignored = {"nested": ["validated", i, False]}))
+        if i % 3 == 0:
+            text = text.replace('"id":', '"\\u0069d":', 1).replace('"topic":', '"to\\u0070ic":', 1).replace('"raw_meta":', '"raw_\\u006deta":', 1)
+        sources.append(_ascii(text) + "\r\n" if i % 2 else text + "\n")
+        expected.append(row)
+    return "".join(sources), expected
+
+def _same(actual, expected):
+    pending = [(actual, expected)]
+    for _ in range(32768):
+        if not pending:
+            return True
+        left, right = pending.pop()
+        if type(left) != type(right):
+            return False
+        if type(right) == "dict":
+            if sorted(left) != sorted(right):
+                return False
+            pending.extend([(left[key], right[key]) for key in right])
+        elif type(right) == "list":
+            if len(left) != len(right):
+                return False
+            pending.extend(zip(left, right))
+        elif type(right) == "float":
+            if left != right or (left == 0.0 and repr(left) != repr(right)):
+                return False
+        elif left != right:
+            return False
+    fail("NDJSON comparison exceeded its bounded corpus")
+
+def _records(output):
+    records = output.split("\n")
+    if records[-1] or len(records) > 129:
+        fail("Expected at most 128 newline-terminated JSON records")
+    return [decode_object(line) for line in records[:-1]]
+
+def _write(ctx, path, data):
+    if type(data) == "string":
+        ctx.std.fs.write(path, data)
+        return
+    stream = ctx.std.fs.create(path)
+    written = stream.write(data)
+    stream.close()
+    if written != len(data):
+        fail("Could not write the complete NDJSON input")
+
+def _worker(ctx: TaskContext) -> int:
+    binary, directory = ctx.args.tool_args
+    root = ctx.std.env.aspect_root_dir()
+    child = command(ctx, binary, ["--stdin"], root).stdin("piped").stdout(
+        ctx.std.fs.create(directory + "/stdout"),
+    ).stderr(ctx.std.fs.create(directory + "/stderr")).spawn()
+    payload = ctx.std.fs.open(directory + "/input").read()
+    input = child.stdin()
+    # Stream writes can be short. An independent caller bounds this worker's
+    # whole process group while writes or the example itself are blocked.
+    offset = 0
+    for _ in range(len(payload)):
+        if offset == len(payload):
+            break
+        written = input.write(payload[offset:])
+        if not written:
+            fail("Example stopped accepting input")
+        offset += written
+    input.close()
+    status = child.wait()
+    ctx.std.fs.write(directory + "/status", str(exit_code(status)))
+    return 0
+
+ndjson_input = task(
+    kind = "ndjson-input",
+    group = ["acceptance", "internal"],
+    summary = "Feed the NDJSON example inside a separately monitored process group",
+    implementation = _worker,
+    args = {"tool_args": args.trailing_var_args(description = "Example binary and its private scratch directory.")},
+)
+
+def _execute(ctx: TaskContext, root: str, binary: str, directory: str, payload = None, failure = ""):
+    stdout = directory + "/stdout"
+    stderr = directory + "/stderr"
+    if payload == None:
+        child = command(ctx, binary, [], root).process_group(0).stdin("null").stdout(ctx.std.fs.create(stdout)).stderr(ctx.std.fs.create(stderr)).spawn()
+    else:
+        ctx.std.fs.write(stdout, "")
+        ctx.std.fs.write(stderr, "")
+        ctx.std.fs.write(directory + "/status", "")
+        _write(ctx, directory + "/input", payload)
+        child = command(ctx, ctx.std.env.current_exe(), ["acceptance", "internal", "ndjson-input", "--", binary, directory], root, {"CI": "false"}).process_group(0).stdout("null").stderr(ctx.std.fs.create(directory + "/worker")).spawn()
+    status = None
+    for _ in range(120):
+        status = child.try_wait(timeout_ms = 250)
+        if ctx.std.fs.metadata(stdout).size > _MAX_OUTPUT or ctx.std.fs.metadata(stderr).size > _STDERR_MAX:
+            if status == None:
+                child.kill()
+                child.wait()
+            fail("NDJSON output exceeded its finite allowance")
+        if status != None:
+            break
+    if status == None:
+        child.kill()
+        child.wait()
+        fail("NDJSON example process deadline exceeded")
+    code = exit_code(status)
+    if payload != None:
+        if code:
+            ctx.std.io.stderr.write(ctx.std.fs.open(directory + "/worker").read())
+            fail("NDJSON input worker failed (exit %d)" % code)
+        code = int(ctx.std.fs.read_to_string(directory + "/status"))
+    output = ctx.std.fs.read_to_string(stdout)
+    diagnostics = ctx.std.fs.read_to_string(stderr)
+    if failure:
+        if code != 1 or output or failure not in diagnostics:
+            fail("Expected an atomic NDJSON rejection with %s, got exit %d: %s" % (failure, code, diagnostics))
+    elif code or diagnostics:
+        fail("Expected a successful example without diagnostics, got exit %d: %s" % (code, diagnostics))
+    return output
+
+def _file(ctx: TaskContext, path: str) -> bool:
+    return ctx.std.fs.exists(path) and ctx.std.fs.metadata(path).is_file
+
+def _check(ctx: TaskContext) -> int:
+    values = ctx.args.tool_args
+    if len(values) == 2 and values[0] == "--binary":
+        binary = values[1]
+    elif len(values) == 1 and values[0].startswith("--binary="):
+        binary = values[0].removeprefix("--binary=")
+    elif values == ["--help"] or values == ["-h"]:
+        ctx.std.io.stdout.write("Pass -- --binary <ndjson_columns>.\n")
+        return 0
+    else:
+        ctx.std.process.exit(2, "Expected --binary <ndjson_columns>")
+    root = ctx.std.env.aspect_root_dir()
+    binary = root_path(root, binary)
+    if not _file(ctx, binary):
+        binary += ".exe"
+    if not _file(ctx, binary):
+        fail("Example binary not found: " + binary)
+    directory = scratch_dir(ctx, "vesper-ndjson-columns-")
+    source, expected = _corpus()
+    if len(bytes(source)) > 64 * 1024:
+        fail("Oracle source exceeds 64 KiB")
+    first = _execute(ctx, root, binary, directory, source)
+    size = ctx.std.fs.metadata(directory + "/stdout").size
+    if first != _execute(ctx, root, binary, directory, source) or not _same(_records(first), expected):
+        fail("NDJSON corpus is not deterministic or did not match the expected rows")
+    if not _same(_records(_execute(ctx, root, binary, directory, source.rstrip("\r\n"))), expected):
+        fail("NDJSON corpus without the final line ending did not match")
+    built_in = [
+        {"id": _U64_MAX, "topic": "é🦀", "raw_meta": {"unknown": [True, None]}},
+        {"id": (1 << 53) + 1, "topic": "line\n🦀", "raw_meta": [1, 2, 3]},
+        {"id": 0, "topic": "empty metadata", "raw_meta": None},
+    ]
+    if not _same(_records(_execute(ctx, root, binary, directory)), built_in):
+        fail("Built-in rows did not match the expected records")
+    if _execute(ctx, root, binary, directory, ""):
+        fail("Empty NDJSON emitted records")
+    good = '{"id":1,"topic":"ok","raw_meta":null}\n'
+    rejected = [
+        ('{"id":2,"topic":"ok","raw_meta":null,"unknown":[1,]}', "Syntax"),
+        ('{"id":2,"topic":"ok","raw_meta":{"x":1,"\\u0078":2}}', "DuplicateKey"),
+        ('{"id":2,"topic":"\\uD800","raw_meta":null}', "Escape"),
+        ('{"topic":"ok","raw_meta":null}', "MissingField"),
+        ('{"id":18446744073709551616,"topic":"ok","raw_meta":null}', "Number"),
+        ('{"id":2,"topic":false,"raw_meta":null}', "Type"),
+        ("\n", "BlankLine"),
+    ]
+    for tail, reason in rejected:
+        _execute(ctx, root, binary, directory, good + tail, failure = reason)
+    invalid_utf8 = bytes(good + '{"id":2,"topic":"') + bytes([255]) + bytes('","raw_meta":null}')
+    _execute(ctx, root, binary, directory, invalid_utf8, failure = "Utf8")
+    _execute(ctx, root, binary, directory, good * 129, failure = "RecordLimit")
+    _execute(ctx, root, binary, directory, "x" * (64 * 1024 + 1), failure = "exceeds 64 KiB")
+    ctx.std.io.stdout.write(json.encode({
+        "status": "passed",
+        "processes": 15,
+        "oracle_rows": len(expected),
+        "encoded_bytes": size,
+        "scope": "actual validated NDJSON to caller columns and scalar JSON; independent Unicode/raw metadata/u64 oracle",
+    }) + "\n")
+    return 0
+
+check_ndjson_columns = task(
+    kind = "check-ndjson-columns",
+    group = ["acceptance"],
+    summary = "Check actual NDJSON column conversion and scalar JSON output",
+    implementation = _check,
+    args = {"tool_args": args.trailing_var_args(description = "Pass -- --binary <ndjson_columns>.")},
+)
+
+def _test(ctx: TaskContext) -> int:
+    source, expected = _corpus()
+    if len(expected) != 96 or len(bytes(source)) > 65536 or source.count("\r\n") != 48:
+        fail("Expected 96 small rows with alternating LF and CRLF")
+    if '"\\u0069d":' not in source or '"to\\u0070ic":' not in source or '"raw_\\u006deta":' not in source:
+        fail("Corpus must exercise escaped field names")
+    if "é🦀" not in source or "\\ud83e\\udd80" not in source or "\\u2028" not in source:
+        fail("Corpus must exercise direct and escaped Unicode")
+    rows = [decode_object(line) for line in source.split("\n")[:-1]]
+    for index, row in enumerate(rows):
+        ignored = row.pop("ignored")
+        if not _same(row, expected[index]) or not _same(ignored, {"nested": ["validated", index, False]}):
+            fail("Wrong decoded corpus row %d" % index)
+    if [row["id"] for row in expected[:4]] != [0, _U64_MAX, 9007199254740993, 4294967295]:
+        fail("Wide-integer edge cases changed")
+    for actual, expected, matches in [
+        (True, 1, False),
+        (1, 1.0, False),
+        (0.0, -0.0, False),
+        (-0.0, -0.0, True),
+        ({"a": [1], "b": None}, {"b": None, "a": [1]}, True),
+        ([{"a": [1]}], [{"a": [2]}], False),
+        ([1], [1, 2], False),
+        (_U64_MAX, _U64_MAX - 1, False),
+    ]:
+        if _same(actual, expected) != matches:
+            fail("Unexpected NDJSON comparison for %r and %r" % (actual, expected))
+    if _records("") != [] or _records('{"x":1}\n') != [{"x": 1}]:
+        fail("Expected the exact newline-delimited records")
+    ctx.std.io.stdout.write("Passed NDJSON corpus and typed equality cases\n")
+    return 0
+
+test_ndjson_columns = task(
+    kind = "ndjson-columns",
+    group = ["ci", "tests"],
+    summary = "Test the independent NDJSON oracle's corpus and typed comparisons",
+    implementation = _test,
+)
