@@ -377,14 +377,8 @@ jobs:
         run: test "$PLAN_RESULT" = success
       - name: Require the shared compiler
         env:
-          PORTS: ${{ needs.plan.outputs.ports }}
           COMPILER_RESULT: ${{ needs.ports-compiler.result }}
-        run: |
-          if [ "$PORTS" = none ]; then
-            echo "no port is affected by this change; nothing to test"
-          else
-            test "$COMPILER_RESULT" = success
-          fi
+        run: test "$COMPILER_RESULT" = success
       - if: ${{ needs.plan.outputs.ports != 'none' }}
         uses: actions/checkout@v4
         with:
@@ -392,7 +386,12 @@ jobs:
       - if: ${{ needs.plan.outputs.ports != 'none' && hashFiles('.aspect/version.axl') != '' }}
         uses: ./.github/actions/aspect
       - name: Verify exact checkout
-        if: ${{ needs.plan.outputs.ports != 'none' }}
+        if: ${{ needs.plan.outputs.ports != 'none' && hashFiles('.aspect/platform-plan.axl') != '' }}
+        env:
+          EXPECTED_SHA: ${{ needs.plan.outputs.sha }}
+        run: aspect ci verify-platform-checkout
+      - name: Verify exact historical checkout
+        if: ${{ needs.plan.outputs.ports != 'none' && hashFiles('.aspect/platform-plan.axl') == '' }}
         env:
           EXPECTED_SHA: ${{ needs.plan.outputs.sha }}
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
@@ -407,20 +406,26 @@ jobs:
         with:
           name: vesper-port-compiler
           path: ${{ runner.temp }}/port-compiler
-      - name: Test the Vesper port harness
+      - name: Make the shared compiler executable
         if: ${{ needs.plan.outputs.ports != 'none' }}
+        env:
+          VESPER_PORT_COMPILER: ${{ runner.temp }}/port-compiler/vesper
+        run: chmod +x "$VESPER_PORT_COMPILER"
+      - name: Test the Vesper port harness
+        if: ${{ needs.plan.outputs.ports != 'none' && hashFiles('.aspect/version.axl') != '' }}
         # Every port compiles with the shared compiler downloaded above.
         env:
           VESPER_PORT_COMPILER: ${{ runner.temp }}/port-compiler/vesper
           VESPER_PORT_HARNESS_SHARD: ${{ matrix.shard }}
           VESPER_PORT_HARNESS_CRATES: ${{ needs.plan.outputs.ports }}
-        run: |
-          chmod +x "$VESPER_PORT_COMPILER"
-          if [ -f .aspect/version.axl ]; then
-            aspect acceptance test-port-harness
-          else
-            scripts/test-port-harness.sh
-          fi
+        run: aspect acceptance test-port-harness
+      - name: Test the Vesper port harness in a historical checkout
+        if: ${{ needs.plan.outputs.ports != 'none' && hashFiles('.aspect/version.axl') == '' }}
+        env:
+          VESPER_PORT_COMPILER: ${{ runner.temp }}/port-compiler/vesper
+          VESPER_PORT_HARNESS_SHARD: ${{ matrix.shard }}
+          VESPER_PORT_HARNESS_CRATES: ${{ needs.plan.outputs.ports }}
+        run: scripts/test-port-harness.sh
 
   complete:
     name: Platform validation complete
