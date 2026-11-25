@@ -148,8 +148,54 @@ struct Session {
     #[cfg(test)]
     peak: Arc<AtomicUsize>,
     closed: bool,
+    /// The child leads its own process tree (a worker and the compiler
+    /// processes it runs), which a kill takes down whole.
+    tree: bool,
+}
+/// Kill `child` and, when it leads a tree, every process in it: a worker
+/// killed at its deadline must not leave a compiler invocation running.
+fn kill_child(child: &mut Child, tree: bool) {
+    if tree {
+        let pid = child.id().to_string();
+        #[cfg(unix)]
+        let mut killer = {
+            let mut c = Command::new(if Path::new("/bin/kill").is_file() {
+                "/bin/kill"
+            } else {
+                "kill"
+            });
+            c.args(["-KILL", "--", &format!("-{pid}")]);
+            c
+        };
+        #[cfg(windows)]
+        let mut killer = {
+            let mut c = Command::new("taskkill");
+            c.args(["/F", "/T", "/PID", &pid]);
+            c
+        };
+        #[cfg(any(unix, windows))]
+        let _ = killer
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
 }
 impl Session {
+    /// Spawn a worker as the leader of its own process tree.
+    fn spawn_tree(
+        mut command: Command,
+        cap: usize,
+        stderr_cap: usize,
+        mode: ReadMode,
+    ) -> Result<Self, HarnessError> {
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut session = Self::spawn(command, cap, stderr_cap, mode)?;
+        session.tree = true;
+        Ok(session)
+    }
     fn spawn(
         mut command: Command,
         cap: usize,
@@ -256,6 +302,7 @@ impl Session {
             #[cfg(test)]
             peak,
             closed: false,
+            tree: false,
         })
     }
     fn stderr_fault(&self) -> Result<(), HarnessError> {
@@ -380,7 +427,7 @@ impl Session {
         self.close_input();
         let mut killed = force;
         if force {
-            let _ = self.child.kill();
+            kill_child(&mut self.child, self.tree);
         }
         let status = loop {
             if let Some(status) = self.child.try_wait()? {
@@ -388,7 +435,7 @@ impl Session {
             }
             if Instant::now() >= until {
                 killed = true;
-                let _ = self.child.kill();
+                kill_child(&mut self.child, self.tree);
                 break Some(self.child.wait()?);
             }
             thread::sleep(Duration::from_millis(5));
@@ -501,6 +548,7 @@ struct Engine {
     lean: Session,
     _root: TempRoot,
     worker_path: PathBuf,
+    compiler_path: PathBuf,
     workers: Vec<Option<WorkerSlot>>,
     started: Vec<bool>,
     requests: blake3::Hasher,
@@ -519,6 +567,8 @@ impl Engine {
         }
         let worker_path = resolve_executable(&config.worker_exe)?;
         report.worker_blake3 = file_hash(&worker_path)?;
+        let compiler_path = resolve_executable(&config.compiler)?;
+        report.compiler_blake3 = file_hash(&compiler_path)?;
         let configured = resolve_invocation(&config.lean)?;
         let mut cmd = command(&configured, None);
         cmd.arg("--version");
@@ -598,6 +648,7 @@ impl Engine {
             lean: server,
             _root: root,
             worker_path,
+            compiler_path,
             workers: (0..config.jobs).map(|_| None).collect(),
             started: vec![false; usize::from(config.jobs)],
             requests: blake3::Hasher::new(),
@@ -690,9 +741,9 @@ impl Engine {
     ) -> Result<(), HarnessError> {
         if self.workers[index].is_none() {
             let mut cmd = command(&self.worker_path, None);
-            cmd.arg("--worker");
+            cmd.arg("--worker").arg(&self.compiler_path);
             let session =
-                Session::spawn(cmd, FRAME_CAP, config.limits.stderr_bytes, ReadMode::Framed)?;
+                Session::spawn_tree(cmd, FRAME_CAP, config.limits.stderr_bytes, ReadMode::Framed)?;
             report.rust_worker_spawns += 1;
             if self.started[index] {
                 report.rust_worker_recycles += 1;
@@ -1164,9 +1215,9 @@ fn shrink(
             let (oracle, request, response) = engine.oracle(&case, config, report, true)?;
             evidence.shrink_log[index]["status"] = serde_json::json!("oracle_answered");
             let mut cmd = command(&engine.worker_path, None);
-            cmd.arg("--worker");
+            cmd.arg("--worker").arg(&engine.compiler_path);
             let mut child =
-                Session::spawn(cmd, FRAME_CAP, config.limits.stderr_bytes, ReadMode::Framed)?;
+                Session::spawn_tree(cmd, FRAME_CAP, config.limits.stderr_bytes, ReadMode::Framed)?;
             spawned = true;
             report.rust_worker_spawns += 1;
             evidence.shrink_log[index]["worker_spawned"] = serde_json::json!(true);
@@ -1540,6 +1591,7 @@ mod tests {
             jobs: 1,
             lean: "unused".into(),
             worker_exe: "unused".into(),
+            compiler: "unused".into(),
             artifacts: Some(output.clone()),
             limits: HarnessLimits::default(),
         };

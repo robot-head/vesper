@@ -1,8 +1,7 @@
 //! The Vesper hot-set decoder and run builder against the Rust ones (both
 //! builds are in the crate under `vesper-port`).
-#![cfg(feature = "vesper-port")]
 
-use vesper_aether::hotset::HotSet;
+use crate::hotset::HotSet;
 
 struct Rng(u64);
 impl Rng {

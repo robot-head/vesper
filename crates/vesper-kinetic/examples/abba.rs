@@ -29,6 +29,9 @@
 //! - `pile-lbvh`: a 16 × 16 × 4 pile (1,024 spheres) with the LBVH
 //!   broadphase, 4 ticks on one solver thread; `pile-lbvh-4t` the same on 4
 //!   threads (the solver's fan-out stays Rust in part 1).
+//! - `rigid-solve`: eight box stacks and two driven hinge chains in
+//!   `RigidWorld`, 8 substeps: 4 ticks, then 24 more runs of the substep
+//!   solver on the last manifolds.
 
 use std::time::Instant;
 use vesper_bench::{PairedSample, analyze_pairs};
@@ -38,8 +41,9 @@ macro_rules! workloads {
         mod $m {
             use $s::lbvh::{Aabb, Lbvh};
             use $s::rigid::{
-                CcdConfig, ColliderShape, RigidBody, RigidCollider, RigidConfig, RigidMaterial,
-                RigidWorld, box_inv_inertia, sphere_inv_inertia,
+                CcdConfig, ColliderShape, JointDrive, JointKind, RigidBody, RigidCollider,
+                RigidConfig, RigidJoint, RigidMaterial, RigidWorld, box_inv_inertia,
+                sphere_inv_inertia,
             };
             use $s::{
                 Body, BroadphaseMode, Colorer, ConstraintBodies, DistanceConstraint, MultiColorer,
@@ -341,6 +345,105 @@ macro_rules! workloads {
                 pile(4)
             }
 
+            /// Eight 6-box stacks with friction and restitution on the
+            /// ground and two 8-link hinge chains (a motor, a servo and joint
+            /// friction), 8 substeps with the gyroscopic term: 4 ticks, then
+            /// the substep solver (`RigidWorld::solve`) 24 more times on the
+            /// last tick's manifolds.
+            pub fn rigid_solve(_: u64) -> u64 {
+                let h = [0.3, 0.2, 0.3];
+                let mat = RigidMaterial {
+                    static_friction: 0.6,
+                    dynamic_friction: 0.4,
+                    restitution: 0.2,
+                    rolling_friction: 0.0,
+                };
+                let colliders = [RigidCollider {
+                    shape: ColliderShape::Box { half_extents: h },
+                    material: mat,
+                }];
+                let inv_i = box_inv_inertia(1.0, h);
+                let mut bodies = Vec::new();
+                for stack in 0..8 {
+                    for level in 0..6 {
+                        let x = (stack % 4) as f32 * 1.0 + level as f32 * 0.01;
+                        let z = (stack / 4) as f32 * 1.0;
+                        bodies.push(RigidBody::new(
+                            [x, 0.21 + level as f32 * 0.41, z],
+                            1.0,
+                            inv_i,
+                            0,
+                        ));
+                    }
+                }
+                let first = bodies.len() as u32;
+                for chain in 0..2 {
+                    for link in 0..8 {
+                        let mut b = RigidBody::new(
+                            [-2.0 - link as f32 * 0.7, 4.0, chain as f32 * 2.0],
+                            1.0,
+                            inv_i,
+                            0,
+                        );
+                        b.ang_vel = [0.5, 3.0, 0.25];
+                        bodies.push(b);
+                    }
+                }
+                let mut w = RigidWorld::new(
+                    RigidConfig {
+                        dt: 1.0 / 60.0,
+                        substeps: 8,
+                        ..RigidConfig::default()
+                    },
+                    &bodies,
+                    &colliders,
+                )
+                .unwrap();
+                w.set_gyroscopic(true);
+                for chain in 0..2u32 {
+                    for link in 0..8u32 {
+                        let a = first + chain * 8 + link;
+                        let (b, anchor_b) = if link == 0 {
+                            (None, [-2.0, 4.0 + 0.35, chain as f32 * 2.0])
+                        } else {
+                            (Some(a - 1), [-0.35, 0.0, 0.0])
+                        };
+                        let j = w
+                            .add_joint(RigidJoint {
+                                kind: JointKind::Hinge {
+                                    axis_a: [0.0, 0.0, 1.0],
+                                    axis_b: [0.0, 0.0, 1.0],
+                                    limits: (link % 2 == 1).then_some([-0.8, 0.8]),
+                                },
+                                ..RigidJoint::ball(a, b, [0.35, 0.0, 0.0], anchor_b)
+                            })
+                            .unwrap();
+                        let drive = match link % 3 {
+                            0 => Some(JointDrive::Velocity {
+                                target: 1.5,
+                                max_force: 30.0,
+                            }),
+                            1 => Some(JointDrive::Position {
+                                target: 0.3,
+                                compliance: 1.0e-3,
+                                damping: 0.5,
+                                max_force: 40.0,
+                            }),
+                            _ => None,
+                        };
+                        w.set_joint_drive(j, drive).unwrap();
+                        w.set_joint_friction(j, 0.2).unwrap();
+                    }
+                }
+                for _ in 0..4 {
+                    w.step().unwrap();
+                }
+                for _ in 0..24 {
+                    w.bench_solve();
+                }
+                w.hash().blake3[0] as u64
+            }
+
             pub fn ccd(seed: u64) -> u64 {
                 let mat = RigidMaterial {
                     static_friction: 0.4,
@@ -476,7 +579,7 @@ workloads!(port_build, vesper_kinetic);
 
 type Work = fn(u64) -> u64;
 
-const WORKLOADS: [(&str, Work, Work); 13] = [
+const WORKLOADS: [(&str, Work, Work); 14] = [
     ("morton", rust_build::morton, port_build::morton),
     ("fastmath", rust_build::fastmath, port_build::fastmath),
     ("crmath", rust_build::crmath, port_build::crmath),
@@ -498,6 +601,11 @@ const WORKLOADS: [(&str, Work, Work); 13] = [
     ),
     ("ccd", rust_build::ccd, port_build::ccd),
     ("manifold", rust_build::manifold, port_build::manifold),
+    (
+        "rigid-solve",
+        rust_build::rigid_solve,
+        port_build::rigid_solve,
+    ),
 ];
 
 /// Total nanoseconds for `ops` timed runs after `ops / 4` warm-up ones.

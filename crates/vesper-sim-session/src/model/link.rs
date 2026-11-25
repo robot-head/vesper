@@ -28,8 +28,6 @@
 //! The generator is SplitMix64 (not cryptographic). It never reads a real
 //! clock or random source.
 use serde::{Deserialize, Serialize};
-#[cfg(not(feature = "vesper-port"))]
-use std::collections::VecDeque;
 
 pub const PPM: u32 = 1_000_000;
 
@@ -40,46 +38,19 @@ impl SplitMix64 {
     pub fn new(seed: u64) -> Self {
         Self(seed)
     }
-    #[cfg(feature = "vesper-port")]
     pub fn next_u64(&mut self) -> u64 {
         port::splitmix_next(&mut self.0)
     }
-    #[cfg(feature = "vesper-port")]
+    /// One Bernoulli draw with probability `ppm / 10^6`. Always consumes one
+    /// value, so the draw sequence does not depend on the probabilities.
     pub fn chance(&mut self, ppm: u32) -> bool {
         port::splitmix_chance(&mut self.0, ppm)
     }
-    #[cfg(not(feature = "vesper-port"))]
-    pub fn next_u64(&mut self) -> u64 {
-        // Wrapping arithmetic is the definition of SplitMix64.
-        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
-    }
-    /// One Bernoulli draw with probability `ppm / 10^6`. Always consumes one
-    /// value, so the draw sequence does not depend on the probabilities.
-    #[cfg(not(feature = "vesper-port"))]
-    pub fn chance(&mut self, ppm: u32) -> bool {
-        (self.next_u64() % u64::from(PPM)) < u64::from(ppm)
-    }
 }
 
 /// FNV-1a of a name, used to derive per-link and per-flow seeds.
-#[cfg(feature = "vesper-port")]
 pub fn name_seed(seed: u64, name: &str) -> u64 {
     port::name_seed(seed, name)
-}
-
-/// FNV-1a of a name, used to derive per-link and per-flow seeds.
-#[cfg(not(feature = "vesper-port"))]
-pub fn name_seed(seed: u64, name: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in name.bytes() {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h ^ seed.rotate_left(17)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,12 +63,10 @@ pub struct GilbertElliott {
 }
 impl GilbertElliott {
     /// Stationary probability of the Bad state, in ppm (rounded down).
-    #[cfg(feature = "vesper-port")]
     pub fn stationary_bad_ppm(&self) -> u32 {
         port::stationary_bad_ppm(self.good_to_bad_ppm, self.bad_to_good_ppm)
     }
     /// Stationary loss probability of the chain alone, in ppm.
-    #[cfg(feature = "vesper-port")]
     pub fn stationary_loss_ppm(&self) -> u32 {
         port::stationary_loss_ppm(
             self.good_to_bad_ppm,
@@ -105,26 +74,6 @@ impl GilbertElliott {
             self.loss_good_ppm,
             self.loss_bad_ppm,
         )
-    }
-    /// Stationary probability of the Bad state, in ppm (rounded down).
-    #[cfg(not(feature = "vesper-port"))]
-    pub fn stationary_bad_ppm(&self) -> u32 {
-        let (g, b) = (
-            u64::from(self.good_to_bad_ppm),
-            u64::from(self.bad_to_good_ppm),
-        );
-        if g + b == 0 {
-            return 0;
-        }
-        (g * u64::from(PPM) / (g + b)) as u32
-    }
-    /// Stationary loss probability of the chain alone, in ppm.
-    #[cfg(not(feature = "vesper-port"))]
-    pub fn stationary_loss_ppm(&self) -> u32 {
-        let bad = u64::from(self.stationary_bad_ppm());
-        let good = u64::from(PPM) - bad;
-        ((good * u64::from(self.loss_good_ppm) + bad * u64::from(self.loss_bad_ppm))
-            / u64::from(PPM)) as u32
     }
 }
 
@@ -197,138 +146,13 @@ pub enum LinkError {
     TimeOverflow,
 }
 
-#[cfg(not(feature = "vesper-port"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Link {
-    spec: LinkSpec,
-    rng: SplitMix64,
-    bad: bool,
-    /// Departure times of queued datagrams, ascending.
-    departures: VecDeque<u64>,
-}
-
-#[cfg(not(feature = "vesper-port"))]
-impl Link {
-    pub fn new(spec: LinkSpec, seed: u64) -> Self {
-        let rng = SplitMix64::new(name_seed(seed, &spec.name));
-        Self {
-            spec,
-            rng,
-            bad: false,
-            departures: VecDeque::new(),
-        }
-    }
-    pub fn spec(&self) -> &LinkSpec {
-        &self.spec
-    }
-    pub fn in_bad_state(&self) -> bool {
-        self.bad
-    }
-    /// Datagrams queued in the bottleneck at `at_ns`.
-    pub fn queued_at(&self, at_ns: u64) -> u32 {
-        let served = self.departures.partition_point(|d| *d <= at_ns);
-        (self.departures.len() - served) as u32
-    }
-
-    /// Service time of a datagram of `bytes`, rounded up (at least 1 ns).
-    pub fn service_ns(&self, bytes: u32) -> u64 {
-        let rate = u128::from(self.spec.bottleneck.rate_bytes_per_sec.max(1));
-        let ns = (u128::from(bytes) * 1_000_000_000).div_ceil(rate);
-        u64::try_from(ns).unwrap_or(u64::MAX).max(1)
-    }
-
-    /// Whether the next datagram is duplicated (one draw).
-    pub fn duplicates(&mut self) -> bool {
-        self.rng.chance(self.spec.duplicate_ppm)
-    }
-
-    /// Draw the fate of one datagram of `bytes` handed to the link at
-    /// `at_ns`. `now_ns` is the virtual clock (never later than `at_ns`);
-    /// queue entries that departed by then are discarded.
-    pub fn transmit(
-        &mut self,
-        now_ns: u64,
-        at_ns: u64,
-        bytes: u32,
-    ) -> Result<Transmission, LinkError> {
-        let served = self.departures.partition_point(|d| *d <= now_ns);
-        self.departures.drain(..served);
-        // Fixed draw order: GE step, GE loss, independent loss, reorder.
-        let mut ge_lost = false;
-        if let Some(ge) = self.spec.gilbert_elliott {
-            let flip = if self.bad {
-                self.rng.chance(ge.bad_to_good_ppm)
-            } else {
-                self.rng.chance(ge.good_to_bad_ppm)
-            };
-            if flip {
-                self.bad = !self.bad;
-            }
-            let loss = if self.bad {
-                ge.loss_bad_ppm
-            } else {
-                ge.loss_good_ppm
-            };
-            ge_lost = self.rng.chance(loss);
-        }
-        let independent = self.rng.chance(self.spec.loss_ppm);
-        let reorder = self
-            .spec
-            .reorder
-            .map(|r| (self.rng.chance(r.ppm), r.extra_delay_ns));
-        let ge_bad = self.bad;
-        let lost = |cause| Transmission {
-            ge_bad,
-            fate: Fate::Lost { cause },
-        };
-        if ge_lost {
-            return Ok(lost(LossCause::GilbertElliott));
-        }
-        if independent {
-            return Ok(lost(LossCause::Independent));
-        }
-        if self.queued_at(at_ns) >= self.spec.bottleneck.buffer_packets {
-            return Ok(lost(LossCause::QueueOverflow));
-        }
-        let start = self
-            .departures
-            .back()
-            .copied()
-            .map_or(at_ns, |last| last.max(at_ns));
-        let departure = start
-            .checked_add(self.service_ns(bytes))
-            .ok_or(LinkError::TimeOverflow)?;
-        let reorder_extra_ns = match reorder {
-            Some((true, extra)) => extra,
-            _ => 0,
-        };
-        let arrive_at_ns = departure
-            .checked_add(self.spec.base_delay_ns)
-            .and_then(|t| t.checked_add(reorder_extra_ns))
-            .ok_or(LinkError::TimeOverflow)?;
-        // Insert keeping the deque ascending (departures are nondecreasing
-        // for nondecreasing `at_ns`; later `at_ns` values only append).
-        let index = self.departures.partition_point(|d| *d <= departure);
-        self.departures.insert(index, departure);
-        Ok(Transmission {
-            ge_bad,
-            fate: Fate::Delivered {
-                queue_delay_ns: departure - at_ns,
-                reorder_extra_ns,
-                arrive_at_ns,
-            },
-        })
-    }
-}
-
-/// The Vesper build of the link (port/src/lib.ves), with the same API.
-#[cfg(feature = "vesper-port")]
+/// A link's state: the Vesper port (port/src/lib.ves) owns the GE chain,
+/// the queue and the generator.
 pub struct Link {
     spec: LinkSpec,
     state: port::LinkState,
 }
 
-#[cfg(feature = "vesper-port")]
 impl Link {
     pub fn new(spec: LinkSpec, seed: u64) -> Self {
         let ge = spec.gilbert_elliott;
@@ -401,7 +225,6 @@ impl Link {
     }
 }
 
-#[cfg(feature = "vesper-port")]
 impl Clone for Link {
     fn clone(&self) -> Self {
         Self {
@@ -411,16 +234,13 @@ impl Clone for Link {
     }
 }
 
-#[cfg(feature = "vesper-port")]
 impl PartialEq for Link {
     fn eq(&self, other: &Self) -> bool {
         self.spec == other.spec && port::LinkState::same(&self.state, &other.state)
     }
 }
-#[cfg(feature = "vesper-port")]
 impl Eq for Link {}
 
-#[cfg(feature = "vesper-port")]
 impl std::fmt::Debug for Link {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Link")
@@ -430,7 +250,6 @@ impl std::fmt::Debug for Link {
     }
 }
 
-#[cfg(feature = "vesper-port")]
 use crate::port;
 
 #[cfg(test)]

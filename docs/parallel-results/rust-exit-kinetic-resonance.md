@@ -611,6 +611,56 @@ instruction. Reported for the codegen owners; not fixed here.
 `cargo +1.100.0 clippy -p vesper-kinetic -p vesper-kinetic-seed
 --all-targets -- -D warnings` and `tools/bazel/sync_build_files.py --check`.
 
+## Part 9: the rigid substep solver flipped (2026-11-25)
+
+`RigidWorld::solve` (src/rigid.rs) moves to `@vesper/kinetic`
+(vesper/src/solve.ves): integration with the implicit gyroscopic term
+(src/rigid/gyro.rs), the restitution pre-pass, the colour-layer position
+pass (contact manifolds and joints with limits, position drives and static
+joint friction), velocities from positions, and the velocity pass (contact
+restitution and friction, angular and rolling friction, motors, servo
+damping and dynamic joint friction). The bodies, manifolds, joints and
+colour layers are packed once per tick, not once per substep; the Rust
+solver stays under `cfg(not(vesper_port))` for the seed.
+
+### Measurements
+
+`examples/abba.rs rigid-solve` (8 box stacks and 2 driven hinge chains, 8
+substeps: 4 ticks, then 24 more solver runs on the last manifolds), 30
+epochs, release, `RUSTFLAGS="-C target-cpu=native"`, Linux x86_64:
+port/Rust **1.22x** (range 1.12x..1.47x, sample median regression
++22%..+22%).
+
+### What changed
+
+- The first port read every lane through `V3`/`Q4` helpers and ran at
+  2.07x (3.7x the instructions of the Rust solver). The hot helpers
+  (`rot`, `qmul`, `points_of`, the inverse inertia and angular weight, the
+  impulse updates, the relative velocity) are now written on scalars with
+  the same operations in the same order; the velocity pass computes only
+  the arms (`centroid_arms`) and the anchor points (`point_a`) it uses.
+- `RigidWorld::bench_solve` (doc-hidden) runs the solver once more for the
+  ABBA workload.
+
+### Checks
+
+- `rigid_solve_matches_the_rust_build` (tests/port_differential.rs): 96
+  random scenes (stacks with materials, inertia frames, gyroscopic spin,
+  sleeping, and ball, hinge and prismatic joints with limits, drives and
+  friction), 90 ticks each: body hashes, manifolds with their solver state,
+  joint forces and coordinates all equal in 8,640 ticks.
+- Every vesper-kinetic test passes on the port, golden hashes included.
+- Divergence 12 (`solve`): a joint motor drives the rate to zero;
+  `joint_drives::hinge_motor_reaches_its_target_rate` fails and
+  `hinge_servo_holds_the_target_angle_against_gravity` passes.
+
+### Compiler gap found
+
+A `copy struct` value (`V3`, `Q4`) is built in a zeroed stack slot with 8
+bytes per `f32` field, even when the helper that returns it is inlined, and
+every `Slice[f32]` element read is its own bounds check and branch. Scalar
+code avoids the first; the second is what is left of the 1.22x.
+
 ## What is left
 
 - **Resonance:** slab (1.89x) and events (8.00x) stay above the bar until codegen removes their hot-path overhead (gap 7). The Rust
@@ -619,7 +669,9 @@ instruction. Reported for the codegen owners; not fixed here.
   plan), the `rtrb` rings (`spsc.rs`) and the denormal registers are not
   ported yet. The SIMD paths are ported (part 3), but they run at 8-48x and
   are bound by gaps 2 and 6.
-- **Kinetic:** every isolated module is flipped (part 8). Next, port `world`/`tile`, `rigid` and `rigid/**`, `soft`,
+- **Kinetic:** every isolated module and the rigid substep solver are
+  flipped (parts 8 and 9). Next, port `world`/`tile`, the rest of `rigid`
+  (step driver, narrowphase driver, queries), `soft`,
   `articulation`, `couple`, `diff`, `rigid_diff`, `rollback`, `snapshot`,
   `detfloat`, `simd` (see `port-p3b-kinetic.md`, "Not ported yet"), then the
   speed of the ported modules (1.3-2.8x in P3b).

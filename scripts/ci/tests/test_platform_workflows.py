@@ -123,6 +123,7 @@ class PlatformWorkflowTests(unittest.TestCase):
         mac_commands = "\n".join(s.get("run", "") for s in mac["steps"])
         windows_commands = "\n".join(s.get("run", "") for s in windows["steps"])
         self.assertIn("aspect ci test-native-executables", mac_commands)
+        self.assertIn("aspect ci test-pulse-port", mac_commands)
         native_step = next(s for s in windows["steps"] if s.get("name") == "Validate native COFF executables")
         self.assertEqual(native_step["shell"], "pwsh")
         self.assertIn("./scripts/windows/test-native-executables.ps1", native_step["run"])
@@ -268,9 +269,10 @@ class PlatformWorkflowTests(unittest.TestCase):
         for result in ("failure", "skipped", "cancelled"):
             with tempfile.TemporaryDirectory() as temp:
                 output = Path(temp) / "outputs"
-                for failed in ("WINDOWS_RESULT", "PORTS_RESULT"):
+                for failed in ("WINDOWS_RESULT", "SWAP_RESULT", "PORTS_RESULT"):
                     env = {**os.environ, "PLAN_RESULT": "success", "MAC_RESULT": "success",
-                           "WINDOWS_RESULT": "success", "PORTS_RESULT": "success",
+                           "WINDOWS_RESULT": "success", "SWAP_RESULT": "success",
+                           "PORTS_RESULT": "success",
                            "CHECKED_SHA": "a" * 40, "PROFILE": "full",
                            "GITHUB_OUTPUT": str(output), failed: result}
                     completed = subprocess.run(["bash", "-e", "-c", run], env=env)
@@ -285,11 +287,28 @@ class PlatformWorkflowTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as temp:
                 output = Path(temp) / "outputs"
                 env = {**os.environ, "PLAN_RESULT": "success", "MAC_RESULT": "success",
-                       "WINDOWS_RESULT": "success", "PORTS_RESULT": "skipped", "PORTS": ports,
+                       "WINDOWS_RESULT": "success", "SWAP_RESULT": "success",
+                       "PORTS_RESULT": "skipped", "PORTS": ports,
                        "CHECKED_SHA": "a" * 40, "PROFILE": "pr", "GITHUB_OUTPUT": str(output)}
                 completed = subprocess.run(["bash", "-e", "-c", run], env=env)
                 self.assertEqual(completed.returncode != 0, bool(expected))
                 self.assertEqual(output.exists(), not expected)
+
+    def test_codegen_swap_objects_compare_on_linux(self):
+        # The macOS and Windows objects of the codegen swap point compare on
+        # Linux; the native lanes keep the hooks' calls and the JIT runs.
+        jobs = self.platforms["jobs"]
+        swap = jobs["codegen-swap"]
+        self.assertEqual(swap["runs-on"], "ubuntu-latest")
+        self.assertEqual({row["target"] for row in swap["strategy"]["matrix"]["include"]},
+                         {"aarch64-apple-darwin", "x86_64-pc-windows-msvc"})
+        step = next(s for s in swap["steps"] if "vesper-codegen-swap-test" in s.get("run", ""))
+        self.assertEqual(step["env"]["CODEGEN_SWAP_TARGET"], "${{ matrix.target }}")
+        self.assertIn("codegen-swap", jobs["complete"]["needs"])
+        for job in (jobs["platform"], jobs["windows"]):
+            step = next(s for s in job["steps"] if s.get("name") == "Test the codegen swap point")
+            self.assertEqual(step["env"]["CHECK_HARNESS_STRIDE"], "4")
+            self.assertNotIn("CODEGEN_SWAP_TARGET", step["env"])
 
     def test_hybrid_and_ports_skip_pull_requests(self):
         # Neither is required; both run on main, nightly and manual runs (#1479).

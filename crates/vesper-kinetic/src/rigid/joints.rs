@@ -48,9 +48,11 @@
 //! A compliant position drive is an undamped XPBD spring (it oscillates
 //! about the target); a rigid one (`compliance = 0`) settles at once.
 
+#[cfg(not(vesper_port))]
+use super::angular_weight;
 use super::{
-    IDENTITY, Q, RigidError, RigidWorld, State, V3, add, angular_weight, conj, cross, det, dot,
-    finite3, length, normalize_q, perpendicular, qmul, rotate, scale, sub,
+    IDENTITY, Q, RigidError, RigidWorld, State, V3, add, conj, cross, det, dot, finite3, length,
+    normalize_q, perpendicular, qmul, rotate, scale, sub,
 };
 use crate::fastmath;
 
@@ -155,15 +157,86 @@ pub(super) struct JointState {
 }
 
 impl JointState {
+    #[cfg(not(vesper_port))]
     pub(super) fn has_friction(&self) -> bool {
         self.friction > 0.0
     }
 
+    #[cfg(not(vesper_port))]
     pub(super) fn reset(&mut self) {
         self.lambda_pos = 0.0;
         self.lambda_ang = 0.0;
         self.lambda_lim = 0.0;
         self.lambda_drive = 0.0;
+    }
+}
+
+/// f32 lanes of a packed joint (`jf` of vesper/src/solve.ves; `ju` has 5).
+#[cfg(vesper_port)]
+pub(super) const JOINT_F32: usize = 37;
+
+#[cfg(vesper_port)]
+impl JointState {
+    /// Appends the joint's lanes for the port solver.
+    pub(super) fn pack(&self, f: &mut Vec<f32>, u: &mut Vec<u32>) {
+        let j = &self.joint;
+        let (kind, limits) = match j.kind {
+            JointKind::Ball => (0, None),
+            JointKind::Hinge { limits, .. } => (1, limits),
+            JointKind::Prismatic { limits, .. } => (2, limits),
+        };
+        let [lo, hi] = limits.unwrap_or([0.0; 2]);
+        let (drive, target, compliance, damping, max_force) = match self.drive {
+            None => (0, 0.0, 0.0, 0.0, 0.0),
+            Some(JointDrive::Velocity { target, max_force }) => (1, target, 0.0, 0.0, max_force),
+            Some(JointDrive::Position {
+                target,
+                compliance,
+                damping,
+                max_force,
+            }) => (2, target, compliance, damping, max_force),
+        };
+        f.extend_from_slice(&j.anchor_a);
+        f.extend_from_slice(&j.anchor_b);
+        f.extend_from_slice(&self.axis_a);
+        f.extend_from_slice(&self.axis_b);
+        f.extend_from_slice(&self.ref_a);
+        f.extend_from_slice(&self.ref_b);
+        f.extend_from_slice(&self.rest);
+        f.extend_from_slice(&[
+            j.compliance,
+            j.angular_compliance,
+            lo,
+            hi,
+            self.lambda_pos,
+            self.lambda_ang,
+            self.lambda_lim,
+            self.last_lambda,
+            self.friction,
+            self.lambda_drive,
+            self.coord_start,
+            target,
+            compliance,
+            damping,
+            max_force,
+        ]);
+        u.extend_from_slice(&[
+            j.a,
+            j.b.unwrap_or(u32::MAX),
+            kind,
+            u32::from(limits.is_some()),
+            drive,
+        ]);
+    }
+
+    /// Takes back the solver state the port wrote into the joint's lanes.
+    pub(super) fn unpack(&mut self, f: &[f32]) {
+        self.lambda_pos = f[26];
+        self.lambda_ang = f[27];
+        self.lambda_lim = f[28];
+        self.last_lambda = f[29];
+        self.lambda_drive = f[31];
+        self.coord_start = f[32];
     }
 }
 
@@ -419,6 +492,7 @@ impl RigidWorld {
     }
 
     /// The free coordinate of a hinge or prismatic joint (`0` for a ball).
+    #[cfg(not(vesper_port))]
     fn coordinate(&self, j: &JointState) -> f32 {
         match j.joint.kind {
             JointKind::Ball => 0.0,
@@ -433,6 +507,7 @@ impl RigidWorld {
 
     /// Record the free coordinate of every joint with friction at the start
     /// of a substep.
+    #[cfg(not(vesper_port))]
     pub(super) fn record_joint_coordinates(&mut self) {
         for k in 0..self.joints.len() {
             if self.joints[k].friction > 0.0 {
@@ -444,6 +519,7 @@ impl RigidWorld {
 
     /// Positional static friction of joint `j`: undo the coordinate's motion
     /// this substep if that takes an impulse within `friction · h²`.
+    #[cfg(not(vesper_port))]
     fn static_joint_friction(&mut self, j: &JointState, h2: f32) -> bool {
         let (a, b) = (j.joint.a, j.joint.b);
         let bound = det::mul(j.friction, h2);
@@ -555,6 +631,7 @@ impl RigidWorld {
     }
 
     /// Velocity pass of joint `k`: the motor, then Coulomb friction.
+    #[cfg(not(vesper_port))]
     pub(super) fn joint_velocity(&mut self, k: usize, h: f32) {
         let j = self.joints[k];
         // (target rate, implicit damping, bound); a velocity motor is
@@ -620,6 +697,7 @@ impl RigidWorld {
     /// Velocity impulse `imp` on the free coordinate: `+imp` along the axis
     /// on `b` and `−imp` on `a` (angular for a hinge, linear at the anchors
     /// for a prismatic joint).
+    #[cfg(not(vesper_port))]
     fn coordinate_impulse(
         &mut self,
         (a, b): (u32, Option<u32>),
@@ -671,6 +749,7 @@ impl RigidWorld {
     }
 
     /// One XPBD positional part: move `a`'s anchor by `delta` towards `b`'s.
+    #[cfg(not(vesper_port))]
     fn positional_part(
         &mut self,
         (a, b): (u32, Option<u32>),
@@ -700,6 +779,7 @@ impl RigidWorld {
 
     /// One XPBD angular part: rotate `a` by `dq` (and `b` by `-dq`), scaled
     /// by the generalized inverse inertia.
+    #[cfg(not(vesper_port))]
     fn angular_part(&mut self, a: u32, b: Option<u32>, dq: V3, alpha: f32, lambda: &mut f32) {
         let theta = length(dq);
         if !(theta > 0.0) {
@@ -720,6 +800,7 @@ impl RigidWorld {
     }
 
     /// [`RigidWorld::angular_part`] with the accumulated `|λ|` bounded.
+    #[cfg(not(vesper_port))]
     fn bounded_angular_part(
         &mut self,
         (a, b): (u32, Option<u32>),
@@ -752,6 +833,7 @@ impl RigidWorld {
     /// A positional part along the unit `axis` with signed violation `c`
     /// (`b`'s anchor is `c` too far along the axis), its accumulated `λ`
     /// bounded by `±bound`.
+    #[cfg(not(vesper_port))]
     fn bounded_positional_part(
         &mut self,
         (a, b): (u32, Option<u32>),
@@ -785,6 +867,7 @@ impl RigidWorld {
     }
 
     /// Project joint `k` once (one substep of length `h`).
+    #[cfg(not(vesper_port))]
     pub(super) fn project_joint(&mut self, k: usize, h: f32) {
         let mut j = self.joints[k];
         let (a, b) = (j.joint.a, j.joint.b);

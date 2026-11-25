@@ -52,6 +52,10 @@ const DIVERGENT: &[(&str, &str)] = &[
     // wal.rs (vesper/src/wal.ves): valid WAL headers are rejected;
     // durable committed_changes_survive_reopen_and_aborts_roll_back fails.
     ("if seq == 0 || base == 0 {", "if true {"),
+    // store/pages.rs leaf validation (vesper/src/leaf.ves: printable ASCII
+    // in leaf text is rejected as invalid UTF-8) is likewise only in
+    // BUILD.bazel's PORT_DIVERGENT; store_ssi
+    // write_skew_on_call_doctors_is_rejected fails.
     // store/pages.rs (vesper/src/internal.ves: the B+Tree internal route
     // always goes left) and store/log.rs (vesper/src/store_log.ves: the
     // Commit tag rejected as unknown) have their edits only in

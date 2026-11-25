@@ -1,37 +1,33 @@
 //! Isolated, actual compiler/evaluator/JIT execution; no reference arithmetic.
+//!
+//! The system under test is the `vesper` command line (`compiler.rs`): the
+//! worker renders the case, has the compiler parse and check it (`emit
+//! --emit hir --no-opt --json`), binds the parsed module to the case, then
+//! runs it on the evaluator (`run`) and the JIT (`jit`) in all four
+//! optimizer settings.
 #![forbid(unsafe_code)]
 
+use super::compiler::{self, Compiler, Executed, Front, Scratch};
 use super::{
     Case, DiagnosticPhase, FRAME_CAP, FailureKind, HarnessError, HarnessLimits, Intent, Kind, Node,
     Outcome, RustAnswer, WorkerRequest, WorkerResponse, corpus, protocol,
 };
 use std::io;
-use vesper::{
-    ast::Diagnostic,
-    check, native, optimize, parser,
-    runtime::{Runtime, Value},
-};
 
 fn invariant(detail: impl Into<String>) -> HarnessError {
     HarnessError::new(FailureKind::Invariant, detail)
 }
 
-fn diagnostic(
-    phase: DiagnosticPhase,
-    diagnostics: &[Diagnostic],
-) -> Result<RustAnswer, HarnessError> {
-    if diagnostics.is_empty()
-        || diagnostics.len() > 16
-        || diagnostics
+fn diagnostic(phase: DiagnosticPhase, codes: Vec<String>) -> Result<RustAnswer, HarnessError> {
+    if codes.is_empty()
+        || codes.len() > 16
+        || codes
             .iter()
-            .any(|d| d.code.is_empty() || d.code.len() > 16 || !d.code.is_ascii())
+            .any(|c| c.is_empty() || c.len() > 16 || !c.is_ascii())
     {
         return Err(invariant("compiler diagnostic codes exceed worker profile"));
     }
-    Ok(RustAnswer::Diagnostic {
-        phase,
-        codes: diagnostics.iter().map(|d| d.code.clone()).collect(),
-    })
+    Ok(RustAnswer::Diagnostic { phase, codes })
 }
 
 /// The only unbound-source exception is an actual parser-range negative. No
@@ -63,22 +59,6 @@ impl Backend {
     }
 }
 
-// Never format an aggregate recursively: carrier diagnostics remain bounded
-// even when a backend unexpectedly returns an unsupported compound value.
-fn carrier(value: &Value) -> String {
-    match value {
-        Value::Int(n) => format!("Int({n})"),
-        Value::UInt(n, width) => format!("UInt({n}, {width})"),
-        Value::Bool(b) => format!("Bool({b})"),
-        Value::Tuple(parts) => format!("Tuple(len={})", parts.len()),
-        _ => "non-integer value".into(),
-    }
-}
-
-fn decode_error(detail: &str, value: &Value) -> HarnessError {
-    invariant(format!("{detail}; carrier={}", carrier(value)))
-}
-
 fn mode_error(
     error: HarnessError,
     backend: Backend,
@@ -95,48 +75,46 @@ fn mode_error(
     )
 }
 
-fn decode(value: Value, kind: Kind, backend: Backend) -> Result<Outcome, HarnessError> {
-    let parts = match value {
-        Value::Tuple(parts) => parts,
-        other => return Err(decode_error("backend result is not a tagged tuple", &other)),
+/// The CLI prints `main`'s `(bool, K)` result as `(<bool>, <integer>)`.
+/// Anything else, a payload outside `K`, or an overflow tag with a nonzero
+/// payload is an invariant failure, never an answer.
+fn decode(printed: &str, kind: Kind) -> Result<Outcome, HarnessError> {
+    let bounded: String = printed.chars().take(128).collect();
+    let shape = || {
+        invariant(format!(
+            "backend result is not a (bool, K) tuple: {bounded}"
+        ))
     };
-    let [Value::Bool(overflow), value] = parts.as_slice() else {
-        return Err(invariant(format!(
-            "backend result must be exactly (bool, K); carrier=Tuple(len={})",
-            parts.len()
-        )));
+    let inner = printed
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .ok_or_else(shape)?;
+    let (tag, value) = inner.split_once(", ").ok_or_else(shape)?;
+    let overflow = match tag {
+        "true" => true,
+        "false" => false,
+        _ => return Err(shape()),
     };
-    let n = match (kind, value) {
-        (Kind::U8, Value::UInt(n, 8))
-        | (Kind::U32, Value::UInt(n, 32))
-        | (Kind::U64, Value::UInt(n, 64)) => i128::from(*n),
-        (Kind::I64, Value::Int(n)) => i128::from(*n),
-        // Runtime can retain an unsuffixed Int in an unsigned aggregate.
-        // Preserve that exact mathematical value; never reinterpret its bits.
-        (Kind::U8 | Kind::U32 | Kind::U64, Value::Int(n))
-            if matches!(backend, Backend::Evaluator) && *n >= 0 =>
-        {
-            i128::from(*n)
-        }
-        _ => {
-            return Err(decode_error(
-                "backend tagged payload has the wrong value kind",
-                value,
-            ));
-        }
-    };
-    if !kind.fits(n) {
-        return Err(decode_error(
-            "backend tagged payload is outside its declared kind",
-            value,
-        ));
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    if digits.is_empty()
+        || digits.len() > 39
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+        || (digits.len() > 1 && digits.starts_with('0'))
+        || value == "-0"
+    {
+        return Err(shape());
     }
-    if *overflow {
+    let n: i128 = value.parse().map_err(|_| shape())?;
+    if !kind.fits(n) {
+        return Err(invariant(format!(
+            "backend tagged payload is outside its declared kind: {bounded}"
+        )));
+    }
+    if overflow {
         if n != 0 {
-            return Err(decode_error(
-                "overflow result must carry same-kind zero",
-                value,
-            ));
+            return Err(invariant(format!(
+                "overflow result must carry same-kind zero: {bounded}"
+            )));
         }
         Ok(Outcome::Overflow)
     } else {
@@ -144,51 +122,64 @@ fn decode(value: Value, kind: Kind, backend: Backend) -> Result<Outcome, Harness
     }
 }
 
-fn execute_mode(
-    world: &check::World,
+struct Program<'a> {
+    compiler: &'a Compiler,
+    scratch: &'a Scratch,
     kind: Kind,
-    evaluator_fuel: u64,
-    ast_optimized: bool,
-    ir_optimized: bool,
-) -> Result<(Outcome, Outcome), HarnessError> {
-    let mut runtime = Runtime::new(world);
-    runtime.optimize = ir_optimized;
-    runtime.fuel = evaluator_fuel;
-    let evaluated = runtime.run("main", Vec::new()).map_err(|e| {
-        mode_error(
-            HarnessError::new(
-                if e == "execution fuel exhausted" {
-                    FailureKind::Fuel
-                } else {
-                    FailureKind::Invariant
-                },
-                e,
-            ),
-            Backend::Evaluator,
-            ast_optimized,
-            ir_optimized,
-        )
-    })?;
-    let evaluated = decode(evaluated, kind, Backend::Evaluator)
-        .map_err(|e| mode_error(e, Backend::Evaluator, ast_optimized, ir_optimized))?;
-    // Each invocation genuinely compiles, finalizes and executes a fresh JIT.
-    // The worker process lifetime bounds retained executable allocations.
-    let native = native::jit_with_options(world, "main", ir_optimized).map_err(|e| {
-        mode_error(
-            HarnessError::new(FailureKind::Invariant, e),
-            Backend::Native,
-            ast_optimized,
-            ir_optimized,
-        )
-    })?;
-    let native = decode(native, kind, Backend::Native)
-        .map_err(|e| mode_error(e, Backend::Native, ast_optimized, ir_optimized))?;
-    Ok((evaluated, native))
+    fuel: u64,
 }
+
+impl Program<'_> {
+    fn execute(
+        &self,
+        backend: Backend,
+        ast_optimized: bool,
+        ir_optimized: bool,
+    ) -> Result<Outcome, HarnessError> {
+        let fail = |e| mode_error(e, backend, ast_optimized, ir_optimized);
+        let executed = compiler::execute(
+            self.compiler,
+            &self.scratch.0,
+            CASE_FILE,
+            matches!(backend, Backend::Native),
+            ast_optimized,
+            ir_optimized,
+            self.fuel,
+        )
+        .map_err(fail)?;
+        match executed {
+            Executed::Printed(text) => decode(&text, self.kind).map_err(fail),
+            Executed::FuelExhausted if matches!(backend, Backend::Evaluator) => Err(fail(
+                HarnessError::new(FailureKind::Fuel, "execution fuel exhausted"),
+            )),
+            Executed::FuelExhausted => Err(fail(invariant("JIT reported fuel exhaustion"))),
+            Executed::Failed(line) => Err(fail(invariant(line))),
+        }
+    }
+
+    fn mode(
+        &self,
+        ast_optimized: bool,
+        ir_optimized: bool,
+    ) -> Result<(Outcome, Outcome), HarnessError> {
+        Ok((
+            self.execute(Backend::Evaluator, ast_optimized, ir_optimized)?,
+            // Each invocation genuinely compiles, finalizes and executes a
+            // fresh JIT in its own process.
+            self.execute(Backend::Native, ast_optimized, ir_optimized)?,
+        ))
+    }
+}
+
+const CASE_FILE: &str = "case.ves";
 
 /// Execute the actual parsed, source-bound program in all eight settings.
 /// Neither this API nor the worker protocol receives an expected Lean answer.
-pub fn execute_case(case: &Case, evaluator_fuel: u64) -> Result<RustAnswer, HarnessError> {
+pub fn execute_case(
+    compiler: &Compiler,
+    case: &Case,
+    evaluator_fuel: u64,
+) -> Result<RustAnswer, HarnessError> {
     if evaluator_fuel == 0 || evaluator_fuel > HarnessLimits::HARD.evaluator_fuel {
         return Err(HarnessError::new(
             FailureKind::InvalidConfig,
@@ -203,32 +194,35 @@ pub fn execute_case(case: &Case, evaluator_fuel: u64) -> Result<RustAnswer, Harn
             "rendered source exceeds the 16 KiB compiler input cap",
         ));
     }
-    let parsed = parser::parse(&source);
-    if !parsed.diagnostics.is_empty() {
-        if !parser_range_negative(case)
-            || parsed.diagnostics.len() != 1
-            || parsed.diagnostics[0].code != "E0002"
-        {
-            return Err(invariant("unexpected parser rejection of rendered source"));
+    let scratch = Scratch::new("worker")?;
+    let module = match compiler::front(compiler, &scratch.0, CASE_FILE, &source)? {
+        Front::Module(module) => module,
+        Front::Rejected { parse: true, codes } => {
+            if !parser_range_negative(case) || codes != ["E0002"] {
+                return Err(invariant("unexpected parser rejection of rendered source"));
+            }
+            return diagnostic(DiagnosticPhase::Parse, codes);
         }
-        return diagnostic(DiagnosticPhase::Parse, &parsed.diagnostics);
-    }
-    corpus::validate_rendered(case, &source, &parsed.module)?;
-    let original = check::check(&parsed.module);
-    if !original.diagnostics.is_empty() {
-        return diagnostic(DiagnosticPhase::Check, &original.diagnostics);
-    }
-    let mut optimized_module = parsed.module.clone();
-    optimize::optimize(&mut optimized_module, &original.expression_types);
-    let optimized = check::check(&optimized_module);
-    if !optimized.diagnostics.is_empty() {
-        return Err(invariant("AST-optimized source failed the real checker"));
-    }
-    let kind = case.program.kind;
-    let (e0, j0) = execute_mode(&original.world, kind, evaluator_fuel, false, false)?;
-    let (e1, j1) = execute_mode(&original.world, kind, evaluator_fuel, false, true)?;
-    let (e2, j2) = execute_mode(&optimized.world, kind, evaluator_fuel, true, false)?;
-    let (e3, j3) = execute_mode(&optimized.world, kind, evaluator_fuel, true, true)?;
+        Front::Rejected {
+            parse: false,
+            codes,
+        } => {
+            return diagnostic(DiagnosticPhase::Check, codes);
+        }
+    };
+    corpus::validate_rendered(case, &source, &module)?;
+    let program = Program {
+        compiler,
+        scratch: &scratch,
+        kind: case.program.kind,
+        fuel: evaluator_fuel,
+    };
+    // An AST-optimized program that fails the checker again is reported by
+    // the CLI ("optimizer validation failed") and fails the mode.
+    let (e0, j0) = program.mode(false, false)?;
+    let (e1, j1) = program.mode(false, true)?;
+    let (e2, j2) = program.mode(true, false)?;
+    let (e3, j3) = program.mode(true, true)?;
     Ok(RustAnswer::Outcomes {
         evaluator: Box::new([e0, e1, e2, e3]),
         jit: Box::new([j0, j1, j2, j3]),
@@ -237,7 +231,7 @@ pub fn execute_case(case: &Case, evaluator_fuel: u64) -> Result<RustAnswer, Harn
 
 /// Bounded private IPC. EOF alone retires a worker normally. A 129th frame is
 /// refused, including when earlier frames were static-negative programs.
-pub fn worker_main() -> Result<(), HarnessError> {
+pub fn worker_main(compiler: &Compiler) -> Result<(), HarnessError> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut input = stdin.lock();
@@ -264,7 +258,7 @@ pub fn worker_main() -> Result<(), HarnessError> {
         let response = WorkerResponse {
             worker_seq: request.worker_seq,
             case_id: request.case.id,
-            answer: execute_case(&request.case, request.evaluator_fuel),
+            answer: execute_case(compiler, &request.case, request.evaluator_fuel),
         };
         let bytes = serde_json::to_vec(&response).map_err(|_| {
             HarnessError::new(
@@ -284,80 +278,88 @@ pub fn worker_main() -> Result<(), HarnessError> {
 mod tests {
     use super::*;
 
-    fn tagged(overflow: bool, value: Value) -> Value {
-        Value::Tuple(vec![Value::Bool(overflow), value])
-    }
-
-    fn rejects(value: Value, kind: Kind, backend: Backend) {
+    fn rejects(printed: &str, kind: Kind) {
         assert_eq!(
-            decode(value, kind, backend).unwrap_err().kind,
-            FailureKind::Invariant
+            decode(printed, kind).unwrap_err().kind,
+            FailureKind::Invariant,
+            "{printed}"
         );
     }
 
     #[test]
-    fn unsigned_evaluator_never_reinterprets_negative_int() {
+    fn unsigned_results_never_admit_a_negative_payload() {
         for kind in [Kind::U8, Kind::U64] {
-            rejects(tagged(false, Value::Int(-1)), kind, Backend::Evaluator);
-            rejects(tagged(true, Value::Int(-1)), kind, Backend::Evaluator);
+            rejects("(false, -1)", kind);
+            rejects("(true, -1)", kind);
         }
     }
 
     #[test]
-    fn unsigned_evaluator_int_must_fit_the_checked_kind() {
-        rejects(tagged(false, Value::Int(256)), Kind::U8, Backend::Evaluator);
-    }
-
-    #[test]
-    fn explicit_unsigned_widths_are_strict_for_both_backends() {
-        for backend in [Backend::Evaluator, Backend::Native] {
-            for (kind, wrong_width) in [(Kind::U8, 64), (Kind::U32, 8), (Kind::U64, 32)] {
-                rejects(tagged(false, Value::UInt(1, wrong_width)), kind, backend);
-                rejects(tagged(true, Value::UInt(0, wrong_width)), kind, backend);
-            }
-        }
-    }
-
-    #[test]
-    fn native_unsigned_values_require_an_explicit_unsigned_carrier() {
-        for kind in [Kind::U8, Kind::U32, Kind::U64] {
-            rejects(tagged(false, Value::Int(1)), kind, Backend::Native);
-            rejects(tagged(true, Value::Int(0)), kind, Backend::Native);
-        }
+    fn payload_must_fit_the_checked_kind() {
+        rejects("(false, 256)", Kind::U8);
+        rejects("(false, 4294967296)", Kind::U32);
+        rejects("(false, 18446744073709551616)", Kind::U64);
+        rejects("(false, 9223372036854775808)", Kind::I64);
+        rejects("(false, -9223372036854775809)", Kind::I64);
     }
 
     #[test]
     fn overflow_tag_never_hides_a_nonzero_payload() {
-        rejects(tagged(true, Value::Int(1)), Kind::U8, Backend::Evaluator);
-        for backend in [Backend::Evaluator, Backend::Native] {
-            for (kind, width) in [(Kind::U8, 8), (Kind::U32, 32), (Kind::U64, 64)] {
-                rejects(tagged(true, Value::UInt(1, width)), kind, backend);
-            }
-            rejects(tagged(true, Value::Int(1)), Kind::I64, backend);
+        for kind in [Kind::U8, Kind::U32, Kind::U64, Kind::I64] {
+            rejects("(true, 1)", kind);
+        }
+        rejects("(true, -1)", Kind::I64);
+    }
+
+    #[test]
+    fn only_the_exact_printed_tuple_is_an_answer() {
+        for printed in [
+            "",
+            "1",
+            "(false)",
+            "(false, 1, 2)",
+            "(0, 1)",
+            "(false,1)",
+            "( false, 1)",
+            "(false, 01)",
+            "(false, -0)",
+            "(false, +1)",
+            "(false, 1.0)",
+            "(false, 1) ",
+            "(False, 1)",
+            "(false, 1u8)",
+        ] {
+            rejects(printed, Kind::I64);
         }
     }
 
     #[test]
-    fn admitted_evaluator_ints_preserve_the_exact_nonnegative_value() {
-        for n in [0, 255] {
-            assert_eq!(
-                decode(tagged(false, Value::Int(n)), Kind::U8, Backend::Evaluator).unwrap(),
-                Outcome::Value(i128::from(n))
-            );
-        }
+    fn exact_values_and_overflow_decode() {
+        assert_eq!(decode("(false, 0)", Kind::U8).unwrap(), Outcome::Value(0));
         assert_eq!(
-            decode(tagged(true, Value::Int(0)), Kind::U8, Backend::Evaluator).unwrap(),
-            Outcome::Overflow
+            decode("(false, 255)", Kind::U8).unwrap(),
+            Outcome::Value(255)
+        );
+        assert_eq!(decode("(true, 0)", Kind::U8).unwrap(), Outcome::Overflow);
+        assert_eq!(
+            decode("(false, 18446744073709551615)", Kind::U64).unwrap(),
+            Outcome::Value(i128::from(u64::MAX))
+        );
+        assert_eq!(
+            decode("(false, -9223372036854775808)", Kind::I64).unwrap(),
+            Outcome::Value(i128::from(i64::MIN))
         );
     }
 
     #[test]
-    fn full_unsigned_64_bit_carrier_is_preserved_without_signed_conversion() {
-        for backend in [Backend::Evaluator, Backend::Native] {
-            assert_eq!(
-                decode(tagged(false, Value::UInt(u64::MAX, 64)), Kind::U64, backend).unwrap(),
-                Outcome::Value(i128::from(u64::MAX))
-            );
-        }
+    fn optimizer_settings_map_to_distinct_flags() {
+        let all: Vec<_> = [(false, false), (false, true), (true, false), (true, true)]
+            .into_iter()
+            .map(|(a, i)| compiler::optimizer_flags(a, i))
+            .collect();
+        assert_eq!(
+            all,
+            [&["--no-opt"][..], &["--no-ast-opt"], &["--no-ir-opt"], &[]]
+        );
     }
 }

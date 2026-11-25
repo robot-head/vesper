@@ -423,6 +423,60 @@ check that the detection agrees with the standard library's and that a
 present generator delivers distinct words. Speed does not matter here
 (four words per clone).
 
+## Part 2f: hot sets, the packed capture and the seccomp evaluator flip; the other aether ports are measured
+
+The Claude thread that took the lane over on 2026-11-25 measured every
+aether port that was still Rust by default on that day's main (84764cd),
+with a randomized differential for the eight modules the paused agent had
+ported with only hand-picked cases (`src/port_abba.rs`, under
+`vesper-port`). The differential found one divergence: on a status write
+that offers FEATURES_OK and DRIVER_OK at once with unacceptable features,
+the Rust transport counts the rejected feature set before failing with
+`DriverOkWithoutFeaturesOk`, and the port did not. The fault now carries
+`rejected_features`, and the transport counts it (`vesper/src/mmio.ves`).
+
+Three modules pass and flip. Their Rust is now `#[cfg(test)]` reference
+code, and their differential and ABBA tests moved from `tests/` into the
+crate (`src/port_reference_tests`), since integration tests cannot reach
+test-only items:
+
+- hot sets (`HotSet::decode`, `HotSet::runs`; `vesper/src/hotset.ves`),
+  which were 1.98x on 2026-11-22 and are 1.35x now;
+- the packed-ring capture (`PackedQueue::capture`; `vesper/src/packed.ves`),
+  which already ran Vesper in every build and kept its Rust under
+  `vesper-port`;
+- the seccomp evaluator (`seccomp::evaluate`; `vesper/src/seccomp.ves`).
+
+`python3 scripts/ci/flip_gate.py vesper-aether` (release,
+`-C target-cpu=native`, 4-core cloud host):
+
+```text
+flip-gate vesper-aether: PASS (bar: 0 differences, every test, 95% upper <= 1.50x) | tests 2/2 pass | differential 0 differences | ABBA vesper/rust virtqueue 1.27x [1.19x, 1.34x] n=30; hotset 1.35x [1.29x, 1.38x] n=30; packed 1.47x [1.40x, 1.50x] n=30; seccomp_evaluate 1.24x [1.17x, 1.37x] n=30 | RUSTFLAGS=-C target-cpu=native
+```
+
+The packed capture's upper bound sits on the bar. The others stay Rust by
+default (`cargo test --release -p vesper-aether --features vesper-port
+--lib port_abba -- --ignored --nocapture`, and `tests/abba_*.rs`):
+
+| Port | Vesper/Rust | 95% interval | Why |
+|---|---|---|---|
+| seccomp compile | 1.67x | [1.65, 1.68] | was 2.79x: the output buffer is now sized to the profile, and the program is written straight into it |
+| virtio-mmio status | 2.6x | [2.26, 2.79] | one crossing per status write |
+| virtio-net TX check + control | 2.4x | [2.32, 2.49] | one crossing per frame |
+| virtio-blk span + discard | 3.0x | [2.88, 3.04] | one crossing per request |
+| guest memory `locate` | 3.8x | [3.42, 4.00] | one crossing per lookup |
+| slot plans | 3.6x | [3.61, 3.71] | G10 |
+| PVH parsing | 8.5x | [8.36, 8.60] | G10 and the crossing |
+| vsock header codec | 27x | [26.3, 29.1] | was 40x: fixed-width reads and writes instead of bytes; a crossing per 44-byte header |
+| vmgenid + fork wire codecs | 28x | [27.9, 28.4] | a crossing per 16- or 24-byte value |
+
+The small codecs and checks cost the Rust caller one Rust-to-Vesper
+crossing per call (slice views, a result buffer and its decode), while the
+Rust code they replace compiles to a few loads and stores inlined into the
+caller. They reach the bar only when their callers are in Vesper too: the
+devices (`devices/{block,net,vsock,vmgenid}.rs`) and the transport's
+register file as whole units, not their helpers.
+
 ## Compiler gaps (for the coordinator)
 
 | Gap | Blocks | Owner of the fix |
@@ -439,5 +493,7 @@ present generator delivers distinct words. Speed does not matter here
 ## Census rows
 
 `vesper-aether` stays "c-api" (KVM ioctls and userfaultfd are its Rust
-wrappers over the OS). Its virtqueue walks are Vesper-only since part 2d;
-slot plans, PVH parsing, hot sets and the packed model wait on G10.
+wrappers over the OS). Its virtqueue walks are Vesper-only since part 2d,
+and hot sets, the packed capture and the seccomp evaluator since part 2f;
+slot plans and PVH parsing wait on G10, and the small device codecs on
+porting their callers.

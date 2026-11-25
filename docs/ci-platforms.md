@@ -21,8 +21,9 @@ The native lanes run only host-specific coverage:
 
 Both lanes build the compiler and every test above it with the
 `port-compiler` Cargo profile: release optimizations with debug assertions
-and overflow checks kept on. The fiber, Pulse and Loom tests and the port
-ABI tier's Rust tests build for debug.
+and overflow checks kept on, and so does the macOS Pulse port test. The
+fiber, `vesper-pulse` and Loom tests and the port ABI tier's Rust tests
+build for debug.
 
 The codegen swap point tests (`vesper-codegen-swap-test`) compare each
 corpus world built by the Rust emitters with the same world built through a

@@ -354,16 +354,25 @@ lines).
 
 `CHECK_HARNESS_SPEED=1 cargo test --release --test self_host_lean_extract
 abba_module -- --ignored --nocapture`, ABBA over all 363 worlds.
-`extract_report` lowers the world itself, so the Vesper side runs
-`lower_world` too:
+`extract_report` lowers the world and every closure it lifts, so the
+Vesper side runs the test's `lift` (the same lowering) too:
 
-| | Rust `extract_report` + render | Vesper `lower_world` + `extract_module` (optimized JIT) | Ratio |
+| | Rust `extract_report` + render | Vesper `lift` + `extract_module` (optimized JIT) | Ratio |
 |---|--:|--:|--:|
-| Corpus modules | 4,925 ms | 4,622 ms | 0.94x |
+| Corpus modules | 5,180 ms | 5,731 ms | 1.11x |
 
-Lowering is most of both sides; `extract_module` alone is 657 ms. The
-test's word encoding (11.4 s) is harness-only and not counted: a Vesper
-front end hands the words over directly.
+Lowering is most of both sides; `extract_module` alone is 633 ms. The
+first measurement (0.94x, in #1937) ran only `lower_world` on the Vesper
+side, leaving out the closure lifting. Lifting then cost twice the
+lowering: it lowered the whole world once per closure and copied every
+world. It now lowers each nesting depth's closures once, in a copy of the
+world without bodies, and copies nothing when there is no closure (still
+0 differences).
+
+The word encoding (about 4 s more) is the harness's and is not counted:
+a Vesper front end hands the words over directly. A hybrid swap of
+`lean::extract` does pay it, so the swap needs a cheaper encoder before
+it can flip.
 
 ## What is left
 

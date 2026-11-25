@@ -288,3 +288,159 @@ pub fn decode_records(
     }
     0
 }
+
+// ---------------------------------------------------------------------
+// Encoding (`encode_record` in src/kafka_wire.rs)
+// ---------------------------------------------------------------------
+
+// Bytes `uvarint(v)` takes.
+fn uvarint_len(v: u64) -> u64 {
+    let mut n: u64 = 1;
+    let mut x = v >> 7;
+    loop {
+        if x == 0 {
+            break;
+        }
+        n = wrapping_add(n, 1);
+        x = x >> 7;
+    }
+    n
+}
+
+fn zigzag(v: i64) -> u64 {
+    wrapping_u64((v << 1) ^ (v >> 63))
+}
+
+fn put_uvarint(inout out: Slice[u8], at: u64, v: u64) -> u64 eff [Fail[RuntimeError]] {
+    let mut pos = at;
+    let mut x = v;
+    loop {
+        let b = wrapping_u8(x & 0x7f);
+        x = x >> 7;
+        if x == 0 {
+            out.set(pos, b);
+            return wrapping_add(pos, 1);
+        }
+        out.set(pos, b | 0x80);
+        pos = wrapping_add(pos, 1);
+    }
+}
+
+// `uvarint_len` of a length field: a length of -1 (none) is the one byte
+// of `varint(-1)`, otherwise the varint plus the bytes.
+fn field_len(n: i64) -> u64 {
+    if n < 0 {
+        1
+    } else {
+        wrapping_add(uvarint_len(zigzag(n)), wrapping_u64(n))
+    }
+}
+
+fn sat_sub_i64(a: i64, b: i64) -> i64 {
+    let r = wrapping_sub(a, b);
+    // Overflow iff a and b have different signs and r's sign differs from a's.
+    if ((a ^ b) < 0) && ((a ^ r) < 0) {
+        if a < 0 {
+            -9223372036854775808
+        } else {
+            9223372036854775807
+        }
+    } else {
+        r
+    }
+}
+
+// The bytes of `data` a length field takes: none (-1) takes nothing.
+fn field_bytes(n: i64) -> u64 {
+    if n < 0 {
+        0
+    } else {
+        wrapping_u64(n)
+    }
+}
+
+// `varint(n)` and then, for n > 0, `data[src..src + n]`.
+fn put_field(inout out: Slice[u8], at: u64, in data: Slice[u8], src: u64, n: i64)
+    -> u64 eff [Fail[RuntimeError]] {
+    let pos = put_uvarint(inout out, at, zigzag(n));
+    if n <= 0 {
+        return pos;
+    }
+    let len = wrapping_u64(n);
+    out.copy_from(pos, in data[src..wrapping_add(src, len)]);
+    wrapping_add(pos, len)
+}
+
+fn encode_records_in(
+    in data: Slice[u8],
+    in meta: Slice[i64],
+    in hdr: Slice[i64],
+    count: u64,
+    base_ts: i64,
+    inout out: Slice[u8]
+) -> u64 eff [Fail[RuntimeError]] {
+    let mut pos: u64 = 0;
+    let mut src: u64 = 0;
+    let mut h: u64 = 0;
+    for i in 0..count {
+        let m = wrapping_mul(i, 4);
+        let ts_delta = sat_sub_i64(meta[m], base_ts);
+        let klen = meta[wrapping_add(m, 1)];
+        let vlen = meta[wrapping_add(m, 2)];
+        let nh = wrapping_u64(meta[wrapping_add(m, 3)]);
+        // The record body's length, so it is written once, in place.
+        let mut body = wrapping_add(1, uvarint_len(zigzag(ts_delta)));
+        body = wrapping_add(body, uvarint_len(zigzag(wrapping_i64(i))));
+        body = wrapping_add(body, field_len(klen));
+        body = wrapping_add(body, field_len(vlen));
+        body = wrapping_add(body, uvarint_len(zigzag(wrapping_i64(nh))));
+        for k in 0..nh {
+            let hb = wrapping_mul(wrapping_add(h, k), 2);
+            body = wrapping_add(body, field_len(hdr[hb]));
+            body = wrapping_add(body, field_len(hdr[wrapping_add(hb, 1)]));
+        }
+        pos = put_uvarint(inout out, pos, zigzag(wrapping_i64(body)));
+        out.set(pos, 0);
+        pos = wrapping_add(pos, 1);
+        pos = put_uvarint(inout out, pos, zigzag(ts_delta));
+        pos = put_uvarint(inout out, pos, zigzag(wrapping_i64(i)));
+        pos = put_field(inout out, pos, in data, src, klen);
+        src = wrapping_add(src, field_bytes(klen));
+        pos = put_field(inout out, pos, in data, src, vlen);
+        src = wrapping_add(src, field_bytes(vlen));
+        pos = put_uvarint(inout out, pos, zigzag(wrapping_i64(nh)));
+        for k in 0..nh {
+            let hb = wrapping_mul(h, 2);
+            let hk = hdr[hb];
+            pos = put_field(inout out, pos, in data, src, hk);
+            src = wrapping_add(src, field_bytes(hk));
+            let hv = hdr[wrapping_add(hb, 1)];
+            pos = put_field(inout out, pos, in data, src, hv);
+            src = wrapping_add(src, field_bytes(hv));
+            h = wrapping_add(h, 1);
+        }
+    }
+    pos
+}
+
+// Encode `count` v2 records with offset deltas 0..count into `out` and
+// return the bytes written (U64_MAX when the packed input is inconsistent
+// or `out` is too short). Per record `meta` holds 4 i64s (timestamp, key
+// length, value length, header count), a length of -1 being none; `hdr`
+// holds 2 i64s per header (key length, value length); `data` holds every
+// key, value, header key and header value, in that order.
+pub fn encode_records(
+    in data: Slice[u8],
+    in meta: Slice[i64],
+    in hdr: Slice[i64],
+    count: u64,
+    base_ts: i64,
+    inout out: Slice[u8]
+) -> u64 {
+    handle Fail[RuntimeError] in {
+        encode_records_in(in data, in meta, in hdr, count, base_ts, inout out)
+    } with {
+        return x => x,
+        raise(e, k) => 18446744073709551615,
+    }
+}

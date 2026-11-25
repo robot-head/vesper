@@ -884,21 +884,36 @@ pub fn check_pool() -> u64 {
     assert_eq!(agree(&checked, "check_pool", &MODES), h);
 }
 
+/// The readiness scenario's Vesper source for this host: the epoll driver
+/// on Linux, the kqueue driver on macOS.
+fn readiness_scenario(src: &str) -> String {
+    if cfg!(target_os = "macos") {
+        src.replace("epoll_driver_", "kqueue_driver_")
+            .replace("EpollPoll", "KqueuePoll")
+            .replace("@PIPE@", "PulseSys::pipe(inout fds)")
+    } else {
+        src.replace("@PIPE@", "PulseSys::pipe2(inout fds, 524288)")
+    }
+}
+
 /// The epoll completion driver (#1938): the same scenario through
 /// `@vesper/pulse`'s `EpollDriver` and `vesper_pulse::epoll::EpollDriver`,
 /// over a pipe and a regular file: a read that waits for data, immediate
 /// zero-length and wrong-direction completions, a stream offset refused
 /// with `ESPIPE`, inline positional I/O on a file, cancellation, a stream
 /// write, and a full queue.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn epoll_completion_driver_matches_rust() {
+fn readiness_completion_driver_matches_rust() {
     use std::io::Write;
     use std::os::fd::{AsRawFd, OwnedFd};
     use vesper_pulse::driver::{
         Completion, CompletionDriver, Operation, PollError, Request, RequestId,
     };
-    use vesper_pulse::epoll::EpollDriver;
+    #[cfg(target_os = "linux")]
+    use vesper_pulse::epoll::EpollDriver as Driver32;
+    #[cfg(target_os = "macos")]
+    use vesper_pulse::kqueue::KqueueDriver as Driver32;
 
     const QUEUE_FULL: u64 = 1000001;
     fn mix(h: u64, v: u64) -> u64 {
@@ -915,7 +930,7 @@ fn epoll_completion_driver_matches_rust() {
             None => 999,
         }
     }
-    type Driver = EpollDriver<u32>;
+    type Driver = Driver32<u32>;
     fn submit(
         h: u64,
         d: &mut Driver,
@@ -1069,7 +1084,7 @@ pub fn scenario() -> u64 eff [Ffi[PulseSys]] {
         read_fd: -1,
         write_fd: -1,
     };
-    let _ = PulseSys::pipe2(inout fds, 524288);
+    let _ = @PIPE@;
     let r = fds.read_fd;
     let w = fds.write_fd;
     let z0 = zeros(0);
@@ -1123,7 +1138,7 @@ pub fn scenario() -> u64 eff [Ffi[PulseSys]] {
 }
 "#
     .replace("@FD@", &file.as_raw_fd().to_string());
-    let checked = check_pulse_driver(&src);
+    let checked = check_pulse_driver(&readiness_scenario(&src));
     assert_eq!(
         agree(
             &checked,
