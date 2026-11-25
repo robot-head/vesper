@@ -1,0 +1,44 @@
+"""Require divergent builds to enable the Vesper library they edit."""
+
+load("./lib/process.axl", "capture")
+
+def _uses_port_cfg(ctx: TaskContext, root: str, source: str) -> bool:
+    metadata = ctx.std.fs.try_metadata(source)
+    if metadata == None or not metadata.is_dir:
+        return False
+    paths = capture(ctx, "find", [source, "-type", "f", "-name", "*.rs", "-print0"], root)
+    for path in paths.split("\x00"):
+        if not path:
+            continue
+        for tail in ctx.std.fs.read_to_string(path).split("feature")[1:]:
+            rest = tail.lstrip()
+            if rest.startswith("=") and rest[1:].lstrip().startswith('"vesper-port"'):
+                return True
+    return False
+
+def _verify(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    data = json.decode(capture(ctx, "cargo", ["metadata", "--locked", "--no-deps", "--format-version", "1"], root))
+    crates = data["workspace_root"].rstrip("/") + "/crates/"
+    checked = 0
+    for package in data["packages"]:
+        manifest = package["manifest_path"]
+        if not manifest.startswith(crates) or len(manifest.removeprefix(crates).split("/")) != 2:
+            continue
+        features = package["features"].get("vesper-port-divergent")
+        if features == None or not _uses_port_cfg(ctx, root, manifest.rpartition("/")[0] + "/src"):
+            continue
+        checked += 1
+        if "vesper-port" not in features:
+            ctx.std.process.exit(1, manifest + ": vesper-port-divergent must enable vesper-port, or the divergent build tests the Rust reference")
+    if not checked:
+        ctx.std.process.exit(1, "No feature-gated divergent ports were checked")
+    ctx.std.io.stdout.write("Checked divergent features for %d feature-gated ports\n" % checked)
+    return 0
+
+port_divergent_features = task(
+    kind = "port-divergent-features",
+    group = ["ci", "tests"],
+    summary = "Verify that divergent Cargo builds link the Vesper port under test",
+    implementation = _verify,
+)

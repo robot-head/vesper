@@ -1,7 +1,7 @@
 //! ABBA benchmark of the Vesper port against the last Rust build (SH6
 //! lane 8, #1403). The Rust parsers and policy check were deleted, so the
 //! Rust arm is this example built at the last commit that had them
-//! (bench-abba.sh builds it in a temporary worktree) and run as a child
+//! (the benchmark task builds it in a temporary worktree) and run as a child
 //! process: `<rust-abba> window rust <workload> N` prints the nanoseconds
 //! its N passes took, timed inside that process.
 //!
@@ -23,12 +23,12 @@
 //! The first four compare with the build at the last commit with the Rust
 //! parsers and policy check; the CBOR workloads with the build at the last
 //! commit with ciborium decoding and the Rust CCA claim parsers, where
-//! bench-abba.sh builds this file (which uses only the crate's public
+//! the benchmark task builds this file (which uses only the crate's public
 //! API) in place of that commit's.
 //!
 //! ```sh
-//! crates/vesper-aegis/bench-abba.sh                    # ABBA, wall clock
-//! crates/vesper-aegis/bench-abba.sh flip-gate snp      # the flip gate's pairs line
+//! aspect crate aegis bench-abba                    # ABBA, wall clock
+//! aspect crate aegis bench-abba -- flip-gate snp      # the flip gate's pairs line
 //! cargo run --release -p vesper-aegis --example abba -- window port snp 2000
 //! ```
 //!
@@ -321,7 +321,7 @@ fn main() {
     let s = samples();
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
-        // `window port` here; `window rust` in a baseline bench-abba.sh
+        // `window port` here; `window rust` in a baseline the benchmark task
         // built (the same code over that commit's crate).
         Some("window") => println!("{}", window(&args[3], args[4].parse().unwrap(), &s)),
         Some("flip-gate") => {

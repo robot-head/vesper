@@ -1,0 +1,133 @@
+"""Install the CI toolchains and kernel-check the Lean model plan."""
+
+load("./lib/process.axl", "capture", "check", "root_path", "scratch_dir")
+
+_LOGOS_RUST = "1.99.0"
+
+def _tool_environment(ctx: TaskContext, root: str, variable: str, default: str):
+    home = ctx.std.env.var(variable) or (ctx.std.env.home_dir() + "/" + default)
+    bin_dir = root_path(root, home) + "/bin"
+    inherited = ctx.std.env.var("PATH")
+    return struct(bin_dir = bin_dir, env = {"PATH": bin_dir + (":" + inherited if inherited else "")})
+
+def _which(ctx: TaskContext, bin_dir: str, name: str) -> str | None:
+    return ctx.std.process.which(bin_dir + "/" + name) or ctx.std.process.which(name)
+
+def _release_target(ctx: TaskContext) -> str:
+    platform = ctx.std.env.os()
+    suffix = {"linux": "unknown-linux-gnu", "macos": "apple-darwin"}.get(platform)
+    arch = ctx.std.env.arch()
+    if not suffix or arch not in ["x86_64", "aarch64"]:
+        ctx.std.process.exit(1, "No CI toolchain installer for %s on %s" % (arch, platform))
+    return arch + "-" + suffix
+
+def _download(ctx: TaskContext, root: str, url: str, output: str):
+    check(ctx, "curl", ["--proto", "=https", "--tlsv1.2", "-fsSL", url, "-o", output], root)
+
+def _publish(ctx: TaskContext, root: str, destination: str, executable: str):
+    temporary = ctx.std.fs.mkdtemp(parent = root, prefix = ".vesper-toolchain-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(temporary))
+    path = temporary + "/path"
+    ctx.std.fs.write(path, executable + "\n")
+    ctx.std.fs.rename(path, root + "/" + destination)
+
+def _required(ctx: TaskContext, bin_dir: str, name: str) -> str:
+    tool = _which(ctx, bin_dir, name)
+    if not tool:
+        ctx.std.process.exit(1, "Cannot find " + name + " on PATH")
+    return tool
+
+def _install_lean(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    tools = _tool_environment(ctx, root, "ELAN_HOME", ".elan")
+    if not _which(ctx, tools.bin_dir, "elan"):
+        directory = scratch_dir(ctx, "vesper-elan-")
+        archive = directory + "/elan.tar.gz"
+        url = "https://github.com/leanprover/elan/releases/latest/download/elan-" + _release_target(ctx) + ".tar.gz"
+        _download(ctx, root, url, archive)
+        check(ctx, "tar", ["-xzf", archive, "-C", directory, "elan-init"], root)
+        check(ctx, directory + "/elan-init", ["-y", "--default-toolchain", "none"], root, tools.env)
+    lean = _required(ctx, tools.bin_dir, "lean")
+    elan = _required(ctx, tools.bin_dir, "elan")
+    check(ctx, lean, ["--version"], root, tools.env)
+    binary = capture(ctx, elan, ["which", "lean"], root, tools.env).rstrip("\r\n")
+    if not binary:
+        ctx.std.process.exit(1, "Elan did not return the Lean executable")
+    _publish(ctx, root, ".ci-lean-path", binary)
+    ctx.std.io.stdout.write(binary + "\n")
+    return 0
+
+install_lean = task(
+    kind = "install-lean",
+    group = ["ci"],
+    summary = "Install the pinned Lean toolchain and record the Lean executable",
+    implementation = _install_lean,
+)
+
+def _install_logos_rust(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    tools = _tool_environment(ctx, root, "CARGO_HOME", ".cargo")
+    rustup = _which(ctx, tools.bin_dir, "rustup")
+    if rustup:
+        check(ctx, rustup, ["toolchain", "install", _LOGOS_RUST, "--profile", "minimal"], root, tools.env)
+    else:
+        directory = scratch_dir(ctx, "vesper-rustup-")
+        installer = directory + "/rustup-init"
+        upstream = (ctx.std.env.var("RUSTUP_UPDATE_ROOT") or "https://static.rust-lang.org/rustup").rstrip("/")
+        version = ctx.std.env.var("RUSTUP_VERSION")
+        channel = "/archive/" + version if version else "/dist"
+        _download(ctx, root, upstream + channel + "/" + _release_target(ctx) + "/rustup-init", installer)
+        ctx.std.fs.set_permissions(installer, 0o755)
+        check(ctx, installer, ["-y", "--no-modify-path", "--profile", "minimal", "--default-toolchain", _LOGOS_RUST], root, tools.env)
+        rustup = _required(ctx, tools.bin_dir, "rustup")
+    binary = capture(ctx, rustup, ["which", "--toolchain", _LOGOS_RUST, "cargo"], root, tools.env).rstrip("\r\n")
+    if not binary:
+        ctx.std.process.exit(1, "Rustup did not return the Cargo executable")
+    check(ctx, binary, ["--version"], root, tools.env)
+    _publish(ctx, root, ".ci-logos-cargo-path", binary)
+    return 0
+
+install_logos_rust = task(
+    kind = "install-logos-rust",
+    group = ["ci"],
+    summary = "Install the pinned Rust toolchain for the Logos checker",
+    implementation = _install_logos_rust,
+)
+
+def _check_models(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    tools = _tool_environment(ctx, root, "ELAN_HOME", ".elan")
+    lean = _required(ctx, tools.bin_dir, "lean")
+    expected = ctx.std.fs.read_to_string(root + "/lean-toolchain").strip().rpartition(":v")[2]
+    version = capture(ctx, lean, ["--version"], root, tools.env).strip()
+    fields = version.partition("version ")[2].split()
+    if not expected or not fields or fields[0].rstrip(",") != expected:
+        ctx.std.process.exit(1, "Expected Lean " + (expected or "from lean-toolchain") + ", got " + version)
+    ctx.std.io.stdout.write(version + "\n")
+
+    plan = json.decode(ctx.std.fs.read_to_string(root + "/scripts/lean-model-plan.json"))
+    for model in plan["standalone"]:
+        path = "lean/" + model + ".lean"
+        ctx.std.io.stdout.write("lean " + path + "\n")
+        check(ctx, lean, [path], root, tools.env)
+
+    artifacts = scratch_dir(ctx, "vesper-lean-models-")
+    for entry in plan["dependencies"]:
+        model = entry["model"]
+        env = dict(tools.env)
+        if entry.get("imports"):
+            env["LEAN_PATH"] = artifacts
+        argv = []
+        if entry.get("compile"):
+            output = artifacts + "/" + model + ".olean"
+            ctx.std.fs.create_dir_all(output.rpartition("/")[0])
+            argv.extend(["-o", output])
+        check(ctx, lean, argv + ["lean/" + model + ".lean"], root, env)
+    return 0
+
+check_lean_models = task(
+    kind = "check-lean-models",
+    group = ["ci"],
+    summary = "Kernel-check the Lean models with their ordered compiled dependencies",
+    implementation = _check_models,
+)

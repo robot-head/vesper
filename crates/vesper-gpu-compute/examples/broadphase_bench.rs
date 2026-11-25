@@ -1,5 +1,5 @@
 //! One timed run of the broadphase workload, for the ABBA comparison that
-//! `port/bench-abba.sh broadphase` drives against the Rust broadphase at its
+//! `aspect crate gpu-compute bench-abba -- broadphase` drives against the Rust broadphase at its
 //! last commit. Prints a label, the elapsed nanoseconds and a digest of the
 //! pair sets, so both arms are seen to compute the same thing.
 //!

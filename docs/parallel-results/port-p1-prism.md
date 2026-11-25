@@ -114,7 +114,7 @@ There is one divergent build per library (`Port::edit` in `build.rs` under the
 | router | a parameter beats a static segment | `routing::static_segments_beat_parameters_independent_of_insertion_order` |
 | connection | an out-of-order completion reserves no room | `connection::out_of_order_completions_cannot_starve_the_earliest_response` |
 
-`crates/vesper-prism/test-port.sh` (run from `scripts/test-port-harness.sh` on
+`aspect crate prism test-port` (run from `scripts/test-port-harness.sh` on
 macOS and Windows) checks that each divergent build fails exactly that test
 while another test in the same file still passes. Bazel runs the same check
 on Linux through `:port_divergence_detected`.

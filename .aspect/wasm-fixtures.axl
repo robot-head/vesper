@@ -1,0 +1,59 @@
+"""Build the committed sandbox and macro Wasm fixtures."""
+
+load("@std//hash.axl", "sha256")
+load("./lib/process.axl", "check", "root_path")
+
+def _checksum(ctx: TaskContext, path: str) -> str:
+    hash = sha256()
+    for chunk in ctx.std.fs.open(path):
+        hash.update(chunk)
+    return hash.hexdigest()
+
+def _fixture_task(crate: str, kind: str, guest_binary: str, outputs: list[tuple], quotation: bool = False):
+    def run(ctx: TaskContext) -> int:
+        root = ctx.std.env.aspect_root_dir()
+        cwd = ctx.std.env.current_dir()
+        fixture = root + "/crates/vesper-" + crate + "/fixtures" + ("/quotation" if quotation else "")
+        guest = fixture + "/guest"
+        target = guest + "/target"
+        cargo_home = ctx.std.env.var("CARGO_HOME") or (ctx.std.env.home_dir() + "/.cargo")
+        remap = "/quotation-fixture" if quotation else "/fixture"
+        env = {"RUSTFLAGS": "--remap-path-prefix=%s=%s --remap-path-prefix=%s=/cargo" % (guest, remap, cargo_home)}
+        if quotation:
+            override = ctx.std.env.var("CARGO_TARGET_DIR")
+            if override:
+                target = root_path(cwd, override)
+            env.update({"CARGO_BUILD_JOBS": "1", "CARGO_INCREMENTAL": "0"})
+        env["CARGO_TARGET_DIR"] = target
+        for triple, _ in outputs:
+            check(ctx, "cargo", ["build", "--locked", "--release", "--manifest-path", guest + "/Cargo.toml", "--target", triple], cwd, env)
+
+        output_dir = fixture + "/bin"
+        ctx.std.fs.create_dir_all(output_dir)
+        checksums = []
+        for triple, name in outputs:
+            path = output_dir + "/" + name
+            ctx.std.fs.copy(target + "/" + triple + "/release/" + guest_binary + ".wasm", path)
+            checksums.append(_checksum(ctx, path) + "  " + name)
+        manifest = "\n".join(checksums) + "\n"
+        ctx.std.fs.write(output_dir + "/SHA256SUMS", manifest)
+        ctx.std.io.stdout.write(manifest)
+        return 0
+
+    return task(
+        kind = kind,
+        group = ["crate", crate],
+        summary = "Rebuild the committed " + ("quotation" if quotation else crate) + " Wasm fixtures",
+        implementation = run,
+    )
+
+forge_runner_build = _fixture_task("forge-runner", "build", "vesper_forge_runner_fixture", [
+    ("wasm32-wasip2", "macro.component.wasm"),
+])
+loom_sandbox_build = _fixture_task("loom-sandbox", "build", "vesper_sandbox_fixture", [
+    ("wasm32-wasip2", "step.component.wasm"),
+    ("wasm32-wasip1", "step.preview1.wasm"),
+])
+loom_sandbox_build_quotation = _fixture_task("loom-sandbox", "build-quotation", "vesper_quotation_fixture", [
+    ("wasm32-wasip2", "quotation.component.wasm"),
+], quotation = True)

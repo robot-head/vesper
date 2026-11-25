@@ -1,0 +1,70 @@
+"""Execute Cargo regression checks and require evidence of deliberate divergence."""
+
+load("./process.axl", "check", "command")
+
+def require_divergence(
+        ctx: TaskContext,
+        root: str,
+        argv: list[str],
+        description: str,
+        expected: list[str],
+        env: dict[str, str] = {},
+        stdin: str = "inherit",
+        line_prefixes: list[str] = []):
+    child = command(ctx, "cargo", argv, root, env).stdin(stdin).stdout("piped").stderr("piped").spawn()
+    result = child.wait_with_output()
+    output = result.stdout + "\n" + result.stderr
+    missing_prefix = False
+    if line_prefixes:
+        lines = output.splitlines()
+        missing_prefix = any([not any([line.startswith(prefix) for line in lines]) for prefix in line_prefixes])
+    if result.status.success or missing_prefix or any([message not in output for message in expected]):
+        ctx.std.io.stderr.write(output)
+        ctx.std.process.exit(1, "Divergence check did not fail as expected: " + description)
+    ctx.std.io.stdout.write("Detected divergent " + description + "\n")
+
+def port_checks(crate: str, kind: str, passing: list[list[str]], divergent: list, after = None):
+    def run(ctx: TaskContext) -> int:
+        root = ctx.std.env.aspect_root_dir()
+        for argv in passing:
+            check(ctx, "cargo", ["test", "--locked"] + argv, root)
+        for case in divergent:
+            require_divergence(
+                ctx,
+                root,
+                ["test", "--locked", "-p", "vesper-" + crate] + case.argv,
+                crate + " port (" + case.name + ")",
+                case.expected,
+                case.env,
+                case.stdin,
+                case.line_prefixes,
+            )
+        if after:
+            after(ctx, root)
+        return 0
+    return task(
+        kind = kind,
+        group = ["crate", crate],
+        summary = "Run the " + crate + " port and divergence checks",
+        implementation = run,
+    )
+
+def divergence(
+        name: str,
+        argv: list[str],
+        failed: list[str],
+        passed: list[str],
+        env: dict[str, str] = {},
+        stdin: str = "inherit",
+        diagnostics: list[str] = [],
+        line_prefixes: list[str] = []):
+    expected = ["test " + test + " ... FAILED" for test in failed]
+    expected.extend(["test " + test + " ... ok" for test in passed])
+    return struct(
+        name = name,
+        argv = argv,
+        expected = expected + diagnostics,
+        env = env,
+        stdin = stdin,
+        line_prefixes = line_prefixes,
+    )

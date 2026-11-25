@@ -1,20 +1,24 @@
-load("./lib/script.axl", "command_task")
+load("./lib/bazel_exec.axl", "executable", "prebuild_executables", "run_target")
+load("./lib/process.axl", "root_path")
 
-bazel_helpers = command_task(
-    "bazel-helpers",
-    ["maintenance"],
-    "Run a function from scripts/bazel-lib.sh (bazel_executable, bazel_exec or bazel_prebuild)",
-    "sh",
-    [
-        "-eu",
-        "-c",
-        """
-. ./scripts/bazel-lib.sh
-case "${1:-}" in
-    bazel_executable|bazel_exec|bazel_prebuild) "$@" ;;
-    *) echo "usage: aspect maintenance bazel-helpers -- {bazel_executable|bazel_exec|bazel_prebuild} [args...]" >&2; exit 2 ;;
-esac
-""",
-        "bazel-helpers",
-    ],
+def _helpers(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    args = ctx.args.tool_args
+    if len(args) == 2 and args[0] == "bazel_executable":
+        ctx.std.io.stdout.write(executable(ctx, root, args[1], absolute = False) + "\n")
+    elif len(args) >= 2 and args[0] == "bazel_exec":
+        run_target(ctx, root, args[1], args[2:])
+    elif len(args) >= 3 and args[0] == "bazel_prebuild":
+        if prebuild_executables(ctx, root, root_path(root, args[1]), args[2:]) == None:
+            return 1
+    else:
+        ctx.std.process.exit(2, "usage: aspect maintenance bazel-helpers -- {bazel_executable|bazel_exec|bazel_prebuild} [args...]")
+    return 0
+
+bazel_helpers = task(
+    kind = "bazel-helpers",
+    group = ["maintenance"],
+    summary = "Locate, run, or prebuild Bazel executables",
+    implementation = _helpers,
+    args = {"tool_args": args.trailing_var_args(description = "Provide the helper function and its arguments.")},
 )

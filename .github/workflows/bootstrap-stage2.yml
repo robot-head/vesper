@@ -22,6 +22,8 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
       CARGO_BUILD_JOBS: 4
+      VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/vesper
+      VESPER_DEFAULT_COMPILER: ${{ github.workspace }}/target/debug/vesper
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/aspect
@@ -29,27 +31,18 @@ jobs:
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
       - uses: Swatinem/rust-cache@v2
       - name: Install pinned wasmtime CLI (v50.0.1) for Stage 2 checks
-        run: |
-          wt_url="https://github.com/bytecodealliance/wasmtime/releases/download/v50.0.1/wasmtime-v50.0.1-x86_64-linux.tar.xz"
-          wt_sha="685466455dd42a14774a86c36c8f2e45cbb9bd6d92a850139315df60a75498a5"
-          curl -fsSL "$wt_url" -o "$RUNNER_TEMP/wasmtime.tar.xz"
-          echo "$wt_sha  $RUNNER_TEMP/wasmtime.tar.xz" | sha256sum -c -
-          mkdir -p "$RUNNER_TEMP/wasmtime"
-          tar -xJf "$RUNNER_TEMP/wasmtime.tar.xz" --strip-components=1 -C "$RUNNER_TEMP/wasmtime"
-          echo "WASMTIME_BIN=$RUNNER_TEMP/wasmtime/wasmtime" >> "$GITHUB_ENV"
-          echo "$RUNNER_TEMP/wasmtime" >> "$GITHUB_PATH"
+        run: aspect ci install-wasmtime
       - name: Verify Stage 2 runner wrapper
-        run: |
-          bash -n bootstrap/stage2.sh
-          aspect bootstrap stage2 -- which
+        env:
+          WASMTIME_BIN: ${{ runner.temp }}/wasmtime/wasmtime
+        run: aspect bootstrap stage2 -- which
       - name: Build the compiler used by the port and hybrid tests
-        run: |
-          cargo build --locked -p vesper --bin vesper
-          echo "VESPER_PORT_COMPILER=$GITHUB_WORKSPACE/target/debug/vesper" >> "$GITHUB_ENV"
-          echo "VESPER_DEFAULT_COMPILER=$GITHUB_WORKSPACE/target/debug/vesper" >> "$GITHUB_ENV"
+        run: cargo build --locked -p vesper --bin vesper
       - name: Compare the C seed runner with Wasmtime and the Stage 1 lock
         run: cargo test --locked -p vesper --test stage2_seed_runner -- --test-threads=1
       - name: Exercise Wasm packages and verify the Stage 2 and per-package fixed points
+        env:
+          WASMTIME_BIN: ${{ runner.temp }}/wasmtime/wasmtime
         run: cargo test --locked -p vesper --test wasm_seed_breadth --test wasm_seed_package_io -- --test-threads=1
       - name: Compare Vesper package assembly with the bootstrap loader
         run: cargo test --locked -p vesper --test self_host_check_names_packages -- --test-threads=1

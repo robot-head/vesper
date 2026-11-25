@@ -1,0 +1,73 @@
+"""Regenerate the test PKI with OpenSSL."""
+
+load("./lib/process.axl", "capture", "check", "scratch_dir")
+
+_KEY = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes"]
+_VALIDITY = ["-days", "36500"]
+
+def _ca(ctx: TaskContext, root: str, work: str, name: str):
+    path = work + "/" + name
+    check(ctx, "openssl", ["req", "-x509", "-new"] + _KEY + [
+        "-keyout", path + ".key", "-out", path + ".pem", "-subj", "/CN=" + name,
+    ] + _VALIDITY + [
+        "-addext", "basicConstraints=critical,CA:TRUE",
+        "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+    ], root)
+    check(ctx, "openssl", ["x509", "-in", path + ".pem", "-outform", "DER", "-out", path + ".der"], root)
+
+def _leaf(ctx: TaskContext, root: str, work: str, name: str, authority: str, subject: str, host: str, quiet: bool):
+    path = work + "/" + name
+    ca = work + "/" + authority
+    check(ctx, "openssl", ["req", "-new"] + _KEY + [
+        "-keyout", path + ".key", "-out", path + ".csr", "-subj", "/CN=" + subject,
+    ], root)
+    ctx.std.fs.write(path + ".ext", "\n".join([
+        "basicConstraints=critical,CA:FALSE",
+        "keyUsage=critical,digitalSignature",
+        "extendedKeyUsage=serverAuth,clientAuth",
+        "subjectAltName=DNS:" + host,
+        "",
+    ]))
+    sign = ["x509", "-req", "-in", path + ".csr", "-CA", ca + ".pem", "-CAkey", ca + ".key", "-CAcreateserial"] + _VALIDITY + [
+        "-extfile", path + ".ext", "-out", path + ".pem",
+    ]
+    if quiet:
+        capture(ctx, "openssl", sign, root)
+    else:
+        check(ctx, "openssl", sign, root)
+    check(ctx, "openssl", ["x509", "-in", path + ".pem", "-outform", "DER", "-out", path + ".der"], root)
+    check(ctx, "openssl", ["pkcs8", "-topk8", "-nocrypt", "-in", path + ".key", "-outform", "DER", "-out", path + ".key.der"], root)
+
+def _generate(crate: str, location: str, authority: str, leaves: list[tuple], quiet: bool = False):
+    def run(ctx: TaskContext) -> int:
+        root = ctx.std.env.aspect_root_dir()
+        output = root + "/crates/vesper-" + crate + "/tests/fixtures" + location
+        work = scratch_dir(ctx, "vesper-" + crate + "-pki-")
+        for name in [authority, "rogue-ca"]:
+            _ca(ctx, root, work, name)
+        for name, issuer, subject, host in leaves:
+            _leaf(ctx, root, work, name, issuer, subject, host, quiet)
+        ctx.std.fs.create_dir_all(output)
+        for name in [authority, "rogue-ca"] + [leaf[0] for leaf in leaves]:
+            ctx.std.fs.copy(work + "/" + name + ".der", output + "/" + name + ".der")
+        for name, _, _, _ in leaves:
+            ctx.std.fs.copy(work + "/" + name + ".key.der", output + "/" + name + ".key.der")
+        return 0
+    return task(
+        kind = "gen",
+        group = ["crate", crate],
+        summary = "Regenerate the " + crate + " TLS test certificates",
+        implementation = run,
+    )
+
+chorus_gen = _generate(
+    "chorus", "/pki", "chorus-ca",
+    [("node%d" % node, "chorus-ca", "node%d.chorus.test" % node, "node%d.chorus.test" % node) for node in range(16)] +
+    [("rogue-node1", "rogue-ca", "node1.chorus.test", "node1.chorus.test")],
+    quiet = True,
+)
+
+warp_tls_gen = _generate("warp-tls", "", "test-ca", [
+    ("server", "test-ca", "server", "warp.test"),
+    ("rogue-server", "rogue-ca", "rogue-server", "warp.test"),
+])

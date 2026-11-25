@@ -30,7 +30,7 @@ port is faster" below).
   `--release`. The port is compiled by the in-tree `vesper` through
   `vesper-port-harness` (`optimize = true`, the inliner and
   `opt_level=speed` of #944).
-- Wall clock: `crates/vesper-aura/bench-abba.sh` (`abba compare`), 200
+- Wall clock: `aspect crate aura bench-abba` (`abba compare`), 200
   operations per run after a 50-operation warm-up, both builds as separate
   processes in Rust, port, port, Rust order per epoch. Per-lever runs use 15
   epochs. The before/after pair uses 21 epochs in one session.

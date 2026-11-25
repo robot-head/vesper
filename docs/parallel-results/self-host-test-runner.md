@@ -266,9 +266,39 @@ tests/common/doctest_guard_words.rs.
   Vesper side parses the source again; the Rust side reuses the module
   `checked` already parsed. That parse is inside the measured 0.39x.
 
-## Left after part 5
+## Part 6: the generated module of a doctest example
 
-- doctest `generate`.
+`packages/vesper-test-runner/src/generate.ves` ports `generate` of
+src/doctest.rs, moved into the src/doctest_generate.rs swap point
+(`DocTestGenerateTable`): the snippet appended to the file's base source
+and, unless it declares items, wrapped in the entry function with the
+`sim` fence's device effect row; the entry (`entry=`, `main` for a
+declaration, the wrapper for a body, none for `compile_fail`); and each
+code line's range. A snippet declares items when it parses (`@vesper/ast`,
+diagnostics from `@vesper/front`) without diagnostics into a module with
+items or model uses, or when its first token is `fn`, a mode, `struct`,
+`enum`, `effect`, `impl` or a contextual `trait`/`model`/`pub`. The
+check-byte budget and the token preflight (already swapped,
+`doctest_extract`) stay in `doctest::generate` before the swap. Entries
+`doctest_generate_words` and `doctest_generate_str`; words in
+tests/common/doctest_generate_words.rs.
+
+- **Differential** (tests/self_host_doctest_generate.rs): every `.ves` file
+  whole (up to 16 KiB), each top-level function (on every seventh file
+  with the whole file as the base), each function's body lines,
+  three-line windows (malformed and partial prefixes), the inline sources
+  of the doctest suites, and 34 rows (each also indented) for every
+  declaration start, contextual-keyword lookalikes and non-ASCII text,
+  under a cycle of 3 wrappers, `entry=` absent/`run`/empty,
+  `compile_fail`, and no sim, an empty, one-device and three-device sim
+  row. Modules equal against `rust_generate`.
+- **Numbers:** 0 diffs over 39,275 snippets (14,574 declarations, 24,701
+  bodies); unoptimized build 0 diffs on every 13th. ABBA best of six:
+  Rust 2.36 s, Vesper 2.06 s, **0.87x**.
+- **Swapped in the hybrid** (`doctest_generate`).
+
+## Left after part 6
+
 - Expect-error matching, verdict keys, reports.
 - A hybrid end-to-end test of `vesper test`.
 - Execution (anvil_jit, the evaluator, anvil_sim) stays Rust until the

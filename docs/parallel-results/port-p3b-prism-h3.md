@@ -65,7 +65,7 @@ Each ported module has one wrong edit (`DIVERGENT_EDITS` in `build.rs`, the `DIV
 
 ## ABBA
 
-`examples/abba.rs` with `vesper-bench` `run_abba` (12 epochs of A/B/B/A, 16 batches, with a digest check). Instruction counts are from callgrind over 5 batches. Run with `CALLGRIND=1 sh crates/vesper-prism-h3/scripts/bench.sh`, on the cloud container, Linux x86_64, release builds.
+`examples/abba.rs` with `vesper-bench` `run_abba` (12 epochs of A/B/B/A, 16 batches, with a digest check). Instruction counts are from callgrind over 5 batches. Run with `CALLGRIND=1 aspect crate prism-h3 bench`, on the cloud container, Linux x86_64, release builds.
 
 The workloads:
 - **decode:** 70 QIFS encoded files, 1,260 sections, each through a fresh decoder.
@@ -129,7 +129,7 @@ Divergence checks for part 2. Each guarding test fails and each control test pas
 
 ### ABBA, all workloads
 
-Instruction counts are now the difference between 6 and 1 batches, so setup (loading the corpus, building inputs and tables) is not counted. This moves the part 1 figures slightly. All numbers below are from one run of `CALLGRIND=1 sh crates/vesper-prism-h3/scripts/bench.sh` after part 3.
+Instruction counts are now the difference between 6 and 1 batches, so setup (loading the corpus, building inputs and tables) is not counted. This moves the part 1 figures slightly. All numbers below are from one run of `CALLGRIND=1 aspect crate prism-h3 bench` after part 3.
 
 The workloads:
 - **frames**, per batch:

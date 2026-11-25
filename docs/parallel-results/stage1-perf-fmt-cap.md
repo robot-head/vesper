@@ -74,7 +74,7 @@ baseline crate and with this branch through the library API, hashing each
 output or recording the error. The two lists are identical: 603 identical
 outputs and the same 5 errors (3 `OpaqueMacro`, 2 `Syntax`; all 5 are in
 `scripts/fmt-exclude.txt` or are fixtures that are invalid on purpose).
-`scripts/test-fmt.sh` (`vesper fmt --check` over the repo) runs in CI on
+`aspect acceptance test-fmt` (`vesper fmt --check` over the repo) runs in CI on
 BuildBuddy.
 
 ## Formatting time against file size

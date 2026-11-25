@@ -21,8 +21,8 @@ run = "cargo test --locked --release -p vesper-prism-h3 --test port_differential
 # Part 3b ABBA benchmarks (A B B A, n = 30) against 0f5a9eba.
 [[abba]]
 workload = "connection"
-run = "crates/vesper-prism-h3/scripts/bench.sh flip-gate connection"
+run = "aspect crate prism-h3 bench -- flip-gate connection"
 
 [[abba]]
 workload = "session"
-run = "crates/vesper-prism-h3/scripts/bench.sh flip-gate session"
+run = "aspect crate prism-h3 bench -- flip-gate session"

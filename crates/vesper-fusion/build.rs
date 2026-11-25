@@ -13,7 +13,7 @@ fn main() {
 }
 
 /// The divergence check (mirrored in BUILD.bazel and asserted by
-/// crates/vesper-fusion/port/test-port.sh).
+/// aspect crate fusion test-port).
 #[cfg(feature = "vesper-port-divergent")]
 const EDITS: &[(&str, &str)] = &[
     // engine.ves: explanation steps record the opposite direction.

@@ -1,0 +1,38 @@
+load("./lib/port_checks.axl", "require_divergence")
+load("./lib/process.axl", "check", "root_path")
+
+def run_port_abi(ctx: TaskContext, root: str, env: dict[str, str]) -> int:
+    selected = (ctx.std.env.var("VESPER_PORT_HARNESS_CRATES") or "all").split()
+    for group in json.decode(ctx.std.fs.read_to_string(root + "/scripts/port-abi-plan.json")):
+        if "all" not in selected and not any([crate in selected for crate in group["crates"]]):
+            continue
+        for case in group["checks"]:
+            argv = ["test", "--locked"] + case["args"]
+            description = case.get("description")
+            if not description:
+                check(ctx, "cargo", argv, root, env)
+                continue
+            expected = ["test " + name + " ... FAILED" for name in case.get("failed", [])]
+            expected.extend(["test " + name + " ... ok" for name in case.get("passed", [])])
+            if case.get("diagnostic"):
+                expected.append(case["diagnostic"])
+            require_divergence(ctx, root, argv, description, expected, env)
+    return 0
+
+def port_compiler(ctx: TaskContext, root: str) -> str:
+    compiler = ctx.std.env.var("VESPER_PORT_COMPILER")
+    if compiler:
+        return compiler
+    check(ctx, "cargo", ["build", "--locked", "--bin", "vesper"], root)
+    return root_path(root, ctx.std.env.var("CARGO_TARGET_DIR") or "target") + "/debug/vesper"
+
+def _port_abi(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    return run_port_abi(ctx, root, {"VESPER_PORT_COMPILER": port_compiler(ctx, root)})
+
+test_port_abi = task(
+    kind = "test-port-abi",
+    group = ["ci"],
+    summary = "Run the host-sensitive export ABI and divergence checks",
+    implementation = _port_abi,
+)

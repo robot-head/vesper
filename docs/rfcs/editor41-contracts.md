@@ -27,7 +27,7 @@ Core AST/checker/Place IR/interface/native ABI schemas, arithmetic semantics,
 `k_i ⊑ m_i` and the AST-based Lean extractor remain unchanged.
 
 Within #85, the coordinator delegates only `src/lsp/session.rs` and its report
-to `editor41/session`, and only `tests/lsp_cli.rs`, `scripts/test-editor.sh`,
+to `editor41/session`, and only `tests/lsp_cli.rs`, `aspect acceptance test-editor`,
 `scripts/check-editor.py`, `.github/workflows/editor.yml` and its report to
 `editor41/stdio`. Root retains `src/lsp.rs`, `src/lsp/search.rs`, the existing
 CLI stdio regression, global registration and integration report. These are

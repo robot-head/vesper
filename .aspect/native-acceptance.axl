@@ -1,0 +1,183 @@
+load("./lib/bazel_exec.axl", "executable", "run_target")
+load("./lib/process.axl", "capture", "check", "command", "exit_code", "root_path", "scratch_dir")
+
+def _native_cases(ctx: TaskContext, root: str) -> list[str]:
+    cases = ctx.std.fs.read_to_string(root + "/scripts/native-example-cases.txt").split()
+    if not cases:
+        ctx.std.process.exit(1, "No native example cases")
+    return cases
+
+def _expected_exit(ctx: TaskContext, root: str, argv: list[str], name: str, target: str, expected: int):
+    status = command(ctx, argv[0], argv[1:], root).status()
+    actual = exit_code(status)
+    if actual != expected:
+        ctx.std.process.exit(1, "%s: expected %d, got %d" % (name, expected, actual))
+    ctx.std.io.stdout.write("%s: %s exit %d\n" % (name, target, actual))
+
+def _host_examples(ctx: TaskContext, root: str, vesper: str, suffix: str) -> int:
+    artifacts = scratch_dir(ctx, "vesper-native-host-")
+    for entry in _native_cases(ctx, root):
+        name, expected = entry.split(":")
+        output = artifacts + "/" + name + suffix
+        check(ctx, vesper, ["build", "examples/" + name + ".ves", "-o", output], root)
+        _expected_exit(ctx, root, [output], name, "host", int(expected))
+    return 0
+
+def _host(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    return _host_examples(ctx, root, executable(ctx, root, "//:bin/vesper"), "")
+
+test_native_host = task(
+    kind = "test-native-host",
+    group = ["acceptance"],
+    summary = "Build and run the native examples on this host",
+    implementation = _host,
+)
+
+_AARCH64_START = """
+.text
+.global _start
+_start:
+    bl main
+    mov x8, #93
+    svc #0
+"""
+
+def _aarch64_case(ctx: TaskContext, root: str, artifacts: str, vesper: str, linker: str, emulator: str, source: str, name: str, expected: int):
+    output = artifacts + "/" + name.replace("/", "_")
+    check(ctx, vesper, ["emit", source, "--emit", "object", "--target", "aarch64-unknown-linux-gnu", "-o", output + ".o"], root)
+    check(ctx, linker, [artifacts + "/start.o", output + ".o", "-o", output], root)
+    _expected_exit(ctx, root, [emulator, output], name, "AArch64", expected)
+
+def _aarch64(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    artifacts = scratch_dir(ctx, "vesper-aarch64-")
+    vesper = executable(ctx, root, "//:bin/vesper")
+    assembler = ctx.std.env.var("AARCH64_AS") or "aarch64-linux-gnu-as"
+    linker = ctx.std.env.var("AARCH64_LD") or "aarch64-linux-gnu-ld"
+    emulator = ctx.std.env.var("QEMU_AARCH64") or "qemu-aarch64"
+    ctx.std.fs.write(artifacts + "/start.s", _AARCH64_START)
+    check(ctx, assembler, [artifacts + "/start.s", "-o", artifacts + "/start.o"], root)
+    for entry in _native_cases(ctx, root):
+        name, expected = entry.split(":")
+        _aarch64_case(ctx, root, artifacts, vesper, linker, emulator, "examples/" + name + ".ves", name, int(expected))
+    for name, expected in [("count", 170), ("control", 62)]:
+        _aarch64_case(ctx, root, artifacts, vesper, linker, emulator, "tests/fixtures/loops/" + name + ".ves", "loops/" + name, expected)
+    return 0
+
+test_aarch64 = task(
+    kind = "test-aarch64",
+    group = ["acceptance"],
+    summary = "Run emitted AArch64 examples and loop fixtures under QEMU",
+    implementation = _aarch64,
+)
+
+def _expansion(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    for crate, examples in [
+        ("serde", ["bounded_json", "binary_codecs"]),
+        ("beacon", ["bounded_trace"]),
+        ("beacon-arrow", ["bounded_export"]),
+        ("quarry", ["quarry", "quarry_pages"]),
+        ("tensor", ["cpu_fusion", "kv_pages"]),
+        ("flux", ["incremental_join", "checkpoint_resume"]),
+        ("aether", ["snapshot_pages", "packed_queue"]),
+    ]:
+        for example in examples:
+            run_target(ctx, root, "//crates/vesper-" + crate + ":example/" + example)
+    return 0
+
+test_expansion_foundations = task(
+    kind = "test-expansion-foundations",
+    group = ["acceptance"],
+    summary = "Run the host-library expansion examples",
+    implementation = _expansion,
+)
+
+def _exclusions(ctx: TaskContext, root: str) -> dict:
+    lines = ctx.std.fs.read_to_string(root + "/scripts/fmt-exclude.txt").splitlines()
+    return {line.strip(): True for line in lines if line.strip() and not line.strip().startswith("#")}
+
+def _fmt_check(ctx: TaskContext, root: str, binary: str) -> int:
+    tracked = sorted([path for path in capture(ctx, "git", ["ls-files", "-z", "--", "*.ves"], root).split("\x00") if path])
+    known = {path: True for path in tracked}
+    skip = _exclusions(ctx, root)
+    stale = sorted([path for path in skip if path not in known])
+    if stale:
+        ctx.std.process.exit(1, "fmt-exclude.txt lists paths that are not tracked .ves files: " + ", ".join(stale))
+    files = [path for path in tracked if path not in skip]
+    if not files:
+        ctx.std.process.exit(1, "no .ves files to check")
+    scratch = scratch_dir(ctx, "vesper-fmt-")
+    stdout = scratch + "/stdout"
+    stderr = scratch + "/stderr"
+    cmd = command(ctx, binary, ["fmt", "--check", "--json", "--"] + files, root)
+    child = cmd.stdout(ctx.std.fs.create(stdout)).stderr(ctx.std.fs.create(stderr)).spawn()
+    status = child.try_wait(timeout_ms = 600000)
+    if status == None:
+        child.kill()
+        child.wait()
+        ctx.std.process.exit(1, "vesper fmt timed out after 600 seconds")
+    report = json.try_decode(ctx.std.fs.read_to_string(stdout))
+    if report == None:
+        ctx.std.process.exit(1, "vesper fmt did not report JSON (exit %d): %s" % (exit_code(status), ctx.std.fs.read_to_string(stderr)))
+    entries = report["files"] if "files" in report else [dict(report, path = files[0])]
+    bad = [entry for entry in entries if entry["status"] != "unchanged"]
+    for entry in bad:
+        ctx.std.io.stdout.write("%s: %s\n" % (entry["path"], entry.get("error", entry["status"])))
+    if bad or not status.success:
+        ctx.std.io.stderr.write(
+            "%d of %d .ves files are not canonically formatted. Run `vesper fmt <file>` on them, or add a reviewed entry to scripts/fmt-exclude.txt.\n" %
+            (len(bad), len(files)),
+        )
+        return 1
+    ctx.std.io.stdout.write("vesper fmt --check: %d files canonical, %d excluded\n" % (len(files), len(skip)))
+    return 0
+
+def _check_fmt(ctx: TaskContext) -> int:
+    values = ctx.args.tool_args
+    if len(values) == 2 and values[0] == "--binary":
+        binary = values[1]
+    elif len(values) == 1 and values[0].startswith("--binary="):
+        binary = values[0].removeprefix("--binary=")
+    else:
+        ctx.std.process.exit(2, "Expected --binary <vesper>")
+    return _fmt_check(ctx, ctx.std.env.aspect_root_dir(), binary)
+
+check_fmt = task(
+    kind = "check-fmt",
+    group = ["acceptance"],
+    summary = "Check tracked Vesper sources with the given compiler",
+    implementation = _check_fmt,
+    args = {"tool_args": args.trailing_var_args(description = "Pass -- --binary <vesper>.")},
+)
+
+def _test_fmt(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    binary = ctx.std.env.var("VESPER_FMT_BINARY") or executable(ctx, root, "//:bin/vesper")
+    candidate = binary + ".exe"
+    candidate_path = root_path(root, candidate)
+    if ctx.std.fs.exists(candidate_path) and ctx.std.fs.metadata(candidate_path).is_file:
+        binary = candidate
+    return _fmt_check(ctx, root, binary)
+
+test_fmt = task(
+    kind = "test-fmt",
+    group = ["acceptance"],
+    summary = "Check tracked Vesper sources with the workspace compiler",
+    implementation = _test_fmt,
+)
+
+def _ci_host(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    compiler = ctx.std.env.var("VESPER_NATIVE_BINARY")
+    if not compiler:
+        ctx.std.process.exit(2, "Set VESPER_NATIVE_BINARY to the compiler executable")
+    return _host_examples(ctx, root, compiler, ctx.std.env.var("VESPER_NATIVE_SUFFIX") or "")
+
+test_native_executables = task(
+    kind = "test-native-executables",
+    group = ["ci"],
+    summary = "Check native examples with the Cargo-built compiler",
+    implementation = _ci_host,
+)

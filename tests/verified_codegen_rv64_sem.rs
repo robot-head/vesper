@@ -189,9 +189,18 @@ fn every_data_instruction_has_a_semantics_lemma() {
 
 #[test]
 fn ci_checks_the_semantics_file() {
-    let script = read("scripts/ci/check-lean-models.sh");
-    assert!(script.contains("lean/CodegenRv64Semantics.lean"));
-    assert!(script.contains("-o \"$oracle_model_dir/CodegenRv64Encoding.olean\""));
+    let plan: serde_json::Value =
+        serde_json::from_str(&read("scripts/lean-model-plan.json")).unwrap();
+    let dependencies = plan["dependencies"].as_array().unwrap();
+    let encoding = dependencies
+        .iter()
+        .position(|entry| entry["model"] == "CodegenRv64Encoding" && entry["compile"] == true)
+        .expect("CI compiles the RV64 encoding");
+    let semantics = dependencies
+        .iter()
+        .position(|entry| entry["model"] == "CodegenRv64Semantics" && entry["imports"] == true)
+        .expect("CI checks the RV64 semantics with compiled imports");
+    assert!(encoding < semantics);
 }
 
 #[test]
