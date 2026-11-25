@@ -294,3 +294,65 @@ No file under `src/verified_codegen/**`, `src/ir.rs`, `ir_opt::optimize`,
 - Part 4: the compile drivers, then `native_clif_opt` once #1426 calls it
   stable. `@vesper/clif` (the #1829 tables) already gives a pass read and
   rewrite access to a finished function.
+
+## Part 3b: entry blocks from the Vesper plan (#1939)
+
+### Changes
+
+- **`src/codegen_swap.rs`**: a `frame_plans` hook (`FramePlansHook`). It
+  takes the world, the first lowering, the entry and the optimize flag, and
+  answers the entry-block plan of each instance by key.
+- **`src/native.rs`**: `compile_entry` asks the hook once per compile
+  without a trace host, right after the first lowering.
+  `define_instances_observed_with_trace` emits each entry block from the
+  hook's plan when the plan covers every parameter, and from
+  `native::frame_plan` otherwise. `FramePlan::parse` reads the plan text back
+  (it round-trips `FramePlan::text`). The library export path
+  (`native_export`) and `define_instances` keep the Rust plans.
+- **`@vesper/native-walk`**: `native_walk_frames_bytes`, the byte entry of
+  the part 3a dump.
+- **`tests/common/native_walk_words.rs`**: `decode_frames`. A task the
+  package refuses, or a plan that doesn't parse, answers `None`, so the
+  whole compile keeps the Rust plans.
+  `tests/common/codegen_calls_words.rs` now reaches its sibling encoders
+  through `super::`, so vesper-hybrid can include it.
+- **vesper-hybrid**: `modules/codegen_walk` exports `frame_plans_words`.
+  `src/swap/codegen_walk.rs` installs `frame_plans` (off with
+  `VESPER_HYBRID_WALK=0`, like `register_locals`) and reports its calls
+  under `VESPER_HYBRID_STATS`.
+
+### Results (Linux x86_64, release)
+
+`the_frame_plans_swap_matches_rust` compiles every task twice, without and
+then with the package at the hook, and compares CLIF text and object bytes.
+
+| Run | Compiles | Hook asked / answered | Vesper plans used | Differ |
+|---|--:|--:|--:|--:|
+| `NATIVE_WALK_FRAME_STEP=1`, 4 entries | 1,966 | 1,980 / 1,838 | 6,392 | **0** |
+| default (step 4, 2 entries) | 614 | 622 / 580 | 1,504 | **0** |
+
+The declined compiles are worlds the calls input can't encode and entries
+`@vesper/codegen-calls` refuses. Those keep the Rust plans.
+
+**Build time.** On the default run, the 614 compiles take 61.50 s with Rust
+plans and 62.44 s with the hook, which is **1.015x**. The hook accounts for
+1.54 s of that (about 2.5 ms a compile): it encodes the world and the
+program, runs the package and decodes the plans. That is under the 1.50x
+bar. The ratio is a single-run sum, not an ABBA CI.
+
+**Rust lines deleted:** 0. `native::frame_plan` stays as the fallback and the
+oracle. It can go once the hook answers every compile (trace hosts and the
+library export path), and the swap passes its flip gate.
+
+### Gaps
+
+- Trace-host compiles still use the Rust plan, the part 3a gap.
+- `native_export` (library objects) and `define_instances` pass no plans.
+- The hook encodes the whole world on every entry compile. A per-session
+  cache of the encoding would remove most of the 2.5 ms.
+
+### What is left
+
+- Part 4: the compile drivers (JIT/object), then `native_clif_opt` after
+  #1426.
+- A flip-gate configuration for `frame_plans` and `register_locals`.
