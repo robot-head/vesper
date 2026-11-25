@@ -15,3 +15,9 @@ capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdProcess]", "Ffi[Std
 "@vesper-std/fmt" = { version = "^0.1", path = "../../../../packages/vesper-std/fmt" }
 # The other commands' layers (SH5 lane 13, #1336).
 "@vesper/driver-commands" = { version = "^0.1", path = "../../../../packages/vesper-driver-commands" }
+# The front-end passes (hd_step group 2, #1893): the parse module's word
+# stream, the front end v2 and the AST, and Rust's `str` Debug text.
+"@vesper/hybrid-parse" = { version = "^0.1", path = "../parse" }
+"@vesper/ast" = { version = "^0.1", path = "../../../../packages/vesper-ast" }
+"@vesper/front" = { version = "^0.1", path = "../../../../packages/vesper-front" }
+"@vesper-std/toml" = { version = "^0.1", path = "../../../../packages/vesper-std/toml" }
