@@ -470,6 +470,42 @@ sys.exit(9)
         missing_cargo = self.aspect(*command, env=env, status=1)
         self.assertIn("The CI Lean and Cargo executable paths are required", missing_cargo.stderr)
 
+    def test_lint_port_checks_new_modes_suite_with_an_independent_control(self):
+        cargo = self.write("bin/cargo", """\
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+args = sys.argv[1:]
+area = os.environ.get("VESPER_LINT_DIVERGE")
+assert args[:4] == ["test", "--locked", "-p", "vesper-lint"]
+if not area:
+    sys.exit(0)
+assert args[4:] == ["--features", "vesper-port,vesper-port-divergent", "--no-fail-fast",
+                    "--test", "differential", "--test", "typed", "--test", "policy", "--test", "modes",
+                    "--", "--skip", "port_frees_its_allocations"]
+failed, passed = {
+    "effects": ("fuzzed_facts_lint_identically", "fuzzed_documents_parse_identically"),
+    "projections": ("fuzzed_facts_lint_identically", "fuzzed_documents_parse_identically"),
+    "toml": ("fuzzed_documents_parse_identically", "fuzzed_facts_lint_identically"),
+    "edits": ("fuzzed_edits_apply_identically", "fuzzed_facts_lint_identically"),
+    "modes": ("repository_sources_match_the_definition", "fuzzed_documents_parse_identically"),
+}[area]
+with Path("lint.log").open("a") as log:
+    print(area, file=log)
+print(f"test {failed} ... FAILED")
+if area != "modes" or not os.environ.get("DROP_MODES_CONTROL"):
+    print(f"test {passed} ... ok")
+sys.exit(101)
+""", executable=True)
+        env = {"PATH": os.pathsep.join([str(cargo.parent), os.environ["PATH"]])}
+        result = self.aspect("crate", "lint", "test-port", env=env)
+        self.assertIn("Detected divergent lint port (modes)", result.stdout)
+        self.assertEqual((self.root / "lint.log").read_text().splitlines(),
+                         ["effects", "projections", "toml", "edits", "modes"])
+        rejected = self.aspect("crate", "lint", "test-port", env={**env, "DROP_MODES_CONTROL": "1"}, status=1)
+        self.assertIn("Divergence check did not fail as expected: lint port (modes)", rejected.stderr)
+
     def test_native_port_check_requires_expected_failure_and_passing_control(self):
         self.write("bin/cargo", """\
 #!/usr/bin/env python3

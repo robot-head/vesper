@@ -330,12 +330,15 @@ lint_test_port = port_checks(
         ["-p", "vesper-lint", "--features", "vesper-port", "--test", "differential", "--", "--exact", "port_frees_its_allocations"],
     ],
     [
-        divergence(name, ["--features", "vesper-port,vesper-port-divergent", "--no-fail-fast", "--test", "differential", "--test", "typed", "--test", "policy", "--", "--skip", "port_frees_its_allocations"], [failed], [passed], env = {"VESPER_LINT_DIVERGE": name})
+        divergence(name, ["--features", "vesper-port,vesper-port-divergent", "--no-fail-fast",
+                          "--test", "differential", "--test", "typed", "--test", "policy", "--test", "modes",
+                          "--", "--skip", "port_frees_its_allocations"], [failed], [passed], env = {"VESPER_LINT_DIVERGE": name})
         for name, failed, passed in [
             ("effects", "fuzzed_facts_lint_identically", "fuzzed_documents_parse_identically"),
             ("projections", "fuzzed_facts_lint_identically", "fuzzed_documents_parse_identically"),
             ("toml", "fuzzed_documents_parse_identically", "fuzzed_facts_lint_identically"),
             ("edits", "fuzzed_edits_apply_identically", "fuzzed_facts_lint_identically"),
+            ("modes", "repository_sources_match_the_definition", "fuzzed_documents_parse_identically"),
         ]
     ],
 )

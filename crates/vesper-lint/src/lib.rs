@@ -135,6 +135,11 @@ pub enum FindingKind {
         mutable_paths: Vec<Vec<String>>,
         read_paths: Vec<Vec<String>>,
     },
+    /// `L0103`: an `inout` parameter that is never written. Produced only by
+    /// the Vesper port's [`analyze_modes`] (#1888); diagnostic only.
+    OverlyRestrictiveMode {
+        parameter: String,
+    },
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct Finding {
@@ -180,6 +185,14 @@ pub fn analyze(program: &CheckedProgram, limits: Limits) -> Result<LintReport, L
     analyze_rust(program, limits)
 }
 #[cfg_attr(vesper_port, allow(dead_code))]
+/// The Vesper-only rules (`L0103`, #1888) over the same facts and limits as
+/// [`analyze`]. Only the port build (`vesper-port`) has them; the work count
+/// is the port's own.
+#[cfg(vesper_port)]
+pub fn analyze_modes(program: &CheckedProgram, limits: Limits) -> Result<LintReport, LintError> {
+    port::analyze_modes(program, limits)
+}
+
 fn analyze_rust(program: &CheckedProgram, limits: Limits) -> Result<LintReport, LintError> {
     if limits.functions == 0
         || limits.functions > MAX_FUNCTIONS
