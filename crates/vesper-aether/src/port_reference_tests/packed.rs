@@ -1,12 +1,11 @@
 //! The Vesper packed-ring capture against the Rust one (both builds are in
 //! the crate under `vesper-port`): two queues run the same random captures
 //! and completions over their own copies of a random ring.
-#![cfg(feature = "vesper-port")]
 
 use std::collections::VecDeque;
 
-use vesper_aether::virtio::*;
-use vesper_aether::{Limits, MemorySlot, PageMapping, Permission, SlotSnapshot, SnapshotMap};
+use crate::virtio::*;
+use crate::{Limits, MemorySlot, PageMapping, Permission, SlotSnapshot, SnapshotMap};
 
 struct Rng(u64);
 impl Rng {

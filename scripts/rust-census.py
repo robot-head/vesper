@@ -106,7 +106,7 @@ CRATES = {
     "vesper-chrono": ("c-api", "", "", "perf/ptrace syscalls; iced-x86 disassembler (port or Capstone C)", "14"),
     "vesper-bench-pmu": ("c-api", "", "", "perf_event_open", "14"),
     "vesper-warp-umem": ("c-api", "", "", "AF_XDP rings, mmap (UMEM as Pinned[u8], rings as mappings viewed in place: #1505)", "14"),
-    "vesper-aether": ("c-api", "in crate", "virtqueue 1.44x, packed 1.35x (flipped); slot plans 3.48x, hot sets 1.98x, pvh 9.06x", "KVM ioctls, userfaultfd; slot plans, PVH, hot sets wait on G10", "14"),
+    "vesper-aether": ("c-api", "in crate", "virtqueue 1.27x, packed 1.47x, hot sets 1.35x, seccomp evaluate 1.24x (flipped); seccomp compile 1.67x, mmio status 2.6x, net 2.4x, blk 3.0x, guest_mem locate 3.8x, slot plans 3.6x, pvh 8.5x, vsock/vmgenid codecs ~27x", "KVM ioctls, userfaultfd; non-flipped ports are bound by per-call Rust/Vesper crossings (small codecs) or G10 (slot plans, PVH)", "14"),
     "vesper-warp-shard": ("unported", "", "", "SIMD CID lookup: source vectors", "4"),
     "vesper-aura-gtk": ("c-api", "", "", "gtk4-rs: call the GTK 4 C API", "15"),
     "vesper-ignis-vulkan": ("c-api", "", "", "ash: call the Vulkan C API; naga via shim", "15"),

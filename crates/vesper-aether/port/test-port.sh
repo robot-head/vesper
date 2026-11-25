@@ -39,17 +39,19 @@ expect slot_plan accepts_adjacent_aligned_slots overlap_check_matches_pairwise_d
 expect slot_plan_port verify_matches_the_rust_verifier
 # pvh: a segment may end one byte past the file.
 expect pvh_port truncations_and_bit_flips_match
-# hotset: equal indices count as increasing.
-expect hotset_port decode_matches_on_valid_and_mutated_encodings -- runs_match
+# hotset (Vesper-only; the Rust reference is a unit-test module): equal
+# indices count as increasing.
+expect lib port_reference_tests::hotset::decode_matches_on_valid_and_mutated_encodings -- port_reference_tests::hotset::runs_match
 expect hotset encoded_form_is_validated -- runs_coalesce_and_split_at_the_batch_size
-# packed: a used descriptor counts as available.
-expect packed_port capture_matches_the_rust_capture
+# packed (Vesper-only; the Rust reference is a unit-test module): a used
+# descriptor counts as available.
+expect lib port_reference_tests::packed::capture_matches_the_rust_capture
 # vq (Vesper-only; the Rust reference is a unit-test module): a chain may
 # hold one buffer more than the limit.
 expect lib devices::queue::reference::differential::capture_matches_the_rust_capture -- devices::queue::reference::abba::both_builds_compute_the_same_workload
 # seccomp: unaligned seccomp_data load offset is rejected.
 expect seccomp malformed_programs_are_rejected -- compiled_profile_allows_exactly_the_allowlist
-expect seccomp_port validate_and_evaluate_match_rust -- compile_matches_rust
+expect lib port_reference_tests::seccomp::validate_and_evaluate_match_rust -- port_reference_tests::seccomp::compile_matches_rust
 # guest_mem: touching regions are accepted as non-overlapping.
 expect guest_mem_port layout_and_locate_match_rust -- out_of_bounds_and_overflow_match_rust
 # block: unaligned discard sector/count is rejected.

@@ -19,49 +19,37 @@ pub copy struct VsockHeader {
     pub fwd_cnt: u32,
 }
 
-fn vsock_byte(in s: Slice[u8], i: u64) -> u8 {
-    match s.try_get(i) {
+fn vsock_read_u16_le(in s: Slice[u8], off: u64) -> u16 {
+    match s.try_read_u16_le(off) {
         Option::Some(v) => v,
         Option::None => 0,
     }
 }
 
-fn vsock_read_u16_le(in s: Slice[u8], off: u64) -> u16 {
-    let b0 = widen_u32(vsock_byte(in s, off));
-    let b1 = widen_u32(vsock_byte(in s, wrapping_add(off, 1))) << 8;
-    wrapping_u16(b0 | b1)
-}
-
 fn vsock_read_u32_le(in s: Slice[u8], off: u64) -> u32 {
-    let b0 = widen_u32(vsock_byte(in s, off));
-    let b1 = widen_u32(vsock_byte(in s, wrapping_add(off, 1))) << 8;
-    let b2 = widen_u32(vsock_byte(in s, wrapping_add(off, 2))) << 16;
-    let b3 = widen_u32(vsock_byte(in s, wrapping_add(off, 3))) << 24;
-    b0 | b1 | b2 | b3
+    match s.try_read_u32_le(off) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
 }
 
 fn vsock_read_u64_le(in s: Slice[u8], off: u64) -> u64 {
-    let lo = widen_u64(vsock_read_u32_le(in s, off));
-    let hi = widen_u64(vsock_read_u32_le(in s, wrapping_add(off, 4))) << 32;
-    lo | hi
+    match s.try_read_u64_le(off) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
 }
 
 fn vsock_write_u16_le(inout out: Slice[u8], off: u64, val: u16) {
-    let v = widen_u32(val);
-    out.try_set(off, wrapping_u8(v));
-    out.try_set(wrapping_add(off, 1), wrapping_u8(v >> 8));
+    out.try_write_u16_le(off, val);
 }
 
 fn vsock_write_u32_le(inout out: Slice[u8], off: u64, val: u32) {
-    out.try_set(off, wrapping_u8(val));
-    out.try_set(wrapping_add(off, 1), wrapping_u8(val >> 8));
-    out.try_set(wrapping_add(off, 2), wrapping_u8(val >> 16));
-    out.try_set(wrapping_add(off, 3), wrapping_u8(val >> 24));
+    out.try_write_u32_le(off, val);
 }
 
 fn vsock_write_u64_le(inout out: Slice[u8], off: u64, val: u64) {
-    vsock_write_u32_le(inout out, off, wrapping_u32(val));
-    vsock_write_u32_le(inout out, wrapping_add(off, 4), wrapping_u32(val >> 32));
+    out.try_write_u64_le(off, val);
 }
 
 pub fn vsock_encode_hdr(h: VsockHeader, inout out: Slice[u8]) -> u64 {
