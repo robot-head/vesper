@@ -40,6 +40,92 @@ mod pages;
 mod shared;
 
 pub use btree::TreeShape;
+
+/// The `leaf_check` ABBA workload (examples/leaf_abba.rs): `n` full PAX
+/// leaves of an (I64, I64, TEXT, TEXT, F64, BOOL) table with tombstones,
+/// nulls and freed slots.
+#[doc(hidden)]
+pub fn bench_leaf_pages(n: usize) -> Vec<Vec<u8>> {
+    use crate::{ScalarType, Value};
+    let types = [
+        ScalarType::I64,
+        ScalarType::I64,
+        ScalarType::Text,
+        ScalarType::Text,
+        ScalarType::F64,
+        ScalarType::Bool,
+    ];
+    let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    let names = [
+        "ada", "grace", "barbara", "edsger", "frances", "tony", "leslie",
+    ];
+    let cities = ["Zürich", "Oslo", "Kyōto", "Lagos", "Lima"];
+    (0..n)
+        .map(|p| {
+            let mut entries = Vec::new();
+            let mut rowid = (p as u64) << 20;
+            for _ in 0..120 {
+                rowid += 1 + next() % 2;
+                let tomb = next().is_multiple_of(10);
+                let values = if tomb {
+                    Vec::new()
+                } else {
+                    vec![
+                        Value::I64(rowid as i64),
+                        Value::I64((next() % 90) as i64),
+                        Value::Text(names[(next() % 7) as usize].repeat(1 + (next() % 3) as usize)),
+                        if next().is_multiple_of(4) {
+                            Value::Null
+                        } else {
+                            Value::Text(cities[(next() % 5) as usize].to_string())
+                        },
+                        Value::F64((next() % 100_000) as f64 / 8.0),
+                        Value::Bool(next().is_multiple_of(2)),
+                    ]
+                };
+                entries.push(pages::Entry {
+                    key: pages::Key::version(rowid, next() % 1000),
+                    tomb,
+                    values,
+                });
+            }
+            let mut b = pages::new_page();
+            assert!(pages::leaf_build(
+                &mut b[..],
+                2 + p as u64,
+                &types,
+                &entries,
+                4096
+            ));
+            let lay = pages::layout_of(&b[..]).expect("leaf");
+            for _ in 0..8 {
+                let pos = (next() % pages::count(&b[..]) as u64) as usize;
+                pages::leaf_remove(&mut b[..], &lay, pos);
+            }
+            b.to_vec()
+        })
+        .collect()
+}
+
+/// Decode every page of [`bench_leaf_pages`]; a digest of the entries.
+#[doc(hidden)]
+pub fn bench_leaf_decode(pages: &[Vec<u8>]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in pages {
+        let (_, entries) = pages::leaf_decode(b).expect("valid leaf");
+        for e in &entries {
+            h = (h ^ e.key.rowid ^ e.key.inv_ts.rotate_left(17) ^ e.values.len() as u64)
+                .wrapping_mul(0x100_0000_01b3);
+        }
+    }
+    h
+}
 pub use error::{StoreError, StoreErrorKind, StoreResult};
 pub use log::{LogTail, StoreRecord, LOG_HEADER_BYTES, MAX_LOG_PAYLOAD};
 pub use shared::SharedStore;

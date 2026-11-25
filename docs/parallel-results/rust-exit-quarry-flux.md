@@ -258,3 +258,31 @@ and compression stay Rust.
   CDC-shaped records per request, `RUSTFLAGS="-C target-cpu=native"`,
   release; Rust arm built from `main` with the same example): Vesper/Rust
   median **0.86x**, 95% CI 0.808x..0.928x, 12 epochs, digests agree.
+## Quarry PAX leaf validation (2026-11-25)
+
+`leaf_decode`'s checks (`crates/vesper-quarry/src/store/pages.rs`) are now
+`leaf_check` in `vesper/src/leaf.ves`: heap offset, right sibling, the
+directory permutation, the occupancy bitmap, tombstone flags, values
+(finite floats, 0/1 booleans, heap bounds, UTF-8 text), key order,
+tombstones without values, overlapping heap values and zeroed free slots,
+with the Rust decoder's status for the first failure. Overlaps are found
+with a one-bit-per-page-byte mask instead of a sort; free slots are checked
+key by key and then column by column, since every failure there is the
+same status. Rust keeps `layout_of` and reads the entries once the check
+passes.
+
+- Differential: `store::pages::leaf_differential` runs 20,000 random leaves
+  (1-6 columns of every type, tombstones, nulls, removed slots), three in
+  four with 1-3 random byte or bit flips, against the old Rust decoder kept
+  in the test module; same entries or the same error every time, and the
+  flips reach every status but the non-finite float, which its own test
+  covers: 0 diffs.
+- Divergence `leaf` (BUILD.bazel `PORT_DIVERGENT`: printable ASCII in leaf
+  text is rejected) fails store_ssi `write_skew_on_call_doctors_is_rejected`
+  while `phantom_write_skew_through_an_index_range_is_rejected` passes.
+- ABBA (`examples/leaf_abba.rs`: decode 256 leaves of a six-column table,
+  400 passes per window, 15 epochs, `RUSTFLAGS="-C target-cpu=native"`,
+  release; Rust arm built from `main` with the same example and hooks):
+  median **1.19x**, 95% CI 1.142x..1.233x, digests agree. The check costs
+  about twice the old Rust validation; the rest of `leaf_decode` (building
+  the `Value`s) is unchanged, so the whole decoder stays inside the bar.
