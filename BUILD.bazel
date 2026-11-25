@@ -905,6 +905,11 @@ vesper_crate(
             "resources:cpu:1",
             "lean_replay",
         ],
+        # Each shard loads the whole corpus and lowers its share of worlds:
+        # about 5 GiB per shard locally (#1913).
+        "test/self_host_swap_inputs": [
+            "resources:memory:6144",
+        ],
         # Four actual corpus workers; memory is an estimate, not an RSS cap.
         "test/self_host_front_end": [
             "resources:memory:5120",
