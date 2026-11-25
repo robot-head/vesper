@@ -501,7 +501,8 @@ fn tarjan(
             }
             if u64_at(in low, v) == u64_at(in index, v) {
                 // The SCC is popped straight into `members` and sorted
-                // there (insertion sort: most SCCs are one vertex).
+                // there: insertion sort while it is small (most SCCs are
+                // one vertex), heap sort over a copy beyond that.
                 let a = members.len();
                 starts.push(a);
                 loop {
@@ -510,23 +511,37 @@ fn tarjan(
                         Option::None => break,
                     };
                     set64(inout on_stack, w, 0);
-                    let x = wrapping_u32(w);
-                    members.push(x);
-                    let mut j = wrapping_sub(members.len(), 1);
-                    loop {
-                        if j == a {
-                            break;
-                        }
-                        let y = u32_at(in members, wrapping_sub(j, 1));
-                        if y <= x {
-                            break;
-                        }
-                        set32(inout members, j, y);
-                        j = wrapping_sub(j, 1);
-                    }
-                    set32(inout members, j, x);
+                    members.push(wrapping_u32(w));
                     if w == v {
                         break;
+                    }
+                }
+                let b = members.len();
+                if wrapping_sub(b, a) <= 16 {
+                    for i in wrapping_add(a, 1)..b {
+                        let x = u32_at(in members, i);
+                        let mut j = i;
+                        loop {
+                            if j == a {
+                                break;
+                            }
+                            let y = u32_at(in members, wrapping_sub(j, 1));
+                            if y <= x {
+                                break;
+                            }
+                            set32(inout members, j, y);
+                            j = wrapping_sub(j, 1);
+                        }
+                        set32(inout members, j, x);
+                    }
+                } else {
+                    let mut scc: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_sub(b, a));
+                    for i in a..b {
+                        scc.push(widen_u64(u32_at(in members, i)));
+                    }
+                    sort_u64(inout scc);
+                    for i in 0..scc.len() {
+                        set32(inout members, wrapping_add(a, i), wrapping_u32(u64_at(in scc, i)));
                     }
                 }
             }

@@ -181,7 +181,7 @@ MODULES = {
     "main": ("SH5-12", "vesper-driver", "#1367"),
     "arrays": ("SH2-9", "", ""),
     "anvil_hash": ("SH5-14", "", ""),
-    "atomics": ("SH2-10", "vesper-check-loops-atomics", "2.31x"),
+    "atomics": ("SH2-10, #1875", "vesper-check-loops-atomics", "port 1.25x (95% CI 1.17-1.26x), 0 diffs; not swapped (needs the checker AST in the hybrid)"),
     "anvil_sim": ("SH5-14", "", ""),
     "native_freestanding": ("SH4-14", "", ""),
     "native_vector": ("SH4-11, G1-3", "", "vectors in registers (#1500): simd 40x -> 5.0x"),

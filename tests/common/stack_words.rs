@@ -147,11 +147,13 @@ impl Words<'_> {
     fn text(&mut self) -> String {
         let len = (self.next() as usize).min(8 * self.words.len().saturating_sub(self.pos));
         let mut bytes = Vec::with_capacity(len);
-        let end = self.pos + len.div_ceil(8);
-        for w in &self.words[self.pos..end] {
+        // A truncated stream leaves the cursor past the end, with `len` 0.
+        let start = self.pos.min(self.words.len());
+        let end = (start + len.div_ceil(8)).min(self.words.len());
+        for w in &self.words[start..end] {
             bytes.extend_from_slice(&w.to_le_bytes()[..(len - bytes.len()).min(8)]);
         }
-        self.pos = end;
+        self.pos = self.pos.max(end);
         String::from_utf8(bytes)
             .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
     }

@@ -1,4 +1,4 @@
-# Rust exit: the stack bound under the flip bar
+# Rust exit: the stack bound and atomics under the flip bar
 
 Claim #1875 (part of #1874 and #1182). Base `907e978`.
 
@@ -84,8 +84,67 @@ under the 1.50x bar. Rust lines deleted: 0. While the Rust compiler is the
 default, `src/stack_bound.rs` is its implementation, and it goes with
 `src/` in the Stage 2 retirement PR (#1397).
 
+Review follow-ups (Codex on #1891), both with tests:
+
+- An SCC larger than 16 vertices is heap-sorted through a copy. A
+  3,000-function call ring and a 3,000-deep chain match Rust
+  (`stack_bound_words_match_rust_on_large_graphs`). Insertion sort alone
+  was quadratic on large rings.
+- The decoder clamps a text's word range to the stream. A truncated
+  stream no longer panics (`stack_words_decode_truncated_streams`).
+
+## Atomics
+
+The atomics task (`needs_prelude`, `needs_workers`, `check_world` and
+`check_program`) measured 2.31x, and 2.22x on `907e978`. Callgrind on an AOT
+build of the task put half its instructions in decoding function bodies
+(`ast.ves` `read_expr`, about 4.8 million expressions over the corpus).
+Each node allocated a children sequence, wrote its 17-word row three
+times, and had its parent read and rewrite the row to set fields it
+already knew.
+
+- `ast.ves`:
+  - The children of the nodes being read now share one stack
+    (`Exprs.stack`). A node's run moves to `kids` when the node is done.
+  - A parent passes what it knows of a child before reading it, in
+    `Up`: the argument's `Pass`, a `let` value's type and pattern, a
+    match arm's pattern, and a clause the checker skips. Each row is
+    written once.
+  - When a `for` is a `let` value or an arm, the parent's pattern still
+    wins, as before.
+  - `ExprRow.arm` marks match arm bodies.
+  - `Exprs::subtree_end`: rows are in pre-order, so a subtree is one run
+    of rows.
+  - The tables are sized from the input left.
+- `atomics.ves`:
+  - `expr_mentions` and `calls_workers` scan a body's run of rows instead
+    of recursing. Both answer whether any node matches, so the order does
+    not matter. A `let` value's and an arm's patterns are read from the
+    rows that carry them.
+  - `read_ir` reserves its tables.
+- `tests/self_host_check_loops_atomics.rs`: `atomics_speed` (ignored),
+  the atomics task alone with the 95% interval.
+
+| Check | Inputs | Differences |
+|---|--:|--:|
+| `atomics_rules_match_rust` | 612 worlds (11,790 lines) | 0 |
+| `control_rules_match_rust` (shares the decoder) | 1,134 worlds (197,899 lines) | 0 |
+
+| Path | Before (`907e978`) | After | 95% CI (after) |
+|---|--:|--:|--|
+| Atomics, JIT entry over the corpus (Rust about 300 ms) | 2.22x | **1.25x** | **1.17x..1.26x** (10 rounds) |
+| Atomics, AOT object over the same inputs | 1.76x | 1.19x | best of 5 |
+
+**Flip gate for the port: PASS** (0 diffs, upper bound 1.26x). The
+atomics rules are not swapped into the hybrid yet: `check_world` runs
+inside the checker and needs the AST across the hybrid boundary. Rust
+lines deleted: 0.
+
 ## What is left
 
-- Atomics (2.22x on `907e978`) and the control rules: the same decode
-  costs, plus every function body and the Place IR in the input. That is
-  the next slice of #1874.
+- Swap atomics and the control rules into the hybrid, once the checker's
+  AST crosses the boundary (this goes with core typing's spine, #1179).
+- `read_expr` still costs about 360 instructions per node, mostly in
+  generated code that moves 17-word rows (each `u8` and `bool` field
+  takes a word). A packed row layout or narrower fields would cut it
+  further.
