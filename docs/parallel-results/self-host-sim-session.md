@@ -350,6 +350,13 @@ Part of the gap is the boundary itself: the ranges go in and out as `Vec`s
 of words and are rebuilt as tuples on each side. The codec is a small share
 of a Warp session's time, since the evaluator dominates.
 
+## Parts 7–10: process epochs, failure injection, model validator, and Warp bounds
+
+- **Part 7 (`#1837` / `#1841`)**: ported `process-epochs-v1` (`ProcessTable`: `new`, `clone`, `crash`, `restart`, `is_up`, `epoch`, `crashes`, `len`) and `validate_model_bounds` into `port/src/process.ves`. Divergent edit `"process"` caught by 4 tests in `tests/models.rs` (`12/12` pass under `vesper-port` and default).
+- **Part 8 (`#1846` / `#1847`)**: ported the operation occurrence counter and deterministic fault-injection lookup (`FailureTable`: `new`, `clone`, `next`) into `port/src/failure.ves`. Divergent edit `"failure"` caught by `partitions_heal_and_delayed_failures_replay_exactly`.
+- **Part 9 (`#1856` / `#1857`)**: ported `validate_log_bounds`, `validate_network_bounds`, and `validate_process_timeline` (insertion sort + alternating crash/restart check) into `port/src/process.ves`. Divergent edit `"validate"` caught by `model_scenarios_are_validated_at_load`.
+- **Part 10 (`#1862`)**: ported `validate_warp_bounds`, `validate_warp_link_params`, and `warp_admit_allows` from `src/model/warp.rs` into `port/src/process.ves`. Divergent edit `"warp_bounds"` caught by `bulk_ingress_under_burst_loss_and_rebinding_conserves_every_frame` in `tests/warp.rs`.
+
 ## What is left (later parts of #1342)
 
 - Hardware SHA-256 (gap 8), and building WAL frames at flush rather than

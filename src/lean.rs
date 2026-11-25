@@ -1049,9 +1049,10 @@ pub fn cfg_function_nodes(world: &World, program: &crate::ir::Program) -> Vec<(S
 #[doc(hidden)]
 pub type StructuredNode = Option<Result<Definition, String>>;
 /// Per source function (name order), what the structured extractor
-/// (`Generator::function` over `Id`) returns for it: `None` when the CFG
-/// extractor handles the function, or when it needs the ambient monad
-/// (effects or effectful arrows). `program` is `ir::lower_world(world)`.
+/// (`Generator::function`) returns for it, over the ambient monad `m` when
+/// the function has effects or effectful arrows and over `Id` otherwise, as
+/// `extract_report` runs it: `None` when the CFG extractor handles the
+/// function. `program` is `ir::lower_world(world)`.
 /// Self-hosting SH5 lane 18 (#1341) compares the Vesper port with it; it
 /// adds no behaviour.
 #[doc(hidden)]
@@ -1070,13 +1071,32 @@ pub fn structured_function_nodes(
             let polymorphic = effectful_function(f)
                 || effectful_arrow(&f.result)
                 || f.params.iter().any(|p| effectful_arrow(&p.ty));
-            if polymorphic {
-                return Some((f.name.clone(), None));
-            }
-            let mut generator = Generator::new(world, global(&["Id"]));
+            let mut generator = Generator::new(
+                world,
+                if polymorphic {
+                    named("m")
+                } else {
+                    global(&["Id"])
+                },
+            );
             Some((f.name.clone(), Some(generator.function(f))))
         })
         .collect()
+}
+
+/// `written_names` of a handled computation, for the differential's
+/// encoder (SH5 lane 18, #1341). It adds no behaviour.
+#[doc(hidden)]
+pub fn handler_written_names(world: &World, body: &Expr) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    written_names(world, body, &mut out);
+    out
+}
+
+/// `visit_expr`, for the differential's encoder (SH5 lane 18, #1341).
+#[doc(hidden)]
+pub fn visit_exprs<'e>(e: &'e Expr, f: &mut dyn FnMut(&'e Expr)) {
+    visit_expr(e, f);
 }
 
 /// `tiled::resolve_ir_call` as `Generator::call` asks it, for the

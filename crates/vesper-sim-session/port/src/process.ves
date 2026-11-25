@@ -14,6 +14,13 @@ const MAX_LOG_RECORDS: u64 = 65536;
 const MAX_QUEUE: u64 = 4096;
 const MAX_MESSAGE_BYTES: u64 = 65536;
 const I32_MAX: u64 = 2147483647;
+const WARP_MAX_NICS: u64 = 4;
+const WARP_MAX_LINKS: u64 = 8;
+const WARP_MAX_FLOWS: u64 = 16;
+const WARP_MAX_EVENTS: u64 = 256;
+const WARP_MAX_FRAMES: u64 = 4096;
+const WARP_MAX_IN_FLIGHT: u64 = 65536;
+const WARP_PPM: u64 = 1000000;
 
 pub struct ProcessTable {
     epochs: ChunkSeq[u64],
@@ -263,4 +270,58 @@ pub fn validate_process_timeline(in events: Slice[u64]) -> (bool, u64) {
         m = wrapping_add(m, 1);
     }
     (true, restarts)
+}
+
+pub fn validate_warp_bounds(
+    max_in_flight: u64,
+    max_leases: u64,
+    n_nics: u64,
+    n_links: u64,
+    n_flows: u64,
+    n_events: u64
+) -> u8 {
+    if max_in_flight == 0
+        || max_in_flight > WARP_MAX_IN_FLIGHT
+        || max_leases == 0
+        || max_leases > WARP_MAX_FRAMES {
+        return 1;
+    }
+    if n_nics == 0
+        || n_nics > WARP_MAX_NICS
+        || n_links > WARP_MAX_LINKS
+        || n_flows > WARP_MAX_FLOWS
+        || n_events > WARP_MAX_EVENTS {
+        return 2;
+    }
+    0
+}
+
+pub fn validate_warp_link_params(
+    loss_ppm: u64,
+    dup_ppm: u64,
+    reorder_ppm: u64,
+    ge_g2b: u64,
+    ge_b2g: u64,
+    ge_lg: u64,
+    ge_lb: u64,
+    buffer_packets: u64,
+    rate_bps: u64
+) -> u8 {
+    if loss_ppm > WARP_PPM
+        || dup_ppm > WARP_PPM
+        || reorder_ppm > WARP_PPM
+        || ge_g2b > WARP_PPM
+        || ge_b2g > WARP_PPM
+        || ge_lg > WARP_PPM
+        || ge_lb > WARP_PPM {
+        return 1;
+    }
+    if buffer_packets == 0 || rate_bps == 0 {
+        return 2;
+    }
+    0
+}
+
+pub fn warp_admit_allows(in_flight: u64, egress_in_flight: u64, max_in_flight: u64) -> bool {
+    wrapping_add(in_flight, egress_in_flight) < max_in_flight
 }
