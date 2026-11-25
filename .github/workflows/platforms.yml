@@ -298,7 +298,7 @@ jobs:
           retention-days: 1
           overwrite: true
 
-  # Seven parallel shards of the harness (#1019, #1100) keep each near 30
+  # Nine parallel shards of the harness (#1019, #1100, #1924) keep each near 30
   # min; with three, the last one ran past 90 min. On pull requests the plan
   # names the affected ports (scripts/ci/port_harness_selection.py): a change
   # inside some ports' crates tests only those ports and their dependents;
@@ -308,11 +308,11 @@ jobs:
   ports:
     needs: [plan, ports-compiler]
     if: ${{ always() && !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.ports != 'none' }}
-    name: Vesper ports (Linux ${{ matrix.shard }}/7)${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
+    name: Vesper ports (Linux ${{ matrix.shard }}/9)${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9]
     runs-on: ubuntu-latest
     # A backstop: each shard's tests and divergent builds take about
     # 10-30 minutes (scripts/test-port-harness.sh).

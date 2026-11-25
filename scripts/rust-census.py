@@ -99,7 +99,6 @@ CRATES = {
     "vesper-port-pilot": ("infra", "", "", "", "2"),
     "vesper-std-driver": ("infra", "", "", "sample driver", "13"),
     # Was "stays Rust" in the port survey. Re-sorted for the Rust-exit goal.
-    "vesper-std-host": ("c-api", "", "", "fs/process/env import libc on Linux and macOS; left: Windows fs and process shims (kernel32 next)", "13"),
     "vesper-pulse": ("c-api", "", "", "io_uring/epoll/kqueue/IOCP syscalls (buffers C keeps: Pinned[T], #1505); scheduler ports", "13"),
     "vesper-fiber-abi": ("c-api", "", "", "stack switching asm (assembly files or Vesper asm), unwinding; Cranelift JIT via the shim", "13"),
     "vesper-ffi": ("c-api", "", "", "Bridge runtime and layouts; BLAKE3 C", "13"),
