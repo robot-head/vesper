@@ -1,0 +1,137 @@
+"""Check native task argument forwarding and diagnostics at CLI entry points."""
+
+load("./lib/process.axl", "check")
+load("./lib/task-fixture.axl", "contains", "equal", "fixture_launcher", "fixture_workspace", "invoke_fixture", "write_fixture")
+
+_TREE_ARGS = ["tree", "--locked", "-p", "vesper", "--edges", "normal", "--prefix", "none"]
+_ORACLE_ARGS = ["run", "--locked", "--quiet", "-p", "vesper-oracles", "--bin", "resource_oracle42", "--", "--fault-peer"]
+
+def _tool_fixture(ctx):
+    variant, tool, cwd, executable = ctx.args.tool_args[:4]
+    argv = ctx.args.tool_args[4:]
+    if variant in ["oracle", "dependencies"]:
+        equal(tool, "cargo")
+        equal(ctx.std.fs.exists(cwd + "/.aspect"), True)
+        if variant == "oracle":
+            equal(argv[:-1], _ORACLE_ARGS)
+            ctx.std.io.stdout.write(json.encode(argv) + "\n")
+            return 7 if argv[-1] == "crash" else 0
+        equal(argv, _TREE_ARGS)
+        ctx.std.io.stdout.write(ctx.std.env.var("FIXTURE_CARGO_TREE") or "")
+        if ctx.std.env.var("FIXTURE_CARGO_FAILURE"):
+            ctx.std.io.stderr.write("failed to load dependency graph\n")
+            return 29
+        return 0
+    if variant == "tls":
+        equal(tool, "openssl")
+        return 23
+    if variant == "fmt":
+        equal(argv, ["fmt", "--check", "--json", "--", "test with spaces.ves"])
+        ctx.std.io.stdout.write('{"status":"unchanged"}\n')
+        return 0
+    if variant == "examples":
+        if not argv:
+            return 42
+        equal(argv[:3], ["build", "examples/fixture.ves", "-o"])
+        if tool == "compiler.exe":
+            equal(argv[3].endswith(".exe"), True)
+        ctx.std.fs.copy(ctx.std.env.var("VESPER_FIXTURE_LAUNCHER"), argv[3])
+        ctx.std.fs.set_permissions(argv[3], 0o755)
+        return 0
+    if variant == "abba":
+        equal(argv, [])
+        name = {"rust arm": "A", "vesper arm": "B"}[tool]
+        order = cwd + "/order"
+        prior = ctx.std.fs.read_to_string(order) if ctx.std.fs.exists(order) else ""
+        ctx.std.fs.write(order, prior + name)
+        output = "rust 8 digest" if name == "A" else "vesper 6 " + (ctx.std.env.var("FIXTURE_DIGEST") or "digest")
+        ctx.std.io.stdout.write(output + "\n")
+        return 0
+    fail("Unknown test tool %r (%s)" % (variant, executable))
+
+native_tool_fixture = task(
+    kind = "tool-fixture", group = ["ci", "tests", "internal"],
+    summary = "Dispatch a compiled tool launcher to a native test fixture",
+    implementation = _tool_fixture,
+    args = {"tool_args": args.trailing_var_args(description = "Fixture case, tool, working directory and tool arguments.")},
+)
+
+def _test(ctx):
+    workspace = fixture_workspace(ctx, "vesper-native-cli-test-")
+    root, cwd = workspace.root, workspace.cwd
+    launcher = fixture_launcher(ctx, workspace, "", ["cargo", "openssl", "vesper compiler", "compiler.exe", "rust arm", "vesper arm"])
+
+    def run(argv, expected = 0, case = "", env = {}, tool = None):
+        variables = dict(launcher, VESPER_FIXTURE_CASE = case, **env)
+        return invoke_fixture(ctx, argv, cwd, expected, variables, tool)
+
+    for choice, tail, mode, status in [("bye-eof-stall", [], "bye_eof_stall", 0), ("fault-peer", ["--", "crash"], "crash", 7)]:
+        output = run(["fixture", "resource-oracle42", choice] + tail, status, "oracle")
+        equal(json.decode(output.stdout), _ORACLE_ARGS + [mode])
+
+    binary = ctx.std.process.which("true")
+    result = run(["acceptance", "check-diagnostics", "--", "--binary", binary, "--work", "diagnostics work"], 1)
+    contains("Expected compiler rejection: move", result.stderr)
+    equal(ctx.std.fs.read_dir(root + "/diagnostics work"), [])
+    write_fixture(ctx, root + "/executables", "//:bin/vesper " + binary + "\n")
+    result = run(["acceptance", "test-diagnostics"], 1, env = {"VESPER_BAZEL_EXECUTABLES": "executables", "BAZEL": "/missing-bazel"})
+    contains("Expected compiler rejection: move", result.stderr)
+
+    deps = ["ci", "check-default-cli-dependencies"]
+    allowed = "\nvesper v0.1.0 (path with wasmtime)\n wasmtime-adapter v1.0.0\n"
+    run(deps, case = "dependencies", env = {"FIXTURE_CARGO_TREE": allowed})
+    for name in ["wasmtime", "wasmtime-wasi", "vesper-loom-sandbox"]:
+        rejected = run(deps, 1, "dependencies", {"FIXTURE_CARGO_TREE": allowed + name + " v1.0.0\n"})
+        contains("forbidden normal dependencies: " + name, rejected.stderr)
+    rejected = run(deps, 1, "dependencies", {"FIXTURE_CARGO_TREE": "wasmtime v1.0.0\nvesper-loom-sandbox v0.0.1\nwasmtime v2.0.0\n"})
+    contains("forbidden normal dependencies: vesper-loom-sandbox, wasmtime\n", rejected.stderr)
+    failed = run(deps, 29, "dependencies", {"FIXTURE_CARGO_FAILURE": "1"})
+    contains("failed to load dependency graph", failed.stderr)
+
+    prior = root + "/crates/vesper-warp-tls/tests/fixtures/test-ca.der"
+    write_fixture(ctx, prior, "previous certificate")
+    run(["crate", "warp-tls", "gen"], 23, "tls")
+    equal(len(ctx.std.fs.read_dir(prior.rpartition("/")[0])), 1)
+    equal(ctx.std.fs.read_to_string(prior), "previous certificate")
+
+    cases = root + "/scripts/native-example-cases.txt"
+    write_fixture(ctx, cases, "fixture:42\n")
+    write_fixture(ctx, root + "/manifest with spaces", "//:bin/vesper bin/vesper compiler\n")
+    output = run(["acceptance", "test-native-host"], case = "examples", env = {"VESPER_BAZEL_EXECUTABLES": "manifest with spaces"})
+    equal(output.stdout, "fixture: host exit 42\n")
+    pwsh = ctx.std.process.which("pwsh")
+    if pwsh:
+        path = "/scripts/windows/test-native-executables.ps1"
+        ctx.std.fs.create_dir_all(root + "/scripts/windows")
+        ctx.std.fs.copy(workspace.source + path, root + path)
+        argv = ["-NoProfile", "-File", root + path]
+        env = {"VESPER_NATIVE_BINARY": root + "/bin/compiler.exe", "VESPER_NATIVE_SUFFIX": ".exe"}
+        contains("fixture: host exit 42", run(argv, case = "examples", env = env, tool = pwsh).stdout)
+        write_fixture(ctx, cases, "fixture:41\n")
+        contains("expected 41, got 42", run(argv, 1, "examples", env, pwsh).stderr)
+
+    check(ctx, "git", ["init", "-q"], root)
+    files = ["test with spaces.ves", "skip.ves"]
+    for name in files:
+        write_fixture(ctx, root + "/" + name, "")
+    check(ctx, "git", ["add", "--"] + files, root)
+    excluded = root + "/scripts/fmt-exclude.txt"
+    write_fixture(ctx, excluded, "# fixture exclusion\nskip.ves\n")
+    fmt = ["acceptance", "check-fmt", "--", "--binary", root + "/bin/vesper compiler"]
+    contains("1 files canonical, 1 excluded", run(fmt, case = "fmt").stdout)
+    write_fixture(ctx, excluded, "missing.ves\n")
+    contains("missing.ves", run(fmt, 1, "fmt").stderr)
+
+    abba = ["crate", "gpu-compute", "abba", "--", root + "/bin/rust arm", root + "/bin/vesper arm", "2"]
+    output = run(abba + ["sample"], case = "abba")
+    equal(ctx.std.fs.read_to_string(cwd + "/order"), "ABBAABBA")
+    contains("flip-gate pairs sample 16:12 16:12", output.stdout)
+    contains("Vesper/Rust mean 0.750", output.stdout)
+    contains("digests DIFFER: different digest", run(abba, 1, "abba", {"FIXTURE_DIGEST": "different"}).stdout)
+    return 0
+
+test_native_cli = task(
+    kind = "native-cli", group = ["ci", "tests"],
+    summary = "Test native task command lines, outputs, exit codes and cleanup",
+    implementation = _test,
+)

@@ -29,6 +29,7 @@ def _platform_tests(ctx: TaskContext) -> int:
         "tensor-interop-fixtures",
         "tensor-reference-fixtures",
         "generated-assets",
+        "native-cli",
         "crmath-reference",
         "rust-test-conversion",
         "rust-census",

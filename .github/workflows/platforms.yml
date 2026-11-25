@@ -112,6 +112,8 @@ jobs:
       - name: Check the Aspect command runner
         if: ${{ hashFiles('.aspect/version.axl') != '' }}
         run: aspect ci tests aspect-unit
+      - if: ${{ hashFiles('.aspect/fixtures/tool-launcher.rs') != '' }}
+        uses: dtolnay/rust-toolchain@stable
       - name: Check CI policy and workflow regressions
         if: ${{ hashFiles('.aspect/workflow-policy-test.axl') != '' }}
         run: aspect ci platform-tests

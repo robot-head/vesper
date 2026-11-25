@@ -51,39 +51,6 @@ class AspectTaskTests(unittest.TestCase):
     def copy_fixture(self, path):
         self.write(path, (ROOT / path).read_text())
 
-    def test_resource_oracle_fixtures_pass_the_mode_and_native_status(self):
-        cargo = self.write("bin/cargo", """\
-#!/usr/bin/env python3
-import json
-import sys
-from pathlib import Path
-assert Path(".aspect").is_dir()
-print(json.dumps(sys.argv[1:]))
-if sys.argv[-1] == "crash":
-    sys.exit(7)
-""", executable=True)
-        env = {"PATH": os.pathsep.join([str(cargo.parent), os.environ["PATH"]])}
-        flags = ["run", "--locked", "--quiet", "-p", "vesper-oracles", "--bin", "resource_oracle42", "--", "--fault-peer"]
-        for args, mode, code in (("bye-eof-stall", "bye_eof_stall", 0), ("fault-peer", "crash", 7)):
-            argv = (args, "--", mode) if args == "fault-peer" else (args,)
-            result = self.aspect("fixture", "resource-oracle42", *argv, env=env, status=code)
-            self.assertEqual(json.loads(result.stdout), flags + [mode])
-
-    def test_diagnostics_rejects_a_successful_compiler_and_cleans_its_work(self):
-        binary = shutil.which("true")
-        result = self.aspect(
-            "acceptance", "check-diagnostics", "--", "--binary", binary,
-            "--work", "diagnostics work", status=1,
-        )
-        self.assertIn("Expected compiler rejection: move", result.stderr)
-        self.assertEqual(list((self.root / "diagnostics work").iterdir()), [])
-        self.write("executables", f"//:bin/vesper {binary}\n")
-        result = self.aspect(
-            "acceptance", "test-diagnostics",
-            env={"VESPER_BAZEL_EXECUTABLES": "executables", "BAZEL": "/missing-bazel"}, status=1,
-        )
-        self.assertIn("Expected compiler rejection: move", result.stderr)
-
     def test_fixture_builds_publish_payloads_and_hashes_only_after_cargo_succeeds(self):
         self.write("bin/cargo", """\
 #!/usr/bin/env python3
@@ -943,32 +910,6 @@ sys.exit(int(os.environ.get("BAZEL_CODE", "0")))
         absent = self.aspect(*command, "--", "--check", env=env, status=1)
         self.assertIn("without working Cargo or Bazel", absent.stderr)
 
-    def test_default_cli_dependency_check_reports_exact_forbidden_packages(self):
-        cargo = self.write("bin/cargo", """\
-#!/usr/bin/env python3
-import os
-from pathlib import Path
-import sys
-assert sys.argv[1:] == ["tree", "--locked", "-p", "vesper", "--edges", "normal", "--prefix", "none"]
-assert Path(".aspect").is_dir()
-print(os.environ["FIXTURE_CARGO_TREE"])
-if os.environ.get("FIXTURE_CARGO_FAILURE"):
-    print("failed to load dependency graph", file=sys.stderr)
-    sys.exit(29)
-""", executable=True)
-        env = {"PATH": os.pathsep.join([str(cargo.parent), os.environ["PATH"]])}
-        command = ("ci", "check-default-cli-dependencies")
-        allowed = "\nvesper v0.1.0 (path with wasmtime)\n wasmtime-adapter v1.0.0\n"
-        self.aspect(*command, env={**env, "FIXTURE_CARGO_TREE": allowed})
-        for package in ("wasmtime", "wasmtime-wasi", "vesper-loom-sandbox"):
-            result = self.aspect(*command, env={**env, "FIXTURE_CARGO_TREE": allowed + f"{package} v1.0.0\n"}, status=1)
-            self.assertIn("forbidden normal dependencies: " + package, result.stderr)
-        output = "wasmtime v1.0.0\nvesper-loom-sandbox v0.0.1\nwasmtime v2.0.0\n"
-        result = self.aspect(*command, env={**env, "FIXTURE_CARGO_TREE": output}, status=1)
-        self.assertIn("forbidden normal dependencies: vesper-loom-sandbox, wasmtime\n", result.stderr)
-        result = self.aspect(*command, env={**env, "FIXTURE_CARGO_TREE": "", "FIXTURE_CARGO_FAILURE": "1"}, status=29)
-        self.assertIn("failed to load dependency graph", result.stderr)
-
     def test_stage1_compiles_and_reproduces_with_distinct_clean_targets(self):
         self.write("bootstrap/stage1.rs", "fixture")
         tools = self.write("bin/cargo", """\
@@ -1743,83 +1684,6 @@ if args[-1] == os.environ.get("VESPER_TEST_LEAN_FAIL"):
                     openssl("verify", "-CAfile", auxiliary / f"{authority}.pem", pem)
                     if authority == "rogue-ca":
                         openssl("verify", "-CAfile", auxiliary / f"{trusted}.pem", pem, status=2)
-
-    def test_native_tls_fixtures_leave_existing_files_on_openssl_failure(self):
-        path = "crates/vesper-warp-tls/tests/fixtures/test-ca.der"
-        prior = self.write(path, "previous certificate")
-        self.write("bin/openssl", "#!/bin/sh\nexit 23\n", executable=True)
-        env = {"PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]])}
-        self.aspect("crate", "warp-tls", "gen", env=env, status=23)
-        self.assertEqual(list(prior.parent.iterdir()), [prior])
-        self.assertEqual(prior.read_text(), "previous certificate")
-
-    def test_native_host_runs_expected_statuses_from_shared_cases(self):
-        self.write("scripts/native-example-cases.txt", "fixture:42\n")
-        self.write("manifest with spaces", "//:bin/vesper bin/vesper compiler\n")
-        self.write("bin/vesper compiler", """\
-#!/bin/sh
-test "$1" = build && test "$2" = examples/fixture.ves && test "$3" = -o || exit 2
-printf '#!/bin/sh\\nexit 42\\n' > "$4"
-chmod +x "$4"
-""", executable=True)
-        result = self.aspect("acceptance", "test-native-host",
-                             env={"VESPER_BAZEL_EXECUTABLES": "manifest with spaces"})
-        self.assertEqual(result.stdout, "fixture: host exit 42\n")
-
-    def test_native_fmt_checks_tracked_paths_and_exclusions(self):
-        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
-        files = ["test with spaces.ves", "skip.ves"]
-        for path in files:
-            self.write(path, "")
-        subprocess.run(["git", "add", "--", *files], cwd=self.root, check=True)
-        self.write("scripts/fmt-exclude.txt", "# fixture exclusion\nskip.ves\n")
-        binary = self.write("bin/vesper", """\
-#!/bin/sh
-test "$#" = 5 && test "$5" = 'test with spaces.ves' || exit 2
-printf '{"status":"unchanged"}\\n'
-""", executable=True)
-        result = self.aspect("acceptance", "check-fmt", "--", "--binary", str(binary))
-        self.assertIn("1 files canonical, 1 excluded", result.stdout)
-        self.write("scripts/fmt-exclude.txt", "missing.ves\n")
-        result = self.aspect("acceptance", "check-fmt", "--", "--binary", str(binary), status=1)
-        self.assertIn("missing.ves", result.stderr)
-
-    def test_native_abba_alternates_arms_and_emits_flip_gate_pairs(self):
-        rust = self.write("bin/rust arm", """\
-#!/bin/sh
-echo A >> order
-echo rust 8 digest
-""", executable=True)
-        vesper = self.write("bin/vesper arm", """\
-#!/bin/sh
-echo B >> order
-echo vesper 6 digest
-""", executable=True)
-        result = self.aspect("crate", "gpu-compute", "abba", "--", str(rust), str(vesper), "2", "sample")
-        self.assertEqual((self.nested / "order").read_text().split(), list("ABBAABBA"))
-        self.assertIn("flip-gate pairs sample 16:12 16:12", result.stdout)
-        self.assertIn("Vesper/Rust mean 0.750", result.stdout)
-        self.write("bin/vesper arm", "#!/bin/sh\necho vesper 6 different\n", executable=True)
-        result = self.aspect("crate", "gpu-compute", "abba", "--", str(rust), str(vesper), "2", status=1)
-        self.assertIn("digests DIFFER: different digest", result.stdout)
-
-    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell unavailable")
-    def test_powershell_native_examples_accept_the_expected_exit_code(self):
-        script = "scripts/windows/test-native-executables.ps1"
-        self.copy_fixture(script)
-        self.write("scripts/native-example-cases.txt", "example:42\n")
-        compiler = self.write("bin/compiler.exe", """\
-#!/bin/sh
-case "$4" in *.exe) ;; *) exit 2 ;; esac
-printf '#!/bin/sh\\nexit 42\\n' > "$4"
-chmod +x "$4"
-""", executable=True)
-        env = {"VESPER_NATIVE_BINARY": str(compiler), "VESPER_NATIVE_SUFFIX": ".exe"}
-        result = self.powershell(script, env=env)
-        self.assertIn("example: host exit 42", result.stdout)
-        self.write("scripts/native-example-cases.txt", "example:41\n")
-        result = self.powershell(script, status=1, env=env)
-        self.assertIn("expected 41, got 42", result.stderr)
 
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell unavailable")
     def test_port_abi_plan_matches_between_aspect_and_powershell(self):
