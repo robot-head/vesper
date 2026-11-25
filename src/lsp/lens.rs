@@ -96,7 +96,7 @@ enum Basis {
     Checked(Arc<CheckedSource>),
     /// `clean`: the Lens profile checked the text without errors.
     Repaired {
-        checked: Box<Checked>,
+        checked: Arc<Checked>,
         clean: bool,
     },
 }
@@ -157,6 +157,53 @@ pub(crate) struct FunctionFacts {
     pub bindings: Vec<Binding>,
 }
 
+/// Text a semantic-error or repaired view is built from, after the editor
+/// guards, the parse and the checker (`View::from_text`).
+pub(crate) struct Prepared {
+    module: Module,
+    checked: Arc<Checked>,
+    clean: bool,
+    regions: Vec<Region>,
+}
+
+impl Prepared {
+    pub(crate) fn new(
+        text: &str,
+        regions: Vec<Region>,
+        limits: AnalysisLimits,
+    ) -> Result<Self, Unavailable> {
+        // The normal editor guards run first. A semantic failure is expected:
+        // the truncated prefix leaves its linear bindings unconsumed.
+        let clean = match frontend::check_source(text, limits) {
+            Ok(_) => true,
+            Err(AnalysisFailure::Semantic { .. }) => false,
+            Err(AnalysisFailure::Parse { .. }) => return Err(Unavailable::RepairUnparsed),
+            Err(AnalysisFailure::Resource { .. }) => return Err(Unavailable::Resource),
+            Err(_) => return Err(Unavailable::Guard),
+        };
+        let parsed = parser::parse_with_limits(
+            text,
+            parser::ParseLimits {
+                max_source_bytes: limits.max_source_bytes,
+                max_tokens: 16_384,
+                max_diagnostics: limits.max_diagnostics,
+                max_depth: limits.max_depth,
+            },
+        )
+        .map_err(|_| Unavailable::Resource)?;
+        if !parsed.diagnostics.is_empty() {
+            return Err(Unavailable::RepairUnparsed);
+        }
+        let checked = Arc::new(check::check(&parsed.module));
+        Ok(Self {
+            module: parsed.module,
+            checked,
+            clean,
+            regions,
+        })
+    }
+}
+
 impl View {
     pub(crate) fn checked(snapshot: Arc<CheckedSource>) -> Result<Self, Unavailable> {
         let functions = facts(&snapshot.parsed().module, snapshot.checked())?;
@@ -188,31 +235,16 @@ impl View {
         regions: Vec<Region>,
         limits: AnalysisLimits,
     ) -> Result<Self, Unavailable> {
-        // The normal editor guards run first. A semantic failure is expected:
-        // the truncated prefix leaves its linear bindings unconsumed.
-        let clean = match frontend::check_source(text, limits) {
-            Ok(_) => true,
-            Err(AnalysisFailure::Semantic { .. }) => false,
-            Err(AnalysisFailure::Parse { .. }) => return Err(Unavailable::RepairUnparsed),
-            Err(AnalysisFailure::Resource { .. }) => return Err(Unavailable::Resource),
-            Err(_) => return Err(Unavailable::Guard),
-        };
-        let parsed = parser::parse_with_limits(
-            text,
-            parser::ParseLimits {
-                max_source_bytes: limits.max_source_bytes,
-                max_tokens: 16_384,
-                max_diagnostics: limits.max_diagnostics,
-                max_depth: limits.max_depth,
-            },
-        )
-        .map_err(|_| Unavailable::Resource)?;
-        if !parsed.diagnostics.is_empty() {
-            return Err(Unavailable::RepairUnparsed);
-        }
-        let checked = check::check(&parsed.module);
-        let functions = facts(&parsed.module, &checked)?;
-        let absorbed = checked
+        Self::from_prepared(&Prepared::new(text, regions, limits)?)
+    }
+
+    /// The view of prepared text: its ownership facts and the scope-exit
+    /// diagnostics its regions absorb.
+    fn from_prepared(prepared: &Prepared) -> Result<Self, Unavailable> {
+        let functions = facts(&prepared.module, &prepared.checked)?;
+        let regions = prepared.regions.clone();
+        let absorbed = prepared
+            .checked
             .diagnostics
             .iter()
             .filter(|diag| {
@@ -223,8 +255,8 @@ impl View {
             .count();
         Ok(Self {
             basis: Basis::Repaired {
-                checked: Box::new(checked),
-                clean,
+                checked: Arc::clone(&prepared.checked),
+                clean: prepared.clean,
             },
             regions,
             functions,
@@ -1307,12 +1339,18 @@ impl Walker<'_> {
 /// its bindings and their consumption events, then the live linear
 /// bindings (`View::outstanding`) at each cursor, by origin.
 pub(crate) fn facts_dump(snapshot: Arc<CheckedSource>, cursors: &[usize]) -> String {
-    use std::fmt::Write as _;
     let view = match View::checked(snapshot) {
         Ok(view) => view,
         Err(unavailable) => return format!("U\t{}\n", unavailable.as_str()),
     };
     let mut out = String::new();
+    write_facts(&mut out, &view);
+    write_outstanding(&mut out, &view, cursors);
+    out
+}
+
+fn write_facts(out: &mut String, view: &View) {
+    use std::fmt::Write as _;
     for f in &view.functions {
         let _ = writeln!(out, "F\t{}\t{}", f.span.start, f.span.end);
         for b in &f.bindings {
@@ -1341,6 +1379,10 @@ pub(crate) fn facts_dump(snapshot: Arc<CheckedSource>, cursors: &[usize]) -> Str
             }
         }
     }
+}
+
+fn write_outstanding(out: &mut String, view: &View, cursors: &[usize]) {
+    use std::fmt::Write as _;
     for &at in cursors {
         let _ = write!(out, "O\t{at}");
         for b in view.outstanding(at) {
@@ -1348,7 +1390,115 @@ pub(crate) fn facts_dump(snapshot: Arc<CheckedSource>, cursors: &[usize]) -> Str
         }
         out.push('\n');
     }
+}
+
+/// Queries against a Lens view, for the Vesper port's differential test.
+pub(crate) struct ViewQueries<'a> {
+    /// Cursors for `View::outstanding`.
+    pub cursors: &'a [usize],
+    /// `View::binding` requests: a name and a cursor.
+    pub bindings: &'a [(String, usize)],
+    /// `View::complete_member` requests: a receiver name and a cursor.
+    pub members: &'a [(String, usize)],
+    /// The Loom.toml capability ceiling completions rank under, if any.
+    pub ceiling: Option<&'a std::collections::BTreeSet<String>>,
+}
+
+/// A semantic-error (`text` with no regions) or repaired (`View::from_text`)
+/// Lens view and its answers to `queries`, as text: the scope and absorbed
+/// count, the facts, live obligations by cursor (read at the cut inside a
+/// damaged body), the poisoned set of each damaged body, resolved bindings
+/// and ranked member completions.
+pub(crate) fn view_dump(
+    text: &str,
+    regions: Vec<Region>,
+    limits: AnalysisLimits,
+    queries: &ViewQueries<'_>,
+) -> String {
+    let prepared = match Prepared::new(text, regions, limits) {
+        Ok(prepared) => prepared,
+        Err(unavailable) => return format!("U\t{}\n", unavailable.as_str()),
+    };
+    prepared_dump(&prepared, queries)
+}
+
+/// `view_dump` of prepared text: the view and its answers.
+pub(crate) fn prepared_dump(prepared: &Prepared, queries: &ViewQueries<'_>) -> String {
+    use std::fmt::Write as _;
+    let view = match View::from_prepared(prepared) {
+        Ok(view) => view,
+        Err(unavailable) => return format!("U\t{}\n", unavailable.as_str()),
+    };
+    let mut out = String::new();
+    let _ = writeln!(out, "S\t{}\t{}", view.scope(), view.absorbed());
+    write_facts(&mut out, &view);
+    write_outstanding(&mut out, &view, queries.cursors);
+    for (region, live) in view.poisoned() {
+        let _ = write!(out, "P\t{}", region.cut);
+        for b in live {
+            let _ = write!(out, "\t{}", b.origin.start);
+        }
+        out.push('\n');
+    }
+    for (name, at) in queries.bindings {
+        match view.binding(name, *at) {
+            Some((b, read)) => {
+                let _ = writeln!(out, "R\t{name}\t{at}\t{}\t{read}", b.origin.start);
+            }
+            None => {
+                let _ = writeln!(out, "R\t{name}\t{at}\t-");
+            }
+        }
+    }
+    for (receiver, at) in queries.members {
+        match view.complete_member(receiver, *at, queries.ceiling) {
+            Some((b, ranked)) => {
+                let _ = writeln!(out, "C\t{receiver}\t{at}\t{}", b.origin.start);
+                for r in ranked {
+                    let _ = writeln!(
+                        out,
+                        "M\t{}\t{}\t{}\t{}",
+                        r.tier.as_str(),
+                        r.label,
+                        r.detail,
+                        r.badge.as_deref().unwrap_or("-")
+                    );
+                }
+            }
+            None => {
+                let _ = writeln!(out, "C\t{receiver}\t{at}\t-");
+            }
+        }
+    }
     out
+}
+
+/// The regions of `repair_dump`'s `G` rows (the Vesper port's
+/// differential test hands them back to `view_dump`).
+pub(crate) fn regions_from_dump(dump: &str) -> Vec<Region> {
+    dump.lines()
+        .take_while(|line| *line != "T")
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split('\t').collect();
+            if f.first() != Some(&"G") || f.len() != 11 {
+                return None;
+            }
+            let n = |i: usize| f[i].parse::<usize>().ok();
+            Some(Region {
+                name: f[1].to_owned(),
+                kind: match f[2] {
+                    "body" => RegionKind::Body,
+                    "header" => RegionKind::Header,
+                    _ => RegionKind::Member,
+                },
+                span: n(3)?..n(4)?,
+                scope: n(5)?..n(6)?,
+                cut: n(7)?,
+                depth: n(8)?,
+                damage: n(9)?..n(10)?,
+            })
+        })
+        .collect()
 }
 
 /// The repaired view's text and regions (`repair`) as text, for the Vesper
