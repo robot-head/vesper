@@ -760,68 +760,48 @@ fn read_entry(b: &[u8], lay: &LeafLayout, slot: usize) -> StoreResult<Entry> {
     };
     Ok(Entry { key, tomb, values })
 }
+/// Status messages of the Vesper leaf check (`leaf_check`,
+/// vesper/src/leaf.ves), by status code.
+const LEAF_CHECK: [&str; 13] = [
+    "leaf heap offset",
+    "leaf right sibling",
+    "leaf directory",
+    "leaf occupancy bitmap",
+    "leaf tombstone flag",
+    "non-finite float in leaf",
+    "leaf boolean",
+    "leaf value outside the heap",
+    "leaf text is not UTF-8",
+    "leaf keys out of order",
+    "tombstone with values",
+    "leaf heap values overlap",
+    "free leaf slot is not zeroed",
+];
 /// Decodes and fully validates a leaf: directory permutation, occupancy
 /// bitmap, key order, values, disjoint heap ranges and zeroed free slots.
+/// The checks run in the Vesper port (`leaf_check`); the entries are read
+/// here once they pass.
 pub(crate) fn leaf_decode(b: &[u8]) -> StoreResult<(LeafLayout, Vec<Entry>)> {
     let lay = layout_of(b)?;
+    let mut seen = vec![0u8; lay.c];
+    let mut mask = [0u64; PAGE_SIZE / 64];
+    let mut cols = vec![0u64; 3 * lay.types.len()];
+    let status = crate::port::binding::leaf_check(b, &mut seen, &mut mask, &mut cols);
+    if status != 0 {
+        let msg = LEAF_CHECK
+            .get(status as usize - 1)
+            .copied()
+            .unwrap_or("leaf check");
+        return Err(corrupt(msg));
+    }
     let n = count(b);
-    let heap = heap_start(b);
-    if heap < lay.end || heap > PAGE_SIZE {
-        return Err(corrupt("leaf heap offset"));
-    }
-    let sib = sibling(b);
-    if sib != 0 && (sib <= FSM_PAGE || sib == page_id(b)) {
-        return Err(corrupt("leaf right sibling"));
-    }
-    let mut seen = vec![false; lay.c];
-    for pos in 0..n {
-        let s = leaf_slot(b, &lay, pos);
-        if s >= lay.c || seen[s] {
-            return Err(corrupt("leaf directory"));
-        }
-        seen[s] = true;
-    }
-    for (s, &live) in seen.iter().enumerate() {
-        if bit(b, lay.used, s) != live {
-            return Err(corrupt("leaf occupancy bitmap"));
-        }
-    }
-    let mut ranges = Vec::new();
     let mut entries = Vec::with_capacity(n);
     for pos in 0..n {
-        let s = leaf_slot(b, &lay, pos);
-        let e = read_entry(b, &lay, s)?;
-        if let Some(prev) = entries.last().map(|p: &Entry| p.key) {
-            if prev >= e.key {
-                return Err(corrupt("leaf keys out of order"));
-            }
-        }
-        for &(nulls, data, st) in &lay.cols {
-            if e.tomb && !bit(b, nulls, s) {
-                return Err(corrupt("tombstone with values"));
-            }
-            if st == Store::Var && !bit(b, nulls, s) {
-                let len = rd16(b, data + 4 * s + 2) as usize;
-                if len > 0 {
-                    ranges.push((rd16(b, data + 4 * s) as usize, len));
-                }
-            }
-        }
-        entries.push(e);
-    }
-    ranges.sort_unstable();
-    for w in ranges.windows(2) {
-        if w[0].0 + w[0].1 > w[1].0 {
-            return Err(corrupt("leaf heap values overlap"));
-        }
-    }
-    for (s, &live) in seen.iter().enumerate() {
-        if !live && !slot_is_zero(b, &lay, s) {
-            return Err(corrupt("free leaf slot is not zeroed"));
-        }
+        entries.push(read_entry(b, &lay, leaf_slot(b, &lay, pos))?);
     }
     Ok((lay, entries))
 }
+#[cfg(test)]
 fn slot_is_zero(b: &[u8], lay: &LeafLayout, s: usize) -> bool {
     b[lay.keys + 16 * s..lay.keys + 16 * s + 16]
         .iter()
@@ -1002,5 +982,224 @@ pub(crate) fn leaf_remove(b: &mut [u8], lay: &LeafLayout, pos: usize) {
         // An empty heap needs no holes.
         b[lay.end..].fill(0);
         set_free_offset(b, PAGE_SIZE);
+    }
+}
+
+#[cfg(test)]
+mod leaf_differential {
+    use super::*;
+
+    /// The Rust leaf decoder the port replaced (#1401), the differential
+    /// reference. Decodes and fully validates a leaf: directory permutation, occupancy
+    /// bitmap, key order, values, disjoint heap ranges and zeroed free slots.
+    fn leaf_decode_reference(b: &[u8]) -> StoreResult<(LeafLayout, Vec<Entry>)> {
+        let lay = layout_of(b)?;
+        let n = count(b);
+        let heap = heap_start(b);
+        if heap < lay.end || heap > PAGE_SIZE {
+            return Err(corrupt("leaf heap offset"));
+        }
+        let sib = sibling(b);
+        if sib != 0 && (sib <= FSM_PAGE || sib == page_id(b)) {
+            return Err(corrupt("leaf right sibling"));
+        }
+        let mut seen = vec![false; lay.c];
+        for pos in 0..n {
+            let s = leaf_slot(b, &lay, pos);
+            if s >= lay.c || seen[s] {
+                return Err(corrupt("leaf directory"));
+            }
+            seen[s] = true;
+        }
+        for (s, &live) in seen.iter().enumerate() {
+            if bit(b, lay.used, s) != live {
+                return Err(corrupt("leaf occupancy bitmap"));
+            }
+        }
+        let mut ranges = Vec::new();
+        let mut entries = Vec::with_capacity(n);
+        for pos in 0..n {
+            let s = leaf_slot(b, &lay, pos);
+            let e = read_entry(b, &lay, s)?;
+            if let Some(prev) = entries.last().map(|p: &Entry| p.key) {
+                if prev >= e.key {
+                    return Err(corrupt("leaf keys out of order"));
+                }
+            }
+            for &(nulls, data, st) in &lay.cols {
+                if e.tomb && !bit(b, nulls, s) {
+                    return Err(corrupt("tombstone with values"));
+                }
+                if st == Store::Var && !bit(b, nulls, s) {
+                    let len = rd16(b, data + 4 * s + 2) as usize;
+                    if len > 0 {
+                        ranges.push((rd16(b, data + 4 * s) as usize, len));
+                    }
+                }
+            }
+            entries.push(e);
+        }
+        ranges.sort_unstable();
+        for w in ranges.windows(2) {
+            if w[0].0 + w[0].1 > w[1].0 {
+                return Err(corrupt("leaf heap values overlap"));
+            }
+        }
+        for (s, &live) in seen.iter().enumerate() {
+            if !live && !slot_is_zero(b, &lay, s) {
+                return Err(corrupt("free leaf slot is not zeroed"));
+            }
+        }
+        Ok((lay, entries))
+    }
+
+    fn rng(seed: u64) -> impl FnMut() -> u64 {
+        let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        }
+    }
+
+    const TYPES: [ScalarType; 6] = [
+        ScalarType::U64,
+        ScalarType::I64,
+        ScalarType::F64,
+        ScalarType::Bool,
+        ScalarType::Text,
+        ScalarType::Bytes,
+    ];
+
+    fn value(t: ScalarType, next: &mut dyn FnMut() -> u64) -> Value {
+        if next().is_multiple_of(5) {
+            return Value::Null;
+        }
+        match t {
+            ScalarType::U64 => Value::U64(next()),
+            ScalarType::I64 => Value::I64(next() as i64),
+            ScalarType::F64 => Value::F64((next() % 1_000_000) as f64 / 7.0),
+            ScalarType::Bool => Value::Bool(next().is_multiple_of(2)),
+            ScalarType::Text => {
+                let words = [
+                    "",
+                    "a",
+                    "quarry",
+                    "żółw",
+                    "日本語",
+                    "🦀x",
+                    "plain ascii text!",
+                ];
+                Value::Text(
+                    (0..next() % 4)
+                        .map(|_| words[(next() % words.len() as u64) as usize])
+                        .collect(),
+                )
+            }
+            ScalarType::Bytes => Value::Bytes((0..next() % 40).map(|_| next() as u8).collect()),
+        }
+    }
+
+    /// A valid leaf: random column types, entries with tombstones, then
+    /// some removals so free slots and heap holes appear.
+    fn leaf(next: &mut dyn FnMut() -> u64) -> Box<Page> {
+        let ncols = 1 + (next() % 6) as usize;
+        let types: Vec<_> = (0..ncols).map(|_| TYPES[(next() % 6) as usize]).collect();
+        let n = (next() % 60) as usize;
+        let mut rowid = 1u64;
+        let mut entries = Vec::new();
+        for _ in 0..n {
+            rowid += 1 + next() % 3;
+            let tomb = next().is_multiple_of(6);
+            let values = if tomb {
+                Vec::new()
+            } else {
+                types.iter().map(|&t| value(t, next)).collect()
+            };
+            entries.push(Entry {
+                key: Key::version(rowid, next() % 100),
+                tomb,
+                values,
+            });
+        }
+        let mut b = new_page();
+        assert!(leaf_build(&mut b[..], 7, &types, &entries, 4096));
+        set_sibling(&mut b[..], if next().is_multiple_of(2) { 0 } else { 9 });
+        let lay = layout_of(&b[..]).unwrap();
+        for _ in 0..next() % 4 {
+            if count(&b[..]) > 0 {
+                let pos = (next() % count(&b[..]) as u64) as usize;
+                leaf_remove(&mut b[..], &lay, pos);
+            }
+        }
+        b
+    }
+
+    #[test]
+    fn leaf_check_matches_the_rust_decoder() {
+        let mut next = rng(1401);
+        let mut errors = std::collections::BTreeMap::new();
+        for case in 0..20_000u64 {
+            let mut b = leaf(&mut next);
+            // Most cases flip a few bytes or bits: in the header, the
+            // fixed area or anywhere on the page.
+            let mutations = if case.is_multiple_of(4) {
+                0
+            } else {
+                1 + next() % 3
+            };
+            let end = layout_of(&b[..]).map(|l| l.end).unwrap_or(PAGE_SIZE);
+            for _ in 0..mutations {
+                let at = match next() % 3 {
+                    0 => 20 + (next() % 16) as usize,
+                    1 => 32 + (next() % (end as u64 - 32)) as usize,
+                    _ => (next() % PAGE_SIZE as u64) as usize,
+                };
+                if next().is_multiple_of(2) {
+                    b[at] ^= 1 << (next() % 8);
+                } else {
+                    b[at] = next() as u8;
+                }
+            }
+            let got = leaf_decode(&b[..]);
+            let want = leaf_decode_reference(&b[..]);
+            match (&got, &want) {
+                (Ok((gl, ge)), Ok((wl, we))) => {
+                    assert_eq!(gl, wl, "case {case}");
+                    assert_eq!(ge, we, "case {case}");
+                }
+                (Err(g), Err(w)) => {
+                    assert_eq!(g.to_string(), w.to_string(), "case {case}");
+                    *errors.entry(w.to_string()).or_insert(0) += 1;
+                }
+                _ => panic!("case {case}: port {got:?}, Rust {want:?}"),
+            }
+        }
+        // The mutations reach most of the checks.
+        assert!(errors.len() >= 12, "{errors:?}");
+    }
+
+    #[test]
+    fn non_finite_floats_fail_like_the_rust_decoder() {
+        let types = [ScalarType::I64, ScalarType::F64];
+        let entries: Vec<_> = (0..5)
+            .map(|i| Entry {
+                key: Key::version(i + 1, 3),
+                tomb: false,
+                values: vec![Value::I64(i as i64), Value::F64(i as f64 * 0.5)],
+            })
+            .collect();
+        for bits in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 1.0e300].map(f64::to_bits) {
+            for slot in 0..5 {
+                let mut b = new_page();
+                assert!(leaf_build(&mut b[..], 7, &types, &entries, 4096));
+                let lay = layout_of(&b[..]).unwrap();
+                wr64(&mut b[..], lay.cols[1].1 + 8 * slot, bits);
+                let got = leaf_decode(&b[..]).map_err(|e| e.to_string());
+                let want = leaf_decode_reference(&b[..]).map_err(|e| e.to_string());
+                assert_eq!(got, want, "bits {bits:#x}, slot {slot}");
+            }
+        }
     }
 }

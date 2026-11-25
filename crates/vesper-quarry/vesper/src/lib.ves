@@ -53,6 +53,7 @@ use self::internal::{
     check as internal_check_impl,
     route as internal_route_impl
 };
+use self::leaf::check as leaf_check_impl;
 use self::paths::{
     access_paths_q
 };
@@ -334,6 +335,17 @@ pub fn internal_route(in b: Slice[u8], rowid: u64, inv_ts: u64) -> u64 {
 
 pub fn internal_check(in b: Slice[u8]) -> u64 {
     internal_check_impl(in b)
+}
+
+// The B+Tree PAX leaf validation of `leaf_decode` (src/store/pages.rs);
+// status codes in vesper/src/leaf.ves.
+pub fn leaf_check(
+    in b: Slice[u8],
+    inout seen: Slice[u8],
+    inout mask: Slice[u64],
+    inout cols: Slice[u64]
+) -> u64 {
+    leaf_check_impl(in b, inout seen, inout mask, inout cols)
 }
 
 pub fn store_log_record_decode(

@@ -1,5 +1,6 @@
 //! Independent acceptance of real Lean data answers and all Rust backend modes.
 //! Fault peers exercise transport only; they never supply arithmetic authority.
+mod common;
 #[path = "../src/bin/arithmetic_oracle42/mod.rs"]
 pub mod oracle;
 
@@ -23,6 +24,18 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+
+/// What the compiler under test says about `source`.
+fn front(source: &str) -> oracle::compiler::Front {
+    let scratch = oracle::compiler::Scratch::new("acceptance-test").unwrap();
+    oracle::compiler::front(
+        &oracle::compiler::Compiler::new(common::vesper()),
+        &scratch.0,
+        "case.ves",
+        source,
+    )
+    .unwrap()
+}
 
 const CAPTURE: usize = 65536;
 const READY: &str = "4.35.0";
@@ -298,6 +311,7 @@ fn config(binary: &Path, tool: &Toolchain, jobs: u8) -> RunConfig {
         jobs,
         lean: tool.lean.clone(),
         worker_exe: binary.to_path_buf(),
+        compiler: common::vesper(),
         artifacts: None,
         limits: HarnessLimits::default(),
     }
@@ -501,15 +515,19 @@ fn corpus_hash() -> [u8; 32] {
         hash.update(&fingerprint);
         let source = oracle::corpus::render_case(&case).unwrap();
         assert!(source.len() <= 16384);
-        let parsed = vesper::parser::parse(&source);
-        // Cases 133 and 142 spell literals past `u64::MAX`, which parse since
-        // #1244 (up to `u128::MAX`) and are rejected by the checker (E0209).
-        assert!(
-            parsed.diagnostics.is_empty(),
-            "{source}\n{:?}",
-            parsed.diagnostics
-        );
-        oracle::corpus::validate_rendered(&case, &source, &parsed.module).unwrap();
+        // The compiler prints a parsed module only for programs its checker
+        // accepts, so the static negatives (ids 128..143, all checker
+        // rejections; 133 and 142 spell literals past `u64::MAX`, E0209) bind
+        // through their diagnostics in tests/oracle42_corpus.rs.
+        match front(&source) {
+            oracle::compiler::Front::Module(module) => {
+                assert!(id < 128, "negative {id} was accepted: {source}");
+                oracle::corpus::validate_rendered(&case, &source, &module).unwrap();
+            }
+            oracle::compiler::Front::Rejected { parse, codes } => {
+                assert!(id >= 128 && !parse, "{source}: {codes:?}");
+            }
+        }
     }
     assert_eq!(unique.len(), 128);
     // Independent source changes must not normalize to the intended DTO.
@@ -520,9 +538,10 @@ fn corpus_hash() -> [u8; 32] {
         format!("{original}\nfn unrelated()->u8{{0}}\n"),
     ] {
         assert_ne!(changed, original);
-        let parsed = vesper::parser::parse(&changed);
-        assert!(parsed.diagnostics.is_empty());
-        assert!(oracle::corpus::validate_rendered(&case, &changed, &parsed.module).is_err());
+        let oracle::compiler::Front::Module(module) = front(&changed) else {
+            panic!("{changed} was rejected");
+        };
+        assert!(oracle::corpus::validate_rendered(&case, &changed, &module).is_err());
     }
     assert!(oracle::corpus::case_at(Suite::Ci128, SEED, 128).is_err());
     assert!(oracle::corpus::case_at(Suite::Full100000, SEED, 100000).is_err());
@@ -598,6 +617,8 @@ fn real_ci(binary: &Path, tool: &Toolchain) {
         Command::new(binary)
             .arg("--lean")
             .arg(&tool.lean)
+            .arg("--vesper")
+            .arg(common::vesper())
             .arg("--artifacts")
             .arg(&artifacts.0),
         840,
@@ -1140,8 +1161,12 @@ fn compare_real_backends(case: &Case, response: &Value) {
     // The expected outcome is read from ACTUAL Lean, never Rust arithmetic.
     let bytes = serde_json::to_vec(response).unwrap();
     let answer = oracle::protocol::decode_answer(response[2].as_u64().unwrap(), &bytes).unwrap();
-    let rust =
-        oracle::worker::execute_case(case, 100000).expect("real compiler/evaluator/JIT execution");
+    let rust = oracle::worker::execute_case(
+        &oracle::compiler::Compiler::new(common::vesper()),
+        case,
+        100000,
+    )
+    .expect("real compiler/evaluator/JIT execution");
     match (answer, rust) {
         (OracleAnswer::Outcome { outcome, .. }, RustAnswer::Outcomes { evaluator, jit }) => {
             assert_eq!(*evaluator, [outcome; 4]);

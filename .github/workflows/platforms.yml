@@ -249,6 +249,10 @@ jobs:
         env:
           VESPER_NATIVE_BINARY: target/debug/vesper
         run: scripts/ci/test-native-executables.sh
+      - name: Test the Vesper Pulse port on kqueue
+        # The kqueue poller and completion driver in @vesper/pulse's macOS
+        # copy against vesper_pulse (Linux runs the epoll copy).
+        run: aspect ci test-pulse-port
       - name: Test the Cranelift C-ABI shim
         # Self-hosting SH0 lane 4 (#1126): Vesper drives Cranelift through
         # crates/vesper-cranelift-sys, links the object it builds and runs it.

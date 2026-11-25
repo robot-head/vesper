@@ -130,6 +130,7 @@ class PlatformWorkflowTests(unittest.TestCase):
         mac_commands = "\n".join(s.get("run", "") for s in mac["steps"])
         windows_commands = "\n".join(s.get("run", "") for s in windows["steps"])
         self.assertIn("aspect ci test-native-executables", mac_commands)
+        self.assertIn("aspect ci test-pulse-port", mac_commands)
         native_step = next(s for s in windows["steps"] if s.get("name") == "Validate native COFF executables")
         self.assertEqual(native_step["shell"], "pwsh")
         self.assertIn("./scripts/windows/test-native-executables.ps1", native_step["run"])

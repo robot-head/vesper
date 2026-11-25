@@ -280,6 +280,7 @@ impl W {
             self.buf.push(b | 0x80);
         }
     }
+    #[cfg(test)]
     pub(crate) fn varint(&mut self, v: i64) -> &mut Self {
         self.uvarint(((v << 1) ^ (v >> 63)) as u64)
     }
@@ -851,37 +852,53 @@ impl ProducerStamp {
     };
 }
 
-fn encode_record(out: &mut W, delta: i64, r: &KafkaRecord, base_ts: i64) -> KResult<()> {
-    let mut body = W::new(false);
-    body.i8(0);
-    body.varint(r.timestamp.saturating_sub(base_ts));
-    body.varint(delta);
-    match &r.key {
-        None => body.varint(-1),
-        Some(k) => {
-            body.varint(k.len() as i64);
-            body.buf.extend_from_slice(k);
-            &mut body
+/// The records of one batch in the v2 record format, offset deltas
+/// `0..records.len()`: packed here and encoded by the Vesper port
+/// (`kw_encode_records`, vesper/src/kafka_wire.ves).
+fn encode_records(records: &[KafkaRecord], base_ts: i64) -> KResult<Vec<u8>> {
+    let mut data = Vec::new();
+    let mut meta = Vec::with_capacity(records.len() * 4);
+    let mut hdr = Vec::new();
+    // Every varint takes at most 10 bytes: per record the length,
+    // timestamp, offset, key, value and header-count varints and the
+    // attributes byte, and two varints per header.
+    let mut bound = 0usize;
+    let len_of = |b: &[u8]| i64::try_from(b.len()).map_err(|_| Fail::Local(Error::Overflow));
+    for r in records {
+        meta.push(r.timestamp);
+        for field in [&r.key, &r.value] {
+            match field {
+                None => meta.push(-1),
+                Some(b) => {
+                    meta.push(len_of(b)?);
+                    data.extend_from_slice(b);
+                }
+            }
         }
-    };
-    match &r.value {
-        None => body.varint(-1),
-        Some(v) => {
-            body.varint(v.len() as i64);
-            body.buf.extend_from_slice(v);
-            &mut body
+        meta.push(r.headers.len() as i64);
+        for (k, v) in &r.headers {
+            hdr.push(len_of(k.as_bytes())?);
+            hdr.push(len_of(v)?);
+            data.extend_from_slice(k.as_bytes());
+            data.extend_from_slice(v);
         }
-    };
-    body.varint(r.headers.len() as i64);
-    for (k, v) in &r.headers {
-        body.varint(k.len() as i64);
-        body.buf.extend_from_slice(k.as_bytes());
-        body.varint(v.len() as i64);
-        body.buf.extend_from_slice(v);
+        bound += 61 + 20 * r.headers.len();
     }
-    out.varint(body.buf.len() as i64);
-    out.buf.extend_from_slice(&body.buf);
-    Ok(())
+    let mut out = vec![0u8; bound + data.len()];
+    let n = crate::port::binding::kw_encode_records(
+        &data,
+        &meta,
+        &hdr,
+        records.len() as u64,
+        base_ts,
+        &mut out,
+    );
+    let n = usize::try_from(n).map_err(|_| Fail::Local(Error::Overflow))?;
+    if n > out.len() {
+        return Err(Fail::Local(Error::Overflow));
+    }
+    out.truncate(n);
+    Ok(out)
 }
 
 /// Encode a v2 record batch (base offset 0).
@@ -896,11 +913,8 @@ pub(crate) fn encode_batch(
     let count = i32::try_from(records.len()).map_err(|_| Fail::Local(Error::Overflow))?;
     let base_ts = records.iter().map(|r| r.timestamp).min().unwrap_or(0);
     let max_ts = records.iter().map(|r| r.timestamp).max().unwrap_or(0);
-    let mut raw = W::new(false);
-    for (i, r) in records.iter().enumerate() {
-        encode_record(&mut raw, i as i64, r, base_ts)?;
-    }
-    let payload = compress(compression, &raw.buf)?;
+    let raw = encode_records(records, base_ts)?;
+    let payload = compress(compression, &raw)?;
     let mut tail = W::new(false);
     let mut attributes = compression.code();
     if stamp.transactional {
@@ -1249,6 +1263,119 @@ mod tests {
             value: Some(vec![i; usize::from(i) * 50]),
             headers,
             timestamp: 1_000 + i64::from(i),
+        }
+    }
+
+    /// The Rust record encoder the port replaced (`encode_record` before
+    /// #1401's kafka_wire encoder part), kept as the differential reference.
+    fn reference_record(out: &mut W, delta: i64, r: &KafkaRecord, base_ts: i64) -> KResult<()> {
+        let mut body = W::new(false);
+        body.i8(0);
+        body.varint(r.timestamp.saturating_sub(base_ts));
+        body.varint(delta);
+        match &r.key {
+            None => body.varint(-1),
+            Some(k) => {
+                body.varint(k.len() as i64);
+                body.buf.extend_from_slice(k);
+                &mut body
+            }
+        };
+        match &r.value {
+            None => body.varint(-1),
+            Some(v) => {
+                body.varint(v.len() as i64);
+                body.buf.extend_from_slice(v);
+                &mut body
+            }
+        };
+        body.varint(r.headers.len() as i64);
+        for (k, v) in &r.headers {
+            body.varint(k.len() as i64);
+            body.buf.extend_from_slice(k.as_bytes());
+            body.varint(v.len() as i64);
+            body.buf.extend_from_slice(v);
+        }
+        out.varint(body.buf.len() as i64);
+        out.buf.extend_from_slice(&body.buf);
+        Ok(())
+    }
+
+    fn reference_records(records: &[KafkaRecord], base_ts: i64) -> Vec<u8> {
+        let mut raw = W::new(false);
+        for (i, r) in records.iter().enumerate() {
+            reference_record(&mut raw, i as i64, r, base_ts).unwrap();
+        }
+        raw.buf
+    }
+
+    /// A deterministic pseudo-random record set: absent and empty keys,
+    /// values and header values, long fields (multi-byte varints) and
+    /// timestamps at both ends of i64 (saturating deltas).
+    fn random_records(seed: u64, n: usize) -> Vec<KafkaRecord> {
+        let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let field = |next: &mut dyn FnMut() -> u64| -> Option<Vec<u8>> {
+            match next() % 6 {
+                0 => None,
+                1 => Some(Vec::new()),
+                2 => Some(vec![
+                    (next() & 0xff) as u8;
+                    200 + (next() % 20_000) as usize
+                ]),
+                _ => Some((0..(next() % 70)).map(|_| (next() & 0xff) as u8).collect()),
+            }
+        };
+        (0..n)
+            .map(|_| {
+                let key = field(&mut next);
+                let value = field(&mut next);
+                let mut headers = BTreeMap::new();
+                for h in 0..(next() % 5) {
+                    let v = field(&mut next).unwrap_or_default();
+                    headers.insert(format!("h{h}-{}", next() % 300), v);
+                }
+                let timestamp = match next() % 8 {
+                    0 => i64::MIN + (next() % 3) as i64,
+                    1 => i64::MAX - (next() % 3) as i64,
+                    2 => -((next() % 1_000_000) as i64),
+                    _ => 1_700_000_000_000 + (next() % 1_000_000) as i64,
+                };
+                KafkaRecord {
+                    key,
+                    value,
+                    headers,
+                    timestamp,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn record_encoder_matches_the_rust_encoder() {
+        let mut cases = vec![vec![KafkaRecord::default()], (0..40).map(rec).collect()];
+        for seed in 0..200u64 {
+            cases.push(random_records(seed, 1 + (seed % 37) as usize));
+        }
+        cases.push(random_records(9_999, 3_000));
+        for (c, records) in cases.iter().enumerate() {
+            for base_ts in [
+                records.iter().map(|r| r.timestamp).min().unwrap(),
+                0,
+                i64::MIN,
+                i64::MAX,
+            ] {
+                assert_eq!(
+                    encode_records(records, base_ts).unwrap(),
+                    reference_records(records, base_ts),
+                    "case {c}, base_ts {base_ts}"
+                );
+            }
         }
     }
 

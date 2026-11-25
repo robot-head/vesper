@@ -41,3 +41,11 @@ platform_tests = task(
     implementation = _platform_tests,
     args = {"tool_args": args.trailing_var_args(description = "Optional unittest flags for the platform tests.")},
 )
+
+pulse_port_tests = command_task(
+    "test-pulse-port",
+    ["ci"],
+    "Run the @vesper/pulse port differentials against vesper_pulse",
+    "cargo",
+    ["test", "--locked", "--test", "pulse_port"],
+)
