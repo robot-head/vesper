@@ -112,6 +112,114 @@ flips and deletes without asking the owner.
   retirement PR deletes `src/`, the compiler's crates, the seeds, the hybrid
   and the port harness crates.
 
+## The retirement checklist
+
+SH6 lane 2 (#1397) owns this section. The Rust compiler (`src/`, its own
+crates, the frozen seeds, the hybrid and the port harness, about 238k
+non-test lines) goes in **one** retirement PR, and that PR merges only when
+every box below is ticked. Each box names how it is checked.
+
+### The default switch
+
+The hybrid installs its swaps in one of three sets
+(`crates/vesper-hybrid/src/swaps.rs`, `VESPER_HYBRID_SWAPS`):
+
+| Set | What runs from Vesper | Use |
+|---|---|---|
+| `all` (default) | every swap | the port lanes' differentials and benchmarks |
+| `gated` (`VESPER_HYBRID_GATED=1` too) | only the swaps whose flip gate passed; every other module stays on its Rust path | the set the default `vesper` switches to |
+| `none` | no swap: the Rust compiler behind the Vesper driver | checking the driver alone |
+
+A swap joins `gated` in the PR that passes its gate: that PR adds the gate
+configuration (`scripts/ci/flip-gate/<name>.toml`), the scoreboard row
+below, and changes the swap's row in `swaps.rs` to `pass(...)`.
+`crates/vesper-hybrid/tests/swaps.rs` checks that every `gated` swap has
+both and that the others really stay on Rust, and
+`gated_hybrid_matches_the_default_compiler` (tests/differential.rs) runs the
+gated set over the whole corpus with 0 differences. Today `gated` holds
+`component` (wit-component), `hoist` (bounds-hoist) and `optimize`.
+
+### Before the retirement PR
+
+1. **Every compiler row passes the gate.** Every module of the census's
+   root-compiler section and every crate of class `compiler` has a PASS row
+   in the scoreboard (0 differences, ABBA upper end at or below 1.5x, its
+   tests pass against the Vesper build). Checked by: `gated` equals `all`
+   in `swaps.rs` (no `open(...)` row left), and no module of the census is
+   still answered by Rust in the default compiler. Open today, largest
+   first: the native walk and the CLIF passes (`native`, `native_clif_opt`,
+   `native_cold_outline`, `native_vectorize`; #1509, #1829); the front-end
+   modules not yet swapped (`check`, `trace_effects`, `dyn_*`, `regions`,
+   `pact_frontend`, `forge_frontend`); `loops` and `atomics` (2.31x) and
+   `stack_bound` (2.54x), above the bar; `lsp`, `tooling`, `database`
+   (#1828); `test_runner`, `anvil_*`, `doctest`; `lean*`,
+   `verify_commands`, `proof_commands` (#1341); `ffi_lowering`, `tiled`,
+   `vector`, `native_vector` (#1830); `native_session`, `native_aggregates`;
+   `seq`; and every swap that has a differential but no gate configuration
+   yet (each `open(...)` row of `swaps.rs` says which).
+2. **The driver runs no Rust pass.** `HybridDriver::hd_step`
+   (`crates/vesper-hybrid/src/driver.rs`) is gone: package loading,
+   checking and artifact emission run in Vesper, so the Vesper compiler is
+   a whole program and not a set of passes the Rust session calls. Checked
+   by: `modules/driver` imports no `HybridDriver` function, and the driver
+   differential (`crates/vesper-hybrid/tests/driver.rs`) passes.
+3. **Stage 2 is reproducible.** The complete compiler, built by itself to
+   wasm and run by the pinned Wasmtime v50.0.1 (`@wasmtime//:wasmtime`,
+   `bootstrap/stage2.sh`), reaches the fixed point stage2 == stage3 bit for
+   bit, and `bootstrap/stage2.lock` records the digests. Checked by:
+   `bootstrap/stage2.sh verify` and `.github/workflows/bootstrap-stage2.yml`
+   (manual dispatch and nightly). Today the fixed point holds for the 42
+   pure-Vesper compiler packages (#1690, #1844), not yet for the whole
+   compiler. `bootstrap/seed/runner/vwasm.c` is frozen (owner decision): it
+   is not a Stage 2 runner.
+4. **The seed rebuilds the compiler with no Rust.** `bootstrap/seed/vesper.wasm`
+   is committed with the script that regenerates it, and a CI job with no
+   Rust toolchain builds the compiler from the seed and gets the bytes of
+   `bootstrap/stage2.lock`. `bootstrap/stage1.lock` still reproduces, from
+   the seed instead of Rust.
+5. **The kept Rust stands alone.** The Rust that stays builds without the
+   Rust compiler:
+   - `crates/vesper-oracles` depends on the root `vesper` crate today (its
+     workers drive the parser, checker, optimizer, evaluator and native
+     backend in process). They must drive the Vesper compiler as a process
+     or through its C ABI instead.
+   - `vesper-codegen-verified` links the frozen seeds of
+     `vesper-loom-calculus`, `vesper-loom-cas` and `vesper-loom-trust`; those
+     seeds go at the retirement, so it needs its own copy of what it uses
+     or a call into the Vesper libraries.
+   - `src/verified_codegen` (the Stage 1 guard) is in `src/`: it ports with
+     SH6b or moves next to the auditor, an owner call before the PR.
+   - `vesper-cranelift-sys` and `vesper-crypto-sys` link with no Rust
+     compiler crate.
+6. **No test is lost.** Every test under `tests/` and `crates/*/tests` that
+   drives the Rust compiler runs against the Vesper compiler or is converted
+   to a Vesper test (lane 19's recipe). None is deleted without a
+   replacement.
+7. **All platforms.** Linux x86_64, macOS (AArch64) and Windows (x86_64
+   MSVC) build and pass the test suite with the Vesper compiler as the
+   default, and every required check is green on the retirement branch.
+
+### The retirement PR
+
+- Makes the Vesper compiler (built from the seed, through Stage 2) the
+  default `vesper` for Cargo, Bazel and the release workflows.
+- Deletes `src/` (with `codegen_swap*`, `ir_swap*`, `swap_input*` and
+  `compiler_modules*`), the crates of class `compiler` in the census, every
+  frozen `crates/*/seed` (27 today), `crates/vesper-hybrid`, the port
+  harness crates (`vesper-port-abi`, `vesper-port-build`,
+  `vesper-port-harness`, `vesper-port-pilot`) and the codegen test crates
+  (`vesper-codegen-swap-test`, `vesper-codegen-numeric-test`).
+- Keeps `vesper-cranelift-sys`, `vesper-crypto-sys`,
+  `vesper-codegen-verified` and `crates/vesper-oracles`.
+- Removes the deleted crates from the root `Cargo.toml` (in its own commit,
+  with `Cargo.lock` regenerated by cargo) and runs
+  `tools/bazel/sync_build_files.py`.
+- Sets the deleted rows to `gone` in the STATUS tables of
+  `scripts/rust-census.py` (never the generated census), adds its row to
+  the scoreboard, and reports the Rust lines deleted in the PR body and in
+  `docs/parallel-results/rust-exit-stage2-retirement.md`.
+- Closes #1397.
+
 ## Bootstrapping without Rust
 
 **Owner, 2026-11-21: a committed wasm seed, Zig-style.** The compiler, built

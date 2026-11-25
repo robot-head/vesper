@@ -4,7 +4,7 @@ Claim #1397. Prompt: `docs/agent-prompts/self-host-sh6/02-stage2-retirement.md`
 (plan PR #1415). Owner decision (2026-11-21): bootstrap from a committed wasm
 seed, the way Zig does.
 
-## Part 1: the C runner (this PR)
+## Part 1: the C runner (#1429)
 
 Base: `main` at `ab965f2a`.
 
@@ -57,39 +57,102 @@ changed. The new test only reads the front-end sources and the lock.
 
 **Rust lines deleted:** 0. This part adds C (the runner) and a Rust test.
 
-## Compiler gaps (block the committed seed)
+## Since part 1
 
-The wasm backend can't build the compiler yet. The seed needs:
+- **#1690**: `@vesper/stage2` (packages/vesper-stage2) built to wasm by
+  `@vesper/wasm-backend` compiles itself: stage2.wasm == stage3.wasm.
+- **#1824**: owner decision, the Stage 2 runner is the prebuilt Wasmtime
+  v50.0.1 CLI, pinned in `MODULE.bazel` (`@wasmtime//:wasmtime`,
+  `tools/bazel/wasmtime.bzl`, `bootstrap/stage2.sh`). `vwasm.c` is frozen:
+  no new imports or features for Stage 2.
+- **#1844**: all 42 pure-Vesper compiler packages compile under
+  `@vesper/stage2`; stage2 == stage3 == stage3_cli == stage3_cwasm.
 
-1. **Loops.** Repro: `fn main() -> u64 { let mut h: u64 = 0; for i in 0..10 { h = wrapping_add(h, i); } h }`
-   fails with "unsupported Operation in 'main': loop, for, break and return
-   are not lowered to Wasm yet".
-2. **Slices and string bytes.** Repro: `fn go(in b: Slice[u8], i: u64) -> u64 { match b.try_read_u64_le(i) { Option::Some(x) => x, Option::None => 0, } } fn main(input: String) -> u64 { go(in input.as_bytes(), 0) }`
-   fails with "IR operation unknown to the Wasm backend". The compiler's
-   packages also use `ChunkSeq` and the other heap sequences everywhere.
-3. **Input.** The backend's only host capabilities are `Stdout`, `Clock` and
-   `Trace`. A seed has to read sources and write bytes. The smallest
-   addition is `String` parameters on `main`, which the canonical ABI already
-   lowers through `cabi_realloc` and which `vwasm` can serve, plus a byte
-   `Stdout`. A WASI `stdin` or filesystem capability would also work.
-4. **A Rust-free compiler.** That is Stage 2: SH5 lane 12's driver (#1367),
-   then every compiler row of the census at the flip bar.
+The gaps part 1 listed (loops, slices and string bytes, input) are closed
+by the wasm backend port (#1492, #1506, #1508).
 
-Items 1-3 are backend breadth over the same Place IR the native backend
-lowers. They belong in the Vesper port (`@vesper/wasm-backend`, #1311),
-because the Rust backend is deleted at the retirement and the seed must be
-regenerable without it. No current lane owns this breadth.
+## Part 4a: the gated switch and the retirement checklist (lock #22)
+
+Base: `main` at `907e9782`, rebased after #1871 and #1870.
+
+### What changed
+
+- **`crates/vesper-hybrid/src/swaps.rs`**: the table of the hybrid's 36
+  swaps, each with its flip-gate verdict (`pass(config, PR)` or
+  `open(why)`), and `VESPER_HYBRID_SWAPS`:
+  - `all` (the default, unchanged behaviour): every swap;
+  - `gated` (or `VESPER_HYBRID_GATED=1`): only the PASS swaps, today
+    `component` (wit-component, #1334), `hoist` (bounds-hoist, #1251) and
+    `optimize` (#1501); every other module runs its Rust path;
+  - `none`: no swap.
+
+  An unknown value exits 2 before `main`, so a typo cannot silently run
+  every swap. The per-swap opt-outs (`VESPER_HYBRID_SEQ=0` and the rest)
+  still apply inside a set. `VESPER_HYBRID_STATS=1` prints the set and one
+  line per swap. The Vesper driver and command layers are the hybrid's
+  entry and run in every set.
+- **`install`** (`crates/vesper-hybrid/src/hybrid.rs`) asks `swaps::on`
+  before each install; the IR passes are filtered one by one.
+- **`crates/vesper-hybrid/tests/swaps.rs`**: `gated` turns on exactly the
+  PASS rows, each of which has its `scripts/ci/flip-gate/<config>.toml` and
+  a PASS scoreboard row in the plan; under `gated` the parser, the whole
+  layout, the IR check, the inliner and the IR optimizer answer 0 calls
+  from Vesper while the optimizer and bounds hoisting run; the alias is
+  the same set; `all` is the default; `none` installs nothing; a misspelt
+  set is refused.
+- **`tests/differential.rs`**: `gated_hybrid_matches_the_default_compiler`
+  runs the gated set over the corpus (Cargo: every file; Bazel: every 4th,
+  `VESPER_GATED_STRIDE=4`). The test's timeout is now `long`.
+- **`docs/maintenance/rust-exit-plan.md`**: "The retirement checklist":
+  the three sets, how a swap joins `gated`, the seven conditions for the
+  retirement PR and what that PR deletes and keeps.
+
+### Evidence
+
+Linux x86_64, local; debug hybrid against the release default compiler
+(the times compare different profiles, so they are not a speed result).
+
+| Check | Result |
+|---|---|
+| `gated_hybrid_matches_the_default_compiler` | 554 files, 2,216 runs, **0 differ** (9 runs are the accepted optimizer equal-cost ties, settled by the Rust producer as in the default set) |
+| `hybrid_matches_the_default_compiler` (`all`, unchanged) | 554 files, 2,202 runs, **0 differ**; 14 wasm builds only the hybrid compiles |
+| `tests/swaps.rs` | 5/5 pass |
+| The rest of `tests/differential.rs` | pilot, pact, wasm and component tests pass |
+
+Stage 1 guard: no guarded path changed; the change is inside
+`crates/vesper-hybrid` and docs.
+
+**Rust lines deleted:** 0. This part adds the switch and its tests.
+
+## Retirement blockers found
+
+Besides the compiler rows that have not passed the gate (checklist item
+1) and `hd_step` (item 2):
+
+1. **`crates/vesper-oracles` links the Rust compiler.** Its `Cargo.toml`
+   depends on the root `vesper` crate: the arithmetic oracle's worker
+   drives the parser, checker, optimizer, evaluator and native backend in
+   process. The oracles stay Rust (owner), so their system under test must
+   become the Vesper compiler as a process or through a C ABI before
+   `src/` can go.
+2. **`vesper-codegen-verified` links three frozen seeds**
+   (`vesper-loom-calculus-seed`, `vesper-loom-cas-seed`,
+   `vesper-loom-trust-seed`), which the retirement deletes.
+3. **`src/verified_codegen`** (the Stage 1 guard) lives in `src/`; it needs
+   an owner call: port it with SH6b, or move it beside the auditor.
+4. **The Stage 2 fixed point is of `@vesper/stage2`**, the standalone
+   compiler package, not of the compiler the hybrid runs. The seed has to be
+   the complete compiler (driver, checker, backends), which needs items 1
+   and 2 of the checklist first.
 
 ## Left
 
-- Part 2: once the backend can build the compiler, commit
-  `bootstrap/seed/vesper.wasm`, add the regeneration script and the CI check
-  that the seed rebuilds the compiler to the same bytes.
-- Part 3: Stage 2 after #1367 merges. Build the compiler packages with the
-  hybrid, rebuild them with the result, compare, record
-  `bootstrap/stage2.lock`, and add `.github/workflows/bootstrap-stage2.yml`
-  (manual dispatch and nightly).
-- Part 4: the default switch for the hybrid, and the retirement checklist in
-  `docs/maintenance/rust-exit-plan.md` once #1415 merges.
-- Census row: `scripts/rust-census.py` arrives with #1415. The row is
-  updated in the first part after that.
+- Part 4b: remove `HybridDriver::hd_step` (checklist item 2).
+- Part 2: commit `bootstrap/seed/vesper.wasm` and its regeneration script
+  once the complete compiler builds to wasm; the no-Rust CI check.
+- Part 3: `bootstrap/stage2.lock` for the complete compiler and the CI
+  gate on it.
+- Part 5: the default switch to `gated` for the shipped `vesper`, then the
+  retirement PR (the plan's checklist).
+- Census: lane 2's rows (`codegen_swap`, `ir_swap`, `swap_input`,
+  `compiler_modules`, `vesper-hybrid`) change only at the retirement.
