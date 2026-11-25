@@ -1,5 +1,5 @@
 load("./lib/process.axl", "check")
-load("./lib/script.axl", "run_command", "script_task")
+load("./lib/script.axl", "command_task", "run_command", "script_task")
 
 flip_gate = script_task("flip-gate", ["ci"], "scripts/ci/flip_gate.py", "python3")
 test_platform_profile = script_task("test-platform-profile", ["ci"], "scripts/ci/test-platform-profile.py", "python3")
