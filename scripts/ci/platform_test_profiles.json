@@ -41,7 +41,7 @@
         "tests/common/lean4lean_proof_packet.rs",
         ".aspect/format-proof.axl",
         ".aspect/lib/strict-json.axl",
-        ".aspect/acceptance-suites.axl",
+        ".aspect/canonical-protocols.axl",
         "tools/logos42/**",
         "crates/vesper-oracles/src/bin/logos42*"
       ]

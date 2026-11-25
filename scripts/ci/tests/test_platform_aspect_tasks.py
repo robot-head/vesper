@@ -79,11 +79,6 @@ print("child stderr", file=sys.stderr)
         })
         self.assertIn("child stderr", result.stderr)
 
-    def test_rooted_checker_runs_from_workspace_root(self):
-        self.write("scripts/check-canonical-protocols.py", "from pathlib import Path\nprint(Path.cwd())\n")
-        result = self.aspect("acceptance", "check-canonical-protocols")
-        self.assertEqual(result.stdout.splitlines(), [str(self.root)])
-
     def test_resource_oracle_fixtures_pass_the_mode_and_native_status(self):
         cargo = self.write("bin/cargo", """\
 #!/usr/bin/env python3
@@ -101,92 +96,6 @@ if sys.argv[-1] == "crash":
             argv = (args, "--", mode) if args == "fault-peer" else (args,)
             result = self.aspect("fixture", "resource-oracle42", *argv, env=env, status=code)
             self.assertEqual(json.loads(result.stdout), flags + [mode])
-
-    def test_acceptance_suites_forward_binary_root_and_scratch_and_run_examples(self):
-        env = {
-            "PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]]),
-            "BAZEL": "/missing-bazel",
-            "VESPER_BAZEL_EXECUTABLES": "executables",
-        }
-        # Use the same interpreter selection as the BuildBuddy acceptance job.
-        (self.root / "bin").mkdir()
-        (self.root / "bin/python").symlink_to(shutil.which("python3"))
-        compiler = self.write("bin/compiler.exe", "")
-        examples = {
-            "canonical-protocols": ["vesper-grammar:example/" + name for name in ("protobuf", "der", "ipc")]
-            + ["vesper-bench-pmu:example/probe"],
-        }
-        rows = ["//:bin/vesper bin/compiler"]
-        self.write("bin/compiler", "")
-        for label in [label for values in examples.values() for label in values]:
-            name = label.split("/")[-1]
-            rows.append(f"//crates/{label} bin/{name}")
-            body = '#!/bin/sh\nprintf "%s\\n" "' + name + '" >> order\n'
-            if name == "probe":
-                body += 'exit "${VESPER_TEST_PMU_STATUS:-0}"\n'
-            self.write(f"bin/{name}", body, executable=True)
-        self.write("executables", "\n".join(rows) + "\n")
-
-        for task, override in (
-            ("canonical-protocols", None),
-        ):
-            with self.subTest(task=task):
-                checker = f"scripts/check-{task}.py"
-                self.write(checker, """\
-import json
-from pathlib import Path
-import sys
-work = sys.argv[sys.argv.index("--work") + 1] if "--work" in sys.argv else None
-if work:
-    assert Path(work).is_dir()
-print(json.dumps([str(Path.cwd()), sys.argv[1:]]))
-Path("order").write_text("checker" + chr(10))
-""")
-                task_env = env.copy()
-                expected_binary = compiler
-                if override:
-                    expected_binary = self.write(f"bin/{task} overridden compiler.exe", "")
-                    task_env[override] = str(expected_binary.with_suffix(""))
-                result = self.aspect("acceptance", "test-" + task, env=task_env)
-                cwd, argv = json.loads(result.stdout.splitlines()[0])
-                self.assertEqual(cwd, str(self.root))
-                expected = ["--binary", str(expected_binary)]
-                if task == "canonical-protocols":
-                    expected += ["--root", str(self.root)]
-                work = Path(argv[-1])
-                self.assertTrue(work.name.startswith(f"vesper-{task}-"))
-                self.assertFalse(work.exists())
-                expected += ["--work", str(work)]
-                self.assertEqual(argv, expected)
-                order = (self.root / "order").read_text().splitlines()
-                self.assertEqual(order, ["checker", *[label.split("/")[-1] for label in examples.get(task, [])]])
-                if task == "canonical-protocols":
-                    self.assertIn("positive counters", result.stdout)
-
-        for status, stream, expected in ((2, "stdout", "reported unavailable"), (5, "stderr", "failed unexpectedly")):
-            result = self.aspect("acceptance", "test-canonical-protocols",
-                                 env={**env, "VESPER_TEST_PMU_STATUS": str(status)},
-                                 status=0 if status == 2 else status)
-            self.assertIn(expected, getattr(result, stream))
-
-    def test_native_acceptance_removes_scratch_and_skips_examples_on_failure(self):
-        (self.root / "bin").mkdir()
-        (self.root / "bin/python").symlink_to(shutil.which("python3"))
-        self.write("executables", "//:bin/vesper bin/compiler\n")
-        self.write("bin/compiler", "")
-        self.write("scripts/check-canonical-protocols.py", """\
-from pathlib import Path
-import sys
-Path("scratch").write_text(sys.argv[-1])
-raise SystemExit(17)
-""")
-        env = {
-            "PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]]),
-            "BAZEL": "/missing-bazel",
-            "VESPER_BAZEL_EXECUTABLES": "executables",
-        }
-        self.aspect("acceptance", "test-canonical-protocols", env=env, status=17)
-        self.assertFalse(Path((self.root / "scratch").read_text()).exists())
 
     def test_diagnostics_rejects_a_successful_compiler_and_cleans_its_work(self):
         binary = shutil.which("true")

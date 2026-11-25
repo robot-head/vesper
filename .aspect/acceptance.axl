@@ -1,3 +1,0 @@
-load("./lib/script.axl", "script_task")
-
-check_canonical_protocols = script_task("check-canonical-protocols", ["acceptance"], "scripts/check-canonical-protocols.py", "python3", from_root = True)
