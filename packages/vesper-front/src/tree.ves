@@ -36,7 +36,26 @@ pub enum NodeKind: _ {
     TypeNode = 204,
     Block = 205,
     Error = 206,
-    Incomplete = 207
+    Incomplete = 207,
+    // The surface profile (parse.ves "Surface profile").
+    SugarItem = 208,
+    SugarStmt = 209,
+    SugarExpr = 210,
+    SugarGroup = 211,
+    SugarDecl = 212,
+    SugarRule = 213,
+    SugarPattern = 214,
+    SugarTemplate = 215,
+    SugarContinuation = 216,
+    SugarHole = 217,
+    SugarPat = 218,
+    SugarOperator = 220,
+    PipeExpr = 221,
+    DottedExpr = 222,
+    TaggedLiteral = 223,
+    SurfaceMacroDecl = 224,
+    SurfaceMacroCall = 225,
+    SurfaceMacroArg = 226
 }
 
 enum Parent: _ {

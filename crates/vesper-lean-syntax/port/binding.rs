@@ -60,15 +60,19 @@ impl Abi for crate::port::LeanError {
 
 const _: () = assert!(<bool as Abi>::WORDS == 1);
 const _: () = assert!(<crate::port::LeanError as Abi>::WORDS == 1);
+const _: () = assert!(<u64 as Abi>::WORDS == 1);
 
 unsafe extern "C" {
     fn vesper_lean_syntax_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_lean_syntax_seq_free(seq: i64) -> i64;
     fn vesper_lean_syntax_live_allocations() -> i64;
+    fn vesper_lean_syntax_binders_end(s: *mut u64, pool: *mut u64, at: i64) -> i64;
     fn vesper_lean_syntax_free_references(s: *mut u64, pool: *mut u64) -> i64;
+    fn vesper_lean_syntax_free_references_at(s: *mut u64, pool: *mut u64, binders_at: i64, body_at: i64) -> i64;
     fn vesper_lean_syntax_references(s: *mut u64, pool: *mut u64) -> i64;
     fn vesper_lean_syntax_render_module(result: *mut u64, s: *mut u64, pool: *mut u64, fail: *mut u64) -> i64;
     fn vesper_lean_syntax_render_term(result: *mut u64, s: *mut u64, pool: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_lean_syntax_term_end(s: *mut u64, pool: *mut u64, at: i64) -> i64;
     fn vesper_lean_syntax_valid_decimal(v: *mut u64) -> i64;
     fn vesper_lean_syntax_valid_ident(v: *mut u64) -> i64;
     fn vesper_lean_syntax_valid_module(v: *mut u64) -> i64;
@@ -86,12 +90,30 @@ pub fn live_allocations() -> i64 {
     unsafe { vesper_lean_syntax_live_allocations() }
 }
 
+/// Calls `binders_end` of the Vesper library `lean_syntax` (`vesper_lean_syntax_binders_end`).
+pub fn binders_end(s: &[u64], pool: &str, at: u64) -> u64 {
+    // SAFETY: `vesper_lean_syntax_binders_end` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(s, |view_s| vesper_port_abi::with_str(pool, |view_pool| unsafe { vesper_lean_syntax_binders_end(view_s, view_pool, at as i64) }));
+    raw as u64
+}
+
 /// Calls `free_references` of the Vesper library `lean_syntax` (`vesper_lean_syntax_free_references`).
 pub fn free_references(s: &[u64], pool: &str) -> Vec<u64> {
     // SAFETY: `vesper_lean_syntax_free_references` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(s, |view_s| vesper_port_abi::with_str(pool, |view_pool| unsafe { vesper_lean_syntax_free_references(view_s, view_pool) }));
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `free_references_at` of the Vesper library `lean_syntax` (`vesper_lean_syntax_free_references_at`).
+pub fn free_references_at(s: &[u64], pool: &str, binders_at: u64, body_at: u64) -> Vec<u64> {
+    // SAFETY: `vesper_lean_syntax_free_references_at` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(s, |view_s| vesper_port_abi::with_str(pool, |view_pool| unsafe { vesper_lean_syntax_free_references_at(view_s, view_pool, binders_at as i64, body_at as i64) }));
     unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }
 
@@ -132,6 +154,15 @@ pub fn render_term(s: &[u64], pool: &str) -> Result<String, crate::port::LeanErr
         1 => Err(<crate::port::LeanError as Abi>::get(&fail[1..])),
         status => panic!("invalid failure status {status} from vesper_lean_syntax_render_term"),
     }
+}
+
+/// Calls `term_end` of the Vesper library `lean_syntax` (`vesper_lean_syntax_term_end`).
+pub fn term_end(s: &[u64], pool: &str, at: u64) -> u64 {
+    // SAFETY: `vesper_lean_syntax_term_end` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(s, |view_s| vesper_port_abi::with_str(pool, |view_pool| unsafe { vesper_lean_syntax_term_end(view_s, view_pool, at as i64) }));
+    raw as u64
 }
 
 /// Calls `valid_decimal` of the Vesper library `lean_syntax` (`vesper_lean_syntax_valid_decimal`).

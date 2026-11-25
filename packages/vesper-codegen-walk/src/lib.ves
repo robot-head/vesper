@@ -67,6 +67,7 @@ use @vesper/place-ir::{
     read_program
 };
 use self::frame::{
+    frames_bytes,
     frames_text
 };
 use @vesper/place-ir::codes::{
@@ -963,4 +964,10 @@ pub fn native_walk_register_locals(in input: Str) -> ChunkSeq[u64] {
 // Part 3a: per task, each instance's entry-block plan (frame.ves).
 pub fn native_walk_frames(in input: Str) -> ChunkSeq[u64] {
     frames_text(in input)
+}
+
+// Part 3b: `native_walk_frames` over the input's bytes, for the
+// `frame_plans` swap hook.
+pub fn native_walk_frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
+    frames_bytes(in b)
 }

@@ -15,6 +15,18 @@ sys library PulseSys (
     const EPOLLONESHOT: u32 = 1073741824;
     const EPERM_ERR: u32 = 1;
     const EINTR_ERR: u32 = 4;
+    // The readiness driver (#1938): errno values, `fcntl` commands and
+    // `open` flags (the same on x86_64 and aarch64 Linux).
+    const EBADF_ERR: u32 = 9;
+    const EAGAIN_ERR: u32 = 11;
+    const ESPIPE_ERR: u32 = 29;
+    const ECANCELED_ERR: u32 = 125;
+    const F_GETFL: i32 = 3;
+    const F_SETFL: i32 = 4;
+    const O_ACCMODE: i32 = 3;
+    const O_RDONLY: i32 = 0;
+    const O_WRONLY: i32 = 1;
+    const O_NONBLOCK: i32 = 2048;
 
     // On x86_64 Linux, `struct epoll_event` is packed (12 bytes: events @ 0, data @ 4).
     // `w3` is trailing padding so x86_64 and aarch64 share one wire struct layout.
@@ -40,4 +52,9 @@ sys library PulseSys (
     #[link_name = "write"]
     fn write_byte(fd: i32, nocapture in byte_val: u8, count: u64) -> ForeignVal[i64] errno;
     fn close(fd: i32) -> ForeignVal[i32] errno;
+    fn fcntl(fd: i32, cmd: i32, ..., arg: i64) -> ForeignVal[i32] errno;
+    fn read(fd: i32, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64] errno;
+    fn write(fd: i32, nocapture in buf: CSlice[u8]) -> ForeignVal[i64] errno;
+    fn pread(fd: i32, nocapture inout buf: CSlice[u8], offset: i64) -> ForeignVal[i64] errno;
+    fn pwrite(fd: i32, nocapture in buf: CSlice[u8], offset: i64) -> ForeignVal[i64] errno;
 }

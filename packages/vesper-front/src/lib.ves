@@ -23,6 +23,7 @@ use self::lex::{
     lex,
     lex_raw,
     lex_with_limits,
+    lex_sugar_with_limits,
     max_source_bytes,
     max_diagnostics
 };
@@ -33,6 +34,7 @@ use self::diag::{
 };
 use self::parse::{
     parse_tokens,
+    parse_surface_tokens,
     hard_depth
 };
 use self::recover::{
@@ -155,7 +157,16 @@ pub struct P {
     item_start: u64,
     // Token weight of the or-pattern bodies copied so far
     // (`Parser::expansion`, `OR_PATTERN_EXPANSION`).
-    expansion: u64
+    expansion: u64,
+    // The surface profile (`Parser::surface`, sugar.ves): sugar
+    // declarations, phrases, operators, tagged literals and expression
+    // macros. `before_handler_in` is set while a surface handler's `state`
+    // initializer is read. `group_end` gives, for each token opening a
+    // delimiter, the index of the token closing it, else u32::MAX
+    // (`group_ends`); empty outside the surface profile.
+    surface: bool,
+    before_handler_in: bool,
+    group_end: ChunkSeq[u32]
 }
 
 // What the parser keeps of a parsed expression: its kind (parse.ves
@@ -246,6 +257,34 @@ pub fn parse_tables_with_limits(
 pub fn parse_tables_with_packed_limits(in source: Str, max_source_bytes: u64, counts: u64)
     -> ChunkSeq[u64] {
     parse_tables_with_limits(in source, max_source_bytes, counts & 4294967295, counts >> 32)
+}
+
+// The sugar surface profile, as the tables of `parse_tables`:
+// `parse_expansion_scopes(source, ParseLimits { max_source_bytes,
+// max_tokens, max_diagnostics, max_depth: HARD_PARSE_DEPTH },
+// include_tests)` without its expression macro validation
+// (crates/vesper-syntax `parser::parse_surface_cst`). `limits` holds the
+// byte limit in its low 32 bits and `include_tests` in bit 32; `counts`
+// the token limit in its low 32 bits and the diagnostic limit in the high
+// 32 bits.
+pub fn parse_surface_tables(in source: Str, limits: u64, counts: u64) -> ChunkSeq[u64] {
+    let b = source.as_bytes();
+    let max_diag = counts >> 32;
+    let mut d = diags_new();
+    let t = lex_sugar_with_limits(
+        in b,
+        inout d,
+        limits & 4294967295,
+        counts & 4294967295,
+        max_diag
+    );
+    if t.rejected {
+        return report_rejected(in d);
+    }
+    let p = parse_surface_tokens(in b, t, d, max_diag, hard_depth(), ((limits >> 32) & 1) == 1);
+    let mut tree = tree_new();
+    build_tree(inout tree, in p);
+    report(in tree, in p)
 }
 
 // The tables of a refused parse: no tokens or nodes, the diagnostics of `d`.
