@@ -180,7 +180,7 @@ MODULES = {
     "native_coverage": ("SH4-17, 3", "", "links the crucible seed; only `vesper fuzz` (a tool) uses it"),
     "main": ("SH5-12", "vesper-driver", "#1367"),
     "arrays": ("SH2-9", "", ""),
-    "anvil_hash": ("SH5-14", "", ""),
+    "anvil_hash": ("SH5-14", "vesper-test-runner", "0 diffs, 0.74x; source graph, no swap until Stage 2"),
     "atomics": ("SH2-10", "vesper-check-loops-atomics", "2.31x"),
     "anvil_sim": ("SH5-14", "", ""),
     "native_freestanding": ("SH4-14", "", ""),
