@@ -1,6 +1,7 @@
 """Check the batch-to-column example against an independent NDJSON corpus."""
 
-load("./lib/process.axl", "command", "exit_code", "root_path", "scratch_dir")
+load("./bounded-stdio.axl", "bounded_run", "utf8")
+load("./lib/process.axl", "root_path", "scratch_dir")
 load("./lib/strict-json.axl", "decode_object")
 
 _MAX_OUTPUT = 128 * 8193
@@ -65,85 +66,19 @@ def _records(output):
         fail("Expected at most 128 newline-terminated JSON records")
     return [decode_object(line) for line in records[:-1]]
 
-def _write(ctx, path, data):
-    if type(data) == "string":
-        ctx.std.fs.write(path, data)
-        return
-    stream = ctx.std.fs.create(path)
-    written = stream.write(data)
-    stream.close()
-    if written != len(data):
-        fail("Could not write the complete NDJSON input")
-
-def _worker(ctx: TaskContext) -> int:
-    binary, directory = ctx.args.tool_args
-    root = ctx.std.env.aspect_root_dir()
-    child = command(ctx, binary, ["--stdin"], root).stdin("piped").stdout(
-        ctx.std.fs.create(directory + "/stdout"),
-    ).stderr(ctx.std.fs.create(directory + "/stderr")).spawn()
-    payload = ctx.std.fs.open(directory + "/input").read()
-    input = child.stdin()
-    # Stream writes can be short. An independent caller bounds this worker's
-    # whole process group while writes or the example itself are blocked.
-    offset = 0
-    for _ in range(len(payload)):
-        if offset == len(payload):
-            break
-        written = input.write(payload[offset:])
-        if not written:
-            fail("Example stopped accepting input")
-        offset += written
-    input.close()
-    status = child.wait()
-    ctx.std.fs.write(directory + "/status", str(exit_code(status)))
-    return 0
-
-ndjson_input = task(
-    kind = "ndjson-input",
-    group = ["acceptance", "internal"],
-    summary = "Feed the NDJSON example inside a separately monitored process group",
-    implementation = _worker,
-    args = {"tool_args": args.trailing_var_args(description = "Example binary and its private scratch directory.")},
-)
-
 def _execute(ctx: TaskContext, root: str, binary: str, directory: str, payload = None, failure = ""):
-    stdout = directory + "/stdout"
-    stderr = directory + "/stderr"
-    if payload == None:
-        child = command(ctx, binary, [], root).process_group(0).stdin("null").stdout(ctx.std.fs.create(stdout)).stderr(ctx.std.fs.create(stderr)).spawn()
-    else:
-        ctx.std.fs.write(stdout, "")
-        ctx.std.fs.write(stderr, "")
-        ctx.std.fs.write(directory + "/status", "")
-        _write(ctx, directory + "/input", payload)
-        child = command(ctx, ctx.std.env.current_exe(), ["acceptance", "internal", "ndjson-input", "--", binary, directory], root, {"CI": "false"}).process_group(0).stdout("null").stderr(ctx.std.fs.create(directory + "/worker")).spawn()
-    status = None
-    for _ in range(120):
-        status = child.try_wait(timeout_ms = 250)
-        if ctx.std.fs.metadata(stdout).size > _MAX_OUTPUT or ctx.std.fs.metadata(stderr).size > _STDERR_MAX:
-            if status == None:
-                child.kill()
-                child.wait()
-            fail("NDJSON output exceeded its finite allowance")
-        if status != None:
-            break
-    if status == None:
-        child.kill()
-        child.wait()
-        fail("NDJSON example process deadline exceeded")
-    code = exit_code(status)
-    if payload != None:
-        if code:
-            ctx.std.io.stderr.write(ctx.std.fs.open(directory + "/worker").read())
-            fail("NDJSON input worker failed (exit %d)" % code)
-        code = int(ctx.std.fs.read_to_string(directory + "/status"))
-    output = ctx.std.fs.read_to_string(stdout)
-    diagnostics = ctx.std.fs.read_to_string(stderr)
+    result = bounded_run(
+        ctx, root, directory, binary, [] if payload == None else ["--stdin"],
+        timeout = 30, stdout_limit = _MAX_OUTPUT, stderr_limit = _STDERR_MAX,
+        label = "NDJSON example", input = payload,
+    )
+    output = utf8(result.stdout)
+    diagnostics = utf8(result.stderr)
     if failure:
-        if code != 1 or output or failure not in diagnostics:
-            fail("Expected an atomic NDJSON rejection with %s, got exit %d: %s" % (failure, code, diagnostics))
-    elif code or diagnostics:
-        fail("Expected a successful example without diagnostics, got exit %d: %s" % (code, diagnostics))
+        if result.code != 1 or output or failure not in diagnostics:
+            fail("Expected an atomic NDJSON rejection with %s, got exit %d: %s" % (failure, result.code, diagnostics))
+    elif result.code or diagnostics:
+        fail("Expected a successful example without diagnostics, got exit %d: %s" % (result.code, diagnostics))
     return output
 
 def _file(ctx: TaskContext, path: str) -> bool:

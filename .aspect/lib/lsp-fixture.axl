@@ -1,0 +1,121 @@
+"""Build and inspect the framed JSON-RPC traffic used by acceptance fixtures."""
+
+load("../bounded-stdio.axl", "bounded_run", "utf8")
+load("./strict-json.axl", "decode_object")
+
+_MAX_FRAME = 2 * 1024 * 1024
+_DELIMITER = bytes("\r\n\r\n")
+_HEX = "0123456789ABCDEF"
+_PATH_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~/"
+
+def file_uri(path):
+    encoded = []
+    raw = bytes(path)
+    for index in range(len(raw)):
+        octet = raw[index]
+        letter = str(raw[index:index + 1]) if octet < 128 else ""
+        if letter and letter in _PATH_CHARS:
+            encoded.append(letter)
+        else:
+            encoded.append("%" + _HEX[octet >> 4] + _HEX[octet & 15])
+    return "file://" + "".join(encoded)
+
+def position(source, offset):
+    prefix = source[:offset]
+    current = prefix.rpartition("\n")[2]
+    units = 0
+    for char in current.elems():
+        units += 2 if len(bytes(char)) == 4 else 1
+    return {"line": prefix.count("\n"), "character": units}
+
+def request(identifier, method, params):
+    return {"jsonrpc": "2.0", "id": identifier, "method": method, "params": params}
+
+def notice(method, params):
+    return {"jsonrpc": "2.0", "method": method, "params": params}
+
+def document(uri):
+    return {"textDocument": {"uri": uri}}
+
+def opened(uri, version, source):
+    return notice("textDocument/didOpen", {"textDocument": {"uri": uri, "version": version, "languageId": "vesper", "text": source}})
+
+def changed(uri, version, source):
+    return notice("textDocument/didChange", {"textDocument": {"uri": uri, "version": version}, "contentChanges": [{"text": source}]})
+
+def frame(message):
+    payload = bytes(json.encode(message))
+    return bytes("Content-Length: %d\r\n\r\n" % len(payload)) + payload
+
+def content_length(header):
+    size = 0
+    for line in header.split("\r\n"):
+        name, colon, value = line.partition(":")
+        if not colon:
+            return 0
+        if name.lower() == "content-length":
+            token = value.strip()
+            if size or not token or not all([char in "0123456789" for char in token.elems()]):
+                return 0
+            size = int(token)
+            if size <= 0 or size > _MAX_FRAME:
+                return 0
+    return size
+
+def decode_frames(data):
+    frames = []
+    offset = 0
+    for _ in range(len(data)):
+        if offset == len(data):
+            break
+        header_end = -1
+        for index in range(offset, min(offset + 8192, len(data) - 4) + 1):
+            if data[index:index + 4] == _DELIMITER:
+                header_end = index
+                break
+        if header_end < 0:
+            fail("Missing or oversized JSON-RPC frame header")
+        size = content_length(utf8(data[offset:header_end]))
+        body = header_end + 4
+        if not size or body + size > len(data):
+            fail("Invalid or incomplete JSON-RPC frame length")
+        message = decode_object(utf8(data[body:body + size]))
+        if message.get("jsonrpc") != "2.0":
+            fail("Expected a JSON-RPC 2.0 message")
+        frames.append(message)
+        offset = body + size
+    return frames
+
+def _response(replies, identifier):
+    found = [reply for reply in replies if reply.get("id") == identifier]
+    if len(found) != 1:
+        fail("Expected exactly one JSON-RPC reply for %s, got %d" % (identifier, len(found)))
+    return found[0]
+
+def result(replies, identifier):
+    reply = _response(replies, identifier)
+    if "error" in reply:
+        fail("Unexpected JSON-RPC error for %s: %r" % (identifier, reply))
+    return reply["result"]
+
+def error(replies, identifier, code, kind = None):
+    reply = _response(replies, identifier)
+    if "result" in reply or reply.get("error", {}).get("code") != code:
+        fail("Expected JSON-RPC error %d for %s: %r" % (code, identifier, reply))
+    failure = reply["error"]
+    if kind != None and failure.get("data", {}).get("kind") != kind:
+        fail("Expected JSON-RPC error kind %s for %s: %r" % (kind, identifier, failure))
+    return failure
+
+def session(ctx, root, work, binary, messages):
+    data = bytes([])
+    for message in messages:
+        data += frame(message)
+    captured = bounded_run(
+        ctx, root, work, binary, ["lsp"], timeout = 45, stdout_limit = 8 * _MAX_FRAME,
+        stderr_limit = _MAX_FRAME, label = "LSP session", input = data,
+    )
+    if captured.code:
+        ctx.std.io.stderr.write(captured.stderr)
+        fail("LSP session exited with status %d" % captured.code)
+    return decode_frames(captured.stdout)
