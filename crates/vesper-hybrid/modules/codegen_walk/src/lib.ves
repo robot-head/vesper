@@ -1,7 +1,7 @@
 // @vesper/hybrid-codegen-walk: `vesper::native::register_locals` and the
 // entry-block plans of `vesper::native::frame_plan` served from Vesper in
 // the hybrid Stage 2 build (Rust-exit gap wave 1 lane 11, #1509), through
-// the `register_locals` and `frame_plans` hooks of `vesper::codegen_swap`.
+// the `register_locals` and `entry_plans` hooks of `vesper::codegen_swap`.
 
 // @export abi 4
 
@@ -14,8 +14,8 @@ pub fn register_locals_words(in input: Slice[u8]) -> ChunkSeq[u64] {
     native_walk_register_locals_bytes(in input)
 }
 
-// One compile's entry-block plans, from `@vesper/codegen-calls`' input
-// with one task (part 3b).
+// One compile's entry plans (entry blocks and internal conventions, parts
+// 3b and 4a), from `@vesper/codegen-calls`' input with one task.
 pub fn frame_plans_words(in input: Slice[u8]) -> ChunkSeq[u64] {
     native_walk_frames_bytes(in input)
 }
