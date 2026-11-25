@@ -34,7 +34,7 @@ def blockers(ctx, root, number, base, head, main, open_prs):
     changed = capture(ctx, "git", ["diff", "--name-only", "-z", main + "..." + head], root).split("\x00")
     paths = [path for path in changed if path]
     if _CENSUS in paths and len(paths) > 1 and _git_status(ctx, root, ["diff", "--quiet", main, head, "--", _CENSUS]):
-        reasons.append("it changes %s, which only the census refresh PR updates: run `git checkout %s -- %s` and keep the STATUS edits in scripts/rust-census.py" % (_CENSUS, main, _CENSUS))
+        reasons.append("it changes %s, which only the census refresh PR updates: run `git checkout %s -- %s` and keep the STATUS edits in .aspect/rust-census.axl" % (_CENSUS, main, _CENSUS))
     return reasons
 
 def _decision(number, reasons):

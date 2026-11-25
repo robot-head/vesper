@@ -22,6 +22,9 @@ def _platform_tests(ctx: TaskContext) -> int:
         "doc-navigation",
         "diagnostics",
         "rewrite-witness",
+        "doc-links",
+        "source-tooling",
+        "rust-census",
     ]:
         check(ctx, ctx.std.env.current_exe(), ["ci", "tests", suite], root)
     return run_command(ctx, "python3", ["-m", "unittest", "discover", "-s", "scripts/ci/tests", "-p", "test_platform*.py"], True, "")

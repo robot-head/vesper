@@ -1,31 +1,8 @@
-#!/usr/bin/env python3
-"""Rust census for the Rust-exit program (docs/maintenance/rust-exit-plan.md).
+"""Count non-test Rust and render the maintained Rust-exit census."""
 
-Counts the non-test Rust lines of every workspace crate and of every module of
-the root compiler, joins them with the hand-kept STATUS tables below, and
-prints docs/maintenance/rust-census.md to stdout.
+load("./lib/process.axl", "capture", "scratch_dir")
 
-    python3 scripts/rust-census.py > docs/maintenance/rust-census.md
-
-Lane pull requests edit only the STATUS tables here, never the generated
-file: .github/workflows/rust-census.yml regenerates it after each push to
-main and keeps one "Refresh the Rust census" pull request open with the
-result, and the merge gate stops CI for any other pull request that changes
-it (aspect ci merge-gate). The output names no commit, so merging the
-refresh leaves nothing new to refresh.
-
-Non-test lines: non-blank, non-comment lines outside `#[cfg(test)]` items,
-skipping `tests.rs`, `tests/`, `benches/` and `examples/`. Update STATUS when a
-lane reports (the scoreboard lane, SH6 lane 1, owns this file).
-"""
-
-import os
-import re
-import subprocess
-import sys
-
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SKIP_DIRS = {"target", "tests", "benches", "examples"}
+_SKIP_DIRS = ["target", "tests", "benches", "examples"]
 
 # Classes, in the order the census lists them.
 CLASSES = {
@@ -215,112 +192,168 @@ MODULES = {
     "native_cold_outline": ("#1829", "vesper-native-cold-outline", "decisions in Vesper, 0 diffs (kernels + corpus), 1.12x end to end; helper building (entity copying) stays Rust"),
 }
 
+def _text_lines(text):
+    return text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
 
-def nontest_lines(path):
-    """Counts production lines, skipping every item marked `#[cfg(test)]`.
-
-    A `#[cfg(test)]` item is skipped up to the end of its braces (or its `;`),
-    so a test-only helper in the middle of a file does not hide the production
-    code after it.
-    """
+def _production_lines(path, text):
     if path.endswith("tests.rs"):
         return 0
-    n = 0
+    count = 0
     skipping = False
     depth = 0
     opened = False
-    with open(path, errors="replace") as f:
-        for line in f:
-            s = line.strip()
-            if not skipping and re.match(r"#\[cfg\(test\)\]", s):
-                skipping, depth, opened = True, 0, False
+    # Skip each cfg(test) item through its closing brace or semicolon so a
+    # test helper in the middle of a file leaves later production visible.
+    for line in _text_lines(text):
+        trimmed = line.strip()
+        if not skipping and trimmed.startswith("#[cfg(test)]"):
+            skipping, depth, opened = True, 0, False
+            continue
+        if skipping:
+            if trimmed.startswith("#[") and not opened:
                 continue
-            if skipping:
-                if s.startswith("#[") and not opened:
-                    continue
-                depth += line.count("{") - line.count("}")
-                opened = opened or "{" in line
-                if (opened and depth <= 0) or (not opened and s.endswith(";")):
-                    skipping = False
-                continue
-            if s and not s.startswith("//"):
-                n += 1
-    return n
+            depth += line.count("{") - line.count("}")
+            opened = opened or "{" in line
+            if (opened and depth <= 0) or (not opened and trimmed.endswith(";")):
+                skipping = False
+            continue
+        if trimmed and not trimmed.startswith("//"):
+            count += 1
+    return count
 
+def _read(ctx, path):
+    return str(ctx.std.fs.open(path).read())
 
-def tree_lines(d):
+def _walk(ctx, directory, skip):
+    pending = [directory]
+    files = []
+    for _ in range(100000):
+        if not pending:
+            return files
+        folder = pending.pop()
+        dirs = []
+        for entry in ctx.std.fs.read_dir(folder):
+            path = folder + "/" + entry.path
+            if entry.is_dir:
+                if entry.path not in skip:
+                    dirs.append(path)
+            elif entry.path.endswith(".rs") and not entry.is_symlink:
+                files.append(path)
+        pending.extend(reversed(dirs))
+    fail("Too many Rust source directories in " + directory)
+
+def _sum(numbers):
     total = 0
-    for root, dirs, files in os.walk(d):
-        dirs[:] = [x for x in dirs if x not in SKIP_DIRS]
-        for f in files:
-            if f.endswith(".rs"):
-                total += nontest_lines(os.path.join(root, f))
+    for value in numbers:
+        total += value
     return total
 
+def _tree_lines(ctx, root):
+    return _sum([_production_lines(path, _read(ctx, path)) for path in _walk(ctx, root, _SKIP_DIRS)])
 
-def tracked_lines(pattern):
-    out = subprocess.run(["git", "ls-files", pattern], cwd=ROOT, capture_output=True, text=True).stdout.split()
-    total = 0
-    for p in out:
-        with open(os.path.join(ROOT, p), errors="replace") as f:
-            total += sum(1 for _ in f)
-    return total
+def _tracked_lines(ctx, root, pattern):
+    files = capture(ctx, "git", ["ls-files", "-z", "--", pattern], root).split("\x00")
+    return _sum([len(_text_lines(_read(ctx, root + "/" + path))) for path in files if path])
 
+def _digits(number):
+    text = str(number)
+    first = len(text) % 3 or 3
+    return ",".join([text[:first]] + [text[i:i + 3] for i in range(first, len(text), 3)])
 
-def main():
-    os.chdir(ROOT)
-    crates = {c: tree_lines(f"crates/{c}") for c in sorted(os.listdir("crates")) if os.path.isdir(f"crates/{c}")}
+def _measure(ctx, root):
+    crates = {}
+    for crate in sorted([entry.path for entry in ctx.std.fs.read_dir(root + "/crates") if entry.is_dir]):
+        crates[crate] = _tree_lines(ctx, root + "/crates/" + crate)
     modules = {}
-    for root, _, files in os.walk("src"):
-        for f in files:
-            if f.endswith(".rs"):
-                rel = os.path.relpath(os.path.join(root, f), "src")
-                key = rel.split(os.sep)[0].removesuffix(".rs")
-                modules[key] = modules.get(key, 0) + nontest_lines(os.path.join(root, f))
-    missing = [c for c in crates if c not in CRATES and crates[c] > 0]
-    missing += [m for m in modules if m not in MODULES and not m.endswith("_commands") and modules[m] > 0]
+    prefix = root + "/src/"
+    for file in _walk(ctx, prefix.rstrip("/"), []):
+        name = file.removeprefix(prefix).partition("/")[0].removesuffix(".rs")
+        modules[name] = modules.get(name, 0) + _production_lines(file, _read(ctx, file))
+    return crates, modules
 
-    w = sys.stdout.write
-    w("# Rust census\n\n")
-    w("> Generated by `scripts/rust-census.py` on `main` (`.github/workflows/rust-census.yml`).\n")
-    w("> Do not edit it in a lane pull request: update the STATUS tables in the script.\n")
-    w("> Plan: [rust-exit-plan.md](rust-exit-plan.md).\n\n")
-    w("Lines are non-test Rust (see the script). Speeds are Vesper time / Rust time from the\n")
-    w("latest lane report; \"unmeasured\" means no ABBA number on file. The bar to flip a module\n")
-    w("and delete its Rust (owner, 2026-11-21): full function and within 1.5x of Rust's speed.\n\n")
-
+def _render(crates, modules, root_tests, crate_tests):
+    lines = [
+        "# Rust census\n",
+        "> Generated by `aspect maintenance rust-census` on `main` (`.github/workflows/rust-census.yml`).",
+        "> Lane pull requests update the STATUS tables in `.aspect/rust-census.axl`. The workflow refreshes this report.",
+        "> Plan: [rust-exit-plan.md](rust-exit-plan.md).\n",
+        "Lines are non-test Rust (see the task). Speeds are Vesper time / Rust time from the",
+        'latest lane report; "unmeasured" means no ABBA number on file. The bar to flip a module',
+        "and delete its Rust (owner, 2026-11-21): full function and within 1.5x of Rust's speed.\n",
+        "## Totals\n",
+        "| Class | Meaning | Non-test lines |",
+        "|---|---|--:|",
+    ]
     by_class = {}
-    for c, n in crates.items():
-        cls = CRATES.get(c, ("unknown",))[0]
-        by_class[cls] = by_class.get(cls, 0) + n
-    # The `*42` oracles, diverse on purpose, left src/bin for
-    # crates/vesper-oracles (#1825): all of `src/` is now the compiler.
-    by_class["compiler"] = by_class.get("compiler", 0) + sum(modules.values())
-    w("## Totals\n\n| Class | Meaning | Non-test lines |\n|---|---|--:|\n")
-    for cls, meaning in CLASSES.items():
-        w(f"| `{cls}` | {meaning} | {by_class.get(cls, 0):,} |\n")
-    w(f"| | **All non-test Rust** (root `src/` plus `crates/`) | **{sum(by_class.values()):,}** |\n\n")
-    w("Test and harness Rust (all lines, tracked files): ")
-    w(f"`tests/` {tracked_lines('tests/*.rs'):,}, ")
-    w(f"`crates/*/tests` {tracked_lines('crates/*/tests/*.rs'):,}. ")
-    w("These move to Vesper tests with each flip (SH6 lane 19).\n\n")
-
-    w("## Crates\n\n| Crate | Lines | Class | Vesper port | Last speed | Left | SH6 lane |\n|---|--:|---|---|---|---|---|\n")
-    order = list(CLASSES)
-    for c in sorted(crates, key=lambda c: (order.index(CRATES[c][0]) if c in CRATES else 99, -crates[c])):
-        cls, port, speed, left, lane = CRATES.get(c, ("unknown", "", "", "", ""))
-        w(f"| `{c}` | {crates[c]:,} | `{cls}` | {port} | {speed} | {left} | {lane} |\n")
-
-    w(f"\n## Root compiler (`src/`, {sum(modules.values()):,} lines)\n\n")
-    w("Every module has an owner lane. SHn-m is wave n lane m; G1-m is gap wave 1 lane m; a bare number is an SH6 lane.\n\n")
-    w("| Module | Lines | Owner lane | Vesper package | Status |\n|---|--:|---|---|---|\n")
-    for m in sorted(modules, key=lambda m: -modules[m]):
-        default = ("SH5-13", "vesper-driver-commands", "") if m.endswith("_commands") else ("**none**", "", "")
-        lane, pkg, note = MODULES.get(m, default)
-        w(f"| `{m}` | {modules[m]:,} | {lane} | {pkg} | {note} |\n")
+    for name, count in crates.items():
+        classification = CRATES.get(name, ("unknown",))[0]
+        by_class[classification] = by_class.get(classification, 0) + count
+    compiler = _sum(modules.values())
+    by_class["compiler"] = by_class.get("compiler", 0) + compiler
+    for classification, meaning in CLASSES.items():
+        lines.append("| `%s` | %s | %s |" % (classification, meaning, _digits(by_class.get(classification, 0))))
+    lines.extend([
+        "| | **All non-test Rust** (root `src/` plus `crates/`) | **%s** |\n" % _digits(_sum(by_class.values())),
+        "Test and harness Rust (all lines, tracked files): `tests/` %s, `crates/*/tests` %s. These move to Vesper tests with each flip (SH6 lane 19).\n" % (_digits(root_tests), _digits(crate_tests)),
+        "## Crates\n",
+        "| Crate | Lines | Class | Vesper port | Last speed | Left | SH6 lane |",
+        "|---|--:|---|---|---|---|---|",
+    ])
+    order = {name: index for index, name in enumerate(CLASSES)}
+    for name in sorted(crates, key = lambda value: (order.get(CRATES.get(value, ("unknown",))[0], 99), -crates[value])):
+        classification, port, speed, left, lane = CRATES.get(name, ("unknown", "", "", "", ""))
+        lines.append("| `%s` | %s | `%s` | %s | %s | %s | %s |" % (name, _digits(crates[name]), classification, port, speed, left, lane))
+    lines.extend([
+        "\n## Root compiler (`src/`, %s lines)\n" % _digits(compiler),
+        "Every module has an owner lane. SHn-m is wave n lane m; G1-m is gap wave 1 lane m; a bare number is an SH6 lane.\n",
+        "| Module | Lines | Owner lane | Vesper package | Status |",
+        "|---|--:|---|---|---|",
+    ])
+    for name in sorted(modules, key = lambda value: -modules[value]):
+        default = ("SH5-13", "vesper-driver-commands", "") if name.endswith("_commands") else ("**none**", "", "")
+        lane, package, status = MODULES.get(name, default)
+        lines.append("| `%s` | %s | %s | %s | %s |" % (name, _digits(modules[name]), lane, package, status))
+    missing = [name for name, count in crates.items() if name not in CRATES and count > 0]
+    missing += [name for name, count in modules.items() if name not in MODULES and not name.endswith("_commands") and count > 0]
     if missing:
-        w("\n## Not in the STATUS tables\n\n" + "".join(f"- `{x}`\n" for x in missing))
+        lines.append("\n## Not in the STATUS tables\n")
+        lines.extend(["- `%s`" % name for name in missing])
+    return "\n".join(lines) + "\n"
 
+def _census(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    crates, modules = _measure(ctx, root)
+    ctx.std.io.stdout.write(_render(crates, modules, _tracked_lines(ctx, root, "tests/*.rs"), _tracked_lines(ctx, root, "crates/*/tests/*.rs")))
+    return 0
 
-if __name__ == "__main__":
-    main()
+rust_census = task(
+    kind = "rust-census",
+    group = ["maintenance"],
+    summary = "Count non-test Rust and render the Rust-exit census",
+    implementation = _census,
+)
+
+def _test(ctx: TaskContext) -> int:
+    source = "// comment\r\nfn before() {}\n\n#[cfg(test)]\n#[test]\nfn inner() {\n    if true { panic!(); }\n}\n#[cfg(test)]\nmod test_support;\nfn after() {}\n"
+    if _production_lines("lib.rs", source) != 2 or _production_lines("smoketests.rs", source) != 0:
+        fail("Expected only production items in the Rust line count")
+    root = scratch_dir(ctx, "vesper-rust-census-test-")
+    for relative in ["crate/src/lib.rs", "crate/src/tests.rs", "crate/tests/integration.rs", "crate/examples/run.rs", "crate/target/generated.rs"]:
+        path = root + "/" + relative
+        ctx.std.fs.create_dir_all(path.rpartition("/")[0])
+        ctx.std.fs.write(path, source)
+    if _tree_lines(ctx, root + "/crate") != 2:
+        fail("Census included a test or generated directory")
+    report = _render({"vesper-aura": 1234, "unknown-crate": 5}, {"main": 2000, "feature_commands": 40}, 5678, 905)
+    for fragment in ["**3,279**", "| `vesper-aura` | 1,234 | `gone`", "`tests/` 5,678", "vesper-driver-commands", "- `unknown-crate`"]:
+        if fragment not in report:
+            fail("Census report omitted " + fragment)
+    ctx.std.io.stdout.write("Passed Rust census line counts and report cases\n")
+    return 0
+
+test_rust_census = task(
+    kind = "rust-census",
+    group = ["ci", "tests"],
+    summary = "Test production-line counting and the generated census tables",
+    implementation = _test,
+)

@@ -2,7 +2,7 @@ name: Rust census
 
 # Regenerates docs/maintenance/rust-census.md on main and keeps one pull
 # request, "Refresh the Rust census", open with the result. Lane pull requests
-# edit only the STATUS tables in scripts/rust-census.py: the generated file
+# edit only the STATUS tables in .aspect/rust-census.axl: the generated file
 # was the most common merge conflict between them. The merge gate
 # (aspect ci merge-gate) stops CI for any other pull request that changes
 # it. The output names no commit, so merging the refresh changes nothing the
@@ -11,7 +11,7 @@ name: Rust census
 on:
   push:
     branches: [main]
-    paths: ['src/**', 'crates/**', 'tests/**', 'scripts/rust-census.py', '.aspect/census-refresh.axl', '.github/workflows/rust-census.yml']
+    paths: ['src/**', 'crates/**', 'tests/**', '.aspect/rust-census.axl', '.aspect/census-refresh.axl', '.github/workflows/rust-census.yml']
   workflow_dispatch:
 
 permissions:

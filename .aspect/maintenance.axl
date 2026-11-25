@@ -1,7 +1,6 @@
 load("./lib/script.axl", "script_task")
 
 convert_rust_tests = script_task("convert-rust-tests", ["maintenance"], "scripts/convert-rust-tests.py", "python3")
-rust_census = script_task("rust-census", ["maintenance"], "scripts/rust-census.py", "python3")
 
 
 logos_sweep_sweep = script_task("sweep", ["maintenance", "logos-sweep"], "tools/logos-sweep/sweep.py", "python3")

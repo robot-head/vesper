@@ -102,7 +102,7 @@ finished (#1321). To keep pull requests within the limit:
   Linux runner ahead of everything else (#1479). The gate also stops a pull
   request that changes the generated `docs/maintenance/rust-census.md` along
   with anything else: lanes edit the STATUS tables in
-  `scripts/rust-census.py`, and `.github/workflows/rust-census.yml`
+  `.aspect/rust-census.axl`, and `.github/workflows/rust-census.yml`
   regenerates the census after each push to main into one "Refresh the Rust
   census" pull request, which changes only that file.
 - `macOS (AArch64)` and `Windows (x86_64 MSVC)` start only when a pull

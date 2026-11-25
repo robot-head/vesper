@@ -80,8 +80,8 @@ print("child stderr", file=sys.stderr)
         self.assertIn("child stderr", result.stderr)
 
     def test_rooted_checker_runs_from_workspace_root(self):
-        self.write("scripts/check-doc-links.py", "from pathlib import Path\nprint(Path.cwd())\n")
-        result = self.aspect("acceptance", "check-doc-links")
+        self.write("scripts/check-editor.py", "from pathlib import Path\nprint(Path.cwd())\n")
+        result = self.aspect("acceptance", "check-editor")
         self.assertEqual(result.stdout.splitlines(), [str(self.root)])
 
     def test_resource_oracle_fixtures_pass_the_mode_and_native_status(self):
@@ -116,8 +116,6 @@ if sys.argv[-1] == "crash":
             "canonical-protocols": ["vesper-grammar:example/" + name for name in ("protobuf", "der", "ipc")]
             + ["vesper-bench-pmu:example/probe"],
             "editor": ["vesper-span:example/source_edits", "vesper-lsp:example/protocol_documents"],
-            "source-tooling": ["vesper-grammar:example/grammar", "vesper-fmt:example/canonical",
-                               "vesper-bench:example/paired_callbacks"],
         }
         rows = ["//:bin/vesper bin/compiler"]
         self.write("bin/compiler", "")
@@ -132,14 +130,12 @@ if sys.argv[-1] == "crash":
 
         for task, override in (
             ("canonical-protocols", None),
-            ("doc-links", "VESPER_DOC_LINKS_BINARY"),
             ("editor", None),
             ("macro-preview", "VESPER_MACRO_PREVIEW_BINARY"),
             ("recovery", "VESPER_RECOVERY_BINARY"),
             ("source-macro-parameters", "VESPER_SOURCE_MACRO_PARAMETERS_BINARY"),
             ("source-macro-tuples", "VESPER_SOURCE_MACRO_TUPLES_BINARY"),
             ("source-macros", "VESPER_SOURCE_MACROS_BINARY"),
-            ("source-tooling", None),
             ("stylus", "VESPER_STYLUS_BINARY"),
         ):
             with self.subTest(task=task):
@@ -163,13 +159,12 @@ Path("order").write_text("checker" + chr(10))
                 cwd, argv = json.loads(result.stdout.splitlines()[0])
                 self.assertEqual(cwd, str(self.root))
                 expected = ["--binary", str(expected_binary)]
-                if task in ("canonical-protocols", "source-tooling"):
+                if task == "canonical-protocols":
                     expected += ["--root", str(self.root)]
-                if task != "doc-links":
-                    work = Path(argv[-1])
-                    self.assertTrue(work.name.startswith(f"vesper-{task}-"))
-                    self.assertFalse(work.exists())
-                    expected += ["--work", str(work)]
+                work = Path(argv[-1])
+                self.assertTrue(work.name.startswith(f"vesper-{task}-"))
+                self.assertFalse(work.exists())
+                expected += ["--work", str(work)]
                 self.assertEqual(argv, expected)
                 order = (self.root / "order").read_text().splitlines()
                 self.assertEqual(order, ["checker", *[label.split("/")[-1] for label in examples.get(task, [])]])
