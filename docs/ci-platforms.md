@@ -122,7 +122,16 @@ finished (#1321). To keep pull requests within the limit:
   and a burst of merges waits as a single newest run (#1479). A pull request
   that wants the port shards before merging can dispatch Platforms on its
   branch with profile `pr` and `pull_request` left empty; that runs every
-  port shard.
+  port shard. A newer such dispatch, or the automatic one for a newer push,
+  cancels the older run on that branch, so dispatching again does not queue
+  a second macOS job. On 2026-11-25 twelve of the fifteen Platforms runs
+  queued for a macOS runner were hand dispatches, three of them for one
+  branch.
+- `Hybrid compiler` runs its nine divergent rebuilds (the checks that its
+  harnesses catch a wrong layout, parse, IR check, inliner, optimizers, trait
+  pass, doc pages or stack bound) on Linux only. The harnesses are the same
+  code on every host; macOS and Windows still build the hybrid and run its
+  tests, the CLI suites included.
 - The merge gate (`.github/actions/merge-gate`, `scripts/ci/merge_gate.py`)
   enforces the project rule that pull requests which cannot merge yet get no
   CI: when a pull request's base is not main, its branch carries another open

@@ -337,6 +337,15 @@ class PlatformWorkflowTests(unittest.TestCase):
         include = hybrid["jobs"]["hybrid"]["strategy"]["matrix"]["include"]
         self.assertEqual([leg["os"] for leg in include],
                          ["ubuntu-latest", "macos-latest", "windows-latest"])
+        # The divergent rebuilds check the harnesses, the same code on every
+        # host, so only Linux runs them; macOS and Windows keep the tests.
+        steps = hybrid["jobs"]["hybrid"]["steps"]
+        divergent = [s for s in steps if " catches a divergent " in s.get("name", "")]
+        self.assertEqual(len(divergent), 9)
+        for s in divergent:
+            self.assertEqual(s.get("if"), "runner.os == 'Linux'", s["name"])
+        tests = next(s for s in steps if s.get("name") == "Build and test the hybrid compiler")
+        self.assertNotIn("if", tests)
         step = next(s for s in self.platforms["jobs"]["plan"]["steps"] if s.get("id") == "ports")
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp) / "outputs"
@@ -352,6 +361,12 @@ class PlatformWorkflowTests(unittest.TestCase):
         cancel = self.platforms["concurrency"]["cancel-in-progress"]
         self.assertNotIn("'push'", cancel)
         self.assertIn("inputs.pull_request != ''", cancel)
+        # A newer `pr` dispatch by hand replaces the older one on its branch;
+        # full-profile and main dispatches (releases, nightly) never cancel.
+        self.assertIn("inputs.profile == 'pr'", cancel)
+        self.assertIn("github.ref != 'refs/heads/main'", cancel)
+        self.assertIn(cancel.removeprefix("${{ ").removesuffix(" }}") + " && github.ref",
+                      self.platforms["concurrency"]["group"])
         self.assertIn("'main'", self.platforms["concurrency"]["group"])
         hybrid = workflow("hybrid.yml")["concurrency"]
         self.assertEqual(hybrid["cancel-in-progress"], "false")

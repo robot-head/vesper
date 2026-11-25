@@ -10,7 +10,11 @@ name: Hybrid compiler
 # stack-bound CLI check and the manifest guard. Then it rebuilds the hybrid
 # with a deliberately wrong layout (`--features divergent`), parse, IR check
 # and stack bound, which the differential harness must catch, and with wrong
-# doc pages, which the doc differential (tests/doc.rs, #1338) must catch. It
+# doc pages, which the doc differential (tests/doc.rs, #1338) must catch.
+# Those divergent rebuilds check the harnesses, which are the same code on
+# every host, so they run on Linux only: each rebuilds the hybrid, and on
+# macOS and Windows the nine of them would hold one of the account's 5 macOS
+# runners (and a Windows runner) for most of the job's 75 minutes. It
 # runs on pushes to main, nightly and manual dispatch only, not on pull
 # requests (#1479): it is not a required check, and Bazel (Test all targets)
 # builds the crate and runs the same tests on Linux for every pull request.
@@ -106,25 +110,34 @@ jobs:
         shell: pwsh
         run: ./scripts/windows/test-hybrid-cli.ps1
       - name: The differential harness catches a divergent layout
+        if: runner.os == 'Linux'
         # The pilot's word arithmetic and the whole layout (#1177) are both
         # wrong; a wrong layout cannot compile the pilot test's program, so
         # only the harness runs here.
         run: cargo test --locked -p vesper-hybrid --features divergent --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The differential harness catches a divergent IR check
+        if: runner.os == 'Linux'
         run: cargo test --locked -p vesper-hybrid --features divergent-ir-check --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The differential harness catches a divergent inliner
+        if: runner.os == 'Linux'
         run: cargo test --locked -p vesper-hybrid --features divergent-ir-inline --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The differential harness catches a divergent AST optimizer
+        if: runner.os == 'Linux'
         run: cargo test --locked -p vesper-hybrid --features divergent-optimize --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The differential harness catches a divergent IR optimizer
+        if: runner.os == 'Linux'
         run: cargo test --locked -p vesper-hybrid --features divergent-ir-opt --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The differential harness catches a divergent trait declaration pass
+        if: runner.os == 'Linux'
         run: cargo test --locked -p vesper-hybrid --features divergent-pact --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The differential harness catches a divergent parse module
+        if: runner.os == 'Linux'
         # A wrong parse cannot compile the pilot test's program, so only the
         # harness runs here.
         run: cargo test --locked -p vesper-hybrid --features divergent-parse --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The doc differential catches a divergent doc module
+        if: runner.os == 'Linux'
         run: cargo test --locked -p vesper-hybrid --features divergent-doc --test doc hybrid_docs_match_the_default_compiler -- --nocapture
       - name: The stack-bound check catches a divergent stack bound
+        if: runner.os == 'Linux'
         run: cargo test --locked -p vesper-hybrid --features divergent-stack-bound --test stack_bound -- --nocapture
