@@ -25,7 +25,7 @@ def require_divergence(
 
 def port_checks(crate: str, kind: str, passing: list[list[str]], divergent: list, after = None):
     def run(ctx: TaskContext) -> int:
-        root = ctx.std.env.aspect_root_dir()
+        root = ctx.std.env.var("PLATFORM_WORKSPACE") or ctx.std.env.aspect_root_dir()
         for argv in passing:
             check(ctx, "cargo", ["test", "--locked"] + argv, root)
         for case in divergent:

@@ -30,6 +30,7 @@ def _platform_tests(ctx: TaskContext) -> int:
         "tensor-reference-fixtures",
         "generated-assets",
         "native-cli",
+        "wasm-fixture-build",
         "crmath-reference",
         "rust-test-conversion",
         "rust-census",

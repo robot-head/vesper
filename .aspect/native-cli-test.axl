@@ -2,6 +2,7 @@
 
 load("./lib/process.axl", "check")
 load("./lib/task-fixture.axl", "contains", "equal", "fixture_launcher", "fixture_workspace", "invoke_fixture", "write_fixture")
+load("./wasm-fixture-test.axl", "mock_wasm_cargo")
 
 _TREE_ARGS = ["tree", "--locked", "-p", "vesper", "--edges", "normal", "--prefix", "none"]
 _ORACLE_ARGS = ["run", "--locked", "--quiet", "-p", "vesper-oracles", "--bin", "resource_oracle42", "--", "--fault-peer"]
@@ -9,6 +10,9 @@ _ORACLE_ARGS = ["run", "--locked", "--quiet", "-p", "vesper-oracles", "--bin", "
 def _tool_fixture(ctx):
     variant, tool, cwd, executable = ctx.args.tool_args[:4]
     argv = ctx.args.tool_args[4:]
+    if variant == "wasm-fixtures":
+        equal(tool, "cargo")
+        return mock_wasm_cargo(ctx, cwd, argv)
     if variant in ["oracle", "dependencies"]:
         equal(tool, "cargo")
         equal(ctx.std.fs.exists(cwd + "/.aspect"), True)
@@ -29,15 +33,34 @@ def _tool_fixture(ctx):
         equal(argv, ["fmt", "--check", "--json", "--", "test with spaces.ves"])
         ctx.std.io.stdout.write('{"status":"unchanged"}\n')
         return 0
-    if variant == "examples":
+    if variant in ["examples", "historical-examples"]:
+        statuses = {"fixture": 42, "fibonacci": 55, "transaction": 42, "projections": 42, "counter": 3,
+                    "fail": 42, "closures": 42, "resumptions": 42, "checked_math": 42}
         if not argv:
-            return 42
-        equal(argv[:3], ["build", "examples/fixture.ves", "-o"])
+            return statuses[tool.removesuffix(".exe")]
+        source = argv[3].rpartition("/")[2].removesuffix(".exe")
+        equal(argv[:3], ["build", "examples/" + source + ".ves", "-o"])
+        if variant == "historical-examples":
+            equal(cwd, ctx.std.env.var("PLATFORM_WORKSPACE"))
+            equal(source == "fixture", False)
         if tool == "compiler.exe":
             equal(argv[3].endswith(".exe"), True)
         ctx.std.fs.copy(ctx.std.env.var("VESPER_FIXTURE_LAUNCHER"), argv[3])
         ctx.std.fs.set_permissions(argv[3], 0o755)
         return 0
+    if variant == "historical-port":
+        equal(cwd, ctx.std.env.var("PLATFORM_WORKSPACE"))
+        equal(ctx.std.env.var("VESPER_PORT_COMPILER"), "fixture compiler")
+        equal(argv[:3], ["test", "--locked", "-p"])
+        equal(argv[3] in ["vesper-warp-shard", "vesper-warp"], True)
+        if "vesper-port-divergent" not in argv:
+            return 0
+        if "equivalence" in argv:
+            ctx.std.io.stdout.write("test kernels_match_scalar ... FAILED\ntest rejects_bad_configs_and_inputs ... FAILED\ntest batch_semantics_examples ... FAILED\ntest reports_isa_paths ... ok\ntest generation_reuse_invalidates_old_handles ... ok\n")
+        else:
+            contains("rss", argv)
+            ctx.std.io.stdout.write("test table_hash_matches_bitwise_reference ... FAILED\ntest microsoft_verification_vectors ... FAILED\ntest rejects_bad_inputs ... ok\n")
+        return 1
     if variant == "abba":
         equal(argv, [])
         name = {"rust arm": "A", "vesper arm": "B"}[tool]
@@ -128,6 +151,25 @@ def _test(ctx):
     contains("flip-gate pairs sample 16:12 16:12", output.stdout)
     contains("Vesper/Rust mean 0.750", output.stdout)
     contains("digests DIFFER: different digest", run(abba, 1, "abba", {"FIXTURE_DIGEST": "different"}).stdout)
+
+    historical = root + "/historical checkout"
+    ctx.std.fs.create_dir_all(historical)
+    tools = dict(launcher, PLATFORM_WORKSPACE = historical, VESPER_FIXTURE_CASE = "historical-examples")
+    tools["VESPER_NATIVE_BINARY"] = root + "/bin/vesper compiler"
+    output = invoke_fixture(ctx, ["ci", "test-native-executables"], workspace.source, env = tools)
+    equal(len(output.stdout.splitlines()), 8)
+    contains("fibonacci: host exit 55", output.stdout)
+    write_fixture(ctx, historical + "/crates/vesper-warp-shard/Cargo.toml", "")
+    tools.update({
+        "VESPER_FIXTURE_CASE": "historical-port",
+        "VESPER_PORT_COMPILER": "fixture compiler",
+        "VESPER_PORT_HARNESS_CRATES": "vesper-warp-shard",
+        "VESPER_PORT_HARNESS_SCOPE": "",
+        "VESPER_PORT_HARNESS_SHARD": "1",
+    })
+    output = invoke_fixture(ctx, ["acceptance", "test-port-harness"], workspace.source, env = tools)
+    contains("Detected divergent warp-shard port (equivalence)", output.stdout)
+    contains("Detected divergent warp-shard port (rss)", output.stdout)
     return 0
 
 test_native_cli = task(

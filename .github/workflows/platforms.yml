@@ -226,6 +226,8 @@ jobs:
           sparse-checkout: |
             .aspect
             .github/actions/aspect
+            scripts/native-example-cases.txt
+            scripts/port-abi-plan.json
       - if: ${{ hashFiles('.aspect/platform-plan.axl') == '' }}
         uses: ./.platform-verify-tools/.github/actions/aspect
       - name: Verify exact historical checkout
@@ -250,9 +252,11 @@ jobs:
         run: aspect ci test-native-executables
       - name: Validate native Mach-O executables in a historical checkout
         if: ${{ hashFiles('.aspect/version.axl') == '' }}
+        working-directory: .platform-verify-tools
         env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
           VESPER_NATIVE_BINARY: target/debug/vesper
-        run: scripts/ci/test-native-executables.sh
+        run: aspect ci test-native-executables
       - name: Test the Vesper Pulse port on kqueue
         # The kqueue poller and completion driver in @vesper/pulse's macOS
         # copy against vesper_pulse (Linux runs the epoll copy).
@@ -283,10 +287,12 @@ jobs:
         run: aspect ci test-port-abi
       - name: Test the Vesper port export ABI in a historical checkout
         if: ${{ hashFiles('.aspect/version.axl') == '' }}
+        working-directory: .platform-verify-tools
         env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
           VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/vesper
           VESPER_PORT_HARNESS_SCOPE: abi
-        run: scripts/test-port-harness.sh
+        run: aspect ci test-port-abi
 
   windows:
     needs: plan
@@ -459,7 +465,7 @@ jobs:
         shard: ${{ fromJSON(needs.plan.outputs.shards || '[1]') }}
     runs-on: ubuntu-latest
     # A backstop: each shard's tests and divergent builds take about
-    # 10-30 minutes (scripts/test-port-harness.sh).
+    # 10-30 minutes (scripts/port-harness-plan.json).
     timeout-minutes: 60
     steps:
       - name: Fail when profile planning failed
@@ -488,6 +494,8 @@ jobs:
           sparse-checkout: |
             .aspect
             .github/actions/aspect
+            scripts/port-abi-plan.json
+            scripts/port-harness-plan.json
       - if: ${{ needs.plan.outputs.ports != 'none' && hashFiles('.aspect/platform-plan.axl') == '' }}
         uses: ./.platform-verify-tools/.github/actions/aspect
       - name: Verify exact historical checkout
@@ -523,11 +531,13 @@ jobs:
         run: aspect acceptance test-port-harness
       - name: Test the Vesper port harness in a historical checkout
         if: ${{ needs.plan.outputs.ports != 'none' && hashFiles('.aspect/version.axl') == '' }}
+        working-directory: .platform-verify-tools
         env:
+          PLATFORM_WORKSPACE: ${{ github.workspace }}
           VESPER_PORT_COMPILER: ${{ runner.temp }}/port-compiler/vesper
           VESPER_PORT_HARNESS_SHARD: ${{ matrix.shard }}
           VESPER_PORT_HARNESS_CRATES: ${{ needs.plan.outputs.ports }}
-        run: scripts/test-port-harness.sh
+        run: aspect acceptance test-port-harness
 
   complete:
     name: Platform validation complete

@@ -114,6 +114,12 @@ def _required_check_names_and_events_are_preserved(h):
     windows_commands = _command_steps(windows["steps"])
     _contains("aspect ci test-native-executables", mac_commands)
     _contains("aspect ci test-pulse-port", mac_commands)
+    for name, command in [("Validate native Mach-O executables in a historical checkout", "aspect ci test-native-executables"),
+                          ("Test the Vesper port export ABI in a historical checkout", "aspect ci test-port-abi")]:
+        fallback = _first([step for step in mac["steps"] if step.get("name") == name])
+        _equal(fallback["working-directory"], ".platform-verify-tools")
+        _equal(fallback["env"]["PLATFORM_WORKSPACE"], "${{ github.workspace }}")
+        _equal(fallback["run"], command)
     native_step = _first([s for s in windows["steps"] if s.get("name") == "Validate native COFF executables"])
     _equal(native_step["shell"], "pwsh")
     _contains("./scripts/windows/test-native-executables.ps1", native_step["run"])
@@ -217,6 +223,10 @@ def _port_harness_runs_once_on_linux(h):
     _equal(ports["steps"][0]["if"], "needs.plan.result != 'success'")
     _equal(ports["steps"][0]["run"], "exit 1")
     step = _first([s for s in ports["steps"] if "aspect acceptance test-port-harness" in s.get("run", "")])
+    fallback = _first([s for s in ports["steps"] if s.get("name") == "Test the Vesper port harness in a historical checkout"])
+    _equal(fallback["working-directory"], ".platform-verify-tools")
+    _equal(fallback["env"]["PLATFORM_WORKSPACE"], "${{ github.workspace }}")
+    _equal(fallback["run"], step["run"])
     _absent("VESPER_PORT_HARNESS_SCOPE", step.get("env", {}))
     # One optimized compiler, built once and shared by every shard (#1103).
     compiler = jobs["ports-compiler"]
