@@ -82,10 +82,6 @@ const ALLOWED: &[(&str, &str)] = &[
     ),
     ("vesper-simpulse-seed", "linked through vesper-chrono"),
     ("vesper-span-seed", "source spans"),
-    (
-        "vesper-std-host",
-        "the host shim of @vesper-std/fs, process and env",
-    ),
     ("vesper-syntax", "the parser"),
     (
         "vesper-tensor-seed",

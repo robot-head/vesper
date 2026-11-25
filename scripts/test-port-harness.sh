@@ -128,7 +128,7 @@ fi
 # Self-hosting SH0 lane 3 (#1125): the std I/O sample driver, an object
 # that walks, reads, spawns and writes through @vesper-std/fs, process and
 # env; host-sensitive (paths, processes, the OS's calling convention).
-if ported vesper-std-driver vesper-std-host; then
+if ported vesper-std-driver; then
 cargo test --locked -p vesper-std-driver --features vesper-port
 fi
 # End of the export ABI tier: the ports below are platform-neutral Rust

@@ -309,15 +309,15 @@ fn package_tests_call_vsys_from_a_path_dependency() {
             "host/env.vsys",
             r#"sys library StdEnv (
     target = "@TARGET@", abi = "@ABI@",
-    link = "static", name = "vesper_std_host",
+    link = "dynamic", name = "c",
     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
 ) {
-    fn vstd_proc_id() -> ForeignVal[u64];
+    fn abs(x: i32) -> ForeignVal[i32];
 }"#,
         ),
         (
             "host/src/lib.ves",
-            "pub fn arg_count() -> u64 eff [Ffi[StdEnv]] {\n    if StdEnv::vstd_proc_id() == 0 {\n        0\n    } else {\n        3\n    }\n}",
+            "pub fn arg_count() -> u64 eff [Ffi[StdEnv]] {\n    if StdEnv::abs(-2) == 0 {\n        0\n    } else {\n        3\n    }\n}",
         ),
         (
             "app/src/suite.ves",
@@ -388,7 +388,7 @@ test {
     let source = fs::read_to_string(&descriptor).unwrap();
     fs::write(
         &descriptor,
-        source.replace("vesper_std_host", "unavailable_host"),
+        source.replace("name = \"c\"", "name = \"unavailable_host\""),
     )
     .unwrap();
     let out = vesper(&temp.0, &["test", "app", "--json"]);

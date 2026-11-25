@@ -4,9 +4,7 @@
 //! package's `src/**`, reads every `.ves` file, spawns `cc --version` and
 //! writes its report atomically (tests/driver.rs).
 
-// All three native platforms call libc/kernel32 directly for @vesper-std/fs,
-// env and process; `vesper_std_host` is kept only for `live_handles()` until
-// the crate is retired.
+// @vesper-std/fs, env and process call libc or kernel32 themselves.
 
 /// `driver::run()` and `driver::live_allocations()`.
 // Generated: rustfmt must never reflow it (the build checks it byte for

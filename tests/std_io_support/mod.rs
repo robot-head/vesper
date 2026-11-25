@@ -4,15 +4,17 @@
 //! `.vsys` imports, and run
 //!
 //! * in the JIT with the native optimizer on and off, the imports bound to
-//!   the real host shim (`vesper_std_host::symbols`), and
+//!   the C library's own functions (libc on Unix, kernel32 on Windows), and
 //! * in the evaluator, through the compiler's `ffi_lowering::EvalHost`
 //!   (the host of `vesper run`): it marshals each foreign call's source
 //!   values into the `.vsys` C ABI (driven by the parsed library
 //!   descriptors) and calls the same host functions, so both paths touch
 //!   the real file system.
-//!
-//! Each run must leave no live host handle behind (the leak check).
 #![allow(dead_code)]
+
+/// The Rust oracles' error codes and byte forms (tests/common).
+#[path = "../common/std_io_oracle.rs"]
+pub mod oracle;
 
 use std::{
     fs,
@@ -592,19 +594,14 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
     vec![]
 }
 
-/// Every symbol the three libraries import on this host: the host shim's
-/// and the C library's.
+/// Every symbol the three libraries import on this host: the C library's.
 pub fn symbols() -> Vec<(&'static str, *const u8)> {
-    let mut s = vesper_std_host::symbols();
-    s.extend(libc_symbols());
-    s
+    libc_symbols()
 }
 
-/// Run `entry` in `mode`; panics with the error. Checks that every host
-/// handle the run created was finalized.
+/// Run `entry` in `mode`; panics with the error.
 pub fn run(checked: &ForeignChecked, entry: &str, mode: Mode) -> Value {
-    let before = vesper_std_host::live_handles();
-    let got = match mode {
+    match mode {
         Mode::Jit | Mode::JitNoOpt => checked
             .jit_with_options(entry, &symbols(), mode == Mode::Jit)
             .unwrap_or_else(|e| panic!("{entry} ({mode:?}): {e}")),
@@ -615,13 +612,7 @@ pub fn run(checked: &ForeignChecked, entry: &str, mode: Mode) -> Value {
                 .evaluate(entry, |call| host.call(call))
                 .unwrap_or_else(|e| panic!("{entry} ({mode:?}): {e}"))
         }
-    };
-    assert_eq!(
-        vesper_std_host::live_handles(),
-        before,
-        "{entry} ({mode:?}): live handles [file, dir, command, child]"
-    );
-    got
+    }
 }
 
 /// The u64 an entry returned.

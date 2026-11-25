@@ -6,11 +6,10 @@
 //!
 //! * `check` reports the Bridge lowering's diagnostics at their files.
 //! * `jit`, `run` and `test` bind each foreign symbol to a host function
-//!   (`run` and `test` through the evaluator's host, `ffi_lowering::EvalHost`):
-//!   the standard I/O libraries (`link name = "vesper_std_host"`, the shim in
-//!   crates/vesper-std-host) from the CLI itself, and every other library
+//!   (`run` and `test` through the evaluator's host, `ffi_lowering::EvalHost`)
 //!   from the shared library its link name names (runtime glue gap G5,
-//!   [`host_libraries`]). A library that cannot be loaded, or that lacks a
+//!   [`host_libraries`]); the standard I/O packages import libc or kernel32
+//!   themselves (SH6 lane 13, #1408). A library that cannot be loaded, or that lacks a
 //!   symbol, is refused before any code runs.
 //! * `build` emits the executable's object with the foreign calls lowered
 //!   and links it with each library the object calls (`-l<name>`, found on
@@ -36,7 +35,9 @@ pub struct Command<'a> {
     pub exclusive: bool,
 }
 
-/// The `.vsys` link name of the standard I/O host the CLI links in.
+/// The retired Rust host of the standard I/O libraries. Only the WASI
+/// views of `StdFs` and `StdEnv` (lowered by the wasm backend, never linked)
+/// still carry this link name.
 pub const STD_HOST: &str = "vesper_std_host";
 
 pub fn run(c: Command<'_>) -> Result<(), String> {
@@ -131,17 +132,15 @@ pub(crate) fn eval_host_in(
     ffi_lowering::EvalHost::new(imports, &symbols)
 }
 
-/// The host functions for `imports`: every function of a library linked as
-/// [`STD_HOST`] from the CLI itself, and every function of another library
-/// from the shared library its link name names ([`host_libraries`]), looked
-/// for in `search` first.
+/// The host functions for `imports`: every function of a library from the
+/// shared library its link name names ([`host_libraries`]), looked for in
+/// `search` first.
 fn host_symbols(
     imports: &Imports,
     command: &str,
     search: &[PathBuf],
 ) -> Result<Vec<(String, *const u8)>, String> {
     let mut out = vec![];
-    let std = ffi_lowering::std_host_symbols();
     for (library, _) in imports.libraries() {
         // `@vesper-std/cpu`'s instructions are native code the backend
         // defines; nothing hosts them.
@@ -158,41 +157,25 @@ fn host_symbols(
                 library.name()
             ));
         }
-        if library.link().name() != STD_HOST {
-            let lib = host_libraries::open(library.link().name(), search).map_err(|why| {
+        let lib = host_libraries::open(library.link().name(), search).map_err(|why| {
+            format!(
+                "{command}: library {} links '{}', which could not be loaded ({why}); link it into an executable with `vesper build`",
+                library.name(),
+                library.link().name()
+            )
+        })?;
+        // A function-pointer type has no symbol; `#[link_name]` gives
+        // the C name a function binds to.
+        for f in library.functions().iter().filter(|f| !f.is_indirect()) {
+            let address = lib.symbol(f.link_symbol()).ok_or_else(|| {
                 format!(
-                    "{command}: library {} links '{}', which could not be loaded ({why}); link it into an executable with `vesper build`",
+                    "{command}: {}::{} is not a symbol of {}",
                     library.name(),
-                    library.link().name()
+                    f.link_symbol(),
+                    lib.shown()
                 )
             })?;
-            // A function-pointer type has no symbol; `#[link_name]` gives
-            // the C name a function binds to.
-            for f in library.functions().iter().filter(|f| !f.is_indirect()) {
-                let address = lib.symbol(f.link_symbol()).ok_or_else(|| {
-                    format!(
-                        "{command}: {}::{} is not a symbol of {}",
-                        library.name(),
-                        f.link_symbol(),
-                        lib.shown()
-                    )
-                })?;
-                bind(&mut out, f.link_symbol(), address, command)?;
-            }
-            continue;
-        }
-        for f in library.functions().iter().filter(|f| !f.is_indirect()) {
-            let (name, address) =
-                std.iter()
-                    .find(|(n, _)| *n == f.link_symbol())
-                    .ok_or_else(|| {
-                        format!(
-                            "{command}: {}::{} is not a function of {STD_HOST}",
-                            library.name(),
-                            f.symbol()
-                        )
-                    })?;
-            bind(&mut out, name, *address, command)?;
+            bind(&mut out, f.link_symbol(), address, command)?;
         }
     }
     Ok(out)
