@@ -373,5 +373,71 @@ Rust lines deleted: 0.
 ## Left in lens.rs
 
 - The repaired view of syntax-damaged functions (`repair`, `candidates`,
-  `open_at`), and the semantic-error view.
+  `open_at`; part 5), and the semantic-error view.
 - Member completion (`complete_member`) and `signature`.
+
+# Part 5 (#1828): Lens repair of syntax-damaged source
+
+The repaired view's text and regions in `src/lsp/lens.rs` are ported with
+0 diffs, at 0.92x Rust's time. That covers `repair`, `candidates`,
+`open_at`, `closers`, `apply` and `parses`. Rust stays the default until
+the hybrid wiring part.
+
+## What changed
+
+- `packages/vesper-lsp-features/src/repair.ves` (entry `lsp_lens_repair`)
+  follows the Rust rules:
+  - Each damaged declaration gets its candidate cuts, most specific first:
+    - a statement cut at each enclosing block, innermost first (in an
+      impl, first keeping the later methods)
+    - a header cut at the last complete parameter, keeping the body
+    - a member cut for structs, enums and effects
+  - Each candidate is validated by parsing it alone: the declaration with
+    its patch, and every other damaged declaration blanked. Parses are
+    capped at 64 across all declarations.
+  - The chosen cuts are then applied together, keeping every byte offset.
+  - Region names, cuts, scopes and the unfinished-code span are worked out
+    as in Rust, including Unicode white space after the cut.
+  - Every `Unavailable` reason is reported as in Rust.
+- The tokens and the validating parses come from @vesper/front
+  (`lex_with_limits`, `parse_tokens`). The recovery parse's declarations,
+  sites and diagnostic spans come from the harness, as the checker's facts
+  do for the other entries (@vesper/front's `parse_recovery_tables` is
+  tested separately against Rust).
+- `src/lsp/lens.rs`: `repair_dump`. `src/lsp.rs`: a hidden
+  `lens_repair_for_port` hook.
+- `tests/self_host_lsp_features.rs` adds `lens_repair_matches_rust` and a
+  speed row. The damaged sources are:
+  - Lens's own scenarios: an unfinished member access, `let`, nested
+    block and match arm; a damaged impl method; a broken parameter list;
+    an unfinished struct member
+  - variants of every corpus document: an unfinished `let`, member
+    access, call or `if` at a few statement ends; truncated prefixes; a
+    dropped `)` in the first signature; an unfinished struct member
+
+## Differential
+
+`lens_repair_matches_rust` ran on 1,043 sources with a recovery parse (10
+more have none). Rust repaired 670 of them, with 621 regions. The other
+373 have no repaired view:
+
+| Reason | Sources |
+|---|--:|
+| `repaired_prefix_does_not_parse` | 216 |
+| `opaque_declaration` | 121 |
+| `damaged_function_header` | 34 |
+| `damaged_non_function_context` | 2 |
+
+The Vesper port matched every regions list and repaired text, with 0 diffs.
+
+## Numbers
+
+One repaired view per damaged document, including its validating parses.
+The one-time encode and decode is timed separately and taken off.
+
+| | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| repair, per damaged document | 51.2 µs | 47.4 µs | **0.92x** |
+
+Rust lines deleted: 0.
+

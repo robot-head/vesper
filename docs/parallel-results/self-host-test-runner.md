@@ -137,7 +137,7 @@ None blocked the port. Worth knowing:
 - Expect-error matching (`verify_expect_error` and its outcome text), the
   verdict cache keys and records, the obligation ledger and the reports
   (text and `--json`) of `src/test_runner.rs` and `crates/vesper-test`.
-- Mutant candidates (`collect_mutants_in_fn`) and the mutation report.
+- The mutation report (sites are part 3).
 - Doctest `generate` (the wrapper source of each example; it needs a
   parse of the snippet) and `nominal_expansion` (an AST walk).
 - An end-to-end differential of `vesper test` and `vesper test --mutate`
@@ -173,3 +173,38 @@ tests/common/doctest_extract_words.rs.
 The preflight keeps a running sum of the open groups' outer segments
 instead of Rust's per-token fold over the stack (same value; the depth is
 bounded by `max_nesting` anyway).
+
+## Part 3: mutation sites
+
+`src/test_mutants.rs` is the swap point: `rust_collect` (the
+`collect_source_mutants` / `collect_mutants_in_fn` / `find_operator_span`
+of `src/test_runner.rs`, moved unchanged) gives every mutation site of a
+source outside its tests: arithmetic, comparison, `&&`/`||`, `+=`/`-=`,
+boolean literals and `!`, in top-level functions, impl methods and
+conformance methods. `packages/vesper-test-runner/src/mutants.ves`
+implements it over `@vesper/ast` (`lower_source`) and `@vesper/front`'s
+tokens; the hybrid build installs it (`VESPER_TEST_MUTANTS`). Words:
+tests/common/test_mutants_words.rs.
+
+- **Differential** (tests/self_host_test_mutants.rs): every `.ves` file, the
+  inline sources of the runner's suites, 16 rows (test markers, `test_`
+  names, impls, every operator, comments between operands, a broken
+  function) alone and as three mutants per source; each source with no
+  test names and with every other function named a test. 4,888 sources,
+  9,776 runs, 492,340 sites: **0 diffs**; unoptimized (every 13th) 0 diffs.
+- **Speed**: ABBA best of six, Rust 5.31 s, Vesper 2.56 s, **0.48x** (the
+  Vesper parse to the AST is faster than `parser::parse`).
+- **End to end**: `vesper test FILE --mutate --json` and with
+  `--max-mutants 3` are byte-identical between `vesper` and `vesper-hybrid`.
+
+The sort of the sites (by start, end, replacement) is a stable insertion
+sort; the walk is already close to source order.
+
+## Part 4 (next): the Anvil call graph and hashes
+
+`FunctionGraph::from_module` runs on the assembled package module (renamed
+names, case wrappers), not on a source, so the hybrid cannot swap it yet:
+there is no source at the call site for `@vesper/ast` to parse. The plan is
+a Vesper `FunctionGraph` over the AST of a source (with `@vesper-std/hash`'s
+BLAKE3), checked against `from_module(&parse(source).module)` on the
+corpus, ready for the Stage 2 runner.
