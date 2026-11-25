@@ -69,6 +69,17 @@ _SELF_HOST_CODEGEN = (
     "wasm_backend",
 )
 
+# Name prefixes, after `self_host_`, of the non-codegen differentials that
+# BuildBuddy runs as "Self-host differentials 2" (tag `self_host_part2`): on
+# one runner, three at a time, all of them neared the one-hour limit (#1882).
+# The rest stay in "Self-host differentials". To rebalance, move prefixes
+# here using the per-target times the two checks print.
+_SELF_HOST_PART2 = (
+    "backend_checks",
+    "check",
+    "ir_",
+)
+
 # Bazel's memory reservation for each "Self-host differentials" test.
 _SELF_HOST_MEMORY = "resources:memory:6144"
 
@@ -283,13 +294,17 @@ def vesper_crate(
         # BuildBuddy runs apart from "Test all targets" so no check passes its
         # one-hour limit (#1519). The codegen differentials (_SELF_HOST_CODEGEN)
         # also get `self_host_codegen` and run as "Self-host codegen
-        # differentials"; the rest run as "Self-host differentials".
+        # differentials". Those in _SELF_HOST_PART2 also get `self_host_part2`
+        # and run as "Self-host differentials 2"; the rest run as "Self-host
+        # differentials".
         test_name = label.split("/")[-1]
         self_host = ["self_host"] if test_name.startswith("self_host_") else []
         label_tags = test_tags.get(label, [])
         if self_host and test_name[len("self_host_"):].startswith(_SELF_HOST_CODEGEN):
             self_host.append("self_host_codegen")
-        elif self_host and not [tag for tag in label_tags if tag.startswith("resources:memory:")]:
+        elif self_host and test_name[len("self_host_"):].startswith(_SELF_HOST_PART2):
+            self_host.append("self_host_part2")
+        if self_host and "self_host_codegen" not in self_host and not [tag for tag in label_tags if tag.startswith("resources:memory:")]:
             # Four of these at once outgrew the 22 GB runner: the kernel killed
             # the Bazel server mid-run ("Server terminated abruptly", no JVM
             # error) on main at 2ed400d8 and on #1372. Reserving 6 GiB of the
