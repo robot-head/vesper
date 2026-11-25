@@ -25,7 +25,7 @@ build = "build.rs"
 vesper-port = []
 # Deliberately wrong Vesper builds, one edit per ported module: the port
 # test runs must fail (scripts/test-port-harness.sh asserts which tests do).
-vesper-port-divergent = []
+vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
 object = { version = "=0.37.3", default-features = false, features = ["write_core", "elf", "std", "read_core"] }

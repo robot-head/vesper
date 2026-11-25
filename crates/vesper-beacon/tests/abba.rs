@@ -14,7 +14,7 @@
 
 use std::hint::black_box;
 
-use vesper_bench::{BenchCase, Invocation, RunConfig, analyze_pairs, run_abba};
+use vesper_bench::{analyze_pairs, run_abba, BenchCase, Invocation, RunConfig};
 
 const OPS: u64 = 4096;
 
