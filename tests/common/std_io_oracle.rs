@@ -1,29 +1,10 @@
-//! Retired host-shim crate for `@vesper-std/fs`, `@vesper-std/env`, and
-//! `@vesper-std/process` (#1408).
-//!
-//! All three std packages now call the platform (`libc` on Unix, `kernel32` on
-//! Windows) directly. This crate is kept only for shared test/oracle helpers
-//! (`IoKind`, `error_word`, `os_bytes`, `path_of`, `live_handles`, and the
-//! `vstd_proc_id` fixture symbol) until all test callers migrate.
-
-/// Handle kinds, kept for [`live_handles`] in existing leak tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HandleKind {
-    File = 0,
-    Dir = 1,
-    Command = 2,
-    Child = 3,
-}
-
-/// Live handles of `kind` (always `0` now that the host shims are retired).
-pub fn live(_kind: HandleKind) -> i64 {
-    0
-}
-
-/// Live handles of every kind: `[file, dir, command, child]`.
-pub fn live_handles() -> [i64; 4] {
-    [0, 0, 0, 0]
-}
+//! The Rust side of the `@vesper-std/fs`, `process` and `env` tests: the
+//! `IoError.kind` codes of a `std::io::Error` and the byte forms of paths
+//! and `OsStr`s, as `@vesper-std` reports them. These helpers were the
+//! retired host shim crates/vesper-std-host (SH6 lane 13, #1408); the std
+//! packages now call libc or kernel32 themselves, and only the test oracles
+//! (which stay in Rust) use them.
+#![allow(dead_code)]
 
 /// The error kinds an I/O call reports, as `IoError.kind` in Vesper
 /// (`@vesper-std/fs::error`). Stable numbers: they are part of the ABI.
@@ -117,15 +98,4 @@ pub fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
     {
         s.to_string_lossy().into_owned().into_bytes()
     }
-}
-
-/// Minimal fixture symbol kept for `tests/test_runner_cli.rs`.
-#[unsafe(no_mangle)]
-pub extern "C" fn vstd_proc_id() -> u64 {
-    u64::from(std::process::id())
-}
-
-/// Host fixture symbols for `ForeignChecked::jit`.
-pub fn symbols() -> Vec<(&'static str, *const u8)> {
-    vec![("vstd_proc_id", vstd_proc_id as *const u8)]
 }
