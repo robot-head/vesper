@@ -305,3 +305,184 @@ fn emit_cst_reports_stdout_write_errors() {
     assert_eq!(d.status.code(), h.status.code());
     assert_eq!(d.stderr, h.stderr);
 }
+
+/// The package directories of the corpus: `packages/*` (and their nested
+/// packages) and `crates/*/vesper`.
+fn package_dirs(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        if dir.join("Loom.toml").is_file() && dir.join("src").is_dir() {
+            out.push(dir.to_path_buf());
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        entries.sort();
+        for path in entries {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if path.is_dir() && name != "src" && name != "target" && !name.starts_with('.') {
+                walk(&path, out);
+            }
+        }
+    }
+    let mut dirs = vec![];
+    walk(&root.join("packages"), &mut dirs);
+    if let Ok(crates) = std::fs::read_dir(root.join("crates")) {
+        let mut crates: Vec<_> = crates.flatten().map(|e| e.path()).collect();
+        crates.sort();
+        for c in crates {
+            let v = c.join("vesper");
+            if v.join("Loom.toml").is_file() {
+                dirs.push(v);
+            }
+        }
+    }
+    dirs
+}
+
+/// `emit --emit interface` (interface.ves of modules/driver): the export
+/// of every checkable standalone source and every package of the corpus,
+/// to stdout (and to `-o` for the sources and one package), and the
+/// package-name errors, as the default
+/// compiler prints and writes them.
+#[test]
+fn interface_export_matches_the_default_compiler() {
+    let root = repository();
+    let default = default_compiler();
+    let hybrid = hybrid();
+    let scratch =
+        std::env::temp_dir().join(format!("vesper-driver-interface-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).unwrap();
+    let stride: usize = std::env::var("VESPER_DRIVER_FRONT_STRIDE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    // Sources for the export's edge cases: generics, rows, effects,
+    // projections, named payloads, arrows and escapes in names.
+    let programs: &[(&str, &str)] = &[
+        (
+            "shapes.ves",
+            "struct Pair[T, U] { b: U, a: T }\nenum Shape { Circle(f64), Square(f64), Dot }\nenum Opt2[T] { No, Yes(T) }\nfn area(in s: Shape) -> f64 { match s { Shape::Circle(r) => r, Shape::Square(w) => w, Shape::Dot => 0.0 } }\nfn wrap[T](sink x: T) -> Opt2[T] { Opt2::Yes(x) }\nfn pair(a: i64, b: bool) -> Pair[i64, bool] { Pair { b: b, a: a } }\nfn main() -> i64 { 0 }\n",
+        ),
+        (
+            "effects.ves",
+            "effect Ask[T] { fn ask() -> T; }\nlinear effect Once { fn go() -> i64; }\nfn asks() -> i64 eff [Ask[i64]] { Ask::ask() }\nfn both() -> i64 eff [Ask[bool], Ask[i64], Once] { Once::go() }\nfn main() -> i64 { 0 }\n",
+        ),
+        (
+            "arrows.ves",
+            "fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }\nfn tuple(in t: (i64, bool)) -> () { () }\nfn main() -> i64 { 0 }\n",
+        ),
+    ];
+    let mut inputs: Vec<(String, bool)> = vec![];
+    for (name, text) in programs {
+        let path = scratch.join(name);
+        std::fs::write(&path, text).unwrap();
+        inputs.push((path.display().to_string(), false));
+    }
+    for (i, path) in corpus(&root).into_iter().enumerate() {
+        if i % stride == 0
+            && (path.starts_with(root.join("examples")) || path.starts_with(root.join("tests")))
+        {
+            inputs.push((path.display().to_string(), false));
+        }
+    }
+    for (i, dir) in package_dirs(&root).into_iter().enumerate() {
+        if i % stride == 0 {
+            inputs.push((dir.display().to_string(), true));
+        }
+    }
+    let out = scratch.join("out.json");
+    let mut cases = 0usize;
+    let mut differences = vec![];
+    let first = inputs[0].0.clone();
+    let mut sets: Vec<Vec<String>> = vec![
+        // No package name, and a malformed one.
+        vec![
+            "emit".into(),
+            "--emit".into(),
+            "interface".into(),
+            first.clone(),
+        ],
+        vec![
+            "emit".into(),
+            "--emit".into(),
+            "interface".into(),
+            "--package".into(),
+            "not a name".into(),
+            first.clone(),
+        ],
+        vec![
+            "emit".into(),
+            "--emit".into(),
+            "interface".into(),
+            "--package".into(),
+            "std/core".into(),
+            first.clone(),
+        ],
+    ];
+    let mut package_written = false;
+    for (input, package) in &inputs {
+        let mut args: Vec<String> = vec!["emit".into(), "--emit".into(), "interface".into()];
+        if !package {
+            args.extend(["--package".into(), "@t/x".into()]);
+        }
+        args.push(input.clone());
+        sets.push(args.clone());
+        // `-o` for the standalone sources and the first package only: a
+        // package's check dominates the run.
+        if *package && package_written {
+            continue;
+        }
+        package_written |= *package;
+        let mut to_file = args;
+        to_file.splice(3..3, ["-o".to_string(), out.display().to_string()]);
+        sets.push(to_file);
+    }
+    for args in sets {
+        cases += 1;
+        let (d, dw) = run(&default, &root, &args, &out);
+        let (h, hw) = run(&hybrid, &root, &args, &out);
+        if d.status.code() != h.status.code()
+            || d.stdout != h.stdout
+            || d.stderr != h.stderr
+            || dw != hw
+        {
+            let (a, b) = if d.stdout != h.stdout {
+                (d.stdout.clone(), h.stdout.clone())
+            } else {
+                (
+                    dw.clone().unwrap_or_default(),
+                    hw.clone().unwrap_or_default(),
+                )
+            };
+            let at = a
+                .iter()
+                .zip(&b)
+                .position(|(x, y)| x != y)
+                .unwrap_or(a.len().min(b.len()));
+            let from = at.saturating_sub(200);
+            differences.push(format!(
+                "{args:?}: status {:?}/{:?}\n--- default stderr\n{}\n--- hybrid stderr\n{}\n--- default output at {at}\n{}\n--- hybrid output\n{}",
+                d.status.code(),
+                h.status.code(),
+                String::from_utf8_lossy(&d.stderr),
+                String::from_utf8_lossy(&h.stderr),
+                String::from_utf8_lossy(&a[from..(at + 200).min(a.len())]),
+                String::from_utf8_lossy(&b[from.min(b.len())..(at + 200).min(b.len())]),
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    println!(
+        "interface differential differences={} cases={cases}",
+        differences.len()
+    );
+    assert!(
+        differences.is_empty(),
+        "{} of {cases} cases differ:\n{}",
+        differences.len(),
+        differences.join("\n\n")
+    );
+}
