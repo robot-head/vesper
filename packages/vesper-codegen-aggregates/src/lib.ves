@@ -13,7 +13,10 @@
 // - the drop decisions of src/fip.rs: what each type owns (`needs_drop`,
 //   `may_need_drop`, `elem_needs_drop`, `type_contains_box`) and whether
 //   it gets a drop or equality helper (`type_is_recursive`), and per graph
-//   `seq_drop_plan`, `replace_drops` and `temporary_drops`.
+//   `seq_drop_plan`, `replace_drops` and `temporary_drops`;
+// - `scalar_enums` (#1330): the small enum values and locals kept as
+//   words (`scalar_plan`), and the graph it rewrites with them
+//   (`rewrite_scalar_enums`, entry `scalar_enum_rewrite`).
 //
 // The input is @vesper/place-ir's (names, types, world, program section)
 // and then the `World` facts check-data does not carry
@@ -25,8 +28,10 @@
 // Rust map of the decision functions is one of these tables here.
 
 use @vesper/place-ir::codes::{
+    Lit,
     Op,
     Pat,
+    Tag,
     Term
 };
 use @vesper/check-data::pack_text;
@@ -69,7 +74,11 @@ use @vesper/check-layout::{
     layouts_new
 };
 use @vesper/place-ir::{
+    BlockRow,
+    FnRow,
+    InstRow,
     Program,
+    put_program,
     read_program
 };
 
@@ -4304,24 +4313,41 @@ fn local_shape(in s: Syms, in cl: ChunkSeq[u64], sym: u32) -> u64 {
     }
 }
 
-// The scalar enums of graph `g` (`native_aggregates::scalar_enums` for a
-// top-level graph, with `returns` and `call_words` from the facts), as
-// `enum`, `enumlocal`, `enumcall` and `enumret` lines; nothing when the
-// graph keeps its enums in memory.
-fn scalar_enums(
-    inout e: Env,
-    inout c: Ctx,
-    in p: Program,
-    in g: G,
-    in s: Syms,
-    inout sh: Shapes,
-    inout o: ChunkSeq[u8]
-) {
+// The decisions of `native_aggregates::scalar_enums` for one graph: the
+// shape (+ 1, 0 for none) of each value and local kept as words, and the
+// values of each value's words, ws[wa[v]..wa[v]+words]. Word values from
+// `first` up to `next` are fresh. `ok` is false when the graph keeps none.
+pub struct Plan {
+    ok: bool,
+    cv: ChunkSeq[u64],
+    cl: ChunkSeq[u64],
+    wa: ChunkSeq[u64],
+    ws: ChunkSeq[u64],
+    first: u64,
+    next: u64,
+}
+
+fn plan_none() -> Plan {
+    Plan {
+        ok: false,
+        cv: ChunkSeq::new[u64](),
+        cl: ChunkSeq::new[u64](),
+        wa: ChunkSeq::new[u64](),
+        ws: ChunkSeq::new[u64](),
+        first: 0,
+        next: 0,
+    }
+}
+
+// `native_aggregates::scalar_enums`: which values and locals of graph `g`
+// are kept as words, and their word values (`Plan`).
+fn scalar_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms, inout sh: Shapes)
+    -> Plan {
     let f = p.function(g.fi);
     // Graphs with fip slots or `Box` drops keep the old lowering.
     for i in 0..f.tn {
         if p.op(add(f.ta, i)) != 0 {
-            return;
+            return plan_none();
         }
     }
     // Shapes of values (shape + 1, 0 for none) and the call facts.
@@ -4338,7 +4364,7 @@ fn scalar_enums(
         }
     }
     if !any {
-        return;
+        return plan_none();
     }
     if c.world.box_active {
         for v in 0..g.nv {
@@ -4346,14 +4372,14 @@ fn scalar_enums(
             if t != NONE32 {
                 let d = default_type(inout c.types, t);
                 if mentions_box(in c, d, 0) {
-                    return;
+                    return plan_none();
                 }
             }
         }
         for li in 0..g.lsym.len() {
             let d = default_type(inout c.types, u32_at(in g.lty, li));
             if mentions_box(in c, d, 0) {
-                return;
+                return plan_none();
             }
         }
     }
@@ -4569,7 +4595,7 @@ fn scalar_enums(
         }
     }
     if !kept || (!taken_apart && ret == 0) {
-        return;
+        return plan_none();
     }
     // The words of each value: a constructor's field values, else fresh
     // values after the graph's largest id.
@@ -4600,14 +4626,16 @@ fn scalar_enums(
     if seen {
         next = inc(next);
     }
+    let first = next;
+    let mut wa: ChunkSeq[u64] = filled64(g.nv, 0);
+    let mut ws: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for v in 0..g.nv {
         let shape1 = u64_at(in cv, v);
         if shape1 == 0 {
             continue;
         }
         let k = wrapping_sub(shape1, 1);
-        put(inout o, "enum v");
-        push_decimal(inout o, v);
+        set64(inout wa, v, ws.len());
         let mut variant = NONE32_64;
         let mut data: u64 = 0;
         let db = u32_at(in g.def_b, v);
@@ -4639,13 +4667,52 @@ fn scalar_enums(
                 id = next;
                 next = inc(next);
             }
+            ws.push(id);
+        }
+    }
+    Plan {
+        ok: true,
+        cv: cv,
+        cl: cl,
+        wa: wa,
+        ws: ws,
+        first: first,
+        next: next,
+    }
+}
+
+// The decisions of `scalar_plan` (a top-level graph, with `returns` and
+// `call_words` from the facts) as the `enum`, `enumlocal`, `enumcall` and
+// `enumret` lines of src/native_aggregate_decisions.rs; nothing when the
+// graph keeps its enums in memory.
+fn put_scalar_enums(
+    inout c: Ctx,
+    in p: Program,
+    in g: G,
+    in sh: Shapes,
+    in plan: Plan,
+    inout o: ChunkSeq[u8]
+) {
+    if !plan.ok {
+        return;
+    }
+    for v in 0..g.nv {
+        let shape1 = u64_at(in plan.cv, v);
+        if shape1 == 0 {
+            continue;
+        }
+        let k = wrapping_sub(shape1, 1);
+        put(inout o, "enum v");
+        push_decimal(inout o, v);
+        let a = u64_at(in plan.wa, v);
+        for word in 0..sh.words(k) {
             put(inout o, " v");
-            push_decimal(inout o, id);
+            push_decimal(inout o, u64_at(in plan.ws, add(a, word)));
         }
         o.push(10);
     }
-    for li in 0..nl {
-        if u64_at(in cl, li) != 0 {
+    for li in 0..g.lsym.len() {
+        if u64_at(in plan.cl, li) != 0 {
             put(inout o, "enumlocal ");
             c.names.write(u32_at(in g.lsym, li), inout o);
             o.push(10);
@@ -4656,7 +4723,7 @@ fn scalar_enums(
     let mut called: ChunkSeq[u8] = filled8(g.nv, 0);
     for k in 0..g.ni {
         let inst = p.inst(add(g.i0, k));
-        if (inst.op == Op::Call || inst.op == Op::Seq) && u64_at(in cv, w(inst.dest)) != 0 {
+        if (inst.op == Op::Call || inst.op == Op::Seq) && u64_at(in plan.cv, w(inst.dest)) != 0 {
             set8(inout called, w(inst.dest), 1);
         }
     }
@@ -4671,7 +4738,7 @@ fn scalar_enums(
     for b in 0..g.nb {
         if p.block(add(g.b0, b)).term == Term::Return && u64_at(in g.tn, b) == 1 {
             let v = w(u32_at(in g.tv, u64_at(in g.ta, b)));
-            if u64_at(in cv, v) != 0 {
+            if u64_at(in plan.cv, v) != 0 {
                 set8(inout returned, v, 1);
             }
         }
@@ -5034,7 +5101,8 @@ fn function_decisions(
             }
         }
     }
-    scalar_enums(inout e, inout c, in p, in g, in s, inout sh, inout o);
+    let plan = scalar_plan(inout e, inout c, in p, in g, in s, inout sh);
+    put_scalar_enums(inout c, in p, in g, in sh, in plan, inout o);
     s.reset();
 }
 
@@ -5059,4 +5127,486 @@ pub fn aggregate_decisions(in input: Str) -> ChunkSeq[u64] {
         function_decisions(inout e, inout c, in p, inout s, fi, inout sh, inout o);
     }
     pack_text(in o)
+}
+
+// ----- the scalar-enum rewrite ------------------------------------------------
+//
+// The graph `native_aggregates::scalar_enums` returns, made on the
+// @vesper/place-ir tables: a constructor of a kept value becomes the
+// constants of its tag and unused words, a read of a kept local reads its
+// `$wordN` locals, a binding binds the words, block parameters and jump
+// arguments carry the words, and a `match` tests the tag word with literal
+// arms. The tables only grow: the function row points at a new header and
+// new blocks; an instruction that stays keeps its row's operand words.
+
+fn copy_word(inout p: Program, i: u64) {
+    let x = p.op(i);
+    let t = p.tag(i);
+    p.put(x, t);
+}
+
+// The word of a header's value count (`values_at` of @vesper/bounds-hoist).
+fn values_word(in p: Program, ha: u64) -> u64 {
+    let mut x = ha;
+    let np = p.op(x);
+    x = inc(x);
+    for i in 0..np {
+        let k = p.op(add(x, 2));
+        x = add(add(x, 6), k);
+    }
+    x = add(x, 2);
+    let nb = p.op(x);
+    x = add(inc(x), wrapping_mul(nb, 2));
+    let nc = p.op(x);
+    add(inc(x), nc)
+}
+
+// The local `{n}$word{word}`.
+fn word_local(inout names: Names, n: u32, word: u64) -> u32 {
+    let mut t: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    names.write(n, inout t);
+    put(inout t, "$word");
+    push_decimal(inout t, word);
+    names.intern(in t.as_slice())
+}
+
+// The type of word `word` of shape `k` (`t_u64` for the tag).
+fn word_ty(in sh: Shapes, k: u64, word: u64, t_u64: u32) -> u32 {
+    if word == 0 {
+        t_u64
+    } else {
+        u32_at(in sh.wt, add(u64_at(in sh.wa, k), wrapping_sub(word, 1)))
+    }
+}
+
+// The tag of variant `name` (a constructor's name symbol) of shape `k`, or
+// NONE32_64.
+fn variant_tag(inout c: Ctx, in sh: Shapes, k: u64, name: u32) -> u64 {
+    let short = short_name(inout c.names, name);
+    let v = sh.variant(k, short);
+    if v == NONE32_64 {
+        NONE32_64
+    } else {
+        wrapping_sub(v, u64_at(in sh.va, k))
+    }
+}
+
+// A new instruction row of `inst`'s token over the operands from `a`.
+fn derived_row(inst: InstRow, dest: u64, ty: u32, op: u8, a: u64, n: u64, span: bool) -> InstRow {
+    InstRow {
+        dest: n32(dest),
+        ty: ty,
+        s0: if span {
+            inst.s0
+        } else {
+            0
+        },
+        s1: if span {
+            inst.s1
+        } else {
+            0
+        },
+        has_token: inst.has_token,
+        tin: inst.tin,
+        tout: inst.tout,
+        fallible: 0,
+        op: op,
+        a: a,
+        n: n
+    }
+}
+
+// The word of value `v`, or `v` itself when it is not kept as words.
+fn push_expanded(inout p: Program, in sh: Shapes, in plan: Plan, v: u64, inout n: u64) {
+    let shape1 = u64_at(in plan.cv, v);
+    if shape1 == 0 {
+        p.put(v, Tag::Value);
+        n = inc(n);
+        return;
+    }
+    let k = wrapping_sub(shape1, 1);
+    let a = u64_at(in plan.wa, v);
+    for word in 0..sh.words(k) {
+        p.put(u64_at(in plan.ws, add(a, word)), Tag::Value);
+        n = inc(n);
+    }
+}
+
+// The rewritten instructions of the instruction at program row `ii`.
+fn rewrite_inst(
+    inout c: Ctx,
+    inout p: Program,
+    in sh: Shapes,
+    in plan: Plan,
+    ii: u64,
+    t_u64: u32,
+    t_unit: u32,
+    inout fresh: ChunkSeq[u64],
+    inout next: u64,
+    inout rows: ChunkSeq[InstRow]
+) {
+    let inst = p.inst(ii);
+    let a = inst.a;
+    let dest = w(inst.dest);
+    let dk = u64_at(in plan.cv, dest);
+    if inst.op == Op::Data && dk != 0 {
+        let k = wrapping_sub(dk, 1);
+        let tag = variant_tag(inout c, in sh, k, n32(p.op(a)));
+        let variant = add(u64_at(in sh.va, k), tag);
+        let wa = u64_at(in plan.wa, dest);
+        for word in 0..sh.words(k) {
+            let id = u64_at(in plan.ws, add(wa, word));
+            let ty = word_ty(in sh, k, word, t_u64);
+            let mut lit = Lit::Int;
+            let mut lo: u64 = 0;
+            if word == 0 {
+                lo = tag;
+            } else if sh.word_field(variant, word) != NONE32_64 {
+                continue;
+            } else if c.types.node(ty).name == c.world.k.bool_ {
+                lit = Lit::Bool;
+            }
+            let at = p.ops.len();
+            p.put(lit, Tag::Raw);
+            p.put(lo, Tag::Raw);
+            p.put(0, Tag::Raw);
+            rows.push(derived_row(inst, id, ty, Op::Const, at, 3, false));
+        }
+        return;
+    }
+    if inst.op == Op::Read && dk != 0 {
+        let k = wrapping_sub(dk, 1);
+        let root = n32(p.op(a));
+        let pass = p.op(add(a, 2));
+        let wa = u64_at(in plan.wa, dest);
+        for word in 0..sh.words(k) {
+            let id = u64_at(in plan.ws, add(wa, word));
+            let ty = word_ty(in sh, k, word, t_u64);
+            let local = word_local(inout c.names, root, word);
+            let at = p.ops.len();
+            p.put(w(local), Tag::Name);
+            p.put(0, Tag::Path);
+            p.put(pass, Tag::Raw);
+            p.put(0, Tag::Raw);
+            rows.push(derived_row(inst, id, ty, Op::Read, at, 4, true));
+        }
+        return;
+    }
+    if inst.op == Op::Bind && u64_at(in plan.cv, p.op(a)) != 0 {
+        let value = p.op(a);
+        let k = wrapping_sub(u64_at(in plan.cv, value), 1);
+        let wa = u64_at(in plan.wa, value);
+        let q = inc(a);
+        // The bindings: (name, value, span start, end).
+        let mut bn: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut bv: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut b0: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut b1: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let kind = p.op(q);
+        if kind == Pat::Bind {
+            let n = n32(p.op(add(q, 3)));
+            for word in 0..sh.words(k) {
+                bn.push(word_local(inout c.names, n, word));
+                bv.push(u64_at(in plan.ws, add(wa, word)));
+                b0.push(p.op(inc(q)));
+                b1.push(p.op(add(q, 2)));
+            }
+        } else if kind == Pat::Constructor {
+            let tag = variant_tag(inout c, in sh, k, n32(p.op(add(q, 3))));
+            let variant = add(u64_at(in sh.va, k), tag);
+            let nf = p.op(add(q, 5));
+            let mut at = add(q, 6);
+            for j in 0..nf {
+                let field = n32(p.op(at));
+                let sub = inc(at);
+                if p.op(sub) == Pat::Bind {
+                    let word = sh.field_word(variant, field);
+                    if word != NONE32_64 {
+                        bn.push(n32(p.op(add(sub, 3))));
+                        bv.push(u64_at(in plan.ws, add(wa, word)));
+                        b0.push(p.op(inc(sub)));
+                        b1.push(p.op(add(sub, 2)));
+                    }
+                }
+                at = pattern_end(in p, sub);
+            }
+        }
+        if bn.len() == 0 {
+            rows.push(derived_row(inst, dest, inst.ty, Op::Unit, p.ops.len(), 0, false));
+            return;
+        }
+        for j in 0..bn.len() {
+            let d = if j == 0 {
+                dest
+            } else {
+                let x = next;
+                next = inc(next);
+                fresh.push(x);
+                x
+            };
+            let at = p.ops.len();
+            p.put(u64_at(in bv, j), Tag::Value);
+            p.put(Pat::Bind, Tag::Raw);
+            p.put(u64_at(in b0, j), Tag::Raw);
+            p.put(u64_at(in b1, j), Tag::Raw);
+            p.put(w(u32_at(in bn, j)), Tag::Name);
+            rows.push(derived_row(inst, d, inst.ty, Op::Bind, at, 5, true));
+        }
+        return;
+    }
+    rows.push(inst);
+}
+
+// The rewrite of graph `g` by `plan` (`scalar_enums`' new `FunctionIr`).
+fn rewrite_scalar_enums(
+    inout c: Ctx,
+    inout p: Program,
+    in g: G,
+    in s: Syms,
+    in sh: Shapes,
+    in plan: Plan
+) {
+    if !plan.ok {
+        return;
+    }
+    let fr = p.function(g.fi);
+    let s_u64 = c.names.intern(in "u64".as_bytes());
+    let t_u64 = c.types.named0(s_u64);
+    let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let t_unit = c.types.tuple(in none);
+    let mut next = plan.next;
+    let mut fresh: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut blocks: ChunkSeq[BlockRow] = ChunkSeq::new[BlockRow]();
+    let mut rows: ChunkSeq[InstRow] = ChunkSeq::new[InstRow]();
+    for b in 0..fr.bc {
+        let bk = p.block(add(fr.b0, b));
+        rows.clear();
+        for i in 0..bk.ic {
+            rewrite_inst(
+                inout c,
+                inout p,
+                in sh,
+                in plan,
+                add(bk.i0, i),
+                t_u64,
+                t_unit,
+                inout fresh,
+                inout next,
+                inout rows
+            );
+        }
+        let i0 = p.insts.len();
+        for i in 0..rows.len() {
+            let row = match rows.try_get(i) {
+                Option::Some(x) => x,
+                Option::None => p.inst(0),
+            };
+            p.insts.push(row);
+        }
+        // The header: tokens as they are, then the parameters' words.
+        let ha = p.ops.len();
+        let ni = p.op(inc(bk.ha));
+        let po = add(add(bk.ha, 2), wrapping_mul(ni, 2));
+        for x in bk.ha..inc(po) {
+            copy_word(inout p, x);
+        }
+        let np_at = p.ops.len();
+        p.put(0, Tag::Raw);
+        let mut np: u64 = 0;
+        for j in 0..p.op(inc(po)) {
+            let v = p.op(add(add(po, 2), j));
+            push_expanded(inout p, in sh, in plan, v, inout np);
+        }
+        let ok = p.ops.try_set(np_at, np);
+        let hn = wrapping_sub(p.ops.len(), ha);
+        let mut ta = bk.ta;
+        let mut tn = bk.tn;
+        if bk.term == Term::Jump {
+            ta = p.ops.len();
+            copy_word(inout p, bk.ta);
+            let n_at = p.ops.len();
+            p.put(0, Tag::Raw);
+            let mut n: u64 = 0;
+            for j in 0..p.op(inc(bk.ta)) {
+                let v = p.op(add(add(bk.ta, 2), j));
+                push_expanded(inout p, in sh, in plan, v, inout n);
+            }
+            let ok2 = p.ops.try_set(n_at, n);
+            tn = wrapping_sub(p.ops.len(), ta);
+        } else if bk.term == Term::Match && u64_at(in plan.cv, p.op(bk.ta)) != 0 {
+            let v = p.op(bk.ta);
+            let k = wrapping_sub(u64_at(in plan.cv, v), 1);
+            let arms = p.op(inc(bk.ta));
+            ta = p.ops.len();
+            p.put(u64_at(in plan.ws, u64_at(in plan.wa, v)), Tag::Value);
+            p.put(arms, Tag::Raw);
+            let mut q = add(bk.ta, 2);
+            for j in 0..arms {
+                let s0 = p.op(inc(q));
+                let s1 = p.op(add(q, 2));
+                if p.op(q) == Pat::Constructor && inc(j) != arms {
+                    let mut tag = variant_tag(inout c, in sh, k, n32(p.op(add(q, 3))));
+                    if tag == NONE32_64 {
+                        tag = 0;
+                    }
+                    p.put(Pat::Literal, Tag::Raw);
+                    p.put(s0, Tag::Raw);
+                    p.put(s1, Tag::Raw);
+                    p.put(Lit::Int, Tag::Raw);
+                    p.put(tag, Tag::Raw);
+                    p.put(0, Tag::Raw);
+                } else {
+                    p.put(Pat::Wild, Tag::Raw);
+                    p.put(s0, Tag::Raw);
+                    p.put(s1, Tag::Raw);
+                }
+                q = pattern_end(in p, q);
+                copy_word(inout p, q);
+                q = inc(q);
+            }
+            tn = wrapping_sub(p.ops.len(), ta);
+        }
+        blocks
+            .push(
+                BlockRow {
+                    ha: ha,
+                    hn: hn,
+                    i0: i0,
+                    ic: rows.len(),
+                    term: bk.term,
+                    ta: ta,
+                    tn: tn
+                }
+            );
+    }
+    let b0 = p.blocks.len();
+    for i in 0..blocks.len() {
+        let row = match blocks.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => p.block(0),
+        };
+        p.blocks.push(row);
+    }
+    // The header: as it was up to the value table, which gains the fresh
+    // words and bindings; the kept locals become their `$wordN` locals.
+    let vw = values_word(in p, fr.ha);
+    let ha = p.ops.len();
+    for x in fr.ha..vw {
+        copy_word(inout p, x);
+    }
+    let vn = p.op(vw);
+    let mut nfresh: u64 = 0;
+    for v in 0..g.nv {
+        let shape1 = u64_at(in plan.cv, v);
+        if shape1 != 0 {
+            let k = wrapping_sub(shape1, 1);
+            for word in 0..sh.words(k) {
+                if u64_at(in plan.ws, add(u64_at(in plan.wa, v), word)) >= plan.first {
+                    nfresh = inc(nfresh);
+                }
+            }
+        }
+    }
+    p.put(add(add(vn, nfresh), fresh.len()), Tag::Raw);
+    for i in 0..wrapping_mul(vn, 2) {
+        copy_word(inout p, add(inc(vw), i));
+    }
+    for v in 0..g.nv {
+        let shape1 = u64_at(in plan.cv, v);
+        if shape1 != 0 {
+            let k = wrapping_sub(shape1, 1);
+            for word in 0..sh.words(k) {
+                let id = u64_at(in plan.ws, add(u64_at(in plan.wa, v), word));
+                if id >= plan.first {
+                    p.put(id, Tag::Value);
+                    p.put(w(word_ty(in sh, k, word, t_u64)), Tag::Type);
+                }
+            }
+        }
+    }
+    for i in 0..fresh.len() {
+        p.put(u64_at(in fresh, i), Tag::Value);
+        p.put(w(t_unit), Tag::Type);
+    }
+    let lw = add(inc(vw), wrapping_mul(vn, 2));
+    let nl = p.op(lw);
+    let nl_at = p.ops.len();
+    p.put(0, Tag::Raw);
+    let mut count: u64 = 0;
+    for i in 0..nl {
+        let at = add(inc(lw), wrapping_mul(i, 2));
+        let li = s.local_of(n32(p.op(at)));
+        if li != NONE32_64 && u64_at(in plan.cl, li) != 0 {
+            continue;
+        }
+        copy_word(inout p, at);
+        copy_word(inout p, inc(at));
+        count = inc(count);
+    }
+    for li in 0..g.lsym.len() {
+        let shape1 = u64_at(in plan.cl, li);
+        if shape1 != 0 {
+            let k = wrapping_sub(shape1, 1);
+            for word in 0..sh.words(k) {
+                let local = word_local(inout c.names, u32_at(in g.lsym, li), word);
+                p.put(w(local), Tag::Name);
+                p.put(w(word_ty(in sh, k, word, t_u64)), Tag::Type);
+                count = inc(count);
+            }
+        }
+    }
+    let ok = p.ops.try_set(nl_at, count);
+    let hn = wrapping_sub(p.ops.len(), ha);
+    let ok2 = p
+        .fns
+        .try_set(
+            g.fi,
+            FnRow {
+                name: fr.name,
+                ha: ha,
+                hn: hn,
+                b0: b0,
+                bc: fr.bc,
+                ta: fr.ta,
+                tn: fr.tn
+            }
+        );
+}
+
+// The harness entry of the rewrite (tests/self_host_codegen_aggregates.rs):
+// the indices of the graphs left to Rust (wide integers), then the program
+// with every other graph rewritten by `rewrite_scalar_enums`, written by
+// `put_program`.
+pub fn scalar_enum_rewrite(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let mut p = read_program(inout r, in b, in c);
+    let mut e = read_env(inout r, in b, inout c.names, p.fn_count());
+    let mut s = syms_new();
+    let mut sh = shapes_new();
+    let mut wide: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for fi in 0..p.fn_count() {
+        let name = p.function(fi).name;
+        if (e.fn_bits(name) & FN_FIP) != 0 {
+            continue;
+        }
+        let g = graph_of(in p, inout c, inout s, fi);
+        if graph_wide(inout e, in c, in g) {
+            wide.push(fi);
+        } else {
+            let plan = scalar_plan(inout e, inout c, in p, in g, in s, inout sh);
+            rewrite_scalar_enums(inout c, inout p, in g, in s, in sh, in plan);
+        }
+        s.reset();
+    }
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    o.push(wide.len());
+    for i in 0..wide.len() {
+        o.push(u64_at(in wide, i));
+    }
+    put_program(in p, in c.types, in c.names, inout o);
+    o
 }

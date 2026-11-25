@@ -77,7 +77,7 @@ Base: `main` at `907e9782`, rebased after #1871 and #1870.
 
 ### What changed
 
-- **`crates/vesper-hybrid/src/swaps.rs`**: the table of the hybrid's 36
+- **`crates/vesper-hybrid/src/swaps.rs`**: the table of the hybrid's 37
   swaps, each with its flip-gate verdict (`pass(config, PR)` or
   `open(why)`), and `VESPER_HYBRID_SWAPS`:
   - `all` (the default, unchanged behaviour): every swap;

@@ -64,6 +64,7 @@ pub(crate) const SWAPS: &[Swap] = &[
     open("effects", "0.28x; no flip-gate configuration"),
     open("fip", "0.92x; no flip-gate configuration"),
     open("aggregate", "0 diffs; no flip-gate configuration"),
+    open("drops", "0 diffs; no flip-gate configuration"),
     open("call", "0 diffs; no flip-gate configuration"),
     open("wasm", "0 diffs; no flip-gate configuration"),
     open("ebpf", "0.93-1.10x; no flip-gate configuration"),
