@@ -9,7 +9,7 @@
 //!   release compiler: every block read every value of the graph, and blocks
 //!   stayed unsealed until the end, so each got a parameter per value);
 //! - the BLAKE3 compression written straight-line over 16 `u32` locals, as
-//!   `packages/vesper-std/hash/gen/blake3_gen.py --straight-line` writes it,
+//!   `aspect maintenance gen-blake3 -- OUTPUT --straight-line` writes it,
 //!   with and without the state stored to the output slice and reloaded
 //!   after every half round (the "spill" shape, 18 s with `--no-opt`);
 //! - the same function's optimized code, which rebuilt the values shared

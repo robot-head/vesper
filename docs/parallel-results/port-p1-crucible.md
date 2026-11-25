@@ -150,7 +150,7 @@ binding module only (Grammar and Beacon do the same).
 
 ## Benchmarks
 
-Measured with `crates/vesper-crucible/bench-abba.sh 11 20`: release builds,
+Measured with `aspect crate crucible bench-abba 11 20`: release builds,
 11 ABBA epochs, 20 timed runs per measurement after 5 warm-up runs. The
 machine was a 4-core x86_64 cloud container, Linux 6.18, on 2026-11-18, and
 the compiler was the debug `vesper` built from this branch. The figures are

@@ -133,6 +133,20 @@ pub(crate) fn parse_expansion_scopes(
     )
 }
 
+/// The CST and diagnostics of [`parse_expansion_scopes`] without its
+/// expression macro validation (`macro_source::validate_surface`): what
+/// the self-hosted surface profile (`@vesper/front`'s
+/// `parse_surface_tables`) reproduces. Test hook for
+/// tests/self_host_front_v2.rs; nothing else calls it.
+#[doc(hidden)]
+pub fn parse_surface_cst(
+    source: &str,
+    limits: ParseLimits,
+    include_tests: bool,
+) -> Result<Parse, lexer::LexLimit> {
+    parse_module_profile(source, limits, include_tests, true, None, false)
+}
+
 /// Parse a surface module with a separate resource budget for validating
 /// fixed-profile expression macros. Pure sugar and core modules do not consume it.
 pub fn parse_surface_with_macro_limits(

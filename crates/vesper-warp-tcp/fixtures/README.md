@@ -5,10 +5,10 @@ timestamps) of eight **hand-constructed** packets. Nothing here was captured
 from a real network or a real TCP stack, so it shows nothing about
 interoperability.
 
-`gen_fixtures.py` builds the file using only the Python standard library.
+The Aspect task writes the pcap directly.
 It computes the IPv4 header checksums and the TCP checksums over the IPv4/IPv6
 pseudo-headers with its own RFC 1071 one's-complement routine, separate from
-the Rust code under test. Run `python3 gen_fixtures.py` to regenerate it; the
+the Rust code under test. Run `aspect crate warp-tcp gen-fixtures` to regenerate it; the
 output is deterministic.
 
 | # | Family | Segment | What it covers |

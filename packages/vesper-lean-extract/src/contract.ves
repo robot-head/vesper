@@ -1,0 +1,806 @@
+// `contracts` (src/lean.rs): `requires_f(params) -> bool` and
+// `ensures_f(params, result, inouts) -> bool` become `f$contract : Prop`
+// (partial correctness over the total form) and `f$admissible : Prop`.
+//
+// The input's contract section lists, per function `f` with `ensures_f`
+// (name order), `f`, `requires_f` (or NONE) and `ensures_f`, each with its
+// generics (name, mode bound, row flag); the rest is the AST section.
+
+use @vesper/check-data::input::{
+    Reader
+};
+use @vesper/check-data::types::{
+    Types,
+    TyPass,
+    substitute,
+    vars_new
+};
+use @vesper/check-data::util::{
+    add,
+    inc,
+    u32_at,
+    u64_at,
+    w
+};
+use self::ast::{
+    SrcFn
+};
+use self::build::{
+    B,
+    B_EXPLICIT,
+    D_DEF,
+    K_DEF,
+    OP_EQ,
+    T,
+    T_ARROW,
+    T_BOOL,
+    T_FORALL
+};
+use self::gen::{
+    Y,
+    inferred
+};
+use self::tm::{
+    app,
+    app1,
+    app_args,
+    ascribe,
+    empty,
+    explicit,
+    field,
+    get,
+    global,
+    global2,
+    lambda,
+    lref,
+    named,
+    named_arg,
+    named_arg_sym,
+    pos,
+    product,
+    record,
+    sref,
+    tuple_get
+};
+use self::ty::{
+    emit_ty,
+    spells,
+    ty_check
+};
+
+const NONE: u64 = 18446744073709551615;
+const NONE32: u32 = 4294967295;
+
+pub copy struct Gen {
+    name: u32,
+    bound: u64,
+    row: bool,
+}
+
+pub copy struct Contract {
+    f: u32,
+    requires: u32,
+    ensures: u32,
+    // generics of f, requires and ensures: gens[..]
+    fa: u64,
+    fz: u64,
+    ra: u64,
+    rz: u64,
+    ea: u64,
+    ez: u64,
+}
+
+pub struct Contracts {
+    list: ChunkSeq[Contract],
+    gens: ChunkSeq[Gen],
+}
+
+fn read_gens(
+    inout r: Reader,
+    in bytes: Slice[u8],
+    in nmap: ChunkSeq[u32],
+    inout gens: ChunkSeq[Gen]
+) {
+    let n = r.word(in bytes);
+    for i in 0..n {
+        let name = u32_at(in nmap, r.word(in bytes));
+        let bound = r.word(in bytes);
+        let row = r.word(in bytes) != 0;
+        gens
+            .push(
+                Gen {
+                    name: name,
+                    bound: bound,
+                    row: row
+                }
+            );
+    }
+}
+
+pub fn read_contracts(inout r: Reader, in bytes: Slice[u8], in nmap: ChunkSeq[u32]) -> Contracts {
+    let mut cs = Contracts {
+        list: ChunkSeq::new[Contract](),
+        gens: ChunkSeq::new[Gen](),
+    };
+    let n = r.word(in bytes);
+    for i in 0..n {
+        let f = u32_at(in nmap, r.word(in bytes));
+        let rw = r.word(in bytes);
+        let requires = if rw == NONE {
+            NONE32
+        } else {
+            u32_at(in nmap, rw)
+        };
+        let ensures = u32_at(in nmap, r.word(in bytes));
+        let fa = cs.gens.len();
+        read_gens(inout r, in bytes, in nmap, inout cs.gens);
+        let ra = cs.gens.len();
+        if requires != NONE32 {
+            read_gens(inout r, in bytes, in nmap, inout cs.gens);
+        }
+        let ea = cs.gens.len();
+        read_gens(inout r, in bytes, in nmap, inout cs.gens);
+        let ez = cs.gens.len();
+        cs
+            .list
+            .push(
+                Contract {
+                    f: f,
+                    requires: requires,
+                    ensures: ensures,
+                    fa: fa,
+                    fz: ra,
+                    ra: ra,
+                    rz: ea,
+                    ea: ea,
+                    ez: ez
+                }
+            );
+    }
+    cs
+}
+
+fn gen_at(in cs: Contracts, i: u64) -> Gen {
+    match cs.gens.try_get(i) {
+        Option::Some(g) => g,
+        Option::None => Gen {
+            name: 0,
+            bound: 0,
+            row: false
+        },
+    }
+}
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+// `ContractError` text into `err`.
+fn predicate_error(inout b: B, inout err: ChunkSeq[u8], p: u32, in reason: Str) {
+    put(inout err, in "contract predicate for '");
+    b.names.write(p, inout err);
+    put(inout err, in "': ");
+    put(inout err, in reason);
+}
+
+fn signature_error(
+    inout b: B,
+    inout err: ChunkSeq[u8],
+    f: u32,
+    p: u32,
+    in reason: Str,
+    n: u64,
+    in tail: Str
+) {
+    put(inout err, in "contract signature for '");
+    b.names.write(f, inout err);
+    put(inout err, in "': '");
+    b.names.write(p, inout err);
+    put(inout err, in reason);
+    if n != NONE {
+        let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let mut v = n;
+        loop {
+            digits.push(wrapping_add(48, wrapping_u8(v % 10)));
+            v = v / 10;
+            if v == 0 {
+                break;
+            }
+        }
+        let mut k = digits.len();
+        loop {
+            if k == 0 {
+                break;
+            }
+            k = wrapping_sub(k, 1);
+            err
+                .push(
+                    match digits.try_get(k) {
+                        Option::Some(c) => c,
+                        Option::None => 48,
+                    }
+                );
+        }
+        put(inout err, in " parameter(s) of the function's types");
+        put(inout err, in tail);
+    }
+}
+
+fn unsupported_prefix(inout b: B, inout err: ChunkSeq[u8], f: u32) {
+    put(inout err, in "contract for '");
+    b.names.write(f, inout err);
+    put(inout err, in "' is unsupported: ");
+}
+
+fn unsupported(inout b: B, inout err: ChunkSeq[u8], f: u32, in reason: Str) {
+    unsupported_prefix(inout b, inout err, f);
+    put(inout err, in reason);
+}
+
+// An internal (`Unsupported`) error from the builder's first failure.
+fn internal(inout b: B, inout err: ChunkSeq[u8], f: u32) -> bool {
+    if !b.failed {
+        return false;
+    }
+    unsupported_prefix(inout b, inout err, f);
+    err.extend(in b.err.as_slice());
+    true
+}
+
+fn effectful(in t: Types, x: SrcFn) -> bool {
+    let row = t.row(t.node(x.row).r2);
+    row.n > 0 || row.tail != 0
+}
+
+// `ty_with_fip(t, fip_active)`.
+fn ty(inout b: B, in t: Types, in y: Y, ty: u32) -> T {
+    let m = b.at();
+    ty_check(inout b, in t, ty, y.fip);
+    emit_ty(inout b, in t, ty, y.fip);
+    b.since(m)
+}
+
+fn forall(inout b: B, in binders: ChunkSeq[T], body: T) -> T {
+    let m = b.at();
+    b.w(T_FORALL);
+    b.w(binders.len());
+    for i in 0..binders.len() {
+        b.put(get(in binders, i));
+    }
+    b.put(body);
+    b.since(m)
+}
+
+fn arrow_t(inout b: B, x: T, z: T) -> T {
+    let m = b.at();
+    b.w(T_ARROW);
+    b.put(x);
+    b.put(z);
+    b.since(m)
+}
+
+fn eq(inout b: B, x: T, z: T) -> T {
+    let m = b.at();
+    b.w(21);
+    b.w(OP_EQ);
+    b.put(x);
+    b.put(z);
+    b.since(m)
+}
+
+fn true_t(inout b: B) -> T {
+    let m = b.at();
+    b.w(T_BOOL);
+    b.w(1);
+    b.since(m)
+}
+
+// `holds(predicate, extra)`: `predicate (generics := ...) args extra = true`.
+fn holds(
+    inout b: B,
+    in cs: Contracts,
+    pa: u64,
+    pz: u64,
+    fa: u64,
+    p: u32,
+    in args: ChunkSeq[T],
+    in extra: ChunkSeq[T]
+) -> T {
+    let mut arguments = empty();
+    let n = wrapping_sub(pz, pa);
+    for i in 0..n {
+        let pg = gen_at(in cs, add(pa, i));
+        let fg = gen_at(in cs, add(fa, i));
+        b.check(pg.name, in "identifier");
+        let v = sref(inout b, fg.name);
+        let na = named_arg_sym(inout b, pg.name, v);
+        arguments.push(na);
+    }
+    for i in 0..args.len() {
+        let x = pos(inout b, get(in args, i));
+        arguments.push(x);
+    }
+    for i in 0..extra.len() {
+        let x = pos(inout b, get(in extra, i));
+        arguments.push(x);
+    }
+    let f = sref(inout b, p);
+    let call = app_args(inout b, f, in arguments);
+    let tr = true_t(inout b);
+    eq(inout b, call, tr)
+}
+
+// The contract definitions (two per contract, as declarations without the
+// module) into `cw`, their function names into `names`. False with the
+// error text in `err` when one fails.
+pub fn contracts(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    in cs: Contracts,
+    in status: ChunkSeq[u64],
+    in reasons: ChunkSeq[u8],
+    in ra: ChunkSeq[u64],
+    in rz: ChunkSeq[u64],
+    inout cw: ChunkSeq[u64],
+    inout names: ChunkSeq[u32],
+    inout err: ChunkSeq[u8]
+) -> bool {
+    let bs = b.intern(in "bool");
+    let bool_ty = t.named0(bs);
+    for ci in 0..cs.list.len() {
+        let c = match cs.list.try_get(ci) {
+            Option::Some(x) => x,
+            Option::None => break,
+        };
+        let fi = y.a.fn_index(c.f);
+        let f = y.a.function(fi);
+        let ei = y.a.fn_index(c.ensures);
+        let ens = y.a.function(ei);
+        let mut ri = NONE;
+        if c.requires != NONE32 {
+            ri = y.a.fn_index(c.requires);
+        }
+        // the predicates
+        for k in 0..2 {
+            let pi = if k == 0 {
+                ri
+            } else {
+                ei
+            };
+            let pa = if k == 0 {
+                c.ra
+            } else {
+                c.ea
+            };
+            let pz = if k == 0 {
+                c.rz
+            } else {
+                c.ez
+            };
+            if pi != NONE {
+                let p = y.a.function(pi);
+                let mut row = false;
+                for i in pa..pz {
+                    if gen_at(in cs, i).row {
+                        row = true;
+                    }
+                }
+                let mut inout_param = false;
+                for i in 0..p.pn {
+                    if y.a.param_pass(p, i) == TyPass::Inout {
+                        inout_param = true;
+                    }
+                }
+                let reason = if effectful(in t, p) {
+                    "it must have no effects"
+                } else if row {
+                    "it must not have row parameters"
+                } else if p.result != bool_ty {
+                    "it must return bool"
+                } else if inout_param {
+                    "it must not take inout parameters"
+                } else if u64_at(in status, pi) != 0 {
+                    "it must not be recursive"
+                } else {
+                    ""
+                };
+                if reason.len() > 0 {
+                    predicate_error(inout b, inout err, p.name, in reason);
+                    return false;
+                }
+            }
+        }
+        let mut frow = false;
+        for i in c.fa..c.fz {
+            if gen_at(in cs, i).row {
+                frow = true;
+            }
+        }
+        if frow {
+            unsupported(
+                inout b,
+                inout err,
+                c.f,
+                in "row-polymorphic functions have no contract proposition"
+            );
+            return false;
+        }
+        // the signatures
+        let mut types: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in 0..f.pn {
+            types.push(y.a.param_ty(f, i));
+        }
+        for k in 0..2 {
+            let pi = if k == 0 {
+                ri
+            } else {
+                ei
+            };
+            let pa = if k == 0 {
+                c.ra
+            } else {
+                c.ea
+            };
+            let pz = if k == 0 {
+                c.rz
+            } else {
+                c.ez
+            };
+            if pi != NONE {
+                let p = y.a.function(pi);
+                let mut expected: ChunkSeq[u32] = ChunkSeq::new[u32]();
+                for i in 0..types.len() {
+                    expected.push(u32_at(in types, i));
+                }
+                if k == 1 {
+                    expected.push(f.result);
+                    for i in 0..f.pn {
+                        if y.a.param_pass(f, i) == TyPass::Inout {
+                            expected.push(y.a.param_ty(f, i));
+                        }
+                    }
+                }
+                let ng = wrapping_sub(pz, pa);
+                let fg = wrapping_sub(c.fz, c.fa);
+                let mut same = ng == fg;
+                if same {
+                    for i in 0..ng {
+                        if gen_at(in cs, add(pa, i)).bound != gen_at(in cs, add(c.fa, i)).bound {
+                            same = false;
+                        }
+                    }
+                }
+                if !same {
+                    signature_error(
+                        inout b,
+                        inout err,
+                        c.f,
+                        p.name,
+                        in "' must have the function's type parameters and mode bounds in order",
+                        NONE,
+                        in ""
+                    );
+                    return false;
+                }
+                let mut vars = vars_new();
+                for i in 0..ng {
+                    let fgn = gen_at(in cs, add(c.fa, i)).name;
+                    let ft = t.named0(fgn);
+                    vars.set(gen_at(in cs, add(pa, i)).name, ft);
+                }
+                let mut ok = p.pn == expected.len();
+                if ok {
+                    for i in 0..p.pn {
+                        let actual = substitute(inout t, y.a.param_ty(p, i), in vars);
+                        if actual != u32_at(in expected, i) {
+                            ok = false;
+                        }
+                    }
+                }
+                if !ok {
+                    let tail = if k == 1 {
+                        " followed by its result and final inout values in parameter order"
+                    } else {
+                        ""
+                    };
+                    signature_error(
+                        inout b,
+                        inout err,
+                        c.f,
+                        p.name,
+                        in "' must take ",
+                        expected.len(),
+                        in tail
+                    );
+                    return false;
+                }
+            }
+        }
+        // the model monad's failures
+        b.words.clear();
+        b.failed = false;
+        b.err.clear();
+        b.quiet = 0;
+        let frow_node = t.row(t.node(f.row).r2);
+        if frow_node.tail != 0 {
+            unsupported(inout b, inout err, c.f, in "open effect rows have no model monad");
+            return false;
+        }
+        let mut all_fail = true;
+        for i in 0..w(frow_node.n) {
+            let e = t.effect_at(add(w(frow_node.a), i));
+            if !spells(in b, e.name, in "Fail") || e.n != 1 {
+                all_fail = false;
+            }
+        }
+        if !all_fail {
+            unsupported(
+                inout b,
+                inout err,
+                c.f,
+                in "only pure and Fail[E] functions have a model monad"
+            );
+            return false;
+        }
+        let mut failures = empty();
+        for i in 0..w(frow_node.n) {
+            let e = t.effect_at(add(w(frow_node.a), i));
+            let a0 = u32_at(in t.items, w(e.a));
+            let ft = ty(inout b, in t, in y, a0);
+            failures.push(ft);
+        }
+        if internal(inout b, inout err, c.f) {
+            return false;
+        }
+        // a right-associated sum
+        let nfail = failures.len();
+        let mut fail = T {
+            a: 0,
+            n: 0
+        };
+        if nfail > 0 {
+            fail = get(in failures, wrapping_sub(nfail, 1));
+            let mut k = wrapping_sub(nfail, 1);
+            loop {
+                if k == 0 {
+                    break;
+                }
+                k = wrapping_sub(k, 1);
+                let sum = global(inout b, in "Sum");
+                let mut xs = empty();
+                xs.push(get(in failures, k));
+                xs.push(fail);
+                fail = app(inout b, sum, in xs);
+            }
+        }
+        let st = u64_at(in status, fi);
+        let fuel = st == 1;
+        if st == 2 {
+            unsupported_prefix(inout b, inout err, c.f);
+            put(inout err, in "it has no total form: ");
+            for q in u64_at(in ra, fi)..u64_at(in rz, fi) {
+                err
+                    .push(
+                        match reasons.try_get(q) {
+                            Option::Some(ch) => ch,
+                            Option::None => 0,
+                        }
+                    );
+            }
+            return false;
+        }
+        // binders and arguments
+        let mut binders = empty();
+        for i in c.fa..c.fz {
+            let g = gen_at(in cs, i);
+            b.check(g.name, in "identifier");
+            let m = b.at();
+            b.type0();
+            let t0 = b.since(m);
+            let bd = explicit(inout b, g.name, t0);
+            binders.push(bd);
+        }
+        let mut args = empty();
+        for i in 0..f.pn {
+            let an = b.joined(in "", y.a.param_name(f, i), in "$arg");
+            b.check(an, in "identifier");
+            let pt = ty(inout b, in t, in y, y.a.param_ty(f, i));
+            let bd = explicit(inout b, an, pt);
+            binders.push(bd);
+            let r = lref(inout b, an);
+            args.push(r);
+        }
+        let result = b.intern(in "$result");
+        let mut outputs = empty();
+        let r0 = ty(inout b, in t, in y, f.result);
+        outputs.push(r0);
+        for i in 0..f.pn {
+            if y.a.param_pass(f, i) == TyPass::Inout {
+                let pt = ty(inout b, in t, in y, y.a.param_ty(f, i));
+                outputs.push(pt);
+            }
+        }
+        let output_count = outputs.len();
+        let result_ty = product(inout b, in outputs);
+        // the model monad
+        let has_model = nfail > 0 || fuel;
+        let mut model = T {
+            a: 0,
+            n: 0
+        };
+        if nfail == 0 && fuel {
+            model = global(inout b, in "Option");
+        } else if nfail > 0 && !fuel {
+            let ex = global(inout b, in "Except");
+            model = app1(inout b, ex, fail);
+        } else if nfail > 0 {
+            let et = global(inout b, in "ExceptT");
+            let op = global(inout b, in "Option");
+            let mut xs = empty();
+            xs.push(fail);
+            xs.push(op);
+            model = app(inout b, et, in xs);
+        }
+        let mut call_args = empty();
+        for i in c.fa..c.fz {
+            let g = gen_at(in cs, i);
+            b.check(g.name, in "identifier");
+            let v = sref(inout b, g.name);
+            let na = named_arg_sym(inout b, g.name, v);
+            call_args.push(na);
+        }
+        if has_model {
+            let na = named_arg(inout b, in "m", model);
+            call_args.push(na);
+        }
+        if nfail > 1 {
+            for index in 0..nfail {
+                let mut error = named(inout b, in "$error");
+                if inc(index) < nfail {
+                    let inl = global2(inout b, in "Sum", in "inl");
+                    error = app1(inout b, inl, error);
+                }
+                for k in 0..index {
+                    let inr = global2(inout b, in "Sum", in "inr");
+                    error = app1(inout b, inr, error);
+                }
+                let error2 = ascribe(inout b, error, fail);
+                let throw = global2(inout b, in "MonadExcept", in "throw");
+                let thrown = app1(inout b, throw, error2);
+                let es = b.intern(in "$error");
+                let mut ins: ChunkSeq[u32] = ChunkSeq::new[u32]();
+                ins.push(es);
+                let lam = inferred(inout b, in ins, thrown);
+                let rs = b.intern(in "raise");
+                let fld = field(inout b, rs, lam);
+                let mut fs = empty();
+                fs.push(fld);
+                let rec = record(inout b, in fs);
+                let cn = b.numbered(in "$cap", index);
+                let na = named_arg_sym(inout b, cn, rec);
+                call_args.push(na);
+            }
+        }
+        if fuel {
+            let fv = named(inout b, in "$fuel");
+            let na = named_arg(inout b, in "$fuel", fv);
+            call_args.push(na);
+        }
+        for i in 0..args.len() {
+            let x = pos(inout b, get(in args, i));
+            call_args.push(x);
+        }
+        let callee = if fuel {
+            let s = b.joined(in "", c.f, in "$fuel");
+            sref(inout b, s)
+        } else {
+            sref(inout b, c.f)
+        };
+        let call = app_args(inout b, callee, in call_args);
+        // the postcondition
+        let none = empty();
+        let mut post = T {
+            a: 0,
+            n: 0
+        };
+        if !has_model {
+            let mut values = empty();
+            for index in 0..output_count {
+                let v = tuple_get(inout b, call, index, output_count);
+                values.push(v);
+            }
+            post = holds(inout b, in cs, c.ea, c.ez, c.fa, c.ensures, in args, in values);
+        } else {
+            let rr = lref(inout b, result);
+            let observed = if nfail == 0 && fuel {
+                let s = global2(inout b, in "Option", in "some");
+                app1(inout b, s, rr)
+            } else if nfail > 0 && !fuel {
+                let s = global2(inout b, in "Except", in "ok");
+                app1(inout b, s, rr)
+            } else {
+                let ok = global2(inout b, in "Except", in "ok");
+                let inner = app1(inout b, ok, rr);
+                let s = global2(inout b, in "Option", in "some");
+                app1(inout b, s, inner)
+            };
+            let run = if nfail > 0 && fuel {
+                let r = global2(inout b, in "ExceptT", in "run");
+                app1(inout b, r, call)
+            } else {
+                call
+            };
+            let mut quantified = empty();
+            if fuel {
+                let fs = b.intern(in "$fuel");
+                let nat = global(inout b, in "Nat");
+                let fb = explicit(inout b, fs, nat);
+                quantified.push(fb);
+            }
+            let rb = explicit(inout b, result, result_ty);
+            quantified.push(rb);
+            let e1 = eq(inout b, run, observed);
+            let mut values = empty();
+            for index in 0..output_count {
+                let rr2 = lref(inout b, result);
+                let v = tuple_get(inout b, rr2, index, output_count);
+                values.push(v);
+            }
+            let h = holds(inout b, in cs, c.ea, c.ez, c.fa, c.ensures, in args, in values);
+            let ar = arrow_t(inout b, e1, h);
+            post = forall(inout b, in quantified, ar);
+        }
+        let precondition = if c.requires != NONE32 {
+            holds(inout b, in cs, c.ra, c.rz, c.fa, c.requires, in args, in none)
+        } else {
+            global(inout b, in "True")
+        };
+        let mut admissible = precondition;
+        let mut k = binders.len();
+        loop {
+            if k == 0 {
+                break;
+            }
+            k = wrapping_sub(k, 1);
+            let mut one = empty();
+            one.push(get(in binders, k));
+            let lam = lambda(inout b, in one, admissible);
+            let ex = global(inout b, in "Exists");
+            admissible = app1(inout b, ex, lam);
+        }
+        let mut body = if c.requires != NONE32 {
+            arrow_t(inout b, precondition, post)
+        } else {
+            post
+        };
+        if binders.len() > 0 {
+            body = forall(inout b, in binders, body);
+        }
+        let cn = b.joined(in "", c.f, in "$contract");
+        let an = b.joined(in "", c.f, in "$admissible");
+        // the two definitions
+        let m = b.at();
+        b.w(D_DEF);
+        b.w(K_DEF);
+        b.name(cn);
+        b.w(0);
+        b.w(2);
+        b.put(body);
+        b.w(D_DEF);
+        b.w(K_DEF);
+        b.name(an);
+        b.w(0);
+        b.w(2);
+        b.put(admissible);
+        let defs = b.since(m);
+        if internal(inout b, inout err, c.f) {
+            return false;
+        }
+        for i in 0..defs.n {
+            cw.push(u64_at(in b.words, add(defs.a, i)));
+        }
+        names.push(c.f);
+    }
+    true
+}

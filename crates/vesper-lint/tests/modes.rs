@@ -1,6 +1,6 @@
 //! L0103 `overly_restrictive_mode` (manuscript §19.6 `[Lint-Demote-Mode]`,
 //! the `inout` half), which only the Vesper port has (#1888). Cargo-only,
-//! with `--features vesper-port`; port/test-port.sh runs it.
+//! with `--features vesper-port`; aspect crate lint test-port runs it.
 #![cfg(vesper_port)]
 
 mod support;

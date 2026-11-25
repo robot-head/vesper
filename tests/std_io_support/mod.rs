@@ -215,6 +215,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn open(path: *const c_char, flags: i32, ...) -> i32;
         fn read(fd: i32, buf: *mut c_void, n: usize) -> isize;
         fn write(fd: i32, buf: *const c_void, n: usize) -> isize;
+        fn pread(fd: i32, buf: *mut c_void, n: usize, offset: i64) -> isize;
+        fn pwrite(fd: i32, buf: *const c_void, n: usize, offset: i64) -> isize;
         fn fsync(fd: i32) -> i32;
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
         fn close(fd: i32) -> i32;
@@ -327,6 +329,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("readdir", readdir as *const u8),
         ("closedir", closedir as *const u8),
         ("bcopy", bcopy as *const u8),
+        ("pread", pread as *const u8),
+        ("pwrite", pwrite as *const u8),
         ("openat", openat as *const u8),
         ("unlinkat", unlinkat as *const u8),
         ("fdopendir", fdopendir as *const u8),
@@ -528,6 +532,10 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn HeapAlloc(h_heap: *mut c_void, dw_flags: u32, dw_bytes: usize) -> *mut c_void;
         fn HeapFree(h_heap: *mut c_void, dw_flags: u32, lp_mem: *mut c_void) -> i32;
         fn RtlMoveMemory(dst: *mut c_void, src: *const c_void, len: usize);
+        fn GetFileAttributesW(lp_file_name: *const u16) -> u32;
+        fn GetModuleFileNameW(h_module: *mut c_void, lp_filename: *mut u16, n_size: u32) -> u32;
+        fn GetSystemDirectoryW(lp_buffer: *mut u16, u_size: u32) -> u32;
+        fn GetWindowsDirectoryW(lp_buffer: *mut u16, u_size: u32) -> u32;
     }
     vec![
         ("GetCommandLineW", GetCommandLineW as *const u8),
@@ -587,6 +595,10 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("HeapAlloc", HeapAlloc as *const u8),
         ("HeapFree", HeapFree as *const u8),
         ("RtlMoveMemory", RtlMoveMemory as *const u8),
+        ("GetFileAttributesW", GetFileAttributesW as *const u8),
+        ("GetModuleFileNameW", GetModuleFileNameW as *const u8),
+        ("GetSystemDirectoryW", GetSystemDirectoryW as *const u8),
+        ("GetWindowsDirectoryW", GetWindowsDirectoryW as *const u8),
     ]
 }
 #[cfg(not(any(unix, windows)))]

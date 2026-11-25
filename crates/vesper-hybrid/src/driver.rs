@@ -109,7 +109,7 @@ struct Options {
 }
 
 /// The record's version (`record_format` in @vesper/driver).
-const RECORD_FORMAT: u64 = 2;
+const RECORD_FORMAT: u64 = 3;
 const SLOTS: usize = 14;
 // Slot numbers (`slot_*` in @vesper/driver).
 const INPUT: usize = 0;

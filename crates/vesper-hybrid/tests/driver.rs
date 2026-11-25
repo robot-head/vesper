@@ -130,6 +130,13 @@ const OPTION_SETS: &[&[&str]] = &[
     &["run", "--entry", "other"],
     &["jit"],
     &["jit", "--no-opt"],
+    // One optimizer at a time (#1929; the arithmetic oracle's settings).
+    &["run", "--no-ast-opt"],
+    &["run", "--no-ir-opt"],
+    &["jit", "--no-ast-opt"],
+    &["jit", "--no-ir-opt"],
+    &["emit", "--emit", "hir", "--no-ast-opt"],
+    &["check", "--no-ir-opt"],
     &["emit", "--emit", "hir"],
     &["emit", "--emit", "ir"],
     &["emit", "--emit", "ir", "--no-opt"],

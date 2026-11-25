@@ -14,7 +14,7 @@ build = "build.rs"
 
 [features]
 # A deliberately wrong Vesper build: the port test run must fail
-# (crates/vesper-fusion/port/test-port.sh asserts which test does).
+# (aspect crate fusion test-port asserts which test does).
 vesper-port-divergent = []
 
 [dependencies]

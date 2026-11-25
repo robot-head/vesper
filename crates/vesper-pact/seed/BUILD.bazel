@@ -43,7 +43,7 @@ rust_test(
 )
 
 # The tests that read no files at run time; Cargo runs dto.rs (which reads
-# tests/fixtures) against the seed too (crates/vesper-pact/port/test-port.sh).
+# tests/fixtures) against the seed too (aspect crate pact test-port).
 [
     rust_test(
         name = "seed_test_" + t,

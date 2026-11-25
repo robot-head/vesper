@@ -51,6 +51,20 @@ their monad `m`, effect operations, handlers (`HandlerCPS` layers, lifts,
 evidence, resumptions), effectful closures and calls. Nothing comes out as
 `skip` any more.
 
+Part 3c ports the rest of `extract_report`, so the port builds the whole
+module:
+
+| Rust (`src/lean.rs`) | Vesper |
+|---|---|
+| `order_definitions` (petgraph `tarjan_scc` over `Term::free_references`), `recursive_reach`, `omitted_executable_definitions` | `src/module.ves` |
+| the `$fuel` companions (`Generator` with `fuel`), `Totality` | `src/gen.ves`, `src/lib.ves` |
+| `contracts`, `contract` (`$contract` and `$admissible` propositions) | `src/contract.ves` |
+| the proof module | `src/lib.ves` |
+
+`@vesper/lean-syntax` gains `free_references_at`, `term_end` and
+`binders_end`, so the ordering reads references straight out of the word
+stream.
+
 ## Input
 
 The `@vesper/check-data` harness input (names, types, the world's ADTs),
@@ -74,6 +88,12 @@ declarations). It runs the CFG extractor as the gate and returns, per
 source function, `none` (CFG path), the error, or the definition as a
 module.
 
+The entry `extract_module` reads the same input followed by the contract
+section: per contract the function, its `requires_` predicate (or none)
+and its `ensures_` predicate, then per function its generics (name, bound,
+row). It returns the module, then `-- proof` and the proof module, then
+`-- omitted`, `-- totality` and `-- contracts` lines, or `error: <message>`.
+
 ## Test
 
 `tests/self_host_lean_extract.rs` compares the text with
@@ -96,3 +116,10 @@ For part 3a, `structured_functions_match_rust_on_the_corpus` and
 (a hidden hook over `Generator::function` with `Id` or `m`). A function
 the port writes as `skip` would take Rust's text; since part 3b there are
 none.
+
+For part 3c, `modules_match_rust_on_the_corpus` and
+`modules_match_rust_on_test_sources` compare `extract_module` with the
+rendered `lean::extract_report` (module, proof module, omitted
+definitions, totality and contracts). Mutants cover contracts on pure,
+fallible, recursive, generic and `inout` functions, and the predicate and
+signature refusals.

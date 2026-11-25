@@ -49,7 +49,7 @@ entry deliberately declares Audit and cannot be executed without a handler.
   `inout` argument changed to `in` (`E0308`). The `sink` half and the
   policy's `deny` level are not implemented yet. `tests/modes.rs` checks
   fixtures and the whole repository corpus against the rule's definition,
-  and `port/test-port.sh` has a fifth divergent area, `modes`.
+  and `aspect crate lint test-port` has a fifth divergent area, `modes`.
 
 Projection changes are **diagnostic-only**: no broken function arity, duplicate
 parameter name, or unreviewed caller rewrite is synthesized. The analyzer never

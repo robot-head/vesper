@@ -537,7 +537,7 @@ fn drive(inout s: Session, in o: Options)
         let json = interface_json(in world.as_slice());
         return pass_with(inout s, step_interface_write(), in json.as_slice());
     }
-    if o.optimize {
+    if o.ast_optimize {
         let r = step(inout s, step_optimize());
         if is_failure(r) {
             return pass_failed(in s, r);

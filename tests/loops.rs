@@ -1,7 +1,7 @@
 //! `loop`, `for` over ranges, `break`, `return` and `let mut` (src/loops.rs):
 //! the evaluator, the Cranelift JIT and both object targets agree, mode
 //! violations are rejected, and the backends without loops refuse them with
-//! typed errors. `scripts/test-aarch64.sh` runs the same fixtures as AArch64
+//! typed errors. `aspect acceptance test-aarch64` runs the same fixtures as AArch64
 //! executables under QEMU.
 use std::path::Path;
 use vesper::{check, native, parser, runtime::Runtime};

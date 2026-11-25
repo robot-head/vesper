@@ -1,5 +1,237 @@
-load("./lib/script.axl", "script_task")
+"""Build the Stage 0 seed and reproduce the Stage 1 bootstrap lock."""
 
-compile_stage1 = script_task("compile-stage1", ["bootstrap"], "bootstrap/compile-stage1.py", "python3")
-run = script_task("run", ["bootstrap"], "bootstrap/run.sh", "bash")
-stage2 = script_task("stage2", ["bootstrap"], "bootstrap/stage2.sh", "bash")
+load("./lib/process.axl", "capture", "check", "command", "exit_code", "root_path")
+
+_USAGE = "usage: aspect bootstrap run -- [stage1 [--reproduce] [--record | --outcome] [--require-cross-backend]]"
+_ARTIFACTS = ["*.rlib", "*.rmeta", "*.so", "*.dylib", "*.dll"]
+
+def _parent(path: str) -> str:
+    return path.rpartition("/")[0] or "/"
+
+def _canonical(ctx: TaskContext, cwd: str, path: str) -> str:
+    return capture(ctx, "realpath", [root_path(cwd, path)], cwd).rstrip("\r\n")
+
+def _remove_tree(ctx: TaskContext, root: str, path: str):
+    check(ctx, "rm", ["-rf", "--", path], root)
+
+def _compile_adapter(ctx: TaskContext, cwd: str, profile: str, source: str, output: str, flags: list[str]):
+    patterns = []
+    for artifact in _ARTIFACTS:
+        if patterns:
+            patterns.append("-o")
+        patterns.extend(["-name", artifact])
+    directories = {}
+    profile_path = root_path(cwd, profile)
+    if ctx.std.fs.is_dir(profile_path):
+        found = capture(ctx, "find", ["-H", profile_path, "("] + patterns + [")", "-print0"], cwd)
+        for artifact in found.split("\x00"):
+            if artifact:
+                directories[artifact.rpartition("/")[0]] = True
+    source_root = _parent(_parent(_canonical(ctx, cwd, source)))
+    target_root = _parent(_canonical(ctx, cwd, profile))
+    argv = ["--edition=2024", "-O", source, "-o", output,
+            "--remap-path-prefix=" + source_root + "=/vesper",
+            "--remap-path-prefix=" + target_root + "=/target"] + flags
+    for crate in ["vesper", "vesper_codegen_verified"]:
+        argv.extend(["--extern", crate + "=" + profile + "/lib" + crate + ".rlib"])
+    for directory in sorted(directories):
+        argv.extend(["-L", "dependency=" + directory])
+    check(ctx, "rustc", argv, cwd)
+
+def _compile_stage1(ctx: TaskContext) -> int:
+    values = ctx.args.tool_args
+    if len(values) not in [3, 4] or (len(values) == 4 and values[3] != "--test"):
+        ctx.std.process.exit(2, "usage: aspect bootstrap compile-stage1 -- PROFILE_DIR SOURCE OUTPUT [--test]")
+    _compile_adapter(ctx, ctx.std.env.current_dir(), values[0], values[1], values[2], values[3:])
+    return 0
+
+compile_stage1 = task(
+    kind = "compile-stage1",
+    group = ["bootstrap"],
+    summary = "Compile the Stage 1 adapter with Cargo's already-built libraries",
+    implementation = _compile_stage1,
+    args = {"tool_args": args.trailing_var_args(description = "Profile directory, adapter source, output, and optional --test.")},
+)
+
+def _profile(ctx: TaskContext) -> tuple[str, ...]:
+    profile = ctx.std.env.var("PROFILE") or "release"
+    if profile not in ["release", "dev"]:
+        ctx.std.process.exit(2, "PROFILE must be release or dev")
+    return profile, "release" if profile == "release" else "debug"
+
+def _remap_flags(ctx: TaskContext, root: str) -> list[str]:
+    cargo_home = ctx.std.env.var("CARGO_HOME") or ctx.std.env.home_dir() + "/.cargo"
+    return ["--remap-path-prefix=" + root + "=/vesper",
+            "--remap-path-prefix=" + root_path(root, cargo_home) + "=/cargo"]
+
+def _build_runner(ctx: TaskContext, root: str, profile: str, profile_dir: str, target: str, runner: str, env: dict[str, str]):
+    flags = _remap_flags(ctx, root) + ["--remap-path-prefix=" + target + "=/target"]
+    check(ctx, "cargo", ["build", "--locked", "--profile", profile, "--target-dir", target,
+                         "--lib", "-p", "vesper", "-p", "vesper-codegen-verified"], root,
+          dict(env, CARGO_ENCODED_RUSTFLAGS = "\x1f".join(flags)))
+    _compile_adapter(ctx, root, target + "/" + profile_dir, root + "/bootstrap/stage1.rs", runner, [])
+
+def _stage1(ctx: TaskContext, root: str, values: list[str]) -> int:
+    forwarded = []
+    for value in values:
+        if value in ["--record", "--outcome", "--require-cross-backend"]:
+            forwarded.append(value)
+        elif value != "--reproduce":
+            ctx.std.process.exit(2, _USAGE)
+    profile, profile_dir = _profile(ctx)
+    work = root_path(root, ctx.std.env.var("WORK") or "target/bootstrap-stage1")
+    ctx.std.fs.create_dir_all(work)
+    work = _canonical(ctx, root, work)
+    runner = work + "/stage1-runner"
+    out = ctx.std.env.var("OUT") or root + "/bootstrap/stage1.lock"
+    env = {
+        "CARGO_BUILD_JOBS": ctx.std.env.var("CARGO_BUILD_JOBS") or "2",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_DEV_DEBUG": "0",
+        "CARGO_PROFILE_TEST_DEBUG": "0",
+        "SOURCE_DATE_EPOCH": ctx.std.env.var("SOURCE_DATE_EPOCH") or "1794650795",
+    }
+    version = capture(ctx, "rustc", ["-vV"], root, env)
+    hosts = [line.removeprefix("host: ") for line in version.splitlines() if line.startswith("host: ")]
+    if not hosts or not hosts[0]:
+        ctx.std.process.exit(1, "rustc did not report a host target")
+    host = hosts[0]
+    if "--reproduce" in values:
+        for side in ["a", "b"]:
+            directory = work + "/repro-" + side
+            target = directory + "/target"
+            candidate = directory + "/stage1-runner"
+            ctx.std.io.stdout.write("== Stage 1 runner %s (%s) from a clean target directory\n" % (side, profile))
+            _remove_tree(ctx, root, directory)
+            ctx.std.fs.create_dir_all(directory)
+            _build_runner(ctx, root, profile, profile_dir, target, candidate, env)
+            check(ctx, candidate, [root, directory + "/work", host, directory + "/stage1.lock", "--record"], root, env)
+            _remove_tree(ctx, root, target)
+        lock_a = work + "/repro-a/stage1.lock"
+        lock_b = work + "/repro-b/stage1.lock"
+        if not command(ctx, "cmp", ["-s", lock_a, lock_b], root).status().success:
+            differences = command(ctx, "diff", [lock_a, lock_b], root).stdout("piped").spawn().wait_with_output()
+            ctx.std.io.stderr.write(differences.stdout)
+            ctx.std.process.exit(1, "stage1: ReproducibilityMismatch: two clean builds recorded different locks")
+        ctx.std.io.stdout.write("== Stage 1 reproducible: two clean builds recorded identical locks\n")
+        ctx.std.fs.copy(work + "/repro-b/stage1-runner", runner)
+    else:
+        target = root_path(root, ctx.std.env.var("CARGO_TARGET_DIR") or work + "/target")
+        _build_runner(ctx, root, profile, profile_dir, target, runner, env)
+    return exit_code(command(ctx, runner, [root, work, host, out] + forwarded, root, env).status())
+
+def _build_seed(ctx: TaskContext, root: str, work: str, profile: str, profile_dir: str, side: str, env: dict[str, str]):
+    target = work + "/target"
+    ctx.std.io.stdout.write("== building seed %s (%s) from a clean target directory\n" % (side, profile))
+    _remove_tree(ctx, root, target)
+    check(ctx, "cargo", ["build", "--locked", "--profile", profile, "--bin", "vesper", "--target-dir", target], root, env)
+    ctx.std.fs.copy(target + "/" + profile_dir + "/vesper", work + "/seed-" + side)
+
+def _stage0(ctx: TaskContext, root: str) -> int:
+    profile, profile_dir = _profile(ctx)
+    work = root_path(root, ctx.std.env.var("WORK") or "target/bootstrap")
+    output = ctx.std.env.var("OUT") or root + "/bootstrap/stage0_seed.lock"
+    lean = ctx.std.env.var("VESPER_LEAN") or (ctx.std.fs.try_read_to_string(root + "/.ci-lean-path") or "").strip() or "lean"
+    cc = ctx.std.env.var("CC_B") or "gcc"
+    invocation = ctx.std.env.current_dir()
+    lean = root_path(invocation, lean) if "/" in lean else ctx.std.process.which(lean)
+    cc = root_path(invocation, cc) if "/" in cc else ctx.std.process.which(cc)
+    if not lean or not ctx.std.process.which(lean):
+        ctx.std.process.exit(2, "Lean not found (set VESPER_LEAN)")
+    if not cc or not ctx.std.process.which(cc):
+        ctx.std.process.exit(2, "C compiler not found (set CC_B)")
+    lean_home = capture(ctx, lean, ["--print-prefix"], invocation).strip()
+    epoch = ctx.std.env.var("SOURCE_DATE_EPOCH") or capture(ctx, "git", ["log", "-1", "--format=%ct"], root).strip()
+    commit = capture(ctx, "git", ["rev-parse", "HEAD"], root).strip()
+    env = {"SOURCE_DATE_EPOCH": epoch, "CARGO_INCREMENTAL": "0"}
+    build_env = dict(env, CARGO_ENCODED_RUSTFLAGS = "\x1f".join(_remap_flags(ctx, root)))
+    ctx.std.fs.create_dir_all(work)
+    for name in ["seed-a", "seed-b", "objects-a", "objects-b", "exe", "path-b"]:
+        _remove_tree(ctx, root, work + "/" + name)
+    for name in ["objects-a", "objects-b", "exe", "path-b"]:
+        ctx.std.fs.create_dir_all(work + "/" + name)
+    for side in ["a", "b"]:
+        _build_seed(ctx, root, work, profile, profile_dir, side, build_env)
+    _remove_tree(ctx, root, work + "/target")
+
+    programs = sorted([entry.path for entry in ctx.std.fs.read_dir(root + "/bootstrap/corpus") if entry.path.endswith(".ves")])
+    corpus = ["bootstrap/corpus/" + name for name in programs]
+    results = []
+    for file in programs:
+        source = "bootstrap/corpus/" + file
+        stem = file.removesuffix(".ves")
+        for side in ["a", "b"]:
+            compiler = work + "/seed-" + side
+            status = command(ctx, compiler, ["emit", source, "--emit", "object", "-o",
+                                              work + "/objects-" + side + "/" + stem + ".o"], root, env).stdout("null").status()
+            if not status.success:
+                ctx.std.process.exit(exit_code(status), compiler + " failed")
+        exe = work + "/exe/" + stem
+        status = command(ctx, work + "/seed-a", ["build", source, "-o", exe], root, env).stdout("null").status()
+        if not status.success:
+            ctx.std.process.exit(exit_code(status), "Seed A failed to build " + source)
+        results.append("%s %d\n" % (stem, exit_code(command(ctx, exe, [], root, env).status())))
+    result_a = work + "/results-a.txt"
+    result_b = work + "/results-b.txt"
+    ctx.std.fs.write(result_a, "".join(results))
+
+    ctx.std.io.stdout.write("== Path B: Lean C emitter + " + cc + "\n")
+    path_b = work + "/path-b"
+    check(ctx, lean, ["-c", path_b + "/reference.c", "BootstrapDdc/Reference.lean"], root + "/lean", env)
+    check(ctx, cc, ["-O2", "-I" + lean_home + "/include", "-c", path_b + "/reference.c", "-o", path_b + "/reference.o"], root, env)
+    library = lean_home + "/lib/lean"
+    executable = path_b + "/vesperc-lean-ddc"
+    check(ctx, cc, [path_b + "/reference.o", "-L" + library, "-lleanshared", "-Wl,-rpath," + library, "-o", executable], root, env)
+    ctx.std.fs.write(result_b, capture(ctx, executable, corpus, root, env))
+    rust_version = " ".join(capture(ctx, "rustc", ["--version"], root, env).split()[:2])
+    lean_version = capture(ctx, lean, ["--version"], root, env).partition("version ")[2].split()[0].rstrip(",")
+    cc_version = capture(ctx, cc, ["--version"], root, env).splitlines()[0]
+
+    ctx.std.io.stdout.write("== recording " + output + "\n")
+    check(ctx, "cargo", ["run", "--quiet", "--locked", "-p", "vesper-codegen-verified", "--bin", "vesper-bootstrap",
+                         "--target-dir", work + "/tools", "--", "seed-lock", "--base-commit", commit, "--rustc", rust_version,
+                         "--profile", profile, "--epoch", epoch, "--seed-a", work + "/seed-a", "--seed-b", work + "/seed-b",
+                         "--objects-a", work + "/objects-a", "--objects-b", work + "/objects-b", "--results-a", result_a,
+                         "--results-b", result_b, "--lean", "Lean " + lean_version, "--cc", cc_version, "--out", output], root, env)
+    return 0
+
+def _run(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    values = ctx.args.tool_args
+    if values and values[0] == "stage1":
+        return _stage1(ctx, root, values[1:])
+    if values:
+        ctx.std.process.exit(2, _USAGE)
+    return _stage0(ctx, root)
+
+run = task(
+    kind = "run",
+    group = ["bootstrap"],
+    summary = "Reproduce the Stage 0 seed or run the Stage 1 bootstrap gate",
+    implementation = _run,
+    args = {"tool_args": args.trailing_var_args(description = "Optional stage1 mode and its lock flags.")},
+)
+
+def _strict_stage1(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    work = root_path(root, ctx.std.env.var("WORK") or "target/bootstrap-stage1")
+    target = root_path(root, ctx.std.env.var("CARGO_TARGET_DIR") or "target")
+    check(ctx, "cargo", ["build", "--locked", "-p", "vesper-codegen-verified", "--bin", "vesper-bootstrap"], root)
+    gate = target + "/debug/vesper-bootstrap"
+    committed = command(ctx, gate, ["check-stage1-lock", "bootstrap/stage1.lock"], root).status()
+    fresh = work + "/stage1.fresh.lock"
+    if committed.success:
+        ctx.std.io.stdout.write("committed lock is strict; the fresh lock must be too\n")
+        return exit_code(command(ctx, gate, ["check-stage1-lock", fresh], root).status())
+    if command(ctx, gate, ["check-stage1-lock", fresh], root).status().success:
+        ctx.std.io.stdout.write("::notice::the fresh Stage 1 lock passes the strict gate; re-record bootstrap/stage1.lock\n")
+    else:
+        ctx.std.io.stdout.write("::notice::strict Stage 1 gate not yet satisfiable (verified backend refuses part of the frontend)\n")
+    return 0
+
+strict_stage1 = task(
+    kind = "stage1-cross-backend",
+    group = ["ci"],
+    summary = "Ratchet the fresh Stage 1 lock against the committed cross-backend gate",
+    implementation = _strict_stage1,
+)

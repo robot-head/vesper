@@ -55,7 +55,7 @@ filegroup(
 # The divergent builds, one per ported module (the Cargo
 # `vesper-port-divergent` feature applies the same edits, DIVERGENT in
 # build.rs): each must build from a copy of the package with its edit
-# applied. The Cargo run in crates/vesper-pact/port/test-port.sh asserts
+# applied. The Cargo run in aspect crate pact test-port asserts
 # which test catches each one.
 [
     vesper_port_object(

@@ -16,7 +16,7 @@
 //! for callgrind.
 //!
 //! ```text
-//! crates/vesper-chorus/scripts/bench.sh   # builds both, runs both workloads
+//! aspect crate chorus bench   # builds both, runs both workloads
 //! abba worker <project|explore>           # one arm
 //! abba drive <project|explore> <rust-worker> <vesper-worker>
 //! ```

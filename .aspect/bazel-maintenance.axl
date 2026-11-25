@@ -1,0 +1,96 @@
+"""Manage Bazel workspace and CI configuration."""
+
+load("./lib/process.axl", "check", "command", "exit_code")
+
+_BUILD_FILE = 'load("//tools/bazel:defs.bzl", "vesper_crate")\n\nvesper_crate()\n'
+
+def _check_with_bazel(ctx: TaskContext, root: str):
+    # Evaluating the workspace metadata repository checks each member's
+    # BUILD.bazel with Bazel's host Cargo, including on runners without Cargo.
+    bazel = ctx.std.process.which("bazel") or ctx.std.process.which("bazelisk")
+    if not bazel:
+        ctx.std.process.exit(1, "Cannot check BUILD.bazel files without working Cargo or Bazel")
+    check(ctx, bazel, ["query", "@vesper_cargo//:packages.bzl"], root)
+
+def _write_build_file(ctx: TaskContext, directory: str):
+    # Publish without replacing a BUILD file that another process created
+    # after the workspace scan.
+    stage = ctx.std.fs.mkdtemp(parent = directory, prefix = ".vesper-build-file-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(stage))
+    pending = stage + "/BUILD.bazel"
+    ctx.std.fs.write(pending, _BUILD_FILE)
+    ctx.std.fs.hard_link(pending, directory + "/BUILD.bazel")
+
+def _sync_build_files(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    argv = ctx.args.tool_args
+    if argv not in [[], ["--check"]]:
+        ctx.std.process.exit(2, "usage: aspect maintenance bazel sync-build-files -- [--check]")
+    check_only = argv == ["--check"]
+    cargo = ctx.std.process.which("cargo")
+    if not cargo:
+        if check_only:
+            _check_with_bazel(ctx, root)
+            return 0
+        ctx.std.process.exit(1, "Cargo is required to generate missing BUILD.bazel files")
+    result = command(ctx, cargo, ["metadata", "--no-deps", "--format-version=1", "--quiet", "--offline"], root).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if not result.status.success:
+        if check_only and (ctx.std.process.which("bazel") or ctx.std.process.which("bazelisk")):
+            _check_with_bazel(ctx, root)
+            return 0
+        ctx.std.io.stderr.write(result.stderr)
+        ctx.std.process.exit(exit_code(result.status), "Could not read the Cargo workspace")
+    data = json.decode(result.stdout)
+    workspace = data["workspace_root"].rstrip("/")
+    members = {package: True for package in data["workspace_members"]}
+    missing = []
+    for package in data["packages"]:
+        if package["id"] not in members:
+            continue
+        directory = package["manifest_path"].rpartition("/")[0]
+        if directory == workspace:
+            continue
+        if not directory.startswith(workspace + "/"):
+            ctx.std.process.exit(1, "Workspace member is outside " + workspace + ": " + directory)
+        if ctx.std.fs.try_metadata(directory + "/BUILD.bazel") == None:
+            missing.append(directory)
+    for directory in sorted(missing):
+        path = directory.removeprefix(workspace + "/") + "/BUILD.bazel"
+        if check_only:
+            ctx.std.io.stdout.write("missing " + path + "; run aspect maintenance bazel sync-build-files\n")
+            continue
+        _write_build_file(ctx, directory)
+        ctx.std.io.stdout.write("created " + path + "\n")
+    return 1 if check_only and missing else 0
+
+bazel_sync_build_files = task(
+    kind = "sync-build-files",
+    group = ["maintenance", "bazel"],
+    summary = "Check or create BUILD.bazel files for the Cargo workspace",
+    implementation = _sync_build_files,
+    args = {"tool_args": args.trailing_var_args(description = "Use --check to report missing files without writing them.")},
+)
+
+def _configure_bazel(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    key = ctx.std.env.var("BUILDBUDDY_API_KEY") or ""
+    lines = ["common --config=ci"]
+    if key:
+        lines.extend([
+            "common --config=buildbuddy",
+            "common --remote_header=x-buildbuddy-api-key=" + key,
+            "common --build_metadata=ROLE=CI",
+        ])
+    ctx.std.fs.write(root + "/user.bazelrc", "\n".join(lines) + "\n")
+    if key:
+        ctx.std.io.stdout.write("BuildBuddy: enabled (results link is printed by each Bazel command)\n")
+    else:
+        ctx.std.io.stdout.write("BuildBuddy: no API key, using the GitHub Actions disk cache\n")
+    return 0
+
+configure_bazel = task(
+    kind = "configure-bazel",
+    group = ["ci"],
+    summary = "Write the GitHub Actions Bazel configuration",
+    implementation = _configure_bazel,
+)

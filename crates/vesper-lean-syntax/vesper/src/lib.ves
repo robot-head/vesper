@@ -1893,6 +1893,47 @@ pub fn free_references(in s: Slice[u64], in pool: Str) -> ChunkSeq[u64] {
     r.found
 }
 
+// `Term::free_references` of a definition whose binders start at
+// `binders_at` and whose body starts at `body_at` (its result type, between
+// them, is not walked).
+pub fn free_references_at(in s: Slice[u64], in pool: Str, binders_at: u64, body_at: u64)
+    -> ChunkSeq[u64] {
+    let mut r = R {
+        found: ChunkSeq::new(),
+        scope: ChunkSeq::new(),
+        all: false
+    };
+    let mut at = binders_at;
+    ref_binders(inout r, in s, in pool, inout at);
+    at = body_at;
+    ref_term(inout r, in s, in pool, inout at);
+    r.found
+}
+
+// Where the term starting at `at` ends.
+pub fn term_end(in s: Slice[u64], in pool: Str, at: u64) -> u64 {
+    let mut r = R {
+        found: ChunkSeq::new(),
+        scope: ChunkSeq::new(),
+        all: true
+    };
+    let mut p = at;
+    ref_term(inout r, in s, in pool, inout p);
+    p
+}
+
+// Where the binder list (count, then binders) starting at `at` ends.
+pub fn binders_end(in s: Slice[u64], in pool: Str, at: u64) -> u64 {
+    let mut r = R {
+        found: ChunkSeq::new(),
+        scope: ChunkSeq::new(),
+        all: true
+    };
+    let mut p = at;
+    ref_binders(inout r, in s, in pool, inout p);
+    p
+}
+
 // `Term::references`: every `Ref` name, binders included.
 pub fn references(in s: Slice[u64], in pool: Str) -> ChunkSeq[u64] {
     let mut r = R {

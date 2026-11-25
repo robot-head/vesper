@@ -1,0 +1,98 @@
+"""Orchestrate source-tool acceptance checks and Bazel examples."""
+
+load("./lib/bazel_exec.axl", "executable", "run_target")
+load("./lib/process.axl", "check", "command", "exit_code", "root_path", "scratch_dir")
+
+def _native_binary(ctx: TaskContext, root: str, binary: str) -> str:
+    candidate = root_path(root, binary + ".exe")
+    if ctx.std.fs.exists(candidate) and ctx.std.fs.metadata(candidate).is_file:
+        return candidate
+    return binary
+
+def _cargo_env(ctx: TaskContext) -> dict[str, str]:
+    defaults = {
+        "CARGO_BUILD_JOBS": "1",
+        "CARGO_PROFILE_DEV_DEBUG": "0",
+        "CARGO_PROFILE_TEST_DEBUG": "0",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_TARGET_DIR": "target",
+    }
+    return {key: ctx.std.env.var(key) or value for key, value in defaults.items()}
+
+def _pmu_probe(ctx: TaskContext, root: str):
+    probe = executable(ctx, root, "//crates/vesper-bench-pmu:example/probe")
+    status = exit_code(command(ctx, probe, [], root).status())
+    if status == 0:
+        ctx.std.io.stdout.write("PMU probe completed with actual checked positive counters; no speed threshold applied.\n")
+    elif status == 2:
+        ctx.std.io.stdout.write("PMU probe reported unavailable (exit 2); no hardware-success or zero-count claim.\n")
+    else:
+        ctx.std.process.exit(status, "PMU probe failed unexpectedly (exit %d)." % status)
+
+def _suite(
+        name: str,
+        *,
+        binary_env: str = "",
+        needs_work: bool = True,
+        needs_root: bool = False,
+        examples: list[str] = [],
+        pmu: bool = False,
+        cargo: bool = False,
+        ci_lean: bool = False):
+    def run(ctx: TaskContext) -> int:
+        root = ctx.std.env.aspect_root_dir()
+        env = _cargo_env(ctx) if cargo else {}
+        lean_path = root + "/.ci-lean-path"
+        if ci_lean and not ctx.std.env.var("VESPER_LEAN") and ctx.std.fs.exists(lean_path):
+            env["VESPER_LEAN"] = ctx.std.fs.read_to_string(lean_path).rstrip("\r\n")
+        binary = ctx.std.env.var(binary_env) if binary_env else None
+        if not binary:
+            if cargo:
+                check(ctx, "cargo", ["build", "--locked", "-p", "vesper", "--bin", "vesper"], root, env)
+                binary = root_path(root, env["CARGO_TARGET_DIR"]) + "/debug/vesper"
+            else:
+                binary = executable(ctx, root, "//:bin/vesper")
+        argv = ["scripts/check-" + name + ".py", "--binary", _native_binary(ctx, root, binary)]
+        if needs_root:
+            argv.extend(["--root", root])
+        if needs_work:
+            argv.extend(["--work", scratch_dir(ctx, "vesper-" + name + "-")])
+        check(ctx, "python", argv, root, env)
+        for example in examples:
+            run_target(ctx, root, example)
+        if pmu:
+            _pmu_probe(ctx, root)
+        return 0
+
+    return task(
+        kind = "test-" + name,
+        group = ["acceptance"],
+        summary = "Run the " + name + " acceptance suite",
+        implementation = run,
+    )
+
+test_canonical_protocols = _suite(
+    "canonical-protocols",
+    needs_root = True,
+    examples = ["//crates/vesper-grammar:example/" + name for name in ["protobuf", "der", "ipc"]],
+    pmu = True,
+)
+test_diagnostics = _suite("diagnostics", examples = ["//crates/vesper-diagnostics:example/causal_diagnostics"])
+test_doc_links = _suite("doc-links", binary_env = "VESPER_DOC_LINKS_BINARY", needs_work = False)
+test_editor = _suite("editor", examples = ["//crates/vesper-span:example/source_edits", "//crates/vesper-lsp:example/protocol_documents"])
+test_format_proof = _suite("format-proof", binary_env = "VESPER_FORMAT_PROOF_BINARY", ci_lean = True)
+test_macro_preview = _suite("macro-preview", binary_env = "VESPER_MACRO_PREVIEW_BINARY")
+test_recovery = _suite("recovery", binary_env = "VESPER_RECOVERY_BINARY")
+test_source_macro_parameters = _suite("source-macro-parameters", binary_env = "VESPER_SOURCE_MACRO_PARAMETERS_BINARY")
+test_source_macro_tuples = _suite("source-macro-tuples", binary_env = "VESPER_SOURCE_MACRO_TUPLES_BINARY")
+test_source_macros = _suite("source-macros", binary_env = "VESPER_SOURCE_MACROS_BINARY")
+test_source_tooling = _suite(
+    "source-tooling",
+    needs_root = True,
+    examples = [
+        "//crates/vesper-grammar:example/grammar",
+        "//crates/vesper-fmt:example/canonical",
+        "//crates/vesper-bench:example/paired_callbacks",
+    ],
+)
+test_stylus = _suite("stylus", binary_env = "VESPER_STYLUS_BINARY", cargo = True)

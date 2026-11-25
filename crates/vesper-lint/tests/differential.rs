@@ -1,7 +1,7 @@
 //! The Vesper port (`--features vesper-port`) against the frozen Rust seed
 //! copy, `vesper-lint-seed`: the same facts, policy documents and edits
 //! give the same reports, policies and errors (self-hosting SH1 lane 13,
-//! #1156). Cargo-only: port/test-port.sh runs it in Linux port shard 7.
+//! #1156). Cargo-only: aspect crate lint test-port runs it in Linux port shard 7.
 #![cfg(vesper_port)]
 
 mod support;
