@@ -379,6 +379,21 @@ const VESPER_WORD_LAYOUT: vesper::layout::WordLayout = vesper::layout::WordLayou
     },
 };
 
+/// A parse the Vesper driver ran (`modules/driver/src/front.ves`), read
+/// back from its `parse_words` stream like the parse swap's.
+pub(crate) fn driver_parse(source: &str, words: &[u64]) -> vesper_syntax::parser::Parse {
+    PARSE_CALLS.fetch_add(1, Relaxed);
+    let timer = stats::Timer::start();
+    let parsed = parse_words::decode(source, words);
+    timer.lap(&stats::PARSE.decode);
+    stats::PARSE.call(
+        false,
+        || vesper_syntax::parser::rust_parse(source),
+        |rust| *rust == parsed,
+    );
+    parsed
+}
+
 /// `vesper_syntax::parser::ParseTable` from `modules/parse`: the front end
 /// v2 and the AST of `@vesper/ast`, read back by `parse_words::decode`.
 const VESPER_PARSE: vesper_syntax::parser::ParseTable = vesper_syntax::parser::ParseTable {

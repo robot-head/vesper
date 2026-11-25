@@ -86,14 +86,20 @@ vesper_hybrid(
             "//crates/vesper-serde:port_package",
         ],
         # The driver (#1335) builds on @vesper/driver and @vesper-std I/O.
-        # The command layers (#1336) add @vesper/driver-commands.
+        # The command layers (#1336) add @vesper/driver-commands; the
+        # front-end passes (#1893) the parse module, the front end v2, the
+        # AST and @vesper-std/toml's Debug text.
         "hybrid_driver": [
+            ":hybrid_parse_package",
+            "//:ast_package",
             "//:driver_commands_package",
             "//:driver_package",
+            "//:front_package",
             "//:std_env_package",
             "//:std_fmt_package",
             "//:std_fs_package",
             "//:std_process_package",
+            "//:std_toml_package",
         ],
         "hybrid_checks": [
             "//:check_data_package",
@@ -367,6 +373,11 @@ vesper_hybrid(
         ],
         "test/swaps": [":bin/vesper-hybrid"],
         "test/driver": [
+            ":bin/vesper-hybrid",
+            "//:bin/vesper",
+        ],
+        # hd_step group 2 (#1893): the front-end passes in the driver.
+        "test/driver_front": [
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],
