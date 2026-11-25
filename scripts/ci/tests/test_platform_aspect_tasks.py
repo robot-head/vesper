@@ -132,7 +132,6 @@ if sys.argv[-1] == "crash":
             ("canonical-protocols", None),
             ("editor", None),
             ("recovery", "VESPER_RECOVERY_BINARY"),
-            ("stylus", "VESPER_STYLUS_BINARY"),
         ):
             with self.subTest(task=task):
                 checker = f"scripts/check-{task}.py"
@@ -172,34 +171,6 @@ Path("order").write_text("checker" + chr(10))
                                  env={**env, "VESPER_TEST_PMU_STATUS": str(status)},
                                  status=0 if status == 2 else status)
             self.assertIn(expected, getattr(result, stream))
-
-    def test_native_stylus_builds_with_cargo_defaults_and_preserves_overrides(self):
-        (self.root / "bin").mkdir()
-        (self.root / "bin/python").symlink_to(shutil.which("python3"))
-        self.write("bin/cargo", """\
-#!/bin/sh
-test "$*" = "build --locked -p vesper --bin vesper" || exit 2
-printf '%s %s %s %s %s\\n' "$CARGO_BUILD_JOBS" "$CARGO_PROFILE_DEV_DEBUG" "$CARGO_PROFILE_TEST_DEBUG" "$CARGO_INCREMENTAL" "$CARGO_TARGET_DIR" > build
-""", executable=True)
-        self.write("scripts/check-stylus.py", """\
-import os
-import sys
-assert os.environ["CARGO_BUILD_JOBS"] == "3"
-assert os.environ["CARGO_PROFILE_TEST_DEBUG"] == "0"
-print(sys.argv[sys.argv.index("--binary") + 1])
-""")
-        env = {
-            "PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]]),
-            "VESPER_STYLUS_BINARY": "",
-            "CARGO_BUILD_JOBS": "3",
-            "CARGO_PROFILE_DEV_DEBUG": "",
-            "CARGO_PROFILE_TEST_DEBUG": "",
-            "CARGO_INCREMENTAL": "",
-            "CARGO_TARGET_DIR": "relative target",
-        }
-        result = self.aspect("acceptance", "test-stylus", env=env)
-        self.assertEqual(result.stdout.strip(), str(self.root / "relative target/debug/vesper"))
-        self.assertEqual((self.root / "build").read_text().strip(), "3 0 0 0 relative target")
 
     def test_native_acceptance_removes_scratch_and_skips_examples_on_failure(self):
         (self.root / "bin").mkdir()

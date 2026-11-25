@@ -20,8 +20,9 @@ on:
       - 'tests/lsp_cli.rs'
       - 'tests/recovery_cli.rs'
       - 'tests/fixtures/stylus/**'
-      - 'scripts/check-stylus.py'
-      - '.aspect/acceptance-suites.axl'
+      - '.aspect/stylus.axl'
+      - '.aspect/lib/lsp-fixture.axl'
+      - '.aspect/bounded-stdio.axl'
       - '.github/workflows/stylus.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -43,8 +44,9 @@ on:
       - 'tests/lsp_cli.rs'
       - 'tests/recovery_cli.rs'
       - 'tests/fixtures/stylus/**'
-      - 'scripts/check-stylus.py'
-      - '.aspect/acceptance-suites.axl'
+      - '.aspect/stylus.axl'
+      - '.aspect/lib/lsp-fixture.axl'
+      - '.aspect/bounded-stdio.axl'
       - '.github/workflows/stylus.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -71,7 +73,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Native workspace tests/lints and check-stylus.py are owned by
+        # Native workspace tests/lints and the Stylus acceptance task are owned by
         # Platforms on Windows/macOS. Keep this extra Linux integration lane.
         os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}

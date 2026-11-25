@@ -47,7 +47,7 @@ def frame(message):
     payload = bytes(json.encode(message))
     return bytes("Content-Length: %d\r\n\r\n" % len(payload)) + payload
 
-def content_length(header):
+def content_length(header, max_frame = _MAX_FRAME):
     size = 0
     for line in header.split("\r\n"):
         name, colon, value = line.partition(":")
@@ -58,11 +58,11 @@ def content_length(header):
             if size or not token or not all([char in "0123456789" for char in token.elems()]):
                 return 0
             size = int(token)
-            if size <= 0 or size > _MAX_FRAME:
+            if size <= 0 or size > max_frame:
                 return 0
     return size
 
-def decode_frames(data):
+def decode_frames(data, max_frame = _MAX_FRAME):
     frames = []
     offset = 0
     for _ in range(len(data)):
@@ -75,7 +75,7 @@ def decode_frames(data):
                 break
         if header_end < 0:
             fail("Missing or oversized JSON-RPC frame header")
-        size = content_length(utf8(data[offset:header_end]))
+        size = content_length(utf8(data[offset:header_end]), max_frame)
         body = header_end + 4
         if not size or body + size > len(data):
             fail("Invalid or incomplete JSON-RPC frame length")

@@ -1,0 +1,260 @@
+"""Verify macro formatting, damaged-source recovery, and UTF-16 LSP edits."""
+
+load("./bounded-stdio.axl", "bounded_run", "utf8")
+load("./lib/lsp-fixture.axl", "changed", "decode_frames", "document", "error", "frame", "notice", "opened", "request", "result")
+load("./lib/process.axl", "check", "root_path", "scratch_dir")
+load("./lib/strict-json.axl", "decode_list", "decode_object")
+
+_LIMIT = 4 * 1024 * 1024
+_USAGE = "Pass -- --binary <vesper> [--work <directory>]."
+
+def _require(condition, message):
+    if not condition:
+        fail(message)
+
+def _offset(source, position):
+    line, character = position["line"], position["character"]
+    _require(type(line) == "int" and type(character) == "int" and line >= 0 and character >= 0, "Invalid UTF-16 position")
+    row, units = 0, 0
+    previous_cr = False
+    for index, char in enumerate(source.elems()):
+        if char == "\n" and previous_cr:
+            previous_cr = False
+            continue
+        if row == line and units == character:
+            return index
+        if char in "\r\n":
+            _require(row < line, "Edit falls outside its line")
+            row += 1
+            units = 0
+        else:
+            units += 2 if len(bytes(char)) == 4 else 1
+        previous_cr = char == "\r"
+    _require(row == line and units == character, "Edit falls inside a UTF-16 surrogate or outside its line")
+    return len(source)
+
+def _apply(source, edits):
+    spans = sorted([(_offset(source, edit["range"]["start"]), _offset(source, edit["range"]["end"]), edit["newText"]) for edit in edits])
+    _require(all([start <= end for start, end, _ in spans]), "Edit has an inverted range")
+    _require(all([left[1] <= right[0] for left, right in zip(spans, spans[1:])]), "Formatting edits overlap")
+    for start, end, text in reversed(spans):
+        source = source[:start] + text + source[end:]
+    return source
+
+def _execute(ctx, h, argv, expected = 0, input = None):
+    captured = bounded_run(
+        ctx, h.root, h.work, h.binary, argv, timeout = 45, stdout_limit = _LIMIT,
+        stderr_limit = _LIMIT, label = "Stylus compiler", input = input,
+    )
+    if captured.code != expected:
+        ctx.std.io.stderr.write(captured.stdout)
+        ctx.std.io.stderr.write(captured.stderr)
+        fail("Expected exit %d, got %d: %r" % (expected, captured.code, argv))
+    h.counts["commands"] += 1
+    return captured.stdout
+
+def _read(ctx, path):
+    return ctx.std.fs.open(path).read()
+
+def _source(ctx, h, data):
+    h.counts["serial"] += 1
+    path = "%s/source-%d.ves" % (h.work, h.counts["serial"])
+    stream = ctx.std.fs.create(path)
+    written = stream.write(data)
+    stream.close()
+    _require(written == len(data), "Failed to write fixture source")
+    return path
+
+def _json(ctx, h, argv, expected = 0):
+    return decode_object(utf8(_execute(ctx, h, argv + ["--json"], expected)))
+
+def _diagnostics(ctx, h, path, expected):
+    return decode_list(utf8(_execute(ctx, h, ["check", path, "--json"], expected)))
+
+def _formatted(ctx, h, data, recovery = False):
+    path = _source(ctx, h, data)
+    flags = ["fmt", path] + (["--recovery"] if recovery else [])
+    mode = "recovery" if recovery else "source"
+    report = _json(ctx, h, flags + ["--check"], 1)
+    _require(report["schema_version"] == 1 and report["mode"] == mode and report["changed"] and report["check"], "Expected noncanonical source")
+    _require(_read(ctx, path) == data, "Format check mutated source")
+    report = _json(ctx, h, flags)
+    _require(report["schema_version"] == 1 and report["mode"] == mode and report["changed"] and not report["check"], "Expected requested formatting change")
+    if recovery:
+        _require(report["edits"] > 0, "Expected recovered edits")
+    after = _read(ctx, path)
+    _require(after != data and report["input_bytes"] == len(data) and report["output_bytes"] == len(after), "Unexpected formatter byte counts")
+    stable = _json(ctx, h, flags + ["--check"])
+    _require(not stable["changed"] and stable["status"] == "unchanged", "Expected idempotent formatting")
+    if recovery:
+        _require(stable["edits"] == 0, "Canonical recovery output still has edits")
+    _require(_read(ctx, path) == after, "Second format check mutated source")
+    return path, after
+
+def _session(ctx, h, sources):
+    uri = "untitled:stylus/😀"
+    messages = [request(1, "initialize", {"capabilities": {"general": {"positionEncodings": ["utf-16"]}}})]
+    for version, source in enumerate(sources, 1):
+        messages.append(opened(uri, version, source) if version == 1 else changed(uri, version, source))
+        messages.append(request(10 + version, "textDocument/formatting", dict(document(uri), options = {"tabSize": 4, "insertSpaces": True})))
+    messages.extend([
+        request(800, "textDocument/hover", dict(document(uri), position = {"line": 0, "character": 0})),
+        request(900, "shutdown", {}), notice("exit", {}),
+    ])
+    input = bytes([])
+    for message in messages:
+        input += frame(message)
+    replies = decode_frames(_execute(ctx, h, ["lsp"], input = input), max_frame = _LIMIT)
+    h.counts["sessions"] += 1
+    edits = [result(replies, 10 + index) for index in range(1, len(sources) + 1)]
+    _require(all([type(value) == "list" for value in edits]), "Expected formatting edit arrays")
+    publications = [reply["params"] for reply in replies if reply.get("method") == "textDocument/publishDiagnostics"]
+    _require(len(publications) == len(sources), "Unexpected diagnostic count")
+    for version, publication in enumerate(publications, 1):
+        _require(publication["uri"] == uri and publication["version"] == version and publication["vesper"]["status"] == "parse_error" and publication["diagnostics"], "Damaged inputs must retain current parse diagnostics")
+    error(replies, 800, -32003)
+    return edits
+
+def _fixture(ctx, h, name):
+    return _read(ctx, h.root + "/tests/fixtures/stylus/" + name + ".ves")
+
+def _cli_cases(ctx, h):
+    path, after = _formatted(ctx, h, _fixture(ctx, h, "macro"))
+    for payload in ["// fn fake(){} stays a comment", "/* quote {$fake} */", '"fn fake(){ keep!(0) } 😀"']:
+        _require(payload in utf8(after), "Formatter changed a macro payload")
+    artifact = _source(ctx, h, _execute(ctx, h, ["forge", "expand", path]))
+    _require(_diagnostics(ctx, h, artifact, 0) == [] and utf8(_execute(ctx, h, ["run", artifact])).strip() == "42", "Expanded macro artifact must check and run")
+    _require(_read(ctx, path) == after, "Expansion changed formatted source")
+
+    recovery = _fixture(ctx, h, "recovery")
+    path = _source(ctx, h, recovery)
+    _execute(ctx, h, ["fmt", path, "--json"], 1)
+    _require(_read(ctx, path) == recovery, "Ordinary formatter wrote damaged source")
+    path, after = _formatted(ctx, h, recovery, True)
+    _require(utf8(after).startswith(utf8(recovery).partition("fn main")[0]) and utf8(after).endswith("\n\n"), "Unexpected recovery boundary")
+    _require(bool(_diagnostics(ctx, h, path, 1)), "Damaged source must remain unparsable")
+    opaque = _fixture(ctx, h, "opaque")
+    _, after = _formatted(ctx, h, opaque, True)
+    _require(utf8(after).startswith(utf8(opaque).partition("fn literal")[0]) and '"fn string_fake( )->i64{42}"' in utf8(after), "Formatter must retain opaque payloads")
+    only = bytes("fn opaque(){unknown!{ fn fake( )->i64{42} }}")
+    path = _source(ctx, h, only)
+    report = _json(ctx, h, ["fmt", path, "--recovery", "--check"])
+    _require(not report["changed"] and report["edits"] == 0 and _read(ctx, path) == only, "Opaque-only source must retain zero edits")
+
+    for data, check_recovery in [
+        (bytes("fn main(){/* unclosed"), True),
+        (bytes("fn main(){") + bytes([255]) + bytes("}"), True),
+        (bytes(" " * (256 * 1024 + 1)), True),
+        (bytes("macro m($x:ty)->expr{quote{$x}} fn main(){m!(i64)}"), False),
+        (bytes("macro m($x:expr)->expr{quote{$x}} fn main(){m!(m!(42))}"), False),
+    ]:
+        path = _source(ctx, h, data)
+        _execute(ctx, h, ["fmt", path, "--json"], 1)
+        _require(_read(ctx, path) == data, "Format rejection changed source")
+        if check_recovery:
+            _execute(ctx, h, ["fmt", path, "--recovery", "--json"], 1)
+            _require(_read(ctx, path) == data, "Recovery rejection changed source")
+    path = _source(ctx, h, bytes("fn main(){42}"))
+    _execute(ctx, h, ["fmt", path, "--bad"], 1)
+    _execute(ctx, h, ["fmt", h.work, "--recovery", "--check"], 1)
+    _require(_read(ctx, path) == bytes("fn main(){42}"), "Directory format check wrote source")
+    for source, code in [
+        ("linear struct Tx{} fn leak(sink tx:Tx){}", "E0302"),
+        ("linear struct Tx{} fn make()->Tx{Tx{}} fn consume(sink tx:Tx){let Tx{}=tx;} fn main(){let tx=make();consume(tx);consume(tx)}", "E0303"),
+    ]:
+        path, _ = _formatted(ctx, h, bytes(source))
+        diagnostics = _diagnostics(ctx, h, path, 1)
+        _require(any([item["code"] == code for item in diagnostics]), "Formatting lost ownership diagnostic " + code)
+
+def _run(ctx, root, binary, parent = ""):
+    binary = root_path(root, binary)
+    if ctx.std.fs.exists(binary + ".exe") and ctx.std.fs.metadata(binary + ".exe").is_file:
+        binary += ".exe"
+    _require(ctx.std.fs.exists(binary) and ctx.std.fs.metadata(binary).is_file, "Compiler not found: " + binary)
+    if parent:
+        parent = root_path(root, parent)
+        ctx.std.fs.create_dir_all(parent)
+        work = ctx.std.fs.mkdtemp(parent = parent, prefix = "vesper-stylus-")
+        ctx.defer(lambda: ctx.std.fs.remove_dir_all(work))
+    else:
+        work = scratch_dir(ctx, "vesper-stylus-")
+    h = struct(root = root, work = work, binary = binary, counts = {"commands": 0, "sessions": 0, "serial": 0})
+    _cli_cases(ctx, h)
+    sources = ["// 😀\r\nfn damaged(){let x=;}\r\nfn main( )->i64{42}\r\n", "// 😀 updated\r\n\r\nfn damaged(){let x=;}\r\n// 🦀\r\nfn main( )->i64{41}\r\n"]
+    for source, edits in zip(sources, _session(ctx, h, sources)):
+        _require(bool(edits), "Expected formatting edits")
+        candidate = _apply(source, edits)
+        _require(candidate != source and candidate.startswith(source.partition("fn main")[0]) and "fn damaged(){let x=;}" in candidate, "Edits must preserve damaged source")
+        _require(_session(ctx, h, [candidate]) == [[]], "LSP formatting must be stable")
+    _require(not any([entry.path.startswith(".vesper-fmt-") for entry in ctx.std.fs.read_dir(work)]), "Unexpected format scratch artifacts")
+    ctx.std.io.stdout.write(json.encode({
+        "status": "passed", "commands": h.counts["commands"], "stdio_sessions": h.counts["sessions"],
+        "explicit_expanded_source_runs": 1, "scope": "syntax formatting; damaged source remains semantically unavailable",
+    }) + "\n")
+    return 0
+
+def _direct(ctx):
+    options = {}
+    next_flag = ""
+    for value in ctx.args.tool_args:
+        if next_flag:
+            if value.startswith("--"):
+                ctx.std.process.exit(2, "Missing value for " + next_flag)
+            options[next_flag] = value
+            next_flag = ""
+        elif value in ["--help", "-h"]:
+            ctx.std.io.stdout.write(_USAGE + "\n")
+            return 0
+        else:
+            flag, equals, argument = value.partition("=")
+            if flag not in ["--binary", "--work"]:
+                ctx.std.process.exit(2, "Unknown option: " + value)
+            if equals:
+                options[flag] = argument
+            else:
+                next_flag = flag
+    if next_flag or not options.get("--binary"):
+        ctx.std.process.exit(2, _USAGE)
+    return _run(ctx, ctx.std.env.aspect_root_dir(), options["--binary"], options.get("--work", ""))
+
+def _cargo_config(var, root):
+    defaults = {"CARGO_BUILD_JOBS": "1", "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0", "CARGO_INCREMENTAL": "0", "CARGO_TARGET_DIR": "target"}
+    env = {key: var(key) or value for key, value in defaults.items()}
+    return env, root_path(root, env["CARGO_TARGET_DIR"]) + "/debug/vesper"
+
+def _suite(ctx):
+    root = ctx.std.env.aspect_root_dir()
+    binary = ctx.std.env.var("VESPER_STYLUS_BINARY")
+    if not binary:
+        env, binary = _cargo_config(ctx.std.env.var, root)
+        check(ctx, "cargo", ["build", "--locked", "-p", "vesper", "--bin", "vesper"], root, env)
+    return _run(ctx, root, binary)
+
+check_stylus = task(
+    kind = "check-stylus", group = ["acceptance"], summary = "Check macro formatting and partial-buffer edits with a supplied compiler",
+    implementation = _direct, args = {"tool_args": args.trailing_var_args(description = _USAGE)},
+)
+
+test_stylus = task(
+    kind = "test-stylus", group = ["acceptance"], summary = "Exercise Stylus CLI recovery and UTF-16 LSP edits",
+    implementation = _suite,
+)
+
+def _test(ctx):
+    source = "a😀b\r\n🦀 c\n"
+    for line, units, offset in [(0, 1, 1), (0, 3, 2), (0, 4, 3), (1, 0, 5), (1, 2, 6), (2, 0, 9)]:
+        _require(_offset(source, {"line": line, "character": units}) == offset, "Wrong UTF-16 fixture offset")
+    edits = [
+        {"range": {"start": {"line": 1, "character": 2}, "end": {"line": 1, "character": 4}}, "newText": "x"},
+        {"range": {"start": {"line": 0, "character": 3}, "end": {"line": 0, "character": 4}}, "newText": "yz"},
+    ]
+    _require(_apply(source, edits) == "a😀yz\r\n🦀x\n", "Edits did not preserve original coordinates")
+    env, binary = _cargo_config({"CARGO_BUILD_JOBS": "3", "CARGO_TARGET_DIR": "relative target", "CARGO_INCREMENTAL": ""}.get, "/root")
+    _require(binary == "/root/relative target/debug/vesper" and env["CARGO_BUILD_JOBS"] == "3" and env["CARGO_INCREMENTAL"] == "0" and env["CARGO_PROFILE_DEV_DEBUG"] == "0" and env["CARGO_PROFILE_TEST_DEBUG"] == "0", "Cargo defaults or overrides changed")
+    ctx.std.io.stdout.write("Passed Stylus UTF-16 edit and Cargo configuration cases\n")
+    return 0
+
+test_stylus_fixtures = task(
+    kind = "stylus-fixtures", group = ["ci", "tests"], summary = "Check Stylus UTF-16 fixture offsets and Cargo defaults",
+    implementation = _test,
+)

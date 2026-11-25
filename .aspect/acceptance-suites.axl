@@ -9,16 +9,6 @@ def _native_binary(ctx: TaskContext, root: str, binary: str) -> str:
         return candidate
     return binary
 
-def _cargo_env(ctx: TaskContext) -> dict[str, str]:
-    defaults = {
-        "CARGO_BUILD_JOBS": "1",
-        "CARGO_PROFILE_DEV_DEBUG": "0",
-        "CARGO_PROFILE_TEST_DEBUG": "0",
-        "CARGO_INCREMENTAL": "0",
-        "CARGO_TARGET_DIR": "target",
-    }
-    return {key: ctx.std.env.var(key) or value for key, value in defaults.items()}
-
 def _pmu_probe(ctx: TaskContext, root: str):
     probe = executable(ctx, root, "//crates/vesper-bench-pmu:example/probe")
     status = exit_code(command(ctx, probe, [], root).status())
@@ -35,23 +25,15 @@ def _suite(
         binary_env: str = "",
         needs_root: bool = False,
         examples: list[str] = [],
-        pmu: bool = False,
-        cargo: bool = False):
+        pmu: bool = False):
     def run(ctx: TaskContext) -> int:
         root = ctx.std.env.aspect_root_dir()
-        env = _cargo_env(ctx) if cargo else {}
-        binary = ctx.std.env.var(binary_env) if binary_env else None
-        if not binary:
-            if cargo:
-                check(ctx, "cargo", ["build", "--locked", "-p", "vesper", "--bin", "vesper"], root, env)
-                binary = root_path(root, env["CARGO_TARGET_DIR"]) + "/debug/vesper"
-            else:
-                binary = executable(ctx, root, "//:bin/vesper")
+        binary = (ctx.std.env.var(binary_env) if binary_env else None) or executable(ctx, root, "//:bin/vesper")
         argv = ["scripts/check-" + name + ".py", "--binary", _native_binary(ctx, root, binary)]
         if needs_root:
             argv.extend(["--root", root])
         argv.extend(["--work", scratch_dir(ctx, "vesper-" + name + "-")])
-        check(ctx, "python", argv, root, env)
+        check(ctx, "python", argv, root)
         for example in examples:
             run_target(ctx, root, example)
         if pmu:
@@ -73,4 +55,3 @@ test_canonical_protocols = _suite(
 )
 test_editor = _suite("editor", examples = ["//crates/vesper-span:example/source_edits", "//crates/vesper-lsp:example/protocol_documents"])
 test_recovery = _suite("recovery", binary_env = "VESPER_RECOVERY_BINARY")
-test_stylus = _suite("stylus", binary_env = "VESPER_STYLUS_BINARY", cargo = True)

@@ -26,6 +26,7 @@ def _platform_tests(ctx: TaskContext) -> int:
         "doc-links",
         "source-tooling",
         "source-macro-fixtures",
+        "stylus-fixtures",
         "rust-census",
     ]:
         check(ctx, ctx.std.env.current_exe(), ["ci", "tests", suite], root)
