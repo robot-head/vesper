@@ -821,6 +821,13 @@ vesper_crate(
             "resources:memory:9216",
             "resources:cpu:8",
         ],
+        # At most two stage2 compiler builds at once (STAGE2_SLOTS in the test),
+        # each under Wasmtime with up to 4 GiB of linear memory, plus the
+        # in-process compile. Unreserved, it ran the 22GB VM out of memory.
+        "test/wasm_seed_package_io": [
+            "resources:memory:12288",
+            "resources:cpu:2",
+        ],
         # The CLI audit subprocess permits Lean -M8192 and runs serially.
         "test/proof_audit_cli": [
             "resources:memory:9216",
