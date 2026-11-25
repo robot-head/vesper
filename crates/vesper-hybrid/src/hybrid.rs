@@ -298,6 +298,14 @@ static CALLS_EMITTED: AtomicU64 = AtomicU64::new(0);
 static CALLS_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// Programs the Vesper wasm backend compiled, and left to Rust.
 static WASM_CALLS: AtomicU64 = AtomicU64::new(0);
+/// `vesper build --target wasm32-wasip2` runs the Vesper driver encoded for
+/// building in Vesper (#1895), and how many of those fell back to the Rust
+/// pass.
+pub static DRIVER_WASM_INPUTS: AtomicU64 = AtomicU64::new(0);
+pub static DRIVER_WASM_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+/// The same for `vesper build --target bpf`.
+pub static DRIVER_EBPF_INPUTS: AtomicU64 = AtomicU64::new(0);
+pub static DRIVER_EBPF_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 static WASM_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// Programs the Vesper eBPF backend compiled, and left to Rust.
 static EBPF_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -1132,6 +1140,56 @@ fn compile_wasm(
             ))
         }
     }
+}
+
+/// The `wasm` swap's input for `vesper build --target wasm32-wasip2`, which
+/// the Vesper driver compiles and wraps itself (#1895): `None` when the
+/// swap is off or the world does not encode (the Rust step builds it).
+/// `VESPER_HYBRID_DRIVER_WASM=0` keeps the build on the Rust step (the
+/// differential's baseline).
+pub fn wasm_build_input(
+    w: &vesper::check::World,
+    entry: &str,
+    o: &vesper::wasm_backend::WasmOptions,
+) -> Option<Vec<u8>> {
+    vesper::codegen_swap::installed().wasm?;
+    if std::env::var_os("VESPER_HYBRID_DRIVER_WASM").is_some_and(|v| v == "0") {
+        return None;
+    }
+    if !w.functions.contains_key(entry) {
+        return None;
+    }
+    let program = wasm_words::backend_program(w, o)?;
+    wasm_words::wasm_input(w, &program, entry, o)
+}
+
+/// The `ebpf` swap's input for `vesper build --target bpf`, which the Vesper
+/// driver compiles, verifies and writes itself (#1895): the source parsed
+/// and checked as `ebpf_backend::compile_source` does. `None` when the swap
+/// is off, the source has errors or the world does not encode (the Rust
+/// step builds it and reports them). `VESPER_HYBRID_DRIVER_EBPF=0` keeps
+/// the build on the Rust step.
+pub fn ebpf_build_input(input: &str, source: &str, entry: &str) -> Option<Vec<u8>> {
+    vesper::codegen_swap::installed().ebpf?;
+    if std::env::var_os("VESPER_HYBRID_DRIVER_EBPF").is_some_and(|v| v == "0") {
+        return None;
+    }
+    let options = vesper::ebpf_backend::Options {
+        entry: entry.to_owned(),
+        file: std::path::Path::new(input)
+            .file_name()
+            .map_or_else(|| input.to_owned(), |f| f.to_string_lossy().into_owned()),
+        policy: Default::default(),
+    };
+    let (source, parsed) = vesper::forge_frontend::parse_compiler_source(source, false).ok()?;
+    if !parsed.diagnostics.is_empty() {
+        return None;
+    }
+    let checked = vesper::check::check(&parsed.module);
+    if !checked.diagnostics.is_empty() {
+        return None;
+    }
+    ebpf_words::input(&checked.world, Some(&source), &options)
 }
 
 /// `wasm_words::artifact` with the component given: the artifact of a
@@ -2082,6 +2140,16 @@ extern "C" fn report() {
         "vesper-hybrid: wasm backend compiled {} programs from Vesper ({} declined)",
         WASM_CALLS.load(Relaxed),
         WASM_DECLINED.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: driver built {} wasm components in Vesper ({} fell back to Rust)",
+        DRIVER_WASM_INPUTS.load(Relaxed) - DRIVER_WASM_FALLBACKS.load(Relaxed),
+        DRIVER_WASM_FALLBACKS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: driver built {} eBPF objects in Vesper ({} fell back to Rust)",
+        DRIVER_EBPF_INPUTS.load(Relaxed) - DRIVER_EBPF_FALLBACKS.load(Relaxed),
+        DRIVER_EBPF_FALLBACKS.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: eBPF backend compiled {} programs from Vesper ({} declined)",

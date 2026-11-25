@@ -293,6 +293,10 @@ pub struct Session {
     checked: Option<check::Checked>,
     /// The last error message or pass result (`hd_text`).
     text: Vec<u8>,
+    /// `WasmInput` handed the build to the Vesper driver (#1895).
+    wasm_input: bool,
+    /// `EbpfInput` did.
+    ebpf_input: bool,
 }
 
 /// The passes (`step_*` in modules/driver/src/lib.ves).
@@ -330,9 +334,11 @@ enum Step {
     EmitLean,
     EmitClif = 26,
     IoError,
+    WasmInput = 60,
+    EbpfInput,
 }
 
-const STEPS: [Step; 26] = [
+const STEPS: [Step; 28] = [
     Step::IsPackage,
     Step::Load,
     Step::EbpfBuild,
@@ -359,6 +365,8 @@ const STEPS: [Step; 26] = [
     Step::EmitLean,
     Step::EmitClif,
     Step::IoError,
+    Step::WasmInput,
+    Step::EbpfInput,
 ];
 
 /// A pass failed; its message is the session's text.
@@ -473,7 +481,11 @@ impl Session {
             | Step::WindowsLink
             | Step::Run
             | Step::Jit => self.native_step(step, arg),
-            Step::WasmBuild | Step::EbpfBuild | Step::VerifiedBuild => self.backends_step(step),
+            Step::WasmBuild
+            | Step::EbpfBuild
+            | Step::VerifiedBuild
+            | Step::WasmInput
+            | Step::EbpfInput => self.backends_step(step, arg),
         }
     }
 }
@@ -579,6 +591,8 @@ pub mod host {
                     parsed: None,
                     checked: None,
                     text: vec![],
+                    wasm_input: false,
+                    ebpf_input: false,
                 }))
             }
             None => std::ptr::null_mut(),

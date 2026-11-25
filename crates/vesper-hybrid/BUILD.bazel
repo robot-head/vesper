@@ -86,14 +86,20 @@ vesper_hybrid(
             "//crates/vesper-serde:port_package",
         ],
         # The driver (#1335) builds on @vesper/driver and @vesper-std I/O.
-        # The command layers (#1336) add @vesper/driver-commands.
+        # The command layers (#1336) add @vesper/driver-commands, and the
+        # wasm and eBPF builds (#1895) those backends and wit-component.
         "hybrid_driver": [
+            "//:check_data_package",
             "//:driver_commands_package",
             "//:driver_package",
+            "//:ebpf_backend_package",
+            "//:place_ir_package",
             "//:std_env_package",
             "//:std_fmt_package",
             "//:std_fs_package",
             "//:std_process_package",
+            "//:wasm_backend_package",
+            "//:wit_component_package",
         ],
         "hybrid_checks": [
             "//:check_data_package",

@@ -79,7 +79,19 @@ use @vesper-std/fs::{
     IoError,
     read_path,
     write_path,
+    replace_path,
     remove_file
+};
+// `vesper build --target wasm32-wasip2` in Vesper (#1895).
+use @vesper/wasm-backend::{
+    wasm_backend_module
+};
+use @vesper/wit-component::{
+    wit_component_command
+};
+// `vesper build --target bpf` in Vesper (#1895).
+use @vesper/ebpf-backend::{
+    ebpf_backend_build
 };
 use @vesper-std/fmt::{
     write_u64
@@ -205,6 +217,14 @@ fn step_emit_clif() -> u32 {
 
 fn step_io_error() -> u32 {
     27
+}
+
+fn step_wasm_input() -> u32 {
+    60
+}
+
+fn step_ebpf_input() -> u32 {
+    61
 }
 
 fn fail_code() -> i64 {
@@ -410,7 +430,7 @@ fn drive(inout s: Session, in o: Options)
         return loaded;
     }
     if c == cmd_build() && is(in o, slot_target(), in "bpf") {
-        return pass(inout s, step_ebpf_build());
+        return ebpf_build(inout s, in o);
     }
     let r = step(inout s, step_parse());
     if is_failure(r) {
@@ -517,7 +537,7 @@ fn build(inout s: Session, in o: Options)
         if o.verifiers != 0 || has(in o, slot_policy()) || o.tee {
             return error(in "--verify and --tee apply to native targets only".as_bytes());
         }
-        return pass(inout s, step_wasm_build());
+        return wasm_build(inout s, in o);
     }
     if !is(in o, slot_entry(), in "main") {
         return error(in "build currently requires entry 'main'".as_bytes());
@@ -597,6 +617,102 @@ fn link(in linker: Slice[u8], in object: Slice[u8], in path: Slice[u8])
         },
         Result::Err(e) => error_word(e),
     }
+}
+
+// `--target wasm32-wasip2`: the session encodes the checked world (the
+// `wasm` swap's input), and @vesper/wasm-backend and @vesper/wit-component
+// build the component here, written atomically. A world that does not
+// encode, a backend error or construct not ported yet, a WIT the wrapper
+// declines and a failed write all go to the Rust pass, so its messages and
+// its fallbacks stay Rust's.
+fn wasm_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    let r = step(inout s, step_wasm_input());
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    if r == 0 {
+        return pass(inout s, step_wasm_build());
+    }
+    let input = text(in s);
+    let mut core: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut wit: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if !wasm_backend_module(in input.as_slice(), inout core, inout wit) {
+        // The swap would decline it too: the Rust pass skips it.
+        let mut declined: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        declined.push(1);
+        return pass_with(inout s, step_wasm_build(), in declined.as_slice());
+    }
+    let mut component: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if wit_component_command(in wit.as_slice(), in core.as_slice(), inout component) != 0 {
+        return pass(inout s, step_wasm_build());
+    }
+    let mut path = value(in o, slot_output());
+    if !has(in o, slot_output()) {
+        path.extend(in "a.wasm".as_bytes());
+    }
+    let failed = handle Fail[IoError] in {
+        replace_path(in path.as_slice(), in component.as_slice());
+        0
+    } with {
+        return v => v,
+        raise(e, _) => error_word(e),
+    };
+    if failed != 0 {
+        return pass(inout s, step_wasm_build());
+    }
+    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    line.extend(in "built ".as_bytes());
+    line.extend(in path.as_slice());
+    line.extend(in " (wasm32-wasip2 component)".as_bytes());
+    line.push(10);
+    print(stdout_stream(), in line.as_slice());
+    0
+}
+
+// `--target bpf`: the session parses and checks the source and encodes
+// the world (the `ebpf` swap's input); @vesper/ebpf-backend compiles,
+// verifies and writes the ELF object here. A program that does not parse,
+// check or encode, a backend or verifier rejection and a failed write all
+// go to the Rust pass, so its messages stay Rust's.
+fn ebpf_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    let r = step(inout s, step_ebpf_input());
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    if r == 0 {
+        return pass(inout s, step_ebpf_build());
+    }
+    let input = text(in s);
+    let mut object: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut tail: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if ebpf_backend_build(in input.as_slice(), inout object, inout tail) != 0 {
+        return pass(inout s, step_ebpf_build());
+    }
+    let path = if has(in o, slot_output()) {
+        value(in o, slot_output())
+    } else {
+        let source = value(in o, slot_input());
+        with_extension(in source.as_slice(), in "o", os() == os_windows())
+    };
+    let failed = handle Fail[IoError] in {
+        write_path(in path.as_slice(), in object.as_slice());
+        0
+    } with {
+        return v => v,
+        raise(e, _) => error_word(e),
+    };
+    if failed != 0 {
+        return pass(inout s, step_ebpf_build());
+    }
+    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    line.extend(in "wrote ".as_bytes());
+    line.extend(in path.as_slice());
+    line.extend(in " (".as_bytes());
+    write_u64(inout line, object.len());
+    line.extend(in " bytes): ".as_bytes());
+    line.extend(in tail.as_slice());
+    print(stdout_stream(), in line.as_slice());
+    0
 }
 
 fn error_word(e: IoError) -> u64 {

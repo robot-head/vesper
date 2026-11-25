@@ -1,0 +1,1454 @@
+// Module object of @vesper/ebpf-backend (see lib.ves): what
+// `vesper build --target bpf` does after lowering (#1895), so the Vesper
+// driver builds the object itself. `vesper_ebpf::verify` through the
+// @vesper/ebpf verifier, `Compiled::object` (vesper_ebpf::elf::write_object
+// with `btf_ext::build` or `maps_btf`) and the summary of
+// src/ebpf_backend.rs `build_command`.
+//
+// Only what the compiler's programs use is written: no kfuncs, CO-RE
+// relocations or attach targets (the backend emits none). The ELF layout
+// is the `object` crate's (0.37) for a relocatable little-endian BPF
+// file: sections in the order they are added, each with its `.rel`
+// section after it when it has relocations, then `.symtab`, `.strtab`
+// and `.shstrtab`; string tables sorted by reversed bytes with suffixes
+// merged.
+
+use @vesper/check-data::util::{
+    push_decimal,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/ebpf::insn::{
+    RawInsn
+};
+use @vesper/ebpf::program::{
+    MapKind,
+    ProgramType,
+    map_validate
+};
+use @vesper/ebpf::verifier::{
+    Outcome,
+    new_pools,
+    verify_program
+};
+use self::asm::{
+    MapRow,
+    LineRow,
+    slot_at
+};
+use self::backend::{
+    G
+};
+use self::extra::{
+    Extra
+};
+
+// BTF (src/btf.rs) and `.BTF.ext` (src/btf_ext.rs) constants.
+const BTF_MAGIC: u64 = 60319;
+const BTF_HDR_LEN: u64 = 24;
+const EXT_HDR_LEN: u64 = 32;
+const KIND_INT: u32 = 1;
+const KIND_PTR: u32 = 2;
+const KIND_ARRAY: u32 = 3;
+const KIND_STRUCT: u32 = 4;
+const KIND_FUNC: u32 = 12;
+const KIND_FUNC_PROTO: u32 = 13;
+const KIND_VAR: u32 = 14;
+const KIND_DATASEC: u32 = 15;
+const FUNC_STATIC: u32 = 0;
+const FUNC_GLOBAL: u32 = 1;
+const VAR_GLOBAL_ALLOCATED: u32 = 1;
+const FUNC_REC_SIZE: u32 = 8;
+const LINE_REC_SIZE: u32 = 16;
+const CORE_REC_SIZE: u32 = 16;
+const LINE_COL_MASK: u32 = 1023;
+const LINE_LIMIT: u32 = 4194304;
+
+// ELF constants.
+const ET_REL: u64 = 1;
+const EM_BPF: u64 = 247;
+const SHT_PROGBITS: u32 = 1;
+const SHT_SYMTAB: u32 = 2;
+const SHT_STRTAB: u32 = 3;
+const SHT_REL: u32 = 9;
+const SHF_WRITE: u64 = 1;
+const SHF_ALLOC: u64 = 2;
+const SHF_EXECINSTR: u64 = 4;
+const SHF_INFO_LINK: u64 = 64;
+const STT_OBJECT: u8 = 1;
+const STT_FUNC: u8 = 2;
+const STB_GLOBAL: u8 = 16;
+const R_BPF_64_64: u64 = 1;
+const HEADER: u64 = 64;
+const SECTION_HEADER: u64 = 64;
+const SYM: u64 = 24;
+const REL: u64 = 16;
+
+// `PT_REGS_SIZE` of x86-64 (only kprobe contexts read it; the backend
+// writes XDP and tc programs) and the default `VerifierPolicy`.
+const PT_REGS: i64 = 168;
+const MAX_INSNS: u64 = 1000000;
+const MAX_STATES: u64 = 64;
+
+// Why the build was left to Rust (any of them reruns the Rust pass).
+const D_COMPILE: u64 = 1;
+const D_MAP: u64 = 2;
+const D_VERIFY: u64 = 3;
+const D_LINE: u64 = 4;
+const D_NAME: u64 = 5;
+
+// ------------------------------------------------------------------ bytes
+
+fn put16(inout o: ChunkSeq[u8], v: u64) {
+    o.push(wrapping_u8(v & 255));
+    o.push(wrapping_u8(wrapping_shr_u64(v, 8) & 255));
+}
+
+fn put32(inout o: ChunkSeq[u8], v: u64) {
+    for k in 0..4 {
+        o.push(wrapping_u8(wrapping_shr_u64(v, wrapping_mul(wrapping_u32(k), 8)) & 255));
+    }
+}
+
+fn put64(inout o: ChunkSeq[u8], v: u64) {
+    for k in 0..8 {
+        o.push(wrapping_u8(wrapping_shr_u64(v, wrapping_mul(wrapping_u32(k), 8)) & 255));
+    }
+}
+
+fn pad_to(inout o: ChunkSeq[u8], align: u64) {
+    if align > 1 {
+        loop {
+            if (o.len() & wrapping_sub(align, 1)) == 0 {
+                break;
+            }
+            o.push(0);
+        }
+    }
+}
+
+fn align_up(x: u64, align: u64) -> u64 {
+    if align <= 1 {
+        return x;
+    }
+    let r = x & wrapping_sub(align, 1);
+    if r == 0 {
+        x
+    } else {
+        wrapping_add(x, wrapping_sub(align, r))
+    }
+}
+
+fn same(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if u8_of(in a, i) != u8_of(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn u8_of(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// ---------------------------------------------------------------- program
+
+// The assembled program with its strings in one pool: string k of a list
+// is pool[a[k]..b[k]].
+struct Prog {
+    pool: ChunkSeq[u8],
+    name_a: u64,
+    name_b: u64,
+    sec_a: u64,
+    sec_b: u64,
+    file_a: u64,
+    file_b: u64,
+    xdp: bool,
+    insns: ChunkSeq[RawInsn],
+    map_a: ChunkSeq[u64],
+    map_b: ChunkSeq[u64],
+    map_kind: ChunkSeq[u8],
+    map_key: ChunkSeq[u32],
+    map_value: ChunkSeq[u32],
+    map_max: ChunkSeq[u32],
+    map_flags: ChunkSeq[u32],
+    // (slot, map) pairs
+    relocs: ChunkSeq[u64],
+    fn_a: ChunkSeq[u64],
+    fn_b: ChunkSeq[u64],
+    fn_slot: ChunkSeq[u64],
+    line_slot: ChunkSeq[u64],
+    line_a: ChunkSeq[u64],
+    line_b: ChunkSeq[u64],
+    line_line: ChunkSeq[u32],
+    line_col: ChunkSeq[u32],
+    bind_a: ChunkSeq[u64],
+    bind_b: ChunkSeq[u64],
+}
+
+fn pool_sym(inout p: Prog, in names: Names, s: u32) -> (u64, u64) {
+    let a = p.pool.len();
+    names.write(s, inout p.pool);
+    (a, p.pool.len())
+}
+
+fn pool_bytes(inout p: Prog, in b: Slice[u8]) -> (u64, u64) {
+    let a = p.pool.len();
+    p.pool.extend(in b);
+    (a, p.pool.len())
+}
+
+fn prog_of(in g: G, in names: Names, in x: Extra) -> Prog {
+    let mut p = Prog {
+        pool: ChunkSeq::new[u8](),
+        name_a: 0,
+        name_b: 0,
+        sec_a: 0,
+        sec_b: 0,
+        file_a: 0,
+        file_b: 0,
+        xdp: g.action == 0,
+        insns: ChunkSeq::new[RawInsn](),
+        map_a: ChunkSeq::new[u64](),
+        map_b: ChunkSeq::new[u64](),
+        map_kind: ChunkSeq::new[u8](),
+        map_key: ChunkSeq::new[u32](),
+        map_value: ChunkSeq::new[u32](),
+        map_max: ChunkSeq::new[u32](),
+        map_flags: ChunkSeq::new[u32](),
+        relocs: ChunkSeq::new[u64](),
+        fn_a: ChunkSeq::new[u64](),
+        fn_b: ChunkSeq::new[u64](),
+        fn_slot: ChunkSeq::new[u64](),
+        line_slot: ChunkSeq::new[u64](),
+        line_a: ChunkSeq::new[u64](),
+        line_b: ChunkSeq::new[u64](),
+        line_line: ChunkSeq::new[u32](),
+        line_col: ChunkSeq::new[u32](),
+        bind_a: ChunkSeq::new[u64](),
+        bind_b: ChunkSeq::new[u64](),
+    };
+    let (a, b) = pool_bytes(inout p, in g.name.as_slice());
+    p.name_a = a;
+    p.name_b = b;
+    let section = if p.xdp {
+        "xdp"
+    } else {
+        "classifier"
+    };
+    let (a, b) = pool_bytes(inout p, in section.as_bytes());
+    p.sec_a = a;
+    p.sec_b = b;
+    let (a, b) = pool_sym(inout p, in names, x.file);
+    p.file_a = a;
+    p.file_b = b;
+    for i in 0..g.asm.slots.len() {
+        p.insns.push(slot_at(in g.asm.slots, i));
+    }
+    for i in 0..g.asm.maps.len() {
+        match g.asm.maps.try_get(i) {
+            Option::Some(m) => {
+                let (a, b) = pool_sym(inout p, in names, m.name);
+                p.map_a.push(a);
+                p.map_b.push(b);
+                p.map_kind.push(m.kind);
+                p.map_key.push(m.key);
+                p.map_value.push(m.value);
+                p.map_max.push(m.max);
+                p.map_flags.push(m.flags);
+            },
+            Option::None => (),
+        }
+    }
+    for i in 0..g.asm.relocs.len() {
+        p.relocs.push(u64_at(in g.asm.relocs, i));
+    }
+    for i in 0..g.asm.fn_names.len() {
+        let (a, b) = pool_sym(inout p, in names, u32_at(in g.asm.fn_names, i));
+        p.fn_a.push(a);
+        p.fn_b.push(b);
+        p.fn_slot.push(g.asm.resolve(u64_at(in g.asm.fn_labels, i)));
+    }
+    for i in 0..g.asm.lines.len() {
+        match g.asm.lines.try_get(i) {
+            Option::Some(l) => {
+                let a = p.pool.len();
+                for k in l.ta..l.tb {
+                    p.pool.push(u8_at(in x.source, k));
+                }
+                p.line_slot.push(l.slot);
+                p.line_a.push(a);
+                p.line_b.push(p.pool.len());
+                p.line_line.push(l.line);
+                p.line_col.push(l.col);
+            },
+            Option::None => (),
+        }
+    }
+    for i in 0..g.map_effects.len() {
+        let (a, b) = pool_sym(inout p, in names, u32_at(in g.map_effects, i));
+        p.bind_a.push(a);
+        p.bind_b.push(b);
+    }
+    p
+}
+
+// The backend's map kind (asm.ves `MapRow.kind`).
+fn map_kind(k: u8) -> MapKind {
+    if k == 0 {
+        MapKind::Hash
+    } else if k == 1 {
+        MapKind::Array
+    } else if k == 2 {
+        MapKind::PerCpuHash
+    } else if k == 3 {
+        MapKind::PerCpuArray
+    } else {
+        MapKind::LruHash
+    }
+}
+
+fn kernel_type(k: u8) -> u32 {
+    if k == 0 {
+        1
+    } else if k == 1 {
+        2
+    } else if k == 2 {
+        5
+    } else if k == 3 {
+        6
+    } else {
+        9
+    }
+}
+
+// `MapKind`'s `Debug` name.
+fn kind_name(k: u8) -> Str {
+    if k == 0 {
+        "Hash"
+    } else if k == 1 {
+        "Array"
+    } else if k == 2 {
+        "PerCpuHash"
+    } else if k == 3 {
+        "PerCpuArray"
+    } else {
+        "LruHash"
+    }
+}
+
+fn seq64(in s: ChunkSeq[u64], i: u64) -> u64 {
+    u64_at(in s, i)
+}
+
+// ----------------------------------------------------------------- verify
+
+// `vesper_ebpf::verify` (src/port.rs): the map checks, then the verifier.
+// The outcome words on acceptance, or None on any rejection.
+fn verify(in p: Prog) -> Option[ChunkSeq[u64]] {
+    let mut maps: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..p.map_a.len() {
+        let a = seq64(in p.map_a, i);
+        let b = seq64(in p.map_b, i);
+        let name = match String::from_utf8(in p.pool[a..b]) {
+            Option::Some(s) => s,
+            Option::None => return Option::None,
+        };
+        let kind = u8_at(in p.map_kind, i);
+        let rule = map_validate(
+            in name.as_str(),
+            map_kind(kind),
+            u32_at(in p.map_key, i),
+            u32_at(in p.map_value, i),
+            u32_at(in p.map_max, i)
+        );
+        if rule != 0 {
+            return Option::None;
+        }
+        maps.push(w(kernel_type(kind)));
+        maps.push(w(u32_at(in p.map_key, i)));
+        maps.push(w(u32_at(in p.map_value, i)));
+        maps.push(w(u32_at(in p.map_max, i)));
+        maps.push(text.len());
+        maps.push(wrapping_sub(b, a));
+        text.extend(in p.pool[a..b]);
+    }
+    let kfuncs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut pools = new_pools();
+    let ptype = if p.xdp {
+        ProgramType::Xdp
+    } else {
+        ProgramType::SchedCls
+    };
+    let out = verify_program(
+        in p.insns.as_slice(),
+        ptype,
+        PT_REGS,
+        true,
+        in maps.as_slice(),
+        in kfuncs.as_slice(),
+        in text.as_slice(),
+        MAX_INSNS,
+        MAX_STATES,
+        true,
+        inout pools
+    );
+    if seq64(in out.words, 0) != 0 {
+        return Option::None;
+    }
+    Option::Some(out.words)
+}
+
+// -------------------------------------------------------------------- BTF
+
+// `BtfBuilder` (src/btf.rs): types, strings (each added once) and the
+// number of types.
+struct Btf {
+    types: ChunkSeq[u8],
+    strings: ChunkSeq[u8],
+    so: ChunkSeq[u64],
+    sn: ChunkSeq[u64],
+    count: u32,
+}
+
+fn btf_new() -> Btf {
+    let mut b = Btf {
+        types: ChunkSeq::new[u8](),
+        strings: ChunkSeq::new[u8](),
+        so: ChunkSeq::new[u64](),
+        sn: ChunkSeq::new[u64](),
+        count: 0,
+    };
+    b.strings.push(0);
+    b
+}
+
+fn btf_str(inout b: Btf, in s: Slice[u8]) -> u32 {
+    let n = s.len();
+    if n == 0 {
+        return 0;
+    }
+    for k in 0..b.so.len() {
+        let o = seq64(in b.so, k);
+        if seq64(in b.sn, k) == n && same(in b.strings[o..wrapping_add(o, n)], in s) {
+            return wrapping_u32(o);
+        }
+    }
+    let o = b.strings.len();
+    b.strings.extend(in s);
+    b.strings.push(0);
+    b.so.push(o);
+    b.sn.push(n);
+    wrapping_u32(o)
+}
+
+fn btf_word(inout b: Btf, v: u32) {
+    put32(inout b.types, w(v));
+}
+
+fn btf_header(inout b: Btf, name: u32, kind: u32, vlen: u32, size_or_type: u32) -> u32 {
+    btf_word(inout b, name);
+    btf_word(inout b, wrapping_shl_u32(kind, 24) | (vlen & 65535));
+    btf_word(inout b, size_or_type);
+    b.count = wrapping_add(b.count, 1);
+    b.count
+}
+
+fn btf_int(inout b: Btf, in name: Str, size: u32, signed: bool) -> u32 {
+    let n = btf_str(inout b, in name.as_bytes());
+    let t = btf_header(inout b, n, KIND_INT, 0, size);
+    let enc: u32 = if signed {
+        16777216
+    } else {
+        0
+    };
+    btf_word(inout b, enc | wrapping_mul(size, 8));
+    t
+}
+
+fn btf_finish(in b: Btf) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put16(inout out, BTF_MAGIC);
+    out.push(1);
+    out.push(0);
+    put32(inout out, BTF_HDR_LEN);
+    put32(inout out, 0);
+    put32(inout out, b.types.len());
+    put32(inout out, b.types.len());
+    put32(inout out, b.strings.len());
+    out.extend(in b.types.as_slice());
+    out.extend(in b.strings.as_slice());
+    out
+}
+
+// The `__uint()` members of map k (`map_fields`): (name, value) pairs.
+fn field_count(in p: Prog, k: u64) -> u64 {
+    if u32_at(in p.map_flags, k) != 0 {
+        5
+    } else {
+        4
+    }
+}
+
+fn field_name(f: u64) -> Str {
+    if f == 0 {
+        "type"
+    } else if f == 1 {
+        "key_size"
+    } else if f == 2 {
+        "value_size"
+    } else if f == 3 {
+        "max_entries"
+    } else {
+        "map_flags"
+    }
+}
+
+fn field_value(in p: Prog, k: u64, f: u64) -> u32 {
+    if f == 0 {
+        kernel_type(u8_at(in p.map_kind, k))
+    } else if f == 1 {
+        u32_at(in p.map_key, k)
+    } else if f == 2 {
+        u32_at(in p.map_value, k)
+    } else if f == 3 {
+        u32_at(in p.map_max, k)
+    } else {
+        u32_at(in p.map_flags, k)
+    }
+}
+
+// The `.maps` types (`maps_btf`, and the start of `btf_ext::build`): each
+// map's offset in `.maps`, and the section size.
+fn maps_types(inout b: Btf, in p: Prog, inout offsets: ChunkSeq[u64]) -> u64 {
+    let int = btf_int(inout b, in "int", 4, true);
+    let mut ptr_value: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut ptr_type: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut vars: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut at: u64 = 0;
+    for k in 0..p.map_a.len() {
+        let n = field_count(in p, k);
+        let mut member_types: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for f in 0..n {
+            let v = field_value(in p, k, f);
+            let mut t: u32 = 0;
+            let mut found = false;
+            for j in 0..ptr_value.len() {
+                if !found && u32_at(in ptr_value, j) == v {
+                    t = u32_at(in ptr_type, j);
+                    found = true;
+                }
+            }
+            if !found {
+                let arr = btf_header(inout b, 0, KIND_ARRAY, 0, 0);
+                btf_word(inout b, int);
+                btf_word(inout b, int);
+                btf_word(inout b, v);
+                t = btf_header(inout b, 0, KIND_PTR, 0, arr);
+                ptr_value.push(v);
+                ptr_type.push(t);
+            }
+            member_types.push(t);
+        }
+        let size = wrapping_u32(wrapping_mul(8, n));
+        let mut member_names: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for f in 0..n {
+            let s = btf_str(inout b, in field_name(f).as_bytes());
+            member_names.push(s);
+        }
+        let st = btf_header(inout b, 0, KIND_STRUCT, wrapping_u32(n), size);
+        for f in 0..n {
+            btf_word(inout b, u32_at(in member_names, f));
+            btf_word(inout b, u32_at(in member_types, f));
+            btf_word(inout b, wrapping_u32(wrapping_mul(f, 64)));
+        }
+        let a = seq64(in p.map_a, k);
+        let z = seq64(in p.map_b, k);
+        let vname = btf_str(inout b, in p.pool[a..z]);
+        let var = btf_header(inout b, vname, KIND_VAR, 0, st);
+        btf_word(inout b, VAR_GLOBAL_ALLOCATED);
+        vars.push(var);
+        vars.push(wrapping_u32(at));
+        vars.push(size);
+        offsets.push(at);
+        at = wrapping_add(at, w(size));
+    }
+    let nv = vars.len() / 3;
+    if nv > 0 {
+        let sname = btf_str(inout b, in ".maps".as_bytes());
+        let s = btf_header(inout b, sname, KIND_DATASEC, wrapping_u32(nv), wrapping_u32(at));
+        for i in 0..vars.len() {
+            btf_word(inout b, u32_at(in vars, i));
+        }
+    }
+    at
+}
+
+// `btf::subprog_starts`: 0 and the targets of local calls and
+// `BPF_PSEUDO_FUNC` loads, sorted, each once.
+fn subprog_starts(in p: Prog) -> ChunkSeq[u64] {
+    let n = p.insns.len();
+    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    starts.push(0);
+    for pc in 0..n {
+        let i = slot_at(in p.insns, pc);
+        let local_call = i.code == 133 && i.src == 1;
+        let func_load = i.code == 24 && i.src == 4;
+        if local_call || func_load {
+            let t = wrapping_add(wrapping_add(wrapping_i64(pc), 1), widen_i64(i.imm));
+            if t >= 0 && t < wrapping_i64(n) {
+                insert_sorted(inout starts, wrapping_u64(t));
+            }
+        }
+    }
+    starts
+}
+
+fn insert_sorted(inout s: ChunkSeq[u64], v: u64) {
+    let n = s.len();
+    let mut at = n;
+    for k in 0..n {
+        let x = seq64(in s, k);
+        if x == v {
+            return;
+        }
+        if at == n && x > v {
+            at = k;
+        }
+    }
+    s.push(0);
+    let mut k = n;
+    loop {
+        if k <= at {
+            break;
+        }
+        let prev = seq64(in s, wrapping_sub(k, 1));
+        let ok = s.try_set(k, prev);
+        k = wrapping_sub(k, 1);
+    }
+    let ok = s.try_set(at, v);
+}
+
+// `c_identifier`: bytes other than ASCII letters, digits and `_` become
+// `_`, and a leading `_` when empty or starting with a digit. False for a
+// name that is not ASCII (Rust maps each character, not each byte).
+fn c_identifier(in s: Slice[u8], inout out: ChunkSeq[u8]) -> bool {
+    let n = s.len();
+    let first = u8_of(in s, 0);
+    if n == 0 || (first >= 48 && first <= 57) {
+        out.push(95);
+    }
+    for i in 0..n {
+        let c = u8_of(in s, i);
+        if c >= 128 {
+            return false;
+        }
+        let ok = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95;
+        if ok {
+            out.push(c);
+        } else {
+            out.push(95);
+        }
+    }
+    true
+}
+
+// `add_func_types`: the FUNC of every subprogram; the (slot, type id)
+// pairs, or false for a name `c_identifier` maps per character.
+fn func_types(inout b: Btf, in p: Prog, inout infos: ChunkSeq[u64]) -> bool {
+    let int = btf_int(inout b, in "int", 4, true);
+    let u64t = btf_int(inout b, in "unsigned long long", 8, false);
+    let void_ptr = btf_header(inout b, 0, KIND_PTR, 0, 0);
+    let ctx = btf_str(inout b, in "ctx".as_bytes());
+    let main_proto = btf_header(inout b, 0, KIND_FUNC_PROTO, 1, int);
+    btf_word(inout b, ctx);
+    btf_word(inout b, void_ptr);
+    let a1 = btf_str(inout b, in "a1".as_bytes());
+    let a2 = btf_str(inout b, in "a2".as_bytes());
+    let sub_proto = btf_header(inout b, 0, KIND_FUNC_PROTO, 2, int);
+    btf_word(inout b, a1);
+    btf_word(inout b, u64t);
+    btf_word(inout b, a2);
+    btf_word(inout b, void_ptr);
+    let starts = subprog_starts(in p);
+    for k in 0..starts.len() {
+        let start = seq64(in starts, k);
+        let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let mut named = false;
+        for f in 0..p.fn_slot.len() {
+            if !named && seq64(in p.fn_slot, f) == start {
+                let a = seq64(in p.fn_a, f);
+                let z = seq64(in p.fn_b, f);
+                name.extend(in p.pool[a..z]);
+                named = true;
+            }
+        }
+        if !named {
+            if start == 0 {
+                name.extend(in p.pool[p.name_a..p.name_b]);
+            } else {
+                name.extend(in "sub_".as_bytes());
+                push_decimal(inout name, start);
+            }
+        }
+        let mut id_bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        if !c_identifier(in name.as_slice(), inout id_bytes) {
+            return false;
+        }
+        let n = btf_str(inout b, in id_bytes.as_slice());
+        let (proto, linkage) = if start == 0 {
+            (main_proto, FUNC_GLOBAL)
+        } else {
+            (sub_proto, FUNC_STATIC)
+        };
+        let id = btf_header(inout b, n, KIND_FUNC, linkage, proto);
+        infos.push(start);
+        infos.push(w(id));
+    }
+    true
+}
+
+// A `.BTF.ext` subsection: the record size, then (section, count,
+// records) when there are records.
+fn subsection(
+    inout out: ChunkSeq[u8],
+    rec_size: u32,
+    sec: u32,
+    in records: ChunkSeq[u32],
+    words: u64
+) {
+    put32(inout out, w(rec_size));
+    let n = if words == 2 {
+        records.len() / 2
+    } else {
+        records.len() / 4
+    };
+    if n > 0 {
+        put32(inout out, w(sec));
+        put32(inout out, n);
+        for i in 0..records.len() {
+            put32(inout out, w(u32_at(in records, i)));
+        }
+    }
+}
+
+// `btf_ext::build` for a program without kfuncs or CO-RE relocations:
+// `.BTF`, `.BTF.ext`, the map offsets and the `.maps` size; false when a
+// line or a function name is out of what Rust writes the same way.
+fn object_btf(
+    in p: Prog,
+    inout btf: ChunkSeq[u8],
+    inout ext: ChunkSeq[u8],
+    inout offsets: ChunkSeq[u64],
+    inout maps_size: u64
+) -> u64 {
+    let mut b = btf_new();
+    maps_size = maps_types(inout b, in p, inout offsets);
+    let mut infos: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if !func_types(inout b, in p, inout infos) {
+        return D_NAME;
+    }
+    let mut lines: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..p.line_slot.len() {
+        let line = u32_at(in p.line_line, i);
+        let col = u32_at(in p.line_col, i);
+        if col > LINE_COL_MASK || line >= LINE_LIMIT {
+            return D_LINE;
+        }
+        lines.push(wrapping_u32(wrapping_mul(seq64(in p.line_slot, i), 8)));
+        lines.push(btf_str(inout b, in p.pool[p.file_a..p.file_b]));
+        let a = seq64(in p.line_a, i);
+        let z = seq64(in p.line_b, i);
+        lines.push(btf_str(inout b, in p.pool[a..z]));
+        lines.push(wrapping_shl_u32(line, 10) | col);
+    }
+    let sec = btf_str(inout b, in p.pool[p.sec_a..p.sec_b]);
+    let mut fi: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in 0..infos.len() / 2 {
+        fi.push(wrapping_u32(wrapping_mul(seq64(in infos, wrapping_mul(k, 2)), 8)));
+        fi.push(wrapping_u32(seq64(in infos, wrapping_add(wrapping_mul(k, 2), 1))));
+    }
+    let core: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut f: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    subsection(inout f, FUNC_REC_SIZE, sec, in fi, 2);
+    let mut l: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    subsection(inout l, LINE_REC_SIZE, sec, in lines, 4);
+    let mut c: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    subsection(inout c, CORE_REC_SIZE, sec, in core, 4);
+    put16(inout ext, BTF_MAGIC);
+    ext.push(1);
+    ext.push(0);
+    put32(inout ext, EXT_HDR_LEN);
+    put32(inout ext, 0);
+    put32(inout ext, f.len());
+    put32(inout ext, f.len());
+    put32(inout ext, l.len());
+    put32(inout ext, wrapping_add(f.len(), l.len()));
+    put32(inout ext, c.len());
+    ext.extend(in f.as_slice());
+    ext.extend(in l.as_slice());
+    ext.extend(in c.as_slice());
+    let bytes = btf_finish(in b);
+    btf.extend(in bytes.as_slice());
+    0
+}
+
+// -------------------------------------------------------------------- ELF
+
+// An `object` string table: the strings in insertion order (each once),
+// written sorted by their bytes from the end, descending, a string that
+// ends the previous one sharing its bytes.
+struct Strtab {
+    bytes: ChunkSeq[u8],
+    a: ChunkSeq[u64],
+    b: ChunkSeq[u64],
+    offsets: ChunkSeq[u64],
+}
+
+fn strtab_new() -> Strtab {
+    Strtab {
+        bytes: ChunkSeq::new[u8](),
+        a: ChunkSeq::new[u64](),
+        b: ChunkSeq::new[u64](),
+        offsets: ChunkSeq::new[u64](),
+    }
+}
+
+// The id of `s`.
+fn strtab_add(inout t: Strtab, in s: Slice[u8]) -> u64 {
+    for k in 0..t.a.len() {
+        let a = seq64(in t.a, k);
+        let z = seq64(in t.b, k);
+        if same(in t.bytes[a..z], in s) {
+            return k;
+        }
+    }
+    let a = t.bytes.len();
+    t.bytes.extend(in s);
+    t.a.push(a);
+    t.b.push(t.bytes.len());
+    wrapping_sub(t.a.len(), 1)
+}
+
+// The byte of string k `pos` bytes from its end (1 is the last), 0 past
+// its start.
+fn back_byte(in t: Strtab, k: u64, pos: u64) -> u8 {
+    let a = seq64(in t.a, k);
+    let z = seq64(in t.b, k);
+    let n = wrapping_sub(z, a);
+    if pos > n {
+        0
+    } else {
+        u8_at(in t.bytes, wrapping_sub(z, pos))
+    }
+}
+
+// String j goes before string k.
+fn before(in t: Strtab, j: u64, k: u64) -> bool {
+    let mut pos: u64 = 1;
+    loop {
+        let x = back_byte(in t, j, pos);
+        let y = back_byte(in t, k, pos);
+        if x != y {
+            return x > y;
+        }
+        if x == 0 {
+            return false;
+        }
+        pos = wrapping_add(pos, 1);
+    }
+}
+
+// `StringTable::write` after a NUL: the table's bytes, and each id's
+// offset in `t.offsets`.
+fn strtab_write(inout t: Strtab) -> ChunkSeq[u8] {
+    let n = t.a.len();
+    let mut ids: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..n {
+        // insertion sort
+        let mut at = ids.len();
+        for i in 0..ids.len() {
+            if at == ids.len() && before(in t, k, seq64(in ids, i)) {
+                at = i;
+            }
+        }
+        ids.push(0);
+        let mut i = wrapping_sub(ids.len(), 1);
+        loop {
+            if i <= at {
+                break;
+            }
+            let prev = seq64(in ids, wrapping_sub(i, 1));
+            let ok = ids.try_set(i, prev);
+            i = wrapping_sub(i, 1);
+        }
+        let ok = ids.try_set(at, k);
+    }
+    let mut offsets: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..n {
+        offsets.push(0);
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.push(0);
+    let mut prev_a: u64 = 0;
+    let mut prev_b: u64 = 0;
+    for i in 0..n {
+        let id = seq64(in ids, i);
+        let a = seq64(in t.a, id);
+        let z = seq64(in t.b, id);
+        let len = wrapping_sub(z, a);
+        let plen = wrapping_sub(prev_b, prev_a);
+        let mut suffix = len <= plen;
+        if suffix {
+            for k in 0..len {
+                if u8_at(in t.bytes, wrapping_add(a, k))
+                    != u8_at(in t.bytes, wrapping_add(wrapping_sub(prev_b, len), k)) {
+                    suffix = false;
+                }
+            }
+        }
+        if suffix {
+            let ok = offsets.try_set(id, wrapping_sub(wrapping_sub(out.len(), len), 1));
+        } else {
+            let ok = offsets.try_set(id, out.len());
+            out.extend(in t.bytes[a..z]);
+            out.push(0);
+            prev_a = a;
+            prev_b = z;
+        }
+    }
+    t.offsets = offsets;
+    out
+}
+
+fn str_offset(in t: Strtab, id: u64) -> u64 {
+    seq64(in t.offsets, id)
+}
+
+// One added section: its name (shstrtab id), data, alignment, flags, and
+// its relocation section's name id (u64::MAX without relocations).
+struct Sections {
+    names: ChunkSeq[u64],
+    data_a: ChunkSeq[u64],
+    data_b: ChunkSeq[u64],
+    align: ChunkSeq[u64],
+    flags: ChunkSeq[u64],
+    rel_name: ChunkSeq[u64],
+    data: ChunkSeq[u8],
+}
+
+const NONE: u64 = 18446744073709551615;
+
+fn add_section(
+    inout s: Sections,
+    inout sh: Strtab,
+    in name: Slice[u8],
+    in data: Slice[u8],
+    align: u64,
+    flags: u64,
+    rels: bool
+) {
+    s.names.push(strtab_add(inout sh, in name));
+    if rels {
+        let mut rn: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        rn.extend(in ".rel".as_bytes());
+        rn.extend(in name);
+        s.rel_name.push(strtab_add(inout sh, in rn.as_slice()));
+    } else {
+        s.rel_name.push(NONE);
+    }
+    let a = s.data.len();
+    s.data.extend(in data);
+    s.data_a.push(a);
+    s.data_b.push(s.data.len());
+    s.align.push(align);
+    s.flags.push(flags);
+}
+
+// `Compiled::object` (`elf::write_object`).
+fn write_object(in p: Prog, inout out: ChunkSeq[u8]) -> u64 {
+    // Program code with the map relocations' immediates cleared.
+    let mut insns: ChunkSeq[RawInsn] = ChunkSeq::new[RawInsn]();
+    for i in 0..p.insns.len() {
+        insns.push(slot_at(in p.insns, i));
+    }
+    let nrel = p.relocs.len() / 2;
+    for r in 0..nrel {
+        let at = seq64(in p.relocs, wrapping_mul(r, 2));
+        let s = slot_at(in insns, at);
+        let ok = insns
+            .try_set(
+                at,
+                RawInsn {
+                    code: s.code,
+                    dst: s.dst,
+                    src: s.src,
+                    off: s.off,
+                    imm: 0
+                }
+            );
+    }
+    let mut code: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..insns.len() {
+        let r = slot_at(in insns, i);
+        let off = widen_u64(wrapping_u16(r.off));
+        let imm = widen_u64(wrapping_u32(r.imm));
+        code.push(r.code);
+        code.push((r.dst & 15) | wrapping_shl_u8(r.src & 15, 4));
+        put16(inout code, off);
+        put32(inout code, imm);
+    }
+    let mut sh = strtab_new();
+    let mut secs = Sections {
+        names: ChunkSeq::new[u64](),
+        data_a: ChunkSeq::new[u64](),
+        data_b: ChunkSeq::new[u64](),
+        align: ChunkSeq::new[u64](),
+        flags: ChunkSeq::new[u64](),
+        rel_name: ChunkSeq::new[u64](),
+        data: ChunkSeq::new[u8](),
+    };
+    // Sections: 0 text, 1 license, then .BTF/.BTF.ext and .maps.
+    add_section(
+        inout secs,
+        inout sh,
+        in p.pool[p.sec_a..p.sec_b],
+        in code.as_slice(),
+        8,
+        SHF_ALLOC | SHF_EXECINSTR,
+        nrel > 0
+    );
+    let mut lic: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    lic.extend(in "Dual MIT/GPL".as_bytes());
+    lic.push(0);
+    add_section(
+        inout secs,
+        inout sh,
+        in "license".as_bytes(),
+        in lic.as_slice(),
+        1,
+        SHF_ALLOC | SHF_WRITE,
+        false
+    );
+    let nmaps = p.map_a.len();
+    let starts = subprog_starts(in p);
+    let rich = p.line_slot.len() > 0 || starts.len() > 1;
+    let mut btf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut ext: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut offsets: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut maps_size: u64 = 0;
+    if rich {
+        let d = object_btf(in p, inout btf, inout ext, inout offsets, inout maps_size);
+        if d != 0 {
+            return d;
+        }
+        add_section(inout secs, inout sh, in ".BTF".as_bytes(), in btf.as_slice(), 4, 0, false);
+        add_section(inout secs, inout sh, in ".BTF.ext".as_bytes(), in ext.as_slice(), 4, 0, false);
+    } else if nmaps > 0 {
+        let mut b = btf_new();
+        maps_size = maps_types(inout b, in p, inout offsets);
+        btf = btf_finish(in b);
+    }
+    let mut maps_index: u64 = 0;
+    if nmaps > 0 {
+        let mut zeros: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        zeros.resize(maps_size, 0);
+        maps_index = secs.names.len();
+        add_section(
+            inout secs,
+            inout sh,
+            in ".maps".as_bytes(),
+            in zeros.as_slice(),
+            8,
+            SHF_ALLOC | SHF_WRITE,
+            false
+        );
+        if !rich {
+            add_section(inout secs, inout sh, in ".BTF".as_bytes(), in btf.as_slice(), 4, 0, false);
+        }
+    }
+    // Symbols in `add_symbol` order: (name a, b, section, value, size,
+    // local, func).
+    let mut sym_a: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut sym_b: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut sym_sec: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut sym_value: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut sym_size: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut sym_local: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut sym_func: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut names: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    names.extend(in "_license".as_bytes());
+    sym_a.push(0);
+    sym_b.push(names.len());
+    sym_sec.push(1);
+    sym_value.push(0);
+    sym_size.push(lic.len());
+    sym_local.push(0);
+    sym_func.push(0);
+    for k in 0..nmaps {
+        let a = names.len();
+        names.extend(in p.pool[seq64(in p.map_a, k)..seq64(in p.map_b, k)]);
+        sym_a.push(a);
+        sym_b.push(names.len());
+        sym_sec.push(maps_index);
+        sym_value.push(seq64(in offsets, k));
+        sym_size.push(wrapping_mul(8, field_count(in p, k)));
+        sym_local.push(0);
+        sym_func.push(0);
+    }
+    // The entry and named subprograms, by slot (a stable sort).
+    let mut ent_a: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut ent_b: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut ent_slot: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    ent_a.push(p.name_a);
+    ent_b.push(p.name_b);
+    ent_slot.push(0);
+    for f in 0..p.fn_slot.len() {
+        let e = seq64(in p.fn_slot, f);
+        if e != 0 {
+            let mut at = ent_slot.len();
+            for i in 0..ent_slot.len() {
+                if at == ent_slot.len() && seq64(in ent_slot, i) > e {
+                    at = i;
+                }
+            }
+            ent_a.push(0);
+            ent_b.push(0);
+            ent_slot.push(0);
+            let mut i = wrapping_sub(ent_slot.len(), 1);
+            loop {
+                if i <= at {
+                    break;
+                }
+                let j = wrapping_sub(i, 1);
+                let x = seq64(in ent_a, j);
+                let ok = ent_a.try_set(i, x);
+                let x = seq64(in ent_b, j);
+                let ok = ent_b.try_set(i, x);
+                let x = seq64(in ent_slot, j);
+                let ok = ent_slot.try_set(i, x);
+                i = j;
+            }
+            let ok = ent_a.try_set(at, seq64(in p.fn_a, f));
+            let ok = ent_b.try_set(at, seq64(in p.fn_b, f));
+            let ok = ent_slot.try_set(at, e);
+        }
+    }
+    let nent = ent_slot.len();
+    for i in 0..nent {
+        let e = seq64(in ent_slot, i);
+        let end = if wrapping_add(i, 1) < nent {
+            seq64(in ent_slot, wrapping_add(i, 1))
+        } else {
+            insns.len()
+        };
+        let a = names.len();
+        names.extend(in p.pool[seq64(in ent_a, i)..seq64(in ent_b, i)]);
+        sym_a.push(a);
+        sym_b.push(names.len());
+        sym_sec.push(0);
+        sym_value.push(wrapping_mul(e, 8));
+        sym_size.push(wrapping_mul(wrapping_sub(end, e), 8));
+        sym_local
+            .push(
+                if i == 0 {
+                    0
+                } else {
+                    1
+                }
+            );
+        sym_func.push(1);
+    }
+    let nsyms = sym_a.len();
+
+    // Layout (`elf_write`): section indices (each section, then its
+    // `.rel` section), symbol indices (locals first), the strtab.
+    let nsec = secs.names.len();
+    let mut index: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut offset: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut len: u64 = HEADER;
+    let mut section_num: u64 = 1;
+    for k in 0..nsec {
+        index.push(section_num);
+        section_num = wrapping_add(section_num, 1);
+        len = align_up(len, seq64(in secs.align, k));
+        offset.push(len);
+        len = wrapping_add(len, wrapping_sub(seq64(in secs.data_b, k), seq64(in secs.data_a, k)));
+        if seq64(in secs.rel_name, k) != NONE {
+            section_num = wrapping_add(section_num, 1);
+        }
+    }
+    let mut sym_index: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..nsyms {
+        sym_index.push(0);
+    }
+    let mut count: u64 = 1;
+    for k in 0..nsyms {
+        if u8_at(in sym_local, k) == 1 {
+            let ok = sym_index.try_set(k, count);
+            count = wrapping_add(count, 1);
+        }
+    }
+    let num_local = count;
+    for k in 0..nsyms {
+        if u8_at(in sym_local, k) == 0 {
+            let ok = sym_index.try_set(k, count);
+            count = wrapping_add(count, 1);
+        }
+    }
+    let mut st = strtab_new();
+    let mut sym_str: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..nsyms {
+        let a = seq64(in sym_a, k);
+        let z = seq64(in sym_b, k);
+        if z > a {
+            sym_str.push(strtab_add(inout st, in names[a..z]));
+        } else {
+            sym_str.push(NONE);
+        }
+    }
+    let symtab_name = strtab_add(inout sh, in ".symtab".as_bytes());
+    let symtab_index = section_num;
+    section_num = wrapping_add(section_num, 1);
+    len = align_up(len, 8);
+    let symtab_offset = len;
+    len = wrapping_add(len, wrapping_mul(count, SYM));
+    let strtab_name = strtab_add(inout sh, in ".strtab".as_bytes());
+    let strtab_index = section_num;
+    section_num = wrapping_add(section_num, 1);
+    let strtab_data = strtab_write(inout st);
+    let strtab_offset = len;
+    len = wrapping_add(len, strtab_data.len());
+    let mut rel_offset: u64 = 0;
+    if nrel > 0 {
+        len = align_up(len, 8);
+        rel_offset = len;
+        len = wrapping_add(len, wrapping_mul(nrel, REL));
+    }
+    let shstrtab_name = strtab_add(inout sh, in ".shstrtab".as_bytes());
+    let shstrtab_index = section_num;
+    section_num = wrapping_add(section_num, 1);
+    let shstrtab_data = strtab_write(inout sh);
+    let shstrtab_offset = len;
+    len = wrapping_add(len, shstrtab_data.len());
+    len = align_up(len, 8);
+    let section_offset = len;
+
+    // The file header.
+    out.push(127);
+    out.push(69);
+    out.push(76);
+    out.push(70);
+    out.push(2);
+    out.push(1);
+    out.push(1);
+    for k in 0..9 {
+        out.push(0);
+    }
+    put16(inout out, ET_REL);
+    put16(inout out, EM_BPF);
+    put32(inout out, 1);
+    put64(inout out, 0);
+    put64(inout out, 0);
+    put64(inout out, section_offset);
+    put32(inout out, 0);
+    put16(inout out, HEADER);
+    put16(inout out, 0);
+    put16(inout out, 0);
+    put16(inout out, SECTION_HEADER);
+    put16(inout out, section_num);
+    put16(inout out, shstrtab_index);
+    // Section data.
+    for k in 0..nsec {
+        pad_to(inout out, seq64(in secs.align, k));
+        out.extend(in secs.data[seq64(in secs.data_a, k)..seq64(in secs.data_b, k)]);
+    }
+    // Symbols.
+    pad_to(inout out, 8);
+    for k in 0..SYM {
+        out.push(0);
+    }
+    for pass in 0..2 {
+        for k in 0..nsyms {
+            let local = u8_at(in sym_local, k) == 1;
+            if (pass == 0) == local {
+                let id = seq64(in sym_str, k);
+                let name = if id == NONE {
+                    0
+                } else {
+                    str_offset(in st, id)
+                };
+                put32(inout out, name);
+                let ty = if u8_at(in sym_func, k) == 1 {
+                    STT_FUNC
+                } else {
+                    STT_OBJECT
+                };
+                let bind = if local {
+                    0
+                } else {
+                    STB_GLOBAL
+                };
+                out.push(bind | ty);
+                out.push(0);
+                put16(inout out, seq64(in index, seq64(in sym_sec, k)));
+                put64(inout out, seq64(in sym_value, k));
+                put64(inout out, seq64(in sym_size, k));
+            }
+        }
+    }
+    out.extend(in strtab_data.as_slice());
+    // Relocations (text only): R_BPF_64_64 against each map's symbol.
+    if nrel > 0 {
+        pad_to(inout out, 8);
+        for r in 0..nrel {
+            let at = seq64(in p.relocs, wrapping_mul(r, 2));
+            let map = seq64(in p.relocs, wrapping_add(wrapping_mul(r, 2), 1));
+            if map >= nmaps {
+                return D_MAP;
+            }
+            put64(inout out, wrapping_mul(at, 8));
+            let sym = seq64(in sym_index, wrapping_add(map, 1));
+            put64(inout out, wrapping_shl_u64(sym, 32) | R_BPF_64_64);
+        }
+    }
+    out.extend(in shstrtab_data.as_slice());
+    // Section headers.
+    pad_to(inout out, 8);
+    for k in 0..SECTION_HEADER {
+        out.push(0);
+    }
+    for k in 0..nsec {
+        put32(inout out, str_offset(in sh, seq64(in secs.names, k)));
+        put32(inout out, w(SHT_PROGBITS));
+        put64(inout out, seq64(in secs.flags, k));
+        put64(inout out, 0);
+        put64(inout out, seq64(in offset, k));
+        put64(inout out, wrapping_sub(seq64(in secs.data_b, k), seq64(in secs.data_a, k)));
+        put32(inout out, 0);
+        put32(inout out, 0);
+        put64(inout out, seq64(in secs.align, k));
+        put64(inout out, 0);
+        let rel = seq64(in secs.rel_name, k);
+        if rel != NONE {
+            put32(inout out, str_offset(in sh, rel));
+            put32(inout out, w(SHT_REL));
+            put64(inout out, SHF_INFO_LINK);
+            put64(inout out, 0);
+            put64(inout out, rel_offset);
+            put64(inout out, wrapping_mul(nrel, REL));
+            put32(inout out, symtab_index);
+            put32(inout out, seq64(in index, k));
+            put64(inout out, 8);
+            put64(inout out, REL);
+        }
+    }
+    put32(inout out, str_offset(in sh, symtab_name));
+    put32(inout out, w(SHT_SYMTAB));
+    put64(inout out, 0);
+    put64(inout out, 0);
+    put64(inout out, symtab_offset);
+    put64(inout out, wrapping_mul(count, SYM));
+    put32(inout out, strtab_index);
+    put32(inout out, num_local);
+    put64(inout out, 8);
+    put64(inout out, SYM);
+    put32(inout out, str_offset(in sh, strtab_name));
+    put32(inout out, w(SHT_STRTAB));
+    put64(inout out, 0);
+    put64(inout out, 0);
+    put64(inout out, strtab_offset);
+    put64(inout out, strtab_data.len());
+    put32(inout out, 0);
+    put32(inout out, 0);
+    put64(inout out, 1);
+    put64(inout out, 0);
+    put32(inout out, str_offset(in sh, shstrtab_name));
+    put32(inout out, w(SHT_STRTAB));
+    put64(inout out, 0);
+    put64(inout out, 0);
+    put64(inout out, shstrtab_offset);
+    put64(inout out, shstrtab_data.len());
+    put32(inout out, 0);
+    put32(inout out, 0);
+    put64(inout out, 1);
+    put64(inout out, 0);
+    0
+}
+
+// ---------------------------------------------------------------- summary
+
+// `build_command`'s summary after "wrote <path> (<n> bytes): ".
+fn summary(in p: Prog, in words: ChunkSeq[u64], inout out: ChunkSeq[u8]) {
+    out.extend(in p.pool[p.sec_a..p.sec_b]);
+    out.extend(in " program `".as_bytes());
+    out.extend(in p.pool[p.name_a..p.name_b]);
+    out.extend(in "`, ".as_bytes());
+    push_decimal(inout out, p.insns.len());
+    out.extend(in " instructions, ".as_bytes());
+    push_decimal(inout out, p.map_a.len());
+    out.extend(in " map(s)\nverifier model: accepted, ".as_bytes());
+    push_decimal(inout out, seq64(in words, 1));
+    out.extend(in " insns processed, worst-case stack ".as_bytes());
+    push_decimal(inout out, seq64(in words, 6));
+    out.extend(in " bytes\n".as_bytes());
+    for i in 0..p.bind_a.len() {
+        out.extend(in "map ".as_bytes());
+        out.extend(in p.pool[seq64(in p.map_a, i)..seq64(in p.map_b, i)]);
+        out.extend(in " <- effect ".as_bytes());
+        out.extend(in p.pool[seq64(in p.bind_a, i)..seq64(in p.bind_b, i)]);
+        out.extend(in ": ".as_bytes());
+        out.extend(in kind_name(u8_at(in p.map_kind, i)).as_bytes());
+        out.extend(in ", key ".as_bytes());
+        push_decimal(inout out, w(u32_at(in p.map_key, i)));
+        out.extend(in " B, value ".as_bytes());
+        push_decimal(inout out, w(u32_at(in p.map_value, i)));
+        out.extend(in " B, ".as_bytes());
+        push_decimal(inout out, w(u32_at(in p.map_max, i)));
+        out.extend(in " entries\n".as_bytes());
+    }
+}
+
+// After a lowering that succeeded: verify, write the object into
+// `object` and the summary's tail into `tail`; 0, or why Rust should
+// build it instead.
+pub fn build_object(
+    in g: G,
+    in names: Names,
+    in x: Extra,
+    inout object: ChunkSeq[u8],
+    inout tail: ChunkSeq[u8]
+) -> u64 {
+    let p = prog_of(in g, in names, in x);
+    // Every binding names map `index` = its position (backend.ves).
+    if p.bind_a.len() > p.map_a.len() {
+        return D_MAP;
+    }
+    let words = match verify(in p) {
+        Option::Some(v) => v,
+        Option::None => return D_VERIFY,
+    };
+    let d = write_object(in p, inout object);
+    if d != 0 {
+        return d;
+    }
+    summary(in p, in words, inout tail);
+    0
+}
+
+pub fn declined_compile() -> u64 {
+    D_COMPILE
+}
