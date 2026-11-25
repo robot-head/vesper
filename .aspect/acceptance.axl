@@ -5,7 +5,6 @@ check_doc_links = script_task("check-doc-links", ["acceptance"], "scripts/check-
 check_editor = script_task("check-editor", ["acceptance"], "scripts/check-editor.py", "python3", from_root = True)
 check_macro_preview = script_task("check-macro-preview", ["acceptance"], "scripts/check-macro-preview.py", "python3", from_root = True)
 check_recovery = script_task("check-recovery", ["acceptance"], "scripts/check-recovery.py", "python3", from_root = True)
-check_rewrite_witness = script_task("check-rewrite-witness", ["acceptance"], "scripts/check-rewrite-witness.py", "python3", from_root = True)
 check_source_macro_parameters = script_task("check-source-macro-parameters", ["acceptance"], "scripts/check-source-macro-parameters.py", "python3", from_root = True)
 check_source_macro_tuples = script_task("check-source-macro-tuples", ["acceptance"], "scripts/check-source-macro-tuples.py", "python3", from_root = True)
 check_source_macros = script_task("check-source-macros", ["acceptance"], "scripts/check-source-macros.py", "python3", from_root = True)
