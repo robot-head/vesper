@@ -35,7 +35,7 @@ fn main() {
 }
 
 /// The divergence checks, one per ported module (mirrored in BUILD.bazel
-/// and asserted by crates/vesper-ebpf/port/check.sh).
+/// and asserted by aspect crate ebpf check).
 #[cfg(feature = "vesper-port-divergent")]
 const EDITS: &[(&str, &str)] = &[
     // 0 insn.rs: `lsh` encodes as `rsh`.

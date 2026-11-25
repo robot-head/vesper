@@ -1,4 +1,5 @@
-load("./lib/process.axl", "capture", "check", "command", "root_path", "scratch_dir")
+load("./lib/cargo.axl", "test_artifacts")
+load("./lib/process.axl", "check", "command", "root_path", "scratch_dir")
 
 def _cli_suites(ctx: TaskContext) -> int:
     root = ctx.std.env.aspect_root_dir()
@@ -15,14 +16,7 @@ def _cli_suites(ctx: TaskContext) -> int:
     filters = []
     for name in sorted(suites):
         filters.extend(["--test", name])
-    messages = capture(ctx, "cargo", ["test", "--locked", "-p", "vesper", "--no-run", "--message-format=json-render-diagnostics"] + filters, root)
-    executables = []
-    for line in messages.splitlines():
-        entry = json.try_decode(line, {})
-        if entry.get("reason") == "compiler-artifact" and entry.get("executable") and "test" in entry["target"]["kind"] and entry["target"]["name"] in suites:
-            executables.append(entry["executable"])
-    if len(executables) != len(suites):
-        ctx.std.process.exit(1, "Cargo did not return an executable for every selected CLI suite")
+    executables = test_artifacts(ctx, root, ["-p", "vesper"] + filters, suites)
 
     target = root_path(root, ctx.std.env.var("CARGO_TARGET_DIR") or "target")
     binary = target + "/debug/vesper"

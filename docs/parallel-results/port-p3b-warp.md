@@ -152,7 +152,7 @@ const context.
   on the Rust build. One example is `bits_find_and_wrap`, a test of the
   reference bitmap type.
 - `scripts/test-port-harness.sh` runs both builds through
-  `crates/vesper-warp/port/check.sh`.
+  `aspect crate warp check`.
 
 ## Divergence checks
 

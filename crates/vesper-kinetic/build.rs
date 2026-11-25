@@ -25,7 +25,7 @@ fn main() {
 }
 
 /// The divergence checks, one per ported module (mirrored in BUILD.bazel and
-/// asserted by crates/vesper-kinetic/port/check.sh).
+/// asserted by aspect crate kinetic check).
 #[cfg(feature = "vesper-port-divergent")]
 const EDITS: &[(&str, &str)] = &[
     // morton.rs: a code with bit 30 set decodes instead of failing.

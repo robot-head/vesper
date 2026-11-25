@@ -22,7 +22,7 @@
 #
 # Ports append their own lines at the end (after the ABI tier, so they run
 # on Linux only), guarded by the crate's directory so a PR that changes only
-# other ports skips them: `skip_port vesper-x || sh crates/vesper-x/...`, or
+# other ports skips them: `skip_port vesper-x || "$VESPER_ASPECT_BIN" crate x check`, or
 # `if ported vesper-x; then ... fi` for several lines (#1103).
 #
 # Shards (#1019, #1100): the Linux job runs the ports in seven parallel
@@ -61,7 +61,7 @@ ported() {
     return 1
 }
 # skip_port <crate dir>: the inverse, for one-line blocks
-# (`skip_port vesper-x || sh crates/vesper-x/port/check.sh`), which keeps a
+# (`skip_port vesper-x || "$VESPER_ASPECT_BIN" crate x check`), which keeps a
 # skipped last line from failing the script under `set -e`.
 skip_port() { ! ported "$@"; }
 [ "$port_crates" = " all " ] || echo "testing only the affected ports:$port_crates"
@@ -116,7 +116,7 @@ divergent "Beacon port (spans.rs)" ids_never_wrap_or_repeat_and_imported_self_pa
     drain_wraparound_partial_zero_and_fifo_ownership -p vesper-beacon --features vesper-port-divergent --test behavior
 fi
 # Port wave P1 lane 14 (#911): vesper-prism against its Vesper port.
-skip_port vesper-prism || sh crates/vesper-prism/test-port.sh
+skip_port vesper-prism || "${VESPER_ASPECT_BIN:-aspect}" crate prism test-port
 # vesper-aura (port wave P1 lane 13, #910; the port is its only build since
 # #979): the crate's tests pass, and one divergent edit per ported module
 # fails that module's test.
@@ -154,12 +154,12 @@ done
 grep -q 'test bbr::tests::inflight_at_loss_solves_for_the_threshold_crossing ... ok' "$log" || { cat "$log"; echo "the divergent warp-bbr port failed an unchanged test" >&2; exit 1; }
 echo "divergent warp-bbr port detected (one failure per ported module)"
 fi
-skip_port vesper-warp-tcp || crates/vesper-warp-tcp/scripts/test-port.sh
+skip_port vesper-warp-tcp || "${VESPER_ASPECT_BIN:-aspect}" crate warp-tcp test-port
 # Port wave P1 lane 3 (#900): vesper-warp-wheel.
-skip_port vesper-warp-wheel || sh crates/vesper-warp-wheel/port/test-port.sh
+skip_port vesper-warp-wheel || "${VESPER_ASPECT_BIN:-aspect}" crate warp-wheel test-port
 # Rust exit SH6 lane 4 (#1399): vesper-warp-shard.
-skip_port vesper-warp-shard || sh crates/vesper-warp-shard/port/test-port.sh
-skip_port vesper-ignis || sh crates/vesper-ignis/port/check.sh  # port P1 lane 12 (#909): vesper-ignis, both builds and the divergence check
+skip_port vesper-warp-shard || "${VESPER_ASPECT_BIN:-aspect}" crate warp-shard test-port
+skip_port vesper-ignis || "${VESPER_ASPECT_BIN:-aspect}" crate ignis check  # port P1 lane 12 (#909): vesper-ignis, both builds and the divergence check
 fi
 # Shard 2: Quarry through pact.
 if part 2; then
@@ -187,16 +187,16 @@ done
 grep -q 'test documented_manifest_is_declarative_and_secure_by_default ... ok' "$log" || { cat "$log"; echo "the divergent loom-calculus port failed an unchanged test" >&2; exit 1; }
 echo "divergent loom-calculus port detected (one failure per ported module)"
 fi
-skip_port vesper-loom-solver || sh crates/vesper-loom-solver/port/test-port.sh  # port P1 lane 17 (#914): vesper-loom-solver, both builds and the divergence check
-skip_port vesper-pact || sh crates/vesper-pact/port/test-port.sh  # port P3a lane 3 (#1038): vesper-pact, all builds and the divergence check
+skip_port vesper-loom-solver || "${VESPER_ASPECT_BIN:-aspect}" crate loom-solver test-port  # port P1 lane 17 (#914): vesper-loom-solver, both builds and the divergence check
+skip_port vesper-pact || "${VESPER_ASPECT_BIN:-aspect}" crate pact test-port  # port P3a lane 3 (#1038): vesper-pact, all builds and the divergence check
 fi
 # Shard 3: semver through Crucible.
 if part 3; then
 # Port wave P1 lane 15 (#912): vesper-semver, both builds and the divergence check.
-skip_port vesper-semver || sh crates/vesper-semver/port/test-port.sh
+skip_port vesper-semver || "${VESPER_ASPECT_BIN:-aspect}" crate semver test-port
 # Port wave P1 lane 8 (#905): vesper-tensor and its Rust seed copy, and the
 # divergence check (one failing test per ported module).
-skip_port vesper-tensor || sh crates/vesper-tensor/port/test-port.sh
+skip_port vesper-tensor || "${VESPER_ASPECT_BIN:-aspect}" crate tensor test-port
 # Port wave P1 lane 6 (#903): vesper-alloc (the Vesper port of the region
 # bookkeeping) and vesper-alloc-seed (the Rust copy every dependent links)
 # both pass the crate's tests; one divergent edit per ported area fails that
@@ -231,45 +231,45 @@ der der typed_set_of_sorts_complete_encodings_retains_duplicates_and_rejects_unt
 ipc ipc independent_arrow_values_and_versions hostile_schema_and_union_discriminants
 CHECKS
 fi
-skip_port vesper-simpulse || . crates/vesper-simpulse/port/check.sh  # port P1 lane 5 (#902): vesper-simpulse, both builds and the divergence check
-skip_port vesper-crucible || . crates/vesper-crucible/port/check.sh  # port P1 lane 18 (#915): vesper-crucible, both builds and the divergence checks
+skip_port vesper-simpulse || "${VESPER_ASPECT_BIN:-aspect}" crate simpulse check  # port P1 lane 5 (#902): vesper-simpulse, both builds and the divergence check
+skip_port vesper-crucible || "${VESPER_ASPECT_BIN:-aspect}" crate crucible check  # port P1 lane 18 (#915): vesper-crucible, both builds and the divergence checks
 fi
 # Shard 4: serde, warp-umem and aether.
 if part 4; then
-skip_port vesper-serde || sh crates/vesper-serde/port/check.sh  # port P1 lane 19 (#916): vesper-serde, both builds and one divergence check per ported module
-skip_port vesper-warp-umem || sh crates/vesper-warp-umem/port/test-port.sh  # self-hosting SH6 lane 14 (#1409): vesper-warp-umem, both builds, its consumers on the port and one divergence check per ported module
-skip_port vesper-aether || sh crates/vesper-aether/port/test-port.sh  # self-hosting SH6 lane 14 (#1409): vesper-aether, both builds and one divergence check per ported module
+skip_port vesper-serde || "${VESPER_ASPECT_BIN:-aspect}" crate serde check  # port P1 lane 19 (#916): vesper-serde, both builds and one divergence check per ported module
+skip_port vesper-warp-umem || "${VESPER_ASPECT_BIN:-aspect}" crate warp-umem test-port  # self-hosting SH6 lane 14 (#1409): vesper-warp-umem, both builds, its consumers on the port and one divergence check per ported module
+skip_port vesper-aether || "${VESPER_ASPECT_BIN:-aspect}" crate aether test-port  # self-hosting SH6 lane 14 (#1409): vesper-aether, both builds and one divergence check per ported module
 fi
 # Shard 5: aegis through bench.
 if part 5; then
-skip_port vesper-aegis || sh crates/vesper-aegis/port/check.sh  # port P3a lane 8 (#1043): vesper-aegis, the port (the only build, SH6 lane 8 #1403) and one divergence check per ported module
-skip_port vesper-loom-audit || sh crates/vesper-loom-audit/port/test-port.sh  # port wave P3a lane 4 (#1039): vesper-loom-audit, both builds and the divergence check
-skip_port vesper-bench || sh crates/vesper-bench/port/check.sh  # port P3a lane 5 (#1040): vesper-bench, both builds and one divergence check per ported module
+skip_port vesper-aegis || "${VESPER_ASPECT_BIN:-aspect}" crate aegis check  # port P3a lane 8 (#1043): vesper-aegis, the port (the only build, SH6 lane 8 #1403) and one divergence check per ported module
+skip_port vesper-loom-audit || "${VESPER_ASPECT_BIN:-aspect}" crate loom-audit test-port  # port wave P3a lane 4 (#1039): vesper-loom-audit, both builds and the divergence check
+skip_port vesper-bench || "${VESPER_ASPECT_BIN:-aspect}" crate bench check  # port P3a lane 5 (#1040): vesper-bench, both builds and one divergence check per ported module
 fi
 # Shard 6: eBPF and silicon.
 if part 6; then
-skip_port vesper-ebpf || . crates/vesper-ebpf/port/check.sh  # port P3a lane 6 (#1041): vesper-ebpf, both builds and one divergence check per ported module
-skip_port vesper-silicon || . crates/vesper-silicon/port/check.sh  # port P3a lane 7 (#1042): vesper-silicon, both builds and one divergence check per ported module
+skip_port vesper-ebpf || "${VESPER_ASPECT_BIN:-aspect}" crate ebpf check  # port P3a lane 6 (#1041): vesper-ebpf, both builds and one divergence check per ported module
+skip_port vesper-silicon || "${VESPER_ASPECT_BIN:-aspect}" crate silicon check  # port P3a lane 7 (#1042): vesper-silicon, both builds and one divergence check per ported module
 fi
 # Shard 7: every later port. New ports append their lines below.
 part 7 || exit 0
-skip_port vesper-warp || . crates/vesper-warp/port/check.sh  # port P3b lane 4 (#1066): vesper-warp, both builds and one divergence check per ported module
-skip_port vesper-prism-h3 || sh crates/vesper-prism-h3/port/check.sh  # port P3b lane 5 (#1067), Vesper-only since SH6 lane 5 (#1400): vesper-prism-h3 tests and one divergence check per ported module
-skip_port vesper-chorus || sh crates/vesper-chorus/port/test-port.sh  # port P3b lane 6 (#1068): vesper-chorus (the Vesper library is its only build) and one divergence check per ported module
-skip_port vesper-resonance || sh crates/vesper-resonance/port/test-port.sh  # port P3b lane 9 (#1071): vesper-resonance, both builds, one divergence check per ported module and the realtime verifier proof
-skip_port vesper-kinetic || . crates/vesper-kinetic/port/check.sh  # port P3b lane 8 (#1070): vesper-kinetic, both builds and one divergence check per ported module
-skip_port vesper-flux || . crates/vesper-flux/port/check.sh  # port P3b lane 7 (#1069): vesper-flux on its Vesper kernels and one divergence check per ported kernel
-skip_port vesper-span || sh crates/vesper-span/port/test-port.sh  # self-hosting SH0 lane 6 (#1128): vesper-span, both builds, the differential test and one divergence check per ported area
-skip_port vesper-lean-syntax || sh crates/vesper-lean-syntax/port/test-port.sh  # self-hosting SH0 lane 6 (#1128): vesper-lean-syntax, both builds, the differential test and one divergence check per ported area
-skip_port vesper-diagnostics || sh crates/vesper-diagnostics/port/test-port.sh  # self-hosting SH1 lane 1 (#1128): vesper-diagnostics, both builds, the differential test and one divergence check per ported area
-skip_port vesper-fmt || sh crates/vesper-fmt/port/test-port.sh  # self-hosting SH1 lane 11 (#1154): vesper-fmt, all three builds, the differential test and one divergence check per ported area
-skip_port vesper-highlight || sh crates/vesper-highlight/port/test-port.sh  # self-hosting SH1 lane 11 (#1154): vesper-highlight tier 0, all three builds, the differential test and one divergence check per ported area
-skip_port vesper-forge || sh crates/vesper-forge/port/test-port.sh  # self-hosting SH1 lane 14 (#1157): vesper-forge hygiene core, both builds, the differential test and one divergence check per ported area
-skip_port vesper-lint || sh crates/vesper-lint/port/test-port.sh  # self-hosting SH1 lane 13 (#1156): vesper-lint, all three builds, the differential test and one divergence check per ported area
-skip_port vesper-sim-session || sh crates/vesper-sim-session/port/test-port.sh  # self-hosting SH5 lane 19 (#1342): vesper-sim-session, both builds, the transcript differential and the divergence check
-skip_port vesper-fusion || sh crates/vesper-fusion/port/test-port.sh  # Rust-exit SH6 lane 18 (#1413): vesper-fusion on its Vesper engine (the only build) and one divergence check
-skip_port vesper-warp-crypto || . crates/vesper-warp-crypto/port/check.sh  # Rust-exit SH6 lane 17 (#1412): vesper-warp-crypto on its Vesper port (the only build), the differential against the Rust reference and one divergence check per ported area
-skip_port vesper-loom-trust || . crates/vesper-loom-trust/port/check.sh  # Rust-exit SH6 lane 17 (#1412): vesper-loom-trust on its Vesper port (its users outside the compiler's build; the tools link the Rust seed), the differential against the Rust reference and one divergence check per ported area
-skip_port vesper-beacon-arrow || sh crates/vesper-beacon-arrow/port/test-port.sh  # Rust-exit SH6 lane 18 (#1413): vesper-beacon-arrow span stream on its Vesper writer (the only build) and one divergence check
-skip_port vesper-loom-cas || sh crates/vesper-loom-cas/port/test-port.sh  # Rust-exit SH6 lane 16 (#1411): vesper-loom-cas (port-backed) and vesper-loom-cas-seed, both differentials, and one divergence check per module
-skip_port vesper-vault || . crates/vesper-vault/port/check.sh  # Rust-exit SH6 lane 17 (#1412): vesper-vault on its Vesper port (external users like vesper-aegis; the compiler and vesper-test link the Rust seed), the differential against the Rust reference, and one divergence check per ported area
+skip_port vesper-warp || "${VESPER_ASPECT_BIN:-aspect}" crate warp check  # port P3b lane 4 (#1066): vesper-warp, both builds and one divergence check per ported module
+skip_port vesper-prism-h3 || "${VESPER_ASPECT_BIN:-aspect}" crate prism-h3 check  # port P3b lane 5 (#1067), Vesper-only since SH6 lane 5 (#1400): vesper-prism-h3 tests and one divergence check per ported module
+skip_port vesper-chorus || "${VESPER_ASPECT_BIN:-aspect}" crate chorus test-port  # port P3b lane 6 (#1068): vesper-chorus (the Vesper library is its only build) and one divergence check per ported module
+skip_port vesper-resonance || "${VESPER_ASPECT_BIN:-aspect}" crate resonance test-port  # port P3b lane 9 (#1071): vesper-resonance, both builds, one divergence check per ported module and the realtime verifier proof
+skip_port vesper-kinetic || "${VESPER_ASPECT_BIN:-aspect}" crate kinetic check  # port P3b lane 8 (#1070): vesper-kinetic, both builds and one divergence check per ported module
+skip_port vesper-flux || "${VESPER_ASPECT_BIN:-aspect}" crate flux check  # port P3b lane 7 (#1069): vesper-flux on its Vesper kernels and one divergence check per ported kernel
+skip_port vesper-span || "${VESPER_ASPECT_BIN:-aspect}" crate span test-port  # self-hosting SH0 lane 6 (#1128): vesper-span, both builds, the differential test and one divergence check per ported area
+skip_port vesper-lean-syntax || "${VESPER_ASPECT_BIN:-aspect}" crate lean-syntax test-port  # self-hosting SH0 lane 6 (#1128): vesper-lean-syntax, both builds, the differential test and one divergence check per ported area
+skip_port vesper-diagnostics || "${VESPER_ASPECT_BIN:-aspect}" crate diagnostics test-port  # self-hosting SH1 lane 1 (#1128): vesper-diagnostics, both builds, the differential test and one divergence check per ported area
+skip_port vesper-fmt || "${VESPER_ASPECT_BIN:-aspect}" crate fmt test-port  # self-hosting SH1 lane 11 (#1154): vesper-fmt, all three builds, the differential test and one divergence check per ported area
+skip_port vesper-highlight || "${VESPER_ASPECT_BIN:-aspect}" crate highlight test-port  # self-hosting SH1 lane 11 (#1154): vesper-highlight tier 0, all three builds, the differential test and one divergence check per ported area
+skip_port vesper-forge || "${VESPER_ASPECT_BIN:-aspect}" crate forge test-port  # self-hosting SH1 lane 14 (#1157): vesper-forge hygiene core, both builds, the differential test and one divergence check per ported area
+skip_port vesper-lint || "${VESPER_ASPECT_BIN:-aspect}" crate lint test-port  # self-hosting SH1 lane 13 (#1156): vesper-lint, all three builds, the differential test and one divergence check per ported area
+skip_port vesper-sim-session || "${VESPER_ASPECT_BIN:-aspect}" crate sim-session test-port  # self-hosting SH5 lane 19 (#1342): vesper-sim-session, both builds, the transcript differential and the divergence check
+skip_port vesper-fusion || "${VESPER_ASPECT_BIN:-aspect}" crate fusion test-port  # Rust-exit SH6 lane 18 (#1413): vesper-fusion on its Vesper engine (the only build) and one divergence check
+skip_port vesper-warp-crypto || "${VESPER_ASPECT_BIN:-aspect}" crate warp-crypto check  # Rust-exit SH6 lane 17 (#1412): vesper-warp-crypto on its Vesper port (the only build), the differential against the Rust reference and one divergence check per ported area
+skip_port vesper-loom-trust || "${VESPER_ASPECT_BIN:-aspect}" crate loom-trust check  # Rust-exit SH6 lane 17 (#1412): vesper-loom-trust on its Vesper port (its users outside the compiler's build; the tools link the Rust seed), the differential against the Rust reference and one divergence check per ported area
+skip_port vesper-beacon-arrow || "${VESPER_ASPECT_BIN:-aspect}" crate beacon-arrow test-port  # Rust-exit SH6 lane 18 (#1413): vesper-beacon-arrow span stream on its Vesper writer (the only build) and one divergence check
+skip_port vesper-loom-cas || "${VESPER_ASPECT_BIN:-aspect}" crate loom-cas test-port  # Rust-exit SH6 lane 16 (#1411): vesper-loom-cas (port-backed) and vesper-loom-cas-seed, both differentials, and one divergence check per module
+skip_port vesper-vault || "${VESPER_ASPECT_BIN:-aspect}" crate vault check  # Rust-exit SH6 lane 17 (#1412): vesper-vault on its Vesper port (external users like vesper-aegis; the compiler and vesper-test link the Rust seed), the differential against the Rust reference, and one divergence check per ported area

@@ -1,0 +1,688 @@
+"""Cargo and divergence checks for the Vesper crate ports."""
+
+load("./lib/port_checks.axl", "divergence", "port_checks")
+
+_FEATURE = ["--features", "vesper-port-divergent"]
+_SERIAL = ["--", "--test-threads=1"]
+
+aegis_check = port_checks(
+    "aegis",
+    "check",
+    [
+        ["-p", "vesper-aegis"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--test"] + args + _SERIAL, [failed], [passed], env = {"VESPER_AEGIS_DIVERGE": name})
+        for name, args, failed, passed in [
+            ("reader", ["parser_fuzz"], "tdx_parser_never_panics_and_round_trips", "claims_wire_decoder_never_panics"),
+            ("snp", ["vendor_samples_rest"], "snp_report_versions_and_reserved_fields", "real_quote_v5_td15_ex_verifies_end_to_end"),
+            ("tdx", ["vendor_samples_rest"], "real_quote_v5_td15_ex_verifies_end_to_end", "snp_report_versions_and_reserved_fields"),
+            ("sgx", ["sgx_quote_v3"], "real_sgx_quote_v3_verifies_end_to_end", "sgx_quote_mutations_never_panic"),
+            ("wire", ["port_differential"], "claims_wire_agrees", "snp_reports_agree"),
+            ("policy", ["port_differential"], "policy_decisions_agree", "snp_reports_agree"),
+            ("time", ["port_differential"], "timestamps_agree", "snp_reports_agree"),
+            ("cbor", ["cbor_differential"], "edge_cases_match_ciborium", "random_items_match_ciborium"),
+            ("cca", ["port_differential"], "cca_claims_agree", "snp_reports_agree"),
+            ("cose", ["port_differential"], "cose_sign1_agrees", "snp_reports_agree"),
+            ("corim", ["port_differential"], "corims_agree", "snp_reports_agree"),
+            ("corim_cca", ["port_differential"], "corim_store_agrees", "snp_reports_agree"),
+            ("gpa", ["gpa_props"], "tracker_matches_reference_bitmap", "dropped_owner_is_counted_as_leaked"),
+            ("host", ["host"], "clock_validator_rejects_backwards_and_jumps", "mmap_validator_rejects_overlap_and_invalid_replies"),
+        ]
+    ],
+)
+
+aether_test_port = port_checks(
+    "aether",
+    "test-port",
+    [
+        ["-p", "vesper-aether"],
+        ["-p", "vesper-aether", "--features", "vesper-port"],
+    ],
+    [
+        divergence(name, _FEATURE + args + _SERIAL, failed, passed)
+        for name, args, failed, passed in [
+            ("slot_plan", ["--test", "slot_plan"], ["accepts_adjacent_aligned_slots", "overlap_check_matches_pairwise_definition"], ["rejects_each_malformed_region"]),
+            ("slot_plan_port", ["--test", "slot_plan_port"], ["verify_matches_the_rust_verifier"], []),
+            ("pvh_port", ["--test", "pvh_port"], ["truncations_and_bit_flips_match"], []),
+            ("hotset_port", ["--test", "hotset_port"], ["decode_matches_on_valid_and_mutated_encodings"], ["runs_match"]),
+            ("hotset", ["--test", "hotset"], ["encoded_form_is_validated"], ["runs_coalesce_and_split_at_the_batch_size"]),
+            ("packed_port", ["--test", "packed_port"], ["capture_matches_the_rust_capture"], []),
+            ("lib", ["--lib"], ["devices::queue::reference::differential::capture_matches_the_rust_capture"], ["devices::queue::reference::abba::both_builds_compute_the_same_workload"]),
+            ("seccomp", ["--test", "seccomp"], ["malformed_programs_are_rejected"], ["compiled_profile_allows_exactly_the_allowlist"]),
+            ("seccomp_port", ["--test", "seccomp_port"], ["validate_and_evaluate_match_rust"], ["compile_matches_rust"]),
+            ("guest_mem_port", ["--test", "guest_mem_port"], ["layout_and_locate_match_rust"], ["out_of_bounds_and_overflow_match_rust"]),
+            ("block_port", ["--test", "block_port"], ["discard_and_write_zeroes_match_rust"], ["span_and_config_match_rust"]),
+            ("net_port", ["--test", "net_port"], ["tx_and_ctrl_match_rust"], ["config_space_matches_rust"]),
+            ("vsock_port", ["--test", "vsock_port"], ["credit_saturates_on_shrunken_alloc"], ["header_codec_matches_rust"]),
+            ("vmgenid_port", ["--test", "vmgenid_port"], ["address_validation_matches_rust"], ["encode_matches_rust"]),
+            ("mmio_port", ["--test", "mmio_port"], ["feature_negotiation_matches_rust"], ["status_errors_and_reset_match_rust"]),
+            ("fork_wire_port", ["--test", "fork_wire_port"], ["decode_length_matches_rust"], ["encode_roundtrip_matches_rust"]),
+        ]
+    ],
+)
+
+beacon_arrow_test_port = port_checks(
+    "beacon-arrow",
+    "test-port",
+    [
+        ["-p", "vesper-beacon-arrow", "--lib", "--test", "interoperability", "--test", "span_stream_differential"],
+    ],
+    [divergence(
+        "combined checks",
+        _FEATURE + ["--no-fail-fast", "--lib", "--test", "interoperability"] + _SERIAL,
+        ["independent_arrow2_reader_compares_every_column_and_metadata"],
+        ["tests::hard_row_limit_precedes_attribute_walk_and_allocations"],
+    )],
+)
+
+bench_check = port_checks(
+    "bench",
+    "check",
+    [
+        ["-p", "vesper-bench-seed", "-p", "vesper-bench"],
+        ["-p", "vesper-bench", "--features", "vesper-port"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--test"] + args + _SERIAL, [failed], [passed], env = {"VESPER_BENCH_DIVERGE": name})
+        for name, args, failed, passed in [
+            ("arithmetic", ["statistics"], "width_specific_counter_model_has_explicit_wrap_and_range_limits", "known_regression_improvement_ties_and_mixed_results"),
+            ("paired_difference", ["paired_difference"], "fractional_and_out_of_range_differences_fail_at_their_index", "exact_per_operation_differences_preserve_sign_and_order"),
+            ("walsh", ["hodges_lehmann"], "point_estimate_retains_quarter_units_and_integer_extremes", "bounds_and_ambiguous_ranks_fail_closed"),
+            ("signed_rank", ["signed_rank"], "zeros_ties_limits_and_extreme_magnitudes_are_explicit", "exact_tied_signed_ranks_match_enumerated_sign_assignments"),
+            ("signed_rank_confidence", ["differential"], "signed_rank_family_matches_rust", "wire_records_match_rust"),
+            ("hodges_lehmann", ["hodges_lehmann"], "paired_difference_gate_uses_exact_interval_bounds_and_preserves_evidence", "point_estimate_retains_quarter_units_and_integer_extremes"),
+            ("statistics", ["layout"], "survival_requires_the_interval_to_exclude_no_difference", "plans_are_deterministic_bounded_and_varied"),
+            ("mann_whitney", ["statistics"], "mann_whitney_known_rank_vectors_and_ties", "independent_binomial_rank_and_coverage_vectors"),
+            ("contract", ["differential"], "contract_parser_and_gate_match_rust", "wire_records_match_rust"),
+            ("contract_gate", ["contract_gate"], "documented_numerical_gates_compare_exact_ratios", "unknown_zero_and_unsupported_evidence_are_never_passes"),
+            ("wire", ["wire"], "malformed_records_are_typed_errors", "layout_is_exactly_one_padding_free_cache_line"),
+            ("layout", ["differential"], "arithmetic_and_layout_match_rust", "wire_records_match_rust"),
+            ("execution", ["execution"], "actual_monotonic_provider_executes_counted_setup_run_teardown_in_abba_order", "invalid_configs_execute_no_callbacks"),
+            ("causal", ["causal"], "causal_profile_finds_the_known_bottleneck", "invalid_experiments_are_typed_errors"),
+        ]
+    ],
+)
+
+chorus_test_port = port_checks(
+    "chorus",
+    "test-port",
+    [
+        ["-p", "vesper-chorus"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--no-fail-fast", "--test"] + args + _SERIAL, [failed], [passed], env = {"VESPER_CHORUS_DIVERGE": name})
+        for name, args, failed, passed in [
+            ("util", ["projection"], "informed_third_party_merges_into_an_offer", "binary_projections_are_dual"),
+            ("tree", ["projection"], "well_formedness_errors_are_typed", "binary_projections_are_dual"),
+            ("local", ["projection"], "two_buyer_projects_to_the_textbook_local_types", "binary_projections_are_dual"),
+            ("project", ["projection"], "role_outside_a_loop_projects_through_it", "binary_projections_are_dual"),
+            ("explore", ["projection"], "recursion_projects_and_runs", "binary_projections_are_dual"),
+            ("parse", ["projection"], "hostile_inputs_are_bounded", "binary_projections_are_dual"),
+            ("simnet", ["session"], "two_buyer_runs_under_simpulse_with_reordering_and_duplication", "two_buyer_runs_on_threads_over_memory_net"),
+            ("session", ["session"], "dropping_a_session_before_end_is_detected_and_unblocks_the_peer", "two_buyer_runs_on_threads_over_memory_net"),
+            ("wire", ["raft_sim"], "quorum_sizes", "wire_formats_have_exact_lengths_and_reject_malformed_input"),
+            ("raft", ["raft_sim"], "five_node_cluster_keeps_election_safety_and_log_matching", "wire_formats_have_exact_lengths_and_reject_malformed_input"),
+            ("replog", ["replog_warp"], "replicated_log_converges_over_lossy_partitioned_warp_links", "replicated_log_rejects_bad_configuration"),
+        ]
+    ],
+)
+
+crucible_check = port_checks(
+    "crucible",
+    "check",
+    [
+        ["-p", "vesper-crucible", "-p", "vesper-crucible-seed"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--test", "parity"] + _SERIAL, [failed], [passed], env = {"VESPER_CRUCIBLE_DIVERGENT": selection}, stdin = "null")
+        for name, failed, passed, selection in [
+            ("rng", "splitmix_outputs_match_the_rust_build", "tape_text_and_keys_match_the_rust_build", "0"),
+            ("draws", "random_and_replayed_sources_match_the_rust_build", "tape_text_and_keys_match_the_rust_build", "1"),
+            ("tape", "tape_text_and_keys_match_the_rust_build", "splitmix_outputs_match_the_rust_build", "2"),
+            ("shrink", "shrink_sequence_matches_the_rust_build", "tape_text_and_keys_match_the_rust_build", "3"),
+            ("fuzz", "fuzz_campaigns_match_the_rust_build", "tape_text_and_keys_match_the_rust_build", "4"),
+            ("dpor", "explorations_match_the_rust_build", "tape_text_and_keys_match_the_rust_build", "5"),
+        ]
+    ],
+)
+
+diagnostics_test_port = port_checks(
+    "diagnostics",
+    "test-port",
+    [
+        ["-p", "vesper-diagnostics", "-p", "vesper-diagnostics-seed"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--no-fail-fast", "--test"] + args + _SERIAL, [failed], [passed], env = {"VESPER_DIAGNOSTICS_DIVERGE": name})
+        for name, args, failed, passed in [
+            ("prepare", ["render"], "existing_index_must_fit_renderer_line_profile", "names_limits_and_empty_diagnostics"),
+            ("lsp", ["render"], "actual_utf8_bytes_become_utf16_ranges_and_all_actual_labels", "names_limits_and_empty_diagnostics"),
+            ("terminal", ["differential"], "generated_reports_render_identically", "the_builds_differ"),
+        ]
+    ],
+)
+
+ebpf_check = port_checks(
+    "ebpf",
+    "check",
+    [
+        ["-p", "vesper-ebpf", "-p", "vesper-ebpf-seed"],
+        ["-p", "vesper-ebpf", "--features", "vesper-port"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--test"] + args + _SERIAL, [failed], [passed], env = {"VESPER_EBPF_DIVERGENT": selection}, stdin = "null")
+        for name, args, failed, passed, selection in [
+            ("insn", ["codec"], "every_family_round_trips", "malformed_input_is_a_typed_error", "0,1,4,7,9,12"),
+            ("scalar", ["scalar_soundness"], "alu_transfer_functions_contain_concrete_results", "branch_refinement_keeps_every_value_on_its_branch", "0,1,4,7,9,12"),
+            ("helpers", ["port_surface"], "helper_table_matches_the_kernel_protos", "map_definitions_are_validated_rule_by_rule", "0,1,4,7,9,12"),
+            ("wire", ["mitigator"], "wire_layouts_are_exact", "verified_within_the_stack_budget", "0,1,4,7,9,12"),
+            ("btf", ["btf_port"], "port_matches_rust_on_mutated_btf", "port_matches_rust_on_every_kind_and_split_btf", "0,1,4,7,9,12"),
+            ("interp_run", ["interp_port"], "port_matches_rust_on_chaos_programs", "port_matches_rust_on_pointer_lifetimes", "0,1,4,7,9,12"),
+            ("interp", ["scalar_soundness"], "alu_transfer_functions_contain_concrete_results", "branch_refinement_keeps_every_value_on_its_branch", "2,5,8,10"),
+            ("program", ["port_surface"], "map_definitions_are_validated_rule_by_rule", "helper_table_matches_the_kernel_protos", "2,5,8,10"),
+            ("explore", ["verifier_rules"], "corpus_verdicts", "every_rule_is_covered", "2,5,8,10"),
+            ("core", ["core_port"], "port_matches_rust_on_random_relocations", "port_matches_rust_on_patch", "2,5,8,10"),
+            ("verifier", ["scalar_soundness"], "branch_refinement_keeps_every_value_on_its_branch", "alu_transfer_functions_contain_concrete_results", "3,6,11"),
+            ("callgraph", ["port_surface"], "stack_bound_reports_every_outcome", "map_definitions_are_validated_rule_by_rule", "3,6,11"),
+            ("btf_ext", ["ext_port"], "port_matches_rust_on_objects_and_mutations", "port_matches_rust_on_local_types_of_host_btf", "3,6,11"),
+        ]
+    ],
+)
+
+flux_check = port_checks(
+    "flux",
+    "check",
+    [
+        ["-p", "vesper-flux"],
+    ],
+    [
+        divergence(name, _FEATURE + args + _SERIAL, [failed], [passed], env = {"VESPER_FLUX_DIVERGE": name}, stdin = "null")
+        for name, args, failed, passed in [
+            ("union", ["--test", "kernels"], "consolidation_and_sums_match_the_rust_build", "frontier_operations_match_the_rust_build"),
+            ("filter", ["--test", "kernels"], "circuit_ticks_and_batches_match_the_rust_build", "consolidation_and_sums_match_the_rust_build"),
+            ("consolidate", ["--test", "kernels"], "consolidation_and_sums_match_the_rust_build", "frontier_operations_match_the_rust_build"),
+            ("join", ["--test", "kernels"], "circuit_ticks_and_batches_match_the_rust_build", "consolidation_and_sums_match_the_rust_build"),
+            ("frontier", ["--test", "kernels"], "frontier_operations_match_the_rust_build", "circuit_ticks_and_batches_match_the_rust_build"),
+            ("accumulator", ["--lib"], "differential::accumulator_matches_the_rust_accumulator", "frontier::tests::stale_and_generation_exhaustion_preserve_holds"),
+            ("cdc", ["--lib"], "differential::cdc_decoder_matches_the_rust_loop", "differential::accumulator_matches_the_rust_accumulator"),
+            ("log", ["--lib"], "differential::input_log_codec_matches_the_rust_codec", "differential::cdc_decoder_matches_the_rust_loop"),
+            ("image", ["--lib"], "circuit::checkpoint::differential::checkpoint_codec_matches_the_rust_codec", "differential::input_log_codec_matches_the_rust_codec"),
+            ("spine", ["--lib"], "circuit::checkpoint::differential::durable_codecs_match_the_rust_codecs", "circuit::checkpoint::differential::checkpoint_codec_matches_the_rust_codec"),
+            ("kafka_wire", ["--lib"], "circuit::wire::tests::batches_round_trip_in_every_codec", "circuit::checkpoint::differential::checkpoint_codec_matches_the_rust_codec"),
+        ]
+    ],
+)
+
+fmt_test_port = port_checks(
+    "fmt",
+    "test-port",
+    [
+        ["-p", "vesper-fmt", "-p", "vesper-fmt-seed"],
+        ["-p", "vesper-fmt", "--features", "vesper-port"],
+    ],
+    [
+        divergence(name, ["--features", "vesper-port,vesper-port-divergent", "--no-fail-fast", "--test", "differential", "--test", "format"], [failed], [passed], env = {"VESPER_FMT_DIVERGE": name})
+        for name, failed, passed in [
+            ("doc", "repository_sources_format_byte_identically", "limit_sweeps_fail_at_the_same_point"),
+            ("gate", "repository_sources_format_byte_identically", "limit_sweeps_fail_at_the_same_point"),
+            ("layout", "repository_sources_format_byte_identically", "line_comment_never_absorbs_next_token"),
+        ]
+    ],
+)
+
+forge_test_port = port_checks(
+    "forge",
+    "test-port",
+    [
+        ["-p", "vesper-forge", "-p", "vesper-forge-seed"],
+        ["-p", "vesper-forge", "--features", "vesper-port"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--no-fail-fast", "--test"] + args + _SERIAL, [failed], [passed], env = {"VESPER_FORGE_DIVERGE": name})
+        for name, args, failed, passed in [
+            ("delimiters", ["fragment"], "delimiters_must_match_and_nest", "reserved_words_are_not_identifiers"),
+            ("parse", ["fragment"], "reserved_words_are_not_identifiers", "delimiters_must_match_and_nest"),
+            ("resolve", ["hygiene"], "same_package_caller_locals_cannot_capture_macro_globals", "introduced_binder_cannot_capture_caller_identifier"),
+            ("registry", ["hygiene"], "forged_def_id_claims_are_rejected", "introduced_binder_cannot_capture_caller_identifier"),
+        ]
+    ],
+)
+
+fusion_test_port = port_checks(
+    "fusion",
+    "test-port",
+    [
+        ["-p", "vesper-fusion"],
+    ],
+    [divergence(
+        "combined checks",
+        _FEATURE + ["--no-fail-fast", "--test", "witness"] + _SERIAL,
+        ["every_shipped_rule_appears_in_a_checked_witness"],
+        ["rule_sets_name_every_rewrite_with_a_lemma"],
+    )],
+)
+
+highlight_test_port = port_checks(
+    "highlight",
+    "test-port",
+    [
+        ["-p", "vesper-highlight", "-p", "vesper-highlight-seed"],
+        ["-p", "vesper-highlight", "--features", "vesper-port"],
+    ],
+    [
+        divergence(name, ["--features", "vesper-port,vesper-port-divergent", "--no-fail-fast", "--test", "differential"], [failed], [passed], env = {"VESPER_HIGHLIGHT_DIVERGE": name})
+        for name, failed, passed in [
+            ("effects", "repository_sources_classify_identically", "sources_past_the_front_end_ceilings_are_classified_by_rust"),
+            ("words", "repository_sources_classify_identically", "sources_past_the_front_end_ceilings_are_classified_by_rust"),
+            ("types", "repository_sources_classify_identically", "sources_past_the_front_end_ceilings_are_classified_by_rust"),
+        ]
+    ],
+)
+
+kinetic_check = port_checks(
+    "kinetic",
+    "check",
+    [
+        ["-p", "vesper-kinetic", "-p", "vesper-kinetic-seed"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--test"] + args + _SERIAL, [failed], [passed], env = {"VESPER_KINETIC_DIVERGENT": selection}, stdin = "null")
+        for name, args, failed, passed, selection in [
+            ("morton", ["morton"], "out_of_range_inputs_are_typed_errors", "every_axis_value_matches_the_bitwise_specification", "0"),
+            ("fastmath", ["fastmath"], "output_sweep_hash_is_identical_on_every_architecture", "annex_f_special_values_match_the_correctly_rounded_path", "1"),
+            ("coloring", ["coloring"], "colouring_is_greedy_lowest_free_in_body_order", "chain_uses_two_colours_and_islands_are_disjoint", "2"),
+            ("lbvh", ["lbvh"], "overlapping_pairs_equal_the_brute_force_set", "morton64_round_trips_and_orders_by_interleaved_bits", "3"),
+            ("sap", ["sap"], "sortable_keys_preserve_float_order", "malformed_inputs_are_typed_errors", "4"),
+            ("crmath", ["crmath"], "matches_mpmath_references_bit_for_bit", "annex_f_special_values", "5"),
+            ("bignum", ["fastmath"], "binary64_functions_stay_within_the_documented_ulp_bound", "binary32_functions_stay_within_the_documented_ulp_bound", "6"),
+            ("gjk", ["gjk"], "sphere_pairs_match_closed_form", "malformed_shapes_are_typed_errors", "7"),
+            ("ccd", ["sleep_ccd"], "ccd_bullets_do_not_cross_a_thin_wall_or_the_ground", "adding_a_joint_wakes_the_bodies_it_binds", "8"),
+            ("manifold", ["rigid"], "a_stack_of_three_boxes_stays_up", "malformed_worlds_are_typed_errors", "9"),
+            ("sleep", ["sleep_ccd"], "a_resting_stack_falls_asleep_and_a_falling_ball_wakes_it", "ccd_bullets_do_not_cross_a_thin_wall_or_the_ground", "10"),
+            ("diff", ["diff"], "adjoint_matches_central_finite_differences", "malformed_scenes_are_typed_errors", "11"),
+        ]
+    ],
+)
+
+lean_syntax_test_port = port_checks(
+    "lean-syntax",
+    "test-port",
+    [
+        ["-p", "vesper-lean-syntax", "-p", "vesper-lean-syntax-seed"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--no-fail-fast", "--test", "lean", "--test", "lists"] + _SERIAL, [failed], [passed], env = {"VESPER_LEAN_DIVERGE": name})
+        for name, failed, passed in [
+            ("printer", "ordinary_lists_include_empty_nested_and_escaped_literal_elements", "free_references_respect_binders"),
+            ("checks", "identifiers_are_injective_and_cannot_break_quotations", "free_references_respect_binders"),
+            ("walks", "free_references_respect_binders", "identifiers_are_injective_and_cannot_break_quotations"),
+        ]
+    ],
+)
+
+lint_test_port = port_checks(
+    "lint",
+    "test-port",
+    [
+        ["-p", "vesper-lint", "-p", "vesper-lint-seed"],
+        ["-p", "vesper-lint", "--features", "vesper-port", "--", "--skip", "port_frees_its_allocations"],
+        ["-p", "vesper-lint", "--features", "vesper-port", "--test", "differential", "--", "--exact", "port_frees_its_allocations"],
+    ],
+    [
+        divergence(name, ["--features", "vesper-port,vesper-port-divergent", "--no-fail-fast", "--test", "differential", "--test", "typed", "--test", "policy", "--", "--skip", "port_frees_its_allocations"], [failed], [passed], env = {"VESPER_LINT_DIVERGE": name})
+        for name, failed, passed in [
+            ("effects", "fuzzed_facts_lint_identically", "fuzzed_documents_parse_identically"),
+            ("projections", "fuzzed_facts_lint_identically", "fuzzed_documents_parse_identically"),
+            ("toml", "fuzzed_documents_parse_identically", "fuzzed_facts_lint_identically"),
+            ("edits", "fuzzed_edits_apply_identically", "fuzzed_facts_lint_identically"),
+        ]
+    ],
+)
+
+loom_audit_test_port = port_checks(
+    "loom-audit",
+    "test-port",
+    [
+        ["-p", "vesper-loom-audit", "-p", "vesper-loom-audit-seed"],
+    ],
+    [divergence(
+        "combined checks",
+        _FEATURE + ["--no-fail-fast", "--tests"] + _SERIAL,
+        [
+            "graph_catalog_path_and_work_budgets_fail_closed",
+            "spdx_boolean_precedence_and_explicit_exception_grants",
+            "malformed_or_ambiguous_catalogs_never_produce_clean_results",
+            "native_shared_dependency_chooses_shortest_path_per_root",
+            "severity_threshold_and_mixed_unknown_violations_are_explicit",
+            "semver_intervals_include_lower_exclude_fixed_and_ignore_build_metadata",
+        ],
+        ["empty_root_scope_cannot_certify_an_empty_or_unreachable_graph_clean"],
+    )],
+)
+
+loom_solver_test_port = port_checks(
+    "loom-solver",
+    "test-port",
+    [
+        ["-p", "vesper-loom-solver", "-p", "vesper-loom-solver-seed"],
+    ],
+    [divergence(
+        "combined checks",
+        _FEATURE + ["--no-fail-fast", "--tests"] + _SERIAL,
+        [
+            "schema_unknown_fields_and_root_collisions_are_errors",
+            "late_feature_requests_revisit_nodes_through_cycles",
+            "valid_older_selection_is_preserved_without_a_search_budget",
+            "native_constraints_unify_and_pick_latest_satisfying_version",
+            "manifest_metadata_and_build_metadata_must_match",
+            "distinguishes_missing_candidate_metadata_from_zero_cost",
+            "resolve_corpus_matches_the_rust_build",
+            "distinguishes_exhaustive_failure_from_search_budget",
+        ],
+        ["backtracks_latest_parent_after_transitive_conflict"],
+    )],
+)
+
+loom_trust_check = port_checks(
+    "loom-trust",
+    "check",
+    [
+        ["-p", "vesper-loom-trust", "-p", "vesper-loom-trust-seed"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--lib"] + _SERIAL, [failed], [passed], env = {"VESPER_LOOM_TRUST_DIVERGE": name}, stdin = "null")
+        for name, failed, passed in [
+            ("semver", "differential::semver_versions_match_the_semver_crate", "differential::distances_keys_and_splits_match_the_rust_code"),
+            ("object", "differential::signing_messages_match_the_rust_encoder", "differential::distances_keys_and_splits_match_the_rust_code"),
+            ("message", "differential::signing_messages_match_the_rust_encoder", "differential::admission_screens_match_the_rust_screen"),
+            ("quorum", "differential::verification_matches_the_rust_verifier", "differential::admission_screens_match_the_rust_screen"),
+            ("interval", "differential::verification_matches_the_rust_verifier", "differential::admission_screens_match_the_rust_screen"),
+            ("conflation", "differential::distances_keys_and_splits_match_the_rust_code", "differential::verification_matches_the_rust_verifier"),
+            ("distance", "differential::distances_keys_and_splits_match_the_rust_code", "differential::verification_matches_the_rust_verifier"),
+            ("screen", "differential::admission_screens_match_the_rust_screen", "differential::verification_matches_the_rust_verifier"),
+        ]
+    ],
+)
+
+pact_test_port = port_checks(
+    "pact",
+    "test-port",
+    [
+        ["-p", "vesper-pact", "-p", "vesper-pact-seed"],
+    ],
+    [divergence(
+        "combined checks",
+        _FEATURE + ["--no-fail-fast", "--tests"] + _SERIAL,
+        [
+            "missing_impl_is_no_solution_with_deterministic_explanation",
+            "merging_duplicate_effect_labels_fails_closed",
+            "open_row_impl_extends_rows",
+            "implicit_brand_uses_lexical_model_scopes",
+            "mode_bounds_follow_the_lattice",
+            "associated_value_must_satisfy_alias_bounds",
+            "malformed_declarations_are_rejected_with_sorted_diagnostics",
+            "schema_version_is_enforced",
+            "step_budget_overflow_is_indeterminate",
+            "query_dto_from_fixture_solves",
+            "coherence_violations_are_reported_deterministically",
+            "tampered_derivations_are_rejected",
+            "coinductive_cycle_is_proven_and_marked",
+        ],
+        ["capability_labels_canonicalize_by_first_occurrence"],
+    )],
+)
+
+prism_h3_check = port_checks(
+    "prism-h3",
+    "check",
+    [
+        ["-p", "vesper-prism-h3"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--no-fail-fast", "--test", "qpack_rfc", "--test", "qpack_qifs", "--test", "qpack_encode_golden", "--test", "frame_codec", "--test", "message_rules", "--test", "priority_bodies", "--test", "h3_mem", "--test", "webtransport_mem"] + _SERIAL, [failed], [passed], env = {"VESPER_H3_DIVERGE": name})
+        for name, failed, passed in [
+            ("huffman", "appendix_b_encoder_side", "capsules_round_trip_split_anywhere"),
+            ("prefix", "committed_qifs_subset_decodes", "frames_round_trip_split_anywhere"),
+            ("table", "appendix_b_decoder_side", "frames_round_trip_split_anywhere"),
+            ("encoder", "appendix_b_encoder_side", "frames_round_trip_split_anywhere"),
+            ("decoder", "committed_qifs_subset_decodes", "frames_round_trip_split_anywhere"),
+            ("varint", "frames_round_trip_split_anywhere", "rfc9218_priorities"),
+            ("frame", "malformed_frames_are_typed_errors", "capsules_round_trip_split_anywhere"),
+            ("priority", "rfc9218_priorities", "malformed_frames_are_typed_errors"),
+            ("capsule", "capsules_round_trip_split_anywhere", "appendix_b_decoder_side"),
+            ("message", "content_length_and_host_rules", "response_statuses"),
+            ("control", "bad_priority_updates_are_connection_errors", "priority_update_overrides_the_header"),
+            ("session", "held_stream_bound_and_gone_sessions_are_refused", "without_quic_datagrams_http_datagrams_use_capsules"),
+            ("core", "incremental_responses_of_one_urgency_share_capacity", "streaming_bodies_are_pulled_under_a_window"),
+            ("server", "goaway_refuses_later_requests", "request_and_response_round_trip"),
+            ("client", "each_lower_goaway_rejects_newly_excluded_requests", "request_and_response_round_trip"),
+        ]
+    ],
+)
+
+serde_check = port_checks(
+    "serde",
+    "check",
+    [
+        ["-p", "vesper-serde-seed", "-p", "vesper-serde"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--test"] + args + _SERIAL, [failed], [passed], env = {"VESPER_SERDE_DIVERGE": name})
+        for name, args, failed, passed in [
+            ("lemire", ["float_lemire"], "every_path_is_bit_identical_to_std_on_a_differential_corpus", "power_of_five_table_matches_an_independent_big_integer"),
+            ("index", ["json_test_suite"], "json_test_suite_corpus", "random_documents_equal_serde_json"),
+            ("stage2", ["simd_stage2"], "random_valid_documents_build_identical_tapes", "deep_and_wide_inputs"),
+            ("encode", ["float_encode"], "every_finite_exponent_class_and_arbitrary_finite_bits_roundtrip_exactly", "all_nonfinite_sign_and_payload_classes_refuse_before_any_nested_output_write"),
+            ("grisu", ["float_encode"], "text_is_exactly_rusts_display_on_the_grisu_and_dragon_paths", "all_nonfinite_sign_and_payload_classes_refuse_before_any_nested_output_write"),
+            ("dragon", ["float_encode"], "text_is_exactly_rusts_display_on_the_grisu_and_dragon_paths", "all_nonfinite_sign_and_payload_classes_refuse_before_any_nested_output_write"),
+            ("helpers", ["simd_stage1"], "branchless_escape_mask_matches_scalar_reference", "prefix_xor_is_parity"),
+            ("binary", ["binary"], "streamvbyte_fixed_reference_bytes_and_output_suffixes", "archive_fixed_reference_bytes_signed_pointers_and_borrowed_views"),
+            ("records", ["tiles"], "ingests_into_hot_and_cold_tiles_on_every_path", "swar_keys_match_exactly_the_equal_byte_strings"),
+        ]
+    ],
+)
+
+silicon_check = port_checks(
+    "silicon",
+    "check",
+    [
+        ["-p", "vesper-silicon", "-p", "vesper-silicon-seed"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--test"] + args + _SERIAL, [failed], [passed], env = {"VESPER_SILICON_DIVERGENT": selection}, stdin = "null")
+        for name, args, failed, passed, selection in [
+            ("imsic", ["parity"], "imsic_files_match", "every_fixture_parses_identically", "0"),
+            ("aplic", ["parity"], "aplic_domains_match", "imsic_files_match", "1"),
+            ("plic", ["parity"], "interrupt_fabrics_match", "imsic_files_match", "2"),
+            ("dtb", ["dtb"], "qemu_riscv_virt_memory_harts_and_plic", "malformed_headers_are_typed_errors", "3"),
+        ]
+    ],
+)
+
+simpulse_check = port_checks(
+    "simpulse",
+    "check",
+    [
+        ["-p", "vesper-simpulse", "-p", "vesper-simpulse-seed"],
+    ],
+    [divergence(
+        "lib.rs",
+        _FEATURE + ["--test", "kernel"] + _SERIAL,
+        ["each_fixed_runnable_task_runs_once_per_round"],
+        ["virtual_clock_only_jumps_when_nothing_can_run"],
+    )],
+)
+
+span_test_port = port_checks(
+    "span",
+    "test-port",
+    [
+        ["-p", "vesper-span", "-p", "vesper-span-seed"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--no-fail-fast", "--test", "span"] + _SERIAL, [failed], [passed], env = {"VESPER_SPAN_DIVERGE": name})
+        for name, failed, passed in [
+            ("index", "utf8_utf16_and_strict_interiors", "unordered_edits_are_sorted_and_snapshot_bound"),
+            ("edits", "collisions_and_invalid_edits_leave_source_unchanged", "utf8_utf16_and_strict_interiors"),
+            ("diagnostics", "diagnostic_invalid_labels_fixes_and_aggregate_budgets", "utf8_utf16_and_strict_interiors"),
+        ]
+    ],
+)
+
+tensor_test_port = port_checks(
+    "tensor",
+    "test-port",
+    [
+        ["-p", "vesper-tensor", "-p", "vesper-tensor-seed"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--test"] + args + _SERIAL, failed, [passed])
+        for name, args, failed, passed in [
+            ("reference_fixtures", ["reference_fixtures"], ["q4_k_bytes_equal_llama_cpp", "fp8_channel_block_and_mxfp8_codes_equal_ml_dtypes", "q8_0_and_q4_0_weights_equal_gguf_py"], "gpt2_case_file_is_well_formed"),
+            ("tokenizer_sampling", ["tokenizer_sampling"], ["sampling_follows_the_distribution_and_the_nucleus", "encoder_matches_run_c_and_round_trips"], "rng_matches_run_c_xorshift"),
+            ("inference_ops", ["inference_ops"], ["silu_swiglu_softmax_argmax"], "rope_matches_f64_rotation_and_rejects_odd_widths"),
+            ("abba", ["abba"], ["both_builds_read_the_same_safetensors_headers", "both_builds_read_the_same_gguf_files", "both_builds_run_the_same_kv_scripts", "both_builds_plan_the_same_shapes", "both_builds_attend_the_same", "both_builds_read_the_same_llama2c_files", "both_builds_open_the_same_weight_files"], "both_builds_encode_the_same_prompt"),
+        ]
+    ],
+)
+
+vault_check = port_checks(
+    "vault",
+    "check",
+    [
+        ["-p", "vesper-vault", "-p", "vesper-vault-seed"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--lib"] + _SERIAL, [failed], [passed], env = {"VESPER_VAULT_DIVERGE": name}, stdin = "null")
+        for name, failed, passed in [
+            ("verify_tag", "differential::verify_tag_matches_the_rust_code", "differential::aead_limits_and_tickets_match_the_rust_code"),
+            ("aead_limits", "differential::aead_limits_and_tickets_match_the_rust_code", "differential::verify_tag_matches_the_rust_code"),
+            ("aead_seal", "differential::aead_sealing_and_frames_match_the_rust_code", "differential::verify_tag_matches_the_rust_code"),
+            ("aead_open", "differential::aead_opening_and_doom_match_the_rust_code", "differential::aead_sealing_and_frames_match_the_rust_code"),
+            ("kem_client", "differential::kem_client_shares_match_the_rust_code", "differential::verify_tag_matches_the_rust_code"),
+            ("kem_server", "differential::kem_server_encaps_and_validation_match_the_rust_code", "differential::kem_client_shares_match_the_rust_code"),
+        ]
+    ],
+)
+
+warp_check = port_checks(
+    "warp",
+    "check",
+    [
+        ["-p", "vesper-warp"],
+        ["-p", "vesper-warp", "--features", "vesper-port"],
+    ],
+    [
+        divergence(name, _FEATURE + args + _SERIAL, [failed], [passed], env = {"VESPER_WARP_DIVERGE": name}, stdin = "null")
+        for name, args, failed, passed in [
+            ("varint", ["--lib"], "varint::tests::rfc_examples", "packet_number::tests::first_packets_decode"),
+            ("pn", ["--lib"], "packet_number::tests::rfc_a3_example", "varint::tests::rfc_examples"),
+            ("header", ["--test=headers"], "configured_dcid_lengths", "long_headers_roundtrip_and_coalesce"),
+            ("frame", ["--test=frames"], "stream_without_length_runs_to_end_and_all_type_bits", "ack_wire_ranges_decode"),
+            ("ack", ["--test=ack_tracking"], "delayed_ack_policy", "merges_ranges_and_detects_duplicates"),
+            ("recovery", ["--test=recovery"], "packet_threshold_then_time_threshold", "rtt_estimator_and_ack_delay_rules"),
+            ("stream", ["--lib"], "stream::tests::recv_buf_reassembles_with_wrap", "stream::tests::send_buf_retransmits_only_unacked_lost_bytes"),
+            ("lifecycle", ["--lib"], "lifecycle::tests::tokens_round_trip_and_refuse_what_they_must", "lifecycle::tests::reset_tokens_are_keyed_and_compared_whole"),
+            ("packet", ["--test=review_fixes"], "explicit_key_update_is_accepted_by_the_peer", "a_full_launch_queue_backpressures_instead_of_sending_early"),
+        ]
+    ],
+)
+
+warp_crypto_check = port_checks(
+    "warp-crypto",
+    "check",
+    [
+        ["-p", "vesper-warp-crypto"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--lib"] + _SERIAL, [failed], [passed], env = {"VESPER_WARP_CRYPTO_DIVERGE": name}, stdin = "null")
+        for name, failed, passed in [
+            ("schedule", "differential::key_schedule_matches_the_rust_schedule", "differential::retry_integrity_matches_the_rust_code"),
+            ("nonce", "differential::packet_and_header_protection_match_the_rust_code", "differential::retry_integrity_matches_the_rust_code"),
+            ("header", "differential::packet_and_header_protection_match_the_rust_code", "differential::retry_integrity_matches_the_rust_code"),
+            ("sealer", "differential::sealers_and_openers_match_the_rust_ticket_rules", "differential::retry_integrity_matches_the_rust_code"),
+            ("update", "differential::one_rtt_key_updates_match_the_rust_state_machine", "differential::retry_integrity_matches_the_rust_code"),
+            ("retry", "differential::retry_integrity_matches_the_rust_code", "differential::key_schedule_matches_the_rust_schedule"),
+        ]
+    ],
+)
+
+warp_shard_test_port = port_checks(
+    "warp-shard",
+    "test-port",
+    [
+        ["-p", "vesper-warp-shard"],
+        ["-p", "vesper-warp-shard", "--features", "vesper-port"],
+        ["-p", "vesper-warp", "--features", "vesper-warp-shard/vesper-port"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--test"] + args + _SERIAL, failed, passed)
+        for name, args, failed, passed in [
+            ("equivalence", ["equivalence"], ["kernels_match_scalar", "rejects_bad_configs_and_inputs", "batch_semantics_examples"], ["reports_isa_paths", "generation_reuse_invalidates_old_handles"]),
+            ("rss", ["rss"], ["table_hash_matches_bitwise_reference", "microsoft_verification_vectors"], ["rejects_bad_inputs"]),
+        ]
+    ],
+)
+
+warp_tcp_test_port = port_checks(
+    "warp-tcp",
+    "test-port",
+    [
+        ["-p", "vesper-warp-tcp", "--features", "vesper-port"],
+    ],
+    [divergence(
+        "combined checks",
+        _FEATURE + ["--no-fail-fast", "--test", "units", "--test", "fixtures", "--test", "state_machine"] + _SERIAL,
+        [
+            "wraparound_ordering",
+            "rfc6298_formulas_and_backoff",
+            "slow_start_then_one_reduction_per_episode",
+            "fixture_checksums_verify_and_recompute",
+            "fixtures_reserialize_byte_for_byte",
+            "third_duplicate_ack_triggers_fast_retransmit",
+        ],
+        [
+            "rfc1071_numeric_example",
+            "fixture_fields_and_options_decode",
+            "listen_close_goes_to_closed",
+        ],
+    )],
+)
+
+warp_umem_test_port = port_checks(
+    "warp-umem",
+    "test-port",
+    [
+        ["-p", "vesper-warp-umem"],
+        ["-p", "vesper-warp-umem", "--features", "vesper-port"],
+        ["-p", "vesper-warp", "-p", "vesper-sim-session", "--features", "vesper-warp-umem/vesper-port"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--test"] + args + _SERIAL, failed, passed)
+        for name, args, failed, passed in [
+            ("rings", ["rings"], ["indices_wrap_modulo_two_to_the_32", "producer_cache_refreshes_only_when_short", "reserve_is_all_or_nothing_and_peek_is_partial"], []),
+            ("soft_nic", ["soft_nic"], ["loopback_delivers_transmitted_bytes_back_to_rx", "full_tx_ring_backpressure_returns_the_frame", "malformed_rx_descriptors_are_rejected_without_losing_frames", "scripted_lifecycle_harvest_turn_around_submit_complete_retire", "randomized_runs_exercise_every_path"], []),
+            ("zero_alloc", ["zero_alloc"], ["steady_state_loop_is_allocation_free"], []),
+            ("lean_model", ["lean_model"], ["rust_count_model_replays_the_audited_runs"], []),
+        ]
+    ],
+)
+
+warp_wheel_test_port = port_checks(
+    "warp-wheel",
+    "test-port",
+    [
+        ["-p", "vesper-warp-wheel"],
+        ["-p", "vesper-warp-wheel", "--features", "vesper-port"],
+        ["-p", "vesper-warp", "--features", "vesper-warp-wheel/vesper-port"],
+    ],
+    [
+        divergence(name, _FEATURE + ["--test"] + args + _SERIAL, failed, [passed])
+        for name, args, failed, passed in [
+            ("wheel", ["wheel"], ["clock_never_moves_backwards"], "invalid_configs_are_rejected"),
+            ("model", ["model"], ["nothing_fires_early_within_a_tick"], "equal_deadlines_fire_fifo_across_cascades"),
+            ("layers", ["layers"], ["park_refusals_return_the_lease", "edt_horizon_and_order_rejections_return_packet"], "discard_space_and_index_stay_consistent_under_churn"),
+        ]
+    ],
+)

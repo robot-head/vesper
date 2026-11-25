@@ -7,7 +7,7 @@ load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper
 # port/binding.rs against the generated binding. The compiler and
 # vesper-fusion link the Rust seed copy, //crates/vesper-resonance/seed,
 # instead. The divergent builds and the realtime verifier proof run in Cargo
-# (crates/vesper-resonance/port/test-port.sh).
+# (aspect crate resonance test-port).
 vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),

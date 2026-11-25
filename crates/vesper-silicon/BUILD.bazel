@@ -29,7 +29,7 @@ filegroup(
 # The divergent builds, one per ported module (the Cargo
 # `vesper-port-divergent` feature applies the same edits from build.rs, one
 # at a time with VESPER_SILICON_DIVERGENT): each must keep compiling, and
-# crates/vesper-silicon/port/check.sh asserts which test catches it.
+# aspect crate silicon check asserts which test catches it.
 [
     vesper_port_object(
         name = "silicon_vesper_divergent_" + module,

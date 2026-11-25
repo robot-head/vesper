@@ -98,7 +98,7 @@ print("child stderr", file=sys.stderr)
             )
         env = {"PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]])}
         for task, path, shell in (
-            (("crate", "warp-wheel", "test-port"), "crates/vesper-warp-wheel/port/test-port.sh", "sh"),
+            (("crate", "warp-tls", "gen"), "crates/vesper-warp-tls/tests/fixtures/gen.sh", "sh"),
             (("ci", "check-lean-models"), "scripts/ci/check-lean-models.sh", "bash"),
         ):
             with self.subTest(task=task):
@@ -328,6 +328,233 @@ out.mkdir(parents=True, exist_ok=True)
                 compatible = self.aspect(*alias, *forwarded, status=19)
                 self.assertEqual(compatible.stdout, "--directory\nfixture with spaces\n")
                 self.assertEqual(compatible.stdout, original.stdout)
+
+    def test_native_port_check_requires_expected_failure_and_passing_control(self):
+        self.write("bin/cargo", """\
+#!/usr/bin/env python3
+import os
+import sys
+
+args = sys.argv[1:]
+mode = os.environ["VESPER_TEST_PORT_MODE"]
+assert args[:2] == ["test", "--locked"]
+with open("port.log", "a") as log:
+    print("|".join(args), file=log)
+if args == ["test", "--locked", "-p", "vesper-simpulse", "-p", "vesper-simpulse-seed"]:
+    sys.exit(37 if mode == "stable-failed" else 0)
+assert args == ["test", "--locked", "-p", "vesper-simpulse", "--features",
+                "vesper-port-divergent", "--test", "kernel", "--", "--test-threads=1"]
+if mode != "missing-failure":
+    print("test each_fixed_runnable_task_runs_once_per_round ... FAILED")
+if mode != "missing-control":
+    print("test virtual_clock_only_jumps_when_nothing_can_run ... ok", file=sys.stderr)
+sys.exit(0 if mode == "divergent-passed" else 101)
+""", executable=True)
+        env = {"PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]])}
+        log = self.root / "port.log"
+        for mode, code, calls in (
+            ("normal", 0, 2),
+            ("stable-failed", 37, 1),
+            ("missing-failure", 1, 2),
+            ("missing-control", 1, 2),
+            ("divergent-passed", 1, 2),
+        ):
+            with self.subTest(mode=mode):
+                log.unlink(missing_ok=True)
+                result = self.aspect("crate", "simpulse", "check", status=code,
+                                     env={**env, "VESPER_TEST_PORT_MODE": mode})
+                self.assertEqual(len(log.read_text().splitlines()), calls)
+                if code == 0:
+                    self.assertIn("Detected divergent simpulse port (lib.rs)", result.stdout)
+                elif code == 1:
+                    self.assertIn("Divergence check did not fail as expected: simpulse port (lib.rs)",
+                                  result.stderr)
+
+        self.copy_fixture("scripts/test-port-harness.sh")
+        log.unlink()
+        result = self.aspect("acceptance", "test-port-harness", env={
+            **env,
+            "VESPER_TEST_PORT_MODE": "normal",
+            "VESPER_PORT_COMPILER": "fixture-compiler",
+            "VESPER_PORT_HARNESS_SCOPE": "all",
+            "VESPER_PORT_HARNESS_SHARD": "3",
+            "VESPER_PORT_HARNESS_CRATES": "vesper-simpulse",
+        })
+        self.assertEqual(len(log.read_text().splitlines()), 2)
+        self.assertIn("Detected divergent simpulse port (lib.rs)", result.stdout)
+
+    def test_indexed_port_checks_scope_mutation_to_each_cargo_child(self):
+        self.write("bin/cargo", """\
+#!/usr/bin/env python3
+import os
+import stat
+import sys
+
+args = sys.argv[1:]
+key = "VESPER_SILICON_DIVERGENT"
+if args == ["test", "--locked", "-p", "vesper-silicon", "-p", "vesper-silicon-seed"]:
+    assert os.environ.get(key) is None
+    sys.exit(0)
+index = int(os.environ[key])
+cases = [
+    ("parity", "imsic_files_match", "every_fixture_parses_identically"),
+    ("parity", "aplic_domains_match", "imsic_files_match"),
+    ("parity", "interrupt_fabrics_match", "imsic_files_match"),
+    ("dtb", "qemu_riscv_virt_memory_harts_and_plic", "malformed_headers_are_typed_errors"),
+]
+suite, bad, good = cases[index]
+assert args == ["test", "--locked", "-p", "vesper-silicon", "--features", "vesper-port-divergent",
+                "--test", suite, "--", "--test-threads=1"]
+assert stat.S_ISCHR(os.fstat(0).st_mode)
+with open("port.log", "a") as log:
+    print(index, file=log)
+print(f"test {bad} ... FAILED")
+print(f"test {good} ... ok")
+sys.exit(101)
+""", executable=True)
+        env = {"PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]])}
+        result = self.aspect("crate", "silicon", "check", env=env)
+        self.assertEqual((self.root / "port.log").read_text().splitlines(), list("0123"))
+        for area in ("imsic", "aplic", "plic", "dtb"):
+            self.assertIn(f"Detected divergent silicon port ({area})", result.stdout)
+
+    def test_port_divergence_can_require_a_line_prefix(self):
+        self.write("bin/cargo", """\
+#!/usr/bin/env python3
+import sys
+
+args = sys.argv[1:]
+if "--features" in args and "vesper-port" in args:
+    sys.exit(0)
+if "--lib" in args:
+    print("test model::link::tests::micro_burst_builds_queue_delay_then_tail_drops ... FAILED")
+else:
+    print("unexpected prefix before warp_wan: transcript differs")
+sys.exit(101)
+""", executable=True)
+        env = {"PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]])}
+        result = self.aspect("crate", "sim-session", "test-port", status=1, env=env)
+        self.assertEqual(result.stdout, "Detected divergent sim-session port (link)\n")
+        self.assertIn("unexpected prefix before warp_wan:", result.stderr)
+
+    def test_ignis_discovers_only_the_requested_test_artifact(self):
+        self.write("bin/cargo", """\
+#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+suite_names = ["planner", "multi_backend", "lifecycle"]
+if "--no-run" in args:
+    suite = args[args.index("--test") + 1]
+    assert suite in suite_names
+    assert "--message-format=json-render-diagnostics" in args
+    assert "vesper-port-divergent" in args
+    artifact = {
+        "reason": "compiler-artifact", "executable": "/path with spaces/" + suite,
+        "target": {"kind": ["test"], "name": suite},
+    }
+    print("null")
+    print(json.dumps({**artifact, "target": {"kind": ["bin"], "name": suite}}))
+    print(json.dumps({**artifact, "target": {"kind": ["test"], "name": "unrelated"}}))
+    if os.environ.get("VESPER_TEST_ARTIFACT_MODE") != "missing":
+        print(json.dumps(artifact))
+    if os.environ.get("VESPER_TEST_ARTIFACT_MODE") == "duplicate":
+        print(json.dumps(artifact))
+elif "--test" in args:
+    assert args[-4:] == ["--test", "divergence", "--", "--nocapture"]
+    for suite in suite_names:
+        assert os.environ["VESPER_IGNIS_DIVERGENT_" + suite.upper()] == "/path with spaces/" + suite
+    Path("checked").touch()
+""", executable=True)
+        env = {"PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]])}
+        self.aspect("crate", "ignis", "check", env=env)
+        self.assertTrue((self.root / "checked").is_file())
+        for mode, message in (("duplicate", "multiple executables"), ("missing", "every selected test suite")):
+            with self.subTest(mode=mode):
+                (self.root / "checked").unlink(missing_ok=True)
+                result = self.aspect("crate", "ignis", "check", env={**env, "VESPER_TEST_ARTIFACT_MODE": mode},
+                                     status=1)
+                self.assertIn(message, result.stderr)
+                self.assertFalse((self.root / "checked").exists())
+
+    def test_resonance_checks_both_architectures_and_the_verifier_control(self):
+        self.write("bin/cargo", """\
+#!/usr/bin/env python3
+import sys
+
+args = sys.argv[1:]
+if "vesper-port-divergent" not in args:
+    sys.exit(0)
+for bad, good in (
+    ("bank_render_matches_reference_with_events", "host_reports_its_paths"),
+    ("malformed_event_streams_are_typed_errors", "emergency_silence_zeroes_the_rest_and_drops_are_counted"),
+    ("lease_must_be_fully_written_to_commit", "emergency_silence_zeroes_the_rest_and_drops_are_counted"),
+    ("parallel_branches_get_compensation_delays", "buffer_liveness_reuses_buffers"),
+    ("graph_outputs_match_the_rust_build", "events_and_ramps_match_the_rust_build"),
+    ("delay_slab_read_write_wraps_and_clones_cleanly", "clones_are_realigned_and_hold_the_same_samples"),
+    ("tick_is_bit_identical_over_filter_range", "host_reports_its_paths"),
+    ("allocation_two_calls_deep_is_rejected_with_its_path", "loops_follow_the_policy"),
+):
+    print(f"test {bad} ... FAILED")
+    print(f"test {good} ... ok")
+sys.exit(101)
+""", executable=True)
+        compiler = self.write("bin/vesper", """\
+#!/usr/bin/env python3
+import os
+import sys
+
+args = sys.argv[1:]
+mode = os.environ["VESPER_TEST_REALTIME_MODE"]
+entry = args[args.index("--entry") + 1]
+policy = args[args.index("--verify-policy") + 1]
+assert "--verify-realtime" in args
+with open("audio.log", "a") as out:
+    if entry == "rt_audio":
+        assert policy.endswith("/realtime-policy.json")
+        print(args[args.index("--target") + 1], file=out)
+    else:
+        assert entry == "compile_schedule" and policy.endswith("/realtime-control.json")
+        print("control", file=out)
+if entry == "rt_audio":
+    if mode == "unexpected":
+        print("error[realtime/rt-unknown-callee]", file=sys.stderr)
+        sys.exit(1)
+    if mode == "crash":
+        sys.exit(99)
+    if mode == "no-findings":
+        sys.exit(0)
+    if mode == "panic":
+        print("thread panicked", file=sys.stderr)
+    if mode == "bare-error":
+        print("error: could not verify", file=sys.stderr)
+    if mode == "no-artifact":
+        print("object was not emitted", file=sys.stderr)
+    print("error[realtime/rt-unbounded-loop]", file=sys.stderr)
+    print("1 native verifier finding(s)", file=sys.stderr)
+elif mode != "missing-control":
+    print("error[realtime/rt-unknown-callee]", file=sys.stderr)
+sys.exit(1)
+""", executable=True)
+        env = {"PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]]),
+               "VESPER_PORT_COMPILER": str(compiler)}
+        log = self.root / "audio.log"
+        for mode, status, calls in (("normal", 0, 3), ("no-findings", 0, 3), ("unexpected", 1, 1),
+                                    ("crash", 1, 1), ("panic", 1, 1), ("bare-error", 1, 1),
+                                    ("no-artifact", 1, 1), ("missing-control", 1, 3)):
+            with self.subTest(mode=mode):
+                log.unlink(missing_ok=True)
+                result = self.aspect("crate", "resonance", "test-port", status=status,
+                                     env={**env, "VESPER_TEST_REALTIME_MODE": mode})
+                sequence = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "control"]
+                self.assertEqual(log.read_text().splitlines(), sequence[:calls])
+                if status == 0:
+                    self.assertIn("accepted both audio targets", result.stdout)
+                else:
+                    self.assertIn("verifier", result.stderr)
 
     def test_script_exit_codes_and_signals_reach_the_cli(self):
         for body, status in (

@@ -114,7 +114,7 @@ in the combined build `units::rfc1071_numeric_example`,
 `state_machine::listen_close_goes_to_closed` still pass, so the failures come
 from the edits. Bazel: `:port_divergence_detected` runs the three divergent
 test binaries (`tests/divergence.rs`). Cargo (macOS, Windows):
-`crates/vesper-warp-tcp/scripts/test-port.sh`, one line in
+`aspect crate warp-tcp test-port`, one line in
 `scripts/test-port-harness.sh`.
 
 ## Benchmarks

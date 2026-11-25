@@ -23,7 +23,7 @@ fn main() {
 }
 
 /// The divergence checks, one per ported area (mirrored in BUILD.bazel and
-/// asserted by crates/vesper-silicon/port/check.sh).
+/// asserted by aspect crate silicon check).
 #[cfg(feature = "vesper-port-divergent")]
 const EDITS: &[(&str, &str)] = &[
     // aia.ves, IMSIC: an identity equal to `eithreshold` is still delivered.

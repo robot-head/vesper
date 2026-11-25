@@ -1,89 +1,26 @@
 load("./lib/script.axl", "script_task")
 
-aegis_check = script_task("check", ["crate", "aegis"], "crates/vesper-aegis/port/check.sh", "sh")
-
-aether_test_port = script_task("test-port", ["crate", "aether"], "crates/vesper-aether/port/test-port.sh", "sh")
-
-beacon_arrow_test_port = script_task("test-port", ["crate", "beacon-arrow"], "crates/vesper-beacon-arrow/port/test-port.sh", "sh")
-
-bench_check = script_task("check", ["crate", "bench"], "crates/vesper-bench/port/check.sh", "sh")
 
 chorus_gen = script_task("gen", ["crate", "chorus"], "crates/vesper-chorus/tests/fixtures/pki/gen.sh", "sh")
-chorus_test_port = script_task("test-port", ["crate", "chorus"], "crates/vesper-chorus/port/test-port.sh", "sh")
 
-crucible_check = script_task("check", ["crate", "crucible"], "crates/vesper-crucible/port/check.sh", "sh")
 
-diagnostics_test_port = script_task("test-port", ["crate", "diagnostics"], "crates/vesper-diagnostics/port/test-port.sh", "sh")
-
-ebpf_check = script_task("check", ["crate", "ebpf"], "crates/vesper-ebpf/port/check.sh", "sh")
-
-flux_check = script_task("check", ["crate", "flux"], "crates/vesper-flux/port/check.sh", "sh")
-
-fmt_test_port = script_task("test-port", ["crate", "fmt"], "crates/vesper-fmt/port/test-port.sh", "sh")
-
-forge_test_port = script_task("test-port", ["crate", "forge"], "crates/vesper-forge/port/test-port.sh", "sh")
-
-fusion_test_port = script_task("test-port", ["crate", "fusion"], "crates/vesper-fusion/port/test-port.sh", "sh")
 
 grammar_generate = script_task("generate", ["crate", "grammar"], "crates/vesper-grammar/tests/fixtures/ipc/generate.py", "python3")
 
-highlight_test_port = script_task("test-port", ["crate", "highlight"], "crates/vesper-highlight/port/test-port.sh", "sh")
-
-ignis_check = script_task("check", ["crate", "ignis"], "crates/vesper-ignis/port/check.sh", "sh")
-
-kinetic_check = script_task("check", ["crate", "kinetic"], "crates/vesper-kinetic/port/check.sh", "sh")
 kinetic_gen_crmath_refs = script_task("gen-crmath-refs", ["crate", "kinetic"], "crates/vesper-kinetic/tests/data/gen_crmath_refs.py", "python3")
 
-lean_syntax_test_port = script_task("test-port", ["crate", "lean-syntax"], "crates/vesper-lean-syntax/port/test-port.sh", "sh")
 
-lint_test_port = script_task("test-port", ["crate", "lint"], "crates/vesper-lint/port/test-port.sh", "sh")
 
-loom_audit_test_port = script_task("test-port", ["crate", "loom-audit"], "crates/vesper-loom-audit/port/test-port.sh", "sh")
 
-loom_cas_test_port = script_task("test-port", ["crate", "loom-cas"], "crates/vesper-loom-cas/port/test-port.sh", "sh")
 
-loom_solver_test_port = script_task("test-port", ["crate", "loom-solver"], "crates/vesper-loom-solver/port/test-port.sh", "sh")
 
-loom_trust_check = script_task("check", ["crate", "loom-trust"], "crates/vesper-loom-trust/port/check.sh", "sh")
-
-pact_test_port = script_task("test-port", ["crate", "pact"], "crates/vesper-pact/port/test-port.sh", "sh")
-
-prism_test_port = script_task("test-port", ["crate", "prism"], "crates/vesper-prism/test-port.sh", "sh")
-
-prism_h3_check = script_task("check", ["crate", "prism-h3"], "crates/vesper-prism-h3/port/check.sh", "sh")
-
-resonance_test_port = script_task("test-port", ["crate", "resonance"], "crates/vesper-resonance/port/test-port.sh", "sh")
-
-semver_test_port = script_task("test-port", ["crate", "semver"], "crates/vesper-semver/port/test-port.sh", "sh")
-
-serde_check = script_task("check", ["crate", "serde"], "crates/vesper-serde/port/check.sh", "sh")
 serde_gen_lean_quotes = script_task("gen-lean-quotes", ["crate", "serde"], "crates/vesper-serde/tools/gen_lean_quotes.py", "python3")
 
-silicon_check = script_task("check", ["crate", "silicon"], "crates/vesper-silicon/port/check.sh", "sh")
-
-sim_session_test_port = script_task("test-port", ["crate", "sim-session"], "crates/vesper-sim-session/port/test-port.sh", "sh")
-
-simpulse_check = script_task("check", ["crate", "simpulse"], "crates/vesper-simpulse/port/check.sh", "sh")
-
-span_test_port = script_task("test-port", ["crate", "span"], "crates/vesper-span/port/test-port.sh", "sh")
 
 tensor_make_interop = script_task("make-interop", ["crate", "tensor"], "crates/vesper-tensor/fixtures/make_interop.py", "python3")
 tensor_make_reference = script_task("make-reference", ["crate", "tensor"], "crates/vesper-tensor/fixtures/reference/make_reference.py", "python3")
-tensor_test_port = script_task("test-port", ["crate", "tensor"], "crates/vesper-tensor/port/test-port.sh", "sh")
 
-vault_check = script_task("check", ["crate", "vault"], "crates/vesper-vault/port/check.sh", "sh")
-
-warp_check = script_task("check", ["crate", "warp"], "crates/vesper-warp/port/check.sh", "sh")
-
-warp_crypto_check = script_task("check", ["crate", "warp-crypto"], "crates/vesper-warp-crypto/port/check.sh", "sh")
-
-warp_shard_test_port = script_task("test-port", ["crate", "warp-shard"], "crates/vesper-warp-shard/port/test-port.sh", "sh")
 
 warp_tcp_gen_fixtures = script_task("gen-fixtures", ["crate", "warp-tcp"], "crates/vesper-warp-tcp/fixtures/gen_fixtures.py", "python3")
-warp_tcp_test_port = script_task("test-port", ["crate", "warp-tcp"], "crates/vesper-warp-tcp/scripts/test-port.sh", "sh")
 
 warp_tls_gen = script_task("gen", ["crate", "warp-tls"], "crates/vesper-warp-tls/tests/fixtures/gen.sh", "sh")
-
-warp_umem_test_port = script_task("test-port", ["crate", "warp-umem"], "crates/vesper-warp-umem/port/test-port.sh", "sh")
-
-warp_wheel_test_port = script_task("test-port", ["crate", "warp-wheel"], "crates/vesper-warp-wheel/port/test-port.sh", "sh")

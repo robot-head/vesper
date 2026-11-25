@@ -248,7 +248,7 @@ without copying the whole element.
 
 ## Tests
 
-- `crates/vesper-warp-tcp/scripts/test-port.sh`: all 67 tests pass against
+- `aspect crate warp-tcp test-port`: all 67 tests pass against
   the Vesper build, and the divergent build fails the six covered tests and
   passes the three unchanged ones.
 - `cargo test -p vesper-warp-tcp` (Rust default build): 67 tests pass.

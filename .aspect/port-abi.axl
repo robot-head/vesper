@@ -1,3 +1,4 @@
+load("./lib/port_checks.axl", "require_divergence")
 load("./lib/process.axl", "check", "command", "exit_code", "root_path")
 
 def _run_port_abi(ctx: TaskContext, root: str, env: dict[str, str]) -> int:
@@ -11,17 +12,11 @@ def _run_port_abi(ctx: TaskContext, root: str, env: dict[str, str]) -> int:
             if not description:
                 check(ctx, "cargo", argv, root, env)
                 continue
-            child = command(ctx, "cargo", argv, root, env).stdout("piped").stderr("piped").spawn()
-            result = child.wait_with_output()
-            output = result.stdout + "\n" + result.stderr
             expected = ["test " + name + " ... FAILED" for name in case.get("failed", [])]
             expected.extend(["test " + name + " ... ok" for name in case.get("passed", [])])
             if case.get("diagnostic"):
                 expected.append(case["diagnostic"])
-            if result.status.success or any([message not in output for message in expected]):
-                ctx.std.io.stderr.write(output)
-                ctx.std.process.exit(1, "Divergence check did not fail as expected: " + description)
-            ctx.std.io.stdout.write("Detected divergent " + description + "\n")
+            require_divergence(ctx, root, argv, description, expected, env)
     return 0
 
 def _port_abi(ctx: TaskContext) -> int:

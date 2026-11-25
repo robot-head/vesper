@@ -45,7 +45,7 @@ vesper_crate(
 # The divergent builds, one per ported module (the Cargo
 # `vesper-port-divergent` feature applies the same edits, DIVERGENT in
 # build.rs): each must build from a copy of the package with its edit
-# applied, and crates/vesper-chorus/port/test-port.sh asserts which test
+# applied, and aspect crate chorus test-port asserts which test
 # catches each one.
 [
     vesper_port_object(
