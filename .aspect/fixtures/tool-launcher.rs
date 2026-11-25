@@ -5,9 +5,8 @@ use std::path::Path;
 use std::process::{Command, ExitCode};
 
 fn run() -> io::Result<ExitCode> {
-    let required = |name| {
-        env::var_os(name).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, name))
-    };
+    let required =
+        |name| env::var_os(name).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, name));
     let mut args = env::args_os();
     let executable = args.next().expect("fixture executable name");
     let cwd = env::current_dir()?;
