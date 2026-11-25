@@ -53,7 +53,7 @@ TRIGGERS = (
     "scripts/ci/install-lean.sh",
     "scripts/ci/install-logos-rust.sh",
     "scripts/ci/prepare-logos42.sh",
-    "scripts/ci/prepare-lean4lean42.sh",
+    ".aspect/ci.axl",
     "scripts/ci/lean_replay_scope.py",
     "scripts/ci/test-lean-replay.sh",
 )

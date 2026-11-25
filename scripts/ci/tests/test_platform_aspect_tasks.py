@@ -1,4 +1,5 @@
 """Exercise the Aspect CLI and task registrations in an isolated checkout."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -98,12 +99,235 @@ print("child stderr", file=sys.stderr)
         env = {"PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]])}
         for task, path, shell in (
             (("crate", "warp-wheel", "test-port"), "crates/vesper-warp-wheel/port/test-port.sh", "sh"),
-            (("acceptance", "test-doc-links"), "scripts/test-doc-links.sh", "bash"),
+            (("ci", "check-lean-models"), "scripts/ci/check-lean-models.sh", "bash"),
         ):
             with self.subTest(task=task):
                 self.write(path, 'printf "%s|%s\\n" "$VESPER_TASK_TEST_SHELL" "$1"\n')
                 result = self.aspect(*task, "--", "two words", env=env)
                 self.assertEqual(result.stdout, f"{shell}|two words\n")
+
+    def test_acceptance_suites_forward_binary_root_and_scratch_and_run_examples(self):
+        env = {
+            "PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]]),
+            "BAZEL": "/missing-bazel",
+            "VESPER_BAZEL_EXECUTABLES": "executables",
+        }
+        # Use the same interpreter selection as the BuildBuddy acceptance job.
+        (self.root / "bin").mkdir()
+        (self.root / "bin/python").symlink_to(shutil.which("python3"))
+        compiler = self.write("bin/compiler.exe", "")
+        examples = {
+            "canonical-protocols": ["vesper-grammar:example/" + name for name in ("protobuf", "der", "ipc")]
+            + ["vesper-bench-pmu:example/probe"],
+            "diagnostics": ["vesper-diagnostics:example/causal_diagnostics"],
+            "editor": ["vesper-span:example/source_edits", "vesper-lsp:example/protocol_documents"],
+            "source-tooling": ["vesper-grammar:example/grammar", "vesper-fmt:example/canonical",
+                               "vesper-bench:example/paired_callbacks"],
+        }
+        rows = ["//:bin/vesper bin/compiler"]
+        self.write("bin/compiler", "")
+        for label in [label for values in examples.values() for label in values]:
+            name = label.split("/")[-1]
+            rows.append(f"//crates/{label} bin/{name}")
+            body = '#!/bin/sh\nprintf "%s\\n" "' + name + '" >> order\n'
+            if name == "probe":
+                body += 'exit "${VESPER_TEST_PMU_STATUS:-0}"\n'
+            self.write(f"bin/{name}", body, executable=True)
+        self.write("executables", "\n".join(rows) + "\n")
+
+        for task, override in (
+            ("canonical-protocols", None),
+            ("diagnostics", None),
+            ("doc-links", "VESPER_DOC_LINKS_BINARY"),
+            ("editor", None),
+            ("format-proof", "VESPER_FORMAT_PROOF_BINARY"),
+            ("macro-preview", "VESPER_MACRO_PREVIEW_BINARY"),
+            ("recovery", "VESPER_RECOVERY_BINARY"),
+            ("source-macro-parameters", "VESPER_SOURCE_MACRO_PARAMETERS_BINARY"),
+            ("source-macro-tuples", "VESPER_SOURCE_MACRO_TUPLES_BINARY"),
+            ("source-macros", "VESPER_SOURCE_MACROS_BINARY"),
+            ("source-tooling", None),
+            ("stylus", "VESPER_STYLUS_BINARY"),
+        ):
+            with self.subTest(task=task):
+                checker = f"scripts/check-{task}.py"
+                self.write(checker, """\
+import json
+from pathlib import Path
+import sys
+work = sys.argv[sys.argv.index("--work") + 1] if "--work" in sys.argv else None
+if work:
+    assert Path(work).is_dir()
+print(json.dumps([str(Path.cwd()), sys.argv[1:]]))
+Path("order").write_text("checker" + chr(10))
+""")
+                task_env = env.copy()
+                expected_binary = compiler
+                if override:
+                    expected_binary = self.write(f"bin/{task} overridden compiler.exe", "")
+                    task_env[override] = str(expected_binary.with_suffix(""))
+                result = self.aspect("acceptance", "test-" + task, env=task_env)
+                cwd, argv = json.loads(result.stdout.splitlines()[0])
+                self.assertEqual(cwd, str(self.root))
+                expected = ["--binary", str(expected_binary)]
+                if task in ("canonical-protocols", "source-tooling"):
+                    expected += ["--root", str(self.root)]
+                if task != "doc-links":
+                    work = Path(argv[-1])
+                    self.assertTrue(work.name.startswith(f"vesper-{task}-"))
+                    self.assertFalse(work.exists())
+                    expected += ["--work", str(work)]
+                self.assertEqual(argv, expected)
+                order = (self.root / "order").read_text().splitlines()
+                self.assertEqual(order, ["checker", *[label.split("/")[-1] for label in examples.get(task, [])]])
+                if task == "canonical-protocols":
+                    self.assertIn("positive counters", result.stdout)
+
+        for status, stream, expected in ((2, "stdout", "reported unavailable"), (5, "stderr", "failed unexpectedly")):
+            result = self.aspect("acceptance", "test-canonical-protocols",
+                                 env={**env, "VESPER_TEST_PMU_STATUS": str(status)},
+                                 status=0 if status == 2 else status)
+            self.assertIn(expected, getattr(result, stream))
+
+    def test_native_stylus_builds_with_cargo_defaults_and_preserves_overrides(self):
+        (self.root / "bin").mkdir()
+        (self.root / "bin/python").symlink_to(shutil.which("python3"))
+        self.write("bin/cargo", """\
+#!/bin/sh
+test "$*" = "build --locked -p vesper --bin vesper" || exit 2
+printf '%s %s %s %s %s\\n' "$CARGO_BUILD_JOBS" "$CARGO_PROFILE_DEV_DEBUG" "$CARGO_PROFILE_TEST_DEBUG" "$CARGO_INCREMENTAL" "$CARGO_TARGET_DIR" > build
+""", executable=True)
+        self.write("scripts/check-stylus.py", """\
+import os
+import sys
+assert os.environ["CARGO_BUILD_JOBS"] == "3"
+assert os.environ["CARGO_PROFILE_TEST_DEBUG"] == "0"
+print(sys.argv[sys.argv.index("--binary") + 1])
+""")
+        env = {
+            "PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]]),
+            "VESPER_STYLUS_BINARY": "",
+            "CARGO_BUILD_JOBS": "3",
+            "CARGO_PROFILE_DEV_DEBUG": "",
+            "CARGO_PROFILE_TEST_DEBUG": "",
+            "CARGO_INCREMENTAL": "",
+            "CARGO_TARGET_DIR": "relative target",
+        }
+        result = self.aspect("acceptance", "test-stylus", env=env)
+        self.assertEqual(result.stdout.strip(), str(self.root / "relative target/debug/vesper"))
+        self.assertEqual((self.root / "build").read_text().strip(), "3 0 0 0 relative target")
+
+    def test_native_acceptance_removes_scratch_and_skips_examples_on_failure(self):
+        (self.root / "bin").mkdir()
+        (self.root / "bin/python").symlink_to(shutil.which("python3"))
+        self.write("executables", "//:bin/vesper bin/compiler\n")
+        self.write("bin/compiler", "")
+        self.write("scripts/check-diagnostics.py", """\
+from pathlib import Path
+import sys
+Path("scratch").write_text(sys.argv[-1])
+raise SystemExit(17)
+""")
+        env = {
+            "PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]]),
+            "BAZEL": "/missing-bazel",
+            "VESPER_BAZEL_EXECUTABLES": "executables",
+        }
+        self.aspect("acceptance", "test-diagnostics", env=env, status=17)
+        self.assertFalse(Path((self.root / "scratch").read_text()).exists())
+
+    def test_fixture_builds_publish_payloads_and_hashes_only_after_cargo_succeeds(self):
+        self.write("bin/cargo", """\
+#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+args = sys.argv[1:]
+assert args[:4] == ["build", "--locked", "--release", "--manifest-path"]
+assert args[5] == "--target"
+guest = Path(args[4]).parent
+target = args[6]
+hash_inputs = str(guest) + "|" + target
+with open("fixtures.log", "a") as log:
+    keys = ["CARGO_TARGET_DIR", "CARGO_BUILD_JOBS", "CARGO_INCREMENTAL", "RUSTFLAGS"]
+    print(json.dumps([hash_inputs, {key: os.environ[key] for key in keys}]), file=log)
+if target == os.environ.get("VESPER_FIXTURE_FAIL_TARGET"):
+    sys.exit(12)
+name = "vesper_sandbox_fixture" if "loom-sandbox" in str(guest) else "vesper_forge_runner_fixture"
+if "quotation" in str(guest):
+    name = "vesper_quotation_fixture"
+out = Path(os.environ["CARGO_TARGET_DIR"]) / target / "release"
+out.mkdir(parents=True, exist_ok=True)
+(out / (name + ".wasm")).write_bytes(bytes([0, 128, 255]) + target.encode())
+""", executable=True)
+        env = {
+            "PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]]),
+            "CARGO_HOME": str(self.root / "cargo home"),
+            "CARGO_TARGET_DIR": "shared out",
+            "CARGO_BUILD_JOBS": "9",
+            "CARGO_INCREMENTAL": "1",
+        }
+        calls = self.nested / "fixtures.log"
+        cases = (
+            ("forge-runner", "build", "", [("wasm32-wasip2", "macro.component.wasm")]),
+            ("loom-sandbox", "build", "", [("wasm32-wasip2", "step.component.wasm"),
+                                         ("wasm32-wasip1", "step.preview1.wasm")]),
+            ("loom-sandbox", "build-quotation", "/quotation",
+             [("wasm32-wasip2", "quotation.component.wasm")]),
+        )
+        for crate, task, qualifier, outputs in cases:
+            with self.subTest(task=task, crate=crate):
+                if calls.exists():
+                    calls.unlink()
+                result = self.aspect("crate", crate, task, env=env)
+                fixture = self.root / f"crates/vesper-{crate}/fixtures{qualifier}"
+                builds = [json.loads(line) for line in calls.read_text().splitlines()]
+                self.assertEqual([item[0] for item in builds],
+                                 [f"{fixture / 'guest'}|{target}" for target, _ in outputs])
+                for _, variables in builds:
+                    self.assertEqual(variables["CARGO_TARGET_DIR"], str(
+                        self.nested / "shared out" if qualifier else fixture / "guest/target"
+                    ))
+                    self.assertEqual(variables["CARGO_BUILD_JOBS"], "1" if qualifier else "9")
+                    self.assertEqual(variables["CARGO_INCREMENTAL"], "0" if qualifier else "1")
+                    remap = "/quotation-fixture" if qualifier else "/fixture"
+                    self.assertEqual(variables["RUSTFLAGS"],
+                                     f"--remap-path-prefix={fixture / 'guest'}={remap} "
+                                     f"--remap-path-prefix={env['CARGO_HOME']}=/cargo")
+                expected = []
+                for target, name in outputs:
+                    payload = bytes([0, 128, 255]) + target.encode()
+                    self.assertEqual((fixture / "bin" / name).read_bytes(), payload)
+                    expected.append(hashlib.sha256(payload).hexdigest() + "  " + name)
+                self.assertEqual(result.stdout, "\n".join(expected) + "\n")
+                self.assertEqual(result.stdout, (fixture / "bin/SHA256SUMS").read_text())
+        calls.unlink()
+        self.aspect("crate", "loom-sandbox", "build-quotation",
+                    env={**env, "CARGO_HOME": "", "CARGO_TARGET_DIR": ""})
+        _, defaults = json.loads(calls.read_text())
+        guest = self.root / "crates/vesper-loom-sandbox/fixtures/quotation/guest"
+        self.assertEqual(defaults["CARGO_TARGET_DIR"], str(guest / "target"))
+        self.assertIn(f"--remap-path-prefix={Path.home() / '.cargo'}=/cargo", defaults["RUSTFLAGS"])
+        sandbox = self.root / "crates/vesper-loom-sandbox/fixtures/bin"
+        checksum = (sandbox / "SHA256SUMS").read_bytes()
+        self.aspect("crate", "loom-sandbox", "build",
+                    env={**env, "VESPER_FIXTURE_FAIL_TARGET": "wasm32-wasip1"}, status=12)
+        self.assertEqual((sandbox / "SHA256SUMS").read_bytes(), checksum)
+
+    def test_lean4lean_task_aliases_forward_arguments_to_logos(self):
+        self.write("scripts/ci/prepare-logos42.sh", 'printf "%s\\n" "$@"\nexit 19\n')
+        self.write("tools/logos42/setup.py", "import sys\nprint(*sys.argv[1:], sep=chr(10))\nraise SystemExit(19)\n")
+        for alias, canonical in (
+            (("ci", "prepare-lean4lean42"), ("ci", "prepare-logos42")),
+            (("maintenance", "lean4lean42", "setup"), ("maintenance", "logos42", "setup")),
+        ):
+            with self.subTest(alias=alias):
+                forwarded = ("--", "--directory", "fixture with spaces")
+                original = self.aspect(*canonical, *forwarded, status=19)
+                compatible = self.aspect(*alias, *forwarded, status=19)
+                self.assertEqual(compatible.stdout, "--directory\nfixture with spaces\n")
+                self.assertEqual(compatible.stdout, original.stdout)
 
     def test_script_exit_codes_and_signals_reach_the_cli(self):
         for body, status in (

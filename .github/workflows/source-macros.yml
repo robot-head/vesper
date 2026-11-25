@@ -21,7 +21,7 @@ on:
       - 'tests/forge_lower.rs'
       - 'tests/fixtures/source_macros/**'
       - 'scripts/check-source-macros.py'
-      - 'scripts/test-source-macros.sh'
+      - '.aspect/acceptance-suites.axl'
       - '.github/workflows/source-macros.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -43,7 +43,7 @@ on:
       - 'tests/forge_lower.rs'
       - 'tests/fixtures/source_macros/**'
       - 'scripts/check-source-macros.py'
-      - 'scripts/test-source-macros.sh'
+      - '.aspect/acceptance-suites.axl'
       - '.github/workflows/source-macros.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -126,7 +126,7 @@ jobs:
           cargo clippy --locked --all-targets --no-default-features
           -p vesper -p vesper-forge -p vesper-syntax -p vesper-core
           -p vesper-span -p vesper-diagnostics -- -D warnings
-      # scripts/test-source-macros.sh runs through Bazel in the BuildBuddy
+      # The source-macros acceptance task runs through Bazel in the BuildBuddy
       # and Platforms workflows. This workflow keeps the Cargo-only feature
       # checks (--no-default-features, the default CLI dependency graph).
 

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# Fixture guest for vesper-loom-sandbox tests. Built by ../build.sh for
+# Fixture guest for vesper-loom-sandbox tests. Built by aspect crate loom-sandbox build for
 # wasm32-wasip2 (component) and wasm32-wasip1 (preview1 core module).
 [lib]
 crate-type = ["cdylib"]

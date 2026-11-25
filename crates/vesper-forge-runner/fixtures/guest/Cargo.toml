@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# Macro fixture component for vesper-forge-runner tests. Built by ../build.sh
+# Macro fixture component for vesper-forge-runner tests. Built by aspect crate forge-runner build
 # for wasm32-wasip2 against the read-only vesper-loom-sandbox WIT.
 [lib]
 crate-type = ["cdylib"]

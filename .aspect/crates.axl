@@ -23,14 +23,11 @@ fmt_test_port = script_task("test-port", ["crate", "fmt"], "crates/vesper-fmt/po
 
 forge_test_port = script_task("test-port", ["crate", "forge"], "crates/vesper-forge/port/test-port.sh", "sh")
 
-forge_runner_build = script_task("build", ["crate", "forge-runner"], "crates/vesper-forge-runner/fixtures/build.sh", "bash")
-
 fusion_test_port = script_task("test-port", ["crate", "fusion"], "crates/vesper-fusion/port/test-port.sh", "sh")
 
 grammar_generate = script_task("generate", ["crate", "grammar"], "crates/vesper-grammar/tests/fixtures/ipc/generate.py", "python3")
 
 highlight_test_port = script_task("test-port", ["crate", "highlight"], "crates/vesper-highlight/port/test-port.sh", "sh")
-
 
 ignis_check = script_task("check", ["crate", "ignis"], "crates/vesper-ignis/port/check.sh", "sh")
 
@@ -44,9 +41,6 @@ lint_test_port = script_task("test-port", ["crate", "lint"], "crates/vesper-lint
 loom_audit_test_port = script_task("test-port", ["crate", "loom-audit"], "crates/vesper-loom-audit/port/test-port.sh", "sh")
 
 loom_cas_test_port = script_task("test-port", ["crate", "loom-cas"], "crates/vesper-loom-cas/port/test-port.sh", "sh")
-
-loom_sandbox_build = script_task("build", ["crate", "loom-sandbox"], "crates/vesper-loom-sandbox/fixtures/build.sh", "bash")
-loom_sandbox_build_quotation = script_task("build-quotation", ["crate", "loom-sandbox"], "crates/vesper-loom-sandbox/fixtures/quotation/build.sh", "bash")
 
 loom_solver_test_port = script_task("test-port", ["crate", "loom-solver"], "crates/vesper-loom-solver/port/test-port.sh", "sh")
 

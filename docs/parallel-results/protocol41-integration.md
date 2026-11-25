@@ -155,12 +155,12 @@ Integrated validation completed locally:
   actual permission denial, not positive hardware evidence.
 - `cargo clippy --workspace --locked --offline --all-targets -- -D warnings`:
   passed. Formatting and diff whitespace checks passed.
-- The full `scripts/test-canonical-protocols.sh` Cargo/helper/example sequence
+- The full `aspect acceptance test-canonical-protocols` Cargo/helper/example sequence
   passed: canonical Protobuf/DER, actual PyArrow versions/nulls/sums/overflow,
   deny/fix/SemVer/run42, and all three PMU metric modes. Hardware requests were
   explicitly unavailable on this host. All three codec examples executed; the
   real PMU probe returned the documented unavailable exit 2.
-- The existing `scripts/test-source-tooling.sh` also passed unchanged after the
+- The existing `aspect acceptance test-source-tooling` also passed unchanged after the
   new policy/metric integration, including default clock-only benchmarking,
   formatting, source lint fixes, documentation and shared-JIT doctests.
 - All four protocol/policy/benchmark libraries passed Windows GNU all-targets
