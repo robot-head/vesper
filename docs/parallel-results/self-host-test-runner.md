@@ -200,11 +200,76 @@ tests/common/test_mutants_words.rs.
 The sort of the sites (by start, end, replacement) is a stable insertion
 sort; the walk is already close to source order.
 
-## Part 4 (next): the Anvil call graph and hashes
+## Part 4: the Anvil call graph and hashes
 
-`FunctionGraph::from_module` runs on the assembled package module (renamed
-names, case wrappers), not on a source, so the hybrid cannot swap it yet:
-there is no source at the call site for `@vesper/ast` to parse. The plan is
-a Vesper `FunctionGraph` over the AST of a source (with `@vesper-std/hash`'s
-BLAKE3), checked against `from_module(&parse(source).module)` on the
-corpus, ready for the Stage 2 runner.
+`packages/vesper-test-runner/src/graph.ves` ports
+`FunctionGraph::from_module` (src/anvil_hash.rs) over `@vesper/ast`'s AST of
+a source: every top-level function and impl method, keyed `name` or
+`Owner::name`, with its canonical span-insensitive BLAKE3 digest and its
+direct callees. The canonical bytes of a function go to one buffer and are
+hashed once with `@vesper-std/hash`'s pure-Vesper BLAKE3; each effect
+instance is hashed on its own and the digests sorted, as in Rust. Entries
+`anvil_graph_words` and `anvil_graph_str`; words in
+tests/common/anvil_graph_words.rs, whose decoder rebuilds the
+`FunctionGraph` maps with `from_module`'s insert order (a later function of
+the same key replaces the digest and callees; callers gather every edge).
+
+- **Differential** (tests/self_host_anvil_graph.rs): every `.ves` file, the
+  inline sources of src/anvil_hash.rs, tests/anvil_cli.rs and
+  tests/test_runner_cli.rs, and 3 mutants per source from 15 rows that add
+  every literal kind (including i128 extremes), operators, patterns,
+  effects, generics with modes, `fip`, closures, handlers, impls on named
+  and applied types, tuple and fn impl owners with effect rows (`Type::Row`
+  displays as `eff {:?}`), duplicate keys and a parse error. Graphs equal against
+  `FunctionGraph::from_module(&parser::parse(src).module)`.
+- **Numbers:** 0 diffs over 4,948 sources (120,092 functions, 176,575 call
+  edges); unoptimized build 0 diffs on every 13th source. ABBA best of six
+  over the corpus: Rust 5.51 s, Vesper 4.06 s, **0.74x**.
+- **No hybrid swap yet.** The call site (test_runner.rs) passes the
+  assembled package module (renamed names, case wrappers), not a source, so
+  there is nothing for `@vesper/ast` to parse there. The Stage 2 runner
+  calls the graph on the source; until then Rust stays, and the Rust is
+  deleted with src/ at retirement.
+
+## Part 5: the doctest source guard
+
+`packages/vesper-test-runner/src/guard.ves` ports the fail-closed source
+profile that `vesper test --doc` applies to a doctest module after it
+parses without diagnostics and before the checker runs: the item limit,
+the AST volume (16,384 nodes) and depth (64) limits, the constructs whose
+checking grows inferred composites (generic functions, ADTs, effects and
+impls, traits and models, nonempty tuples and tuple types and patterns,
+generic type applications and calls, builtin generic constructors,
+closures, handlers, inferred signatures), and `nominal_expansion` (the
+global unfolding budget, depth 48, recursive nominal types). The walk keeps
+Rust's explicit last-first stack, so the first error found is the same.
+The Rust moved unchanged from src/doctest.rs into src/doctest_guard.rs,
+now a swap point (`DocTestGuardTable`, given the source and the parsed
+module); `DocTestLimits::validate` stays in `checked` before the swap.
+Entries `doctest_guard_words` and `doctest_guard_str`; words in
+tests/common/doctest_guard_words.rs.
+
+- **Differential** (tests/self_host_doctest_guard.rs): every `.ves` file
+  and each of its top-level functions on its own (so an early generic
+  function does not hide the rest of a file), the inline sources of
+  src/doctest.rs and tests/doctest_cli.rs, 35 rows and 24 generated rows
+  (depth, volume, nominal width and depth at and around each limit), and 3
+  mutants per whole source, keeping only sources that parse without
+  diagnostics, under four limit sets (256/32768, the defaults 128/8192,
+  4/6 and 1/1). The test requires every one of the 20 reachable errors to
+  occur.
+- **Numbers:** 0 diffs over 14,728 sources (58,912 runs, about 20,700
+  passing). Unoptimized build 0 diffs on every 13th source. ABBA best of
+  six under the default limits, Rust parse and guard against Vesper
+  lowering and guard: Rust 5.77 s, Vesper 2.22 s, **0.39x**.
+- **Swapped in the hybrid** (`doctest_guard`, registered in swaps.rs). The
+  Vesper side parses the source again; the Rust side reuses the module
+  `checked` already parsed. That parse is inside the measured 0.39x.
+
+## Left after part 5
+
+- doctest `generate`.
+- Expect-error matching, verdict keys, reports.
+- A hybrid end-to-end test of `vesper test`.
+- Execution (anvil_jit, the evaluator, anvil_sim) stays Rust until the
+  compiler is retired.

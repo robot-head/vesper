@@ -1,0 +1,523 @@
+// The RV64IMD encoding of each abstract machine instruction:
+// src/verified_codegen/riscv64.rs in Vesper (#1886, part 2).
+//
+// `R0`, `R1`, `R2` are `a0`, `a1`, `a2`; frame words are `[sp + 8n]` and
+// `[s0 + 16 + 8n]`. Immediates are passed as two's-complement words.
+// lean/CodegenRv64Encoding.lean models `emit`.
+
+use self::asm::{
+    Asm,
+    FIX_AUIPC_JALR,
+    FIX_JAL,
+    bind,
+    bind_copy,
+    fixup,
+    here,
+    put_u32,
+    set_scope,
+    trap_label
+};
+use self::machine::{
+    C_EQ,
+    C_GE,
+    C_GT,
+    C_LE,
+    C_LT,
+    C_NE,
+    L_IN,
+    M,
+    M_ADD_CHK,
+    M_AND_R2,
+    M_BZ,
+    M_CALL,
+    M_CMP,
+    M_DIV,
+    M_ENTER,
+    M_FCMP,
+    M_FNEG,
+    M_FOP,
+    M_IMM,
+    M_JMP,
+    M_LABEL,
+    M_LD,
+    M_LDH,
+    M_LEAVE,
+    M_MUL_CHK,
+    M_NEG_CHK,
+    M_REM,
+    M_ST,
+    M_STH,
+    M_SUB_CHK,
+    M_TRAP,
+    M_TRAP_DIV_OVF,
+    M_TRAP_GT_U,
+    M_TRAP_ZERO,
+    M_WRAP,
+    M_XOR_ONE,
+    OP_ADD,
+    OP_MUL,
+    OP_SUB,
+    S_S
+};
+
+const P_EXIT_STATUS: u8 = 0;
+const P_WORDS: u8 = 1;
+
+const ZERO: u32 = 0;
+const RA: u32 = 1;
+const SP: u32 = 2;
+const T0: u32 = 5;
+const T1: u32 = 6;
+const S0: u32 = 8;
+const A0: u32 = 10;
+const A1: u32 = 11;
+const A2: u32 = 12;
+const A7: u32 = 17;
+
+const OP: u32 = 51;
+const OP_IMM: u32 = 19;
+const LOAD: u32 = 3;
+const STORE: u32 = 35;
+const BRANCH: u32 = 99;
+const JAL: u32 = 111;
+const JALR: u32 = 103;
+const AUIPC: u32 = 23;
+
+const BEQ: u32 = 0;
+const BNE: u32 = 1;
+const BLTU: u32 = 6;
+
+const MUL: u32 = 0;
+const MULH: u32 = 1;
+const MULHU: u32 = 3;
+const DIV: u32 = 4;
+const DIVU: u32 = 5;
+const REM: u32 = 6;
+const REMU: u32 = 7;
+
+// -1 and -16 as two's-complement words.
+const MINUS_1: u64 = 18446744073709551615;
+const MINUS_16: u64 = 18446744073709551600;
+
+fn sh(x: u32, n: u32) -> u32 {
+    wrapping_shl_u32(x, n)
+}
+
+fn shr(x: u32, n: u32) -> u32 {
+    wrapping_shr_u32(x, n)
+}
+
+fn reg(r: u8) -> u32 {
+    wrapping_add(widen_u32(r), A0)
+}
+
+fn r(inout a: Asm, funct7: u32, funct3: u32, rd: u32, rs1: u32, rs2: u32) {
+    put_u32(inout a, sh(funct7, 25) | sh(rs2, 20) | sh(rs1, 15) | sh(funct3, 12) | sh(rd, 7) | OP);
+}
+
+fn i(inout a: Asm, opcode: u32, funct3: u32, rd: u32, rs1: u32, imm: u64) {
+    put_u32(
+        inout a,
+        sh(wrapping_u32(imm) & 4095, 20) | sh(rs1, 15) | sh(funct3, 12) | sh(rd, 7) | opcode
+    );
+}
+
+fn s(inout a: Asm, funct3: u32, rs1: u32, rs2: u32, imm: u64) {
+    let x = wrapping_u32(imm) & 4095;
+    put_u32(
+        inout a,
+        sh(shr(x, 5), 25) | sh(rs2, 20) | sh(rs1, 15) | sh(funct3, 12) | sh(x & 31, 7) | STORE
+    );
+}
+
+fn b(inout a: Asm, funct3: u32, rs1: u32, rs2: u32, offset: u32) {
+    let x = offset;
+    put_u32(
+        inout a,
+        sh(shr(x, 12) & 1, 31) | sh(shr(x, 5) & 63, 25) | sh(rs2, 20) | sh(rs1, 15) | sh(
+            funct3,
+            12
+        ) | sh(shr(x, 1) & 15, 8) | sh(shr(x, 11) & 1, 7) | BRANCH
+    );
+}
+
+fn addi(inout a: Asm, rd: u32, rs1: u32, imm: u64) {
+    i(inout a, OP_IMM, 0, rd, rs1, imm);
+}
+
+fn slli(inout a: Asm, rd: u32, rs1: u32, shamt: u64) {
+    i(inout a, OP_IMM, 1, rd, rs1, shamt);
+}
+
+fn srai(inout a: Asm, rd: u32, rs1: u32, shamt: u64) {
+    i(inout a, OP_IMM, 5, rd, rs1, 1024 | shamt);
+}
+
+fn ori(inout a: Asm, rd: u32, rs1: u32, imm: u64) {
+    i(inout a, OP_IMM, 6, rd, rs1, imm);
+}
+
+fn xori(inout a: Asm, rd: u32, rs1: u32, imm: u64) {
+    i(inout a, OP_IMM, 4, rd, rs1, imm);
+}
+
+fn add(inout a: Asm, rd: u32, rs1: u32, rs2: u32) {
+    r(inout a, 0, 0, rd, rs1, rs2);
+}
+
+fn sub(inout a: Asm, rd: u32, rs1: u32, rs2: u32) {
+    r(inout a, 32, 0, rd, rs1, rs2);
+}
+
+fn slt(inout a: Asm, rd: u32, rs1: u32, rs2: u32) {
+    r(inout a, 0, 2, rd, rs1, rs2);
+}
+
+fn sltu(inout a: Asm, rd: u32, rs1: u32, rs2: u32) {
+    r(inout a, 0, 3, rd, rs1, rs2);
+}
+
+fn muldiv(inout a: Asm, funct3: u32, rd: u32, rs1: u32, rs2: u32) {
+    r(inout a, 1, funct3, rd, rs1, rs2);
+}
+
+fn fp(inout a: Asm, funct7: u32, funct3: u32, rd: u32, rs1: u32, rs2: u32) {
+    put_u32(inout a, sh(funct7, 25) | sh(rs2, 20) | sh(rs1, 15) | sh(funct3, 12) | sh(rd, 7) | 83);
+}
+
+fn fmv_d_x(inout a: Asm, fd: u32, rs1: u32) {
+    fp(inout a, 121, 0, fd, rs1, 0);
+}
+
+fn fmv_x_d(inout a: Asm, rd: u32, fs1: u32) {
+    fp(inout a, 113, 0, rd, fs1, 0);
+}
+
+// The 64-bit immediate: the top 9 bits, then five 11-bit chunks.
+fn imm(inout a: Asm, rd: u32, w: u64) {
+    addi(inout a, rd, ZERO, w >> 55);
+    for k in 0..5 {
+        let chunk = wrapping_sub(4, k);
+        slli(inout a, rd, rd, 11);
+        ori(inout a, rd, rd, wrapping_shr_u64(w, wrapping_u32(wrapping_mul(11, chunk))) & 2047);
+    }
+}
+
+fn jal(inout a: Asm, rd: u32, l: u64) {
+    let at = here(in a);
+    put_u32(inout a, sh(rd, 7) | JAL);
+    fixup(inout a, at, l, FIX_JAL);
+}
+
+fn far_call(inout a: Asm, rd: u32, l: u64) {
+    let at = here(in a);
+    put_u32(inout a, sh(rd, 7) | AUIPC);
+    put_u32(inout a, sh(rd, 15) | sh(rd, 7) | JALR);
+    fixup(inout a, at, l, FIX_AUIPC_JALR);
+}
+
+// The inverted short branch over a `jal` to the label (±1 MiB).
+fn branch_to(inout a: Asm, funct3: u32, rs1: u32, rs2: u32, l: u64) {
+    b(inout a, funct3 ^ 1, rs1, rs2, 8);
+    jal(inout a, ZERO, l);
+}
+
+fn ldst(inout a: Asm, load: bool, rr: u32, loc: u8, n: u64) {
+    let mut base = if loc == L_IN {
+        S0
+    } else {
+        SP
+    };
+    let mut offset = if loc == L_IN {
+        wrapping_add(16, wrapping_mul(n, 8))
+    } else {
+        wrapping_mul(n, 8)
+    };
+    offset = offset & 4294967295;
+    if offset >= 2048 {
+        imm(inout a, T0, offset);
+        add(inout a, T0, T0, base);
+        base = T0;
+        offset = 0;
+    }
+    if load {
+        i(inout a, LOAD, 3, rr, base, offset);
+    } else {
+        s(inout a, 3, base, rr, offset);
+    }
+}
+
+fn sub_sp(inout a: Asm, bytes: u32) {
+    if bytes < 2048 {
+        addi(inout a, SP, SP, wrapping_sub(0, widen_u64(bytes)));
+    } else {
+        imm(inout a, T0, widen_u64(bytes));
+        sub(inout a, SP, SP, T0);
+    }
+}
+
+fn int_min(inout a: Asm, rd: u32) {
+    addi(inout a, rd, ZERO, 1);
+    slli(inout a, rd, rd, 63);
+}
+
+fn lt(inout a: Asm, signed: bool, rd: u32, x: u32, y: u32) {
+    if signed {
+        slt(inout a, rd, x, y);
+    } else {
+        sltu(inout a, rd, x, y);
+    }
+}
+
+// `emit`: the words of one instruction.
+pub fn emit(inout a: Asm, in m: M) {
+    let ovf = trap_label(in a, 0);
+    let o = m.op;
+    if o == M_LD {
+        ldst(inout a, true, reg(m.a), m.b, m.n);
+    } else if o == M_ST {
+        ldst(inout a, false, reg(m.a), m.b, m.n);
+    } else if o == M_IMM {
+        imm(inout a, reg(m.a), m.n);
+    } else if o == M_ADD_CHK {
+        if m.a == S_S {
+            addi(inout a, T0, A0, 0);
+            add(inout a, A0, A0, A1);
+            slt(inout a, T1, A1, ZERO);
+            slt(inout a, T0, A0, T0);
+            branch_to(inout a, BNE, T1, T0, ovf);
+        } else {
+            add(inout a, A0, A0, A1);
+            branch_to(inout a, BLTU, A0, A1, ovf);
+        }
+    } else if o == M_SUB_CHK {
+        if m.a == S_S {
+            addi(inout a, T0, A0, 0);
+            sub(inout a, A0, A0, A1);
+            slt(inout a, T1, ZERO, A1);
+            slt(inout a, T0, A0, T0);
+            branch_to(inout a, BNE, T1, T0, ovf);
+        } else {
+            branch_to(inout a, BLTU, A0, A1, ovf);
+            sub(inout a, A0, A0, A1);
+        }
+    } else if o == M_MUL_CHK {
+        if m.a == S_S {
+            muldiv(inout a, MULH, A2, A0, A1);
+            muldiv(inout a, MUL, A0, A0, A1);
+            srai(inout a, T0, A0, 63);
+            branch_to(inout a, BNE, A2, T0, ovf);
+        } else {
+            muldiv(inout a, MULHU, A2, A0, A1);
+            muldiv(inout a, MUL, A0, A0, A1);
+            branch_to(inout a, BNE, A2, ZERO, ovf);
+        }
+    } else if o == M_WRAP {
+        if m.a == OP_ADD {
+            add(inout a, A0, A0, A1);
+        } else if m.a == OP_SUB {
+            sub(inout a, A0, A0, A1);
+        } else {
+            muldiv(inout a, MUL, A0, A0, A1);
+        }
+    } else if o == M_AND_R2 {
+        r(inout a, 0, 7, A0, A0, A2);
+    } else if o == M_TRAP_GT_U {
+        branch_to(inout a, BLTU, A2, A0, ovf);
+    } else if o == M_TRAP_ZERO {
+        let l = trap_label(in a, 1);
+        branch_to(inout a, BEQ, A1, ZERO, l);
+    } else if o == M_TRAP_DIV_OVF {
+        int_min(inout a, A2);
+        b(inout a, BNE, A0, A2, 16);
+        addi(inout a, T0, ZERO, MINUS_1);
+        b(inout a, BNE, A1, T0, 8);
+        jal(inout a, ZERO, ovf);
+    } else if o == M_DIV {
+        muldiv(
+            inout a,
+            if m.a == S_S {
+                DIV
+            } else {
+                DIVU
+            },
+            A0,
+            A0,
+            A1
+        );
+    } else if o == M_REM {
+        muldiv(
+            inout a,
+            if m.a == S_S {
+                REM
+            } else {
+                REMU
+            },
+            A0,
+            A0,
+            A1
+        );
+    } else if o == M_NEG_CHK {
+        if m.a == S_S {
+            int_min(inout a, T0);
+            branch_to(inout a, BEQ, A0, T0, ovf);
+            sub(inout a, A0, ZERO, A0);
+        } else {
+            branch_to(inout a, BNE, A0, ZERO, ovf);
+        }
+    } else if o == M_XOR_ONE {
+        xori(inout a, A0, A0, 1);
+    } else if o == M_CMP {
+        let c = m.a;
+        let signed = m.b == S_S;
+        if c == C_EQ {
+            sub(inout a, T0, A0, A1);
+            // sltiu a0, t0, 1
+            i(inout a, OP_IMM, 3, A0, T0, 1);
+        } else if c == C_NE {
+            sub(inout a, T0, A0, A1);
+            sltu(inout a, A0, ZERO, T0);
+        } else if c == C_LT {
+            lt(inout a, signed, A0, A0, A1);
+        } else if c == C_GT {
+            lt(inout a, signed, A0, A1, A0);
+        } else if c == C_LE {
+            lt(inout a, signed, A0, A1, A0);
+            xori(inout a, A0, A0, 1);
+        } else {
+            lt(inout a, signed, A0, A0, A1);
+            xori(inout a, A0, A0, 1);
+        }
+    } else if o == M_FOP {
+        let funct7: u32 = if m.a == OP_ADD {
+            1
+        } else if m.a == OP_SUB {
+            5
+        } else if m.a == OP_MUL {
+            9
+        } else {
+            13
+        };
+        fmv_d_x(inout a, 0, A0);
+        fmv_d_x(inout a, 1, A1);
+        fp(inout a, funct7, 0, 0, 0, 1);
+        fmv_x_d(inout a, A0, 0);
+    } else if o == M_FNEG {
+        fmv_d_x(inout a, 0, A0);
+        fp(inout a, 17, 1, 0, 0, 0);
+        fmv_x_d(inout a, A0, 0);
+    } else if o == M_FCMP {
+        fmv_d_x(inout a, 0, A0);
+        fmv_d_x(inout a, 1, A1);
+        let c = m.a;
+        let funct3: u32 = if c == C_EQ || c == C_NE {
+            2
+        } else if c == C_LT || c == C_GT {
+            1
+        } else {
+            0
+        };
+        let swap = c == C_GT || c == C_GE;
+        let x: u32 = if swap {
+            1
+        } else {
+            0
+        };
+        let y: u32 = if swap {
+            0
+        } else {
+            1
+        };
+        fp(inout a, 81, funct3, A0, x, y);
+        if c == C_NE {
+            xori(inout a, A0, A0, 1);
+        }
+    } else if o == M_LDH || o == M_STH {
+        addi(inout a, T0, ZERO, 1);
+        slli(inout a, T0, T0, 28);
+        slli(inout a, T1, A1, 3);
+        add(inout a, T0, T0, T1);
+        let mut offset = wrapping_mul(m.n, 8) & 4294967295;
+        if offset >= 2048 {
+            imm(inout a, T1, offset);
+            add(inout a, T0, T0, T1);
+            offset = 0;
+        }
+        if o == M_LDH {
+            i(inout a, LOAD, 3, A0, T0, offset);
+        } else {
+            s(inout a, 3, T0, A0, offset);
+        }
+    } else if o == M_LABEL {
+        bind(inout a, m.n);
+    } else if o == M_JMP {
+        jal(inout a, ZERO, m.n);
+    } else if o == M_BZ {
+        branch_to(inout a, BEQ, A0, ZERO, m.n);
+    } else if o == M_CALL {
+        far_call(inout a, RA, m.n);
+    } else if o == M_ENTER {
+        addi(inout a, SP, SP, MINUS_16);
+        s(inout a, 3, SP, RA, 8);
+        s(inout a, 3, SP, S0, 0);
+        addi(inout a, S0, SP, 0);
+        sub_sp(inout a, wrapping_u32(wrapping_mul(m.n, 8)));
+    } else if o == M_LEAVE {
+        addi(inout a, SP, S0, 0);
+        i(inout a, LOAD, 3, S0, SP, 0);
+        i(inout a, LOAD, 3, RA, SP, 8);
+        addi(inout a, SP, SP, 16);
+        i(inout a, JALR, 0, ZERO, RA, 0);
+    } else if o == M_TRAP {
+        let l = trap_label(in a, m.a);
+        jal(inout a, ZERO, l);
+    } else {
+        set_scope(inout a, m.n, m.n2);
+    }
+}
+
+fn syscall(inout a: Asm, number: u64) {
+    addi(inout a, A7, ZERO, number);
+    put_u32(inout a, 115);
+}
+
+// `_start` (Linux only).
+pub fn start(inout a: Asm, protocol: u8, result_words: u32, entry: u64) {
+    let words: u32 = if result_words == 0 {
+        1
+    } else {
+        result_words
+    };
+    let area = wrapping_mul(wrapping_add(words, 1) & 4294967294, 8);
+    sub_sp(inout a, area);
+    far_call(inout a, RA, entry);
+    if protocol == P_WORDS && result_words > 0 {
+        addi(inout a, A0, ZERO, 1);
+        addi(inout a, A1, SP, 0);
+        imm(inout a, A2, wrapping_mul(widen_u64(result_words), 8));
+        syscall(inout a, 64);
+    }
+    if protocol == P_EXIT_STATUS && result_words > 0 {
+        i(inout a, LOAD, 3, A0, SP, 0);
+    } else {
+        addi(inout a, A0, ZERO, 0);
+    }
+    syscall(inout a, 93);
+    for k in 0..4 {
+        bind(inout a, k);
+        exit(inout a, k);
+    }
+}
+
+fn exit(inout a: Asm, k: u64) {
+    addi(inout a, A0, ZERO, wrapping_add(k, 101));
+    syscall(inout a, 93);
+}
+
+// Another copy of the abort exits, between functions (`exits`).
+pub fn exits(inout a: Asm) {
+    for k in 0..4 {
+        bind_copy(inout a, k);
+        exit(inout a, k);
+    }
+}

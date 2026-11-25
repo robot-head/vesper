@@ -489,6 +489,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # #1886: @vesper/verified-codegen against src/verified_codegen on the
+        # selection table and the slot IR of the corpus mains.
+        "test/self_host_verified_codegen": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # #1829: @vesper/native-cold-outline against src/native_cold_outline.rs;
         # its kernels are the programs of tests/native_cold_outline.rs.
         "test/self_host_native_cold_outline": glob([
@@ -679,6 +686,27 @@ vesper_crate(
             "src/test_mutants.rs",
             "tests/anvil_cli.rs",
             "tests/test_runner_cli.rs",
+        ]),
+        # Part 4: the Anvil function graph and digests against
+        # anvil_hash::FunctionGraph on the same .ves files and suites.
+        "test/self_host_anvil_graph": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+            "src/anvil_hash.rs",
+            "tests/anvil_cli.rs",
+            "tests/test_runner_cli.rs",
+        ]),
+        # Part 5: the doctest source guard against doctest_guard::rust_guard
+        # on the same .ves files, their functions and the doctest suites.
+        "test/self_host_doctest_guard": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+            "src/doctest.rs",
+            "tests/doctest_cli.rs",
         ]),
         # Self-hosting SH4 lane 17 (#1291): @vesper/backend-checks against
         # native_verifiers on the verifier fixtures and the corpus. Anchored
@@ -933,6 +961,11 @@ vesper_crate(
             "resources:cpu:1",
             "lean_replay",
         ],
+        # Each shard loads the whole corpus and lowers its share of worlds:
+        # about 5 GiB per shard locally (#1913).
+        "test/self_host_swap_inputs": [
+            "resources:memory:6144",
+        ],
         # Four actual corpus workers; memory is an estimate, not an RSS cap.
         "test/self_host_front_end": [
             "resources:memory:5120",
@@ -1154,6 +1187,8 @@ vesper_crate(
         "test/self_host_bounds_hoist_pass": "eternal",
         "test/self_host_native_vectorize": "eternal",
         "test/self_host_native_cold_outline": "eternal",
+        # #1886: the verified backend lowers every corpus main.
+        "test/self_host_verified_codegen": "eternal",
         "test/self_host_bounds_hoist_jit": "eternal",
         # The dyn differential runs both passes over every .ves source twice.
         "test/self_host_check_dyn": "long",
@@ -1199,6 +1234,11 @@ vesper_crate(
         "test/self_host_doctest_extract": "long",
         # The mutation-site differential (#1337) runs the corpus twice.
         "test/self_host_test_mutants": "long",
+        # The Anvil graph differential (#1337) runs the corpus twice.
+        "test/self_host_anvil_graph": "long",
+        # The doctest guard differential (#1337) runs the corpus and every
+        # top-level function under four limit sets, twice.
+        "test/self_host_doctest_guard": "long",
         # The backend-checks differential emits every corpus program 4 times.
         "test/self_host_backend_checks": "long",
         # The optimizer policy (#1279) optimizes every corpus world three times.
@@ -1296,6 +1336,7 @@ vesper_package(
         ":ast_package",
         ":front_package",
         ":std_arena_package",
+        ":std_hash_package",
         ":std_intern_package",
     ],
 )

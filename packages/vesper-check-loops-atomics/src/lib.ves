@@ -21,8 +21,10 @@ use @vesper/check-data::{
     pack_text
 };
 use @vesper/check-data::input::{
+    NamesCtx,
     Reader,
-    read_ctx
+    read_ctx,
+    read_names_ctx
 };
 use self::ast::{
     exprs_new,
@@ -111,11 +113,27 @@ pub fn check_stack_bound(in input: Str) -> ChunkSeq[u64] {
     let mut r = Reader {
         pos: 0
     };
-    let c = read_ctx(inout r, in b);
+    let c = stack_ctx(inout r, in b);
     let g = read_graph(inout r, in b, in c.nmap);
     let mut o = ChunkSeq::new[u8]();
     write_report(inout o, in c.names, in g);
     pack_text(in o)
+}
+
+// The names of a stack-bound input. Its types and world are empty, so
+// only the names are read, into a table sized for them; another input
+// goes through `read_ctx`.
+fn stack_ctx(inout r: Reader, in b: Slice[u8]) -> NamesCtx {
+    let c = read_names_ctx(inout r, in b);
+    if c.ok {
+        return c;
+    }
+    let full = read_ctx(inout r, in b);
+    NamesCtx {
+        names: full.names,
+        nmap: full.nmap,
+        ok: true
+    }
 }
 
 // The hybrid task (crates/vesper-hybrid/modules/stack_bound): the names,
@@ -125,7 +143,7 @@ pub fn stack_bound_words(in input: Slice[u8]) -> ChunkSeq[u64] {
     let mut r = Reader {
         pos: 0
     };
-    let c = read_ctx(inout r, in input);
+    let c = stack_ctx(inout r, in input);
     let g = read_graph(inout r, in input, in c.nmap);
     let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
     report_words(inout o, in c.names, in g);

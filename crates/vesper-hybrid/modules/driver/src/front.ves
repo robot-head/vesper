@@ -1,0 +1,181 @@
+// The front-end passes the driver runs itself (hd_step group 2, #1893):
+// for a standalone source the driver parses with the front end v2 and
+// `@vesper/ast`, prints `--emit cst`, and hands the Rust session the AST as
+// the hybrid's `parse_words` stream (modules/parse) for the passes that
+// still run there. Inputs these do not cover go to the session's own
+// `Parse` and `EmitCst` passes (crates/vesper-hybrid/src/driver.rs): a
+// package, `--include-tests` (the test-block parse), a source over the
+// byte budget, and a parse with diagnostics (the session expands source
+// sugar and reports them).
+use @vesper/hybrid-parse::{
+    parse_words
+};
+use @vesper/ast::lower::{
+    lower_source
+};
+use @vesper/front::lex::{
+    max_source_bytes,
+    token_end
+};
+use @vesper-std/fmt::{
+    write_u64
+};
+use @vesper-std/toml::debug::{
+    put_debug_str
+};
+
+fn word_at(in w: ChunkSeq[u64], i: u64) -> u64 {
+    match w.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// The diagnostic count of a `parse_words` stream: the word after the CST
+// events (format, event count, events, diagnostic count, ...).
+fn diagnostic_count(in w: ChunkSeq[u64]) -> u64 {
+    let events = word_at(in w, 1);
+    word_at(in w, wrapping_add(events, 2))
+}
+
+// The `parse_words` stream of a standalone source whose parse has no
+// diagnostics, for the session's `Parse` (`hd_parsed`); `None` when the
+// session's pass must run instead.
+pub fn parse_clean(in source: Slice[u8]) -> Option[ChunkSeq[u64]] {
+    if source.len() > max_source_bytes() {
+        return Option::None;
+    }
+    let text = match String::from_utf8(in source) {
+        Option::Some(t) => t,
+        Option::None => return Option::None,
+    };
+    let words = parse_words(in text);
+    if diagnostic_count(in words) != 0 {
+        return Option::None;
+    }
+    Option::Some(words)
+}
+
+fn u32_at(in s: ChunkSeq[u32], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn u8_at(in s: ChunkSeq[u8], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn byte_at(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// rowan's `{:?}` of a kind and range: `SyntaxKind(<kind>)@<start>..<end>`.
+fn put_head(inout out: ChunkSeq[u8], kind: u64, start: u64, end: u64) {
+    out.extend(in "SyntaxKind(".as_bytes());
+    write_u64(inout out, kind);
+    out.extend(in ")@".as_bytes());
+    write_u64(inout out, start);
+    out.extend(in "..".as_bytes());
+    write_u64(inout out, end);
+}
+
+fn indent(inout out: ChunkSeq[u8], level: u64) {
+    for _ in 0..level {
+        out.extend(in "  ".as_bytes());
+    }
+}
+
+// rowan's `{:?}` of a token's text: the text, or under 25 bytes of it and
+// ` ...` (the first char boundary from byte 21), as a Rust `str` Debug.
+fn put_token_text(inout out: ChunkSeq[u8], in src: Slice[u8], start: u64, end: u64) {
+    out.push(32);
+    let n = wrapping_sub(end, start);
+    if n < 25 {
+        put_debug_str(inout out, in src, start, end);
+        return;
+    }
+    let mut cut: u64 = 21;
+    loop {
+        let b = byte_at(in src, wrapping_add(start, cut));
+        if b < 128 || b >= 192 || cut >= 24 {
+            break;
+        }
+        cut = wrapping_add(cut, 1);
+    }
+    let mut t: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    t.extend(in src[start..wrapping_add(start, cut)]);
+    t.extend(in " ...".as_bytes());
+    put_debug_str(inout out, in t.as_slice(), 0, t.len());
+}
+
+// `format!("{syntax:#?}\n")` of the concrete syntax tree of a standalone
+// source whose parse has no diagnostics (`--emit cst`); `None` when the
+// session's pass must run instead.
+pub fn cst_text(in source: Slice[u8]) -> Option[ChunkSeq[u8]] {
+    if source.len() > max_source_bytes() {
+        return Option::None;
+    }
+    let text = match String::from_utf8(in source) {
+        Option::Some(t) => t,
+        Option::None => return Option::None,
+    };
+    let l = lower_source(in text);
+    if l.p.d.code.len() != 0 {
+        return Option::None;
+    }
+    let ev = l.p.ev;
+    let n = ev.len();
+    // Each node's end: the end of the last token before its finish.
+    let mut ends: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    ends.resize(n, 0);
+    let mut open: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut at: u64 = 0;
+    for i in 0..n {
+        let e = u32_at(in ev, i);
+        if e == 4294967295 {
+            let depth = open.len();
+            if depth != 0 {
+                let k = word_at(in open, wrapping_sub(depth, 1));
+                ends.try_set(k, at);
+                open.truncate(wrapping_sub(depth, 1));
+            }
+        } else if e >= 2147483648 {
+            open.push(i);
+        } else {
+            at = token_end(in l.p.t, e);
+        }
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut level: u64 = 0;
+    at = 0;
+    for i in 0..n {
+        let e = u32_at(in ev, i);
+        if e == 4294967295 {
+            level = wrapping_sub(level, 1);
+        } else if e >= 2147483648 {
+            indent(inout out, level);
+            put_head(inout out, wrapping_sub(e, 2147483648), at, word_at(in ends, i));
+            out.push(10);
+            level = wrapping_add(level, 1);
+        } else {
+            let start = u32_at(in l.p.t.start, e);
+            let end = token_end(in l.p.t, e);
+            indent(inout out, level);
+            put_head(inout out, u8_at(in l.p.t.kind, e), start, end);
+            put_token_text(inout out, in source, start, end);
+            out.push(10);
+            at = end;
+        }
+    }
+    // `{:#?}` ends each line with a newline; `cli()` adds one more.
+    out.push(10);
+    Option::Some(out)
+}

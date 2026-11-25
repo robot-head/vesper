@@ -106,3 +106,32 @@ pub fn stage2_heap_swap(m: u64) -> u64 {
     let _ = m;
     0
 }
+
+// `b` as words: its byte length, then its bytes eight per word,
+// little-endian, the last word zero-padded (`pack_text`'s layout).
+pub fn put_text_words(inout out: ChunkSeq[u64], in b: Slice[u8]) {
+    let n = b.len();
+    out.push(n);
+    let full = n >> 3;
+    for j in 0..full {
+        let x = match b.try_read_u64_le(j << 3) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        out.push(x);
+    }
+    let at = full << 3;
+    if at < n {
+        let mut x: u64 = 0;
+        let mut k: u64 = 0;
+        for i in at..n {
+            let c = match b.try_get(i) {
+                Option::Some(c) => widen_u64(c),
+                Option::None => 0,
+            };
+            x = x | wrapping_shl_u64(c, wrapping_u32(k << 3));
+            k = wrapping_add(k, 1);
+        }
+        out.push(x);
+    }
+}

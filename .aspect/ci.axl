@@ -22,6 +22,7 @@ tests_flip_gate = script_task("flip-gate", ["ci", "tests"], "scripts/ci/tests/te
 tests_lean_replay_scope = script_task("lean-replay-scope", ["ci", "tests"], "scripts/ci/tests/test_platform_lean_replay_scope.py", "python3")
 tests_merge_gate = script_task("merge-gate", ["ci", "tests"], "scripts/ci/tests/test_platform_merge_gate.py", "python3")
 tests_port_selection = script_task("port-selection", ["ci", "tests"], "scripts/ci/tests/test_platform_port_selection.py", "python3")
+tests_port_divergent_features = script_task("port-divergent-features", ["ci", "tests"], "scripts/ci/tests/test_platform_port_divergent_features.py", "python3")
 tests_profile_runner = script_task("profile-runner", ["ci", "tests"], "scripts/ci/tests/test_platform_profile_runner.py", "python3")
 tests_test_plan = script_task("test-plan", ["ci", "tests"], "scripts/ci/tests/test_platform_test_plan.py", "python3")
 tests_workflows = script_task("workflows", ["ci", "tests"], "scripts/ci/tests/test_platform_workflows.py", "python3")

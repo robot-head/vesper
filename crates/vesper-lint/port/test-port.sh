@@ -9,7 +9,10 @@
 # that guards that area while a test it does not reach still passes.
 set -eu
 cd "$(dirname "$0")/../../.."
-cargo test --locked -p vesper-lint -p vesper-lint-seed
+# port_frees_its_allocations reads the port's process-wide live-allocation
+# count, so it runs alone (as Bazel runs test/differential with one thread).
+# The default build links the port too since the flip (#1708).
+cargo test --locked -p vesper-lint -p vesper-lint-seed -- --skip port_frees_its_allocations
 # The allocation balance reads one process-wide counter, so it runs alone.
 cargo test --locked -p vesper-lint --features vesper-port -- --skip port_frees_its_allocations
 cargo test --locked -p vesper-lint --features vesper-port --test differential -- --exact port_frees_its_allocations

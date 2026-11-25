@@ -45,7 +45,7 @@ pub fn new_policy() -> RedactionPolicy {
 }
 
 // Returns 0 = Ok, 1 = EmptyRule, 2 = SecretTooShort.
-pub fn add_pii_field(inout p: RedactionPolicy, rule: FieldRule) -> u32 {
+pub fn add_pii_field(inout p.{fields}: RedactionPolicy, rule: FieldRule) -> u32 {
     if rule.len == 0 {
         return 1;
     }
@@ -53,7 +53,7 @@ pub fn add_pii_field(inout p: RedactionPolicy, rule: FieldRule) -> u32 {
     0
 }
 
-pub fn add_secret_region(inout p: RedactionPolicy, region: ImageRegion) -> u32 {
+pub fn add_secret_region(inout p.{regions}: RedactionPolicy, region: ImageRegion) -> u32 {
     if region.len == 0 {
         return 1;
     }
@@ -61,7 +61,8 @@ pub fn add_secret_region(inout p: RedactionPolicy, region: ImageRegion) -> u32 {
     0
 }
 
-pub fn add_secret_value(inout p: RedactionPolicy, in bytes: Slice[u8]) -> u32 {
+pub fn add_secret_value(inout p.{secret_buf, secret_spans}: RedactionPolicy, in bytes: Slice[u8])
+    -> u32 {
     if bytes.len() < min_secret_bytes() {
         return 2;
     }

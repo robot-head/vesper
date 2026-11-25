@@ -233,6 +233,10 @@ mod doctest_extract_words;
 // package's tests/self_host_test_mutants.rs.
 #[path = "../../../tests/common/test_mutants_words.rs"]
 mod test_mutants_words;
+// The doctest source guard words (SH5 lane 14 part 5), shared with the
+// root package's tests/self_host_doctest_guard.rs.
+#[path = "../../../tests/common/doctest_guard_words.rs"]
+mod doctest_guard_words;
 
 // The inliner swap's encoder and decoder (#1250), shared with the root
 // package's tests/self_host_ir_inline.rs.
@@ -382,6 +386,45 @@ const VESPER_WORD_LAYOUT: vesper::layout::WordLayout = vesper::layout::WordLayou
         layout_binding::word_offset(index)
     },
 };
+
+thread_local! {
+    /// When the Vesper driver started its own parse (`driver_parse_begin`),
+    /// with stats on.
+    static DRIVER_PARSE_START: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Whether the Vesper driver parses a standalone source itself: only with
+/// the parse swap installed (`VESPER_HYBRID_SWAPS`), since its parse is the
+/// swap's. Starts the clock of the parse's Vesper time when stats are on.
+pub(crate) fn driver_parse_begin() -> bool {
+    let on = swaps::on("parse");
+    if on && stats::level() > 0 {
+        DRIVER_PARSE_START.with(|t| t.set(Some(std::time::Instant::now())));
+    }
+    on
+}
+
+/// A parse the Vesper driver ran (`modules/driver/src/front.ves`), read
+/// back from its `parse_words` stream like the parse swap's; its Vesper
+/// time runs from `driver_parse_begin`.
+pub(crate) fn driver_parse(source: &str, words: &[u64]) -> vesper_syntax::parser::Parse {
+    PARSE_CALLS.fetch_add(1, Relaxed);
+    if let Some(start) = DRIVER_PARSE_START.with(|t| t.take()) {
+        stats::PARSE
+            .vesper
+            .fetch_add(start.elapsed().as_nanos() as u64, Relaxed);
+    }
+    let timer = stats::Timer::start();
+    let parsed = parse_words::decode(source, words);
+    timer.lap(&stats::PARSE.decode);
+    stats::PARSE.call(
+        false,
+        || vesper_syntax::parser::rust_parse(source),
+        |rust| *rust == parsed,
+    );
+    parsed
+}
 
 /// `vesper_syntax::parser::ParseTable` from `modules/parse`: the front end
 /// v2 and the AST of `@vesper/ast`, read back by `parse_words::decode`.
@@ -1693,6 +1736,17 @@ const VESPER_TEST_MUTANTS: vesper::test_mutants::TestMutantsTable =
         },
     };
 
+/// `vesper::doctest_guard::DocTestGuardTable` from `modules/test_runner`:
+/// the doctest source profile of `@vesper/test-runner`, which parses the
+/// source again with `@vesper/ast`.
+const VESPER_DOCTEST_GUARD: vesper::doctest_guard::DocTestGuardTable =
+    vesper::doctest_guard::DocTestGuardTable {
+        guard: |source, _, limits| {
+            let input = doctest_guard_words::guard_input(source, limits);
+            doctest_guard_words::decode_guard(&test_runner_binding::doctest_guard_words(&input))
+        },
+    };
+
 /// `ir_swap`'s `inline` hook from `modules/ir_inline`: the inliner of
 /// `@vesper/ir-inline`. The package decides and splices; the hook encodes
 /// the world's answers and the program, and reads the report and the
@@ -1973,6 +2027,11 @@ extern "C" fn install() {
     }
     if on("test_mutants")
         && vesper::test_mutants::install_test_mutants(VESPER_TEST_MUTANTS).is_err()
+    {
+        std::process::abort();
+    }
+    if on("doctest_guard")
+        && vesper::doctest_guard::install_doctest_guard(VESPER_DOCTEST_GUARD).is_err()
     {
         std::process::abort();
     }
