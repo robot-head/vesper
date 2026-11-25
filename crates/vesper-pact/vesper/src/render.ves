@@ -10,18 +10,18 @@ use self::term::{
     b_var,
     c_nested,
     dec,
-    fa,
-    fb,
-    fc,
+    field_a,
+    field_b,
+    field_c,
     g_impl,
     g_peq,
     g_row,
     inc,
     kid,
+    kid_count,
     l_eff,
     m_const,
     m_var,
-    nlen,
     none,
     r_indcyc,
     r_modelmis,
@@ -37,7 +37,7 @@ use self::term::{
     t_ctor,
     t_proj,
     t_var,
-    tg,
+    tag_of,
     vidx,
     vkind
 };
@@ -124,24 +124,19 @@ pub fn r_id(inout s: S, in prefix: Str, x: u64) {
 // Renders the kids of n from index `from` as a comma-separated argument
 // list.
 fn r_args_from(inout s: S, n: u64, from: u64) {
-    let len = nlen(in s, n);
-    let mut i = from;
-    loop {
-        if i >= len {
-            break;
-        }
+    let len = kid_count(in s, n);
+    for i in from..len {
         if i > from {
             lit(inout s, ", ");
         }
         let k = kid(in s, n, i);
         r_arg(inout s, k);
-        i = inc(i);
     }
 }
 
 // `[args]` when there are any.
 fn r_bracket_args(inout s: S, n: u64) {
-    if nlen(in s, n) > 0 {
+    if kid_count(in s, n) > 0 {
         byte(inout s, LBRACKET);
         r_args_from(inout s, n, 0);
         byte(inout s, RBRACKET);
@@ -149,56 +144,51 @@ fn r_bracket_args(inout s: S, n: u64) {
 }
 
 pub fn r_mode(inout s: S, n: u64) {
-    if tg(in s, n) == m_const() {
-        let h51 = fa(in s, n);
+    if tag_of(in s, n) == m_const() {
+        let h51 = field_a(in s, n);
         r_mode_const(inout s, h51);
     } else {
-        let h50 = fa(in s, n);
+        let h50 = field_a(in s, n);
         r_var(inout s, h50);
     }
 }
 
 pub fn r_brand(inout s: S, n: u64) {
-    let t = tg(in s, n);
+    let t = tag_of(in s, n);
     if t == b_canon() {
         lit(inout s, "canonical");
     } else if t == b_named() {
-        let h49 = fa(in s, n);
+        let h49 = field_a(in s, n);
         r_id(inout s, "model", h49);
     } else {
-        let h48 = fa(in s, n);
+        let h48 = field_a(in s, n);
         r_var(inout s, h48);
     }
 }
 
 pub fn r_label(inout s: S, l: u64) {
-    if tg(in s, l) == l_eff() {
-        let h47 = fa(in s, l);
+    if tag_of(in s, l) == l_eff() {
+        let h47 = field_a(in s, l);
         r_id(inout s, "effect", h47);
         r_bracket_args(inout s, l);
     } else {
         lit(inout s, "cap ");
-        let h46 = fa(in s, l);
+        let h46 = field_a(in s, l);
         r_var(inout s, h46);
     }
 }
 
 pub fn r_row(inout s: S, n: u64) {
     lit(inout s, "eff [");
-    let len = nlen(in s, n);
-    let mut i: u64 = 0;
-    loop {
-        if i >= len {
-            break;
-        }
+    let len = kid_count(in s, n);
+    for i in 0..len {
         if i > 0 {
             lit(inout s, ", ");
         }
         let l = kid(in s, n, i);
         r_label(inout s, l);
-        i = inc(i);
     }
-    let t = fa(in s, n);
+    let t = field_a(in s, n);
     if t != none() {
         if len > 0 {
             byte(inout s, SPACE);
@@ -210,34 +200,34 @@ pub fn r_row(inout s: S, n: u64) {
 }
 
 pub fn r_trait_ref(inout s: S, n: u64) {
-    let st = fb(in s, n);
+    let st = field_b(in s, n);
     r_ty(inout s, st);
     lit(inout s, ": ");
-    let h45 = fa(in s, n);
+    let h45 = field_a(in s, n);
     r_id(inout s, "trait", h45);
     r_bracket_args(inout s, n);
 }
 
 pub fn r_proj(inout s: S, n: u64) {
     byte(inout s, LT);
-    let t = fa(in s, n);
+    let t = field_a(in s, n);
     r_trait_ref(inout s, t);
     lit(inout s, " via ");
-    let b = fb(in s, n);
+    let b = field_b(in s, n);
     r_brand(inout s, b);
     lit(inout s, ">::");
-    let h44 = fc(in s, n);
+    let h44 = field_c(in s, n);
     r_id(inout s, "assoc", h44);
 }
 
 pub fn r_ty(inout s: S, n: u64) {
-    let t = tg(in s, n);
+    let t = tag_of(in s, n);
     if t == t_ctor() {
-        let h43 = fa(in s, n);
+        let h43 = field_a(in s, n);
         r_id(inout s, "type", h43);
         r_bracket_args(inout s, n);
     } else if t == t_var() {
-        let h42 = fa(in s, n);
+        let h42 = field_a(in s, n);
         r_var(inout s, h42);
     } else {
         r_proj(inout s, n);
@@ -246,7 +236,7 @@ pub fn r_ty(inout s: S, n: u64) {
 
 // `GenericArg` Display.
 pub fn r_arg(inout s: S, n: u64) {
-    let t = tg(in s, n);
+    let t = tag_of(in s, n);
     if t <= t_proj() {
         r_ty(inout s, n);
     } else if t <= m_var() {
@@ -259,15 +249,15 @@ pub fn r_arg(inout s: S, n: u64) {
         r_brand(inout s, n);
     } else {
         lit(inout s, "cap ");
-        let h41 = fa(in s, n);
+        let h41 = field_a(in s, n);
         r_var(inout s, h41);
     }
 }
 
 pub fn r_goal(inout s: S, n: u64) {
-    let t = tg(in s, n);
-    let a = fa(in s, n);
-    let b = fb(in s, n);
+    let t = tag_of(in s, n);
+    let a = field_a(in s, n);
+    let b = field_b(in s, n);
     if t == g_impl() {
         r_trait_ref(inout s, a);
         lit(inout s, " via ");
@@ -316,26 +306,21 @@ pub fn d_label_key(inout s: S, k: u64) {
 
 fn d_list(inout s: S, n: u64) {
     byte(inout s, LBRACKET);
-    let len = nlen(in s, n);
-    let mut i: u64 = 0;
-    loop {
-        if i >= len {
-            break;
-        }
+    let len = kid_count(in s, n);
+    for i in 0..len {
         if i > 0 {
             lit(inout s, ", ");
         }
         let k = kid(in s, n, i);
         d_arg(inout s, k);
-        i = inc(i);
     }
     byte(inout s, RBRACKET);
 }
 
 fn d_mode_term(inout s: S, n: u64) {
-    if tg(in s, n) == m_const() {
+    if tag_of(in s, n) == m_const() {
         lit(inout s, "Const(");
-        let m = fa(in s, n);
+        let m = field_a(in s, n);
         if m == 0 {
             lit(inout s, "Copy");
         } else if m == 1 {
@@ -346,24 +331,24 @@ fn d_mode_term(inout s: S, n: u64) {
         byte(inout s, RPAREN);
     } else {
         lit(inout s, "Var(");
-        let h40 = fa(in s, n);
+        let h40 = field_a(in s, n);
         d_var(inout s, h40);
         byte(inout s, RPAREN);
     }
 }
 
 fn d_brand(inout s: S, n: u64) {
-    let t = tg(in s, n);
+    let t = tag_of(in s, n);
     if t == b_canon() {
         lit(inout s, "Canonical");
     } else if t == b_named() {
         lit(inout s, "Named(ModelId(");
-        let h39 = fa(in s, n);
+        let h39 = field_a(in s, n);
         num(inout s, h39);
         lit(inout s, "))");
     } else {
         lit(inout s, "Var(");
-        let h38 = fa(in s, n);
+        let h38 = field_a(in s, n);
         d_var(inout s, h38);
         byte(inout s, RPAREN);
     }
@@ -371,10 +356,10 @@ fn d_brand(inout s: S, n: u64) {
 
 fn d_trait_ref(inout s: S, n: u64) {
     lit(inout s, "TraitRef { trait_id: TraitId(");
-    let h37 = fa(in s, n);
+    let h37 = field_a(in s, n);
     num(inout s, h37);
     lit(inout s, "), self_ty: ");
-    let st = fb(in s, n);
+    let st = field_b(in s, n);
     d_ty(inout s, st);
     lit(inout s, ", args: ");
     d_list(inout s, n);
@@ -382,28 +367,28 @@ fn d_trait_ref(inout s: S, n: u64) {
 }
 
 fn d_ty(inout s: S, n: u64) {
-    let t = tg(in s, n);
+    let t = tag_of(in s, n);
     if t == t_ctor() {
         lit(inout s, "Ctor { ctor: TypeCtorId(");
-        let h36 = fa(in s, n);
+        let h36 = field_a(in s, n);
         num(inout s, h36);
         lit(inout s, "), args: ");
         d_list(inout s, n);
         lit(inout s, " }");
     } else if t == t_var() {
         lit(inout s, "Var(");
-        let h35 = fa(in s, n);
+        let h35 = field_a(in s, n);
         d_var(inout s, h35);
         byte(inout s, RPAREN);
     } else {
         lit(inout s, "Projection(Projection { trait_ref: ");
-        let tr = fa(in s, n);
+        let tr = field_a(in s, n);
         d_trait_ref(inout s, tr);
         lit(inout s, ", brand: ");
-        let b = fb(in s, n);
+        let b = field_b(in s, n);
         d_brand(inout s, b);
         lit(inout s, ", assoc: AssocIdx(");
-        let h34 = fc(in s, n);
+        let h34 = field_c(in s, n);
         num(inout s, h34);
         lit(inout s, ") })");
     }
@@ -411,33 +396,28 @@ fn d_ty(inout s: S, n: u64) {
 
 fn d_row(inout s: S, n: u64) {
     lit(inout s, "EffectRow { labels: [");
-    let len = nlen(in s, n);
-    let mut i: u64 = 0;
-    loop {
-        if i >= len {
-            break;
-        }
+    let len = kid_count(in s, n);
+    for i in 0..len {
         if i > 0 {
             lit(inout s, ", ");
         }
         let l = kid(in s, n, i);
-        if tg(in s, l) == l_eff() {
+        if tag_of(in s, l) == l_eff() {
             lit(inout s, "Effect { effect: EffectId(");
-            let h33 = fa(in s, l);
+            let h33 = field_a(in s, l);
             num(inout s, h33);
             lit(inout s, "), args: ");
             d_list(inout s, l);
             lit(inout s, " }");
         } else {
             lit(inout s, "Capability(");
-            let h32 = fa(in s, l);
+            let h32 = field_a(in s, l);
             d_var(inout s, h32);
             byte(inout s, RPAREN);
         }
-        i = inc(i);
     }
     lit(inout s, "], tail: ");
-    let t = fa(in s, n);
+    let t = field_a(in s, n);
     if t == none() {
         lit(inout s, "None");
     } else {
@@ -450,7 +430,7 @@ fn d_row(inout s: S, n: u64) {
 
 // `GenericArg` Debug.
 pub fn d_arg(inout s: S, n: u64) {
-    let t = tg(in s, n);
+    let t = tag_of(in s, n);
     if t <= t_proj() {
         lit(inout s, "Ty(");
         d_ty(inout s, n);
@@ -465,7 +445,7 @@ pub fn d_arg(inout s: S, n: u64) {
         d_brand(inout s, n);
     } else {
         lit(inout s, "Capability(");
-        let h31 = fa(in s, n);
+        let h31 = field_a(in s, n);
         d_var(inout s, h31);
     }
     byte(inout s, RPAREN);
@@ -483,37 +463,37 @@ fn d_source(inout s: S, src: u64) {
 
 // `Step` Debug.
 pub fn d_step(inout s: S, n: u64) {
-    let t = tg(in s, n);
+    let t = tag_of(in s, n);
     if t == st_conf() {
         lit(inout s, "Conformance { source: ");
-        let h30 = fa(in s, n);
+        let h30 = field_a(in s, n);
         d_source(inout s, h30);
         lit(inout s, ", args: ");
         d_list(inout s, n);
         lit(inout s, " }");
     } else if t == st_assume() {
         lit(inout s, "Assumption { index: ");
-        let h29 = fa(in s, n);
+        let h29 = field_a(in s, n);
         num(inout s, h29);
         lit(inout s, " }");
     } else if t == st_alias() {
         lit(inout s, "AliasBound { bound: ");
-        let h28 = fa(in s, n);
+        let h28 = field_a(in s, n);
         num(inout s, h28);
         lit(inout s, " }");
     } else if t == st_pconf() {
         lit(inout s, "ProjectionConformance { source: ");
-        let h27 = fa(in s, n);
+        let h27 = field_a(in s, n);
         d_source(inout s, h27);
         lit(inout s, ", args: ");
         d_list(inout s, n);
         lit(inout s, ", value_normalizations: ");
-        let h26 = fb(in s, n);
+        let h26 = field_b(in s, n);
         num(inout s, h26);
         lit(inout s, " }");
     } else if t == st_passume() {
         lit(inout s, "ProjectionAssumption { index: ");
-        let h25 = fa(in s, n);
+        let h25 = field_a(in s, n);
         num(inout s, h25);
         lit(inout s, " }");
     } else if t == st_rigid() {
@@ -531,13 +511,8 @@ pub fn d_step(inout s: S, n: u64) {
 // Failure::render and Derivation::render, appended to txt.
 
 fn pad(inout s: S, depth: u64) {
-    let mut i: u64 = 0;
-    loop {
-        if i >= depth {
-            break;
-        }
+    for i in 0..depth {
         lit(inout s, "  ");
-        i = inc(i);
     }
 }
 
@@ -567,48 +542,43 @@ fn goal_tick(inout s: S, depth: u64, g: u64) {
 }
 
 pub fn r_failure(inout s: S, f: u64, depth: u64) {
-    let g = fa(in s, f);
-    let r = fb(in s, f);
-    let t = tg(in s, r);
+    let g = field_a(in s, f);
+    let r = field_b(in s, f);
+    let t = tag_of(in s, r);
     goal_tick(inout s, depth, g);
     if t == r_nocand() {
         lit(inout s, "no matching impl, model or assumption\n");
     } else if t == R_MODE_TAG {
         lit(inout s, "mode ");
-        let a = fa(in s, r);
+        let a = field_a(in s, r);
         r_mode(inout s, a);
         lit(inout s, " is not below ");
-        let b = fb(in s, r);
+        let b = field_b(in s, r);
         r_mode(inout s, b);
         byte(inout s, NEWLINE);
     } else if t == r_modelmis() {
-        let h24 = fa(in s, r);
+        let h24 = field_a(in s, r);
         r_id(inout s, "model", h24);
         lit(inout s, " does not model this trait\n");
     } else if t == r_indcyc() {
         lit(inout s, "inductive cycle without a base case\n");
     } else {
         lit(inout s, "every candidate failed\n");
-        let n = nlen(in s, r);
-        let mut i: u64 = 0;
-        loop {
-            if i >= n {
-                break;
-            }
+        let n = kid_count(in s, r);
+        for i in 0..n {
             let c = kid(in s, r, i);
-            let cause = fb(in s, c);
+            let cause = field_b(in s, c);
             pad(inout s, depth);
             lit(inout s, "  ");
-            let h23 = fa(in s, c);
+            let h23 = field_a(in s, c);
             r_source(inout s, h23);
-            if tg(in s, cause) == c_nested() {
+            if tag_of(in s, cause) == c_nested() {
                 lit(inout s, " requires\n");
-                let inner = fa(in s, cause);
+                let inner = field_a(in s, cause);
                 r_failure(inout s, inner, wrapping_add(depth, 2));
             } else {
                 lit(inout s, ": associated type differs\n");
             }
-            i = inc(i);
         }
     }
 }

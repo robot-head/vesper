@@ -6,32 +6,32 @@ use self::{
 use self::term::{
     b_var,
     e_env,
-    fa,
-    fb,
-    fc,
+    field_a,
+    field_b,
+    field_c,
     g_cap,
     g_impl,
     g_mode,
     g_row,
     inc,
+    intern,
+    intern_with_kids,
     k_list,
     k_slist,
     kid,
+    kid_count,
     l_cap,
     l_eff,
     m_var,
-    mk,
-    mkl,
-    nlen,
     none,
-    sw,
     t_ctor,
     t_proj,
     t_ref,
     t_var,
-    tg,
+    tag_of,
     vidx,
-    vkind
+    vkind,
+    word_at
 };
 use self::fold::{
     cn_begin,
@@ -49,15 +49,10 @@ fn on_var(inout s: S, v: u64, what: u64) {
     } else if vkind(v) == 1 {
         let i = vidx(v);
         let n = s.ford.len();
-        let mut j: u64 = 0;
-        loop {
-            if j >= n {
-                break;
-            }
-            if sw(in s.ford, j) == i {
+        for j in 0..n {
+            if word_at(in s.ford, j) == i {
                 return;
             }
-            j = inc(j);
         }
         s.ford.push(i);
     }
@@ -67,57 +62,47 @@ fn on_var(inout s: S, v: u64, what: u64) {
 // s.seen, 1 appends unseen placeholders to s.ford. Returns false where the
 // fold would stop (a row repeating a label), as the Rust visitor does.
 pub fn visit(inout s: S, n: u64, what: u64) -> bool {
-    let t = tg(in s, n);
+    let t = tag_of(in s, n);
     if t == t_var() || t == m_var() || t == b_var() || t == g_cap() || t == l_cap() {
-        let v = fa(in s, n);
+        let v = field_a(in s, n);
         on_var(inout s, v, what);
         return true;
     }
     if t == g_row() {
-        let len = nlen(in s, n);
-        let mut i: u64 = 0;
-        loop {
-            if i >= len {
-                break;
-            }
+        let len = kid_count(in s, n);
+        for i in 0..len {
             let l = kid(in s, n, i);
             if !visit(inout s, l, what) {
                 return false;
             }
-            i = inc(i);
         }
-        let tail = fa(in s, n);
+        let tail = field_a(in s, n);
         if tail != none() {
             on_var(inout s, tail, what);
         }
         return row_dup(in s, n) == none();
     }
     if t == t_proj() || (t >= g_impl() && t <= g_mode()) {
-        let a = fa(in s, n);
+        let a = field_a(in s, n);
         if !visit(inout s, a, what) {
             return false;
         }
-        let b = fb(in s, n);
+        let b = field_b(in s, n);
         return visit(inout s, b, what);
     }
     if t == t_ref() {
-        let b = fb(in s, n);
+        let b = field_b(in s, n);
         if !visit(inout s, b, what) {
             return false;
         }
     }
     if t == t_ctor() || t == l_eff() || t == t_ref() {
-        let len = nlen(in s, n);
-        let mut i: u64 = 0;
-        loop {
-            if i >= len {
-                break;
-            }
+        let len = kid_count(in s, n);
+        for i in 0..len {
             let k = kid(in s, n, i);
             if !visit(inout s, k, what) {
                 return false;
             }
-            i = inc(i);
         }
     }
     true
@@ -131,8 +116,8 @@ pub fn visit(inout s: S, n: u64, what: u64) -> bool {
 pub fn canon_placeholders(inout s: S, env: u64, goal: u64) -> bool {
     s.ford.clear();
     let _ = visit(inout s, goal, 1);
-    let asm = fb(in s, env);
-    let na = nlen(in s, asm);
+    let asm = field_b(in s, env);
+    let na = kid_count(in s, asm);
     let mut i: u64 = 0;
     loop {
         if i >= na {
@@ -162,9 +147,9 @@ pub fn canon_placeholders(inout s: S, env: u64, goal: u64) -> bool {
         s.tmp.push(x);
         i = inc(i);
     }
-    let asm2 = mkl(inout s, k_list(), 0, 0, 0, from);
-    let phs = fa(in s, env);
-    let nph = nlen(in s, phs);
+    let asm2 = intern_with_kids(inout s, k_list(), 0, 0, 0, from);
+    let phs = field_a(in s, env);
+    let nph = kid_count(in s, phs);
     let no = s.ford.len();
     let f2 = s.tmp.len();
     let mut j: u64 = 0;
@@ -172,7 +157,7 @@ pub fn canon_placeholders(inout s: S, env: u64, goal: u64) -> bool {
         if j >= no {
             break;
         }
-        let o = sw(in s.ford, j);
+        let o = word_at(in s.ford, j);
         if o >= nph {
             s.oob = true;
         }
@@ -180,9 +165,9 @@ pub fn canon_placeholders(inout s: S, env: u64, goal: u64) -> bool {
         s.tmp.push(p);
         j = inc(j);
     }
-    let phs2 = mkl(inout s, k_list(), 0, 0, 0, f2);
-    let scopes = fc(in s, env);
-    let ns = nlen(in s, scopes);
+    let phs2 = intern_with_kids(inout s, k_list(), 0, 0, 0, f2);
+    let scopes = field_c(in s, env);
+    let ns = kid_count(in s, scopes);
     let f3 = s.tmp.len();
     j = 0;
     loop {
@@ -190,13 +175,13 @@ pub fn canon_placeholders(inout s: S, env: u64, goal: u64) -> bool {
             break;
         }
         let sc = kid(in s, scopes, j);
-        if nlen(in s, sc) > 0 {
+        if kid_count(in s, sc) > 0 {
             s.tmp.push(sc);
         }
         j = inc(j);
     }
-    let scopes2 = mkl(inout s, k_list(), 0, 0, 0, f3);
-    s.cenv = mk(inout s, e_env(), phs2, asm2, scopes2);
+    let scopes2 = intern_with_kids(inout s, k_list(), 0, 0, 0, f3);
+    s.cenv = intern(inout s, e_env(), phs2, asm2, scopes2);
     s.cgoal = g;
     let f4 = s.tmp.len();
     j = 0;
@@ -204,11 +189,11 @@ pub fn canon_placeholders(inout s: S, env: u64, goal: u64) -> bool {
         if j >= no {
             break;
         }
-        let o = sw(in s.ford, j);
+        let o = word_at(in s.ford, j);
         s.tmp.push(o);
         j = inc(j);
     }
-    s.corigin = mkl(inout s, k_slist(), 0, 0, 0, f4);
+    s.corigin = intern_with_kids(inout s, k_slist(), 0, 0, 0, f4);
     true
 }
 
@@ -224,14 +209,9 @@ pub fn canon_free(inout s: S, n: u64) -> u64 {
 pub fn binders_slist(inout s: S) -> u64 {
     let from = s.tmp.len();
     let n = s.cn_binders.len();
-    let mut i: u64 = 0;
-    loop {
-        if i >= n {
-            break;
-        }
-        let k = sw(in s.cn_binders, i);
+    for i in 0..n {
+        let k = word_at(in s.cn_binders, i);
         s.tmp.push(k);
-        i = inc(i);
     }
-    mkl(inout s, k_slist(), 0, 0, 0, from)
+    intern_with_kids(inout s, k_slist(), 0, 0, 0, from)
 }

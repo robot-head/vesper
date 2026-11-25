@@ -47,26 +47,26 @@ use self::term::{
     d_node,
     dec,
     f_node,
-    fa,
-    fb,
-    fc,
+    field_a,
+    field_b,
+    field_c,
     flags,
     g_impl,
     g_mode,
     g_peq,
     g_row,
     inc,
+    intern,
+    intern0,
+    intern1,
+    intern2,
+    intern_with_kids,
     is_inf,
     k_list,
     k_slist,
     kid,
+    kid_count,
     l_eff,
-    mk,
-    mk0,
-    mk1,
-    mk2,
-    mkl,
-    nlen,
     none,
     push_kids,
     q_ambig,
@@ -79,7 +79,7 @@ use self::term::{
     r_mode,
     r_modelmis,
     r_nocand,
-    setw,
+    set_word,
     st_alias,
     st_assume,
     st_cohyp,
@@ -90,19 +90,19 @@ use self::term::{
     st_pconf,
     st_rigid,
     sub,
-    sw,
     t_ctor,
     t_proj,
     t_ref,
     t_var,
-    tg,
+    tag_of,
     un_dup,
     un_internal,
     un_mixed,
     var_arg,
     vidx,
     vinf,
-    vkind
+    vkind,
+    word_at
 };
 use self::fold::{
     cn_begin,
@@ -138,17 +138,17 @@ fn src(v: u64, x: u64) -> u64 {
 
 fn dup_err(inout s: S) -> u64 {
     let k = s.dkey;
-    let r = mk1(inout s, un_dup(), k);
-    mk1(inout s, q_unsup(), r)
+    let r = intern1(inout s, un_dup(), k);
+    intern1(inout s, q_unsup(), r)
 }
 
 // `unify_err`.
 fn unify_err(inout s: S, e: u64) -> u64 {
     if e == 1 {
-        mk0(inout s, ce_head())
+        intern0(inout s, ce_head())
     } else if e == 2 {
-        let a = mk0(inout s, am_noninj());
-        mk1(inout s, q_ambig(), a)
+        let a = intern0(inout s, am_noninj());
+        intern1(inout s, q_ambig(), a)
     } else {
         dup_err(inout s)
     }
@@ -156,17 +156,17 @@ fn unify_err(inout s: S, e: u64) -> u64 {
 
 // `From<NestedErr> for CandErr`.
 fn nested_to_cand(inout s: S, e: u64) -> u64 {
-    if tg(in s, e) == q_nosol() {
-        let f = fa(in s, e);
-        let c = mk1(inout s, c_nested(), f);
-        mk1(inout s, ce_nosol(), c)
+    if tag_of(in s, e) == q_nosol() {
+        let f = field_a(in s, e);
+        let c = intern1(inout s, c_nested(), f);
+        intern1(inout s, ce_nosol(), c)
     } else {
         e
     }
 }
 
 fn is_err(in s: S, n: u64) -> bool {
-    let t = tg(in s, n);
+    let t = tag_of(in s, n);
     t >= q_proven() && t <= q_over() || t == ce_head() || t == ce_nosol()
 }
 
@@ -176,25 +176,25 @@ fn bump(inout s: S) -> bool {
 }
 
 fn overflow(inout s: S, k: u64) -> u64 {
-    mk1(inout s, q_over(), k)
+    intern1(inout s, q_over(), k)
 }
 
 // The candidate's goal: the builder with its brand resolved in cx.
 fn goal_of(inout s: S, in cx: ChunkSeq[u64], g: u64) -> u64 {
-    if tg(in s, g) == g_impl() {
-        let tr = fa(in s, g);
-        let b = fb(in s, g);
+    if tag_of(in s, g) == g_impl() {
+        let tr = field_a(in s, g);
+        let b = field_b(in s, g);
         let rb = resolve(inout s, in cx, b);
-        mk2(inout s, g_impl(), tr, rb)
+        intern2(inout s, g_impl(), tr, rb)
     } else {
-        let p = fa(in s, g);
-        let ty = fb(in s, g);
-        let tr = fa(in s, p);
-        let b = fb(in s, p);
-        let assoc = fc(in s, p);
+        let p = field_a(in s, g);
+        let ty = field_b(in s, g);
+        let tr = field_a(in s, p);
+        let b = field_b(in s, p);
+        let assoc = field_c(in s, p);
         let rb = resolve(inout s, in cx, b);
-        let np = mk(inout s, t_proj(), tr, rb, assoc);
-        mk2(inout s, g_peq(), np, ty)
+        let np = intern(inout s, t_proj(), tr, rb, assoc);
+        intern2(inout s, g_peq(), np, ty)
     }
 }
 
@@ -203,12 +203,8 @@ fn goal_of(inout s: S, in cx: ChunkSeq[u64], g: u64) -> u64 {
 pub fn make_response(inout s: S, in cx: ChunkSeq[u64], vars: u64, d: u64) -> u64 {
     let base = s.tmp.len();
     cn_begin(inout s);
-    let n = nlen(in s, vars);
-    let mut i: u64 = 0;
-    loop {
-        if i >= n {
-            break;
-        }
+    let n = kid_count(in s, vars);
+    for i in 0..n {
         let v = kid(in s, vars, i);
         let r = resolve(inout s, in cx, v);
         if r == 0 {
@@ -221,7 +217,6 @@ pub fn make_response(inout s: S, in cx: ChunkSeq[u64], vars: u64, d: u64) -> u64
             return dup_err(inout s);
         }
         s.tmp.push(c);
-        i = inc(i);
     }
     let resolved = run(inout s, in cx, 7, d);
     if resolved == 0 {
@@ -233,20 +228,15 @@ pub fn make_response(inout s: S, in cx: ChunkSeq[u64], vars: u64, d: u64) -> u64
         s.tmp.truncate(base);
         return dup_err(inout s);
     }
-    let values = mkl(inout s, k_list(), 0, 0, 0, base);
+    let values = intern_with_kids(inout s, k_list(), 0, 0, 0, base);
     let from = s.tmp.len();
     let nb = s.cn_binders.len();
-    let mut j: u64 = 0;
-    loop {
-        if j >= nb {
-            break;
-        }
-        let k = sw(in s.cn_binders, j);
+    for j in 0..nb {
+        let k = word_at(in s.cn_binders, j);
         s.tmp.push(k);
-        j = inc(j);
     }
-    let binders = mkl(inout s, k_slist(), 0, 0, 0, from);
-    mk(inout s, q_proven(), binders, values, der)
+    let binders = intern_with_kids(inout s, k_slist(), 0, 0, 0, from);
+    intern(inout s, q_proven(), binders, values, der)
 }
 
 // ---------------------------------------------------------------------------
@@ -255,16 +245,11 @@ pub fn make_response(inout s: S, in cx: ChunkSeq[u64], vars: u64, d: u64) -> u64
 
 fn norm_args(inout s: S, inout cx: ChunkSeq[u64], n: u64, inout out: ChunkSeq[u64]) -> u64 {
     let from = s.tmp.len();
-    let len = nlen(in s, n);
-    let mut i: u64 = 0;
-    loop {
-        if i >= len {
-            break;
-        }
+    let len = kid_count(in s, n);
+    for i in 0..len {
         let a = kid(in s, n, i);
         let x = norm_arg(inout s, inout cx, a, inout out);
         s.tmp.push(x);
-        i = inc(i);
     }
     from
 }
@@ -273,31 +258,26 @@ fn norm_arg(inout s: S, inout cx: ChunkSeq[u64], a: u64, inout out: ChunkSeq[u64
     if (flags(in s, a) & 8) == 0 {
         return a;
     }
-    let t = tg(in s, a);
+    let t = tag_of(in s, a);
     if t <= t_proj() {
         return norm_ty(inout s, inout cx, a, inout out);
     }
     if t == g_row() {
         let from = s.tmp.len();
-        let len = nlen(in s, a);
-        let mut i: u64 = 0;
-        loop {
-            if i >= len {
-                break;
-            }
+        let len = kid_count(in s, a);
+        for i in 0..len {
             let l = kid(in s, a, i);
-            if tg(in s, l) == l_eff() {
+            if tag_of(in s, l) == l_eff() {
                 let f2 = norm_args(inout s, inout cx, l, inout out);
-                let e = fa(in s, l);
-                let x = mkl(inout s, l_eff(), e, 0, 0, f2);
+                let e = field_a(in s, l);
+                let x = intern_with_kids(inout s, l_eff(), e, 0, 0, f2);
                 s.tmp.push(x);
             } else {
                 s.tmp.push(l);
             }
-            i = inc(i);
         }
-        let tail = fa(in s, a);
-        return mkl(inout s, g_row(), tail, 0, 0, from);
+        let tail = field_a(in s, a);
+        return intern_with_kids(inout s, g_row(), tail, 0, 0, from);
     }
     a
 }
@@ -306,32 +286,32 @@ fn norm_tref(inout s: S, inout cx: ChunkSeq[u64], tr: u64, inout out: ChunkSeq[u
     if (flags(in s, tr) & 8) == 0 {
         return tr;
     }
-    let st = fb(in s, tr);
+    let st = field_b(in s, tr);
     let st2 = norm_ty(inout s, inout cx, st, inout out);
     let from = norm_args(inout s, inout cx, tr, inout out);
-    let t = fa(in s, tr);
-    mkl(inout s, t_ref(), t, st2, 0, from)
+    let t = field_a(in s, tr);
+    intern_with_kids(inout s, t_ref(), t, st2, 0, from)
 }
 
 pub fn norm_ty(inout s: S, inout cx: ChunkSeq[u64], t: u64, inout out: ChunkSeq[u64]) -> u64 {
     if (flags(in s, t) & 8) == 0 {
         return t;
     }
-    let tag = tg(in s, t);
+    let tag = tag_of(in s, t);
     if tag == t_ctor() {
         let from = norm_args(inout s, inout cx, t, inout out);
-        let c = fa(in s, t);
-        return mkl(inout s, t_ctor(), c, 0, 0, from);
+        let c = field_a(in s, t);
+        return intern_with_kids(inout s, t_ctor(), c, 0, 0, from);
     }
     if tag == t_proj() {
-        let tr = fa(in s, t);
+        let tr = field_a(in s, t);
         let tr2 = norm_tref(inout s, inout cx, tr, inout out);
-        let b = fb(in s, t);
-        let assoc = fc(in s, t);
-        let inner = mk(inout s, t_proj(), tr2, b, assoc);
+        let b = field_b(in s, t);
+        let assoc = field_c(in s, t);
+        let inner = intern(inout s, t_proj(), tr2, b, assoc);
         let v = new_var(inout cx, 0);
-        let tv = mk1(inout s, t_var(), v);
-        let g = mk2(inout s, g_peq(), inner, tv);
+        let tv = intern1(inout s, t_var(), v);
+        let g = intern2(inout s, g_peq(), inner, tv);
         out.push(g);
         return tv;
     }
@@ -347,23 +327,23 @@ fn norm_goal(inout s: S, inout cx: ChunkSeq[u64], g: u64, inout out: ChunkSeq[u6
     if (flags(in s, g) & 8) == 0 {
         return g;
     }
-    let t = tg(in s, g);
-    let a = fa(in s, g);
-    let b = fb(in s, g);
+    let t = tag_of(in s, g);
+    let a = field_a(in s, g);
+    let b = field_b(in s, g);
     if t == g_impl() {
         let tr = norm_tref(inout s, inout cx, a, inout out);
-        mk2(inout s, g_impl(), tr, b)
+        intern2(inout s, g_impl(), tr, b)
     } else if t == g_peq() {
-        let tr = fa(in s, a);
+        let tr = field_a(in s, a);
         let tr2 = norm_tref(inout s, inout cx, tr, inout out);
-        let pb = fb(in s, a);
-        let assoc = fc(in s, a);
-        let p = mk(inout s, t_proj(), tr2, pb, assoc);
+        let pb = field_b(in s, a);
+        let assoc = field_c(in s, a);
+        let p = intern(inout s, t_proj(), tr2, pb, assoc);
         let ty = norm_ty(inout s, inout cx, b, inout out);
-        mk2(inout s, g_peq(), p, ty)
+        intern2(inout s, g_peq(), p, ty)
     } else {
         let ty = norm_ty(inout s, inout cx, a, inout out);
-        mk2(inout s, g_mode(), ty, b)
+        intern2(inout s, g_mode(), ty, b)
     }
 }
 
@@ -374,12 +354,8 @@ fn norm_goal(inout s: S, inout cx: ChunkSeq[u64], g: u64, inout out: ChunkSeq[u6
 pub fn drive(inout s: S, env: u64, inout cx: ChunkSeq[u64], goals: u64) -> u64 {
     let mut obl = ChunkSeq::new[u64]();
     let mut roots = ChunkSeq::new[u64]();
-    let ng = nlen(in s, goals);
-    let mut i: u64 = 0;
-    loop {
-        if i >= ng {
-            break;
-        }
+    let ng = kid_count(in s, goals);
+    for i in 0..ng {
         let g = kid(in s, goals, i);
         let start = obl.len();
         let normalized = norm_goal(inout s, inout cx, g, inout obl);
@@ -390,64 +366,53 @@ pub fn drive(inout s: S, env: u64, inout cx: ChunkSeq[u64], goals: u64) -> u64 {
         roots.push(start);
         roots.push(obl.len());
         obl.push(normalized);
-        i = inc(i);
     }
     let n = obl.len();
     let mut proofs = ChunkSeq::with_capacity[u64](n);
     let mut pending = ChunkSeq::with_capacity[u64](n);
-    let mut j: u64 = 0;
-    loop {
-        if j >= n {
-            break;
-        }
+    for j in 0..n {
         proofs.push(0);
         pending.push(j);
-        j = inc(j);
     }
     loop {
         let mut progress = false;
         let mut still = ChunkSeq::new[u64]();
         let mut first = none();
         let np = pending.len();
-        let mut k: u64 = 0;
-        loop {
-            if k >= np {
-                break;
-            }
-            let idx = sw(in pending, k);
-            let g = sw(in obl, idx);
+        for k in 0..np {
+            let idx = word_at(in pending, k);
+            let g = word_at(in obl, idx);
             let r = solve_nested(inout s, env, inout cx, g);
-            let t = tg(in s, r);
+            let t = tag_of(in s, r);
             if t == d_node() {
-                setw(inout proofs, idx, r);
+                set_word(inout proofs, idx, r);
                 progress = true;
             } else if t == q_ambig() {
                 if first == none() {
-                    first = fa(in s, r);
+                    first = field_a(in s, r);
                 }
                 still.push(idx);
             } else {
                 return r;
             }
-            k = inc(k);
         }
         if still.len() == 0 {
             break;
         }
         if !progress {
-            let g0 = sw(in obl, sw(in still, 0));
+            let g0 = word_at(in obl, word_at(in still, 0));
             let g = resolve(inout s, in cx, g0);
             if g == 0 {
                 return dup_err(inout s);
             }
-            let amb = if tg(in s, first) == am_stalled() {
+            let amb = if tag_of(in s, first) == am_stalled() {
                 first
             } else if still.len() == 1 {
                 first
             } else {
-                mk1(inout s, am_stalled(), g)
+                intern1(inout s, am_stalled(), g)
             };
-            return mk1(inout s, q_ambig(), amb);
+            return intern1(inout s, q_ambig(), amb);
         }
         pending = still;
     }
@@ -458,31 +423,26 @@ pub fn drive(inout s: S, env: u64, inout cx: ChunkSeq[u64], goals: u64) -> u64 {
         if r >= nr {
             break;
         }
-        let orig = sw(in roots, r);
-        let start = sw(in roots, inc(r));
-        let main = sw(in roots, add(r, 2));
-        let mp = sw(in proofs, main);
+        let orig = word_at(in roots, r);
+        let start = word_at(in roots, inc(r));
+        let main = word_at(in roots, add(r, 2));
+        let mp = word_at(in proofs, main);
         if start == main {
             s.tmp.push(mp);
         } else {
             let f2 = s.tmp.len();
-            let mut q = start;
-            loop {
-                if q >= main {
-                    break;
-                }
-                let p = sw(in proofs, q);
+            for q in start..main {
+                let p = word_at(in proofs, q);
                 s.tmp.push(p);
-                q = inc(q);
             }
             s.tmp.push(mp);
-            let step = mk0(inout s, st_norm());
-            let d = mkl(inout s, d_node(), orig, step, 0, f2);
+            let step = intern0(inout s, st_norm());
+            let d = intern_with_kids(inout s, d_node(), orig, step, 0, f2);
             s.tmp.push(d);
         }
         r = add(r, 3);
     }
-    mkl(inout s, k_list(), 0, 0, 0, from)
+    intern_with_kids(inout s, k_list(), 0, 0, 0, from)
 }
 
 // Canonicalizes a goal of cx, answers it through the table, and applies
@@ -504,36 +464,32 @@ fn solve_nested(inout s: S, env: u64, inout cx: ChunkSeq[u64], goal: u64) -> u64
         if i >= nb {
             break;
         }
-        let k = sw(in s.cn_binders, i);
+        let k = word_at(in s.cn_binders, i);
         s.tmp.push(k);
         i = inc(i);
     }
-    let binders = mkl(inout s, k_slist(), 0, 0, 0, from);
+    let binders = intern_with_kids(inout s, k_slist(), 0, 0, 0, from);
     let from2 = s.tmp.len();
     i = 0;
     loop {
         if i >= nb {
             break;
         }
-        let o = sw(in s.cn_origins, i);
+        let o = word_at(in s.cn_origins, i);
         s.tmp.push(o);
         i = inc(i);
     }
-    let origins = mkl(inout s, k_slist(), 0, 0, 0, from2);
+    let origins = intern_with_kids(inout s, k_slist(), 0, 0, 0, from2);
     let result = solve_key(inout s, env, canon, binders);
-    if tg(in s, result) != q_proven() {
+    if tag_of(in s, result) != q_proven() {
         return result;
     }
-    let rb = fa(in s, result);
-    let values = fb(in s, result);
-    let der = fc(in s, result);
+    let rb = field_a(in s, result);
+    let values = field_b(in s, result);
+    let der = field_c(in s, result);
     let fresh = fresh_args(inout s, inout cx, rb);
-    let nv = nlen(in s, values);
-    let mut j: u64 = 0;
-    loop {
-        if j >= nv {
-            break;
-        }
+    let nv = kid_count(in s, values);
+    for j in 0..nv {
         let value = kid(in s, values, j);
         let saved = s.fsub;
         s.fsub = fresh;
@@ -550,10 +506,9 @@ fn solve_nested(inout s: S, env: u64, inout cx: ChunkSeq[u64], goal: u64) -> u64
             if e == 3 {
                 return dup_err(inout s);
             }
-            let r = mk2(inout s, un_internal(), 0, goal);
-            return mk1(inout s, q_unsup(), r);
+            let r = intern2(inout s, un_internal(), 0, goal);
+            return intern1(inout s, q_unsup(), r);
         }
-        j = inc(j);
     }
     let saved = s.fsub;
     s.fsub = fresh;
@@ -569,10 +524,10 @@ fn solve_nested(inout s: S, env: u64, inout cx: ChunkSeq[u64], goal: u64) -> u64
 // Tabling and cycles.
 
 fn same_answer(in s: S, a: u64, b: u64) -> bool {
-    let ta = tg(in s, a);
-    let tb = tg(in s, b);
+    let ta = tag_of(in s, a);
+    let tb = tag_of(in s, b);
     if ta == q_proven() && tb == q_proven() {
-        return fa(in s, a) == fa(in s, b) && fb(in s, a) == fb(in s, b);
+        return field_a(in s, a) == field_a(in s, b) && field_b(in s, a) == field_b(in s, b);
     }
     ta == tb
 }
@@ -581,11 +536,11 @@ fn ck_slot(in s: S, env: u64, goal: u64) -> u64 {
     let h = wrapping_mul(wrapping_mul(env, GOLDEN_GAMMA) ^ goal, MIX_MUL);
     let mut at = (h >> HALF_BITS) & s.ck_mask;
     loop {
-        let g = sw(in s.ck_goal, at);
+        let g = word_at(in s.ck_goal, at);
         if g == 0 {
             return at;
         }
-        if g == goal && sw(in s.ck_env, at) == env {
+        if g == goal && word_at(in s.ck_env, at) == env {
             return at;
         }
         at = inc(at) & s.ck_mask;
@@ -603,11 +558,11 @@ fn ck_grow(inout s: S) {
         if i >= old {
             break;
         }
-        let g = sw(in s.ck_goal, i);
+        let g = word_at(in s.ck_goal, i);
         if g != 0 {
-            oe.push(sw(in s.ck_env, i));
+            oe.push(word_at(in s.ck_env, i));
             og.push(g);
-            ov.push(sw(in s.ck_val, i));
+            ov.push(word_at(in s.ck_val, i));
         }
         i = inc(i);
     }
@@ -631,109 +586,94 @@ fn ck_grow(inout s: S) {
         if i >= n {
             break;
         }
-        let e = sw(in oe, i);
-        let g = sw(in og, i);
+        let e = word_at(in oe, i);
+        let g = word_at(in og, i);
         let at = ck_slot(in s, e, g);
-        setw(inout s.ck_env, at, e);
-        setw(inout s.ck_goal, at, g);
-        setw(inout s.ck_val, at, sw(in ov, i));
+        set_word(inout s.ck_env, at, e);
+        set_word(inout s.ck_goal, at, g);
+        set_word(inout s.ck_val, at, word_at(in ov, i));
         i = inc(i);
     }
 }
 
 fn ck_insert(inout s: S, env: u64, goal: u64, v: u64) {
     let at = ck_slot(in s, env, goal);
-    if sw(in s.ck_goal, at) == 0 {
+    if word_at(in s.ck_goal, at) == 0 {
         s.ck_count = inc(s.ck_count);
     }
-    setw(inout s.ck_env, at, env);
-    setw(inout s.ck_goal, at, goal);
-    setw(inout s.ck_val, at, v);
+    set_word(inout s.ck_env, at, env);
+    set_word(inout s.ck_goal, at, goal);
+    set_word(inout s.ck_val, at, v);
     if wrapping_mul(s.ck_count, 2) > s.ck_mask {
         ck_grow(inout s);
     }
 }
 
 fn cohyp_leaf(inout s: S, goal: u64) -> u64 {
-    let st = mk0(inout s, st_cohyp());
-    mk2(inout s, d_node(), goal, st)
+    let st = intern0(inout s, st_cohyp());
+    intern2(inout s, d_node(), goal, st)
 }
 
 pub fn solve_key(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
     let at = ck_slot(in s, env, goal);
-    if sw(in s.ck_goal, at) != 0 {
+    if word_at(in s.ck_goal, at) != 0 {
         s.st_hits = inc(s.st_hits);
-        return sw(in s.ck_val, at);
+        return word_at(in s.ck_val, at);
     }
     let depth = s.sk_env.len();
-    let mut i: u64 = 0;
-    loop {
-        if i >= depth {
-            break;
-        }
-        if sw(in s.sk_goal, i) == goal && sw(in s.sk_env, i) == env {
+    for i in 0..depth {
+        if word_at(in s.sk_goal, i) == goal && word_at(in s.sk_env, i) == env {
             let mut co = true;
-            let mut j = i;
-            loop {
-                if j >= depth {
-                    break;
-                }
-                if sw(in s.sk_co, j) == 0 {
+            for j in i..depth {
+                if word_at(in s.sk_co, j) == 0 {
                     co = false;
                 }
-                j = inc(j);
             }
             let top = dec(depth);
-            let m = sw(in s.sk_min, top);
+            let m = word_at(in s.sk_min, top);
             if i < m {
-                setw(inout s.sk_min, top, i);
+                set_word(inout s.sk_min, top, i);
             }
             if co {
-                setw(inout s.sk_uco, i, 1);
+                set_word(inout s.sk_uco, i, 1);
                 s.st_cocyc = inc(s.st_cocyc);
             } else {
-                setw(inout s.sk_uind, i, 1);
+                set_word(inout s.sk_uind, i, 1);
                 s.st_indcyc = inc(s.st_indcyc);
             }
-            if sw(in s.sk_uco, i) != 0 && sw(in s.sk_uind, i) != 0 {
-                let r = mk1(inout s, un_mixed(), goal);
-                return mk1(inout s, q_unsup(), r);
+            if word_at(in s.sk_uco, i) != 0 && word_at(in s.sk_uind, i) != 0 {
+                let r = intern1(inout s, un_mixed(), goal);
+                return intern1(inout s, q_unsup(), r);
             }
             return if co {
-                sw(in s.sk_pco, i)
+                word_at(in s.sk_pco, i)
             } else {
-                sw(in s.sk_pind, i)
+                word_at(in s.sk_pind, i)
             };
         }
-        i = inc(i);
     }
     if depth >= s.max_depth {
         return overflow(inout s, 0);
     }
     let mut coinductive = false;
-    if tg(in s, goal) == g_impl() {
-        let tr = fa(in s, goal);
-        coinductive = sw(in s.tr_coind, fa(in s, tr)) != 0;
+    if tag_of(in s, goal) == g_impl() {
+        let tr = field_a(in s, goal);
+        coinductive = word_at(in s.tr_coind, field_a(in s, tr)) != 0;
     }
     // The identity response with a coinductive-hypothesis leaf.
     let from = s.tmp.len();
-    let nb = nlen(in s, binders);
-    let mut b: u64 = 0;
-    loop {
-        if b >= nb {
-            break;
-        }
+    let nb = kid_count(in s, binders);
+    for b in 0..nb {
         let k = kid(in s, binders, b);
         let v = var_arg(inout s, k, vinf(b));
         s.tmp.push(v);
-        b = inc(b);
     }
-    let ids = mkl(inout s, k_list(), 0, 0, 0, from);
+    let ids = intern_with_kids(inout s, k_list(), 0, 0, 0, from);
     let leaf = cohyp_leaf(inout s, goal);
-    let identity = mk(inout s, q_proven(), binders, ids, leaf);
-    let ic = mk0(inout s, r_indcyc());
-    let fl = mk2(inout s, f_node(), goal, ic);
-    let ind = mk1(inout s, q_nosol(), fl);
+    let identity = intern(inout s, q_proven(), binders, ids, leaf);
+    let ic = intern0(inout s, r_indcyc());
+    let fl = intern2(inout s, f_node(), goal, ic);
+    let ind = intern1(inout s, q_nosol(), fl);
     s.sk_env.push(env);
     s.sk_goal.push(goal);
     s
@@ -754,20 +694,20 @@ pub fn solve_key(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
     let mut iterations: u64 = 0;
     let mut result: u64 = 0;
     loop {
-        setw(inout s.sk_uco, index, 0);
-        setw(inout s.sk_uind, index, 0);
-        setw(inout s.sk_min, index, none());
+        set_word(inout s.sk_uco, index, 0);
+        set_word(inout s.sk_uind, index, 0);
+        set_word(inout s.sk_min, index, none());
         let r = evaluate(inout s, env, goal, binders);
-        let uco = sw(in s.sk_uco, index) != 0;
-        let uind = sw(in s.sk_uind, index) != 0;
-        let mixed = tg(in s, r) == q_unsup() && tg(in s, fa(in s, r)) == un_mixed();
+        let uco = word_at(in s.sk_uco, index) != 0;
+        let uind = word_at(in s.sk_uind, index) != 0;
+        let mixed = tag_of(in s, r) == q_unsup() && tag_of(in s, field_a(in s, r)) == un_mixed();
         if mixed || (uco && uind) {
-            let m = mk1(inout s, un_mixed(), goal);
-            result = mk1(inout s, q_unsup(), m);
+            let m = intern1(inout s, un_mixed(), goal);
+            result = intern1(inout s, q_unsup(), m);
             break;
         }
-        let stable = (!uco || same_answer(in s, r, sw(in s.sk_pco, index)))
-            && (!uind || same_answer(in s, r, sw(in s.sk_pind, index)));
+        let stable = (!uco || same_answer(in s, r, word_at(in s.sk_pco, index)))
+            && (!uind || same_answer(in s, r, word_at(in s.sk_pind, index)));
         if stable {
             result = r;
             break;
@@ -779,21 +719,21 @@ pub fn solve_key(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
         }
         s.st_reruns = inc(s.st_reruns);
         if uco {
-            let p = if tg(in s, r) == q_proven() {
-                let rb = fa(in s, r);
-                let rv = fb(in s, r);
+            let p = if tag_of(in s, r) == q_proven() {
+                let rb = field_a(in s, r);
+                let rv = field_b(in s, r);
                 let lf = cohyp_leaf(inout s, goal);
-                mk(inout s, q_proven(), rb, rv, lf)
+                intern(inout s, q_proven(), rb, rv, lf)
             } else {
                 r
             };
-            setw(inout s.sk_pco, index, p);
+            set_word(inout s.sk_pco, index, p);
         }
         if uind {
-            setw(inout s.sk_pind, index, r);
+            set_word(inout s.sk_pind, index, r);
         }
     }
-    let min = sw(in s.sk_min, index);
+    let min = word_at(in s.sk_min, index);
     s.sk_env.truncate(index);
     s.sk_goal.truncate(index);
     s.sk_co.truncate(index);
@@ -805,11 +745,11 @@ pub fn solve_key(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
     if min < index {
         if index > 0 {
             let p = dec(index);
-            if min < sw(in s.sk_min, p) {
-                setw(inout s.sk_min, p, min);
+            if min < word_at(in s.sk_min, p) {
+                set_word(inout s.sk_min, p, min);
             }
         }
-    } else if tg(in s, result) != q_over() {
+    } else if tag_of(in s, result) != q_over() {
         ck_insert(inout s, env, goal, result);
     }
     result
@@ -825,34 +765,34 @@ fn evaluate(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
     }
     let mut cx = ChunkSeq::new[u64]();
     let vars = fresh_args(inout s, inout cx, binders);
-    let t = tg(in s, goal);
+    let t = tag_of(in s, goal);
     let base = s.ph_src.len();
     let st = if t == g_impl() {
-        let tr = fa(in s, goal);
-        let b = fb(in s, goal);
+        let tr = field_a(in s, goal);
+        let b = field_b(in s, goal);
         implements(inout s, env, in cx, tr, b, vars)
     } else if t == g_peq() {
-        let p = fa(in s, goal);
-        let ty = fb(in s, goal);
+        let p = field_a(in s, goal);
+        let ty = field_b(in s, goal);
         projection_eq(inout s, env, in cx, p, ty, vars)
     } else {
-        let ty = fa(in s, goal);
-        let b = fb(in s, goal);
+        let ty = field_a(in s, goal);
+        let b = field_b(in s, goal);
         return mode_bound(inout s, env, in cx, goal, ty, b, vars);
     };
     if st != 0 {
         truncate_phase(inout s, base);
-        let tag = tg(in s, st);
+        let tag = tag_of(in s, st);
         if tag == q_ambig() || tag == q_unsup() || tag == q_over() {
             return st;
         }
         let reason = if tag == r_modelmis() {
             st
         } else {
-            mk0(inout s, r_nocand())
+            intern0(inout s, r_nocand())
         };
-        let f = mk2(inout s, f_node(), goal, reason);
-        return mk1(inout s, q_nosol(), f);
+        let f = intern2(inout s, f_node(), goal, reason);
+        return intern1(inout s, q_nosol(), f);
     }
     let r = combine(inout s, goal, base);
     truncate_phase(inout s, base);
@@ -877,7 +817,7 @@ fn applies_from(in s: S, base: u64, nosol_counts: bool) -> bool {
         if i >= n {
             return false;
         }
-        let t = tg(in s, sw(in s.ph_val, i));
+        let t = tag_of(in s, word_at(in s.ph_val, i));
         if t != ce_head() && (t != ce_nosol() || nosol_counts) {
             return true;
         }
@@ -887,28 +827,28 @@ fn applies_from(in s: S, base: u64, nosol_counts: bool) -> bool {
 
 fn is_unresolved_infer(inout s: S, in cx: ChunkSeq[u64], t: u64) -> bool {
     let r = resolve(inout s, in cx, t);
-    r != 0 && tg(in s, r) == t_var() && is_inf(fa(in s, r))
+    r != 0 && tag_of(in s, r) == t_var() && is_inf(field_a(in s, r))
 }
 
 // How a brand is resolved, binding implicit brands: b_canon, b_named or
 // b_var (a placeholder), or a candidate error.
 fn brand_mode(inout s: S, env: u64, inout cx: ChunkSeq[u64], tr: u64, brand: u64) -> u64 {
     let rb = resolve(inout s, in cx, brand);
-    let t = tg(in s, rb);
+    let t = tag_of(in s, rb);
     if t == b_canon() || t == b_named() {
         return rb;
     }
-    let v = fa(in s, rb);
+    let v = field_a(in s, rb);
     if vkind(v) == 1 {
         return rb;
     }
     if vkind(v) == 0 {
-        let r = mk2(inout s, un_internal(), 1, none());
-        return mk1(inout s, q_unsup(), r);
+        let r = intern2(inout s, un_internal(), 1, none());
+        return intern1(inout s, q_unsup(), r);
     }
-    let scopes = fc(in s, env);
-    let ns = nlen(in s, scopes);
-    let tid = fa(in s, tr);
+    let scopes = field_c(in s, env);
+    let ns = kid_count(in s, scopes);
+    let tid = field_a(in s, tr);
     let mut si = ns;
     loop {
         if si == 0 {
@@ -916,19 +856,15 @@ fn brand_mode(inout s: S, env: u64, inout cx: ChunkSeq[u64], tr: u64, brand: u64
         }
         si = dec(si);
         let scope = kid(in s, scopes, si);
-        let n = nlen(in s, scope);
+        let n = kid_count(in s, scope);
         let mut matching = ChunkSeq::new[u64]();
-        let mut i: u64 = 0;
-        loop {
-            if i >= n {
-                break;
-            }
+        for i in 0..n {
             let m = kid(in s, scope, i);
             let ci = add(s.nimpl, m);
-            let mtr = sw(in s.cf_tref, ci);
-            if fa(in s, mtr) == tid {
+            let mtr = word_at(in s.cf_tref, ci);
+            if field_a(in s, mtr) == tid {
                 let mut probe = clone_cx(in cx);
-                let params = sw(in s.cf_params, ci);
+                let params = word_at(in s.cf_params, ci);
                 let args = fresh_args(inout s, inout probe, params);
                 let head = inst(inout s, mtr, args);
                 if head == 0 {
@@ -941,63 +877,52 @@ fn brand_mode(inout s: S, env: u64, inout cx: ChunkSeq[u64], tr: u64, brand: u64
                     return dup_err(inout s);
                 }
             }
-            i = inc(i);
         }
         // sort and dedup
         let nm = matching.len();
-        let mut a: u64 = 1;
-        loop {
-            if a >= nm {
-                break;
-            }
-            let x = sw(in matching, a);
+        for a in 1..nm {
+            let x = word_at(in matching, a);
             let mut j = a;
             loop {
                 if j == 0 {
                     break;
                 }
-                let y = sw(in matching, dec(j));
+                let y = word_at(in matching, dec(j));
                 if y <= x {
                     break;
                 }
-                setw(inout matching, j, y);
+                set_word(inout matching, j, y);
                 j = dec(j);
             }
-            setw(inout matching, j, x);
-            a = inc(a);
+            set_word(inout matching, j, x);
         }
         let from = s.tmp.len();
-        let mut k: u64 = 0;
-        loop {
-            if k >= nm {
-                break;
-            }
-            let x = sw(in matching, k);
-            if k == 0 || x != sw(in matching, dec(k)) {
+        for k in 0..nm {
+            let x = word_at(in matching, k);
+            if k == 0 || x != word_at(in matching, dec(k)) {
                 s.tmp.push(x);
             }
-            k = inc(k);
         }
         let distinct = sub(s.tmp.len(), from);
         if distinct == 0 {
             s.tmp.truncate(from);
         } else {
             if distinct == 1 {
-                let m = sw(in s.tmp, from);
+                let m = word_at(in s.tmp, from);
                 s.tmp.truncate(from);
-                let named = mk1(inout s, b_named(), m);
+                let named = intern1(inout s, b_named(), m);
                 let u = unify_brand(inout s, inout cx, rb, named);
                 if u != 0 {
                     return unify_err(inout s, u);
                 }
                 return named;
             }
-            let l = mkl(inout s, k_slist(), 0, 0, 0, from);
-            let am = mk1(inout s, am_scoped(), l);
-            return mk1(inout s, q_ambig(), am);
+            let l = intern_with_kids(inout s, k_slist(), 0, 0, 0, from);
+            let am = intern1(inout s, am_scoped(), l);
+            return intern1(inout s, q_ambig(), am);
         }
     }
-    let canon = mk0(inout s, b_canon());
+    let canon = intern0(inout s, b_canon());
     let u = unify_brand(inout s, inout cx, rb, canon);
     if u != 0 {
         return unify_err(inout s, u);
@@ -1008,10 +933,10 @@ fn brand_mode(inout s: S, env: u64, inout cx: ChunkSeq[u64], tr: u64, brand: u64
 // Phase of an `Implements` goal: 0 with the candidates on the phase stack,
 // r_modelmis for a model of another trait, or a candidate error.
 fn implements(inout s: S, env: u64, in cx0: ChunkSeq[u64], tr: u64, brand: u64, vars: u64) -> u64 {
-    let st = fb(in s, tr);
+    let st = field_b(in s, tr);
     if is_unresolved_infer(inout s, in cx0, st) {
-        let a = mk0(inout s, am_self());
-        return mk1(inout s, q_ambig(), a);
+        let a = intern0(inout s, am_self());
+        return intern1(inout s, q_ambig(), a);
     }
     let mut cx = clone_cx(in cx0);
     let mode = brand_mode(inout s, env, inout cx, tr, brand);
@@ -1019,15 +944,15 @@ fn implements(inout s: S, env: u64, in cx0: ChunkSeq[u64], tr: u64, brand: u64, 
         return mode;
     }
     let rbrand = resolve(inout s, in cx, brand);
-    let builder = mk2(inout s, g_impl(), tr, brand);
-    let tid = fa(in s, tr);
+    let builder = intern2(inout s, g_impl(), tr, brand);
+    let tid = field_a(in s, tr);
     let base = s.ph_src.len();
-    let mt = tg(in s, mode);
+    let mt = tag_of(in s, mode);
     if mt == b_named() {
-        let m = fa(in s, mode);
+        let m = field_a(in s, mode);
         let ci = add(s.nimpl, m);
-        if fa(in s, sw(in s.cf_tref, ci)) != tid {
-            return mk1(inout s, r_modelmis(), m);
+        if field_a(in s, word_at(in s.cf_tref, ci)) != tid {
+            return intern1(inout s, r_modelmis(), m);
         }
         env_implements(inout s, env, in cx, tr, rbrand, builder, vars);
         if applies_from(in s, base, false) {
@@ -1051,17 +976,12 @@ fn implements(inout s: S, env: u64, in cx0: ChunkSeq[u64], tr: u64, brand: u64, 
     if applies_from(in s, base, false) || mt == b_var() {
         return 0;
     }
-    let at = sw(in s.ib_at, tid);
-    let n = sw(in s.ib_n, tid);
-    let mut i: u64 = 0;
-    loop {
-        if i >= n {
-            break;
-        }
-        let ci = sw(in s.ib, add(at, i));
+    let at = word_at(in s.ib_at, tid);
+    let n = word_at(in s.ib_n, tid);
+    for i in 0..n {
+        let ci = word_at(in s.ib, add(at, i));
         let r = try_conformance(inout s, env, in cx, ci, wrapping_mul(ci, 2), tr, builder, vars);
         push_phase(inout s, src(0, ci), r);
-        i = inc(i);
     }
     0
 }
@@ -1077,19 +997,15 @@ fn env_implements(
     builder: u64,
     vars: u64
 ) {
-    let asm = fb(in s, env);
-    let na = nlen(in s, asm);
-    let tid = fa(in s, tr);
-    let mut k: u64 = 0;
-    loop {
-        if k >= na {
-            break;
-        }
+    let asm = field_b(in s, env);
+    let na = kid_count(in s, asm);
+    let tid = field_a(in s, tr);
+    for k in 0..na {
         let a = kid(in s, asm, k);
-        if tg(in s, a) == g_impl() && fa(in s, fa(in s, a)) == tid {
+        if tag_of(in s, a) == g_impl() && field_a(in s, field_a(in s, a)) == tid {
             let mut cx = clone_cx(in cx0);
-            let atr = fa(in s, a);
-            let ab = fb(in s, a);
+            let atr = field_a(in s, a);
+            let ab = field_b(in s, a);
             let mut u = unify_trait_ref(inout s, inout cx, atr, tr);
             if u == 0 {
                 u = unify_brand(inout s, inout cx, ab, brand);
@@ -1098,38 +1014,33 @@ fn env_implements(
                 unify_err(inout s, u)
             } else {
                 let g = goal_of(inout s, in cx, builder);
-                let step = mk1(inout s, st_assume(), k);
-                let d = mk2(inout s, d_node(), g, step);
+                let step = intern1(inout s, st_assume(), k);
+                let d = intern2(inout s, d_node(), g, step);
                 make_response(inout s, in cx, vars, d)
             };
             push_phase(inout s, src(2, k), v);
         }
-        k = inc(k);
     }
-    let st = fb(in s, tr);
-    if tg(in s, st) != t_proj() {
+    let st = field_b(in s, tr);
+    if tag_of(in s, st) != t_proj() {
         return;
     }
-    let ptr = fa(in s, st);
-    let pb = fb(in s, st);
-    let pt = fa(in s, ptr);
-    let at = add(sw(in s.tr_as_at, pt), fc(in s, st));
-    let bat = sw(in s.as_bd_at, at);
-    let bn = sw(in s.as_bd_n, at);
+    let ptr = field_a(in s, st);
+    let pb = field_b(in s, st);
+    let pt = field_a(in s, ptr);
+    let at = add(word_at(in s.tr_as_at, pt), field_c(in s, st));
+    let bat = word_at(in s.as_bd_at, at);
+    let bn = word_at(in s.as_bd_n, at);
     let from = s.tmp.len();
-    let pst = fb(in s, ptr);
+    let pst = field_b(in s, ptr);
     s.tmp.push(pst);
     push_kids(inout s, ptr);
-    let binder = mkl(inout s, k_list(), 0, 0, 0, from);
-    let mut bi: u64 = 0;
-    loop {
-        if bi >= bn {
-            break;
-        }
-        let bt = sw(in s.bd_trait, add(bat, bi));
+    let binder = intern_with_kids(inout s, k_list(), 0, 0, 0, from);
+    for bi in 0..bn {
+        let bt = word_at(in s.bd_trait, add(bat, bi));
         if bt == tid {
-            let bargs = sw(in s.bd_args, add(bat, bi));
-            let bbrand = sw(in s.bd_brand, add(bat, bi));
+            let bargs = word_at(in s.bd_args, add(bat, bi));
+            let bbrand = word_at(in s.bd_brand, add(bat, bi));
             let v = alias_bound(
                 inout s,
                 env,
@@ -1147,7 +1058,6 @@ fn env_implements(
             );
             push_phase(inout s, src(3, bi), v);
         }
-        bi = inc(bi);
     }
 }
 
@@ -1183,39 +1093,34 @@ fn alias_bound(
     if u2 != 0 {
         return unify_err(inout s, u2);
     }
-    let parent = mk2(inout s, g_impl(), ptr, pb);
+    let parent = intern2(inout s, g_impl(), ptr, pb);
     let from = s.tmp.len();
     s.tmp.push(parent);
-    let goals = mkl(inout s, k_list(), 0, 0, 0, from);
+    let goals = intern_with_kids(inout s, k_list(), 0, 0, 0, from);
     let children = drive(inout s, env, inout cx, goals);
-    if tg(in s, children) != k_list() {
+    if tag_of(in s, children) != k_list() {
         return nested_to_cand(inout s, children);
     }
     let g = goal_of(inout s, in cx, builder);
-    let step = mk1(inout s, st_alias(), bi);
+    let step = intern1(inout s, st_alias(), bi);
     let f2 = s.tmp.len();
     push_kids(inout s, children);
-    let d = mkl(inout s, d_node(), g, step, 0, f2);
+    let d = intern_with_kids(inout s, d_node(), g, step, 0, f2);
     make_response(inout s, in cx, vars, d)
 }
 
 // Instantiates the where-clauses of conformance ci with args onto tmp
 // (from `from`); false on a duplicate label.
 fn where_goals(inout s: S, ci: u64, args: u64) -> bool {
-    let wh = sw(in s.cf_where, ci);
-    let n = nlen(in s, wh);
-    let mut i: u64 = 0;
-    loop {
-        if i >= n {
-            break;
-        }
+    let wh = word_at(in s.cf_where, ci);
+    let n = kid_count(in s, wh);
+    for i in 0..n {
         let w = kid(in s, wh, i);
         let g = inst(inout s, w, args);
         if g == 0 {
             return false;
         }
         s.tmp.push(g);
-        i = inc(i);
     }
     true
 }
@@ -1234,9 +1139,9 @@ fn try_conformance(
         return overflow(inout s, 1);
     }
     let mut cx = clone_cx(in cx0);
-    let params = sw(in s.cf_params, ci);
+    let params = word_at(in s.cf_params, ci);
     let args = fresh_args(inout s, inout cx, params);
-    let ctr = sw(in s.cf_tref, ci);
+    let ctr = word_at(in s.cf_tref, ci);
     let head = inst(inout s, ctr, args);
     if head == 0 {
         return dup_err(inout s);
@@ -1250,64 +1155,60 @@ fn try_conformance(
         s.tmp.truncate(from);
         return dup_err(inout s);
     }
-    let wcs = mkl(inout s, k_list(), 0, 0, 0, from);
+    let wcs = intern_with_kids(inout s, k_list(), 0, 0, 0, from);
     let children = drive(inout s, env, inout cx, wcs);
-    if tg(in s, children) != k_list() {
+    if tag_of(in s, children) != k_list() {
         return nested_to_cand(inout s, children);
     }
     let g = goal_of(inout s, in cx, builder);
     let f2 = s.tmp.len();
     push_kids(inout s, args);
-    let step = mkl(inout s, st_conf(), source, 0, 0, f2);
+    let step = intern_with_kids(inout s, st_conf(), source, 0, 0, f2);
     let f3 = s.tmp.len();
     push_kids(inout s, children);
-    let d = mkl(inout s, d_node(), g, step, 0, f3);
+    let d = intern_with_kids(inout s, d_node(), g, step, 0, f3);
     make_response(inout s, in cx, vars, d)
 }
 
 fn projection_eq(inout s: S, env: u64, in cx0: ChunkSeq[u64], p: u64, ty: u64, vars: u64) -> u64 {
-    let tr = fa(in s, p);
-    let st = fb(in s, tr);
+    let tr = field_a(in s, p);
+    let st = field_b(in s, tr);
     if is_unresolved_infer(inout s, in cx0, st) {
-        let a = mk0(inout s, am_self());
-        return mk1(inout s, q_ambig(), a);
+        let a = intern0(inout s, am_self());
+        return intern1(inout s, q_ambig(), a);
     }
     let mut cx = clone_cx(in cx0);
-    let pbrand = fb(in s, p);
-    let assoc = fc(in s, p);
+    let pbrand = field_b(in s, p);
+    let assoc = field_c(in s, p);
     let mode = brand_mode(inout s, env, inout cx, tr, pbrand);
     if is_err(in s, mode) {
         return mode;
     }
-    let builder = mk2(inout s, g_peq(), p, ty);
-    let tid = fa(in s, tr);
-    let mt = tg(in s, mode);
+    let builder = intern2(inout s, g_peq(), p, ty);
+    let tid = field_a(in s, tr);
+    let mt = tag_of(in s, mode);
     if mt == b_named() {
-        let m = fa(in s, mode);
-        if fa(in s, sw(in s.cf_tref, add(s.nimpl, m))) != tid {
-            return mk1(inout s, r_modelmis(), m);
+        let m = field_a(in s, mode);
+        if field_a(in s, word_at(in s.cf_tref, add(s.nimpl, m))) != tid {
+            return intern1(inout s, r_modelmis(), m);
         }
     }
     let brand = resolve(inout s, in cx, pbrand);
     let base = s.ph_src.len();
     // 1. Explicit equality assumptions.
-    let asm = fb(in s, env);
-    let na = nlen(in s, asm);
-    let mut k: u64 = 0;
-    loop {
-        if k >= na {
-            break;
-        }
+    let asm = field_b(in s, env);
+    let na = kid_count(in s, asm);
+    for k in 0..na {
         let a = kid(in s, asm, k);
-        if tg(in s, a) == g_peq() {
-            let ap = fa(in s, a);
-            let aty = fb(in s, a);
-            let atr = fa(in s, ap);
-            if fa(in s, atr) == tid && fc(in s, ap) == assoc {
+        if tag_of(in s, a) == g_peq() {
+            let ap = field_a(in s, a);
+            let aty = field_b(in s, a);
+            let atr = field_a(in s, ap);
+            if field_a(in s, atr) == tid && field_c(in s, ap) == assoc {
                 let mut c = clone_cx(in cx);
                 let mut u = unify_trait_ref(inout s, inout c, atr, tr);
                 if u == 0 {
-                    let ab = fb(in s, ap);
+                    let ab = field_b(in s, ap);
                     u = unify_brand(inout s, inout c, ab, brand);
                 }
                 let v = if u != 0 {
@@ -1315,48 +1216,42 @@ fn projection_eq(inout s: S, env: u64, in cx0: ChunkSeq[u64], p: u64, ty: u64, v
                 } else {
                     let u2 = unify_ty(inout s, inout c, aty, ty);
                     if u2 == 1 {
-                        let cv = mk0(inout s, c_value());
-                        mk1(inout s, ce_nosol(), cv)
+                        let cv = intern0(inout s, c_value());
+                        intern1(inout s, ce_nosol(), cv)
                     } else if u2 != 0 {
                         unify_err(inout s, u2)
                     } else {
                         let g = goal_of(inout s, in c, builder);
-                        let step = mk1(inout s, st_passume(), k);
-                        let d = mk2(inout s, d_node(), g, step);
+                        let step = intern1(inout s, st_passume(), k);
+                        let d = intern2(inout s, d_node(), g, step);
                         make_response(inout s, in c, vars, d)
                     }
                 };
                 push_phase(inout s, src(2, k), v);
             }
         }
-        k = inc(k);
     }
     if applies_from(in s, base, true) {
         return 0;
     }
     // 2. The trait holds through the environment: rigid projection.
-    let tbuilder = mk2(inout s, g_impl(), tr, brand);
+    let tbuilder = intern2(inout s, g_impl(), tr, brand);
     let ebase = s.ph_src.len();
     env_implements(inout s, env, in cx, tr, brand, tbuilder, vars);
     let n = s.ph_val.len();
     let mut env_applies = false;
-    let mut i = ebase;
-    loop {
-        if i >= n {
-            break;
-        }
-        if tg(in s, sw(in s.ph_val, i)) != ce_head() {
+    for i in ebase..n {
+        if tag_of(in s, word_at(in s.ph_val, i)) != ce_head() {
             env_applies = true;
         }
-        i = inc(i);
     }
     truncate_phase(inout s, ebase);
     if env_applies || mt == b_var() {
-        let stt = tg(in s, st);
-        let rigid = (stt == t_var() && vkind(fa(in s, st)) == 1) || stt == t_proj();
+        let stt = tag_of(in s, st);
+        let rigid = (stt == t_var() && vkind(field_a(in s, st)) == 1) || stt == t_proj();
         let v = if !rigid {
-            let r = mk2(inout s, un_internal(), 2, none());
-            mk1(inout s, q_unsup(), r)
+            let r = intern2(inout s, un_internal(), 2, none());
+            intern1(inout s, q_unsup(), r)
         } else {
             rigid_projection(inout s, env, in cx, p, brand, ty, builder, vars)
         };
@@ -1366,7 +1261,7 @@ fn projection_eq(inout s: S, env: u64, in cx0: ChunkSeq[u64], p: u64, ty: u64, v
     }
     // 3. The selected model's value, or canonical impls.
     if mt == b_named() {
-        let m = fa(in s, mode);
+        let m = field_a(in s, mode);
         let ci = add(s.nimpl, m);
         let v = try_proj_conformance(
             inout s,
@@ -1382,14 +1277,10 @@ fn projection_eq(inout s: S, env: u64, in cx0: ChunkSeq[u64], p: u64, ty: u64, v
         push_phase(inout s, src(1, m), v);
         return 0;
     }
-    let at = sw(in s.ib_at, tid);
-    let ni = sw(in s.ib_n, tid);
-    let mut j: u64 = 0;
-    loop {
-        if j >= ni {
-            break;
-        }
-        let ci = sw(in s.ib, add(at, j));
+    let at = word_at(in s.ib_at, tid);
+    let ni = word_at(in s.ib_n, tid);
+    for j in 0..ni {
+        let ci = word_at(in s.ib, add(at, j));
         let v = try_proj_conformance(
             inout s,
             env,
@@ -1402,7 +1293,6 @@ fn projection_eq(inout s: S, env: u64, in cx0: ChunkSeq[u64], p: u64, ty: u64, v
             vars
         );
         push_phase(inout s, src(0, ci), v);
-        j = inc(j);
     }
     0
 }
@@ -1421,30 +1311,30 @@ fn rigid_projection(
         return overflow(inout s, 1);
     }
     let mut cx = clone_cx(in cx0);
-    let tr = fa(in s, p);
-    let assoc = fc(in s, p);
-    let pp = mk(inout s, t_proj(), tr, brand, assoc);
-    let parent = mk2(inout s, g_impl(), tr, brand);
+    let tr = field_a(in s, p);
+    let assoc = field_c(in s, p);
+    let pp = intern(inout s, t_proj(), tr, brand, assoc);
+    let parent = intern2(inout s, g_impl(), tr, brand);
     let from = s.tmp.len();
     s.tmp.push(parent);
-    let goals = mkl(inout s, k_list(), 0, 0, 0, from);
+    let goals = intern_with_kids(inout s, k_list(), 0, 0, 0, from);
     let children = drive(inout s, env, inout cx, goals);
-    if tg(in s, children) != k_list() {
+    if tag_of(in s, children) != k_list() {
         return nested_to_cand(inout s, children);
     }
     let u = unify_ty(inout s, inout cx, pp, ty);
     if u == 1 {
-        let cv = mk0(inout s, c_value());
-        return mk1(inout s, ce_nosol(), cv);
+        let cv = intern0(inout s, c_value());
+        return intern1(inout s, ce_nosol(), cv);
     }
     if u != 0 {
         return unify_err(inout s, u);
     }
     let g = goal_of(inout s, in cx, builder);
-    let step = mk0(inout s, st_rigid());
+    let step = intern0(inout s, st_rigid());
     let f2 = s.tmp.len();
     push_kids(inout s, children);
-    let d = mkl(inout s, d_node(), g, step, 0, f2);
+    let d = intern_with_kids(inout s, d_node(), g, step, 0, f2);
     make_response(inout s, in cx, vars, d)
 }
 
@@ -1463,20 +1353,20 @@ fn try_proj_conformance(
         return overflow(inout s, 1);
     }
     let mut cx = clone_cx(in cx0);
-    let params = sw(in s.cf_params, ci);
+    let params = word_at(in s.cf_params, ci);
     let args = fresh_args(inout s, inout cx, params);
-    let ctr = sw(in s.cf_tref, ci);
+    let ctr = word_at(in s.cf_tref, ci);
     let head = inst(inout s, ctr, args);
     if head == 0 {
         return dup_err(inout s);
     }
-    let tr = fa(in s, p);
+    let tr = field_a(in s, p);
     let u = unify_trait_ref(inout s, inout cx, head, tr);
     if u != 0 {
         return unify_err(inout s, u);
     }
-    let vals = sw(in s.cf_vals, ci);
-    let raw = kid(in s, vals, fc(in s, p));
+    let vals = word_at(in s.cf_vals, ci);
+    let raw = kid(in s, vals, field_c(in s, p));
     let value = inst(inout s, raw, args);
     if value == 0 {
         return dup_err(inout s);
@@ -1485,8 +1375,8 @@ fn try_proj_conformance(
     let value = norm_ty(inout s, inout cx, value, inout norms);
     let u2 = unify_ty(inout s, inout cx, value, ty);
     if u2 == 1 {
-        let cv = mk0(inout s, c_value());
-        return mk1(inout s, ce_nosol(), cv);
+        let cv = intern0(inout s, c_value());
+        return intern1(inout s, ce_nosol(), cv);
     }
     if u2 != 0 {
         return unify_err(inout s, u2);
@@ -1497,27 +1387,22 @@ fn try_proj_conformance(
         return dup_err(inout s);
     }
     let k = norms.len();
-    let mut i: u64 = 0;
-    loop {
-        if i >= k {
-            break;
-        }
-        let g = sw(in norms, i);
+    for i in 0..k {
+        let g = word_at(in norms, i);
         s.tmp.push(g);
-        i = inc(i);
     }
-    let goals = mkl(inout s, k_list(), 0, 0, 0, from);
+    let goals = intern_with_kids(inout s, k_list(), 0, 0, 0, from);
     let children = drive(inout s, env, inout cx, goals);
-    if tg(in s, children) != k_list() {
+    if tag_of(in s, children) != k_list() {
         return nested_to_cand(inout s, children);
     }
     let g = goal_of(inout s, in cx, builder);
     let f2 = s.tmp.len();
     push_kids(inout s, args);
-    let step = mkl(inout s, st_pconf(), source, k, 0, f2);
+    let step = intern_with_kids(inout s, st_pconf(), source, k, 0, f2);
     let f3 = s.tmp.len();
     push_kids(inout s, children);
-    let d = mkl(inout s, d_node(), g, step, 0, f3);
+    let d = intern_with_kids(inout s, d_node(), g, step, 0, f3);
     make_response(inout s, in cx, vars, d)
 }
 
@@ -1533,18 +1418,18 @@ fn mode_bound(inout s: S, env: u64, in cx: ChunkSeq[u64], goal: u64, ty: u64, bo
     let v = decide(inout s, from, b);
     s.atoms.truncate(from);
     if v == 0 {
-        let step = mk0(inout s, st_mode());
-        let d = mk2(inout s, d_node(), goal, step);
+        let step = intern0(inout s, st_mode());
+        let d = intern2(inout s, d_node(), goal, step);
         return make_response(inout s, in cx, vars, d);
     }
     if v == 1 {
         let atom = s.vatom;
-        let r = mk2(inout s, r_mode(), atom, b);
-        let f = mk2(inout s, f_node(), goal, r);
-        return mk1(inout s, q_nosol(), f);
+        let r = intern2(inout s, r_mode(), atom, b);
+        let f = intern2(inout s, f_node(), goal, r);
+        return intern1(inout s, q_nosol(), f);
     }
-    let a = mk0(inout s, am_mode());
-    mk1(inout s, q_ambig(), a)
+    let a = intern0(inout s, am_mode());
+    intern1(inout s, q_ambig(), a)
 }
 
 // Combines the candidates of the phase stack from base on: any unsupported
@@ -1555,19 +1440,15 @@ fn combine(inout s: S, goal: u64, base: u64) -> u64 {
     let mut proven = ChunkSeq::new[u64]();
     let mut amb = ChunkSeq::new[u64]();
     let from = s.tmp.len();
-    let mut i = base;
-    loop {
-        if i >= n {
-            break;
-        }
-        let v = sw(in s.ph_val, i);
-        let source = sw(in s.ph_src, i);
-        let t = tg(in s, v);
+    for i in base..n {
+        let v = word_at(in s.ph_val, i);
+        let source = word_at(in s.ph_src, i);
+        let t = tag_of(in s, v);
         if t == q_proven() {
             proven.push(i);
         } else if t == ce_nosol() {
-            let cause = fa(in s, v);
-            let cf = mk2(inout s, cf_node(), source, cause);
+            let cause = field_a(in s, v);
+            let cf = intern2(inout s, cf_node(), source, cause);
             s.tmp.push(cf);
         } else if t == q_ambig() {
             amb.push(i);
@@ -1575,33 +1456,22 @@ fn combine(inout s: S, goal: u64, base: u64) -> u64 {
             s.tmp.truncate(from);
             return v;
         }
-        i = inc(i);
     }
     let np = proven.len();
     let mut distinct: u64 = 0;
-    let mut a: u64 = 0;
-    loop {
-        if a >= np {
-            break;
-        }
-        let pa = sw(in s.ph_val, sw(in proven, a));
+    for a in 0..np {
+        let pa = word_at(in s.ph_val, word_at(in proven, a));
         let mut seen = false;
-        let mut b: u64 = 0;
-        loop {
-            if b >= a {
-                break;
-            }
-            let pb = sw(in s.ph_val, sw(in proven, b));
-            if fa(in s, pa) == fa(in s, pb) && fb(in s, pa) == fb(in s, pb) {
+        for b in 0..a {
+            let pb = word_at(in s.ph_val, word_at(in proven, b));
+            if field_a(in s, pa) == field_a(in s, pb) && field_b(in s, pa) == field_b(in s, pb) {
                 seen = true;
                 break;
             }
-            b = inc(b);
         }
         if !seen {
             distinct = inc(distinct);
         }
-        a = inc(a);
     }
     if distinct > 1 || (distinct > 0 && amb.len() > 0) {
         s.tmp.truncate(from);
@@ -1611,7 +1481,7 @@ fn combine(inout s: S, goal: u64, base: u64) -> u64 {
             if x >= np {
                 break;
             }
-            srcs.push(sw(in s.ph_src, sw(in proven, x)));
+            srcs.push(word_at(in s.ph_src, word_at(in proven, x)));
             x = inc(x);
         }
         let na = amb.len();
@@ -1620,30 +1490,25 @@ fn combine(inout s: S, goal: u64, base: u64) -> u64 {
             if x >= na {
                 break;
             }
-            srcs.push(sw(in s.ph_src, sw(in amb, x)));
+            srcs.push(word_at(in s.ph_src, word_at(in amb, x)));
             x = inc(x);
         }
         let ns = srcs.len();
-        let mut q: u64 = 1;
-        loop {
-            if q >= ns {
-                break;
-            }
-            let y = sw(in srcs, q);
+        for q in 1..ns {
+            let y = word_at(in srcs, q);
             let mut j = q;
             loop {
                 if j == 0 {
                     break;
                 }
-                let z = sw(in srcs, dec(j));
+                let z = word_at(in srcs, dec(j));
                 if z <= y {
                     break;
                 }
-                setw(inout srcs, j, z);
+                set_word(inout srcs, j, z);
                 j = dec(j);
             }
-            setw(inout srcs, j, y);
-            q = inc(q);
+            set_word(inout srcs, j, y);
         }
         let f2 = s.tmp.len();
         x = 0;
@@ -1651,26 +1516,26 @@ fn combine(inout s: S, goal: u64, base: u64) -> u64 {
             if x >= ns {
                 break;
             }
-            s.tmp.push(sw(in srcs, x));
+            s.tmp.push(word_at(in srcs, x));
             x = inc(x);
         }
-        let l = mkl(inout s, k_slist(), 0, 0, 0, f2);
-        let am = mk1(inout s, am_multi(), l);
-        return mk1(inout s, q_ambig(), am);
+        let l = intern_with_kids(inout s, k_slist(), 0, 0, 0, f2);
+        let am = intern1(inout s, am_multi(), l);
+        return intern1(inout s, q_ambig(), am);
     }
     if np > 0 {
         s.tmp.truncate(from);
-        return sw(in s.ph_val, sw(in proven, 0));
+        return word_at(in s.ph_val, word_at(in proven, 0));
     }
     if amb.len() > 0 {
         s.tmp.truncate(from);
-        return sw(in s.ph_val, sw(in amb, 0));
+        return word_at(in s.ph_val, word_at(in amb, 0));
     }
     let reason = if s.tmp.len() == from {
-        mk0(inout s, r_nocand())
+        intern0(inout s, r_nocand())
     } else {
-        mkl(inout s, r_cands(), 0, 0, 0, from)
+        intern_with_kids(inout s, r_cands(), 0, 0, 0, from)
     };
-    let f = mk2(inout s, f_node(), goal, reason);
-    mk1(inout s, q_nosol(), f)
+    let f = intern2(inout s, f_node(), goal, reason);
+    intern1(inout s, q_nosol(), f)
 }
