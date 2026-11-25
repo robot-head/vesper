@@ -756,49 +756,20 @@ fn params(nic: &NicSpec, max_leases: u64) -> UmemParams {
 }
 
 /// Bytes of an ACK datagram carrying `ranges` ranges.
-#[cfg(feature = "vesper-port")]
 pub fn ack_datagram_len(ranges: u32) -> u32 {
     crate::port::ack_datagram_len(ranges)
 }
 
 /// Add `pn` to inclusive ranges kept largest first, merging neighbours, and
 /// keep at most `max` ranges (the oldest are forgotten).
-#[cfg(feature = "vesper-port")]
 fn record_pn(ranges: &mut Vec<(u64, u64)>, pn: u64, max: usize) {
     let words: Vec<u64> = ranges.iter().flat_map(|&(lo, hi)| [lo, hi]).collect();
     *ranges = crate::port::record_pn(&words, pn, max as u64)
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|r| (r[0], r[1]))
         .collect();
-}
-
-/// Bytes of an ACK datagram carrying `ranges` ranges.
-#[cfg(not(feature = "vesper-port"))]
-pub fn ack_datagram_len(ranges: u32) -> u32 {
-    umem::SHORT_HEADER_BYTES
-        + umem::ACK_FRAME_FIXED_BYTES
-        + umem::ACK_RANGE_BYTES * ranges.saturating_sub(1)
-}
-
-/// Add `pn` to inclusive ranges kept largest first, merging neighbours, and
-/// keep at most `max` ranges (the oldest are forgotten).
-#[cfg(not(feature = "vesper-port"))]
-fn record_pn(ranges: &mut Vec<(u64, u64)>, pn: u64, max: usize) {
-    if ranges.iter().any(|(lo, hi)| (*lo..=*hi).contains(&pn)) {
-        return;
-    }
-    ranges.push((pn, pn));
-    ranges.sort_by_key(|r| std::cmp::Reverse(r.1));
-    let mut out: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
-    for (lo, hi) in ranges.drain(..) {
-        match out.last_mut() {
-            // Packet numbers are below 2^62, so `hi + 1` cannot overflow.
-            Some(last) if hi + 1 >= last.0 => last.0 = last.0.min(lo),
-            _ => out.push((lo, hi)),
-        }
-    }
-    out.truncate(max);
-    *ranges = out;
 }
 
 impl WarpState {

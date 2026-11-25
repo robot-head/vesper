@@ -4,7 +4,7 @@
 //! Used by `tests/self_host_native_walk.rs`,
 //! `tests/self_host_native_walk_frame.rs` and `vesper-hybrid`'s
 //! `hybrid_codegen_walk` bridge (`codegen_swap::register_locals` and
-//! `codegen_swap::frame_plans`).
+//! `codegen_swap::entry_plans`).
 #![allow(dead_code)]
 
 use super::{check_words, ir_words};
@@ -127,19 +127,23 @@ fn unpack(words: &[u64]) -> String {
     String::from_utf8(bytes).expect("utf-8")
 }
 
-/// Decodes `native_walk_frames_bytes`'s answer to one task (part 3b): each
-/// instance's entry-block plan by key, or `None` when the task refused or a
-/// plan does not parse, which leaves every plan to Rust.
-pub fn decode_frames(words: &[u64]) -> Option<BTreeMap<String, vesper::native::FramePlan>> {
+/// Decodes `native_walk_frames_bytes`'s answer to one task (parts 3b and
+/// 4a): each instance's entry-block plan (`F` blocks) and internal
+/// convention (`B key status words` lines) by key, or `None` when the task
+/// refused or a line does not parse, which leaves every plan to Rust.
+pub fn decode_entry_plans(words: &[u64]) -> Option<vesper::native::EntryPlans> {
     let text = unpack(words);
-    let mut plans = BTreeMap::new();
+    let mut plans = vesper::native::EntryPlans::default();
     let mut current: Option<(String, String)> = None;
-    let mut finish = |current: Option<(String, String)>| -> Option<()> {
-        if let Some((key, plan)) = current {
-            plans.insert(key, vesper::native::FramePlan::parse(&plan)?);
-        }
-        Some(())
-    };
+    let finish =
+        |plans: &mut vesper::native::EntryPlans, current: Option<(String, String)>| -> Option<()> {
+            if let Some((key, plan)) = current {
+                plans
+                    .frames
+                    .insert(key, vesper::native::FramePlan::parse(&plan)?);
+            }
+            Some(())
+        };
     for line in text.lines() {
         if line.starts_with("E ") {
             continue;
@@ -147,8 +151,22 @@ pub fn decode_frames(words: &[u64]) -> Option<BTreeMap<String, vesper::native::F
         if line.starts_with("X ") {
             return None;
         }
-        if let Some(key) = line.strip_prefix("F ") {
-            finish(current.take())?;
+        if let Some(rest) = line.strip_prefix("B ") {
+            let mut fields = rest.rsplitn(3, ' ');
+            let words: u32 = fields.next()?.parse().ok()?;
+            let status = match fields.next()? {
+                "0" => false,
+                "1" => true,
+                _ => return None,
+            };
+            let key = fields.next()?.to_string();
+            let abi = vesper::native::FnAbi {
+                status,
+                result_words: (words != 0).then_some(words),
+            };
+            plans.abi.insert(key, abi);
+        } else if let Some(key) = line.strip_prefix("F ") {
+            finish(&mut plans, current.take())?;
             current = Some((key.to_string(), String::new()));
         } else {
             let (_, plan) = current.as_mut()?;
@@ -156,6 +174,6 @@ pub fn decode_frames(words: &[u64]) -> Option<BTreeMap<String, vesper::native::F
             plan.push('\n');
         }
     }
-    finish(current)?;
+    finish(&mut plans, current)?;
     Some(plans)
 }

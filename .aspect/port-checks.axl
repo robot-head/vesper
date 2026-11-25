@@ -302,6 +302,7 @@ kinetic_check = port_checks(
             ("manifold", ["rigid"], "a_stack_of_three_boxes_stays_up", "malformed_worlds_are_typed_errors", "9"),
             ("sleep", ["sleep_ccd"], "a_resting_stack_falls_asleep_and_a_falling_ball_wakes_it", "ccd_bullets_do_not_cross_a_thin_wall_or_the_ground", "10"),
             ("diff", ["diff"], "adjoint_matches_central_finite_differences", "malformed_scenes_are_typed_errors", "11"),
+            ("solve", ["joint_drives"], "hinge_motor_reaches_its_target_rate", "hinge_servo_holds_the_target_angle_against_gravity", "12"),
         ]
     ],
 )

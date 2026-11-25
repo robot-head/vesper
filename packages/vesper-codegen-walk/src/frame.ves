@@ -587,6 +587,14 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
                         break;
                     }
                 }
+                // The internal convention (`NativeAbi::plan`), part 4a.
+                put(inout o, "B ");
+                c.names.write(x.key, inout o);
+                put(inout o, " ");
+                bit(inout o, abi.status);
+                put(inout o, " ");
+                push_decimal(inout o, w(abi.result_words));
+                o.push(10);
                 put(inout o, "F ");
                 c.names.write(x.key, inout o);
                 o.push(10);

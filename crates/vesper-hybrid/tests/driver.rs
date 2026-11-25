@@ -151,6 +151,61 @@ const OPTION_SETS: &[&[&str]] = &[
     &["emit", "--emit", "ir", "-o", "{dir}/a.out"],
     &["emit", "--emit", "clif", "-o", "{dir}/a.out"],
     &["run", "--entry", "missing"],
+    // Slice 2 of #1894: the driver runs the native verifiers' orchestration
+    // (whether they run, the policy file, the report and the verdict).
+    &[
+        "emit",
+        "--emit",
+        "clif",
+        "--verify-stack",
+        "--verify-policy",
+        "{policy}",
+    ],
+    &[
+        "emit",
+        "--emit",
+        "clif",
+        "-o",
+        "{out}",
+        "--verify-stack",
+        "--verify-policy",
+        "{roomy}",
+    ],
+    &[
+        "emit",
+        "--emit",
+        "object",
+        "-o",
+        "{out}",
+        "--verify-stack",
+        "--verify-policy",
+        "{dir}/a.out",
+    ],
+    &[
+        "build",
+        "-o",
+        "{out}",
+        "--verify-stack",
+        "--verify-policy",
+        "{badpolicy}",
+    ],
+    &[
+        "build",
+        "-o",
+        "{out}",
+        "--verify-stack",
+        "--verify-policy",
+        "{binpolicy}",
+    ],
+    &[
+        "build",
+        "-o",
+        "{out}",
+        "--verify-stack",
+        "--verify-policy",
+        "{roomy}",
+    ],
+    &["emit", "--emit", "clif", "--verify-policy", "{badpolicy}"],
     &["emit", "--emit", "object", "-o", "{out}"],
     &["emit", "--emit", "object"],
     &[
@@ -267,6 +322,22 @@ fn driver_matches_the_default_compiler() {
     inputs.push(root.join("examples/loom"));
     inputs.push(root.join("tests/fixtures/packages/workspace/app"));
     inputs.push(root.join("tests/fixtures/packages/reject/unknown_item"));
+    // Native verifier policies: a stack budget most entries exceed, one
+    // they fit, one that does not parse and one that is not UTF-8.
+    for (name, text) in [
+        (
+            "policy",
+            &br#"{"schema":"vesper.native-verifiers/1","stack":{"roots":{"main":1}}}"#[..],
+        ),
+        (
+            "roomy",
+            br#"{"schema":"vesper.native-verifiers/1","stack":{"roots":{"main":1048576}}}"#,
+        ),
+        ("badpolicy", b"{ not json"),
+        ("binpolicy", &[0xff, 0xfe]),
+    ] {
+        std::fs::write(scratch.join(name), text).unwrap();
+    }
     let invalid_utf8 = scratch.join("invalid-utf8.ves");
     std::fs::write(&invalid_utf8, [0xff]).unwrap();
     inputs.push(invalid_utf8);
@@ -296,6 +367,9 @@ fn driver_matches_the_default_compiler() {
                     .map(|a| match *a {
                         "{out}" => out.display().to_string(),
                         "{dir}/a.out" => scratch.join("no-such-dir/a.out").display().to_string(),
+                        "{policy}" | "{roomy}" | "{badpolicy}" | "{binpolicy}" => {
+                            scratch.join(&a[1..a.len() - 1]).display().to_string()
+                        }
                         a => a.to_owned(),
                     })
                     .collect();

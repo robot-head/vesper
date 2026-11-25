@@ -1,5 +1,5 @@
 //! The records that cross the Vesper port boundary (port/src/lib.ves), and
-//! the generated binding. Compiled only under `vesper-port`.
+//! the generated binding. Every build links the port.
 
 /// `LinkSpec` without its name, with the options flattened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

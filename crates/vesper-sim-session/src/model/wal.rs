@@ -105,7 +105,9 @@ fn damage(code: (u8, u64, u64)) -> Option<TailDamage> {
 pub fn scan(bytes: &[u8]) -> Recovery {
     let result = crate::port::wal_scan(bytes);
     let records = crate::port::scan_result_records(&result)
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|r| {
             let (start, len) = (r[1] as usize, r[2] as usize);
             WalRecord {
@@ -520,7 +522,9 @@ impl Wal {
         }
         let durable = self.durable_bytes();
         let records: Vec<WalRecord> = crate::port::wal_recovery_records(&recovery)
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|r| {
                 let (start, len) = (r[1] as usize, r[2] as usize);
                 WalRecord {

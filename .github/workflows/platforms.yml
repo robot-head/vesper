@@ -192,7 +192,7 @@ jobs:
           - name: macOS (AArch64)
             os: macos-latest
     runs-on: ${{ matrix.os }}
-    # Passing runs take 30-55 min and "Test the codegen swap point" has grown,
+    # Passing runs took 30-55 min with a debug "Test the codegen swap point",
     # so 60 timed out on many PRs on 2026-11-25. Windows has 120 (#1537).
     timeout-minutes: 120
     defaults:
@@ -247,10 +247,15 @@ jobs:
         run: cargo test --locked -p vesper-cranelift-sys
       - name: Test the codegen swap point
         # Self-hosting SH4 lane 1 (#1275): lent handles and the pilot swap
-        # over every fourth corpus world (Linux runs all of them).
+        # over every fourth corpus world (Linux runs all of them). Nearly
+        # all of its time is the compiler compiling corpus worlds, so it
+        # builds with the optimized `port-compiler` profile (debug
+        # assertions and overflow checks stay on): a debug build took 55 of
+        # the macOS job's 60 minutes, and its test binaries ran 3.3-3.5 times
+        # faster optimized (docs/ci-platforms.md).
         env:
           CODEGEN_SWAP_STEP: "4"
-        run: cargo test --locked -p vesper-codegen-swap-test
+        run: cargo test --locked --profile port-compiler -p vesper-codegen-swap-test
       - name: Test the Vesper port export ABI
         # Only the host-sensitive tier of the port harness: the pilot's export
         # ABI v2/v3 libraries and divergence checks, package linking and the
@@ -272,9 +277,9 @@ jobs:
     if: ${{ always() && !cancelled() }}
     name: Windows (x86_64 MSVC)${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
     runs-on: windows-latest
-    # The codegen swap tests alone take about 20 minutes on windows-latest
-    # (self_host_codegen_seq is about 9.5), which pushed the job past 60
-    # (#1519). GitHub-hosted jobs allow up to 6 hours.
+    # The debug codegen swap tests took 35-61 minutes on windows-latest,
+    # which pushed the job past 60 (#1519); they now build optimized.
+    # GitHub-hosted jobs allow up to 6 hours.
     timeout-minutes: 120
     defaults:
       run:
@@ -326,10 +331,15 @@ jobs:
         run: cargo test --locked -p vesper-cranelift-sys
       - name: Test the codegen swap point
         # Self-hosting SH4 lane 1 (#1275): lent handles and the pilot swap
-        # over every fourth corpus world (Linux runs all of them).
+        # over every fourth corpus world (Linux runs all of them). Nearly
+        # all of its time is the compiler compiling corpus worlds, so it
+        # builds with the optimized `port-compiler` profile (debug
+        # assertions and overflow checks stay on): a debug build took 55 of
+        # the macOS job's 60 minutes, and its test binaries ran 3.3-3.5 times
+        # faster optimized (docs/ci-platforms.md).
         env:
           CODEGEN_SWAP_STEP: "4"
-        run: cargo test --locked -p vesper-codegen-swap-test
+        run: cargo test --locked --profile port-compiler -p vesper-codegen-swap-test
       - name: Test the Vesper port export ABI
         # Only the host-sensitive tier of the port harness: the pilot's export
         # ABI v2/v3 libraries and divergence checks, package linking and the
