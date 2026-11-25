@@ -16,6 +16,7 @@ use @vesper/check-data::util::{
 };
 use self::build::{
     B,
+    T,
     T_APP,
     T_ARROW,
     T_INFER,
@@ -133,13 +134,20 @@ fn has_effects(in t: Types, r: u32) -> bool {
 // The first error of `typed(ty, None, erase_box)` and, for E_NAME, the
 // offending name.
 pub fn ty_error(in b: B, in t: Types, ty: u32, erase_box: bool, inout name: u32) -> u64 {
+    ty_error_m(in b, in t, ty, erase_box, false, inout name)
+}
+
+// `ty_error` of `typed(ty, monad, erase_box)`: with an ambient monad an
+// effectful arrow is no error.
+pub fn ty_error_m(in b: B, in t: Types, ty: u32, erase_box: bool, monad: bool, inout name: u32)
+    -> u64 {
     let n = t.node(ty);
     if n.kind == TyKind::Lit || n.kind == T_INFER_KIND {
         return E_NONE;
     }
     if n.kind == TyKind::Named {
         if erased(in b, in t, ty, erase_box) {
-            return ty_error(in b, in t, t.arg(ty, 0), erase_box, inout name);
+            return ty_error_m(in b, in t, t.arg(ty, 0), erase_box, monad, inout name);
         }
         if spells(in b, n.name, in "i128") {
             return E_I128;
@@ -152,7 +160,14 @@ pub fn ty_error(in b: B, in t: Types, ty: u32, erase_box: bool, inout name: u32)
             return E_NAME;
         }
         for i in 0..ordered_count(in b, in t, ty) {
-            let e = ty_error(in b, in t, ordered_arg(in b, in t, ty, i), erase_box, inout name);
+            let e = ty_error_m(
+                in b,
+                in t,
+                ordered_arg(in b, in t, ty, i),
+                erase_box,
+                monad,
+                inout name
+            );
             if e != E_NONE {
                 return e;
             }
@@ -161,7 +176,7 @@ pub fn ty_error(in b: B, in t: Types, ty: u32, erase_box: bool, inout name: u32)
     }
     if n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
-            let e = ty_error(in b, in t, t.arg(ty, i), erase_box, inout name);
+            let e = ty_error_m(in b, in t, t.arg(ty, i), erase_box, monad, inout name);
             if e != E_NONE {
                 return e;
             }
@@ -169,19 +184,19 @@ pub fn ty_error(in b: B, in t: Types, ty: u32, erase_box: bool, inout name: u32)
         return E_NONE;
     }
     if n.kind == TyKind::Fn {
-        let e = ty_error(in b, in t, n.r, erase_box, inout name);
+        let e = ty_error_m(in b, in t, n.r, erase_box, monad, inout name);
         if e != E_NONE {
             return e;
         }
         for i in 0..w(n.n) {
             if t.param_pass(ty, i) == TyPass::Inout {
-                let e = ty_error(in b, in t, t.arg(ty, i), erase_box, inout name);
+                let e = ty_error_m(in b, in t, t.arg(ty, i), erase_box, monad, inout name);
                 if e != E_NONE {
                     return e;
                 }
             }
         }
-        if has_effects(in t, n.r2) {
+        if !monad && has_effects(in t, n.r2) {
             return E_MONAD;
         }
         let mut i = w(n.n);
@@ -190,7 +205,7 @@ pub fn ty_error(in b: B, in t: Types, ty: u32, erase_box: bool, inout name: u32)
                 break;
             }
             i = wrapping_sub(i, 1);
-            let e = ty_error(in b, in t, t.arg(ty, i), erase_box, inout name);
+            let e = ty_error_m(in b, in t, t.arg(ty, i), erase_box, monad, inout name);
             if e != E_NONE {
                 return e;
             }
@@ -216,6 +231,16 @@ pub fn ty_check(inout b: B, in t: Types, ty: u32, erase_box: bool) {
 
 // Writes `typed(ty, None, erase_box)`.
 pub fn emit_ty(inout b: B, in t: Types, ty: u32, erase_box: bool) {
+    let none = T {
+        a: 0,
+        n: 0
+    };
+    emit_ty_m(inout b, in t, ty, erase_box, false, none);
+}
+
+// Writes `typed(ty, Some(monad), erase_box)` when `has`, else with no
+// monad.
+pub fn emit_ty_m(inout b: B, in t: Types, ty: u32, erase_box: bool, has: bool, monad: T) {
     let n = t.node(ty);
     if n.kind == TyKind::Lit {
         if n.mode == 0 && wrapping_u64(n.lit) > 9223372036854775807 {
@@ -227,7 +252,7 @@ pub fn emit_ty(inout b: B, in t: Types, ty: u32, erase_box: bool) {
     }
     if n.kind == TyKind::Named {
         if erased(in b, in t, ty, erase_box) {
-            emit_ty(inout b, in t, t.arg(ty, 0), erase_box);
+            emit_ty_m(inout b, in t, t.arg(ty, 0), erase_box, has, monad);
             return;
         }
         let count = ordered_count(in b, in t, ty);
@@ -246,7 +271,7 @@ pub fn emit_ty(inout b: B, in t: Types, ty: u32, erase_box: bool) {
             for i in 0..count {
                 b.arg();
                 let a = ordered_arg(in b, in t, ty, i);
-                emit_ty(inout b, in t, a, erase_box);
+                emit_ty_m(inout b, in t, a, erase_box, has, monad);
             }
         }
         return;
@@ -255,12 +280,12 @@ pub fn emit_ty(inout b: B, in t: Types, ty: u32, erase_box: bool) {
         if n.n == 0 {
             b.global(in "Unit");
         } else if n.n == 1 {
-            emit_ty(inout b, in t, t.arg(ty, 0), erase_box);
+            emit_ty_m(inout b, in t, t.arg(ty, 0), erase_box, has, monad);
         } else {
             b.w(T_PRODUCT);
             b.w(w(n.n));
             for i in 0..w(n.n) {
-                emit_ty(inout b, in t, t.arg(ty, i), erase_box);
+                emit_ty_m(inout b, in t, t.arg(ty, i), erase_box, has, monad);
             }
         }
         return;
@@ -269,7 +294,7 @@ pub fn emit_ty(inout b: B, in t: Types, ty: u32, erase_box: bool) {
         let params = w(n.n);
         for i in 0..params {
             b.w(T_ARROW);
-            emit_ty(inout b, in t, t.arg(ty, i), erase_box);
+            emit_ty_m(inout b, in t, t.arg(ty, i), erase_box, has, monad);
         }
         if params == 0 {
             b.w(T_ARROW);
@@ -282,14 +307,22 @@ pub fn emit_ty(inout b: B, in t: Types, ty: u32, erase_box: bool) {
                 results = wrapping_add(results, 1);
             }
         }
+        let wrap = has && has_effects(in t, n.r2);
+        let mut mark: u64 = 0;
+        if wrap {
+            mark = b.app(1);
+            b.put(monad);
+            b.args(mark);
+            b.arg();
+        }
         if results > 1 {
             b.w(T_PRODUCT);
             b.w(results);
         }
-        emit_ty(inout b, in t, n.r, erase_box);
+        emit_ty_m(inout b, in t, n.r, erase_box, has, monad);
         for i in 0..params {
             if t.param_pass(ty, i) == TyPass::Inout {
-                emit_ty(inout b, in t, t.arg(ty, i), erase_box);
+                emit_ty_m(inout b, in t, t.arg(ty, i), erase_box, has, monad);
             }
         }
         return;

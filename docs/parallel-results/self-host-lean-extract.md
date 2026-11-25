@@ -248,17 +248,76 @@ is not at parity; profiling the generator (name lookup in `fresh`, the
 linear scope and current-value stacks, and term copies) is the next step
 before the swap.
 
+## Part 3b: effects and handlers
+
+Part 3b ports the rest of `Generator`: the functions that are polymorphic
+in their monad `m` (effect rows, effectful arrows in the result or the
+parameters). With it the port writes no `skip`.
+
+- `src/gen.ves`: the polymorphic prologue (`{m}`, `[Monad m]`, one
+  `[$cap{i} : Effect_E args m]` per labeled requirement, the `$sync`
+  keep-writes `optParam`), `m (...)` results, effect operations
+  (`perform_op`: the direct lens path and the `Effect_E.op (self := ev)`
+  path, with borrowed arguments written back), handlers (`handler`:
+  `HandlerCPS` layers, `liftAction`, `lift_E` evidence, state and return
+  clauses, direct and fallback resumptions, frames and
+  `post_resume_access`), effectful closures, local calls through function
+  values, and calls of effectful world functions with their evidence and
+  `$sync` arguments.
+- `src/ast.ves`: handle expressions, clauses, closure rows and the effect
+  declarations (linear flag, generics, operation parameters with their
+  projections, results).
+- `src/ty.ves`: `emit_ty_m` wraps an effectful arrow's result in the
+  monad; `ty_error_m` refuses `m` only outside a monad.
+- `src/lean.rs`: `structured_function_nodes` now runs polymorphic
+  functions with `m`. Two more hidden hooks, `handler_written_names` and
+  `visit_exprs`, let the test encoder precompute the names a handler body
+  writes and the free-name spans of each clause. They add no behaviour.
+
+The encoder also precomputes, per call, the `instance_key` of an
+unlabeled `E::op` with explicit types, and per handler the entries the
+routes check needs (function arrows, typed layers, other callees).
+
+One fix came out of the corpus: indexing a constant table
+(`$table$const$T(..)[i]`) refuses the call first, as Rust does, but the
+port kept building the tuple selection chain after the refusal. For a
+1,024-entry table (`vesper-kinetic`'s Morton tables) the chain's copies
+are cubic in the arity and ran out of memory. The index now stops once
+the operands fail.
+
+### Differential
+
+`cargo test --release --test self_host_lean_extract structured_` (Linux
+x86-64):
+
+| Test | Cases | Differences |
+|---|--:|--:|
+| `structured_functions_match_rust_on_the_corpus` | 354 worlds, 51,864 functions: 7,234 definitions and 13,643 refusals from the structured extractor, 0 skipped; 110,962 lines | 0 |
+| `structured_functions_match_rust_on_test_sources` | 155 programs and mutants: 89 definitions, 16 refusals, 0 skipped | 0 |
+
+### Speed
+
+`CHECK_HARNESS_SPEED=1 cargo test --release --test self_host_lean_extract
+abba_structured -- --ignored --nocapture`, ABBA over all 354 worlds, CFG
+gate on both sides:
+
+| | Rust `structured_function_nodes` | Vesper `extract_structured_functions` (optimized JIT) | Ratio |
+|---|--:|--:|--:|
+| Corpus functions | 4,642 ms | 3,347 ms | 0.72x |
+
+The structured extractor is under the 1.5x bar, including the effects
+part. The Rust code cannot be deleted yet: `extract_report` (ordering,
+fuel companions, contracts, the proof module) still runs in Rust only.
+
 ## What is left
 
-- **Effects (part 3b).** The polymorphic monad `m`: `perform`,
-  `resume`, handlers, effectful closures and calls. This covers the 119
-  skipped corpus functions and the polymorphic ones.
 - **Part 3c: ordering, fuel companions, contracts.** `order_definitions`,
   the recursive family and `$fuel` companions, `Totality`, `contracts`,
   the proof module and `omitted_executable_definitions`. Then the full
   module differential over the corpus and the sources of `tests/lean*.rs`.
 - **Verify and proof commands** (`src/verify_commands.rs`,
-  `src/proof_commands.rs`): lane 12's driver (#1335) has not landed, so
-  they are left for after it.
+  `src/proof_commands.rs`): the driver (#1367) and command routing
+  (#1372) have landed, so these port onto `@vesper/driver-commands`
+  after part 3c.
 - **Hybrid module `lean_extract`**: Rust has no extraction swap point yet;
   it is added with the full port.
