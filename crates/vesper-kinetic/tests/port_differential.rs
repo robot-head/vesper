@@ -1120,3 +1120,232 @@ fn abba_diff() {
         "ABBA 95% upper bound {ci_hi:.3}x exceeds 1.50x"
     );
 }
+
+/// One random rigid scene, built the same way in either build: a stack of
+/// boxes, spheres and capsules with random materials, inertia frames and
+/// spins on the ground, and hinge, prismatic and ball joints with limits,
+/// drives and friction (`variant` picks the mix; 3 also sleeps).
+macro_rules! rigid_solve_scene {
+    ($k:ident, $seed:expr, $variant:expr) => {{
+        use $k::rigid::{
+            ColliderShape, JointDrive, JointKind, RigidBody, RigidCollider, RigidConfig,
+            RigidJoint, RigidMaterial, RigidWorld, SleepConfig,
+        };
+        let mut rng = Lcg($seed);
+        let variant: u32 = $variant;
+        let mut colliders = Vec::new();
+        for c in 0..4u32 {
+            let material = RigidMaterial {
+                static_friction: rng.range(0.0, 1.0) as f32,
+                dynamic_friction: rng.range(0.0, 0.8) as f32,
+                restitution: if c == 1 {
+                    rng.range(0.2, 0.9) as f32
+                } else {
+                    0.0
+                },
+                rolling_friction: if c == 2 {
+                    rng.range(0.0, 0.05) as f32
+                } else {
+                    0.0
+                },
+            };
+            let shape = match c {
+                0 => ColliderShape::Box {
+                    half_extents: [0.4, 0.3, 0.35],
+                },
+                1 => ColliderShape::Sphere { radius: 0.3 },
+                2 => ColliderShape::Capsule {
+                    half_height: 0.3,
+                    radius: 0.2,
+                },
+                _ => ColliderShape::Box {
+                    half_extents: [0.2, 0.2, 0.2],
+                },
+            };
+            colliders.push(RigidCollider { shape, material });
+        }
+        let count = 6 + (rng.next() % 10) as usize;
+        let mut bodies = Vec::with_capacity(count);
+        for i in 0..count {
+            let collider = rng.next() % 4;
+            let pos = [
+                rng.range(-0.3, 0.3) as f32,
+                0.5 + i as f32 * 0.72,
+                rng.range(-0.3, 0.3) as f32,
+            ];
+            let inv_mass = if i == 0 && variant == 2 {
+                0.0
+            } else {
+                rng.range(0.3, 2.0) as f32
+            };
+            let mut b = RigidBody::new(
+                pos,
+                inv_mass,
+                [
+                    rng.range(0.5, 6.0) as f32,
+                    rng.range(0.5, 6.0) as f32,
+                    rng.range(0.5, 6.0) as f32,
+                ],
+                collider,
+            );
+            b.vel = [
+                rng.range(-1.0, 1.0) as f32,
+                rng.range(-1.0, 0.5) as f32,
+                rng.range(-1.0, 1.0) as f32,
+            ];
+            b.ang_vel = [
+                rng.range(-4.0, 4.0) as f32,
+                rng.range(-4.0, 4.0) as f32,
+                rng.range(-4.0, 4.0) as f32,
+            ];
+            if rng.next() % 3 == 0 {
+                let (s, c) = (rng.range(-0.5, 0.5) as f32).sin_cos();
+                b.inertia_frame = [s, 0.0, 0.0, c];
+            }
+            if rng.next() % 4 == 0 {
+                let (s, c) = (rng.range(-1.0, 1.0) as f32).sin_cos();
+                b.orientation = [0.0, s, 0.0, c];
+            }
+            bodies.push(b);
+        }
+        let mut w = RigidWorld::new(
+            RigidConfig {
+                dt: 1.0 / 60.0,
+                substeps: 1 + rng.next() % 8,
+                ..RigidConfig::default()
+            },
+            &bodies,
+            &colliders,
+        )
+        .unwrap();
+        w.set_gyroscopic(rng.next() % 2 == 0);
+        if variant == 3 {
+            w.set_sleeping(Some(SleepConfig {
+                linear_threshold: 0.3,
+                angular_threshold: 0.3,
+                ticks: 3,
+            }))
+            .unwrap();
+        }
+        let joints = if variant == 0 { 0 } else { 2 + rng.next() % 5 };
+        for _ in 0..joints {
+            let a = rng.next() % count as u32;
+            let b = if rng.next() % 3 == 0 {
+                None
+            } else {
+                Some((a + 1 + rng.next() % (count as u32 - 1)) % count as u32)
+            };
+            let limits = if rng.next() % 2 == 0 {
+                let lo = rng.range(-1.5, 0.0) as f32;
+                Some([lo, lo + rng.range(0.1, 2.0) as f32])
+            } else {
+                None
+            };
+            let axis = [
+                rng.range(-1.0, 1.0) as f32,
+                rng.range(0.2, 1.0) as f32,
+                rng.range(-1.0, 1.0) as f32,
+            ];
+            let kind = match (rng.next() % 3, variant) {
+                (0, _) => JointKind::Ball,
+                (1, _) | (_, 1) => JointKind::Hinge {
+                    axis_a: axis,
+                    axis_b: axis,
+                    limits,
+                },
+                _ => JointKind::Prismatic {
+                    axis_a: axis,
+                    limits,
+                },
+            };
+            let anchor_b = match b {
+                None => {
+                    let p = bodies[a as usize].pos;
+                    [p[0], p[1] + 0.4, p[2]]
+                }
+                Some(_) => [0.0, -0.36, 0.0],
+            };
+            let Ok(i) = w.add_joint(RigidJoint {
+                kind,
+                compliance: if rng.next() % 2 == 0 { 0.0 } else { 1.0e-4 },
+                angular_compliance: if rng.next() % 2 == 0 { 0.0 } else { 1.0e-3 },
+                collide_connected: rng.next() % 2 == 0,
+                ..RigidJoint::ball(a, b, [0.0, 0.36, 0.0], anchor_b)
+            }) else {
+                continue;
+            };
+            if matches!(kind, JointKind::Ball) {
+                continue;
+            }
+            let drive = match rng.next() % 3 {
+                0 => None,
+                1 => Some(JointDrive::Velocity {
+                    target: rng.range(-3.0, 3.0) as f32,
+                    max_force: rng.range(0.1, 20.0) as f32,
+                }),
+                _ => Some(JointDrive::Position {
+                    target: rng.range(-0.8, 0.8) as f32,
+                    compliance: if rng.next() % 2 == 0 { 0.0 } else { 1.0e-3 },
+                    damping: rng.range(0.0, 2.0) as f32,
+                    max_force: rng.range(0.5, 50.0) as f32,
+                }),
+            };
+            let _ = w.set_joint_drive(i, drive);
+            if rng.next() % 2 == 0 {
+                let _ = w.set_joint_friction(i, rng.range(0.0, 2.0) as f32);
+            }
+        }
+        w
+    }};
+}
+
+/// The port's substep solver (`RigidWorld::solve`, vesper/src/solve.ves)
+/// against the frozen Rust build: body hashes, manifolds (with their
+/// solver state), joint forces and coordinates after every tick of random
+/// stacks with materials, inertia frames, gyroscopic spin, sleeping and
+/// hinge, prismatic and ball joints with limits, drives and friction (SH6
+/// lane 9, #1404).
+#[test]
+fn rigid_solve_matches_the_rust_build() {
+    let mut differences = 0usize;
+    let mut cases = 0usize;
+    let mut joints = 0usize;
+    let mut contacts = 0usize;
+    for round in 0..96u64 {
+        let seed = 0x736f_6c76_6500 + round;
+        let variant = (round % 4) as u32;
+        let mut pw = rigid_solve_scene!(vesper_kinetic, seed, variant);
+        let mut rw = rigid_solve_scene!(vesper_kinetic_rust, seed, variant);
+        for step in 0..90 {
+            if step == 45 && variant == 3 {
+                pw.wake(0);
+                rw.wake(0);
+            }
+            let (p, r) = (pw.step(), rw.step());
+            assert_eq!(p.is_ok(), r.is_ok(), "round {round} step {step}");
+            cases += 1;
+            contacts += pw.manifolds().len();
+            let mut same = pw.hash().blake3 == rw.hash().blake3
+                && format!("{:?}", pw.manifolds()) == format!("{:?}", rw.manifolds());
+            for j in 0.. {
+                match (pw.joint_force(j), rw.joint_force(j)) {
+                    (None, None) => break,
+                    (pf, rf) => {
+                        joints += 1;
+                        same &= pf.map(f32::to_bits) == rf.map(f32::to_bits);
+                        same &= pw.joint_coordinate(j).map(f32::to_bits)
+                            == rw.joint_coordinate(j).map(f32::to_bits);
+                    }
+                }
+            }
+            if !same {
+                differences += 1;
+            }
+        }
+    }
+    println!(
+        "rigid solve differential differences={differences} cases={cases} joints={joints} contacts={contacts}"
+    );
+    assert!(joints > 1000 && contacts > 1000);
+    assert_eq!(differences, 0);
+}
