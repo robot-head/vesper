@@ -26,14 +26,18 @@
 # other ports skips them: `skip_port vesper-x || sh crates/vesper-x/...`, or
 # `if ported vesper-x; then ... fi` for several lines (#1103).
 #
-# Shards (#1019, #1100): the Linux job runs the ports in seven parallel
-# shards, VESPER_PORT_HARNESS_SHARD=1 to 7 (unset runs all of them), each a
+# Shards (#1019, #1100, #1924): the Linux job runs the ports in nine parallel
+# shards, VESPER_PORT_HARNESS_SHARD=1 to 9 (unset runs all of them), each a
 # run of consecutive blocks below: 1 the ABI tier through Ignis, 2 Quarry
 # through pact, 3 semver through Crucible, 4 serde, warp-umem and aether, 5 aegis through bench,
-# 6 eBPF and silicon, 7 prism-h3 and every line new ports append. With a
+# 6 eBPF and silicon, 7 Warp through diagnostics, 8 fmt through lint, and 9
+# sim-session and every line new ports append. With a
 # debug compiler, the jobs took 21, 17, 19, 21, 24, 30 and 6 minutes on
 # #1101 (November 2026); the shared optimized compiler (#1103) cuts most of
-# that, since compiling Vesper sources is nearly all of it. When a shard
+# that, since compiling Vesper sources is nearly all of it. The old shard 7
+# ran past its 60 minute limit once its divergence gates stopped failing
+# early (#1899): Warp through diagnostics took 18 minutes and fmt through
+# lint 29, so #1924 split it in three. When a shard
 # passes about 35 minutes, move a shard boundary (or add a shard here and in
 # the `ports` matrix of .github/workflows/platforms.yml).
 set -eu
@@ -47,8 +51,8 @@ fi
 export VESPER_PORT_COMPILER
 echo "compiling ports with $VESPER_PORT_COMPILER"
 shard=${VESPER_PORT_HARNESS_SHARD:-}
-shards=7
-case "$shard" in "" | [1-7]) ;; *) echo "VESPER_PORT_HARNESS_SHARD must be 1 to $shards" >&2; exit 1 ;; esac
+shards=9
+case "$shard" in "" | [1-9]) ;; *) echo "VESPER_PORT_HARNESS_SHARD must be 1 to $shards" >&2; exit 1 ;; esac
 [ "${VESPER_PORT_HARNESS_SCOPE:-all}" = abi ] && [ -n "$shard" ] && { echo "VESPER_PORT_HARNESS_SCOPE=abi takes no shard" >&2; exit 1; }
 # part <n>: whether this run includes shard n.
 part() { [ -z "$shard" ] || [ "$shard" = "$1" ]; }
@@ -289,8 +293,8 @@ if part 6; then
 skip_port vesper-ebpf || . crates/vesper-ebpf/port/check.sh  # port P3a lane 6 (#1041): vesper-ebpf, both builds and one divergence check per ported module
 skip_port vesper-silicon || . crates/vesper-silicon/port/check.sh  # port P3a lane 7 (#1042): vesper-silicon, both builds and one divergence check per ported module
 fi
-# Shard 7: every later port. New ports append their lines below.
-part 7 || exit 0
+# Shard 7: Warp through diagnostics.
+if part 7; then
 skip_port vesper-warp || . crates/vesper-warp/port/check.sh  # port P3b lane 4 (#1066): vesper-warp, both builds and one divergence check per ported module
 skip_port vesper-prism-h3 || sh crates/vesper-prism-h3/port/check.sh  # port P3b lane 5 (#1067), Vesper-only since SH6 lane 5 (#1400): vesper-prism-h3 tests and one divergence check per ported module
 skip_port vesper-chorus || sh crates/vesper-chorus/port/test-port.sh  # port P3b lane 6 (#1068): vesper-chorus (the Vesper library is its only build) and one divergence check per ported module
@@ -300,10 +304,16 @@ skip_port vesper-flux || . crates/vesper-flux/port/check.sh  # port P3b lane 7 (
 skip_port vesper-span || sh crates/vesper-span/port/test-port.sh  # self-hosting SH0 lane 6 (#1128): vesper-span, both builds, the differential test and one divergence check per ported area
 skip_port vesper-lean-syntax || sh crates/vesper-lean-syntax/port/test-port.sh  # self-hosting SH0 lane 6 (#1128): vesper-lean-syntax, both builds, the differential test and one divergence check per ported area
 skip_port vesper-diagnostics || sh crates/vesper-diagnostics/port/test-port.sh  # self-hosting SH1 lane 1 (#1128): vesper-diagnostics, both builds, the differential test and one divergence check per ported area
+fi
+# Shard 8: fmt through lint.
+if part 8; then
 skip_port vesper-fmt || sh crates/vesper-fmt/port/test-port.sh  # self-hosting SH1 lane 11 (#1154): vesper-fmt, all three builds, the differential test and one divergence check per ported area
 skip_port vesper-highlight || sh crates/vesper-highlight/port/test-port.sh  # self-hosting SH1 lane 11 (#1154): vesper-highlight tier 0, all three builds, the differential test and one divergence check per ported area
 skip_port vesper-forge || sh crates/vesper-forge/port/test-port.sh  # self-hosting SH1 lane 14 (#1157): vesper-forge hygiene core, both builds, the differential test and one divergence check per ported area
 skip_port vesper-lint || sh crates/vesper-lint/port/test-port.sh  # self-hosting SH1 lane 13 (#1156): vesper-lint, all three builds, the differential test and one divergence check per ported area
+fi
+# Shard 9: every later port. New ports append their lines below.
+part 9 || exit 0
 skip_port vesper-sim-session || sh crates/vesper-sim-session/port/test-port.sh  # self-hosting SH5 lane 19 (#1342): vesper-sim-session, both builds, the transcript differential and the divergence check
 skip_port vesper-fusion || sh crates/vesper-fusion/port/test-port.sh  # Rust-exit SH6 lane 18 (#1413): vesper-fusion on its Vesper engine (the only build) and one divergence check
 skip_port vesper-warp-crypto || . crates/vesper-warp-crypto/port/check.sh  # Rust-exit SH6 lane 17 (#1412): vesper-warp-crypto on its Vesper port (the only build), the differential against the Rust reference and one divergence check per ported area
