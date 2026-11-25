@@ -4,7 +4,6 @@ load("./lib/script.axl", "script_task")
 
 
 
-grammar_generate = script_task("generate", ["crate", "grammar"], "crates/vesper-grammar/tests/fixtures/ipc/generate.py", "python3")
 
 
 
