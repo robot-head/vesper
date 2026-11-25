@@ -12,6 +12,11 @@
 //   modules    count; per module its package, its path (count, then str
 //              each segment), its file and its source text (str)
 //   foreign types (optional suffix) count; per type the package and name (str)
+//   sugars     (optional suffix, after the foreign types) count; per `sugar`
+//              declaration its module, its name (str) and 1 when it is
+//              `pub`, else 0. The Rust loader expands sugar before assembly
+//              (`Loader::expand_sugars`), so module texts hold no sugar;
+//              these are the names `Resolver::new` adds to the tables.
 //
 // Package 0 is the root package.
 
@@ -58,6 +63,7 @@ use self::state::{
     find_module,
     inc,
     kind_both,
+    kind_sugar,
     kind_type,
     kind_value,
     mod_hash,
@@ -165,6 +171,15 @@ pub fn decode_bytes(inout s: St, in input: Slice[u8]) {
         if root != none() {
             s.foreign_types.insert(pair(root, name), 1);
         }
+    }
+    // An absent suffix is a graph that declares no sugar.
+    let nsugars = rd(in input, inout pos);
+    for _i in 0..nsugars {
+        s.sugar_mod.push(n32(rd(in input, inout pos)));
+        let name = rd_sym_bytes(inout s, in input, inout pos);
+        s.sugar_name.push(name);
+        // 1 when the declaration is `pub`.
+        s.sugar_public.push(wrapping_u8(rd(in input, inout pos)));
     }
 }
 
@@ -366,6 +381,21 @@ pub fn collect(inout s: St, in a: Ast, m: u32) {
                     let vn = tr(inout s, in a, variant_name(in a, list_at(in a, x.variants, k)));
                     s.enum_vars.push(vn);
                 }
+            }
+        }
+    }
+    // The module's sugar names follow its items, so a sugar's kind wins
+    // over an item of the same name, as in the Rust table.
+    for i in 0..s.sugar_mod.len() {
+        if at32(in s.sugar_mod, i) == m {
+            let g = at32(in s.sugar_name, i);
+            match s.item_kind.insert(pair(m, g), kind_sugar()) {
+                Option::Some(_) => {},
+                Option::None => index_constant(inout s, m, g),
+            }
+            s.item_list.push(g);
+            if at8(in s.sugar_public, i) != 0 {
+                s.public.insert(pair(m, g), 1);
             }
         }
     }

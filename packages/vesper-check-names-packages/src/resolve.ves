@@ -17,6 +17,7 @@ use self::state::{
     const_prefix,
     join_path,
     kind_both,
+    kind_sugar,
     kind_value,
     emit,
     err,
@@ -611,6 +612,14 @@ pub fn overrides(inout s: St) {
     let file = at32(in s.mod_file, w(r));
     for i in 0..order.len() {
         let written = at32(in order, i);
+        // A re-exported sugar renames nothing.
+        let sugar = match s.reexp_kind.get(pair(r, written)) {
+            Option::Some(k) => k == kind_sugar(),
+            Option::None => false,
+        };
+        if sugar {
+            continue;
+        }
         let item = at64_key(in s, pair(r, written));
         // A constant keeps its function prefix under its new name.
         let local = if sym_starts(in s, lo(item), in const_prefix()) {
