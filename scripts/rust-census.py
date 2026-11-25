@@ -170,7 +170,7 @@ MODULES = {
     "ir": ("SH3-13", "vesper-place-ir-lower", "0.40x"),
     "doctest": ("SH5-14", "vesper-test-runner", "fence extraction + preflight moved to doctest_extract"),
     "doctest_extract": ("SH5-14", "vesper-test-runner", "0 diffs, 1.12x; swapped in the hybrid"),
-    "native_session": ("SH4-10, #1830", "vesper-codegen-control", "plans + park/fail/return emission swapped, 0 declined"),
+    "native_session": ("SH4-10, #1830", "vesper-codegen-control", "plans, data-frame freshness check (0 diffs) + park/fail/return emission swapped, 0 declined; left: copy_bytes/store_constructor and the entry glue (native walk)"),
     "runtime": ("SH4-17", "vesper-backend-checks", ""),
     "dyn_trait": ("SH2-11", "vesper-check-dyn", "0.28x"),
     "dyn_fn": ("SH2-11", "vesper-check-dyn", ""),

@@ -21,6 +21,7 @@ these families decline nothing.
 | `scalar_enums` graph rewrite ported (`scalar_enum_rewrite`) | 0 of 54,236 graphs differ, 2,347 of them rewritten (`Debug`-equal `FunctionIr`) | 0 now (goes at the retirement) | this PR |
 | `ffi_lowering/cpu.rs` machine-code tables ported (`@vesper/ffi-lowering` `cpu.ves`) | 0 of 72 symbol and target pairs differ (every function, unknown and plain symbols, x86_64, AArch64, RISC-V) | 0 now (goes at the retirement) | this PR |
 | `ffi_lowering/buffers.rs` check pass ported (`@vesper/ffi-rewrite` `buffers.ves`) | 0 of 35 sources differ that reach the check (27 refused, with the same span and message); the foreign-memory suite, the xsk fixture and 13 hand sources | 0 now (goes at the retirement) | next PR |
+| `native_session::check_data_base_freshness` ported (`@vesper/codegen-control` `freshness.ves`) | 0 of 229 functions differ: 217 corpus session entries as emitted, and 12 hand-built ones (4 refused) | 0 now (goes at the retirement) | next PR |
 
 ### `native_handlers`: deleted
 
@@ -127,6 +128,26 @@ side passes as input (the checker is not part of this port). It prints
   the type checker, which the Vesper entry takes as input. It shows the
   walk is not a bottleneck.
 
+## The data-frame freshness check
+
+`freshness.ves` ports `check_data_base_freshness`, the check every
+session entry passes after emission: no address derived from a
+`data_base` loaded before a park is used after it. The entry
+`control_session_freshness` reads the emitted function as tables; what
+Cranelift computes (aliases, value definitions, whether an opcode touches
+memory, whether a call is `park`) is input. The derivation fixpoint and
+the path search are Vesper.
+
+- Differential `freshness::freshness_matches_rust`
+  (tests/self_host_codegen_control.rs): every corpus session entry that
+  plans is compiled to an object and captured before the check
+  (`native::session::capture_freshness_inputs`), 217 functions, plus 12
+  hand-built ones (a stale base, a reload from `ctx`, a reload from the
+  park's signal; through a block parameter or not; in a loop or not).
+  0 of 229 differ; the 4 stale functions are refused with Rust's message.
+- Cost (`freshness_cost`, ABBA): Rust 3.32 ms, Vesper 3.23 ms (0.98x),
+  with input decoding on the Vesper side.
+
 ## Hybrid swap coverage
 
 The release `vesper-hybrid` against the release default compiler, `emit
@@ -161,7 +182,7 @@ side stands:
 | `ffi_lowering/cpu.rs` | 99 | `@vesper/ffi-lowering` `cpu.ves` (0 diffs) | the call that picks it in `foreign_perform` |
 | `ffi_lowering/eval_host.rs` | 596 | none | the evaluator's foreign-call host (`vesper run`) |
 | `src/native_aggregates.rs` | 1,746 | `@vesper/codegen-aggregates` (decisions and the scalar-enum rewrite), `@vesper/codegen-base` and `@vesper/codegen-aggregates-emit` (emission) | `enum_words` and the split-local reads and writes (the native walk, #1509) |
-| `src/native_session.rs` | 1,478 | `codegen-control/session.ves` (plans), `codegen-control-emit` (ops 38-42) | `copy_bytes`/`store_constructor`, the session object and entry symbol glue |
+| `src/native_session.rs` | 1,498 | `codegen-control/session.ves` (plans), `freshness.ves` (the data-frame check, 0 diffs), `codegen-control-emit` (ops 38-42) | `copy_bytes`/`store_constructor` and the entry function's Cranelift setup, which are the native walk's (#1509) |
 | `src/tiled.rs`, `tiled/native.rs`, `tiled/aot_runtime.rs` | 468 + 612 + 697 | `@vesper/codegen-numeric` (`tiled.ves`, `tiled_ops.ves`, AOT runtime) | |
 | `tiled/check.rs`, `src/vector/check.rs` | 577 + 441 | `@vesper/check-regions-seqs` (`tiled.ves`, `vector.ves`) | |
 | `tiled/eval.rs`, `vector/eval.rs` | 311 + 432 | none | the evaluator's tile and vector operations |
