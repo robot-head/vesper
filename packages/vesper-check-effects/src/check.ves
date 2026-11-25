@@ -78,7 +78,7 @@ fn finish(inout s: Walk, a: u64, in help: Str, start: u64, end: u64) {
 }
 
 // `summarise`: the facts to a fixpoint; left in `s.cur`.
-fn summarise(inout c: Ctx, in p: Prog, inout s: Walk) {
+pub fn summarise(inout c: Ctx, in p: Prog, inout s: Walk) {
     let mut bound: u64 = 4;
     for i in 0..p.funs.len() {
         bound = add(bound, wrapping_mul(w(p.fun(n32(i)).pn), 2));
@@ -220,7 +220,7 @@ fn edge_at(in s: Walk, i: u64) -> Edge {
 }
 
 // Byte order of two names (-1, 0, 1).
-fn cmp_names(in c: Ctx, a: u32, b: u32) -> i32 {
+pub fn cmp_names(in c: Ctx, a: u32, b: u32) -> i32 {
     let na = c.names.size(a);
     let nb = c.names.size(b);
     let n = if na < nb {
@@ -597,7 +597,7 @@ pub fn write_text(in s: Walk, in rows: ChunkSeq[u64], inout o: ChunkSeq[u8]) {
     }
 }
 
-fn push_u32_le(inout o: ChunkSeq[u8], x: u64) {
+pub fn push_u32_le(inout o: ChunkSeq[u8], x: u64) {
     o.push(wrapping_u8(x & 255));
     o.push(wrapping_u8((x >> 8) & 255));
     o.push(wrapping_u8((x >> 16) & 255));
