@@ -2,11 +2,11 @@
 //! check-data's names, types and world, place-ir's program section, then
 //! the calls section (data.ves). Shared by tests/self_host_codegen_calls.rs
 //! and tests/self_host_native_walk_frame.rs, which declare `check_words`
-//! and `ir_words` next to this module.
+//! and `ir_words` next to this module (as does vesper-hybrid).
 #![allow(dead_code)]
 
-use crate::check_words::{Enc, encodable, pass_word};
-use crate::ir_words::{self, Payload, Tables};
+use super::check_words::{Enc, encodable, pass_word};
+use super::ir_words::{self, Payload, Tables};
 use vesper::ast::{Expr, ExprKind, Function, Statement, Type};
 use vesper::check::World;
 use vesper::ir::Program;
