@@ -994,9 +994,68 @@ sys.exit(1)
         self.assertEqual(self.aspect(*command, env={**env, "VESPER_LEAN": "/explicit/lean"}).stdout.strip(),
                          "/explicit/lean")
 
+    def test_lean_replay_scope_uses_the_git_branch_history_and_exact_paths(self):
+        def git(*args):
+            result = subprocess.run(
+                ["git", *args], cwd=self.root, text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        command = ("ci", "lean-replay-scope")
+        env = {"GIT_BRANCH": ""}
+        skip = "--test_tag_filters=-lean_replay\n"
+        git("init", "-b", "main")
+        git("config", "user.name", "Fixture")
+        git("config", "user.email", "fixture@example.invalid")
+        git("config", "commit.gpgsign", "false")
+        git("commit", "--allow-empty", "-m", "Base")
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.assertEqual(self.aspect(*command, env=env).stdout, "")
+        git("switch", "-c", "feature")
+        self.write("docs/file with spaces.md", "Unrelated")
+        git("add", "docs")
+        git("commit", "-m", "Documentation")
+        self.assertEqual(self.aspect(*command, env=env).stdout, skip)
+        self.assertEqual(self.aspect(*command, "--", "--base", "main", env=env).stdout, skip)
+        self.assertEqual(self.aspect(*command, "--", "--base=main", env=env).stdout, skip)
+        self.assertEqual(self.aspect(*command, env={**env, "GIT_BRANCH": "main"}).stdout, "")
+        self.assertEqual(self.aspect(*command, "--", "--base", "missing", env=env).stdout, "")
+        self.aspect(*command, "--", "--unknown", env=env, status=2)
+        git_path = shutil.which("git")
+        self.write("bin/git", f"""\
+#!/usr/bin/env python3
+import os
+import sys
+args = sys.argv[1:]
+failure = os.environ.get("FIXTURE_GIT_FAILURE")
+if args[:2] in ([failure, "--name-only"], [failure, "--format=%B"]):
+    sys.exit(45)
+os.execv({git_path!r}, [{git_path!r}, *args])
+""", executable=True)
+        for failure in ("diff", "log"):
+            with self.subTest(git_failure=failure):
+                full = self.aspect(*command, env={
+                    **env, "FIXTURE_GIT_FAILURE": failure,
+                    "PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]]),
+                })
+                self.assertEqual(full.stdout, "")
+                self.assertIn(f"git {failure} failed; running the full suite", full.stderr)
+        git("commit", "--allow-empty", "-m", "Run CI [ci full]")
+        self.assertEqual(self.aspect(*command, env=env).stdout, "")
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.assertEqual(self.aspect(*command, env=env).stdout, skip)
+        self.write("lean/Model with spaces λ.lean", "import Lean")
+        git("add", "lean")
+        git("commit", "-m", "Update Lean")
+        full = self.aspect(*command, env=env)
+        self.assertEqual(full.stdout, "")
+        self.assertIn("Model with spaces λ.lean", full.stderr)
+        git("switch", "--detach")
+        self.assertEqual(self.aspect(*command, env=env).stdout, "")
+
     def test_native_lean_replay_preserves_scope_and_cleans_up_on_failure(self):
-        (self.root / ".aspect/ci.axl").unlink()
         (self.root / ".aspect/lean-ci.axl").unlink()
+        (self.root / ".aspect/lean-replay-scope.axl").unlink()
         disk_task = self.root / ".aspect/disk-ci.axl"
         disk_task.write_text(disk_task.read_text().replace('kind = "reclaim-disk"', 'kind = "unused-reclaim-disk"'))
         self.write(".aspect/replay-fixture.axl", """

@@ -38,6 +38,14 @@ class PlatformWorkflowTests(unittest.TestCase):
         ]
         self.assertCountEqual(paths, scripts)
 
+    @unittest.skipUnless(shutil.which("aspect"), "Aspect CLI unavailable")
+    def test_native_lean_replay_scope_rules_and_bazel_targets(self):
+        result = subprocess.run(
+            ["aspect", "ci", "tests", "lean-replay-scope"],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_required_check_names_and_events_are_preserved(self):
         self.assertTrue({"push", "merge_group", "schedule",
                          "workflow_dispatch", "workflow_call"} <= self.platforms["on"].keys())

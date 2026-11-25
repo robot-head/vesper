@@ -1,0 +1,148 @@
+"""Select the Lean replay targets conservatively when the Git scope is unknown."""
+
+load("./lib/process.axl", "command")
+
+_SKIP = "--test_tag_filters=-lean_replay"
+_TRIGGERS = [
+    "lean/*",
+    "tools/lean4lean*",
+    "tools/logos42/*",
+    "tools/resource-model42/*",
+    "crates/vesper-oracles/*",
+    "src/lean.rs",
+    "src/lean_*.rs",
+    "src/lean/*",
+    "src/optimize/witness*",
+    "crates/vesper-lean-syntax/*",
+    "tests/lean4lean_*42.rs",
+    "tests/resource_model42.rs",
+    "tests/replay42_kernel.rs",
+    "tests/common/lean4lean*",
+    "docs/rfcs/resource-model42*",
+    "BUILD.bazel",
+    "MODULE.bazel",
+    ".bazelrc",
+    ".bazelversion",
+    "Cargo.lock",
+    "rust-toolchain*",
+    "buildbuddy.yaml",
+    "tools/bazel/*",
+    ".aspect/lean-ci.axl",
+    "scripts/lean-model-plan.json",
+    "lean-toolchain",
+    ".aspect/logos-ci.axl",
+    ".aspect/ci.axl",
+    ".aspect/lean-replay-scope.axl",
+    ".aspect/disk-ci.axl",
+]
+
+def _matches(path: str, pattern: str) -> bool:
+    prefix, wildcard, suffix = pattern.partition("*")
+    if not wildcard:
+        return path == pattern
+    return len(path) >= len(prefix) + len(suffix) and path.startswith(prefix) and path.endswith(suffix)
+
+def replay_triggers(paths: list[str]) -> list[str]:
+    return [path for path in paths if any([_matches(path, pattern) for pattern in _TRIGGERS])]
+
+def _skip_replay(branch: str, changed: list[str] | None, messages: str) -> bool:
+    return branch not in ["", "main", "HEAD"] and changed != None and "[ci full]" not in messages and not replay_triggers(changed)
+
+def _git(ctx: TaskContext, root: str, argv: list[str]) -> str | None:
+    git = ctx.std.process.which("git")
+    if not git:
+        ctx.std.io.stderr.write("lean_replay_scope: git unavailable; running the full suite\n")
+        return None
+    result = command(ctx, git, argv, root).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if not result.status.success:
+        ctx.std.io.stderr.write("lean_replay_scope: git " + argv[0] + " failed; running the full suite\n")
+        return None
+    return result.stdout
+
+def _scope(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    argv = ctx.args.tool_args
+    base = "origin/main"
+    if len(argv) == 2 and argv[0] == "--base":
+        base = argv[1]
+    elif len(argv) == 1 and argv[0].startswith("--base="):
+        base = argv[0].partition("=")[2]
+    elif argv:
+        ctx.std.process.exit(2, "usage: aspect ci lean-replay-scope -- [--base REF]")
+    branch = ctx.std.env.var("GIT_BRANCH") or (_git(ctx, root, ["rev-parse", "--abbrev-ref", "HEAD"]) or "").strip()
+    changed = None
+    messages = ""
+    if branch not in ["", "main", "HEAD"]:
+        commit = _git(ctx, root, ["rev-parse", "--verify", "--end-of-options", base + "^{commit}"])
+        if commit:
+            commit = commit.strip()
+            diff = _git(ctx, root, ["diff", "--name-only", "-z", commit, "HEAD", "--"])
+            log = _git(ctx, root, ["log", "--format=%B", commit + "..HEAD"])
+            if diff != None and log != None:
+                changed = [path for path in diff.split("\x00") if path]
+                messages = log
+    hits = replay_triggers(changed or [])
+    if _skip_replay(branch, changed, messages):
+        ctx.std.io.stderr.write("lean_replay_scope: %s: no Lean-facing changes; skipping lean_replay tests\n" % branch)
+        ctx.std.io.stdout.write(_SKIP + "\n")
+    elif hits:
+        ctx.std.io.stderr.write("lean_replay_scope: %s: running lean_replay tests for %r\n" % (branch, hits[:5]))
+    else:
+        ctx.std.io.stderr.write("lean_replay_scope: %s: running the full suite\n" % (branch or "unknown"))
+    return 0
+
+lean_replay_scope = task(
+    kind = "lean-replay-scope",
+    group = ["ci"],
+    summary = "Select Lean replay tests for a BuildBuddy change",
+    implementation = _scope,
+    args = {"tool_args": args.trailing_var_args(description = "Optional --base REF for the Git comparison.")},
+)
+
+def _test_scope(ctx: TaskContext) -> int:
+    cases = [
+        ("main", ["README.md"], "", False),
+        ("HEAD", ["README.md"], "", False),
+        ("feature", None, "", False),
+        ("", [], "", False),
+        ("feature", ["docs/x.md", "src/lean_ir.rs.bak"], "", True),
+        ("feature", [], "", True),
+        ("feature", ["docs/x.md"], "fix\n[ci full]\n", False),
+    ]
+    for branch, changed, messages, expected in cases:
+        if _skip_replay(branch, changed, messages) != expected:
+            fail("Unexpected replay scope for %r, %r, %r" % (branch, changed, messages))
+    for path in [
+        "lean/Model.lean", "tools/logos42/pins.json", "src/lean_ir.rs",
+        "tests/lean4lean_map42.rs", "MODULE.bazel", "src/optimize/witness_lean.rs",
+        "crates/vesper-oracles/tests/fixtures/resource_oracle42/fault_peer.py",
+        "docs/rfcs/resource-model42-source-manifest.json", ".aspect/logos-ci.axl",
+    ]:
+        if _skip_replay("feature", [path], ""):
+            fail("Lean-facing change bypassed replay: " + path)
+
+    root = ctx.std.env.aspect_root_dir()
+    count = 0
+    for package in ["", "crates/vesper-oracles/"]:
+        build = ctx.std.fs.read_to_string(root + "/" + package + "BUILD.bazel")
+        target = ""
+        for row in build.splitlines():
+            line = row.strip()
+            if line.startswith('"test/') and '"' in line[6:]:
+                target = line[6:].partition('"')[0]
+            if '"lean_replay"' in line:
+                source = package + "tests/" + target + ".rs"
+                if not target or not ctx.std.fs.exists(root + "/" + source) or not replay_triggers([source]):
+                    fail("No replay trigger for " + source)
+                count += 1
+    if count < 18:
+        fail("Expected at least 18 lean_replay test targets, found %d" % count)
+    print("Passed Lean replay scope tests for %d tagged targets" % count)
+    return 0
+
+test_lean_replay_scope = task(
+    kind = "lean-replay-scope",
+    group = ["ci", "tests"],
+    summary = "Check Lean replay scope rules and tagged Bazel targets",
+    implementation = _test_scope,
+)
