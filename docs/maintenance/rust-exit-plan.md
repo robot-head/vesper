@@ -42,23 +42,25 @@ In practice, a crate or compiler module flips when:
 3. The crate's Rust tests are converted or kept as a differential against the
    last Rust commit.
 
-`scripts/ci/flip_gate.py` (SH6 lane 1) checks 1 and 2 and prints the row for
+`aspect ci flip-gate -- <crate>` (SH6 lane 1) checks 1 and 2 and prints the row for
 the census. A lane that passes flips without asking the owner; the recipe is
 below.
 
 ## Flipping a module
 
-Every flip PR runs `scripts/ci/flip_gate.py` and pastes its two output lines
+Every flip PR runs `aspect ci flip-gate -- <crate>` and pastes its two output lines
 (the verdict and the scoreboard row) into the PR body. A lane that gets PASS
 flips and deletes without asking the owner.
 
-1. **Write the gate's configuration** at `crates/<crate>/flip-gate.toml` (a
-   compiler module: `scripts/ci/flip-gate/<module>.toml`). It lists the build
-   commands, every test command (the crate's tests against the Vesper build,
-   and the seed's), the differential, one `[[abba]]` table per workload and
-   the Rust paths the flip deletes (`rust = [...]`, counted for the
-   scoreboard). The format is in the script's header;
-   `scripts/ci/flip-gate/vesper-span.toml` is a worked example.
+1. **Write the gate's configuration** at `crates/<crate>/flip-gate.json`, or at
+   `scripts/ci/flip-gate/<module>.json` for a compiler module. List the build
+   commands, tests against the Vesper build and the seed, the differential,
+   one `abba` entry per workload, and the Rust paths to count for the
+   scoreboard. Write commands as argument arrays. Use an object with `argv`
+   and `env` for command-specific variables, `cargo_target` and `args` for
+   paths relative to Cargo's target directory, or `sequence` for commands
+   that run in order and stop at the first failure. See
+   `scripts/ci/flip-gate/vesper-span.json` for a worked example.
 2. **ABBA.** Either point `rust` and `vesper` at two commands that run the
    same workload once (an `abba once <workload> <rust|vesper> <batches>`
    example, or the Rust and hybrid compilers on one package), and the gate
@@ -78,8 +80,8 @@ flips and deletes without asking the owner.
    counts its cases prints
    `flip-gate differential differences=<D> cases=<C>`, which goes into the
    row; D must be 0.
-4. **Run it:** `VESPER_PORT_COMPILER=<prebuilt vesper> python3
-   scripts/ci/flip_gate.py <crate>`. Exit 0 is PASS (every test and the
+4. **Run it** with `VESPER_PORT_COMPILER=<prebuilt vesper> aspect ci flip-gate -- <crate>`.
+   Exit 0 is PASS (every test and the
    differential pass, and every workload's 95% interval has its upper end at
    or below 1.5x), 1 is FAIL (a failing test, a difference, or a lower end
    above 1.5x), 2 is INCONCLUSIVE (an interval crosses 1.5x: rerun on a
@@ -89,7 +91,7 @@ flips and deletes without asking the owner.
 5. **Flip.** On PASS: make Vesper the only build (a crate outside the
    compiler's closure deletes its Rust; a crate the compiler links moves
    its Rust engine to `seed/`, #1102), convert or keep its Rust tests
-   (lane 19), keep `flip-gate.toml` working against the last Rust commit or
+   (lane 19), keep `flip-gate.json` working against the last Rust commit or
    the seed, and add the gate's row to the scoreboard below and the crate's
    STATUS in `.aspect/rust-census.axl`.
 

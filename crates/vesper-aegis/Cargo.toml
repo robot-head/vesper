@@ -10,7 +10,7 @@ build = "build.rs"
 # build.rs links the Vesper package in vesper/ (@vesper/aegis), which is the
 # only implementation of the quote, report and claims parsers, the
 # timestamp parser and the relying-party policy check: SH6 lane 8 (#1403)
-# deleted their Rust once the port passed the flip gate (flip-gate.toml).
+# deleted their Rust once the port passed the flip gate (flip-gate.json).
 # The compiler does not link Aegis, so there is no seed copy. The rest of
 # the crate (certificate chains, collateral, signing/PKIX verification, the
 # gate, GPA and host values) is still Rust; see docs/parallel-results/rust-exit-aegis.md.

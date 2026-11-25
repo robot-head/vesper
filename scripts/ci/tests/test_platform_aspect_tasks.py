@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import signal
 import subprocess
 import tempfile
 import unittest
@@ -51,33 +50,6 @@ class AspectTaskTests(unittest.TestCase):
 
     def copy_fixture(self, path):
         self.write(path, (ROOT / path).read_text())
-
-    def test_script_task_preserves_argv_cwd_environment_and_standard_streams(self):
-        self.write("scripts/ci/flip_gate.py", """\
-import json
-import os
-from pathlib import Path
-import sys
-print(json.dumps({
-    "argv": sys.argv[1:],
-    "cwd": str(Path.cwd()),
-    "env": os.environ["VESPER_TASK_TEST_VALUE"],
-    "stdin": sys.stdin.read(),
-}))
-print("child stderr", file=sys.stderr)
-""")
-        args = ["--help", "", "two words", "$HOME", "*.py", "--", "line\nbreak"]
-        result = self.aspect(
-            "ci", "flip-gate", "--", *args,
-            stdin="input with spaces\n", env={"VESPER_TASK_TEST_VALUE": "value with spaces"},
-        )
-        self.assertEqual(json.loads(result.stdout), {
-            "argv": args,
-            "cwd": str(self.nested),
-            "env": "value with spaces",
-            "stdin": "input with spaces\n",
-        })
-        self.assertIn("child stderr", result.stderr)
 
     def test_resource_oracle_fixtures_pass_the_mode_and_native_status(self):
         cargo = self.write("bin/cargo", """\
@@ -2116,21 +2088,6 @@ shutil.copy2({str(installer)!r}, Path(directory) / entry)
         self.aspect("crate", "warp-tls", "gen", env=env, status=23)
         self.assertEqual(list(prior.parent.iterdir()), [prior])
         self.assertEqual(prior.read_text(), "previous certificate")
-
-    def test_script_exit_codes_and_signals_reach_the_cli(self):
-        for body, status in (
-            ("raise SystemExit(23)\n", 23),
-            ("import os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n", 128 + signal.SIGTERM),
-        ):
-            with self.subTest(status=status):
-                self.write("scripts/ci/flip_gate.py", body)
-                result = self.aspect("ci", "flip-gate", status=status)
-                self.assertEqual(result.stdout, "")
-
-    def test_missing_script_has_a_nonzero_status_and_diagnostic(self):
-        result = self.aspect("ci", "flip-gate", status=2)
-        self.assertEqual(result.stdout, "")
-        self.assertIn("flip_gate.py", result.stderr)
 
     def test_platform_suite_discovers_tests_from_workspace_root(self):
         for name in ("commented", "macro", "hostile"):

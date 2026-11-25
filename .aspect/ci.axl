@@ -1,11 +1,9 @@
 load("./lib/process.axl", "check")
 load("./lib/script.axl", "command_task", "run_command", "script_task")
 
-flip_gate = script_task("flip-gate", ["ci"], "scripts/ci/flip_gate.py", "python3")
 test_platform_profile = script_task("test-platform-profile", ["ci"], "scripts/ci/test-platform-profile.py", "python3")
 
 tests_aspect_tasks = script_task("aspect-tasks", ["ci", "tests"], "scripts/ci/tests/test_platform_aspect_tasks.py", "python3")
-tests_flip_gate = script_task("flip-gate", ["ci", "tests"], "scripts/ci/tests/test_platform_flip_gate.py", "python3")
 tests_profile_runner = script_task("profile-runner", ["ci", "tests"], "scripts/ci/tests/test_platform_profile_runner.py", "python3")
 tests_workflows = script_task("workflows", ["ci", "tests"], "scripts/ci/tests/test_platform_workflows.py", "python3")
 
@@ -31,6 +29,7 @@ def _platform_tests(ctx: TaskContext) -> int:
         "recovery-fixtures",
         "canonical-protocol-fixtures",
         "rust-census",
+        "flip-gate",
     ]:
         check(ctx, ctx.std.env.current_exe(), ["ci", "tests", suite], root)
     return run_command(ctx, "python3", ["-m", "unittest", "discover", "-s", "scripts/ci/tests", "-p", "test_platform*.py"], True, "")

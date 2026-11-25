@@ -1,0 +1,550 @@
+"""Check Rust and Vesper behavior plus the exact ABBA confidence interval."""
+
+load("@std//time.axl", "monotonic_ns")
+load("./lib/flip-statistics.axl", "decision", "display_ratio", "fraction_number", "fraction_string", "median_interval", "natural", "threshold_ratio")
+load("./lib/process.axl", "capture", "command", "exit_code", "root_path")
+
+_CHECKS = ["tests", "differential", "abba"]
+_NATIVE = "-C target-cpu=native"
+_MIN_EPOCHS = 6
+_USAGE = """aspect ci flip-gate -- NAME [--config FILE] [--only tests,differential,abba]
+    [--epochs N] [--threshold 1.5] [--portable] [--json FILE] [--dry-run] [--quiet]
+The default configuration is flip-gate.json for the crate, package, or compiler module.
+Each command is an argument array. Command objects can add per-command environment,
+name a Cargo target path, or run a sequence of direct commands."""
+
+def _error(ctx, name, message):
+    ctx.std.process.exit(3, "flip-gate %s: configuration error: %s" % (name, message))
+
+def _arguments(ctx, args):
+    options = {}
+    name = None
+    pending = None
+    for arg in args:
+        if pending:
+            if arg.startswith("--"):
+                _error(ctx, name, "missing value for " + pending)
+            options[pending] = arg
+            pending = None
+        elif arg in ["--help", "-h"]:
+            ctx.std.io.stdout.write(_USAGE + "\n")
+            return None
+        elif arg in ["--dry-run", "--quiet", "--portable"]:
+            options[arg] = True
+        elif arg.startswith("--"):
+            flag, equals, value = arg.partition("=")
+            if flag not in ["--config", "--only", "--epochs", "--threshold", "--json"]:
+                _error(ctx, name, "unknown option " + arg)
+            if equals:
+                options[flag] = value
+            else:
+                pending = flag
+        elif name == None:
+            name = arg
+        else:
+            _error(ctx, name, "unexpected argument " + arg)
+    if not name or pending:
+        _error(ctx, name, _USAGE)
+    only = [part.strip() for part in options.get("--only", ",".join(_CHECKS)).split(",") if part.strip()]
+    if not only or any([part not in _CHECKS for part in only]):
+        _error(ctx, name, "--only takes " + ",".join(_CHECKS))
+    epochs = None
+    if "--epochs" in options:
+        epochs = natural(options["--epochs"].removeprefix("+"))
+        if epochs == None or epochs < _MIN_EPOCHS:
+            _error(ctx, name, "--epochs must be at least %d" % _MIN_EPOCHS)
+    threshold = threshold_ratio(options.get("--threshold", "1.5"))
+    if threshold == None:
+        _error(ctx, name, "--threshold must be a positive finite number")
+    return struct(name = name, only = only, epochs = epochs, threshold = threshold, values = options)
+
+def _strings(values):
+    return type(values) == "list" and all([type(value) == "string" for value in values])
+
+def _environment(value):
+    return type(value) == "dict" and all([key and "=" not in key and type(val) == "string" for key, val in value.items()])
+
+def _direct_step(step):
+    if _strings(step):
+        return bool(step) and bool(step[0])
+    if type(step) != "dict" or not _environment(step.get("env", {})):
+        return False
+    if "cargo_target" in step:
+        path = step["cargo_target"]
+        return all([key in ["cargo_target", "args", "env"] for key in step]) and type(path) == "string" and bool(path) and _strings(step.get("args", []))
+    argv = step.get("argv")
+    return all([key in ["argv", "env"] for key in step]) and _strings(argv) and bool(argv) and bool(argv[0])
+
+def _valid_step(step):
+    if type(step) == "dict" and "sequence" in step:
+        sequence = step["sequence"]
+        return len(step) == 1 and type(sequence) == "list" and bool(sequence) and all([_direct_step(item) for item in sequence])
+    return _direct_step(step)
+
+def _validate(config):
+    if type(config) != "dict":
+        return "expected a JSON object"
+    if type(config.get("name", "")) != "string" or type(config.get("lane", "")) != "string":
+        return "name and lane must be strings"
+    if not _strings(config.get("rust", [])) or not _environment(config.get("env", {})) or type(config.get("native", True)) != "bool":
+        return "invalid rust paths, environment, or native setting"
+    if type(config.get("build", [])) != "list" or any([not _valid_step(step) for step in config.get("build", [])]):
+        return "build must contain direct commands"
+    tests = config.get("tests", [])
+    if type(tests) != "list" or any([type(test) != "dict" or not _valid_step(test.get("run")) for test in tests]):
+        return "every test needs a direct run command"
+    if "differential" in config:
+        differential = config["differential"]
+        if type(differential) != "dict" or not _valid_step(differential.get("run")):
+            return "differential needs a direct run command"
+    if type(config.get("abba", [])) != "list":
+        return "abba must be an array"
+    for bench in config.get("abba", []):
+        if type(bench) != "dict" or type(bench.get("workload")) != "string" or len(bench["workload"].split()) != 1 or bench["workload"].strip() != bench["workload"]:
+            return "every ABBA entry needs a workload name"
+        timed = "rust" in bench and "vesper" in bench
+        if timed:
+            valid = "run" not in bench and _valid_step(bench["rust"]) and _valid_step(bench["vesper"])
+        else:
+            valid = "rust" not in bench and "vesper" not in bench and _valid_step(bench.get("run"))
+        if not valid:
+            return "ABBA %s needs rust and vesper, or run" % bench["workload"]
+        if "epochs" in bench and (type(bench["epochs"]) != "int" or bench["epochs"] < _MIN_EPOCHS):
+            return "ABBA epochs must be at least %d" % _MIN_EPOCHS
+    return None
+
+def _load(ctx, root, cwd, options):
+    name = options.name
+    if "--config" in options.values:
+        candidates = [root_path(cwd, options.values["--config"])]
+    else:
+        candidates = [
+            root + "/crates/" + name + "/flip-gate.json",
+            root + "/packages/" + name + "/flip-gate.json",
+            root + "/scripts/ci/flip-gate/" + name + ".json",
+        ]
+    for path in candidates:
+        if ctx.std.fs.exists(path) and ctx.std.fs.metadata(path).is_file:
+            config = json.try_decode(ctx.std.fs.read_to_string(path))
+            error = _validate(config)
+            if error:
+                _error(ctx, name, path + ": " + error)
+            return config
+    _error(ctx, name, "no flip-gate.json found; pass --config (searched %s)" % ", ".join(candidates))
+
+def _rust_lines(ctx, root, name, entries):
+    if not entries:
+        return None
+    count = 0
+    for entry in entries:
+        path = root_path(root, entry)
+        if not ctx.std.fs.exists(path):
+            _error(ctx, name, "rust path %s does not exist" % entry)
+        metadata = ctx.std.fs.metadata(path)
+        files = [path] if metadata.is_file else capture(ctx, "find", [path, "-type", "f", "-name", "*.rs", "-print0"], root).split("\x00")[:-1]
+        for file in files:
+            count += len([line for line in str(ctx.std.fs.open(file).read()).splitlines() if line.strip()])
+    return count
+
+def _bench_env(base, inherited, native):
+    flags = " ".join(base.get("RUSTFLAGS", inherited).split())
+    bench = dict(base)
+    if native:
+        if "target-cpu=native" not in flags:
+            flags = (flags + " " + _NATIVE).strip()
+        bench["RUSTFLAGS"] = flags
+    return bench
+
+def _steps(step):
+    return step["sequence"] if type(step) == "dict" and "sequence" in step else [step]
+
+def _invocation(step, env, caller_target):
+    if type(step) == "list":
+        return step, env
+    variables = dict(env)
+    variables.update(step.get("env", {}))
+    if "cargo_target" in step:
+        target = variables.get("CARGO_TARGET_DIR", caller_target) or "target"
+        return [target.rstrip("/") + "/" + step["cargo_target"]] + step.get("args", []), variables
+    return step["argv"], variables
+
+def _quote(word):
+    if word and all([char in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-" for char in word.elems()]):
+        return word
+    return "'" + word.replace("'", "'\"'\"'") + "'"
+
+def _show_direct(step):
+    if type(step) == "list":
+        return " ".join([_quote(word) for word in step])
+    prefix = ["%s=%s" % (key, _quote(val)) for key, val in step.get("env", {}).items()]
+    if "cargo_target" in step:
+        return " ".join(prefix + ["<cargo-target>/" + step["cargo_target"]] + [_quote(word) for word in step.get("args", [])])
+    return " ".join(prefix + [_quote(word) for word in step["argv"]])
+
+def _show(step):
+    return " then ".join([_show_direct(item) for item in _steps(step)])
+
+def _runner(ctx, root, config, options):
+    env = config.get("env", {})
+    caller_flags = ctx.std.env.var("RUSTFLAGS") or ""
+    caller_target = ctx.std.env.var("CARGO_TARGET_DIR") or ""
+    native = not options.get("--portable") and config.get("native", True)
+    bench_env = _bench_env(env, caller_flags, native)
+    dry = options.get("--dry-run", False)
+
+    def run(step, bench = False):
+        output = ""
+        for item in _steps(step):
+            argv, variables = _invocation(item, bench_env if bench else env, caller_target)
+            if not options.get("--quiet"):
+                prefix = ("RUSTFLAGS=%s " % _quote(variables.get("RUSTFLAGS", caller_flags))) if bench and native else ""
+                ctx.std.io.stderr.write("$ " + prefix + " ".join([_quote(word) for word in argv]) + "\n")
+            if dry:
+                continue
+            binary = argv[0]
+            if binary == "aspect":
+                binary = ctx.std.env.current_exe()
+            elif "/" in binary:
+                binary = root_path(root, binary)
+            if not ctx.std.process.which(binary):
+                return 127, output + "executable not found: " + binary + "\n"
+            result = command(ctx, binary, argv[1:], root, variables).stdout("piped").stderr("piped").spawn().wait_with_output()
+            output += result.stdout + result.stderr
+            if not result.status.success:
+                return exit_code(result.status), output
+        return 0, output
+
+    return struct(run = run, dry = dry, rustflags = bench_env.get("RUSTFLAGS", caller_flags))
+
+def _diff_output(output):
+    differences, cases = None, None
+    for line in output.splitlines():
+        words = line.rstrip().split(" ")
+        if len(words) != 4 or words[:2] != ["flip-gate", "differential"] or not words[2].startswith("differences=") or not words[3].startswith("cases="):
+            continue
+        diff, count = natural(words[2][12:]), natural(words[3][6:])
+        if diff != None and count != None:
+            differences = (differences or 0) + diff
+            cases = (cases or 0) + count
+    return differences, cases
+
+def _harness_pairs(output, workload):
+    prefix = "flip-gate pairs " + workload + " "
+    for line in output.splitlines():
+        if not line.startswith(prefix):
+            continue
+        pairs = []
+        words = line[len(prefix):].rstrip().split(" ")
+        for item in words:
+            left, _, right = item.partition(":")
+            rust, vesper = natural(left), natural(right)
+            if rust == None or vesper == None:
+                break
+            if not rust or not vesper:
+                return [], "a zero time in " + item
+            pairs.append((rust, vesper))
+        if len(pairs) == len(words):
+            return pairs, None
+    return [], "no `flip-gate pairs %s ...` line in the output" % workload
+
+def _elapsed(runner, step):
+    start = monotonic_ns()
+    status, output = runner.run(step, bench = True)
+    elapsed = max(1, monotonic_ns() - start)
+    return elapsed, ("`%s` exited %d\n%s" % (_show(step), status, output[-2000:])) if status else None
+
+def _pairs(runner, bench, epochs):
+    if "run" in bench:
+        step = bench["run"]
+        status, output = runner.run(step, bench = True)
+        if status:
+            return [], "`%s` exited %d\n%s" % (_show(step), status, output[-2000:])
+        return ([], None) if runner.dry else _harness_pairs(output, bench["workload"])
+    rust, vesper = bench["rust"], bench["vesper"]
+    for step in [rust, vesper]:
+        _, error = _elapsed(runner, step)
+        if error:
+            return [], error
+    pairs = []
+    if not runner.dry:
+        for _ in range(epochs):
+            times = []
+            for step in [rust, vesper, vesper, rust]:
+                elapsed, error = _elapsed(runner, step)
+                if error:
+                    return [], error
+                times.append(elapsed)
+            pairs.append((times[0] + times[3], times[1] + times[2]))
+    return pairs, None
+
+def _gate(config, options, runner, rust_lines):
+    result = {
+        "name": config.get("name", options.name),
+        "lane": config.get("lane", ""),
+        "threshold": fraction_string(options.threshold),
+        "tests": None,
+        "differential": None,
+        "abba": [],
+        "skipped": [],
+        "rust_lines": rust_lines,
+        "rustflags": runner.rustflags,
+    }
+    intervals = {}
+    for step in config.get("build", []):
+        status, output = runner.run(step, bench = True)
+        if status:
+            result.update(error = "build `%s` exited %d\n%s" % (_show(step), status, output[-2000:]), verdict = "FAIL")
+            return result, intervals
+
+    if "tests" in options.only and config.get("tests"):
+        result["tests"] = []
+        for test in config["tests"]:
+            status, output = runner.run(test["run"])
+            result["tests"].append({"run": _show(test["run"]), "ok": status == 0, "tail": output[-2000:] if status else ""})
+    else:
+        result["skipped"].append("tests")
+
+    if "differential" in options.only and "differential" in config:
+        step = config["differential"]["run"]
+        status, output = runner.run(step)
+        differences, cases = _diff_output(output)
+        ok = status == 0 and (differences or 0) == 0
+        result["differential"] = {"run": _show(step), "status": status, "differences": differences, "cases": cases, "ok": ok}
+        if not ok:
+            result["differential"]["tail"] = output[-2000:]
+    else:
+        result["skipped"].append("differential")
+
+    if "abba" in options.only and config.get("abba"):
+        for index, bench in enumerate(config["abba"]):
+            row = {"workload": bench["workload"]}
+            pairs, error = _pairs(runner, bench, options.epochs or bench.get("epochs", 30))
+            if error:
+                row.update(decision = "error", error = error)
+            elif runner.dry:
+                row["decision"] = "dry-run"
+            else:
+                interval = median_interval(pairs)
+                intervals[index] = interval
+                row.update(
+                    epochs = len(pairs),
+                    lower = fraction_number(interval.lower),
+                    upper = fraction_number(interval.upper),
+                    median = fraction_number(interval.median),
+                    decision = decision(interval, options.threshold),
+                )
+            result["abba"].append(row)
+    else:
+        result["skipped"].append("abba")
+
+    failed = (
+        any([not row["ok"] for row in result["tests"] or []]) or
+        (result["differential"] != None and not result["differential"]["ok"]) or
+        any([row["decision"] in ["regression", "error"] for row in result["abba"]])
+    )
+    uncertain = result["skipped"] or any([row["decision"] != "pass" for row in result["abba"]])
+    result["verdict"] = "FAIL" if failed else ("INCONCLUSIVE" if uncertain else "PASS")
+    return result, intervals
+
+def _grouped(number):
+    digits = str(number)
+    first = len(digits) % 3 or 3
+    return ",".join([digits[:first]] + [digits[index:index + 3] for index in range(first, len(digits), 3)])
+
+def _describe_diff(diff):
+    if diff == None:
+        return "not run"
+    if diff["differences"] != None:
+        return "%d differences on %s cases" % (diff["differences"], _grouped(diff["cases"]))
+    return "0 differences" if diff["ok"] else "failed (exit %d)" % diff["status"]
+
+def _describe_abba(rows, intervals):
+    parts = []
+    for index, row in enumerate(rows):
+        if index in intervals:
+            interval = intervals[index]
+            parts.append("%s %s [%s, %s] n=%d" % (row["workload"], display_ratio(interval.median), display_ratio(interval.lower), display_ratio(interval.upper), row["epochs"]))
+        else:
+            parts.append("%s %s" % (row["workload"], row["decision"]))
+    return "; ".join(parts) if parts else "not run"
+
+def _report(ctx, result, intervals, threshold):
+    for row in result["tests"] or []:
+        if not row["ok"]:
+            ctx.std.io.stderr.write("--- failing test command: %s\n%s\n" % (row["run"], row["tail"]))
+    diff = result["differential"]
+    if diff and not diff["ok"]:
+        ctx.std.io.stderr.write("--- differential:\n%s\n" % diff.get("tail", ""))
+    for row in result["abba"]:
+        if "error" in row:
+            ctx.std.io.stderr.write("--- abba %s: %s\n" % (row["workload"], row["error"]))
+    tests = result["tests"]
+    tests = "%d/%d pass" % (len([row for row in tests if row["ok"]]), len(tests)) if tests != None else "not run"
+    diff = _describe_diff(diff)
+    abba = _describe_abba(result["abba"], intervals)
+    line = "flip-gate %s: %s (bar: 0 differences, every test, 95%% upper <= %s) | tests %s | differential %s | ABBA vesper/rust %s" % (
+        result["name"], result["verdict"], display_ratio(threshold), tests, diff, abba,
+    )
+    if result["abba"] and result["rustflags"]:
+        line += " | RUSTFLAGS=" + result["rustflags"]
+    if "error" in result:
+        line += " | " + result["error"].splitlines()[0]
+    deleted = _grouped(result["rust_lines"]) if result["rust_lines"] != None else ""
+    row = "| `%s` (%s) | %s | %s; tests %s | %s | %s | |" % (
+        result["name"], result["verdict"], result["lane"], diff, tests, abba.replace("|", "/"), deleted,
+    )
+    ctx.std.io.stdout.write(line + "\n" + row + "\n")
+
+def _run(ctx):
+    options = _arguments(ctx, ctx.args.tool_args)
+    if options == None:
+        return 0
+    root, cwd = ctx.std.env.aspect_root_dir(), ctx.std.env.current_dir()
+    config = _load(ctx, root, cwd, options)
+    lines = _rust_lines(ctx, root, options.name, config.get("rust", []))
+    result, intervals = _gate(config, options, _runner(ctx, root, config, options.values), lines)
+    _report(ctx, result, intervals, options.threshold)
+    if "--json" in options.values:
+        ctx.std.fs.write(root_path(cwd, options.values["--json"]), json.encode(result) + "\n")
+    return {"PASS": 0, "FAIL": 1, "INCONCLUSIVE": 2}[result["verdict"]]
+
+flip_gate = task(
+    kind = "flip-gate",
+    group = ["ci"],
+    summary = "Check Rust exit behavior, differential results and exact ABBA thresholds",
+    implementation = _run,
+    args = {"tool_args": args.trailing_var_args(description = _USAGE)},
+)
+
+def _equal(actual, expected, label):
+    if actual != expected:
+        fail("%s: expected %r, got %r" % (label, expected, actual))
+
+def _statistics_tests():
+    threshold = threshold_ratio("1.5")
+    for spelling in ["3/2", "1.50", "15e-1", "+0.15e+1"]:
+        _equal(threshold_ratio(spelling), threshold, spelling)
+    for spelling in ["", "0", "-1", "1/0", "1.2.3", "1e", "1e309", "NaN"]:
+        _equal(threshold_ratio(spelling), None, "Invalid threshold " + spelling)
+    for count, rank in [(6, 1), (8, 1), (9, 2), (11, 2), (12, 3), (30, 10)]:
+        interval = median_interval([(100, 100 + index) for index in range(count - 1, -1, -1)])
+        _equal(interval.lower, (100 + rank - 1, 100), "Lower binomial rank")
+        _equal(interval.upper, (100 + count - rank, 100), "Upper binomial rank")
+    interval = median_interval([(10, 11)] * 5)
+    _equal((interval.lower, interval.upper, display_ratio(interval.median), decision(interval, threshold)),
+           (None, None, "1.10x", "inconclusive"), "Insufficient epochs")
+    for pairs, expected in [
+        ([(100, 150)] * 6, "pass"),
+        ([(100, 100), (100000, 150001)] * 4, "inconclusive"),
+        ([(100, 151), (100, 200)] * 4, "regression"),
+        ([(1000000000000000000, 1500000000000000000 + 1)] * 6, "regression"),
+    ]:
+        _equal(decision(median_interval(pairs), threshold), expected, "Exact decision")
+
+def _case(ctx, work, config, expected, extra = []):
+    input = work + "/gate config.json"
+    output = work + "/gate result.json"
+    ctx.std.fs.write(input, json.encode(config))
+    argv = ["ci", "flip-gate", "--", "demo", "--config", input, "--json", output, "--quiet"] + extra
+    result = command(ctx, ctx.std.env.current_exe(), argv, work, {"CI": "false", "RUSTFLAGS": ""}).stdout("piped").stderr("piped").spawn().wait_with_output()
+    _equal(exit_code(result.status), expected, result.stderr + result.stdout)
+    data = json.decode(ctx.std.fs.read_to_string(output)) if expected != 3 else None
+    return data, result.stdout, result.stderr
+
+def _test(ctx):
+    _statistics_tests()
+    root = ctx.std.env.aspect_root_dir()
+    work = ctx.std.fs.mkdtemp(parent = root, prefix = "vesper-flip-gate-tests-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(work))
+    src = work + "/src"
+    ctx.std.fs.create_dir_all(src + "/nested")
+    ctx.std.fs.write(src + "/lib.rs", "\nfn item() {}\n")
+    ctx.std.fs.write(src + "/nested/lib.rs", "\n// source\n")
+    ctx.std.fs.write(src + "/notes.txt", "ignored\n")
+    pairs = " ".join(["1000:%d" % (1100 + 10 * index) for index in range(30)])
+    benchmark = ["printf", "%s\n", "warm up", "flip-gate pairs w " + pairs]
+    differential = ["printf", "%s\n", "flip-gate differential differences=0 cases=1234"]
+    config = {
+        "name": "demo",
+        "lane": "SH6-1",
+        "rust": [src],
+        "tests": [{"run": ["true"]}],
+        "differential": {"run": differential},
+        "abba": [{"workload": "w", "run": benchmark}],
+    }
+    result, stdout, _ = _case(ctx, work, config, 0)
+    _equal(result["verdict"], "PASS", "Passed gate")
+    _equal(result["differential"]["cases"], 1234, "Reported cases")
+    _equal(result["abba"][0]["decision"], "pass", "ABBA decision")
+    _equal(result["rust_lines"], 2, "Recursive Rust line count")
+    if "w 1.24x [1.19x, 1.30x] n=30" not in stdout or "0 differences on 1,234 cases" not in stdout or "| 2 | |" not in stdout:
+        fail("Unexpected gate receipt: " + stdout)
+    _equal(_case(ctx, work, config, 2, ["--only", "tests,differential"])[0]["skipped"], ["abba"], "Explicitly skipped check")
+    _equal(_case(ctx, work, config, 2, ["--dry-run"])[0]["abba"][0]["decision"], "dry-run", "Dry-run decision")
+    for line, code, expected in [
+        ("flip-gate pairs w " + "100:200 " * 10, 1, "regression"),
+        ("flip-gate pairs w 100:120 100:130 100:140 100:150 100:160 100:170", 2, "inconclusive"),
+        ("flip-gate pairs w " + "10:11 " * 5, 2, "inconclusive"),
+        ("flip-gate pairs w 0:10", 1, "error"),
+        ("flip-gate pairs other 10:10", 1, "error"),
+        ("flip-gate pairs w 10:10 malformed", 1, "error"),
+    ]:
+        data, _, _ = _case(ctx, work, dict(config, abba = [{"workload": "w", "run": ["printf", "%s\n", line]}]), code)
+        _equal(data["abba"][0]["decision"], expected, line)
+    failed = dict(config, tests = config["tests"] + [{"run": ["false"]}])
+    _equal([row["ok"] for row in _case(ctx, work, failed, 1)[0]["tests"]], [True, False], "Failed test")
+    for step, status, differences in [
+        (["false"], 1, None),
+        (["printf", "%s\n", "flip-gate differential differences=3 cases=50"], 0, 3),
+        ({"sequence": [["false"], differential]}, 1, None),
+        ({"sequence": [differential, differential]}, 0, 0),
+    ]:
+        data, _, _ = _case(ctx, work, dict(config, differential = {"run": step}), 0 if differences == 0 else 1)
+        _equal((data["differential"]["status"], data["differential"]["differences"]), (status, differences), "Differential evidence")
+    data, _, _ = _case(ctx, work, dict(config, build = [["false"]]), 1)
+    _equal(data["tests"], None, "Build failure stops the gate")
+    for invalid in [
+        dict(config, tests = [{"run": "echo shell string"}]),
+        dict(config, rust = ["no/such/rust/path"]),
+        dict(config, abba = [{"workload": "w", "rust": ["true"]}]),
+    ]:
+        _case(ctx, work, invalid, 3)
+    _case(ctx, work, config, 3, ["--only", "unknown"])
+    _case(ctx, work, config, 3, ["--epochs", "5"])
+    absent = command(ctx, ctx.std.env.current_exe(), ["ci", "flip-gate", "--", "nonexistent-flip-gate-test"], work).stdout("piped").stderr("piped").spawn().wait_with_output()
+    _equal(exit_code(absent.status), 3, "Missing configuration")
+    if "no flip-gate.json" not in absent.stderr:
+        fail(absent.stderr)
+
+    calls = []
+
+    def fake_run(step, bench = False):
+        if not bench:
+            fail("Timed benchmark lost its benchmark environment")
+        calls.append(step[0])
+        return 0, ""
+
+    _equal(len(_pairs(struct(run = fake_run, dry = False), {"rust": ["rust"], "vesper": ["vesper"]}, 6)[0]), 6, "Timed epoch count")
+    _equal(calls, ["rust", "vesper"] + ["rust", "vesper", "vesper", "rust"] * 6, "ABBA calls including warmup")
+    cli_runner = _runner(ctx, root, {"env": {"RUSTFLAGS": "-C opt-level=3"}}, {"--quiet": True})
+    _equal(cli_runner.run(["pwd"])[1].strip(), capture(ctx, "realpath", [root], root).strip(), "Direct command rooted in workspace")
+    literal = "argument with spaces $HOME *.rs"
+    _equal(cli_runner.run(["printf", "%s\n", literal])[1], literal + "\n", "Arguments are passed literally")
+    _equal(cli_runner.run(["printenv", "RUSTFLAGS"])[1].strip(), "-C opt-level=3", "Caller flags in tests")
+    _equal(cli_runner.run(["printenv", "RUSTFLAGS"], bench = True)[1].strip(), "-C opt-level=3 " + _NATIVE, "Native flags in build and ABBA")
+    _equal(_bench_env({"RUSTFLAGS": _NATIVE}, "", True)["RUSTFLAGS"], _NATIVE, "Native flag is idempotent")
+    _equal(_bench_env({"RUSTFLAGS": "original"}, "", False)["RUSTFLAGS"], "original", "Portable flags")
+    _equal(_invocation({"cargo_target": "release/examples/abba", "args": ["once"]}, {"CARGO_TARGET_DIR": "target with spaces"}, "")[0],
+           ["target with spaces/release/examples/abba", "once"], "Cargo target is one literal path")
+    elapsed, error = _elapsed(cli_runner, ["sleep", "0.05"])
+    if error or elapsed < 50000000:
+        fail("Elapsed time must include child execution")
+    ctx.std.io.stdout.write("Passed exact flip-gate statistics, direct command and receipt cases\n")
+    return 0
+
+test_flip_gate = task(
+    kind = "flip-gate",
+    group = ["ci", "tests"],
+    summary = "Test exact flip-gate statistics, command execution and verdicts",
+    implementation = _test,
+)
