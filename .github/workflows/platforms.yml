@@ -170,6 +170,7 @@ jobs:
           sparse-checkout: |
             .aspect
             .github/actions/aspect
+            scripts/port-harness-plan.json
       - if: ${{ (steps.ports.outputs.crates || steps.legacy_ports.outputs.crates) != 'none' && hashFiles('.aspect/port-shards.axl') == '' }}
         uses: ./.platform-shard-tools/.github/actions/aspect
       - id: historical_shards

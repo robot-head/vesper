@@ -170,6 +170,27 @@ def _test(ctx):
     output = invoke_fixture(ctx, ["acceptance", "test-port-harness"], workspace.source, env = tools)
     contains("Detected divergent warp-shard port (equivalence)", output.stdout)
     contains("Detected divergent warp-shard port (rss)", output.stdout)
+
+    output_path = root + "/matrix output"
+    write_fixture(ctx, output_path, "previous=kept\n")
+    matrix = ["ci", "port-shard-matrix"]
+    matrix_env = {"GITHUB_OUTPUT": output_path, "PORT_HARNESS_ROOT": historical}
+    expected = list(range(1, 10))
+    fallback = invoke_fixture(ctx, matrix, workspace.source, env = matrix_env)
+    equal(json.decode(fallback.stdout), expected)
+    plan = historical + "/scripts/port-harness-plan.json"
+    for count in [7, 9]:
+        write_fixture(ctx, plan, json.encode([[] for _ in range(count)]))
+        custom = invoke_fixture(ctx, matrix, workspace.source, env = matrix_env)
+        equal(json.decode(custom.stdout), list(range(1, count + 1)))
+    lines = ctx.std.fs.read_to_string(output_path).splitlines()
+    equal(lines[0], "previous=kept")
+    equal(json.decode(lines[-1].partition("=")[2]), expected)
+    write_fixture(ctx, plan, "[]")
+    invoke_fixture(ctx, matrix, workspace.source, 1, matrix_env)
+    write_fixture(ctx, plan, "{}")
+    contains("Expected a list", invoke_fixture(ctx, matrix, workspace.source, 1, matrix_env).stderr)
+    invoke_fixture(ctx, matrix, workspace.source, 2, dict(matrix_env, GITHUB_OUTPUT = ""))
     return 0
 
 test_native_cli = task(
