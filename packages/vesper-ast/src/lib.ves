@@ -39,6 +39,10 @@ use self::lower::{
 use self::dump::{
     dump_ast
 };
+use self::words::{
+    words_count,
+    words_dump
+};
 
 // An absent child, name or optional value.
 pub fn none() -> u32 {
@@ -1241,6 +1245,18 @@ pub fn ast_dump(in source: Str) -> ChunkSeq[u64] {
         out.push(w);
     }
     out
+}
+
+// The canonical dump of the `Ast` an `ast` section of the `parse_words`
+// stream holds (words.ves; the checker AST crossing, #1910), in
+// `ast_dump`'s format.
+pub fn ast_words_dump(in input: Str) -> ChunkSeq[u64] {
+    words_dump(in input)
+}
+
+// The row count of the `Ast` an `ast` section decodes to, for benchmarks.
+pub fn ast_words_count(in input: Str) -> u64 {
+    words_count(in input)
 }
 
 // Parses `source` to an AST and returns the number of expression, pattern

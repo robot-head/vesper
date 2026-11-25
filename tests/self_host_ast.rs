@@ -19,6 +19,9 @@ use vesper::ast::*;
 use vesper::{check, native, packages};
 use vesper_syntax::parser;
 
+#[path = "common/ast_words.rs"]
+mod ast_words;
+
 const PACKAGE: &str = "packages/vesper-ast";
 
 fn root() -> PathBuf {
@@ -154,7 +157,13 @@ impl Dump {
         match &p.kind {
             PatternKind::Wild => self.line(d, &format!("P _{s}")),
             PatternKind::Bind(n) => self.line(d, &format!("P bind {}{s}", q(n))),
-            PatternKind::Literal(l) => self.line(d, &format!("P lit {}{s}", lit(l))),
+            PatternKind::Literal(l) => {
+                let ty = p
+                    .integer_kind
+                    .map(|k| format!(" type={}", q(k.name())))
+                    .unwrap_or_default();
+                self.line(d, &format!("P lit {}{ty}{s}", lit(l)))
+            }
             PatternKind::Tuple(ps) => {
                 self.line(d, &format!("P tuple{s}"));
                 for p in ps {
@@ -1371,6 +1380,188 @@ fn fuzzed_corpus_matches_the_rust_ast() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+// ---------------------------------------------------------------- crossing
+
+/// `ast_words_dump`, compiled on first use (the checker AST crossing,
+/// #1910).
+fn words_entry() -> &'static native::WordFunction {
+    static WORDS: OnceLock<native::WordFunction> = OnceLock::new();
+    WORDS.get_or_init(|| {
+        let checked = load_checked(&root().join(PACKAGE));
+        native::WordFunction::compile(&checked.world, "ast_words_dump", true)
+            .unwrap_or_else(|e| panic!("ast_words_dump: {e}"))
+    })
+}
+
+/// The Vesper dump of `m` after it crosses as words
+/// (tests/common/ast_words.rs, then packages/vesper-ast/src/words.ves).
+fn crossed_dump(m: &Module) -> String {
+    let words = ast_words::module_words(m);
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let input = [bytes.len() as u64, 0, bytes.as_ptr() as u64];
+    // SAFETY: the entry takes one `in Str`, passed as the address of its
+    // three words; `bytes` outlives the call. The entry reads the bytes as
+    // words and never needs them to be UTF-8.
+    let handle = unsafe { words_entry().call(&[input.as_ptr() as u64]) }.unwrap();
+    unpack(&take_words(handle)).0
+}
+
+/// Compares the Rust dump of `m` with the dump of its crossing.
+fn compare_crossed(m: &Module) -> Option<String> {
+    let rust = dump_module(m);
+    let vesper = crossed_dump(m);
+    (rust != vesper).then(|| first_difference(&rust, &vesper))
+}
+
+/// Every repository source's module crosses into `@vesper/ast` unchanged,
+/// and so do the modules the checker's rewrites build from it (module
+/// constants, untyped value-enum members, the Beacon prelude), which no
+/// source parses to.
+#[test]
+fn modules_cross_into_vesper_as_words() {
+    let files = repository_sources();
+    let floor = if under_bazel() { 300 } else { 800 };
+    assert!(files.len() >= floor, "{} sources", files.len());
+    let mut failures = vec![];
+    let mut rewritten = 0;
+    for path in &files {
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let shown = path.strip_prefix(root()).unwrap_or(path).display();
+        let m = parser::parse(&source).module;
+        if let Some(d) = compare_crossed(&m) {
+            failures.push(format!("{shown}: {d}"));
+        }
+        let mut rewrites = vec![];
+        if let Some(c) = vesper::arrays::lower_consts(&m) {
+            rewrites.push(("constants", c));
+        }
+        if let Some((u, _)) = vesper::arrays::untyped_members(&m) {
+            rewrites.push(("untyped members", u));
+        }
+        let beacon = vesper::trace_effects::with_prelude(&m);
+        if beacon.active() {
+            rewrites.push(("Beacon prelude", beacon.module().clone()));
+        }
+        for (what, r) in &rewrites {
+            rewritten += 1;
+            if let Some(d) = compare_crossed(r) {
+                failures.push(format!("{shown} ({what}): {d}"));
+            }
+        }
+    }
+    assert!(rewritten > 0, "no source exercised a checker rewrite");
+    assert!(
+        failures.is_empty(),
+        "{} of {} modules differ:\n{}",
+        failures.len(),
+        files.len() + rewritten,
+        failures.join("\n")
+    );
+}
+
+/// Modules no parse builds: integer literal types, wide and negative
+/// literals, every optional child absent and present.
+#[test]
+fn built_modules_cross_into_vesper_as_words() {
+    let span = 3..9;
+    let e = |kind| Expr {
+        kind,
+        span: span.clone(),
+    };
+    let int = |n| e(ExprKind::Literal(Literal::Int(n)));
+    let body = e(ExprKind::Block {
+        statements: vec![
+            Statement::Let {
+                pat: Pattern {
+                    kind: PatternKind::Literal(Literal::Int(-7)),
+                    span: span.clone(),
+                    integer_kind: vesper::numeric::IntegerKind::from_name("i16"),
+                },
+                ty: Type::IntLiteral(-(1i128 << 100)),
+                value: int(i128::MIN),
+                mutable: true,
+            },
+            Statement::Expr(e(ExprKind::Literal(Literal::WideInt(u128::MAX)))),
+            Statement::Expr(e(ExprKind::Return(None))),
+            Statement::Expr(e(ExprKind::Break(Some(Box::new(int(1)))))),
+        ],
+        tail: Some(Box::new(e(ExprKind::If {
+            condition: Box::new(e(ExprKind::Literal(Literal::Bool(true)))),
+            then: Box::new(e(ExprKind::Literal(Literal::Float(-0.5)))),
+            otherwise: None,
+        }))),
+    });
+    let m = Module {
+        items: vec![Item::Function(Box::new(Function {
+            name: "built".into(),
+            fip: true,
+            generics: vec![],
+            params: vec![],
+            result: Type::IntLiteral(42),
+            effects: Effects::default(),
+            body: Some(body),
+            span: 0..40,
+        }))],
+        ..Module::default()
+    };
+    assert_eq!(compare_crossed(&m), None);
+    assert_eq!(compare_crossed(&Module::default()), None);
+}
+
+/// The crossing's cost next to the Rust check it serves
+/// (`CHECK_HARNESS_SPEED=1`; ignored by default): over the repository
+/// sources, encoding plus the Vesper decode against `check::check`.
+#[test]
+#[ignore]
+fn crossing_speed() {
+    use std::time::Instant;
+    let sources: Vec<String> = repository_sources()
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .collect();
+    let modules: Vec<Module> = sources.iter().map(|s| parser::parse(s).module).collect();
+    let count = {
+        let checked = load_checked(&root().join(PACKAGE));
+        native::WordFunction::compile(&checked.world, "ast_words_count", true).unwrap()
+    };
+    let cross = || {
+        let t = Instant::now();
+        let mut rows = 0u64;
+        for m in &modules {
+            let words = ast_words::module_words(m);
+            let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            let input = [bytes.len() as u64, 0, bytes.as_ptr() as u64];
+            // SAFETY: as in `crossed_dump`.
+            rows += unsafe { count.call(&[input.as_ptr() as u64]) }.unwrap();
+        }
+        (t.elapsed(), rows)
+    };
+    let check = || {
+        let t = Instant::now();
+        let mut n = 0usize;
+        for m in &modules {
+            n += check::check(m).diagnostics.len();
+        }
+        (t.elapsed(), n)
+    };
+    let _ = (cross(), check());
+    let mut ratios = vec![];
+    for _ in 0..5 {
+        let (c, rows) = cross();
+        let (k, _) = check();
+        ratios.push(c.as_secs_f64() / k.as_secs_f64());
+        println!("crossing {c:?} ({rows} rows) vs check::check {k:?}");
+    }
+    ratios.sort_by(f64::total_cmp);
+    println!(
+        "crossing / check over {} modules: median {:.3}",
+        modules.len(),
+        ratios[2]
+    );
 }
 
 /// Building an AST frees every sequence it allocates.
