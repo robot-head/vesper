@@ -26,6 +26,7 @@ mod check_words;
 mod ir_words;
 
 use check_harness::*;
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use vesper::ast::{
     Adt, Effect, Effects, ExprKind, Field, Function, Mode, Param, Pass, Type, Variant,
@@ -391,26 +392,81 @@ fn abba_head() {
 /// lowered the way Rust lowers it (in the world extended by the lifted
 /// function), and the closure table: per closure instruction its owner,
 /// destination, lifted name and captured slots.
-struct Lifted {
-    world: World,
+struct Lifted<'a> {
+    world: std::borrow::Cow<'a, World>,
     program: Program,
     closures: Vec<(String, u32, String, Vec<String>)>,
 }
 
-fn lift(world: &World) -> Lifted {
+fn lift(world: &World) -> Lifted<'_> {
     let program = vesper::ir::lower_world(world);
+    // The lifted functions are lowered in a copy of the world whose other
+    // functions keep their signatures but lose their bodies, one round per
+    // nesting depth: lowering a function reads only signatures, so each
+    // lifted function's IR is the one Rust's extended world gives, without
+    // lowering the whole world once per closure. Most worlds have no
+    // closure to lift and are not copied at all.
+    let first: Vec<Closure> = program
+        .functions
+        .values()
+        .flat_map(|f| closures_of(world, f))
+        .collect();
+    if first.is_empty() {
+        return Lifted {
+            world: std::borrow::Cow::Borrowed(world),
+            program,
+            closures: vec![],
+        };
+    }
+    let mut bodiless = world.clone();
+    for f in bodiless.functions.values_mut() {
+        f.body = None;
+    }
+    let mut lifted: BTreeMap<String, (Function, FunctionIr)> = BTreeMap::new();
+    let mut round = first;
+    while !round.is_empty() {
+        let names: Vec<String> = round.iter().map(|c| c.name.clone()).collect();
+        for c in round {
+            bodiless.functions.insert(c.name, c.function);
+        }
+        let lowered = vesper::ir::lower_world(&bodiless);
+        round = vec![];
+        for name in names {
+            if let Some(ir) = lowered.functions.get(&name) {
+                round.extend(closures_of(&bodiless, ir));
+                lifted.insert(
+                    name.clone(),
+                    (bodiless.functions[&name].clone(), ir.clone()),
+                );
+            }
+        }
+    }
     let mut out = Lifted {
-        world: world.clone(),
-        program: program.clone(),
+        world: std::borrow::Cow::Owned(world.clone()),
+        program: Program::default(),
         closures: vec![],
     };
     for f in program.functions.values() {
-        lift_function(world, f, &mut out);
+        add_closures(&bodiless, f, &lifted, &mut out);
     }
+    let added = std::mem::take(&mut out.program.functions);
+    out.program = program;
+    out.program.functions.extend(added);
     out
 }
 
-fn lift_function(world: &World, f: &FunctionIr, out: &mut Lifted) {
+/// A closure instruction of a function as its lifted function.
+struct Closure {
+    dest: u32,
+    name: String,
+    function: Function,
+    captures: Vec<String>,
+}
+
+/// The closures `lean_ir::extract_closures` lifts out of `f`, in
+/// instruction order, up to the first whose captures it cannot type.
+fn closures_of(world: &World, f: &FunctionIr) -> Vec<Closure> {
+    let mut out = vec![];
     for i in f.blocks.iter().flat_map(|b| &b.instructions) {
         let Op::Closure { expr, aliases, .. } = &i.op else {
             continue;
@@ -436,7 +492,7 @@ fn lift_function(world: &World, f: &FunctionIr, out: &mut Lifted) {
         for n in free {
             if let Some(slot) = aliases.get(&n) {
                 let Some(ty) = f.locals.get(slot) else {
-                    return;
+                    return out;
                 };
                 captured.push(Param {
                     name: n,
@@ -456,29 +512,47 @@ fn lift_function(world: &World, f: &FunctionIr, out: &mut Lifted) {
         captured.extend(actual);
         let name = format!("$lambda_{}_{}", f.name, i.dest);
         let Some(generics) = world.functions.get(&f.name).map(|g| g.generics.clone()) else {
-            return;
+            return out;
         };
-        let function = Function {
+        out.push(Closure {
+            dest: i.dest,
             name: name.clone(),
-            fip: false,
-            params: captured,
-            result: *result.clone(),
-            effects: effects.clone(),
-            generics,
-            body: Some(*body.clone()),
-            span: expr.span.clone(),
-        };
-        let mut extended = world.clone();
-        extended.functions.insert(name.clone(), function.clone());
-        let program = vesper::ir::lower_world(&extended);
-        let Some(ir) = program.functions.get(&name) else {
+            function: Function {
+                name,
+                fip: false,
+                params: captured,
+                result: *result.clone(),
+                effects: effects.clone(),
+                generics,
+                body: Some(*body.clone()),
+                span: expr.span.clone(),
+            },
+            captures,
+        });
+    }
+    out
+}
+
+/// Adds `f`'s lifted closures to `out` depth first, each followed by its
+/// own: the order Rust lifts them in.
+fn add_closures(
+    world: &World,
+    f: &FunctionIr,
+    lifted: &BTreeMap<String, (Function, FunctionIr)>,
+    out: &mut Lifted,
+) {
+    for c in closures_of(world, f) {
+        let Some((function, ir)) = lifted.get(&c.name) else {
             continue;
         };
-        out.world.functions.insert(name.clone(), function);
-        out.program.functions.insert(name.clone(), ir.clone());
+        out.world
+            .to_mut()
+            .functions
+            .insert(c.name.clone(), function.clone());
+        out.program.functions.insert(c.name.clone(), ir.clone());
         out.closures
-            .push((f.name.clone(), i.dest, name.clone(), captures));
-        lift_function(&extended, ir, out);
+            .push((f.name.clone(), c.dest, c.name.clone(), c.captures));
+        add_closures(world, ir, lifted, out);
     }
 }
 
@@ -2133,10 +2207,10 @@ fn modules_match_rust_on_test_sources() {
 
 /// ABBA timing of the whole module over the corpus (`CHECK_HARNESS_SPEED=1
 /// cargo test --release --test self_host_lean_extract abba_module --
-/// --ignored --nocapture`). Rust lowers the world inside `extract_report`, so
-/// the Vesper side pays for `lower_world` too. The word encoding is the test
-/// harness's (a Vesper front end hands the words over directly), so it is
-/// timed and printed apart.
+/// --ignored --nocapture`). Rust lowers the world and each lifted closure
+/// inside `extract_report`, so the Vesper side pays for [`lift`] too. The
+/// word encoding is the test harness's (a Vesper front end hands the words
+/// over directly), so it is timed and printed apart.
 #[test]
 #[ignore]
 fn abba_module() {
@@ -2163,7 +2237,14 @@ fn abba_module() {
             std::hint::black_box(e.text(input));
         }
     });
-    eprintln!("lean module: encoding {encode:?}, extraction {run:?}");
+    let lifting = time(|| {
+        for w in &worlds {
+            std::hint::black_box(lift(w));
+        }
+    });
+    eprintln!(
+        "lean module: encoding {encode:?} (lowering and lifting {lifting:?}), extraction {run:?}"
+    );
     abba(
         "lean module",
         &mut || {
@@ -2176,7 +2257,7 @@ fn abba_module() {
         &mut || {
             time(|| {
                 for (w, input) in worlds.iter().zip(&inputs) {
-                    std::hint::black_box(vesper::ir::lower_world(w));
+                    std::hint::black_box(lift(w));
                     std::hint::black_box(e.text(input));
                 }
             })
