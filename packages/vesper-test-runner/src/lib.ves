@@ -21,6 +21,8 @@
 // - graph.ves: the Anvil function graph and per-function BLAKE3 digests
 //   (`FunctionGraph::from_module` of src/anvil_hash.rs), over @vesper/ast
 //   and @vesper-std/hash.
+// - generate.ves: the generated module of a doctest example
+//   (src/doctest_generate.rs), over @vesper/ast and @vesper/front.
 // - guard.ves: the fail-closed source profile a doctest module passes
 //   before checking (src/doctest_guard.rs), over @vesper/ast.
 
@@ -34,6 +36,9 @@ use self::doctest::{
 };
 use self::graph::{
     graph
+};
+use self::generate::{
+    generate
 };
 use self::guard::{
     guard
@@ -110,4 +115,13 @@ pub fn doctest_guard_words(in input: Slice[u8]) -> ChunkSeq[u64] {
 
 pub fn doctest_guard_str(in input: Str) -> ChunkSeq[u64] {
     guard(in input.as_bytes())
+}
+
+// `doctest_generate::rust_generate` of one example.
+pub fn doctest_generate_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    generate(in input)
+}
+
+pub fn doctest_generate_str(in input: Str) -> ChunkSeq[u64] {
+    generate(in input.as_bytes())
 }
