@@ -39,7 +39,8 @@
         "src/snapshot*",
         "src/snapshot/**",
         "tests/common/lean4lean_proof_packet.rs",
-        "scripts/check-format-proof.py",
+        ".aspect/format-proof.axl",
+        ".aspect/lib/strict-json.axl",
         ".aspect/acceptance-suites.axl",
         "tools/logos42/**",
         "crates/vesper-oracles/src/bin/logos42*"

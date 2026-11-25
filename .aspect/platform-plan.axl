@@ -316,6 +316,7 @@ def _test_policy(ctx: TaskContext) -> int:
             "crates/vesper-oracles/src/bin/arithmetic_oracle42.rs",
             "crates/vesper-oracles/src/bin/arithmetic_oracle42/process.rs",
             "src/lsp/proof_lens.rs", "src/optimize/witness_lean.rs", "src/format_commands.rs", "src/stylus_safety.rs",
+            ".aspect/format-proof.axl", ".aspect/lib/strict-json.axl",
         ],
         "frontend_corpus": [
             "examples/new.ves", "new.ves", "src/native.rs", "src/ffi_lowering.rs",

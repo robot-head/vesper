@@ -136,7 +136,6 @@ if sys.argv[-1] == "crash":
             ("diagnostics", None),
             ("doc-links", "VESPER_DOC_LINKS_BINARY"),
             ("editor", None),
-            ("format-proof", "VESPER_FORMAT_PROOF_BINARY"),
             ("macro-preview", "VESPER_MACRO_PREVIEW_BINARY"),
             ("recovery", "VESPER_RECOVERY_BINARY"),
             ("source-macro-parameters", "VESPER_SOURCE_MACRO_PARAMETERS_BINARY"),
@@ -1806,18 +1805,223 @@ sys.exit(1)
         self.write(".ci-lean-path", "\n")
         self.assertIn("Lean executable path is required", self.aspect(*args, env=env, status=1).stderr)
 
-    def test_format_proof_uses_the_ci_lean_path_when_available(self):
-        self.write("scripts/check-format-proof.py", "import os\nprint(os.getenv('VESPER_LEAN', 'missing'))\n")
-        self.write("bin/vesper", "")
-        env = {"VESPER_FORMAT_PROOF_BINARY": "bin/vesper", "VESPER_LEAN": "",
-               "PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]])}
-        (self.root / "bin/python").symlink_to(shutil.which("python3"))
+    def format_proof_fixture(self):
+        for source in ("commented", "macro", "hostile"):
+            self.copy_fixture(f"tests/fixtures/format_proof/{source}.ves")
+        self.write("lean/StylusAndLintSafety.lean", "default model")
+        self.write("models/custom model.lean", "custom model")
+        self.write("installed lean/bin/lean", """\
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+fault = os.getenv("FIXTURE_PROOF_FAULT")
+if args == ["--version"]:
+    print("Lean (version 4.35.0, pinned)" if fault != "lean-version" else "Lean (version 4.35.1, stale)")
+    sys.exit()
+assert args[0] == "--trust=0"
+directory = Path.cwd()
+assert os.environ["LEAN_PATH"] == str(directory)
+assert "LEAN_SRC_PATH" not in os.environ and "LEAN_PLUGIN_PATH" not in os.environ
+assert directory.name == "independent-kernel"
+path = Path(args[-1])
+if path.name == "StylusAndLintSafety.lean":
+    assert args[1:] == ["-o", "StylusAndLintSafety.olean", path.name]
+    assert path.read_text() == os.environ.get("FIXTURE_EXPECT_MODEL", "default model")
+    Path("StylusAndLintSafety.olean").touch()
+elif path.name == "Witness.lean":
+    assert args[1:] == ["-o", "Witness.olean", path.name]
+    assert Path("StylusAndLintSafety.olean").is_file()
+    assert path.read_text() == "namespace «Vesper».«StylusGenerated»\\ntheorem comments_preserved := True.intro\\n"
+    Path("Witness.olean").touch()
+else:
+    assert Path("Witness.olean").is_file()
+    assert args[1:] == [path.name]
+    if path.name == "Inspect.lean":
+        assert path.read_text().splitlines() == [
+            "import Witness",
+            "#check Vesper.StylusGenerated.comments_preserved",
+            "#print axioms Vesper.StylusGenerated.comments_preserved",
+            "#print axioms Vesper.StylusSafety.projection_narrowing_preserves_disjointness",
+        ]
+        print("does not depend on any axioms")
+        print("sorryAx" if fault == "replay-axiom" else "does not depend on any axioms")
+    else:
+        assert path.name == "NoInjection.lean" and path.read_text() == "import Witness\\n#check injected\\n"
+        sys.exit(0 if fault == "injection" else 1)
+""", executable=True)
+        launcher = """\
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+assert sys.argv[1:] == ["--print-prefix"]
+assert Path(sys.argv[0]).name == os.environ["FIXTURE_EXPECT_LAUNCHER"]
+print(Path.cwd() / "installed lean")
+"""
+        for name in ("lean", "ci launcher", "explicit launcher"):
+            self.write(f"bin/{name}", launcher, executable=True)
+        self.write(".ci-lean-path", "bin/ci launcher\r\n")
+        self.write("bin/compiler", "")
+        self.write("bin/compiler.exe", r"""#!/usr/bin/env python3
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+
+command, filename, *flags = sys.argv[1:]
+path = Path(filename)
+assert sys.argv[0].endswith("/bin/compiler.exe")
+assert path.is_absolute()
+if path.is_dir():
+    assert command == "verify" and flags == ["--format", "--json"]
+    sys.exit(1)
+data = path.read_bytes()
+fixture_dir = Path("tests/fixtures/format_proof")
+commented = (fixture_dir / "commented.ves").read_bytes()
+macro = (fixture_dir / "macro.ves").read_bytes()
+hostile = (fixture_dir / "hostile.ves").read_bytes()
+changed = commented.replace("final 🦀".encode(), "current 🦀".encode())
+fault = os.getenv("FIXTURE_PROOF_FAULT")
+if command == "fmt":
+    assert data == commented and flags == ["--json"]
+    path.write_bytes(data + b"\n")
+    sys.exit()
+assert command == "verify"
+if "--lean" in flags:
+    lean = flags[flags.index("--lean") + 1]
+    if not lean.endswith("/nonexistent-real-lean"):
+        assert lean == str(Path.cwd() / "installed lean/bin/lean")
+        assert flags[2:] == ["--lean", lean, "--timeout", "300"]
+        if flags[:2] == ["--format", "--emit-lean"]:
+            assert data == hostile
+            print("namespace «Vesper».«StylusGenerated»\ntheorem comments_preserved := True.intro")
+            sys.exit()
+        assert flags[:2] == ["--format", "--json"] and data in [commented, changed, macro]
+        digest = hashlib.sha256(data if fault != "same-digest" else commented).hexdigest()
+        report = {
+            "additional_text": "☃ 'quoted' { [ }",
+            "schema": "vesper.format-proof/1",
+            "status": "kernel_checked",
+            "scope": "formatter_document_model",
+            "input_bytes": len(data),
+            "output_bytes": len(data) + 1,
+            "document_nodes": 9,
+            "lean_version": "4.35.0",
+            "source_blake3": digest,
+            "output_blake3": digest,
+            "comment_tokens": 2 if data == macro else 3,
+            "audit": {
+                "accepted": True, "kernel_replayed": fault != "not-replayed",
+                "cache_eligible": False, "forbidden_axioms": [],
+                "theorems": [
+                    {"name": "Vesper.StylusGenerated.comments_preserved", "axioms": []},
+                    {"name": "Vesper.StylusSafety.projection_narrowing_preserves_disjointness", "axioms": []},
+                ],
+            },
+        }
+        if fault == "extra-claim":
+            report["program_verified"] = False
+        if fault == "byte-count":
+            report["input_bytes"] = len(data.decode())
+        if fault == "bad-digest":
+            report["output_blake3"] = digest.upper()
+        if fault == "theorem-axiom":
+            report["audit"]["theorems"][0]["axioms"] = ["sorryAx"]
+        output = json.dumps(report, ensure_ascii=False)
+        if fault == "duplicate":
+            output = output.replace('"kernel_replayed": true', '"kernel_replayed": false, "kernel_\\u0072eplayed": true')
+        print(output)
+        if fault == "oversize":
+            print("x" * (4 * 1024 * 1024), file=sys.stderr)
+        sys.exit()
+if data != commented:
+    assert data in [b"fn main(){let x=;", b"fn main(){/* unclosed", b"fn main(){unknown!{raw}}",
+                    b"fn main(){\xff}", b" " * (128 * 1024 + 1)]
+    assert flags in [["--format", "--json"], ["--format", "--emit-lean"]]
+if fault == "source-changed":
+    path.write_bytes(data + b" ")
+if "--json" in flags:
+    report = {"status": "rejected", "stage": "fixture", "message": "bad input"}
+    if fault == "rejection-claim":
+        report["audit"] = {}
+    print(json.dumps(report))
+elif fault == "failed-witness":
+    print("unexpected witness")
+if fault == "scratch-leak":
+    (path.parent / ".vesper-leftover").touch()
+sys.exit(1)
+""", executable=True)
+        env = {
+            "VESPER_FORMAT_PROOF_BINARY": "bin/compiler", "VESPER_FORMAT_PROOF_MODEL": "",
+            "VESPER_LEAN": "", "PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]]),
+            "LEAN_PATH": "outside", "LEAN_SRC_PATH": "outside", "LEAN_PLUGIN_PATH": "outside",
+            "FIXTURE_EXPECT_LAUNCHER": "ci launcher",
+        }
+        return env
+
+    def test_format_proof_runs_both_entry_points_and_selects_lean(self):
+        env = self.format_proof_fixture()
         command = ("acceptance", "test-format-proof")
-        self.assertEqual(self.aspect(*command, env=env).stdout.strip(), "")
-        self.write(".ci-lean-path", "/installed lean/bin/lean\r\n")
-        self.assertEqual(self.aspect(*command, env=env).stdout.strip(), "/installed lean/bin/lean")
-        self.assertEqual(self.aspect(*command, env={**env, "VESPER_LEAN": "/explicit/lean"}).stdout.strip(),
-                         "/explicit/lean")
+        wanted = {
+            "status": "passed", "commands": 28, "kernel_reports": 3,
+            "independent_witness_replay": True,
+            "scope": "formatter_document_model; no semantic or Rust-refinement proof",
+        }
+        self.assertEqual(json.loads(self.aspect(*command, env=env).stdout), wanted)
+        self.write("compiler manifest", "//:bin/vesper bin/compiler\n")
+        explicit = {
+            **env, "VESPER_LEAN": "bin/explicit launcher", "FIXTURE_EXPECT_LAUNCHER": "explicit launcher",
+            "VESPER_FORMAT_PROOF_BINARY": "", "VESPER_BAZEL_EXECUTABLES": "compiler manifest",
+            "VESPER_FORMAT_PROOF_MODEL": "models/custom model.lean", "FIXTURE_EXPECT_MODEL": "custom model",
+        }
+        self.assertEqual(json.loads(self.aspect(*command, env=explicit).stdout), wanted)
+        direct = ("acceptance", "check-format-proof", "--")
+        self.assertEqual(json.loads(self.aspect(
+            *direct, "--binary=bin/compiler", "--work", "work with spaces",
+            "--lean", "bin/explicit launcher", "--model=models/custom model.lean",
+            env={**explicit, "VESPER_LEAN": "bin/ci launcher"},
+        ).stdout), wanted)
+        self.assertEqual(list((self.root / "work with spaces").iterdir()), [])
+        (self.root / ".ci-lean-path").unlink()
+        self.assertEqual(json.loads(self.aspect(
+            *command, env={**env, "FIXTURE_EXPECT_LAUNCHER": "lean"},
+        ).stdout), wanted)
+        for options in ([], ["--binary"], ["--binary", "--model=x"], ["--unexpected"]):
+            with self.subTest(options=options):
+                self.aspect(*direct, *options, env=env, status=2)
+
+    def test_format_proof_rejects_untrustworthy_results_and_cleans_scratch(self):
+        env = self.format_proof_fixture()
+        failures = {
+            "lean-version": "Expected Lean version 4.35.0",
+            "duplicate": "Duplicate JSON key: kernel_replayed",
+            "extra-claim": "Unexpected proof claim: program_verified",
+            "byte-count": "Invalid proof byte or document node counts",
+            "bad-digest": "Invalid output_blake3",
+            "not-replayed": "Expected an accepted, independently replayed proof",
+            "theorem-axiom": "Theorem uses axioms",
+            "same-digest": "Changed comment must change both proof digests",
+            "oversize": "Output exceeds 4 MiB",
+            "replay-axiom": "Independent witness replay did not verify two axiom-free theorems",
+            "injection": "Expected exit 1, got 0",
+            "source-changed": "verify changed its source",
+            "rejection-claim": "Unexpected proof field in rejection report: audit",
+            "failed-witness": "Failed witness emission wrote output",
+            "scratch-leak": "Unexpected proof scratch file",
+        }
+        for fault, message in failures.items():
+            with self.subTest(fault=fault):
+                result = self.aspect(
+                    "acceptance", "check-format-proof", "--", "--binary", "bin/compiler",
+                    "--lean", "bin/ci launcher", "--work", "failed work",
+                    env={**env, "FIXTURE_PROOF_FAULT": fault}, status=1,
+                )
+                self.assertIn(message, result.stderr)
+                self.assertEqual(list((self.root / "failed work").iterdir()), [])
 
     def test_lean_replay_scope_uses_the_git_branch_history_and_exact_paths(self):
         def git(*args):
