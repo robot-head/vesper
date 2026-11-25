@@ -39,9 +39,21 @@ entry deliberately declares Audit and cannot be executed without a handler.
   so shadowed locals cannot masquerade as accesses to a parameter. Reading a
   sibling field and writing another are reported separately.
 
+- `L0103 overly_restrictive_mode` (Vesper port only, #1888): an `inout`
+  parameter, whole or projected, that no assignment, `inout` selector
+  (callees' included) or noncopy move touches, in a body without opaque
+  actions. `analyze_modes` returns these findings; it exists only with the
+  `vesper-port` feature, so the compiler's seed copy (and therefore the
+  `vesper lint` command) does not report them until the command links the
+  port. Diagnostic only: demoting to `in` also needs every call site's
+  `inout` argument changed to `in` (`E0308`). The `sink` half and the
+  policy's `deny` level are not implemented yet. `tests/modes.rs` checks
+  fixtures and the whole repository corpus against the rule's definition,
+  and `port/test-port.sh` has a fifth divergent area, `modes`.
+
 Projection changes are **diagnostic-only**: no broken function arity, duplicate
 parameter name, or unreviewed caller rewrite is synthesized. The analyzer never
-infers arena escape freedom from a return type/name set. Mode relaxation, arena
+infers arena escape freedom from a return type/name set. Generic-bound mode relaxation, arena
 demotion, FIP, Cancel/secret hygiene, egglog simplification, severity/plugin packs,
 LSP scheduling and formal proof generation are unimplemented.
 No general zero-false-positive or completeness claim applies.

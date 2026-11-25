@@ -209,12 +209,55 @@ fn differences(default: &Run, hybrid: &Run) -> Vec<&'static str> {
 
 #[test]
 fn hybrid_matches_the_default_compiler() {
+    differential("all", 1);
+}
+
+/// The set the default `vesper` switches to (SH6 lane 2, #1397): only the
+/// swaps whose flip gate passed (`VESPER_HYBRID_SWAPS=gated`,
+/// tests/swaps.rs), every other module on its Rust path. It must agree
+/// with the default compiler on every run. `VESPER_GATED_STRIDE=<n>` runs
+/// every n-th file (Bazel runs every 4th; Cargo, all).
+#[test]
+fn gated_hybrid_matches_the_default_compiler() {
+    // A divergent module may be gated on (`divergent-optimize`): the
+    // default set's run is the proof the harness fails.
+    if DIVERGENT {
+        return;
+    }
+    let stride = std::env::var("VESPER_GATED_STRIDE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(1);
+    differential("gated", stride);
+}
+
+/// Whether this build has a deliberately wrong module (build.rs).
+const DIVERGENT: bool = cfg!(any(
+    feature = "divergent",
+    feature = "divergent-parse",
+    feature = "divergent-ir-check",
+    feature = "divergent-ir-inline",
+    feature = "divergent-ir-opt",
+    feature = "divergent-optimize",
+    feature = "divergent-pact"
+));
+
+/// Runs the default compiler and the hybrid with the swap set `set` over
+/// every `stride`-th corpus file.
+fn differential(set: &str, stride: usize) {
     let root = repository();
     let default = default_compiler();
     let hybrid = hybrid();
-    let files = corpus(&root);
-    assert!(files.len() > 500, "corpus has only {} files", files.len());
-    let scratch = std::env::temp_dir().join(format!("vesper-hybrid-diff-{}", std::process::id()));
+    let files: Vec<PathBuf> = corpus(&root).into_iter().step_by(stride).collect();
+    assert!(
+        files.len() * stride > 500,
+        "corpus has only {} files",
+        files.len() * stride
+    );
+    let swaps = [("VESPER_HYBRID_SWAPS", set)];
+    let scratch =
+        std::env::temp_dir().join(format!("vesper-hybrid-diff-{set}-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
 
     let jobs: Mutex<Vec<(usize, &PathBuf)>> = Mutex::new(files.iter().enumerate().rev().collect());
@@ -236,7 +279,7 @@ fn hybrid_matches_the_default_compiler() {
                         let a = scratch.join(format!("{i}-{c}.o"));
                         let b = a.clone();
                         let d = run(&default, &root, command, file, &a);
-                        let h = run(&hybrid, &root, command, file, &b);
+                        let h = run_with(&hybrid, &root, command, file, &b, &swaps);
                         if port_extension(command, &d, &h) {
                             *extended.lock().unwrap() += 1;
                             continue;
@@ -265,7 +308,7 @@ fn hybrid_matches_the_default_compiler() {
                                 command,
                                 file,
                                 &b,
-                                &[("VESPER_HYBRID_RUST_PRODUCER", "1")],
+                                &[swaps[0], ("VESPER_HYBRID_RUST_PRODUCER", "1")],
                             );
                             if differences(&d, &r).is_empty() {
                                 ties.lock().unwrap().push(format!(
@@ -305,7 +348,7 @@ fn hybrid_matches_the_default_compiler() {
         ties.len()
     );
     eprintln!(
-        "differential: {} files, {runs} runs per compiler; default {:.2} s, hybrid {:.2} s ({:.3}x); \
+        "differential ({set}): {} files, {runs} runs per compiler; default {:.2} s, hybrid {:.2} s ({:.3}x); \
          {} differ; {} wasm builds only the hybrid compiles (loops, sequences, conversions)",
         files.len(),
         d.as_secs_f64(),
@@ -314,15 +357,7 @@ fn hybrid_matches_the_default_compiler() {
         mismatches.len(),
         extended.into_inner().unwrap()
     );
-    if cfg!(any(
-        feature = "divergent",
-        feature = "divergent-parse",
-        feature = "divergent-ir-check",
-        feature = "divergent-ir-inline",
-        feature = "divergent-ir-opt",
-        feature = "divergent-optimize",
-        feature = "divergent-pact"
-    )) {
+    if DIVERGENT {
         assert!(
             !mismatches.is_empty(),
             "the divergent hybrid build agreed with the default compiler on every run: \
@@ -332,7 +367,7 @@ fn hybrid_matches_the_default_compiler() {
     } else {
         assert!(
             mismatches.is_empty(),
-            "the hybrid compiler differs from the default on {} runs:\n{}",
+            "the hybrid compiler ({set}) differs from the default on {} runs:\n{}",
             mismatches.len(),
             mismatches.join("\n")
         );

@@ -457,6 +457,50 @@ pub(crate) fn analyze(program: &CheckedProgram, limits: Limits) -> Result<LintRe
 }
 
 /// [`crate::apply_edits`] through the port.
+/// [`crate::analyze_modes`]: the Vesper-only `L0103` rule.
+pub(crate) fn analyze_modes(
+    program: &CheckedProgram,
+    limits: Limits,
+) -> Result<LintReport, LintError> {
+    let encoded = encode(program);
+    if encoded.too_deep {
+        return Err(LintError("type complexity limit"));
+    }
+    let words = crate::port_binding::analyze_modes(
+        &encoded.words,
+        &encoded.blob,
+        limits.functions as u64,
+        limits.actions as u64,
+        limits.work as u64,
+        limits.call_depth as u64,
+    )
+    .map_err(lint_error)?;
+    let functions: Vec<_> = program.functions.iter().collect();
+    let mut r = Words {
+        words: &words,
+        at: 0,
+    };
+    let work = r.usize();
+    let mut findings = Vec::new();
+    for _ in 0..r.usize() {
+        let (name, facts) = functions[r.usize()];
+        let span = r.usize()..r.usize();
+        let parameter = facts.parameters[r.usize()].parameter.name.clone();
+        findings.push(Finding {
+            code: "L0103".into(),
+            function: name.clone(),
+            span,
+            message: r.text(),
+            detail: FindingKind::OverlyRestrictiveMode { parameter },
+        });
+    }
+    Ok(LintReport {
+        findings,
+        skipped: Vec::new(),
+        work,
+    })
+}
+
 pub(crate) fn apply_edits(
     source: &str,
     edits: &[SourceEdit],

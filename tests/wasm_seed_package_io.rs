@@ -1723,10 +1723,43 @@ fn wasm_backend_emits_runnable_core_under_seed_runner() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// How many stage2 tests may hold a compiler build at once. Each one compiles
+/// `@vesper/stage2` in-process and runs it with up to 4 GiB of linear memory;
+/// all six at once ran the 22GB "Test all targets" VM out of memory (#1870).
+/// BUILD.bazel reserves memory for this target to match.
+const STAGE2_SLOTS: usize = 2;
+
+/// Holds one of the `STAGE2_SLOTS` until dropped, also when the test panics.
+struct Stage2Slot;
+
+static STAGE2_IN_USE: (std::sync::Mutex<usize>, std::sync::Condvar) =
+    (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+impl Stage2Slot {
+    fn acquire() -> Self {
+        let (lock, freed) = &STAGE2_IN_USE;
+        let mut in_use = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while *in_use >= STAGE2_SLOTS {
+            in_use = freed.wait(in_use).unwrap_or_else(|e| e.into_inner());
+        }
+        *in_use += 1;
+        Stage2Slot
+    }
+}
+
+impl Drop for Stage2Slot {
+    fn drop(&mut self) {
+        let (lock, freed) = &STAGE2_IN_USE;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        freed.notify_one();
+    }
+}
+
 fn with_large_stack<F>(f: F)
 where
     F: FnOnce() + Send + 'static,
 {
+    let _slot = Stage2Slot::acquire();
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(f)

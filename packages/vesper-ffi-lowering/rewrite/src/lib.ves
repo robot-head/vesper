@@ -24,6 +24,11 @@
 use self::drops::{
     append_drops
 };
+use self::buffers::{
+    W,
+    w_new,
+    check_buffers
+};
 use @vesper/ast::{
     Ast,
     Lit,
@@ -1448,4 +1453,139 @@ fn pack(in text: ChunkSeq[u8]) -> ChunkSeq[u64] {
         out.push(x);
     }
     out
+}
+
+// A type of the buffer check's input (`buffer_input` of
+// tests/self_host_ffi_lowering_rewrite.rs): 0 other, 1 named (name, n, n
+// types), 2 tuple (n, n types).
+fn read_ty(inout rd: Reader, in b: Slice[u8], inout ast: Ast, inout w: W) -> u32 {
+    let kind = rd.word(in b);
+    if kind == 0 {
+        return 0;
+    }
+    let mut name: u32 = NONE;
+    if kind == 1 {
+        let (x, e) = rd.text(in b);
+        let mut t = String::new();
+        for i in x..e {
+            match b.try_get(i) {
+                Option::Some(c) => {
+                    let _ = t.push_char(wrapping_u32(widen_u64(c)));
+                }
+                Option::None => {}
+            }
+        }
+        name = ast.names.intern(in t).id();
+    }
+    let n = rd.word(in b);
+    let mut items: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..n {
+        let t = read_ty(inout rd, in b, inout ast, inout w);
+        items.push(t);
+    }
+    w
+        .ty(
+            if kind == 1 {
+                1
+            } else {
+                2
+            },
+            name,
+            in items
+        )
+}
+
+// The harness entry of buffers.ves: the case `input` (the rewrite's, then
+// the buffer type names and the checker's expression types) and `source`.
+// The source gets its drop items and the pass-2 rewrite, as in
+// `check_module`; the text is `ok`, or the first refusal (`err @start..end
+// message`).
+pub fn ffi_buffer_text(in input: Str, in source: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut s = s_new();
+    let mut rd = Reader {
+        pos: 0,
+        stop: b.len()
+    };
+    let nl = rd.word(in b);
+    for i in 0..nl {
+        let handler = rd.word(in b);
+        let (a, e) = rd.text(in b);
+        read_library(in b, a, e, handler, inout s);
+    }
+    let has2 = rd.word(in b) == 1;
+    let mut ar = ChunkSeq::new[u64]();
+    let mut lens = ChunkSeq::new[u64]();
+    if has2 {
+        let n = rd.word(in b);
+        for i in 0..n {
+            ar.push(rd.word(in b));
+            ar.push(rd.word(in b));
+            ar.push(lens.len());
+            let k = rd.word(in b);
+            ar.push(k);
+            for j in 0..k {
+                lens.push(rd.word(in b));
+            }
+        }
+    }
+    let g = generate(inout s);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if g.msg != NONE {
+        out.extend(in "generate err\n".as_bytes());
+        return pack(in out);
+    }
+    let l = lower_source(in source);
+    let mut ast = l.ast;
+    append_drops(inout ast, in s);
+    let mut r = r_new(s, ast, true, in ar, in lens);
+    module(inout r);
+    if r.has_err {
+        out.extend(in "rewrite err\n".as_bytes());
+        return pack(in out);
+    }
+    let mut w = w_new(inout r.ast);
+    let nb = rd.word(in b);
+    for i in 0..nb {
+        let (x, e) = rd.text(in b);
+        let mut t = String::new();
+        for j in x..e {
+            match b.try_get(j) {
+                Option::Some(c) => {
+                    let _ = t.push_char(wrapping_u32(widen_u64(c)));
+                }
+                Option::None => {}
+            }
+        }
+        let name = r.ast.names.intern(in t).id();
+        w.add_buffer(name);
+    }
+    let nt = rd.word(in b);
+    for i in 0..nt {
+        let start = rd.word(in b);
+        let end = rd.word(in b);
+        let t = read_ty(inout rd, in b, inout r.ast, inout w);
+        w.record(start, end, t);
+    }
+    if check_buffers(in r.ast, inout w) {
+        out.extend(in "err @".as_bytes());
+        push_dec(inout out, widen_u64(w.err_start));
+        out.extend(in "..".as_bytes());
+        push_dec(inout out, widen_u64(w.err_end));
+        out.push(32);
+        for i in 0..w.msg.len() {
+            out.push(u8_at(in w.msg, i));
+        }
+        out.push(10);
+    } else {
+        out.extend(in "ok\n".as_bytes());
+    }
+    pack(in out)
+}
+
+fn push_dec(inout o: ChunkSeq[u8], x: u64) {
+    if x >= 10 {
+        push_dec(inout o, x / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(x % 10, 48)));
 }

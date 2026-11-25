@@ -57,5 +57,9 @@ const DIVERGENT: &[(&str, &str)] = &[
     ("if key_le(kr, kt, rowid, inv_ts) {", "if false {"),
     // store/log.rs (vesper/src/store_log.ves): Commit tag rejected as unknown;
     // store fuzzy_checkpoint_runs_while_transactions_commit fails.
-    ("if tag == 3 {", "if tag == 99 {"),
+    // (wal.ves has an `if tag == 3 {` too: match the store/log one.)
+    (
+        "    if tag == 3 {\n        if plen < 17 {",
+        "    if tag == 99 {\n        if plen < 17 {",
+    ),
 ];

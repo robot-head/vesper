@@ -839,6 +839,13 @@ pub fn is_operand(name: &str, index: usize, count: usize) -> bool {
     }
 }
 
+/// [`check_world`], for the self-hosting differential of
+/// `@vesper/check-regions-seqs` (`isa.ves`, #1830).
+#[doc(hidden)]
+pub fn check_world_probe(world: &World) -> Vec<Diagnostic> {
+    check_world(world)
+}
+
 /// Isa discipline over the surface HIR of a well-typed World (run after
 /// checking, like the capability-effect rules).
 pub(crate) fn check_world(world: &World) -> Vec<Diagnostic> {

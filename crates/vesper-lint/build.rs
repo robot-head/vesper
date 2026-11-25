@@ -11,7 +11,8 @@ fn main() {
         .binding("port/binding.rs")
         .rust_types("crate::port");
     // One divergent edit per ported area (the effect rule, the
-    // projection rule, the TOML reader, the source edits), the same
+    // projection rule, the TOML reader, the source edits, the L0103 mode
+    // rule), the same
     // edits as BUILD.bazel; port/test-port.sh asserts that the tests
     // catch each one.
     #[cfg(feature = "vesper-port-divergent")]
@@ -50,4 +51,7 @@ const EDITS: &[(&str, &str, &str)] = &[
     ),
     // The source edits: an oversized result reports a stale edit.
     ("edits", "fail(E_CANDIDATE);", "fail(E_STALE);"),
+    // The L0103 mode rule (#1888): an `inout` selector no longer counts as a
+    // write, so only noncopy moves keep a parameter `inout`.
+    ("modes", "(a.moves || a.pass == PASS_INOUT)", "(a.moves)"),
 ];

@@ -1717,6 +1717,96 @@ pub fn analyze(
     out
 }
 
+// ================================================================ modes
+
+// L0103 `overly_restrictive_mode` (manuscript §19.6 `[Lint-Demote-Mode]`,
+// the `inout` half), Vesper only (#1888): an `inout` parameter, whole or
+// projected, that the body never writes. A write is an assignment through
+// it or an `inout` selector on it (a callee's included, as the facts carry
+// the callee's selectors); a noncopy move or an opaque action in the body
+// means no finding. Diagnostic only: every call site passes the argument
+// `inout`, which an `in` parameter rejects (`E0308`).
+fn mode_findings(
+    in p: Prog,
+    in blob: Str,
+    fi: u64,
+    inout w: Work,
+    inout out: ChunkSeq[u64],
+    inout count: u64
+) eff [Fail[LintFail]] {
+    let f = fn_at(in p, fi);
+    for k in 0..widen_u64(f.act_len) {
+        if act_at(in p, wrapping_add(widen_u64(f.act_first), k)).kind == A_OPAQUE {
+            return;
+        }
+    }
+    for pi in 0..list_len(in p, f.facts) {
+        let q = param_at(in p, list_at(in p, f.facts, pi));
+        if q.pass != PASS_INOUT {
+            continue;
+        }
+        let mut keep = false;
+        for k in 0..widen_u64(f.act_len) {
+            tick(inout w);
+            let a = act_at(in p, wrapping_add(widen_u64(f.act_first), k));
+            if a.kind == A_ACCESS && a.a == q.name && (a.moves || a.pass == PASS_INOUT) {
+                keep = true;
+                break;
+            }
+        }
+        if keep {
+            continue;
+        }
+        out.push(fi);
+        out.push(q.start);
+        out.push(q.end);
+        out.push(pi);
+        let mut msg = ChunkSeq::new[u8]();
+        put(inout msg, in "inout ");
+        put_sym(inout msg, in p, in blob, q.name);
+        put(
+            inout msg,
+            in " is never written; it can be `in` once every caller passes it `in` (diagnostic only)"
+        );
+        push_text(inout out, in msg.as_slice());
+        count = inc(count);
+    }
+}
+
+// The Vesper-only rules over the same facts as `analyze`, with its limits.
+// The result: the work used, the number of L0103 findings, then each
+// finding (function index, span, parameter index, message).
+pub fn analyze_modes(
+    in facts: Slice[u64],
+    in blob: Str,
+    functions: u64,
+    actions: u64,
+    work: u64,
+    call_depth: u64
+) -> ChunkSeq[u64] eff [Fail[LintFail]] {
+    let p = decode(in facts, in blob);
+    check_limits(in p, functions, actions, work, call_depth);
+    let mut w = Work {
+        remaining: work,
+        used: 0,
+        depth: call_depth
+    };
+    let mut findings = ChunkSeq::new[u64]();
+    let mut n: u64 = 0;
+    for fi in 0..p.fns.len() {
+        let f = fn_at(in p, fi);
+        if !f.owned || !f.body {
+            continue;
+        }
+        mode_findings(in p, in blob, fi, inout w, inout findings, inout n);
+    }
+    let mut out = ChunkSeq::with_capacity[u64](wrapping_add(findings.len(), 2));
+    out.push(w.used);
+    out.push(n);
+    out.extend(in findings.as_slice());
+    out
+}
+
 // ================================================================ edits
 
 const E_EDIT_LIMIT: u64 = 15;

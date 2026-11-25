@@ -249,3 +249,53 @@ Rust stays the default until the hybrid wiring part.
 
 Rust lines deleted: 0. Rust code is deleted only after the hybrid swap
 (session and dispatch part).
+
+# Part 3 (#1828): proof-lens models
+
+`src/lsp/proof_model.rs` (`proof_model::all`: the scalar model of each
+checked function, with its exact-integer and bit-vector Lean renderings and
+the model key) is ported, with 0 diffs. Rust stays the default until the
+hybrid wiring part.
+
+## What changed
+
+- `packages/vesper-lsp-features/src/proof.ves`: the builder (`Builder`:
+  scopes, kinds from the checker's expression types, inlining, the node
+  budget and every reason a function has no model) and the entry
+  `lsp_proof_models`.
+- `proof_types.ves`: `Kind::of` of source types, and `Display` and `Debug`
+  of `ast::Type` for the reasons.
+- `lean.ves`: `Exact::render` and `BitVecs::render`, byte for byte.
+- The checker's functions come from `World::functions`, with their spans.
+  Their trees are parsed from one text: the source, then each prelude the
+  checker added (String, Atomic, workers). A per-function `delta` maps that
+  text's spans back to the checker's, because preludes are parsed at an
+  offset past the source.
+- The key is BLAKE3 over both renderings. The entry hashes it with the
+  portable `@vesper-std/hash` BLAKE3, or leaves it to the host. The hosted
+  build would hash through `@vesper-std/hash-sys` (the C BLAKE3), as the
+  formatter port does.
+- `src/lsp.rs`: a hidden `proof_models_for_port` hook for the test (the
+  module is private).
+- Generated sources cover every scalar shape and each reachable reason.
+  These include the inlining depth limit (8), the node budget (4,096),
+  17 parameters, a disallowed effect and a non-scalar `let`.
+
+## Differential
+
+`proof_models_match_rust`: 203 documents, 490 models and 507 reasons, 0
+diffs. Keys hashed by the host also match.
+
+## Numbers
+
+Per document round, with the parse and facts kept (the session builds every
+model once per snapshot). The one-time encode, decode and parse is timed
+apart and taken off.
+
+| Key hashed by | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| the host's C BLAKE3 (the hosted build's `@vesper-std/hash-sys`) | 18.3 µs | 17.5 µs | **0.96x** |
+| the portable Vesper BLAKE3 | 18.3 µs | 32.5 µs | 1.78x |
+
+The portable BLAKE3 alone is about 15 µs of a round, so the hybrid wiring
+must hash through hash-sys. Rust lines deleted: 0.

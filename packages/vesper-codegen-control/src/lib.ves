@@ -7,6 +7,8 @@
 //
 // - session.ves: `native_session::plan`, the validated effect bindings and
 //   data-frame layout of a native session entry.
+// - freshness.ves: `native_session::check_data_base_freshness`, the check
+//   that no data-frame address loaded before a park is used after it.
 //
 // Emission (closure tags and invocation, handler inlining, `perform`,
 // trace effects, `Fail` exits, vtables, session parks) goes through the
@@ -30,6 +32,7 @@ use @vesper/check-layout::{
 use self::tables::{
     read_tables
 };
+use self::freshness::freshness_text;
 use self::session::{
     EffBinding,
     OpBinding,
@@ -117,5 +120,13 @@ pub fn control_session_plans(in input: Str) -> ChunkSeq[u64] {
         o.push(10);
         ls.reset(m);
     }
+    pack_text(in o)
+}
+
+// Task "freshness": emitted session functions (freshness.ves documents the
+// layout). One line per function: `ok` or `err <message>`.
+pub fn control_session_freshness(in input: Str) -> ChunkSeq[u64] {
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    freshness_text(in input.as_bytes(), inout o);
     pack_text(in o)
 }
