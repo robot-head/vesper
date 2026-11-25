@@ -1,3 +1,0 @@
-load("./lib/script.axl", "script_task")
-
-convert_rust_tests = script_task("convert-rust-tests", ["maintenance"], "scripts/convert-rust-tests.py", "python3")

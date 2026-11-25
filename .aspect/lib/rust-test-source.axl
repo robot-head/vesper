@@ -1,0 +1,442 @@
+"""Read the limited Rust syntax needed to recognize convertible test cases."""
+
+LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_"
+DIGITS = "0123456789"
+IDENT = LETTERS + DIGITS
+SPACE = " \t\r\n\f\v"
+PAIRS = {"(": ")", "[": "]", "{": "}"}
+_LOW = "abcdefghijklmnopqrstuvwxyz_"
+_HEX = DIGITS + "abcdefABCDEF_"
+_PAIR = ["::", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", ".."]
+_INTEGERS = ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "usize", "isize", "i128", "u128"]
+PROGRAM_PATHS = ["check", "parser", "runtime", "native", "native_runtime", "seq", "fip", "Runtime"]
+
+def _until(source, start, allowed):
+    for index in range(start, len(source)):
+        if source[index] not in allowed:
+            return index
+    return len(source)
+
+def _codepoint(n):
+    if n < 128:
+        return str(bytes([n]))
+    if n < 2048:
+        return str(bytes([192 + n // 64, 128 + n % 64]))
+    if n < 65536:
+        return str(bytes([224 + n // 4096, 128 + (n // 64) % 64, 128 + n % 64]))
+    return str(bytes([240 + n // 262144, 128 + (n // 4096) % 64, 128 + (n // 64) % 64, 128 + n % 64]))
+
+def _unescape(body):
+    output = []
+    cursor = 0
+    simple = {"n": "\n", "t": "\t", "r": "\r", "0": "\x00", "\\": "\\", '"': '"', "'": "'"}
+    for index, char in enumerate(body.elems()):
+        if index < cursor:
+            continue
+        if char != "\\":
+            output.append(char)
+            continue
+        n = body[index + 1]
+        cursor = index + 2
+        if n == "\n":
+            cursor = _until(body, cursor, SPACE)
+        elif n in simple:
+            output.append(simple[n])
+        elif n == "x":
+            output.append(_codepoint(int(body[cursor:cursor + 2], 16)))
+            cursor += 2
+        elif n == "u":
+            close = body.find("}", cursor)
+            if close < 0:
+                fail("Unclosed Rust escape")
+            output.append(_codepoint(int(body[cursor + 1:close].replace("_", ""), 16)))
+            cursor = close + 1
+        else:
+            output.append(n)
+    return "".join(output)
+
+def _quoted_end(source, start):
+    cursor = start + 1
+    quote = source[start]
+    for index in range(cursor, len(source)):
+        if index < cursor:
+            continue
+        if source[index] == quote:
+            return index
+        if source[index] == "\\":
+            cursor = index + 2
+    fail("Unclosed Rust quoted token")
+
+def _comment_end(source, start):
+    cursor, depth = start + 2, 1
+    for index in range(cursor, len(source)):
+        if index < cursor:
+            continue
+        pair = source[index:index + 2]
+        if pair == "/*":
+            depth += 1
+            cursor = index + 2
+        elif pair == "*/":
+            depth -= 1
+            cursor = index + 2
+            if not depth:
+                return cursor
+    return len(source)
+
+def _raw(source, start):
+    end = _until(source, start + 1, "#")
+    if source[end:end + 1] != '"':
+        return None
+    close = '"' + source[start + 1:end]
+    boundary = source.find(close, end + 1)
+    if boundary < 0:
+        fail("Unclosed Rust raw string")
+    return boundary + len(close), source[end + 1:boundary]
+
+def _number(source, start):
+    prefix = source[start:start + 2]
+    base, digits = {"0x": (16, _HEX), "0o": (8, "01234567_"), "0b": (2, "01_")}.get(prefix, (10, DIGITS + "_"))
+    origin = start + (2 if base != 10 else 0)
+    end = _until(source, origin, digits)
+    real = False
+    if base == 10 and source[end:end + 1] == "." and source[end + 1:end + 2] and source[end + 1] in DIGITS:
+        real = True
+        end = _until(source, end + 1, digits)
+    if base == 10 and source[end:end + 1] in ["e", "E"]:
+        exp = end + 1
+        if source[exp:exp + 1] in ["+", "-"]:
+            exp += 1
+        if source[exp:exp + 1] and source[exp] in DIGITS:
+            real = True
+            end = _until(source, exp, DIGITS)
+    value = None if real or end == origin else int(source[origin:end].replace("_", ""), base)
+    for suffix in _INTEGERS + ["f32", "f64"]:
+        if source[end:end + len(suffix)] == suffix:
+            end += len(suffix)
+            break
+    return end, value
+
+def _apostrophe(source, start):
+    first = source[start + 1:start + 2]
+    if not first:
+        return start + 1, "punct"
+    if first == "\\":
+        try_error, end = catch(_quoted_end, source, start)
+        return (end + 1, "char") if try_error == None else (start + 2, "lifetime")
+    if source[start + 2:start + 3] == "'":
+        return start + 3, "char"
+    if first in LETTERS:
+        return _until(source, start + 2, IDENT), "lifetime"
+    return start + 2, "lifetime"
+
+def tokenize(source):
+    tokens = []
+    next_index = 0
+    for index, char in enumerate(source.elems()):
+        if index < next_index or char in SPACE:
+            continue
+        two = source[index:index + 2]
+        if two == "//":
+            end = source.find("\n", index + 2)
+            next_index = len(source) if end < 0 else end
+            continue
+        if two == "/*":
+            next_index = _comment_end(source, index)
+            continue
+        kind, value = "punct", None
+        next_index = index + 1
+        if char == "r" or two in ["br", "cr"]:
+            raw = _raw(source, index if char == "r" else index + 1)
+            if raw != None:
+                next_index, value = raw
+                kind = "str" if char == "r" else "bytes"
+        if kind != "punct":
+            pass
+        elif char == "b" and source[index + 1:index + 2] in ['"', "'"]:
+            kind, next_index = "bytes", _quoted_end(source, index + 1) + 1
+        elif char == '"':
+            end = _quoted_end(source, index)
+            kind, next_index, value = "str", end + 1, _unescape(source[index + 1:end])
+        elif char == "'":
+            next_index, kind = _apostrophe(source, index)
+        elif char in LETTERS:
+            kind, next_index = "ident", _until(source, index + 1, IDENT)
+        elif char in DIGITS:
+            next_index, value = _number(source, index)
+            kind = "int" if value != None else "float"
+        elif two in _PAIR:
+            next_index = index + 2
+        tokens.append(struct(kind = kind, text = source[index:next_index], start = index, end = next_index, value = value))
+    return tokens
+
+def matching(tokens, start):
+    expected = []
+    for index in range(start, len(tokens)):
+        token = tokens[index]
+        if token.kind != "punct":
+            continue
+        if token.text in PAIRS:
+            expected.append(PAIRS[token.text])
+        elif token.text in PAIRS.values():
+            if not expected or expected.pop() != token.text:
+                fail("Unbalanced Rust token: " + token.text)
+            if not expected:
+                return index
+    fail("Unclosed Rust group")
+
+def _arguments(tokens, opening, closing):
+    args, current = [], []
+    depth = 0
+    for token in tokens[opening + 1:closing]:
+        if token.kind == "punct" and token.text in PAIRS:
+            depth += 1
+        elif token.kind == "punct" and token.text in PAIRS.values():
+            depth -= 1
+        if not depth and token.kind == "punct" and token.text == ",":
+            args.append(current)
+            current = []
+        else:
+            current.append(token)
+    if current:
+        args.append(current)
+    return args
+
+def _value(arg, bindings):
+    if len(arg) == 1:
+        token = arg[0]
+        return bindings.get(token.text) if token.kind == "ident" else (token.value if token.kind in ["int", "str"] else None)
+    if len(arg) == 2:
+        if arg[0].text == "-" and arg[1].kind == "int":
+            return -arg[1].value
+        if arg[0].text == "&" and arg[1].kind == "str":
+            return arg[1].value
+    return None
+
+def _function_body(tokens, start):
+    cursor = start
+    if tokens[cursor].text == "<":
+        depth = 0
+        for index in range(cursor, len(tokens)):
+            char = tokens[index].text
+            if char == "<":
+                depth += 1
+            elif char == ">":
+                depth -= 1
+                if not depth:
+                    cursor = index + 1
+                    break
+    if cursor >= len(tokens) or tokens[cursor].text != "(":
+        return None
+    close = matching(tokens, cursor)
+    params = []
+    for arg in _arguments(tokens, cursor, close):
+        words = [token.text for token in arg]
+        if ":" in words:
+            sep = words.index(":")
+            params.append((" ".join(words[:sep]), " ".join(words[sep + 1:])))
+        else:
+            params.append((" ".join(words), ""))
+    ret = []
+    for index in range(close + 1, len(tokens)):
+        char = tokens[index].text
+        if char == ";":
+            return None
+        if char == "{":
+            return params, " ".join(ret[1:]) if ret[:1] == ["->"] else "", (index, matching(tokens, index))
+        ret.append(char)
+    return None
+
+def _is_test(tokens, head):
+    end = head
+    for _ in range(head):
+        if end < 2 or tokens[end - 1].text != "]":
+            return False
+        depth = 0
+        opening = None
+        for i in range(end - 1, -1, -1):
+            text = tokens[i].text
+            if text == "]":
+                depth += 1
+            elif text == "[":
+                depth -= 1
+                if not depth:
+                    opening = i
+                    break
+        if not opening or tokens[opening - 1].text != "#":
+            return False
+        if [token.text for token in tokens[opening + 1:end - 1]] == ["test"]:
+            return True
+        end = opening - 1
+    return False
+
+def functions(tokens):
+    out = []
+    cursor = 0
+    for index, token in enumerate(tokens[:-2]):
+        if index < cursor or token.kind != "ident" or token.text != "fn" or tokens[index + 1].kind != "ident":
+            continue
+        body = _function_body(tokens, index + 2)
+        if body != None:
+            params, ret, brace = body
+            out.append(struct(name = tokens[index + 1].text, params = params, ret = ret, body = brace, is_test = _is_test(tokens, index)))
+            cursor = brace[0] + 1
+    return out
+
+def vesper_modules(source):
+    modules = {}
+    for tail in source.split("vesper::")[1:]:
+        end = _until(tail, 0, _LOW)
+        if end and tail[:end] != "self":
+            modules[tail[:end]] = True
+    for tail in source.split("use vesper::{")[1:]:
+        end = tail.find("};")
+        if end < 0:
+            continue
+        flattened = tail[:end].replace("{", " ").replace("}", " ").replace(",", " ")
+        for word in flattened.split():
+            end = _until(word, 0, _LOW)
+            if end and (end == len(word) or word[end:].startswith("::")) and word[:end] != "self":
+                modules[word[:end]] = True
+    return modules
+
+def _reached(tokens, functions, start):
+    pending, seen, paths, calls = [start], {}, {}, {}
+    for _ in range(len(functions)):
+        if not pending:
+            break
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen[name] = True
+        lo, hi = functions[name].body
+        for index in range(lo, hi):
+            token = tokens[index]
+            if token.text == "::" and tokens[index - 1].kind == "ident":
+                paths[tokens[index - 1].text] = True
+            if token.kind == "ident" and tokens[index + 1].text == "(":
+                call = token.text
+                calls[call] = True
+                if call in functions and call not in seen and call not in pending:
+                    pending.append(call)
+    return paths, calls
+
+def _helpers(source, tokens, funs):
+    ordinary = {fn.name: fn for fn in funs if not fn.is_test}
+    known = {}
+    modules = vesper_modules(source)
+    for fn in ordinary.values():
+        types = [kind for _, kind in fn.params]
+        names = [name for name, _ in fn.params]
+        if types[:2] != ["& str", "& str"]:
+            continue
+        if names[:2] == ["name", "source"]:
+            paths, calls = _reached(tokens, ordinary, fn.name)
+            extras = [path for path in paths if (path in modules or path.startswith("vesper_")) and path not in PROGRAM_PATHS]
+            if "jit_with_options" not in calls:
+                continue
+            if len(fn.params) == 3 and types[2] in _INTEGERS and not fn.ret:
+                kind = "value"
+            elif len(fn.params) == 2 and fn.ret in _INTEGERS:
+                kind = "value-ret"
+            else:
+                continue
+            reason = "also reaches " + ", ".join(sorted(extras)) if extras else ""
+            known[fn.name] = struct(kind = kind, name = fn.name, reason = reason, message = False)
+        elif names[:2] == ["source", "code"] and len(fn.params) in [2, 3]:
+            left, right = fn.body
+            text = source[tokens[left].start:tokens[right].end]
+            if "== code" not in text and "code ==" not in text:
+                continue
+            if len(fn.params) == 3 and (types[2] != "& str" or (".contains(%s)" % names[2]) not in text.replace(" ", "")):
+                continue
+            known[fn.name] = struct(kind = "error", name = fn.name, reason = "", message = len(fn.params) == 3)
+    return known
+
+def _statement_end(tokens, start, hi):
+    depth = 0
+    for index in range(start, hi):
+        token = tokens[index]
+        if token.kind != "punct":
+            continue
+        if token.text in PAIRS:
+            depth += 1
+        elif token.text in PAIRS.values():
+            depth -= 1
+            if depth < 0:
+                return index
+            if not depth and token.text == "}" and tokens[index + 1].text not in [".", ")", ",", ";", "else"]:
+                return index + 1
+        elif not depth and token.text == ";":
+            return index + 1
+    return hi
+
+def _case(test, kind, name, source, expected = None, code = None, message = None):
+    return struct(test = test, kind = kind, name = name, source = source, expected = expected, code = code, message = message)
+
+def _skip(test, reason):
+    return struct(test = test, reason = reason)
+
+def read_cases(source):
+    tokens = tokenize(source)
+    fns = functions(tokens)
+    helpers = _helpers(source, tokens, fns)
+    cases, skipped, covered = [], [], {}
+    tests = [fn.name for fn in fns if fn.is_test]
+    for fn in fns:
+        if not fn.is_test:
+            continue
+        left, right = fn.body
+        cursor, errors = left + 1, 0
+        found, uncovered = False, False
+        bindings = {}
+        for index in range(left + 1, right):
+            if index < cursor:
+                continue
+            t = tokens[index]
+            following = tokens[index + 1:index + 5]
+            texts = [token.text for token in following]
+            if t.text == "let" and len(texts) == 4 and following[0].kind == "ident" and texts[1] == "=" and following[2].kind == "str" and texts[3] == ";":
+                bindings[texts[0]] = following[2].value
+                cursor = index + 5
+                continue
+            if t.text == "assert_eq" and len(texts) == 4 and texts[:2] == ["!", "("] and texts[2] in helpers and helpers[texts[2]].kind == "value-ret" and texts[3] == "(":
+                outer = matching(tokens, index + 2)
+                args = _arguments(tokens, index + 2, outer)
+                inner = _arguments(tokens, index + 4, matching(tokens, index + 4))
+                helper = helpers[texts[2]]
+                values = [_value(arg, bindings) for arg in inner]
+                expected = _value(args[1], bindings) if len(args) >= 2 else None
+                if len(values) == 2 and all([type(value) == "string" for value in values]) and type(expected) == "int" and not helper.reason:
+                    cases.append(_case(fn.name, "value", values[0], values[1], expected = expected))
+                    found = True
+                else:
+                    uncovered = True
+                    skipped.append(_skip(fn.name, "`assert_eq!(%s(..), ..)`: %s" % (helper.name, helper.reason or "arguments are not literals")))
+                cursor = outer + 1
+                continue
+            if t.kind == "ident" and t.text in helpers and texts[:1] == ["("] and tokens[index - 1].text not in ["fn", "."]:
+                helper = helpers[t.text]
+                close = matching(tokens, index + 1)
+                values = [_value(arg, bindings) for arg in _arguments(tokens, index + 1, close)]
+                if helper.kind == "value" and len(values) == 3 and type(values[0]) == "string" and type(values[1]) == "string" and type(values[2]) == "int" and not helper.reason:
+                    cases.append(_case(fn.name, "value", values[0], values[1], expected = values[2]))
+                    found = True
+                elif helper.kind == "error" and len(values) == (3 if helper.message else 2) and all([type(value) == "string" for value in values]):
+                    errors += 1
+                    cases.append(_case(fn.name, "error", "%s_%d" % (fn.name, errors), values[0], code = values[1],
+                                       message = (values[2] or None) if helper.message else None))
+                    found = True
+                elif helper.kind != "value-ret":
+                    uncovered = True
+                    skipped.append(_skip(fn.name, "`%s(..)`: %s" % (helper.name, helper.reason or "arguments are not literals")))
+                cursor = close + 1
+                continue
+            if t.kind != "punct" or t.text != ";":
+                uncovered = True
+                cursor = _statement_end(tokens, index, right)
+        covered[fn.name] = found and not uncovered
+        if not found:
+            skipped.append(_skip(fn.name, "no case of a known helper shape"))
+        elif uncovered:
+            skipped.append(_skip(fn.name, "has statements besides converted cases (kept in Rust)"))
+    return struct(cases = cases, skipped = skipped, covered = covered, tests = tests)

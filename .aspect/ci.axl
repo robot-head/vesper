@@ -26,6 +26,7 @@ def _platform_tests(ctx: TaskContext) -> int:
         "recovery-fixtures",
         "canonical-protocol-fixtures",
         "crmath-reference",
+        "rust-test-conversion",
         "rust-census",
         "flip-gate",
         "profile-runner",
