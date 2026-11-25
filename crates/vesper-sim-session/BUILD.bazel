@@ -1,3 +1,41 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
-vesper_crate()
+# The datagram link model, the net-v1 network and the QUIC wire codec are
+# Vesper-only (SH5 lane 19, #1342): build.rs links the object built here
+# from the Loom package in port/ and checks port/binding.rs against the
+# generated binding, as for vesper-flux. The WAL, SHA-256, process and
+# failure parts of the port run only under the Cargo `vesper-port` feature
+# (port/test-port.sh).
+vesper_package(
+    name = "port_package",
+    srcs = glob(["port/src/**/*.ves"]),
+    manifest = "port/Loom.toml",
+)
+
+vesper_port_object(
+    name = "sim_vesper",
+    library = "sim",
+    package = ":port_package",
+    # As build.rs: the binding names the crate's boundary types.
+    rust_types = "crate::port",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "sim_vesper_binding",
+    srcs = [":sim_vesper"],
+    output_group = "rust_binding",
+)
+
+vesper_crate(
+    build_script_data = [
+        ":sim_vesper",
+        ":sim_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :sim_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :sim_vesper_binding)",
+    },
+)
