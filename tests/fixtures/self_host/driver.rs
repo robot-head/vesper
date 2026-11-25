@@ -435,6 +435,11 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     // SH5 lane 1 (#1324): `use` (#880) and `pub const`.
                     || path.ends_with("packages/vesper-codegen-base/walk")
                     || path.ends_with("crates/vesper-codegen-swap-test/walk-demo")
+                    // Claim #1829: the CLIF pass ports use `use` (#880) and
+                    // `pub const`.
+                    || path.ends_with("packages/vesper-clif")
+                    || path.ends_with("packages/vesper-native-vectorize")
+                    || path.ends_with("packages/vesper-native-cold-outline")
                 {
                     continue;
                 }
