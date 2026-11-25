@@ -679,11 +679,8 @@ impl Session {
                     return Err("driver: bad link request".into());
                 };
                 let explicit = linker.strip_prefix('=').map(Path::new);
-                let path = native::windows::link_executable(
-                    Path::new(object),
-                    Path::new(path),
-                    explicit,
-                )?;
+                let path =
+                    native::windows::link_executable(Path::new(object), Path::new(path), explicit)?;
                 self.text = path.display().to_string().into_bytes();
                 Ok(0)
             }
