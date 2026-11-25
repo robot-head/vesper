@@ -34,7 +34,10 @@ pub sugar guard: stmt {
             $pat => {
                 $..rest
             },
-            _ => $diverge,
+            _ => {
+                let rejected: Never = $diverge;
+                rejected
+            },
         }
     }
 }
