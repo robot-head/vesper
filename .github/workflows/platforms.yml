@@ -170,7 +170,9 @@ jobs:
           - name: macOS (AArch64)
             os: macos-latest
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # Passing runs take 30-55 min and "Test the codegen swap point" has grown,
+    # so 60 timed out on many PRs on 2026-11-25. Windows has 120 (#1537).
+    timeout-minutes: 120
     defaults:
       run:
         shell: bash

@@ -1,0 +1,684 @@
+// Mutation sites of `vesper test --mutate`: `rust_collect` of
+// src/test_mutants.rs (`collect_source_mutants`, `collect_mutants_in_fn`
+// and `find_operator_span`) over @vesper/ast's AST of the source.
+//
+// Input words: the source and the test names. Result words: the site
+// count and, per site sorted by (start, end, replacement), the function's
+// name, start, end, the original text and the replacement
+// (tests/common/test_mutants_words.rs).
+
+use @vesper/ast::{
+    ArgNode,
+    Ast,
+    ClauseNode,
+    ConfNode,
+    FnNode,
+    ImplNode,
+    ItemNode,
+    StmtNode,
+    expr_at,
+    list_at,
+    list_len,
+    lit_at,
+    none
+};
+use @vesper/ast::lower::{
+    lower_source
+};
+use @vesper-std/arena::{
+    idx_from_raw
+};
+use @vesper-std/intern::{
+    symbol_from_id
+};
+use @vesper/front::kinds::{
+    k_block_comment,
+    k_comment,
+    k_whitespace
+};
+use self::discover::{
+    Toks,
+    case_marker,
+    is_test_marker,
+    preceding_comments,
+    toks
+};
+use self::util::{
+    Reader,
+    add,
+    inc,
+    is_text,
+    put_text,
+    same,
+    sub,
+    trim_end,
+    trim_start,
+    u8_at,
+    u64_at
+};
+
+// The interned operators a site can replace.
+struct Ops {
+    plus: u32,
+    minus: u32,
+    star: u32,
+    eq_eq: u32,
+    ne: u32,
+    lt: u32,
+    le: u32,
+    gt: u32,
+    ge: u32,
+    and: u32,
+    or: u32,
+    not: u32,
+    plus_eq: u32,
+    minus_eq: u32
+}
+
+fn ops_new(inout a: Ast) -> Ops {
+    Ops {
+        plus: a.names.intern(in "+").id(),
+        minus: a.names.intern(in "-").id(),
+        star: a.names.intern(in "*").id(),
+        eq_eq: a.names.intern(in "==").id(),
+        ne: a.names.intern(in "!=").id(),
+        lt: a.names.intern(in "<").id(),
+        le: a.names.intern(in "<=").id(),
+        gt: a.names.intern(in ">").id(),
+        ge: a.names.intern(in ">=").id(),
+        and: a.names.intern(in "&&").id(),
+        or: a.names.intern(in "||").id(),
+        not: a.names.intern(in "!").id(),
+        plus_eq: a.names.intern(in "+=").id(),
+        minus_eq: a.names.intern(in "-=").id()
+    }
+}
+
+// The sites found so far: per site the function's name symbol, start,
+// end, and the original and replacement as `code` numbers (`code_text`).
+struct Sites {
+    words: ChunkSeq[u64]
+}
+
+// Site texts: 1-14 operators, 15 "true", 16 "false", 17 " " (a dropped `!`).
+fn code_text(c: u64) -> Str {
+    match c {
+        1 => "+",
+        2 => "-",
+        3 => "*",
+        4 => "==",
+        5 => "!=",
+        6 => "<",
+        7 => "<=",
+        8 => ">",
+        9 => ">=",
+        10 => "&&",
+        11 => "||",
+        12 => "!",
+        13 => "+=",
+        14 => "-=",
+        15 => "true",
+        16 => "false",
+        _ => " ",
+    }
+}
+
+fn site(inout s: Sites, name: u32, start: u64, end: u64, original: u64, replacement: u64) {
+    s.words.push(widen_u64(name));
+    s.words.push(start);
+    s.words.push(end);
+    s.words.push(original);
+    s.words.push(replacement);
+}
+
+// The binary operator code of `op` and its one or two replacement codes
+// (0 when none): `collect_mutants_in_fn`'s table.
+fn binary_codes(in o: Ops, op: u32) -> (u64, u64, u64) {
+    if op == o.plus {
+        (1, 2, 0)
+    } else if op == o.minus {
+        (2, 1, 0)
+    } else if op == o.star {
+        (3, 1, 0)
+    } else if op == o.eq_eq {
+        (4, 5, 0)
+    } else if op == o.ne {
+        (5, 4, 0)
+    } else if op == o.lt {
+        (6, 7, 9)
+    } else if op == o.le {
+        (7, 6, 8)
+    } else if op == o.gt {
+        (8, 9, 7)
+    } else if op == o.ge {
+        (9, 8, 6)
+    } else if op == o.and {
+        (10, 11, 0)
+    } else if op == o.or {
+        (11, 10, 0)
+    } else {
+        (0, 0, 0)
+    }
+}
+
+// `find_operator_span`: the first non-trivia token within
+// `[range_start, range_end]` whose text is `op`, as (found, start, end).
+fn find_operator(in src: Slice[u8], in t: Toks, range_start: u64, range_end: u64, in op: Str)
+    -> (bool, u64, u64) {
+    // partition_point(|t| t.span.start < range_start)
+    let mut lo: u64 = 0;
+    let mut hi = t.kind.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = add(lo, sub(hi, lo) / 2);
+        if u64_at(in t.start, mid) < range_start {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+    let n = t.kind.len();
+    let mut i = lo;
+    loop {
+        if i >= n {
+            break;
+        }
+        let s = u64_at(in t.start, i);
+        let e = u64_at(in t.end, i);
+        if e > range_end {
+            break;
+        }
+        let k = u8_at(in t.kind, i);
+        if k != k_whitespace()
+            && k != k_comment()
+            && k != k_block_comment()
+            && is_text(in src, s, e, in op) {
+            return (true, s, e);
+        }
+        i = inc(i);
+    }
+    (false, 0, 0)
+}
+
+fn stmt_at(in a: Ast, i: u32) -> StmtNode {
+    a
+        .stmts
+        .get_or(
+            idx_from_raw[StmtNode](i),
+            StmtNode {
+                kind: 0,
+                pat: 0,
+                ty: 0,
+                value: 0,
+                mutable: false
+            }
+        )
+}
+
+fn arg_at(in a: Ast, i: u32) -> ArgNode {
+    a
+        .args
+        .get_or(
+            idx_from_raw[ArgNode](i),
+            ArgNode {
+                pass: 0,
+                explicit: false,
+                expr: 0
+            }
+        )
+}
+
+fn clause_at(in a: Ast, i: u32) -> ClauseNode {
+    a
+        .clauses
+        .get_or(
+            idx_from_raw[ClauseNode](i),
+            ClauseNode {
+                name: 0,
+                pats: 0,
+                body: 0
+            }
+        )
+}
+
+fn fn_at(in a: Ast, i: u32) -> FnNode {
+    a
+        .fns
+        .get_or(
+            idx_from_raw[FnNode](i),
+            FnNode {
+                name: 0,
+                fip: false,
+                generics: 0,
+                params: 0,
+                result: 0,
+                effects: 0,
+                body: none(),
+                start: 0,
+                end: 0
+            }
+        )
+}
+
+// Pushes the elements of `list` (`stride` words each, the expression at
+// word `at`) in reverse order.
+fn push_rev(inout stack: ChunkSeq[u32], in a: Ast, list: u32, stride: u64, at: u64) {
+    let len = list_len(in a, list);
+    let n = if stride == 2 {
+        len / 2
+    } else {
+        len
+    };
+    let mut k = n;
+    loop {
+        if k == 0 {
+            break;
+        }
+        k = sub(k, 1);
+        stack.push(list_at(in a, list, add(wrapping_mul(k, stride), at)));
+    }
+}
+
+// `collect_mutants_in_fn` for the function `f`.
+fn collect_in_fn(
+    in src: Slice[u8],
+    in t: Toks,
+    in a: Ast,
+    in o: Ops,
+    in f: FnNode,
+    inout stack: ChunkSeq[u32],
+    inout out: Sites
+) {
+    if f.body == none() {
+        return;
+    }
+    stack.clear();
+    stack.push(f.body);
+    let mut visited: u64 = 0;
+    loop {
+        let n = stack.len();
+        if n == 0 {
+            break;
+        }
+        let ei = match stack.try_get(sub(n, 1)) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        stack.truncate(sub(n, 1));
+        visited = inc(visited);
+        if visited > 16384 {
+            break;
+        }
+        let e = expr_at(in a, ei);
+        let k = e.kind;
+        if k == 1 {
+            let lit = lit_at(in a, e.a);
+            if lit.kind == 3 {
+                let s = widen_u64(e.start);
+                let z = widen_u64(e.end);
+                if z <= src.len() && s <= z {
+                    let ts = trim_start(in src, s, z);
+                    let te = trim_end(in src, ts, z);
+                    let value = lit.bits != 0;
+                    if value && is_text(in src, ts, te, in "true") {
+                        site(inout out, f.name, ts, te, 15, 16);
+                    } else if !value && is_text(in src, ts, te, in "false") {
+                        site(inout out, f.name, ts, te, 16, 15);
+                    }
+                }
+            }
+        } else if k == 10 {
+            if e.a == o.not {
+                let inner = expr_at(in a, e.b);
+                let (found, s, z) = find_operator(
+                    in src,
+                    in t,
+                    widen_u64(e.start),
+                    widen_u64(inner.start),
+                    in "!"
+                );
+                if found {
+                    site(inout out, f.name, s, z, 12, 17);
+                }
+            }
+            stack.push(e.b);
+        } else if k == 11 {
+            let (code, r1, r2) = binary_codes(in o, e.a);
+            if code != 0 {
+                let lhs = expr_at(in a, e.b);
+                let rhs = expr_at(in a, e.c);
+                let (found, s, z) = find_operator(
+                    in src,
+                    in t,
+                    widen_u64(lhs.end),
+                    widen_u64(rhs.start),
+                    in code_text(code)
+                );
+                if found {
+                    site(inout out, f.name, s, z, code, r1);
+                    if r2 != 0 {
+                        site(inout out, f.name, s, z, code, r2);
+                    }
+                }
+            }
+            stack.push(e.c);
+            stack.push(e.b);
+        } else if k == 12 {
+            let mut code: u64 = 0;
+            let mut rep: u64 = 0;
+            if e.a == o.plus_eq {
+                code = 13;
+                rep = 14;
+            } else if e.a == o.minus_eq {
+                code = 14;
+                rep = 13;
+            }
+            if code != 0 {
+                let lhs = expr_at(in a, e.b);
+                let rhs = expr_at(in a, e.c);
+                let (found, s, z) = find_operator(
+                    in src,
+                    in t,
+                    widen_u64(lhs.end),
+                    widen_u64(rhs.start),
+                    in code_text(code)
+                );
+                if found {
+                    site(inout out, f.name, s, z, code, rep);
+                }
+            }
+            stack.push(e.c);
+            stack.push(e.b);
+        } else if k == 3 {
+            push_rev(inout stack, in a, e.a, 1, 0);
+        } else if k == 4 {
+            push_rev(inout stack, in a, e.b, 2, 1);
+        } else if k == 5 {
+            if e.b != none() {
+                stack.push(e.b);
+            }
+            let m = list_len(in a, e.a);
+            let mut q = m;
+            loop {
+                if q == 0 {
+                    break;
+                }
+                q = sub(q, 1);
+                let st = stmt_at(in a, list_at(in a, e.a, q));
+                stack.push(st.value);
+            }
+        } else if k == 6 {
+            let m = list_len(in a, e.c);
+            let mut q = m;
+            loop {
+                if q == 0 {
+                    break;
+                }
+                q = sub(q, 1);
+                stack.push(arg_at(in a, list_at(in a, e.c, q)).expr);
+            }
+            stack.push(e.a);
+        } else if k == 7 || k == 9 {
+            stack.push(e.a);
+        } else if k == 8 {
+            stack.push(e.b);
+            stack.push(e.a);
+        } else if k == 13 {
+            if e.c != none() {
+                stack.push(e.c);
+            }
+            stack.push(e.b);
+            stack.push(e.a);
+        } else if k == 14 {
+            push_rev(inout stack, in a, e.b, 2, 1);
+            stack.push(e.a);
+        } else if k == 15 {
+            stack.push(e.e);
+        } else if k == 17 {
+            stack.push(e.a);
+        } else if k == 18 {
+            // control_children [iter, body], reversed onto the stack.
+            stack.push(e.c);
+            stack.push(e.b);
+        } else if k == 19 {
+            stack.push(e.b);
+            stack.push(e.a);
+        } else if k == 20 || k == 21 {
+            if e.a != none() {
+                stack.push(e.a);
+            }
+        } else if k == 16 {
+            // The clauses: the return clause, then the operations.
+            let m = list_len(in a, e.e);
+            let mut q = m;
+            loop {
+                if q <= 1 {
+                    break;
+                }
+                q = sub(q, 1);
+                stack.push(clause_at(in a, list_at(in a, e.e, q)).body);
+            }
+            if m > 0 {
+                stack.push(clause_at(in a, list_at(in a, e.e, 0)).body);
+            }
+            stack.push(e.d);
+            if e.b != none() {
+                stack.push(e.c);
+            }
+        }
+    }
+}
+
+// Whether `src[s..e]` is one of the test names in the input `b`.
+fn is_test_name(in b: Slice[u8], in names: ChunkSeq[u64], in name: Slice[u8]) -> bool {
+    let n = names.len() / 2;
+    for i in 0..n {
+        let s = u64_at(in names, wrapping_mul(i, 2));
+        let e = u64_at(in names, inc(wrapping_mul(i, 2)));
+        if same(in b, s, e, in name, 0, name.len()) {
+            return true;
+        }
+    }
+    false
+}
+
+// Site `i`'s word `w` of `s`.
+fn sw(in s: Sites, i: u64, w: u64) -> u64 {
+    u64_at(in s.words, add(wrapping_mul(i, 5), w))
+}
+
+// Whether site `x` sorts before site `y`: (start, end, replacement text).
+fn site_less(in s: Sites, x: u64, y: u64) -> bool {
+    let (xs, ys) = (sw(in s, x, 1), sw(in s, y, 1));
+    if xs != ys {
+        return xs < ys;
+    }
+    let (xe, ye) = (sw(in s, x, 2), sw(in s, y, 2));
+    if xe != ye {
+        return xe < ye;
+    }
+    let p = code_text(sw(in s, x, 4)).as_bytes();
+    let q = code_text(sw(in s, y, 4)).as_bytes();
+    let n = p.len();
+    let m = q.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n || i >= m {
+            break;
+        }
+        let (c, d) = (u8_at_slice(in p, i), u8_at_slice(in q, i));
+        if c != d {
+            return c < d;
+        }
+        i = inc(i);
+    }
+    n < m
+}
+
+fn u8_at_slice(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(c) => c,
+        Option::None => 0,
+    }
+}
+
+// `rust_collect` over the input words.
+pub fn collect(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let (ss, se) = r.text(in b);
+    let count = r.word(in b);
+    let mut names: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..count {
+        let (s, e) = r.text(in b);
+        names.push(s);
+        names.push(e);
+    }
+    let src = b[ss..se];
+    let text = match String::from_utf8(in src) {
+        Option::Some(x) => x,
+        Option::None => String::new(),
+    };
+    let mut l = lower_source(in text.as_str());
+    let o = ops_new(inout l.ast);
+    let t = toks(in src);
+    let mut out = Sites {
+        words: ChunkSeq::new[u64]()
+    };
+    let mut stack: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut comments: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut name: String = String::new();
+    let items = l.ast.m_items.len();
+    for i in 0..items {
+        let it = match l.ast.m_items.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let item = l
+            .ast
+            .items
+            .get_or(
+                idx_from_raw[ItemNode](it),
+                ItemNode {
+                    kind: 0,
+                    node: 0
+                }
+            );
+        if item.kind == 2 {
+            let f = fn_at(in l.ast, item.node);
+            name.clear();
+            let ok = l.ast.names.resolve_into(symbol_from_id(f.name), inout name);
+            let nb = name.as_bytes();
+            let mut test = is_test_name(in b, in names, in nb)
+                || starts_with_bytes(in nb, in "test_");
+            if !test {
+                preceding_comments(in t, widen_u64(f.start), inout comments);
+                let m = comments.len() / 2;
+                for q in 0..m {
+                    let cs = u64_at(in comments, wrapping_mul(q, 2));
+                    let ce = u64_at(in comments, inc(wrapping_mul(q, 2)));
+                    let (row, x, y) = case_marker(in src, cs, ce);
+                    if is_test_marker(in src, cs, ce) || row {
+                        test = true;
+                    }
+                }
+            }
+            if !test {
+                collect_in_fn(in src, in t, in l.ast, in o, in f, inout stack, inout out);
+            }
+        } else if item.kind == 4 {
+            let im = l
+                .ast
+                .impls
+                .get_or(
+                    idx_from_raw[ImplNode](item.node),
+                    ImplNode {
+                        ty: 0,
+                        generics: 0,
+                        methods: 0
+                    }
+                );
+            let m = list_len(in l.ast, im.methods);
+            for q in 0..m {
+                let f = fn_at(in l.ast, list_at(in l.ast, im.methods, q));
+                collect_in_fn(in src, in t, in l.ast, in o, in f, inout stack, inout out);
+            }
+        } else if item.kind == 6 {
+            let c = l
+                .ast
+                .confs
+                .get_or(
+                    idx_from_raw[ConfNode](item.node),
+                    ConfNode {
+                        model: 0,
+                        public: false,
+                        generics: 0,
+                        trait_ref: 0,
+                        self_ty: 0,
+                        wheres: 0,
+                        assoc: 0,
+                        methods: 0,
+                        start: 0,
+                        end: 0
+                    }
+                );
+            let m = list_len(in l.ast, c.methods);
+            for q in 0..m {
+                let f = fn_at(in l.ast, list_at(in l.ast, c.methods, q));
+                collect_in_fn(in src, in t, in l.ast, in o, in f, inout stack, inout out);
+            }
+        }
+    }
+    // A stable insertion sort of the site indices (the walk is close to
+    // source order already).
+    let n = out.words.len() / 5;
+    let mut order: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    for i in 0..n {
+        order.push(i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev = u64_at(in order, sub(j, 1));
+            let cur = u64_at(in order, j);
+            if !site_less(in out, cur, prev) {
+                break;
+            }
+            let ok1 = order.try_set(sub(j, 1), cur);
+            let ok2 = order.try_set(j, prev);
+            j = sub(j, 1);
+        }
+    }
+    let mut res: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    res.push(0);
+    res.push(n);
+    for i in 0..n {
+        let x = u64_at(in order, i);
+        name.clear();
+        let ok = l
+            .ast
+            .names
+            .resolve_into(symbol_from_id(wrapping_u32(sw(in out, x, 0))), inout name);
+        let nb = name.as_bytes();
+        put_text(inout res, in nb, 0, nb.len());
+        res.push(sw(in out, x, 1));
+        res.push(sw(in out, x, 2));
+        let orig = code_text(sw(in out, x, 3)).as_bytes();
+        put_text(inout res, in orig, 0, orig.len());
+        let rep = code_text(sw(in out, x, 4)).as_bytes();
+        put_text(inout res, in rep, 0, rep.len());
+    }
+    res
+}
+
+fn starts_with_bytes(in b: Slice[u8], in w: Str) -> bool {
+    let c = w.as_bytes();
+    if b.len() < c.len() {
+        return false;
+    }
+    same(in b, 0, c.len(), in c, 0, c.len())
+}

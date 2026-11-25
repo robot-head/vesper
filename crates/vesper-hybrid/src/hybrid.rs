@@ -8,8 +8,17 @@
 //! Set `VESPER_HYBRID_STATS=1` to print, at exit, how many calls each
 //! swapped module answered from Vesper (the differential harness uses it to
 //! show the pilot really ran) and what each checker swap's input and output
-//! cost (`stats`; `VESPER_HYBRID_STATS=time` adds the Rust pass).
+//! cost (`stats`; `VESPER_HYBRID_STATS=time` adds the Rust pass), and
+//! which swaps were on.
+//!
+//! Set `VESPER_HYBRID_SWAPS=gated` to install only the swaps whose flip gate
+//! passed, or `none` for none (`swaps`).
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+// Which swaps `install` installs: all, the flip-gated ones, or none
+// (`VESPER_HYBRID_SWAPS`, SH6 lane 2, #1397).
+#[path = "swaps.rs"]
+mod swaps;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
@@ -220,6 +229,14 @@ mod test_runner_words;
 // package's tests/self_host_doctest_extract.rs.
 #[path = "../../../tests/common/doctest_extract_words.rs"]
 mod doctest_extract_words;
+// The mutation-site words (SH5 lane 14 part 3), shared with the root
+// package's tests/self_host_test_mutants.rs.
+#[path = "../../../tests/common/test_mutants_words.rs"]
+mod test_mutants_words;
+// The doctest source guard words (SH5 lane 14 part 5), shared with the
+// root package's tests/self_host_doctest_guard.rs.
+#[path = "../../../tests/common/doctest_guard_words.rs"]
+mod doctest_guard_words;
 
 // The inliner swap's encoder and decoder (#1250), shared with the root
 // package's tests/self_host_ir_inline.rs.
@@ -369,6 +386,45 @@ const VESPER_WORD_LAYOUT: vesper::layout::WordLayout = vesper::layout::WordLayou
         layout_binding::word_offset(index)
     },
 };
+
+thread_local! {
+    /// When the Vesper driver started its own parse (`driver_parse_begin`),
+    /// with stats on.
+    static DRIVER_PARSE_START: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Whether the Vesper driver parses a standalone source itself: only with
+/// the parse swap installed (`VESPER_HYBRID_SWAPS`), since its parse is the
+/// swap's. Starts the clock of the parse's Vesper time when stats are on.
+pub(crate) fn driver_parse_begin() -> bool {
+    let on = swaps::on("parse");
+    if on && stats::level() > 0 {
+        DRIVER_PARSE_START.with(|t| t.set(Some(std::time::Instant::now())));
+    }
+    on
+}
+
+/// A parse the Vesper driver ran (`modules/driver/src/front.ves`), read
+/// back from its `parse_words` stream like the parse swap's; its Vesper
+/// time runs from `driver_parse_begin`.
+pub(crate) fn driver_parse(source: &str, words: &[u64]) -> vesper_syntax::parser::Parse {
+    PARSE_CALLS.fetch_add(1, Relaxed);
+    if let Some(start) = DRIVER_PARSE_START.with(|t| t.take()) {
+        stats::PARSE
+            .vesper
+            .fetch_add(start.elapsed().as_nanos() as u64, Relaxed);
+    }
+    let timer = stats::Timer::start();
+    let parsed = parse_words::decode(source, words);
+    timer.lap(&stats::PARSE.decode);
+    stats::PARSE.call(
+        false,
+        || vesper_syntax::parser::rust_parse(source),
+        |rust| *rust == parsed,
+    );
+    parsed
+}
 
 /// `vesper_syntax::parser::ParseTable` from `modules/parse`: the front end
 /// v2 and the AST of `@vesper/ast`, read back by `parse_words::decode`.
@@ -1670,6 +1726,27 @@ const VESPER_DOCTEST_EXTRACT: vesper::doctest_extract::DocTestExtractTable =
         },
     };
 
+/// `vesper::test_mutants::TestMutantsTable` from `modules/test_runner`: the
+/// mutation sites of `@vesper/test-runner` (over `@vesper/ast`).
+const VESPER_TEST_MUTANTS: vesper::test_mutants::TestMutantsTable =
+    vesper::test_mutants::TestMutantsTable {
+        collect: |source, test_names| {
+            let input = test_mutants_words::collect_input(source, test_names);
+            test_mutants_words::decode_collect(&test_runner_binding::mutants_words(&input))
+        },
+    };
+
+/// `vesper::doctest_guard::DocTestGuardTable` from `modules/test_runner`:
+/// the doctest source profile of `@vesper/test-runner`, which parses the
+/// source again with `@vesper/ast`.
+const VESPER_DOCTEST_GUARD: vesper::doctest_guard::DocTestGuardTable =
+    vesper::doctest_guard::DocTestGuardTable {
+        guard: |source, _, limits| {
+            let input = doctest_guard_words::guard_input(source, limits);
+            doctest_guard_words::decode_guard(&test_runner_binding::doctest_guard_words(&input))
+        },
+    };
+
 /// `ir_swap`'s `inline` hook from `modules/ir_inline`: the inliner of
 /// `@vesper/ir-inline`. The package decides and splices; the hook encodes
 /// the world's answers and the program, and reads the report and the
@@ -1864,27 +1941,36 @@ fn versioned_loops(program: &vesper::ir::Program) -> usize {
 }
 
 extern "C" fn install() {
+    use swaps::on;
+    // Read the set first: an unknown value stops here, before any swap.
+    swaps::set();
     // Nothing runs before this constructor, so the slots are empty.
-    if vesper::layout::install_word_layout(VESPER_WORD_LAYOUT).is_err() {
+    if on("word_layout") && vesper::layout::install_word_layout(VESPER_WORD_LAYOUT).is_err() {
         std::process::abort();
     }
-    if vesper_syntax::parser::install_parse(VESPER_PARSE).is_err() {
+    if on("parse") && vesper_syntax::parser::install_parse(VESPER_PARSE).is_err() {
         std::process::abort();
     }
-    if vesper::layout::install_layout(VESPER_LAYOUT).is_err() {
+    if on("layout") && vesper::layout::install_layout(VESPER_LAYOUT).is_err() {
         std::process::abort();
     }
-    if vesper::ir_check::install_ir_check(VESPER_IR_CHECK).is_err() {
+    if on("ir_check") && vesper::ir_check::install_ir_check(VESPER_IR_CHECK).is_err() {
         std::process::abort();
     }
-    if vesper::stack_bound::install_stack_bound(VESPER_STACK_BOUND).is_err() {
+    if on("stack_bound") && vesper::stack_bound::install_stack_bound(VESPER_STACK_BOUND).is_err() {
         std::process::abort();
     }
-    if vesper::tensor_types::install_tensor_check(VESPER_TENSOR_CHECK).is_err() {
+    if on("tensor_check")
+        && vesper::tensor_types::install_tensor_check(VESPER_TENSOR_CHECK).is_err()
+    {
         std::process::abort();
     }
-    vesper::capability_effects::install_effects_check(VESPER_EFFECTS_CHECK);
-    vesper::fip::install_fip_check(VESPER_FIP_CHECK);
+    if on("effects") {
+        vesper::capability_effects::install_effects_check(VESPER_EFFECTS_CHECK);
+    }
+    if on("fip") {
+        vesper::fip::install_fip_check(VESPER_FIP_CHECK);
+    }
     // Swaps keep one input per compilation (SH4 lane 2, #1276).
     // `VESPER_HYBRID_SCOPES=0` encodes per call instead (the before side of
     // the report's measurement).
@@ -1892,50 +1978,76 @@ extern "C" fn install() {
         vesper::swap_input::enable();
     }
     let hooks = vesper::codegen_swap::CodegenHooks {
-        aggregate: Some(vesper_aggregate),
-        drops: (!std::env::var_os("VESPER_HYBRID_DROPS").is_some_and(|v| v == "0"))
+        aggregate: on("aggregate").then_some(vesper_aggregate),
+        drops: (on("drops") && !std::env::var_os("VESPER_HYBRID_DROPS").is_some_and(|v| v == "0"))
             .then_some(vesper_drops as vesper::codegen_swap::Hook),
-        call: Some(vesper_call),
-        wasm: Some(vesper_wasm),
-        ebpf: (!std::env::var_os("VESPER_HYBRID_EBPF").is_some_and(|v| v == "0"))
+        call: on("call").then_some(vesper_call),
+        wasm: on("wasm").then_some(vesper_wasm),
+        ebpf: (on("ebpf") && !std::env::var_os("VESPER_HYBRID_EBPF").is_some_and(|v| v == "0"))
             .then_some(vesper_ebpf as vesper::codegen_swap::EbpfHook),
-        freestanding: (!std::env::var_os("VESPER_HYBRID_FREESTANDING").is_some_and(|v| v == "0"))
-            .then_some(vesper_freestanding as vesper::codegen_swap::FreestandingHook),
-        verifiers: (!std::env::var_os("VESPER_HYBRID_VERIFIERS").is_some_and(|v| v == "0"))
-            .then_some(vesper_verifiers as vesper::codegen_swap::VerifierHook),
-        register_locals: (!std::env::var_os("VESPER_HYBRID_WALK").is_some_and(|v| v == "0"))
-            .then_some(vesper_register_locals as vesper::codegen_swap::RegisterLocalsHook),
-        component: Some(vesper_component),
-        numeric: Some(vesper_numeric),
-        seq: (!std::env::var_os("VESPER_HYBRID_SEQ").is_some_and(|v| v == "0"))
+        freestanding: (on("freestanding")
+            && !std::env::var_os("VESPER_HYBRID_FREESTANDING").is_some_and(|v| v == "0"))
+        .then_some(vesper_freestanding as vesper::codegen_swap::FreestandingHook),
+        verifiers: (on("verifiers")
+            && !std::env::var_os("VESPER_HYBRID_VERIFIERS").is_some_and(|v| v == "0"))
+        .then_some(vesper_verifiers as vesper::codegen_swap::VerifierHook),
+        register_locals: (on("register_locals")
+            && !std::env::var_os("VESPER_HYBRID_WALK").is_some_and(|v| v == "0"))
+        .then_some(vesper_register_locals as vesper::codegen_swap::RegisterLocalsHook),
+        component: on("component").then_some(vesper_component),
+        numeric: on("numeric").then_some(vesper_numeric),
+        seq: (on("seq") && !std::env::var_os("VESPER_HYBRID_SEQ").is_some_and(|v| v == "0"))
             .then_some(vesper_seq as vesper::codegen_swap::Hook),
-        control: (!std::env::var_os("VESPER_HYBRID_CONTROL").is_some_and(|v| v == "0"))
-            .then_some(vesper_control as vesper::codegen_swap::Hook),
-        ffi: (!std::env::var_os("VESPER_HYBRID_FFI").is_some_and(|v| v == "0"))
+        control: (on("control")
+            && !std::env::var_os("VESPER_HYBRID_CONTROL").is_some_and(|v| v == "0"))
+        .then_some(vesper_control as vesper::codegen_swap::Hook),
+        ffi: (on("ffi") && !std::env::var_os("VESPER_HYBRID_FFI").is_some_and(|v| v == "0"))
             .then_some(vesper_ffi as vesper::codegen_swap::Hook),
         // `VESPER_HYBRID_SCALAR=0` leaves scalars to Rust (the scoreboard's
         // before side).
-        scalar: (!std::env::var_os("VESPER_HYBRID_SCALAR").is_some_and(|v| v == "0"))
-            .then_some(vesper_scalar as vesper::codegen_swap::Hook),
-        export: Some(vesper_export),
-        plan: Some(vesper_plan),
-        interface_json: Some(vesper_interface_json),
+        scalar: (on("scalar")
+            && !std::env::var_os("VESPER_HYBRID_SCALAR").is_some_and(|v| v == "0"))
+        .then_some(vesper_scalar as vesper::codegen_swap::Hook),
+        export: on("export").then_some(vesper_export),
+        plan: on("plan").then_some(vesper_plan),
+        interface_json: on("interface_json").then_some(vesper_interface_json),
     };
     if vesper::codegen_swap::install(hooks).is_err() {
         std::process::abort();
     }
-    if vesper::test_discovery::install_test_discovery(VESPER_TEST_DISCOVERY).is_err() {
+    if on("test_discovery")
+        && vesper::test_discovery::install_test_discovery(VESPER_TEST_DISCOVERY).is_err()
+    {
         std::process::abort();
     }
-    if vesper::doctest_extract::install_doctest_extract(VESPER_DOCTEST_EXTRACT).is_err() {
+    if on("doctest_extract")
+        && vesper::doctest_extract::install_doctest_extract(VESPER_DOCTEST_EXTRACT).is_err()
+    {
         std::process::abort();
     }
-    if vesper::ir_swap::install(VESPER_IR_PASSES).is_err() {
+    if on("test_mutants")
+        && vesper::test_mutants::install_test_mutants(VESPER_TEST_MUTANTS).is_err()
+    {
+        std::process::abort();
+    }
+    if on("doctest_guard")
+        && vesper::doctest_guard::install_doctest_guard(VESPER_DOCTEST_GUARD).is_err()
+    {
+        std::process::abort();
+    }
+    let passes = vesper::ir_swap::IrPasses {
+        lower: VESPER_IR_PASSES.lower.filter(|_| on("ir_lower")),
+        opt: VESPER_IR_PASSES.opt.filter(|_| on("ir_opt")),
+        inline: VESPER_IR_PASSES.inline.filter(|_| on("inline")),
+        hoist: VESPER_IR_PASSES.hoist.filter(|_| on("hoist")),
+    };
+    if vesper::ir_swap::install(passes).is_err() {
         std::process::abort();
     }
     // The request layout the Rust encoder writes must be the module's.
-    if doc_binding::doc_format() != vesper_doc::swap::FORMAT
-        || vesper_doc::swap::install_render(VESPER_DOC).is_err()
+    if on("doc")
+        && (doc_binding::doc_format() != vesper_doc::swap::FORMAT
+            || vesper_doc::swap::install_render(VESPER_DOC).is_err())
     {
         std::process::abort();
     }
@@ -1950,19 +2062,25 @@ extern "C" fn install() {
     } else {
         VESPER_OPTIMIZE
     };
-    if vesper::optimize::install_optimize(table).is_err() {
+    if on("optimize") && vesper::optimize::install_optimize(table).is_err() {
         std::process::abort();
     }
-    if vesper::pact_frontend::install_declaration_pass(VESPER_DECLARATION_PASS).is_err() {
+    if on("declaration_pass")
+        && vesper::pact_frontend::install_declaration_pass(VESPER_DECLARATION_PASS).is_err()
+    {
         std::process::abort();
     }
-    if vesper::pact_frontend::install_pact_session(VESPER_PACT_SESSION).is_err() {
+    if on("pact_session")
+        && vesper::pact_frontend::install_pact_session(VESPER_PACT_SESSION).is_err()
+    {
         std::process::abort();
     }
-    if vesper::pact_frontend::install_builtin_wanted(VESPER_BUILTIN_WANTED).is_err() {
+    if on("builtin_wanted")
+        && vesper::pact_frontend::install_builtin_wanted(VESPER_BUILTIN_WANTED).is_err()
+    {
         std::process::abort();
     }
-    if vesper::pact_frontend::install_deps_pass(VESPER_DEPS_PASS).is_err() {
+    if on("deps_pass") && vesper::pact_frontend::install_deps_pass(VESPER_DEPS_PASS).is_err() {
         std::process::abort();
     }
     if std::env::var_os("VESPER_HYBRID_STATS").is_some_and(|v| v == "1" || v == "time") {
@@ -2122,6 +2240,7 @@ extern "C" fn report() {
         "vesper-hybrid: the command layers printed {} times from Vesper",
         crate::commands::PRINTS.load(Relaxed)
     );
+    swaps::report();
 }
 
 // Run `install` before `main` (the platform's static-constructor section).

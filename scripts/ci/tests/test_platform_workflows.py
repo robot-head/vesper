@@ -101,7 +101,7 @@ class PlatformWorkflowTests(unittest.TestCase):
             checkout = next(s for s in job["steps"] if s.get("uses") == "actions/checkout@v4")
             self.assertEqual(checkout["with"]["ref"], "${{ needs.plan.outputs.sha }}")
             self.assertTrue(any(s.get("name") == "Verify exact checkout" for s in job["steps"]))
-        self.assertEqual(mac["timeout-minutes"], "60")
+        self.assertEqual(mac["timeout-minutes"], "120")
         self.assertEqual(windows["timeout-minutes"], "120")
         for job, command in [(mac, "aspect ci verify-platform-checkout"),
                              (windows, "./scripts/windows/verify-platform-checkout.ps1")]:

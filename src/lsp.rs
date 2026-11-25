@@ -44,6 +44,80 @@ pub fn proof_models_for_port(
         })
         .collect()
 }
+/// The ownership facts behind Lens views (`lens::View::checked`) as text,
+/// for the Vesper port's differential test.
+#[doc(hidden)]
+pub fn lens_facts_for_port(
+    snapshot: std::sync::Arc<crate::tooling::frontend::CheckedSource>,
+    cursors: &[usize],
+) -> String {
+    lens::facts_dump(snapshot, cursors)
+}
+/// The repaired text and regions of a syntax-damaged document
+/// (`lens::repair`) as text, for the Vesper port's differential test.
+#[doc(hidden)]
+pub fn lens_repair_for_port(
+    syntax: &vesper_syntax::recovery::RecoverySyntax,
+    limits: crate::tooling::frontend::AnalysisLimits,
+) -> String {
+    lens::repair_dump(syntax, limits)
+}
+/// A Lens view of `text` (semantic errors, or a repaired prefix whose
+/// regions are `repair_dump`'s `G` rows in `regions`) and its answers to
+/// the queries, as text, for the Vesper port's differential test.
+#[doc(hidden)]
+pub fn lens_view_for_port(
+    text: &str,
+    regions: &str,
+    limits: crate::tooling::frontend::AnalysisLimits,
+    cursors: &[usize],
+    bindings: &[(String, usize)],
+    members: &[(String, usize)],
+    ceiling: Option<&std::collections::BTreeSet<String>>,
+) -> String {
+    lens::view_dump(
+        text,
+        lens::regions_from_dump(regions),
+        limits,
+        &lens::ViewQueries {
+            cursors,
+            bindings,
+            members,
+            ceiling,
+        },
+    )
+}
+/// `lens_view_for_port` with the guards, parse and check done once and
+/// the view and its answers built `rounds` times (the last answer, or ""
+/// for no rounds), for the Vesper port's speed comparison.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn lens_view_rounds_for_port(
+    text: &str,
+    regions: &str,
+    limits: crate::tooling::frontend::AnalysisLimits,
+    cursors: &[usize],
+    bindings: &[(String, usize)],
+    members: &[(String, usize)],
+    ceiling: Option<&std::collections::BTreeSet<String>>,
+    rounds: u64,
+) -> String {
+    let prepared = match lens::Prepared::new(text, lens::regions_from_dump(regions), limits) {
+        Ok(prepared) => prepared,
+        Err(unavailable) => return format!("U\t{}\n", unavailable.as_str()),
+    };
+    let queries = lens::ViewQueries {
+        cursors,
+        bindings,
+        members,
+        ceiling,
+    };
+    let mut out = String::new();
+    for _ in 0..rounds {
+        out = lens::prepared_dump(&prepared, &queries);
+    }
+    out
+}
 use std::{
     cell::RefCell,
     io::{BufRead, Write},

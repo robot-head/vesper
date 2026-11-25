@@ -1,0 +1,429 @@
+// The AArch64 encoding of each abstract machine instruction:
+// src/verified_codegen/aarch64.rs in Vesper (#1886, part 2).
+//
+// `R0`, `R1`, `R2` are `x0`, `x1`, `x2`; frame words are `[sp, #8n]`
+// (slots and the outgoing area) and `[x29, #16 + 8n]` (the incoming area).
+// `x18` is never used. lean/CodegenA64Encoding.lean models `emit`.
+
+use self::asm::{
+    Asm,
+    FIX_IMM19,
+    FIX_IMM26,
+    bind,
+    bind_copy,
+    fixup,
+    here,
+    put_u32,
+    set_scope,
+    trap_label
+};
+use self::machine::{
+    C_EQ,
+    C_GE,
+    C_GT,
+    C_LE,
+    C_LT,
+    C_NE,
+    L_IN,
+    M,
+    M_ADD_CHK,
+    M_AND_R2,
+    M_BZ,
+    M_CALL,
+    M_CMP,
+    M_DIV,
+    M_ENTER,
+    M_FCMP,
+    M_FNEG,
+    M_FOP,
+    M_IMM,
+    M_JMP,
+    M_LABEL,
+    M_LD,
+    M_LDH,
+    M_LEAVE,
+    M_MUL_CHK,
+    M_NEG_CHK,
+    M_REM,
+    M_ST,
+    M_STH,
+    M_SUB_CHK,
+    M_TRAP,
+    M_TRAP_DIV_OVF,
+    M_TRAP_GT_U,
+    M_TRAP_ZERO,
+    M_WRAP,
+    M_XOR_ONE,
+    OP_ADD,
+    OP_MUL,
+    OP_SUB,
+    S_S
+};
+
+// `Os` of the input.
+pub const OS_LINUX: u64 = 0;
+pub const OS_MACOS: u64 = 1;
+
+const P_EXIT_STATUS: u8 = 0;
+const P_WORDS: u8 = 1;
+
+const SP: u32 = 31;
+const FP: u32 = 29;
+const XZR: u32 = 31;
+
+// Condition codes.
+const EQ: u32 = 0;
+const NE: u32 = 1;
+const HS: u32 = 2;
+const LO: u32 = 3;
+const MI: u32 = 4;
+const VS: u32 = 6;
+const HI: u32 = 8;
+const LS: u32 = 9;
+const GE: u32 = 10;
+const LT: u32 = 11;
+const GT: u32 = 12;
+const LE: u32 = 13;
+
+const ADD: u32 = 2332033024;
+const ADDS: u32 = 2868903936;
+const SUB: u32 = 3405774848;
+const SUBS: u32 = 3942645760;
+const AND: u32 = 2315255808;
+// `madd xd, xn, xm, xzr` = `mul`.
+const MUL: u32 = 2600500224;
+const SMULH: u32 = 2604694528;
+const UMULH: u32 = 2613083136;
+const SDIV: u32 = 2596277248;
+const UDIV: u32 = 2596276224;
+
+const HEAP_BASE: u64 = 268435456;
+
+fn sh(x: u32, n: u32) -> u32 {
+    wrapping_shl_u32(x, n)
+}
+
+fn reg(r: u8) -> u32 {
+    widen_u32(r)
+}
+
+fn ldst(inout a: Asm, load: bool, r: u8, loc: u8, n: u64) {
+    let base = if loc == L_IN {
+        FP
+    } else {
+        SP
+    };
+    let offset = if loc == L_IN {
+        wrapping_add(16, wrapping_mul(n, 8))
+    } else {
+        wrapping_mul(n, 8)
+    };
+    let op: u32 = if load {
+        4181721088
+    } else {
+        4177526784
+    };
+    put_u32(inout a, op | sh(wrapping_u32(offset / 8), 10) | sh(base, 5) | reg(r));
+}
+
+// `movz`/`movk` the 64-bit immediate (always four instructions).
+fn imm(inout a: Asm, rd: u32, w: u64) {
+    for hw in 0..4 {
+        let part = wrapping_u32(wrapping_shr_u64(w, wrapping_u32(wrapping_mul(hw, 16))) & 65535);
+        let op: u32 = if hw == 0 {
+            3531603968
+        } else {
+            4068474880
+        };
+        put_u32(inout a, op | sh(wrapping_u32(hw), 21) | sh(part, 5) | rd);
+    }
+}
+
+// `b.cond label`.
+fn bcond(inout a: Asm, cond: u32, l: u64) {
+    let at = here(in a);
+    put_u32(inout a, 1409286144 | cond);
+    fixup(inout a, at, l, FIX_IMM19);
+}
+
+fn branch(inout a: Asm, op: u32, l: u64) {
+    let at = here(in a);
+    put_u32(inout a, op);
+    fixup(inout a, at, l, FIX_IMM26);
+}
+
+// `cbz`/`cbnz xt, label`.
+fn cb(inout a: Asm, nonzero: bool, rt: u32, l: u64) {
+    let at = here(in a);
+    let op: u32 = if nonzero {
+        3036676096
+    } else {
+        3019898880
+    };
+    put_u32(inout a, op | rt);
+    fixup(inout a, at, l, FIX_IMM19);
+}
+
+// Data-processing (shifted register) `op xd, xn, xm`.
+fn rrr(inout a: Asm, op: u32, d: u32, n: u32, m: u32) {
+    put_u32(inout a, op | sh(m, 16) | sh(n, 5) | d);
+}
+
+// `msub xd, xn, xm, xa`: `xd = xa - xn * xm`.
+fn msub(inout a: Asm, d: u32, n: u32, m: u32, acc: u32) {
+    put_u32(inout a, 2600501248 | sh(m, 16) | sh(acc, 10) | sh(n, 5) | d);
+}
+
+// `sub sp, sp, #bytes` (bytes < 2^24).
+fn sub_sp(inout a: Asm, bytes: u32) {
+    let hi = wrapping_shr_u32(bytes, 12);
+    if hi != 0 {
+        put_u32(inout a, 3510632448 | sh(hi, 10) | sh(SP, 5) | SP);
+    }
+    if bytes & 4095 != 0 || bytes == 0 {
+        put_u32(inout a, 3506438144 | sh(bytes & 4095, 10) | sh(SP, 5) | SP);
+    }
+}
+
+fn signed(s: u8, x: u32, y: u32) -> u32 {
+    if s == S_S {
+        x
+    } else {
+        y
+    }
+}
+
+// `emit`: the words of one instruction.
+pub fn emit(inout a: Asm, in m: M) {
+    let ovf = trap_label(in a, 0);
+    let o = m.op;
+    if o == M_LD {
+        ldst(inout a, true, m.a, m.b, m.n);
+    } else if o == M_ST {
+        ldst(inout a, false, m.a, m.b, m.n);
+    } else if o == M_IMM {
+        imm(inout a, reg(m.a), m.n);
+    } else if o == M_ADD_CHK {
+        // adds x0, x0, x1; b.vs / b.hs
+        rrr(inout a, ADDS, 0, 0, 1);
+        bcond(inout a, signed(m.a, VS, HS), ovf);
+    } else if o == M_SUB_CHK {
+        // subs x0, x0, x1; b.vs / b.lo
+        rrr(inout a, SUBS, 0, 0, 1);
+        bcond(inout a, signed(m.a, VS, LO), ovf);
+    } else if o == M_MUL_CHK {
+        if m.a == S_S {
+            // smulh x2, x0, x1; mul x0, x0, x1; cmp x2, x0, asr #63; b.ne
+            rrr(inout a, SMULH, 2, 0, 1);
+            rrr(inout a, MUL, 0, 0, 1);
+            put_u32(inout a, SUBS | sh(2, 22) | sh(63, 10) | sh(2, 5) | XZR);
+            bcond(inout a, NE, ovf);
+        } else {
+            // umulh x2, x0, x1; mul x0, x0, x1; cbnz x2
+            rrr(inout a, UMULH, 2, 0, 1);
+            rrr(inout a, MUL, 0, 0, 1);
+            cb(inout a, true, 2, ovf);
+        }
+    } else if o == M_WRAP {
+        let op = if m.a == OP_ADD {
+            ADD
+        } else if m.a == OP_SUB {
+            SUB
+        } else {
+            MUL
+        };
+        rrr(inout a, op, 0, 0, 1);
+    } else if o == M_AND_R2 {
+        rrr(inout a, AND, 0, 0, 2);
+    } else if o == M_TRAP_GT_U {
+        // cmp x0, x2; b.hi
+        rrr(inout a, SUBS, XZR, 0, 2);
+        bcond(inout a, HI, ovf);
+    } else if o == M_TRAP_ZERO {
+        let l = trap_label(in a, 1);
+        cb(inout a, false, 1, l);
+    } else if o == M_TRAP_DIV_OVF {
+        // movz x2, #0x8000, lsl #48; cmp x0, x2; b.ne +3; cmn x1, #1; b.eq
+        put_u32(inout a, 3531603968 | sh(3, 21) | sh(32768, 5) | 2);
+        rrr(inout a, SUBS, XZR, 0, 2);
+        put_u32(inout a, 1409286144 | sh(3, 5) | NE);
+        put_u32(inout a, 2969568287 | sh(1, 5));
+        bcond(inout a, EQ, ovf);
+    } else if o == M_DIV {
+        rrr(inout a, signed(m.a, SDIV, UDIV), 0, 0, 1);
+    } else if o == M_REM {
+        // sdiv x2, x0, x1; msub x0, x2, x1, x0
+        rrr(inout a, signed(m.a, SDIV, UDIV), 2, 0, 1);
+        msub(inout a, 0, 2, 1, 0);
+    } else if o == M_NEG_CHK {
+        if m.a == S_S {
+            // negs x0, x0; b.vs
+            rrr(inout a, SUBS, 0, XZR, 0);
+            bcond(inout a, VS, ovf);
+        } else {
+            cb(inout a, true, 0, ovf);
+        }
+    } else if o == M_XOR_ONE {
+        // eor x0, x0, #1
+        put_u32(inout a, 3527409664);
+    } else if o == M_CMP {
+        // cmp x0, x1; cset x0, cond
+        let c = m.a;
+        let cond = if c == C_EQ {
+            EQ
+        } else if c == C_NE {
+            NE
+        } else if c == C_LT {
+            signed(m.b, LT, LO)
+        } else if c == C_LE {
+            signed(m.b, LE, LS)
+        } else if c == C_GT {
+            signed(m.b, GT, HI)
+        } else {
+            signed(m.b, GE, HS)
+        };
+        rrr(inout a, SUBS, XZR, 0, 1);
+        put_u32(inout a, 2594113504 | sh(cond ^ 1, 12));
+    } else if o == M_FOP {
+        // fmov d0, x0; fmov d1, x1; f<op> d0, d0, d1; fmov x0, d0
+        let opcode: u32 = if m.a == OP_ADD {
+            509683712
+        } else if m.a == OP_SUB {
+            509687808
+        } else if m.a == OP_MUL {
+            509675520
+        } else {
+            509679616
+        };
+        put_u32(inout a, 2657550336);
+        put_u32(inout a, 2657550369);
+        put_u32(inout a, opcode);
+        put_u32(inout a, 2657484800);
+    } else if o == M_FNEG {
+        put_u32(inout a, 2657550336);
+        put_u32(inout a, 509689856);
+        put_u32(inout a, 2657484800);
+    } else if o == M_FCMP {
+        // fmov d0, x0; fmov d1, x1; fcmp d0, d1; cset x0, cond
+        let c = m.a;
+        let cond = if c == C_EQ {
+            EQ
+        } else if c == C_NE {
+            NE
+        } else if c == C_LT {
+            MI
+        } else if c == C_LE {
+            LS
+        } else if c == C_GT {
+            GT
+        } else {
+            GE
+        };
+        put_u32(inout a, 2657550336);
+        put_u32(inout a, 2657550369);
+        put_u32(inout a, 509681664);
+        put_u32(inout a, 2594113504 | sh(cond ^ 1, 12));
+    } else if o == M_LDH || o == M_STH {
+        // movz x16, #HEAP_BASE >> 16, lsl #16; add x16, x16, x1, lsl #3;
+        // ldr x0, [x16, #8*off] (str x0, ...).
+        put_u32(inout a, 3533701120 | sh(wrapping_u32(HEAP_BASE >> 16), 5) | 16);
+        put_u32(inout a, ADD | sh(1, 16) | sh(3, 10) | sh(16, 5) | 16);
+        let op: u32 = if o == M_LDH {
+            4181721088
+        } else {
+            4177526784
+        };
+        put_u32(inout a, op | sh(wrapping_u32(m.n), 10) | sh(16, 5));
+    } else if o == M_LABEL {
+        bind(inout a, m.n);
+    } else if o == M_JMP {
+        branch(inout a, 335544320, m.n);
+    } else if o == M_BZ {
+        cb(inout a, false, 0, m.n);
+    } else if o == M_CALL {
+        branch(inout a, 2483027968, m.n);
+    } else if o == M_ENTER {
+        // stp x29, x30, [sp, #-16]!; mov x29, sp; sub sp, sp, #bytes
+        put_u32(inout a, 2847898621);
+        put_u32(inout a, 2432697341);
+        sub_sp(inout a, wrapping_u32(wrapping_mul(m.n, 8)));
+    } else if o == M_LEAVE {
+        leave(inout a);
+    } else if o == M_TRAP {
+        let l = trap_label(in a, m.a);
+        branch(inout a, 335544320, l);
+    } else {
+        set_scope(inout a, m.n, m.n2);
+    }
+}
+
+// mov sp, x29; ldp x29, x30, [sp], #16; ret
+fn leave(inout a: Asm) {
+    put_u32(inout a, 2432697279);
+    put_u32(inout a, 2831252477);
+    put_u32(inout a, 3596551104);
+}
+
+// `svc` with the system-call number in `x8` (Linux) or `x16` (macOS).
+fn syscall(inout a: Asm, os: u64, linux: u32, macos: u32) {
+    if os == OS_MACOS {
+        put_u32(inout a, 3531603968 | sh(macos, 5) | 16);
+        put_u32(inout a, 3556773889);
+    } else {
+        put_u32(inout a, 3531603968 | sh(linux, 5) | 8);
+        put_u32(inout a, 3556769793);
+    }
+}
+
+// The entry: `_start` (Linux) or the C `_main` (macOS).
+pub fn start(inout a: Asm, os: u64, protocol: u8, result_words: u32, entry: u64) {
+    let words: u32 = if result_words == 0 {
+        1
+    } else {
+        result_words
+    };
+    let area = wrapping_mul(wrapping_add(words, 1) & 4294967294, 8);
+    if os == OS_MACOS {
+        put_u32(inout a, 2847898621);
+        put_u32(inout a, 2432697341);
+    }
+    sub_sp(inout a, area);
+    branch(inout a, 2483027968, entry);
+    if protocol == P_WORDS && result_words > 0 {
+        // mov x0, #1; mov x1, sp; mov x2, #len; write
+        put_u32(inout a, 3531604000);
+        put_u32(inout a, 2432697313);
+        imm(inout a, 2, wrapping_mul(widen_u64(result_words), 8));
+        syscall(inout a, os, 64, 4);
+    }
+    if protocol == P_EXIT_STATUS && result_words > 0 {
+        // ldr x0, [sp]
+        put_u32(inout a, 4181722080);
+    } else {
+        // mov x0, #0
+        put_u32(inout a, 3531603968);
+    }
+    if os == OS_MACOS {
+        leave(inout a);
+    } else {
+        syscall(inout a, os, 93, 1);
+    }
+    for k in 0..4 {
+        bind(inout a, k);
+        exit(inout a, os, k);
+    }
+}
+
+fn exit(inout a: Asm, os: u64, k: u64) {
+    // mov x0, #status; exit
+    put_u32(inout a, 3531603968 | sh(wrapping_u32(wrapping_add(k, 101)), 5));
+    syscall(inout a, os, 93, 1);
+}
+
+// Another copy of the abort exits, between functions (`exits`).
+pub fn exits(inout a: Asm, os: u64) {
+    for k in 0..4 {
+        bind_copy(inout a, k);
+        exit(inout a, os, k);
+    }
+}

@@ -19,13 +19,13 @@ build = "build.rs"
 # with the Rust build (docs/parallel-results/port-p3-ebpf.md).
 
 [features]
-# btf, callgraph, core, helpers, insn, interp, program, scalar and verifier
-# are unconditionally Vesper; btf_ext and wire stay behind `vesper-port`
-# until `ext` (1.68x) and `decode` (1.81x) clear 1.50x.
+# btf, btf_ext, callgraph, core, helpers, insn, interp, program, scalar and
+# verifier are unconditionally Vesper; wire stays behind `vesper-port` until
+# `decode` (1.65x) clears 1.50x.
 vesper-port = []
 # Deliberately wrong Vesper builds, one edit per ported module: the port
 # test runs must fail (scripts/test-port-harness.sh asserts which tests do).
-vesper-port-divergent = []
+vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
 object = { version = "=0.37.3", default-features = false, features = ["write_core", "elf", "std", "read_core"] }
