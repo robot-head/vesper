@@ -73,7 +73,7 @@ CRATES = {
     "vesper-loom-calculus": ("gone", "in crate (+ seed)", "1.12x @8 / 0.80x @64 pkgs", "seed until Stage 2; TOML decoding in Vesper (#965), serde_json read of its output", "12"),
     "vesper-loom-audit": ("gone", "in crate (+ seed)", "1.37x @8 / 1.15x @64 / 0.96x @256 pkgs", "seed until Stage 2; size checks and BLAKE3 digests (vesper-blake3-sys)", "12"),
     "vesper-beacon": ("partial", "in crate (+ seed)", "traceparent 0.90x, spans 1.35x; exp 2.58x, hist 3.00x", "traceparent, spans flipped; histogram, exponential still Rust (seed until Stage 2)", "12"),
-    "vesper-sim-session": ("partial", "in crate", "unmeasured", "umem, warp, JSON, driver (SH5 lane 19)", "SH5-19"),
+    "vesper-sim-session": ("partial", "in crate", "link 0.98x, net 1.12x, quic wire 1.36x (flipped); wal_ops 3.7x (SHA-256 vs SHA-NI)", "link, net-v1 and QUIC wire flipped (Rust deleted); WAL/SHA-256, process, failure and validators behind vesper-port; umem/warp orchestration, JSON, driver (SH5 lane 19)", "SH5-19"),
     # The compiler's own crates.
     "vesper-syntax": ("compiler", "packages/vesper-front", "parse swap 1.03x corpus", "editor mode, lossless CST users", "SH1/2"),
     "vesper-core": ("compiler", "packages/vesper-ast", "in parse swap", "", "SH1/2"),
