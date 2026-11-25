@@ -694,3 +694,335 @@ fn speed_abba() {
         (v.saturating_sub(d)).as_secs_f64() / r.as_secs_f64()
     );
 }
+
+// ------------------------------------------------------------------ isa
+
+/// `isa.ves`: `vector::check_world` (E1401-E1403) on the corpus files and
+/// the vector tests' sources, against the Rust walk.
+mod isa {
+    use super::*;
+
+    struct In(Vec<u8>);
+
+    impl In {
+        fn word(&mut self, x: u64) {
+            self.0.extend_from_slice(&x.to_le_bytes());
+        }
+        fn text(&mut self, s: &str) {
+            self.word(s.len() as u64);
+            self.0.extend_from_slice(s.as_bytes());
+            while !self.0.len().is_multiple_of(8) {
+                self.0.push(0);
+            }
+        }
+        fn ty(&mut self, t: &Type) {
+            match t {
+                Type::Named(n, args) => {
+                    self.word(1);
+                    self.text(n);
+                    self.word(args.len() as u64);
+                    for a in args {
+                        self.ty(a);
+                    }
+                }
+                Type::Tuple(items) => {
+                    self.word(2);
+                    self.word(items.len() as u64);
+                    for a in items {
+                        self.ty(a);
+                    }
+                }
+                Type::Function { effects, .. } => {
+                    self.word(3);
+                    self.effects(effects);
+                }
+                _ => self.word(0),
+            }
+        }
+        fn effects(&mut self, e: &Effects) {
+            self.word(e.instances.len() as u64);
+            for i in &e.instances {
+                self.text(&i.name);
+                self.word(i.args.len() as u64);
+                for a in &i.args {
+                    self.ty(a);
+                }
+            }
+        }
+    }
+
+    /// The world facts `isa_text` reads.
+    fn input(w: &World) -> Vec<u8> {
+        let mut i = In(Vec::new());
+        i.word(w.adts.len() as u64);
+        for (name, a) in &w.adts {
+            i.text(name);
+            i.word(a.span.start as u64);
+            i.word(a.span.end as u64);
+            i.word(a.generics.len() as u64);
+            for g in &a.generics {
+                i.text(&g.name);
+            }
+            let fields: Vec<&Type> = a
+                .variants
+                .iter()
+                .flat_map(|v| &v.fields)
+                .map(|f| &f.ty)
+                .collect();
+            i.word(fields.len() as u64);
+            for t in fields {
+                i.ty(t);
+            }
+        }
+        i.word(w.functions.len() as u64);
+        for (name, f) in &w.functions {
+            i.text(name);
+            i.effects(&f.effects);
+            match &f.body {
+                Some(b) => {
+                    i.word(1);
+                    i.word(b.span.start as u64);
+                    i.word(b.span.end as u64);
+                }
+                None => {
+                    i.word(0);
+                    i.word(0);
+                    i.word(0);
+                }
+            }
+        }
+        i.word(w.types.len() as u64);
+        for ((s, e), t) in &w.types {
+            i.word(*s as u64);
+            i.word(*e as u64);
+            i.ty(t);
+        }
+        i.0
+    }
+
+    fn rust(w: &World) -> String {
+        vector::check_world_probe(w)
+            .iter()
+            .map(|d| {
+                let help = d
+                    .help
+                    .as_ref()
+                    .map(|h| format!(" | {h}"))
+                    .unwrap_or_default();
+                format!(
+                    "{} {}..{} {}{help}\n",
+                    d.code, d.span.start, d.span.end, d.message
+                )
+            })
+            .collect()
+    }
+
+    fn call(f: &vesper::native::WordFunction, input: &[u8], source: &str) -> String {
+        let a = [input.len() as u64, 0, input.as_ptr() as u64];
+        let s = [source.len() as u64, 0, source.as_ptr() as u64];
+        // SAFETY: the entry takes two `in Str`s, each the address of its
+        // three words `{len, 0, data}`, which live across the call, as do
+        // `input` and `source`.
+        unpack_text(&take_words(
+            unsafe { f.call(&[a.as_ptr() as u64, s.as_ptr() as u64]) }.unwrap(),
+        ))
+    }
+
+    /// The string literals of a Rust test file (plain and `r#"..."#`).
+    fn literals(text: &str) -> Vec<String> {
+        let b = text.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i..].starts_with(b"r#\"") {
+                let start = i + 3;
+                if let Some(end) = text[start..].find("\"#") {
+                    out.push(text[start..start + end].to_string());
+                    i = start + end + 2;
+                    continue;
+                }
+                break;
+            }
+            if b[i] == b'"' && (i == 0 || b[i - 1] != b'\'') {
+                let mut s = String::new();
+                let mut j = i + 1;
+                while j < b.len() && b[j] != b'"' {
+                    if b[j] == b'\\' && j + 1 < b.len() {
+                        match b[j + 1] {
+                            b'n' => s.push('\n'),
+                            b't' => s.push('\t'),
+                            b'\n' => {
+                                j += 2;
+                                while j < b.len() && (b[j] == b' ' || b[j] == b'\n') {
+                                    j += 1;
+                                }
+                                continue;
+                            }
+                            c => s.push(c as char),
+                        }
+                        j += 2;
+                        continue;
+                    }
+                    let ch = text[j..].chars().next().unwrap();
+                    s.push(ch);
+                    j += ch.len_utf8();
+                }
+                out.push(s);
+                i = j + 1;
+                continue;
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// Sources for the walk's paths the tests reach rarely: dispatch,
+    /// closures, function values, methods, widening, `load_tile_vec`,
+    /// lane-index literals and ADTs holding vectors.
+    const HAND: &[&str] = &[
+        "fn f(a: Vec[u32, 8]) -> u32 { if Isa::supported[Avx2]() { Vec::reduce_add(a) } else { 0 } }",
+        "fn f(a: Vec[u32, 8]) -> u32 eff [Isa[Avx2]] { let g = |v: Vec[u32, 8]| Vec::reduce_add(v); g(a) }",
+        "fn f(a: Vec[u32, 8]) -> u32 { let g = |v: Vec[u32, 8]| -> u32 eff [Isa[Avx2]] { Vec::reduce_add(v) }; 0 }",
+        "fn wide(a: Vec[u32, 8]) -> u32 eff [Isa[Avx2]] { Vec::reduce_add(a) }\nfn f(a: Vec[u32, 8]) -> u32 eff [Isa[Baseline128]] { wide(a) }",
+        "fn wide(a: Vec[u32, 8]) -> u32 eff [Isa[Avx512]] { Vec::reduce_add(a) }\nfn f(a: Vec[u32, 8], g: fn(Vec[u32, 8]) -> u32 eff [Isa[Avx2]]) -> u32 { g(a) }",
+        "struct P { v: Vec[u32, 4] }\nimpl P { fn sum(self) -> u32 eff [Isa[Avx2]] { Vec::reduce_add(self.v) } }\nfn f(p: P) -> u32 { p.sum() }",
+        "struct P[T] { v: T }\nfn f(a: P[Vec[u32, 4]], b: P[Vec[u32, 4]]) -> bool { a == b }",
+        "fn f(a: (Vec[u32, 4], u64), b: (Vec[u32, 4], u64)) -> bool { a != b }",
+        "fn f(a: Vec[f32, 4]) -> Vec[f64, 4] eff [Isa[Baseline128]] { Vec::widen_f64(a) }",
+        "fn f(a: Vec[u32, 16]) -> u32 eff [Isa[Avx2]] { Vec::extract(a, 3) }",
+        "fn f(a: Vec[u32, 16], i: u64) -> u32 eff [Isa[Avx2]] { Vec::extract(a, i) }",
+        "fn f(a: Vec[u32, 8]) -> Vec[u32, 8] { Vec::shuffle(a, 0, 1, 2, 3, 4, 5, 6, 7) }",
+        "fn f() -> Vec[u32, 8] { Vec::splat[u32, 8](1) }",
+        "fn f(in s: Slice[u32]) -> Vec[u32, 16] eff [Isa[Avx2]] { Vec::load[u32, 16](s, 0) }",
+        "struct Vec[T, U] { a: T, b: U }\nfn f() -> u64 { 0 }",
+        "fn f(a: Vec[u32, 8]) -> u32 eff [Isa[Sve2], Isa[Baseline128]] { Vec::reduce_add(a) }",
+        "fn f(a: Vec[u32, 8]) -> u32 { handle Fail[u64] in { Vec::reduce_add(a) } with { return x => x, raise(e, k) => 0, } }",
+        "fn f(a: Vec[u32, 8]) -> u32 { let mut n = 0; for i in 0..4 { n = Vec::reduce_add(a); } loop { break; } n }",
+        "fn f(a: Vec[u32, 8], b: bool) -> u32 { match b { true => Vec::reduce_add(a), false => 0 } }",
+    ];
+
+    /// Corpus files (packages span several sources), every vector test's
+    /// source that parses, and [`HAND`].
+    fn cases() -> Vec<(String, String, World)> {
+        let mut out = Vec::new();
+        for c in corpus() {
+            if c.name.ends_with('/') {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&c.name) else {
+                continue;
+            };
+            out.push((c.name.clone(), src, c.world.clone()));
+        }
+        for file in [
+            "tests/vector.rs",
+            "tests/vector_f32.rs",
+            "tests/vector_kernel.rs",
+            "tests/vector_slice_io.rs",
+            "tests/tiled.rs",
+            "hand",
+        ] {
+            let text = std::fs::read_to_string(file).unwrap_or_default();
+            let srcs = if file == "hand" {
+                HAND.iter().map(|s| s.to_string()).collect()
+            } else {
+                literals(&text)
+            };
+            for (k, src) in srcs.into_iter().enumerate() {
+                if !src.contains("fn ") {
+                    continue;
+                }
+                let parsed = vesper::parser::parse(&src);
+                if !parsed.diagnostics.is_empty() {
+                    if file == "hand" {
+                        eprintln!(
+                            "isa: hand source {k} does not parse: {:?}",
+                            parsed.diagnostics
+                        );
+                    }
+                    continue;
+                }
+                let r = std::panic::catch_unwind(|| vesper::check::check(&parsed.module).world);
+                if let Ok(world) = r {
+                    out.push((format!("{file}#{k}"), src, world));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn isa_walk_matches_rust() {
+        let f = package().entry("regions_seqs_isa", true).0;
+        let quiet = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let cases = cases();
+        std::panic::set_hook(quiet);
+        let (mut bad, mut diags, mut missing) = (0, 0, 0);
+        let mut codes = BTreeMap::<String, usize>::new();
+        for (name, src, w) in &cases {
+            let r = rust(w);
+            let v = call(&f, &input(w), src);
+            let (miss, v): (Vec<&str>, Vec<&str>) =
+                v.lines().partition(|l| l.starts_with("missing "));
+            missing += miss.len();
+            let v: String = v.iter().map(|l| format!("{l}\n")).collect();
+            for l in r.lines() {
+                diags += 1;
+                *codes.entry(l[..5].to_string()).or_default() += 1;
+            }
+            if r != v {
+                bad += 1;
+                if bad <= 5 {
+                    eprintln!("isa: {name} differs:\n  rust:\n{r}  vesper:\n{v}");
+                }
+            }
+        }
+        eprintln!(
+            "isa: {bad} of {} worlds differ; {diags} diagnostics {codes:?}; {missing} functions outside the source",
+            cases.len()
+        );
+        assert!(codes.len() >= 3, "codes {codes:?}");
+        assert_eq!(bad, 0);
+    }
+
+    /// What the walk costs: Rust's parse and `check_world` against the
+    /// Vesper entry, which also parses the source and decodes its input
+    /// (`ISA_COST_WALK_ONLY` times Rust's walk alone).
+    #[test]
+    #[ignore = "timing; run with CHECK_HARNESS_SPEED=1 and --ignored"]
+    fn isa_walk_cost() {
+        let f = package().entry("regions_seqs_isa", true).0;
+        let quiet = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let cases = cases();
+        std::panic::set_hook(quiet);
+        let inputs: Vec<Vec<u8>> = cases.iter().map(|(_, _, w)| input(w)).collect();
+        // Rust's side with its parse, like the Vesper entry's.
+        let parse = std::env::var_os("ISA_COST_WALK_ONLY").is_none();
+        let (r, v) = abba(
+            "isa walk",
+            &mut || {
+                time(|| {
+                    for (_, src, w) in &cases {
+                        if parse {
+                            std::hint::black_box(vesper::parser::parse(src));
+                        }
+                        std::hint::black_box(vector::check_world_probe(w));
+                    }
+                })
+            },
+            &mut || {
+                time(|| {
+                    for ((_, src, _), i) in cases.iter().zip(&inputs) {
+                        std::hint::black_box(call(&f, i, src));
+                    }
+                })
+            },
+        );
+        eprintln!(
+            "rust {r:?} vesper {v:?} ({:.2}x)",
+            v.as_secs_f64() / r.as_secs_f64()
+        );
+    }
+}

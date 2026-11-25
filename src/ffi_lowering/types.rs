@@ -670,6 +670,21 @@ impl Generated {
     pub fn has_buffers(&self) -> bool {
         self.pinned.is_some() || self.handles.keys().any(|n| self.is_buffer(n))
     }
+    /// The source types whose values hold foreign memory viewed in place
+    /// ([`Self::is_buffer`]), in name order.
+    pub(super) fn buffer_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .handles
+            .keys()
+            .filter(|n| self.is_buffer(n))
+            .cloned()
+            .collect();
+        if self.pinned.is_some() {
+            out.push(PINNED_TYPE.to_owned());
+        }
+        out.sort();
+        out
+    }
     /// Whether values of the source type `name` hold foreign memory viewed
     /// in place: a mapping or `Pinned`.
     pub fn is_buffer(&self, name: &str) -> bool {
