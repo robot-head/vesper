@@ -1,0 +1,374 @@
+"""Plan native-platform coverage from a validated test catalog and Git diff."""
+
+load("./lib/process.axl", "capture", "command", "root_path")
+
+_POLICY = "scripts/ci/platform_test_profiles.json"
+_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_"
+_WORD = _LETTERS + "0123456789"
+_USAGE = "usage: aspect ci platform-test-plan -- --profile {pr|full} --head SHA [--base SHA] [--github-output PATH] [--output PATH]"
+
+def _error(ctx: TaskContext, message: str):
+    ctx.std.process.exit(2, message)
+
+def _identifier(value) -> bool:
+    return type(value) == "string" and bool(value) and value[0] in _LETTERS and all([letter in _WORD for letter in value.elems()])
+
+def _path_patterns(value) -> bool:
+    return type(value) == "list" and all([type(pattern) == "string" and bool(pattern) for pattern in value])
+
+def _rust_cases(source: str) -> dict:
+    tokens = []
+    word = []
+    for char in source.elems():
+        if char in _WORD:
+            word.append(char)
+        else:
+            if word:
+                tokens.append("".join(word))
+                word = []
+            if char not in " \t\n\r\f\v":
+                tokens.append(char)
+    if word:
+        tokens.append("".join(word))
+    pending = False
+    cases = {}
+    for index, token in enumerate(tokens):
+        if token == "#" and tokens[index:index + 4] == ["#", "[", "test", "]"]:
+            pending = True
+        elif pending and token == "fn":
+            if index + 2 < len(tokens) and _identifier(tokens[index + 1]) and tokens[index + 2] == "(":
+                cases[tokens[index + 1]] = True
+            pending = False
+    return cases
+
+def _load_policy(ctx: TaskContext, root: str) -> dict:
+    policy = json.decode(ctx.std.fs.read_to_string(root + "/" + _POLICY))
+    if type(policy) != "dict" or policy.get("version") != 1:
+        _error(ctx, "unsupported platform test policy version")
+    groups = policy.get("groups")
+    if type(groups) != "dict" or not groups:
+        _error(ctx, "policy needs named escalation groups")
+    for name, settings in groups.items():
+        if not _identifier(name) or type(settings) != "dict":
+            _error(ctx, "invalid escalation group")
+        if not _path_patterns(settings.get("paths")):
+            _error(ctx, "invalid paths for " + name)
+    if not _path_patterns(policy.get("shared_paths")):
+        _error(ctx, "invalid shared paths")
+    records = policy.get("deferred_targets")
+    if type(records) != "list" or not records:
+        _error(ctx, "policy needs an explicit deferred-target catalog")
+    seen = {}
+    for record in records:
+        if type(record) != "dict" or sorted(record) != ["bazel", "group", "package", "skip_tests", "source", "target"]:
+            _error(ctx, "invalid deferred-target record")
+        package, target = record["package"], record["target"]
+        if type(package) != "string" or not package or not all([char in _WORD + "-" for char in package.elems()]):
+            _error(ctx, "invalid Cargo package selector")
+        if not _identifier(target):
+            _error(ctx, "invalid Cargo test selector")
+        if type(record["group"]) != "string" or record["group"] not in groups:
+            _error(ctx, "target references unknown escalation group")
+        source = record["source"]
+        if type(source) != "string" or source.startswith("/") or ".." in source.split("/"):
+            _error(ctx, "source must be repository-relative")
+        package_path = "" if package == "vesper" else "crates/" + package
+        prefix = package_path + "/" if package_path else ""
+        if source != prefix + "tests/" + target + ".rs" or record["bazel"] != "//" + package_path + ":test/" + target:
+            _error(ctx, "Cargo/Bazel/source selectors disagree")
+        if source in seen:
+            _error(ctx, "duplicate deferred-target selector")
+        seen[source] = True
+        metadata = ctx.std.fs.try_metadata(root + "/" + source)
+        if metadata == None or not metadata.is_file:
+            _error(ctx, "catalog source missing: " + source)
+        cases = _rust_cases(ctx.std.fs.read_to_string(root + "/" + source))
+        if not cases:
+            _error(ctx, "catalog source has no libtest cases: " + source)
+        skipped = record["skip_tests"]
+        if skipped != None:
+            if type(skipped) != "list" or not skipped or not all([_identifier(case) for case in skipped]) or len({case: True for case in skipped}) != len(skipped):
+                _error(ctx, "invalid exact test-case selectors")
+            missing = sorted([case for case in skipped if case not in cases])
+            if missing:
+                _error(ctx, "stale test cases in %s: %r" % (source, missing))
+            if len(cases) == len(skipped):
+                _error(ctx, "partial exclusion leaves no PR tests in " + source)
+    return policy
+
+def _class_value(character: str, contents: str) -> bool:
+    exclude = contents.startswith("!")
+    chars = contents[1:] if exclude else contents
+    contains = False
+    skip = -1
+    for index, char in enumerate(chars.elems()):
+        if index <= skip:
+            continue
+        if index + 2 < len(chars) and chars[index + 1] == "-":
+            contains = contains or (char <= character and character <= chars[index + 2])
+            skip = index + 2
+        else:
+            contains = contains or character == char
+    return contains != exclude
+
+def _matches(path: str, pattern: str) -> bool:
+    if "*" not in pattern and "?" not in pattern and "[" not in pattern:
+        return path == pattern
+    if "?" not in pattern and "[" not in pattern:
+        # The tracked policy uses literal segments separated by asterisks.
+        # Match the fixed suffix before consuming intermediate segments.
+        parts = [part for part in pattern.split("*") if part]
+        if not parts:
+            return True
+        if not pattern.startswith("*"):
+            if not path.startswith(parts[0]):
+                return False
+            path = path[len(parts[0]):]
+            parts = parts[1:]
+        if not pattern.endswith("*"):
+            if not parts or not path.endswith(parts[-1]):
+                return False
+            path = path[:-len(parts[-1])]
+            parts = parts[:-1]
+        for part in parts:
+            index = path.find(part)
+            if index == -1:
+                return False
+            path = path[index + len(part):]
+        return True
+    return _match_tokens(path, pattern)
+
+def _match_tokens(path: str, pattern: str) -> bool:
+    # Candidate offsets after each pattern token. A star consumes any number
+    # of bytes, including a slash, matching the policy's fnmatch semantics.
+    reachable = {0: True}
+    end = -1
+    for index, token in enumerate(pattern.elems()):
+        if index <= end:
+            continue
+        if token == "*":
+            reachable = {offset: True for offset in range(min(reachable), len(path) + 1)}
+            continue
+        contents = None
+        if token == "[":
+            start = index + 1
+            first = start + 1 if pattern[start:start + 1] == "!" else start
+            first += 1 if pattern[first:first + 1] == "]" else 0
+            close = pattern.find("]", first)
+            if close != -1:
+                contents = pattern[start:close]
+                end = close
+        reachable = {
+            offset + 1: True
+            for offset in reachable
+            if offset < len(path) and (token == "?" or (_class_value(path[offset], contents) if contents != None else path[offset] == token))
+        }
+        if not reachable:
+            return False
+    return len(path) in reachable
+
+def _affected(paths: list[str], policy: dict) -> list[str]:
+    for path in paths:
+        if any([_matches(path, pattern) for pattern in policy["shared_paths"]]):
+            return sorted(policy["groups"])
+    result = {}
+    for name, group in policy["groups"].items():
+        for path in paths:
+            if any([_matches(path, pattern) for pattern in group["paths"]]):
+                result[name] = True
+                break
+    for record in policy["deferred_targets"]:
+        if record["source"] in paths:
+            result[record["group"]] = True
+    return sorted(result)
+
+def _git(ctx: TaskContext, root: str, argv: list[str]):
+    return command(ctx, "git", argv, root).stdout("piped").stderr("piped").spawn().wait_with_output()
+
+def _full_sha(value: str) -> bool:
+    return len(value) == 40 and all([char in "0123456789abcdefABCDEF" for char in value.elems()])
+
+def _commit(ctx: TaskContext, root: str, value: str) -> str:
+    result = _git(ctx, root, ["rev-parse", "--verify", value + "^{commit}"])
+    return result.stdout.strip() if result.status.success else ""
+
+def _make_plan(ctx: TaskContext, root: str, profile: str, base: str, head: str) -> dict:
+    policy = _load_policy(ctx, root)
+    if profile not in ["pr", "full"]:
+        _error(ctx, "unknown platform test profile: " + profile)
+    if not _full_sha(head):
+        _error(ctx, "commit must be a full 40-hex SHA")
+    sha = _commit(ctx, root, head)
+    if not sha:
+        _error(ctx, "commit unavailable: " + head)
+    if _commit(ctx, root, "HEAD") != sha:
+        _error(ctx, "requested head does not match the checked-out commit")
+    groups = sorted(policy["groups"])
+    reason = "full profile requested"
+    changed = []
+    if profile == "pr":
+        reason = "base unavailable; full coverage selected"
+        base_sha = _commit(ctx, root, base) if _full_sha(base) else ""
+        if base_sha:
+            diff = _git(ctx, root, ["diff", "--name-only", "--no-renames", "-z", base_sha + "..." + sha, "--"])
+            if diff.status.success:
+                changed = [path for path in diff.stdout.split("\x00") if path]
+                groups = _affected(changed, policy)
+                reason = "groups selected from changed paths"
+            else:
+                reason = "diff unavailable; full coverage selected"
+    return {"profile": profile, "groups": groups, "sha": sha, "reason": reason, "changed_paths": changed}
+
+def _publish(ctx: TaskContext, plan: dict, output: str, github: str):
+    encoded = json.encode(plan) + "\n"
+    if output:
+        output = root_path(ctx.std.env.current_dir(), output)
+        ctx.std.fs.create_dir_all(output.rpartition("/")[0] or "/")
+        ctx.std.fs.write(output, encoded)
+    if github:
+        groups = json.encode(plan["groups"])
+        github = root_path(ctx.std.env.current_dir(), github)
+        if not ctx.std.fs.try_append(github, "profile=%s\ngroups=%s\nsha=%s\n" % (plan["profile"], groups, plan["sha"])):
+            _error(ctx, "could not write the platform plan to the GitHub output file")
+    ctx.std.io.stdout.write(encoded)
+
+def _run_cli(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    argv = ctx.args.tool_args
+    if argv and argv[0] == "plan":
+        argv = argv[1:]
+    options = {}
+    skip = -1
+    for index, arg in enumerate(argv):
+        if index == skip:
+            continue
+        flag, equals, value = arg.partition("=")
+        if flag not in ["--profile", "--head", "--base", "--github-output", "--output"]:
+            _error(ctx, _USAGE)
+        if not equals:
+            if index + 1 == len(argv) or argv[index + 1].startswith("--"):
+                _error(ctx, _USAGE)
+            skip = index + 1
+            value = argv[skip]
+        options[flag] = value
+    if "--profile" not in options or "--head" not in options:
+        _error(ctx, _USAGE)
+    plan = _make_plan(ctx, root, options["--profile"], options.get("--base", ""), options["--head"])
+    _publish(ctx, plan, options.get("--output", ""), options.get("--github-output", ""))
+    return 0
+
+def _verify_dispatch(ctx: TaskContext, root: str, head: str, requested: str):
+    if requested and requested != head and _commit(ctx, root, "HEAD^2") != requested:
+        _error(ctx, "checkout is neither the dispatched PR head nor its test merge")
+
+def _verify_workflow_checkout(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    requested = ctx.std.env.var("PR_HEAD")
+    if not requested:
+        _error(ctx, "PR_HEAD is required")
+    head = capture(ctx, "git", ["rev-parse", "HEAD"], root).strip()
+    _verify_dispatch(ctx, root, head, requested)
+    return 0
+
+def _run_workflow(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    head = capture(ctx, "git", ["rev-parse", "HEAD"], root).strip()
+    directory = ctx.std.env.var("RUNNER_TEMP")
+    output = ctx.std.env.var("GITHUB_OUTPUT")
+    if not directory or not output:
+        _error(ctx, "RUNNER_TEMP and GITHUB_OUTPUT are required")
+    plan = _make_plan(ctx, root, ctx.std.env.var("REQUESTED_PROFILE") or "pr", ctx.std.env.var("BASE_SHA") or "", head)
+    _publish(ctx, plan, directory + "/platform-plan.json", output)
+    return 0
+
+platform_test_plan = task(
+    kind = "platform-test-plan",
+    group = ["ci"],
+    summary = "Plan native-platform coverage for a checked-out commit",
+    implementation = _run_cli,
+    args = {"tool_args": args.trailing_var_args(description = "Coverage profile, full commit SHAs and optional output paths.")},
+)
+
+plan_platform_workflow = task(
+    kind = "plan-platform-workflow",
+    group = ["ci"],
+    summary = "Publish coverage and checkout identity for the Platforms workflow",
+    implementation = _run_workflow,
+)
+
+verify_platform_dispatch = task(
+    kind = "verify-platform-dispatch",
+    group = ["ci"],
+    summary = "Require the dispatched PR head or its GitHub test merge",
+    implementation = _verify_workflow_checkout,
+)
+
+def _test_policy(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    policy = _load_policy(ctx, root)
+    cases = {
+        "": ["README.md", "docs/design.md", "website/index.html"],
+        "flux_faults": ["crates/vesper-flux/src/cluster.rs", "crates/vesper-simpulse/src/lib.rs"],
+        "proof": [
+            "lean/NewProof.lean", "tests/format_proof_cli.rs", "src/audit_commands.rs",
+            "src/replay_commands.rs", "crates/vesper-lean-syntax/src/lib.rs", "crates/vesper-fmt/src/lib.rs",
+            "src/kernel_snapshot.rs", "crates/vesper-oracles/src/bin/logos42/process.rs",
+            "crates/vesper-oracles/src/bin/arithmetic_oracle42.rs",
+            "crates/vesper-oracles/src/bin/arithmetic_oracle42/process.rs",
+            "src/lsp/proof_lens.rs", "src/optimize/witness_lean.rs", "src/format_commands.rs", "src/stylus_safety.rs",
+        ],
+        "frontend_corpus": [
+            "examples/new.ves", "new.ves", "src/native.rs", "src/ffi_lowering.rs",
+            "src/ffi_lowering/native.rs", "src/eval.rs", "src/world.rs", "src/resolve.rs",
+            "src/mono.rs", "src/layout.rs", "src/types.rs", "src/runtime.rs", "src/runtime/resource_trace.rs",
+        ],
+    }
+    for group, paths in cases.items():
+        for path in paths:
+            expected = [group] if group else []
+            if _affected([path], policy) != expected:
+                fail("Unexpected escalation for " + path)
+    for path in ["Cargo.lock", ".github/workflows/platforms.yml", ".aspect/platform-plan.axl"]:
+        if _affected([path], policy) != sorted(policy["groups"]):
+            fail("Expected shared path to restore full coverage: " + path)
+    for path, pattern, expected in [
+        ("src/deep/native/foo.rs", "src/*/foo.rs", True),
+        ("abc", "abc*abc", False),
+        ("a/a/a", "*a*a", True),
+        ("abc", "a?c", True),
+        ("λ", "?", True),
+        ("b", "[a-c]", True),
+        ("b", "[!a-c]", False),
+        ("]", "[]]", True),
+        ("[x", "[x", True),
+    ]:
+        if _matches(path, pattern) != expected:
+            fail("Unexpected path match: %r against %r" % (path, pattern))
+    if _rust_cases("fn helper() {}\n#[ test ]\n#[cfg(unix)]\nfn real_case() {}") != {"real_case": True}:
+        fail("Only the attributed Rust function should be selected")
+    print("Passed the platform selector policy and %d catalog records" % len(policy["deferred_targets"]))
+    return 0
+
+test_platform_plan = task(
+    kind = "test-plan",
+    group = ["ci", "tests"],
+    summary = "Verify platform policy path matching and catalog entries",
+    implementation = _test_policy,
+)
+
+def _verify_exact_checkout(ctx: TaskContext) -> int:
+    expected = ctx.std.env.var("EXPECTED_SHA")
+    if not expected:
+        _error(ctx, "EXPECTED_SHA is required")
+    root = ctx.std.env.aspect_root_dir()
+    actual = capture(ctx, "git", ["rev-parse", "HEAD"], root).strip()
+    if actual != expected:
+        _error(ctx, "expected checkout %s, found %s" % (expected, actual))
+    return 0
+
+verify_platform_checkout = task(
+    kind = "verify-platform-checkout",
+    group = ["ci"],
+    summary = "Require the exact commit from the Platforms plan",
+    implementation = _verify_exact_checkout,
+)

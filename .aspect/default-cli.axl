@@ -1,0 +1,24 @@
+"""Check dependencies in the default Vesper CLI build."""
+
+load("./lib/process.axl", "capture")
+
+_FORBIDDEN = ["wasmtime", "wasmtime-wasi", "vesper-loom-sandbox"]
+
+def _check_graph(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    graph = capture(ctx, "cargo", ["tree", "--locked", "-p", "vesper", "--edges", "normal", "--prefix", "none"], root)
+    found = {}
+    for line in graph.splitlines():
+        fields = line.split()
+        if fields and fields[0] in _FORBIDDEN:
+            found[fields[0]] = True
+    if found:
+        ctx.std.process.exit(1, "Default Vesper CLI has forbidden normal dependencies: " + ", ".join(sorted(found)))
+    return 0
+
+check_default_cli_dependencies = task(
+    kind = "check-default-cli-dependencies",
+    group = ["ci"],
+    summary = "Reject Wasmtime and the Loom sandbox in the default CLI dependency graph",
+    implementation = _check_graph,
+)

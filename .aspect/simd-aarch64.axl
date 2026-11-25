@@ -1,0 +1,105 @@
+"""Compare the emitted AArch64 scanner to a scalar byte oracle."""
+
+load("./lib/bazel_exec.axl", "run_target")
+load("./lib/process.axl", "check", "scratch_dir")
+
+_START = """.text
+.global _start
+_start:
+    adrp x19, cases
+    add x19, x19, :lo12:cases
+    adrp x20, input
+    add x20, x20, :lo12:input
+    mov x21, #9600
+next_case:
+    ldp x0, x1, [x19]
+    add x0, x20, x0
+    ldr x2, [x19, #16]
+    adrp x3, xor_out
+    add x3, x3, :lo12:xor_out
+    bl vesper_simd_scan_baseline128_v1
+    ldr x9, [x19, #24]
+    cmp x0, x9
+    b.ne failure
+    adrp x3, xor_out
+    add x3, x3, :lo12:xor_out
+    ldrb w10, [x3]
+    ldr x9, [x19, #32]
+    cmp x10, x9
+    b.ne failure
+    add x19, x19, #40
+    subs x21, x21, #1
+    b.ne next_case
+    mov x0, #0
+    b exit
+failure:
+    mov x0, #1
+exit:
+    mov x8, #93
+    svc #0
+.section .rodata
+.balign 16
+input:
+    .incbin "input.bin"
+.balign 8
+cases:
+    .incbin "cases.bin"
+.bss
+xor_out:
+    .skip 1
+"""
+
+def _write_bytes(ctx: TaskContext, path: str, data: list[int]):
+    stream = ctx.std.fs.create(path)
+    size = stream.write(bytes(data))
+    stream.close()
+    if size != len(data):
+        ctx.std.process.exit(1, "Short write while creating " + path)
+
+def _fixtures(ctx: TaskContext, artifacts: str):
+    delimiters = [0, 7, 255]
+    data = [(i * 131 + 7) % 256 for i in range(131120)]
+    xor_prefix = [0]
+    count_prefix = {delimiter: [0] for delimiter in delimiters}
+    for byte in data:
+        xor_prefix.append(xor_prefix[-1] ^ byte)
+        for delimiter in delimiters:
+            prefix = count_prefix[delimiter]
+            prefix.append(prefix[-1] + int(byte == delimiter))
+    _write_bytes(ctx, artifacts + "/input.bin", data)
+
+    cases = []
+    lengths = list(range(96)) + [65535, 65536, 65537, 131089]
+    for offset in range(32):
+        for length in lengths:
+            end = offset + length
+            for delimiter in delimiters:
+                prefix = count_prefix[delimiter]
+                fields = [offset, length, delimiter, prefix[end] - prefix[offset], xor_prefix[end] ^ xor_prefix[offset]]
+                for field in fields:
+                    cases.extend([(field >> shift) & 255 for shift in range(0, 64, 8)])
+    _write_bytes(ctx, artifacts + "/cases.bin", cases)
+
+def _simd(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    artifacts = scratch_dir(ctx, "vesper-simd-aarch64-")
+    assembler = ctx.std.env.var("AARCH64_AS") or "aarch64-linux-gnu-as"
+    linker = ctx.std.env.var("AARCH64_LD") or "aarch64-linux-gnu-ld"
+    emulator = ctx.std.env.var("QEMU_AARCH64") or "qemu-aarch64"
+
+    run_target(ctx, root, "//crates/vesper-simd:example/emit_objects", [artifacts])
+    _fixtures(ctx, artifacts)
+    ctx.std.fs.write(artifacts + "/start.s", _START)
+    check(ctx, assembler, ["start.s", "-o", "start.o"], artifacts)
+    scanner = artifacts + "/scanner"
+    check(ctx, linker, ["-z", "noexecstack", artifacts + "/start.o", artifacts + "/aarch64.o", "-o", scanner], root)
+    check(ctx, emulator, [scanner], root)
+    ctx.std.io.stdout.write("AArch64 SIMD scanner: 9600 scalar-reference comparisons passed\n")
+    return 0
+
+test_simd_aarch64 = task(
+    kind = "test-simd-aarch64",
+    group = ["acceptance"],
+    summary = "Check the emitted SIMD scanner against scalar results under AArch64 emulation",
+    implementation = _simd,
+)

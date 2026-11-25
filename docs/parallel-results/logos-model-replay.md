@@ -2,7 +2,7 @@
 
 Claim: #843. Tool: [`tools/logos-sweep`](../../tools/logos-sweep/README.md).
 CI: `.github/workflows/logos-sweep.yml` (nightly on main, and on PRs touching
-Lean, the extractor or the Logos tooling), `scripts/ci/logos-sweep.sh`.
+Lean, the extractor or the Logos tooling), `aspect ci logos-sweep`.
 
 ## Gap closed
 

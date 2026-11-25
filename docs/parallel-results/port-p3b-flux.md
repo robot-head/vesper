@@ -133,7 +133,7 @@ slot's generation to `u64::MAX`). It now sets `gens[slot]` instead of
   kernel (`union` drops the second set's weights, `filter` makes `AtLeast`
   strict, `consolidate` keeps zero sums, `join` is off by one on the product
   limit, `frontier` publishes 0 for an empty table).
-  `crates/vesper-flux/port/check.sh` builds each one and asserts that a named
+  `aspect crate flux check` builds each one and asserts that a named
   differential test fails while another passes; Bazel builds every divergent
   object.
 

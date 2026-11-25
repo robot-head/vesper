@@ -848,7 +848,7 @@ pub fn inspect(bytes: &[u8]) -> Result<CoffSummary, String> {
 mod tests {
     use super::*;
 
-    /// The examples `scripts/test-native-host.sh` builds on Linux and macOS,
+    /// The examples `aspect acceptance test-native-host` builds on Linux and macOS,
     /// with the exit status each must return.
     const EXAMPLES: [(&str, &str, i64); 8] = [
         ("fibonacci", include_str!("../examples/fibonacci.ves"), 55),

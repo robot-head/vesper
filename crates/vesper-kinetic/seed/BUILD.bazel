@@ -45,7 +45,7 @@ rust_test(
 
 # Every integration test but tests/lean_model.rs, which reads lean/ through
 # a regular-file copy of the runfiles; it runs against the seed in Cargo
-# (crates/vesper-kinetic/port/check.sh) and against the port here.
+# (aspect crate kinetic check) and against the port here.
 [
     rust_test(
         name = "seed_test_" + t,

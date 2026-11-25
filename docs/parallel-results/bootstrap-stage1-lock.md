@@ -10,7 +10,7 @@ Base `01d558d` (after V1 #859, V2 #857 and V3 #850). The verified backend now
 compiles the whole Stage 1 frontend entry `parse_main`, so the strict gate
 passes and #582's Stage 1 acceptance is met.
 
-- `WORK=... bootstrap/run.sh stage1 --reproduce --record --require-cross-backend`
+- `WORK=... aspect bootstrap run -- stage1 --reproduce --record --require-cross-backend`
   with Rust 1.100.0 on the 4 vCPU cloud host: two clean runner builds recorded
   byte-identical locks; 8 min 30 s wall in total.
 - All 11 programs are `status = "built"`: for each of the ten corpus programs
@@ -18,7 +18,7 @@ passes and #582's Stage 1 acceptance is met.
   backend (a standalone x86-64 ELF executable, run natively, returning all
   eight result bytes) return the same full 63-bit CST digest, equal to the
   digest of the Rust seed parser's CST. The byte-class probe also agrees.
-- Re-running exact mode (`bootstrap/run.sh stage1 --require-cross-backend`,
+- Re-running exact mode (`aspect bootstrap run -- stage1 --require-cross-backend`,
   runner only: 25 s) regenerates the committed lock bit for bit.
 - `vesper-bootstrap check-stage1-lock bootstrap/stage1.lock`: ok (11 programs).
   The committed-lock test now requires every program to be verified-built,
@@ -42,7 +42,7 @@ cross-backend lock follows once the verified backend accepts the whole
 frontend (planned lanes: abort-only `Fail`, monomorphization, then a frontend
 coverage driver). #582 stays open.
 
-- `bootstrap/run.sh stage1 --reproduce` builds the Stage 1 runner twice from
+- `aspect bootstrap run -- stage1 --reproduce` builds the Stage 1 runner twice from
   clean target directories at two different paths, records a lock with each,
   and fails with `ReproducibilityMismatch` unless the two locks are byte
   identical (seed digest, Cranelift objects, verified executable). The
@@ -120,9 +120,9 @@ builders or the Stage 3 fixed point.
 ## Driver and lock
 
 ```
-bootstrap/run.sh stage1 --record
-bootstrap/run.sh stage1
-bootstrap/run.sh stage1 --require-cross-backend
+aspect bootstrap run -- stage1 --record
+aspect bootstrap run -- stage1
+aspect bootstrap run -- stage1 --require-cross-backend
 ```
 
 The first command intentionally records a new baseline. The second rebuilds
@@ -198,7 +198,7 @@ this driver disables the additional Place-IR optimizer for both backends.
   strict focused Clippy, workspace formatting, explicit
   adapter Rustfmt, shell syntax, Python compilation, Vesper fixture formatting,
   BUILD-file synchronization and whitespace checks pass.
-- `bootstrap/run.sh stage1 --record`, followed by `bootstrap/run.sh stage1`:
+- `aspect bootstrap run -- stage1 --record`, followed by `aspect bootstrap run -- stage1`:
   pass; lock bytes are identical. SHA-256 of the committed lock:
   `b38437b85d500888c18f0ff79fd40d3c7fdb6e608c5977187ee12492608e8917`.
 - Actual retained Cranelift object and verified executable tampering, and an

@@ -310,17 +310,18 @@ fn path_b_reference_compiled_by_gcc_matches_expected_statuses() {
 /// and gcc; CI runs the fast checks above instead. Run with
 /// `cargo test -p vesper-codegen-verified --test model -- --ignored`.
 #[test]
-#[ignore = "builds the Stage 0 compiler twice from clean target directories (tens of minutes); run bootstrap/run.sh"]
+#[ignore = "builds the Stage 0 compiler twice from clean target directories (tens of minutes); run aspect bootstrap run"]
 fn two_seed_builds_compile_the_corpus_bit_identically() {
     let dir = temp_dir("run");
     let _cleanup = Cleanup(dir.clone());
-    let status = Command::new("bash")
-        .arg(repo().join("bootstrap/run.sh"))
+    let status = Command::new("aspect")
+        .current_dir(repo())
+        .args(["bootstrap", "run"])
         .env("WORK", dir.join("work"))
         .env("OUT", dir.join("stage0_seed.lock"))
         .status()
-        .expect("run bootstrap/run.sh");
-    assert!(status.success(), "bootstrap/run.sh failed");
+        .expect("run aspect bootstrap run");
+    assert!(status.success(), "Stage 0 bootstrap failed");
     SeedLock::parse(&std::fs::read(dir.join("stage0_seed.lock")).unwrap()).expect("seed lock");
 }
 

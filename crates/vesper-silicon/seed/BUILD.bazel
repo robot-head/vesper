@@ -53,7 +53,7 @@ rust_test(
 
 # Every integration test but tests/lean.rs, which reads lean/ through a
 # regular-file copy of the runfiles; it runs against the seed in Cargo
-# (crates/vesper-silicon/port/check.sh) and against the port here.
+# (aspect crate silicon check) and against the port here.
 [
     rust_test(
         name = "seed_test_" + t,

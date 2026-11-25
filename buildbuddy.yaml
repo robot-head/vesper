@@ -22,31 +22,25 @@ actions:
         branches:
           - "*"
     steps:
+      - &aspect_directory
+        run: mkdir -p ./.git/vesper-aspect
+      - &aspect_download
+        run: curl --fail --silent --show-error --location --retry 3 https://github.com/aspect-build/aspect-cli/releases/download/v2026.47.12/aspect-launcher-x86_64-unknown-linux-musl -o ./.git/vesper-aspect/aspect
+      - &aspect_verify
+        run: sha256sum --check .aspect/launcher-linux-x86_64.sha256
+      - &aspect_executable
+        run: chmod +x ./.git/vesper-aspect/aspect
       # Recycled runners keep earlier runs' /tmp leftovers (#1200).
-      - run: "scripts/ci/reclaim-disk.sh"
-      - &setup_aspect
-        run: |
-          set -euo pipefail
-          aspect_bin="$(git rev-parse --git-path vesper-aspect)/aspect"
-          mkdir -p "$(dirname "$aspect_bin")"
-          curl --fail --silent --show-error --location --retry 3 \
-            https://github.com/aspect-build/aspect-cli/releases/download/v2026.47.12/aspect-launcher-x86_64-unknown-linux-musl \
-            -o "$aspect_bin"
-          printf '%s  %s\n' a49be533dc38314bbc9d578a9a7c537a5ec10d2a5e296ed5a909d43c4b68a237 "$aspect_bin" | sha256sum -c -
-          chmod +x "$aspect_bin"
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" maintenance bazel sync-build-files -- --check'
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" ci install-lean'
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential
+      - run: ./.git/vesper-aspect/aspect ci reclaim-disk
+      - run: ./.git/vesper-aspect/aspect maintenance bazel sync-build-files -- --check
+      - run: ./.git/vesper-aspect/aspect ci install-lean
+      - &apt_update
+        run: sudo apt-get update
+      - &build_tools
+        run: sudo apt-get install -y build-essential
       # Core builds, tests, Clippy and rustfmt. The explicit build filter
       # keeps replay test binaries and their runfiles off this runner.
-      - run: |
-          export VESPER_LEAN="$(cat .ci-lean-path)"
-          scripts/ci/reclaim-disk.sh watch &
-          disk_watch=$!
-          trap 'kill "$disk_watch" 2>/dev/null || true; scripts/ci/reclaim-disk.sh report' EXIT
-          bazel test --config=ci --config=rbe_build --config=ci_tests --remote_download_outputs=minimal --build_tag_filters=-lean_replay,-self_host --test_tag_filters=-lean_replay,-self_host //...
+      - run: ./.git/vesper-aspect/aspect ci bazel-tests -- --config=ci --config=rbe_build --config=ci_tests --remote_download_outputs=minimal --build_tag_filters=-lean_replay,-self_host --test_tag_filters=-lean_replay,-self_host //...
 
   # The corpus differentials (test/self_host_*, tagged `self_host` by
   # tools/bazel/defs.bzl) on their own runners: on one runner with the rest of
@@ -72,18 +66,15 @@ actions:
         branches:
           - "*"
     steps:
-      - run: "scripts/ci/reclaim-disk.sh"
-      - *setup_aspect
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" ci install-lean'
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential
-      - run: |
-          export VESPER_LEAN="$(cat .ci-lean-path)"
-          scripts/ci/reclaim-disk.sh watch &
-          disk_watch=$!
-          trap 'kill "$disk_watch" 2>/dev/null || true; scripts/ci/reclaim-disk.sh report' EXIT
-          bazel test --config=ci --config=rbe_build --config=ci_tests --remote_download_outputs=minimal --build_tests_only --test_summary=short --test_tag_filters=self_host,-self_host_codegen,-self_host_part2,-lean_replay //...
+      - *aspect_directory
+      - *aspect_download
+      - *aspect_verify
+      - *aspect_executable
+      - run: ./.git/vesper-aspect/aspect ci reclaim-disk
+      - run: ./.git/vesper-aspect/aspect ci install-lean
+      - *apt_update
+      - *build_tools
+      - run: ./.git/vesper-aspect/aspect ci bazel-tests -- --config=ci --config=rbe_build --config=ci_tests --remote_download_outputs=minimal --build_tests_only --test_summary=short --test_tag_filters=self_host,-self_host_codegen,-self_host_part2,-lean_replay //...
 
   # The `self_host_part2` differentials (see above).
   - name: "Self-host differentials 2"
@@ -101,18 +92,15 @@ actions:
         branches:
           - "*"
     steps:
-      - run: "scripts/ci/reclaim-disk.sh"
-      - *setup_aspect
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" ci install-lean'
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential
-      - run: |
-          export VESPER_LEAN="$(cat .ci-lean-path)"
-          scripts/ci/reclaim-disk.sh watch &
-          disk_watch=$!
-          trap 'kill "$disk_watch" 2>/dev/null || true; scripts/ci/reclaim-disk.sh report' EXIT
-          bazel test --config=ci --config=rbe_build --config=ci_tests --remote_download_outputs=minimal --build_tests_only --test_summary=short --test_tag_filters=self_host_part2,-lean_replay //...
+      - *aspect_directory
+      - *aspect_download
+      - *aspect_verify
+      - *aspect_executable
+      - run: ./.git/vesper-aspect/aspect ci reclaim-disk
+      - run: ./.git/vesper-aspect/aspect ci install-lean
+      - *apt_update
+      - *build_tools
+      - run: ./.git/vesper-aspect/aspect ci bazel-tests -- --config=ci --config=rbe_build --config=ci_tests --remote_download_outputs=minimal --build_tests_only --test_summary=short --test_tag_filters=self_host_part2,-lean_replay //...
 
   # The codegen swap point and backend differentials (`self_host_codegen`).
   - name: "Self-host codegen differentials"
@@ -130,18 +118,15 @@ actions:
         branches:
           - "*"
     steps:
-      - run: "scripts/ci/reclaim-disk.sh"
-      - *setup_aspect
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" ci install-lean'
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential
-      - run: |
-          export VESPER_LEAN="$(cat .ci-lean-path)"
-          scripts/ci/reclaim-disk.sh watch &
-          disk_watch=$!
-          trap 'kill "$disk_watch" 2>/dev/null || true; scripts/ci/reclaim-disk.sh report' EXIT
-          bazel test --config=ci --config=rbe_build --config=ci_tests --remote_download_outputs=minimal --build_tests_only --test_summary=short --test_tag_filters=self_host_codegen,-lean_replay //...
+      - *aspect_directory
+      - *aspect_download
+      - *aspect_verify
+      - *aspect_executable
+      - run: ./.git/vesper-aspect/aspect ci reclaim-disk
+      - run: ./.git/vesper-aspect/aspect ci install-lean
+      - *apt_update
+      - *build_tools
+      - run: ./.git/vesper-aspect/aspect ci bazel-tests -- --config=ci --config=rbe_build --config=ci_tests --remote_download_outputs=minimal --build_tests_only --test_summary=short --test_tag_filters=self_host_codegen,-lean_replay //...
 
   - name: "Native and acceptance scripts"
     container_image: "ubuntu-24.04"
@@ -159,36 +144,37 @@ actions:
           - "*"
     env:
       BAZEL_FLAGS: "--config=ci --config=rbe_build"
-      # Written by the prebuild step below; scripts/bazel-lib.sh reads it.
+      # Written by the prebuild step below and read by the acceptance tasks.
       VESPER_BAZEL_EXECUTABLES: ".ci-bazel-executables"
     steps:
-      - run: "scripts/ci/reclaim-disk.sh"
-      - *setup_aspect
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential python-is-python3 qemu-user binutils-aarch64-linux-gnu
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" ci install-lean'
+      - *aspect_directory
+      - *aspect_download
+      - *aspect_verify
+      - *aspect_executable
+      - run: ./.git/vesper-aspect/aspect ci reclaim-disk
+      - *apt_update
+      - run: sudo apt-get install -y build-essential python-is-python3 qemu-user binutils-aarch64-linux-gnu
+      - run: ./.git/vesper-aspect/aspect ci install-lean
       # One Bazel build for every executable the scripts run, instead of a
       # build and a cquery per executable.
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" ci prebuild-acceptance -- .ci-bazel-executables'
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-aarch64'
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-simd-aarch64'
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-native-host'
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-canonical-protocols'
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-diagnostics'
+      - run: ./.git/vesper-aspect/aspect ci prebuild-acceptance -- .ci-bazel-executables
+      - run: ./.git/vesper-aspect/aspect acceptance test-aarch64
+      - run: ./.git/vesper-aspect/aspect acceptance test-simd-aarch64
+      - run: ./.git/vesper-aspect/aspect acceptance test-native-host
+      - run: ./.git/vesper-aspect/aspect acceptance test-canonical-protocols
+      - run: ./.git/vesper-aspect/aspect acceptance test-diagnostics
       # Every tracked .ves file must be `vesper fmt` canonical (scripts/fmt-exclude.txt).
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-fmt'
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-editor'
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-expansion-foundations'
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-recovery'
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-source-tooling'
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-source-macros'
-      - run: |
-          VESPER_LEAN="$(cat .ci-lean-path)" "$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-format-proof
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-macro-preview'
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-source-macro-parameters'
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-source-macro-tuples'
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-doc-links'
+      - run: ./.git/vesper-aspect/aspect acceptance test-fmt
+      - run: ./.git/vesper-aspect/aspect acceptance test-editor
+      - run: ./.git/vesper-aspect/aspect acceptance test-expansion-foundations
+      - run: ./.git/vesper-aspect/aspect acceptance test-recovery
+      - run: ./.git/vesper-aspect/aspect acceptance test-source-tooling
+      - run: ./.git/vesper-aspect/aspect acceptance test-source-macros
+      - run: ./.git/vesper-aspect/aspect acceptance test-format-proof
+      - run: ./.git/vesper-aspect/aspect acceptance test-macro-preview
+      - run: ./.git/vesper-aspect/aspect acceptance test-source-macro-parameters
+      - run: ./.git/vesper-aspect/aspect acceptance test-source-macro-tuples
+      - run: ./.git/vesper-aspect/aspect acceptance test-doc-links
       # Keep model validation and replay on this separate required runner.
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" ci check-lean-models'
-      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" ci test-lean-replay'
+      - run: ./.git/vesper-aspect/aspect ci check-lean-models
+      - run: ./.git/vesper-aspect/aspect ci test-lean-replay

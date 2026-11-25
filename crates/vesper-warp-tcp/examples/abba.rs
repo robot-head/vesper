@@ -10,7 +10,7 @@
 //! its results, and the driver checks that both builds agree.
 //!
 //! ```text
-//! crates/vesper-warp-tcp/scripts/bench.sh        # builds both, runs both workloads
+//! aspect crate warp-tcp bench        # builds both, runs both workloads
 //! abba worker <codec|transfer>                   # one arm
 //! abba drive <codec|transfer> <rust-worker> <vesper-worker>
 //! ```

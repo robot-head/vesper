@@ -6,7 +6,7 @@ subset of Vesper used by `bootstrap/corpus/*.ves`: `i64` functions, `let`,
 `if`/`else`, recursion, unary minus, checked `+ - *`, truncating `/ %`,
 comparisons and `handle Fail[ArithOverflow | RuntimeError]` with a value
 handler. It imports only `Init`: no Rust, no Cranelift and no code shared with
-the Rust seed. `bootstrap/run.sh` compiles it with `lean -c` and links the C
+the Rust seed. `aspect bootstrap run` compiles it with `lean -c` and links the C
 with the distribution's gcc (CompCert is not packaged here).
 
 For each file argument it prints `<stem> <status>`, where status is the

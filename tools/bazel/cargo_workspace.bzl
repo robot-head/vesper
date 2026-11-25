@@ -21,7 +21,7 @@ one so Bazel can build it. Create {dir}/BUILD.bazel containing:
 
     vesper_crate()
 
-(or run `python3 tools/bazel/sync_build_files.py`). See docs/bazel.md.
+(or run `aspect maintenance bazel sync-build-files`). See docs/bazel.md.
 """
 
 def _rel(path, root):

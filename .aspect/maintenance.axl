@@ -1,14 +1,15 @@
 load("./lib/script.axl", "script_task")
 
 convert_rust_tests = script_task("convert-rust-tests", ["maintenance"], "scripts/convert-rust-tests.py", "python3")
-gen_blake3 = script_task("gen-blake3", ["maintenance"], "packages/vesper-std/hash/gen/blake3_gen.py", "python3")
 rust_census = script_task("rust-census", ["maintenance"], "scripts/rust-census.py", "python3")
 
-bazel_sync_build_files = script_task("sync-build-files", ["maintenance", "bazel"], "tools/bazel/sync_build_files.py", "python3")
-
-lean4lean42_setup = script_task("setup", ["maintenance", "lean4lean42"], "tools/lean4lean42/setup.py", "python3")
 
 logos_sweep_sweep = script_task("sweep", ["maintenance", "logos-sweep"], "tools/logos-sweep/sweep.py", "python3")
 
 logos42_setup = script_task("setup", ["maintenance", "logos42"], "tools/logos42/setup.py", "python3")
+lean4lean42_setup = logos42_setup.alias(
+    kind = "setup",
+    group = ["maintenance", "lean4lean42"],
+    summary = "Set up Logos under the former Lean4Lean task name",
+)
 logos42_update_pins = script_task("update-pins", ["maintenance", "logos42"], "tools/logos42/update-pins.py", "python3")
