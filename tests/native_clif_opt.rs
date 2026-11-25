@@ -1031,3 +1031,51 @@ fn main() -> u64 {
         "expected same-operand and post-propagation constant ops to fold in compute:\n{fn_clif}"
     );
 }
+
+#[test]
+fn folds_binary_imm_unary_and_bool_select() {
+    let source = "
+fn check_bool(x: u64, inout s: ChunkSeq[u64]) -> u64 {
+    let flag = if x > 2 { true } else { false };
+    let inv = !(!flag);
+    if inv {
+        s.push(1);
+    } else {
+        s.push(0);
+    }
+    let a = wrapping_add(x, 0);
+    let b = a | 0;
+    let c = b ^ 0;
+    let d = c & 0;
+    wrapping_add(c, d)
+}
+
+fn main() -> u64 {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new();
+    let mut acc = 0;
+    let mut i = 0;
+    loop {
+        if i > 5 {
+            break;
+        }
+        acc = wrapping_add(acc, check_bool(i, inout s));
+        i = wrapping_add(i, 1);
+    }
+    wrapping_add(acc, s.len())
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("check_bool\n"))
+        .unwrap_or(&clif);
+    assert!(
+        !fn_clif.contains("select ") && !fn_clif.contains("bor") && !fn_clif.contains("bxor"),
+        "expected bool select and identity BinaryImm ops to fold in check_bool:\n{fn_clif}"
+    );
+}
