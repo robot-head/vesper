@@ -193,10 +193,10 @@ gated set over the whole corpus with 0 differences. Today `gated` holds
    the seed instead of Rust.
 5. **The kept Rust stands alone.** The Rust that stays builds without the
    Rust compiler:
-   - `crates/vesper-oracles` depends on the root `vesper` crate today (its
-     workers drive the parser, checker, optimizer, evaluator and native
-     backend in process). They must drive the Vesper compiler as a process
-     or through its C ABI instead.
+   - `crates/vesper-oracles` no longer depends on the root `vesper` crate
+     (#1929): the arithmetic oracle's worker drives the `vesper` binary as a
+     process (`--vesper PATH`), with `--no-ast-opt`/`--no-ir-opt` for its
+     four optimizer settings, so it tests the Vesper compiler unchanged.
    - `vesper-codegen-verified` no longer links the frozen seeds of
      `vesper-loom-calculus`, `vesper-loom-cas` and `vesper-loom-trust`
      (#1929): `src/trust.rs` is its own copy of the attestation rules,

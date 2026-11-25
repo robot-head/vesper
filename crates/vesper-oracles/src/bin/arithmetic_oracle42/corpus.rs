@@ -3,9 +3,9 @@ use super::{
     Callee, Case, Code, FailureKind, HarnessError, Input, Intent, Kind, Node, Op, Program, Scope,
     Suite,
 };
+use serde_json::Value;
 use std::fmt::Write;
 use std::sync::OnceLock;
-use vesper::ast::{self, Expr, ExprKind, Item, Literal, Pass, PatternKind, Statement, Type};
 
 const MAX_NODES: usize = 63;
 const MAX_DEPTH: usize = 8;
@@ -460,35 +460,93 @@ pub fn render_case(case: &Case) -> Result<String, HarnessError> {
     Ok(out)
 }
 
-fn typed(kind: Kind, ty: &Type) -> bool {
-    matches!(ty, Type::Named(n, args) if n == kind_name(kind) && args.is_empty())
+// The parsed module is the compiler's own `emit --emit hir --no-opt` JSON
+// (externally tagged enums, `kind`/`span` expression records). Only the
+// fields named here are read; spans are ignored.
+
+/// The single variant `{ "<tag>": payload }` of an enum value.
+fn variant(v: &Value) -> Option<(&str, &Value)> {
+    let o = v.as_object()?;
+    (o.len() == 1).then(|| o.iter().next().map(|(k, v)| (k.as_str(), v)))?
 }
-fn fail_effect(effect: &ast::Effect) -> bool {
-    effect.label.is_none() && effect.name == "Fail" && effect.args == [Type::named("ArithOverflow")]
+fn tagged<'a>(v: &'a Value, tag: &str) -> Option<&'a Value> {
+    variant(v).and_then(|(t, p)| (t == tag).then_some(p))
 }
-fn binding(p: &ast::Pattern, name: &str) -> bool {
-    matches!(&p.kind, PatternKind::Bind(n) if n == name)
+fn field<'a>(v: &'a Value, name: &str) -> Result<&'a Value, HarnessError> {
+    v.get(name)
+        .ok_or_else(|| error("parsed module lacks an expected field"))
 }
-fn plain_block(e: &Expr) -> Result<&Expr, HarnessError> {
-    match &e.kind {
-        ExprKind::Block {
-            statements,
-            tail: Some(tail),
-        } if statements.is_empty() => Ok(tail),
+fn list<'a>(v: &'a Value, name: &str) -> Result<&'a [Value], HarnessError> {
+    field(v, name)?
+        .as_array()
+        .map(Vec::as_slice)
+        .ok_or_else(|| error("parsed module field is not a list"))
+}
+fn text<'a>(v: &'a Value, name: &str) -> Option<&'a str> {
+    v.get(name).and_then(Value::as_str)
+}
+fn empty(v: &Value, name: &str) -> bool {
+    v.get(name)
+        .is_none_or(|f| f.is_null() || f.as_array().is_some_and(Vec::is_empty))
+}
+/// An expression's kind (`{ "kind": ..., "span": ... }`).
+fn kind_of(e: &Value) -> Result<(&str, &Value), HarnessError> {
+    e.get("kind")
+        .and_then(variant)
+        .ok_or_else(|| error("parsed expression has no kind"))
+}
+/// `Named(name, [])`.
+fn named_type(ty: &Value, name: &str) -> bool {
+    tagged(ty, "Named")
+        .and_then(Value::as_array)
+        .is_some_and(|p| p.len() == 2 && p[0] == name && p[1].as_array().is_some_and(Vec::is_empty))
+}
+fn typed(kind: Kind, ty: &Value) -> bool {
+    named_type(ty, kind_name(kind))
+}
+fn fail_effect(effect: &Value) -> bool {
+    effect.get("label").is_some_and(Value::is_null)
+        && text(effect, "name") == Some("Fail")
+        && effect
+            .get("args")
+            .and_then(Value::as_array)
+            .is_some_and(|a| a.len() == 1 && named_type(&a[0], "ArithOverflow"))
+}
+fn no_effects(effects: &Value) -> bool {
+    empty(effects, "instances") && effects.get("tail").is_none_or(Value::is_null)
+}
+fn binding(p: &Value, name: &str) -> bool {
+    p.get("kind")
+        .and_then(|k| tagged(k, "Bind"))
+        .is_some_and(|n| n == name)
+}
+fn plain_block(e: &Value) -> Result<&Value, HarnessError> {
+    match kind_of(e)? {
+        ("Block", b) if empty(b, "statements") && !empty(b, "tail") => field(b, "tail"),
         _ => Err(error("expected exact statement-free wrapper block")),
     }
 }
-fn named(e: &Expr, name: &str) -> bool {
-    matches!(&e.kind, ExprKind::Name(n) if n == name)
+fn named(e: &Value, name: &str) -> bool {
+    matches!(kind_of(e), Ok(("Name", n)) if n == name)
 }
-fn int(e: &Expr, value: i128) -> bool {
-    matches!(&e.kind, ExprKind::Literal(Literal::Int(n)) if *n == value)
+fn literal_int(e: &Value) -> Option<i128> {
+    let ("Literal", l) = kind_of(e).ok()? else {
+        return None;
+    };
+    let n = tagged(l, "Int")?;
+    n.as_i64()
+        .map(i128::from)
+        .or_else(|| n.as_u64().map(i128::from))
 }
-fn boolean(e: &Expr, value: bool) -> bool {
-    matches!(&e.kind, ExprKind::Literal(Literal::Bool(n)) if *n == value)
+fn int(e: &Value, value: i128) -> bool {
+    literal_int(e) == Some(value)
 }
-fn args_plain(args: &[ast::Arg]) -> bool {
-    args.iter().all(|a| a.pass == Pass::In && !a.explicit)
+fn boolean(e: &Value, value: bool) -> bool {
+    matches!(kind_of(e), Ok(("Literal", l)) if tagged(l, "Bool") == Some(&Value::Bool(value)))
+}
+fn args_plain(args: &[Value]) -> bool {
+    args.iter()
+        .all(|a| text(a, "pass") == Some("In") && a.get("explicit") == Some(&Value::Bool(false)))
 }
 fn parse_variable(name: &str) -> Result<(Scope, u16), HarnessError> {
     let (scope, digits) = if let Some(s) = name.strip_prefix('x') {
@@ -515,7 +573,7 @@ fn parsed_op(name: &str) -> Result<Op, HarnessError> {
     }
 }
 fn normalize(
-    e: &Expr,
+    e: &Value,
     depth: usize,
     out: &mut Code,
     total: &mut usize,
@@ -524,25 +582,30 @@ fn normalize(
         return Err(error("actual source shape limit"));
     }
     *total += 1;
-    let node = match &e.kind {
-        ExprKind::Literal(Literal::Int(v)) => Node::Int(*v),
-        ExprKind::Literal(Literal::Bool(v)) => Node::Bool(*v),
-        ExprKind::Name(n) => {
+    let node = match kind_of(e)? {
+        ("Literal", l) => match variant(l) {
+            Some(("Int", _)) => {
+                Node::Int(literal_int(e).ok_or_else(|| error("source literal range"))?)
+            }
+            Some(("Bool", Value::Bool(v))) => Node::Bool(*v),
+            _ => return Err(error("unexpected source literal")),
+        },
+        ("Name", Value::String(n)) => {
             let (scope, slot) = parse_variable(n)?;
             Node::Variable(scope, slot)
         }
-        ExprKind::Binary(op, a, b) => {
-            let op = parsed_op(op)?;
-            normalize(a, depth + 1, out, total)?;
-            normalize(b, depth + 1, out, total)?;
+        ("Binary", Value::Array(parts)) if parts.len() == 3 => {
+            let op = parsed_op(parts[0].as_str().ok_or_else(|| error("source operator"))?)?;
+            normalize(&parts[1], depth + 1, out, total)?;
+            normalize(&parts[2], depth + 1, out, total)?;
             Node::Checked(op)
         }
-        ExprKind::Call {
-            callee,
-            types,
-            args,
-        } if types.is_empty() && args.len() <= 3 && args_plain(args) => {
-            let ExprKind::Name(n) = &callee.kind else {
+        ("Call", call) => {
+            let args = list(call, "args")?;
+            if !empty(call, "types") || args.len() > 3 || !args_plain(args) {
+                return Err(error("unexpected source call"));
+            }
+            let ("Name", Value::String(n)) = kind_of(field(call, "callee")?)? else {
                 return Err(error("non-name source callee"));
             };
             let callee = match n.as_str() {
@@ -555,7 +618,7 @@ fn normalize(
                 }
             };
             for a in args {
-                normalize(&a.expr, depth + 1, out, total)?;
+                normalize(field(a, "expr")?, depth + 1, out, total)?;
             }
             Node::Call(callee, args.len() as u8)
         }
@@ -566,73 +629,83 @@ fn normalize(
 }
 
 /// Independently normalize the actual parser output, including its wrapper.
-pub fn validate_rendered(
-    case: &Case,
-    source: &str,
-    module: &ast::Module,
-) -> Result<(), HarnessError> {
+/// `module` is the compiler's parsed module (`emit --emit hir --no-opt`).
+pub fn validate_rendered(case: &Case, source: &str, module: &Value) -> Result<(), HarnessError> {
     let p = &case.program;
     validate_program(p)?;
-    if source.len() > SOURCE_BYTES
-        || !source.is_ascii()
-        || !module.model_uses.is_empty()
-        || !module.trait_bounds.is_empty()
-    {
+    let only_items = module.as_object().is_some_and(|m| {
+        m.iter()
+            .all(|(k, v)| k == "items" || empty(module, k) || v.is_null())
+    });
+    if source.len() > SOURCE_BYTES || !source.is_ascii() || !only_items {
         return Err(error("source/module profile"));
     }
-    let [Item::Function(f), Item::Function(main)] = module.items.as_slice() else {
+    let items = list(module, "items")?;
+    let [f, main] = items else {
         return Err(error("expected only f and main"));
     };
-    if f.name != "f"
-        || main.name != "main"
-        || !f.generics.is_empty()
-        || !main.generics.is_empty()
-        || !main.params.is_empty()
-        || f.params.len() != p.inputs.len()
-        || !typed(p.kind, &f.result)
-        || main.result != Type::Tuple(vec![Type::named("bool"), Type::named(kind_name(p.kind))])
-        || main.effects != ast::Effects::default()
-        || f.effects.tail.is_some()
+    let (Some(f), Some(main)) = (tagged(f, "Function"), tagged(main, "Function")) else {
+        return Err(error("expected only f and main"));
+    };
+    let main_result = tagged(field(main, "result")?, "Tuple")
+        .and_then(Value::as_array)
+        .is_some_and(|t| t.len() == 2 && named_type(&t[0], "bool") && typed(p.kind, &t[1]));
+    let f_params = list(f, "params")?;
+    if text(f, "name") != Some("f")
+        || text(main, "name") != Some("main")
+        || !empty(f, "generics")
+        || !empty(main, "generics")
+        || !empty(main, "params")
+        || f_params.len() != p.inputs.len()
+        || !typed(p.kind, field(f, "result")?)
+        || !main_result
+        || !no_effects(field(main, "effects")?)
+        || !field(f, "effects")?.get("tail").is_none_or(Value::is_null)
     {
         return Err(error("function declarations differ"));
     }
-    if (p.allow_fail && (f.effects.instances.len() != 1 || !fail_effect(&f.effects.instances[0])))
-        || (!p.allow_fail && !f.effects.instances.is_empty())
+    let instances = list(field(f, "effects")?, "instances")?;
+    if (p.allow_fail && (instances.len() != 1 || !fail_effect(&instances[0])))
+        || (!p.allow_fail && !instances.is_empty())
     {
         return Err(error("failure row differs"));
     }
-    for (i, (param, input)) in f.params.iter().zip(&p.inputs).enumerate() {
-        if param.name != format!("x{i}")
-            || param.pass != Pass::In
-            || !param.projections.is_empty()
-            || !typed(input.kind, &param.ty)
+    for (i, (param, input)) in f_params.iter().zip(&p.inputs).enumerate() {
+        if text(param, "name") != Some(format!("x{i}").as_str())
+            || text(param, "pass") != Some("In")
+            || !empty(param, "projections")
+            || !typed(input.kind, field(param, "ty")?)
         {
             return Err(error("input declaration differs"));
         }
     }
-    let Some(fbody) = &f.body else {
-        return Err(error("missing f body"));
-    };
-    let ExprKind::Block {
-        statements,
-        tail: Some(result),
-    } = &fbody.kind
-    else {
+    let fbody = f
+        .get("body")
+        .filter(|b| !b.is_null())
+        .ok_or_else(|| error("missing f body"))?;
+    let ("Block", block) = kind_of(fbody)? else {
         return Err(error("f body is not a strict block"));
     };
+    let statements = list(block, "statements")?;
+    if empty(block, "tail") {
+        return Err(error("f body is not a strict block"));
+    }
+    let result = field(block, "tail")?;
     if statements.len() != p.locals.len() {
         return Err(error("local count differs"));
     }
     let mut total = 0;
     for (i, (stmt, expected)) in statements.iter().zip(&p.locals).enumerate() {
-        let Statement::Let { pat, ty, value, .. } = stmt else {
+        let Some(binding_let) = tagged(stmt, "Let") else {
             return Err(error("extra source statement"));
         };
-        if !binding(pat, &format!("t{i}")) || !typed(p.kind, ty) {
+        if !binding(field(binding_let, "pat")?, &format!("t{i}"))
+            || !typed(p.kind, field(binding_let, "ty")?)
+        {
             return Err(error("local declaration differs"));
         }
         let mut code = Vec::with_capacity(expected.len());
-        normalize(value, 1, &mut code, &mut total)?;
+        normalize(field(binding_let, "value")?, 1, &mut code, &mut total)?;
         if code != *expected {
             return Err(error("local source code differs"));
         }
@@ -642,66 +715,59 @@ pub fn validate_rendered(
     if code != p.result {
         return Err(error("result source code differs"));
     }
-    let mainbody = plain_block(
-        main.body
-            .as_ref()
-            .ok_or_else(|| error("missing main body"))?,
-    )?;
-    let ExprKind::Handle {
-        effect,
-        state: None,
-        body,
-        ret,
-        ops,
-    } = &mainbody.kind
-    else {
+    let main_body = main
+        .get("body")
+        .filter(|b| !b.is_null())
+        .ok_or_else(|| error("missing main body"))?;
+    let ("Handle", handle) = kind_of(plain_block(main_body)?)? else {
         return Err(error("main handler differs"));
     };
-    if !fail_effect(effect)
-        || ret.name != "return"
-        || ret.pats.len() != 1
-        || !binding(&ret.pats[0], "v")
-        || !named(&ret.body, "v")
+    let ret = field(handle, "ret")?;
+    let ret_pats = list(ret, "pats")?;
+    let ops = list(handle, "ops")?;
+    if !fail_effect(field(handle, "effect")?)
+        || !handle.get("state").is_none_or(Value::is_null)
+        || text(ret, "name") != Some("return")
+        || ret_pats.len() != 1
+        || !binding(&ret_pats[0], "v")
+        || !named(field(ret, "body")?, "v")
         || ops.len() != 1
     {
         return Err(error("handler return differs"));
     }
     let op = &ops[0];
-    if op.name != "raise"
-        || op.pats.len() != 2
-        || !binding(&op.pats[0], "e")
-        || !binding(&op.pats[1], "k")
+    let op_pats = list(op, "pats")?;
+    if text(op, "name") != Some("raise")
+        || op_pats.len() != 2
+        || !binding(&op_pats[0], "e")
+        || !binding(&op_pats[1], "k")
     {
         return Err(error("handler failure clause differs"));
     }
-    let ExprKind::Tuple(failure) = &op.body.kind else {
+    let ("Tuple", Value::Array(failure)) = kind_of(field(op, "body")?)? else {
         return Err(error("failure tuple differs"));
     };
     if failure.len() != 2 || !boolean(&failure[0], true) || !int(&failure[1], 0) {
         return Err(error("failure tag/value differs"));
     }
-    let ExprKind::Tuple(success) = &plain_block(body)?.kind else {
+    let ("Tuple", Value::Array(success)) = kind_of(plain_block(field(handle, "body")?)?)? else {
         return Err(error("success tuple differs"));
     };
     if success.len() != 2 || !boolean(&success[0], false) {
         return Err(error("success tag differs"));
     }
-    let ExprKind::Call {
-        callee,
-        types,
-        args,
-    } = &success[1].kind
-    else {
+    let ("Call", call) = kind_of(&success[1])? else {
         return Err(error("entry call differs"));
     };
-    if !named(callee, "f")
-        || !types.is_empty()
+    let args = list(call, "args")?;
+    if !named(field(call, "callee")?, "f")
+        || !empty(call, "types")
         || args.len() != p.inputs.len()
         || !args_plain(args)
         || !args
             .iter()
             .zip(&p.inputs)
-            .all(|(a, i)| int(&a.expr, i.value))
+            .all(|(a, i)| a.get("expr").is_some_and(|e| int(e, i.value)))
     {
         return Err(error("actual input argument values differ"));
     }
