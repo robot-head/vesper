@@ -3,6 +3,10 @@ use self::unstable::{
     lt,
     insertion
 };
+use self::sugar::{
+    guard,
+    when
+};
 
 // The length of the runs `stable_sort` insertion sorts before merging.
 const RUN: u64 = 16;
@@ -96,9 +100,8 @@ pub fn stable_sort[T: mod copy + Ord](inout s: Slice[T]) {
     if n <= RUN {
         return;
     }
-    match s.try_get(0) {
-        Option::Some(first) => merge_runs(inout s, n, RUN, first),
-        Option::None => {},
+    when let Option::Some(first) = s.try_get(0) {
+        merge_runs(inout s, n, RUN, first);
     }
 }
 
@@ -170,14 +173,12 @@ test {
             } else {
                 wrapping_sub(i, zeros) << 1
             };
-            match items.try_get(i) {
-                Option::Some(item) => {
-                    let payload = wrapping_sub(count, original_index);
-                    if item.key != expected_key || item.payload != payload {
-                        return false;
-                    }
-                },
-                Option::None => return false,
+            guard let Option::Some(item) = items.try_get(i) else {
+                return false;
+            };
+            let payload = wrapping_sub(count, original_index);
+            if item.key != expected_key || item.payload != payload {
+                return false;
             }
         }
         items.len() == count

@@ -16,6 +16,8 @@
 //   IEEE 754 total order (`f64::total_cmp`: -NaN < -inf < .. < -0 < +0 < ..
 //   < +inf < +NaN), and `sort_f32_bits` for `f32` values held as their bit
 //   patterns in a `Slice[u32]` (as the export ABI passes them).
+// - `sugar`: `guard let .. else` and `when let`, the package's names for
+//   "take the value or leave" and "do this if it is there".
 //
 // Saturating arithmetic is in `@vesper-std/core::saturating`, and
 // `all_zero` and `ct_eq` in `@vesper-std/bytes::ct`.
