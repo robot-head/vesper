@@ -68,17 +68,17 @@ filegroup(
     )
     for module, old, new in [
         ("term", "            if same {", "            if same && tag != 14 {"),
-        ("fold", "        if a == label_key(in s, sw(in s.tmp, k)) {", "        if a == none() {"),
+        ("fold", "        if a == label_key(in s, word_at(in s.tmp, k)) {", "        if a == none() {"),
         ("infer", "        if !has_key(in s, other, label_key(in s, l)) {", "        if !has_key(in s, other, none()) {"),
-        ("canon", "        if nlen(in s, sc) > 0 {", "        if nlen(in s, sc) > 1 {"),
+        ("canon", "        if kid_count(in s, sc) > 0 {", "        if kid_count(in s, sc) > 1 {"),
         ("mode", "            if av <= bv {", "            if av < bv {"),
         ("render", "        r_id(inout s, \"type\", h43);", "        r_id(inout s, \"ty\", h43);"),
         ("diag", "            if cmp_diag(in s, dec(j), j) != 2 {", "            if cmp_diag(in s, dec(j), j) != 0 {"),
         ("program", "    if maj != 0 || min > 1 {", "    if maj != 0 || min > 2 {"),
         ("solver", "    s.steps > s.max_steps", "    s.steps > wrapping_add(s.max_steps, 1000)"),
         ("query", "    if r == 0 {\n        n\n    } else {\n        r\n    }", "    if r == 0 {\n        n\n    } else {\n        n\n    }"),
-        ("coherence", "    if sw(in s.tr_pkg, t) == pkg {", "    if sw(in s.tr_pkg, t) != pkg {"),
-        ("deriv", "        if nlen(in s, d) != nlen(in s, sw(in s.cf_where, ci)) {", "        if nlen(in s, d) > nlen(in s, sw(in s.cf_where, ci)) {"),
+        ("coherence", "    if word_at(in s.tr_pkg, t) == pkg {", "    if word_at(in s.tr_pkg, t) != pkg {"),
+        ("deriv", "        if kid_count(in s, d) != kid_count(in s, word_at(in s.cf_where, ci)) {", "        if kid_count(in s, d) > kid_count(in s, word_at(in s.cf_where, ci)) {"),
         ("out", "        let co: u64 = if uses_coinduction(in s, d) {", "        let co: u64 = if !uses_coinduction(in s, d) {"),
     ]
 ]
