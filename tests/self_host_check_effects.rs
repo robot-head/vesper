@@ -204,6 +204,51 @@ fn effects_match_rust_on_the_corpus() {
 }
 
 #[test]
+fn policies_match_rust_on_corpus_and_fixtures() {
+    static ENTRY: OnceLock<Entry> = OnceLock::new();
+    let pol_entry = ENTRY.get_or_init(|| package().entry("check_policies", true));
+    let mut checked_count = 0usize;
+    let mut diffs = 0usize;
+    for c in corpus() {
+        let checked = vesper::check::Checked {
+            world: c.world.clone(),
+            diagnostics: vec![],
+            expression_types: Default::default(),
+        };
+        let rust = vesper::capability_effects::capability_policies(&checked).unwrap();
+        let vesper = effects_words::decode_policies(&pol_entry.words(&input(&c.world)));
+        checked_count += 1;
+        if rust != vesper {
+            diffs += 1;
+            if diffs <= 2 {
+                eprintln!(
+                    "policies differ on corpus {}:\n  rust:   {rust:?}\n  vesper: {vesper:?}",
+                    c.name
+                );
+            }
+        }
+    }
+    for (name, w) in fixture_worlds() {
+        let checked = vesper::check::Checked {
+            world: w.clone(),
+            diagnostics: vec![],
+            expression_types: Default::default(),
+        };
+        let rust = vesper::capability_effects::capability_policies(&checked).unwrap();
+        let vesper = effects_words::decode_policies(&pol_entry.words(&input(w)));
+        checked_count += 1;
+        if rust != vesper {
+            diffs += 1;
+            if diffs <= 5 {
+                eprintln!("policies differ on fixture {name}");
+            }
+        }
+    }
+    eprintln!("policies: {diffs} of {checked_count} worlds differ");
+    assert_eq!(diffs, 0);
+}
+
+#[test]
 fn effects_match_rust_on_the_checker_fixtures() {
     let cases: Vec<(String, &World)> = fixture_worlds()
         .iter()

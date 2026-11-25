@@ -823,6 +823,11 @@ const VESPER_EFFECTS_CHECK: vesper::capability_effects::EffectsCheckTable =
             let words = effects_binding::effects_diags(&bytes);
             effects_words::decode_diagnostics(&words)
         },
+        capability_policies: |world| {
+            let bytes = effects_words::encode_world(world);
+            let words = effects_binding::effects_policies(&bytes);
+            effects_words::decode_policies(&words)
+        },
     };
 
 /// `fip::check_world` from `modules/fip` (SH2 lane 12, `#1184`).
