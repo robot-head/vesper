@@ -26,7 +26,9 @@
 // - emit.ves: the CFG extractor's definitions.
 // - ast.ves: the source AST section (part 3).
 // - tm.ves: terms as word ranges of the builder.
-// - gen.ves: the structured extractor over `Id`.
+// - gen.ves: the structured extractor (with effects and fuel companions).
+// - module.ves: the whole module: ordering, companions, the proof module.
+// - contract.ves: `f$contract` and `f$admissible`.
 
 use @vesper/check-data::input::{
     Reader,
@@ -46,6 +48,8 @@ use self::build::{
     B,
     D_NAMESPACE,
     D_OPTION,
+    K_DEF,
+    K_PARTIAL,
     builder
 };
 use self::head::{
@@ -82,6 +86,27 @@ use @vesper/check-data::util::{
 };
 use self::ast::{
     read_ast
+};
+use self::contract::{
+    contracts,
+    read_contracts
+};
+use self::module::{
+    defs_new,
+    K_NONCOMPUTABLE,
+    emit_ordered,
+    order,
+    references_symbol,
+    take_module
+};
+use self::input::{
+    Effects
+};
+use @vesper/check-data::types::{
+    Types
+};
+use @vesper/check-data::world::{
+    World
 };
 use self::gen::{
     G,
@@ -131,6 +156,29 @@ fn head(in input: Str) -> B {
     b.w(D_NAMESPACE);
     b.name_fixed(in "Vesper");
     let count = b.hole();
+    let n = head_decls(inout b, in t, in wd, in fx);
+    b.fill(count, n);
+    b
+}
+
+// `import Std`, the unused-variable option and `namespace Vesper` up to
+// the declaration count (a hole, returned).
+fn module_header(inout b: B) -> u64 {
+    b.w(1);
+    b.w(1);
+    b.text(in "Std");
+    b.w(2);
+    b.w(D_OPTION);
+    b.w(0);
+    b.w(0);
+    b.w(0);
+    b.w(D_NAMESPACE);
+    b.name_fixed(in "Vesper");
+    b.hole()
+}
+
+// The head's declarations into `b.words`; returns their number.
+fn head_decls(inout b: B, in t: Types, in wd: World, in fx: Effects) -> u64 {
     handler_cps(inout b);
     cps_monad(inout b);
     lift_action(inout b);
@@ -146,8 +194,7 @@ fn head(in input: Str) -> B {
         fail_models(inout b);
         n = wrapping_add(n, FAIL_MODEL_DECLARATIONS);
     }
-    b.fill(count, n);
-    b
+    n
 }
 
 fn printer_error(e: LeanError) -> Str {
@@ -461,4 +508,377 @@ pub fn extract_structured_functions(in input: Str) -> ChunkSeq[u64] {
         }
     }
     pack_text(in out)
+}
+
+// ----- part 3c: the whole module ---------------------------------------------------
+
+fn put_error(inout out: ChunkSeq[u8], in err: Slice[u8]) {
+    put(inout out, in "error: ");
+    out.extend(in err);
+    put(inout out, in "\n");
+}
+
+fn render_words(inout out: ChunkSeq[u8], in b: B, in pool: Str) -> bool {
+    let rendered = render_part(in b.words.as_slice(), 0, b.words.len(), in pool);
+    match rendered {
+        Result::Ok(text) => {
+            out.extend(in text.as_bytes());
+            true
+        },
+        Result::Err(e) => {
+            out.clear();
+            put(inout out, in "error: ");
+            put(inout out, in printer_error(e));
+            put(inout out, in "\n");
+            false
+        },
+    }
+}
+
+const TOTAL: u64 = 0;
+const FUEL: u64 = 1;
+const PARTIAL: u64 = 2;
+const NONE: u64 = 18446744073709551615;
+
+// `lean::extract_report` of the world: the module, `-- proof` and the
+// proof module, `-- omitted` and the omitted executable definitions, and
+// `-- totality` with one `name: total|fuel|partial: reason` line per
+// function, then `-- contracts` and the contracted functions; or `error: <message>` (tests/self_host_lean_extract.rs
+// `rust_module_text`). The input is the structured input followed by the
+// effect section and the contract section (contract.ves).
+pub fn extract_module(in input: Str) -> ChunkSeq[u64] {
+    let bytes = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in bytes);
+    let p = read_program(inout r, in bytes, in c);
+    let fx = read_fns(inout r, in bytes, in c.nmap, in c.tmap);
+    let ast = read_ast(inout r, in bytes, in c.nmap, in c.tmap);
+    let effs = read_effects(inout r, in bytes, in c.nmap, in c.tmap);
+    let cs = read_contracts(inout r, in bytes, in c.nmap);
+    let mut b = builder(names_new());
+    b.names = c.names;
+    let mut t = c.types;
+    let wd = c.world;
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    // the head
+    let hn = head_decls(inout b, in t, in wd, in effs);
+    if b.failed {
+        put_error(inout out, in b.err.as_slice());
+        return pack_text(in out);
+    }
+    let mut hw: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..b.words.len() {
+        hw.push(u64_at(in b.words, k));
+    }
+    let rec = recursive_structs(in b, in t, in wd);
+    let mut by_name: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..p.fn_count() {
+        set_by_symbol(inout by_name, p.function(i).name, n32(inc(i)));
+    }
+    let fip = wd.box_active;
+    let infer = t.infer;
+    let x = X {
+        p: p,
+        wd: wd,
+        fx: fx,
+        fip: fip,
+        rec: rec,
+        fn_by_name: by_name
+    };
+    let fip_ast = ast.fip;
+    let y = Y {
+        x: x,
+        a: ast,
+        fip: fip_ast,
+        infer: infer
+    };
+    let mut g = gen_new();
+    let mut d = defs_new();
+    let nf = y.a.fns.len();
+    // the executable definitions
+    for i in 0..nf {
+        let f = y.a.function(i);
+        let pi = u32_at(in y.x.fn_by_name, widen_u64(f.name));
+        b.words.clear();
+        b.failed = false;
+        b.err.clear();
+        b.quiet = 0;
+        b.w(0);
+        let count_at = b.hole();
+        let mut count: u64 = 0;
+        let mut taken = false;
+        if pi != 0 {
+            taken = extract(inout b, inout t, in y.x, wrapping_sub(widen_u64(pi), 1), inout count);
+        }
+        if taken {
+            if b.failed {
+                put_error(inout out, in b.err.as_slice());
+                return pack_text(in out);
+            }
+            b.fill(count_at, count);
+            if !take_module(inout b, inout d, i) {
+                put(
+                    inout out,
+                    in "error: Lean CFG extractor returned a non-function declaration\n"
+                );
+                return pack_text(in out);
+            }
+        } else {
+            b.words.clear();
+            b.failed = false;
+            b.err.clear();
+            b.quiet = 0;
+            g.reset();
+            let m = function(inout b, inout t, in y, inout g, i);
+            if b.failed {
+                put_error(inout out, in b.err.as_slice());
+                return pack_text(in out);
+            }
+            if g.skip {
+                put(inout out, in "skip\n");
+                return pack_text(in out);
+            }
+            // the definition module at the end of the words
+            let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            for k in 0..m.n {
+                words.push(u64_at(in b.words, add(m.a, k)));
+            }
+            b.words = words;
+            let ok = take_module(inout b, inout d, i);
+        }
+    }
+    let mut family: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let exec = order(inout b, in d, 0, K_PARTIAL, inout family);
+    // the total companions of the recursive family
+    g.fuel = true;
+    for i in 0..nf {
+        if u32_at(in family, i) != 0 {
+            set_by_symbol(inout g.family, y.a.function(i).name, 1);
+        }
+    }
+    let mut status: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    // per function: its companion definition index, or NONE
+    let mut companion: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut reasons: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut ra: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut rz: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut cd = defs_new();
+    for i in 0..nf {
+        ra.push(0);
+        rz.push(0);
+        companion.push(NONE);
+        if u32_at(in family, i) == 0 {
+            status.push(TOTAL);
+        } else {
+            b.words.clear();
+            b.failed = false;
+            b.err.clear();
+            b.quiet = 0;
+            g.reset();
+            let m = function(inout b, inout t, in y, inout g, i);
+            if b.failed {
+                status.push(PARTIAL);
+                let ok1 = ra.try_set(i, reasons.len());
+                reasons.extend(in b.err.as_slice());
+                let ok2 = rz.try_set(i, reasons.len());
+            } else {
+                status.push(FUEL);
+                let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+                for k in 0..m.n {
+                    words.push(u64_at(in b.words, add(m.a, k)));
+                }
+                b.words = words;
+                let ok1 = companion.try_set(i, cd.defs.len());
+                let ok = take_module(inout b, inout cd, i);
+            }
+        }
+    }
+    // a companion that calls a missing companion cannot elaborate
+    let mut fuel_syms: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..nf {
+        let s0 = b.joined(in "", y.a.function(i).name, in "$fuel");
+        fuel_syms.push(s0);
+    }
+    loop {
+        let mut found = false;
+        let mut owner: u64 = 0;
+        let mut callee: u64 = 0;
+        for i in 0..nf {
+            let ci = u64_at(in companion, i);
+            if ci != NONE && !found {
+                let cdef = match cd.defs.try_get(ci) {
+                    Option::Some(z) => z,
+                    Option::None => break,
+                };
+                for j in 0..nf {
+                    if !found && u32_at(in family, j) != 0 && u64_at(in companion, j) == NONE {
+                        if references_symbol(in b, in cd, cdef, u32_at(in fuel_syms, j)) {
+                            found = true;
+                            owner = i;
+                            callee = j;
+                        }
+                    }
+                }
+            }
+        }
+        if !found {
+            break;
+        }
+        let ok0 = companion.try_set(owner, NONE);
+        let ok1 = status.try_set(owner, PARTIAL);
+        let ok2 = ra.try_set(owner, reasons.len());
+        put(inout reasons, in "calls '");
+        b.names.write(y.a.function(callee).name, inout reasons);
+        put(inout reasons, in "', which has no total fuel companion");
+        let ok3 = rz.try_set(owner, reasons.len());
+    }
+    // the remaining companions, in owner order
+    let mut kept = defs_new();
+    for k in 0..cd.dw.len() {
+        kept.dw.push(u64_at(in cd.dw, k));
+    }
+    for i in 0..nf {
+        let ci = u64_at(in companion, i);
+        if ci != NONE {
+            match cd.defs.try_get(ci) {
+                Option::Some(z) => kept.defs.push(z),
+                Option::None => {},
+            }
+        }
+    }
+    let mut unused: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let fuel_ordered = order(inout b, in kept, 0, K_DEF, inout unused);
+    // the contracts
+    let mut cw: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut contract_names: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut cerr: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if !contracts(
+        inout b,
+        inout t,
+        in y,
+        in cs,
+        in status,
+        in reasons,
+        in ra,
+        in rz,
+        inout cw,
+        inout contract_names,
+        inout cerr
+    ) {
+        put_error(inout out, in cerr.as_slice());
+        return pack_text(in out);
+    }
+    let n3 = wrapping_mul(contract_names.len(), 2);
+    let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    // the module
+    b.words.clear();
+    let mc = module_header(inout b);
+    for k in 0..hw.len() {
+        b.w(u64_at(in hw, k));
+    }
+    let n1 = emit_ordered(inout b, in d, in exec, in none, false, NONE);
+    let n2 = emit_ordered(inout b, in kept, in fuel_ordered, in none, false, NONE);
+    for k in 0..cw.len() {
+        b.w(u64_at(in cw, k));
+    }
+    b.fill(mc, add(add(hn, n3), add(n1, n2)));
+    let pool = match String::from_utf8(in b.names.text.as_slice()) {
+        Option::Some(s) => s,
+        Option::None => String::new(),
+    };
+    if !render_words(inout out, in b, in pool.as_str()) {
+        return pack_text(in out);
+    }
+    // the proof module
+    put(inout out, in "-- proof\n");
+    b.words.clear();
+    let pc = module_header(inout b);
+    for k in 0..hw.len() {
+        b.w(u64_at(in hw, k));
+    }
+    let p1 = emit_ordered(inout b, in d, in exec, in family, true, NONE);
+    let p2 = emit_ordered(inout b, in kept, in fuel_ordered, in none, false, K_NONCOMPUTABLE);
+    for k in 0..cw.len() {
+        b.w(u64_at(in cw, k));
+    }
+    b.fill(pc, add(add(hn, n3), add(p1, p2)));
+    let pool2 = match String::from_utf8(in b.names.text.as_slice()) {
+        Option::Some(s) => s,
+        Option::None => String::new(),
+    };
+    if !render_words(inout out, in b, in pool2.as_str()) {
+        return pack_text(in out);
+    }
+    // the omitted executable definitions, sorted
+    put(inout out, in "-- omitted\n");
+    let mut omitted: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in 0..d.defs.len() {
+        let z = match d.defs.try_get(k) {
+            Option::Some(v) => v,
+            Option::None => break,
+        };
+        if u32_at(in family, z.owner) != 0 {
+            let mut pos = omitted.len();
+            omitted.push(z.key);
+            loop {
+                if pos == 0 {
+                    break;
+                }
+                let prev = u32_at(in omitted, wrapping_sub(pos, 1));
+                if !sym_less(in b, z.key, prev) {
+                    break;
+                }
+                let o1 = omitted.try_set(pos, prev);
+                let o2 = omitted.try_set(wrapping_sub(pos, 1), z.key);
+                pos = wrapping_sub(pos, 1);
+            }
+        }
+    }
+    for k in 0..omitted.len() {
+        put(inout out, in "Vesper.");
+        b.names.write(u32_at(in omitted, k), inout out);
+        put(inout out, in "\n");
+    }
+    // the totality of every function
+    put(inout out, in "-- totality\n");
+    for i in 0..nf {
+        b.names.write(y.a.function(i).name, inout out);
+        let st = u64_at(in status, i);
+        if st == TOTAL {
+            put(inout out, in ": total\n");
+        } else if st == FUEL {
+            put(inout out, in ": fuel\n");
+        } else {
+            put(inout out, in ": partial: ");
+            put_part(inout out, in reasons.as_slice(), u64_at(in ra, i), u64_at(in rz, i));
+            put(inout out, in "\n");
+        }
+    }
+    put(inout out, in "-- contracts\n");
+    for k in 0..contract_names.len() {
+        b.names.write(u32_at(in contract_names, k), inout out);
+        put(inout out, in "\n");
+    }
+    pack_text(in out)
+}
+
+// Byte order of two symbols' texts.
+fn sym_less(in b: B, x: u32, y: u32) -> bool {
+    let nx = b.names.size(x);
+    let ny = b.names.size(y);
+    let n = if nx < ny {
+        nx
+    } else {
+        ny
+    };
+    for i in 0..n {
+        let cx = b.names.byte(x, i);
+        let cy = b.names.byte(y, i);
+        if cx != cy {
+            return cx < cy;
+        }
+    }
+    nx < ny
 }
