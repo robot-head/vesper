@@ -44,6 +44,15 @@ pub fn proof_models_for_port(
         })
         .collect()
 }
+/// The ownership facts behind Lens views (`lens::View::checked`) as text,
+/// for the Vesper port's differential test.
+#[doc(hidden)]
+pub fn lens_facts_for_port(
+    snapshot: std::sync::Arc<crate::tooling::frontend::CheckedSource>,
+    cursors: &[usize],
+) -> String {
+    lens::facts_dump(snapshot, cursors)
+}
 use std::{
     cell::RefCell,
     io::{BufRead, Write},
