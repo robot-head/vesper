@@ -243,9 +243,14 @@ vesper_hybrid(
         "hybrid_codegen_walk": [
             "//:codegen_walk_package",
         ],
-        # Test discovery (#1337) builds on @vesper/test-runner.
+        # Test discovery, doctest extraction and mutation sites (#1337)
+        # build on @vesper/test-runner.
         "hybrid_test_runner": [
+            "//:ast_package",
+            "//:check_data_package",
             "//:front_package",
+            "//:std_arena_package",
+            "//:std_intern_package",
             "//:test_runner_package",
         ],
     },
