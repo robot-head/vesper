@@ -31,8 +31,11 @@ On Windows, use PowerShell 7 with the same Stage 2 subcommands.
 Under Bazel (`test/wasm_seed_package_io`), `BUILD.bazel` places `@wasmtime//:wasmtime`
 on `PATH` for `stage2_self_compilation_fixed_point` (which executes `stage2.wasm`
 and precompiled `stage2.cwasm` via the hermetic `wasmtime` CLI and verifies
-`stage2.wasm == stage3.wasm`) and `stage2_compiles_compiler_packages` (42/42 pure-Vesper
-compiler packages).
+`stage2.wasm == stage3.wasm`) and `stage2_compiles_compiler_packages` (49 pure-Vesper
+compiler packages). The fixed point test also builds each of those 49 packages
+with the boot component, with `stage2.wasm` and with `stage2.cwasm` under the
+CLI, and requires the same bytes from all three. `STAGE2_PACKAGE_GAPS` in the
+test lists the packages Stage 2 cannot build yet, with the reason.
 
 - `vesper.wasm` (committed once the remaining driver/compiler gaps land) is the
   Vesper compiler built by its own wasm backend with portable effects.
