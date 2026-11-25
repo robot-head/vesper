@@ -5,7 +5,7 @@
 > [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
 
 Owned slice on `editor41/stdio`, fresh base `bbd19af`: only
-`tests/lsp_cli.rs`, `scripts/test-editor.sh`, `scripts/check-editor.py`,
+`tests/lsp_cli.rs`, `aspect acceptance test-editor`, `scripts/check-editor.py`,
 `.github/workflows/editor.yml`, and this report. The dispatcher and session
 implementation remain coordinator/Quarry-owned. Read the editor contracts and
 actual span/protocol/navigation/action/query APIs before forming the traffic.
@@ -48,7 +48,7 @@ different code, demonstrating the opened buffer drives symbols and the disk
 file stays unchanged. Only invocation-owned temporary directories/files are
 created; tracked fixtures are untouched.
 
-`scripts/test-editor.sh` builds the actual locked root binary, unconditionally
+`aspect acceptance test-editor` builds the actual locked root binary, unconditionally
 prefers its `.exe` if present (avoiding the MSYS extensionless alias problem),
 runs disposable Python acceptance, and executes the self-checking `source_edits`
 and `protocol_documents` leaf examples. A caller can set a private Cargo target;
@@ -66,7 +66,7 @@ matching tests, scripts, workflow and Cargo files. No new proof model/job.
 Checks completed before the coordinated server integration:
 
 - `rustfmt --edition 2024 --check tests/lsp_cli.rs`: pass.
-- `bash -n scripts/test-editor.sh`: pass.
+- `bash -n aspect acceptance test-editor`: pass.
 - `python3 -m py_compile scripts/check-editor.py` and `--help`: pass.
 - Direct Python helper checks for real UTF-8 wire lengths, astral UTF-16 edit
   application, CRLF positions and decoded duplicate output rejection: pass.

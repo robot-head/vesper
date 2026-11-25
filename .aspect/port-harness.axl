@@ -1,0 +1,47 @@
+"""Run the Cargo port shards with a shared compiler."""
+
+load("./lib/process.axl", "check")
+load("./port-abi.axl", "port_compiler", "run_port_abi")
+
+def _port_harness(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    compiler = port_compiler(ctx, root)
+    env = {"VESPER_PORT_COMPILER": compiler}
+    ctx.std.io.stdout.write("compiling ports with " + compiler + "\n")
+
+    plan = json.decode(ctx.std.fs.read_to_string(root + "/scripts/port-harness-plan.json"))
+    shard = ctx.std.env.var("VESPER_PORT_HARNESS_SHARD") or ""
+    valid_shards = [str(n) for n in range(1, len(plan) + 1)]
+    if shard and shard not in valid_shards:
+        ctx.std.process.exit(1, "VESPER_PORT_HARNESS_SHARD must be 1 to %d" % len(plan))
+    abi_only = ctx.std.env.var("VESPER_PORT_HARNESS_SCOPE") == "abi"
+    if abi_only and shard:
+        ctx.std.process.exit(1, "VESPER_PORT_HARNESS_SCOPE=abi takes no shard")
+
+    selection = ctx.std.env.var("VESPER_PORT_HARNESS_CRATES") or "all"
+    crates = selection.split(" ")
+    if selection != "all":
+        ctx.std.io.stdout.write("testing only the affected ports: " + selection + "\n")
+    if shard:
+        ctx.std.io.stdout.write("port harness shard %s of %d\n" % (shard, len(plan)))
+
+    if not shard or shard == "1":
+        run_port_abi(ctx, root, env)
+    if abi_only:
+        ctx.std.io.stdout.write("export ABI tier done (VESPER_PORT_HARNESS_SCOPE=abi); ports run on Linux\n")
+        return 0
+
+    for index, checks in enumerate(plan, start = 1):
+        if shard and shard != str(index):
+            continue
+        for suite in checks:
+            if selection == "all" or any([crate in crates for crate in suite["crates"]]):
+                check(ctx, ctx.std.env.current_exe(), suite["task"], root, env)
+    return 0
+
+test_port_harness = task(
+    kind = "test-port-harness",
+    group = ["acceptance"],
+    summary = "Run the export ABI tier and selected Cargo port shards",
+    implementation = _port_harness,
+)

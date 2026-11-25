@@ -1,0 +1,99 @@
+"""Reclaim BuildBuddy scratch space and report disk use around Bazel tests."""
+
+load("./lib/process.axl", "capture", "check", "command", "exit_code", "root_path")
+
+_SCRATCH_NAMES = ["vesper-*", "stage1-*", "blake3-*", "native-*", ".tmp*"]
+
+def _temporary(ctx: TaskContext, root: str) -> str:
+    return root_path(root, ctx.std.env.var("TMPDIR") or "/tmp")
+
+def _free_gb(ctx: TaskContext, root: str) -> int:
+    rows = capture(ctx, "df", ["-Pk", "."], root).splitlines()
+    return int(rows[1].split()[3]) // 1048576
+
+def _report(ctx: TaskContext, root: str, temporary: str, heading: str):
+    ctx.std.io.stdout.write("reclaim-disk: " + heading + "\n")
+    disk = command(ctx, "df", ["-h", ".", temporary], root).stdout("piped").stderr("null").spawn().wait_with_output()
+    for line in {line: True for line in disk.stdout.splitlines()}:
+        ctx.std.io.stdout.write(line + "\n")
+
+    directories = [temporary, ctx.std.env.home_dir()]
+    bazel = ctx.std.process.which("bazel")
+    if bazel:
+        info = command(ctx, bazel, ["info", "output_base"], root).stdout("piped").stderr("null").spawn().wait_with_output()
+        if info.status.success and info.stdout.strip():
+            directories.append(info.stdout.strip())
+    command(ctx, "timeout", ["120", "du", "-sh"] + directories, root).stderr("null").status()
+
+def _reclaim(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    temporary = _temporary(ctx, root)
+    argv = ctx.args.tool_args
+    if argv == ["watch"]:
+        for _ in range(1000000):
+            check(ctx, "sleep", ["120"], root)
+            clock = capture(ctx, "date", ["-u", "+%H:%M:%S"], root).strip()
+            ctx.std.io.stdout.write("reclaim-disk: %s %d GB free\n" % (clock, _free_gb(ctx, root)))
+        return 0
+    if argv == ["report"]:
+        _report(ctx, root, temporary, "disk use")
+        return 0
+    if argv:
+        ctx.std.process.exit(2, "usage: aspect ci reclaim-disk -- [report|watch]")
+
+    threshold = int(ctx.std.env.var("VESPER_CI_MIN_FREE_GB") or "20")
+    _report(ctx, root, temporary, "before cleanup")
+    user = capture(ctx, "id", ["-u"], root).strip()
+    names = []
+    for pattern in _SCRATCH_NAMES:
+        if names:
+            names.append("-o")
+        names.extend(["-name", pattern])
+    # Bound removal to the current user's immediate scratch children. Find
+    # does not follow symlinks, and rm treats every match as an operand.
+    command(ctx, "find", [temporary, "-mindepth", "1", "-maxdepth", "1", "-user", user, "("] + names + [
+        ")", "-exec", "rm", "-rf", "--", "{}", "+",
+    ], root).stderr("null").status()
+
+    free = _free_gb(ctx, root)
+    bazel = ctx.std.process.which("bazel")
+    if free < threshold and bazel:
+        ctx.std.io.stdout.write("reclaim-disk: %d GB free, below %d GB; running bazel clean\n" % (free, threshold))
+        command(ctx, bazel, ["clean"], root).status()
+    _report(ctx, root, temporary, "after cleanup")
+    ctx.std.io.stdout.write("reclaim-disk: %d GB free\n" % _free_gb(ctx, root))
+    return 0
+
+reclaim_disk = task(
+    kind = "reclaim-disk",
+    group = ["ci"],
+    summary = "Reclaim owned scratch space on a recycled BuildBuddy runner",
+    implementation = _reclaim,
+    args = {"tool_args": args.trailing_var_args(description = "Optional report or watch mode.")},
+)
+
+def _stop_disk_watcher(child):
+    if child.try_wait() == None:
+        child.kill()
+        child.wait()
+
+def start_disk_watcher(ctx: TaskContext, root: str):
+    watcher = command(ctx, ctx.std.env.current_exe(), ["ci", "reclaim-disk", "--", "watch"], root).process_group(0).spawn()
+    ctx.defer(lambda: _stop_disk_watcher(watcher))
+
+def _bazel_tests(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    lean = ctx.std.fs.read_to_string(root + "/.ci-lean-path").rstrip("\r\n")
+    if not lean:
+        ctx.std.process.exit(1, "The CI Lean executable path is required")
+    ctx.defer(lambda: _report(ctx, root, _temporary(ctx, root), "disk use"))
+    start_disk_watcher(ctx, root)
+    return exit_code(command(ctx, "bazel", ["test"] + ctx.args.tool_args, root, {"VESPER_LEAN": lean}).status())
+
+bazel_tests = task(
+    kind = "bazel-tests",
+    group = ["ci"],
+    summary = "Run a BuildBuddy Bazel test lane with Lean and disk reporting",
+    implementation = _bazel_tests,
+    args = {"tool_args": args.trailing_var_args(description = "Flags and targets for bazel test.")},
+)

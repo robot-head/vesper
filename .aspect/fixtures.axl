@@ -1,4 +1,27 @@
-load("./lib/script.axl", "script_task")
+load("./lib/process.axl", "check")
 
-resource_oracle42_bye_eof_stall = script_task("bye-eof-stall", ["fixture", "resource-oracle42"], "crates/vesper-oracles/tests/fixtures/resource_oracle42/bye_eof_stall.sh", "sh")
-resource_oracle42_fault_peer = script_task("fault-peer", ["fixture", "resource-oracle42"], "crates/vesper-oracles/tests/fixtures/resource_oracle42/fault_peer.py", "python3")
+def _run_peer(ctx: TaskContext, modes: list[str]) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    check(ctx, "cargo", ["run", "--locked", "--quiet", "-p", "vesper-oracles", "--bin", "resource_oracle42", "--", "--fault-peer"] + modes, root)
+    return 0
+
+def _fault_peer(ctx: TaskContext) -> int:
+    return _run_peer(ctx, ctx.args.tool_args)
+
+def _bye_eof_stall(ctx: TaskContext) -> int:
+    return _run_peer(ctx, ["bye_eof_stall"])
+
+resource_oracle42_bye_eof_stall = task(
+    kind = "bye-eof-stall",
+    group = ["fixture", "resource-oracle42"],
+    summary = "Run the resource oracle fixture that stalls after BYE and EOF",
+    implementation = _bye_eof_stall,
+)
+
+resource_oracle42_fault_peer = task(
+    kind = "fault-peer",
+    group = ["fixture", "resource-oracle42"],
+    summary = "Run a negative resource oracle transport fixture",
+    implementation = _fault_peer,
+    args = {"tool_args": args.trailing_var_args(description = "The fault mode.")},
+)

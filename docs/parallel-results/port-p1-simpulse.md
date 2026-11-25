@@ -138,7 +138,7 @@ passed, and exactly that test failed.
 
 ## Benchmark
 
-`crates/vesper-simpulse/bench-abba.sh 11 40` (`examples/abba.rs`, built once
+`aspect crate simpulse bench-abba 11 40` (`examples/abba.rs`, built once
 per package, run as separate processes in Rust, port, port, Rust order per
 epoch, paired analysis with `vesper-bench`). Each run records a full journal
 on a fresh simulator. Cloud container, 4 vCPU Intel Xeon @ 2.10GHz, release

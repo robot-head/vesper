@@ -12,7 +12,7 @@ fn main() {
 }
 
 /// One deliberately wrong edit per ported Rust module (BUILD.bazel builds
-/// the same edits); `crates/vesper-tensor/port/test-port.sh` checks that each
+/// the same edits); `aspect crate tensor test-port` checks that each
 /// fails its test and that an unchanged test still passes. Each text occurs
 /// exactly once across the package's `.ves` files.
 #[cfg(feature = "vesper-port-divergent")]

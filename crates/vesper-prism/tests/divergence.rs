@@ -2,7 +2,7 @@
 //! deliberately wrong build of each Vesper library must make the tests of its
 //! module fail, while an unrelated test still passes. Bazel passes the
 //! divergent test binaries (BUILD.bazel); under Cargo the same check is
-//! crates/vesper-prism/test-port.sh. Without the variables this test has
+//! aspect crate prism test-port. Without the variables this test has
 //! nothing to run and passes.
 use std::process::Command;
 

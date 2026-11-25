@@ -4,7 +4,7 @@ load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper
 # The saturation engine is the Vesper port (Rust-exit SH6 lane 18, #1413):
 # build.rs links the object built here from the Loom package in vesper/ and
 # checks port/binding.rs against the generated binding. The divergent build
-# stays compiling here; crates/vesper-fusion/port/test-port.sh asserts which
+# stays compiling here; aspect crate fusion test-port asserts which
 # test catches it.
 vesper_package(
     name = "port_package",

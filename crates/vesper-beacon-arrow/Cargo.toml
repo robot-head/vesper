@@ -20,7 +20,7 @@ grpc = ["dep:tonic", "dep:tonic-prost", "dep:tokio", "dep:subtle", "dep:rustls"]
 # #901). Off by default until the port reaches performance parity.
 vesper-port = ["vesper-beacon/vesper-port"]
 # A deliberately wrong Vesper build: the port test run must fail
-# (crates/vesper-beacon-arrow/port/test-port.sh asserts which test does).
+# (aspect crate beacon-arrow test-port asserts which test does).
 vesper-port-divergent = []
 
 [dependencies]

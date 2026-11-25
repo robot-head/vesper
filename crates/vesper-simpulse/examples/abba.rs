@@ -3,7 +3,7 @@
 //! packages with one library name, so this example is built once per package
 //! and, in `compare` mode, runs the two executables as separate processes in
 //! Rust, port, port, Rust order per epoch, then analyzes the paired totals
-//! with vesper-bench. Run `crates/vesper-simpulse/bench-abba.sh`.
+//! with vesper-bench. Run `aspect crate simpulse bench-abba`.
 //!
 //! `abba measure <ops>` warms each workload up and prints its total
 //! nanoseconds over `<ops>` runs. `abba compare <rust> <port> <epochs> <ops>`

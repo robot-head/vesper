@@ -61,7 +61,7 @@ Bazel change.
 Add it to `[workspace].members` as usual, then run
 
 ```sh
-python3 tools/bazel/sync_build_files.py
+aspect maintenance bazel sync-build-files
 ```
 
 which writes the crate's one-line `BUILD.bazel`. Bazel stops with the same

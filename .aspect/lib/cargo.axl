@@ -1,0 +1,19 @@
+"""Read Cargo's machine-readable test artifact messages."""
+
+load("./process.axl", "capture")
+
+def test_artifacts(ctx: TaskContext, root: str, options: list[str], suites: list[str]) -> list[str]:
+    messages = capture(ctx, "cargo", ["test", "--locked", "--no-run", "--message-format=json-render-diagnostics"] + options, root)
+    paths = []
+    seen = {}
+    for line in messages.splitlines():
+        entry = json.try_decode(line, {})
+        if type(entry) == "dict" and entry.get("reason") == "compiler-artifact" and entry.get("executable") and "test" in entry["target"]["kind"] and entry["target"]["name"] in suites:
+            suite = entry["target"]["name"]
+            if suite in seen:
+                ctx.std.process.exit(1, "Cargo returned multiple executables for test suite " + suite)
+            seen[suite] = True
+            paths.append(entry["executable"])
+    if len(paths) != len(suites):
+        ctx.std.process.exit(1, "Cargo did not return an executable for every selected test suite")
+    return paths

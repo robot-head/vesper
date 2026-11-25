@@ -71,7 +71,7 @@ graph's whole schedule loop spills (gap 3).
 
 ### Checks
 
-`crates/vesper-resonance/port/test-port.sh` passes in full: every test of
+`aspect crate resonance test-port` passes in full: every test of
 the Rust build, the seed and the port (255 test cases;
 `tests/port_differential.rs` compares samples, schedules, findings and
 leases with the Rust build bit for bit, including events and ramps through
@@ -184,7 +184,7 @@ it ran 357M; the Rust build runs 192M. The rest is mostly the input sums
 
 ### Checks
 
-`crates/vesper-resonance/port/test-port.sh` passes in full (all tests of
+`aspect crate resonance test-port` passes in full (all tests of
 the three builds, including the bit-for-bit differential; the seven
 divergence checks; the realtime verifier proof on x86_64 and aarch64 with
 its positive control). The graph's divergent edit in `build.rs` moved with
@@ -354,7 +354,7 @@ wall-clock gap is mostly that function's spills (gap 3).
 
 - `cargo test -p vesper-resonance -p vesper-resonance-seed` (the package
   now runs every test against the port).
-- `crates/vesper-resonance/port/test-port.sh`: the divergent port fails one
+- `aspect crate resonance test-port`: the divergent port fails one
   test per ported module, and the realtime verifier proves the audio path
   allocation-free on x86_64 and aarch64.
 - `vesper build --lib` of the port for `aarch64-apple-darwin`,

@@ -1,0 +1,356 @@
+load("./lib/process.axl", "capture", "check", "command", "exit_code", "root_path", "scratch_dir")
+
+def _bench_task(crate: str, kind: str, summary: str, implementation):
+    return task(
+        kind = kind,
+        group = ["crate", crate],
+        summary = summary,
+        implementation = implementation,
+        args = {
+            "tool_args": args.trailing_var_args(
+                description = "Benchmark arguments. Put -- before benchmark flags.",
+            ),
+        },
+    )
+
+def _build_args(crate: str, example: str, features: list[str], quiet: bool) -> list[str]:
+    args = ["build", "--locked", "--release"]
+    if quiet:
+        args.append("-q")
+    return args + ["-p", "vesper-" + crate, "--example", example] + features
+
+def _build(ctx: TaskContext, crate: str, cwd: str, target: str, features: list[str] = [], quiet: bool = False):
+    check(ctx, "cargo", _build_args(crate, "abba", features, quiet), cwd, {"CARGO_TARGET_DIR": target})
+
+def _target(ctx: TaskContext, root: str) -> str:
+    return root_path(root, ctx.std.env.var("CARGO_TARGET_DIR") or "target")
+
+def _exe_suffix(ctx: TaskContext) -> str:
+    return ".exe" if ctx.std.env.os() == "windows" else ""
+
+def _example(target: str, suffix: str, name: str = "abba") -> str:
+    return target + "/release/examples/" + name + suffix
+
+def _default(values: list[str], index: int, fallback: str) -> str:
+    return (values[index] or fallback) if index < len(values) else fallback
+
+def _workloads(ctx: TaskContext, fallback: list[str]) -> list[str]:
+    value = ctx.std.env.var("WORKLOADS")
+    return value.split() if value else fallback
+
+def _remove_worktree(ctx: TaskContext, root: str, tree: str):
+    command(ctx, "git", ["worktree", "remove", "--force", tree], root).stdout("null").stderr("null").status()
+
+def _temporary_worktree(ctx: TaskContext, root: str, commit: str) -> str:
+    tree = scratch_dir(ctx, "vesper-benchmark-") + "/rust-tree"
+    check(ctx, "git", ["worktree", "add", "--detach", "-q", tree, commit], root)
+    ctx.defer(lambda: _remove_worktree(ctx, root, tree))
+    return tree
+
+def _overlay_example(ctx: TaskContext, root: str, tree: str, crate: str):
+    path = "/crates/vesper-" + crate + "/examples/abba.rs"
+    ctx.std.fs.copy(root + path, tree + path)
+
+def _baseline(ctx: TaskContext, root: str, target: str, crate: str, commit: str, overlay: bool, quiet: bool) -> str:
+    tree = _temporary_worktree(ctx, root, commit)
+    if overlay:
+        _overlay_example(ctx, root, tree, crate)
+    _build(ctx, crate, tree, target, quiet = quiet)
+    return _example(target, _exe_suffix(ctx))
+
+def _compare_task(crate: str, epochs: str, ops: str, seed: str = "", commit: str = "", overlay: bool = False):
+    def run(ctx: TaskContext) -> int:
+        values = ctx.args.tool_args
+        root = ctx.std.env.aspect_root_dir()
+        target = _target(ctx, root)
+        suffix = _exe_suffix(ctx)
+        temp = scratch_dir(ctx, "vesper-benchmark-")
+        rust = temp + "/rust" + suffix
+        port = temp + "/port" + suffix
+        if commit:
+            baseline = _baseline(ctx, root, target + "/" + crate + "-rust-baseline", crate, _default(values, 2, commit), overlay, True)
+        else:
+            _build(ctx, seed or crate, root, target, quiet = True)
+            baseline = _example(target, suffix)
+        ctx.std.fs.copy(baseline, rust)
+        features = ["--features", "vesper-port"] if crate == "ignis" else []
+        _build(ctx, crate, root, target, features, quiet = True)
+        ctx.std.fs.copy(_example(target, suffix), port)
+        driver = rust if seed else port
+        check(ctx, driver, ["compare", rust, port, _default(values, 0, epochs), _default(values, 1, ops)], root)
+        return 0
+
+    return _bench_task(crate, "bench-abba", "Compare the Rust and Vesper benchmark builds", run)
+
+aura_bench_abba = _compare_task("aura", "15", "200", commit = "cee8b1ac3552d7a2beccb5553ef43fee56b00868")
+crucible_bench_abba = _compare_task("crucible", "11", "20", seed = "crucible-seed")
+ignis_bench_abba = _compare_task("ignis", "15", "100")
+prism_bench_abba = _compare_task("prism", "15", "200", commit = "ab965f2ab475a4b8d3bf31034808c306cdf16975", overlay = True)
+simpulse_bench_abba = _compare_task("simpulse", "11", "40", seed = "simpulse-seed")
+
+def _callgrind_count(ctx: TaskContext, root: str, binary: str, argv: list[str]) -> int:
+    process = command(ctx, "valgrind", ["--tool=callgrind", "--callgrind-out-file=/dev/null", binary, "once"] + argv, root)
+    result = process.stdout("piped").stderr("piped").spawn().wait_with_output()
+    for line in (result.stderr + "\n" + result.stdout).splitlines():
+        if result.status.success and "Collected : " in line:
+            return int(line.partition("Collected : ")[2].strip())
+    ctx.std.io.stderr.write(result.stderr)
+    ctx.std.process.exit(exit_code(result.status) or 1, "Callgrind did not report an instruction count")
+
+def _print_instruction_count(ctx: TaskContext, root: str, binary: str, workload: str, arm: str, argv: list[str]):
+    total = _callgrind_count(ctx, root, binary, argv + ["6"])
+    setup = _callgrind_count(ctx, root, binary, argv + ["1"])
+    ctx.std.io.stdout.write("%s %s instructions (5 batches): %d\n" % (workload, arm, total - setup))
+
+def _callgrind_task(crate: str, workloads: list[str], features: list[str] = []):
+    def run(ctx: TaskContext) -> int:
+        root = ctx.std.env.aspect_root_dir()
+        target = _target(ctx, root)
+        binary = _example(target, _exe_suffix(ctx))
+        _build(ctx, crate, root, target, features)
+        for workload in _workloads(ctx, workloads):
+            check(ctx, binary, ["abba", workload], root)
+            if ctx.std.env.var("CALLGRIND") == "1":
+                for arm in ["rust", "vesper"]:
+                    _print_instruction_count(ctx, root, binary, workload, arm, [workload, arm])
+        return 0
+
+    return _bench_task(crate, "bench", "Measure the Rust and Vesper benchmark arms", run)
+
+diagnostics_bench = _callgrind_task("diagnostics", ["prepare", "terminal", "colored", "json", "lsp"])
+forge_bench = _callgrind_task("forge", ["corpus", "macro", "chain"], ["--features", "vesper-port"])
+lean_syntax_bench = _callgrind_task("lean-syntax", ["term", "module", "free"])
+span_bench = _callgrind_task("span", ["lookup", "index", "edits"])
+
+def _drive_task(crate: str, workloads: list[str], baseline_commit: str = "", env_workloads: bool = False):
+    def run(ctx: TaskContext) -> int:
+        root = ctx.std.env.aspect_root_dir()
+        target = _target(ctx, root)
+        suffix = _exe_suffix(ctx)
+        temp = scratch_dir(ctx, "vesper-benchmark-")
+        rust = temp + "/rust" + suffix
+        port = temp + "/vesper" + suffix
+        if baseline_commit:
+            base = _default(ctx.args.tool_args, 0, baseline_commit)
+            built_rust = _baseline(ctx, root, target + "/" + crate + "-rust-baseline", crate, base, False, True)
+        else:
+            _build(ctx, crate, root, target)
+            built_rust = _example(target, suffix)
+        ctx.std.fs.copy(built_rust, rust)
+        features = [] if baseline_commit else ["--features", "vesper-port"]
+        _build(ctx, crate, root, target, features, quiet = bool(baseline_commit))
+        ctx.std.fs.copy(_example(target, suffix), port)
+        for workload in _workloads(ctx, workloads) if env_workloads else workloads:
+            check(ctx, rust, ["drive", workload, rust, port], root)
+        return 0
+
+    return _bench_task(crate, "bench", "Build and compare both benchmark arms", run)
+
+chorus_bench = _drive_task("chorus", ["project", "explore"], baseline_commit = "a2adca200824728bfb06a9a27e673b4d488da5c7")
+warp_bench = _drive_task("warp", ["frames", "ack", "recovery", "buffers", "transfer"], env_workloads = True)
+warp_tcp_bench = _drive_task("warp-tcp", ["codec", "transfer"])
+
+def _persistent_tree(ctx: TaskContext, root: str, tree: str, commit: str):
+    if not ctx.std.fs.exists(tree):
+        check(ctx, "git", ["worktree", "prune"], root)
+        check(ctx, "git", ["-c", "core.longpaths=true", "worktree", "add", "--detach", "-q", tree, commit], root)
+
+def _aegis_baseline(ctx: TaskContext, root: str, target: str, commit: str, overlay: bool) -> str:
+    cache = target + "/aegis-rust-baseline"
+    suffix = _exe_suffix(ctx)
+    short = commit[:12]
+    tree = cache + "/t-" + short
+    output = _example(cache, suffix, "abba-" + short)
+    if ctx.std.process.which(output) and ctx.std.fs.exists(tree):
+        return output
+    ctx.std.fs.create_dir_all(cache)
+    _persistent_tree(ctx, root, tree, commit)
+    if overlay:
+        _overlay_example(ctx, root, tree, "aegis")
+    env = {"CARGO_TARGET_DIR": cache}
+    compiler = target + "/vesper-port-compiler/x86_64-unknown-linux-gnu/debug/vesper" + suffix
+    if not ctx.std.env.var("VESPER_PORT_COMPILER") and ctx.std.process.which(compiler):
+        env["VESPER_PORT_COMPILER"] = compiler
+    check(ctx, "cargo", _build_args("aegis", "abba", [], True), tree, env)
+    ctx.std.fs.copy(_example(cache, suffix), output)
+    return output
+
+def _aegis(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    target = _target(ctx, root)
+    values = ctx.args.tool_args
+    parsers = ctx.std.env.var("AEGIS_RUST_COMMIT") or "a8570f2857d85dfb8fdbbdda74977b41f478c49d"
+    cbor = ctx.std.env.var("AEGIS_RUST_CBOR_COMMIT") or "11cdaefab068dd34735c3d8b17fe230a7cfc3522"
+    cose = ctx.std.env.var("AEGIS_RUST_COSE_COMMIT") or "0f5a9eba809fd81ad7050d7d083a0e729ce009d4"
+    codec_workloads = ["cca_token", "corim", "corim_store", "appraise_cca"]
+    _build(ctx, "aegis", root, target, quiet = True)
+    port = _example(target, _exe_suffix(ctx))
+    if values and values[0] == "flip-gate":
+        if len(values) != 2:
+            ctx.std.process.exit(2, "flip-gate requires a workload")
+        workload = values[1]
+        commit = cbor if workload == "cca_claims" else cose if workload in codec_workloads else parsers
+        rust = _aegis_baseline(ctx, root, target, commit, commit != parsers or workload in ["cca_claims"] + codec_workloads)
+        check(ctx, port, ["flip-gate", workload, rust], root)
+    else:
+        for commit, overlay, workloads in [
+            (parsers, False, ["snp", "tdx", "sgx", "policy"]),
+            (cbor, True, ["cca_claims"]),
+            (cose, True, codec_workloads),
+        ]:
+            rust = _aegis_baseline(ctx, root, target, commit, overlay)
+            check(ctx, port, ["compare", rust] + workloads, root)
+    return 0
+
+aegis_bench_abba = _bench_task("aegis", "bench-abba", "Compare Aegis against the historical Rust builds", _aegis)
+
+def _flags_cache_tag(flags: str) -> str:
+    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+    tag = []
+    separating = False
+    for char in flags.elems():
+        if char in allowed:
+            tag.append(char)
+            separating = False
+        elif not separating:
+            tag.append("_")
+            separating = True
+    return "".join(tag) or "default"
+
+def _h3_commit(workload: str) -> str:
+    if workload in ["connection", "session"]:
+        return "0f5a9eba809fd81ad7050d7d083a0e729ce009d4"
+    return "236c57d879e8dc718a406efa5b7aa5b69ffeab66"
+
+def _h3_baseline(ctx: TaskContext, root: str, cache: str, commit: str) -> str:
+    tag = _flags_cache_tag(ctx.std.env.var("RUSTFLAGS") or "")
+    binary = cache + "/abba-" + commit + "-" + tag + _exe_suffix(ctx)
+    if not ctx.std.process.which(binary):
+        built = _baseline(ctx, root, cache + "/build-" + commit, "prism-h3", commit, True, False)
+        ctx.std.fs.copy(built, binary)
+    return binary
+
+def _h3(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    target = _target(ctx, root)
+    cache = target + "/prism-h3-rust-baseline"
+    ctx.std.fs.create_dir_all(cache)
+    _build(ctx, "prism-h3", root, target)
+    port = _example(target, _exe_suffix(ctx))
+    values = ctx.args.tool_args
+    if values and values[0] == "flip-gate":
+        if len(values) < 2:
+            ctx.std.process.exit(2, "flip-gate requires a workload")
+        workload = values[1]
+        commit = _default(values, 2, _h3_commit(workload))
+        rust = _h3_baseline(ctx, root, cache, commit)
+        check(ctx, port, ["flip-gate", workload, rust, port], root)
+        return 0
+    for workload in ["decode", "encode", "frames", "messages", "connection", "session"]:
+        commit = _default(values, 0, _h3_commit(workload))
+        rust = _h3_baseline(ctx, root, cache, commit)
+        check(ctx, port, ["drive", workload, rust, port], root)
+        if ctx.std.env.var("CALLGRIND") == "1":
+            for arm, binary in [("rust", rust), ("vesper", port)]:
+                _print_instruction_count(ctx, root, binary, workload, arm, [workload])
+    return 0
+
+prism_h3_bench = _bench_task("prism-h3", "bench", "Compare Prism HTTP/3 against the historical Rust builds", _h3)
+
+_T95 = [(4, 2.776), (5, 2.571), (6, 2.447), (7, 2.365), (8, 2.306), (9, 2.262), (10, 2.228), (11, 2.201), (12, 2.179), (13, 2.160), (14, 2.145), (15, 2.131), (19, 2.093), (29, 2.045)]
+
+def _sqrt(x: float) -> float:
+    if x == 0.0:
+        return 0.0
+    guess = max(1.0, x)
+    for _ in range(256):
+        next_guess = (guess + x / guess) / 2.0
+        if next_guess == guess:
+            break
+        guess = next_guess
+    return guess
+
+def _decimal(x: float) -> str:
+    thousandths = int(abs(x) * 1000.0 + 0.5)
+    fraction = str(thousandths % 1000)
+    return ("-" if x < 0.0 else "") + str(thousandths // 1000) + "." + ("000" + fraction)[-3:]
+
+def _timing(ctx: TaskContext, cwd: str, binary: str) -> tuple:
+    fields = capture(ctx, binary, [], cwd).split()
+    if len(fields) < 3:
+        ctx.std.process.exit(1, "Expected benchmark output with a build name, timing and digest")
+    return int(fields[1]), fields[2]
+
+def _timing_pairs(ctx: TaskContext, cwd: str, a: str, b: str, pairs: int, workload: str) -> int:
+    if pairs < 2:
+        ctx.std.process.exit(2, "ABBA requires at least two pairs")
+    ratios = []
+    digests = {}
+    sums = []
+    for _ in range(pairs):
+        a1, da = _timing(ctx, cwd, a)
+        b1, db = _timing(ctx, cwd, b)
+        b2, db2 = _timing(ctx, cwd, b)
+        a2, da2 = _timing(ctx, cwd, a)
+        for digest in [da, db, da2, db2]:
+            digests[digest] = True
+        rust_time = a1 + a2
+        vesper_time = b1 + b2
+        if rust_time <= 0 or vesper_time < 0:
+            ctx.std.process.exit(1, "Invalid ABBA timings")
+        ratios.append(float(vesper_time) / float(rust_time))
+        sums.append("%d:%d" % (rust_time, vesper_time))
+    total = 0.0
+    for ratio in ratios:
+        total += ratio
+    mean = total / float(pairs)
+    variance = 0.0
+    for ratio in ratios:
+        difference = ratio - mean
+        variance += difference * difference
+    t = 3.182
+    for df, critical in _T95:
+        if df >= pairs:
+            break
+        t = critical
+    half = t * _sqrt(variance / float(pairs - 1)) / _sqrt(float(pairs))
+    ctx.std.io.stdout.write("pairs %d  Vesper/Rust mean %s  95%% [%s, %s]\n" % (pairs, _decimal(mean), _decimal(mean - half), _decimal(mean + half)))
+    ctx.std.io.stdout.write("flip-gate pairs %s %s\n" % (workload, " ".join(sums)))
+    ctx.std.io.stdout.write("digests " + ("equal" if len(digests) == 1 else "DIFFER: " + " ".join(sorted(digests))) + "\n")
+    return 0 if len(digests) == 1 else 1
+
+def _abba(ctx: TaskContext) -> int:
+    values = ctx.args.tool_args
+    if len(values) < 2 or len(values) > 4:
+        ctx.std.process.exit(2, "Expected <rust-binary> <vesper-binary> [pairs] [workload]")
+    return _timing_pairs(ctx, ctx.std.env.current_dir(), values[0], values[1], int(_default(values, 2, "10")), _default(values, 3, "runtime"))
+
+def _gpu(ctx: TaskContext) -> int:
+    values = ctx.args.tool_args
+    if not values or values[0] not in ["runtime", "broadphase", "generation"]:
+        ctx.std.process.exit(2, "Expected workload runtime, broadphase or generation")
+    workload = values[0]
+    if workload == "runtime":
+        commit = ctx.std.env.var("GPU_RUST_RUNTIME_COMMIT") or "0787bb712cde55149c3b2f98fcee93af6f1d8892"
+    else:
+        commit = ctx.std.env.var("GPU_RUST_DRIVER_COMMIT") or "6628b18a31135f0ba3c4d6c59eeefa85f84122e8"
+    example = workload + "_bench"
+    root = ctx.std.env.aspect_root_dir()
+    target = _target(ctx, root)
+    cache = target + "/gpu-compute-rust-baseline"
+    suffix = _exe_suffix(ctx)
+    rust = _example(cache, suffix, example + "." + commit)
+    if not ctx.std.process.which(rust):
+        tree = cache + "/tree-" + commit
+        ctx.std.fs.create_dir_all(cache)
+        _persistent_tree(ctx, root, tree, commit)
+        source = "crates/vesper-gpu-compute/examples/" + example + ".rs"
+        example_commit = ctx.std.env.var("GPU_EXAMPLE_COMMIT") or "086e3684361b70921b5492f0274bf20f92f9c97d"
+        ctx.std.fs.write(tree + "/" + source, capture(ctx, "git", ["show", example_commit + ":" + source], root))
+        check(ctx, "cargo", _build_args("gpu-compute", example, [], True), tree, {"CARGO_TARGET_DIR": cache})
+        ctx.std.fs.copy(_example(cache, suffix, example), rust)
+    check(ctx, "cargo", _build_args("gpu-compute", example, [], True), root, {"CARGO_TARGET_DIR": target})
+    return _timing_pairs(ctx, root, rust, _example(target, suffix, example), int(_default(values, 1, "10")), workload)
+
+gpu_compute_abba = _bench_task("gpu-compute", "abba", "Measure alternating Rust and Vesper binaries and compare digests", _abba)
+gpu_compute_bench_abba = _bench_task("gpu-compute", "bench-abba", "Build and measure a GPU benchmark against historical Rust", _gpu)

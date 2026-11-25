@@ -708,6 +708,17 @@ vesper_crate(
             "src/doctest.rs",
             "tests/doctest_cli.rs",
         ]),
+        # Part 6: the generated module of a doctest example against
+        # doctest_generate::rust_generate on snippets of the same files.
+        "test/self_host_doctest_generate": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+            "src/doctest.rs",
+            "src/doctest_extract.rs",
+            "tests/doctest_cli.rs",
+        ]),
         # Self-hosting SH4 lane 17 (#1291): @vesper/backend-checks against
         # native_verifiers on the verifier fixtures and the corpus. Anchored
         # globs; @vesper/resonance comes from its crate's package.
@@ -880,7 +891,7 @@ vesper_crate(
     # Reservations include subprocess overhead; they do not enforce RSS limits.
     # `lean_replay` marks the Lean/Logos suite run by "Native and acceptance
     # scripts" when Lean-facing paths change and on pushes to main
-    # (scripts/ci/lean_replay_scope.py, docs/ci-platforms.md "PR test tiers").
+    # (.aspect/lean-replay-scope.axl, docs/ci-platforms.md "PR test tiers").
     test_tags = {
         # These harnesses can run several compiler/evaluator cases in parallel.
         "vesper_unit_test": [
@@ -1239,6 +1250,8 @@ vesper_crate(
         # The doctest guard differential (#1337) runs the corpus and every
         # top-level function under four limit sets, twice.
         "test/self_host_doctest_guard": "long",
+        # The doctest generate differential (#1337) runs 39k snippets twice.
+        "test/self_host_doctest_generate": "long",
         # The backend-checks differential emits every corpus program 4 times.
         "test/self_host_backend_checks": "long",
         # The optimizer policy (#1279) optimizes every corpus world three times.
