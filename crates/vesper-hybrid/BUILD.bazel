@@ -243,6 +243,11 @@ vesper_hybrid(
         "hybrid_codegen_walk": [
             "//:codegen_walk_package",
         ],
+        # The drops swap (#1282) builds on @vesper/codegen-aggregates-emit.
+        "hybrid_codegen_drops": [
+            "//:codegen_aggregates_emit_package",
+            "//packages/vesper-cranelift:cranelift_package",
+        ],
         # Test discovery (#1337) builds on @vesper/test-runner.
         "hybrid_test_runner": [
             "//:front_package",
@@ -277,6 +282,7 @@ vesper_hybrid(
         "hybrid_freestanding": "modules/freestanding",
         "hybrid_backend_checks": "modules/backend_checks",
         "hybrid_codegen_walk": "modules/codegen_walk",
+        "hybrid_codegen_drops": "modules/codegen_drops",
         "hybrid_test_runner": "modules/test_runner",
         "hybrid_place_ir": "modules/place_ir",
         "hybrid_stack_bound": "modules/stack_bound",

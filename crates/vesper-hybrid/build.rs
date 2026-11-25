@@ -71,6 +71,12 @@ const MODULES: &[(&str, &str, &str)] = &[
         "modules/codegen_walk",
         "port/codegen_walk.rs",
     ),
+    // SH4 lane 8 (#1282): drop glue of boxed values, through the `drops` hook.
+    (
+        "hybrid_codegen_drops",
+        "modules/codegen_drops",
+        "port/codegen_drops.rs",
+    ),
     // SH4 lane 11 (#1285): vector and TiledSeq operations, through the
     // `numeric` hook.
     (
