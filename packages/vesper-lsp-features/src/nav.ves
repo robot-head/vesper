@@ -369,7 +369,7 @@ pub fn arg_at(in a: Ast, i: u32) -> ArgNode {
         )
 }
 
-fn clause_at(in a: Ast, c: u32) -> ClauseNode {
+pub fn clause_at(in a: Ast, c: u32) -> ClauseNode {
     a
         .clauses
         .get_or(

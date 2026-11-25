@@ -18,7 +18,7 @@ trap 'rm -f "$log"' EXIT HUP INT TERM
 while read -r area failing passing; do
     if VESPER_LINT_DIVERGE=$area cargo test --locked -p vesper-lint \
         --features vesper-port,vesper-port-divergent --no-fail-fast \
-        --test differential --test typed --test policy \
+        --test differential --test typed --test policy --test modes \
         -- --skip port_frees_its_allocations >"$log" 2>&1; then
         cat "$log"
         echo "the divergent lint port ($area) passed its tests" >&2
@@ -36,4 +36,5 @@ effects fuzzed_facts_lint_identically fuzzed_documents_parse_identically
 projections fuzzed_facts_lint_identically fuzzed_documents_parse_identically
 toml fuzzed_documents_parse_identically fuzzed_facts_lint_identically
 edits fuzzed_edits_apply_identically fuzzed_facts_lint_identically
+modes repository_sources_match_the_definition fuzzed_documents_parse_identically
 CHECKS

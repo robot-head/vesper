@@ -44,6 +44,24 @@ pub fn proof_models_for_port(
         })
         .collect()
 }
+/// The ownership facts behind Lens views (`lens::View::checked`) as text,
+/// for the Vesper port's differential test.
+#[doc(hidden)]
+pub fn lens_facts_for_port(
+    snapshot: std::sync::Arc<crate::tooling::frontend::CheckedSource>,
+    cursors: &[usize],
+) -> String {
+    lens::facts_dump(snapshot, cursors)
+}
+/// The repaired text and regions of a syntax-damaged document
+/// (`lens::repair`) as text, for the Vesper port's differential test.
+#[doc(hidden)]
+pub fn lens_repair_for_port(
+    syntax: &vesper_syntax::recovery::RecoverySyntax,
+    limits: crate::tooling::frontend::AnalysisLimits,
+) -> String {
+    lens::repair_dump(syntax, limits)
+}
 use std::{
     cell::RefCell,
     io::{BufRead, Write},

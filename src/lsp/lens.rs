@@ -1301,3 +1301,82 @@ impl Walker<'_> {
         Ok(())
     }
 }
+
+/// The ownership facts of a checked snapshot as text, for the Vesper port's
+/// differential test (tests/self_host_lsp_features.rs): each function with
+/// its bindings and their consumption events, then the live linear
+/// bindings (`View::outstanding`) at each cursor, by origin.
+pub(crate) fn facts_dump(snapshot: Arc<CheckedSource>, cursors: &[usize]) -> String {
+    use std::fmt::Write as _;
+    let view = match View::checked(snapshot) {
+        Ok(view) => view,
+        Err(unavailable) => return format!("U\t{}\n", unavailable.as_str()),
+    };
+    let mut out = String::new();
+    for f in &view.functions {
+        let _ = writeln!(out, "F\t{}\t{}", f.span.start, f.span.end);
+        for b in &f.bindings {
+            let _ = writeln!(
+                out,
+                "B\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                b.name,
+                b.origin.start,
+                b.origin.end,
+                u8::from(b.linear),
+                u8::from(b.owned),
+                b.scope.start,
+                b.scope.end,
+                b.ty
+            );
+            for e in &b.events {
+                let _ = write!(out, "E\t{}\t{}", e.span.start, e.span.end);
+                for (arm, construct) in &e.branches {
+                    let _ = write!(
+                        out,
+                        "\t{}\t{}\t{}\t{}",
+                        arm.start, arm.end, construct.start, construct.end
+                    );
+                }
+                out.push('\n');
+            }
+        }
+    }
+    for &at in cursors {
+        let _ = write!(out, "O\t{at}");
+        for b in view.outstanding(at) {
+            let _ = write!(out, "\t{}", b.origin.start);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// The repaired view's text and regions (`repair`) as text, for the Vesper
+/// port's differential test.
+pub(crate) fn repair_dump(syntax: &RecoverySyntax, limits: AnalysisLimits) -> String {
+    use std::fmt::Write as _;
+    let (text, regions) = match repair(syntax, limits) {
+        Ok(repaired) => repaired,
+        Err(unavailable) => return format!("U\t{}\n", unavailable.as_str()),
+    };
+    let mut out = String::new();
+    for r in &regions {
+        let _ = writeln!(
+            out,
+            "G\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            r.name,
+            r.kind.as_str(),
+            r.span.start,
+            r.span.end,
+            r.scope.start,
+            r.scope.end,
+            r.cut,
+            r.depth,
+            r.damage.start,
+            r.damage.end
+        );
+    }
+    out.push_str("T\n");
+    out.push_str(&text);
+    out
+}
