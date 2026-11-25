@@ -1,0 +1,315 @@
+// @vesper-std/process on wasm32-wasip2 (#1928, part of #1397). WASI 0.2
+// has no way to start a process, so this is the same interface as src/
+// with every start refused: `spawn` returns Unsupported (or InvalidInput
+// for a NUL byte, as on every target) and `output` raises it. Commands are
+// still built and checked here, so a program that reports the error reads
+// the same as on a native target. There is no `exit`: a WASI program ends
+// by returning from its entry. `id` is 0, as `vstd_env_os` is: wasm is no
+// particular process. The `StdProcess` library of process-wasip2.vsys
+// declares no functions; the Wasm backend lowers `Ffi[StdProcess]` to
+// nothing.
+//
+// ProcCommand and ProcChild are the linear values of src/: a command is
+// spawned or discarded, a child (which cannot exist here) is released.
+use @vesper-std/fs::{
+    IoError,
+    invalid_input,
+    unsupported
+};
+
+// How a child ended: `exited` with `code`, or (Unix) killed by `signal`.
+pub copy struct ExitStatus {
+    pub code: i64,
+    pub signal: u32,
+    pub exited: bool,
+}
+
+// Whether the child exited with code 0.
+pub fn success(s: ExitStatus) -> bool {
+    s.exited && s.code == 0
+}
+
+// A finished child: its status and the captured output.
+pub struct Output {
+    pub status: ExitStatus,
+    pub stdout: ChunkSeq[u8],
+    pub stderr: ChunkSeq[u8],
+}
+
+// Stream numbers and modes of `stdio`.
+pub fn stdin_stream() -> u32 {
+    0
+}
+
+pub fn stdout_stream() -> u32 {
+    1
+}
+
+pub fn stderr_stream() -> u32 {
+    2
+}
+
+pub fn inherit() -> u32 {
+    0
+}
+
+pub fn capture() -> u32 {
+    1
+}
+
+pub fn null() -> u32 {
+    2
+}
+
+// A command being built. `args` holds argv (the program first), each
+// argument ended by a NUL byte, as a `CStrList` takes it. The environment
+// edits are in order: edit `i` names the key `keys[key_ends[i - 1]..
+// key_ends[i]]`, sets it to the matching range of `values` when `ops[i]`
+// is 1 and removes it when 0; the last edit of a key wins, as in Rust's
+// `Command`. `nul` records a NUL byte in any text, which `spawn` refuses.
+pub linear struct ProcCommand {
+    program: ChunkSeq[u8],
+    args: ChunkSeq[u8],
+    keys: ChunkSeq[u8],
+    key_ends: ChunkSeq[u64],
+    values: ChunkSeq[u8],
+    value_ends: ChunkSeq[u64],
+    ops: ChunkSeq[u8],
+    clear: bool,
+    dir: ChunkSeq[u8],
+    has_dir: bool,
+    nul: bool,
+    stdin: u32,
+    stdout: u32,
+    stderr: u32,
+}
+
+// A spawned child: `pid` until it is waited for (then 0), the read ends
+// of its captured streams until they are drained (then -1), and what they
+// carried.
+pub linear struct ProcChild {
+    pid: i32,
+    out_fd: i32,
+    err_fd: i32,
+    out: ChunkSeq[u8],
+    err: ChunkSeq[u8],
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers.
+
+fn byte_at(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn has_byte(in s: Slice[u8], b: u8) -> bool {
+    for i in 0..s.len() {
+        if byte_at(in s, i) == b {
+            return true;
+        }
+    }
+    false
+}
+
+fn io_kind(kind: u32) -> IoError {
+    IoError {
+        kind: kind,
+        os: 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Building a command.
+
+// A command that runs `program` (searched on `PATH` when it has no path
+// separator) with no arguments, the parent's environment and directory,
+// and inherited standard streams.
+pub fn command(in program: Str) -> ProcCommand eff [Ffi[StdProcess]] {
+    command_path(in program.as_bytes())
+}
+
+pub fn command_path(in program: Slice[u8]) -> ProcCommand eff [Ffi[StdProcess]] {
+    let mut p: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    p.extend(in program);
+    let mut a: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    a.extend(in program);
+    a.push(0);
+    ProcCommand {
+        program: p,
+        args: a,
+        keys: ChunkSeq::new[u8](),
+        key_ends: ChunkSeq::new[u64](),
+        values: ChunkSeq::new[u8](),
+        value_ends: ChunkSeq::new[u64](),
+        ops: ChunkSeq::new[u8](),
+        clear: false,
+        dir: ChunkSeq::new[u8](),
+        has_dir: false,
+        nul: has_byte(in program, 0),
+        stdin: inherit(),
+        stdout: inherit(),
+        stderr: inherit(),
+    }
+}
+
+pub fn arg(inout c: ProcCommand, in a: Str) eff [Ffi[StdProcess]] {
+    arg_bytes(inout c, in a.as_bytes());
+}
+
+pub fn arg_bytes(inout c: ProcCommand, in a: Slice[u8]) eff [Ffi[StdProcess]] {
+    if has_byte(in a, 0) {
+        c.nul = true;
+    }
+    c.args.extend(in a);
+    c.args.push(0);
+}
+
+fn edit(inout c: ProcCommand, in key: Slice[u8], in value: Slice[u8], op: u8) {
+    if has_byte(in key, 0) || has_byte(in value, 0) {
+        c.nul = true;
+    }
+    c.keys.extend(in key);
+    c.key_ends.push(c.keys.len());
+    c.values.extend(in value);
+    c.value_ends.push(c.values.len());
+    c.ops.push(op);
+}
+
+// Set `key` to `value` in the child's environment.
+pub fn env(inout c: ProcCommand, in key: Str, in value: Str) eff [Ffi[StdProcess]] {
+    edit(inout c, in key.as_bytes(), in value.as_bytes(), 1);
+}
+
+// Leave `key` out of the child's environment.
+pub fn env_remove(inout c: ProcCommand, in key: Str) eff [Ffi[StdProcess]] {
+    edit(inout c, in key.as_bytes(), in "".as_bytes(), 0);
+}
+
+// Start the child from an empty environment; `env` calls after this one
+// still apply.
+pub fn env_clear(inout c: ProcCommand) eff [Ffi[StdProcess]] {
+    c.clear = true;
+    c.keys.truncate(0);
+    c.key_ends.truncate(0);
+    c.values.truncate(0);
+    c.value_ends.truncate(0);
+    c.ops.truncate(0);
+}
+
+// Run the child in directory `dir`.
+pub fn cwd(inout c: ProcCommand, in dir: Str) eff [Ffi[StdProcess]] {
+    let d = dir.as_bytes();
+    if has_byte(in d, 0) {
+        c.nul = true;
+    }
+    c.dir.truncate(0);
+    c.dir.extend(in d);
+    c.has_dir = true;
+}
+
+// Set standard stream `stream` (`stdin_stream()` and friends) to `mode`
+// (`inherit()`, `capture()` or `null()`; stdin cannot be captured and is
+// then `null()`).
+pub fn stdio(inout c: ProcCommand, stream: u32, mode: u32) eff [Ffi[StdProcess]] {
+    if stream == 0 {
+        c.stdin = mode;
+    } else if stream == 1 {
+        c.stdout = mode;
+    } else if stream == 2 {
+        c.stderr = mode;
+    }
+}
+
+// Throw a command away without running it.
+pub fn discard(sink c: ProcCommand) eff [Ffi[StdProcess]] {
+    let ProcCommand {
+        program,
+        args,
+        keys,
+        key_ends,
+        values,
+        value_ends,
+        ops,
+        clear,
+        dir,
+        has_dir,
+        nul,
+        stdin,
+        stdout,
+        stderr,
+    } = c;
+}
+
+// ---------------------------------------------------------------------------
+// Running a command: refused on WASI.
+
+pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProcess]] {
+    let kind = if c.nul {
+        invalid_input()
+    } else {
+        unsupported()
+    };
+    discard(c);
+    Result::Err(io_kind(kind))
+}
+
+pub fn wait(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProcess]] {
+    if ch.pid <= 0 {
+        return Result::Err(io_kind(invalid_input()));
+    }
+    Result::Err(io_kind(unsupported()))
+}
+
+// What a waited child wrote to a captured stdout (empty before `wait`, or
+// when stdout was not captured).
+pub fn stdout(in ch: ProcChild) -> ChunkSeq[u8] eff [Ffi[StdProcess]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in ch.out.as_slice());
+    out
+}
+
+pub fn stderr(in ch: ProcChild) -> ChunkSeq[u8] eff [Ffi[StdProcess]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in ch.err.as_slice());
+    out
+}
+
+// The child's process id (0 once it has been waited for).
+pub fn child_id(in ch: ProcChild) -> u64 eff [Ffi[StdProcess]] {
+    if ch.pid > 0 {
+        widen_u64(wrapping_u32(ch.pid))
+    } else {
+        0
+    }
+}
+
+// Release a child.
+pub fn release(sink ch: ProcChild) eff [Ffi[StdProcess]] {
+    let ProcChild {
+        pid,
+        out_fd,
+        err_fd,
+        out,
+        err,
+    } = ch;
+}
+
+// Run the command to completion: on WASI, raises Unsupported (or
+// InvalidInput for a NUL byte).
+pub fn output(sink c: ProcCommand) -> Output eff [Ffi[StdProcess], Fail[IoError]] {
+    match spawn(c) {
+        Result::Ok(ch) => {
+            release(ch);
+            Fail::raise(io_kind(unsupported()))
+        },
+        Result::Err(e) => Fail::raise(e),
+    }
+}
+
+// This process's id: 0 on WASI.
+pub fn id() -> u64 eff [Ffi[StdProcess]] {
+    0
+}
