@@ -85,6 +85,6 @@ The existing `Lean4LeanLevel42` proof packets remain proofs about their archived
 helper sources. They are not implementation proofs of Logos.
 
 Maintainers can refresh the embedded associations from an assembled candidate
-with `python3 tools/logos42/update-pins.py CANDIDATE` (requires Python `blake3`).
+with `aspect maintenance logos42 update-pins -- CANDIDATE` using `b3sum`.
 This produces source expectations, not a success receipt. A clean setup and the
 actual acceptance suite must still pass after a source or pin change.

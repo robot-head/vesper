@@ -1,0 +1,190 @@
+"""Refresh the Logos source associations without publishing a setup receipt."""
+
+load("@std//hash.axl", "sha256")
+load("./bounded-stdio.axl", "utf8")
+load("./lib/logos-sources.axl", "ADAPTERS", "CARGO_RECIPE", "CHECKER", "EXPORTER", "KERNEL", "LEAN_COMMIT", "PATCHES", "PROFILE", "RECEIPT_BYTES", "RELEASE", "UPSTREAM", "read_bounded", "regular", "source_paths")
+load("./lib/process.axl", "capture", "root_path", "scratch_dir")
+load("./lib/strict-json.axl", "decode_list", "decode_object")
+
+_USAGE = "aspect maintenance logos42 update-pins -- ASSEMBLED_CANDIDATE"
+
+def _digest_bytes(hex):
+    if len(hex) != 64 or not all([char in "0123456789abcdef" for char in hex.elems()]):
+        fail("Invalid BLAKE3 output: %r" % hex)
+    return [int(hex[index:index + 2], 16) for index in range(0, len(hex), 2)]
+
+def _digests(ctx, root, paths):
+    hashes = []
+    for start in range(0, len(paths), 128):
+        batch = paths[start:start + 128]
+        lines = capture(ctx, "b3sum", ["--no-names", "--"] + batch, root).splitlines()
+        if len(lines) != len(batch):
+            fail("BLAKE3 command returned an unexpected number of hashes")
+        hashes.extend([_digest_bytes(line) for line in lines])
+    return hashes
+
+def _sha256(data):
+    hash = sha256()
+    hash.update(data)
+    return hash.hexdigest()
+
+def _little_endian(value, width):
+    return bytes([(value >> (index * 8)) & 255 for index in range(width)])
+
+def _manifest_digest(ctx, root, path, records):
+    stream = ctx.std.fs.create(path)
+    stream.write(bytes("vesper.logos42.sources\x00"))
+    stream.write(_little_endian(1, 2) + _little_endian(len(records), 4))
+    for record in records:
+        name = bytes(record["path"])
+        stream.write(_little_endian(len(name), 4) + name + _little_endian(record["bytes"], 8) + bytes(record["blake3"]))
+    stream.close()
+    return _digests(ctx, root, [path])[0]
+
+def _pretty(value):
+    text = json.encode(value)
+    output, depth = [], 0
+    quoted, escaped = False, False
+    for index, char in enumerate(text.elems()):
+        if quoted:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            output.append(char)
+            quoted = True
+        elif char in "[{":
+            output.append(char)
+            depth += 1
+            if text[index + 1] not in "]}":
+                output.append("\n" + "  " * depth)
+        elif char in "]}":
+            depth -= 1
+            if text[index - 1] not in "[{":
+                output.append("\n" + "  " * depth)
+            output.append(char)
+        elif char == ",":
+            output.append(",\n" + "  " * depth)
+        elif char == ":":
+            output.append(": ")
+        else:
+            output.append(char)
+    return "".join(output) + "\n"
+
+def _known_fixes(ctx, tool, cases):
+    return {
+        "schema": 1,
+        "role": "review_evidence_not_success_receipt",
+        "upstream_base": UPSTREAM,
+        "exporter_commit": EXPORTER,
+        "lean_toolchain": RELEASE,
+        "controls": [{
+            "id": case["id"], "source": "tools/logos42/controls/cases.json", "expected_accept": case["expected_accept"],
+            "expected_reason": case["expected_reason"], "kind": "raw_export",
+        } for case in cases],
+        "fixes": [{
+            "id": "lean435-primitive-reflection",
+            "disposition": "Regenerate the checked primitive reference terms with Lean 4.35's structure-based Decidable, and use its decide projection. Primitive recognizers and declaration checking remain enabled; no trusted-prefix or parse-only path is exposed.",
+            "patch": PATCHES[0],
+        }],
+        "source_sha256": {"tools/logos42/" + path: _sha256(read_bounded(ctx, tool + "/" + path, RECEIPT_BYTES)) for path in ADAPTERS},
+        "executions": [],
+        "unexecuted": ["whole-checker formal verification", "exporter/compiler refinement proof"],
+    }
+
+def _refresh(ctx, root, candidate):
+    tool = root + "/tools/logos42"
+    # Compute every file and digest before replacing any checked-in expectation.
+    stage = ctx.std.fs.mkdtemp(parent = tool, prefix = "logos-pins-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(stage))
+    cases = decode_list(utf8(read_bounded(ctx, tool + "/controls/cases.json", RECEIPT_BYTES)))
+    known = _known_fixes(ctx, tool, cases)
+    ctx.std.fs.write(stage + "/known-fixes.json", _pretty(known))
+    resources = decode_object(utf8(read_bounded(ctx, tool + "/resource-source-manifest.json", RECEIPT_BYTES)))
+    resource_paths = [entry["path"] for entry in resources["files"]]
+    for relative in resource_paths:
+        if relative.startswith("/") or ".." in relative.split("/"):
+            fail("Resource path must be repository-relative: " + relative)
+    hashes = _digests(ctx, root, [root + "/" + relative for relative in resource_paths])
+    for index, entry in enumerate(resources["files"]):
+        path = root + "/" + entry["path"]
+        entry.update(bytes = regular(ctx, path).size, blake3 = hashes[index])
+    ctx.std.fs.write(stage + "/resource-source-manifest.json", _pretty(resources))
+
+    files = source_paths(ctx, candidate)
+    source_hashes = _digests(ctx, root, [candidate + "/" + path for path in files])
+    records = [{"path": path, "bytes": regular(ctx, candidate + "/" + path).size, "blake3": source_hashes[index]}
+               for index, path in enumerate(files)]
+    text = '{\n  "schema": 1,\n  "files": [\n' + ",\n".join(["    " + json.encode(record) for record in records]) + "\n  ]\n}\n"
+    ctx.std.fs.write(stage + "/source-manifest.json", text)
+    manifest_digest = _manifest_digest(ctx, root, stage + "/source-associations", records)
+    patch_hashes = _digests(ctx, root, [root + "/" + path for path in PATCHES])
+    overlay_hashes = _digests(ctx, root, [tool + "/" + path for path in ADAPTERS])
+    known_hash, resource_hash = _digests(ctx, root, [stage + "/known-fixes.json", stage + "/resource-source-manifest.json"])
+    pins = {
+        "schema": 3, "profile": PROFILE, "upstream_commit": UPSTREAM,
+        "exporter_commit": EXPORTER, "lean_release": RELEASE, "lean_commit": LEAN_COMMIT,
+        "patches": [{"path": path, "blake3": patch_hashes[index]} for index, path in enumerate(PATCHES)],
+        "source_overlays": [{"source": "tools/logos42/" + path, "destination": path, "blake3": overlay_hashes[index]} for index, path in enumerate(ADAPTERS)],
+        "known_fixes_blake3": known_hash, "source_manifest_blake3": manifest_digest, "resource_bundle_blake3": resource_hash,
+        "build_argv": ["{lake}", "build", "logos42"], "cargo_build_argv": CARGO_RECIPE,
+        "checker_relative_path": CHECKER, "kernel_relative_path": KERNEL,
+    }
+    ctx.std.fs.write(stage + "/pins.json", _pretty(pins))
+    for path in ["known-fixes.json", "source-manifest.json", "resource-source-manifest.json", "pins.json"]:
+        ctx.std.fs.rename(stage + "/" + path, tool + "/" + path)
+    ctx.std.io.stdout.write("Refreshed %d source records and %d control expectations.\n" % (len(files), len(cases)))
+
+def _run(ctx):
+    values = ctx.args.tool_args
+    if values in [["--help"], ["-h"]]:
+        ctx.std.io.stdout.write(_USAGE + "\n")
+        return 0
+    if len(values) != 1 or not values[0]:
+        ctx.std.process.exit(2, _USAGE)
+    if not ctx.std.process.which("b3sum"):
+        ctx.std.process.exit(2, "Install b3sum to refresh Logos pins")
+    _refresh(ctx, ctx.std.env.aspect_root_dir(), root_path(ctx.std.env.current_dir(), values[0]))
+    return 0
+
+update_pins = task(
+    kind = "update-pins", group = ["maintenance", "logos42"],
+    summary = "Refresh Logos source manifests and pin digests from an assembled candidate",
+    implementation = _run, args = {"tool_args": args.trailing_var_args(description = _USAGE)},
+)
+
+def _test(ctx):
+    sample = {"name": "a,b[]", "nested": [1, {"test": True}, []]}
+    text = '{\n  "name": "a,b[]",\n  "nested": [\n    1,\n    {\n      "test": true\n    },\n    []\n  ]\n}\n'
+    if _pretty(sample) != text or json.decode(text) != sample:
+        fail("Unexpected JSON pin representation")
+    if _little_endian(65536, 4) != bytes([0, 0, 1, 0]) or _digest_bytes("00ff" * 16) != [0, 255] * 16:
+        fail("Incorrect binary manifest encoding")
+    root = scratch_dir(ctx, "logos-pin-tests-")
+    for path in ["/.git", "/.lake/build", "/bridge/src"]:
+        ctx.std.fs.create_dir_all(root + path)
+    for path in ["/.git/ignore", "/.lake/build/ignore", "/setup-inputs.json", "/setup-receipt.json",
+                 "/build.stdout", "/build.stderr", "/.lake/other", "/bridge/src/lib.rs", "/other"]:
+        ctx.std.fs.write(root + path, "fixture")
+    if source_paths(ctx, root) != [".lake/other", "bridge/src/lib.rs", "other"]:
+        fail("Only exact generated paths should be excluded")
+    if read_bounded(ctx, root + "/other", 7) != bytes("fixture"):
+        fail("Bounded file reader changed fixture bytes")
+    error, _ = catch(read_bounded, ctx, root + "/other", 6)
+    if error == None or "byte cap" not in str(error):
+        fail("Over-cap input must be rejected")
+    capture(ctx, "ln", ["-s", "other", "link"], root)
+    error, _ = catch(source_paths, ctx, root)
+    if error == None or "nonregular source entry" not in str(error):
+        fail("Source walk must refuse symlinks")
+    ctx.std.io.stdout.write("Passed Logos pin representation, inventory and byte limits\n")
+    return 0
+
+test_logos_pins = task(
+    kind = "logos-pins", group = ["ci", "tests"], summary = "Test Logos manifests, associations and file boundaries",
+    implementation = _test,
+)

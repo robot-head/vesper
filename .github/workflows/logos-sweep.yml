@@ -24,6 +24,7 @@ on:
       - 'crates/vesper-oracles/src/bin/logos42/**'
       - 'lean-toolchain'
       - '.aspect/logos-ci.axl'
+      - '.aspect/logos-sweep.axl'
       - '.aspect/lean-ci.axl'
       - '.github/workflows/logos-sweep.yml'
 

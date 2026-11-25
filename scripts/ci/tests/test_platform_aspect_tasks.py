@@ -213,60 +213,7 @@ out.mkdir(parents=True, exist_ok=True)
         missing_cargo = self.aspect(*command, env=env, status=1)
         self.assertIn("requires Cargo and Git", missing_cargo.stderr)
 
-    def test_native_logos_sweep_reports_results_even_when_the_checker_fails(self):
-        self.write("manifest", "//crates/vesper-oracles:bin/logos42 bin/checker\n//:bin/vesper bin/vesper\n")
-        checker = self.write("bin/checker", "")
-        vesper = self.write("bin/vesper", "")
-        self.write("tools/logos-sweep/sweep.py", """\
-import json
-import os
-from pathlib import Path
-import sys
-
-args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
-assert args["--root"] == "sealed fixture"
-assert args["--lean"] == "/fixture/lean"
-(Path("args.json")).write_text(json.dumps(args))
-if not os.getenv("VESPER_TEST_NO_REPORT"):
-    Path(args["--report"]).write_text(json.dumps({
-        "status": "failed", "modules": 3, "batches": [{"logos_checked": 2}, {"logos_checked": 5}],
-        "total_seconds": 1.25, "declined": [
-            {"declaration": "A", "reason": "unsupported", "detail": "ignored"},
-            {"declaration": "B", "reason": None, "detail": "detail fallback"},
-        ],
-        "problems": ["fixture problem"],
-    }))
-sys.exit(9)
-""")
-        env = {
-            "VESPER_LEAN": "/fixture/lean",
-            "LOGOS42_DRIVER": "",
-            "VESPER_BIN": "",
-            "LOGOS_SWEEP_BATCH_JOBS": "",
-            "VESPER_BAZEL_EXECUTABLES": "manifest",
-        }
-        command = ("ci", "logos-sweep", "--", "sealed fixture", "report with spaces.json")
-        report = self.aspect(*command, status=9, env=env)
-        self.assertIn("3 modules, 7 declarations checked by Logos in 2 batches, 1.25 s", report.stdout)
-        self.assertIn("A: unsupported", report.stdout)
-        self.assertIn("B: detail fallback", report.stdout)
-        self.assertIn("PROBLEM: fixture problem", report.stdout)
-        args = json.loads((self.root / "args.json").read_text())
-        self.assertEqual((args["--driver"], args["--vesper"], args["--batch-jobs"]),
-                         (str(checker), str(vesper), "2"))
-        (self.root / "report with spaces.json").unlink()
-        no_report = self.aspect(*command, status=9, env={
-            **env, "LOGOS42_DRIVER": "custom-checker", "VESPER_BIN": "custom-vesper",
-            "LOGOS_SWEEP_BATCH_JOBS": "4", "VESPER_TEST_NO_REPORT": "1",
-        })
-        args = json.loads((self.root / "args.json").read_text())
-        self.assertEqual((args["--driver"], args["--vesper"], args["--batch-jobs"]),
-                         ("custom-checker", "custom-vesper", "4"))
-        self.assertEqual(no_report.stdout, "")
-        missing = self.aspect("ci", "logos-sweep", "--", "only one arg", status=2, env=env)
-        self.assertIn("SEALED_ROOT REPORT", missing.stderr)
-
-    def test_logos_workflow_replays_with_the_pinned_tools_and_retains_the_report(self):
+    def test_logos_workflow_prepares_with_the_pinned_tools_before_sweeping(self):
         self.write(".ci-lean-path", "/installed lean/bin/lean\r\n")
         self.write(".ci-logos-cargo-path", "/pinned cargo/bin/cargo\n")
         self.write("tools/logos42/setup.py", """\
@@ -281,27 +228,13 @@ if os.environ.get("SETUP_FAILURE"):
     sys.exit(17)
 Path(args["--directory"]).mkdir()
 """)
-        self.write("tools/logos-sweep/sweep.py", """\
-import json
-from pathlib import Path
-import sys
-
-args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
-assert Path(args["--root"]).is_dir()
-Path("sweep.json").write_text(json.dumps(args))
-Path(args["--report"]).write_text(json.dumps({
-    "status": "failed", "modules": 3, "batches": [], "total_seconds": 1,
-    "declined": [], "problems": ["fixture problem"],
-}))
-sys.exit(9)
-""")
         command = ("ci", "replay-logos-models")
         no_temp = self.aspect(*command, env={"RUNNER_TEMP": ""}, status=2)
         self.assertIn("RUNNER_TEMP is required", no_temp.stderr)
         env = {"RUNNER_TEMP": "runner scratch", "LOGOS_SWEEP_BATCH_JOBS": "99"}
         self.aspect(*command, env={**env, "SETUP_FAILURE": "1"}, status=17)
-        self.assertFalse((self.root / "sweep.json").exists())
-        result = self.aspect(*command, env=env, status=9)
+        self.assertFalse((self.root / "runner scratch/logos42/checker").exists())
+        result = self.aspect(*command, env=env, status=1)
         temp = self.root / "runner scratch"
         checker = temp / "logos42/checker"
         driver = self.root / "target/debug/logos42"
@@ -311,13 +244,8 @@ sys.exit(9)
             "--lean": "/installed lean/bin/lean", "--lake": "/installed lean/bin/lake",
             "--cargo": "/pinned cargo/bin/cargo", "--git": shutil.which("git"),
         })
-        self.assertEqual(json.loads((self.root / "sweep.json").read_text()), {
-            "--root": str(checker), "--driver": str(driver),
-            "--vesper": str(self.root / "target/debug/vesper"), "--lean": "/installed lean/bin/lean",
-            "--batch-jobs": "2", "--report": str(report),
-        })
-        self.assertIn("PROBLEM: fixture problem", result.stdout)
-        self.assertTrue(report.is_file())
+        self.assertIn("setup-receipt.json", result.stderr)
+        self.assertFalse(report.exists())
         self.write(".ci-logos-cargo-path", "\n")
         missing_cargo = self.aspect(*command, env=env, status=1)
         self.assertIn("The CI Lean and Cargo executable paths are required", missing_cargo.stderr)
