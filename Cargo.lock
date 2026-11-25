@@ -5828,11 +5828,10 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
+ "semver",
  "serde",
+ "serde_json",
  "toml 0.8.23",
- "vesper-loom-calculus-seed",
- "vesper-loom-cas-seed",
- "vesper-loom-trust-seed",
 ]
 
 [[package]]
