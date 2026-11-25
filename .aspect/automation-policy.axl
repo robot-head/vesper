@@ -1,0 +1,429 @@
+"""Reject newly introduced scripts and embedded workflow or configuration logic."""
+
+load("./lib/process.axl", "capture", "command", "scratch_dir")
+
+_USAGE = "aspect ci check-automation-policy -- --base REF [--head REF]"
+_SCRIPT_SUFFIXES = [".py", ".pyw", ".pyi", ".py3", ".sh", ".bash", ".zsh", ".fish", ".ksh", ".dash", ".ash", ".csh", ".tcsh", ".bats", ".command"]
+_SCRIPT_NAMES = [".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".zshenv", ".profile"]
+_SHELLS = ["sh", "bash", "zsh", "ksh", "dash", "ash", "fish", "csh", "tcsh", "mksh"]
+_INTERPRETERS = _SHELLS + ["python", "python2", "python3", "pypy", "pypy3", "perl", "ruby", "node", "deno", "bun", "lua", "awk", "rscript"]
+_POWERSHELL = ["pwsh", "powershell", "powershell_ise"]
+_INLINE_FLAGS = ["-c", "-e", "-lc", "-ec", "-ce", "/c", "--command", "-command", "-commandwithargs", "-encodedcommand", "-enc", "--eval", "-eval", "--print"]
+_COMMAND_KEYS = ["run", "script", "scripts", "command", "commands", "cmd", "entrypoint", "entry-point", "entry_point", "exec",
+                 "before_script", "after_script", "build_command", "install_command", "deploy_command", "start_command", "test_command"]
+_SHELL_START = ["if", "then", "elif", "else", "fi", "for", "while", "until", "case", "esac", "function", "do", "done",
+                "export", "source", "eval", "trap", "set", "unset", "exit", "return", "cd", "local", "declare", "read", "[[", "."]
+
+def _basename(value):
+    return value.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+
+def _python(name):
+    if name in ["python", "python2", "python3", "pypy", "pypy3"]:
+        return True
+    return any([name.startswith(prefix) and name[len(prefix):].replace(".", "").isdigit() for prefix in ["python", "pypy"]])
+
+def _forbidden_path(path):
+    name = path.rsplit("/", 1)[-1].lower()
+    return name in _SCRIPT_NAMES or any([name.endswith(suffix) for suffix in _SCRIPT_SUFFIXES])
+
+def _script_content(path, mode, prefix):
+    if mode not in ["100644", "100755"]:
+        return None
+    line = str(prefix).split("\n", 1)[0].removeprefix("﻿")
+    if line.startswith("#!"):
+        words = [_basename(value) for value in line[2:].split()]
+        if any([word in _INTERPRETERS or _python(word) for word in words]) or ("uv" in words and "--script" in words):
+            return "script interpreter in shebang"
+        if any([word in _POWERSHELL for word in words]) and not path.lower().endswith(".ps1"):
+            return "PowerShell entry points must use .ps1"
+    extensionless = "." not in path.rsplit("/", 1)[-1]
+    if extensionless and not line.startswith("#!"):
+        for source_line in str(prefix).splitlines():
+            stripped = source_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("set -") or stripped.startswith("from ") and " import " in stripped:
+                return "extensionless Python or shell script"
+            break
+    if mode == "100755" and extensionless and prefix and not line.startswith("#!"):
+        # Executable text without a recognized binary header is a script even
+        # when invoked explicitly through an interpreter and lacking a shebang.
+        if all([prefix[index] >= 32 or prefix[index] in [9, 10, 13] for index in range(len(prefix))]) and prefix[0] != 127:
+            return "extensionless executable text"
+    return None
+
+def _configuration(path):
+    name = path.rsplit("/", 1)[-1].lower()
+    if name.endswith(".yaml") or name.endswith(".yml"):
+        return "yaml"
+    if name.endswith(".toml"):
+        return "toml"
+    if name.endswith(".json") or name.endswith(".jsonc"):
+        return "json"
+    if name.endswith(".ini") or name.endswith(".cfg") or name.endswith(".conf") or name.endswith(".env"):
+        return "ini"
+    if name.endswith(".xml"):
+        return "xml"
+    if name.endswith(".hcl"):
+        return "hcl"
+    if any([name.startswith(prefix) for prefix in ["dockerfile", "makefile", "justfile", "taskfile"]]) or name in [".gitconfig", ".editorconfig", ".bazelrc"]:
+        return "text"
+    return None
+
+def _workflow(path):
+    return path.startswith(".github/workflows/") or path.startswith(".github/actions/") or path == "buildbuddy.yaml"
+
+def _without_actions_expression(text):
+    parts = text.split("${{")
+    return parts[0] + "".join(["__github_expression__" + part.partition("}}")[2] for part in parts[1:]])
+
+def _syntax(text):
+    text = _without_actions_expression(text)
+    quote, escaped = "", False
+    for index, char in enumerate(text.elems()):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            continue
+        if char == quote:
+            quote = ""
+        elif not quote and char in "\"'":
+            quote = char
+        elif quote != "'" and (char == "`" or text[index:index + 2] == "$("):
+            return "command substitution"
+        elif not quote and char in ";|&<>" and not (index == 0 and char == "&"):
+            return "shell operators or redirects"
+    return None
+
+def _words(text):
+    words, word = [], []
+    quote, escaped = "", False
+    for index, char in enumerate(text.elems()):
+        if escaped:
+            word.append(char)
+            escaped = False
+        elif char == "\\" and quote != "'" and text[index + 1:index + 2] in [" ", "\t", "\\", "\"", "'"]:
+            escaped = True
+        elif char == quote:
+            quote = ""
+        elif not quote and char in "\"'":
+            quote = char
+        elif not quote and char in " \t":
+            if word:
+                words.append("".join(word))
+                word = []
+        else:
+            word.append(char)
+    if word:
+        words.append("".join(word))
+    return words
+
+def _argv_reason(words, workflow = False):
+    if not words:
+        return None
+    names = [_basename(word.strip("\"'")) for word in words]
+    for index, name in enumerate(names):
+        flags = names[index + 1:]
+        if (name in _INTERPRETERS or _python(name) or name in _POWERSHELL or name in ["cmd", "uv"]) and flags:
+            if any([flag in _INLINE_FLAGS for flag in flags]):
+                return "inline interpreter command"
+            if name in _SHELLS and any([flag.startswith("-") and not flag.startswith("--") and "c" in flag[1:] for flag in flags]):
+                return "inline interpreter command"
+            if name == "node" and "-p" in flags:
+                return "inline interpreter command"
+            if name == "uv" and flags[:1] == ["run"] and "--script" in flags:
+                return "Python script invocation"
+    first = names[0]
+    if first == "exit" and len(names) == 2 and names[1].isdigit():
+        # A standalone status is useful for workflow failure gates.
+        return None
+    if first == "&" and len(names) > 1:
+        if not names[1].endswith(".ps1"):
+            return "inline PowerShell invocation"
+        first = names[1]
+    if first in _SHELL_START or first == "&":
+        return "inline shell control or state"
+    if workflow and (first in _SHELLS or _python(first)):
+        return "direct shell or Python interpreter"
+    if workflow and first in _POWERSHELL and not any([name.endswith(".ps1") for name in names[1:]]) and not any([name in ["--version", "-version", "-v"] for name in names[1:]]):
+        return "PowerShell steps must invoke a .ps1 file"
+    if _forbidden_path(first):
+        return "script file invocation"
+    return None
+
+def _command_reason(text, workflow):
+    if "\n" in text.rstrip("\r\n") or "\r" in text.rstrip("\r\n"):
+        return "multi-line command"
+    text = text.strip()
+    if not text:
+        return None
+    return _syntax(text) or _argv_reason(_words(_without_actions_expression(text)), workflow)
+
+def _record(out, reason, text):
+    key = (reason, " ".join(text.split()))
+    out[key] = out.get(key, 0) + 1
+
+def _structured_violations(data, workflow, budget):
+    out = {}
+    pending = [(data, "")]
+    for _ in range(budget):
+        if not pending:
+            return out
+        node, key = pending.pop()
+        if type(node) == "dict":
+            pending.extend([(value, "command" if key == "scripts" else str(name).lower()) for name, value in node.items()])
+        elif type(node) == "list":
+            if node and all([type(item) == "string" for item in node]):
+                reason = _argv_reason(node, workflow)
+                if reason:
+                    _record(out, reason, json.encode(node))
+            pending.extend([(item, key) for item in node])
+        elif type(node) == "string":
+            if not node.strip():
+                continue
+            if workflow and key == "script":
+                _record(out, "inline workflow script", node)
+                continue
+            if key in _COMMAND_KEYS or (key.endswith("_command") or key.endswith("-command")):
+                reason = _command_reason(node, workflow)
+                if reason:
+                    _record(out, reason, node)
+    fail("Configuration nesting exceeded its parsed size")
+
+def _text_violations(text):
+    out = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        word, _, tail = stripped.partition(" ")
+        name = word.lower()
+        if name in ["run", "cmd", "entrypoint"] and tail:
+            reason = _command_reason(tail, False)
+        elif line.startswith("\t"):
+            reason = _command_reason(stripped.lstrip("@+-"), False)
+        else:
+            reason = None
+        if reason:
+            _record(out, reason, stripped)
+    return out
+
+def _git(ctx, root, argv):
+    return capture(ctx, "git", argv, root)
+
+def _revision(ctx, root, ref):
+    return _git(ctx, root, ["rev-parse", "--verify", "--end-of-options", ref + "^{commit}"]).strip()
+
+def _blob_prefix(ctx, root, hash):
+    child = command(ctx, "git", ["cat-file", "blob", hash], root).stdout("piped").stderr("null").spawn()
+    prefix = child.stdout().read(768)
+    child.kill()
+    child.wait()
+    return prefix
+
+def _blob_file(ctx, root, hash, path):
+    child = command(ctx, "git", ["cat-file", "blob", hash], root).stdout(ctx.std.fs.create(path)).stderr("piped").spawn().wait_with_output()
+    if not child.status.success:
+        fail("Cannot read configuration blob: " + child.stderr)
+
+def _config_findings(ctx, root, path, hash, format, work):
+    _blob_file(ctx, root, hash, work + "/config")
+    raw = ctx.std.fs.open(work + "/config").read()
+    text = str(raw)
+    if bytes(text) != raw:
+        if _workflow(path):
+            fail("Workflow must be UTF-8: %r" % path)
+        return {}
+    if format == "text":
+        return _text_violations(text)
+    if format == "json":
+        data = json.try_decode(text)
+        return _structured_violations(data, _workflow(path), len(text) + 1) if data != None else _text_violations(text)
+    yq = ctx.std.process.which("yq")
+    if not yq:
+        fail("Install Mike Farah's yq v4 to check YAML, TOML and INI configuration")
+    argv = ["eval-all", "--input-format", format, "--output-format", "json", "[(. | explode(.))]", work + "/config"]
+    result = command(ctx, yq, argv, root).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if not result.status.success:
+        if _workflow(path):
+            fail("Cannot parse workflow %r: %s" % (path, result.stderr))
+        return _text_violations(text)
+    return _structured_violations(json.decode(result.stdout), _workflow(path), len(result.stdout) + 1)
+
+def _introduced(before, after):
+    return [issue for issue, count in after.items() if count > before.get(issue, 0)]
+
+def _inspect(ctx, root, base, head, work):
+    raw = _git(ctx, root, ["diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--diff-filter=AMT", base, head, "--"])
+    if not raw:
+        return []
+    fields = raw.split("\x00")[:-1]
+    failures = []
+    for index in range(0, len(fields), 2):
+        old_mode, mode, old, new, change = fields[index].removeprefix(":").split()
+        path = fields[index + 1]
+        if change == "A" and _forbidden_path(path):
+            failures.append((path, "new Python or shell script", ""))
+            continue
+        if mode not in ["100644", "100755"]:
+            continue
+        reason = _script_content(path, mode, _blob_prefix(ctx, root, new))
+        if reason:
+            prior = _script_content(path, old_mode, _blob_prefix(ctx, root, old)) if old_mode in ["100644", "100755"] else None
+            if prior != reason and not (_forbidden_path(path) and change != "A"):
+                failures.append((path, reason, ""))
+                continue
+        format = _configuration(path)
+        if format:
+            before = _config_findings(ctx, root, path, old, format, work) if old_mode in ["100644", "100755"] else {}
+            after = _config_findings(ctx, root, path, new, format, work)
+            for issue, example in _introduced(before, after):
+                failures.append((path, issue, example))
+    return failures
+
+def _references(ctx):
+    options = {}
+    pending = None
+    for value in ctx.args.tool_args:
+        if pending:
+            if value.startswith("--"):
+                ctx.std.process.exit(2, "Missing value for " + pending)
+            options[pending] = value
+            pending = None
+        elif value in ["--help", "-h"]:
+            ctx.std.io.stdout.write(_USAGE + "\n")
+            return None
+        elif value in ["--base", "--head"]:
+            pending = value
+        else:
+            ctx.std.process.exit(2, "Unknown option: " + value)
+    base = options.get("--base") or ctx.std.env.var("BASE_SHA")
+    if pending or not base:
+        ctx.std.process.exit(2, _USAGE)
+    return base, options.get("--head") or ctx.std.env.var("HEAD_SHA") or "HEAD"
+
+def _run(ctx):
+    refs = _references(ctx)
+    if refs == None:
+        return 0
+    root = ctx.std.env.aspect_root_dir()
+    base, head = [_revision(ctx, root, ref) for ref in refs]
+    base = _git(ctx, root, ["merge-base", base, head]).strip()
+    failures = _inspect(ctx, root, base, head, scratch_dir(ctx, "vesper-automation-policy-"))
+    for path, reason, example in failures:
+        detail = " (%s)" % repr(example[:160]) if example else ""
+        ctx.std.io.stderr.write("%r: %s%s\n" % (path, reason, detail))
+    if failures:
+        ctx.std.io.stderr.write("Use an Aspect task written in AXL or a Windows PowerShell .ps1 entry point. See AGENTS.md.\n")
+        return 1
+    ctx.std.io.stdout.write("No new scripts or inline automation logic\n")
+    return 0
+
+check_automation_policy = task(
+    kind = "check-automation-policy", group = ["ci"],
+    summary = "Reject new Python or shell scripts and inline automation logic",
+    implementation = _run, args = {"tool_args": args.trailing_var_args(description = _USAGE)},
+)
+
+def _expect(condition, message):
+    if not condition:
+        fail(message)
+
+def _fixture_blob(ctx, root, path, content, mode = "100644"):
+    # Test forbidden inputs by adding Git blobs to an owned index. They are
+    # never materialized as executable files or used as test launchers.
+    data = root + "/object-content"
+    stream = ctx.std.fs.create(data)
+    stream.write(bytes(content))
+    stream.close()
+    hash = _git(ctx, root, ["hash-object", "-w", "--", data]).strip()
+    _git(ctx, root, ["update-index", "--add", "--cacheinfo", "%s,%s,%s" % (mode, hash, path)])
+
+def _fixture_commit(ctx, root, message):
+    _git(ctx, root, ["-c", "user.name=Automation Fixture", "-c", "user.email=fixture@example.invalid",
+                     "commit", "--quiet", "--message", message])
+    return _revision(ctx, root, "HEAD")
+
+def _test(ctx):
+    root = scratch_dir(ctx, "vesper-policy-fixtures-")
+    _git(ctx, root, ["init", "--quiet"])
+    _fixture_blob(ctx, root, ".github/workflows/demo.yml", "jobs: {build: {steps: [{run: 'export LEGACY=1'}]}}")
+    _fixture_blob(ctx, root, "legacy.py", "print(1)\n")
+    base = _fixture_commit(ctx, root, "Baseline")
+    _fixture_blob(ctx, root, ".github/workflows/demo.yml", """jobs:
+  build:
+    steps:
+      - run: export LEGACY=1
+      - run: exit 1
+      - run: aspect ci fixtures
+      - run: cargo check --locked
+      - run: git show 'ref; with a separator'
+      - run: aspect ci task -- ${{ inputs.value || 'default' }}
+  windows:
+    steps:
+      - shell: pwsh
+        run: ./scripts/windows/example.ps1
+      - shell: pwsh
+        run: pwsh -NoProfile -File ./scripts/windows/example.ps1
+      - shell: pwsh
+        run: '& "./scripts/windows/path with spaces.ps1"'
+""")
+    _fixture_blob(ctx, root, "legacy.py", "print(2)\n")
+    _fixture_blob(ctx, root, "scripts/windows/example.ps1", "Write-Output 'fixture'\n")
+    _fixture_blob(ctx, root, ".aspect/task.axl", "pass\n")
+    _fixture_blob(ctx, root, "test executable", bytes([127, 69, 76, 70, 0, 1]), "100755")
+    _fixture_blob(ctx, root, "tests/invalid UTF-8.json", bytes([123, 34, 254, 34, 125]))
+    _fixture_blob(ctx, root, "safe.toml", '[option]\nrun = ["cargo", "test", "--locked"]\n')
+    valid = _fixture_commit(ctx, root, "Allowed automation")
+    _expect(not _inspect(ctx, root, base, valid, root), "Allowed direct commands, scripts under migration or binary fixture were rejected")
+
+    _fixture_blob(ctx, root, "scripts/new test.PY", "")
+    _fixture_blob(ctx, root, "scripts/new.zsh", "")
+    _fixture_blob(ctx, root, "tools/no extension", "#!" + "/usr/bin/env -S python3.13 -I\n")
+    _fixture_blob(ctx, root, "tools/no shebang", "set -eu\n", "100755")
+    _fixture_blob(ctx, root, "tools/plain wrapper", "printf example\n", "100755")
+    _fixture_blob(ctx, root, "tools/entrypoint.dat", "#!" + "/usr/bin/env bash\n")
+    _fixture_blob(ctx, root, "tools/powershell", "#!" + "/usr/bin/env pwsh\n")
+    _fixture_blob(ctx, root, "scripts/lint.conf", "[run]\ncommand=python3 -I -c 'print(1)'\n")
+    _fixture_blob(ctx, root, "task.toml", 'run = ["/bin/bash", "-lc", "echo bad"]\n')
+    _fixture_blob(ctx, root, "package.json", '{"scripts":{"build":"node -p 42"}}')
+    _fixture_blob(ctx, root, "Dockerfile", "FROM scratch\nRUN echo one > generated\n")
+    _fixture_blob(ctx, root, "buildbuddy.yaml", "actions: [{steps: [{run: 'echo " + "$" + "(git rev-parse HEAD)'}]}]")
+    _fixture_blob(ctx, root, ".github/actions/nested/action.yml", """
+runs:
+  using: composite
+  steps:
+    - run: >-
+        echo one
+        && echo two
+    - uses: actions/github-script@v7
+      with:
+        script: core.info('inline')
+    - shell: pwsh
+      run: pwsh -NoProfile -Command Get-Item
+    - shell: pwsh
+      run: '& { Write-Output one }'
+    - run: |
+        printf foo
+        printf bar
+""")
+    invalid = _fixture_commit(ctx, root, "Prohibited automation")
+    found = _inspect(ctx, root, valid, invalid, root)
+    want = {
+        "scripts/new test.PY": 1, "scripts/new.zsh": 1, "tools/no extension": 1, "tools/no shebang": 1,
+        "tools/plain wrapper": 1, "tools/entrypoint.dat": 1, "tools/powershell": 1, "scripts/lint.conf": 1,
+        "task.toml": 1, "package.json": 1, "Dockerfile": 1, "buildbuddy.yaml": 1, ".github/actions/nested/action.yml": 5,
+    }
+    actual = {}
+    for path, _, _ in found:
+        actual[path] = actual.get(path, 0) + 1
+    _expect(actual == want, "Expected %r, got %r" % (want, found))
+    ctx.std.io.stdout.write("Passed automation policy cases for Git additions, direct commands, interpreters and inline logic\n")
+    return 0
+
+test_automation_policy = task(
+    kind = "automation-policy", group = ["ci", "tests"], summary = "Test automation policy against Git and configuration fixtures",
+    implementation = _test,
+)

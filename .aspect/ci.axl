@@ -29,6 +29,7 @@ def _platform_tests(ctx: TaskContext) -> int:
         "flip-gate",
         "profile-runner",
         "workflows",
+        "automation-policy",
         "logos-sweep",
         "logos-sweep-summary",
         "logos-pins",
