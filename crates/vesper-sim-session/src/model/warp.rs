@@ -508,49 +508,104 @@ pub(crate) fn validate(
     max_virtual_ns: u64,
 ) -> Result<(), String> {
     let l = &spec.limits;
-    if l.max_in_flight == 0
-        || l.max_in_flight > MAX_IN_FLIGHT
-        || l.max_leases == 0
-        || l.max_leases > u64::from(MAX_FRAMES)
-    {
-        return fail(format!(
-            "warp limits must be positive, in-flight <= {MAX_IN_FLIGHT}, leases <= {MAX_FRAMES}"
-        ));
+    #[cfg(feature = "vesper-port")]
+    match crate::port::sim_validate_warp_bounds(
+        l.max_in_flight,
+        l.max_leases,
+        spec.nics.len() as u64,
+        spec.links.len() as u64,
+        spec.flows.len() as u64,
+        spec.events.len() as u64,
+    ) {
+        0 => {}
+        1 => {
+            return fail(format!(
+                "warp limits must be positive, in-flight <= {MAX_IN_FLIGHT}, leases <= {MAX_FRAMES}"
+            ));
+        }
+        _ => return fail("warp needs 1..=4 NICs and at most 8 links, 16 flows, 256 events"),
     }
-    if spec.nics.is_empty()
-        || spec.nics.len() > MAX_NICS
-        || spec.links.len() > MAX_LINKS
-        || spec.flows.len() > MAX_FLOWS
-        || spec.events.len() > MAX_WARP_EVENTS
+    #[cfg(not(feature = "vesper-port"))]
     {
-        return fail("warp needs 1..=4 NICs and at most 8 links, 16 flows, 256 events");
+        if l.max_in_flight == 0
+            || l.max_in_flight > MAX_IN_FLIGHT
+            || l.max_leases == 0
+            || l.max_leases > u64::from(MAX_FRAMES)
+        {
+            return fail(format!(
+                "warp limits must be positive, in-flight <= {MAX_IN_FLIGHT}, leases <= {MAX_FRAMES}"
+            ));
+        }
+        if spec.nics.is_empty()
+            || spec.nics.len() > MAX_NICS
+            || spec.links.len() > MAX_LINKS
+            || spec.flows.len() > MAX_FLOWS
+            || spec.events.len() > MAX_WARP_EVENTS
+        {
+            return fail("warp needs 1..=4 NICs and at most 8 links, 16 flows, 256 events");
+        }
     }
     let mut links = BTreeSet::new();
     for link in &spec.links {
         if link.name.is_empty() || !links.insert(link.name.as_str()) {
             return fail(format!("link names must be unique: {:?}", link.name));
         }
-        let ppm = [
-            link.loss_ppm,
-            link.duplicate_ppm,
-            link.reorder.map_or(0, |r| r.ppm),
-        ];
-        let ge = link.gilbert_elliott.map_or([0; 4], |g| {
-            [
-                g.good_to_bad_ppm,
-                g.bad_to_good_ppm,
-                g.loss_good_ppm,
-                g.loss_bad_ppm,
-            ]
-        });
-        if ppm.iter().chain(&ge).any(|p| *p > super::link::PPM) {
-            return fail(format!("link {}: probabilities are ppm <= 10^6", link.name));
+        #[cfg(feature = "vesper-port")]
+        {
+            let reorder_ppm = link.reorder.map_or(0, |r| u64::from(r.ppm));
+            let ge = link.gilbert_elliott.map_or([0u64; 4], |g| {
+                [
+                    u64::from(g.good_to_bad_ppm),
+                    u64::from(g.bad_to_good_ppm),
+                    u64::from(g.loss_good_ppm),
+                    u64::from(g.loss_bad_ppm),
+                ]
+            });
+            match crate::port::sim_validate_warp_link_params(
+                u64::from(link.loss_ppm),
+                u64::from(link.duplicate_ppm),
+                reorder_ppm,
+                ge[0],
+                ge[1],
+                ge[2],
+                ge[3],
+                u64::from(link.bottleneck.buffer_packets),
+                link.bottleneck.rate_bytes_per_sec,
+            ) {
+                0 => {}
+                1 => return fail(format!("link {}: probabilities are ppm <= 10^6", link.name)),
+                _ => {
+                    return fail(format!(
+                        "link {}: the bottleneck needs a positive buffer and rate",
+                        link.name
+                    ));
+                }
+            }
         }
-        if link.bottleneck.buffer_packets == 0 || link.bottleneck.rate_bytes_per_sec == 0 {
-            return fail(format!(
-                "link {}: the bottleneck needs a positive buffer and rate",
-                link.name
-            ));
+        #[cfg(not(feature = "vesper-port"))]
+        {
+            let ppm = [
+                link.loss_ppm,
+                link.duplicate_ppm,
+                link.reorder.map_or(0, |r| r.ppm),
+            ];
+            let ge = link.gilbert_elliott.map_or([0; 4], |g| {
+                [
+                    g.good_to_bad_ppm,
+                    g.bad_to_good_ppm,
+                    g.loss_good_ppm,
+                    g.loss_bad_ppm,
+                ]
+            });
+            if ppm.iter().chain(&ge).any(|p| *p > super::link::PPM) {
+                return fail(format!("link {}: probabilities are ppm <= 10^6", link.name));
+            }
+            if link.bottleneck.buffer_packets == 0 || link.bottleneck.rate_bytes_per_sec == 0 {
+                return fail(format!(
+                    "link {}: the bottleneck needs a positive buffer and rate",
+                    link.name
+                ));
+            }
         }
     }
     let mut nics: BTreeMap<&str, &NicSpec> = BTreeMap::new();
@@ -941,7 +996,16 @@ impl WarpState {
     ) -> Result<(), WarpError> {
         for (id, t) in sent {
             if let Fate::Delivered { arrive_at_ns, .. } = t.fate {
-                if self.in_flight.len() as u64 + self.egress_in_flight >= self.max_in_flight {
+                #[cfg(feature = "vesper-port")]
+                let allowed = crate::port::sim_warp_admit_allows(
+                    self.in_flight.len() as u64,
+                    self.egress_in_flight,
+                    self.max_in_flight,
+                );
+                #[cfg(not(feature = "vesper-port"))]
+                let allowed =
+                    self.in_flight.len() as u64 + self.egress_in_flight < self.max_in_flight;
+                if !allowed {
                     return Err(WarpError::Budget(format!(
                         "more than {} datagrams in flight",
                         self.max_in_flight

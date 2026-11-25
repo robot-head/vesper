@@ -791,6 +791,9 @@ unsafe extern "C" {
     fn vesper_sim_sim_validate_model_bounds(max_events: i64, max_epochs: i64, max_instances: i64, n_processes: i64, n_logs: i64, n_networks: i64, n_faults: i64, n_failures: i64) -> i64;
     fn vesper_sim_sim_validate_network_bounds(max_in_flight: i64, max_inbox: i64, max_message_bytes: i64, timeout_code: i64, unreachable_code: i64) -> i64;
     fn vesper_sim_sim_validate_process_timeline(result: *mut u64, events: *mut u64) -> i64;
+    fn vesper_sim_sim_validate_warp_bounds(max_in_flight: i64, max_leases: i64, n_nics: i64, n_links: i64, n_flows: i64, n_events: i64) -> i64;
+    fn vesper_sim_sim_validate_warp_link_params(loss_ppm: i64, dup_ppm: i64, reorder_ppm: i64, ge_g2b: i64, ge_b2g: i64, ge_lg: i64, ge_lb: i64, buffer_packets: i64, rate_bps: i64) -> i64;
+    fn vesper_sim_sim_warp_admit_allows(in_flight: i64, egress_in_flight: i64, max_in_flight: i64) -> i64;
     fn vesper_sim_splitmix_chance(state: *mut u64, ppm: i64) -> i64;
     fn vesper_sim_splitmix_next(state: *mut u64) -> i64;
     fn vesper_sim_stationary_bad_ppm(good_to_bad_ppm: i64, bad_to_good_ppm: i64) -> i64;
@@ -1358,6 +1361,33 @@ pub fn sim_validate_process_timeline(events: &[u64]) -> (bool, u64) {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(events, |view_events| unsafe { vesper_sim_sim_validate_process_timeline(result.as_mut_ptr(), view_events) });
     <(bool, u64) as Abi>::get(&result[0..])
+}
+
+/// Calls `sim_validate_warp_bounds` of the Vesper library `sim` (`vesper_sim_sim_validate_warp_bounds`).
+pub fn sim_validate_warp_bounds(max_in_flight: u64, max_leases: u64, n_nics: u64, n_links: u64, n_flows: u64, n_events: u64) -> u8 {
+    // SAFETY: `vesper_sim_sim_validate_warp_bounds` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_sim_validate_warp_bounds(max_in_flight as i64, max_leases as i64, n_nics as i64, n_links as i64, n_flows as i64, n_events as i64) };
+    raw as u8
+}
+
+/// Calls `sim_validate_warp_link_params` of the Vesper library `sim` (`vesper_sim_sim_validate_warp_link_params`).
+pub fn sim_validate_warp_link_params(loss_ppm: u64, dup_ppm: u64, reorder_ppm: u64, ge_g2b: u64, ge_b2g: u64, ge_lg: u64, ge_lb: u64, buffer_packets: u64, rate_bps: u64) -> u8 {
+    // SAFETY: `vesper_sim_sim_validate_warp_link_params` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_sim_validate_warp_link_params(loss_ppm as i64, dup_ppm as i64, reorder_ppm as i64, ge_g2b as i64, ge_b2g as i64, ge_lg as i64, ge_lb as i64, buffer_packets as i64, rate_bps as i64) };
+    raw as u8
+}
+
+/// Calls `sim_warp_admit_allows` of the Vesper library `sim` (`vesper_sim_sim_warp_admit_allows`).
+pub fn sim_warp_admit_allows(in_flight: u64, egress_in_flight: u64, max_in_flight: u64) -> bool {
+    // SAFETY: `vesper_sim_sim_warp_admit_allows` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_sim_warp_admit_allows(in_flight as i64, egress_in_flight as i64, max_in_flight as i64) };
+    raw != 0
 }
 
 /// Calls `splitmix_chance` of the Vesper library `sim` (`vesper_sim_splitmix_chance`).

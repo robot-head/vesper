@@ -34,7 +34,10 @@ use self::process::{
     validate_log_bounds,
     validate_model_bounds,
     validate_network_bounds,
-    validate_process_timeline
+    validate_process_timeline,
+    validate_warp_bounds,
+    validate_warp_link_params,
+    warp_admit_allows
 };
 use self::sha256::{
     sha256_digest
@@ -1645,4 +1648,43 @@ pub fn sim_validate_network_bounds(
 
 pub fn sim_validate_process_timeline(in events: Slice[u64]) -> (bool, u64) {
     validate_process_timeline(in events)
+}
+
+pub fn sim_validate_warp_bounds(
+    max_in_flight: u64,
+    max_leases: u64,
+    n_nics: u64,
+    n_links: u64,
+    n_flows: u64,
+    n_events: u64
+) -> u8 {
+    validate_warp_bounds(max_in_flight, max_leases, n_nics, n_links, n_flows, n_events)
+}
+
+pub fn sim_validate_warp_link_params(
+    loss_ppm: u64,
+    dup_ppm: u64,
+    reorder_ppm: u64,
+    ge_g2b: u64,
+    ge_b2g: u64,
+    ge_lg: u64,
+    ge_lb: u64,
+    buffer_packets: u64,
+    rate_bps: u64
+) -> u8 {
+    validate_warp_link_params(
+        loss_ppm,
+        dup_ppm,
+        reorder_ppm,
+        ge_g2b,
+        ge_b2g,
+        ge_lg,
+        ge_lb,
+        buffer_packets,
+        rate_bps
+    )
+}
+
+pub fn sim_warp_admit_allows(in_flight: u64, egress_in_flight: u64, max_in_flight: u64) -> bool {
+    warp_admit_allows(in_flight, egress_in_flight, max_in_flight)
 }
