@@ -7,7 +7,8 @@
 //! [`super::aggregates::plan`], [`super::aggregates::split_sources`],
 //! [`super::aggregates::split_words`], [`super::aggregates::plain_data`])
 //! the way `Codegen` calls them for a top-level graph with no generic
-//! arguments, and prints what they decide. It changes no lowering.
+//! arguments, and prints what they decide; [`scalar_enum_rewrite`] returns
+//! the graph `scalar_enums` makes. It changes no lowering.
 use super::aggregates::{self, Home};
 use crate::check::World;
 use crate::ir::{FunctionIr, Program};
@@ -192,20 +193,32 @@ fn call_words(
 /// its words, `enumlocal L` for each local, `enumcall vV` for each call
 /// whose result the graph keeps as words and `enumret vV` for each
 /// returned word value. Nothing when the graph keeps its enums in memory.
-fn scalar_enum_decisions(world: &World, f: &FunctionIr, out: &mut String) {
+/// `scalar_enums` of `f` as `Codegen::ir_graph_at` calls it for a
+/// top-level graph.
+fn scalar_enums_of(world: &World, f: &FunctionIr) -> Option<aggregates::ScalarEnums> {
     let (returns, _) = scalar_enum_facts(world, f);
     let returns = returns
         .then(|| aggregates::enum_shape(world, &crate::numeric::default_type(&f.result)))
         .flatten();
     let none = BTreeMap::new();
-    let Some(s) = aggregates::scalar_enums(
+    aggregates::scalar_enums(
         world,
         f,
         &none,
         returns.as_ref(),
         &|callee, types, shape| call_words(world, callee, types, shape),
         &std::collections::BTreeSet::new(),
-    ) else {
+    )
+}
+
+/// The graph `scalar_enums` makes of `f` (its values and locals kept as
+/// words), or `None` when it keeps `f` as it is.
+pub fn scalar_enum_rewrite(world: &World, f: &FunctionIr) -> Option<FunctionIr> {
+    scalar_enums_of(world, f).map(|s| s.f)
+}
+
+fn scalar_enum_decisions(world: &World, f: &FunctionIr, out: &mut String) {
+    let Some(s) = scalar_enums_of(world, f) else {
         return;
     };
     for (v, ws) in &s.words {
