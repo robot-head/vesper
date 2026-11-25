@@ -966,7 +966,7 @@ fn field(inout out: ChunkSeq[u8], in name: Str, v: u64, last: bool) {
 }
 
 // `{row:?}` of the Rust `Lir`.
-fn put_debug(inout out: ChunkSeq[u8], in r: Lir) {
+pub fn put_debug(inout out: ChunkSeq[u8], in r: Lir) {
     let t = r.tag;
     if t == LIR_CONST {
         puts(inout out, "Const { ");
