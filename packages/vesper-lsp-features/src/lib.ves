@@ -42,6 +42,7 @@ use self::proof::{
 };
 use self::ownership::{
     lens_facts,
+    lens_requests,
     lens_view
 };
 use self::repair::{
@@ -639,4 +640,13 @@ pub fn lsp_lens_repair(in input: Str) -> ChunkSeq[u64] {
 // `poisoned`, `binding`, `complete_member`, `signature`; ownership.ves).
 pub fn lsp_lens_view(in input: Str) -> ChunkSeq[u64] {
     lens_view(in input)
+}
+
+// The Lens request layer on a document and its view: poison notices and
+// Lens metadata, obligation-guided member completion, obligation hovers
+// and linear-binding inlay hints (src/lsp/session/lens_requests.rs
+// `poison_of`, `completion_of`, `obligation_text_of`, `inlay_hints_of`;
+// ownership.ves).
+pub fn lsp_lens_requests(in input: Str) -> ChunkSeq[u64] {
+    lens_requests(in input)
 }
