@@ -413,7 +413,7 @@ act (`transport.send(..)`), Vesper returns the actions as a sequence of a
      - for an optional `vesper-port` feature, copy the `rust_library` (with
        `port/binding.rs` in `srcs`) and `rust_test` targets from
        `crates/vesper-port-pilot/BUILD.bazel`.
-     Run `python3 tools/bazel/sync_build_files.py` for a new crate.
+     Run `aspect maintenance bazel sync-build-files` for a new crate.
    - Cargo: append the crate's lines to the end of
      `aspect acceptance test-port-harness`. The Linux job of the Platforms workflow
      runs them, with the prebuilt compiler in `VESPER_PORT_COMPILER`. macOS

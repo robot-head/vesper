@@ -172,6 +172,19 @@ class PlatformWorkflowTests(unittest.TestCase):
                 else:
                     self.assertIn(f"{launcher} acceptance test-format-proof", steps)
 
+    def test_bazel_setup_selects_native_configuration_by_host(self):
+        action = yaml.load((ROOT / ".github/actions/bazel/action.yml").read_text(), Loader=yaml.BaseLoader)
+        setup, aspect, unix, windows = action["runs"]["steps"]
+        self.assertIn("inputs.buildbuddy-api-key == ''", setup["with"]["disk-cache"])
+        self.assertEqual(aspect["uses"], "./.github/actions/aspect")
+        self.assertEqual(aspect["if"], "runner.os != 'Windows'")
+        self.assertEqual(unix["if"], aspect["if"])
+        self.assertEqual(unix["run"], "aspect ci configure-bazel")
+        self.assertEqual(windows["if"], "runner.os == 'Windows'")
+        self.assertEqual(windows["shell"], "pwsh")
+        self.assertEqual(windows["run"], "./scripts/windows/configure-bazel.ps1")
+        self.assertEqual(unix["env"], windows["env"])
+
     def test_bootstrap_workflows_invoke_native_tasks(self):
         stage1 = workflow("bootstrap-stage1.yml")["jobs"]
         stage2 = workflow("bootstrap-stage2.yml")["jobs"]["bootstrap"]

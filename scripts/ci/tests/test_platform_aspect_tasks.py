@@ -1080,6 +1080,98 @@ print(Path("metadata.json").read_text())
         git("commit", "-qm", "move a port file to documentation")
         self.assertEqual(self.aspect(*scoped, env=env).stdout, "last middle source\n")
 
+    def test_bazel_workspace_sync_checks_and_creates_only_missing_members(self):
+        cargo = self.write("bin/cargo", """\
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+assert sys.argv[1:] == ["metadata", "--no-deps", "--format-version=1", "--quiet", "--offline"]
+if os.environ.get("METADATA_FAILURE"):
+    print("metadata failure", file=sys.stderr)
+    sys.exit(29)
+print(Path("cargo metadata.json").read_text())
+""", executable=True)
+        build = self.write("crates/owned/BUILD.bazel", "manually edited\n")
+        for path in ("crates/first crate", "crates/second", "outside"):
+            (self.root / path).mkdir(parents=True)
+        self.write("cargo metadata.json", json.dumps({
+            "workspace_root": str(self.root),
+            "workspace_members": ["root", "owned", "first", "second"],
+            "packages": [{"id": name, "manifest_path": str(self.root / path / "Cargo.toml")}
+                         for name, path in [("root", ""), ("owned", "crates/owned"), ("outside", "outside"),
+                                            ("second", "crates/second"), ("first", "crates/first crate")]],
+        }))
+        for binary in ("git", "python3"):
+            (cargo.parent / binary).symlink_to(shutil.which(binary))
+        env = {"PATH": str(cargo.parent)}
+        command = ("maintenance", "bazel", "sync-build-files")
+        expected = ["crates/first crate/BUILD.bazel", "crates/second/BUILD.bazel"]
+        check = self.aspect(*command, "--", "--check", env=env, status=1)
+        self.assertEqual(check.stdout.splitlines(),
+                         [f"missing {path}; run aspect maintenance bazel sync-build-files" for path in expected])
+        self.assertTrue(all(not (self.root / path).exists() for path in expected))
+        repair = self.aspect(*command, env=env)
+        self.assertEqual(repair.stdout.splitlines(), [f"created {path}" for path in expected])
+        for path in expected:
+            created = self.root / path
+            self.assertEqual(created.read_text(), 'load("//tools/bazel:defs.bzl", "vesper_crate")\n\nvesper_crate()\n')
+            self.assertEqual(list(created.parent.iterdir()), [created])
+        self.assertFalse((self.root / "BUILD.bazel").exists())
+        self.assertFalse((self.root / "outside/BUILD.bazel").exists())
+        self.assertEqual(build.read_text(), "manually edited\n")
+        self.assertEqual(self.aspect(*command, "--", "--check", env=env).stdout, "")
+        invalid = self.aspect(*command, "--", "--invalid", env=env, status=2)
+        self.assertIn("usage:", invalid.stderr)
+        failure = self.aspect(*command, "--", "--check", env={**env, "METADATA_FAILURE": "1"}, status=29)
+        self.assertIn("metadata failure", failure.stderr)
+
+        self.write("bin/bazelisk", """\
+#!/usr/bin/env python3
+import os
+import sys
+assert sys.argv[1:] == ["query", "@vesper_cargo//:packages.bzl"]
+print("Bazel checked the generated workspace repository")
+sys.exit(int(os.environ.get("BAZEL_CODE", "0")))
+""", executable=True)
+        fallback = self.aspect(*command, "--", "--check", env={**env, "METADATA_FAILURE": "1"})
+        self.assertIn("Bazel checked", fallback.stdout)
+        cargo.unlink()
+        self.assertIn("Bazel checked", self.aspect(*command, "--", "--check", env=env).stdout)
+        self.aspect(*command, "--", "--check", env={**env, "BAZEL_CODE": "43"}, status=43)
+        generation = self.aspect(*command, env=env, status=1)
+        self.assertIn("Cargo is required", generation.stderr)
+        (cargo.parent / "bazelisk").unlink()
+        absent = self.aspect(*command, "--", "--check", env=env, status=1)
+        self.assertIn("without working Cargo or Bazel", absent.stderr)
+
+    def test_bazel_configuration_preserves_cache_modes(self):
+        self.check_bazel_configuration(lambda **kwargs: self.aspect("ci", "configure-bazel", **kwargs), windows=False)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell unavailable")
+    def test_windows_bazel_configuration_preserves_cache_modes_and_runtime_settings(self):
+        script = "scripts/windows/configure-bazel.ps1"
+        self.copy_fixture(script)
+        self.check_bazel_configuration(lambda **kwargs: self.powershell(script, **kwargs), windows=True)
+
+    def check_bazel_configuration(self, run, *, windows):
+        path = self.root / "user.bazelrc"
+        key = "fixture-api-key"
+        lines = ["common --config=ci"]
+        if windows:
+            lines += ["startup --output_user_root=C:/_bzl",
+                      "common --repo_env=BAZEL_MSVC_RUNTIME_VISUAL_STUDIO_EULA=1"]
+        enabled = run(env={"BUILDBUDDY_API_KEY": key})
+        self.assertIn("BuildBuddy: enabled", enabled.stdout)
+        self.assertNotIn(key, enabled.stdout + enabled.stderr)
+        self.assertEqual(path.read_bytes(), ("\n".join(lines + [
+            "common --config=buildbuddy", f"common --remote_header=x-buildbuddy-api-key={key}",
+            "common --build_metadata=ROLE=CI",
+        ]) + "\n").encode())
+        disabled = run(env={"BUILDBUDDY_API_KEY": ""})
+        self.assertIn("using the GitHub Actions disk cache", disabled.stdout)
+        self.assertEqual(path.read_bytes(), ("\n".join(lines) + "\n").encode())
+
     def test_blake3_generator_preserves_both_source_forms(self):
         command = ("maintenance", "gen-blake3", "--")
         self.aspect(*command, "rounds output.ves")
