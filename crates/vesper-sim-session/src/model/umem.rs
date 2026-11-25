@@ -1054,7 +1054,6 @@ impl Umem {
 }
 
 /// `(first_byte, dcid, truncated pn)` of a short header, or the error code.
-#[cfg(feature = "vesper-port")]
 fn parse_short_header(bytes: &[u8]) -> Result<(u8, u64, u32), u32> {
     match crate::port::parse_short_header(bytes) {
         (0, first, dcid, pn) => Ok((first, dcid, pn)),
@@ -1062,27 +1061,8 @@ fn parse_short_header(bytes: &[u8]) -> Result<(u8, u64, u32), u32> {
     }
 }
 
-/// `(first_byte, dcid, truncated pn)` of a short header, or the error code.
-#[cfg(not(feature = "vesper-port"))]
-fn parse_short_header(bytes: &[u8]) -> Result<(u8, u64, u32), u32> {
-    if bytes.len() < SHORT_HEADER_BYTES as usize {
-        return Err(ERR_TRUNCATED);
-    }
-    let first = bytes[0];
-    if first & 0x80 != 0 {
-        return Err(ERR_LONG_HEADER);
-    }
-    if first & 0x40 == 0 {
-        return Err(ERR_FIXED_BIT);
-    }
-    let dcid = u64::from_be_bytes(bytes[1..9].try_into().expect("8 bytes"));
-    let pn = u32::from_be_bytes(bytes[9..13].try_into().expect("4 bytes"));
-    Ok((first, dcid, pn))
-}
-
 /// Parse a datagram whose payload starts with a fixed-width ACK frame
 /// (RFC 9000 §19.3 fields, big-endian integers instead of varints).
-#[cfg(feature = "vesper-port")]
 pub fn parse_ack(bytes: &[u8]) -> Result<AckFrame, u32> {
     let words = crate::port::parse_ack(bytes);
     match words[0] {
@@ -1090,106 +1070,31 @@ pub fn parse_ack(bytes: &[u8]) -> Result<AckFrame, u32> {
             dcid: words[1],
             largest: words[2],
             ack_delay_ns: words[3],
-            ranges: words[4..].chunks_exact(2).map(|r| (r[0], r[1])).collect(),
+            ranges: words[4..]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|r| (r[0], r[1]))
+                .collect(),
         }),
         code => Err(code as u32),
     }
 }
 
-/// Parse a datagram whose payload starts with a fixed-width ACK frame
-/// (RFC 9000 §19.3 fields, big-endian integers instead of varints).
-#[cfg(not(feature = "vesper-port"))]
-pub fn parse_ack(bytes: &[u8]) -> Result<AckFrame, u32> {
-    let (_, dcid, _) = parse_short_header(bytes)?;
-    let payload = &bytes[SHORT_HEADER_BYTES as usize..];
-    if payload.first() != Some(&ACK_FRAME_TYPE) {
-        return Err(ERR_NOT_ACK);
-    }
-    let mut at = 1usize;
-    let mut take = |n: usize| -> Result<&[u8], u32> {
-        let end = at.checked_add(n).ok_or(ERR_BAD_ACK)?;
-        let field = payload.get(at..end).ok_or(ERR_BAD_ACK)?;
-        at = end;
-        Ok(field)
-    };
-    let u64_at = |b: &[u8]| u64::from_be_bytes(b.try_into().expect("8 bytes"));
-    let largest = u64_at(take(8)?);
-    let ack_delay_ns = u64_at(take(8)?);
-    let count = u32::from_be_bytes(take(4)?.try_into().expect("4 bytes"));
-    let first = u64_at(take(8)?);
-    if largest > MAX_PACKET_NUMBER {
-        return Err(ERR_BAD_ACK);
-    }
-    let mut hi = largest;
-    let mut lo = hi.checked_sub(first).ok_or(ERR_BAD_ACK)?;
-    // Each additional range needs 16 bytes; reject counts the datagram cannot hold.
-    if u64::from(count) * u64::from(ACK_RANGE_BYTES) > payload.len() as u64 {
-        return Err(ERR_BAD_ACK);
-    }
-    let mut ranges = vec![(lo, hi)];
-    for _ in 0..count {
-        let gap = u64_at(take(8)?);
-        let len = u64_at(take(8)?);
-        // RFC 9000 §19.3.1: the next largest is smallest - gap - 2.
-        hi = lo
-            .checked_sub(gap)
-            .and_then(|v| v.checked_sub(2))
-            .ok_or(ERR_BAD_ACK)?;
-        lo = hi.checked_sub(len).ok_or(ERR_BAD_ACK)?;
-        ranges.push((lo, hi));
-    }
-    Ok(AckFrame {
-        dcid,
-        largest,
-        ack_delay_ns,
-        ranges,
-    })
-}
-
 /// Encode an ACK frame for inclusive ranges given largest first, disjoint
 /// and separated by at least one missing packet number.
-#[cfg(feature = "vesper-port")]
 pub fn ack_frame_bytes(ranges: &[(u64, u64)], ack_delay_ns: u64) -> Vec<u8> {
     assert!(!ranges.is_empty(), "an ACK frame has at least one range");
     let words: Vec<u64> = ranges.iter().flat_map(|&(lo, hi)| [lo, hi]).collect();
     crate::port::ack_frame_bytes(&words, ack_delay_ns)
 }
 
-/// Encode an ACK frame for inclusive ranges given largest first, disjoint
-/// and separated by at least one missing packet number.
-#[cfg(not(feature = "vesper-port"))]
-pub fn ack_frame_bytes(ranges: &[(u64, u64)], ack_delay_ns: u64) -> Vec<u8> {
-    let mut out = vec![ACK_FRAME_TYPE];
-    let (lo0, hi0) = ranges[0];
-    out.extend_from_slice(&hi0.to_be_bytes());
-    out.extend_from_slice(&ack_delay_ns.to_be_bytes());
-    out.extend_from_slice(&(ranges.len() as u32 - 1).to_be_bytes());
-    out.extend_from_slice(&(hi0 - lo0).to_be_bytes());
-    let mut prev_lo = lo0;
-    for &(lo, hi) in &ranges[1..] {
-        out.extend_from_slice(&(prev_lo - hi - 2).to_be_bytes());
-        out.extend_from_slice(&(hi - lo).to_be_bytes());
-        prev_lo = lo;
-    }
-    out
-}
-
 /// Build the bytes of a datagram's materialised head.
-#[cfg(feature = "vesper-port")]
 pub fn short_header(first_byte: u8, dcid: u64, pkt_num: u64) -> Vec<u8> {
     crate::port::short_header(first_byte, dcid, pkt_num)
 }
 
 /// Build the bytes of a datagram's materialised head.
-#[cfg(not(feature = "vesper-port"))]
-pub fn short_header(first_byte: u8, dcid: u64, pkt_num: u64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(SHORT_HEADER_BYTES as usize);
-    out.push(first_byte);
-    out.extend_from_slice(&dcid.to_be_bytes());
-    // Truncation to the low 32 bits is the wire encoding (4-byte PN field).
-    out.extend_from_slice(&(pkt_num as u32).to_be_bytes());
-    out
-}
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
