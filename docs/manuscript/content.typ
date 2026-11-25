@@ -5203,7 +5203,7 @@ Because narrowing a function's parameter projection or effect row alters its sta
   2. _SemVer variance gate (`--semver-safe`):_ On `pub` items, `--fix --semver-safe` permits body-internal repairs (such as `L0204` local region demotion or `L0302` canonicalization) and suppresses signature rewrites whenever module-interface (`mif:blake3`) signature stability is locked.
   3. _Bounded preflight and compiler replay:_ Complexity limits (`Limits.max_type_depth` $<= 32$, checked via an explicit iterative stack prior to type encoding) and candidate byte budgets ($abs(S) - sum_i (e_i - s_i) + sum_i abs(r_i) <= B_(upright("max"))$, validated _before_ copying replacement slices across the port boundary) guard against pathological inputs. Rewritten text $S'$ is committed if and only if `check(parse(S'))` succeeds with zero new diagnostics and `stylus::format(S')` is idempotent.
 
-Consider a broker accounting routine that borrows an entire `Broker` record mutably and declares an unused `Fail[RuntimeError]` capability despite using modular wrapping arithmetic:
+Consider a broker accounting routine that borrows an entire `Broker` record mutably and declares an unused `Fail[RuntimeError]` capability despite using modular wrapping arithmetic. The current `--fix` applies only the `L0102` contraction; `L0101` is reported as a diagnostic, and the narrowed signature below is the proposed `[Lint-Narrow-Proj]` rewrite, applied by hand today:
 
 ```vesper
 copy struct Broker { index: u64, metrics: u64, config: u64 }
@@ -5214,7 +5214,7 @@ fn record_batch(inout broker: Broker, count: u64) eff [Fail[RuntimeError]] {
     broker.metrics = wrapping_add(broker.metrics, 1);
 }
 
-// After `vesper lint --fix`: minimal disjoint projection and contracted effect row.
+// After: contracted effect row (`--fix`) and minimal disjoint projection (proposed L0101 rewrite).
 fn record_batch(inout broker.{index, metrics}: Broker, count: u64) {
     broker.index = wrapping_add(broker.index, count);
     broker.metrics = wrapping_add(broker.metrics, 1);
@@ -5225,7 +5225,7 @@ After narrowing, a caller can pass `inout broker.{index, metrics}` and simultane
 
 ==== Package Policy Discovery and CLI Contract <sec:vesper-lint-cli>
 
-`vesper lint` ships inside the single static `vesper` binary (`crates/vesper-cli`) with its CLI command layer self-hosted in Vesper (`hc_lint_run`), automatically discovering `[lints]` policy from the enclosing workspace or package `Loom.toml` unless overridden via `--config`:
+`vesper lint` ships inside the single static `vesper` binary (`crates/vesper-cli`) with its CLI command layer self-hosted in Vesper (`hc_lint_run`), automatically discovering `[lints.vesper]` policy from the enclosing workspace or package `Loom.toml` unless overridden via `--config`:
 
 ```toml
 [package]
@@ -5233,7 +5233,7 @@ name = "@vesper-std/broker"
 version = "0.4.0"
 capability_ceiling = []
 
-[lints]
+[lints.vesper]
 overbroad_inout_projection = "deny"     # L0101
 unused_effect_capability   = "deny"     # L0102
 demote_alloc_to_region     = "warn"     # L0204
@@ -5243,7 +5243,7 @@ missed_fip_opportunity     = "warn"     # L0205
 ```sh
 vesper lint src/lib.ves                          # Human-readable multi-span diagnostics
 vesper lint src/lib.ves --fix --semver-safe      # Hygiene- & SemVer-gated CST autofixes
-vesper lint src/lib.ves --json --config ci.toml  # Machine-readable SARIF/JSON report
+vesper lint src/lib.ves --json --config ci.toml  # Machine-readable JSON report (schema_version 1)
 ```
 
 Across the C ABI boundary between the Vesper CLI layer and host I/O (`hc_lint_run`), standard-output write panics (such as broken pipes or `/dev/full` redirection) are caught before unwinding across `extern "C"`, preserving the toolchain's standard exit code `101` rather than aborting the process. Oversized inputs deterministically return structured `LintError` diagnostics (`"type complexity limit"` or `"candidate byte limit"`) without stack overflow or unbounded intermediate allocation.
@@ -5254,7 +5254,7 @@ The lint engine is self-hosted in Vesper (`crates/vesper-lint/vesper/`) and vali
 
 + *Bit-Identical Differential and Zero-Leak Suites:* `tests/differential.rs` runs every corpus program, TOML policy configuration, and autofix splice batch through both the seed engine and `@vesper/lint`, asserting identical diagnostic codes, primary/secondary spans, and rewritten source bytes, while serialized allocation-counter checks (`port_frees_its_allocations`) verify zero leaked port buffers per invocation.
 + *Four-Subsystem Divergent Mutation Gate:* Under `vesper-port-divergent` (`VESPER_LINT_DIVERGE`), `port/test-port.sh` and `BUILD.bazel` inject targeted semantic mutations into each of the four ported subsystems—the _effect rule_, the _projection rule_, the _TOML policy reader_, and the _source-edit engine_—requiring the differential suite to catch and reject every mutant before a port change can land.
-+ *Kernel-Replayed Narrowing Proofs:* Extracted Lean 4 models of the projection-subtyping and PCG-framing obligations (`LintNarrowingSafety`) are replayed from `.olean` artifacts by the pinned *Logos* kernel checker (`logos-sweep`), certifying that `[Lint-Narrow-Proj]` and `[Lint-Narrow-Eff]` preserve caller disjointness and effect soundness across all well-typed call graphs.
++ *Kernel-Replayed Narrowing Proofs (partial):* `lean/StylusAndLintSafety.lean` proves `projection_narrowing_preserves_disjointness`: if the narrowed leaf set is a subset of the declared one, caller-side disjointness is preserved. It does not establish that a production autofix satisfies that subset premise, nor anything about `[Lint-Narrow-Eff]`. Extracted models of the full projection-subtyping and PCG-framing obligations (`LintNarrowingSafety`), replayed from `.olean` artifacts by the pinned *Logos* kernel checker (`logos-sweep`) across well-typed call graphs, are proposed future work.
 
 == 20. Vesper Codex: Living Documentation and Hermetic JIT Doctests
 <ch-19>
