@@ -1,5 +1,6 @@
 """Check native task argument forwarding and diagnostics at CLI entry points."""
 
+load("./cargo-metadata-test.axl", "mock_cargo_metadata")
 load("./lib/process.axl", "check")
 load("./lib/task-fixture.axl", "contains", "equal", "fixture_launcher", "fixture_workspace", "invoke_fixture", "write_fixture")
 load("./wasm-fixture-test.axl", "mock_wasm_cargo")
@@ -10,6 +11,8 @@ _ORACLE_ARGS = ["run", "--locked", "--quiet", "-p", "vesper-oracles", "--bin", "
 def _tool_fixture(ctx):
     variant, tool, cwd, executable = ctx.args.tool_args[:4]
     argv = ctx.args.tool_args[4:]
+    if variant == "metadata":
+        return mock_cargo_metadata(ctx, cwd, tool, argv)
     if variant == "wasm-fixtures":
         equal(tool, "cargo")
         return mock_wasm_cargo(ctx, cwd, argv)
