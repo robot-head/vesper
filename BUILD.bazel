@@ -430,9 +430,13 @@ vesper_crate(
         ]),
         # Self-hosting SH2 lane 9 (#1181): the region, sequence, tiled and
         # vector rules over the same corpus. Anchored globs.
+        # The Isa walk differential (#1830) also reads the vector tests'
+        # sources.
         "test/self_host_check_regions_seqs": glob([
             "packages/**",
             "tests/fixtures/**",
+            "tests/tiled.rs",
+            "tests/vector*.rs",
         ]),
         # Self-hosting SH3 lane 12 (#1251): bounds hoisting on the same corpus.
         "test/self_host_bounds_hoist": glob([

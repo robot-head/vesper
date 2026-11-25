@@ -1569,3 +1569,211 @@ fn rust_string_literals(text: &str) -> Vec<String> {
     });
     out
 }
+
+// ------------------------------------------------------- foreign memory
+
+/// A type of the checker's `TypeMap` for `ffi_buffer_text`: 0 other,
+/// 1 named (name, n, n types), 2 tuple (n, n types).
+fn put_buffer_type(w: &mut Vec<u8>, t: &Type) {
+    let word = |w: &mut Vec<u8>, x: u64| w.extend_from_slice(&x.to_le_bytes());
+    match t {
+        Type::Named(n, args) => {
+            word(w, 1);
+            word(w, n.len() as u64);
+            w.extend_from_slice(n.as_bytes());
+            word(w, args.len() as u64);
+            for a in args {
+                put_buffer_type(w, a);
+            }
+        }
+        Type::Tuple(items) => {
+            word(w, 2);
+            word(w, items.len() as u64);
+            for a in items {
+                put_buffer_type(w, a);
+            }
+        }
+        _ => word(w, 0),
+    }
+}
+
+/// `ffi_buffer_text`'s input: the rewrite's (with the pass-2 arities),
+/// then the buffer type names and the checker's expression types.
+fn buffer_input(case: &Case, probe: &plan_probe::BufferProbe) -> Vec<u8> {
+    let mut w = input(case, Some(&probe.arities));
+    let word = |w: &mut Vec<u8>, x: u64| w.extend_from_slice(&x.to_le_bytes());
+    word(&mut w, probe.buffers.len() as u64);
+    for n in &probe.buffers {
+        word(&mut w, n.len() as u64);
+        w.extend_from_slice(n.as_bytes());
+    }
+    word(&mut w, probe.types.len() as u64);
+    for ((start, end), t) in &probe.types {
+        word(&mut w, *start as u64);
+        word(&mut w, *end as u64);
+        put_buffer_type(&mut w, t);
+    }
+    w
+}
+
+/// Sources for the paths of the buffer walk the suite does not reach,
+/// after the suite's prelude.
+const BUFFER_SOURCES: &[&str] = &[
+    // Tuple patterns, `for` bindings, closures and nested blocks.
+    "fn f(inout r: Ring, in p: Pinned[u8]) -> u64 { let (a, b) = (r.data.len(), p.data.len()); let mut n = 0; for i in 0..a { n = wrapping_add(n, i); } let g = |x: u64| wrapping_add(x, b); g(n) }",
+    "fn f(inout r: Ring) { let t = (1, 2); let (x, y) = t; r.data.push(1); }",
+    "fn f(inout r: Ring) { for i in 0..4 { r.data.clear(); } }",
+    "fn f(inout r: Ring) -> u64 { let g = |n: u64| n; let k = { let j = { r.data.truncate(g(0)); 1 }; j }; k }",
+    // Result payloads, generic structs and enum constructors.
+    "fn f(sink o: Result[Ring, u64]) -> u64 eff [Ffi[Xsk]] { match o { Ok(r) => { let mut m = r; m.data.push(1); Xsk::xsk_ring_unmap(m); 1 }, Err(e) => e } }",
+    "fn f(sink o: Result[u64, Ring]) -> u64 eff [Ffi[Xsk]] { match o { Ok(n) => n, Err(r) => { let mut m = r; m.data.reserve(1); Xsk::xsk_ring_unmap(m); 1 } } }",
+    "linear struct Box2[T] { inner: T, n: u64 }\nfn f(inout b: Box2[Pinned[u8]]) { b.inner.data.push(1); }",
+    "linear enum Held { Ring(Ring), Nothing }\nfn f(sink h: Held) -> u64 eff [Ffi[Xsk]] { match h { Held::Ring(r) => { let mut m = r; m.data.push(1); Xsk::xsk_ring_unmap(m); 1 }, Held::Nothing => 0 } }",
+    // Methods that keep the buffer, by name and by prefix; `in` arguments.
+    "fn sum(in s: ChunkSeq[u8]) -> u64 { s.len() }\nfn f(inout r: Ring) -> u64 eff [Fail[RuntimeError]] { r.data.try_write_u64_le(0, 1); let n = sum(in r.data); n }",
+    // A view across a foreign call.
+    "fn f(inout s: Socket, inout r: Ring) -> u64 eff [Ffi[Xsk]] { let v = r.data.as_slice_mut(); if v.len() > 0 { Xsk::xsk_kernel_rx(inout s, 1); } 0 }",
+    "fn f(inout r: Ring) { loop { r.data.clear(); break; } }",
+];
+
+/// Every source of the foreign-memory suite with the Xsk library, the
+/// suite's fixture, and [`BUFFER_SOURCES`].
+fn buffer_corpus() -> Vec<Case> {
+    let pool = library_pool();
+    let xsk = pool
+        .iter()
+        .find(|d| d.name() == "Xsk")
+        .expect("the Xsk library");
+    let libraries = vec![host(xsk, Handler::Direct)];
+    let text = std::fs::read_to_string(root().join("tests/foreign_memory.rs")).unwrap_or_default();
+    let literals = rust_string_literals(&text);
+    let prelude = literals
+        .iter()
+        .find(|s| s.contains("fn umem() -> Pinned[u8]") && s.contains("fn grow("))
+        .expect("the suite's prelude")
+        .clone();
+    let mut sources: Vec<(String, String)> = vec![];
+    for (i, s) in literals.iter().enumerate() {
+        if s.contains("sys library") || *s == prelude {
+            continue;
+        }
+        let source = if s.contains("{PRELUDE}") {
+            s.replace("{PRELUDE}", &prelude)
+                .replace("{{", "{")
+                .replace("}}", "}")
+        } else if ["fn ", "pub fn ", "linear ", "effect ", "struct "]
+            .iter()
+            .any(|p| s.starts_with(p))
+        {
+            format!("{prelude}\n{s}")
+        } else {
+            continue;
+        };
+        sources.push((format!("tests/foreign_memory.rs#{i}"), source));
+    }
+    let fixture = std::fs::read_to_string(root().join("tests/fixtures/foreign_memory/xsk.ves"))
+        .expect("the xsk fixture");
+    sources.push(("tests/fixtures/foreign_memory/xsk.ves".into(), fixture));
+    for (i, s) in BUFFER_SOURCES.iter().enumerate() {
+        sources.push((format!("buffer source {i}"), format!("{prelude}\n{s}")));
+    }
+    sources
+        .into_iter()
+        .map(|(label, source)| Case {
+            label,
+            source,
+            libraries: libraries.clone(),
+        })
+        .collect()
+}
+
+/// The foreign-memory rules (src/ffi_lowering/buffers.rs, §16.3) against
+/// `ffi_buffer_text`: for every source that `check_module` takes as far as
+/// `buffers::check`, the same result (accepted, or the first refusal with
+/// its span and message).
+#[test]
+fn buffer_check_matches_rust() {
+    let compiled = compile("ffi_buffer_text", speed());
+    let (mut tested, mut refused, mut bad) = (0usize, 0usize, 0usize);
+    for case in &buffer_corpus() {
+        let imports = case.imports().expect("corpus libraries import");
+        let module = vesper::parser::parse(&case.source).module;
+        let Some(probe) = plan_probe::buffer_check(&module, &imports) else {
+            if std::env::var_os("FFI_BUFFER_VERBOSE").is_some() {
+                let e = vesper::ffi_lowering::check_source(&case.source, &imports).err();
+                let d = e.as_ref().map(|e| {
+                    let ds: Vec<String> = e
+                        .diagnostics
+                        .iter()
+                        .map(|d| format!("{} {}", d.code, d.message))
+                        .collect();
+                    format!("{e} {ds:?}")
+                });
+                eprintln!("{}: stops before the check: {d:?}", case.label);
+            }
+            continue;
+        };
+        tested += 1;
+        let rust = match &probe.result {
+            Ok(()) => "ok\n".to_owned(),
+            Err(e) => {
+                refused += 1;
+                let span = e.span.clone().unwrap_or(0..0);
+                format!("err @{}..{} {}\n", span.start, span.end, e.message)
+            }
+        };
+        let bytes = buffer_input(case, &probe);
+        let vesper = unpack_text(&take_words(call(&compiled, &bytes, &case.source)));
+        if std::env::var_os("FFI_BUFFER_VERBOSE").is_some() {
+            eprintln!("{}: {rust}", case.label);
+        }
+        if rust != vesper {
+            bad += 1;
+            if bad <= 5 {
+                eprintln!("{}:\n  rust:   {rust}  vesper: {vesper}", case.label);
+            }
+        }
+    }
+    eprintln!("buffers: {tested} sources reach the check, {refused} refused; {bad} differ");
+    assert!(refused >= 10, "only {refused} refusals");
+    assert_eq!(bad, 0, "{bad} of {tested} sources differ");
+}
+
+/// What the buffer check costs: Rust's probe (pass 2, the checker and
+/// the buffer walk) against the Vesper entry (pass 2 and the buffer walk)
+/// over the sources that reach the check.
+#[test]
+#[ignore = "timing; run with CHECK_HARNESS_SPEED=1 and --ignored"]
+fn buffer_check_cost() {
+    let compiled = compile("ffi_buffer_text", speed());
+    let mut prepared = Vec::new();
+    for case in buffer_corpus() {
+        let imports = case.imports().expect("corpus libraries import");
+        let module = vesper::parser::parse(&case.source).module;
+        if let Some(probe) = plan_probe::buffer_check(&module, &imports) {
+            let bytes = buffer_input(&case, &probe);
+            prepared.push((case, module, imports, bytes));
+        }
+    }
+    let (r, v) = abba(
+        "ffi buffer check",
+        &mut || {
+            time(|| {
+                for (_, m, i, _) in &prepared {
+                    std::hint::black_box(plan_probe::buffer_check(m, i));
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for (c, _, _, b) in &prepared {
+                    std::hint::black_box(call(&compiled, b, &c.source));
+                }
+            })
+        },
+    );
+    eprintln!(
+        "rust {r:?} vesper {v:?} ({:.2}x)",
+        v.as_secs_f64() / r.as_secs_f64()
+    );
+}

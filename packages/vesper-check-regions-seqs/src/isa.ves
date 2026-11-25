@@ -1,0 +1,1478 @@
+// The `Isa` discipline of src/vector.rs `check_world` over the @vesper/ast
+// tree: E1401 (a two-parameter `Vec` or `Mask` ADT), E1402 (aggregate
+// comparison of vector or mask values) and E1403 (a vector operation, a
+// `load_tile_vec` profile or a call that needs an `Isa[P]` the scope does
+// not grant).
+//
+// The tree is the source parsed by @vesper/ast. The world facts the walk
+// reads come in the input (the layout is `isa_input` in
+// tests/self_host_check_regions_seqs.rs): the ADTs (name, span, generics,
+// field types), the functions in `world.functions` order (name, effect
+// row, body span) and the checker's recorded expression types. The walk
+// and every rule are here.
+//
+// Types are rows of `T`: Other (anything the walk never looks into, and
+// `Infer`), Named (name, args), Tuple (items) or Function (its effect row:
+// each effect's name and its argument when it has exactly one).
+
+use @vesper/ast::{
+    Ast,
+    ExprNode,
+    TypeNode,
+    StmtNode,
+    ArgNode,
+    ClauseNode,
+    EffectsNode,
+    EffectNode,
+    FnNode,
+    list_len,
+    list_at,
+    expr_at,
+    type_at,
+    lit_at
+};
+use @vesper/ast::lower::{
+    lower_source
+};
+use @vesper-std/arena::{
+    idx_from_raw
+};
+use @vesper-std/intern::{
+    symbol_from_id
+};
+use @vesper/check-data::util::{
+    push_decimal
+};
+
+const NONE: u32 = 4294967295;
+const NO_TY: u32 = 4294967295;
+
+const TK_OTHER: u8 = 0;
+const TK_NAMED: u8 = 1;
+const TK_TUPLE: u8 = 2;
+const TK_FN: u8 = 3;
+
+// @vesper/ast expression kinds.
+const E_LITERAL: u8 = 1;
+const E_NAME: u8 = 2;
+const E_TUPLE: u8 = 3;
+const E_STRUCT: u8 = 4;
+const E_BLOCK: u8 = 5;
+const E_CALL: u8 = 6;
+const E_FIELD: u8 = 7;
+const E_INDEX: u8 = 8;
+const E_TRY: u8 = 9;
+const E_UNARY: u8 = 10;
+const E_BINARY: u8 = 11;
+const E_ASSIGN: u8 = 12;
+const E_IF: u8 = 13;
+const E_MATCH: u8 = 14;
+const E_CLOSURE: u8 = 15;
+const E_HANDLE: u8 = 16;
+const E_LOOP: u8 = 17;
+const E_FOR: u8 = 18;
+const E_RANGE: u8 = 19;
+const E_BREAK: u8 = 20;
+const E_RETURN: u8 = 21;
+const AT_NAMED: u8 = 1;
+
+// Profiles: 1 Baseline128, 2 Avx2, 3 Avx512, 4 Sve2, 5 Rvv1 (0 = none).
+const P_BASE: u8 = 1;
+const P_AVX2: u8 = 2;
+const P_AVX512: u8 = 3;
+
+// Intrinsic classes the walk distinguishes (`Intrinsic`), 0 = not one.
+const I_OTHER: u8 = 1;
+const I_ISA: u8 = 2;
+const I_LOAD: u8 = 3;
+const I_STORE: u8 = 4;
+const I_STORE_MASKED: u8 = 5;
+const I_LOAD_MASKED: u8 = 6;
+const I_CONVERT: u8 = 7;
+const I_EXTRACT: u8 = 8;
+const I_REPLACE: u8 = 9;
+const I_SHUFFLE: u8 = 10;
+// A reserved namespace's unknown name (`Some(Err(()))`).
+const I_UNKNOWN: u8 = 255;
+
+fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => NONE,
+    }
+}
+
+fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn byte_at(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn w64(x: u32) -> u64 {
+    widen_u64(x)
+}
+
+fn stmt_at(in a: Ast, i: u32) -> StmtNode {
+    a
+        .stmts
+        .get_or(
+            idx_from_raw[StmtNode](i),
+            StmtNode {
+                kind: 0,
+                pat: NONE,
+                ty: NONE,
+                value: NONE,
+                mutable: false
+            }
+        )
+}
+
+fn arg_at(in a: Ast, i: u32) -> ArgNode {
+    a
+        .args
+        .get_or(
+            idx_from_raw[ArgNode](i),
+            ArgNode {
+                pass: 0,
+                explicit: false,
+                expr: NONE
+            }
+        )
+}
+
+fn clause_at(in a: Ast, i: u32) -> ClauseNode {
+    a
+        .clauses
+        .get_or(
+            idx_from_raw[ClauseNode](i),
+            ClauseNode {
+                name: NONE,
+                pats: 0,
+                body: NONE
+            }
+        )
+}
+
+fn effects_at(in a: Ast, i: u32) -> EffectsNode {
+    a
+        .effects
+        .get_or(
+            idx_from_raw[EffectsNode](i),
+            EffectsNode {
+                instances: 0,
+                tail: NONE
+            }
+        )
+}
+
+fn effect_at(in a: Ast, i: u32) -> EffectNode {
+    a
+        .effect_nodes
+        .get_or(
+            idx_from_raw[EffectNode](i),
+            EffectNode {
+                label: NONE,
+                name: NONE,
+                args: 0
+            }
+        )
+}
+
+fn fn_at(in a: Ast, i: u32) -> FnNode {
+    a
+        .fns
+        .get_or(
+            idx_from_raw[FnNode](i),
+            FnNode {
+                name: NONE,
+                fip: false,
+                generics: 0,
+                params: 0,
+                result: NONE,
+                effects: NONE,
+                body: NONE,
+                start: 0,
+                end: 0
+            }
+        )
+}
+
+// Whether symbol `x` of the tree is `text`.
+fn sym_is(in a: Ast, x: u32, in text: Str) -> bool {
+    if x == NONE {
+        return false;
+    }
+    a.names.symbol_eq(symbol_from_id(x), in text)
+}
+
+// The bytes of symbol `x`, appended to `out`.
+fn sym_text(in a: Ast, x: u32, inout out: ChunkSeq[u8]) {
+    if x == NONE {
+        return;
+    }
+    let (s, e) = a.names.span(symbol_from_id(x));
+    for i in s..e {
+        match a.names.text_byte(i) {
+            Option::Some(c) => out.push(c),
+            Option::None => {}
+        }
+    }
+}
+
+// Interns UTF-8 `b[s..e]` into the tree's names.
+fn intern_bytes(inout a: Ast, in b: Slice[u8], s: u64, e: u64) -> u32 {
+    let mut t = String::new();
+    let mut i = s;
+    loop {
+        if i >= e {
+            break;
+        }
+        let c = widen_u64(byte_at(in b, i));
+        let (cp, n): (u64, u64) = if c < 128 {
+            (c, 1)
+        } else if c < 224 {
+            (((c & 31) << 6) | (widen_u64(byte_at(in b, wrapping_add(i, 1))) & 63), 2)
+        } else if c < 240 {
+            (
+                ((c & 15) << 12) | ((widen_u64(byte_at(in b, wrapping_add(i, 1))) & 63) << 6) | (
+                    widen_u64(byte_at(in b, wrapping_add(i, 2))) & 63
+                ),
+                3
+            )
+        } else {
+            (
+                ((c & 7) << 18) | ((widen_u64(byte_at(in b, wrapping_add(i, 1))) & 63) << 12) | (
+                    (widen_u64(byte_at(in b, wrapping_add(i, 2))) & 63) << 6
+                ) | (widen_u64(byte_at(in b, wrapping_add(i, 3))) & 63),
+                4
+            )
+        };
+        let _ = t.push_char(wrapping_u32(cp));
+        i = wrapping_add(i, n);
+    }
+    a.names.intern(in t).id()
+}
+
+fn intern_seq(inout a: Ast, in b: ChunkSeq[u8]) -> u32 {
+    intern_bytes(inout a, in b.as_slice(), 0, b.len())
+}
+
+// The walk's state.
+pub struct I {
+    // types: kind, name symbol, items ti[ta..ta+tn] (a Function's are
+    // effect rows fe_*[ta..ta+tn])
+    tk: ChunkSeq[u8],
+    tname: ChunkSeq[u32],
+    ta: ChunkSeq[u64],
+    tn: ChunkSeq[u64],
+    ti: ChunkSeq[u32],
+    fe_name: ChunkSeq[u32],
+    fe_arg: ChunkSeq[u32],
+    // the checker's types by span key (start << 32 | end), sorted
+    rec_key: ChunkSeq[u64],
+    rec_ty: ChunkSeq[u32],
+    // ADTs: name, generics gn[ga..ga+gc], field types fa..fa+fc of ti-like
+    // pool af
+    adt_name: ChunkSeq[u32],
+    adt_ga: ChunkSeq[u64],
+    adt_gc: ChunkSeq[u64],
+    adt_fa: ChunkSeq[u64],
+    adt_fc: ChunkSeq[u64],
+    gn: ChunkSeq[u32],
+    af: ChunkSeq[u32],
+    // functions: name, row profiles pr[pa..pa+pc]
+    fn_name: ChunkSeq[u32],
+    fn_pa: ChunkSeq[u64],
+    fn_pc: ChunkSeq[u64],
+    pr: ChunkSeq[u8],
+    // the report
+    out: ChunkSeq[u8],
+    // symbols
+    s_vec: u32,
+    s_mask: u32,
+    s_isa: u32,
+    s_tiled: u32,
+    s_chunk: u32,
+    s_slice: u32,
+    s_load_tile_vec_path: u32,
+    s_load_tile_vec: u32,
+}
+
+fn i_new(inout a: Ast) -> I {
+    let mut x = I {
+        tk: ChunkSeq::new[u8](),
+        tname: ChunkSeq::new[u32](),
+        ta: ChunkSeq::new[u64](),
+        tn: ChunkSeq::new[u64](),
+        ti: ChunkSeq::new[u32](),
+        fe_name: ChunkSeq::new[u32](),
+        fe_arg: ChunkSeq::new[u32](),
+        rec_key: ChunkSeq::new[u64](),
+        rec_ty: ChunkSeq::new[u32](),
+        adt_name: ChunkSeq::new[u32](),
+        adt_ga: ChunkSeq::new[u64](),
+        adt_gc: ChunkSeq::new[u64](),
+        adt_fa: ChunkSeq::new[u64](),
+        adt_fc: ChunkSeq::new[u64](),
+        gn: ChunkSeq::new[u32](),
+        af: ChunkSeq::new[u32](),
+        fn_name: ChunkSeq::new[u32](),
+        fn_pa: ChunkSeq::new[u64](),
+        fn_pc: ChunkSeq::new[u64](),
+        pr: ChunkSeq::new[u8](),
+        out: ChunkSeq::new[u8](),
+        s_vec: a.names.intern(in "Vec").id(),
+        s_mask: a.names.intern(in "Mask").id(),
+        s_isa: a.names.intern(in "Isa").id(),
+        s_tiled: a.names.intern(in "TiledSeq").id(),
+        s_chunk: a.names.intern(in "ChunkSeq").id(),
+        s_slice: a.names.intern(in "Slice").id(),
+        s_load_tile_vec_path: a.names.intern(in "TiledSeq::load_tile_vec").id(),
+        s_load_tile_vec: a.names.intern(in "load_tile_vec").id(),
+    };
+    // Type 0 is Other.
+    let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let other = x.ty(TK_OTHER, NONE, in none);
+    x
+}
+
+impl I {
+    fn ty(inout self, kind: u8, name: u32, in items: ChunkSeq[u32]) -> u32 {
+        let id = wrapping_u32(self.tk.len());
+        self.tk.push(kind);
+        self.tname.push(name);
+        self.ta.push(self.ti.len());
+        self.tn.push(items.len());
+        for i in 0..items.len() {
+            self.ti.push(u32_at(in items, i));
+        }
+        id
+    }
+
+    fn kind(in self, t: u32) -> u8 {
+        if t == NO_TY {
+            return TK_OTHER;
+        }
+        u8_at(in self.tk, w64(t))
+    }
+
+    fn name(in self, t: u32) -> u32 {
+        if t == NO_TY {
+            return NONE;
+        }
+        u32_at(in self.tname, w64(t))
+    }
+
+    fn count(in self, t: u32) -> u64 {
+        if t == NO_TY {
+            return 0;
+        }
+        u64_at(in self.tn, w64(t))
+    }
+
+    fn item(in self, t: u32, i: u64) -> u32 {
+        if i >= self.count(t) {
+            return NO_TY;
+        }
+        u32_at(in self.ti, wrapping_add(u64_at(in self.ta, w64(t)), i))
+    }
+
+    fn recorded(in self, start: u32, end: u32) -> u32 {
+        let k = (w64(start) << 32) | w64(end);
+        let mut lo: u64 = 0;
+        let mut hi = self.rec_key.len();
+        loop {
+            if lo >= hi {
+                return 0;
+            }
+            let mid = wrapping_add(lo, hi) >> 1;
+            let x = u64_at(in self.rec_key, mid);
+            if x == k {
+                return u32_at(in self.rec_ty, mid);
+            }
+            if x < k {
+                lo = wrapping_add(mid, 1);
+            } else {
+                hi = mid;
+            }
+        }
+    }
+
+    // The function named `n`: its index + 1, or 0.
+    fn function(in self, n: u32) -> u64 {
+        for i in 0..self.fn_name.len() {
+            if u32_at(in self.fn_name, i) == n {
+                return wrapping_add(i, 1);
+            }
+        }
+        0
+    }
+
+    fn adt(in self, n: u32) -> u64 {
+        // A later entry with the same name replaces an earlier one.
+        let mut found: u64 = 0;
+        for i in 0..self.adt_name.len() {
+            if u32_at(in self.adt_name, i) == n {
+                found = wrapping_add(i, 1);
+            }
+        }
+        found
+    }
+}
+
+// ------------------------------------------------------------------ input
+
+struct Rd {
+    pos: u64,
+}
+
+impl Rd {
+    fn word(inout self, in b: Slice[u8]) -> u64 {
+        let x = match b.try_read_u64_le(self.pos) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        self.pos = wrapping_add(self.pos, 8);
+        x
+    }
+
+    // A string: its length, then its bytes padded to whole words.
+    fn text(inout self, inout a: Ast, in b: Slice[u8]) -> u32 {
+        let n = self.word(in b);
+        let s = self.pos;
+        self.pos = wrapping_add(s, wrapping_mul(wrapping_add(n, 7) >> 3, 8));
+        intern_bytes(inout a, in b, s, wrapping_add(s, n))
+    }
+}
+
+fn read_ty(inout r: Rd, in b: Slice[u8], inout a: Ast, inout x: I) -> u32 {
+    let k = r.word(in b);
+    let mut items: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    if k == 1 {
+        let name = r.text(inout a, in b);
+        let n = r.word(in b);
+        for i in 0..n {
+            items.push(read_ty(inout r, in b, inout a, inout x));
+        }
+        return x.ty(TK_NAMED, name, in items);
+    }
+    if k == 2 {
+        let n = r.word(in b);
+        for i in 0..n {
+            items.push(read_ty(inout r, in b, inout a, inout x));
+        }
+        return x.ty(TK_TUPLE, NONE, in items);
+    }
+    if k == 3 {
+        // A function type: its effect row.
+        let n = r.word(in b);
+        let mut names: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in 0..n {
+            names.push(r.text(inout a, in b));
+            let na = r.word(in b);
+            let mut one = NO_TY;
+            for j in 0..na {
+                let t = read_ty(inout r, in b, inout a, inout x);
+                if na == 1 {
+                    one = t;
+                }
+            }
+            args.push(one);
+        }
+        let id = wrapping_u32(x.tk.len());
+        x.tk.push(TK_FN);
+        x.tname.push(NONE);
+        x.ta.push(x.fe_name.len());
+        x.tn.push(n);
+        for i in 0..n {
+            x.fe_name.push(u32_at(in names, i));
+            x.fe_arg.push(u32_at(in args, i));
+        }
+        return id;
+    }
+    0
+}
+
+// ------------------------------------------------------------------ rules
+
+fn profile_of_sym(in a: Ast, s: u32) -> u8 {
+    if sym_is(in a, s, in "Baseline128") {
+        1
+    } else if sym_is(in a, s, in "Avx2") {
+        2
+    } else if sym_is(in a, s, in "Avx512") {
+        3
+    } else if sym_is(in a, s, in "Sve2") {
+        4
+    } else if sym_is(in a, s, in "Rvv1") {
+        5
+    } else {
+        0
+    }
+}
+
+fn profile_name(p: u8, inout o: ChunkSeq[u8]) {
+    let s = if p == 1 {
+        "Baseline128"
+    } else if p == 2 {
+        "Avx2"
+    } else if p == 3 {
+        "Avx512"
+    } else if p == 4 {
+        "Sve2"
+    } else {
+        "Rvv1"
+    };
+    o.extend(in s.as_bytes());
+}
+
+// `Profile::le`: `p ⊑ q`.
+fn profile_le(p: u8, q: u8) -> bool {
+    p == q || p == P_BASE || (p == P_AVX2 && q == P_AVX512)
+}
+
+fn fixed_bits(p: u8) -> u64 {
+    if p == P_AVX2 {
+        256
+    } else if p == P_AVX512 {
+        512
+    } else {
+        128
+    }
+}
+
+// The profile of an `Isa[P]` effect: its argument a Named type with no
+// arguments that names a profile.
+fn effect_profile(in a: Ast, in x: I, name: u32, arg: u32) -> u8 {
+    if name != x.s_isa || arg == NO_TY || x.kind(arg) != TK_NAMED || x.count(arg) != 0 {
+        return 0;
+    }
+    profile_of_sym(in a, x.name(arg))
+}
+
+// `row_profiles` of a Function type.
+fn fn_type_profiles(in a: Ast, in x: I, t: u32, inout out: ChunkSeq[u8]) -> bool {
+    if x.kind(t) != TK_FN {
+        return false;
+    }
+    let s = u64_at(in x.ta, w64(t));
+    for i in 0..x.count(t) {
+        let k = wrapping_add(s, i);
+        let p = effect_profile(in a, in x, u32_at(in x.fe_name, k), u32_at(in x.fe_arg, k));
+        if p != 0 {
+            out.push(p);
+        }
+    }
+    true
+}
+
+// `row_profiles` of an AST effect row (a closure's).
+fn ast_row_profiles(in a: Ast, effects: u32, inout out: ChunkSeq[u8]) {
+    if effects == NONE {
+        return;
+    }
+    let es = effects_at(in a, effects);
+    for i in 0..list_len(in a, es.instances) {
+        let e = effect_at(in a, list_at(in a, es.instances, i));
+        if e.name == NONE || !sym_is(in a, e.name, in "Isa") || list_len(in a, e.args) != 1 {
+            continue;
+        }
+        let t = type_at(in a, list_at(in a, e.args, 0));
+        if t.kind != AT_NAMED || list_len(in a, t.b) != 0 {
+            continue;
+        }
+        let p = profile_of_sym(in a, t.a);
+        if p != 0 {
+            out.push(p);
+        }
+    }
+}
+
+// The lane bits of an element type name (`Elem::from_name`), 0 if none.
+fn elem_bits_of(in a: Ast, s: u32) -> u64 {
+    if sym_is(in a, s, in "u8") {
+        8
+    } else if sym_is(in a, s, in "u32") || sym_is(in a, s, in "f32") {
+        32
+    } else if sym_is(in a, s, in "u64") || sym_is(in a, s, in "i64") || sym_is(in a, s, in "f64") {
+        64
+    } else {
+        0
+    }
+}
+
+// A lane count: `u16`'s parse of the name's text, `strict` for
+// `is_lane_count` (digits only, no sign). NONE when not one.
+fn lane_count(in a: Ast, s: u32, strict: bool) -> u64 {
+    let mut t: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    sym_text(in a, s, inout t);
+    let mut i: u64 = 0;
+    if !strict && u8_at(in t, 0) == 43 {
+        i = 1;
+    }
+    if i >= t.len() {
+        return 4294967295;
+    }
+    let mut v: u64 = 0;
+    loop {
+        if i >= t.len() {
+            break;
+        }
+        let c = u8_at(in t, i);
+        if c < 48 || c > 57 {
+            return 4294967295;
+        }
+        v = wrapping_add(wrapping_mul(v, 10), wrapping_sub(widen_u64(c), 48));
+        if v > 65535 {
+            return 4294967295;
+        }
+        i = wrapping_add(i, 1);
+    }
+    v
+}
+
+// A shape's bits (`Shape::new`): 0 unless 128, 256 or 512.
+fn shape_bits(elem: u64, lanes: u64) -> u64 {
+    if elem == 0 || lanes == 4294967295 {
+        return 0;
+    }
+    let bits = wrapping_mul(elem, lanes);
+    if bits == 128 || bits == 256 || bits == 512 {
+        bits
+    } else {
+        0
+    }
+}
+
+// `shape_of`: the bits of a valid vector or mask type, 0 if not one.
+fn shape_of(in a: Ast, in x: I, t: u32) -> u64 {
+    if x.kind(t) != TK_NAMED {
+        return 0;
+    }
+    let n = x.name(t);
+    if n != x.s_vec && n != x.s_mask {
+        return 0;
+    }
+    if x.count(t) != 2 {
+        return 0;
+    }
+    let elem = x.item(t, 0);
+    let count = x.item(t, 1);
+    if x.kind(count) != TK_NAMED || x.count(count) != 0 {
+        return 0;
+    }
+    let lanes = lane_count(in a, x.name(count), true);
+    if x.kind(elem) != TK_NAMED || x.count(elem) != 0 {
+        return 0;
+    }
+    shape_bits(elem_bits_of(in a, x.name(elem)), lanes)
+}
+
+// `explicit_shape` of explicit type arguments `[T, N]` (AST types).
+fn explicit_shape(in a: Ast, types: u32) -> u64 {
+    if list_len(in a, types) != 2 {
+        return 0;
+    }
+    let elem = type_at(in a, list_at(in a, types, 0));
+    let n = type_at(in a, list_at(in a, types, 1));
+    if n.kind != AT_NAMED {
+        return 0;
+    }
+    if elem.kind != AT_NAMED || list_len(in a, elem.b) != 0 {
+        return 0;
+    }
+    shape_bits(elem_bits_of(in a, elem.a), lane_count(in a, n.a, false))
+}
+
+fn required_profile(bits: u64) -> u8 {
+    if bits == 128 {
+        P_BASE
+    } else if bits == 256 {
+        P_AVX2
+    } else {
+        P_AVX512
+    }
+}
+
+// `Intrinsic::lookup`, in the classes the walk distinguishes.
+fn intrinsic(in a: Ast, n: u32) -> u8 {
+    let mut t: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    sym_text(in a, n, inout t);
+    // Split at the first `::`.
+    let mut at: u64 = 0;
+    let mut found = false;
+    loop {
+        if wrapping_add(at, 1) >= t.len() {
+            break;
+        }
+        if u8_at(in t, at) == 58 && u8_at(in t, wrapping_add(at, 1)) == 58 {
+            found = true;
+            break;
+        }
+        at = wrapping_add(at, 1);
+    }
+    if !found {
+        return 0;
+    }
+    let o = wrapping_add(at, 2);
+    let n = t.len();
+    let is_vec = range_is(in t, 0, at, in "Vec");
+    let is_mask = range_is(in t, 0, at, in "Mask");
+    let is_isa = range_is(in t, 0, at, in "Isa");
+    if is_vec {
+        if range_is(in t, o, n, in "load") {
+            return I_LOAD;
+        }
+        if range_is(in t, o, n, in "store") {
+            return I_STORE;
+        }
+        if range_is(in t, o, n, in "store_masked") {
+            return I_STORE_MASKED;
+        }
+        if range_is(in t, o, n, in "load_masked") {
+            return I_LOAD_MASKED;
+        }
+        if range_is(in t, o, n, in "to_bits")
+            || range_is(in t, o, n, in "from_bits")
+            || range_is(in t, o, n, in "widen_f64")
+            || range_is(in t, o, n, in "nearest_f32") {
+            return I_CONVERT;
+        }
+        if range_is(in t, o, n, in "extract") {
+            return I_EXTRACT;
+        }
+        if range_is(in t, o, n, in "replace") {
+            return I_REPLACE;
+        }
+        if range_is(in t, o, n, in "shuffle") {
+            return I_SHUFFLE;
+        }
+        let others = "splat from add sub mul div min max and or xor saturating_add saturating_sub not sqrt abs neg mul_add shl shr eq ne lt le gt ge select reduce_add reduce_xor reduce_or reduce_and reduce_min reduce_max";
+        if word_in(in t, o, n, in others) {
+            return I_OTHER;
+        }
+        return I_UNKNOWN;
+    }
+    if is_mask {
+        let others = "and or xor not count bitmask any all in_bounds active";
+        if word_in(in t, o, n, in others) {
+            return I_OTHER;
+        }
+        return I_UNKNOWN;
+    }
+    if is_isa {
+        if range_is(in t, o, n, in "supported") {
+            return I_ISA;
+        }
+        return I_UNKNOWN;
+    }
+    0
+}
+
+// Whether `b[s..e]` is `text`.
+fn range_is(in b: ChunkSeq[u8], s: u64, e: u64, in text: Str) -> bool {
+    let t = text.as_bytes();
+    if wrapping_sub(e, s) != t.len() {
+        return false;
+    }
+    for i in 0..t.len() {
+        if u8_at(in b, wrapping_add(s, i)) != byte_at(in t, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether `b[s..e]` is one of the space-separated words of `list`.
+fn word_in(in b: ChunkSeq[u8], s: u64, e: u64, in list: Str) -> bool {
+    let l = list.as_bytes();
+    let n = wrapping_sub(e, s);
+    let mut w: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i > l.len() {
+            break;
+        }
+        if i == l.len() || byte_at(in l, i) == 32 {
+            if wrapping_sub(i, w) == n {
+                let mut same = true;
+                for k in 0..n {
+                    if u8_at(in b, wrapping_add(s, k)) != byte_at(in l, wrapping_add(w, k)) {
+                        same = false;
+                        break;
+                    }
+                }
+                if same {
+                    return true;
+                }
+            }
+            w = wrapping_add(i, 1);
+        }
+        i = wrapping_add(i, 1);
+    }
+    false
+}
+
+fn is_seq_or_slice(in x: I, t: u32) -> bool {
+    x.kind(t) == TK_NAMED && x.count(t) == 1 && (x.name(t) == x.s_chunk || x.name(t) == x.s_slice)
+}
+
+fn is_tiled_seq(in x: I, t: u32) -> bool {
+    x.kind(t) == TK_NAMED && x.name(t) == x.s_tiled && (x.count(t) == 1 || x.count(t) == 2)
+}
+
+// A literal lane index (`u16::try_from` of an integer literal).
+fn is_lane_literal(in a: Ast, e: u32) -> bool {
+    let n = expr_at(in a, e);
+    if n.kind != E_LITERAL {
+        return false;
+    }
+    let l = lit_at(in a, n.a);
+    if l.kind != 1 || l.hi != 0 || l.bits > 65535 {
+        return false;
+    }
+    ! l.neg || l.bits == 0
+}
+
+// `VectorOp::resolve(..).shape()`: the operation's shape bits, 0 for none.
+fn op_shape(in a: Ast, inout x: I, intr: u8, types: u32, args: u32, result: u32) -> u64 {
+    let nargs = list_len(in a, args);
+    let first = if nargs > 0 {
+        arg_type(in a, in x, args, 0)
+    } else {
+        NO_TY
+    };
+    // `SliceIo::resolve`.
+    let applies = intr == I_LOAD
+        || intr == I_STORE
+        || intr == I_STORE_MASKED
+        || (intr == I_LOAD_MASKED && first != NO_TY && is_seq_or_slice(in x, first));
+    if applies {
+        let store = intr == I_STORE || intr == I_STORE_MASKED;
+        let s = if store {
+            if nargs > 2 {
+                shape_of(in a, in x, arg_type(in a, in x, args, 2))
+            } else {
+                0
+            }
+        } else {
+            let r = shape_of(in a, in x, result);
+            if r != 0 {
+                r
+            } else {
+                explicit_shape(in a, types)
+            }
+        };
+        if s != 0 {
+            return s;
+        }
+    }
+    let operand = if first == NO_TY {
+        0
+    } else {
+        shape_of(in a, in x, first)
+    };
+    let shape = if intr == I_CONVERT {
+        operand
+    } else {
+        let r = shape_of(in a, in x, result);
+        if r != 0 {
+            r
+        } else if operand != 0 {
+            operand
+        } else {
+            explicit_shape(in a, types)
+        }
+    };
+    if shape == 0 {
+        return 0;
+    }
+    // Literal lane indices.
+    let (lo, hi): (u64, u64) = if intr == I_EXTRACT || intr == I_REPLACE {
+        (1, 2)
+    } else if intr == I_SHUFFLE {
+        (
+            1,
+            if nargs > 1 {
+                nargs
+            } else {
+                1
+            }
+        )
+    } else {
+        (0, 0)
+    };
+    for i in lo..hi {
+        if !is_lane_literal(in a, arg_at(in a, list_at(in a, args, i)).expr) {
+            return 0;
+        }
+    }
+    shape
+}
+
+fn arg_type(in a: Ast, in x: I, args: u32, i: u64) -> u32 {
+    let e = arg_at(in a, list_at(in a, args, i)).expr;
+    expr_type(in a, in x, e)
+}
+
+fn expr_type(in a: Ast, in x: I, e: u32) -> u32 {
+    let n = expr_at(in a, e);
+    x.recorded(n.start, n.end)
+}
+
+// `substitute` of `t` with the ADT's generics `g` bound to `args` (of the
+// type `owner`); only Named and Tuple types are rebuilt.
+fn subst(inout x: I, t: u32, adt: u64, owner: u32) -> u32 {
+    let k = x.kind(t);
+    if k == TK_NAMED {
+        let n = x.name(t);
+        let c = x.count(t);
+        if c == 0 {
+            let ga = u64_at(in x.adt_ga, adt);
+            let gc = u64_at(in x.adt_gc, adt);
+            // The last generic of that name wins, as a map collect does;
+            // only generics with an argument bind.
+            let mut found = NO_TY;
+            let bound = if gc < x.count(owner) {
+                gc
+            } else {
+                x.count(owner)
+            };
+            for i in 0..bound {
+                if u32_at(in x.gn, wrapping_add(ga, i)) == n {
+                    found = x.item(owner, i);
+                }
+            }
+            if found != NO_TY {
+                return found;
+            }
+            return t;
+        }
+        let mut items: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in 0..c {
+            let it = x.item(t, i);
+            items.push(subst(inout x, it, adt, owner));
+        }
+        return x.ty(TK_NAMED, n, in items);
+    }
+    if k == TK_TUPLE {
+        let mut items: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in 0..x.count(t) {
+            let it = x.item(t, i);
+            items.push(subst(inout x, it, adt, owner));
+        }
+        return x.ty(TK_TUPLE, NONE, in items);
+    }
+    t
+}
+
+// `contains_vector`.
+fn contains_vector(in a: Ast, inout x: I, t: u32, depth: u64) -> bool {
+    if depth > 32 {
+        return false;
+    }
+    if shape_of(in a, in x, t) != 0 {
+        return true;
+    }
+    let k = x.kind(t);
+    if k == TK_TUPLE {
+        for i in 0..x.count(t) {
+            let it = x.item(t, i);
+            if contains_vector(in a, inout x, it, wrapping_add(depth, 1)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if k == TK_NAMED {
+        let d = x.adt(x.name(t));
+        if d == 0 {
+            return false;
+        }
+        let adt = wrapping_sub(d, 1);
+        let fa = u64_at(in x.adt_fa, adt);
+        let fc = u64_at(in x.adt_fc, adt);
+        for i in 0..fc {
+            let f = u32_at(in x.af, wrapping_add(fa, i));
+            let s = subst(inout x, f, adt, t);
+            if contains_vector(in a, inout x, s, wrapping_add(depth, 1)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// ------------------------------------------------------------------ report
+
+fn diag_head(inout x: I, in code: Str, start: u32, end: u32) {
+    x.out.extend(in code.as_bytes());
+    x.out.push(32);
+    push_decimal(inout x.out, w64(start));
+    x.out.extend(in "..".as_bytes());
+    push_decimal(inout x.out, w64(end));
+    x.out.push(32);
+}
+
+// `IsaWalker::require`; `what` is the message's subject.
+fn require(
+    inout x: I,
+    needed: u8,
+    in available: ChunkSeq[u8],
+    in what: ChunkSeq[u8],
+    start: u32,
+    end: u32
+) {
+    for i in 0..available.len() {
+        if profile_le(needed, u8_at(in available, i)) {
+            return;
+        }
+    }
+    diag_head(inout x, in "E1403", start, end);
+    x.out.extend(in what.as_slice());
+    x.out.extend(in " requires 'eff [Isa[".as_bytes());
+    profile_name(needed, inout x.out);
+    x.out.extend(in "]]'".as_bytes());
+    if available.len() > 0 {
+        x.out.extend(in "; only ".as_bytes());
+        for i in 0..available.len() {
+            if i > 0 {
+                x.out.extend(in ", ".as_bytes());
+            }
+            x.out.extend(in "Isa[".as_bytes());
+            profile_name(u8_at(in available, i), inout x.out);
+            x.out.push(93);
+        }
+        x.out.extend(in " is available here".as_bytes());
+    }
+    x.out.extend(in " | add Isa[".as_bytes());
+    profile_name(needed, inout x.out);
+    x
+        .out
+        .extend(
+            in "] to the function's effect row, or call it from the checked dispatch `if Isa::supported["
+                .as_bytes()
+        );
+    profile_name(needed, inout x.out);
+    x.out.extend(in "]() { ... }`\n".as_bytes());
+}
+
+// `IsaWalker::vector_width`.
+fn vector_width(
+    inout x: I,
+    bits: u64,
+    in available: ChunkSeq[u8],
+    in name: ChunkSeq[u8],
+    start: u32,
+    end: u32
+) {
+    for i in 0..available.len() {
+        if fixed_bits(u8_at(in available, i)) >= bits {
+            return;
+        }
+    }
+    let mut what: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    what.push(39);
+    what.extend(in name.as_slice());
+    what.extend(in "' on ".as_bytes());
+    push_decimal(inout what, bits);
+    what.extend(in "-bit vectors".as_bytes());
+    require(inout x, required_profile(bits), in available, in what, start, end);
+}
+
+fn require_profiles(
+    inout x: I,
+    in profiles: ChunkSeq[u8],
+    in available: ChunkSeq[u8],
+    in what: ChunkSeq[u8],
+    start: u32,
+    end: u32
+) {
+    for i in 0..profiles.len() {
+        require(inout x, u8_at(in profiles, i), in available, in what, start, end);
+    }
+}
+
+fn fn_profiles(in x: I, f: u64, inout out: ChunkSeq[u8]) {
+    let pa = u64_at(in x.fn_pa, f);
+    for i in 0..u64_at(in x.fn_pc, f) {
+        out.push(u8_at(in x.pr, wrapping_add(pa, i)));
+    }
+}
+
+fn calling(in a: Ast, n: u32) -> ChunkSeq[u8] {
+    let mut what: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    what.extend(in "calling '".as_bytes());
+    sym_text(in a, n, inout what);
+    what.push(39);
+    what
+}
+
+// `load_tile_vec`'s explicit profile and result width.
+fn load_tile_vec(in a: Ast, inout x: I, p: u8, e: ExprNode, in available: ChunkSeq[u8]) {
+    if p != 0 {
+        let mut what: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        what.extend(in "calling 'load_tile_vec[".as_bytes());
+        profile_name(p, inout what);
+        what.extend(in ", ...]'".as_bytes());
+        require(inout x, p, in available, in what, e.start, e.end);
+    }
+    let bits = shape_of(in a, in x, x.recorded(e.start, e.end));
+    if bits != 0 {
+        let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        name.extend(in "load_tile_vec".as_bytes());
+        vector_width(inout x, bits, in available, in name, e.start, e.end);
+    }
+}
+
+// The profile a type argument names when it is a Named type with no
+// arguments.
+fn type_arg_profile(in a: Ast, types: u32, i: u64) -> u8 {
+    let t = type_at(in a, list_at(in a, types, i));
+    if t.kind != AT_NAMED || list_len(in a, t.b) != 0 {
+        return 0;
+    }
+    profile_of_sym(in a, t.a)
+}
+
+fn is_comparison(in a: Ast, op: u32) -> bool {
+    sym_is(in a, op, in "==")
+        || sym_is(in a, op, in "!=")
+        || sym_is(in a, op, in "<")
+        || sym_is(in a, op, in "<=")
+        || sym_is(in a, op, in ">")
+        || sym_is(in a, op, in ">=")
+}
+
+// `IsaWalker::expr`.
+fn expr(inout a: Ast, inout x: I, id: u32, in available: ChunkSeq[u8]) {
+    if id == NONE {
+        return;
+    }
+    let e = expr_at(in a, id);
+    let k = e.kind;
+    if k == E_IF {
+        expr(inout a, inout x, e.a, in available);
+        let mut granted = copy_u8(in available);
+        let c = expr_at(in a, e.a);
+        if c.kind == E_CALL {
+            let callee = expr_at(in a, c.a);
+            if callee.kind == E_NAME
+                && intrinsic(in a, callee.a) == I_ISA
+                && list_len(in a, c.b) == 1 {
+                let t = type_at(in a, list_at(in a, c.b, 0));
+                if t.kind == AT_NAMED {
+                    let p = profile_of_sym(in a, t.a);
+                    if p != 0 {
+                        granted.push(p);
+                    }
+                }
+            }
+        }
+        expr(inout a, inout x, e.b, in granted);
+        expr(inout a, inout x, e.c, in available);
+    } else if k == E_CALL {
+        let callee = expr_at(in a, e.a);
+        if callee.kind == E_NAME {
+            let n = callee.a;
+            let intr = intrinsic(in a, n);
+            let f = x.function(n);
+            if intr != 0 && intr != I_UNKNOWN && f == 0 {
+                if intr != I_ISA {
+                    let result = x.recorded(e.start, e.end);
+                    let bits = op_shape(in a, inout x, intr, e.b, e.c, result);
+                    if bits != 0 {
+                        let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                        sym_text(in a, n, inout name);
+                        vector_width(inout x, bits, in available, in name, e.start, e.end);
+                        let r = shape_of(in a, in x, result);
+                        if r != 0 && r > bits {
+                            vector_width(inout x, r, in available, in name, e.start, e.end);
+                        }
+                    }
+                }
+            } else if n == x.s_load_tile_vec_path {
+                let nt = list_len(in a, e.b);
+                let p = if nt == 3 {
+                    type_arg_profile(in a, e.b, 1)
+                } else if nt == 2 {
+                    type_arg_profile(in a, e.b, 0)
+                } else {
+                    0
+                };
+                load_tile_vec(in a, inout x, p, e, in available);
+            } else if f != 0 {
+                let mut ps: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                fn_profiles(in x, wrapping_sub(f, 1), inout ps);
+                let what = calling(in a, n);
+                require_profiles(inout x, in ps, in available, in what, e.start, e.end);
+            } else {
+                let t = x.recorded(callee.start, callee.end);
+                let mut ps: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                if fn_type_profiles(in a, in x, t, inout ps) {
+                    let what = calling(in a, n);
+                    require_profiles(inout x, in ps, in available, in what, e.start, e.end);
+                }
+            }
+        } else {
+            if callee.kind == E_FIELD {
+                let base_ty = x
+                    .recorded(expr_at(in a, callee.a).start, expr_at(in a, callee.a).end);
+                if callee.b == x.s_load_tile_vec && is_tiled_seq(in x, base_ty) {
+                    let p = if list_len(in a, e.b) == 2 {
+                        type_arg_profile(in a, e.b, 0)
+                    } else {
+                        0
+                    };
+                    load_tile_vec(in a, inout x, p, e, in available);
+                } else {
+                    let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                    if x.kind(base_ty) == TK_NAMED {
+                        sym_text(in a, x.name(base_ty), inout name);
+                    }
+                    name.extend(in "::".as_bytes());
+                    sym_text(in a, callee.b, inout name);
+                    let s = intern_seq(inout a, in name);
+                    let f = x.function(s);
+                    if f != 0 {
+                        let mut ps: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                        fn_profiles(in x, wrapping_sub(f, 1), inout ps);
+                        let what = calling(in a, s);
+                        require_profiles(inout x, in ps, in available, in what, e.start, e.end);
+                    }
+                }
+            }
+            let t = x.recorded(callee.start, callee.end);
+            let mut ps: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            if fn_type_profiles(in a, in x, t, inout ps) {
+                let mut what: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                what.extend(in "calling this function value".as_bytes());
+                require_profiles(inout x, in ps, in available, in what, e.start, e.end);
+            }
+            expr(inout a, inout x, e.a, in available);
+        }
+        for i in 0..list_len(in a, e.c) {
+            let arg = arg_at(in a, list_at(in a, e.c, i)).expr;
+            expr(inout a, inout x, arg, in available);
+        }
+    } else if k == E_LOOP {
+        expr(inout a, inout x, e.a, in available);
+    } else if k == E_FOR {
+        expr(inout a, inout x, e.b, in available);
+        expr(inout a, inout x, e.c, in available);
+    } else if k == E_RANGE {
+        expr(inout a, inout x, e.a, in available);
+        expr(inout a, inout x, e.b, in available);
+    } else if k == E_BREAK || k == E_RETURN {
+        expr(inout a, inout x, e.a, in available);
+    } else if k == E_CLOSURE {
+        // A closure may run outside this scope: only its own row grants
+        // it a profile.
+        let mut own: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        ast_row_profiles(in a, e.d, inout own);
+        expr(inout a, inout x, e.e, in own);
+    } else if k == E_HANDLE {
+        if e.b != NONE {
+            expr(inout a, inout x, e.c, in available);
+        }
+        expr(inout a, inout x, e.d, in available);
+        for i in 0..list_len(in a, e.e) {
+            let body = clause_at(in a, list_at(in a, e.e, i)).body;
+            expr(inout a, inout x, body, in available);
+        }
+    } else if k == E_TUPLE {
+        for i in 0..list_len(in a, e.a) {
+            let c = list_at(in a, e.a, i);
+            expr(inout a, inout x, c, in available);
+        }
+    } else if k == E_STRUCT {
+        for i in 0..(list_len(in a, e.b) >> 1) {
+            let c = list_at(in a, e.b, wrapping_add(i << 1, 1));
+            expr(inout a, inout x, c, in available);
+        }
+    } else if k == E_BLOCK {
+        for i in 0..list_len(in a, e.a) {
+            let v = stmt_at(in a, list_at(in a, e.a, i)).value;
+            expr(inout a, inout x, v, in available);
+        }
+        expr(inout a, inout x, e.b, in available);
+    } else if k == E_FIELD || k == E_TRY {
+        expr(inout a, inout x, e.a, in available);
+    } else if k == E_UNARY {
+        expr(inout a, inout x, e.b, in available);
+    } else if k == E_BINARY
+        && is_comparison(in a, e.a)
+        && contains_vector(in a, inout x, expr_type(in a, in x, e.b), 0) {
+        // Aggregate equality would compare lane bits, not values (-0.0
+        // and NaN): lanes are compared with Vec::eq and friends.
+        diag_head(inout x, in "E1402", e.start, e.end);
+        x.out.push(39);
+        sym_text(in a, e.a, inout x.out);
+        x
+            .out
+            .extend(
+                in "' is not defined on vector and mask values | compare lanes with Vec::eq, Vec::ne, Vec::lt, ... and reduce the mask with Mask::all or Mask::any\n"
+                    .as_bytes()
+            );
+    } else if k == E_INDEX {
+        expr(inout a, inout x, e.a, in available);
+        expr(inout a, inout x, e.b, in available);
+    } else if k == E_BINARY || k == E_ASSIGN {
+        expr(inout a, inout x, e.b, in available);
+        expr(inout a, inout x, e.c, in available);
+    } else if k == E_MATCH {
+        expr(inout a, inout x, e.a, in available);
+        for i in 0..(list_len(in a, e.b) >> 1) {
+            let c = list_at(in a, e.b, wrapping_add(i << 1, 1));
+            expr(inout a, inout x, c, in available);
+        }
+    }
+}
+
+fn copy_u8(in s: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    o.extend(in s.as_slice());
+    o
+}
+
+// The body expression whose span is `start..end`, among the tree's
+// functions; NONE when none.
+fn body_at(in a: Ast, start: u64, end: u64) -> u32 {
+    for i in 0..a.fns.len() {
+        let f = fn_at(in a, wrapping_u32(i));
+        if f.body == NONE {
+            continue;
+        }
+        let b = expr_at(in a, f.body);
+        if w64(b.start) == start && w64(b.end) == end {
+            return f.body;
+        }
+    }
+    NONE
+}
+
+// `vector::check_world` on the input's world and `source`'s tree: one
+// line per diagnostic (`code start..end message | help`), or `missing
+// <function>` for a function whose body the tree lacks.
+pub fn isa_text(in input: Str, in source: Str) -> ChunkSeq[u8] {
+    let b = input.as_bytes();
+    let l = lower_source(in source);
+    let mut a = l.ast;
+    let mut x = i_new(inout a);
+    let mut r = Rd {
+        pos: 0
+    };
+    // ADTs.
+    let na = r.word(in b);
+    let mut spans: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..na {
+        let name = r.text(inout a, in b);
+        spans.push(r.word(in b));
+        spans.push(r.word(in b));
+        x.adt_name.push(name);
+        x.adt_ga.push(x.gn.len());
+        let ng = r.word(in b);
+        x.adt_gc.push(ng);
+        for j in 0..ng {
+            let g = r.text(inout a, in b);
+            x.gn.push(g);
+        }
+        let nf = r.word(in b);
+        let mut fs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for j in 0..nf {
+            fs.push(read_ty(inout r, in b, inout a, inout x));
+        }
+        x.adt_fa.push(x.af.len());
+        x.adt_fc.push(nf);
+        for j in 0..nf {
+            x.af.push(u32_at(in fs, j));
+        }
+    }
+    // Functions.
+    let nf = r.word(in b);
+    let mut bodies: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..nf {
+        let name = r.text(inout a, in b);
+        x.fn_name.push(name);
+        x.fn_pa.push(x.pr.len());
+        let ne = r.word(in b);
+        let mut count: u64 = 0;
+        for j in 0..ne {
+            let en = r.text(inout a, in b);
+            let nargs = r.word(in b);
+            let mut one = NO_TY;
+            for q in 0..nargs {
+                let t = read_ty(inout r, in b, inout a, inout x);
+                if nargs == 1 {
+                    one = t;
+                }
+            }
+            let p = effect_profile(in a, in x, en, one);
+            if p != 0 {
+                x.pr.push(p);
+                count = wrapping_add(count, 1);
+            }
+        }
+        x.fn_pc.push(count);
+        let has = r.word(in b);
+        let s = r.word(in b);
+        let e = r.word(in b);
+        bodies.push(has);
+        bodies.push(s);
+        bodies.push(e);
+    }
+    // The checker's expression types, sorted by span.
+    let nt = r.word(in b);
+    for i in 0..nt {
+        let s = r.word(in b);
+        let e = r.word(in b);
+        let t = read_ty(inout r, in b, inout a, inout x);
+        x.rec_key.push((s << 32) | e);
+        x.rec_ty.push(t);
+    }
+    for i in 0..na {
+        let n = u32_at(in x.adt_name, i);
+        if (n == x.s_vec || n == x.s_mask) && u64_at(in x.adt_gc, i) == 2 {
+            let s = wrapping_u32(u64_at(in spans, wrapping_mul(i, 2)));
+            let e = wrapping_u32(u64_at(in spans, wrapping_add(wrapping_mul(i, 2), 1)));
+            diag_head(inout x, in "E1401", s, e);
+            x.out.push(39);
+            sym_text(in a, n, inout x.out);
+            x.out.extend(in "' with two parameters is reserved for vector types\n".as_bytes());
+        }
+    }
+    for i in 0..nf {
+        if u64_at(in bodies, wrapping_mul(i, 3)) == 0 {
+            continue;
+        }
+        let s = u64_at(in bodies, wrapping_add(wrapping_mul(i, 3), 1));
+        let e = u64_at(in bodies, wrapping_add(wrapping_mul(i, 3), 2));
+        let body = body_at(in a, s, e);
+        if body == NONE {
+            x.out.extend(in "missing ".as_bytes());
+            sym_text(in a, u32_at(in x.fn_name, i), inout x.out);
+            x.out.push(10);
+            continue;
+        }
+        let mut available: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        fn_profiles(in x, i, inout available);
+        expr(inout a, inout x, body, in available);
+    }
+    x.out
+}
