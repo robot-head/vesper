@@ -19,6 +19,18 @@ The native lanes run only host-specific coverage:
   link Vesper-compiled Mach-O or COFF objects into Rust, so they depend on the
   host's object format and calling convention.
 
+The codegen swap point tests (`vesper-codegen-swap-test`, every fourth
+corpus world on these hosts) build with the `port-compiler` Cargo profile:
+release optimizations with debug assertions and overflow checks kept on.
+Nearly all of their time is the compiler compiling corpus worlds. Built for
+debug they took about 55 minutes of a 60 minute macOS job and 35-61 minutes
+on Windows (November 2026). On a 4-core Linux machine,
+`self_host_codegen_seq` ran in 97 s optimized against 319 s for debug, and
+`self_host_codegen_calls_emit` in 100 s against 347 s; building the
+optimized test binaries from scratch took 7 minutes there against 4 for
+debug. The other steps still use the debug compiler, and Linux still runs
+every world unoptimized under Bazel.
+
 The rest of the port harness, every ported crate's tests against both builds
 and its divergence checks, is platform-neutral once the ABI tier passes. It
 runs once, in the `Vesper ports (Linux n/9)` jobs of the same workflow, on

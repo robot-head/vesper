@@ -181,6 +181,7 @@ unsafe extern "C" {
     fn vesper_kinetic_morton_spread(v: i64) -> i64;
     fn vesper_kinetic_multi_colorer_color(bodies: *mut u64, offs: *mut u64, capacity: i64, masks: *mut u64, keys: *mut u64, order: *mut u64, colors: *mut u64, offsets: *mut u64, sorted: *mut u64, fail: *mut u64) -> i64;
     fn vesper_kinetic_rigid_pair_manifold(ka: i64, na: i64, ra: f64, da: *mut u64, kb: i64, nb: i64, rb: f64, db: *mut u64, margin: f64, tol: f64, merge: f64, gjk_out: *mut u64, probe: *mut u64, cands: *mut u64, kept: *mut u64, out_cands: *mut u64, out_normal: *mut u64) -> i64;
+    fn vesper_kinetic_rigid_solve(dt: f32, substeps: i64, gx: f32, gy: f32, gz: f32, sleeping: i64, gyroscopic: i64, bodies: *mut u64, asleep: *mut u64, mf: *mut u64, mu: *mut u64, jf: *mut u64, ju: *mut u64, layer_off: *mut u64, layer_idx: *mut u64, scratch: *mut u64) -> i64;
     fn vesper_kinetic_rigid_update_sleep_pass(is_dyn: *mut u64, quiet: *mut u64, edge_a: *mut u64, edge_b: *mut u64, ticks: i64, island: *mut u64, island_awake: *mut u64, asleep: *mut u64, sleep_ticks: *mut u64) -> i64;
     fn vesper_kinetic_rigid_wake_island_pass(is_dyn: *mut u64, edge_a: *mut u64, edge_b: *mut u64, island: *mut u64, island_awake: *mut u64, asleep: *mut u64, sleep_ticks: *mut u64) -> i64;
     fn vesper_kinetic_sap_build(boxes: *mut u64, keys: *mut u64, order: *mut u64, smin: *mut u64, smax: *mut u64, tk: *mut u64, tv: *mut u64, hist: *mut u64, fail: *mut u64) -> i64;
@@ -561,6 +562,15 @@ pub fn rigid_pair_manifold(ka: u32, na: u64, ra: f64, da: &[f64], kb: u32, nb: u
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(da, |view_da| vesper_port_abi::with_slice(db, |view_db| vesper_port_abi::with_slice_mut(gjk_out, |view_gjk_out| vesper_port_abi::with_slice_mut(probe, |view_probe| vesper_port_abi::with_slice_mut(cands, |view_cands| vesper_port_abi::with_slice_mut(kept, |view_kept| vesper_port_abi::with_slice_mut(out_cands, |view_out_cands| vesper_port_abi::with_slice_mut(out_normal, |view_out_normal| unsafe { vesper_kinetic_rigid_pair_manifold(ka as i64, na as i64, ra, view_da, kb as i64, nb as i64, rb, view_db, margin, tol, merge, view_gjk_out, view_probe, view_cands, view_kept, view_out_cands, view_out_normal) }))))))));
     raw as u64
+}
+
+/// Calls `rigid_solve` of the Vesper library `kinetic` (`vesper_kinetic_rigid_solve`).
+pub fn rigid_solve(dt: f32, substeps: u32, gx: f32, gy: f32, gz: f32, sleeping: bool, gyroscopic: bool, bodies: &mut [f32], asleep: &[u8], mf: &mut [f32], mu: &[u32], jf: &mut [f32], ju: &[u32], layer_off: &[u32], layer_idx: &[u32], scratch: &mut [f32]) -> () {
+    // SAFETY: `vesper_kinetic_rigid_solve` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(bodies, |view_bodies| vesper_port_abi::with_slice(asleep, |view_asleep| vesper_port_abi::with_slice_mut(mf, |view_mf| vesper_port_abi::with_slice(mu, |view_mu| vesper_port_abi::with_slice_mut(jf, |view_jf| vesper_port_abi::with_slice(ju, |view_ju| vesper_port_abi::with_slice(layer_off, |view_layer_off| vesper_port_abi::with_slice(layer_idx, |view_layer_idx| vesper_port_abi::with_slice_mut(scratch, |view_scratch| unsafe { vesper_kinetic_rigid_solve(dt, substeps as i64, gx, gy, gz, sleeping as i64, gyroscopic as i64, view_bodies, view_asleep, view_mf, view_mu, view_jf, view_ju, view_layer_off, view_layer_idx, view_scratch) })))))))));
+    { let _ = raw; }
 }
 
 /// Calls `rigid_update_sleep_pass` of the Vesper library `kinetic` (`vesper_kinetic_rigid_update_sleep_pass`).

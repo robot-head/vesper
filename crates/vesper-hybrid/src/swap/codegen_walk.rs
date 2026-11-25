@@ -1,6 +1,7 @@
-// The native walk's `register_locals` plan and entry-block plans (gap lane
-// 11, #1509), from `modules/codegen_walk`, through the `register_locals`
-// and `frame_plans` hooks.
+// The native walk's `register_locals` plan and entry plans (entry blocks
+// and internal conventions; gap lane 11, #1509), from
+// `modules/codegen_walk`, through the `register_locals` and `entry_plans`
+// hooks.
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
@@ -14,8 +15,8 @@ mod codegen_walk_binding;
 #[path = "../../../../tests/common/native_walk_words.rs"]
 mod native_walk_words;
 
-// `@vesper/codegen-calls`' input encoder, for the `frame_plans` swap (#1509
-// part 3b), shared with tests/self_host_native_walk_frame.rs.
+// `@vesper/codegen-calls`' input encoder, for the `entry_plans` swap (#1509
+// parts 3b and 4a), shared with tests/self_host_native_walk_frame.rs.
 #[path = "../../../../tests/common/codegen_calls_words.rs"]
 mod codegen_calls_words;
 
@@ -47,19 +48,19 @@ fn vesper_register_locals(
     Some(native_walk_words::decode_register_locals(&words))
 }
 
-/// The `frame_plans` hook of `vesper::codegen_swap` from `modules/codegen_walk`
-/// (#1509 part 3b): `@vesper/native-walk` plans each instance's entry block
-/// for one entry compile. Worlds the calls input cannot encode, and tasks
+/// The `entry_plans` hook of `vesper::codegen_swap` from `modules/codegen_walk`
+/// (#1509 parts 3b and 4a): `@vesper/native-walk` plans each instance's
+/// entry block and internal convention for one entry compile. Worlds the calls input cannot encode, and tasks
 /// the package refuses, decline to Rust.
-fn vesper_frame_plans(
+fn vesper_entry_plans(
     world: &vesper::check::World,
     program: &vesper::ir::Program,
     entry: &str,
     optimize: bool,
-) -> Option<std::collections::BTreeMap<String, vesper::native::FramePlan>> {
+) -> Option<vesper::native::EntryPlans> {
     let plans = codegen_calls_words::calls_input(world, program, &[(entry.to_string(), optimize)])
         .and_then(|bytes| {
-            native_walk_words::decode_frames(&codegen_walk_binding::frame_plans_words(&bytes))
+            native_walk_words::decode_entry_plans(&codegen_walk_binding::frame_plans_words(&bytes))
         });
     match plans {
         Some(_) => FRAME_CALLS.fetch_add(1, Relaxed),
@@ -71,15 +72,15 @@ fn vesper_frame_plans(
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[
     open("register_locals", "0 diffs; no flip-gate configuration"),
-    open("frame_plans", "0 diffs; no flip-gate configuration"),
+    open("entry_plans", "0 diffs; no flip-gate configuration"),
 ];
 
 pub(super) fn register(r: &mut Registry) {
     if on("register_locals") && !env_off("VESPER_HYBRID_WALK") {
         r.codegen.register_locals = Some(vesper_register_locals);
     }
-    if on("frame_plans") && !env_off("VESPER_HYBRID_WALK") {
-        r.codegen.frame_plans = Some(vesper_frame_plans);
+    if on("entry_plans") && !env_off("VESPER_HYBRID_WALK") {
+        r.codegen.entry_plans = Some(vesper_entry_plans);
     }
 }
 

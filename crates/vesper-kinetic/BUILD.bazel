@@ -115,6 +115,12 @@ filegroup(
             "if a != 0.0 {",
             "if a == 0.0 {",
         ),
+        (
+            "solve",
+            "solve",
+            "let target: f32 = if drive == 1 {",
+            "let target: f32 = if drive == 3 {",
+        ),
     ]
 ]
 
