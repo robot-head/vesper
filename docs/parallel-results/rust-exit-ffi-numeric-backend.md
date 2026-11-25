@@ -22,6 +22,7 @@ these families decline nothing.
 | `ffi_lowering/cpu.rs` machine-code tables ported (`@vesper/ffi-lowering` `cpu.ves`) | 0 of 72 symbol and target pairs differ (every function, unknown and plain symbols, x86_64, AArch64, RISC-V) | 0 now (goes at the retirement) | this PR |
 | `ffi_lowering/buffers.rs` check pass ported (`@vesper/ffi-rewrite` `buffers.ves`) | 0 of 35 sources differ that reach the check (27 refused, with the same span and message); the foreign-memory suite, the xsk fixture and 13 hand sources | 0 now (goes at the retirement) | next PR |
 | `native_session::check_data_base_freshness` ported (`@vesper/codegen-control` `freshness.ves`) | 0 of 229 functions differ: 217 corpus session entries as emitted, and 12 hand-built ones (4 refused) | 0 now (goes at the retirement) | next PR |
+| `vector::check_world` (the `Isa` discipline, E1401-E1403) ported (`@vesper/check-regions-seqs` `isa.ves`) | 0 of 329 worlds differ (the corpus files, the vector and tiled tests' sources, 19 hand sources); 35 diagnostics: 2 E1401, 5 E1402, 28 E1403 | 0 now (goes at the retirement) | next PR |
 
 ### `native_handlers`: deleted
 
@@ -148,6 +149,27 @@ the path search are Vesper.
 - Cost (`freshness_cost`, ABBA): Rust 3.32 ms, Vesper 3.23 ms (0.98x),
   with input decoding on the Vesper side.
 
+## The Isa discipline walk
+
+`isa.ves` ports `vector::check_world`: a two-parameter `Vec` or `Mask`
+ADT (E1401), `==` and the other comparisons on values holding vector
+lanes (E1402), and every vector operation, `load_tile_vec` profile and
+call whose `Isa[P]` the scope does not grant (E1403), with
+`if Isa::supported[P]()` granting `P` in its branch and closures
+granted only their own row. The entry `regions_seqs_isa` parses the
+source with @vesper/ast; the input carries the world facts the walk
+reads (ADTs with their fields, the functions in `world.functions` order
+with their rows and body spans, the checker's expression types).
+`Intrinsic::lookup`, `VectorOp::resolve`, `SliceIo::resolve`, `shape_of`,
+`contains_vector` and `substitute` are ported with it.
+
+- Differential `isa::isa_walk_matches_rust`
+  (tests/self_host_check_regions_seqs.rs): 0 of 329 worlds differ. 121
+  functions of the checker's prelude have bodies outside the source and
+  are skipped on both sides' terms: none of them reports anything.
+- Cost (`isa_walk_cost`, ABBA): Rust's parse and walk 19.2 ms, the
+  Vesper entry (parse, input decoding and walk) 17.4 ms (0.91x).
+
 ## Hybrid swap coverage
 
 The release `vesper-hybrid` against the release default compiler, `emit
@@ -187,7 +209,7 @@ side stands:
 | `tiled/check.rs`, `src/vector/check.rs` | 577 + 441 | `@vesper/check-regions-seqs` (`tiled.ves`, `vector.ves`) | |
 | `tiled/eval.rs`, `vector/eval.rs` | 311 + 432 | none | the evaluator's tile and vector operations |
 | `tiled/native_runtime.rs` | 377 | AOT runtime only | the JIT's Rust host symbols |
-| `src/vector.rs` | 1,020 | `codegen-numeric/shapes.ves` (lane shapes) | the expression typing walk |
+| `src/vector.rs` | 1,027 | `codegen-numeric/shapes.ves` (lane shapes), `check-regions-seqs` `vector.ves` (type rules) and `isa.ves` (the `Isa` walk, 0 diffs) | |
 | `src/native_vector.rs` | 1,131 | `codegen-numeric/vector.ves` (every intrinsic) | slot fusion and access retyping (gap lane 3, #1500) |
 
 ## Checks

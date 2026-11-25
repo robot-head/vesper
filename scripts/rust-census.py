@@ -161,7 +161,7 @@ MODULES = {
     "trace_effects": ("SH2-8", "vesper-check-effects", ""),
     "freestanding": ("SH4-14", "", ""),
     "packages": ("SH2-6", "vesper-check-names-packages", "0.72-0.87x wall"),
-    "vector": ("SH4-11, #1830", "vesper-codegen-numeric", "lane shapes + checks ported; left: eval.rs, expression typing walk"),
+    "vector": ("SH4-11, #1830", "vesper-codegen-numeric", "lane shapes, checks and the Isa walk (check_world, 0 diffs) ported; left: eval.rs (evaluator)"),
     "native_aggregates": ("SH4-8, #1830", "vesper-codegen-aggregates", "decisions and the scalar-enum rewrite (#1330) at 0 diffs, emission swapped; left: enum_words and split-local emission (native walk)"),
     "ir_inline": ("SH3-11", "vesper-ir-inline", "0.76x, swapped"),
     "anvil_jit": ("SH5-14", "vesper-test-runner", ""),

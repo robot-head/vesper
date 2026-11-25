@@ -12,6 +12,8 @@
 // - tiled.ves: `src/tiled.rs` types and `check_world_adts` (E1501-E1503).
 // - vector.ves: `src/vector.rs` shapes, `type_error`, `layout_words`,
 //   profiles and `isa_row_entry` (E1404).
+// - isa.ves: the `Isa` discipline of `vector::check_world` (E1401-E1403)
+//   over the @vesper/ast tree (#1830).
 // The checker methods of src/{regions,seq,strings,arrays,tiled,vector}/
 // check.rs and the expression passes of each `check_world` walk the AST;
 // they are the next part.
@@ -53,6 +55,7 @@ use @vesper/check-data::input::{
 use @vesper/check-data::{
     pack_text
 };
+use self::isa::isa_text;
 use self::regions::{
     is_handle_type,
     mismatch,
@@ -465,4 +468,10 @@ pub fn regions_seqs_decode(in input: Str) -> ChunkSeq[u64] {
     let vn = vec_names_new(inout c.names);
     let o = ChunkSeq::new[u8]();
     pack_text(in o)
+}
+
+// `vector::check_world` (isa.ves): the world facts in `input`, the tree
+// parsed from `source`.
+pub fn regions_seqs_isa(in input: Str, in source: Str) -> ChunkSeq[u64] {
+    pack_text(in isa_text(in input, in source))
 }
