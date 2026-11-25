@@ -41,6 +41,9 @@ on:
       - 'crates/vesper-hybrid/**'
       - 'crates/vesper-port-harness/**'
       - 'crates/vesper-port-abi/**'
+      - '.aspect/hybrid.axl'
+      - '.aspect/lib/process.axl'
+      - 'scripts/windows/test-hybrid-cli.ps1'
       - '.github/workflows/hybrid.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -69,15 +72,18 @@ jobs:
         include:
           - name: Linux x86_64
             os: ubuntu-latest
+            compiler: vesper
           - name: macOS AArch64
             os: macos-latest
+            compiler: vesper
           - name: Windows x86_64 MSVC
             os: windows-latest
+            compiler: vesper.exe
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
-    defaults:
-      run:
-        shell: bash
+    env:
+      VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/${{ matrix.compiler }}
+      VESPER_DEFAULT_COMPILER: ${{ github.workspace }}/target/debug/${{ matrix.compiler }}
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
@@ -86,25 +92,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build the default compiler
-        run: |
-          cargo build --locked --bin vesper
-          exe=vesper
-          if [ "$RUNNER_OS" = Windows ]; then exe=vesper.exe; fi
-          echo "VESPER_PORT_COMPILER=$GITHUB_WORKSPACE/target/debug/$exe" >> "$GITHUB_ENV"
-          echo "VESPER_DEFAULT_COMPILER=$GITHUB_WORKSPACE/target/debug/$exe" >> "$GITHUB_ENV"
+        run: cargo build --locked --bin vesper
       - name: Build and test the hybrid compiler
         run: cargo test --locked -p vesper-hybrid -- --nocapture
       - name: The CLI suites on the hybrid (its main is the Vesper driver)
         # SH5 lane 12 (#1335): every tests/*cli*.rs suite of the root package
         # with the hybrid binary in place of target/debug/vesper. It builds
         # every CLI suite, so pull requests skip it (#1321).
-        if: github.event_name != 'pull_request'
-        run: |
-          if [ "$RUNNER_OS" = Windows ]; then
-            crates/vesper-hybrid/cli-suites.sh
-          else
-            aspect crate hybrid cli-suites
-          fi
+        if: github.event_name != 'pull_request' && runner.os != 'Windows'
+        run: aspect crate hybrid cli-suites
+      - name: The CLI suites on the hybrid (Windows)
+        if: github.event_name != 'pull_request' && runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/windows/test-hybrid-cli.ps1
       - name: The differential harness catches a divergent layout
         # The pilot's word arithmetic and the whole layout (#1177) are both
         # wrong; a wrong layout cannot compile the pilot test's program, so

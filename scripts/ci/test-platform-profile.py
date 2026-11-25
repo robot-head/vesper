@@ -12,7 +12,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import signal
 import subprocess
@@ -22,10 +22,105 @@ import time
 import tomllib
 from dataclasses import dataclass
 
-from platform_test_plan import deferred_targets, load_policy
-
-
 ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_POLICY = Path(__file__).with_name("platform_test_profiles.json")
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def rust_test_cases(source: str) -> set[str]:
+    """Read this catalog's top-level libtest cases, including intervening attrs."""
+    return set(re.findall(
+        r"#\[\s*test\s*\](?:(?!\bfn\b).)*?\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        source, re.DOTALL,
+    ))
+
+
+def load_policy(path: Path | str = DEFAULT_POLICY, *, source_root: Path = ROOT) -> dict:
+    policy = json.loads(Path(path).read_text(encoding="utf-8"))
+    if policy.get("version") != 1:
+        raise ValueError("unsupported platform test policy version")
+    groups = policy.get("groups")
+    if not isinstance(groups, dict) or not groups:
+        raise ValueError("policy needs named escalation groups")
+    for name, settings in groups.items():
+        if not _IDENTIFIER.fullmatch(name) or not isinstance(settings, dict):
+            raise ValueError("invalid escalation group")
+        if not isinstance(settings.get("paths"), list) or not all(
+            isinstance(p, str) and p for p in settings["paths"]
+        ):
+            raise ValueError(f"invalid paths for {name}")
+    if not isinstance(policy.get("shared_paths"), list) or not all(
+        isinstance(p, str) and p for p in policy["shared_paths"]
+    ):
+        raise ValueError("invalid shared paths")
+    records = policy.get("deferred_targets")
+    if not isinstance(records, list) or not records:
+        raise ValueError("policy needs an explicit deferred-target catalog")
+    seen_cargo, seen_bazel, seen_source = set(), set(), set()
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {
+            "package", "target", "bazel", "group", "source", "skip_tests"
+        }:
+            raise ValueError("invalid deferred-target record")
+        package, target = record["package"], record["target"]
+        if not isinstance(package, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", package):
+            raise ValueError("invalid Cargo package selector")
+        if not isinstance(target, str) or not _IDENTIFIER.fullmatch(target):
+            raise ValueError("invalid Cargo test selector")
+        if record["group"] not in groups:
+            raise ValueError("target references unknown escalation group")
+        source = record["source"]
+        if not isinstance(source, str) or PurePosixPath(source).is_absolute() or ".." in PurePosixPath(source).parts:
+            raise ValueError("source must be repository-relative")
+        expected = f"tests/{target}.rs" if package == "vesper" else f"crates/{package}/tests/{target}.rs"
+        expected_bazel = f"//:test/{target}" if package == "vesper" else f"//crates/{package}:test/{target}"
+        if source != expected or record["bazel"] != expected_bazel:
+            raise ValueError("Cargo/Bazel/source selectors disagree")
+        cargo = (package, target)
+        if cargo in seen_cargo or record["bazel"] in seen_bazel or source in seen_source:
+            raise ValueError("duplicate deferred-target selector")
+        seen_cargo.add(cargo)
+        seen_bazel.add(record["bazel"])
+        seen_source.add(source)
+        source_file = source_root / source
+        if not source_file.is_file():
+            raise ValueError(f"catalog source missing: {source}")
+        cases = rust_test_cases(source_file.read_text(encoding="utf-8"))
+        if not cases:
+            raise ValueError(f"catalog source has no libtest cases: {source}")
+        skipped = record["skip_tests"]
+        if skipped is not None:
+            if not isinstance(skipped, list) or not skipped or not all(
+                isinstance(case, str) and _IDENTIFIER.fullmatch(case) for case in skipped
+            ) or len(set(skipped)) != len(skipped):
+                raise ValueError("invalid exact test-case selectors")
+            missing = set(skipped) - cases
+            if missing:
+                raise ValueError(f"stale test cases in {source}: {sorted(missing)}")
+            if not cases - set(skipped):
+                raise ValueError(f"partial exclusion leaves no PR tests in {source}")
+    return policy
+
+
+def _checked_groups(groups, policy: dict) -> set[str]:
+    if isinstance(groups, str):
+        raise ValueError("groups must be a sequence, not a string")
+    result = set(groups)
+    unknown = result - policy["groups"].keys()
+    if unknown:
+        raise ValueError(f"unknown escalation groups: {sorted(unknown)}")
+    return result
+
+
+def deferred_targets(profile: str, groups = ()) -> list[dict]:
+    policy = load_policy()
+    selected = _checked_groups(groups, policy)
+    if profile not in {"pr", "full"}:
+        raise ValueError(f"unknown platform test profile: {profile}")
+    if profile == "full":
+        return []
+    return [dict(r) for r in policy["deferred_targets"] if r["group"] not in selected]
+
 
 
 @dataclass(frozen=True)

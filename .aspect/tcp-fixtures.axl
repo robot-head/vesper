@@ -1,0 +1,88 @@
+"""Generate the independent RFC 1071 TCP checksum fixture."""
+
+def _be16(value: int) -> list[int]:
+    return [(value >> 8) & 255, value & 255]
+
+def _be32(value: int) -> list[int]:
+    return _be16(value >> 16) + _be16(value & 65535)
+
+def _le32(value: int) -> list[int]:
+    return _be32(value)[::-1]
+
+def _checksum(data: list[int]) -> list[int]:
+    padded = data + [0] if len(data) % 2 else data
+    total = 0
+    for index in range(0, len(padded), 2):
+        total += (padded[index] << 8) + padded[index + 1]
+        total = (total & 65535) + (total >> 16)
+    return _be16(65535 ^ total)
+
+def _tcp(
+        source: int,
+        destination: int,
+        sequence: int,
+        acknowledge: int,
+        flags: int,
+        window: int,
+        options: list[int] = [],
+        payload: list[int] = [],
+        urgent: int = 0) -> list[int]:
+    offset = (20 + len(options)) // 4
+    return (_be16(source) + _be16(destination) + _be32(sequence) + _be32(acknowledge) +
+            [offset << 4, flags] + _be16(window) + [0, 0] + _be16(urgent) + options + payload)
+
+def _segment(segment: list[int], pseudo: list[int]) -> list[int]:
+    return segment[:16] + _checksum(pseudo + segment) + segment[18:]
+
+def _ipv4(source: list[int], destination: list[int], segment: list[int], ident: int) -> list[int]:
+    pseudo = source + destination + [0, 6] + _be16(len(segment))
+    header = [0x45, 0] + _be16(20 + len(segment)) + _be16(ident) + [0x40, 0, 64, 6, 0, 0] + source + destination
+    return header[:10] + _checksum(header) + header[12:] + _segment(segment, pseudo)
+
+def _ipv6(source: list[int], destination: list[int], segment: list[int]) -> list[int]:
+    pseudo = source + destination + _be32(len(segment)) + [0, 0, 0, 6]
+    return [0x60, 0, 0, 0] + _be16(len(segment)) + [6, 64] + source + destination + _segment(segment, pseudo)
+
+def _timestamps(value: int, echo: int) -> list[int]:
+    return [1, 1, 8, 10] + _be32(value) + _be32(echo)
+
+def _generate(ctx: TaskContext) -> int:
+    a4 = [192, 0, 2, 1]
+    b4 = [198, 51, 100, 7]
+    a6 = [0x20, 0x01, 0x0D, 0xB8] + [0] * 11 + [1]
+    b6 = a6[:-1] + [2]
+    syn_opts = [2, 4] + _be16(1460) + [4, 2, 8, 10] + _be32(4242) + _be32(0) + [1, 3, 3, 7]
+    sack = [1, 1, 5, 18] + _be32(0x10000100) + _be32(0x10000200) + _be32(0x10000300) + _be32(0x10000400)
+    fin, syn, rst, psh, ack, urg = 1, 2, 4, 8, 16, 32
+    http = b"GET / HTTP/1.1\r\n\r\n!"
+    packets = [
+        _ipv4(a4, b4, _tcp(40000, 80, 0x01020304, 0, syn, 64240, syn_opts), 1),
+        _ipv4(b4, a4, _tcp(80, 40000, 0xA0B0C0D0, 0x01020305, syn | ack, 65160, syn_opts), 2),
+        _ipv4(a4, b4, _tcp(40000, 80, 0x01020305, 0xA0B0C0D1, psh | ack, 502, _timestamps(4243, 4242), [http[index] for index in range(len(http))]), 3),
+        _ipv4(b4, a4, _tcp(80, 40000, 0xA0B0C0D1, 0x01020318, fin | ack, 509, _timestamps(4250, 4243)), 4),
+        _ipv4(a4, b4, _tcp(40000, 80, 0x01020318, 0xA0B0C0D1, urg | ack, 502, payload = [255, 244, 255, 253, 6], urgent = 5), 5),
+        _ipv4(a4, b4, _tcp(40000, 80, 0xFFFFFFFE, 0, rst, 0), 6),
+        _ipv6(a6, b6, _tcp(50000, 443, 0x10000000, 0x20000000, ack, 1024, sack)),
+        _ipv6(b6, a6, _tcp(443, 50000, 0x20000000, 0x10000100, psh | ack, 2048, payload = list(range(255)))),
+    ]
+    data = _le32(0xA1B2C3D4) + [2, 0, 4, 0] + [0] * 8 + _le32(65535) + _le32(101)
+    for index, packet in enumerate(packets):
+        data.extend(_le32(1700000000 + index) + _le32(0) + _le32(len(packet)) * 2 + packet)
+    path = ctx.std.env.aspect_root_dir() + "/crates/vesper-warp-tcp/fixtures/tcp_fixtures.pcap"
+    stream = ctx.std.fs.create(path)
+    written = stream.write(bytes(data))
+    stream.close()
+    if written != len(data):
+        ctx.std.process.exit(1, "Short write while creating " + path)
+    ctx.std.io.stdout.write("%s %d packets\n" % (path, len(packets)))
+    hex_digits = "0123456789abcdef"
+    for packet in packets:
+        ctx.std.io.stdout.write("".join([hex_digits[octet >> 4] + hex_digits[octet & 15] for octet in packet]) + "\n")
+    return 0
+
+generate_tcp_fixtures = task(
+    kind = "gen-fixtures",
+    group = ["crate", "warp-tcp"],
+    summary = "Regenerate the independent TCP checksum pcap",
+    implementation = _generate,
+)

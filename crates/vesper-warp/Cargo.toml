@@ -13,7 +13,7 @@ build = "build.rs"
 # packet_number, header, frame, recovery, lifecycle, packet) to Vesper.
 vesper-port = []
 # A deliberately wrong Vesper build, one change per ported module: the port
-# test runs must fail (crates/vesper-warp/port/test-port.sh asserts it).
+# test runs must fail (the Aspect task for the Warp port asserts it).
 vesper-port-divergent = ["vesper-port"]
 
 [dependencies]

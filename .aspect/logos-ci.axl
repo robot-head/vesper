@@ -1,0 +1,155 @@
+"""Prepare the sealed Logos checker and independently replay Lean modules."""
+
+load("./lib/bazel_exec.axl", "executable")
+load("./lib/process.axl", "capture", "check", "command", "exit_code", "root_path")
+load("./disk-ci.axl", "start_disk_watcher")
+
+_LOGOS_DRIVER = "//crates/vesper-oracles:bin/logos42"
+
+def _prepare(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    args = ctx.args.tool_args
+    lean = ctx.std.env.var("VESPER_LEAN")
+    if len(args) != 1 or not lean:
+        ctx.std.process.exit(2, "usage: VESPER_LEAN=actual-lean aspect ci prepare-logos42 -- ABSENT_DIRECTORY")
+    driver = executable(ctx, root, _LOGOS_DRIVER)
+    cargo = ctx.std.env.var("VESPER_CARGO")
+    if not cargo:
+        rustup = ctx.std.process.which("rustup")
+        cargo = capture(ctx, rustup, ["which", "cargo"], root).strip() if rustup else ctx.std.process.which("cargo")
+    _setup(ctx, root, args[0], driver, lean, cargo)
+    return 0
+
+def _setup(ctx: TaskContext, root: str, directory: str, driver: str, lean: str, cargo: str | None):
+    git = ctx.std.process.which("git")
+    if not cargo or not git:
+        ctx.std.process.exit(1, "The Logos checker setup requires Cargo and Git")
+    lake = (lean.rpartition("/")[0] or ("/" if lean.startswith("/") else ".")) + "/lake"
+    check(ctx, "python3", [
+        "tools/logos42/setup.py",
+        "--directory", directory,
+        "--driver", driver,
+        "--lean", lean,
+        "--lake", lake,
+        "--git", git,
+        "--cargo", cargo,
+    ], root)
+
+prepare_logos42 = task(
+    kind = "prepare-logos42",
+    group = ["ci"],
+    summary = "Set up the sealed Logos checker in an empty directory",
+    implementation = _prepare,
+    args = {"tool_args": args.trailing_var_args(description = "The absent destination directory for the checker.")},
+)
+
+prepare_lean4lean42 = prepare_logos42.alias(
+    kind = "prepare-lean4lean42",
+    group = ["ci"],
+    summary = "Prepare the Logos checker under the former Lean4Lean task name",
+)
+
+def _summarize(ctx: TaskContext, report: dict):
+    batches = report["batches"]
+    checked = 0
+    for batch in batches:
+        checked += batch["logos_checked"]
+    ctx.std.io.stdout.write("logos-sweep: %s: %d modules, %d declarations checked by Logos in %d batches, %s s\n" %
+                            (report["status"], report["modules"], checked, len(batches), report["total_seconds"]))
+    for item in report["declined"]:
+        ctx.std.io.stdout.write("  declined (Lean kernel only): %s: %s\n" %
+                                (item["declaration"], item["reason"] or item["detail"]))
+    for problem in report["problems"]:
+        ctx.std.io.stdout.write("  PROBLEM: %s\n" % problem)
+
+def _sweep(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    args = ctx.args.tool_args
+    lean = ctx.std.env.var("VESPER_LEAN")
+    if len(args) != 2 or not lean:
+        ctx.std.process.exit(2, "usage: VESPER_LEAN=actual-lean aspect ci logos-sweep -- SEALED_ROOT REPORT")
+    driver = ctx.std.env.var("LOGOS42_DRIVER") or executable(ctx, root, _LOGOS_DRIVER)
+    vesper = ctx.std.env.var("VESPER_BIN") or executable(ctx, root, "//:bin/vesper")
+    batch_jobs = ctx.std.env.var("LOGOS_SWEEP_BATCH_JOBS") or "2"
+    return _run_sweep(ctx, root, args[0], args[1], driver, vesper, lean, batch_jobs)
+
+def _run_sweep(ctx: TaskContext, root: str, checker: str, report_path: str, driver: str, vesper: str, lean: str, batch_jobs: str) -> int:
+    result = command(ctx, "python3", [
+        "tools/logos-sweep/sweep.py",
+        "--root", checker,
+        "--driver", driver,
+        "--vesper", vesper,
+        "--lean", lean,
+        "--batch-jobs", batch_jobs,
+        "--report", report_path,
+    ], root).status()
+    report = root_path(root, report_path)
+    if ctx.std.fs.exists(report) and ctx.std.fs.metadata(report).is_file:
+        _summarize(ctx, json.decode(ctx.std.fs.read_to_string(report)))
+    return exit_code(result)
+
+logos_sweep = task(
+    kind = "logos-sweep",
+    group = ["ci"],
+    summary = "Replay the Lean modules with the Logos checker and summarize the report",
+    implementation = _sweep,
+    args = {"tool_args": args.trailing_var_args(description = "Provide the sealed checker directory and report path.")},
+)
+
+def _replay_models(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    temp = ctx.std.env.var("RUNNER_TEMP")
+    if not temp:
+        ctx.std.process.exit(2, "RUNNER_TEMP is required for Logos model replay")
+    temp = root_path(root, temp)
+    directory = temp + "/logos42"
+    checker = directory + "/checker"
+    driver = root + "/target/debug/logos42"
+    lean = ctx.std.fs.read_to_string(root + "/.ci-lean-path").rstrip("\r\n")
+    cargo = ctx.std.fs.read_to_string(root + "/.ci-logos-cargo-path").rstrip("\r\n")
+    if not lean or not cargo:
+        ctx.std.process.exit(1, "The CI Lean and Cargo executable paths are required")
+    ctx.std.fs.create_dir_all(directory)
+    _setup(ctx, root, checker, driver, lean, cargo)
+    return _run_sweep(ctx, root, checker, temp + "/logos-sweep-report.json", driver, root + "/target/debug/vesper", lean, "2")
+
+replay_logos_models = task(
+    kind = "replay-logos-models",
+    group = ["ci"],
+    summary = "Prepare the GitHub Actions Logos checker and replay every model",
+    implementation = _replay_models,
+)
+
+_REPLAY_QUERY = 'attr(tags, "(^|[^a-zA-Z0-9_-])lean_replay([^a-zA-Z0-9_-]|$)", tests(//...))'
+
+def _replay(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    aspect = ctx.std.env.current_exe()
+    scope = command(ctx, aspect, ["ci", "lean-replay-scope"], root).stdout("piped").spawn().wait_with_output()
+    if scope.stdout.rstrip("\n"):
+        return 0
+    labels = capture(ctx, "bazel", ["query", "--config=ci", _REPLAY_QUERY], root).splitlines()
+    if not labels:
+        ctx.std.process.exit(1, "No Lean replay test targets found")
+    check(ctx, aspect, ["ci", "install-logos-rust"], root)
+
+    ctx.defer(lambda: command(ctx, aspect, ["ci", "reclaim-disk", "--", "report"], root).status())
+    directory = ctx.std.fs.mkdtemp(prefix = "vesper-logos42-ci-", parent = "/tmp")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(directory))
+    checker = directory + "/checker"
+    env = {
+        "VESPER_LEAN": ctx.std.fs.read_to_string(root + "/.ci-lean-path").rstrip("\n"),
+        "VESPER_CARGO": ctx.std.fs.read_to_string(root + "/.ci-logos-cargo-path").rstrip("\n"),
+        "VESPER_LOGOS42_ROOT": checker,
+    }
+    start_disk_watcher(ctx, root)
+    check(ctx, aspect, ["ci", "prepare-logos42", "--", checker], root, env)
+    check(ctx, "bazel", ["test", "--config=ci", "--config=rbe_build", "--config=ci_tests"] + labels, root, env)
+    return 0
+
+test_lean_replay = task(
+    kind = "test-lean-replay",
+    group = ["ci"],
+    summary = "Run the selected Lean replay test targets with Logos",
+    implementation = _replay,
+)

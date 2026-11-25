@@ -1,0 +1,160 @@
+"""Crate port checks that need Rust test artifacts or verifier diagnostics."""
+
+load("./lib/cargo.axl", "test_artifacts")
+load("./lib/port_checks.axl", "divergence", "port_checks")
+load("./lib/process.axl", "check", "command", "scratch_dir")
+
+_FEATURE = ["--features", "vesper-port-divergent"]
+_SERIAL = ["--", "--test-threads=1"]
+
+def _ignis(ctx: TaskContext, root: str):
+    env = {}
+    for suite in ["planner", "multi_backend", "lifecycle"]:
+        paths = test_artifacts(ctx, root, ["--color", "never", "-p", "vesper-ignis"] + _FEATURE + ["--test", suite], [suite])
+        env["VESPER_IGNIS_DIVERGENT_" + suite.upper()] = paths[0]
+    check(ctx, "cargo", ["test", "--locked", "-p", "vesper-ignis", "--test", "divergence", "--", "--nocapture"], root, env)
+    ctx.std.io.stdout.write("Detected divergent Ignis port tests\n")
+
+ignis_check = port_checks(
+    "ignis", "check",
+    [["-p", "vesper-ignis"], ["-p", "vesper-ignis", "--features", "vesper-port"]],
+    [],
+    after = _ignis,
+)
+
+def _realtime_output(ctx: TaskContext, root: str, compiler: str, entry: str, policy: str, output: str, target: str = ""):
+    package = "crates/vesper-resonance/vesper"
+    argv = ["emit", package, "--emit", "object", "-o", output, "--entry", entry]
+    if target:
+        argv.extend(["--target", target])
+    argv.extend(["--verify-realtime", "--verify-policy", package + "/../port/" + policy])
+    return command(ctx, compiler, argv, root).stdout("piped").stderr("piped").spawn().wait_with_output()
+
+def _realtime(ctx: TaskContext, root: str):
+    compiler = ctx.std.env.var("VESPER_PORT_COMPILER")
+    if not compiler:
+        ctx.std.process.exit(1, "Set VESPER_PORT_COMPILER to run the realtime verifier")
+    artifact = scratch_dir(ctx, "vesper-realtime-") + "/audio.o"
+    for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]:
+        result = _realtime_output(ctx, root, compiler, "rt_audio", "realtime-policy.json", artifact, target)
+        log = result.stdout + "\n" + result.stderr
+        lines = log.splitlines()
+        finding = any([line.endswith("native verifier finding(s)") for line in lines])
+        unexpected = any([
+            line.startswith("error:") or ("error[" in line and "error[realtime/rt-unbounded-loop]" not in line)
+            for line in lines
+        ])
+        if (not result.status.success and not finding) or unexpected or "panicked" in log or "was not emitted" in log:
+            ctx.std.io.stderr.write(log)
+            ctx.std.process.exit(1, "The realtime verifier rejected the port's audio path on " + target)
+
+    result = _realtime_output(ctx, root, compiler, "compile_schedule", "realtime-control.json", artifact)
+    log = result.stdout + "\n" + result.stderr
+    if "error[realtime/rt-unknown-callee]" not in log:
+        ctx.std.io.stderr.write(log)
+        ctx.std.process.exit(1, "The realtime verifier's positive control was not rejected")
+    ctx.std.io.stdout.write("Realtime verifier accepted both audio targets and rejected the allocation control\n")
+
+prism_test_port = port_checks(
+    "prism", "test-port",
+    [
+        ["-p", "vesper-prism"],
+        ["-p", "vesper-prism-h3"],
+    ],
+    [
+        divergence(area, _FEATURE + ["--test", suite] + _SERIAL, [failed], [passed])
+        for area, suite, failed, passed in [
+            ("framing", "framing", "exact_limits_accept_and_overruns_poison_without_retaining_excess", "host_must_be_unique_and_unambiguous_with_valid_port_and_address"),
+            ("responses", "responses", "body_forbidden_statuses_omit_length_and_never_accept_a_payload", "exact_binary_response_and_repeated_fields_are_not_combined"),
+            ("routing", "routing", "query_entries_plus_duplicates_and_empty_forms_are_defined", "utf8_policy_is_explicit_for_paths_and_queries"),
+            ("routing", "routing", "static_segments_beat_parameters_independent_of_insertion_order", "utf8_policy_is_explicit_for_paths_and_queries"),
+            ("connection", "connection", "out_of_order_completions_cannot_starve_the_earliest_response", "single_byte_feed_issues_each_request_once"),
+        ]
+    ],
+)
+
+semver_test_port = port_checks(
+    "semver", "test-port",
+    [
+        ["-p", "vesper-semver", "-p", "vesper-semver-seed"],
+    ],
+    [
+        divergence(area, _FEATURE + ["--test", suite] + _SERIAL, [failed], [passed])
+        for area, suite, failed, passed in [
+            ("interface", "interface", "function_and_produced_value_modes_are_covariant", "identical_interface_is_patch_and_round_trips"),
+            ("release", "release", "component_resets_are_allowed_only_when_precedence_increases", "invalid_and_overflowing_versions_return_typed_errors"),
+        ]
+    ],
+)
+
+resonance_test_port = port_checks(
+    "resonance", "test-port",
+    [
+        ["-p", "vesper-resonance", "-p", "vesper-resonance-seed"],
+    ],
+    [
+        divergence(area, _FEATURE + ["--test", suite] + _SERIAL, [failed], [passed])
+        for area, suite, failed, passed in [
+            ("kernels", "simd", "bank_render_matches_reference_with_events", "host_reports_its_paths"),
+            ("events", "realtime", "malformed_event_streams_are_typed_errors", "emergency_silence_zeroes_the_rest_and_drops_are_counted"),
+            ("lease", "realtime", "lease_must_be_fully_written_to_commit", "emergency_silence_zeroes_the_rest_and_drops_are_counted"),
+            ("pdc", "pdc", "parallel_branches_get_compensation_delays", "buffer_liveness_reuses_buffers"),
+            ("graph", "port_differential", "graph_outputs_match_the_rust_build", "events_and_ramps_match_the_rust_build"),
+            ("slab", "slab", "delay_slab_read_write_wraps_and_clones_cleanly", "clones_are_realigned_and_hold_the_same_samples"),
+            ("simd", "simd", "tick_is_bit_identical_over_filter_range", "host_reports_its_paths"),
+            ("confine", "confinement", "allocation_two_calls_deep_is_rejected_with_its_path", "loops_follow_the_policy"),
+        ]
+    ],
+    after = _realtime,
+)
+
+loom_cas_test_port = port_checks(
+    "loom-cas", "test-port",
+    [
+        ["-p", "vesper-loom-cas", "-p", "vesper-loom-cas-seed"],
+    ],
+    [
+        divergence(area, _FEATURE + args, [], [], env = {"VESPER_CAS_DIVERGE": area},
+                   diagnostics = [evidence] if not anchored else [],
+                   line_prefixes = [evidence] if anchored else [])
+        for area, args, evidence, anchored in [
+            ("name", ["--lib"], "test tree::tests::rejects_adversarial_names ... FAILED", False),
+            ("name", ["--test", "codec_differential"], "codecs_agree_with_the_rust_build ... FAILED", False),
+            ("id", ["--test", "codec_differential"], "codecs_agree_with_the_rust_build ... FAILED", False),
+            ("tree", ["--lib"], "test tree::tests::directory_entries_must_have_zero_size ... FAILED", False),
+            ("tree", ["--test", "codec_differential"], "codecs_agree_with_the_rust_build ... FAILED", False),
+            ("drv", ["--test", "codec_differential"], "codecs_agree_with_the_rust_build ... FAILED", False),
+            ("store", ["--test", "store"], "corrupted_objects_are_rejected_reported_and_repaired ... FAILED", False),
+            ("fold", ["--lib"], "test port::tests::name_fold_fixed_cases ... FAILED", False),
+            ("fold", ["--test", "store"], "ingest_rejects_nonportable_names ... FAILED", False),
+            ("walk", ["--test", "store"], "ingest_rejects_nonportable_names ... FAILED", False),
+            ("pack", ["--test", "transfer_acceptance"], "complete_valid_hashes_do_not_authorize_duplicate_extra_missing_or_reordered_records ... FAILED", False),
+        ]
+    ],
+)
+
+sim_session_test_port = port_checks(
+    "sim-session", "test-port",
+    [
+        ["-p", "vesper-sim-session", "--features", "vesper-port"],
+    ],
+    [
+        divergence(area, _FEATURE + args + _SERIAL, [], [], env = {"VESPER_SIM_DIVERGE": area},
+                   diagnostics = [evidence] if not anchored else [],
+                   line_prefixes = [evidence] if anchored else [])
+        for area, args, evidence, anchored in [
+            ("link", ["--lib"], "test model::link::tests::micro_burst_builds_queue_delay_then_tail_drops ... FAILED", False),
+            ("link", ["--test", "self_host_sim_session"], "warp_wan: ", True),
+            ("wal", ["--test", "self_host_sim_session"], "the port validated the payload", False),
+            ("net", ["--lib"], "test model::net::tests::bounds_are_checked_before_anything_is_retained ... FAILED", False),
+            ("net", ["--test", "self_host_sim_session"], "net: ", True),
+            ("log", ["--test", "self_host_sim_session"], "wal_ops: ", True),
+            ("quic", ["--lib"], "test model::umem::tests::header_errors_bounds_and_a_dropping_binding ... FAILED", False),
+            ("quic", ["--test", "self_host_sim_session"], "quic_wire: ", True),
+            ("process", ["--test", "models"], "test stale_host_completions_are_rejected_without_losing_the_response ... FAILED", False),
+            ("failure", ["--test", "models"], "test partitions_heal_and_delayed_failures_replay_exactly ... FAILED", False),
+            ("validate", ["--test", "models"], "test model_scenarios_are_validated_at_load ... FAILED", False),
+            ("warp_bounds", ["--test", "warp"], "test bulk_ingress_under_burst_loss_and_rebinding_conserves_every_frame ... FAILED", False),
+        ]
+    ],
+)

@@ -117,7 +117,7 @@ Integrated local validation:
   tooling workflow. This image has no provisioned sudo/package installer, so
   system privilege configuration was left unchanged.
 - The recorded specification inventory and its 14 Python regressions passed.
-- `scripts/test-source-tooling.sh`: passed the full Cargo build/run sequence.
+- `aspect acceptance test-source-tooling`: passed the full Cargo build/run sequence.
   The actual CLI formatted/rechecked/executed a source returning 42, applied a
   SemVer-safe lint fix to a disposable demo returning 42, matched only `close`
   in the typed documentation query, rendered deterministic escaped local HTML,

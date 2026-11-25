@@ -132,9 +132,9 @@ incremental disabled, locked/offline dependencies and the root private target:
 - `cargo clippy --workspace --locked --offline --all-targets -- -D warnings`:
   passed, including the final five-test stdio source.
 - `cargo fmt --all -- --check` and `git diff --check`: passed.
-- `scripts/test-editor.sh`: passed 19 actual framed child sessions, applied and
+- `aspect acceptance test-editor`: passed 19 actual framed child sessions, applied and
   rechecked returned candidates, plus both executable span/protocol examples.
-- `scripts/test-source-tooling.sh` and `scripts/test-canonical-protocols.sh`:
+- `aspect acceptance test-source-tooling` and `aspect acceptance test-canonical-protocols`:
   passed their existing actual CLI/library acceptance. The optional PMU provider
   remains explicitly unavailable in this environment; no hardware success claim.
 - Specification snapshot validation and all 14 snapshot unit tests: passed.

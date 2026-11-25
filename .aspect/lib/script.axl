@@ -1,5 +1,7 @@
 """Run repository tooling with the caller's environment and standard streams."""
 
+load("./process.axl", "exit_code")
+
 def run_command(
         ctx,
         interpreter: str,
@@ -13,7 +15,7 @@ def run_command(
     if from_root:
         command.current_dir(root)
     status = command.status()
-    return status.code if status.code != None else 128 + (status.signal or 0)
+    return exit_code(status)
 
 def _command_task(
         name: str,

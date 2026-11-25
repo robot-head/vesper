@@ -4,5 +4,5 @@ Hermetic Wasmtime host for `wasm32-wasip2` build steps and Forge macros. A step 
 
 ```sh
 cargo test                 # uses the committed fixtures in fixtures/bin
-./fixtures/build.sh        # rebuild fixtures (needs wasm32-wasip2 and wasm32-wasip1 targets)
+aspect crate loom-sandbox build        # rebuild fixtures (needs wasm32-wasip2 and wasm32-wasip1 targets)
 ```

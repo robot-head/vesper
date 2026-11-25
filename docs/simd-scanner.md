@@ -19,7 +19,7 @@ loads. Native tests compare every byte value and delimiter, unaligned inputs,
 all remainder lengths and larger inputs against a scalar reference. Unix guard
 pages check both ends of slices. Object tests inspect both target formats and
 profile metadata. With AArch64 binutils and QEMU installed,
-`scripts/test-simd-aarch64.sh` executes the emitted scanner without a target libc
+`aspect acceptance test-simd-aarch64` executes the emitted scanner without a target libc
 and checks 9,600 cases against independently computed scalar results. This covers
 offsets 0–31, lengths 0–95 and large buffers, with delimiters 0, 7 and 255.
 QEMU execution is functional validation, not Arm hardware performance evidence.

@@ -5,7 +5,7 @@
 //! still has the Rust implementation, and, in `compare` mode, runs the two
 //! executables as separate processes in Rust, port, port, Rust order per
 //! epoch, then analyzes the paired totals with vesper-bench. Run
-//! `crates/vesper-aura/bench-abba.sh`.
+//! `aspect crate aura bench-abba`.
 //!
 //! `abba measure <ops>` warms each workload up and prints its total
 //! nanoseconds over `<ops>` operations. `abba compare <rust> <port> <epochs>

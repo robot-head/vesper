@@ -528,6 +528,10 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn HeapAlloc(h_heap: *mut c_void, dw_flags: u32, dw_bytes: usize) -> *mut c_void;
         fn HeapFree(h_heap: *mut c_void, dw_flags: u32, lp_mem: *mut c_void) -> i32;
         fn RtlMoveMemory(dst: *mut c_void, src: *const c_void, len: usize);
+        fn GetFileAttributesW(lp_file_name: *const u16) -> u32;
+        fn GetModuleFileNameW(h_module: *mut c_void, lp_filename: *mut u16, n_size: u32) -> u32;
+        fn GetSystemDirectoryW(lp_buffer: *mut u16, u_size: u32) -> u32;
+        fn GetWindowsDirectoryW(lp_buffer: *mut u16, u_size: u32) -> u32;
     }
     vec![
         ("GetCommandLineW", GetCommandLineW as *const u8),
@@ -587,6 +591,10 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("HeapAlloc", HeapAlloc as *const u8),
         ("HeapFree", HeapFree as *const u8),
         ("RtlMoveMemory", RtlMoveMemory as *const u8),
+        ("GetFileAttributesW", GetFileAttributesW as *const u8),
+        ("GetModuleFileNameW", GetModuleFileNameW as *const u8),
+        ("GetSystemDirectoryW", GetSystemDirectoryW as *const u8),
+        ("GetWindowsDirectoryW", GetWindowsDirectoryW as *const u8),
     ]
 }
 #[cfg(not(any(unix, windows)))]

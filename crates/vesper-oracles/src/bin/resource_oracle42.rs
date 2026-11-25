@@ -4,6 +4,9 @@
 #[path = "resource_oracle42/mod.rs"]
 pub mod oracle;
 
+#[path = "resource_oracle42/fault_peer.rs"]
+mod fault_peer;
+
 use oracle::{Config, HarnessLimits, protocol};
 use std::{ffi::OsString, fs::File, io::Read, io::Write, path::PathBuf, process::ExitCode};
 
@@ -22,8 +25,7 @@ fn value(args: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<PathBu
         .ok_or_else(|| format!("missing value for {flag}"))
 }
 
-fn options() -> Result<Option<Options>, String> {
-    let mut args = std::env::args_os().skip(1);
+fn options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Options>, String> {
     let mut lean = std::env::var_os("VESPER_LEAN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("lean"));
@@ -110,7 +112,26 @@ fn run(options: Options) -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
-    match options() {
+    let mut args = std::env::args_os().skip(1).peekable();
+    if args.peek().is_some_and(|arg| arg == "--fault-peer") {
+        args.next();
+        let mode = args.next();
+        if let (Some(mode), None) = (
+            mode.as_deref().and_then(std::ffi::OsStr::to_str),
+            args.next(),
+        ) {
+            return match fault_peer::run(mode) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("resource_oracle42 fault peer: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        eprintln!("resource_oracle42 fault peer requires exactly one mode");
+        return ExitCode::from(2);
+    }
+    match options(args) {
         Ok(None) => {
             println!(
                 "resource_oracle42 --request FILE [--lean PATH] [--repo-root PATH] [--artifacts DIR]\n\

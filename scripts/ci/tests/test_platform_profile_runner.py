@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import importlib.util
 import io
 import json
@@ -39,6 +40,60 @@ def record(package="ordinary", target="suite", skips=None):
     return {"package": package, "target": target, "bazel": "//crates/ordinary:test/suite",
             "group": "faults", "skip_tests": skips}
 
+
+class PlatformProfilePolicyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.policy = runner.load_policy()
+
+    def test_full_profile_has_no_exclusions(self):
+        self.assertEqual(runner.deferred_targets("full"), [])
+
+    def test_all_groups_escalated_has_no_exclusions(self):
+        self.assertEqual(runner.deferred_targets("pr", self.policy["groups"]), [])
+
+    def test_escalation_restores_only_relevant_groups(self):
+        deferred = runner.deferred_targets("pr", ["flux_faults"])
+        self.assertNotIn("flux_faults", {r["group"] for r in deferred})
+        self.assertIn("proof", {r["group"] for r in deferred})
+        self.assertIn("frontend_corpus", {r["group"] for r in deferred})
+
+    def test_partial_suites_preserve_other_cases(self):
+        partial = [r for r in runner.deferred_targets("pr") if r["skip_tests"]]
+        self.assertEqual(len(partial), 3)
+        for record in partial:
+            cases = runner.rust_test_cases((runner.ROOT / record["source"]).read_text())
+            self.assertTrue(set(record["skip_tests"]) < cases)
+        self.assertNotIn("store_crash", {r["target"] for r in runner.deferred_targets("pr")})
+        self.assertNotIn("resource_oracle42", {r["target"] for r in runner.deferred_targets("pr")})
+
+    def test_unknown_profile_or_group_is_error(self):
+        for profile, groups in [("quick", []), ("pr", ["typo"]), ("full", ["typo"]), ("pr", "proof")]:
+            with self.subTest(profile=profile, groups=groups), self.assertRaises(ValueError):
+                runner.deferred_targets(profile, groups)
+
+    def invalid_policy(self, change, expected):
+        policy = copy.deepcopy(self.policy)
+        change(policy)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy.json"
+            path.write_text(json.dumps(policy))
+            with self.assertRaisesRegex(ValueError, expected):
+                runner.load_policy(path)
+
+    def test_removed_or_renamed_case_fails_closed(self):
+        self.invalid_policy(lambda p: p["deferred_targets"][-1]["skip_tests"].__setitem__(0, "renamed_case"), "stale test cases")
+
+    def test_selector_duplicates_and_missing_source_fail_closed(self):
+        self.invalid_policy(lambda p: p["deferred_targets"].append(p["deferred_targets"][0]), "duplicate")
+        def rename(p):
+            record = p["deferred_targets"][0]
+            record.update(target="gone", source="tests/gone.rs", bazel="//:test/gone")
+        self.invalid_policy(rename, "source missing")
+
+    def test_helper_function_does_not_count_as_test(self):
+        cases = runner.rust_test_cases("fn helper() {}\n#[test]\n#[cfg(unix)]\nfn real_case() {}")
+        self.assertEqual(cases, {"real_case"})
 
 class SelectionTests(unittest.TestCase):
     def test_unclassified_targets_remain_and_full_has_no_tier_skips(self):

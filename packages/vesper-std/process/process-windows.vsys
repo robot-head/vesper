@@ -17,6 +17,7 @@ sys library StdProcess (
     const STD_INPUT_HANDLE: i32 = -10;
     const STD_OUTPUT_HANDLE: i32 = -11;
     const STD_ERROR_HANDLE: i32 = -12;
+    const INVALID_FILE_ATTRIBUTES: u32 = 4294967295;
 
     wire struct HandleBox {
         h: u64,
@@ -124,4 +125,15 @@ sys library StdProcess (
     fn HeapAlloc(heap: u64, flags: u32, bytes: u64) -> ForeignVal[u64];
     fn HeapFree(heap: u64, flags: u32, mem: u64) -> ForeignVal[i32];
     fn RtlMoveMemory(dst: u64, nocapture in src: CSlice[u8]) -> ForeignVal[Unit];
+    // The program search of Rust's `Command` (`resolve_exe`): UTF-16
+    // results land two units per `u32`, and the buffer's `u32` count is the
+    // size passed, so a result always fits.
+    fn GetFileAttributesW(nocapture in path: CWStr) -> ForeignVal[u32];
+    fn GetModuleFileNameW(module: u64, nocapture inout buf: CSlice[u32]) -> ForeignVal[u32];
+    fn GetSystemDirectoryW(nocapture inout buf: CSlice[u32]) -> ForeignVal[u32];
+    fn GetWindowsDirectoryW(nocapture inout buf: CSlice[u32]) -> ForeignVal[u32];
+    fn GetEnvironmentVariableW(
+        nocapture in name: CWStr,
+        nocapture inout buf: CSlice[u32]
+    ) -> ForeignVal[u32];
 }

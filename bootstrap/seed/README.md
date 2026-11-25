@@ -16,9 +16,16 @@ report is
 bazel run @wasmtime//:wasmtime -- --version
 
 # Rebuild a package (or self-rebuild @vesper/stage2) using the official Stage 2 runner:
-bootstrap/stage2.sh run bootstrap/seed/vesper.wasm packages/vesper-stage2 target/stage3.wasm main
-bootstrap/stage2.sh precompile target/stage2.wasm target/stage2.cwasm
-bootstrap/stage2.sh verify --precompile target/stage2.wasm
+aspect bootstrap stage2 -- run bootstrap/seed/vesper.wasm packages/vesper-stage2 target/stage3.wasm main
+aspect bootstrap stage2 -- precompile target/stage2.wasm target/stage2.cwasm
+aspect bootstrap stage2 -- verify --precompile target/stage2.wasm
+```
+
+On Windows, use PowerShell 7 with the same Stage 2 subcommands.
+
+```powershell
+./scripts/windows/bootstrap-stage2.ps1 run bootstrap/seed/vesper.wasm packages/vesper-stage2 target/stage3.wasm main
+./scripts/windows/bootstrap-stage2.ps1 verify --precompile target/stage2.wasm
 ```
 
 Under Bazel (`test/wasm_seed_package_io`), `BUILD.bazel` places `@wasmtime//:wasmtime`
@@ -32,14 +39,14 @@ test lists the packages Stage 2 cannot build yet, with the reason.
 
 - `vesper.wasm` (committed once the remaining driver/compiler gaps land) is the
   Vesper compiler built by its own wasm backend with portable effects.
-- [bootstrap/stage2.sh](../stage2.sh) wraps `wasmtime run --dir <workspace>::. --dir <out>::/out --argv0 stage2 ...`
+- `aspect bootstrap stage2` wraps `wasmtime run --dir <workspace>::. --dir <out>::/out --argv0 stage2 ...`
   and checks Stage 2 sidecar diagnostics (`.err.txt`).
 
 ## What is here today
 
 | Piece | State |
 |---|---|
-| Hermetic `@wasmtime//:wasmtime` (`v50.0.1`) | Wired in `MODULE.bazel` / `tools/bazel/wasmtime.bzl` for Linux (`x86_64`, `aarch64`), macOS (`aarch64`, `x86_64`), and Windows (`x86_64`, `aarch64`). Official Stage 2 CLI runner via `bootstrap/stage2.sh` and `test/wasm_seed_package_io`. |
+| Hermetic `@wasmtime//:wasmtime` (`v50.0.1`) | Wired in `MODULE.bazel` / `tools/bazel/wasmtime.bzl` for Linux (`x86_64`, `aarch64`), macOS (`aarch64`, `x86_64`), and Windows (`x86_64`, `aarch64`). Official Stage 2 CLI runner via `aspect bootstrap stage2` and `test/wasm_seed_package_io`. |
 | `runner/vwasm.c` (frozen) | A core WebAssembly interpreter covering the MVP, sign extension, saturating truncation, bulk memory, multi-value, funcref tables and tail calls. Frozen; kept for historical Stage 1 / core-differential checks (`tests/stage2_seed_runner.rs`, `tests/wasm_seed_package_io.rs`). |
 | Runner differential | `tests/stage2_seed_runner.rs`. Every corpus program the wasm backend builds (portable effects, optimizer on and off) runs in Wasmtime and in `vwasm`. They must agree on trap or return, the result bits, stdout and a digest of the whole linear memory. |
 | Stage 1 front end under the runner | The same test builds the Stage 1 front end (`packages/vesper-compiler`) with the wasm backend. `vwasm` then reproduces all 11 results in `bootstrap/stage1.lock`: 10 CST digests and the byte-class checksum. |

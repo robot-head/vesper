@@ -126,7 +126,7 @@ edit was also built alone to check that it is the one the named test catches.
 
 ## Benchmarks
 
-`examples/abba.rs`, run by `crates/vesper-aura/bench-abba.sh`. The two builds
+`examples/abba.rs`, run by `aspect crate aura bench-abba`. The two builds
 cannot share one binary (the public failure types name a single `Session`),
 so the example is built twice and its `compare` mode runs the executables as
 separate processes in Rust, port, port, Rust order per epoch. Each run warms

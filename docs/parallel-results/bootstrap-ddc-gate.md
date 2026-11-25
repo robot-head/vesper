@@ -18,7 +18,7 @@ the pre-manuscript design.
 | Rewrite-certificate hook | `verify_rewrite_certificate_chain` | Typed `RewriteCheckerNotWired`. The checker is Codex's (`src/optimize*`, `lean/RewriteWitness*`) and lives in the root package, which a library crate may not depend on. Not reimplemented. |
 | TEE binding | `TeeEvidence` | The gate does not verify quotes. A caller that verified a TDX/SNP quote (for example with `vesper-aegis`) passes its report data; the gate requires its first 32 bytes to be the fixed-point digest. A lock with `aegis_tdx_snp_attested = true` and no evidence fails. |
 | Seed reproducibility record | `src/seed.rs`, `bootstrap/stage0_seed.lock` | Done (schema `vesper.bootstrap.stage0-seed/1`). |
-| Driver | `bootstrap/run.sh`, bin `vesper-bootstrap` | Done, see below. |
+| Driver | `aspect bootstrap run`, bin `vesper-bootstrap` | Done, see below. |
 | Path B reference | `lean/BootstrapDdc/Reference.lean` | Done for the corpus subset, see below. |
 | §42.4 theorems and gate model | `lean/BootstrapDdc.lean` | Done, see below. |
 
@@ -54,7 +54,7 @@ malformed-lock cases, non-UTF-8 and oversize input.
 
 ## Two-build reproducibility (measured)
 
-`bootstrap/run.sh` builds `vesper` twice (release, `rustc 1.100.0`), each time
+`aspect bootstrap run` builds `vesper` twice (release, `rustc 1.100.0`), each time
 after deleting the target directory, with `SOURCE_DATE_EPOCH` = HEAD's commit
 time, `CARGO_INCREMENTAL=0` and `--remap-path-prefix` for the checkout and
 `CARGO_HOME`. Both builds use the same target path, so `RUSTFLAGS` and Cargo
