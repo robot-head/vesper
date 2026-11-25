@@ -43,6 +43,9 @@ use self::proof::{
 use self::ownership::{
     lens_facts
 };
+use self::repair::{
+    lens_repair
+};
 use self::hover::{
     Facts,
     facts_new,
@@ -621,4 +624,10 @@ pub fn lsp_proof_models(in input: Str) -> ChunkSeq[u64] {
 // ownership.ves).
 pub fn lsp_lens_facts(in input: Str) -> ChunkSeq[u64] {
     lens_facts(in input)
+}
+
+// The repaired view of syntax-damaged source (src/lsp/lens.rs `repair`;
+// repair.ves).
+pub fn lsp_lens_repair(in input: Str) -> ChunkSeq[u64] {
+    lens_repair(in input)
 }

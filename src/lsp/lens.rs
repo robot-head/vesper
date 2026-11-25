@@ -1350,3 +1350,33 @@ pub(crate) fn facts_dump(snapshot: Arc<CheckedSource>, cursors: &[usize]) -> Str
     }
     out
 }
+
+/// The repaired view's text and regions (`repair`) as text, for the Vesper
+/// port's differential test.
+pub(crate) fn repair_dump(syntax: &RecoverySyntax, limits: AnalysisLimits) -> String {
+    use std::fmt::Write as _;
+    let (text, regions) = match repair(syntax, limits) {
+        Ok(repaired) => repaired,
+        Err(unavailable) => return format!("U\t{}\n", unavailable.as_str()),
+    };
+    let mut out = String::new();
+    for r in &regions {
+        let _ = writeln!(
+            out,
+            "G\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            r.name,
+            r.kind.as_str(),
+            r.span.start,
+            r.span.end,
+            r.scope.start,
+            r.scope.end,
+            r.cut,
+            r.depth,
+            r.damage.start,
+            r.damage.end
+        );
+    }
+    out.push_str("T\n");
+    out.push_str(&text);
+    out
+}
