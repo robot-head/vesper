@@ -652,6 +652,17 @@ vesper_crate(
             "tests/anvil_cli.rs",
             "tests/test_runner_cli.rs",
         ]),
+        # Part 4: the Anvil function graph and digests against
+        # anvil_hash::FunctionGraph on the same .ves files and suites.
+        "test/self_host_anvil_graph": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+            "src/anvil_hash.rs",
+            "tests/anvil_cli.rs",
+            "tests/test_runner_cli.rs",
+        ]),
         # Self-hosting SH4 lane 17 (#1291): @vesper/backend-checks against
         # native_verifiers on the verifier fixtures and the corpus. Anchored
         # globs; @vesper/resonance comes from its crate's package.
@@ -904,6 +915,11 @@ vesper_crate(
             "resources:memory:9216",
             "resources:cpu:1",
             "lean_replay",
+        ],
+        # Each shard loads the whole corpus and lowers its share of worlds:
+        # about 5 GiB per shard locally (#1913).
+        "test/self_host_swap_inputs": [
+            "resources:memory:6144",
         ],
         # Four actual corpus workers; memory is an estimate, not an RSS cap.
         "test/self_host_front_end": [
@@ -1167,6 +1183,8 @@ vesper_crate(
         "test/self_host_doctest_extract": "long",
         # The mutation-site differential (#1337) runs the corpus twice.
         "test/self_host_test_mutants": "long",
+        # The Anvil graph differential (#1337) runs the corpus twice.
+        "test/self_host_anvil_graph": "long",
         # The backend-checks differential emits every corpus program 4 times.
         "test/self_host_backend_checks": "long",
         # The optimizer policy (#1279) optimizes every corpus world three times.
@@ -1264,6 +1282,7 @@ vesper_package(
         ":ast_package",
         ":front_package",
         ":std_arena_package",
+        ":std_hash_package",
         ":std_intern_package",
     ],
 )

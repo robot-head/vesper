@@ -27,7 +27,11 @@ under the 1.5x bar, and part 2 adds hover and the documentation links:
   `src/lsp/lens.rs`, part 4 (#1828);
 - the repaired Lens view of syntax-damaged source (`lsp_lens_repair`,
   `repair.ves`): `repair`, `candidates` and `open_at` of `src/lsp/lens.rs`,
-  part 5 (#1828).
+  part 5 (#1828);
+- the Lens views of semantic-error and repaired text and their queries
+  (`lsp_lens_view`, `ownership.ves`): `View::from_text`, `outstanding` at
+  the cut, `poisoned`, `binding`, `complete_member`, `signature` and
+  `rank_methods_within`, part 6 (#1828).
 
 The source is parsed with `@vesper/front` and `@vesper/ast`, positions use
 `@vesper/span`, and the JSON is written byte for byte as serde_json writes

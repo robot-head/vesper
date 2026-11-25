@@ -255,6 +255,7 @@ vesper_hybrid(
             "//:check_data_package",
             "//:front_package",
             "//:std_arena_package",
+            "//:std_hash_package",
             "//:std_intern_package",
             "//:test_runner_package",
         ],

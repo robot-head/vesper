@@ -41,7 +41,8 @@ use self::proof::{
     proof_models
 };
 use self::ownership::{
-    lens_facts
+    lens_facts,
+    lens_view
 };
 use self::repair::{
     lens_repair
@@ -630,4 +631,12 @@ pub fn lsp_lens_facts(in input: Str) -> ChunkSeq[u64] {
 // repair.ves).
 pub fn lsp_lens_repair(in input: Str) -> ChunkSeq[u64] {
     lens_repair(in input)
+}
+
+// A Lens view of source with semantic errors, or of a repaired prefix:
+// its live obligations read at the cut, the poisoned bindings, resolved
+// names and ranked member completions (src/lsp/lens.rs `View::from_text`,
+// `poisoned`, `binding`, `complete_member`, `signature`; ownership.ves).
+pub fn lsp_lens_view(in input: Str) -> ChunkSeq[u64] {
+    lens_view(in input)
 }
