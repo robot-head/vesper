@@ -19,17 +19,36 @@ The native lanes run only host-specific coverage:
   link Vesper-compiled Mach-O or COFF objects into Rust, so they depend on the
   host's object format and calling convention.
 
-The codegen swap point tests (`vesper-codegen-swap-test`, every fourth
-corpus world on these hosts) build with the `port-compiler` Cargo profile:
-release optimizations with debug assertions and overflow checks kept on.
-Nearly all of their time is the compiler compiling corpus worlds. Built for
-debug they took about 55 minutes of a 60 minute macOS job and 35-61 minutes
-on Windows (November 2026). On a 4-core Linux machine,
-`self_host_codegen_seq` ran in 97 s optimized against 319 s for debug, and
-`self_host_codegen_calls_emit` in 100 s against 347 s; building the
-optimized test binaries from scratch took 7 minutes there against 4 for
-debug. The other steps still use the debug compiler, and Linux still runs
-every world unoptimized under Bazel.
+Both lanes build the compiler and every test above it with the
+`port-compiler` Cargo profile: release optimizations with debug assertions
+and overflow checks kept on. The fiber, Pulse and Loom tests and the port
+ABI tier's Rust tests build for debug.
+
+The codegen swap point tests (`vesper-codegen-swap-test`) compare each
+corpus world built by the Rust emitters with the same world built through a
+Vesper hook: CLIF text and object bytes, and for sampled worlds a JIT run.
+Only the hooks' calls and the JIT runs need the host. An object for another
+target needs no machine of that kind, so the comparisons for the macOS and
+Windows objects run on `ubuntu-latest`, in `Codegen swap point (Linux for
+macOS)` and `(Linux for Windows)` (`CODEGEN_SWAP_TARGET`, which skips the JIT
+runs). They keep the sweep the native lanes ran: every fourth world for the
+pilot, control and walk-state swaps (`CODEGEN_SWAP_STEP=4`), every world for
+the others. `Platform validation complete` requires both. The native lanes
+then run the suite over every fourth corpus file (`CHECK_HARNESS_STRIDE=4`),
+skipping the two tests whose corpus worlds a quarter may lack
+(`a_divergent_hook_is_caught` and `box_drops_match_the_rust_emitter`, which
+check the harness and the Linux jobs run). So the drops, calls, scalar and
+sequence sweeps JIT-run about a quarter as many corpus worlds on macOS and
+Windows as before; the pilot, control and walk-state sweeps run as many.
+
+Checking the corpus, not comparing it, is most of each test binary's time.
+Built for debug, the suite took about 55 minutes of a 60 minute macOS job
+and 35-61 minutes on Windows (November 2026). On a 4-core Linux machine the
+whole sweep took 13.7 minutes optimized, and `self_host_codegen_seq` alone
+97 s against 319 s for debug; building the optimized test binaries from
+scratch took 7 minutes against 4 for debug. Over a quarter of the corpus the
+suite took 4.5 minutes. Bazel also runs the suite, unoptimized and for
+Linux objects, in `Self-host codegen differentials`.
 
 The rest of the port harness, every ported crate's tests against both builds
 and its divergence checks, is platform-neutral once the ABI tier passes. It

@@ -226,45 +226,52 @@ jobs:
       - run: cargo test --locked -p vesper-pulse --test drivers
       - run: cargo test --locked -p vesper-pulse --test pool
       - run: cargo test --locked -p vesper-loom-tuf --test offline system_symlink_ancestor_is_accepted -- --exact
-      - run: cargo build --locked --bin vesper
+      - name: Build the compiler (port-compiler profile)
+        # Optimized like the port shards' compiler, with debug assertions
+        # and overflow checks on. The tests below build with the same
+        # profile, so they reuse its dependencies: a separate debug build
+        # took 9 minutes of this job.
+        run: cargo build --locked --profile port-compiler --bin vesper
       - name: Validate native Mach-O executables
         if: ${{ hashFiles('.aspect/version.axl') != '' }}
         env:
-          VESPER_NATIVE_BINARY: target/debug/vesper
+          VESPER_NATIVE_BINARY: target/port-compiler/vesper
         run: aspect ci test-native-executables
       - name: Validate native Mach-O executables in a historical checkout
         if: ${{ hashFiles('.aspect/version.axl') == '' }}
         env:
-          VESPER_NATIVE_BINARY: target/debug/vesper
+          VESPER_NATIVE_BINARY: target/port-compiler/vesper
         run: scripts/ci/test-native-executables.sh
       - name: Test the Cranelift C-ABI shim
         # Self-hosting SH0 lane 4 (#1126): Vesper drives Cranelift through
         # crates/vesper-cranelift-sys, links the object it builds and runs it.
-        run: cargo test --locked -p vesper-cranelift-sys
+        run: cargo test --locked --profile port-compiler -p vesper-cranelift-sys
       - name: Test the codegen swap point
-        # Self-hosting SH4 lane 1 (#1275): lent handles and the pilot swap
-        # over every fourth corpus world (Linux runs all of them). Nearly
-        # all of its time is the compiler compiling corpus worlds, so it
-        # builds with the optimized `port-compiler` profile (debug
-        # assertions and overflow checks stay on): a debug build took 55 of
-        # the macOS job's 60 minutes, and its test binaries ran 3.3-3.5 times
-        # faster optimized (docs/ci-platforms.md).
+        # Self-hosting SH4 lane 1 (#1275): lent handles and the pilot swap,
+        # only the part that needs this machine: the Vesper hooks called
+        # here and the JIT runs, over every fourth corpus file
+        # (CHECK_HARNESS_STRIDE). The Mach-O objects of the whole sweep are
+        # compared on Linux in `Codegen swap point (Linux for macOS)`
+        # (docs/ci-platforms.md). Checking the corpus is most of each test
+        # binary's time, so a quarter of it took a third of the time. The
+        # two skipped tests need corpus worlds a quarter may lack, and
+        # check nothing host-specific; the Linux job runs them.
         env:
-          CODEGEN_SWAP_STEP: "4"
-        run: cargo test --locked --profile port-compiler -p vesper-codegen-swap-test
+          CHECK_HARNESS_STRIDE: "4"
+        run: cargo test --locked --profile port-compiler -p vesper-codegen-swap-test -- --skip a_divergent_hook_is_caught --skip box_drops_match_the_rust_emitter
       - name: Test the Vesper port export ABI
         # Only the host-sensitive tier of the port harness: the pilot's export
         # ABI v2/v3 libraries and divergence checks, package linking and the
         # closure guard. The ported crates run once, in the Linux job below.
         if: ${{ hashFiles('.aspect/version.axl') != '' }}
         env:
-          VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/vesper
+          VESPER_PORT_COMPILER: ${{ github.workspace }}/target/port-compiler/vesper
           VESPER_PORT_HARNESS_SCOPE: abi
         run: aspect ci test-port-abi
       - name: Test the Vesper port export ABI in a historical checkout
         if: ${{ hashFiles('.aspect/version.axl') == '' }}
         env:
-          VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/vesper
+          VESPER_PORT_COMPILER: ${{ github.workspace }}/target/port-compiler/vesper
           VESPER_PORT_HARNESS_SCOPE: abi
         run: scripts/test-port-harness.sh
 
@@ -307,51 +314,95 @@ jobs:
       - run: cargo test --locked -p vesper-pulse --test windows
       - run: cargo test --locked -p vesper-pulse --test drivers
       - run: cargo test --locked -p vesper-pulse --test pool
-      - run: cargo build --locked --bin vesper
+      - name: Build the compiler (port-compiler profile)
+        # Optimized like the port shards' compiler, with debug assertions
+        # and overflow checks on. The tests below build with the same
+        # profile, so they reuse its dependencies: a separate debug build
+        # took 9 minutes of this job.
+        run: cargo build --locked --profile port-compiler --bin vesper
       - name: Validate native COFF executables
         if: ${{ hashFiles('scripts/windows/test-native-executables.ps1') != '' }}
         shell: pwsh
         env:
-          VESPER_NATIVE_BINARY: target/debug/vesper.exe
+          VESPER_NATIVE_BINARY: target/port-compiler/vesper.exe
           VESPER_NATIVE_SUFFIX: .exe
         run: ./scripts/windows/test-native-executables.ps1
       - name: Validate native COFF executables in a historical checkout
         if: ${{ hashFiles('scripts/windows/test-native-executables.ps1') == '' }}
         env:
-          VESPER_NATIVE_BINARY: target/debug/vesper.exe
+          VESPER_NATIVE_BINARY: target/port-compiler/vesper.exe
           VESPER_NATIVE_SUFFIX: .exe
         run: bash scripts/ci/test-native-executables.sh
       - name: Test the Cranelift C-ABI shim
         # Self-hosting SH0 lane 4 (#1126): Vesper drives Cranelift through
         # crates/vesper-cranelift-sys, links the object it builds and runs it.
-        run: cargo test --locked -p vesper-cranelift-sys
+        run: cargo test --locked --profile port-compiler -p vesper-cranelift-sys
       - name: Test the codegen swap point
-        # Self-hosting SH4 lane 1 (#1275): lent handles and the pilot swap
-        # over every fourth corpus world (Linux runs all of them). Nearly
-        # all of its time is the compiler compiling corpus worlds, so it
-        # builds with the optimized `port-compiler` profile (debug
-        # assertions and overflow checks stay on): a debug build took 55 of
-        # the macOS job's 60 minutes, and its test binaries ran 3.3-3.5 times
-        # faster optimized (docs/ci-platforms.md).
+        # Self-hosting SH4 lane 1 (#1275): lent handles and the pilot swap,
+        # only the part that needs this machine: the Vesper hooks called
+        # here and the JIT runs, over every fourth corpus file
+        # (CHECK_HARNESS_STRIDE). The COFF objects of the whole sweep are
+        # compared on Linux in `Codegen swap point (Linux for Windows)`
+        # (docs/ci-platforms.md). Checking the corpus is most of each test
+        # binary's time, so a quarter of it took a third of the time. The
+        # two skipped tests need corpus worlds a quarter may lack, and
+        # check nothing host-specific; the Linux job runs them.
         env:
-          CODEGEN_SWAP_STEP: "4"
-        run: cargo test --locked --profile port-compiler -p vesper-codegen-swap-test
+          CHECK_HARNESS_STRIDE: "4"
+        run: cargo test --locked --profile port-compiler -p vesper-codegen-swap-test -- --skip a_divergent_hook_is_caught --skip box_drops_match_the_rust_emitter
       - name: Test the Vesper port export ABI
         # Only the host-sensitive tier of the port harness: the pilot's export
         # ABI v2/v3 libraries and divergence checks, package linking and the
         # closure guard. The ported crates run once, in the Linux job below.
         if: ${{ hashFiles('scripts/windows/test-port-abi.ps1') != '' }}
         env:
-          VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/vesper.exe
+          VESPER_PORT_COMPILER: ${{ github.workspace }}/target/port-compiler/vesper.exe
           VESPER_PORT_HARNESS_SCOPE: abi
         shell: pwsh
         run: ./scripts/windows/test-port-abi.ps1
       - name: Test the Vesper port export ABI in a historical checkout
         if: ${{ hashFiles('scripts/windows/test-port-abi.ps1') == '' }}
         env:
-          VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/vesper.exe
+          VESPER_PORT_COMPILER: ${{ github.workspace }}/target/port-compiler/vesper.exe
           VESPER_PORT_HARNESS_SCOPE: abi
         run: bash scripts/test-port-harness.sh
+
+  # The codegen swap point's macOS and Windows objects (#1275), compared
+  # on Linux: an object for another target needs no machine of that kind,
+  # so only the hooks' calls and the JIT runs stay on macOS and Windows.
+  # Same sweep as those jobs ran before: every fourth corpus world for the
+  # pilot, control and walk-state swaps, every world for the others.
+  codegen-swap:
+    needs: plan
+    if: ${{ always() && !cancelled() && needs.plan.result == 'success' }}
+    name: Codegen swap point (Linux for ${{ matrix.name }})${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            target: aarch64-apple-darwin
+          - name: Windows
+            target: x86_64-pc-windows-msvc
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - name: Verify exact checkout
+        env:
+          EXPECTED_SHA: ${{ needs.plan.outputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: codegen-swap
+      - name: Compare the codegen swap point's objects
+        env:
+          CODEGEN_SWAP_TARGET: ${{ matrix.target }}
+          CODEGEN_SWAP_STEP: "4"
+        run: cargo test --locked --profile port-compiler -p vesper-codegen-swap-test
 
   # The ported crates' tests and divergence checks are platform-neutral, so
   # they run once, here (#1010). Bazel on BuildBuddy builds the same ports.
@@ -463,7 +514,7 @@ jobs:
 
   complete:
     name: Platform validation complete
-    needs: [plan, platform, windows, ports]
+    needs: [plan, platform, windows, codegen-swap, ports]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     outputs:
@@ -475,6 +526,7 @@ jobs:
           PLAN_RESULT: ${{ needs.plan.result }}
           MAC_RESULT: ${{ needs.platform.result }}
           WINDOWS_RESULT: ${{ needs.windows.result }}
+          SWAP_RESULT: ${{ needs.codegen-swap.result }}
           PORTS_RESULT: ${{ needs.ports.result }}
           PORTS: ${{ needs.plan.outputs.ports }}
           CHECKED_SHA: ${{ needs.plan.outputs.sha }}
@@ -483,6 +535,7 @@ jobs:
           test "$PLAN_RESULT" = success
           test "$MAC_RESULT" = success
           test "$WINDOWS_RESULT" = success
+          test "$SWAP_RESULT" = success
           # The shards are skipped only when no port is affected.
           if [ "$PORTS_RESULT" != skipped ] || [ "$PORTS" != none ]; then
             test "$PORTS_RESULT" = success
