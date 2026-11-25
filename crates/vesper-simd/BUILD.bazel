@@ -37,12 +37,24 @@ vesper_port_object(
     target = VESPER_TARGET,
 )
 
-# The build script does not take the object (as Beacon's does): //:bin/vesper
-# builds it, and //:bin/vesper's run-time tools link this crate, so that
-# would be a dependency cycle.
+# The build script does not take the object (as Beacon's does): the
+# harness and //:bin/vesper are in each other's graphs through this crate's
+# users, which link the seed (seed/) for that reason.
 vesper_crate(
     # Lean resolves symlinked runfiles to the source tree and then rejects
     # them as outside --root, so these run in a copy of regular files.
     copy_test_cwd = ["test/model"],
     extra_test_data = ["//:lean"],
+)
+
+# The seed package (seed/) builds these same Rust sources without the port.
+exports_files(glob([
+    "src/**/*.rs",
+    "tests/**/*.rs",
+]))
+
+filegroup(
+    name = "rust_srcs",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//crates/vesper-simd/seed:__pkg__"],
 )
