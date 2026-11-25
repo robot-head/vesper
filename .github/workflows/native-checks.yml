@@ -1,7 +1,7 @@
 name: Native platform checks
 # Starts the required `macOS (AArch64)` and `Windows (x86_64 MSVC)` checks for
 # a pull request only once it is ready to merge (#1479): the merge gate passes
-# (scripts/ci/merge_gate.py, #1321) and the BuildBuddy checks, `Test all
+# (aspect ci merge-gate, #1321) and the BuildBuddy checks, `Test all
 # targets`, `Self-host differentials`, `Self-host differentials 2` (#1882),
 # `Self-host codegen differentials` (#1519) and `Native and acceptance scripts`, are green on its head commit.
 # Before, every push queued for one of the account's 5 macOS runners at once,
@@ -41,54 +41,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .native-checks-tools
+          persist-credentials: false
+          sparse-checkout: |
+            .aspect
+            .github/actions/aspect
+      - uses: ./.native-checks-tools/.github/actions/aspect
       - name: Find a pull request whose head is green on BuildBuddy
         id: pr
+        working-directory: .native-checks-tools
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.event.sha }}
-        run: |
-          set -euo pipefail
-          states=$(gh api "repos/$REPO/commits/$SHA/status" \
-            --jq '[.statuses[] | select(.context == "Test all targets" or .context == "Self-host differentials" or .context == "Native and acceptance scripts") | .state] | map(select(. == "success")) | length')
-          if [ "$states" != 3 ]; then
-            echo "BuildBuddy is not green on all three checks yet ($states of 3)"
-            exit 0
-          fi
-          # A head from before the codegen split (#1519) ran those tests in
-          # `Self-host differentials` and has no codegen status; any other
-          # head must have it green.
-          codegen=$(gh api "repos/$REPO/commits/$SHA/status" \
-            --jq '[.statuses[] | select(.context == "Self-host codegen differentials") | .state] | first // "absent"')
-          if [ "$codegen" != success ] && [ "$codegen" != absent ]; then
-            echo "Self-host codegen differentials is $codegen"
-            exit 0
-          fi
-          # Likewise a head from before the second self-host split (#1882)
-          # has no `Self-host differentials 2` status.
-          part2=$(gh api "repos/$REPO/commits/$SHA/status" \
-            --jq '[.statuses[] | select(.context == "Self-host differentials 2") | .state] | first // "absent"')
-          if [ "$part2" != success ] && [ "$part2" != absent ]; then
-            echo "Self-host differentials 2 is $part2"
-            exit 0
-          fi
-          pr=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq "[.[] | select(.state == \"open\" and .head.sha == \"$SHA\" and .head.repo.full_name == \"$REPO\")] | first // empty")
-          if [ -z "$pr" ]; then
-            echo "no open pull request has $SHA as its head"
-            exit 0
-          fi
-          number=$(jq -r .number <<<"$pr")
-          started=$(gh api "repos/$REPO/actions/workflows/platforms.yml/runs?event=workflow_dispatch&head_sha=$SHA&per_page=100" \
-            --jq '[.workflow_runs[] | select(.conclusion != "cancelled")] | length')
-          if [ "$started" != 0 ]; then
-            echo "Platforms already started for PR #$number at $SHA"
-            exit 0
-          fi
-          {
-            echo "number=$number"
-            echo "base=$(jq -r .base.ref <<<"$pr")"
-            echo "branch=$(jq -r .head.ref <<<"$pr")"
-          } >> "$GITHUB_OUTPUT"
+        run: aspect ci find-native-dispatch
       - name: Check out the pull request head for the merge gate
         if: steps.pr.outputs.number != ''
         uses: actions/checkout@v4
@@ -98,7 +67,7 @@ jobs:
           fetch-depth: 0
           sparse-checkout: |
             .github/actions
-            scripts/ci
+            .aspect
       - name: Merge gate
         if: steps.pr.outputs.number != ''
         uses: ./.gate/.github/actions/merge-gate
@@ -108,25 +77,11 @@ jobs:
           head-sha: ${{ github.event.sha }}
       - name: Start Platforms on the pull request branch
         if: steps.pr.outputs.number != ''
+        working-directory: .native-checks-tools
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.event.sha }}
           NUMBER: ${{ steps.pr.outputs.number }}
           BRANCH: ${{ steps.pr.outputs.branch }}
-        run: |
-          set -euo pipefail
-          # The run reports on the branch head, so it must still be this commit.
-          head=$(gh api "repos/$REPO/pulls/$NUMBER" --jq .head.sha)
-          if [ "$head" != "$SHA" ]; then
-            echo "PR #$NUMBER moved on to $head; its own BuildBuddy results start it"
-            exit 0
-          fi
-          if ! gh workflow run platforms.yml --repo "$REPO" --ref "$BRANCH" \
-              -f profile=pr -f checkout_ref="refs/pull/$NUMBER/merge" -f pull_request="$NUMBER"; then
-            # A branch from before #1479 has no `pull_request` input; its own
-            # pull request runs of Platforms already include macOS and Windows.
-            echo "::warning::could not dispatch Platforms on $BRANCH; merge main into it"
-            exit 0
-          fi
-          echo "started macOS and Windows for PR #$NUMBER at $SHA" >> "$GITHUB_STEP_SUMMARY"
+        run: aspect ci dispatch-native-checks

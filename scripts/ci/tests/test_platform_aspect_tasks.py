@@ -53,7 +53,7 @@ class AspectTaskTests(unittest.TestCase):
         self.write(path, (ROOT / path).read_text())
 
     def test_script_task_preserves_argv_cwd_environment_and_standard_streams(self):
-        self.write("scripts/ci/merge_gate.py", """\
+        self.write("scripts/ci/flip_gate.py", """\
 import json
 import os
 from pathlib import Path
@@ -68,7 +68,7 @@ print("child stderr", file=sys.stderr)
 """)
         args = ["--help", "", "two words", "$HOME", "*.py", "--", "line\nbreak"]
         result = self.aspect(
-            "ci", "merge-gate", "--", *args,
+            "ci", "flip-gate", "--", *args,
             stdin="input with spaces\n", env={"VESPER_TASK_TEST_VALUE": "value with spaces"},
         )
         self.assertEqual(json.loads(result.stdout), {
@@ -2460,14 +2460,14 @@ shutil.copy2({str(installer)!r}, Path(directory) / entry)
             ("import os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n", 128 + signal.SIGTERM),
         ):
             with self.subTest(status=status):
-                self.write("scripts/ci/merge_gate.py", body)
-                result = self.aspect("ci", "merge-gate", status=status)
+                self.write("scripts/ci/flip_gate.py", body)
+                result = self.aspect("ci", "flip-gate", status=status)
                 self.assertEqual(result.stdout, "")
 
     def test_missing_script_has_a_nonzero_status_and_diagnostic(self):
-        result = self.aspect("ci", "merge-gate", status=2)
+        result = self.aspect("ci", "flip-gate", status=2)
         self.assertEqual(result.stdout, "")
-        self.assertIn("merge_gate.py", result.stderr)
+        self.assertIn("flip_gate.py", result.stderr)
 
     def test_platform_suite_discovers_tests_from_workspace_root(self):
         self.write("scripts/ci/tests/test_platform_fixture.py", """\

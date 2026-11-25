@@ -43,6 +43,8 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertEqual(steps["ports"]["run"], "aspect ci choose-platform-ports")
         self.assertIn("!= ''", steps["ports"]["if"])
         self.assertIn("== ''", steps["legacy_ports"]["if"])
+        self.assertEqual(steps["legacy_ports"]["run"], steps["ports"]["run"])
+        self.assertEqual(steps["legacy_ports"]["env"]["PLATFORM_WORKSPACE"], "${{ github.workspace }}")
         self.assertEqual(plan["outputs"]["ports"], "${{ steps.ports.outputs.crates || steps.legacy_ports.outputs.crates }}")
 
     @unittest.skipUnless(shutil.which("aspect"), "Aspect unavailable")
@@ -59,7 +61,11 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertLess(native, tests)
         self.assertEqual(report["run"], "aspect ci plan-platform-workflow")
         self.assertIn("!= ''", report["if"])
-        self.assertIn("== ''", next(step["if"] for step in steps if step.get("id") == "legacy_plan"))
+        historical = next(step for step in steps if step.get("id") == "legacy_plan")
+        self.assertIn("== ''", historical["if"])
+        self.assertEqual(historical["run"], report["run"])
+        self.assertEqual(historical["env"]["PLATFORM_WORKSPACE"], "${{ github.workspace }}")
+        self.assertEqual(self.platforms["jobs"]["complete"]["steps"][-1]["run"], "aspect ci complete-platform-validation")
         for name in ("sha", "profile", "groups"):
             self.assertEqual(plan["outputs"][name],
                              "${{ steps.plan.outputs." + name + " || steps.legacy_plan.outputs." + name + " }}")
@@ -103,7 +109,8 @@ class PlatformWorkflowTests(unittest.TestCase):
             self.assertIn("always()", job["if"])
             self.assertIn("!cancelled()", job["if"])
             first = job["steps"][0]
-            self.assertEqual(first["run"], 'test "$PLAN_RESULT" = success')
+            self.assertEqual(first["if"], "needs.plan.result != 'success'")
+            self.assertEqual(first["run"], "exit 1")
             checkout = next(s for s in job["steps"] if s.get("uses") == "actions/checkout@v4")
             self.assertEqual(checkout["with"]["ref"], "${{ needs.plan.outputs.sha }}")
             self.assertTrue(any(s.get("name") == "Verify exact checkout" for s in job["steps"]))
@@ -215,7 +222,8 @@ class PlatformWorkflowTests(unittest.TestCase):
         ports = jobs["ports"]
         self.assertEqual(ports["runs-on"], "ubuntu-latest")
         self.assertEqual(ports["needs"], ["plan", "ports-compiler"])
-        self.assertEqual(ports["steps"][0]["run"], 'test "$PLAN_RESULT" = success')
+        self.assertEqual(ports["steps"][0]["if"], "needs.plan.result != 'success'")
+        self.assertEqual(ports["steps"][0]["run"], "exit 1")
         step = next(s for s in ports["steps"] if "aspect acceptance test-port-harness" in s.get("run", ""))
         self.assertNotIn("VESPER_PORT_HARNESS_SCOPE", step.get("env", {}))
         # One optimized compiler, built once and shared by every shard (#1103).
@@ -256,15 +264,17 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertEqual(shards_plan[8][0]["task"], ["crate", "sim-session", "test-port"])
 
     def test_plan_failure_fails_required_jobs(self):
-        for result in ("failure", "cancelled", "skipped", ""):
-            command = self.platforms["jobs"]["windows"]["steps"][0]["run"]
-            run = subprocess.run(["bash", "-c", command], env={**os.environ, "PLAN_RESULT": result})
-            self.assertNotEqual(run.returncode, 0)
-        run = subprocess.run(["bash", "-c", command], env={**os.environ, "PLAN_RESULT": "success"})
-        self.assertEqual(run.returncode, 0)
+        for name in ("platform", "windows", "ports"):
+            job = self.platforms["jobs"][name]
+            self.assertEqual(job["steps"][0]["run"], "exit 1")
+            self.assertEqual(job["steps"][0]["if"], "needs.plan.result != 'success'")
+        compiler_gate = self.platforms["jobs"]["ports"]["steps"][1]
+        self.assertEqual(compiler_gate["run"], "exit 1")
+        self.assertEqual(compiler_gate["if"], "needs.ports-compiler.result != 'success'")
 
+    @unittest.skipUnless(shutil.which("aspect"), "Aspect unavailable")
     def test_completion_emits_no_success_for_partial_or_skipped_platforms(self):
-        run = self.platforms["jobs"]["complete"]["steps"][0]["run"]
+        run = self.platforms["jobs"]["complete"]["steps"][-1]["run"]
         for result in ("failure", "skipped", "cancelled"):
             with tempfile.TemporaryDirectory() as temp:
                 output = Path(temp) / "outputs"
@@ -273,21 +283,22 @@ class PlatformWorkflowTests(unittest.TestCase):
                            "WINDOWS_RESULT": "success", "PORTS_RESULT": "success",
                            "CHECKED_SHA": "a" * 40, "PROFILE": "full",
                            "GITHUB_OUTPUT": str(output), failed: result}
-                    completed = subprocess.run(["bash", "-e", "-c", run], env=env)
+                    completed = subprocess.run(run.split(), cwd=ROOT, env=env, capture_output=True)
                     self.assertNotEqual(completed.returncode, 0)
                     self.assertFalse(output.exists())
 
+    @unittest.skipUnless(shutil.which("aspect"), "Aspect unavailable")
     def test_completion_accepts_skipped_shards_only_when_no_port_is_affected(self):
         # The shards skip as jobs when the plan names no port (#1321).
         self.assertIn("needs.plan.outputs.ports != 'none'", self.platforms["jobs"]["ports"]["if"])
-        run = self.platforms["jobs"]["complete"]["steps"][0]["run"]
+        run = self.platforms["jobs"]["complete"]["steps"][-1]["run"]
         for ports, expected in (("none", 0), ("vesper-aura", 1), ("", 1)):
             with tempfile.TemporaryDirectory() as temp:
                 output = Path(temp) / "outputs"
                 env = {**os.environ, "PLAN_RESULT": "success", "MAC_RESULT": "success",
                        "WINDOWS_RESULT": "success", "PORTS_RESULT": "skipped", "PORTS": ports,
                        "CHECKED_SHA": "a" * 40, "PROFILE": "pr", "GITHUB_OUTPUT": str(output)}
-                completed = subprocess.run(["bash", "-e", "-c", run], env=env)
+                completed = subprocess.run(run.split(), cwd=ROOT, env=env, capture_output=True)
                 self.assertEqual(completed.returncode != 0, bool(expected))
                 self.assertEqual(output.exists(), not expected)
 
@@ -324,7 +335,9 @@ class PlatformWorkflowTests(unittest.TestCase):
         # that queued for a runner ahead of them (#1479).
         self.assertFalse((ROOT / ".github/workflows/merge-gate.yml").exists())
         action = yaml.safe_load((ROOT / ".github/actions/merge-gate/action.yml").read_text())
-        self.assertIn("scripts/ci/merge_gate.py", action["runs"]["steps"][0]["run"])
+        setup, gate = action["runs"]["steps"]
+        self.assertTrue(setup["uses"].startswith("aspect-build/setup-aspect@"))
+        self.assertEqual(gate["run"], "aspect ci merge-gate-workflow")
         guarded = []
         for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
             flow = workflow(path.name)
@@ -340,6 +353,7 @@ class PlatformWorkflowTests(unittest.TestCase):
                 self.assertEqual(checkout["with"]["path"], ".gate")
                 self.assertEqual(checkout["with"]["ref"], "${{ github.event.pull_request.head.sha }}")
                 self.assertEqual(checkout["with"]["fetch-depth"], "0")
+                self.assertIn(".aspect", checkout["with"]["sparse-checkout"].splitlines())
                 self.assertEqual(gate["uses"], "./.gate/.github/actions/merge-gate", (path.name, name))
                 self.assertEqual(gate["with"]["head-sha"], "${{ github.event.pull_request.head.sha }}")
                 for step in (checkout, gate):
@@ -387,22 +401,17 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertIn("github.event.state == 'success'", job["if"])
         self.assertEqual(job["runs-on"], "ubuntu-latest")
         steps = job["steps"]
-        find = steps[0]["run"]
         for context in ("Test all targets", "Self-host differentials", "Self-host differentials 2",
                         "Self-host codegen differentials", "Native and acceptance scripts"):
             self.assertIn(context, job["if"])
-            self.assertIn(f'"{context}"', find)
-        self.assertIn('"$states" != 3', find)
-        self.assertIn('"$codegen" != success', find)
-        self.assertIn('"$part2" != success', find)
         names = [s.get("uses") or s.get("name") for s in steps]
         gate = names.index("./.gate/.github/actions/merge-gate")
-        dispatch = next(i for i, s in enumerate(steps) if "gh workflow run" in s.get("run", ""))
+        find = next(i for i, s in enumerate(steps) if s.get("run") == "aspect ci find-native-dispatch")
+        dispatch = next(i for i, s in enumerate(steps) if s.get("run") == "aspect ci dispatch-native-checks")
+        self.assertLess(find, gate)
         self.assertLess(gate, dispatch)
-        command = steps[dispatch]["run"]
-        for flag in ("platforms.yml", "-f profile=pr", '-f checkout_ref="refs/pull/$NUMBER/merge"',
-                     '-f pull_request="$NUMBER"', '--ref "$BRANCH"'):
-            self.assertIn(flag, command)
+        for index in (find, dispatch):
+            self.assertEqual(steps[index]["working-directory"], ".native-checks-tools")
         verify = next(s for s in self.platforms["jobs"]["plan"]["steps"]
                       if s.get("name") == "Verify the dispatched pull request commit")
         self.assertIn("inputs.pull_request != ''", verify["if"])
@@ -433,95 +442,9 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertEqual(full["with"]["checkout_ref"], "${{ needs.linux.outputs.sha }}")
         self.assertEqual(set(self.release["jobs"]["ready"]["needs"]), {"linux", "platforms"})
         self.assertNotIn("publish", self.release["jobs"])
+        self.assertEqual(self.release["jobs"]["linux"]["steps"][-1]["run"], "aspect ci require-release-linux")
+        self.assertEqual(self.release["jobs"]["ready"]["steps"][-2]["run"], "aspect ci attest-release-validation")
 
-    def gate(self, which, *, sha=None, checked=None, profile="full", statuses=None, resolved=None):
-        if not shutil.which("node"):
-            self.fail("Node is required to execute the actual GitHub release-gate scripts")
-        sha = "a" * 40 if sha is None else sha
-        if statuses is None:
-            statuses = [{"id": 1, "context": "Test all targets", "state": "success"},
-                        {"id": 2, "context": "Native and acceptance scripts", "state": "success"},
-                        {"id": 4, "context": "Self-host differentials", "state": "success"},
-                        {"id": 6, "context": "Self-host codegen differentials", "state": "success"},
-                        {"id": 8, "context": "Self-host differentials 2", "state": "success"}]
-        job = self.release["jobs"][which]
-        step = next(s for s in job["steps"] if s.get("uses") == "actions/github-script@v7")
-        code = step["with"]["script"]
-        with tempfile.TemporaryDirectory() as temp:
-            config = {
-                "code": code, "sha": sha, "checked": sha if checked is None else checked,
-                "profile": profile, "statuses": statuses,
-                "resolved": sha if resolved is None else resolved, "temp": temp,
-            }
-            program = """
-const cfg = JSON.parse(process.argv[1]);
-const outputs = {};
-const requests = [];
-const github = {
-  rest: {repos: {
-    getCommit: async options => { requests.push(options.ref); return {data: {sha: cfg.resolved}}; },
-    listCommitStatusesForRef: () => {},
-  }},
-  paginate: async (method, options) => { requests.push(options.ref); return cfg.statuses; },
-};
-const summary = {addHeading() {return this;}, addRaw() {return this;}, async write() {}};
-const core = {setOutput(name, value) {outputs[name] = value;}, summary};
-const context = {repo: {owner: "robot-head", repo: "vesper"}, runId: 123};
-const proc = {env: {CANDIDATE_SHA: cfg.sha, CHECKED_SHA: cfg.checked,
-                   CHECKED_PROFILE: cfg.profile, RUNNER_TEMP: cfg.temp}};
-const fn = new Function("github", "context", "core", "process", "require",
-                        "return (async () => {" + cfg.code + "})()");
-(async () => {
-  try {
-    await fn(github, context, core, proc, require);
-    console.log(JSON.stringify({ok: true, outputs, requests,
-      artifact: require("fs").existsSync(cfg.temp + "/release-validation.json")}));
-  } catch (error) {
-    console.log(JSON.stringify({ok: false, error: String(error), outputs, requests}));
-  }
-})();
-"""
-            result = subprocess.run(["node", "-e", program, json.dumps(config)],
-                                    check=True, text=True, capture_output=True)
-            return json.loads(result.stdout)
-
-    def test_release_gate_accepts_exact_green_candidate(self):
-        result = self.gate("linux")
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(result["outputs"]["sha"], "a" * 40)
-        self.assertEqual(set(result["requests"]), {"a" * 40})
-        result = self.gate("ready")
-        self.assertTrue(result["ok"], result)
-        self.assertTrue(result["artifact"])
-
-    def test_release_gate_rejects_moving_refs_and_wrong_commits(self):
-        for sha in ("main", "v1.0.0", "", "a" * 39, "A" * 40, "a" * 40 + ";bad"):
-            self.assertFalse(self.gate("linux", sha=sha)["ok"])
-        self.assertFalse(self.gate("linux", resolved="b" * 40)["ok"])
-        self.assertFalse(self.gate("ready", checked="b" * 40)["ok"])
-        self.assertFalse(self.gate("ready", profile="pr")["ok"])
-
-    def test_release_gate_uses_latest_linux_states_and_fails_closed(self):
-        good = [{"id": 1, "context": "Test all targets", "state": "success"},
-                {"id": 2, "context": "Native and acceptance scripts", "state": "success"},
-                {"id": 4, "context": "Self-host differentials", "state": "success"},
-                {"id": 6, "context": "Self-host codegen differentials", "state": "success"},
-                {"id": 8, "context": "Self-host differentials 2", "state": "success"}]
-        for which in ("linux", "ready"):
-            for state in ("failure", "error", "pending"):
-                for context in ("Test all targets", "Self-host differentials", "Self-host codegen differentials",
-                                "Self-host differentials 2"):
-                    statuses = good + [{"id": 9, "context": context, "state": state}]
-                    self.assertFalse(self.gate(which, statuses=statuses)["ok"])
-            # A candidate without every self-host check (#1519, #1882) is not ready.
-            self.assertFalse(self.gate(which, statuses=good[:4])["ok"])
-            self.assertFalse(self.gate(which, statuses=good[:3])["ok"])
-            self.assertFalse(self.gate(which, statuses=good[:2])["ok"])
-            self.assertFalse(self.gate(which, statuses=good[:1])["ok"])
-            self.assertFalse(self.gate(which, statuses=[])["ok"])
-            # Input order cannot let an old failure replace a newer success.
-            statuses = good + [{"id": 0, "context": "Test all targets", "state": "failure"}]
-            self.assertTrue(self.gate(which, statuses=statuses)["ok"])
 
 
 if __name__ == "__main__":

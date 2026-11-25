@@ -11,7 +11,7 @@ Lane pull requests edit only the STATUS tables here, never the generated
 file: .github/workflows/rust-census.yml regenerates it after each push to
 main and keeps one "Refresh the Rust census" pull request open with the
 result, and the merge gate stops CI for any other pull request that changes
-it (scripts/ci/merge_gate.py). The output names no commit, so merging the
+it (aspect ci merge-gate). The output names no commit, so merging the
 refresh leaves nothing new to refresh.
 
 Non-test lines: non-blank, non-comment lines outside `#[cfg(test)]` items,

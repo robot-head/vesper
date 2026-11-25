@@ -1,19 +1,24 @@
-load("./lib/script.axl", "command_task", "script_task")
+load("./lib/process.axl", "check")
+load("./lib/script.axl", "run_command", "script_task")
 
 flip_gate = script_task("flip-gate", ["ci"], "scripts/ci/flip_gate.py", "python3")
-merge_gate = script_task("merge-gate", ["ci"], "scripts/ci/merge_gate.py", "python3")
 test_platform_profile = script_task("test-platform-profile", ["ci"], "scripts/ci/test-platform-profile.py", "python3")
 
 tests_aspect_tasks = script_task("aspect-tasks", ["ci", "tests"], "scripts/ci/tests/test_platform_aspect_tasks.py", "python3")
 tests_flip_gate = script_task("flip-gate", ["ci", "tests"], "scripts/ci/tests/test_platform_flip_gate.py", "python3")
-tests_merge_gate = script_task("merge-gate", ["ci", "tests"], "scripts/ci/tests/test_platform_merge_gate.py", "python3")
 tests_profile_runner = script_task("profile-runner", ["ci", "tests"], "scripts/ci/tests/test_platform_profile_runner.py", "python3")
 tests_workflows = script_task("workflows", ["ci", "tests"], "scripts/ci/tests/test_platform_workflows.py", "python3")
 
-platform_tests = command_task(
-    "platform-tests",
-    ["ci"],
-    "Run the platform planning, policy and workflow tests",
-    "python3",
-    ["-m", "unittest", "discover", "-s", "scripts/ci/tests", "-p", "test_platform*.py"],
+def _platform_tests(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    for suite in ["merge-gate", "hardware-ci", "workflow-tasks", "platform-completion", "release-validation"]:
+        check(ctx, ctx.std.env.current_exe(), ["ci", "tests", suite], root)
+    return run_command(ctx, "python3", ["-m", "unittest", "discover", "-s", "scripts/ci/tests", "-p", "test_platform*.py"], True, "")
+
+platform_tests = task(
+    kind = "platform-tests",
+    group = ["ci"],
+    summary = "Run the platform planning, policy and workflow tests",
+    implementation = _platform_tests,
+    args = {"tool_args": args.trailing_var_args(description = "Optional unittest flags for the platform tests.")},
 )

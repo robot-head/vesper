@@ -90,7 +90,7 @@ jobs:
           fetch-depth: 0
           sparse-checkout: |
             .github/actions
-            scripts/ci
+            .aspect
       - name: Merge gate
         if: github.event_name == 'pull_request'
         uses: ./.gate/.github/actions/merge-gate
@@ -116,9 +116,7 @@ jobs:
       - name: Test actual formatter with macro and complete-function recovery sources
         run: cargo test --locked -p vesper-fmt --all-targets
       - name: Test actual CLI, current editor actions and original-buffer recovery
-        run: >-
-          cargo test --locked -p vesper --lib --test stylus_cli --test fmt_cli
-          --test lsp_actions --test lsp_cli --test recovery_cli --test forge_cli
+        run: cargo test --locked -p vesper --lib --test stylus_cli --test fmt_cli --test lsp_actions --test lsp_cli --test recovery_cli --test forge_cli
       - name: Check strict formatter and source integration Clippy
         run: cargo clippy --locked -p vesper -p vesper-fmt --all-targets -- -D warnings
       - name: Execute actual formatting and stdio acceptance

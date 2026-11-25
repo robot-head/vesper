@@ -77,7 +77,7 @@ jobs:
           fetch-depth: 0
           sparse-checkout: |
             .github/actions
-            scripts/ci
+            .aspect
       - name: Merge gate
         if: github.event_name == 'pull_request'
         uses: ./.gate/.github/actions/merge-gate
@@ -125,7 +125,7 @@ jobs:
           fetch-depth: 0
           sparse-checkout: |
             .github/actions
-            scripts/ci
+            .aspect
       - name: Merge gate
         if: github.event_name == 'pull_request'
         uses: ./.gate/.github/actions/merge-gate
@@ -141,6 +141,4 @@ jobs:
       - name: Install Lean
         run: aspect ci install-lean
       - name: Two clean seed builds compile the corpus bit-identically
-        run: >-
-          cargo test --locked --release -p vesper-codegen-verified --test model --
-          --ignored two_seed_builds_compile_the_corpus_bit_identically --nocapture
+        run: cargo test --locked --release -p vesper-codegen-verified --test model -- --ignored two_seed_builds_compile_the_corpus_bit_identically --nocapture

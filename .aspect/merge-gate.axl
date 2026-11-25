@@ -1,0 +1,162 @@
+"""Determine whether a PR can merge and enforce that decision in Actions."""
+
+load("./lib/process.axl", "capture", "check", "command", "exit_code", "root_path")
+
+_CENSUS = "docs/maintenance/rust-census.md"
+_MAIN = "origin/main"
+_USAGE = "Pass -- --number N --base-ref BRANCH --head REF --open-prs FILE [--main REF]."
+
+def _commits(ctx, root, revision, first_parent = False):
+    args = ["rev-list", "--first-parent"] if first_parent else ["rev-list"]
+    return {sha: True for sha in capture(ctx, "git", args + [revision], root).split()}
+
+def _git_status(ctx, root, args):
+    return exit_code(command(ctx, "git", args, root).stdout("null").stderr("null").status())
+
+def blockers(ctx, root, number, base, head, main, open_prs):
+    reasons = []
+    if base != "main":
+        reasons.append("its base is %s, not main" % base)
+    revision = main + ".." + head
+    carried = _commits(ctx, root, revision)
+    own = _commits(ctx, root, revision, first_parent = True)
+    merged = {sha: True for sha in carried if sha not in own}
+    for pr in open_prs:
+        if pr["number"] == number or pr.get("base", "main") != "main":
+            continue
+        theirs = _commits(ctx, root, main + ".." + pr["ref"], first_parent = True)
+        shared = len([sha for sha in merged if sha in theirs])
+        if shared:
+            reasons.append("it carries %d commit(s) of open PR #%d" % (shared, pr["number"]))
+    identity = ["-c", "user.name=merge-gate", "-c", "user.email=merge-gate@users.noreply.github.com"]
+    if _git_status(ctx, root, identity + ["merge-tree", "--write-tree", main, head]):
+        reasons.append("it conflicts with main")
+    changed = capture(ctx, "git", ["diff", "--name-only", "-z", main + "..." + head], root).split("\x00")
+    paths = [path for path in changed if path]
+    if _CENSUS in paths and len(paths) > 1 and _git_status(ctx, root, ["diff", "--quiet", main, head, "--", _CENSUS]):
+        reasons.append("it changes %s, which only the census refresh PR updates: run `git checkout %s -- %s` and keep the STATUS edits in scripts/rust-census.py" % (_CENSUS, main, _CENSUS))
+    return reasons
+
+def _decision(number, reasons):
+    if not reasons:
+        return "PR #%d can merge: CI runs\n" % number
+    return "".join(["PR #%d cannot merge yet: %s\n" % (number, reason) for reason in reasons])
+
+def _decimal(value):
+    return bool(value) and all([char in "0123456789" for char in value.elems()])
+
+def _direct(ctx: TaskContext) -> int:
+    options = {}
+    pending = ""
+    for value in ctx.args.tool_args:
+        if pending:
+            if value.startswith("--"):
+                ctx.std.process.exit(2, "Missing value for " + pending)
+            options[pending] = value
+            pending = ""
+        elif value in ["-h", "--help"]:
+            ctx.std.io.stdout.write(_USAGE + "\n")
+            return 0
+        else:
+            flag, equals, argument = value.partition("=")
+            if flag not in ["--number", "--base-ref", "--head", "--main", "--open-prs"]:
+                ctx.std.process.exit(2, "Unknown option: " + value)
+            if equals:
+                options[flag] = argument
+            else:
+                pending = flag
+    if pending or not all([options.get(flag) for flag in ["--number", "--base-ref", "--head", "--open-prs"]]) or not _decimal(options["--number"]):
+        ctx.std.process.exit(2, _USAGE)
+    root = ctx.std.env.aspect_root_dir()
+    prs = json.decode(ctx.std.fs.read_to_string(root_path(ctx.std.env.current_dir(), options["--open-prs"])))
+    number = int(options["--number"])
+    reasons = blockers(ctx, root, number, options["--base-ref"], options["--head"], options.get("--main", _MAIN), prs)
+    ctx.std.io.stdout.write(_decision(number, reasons))
+    return 1 if reasons else 0
+
+merge_gate = task(
+    kind = "merge-gate",
+    group = ["ci"],
+    summary = "Check whether a pull request can merge",
+    implementation = _direct,
+    args = {"tool_args": args.trailing_var_args(description = _USAGE)},
+)
+
+def gate_workflow(settings, run, get, cancel, analyze, append, tell):
+    repo = "repos/" + settings.repo
+    run("git", ["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"])
+    prs = []
+    refspecs = []
+    for row in get(repo + "/pulls?state=open&per_page=100", '.[] | [.number, .base.ref] | @tsv').splitlines():
+        number, base = row.split("\t")
+        if not _decimal(number):
+            fail("Invalid pull request number from GitHub: " + number)
+        ref = "refs/gate/pr/" + number
+        prs.append({"number": int(number), "base": base, "ref": ref})
+        refspecs.append("+refs/pull/" + number + "/head:" + ref)
+    if refspecs:
+        run("git", ["fetch", "--quiet", "origin"] + refspecs)
+    reasons = analyze(prs)
+    report = _decision(settings.number, reasons)
+    tell(report)
+    append(settings.output, "blocked=%s\n" % ("true" if reasons else "false"))
+    if not reasons:
+        return 0
+    append(settings.summary, "### CI skipped: this pull request cannot merge yet\n" + report +
+           "\nPush again once the parent has merged or the conflict is fixed.\n")
+    for attempt in range(3):
+        for row in get(repo + "/actions/runs?head_sha=" + settings.head + "&per_page=100", '.workflow_runs[] | [.id, .status] | @tsv').splitlines():
+            run_id, status = row.split("\t")
+            if not _decimal(run_id):
+                fail("Invalid Actions run ID from GitHub: " + run_id)
+            if run_id != settings.run_id and status != "completed":
+                tell("cancelling run " + run_id + "\n")
+                cancel(repo + "/actions/runs/" + run_id + "/cancel")
+        if attempt < 2:
+            run("sleep", ["20"])
+    cancel(repo + "/actions/runs/" + settings.run_id + "/cancel")
+    return 1
+
+def _workflow(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    required = ["REPO", "NUMBER", "BASE_REF", "HEAD_SHA", "RUN_ID", "GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY"]
+    env = {name: ctx.std.env.var(name) for name in required}
+    for name in required:
+        if not env[name]:
+            ctx.std.process.exit(2, name + " is required")
+    if not _decimal(env["NUMBER"]) or not _decimal(env["RUN_ID"]):
+        ctx.std.process.exit(2, "NUMBER and RUN_ID must be decimal")
+    settings = struct(
+        repo = env["REPO"],
+        number = int(env["NUMBER"]),
+        base = env["BASE_REF"],
+        head = env["HEAD_SHA"],
+        run_id = env["RUN_ID"],
+        output = env["GITHUB_OUTPUT"],
+        summary = env["GITHUB_STEP_SUMMARY"],
+    )
+
+    def run(tool, args):
+        check(ctx, tool, args, root)
+
+    def get(endpoint, query):
+        return capture(ctx, "gh", ["api", "--paginate", endpoint, "--jq", query], root)
+
+    def cancel(endpoint):
+        command(ctx, "gh", ["api", "-X", "POST", endpoint], root).stdout("null").status()
+
+    def analyze(prs):
+        return blockers(ctx, root, settings.number, settings.base, settings.head, _MAIN, prs)
+
+    def append(path, value):
+        if not ctx.std.fs.try_append(path, value):
+            fail("Cannot write GitHub Actions file: " + path)
+
+    return gate_workflow(settings, run, get, cancel, analyze, append, ctx.std.io.stdout.write)
+
+merge_gate_workflow = task(
+    kind = "merge-gate-workflow",
+    group = ["ci"],
+    summary = "Run the GitHub Actions merge gate",
+    implementation = _workflow,
+)

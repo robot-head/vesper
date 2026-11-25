@@ -1,0 +1,234 @@
+"""Prepare dependencies and run hardware and interop checks on CI."""
+
+load("./lib/process.axl", "capture", "check", "command", "exit_code", "scratch_dir")
+
+def _required(ctx, name):
+    value = ctx.std.env.var(name)
+    if not value:
+        ctx.std.process.exit(2, name + " is required")
+    return value
+
+def _install(ctx, root, packages, recommends = False):
+    check(ctx, "sudo", ["apt-get", "update"], root)
+    flags = [] if recommends else ["--no-install-recommends"]
+    check(ctx, "sudo", ["apt-get", "install", "-y"] + flags + packages, root)
+
+def _install_qemu(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    _install(ctx, root, ["qemu-user"] + _required(ctx, "PACKAGES").split(), recommends = True)
+    for emulator in ["qemu-aarch64", "qemu-riscv64"]:
+        output = capture(ctx, emulator, ["--version"], root)
+        ctx.std.io.stdout.write(output.partition("\n")[0] + "\n")
+    return 0
+
+install_scalable_qemu = task(
+    kind = "install-scalable-qemu",
+    group = ["ci"],
+    summary = "Install the cross linker and QEMU for scalable vector tests",
+    implementation = _install_qemu,
+)
+
+def run_scalable_suite(run, target, linker, qemu = "", cpu = "", require = "", absent = False):
+    prefix = "CARGO_TARGET_" + target.upper().replace("-", "_")
+    env = {prefix + "_LINKER": linker}
+    if cpu:
+        env[prefix + "_RUNNER"] = qemu + " -cpu " + cpu
+        if not absent:
+            env[require] = "1"
+    tool = "env" if absent else "cargo"
+    args = ["-u", require, "cargo"] if absent else []
+    args += ["test", "--locked", "--release", "--target", target]
+    flags = ["--", "--nocapture"] if cpu else ["--no-run"]
+    for package, suite in [("vesper-simd", "vvec"), ("vesper-serde-seed", "simd_scalable")]:
+        run(tool, args + ["-p", package, "--test", suite] + flags, env)
+
+def _scalable(ctx: TaskContext, build: bool) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    target = _required(ctx, "TARGET")
+    linker = _required(ctx, "LINKER")
+
+    def run(tool, args, env):
+        check(ctx, tool, args, root, env)
+
+    if build:
+        run_scalable_suite(run, target, linker)
+        return 0
+    qemu = _required(ctx, "QEMU")
+    require = _required(ctx, "REQUIRE")
+    for cpu in _required(ctx, "CPUS").split():
+        ctx.std.io.stdout.write("::group::-cpu " + cpu + "\n")
+        run_scalable_suite(run, target, linker, qemu, cpu, require)
+        ctx.std.io.stdout.write("::endgroup::\n")
+    # Without the vector unit the paths must refuse with typed errors.
+    without = _required(ctx, "WITHOUT")
+    ctx.std.io.stdout.write("::group::-cpu " + without + " (vector unit absent)\n")
+    run_scalable_suite(run, target, linker, qemu, without, require, absent = True)
+    ctx.std.io.stdout.write("::endgroup::\n")
+    return 0
+
+build_scalable_vectors = task(
+    kind = "build-scalable-vectors",
+    group = ["ci"],
+    summary = "Cross-compile both scalable vector test targets",
+    implementation = lambda ctx: _scalable(ctx, True),
+)
+
+test_scalable_vectors = task(
+    kind = "test-scalable-vectors",
+    group = ["ci"],
+    summary = "Run both vector test suites across all configured CPU variants",
+    implementation = lambda ctx: _scalable(ctx, False),
+)
+
+def prepare_kafka(run, hash_file, append, archive, directory, version, scala, checksum):
+    name = "kafka_" + scala + "-" + version
+    run("curl", ["-sSfL", "-o", archive, "https://archive.apache.org/dist/kafka/" + version + "/" + name + ".tgz"])
+    actual = hash_file(archive)
+    if actual != checksum.lower():
+        return False
+    run("tar", ["xzf", archive, "-C", directory])
+    append("VESPER_KAFKA_HOME=" + directory + "/" + name + "\n")
+    return True
+
+def _kafka(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    output = _required(ctx, "GITHUB_ENV")
+
+    def append(value):
+        if not ctx.std.fs.try_append(output, value):
+            fail("Cannot write the Kafka installation path")
+
+    verified = prepare_kafka(
+        lambda tool, argv: check(ctx, tool, argv, root),
+        lambda archive: capture(ctx, "sha512sum", [archive], root).split()[0],
+        append,
+        scratch_dir(ctx, "vesper-kafka-") + "/kafka.tgz",
+        _required(ctx, "RUNNER_TEMP"),
+        _required(ctx, "KAFKA_VERSION"),
+        _required(ctx, "KAFKA_SCALA"),
+        _required(ctx, "KAFKA_SHA512"),
+    )
+    if not verified:
+        ctx.std.process.exit(1, "Apache Kafka archive checksum mismatch")
+    return 0
+
+install_kafka = task(
+    kind = "install-kafka",
+    group = ["ci"],
+    summary = "Download and verify the pinned Apache Kafka broker",
+    implementation = _kafka,
+)
+
+def _kafka_version(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    kafka = _required(ctx, "VESPER_KAFKA_HOME")
+    check(ctx, "java", ["-version"], root)
+    check(ctx, kafka + "/bin/kafka-server-start.sh", ["--version"], root)
+    return 0
+
+report_kafka = task(
+    kind = "report-kafka",
+    group = ["ci"],
+    summary = "Report the Java and Apache Kafka versions",
+    implementation = _kafka_version,
+)
+
+def _vulkan_install(ctx: TaskContext, desktop: bool) -> int:
+    packages = ["mesa-vulkan-drivers", "libvulkan1", "vulkan-validationlayers", "vulkan-tools"]
+    if desktop:
+        packages += ["xvfb", "libxcb1"]
+    _install(ctx, ctx.std.env.aspect_root_dir(), packages)
+    return 0
+
+install_vulkan = task(
+    kind = "install-vulkan",
+    group = ["ci"],
+    summary = "Install the Vulkan software device and validation layer",
+    implementation = lambda ctx: _vulkan_install(ctx, False),
+)
+
+install_desktop_vulkan = task(
+    kind = "install-desktop-vulkan",
+    group = ["ci"],
+    summary = "Install Vulkan, Xvfb and XCB for desktop tests",
+    implementation = lambda ctx: _vulkan_install(ctx, True),
+)
+
+def setup_udmabuf(exists, run, capture, tell):
+    device = "/dev/udmabuf"
+    if not exists(device) and run("sudo", ["modprobe", "udmabuf"]):
+        kernel = capture("uname", ["-r"]).strip()
+        if run("sudo", ["apt-get", "install", "-y", "--no-install-recommends", "linux-modules-extra-" + kernel]) or run("sudo", ["modprobe", "udmabuf"]):
+            tell("udmabuf unavailable\n")
+    if exists(device):
+        status = run("sudo", ["chmod", "a+rw", device])
+        return status or run("ls", ["-l", device])
+    return 0
+
+def _udmabuf(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    return setup_udmabuf(
+        ctx.std.fs.exists,
+        lambda tool, args: exit_code(command(ctx, tool, args, root).status()),
+        lambda tool, args: capture(ctx, tool, args, root),
+        ctx.std.io.stdout.write,
+    )
+
+prepare_udmabuf = task(
+    kind = "prepare-udmabuf",
+    group = ["ci"],
+    summary = "Enable the Vulkan sync-fd backing device when available",
+    implementation = _udmabuf,
+)
+
+def _report_vulkan(ctx: TaskContext, desktop: bool) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    if desktop:
+        result = command(ctx, "vulkaninfo", [], root).stdout("piped").spawn().wait_with_output()
+        extensions = [line for line in result.stdout.splitlines() if any([name in line for name in ["external_semaphore_fd", "external_fence_fd", "xcb_surface"]])]
+        ctx.std.io.stdout.write("\n".join(extensions or ["no sync-fd or XCB extensions"]) + "\n")
+        check(ctx, "dpkg-query", ["-W", "mesa-vulkan-drivers", "vulkan-validationlayers", "libvulkan1"], root)
+    else:
+        installed = capture(ctx, "dpkg", ["-l", "mesa-vulkan-drivers", "libvulkan1"], root).splitlines()
+        ctx.std.io.stdout.write("\n".join(installed[-2:]) + "\n")
+    check(ctx, "vulkaninfo", ["--summary"], root)
+    return 0
+
+report_vulkan = task(
+    kind = "report-vulkan",
+    group = ["ci"],
+    summary = "Report the Vulkan software device",
+    implementation = lambda ctx: _report_vulkan(ctx, False),
+)
+
+report_desktop_vulkan = task(
+    kind = "report-desktop-vulkan",
+    group = ["ci"],
+    summary = "Report XCB and sync-fd extensions and the Vulkan device",
+    implementation = lambda ctx: _report_vulkan(ctx, True),
+)
+
+def gpu_validation_result(output, status, tell):
+    tell(output)
+    if status:
+        return status
+    if "Validation Error" in output:
+        tell("::error::the Vulkan validation layer reported errors\n")
+        return 1
+    return 0
+
+def _validate_gpu(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    path = root + "/validation.log"
+    log = ctx.std.fs.create(path)
+    argv = ["test", "--locked", "-p", "vesper-gpu-compute", "-p", "vesper-kinetic-gpu", "--", "--nocapture", "--test-threads=1"]
+    status = command(ctx, "cargo", argv, root).stdout(log).stderr(log).status()
+    log.close()
+    return gpu_validation_result(ctx.std.fs.read_to_string(path), exit_code(status), ctx.std.io.stdout.write)
+
+validate_gpu = task(
+    kind = "validate-gpu",
+    group = ["ci"],
+    summary = "Run GPU tests and reject validation layer errors",
+    implementation = _validate_gpu,
+)

@@ -262,7 +262,7 @@ def _verify_dispatch(ctx: TaskContext, root: str, head: str, requested: str):
         _error(ctx, "checkout is neither the dispatched PR head nor its test merge")
 
 def _verify_workflow_checkout(ctx: TaskContext) -> int:
-    root = ctx.std.env.aspect_root_dir()
+    root = ctx.std.env.var("PLATFORM_WORKSPACE") or ctx.std.env.aspect_root_dir()
     requested = ctx.std.env.var("PR_HEAD")
     if not requested:
         _error(ctx, "PR_HEAD is required")
@@ -271,7 +271,7 @@ def _verify_workflow_checkout(ctx: TaskContext) -> int:
     return 0
 
 def _run_workflow(ctx: TaskContext) -> int:
-    root = ctx.std.env.aspect_root_dir()
+    root = ctx.std.env.var("PLATFORM_WORKSPACE") or ctx.std.env.aspect_root_dir()
     head = capture(ctx, "git", ["rev-parse", "HEAD"], root).strip()
     directory = ctx.std.env.var("RUNNER_TEMP")
     output = ctx.std.env.var("GITHUB_OUTPUT")
@@ -361,7 +361,7 @@ def _verify_exact_checkout(ctx: TaskContext) -> int:
     expected = ctx.std.env.var("EXPECTED_SHA")
     if not expected:
         _error(ctx, "EXPECTED_SHA is required")
-    root = ctx.std.env.aspect_root_dir()
+    root = ctx.std.env.var("PLATFORM_WORKSPACE") or ctx.std.env.aspect_root_dir()
     actual = capture(ctx, "git", ["rev-parse", "HEAD"], root).strip()
     if actual != expected:
         _error(ctx, "expected checkout %s, found %s" % (expected, actual))

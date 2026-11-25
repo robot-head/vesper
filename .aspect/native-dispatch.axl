@@ -1,0 +1,98 @@
+"""Dispatch Platforms once the BuildBuddy checks on a PR head pass."""
+
+load("./lib/process.axl", "capture", "command")
+
+_REQUIRED = ["Test all targets", "Self-host differentials", "Native and acceptance scripts"]
+_SPLIT = ["Self-host codegen differentials", "Self-host differentials 2"]
+
+def find_dispatch(repo, sha, get, tell):
+    statuses = {}
+    for entry in get("/commits/" + sha + "/status")["statuses"]:
+        if entry["context"] not in statuses:
+            statuses[entry["context"]] = entry["state"]
+    passed = len([name for name in _REQUIRED if statuses.get(name) == "success"])
+    if passed != len(_REQUIRED):
+        tell("BuildBuddy is not green on all three checks yet (%d of 3)\n" % passed)
+        return None
+    # Heads from before a lane was split can lack that lane's status.
+    for name in _SPLIT:
+        state = statuses.get(name)
+        if state != None and state != "success":
+            tell("%s is %s\n" % (name, state))
+            return None
+    for pr in get("/commits/" + sha + "/pulls"):
+        head = pr["head"]
+        if pr["state"] == "open" and head["sha"] == sha and (head.get("repo") or {}).get("full_name") == repo:
+            runs = get("/actions/workflows/platforms.yml/runs?event=workflow_dispatch&head_sha=" + sha + "&per_page=100")["workflow_runs"]
+            if any([run["conclusion"] != "cancelled" for run in runs]):
+                tell("Platforms already started for PR #%d at %s\n" % (pr["number"], sha))
+                return None
+            return {"number": str(pr["number"]), "base": pr["base"]["ref"], "branch": head["ref"]}
+    tell("no open pull request has %s as its head\n" % sha)
+    return None
+
+def dispatch(repo, sha, number, branch, get, run, tell):
+    head = get("/pulls/" + number)["head"]["sha"]
+    if head != sha:
+        tell("PR #%s moved on to %s; its own BuildBuddy results start it\n" % (number, head))
+        return ""
+    argv = [
+        "workflow", "run", "platforms.yml", "--repo", repo, "--ref", branch,
+        "-f", "profile=pr", "-f", "checkout_ref=refs/pull/" + number + "/merge", "-f", "pull_request=" + number,
+    ]
+    if not run(argv):
+        # Branches from before #1479 can lack the pull_request input.
+        tell("::warning::could not dispatch Platforms on %s; merge main into it\n" % branch)
+        return ""
+    return "started macOS and Windows for PR #%s at %s\n" % (number, sha)
+
+def _required(ctx, name):
+    value = ctx.std.env.var(name)
+    if not value:
+        ctx.std.process.exit(2, name + " is required")
+    return value
+
+def _get(ctx, root, repo, path):
+    return json.decode(capture(ctx, "gh", ["api", "repos/" + repo + path], root))
+
+def _append(ctx, variable, text):
+    if not ctx.std.fs.try_append(_required(ctx, variable), text):
+        fail("Cannot write " + variable)
+
+def _find(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    repo = _required(ctx, "REPO")
+    selected = find_dispatch(repo, _required(ctx, "SHA"), lambda path: _get(ctx, root, repo, path), ctx.std.io.stdout.write)
+    if selected:
+        _append(ctx, "GITHUB_OUTPUT", "".join(["%s=%s\n" % (key, value) for key, value in selected.items()]))
+    return 0
+
+def _dispatch(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    repo = _required(ctx, "REPO")
+    summary = dispatch(
+        repo,
+        _required(ctx, "SHA"),
+        _required(ctx, "NUMBER"),
+        _required(ctx, "BRANCH"),
+        lambda path: _get(ctx, root, repo, path),
+        lambda argv: command(ctx, "gh", argv, root).status().success,
+        ctx.std.io.stdout.write,
+    )
+    if summary:
+        _append(ctx, "GITHUB_STEP_SUMMARY", summary)
+    return 0
+
+find_native_dispatch = task(
+    kind = "find-native-dispatch",
+    group = ["ci"],
+    summary = "Find a same-repository pull request ready for native platform checks",
+    implementation = _find,
+)
+
+dispatch_native_checks = task(
+    kind = "dispatch-native-checks",
+    group = ["ci"],
+    summary = "Dispatch Platforms if the selected pull request head is still current",
+    implementation = _dispatch,
+)

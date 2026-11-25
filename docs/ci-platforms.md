@@ -91,7 +91,7 @@ finished (#1321). To keep pull requests within the limit:
   that wants the port shards before merging can dispatch Platforms on its
   branch with profile `pr` and `pull_request` left empty; that runs every
   port shard.
-- The merge gate (`.github/actions/merge-gate`, `scripts/ci/merge_gate.py`)
+- The merge gate (`.github/actions/merge-gate`, `aspect ci merge-gate`)
   enforces the project rule that pull requests which cannot merge yet get no
   CI: when a pull request's base is not main, its branch carries another open
   pull request's commits (a merged-in parent that has not landed), or it
