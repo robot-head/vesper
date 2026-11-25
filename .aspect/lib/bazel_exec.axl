@@ -2,7 +2,7 @@
 
 load("./process.axl", "capture", "check", "command", "exit_code", "root_path")
 
-def executable(ctx: TaskContext, root: str, label: str) -> str:
+def executable(ctx: TaskContext, root: str, label: str, absolute: bool = True) -> str:
     manifest = ctx.std.env.var("VESPER_BAZEL_EXECUTABLES")
     if manifest:
         content = ctx.std.fs.try_read_to_string(root_path(root, manifest)) or ""
@@ -11,7 +11,7 @@ def executable(ctx: TaskContext, root: str, label: str) -> str:
             if len(fields) == 2 and fields[0] == label:
                 output = root_path(root, fields[1])
                 if ctx.std.fs.exists(output) and ctx.std.fs.metadata(output).is_file:
-                    return output
+                    return output if absolute else fields[1]
     bazel = ctx.std.env.var("BAZEL") or "bazel"
     flags = (ctx.std.env.var("BAZEL_FLAGS") or "").split()
     build = command(ctx, bazel, ["build"] + flags + [label], root).stdout("piped").spawn().wait_with_output()
@@ -21,7 +21,29 @@ def executable(ctx: TaskContext, root: str, label: str) -> str:
     outputs = capture(ctx, bazel, ["cquery"] + flags + ["--output=files", label], root).splitlines()
     if not outputs:
         ctx.std.process.exit(1, "Bazel did not return an executable for " + label)
-    return root_path(root, outputs[0])
+    return root_path(root, outputs[0]) if absolute else outputs[0]
 
 def run_target(ctx: TaskContext, root: str, label: str, args: list[str] = []):
     check(ctx, executable(ctx, root, label), args, root)
+
+_OUTPUT = 'str(target.label) + " " + (target.files.to_list()[0].path if target.files.to_list() else "")'
+
+def prebuild_executables(ctx: TaskContext, root: str, path: str, targets: list[str]) -> int | None:
+    bazel = ctx.std.env.var("BAZEL") or "bazel"
+    flags = (ctx.std.env.var("BAZEL_FLAGS") or "").split()
+    build = command(ctx, bazel, ["build"] + flags + targets, root).stdout("piped").spawn().wait_with_output()
+    ctx.std.io.stderr.write(build.stdout)
+    if not build.status.success:
+        return None
+    query = ["cquery"] + flags + ["--output=starlark", "--starlark:expr=" + _OUTPUT, "set(" + " ".join(targets) + ")"]
+    output = command(ctx, bazel, query, root).stdout("piped").stderr("null").spawn().wait_with_output()
+    if not output.status.success:
+        return None
+    lines = [line.lstrip("@") if line.lstrip("@").startswith("//") else line for line in output.stdout.splitlines()]
+    parent = path.rpartition("/")[0] or "/"
+    temporary = ctx.std.fs.mkdtemp(parent = parent, prefix = ".vesper-prebuild-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(temporary))
+    manifest = temporary + "/executables"
+    ctx.std.fs.write(manifest, "\n".join(lines) + "\n" if lines else "")
+    ctx.std.fs.rename(manifest, path)
+    return len(lines)

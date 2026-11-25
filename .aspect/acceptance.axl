@@ -16,4 +16,3 @@ check_source_macro_tuples = script_task("check-source-macro-tuples", ["acceptanc
 check_source_macros = script_task("check-source-macros", ["acceptance"], "scripts/check-source-macros.py", "python3", from_root = True)
 check_source_tooling = script_task("check-source-tooling", ["acceptance"], "scripts/check-source-tooling.py", "python3", from_root = True)
 check_stylus = script_task("check-stylus", ["acceptance"], "scripts/check-stylus.py", "python3", from_root = True)
-test_simd_aarch64 = script_task("test-simd-aarch64", ["acceptance"], "scripts/test-simd-aarch64.sh", "sh")

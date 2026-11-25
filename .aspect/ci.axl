@@ -5,18 +5,10 @@ flip_gate = script_task("flip-gate", ["ci"], "scripts/ci/flip_gate.py", "python3
 install_lean = script_task("install-lean", ["ci"], "scripts/ci/install-lean.sh", "bash")
 install_logos_rust = script_task("install-logos-rust", ["ci"], "scripts/ci/install-logos-rust.sh", "bash")
 lean_replay_scope = script_task("lean-replay-scope", ["ci"], "scripts/ci/lean_replay_scope.py", "python3")
-logos_sweep = script_task("logos-sweep", ["ci"], "scripts/ci/logos-sweep.sh", "bash")
 merge_gate = script_task("merge-gate", ["ci"], "scripts/ci/merge_gate.py", "python3")
 platform_test_plan = script_task("platform-test-plan", ["ci"], "scripts/ci/platform_test_plan.py", "python3")
 port_harness_selection = script_task("port-harness-selection", ["ci"], "scripts/ci/port_harness_selection.py", "python3")
-prepare_logos42 = script_task("prepare-logos42", ["ci"], "scripts/ci/prepare-logos42.sh", "bash")
-prepare_lean4lean42 = prepare_logos42.alias(
-    group = ["ci"],
-    kind = "prepare-lean4lean42",
-    summary = "Prepare the Logos checker under the former Lean4Lean task name",
-)
 reclaim_disk = script_task("reclaim-disk", ["ci"], "scripts/ci/reclaim-disk.sh", "bash")
-test_lean_replay = script_task("test-lean-replay", ["ci"], "scripts/ci/test-lean-replay.sh", "bash")
 test_platform_profile = script_task("test-platform-profile", ["ci"], "scripts/ci/test-platform-profile.py", "python3")
 
 tests_aspect_tasks = script_task("aspect-tasks", ["ci", "tests"], "scripts/ci/tests/test_platform_aspect_tasks.py", "python3")

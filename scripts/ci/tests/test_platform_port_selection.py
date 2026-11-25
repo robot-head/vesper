@@ -12,7 +12,7 @@ import port_harness_selection as selection  # noqa: E402
 class PortHarnessSelectionTests(unittest.TestCase):
     def test_compiler_and_shared_paths_run_every_port(self):
         for path in ("src/lib.rs", "tests/fixtures/self_host/driver.rs", "Cargo.lock",
-                     "Cargo.toml", "scripts/test-port-harness.sh", ".github/workflows/platforms.yml",
+                     "Cargo.toml", "scripts/port-harness-plan.json", ".github/workflows/platforms.yml",
                      "packages/vesper-std/src/lib.ves", "crates/vesper-syntax/src/lib.rs"):
             self.assertEqual(selection.select([path]), "all", path)
 
@@ -56,13 +56,10 @@ class PortHarnessSelectionTests(unittest.TestCase):
                 self.assertEqual(out.getvalue().strip(), "all")
 
     def test_every_harness_guard_names_a_crate_directory(self):
-        import re
-        script = (selection.ROOT / "scripts/test-port-harness.sh").read_text()
-        names = set()
-        for line in script.splitlines():
-            m = re.match(r"(?:if ported|skip_port) ([a-z0-9 -]+?)(?:; then| \|\|)", line)
-            if m:
-                names.update(m.group(1).split())
+        import json
+
+        plan = json.loads((selection.ROOT / "scripts/port-harness-plan.json").read_text())
+        names = {name for shard in plan for suite in shard for name in suite["crates"]}
         self.assertGreater(len(names), 20)
         for name in names:
             self.assertTrue((selection.ROOT / "crates" / name / "Cargo.toml").is_file(), name)

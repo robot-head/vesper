@@ -32,7 +32,7 @@ class LeanReplayScope(unittest.TestCase):
                      "tests/lean4lean_map42.rs", "MODULE.bazel", "src/optimize/witness_lean.rs",
                      "crates/vesper-oracles/tests/fixtures/resource_oracle42/fault_peer.py",
                      "docs/rfcs/resource-model42-source-manifest.json",
-                     "scripts/ci/test-lean-replay.sh"]:
+                     ".aspect/logos-ci.axl"]:
             with self.subTest(path=path):
                 self.assertEqual(scope.flags(branch="feature", changed=[path], messages=""), [])
 

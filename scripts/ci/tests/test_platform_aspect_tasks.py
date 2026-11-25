@@ -52,11 +52,6 @@ class AspectTaskTests(unittest.TestCase):
     def copy_fixture(self, path):
         self.write(path, (ROOT / path).read_text())
 
-    def install_bazel_helpers(self):
-        destination = self.root / "scripts/bazel-lib.sh"
-        destination.parent.mkdir()
-        shutil.copyfile(ROOT / "scripts/bazel-lib.sh", destination)
-
     def test_script_task_preserves_argv_cwd_environment_and_standard_streams(self):
         self.write("scripts/ci/platform_test_plan.py", """\
 import json
@@ -316,18 +311,107 @@ out.mkdir(parents=True, exist_ok=True)
         self.assertEqual((sandbox / "SHA256SUMS").read_bytes(), checksum)
 
     def test_lean4lean_task_aliases_forward_arguments_to_logos(self):
-        self.write("scripts/ci/prepare-logos42.sh", 'printf "%s\\n" "$@"\nexit 19\n')
-        self.write("tools/logos42/setup.py", "import sys\nprint(*sys.argv[1:], sep=chr(10))\nraise SystemExit(19)\n")
-        for alias, canonical in (
-            (("ci", "prepare-lean4lean42"), ("ci", "prepare-logos42")),
-            (("maintenance", "lean4lean42", "setup"), ("maintenance", "logos42", "setup")),
+        self.write("tools/logos42/setup.py",
+                   "import sys\nprint(*sys.argv[1:], sep=chr(10))\nraise SystemExit(19)\n")
+        self.write("executables", "//crates/vesper-oracles:bin/logos42 bin/checker\n")
+        checker = self.write("bin/checker", "")
+        env = {
+            "VESPER_LEAN": "/fixture/bin/lean",
+            "VESPER_CARGO": "/fixture/bin/cargo",
+            "VESPER_BAZEL_EXECUTABLES": "executables",
+        }
+        for alias, canonical, expected in (
+            (("ci", "prepare-lean4lean42"), ("ci", "prepare-logos42"),
+             ["--directory", "fixture with spaces", "--driver", str(checker), "--lean", "/fixture/bin/lean",
+              "--lake", "/fixture/bin/lake", "--git", shutil.which("git"), "--cargo", "/fixture/bin/cargo"]),
+            (("maintenance", "lean4lean42", "setup"), ("maintenance", "logos42", "setup"),
+             ["--directory", "fixture with spaces"]),
         ):
             with self.subTest(alias=alias):
-                forwarded = ("--", "--directory", "fixture with spaces")
-                original = self.aspect(*canonical, *forwarded, status=19)
-                compatible = self.aspect(*alias, *forwarded, status=19)
-                self.assertEqual(compatible.stdout, "--directory\nfixture with spaces\n")
+                forwarded = ("--", "--directory", "fixture with spaces") if alias[0] == "maintenance" else (
+                    "--", "fixture with spaces")
+                original = self.aspect(*canonical, *forwarded, status=19, env=env)
+                compatible = self.aspect(*alias, *forwarded, status=19, env=env)
+                self.assertEqual(compatible.stdout.splitlines(), expected)
                 self.assertEqual(compatible.stdout, original.stdout)
+
+    def test_native_logos_prepare_validates_inputs_and_discovers_cargo(self):
+        self.write("tools/logos42/setup.py", "import sys\nprint(sys.argv[-1])\n")
+        self.write("executables", "//crates/vesper-oracles:bin/logos42 bin/checker\n")
+        self.write("bin/checker", "")
+        for command in ("git", "python3"):
+            (self.root / "bin" / command).symlink_to(shutil.which(command))
+        cargo = self.write("bin/cargo", "#!/bin/sh\nexit 0\n", executable=True)
+        rustup = self.write("bin/rustup", '#!/bin/sh\ntest "$*" = "which cargo" || exit 22\necho /fixture/cargo\n',
+                            executable=True)
+        env = {
+            "PATH": str(self.root / "bin"),
+            "VESPER_LEAN": "relative-lean",
+            "VESPER_CARGO": "",
+            "VESPER_BAZEL_EXECUTABLES": "executables",
+        }
+        command = ("ci", "prepare-logos42", "--", "missing")
+        self.assertEqual(self.aspect(*command, env=env).stdout.strip(), "/fixture/cargo")
+        rustup.unlink()
+        self.assertEqual(self.aspect(*command, env=env).stdout.strip(), str(cargo))
+        missing_lean = self.aspect(*command, env={**env, "VESPER_LEAN": ""}, status=2)
+        self.assertIn("ABSENT_DIRECTORY", missing_lean.stderr)
+        cargo.unlink()
+        missing_cargo = self.aspect(*command, env=env, status=1)
+        self.assertIn("requires Cargo and Git", missing_cargo.stderr)
+
+    def test_native_logos_sweep_reports_results_even_when_the_checker_fails(self):
+        self.write("manifest", "//crates/vesper-oracles:bin/logos42 bin/checker\n//:bin/vesper bin/vesper\n")
+        checker = self.write("bin/checker", "")
+        vesper = self.write("bin/vesper", "")
+        self.write("tools/logos-sweep/sweep.py", """\
+import json
+import os
+from pathlib import Path
+import sys
+
+args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
+assert args["--root"] == "sealed fixture"
+assert args["--lean"] == "/fixture/lean"
+(Path("args.json")).write_text(json.dumps(args))
+if not os.getenv("VESPER_TEST_NO_REPORT"):
+    Path(args["--report"]).write_text(json.dumps({
+        "status": "failed", "modules": 3, "batches": [{"logos_checked": 2}, {"logos_checked": 5}],
+        "total_seconds": 1.25, "declined": [
+            {"declaration": "A", "reason": "unsupported", "detail": "ignored"},
+            {"declaration": "B", "reason": None, "detail": "detail fallback"},
+        ],
+        "problems": ["fixture problem"],
+    }))
+sys.exit(9)
+""")
+        env = {
+            "VESPER_LEAN": "/fixture/lean",
+            "LOGOS42_DRIVER": "",
+            "VESPER_BIN": "",
+            "LOGOS_SWEEP_BATCH_JOBS": "",
+            "VESPER_BAZEL_EXECUTABLES": "manifest",
+        }
+        command = ("ci", "logos-sweep", "--", "sealed fixture", "report with spaces.json")
+        report = self.aspect(*command, status=9, env=env)
+        self.assertIn("3 modules, 7 declarations checked by Logos in 2 batches, 1.25 s", report.stdout)
+        self.assertIn("A: unsupported", report.stdout)
+        self.assertIn("B: detail fallback", report.stdout)
+        self.assertIn("PROBLEM: fixture problem", report.stdout)
+        args = json.loads((self.root / "args.json").read_text())
+        self.assertEqual((args["--driver"], args["--vesper"], args["--batch-jobs"]),
+                         (str(checker), str(vesper), "2"))
+        (self.root / "report with spaces.json").unlink()
+        no_report = self.aspect(*command, status=9, env={
+            **env, "LOGOS42_DRIVER": "custom-checker", "VESPER_BIN": "custom-vesper",
+            "LOGOS_SWEEP_BATCH_JOBS": "4", "VESPER_TEST_NO_REPORT": "1",
+        })
+        args = json.loads((self.root / "args.json").read_text())
+        self.assertEqual((args["--driver"], args["--vesper"], args["--batch-jobs"]),
+                         ("custom-checker", "custom-vesper", "4"))
+        self.assertEqual(no_report.stdout, "")
+        missing = self.aspect("ci", "logos-sweep", "--", "only one arg", status=2, env=env)
+        self.assertIn("SEALED_ROOT REPORT", missing.stderr)
 
     def test_native_port_check_requires_expected_failure_and_passing_control(self):
         self.write("bin/cargo", """\
@@ -370,7 +454,7 @@ sys.exit(0 if mode == "divergent-passed" else 101)
                     self.assertIn("Divergence check did not fail as expected: simpulse port (lib.rs)",
                                   result.stderr)
 
-        self.copy_fixture("scripts/test-port-harness.sh")
+        self.copy_fixture("scripts/port-harness-plan.json")
         log.unlink()
         result = self.aspect("acceptance", "test-port-harness", env={
             **env,
@@ -556,6 +640,260 @@ sys.exit(1)
                 else:
                     self.assertIn("verifier", result.stderr)
 
+    def test_native_harness_routes_all_shards_and_stops_at_failure(self):
+        path = "scripts/port-harness-plan.json"
+        self.copy_fixture(path)
+        self.copy_fixture("scripts/port-abi-plan.json")
+        plan = json.loads((self.root / path).read_text())
+        for module in ("port-checks.axl", "port-special-checks.axl"):
+            (self.root / ".aspect" / module).unlink()
+        fixtures = """
+def fixture(crate, kind):
+    def run(ctx):
+        env = ctx.std.env
+        ctx.std.io.stdout.write(crate + " " + kind + "|" + env.var("VESPER_PORT_COMPILER") + "\\n")
+        if env.var("VESPER_TEST_FAIL_PORT") == crate:
+            return 27
+        return 0
+    return task(kind = kind, group = ["crate", crate], implementation = run)
+"""
+        # The mock tasks expose their own names and compiler paths to the parent.
+        for shard in plan:
+            for suite in shard:
+                _, crate, kind = suite["task"]
+                name = crate.replace("-", "_") + "_" + kind.replace("-", "_")
+                fixtures += f'\n{name} = fixture("{crate}", "{kind}")'
+        self.write(".aspect/dispatch-fixture.axl", fixtures)
+        self.write("bin/cargo", """\
+#!/usr/bin/env python3
+import json
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+if args == ["build", "--locked", "--bin", "vesper"]:
+    Path("compiler-built").touch()
+    sys.exit(0)
+plan = json.loads(Path("scripts/port-abi-plan.json").read_text())
+for group in plan:
+    for check in group["checks"]:
+        if args == ["test", "--locked", *check["args"]]:
+            print("abi|" + " ".join(args))
+            if "description" not in check:
+                sys.exit(0)
+            for name in check.get("failed", []):
+                print(f"test {name} ... FAILED")
+            for name in check.get("passed", []):
+                print(f"test {name} ... ok")
+            if "diagnostic" in check:
+                print(check["diagnostic"])
+            sys.exit(101)
+sys.exit(99)
+""", executable=True)
+        env = {
+            "PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]]),
+            "VESPER_PORT_COMPILER": "explicit compiler",
+            "VESPER_PORT_HARNESS_SCOPE": "all",
+            "VESPER_PORT_HARNESS_SHARD": "",
+            "VESPER_PORT_HARNESS_CRATES": "all",
+        }
+        command = ("acceptance", "test-port-harness")
+
+        def ports(result):
+            return [line.split("|")[0] for line in result.stdout.splitlines() if "|explicit compiler" in line]
+
+        def selected(shard):
+            return [" ".join(suite["task"][1:]) for suite in shard]
+
+        all_ports = self.aspect(*command, env=env)
+        self.assertEqual(ports(all_ports), [item for shard in plan for item in selected(shard)])
+        self.assertIn("abi|test --locked", all_ports.stdout)
+        self.assertLess(all_ports.stdout.index("abi|test --locked"), all_ports.stdout.index("beacon check|"))
+        self.assertFalse((self.root / "compiler-built").exists())
+        for index, shard in enumerate(plan, 1):
+            with self.subTest(shard=index):
+                result = self.aspect(*command, env={**env, "VESPER_PORT_HARNESS_SHARD": str(index)})
+                self.assertEqual(ports(result), selected(shard))
+                self.assertEqual("abi|test --locked" in result.stdout, index == 1)
+        filtered = self.aspect(*command, env={**env, "VESPER_PORT_HARNESS_CRATES": "vesper-beacon-arrow vesper-vault"})
+        self.assertEqual(ports(filtered), ["beacon check", "beacon-arrow test-port", "vault check"])
+        empty = self.aspect(*command, env={**env, "VESPER_PORT_HARNESS_CRATES": "all vesper-vault"})
+        self.assertEqual(ports(empty), ["vault check"])
+        abi_only = self.aspect(*command, env={**env, "VESPER_PORT_HARNESS_SCOPE": "abi"})
+        self.assertIn("export ABI tier done", abi_only.stdout)
+        self.assertFalse(ports(abi_only))
+        failed = self.aspect(*command, status=27, env={**env, "VESPER_TEST_FAIL_PORT": "prism"})
+        self.assertEqual(ports(failed), ["beacon check", "prism test-port"])
+        for config, error in (
+            ({"VESPER_PORT_HARNESS_SHARD": "01"}, "must be 1 to 7"),
+            ({"VESPER_PORT_HARNESS_SHARD": "8"}, "must be 1 to 7"),
+            ({"VESPER_PORT_HARNESS_SCOPE": "abi", "VESPER_PORT_HARNESS_SHARD": "1"}, "abi takes no shard"),
+        ):
+            result = self.aspect(*command, status=1, env={**env, **config})
+            self.assertIn(error, result.stderr)
+            self.assertFalse(ports(result))
+            self.assertNotIn("abi|test --locked", result.stdout)
+        built = self.aspect(*command, env={
+            **env,
+            "VESPER_PORT_COMPILER": "",
+            "CARGO_TARGET_DIR": "build directory",
+            "VESPER_PORT_HARNESS_CRATES": "vesper-vault",
+        })
+        self.assertTrue((self.root / "compiler-built").exists())
+        self.assertIn("vault check|" + str(self.root / "build directory/debug/vesper"), built.stdout)
+
+    def test_native_simd_oracle_preserves_the_binary_corpus_and_checks_tools(self):
+        tool = self.write("bin/tool", """\
+#!/usr/bin/env python3
+import hashlib
+import os
+from pathlib import Path
+import sys
+
+name = Path(sys.argv[0]).name
+root = Path(os.environ["VESPER_TEST_FIXTURE_ROOT"])
+args = sys.argv[1:]
+with (root / "tool-order").open("a") as log:
+    print(name, file=log)
+if name == "emit":
+    assert len(args) == 1
+    scratch = Path(args[0])
+    (root / "scratch").write_text(str(scratch))
+    (scratch / "aarch64.o").write_bytes(b"scanner object")
+elif name == "assemble":
+    assert args == ["start.s", "-o", "start.o"]
+    assert hashlib.sha256(Path("start.s").read_bytes()).hexdigest() == (
+        "b06a1ecbd3dba494ec4c384a85ff0ae7fef456f00bfb361afd6803967db90517")
+    Path("start.o").write_bytes(b"start object")
+elif name == "link":
+    assert args[:2] == ["-z", "noexecstack"] and args[4] == "-o"
+    assert Path(args[2]).name == "start.o" and Path(args[3]).name == "aarch64.o"
+    assert Path(args[2]).read_bytes() == b"start object"
+    Path(args[5]).write_bytes(b"scanner")
+else:
+    assert name == "emulate" and len(args) == 1 and Path(args[0]).read_bytes() == b"scanner"
+    scratch = Path(args[0]).parent
+    for file, length, digest in [
+        ("input.bin", 131120, "9675030ae6483c3ae9c2e1a56a93bb7ac7c04b01c22c82a5c47ace1b27be6cf8"),
+        ("cases.bin", 384000, "8f3f9664f5e5d4e18c981289c879cc3d82c4efbf3108c13a8104fa0e84ad725f"),
+    ]:
+        data = (scratch / file).read_bytes()
+        assert len(data) == length and hashlib.sha256(data).hexdigest() == digest, file
+    sys.exit(int(os.environ["VESPER_TEST_QEMU_STATUS"]))
+""", executable=True)
+        paths = {}
+        for name in ("emit", "assemble", "link", "emulate"):
+            paths[name] = self.root / "bin" / name
+            paths[name].symlink_to(tool)
+        self.write("manifest", "//crates/vesper-simd:example/emit_objects bin/emit\n")
+        env = {
+            "VESPER_TEST_FIXTURE_ROOT": str(self.root),
+            "VESPER_BAZEL_EXECUTABLES": "manifest",
+            "BAZEL": "/missing-bazel",
+            "AARCH64_AS": str(paths["assemble"]),
+            "AARCH64_LD": str(paths["link"]),
+            "QEMU_AARCH64": str(paths["emulate"]),
+        }
+        for status in (0, 7):
+            with self.subTest(status=status):
+                order = self.root / "tool-order"
+                order.unlink(missing_ok=True)
+                result = self.aspect("acceptance", "test-simd-aarch64", status=status,
+                                     env={**env, "VESPER_TEST_QEMU_STATUS": str(status)})
+                self.assertEqual(order.read_text().splitlines(), ["emit", "assemble", "link", "emulate"])
+                self.assertFalse(Path((self.root / "scratch").read_text()).exists())
+                self.assertEqual("9600 scalar-reference comparisons passed" in result.stdout, status == 0)
+
+    def test_native_lean_replay_preserves_scope_and_cleans_up_on_failure(self):
+        (self.root / ".aspect/ci.axl").unlink()
+        self.write(".aspect/replay-fixture.axl", """
+def _scope(ctx):
+    if ctx.std.env.var("VESPER_TEST_REPLAY_MODE") == "skip":
+        ctx.std.io.stdout.write("--skip-lean\\n")
+    return 0
+
+def _install(ctx):
+    root = ctx.std.env.aspect_root_dir()
+    ctx.std.fs.write(root + "/.ci-lean-path", "mock-lean\\n")
+    ctx.std.fs.write(root + "/.ci-logos-cargo-path", "mock-cargo\\n")
+    return 0
+
+def _reclaim(ctx):
+    root = ctx.std.env.aspect_root_dir()
+    if ctx.args.tool_args == ["watch"]:
+        return ctx.std.process.command("sleep").args(["30"]).status().code or 0
+    checker = ctx.std.fs.read_to_string(root + "/checker-path")
+    ctx.std.fs.write(root + "/report-clean", str(not ctx.std.fs.exists(checker)))
+    return 0
+
+scope = task(kind = "lean-replay-scope", group = ["ci"], summary = "Mock replay scope", implementation = _scope)
+install = task(kind = "install-logos-rust", group = ["ci"], summary = "Mock replay installer", implementation = _install)
+reclaim = task(kind = "reclaim-disk", group = ["ci"], summary = "Mock disk watcher", implementation = _reclaim,
+               args = {"tool_args": args.trailing_var_args(description = "watch or report")})
+""")
+        self.write("manifest", "//crates/vesper-oracles:bin/logos42 bin/checker\n")
+        self.write("bin/checker", "")
+        self.write("tools/logos42/setup.py", """\
+import os
+from pathlib import Path
+import sys
+
+args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
+checker = Path(args["--directory"])
+assert str(checker) == os.environ["VESPER_LOGOS42_ROOT"]
+Path("checker-path").write_text(str(checker))
+assert args["--lean"] == "mock-lean" and args["--cargo"] == "mock-cargo"
+checker.mkdir()
+if os.environ["VESPER_TEST_REPLAY_MODE"] == "prepare-fail":
+    sys.exit(17)
+""")
+        self.write("bin/bazel", """\
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+mode = os.environ["VESPER_TEST_REPLAY_MODE"]
+if args[0] == "query":
+    assert args[1] == "--config=ci" and "lean_replay" in args[2]
+    Path("queried").touch()
+    if mode != "empty":
+        print("//:first")
+        print("//:second")
+    sys.exit(0)
+assert args == ["test", "--config=ci", "--config=rbe_build", "--config=ci_tests", "//:first", "//:second"]
+assert os.environ["VESPER_LEAN"] == "mock-lean"
+assert os.environ["VESPER_CARGO"] == "mock-cargo"
+assert Path(os.environ["VESPER_LOGOS42_ROOT"]).is_dir()
+Path("tested").touch()
+sys.exit(23 if mode == "test-fail" else 0)
+""", executable=True)
+        env = {"PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]]),
+               "VESPER_BAZEL_EXECUTABLES": "manifest"}
+        for mode, status, queried, tested, cleaned in (
+            ("skip", 0, False, False, False),
+            ("empty", 1, True, False, False),
+            ("prepare-fail", 17, True, False, True),
+            ("test-fail", 23, True, True, True),
+            ("normal", 0, True, True, True),
+        ):
+            with self.subTest(mode=mode):
+                for path in ("queried", "tested", "report-clean", "checker-path"):
+                    (self.root / path).unlink(missing_ok=True)
+                result = self.aspect("ci", "test-lean-replay", status=status,
+                                     env={**env, "VESPER_TEST_REPLAY_MODE": mode})
+                if mode == "empty":
+                    self.assertIn("No Lean replay test targets found", result.stderr)
+                self.assertEqual((self.root / "queried").exists(), queried)
+                self.assertEqual((self.root / "tested").exists(), tested)
+                self.assertEqual((self.root / "report-clean").exists(), cleaned)
+                if cleaned:
+                    scratch = Path((self.root / "checker-path").read_text()).parent
+                    if scratch.parent == Path("/tmp") and scratch.name.startswith("vesper-logos42-ci-"):
+                        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+                    self.assertEqual((self.root / "report-clean").read_text(), "True")
+
     def test_script_exit_codes_and_signals_reach_the_cli(self):
         for body, status in (
             ("raise SystemExit(23)\n", 23),
@@ -656,7 +994,7 @@ chmod +x "$4"
         script = "scripts/windows/test-port-abi.ps1"
         self.copy_fixture(script)
         self.copy_fixture("scripts/port-abi-plan.json")
-        self.copy_fixture("scripts/test-port-harness.sh")
+        self.copy_fixture("scripts/port-harness-plan.json")
         self.write("bin/cargo", """\
 #!/usr/bin/env python3
 import json
@@ -772,8 +1110,40 @@ esac
         self.assertIn("each task will build its own", result.stderr)
         self.assertFalse(manifest.exists())
 
+    def test_bazel_helpers_query_uncached_builds_and_report_failures(self):
+        bazel = self.write("bin/mock bazel", """\
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+
+verb, *args = sys.argv[1:]
+with open("bazel-calls", "a") as log:
+    print(verb, file=log)
+mode = os.environ["VESPER_TEST_BAZEL_MODE"]
+if verb == "build":
+    assert args == ["--config=ci", "//:uncached"]
+    print("build diagnostic")
+    sys.exit(19 if mode == "build-fail" else 0)
+assert verb == "cquery" and args == ["--config=ci", "--output=files", "//:uncached"]
+if mode != "empty-query":
+    print("bin/output with spaces")
+    print("bin/second output")
+""", executable=True)
+        env = {"BAZEL": str(bazel), "BAZEL_FLAGS": "--config=ci", "VESPER_BAZEL_EXECUTABLES": "missing"}
+        command = ("maintenance", "bazel-helpers", "--", "bazel_executable", "//:uncached")
+        calls = self.root / "bazel-calls"
+        for mode, status, invocations in (("normal", 0, ["build", "cquery"]),
+                                          ("build-fail", 19, ["build"]),
+                                          ("empty-query", 1, ["build", "cquery"])):
+            with self.subTest(mode=mode):
+                calls.unlink(missing_ok=True)
+                result = self.aspect(*command, status=status, env={**env, "VESPER_TEST_BAZEL_MODE": mode})
+                self.assertEqual(calls.read_text().splitlines(), invocations)
+                self.assertIn("build diagnostic", result.stderr)
+                self.assertEqual(result.stdout, "bin/output with spaces\n" if status == 0 else "")
+
     def test_bazel_helpers_resolve_and_run_prebuilt_executable(self):
-        self.install_bazel_helpers()
         self.write("bin/cached", '#!/bin/sh\nprintf "%s\\n" "$1"\nexit 19\n', executable=True)
         self.write("bazel-cache", "//:cached bin/cached\n")
         env = {"BAZEL": "/missing-bazel", "VESPER_BAZEL_EXECUTABLES": "bazel-cache"}
@@ -784,7 +1154,6 @@ esac
         self.assertEqual(result.stdout, "two words\n")
 
     def test_bazel_prebuild_writes_the_manifest_in_workspace_root(self):
-        self.install_bazel_helpers()
         bazel = self.write("bin/mock-bazel", """\
 #!/bin/sh
 case "$1" in
@@ -805,7 +1174,6 @@ esac
         self.assertFalse((self.root / "output with spaces.tmp").exists())
 
     def test_bazel_helpers_reject_missing_and_unlisted_functions(self):
-        self.install_bazel_helpers()
         for args in ((), ("touch", "unexpected")):
             with self.subTest(args=args):
                 result = self.aspect("maintenance", "bazel-helpers", "--", *args, status=2)

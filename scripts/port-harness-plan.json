@@ -1,0 +1,62 @@
+[
+  [
+    {"crates": ["vesper-beacon", "vesper-beacon-arrow"], "task": ["crate", "beacon", "check"]},
+    {"crates": ["vesper-prism"], "task": ["crate", "prism", "test-port"]},
+    {"crates": ["vesper-aura"], "task": ["crate", "aura", "check"]},
+    {"crates": ["vesper-warp-bbr"], "task": ["crate", "warp-bbr", "check"]},
+    {"crates": ["vesper-warp-tcp"], "task": ["crate", "warp-tcp", "test-port"]},
+    {"crates": ["vesper-warp-wheel"], "task": ["crate", "warp-wheel", "test-port"]},
+    {"crates": ["vesper-warp-shard"], "task": ["crate", "warp-shard", "test-port"]},
+    {"crates": ["vesper-ignis"], "task": ["crate", "ignis", "check"]}
+  ],
+  [
+    {"crates": ["vesper-quarry"], "task": ["crate", "quarry", "check"]},
+    {"crates": ["vesper-loom-calculus"], "task": ["crate", "loom-calculus", "check"]},
+    {"crates": ["vesper-loom-solver"], "task": ["crate", "loom-solver", "test-port"]},
+    {"crates": ["vesper-pact"], "task": ["crate", "pact", "test-port"]}
+  ],
+  [
+    {"crates": ["vesper-semver"], "task": ["crate", "semver", "test-port"]},
+    {"crates": ["vesper-tensor"], "task": ["crate", "tensor", "test-port"]},
+    {"crates": ["vesper-alloc"], "task": ["crate", "alloc", "check"]},
+    {"crates": ["vesper-grammar"], "task": ["crate", "grammar", "check"]},
+    {"crates": ["vesper-simpulse"], "task": ["crate", "simpulse", "check"]},
+    {"crates": ["vesper-crucible"], "task": ["crate", "crucible", "check"]}
+  ],
+  [
+    {"crates": ["vesper-serde"], "task": ["crate", "serde", "check"]},
+    {"crates": ["vesper-warp-umem"], "task": ["crate", "warp-umem", "test-port"]},
+    {"crates": ["vesper-aether"], "task": ["crate", "aether", "test-port"]}
+  ],
+  [
+    {"crates": ["vesper-aegis"], "task": ["crate", "aegis", "check"]},
+    {"crates": ["vesper-loom-audit"], "task": ["crate", "loom-audit", "test-port"]},
+    {"crates": ["vesper-bench"], "task": ["crate", "bench", "check"]}
+  ],
+  [
+    {"crates": ["vesper-ebpf"], "task": ["crate", "ebpf", "check"]},
+    {"crates": ["vesper-silicon"], "task": ["crate", "silicon", "check"]}
+  ],
+  [
+    {"crates": ["vesper-warp"], "task": ["crate", "warp", "check"]},
+    {"crates": ["vesper-prism-h3"], "task": ["crate", "prism-h3", "check"]},
+    {"crates": ["vesper-chorus"], "task": ["crate", "chorus", "test-port"]},
+    {"crates": ["vesper-resonance"], "task": ["crate", "resonance", "test-port"]},
+    {"crates": ["vesper-kinetic"], "task": ["crate", "kinetic", "check"]},
+    {"crates": ["vesper-flux"], "task": ["crate", "flux", "check"]},
+    {"crates": ["vesper-span"], "task": ["crate", "span", "test-port"]},
+    {"crates": ["vesper-lean-syntax"], "task": ["crate", "lean-syntax", "test-port"]},
+    {"crates": ["vesper-diagnostics"], "task": ["crate", "diagnostics", "test-port"]},
+    {"crates": ["vesper-fmt"], "task": ["crate", "fmt", "test-port"]},
+    {"crates": ["vesper-highlight"], "task": ["crate", "highlight", "test-port"]},
+    {"crates": ["vesper-forge"], "task": ["crate", "forge", "test-port"]},
+    {"crates": ["vesper-lint"], "task": ["crate", "lint", "test-port"]},
+    {"crates": ["vesper-sim-session"], "task": ["crate", "sim-session", "test-port"]},
+    {"crates": ["vesper-fusion"], "task": ["crate", "fusion", "test-port"]},
+    {"crates": ["vesper-warp-crypto"], "task": ["crate", "warp-crypto", "check"]},
+    {"crates": ["vesper-loom-trust"], "task": ["crate", "loom-trust", "check"]},
+    {"crates": ["vesper-beacon-arrow"], "task": ["crate", "beacon-arrow", "test-port"]},
+    {"crates": ["vesper-loom-cas"], "task": ["crate", "loom-cas", "test-port"]},
+    {"crates": ["vesper-vault"], "task": ["crate", "vault", "check"]}
+  ]
+]

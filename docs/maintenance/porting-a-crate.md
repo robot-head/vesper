@@ -415,7 +415,7 @@ act (`transport.send(..)`), Vesper returns the actions as a sequence of a
        `crates/vesper-port-pilot/BUILD.bazel`.
      Run `python3 tools/bazel/sync_build_files.py` for a new crate.
    - Cargo: append the crate's lines to the end of
-     `scripts/test-port-harness.sh`. The Linux job of the Platforms workflow
+     `aspect acceptance test-port-harness`. The Linux job of the Platforms workflow
      runs them, with the prebuilt compiler in `VESPER_PORT_COMPILER`. macOS
      and Windows stop after the export ABI tier at the top of the script,
      so a port's lines run there only if they test the export ABI itself.
@@ -513,7 +513,7 @@ CI asserts that the API tests fail on exactly the changed function and pass on
 the rest:
 
 - Bazel: `//crates/vesper-port-pilot:port_divergence_detected`.
-- Cargo: `scripts/test-port-harness.sh` (the Linux Platforms job for
+- Cargo: `aspect acceptance test-port-harness` (the Linux Platforms job for
   ports; macOS and Windows run its export ABI tier, which includes the
   pilot's checks).
 

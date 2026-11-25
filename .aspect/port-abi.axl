@@ -1,7 +1,7 @@
 load("./lib/port_checks.axl", "require_divergence")
-load("./lib/process.axl", "check", "command", "exit_code", "root_path")
+load("./lib/process.axl", "check", "root_path")
 
-def _run_port_abi(ctx: TaskContext, root: str, env: dict[str, str]) -> int:
+def run_port_abi(ctx: TaskContext, root: str, env: dict[str, str]) -> int:
     selected = (ctx.std.env.var("VESPER_PORT_HARNESS_CRATES") or "all").split()
     for group in json.decode(ctx.std.fs.read_to_string(root + "/scripts/port-abi-plan.json")):
         if "all" not in selected and not any([crate in selected for crate in group["crates"]]):
@@ -19,31 +19,20 @@ def _run_port_abi(ctx: TaskContext, root: str, env: dict[str, str]) -> int:
             require_divergence(ctx, root, argv, description, expected, env)
     return 0
 
+def port_compiler(ctx: TaskContext, root: str) -> str:
+    compiler = ctx.std.env.var("VESPER_PORT_COMPILER")
+    if compiler:
+        return compiler
+    check(ctx, "cargo", ["build", "--locked", "--bin", "vesper"], root)
+    return root_path(root, ctx.std.env.var("CARGO_TARGET_DIR") or "target") + "/debug/vesper"
+
 def _port_abi(ctx: TaskContext) -> int:
     root = ctx.std.env.aspect_root_dir()
-    compiler = ctx.std.env.var("VESPER_PORT_COMPILER")
-    if not compiler:
-        check(ctx, "cargo", ["build", "--locked", "--bin", "vesper"], root)
-        compiler = root_path(root, ctx.std.env.var("CARGO_TARGET_DIR") or "target") + "/debug/vesper"
-    return _run_port_abi(ctx, root, {"VESPER_PORT_COMPILER": compiler})
+    return run_port_abi(ctx, root, {"VESPER_PORT_COMPILER": port_compiler(ctx, root)})
 
 test_port_abi = task(
     kind = "test-port-abi",
     group = ["ci"],
     summary = "Run the host-sensitive export ABI and divergence checks",
     implementation = _port_abi,
-)
-
-def _port_harness(ctx: TaskContext) -> int:
-    root = ctx.std.env.aspect_root_dir()
-    env = {"VESPER_ASPECT_BIN": ctx.std.env.current_exe()}
-    status = command(ctx, "sh", [root + "/scripts/test-port-harness.sh"] + ctx.args.tool_args, root, env).status()
-    return exit_code(status)
-
-test_port_harness = task(
-    kind = "test-port-harness",
-    group = ["acceptance"],
-    summary = "Run scripts/test-port-harness.sh",
-    implementation = _port_harness,
-    args = {"tool_args": args.trailing_var_args(description = "Arguments passed to the port harness.")},
 )

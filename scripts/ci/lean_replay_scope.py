@@ -52,10 +52,9 @@ TRIGGERS = (
     "tools/bazel/*",
     "scripts/ci/install-lean.sh",
     "scripts/ci/install-logos-rust.sh",
-    "scripts/ci/prepare-logos42.sh",
+    ".aspect/logos-ci.axl",
     ".aspect/ci.axl",
     "scripts/ci/lean_replay_scope.py",
-    "scripts/ci/test-lean-replay.sh",
 )
 
 

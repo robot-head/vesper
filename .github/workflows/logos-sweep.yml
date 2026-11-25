@@ -23,8 +23,7 @@ on:
       - 'crates/vesper-oracles/src/bin/logos42*'
       - 'crates/vesper-oracles/src/bin/logos42/**'
       - 'lean-toolchain'
-      - 'scripts/ci/logos-sweep.sh'
-      - 'scripts/ci/prepare-logos42.sh'
+      - '.aspect/logos-ci.axl'
       - '.github/workflows/logos-sweep.yml'
 
 permissions:

@@ -112,8 +112,6 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertEqual(ports["strategy"]["fail-fast"], "false")
         self.assertEqual(step["env"]["VESPER_PORT_HARNESS_SHARD"], "${{ matrix.shard }}")
         self.assertIn("ports", jobs["complete"]["needs"])
-        script = (ROOT / "scripts/test-port-harness.sh").read_text()
-        self.assertIn('"${VESPER_ASPECT_BIN:-aspect}" ci test-port-abi', script)
         plan = json.loads((ROOT / "scripts/port-abi-plan.json").read_text())
         abi_tier = "\n".join(" ".join(case["args"]) for group in plan for case in group["checks"])
         for check in ("-p vesper-port-abi", "-p vesper-port-harness", "--test kit",
@@ -121,13 +119,11 @@ class PlatformWorkflowTests(unittest.TestCase):
                       "-p vesper-port-build --features divergent"):
             self.assertIn(check, abi_tier)
         self.assertNotIn("vesper-beacon", abi_tier)
-        # Every shard is reached, and later ports land in the last one.
-        self.assertIn(f"shards={shards[-1]}\n", script)
-        for n in shards[:-1]:
-            self.assertIn(f"if part {n}; then", script)
-        self.assertIn(f"part {shards[-1]} || exit 0", script)
-        tail = script.split(f"part {shards[-1]} || exit 0", 1)[1]
-        self.assertNotIn("\nfi\n", tail.replace("\n    fi", ""))
+        # Every configured shard has work, and later ports land in the last one.
+        shards_plan = json.loads((ROOT / "scripts/port-harness-plan.json").read_text())
+        self.assertEqual(len(shards_plan), len(shards))
+        self.assertTrue(all(shards_plan))
+        self.assertEqual(shards_plan[-1][-1]["task"], ["crate", "vault", "check"])
 
     def test_plan_failure_fails_required_jobs(self):
         for result in ("failure", "cancelled", "skipped", ""):
