@@ -40,6 +40,9 @@ use self::doc_links::{
 use self::proof::{
     proof_models
 };
+use self::ownership::{
+    lens_facts
+};
 use self::hover::{
     Facts,
     facts_new,
@@ -611,4 +614,11 @@ fn map_type(in f: Facts, i: u64) -> u32 {
 // every checked function with a body (proof.ves).
 pub fn lsp_proof_models(in input: Str) -> ChunkSeq[u64] {
     proof_models(in input)
+}
+
+// The ownership facts behind Lens views (src/lsp/lens.rs `facts`) and the
+// live linear obligations at each cursor (`View::outstanding`;
+// ownership.ves).
+pub fn lsp_lens_facts(in input: Str) -> ChunkSeq[u64] {
+    lens_facts(in input)
 }
