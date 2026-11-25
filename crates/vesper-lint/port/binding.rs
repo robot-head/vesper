@@ -22,6 +22,7 @@ unsafe extern "C" {
     fn vesper_lint_seq_free(seq: i64) -> i64;
     fn vesper_lint_live_allocations() -> i64;
     fn vesper_lint_analyze(facts: *mut u64, blob: *mut u64, functions: i64, actions: i64, work: i64, call_depth: i64, fail: *mut u64) -> i64;
+    fn vesper_lint_analyze_modes(facts: *mut u64, blob: *mut u64, functions: i64, actions: i64, work: i64, call_depth: i64, fail: *mut u64) -> i64;
     fn vesper_lint_apply_edits(source: *mut u64, edits: *mut u64, texts: *mut u64, max_bytes: i64, fail: *mut u64) -> i64;
     fn vesper_lint_policy_parse(source: *mut u64, bytes: i64, depth: i64, tokens: i64, nodes: i64, work: i64, fail: *mut u64) -> i64;
 }
@@ -49,6 +50,20 @@ pub fn analyze(facts: &[u64], blob: &str, functions: u64, actions: u64, work: u6
         0 => Ok(unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }),
         1 => Err(<crate::port::LintFail as Abi>::get(&fail[1..])),
         status => panic!("invalid failure status {status} from vesper_lint_analyze"),
+    }
+}
+
+/// Calls `analyze_modes` of the Vesper library `lint` (`vesper_lint_analyze_modes`).
+pub fn analyze_modes(facts: &[u64], blob: &str, functions: u64, actions: u64, work: u64, call_depth: u64) -> Result<Vec<u64>, crate::port::LintFail> {
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_lint_analyze_modes` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(facts, |view_facts| vesper_port_abi::with_str(blob, |view_blob| unsafe { vesper_lint_analyze_modes(view_facts, view_blob, functions as i64, actions as i64, work as i64, call_depth as i64, fail.as_mut_ptr()) }));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }),
+        1 => Err(<crate::port::LintFail as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_lint_analyze_modes"),
     }
 }
 
