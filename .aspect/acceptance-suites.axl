@@ -73,7 +73,6 @@ test_canonical_protocols = _suite(
     examples = ["//crates/vesper-grammar:example/" + name for name in ["protobuf", "der", "ipc"]],
     pmu = True,
 )
-test_diagnostics = _suite("diagnostics", examples = ["//crates/vesper-diagnostics:example/causal_diagnostics"])
 test_doc_links = _suite("doc-links", binary_env = "VESPER_DOC_LINKS_BINARY", needs_work = False)
 test_editor = _suite("editor", examples = ["//crates/vesper-span:example/source_edits", "//crates/vesper-lsp:example/protocol_documents"])
 test_macro_preview = _suite("macro-preview", binary_env = "VESPER_MACRO_PREVIEW_BINARY")

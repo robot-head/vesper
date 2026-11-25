@@ -115,7 +115,6 @@ if sys.argv[-1] == "crash":
         examples = {
             "canonical-protocols": ["vesper-grammar:example/" + name for name in ("protobuf", "der", "ipc")]
             + ["vesper-bench-pmu:example/probe"],
-            "diagnostics": ["vesper-diagnostics:example/causal_diagnostics"],
             "editor": ["vesper-span:example/source_edits", "vesper-lsp:example/protocol_documents"],
             "source-tooling": ["vesper-grammar:example/grammar", "vesper-fmt:example/canonical",
                                "vesper-bench:example/paired_callbacks"],
@@ -133,7 +132,6 @@ if sys.argv[-1] == "crash":
 
         for task, override in (
             ("canonical-protocols", None),
-            ("diagnostics", None),
             ("doc-links", "VESPER_DOC_LINKS_BINARY"),
             ("editor", None),
             ("macro-preview", "VESPER_MACRO_PREVIEW_BINARY"),
@@ -217,7 +215,7 @@ print(sys.argv[sys.argv.index("--binary") + 1])
         (self.root / "bin/python").symlink_to(shutil.which("python3"))
         self.write("executables", "//:bin/vesper bin/compiler\n")
         self.write("bin/compiler", "")
-        self.write("scripts/check-diagnostics.py", """\
+        self.write("scripts/check-canonical-protocols.py", """\
 from pathlib import Path
 import sys
 Path("scratch").write_text(sys.argv[-1])
@@ -228,8 +226,23 @@ raise SystemExit(17)
             "BAZEL": "/missing-bazel",
             "VESPER_BAZEL_EXECUTABLES": "executables",
         }
-        self.aspect("acceptance", "test-diagnostics", env=env, status=17)
+        self.aspect("acceptance", "test-canonical-protocols", env=env, status=17)
         self.assertFalse(Path((self.root / "scratch").read_text()).exists())
+
+    def test_diagnostics_rejects_a_successful_compiler_and_cleans_its_work(self):
+        binary = shutil.which("true")
+        result = self.aspect(
+            "acceptance", "check-diagnostics", "--", "--binary", binary,
+            "--work", "diagnostics work", status=1,
+        )
+        self.assertIn("Expected compiler rejection: move", result.stderr)
+        self.assertEqual(list((self.root / "diagnostics work").iterdir()), [])
+        self.write("executables", f"//:bin/vesper {binary}\n")
+        result = self.aspect(
+            "acceptance", "test-diagnostics",
+            env={"VESPER_BAZEL_EXECUTABLES": "executables", "BAZEL": "/missing-bazel"}, status=1,
+        )
+        self.assertIn("Expected compiler rejection: move", result.stderr)
 
     def test_fixture_builds_publish_payloads_and_hashes_only_after_cargo_succeeds(self):
         self.write("bin/cargo", """\

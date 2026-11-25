@@ -1,10 +1,6 @@
 """Decode JSON reports that must have unique keys in every object."""
 
-def decode_object(text: str) -> dict:
-    report = json.try_decode(text)
-    if type(report) != "dict":
-        fail("Expected a JSON object")
-
+def _check_unique_keys(text: str):
     # The JSON decoder has already validated the syntax. Track object keys
     # separately because the decoder keeps only the last value of each key.
     containers = []
@@ -45,4 +41,17 @@ def decode_object(text: str) -> dict:
             end = -1
         else:
             end = -1
+
+def decode_object(text: str) -> dict:
+    report = json.try_decode(text)
+    if type(report) != "dict":
+        fail("Expected a JSON object")
+    _check_unique_keys(text)
+    return report
+
+def decode_list(text: str) -> list:
+    report = json.try_decode(text)
+    if type(report) != "list":
+        fail("Expected a JSON array")
+    _check_unique_keys(text)
     return report

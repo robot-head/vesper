@@ -1,7 +1,6 @@
 load("./lib/script.axl", "script_task")
 
 check_canonical_protocols = script_task("check-canonical-protocols", ["acceptance"], "scripts/check-canonical-protocols.py", "python3", from_root = True)
-check_diagnostics = script_task("check-diagnostics", ["acceptance"], "scripts/check-diagnostics.py", "python3", from_root = True)
 check_doc_links = script_task("check-doc-links", ["acceptance"], "scripts/check-doc-links.py", "python3", from_root = True)
 check_editor = script_task("check-editor", ["acceptance"], "scripts/check-editor.py", "python3", from_root = True)
 check_macro_preview = script_task("check-macro-preview", ["acceptance"], "scripts/check-macro-preview.py", "python3", from_root = True)
