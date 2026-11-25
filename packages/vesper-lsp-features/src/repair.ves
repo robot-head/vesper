@@ -1,0 +1,1001 @@
+// The repaired view of syntax-damaged source (src/lsp/lens.rs `repair`,
+// `candidates`, `open_at`, `closers`, `apply` and `parses`) in Vesper. Each
+// damaged function is cut at the last complete statement of the innermost
+// block that can be closed and closed with the delimiters still open there.
+// A damaged header is cut at its last complete parameter, and a damaged
+// struct, enum or effect at its last complete member. Every byte offset is
+// kept: cut text becomes spaces (newlines kept) and the closers overwrite
+// the first of them. Each repair is validated by parsing it alone.
+//
+// The recovery parse's declarations, recovery sites and diagnostics
+// (`RecoverySyntax`) come from the harness, as the checker's facts do for
+// the other entries. The tokens and the validating parses are
+// @vesper/front's.
+
+use @vesper/front::Tokens;
+use @vesper/front::lex::{
+    lex_with_limits,
+    token_end
+};
+use @vesper/front::diag::{
+    diags_new
+};
+use @vesper/front::parse::{
+    parse_tokens,
+    hard_depth
+};
+use @vesper/front::kinds::{
+    k_whitespace,
+    k_comment,
+    k_block_comment,
+    k_eof,
+    k_upper,
+    k_lower,
+    k_self_kw,
+    k_let,
+    k_if,
+    k_match,
+    k_handle,
+    k_return,
+    k_fn,
+    k_l_brace,
+    k_r_brace,
+    k_l_paren,
+    k_r_paren,
+    k_l_bracket,
+    k_r_bracket,
+    k_semi,
+    k_comma
+};
+use self::json::{
+    pack,
+    put,
+    put_bytes,
+    put_u64
+};
+
+const NONE64: u64 = 18446744073709551615;
+
+// `DeclarationKind` and `DeclarationStatus` as the harness numbers them.
+const D_OTHER: u64 = 0;
+const D_FUNCTION: u64 = 1;
+const D_IMPL: u64 = 2;
+const D_STRUCT: u64 = 3;
+const D_ENUM: u64 = 4;
+const D_EFFECT: u64 = 5;
+const S_COMPLETE: u64 = 0;
+const S_OPAQUE: u64 = 2;
+
+// `RegionKind`.
+const R_BODY: u8 = 0;
+const R_HEADER: u8 = 1;
+const R_MEMBER: u8 = 2;
+
+// Why there is no repaired view (`Unavailable`).
+const U_NONE: u8 = 0;
+const U_OPAQUE: u8 = 1;
+const U_CONTEXT: u8 = 2;
+const U_HEADER: u8 = 3;
+const U_UNPARSED: u8 = 4;
+const U_RESOURCE: u8 = 5;
+
+const MAX_DAMAGED: u64 = 16;
+const MAX_PARSES: u64 = 64;
+const MAX_TOKENS: u64 = 65536;
+
+fn g64(in v: ChunkSeq[u64], i: u64) -> u64 {
+    match v.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn g8(in v: ChunkSeq[u8], i: u64) -> u8 {
+    match v.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+// The significant tokens (no whitespace, comments or end of file): kind,
+// start and end.
+struct Tk {
+    kind: ChunkSeq[u8],
+    s: ChunkSeq[u64],
+    e: ChunkSeq[u64]
+}
+
+// The recovery parse (`RecoverySyntax`): declarations (kind, status, span,
+// name span or NONE64), sites (owner or NONE64, span) and diagnostic spans.
+struct Rs {
+    d_kind: ChunkSeq[u64],
+    d_status: ChunkSeq[u64],
+    d_s: ChunkSeq[u64],
+    d_e: ChunkSeq[u64],
+    d_ns: ChunkSeq[u64],
+    d_ne: ChunkSeq[u64],
+    site_owner: ChunkSeq[u64],
+    site_s: ChunkSeq[u64],
+    site_e: ChunkSeq[u64],
+    diag_s: ChunkSeq[u64],
+    diag_e: ChunkSeq[u64]
+}
+
+// An open delimiter (`Open`).
+struct Opens {
+    kind: ChunkSeq[u8],
+    cut: ChunkSeq[u64],
+    in_let: ChunkSeq[u8]
+}
+
+fn opens_new() -> Opens {
+    Opens {
+        kind: ChunkSeq::new[u8](),
+        cut: ChunkSeq::new[u64](),
+        in_let: ChunkSeq::new[u8]()
+    }
+}
+
+// Candidate patches (`Patch`) with their scope and `fn` start, closers in
+// one pool (cl[cl_a..+cl_n]).
+struct Patches {
+    cut: ChunkSeq[u64],
+    blank_end: ChunkSeq[u64],
+    cl_a: ChunkSeq[u64],
+    cl_n: ChunkSeq[u64],
+    kind: ChunkSeq[u8],
+    depth: ChunkSeq[u64],
+    keep_from: ChunkSeq[u64],
+    scope_s: ChunkSeq[u64],
+    scope_e: ChunkSeq[u64],
+    fn_start: ChunkSeq[u64],
+    cl: ChunkSeq[u8]
+}
+
+fn patches_new() -> Patches {
+    Patches {
+        cut: ChunkSeq::new[u64](),
+        blank_end: ChunkSeq::new[u64](),
+        cl_a: ChunkSeq::new[u64](),
+        cl_n: ChunkSeq::new[u64](),
+        kind: ChunkSeq::new[u8](),
+        depth: ChunkSeq::new[u64](),
+        keep_from: ChunkSeq::new[u64](),
+        scope_s: ChunkSeq::new[u64](),
+        scope_e: ChunkSeq::new[u64](),
+        fn_start: ChunkSeq::new[u64](),
+        cl: ChunkSeq::new[u8]()
+    }
+}
+
+fn closer(kind: u8) -> u8 {
+    if kind == k_l_paren() {
+        41
+    } else if kind == k_l_bracket() {
+        93
+    } else {
+        125
+    }
+}
+
+// `closers(levels[from..=to])`: innermost first, with the `;` a block
+// inside an unterminated `let` needs.
+fn closers(inout out: ChunkSeq[u8], in st: Opens, from: u64, to: u64) {
+    let mut i = inc(to);
+    loop {
+        if i <= from {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        out.push(closer(g8(in st.kind, i)));
+        if i > from {
+            let parent = wrapping_sub(i, 1);
+            if g8(in st.kind, parent) == k_l_brace() && g8(in st.in_let, parent) != 0 {
+                out.push(59);
+            }
+        }
+    }
+}
+
+fn starts_element(kind: u8) -> bool {
+    kind == k_let()
+        || kind == k_lower()
+        || kind == k_upper()
+        || kind == k_self_kw()
+        || kind == k_if()
+        || kind == k_match()
+        || kind == k_handle()
+        || kind == k_return()
+}
+
+fn set8(inout v: ChunkSeq[u8], i: u64, x: u8) {
+    let ok = v.try_set(i, x);
+}
+
+fn set64(inout v: ChunkSeq[u64], i: u64, x: u64) {
+    let ok = v.try_set(i, x);
+}
+
+// `open_at`: the delimiters open at `damage`, scanning from `from`.
+fn open_at(in tk: Tk, from: u64, damage: u64) -> Opens {
+    let mut st = opens_new();
+    let n = tk.kind.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n || g64(in tk.s, i) >= from {
+            break;
+        }
+        i = inc(i);
+    }
+    loop {
+        if i >= n || g64(in tk.s, i) >= damage {
+            break;
+        }
+        let kind = g8(in tk.kind, i);
+        let end = g64(in tk.e, i);
+        if kind == k_l_brace() || kind == k_l_paren() || kind == k_l_bracket() {
+            st.kind.push(kind);
+            st.cut.push(end);
+            st.in_let.push(0);
+        } else if kind == k_let() {
+            let top = st.kind.len();
+            if top > 0 {
+                set8(inout st.in_let, wrapping_sub(top, 1), 1);
+            }
+        } else if kind == k_r_brace() || kind == k_r_paren() || kind == k_r_bracket() {
+            let closed = match st.kind.pop() {
+                Option::Some(x) => x,
+                Option::None => 0,
+            };
+            let had = st.cut.len() > 0;
+            let x = st.cut.pop();
+            let y = st.in_let.pop();
+            let top = st.kind.len();
+            if had && closed == k_l_brace() && top > 0 {
+                let parent = wrapping_sub(top, 1);
+                let j = inc(i);
+                if g8(in st.kind, parent) == k_l_brace()
+                    && j < n
+                    && g64(in tk.s, j) < damage
+                    && starts_element(g8(in tk.kind, j)) {
+                    set64(inout st.cut, parent, end);
+                }
+            }
+        } else if kind == k_semi() || kind == k_comma() {
+            let top = st.kind.len();
+            if top > 0 {
+                set64(inout st.cut, wrapping_sub(top, 1), end);
+                if kind == k_semi() {
+                    set8(inout st.in_let, wrapping_sub(top, 1), 0);
+                }
+            }
+        }
+        i = inc(i);
+    }
+    st
+}
+
+fn push_patch(
+    inout ps: Patches,
+    in st: Opens,
+    cut: u64,
+    blank_end: u64,
+    cl_from: u64,
+    cl_to: u64,
+    kind: u8,
+    depth: u64,
+    keep_from: u64,
+    scope_s: u64,
+    scope_e: u64,
+    fn_start: u64
+) {
+    ps.cut.push(cut);
+    ps.blank_end.push(blank_end);
+    let a = ps.cl.len();
+    if cl_to != NONE64 {
+        closers(inout ps.cl, in st, cl_from, cl_to);
+    }
+    ps.cl_a.push(a);
+    ps.cl_n.push(wrapping_sub(ps.cl.len(), a));
+    ps.kind.push(kind);
+    ps.depth.push(depth);
+    ps.keep_from.push(keep_from);
+    ps.scope_s.push(scope_s);
+    ps.scope_e.push(scope_e);
+    ps.fn_start.push(fn_start);
+}
+
+// `candidates`: the patches for one damaged declaration, most specific
+// first.
+fn candidates(in tk: Tk, kind: u64, ss: u64, se: u64, damage: u64) -> Patches {
+    let st = open_at(in tk, ss, damage);
+    let mut ps = patches_new();
+    let n = tk.kind.len();
+    let mut fn_start = NONE64;
+    let mut next_fn = NONE64;
+    for i in 0..n {
+        let s = g64(in tk.s, i);
+        if ss <= s && g64(in tk.e, i) <= se && g8(in tk.kind, i) == k_fn() {
+            if s < damage {
+                fn_start = s;
+            } else if next_fn == NONE64 {
+                next_fn = s;
+            }
+        }
+    }
+    let member = kind == D_STRUCT || kind == D_ENUM || kind == D_EFFECT;
+    let base: u64 = if kind == D_IMPL {
+        1
+    } else {
+        0
+    };
+    let depth_n = st.kind.len();
+    let mut body_level = NONE64;
+    let mut i = base;
+    loop {
+        if i >= depth_n {
+            break;
+        }
+        if g8(in st.kind, i) == k_l_brace() {
+            body_level = i;
+            break;
+        }
+        i = inc(i);
+    }
+    let scope_from = if member || fn_start == NONE64 {
+        ss
+    } else {
+        fn_start
+    };
+    if !member && body_level != NONE64 {
+        // Statement repair at each enclosing block, innermost first.
+        let mut level = depth_n;
+        loop {
+            if level <= body_level {
+                break;
+            }
+            level = wrapping_sub(level, 1);
+            if g8(in st.kind, level) != k_l_brace() {
+                continue;
+            }
+            let cut = g64(in st.cut, level);
+            let depth = wrapping_sub(level, body_level);
+            // Inside an impl, first keep the later methods.
+            if kind == D_IMPL && next_fn != NONE64 {
+                push_patch(
+                    inout ps,
+                    in st,
+                    cut,
+                    next_fn,
+                    base,
+                    level,
+                    R_BODY,
+                    depth,
+                    NONE64,
+                    scope_from,
+                    next_fn,
+                    fn_start
+                );
+            }
+            push_patch(
+                inout ps,
+                in st,
+                cut,
+                se,
+                0,
+                level,
+                R_BODY,
+                depth,
+                NONE64,
+                scope_from,
+                se,
+                fn_start
+            );
+        }
+        return ps;
+    }
+    if !member {
+        // Header repair: close the parameter list at its last complete
+        // parameter (or drop a damaged signature tail) and keep the body.
+        if fn_start == NONE64 {
+            return ps;
+        }
+        let limit = if next_fn == NONE64 {
+            se
+        } else {
+            next_fn
+        };
+        let mut body = NONE64;
+        let mut rparen = NONE64;
+        for j in 0..n {
+            let s = g64(in tk.s, j);
+            let e = g64(in tk.e, j);
+            if ss <= s && e <= se {
+                let k = g8(in tk.kind, j);
+                if body == NONE64 && k == k_l_brace() && s >= damage && s < limit {
+                    body = s;
+                }
+                if k == k_r_paren() && s >= fn_start && e <= damage {
+                    rparen = e;
+                }
+            }
+        }
+        if body == NONE64 {
+            return ps;
+        }
+        let mut params = NONE64;
+        let mut q = base;
+        loop {
+            if q >= depth_n {
+                break;
+            }
+            if g8(in st.kind, q) == k_l_paren() {
+                params = q;
+                break;
+            }
+            q = inc(q);
+        }
+        if params != NONE64 {
+            ps.cut.push(g64(in st.cut, params));
+            ps.blank_end.push(body);
+            ps.cl_a.push(ps.cl.len());
+            ps.cl.push(41);
+            ps.cl_n.push(1);
+            ps.kind.push(R_HEADER);
+            ps.depth.push(0);
+            ps.keep_from.push(body);
+            ps.scope_s.push(fn_start);
+            ps.scope_e.push(limit);
+            ps.fn_start.push(fn_start);
+        } else if rparen != NONE64 {
+            push_patch(
+                inout ps,
+                in st,
+                rparen,
+                body,
+                0,
+                NONE64,
+                R_HEADER,
+                0,
+                body,
+                fn_start,
+                limit,
+                fn_start
+            );
+        }
+        return ps;
+    }
+    // Member repair: close the struct, enum or effect at its last complete
+    // member.
+    for level in 0..depth_n {
+        if g8(in st.kind, level) == k_l_brace() {
+            push_patch(
+                inout ps,
+                in st,
+                g64(in st.cut, level),
+                se,
+                0,
+                level,
+                R_MEMBER,
+                wrapping_sub(wrapping_sub(depth_n, 1), level),
+                NONE64,
+                ss,
+                se,
+                NONE64
+            );
+            break;
+        }
+    }
+    ps
+}
+
+fn is_newline(b: u8) -> bool {
+    b == 10 || b == 13
+}
+
+fn blank(inout bytes: ChunkSeq[u8], s: u64, e: u64) {
+    let mut end = e;
+    if end > bytes.len() {
+        end = bytes.len();
+    }
+    let mut i = s;
+    loop {
+        if i >= end {
+            break;
+        }
+        if !is_newline(g8(in bytes, i)) {
+            set8(inout bytes, i, 32);
+        }
+        i = inc(i);
+    }
+}
+
+// `apply`: blank from the cut, then write the closers over its first
+// non-newline bytes.
+fn apply(inout bytes: ChunkSeq[u8], in ps: Patches, p: u64) -> bool {
+    let keep = g64(in ps.keep_from, p);
+    let mut end = if keep == NONE64 {
+        g64(in ps.blank_end, p)
+    } else {
+        keep
+    };
+    if end > bytes.len() {
+        end = bytes.len();
+    }
+    let cut = g64(in ps.cut, p);
+    if cut > end {
+        return false;
+    }
+    blank(inout bytes, cut, end);
+    let mut at = cut;
+    let a = g64(in ps.cl_a, p);
+    for j in 0..g64(in ps.cl_n, p) {
+        loop {
+            if at >= end || !is_newline(g8(in bytes, at)) {
+                break;
+            }
+            at = inc(at);
+        }
+        if at >= end {
+            return false;
+        }
+        set8(inout bytes, at, g8(in ps.cl, wrapping_add(a, j)));
+        at = inc(at);
+    }
+    true
+}
+
+// `parses`: the text parses with no diagnostic.
+fn parses(in text: Slice[u8], max_source: u64, max_depth: u64) -> bool {
+    if max_depth == 0 || max_depth > hard_depth() {
+        return false;
+    }
+    let mut d = diags_new();
+    let t = lex_with_limits(in text, inout d, max_source, MAX_TOKENS, 1);
+    if t.rejected {
+        return false;
+    }
+    let p = parse_tokens(in text, t, d, 1, max_depth);
+    p.d.code.len() == 0
+}
+
+// The length of the white space (`char::is_whitespace`) that starts `b`
+// at `i`, or 0.
+fn white_len(in b: ChunkSeq[u8], i: u64) -> u64 {
+    let c = g8(in b, i);
+    if c == 32 || (c >= 9 && c <= 13) {
+        return 1;
+    }
+    if c == 194 {
+        let d = g8(in b, inc(i));
+        if d == 133 || d == 160 {
+            return 2;
+        }
+        return 0;
+    }
+    if c == 225 {
+        if g8(in b, inc(i)) == 154 && g8(in b, wrapping_add(i, 2)) == 128 {
+            return 3;
+        }
+        return 0;
+    }
+    if c == 226 {
+        let d = g8(in b, inc(i));
+        let e = g8(in b, wrapping_add(i, 2));
+        if d == 128 && ((e >= 128 && e <= 138) || e == 168 || e == 169 || e == 175) {
+            return 3;
+        }
+        if d == 129 && e == 159 {
+            return 3;
+        }
+        return 0;
+    }
+    if c == 227 {
+        if g8(in b, inc(i)) == 128 && g8(in b, wrapping_add(i, 2)) == 128 {
+            return 3;
+        }
+    }
+    0
+}
+
+// The UTF-8 length of the character starting with byte `c`.
+fn char_len(c: u8) -> u64 {
+    if c < 128 {
+        1
+    } else if c >= 240 {
+        4
+    } else if c >= 224 {
+        3
+    } else if c >= 192 {
+        2
+    } else {
+        1
+    }
+}
+
+fn put_span(inout out: ChunkSeq[u8], in src: ChunkSeq[u8], s: u64, e: u64) {
+    let mut i = s;
+    loop {
+        if i >= e {
+            break;
+        }
+        out.push(g8(in src, i));
+        i = inc(i);
+    }
+}
+
+fn tab_u(inout out: ChunkSeq[u8], n: u64) {
+    out.push(9);
+    put_u64(inout out, n);
+}
+
+fn unavailable(inout out: ChunkSeq[u8], why: u8) {
+    put(inout out, in "U\t");
+    if why == U_OPAQUE {
+        put(inout out, in "opaque_declaration");
+    } else if why == U_CONTEXT {
+        put(inout out, in "damaged_non_function_context");
+    } else if why == U_HEADER {
+        put(inout out, in "damaged_function_header");
+    } else if why == U_UNPARSED {
+        put(inout out, in "repaired_prefix_does_not_parse");
+    } else {
+        put(inout out, in "lens_resource_limit");
+    }
+    out.push(10);
+}
+
+fn copy_bytes(in from: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::with_capacity[u8](from.len());
+    for i in 0..from.len() {
+        out.push(g8(in from, i));
+    }
+    out
+}
+
+// `repair` into `out`: the regions (`G` rows), then `T` and the repaired
+// text; or `U` and the reason there is no repaired view.
+fn repair(
+    inout out: ChunkSeq[u8],
+    in source: Str,
+    in rs: Rs,
+    max_source: u64,
+    max_diag: u64,
+    max_depth: u64
+) {
+    let b = source.as_bytes();
+    let mut d = diags_new();
+    let t = lex_with_limits(in b, inout d, max_source, MAX_TOKENS, max_diag);
+    if t.rejected || t.limited {
+        return unavailable(inout out, U_RESOURCE);
+    }
+    let mut tk = Tk {
+        kind: ChunkSeq::new[u8](),
+        s: ChunkSeq::new[u64](),
+        e: ChunkSeq::new[u64]()
+    };
+    for i in 0..t.kind.len() {
+        let k = g8(in t.kind, i);
+        if k == k_whitespace() || k == k_comment() || k == k_block_comment() || k == k_eof() {
+            continue;
+        }
+        tk.kind.push(k);
+        tk
+            .s
+            .push(
+                widen_u64(
+                    match t.start.try_get(i) {
+                        Option::Some(x) => x,
+                        Option::None => 0,
+                    }
+                )
+            );
+        tk.e.push(token_end(in t, i));
+    }
+    let nd = rs.d_kind.len();
+    // Sites outside every damaged declaration cannot be repaired by a cut.
+    for i in 0..rs.site_owner.len() {
+        let owner = g64(in rs.site_owner, i);
+        if owner == NONE64 || owner >= nd || g64(in rs.d_status, owner) == S_COMPLETE {
+            return unavailable(inout out, U_CONTEXT);
+        }
+    }
+    let mut damaged = ChunkSeq::new[u64]();
+    for i in 0..nd {
+        if g64(in rs.d_status, i) != S_COMPLETE {
+            damaged.push(i);
+        }
+    }
+    if damaged.len() > MAX_DAMAGED {
+        return unavailable(inout out, U_RESOURCE);
+    }
+    let mut src = ChunkSeq::with_capacity[u8](b.len());
+    for i in 0..b.len() {
+        src
+            .push(
+                match b.try_get(i) {
+                    Option::Some(x) => x,
+                    Option::None => 0,
+                }
+            );
+    }
+    let mut base = copy_bytes(in src);
+    for j in 0..damaged.len() {
+        let i = g64(in damaged, j);
+        let kind = g64(in rs.d_kind, i);
+        let function_like = kind == D_FUNCTION || kind == D_IMPL;
+        if g64(in rs.d_status, i) == S_OPAQUE && !function_like {
+            return unavailable(inout out, U_OPAQUE);
+        }
+        if !function_like && kind != D_STRUCT && kind != D_ENUM && kind != D_EFFECT {
+            return unavailable(inout out, U_CONTEXT);
+        }
+        blank(inout base, g64(in rs.d_s, i), g64(in rs.d_e, i));
+    }
+    // The chosen patch of each damaged declaration, and its region.
+    let mut chosen = patches_new();
+    let mut regions = ChunkSeq::new[u8]();
+    let mut parses_left = MAX_PARSES;
+    for j in 0..damaged.len() {
+        let index = g64(in damaged, j);
+        let kind = g64(in rs.d_kind, index);
+        let ds = g64(in rs.d_s, index);
+        let de = g64(in rs.d_e, index);
+        // The first damage: its sites, then diagnostics starting inside it.
+        let mut dmg_s = NONE64;
+        let mut dmg_e: u64 = 0;
+        for q in 0..rs.site_owner.len() {
+            if g64(in rs.site_owner, q) == index {
+                let s = g64(in rs.site_s, q);
+                if dmg_s == NONE64 || s < dmg_s {
+                    dmg_s = s;
+                    dmg_e = g64(in rs.site_e, q);
+                }
+            }
+        }
+        for q in 0..rs.diag_s.len() {
+            let s = g64(in rs.diag_s, q);
+            if ds <= s && s < de && (dmg_s == NONE64 || s < dmg_s) {
+                dmg_s = s;
+                dmg_e = g64(in rs.diag_e, q);
+            }
+        }
+        if dmg_s == NONE64 {
+            dmg_s = de;
+            dmg_e = de;
+        }
+        let ps = candidates(in tk, kind, ds, de, dmg_s);
+        if ps.cut.len() == 0 {
+            if kind == D_FUNCTION || kind == D_IMPL {
+                return unavailable(inout out, U_HEADER);
+            }
+            return unavailable(inout out, U_CONTEXT);
+        }
+        let mut accepted = NONE64;
+        for p in 0..ps.cut.len() {
+            if parses_left == 0 {
+                return unavailable(inout out, U_RESOURCE);
+            }
+            parses_left = wrapping_sub(parses_left, 1);
+            // This repair alone: the declaration's original bytes with the
+            // patch, every other damaged declaration blanked.
+            let mut trial = copy_bytes(in base);
+            let mut x = ds;
+            loop {
+                if x >= de || x >= trial.len() {
+                    break;
+                }
+                set8(inout trial, x, g8(in src, x));
+                x = inc(x);
+            }
+            if !apply(inout trial, in ps, p) {
+                continue;
+            }
+            let ok = match String::from_utf8(in trial.as_slice()) {
+                Option::Some(text) => parses(in text.as_bytes(), max_source, max_depth),
+                Option::None => false,
+            };
+            if ok {
+                accepted = p;
+                break;
+            }
+        }
+        if accepted == NONE64 {
+            return unavailable(inout out, U_UNPARSED);
+        }
+        let p = accepted;
+        // The region's name: `Owner::method` inside an impl.
+        regions.push(71);
+        regions.push(9);
+        let fn_start = g64(in ps.fn_start, p);
+        if kind == D_IMPL && fn_start != NONE64 {
+            let ns = g64(in rs.d_ns, index);
+            if ns != NONE64 {
+                put_span(inout regions, in src, ns, g64(in rs.d_ne, index));
+            } else {
+                let mut found = false;
+                for q in 0..tk.kind.len() {
+                    if g64(in tk.s, q) > ds && g8(in tk.kind, q) == k_upper() {
+                        put_span(inout regions, in src, g64(in tk.s, q), g64(in tk.e, q));
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    regions.push(63);
+                }
+            }
+            regions.push(58);
+            regions.push(58);
+            let mut found = false;
+            for q in 0..tk.kind.len() {
+                if g64(in tk.s, q) > fn_start && g8(in tk.kind, q) == k_lower() {
+                    put_span(inout regions, in src, g64(in tk.s, q), g64(in tk.e, q));
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                regions.push(63);
+            }
+        } else {
+            let ns = g64(in rs.d_ns, index);
+            if ns != NONE64 {
+                put_span(inout regions, in src, ns, g64(in rs.d_ne, index));
+            }
+        }
+        let pk = g8(in ps.kind, p);
+        regions.push(9);
+        if pk == R_BODY {
+            put(inout regions, in "body");
+        } else if pk == R_HEADER {
+            put(inout regions, in "header");
+        } else {
+            put(inout regions, in "member");
+        }
+        let cut = g64(in ps.cut, p);
+        // The unfinished code starts at the first non-space after the cut.
+        let mut unfinished = cut;
+        let mut found = false;
+        loop {
+            if unfinished >= src.len() {
+                break;
+            }
+            let wl = white_len(in src, unfinished);
+            if wl == 0 {
+                found = true;
+                break;
+            }
+            unfinished = wrapping_add(unfinished, wl);
+        }
+        if !found {
+            unfinished = cut;
+        }
+        if unfinished < dmg_e {
+            dmg_s = unfinished;
+        }
+        tab_u(inout regions, ds);
+        tab_u(inout regions, de);
+        tab_u(inout regions, g64(in ps.scope_s, p));
+        tab_u(inout regions, g64(in ps.scope_e, p));
+        tab_u(
+            inout regions,
+            if pk == R_HEADER {
+                de
+            } else {
+                cut
+            }
+        );
+        tab_u(inout regions, g64(in ps.depth, p));
+        tab_u(inout regions, dmg_s);
+        tab_u(inout regions, dmg_e);
+        regions.push(10);
+        chosen.cut.push(cut);
+        chosen.blank_end.push(g64(in ps.blank_end, p));
+        chosen.cl_a.push(chosen.cl.len());
+        let a = g64(in ps.cl_a, p);
+        let cn = g64(in ps.cl_n, p);
+        for q in 0..cn {
+            chosen.cl.push(g8(in ps.cl, wrapping_add(a, q)));
+        }
+        chosen.cl_n.push(cn);
+        chosen.kind.push(pk);
+        chosen.depth.push(g64(in ps.depth, p));
+        chosen.keep_from.push(g64(in ps.keep_from, p));
+        chosen.scope_s.push(0);
+        chosen.scope_e.push(0);
+        chosen.fn_start.push(fn_start);
+    }
+    let mut bytes = copy_bytes(in src);
+    for p in 0..chosen.cut.len() {
+        if !apply(inout bytes, in chosen, p) {
+            return unavailable(inout out, U_UNPARSED);
+        }
+    }
+    match String::from_utf8(in bytes.as_slice()) {
+        Option::Some(text) => {
+            put_bytes(inout out, in regions.as_slice());
+            put(inout out, in "T\n");
+            put_bytes(inout out, in text.as_bytes());
+        },
+        Option::None => unavailable(inout out, U_UNPARSED),
+    }
+}
+
+// ------------------------------------------------------------ entry
+
+copy struct Rd {
+    pos: u64
+}
+
+fn word(in b: Slice[u8], inout r: Rd) -> u64 {
+    let x = match b.try_read_u64_le(r.pos) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    r.pos = wrapping_add(r.pos, 8);
+    x
+}
+
+// The harness input: the declarations (kind, status, span, name span or
+// all ones), the sites (owner or all ones, span), the diagnostic spans,
+// the limits (source bytes, diagnostics, depth), the round count and the
+// source length, then the source.
+pub fn lens_repair(in input: Str) -> ChunkSeq[u64] {
+    let bytes = input.as_bytes();
+    let mut r = Rd {
+        pos: 0
+    };
+    let mut rs = Rs {
+        d_kind: ChunkSeq::new[u64](),
+        d_status: ChunkSeq::new[u64](),
+        d_s: ChunkSeq::new[u64](),
+        d_e: ChunkSeq::new[u64](),
+        d_ns: ChunkSeq::new[u64](),
+        d_ne: ChunkSeq::new[u64](),
+        site_owner: ChunkSeq::new[u64](),
+        site_s: ChunkSeq::new[u64](),
+        site_e: ChunkSeq::new[u64](),
+        diag_s: ChunkSeq::new[u64](),
+        diag_e: ChunkSeq::new[u64]()
+    };
+    let nd = word(in bytes, inout r);
+    for i in 0..nd {
+        rs.d_kind.push(word(in bytes, inout r));
+        rs.d_status.push(word(in bytes, inout r));
+        rs.d_s.push(word(in bytes, inout r));
+        rs.d_e.push(word(in bytes, inout r));
+        rs.d_ns.push(word(in bytes, inout r));
+        rs.d_ne.push(word(in bytes, inout r));
+    }
+    let ns = word(in bytes, inout r);
+    for i in 0..ns {
+        rs.site_owner.push(word(in bytes, inout r));
+        rs.site_s.push(word(in bytes, inout r));
+        rs.site_e.push(word(in bytes, inout r));
+    }
+    let ng = word(in bytes, inout r);
+    for i in 0..ng {
+        rs.diag_s.push(word(in bytes, inout r));
+        rs.diag_e.push(word(in bytes, inout r));
+    }
+    let max_source = word(in bytes, inout r);
+    let max_diag = word(in bytes, inout r);
+    let max_depth = word(in bytes, inout r);
+    let reps = word(in bytes, inout r);
+    let len = word(in bytes, inout r);
+    let source = match String::from_utf8(in bytes[r.pos..wrapping_add(r.pos, len)]) {
+        Option::Some(x) => x,
+        Option::None => String::new(),
+    };
+    let mut out = ChunkSeq::new[u8]();
+    for round in 0..reps {
+        out.clear();
+        repair(inout out, in source, in rs, max_source, max_diag, max_depth);
+    }
+    pack(in out.as_slice())
+}
