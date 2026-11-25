@@ -36,6 +36,12 @@ pub fn kind_both() -> u8 {
     3
 }
 
+// A `sugar` declaration's name: importable like an item, but in neither
+// namespace, so no reference resolves to it (`Kind::Sugar`).
+pub fn kind_sugar() -> u8 {
+    4
+}
+
 // `Kind::has`.
 pub fn kind_has(k: u8, ns: u8) -> bool {
     k == kind_both() || k == ns
@@ -120,6 +126,11 @@ pub struct St {
     item_kind: FlatTable[u64, u8],
     // Bridge types provided by .vsys libraries, keyed (root module, name).
     foreign_types: FlatTable[u64, u8],
+    // Each module's `sugar` declarations (`ModuleSugar::declarations`), in
+    // input order: the module, the name and whether it is `pub` (1).
+    sugar_mod: ChunkSeq[u32],
+    sugar_name: ChunkSeq[u32],
+    sugar_public: ChunkSeq[u8],
     public: FlatTable[u64, u8],
     // Each module's declared names in source order (`Kind::of`; a name
     // declared twice appears twice, its kind is the last one's).
@@ -278,6 +289,9 @@ pub fn st_new() -> St {
         root_mod: none(),
         item_kind: flat_table_new[u64, u8](),
         foreign_types: flat_table_new[u64, u8](),
+        sugar_mod: ChunkSeq::new[u32](),
+        sugar_name: ChunkSeq::new[u32](),
+        sugar_public: ChunkSeq::new[u8](),
         public: flat_table_new[u64, u8](),
         mod_items_first: ChunkSeq::new[u32](),
         mod_items_len: ChunkSeq::new[u32](),
