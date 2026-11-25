@@ -1,0 +1,1312 @@
+// The two Lean renderings of a proof-lens model (`Exact` and `BitVecs` in
+// src/lsp/proof_model.rs), byte for byte, over the model terms proof.ves
+// builds.
+
+use self::nav::{
+    put_u
+};
+
+// Model kinds (`proof_model::Kind`).
+pub const K_U8: u8 = 0;
+pub const K_U32: u8 = 1;
+pub const K_U64: u8 = 2;
+pub const K_I64: u8 = 3;
+pub const K_BOOL: u8 = 4;
+pub const K_UNIT: u8 = 5;
+pub const K_NONE: u8 = 255;
+
+// Term kinds (`proof_model::Term`).
+pub const TM_VAR: u8 = 1;
+pub const TM_INT: u8 = 2;
+pub const TM_BOOL: u8 = 3;
+pub const TM_UNIT: u8 = 4;
+pub const TM_ARITH: u8 = 5;
+pub const TM_DIV: u8 = 6;
+pub const TM_NEG: u8 = 7;
+pub const TM_NOT: u8 = 8;
+pub const TM_CMP: u8 = 9;
+pub const TM_AND: u8 = 10;
+pub const TM_OR: u8 = 11;
+pub const TM_ITE: u8 = 12;
+pub const TM_LET: u8 = 13;
+
+// `Arith`: 0 Add, 1 Sub, 2 Mul. `Cmp`: 0 Eq, 1 Ne, 2 Lt, 3 Le, 4 Gt, 5 Ge.
+pub const OP_ADD: u8 = 0;
+pub const OP_SUB: u8 = 1;
+pub const OP_MUL: u8 = 2;
+pub const CMP_EQ: u8 = 0;
+pub const CMP_NE: u8 = 1;
+pub const CMP_LT: u8 = 2;
+pub const CMP_LE: u8 = 3;
+pub const CMP_GT: u8 = 4;
+pub const CMP_GE: u8 = 5;
+
+// The model's terms and variables. A term is a row: kind, up to three
+// children (`a`, `b`, `c`; a variable index for Var and Let's `a`), its
+// kind, operator and flag (Bool's value, Arith's `checked`, Div's `rem`),
+// and an Int's value as sign and magnitude.
+pub struct Tm {
+    k: ChunkSeq[u8],
+    a: ChunkSeq[u32],
+    b: ChunkSeq[u32],
+    c: ChunkSeq[u32],
+    kind: ChunkSeq[u8],
+    op: ChunkSeq[u8],
+    flag: ChunkSeq[u8],
+    mag: ChunkSeq[u64],
+    neg: ChunkSeq[u8],
+    // Variables (`VarInfo`): sanitized name in `pool`, kind, parameter.
+    v_s: ChunkSeq[u64],
+    v_l: ChunkSeq[u64],
+    v_kind: ChunkSeq[u8],
+    v_param: ChunkSeq[u8],
+    pool: ChunkSeq[u8]
+}
+
+pub fn tm_new() -> Tm {
+    Tm {
+        k: ChunkSeq::new[u8](),
+        a: ChunkSeq::new[u32](),
+        b: ChunkSeq::new[u32](),
+        c: ChunkSeq::new[u32](),
+        kind: ChunkSeq::new[u8](),
+        op: ChunkSeq::new[u8](),
+        flag: ChunkSeq::new[u8](),
+        mag: ChunkSeq::new[u64](),
+        neg: ChunkSeq::new[u8](),
+        v_s: ChunkSeq::new[u64](),
+        v_l: ChunkSeq::new[u64](),
+        v_kind: ChunkSeq::new[u8](),
+        v_param: ChunkSeq::new[u8](),
+        pool: ChunkSeq::new[u8]()
+    }
+}
+
+pub fn tm_clear(inout m: Tm) {
+    m.k.clear();
+    m.a.clear();
+    m.b.clear();
+    m.c.clear();
+    m.kind.clear();
+    m.op.clear();
+    m.flag.clear();
+    m.mag.clear();
+    m.neg.clear();
+    m.v_s.clear();
+    m.v_l.clear();
+    m.v_kind.clear();
+    m.v_param.clear();
+    m.pool.clear();
+}
+
+pub fn term(inout m: Tm, k: u8, a: u32, b: u32, c: u32, kind: u8, op: u8, flag: u8) -> u32 {
+    m.k.push(k);
+    m.a.push(a);
+    m.b.push(b);
+    m.c.push(c);
+    m.kind.push(kind);
+    m.op.push(op);
+    m.flag.push(flag);
+    m.mag.push(0);
+    m.neg.push(0);
+    wrapping_u32(wrapping_sub(m.k.len(), 1))
+}
+
+pub fn int_term(inout m: Tm, neg: bool, mag: u64, kind: u8) -> u32 {
+    let t = term(inout m, TM_INT, 0, 0, 0, kind, 0, 0);
+    let ok = m.mag.try_set(widen_u64(t), mag);
+    let ok2 = m
+        .neg
+        .try_set(
+            widen_u64(t),
+            if neg && mag != 0 {
+                1
+            } else {
+                0
+            }
+        );
+    t
+}
+
+fn g8(in s: ChunkSeq[u8], i: u32) -> u8 {
+    match s.try_get(widen_u64(i)) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn g32(in s: ChunkSeq[u32], i: u32) -> u32 {
+    match s.try_get(widen_u64(i)) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn g64(in s: ChunkSeq[u64], i: u32) -> u64 {
+    match s.try_get(widen_u64(i)) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn tk(in m: Tm, t: u32) -> u8 {
+    g8(in m.k, t)
+}
+
+pub fn ta(in m: Tm, t: u32) -> u32 {
+    g32(in m.a, t)
+}
+
+pub fn tb(in m: Tm, t: u32) -> u32 {
+    g32(in m.b, t)
+}
+
+pub fn tc(in m: Tm, t: u32) -> u32 {
+    g32(in m.c, t)
+}
+
+pub fn t_kind(in m: Tm, t: u32) -> u8 {
+    g8(in m.kind, t)
+}
+
+pub fn t_op(in m: Tm, t: u32) -> u8 {
+    g8(in m.op, t)
+}
+
+pub fn t_flag(in m: Tm, t: u32) -> u8 {
+    g8(in m.flag, t)
+}
+
+pub fn t_mag(in m: Tm, t: u32) -> u64 {
+    g64(in m.mag, t)
+}
+
+pub fn t_neg(in m: Tm, t: u32) -> bool {
+    g8(in m.neg, t) != 0
+}
+
+pub fn var_kind(in m: Tm, v: u32) -> u8 {
+    g8(in m.v_kind, v)
+}
+
+pub fn var_param(in m: Tm, v: u32) -> bool {
+    g8(in m.v_param, v) != 0
+}
+
+pub fn var_count(in m: Tm) -> u64 {
+    m.v_kind.len()
+}
+
+// `Builder::kind_of`.
+pub fn kind_of(in m: Tm, t: u32) -> u8 {
+    let mut at = t;
+    loop {
+        let k = tk(in m, at);
+        if k == TM_LET {
+            at = tc(in m, at);
+            continue;
+        }
+        if k == TM_VAR {
+            return var_kind(in m, ta(in m, at));
+        }
+        if k == TM_BOOL || k == TM_NOT || k == TM_CMP || k == TM_AND || k == TM_OR {
+            return K_BOOL;
+        }
+        if k == TM_UNIT {
+            return K_UNIT;
+        }
+        return t_kind(in m, at);
+    }
+}
+
+// ------------------------------------------------------------ kinds
+
+pub fn integer(k: u8) -> bool {
+    k == K_U8 || k == K_U32 || k == K_U64 || k == K_I64
+}
+
+pub fn width(k: u8) -> u64 {
+    if k == K_U8 {
+        8
+    } else if k == K_U32 {
+        32
+    } else if k == K_U64 || k == K_I64 {
+        64
+    } else if k == K_BOOL {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn kind_name(k: u8) -> Str {
+    if k == K_U8 {
+        "u8"
+    } else if k == K_U32 {
+        "u32"
+    } else if k == K_U64 {
+        "u64"
+    } else if k == K_I64 {
+        "i64"
+    } else if k == K_BOOL {
+        "bool"
+    } else {
+        "Unit"
+    }
+}
+
+fn range_lo(k: u8) -> Str {
+    if k == K_I64 {
+        "-9223372036854775808"
+    } else {
+        "0"
+    }
+}
+
+fn range_hi(k: u8) -> Str {
+    if k == K_U8 {
+        "255"
+    } else if k == K_U32 {
+        "4294967295"
+    } else if k == K_U64 {
+        "18446744073709551615"
+    } else if k == K_I64 {
+        "9223372036854775807"
+    } else if k == K_BOOL {
+        "1"
+    } else {
+        "0"
+    }
+}
+
+// `1 << width` and half of it, as decimals.
+fn modulus(k: u8) -> Str {
+    let w = width(k);
+    if w == 64 {
+        "18446744073709551616"
+    } else if w == 32 {
+        "4294967296"
+    } else if w == 8 {
+        "256"
+    } else if w == 1 {
+        "2"
+    } else {
+        "1"
+    }
+}
+
+fn half(k: u8) -> Str {
+    let w = width(k);
+    if w == 64 {
+        "9223372036854775808"
+    } else if w == 32 {
+        "2147483648"
+    } else if w == 8 {
+        "128"
+    } else if w == 1 {
+        "1"
+    } else {
+        "0"
+    }
+}
+
+// ------------------------------------------------------------ text
+
+pub fn s(inout o: ChunkSeq[u8], in x: Str) {
+    o.extend(in x.as_bytes());
+}
+
+pub fn sb(inout o: ChunkSeq[u8], in x: ChunkSeq[u8]) {
+    o.extend(in x.as_slice());
+}
+
+fn is_text(in b: ChunkSeq[u8], in x: Str) -> bool {
+    let y = x.as_bytes();
+    if b.len() != y.len() {
+        return false;
+    }
+    for i in 0..b.len() {
+        let c = match b.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let d = match y.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if c != d {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_false(in b: ChunkSeq[u8]) -> bool {
+    is_text(in b, in "False")
+}
+
+// An i128 value printed by `{}`: sign and magnitude.
+pub fn put_int(inout o: ChunkSeq[u8], neg: bool, mag: u64) {
+    if neg && mag != 0 {
+        o.push(45);
+    }
+    put_u(inout o, mag);
+}
+
+// `bv_literal`: `(n.rem_euclid(1 << width)#width)`.
+fn bv_literal(inout o: ChunkSeq[u8], neg: bool, mag: u64, w: u64) {
+    let mut v: u64 = 0;
+    if w >= 64 {
+        v = if neg {
+            wrapping_sub(0, mag)
+        } else {
+            mag
+        };
+    } else if w > 0 {
+        let m = wrapping_shl_u64(1, wrapping_u32(w));
+        let r = mag & wrapping_sub(m, 1);
+        v = if neg && r != 0 {
+            wrapping_sub(m, r)
+        } else {
+            r
+        };
+    }
+    s(inout o, in "(");
+    put_u(inout o, v);
+    s(inout o, in "#");
+    put_u(inout o, w);
+    s(inout o, in ")");
+}
+
+fn var_name(inout o: ChunkSeq[u8], in m: Tm, v: u32) {
+    s(inout o, in "«");
+    if var_param(in m, v) {
+        let st = g64(in m.v_s, v);
+        let l = g64(in m.v_l, v);
+        for i in 0..l {
+            match m.pool.try_get(wrapping_add(st, i)) {
+                Option::Some(c) => o.push(c),
+                Option::None => {}
+            }
+        }
+    } else {
+        s(inout o, in "$v");
+        put_u(inout o, widen_u64(v));
+    }
+    s(inout o, in "»");
+}
+
+fn range_prop(inout o: ChunkSeq[u8], in t: ChunkSeq[u8], k: u8) {
+    s(inout o, in "(");
+    s(inout o, in range_lo(k));
+    s(inout o, in " : Int) ≤ ");
+    sb(inout o, in t);
+    s(inout o, in " ∧ ");
+    sb(inout o, in t);
+    s(inout o, in " ≤ ");
+    s(inout o, in range_hi(k));
+}
+
+// `any`: a disjunction of the parts that are not `False`.
+struct Any {
+    out: ChunkSeq[u8],
+    first: ChunkSeq[u8],
+    n: u64
+}
+
+fn any_new() -> Any {
+    Any {
+        out: ChunkSeq::new[u8](),
+        first: ChunkSeq::new[u8](),
+        n: 0
+    }
+}
+
+fn any_add(inout a: Any, in p: ChunkSeq[u8]) {
+    if is_false(in p) {
+        return;
+    }
+    if a.n == 0 {
+        sb(inout a.first, in p);
+    } else {
+        if a.n == 1 {
+            s(inout a.out, in "(");
+            sb(inout a.out, in a.first);
+            s(inout a.out, in ")");
+        }
+        s(inout a.out, in " ∨ (");
+        sb(inout a.out, in p);
+        s(inout a.out, in ")");
+    }
+    a.n = wrapping_add(a.n, 1);
+}
+
+fn any_end(sink a: Any) -> ChunkSeq[u8] {
+    if a.n == 0 {
+        let mut f = ChunkSeq::new[u8]();
+        s(inout f, in "False");
+        f
+    } else if a.n == 1 {
+        a.first
+    } else {
+        a.out
+    }
+}
+
+// `both`: `condition ∧ (fault)`, or `False`.
+fn both(in c: ChunkSeq[u8], in f: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    if is_false(in f) {
+        s(inout o, in "False");
+    } else {
+        sb(inout o, in c);
+        s(inout o, in " ∧ (");
+        sb(inout o, in f);
+        s(inout o, in ")");
+    }
+    o
+}
+
+fn not_of(in c: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    s(inout o, in "¬ ");
+    sb(inout o, in c);
+    o
+}
+
+// ------------------------------------------------------------ Exact
+
+struct Ex {
+    temps: u64,
+    // ` (b : Int)` per binder, and `    (d) →\n` per definition.
+    binders: ChunkSeq[u8],
+    nb: u64,
+    defs: ChunkSeq[u8]
+}
+
+struct Vf {
+    v: ChunkSeq[u8],
+    f: ChunkSeq[u8]
+}
+
+fn binder(inout ex: Ex, in name: ChunkSeq[u8]) {
+    s(inout ex.binders, in " (");
+    sb(inout ex.binders, in name);
+    s(inout ex.binders, in " : Int)");
+    ex.nb = wrapping_add(ex.nb, 1);
+}
+
+fn def(inout ex: Ex, in d: ChunkSeq[u8]) {
+    s(inout ex.defs, in "    (");
+    sb(inout ex.defs, in d);
+    s(inout ex.defs, in ") →\n");
+}
+
+fn temp(inout ex: Ex) -> ChunkSeq[u8] {
+    ex.temps = wrapping_add(ex.temps, 1);
+    let mut n = ChunkSeq::new[u8]();
+    s(inout n, in "«$t");
+    put_u(inout n, ex.temps);
+    s(inout n, in "»");
+    binder(inout ex, in n);
+    n
+}
+
+fn lit(in x: Str) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    s(inout o, in x);
+    o
+}
+
+fn cond(in x: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    sb(inout o, in x);
+    s(inout o, in " = 1");
+    o
+}
+
+fn bool_def(inout ex: Ex, in p: ChunkSeq[u8], in t: ChunkSeq[u8]) {
+    let mut d = ChunkSeq::new[u8]();
+    s(inout d, in "((");
+    sb(inout d, in p);
+    s(inout d, in ") ∧ ");
+    sb(inout d, in t);
+    s(inout d, in " = 1) ∨ (¬ (");
+    sb(inout d, in p);
+    s(inout d, in ") ∧ ");
+    sb(inout d, in t);
+    s(inout d, in " = 0)");
+    def(inout ex, in d);
+}
+
+fn emit(inout ex: Ex, in m: Tm, t: u32) -> Vf {
+    let k = tk(in m, t);
+    if k == TM_VAR {
+        let mut v = ChunkSeq::new[u8]();
+        var_name(inout v, in m, ta(in m, t));
+        return Vf {
+            v: v,
+            f: lit(in "False")
+        };
+    }
+    if k == TM_INT {
+        let mut v = ChunkSeq::new[u8]();
+        s(inout v, in "(");
+        put_int(inout v, t_neg(in m, t), t_mag(in m, t));
+        s(inout v, in " : Int)");
+        return Vf {
+            v: v,
+            f: lit(in "False")
+        };
+    }
+    if k == TM_BOOL {
+        return Vf {
+            v: lit(
+                in if t_flag(in m, t) != 0 {
+                    "1"
+                } else {
+                    "0"
+                }
+            ),
+            f: lit(in "False")
+        };
+    }
+    if k == TM_UNIT {
+        return Vf {
+            v: lit(in "0"),
+            f: lit(in "False")
+        };
+    }
+    let kind = t_kind(in m, t);
+    if k == TM_ARITH {
+        let x = emit(inout ex, in m, ta(in m, t));
+        let y = emit(inout ex, in m, tb(in m, t));
+        let op = t_op(in m, t);
+        let tt = temp(inout ex);
+        let mut exact = ChunkSeq::new[u8]();
+        sb(inout exact, in x.v);
+        s(
+            inout exact,
+            in if op == OP_ADD {
+                " + "
+            } else if op == OP_SUB {
+                " - "
+            } else {
+                " * "
+            }
+        );
+        sb(inout exact, in y.v);
+        let mut d = ChunkSeq::new[u8]();
+        sb(inout d, in tt);
+        s(inout d, in " = ");
+        let mut a = any_new();
+        any_add(inout a, in x.f);
+        any_add(inout a, in y.f);
+        if t_flag(in m, t) != 0 {
+            sb(inout d, in exact);
+            def(inout ex, in d);
+            let mut over = ChunkSeq::new[u8]();
+            s(inout over, in "¬ (");
+            range_prop(inout over, in tt, kind);
+            s(inout over, in ")");
+            any_add(inout a, in over);
+        } else {
+            if kind == K_I64 {
+                s(inout d, in "((");
+                sb(inout d, in exact);
+                s(inout d, in ") + ");
+                s(inout d, in half(kind));
+                s(inout d, in ") % ");
+                s(inout d, in modulus(kind));
+                s(inout d, in " - ");
+                s(inout d, in half(kind));
+            } else {
+                s(inout d, in "(");
+                sb(inout d, in exact);
+                s(inout d, in ") % ");
+                s(inout d, in modulus(kind));
+            }
+            def(inout ex, in d);
+        }
+        return Vf {
+            v: tt,
+            f: any_end(a)
+        };
+    }
+    if k == TM_DIV {
+        let bt = tb(in m, t);
+        let x = emit(inout ex, in m, ta(in m, t));
+        let y = emit(inout ex, in m, bt);
+        let tt = temp(inout ex);
+        let rem = t_flag(in m, t) != 0;
+        let mut a = any_new();
+        any_add(inout a, in x.f);
+        any_add(inout a, in y.f);
+        let mut z = ChunkSeq::new[u8]();
+        sb(inout z, in y.v);
+        s(inout z, in " = 0");
+        any_add(inout a, in z);
+        if kind == K_I64 && !rem {
+            let mut o = ChunkSeq::new[u8]();
+            s(inout o, in "(");
+            sb(inout o, in x.v);
+            s(inout o, in " = (");
+            s(inout o, in range_lo(kind));
+            s(inout o, in " : Int) ∧ ");
+            sb(inout o, in y.v);
+            s(inout o, in " = -1)");
+            any_add(inout a, in o);
+        }
+        if tk(in m, bt) == TM_INT && t_mag(in m, bt) != 0 {
+            let cneg = t_neg(in m, bt);
+            let cm = t_mag(in m, bt);
+            let q = temp(inout ex);
+            let mut d = ChunkSeq::new[u8]();
+            // `({x} ≥ 0 ∧ {q} = ...) ∨ ({x} < 0 ∧ {q} = ...)`
+            s(inout d, in "(");
+            sb(inout d, in x.v);
+            s(inout d, in " ≥ 0 ∧ ");
+            sb(inout d, in q);
+            if !cneg {
+                s(inout d, in " = ");
+                sb(inout d, in x.v);
+                s(inout d, in " / ");
+                put_u(inout d, cm);
+                s(inout d, in ") ∨ (");
+                sb(inout d, in x.v);
+                s(inout d, in " < 0 ∧ ");
+                sb(inout d, in q);
+                s(inout d, in " = -((-");
+                sb(inout d, in x.v);
+                s(inout d, in ") / ");
+                put_u(inout d, cm);
+                s(inout d, in "))");
+            } else {
+                s(inout d, in " = -(");
+                sb(inout d, in x.v);
+                s(inout d, in " / ");
+                put_u(inout d, cm);
+                s(inout d, in ")) ∨ (");
+                sb(inout d, in x.v);
+                s(inout d, in " < 0 ∧ ");
+                sb(inout d, in q);
+                s(inout d, in " = (-");
+                sb(inout d, in x.v);
+                s(inout d, in ") / ");
+                put_u(inout d, cm);
+                s(inout d, in ")");
+            }
+            def(inout ex, in d);
+            let mut d2 = ChunkSeq::new[u8]();
+            sb(inout d2, in tt);
+            if rem {
+                s(inout d2, in " = ");
+                sb(inout d2, in x.v);
+                s(inout d2, in " - (");
+                put_int(inout d2, cneg, cm);
+                s(inout d2, in " : Int) * ");
+                sb(inout d2, in q);
+            } else {
+                s(inout d2, in " = ");
+                sb(inout d2, in q);
+            }
+            def(inout ex, in d2);
+        }
+        return Vf {
+            v: tt,
+            f: any_end(a)
+        };
+    }
+    if k == TM_NEG {
+        let x = emit(inout ex, in m, ta(in m, t));
+        let tt = temp(inout ex);
+        let mut d = ChunkSeq::new[u8]();
+        sb(inout d, in tt);
+        s(inout d, in " = 0 - ");
+        sb(inout d, in x.v);
+        def(inout ex, in d);
+        let mut fault = ChunkSeq::new[u8]();
+        sb(inout fault, in x.v);
+        if kind == K_I64 {
+            s(inout fault, in " = (");
+            s(inout fault, in range_lo(kind));
+            s(inout fault, in " : Int)");
+        } else {
+            s(inout fault, in " ≠ 0");
+        }
+        let mut a = any_new();
+        any_add(inout a, in x.f);
+        any_add(inout a, in fault);
+        return Vf {
+            v: tt,
+            f: any_end(a)
+        };
+    }
+    if k == TM_NOT {
+        let x = emit(inout ex, in m, ta(in m, t));
+        let tt = temp(inout ex);
+        let mut d = ChunkSeq::new[u8]();
+        sb(inout d, in tt);
+        s(inout d, in " = 1 - ");
+        sb(inout d, in x.v);
+        def(inout ex, in d);
+        return Vf {
+            v: tt,
+            f: x.f
+        };
+    }
+    if k == TM_CMP {
+        let x = emit(inout ex, in m, ta(in m, t));
+        let y = emit(inout ex, in m, tb(in m, t));
+        let op = t_op(in m, t);
+        let tt = temp(inout ex);
+        let mut p = ChunkSeq::new[u8]();
+        sb(inout p, in x.v);
+        s(
+            inout p,
+            in if op == CMP_EQ {
+                " = "
+            } else if op == CMP_NE {
+                " ≠ "
+            } else if op == CMP_LT {
+                " < "
+            } else if op == CMP_LE {
+                " ≤ "
+            } else if op == CMP_GT {
+                " > "
+            } else {
+                " ≥ "
+            }
+        );
+        sb(inout p, in y.v);
+        bool_def(inout ex, in p, in tt);
+        let mut a = any_new();
+        any_add(inout a, in x.f);
+        any_add(inout a, in y.f);
+        return Vf {
+            v: tt,
+            f: any_end(a)
+        };
+    }
+    if k == TM_AND || k == TM_OR {
+        let and = k == TM_AND;
+        let x = emit(inout ex, in m, ta(in m, t));
+        let y = emit(inout ex, in m, tb(in m, t));
+        let tt = temp(inout ex);
+        let cx = cond(in x.v);
+        let cy = cond(in y.v);
+        let mut p = ChunkSeq::new[u8]();
+        sb(inout p, in cx);
+        s(
+            inout p,
+            in if and {
+                " ∧ "
+            } else {
+                " ∨ "
+            }
+        );
+        sb(inout p, in cy);
+        bool_def(inout ex, in p, in tt);
+        let runs = if and {
+            copy_bytes(in cx)
+        } else {
+            not_of(in cx)
+        };
+        let mut a = any_new();
+        any_add(inout a, in x.f);
+        any_add(inout a, in both(in runs, in y.f));
+        return Vf {
+            v: tt,
+            f: any_end(a)
+        };
+    }
+    if k == TM_ITE {
+        let x = emit(inout ex, in m, ta(in m, t));
+        let vt = emit(inout ex, in m, tb(in m, t));
+        let ve = emit(inout ex, in m, tc(in m, t));
+        let v = temp(inout ex);
+        let cx = cond(in x.v);
+        let mut d = ChunkSeq::new[u8]();
+        s(inout d, in "(");
+        sb(inout d, in cx);
+        s(inout d, in " ∧ ");
+        sb(inout d, in v);
+        s(inout d, in " = ");
+        sb(inout d, in vt.v);
+        s(inout d, in ") ∨ (¬ ");
+        sb(inout d, in cx);
+        s(inout d, in " ∧ ");
+        sb(inout d, in v);
+        s(inout d, in " = ");
+        sb(inout d, in ve.v);
+        s(inout d, in ")");
+        def(inout ex, in d);
+        let mut a = any_new();
+        any_add(inout a, in x.f);
+        any_add(inout a, in both(in cx, in vt.f));
+        any_add(inout a, in both(in not_of(in cx), in ve.f));
+        return Vf {
+            v: v,
+            f: any_end(a)
+        };
+    }
+    // Let
+    let x = emit(inout ex, in m, tb(in m, t));
+    let mut name = ChunkSeq::new[u8]();
+    var_name(inout name, in m, ta(in m, t));
+    binder(inout ex, in name);
+    let mut d = ChunkSeq::new[u8]();
+    sb(inout d, in name);
+    s(inout d, in " = ");
+    sb(inout d, in x.v);
+    def(inout ex, in d);
+    let body = emit(inout ex, in m, tc(in m, t));
+    let mut a = any_new();
+    any_add(inout a, in x.f);
+    any_add(inout a, in body.f);
+    Vf {
+        v: body.v,
+        f: any_end(a)
+    }
+}
+
+fn copy_bytes(in b: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    sb(inout o, in b);
+    o
+}
+
+// `Exact::render`.
+pub fn exact(inout o: ChunkSeq[u8], in m: Tm, root: u32) {
+    let mut ex = Ex {
+        temps: 0,
+        binders: ChunkSeq::new[u8](),
+        nb: 0,
+        defs: ChunkSeq::new[u8]()
+    };
+    let mut ranges = ChunkSeq::new[u8]();
+    for i in 0..var_count(in m) {
+        let v = wrapping_u32(i);
+        if var_param(in m, v) {
+            let mut name = ChunkSeq::new[u8]();
+            var_name(inout name, in m, v);
+            binder(inout ex, in name);
+            s(inout ranges, in "    (");
+            range_prop(inout ranges, in name, var_kind(in m, v));
+            s(inout ranges, in ") →\n");
+        }
+    }
+    let r = emit(inout ex, in m, root);
+    s(inout o, in "theorem no_arith_fault :");
+    if ex.nb > 0 {
+        s(inout o, in " ∀");
+        sb(inout o, in ex.binders);
+        s(inout o, in ",");
+    }
+    s(inout o, in "\n");
+    sb(inout o, in ranges);
+    sb(inout o, in ex.defs);
+    s(inout o, in "    ¬ (");
+    sb(inout o, in r.f);
+    s(inout o, in ") := by\n  intros\n  ");
+    s(
+        inout o,
+        in if is_false(in r.f) {
+            "simp"
+        } else {
+            "omega"
+        }
+    );
+    s(inout o, in "\n");
+}
+
+// ------------------------------------------------------------ BitVecs
+
+fn bv_value(inout o: ChunkSeq[u8], in m: Tm, t: u32) {
+    let k = tk(in m, t);
+    if k == TM_VAR {
+        var_name(inout o, in m, ta(in m, t));
+    } else if k == TM_INT {
+        bv_literal(inout o, t_neg(in m, t), t_mag(in m, t), width(t_kind(in m, t)));
+    } else if k == TM_BOOL {
+        s(
+            inout o,
+            in if t_flag(in m, t) != 0 {
+                "true"
+            } else {
+                "false"
+            }
+        );
+    } else if k == TM_UNIT {
+        s(inout o, in "()");
+    } else if k == TM_ARITH {
+        let op = t_op(in m, t);
+        s(inout o, in "(");
+        bv_value(inout o, in m, ta(in m, t));
+        s(
+            inout o,
+            in if op == OP_ADD {
+                " + "
+            } else if op == OP_SUB {
+                " - "
+            } else {
+                " * "
+            }
+        );
+        bv_value(inout o, in m, tb(in m, t));
+        s(inout o, in ")");
+    } else if k == TM_DIV {
+        let signed = t_kind(in m, t) == K_I64;
+        let rem = t_flag(in m, t) != 0;
+        s(
+            inout o,
+            in if signed && !rem {
+                "(BitVec.sdiv "
+            } else if signed {
+                "(BitVec.srem "
+            } else if !rem {
+                "(BitVec.udiv "
+            } else {
+                "(BitVec.umod "
+            }
+        );
+        bv_value(inout o, in m, ta(in m, t));
+        s(inout o, in " ");
+        bv_value(inout o, in m, tb(in m, t));
+        s(inout o, in ")");
+    } else if k == TM_NEG {
+        s(inout o, in "(-");
+        bv_value(inout o, in m, ta(in m, t));
+        s(inout o, in ")");
+    } else if k == TM_NOT {
+        s(inout o, in "(!");
+        bv_value(inout o, in m, ta(in m, t));
+        s(inout o, in ")");
+    } else if k == TM_CMP {
+        let mut x = ChunkSeq::new[u8]();
+        bv_value(inout x, in m, ta(in m, t));
+        let mut y = ChunkSeq::new[u8]();
+        bv_value(inout y, in m, tb(in m, t));
+        let op = t_op(in m, t);
+        let sg = t_kind(in m, t) == K_I64;
+        if op == CMP_EQ || op == CMP_NE {
+            s(inout o, in "(");
+            sb(inout o, in x);
+            s(
+                inout o,
+                in if op == CMP_EQ {
+                    " == "
+                } else {
+                    " != "
+                }
+            );
+            sb(inout o, in y);
+            s(inout o, in ")");
+        } else {
+            let swap = op == CMP_GT || op == CMP_GE;
+            let strict = op == CMP_LT || op == CMP_GT;
+            s(
+                inout o,
+                in if sg && strict {
+                    "(BitVec.slt "
+                } else if sg {
+                    "(BitVec.sle "
+                } else if strict {
+                    "(BitVec.ult "
+                } else {
+                    "(BitVec.ule "
+                }
+            );
+            if swap {
+                sb(inout o, in y);
+                s(inout o, in " ");
+                sb(inout o, in x);
+            } else {
+                sb(inout o, in x);
+                s(inout o, in " ");
+                sb(inout o, in y);
+            }
+            s(inout o, in ")");
+        }
+    } else if k == TM_AND || k == TM_OR {
+        s(inout o, in "(");
+        bv_value(inout o, in m, ta(in m, t));
+        s(
+            inout o,
+            in if k == TM_AND {
+                " && "
+            } else {
+                " || "
+            }
+        );
+        bv_value(inout o, in m, tb(in m, t));
+        s(inout o, in ")");
+    } else if k == TM_ITE {
+        s(inout o, in "(bif ");
+        bv_value(inout o, in m, ta(in m, t));
+        s(inout o, in " then ");
+        bv_value(inout o, in m, tb(in m, t));
+        s(inout o, in " else ");
+        bv_value(inout o, in m, tc(in m, t));
+        s(inout o, in ")");
+    } else {
+        s(inout o, in "(let ");
+        var_name(inout o, in m, ta(in m, t));
+        s(inout o, in " := ");
+        bv_value(inout o, in m, tb(in m, t));
+        s(inout o, in "; ");
+        bv_value(inout o, in m, tc(in m, t));
+        s(inout o, in ")");
+    }
+}
+
+fn extended(
+    inout o: ChunkSeq[u8],
+    in f: Str,
+    n: u64,
+    in x: ChunkSeq[u8],
+    in y: ChunkSeq[u8],
+    in op: Str
+) {
+    // `((BitVec.f n x OP BitVec.f n y) != BitVec.f n (x OP y))`
+    s(inout o, in "((");
+    s(inout o, in f);
+    s(inout o, in " ");
+    put_u(inout o, n);
+    s(inout o, in " ");
+    sb(inout o, in x);
+    s(inout o, in op);
+    s(inout o, in f);
+    s(inout o, in " ");
+    put_u(inout o, n);
+    s(inout o, in " ");
+    sb(inout o, in y);
+    s(inout o, in ") != ");
+    s(inout o, in f);
+    s(inout o, in " ");
+    put_u(inout o, n);
+    s(inout o, in " (");
+    sb(inout o, in x);
+    s(inout o, in op);
+    sb(inout o, in y);
+    s(inout o, in "))");
+}
+
+fn bv_fault(inout o: ChunkSeq[u8], in m: Tm, t: u32) {
+    let k = tk(in m, t);
+    if k == TM_VAR || k == TM_INT || k == TM_BOOL || k == TM_UNIT {
+        s(inout o, in "false");
+        return;
+    }
+    let kind = t_kind(in m, t);
+    let w = width(kind);
+    let sg = kind == K_I64;
+    if k == TM_ARITH {
+        let checked = t_flag(in m, t) != 0;
+        if checked {
+            s(inout o, in "(");
+        }
+        s(inout o, in "(");
+        bv_fault(inout o, in m, ta(in m, t));
+        s(inout o, in " || ");
+        bv_fault(inout o, in m, tb(in m, t));
+        s(inout o, in ")");
+        if !checked {
+            return;
+        }
+        let mut x = ChunkSeq::new[u8]();
+        bv_value(inout x, in m, ta(in m, t));
+        let mut y = ChunkSeq::new[u8]();
+        bv_value(inout y, in m, tb(in m, t));
+        s(inout o, in " || ");
+        let op = t_op(in m, t);
+        if sg {
+            let n = if op == OP_MUL {
+                wrapping_add(w, w)
+            } else {
+                wrapping_add(w, 1)
+            };
+            extended(
+                inout o,
+                in "BitVec.signExtend",
+                n,
+                in x,
+                in y,
+                in if op == OP_ADD {
+                    " + "
+                } else if op == OP_SUB {
+                    " - "
+                } else {
+                    " * "
+                }
+            );
+        } else if op == OP_ADD {
+            s(inout o, in "(BitVec.ult (");
+            sb(inout o, in x);
+            s(inout o, in " + ");
+            sb(inout o, in y);
+            s(inout o, in ") ");
+            sb(inout o, in x);
+            s(inout o, in ")");
+        } else if op == OP_SUB {
+            s(inout o, in "(BitVec.ult ");
+            sb(inout o, in x);
+            s(inout o, in " ");
+            sb(inout o, in y);
+            s(inout o, in ")");
+        } else {
+            extended(inout o, in "BitVec.zeroExtend", wrapping_add(w, w), in x, in y, in " * ");
+        }
+        s(inout o, in ")");
+        return;
+    }
+    if k == TM_DIV {
+        let mut x = ChunkSeq::new[u8]();
+        bv_value(inout x, in m, ta(in m, t));
+        let mut y = ChunkSeq::new[u8]();
+        bv_value(inout y, in m, tb(in m, t));
+        s(inout o, in "(");
+        bv_fault(inout o, in m, ta(in m, t));
+        s(inout o, in " || ");
+        bv_fault(inout o, in m, tb(in m, t));
+        s(inout o, in " || (");
+        sb(inout o, in y);
+        s(inout o, in " == 0#");
+        put_u(inout o, w);
+        s(inout o, in ")");
+        if sg && t_flag(in m, t) == 0 {
+            s(inout o, in " || (");
+            sb(inout o, in x);
+            s(inout o, in " == ");
+            bv_literal(inout o, true, 9223372036854775808, w);
+            s(inout o, in " && ");
+            sb(inout o, in y);
+            s(inout o, in " == ");
+            bv_literal(inout o, true, 1, w);
+            s(inout o, in ")");
+        }
+        s(inout o, in ")");
+        return;
+    }
+    if k == TM_NEG {
+        let mut x = ChunkSeq::new[u8]();
+        bv_value(inout x, in m, ta(in m, t));
+        s(inout o, in "(");
+        bv_fault(inout o, in m, ta(in m, t));
+        s(inout o, in " || (");
+        sb(inout o, in x);
+        if sg {
+            s(inout o, in " == ");
+            bv_literal(inout o, true, 9223372036854775808, w);
+        } else {
+            s(inout o, in " != 0#");
+            put_u(inout o, w);
+        }
+        s(inout o, in "))");
+        return;
+    }
+    if k == TM_NOT {
+        bv_fault(inout o, in m, ta(in m, t));
+        return;
+    }
+    if k == TM_CMP {
+        s(inout o, in "(");
+        bv_fault(inout o, in m, ta(in m, t));
+        s(inout o, in " || ");
+        bv_fault(inout o, in m, tb(in m, t));
+        s(inout o, in ")");
+        return;
+    }
+    if k == TM_AND || k == TM_OR {
+        s(inout o, in "(");
+        bv_fault(inout o, in m, ta(in m, t));
+        s(
+            inout o,
+            in if k == TM_AND {
+                " || ("
+            } else {
+                " || (!"
+            }
+        );
+        bv_value(inout o, in m, ta(in m, t));
+        s(inout o, in " && ");
+        bv_fault(inout o, in m, tb(in m, t));
+        s(inout o, in "))");
+        return;
+    }
+    if k == TM_ITE {
+        s(inout o, in "(");
+        bv_fault(inout o, in m, ta(in m, t));
+        s(inout o, in " || (bif ");
+        bv_value(inout o, in m, ta(in m, t));
+        s(inout o, in " then ");
+        bv_fault(inout o, in m, tb(in m, t));
+        s(inout o, in " else ");
+        bv_fault(inout o, in m, tc(in m, t));
+        s(inout o, in "))");
+        return;
+    }
+    // Let
+    s(inout o, in "(");
+    bv_fault(inout o, in m, tb(in m, t));
+    s(inout o, in " || (let ");
+    var_name(inout o, in m, ta(in m, t));
+    s(inout o, in " := ");
+    bv_value(inout o, in m, tb(in m, t));
+    s(inout o, in "; ");
+    bv_fault(inout o, in m, tc(in m, t));
+    s(inout o, in "))");
+}
+
+fn bv_type(inout o: ChunkSeq[u8], k: u8) {
+    if k == K_BOOL {
+        s(inout o, in "Bool");
+    } else if k == K_UNIT {
+        s(inout o, in "Unit");
+    } else {
+        s(inout o, in "BitVec ");
+        put_u(inout o, width(k));
+    }
+}
+
+// `BitVecs::render`; the parameters are the model's first `np` variables.
+pub fn bitvec(inout o: ChunkSeq[u8], in m: Tm, root: u32, np: u64) {
+    let mut binders = ChunkSeq::new[u8]();
+    let mut names = ChunkSeq::new[u8]();
+    for i in 0..np {
+        let v = wrapping_u32(i);
+        s(inout binders, in " (");
+        var_name(inout binders, in m, v);
+        s(inout binders, in " : ");
+        bv_type(inout binders, var_kind(in m, v));
+        s(inout binders, in ")");
+        if i > 0 {
+            s(inout names, in " ");
+        }
+        var_name(inout names, in m, v);
+    }
+    let mut fault = ChunkSeq::new[u8]();
+    bv_fault(inout fault, in m, root);
+    s(inout o, in "def fault");
+    sb(inout o, in binders);
+    s(inout o, in " : Bool :=\n  ");
+    sb(inout o, in fault);
+    s(inout o, in "\ntheorem no_arith_fault_bv : ");
+    if np > 0 {
+        s(inout o, in "∀");
+        sb(inout o, in binders);
+        s(inout o, in ", ");
+    }
+    s(inout o, in "fault ");
+    sb(inout o, in names);
+    s(inout o, in " = false := by\n");
+    if np > 0 {
+        s(inout o, in "  intro ");
+        sb(inout o, in names);
+        s(inout o, in "\n");
+    }
+    s(inout o, in "  simp only [fault]\n");
+    if !is_text(in fault, in "false") {
+        s(inout o, in "  bv_decide\n");
+    }
+}

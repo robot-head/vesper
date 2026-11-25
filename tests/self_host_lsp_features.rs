@@ -28,6 +28,7 @@ use check_harness::*;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use vesper::lsp::navigation::{self, OpenDocument};
 use vesper::tooling::frontend::{AnalysisFailure, AnalysisLimits, CheckedSource, check_source};
 use vesper_lsp::{ContentChange, DocumentStore, StoreLimits};
@@ -52,6 +53,7 @@ fn entry(name: &'static str) -> &'static Entry {
             "lsp_definitions",
             "lsp_document_symbols_kept",
             "lsp_hovers",
+            "lsp_proof_models",
         ]
         .into_iter()
         .map(|n| (n, features().entry(n, optimize())))
@@ -446,6 +448,245 @@ fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 
 /// Generated sources at the navigation limits and with the shapes the
 /// index treats specially.
+const PROOF_SCALAR: &str = "fn inc(x: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if x < 100 {
+        x + 1
+    } else {
+        0
+    }
+}
+
+fn add(a: i64, b: i64) -> i64 eff [Fail[ArithOverflow]] {
+    a + b
+}
+
+fn half(x: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let q = x / 2;
+    let r = x % 3;
+    wrapping_add(q, r)
+}
+
+fn ratio(x: u64, y: u64) -> u64 eff [Fail[RuntimeError]] {
+    x / y
+}
+
+fn both(a: bool, b: bool, x: u8) -> bool eff [Fail[ArithOverflow]] {
+    a && (x < 200) && (wrapping_add(x, 100) > 3)
+}
+
+fn negate(x: i64) -> i64 eff [Fail[ArithOverflow]] {
+    -x
+}
+
+fn counted(x: u32) -> u32 eff [Fail[ArithOverflow]] {
+    let mut total = x;
+    total += 1;
+    if total > 10 {
+        total - 10
+    } else {
+        total
+    }
+}
+
+fn main() -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    add(inc(3), half(4))
+}
+
+fn answer() -> i64 {
+    42
+}
+";
+
+const PROOF_OPS: &str =
+    "fn signed(x: i64, y: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let a = x / -3;
+    let b = x % -3;
+    let c = x / y;
+    let d = x % y;
+    let e = wrapping_sub(a, b);
+    let f = wrapping_mul(c, d);
+    let mut g = e * 2;
+    g -= 1;
+    g *= 3;
+    g /= 5;
+    g %= 7;
+    g = g - f;
+    if x >= y || x <= -5 {
+        -g
+    } else {
+        g
+    }
+}
+
+fn unsigned(x: u8, y: u32, z: u64) -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let a = wrapping_mul(x, 3);
+    let b = wrapping_sub(y, 9) / 7;
+    let c = z % 10;
+    let d = z * 2 - 1;
+    let ok = a != 0 && b > 1 || c == d;
+    let flag = !ok;
+    flag == true
+}
+
+fn units(x: u64) eff [Fail[ArithOverflow]] {
+    let y = x + 1;
+    if y > 3 {
+        ()
+    }
+}
+
+fn nothing() {
+}
+
+fn small(x: u8) -> u8 eff [Fail[ArithOverflow]] {
+    let y: u8 = 7;
+    x + y + 255
+}
+
+fn wide_literals(x: u64, y: i64) -> bool eff [Fail[ArithOverflow]] {
+    x + 18446744073709551000 > 5 && y - 9223372036854775807 < 0
+}
+
+fn calls(x: u32) -> u32 eff [Fail[ArithOverflow]] {
+    helper(x, true) + helper(1, false)
+}
+
+fn helper(v: u32, on: bool) -> u32 eff [Fail[ArithOverflow]] {
+    if on {
+        v * 2
+    } else {
+        v
+    }
+}
+";
+
+const PROOF_REASONS: &str = "linear struct Tx {
+    slot: u64
+}
+
+enum Shape { Dot, Square(u64) }
+
+fn make(x: u64) -> Tx {
+    Tx {
+        slot: x
+    }
+}
+
+fn loop_forever(x: u64) -> u64 {
+    loop_forever(x)
+}
+
+fn ping(x: u64) -> u64 {
+    pong(x)
+}
+
+fn pong(x: u64) -> u64 {
+    ping(x)
+}
+
+fn pick[T](sink x: T) -> T {
+    x
+}
+
+fn bump(inout x: u64) {
+    x = wrapping_add(x, 1);
+}
+
+fn floaty(x: f64) -> f64 {
+    x
+}
+
+fn helper(x: u64) -> u64 {
+    x
+}
+
+fn opt(x: Option[u64]) -> u64 {
+    0
+}
+
+fn matched(x: u64) -> u64 {
+    match x {
+        0 => 1,
+        _ => 2,
+    }
+}
+
+fn looped(x: u64) -> u64 {
+    let mut i = 0;
+    loop {
+        if i > x {
+            break;
+        }
+        i = wrapping_add(i, 1);
+    }
+    i
+}
+
+fn early(x: u64) -> u64 {
+    return x;
+}
+
+fn typed_let(x: Option[u64]) -> u64 {
+    let s: Option[u64] = x;
+    0
+}
+
+fn shapes(s: Shape) -> u64 {
+    0
+}
+
+fn outer(x: u64, c: bool) -> u64 {
+    let mut t = x;
+    if c {
+        t = 1;
+    }
+    t
+}
+
+fn none() {
+}
+
+fn unit_cmp(a: u64) -> bool {
+    none() == none()
+}
+
+fn text() -> u64 {
+    let s = \"hi\";
+    1
+}
+
+effect Log { fn note(x: u64) -> Unit; }
+
+fn many(p0: u64, p1: u64, p2: u64, p3: u64, p4: u64, p5: u64, p6: u64, p7: u64, p8: u64, p9: u64, p10: u64, p11: u64, p12: u64, p13: u64, p14: u64, p15: u64, p16: u64) -> u64 {
+    p0
+}
+
+fn logged(x: u64) -> u64 eff [Log] {
+    x
+}
+
+fn shape_let(x: u64) -> u64 {
+    let s: Shape = Shape::Dot;
+    x
+}
+
+fn shape_value(x: u64) -> u64 {
+    let s = Shape::Square(x);
+    x
+}
+
+struct Pt { x: u64 }
+
+fn built(x: u64) -> u64 {
+    let t = Pt { x: x };
+    0
+}
+
+fn calls_unknown(x: u64) -> u64 eff [Fail[ArithOverflow]] {
+    helper(x) + 1
+}
+";
+
 fn generated() -> Vec<(String, String)> {
     let mut out = vec![];
     // Long names: three of these overflow `max_output_bytes` (256 KiB)
@@ -488,6 +729,27 @@ fn generated() -> Vec<(String, String)> {
         s.push_str("fn f() -> u64 { 1 }\n");
         out.push((name.into(), s));
     }
+    // Proof-lens models: the scalar shapes the model covers, and each
+    // reason a function has none.
+    out.push(("proof_scalar".into(), PROOF_SCALAR.into()));
+    out.push(("proof_reasons".into(), PROOF_REASONS.into()));
+    out.push(("proof_ops".into(), PROOF_OPS.into()));
+    // A call chain deeper than the inlining limit (8), and a body past the
+    // node budget (4,096).
+    let mut chain = String::new();
+    for i in 0..11 {
+        if i == 10 {
+            chain.push_str("fn c10(x: u64) -> u64 { x }\n");
+        } else {
+            chain.push_str(&format!("fn c{i}(x: u64) -> u64 {{ c{}(x) }}\n", i + 1));
+        }
+    }
+    out.push(("proof_chain".into(), chain));
+    let mut wide = String::from("fn wide(x: u64) -> u64 eff [Fail[ArithOverflow]] {\n");
+    for i in 0..460 {
+        wide.push_str(&format!("    let a{i} = x + x + x + x + {i};\n"));
+    }
+    out.push(("proof_budget".into(), format!("{wide}    x\n}}\n")));
     // Documentation links of every target kind and the Markdown shapes
     // the link scanner skips: code spans and fences, inline and
     // reference-style links, images, definitions with titles, escapes,
@@ -1453,6 +1715,81 @@ fn lsp_features_speed() {
         r / requests as u32,
         v / requests as u32
     );
+    // The session builds every model once per snapshot from the parse it
+    // keeps. Vesper's one-time cost per document (the harness encoding the
+    // facts, decoding them, the parse) is timed with 0 rounds and taken off
+    // 64 rounds; the best of five runs each, interleaved.
+    const ROUNDS: u64 = 64;
+    let (mut rust, mut fixed, mut full) = (Duration::MAX, Duration::MAX, Duration::MAX);
+    let mut hosted = Duration::MAX;
+    for _ in 0..5 {
+        hosted = hosted.min(time(|| {
+            for d in docs {
+                std::hint::black_box(vesper_proof_models_kept(&d.checked, ROUNDS, false));
+            }
+        }));
+        rust = rust.min(time(|| {
+            for d in docs {
+                for _ in 0..ROUNDS {
+                    std::hint::black_box(vesper::lsp::proof_models_for_port(&d.checked));
+                }
+            }
+        }));
+        fixed = fixed.min(time(|| {
+            for d in docs {
+                std::hint::black_box(vesper_proof_models_kept(&d.checked, 0, false));
+            }
+        }));
+        full = full.min(time(|| {
+            for d in docs {
+                std::hint::black_box(vesper_proof_models_kept(&d.checked, ROUNDS, true));
+            }
+        }));
+    }
+    let rounds = docs.len() as u32 * ROUNDS as u32;
+    // The host hashes once per answer, not per round: its hashing is in
+    // `fixed` and `hosted` alike, so the difference is the port's rounds.
+    // That hashing is charged per round too: the host's C BLAKE3 over every
+    // model's renderings, best of five.
+    let renderings: Vec<Vec<[String; 3]>> = docs
+        .iter()
+        .map(|d| {
+            vesper::lsp::proof_models_for_port(&d.checked)
+                .into_iter()
+                .filter_map(|(_, m)| m.ok())
+                .collect()
+        })
+        .collect();
+    let mut hashing = Duration::MAX;
+    for _ in 0..5 {
+        hashing = hashing.min(time(|| {
+            for ms in &renderings {
+                for m in ms {
+                    let mut h = blake3::Hasher::new();
+                    h.update(b"vesper.lens.model/1\0");
+                    h.update(m[0].as_bytes());
+                    h.update(b"\0");
+                    h.update(m[1].as_bytes());
+                    std::hint::black_box(h.finalize().to_hex());
+                }
+            }
+        }));
+    }
+    let h = hosted.saturating_sub(fixed) / rounds + hashing / docs.len() as u32;
+    let r = rust / rounds;
+    eprintln!(
+        "proof-lens models per document round, key hashed by the host's C BLAKE3: rust {r:?} \
+         vesper {h:?} ratio {:.2}",
+        h.as_secs_f64() / r.as_secs_f64()
+    );
+    let v = full.saturating_sub(fixed) / rounds;
+    eprintln!(
+        "proof-lens models per document round ({} x {ROUNDS}), key hashed by the portable \
+         Vesper BLAKE3: rust {r:?} vesper {v:?} ratio {:.2} (vesper's one-time encode, decode and parse: {:?} per document)",
+        docs.len(),
+        v.as_secs_f64() / r.as_secs_f64(),
+        fixed / docs.len() as u32
+    );
     let per_doc: Vec<Vec<Position>> = docs
         .iter()
         .map(|d| positions(d).into_iter().step_by(8).collect())
@@ -1512,4 +1849,212 @@ fn lsp_features_speed() {
         r / cursors.len() as u32,
         v / cursors.len() as u32
     );
+}
+
+// ------------------------------------------------------------ proof models
+
+/// The preludes the checker can add to a module (their functions reach
+/// `World::functions` with spans into the prelude's own text).
+fn preludes() -> [&'static str; 5] {
+    [
+        vesper::strings::PRELUDE,
+        vesper::atomics::PRELUDE,
+        vesper::atomics::WORKERS_PRELUDE,
+        vesper::trace_effects::PRELUDE,
+        vesper::trace_effects::TELEMETRABLE_PRELUDE,
+    ]
+}
+
+/// The function trees of a parsed text, as the checker names them.
+fn trees(module: &vesper::ast::Module) -> Vec<Tree> {
+    let mut out = vec![];
+    for item in &module.items {
+        match item {
+            vesper::ast::Item::Function(f) => out.push((f.name.clone(), f.span.clone())),
+            vesper::ast::Item::Impl { ty, methods, .. } => {
+                for f in methods {
+                    out.push((format!("{}::{}", ty.name(), f.name), f.span.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `lsp_proof_models`: the checker's facts, the function table and one text
+/// (the source, then each prelude a function comes from). `None` when a
+/// function's tree is in no known text.
+/// One function's proof-lens model from the port: its renderings and key,
+/// or the reason it has none.
+type PortModel = (String, Result<[String; 3], String>);
+
+/// A function's tree, as the checker names it, and its span.
+type Tree = (String, std::ops::Range<usize>);
+
+fn vesper_proof_models(s: &CheckedSource) -> Option<Vec<PortModel>> {
+    vesper_proof_models_kept(s, 1, true)
+}
+
+/// `lsp_proof_models` with `reps` rounds of every model on one parse. With
+/// `hash` false the port leaves the key to the host, which hashes the
+/// renderings with the C BLAKE3 (the `blake3` crate), as the hosted build
+/// does through `@vesper-std/hash-sys`.
+fn vesper_proof_models_kept(s: &CheckedSource, reps: u64, hash: bool) -> Option<Vec<PortModel>> {
+    let checked = s.checked();
+    let mut world = checked.world.clone();
+    world.types = checked.expression_types.clone();
+    let mut texts: Vec<(&str, Vec<Tree>)> = vec![(s.source(), trees(&s.parsed().module))];
+    for p in preludes() {
+        texts.push((p, trees(&vesper::parser::parse(p).module)));
+    }
+    // A prelude is parsed at an offset (after the source), so its spans in
+    // the world are its own spans plus that offset.
+    let mut offset: Vec<Option<usize>> = vec![None; texts.len()];
+    offset[0] = Some(0);
+    let mut rows = vec![];
+    for (name, f) in &world.functions {
+        let mut placed = None;
+        for (t, (_, fs)) in texts.iter().enumerate() {
+            for (n, sp) in fs {
+                if n != name
+                    || sp.end - sp.start != f.span.end - f.span.start
+                    || f.span.start < sp.start
+                {
+                    continue;
+                }
+                let o = f.span.start - sp.start;
+                if offset[t].is_none_or(|x| x == o) {
+                    offset[t] = Some(o);
+                    placed = Some(t);
+                    break;
+                }
+            }
+            if placed.is_some() {
+                break;
+            }
+        }
+        let Some(t) = placed else {
+            eprintln!("  unplaced {name} {:?}", f.span);
+            return None;
+        };
+        rows.push((name.clone(), t, f.span.clone(), f.body.is_some()));
+    }
+    // The one text: the source, then each prelude used; `delta` is a
+    // text's place in it less its offset in the world.
+    let mut text = String::new();
+    let mut delta = vec![0usize; texts.len()];
+    for (t, (src, _)) in texts.iter().enumerate() {
+        if let Some(o) = offset[t] {
+            if t > 0 {
+                text.push('\n');
+            }
+            delta[t] = text.len().wrapping_sub(o);
+            text.push_str(src);
+        }
+    }
+    let mut names = String::new();
+    let input = encode(&world, |_, tail| {
+        tail.push(rows.len() as u64);
+        for (name, t, span, body) in &rows {
+            tail.extend([names.len() as u64, name.len() as u64]);
+            names.push_str(name);
+            let d = delta[*t];
+            tail.extend([
+                span.start.wrapping_add(d) as u64,
+                span.end.wrapping_add(d) as u64,
+                d as u64,
+                *body as u64,
+            ]);
+        }
+        tail.push(text.len() as u64);
+        tail.push(names.len() as u64);
+        tail.push(reps);
+        tail.push(hash as u64);
+    });
+    let mut input = input;
+    input.extend_from_slice(text.as_bytes());
+    input.extend_from_slice(names.as_bytes());
+    let out = entry("lsp_proof_models").text(&input);
+    if out.is_empty() {
+        return Some(vec![]);
+    }
+    Some(
+        out.split('\u{1e}')
+            .map(|record| {
+                let (name, model) = record.split_once('\u{1f}').expect("record name");
+                let model = match model.strip_prefix('O') {
+                    Some(rest) => {
+                        let parts: Vec<&str> = rest.split('\u{1f}').collect();
+                        let key = if hash {
+                            parts[2].to_string()
+                        } else {
+                            let mut h = blake3::Hasher::new();
+                            h.update(b"vesper.lens.model/1\0");
+                            h.update(parts[0].as_bytes());
+                            h.update(b"\0");
+                            h.update(parts[1].as_bytes());
+                            h.finalize().to_hex().to_string()
+                        };
+                        Ok([parts[0].to_string(), parts[1].to_string(), key])
+                    }
+                    None => Err(model.strip_prefix('E').unwrap_or(model).to_string()),
+                };
+                (name.to_string(), model)
+            })
+            .collect(),
+    )
+}
+
+/// Every proof-lens model of every corpus document (Rust
+/// `proof_model::all`) against the Vesper port: renderings, keys and
+/// reasons.
+#[test]
+fn proof_models_match_rust() {
+    let (mut docs, mut models, mut reasons, mut unplaced) = (0, 0, 0, 0);
+    let mut diffs = 0;
+    for d in corpus_docs() {
+        let rust = vesper::lsp::proof_models_for_port(&d.checked);
+        assert_eq!(
+            vesper_proof_models_kept(&d.checked, 1, false),
+            vesper_proof_models(&d.checked),
+            "{}: host-hashed keys",
+            d.name
+        );
+        let Some(port) = vesper_proof_models(&d.checked) else {
+            unplaced += 1;
+            eprintln!("{}: a function's tree is in no known text", d.name);
+            continue;
+        };
+        docs += 1;
+        assert_eq!(rust.len(), port.len(), "{}", d.name);
+        for (r, v) in rust.iter().zip(&port) {
+            match &r.1 {
+                Ok(_) => models += 1,
+                Err(_) => reasons += 1,
+            }
+            if std::env::var("PROOF_SHOW").is_ok() && d.uri.starts_with("untitled:proof") {
+                eprintln!(
+                    "  {} {}: {:?}",
+                    d.name,
+                    r.0,
+                    r.1.as_ref().map(|m| m[2].clone())
+                );
+            }
+            if r != v {
+                diffs += 1;
+                if diffs <= 12 {
+                    eprintln!(
+                        "{} {}:\n  rust   {:?}\n  vesper {:?}",
+                        d.name, r.0, r.1, v.1
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "proof models: {docs} documents, {models} models, {reasons} reasons, {unplaced} unplaced, {diffs} differ"
+    );
+    assert_eq!(diffs, 0);
+    assert_eq!(unplaced, 0);
 }
