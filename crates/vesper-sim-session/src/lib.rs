@@ -26,7 +26,9 @@
 //! path, and not a production storage or network implementation.
 pub mod identity;
 pub mod model;
-#[cfg(feature = "vesper-port")]
+// The WAL, SHA-256, process and failure parts of the port are used only
+// under `vesper-port`.
+#[cfg_attr(not(feature = "vesper-port"), allow(dead_code))]
 pub(crate) mod port;
 pub mod program;
 pub mod scenario;

@@ -1,9 +1,9 @@
-//! Under `vesper-port`, compile the Vesper port in port/ into a static
-//! library and check the committed binding (see
-//! docs/maintenance/porting-a-crate.md).
+//! Compile the Vesper port in port/ into a static library and check the
+//! committed binding (see docs/maintenance/porting-a-crate.md). Every build
+//! links it: the link, net and QUIC wire models are Vesper-only, and
+//! `vesper-port` switches the other ported modules to it.
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    #[cfg(feature = "vesper-port")]
     {
         let port = vesper_port_harness::Port::new("sim", "port")
             .binding("port/binding.rs")

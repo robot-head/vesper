@@ -8,7 +8,8 @@
     "Rust is the seed's engine, which the compiler links until Stage 2.",
     "Both colourers against the seed: visiting order, colours and layers.",
     "Both builds are in one binary (the seed is a dev-dependency), so the",
-    "harness times both arms itself (A B B A per epoch) and prints the pairs."
+    "harness times both arms itself (A B B A per epoch) and prints the pairs.",
+    "The rigid substep solver (RigidWorld::solve, vesper/src/solve.ves) runs four ticks of box stacks and driven hinge chains, then 24 more solver runs."
   ],
   "name": "vesper-kinetic",
   "lane": "SH6-9",
@@ -98,6 +99,13 @@
       "run": {
         "cargo_target": "release/examples/abba",
         "args": ["flip-gate", "crmath", "20"]
+      }
+    },
+    {
+      "workload": "rigid-solve",
+      "run": {
+        "cargo_target": "release/examples/abba",
+        "args": ["flip-gate", "rigid-solve", "5"]
       }
     }
   ]

@@ -347,7 +347,8 @@ sys.exit(101)
 import sys
 
 args = sys.argv[1:]
-if "--features" in args and "vesper-port" in args:
+# The plain builds (default and `vesper-port`) pass; only the divergent one fails.
+if "vesper-port-divergent" not in args:
     sys.exit(0)
 if "--lib" in args:
     print("test model::link::tests::micro_burst_builds_queue_delay_then_tail_drops ... FAILED")
