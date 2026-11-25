@@ -108,7 +108,7 @@ pub fn toks(in src: Slice[u8]) -> Toks {
 
 // `preceding_comments(tokens, fn_start)`: the line comments directly before
 // `fn_start`, nearest first, as (start, end) pairs in `out`.
-fn preceding_comments(in t: Toks, fn_start: u64, inout out: ChunkSeq[u64]) {
+pub fn preceding_comments(in t: Toks, fn_start: u64, inout out: ChunkSeq[u64]) {
     out.clear();
     // partition_point(|t| t.span.end <= fn_start)
     let mut lo: u64 = 0;
@@ -153,7 +153,7 @@ fn after_slashes(in src: Slice[u8], s: u64, e: u64) -> u64 {
 }
 
 // `is_test_marker`.
-fn is_test_marker(in src: Slice[u8], s: u64, e: u64) -> bool {
+pub fn is_test_marker(in src: Slice[u8], s: u64, e: u64) -> bool {
     let i = after_slashes(in src, s, e);
     is_text(in src, i, e, in "@test")
         || starts_with(in src, i, e, in "@test ")
@@ -162,7 +162,7 @@ fn is_test_marker(in src: Slice[u8], s: u64, e: u64) -> bool {
 }
 
 // `case_marker`: whether the comment is a `@case` row, and the trimmed row.
-fn case_marker(in src: Slice[u8], s: u64, e: u64) -> (bool, u64, u64) {
+pub fn case_marker(in src: Slice[u8], s: u64, e: u64) -> (bool, u64, u64) {
     let i = after_slashes(in src, s, e);
     if !starts_with(in src, i, e, in "@case") {
         return (false, 0, 0);
