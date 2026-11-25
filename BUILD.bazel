@@ -458,9 +458,13 @@ vesper_crate(
         ]),
         # Self-hosting SH2 lane 9 (#1181): the region, sequence, tiled and
         # vector rules over the same corpus. Anchored globs.
+        # The Isa walk differential (#1830) also reads the vector tests'
+        # sources.
         "test/self_host_check_regions_seqs": glob([
             "packages/**",
             "tests/fixtures/**",
+            "tests/tiled.rs",
+            "tests/vector*.rs",
         ]),
         # Self-hosting SH3 lane 12 (#1251): bounds hoisting on the same corpus.
         "test/self_host_bounds_hoist": glob([
@@ -847,6 +851,13 @@ vesper_crate(
         "test/self_host_check": [
             "resources:memory:9216",
             "resources:cpu:8",
+        ],
+        # At most two stage2 compiler builds at once (STAGE2_SLOTS in the test),
+        # each under Wasmtime with up to 4 GiB of linear memory, plus the
+        # in-process compile. Unreserved, it ran the 22GB VM out of memory.
+        "test/wasm_seed_package_io": [
+            "resources:memory:12288",
+            "resources:cpu:2",
         ],
         # The CLI audit subprocess permits Lean -M8192 and runs serially.
         "test/proof_audit_cli": [

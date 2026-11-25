@@ -1,0 +1,481 @@
+// `native_session::check_data_base_freshness`: reject any use, after a
+// park, of a data-frame address derived from a base loaded before that park.
+//
+// Bases are loads of `ctx.data_base` and of `ResumeSignal::data_base` from a
+// park's returned signal. Addresses derive from a base through any
+// non-memory instruction and through block parameters. A use is stale if
+// some control path from the base's definition to the use crosses a call to
+// `park` without passing the base's definition again.
+//
+// The input is one emitted session function as Cranelift tables
+// (tests/self_host_codegen_control.rs `freshness_words`); what Cranelift
+// computes (aliases, whether an opcode touches memory, whether a call is
+// `park`) is input, the check is not.
+
+use @vesper/check-data::util::{
+    push_decimal,
+    u64_at
+};
+use @vesper/check-data::input::{
+    Reader
+};
+
+// `vesper_fiber_abi::abi::offsets::CTX_DATA_BASE` and `RESUME_DATA_BASE`.
+const CTX_DATA_BASE: u64 = 56;
+const RESUME_DATA_BASE: u64 = 16;
+
+// Instruction flags.
+const F_MEMORY: u64 = 1;
+const F_PARK: u64 = 2;
+const F_LOAD: u64 = 4;
+
+fn put(inout s: ChunkSeq[u64], i: u64, v: u64) {
+    let ok = s.try_set(i, v);
+}
+
+fn zeros(n: u64) -> ChunkSeq[u64] {
+    let mut s = ChunkSeq::with_capacity[u64](n);
+    for i in 0..n {
+        s.push(0);
+    }
+    s
+}
+
+// One function's tables: the input words and an index over them.
+struct F {
+    words: ChunkSeq[u64],
+    ctx: u64,
+    // per value: resolved alias, defining instruction + 1, result index
+    alias: ChunkSeq[u64],
+    def: ChunkSeq[u64],
+    def_result: ChunkSeq[u64],
+    // per block: first instruction (global index), count, params offset
+    bfirst: ChunkSeq[u64],
+    bcount: ChunkSeq[u64],
+    bparams: ChunkSeq[u64],
+    // per instruction (global index): id, flags, load arg and offset, and
+    // the offsets of its args, results, values and destinations
+    iid: ChunkSeq[u64],
+    iflags: ChunkSeq[u64],
+    iarg: ChunkSeq[u64],
+    ioff: ChunkSeq[u64],
+    iargs: ChunkSeq[u64],
+    ires: ChunkSeq[u64],
+    ivals: ChunkSeq[u64],
+    idests: ChunkSeq[u64],
+    // instruction id -> global index + 1, block position
+    at: ChunkSeq[u64],
+    block_of: ChunkSeq[u64],
+}
+
+fn wd(in f: F, i: u64) -> u64 {
+    u64_at(in f.words, i)
+}
+
+fn skip_list(in f: F, o: u64) -> u64 {
+    wrapping_add(wrapping_add(o, 1), wd(in f, o))
+}
+
+fn read_function(inout r: Reader, in b: Slice[u8]) -> F {
+    let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let n = r.word(in b);
+    for i in 0..n {
+        words.push(r.word(in b));
+    }
+    let mut f = F {
+        words: words,
+        ctx: 0,
+        alias: ChunkSeq::new[u64](),
+        def: ChunkSeq::new[u64](),
+        def_result: ChunkSeq::new[u64](),
+        bfirst: ChunkSeq::new[u64](),
+        bcount: ChunkSeq::new[u64](),
+        bparams: ChunkSeq::new[u64](),
+        iid: ChunkSeq::new[u64](),
+        iflags: ChunkSeq::new[u64](),
+        iarg: ChunkSeq::new[u64](),
+        ioff: ChunkSeq::new[u64](),
+        iargs: ChunkSeq::new[u64](),
+        ires: ChunkSeq::new[u64](),
+        ivals: ChunkSeq::new[u64](),
+        idests: ChunkSeq::new[u64](),
+        at: ChunkSeq::new[u64](),
+        block_of: ChunkSeq::new[u64](),
+    };
+    f.ctx = wd(in f, 0);
+    let nv = wd(in f, 1);
+    let mut o: u64 = 2;
+    for v in 0..nv {
+        f.alias.push(wd(in f, o));
+        f.def.push(wd(in f, wrapping_add(o, 1)));
+        f.def_result.push(wd(in f, wrapping_add(o, 2)));
+        o = wrapping_add(o, 3);
+    }
+    let ni = wd(in f, o);
+    o = wrapping_add(o, 1);
+    f.at = zeros(ni);
+    f.block_of = zeros(ni);
+    let nb = wd(in f, o);
+    o = wrapping_add(o, 1);
+    for bi in 0..nb {
+        f.bparams.push(o);
+        o = skip_list(in f, o);
+        let count = wd(in f, o);
+        o = wrapping_add(o, 1);
+        f.bfirst.push(f.iid.len());
+        f.bcount.push(count);
+        for k in 0..count {
+            let id = wd(in f, o);
+            put(inout f.at, id, wrapping_add(f.iid.len(), 1));
+            put(inout f.block_of, id, bi);
+            f.iid.push(id);
+            f.iflags.push(wd(in f, wrapping_add(o, 1)));
+            f.iarg.push(wd(in f, wrapping_add(o, 2)));
+            f.ioff.push(wd(in f, wrapping_add(o, 3)));
+            o = wrapping_add(o, 4);
+            f.iargs.push(o);
+            o = skip_list(in f, o);
+            f.ires.push(o);
+            o = skip_list(in f, o);
+            f.ivals.push(o);
+            o = skip_list(in f, o);
+            f.idests.push(o);
+            let nd = wd(in f, o);
+            o = wrapping_add(o, 1);
+            for d in 0..nd {
+                let na = wd(in f, wrapping_add(o, 1));
+                o = wrapping_add(wrapping_add(o, 2), wrapping_mul(na, 2));
+            }
+        }
+    }
+    f
+}
+
+fn resolve(in f: F, v: u64) -> u64 {
+    if v < f.alias.len() {
+        u64_at(in f.alias, v)
+    } else {
+        v
+    }
+}
+
+fn is_park(in f: F, inst_id: u64) -> bool {
+    let g = u64_at(in f.at, inst_id);
+    g != 0 && (u64_at(in f.iflags, wrapping_sub(g, 1)) & F_PARK) != 0
+}
+
+// The roots' derivation sets: one bit row of `rw` words per value.
+struct Sets {
+    bits: ChunkSeq[u64],
+    rw: u64,
+}
+
+impl Sets {
+    fn has_any(in self, v: u64) -> bool {
+        let a = wrapping_mul(v, self.rw);
+        for k in 0..self.rw {
+            if u64_at(in self.bits, wrapping_add(a, k)) != 0 {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn has(in self, v: u64, root: u64) -> bool {
+        let x = u64_at(in self.bits, wrapping_add(wrapping_mul(v, self.rw), root >> 6));
+        ((x >> (root & 63)) & 1) != 0
+    }
+
+    // Add the bits of row `from` (of `src`) to row `to`; whether any changed.
+    fn union_row(inout self, to: u64, in src: ChunkSeq[u64], from: u64) -> bool {
+        let mut changed = false;
+        let a = wrapping_mul(to, self.rw);
+        let s = wrapping_mul(from, self.rw);
+        for k in 0..self.rw {
+            let old = u64_at(in self.bits, wrapping_add(a, k));
+            let new = old | u64_at(in src, wrapping_add(s, k));
+            if new != old {
+                put(inout self.bits, wrapping_add(a, k), new);
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
+fn push_text(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn push_value(inout o: ChunkSeq[u8], v: u64) {
+    o.push(118);
+    push_decimal(inout o, v);
+}
+
+fn push_inst(inout o: ChunkSeq[u8], i: u64) {
+    push_text(inout o, "inst");
+    push_decimal(inout o, i);
+}
+
+// `check_data_base_freshness`: true when no stale use; else the message
+// is appended to `err`.
+pub fn fresh(in f: F, inout err: ChunkSeq[u8]) -> bool {
+    let ctx = resolve(in f, f.ctx);
+    let nv = f.alias.len();
+    let ni = f.iid.len();
+    // Roots, by value: (value, defining instruction id).
+    let mut rv: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut rd: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for g in 0..ni {
+        let flags = u64_at(in f.iflags, g);
+        if (flags & F_LOAD) == 0 {
+            continue;
+        }
+        let arg = resolve(in f, u64_at(in f.iarg, g));
+        let offset = u64_at(in f.ioff, g);
+        let from_ctx = arg == ctx && offset == CTX_DATA_BASE;
+        let mut from_signal = false;
+        if offset == RESUME_DATA_BASE && arg < nv {
+            let d = u64_at(in f.def, arg);
+            from_signal = d != 0
+                && u64_at(in f.def_result, arg) == 0
+                && is_park(in f, wrapping_sub(d, 1));
+        }
+        if from_ctx || from_signal {
+            let ro = u64_at(in f.ires, g);
+            let value = wd(in f, wrapping_add(ro, 1));
+            let id = u64_at(in f.iid, g);
+            // Keep the roots sorted by value; a repeated value keeps the
+            // last definition, as a map insert does.
+            let mut j: u64 = 0;
+            let mut found = false;
+            loop {
+                if j >= rv.len() {
+                    break;
+                }
+                let x = u64_at(in rv, j);
+                if x == value {
+                    put(inout rd, j, id);
+                    found = true;
+                    break;
+                }
+                if x > value {
+                    break;
+                }
+                j = wrapping_add(j, 1);
+            }
+            if !found {
+                rv.push(0);
+                rd.push(0);
+                let mut k = wrapping_sub(rv.len(), 1);
+                loop {
+                    if k <= j {
+                        break;
+                    }
+                    put(inout rv, k, u64_at(in rv, wrapping_sub(k, 1)));
+                    put(inout rd, k, u64_at(in rd, wrapping_sub(k, 1)));
+                    k = wrapping_sub(k, 1);
+                }
+                put(inout rv, j, value);
+                put(inout rd, j, id);
+            }
+        }
+    }
+    let nr = rv.len();
+    if nr == 0 {
+        return true;
+    }
+    let rw = wrapping_add(nr, 63) >> 6;
+    let mut s = Sets {
+        bits: zeros(wrapping_mul(nv, rw)),
+        rw: rw,
+    };
+    for r in 0..nr {
+        let v = u64_at(in rv, r);
+        let at = wrapping_add(wrapping_mul(v, rw), r >> 6);
+        put(inout s.bits, at, u64_at(in s.bits, at) | (1 << (r & 63)));
+    }
+    let mut changed = true;
+    let mut incoming = zeros(rw);
+    loop {
+        if !changed {
+            break;
+        }
+        changed = false;
+        for g in 0..ni {
+            let memory = (u64_at(in f.iflags, g) & F_MEMORY) != 0;
+            let mut any = false;
+            for k in 0..rw {
+                put(inout incoming, k, 0);
+            }
+            let ao = u64_at(in f.iargs, g);
+            let na = wd(in f, ao);
+            for k in 0..na {
+                let a = resolve(in f, wd(in f, wrapping_add(wrapping_add(ao, 1), k)));
+                if a < nv && s.has_any(a) {
+                    any = true;
+                    let base = wrapping_mul(a, rw);
+                    for q in 0..rw {
+                        put(
+                            inout incoming,
+                            q,
+                            u64_at(in incoming, q) | u64_at(in s.bits, wrapping_add(base, q))
+                        );
+                    }
+                }
+            }
+            if !memory && any {
+                let ro = u64_at(in f.ires, g);
+                let n = wd(in f, ro);
+                for k in 0..n {
+                    let res = wd(in f, wrapping_add(wrapping_add(ro, 1), k));
+                    if s.union_row(res, in incoming, 0) {
+                        changed = true;
+                    }
+                }
+            }
+            let mut o = u64_at(in f.idests, g);
+            let nd = wd(in f, o);
+            o = wrapping_add(o, 1);
+            for d in 0..nd {
+                let target = wd(in f, o);
+                let nargs = wd(in f, wrapping_add(o, 1));
+                o = wrapping_add(o, 2);
+                let po = u64_at(in f.bparams, target);
+                let np = wd(in f, po);
+                for k in 0..nargs {
+                    let kind = wd(in f, o);
+                    let v = wd(in f, wrapping_add(o, 1));
+                    o = wrapping_add(o, 2);
+                    if k >= np || kind != 0 {
+                        continue;
+                    }
+                    let rv2 = resolve(in f, v);
+                    if rv2 < nv && s.has_any(rv2) {
+                        let param = wd(in f, wrapping_add(wrapping_add(po, 1), k));
+                        let row = copy_row(in s, rv2);
+                        if s.union_row(param, in row, 0) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let nb = f.bfirst.len();
+    for r in 0..nr {
+        let root = u64_at(in rv, r);
+        let def = u64_at(in rd, r);
+        let dg = wrapping_sub(u64_at(in f.at, def), 1);
+        let start_block = u64_at(in f.block_of, def);
+        let start_index = wrapping_sub(dg, u64_at(in f.bfirst, start_block));
+        // The queue: (block, start, crossed) triples.
+        let mut queue: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        queue.push(start_block);
+        queue.push(wrapping_add(start_index, 1));
+        queue.push(0);
+        let mut head: u64 = 0;
+        let mut visited = zeros(wrapping_mul(nb, 2));
+        loop {
+            if head >= queue.len() {
+                break;
+            }
+            let block = u64_at(in queue, head);
+            let start = u64_at(in queue, wrapping_add(head, 1));
+            let mut crossed = u64_at(in queue, wrapping_add(head, 2)) != 0;
+            head = wrapping_add(head, 3);
+            let first = u64_at(in f.bfirst, block);
+            let count = u64_at(in f.bcount, block);
+            let mut reached_end = true;
+            let mut i = start;
+            loop {
+                if i >= count {
+                    break;
+                }
+                let g = wrapping_add(first, i);
+                let inst = u64_at(in f.iid, g);
+                if inst == def {
+                    reached_end = false;
+                    break;
+                }
+                if crossed {
+                    let vo = u64_at(in f.ivals, g);
+                    let n = wd(in f, vo);
+                    for k in 0..n {
+                        let value = wd(in f, wrapping_add(wrapping_add(vo, 1), k));
+                        let rv3 = resolve(in f, value);
+                        if rv3 < nv && s.has(rv3, r) {
+                            push_text(inout err, "stale data-frame base: ");
+                            push_value(inout err, value);
+                            push_text(inout err, " (derived from base ");
+                            push_value(inout err, root);
+                            push_text(inout err, " loaded at ");
+                            push_inst(inout err, def);
+                            push_text(inout err, ") is used by ");
+                            push_inst(inout err, inst);
+                            push_text(inout err, " after a park");
+                            return false;
+                        }
+                    }
+                }
+                if is_park(in f, inst) {
+                    crossed = true;
+                }
+                i = wrapping_add(i, 1);
+            }
+            if !reached_end || count == 0 {
+                continue;
+            }
+            let last = wrapping_add(first, wrapping_sub(count, 1));
+            let mut o = u64_at(in f.idests, last);
+            let nd = wd(in f, o);
+            o = wrapping_add(o, 1);
+            for d in 0..nd {
+                let target = wd(in f, o);
+                let nargs = wd(in f, wrapping_add(o, 1));
+                o = wrapping_add(wrapping_add(o, 2), wrapping_mul(nargs, 2));
+                let c: u64 = if crossed {
+                    1
+                } else {
+                    0
+                };
+                let key = wrapping_add(wrapping_mul(target, 2), c);
+                if u64_at(in visited, key) == 0 {
+                    put(inout visited, key, 1);
+                    queue.push(target);
+                    queue.push(0);
+                    queue.push(c);
+                }
+            }
+        }
+    }
+    true
+}
+
+fn copy_row(in s: Sets, v: u64) -> ChunkSeq[u64] {
+    let mut row = ChunkSeq::with_capacity[u64](s.rw);
+    let base = wrapping_mul(v, s.rw);
+    for k in 0..s.rw {
+        row.push(u64_at(in s.bits, wrapping_add(base, k)));
+    }
+    row
+}
+
+// The functions of the input, one line each: `ok` or `err <message>`.
+pub fn freshness_text(in b: Slice[u8], inout o: ChunkSeq[u8]) {
+    let mut r = Reader {
+        pos: 0
+    };
+    let n = r.word(in b);
+    for i in 0..n {
+        let f = read_function(inout r, in b);
+        let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        if fresh(in f, inout err) {
+            push_text(inout o, "ok");
+        } else {
+            push_text(inout o, "err ");
+            o.extend(in err.as_slice());
+        }
+        o.push(10);
+    }
+}
