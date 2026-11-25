@@ -733,9 +733,21 @@ pub struct IrCase<'a> {
 /// Each corpus world's IR, followed by `CHECK_HARNESS_MUTANTS` (0 to 5,
 /// default `mutants`) of its mutants.
 pub fn ir_cases(mutants: usize) -> Vec<IrCase<'static>> {
+    ir_cases_where(mutants, |_| true)
+}
+
+/// [`ir_cases`] for only the corpus worlds whose index `keep` accepts.
+/// The whole corpus's programs and mutants take over 14 GiB (#1913), so a
+/// test that samples worlds lowers only those.
+pub fn ir_cases_where(mutants: usize, keep: impl Fn(usize) -> bool) -> Vec<IrCase<'static>> {
     let mutants = env_usize("CHECK_HARNESS_MUTANTS", mutants).min(IR_MUTANTS);
     // Lower on a few worker threads (#1519), keeping corpus order.
-    let cases = corpus();
+    let all = corpus();
+    let cases: Vec<&'static Case> = (0..all.len())
+        .filter(|&i| keep(i))
+        .map(|i| &all[i])
+        .collect();
+    let cases = &cases;
     let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
     let mut lowered: Vec<(usize, vesper::ir::Program)> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
