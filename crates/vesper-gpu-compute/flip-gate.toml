@@ -26,12 +26,12 @@ run = "cargo test --locked -p vesper-gpu-compute --test runtime --test generatio
 # both arms must print the same digest.
 [[abba]]
 workload = "runtime"
-run = "crates/vesper-gpu-compute/port/bench-abba.sh runtime 10"
+run = "aspect crate gpu-compute bench-abba -- runtime 10"
 
 [[abba]]
 workload = "broadphase"
-run = "crates/vesper-gpu-compute/port/bench-abba.sh broadphase 10"
+run = "aspect crate gpu-compute bench-abba -- broadphase 10"
 
 [[abba]]
 workload = "generation"
-run = "crates/vesper-gpu-compute/port/bench-abba.sh generation 10"
+run = "aspect crate gpu-compute bench-abba -- generation 10"

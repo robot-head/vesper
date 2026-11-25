@@ -102,7 +102,7 @@ formatted.
   | clock | moving back by 1 ns accepted | `clock_never_moves_backwards` (`invalid_configs_are_rejected` passes) |
 
   Bazel: `//crates/vesper-warp-wheel:port_divergence_detected`. macOS and
-  Windows: `crates/vesper-warp-wheel/port/test-port.sh`, called from
+  Windows: `aspect crate warp-wheel test-port`, called from
   `scripts/test-port-harness.sh`.
 
 ## Zero allocation
@@ -155,7 +155,7 @@ frames), not this lane's.
 - Linux x86_64 (cloud): both builds, 17/17 tests each, `tests/port_memory.rs`,
   `tests/alloc_audit.rs`, `cargo test -p vesper-warp --features
   vesper-warp-wheel/vesper-port`, the divergent build,
-  `crates/vesper-warp-wheel/port/test-port.sh`,
+  `aspect crate warp-wheel test-port`,
   `cargo +1.100.0 clippy --all-targets -D warnings` (default, `vesper-port`,
   `vesper-port-divergent`, and vesper-warp on the port), `vesper fmt --check`
   on every port file.

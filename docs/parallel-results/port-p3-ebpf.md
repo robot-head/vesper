@@ -103,7 +103,7 @@ vesper-port` (port) both pass all 88 tests plus the ABBA equality test
 other kernel tests really load programs). Both builds agree on every verdict
 and abstract state the soundness tests print.
 
-CI: the Linux "Vesper ports" job runs `crates/vesper-ebpf/port/check.sh`
+CI: the Linux "Vesper ports" job runs `aspect crate ebpf check`
 (both builds and the divergence checks); Bazel builds the port object and
 every divergent object, and runs `codec`, `port_surface`, `scalar_soundness`
 and `soundness` against the port. macOS and Windows build and test the Rust

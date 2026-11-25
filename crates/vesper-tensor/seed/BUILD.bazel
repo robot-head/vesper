@@ -35,7 +35,7 @@ rust_test(
 
 # The tests that read no files at run time; Cargo runs every test against
 # the seed on every platform (scripts/test-port-harness.sh,
-# crates/vesper-tensor/port/test-port.sh), including lean_kv, model_formats
+# aspect crate tensor test-port), including lean_kv, model_formats
 # and steady_state_alloc_batch.
 [
     rust_test(

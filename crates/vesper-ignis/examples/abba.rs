@@ -3,7 +3,7 @@
 //! feature swaps the engine behind one `RenderGraph`), so this example is
 //! built twice and, in `compare` mode, runs the two executables as separate
 //! processes in Rust, port, port, Rust order per epoch, then analyzes the
-//! paired totals with vesper-bench. Run `crates/vesper-ignis/bench-abba.sh`.
+//! paired totals with vesper-bench. Run `aspect crate ignis bench-abba`.
 //!
 //! `abba measure <ops>` warms each workload up and prints its total
 //! nanoseconds over `<ops>` operations; `abba profile <workload> <passes>

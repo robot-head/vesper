@@ -18,7 +18,7 @@ build = "build.rs"
 
 [features]
 # Deliberately wrong Vesper builds (EDITS in build.rs, one per ported
-# module): crates/vesper-kinetic/port/check.sh asserts which test catches
+# module): aspect crate kinetic check asserts which test catches
 # each.
 vesper-port-divergent = []
 

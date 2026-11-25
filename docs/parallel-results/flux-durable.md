@@ -120,7 +120,7 @@ SimPulse or protocol):
 
 All twelve theorems use only `propext`/`Quot.sound` (checked by
 `tests/lean_model.rs` when `VESPER_LEAN` is set, and by
-`scripts/ci/check-lean-models.sh`). No `sorry`, `admit` or new axioms.
+`aspect ci check-lean-models`). No `sorry`, `admit` or new axioms.
 
 ## Tests
 

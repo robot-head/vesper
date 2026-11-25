@@ -1,0 +1,42 @@
+load("./lib/cargo.axl", "test_artifacts")
+load("./lib/process.axl", "check", "command", "root_path", "scratch_dir")
+
+def _cli_suites(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    selected = (ctx.std.env.var("CLI_SUITES") or "").split()
+    suites = []
+    for file in ctx.std.fs.read_dir(root + "/tests"):
+        name = file.path.rpartition("/")[2].removesuffix(".rs")
+        if file.is_file and file.path.endswith(".rs") and "cli" in name and (not selected or name in selected):
+            suites.append(name)
+    if not suites:
+        ctx.std.process.exit(2, "No CLI test suites selected")
+    for package in [["-p", "vesper", "--bin", "vesper"], ["-p", "vesper-tools"], ["-p", "vesper-hybrid"]]:
+        check(ctx, "cargo", ["build", "--locked"] + package, root)
+    filters = []
+    for name in sorted(suites):
+        filters.extend(["--test", name])
+    executables = test_artifacts(ctx, root, ["-p", "vesper"] + filters, suites)
+
+    target = root_path(root, ctx.std.env.var("CARGO_TARGET_DIR") or "target")
+    binary = target + "/debug/vesper"
+    backup = scratch_dir(ctx, "vesper-hybrid-cli-") + "/vesper"
+    ctx.std.fs.copy(binary, backup)
+    ctx.defer(lambda: ctx.std.fs.copy(backup, binary))
+    ctx.std.fs.copy(target + "/debug/vesper-hybrid", binary)
+    failed = []
+    for executable in executables:
+        if not command(ctx, executable, ctx.args.tool_args, root).status().success:
+            failed.append(executable)
+    ctx.std.io.stdout.write("cli-suites: %d suites on the hybrid, %d failed\n" % (len(executables), len(failed)))
+    for path in failed:
+        ctx.std.io.stdout.write("  failed: " + path + "\n")
+    return 1 if failed else 0
+
+hybrid_cli_suites = task(
+    kind = "cli-suites",
+    group = ["crate", "hybrid"],
+    summary = "Run the repository CLI suites against the hybrid compiler",
+    implementation = _cli_suites,
+    args = {"tool_args": args.trailing_var_args(description = "Arguments forwarded to each selected test binary.")},
+)

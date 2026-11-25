@@ -552,33 +552,6 @@ fn hash_package_checks_on_its_own() {
     load(Path::new("packages/vesper-std/hash"));
 }
 
-/// The compression function is the output of its generator.
-#[test]
-fn compress_is_generated() {
-    let script = Path::new("packages/vesper-std/hash/gen/blake3_gen.py");
-    let Ok(out) = Command::new("python3")
-        .arg(script)
-        .arg(std::env::temp_dir().join(format!("blake3-compress-{}.ves", std::process::id())))
-        .output()
-    else {
-        eprintln!("python3 unavailable; generator check skipped");
-        return;
-    };
-    if !out.status.success() {
-        eprintln!("python3 failed; generator check skipped");
-        return;
-    }
-    let path = std::env::temp_dir().join(format!("blake3-compress-{}.ves", std::process::id()));
-    let generated = fs::read_to_string(&path).unwrap();
-    let _ = fs::remove_file(&path);
-    let committed = fs::read_to_string("packages/vesper-std/hash/src/compress.ves").unwrap();
-    assert_eq!(
-        generated.replace("\r\n", "\n"),
-        committed.replace("\r\n", "\n"),
-        "regenerate src/compress.ves with gen/blake3_gen.py"
-    );
-}
-
 // ---------------------------------------------------------------------------
 // The `.vsys` driver: the same folds through @vesper-std/hash-sys.
 

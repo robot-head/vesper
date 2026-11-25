@@ -6,7 +6,7 @@
 
 Branch `diagnostics41/acceptance`, base
 `b4d1df8846d29afac7133774d00e39362b66deff`. This lane owns only
-`tests/diagnostics_cli.rs`, `scripts/test-diagnostics.sh`,
+`tests/diagnostics_cli.rs`, `aspect acceptance test-diagnostics`,
 `scripts/check-diagnostics.py`, `.github/workflows/diagnostics.yml` and this
 report. No production source, manifest, lockfile, server or renderer edits.
 The causal model/producers/guard/renderer and host routing belong to #87–#91/#93.
@@ -93,7 +93,7 @@ The frame reader checks exact byte lengths, bounded headers/replies, unique
 decoded output keys, UTF-8, and complete framing. Unicode/newline conversions
 are independent from the production LineIndex.
 
-`scripts/test-diagnostics.sh` builds the real locked binary, runs the disposable
+`aspect acceptance test-diagnostics` builds the real locked binary, runs the disposable
 Python acceptance, then executes the actual renderer's self-checking
 `causal_diagnostics` example. Shell, Python and Rust binary selection all prefer
 an existing `.exe` candidate before relying on an extensionless alias, including
@@ -130,7 +130,7 @@ Static checks passed:
 cargo test -p vesper --test diagnostics_cli --no-run
 cargo clippy -p vesper --test diagnostics_cli -- -D warnings
 rustfmt --edition 2024 --check tests/diagnostics_cli.rs
-bash -n scripts/test-diagnostics.sh
+bash -n aspect acceptance test-diagnostics
 Python source compilation; native workflow YAML parsing
 git diff --check
 ```

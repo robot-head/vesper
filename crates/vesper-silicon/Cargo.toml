@@ -16,7 +16,7 @@ build = "build.rs"
 
 [features]
 # Deliberately wrong Vesper builds (EDITS in build.rs, one per ported area):
-# crates/vesper-silicon/port/check.sh asserts which test catches each.
+# aspect crate silicon check asserts which test catches each.
 vesper-port-divergent = []
 
 [dependencies]

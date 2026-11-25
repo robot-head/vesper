@@ -13,7 +13,7 @@ fn main() {
     // One divergent edit per ported area (the effect rule, the
     // projection rule, the TOML reader, the source edits, the L0103 mode
     // rule), the same
-    // edits as BUILD.bazel; port/test-port.sh asserts that the tests
+    // edits as BUILD.bazel; aspect crate lint test-port asserts that the tests
     // catch each one.
     #[cfg(feature = "vesper-port-divergent")]
     let port = {
@@ -28,7 +28,7 @@ fn main() {
 }
 
 /// The divergence checks (mirrored in BUILD.bazel and asserted by
-/// port/test-port.sh).
+/// aspect crate lint test-port).
 #[cfg(feature = "vesper-port-divergent")]
 const EDITS: &[(&str, &str, &str)] = &[
     // The effect rule: a label on the request no longer narrows the match.

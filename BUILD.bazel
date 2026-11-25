@@ -880,7 +880,7 @@ vesper_crate(
     # Reservations include subprocess overhead; they do not enforce RSS limits.
     # `lean_replay` marks the Lean/Logos suite run by "Native and acceptance
     # scripts" when Lean-facing paths change and on pushes to main
-    # (scripts/ci/lean_replay_scope.py, docs/ci-platforms.md "PR test tiers").
+    # (.aspect/lean-replay-scope.axl, docs/ci-platforms.md "PR test tiers").
     test_tags = {
         # These harnesses can run several compiler/evaluator cases in parallel.
         "vesper_unit_test": [

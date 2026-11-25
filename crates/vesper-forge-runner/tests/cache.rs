@@ -23,7 +23,7 @@ fn committed_fixture_matches_its_checksum() {
     assert_eq!(
         SHA256SUMS.split_whitespace().next(),
         Some(hex.as_str()),
-        "fixtures/bin/macro.component.wasm differs from SHA256SUMS; rebuild with fixtures/build.sh"
+        "fixtures/bin/macro.component.wasm differs from SHA256SUMS; rebuild with aspect crate forge-runner build"
     );
 }
 

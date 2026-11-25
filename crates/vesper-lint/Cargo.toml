@@ -18,7 +18,7 @@ build = "build.rs"
 [features]
 vesper-port = []
 # Deliberately wrong Vesper builds, one edit per ported area: the port test
-# runs must fail (port/test-port.sh asserts which tests do).
+# runs must fail (aspect crate lint test-port asserts which tests do).
 vesper-port-divergent = ["vesper-port"]
 
 [dependencies]

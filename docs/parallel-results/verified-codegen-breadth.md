@@ -231,7 +231,7 @@ exercised by the tests.
   - `tests/verified_codegen_lean.rs` requires the two listings to be equal
     line for line. This ties the Rust bit-twiddling to the proven model on
     those samples. Outside the samples it is a test, not a proof.
-- `scripts/ci/check-lean-models.sh` compiles the new file after
+- `aspect ci check-lean-models` compiles the new file after
   `VerifiedCodegen.olean`.
 
 ### Checks
@@ -305,7 +305,7 @@ exercised by the tests.
   - `tests/verified_codegen_lean.rs` requires the listings to be equal line
     for line, and checks the file's hygiene and axiom report like the RV64
     model's.
-- `scripts/ci/check-lean-models.sh` compiles the new file.
+- `aspect ci check-lean-models` compiles the new file.
 
 ### Checks
 
@@ -421,7 +421,7 @@ Claim #837 (lane V1 of the verified-compiler parallel plan). Refs #582,
   - The axiom reports use only `propext`, `Classical.choice` and
     `Quot.sound`.
   - `tests/refinement_places_lean.rs` audits every theorem of the new file.
-  - `scripts/ci/check-lean-models.sh` compiles it.
+  - `aspect ci check-lean-models` compiles it.
 
 ### Tests
 
@@ -523,7 +523,7 @@ Claim #837 (lane V1 of the verified-compiler parallel plan). Refs #582,
     `verified_codegen::x64_encoding_listing`) runs the Rust emitter on the
     same instructions. `tests/verified_codegen_lean.rs` requires the two
     to be equal line for line, and checks hygiene and the axiom report.
-- `scripts/ci/check-lean-models.sh` compiles the new file.
+- `aspect ci check-lean-models` compiles the new file.
 
 ### Checks
 

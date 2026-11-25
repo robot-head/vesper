@@ -1,4 +1,4 @@
-# Tracked .ves files that `scripts/check-fmt.py` does not require to be
+# Tracked .ves files that `aspect acceptance check-fmt` does not require to be
 # canonically formatted. Every entry needs a reason; the check fails if an
 # entry no longer exists. One repository-relative path per line.
 

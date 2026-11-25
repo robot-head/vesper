@@ -6,7 +6,6 @@
 # Keep the published manuscript byte-exact and its editable sources portable.
 website/*.pdf binary
 docs/manuscript/*.typ text eol=lf
-bootstrap/stage2.sh text eol=lf
 
 # Unified-diff context lines and this verbatim upstream license retain their bytes.
 tools/logos42/patches/*.patch whitespace=-blank-at-eol

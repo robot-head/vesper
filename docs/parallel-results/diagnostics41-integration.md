@@ -118,13 +118,13 @@ locked/offline dependencies and the coordinator's private target:
   and all eight final diagnostics CLI/stdio tests passed separately.
 - Strict `cargo clippy --workspace --locked --offline --all-targets -- -D warnings`
   passed on final production/test sources; formatting and diff checks passed.
-- `scripts/test-diagnostics.sh`: 17 actual CLI checks, 16 framed stdio sessions,
+- `aspect acceptance test-diagnostics`: 17 actual CLI checks, 16 framed stdio sessions,
   and the executable shared renderer example passed. It checks real source
   slices/current UTF-16 positions/hash/version, shadowing, recovery, independent
   publication capabilities, rejected client evidence, resource refusal and exact
   raw fallback for unsupported terminal line separators.
-- Existing `scripts/test-editor.sh` (19 child sessions and span/protocol examples),
-  `scripts/test-source-tooling.sh` and `scripts/test-canonical-protocols.sh` passed.
+- Existing `aspect acceptance test-editor` (19 child sessions and span/protocol examples),
+  `aspect acceptance test-source-tooling` and `aspect acceptance test-canonical-protocols` passed.
   Optional PMU evidence remains explicitly unavailable here; no hardware claim.
 - Specification snapshot validation and all 14 snapshot unit tests passed.
 
