@@ -187,8 +187,10 @@ gated set over the whole corpus with 0 differences. Today `gated` holds
      `vesper-loom-calculus`, `vesper-loom-cas` and `vesper-loom-trust`; those
      seeds go at the retirement, so it needs its own copy of what it uses
      or a call into the Vesper libraries.
-   - `src/verified_codegen` (the Stage 1 guard) is in `src/`: it ports with
-     SH6b or moves next to the auditor, an owner call before the PR.
+   - `src/verified_codegen` (the Stage 1 guard) is in `src/`. Owner
+     decision (2026-11-25): it is ported to Vesper (#1886,
+     `@vesper/verified-codegen`), and `bootstrap/stage1.rs` uses the port
+     with `bootstrap/stage1.lock` reproduced.
    - `vesper-cranelift-sys` and `vesper-crypto-sys` link with no Rust
      compiler crate.
 6. **No test is lost.** Every test under `tests/` and `crates/*/tests` that

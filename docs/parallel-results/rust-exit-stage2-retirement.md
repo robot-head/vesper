@@ -138,8 +138,8 @@ Besides the compiler rows that have not passed the gate (checklist item
 2. **`vesper-codegen-verified` links three frozen seeds**
    (`vesper-loom-calculus-seed`, `vesper-loom-cas-seed`,
    `vesper-loom-trust-seed`), which the retirement deletes.
-3. **`src/verified_codegen`** (the Stage 1 guard) lives in `src/`; it needs
-   an owner call: port it with SH6b, or move it beside the auditor.
+3. **`src/verified_codegen`** (the Stage 1 guard) lives in `src/`. Owner
+   decision (2026-11-25): port it to Vesper (#1886).
 4. **The Stage 2 fixed point is of `@vesper/stage2`**, the standalone
    compiler package, not of the compiler the hybrid runs. The seed has to be
    the complete compiler (driver, checker, backends), which needs items 1
