@@ -502,7 +502,12 @@ pub fn frame_plan(
 
 // The harness dump: see the header.
 pub fn frames_text(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
+    frames_bytes(in input.as_bytes())
+}
+
+// `frames_text` over the input's bytes: the `frame_plans` swap hook's entry
+// (part 3b, #1509).
+pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut r = Reader {
         pos: 0
     };

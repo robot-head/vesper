@@ -1068,6 +1068,15 @@ fn compile_entry<M: Module>(
     }
     let instances = instances_for_entry(world, entry, trace_ok)?;
     let mut program = crate::ir_swap::lower(world);
+    // The entry-block plans from the `frame_plans` swap hook (#1509 part
+    // 3b), from the first lowering; a trace host keeps the Rust plans.
+    let frames = if trace_ok {
+        None
+    } else {
+        crate::codegen_swap::installed()
+            .frame_plans
+            .and_then(|hook| hook(world, &program, entry, optimize))
+    };
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
     wide_native::refine_wide_tuples(&mut program);
     let mut inlined_into = BTreeMap::new();
@@ -1125,6 +1134,7 @@ fn compile_entry<M: Module>(
         trace_entry,
         optimize,
         &abi,
+        frames.as_ref(),
     )?;
     let mut abi = Vec::new();
     for (key, (name, vars)) in &instances {
@@ -1221,6 +1231,59 @@ impl FramePlan {
         }
         s
     }
+    /// The plan [`FramePlan::text`] wrote, or `None` when `text` is not one
+    /// (the `frame_plans` swap hook's answer, part 3b of #1509).
+    pub fn parse(text: &str) -> Option<FramePlan> {
+        let mut lines = text.lines();
+        let mut plan = FramePlan::default();
+        let mut head = lines.next()?.split(' ');
+        let flag = |field: Option<&str>, name: &str| match field?.strip_prefix(name)? {
+            "0" => Some(false),
+            "1" => Some(true),
+            _ => None,
+        };
+        plan.trace_fail = flag(head.next(), "trace=")?;
+        plan.fail_record = flag(head.next(), "fail=")?;
+        plan.caller_slot = flag(head.next(), "caller=")?;
+        let words = |n: Option<&str>| n?.parse::<u32>().ok();
+        plan.result = match head.next()?.strip_prefix("result=")? {
+            "value" => FrameResult::Value,
+            "sret" => FrameResult::Sret,
+            "buffer" => FrameResult::Buffer(words(head.next())?),
+            "words" => FrameResult::Words(words(head.next())?),
+            _ => return None,
+        };
+        if head.next().is_some() {
+            return None;
+        }
+        for line in lines {
+            if let Some(rest) = line.strip_prefix("P ") {
+                let (name, how) = rest.split_once(' ')?;
+                let load = match how {
+                    "value" => None,
+                    _ => Some(scalar_type_named(how.strip_prefix("load ")?)?),
+                };
+                plan.params.push((name.to_string(), load));
+            } else if let Some(rest) = line.strip_prefix("A ") {
+                let (param, function) = rest.split_once(' ')?;
+                plan.function_args
+                    .push((param.to_string(), function.to_string()));
+            } else {
+                let (key, identity) = line.strip_prefix("K ")?.rsplit_once(' ')?;
+                plan.capabilities
+                    .insert(key.to_string(), identity.to_string());
+            }
+        }
+        Some(plan)
+    }
+}
+/// The scalar Cranelift type `name` (`Display` of [`ir::Type`]) that an
+/// `inout` scalar parameter loads as ([`FramePlan::parse`]).
+fn scalar_type_named(name: &str) -> Option<ir::Type> {
+    use ir::types::*;
+    [I8, I16, I32, I64, I128, F32, F64]
+        .into_iter()
+        .find(|t| t.to_string() == name)
 }
 /// The entry-block plan of instance `name` (`f`, already [`concrete`]) whose
 /// ABI returns `result_words` register words ([`NativeAbi`]): which trailing block parameters are the trace flag, the
@@ -1474,6 +1537,7 @@ fn define_instances<M: Module>(
         None,
         optimize,
         &DEFAULT_ABI,
+        None,
     )
 }
 #[allow(clippy::too_many_arguments)]
@@ -1491,6 +1555,7 @@ fn define_instances_observed_with_trace<M: Module>(
     trace_entry: Option<(&str, FuncId)>,
     operands_only: bool,
     abi: &NativeAbi,
+    frames: Option<&BTreeMap<String, FramePlan>>,
 ) -> Result<String, String> {
     let _module_kind = crate::codegen_swap::module_kind_scope(
         std::any::type_name::<M>().ends_with("JITModule"),
@@ -1513,16 +1578,24 @@ fn define_instances_observed_with_trace<M: Module>(
         let mut ctx = m.make_context();
         let own_abi = abi.of(key);
         ctx.func.signature = signature_with_abi(m, world, &f, pass_trace, own_abi)?;
-        let frame = frame_plan(
-            world,
-            name,
-            &f,
-            generic_vars,
-            own_abi.result_words,
-            operands_only,
-            pass_trace,
-            trace_host,
-        )?;
+        // A plan from the `frame_plans` hook stands in for the Rust one
+        // when it covers every parameter.
+        let frame = match frames
+            .and_then(|plans| plans.get(key))
+            .filter(|plan| plan.params.len() == f.params.len())
+        {
+            Some(plan) => plan.clone(),
+            None => frame_plan(
+                world,
+                name,
+                &f,
+                generic_vars,
+                own_abi.result_words,
+                operands_only,
+                pass_trace,
+                trace_host,
+            )?,
+        };
         let mut fbctx = FunctionBuilderContext::new();
         let wide_divisions = {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);

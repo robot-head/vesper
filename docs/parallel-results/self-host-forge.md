@@ -219,3 +219,65 @@ Ported `AuthorityGraph::requirements` (`crates/vesper-forge/src/authority.rs`) i
 - The quotation expansion of `host.rs` (`expand_items`, splice lookup) is host state; it can move once the host's arenas do.
 - `typed_quote.rs` parses with `vesper-syntax`'s lexer, so it moves with the parser swap (lane 12) rather than here.
 - `src/forge_frontend` (the `vesper forge` command) is compiler code in `src/` and belongs to SH2, not to this crate's lane.
+
+## Part 3: the sugar surface profile in `@vesper/front` (Claude takeover)
+
+The Claude project thread "Port forge macro expansion to Vesper" took this
+lane over on 2026-11-25 (the Antigravity and Codex agents are paused). The
+plan for the rest of the lane is on #1157: the compiler reaches
+`forge_frontend` through `parse_compiler_input`, whose fallback runs
+`vesper_syntax::sugar_expand`, and that parses every round in the surface
+profile (`parser::parse_expansion_scopes`). `@vesper/front` had no surface
+profile, so it comes first.
+
+What changed:
+
+- `packages/vesper-front`: the surface profile of the Rust parser, behind
+  the new entry `parse_surface_tables(source, limits, counts)` (the byte
+  limit and `include_tests` in `limits`, the token and diagnostic limits in
+  `counts`):
+  - `lex.ves`: `lex_sugar_with_limits`, where a lone backtick is a
+    `Backtick` token (kind 81) instead of an invalid one.
+  - `parse.ves`, section "Surface profile": sugar declarations
+    (`parser/sugar_decl.rs`: annotations, sorts, `infix` sorts with quoted
+    operators, `emits` rows, rules, holes, sequence holes and
+    repetitions with separators), sugar phrases at item, statement and
+    expression starts with heads, bracketed head words, continuations and
+    `ghost` (`parser/sugar_phrase.rs`), pattern phrases, pipelines with
+    `_` placeholders, dotted operators and tagged literals
+    (`parser/sugar_ops.rs`), and expression macro declarations and calls
+    (`parser/surface_macro.rs`), plus `test` blocks parsed as items when
+    `include_tests` is set.
+  - The core parser's hooks all check `p.surface` first. Two changes touch
+    the batch profile, both without changing what it parses: binary
+    operator levels are now the Rust parser's (twice the old numbers, which
+    leaves level 3 for the pipelines), and call arguments, tuple and array
+    elements and index bounds go through `dexpr` (`delimited_expr`), which
+    differs from `expr` only in the surface profile.
+- `crates/vesper-syntax/src/parser.rs`: a `#[doc(hidden)]` test hook,
+  `parse_surface_cst`, which is `parse_expansion_scopes` without the
+  expression macro validation (`macro_source::validate_surface`, which is
+  part 6). It does not change behaviour.
+- `tests/self_host_front_v2.rs`: four surface differentials (CST rows and
+  diagnostics) and an ignored speed test.
+
+Nothing calls the surface profile yet. Part 4 (sugar expansion in Vesper)
+is its first user.
+
+Tests (release, this 4-core cloud machine):
+
+| Test | Sources | Result |
+|---|---|---|
+| `surface_profile_matches_on_the_sugar_corpus` | 103 hand-written surface cases plus the string literals of the sugar, macro and recovery test suites, `sugar_expand`, `macro_source`, `forge_frontend/sugar.rs`, `packages/sugar.rs` and the forge, fmt and package CLI tests; each with and without test blocks. Every surface node kind occurs. | 0 differences |
+| `surface_profile_matches_on_repository_sources` | every repository `.ves` file | 0 differences |
+| `surface_profile_matches_on_the_fuzzed_corpus` | 40,000 rounds (`VESPER_FRONT_FUZZ=40000`; CI runs 3,000) of edited sugar sources and surface token soup | 0 differences |
+| `surface_profile_matches_under_explicit_limits` | byte, token, diagnostic and depth limits | 0 differences |
+| the 13 existing front end v2 differentials | the batch and editor profiles | pass, unchanged |
+
+Speed (`surface_profile_speed`, ignored; release, `-C target-cpu=native`,
+20 alternating rounds over 1,484 sources: the repository `.ves` files and
+the hand-written cases): the Vesper tables take **0.35x** the time of the
+Rust surface parse and its rows (median; range 0.30x to 0.48x).
+
+A divergence check (changing one surface diagnostic's message) fails
+`surface_profile_matches_on_the_sugar_corpus` at the case that reaches it.

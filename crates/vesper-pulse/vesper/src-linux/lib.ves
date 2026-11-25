@@ -1934,3 +1934,570 @@ pub fn run_seeded(inout pool: SeededPool) -> PoolOutput {
         abandoned: pool.live,
     }
 }
+
+// ---------------------------------------------------------------------------
+// The epoll completion driver (`readiness.rs` over `epoll.rs`, #1938).
+//
+// A readiness kernel interface never holds a user buffer: the driver
+// performs the read or write itself once the descriptor is ready. Each
+// request is in exactly one place: `waiting` (registered with epoll) or
+// `ready` (finished, returned by the next poll). Descriptors epoll refuses
+// because they are always ready (`EPERM`: regular files, most character
+// devices) are serviced inline with `pread`/`pwrite` at the request
+// offset; their completion is delivered by the next poll, never by
+// `submit`. Stream descriptors are switched to `O_NONBLOCK` (and left so)
+// and registered one-shot; a spurious wake-up re-arms. Zero-length
+// operations and operations against the descriptor's access mode
+// (`EBADF`) need no readiness and complete at the next poll.
+//
+// Request buffers live in the driver's byte arena (`start`, `len`); a
+// poll copies its completions' bytes into the `EpollPoll` it returns.
+// Errors are errno values, or one of the `io_error_*` codes below for the
+// failures Rust reports without one.
+
+// The submission queue is full (Rust: `WouldBlock`, no errno).
+pub fn io_error_queue_full() -> u32 {
+    1000001
+}
+
+// Request ids are exhausted.
+pub fn io_error_ids_exhausted() -> u32 {
+    1000002
+}
+
+// The kernel reported more bytes than the buffer holds.
+pub fn io_error_invalid_length() -> u32 {
+    1000003
+}
+
+// epoll reported a token that names no waiting request.
+pub fn io_error_unknown_event() -> u32 {
+    1000004
+}
+
+// A driver needs at least one entry.
+pub fn io_error_invalid_entries() -> u32 {
+    1000005
+}
+
+// A request the driver owns. `start` and `len` name its buffer in the
+// driver's arena.
+copy struct IoRequest {
+    id: RequestId,
+    fd: i32,
+    op: Operation,
+    offset: u64,
+    token: u64,
+    start: u64,
+    len: u64,
+}
+
+// A finished request: `bytes` read or written when `ok`, else `errno`
+// (`PulseSys::ECANCELED_ERR` for a cancelled request). `start` and `len`
+// name its buffer in the `EpollPoll` that returned it: a successful read
+// is truncated to the bytes read; anything else keeps the buffer as
+// submitted.
+pub copy struct IoCompletion {
+    pub id: RequestId,
+    pub token: u64,
+    pub op: Operation,
+    pub ok: bool,
+    pub bytes: u64,
+    pub errno: u32,
+    pub start: u64,
+    pub len: u64,
+}
+
+// One poll's completions, their buffers, and the first driver error
+// (0 for none). The completions are returned even when `error` is set.
+pub struct EpollPoll {
+    pub completions: ChunkSeq[IoCompletion],
+    pub data: ChunkSeq[u8],
+    pub error: u32,
+}
+
+pub struct EpollDriver {
+    poller: EpollPoller,
+    capacity: u64,
+    next: u64,
+    waiting: ChunkSeq[IoRequest],
+    ready: ChunkSeq[IoCompletion],
+    arena: ChunkSeq[u8],
+}
+
+fn io_request_at(in seq: ChunkSeq[IoRequest], idx: u64) -> IoRequest {
+    match seq.try_get(idx) {
+        Option::Some(v) => v,
+        Option::None => IoRequest {
+            id: RequestId {
+                bits: 0
+            },
+            fd: -1,
+            op: Operation::Read,
+            offset: 0,
+            token: 0,
+            start: 0,
+            len: 0,
+        },
+    }
+}
+
+fn io_completion_at(in seq: ChunkSeq[IoCompletion], idx: u64) -> IoCompletion {
+    match seq.try_get(idx) {
+        Option::Some(v) => v,
+        Option::None => IoCompletion {
+            id: RequestId {
+                bits: 0
+            },
+            token: 0,
+            op: Operation::Read,
+            ok: false,
+            bytes: 0,
+            errno: 0,
+            start: 0,
+            len: 0,
+        },
+    }
+}
+
+fn is_read(op: Operation) -> bool {
+    match op {
+        Operation::Read => true,
+        Operation::Write => false,
+    }
+}
+
+// The epoll interest of `op`, as `epoll_mask` takes it.
+fn op_interest(op: Operation) -> u32 {
+    if is_read(op) {
+        0
+    } else {
+        1
+    }
+}
+
+// A driver of `entries` requests at most, or `Err` with the error.
+pub fn epoll_driver_new(entries: u32) -> Result[EpollDriver, u32] eff [Ffi[PulseSys]] {
+    if entries == 0 {
+        return Result::Err(io_error_invalid_entries());
+    }
+    let (fd, err) = PulseSys::epoll_create1(PulseSys::EPOLL_CLOEXEC);
+    if fd < 0 {
+        return Result::Err(err);
+    }
+    Result::Ok(
+        EpollDriver {
+            poller: EpollPoller {
+                fd: fd
+            },
+            capacity: widen_u64(entries),
+            next: 1,
+            waiting: ChunkSeq::new[IoRequest](),
+            ready: ChunkSeq::new[IoCompletion](),
+            arena: ChunkSeq::new[u8](),
+        }
+    )
+}
+
+// The epoll instance, which is readable while a registered request fired.
+pub fn epoll_driver_fd(in d: EpollDriver) -> i32 {
+    d.poller.fd
+}
+
+// Requests the driver owns: waiting and finished but not yet polled.
+pub fn epoll_driver_pending(in d: EpollDriver) -> u64 {
+    wrapping_add(d.waiting.len(), d.ready.len())
+}
+
+// Requests registered with epoll.
+pub fn epoll_driver_in_flight(in d: EpollDriver) -> u64 {
+    d.waiting.len()
+}
+
+// Whether the next poll returns completions without waiting.
+pub fn epoll_driver_has_ready(in d: EpollDriver) -> bool {
+    d.ready.len() > 0
+}
+
+// Finish `r` with `n` bytes (`ok`) or `errno`, as Rust's `finish` does.
+fn io_finish(r: IoRequest, ok: bool, n: u64, errno: u32) -> IoCompletion {
+    let mut good = ok;
+    let mut e = errno;
+    if good && n > r.len {
+        good = false;
+        e = io_error_invalid_length();
+    }
+    let len = if good && is_read(r.op) {
+        n
+    } else {
+        r.len
+    };
+    IoCompletion {
+        id: r.id,
+        token: r.token,
+        op: r.op,
+        ok: good,
+        bytes: if good {
+            n
+        } else {
+            0
+        },
+        errno: if good {
+            0
+        } else {
+            e
+        },
+        start: r.start,
+        len: len,
+    }
+}
+
+// `pread`/`pwrite` of `r` at its offset, retrying `EINTR`: `(ok, n, errno)`.
+fn io_positional(inout d: EpollDriver, r: IoRequest) -> (bool, u64, u32) eff [Ffi[PulseSys]] {
+    let end = wrapping_add(r.start, r.len);
+    loop {
+        let (n, e) = if is_read(r.op) {
+            PulseSys::pread(r.fd, inout d.arena[r.start..end], wrapping_i64(r.offset))
+        } else {
+            PulseSys::pwrite(r.fd, in d.arena[r.start..end], wrapping_i64(r.offset))
+        };
+        if n >= 0 {
+            return (true, wrapping_u64(n), 0);
+        }
+        if e != PulseSys::EINTR_ERR {
+            return (false, 0, e);
+        }
+    }
+}
+
+// `read`/`write` of `r` on its non-blocking stream, retrying `EINTR`.
+fn io_streamed(inout d: EpollDriver, r: IoRequest) -> (bool, u64, u32) eff [Ffi[PulseSys]] {
+    let end = wrapping_add(r.start, r.len);
+    loop {
+        let (n, e) = if is_read(r.op) {
+            PulseSys::read(r.fd, inout d.arena[r.start..end])
+        } else {
+            PulseSys::write(r.fd, in d.arena[r.start..end])
+        };
+        if n >= 0 {
+            return (true, wrapping_u64(n), 0);
+        }
+        if e != PulseSys::EINTR_ERR {
+            return (false, 0, e);
+        }
+    }
+}
+
+// Remove the registration of `fd`: 0 or the errno.
+fn io_deregister(in d: EpollDriver, fd: i32) -> u32 eff [Ffi[PulseSys]] {
+    let (ok, e) = epoll_release(in d.poller, fd);
+    if ok {
+        0
+    } else {
+        e
+    }
+}
+
+// Submit a read into a buffer of `buffer.len()` bytes (its contents are
+// kept when the read fails) or a write of `buffer`, at `offset` (0 for a
+// stream). The request's id, or `Err` with the error; a rejected request
+// leaves nothing behind.
+pub fn epoll_driver_submit(
+    inout d: EpollDriver,
+    fd: i32,
+    op: Operation,
+    in buffer: Slice[u8],
+    offset: u64,
+    token: u64,
+) -> Result[RequestId, u32] eff [Ffi[PulseSys]] {
+    if epoll_driver_pending(in d) >= d.capacity {
+        return Result::Err(io_error_queue_full());
+    }
+    if d.next == 18446744073709551615 {
+        return Result::Err(io_error_ids_exhausted());
+    }
+    let id = RequestId {
+        bits: d.next
+    };
+    let (flags, ferr) = PulseSys::fcntl(fd, PulseSys::F_GETFL, 0);
+    if flags < 0 {
+        return Result::Err(ferr);
+    }
+    let start = d.arena.len();
+    d.arena.extend(in buffer);
+    let r = IoRequest {
+        id: id,
+        fd: fd,
+        op: op,
+        offset: offset,
+        token: token,
+        start: start,
+        len: buffer.len(),
+    };
+    // Requests that can finish without readiness complete at the next
+    // poll: a readiness event for them might never arrive.
+    let mode = flags & PulseSys::O_ACCMODE;
+    let wrong = if is_read(op) {
+        mode == PulseSys::O_WRONLY
+    } else {
+        mode == PulseSys::O_RDONLY
+    };
+    if wrong || buffer.len() == 0 {
+        d.next = wrapping_add(d.next, 1);
+        let c = if wrong {
+            io_finish(r, false, 0, PulseSys::EBADF_ERR)
+        } else {
+            io_finish(r, true, 0, 0)
+        };
+        d.ready.push(c);
+        return Result::Ok(id);
+    }
+    let armed = epoll_arm(in d.poller, fd, op_interest(op), id.bits);
+    if armed.status == 2 {
+        d.arena.truncate(start);
+        return Result::Err(armed.errno);
+    }
+    if armed.status == 1 {
+        d.next = wrapping_add(d.next, 1);
+        let (ok, n, e) = io_positional(inout d, r);
+        d.ready.push(io_finish(r, ok, n, e));
+        return Result::Ok(id);
+    }
+    if offset != 0 {
+        // A stream has no position; refusing beats reading from somewhere
+        // other than the requested offset.
+        let _ = io_deregister(in d, fd);
+        d.arena.truncate(start);
+        return Result::Err(PulseSys::ESPIPE_ERR);
+    }
+    if (flags & PulseSys::O_NONBLOCK) == 0 {
+        let (rc, e) = PulseSys::fcntl(
+            fd,
+            PulseSys::F_SETFL,
+            widen_i64(flags | PulseSys::O_NONBLOCK)
+        );
+        if rc < 0 {
+            let _ = io_deregister(in d, fd);
+            d.arena.truncate(start);
+            return Result::Err(e);
+        }
+    }
+    d.next = wrapping_add(d.next, 1);
+    d.waiting.push(r);
+    Result::Ok(id)
+}
+
+// The index of waiting request `id`, or the waiting count.
+fn io_waiting_index(in d: EpollDriver, id: u64) -> u64 {
+    let n = d.waiting.len();
+    for i in 0..n {
+        if io_request_at(in d.waiting, i).id.bits == id {
+            return i;
+        }
+    }
+    n
+}
+
+// Remove waiting request `i`, keeping the rest in id order.
+fn io_remove_waiting(inout d: EpollDriver, i: u64) {
+    let n = d.waiting.len();
+    let last = wrapping_sub(n, 1);
+    for j in i..last {
+        let next = io_request_at(in d.waiting, wrapping_add(j, 1));
+        let _ok = d.waiting.try_set(j, next);
+    }
+    let _popped = d.waiting.pop();
+}
+
+// Cancel a waiting request: true when it was waiting (its cancelled
+// completion comes with the next poll), false when it is not; `Err` with
+// the errno when epoll refuses to forget it (it stays waiting).
+pub fn epoll_driver_cancel(inout d: EpollDriver, id: RequestId)
+    -> Result[bool, u32] eff [Ffi[PulseSys]] {
+    let i = io_waiting_index(in d, id.bits);
+    if i >= d.waiting.len() {
+        return Result::Ok(false);
+    }
+    let r = io_request_at(in d.waiting, i);
+    let e = io_deregister(in d, r.fd);
+    if e != 0 {
+        return Result::Err(e);
+    }
+    io_remove_waiting(inout d, i);
+    d.ready.push(io_finish(r, false, 0, PulseSys::ECANCELED_ERR));
+    Result::Ok(true)
+}
+
+// Cancel every waiting request, in id order, going on past failures: 0 or
+// the first error.
+pub fn epoll_driver_cancel_all(inout d: EpollDriver) -> u32 eff [Ffi[PulseSys]] {
+    let mut ids: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..d.waiting.len() {
+        ids.push(io_request_at(in d.waiting, i).id.bits);
+    }
+    let mut first: u32 = 0;
+    for i in 0..ids.len() {
+        let id = match ids.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let rid = RequestId {
+            bits: id
+        };
+        let r = epoll_driver_cancel(inout d, rid);
+        match r {
+            Result::Ok(_) => {},
+            Result::Err(e) => {
+                if first == 0 {
+                    first = e;
+                }
+            },
+        }
+    }
+    first
+}
+
+// Append the tokens of fired registrations to `fired`, at most 64; when
+// `block`, wait until one fires. `EINTR` is retried. 0 or the errno.
+fn io_wait(in d: EpollDriver, block: bool, inout fired: ChunkSeq[u64]) -> u32 eff [Ffi[PulseSys]] {
+    let mut timeout: i32 = if block {
+        -1
+    } else {
+        0
+    };
+    loop {
+        if fired.len() >= 64 {
+            return 0;
+        }
+        let mut ev = EpollEvent {
+            w0: 0,
+            w1: 0,
+            w2: 0,
+            w3: 0,
+        };
+        let (rc, err) = PulseSys::epoll_wait(d.poller.fd, inout ev, 1, timeout);
+        if rc < 0 {
+            if err == PulseSys::EINTR_ERR {
+                continue;
+            }
+            return err;
+        }
+        if rc == 0 {
+            return 0;
+        }
+        fired.push(epoll_event_token(ev));
+        timeout = 0;
+    }
+}
+
+// Perform one fired request. It always reaches `ready` or stays waiting;
+// an error here is a driver error, reported after the request itself has
+// been accounted for.
+fn io_service(inout d: EpollDriver, token: u64) -> u32 eff [Ffi[PulseSys]] {
+    let i = io_waiting_index(in d, token);
+    if i >= d.waiting.len() {
+        return io_error_unknown_event();
+    }
+    let r = io_request_at(in d.waiting, i);
+    let (ok, n, e) = io_streamed(inout d, r);
+    if !ok && e == PulseSys::EAGAIN_ERR {
+        let (rearmed, re) = epoll_rearm(in d.poller, r.fd, op_interest(r.op), r.id.bits);
+        if rearmed {
+            return 0;
+        }
+        io_remove_waiting(inout d, i);
+        d.ready.push(io_finish(r, false, 0, re));
+        return re;
+    }
+    io_remove_waiting(inout d, i);
+    let released = io_deregister(in d, r.fd);
+    d.ready.push(io_finish(r, ok, n, e));
+    released
+}
+
+// Collect what finished: fired registrations are serviced, then every
+// finished request is returned with its buffer. `wait` blocks until a
+// registered request fires when nothing is finished yet.
+pub fn epoll_driver_poll(inout d: EpollDriver, wait: bool) -> EpollPoll eff [Ffi[PulseSys]] {
+    let mut error: u32 = 0;
+    if d.waiting.len() > 0 {
+        let block = wait && d.ready.len() == 0;
+        let mut fired: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let we = io_wait(in d, block, inout fired);
+        if we != 0 {
+            error = we;
+        }
+        for k in 0..fired.len() {
+            let token = match fired.try_get(k) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            let se = io_service(inout d, token);
+            if se != 0 && error == 0 {
+                error = se;
+            }
+        }
+    }
+    let ready = replace(inout d.ready, ChunkSeq::new[IoCompletion]());
+    let mut completions: ChunkSeq[IoCompletion] = ChunkSeq::new[IoCompletion]();
+    let mut data: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for k in 0..ready.len() {
+        let mut c = io_completion_at(in ready, k);
+        let at = data.len();
+        data.extend(in d.arena[c.start..wrapping_add(c.start, c.len)]);
+        c.start = at;
+        completions.push(c);
+    }
+    io_compact(inout d);
+    EpollPoll {
+        completions: completions,
+        data: data,
+        error: error,
+    }
+}
+
+// Drop arena bytes no waiting request uses: all of them when none waits,
+// else rebuild once the arena is twice the live bytes.
+fn io_compact(inout d: EpollDriver) {
+    if d.waiting.len() == 0 && d.ready.len() == 0 {
+        d.arena.truncate(0);
+        return;
+    }
+    let mut live: u64 = 0;
+    for i in 0..d.waiting.len() {
+        live = wrapping_add(live, io_request_at(in d.waiting, i).len);
+    }
+    for i in 0..d.ready.len() {
+        live = wrapping_add(live, io_completion_at(in d.ready, i).len);
+    }
+    if d.arena.len() < wrapping_add(wrapping_mul(live, 2), 4096) {
+        return;
+    }
+    let mut arena: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..d.waiting.len() {
+        let mut r = io_request_at(in d.waiting, i);
+        let at = arena.len();
+        arena.extend(in d.arena[r.start..wrapping_add(r.start, r.len)]);
+        r.start = at;
+        let _ok = d.waiting.try_set(i, r);
+    }
+    for i in 0..d.ready.len() {
+        let mut c = io_completion_at(in d.ready, i);
+        let at = arena.len();
+        arena.extend(in d.arena[c.start..wrapping_add(c.start, c.len)]);
+        c.start = at;
+        let _ok = d.ready.try_set(i, c);
+    }
+    d.arena = arena;
+}
+
+// Forget every registration without completing it and close the epoll
+// instance: the requests abandoned (Rust's drop path).
+pub fn epoll_driver_close(in d: EpollDriver) -> u64 eff [Ffi[PulseSys]] {
+    for i in 0..d.waiting.len() {
+        let _ = io_deregister(in d, io_request_at(in d.waiting, i).fd);
+    }
+    let n = epoll_driver_pending(in d);
+    let _ = PulseSys::close(d.poller.fd);
+    n
+}

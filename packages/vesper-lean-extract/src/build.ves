@@ -45,6 +45,7 @@ pub const P_WILD: u64 = 0;
 pub const P_BIND: u64 = 1;
 pub const P_CTOR: u64 = 2;
 pub const P_TUPLE: u64 = 3;
+pub const P_NAT: u64 = 4;
 pub const P_BOOL: u64 = 5;
 pub const P_STRING: u64 = 6;
 pub const P_INT: u64 = 8;

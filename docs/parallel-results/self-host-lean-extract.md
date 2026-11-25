@@ -309,15 +309,65 @@ The structured extractor is under the 1.5x bar, including the effects
 part. The Rust code cannot be deleted yet: `extract_report` (ordering,
 fuel companions, contracts, the proof module) still runs in Rust only.
 
+## Part 3c: ordering, fuel companions, contracts, the proof module
+
+The entry `extract_module` builds the whole module `extract_report`
+builds, so the port now covers all of `src/lean.rs`, `src/lean_ir.rs` and
+`src/lean_nodes.rs`:
+
+- **Ordering** (`src/module.ves`): the definitions are read back out of the
+  word stream; `free_references_at`, `term_end` and `binders_end` (new in
+  `@vesper/lean-syntax`, binding regenerated) walk each body. Tarjan runs
+  over edges in Rust's `BTreeSet<Name>` order, so groups and members come
+  out in petgraph's order. Cyclic groups are `mutual` blocks of the
+  recursive kind; nullary `$block_*` definitions are `abbrev`, the others
+  `@[simp]`.
+- **Fuel companions** (`src/gen.ves`): for the recursive family, the
+  generator runs again with a `[VesperDiverge m] ($fuel : Nat)` prologue,
+  the `match $fuel` wrapper, and `f$fuel ($fuel := $fuel)` calls; a pure
+  closure or a value use of a family function is refused with Rust's
+  message. A companion that calls a function with no companion is dropped,
+  as in Rust. `Totality` comes out as `total`, `fuel` or `partial: reason`.
+- **Contracts** (`src/contract.ves`): predicate and signature checks in
+  Rust's order, `$contract` and `$admissible` propositions with `Fail`
+  capabilities (`MonadExcept.throw` on `Sum` injections), `inout` before
+  and after values, generics substituted by name.
+- **Proof module**: the executable definitions without the recursive
+  family, the companions as `noncomputable`, then the contracts; the
+  omitted names are sorted.
+
+### Differential
+
+`cargo test --release --test self_host_lean_extract modules_` (Linux
+x86-64):
+
+| Test | Cases | Differences |
+|---|--:|--:|
+| `modules_match_rust_on_the_corpus` | 363 worlds (7 with contracts, 26 contracts stated), 152 refused, 84 fuel companions; 23,239 lines | 0 |
+| `modules_match_rust_on_test_sources` | 197 programs and mutants (28 with contracts, 10 contracts stated), 73 refused | 0 |
+
+The rest of the suite still passes on the same corpus: head 0 of 363
+worlds, CFG 0 of 363 (288,024 lines), structured 0 of 363 (125,609
+lines).
+
+### Speed
+
+`CHECK_HARNESS_SPEED=1 cargo test --release --test self_host_lean_extract
+abba_module -- --ignored --nocapture`, ABBA over all 363 worlds.
+`extract_report` lowers the world itself, so the Vesper side runs
+`lower_world` too:
+
+| | Rust `extract_report` + render | Vesper `lower_world` + `extract_module` (optimized JIT) | Ratio |
+|---|--:|--:|--:|
+| Corpus modules | 4,925 ms | 4,622 ms | 0.94x |
+
+Lowering is most of both sides; `extract_module` alone is 657 ms. The
+test's word encoding (11.4 s) is harness-only and not counted: a Vesper
+front end hands the words over directly.
+
 ## What is left
 
-- **Part 3c: ordering, fuel companions, contracts.** `order_definitions`,
-  the recursive family and `$fuel` companions, `Totality`, `contracts`,
-  the proof module and `omitted_executable_definitions`. Then the full
-  module differential over the corpus and the sources of `tests/lean*.rs`.
 - **Verify and proof commands** (`src/verify_commands.rs`,
-  `src/proof_commands.rs`): the driver (#1367) and command routing
-  (#1372) have landed, so these port onto `@vesper/driver-commands`
-  after part 3c.
-- **Hybrid module `lean_extract`**: Rust has no extraction swap point yet;
-  it is added with the full port.
+  `src/proof_commands.rs`): port onto `@vesper/driver-commands`.
+- **Hybrid module `lean_extract`**: a swap point for `extract_report`,
+  then the Lean emit driver step, then deleting the Rust extractor.
