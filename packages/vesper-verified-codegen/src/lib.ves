@@ -1,0 +1,284 @@
+// @vesper/verified-codegen: the verified direct code generator of
+// src/verified_codegen in Vesper (#1886). Part 1 is the slot IR and the
+// instruction-selection table (machine.ves), the rows the Lean model in
+// lean/VerifiedCodegen.lean mirrors. Part 2 adds the assembler buffer
+// (asm.ves), the encoders (x86_64.ves, aarch64.ves, riscv64.ves) and the
+// containers (container.ves: ELF, Mach-O, COFF):
+// the back half of `verified_codegen::compile`, from the slot IR of every
+// function to the executable's bytes.
+//
+// Part 3 adds the range certificate of the slot IR and its validator
+// (certificate.ves).
+//
+// Harness entries (tests/self_host_verified_codegen.rs) take one `Str` of
+// little-endian words and return `pack_text`'s packing.
+
+use self::aarch64::{
+    emit as aarch64_emit,
+    exits as aarch64_exits,
+    start as aarch64_start
+};
+use self::asm::{
+    ERR_LIMIT,
+    ERR_NONE,
+    asm,
+    finish,
+    here,
+    last_exits
+};
+use self::certificate::{
+    check_input,
+    validate_input
+};
+use self::container::{
+    EM_AARCH64,
+    EM_RISCV,
+    EM_X86_64,
+    coff_object,
+    elf_executable,
+    macho_object
+};
+use self::machine::{
+    LIR_LOAD_PTR,
+    LIR_STORE_PTR,
+    Lir,
+    M,
+    put_selected,
+    select,
+    table_listing
+};
+use self::riscv64::{
+    emit as riscv64_emit,
+    exits as riscv64_exits,
+    start as riscv64_start
+};
+use self::x86_64::{
+    emit as x86_64_emit,
+    start as x86_64_start,
+    start_windows
+};
+
+// `Arch` and `Os` of the input.
+const ARCH_X86_64: u64 = 0;
+const ARCH_AARCH64: u64 = 1;
+const ARCH_RISCV64: u64 = 2;
+const OS_LINUX: u64 = 0;
+const OS_MACOS: u64 = 1;
+const OS_WINDOWS: u64 = 2;
+// AArch64 conditional branches and RV64 `jal` reach 1 MiB either way: a
+// function that ends further than this past the last abort exits is
+// followed by another copy of them (src/verified_codegen.rs).
+const EXIT_SPACING: u64 = 262144;
+// `build_words` statuses: built, `Invalid`, `Limit`, or a target error
+// (a pair the Rust backend refuses, or regions off Linux).
+const BUILD_UNSUPPORTED: u64 = 3;
+
+fn word_at(in b: Slice[u8], i: u64) -> u64 {
+    match b.try_read_u64_le(wrapping_mul(i, 8)) {
+        Option::Some(w) => w,
+        Option::None => 0,
+    }
+}
+
+// `text` packed little-endian eight bytes per word after one header word,
+// its byte length (`pack_text` of @vesper/check-data).
+pub fn pack_text(in text: ChunkSeq[u8]) -> ChunkSeq[u64] {
+    let n = text.len();
+    let mut out = ChunkSeq::with_capacity[u64](wrapping_add(n >> 3, 2));
+    out.push(n);
+    let mut x: u64 = 0;
+    let mut k: u32 = 0;
+    for i in 0..n {
+        let b = match text.try_get(i) {
+            Option::Some(c) => widen_u64(c),
+            Option::None => 0,
+        };
+        x = x | wrapping_shl_u64(b, wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == 8 {
+            out.push(x);
+            x = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        out.push(x);
+    }
+    out
+}
+
+// `table_listing` (the input is ignored).
+pub fn table_listing_text(in input: Str) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u8]();
+    table_listing(inout out);
+    pack_text(in out)
+}
+
+fn read_row(in b: Slice[u8], at: u64) -> Lir {
+    let head = word_at(in b, at);
+    Lir {
+        tag: wrapping_u8(head & 255),
+        op: wrapping_u8((head >> 8) & 255),
+        kind: wrapping_u8((head >> 16) & 255),
+        f1: word_at(in b, wrapping_add(at, 1)),
+        f2: word_at(in b, wrapping_add(at, 2)),
+        f3: word_at(in b, wrapping_add(at, 3))
+    }
+}
+
+// The back half of `compile`: the input is the target's arch and os, the
+// result protocol, the entry's result word count, the entry's label, the
+// code-byte limit and the function count, then each function's row count
+// and rows (four words a row, as `select_text` reads them). The output is
+// the status word, the byte count, then the bytes eight per word.
+pub fn build_words(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let arch = word_at(in b, 0);
+    let os = word_at(in b, 1);
+    let protocol = wrapping_u8(word_at(in b, 2));
+    let result_words = wrapping_u32(word_at(in b, 3));
+    let entry = word_at(in b, 4);
+    let max_code = word_at(in b, 5);
+    let nfun = word_at(in b, 6);
+    let mut out = ChunkSeq::new[u64]();
+    let supported = (arch == ARCH_X86_64 && (os == OS_LINUX || os == OS_WINDOWS))
+        || (arch == ARCH_AARCH64 && (os == OS_LINUX || os == OS_MACOS))
+        || (arch == ARCH_RISCV64 && os == OS_LINUX);
+    if !supported {
+        out.push(BUILD_UNSUPPORTED);
+        out.push(0);
+        return out;
+    }
+    // Region payloads need the program heap (an ELF zero-fill segment).
+    let mut heap = false;
+    let mut at: u64 = 7;
+    for f in 0..nfun {
+        let n = word_at(in b, at);
+        at = wrapping_add(at, 1);
+        for i in 0..n {
+            let r = read_row(in b, wrapping_add(at, wrapping_mul(i, 4)));
+            if r.tag == LIR_LOAD_PTR || r.tag == LIR_STORE_PTR {
+                heap = true;
+            }
+        }
+        at = wrapping_add(at, wrapping_mul(n, 4));
+    }
+    // Region payloads need the heap, which only the Linux ELF maps.
+    if heap && os != OS_LINUX {
+        out.push(BUILD_UNSUPPORTED);
+        out.push(0);
+        return out;
+    }
+    let mut a = asm();
+    a.windows = os == OS_WINDOWS;
+    let mut main: u64 = 0;
+    if a.windows {
+        main = start_windows(inout a, protocol, result_words, entry);
+    } else if arch == ARCH_X86_64 {
+        x86_64_start(inout a, protocol, result_words, entry);
+    } else if arch == ARCH_AARCH64 {
+        aarch64_start(inout a, os, protocol, result_words, entry);
+    } else {
+        riscv64_start(inout a, protocol, result_words, entry);
+    }
+    let mut ms = ChunkSeq::new[M]();
+    at = 7;
+    for f in 0..nfun {
+        let n = word_at(in b, at);
+        at = wrapping_add(at, 1);
+        for i in 0..n {
+            let r = read_row(in b, wrapping_add(at, wrapping_mul(i, 4)));
+            ms.clear();
+            select(in r, inout ms);
+            for j in 0..ms.len() {
+                match ms.try_get(j) {
+                    Option::Some(m) => {
+                        if arch == ARCH_X86_64 {
+                            x86_64_emit(inout a, in m);
+                        } else if arch == ARCH_AARCH64 {
+                            aarch64_emit(inout a, in m);
+                        } else {
+                            riscv64_emit(inout a, in m);
+                        }
+                    }
+                    Option::None => {}
+                }
+            }
+            if a.err != ERR_NONE {
+                out.push(widen_u64(a.err));
+                out.push(0);
+                return out;
+            }
+            if here(in a) > max_code {
+                out.push(widen_u64(ERR_LIMIT));
+                out.push(0);
+                return out;
+            }
+        }
+        at = wrapping_add(at, wrapping_mul(n, 4));
+        if wrapping_sub(here(in a), last_exits(in a)) > EXIT_SPACING {
+            if arch == ARCH_AARCH64 {
+                aarch64_exits(inout a, os);
+            } else if arch == ARCH_RISCV64 {
+                riscv64_exits(inout a);
+            }
+        }
+    }
+    finish(inout a);
+    if a.err != ERR_NONE {
+        out.push(widen_u64(a.err));
+        out.push(0);
+        return out;
+    }
+    let mut file = ChunkSeq::new[u8]();
+    if a.windows {
+        coff_object(in a.code, main, in a.prologues, in a.externals, inout file);
+    } else if arch == ARCH_X86_64 {
+        elf_executable(EM_X86_64, in a.code, heap, inout file);
+    } else if arch == ARCH_RISCV64 {
+        elf_executable(EM_RISCV, in a.code, heap, inout file);
+    } else if os == OS_MACOS {
+        macho_object(in a.code, inout file);
+    } else {
+        elf_executable(EM_AARCH64, in a.code, heap, inout file);
+    }
+    out.push(0);
+    let packed = pack_text(in file);
+    for i in 0..packed.len() {
+        match packed.try_get(i) {
+            Option::Some(w) => out.push(w),
+            Option::None => {}
+        }
+    }
+    out
+}
+
+// The selection of every row the input encodes: a row count, then four
+// words a row (`tag | op << 8 | kind << 16`, then `f1`, `f2`, `f3`). One
+// `<m>; <m>; ...` line a row.
+pub fn select_text(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let n = word_at(in b, 0);
+    let mut out = ChunkSeq::new[u8]();
+    for i in 0..n {
+        let r = read_row(in b, wrapping_add(wrapping_mul(i, 4), 1));
+        put_selected(inout out, in r);
+        out.push(10);
+    }
+    pack_text(in out)
+}
+
+// `certificate::check` of the program in `input` (`check_input`).
+pub fn certificate_text(in input: Str) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u8]();
+    check_input(in input.as_bytes(), inout out);
+    pack_text(in out)
+}
+
+// `certificate::validate` of the program and certificate in `input`
+// (`validate_input`).
+pub fn validate_text(in input: Str) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u8]();
+    validate_input(in input.as_bytes(), inout out);
+    pack_text(in out)
+}
