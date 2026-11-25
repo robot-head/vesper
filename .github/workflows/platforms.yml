@@ -395,10 +395,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.plan.outputs.sha }}
+      - uses: ./.github/actions/aspect
       - name: Verify exact checkout
         env:
           EXPECTED_SHA: ${{ needs.plan.outputs.sha }}
-        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+        run: aspect ci verify-platform-checkout
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
