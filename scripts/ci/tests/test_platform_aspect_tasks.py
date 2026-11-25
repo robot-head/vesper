@@ -95,7 +95,7 @@ print("child stderr", file=sys.stderr)
         for task, path, shell in (
             (("fixture", "resource-oracle42", "bye-eof-stall"),
              "crates/vesper-oracles/tests/fixtures/resource_oracle42/bye_eof_stall.sh", "sh"),
-            (("ci", "reclaim-disk"), "scripts/ci/reclaim-disk.sh", "bash"),
+            (("bootstrap", "run"), "bootstrap/run.sh", "bash"),
         ):
             with self.subTest(task=task):
                 self.write(path, 'printf "%s|%s\\n" "$VESPER_TASK_TEST_SHELL" "$1"\n')
@@ -861,9 +861,144 @@ else:
                 self.assertFalse(Path((self.root / "scratch").read_text()).exists())
                 self.assertEqual("9600 scalar-reference comparisons passed" in result.stdout, status == 0)
 
+    def test_native_disk_cleanup_preserves_ownership_depth_and_symlink_targets(self):
+        outside = self.write("outside/keep", "outside scratch")
+        keep = [self.write("vesper-tmp scratch/unrelated/stage1-nested/keep", "nested"),
+                self.write("vesper-tmp scratch/keep", "unrelated")]
+        if os.geteuid() == 0:
+            foreign = self.write("vesper-tmp scratch/vesper-foreign", "foreign")
+            os.chown(foreign, 65534, -1)
+            keep.append(foreign)
+        purge = [self.write(f"vesper-tmp scratch/{name}/artifact", "stale").parent for name in (
+            "vesper-check", "stage1-test", "blake3-case", "native-probe", ".tmp fixture",
+        )]
+        link = self.root / "vesper-tmp scratch/vesper-symlink"
+        link.symlink_to(outside.parent, target_is_directory=True)
+        find = shutil.which("find")
+        self.write("bin/find", f"""\
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+args = sys.argv[1:]
+if args[1:7] == ["-mindepth", "1", "-maxdepth", "1", "-user", str(os.getuid())]:
+    Path("cleanup-ownership-verified").touch()
+os.execv({find!r}, [{find!r}, *args])
+""", executable=True)
+        self.write("bin/df", """\
+#!/usr/bin/env python3
+import sys
+if sys.argv[1:] == ["-Pk", "."]:
+    print("header")
+    print("/dev/fake 0 100 10485759 99% /")
+else:
+    assert sys.argv[1] == "-h" and sys.argv[2] == "." and sys.argv[3].endswith("tmp scratch")
+    print("disk output")
+    print("disk output")
+""", executable=True)
+        self.write("bin/bazel", """\
+#!/usr/bin/env python3
+from pathlib import Path
+import sys
+with Path("bazel.log").open("a") as log:
+    log.write(" ".join(sys.argv[1:]) + "\\n")
+if sys.argv[1:] == ["info", "output_base"]:
+    print("bazel output directory")
+if sys.argv[1:] == ["clean"]:
+    sys.exit(23)
+""", executable=True)
+        self.write("bin/du", "#!/usr/bin/env python3\nimport sys\nprint(repr(sys.argv[1:]))\n", executable=True)
+        command = ("ci", "reclaim-disk")
+        env = {"PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]]),
+               "TMPDIR": "vesper-tmp scratch", "VESPER_CI_MIN_FREE_GB": "9"}
+        self.aspect(*command, "--", "invalid", env=env, status=2)
+        report = self.aspect(*command, "--", "report", env=env)
+        self.assertEqual(report.stdout.count("disk output\n"), 1)
+        self.assertIn("bazel output directory", report.stdout)
+        self.assertTrue(all(path.exists() for path in purge))
+        log = self.root / "bazel.log"
+        self.assertEqual(log.read_text().splitlines(), ["info output_base"])
+        log.unlink()
+        self.aspect(*command, env=env)
+        self.assertTrue((self.root / "cleanup-ownership-verified").is_file())
+        self.assertTrue(all(path.exists() for path in [outside, *keep]))
+        self.assertTrue(all(not path.exists() for path in purge))
+        self.assertFalse(link.is_symlink())
+        self.assertEqual(log.read_text().splitlines(), ["info output_base", "info output_base"])
+        log.unlink()
+        result = self.aspect(*command, env={**env, "VESPER_CI_MIN_FREE_GB": ""})
+        self.assertIn("9 GB free, below 20 GB", result.stdout)
+        self.assertEqual(log.read_text().splitlines(), ["info output_base", "clean", "info output_base"])
+        self.assertLess(result.stdout.index("before cleanup"), result.stdout.index("after cleanup"))
+
+    def test_native_disk_watch_and_bazel_lane_preserve_status_and_lean(self):
+        self.write(".ci-lean-path", "/actual lean/bin/lean\r\n")
+        self.write("bin/df", """\
+#!/usr/bin/env python3
+import sys
+if sys.argv[1] == "-Pk":
+    print("header")
+    print("/dev/fake 0 500 12582912 0% /")
+else:
+    print("report")
+""", executable=True)
+        self.write("bin/sleep", """\
+#!/usr/bin/env python3
+from pathlib import Path
+import sys
+assert sys.argv[1:] == ["120"]
+if Path("slept").exists():
+    sys.exit(22)
+Path("slept").touch()
+""", executable=True)
+        env = {"PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]])}
+        watch = self.aspect("ci", "reclaim-disk", "--", "watch", env=env, status=22)
+        self.assertRegex(watch.stdout, r"reclaim-disk: \d\d:\d\d:\d\d 12 GB free")
+        (self.root / "slept").unlink()
+        self.write("bin/bazel", """\
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+import time
+if sys.argv[1] == "test":
+    assert sys.argv[2:] == ["--config=ci", "//:target name"]
+    assert os.environ["VESPER_LEAN"] == "/actual lean/bin/lean"
+    for _ in range(300):
+        if Path("slept").exists():
+            break
+        time.sleep(0.01)
+    assert Path("slept").exists()
+    print("Bazel test")
+    sys.exit(37)
+assert sys.argv[1:] == ["info", "output_base"]
+sys.exit(1)
+""", executable=True)
+        self.write("bin/du", "#!/usr/bin/env python3\nraise SystemExit(124)\n", executable=True)
+        args = ("ci", "bazel-tests", "--", "--config=ci", "//:target name")
+        result = self.aspect(*args, env=env, status=37)
+        self.assertLess(result.stdout.index("Bazel test"), result.stdout.index("reclaim-disk: disk use"))
+        self.write(".ci-lean-path", "\n")
+        self.assertIn("Lean executable path is required", self.aspect(*args, env=env, status=1).stderr)
+
+    def test_format_proof_uses_the_ci_lean_path_when_available(self):
+        self.write("scripts/check-format-proof.py", "import os\nprint(os.getenv('VESPER_LEAN', 'missing'))\n")
+        self.write("bin/vesper", "")
+        env = {"VESPER_FORMAT_PROOF_BINARY": "bin/vesper", "VESPER_LEAN": "",
+               "PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]])}
+        (self.root / "bin/python").symlink_to(shutil.which("python3"))
+        command = ("acceptance", "test-format-proof")
+        self.assertEqual(self.aspect(*command, env=env).stdout.strip(), "")
+        self.write(".ci-lean-path", "/installed lean/bin/lean\r\n")
+        self.assertEqual(self.aspect(*command, env=env).stdout.strip(), "/installed lean/bin/lean")
+        self.assertEqual(self.aspect(*command, env={**env, "VESPER_LEAN": "/explicit/lean"}).stdout.strip(),
+                         "/explicit/lean")
+
     def test_native_lean_replay_preserves_scope_and_cleans_up_on_failure(self):
         (self.root / ".aspect/ci.axl").unlink()
         (self.root / ".aspect/lean-ci.axl").unlink()
+        disk_task = self.root / ".aspect/disk-ci.axl"
+        disk_task.write_text(disk_task.read_text().replace('kind = "reclaim-disk"', 'kind = "unused-reclaim-disk"'))
         self.write(".aspect/replay-fixture.axl", """
 def _scope(ctx):
     if ctx.std.env.var("VESPER_TEST_REPLAY_MODE") == "skip":

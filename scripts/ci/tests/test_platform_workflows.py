@@ -82,6 +82,41 @@ class PlatformWorkflowTests(unittest.TestCase):
             self.assertIn("--test drivers", commands)
             self.assertIn("--test pool", commands)
 
+    def test_buildbuddy_reclaims_disk_and_runs_bazel_via_aspect(self):
+        config = yaml.load((ROOT / "buildbuddy.yaml").read_text(), Loader=yaml.BaseLoader)
+        launcher = "./.git/vesper-aspect/aspect"
+        checksum = (ROOT / ".aspect/launcher-linux-x86_64.sha256").read_text().split()
+        self.assertEqual(checksum[1:], [launcher])
+        self.assertRegex(checksum[0], r"^[a-f0-9]{64}$")
+        lanes = {
+            "Test all targets": "--test_tag_filters=-lean_replay,-self_host",
+            "Self-host differentials": "--test_tag_filters=self_host,-self_host_codegen,-lean_replay",
+            "Self-host codegen differentials": "--test_tag_filters=self_host_codegen,-lean_replay",
+            "Native and acceptance scripts": "",
+        }
+        self.assertCountEqual([action["name"] for action in config["actions"]], lanes.keys())
+        for action in config["actions"]:
+            with self.subTest(action=action["name"]):
+                steps = [step["run"] for step in action["steps"]]
+                self.assertTrue(all("\n" not in step for step in steps))
+                self.assertEqual(steps[0], "mkdir -p ./.git/vesper-aspect")
+                self.assertTrue(steps[1].startswith("curl --fail "))
+                self.assertTrue(steps[1].endswith(f" -o {launcher}"))
+                self.assertEqual(steps[2:5], [
+                    "sha256sum --check .aspect/launcher-linux-x86_64.sha256",
+                    f"chmod +x {launcher}", f"{launcher} ci reclaim-disk",
+                ])
+                lane = lanes[action["name"]]
+                if lane:
+                    [tests] = [step for step in steps if step.startswith(f"{launcher} ci bazel-tests -- ")]
+                    self.assertIn("--config=ci --config=rbe_build --config=ci_tests", tests)
+                    self.assertIn("--remote_download_outputs=minimal", tests)
+                    self.assertIn(lane, tests.split())
+                    self.assertTrue(tests.endswith(" //..."))
+                    self.assertLess(steps.index(f"{launcher} ci install-lean"), steps.index(tests))
+                else:
+                    self.assertIn(f"{launcher} acceptance test-format-proof", steps)
+
     def test_port_harness_runs_once_on_linux(self):
         # macOS and Windows run only the export ABI tier; the ported crates
         # are platform-neutral and run once in the Linux job (#1010).

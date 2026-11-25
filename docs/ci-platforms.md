@@ -137,8 +137,8 @@ fails the corresponding required check.
 BuildBuddy reuses workflow runners between runs, disk included. Tests write
 their scratch roots under `/tmp` (Bazel sets no `TMPDIR` for tests), and the
 replay job builds the Logos42 checker there. A killed or failed run can
-leave those files behind. Both BuildBuddy actions start with
-`scripts/ci/reclaim-disk.sh`, which removes earlier runs' temporary files
+leave those files behind. Each BuildBuddy action runs
+`aspect ci reclaim-disk`, which removes earlier runs' temporary files
 and runs `bazel clean` when less than 20 GB is free. The Bazel test steps log
 free space every two minutes. The replay step removes its temporary
 checker when it exits.

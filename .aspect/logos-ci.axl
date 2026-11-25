@@ -2,6 +2,7 @@
 
 load("./lib/bazel_exec.axl", "executable")
 load("./lib/process.axl", "capture", "check", "command", "exit_code", "root_path")
+load("./disk-ci.axl", "start_disk_watcher")
 
 _LOGOS_DRIVER = "//crates/vesper-oracles:bin/logos42"
 
@@ -121,11 +122,6 @@ replay_logos_models = task(
 
 _REPLAY_QUERY = 'attr(tags, "(^|[^a-zA-Z0-9_-])lean_replay([^a-zA-Z0-9_-]|$)", tests(//...))'
 
-def _stop_watcher(child):
-    if child.try_wait() == None:
-        child.kill()
-        child.wait()
-
 def _replay(ctx: TaskContext) -> int:
     root = ctx.std.env.aspect_root_dir()
     aspect = ctx.std.env.current_exe()
@@ -146,8 +142,7 @@ def _replay(ctx: TaskContext) -> int:
         "VESPER_CARGO": ctx.std.fs.read_to_string(root + "/.ci-logos-cargo-path").rstrip("\n"),
         "VESPER_LOGOS42_ROOT": checker,
     }
-    watcher = command(ctx, aspect, ["ci", "reclaim-disk", "--", "watch"], root, env).process_group(0).spawn()
-    ctx.defer(lambda: _stop_watcher(watcher))
+    start_disk_watcher(ctx, root)
     check(ctx, aspect, ["ci", "prepare-logos42", "--", checker], root, env)
     check(ctx, "bazel", ["test", "--config=ci", "--config=rbe_build", "--config=ci_tests"] + labels, root, env)
     return 0
