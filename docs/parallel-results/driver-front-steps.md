@@ -57,11 +57,47 @@ So `ReportSyntax` stays in the session for now.
 - Rust lines deleted: none yet. The session's `Parse`/`EmitCst` code stays
   for the fallbacks above.
 
+## Slice 3a: EmitInterface
+
+`vesper emit --emit interface` now runs the source-contract export of
+`src/interface.rs` in Vesper (`crates/vesper-hybrid/modules/driver/src/interface.ves`).
+The session still holds the checked world, so its `EmitInterface` step only
+resolves and validates the package name and encodes the world's
+declarations as a byte stream (`interface_words` in `src/driver/front.rs`:
+LEB128 numbers and length-prefixed texts; ADTs with their nominal mode,
+effects, traits, conformances and the non-generated functions). The driver
+builds the `vesper_semver::Interface` JSON from it: ids with builtins under
+`std/core`, type and mode lowering, capability identities (the effect id
+and the compact JSON of its arguments), `BTreeMap`/`BTreeSet` order with
+last-wins keys, the `unsupported` cases, and serde_json's pretty printer and
+string escapes. A new step, `InterfaceWrite` (40), takes the JSON and writes
+it to `-o` atomically or to stdout.
+
+### Results
+
+- Differential (`interface_export_matches_the_default_compiler` in
+  `crates/vesper-hybrid/tests/driver_front.rs`): every checkable source in
+  `examples/` and `tests/` with `--package @t/x`, every package directory
+  in `packages/` and `crates/*/vesper/` (99 of them export, the rest fail
+  to check and must fail the same way), three sources for generics,
+  effects and arrows, to stdout and to `-o`, plus the missing and malformed
+  package-name errors. **`interface differential differences=0 cases=1351`**
+  (before the `-o` cases were trimmed to one package).
+- Speed, ABBA (20 epochs, release, this host), hybrid over the default
+  compiler:
+  - `emit --emit interface packages/vesper-std/toml` (198 KB of JSON):
+    median **0.64x** (95% CI 0.59..0.65).
+  - `emit --emit interface --package @t/x examples/counter.ves`: 1.09x
+    (1.03..1.12), process startup as in slice 1.
+- Rust lines: the hybrid's JSON export (`interface::export` and
+  `serde_json::to_vec_pretty`) is no longer called from the driver; the
+  world encoder adds about 200 lines that go away once the checked world is
+  held in Vesper. `src/interface.rs` stays for the default compiler until
+  Stage 2.
+
 ## Next
 
 - Slice 2: `EmitHir` from the Vesper AST (serde's pretty JSON of
   `ast::Module`).
-- Slice 3: `Check` through the Vesper `check::check` orchestration
-  (`fn check(inout s: Session)` of the driver module, #1900), then
-  `EmitInterface` and `LibBuild` over the world it leaves in the session.
+- Slice 3b: `LibBuild`'s orchestration over the world the session keeps.
 - `ReportSyntax` and the fallbacks follow the source-sugar and Forge ports.

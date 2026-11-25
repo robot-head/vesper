@@ -1,5 +1,6 @@
-// @vesper-std/fs's import (self-hosting SH0 lane 3, #1125). The functions
-// are the C-ABI host shim in crates/vesper-std-host (src/fs.rs). `@TARGET@`
+// @vesper-std/fs's import on wasm32-wasip2 (self-hosting SH0 lane 3, #1125).
+// The wasm backend lowers these functions to WASI 0.2 (its host.ves);
+// tests/common/vstd_fs_oracle.rs is the native reference. `@TARGET@`
 // and `@ABI@` stand for the object target, as in `// @export vsys`.
 // Errors come back through `err`: the IoError kind in the low 8 bits and
 // the raw OS error in the high 32.

@@ -1,6 +1,6 @@
 // @vesper-std/fs: files and directories (self-hosting SH0 lane 3, #1125),
-// over the `.vsys` library `StdFs` (fs.vsys; the host side is
-// crates/vesper-std-host). Every operation performs `Ffi[StdFs]` and
+// over the `.vsys` library `StdFs` (fs-wasip2-wasm32.vsys, lowered to WASI
+// by the wasm backend). Every operation performs `Ffi[StdFs]` and
 // raises `Fail[IoError]` when the OS refuses it. Files are linear handles
 // inside this package: each public function opens and closes its own, so
 // none escapes and every path closes it exactly once.

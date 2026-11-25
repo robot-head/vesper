@@ -4,31 +4,29 @@
 impl WheelCore {
     // Place a detached entry relative to the cursor.
     fn place(inout self, index: u64) {
-        let tick = at(in self.e_tick, index);
+        let tick = at(in self.e, ix(index, 1));
         if tick < self.cursor {
             self.insert_ready_sorted(index);
             return;
         }
         let diff = tick ^ self.cursor;
-        // The level is `(63 - leading_zeros(diff)) / slot_bits`: the first
-        // level whose span `2^((level + 1) * slot_bits)` exceeds `diff`, or
-        // `levels` (overflow) when none does. Comparing against the
-        // precomputed spans needs no bit scan, shift or division.
-        let mut level: u64 = 0;
-        loop {
-            if level >= self.levels || diff < at(in self.l_span, level) {
-                break;
-            }
-            level = wrapping_add(level, 1);
-        }
+        // The level is `(63 - leading_zeros(diff)) / slot_bits` (0 for
+        // `diff == 0`), or `levels` (overflow) past the last level, read
+        // from the precomputed table. `diff | 1` has the same highest bit
+        // for a non-zero `diff`, and bit 0 (level 0) for zero.
+        let top = wrapping_sub(63, widen_u64(leading_zeros_u64(diff | 1)));
+        let level = at(in self.level_of_bit, top);
         // One `push_back` call site, so the inliner takes it.
         let list = if level >= self.levels {
             self.overflow_min_tick = min(self.overflow_min_tick, tick);
             self.overflow_list()
         } else {
-            let slot = shr(tick, wrapping_mul(level, self.slot_bits)) & self.slot_mask();
+            // level * slot_bits < levels * slot_bits <= 63, and
+            // slot < slots <= 2^MAX_SLOT_BITS <= 64.
+            let low = wrapping_u32(wrapping_mul(level, self.slot_bits));
+            let slot = wrapping_shr_u64(tick, low) & self.slot_mask();
             let bits = at(in self.occupied, level);
-            self.occupied.try_set(level, bits | shl(1, slot));
+            self.occupied.try_set(level, bits | wrapping_shl_u64(1, wrapping_u32(slot)));
             wrapping_add(wrapping_mul(level, self.slots), slot)
         };
         self.push_back(list, index);
@@ -36,30 +34,30 @@ impl WheelCore {
 
     fn push_back(inout self, list: u64, index: u64) {
         let tail = self.tail_of(list);
-        self.e_prev.try_set(index, tail);
-        self.e_next.try_set(index, nil());
-        self.e_list.try_set(index, list);
+        self.e.try_set(ix(index, 4), tail);
+        self.e.try_set(ix(index, 5), nil());
+        self.e.try_set(ix(index, 6), list);
         if tail == nil() {
-            self.l_head.try_set(list, index);
+            self.l.try_set(lx(list, 0), index);
         } else {
-            self.e_next.try_set(tail, index);
+            self.e.try_set(ix(tail, 5), index);
         }
-        self.l_tail.try_set(list, index);
+        self.l.try_set(lx(list, 1), index);
     }
 
     fn unlink(inout self, index: u64) {
         let prev = self.prev_of(index);
         let next = self.next_of(index);
-        let list = at(in self.e_list, index);
+        let list = at(in self.e, ix(index, 6));
         if prev == nil() {
-            self.l_head.try_set(list, next);
+            self.l.try_set(lx(list, 0), next);
         } else {
-            self.e_next.try_set(prev, next);
+            self.e.try_set(ix(prev, 5), next);
         }
         if next == nil() {
-            self.l_tail.try_set(list, prev);
+            self.l.try_set(lx(list, 1), prev);
         } else {
-            self.e_prev.try_set(next, prev);
+            self.e.try_set(ix(next, 4), prev);
         }
         if self.head_of(list) == nil() {
             if list < self.overflow_list() {
@@ -68,15 +66,15 @@ impl WheelCore {
                 self.overflow_min_tick = u64_max();
             }
         }
-        self.e_prev.try_set(index, nil());
-        self.e_next.try_set(index, nil());
+        self.e.try_set(ix(index, 4), nil());
+        self.e.try_set(ix(index, 5), nil());
     }
 
     // Detach a whole list, returning its head (entries keep `next` links).
     fn take_list(inout self, list: u64) -> u64 {
         let head = self.head_of(list);
-        self.l_head.try_set(list, nil());
-        self.l_tail.try_set(list, nil());
+        self.l.try_set(lx(list, 0), nil());
+        self.l.try_set(lx(list, 1), nil());
         self.clear_occupied(list);
         head
     }
@@ -99,18 +97,18 @@ impl WheelCore {
         } else {
             self.next_of(after)
         };
-        self.e_prev.try_set(index, after);
-        self.e_next.try_set(index, next);
-        self.e_list.try_set(index, list);
+        self.e.try_set(ix(index, 4), after);
+        self.e.try_set(ix(index, 5), next);
+        self.e.try_set(ix(index, 6), list);
         if after == nil() {
-            self.l_head.try_set(list, index);
+            self.l.try_set(lx(list, 0), index);
         } else {
-            self.e_next.try_set(after, index);
+            self.e.try_set(ix(after, 5), index);
         }
         if next == nil() {
-            self.l_tail.try_set(list, index);
+            self.l.try_set(lx(list, 1), index);
         } else {
-            self.e_prev.try_set(next, index);
+            self.e.try_set(ix(next, 4), index);
         }
     }
 
@@ -126,12 +124,12 @@ impl WheelCore {
                 let low = wrapping_mul(level, self.slot_bits);
                 // rotation <= 63 by the configuration check.
                 let rotation = wrapping_add(low, self.slot_bits);
-                let position = shr(c, low) & self.slot_mask();
-                let base = shl(shr(c, rotation), rotation);
-                let ahead = bitmap & shl(u64_max(), position);
+                let position = shr_in(c, low) & self.slot_mask();
+                let base = shl_in(shr_in(c, rotation), rotation);
+                let ahead = bitmap & shl_in(u64_max(), position);
                 if ahead != 0 {
                     let slot = self.low_bit(ahead);
-                    let t = max(wrapping_add(base, shl(slot, low)), c);
+                    let t = max(wrapping_add(base, shl_in(slot, low)), c);
                     if !found || t < best {
                         best = t;
                         found = true;
@@ -141,9 +139,9 @@ impl WheelCore {
                     // slots are never behind the cursor); handled
                     // conservatively, as the Rust build does.
                     let slot = self.low_bit(bitmap);
-                    let block = wrapping_add(base, shl(1, rotation));
+                    let block = wrapping_add(base, shl_in(1, rotation));
                     if block >= base {
-                        let t = wrapping_add(block, shl(slot, low));
+                        let t = wrapping_add(block, shl_in(slot, low));
                         if t >= block {
                             if !found || t < best {
                                 best = t;
@@ -156,7 +154,7 @@ impl WheelCore {
         }
         if self.head_of(self.overflow_list()) != nil() {
             let span = wrapping_mul(self.levels, self.slot_bits);
-            let block = shl(shr(self.overflow_min_tick, span), span);
+            let block = shl_in(shr_in(self.overflow_min_tick, span), span);
             let t = max(block, c);
             if !found || t < best {
                 best = t;
@@ -190,7 +188,7 @@ impl WheelCore {
         let overflow = self.overflow_list();
         if self.head_of(overflow) != nil() {
             let span = wrapping_mul(self.levels, self.slot_bits);
-            if c >= shl(shr(self.overflow_min_tick, span), span) {
+            if c >= shl_in(shr_in(self.overflow_min_tick, span), span) {
                 self.overflow_min_tick = u64_max();
                 let head = self.take_list(overflow);
                 self.replace_chain(head);
@@ -202,8 +200,8 @@ impl WheelCore {
                 break;
             }
             let low = wrapping_mul(level, self.slot_bits);
-            if c & wrapping_sub(shl(1, low), 1) == 0 {
-                let slot = shr(c, low) & self.slot_mask();
+            if c & wrapping_sub(shl_in(1, low), 1) == 0 {
+                let slot = shr_in(c, low) & self.slot_mask();
                 let list = wrapping_add(wrapping_mul(level, self.slots), slot);
                 let head = self.take_list(list);
                 self.replace_chain(head);
@@ -226,22 +224,26 @@ impl WheelCore {
             if cur == nil() {
                 break;
             }
-            self.e_prev.try_set(cur, prev);
-            self.e_list.try_set(cur, ready);
+            self.e.try_set(ix(cur, 4), prev);
+            self.e.try_set(ix(cur, 6), ready);
             prev = cur;
             cur = self.next_of(cur);
         }
         if ready_tail == nil() {
-            self.l_head.try_set(ready, head);
+            self.l.try_set(lx(ready, 0), head);
         } else {
-            self.e_next.try_set(ready_tail, head);
+            self.e.try_set(ix(ready_tail, 5), head);
         }
-        self.l_tail.try_set(ready, tail);
+        self.l.try_set(lx(ready, 1), tail);
     }
 
     // Stable bottom-up merge sort of a `next`-linked chain by
     // `(deadline, sequence)`, in place. Returns `(head, tail)`.
     fn sort_chain(inout self, head: u64) -> (u64, u64) {
+        // A one-entry chain (most level-0 slots) is already sorted.
+        if self.next_of(head) == nil() {
+            return (head, head);
+        }
         let mut list = head;
         let mut width: u64 = 1;
         loop {
@@ -289,13 +291,13 @@ impl WheelCore {
                     if tail == nil() {
                         list = e;
                     } else {
-                        self.e_next.try_set(tail, e);
+                        self.e.try_set(ix(tail, 5), e);
                     }
                     tail = e;
                 }
                 p = q;
             }
-            self.e_next.try_set(tail, nil());
+            self.e.try_set(ix(tail, 5), nil());
             if merges <= 1 {
                 break(list, tail);
             }
