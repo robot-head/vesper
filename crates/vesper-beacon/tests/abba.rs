@@ -14,7 +14,7 @@
 
 use std::hint::black_box;
 
-use vesper_bench::{analyze_pairs, run_abba, BenchCase, Invocation, RunConfig};
+use vesper_bench::{BenchCase, Invocation, RunConfig, analyze_pairs, run_abba};
 
 const OPS: u64 = 4096;
 
@@ -133,6 +133,29 @@ fn workload(name: &str) -> (Workload, Workload) {
 
 const WORKLOADS: [&str; 4] = ["histogram", "exponential", "traceparent", "spans"];
 
+/// The distribution-free 95% interval of the median of `sorted`: the order
+/// statistics `x(k)` and `x(n + 1 - k)` (1-based) for the largest `k` with
+/// `P(Binomial(n, 1/2) <= k - 1) <= 0.025` (for 30 epochs, `x(10)..x(21)`).
+fn median_interval(sorted: &[f64]) -> (f64, f64) {
+    let n = sorted.len();
+    let mut cdf = 0.0;
+    let mut choose = 1.0;
+    let mut k = 0;
+    for j in 0..n {
+        // P(X = j), then P(X <= j)
+        cdf += choose * 0.5f64.powi(n as i32);
+        if cdf > 0.025 {
+            break;
+        }
+        k = j + 1;
+        choose = choose * (n - j) as f64 / (j + 1) as f64;
+    }
+    // `k` is now that largest 1-based rank; with too few samples for a 95%
+    // interval it is 0 and the interval is the whole range.
+    let i = k.saturating_sub(1).min(n / 2);
+    (sorted[i], sorted[n - 1 - i])
+}
+
 #[test]
 fn both_builds_compute_the_same_workloads() {
     assert_eq!(vesper_beacon::IMPLEMENTATION, "vesper");
@@ -185,6 +208,11 @@ fn abba(name: &str) {
         ratios[mid],
         ratios[0],
         ratios[ratios.len() - 1]
+    );
+    let (lo, hi) = median_interval(&ratios);
+    println!(
+        "ABBA {name}: Vesper/Rust 95% interval of the median {lo:.2}..{hi:.2}; flip bar (upper end <= 1.50): {}",
+        if hi <= 1.5 { "pass" } else { "fail" }
     );
     let analysis = analyze_pairs(pairs, 10_000).expect("analysis");
     println!(
