@@ -195,8 +195,9 @@ contents and tools also become declared inputs.
 Library compilation defaults exclude integration tests, examples and benches;
 integration compilation excludes other Cargo test entrypoints. Shared nested
 Rust modules stay declared. Root compiler compilation lists only embedded
-assets and models. CLI checker source identities use additional
-`binary_compile_data`, without becoming library inputs. Integration-only
+assets and models. The `*42` oracles in `crates/vesper-oracles` embed their
+source identities through the root's `oracle_sources` filegroup, without
+becoming compiler inputs. Integration-only
 embedded fixtures use `integration_compile_data` and
 `extra_integration_compile_data`. Runtime data remains separate;
 `test_data_by_target` supplies a complete replacement for one target's runtime

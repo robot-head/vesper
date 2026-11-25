@@ -111,7 +111,7 @@ Non-test lines in `src/` (code above the first `#[cfg(test)]`, without
 | Editor and test tooling | 17,100 | `lsp`, `tooling`, `doctest`, `test_runner` | salsa | SH5 |
 | Package and front-end glue | 12,200 | `packages`, `package_graph`, `interface`, `database`, `pact_frontend`, `forge_frontend` | salsa, serde_json | SH1/SH2 |
 | CLI commands | 12,200 | `*_commands`, `main`, `lib` | serde_json | SH0-2, SH5 |
-| Test oracles | 11,700 | `src/bin/*42` | logos | stays Rust (diverse oracles) |
+| Test oracles | 11,700 | `src/bin/*42` (now `crates/vesper-oracles`, #1825) | logos | stays Rust (diverse oracles) |
 | IR and optimizer | 10,200 | `ir`, `ir_check`, `ir_opt`, `ir_inline`, `optimize`, `bounds_hoist` | egg, egglog | SH3 |
 | Other backends | 9,500 | `wasm_backend`, `ebpf_backend` | wasm-encoder, wit-component | SH4 |
 | Verified backend | 9,200 | `verified_codegen` | none | SH6 (see below) |
@@ -321,5 +321,5 @@ about 2k to 6k lines of Rust in a day, including the gap reports.
 ## Not in this plan
 
 - (Superseded 2026-11-21: deletion at the 1.5x bar and the stays-Rust crates are now in [rust-exit-plan.md](rust-exit-plan.md).)
-- The test oracles in `src/bin/*42`: they are diverse oracles, like
+- The test oracles (`src/bin/*42`, now `crates/vesper-oracles`): they are diverse oracles, like
   `vesper-codegen-verified`, and keep their value by staying Rust.

@@ -13,7 +13,7 @@ if [[ $# != 2 || -z "${VESPER_LEAN:-}" ]]; then
 fi
 . scripts/bazel-lib.sh
 if [[ -z "${LOGOS42_DRIVER:-}" ]]; then
-  LOGOS42_DRIVER="$(bazel_executable //:bin/logos42)"
+  LOGOS42_DRIVER="$(bazel_executable //crates/vesper-oracles:bin/logos42)"
 fi
 if [[ -z "${VESPER_BIN:-}" ]]; then
   VESPER_BIN="$(bazel_executable //:bin/vesper)"

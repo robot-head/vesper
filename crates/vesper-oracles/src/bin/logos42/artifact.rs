@@ -13,8 +13,8 @@ use std::{
 };
 
 const MIB: usize = 1024 * 1024;
-const MODEL0: &[u8] = include_bytes!("../../../lean/RewriteWitness.lean");
-const MODEL1: &[u8] = include_bytes!("../../../lean/ArithmeticOracle.lean");
+const MODEL0: &[u8] = include_bytes!("../../../../../lean/RewriteWitness.lean");
+const MODEL1: &[u8] = include_bytes!("../../../../../lean/ArithmeticOracle.lean");
 static NEXT: AtomicU64 = AtomicU64::new(0);
 fn identity(detail: impl Into<String>) -> Error {
     Error::new(ErrorKind::ToolIdentity, detail)

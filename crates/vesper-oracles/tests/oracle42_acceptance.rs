@@ -181,7 +181,8 @@ impl Toolchain {
         let selected = std::env::var_os("VESPER_LEAN").unwrap_or_else(|| "lean".into());
         let output = execute(
             Command::new(selected)
-                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                // The repository root, where `lean-toolchain` selects the pinned Lean.
+                .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
                 .arg("--print-prefix"),
             30,
         );
@@ -374,11 +375,11 @@ fn report_counts(report: &RunReport, jobs: u8, binary: &Path) {
     assert_eq!(report.worker_blake3, hash_file(binary));
     assert_eq!(
         report.model_blake3,
-        *blake3::hash(include_bytes!("../lean/RewriteWitness.lean")).as_bytes()
+        *blake3::hash(include_bytes!("../../../lean/RewriteWitness.lean")).as_bytes()
     );
     assert_eq!(
         report.driver_blake3,
-        *blake3::hash(include_bytes!("../lean/ArithmeticOracle.lean")).as_bytes()
+        *blake3::hash(include_bytes!("../../../lean/ArithmeticOracle.lean")).as_bytes()
     );
     assert_eq!(report.shrink_calls.lean_requests, 0);
     assert_eq!(report.shrink_calls.lean_responses, 0);
@@ -707,11 +708,11 @@ fn preflight_failures(binary: &Path, tool: &Toolchain) {
     ));
 
     // A real executable which cannot speak the worker protocol must not become
-    // a skipped backend case. Its failed artifact write must also stay failed.
+    // a skipped backend case (the Logos driver, this package's other binary). Its failed artifact write must also stay failed.
     let artifacts = Directory::new();
     fs::write(artifacts.0.join("unrelated.txt"), b"keep original bytes").unwrap();
     let mut wrong_protocol = config(binary, tool, 1);
-    wrong_protocol.worker_exe = PathBuf::from(env!("CARGO_BIN_EXE_vesper"));
+    wrong_protocol.worker_exe = PathBuf::from(env!("CARGO_BIN_EXE_logos42"));
     wrong_protocol.artifacts = Some(artifacts.0.clone());
     wrong_protocol.limits.artifact_bytes = 1;
     let failure =
@@ -809,12 +810,12 @@ impl StaticDriver {
         let directory = Directory::new();
         fs::write(
             directory.0.join("RewriteWitness.lean"),
-            include_bytes!("../lean/RewriteWitness.lean"),
+            include_bytes!("../../../lean/RewriteWitness.lean"),
         )
         .unwrap();
         fs::write(
             directory.0.join("ArithmeticOracle.lean"),
-            include_bytes!("../lean/ArithmeticOracle.lean"),
+            include_bytes!("../../../lean/ArithmeticOracle.lean"),
         )
         .unwrap();
         for module in ["RewriteWitness", "ArithmeticOracle"] {

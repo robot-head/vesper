@@ -128,11 +128,11 @@ CRATES = {
     "vesper-crypto-sys": ("shim", "", "", "vetted crypto C-ABI shim (SH6 lane 17)", "17"),
     "vesper-cranelift-sys": ("shim", "", "", "Cranelift C-ABI shim (owner 2026-11-19)", "-"),
     "vesper-codegen-verified": ("diverse", "", "", "DDC auditor, diverse on purpose", "owner"),
+    "vesper-oracles": ("diverse", "", "", "test oracles (*42), diverse on purpose: exempt from the flip gate; moved out of `src/bin` (#1825)", "owner"),
 }
 
 # Root compiler module -> (owner lane(s), Vesper package, status note)
 MODULES = {
-    "bin": ("owner (`diverse`)", "", "test oracles (*42), diverse on purpose: exempt from the flip gate; moved out of `src/` before the retirement"),
     "verified_codegen": ("SH6b", "", "Stage 1 guard; port with the verified-backend breadth track"),
     "lean": ("SH5-18", "vesper-lean-extract", "part 3a 2.37x"),
     "lean_ir": ("SH5-18", "vesper-lean-extract", ""),
@@ -288,11 +288,9 @@ def main():
     for c, n in crates.items():
         cls = CRATES.get(c, ("unknown",))[0]
         by_class[cls] = by_class.get(cls, 0) + n
-    # The `*42` oracles in src/bin are diverse on purpose: they stay Rust and
-    # move out of `src/` before the retirement (SH6 lane 2).
-    oracles = modules.get("bin", 0)
-    by_class["compiler"] = by_class.get("compiler", 0) + sum(modules.values()) - oracles
-    by_class["diverse"] = by_class.get("diverse", 0) + oracles
+    # The `*42` oracles, diverse on purpose, left src/bin for
+    # crates/vesper-oracles (#1825): all of `src/` is now the compiler.
+    by_class["compiler"] = by_class.get("compiler", 0) + sum(modules.values())
     w("## Totals\n\n| Class | Meaning | Non-test lines |\n|---|---|--:|\n")
     for cls, meaning in CLASSES.items():
         w(f"| `{cls}` | {meaning} | {by_class.get(cls, 0):,} |\n")

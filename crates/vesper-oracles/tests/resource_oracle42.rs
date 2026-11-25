@@ -102,6 +102,11 @@ fn request(name: &str) -> Request {
     request
 }
 
+/// The repository root: the oracle reads the fixed Lean sources under `lean/`.
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
 fn config(repo_root: PathBuf) -> Config {
     Config {
         lean: std::env::var_os("VESPER_LEAN").map_or_else(|| PathBuf::from("lean"), PathBuf::from),
@@ -117,7 +122,7 @@ struct Matrix {
 }
 impl Matrix {
     fn new() -> Self {
-        let config = config(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let config = config(repo_root());
         Self {
             session: process::start(&config).expect("required genuine pinned Lean worker"),
             counts: [0; 7],
@@ -727,7 +732,7 @@ const SOURCES: &[&str] = &[
 ];
 fn fixed_source_copy(destination: &Path) {
     for relative in SOURCES {
-        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        let source = repo_root().join(relative);
         assert!(fs::symlink_metadata(&source).unwrap().file_type().is_file());
         let target = destination.join(relative);
         fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -789,7 +794,7 @@ fn changed_executable_object_is_refused_before_any_model_response_or_evidence() 
     let _lease = GENUINE_SESSION
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut session = process::start(&config(PathBuf::from(env!("CARGO_MANIFEST_DIR")))).unwrap();
+    let mut session = process::start(&config(repo_root())).unwrap();
     let object = session.artifact_root().join("ResourceOracle42.olean");
     let mut bytes = fs::read(&object).unwrap();
     bytes.push(0);
@@ -996,7 +1001,7 @@ fn retirement_reserve_is_prepaid_and_unconfirmed_retirement_has_no_evidence() {
     .unwrap();
     let request_bytes = protocol::encode_request(0, &request).unwrap();
     let threshold = 4 + ready.len() + 4 + request_bytes.len() + 4 + protocol::RESPONSE_CAP + 512;
-    let mut configuration = config(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let mut configuration = config(repo_root());
     configuration.limits.session_wire_bytes = u64::try_from(threshold - 1).unwrap();
     let mut session =
         process::start(&configuration).expect("genuine READY below bounded wire quota");
@@ -1014,7 +1019,7 @@ fn dropping_genuine_session_records_abandonment_and_never_completed_evidence() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let before = process::abandoned_sessions();
-    let session = process::start(&config(PathBuf::from(env!("CARGO_MANIFEST_DIR")))).unwrap();
+    let session = process::start(&config(repo_root())).unwrap();
     let private_root = session.artifact_root().to_path_buf();
     assert!(private_root.is_dir());
     drop(session);

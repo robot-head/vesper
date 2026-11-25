@@ -20,8 +20,8 @@ on:
       - 'tests/fixtures/lean_extract/**'
       - 'src/lean.rs'
       - 'src/lean/**'
-      - 'src/bin/logos42*'
-      - 'src/bin/logos42/**'
+      - 'crates/vesper-oracles/src/bin/logos42*'
+      - 'crates/vesper-oracles/src/bin/logos42/**'
       - 'lean-toolchain'
       - 'scripts/ci/logos-sweep.sh'
       - 'scripts/ci/prepare-logos42.sh'
@@ -72,7 +72,7 @@ jobs:
       - run: aspect ci install-lean
       - run: aspect ci install-logos-rust
       - name: Build the driver and the compiler
-        run: cargo build --locked --bin logos42 --bin vesper
+        run: cargo build --locked -p vesper-oracles --bin logos42 -p vesper --bin vesper
       - name: Prepare the sealed Logos root
         run: |
           root="$RUNNER_TEMP/logos42/checker"
