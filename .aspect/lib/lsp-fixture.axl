@@ -87,7 +87,7 @@ def decode_frames(data):
     return frames
 
 def _response(replies, identifier):
-    found = [reply for reply in replies if reply.get("id") == identifier]
+    found = [reply for reply in replies if "id" in reply and reply["id"] == identifier]
     if len(found) != 1:
         fail("Expected exactly one JSON-RPC reply for %s, got %d" % (identifier, len(found)))
     return found[0]

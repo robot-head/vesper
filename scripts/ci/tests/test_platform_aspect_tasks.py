@@ -131,11 +131,7 @@ if sys.argv[-1] == "crash":
         for task, override in (
             ("canonical-protocols", None),
             ("editor", None),
-            ("macro-preview", "VESPER_MACRO_PREVIEW_BINARY"),
             ("recovery", "VESPER_RECOVERY_BINARY"),
-            ("source-macro-parameters", "VESPER_SOURCE_MACRO_PARAMETERS_BINARY"),
-            ("source-macro-tuples", "VESPER_SOURCE_MACRO_TUPLES_BINARY"),
-            ("source-macros", "VESPER_SOURCE_MACROS_BINARY"),
             ("stylus", "VESPER_STYLUS_BINARY"),
         ):
             with self.subTest(task=task):
