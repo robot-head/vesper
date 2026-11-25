@@ -83,6 +83,7 @@ use std::sync::OnceLock;
 #[derive(Clone, Copy)]
 pub struct EffectsCheckTable {
     pub check_world: fn(&World) -> Vec<Diagnostic>,
+    pub capability_policies: fn(&World) -> CapabilityPolicies,
 }
 
 static EFFECTS_CHECK_HOOK: OnceLock<EffectsCheckTable> = OnceLock::new();
@@ -2510,6 +2511,9 @@ pub fn capability_policies(checked: &Checked) -> Result<CapabilityPolicies, Poli
         return Err(PolicyError::Unchecked {
             diagnostics: checked.diagnostics.len(),
         });
+    }
+    if let Some(hook) = EFFECTS_CHECK_HOOK.get() {
+        return Ok((hook.capability_policies)(&checked.world));
     }
     let world = &checked.world;
     let mut out = CapabilityPolicies {
