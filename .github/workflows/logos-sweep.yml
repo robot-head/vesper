@@ -25,6 +25,8 @@ on:
       - 'lean-toolchain'
       - '.aspect/logos-ci.axl'
       - '.aspect/logos-sweep.axl'
+      - '.aspect/logos-setup.axl'
+      - '.aspect/lib/logos-sources.axl'
       - '.aspect/lean-ci.axl'
       - '.github/workflows/logos-sweep.yml'
 

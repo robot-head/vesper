@@ -15,13 +15,13 @@ bounds-checked indexing; the Arena's `unchecked-access` feature is disabled.
 
 ## Setup and acceptance
 
-Use Python 3.11+, Git, a Rust toolchain supporting the pinned packages, and the
-already installed Lean/Lake toolchain. Setup uses Python's standard library.
-The destination must not exist.
+Use Aspect on Linux or macOS, Git, a Rust toolchain supporting the pinned
+packages, and the already installed Lean/Lake toolchain. The destination must
+be absent.
 
 ```sh
 cargo build --locked --bin logos42
-python3 tools/logos42/setup.py \
+aspect maintenance logos42 setup -- \
   --directory /absolute/path/to/NEW_LOGOS_ROOT \
   --driver "$PWD/target/debug/logos42" \
   --lean "$(elan which lean)" --lake "$(elan which lake)" \

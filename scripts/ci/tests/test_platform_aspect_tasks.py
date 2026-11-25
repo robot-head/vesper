@@ -163,70 +163,34 @@ out.mkdir(parents=True, exist_ok=True)
                     env={**env, "VESPER_FIXTURE_FAIL_TARGET": "wasm32-wasip1"}, status=12)
         self.assertEqual((sandbox / "SHA256SUMS").read_bytes(), checksum)
 
-    def test_lean4lean_task_aliases_forward_arguments_to_logos(self):
-        self.write("tools/logos42/setup.py",
-                   "import sys\nprint(*sys.argv[1:], sep=chr(10))\nraise SystemExit(19)\n")
-        self.write("executables", "//crates/vesper-oracles:bin/logos42 bin/checker\n")
-        checker = self.write("bin/checker", "")
-        env = {
-            "VESPER_LEAN": "/fixture/bin/lean",
-            "VESPER_CARGO": "/fixture/bin/cargo",
-            "VESPER_BAZEL_EXECUTABLES": "executables",
-        }
-        for alias, canonical, expected in (
-            (("ci", "prepare-lean4lean42"), ("ci", "prepare-logos42"),
-             ["--directory", "fixture with spaces", "--driver", str(checker), "--lean", "/fixture/bin/lean",
-              "--lake", "/fixture/bin/lake", "--git", shutil.which("git"), "--cargo", "/fixture/bin/cargo"]),
-            (("maintenance", "lean4lean42", "setup"), ("maintenance", "logos42", "setup"),
-             ["--directory", "fixture with spaces"]),
-        ):
-            with self.subTest(alias=alias):
-                forwarded = ("--", "--directory", "fixture with spaces") if alias[0] == "maintenance" else (
-                    "--", "fixture with spaces")
-                original = self.aspect(*canonical, *forwarded, status=19, env=env)
-                compatible = self.aspect(*alias, *forwarded, status=19, env=env)
-                self.assertEqual(compatible.stdout.splitlines(), expected)
-                self.assertEqual(compatible.stdout, original.stdout)
+    def test_logos_maintenance_alias_uses_the_native_argument_parser(self):
+        canonical = self.aspect("maintenance", "logos42", "setup", "--", "--help")
+        alias = self.aspect("maintenance", "lean4lean42", "setup", "--", "--help")
+        self.assertEqual(alias.stdout, canonical.stdout)
+        self.assertIn("--directory DIRECTORY", alias.stdout)
 
-    def test_native_logos_prepare_validates_inputs_and_discovers_cargo(self):
-        self.write("tools/logos42/setup.py", "import sys\nprint(sys.argv[-1])\n")
-        self.write("executables", "//crates/vesper-oracles:bin/logos42 bin/checker\n")
-        self.write("bin/checker", "")
-        for command in ("git", "python3"):
-            (self.root / "bin" / command).symlink_to(shutil.which(command))
-        cargo = self.write("bin/cargo", "#!/bin/sh\nexit 0\n", executable=True)
-        rustup = self.write("bin/rustup", '#!/bin/sh\ntest "$*" = "which cargo" || exit 22\necho /fixture/cargo\n',
-                            executable=True)
-        env = {
-            "PATH": str(self.root / "bin"),
-            "VESPER_LEAN": "relative-lean",
-            "VESPER_CARGO": "",
-            "VESPER_BAZEL_EXECUTABLES": "executables",
-        }
-        command = ("ci", "prepare-logos42", "--", "missing")
-        self.assertEqual(self.aspect(*command, env=env).stdout.strip(), "/fixture/cargo")
-        rustup.unlink()
-        self.assertEqual(self.aspect(*command, env=env).stdout.strip(), str(cargo))
-        missing_lean = self.aspect(*command, env={**env, "VESPER_LEAN": ""}, status=2)
-        self.assertIn("ABSENT_DIRECTORY", missing_lean.stderr)
-        cargo.unlink()
-        missing_cargo = self.aspect(*command, env=env, status=1)
-        self.assertIn("requires Cargo and Git", missing_cargo.stderr)
+    def mock_logos_setup(self, body):
+        path = self.root / ".aspect/logos-ci.axl"
+        path.write_text(path.read_text().replace(
+            'load("./logos-setup.axl", "setup")',
+            'load("./logos-setup-fixture.axl", "setup")',
+        ))
+        self.write(".aspect/logos-setup-fixture.axl", body)
 
     def test_logos_workflow_prepares_with_the_pinned_tools_before_sweeping(self):
         self.write(".ci-lean-path", "/installed lean/bin/lean\r\n")
         self.write(".ci-logos-cargo-path", "/pinned cargo/bin/cargo\n")
-        self.write("tools/logos42/setup.py", """\
-import json
-import os
-from pathlib import Path
-import sys
-
-args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
-Path("setup.json").write_text(json.dumps(args))
-if os.environ.get("SETUP_FAILURE"):
-    sys.exit(17)
-Path(args["--directory"]).mkdir()
+        self.mock_logos_setup(r"""
+def setup(ctx, root, cwd, directory, driver, lean, lake, git, cargo):
+    if root != cwd:
+        fail("Setup did not receive the repository root")
+    ctx.std.fs.write(root + "/setup.json", json.encode({
+        "--directory": directory, "--driver": driver, "--lean": lean,
+        "--lake": lake, "--git": git, "--cargo": cargo,
+    }))
+    if ctx.std.env.var("SETUP_FAILURE"):
+        ctx.std.process.exit(17, "fixture setup failure")
+    ctx.std.fs.create_dir(directory)
 """)
         command = ("ci", "replay-logos-models")
         no_temp = self.aspect(*command, env={"RUNNER_TEMP": ""}, status=2)
@@ -1677,19 +1641,14 @@ reclaim = task(kind = "reclaim-disk", group = ["ci"], summary = "Mock disk watch
 """)
         self.write("manifest", "//crates/vesper-oracles:bin/logos42 bin/checker\n")
         self.write("bin/checker", "")
-        self.write("tools/logos42/setup.py", """\
-import os
-from pathlib import Path
-import sys
-
-args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
-checker = Path(args["--directory"])
-assert str(checker) == os.environ["VESPER_LOGOS42_ROOT"]
-Path("checker-path").write_text(str(checker))
-assert args["--lean"] == "mock-lean" and args["--cargo"] == "mock-cargo"
-checker.mkdir()
-if os.environ["VESPER_TEST_REPLAY_MODE"] == "prepare-fail":
-    sys.exit(17)
+        self.mock_logos_setup(r"""
+def setup(ctx, root, cwd, directory, driver, lean, lake, git, cargo):
+    if directory != ctx.std.env.var("VESPER_LOGOS42_ROOT") or lean != "mock-lean" or cargo != "mock-cargo":
+        fail("Setup did not receive the pinned build tools and checker directory")
+    ctx.std.fs.write(root + "/checker-path", directory)
+    ctx.std.fs.create_dir(directory)
+    if ctx.std.env.var("VESPER_TEST_REPLAY_MODE") == "prepare-fail":
+        ctx.std.process.exit(17, "fixture setup failure")
 """)
         self.write("bin/bazel", """\
 #!/usr/bin/env python3

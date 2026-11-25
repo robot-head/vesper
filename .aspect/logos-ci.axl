@@ -4,6 +4,7 @@ load("./lib/bazel_exec.axl", "executable")
 load("./lib/flip-statistics.axl", "natural")
 load("./lib/process.axl", "capture", "check", "command", "root_path")
 load("./disk-ci.axl", "start_disk_watcher")
+load("./logos-setup.axl", "setup")
 load("./logos-sweep.axl", "sweep")
 
 _LOGOS_DRIVER = "//crates/vesper-oracles:bin/logos42"
@@ -27,15 +28,7 @@ def _setup(ctx: TaskContext, root: str, directory: str, driver: str, lean: str, 
     if not cargo or not git:
         ctx.std.process.exit(1, "The Logos checker setup requires Cargo and Git")
     lake = (lean.rpartition("/")[0] or ("/" if lean.startswith("/") else ".")) + "/lake"
-    check(ctx, "python3", [
-        "tools/logos42/setup.py",
-        "--directory", directory,
-        "--driver", driver,
-        "--lean", lean,
-        "--lake", lake,
-        "--git", git,
-        "--cargo", cargo,
-    ], root)
+    setup(ctx, root, root, directory, driver, lean, lake, git, cargo)
 
 prepare_logos42 = task(
     kind = "prepare-logos42",

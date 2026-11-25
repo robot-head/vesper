@@ -1,12 +1,3 @@
 load("./lib/script.axl", "script_task")
 
 convert_rust_tests = script_task("convert-rust-tests", ["maintenance"], "scripts/convert-rust-tests.py", "python3")
-
-
-
-logos42_setup = script_task("setup", ["maintenance", "logos42"], "tools/logos42/setup.py", "python3")
-lean4lean42_setup = logos42_setup.alias(
-    kind = "setup",
-    group = ["maintenance", "lean4lean42"],
-    summary = "Set up Logos under the former Lean4Lean task name",
-)
