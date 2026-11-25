@@ -1,6 +1,6 @@
 //! One timed run of the runtime workload, for the ABBA comparison of the Rust
 //! build and the Vesper build (feature `vesper-port`) that
-//! `crates/vesper-gpu-compute/port/abba.py` drives. Prints the build, the
+//! `aspect crate gpu-compute abba` drives. Prints the build, the
 //! elapsed nanoseconds and a digest of the results, so both builds are seen
 //! to compute the same thing.
 //!

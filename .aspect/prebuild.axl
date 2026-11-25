@@ -1,0 +1,41 @@
+load("./lib/process.axl", "command", "root_path")
+
+_QUERY = "filter(':example/', //crates/...)"
+_OUTPUT = 'str(target.label) + " " + (target.files.to_list()[0].path if target.files.to_list() else "")'
+
+def _prebuild(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    destination = ctx.args.tool_args[0] if ctx.args.tool_args else ".ci-bazel-executables"
+    path = root_path(root, destination)
+    if ctx.std.fs.exists(path):
+        ctx.std.fs.remove_file(path)
+    bazel = ctx.std.env.var("BAZEL") or "bazel"
+    flags = (ctx.std.env.var("BAZEL_FLAGS") or "").split()
+    examples = command(ctx, bazel, ["query"] + flags + [_QUERY], root).stdout("piped").stderr("null").spawn().wait_with_output()
+    targets = ["//:bin/vesper", "//crates/vesper-oracles:bin/logos42"] + examples.stdout.split()
+    build = command(ctx, bazel, ["build"] + flags + targets, root).stdout("piped").spawn().wait_with_output()
+    ctx.std.io.stderr.write(build.stdout)
+    output = None
+    if build.status.success:
+        query = ["cquery"] + flags + ["--output=starlark", "--starlark:expr=" + _OUTPUT, "set(" + " ".join(targets) + ")"]
+        output = command(ctx, bazel, query, root).stdout("piped").stderr("null").spawn().wait_with_output()
+    if output == None or not output.status.success:
+        ctx.std.io.stderr.write("warning: prebuilding acceptance executables failed; each task will build its own\n")
+        return 0
+    lines = [line.lstrip("@") if line.lstrip("@").startswith("//") else line for line in output.stdout.splitlines()]
+    parent = path.rpartition("/")[0] or "/"
+    temporary = ctx.std.fs.mkdtemp(parent = parent, prefix = ".vesper-prebuild-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(temporary))
+    manifest = temporary + "/executables"
+    ctx.std.fs.write(manifest, "\n".join(lines) + "\n" if lines else "")
+    ctx.std.fs.rename(manifest, path)
+    ctx.std.io.stdout.write("Prebuilt %d executables into %s\n" % (len(lines), destination))
+    return 0
+
+prebuild_acceptance = task(
+    kind = "prebuild-acceptance",
+    group = ["ci"],
+    summary = "Build and record the executables needed by the acceptance tasks",
+    implementation = _prebuild,
+    args = {"tool_args": args.trailing_var_args(description = "Optional manifest path, default .ci-bazel-executables.")},
+)

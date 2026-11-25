@@ -15,7 +15,7 @@
 //! batches without the driver, for callgrind instruction counts.
 //!
 //! ```text
-//! crates/vesper-prism-h3/scripts/bench.sh       # builds both, runs every workload
+//! aspect crate prism-h3 bench       # builds both, runs every workload
 //! abba worker <decode|encode|frames|messages|connection|session>                # one arm
 //! abba drive <workload> <rust-worker> <vesper-worker>
 //! abba flip-gate <workload> <rust-worker> <vesper-worker>

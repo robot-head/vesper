@@ -1,0 +1,30 @@
+"""Shared process and temporary-directory operations for native repository tasks."""
+
+def command(ctx: TaskContext, executable: str, argv: list[str], cwd: str, env: dict[str, str] = {}):
+    child = ctx.std.process.command(executable).args(argv).current_dir(cwd)
+    for name, value in env.items():
+        child.env(name, value)
+    return child
+
+def exit_code(status) -> int:
+    return status.code if status.code != None else 128 + (status.signal or 0)
+
+def check(ctx: TaskContext, executable: str, argv: list[str], cwd: str, env: dict[str, str] = {}):
+    status = command(ctx, executable, argv, cwd, env).status()
+    if not status.success:
+        ctx.std.process.exit(exit_code(status), "%s failed" % executable)
+
+def capture(ctx: TaskContext, executable: str, argv: list[str], cwd: str, env: dict[str, str] = {}) -> str:
+    result = command(ctx, executable, argv, cwd, env).stdout("piped").stderr("piped").spawn().wait_with_output()
+    if not result.status.success:
+        ctx.std.io.stderr.write(result.stderr)
+        ctx.std.process.exit(exit_code(result.status), "%s failed" % executable)
+    return result.stdout
+
+def scratch_dir(ctx: TaskContext, prefix: str) -> str:
+    path = ctx.std.fs.mkdtemp(prefix = prefix)
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(path))
+    return path
+
+def root_path(root: str, path: str) -> str:
+    return path if path.startswith("/") or path[1:2] == ":" else root + "/" + path

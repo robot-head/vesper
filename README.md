@@ -74,9 +74,10 @@ aspect maintenance bazel sync-build-files -- --check
 aspect bootstrap stage2 -- which
 ```
 
-Tasks use the scripts' existing interpreters and toolchain dependencies. The
-underlying files also serve Bazel, Windows CI, Python imports, and subprocess
-fixtures.
+Benchmarks, selected acceptance checks, and table generators run directly in
+AXL. Tasks that still invoke scripts use the original interpreters and
+toolchain dependencies. Windows CI uses PowerShell for native executable,
+export ABI, and hybrid CLI checks.
 
 ## Vesper unit tests
 

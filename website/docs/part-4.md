@@ -1120,7 +1120,7 @@ In continuous integration, `scripts/ci/flip_gate.py` and per-crate `flip-gate.to
     run = "cargo test --locked --release -p vesper-aegis --test port_differential"
     [[abba]]
     workload = "snp"
-    run = "crates/vesper-aegis/bench-abba.sh flip-gate snp"
+    run = "aspect crate aegis bench-abba -- flip-gate snp"
     ----
     // crates/vesper-bench/src/lib.rs: 48-bit RDPMC delta & SplitMix64 64B Stabilizer offset
     pub const PMU_COUNTER_MASK_48: u64 = (1u64 << 48) - 1;

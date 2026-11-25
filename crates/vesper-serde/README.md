@@ -145,7 +145,7 @@ not about the compiled Rust code.
 `Node::as_f64(FloatLimits)` and transactional `Cursor::read_f64(FloatLimits)`
 convert already validated Number nodes to the correctly rounded binary64 with
 `number::decode_f64`: Clinger's exact fast path, then Eisel–Lemire over a
-generated 128-bit power-of-five table (`tools/gen_pow5.py`, rechecked by a test
+generated 128-bit power-of-five table (`aspect crate serde gen-pow5`, rechecked by a test
 with an independent big integer), then `str::parse` when Eisel–Lemire cannot
 decide. It reports which path decided. IEEE rounding, subnormals and underflow to correctly signed zero are
 supported. Overflow to Infinity returns `Number` at the original token start;

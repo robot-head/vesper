@@ -12,7 +12,7 @@ The native lanes run only host-specific coverage:
   executables built and run on Apple silicon.
 - Windows runs its direct-fiber and IOCP suites, Pulse's host-driver and pool
   tests against IOCP, and COFF executables linked with MSVC and run on Windows.
-- Both run the export ABI tier of `scripts/test-port-harness.sh`
+- Both run the export ABI tier from `scripts/port-abi-plan.json`
   (`VESPER_PORT_HARNESS_SCOPE=abi`): the port pilot's export ABI v2 kit and
   v3 gauge against their Rust builds, their divergence and leak checks,
   `vesper-port-build` package linking, and the port closure guard. These
@@ -116,8 +116,9 @@ finished (#1321). To keep pull requests within the limit:
   Actions tab on the branch with profile `pr`, `checkout_ref`
   `refs/pull/<n>/merge` and `pull_request` `<n>`.
 
-The native executable cases are shared with `scripts/test-native-host.sh`;
-`scripts/ci/test-native-executables.sh` runs them with the Cargo-built compiler.
+The native executable cases are shared with `aspect acceptance test-native-host`;
+Use `aspect ci test-native-executables` on macOS. Windows CI runs
+`scripts/windows/test-native-executables.ps1` with the Cargo-built compiler.
 Linux retains general source-macro, formatting, proof, and workspace tests.
 The native lanes no longer compile or run the entire workspace, Lean proofs,
 Clippy, generic acceptance scripts, or doctests. Tests for other host-sensitive

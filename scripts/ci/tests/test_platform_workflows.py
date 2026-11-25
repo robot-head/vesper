@@ -68,7 +68,13 @@ class PlatformWorkflowTests(unittest.TestCase):
         mac_commands = "\n".join(s.get("run", "") for s in mac["steps"])
         windows_commands = "\n".join(s.get("run", "") for s in windows["steps"])
         self.assertIn("aspect ci test-native-executables", mac_commands)
-        self.assertIn("scripts/ci/test-native-executables.sh", windows_commands)
+        native_step = next(s for s in windows["steps"] if s.get("name") == "Validate native COFF executables")
+        self.assertEqual(native_step["shell"], "pwsh")
+        self.assertIn("./scripts/windows/test-native-executables.ps1", native_step["run"])
+        hybrid_step = next(s for s in workflow("hybrid.yml")["jobs"]["hybrid"]["steps"]
+                           if s.get("name") == "The CLI suites on the hybrid (Windows)")
+        self.assertEqual(hybrid_step["shell"], "pwsh")
+        self.assertEqual(hybrid_step["run"], "./scripts/windows/test-hybrid-cli.ps1")
         self.assertIn("--test platform", mac_commands)
         self.assertIn("--test windows_platform", windows_commands)
         self.assertIn("--test windows", windows_commands)
@@ -80,10 +86,12 @@ class PlatformWorkflowTests(unittest.TestCase):
         # macOS and Windows run only the export ABI tier; the ported crates
         # are platform-neutral and run once in the Linux job (#1010).
         jobs = self.platforms["jobs"]
-        for job, command in (("platform", "aspect acceptance test-port-harness"),
-                             ("windows", "scripts/test-port-harness.sh")):
+        for job, command in (("platform", "aspect ci test-port-abi"),
+                             ("windows", "./scripts/windows/test-port-abi.ps1")):
             step = next(s for s in jobs[job]["steps"] if command in s.get("run", ""))
             self.assertEqual(step["env"]["VESPER_PORT_HARNESS_SCOPE"], "abi")
+            if job == "windows":
+                self.assertEqual(step["shell"], "pwsh")
         ports = jobs["ports"]
         self.assertEqual(ports["runs-on"], "ubuntu-latest")
         self.assertEqual(ports["needs"], ["plan", "ports-compiler"])
@@ -105,13 +113,14 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertEqual(step["env"]["VESPER_PORT_HARNESS_SHARD"], "${{ matrix.shard }}")
         self.assertIn("ports", jobs["complete"]["needs"])
         script = (ROOT / "scripts/test-port-harness.sh").read_text()
-        tier_end = script.index('echo "export ABI tier done')
-        abi_tier = script[:tier_end]
+        self.assertIn('"${VESPER_ASPECT_BIN:-aspect}" ci test-port-abi', script)
+        plan = json.loads((ROOT / "scripts/port-abi-plan.json").read_text())
+        abi_tier = "\n".join(" ".join(case["args"]) for group in plan for case in group["checks"])
         for check in ("-p vesper-port-abi", "-p vesper-port-harness", "--test kit",
                       "--test kit_memory", "-p vesper-port-pilot --features vesper-port",
                       "-p vesper-port-build --features divergent"):
             self.assertIn(check, abi_tier)
-        self.assertNotIn("vesper-beacon", abi_tier.split("set -eu", 1)[1])
+        self.assertNotIn("vesper-beacon", abi_tier)
         # Every shard is reached, and later ports land in the last one.
         self.assertIn(f"shards={shards[-1]}\n", script)
         for n in shards[:-1]:

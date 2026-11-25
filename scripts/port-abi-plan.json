@@ -1,0 +1,50 @@
+[
+  {
+    "crates": ["vesper-port-abi", "vesper-port-harness", "vesper-port-pilot", "vesper-port-build"],
+    "checks": [
+      {
+        "args": ["-p", "vesper-port-abi", "-p", "vesper-port-harness"]
+      },
+      {
+        "args": ["-p", "vesper-port-pilot"]
+      },
+      {
+        "args": ["-p", "vesper-port-pilot", "--features", "vesper-port"]
+      },
+      {
+        "args": ["-p", "vesper-port-pilot", "--features", "vesper-port-divergent", "--test", "api", "--", "--test-threads=1"],
+        "description": "Vesper port of the pilot",
+        "failed": ["bytes_and_booleans"],
+        "passed": ["gcd_matches_euclid"]
+      },
+      {
+        "args": ["-p", "vesper-port-pilot", "--features", "vesper-port-divergent", "--test", "kit", "--", "--test-threads=1"],
+        "description": "export ABI kit",
+        "failed": ["sequence_results", "slice_parameters", "strings", "owned_handles", "linear_handles", "recursive_enum_handles", "generic_instances", "vsys_imports"],
+        "passed": ["pattern_sink_closure"]
+      },
+      {
+        "args": ["-p", "vesper-port-pilot", "--features", "vesper-port-divergent", "--test", "kit_memory"],
+        "description": "kit leak check",
+        "diagnostic": "leaked over 10^5 cycles"
+      },
+      {
+        "args": ["-p", "vesper-port-build"]
+      },
+      {
+        "args": ["-p", "vesper-port-build", "--features", "divergent", "--test", "package", "--", "--test-threads=1"],
+        "description": "package port",
+        "failed": ["root_package_modules_are_linked"],
+        "passed": ["dependency_modules_are_linked"]
+      }
+    ]
+  },
+  {
+    "crates": ["vesper-std-driver", "vesper-std-host"],
+    "checks": [
+      {
+        "args": ["-p", "vesper-std-driver", "--features", "vesper-port"]
+      }
+    ]
+  }
+]

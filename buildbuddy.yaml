@@ -124,7 +124,7 @@ actions:
           - "*"
     env:
       BAZEL_FLAGS: "--config=ci --config=rbe_build"
-      # Written by the prebuild step below; scripts/bazel-lib.sh reads it.
+      # Written by the prebuild step below and read by the acceptance tasks.
       VESPER_BAZEL_EXECUTABLES: ".ci-bazel-executables"
     steps:
       - run: "scripts/ci/reclaim-disk.sh"

@@ -203,7 +203,7 @@ jobs:
           VESPER_PORT_HARNESS_SCOPE: abi
         run: |
           if [ -f .aspect/version.axl ]; then
-            aspect acceptance test-port-harness
+            aspect ci test-port-abi
           else
             scripts/test-port-harness.sh
           fi
@@ -242,9 +242,18 @@ jobs:
           cargo test --locked -p vesper-pulse --test drivers
           cargo test --locked -p vesper-pulse --test pool
       - name: Validate native COFF executables
+        shell: pwsh
+        env:
+          VESPER_NATIVE_BINARY: target/debug/vesper.exe
+          VESPER_NATIVE_SUFFIX: .exe
         run: |
           cargo build --locked --bin vesper
-          VESPER_NATIVE_BINARY=target/debug/vesper.exe VESPER_NATIVE_SUFFIX=.exe scripts/ci/test-native-executables.sh
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (Test-Path scripts/windows/test-native-executables.ps1) {
+            & ./scripts/windows/test-native-executables.ps1
+          } else {
+            bash scripts/ci/test-native-executables.sh
+          }
       - name: Test the Cranelift C-ABI shim
         # Self-hosting SH0 lane 4 (#1126): Vesper drives Cranelift through
         # crates/vesper-cranelift-sys, links the object it builds and runs it.
@@ -262,7 +271,13 @@ jobs:
         env:
           VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/vesper.exe
           VESPER_PORT_HARNESS_SCOPE: abi
-        run: scripts/test-port-harness.sh
+        shell: pwsh
+        run: |
+          if (Test-Path scripts/windows/test-port-abi.ps1) {
+            & ./scripts/windows/test-port-abi.ps1
+          } else {
+            bash scripts/test-port-harness.sh
+          }
 
   # The ported crates' tests and divergence checks are platform-neutral, so
   # they run once, here (#1010). Bazel on BuildBuddy builds the same ports.

@@ -25,7 +25,7 @@ Run by hand (the recipe in `docs/maintenance/rust-exit-plan.md`; SH6 lane 1's
    (QPACK corpora, HTTP/3 and WebTransport end to end, the quinn and
    wtransport interop tests) passes on top of it. Each of the five divergent
    libraries still fails its module's tests (`test-port.sh`).
-2. **Speed.** `taskset -c 3 sh crates/vesper-prism/bench-abba.sh 21 400`:
+2. **Speed.** `taskset -c 3 aspect crate prism bench-abba 21 400`:
    the last Rust build (`ab965f2`) against this branch, 21 ABBA epochs of 400
    operations, pinned to one CPU:
 
@@ -191,7 +191,7 @@ against 47.3 M (0.97x).
 
    Each of the ten divergent modules still fails its guarding test
    (`port/check.sh`).
-2. **Speed.** `taskset -c 3 sh crates/vesper-prism-h3/scripts/bench.sh`
+2. **Speed.** `taskset -c 3 aspect crate prism-h3 bench`
    against the Rust build (12 ABBA epochs of 16 batches, pinned to one CPU):
 
    | Workload | Rust | Vesper | Ratio | 95% interval | Before this lane | Bar (upper end <= 1.5x) |
@@ -210,7 +210,7 @@ Verdict: **flip.** Rust deleted (2,679 lines): the Rust build of QPACK
 (decoder 420 lines, encoder 393, the table code in `qpack/mod.rs` 148,
 Huffman 151 and its 265-line table, prefix 120, the static table 115 and
 the wire constants 65), frames 321, priorities 329, capsules 151 and the
-message rules 201. `tests/fixtures/gen_tables.py` now
+message rules 201. `aspect crate prism-h3 gen-tables` now
 writes the Vesper tables (`vesper/src/static_table.ves`,
 `huffman_codes.ves`) straight from the RFC 9204 text and the h2 crate's
 Huffman table, so the Rust tables and `vesper/gen_tables.py` are gone (its

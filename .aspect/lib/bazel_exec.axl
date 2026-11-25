@@ -1,0 +1,27 @@
+"""Locate workspace Bazel executables and reuse the CI prebuild manifest."""
+
+load("./process.axl", "capture", "check", "command", "exit_code", "root_path")
+
+def executable(ctx: TaskContext, root: str, label: str) -> str:
+    manifest = ctx.std.env.var("VESPER_BAZEL_EXECUTABLES")
+    if manifest:
+        content = ctx.std.fs.try_read_to_string(root_path(root, manifest)) or ""
+        for line in content.splitlines():
+            fields = line.split(None, 1)
+            if len(fields) == 2 and fields[0] == label:
+                output = root_path(root, fields[1])
+                if ctx.std.fs.exists(output) and ctx.std.fs.metadata(output).is_file:
+                    return output
+    bazel = ctx.std.env.var("BAZEL") or "bazel"
+    flags = (ctx.std.env.var("BAZEL_FLAGS") or "").split()
+    build = command(ctx, bazel, ["build"] + flags + [label], root).stdout("piped").spawn().wait_with_output()
+    ctx.std.io.stderr.write(build.stdout)
+    if not build.status.success:
+        ctx.std.process.exit(exit_code(build.status), "Bazel build failed for " + label)
+    outputs = capture(ctx, bazel, ["cquery"] + flags + ["--output=files", label], root).splitlines()
+    if not outputs:
+        ctx.std.process.exit(1, "Bazel did not return an executable for " + label)
+    return root_path(root, outputs[0])
+
+def run_target(ctx: TaskContext, root: str, label: str, args: list[str] = []):
+    check(ctx, executable(ctx, root, label), args, root)

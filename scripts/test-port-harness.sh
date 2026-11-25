@@ -5,8 +5,7 @@
 # this script builds it when unset).
 #
 # Where it runs (#1010, docs/ci-platforms.md): the Linux job of the
-# Platforms workflow runs all of it. macOS and Windows set
-# VESPER_PORT_HARNESS_SCOPE=abi and stop after the export ABI tier below,
+# Platforms workflow runs all of it. macOS and Windows run only the export ABI tier,
 # the part that depends on the host's object format and calling convention.
 # Bazel on Linux also builds every port and runs most of the same tests
 # (BUILD.bazel of each crate).
@@ -93,44 +92,7 @@ log=$(mktemp)
 trap 'rm -f "$log"' EXIT HUP INT TERM
 # Shard 1: the export ABI tier and the ports through Ignis.
 if part 1; then
-if ported vesper-port-abi vesper-port-harness vesper-port-pilot vesper-port-build; then
-cargo test --locked -p vesper-port-abi -p vesper-port-harness
-cargo test --locked -p vesper-port-pilot
-cargo test --locked -p vesper-port-pilot --features vesper-port
-divergent "Vesper port of the pilot" bytes_and_booleans gcd_matches_euclid \
-    -p vesper-port-pilot --features vesper-port-divergent --test api
-# The kit (export ABI v2, #898): one failing test per form, and the leak
-# check fails on the build that omits one Vesper-side free.
-if cargo test --locked -p vesper-port-pilot --features vesper-port-divergent --test kit -- --test-threads=1 >"$log" 2>&1; then
-    cat "$log"
-    echo "the divergent kit passed its API tests" >&2
-    exit 1
-fi
-for t in sequence_results slice_parameters strings owned_handles linear_handles recursive_enum_handles generic_instances vsys_imports; do
-    if ! grep -q "test $t ... FAILED" "$log"; then
-        cat "$log"
-        echo "the divergent kit did not fail $t" >&2
-        exit 1
-    fi
-done
-grep -q 'test pattern_sink_closure ... ok' "$log" || { cat "$log"; echo "the divergent kit failed an unchanged test" >&2; exit 1; }
-if cargo test --locked -p vesper-port-pilot --features vesper-port-divergent --test kit_memory >"$log" 2>&1; then
-    cat "$log"
-    echo "the kit leak check passed a build that leaks" >&2
-    exit 1
-fi
-grep -qF 'leaked over 10^5 cycles' "$log" || { cat "$log"; echo "the kit leak check failed for another reason" >&2; exit 1; }
-echo "divergent kit detected (one failure per form, and the leak)"
-cargo test --locked -p vesper-port-build
-divergent "package port" root_package_modules_are_linked dependency_modules_are_linked \
-    -p vesper-port-build --features divergent --test package
-fi
-# Self-hosting SH0 lane 3 (#1125): the std I/O sample driver, an object
-# that walks, reads, spawns and writes through @vesper-std/fs, process and
-# env; host-sensitive (paths, processes, the OS's calling convention).
-if ported vesper-std-driver vesper-std-host; then
-cargo test --locked -p vesper-std-driver --features vesper-port
-fi
+"${VESPER_ASPECT_BIN:-aspect}" ci test-port-abi
 # End of the export ABI tier: the ports below are platform-neutral Rust
 # tests over objects the ABI checks above already cover.
 if [ "${VESPER_PORT_HARNESS_SCOPE:-all}" = abi ]; then

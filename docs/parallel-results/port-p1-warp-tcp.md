@@ -120,7 +120,7 @@ test binaries (`tests/divergence.rs`). Cargo (macOS, Windows):
 ## Benchmarks
 
 `crates/vesper-warp-tcp/examples/abba.rs`, run by
-`crates/vesper-warp-tcp/scripts/bench.sh`. The two builds are one crate with
+`aspect crate warp-tcp bench`. The two builds are one crate with
 and without a feature, so they cannot share a process: each arm is a worker
 process (the example built one way or the other, release profile, Vesper
 library compiled with `optimize: true`) that runs one batch per request on
