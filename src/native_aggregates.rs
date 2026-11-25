@@ -1511,6 +1511,11 @@ pub(super) struct ScalarEnums {
     pub(super) calls: BTreeMap<ValueId, (EnumShape, Vec<ValueId>)>,
     /// Returned values that are words, for a graph whose join takes words.
     pub(super) returns: BTreeMap<ValueId, Vec<ValueId>>,
+    /// The values kept as words, with the values of their words (read by
+    /// [`super::aggregate_decisions`], the self-hosting differential).
+    pub(super) words: BTreeMap<ValueId, Vec<ValueId>>,
+    /// The locals kept as words.
+    pub(super) locals: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -2033,6 +2038,8 @@ pub(super) fn scalar_enums(
         f: g,
         calls,
         returns: returned,
+        words,
+        locals: cl.into_keys().collect(),
     })
 }
 

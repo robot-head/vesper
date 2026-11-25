@@ -193,6 +193,13 @@ pub struct Env {
     digits: ChunkSeq[u32],
     // by ADT index: 0 not computed, 1 no wide integer, 2 wide
     wide: ChunkSeq[u8],
+    // the ABI facts of `scalar_enums`, per program function: whether its
+    // result travels as the words of its enum shape, and for its calls
+    // cflag[ca[f]..] in instruction order, whether the callee returns the
+    // words of the call's result shape
+    ret: ChunkSeq[u8],
+    ca: ChunkSeq[u64],
+    cflag: ChunkSeq[u8],
 }
 
 fn read_text(inout r: Reader, in b: Slice[u8], inout names: Names) -> u32 {
@@ -232,6 +239,9 @@ fn read_env(inout r: Reader, in b: Slice[u8], inout names: Names, functions: u64
         s_hoisted_try_get: names.intern(in "Hoisted(TryGet)".as_bytes()),
         digits: ChunkSeq::new[u32](),
         wide: ChunkSeq::new[u8](),
+        ret: ChunkSeq::new[u8](),
+        ca: ChunkSeq::new[u64](),
+        cflag: ChunkSeq::new[u8](),
     };
     let nf = r.word(in b);
     for i in 0..nf {
@@ -288,6 +298,24 @@ fn read_env(inout r: Reader, in b: Slice[u8], inout names: Names, functions: u64
                 let s = read_text(inout r, in b, inout names);
                 e.cu.push(s);
             }
+        }
+    }
+    for f in 0..functions {
+        let ret: u8 = if r.word(in b) != 0 {
+            1
+        } else {
+            0
+        };
+        e.ret.push(ret);
+        e.ca.push(e.cflag.len());
+        let n = r.word(in b);
+        for k in 0..n {
+            let x: u8 = if r.word(in b) != 0 {
+                1
+            } else {
+                0
+            };
+            e.cflag.push(x);
         }
     }
     e
@@ -3918,12 +3946,935 @@ fn put_value(inout o: ChunkSeq[u8], v: u64) {
 
 // One graph's decisions (src/native_aggregate_decisions.rs
 // `function_decisions`).
+// ----- small enums as words (`native_aggregates::scalar_enums`, #1330) ------------
+
+// `native_aggregates::MAX_ENUM_WORDS`: the most words a scalar enum may
+// have, its tag included.
+const MAX_ENUM_WORDS: u64 = 4;
+// Shape cache entries, by type id: 0 not computed, 1 no shape, else the
+// shape id + 2.
+const SC_UNKNOWN: u32 = 0;
+const SC_NONE: u32 = 1;
+const SC_BASE: u32 = 2;
+// A use of a value: an instruction (by graph index) or a block's
+// terminator.
+const U_INST: u8 = 0;
+const U_TERM: u8 = 1;
+
+// The `EnumShape`s met so far, interned by content, so that two values
+// have the same shape exactly when their shape ids are equal. Shape `k`
+// has the word types wt[wa[k]..wa[k]+wn[k]] (the tag's `u64` left out:
+// every shape starts with it) and the variants vr[va[k]..va[k]+vn[k]];
+// a variant has its short name and the fields ff[fa[v]..fa[v]+fn[v]],
+// each a field name, its word and its byte offset.
+pub struct Shapes {
+    cache: ChunkSeq[u32],
+    wa: ChunkSeq[u64],
+    wn: ChunkSeq[u64],
+    wt: ChunkSeq[u32],
+    va: ChunkSeq[u64],
+    vn: ChunkSeq[u64],
+    vname: ChunkSeq[u32],
+    fa: ChunkSeq[u64],
+    fnum: ChunkSeq[u64],
+    fname: ChunkSeq[u32],
+    fword: ChunkSeq[u64],
+    foff: ChunkSeq[i32],
+}
+
+fn shapes_new() -> Shapes {
+    Shapes {
+        cache: ChunkSeq::new[u32](),
+        wa: ChunkSeq::new[u64](),
+        wn: ChunkSeq::new[u64](),
+        wt: ChunkSeq::new[u32](),
+        va: ChunkSeq::new[u64](),
+        vn: ChunkSeq::new[u64](),
+        vname: ChunkSeq::new[u32](),
+        fa: ChunkSeq::new[u64](),
+        fnum: ChunkSeq::new[u64](),
+        fname: ChunkSeq::new[u32](),
+        fword: ChunkSeq::new[u64](),
+        foff: ChunkSeq::new[i32](),
+    }
+}
+
+fn i32_at(in s: ChunkSeq[i32], i: u64) -> i32 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+impl Shapes {
+    fn words(in self, k: u64) -> u64 {
+        inc(u64_at(in self.wn, k))
+    }
+
+    // The variant of shape `k` named `short`, or NONE32_64.
+    fn variant(in self, k: u64, short: u32) -> u64 {
+        let a = u64_at(in self.va, k);
+        for i in 0..u64_at(in self.vn, k) {
+            if u32_at(in self.vname, add(a, i)) == short {
+                return add(a, i);
+            }
+        }
+        NONE32_64
+    }
+
+    // The word of field `name` of variant `v`, or NONE32_64.
+    fn field_word(in self, v: u64, name: u32) -> u64 {
+        let a = u64_at(in self.fa, v);
+        for i in 0..u64_at(in self.fnum, v) {
+            if u32_at(in self.fname, add(a, i)) == name {
+                return u64_at(in self.fword, add(a, i));
+            }
+        }
+        NONE32_64
+    }
+
+    // The field of variant `v` on word `word`, or NONE32_64.
+    fn word_field(in self, v: u64, word: u64) -> u64 {
+        let a = u64_at(in self.fa, v);
+        for i in 0..u64_at(in self.fnum, v) {
+            if u64_at(in self.fword, add(a, i)) == word {
+                return add(a, i);
+            }
+        }
+        NONE32_64
+    }
+
+    // Whether shapes `x` and `y` (the candidate, the last one) are equal.
+    fn same(in self, x: u64, y: u64) -> bool {
+        if u64_at(in self.wn, x) != u64_at(in self.wn, y)
+            || u64_at(in self.vn, x) != u64_at(in self.vn, y) {
+            return false;
+        }
+        for i in 0..u64_at(in self.wn, x) {
+            if u32_at(in self.wt, add(u64_at(in self.wa, x), i))
+                != u32_at(in self.wt, add(u64_at(in self.wa, y), i)) {
+                return false;
+            }
+        }
+        for i in 0..u64_at(in self.vn, x) {
+            let vx = add(u64_at(in self.va, x), i);
+            let vy = add(u64_at(in self.va, y), i);
+            if u32_at(in self.vname, vx) != u32_at(in self.vname, vy)
+                || u64_at(in self.fnum, vx) != u64_at(in self.fnum, vy) {
+                return false;
+            }
+            for j in 0..u64_at(in self.fnum, vx) {
+                let fx = add(u64_at(in self.fa, vx), j);
+                let fy = add(u64_at(in self.fa, vy), j);
+                if u32_at(in self.fname, fx) != u32_at(in self.fname, fy)
+                    || u64_at(in self.fword, fx) != u64_at(in self.fword, fy)
+                    || i32_at(in self.foff, fx) != i32_at(in self.foff, fy) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    // Drops the shape being built (the last one) and its rows.
+    fn pop_last(inout self) {
+        let k = wrapping_sub(self.wa.len(), 1);
+        self.wt.truncate(u64_at(in self.wa, k));
+        let v0 = u64_at(in self.va, k);
+        if v0 < self.vname.len() {
+            self.fname.truncate(u64_at(in self.fa, v0));
+            self.fword.truncate(u64_at(in self.fa, v0));
+            self.foff.truncate(u64_at(in self.fa, v0));
+        }
+        self.vname.truncate(v0);
+        self.fa.truncate(v0);
+        self.fnum.truncate(v0);
+        self.wa.truncate(k);
+        self.wn.truncate(k);
+        self.va.truncate(k);
+        self.vn.truncate(k);
+    }
+}
+
+// `native_aggregates::word_type`: one integer or `bool` word.
+fn word_type(in e: Env, in c: Ctx, ty: u32) -> bool {
+    let n = c.types.node(ty);
+    if n.kind != TyKind::Named || n.n != 0 {
+        return false;
+    }
+    (c.world.k.is_integer(n.name) && n.name != e.s_i128 && n.name != e.s_u128)
+        || n.name == c.world.k.bool_
+}
+
+// `native_aggregates::enum_shape` of `ty`, defaulted: the shape id, or
+// NONE32_64.
+fn enum_shape(inout e: Env, inout c: Ctx, inout sh: Shapes, ty0: u32) -> u64 {
+    if ty0 == NONE32 {
+        return NONE32_64;
+    }
+    let ty = default_type(inout c.types, ty0);
+    let cached = u32_at(in sh.cache, w(ty));
+    if cached == SC_NONE {
+        return NONE32_64;
+    }
+    if cached != SC_UNKNOWN {
+        return w(wrapping_sub(cached, SC_BASE));
+    }
+    let k = shape_build(inout e, inout c, inout sh, ty);
+    let entry = if k == NONE32_64 {
+        SC_NONE
+    } else {
+        wrapping_add(n32(k), SC_BASE)
+    };
+    set_by_symbol(inout sh.cache, ty, entry);
+    k
+}
+
+fn shape_build(inout e: Env, inout c: Ctx, inout sh: Shapes, ty: u32) -> u64 {
+    if c.world.box_active && mentions_box(in c, ty, 0) {
+        return NONE32_64;
+    }
+    let l = lay(inout e, inout c, ty);
+    if l == NONE32 {
+        return NONE32_64;
+    }
+    let node = e.ls.node(l);
+    if node.kind != L_ENUM {
+        return NONE32_64;
+    }
+    let k = sh.wa.len();
+    sh.wa.push(sh.wt.len());
+    sh.wn.push(0);
+    sh.va.push(sh.vname.len());
+    sh.vn.push(w(node.n));
+    let mut words: u64 = 1;
+    for v in 0..w(node.n) {
+        let var = e.ls.lvariant(add(w(node.a), v));
+        sh.vname.push(var.name);
+        sh.fa.push(sh.fname.len());
+        sh.fnum.push(w(var.fc));
+        for i in 0..w(var.fc) {
+            let f = e.ls.lfield(add(w(var.fa), i));
+            let t = default_type(inout c.types, f.ty);
+            if !word_type(in e, in c, t) {
+                sh.pop_last();
+                return NONE32_64;
+            }
+            sh.wt.push(t);
+            sh.fname.push(f.name);
+            sh.fword.push(words);
+            sh.foff.push(f.offset);
+            words = inc(words);
+        }
+    }
+    set64(inout sh.wn, k, wrapping_sub(words, 1));
+    if words > MAX_ENUM_WORDS {
+        sh.pop_last();
+        return NONE32_64;
+    }
+    for x in 0..k {
+        if sh.same(x, k) {
+            sh.pop_last();
+            return x;
+        }
+    }
+    k
+}
+
+// Whether the pattern at word `q` is a constructor whose fields only bind
+// or ignore fields of variant `name` of shape `k` (`word_fields`).
+fn word_fields(inout c: Ctx, in p: Program, in sh: Shapes, k: u64, q: u64) -> bool {
+    let body = add(q, 3);
+    let short = short_name(inout c.names, n32(p.op(body)));
+    let v = sh.variant(k, short);
+    if v == NONE32_64 {
+        return false;
+    }
+    let n = p.op(add(body, 2));
+    let mut at = add(body, 3);
+    for i in 0..n {
+        let field = n32(p.op(at));
+        let sub = inc(at);
+        let kind = p.op(sub);
+        if sh.field_word(v, field) == NONE32_64 || (kind != Pat::Bind && kind != Pat::Wild) {
+            return false;
+        }
+        at = pattern_end(in p, sub);
+    }
+    true
+}
+
+// Whether the label of the `Seq` operation in pool row `pool` spells
+// `text`, or starts with it when `prefix`.
+fn label_is(in p: Program, in names: Names, pool: u64, in text: Str, prefix: bool) -> bool {
+    let s = p.pool_row(pool).label;
+    let t = text.as_bytes();
+    let n = names.size(s);
+    if n < t.len() || (!prefix && n != t.len()) {
+        return false;
+    }
+    for i in 0..t.len() {
+        if names.byte(s, i) != u8_at_slice(in t, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn u8_at_slice(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// Whether the label of pool row `pool` contains `text`.
+fn label_has(in p: Program, in names: Names, pool: u64, in text: Str) -> bool {
+    let s = p.pool_row(pool).label;
+    let t = text.as_bytes();
+    let n = names.size(s);
+    if n < t.len() {
+        return false;
+    }
+    for start in 0..inc(wrapping_sub(n, t.len())) {
+        let mut all = true;
+        for i in 0..t.len() {
+            if all && names.byte(s, add(start, i)) != u8_at_slice(in t, i) {
+                all = false;
+            }
+        }
+        if all {
+            return true;
+        }
+    }
+    false
+}
+
+// `seq_option_op`: a `Seq` operation that returns a two-word scalar
+// `Option[T]` (`Pop`, `Last`, a total wide read, a byte scan).
+fn seq_option_op(in p: Program, in names: Names, in sh: Shapes, k: u64, pool: u64) -> bool {
+    let kind = p.pool_row(pool).kind;
+    if sh.words(k) != 2 || (kind != 0 && kind != 7) {
+        return false;
+    }
+    if label_is(in p, in names, pool, "Pop", false)
+        || label_is(in p, in names, pool, "Last", false) {
+        return true;
+    }
+    if label_is(in p, in names, pool, "Wide(", true) {
+        return label_has(in p, in names, pool, "write: false")
+            && label_has(in p, in names, pool, "total: true");
+    }
+    label_is(in p, in names, pool, "SumBe16", false)
+        || label_is(in p, in names, pool, "BytesEq", false)
+        || label_is(in p, in names, pool, "BytesCmp", false)
+        || label_is(in p, in names, pool, "FindByte", false)
+        || label_is(in p, in names, pool, "FindEither", false)
+        || label_is(in p, in names, pool, "FindNotIn", false)
+        || label_is(in p, in names, pool, "EqIgnoreAsciiCase", false)
+        || label_is(in p, in names, pool, "ExtendAsciiLowercase", false)
+        || label_is(in p, in names, pool, "MakeAsciiLowercase {", true)
+}
+
+fn ban(in s: Syms, inout banned: ChunkSeq[u8], sym: u32) {
+    let li = s.local_of(sym);
+    if li != NONE32_64 {
+        set8(inout banned, li, 1);
+    }
+}
+
+// The places of an argument list at `at` (its roots), banned.
+fn ban_args(in p: Program, in s: Syms, inout banned: ChunkSeq[u8], at: u64) {
+    for j in 0..arg_count(in p, at) {
+        let root = p.op(arg_word(at, j, 2));
+        if root != 0 {
+            ban(in s, inout banned, n32(wrapping_sub(root, 1)));
+        }
+    }
+}
+
+// The local `sym` names, as its shape + 1 in `cl` (0 when it is not kept
+// as words).
+fn local_shape(in s: Syms, in cl: ChunkSeq[u64], sym: u32) -> u64 {
+    let li = s.local_of(sym);
+    if li == NONE32_64 {
+        0
+    } else {
+        u64_at(in cl, li)
+    }
+}
+
+// The scalar enums of graph `g` (`native_aggregates::scalar_enums` for a
+// top-level graph, with `returns` and `call_words` from the facts), as
+// `enum`, `enumlocal`, `enumcall` and `enumret` lines; nothing when the
+// graph keeps its enums in memory.
+fn scalar_enums(
+    inout e: Env,
+    inout c: Ctx,
+    in p: Program,
+    in g: G,
+    in s: Syms,
+    inout sh: Shapes,
+    inout o: ChunkSeq[u8]
+) {
+    let f = p.function(g.fi);
+    // Graphs with fip slots or `Box` drops keep the old lowering.
+    for i in 0..f.tn {
+        if p.op(add(f.ta, i)) != 0 {
+            return;
+        }
+    }
+    // Shapes of values (shape + 1, 0 for none) and the call facts.
+    let mut cv: ChunkSeq[u64] = filled64(g.nv, 0);
+    let mut any = false;
+    for v in 0..g.nv {
+        let t = u32_at(in g.vty, v);
+        if t != NONE32 {
+            let k = enum_shape(inout e, inout c, inout sh, t);
+            if k != NONE32_64 {
+                set64(inout cv, v, inc(k));
+                any = true;
+            }
+        }
+    }
+    if !any {
+        return;
+    }
+    if c.world.box_active {
+        for v in 0..g.nv {
+            let t = u32_at(in g.vty, v);
+            if t != NONE32 {
+                let d = default_type(inout c.types, t);
+                if mentions_box(in c, d, 0) {
+                    return;
+                }
+            }
+        }
+        for li in 0..g.lsym.len() {
+            let d = default_type(inout c.types, u32_at(in g.lty, li));
+            if mentions_box(in c, d, 0) {
+                return;
+            }
+        }
+    }
+    let nl = g.lsym.len();
+    let mut cl: ChunkSeq[u64] = filled64(nl, 0);
+    for li in 0..nl {
+        let sym = u32_at(in g.lsym, li);
+        if !s.has(sym, S_PARAM) && !s.has(sym, S_CAPTURE) {
+            let k = enum_shape(inout e, inout c, inout sh, u32_at(in g.lty, li));
+            if k != NONE32_64 {
+                set64(inout cl, li, inc(k));
+            }
+        }
+    }
+    // Locals some mention keeps in memory.
+    let mut banned: ChunkSeq[u8] = filled8(nl, 0);
+    let mut bound: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    // The call facts by graph instruction (1 when the callee returns the
+    // words of its result's shape).
+    let mut call_ok: ChunkSeq[u8] = filled8(g.ni, 0);
+    let mut calls = u64_at(in e.ca, g.fi);
+    for k in 0..g.ni {
+        let inst = p.inst(add(g.i0, k));
+        let a = inst.a;
+        let op = inst.op;
+        if op == Op::Call {
+            set8(inout call_ok, k, u8_at(in e.cflag, calls));
+            calls = inc(calls);
+        }
+        if op == Op::Read {
+            if p.op(inc(a)) != 0 || p.op(add(a, 3)) != 0 {
+                ban(in s, inout banned, n32(p.op(a)));
+            }
+        } else if op == Op::Write {
+            ban(in s, inout banned, place_root(inout c.names, n32(p.op(a))));
+        } else if op == Op::Bind {
+            if p.op(inc(a)) != Pat::Bind {
+                bound.clear();
+                pattern_binds(in p, inc(a), inout bound);
+                for i in 0..bound.len() {
+                    ban(in s, inout banned, u32_at(in bound, i));
+                }
+            }
+        } else if op == Op::Call
+            || op == Op::Indirect
+            || op == Op::Seq
+            || op == Op::Fip
+            || op == Op::Tiled {
+            ban_args(in p, in s, inout banned, inc(a));
+        } else if op == Op::Closure || op == Op::Handle {
+            let mut at = if op == Op::Handle {
+                add(a, 3)
+            } else {
+                inc(a)
+            };
+            let na = p.op(at);
+            for j in 0..na {
+                ban(in s, inout banned, n32(p.op(add(inc(at), wrapping_mul(j, 2)))));
+                ban(in s, inout banned, n32(p.op(add(add(at, 2), wrapping_mul(j, 2)))));
+            }
+            at = add(inc(at), wrapping_mul(na, 2));
+            let nm = p.op(at);
+            for j in 0..nm {
+                ban(in s, inout banned, n32(p.op(add(inc(at), wrapping_mul(j, 2)))));
+            }
+        }
+    }
+    let fa = u64_at(in e.free_a, g.fi);
+    for i in 0..u64_at(in e.free_n, g.fi) {
+        ban(in s, inout banned, u32_at(in e.free, add(fa, i)));
+    }
+    for li in 0..nl {
+        if u8_at(in banned, li) != 0 {
+            set64(inout cl, li, 0);
+        }
+    }
+    // Uses, by value: (kind, index) pairs ua[v]..ua[v]+un[v].
+    let mut un: ChunkSeq[u64] = filled64(g.nv, 0);
+    for i in 0..g.opv.len() {
+        let v = w(u32_at(in g.opv, i));
+        set64(inout un, v, inc(u64_at(in un, v)));
+    }
+    for i in 0..g.tv.len() {
+        let v = w(u32_at(in g.tv, i));
+        set64(inout un, v, inc(u64_at(in un, v)));
+    }
+    let mut ua: ChunkSeq[u64] = filled64(g.nv, 0);
+    let mut total: u64 = 0;
+    for v in 0..g.nv {
+        set64(inout ua, v, total);
+        total = add(total, u64_at(in un, v));
+    }
+    let mut ukind: ChunkSeq[u8] = filled8(total, 0);
+    let mut uat: ChunkSeq[u64] = filled64(total, 0);
+    let mut fill: ChunkSeq[u64] = filled64(g.nv, 0);
+    for k in 0..g.ni {
+        let a = u64_at(in g.oa, k);
+        for i in 0..u64_at(in g.on, k) {
+            let v = w(u32_at(in g.opv, add(a, i)));
+            let at = add(u64_at(in ua, v), u64_at(in fill, v));
+            set8(inout ukind, at, U_INST);
+            set64(inout uat, at, k);
+            set64(inout fill, v, inc(u64_at(in fill, v)));
+        }
+    }
+    for b in 0..g.nb {
+        let a = u64_at(in g.ta, b);
+        for i in 0..u64_at(in g.tn, b) {
+            let v = w(u32_at(in g.tv, add(a, i)));
+            let at = add(u64_at(in ua, v), u64_at(in fill, v));
+            set8(inout ukind, at, U_TERM);
+            set64(inout uat, at, b);
+            set64(inout fill, v, inc(u64_at(in fill, v)));
+        }
+    }
+    // The shape the graph returns as words (shape + 1, 0 for none).
+    let mut ret: u64 = 0;
+    if u8_at(in e.ret, g.fi) != 0 {
+        let k = enum_shape(inout e, inout c, inout sh, g.result);
+        if k != NONE32_64 {
+            ret = inc(k);
+        }
+    }
+    let mut drop_values: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut drop_locals: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    loop {
+        drop_values.clear();
+        drop_locals.clear();
+        for v in 0..g.nv {
+            let shape1 = u64_at(in cv, v);
+            if shape1 == 0 {
+                continue;
+            }
+            let k = wrapping_sub(shape1, 1);
+            let ok = value_def_ok(
+                inout c,
+                in p,
+                in g,
+                in s,
+                in sh,
+                in cv,
+                in cl,
+                in call_ok,
+                n32(v),
+                k
+            )
+                && value_uses_ok(
+                    inout c,
+                    in p,
+                    in g,
+                    in s,
+                    in sh,
+                    in cv,
+                    in cl,
+                    in ukind,
+                    in uat,
+                    u64_at(in ua, v),
+                    u64_at(in un, v),
+                    n32(v),
+                    k,
+                    ret
+                );
+            if !ok {
+                drop_values.push(n32(v));
+            }
+        }
+        for k in 0..g.ni {
+            let inst = p.inst(add(g.i0, k));
+            let a = inst.a;
+            if inst.op == Op::Bind && p.op(inc(a)) == Pat::Bind {
+                let li = s.local_of(n32(p.op(add(a, 4))));
+                if li != NONE32_64 && u64_at(in cl, li) != 0 && u64_at(in cv, p.op(a)) == 0 {
+                    drop_locals.push(li);
+                }
+            } else if inst.op == Op::Read {
+                let li = s.local_of(n32(p.op(a)));
+                if li != NONE32_64 && u64_at(in cl, li) != 0 && u64_at(in cv, w(inst.dest)) == 0 {
+                    drop_locals.push(li);
+                }
+            }
+        }
+        if drop_values.len() == 0 && drop_locals.len() == 0 {
+            break;
+        }
+        for i in 0..drop_values.len() {
+            set64(inout cv, w(u32_at(in drop_values, i)), 0);
+        }
+        for i in 0..drop_locals.len() {
+            set64(inout cl, u64_at(in drop_locals, i), 0);
+        }
+    }
+    // Only a value that some `match` or field binding takes apart is worth
+    // its words; a set that is only passed along keeps its storage.
+    let mut taken_apart = false;
+    let mut kept = false;
+    for v in 0..g.nv {
+        if u64_at(in cv, v) == 0 {
+            continue;
+        }
+        kept = true;
+        let a = u64_at(in ua, v);
+        for i in 0..u64_at(in un, v) {
+            let at = add(a, i);
+            let x = u64_at(in uat, at);
+            if u8_at(in ukind, at) == U_INST {
+                let inst = p.inst(add(g.i0, x));
+                if inst.op == Op::Bind && p.op(inc(inst.a)) == Pat::Constructor {
+                    taken_apart = true;
+                }
+            } else if p.block(add(g.b0, x)).term == Term::Match {
+                taken_apart = true;
+            }
+        }
+    }
+    if !kept || (!taken_apart && ret == 0) {
+        return;
+    }
+    // The words of each value: a constructor's field values, else fresh
+    // values after the graph's largest id.
+    let mut next: u64 = 0;
+    let mut seen = false;
+    for v in 0..g.nv {
+        if u32_at(in g.vty, v) != NONE32 {
+            next = v;
+            seen = true;
+        }
+    }
+    for b in 0..g.nb {
+        for k in 0..u64_at(in g.pn, b) {
+            let x = w(g.param(b, k));
+            if !seen || x > next {
+                next = x;
+                seen = true;
+            }
+        }
+    }
+    for k in 0..g.ni {
+        let x = w(p.inst(add(g.i0, k)).dest);
+        if !seen || x > next {
+            next = x;
+            seen = true;
+        }
+    }
+    if seen {
+        next = inc(next);
+    }
+    for v in 0..g.nv {
+        let shape1 = u64_at(in cv, v);
+        if shape1 == 0 {
+            continue;
+        }
+        let k = wrapping_sub(shape1, 1);
+        put(inout o, "enum v");
+        push_decimal(inout o, v);
+        let mut variant = NONE32_64;
+        let mut data: u64 = 0;
+        let db = u32_at(in g.def_b, v);
+        if db != NONE32 {
+            let ii = add(g.i0, def_index(in p, in g, n32(v)));
+            let inst = p.inst(ii);
+            if inst.op == Op::Data {
+                let short = short_name(inout c.names, n32(p.op(inst.a)));
+                variant = sh.variant(k, short);
+                data = inst.a;
+            }
+        }
+        for word in 0..sh.words(k) {
+            let mut id = NONE32_64;
+            if variant != NONE32_64 {
+                let fi = sh.word_field(variant, word);
+                if fi != NONE32_64 {
+                    let name = u32_at(in sh.fname, fi);
+                    let n = p.op(inc(data));
+                    for j in 0..n {
+                        if id == NONE32_64
+                            && n32(p.op(add(add(data, 2), wrapping_mul(j, 2)))) == name {
+                            id = p.op(add(add(data, 3), wrapping_mul(j, 2)));
+                        }
+                    }
+                }
+            }
+            if id == NONE32_64 {
+                id = next;
+                next = inc(next);
+            }
+            put(inout o, " v");
+            push_decimal(inout o, id);
+        }
+        o.push(10);
+    }
+    for li in 0..nl {
+        if u64_at(in cl, li) != 0 {
+            put(inout o, "enumlocal ");
+            c.names.write(u32_at(in g.lsym, li), inout o);
+            o.push(10);
+        }
+    }
+    // A value is defined once in SSA, but an inlined graph can repeat a
+    // call's destination: each value once, as Rust's map has it.
+    let mut called: ChunkSeq[u8] = filled8(g.nv, 0);
+    for k in 0..g.ni {
+        let inst = p.inst(add(g.i0, k));
+        if (inst.op == Op::Call || inst.op == Op::Seq) && u64_at(in cv, w(inst.dest)) != 0 {
+            set8(inout called, w(inst.dest), 1);
+        }
+    }
+    for v in 0..g.nv {
+        if u8_at(in called, v) != 0 {
+            put(inout o, "enumcall v");
+            push_decimal(inout o, v);
+            o.push(10);
+        }
+    }
+    let mut returned: ChunkSeq[u8] = filled8(g.nv, 0);
+    for b in 0..g.nb {
+        if p.block(add(g.b0, b)).term == Term::Return && u64_at(in g.tn, b) == 1 {
+            let v = w(u32_at(in g.tv, u64_at(in g.ta, b)));
+            if u64_at(in cv, v) != 0 {
+                set8(inout returned, v, 1);
+            }
+        }
+    }
+    for v in 0..g.nv {
+        if u8_at(in returned, v) != 0 {
+            put(inout o, "enumret v");
+            push_decimal(inout o, v);
+            o.push(10);
+        }
+    }
+}
+
+// The graph index of the instruction defining `v` (which has one).
+fn def_index(in p: Program, in g: G, v: u32) -> u64 {
+    let b = w(u32_at(in g.def_b, w(v)));
+    let blk = p.block(add(g.b0, b));
+    add(wrapping_sub(blk.i0, g.i0), w(u32_at(in g.def_i, w(v))))
+}
+
+// The index of `v` among the parameters of block `b`.
+fn param_index(in g: G, b: u64, v: u32) -> u64 {
+    for k in 0..u64_at(in g.pn, b) {
+        if g.param(b, k) == v {
+            return k;
+        }
+    }
+    NONE32_64
+}
+
+// Whether `v`'s definition keeps shape `k` (`def_ok`).
+fn value_def_ok(
+    inout c: Ctx,
+    in p: Program,
+    in g: G,
+    in s: Syms,
+    in sh: Shapes,
+    in cv: ChunkSeq[u64],
+    in cl: ChunkSeq[u64],
+    in call_ok: ChunkSeq[u8],
+    v: u32,
+    k: u64
+) -> bool {
+    let shape1 = inc(k);
+    if u32_at(in g.def_b, w(v)) != NONE32 {
+        let gi = def_index(in p, in g, v);
+        let inst = p.inst(add(g.i0, gi));
+        let a = inst.a;
+        if inst.op == Op::Data {
+            let short = short_name(inout c.names, n32(p.op(a)));
+            let var = sh.variant(k, short);
+            if var == NONE32_64 {
+                return false;
+            }
+            let n = p.op(inc(a));
+            if u64_at(in sh.fnum, var) != n {
+                return false;
+            }
+            let f0 = u64_at(in sh.fa, var);
+            for i in 0..u64_at(in sh.fnum, var) {
+                let name = u32_at(in sh.fname, add(f0, i));
+                let mut found = false;
+                for j in 0..n {
+                    if n32(p.op(add(add(a, 2), wrapping_mul(j, 2)))) == name {
+                        found = true;
+                    }
+                }
+                if !found {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if inst.op == Op::Read {
+            return local_shape(in s, in cl, n32(p.op(a))) == shape1;
+        }
+        if inst.op == Op::Call {
+            // `capability` is the last operand word of a call.
+            let at = inc(a);
+            let nargs = arg_count(in p, at);
+            let types_at = add(inc(at), wrapping_mul(nargs, 4));
+            let nt = p.op(types_at);
+            let cap = p.op(add(inc(types_at), nt));
+            return cap == 0 && u8_at(in call_ok, gi) != 0;
+        }
+        if inst.op == Op::Seq {
+            return seq_option_op(in p, in c.names, in sh, k, p.op(a));
+        }
+        return false;
+    }
+    let b = u32_at(in g.param_b, w(v));
+    if b == NONE32 {
+        return false;
+    }
+    let pos = param_index(in g, w(b), v);
+    let qa = u64_at(in g.qa, w(b));
+    let qn = u64_at(in g.qn, w(b));
+    if qn == 0 {
+        return false;
+    }
+    for i in 0..qn {
+        let pred = w(u32_at(in g.preds, add(qa, i)));
+        if p.block(add(g.b0, pred)).term != Term::Jump {
+            return false;
+        }
+        // A jump's terminator operands are its arguments.
+        if pos >= u64_at(in g.tn, pred) {
+            return false;
+        }
+        let arg = w(u32_at(in g.tv, add(u64_at(in g.ta, pred), pos)));
+        if u64_at(in cv, arg) != shape1 {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether every use of `v` keeps shape `k` (`uses_ok`).
+fn value_uses_ok(
+    inout c: Ctx,
+    in p: Program,
+    in g: G,
+    in s: Syms,
+    in sh: Shapes,
+    in cv: ChunkSeq[u64],
+    in cl: ChunkSeq[u64],
+    in ukind: ChunkSeq[u8],
+    in uat: ChunkSeq[u64],
+    ua: u64,
+    un: u64,
+    v: u32,
+    k: u64,
+    ret: u64
+) -> bool {
+    let shape1 = inc(k);
+    for i in 0..un {
+        let at = add(ua, i);
+        let x = u64_at(in uat, at);
+        if u8_at(in ukind, at) == U_INST {
+            let inst = p.inst(add(g.i0, x));
+            if inst.op != Op::Bind {
+                return false;
+            }
+            let q = inc(inst.a);
+            let kind = p.op(q);
+            if kind == Pat::Bind {
+                if local_shape(in s, in cl, n32(p.op(add(q, 3)))) != shape1 {
+                    return false;
+                }
+            } else if kind == Pat::Constructor {
+                if !word_fields(inout c, in p, in sh, k, q) {
+                    return false;
+                }
+            } else if kind != Pat::Wild {
+                return false;
+            }
+        } else {
+            let blk = p.block(add(g.b0, x));
+            let t = blk.ta;
+            if blk.term == Term::Jump {
+                let target = p.op(t);
+                let n = p.op(inc(t));
+                let np = u64_at(in g.pn, target);
+                for j in 0..n {
+                    if j < np && n32(p.op(add(add(t, 2), j))) == v {
+                        if u64_at(in cv, w(g.param(target, j))) != shape1 {
+                            return false;
+                        }
+                    }
+                }
+            } else if blk.term == Term::Match {
+                let n = p.op(inc(t));
+                let mut q = add(t, 2);
+                for j in 0..n {
+                    let kind = p.op(q);
+                    if kind == Pat::Constructor {
+                        if !word_fields(inout c, in p, in sh, k, q) {
+                            return false;
+                        }
+                    } else if kind != Pat::Wild {
+                        return false;
+                    }
+                    q = inc(pattern_end(in p, q));
+                }
+            } else if blk.term == Term::Return {
+                if ret != shape1 {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn function_decisions(
     inout e: Env,
     inout c: Ctx,
     in p: Program,
     inout s: Syms,
     fi: u64,
+    inout sh: Shapes,
     inout o: ChunkSeq[u8]
 ) {
     let mut g = graph_of(in p, inout c, inout s, fi);
@@ -4083,6 +5034,7 @@ fn function_decisions(
             }
         }
     }
+    scalar_enums(inout e, inout c, in p, in g, in s, inout sh, inout o);
     s.reset();
 }
 
@@ -4097,13 +5049,14 @@ pub fn aggregate_decisions(in input: Str) -> ChunkSeq[u64] {
     let p = read_program(inout r, in b, in c);
     let mut e = read_env(inout r, in b, inout c.names, p.fn_count());
     let mut s = syms_new();
+    let mut sh = shapes_new();
     let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
     for fi in 0..p.fn_count() {
         let name = p.function(fi).name;
         if (e.fn_bits(name) & FN_FIP) != 0 {
             continue;
         }
-        function_decisions(inout e, inout c, in p, inout s, fi, inout o);
+        function_decisions(inout e, inout c, in p, inout s, fi, inout sh, inout o);
     }
     pack_text(in o)
 }
