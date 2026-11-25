@@ -256,3 +256,14 @@ The first of Pulse's real I/O drivers moves to Vesper: `readiness.rs` over
 The Rust driver stays until the runtime's `run` step stops using it. Next:
 kqueue (macOS, needs `fstat` for the regular-file check), then io_uring
 and AFD.
+
+## Pulse: the kqueue completion driver (#1946)
+
+The macOS copy gets the same driver over kqueue, as `kqueue_driver_*`.
+
+- `fstat` sends regular files to inline `pread`/`pwrite`. A registration that answers `EINVAL`, `ENODEV` or `ENOTSUP` is also treated as always ready.
+- Streams use `EV_ADD | EV_ONESHOT`. The kernel drops a filter once it fires, so release does nothing.
+- `EV_DELETE` treats `ENOENT` as success, because the filter may have fired and been removed before the driver collected it.
+- A fired event that carries `EV_ERROR` reports its error, and the event's token is still serviced.
+- PulseSys (macOS) now declares one variadic `fcntl` in place of `fcntl_setfd`. Apple arm64 passes variadic arguments on the stack, so the old fixed-argument declaration passed them in the wrong place. It also adds `fstat` with a 144-byte `Stat`, and `read`, `write`, `pread` and `pwrite`.
+- The scenario test now runs on both Linux and macOS (`readiness_completion_driver_matches_rust`). The macOS Platforms job had never run `tests/pulse_port.rs`, including the existing kqueue roundtrip test; it runs it now.

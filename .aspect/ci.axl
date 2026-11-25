@@ -17,3 +17,11 @@ platform_tests = command_task(
     "python3",
     ["-m", "unittest", "discover", "-s", "scripts/ci/tests", "-p", "test_platform*.py"],
 )
+
+pulse_port_tests = command_task(
+    "test-pulse-port",
+    ["ci"],
+    "Run the @vesper/pulse port differentials against vesper_pulse",
+    "cargo",
+    ["test", "--locked", "--test", "pulse_port"],
+)
