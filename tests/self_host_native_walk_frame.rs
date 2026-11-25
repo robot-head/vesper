@@ -19,10 +19,11 @@
 //! the package refuses it too (a declaration refusal); the test counts the
 //! rest as unverified, as the calls test does.
 //!
-//! Part 3b (`the_frame_plans_swap_matches_rust`) installs the package at
-//! the `frame_plans` swap hook of `vesper::codegen_swap`, so the walk emits
-//! each entry block from the Vesper plan, and proves 0 CLIF and 0 object
-//! diffs against the Rust plans.
+//! Part 3b (`the_entry_plans_swap_matches_rust`) installs the package at
+//! the `entry_plans` swap hook of `vesper::codegen_swap`, so the walk emits
+//! each entry block from the Vesper plan and (part 4a) takes the internal
+//! calling conventions from it in place of `NativeAbi::plan`, and proves 0
+//! CLIF and 0 object diffs against the Rust plans.
 //!
 //! `NATIVE_WALK_FRAME_STEP` (default 4) takes every n-th corpus world and
 //! `NATIVE_WALK_FRAME_ENTRIES` (default 2 on the corpus, 4 on the test
@@ -113,6 +114,8 @@ fn vesper_task(block: &str) -> (BTreeMap<String, String>, Option<String>) {
         if let Some(k) = l.strip_prefix("F ") {
             key = Some(k.to_string());
             frames.insert(k.to_string(), String::new());
+        } else if l.starts_with("B ") {
+            // The internal convention (part 4a), checked by the swap test.
         } else if let Some(e) = l.strip_prefix("X ") {
             err = Some(e.to_string());
             key = None;
@@ -318,21 +321,21 @@ static SWAP_PLANS: AtomicU64 = AtomicU64::new(0);
 /// Nanoseconds spent in the hook (encoding, the package, decoding).
 static SWAP_NANOS: AtomicU64 = AtomicU64::new(0);
 
-/// The `frame_plans` hook: the package plans the one task.
-fn vesper_frame_plans(
+/// The `entry_plans` hook: the package plans the one task.
+fn vesper_entry_plans(
     world: &World,
     program: &Program,
     entry: &str,
     optimize: bool,
-) -> Option<BTreeMap<String, native::FramePlan>> {
+) -> Option<native::EntryPlans> {
     SWAP_CALLS.fetch_add(1, Ordering::Relaxed);
     let start = Instant::now();
     let plans = calls_input(world, program, &[(entry.to_string(), optimize)])
-        .and_then(|input| native_walk_words::decode_frames(&frames_entry().words(&input)));
+        .and_then(|input| native_walk_words::decode_entry_plans(&frames_entry().words(&input)));
     SWAP_NANOS.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     let plans = plans?;
     SWAP_ANSWERED.fetch_add(1, Ordering::Relaxed);
-    SWAP_PLANS.fetch_add(plans.len() as u64, Ordering::Relaxed);
+    SWAP_PLANS.fetch_add(plans.frames.len() as u64, Ordering::Relaxed);
     Some(plans)
 }
 
@@ -351,14 +354,14 @@ fn frame_plan_text_round_trips() {
     );
 }
 
-/// With the package at the `frame_plans` hook, every entry compile of the
+/// With the package at the `entry_plans` hook, every entry compile of the
 /// sampled corpus worlds and the test sources gives Rust's CLIF and object.
 #[test]
-fn the_frame_plans_swap_matches_rust() {
+fn the_entry_plans_swap_matches_rust() {
     let (compiled, bad, calls, answered, plans, times) = big_stack(|| {
         let _ = frames_entry();
         let hooks = CodegenHooks {
-            frame_plans: Some(vesper_frame_plans),
+            entry_plans: Some(vesper_entry_plans),
             ..CodegenHooks::default()
         };
         let step = env_or("NATIVE_WALK_FRAME_STEP", 4);
@@ -434,7 +437,7 @@ fn the_frame_plans_swap_matches_rust() {
         )
     });
     eprintln!(
-        "frame_plans swap: {compiled} compiles, {bad} differ; hook asked {calls}, \
+        "entry_plans swap: {compiled} compiles, {bad} differ; hook asked {calls}, \
          answered {answered}, {plans} Vesper plans; compiles {:?} Rust, {:?} hooked \
          ({:?} in the hook)",
         times.0, times.1, times.2
