@@ -73,6 +73,17 @@ fn shr(x: u64, s: u64) -> u64 {
     }
 }
 
+// `x << s` and `x >> s` for an amount the caller knows is below 64 (a
+// level offset or span, at most `levels * slot_bits <= 63` by the
+// configuration check): no range test.
+fn shl_in(x: u64, s: u64) -> u64 {
+    wrapping_shl_u64(x, wrapping_u32(s))
+}
+
+fn shr_in(x: u64, s: u64) -> u64 {
+    wrapping_shr_u64(x, wrapping_u32(s))
+}
+
 // `a / b` for `b > 0` (every divisor is a validated tick width or slot
 // width), and 0 for `b == 0`.
 // The `b != 0` test lets the checker prove the division total, so there is
@@ -108,8 +119,6 @@ fn saturating_mul(a: u64, b: u64) -> u64 {
 // A sequence of `n` copies of `v`, allocated once.
 fn filled(n: u64, v: u64) -> ChunkSeq[u64] {
     let mut s: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
-    for i in 0..n {
-        s.push(v);
-    }
+    s.resize(n, v);
     s
 }

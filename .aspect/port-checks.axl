@@ -325,7 +325,7 @@ lint_test_port = port_checks(
     "lint",
     "test-port",
     [
-        ["-p", "vesper-lint", "-p", "vesper-lint-seed"],
+        ["-p", "vesper-lint", "-p", "vesper-lint-seed", "--", "--skip", "port_frees_its_allocations"],
         ["-p", "vesper-lint", "--features", "vesper-port", "--", "--skip", "port_frees_its_allocations"],
         ["-p", "vesper-lint", "--features", "vesper-port", "--test", "differential", "--", "--exact", "port_frees_its_allocations"],
     ],

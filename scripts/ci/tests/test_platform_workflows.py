@@ -31,6 +31,12 @@ class PlatformWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    @unittest.skipUnless(shutil.which("aspect") and shutil.which("cargo"), "Aspect or Cargo unavailable")
+    def test_divergent_features_link_the_port_in_the_current_workspace(self):
+        result = subprocess.run(["aspect", "ci", "tests", "port-divergent-features"],
+                                cwd=ROOT, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_platform_workflow_selects_ports_natively_with_historical_fallback(self):
         plan = self.platforms["jobs"]["plan"]
         steps = {step.get("id"): step for step in plan["steps"]}
@@ -101,7 +107,7 @@ class PlatformWorkflowTests(unittest.TestCase):
             checkout = next(s for s in job["steps"] if s.get("uses") == "actions/checkout@v4")
             self.assertEqual(checkout["with"]["ref"], "${{ needs.plan.outputs.sha }}")
             self.assertTrue(any(s.get("name") == "Verify exact checkout" for s in job["steps"]))
-        self.assertEqual(mac["timeout-minutes"], "60")
+        self.assertEqual(mac["timeout-minutes"], "120")
         self.assertEqual(windows["timeout-minutes"], "120")
         for job, command in [(mac, "aspect ci verify-platform-checkout"),
                              (windows, "./scripts/windows/verify-platform-checkout.ps1")]:
@@ -220,9 +226,16 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertEqual(step["env"]["VESPER_PORT_COMPILER"], "${{ runner.temp }}/port-compiler/vesper")
         self.assertEqual(step["env"]["VESPER_PORT_HARNESS_CRATES"], "${{ needs.plan.outputs.ports }}")
         self.assertNotIn("cargo build", "\n".join(s.get("run", "") for s in ports["steps"]))
-        # Seven shards (#1019, #1100), each running its own part of the harness.
-        shards = [str(n) for n in range(1, 8)]
-        self.assertEqual(ports["strategy"]["matrix"]["shard"], shards)
+        # Nine shards (#1019, #1100, #1924), each running its own part of the harness.
+        shards = [str(n) for n in range(1, 10)]
+        self.assertEqual(ports["strategy"]["matrix"]["shard"], "${{ fromJSON(needs.plan.outputs.shards || '[1]') }}")
+        plan = self.platforms["jobs"]["plan"]
+        self.assertEqual(plan["outputs"]["shards"], "${{ steps.shards.outputs.shards || steps.historical_shards.outputs.shards }}")
+        steps = {step.get("id"): step for step in plan["steps"]}
+        self.assertEqual(steps["shards"]["run"], "aspect ci port-shard-matrix")
+        self.assertIn("!= ''", steps["shards"]["if"])
+        self.assertIn("== ''", steps["historical_shards"]["if"])
+        self.assertEqual(steps["historical_shards"]["env"]["PORT_HARNESS_ROOT"], "${{ github.workspace }}")
         self.assertEqual(ports["strategy"]["fail-fast"], "false")
         self.assertEqual(step["env"]["VESPER_PORT_HARNESS_SHARD"], "${{ matrix.shard }}")
         self.assertIn("ports", jobs["complete"]["needs"])
@@ -238,6 +251,9 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertEqual(len(shards_plan), len(shards))
         self.assertTrue(all(shards_plan))
         self.assertEqual(shards_plan[-1][-1]["task"], ["crate", "vault", "check"])
+        self.assertEqual(shards_plan[6][-1]["task"], ["crate", "diagnostics", "test-port"])
+        self.assertEqual(shards_plan[7][-1]["task"], ["crate", "lint", "test-port"])
+        self.assertEqual(shards_plan[8][0]["task"], ["crate", "sim-session", "test-port"])
 
     def test_plan_failure_fails_required_jobs(self):
         for result in ("failure", "cancelled", "skipped", ""):

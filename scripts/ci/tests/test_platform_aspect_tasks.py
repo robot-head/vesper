@@ -480,6 +480,8 @@ args = sys.argv[1:]
 area = os.environ.get("VESPER_LINT_DIVERGE")
 assert args[:4] == ["test", "--locked", "-p", "vesper-lint"]
 if not area:
+    if args[4:6] == ["-p", "vesper-lint-seed"]:
+        assert args[6:] == ["--", "--skip", "port_frees_its_allocations"]
     sys.exit(0)
 assert args[4:] == ["--features", "vesper-port,vesper-port-divergent", "--no-fail-fast",
                     "--test", "differential", "--test", "typed", "--test", "policy", "--test", "modes",
@@ -1079,6 +1081,56 @@ print(Path("metadata.json").read_text())
         git("mv", "crates/source/file with spaces λ.rs", "docs/renamed.md")
         git("commit", "-qm", "move a port file to documentation")
         self.assertEqual(self.aspect(*scoped, env=env).stdout, "last middle source\n")
+
+    def test_port_shard_matrix_uses_the_selected_current_or_historical_checkout(self):
+        self.copy_fixture("scripts/port-harness-plan.json")
+        output = self.write("matrix output", "previous=kept\n")
+        env = {"GITHUB_OUTPUT": str(output)}
+        command = ("ci", "port-shard-matrix")
+        expected = list(range(1, 10))
+        self.assertEqual(json.loads(self.aspect(*command, env=env).stdout), expected)
+        old = self.write("historical checkout/scripts/test-port-harness.sh",
+                         "# Archived harness fixture\nshards=7\n")
+        old_root = old.parents[1]
+        historical = {**env, "PORT_HARNESS_ROOT": str(old_root)}
+        for count in (7, 9):
+            old.write_text(f"shards={count}\n")
+            self.assertEqual(json.loads(self.aspect(*command, env=historical).stdout),
+                             list(range(1, count + 1)))
+        self.assertEqual(output.read_text().splitlines()[0], "previous=kept")
+        self.assertEqual(json.loads(output.read_text().splitlines()[-1].partition("=")[2]), expected)
+        old.write_text("shards=0\n")
+        self.aspect(*command, env=historical, status=1)
+        old.write_text("shards=unknown\n")
+        self.assertIn("Could not determine", self.aspect(*command, env=historical, status=1).stderr)
+        self.aspect(*command, env={"GITHUB_OUTPUT": ""}, status=2)
+
+    def test_divergent_feature_guard_requires_the_cfg_selected_library(self):
+        cargo = self.write("bin/cargo", """\
+#!/usr/bin/env python3
+import sys
+from pathlib import Path
+assert sys.argv[1:] == ["metadata", "--locked", "--no-deps", "--format-version", "1"]
+print(Path("fixture metadata.json").read_text())
+""", executable=True)
+        self.write("crates/guarded/src/nested/module.rs", '#[cfg(feature\n =\n "vesper-port")]\nfn port() {}\n')
+        self.write("crates/unconditional/src/lib.rs", "fn port() {}\n")
+        self.write("crates/unconditional/tests/fixture.rs", '#[cfg(feature = "vesper-port")]\nfn fixture() {}\n')
+        def metadata(features):
+            self.write("fixture metadata.json", json.dumps({
+                "workspace_root": str(self.root),
+                "packages": [{"manifest_path": str(self.root / "crates" / name / "Cargo.toml"),
+                              "features": {"vesper-port-divergent": flags}}
+                             for name, flags in [("guarded", features), ("unconditional", [])]],
+            }))
+        env = {"PATH": os.pathsep.join([str(cargo.parent), os.environ["PATH"]])}
+        command = ("ci", "tests", "port-divergent-features")
+        metadata(["vesper-port"])
+        self.assertIn("1 feature-gated ports", self.aspect(*command, env=env).stdout)
+        metadata([])
+        result = self.aspect(*command, env=env, status=1)
+        self.assertIn("vesper-port-divergent must enable vesper-port", result.stderr)
+        self.assertIn("/guarded/Cargo.toml", result.stderr)
 
     def test_bazel_workspace_sync_checks_and_creates_only_missing_members(self):
         cargo = self.write("bin/cargo", """\

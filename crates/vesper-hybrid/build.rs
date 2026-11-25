@@ -1,6 +1,7 @@
 //! Compile each swapped compiler module's Vesper package with the default
 //! `vesper` executable and link it (vesper-port-harness), checking its
-//! committed binding. See docs/parallel-results/self-host-hybrid-build.md.
+//! committed binding, and list the swap files of `src/swap/` for
+//! `src/hybrid.rs`. See docs/parallel-results/self-host-hybrid-build.md.
 //!
 //! Bazel builds every module object with `vesper_port_object` and passes it
 //! as `VESPER_HYBRID_OBJECT_<MODULE>` (and the generated binding as
@@ -9,149 +10,76 @@
 //! handed to it in turn.
 use vesper_port_harness::{GENERATED_BINDING_ENV, OBJECT_ENV, Port};
 
-/// The swapped modules: (library, Vesper package, committed binding).
-/// SH1+ lanes append theirs (recipe in the report).
-const MODULES: &[(&str, &str, &str)] = &[
-    ("hybrid_layout", "modules/layout", "port/layout.rs"),
-    ("hybrid_parse", "modules/parse", "port/parse.rs"),
-    // SH2 lane 5 (#1177): the whole layout and the IR check.
-    (
-        "hybrid_check_layout",
-        "modules/check_layout",
-        "port/check_layout.rs",
-    ),
-    ("hybrid_ir_check", "modules/ir_check", "port/ir_check.rs"),
-    // SH5 lane 12 (#1335): the driver, the binary's entry point.
-    ("hybrid_driver", "modules/driver", "port/driver.rs"),
-    // SH5 lane 10 (#1333): both checker swaps in one library over one
-    // shared world, with word answers.
-    ("hybrid_checks", "modules/checks", "port/checks.rs"),
-    // SH2 lane 10 (#1182): the stack-bound report.
-    (
-        "hybrid_stack_bound",
-        "modules/stack_bound",
-        "port/stack_bound.rs",
-    ),
-    // SH4 lane 1 (#1275): the census lowering family, emitted through
-    // lent Cranelift handles.
-    ("hybrid_codegen", "modules/codegen", "port/codegen.rs"),
-    // SH4 lane 7 (#1281): the call instructions of native lowering.
-    (
-        "hybrid_codegen_calls",
-        "modules/codegen_calls",
-        "port/codegen_calls.rs",
-    ),
-    // SH4 lane 15 (#1289): the wasm backend's core module and WIT.
-    (
-        "hybrid_wasm_backend",
-        "modules/wasm_backend",
-        "port/wasm_backend.rs",
-    ),
-    // SH4 lane 16 (#1290): the eBPF backend.
-    (
-        "hybrid_ebpf_backend",
-        "modules/ebpf_backend",
-        "port/ebpf_backend.rs",
-    ),
-    // SH4 lane 14 (#1288): freestanding stubs, linker, trap table and scripts.
-    (
-        "hybrid_freestanding",
-        "modules/freestanding",
-        "port/freestanding.rs",
-    ),
-    // SH4 lane 17 (#1291): backend verifiers (const-time, stack, realtime, detfloat).
-    (
-        "hybrid_backend_checks",
-        "modules/backend_checks",
-        "port/backend_checks.rs",
-    ),
-    // Rust-exit gap wave 1 lane 11 (#1509): native walk register_locals plan.
-    (
-        "hybrid_codegen_walk",
-        "modules/codegen_walk",
-        "port/codegen_walk.rs",
-    ),
-    // SH4 lane 8 (#1282): drop glue of boxed values, through the `drops` hook.
-    (
-        "hybrid_codegen_drops",
-        "modules/codegen_drops",
-        "port/codegen_drops.rs",
-    ),
-    // SH4 lane 11 (#1285): vector and TiledSeq operations, through the
-    // `numeric` hook.
-    (
-        "hybrid_codegen_numeric",
-        "modules/codegen_numeric",
-        "port/codegen_numeric.rs",
-    ),
-    // SH4 lane 6 (#1280): scalars, locals and control flow, through the
-    // `scalar` hook.
-    (
-        "hybrid_codegen_scalar",
-        "modules/codegen_scalar",
-        "port/codegen_scalar.rs",
-    ),
-    // SH4 lane 9 (#1283): ChunkSeq and Slice operations, through the `seq` hook.
-    (
-        "hybrid_codegen_seq",
-        "modules/codegen_seq",
-        "port/codegen_seq.rs",
-    ),
-    // SH4 lane 10 (#1284): closures, handlers and effect calls, through the
-    // `control` hook.
-    (
-        "hybrid_codegen_control",
-        "modules/codegen_control",
-        "port/codegen_control.rs",
-    ),
-    // SH4 lane 13 (#1287): foreign (.vsys) call emission, through the `ffi` hook.
-    (
-        "hybrid_ffi_lowering",
-        "modules/ffi_lowering",
-        "port/ffi_lowering.rs",
-    ),
-    // SH4 lane 12 (#1286): the export ABI v2 glue over the lent module.
-    (
-        "hybrid_codegen_export",
-        "modules/codegen_export",
-        "port/codegen_export.rs",
-    ),
-    // SH5 lane 14 (#1337): test discovery of `vesper test`.
-    (
-        "hybrid_test_runner",
-        "modules/test_runner",
-        "port/test_runner.rs",
-    ),
-    // SH3 lane 11 (#1250): the inliner, through `ir_swap`'s `inline` hook.
-    ("hybrid_ir_inline", "modules/ir_inline", "port/ir_inline.rs"),
-    // SH3 lane 10 (#1249): the AST optimizer's producer and checker,
-    // through `optimize`'s table.
-    ("hybrid_optimize", "modules/optimize", "port/optimize.rs"),
-    // SH3 lane 9 (#1248): the IR optimizer, through `ir_swap`'s `opt` hook.
-    ("hybrid_ir_opt", "modules/ir_opt", "port/ir_opt.rs"),
-    // SH3 lane 1 (#1240): the IR swap point's identity round trip.
-    ("hybrid_place_ir", "modules/place_ir", "port/place_ir.rs"),
-    // SH3 lane 12 (#1251): bounds hoisting through the `hoist` hook.
-    (
-        "hybrid_bounds_hoist",
-        "modules/bounds_hoist",
-        "port/bounds_hoist.rs",
-    ),
-    // SH2 lane 13 (#1185): the declaration pass of the trait frontend.
-    ("hybrid_pact", "modules/pact", "port/pact.rs"),
-    // SH2 lane 14 (#1186): the tensor type checker.
-    (
-        "hybrid_tensor_types",
-        "modules/tensor_types",
-        "port/tensor_types.rs",
-    ),
-    // SH2 lane 8 (#1180): capability effect rules (`capability_effects::check_world`).
-    ("hybrid_effects", "modules/effects", "port/effects.rs"),
-    // SH2 lane 12 (#1184): fip checks (`fip::check_world`).
-    ("hybrid_fip", "modules/fip", "port/fip.rs"),
-    // SH5 lane 15 (#1338): the doc renderers.
-    ("hybrid_doc", "modules/doc", "port/doc.rs"),
-];
+/// This package's directory.
+fn manifest_dir() -> std::path::PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR")
+        .into()
+}
+
+/// The swapped modules, one per directory of `modules/` (#1897): library
+/// `hybrid_<dir>`, Vesper package `modules/<dir>`, committed binding
+/// `port/<dir>.rs`. A new module is a new directory; nothing here lists it.
+fn modules() -> Vec<(String, String, String)> {
+    let mut dirs: Vec<String> = std::fs::read_dir(manifest_dir().join("modules"))
+        .expect("read modules/")
+        .map(|e| e.expect("read modules/"))
+        .filter(|e| e.path().join("Loom.toml").is_file())
+        .map(|e| e.file_name().into_string().expect("a UTF-8 module name"))
+        .collect();
+    dirs.sort();
+    dirs.into_iter()
+        .map(|d| {
+            (
+                format!("hybrid_{d}"),
+                format!("modules/{d}"),
+                format!("port/{d}.rs"),
+            )
+        })
+        .collect()
+}
+
+/// Writes `$OUT_DIR/swap_registry.rs` (#1897): `mod <file>` for every file
+/// of `src/swap/` and `SWAP_FILES`, the list `src/hybrid.rs` installs and
+/// reports from, in file-name order. A new swap is a new file; nothing
+/// here or in `src/hybrid.rs` lists it.
+fn swap_registry() {
+    println!("cargo:rerun-if-changed=src/swap");
+    let mut names: Vec<String> = std::fs::read_dir(manifest_dir().join("src/swap"))
+        .expect("read src/swap/")
+        .map(|e| {
+            e.expect("read src/swap/")
+                .file_name()
+                .into_string()
+                .expect("a UTF-8 file name")
+        })
+        .filter_map(|n| n.strip_suffix(".rs").map(str::to_owned))
+        .collect();
+    names.sort();
+    let mut out = String::from("// @generated by build.rs `swap_registry` from src/swap/.\n");
+    for n in &names {
+        assert!(
+            n.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                && n.starts_with(|c: char| c.is_ascii_lowercase()),
+            "src/swap/{n}.rs: swap file names are lower-case Rust identifiers"
+        );
+        out += &format!(
+            "mod {n} {{\n    include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/swap/{n}.rs\"));\n}}\n"
+        );
+    }
+    out +=
+        "/// Every file of `src/swap/`, in file-name order.\nconst SWAP_FILES: &[SwapFile] = &[\n";
+    for n in &names {
+        out += &format!(
+            "    SwapFile {{\n        name: \"{n}\",\n        swaps: {n}::SWAPS,\n        register: {n}::register,\n        report: {n}::report,\n    }},\n"
+        );
+    }
+    out += "];\n";
+    let path = std::path::Path::new(&std::env::var_os("OUT_DIR").expect("OUT_DIR"))
+        .join("swap_registry.rs");
+    std::fs::write(&path, out).expect("write swap_registry.rs");
+}
 
 /// The divergence check of the differential harness: the enum tag word
 /// takes two words, so every enum layout moves (mirrored in BUILD.bazel).
@@ -270,7 +198,10 @@ const DIVERGENT_PARSE_EDIT: (&str, &str) = (
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    for (library, package, binding) in MODULES {
+    println!("cargo:rerun-if-changed=modules");
+    swap_registry();
+    for (library, package, binding) in &modules() {
+        let library = library.as_str();
         let key = library.to_ascii_uppercase();
         let object = format!("VESPER_HYBRID_OBJECT_{key}");
         let generated = format!("VESPER_HYBRID_BINDING_{key}");
@@ -290,13 +221,13 @@ fn main() {
         }
         let port = Port::new(library, package).binding(binding);
         #[cfg(feature = "divergent")]
-        let port = if *library == "hybrid_layout" {
+        let port = if library == "hybrid_layout" {
             port.edit(DIVERGENT_EDIT.0, DIVERGENT_EDIT.1)
         } else {
             port
         };
         #[cfg(feature = "divergent")]
-        let port = if *library == "hybrid_check_layout" {
+        let port = if library == "hybrid_check_layout" {
             port.edit(DIVERGENT_CHECK_LAYOUT_EDIT.0, DIVERGENT_CHECK_LAYOUT_EDIT.1)
                 .edit(
                     DIVERGENT_SCOPED_LAYOUT_EDIT.0,
@@ -306,7 +237,7 @@ fn main() {
             port
         };
         #[cfg(feature = "divergent-ir-check")]
-        let port = if *library == "hybrid_ir_check" {
+        let port = if library == "hybrid_ir_check" {
             port.edit(DIVERGENT_IR_CHECK_EDIT.0, DIVERGENT_IR_CHECK_EDIT.1)
                 .edit(
                     DIVERGENT_SCOPED_IR_CHECK_EDIT.0,
@@ -316,7 +247,7 @@ fn main() {
             port
         };
         #[cfg(feature = "divergent")]
-        let port = if *library == "hybrid_checks" {
+        let port = if library == "hybrid_checks" {
             port.edit(
                 DIVERGENT_SHARED_LAYOUT_EDIT.0,
                 DIVERGENT_SHARED_LAYOUT_EDIT.1,
@@ -325,7 +256,7 @@ fn main() {
             port
         };
         #[cfg(feature = "divergent-ir-check")]
-        let port = if *library == "hybrid_checks" {
+        let port = if library == "hybrid_checks" {
             port.edit(
                 DIVERGENT_SHARED_IR_CHECK_EDIT.0,
                 DIVERGENT_SHARED_IR_CHECK_EDIT.1,
@@ -334,43 +265,43 @@ fn main() {
             port
         };
         #[cfg(feature = "divergent-stack-bound")]
-        let port = if *library == "hybrid_stack_bound" {
+        let port = if library == "hybrid_stack_bound" {
             port.edit(DIVERGENT_STACK_BOUND_EDIT.0, DIVERGENT_STACK_BOUND_EDIT.1)
         } else {
             port
         };
         #[cfg(feature = "divergent-ir-inline")]
-        let port = if *library == "hybrid_ir_inline" {
+        let port = if library == "hybrid_ir_inline" {
             port.edit(DIVERGENT_IR_INLINE_EDIT.0, DIVERGENT_IR_INLINE_EDIT.1)
         } else {
             port
         };
         #[cfg(feature = "divergent-optimize")]
-        let port = if *library == "hybrid_optimize" {
+        let port = if library == "hybrid_optimize" {
             port.edit(DIVERGENT_OPTIMIZE_EDIT.0, DIVERGENT_OPTIMIZE_EDIT.1)
         } else {
             port
         };
         #[cfg(feature = "divergent-ir-opt")]
-        let port = if *library == "hybrid_ir_opt" {
+        let port = if library == "hybrid_ir_opt" {
             port.edit(DIVERGENT_IR_OPT_EDIT.0, DIVERGENT_IR_OPT_EDIT.1)
         } else {
             port
         };
         #[cfg(feature = "divergent-pact")]
-        let port = if *library == "hybrid_pact" {
+        let port = if library == "hybrid_pact" {
             port.edit(DIVERGENT_PACT_EDIT.0, DIVERGENT_PACT_EDIT.1)
         } else {
             port
         };
         #[cfg(feature = "divergent-parse")]
-        let port = if *library == "hybrid_parse" {
+        let port = if library == "hybrid_parse" {
             port.edit(DIVERGENT_PARSE_EDIT.0, DIVERGENT_PARSE_EDIT.1)
         } else {
             port
         };
         #[cfg(feature = "divergent-doc")]
-        let port = if *library == "hybrid_doc" {
+        let port = if library == "hybrid_doc" {
             port.edit(DIVERGENT_DOC_EDIT.0, DIVERGENT_DOC_EDIT.1)
         } else {
             port

@@ -46,11 +46,15 @@
     {"crates": ["vesper-flux"], "task": ["crate", "flux", "check"]},
     {"crates": ["vesper-span"], "task": ["crate", "span", "test-port"]},
     {"crates": ["vesper-lean-syntax"], "task": ["crate", "lean-syntax", "test-port"]},
-    {"crates": ["vesper-diagnostics"], "task": ["crate", "diagnostics", "test-port"]},
+    {"crates": ["vesper-diagnostics"], "task": ["crate", "diagnostics", "test-port"]}
+  ],
+  [
     {"crates": ["vesper-fmt"], "task": ["crate", "fmt", "test-port"]},
     {"crates": ["vesper-highlight"], "task": ["crate", "highlight", "test-port"]},
     {"crates": ["vesper-forge"], "task": ["crate", "forge", "test-port"]},
-    {"crates": ["vesper-lint"], "task": ["crate", "lint", "test-port"]},
+    {"crates": ["vesper-lint"], "task": ["crate", "lint", "test-port"]}
+  ],
+  [
     {"crates": ["vesper-sim-session"], "task": ["crate", "sim-session", "test-port"]},
     {"crates": ["vesper-fusion"], "task": ["crate", "fusion", "test-port"]},
     {"crates": ["vesper-warp-crypto"], "task": ["crate", "warp-crypto", "check"]},

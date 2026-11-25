@@ -21,7 +21,7 @@ The native lanes run only host-specific coverage:
 
 The rest of the port harness, every ported crate's tests against both builds
 and its divergence checks, is platform-neutral once the ABI tier passes. It
-runs once, in the `Vesper ports (Linux n/7)` jobs of the same workflow, on
+runs once, in the `Vesper ports (Linux n/9)` jobs of the same workflow, on
 `ubuntu-latest` (#1010). Before that, macOS and Windows each ran the whole
 harness, which took 27 and 39 minutes of 34 and 50 minute jobs on main
 (November 2026). Some divergence assertions exist only in this Cargo run (the
@@ -30,17 +30,19 @@ them), so the Linux job is not a duplicate of BuildBuddy. `Platform
 validation complete` requires it. A new port appends its lines after the ABI
 tier, so it runs on Linux only.
 
-The Linux job runs as seven parallel shards, `Vesper ports (Linux 1/7)` to
-`(Linux 7/7)` (`VESPER_PORT_HARNESS_SHARD`, #1019, #1100). With one job, a run
+The Linux job runs as nine parallel shards, `Vesper ports (Linux 1/9)` to
+`(Linux 9/9)` (`VESPER_PORT_HARNESS_SHARD`, #1019, #1100, #1924). With one job, a run
 took 52 minutes and others hit the 60 minute limit once Loom, Crucible and
 serde landed; with three, the last shard ran past its 90 minute limit once
 the P3a ports landed. Each shard is a run of consecutive blocks of the
 script: 1 the ABI tier through Ignis, 2 Quarry through pact, 3 semver through
-Crucible, 4 serde, 5 aegis through bench, 6 eBPF and silicon, and 7 prism-h3
-and every port appended after it. Each takes about 10-30 minutes after a 2-4
+Crucible, 4 serde, 5 aegis through bench, 6 eBPF and silicon, 7 Warp through
+diagnostics, 8 fmt through lint, and 9 sim-session and every port appended
+after it. Each takes about 10-30 minutes after a 2-4
 minute compiler build; the 60 minute job timeout is a backstop. When a shard
-passes about 35 minutes, move a shard boundary in the script, or add a shard
-there and in the `ports` matrix.
+passes about 35 minutes, move a shard boundary or add a shard in
+`scripts/port-harness-plan.json`. The workflow gets the shard count from the
+selected checkout so it can also run older revisions with seven shards.
 
 Nearly all of the harness's time is the compiler compiling Vesper sources:
 the Rust tests themselves finish in seconds. So one `Vesper ports compiler`
@@ -63,7 +65,7 @@ ports to `none`. The selection still applies to manual `pr` runs.
 Each block of the script names its crate directory with `if ported vesper-x;
 then ... fi` or `skip_port vesper-x || ...`; a line without a guard always
 runs.
-When the plan names no port, the seven shard jobs are skipped as jobs, so
+When the plan names no port, the nine shard jobs are skipped as jobs, so
 they take no runners, and `Platform validation complete` accepts that skip
 (#1321).
 
@@ -75,7 +77,7 @@ runs queued and every Platforms run cancelled by the next push before it
 finished (#1321). To keep pull requests within the limit:
 
 - `Hybrid compiler` and the `Vesper ports` jobs (the compiler build and its
-  seven shards, about nine Linux runners) run only on pushes to main, the
+  nine shards, about eleven Linux runners) run only on pushes to main, the
   nightly schedule and manual runs, not on pull requests (#1479). Neither is
   a required check, and Bazel builds and tests both crates on every pull
   request.

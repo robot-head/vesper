@@ -1,0 +1,448 @@
+// The containers around the code: src/verified_codegen/container.rs in
+// Vesper (#1886, part 2). The static Linux ELF executable, the Mach-O
+// AArch64 object and the x86-64 COFF object with its unwind tables.
+
+use self::asm::{
+    EXT_EXIT_PROCESS,
+    EXT_GET_STD_HANDLE,
+    External,
+    Prologue
+};
+
+pub const ELF_BASE: u64 = 4194304;
+// The code's file offset with one program header, and with the heap's.
+pub const ELF_CODE_OFFSET: u64 = 128;
+pub const ELF_HEAP_CODE_OFFSET: u64 = 256;
+pub const EM_X86_64: u16 = 62;
+pub const EM_AARCH64: u16 = 183;
+pub const EM_RISCV: u16 = 243;
+
+pub const HEAP_BASE: u64 = 268435456;
+pub const HEAP_WORDS: u64 = 67108864;
+
+fn put_le(inout out: ChunkSeq[u8], x: u64, n: u64) {
+    for i in 0..n {
+        out.push(wrapping_u8(wrapping_shr_u64(x, wrapping_u32(wrapping_mul(i, 8))) & 255));
+    }
+}
+
+fn put16(inout out: ChunkSeq[u8], x: u64) {
+    put_le(inout out, x, 2);
+}
+
+fn put32(inout out: ChunkSeq[u8], x: u64) {
+    put_le(inout out, x, 4);
+}
+
+fn put64(inout out: ChunkSeq[u8], x: u64) {
+    put_le(inout out, x, 8);
+}
+
+// A static ELF executable: one R+X PT_LOAD of the whole file at
+// ELF_BASE, and with `heap` a zero-fill R+W PT_LOAD at HEAP_BASE.
+pub fn elf_executable(machine: u16, in code: ChunkSeq[u8], heap: bool, inout out: ChunkSeq[u8]) {
+    let code_offset = if heap {
+        ELF_HEAP_CODE_OFFSET
+    } else {
+        ELF_CODE_OFFSET
+    };
+    // e_ident: ELFCLASS64, ELFDATA2LSB, EV_CURRENT, ELFOSABI_SYSV.
+    out.push(127);
+    out.push(69);
+    out.push(76);
+    out.push(70);
+    out.push(2);
+    out.push(1);
+    out.push(1);
+    out.push(0);
+    put64(inout out, 0);
+    put16(inout out, 2);
+    put16(inout out, widen_u64(machine));
+    put32(inout out, 1);
+    put64(inout out, wrapping_add(ELF_BASE, code_offset));
+    put64(inout out, 64);
+    put64(inout out, 0);
+    put32(inout out, 0);
+    put16(inout out, 64);
+    put16(inout out, 56);
+    put16(
+        inout out,
+        if heap {
+            2
+        } else {
+            1
+        }
+    );
+    put16(inout out, 64);
+    put16(inout out, 0);
+    put16(inout out, 0);
+    let size = wrapping_add(code_offset, code.len());
+    put32(inout out, 1);
+    put32(inout out, 5);
+    put64(inout out, 0);
+    put64(inout out, ELF_BASE);
+    put64(inout out, ELF_BASE);
+    put64(inout out, size);
+    put64(inout out, size);
+    put64(inout out, 4096);
+    if heap {
+        put32(inout out, 1);
+        put32(inout out, 6);
+        put64(inout out, 0);
+        put64(inout out, HEAP_BASE);
+        put64(inout out, HEAP_BASE);
+        put64(inout out, 0);
+        put64(inout out, wrapping_mul(HEAP_WORDS, 8));
+        put64(inout out, 4096);
+    }
+    loop {
+        if out.len() >= code_offset {
+            break;
+        }
+        out.push(0);
+    }
+    out.extend(in code.as_slice());
+}
+
+fn pad_to(inout out: ChunkSeq[u8], n: u64) {
+    loop {
+        if out.len() >= n {
+            break;
+        }
+        out.push(0);
+    }
+}
+
+fn name16(inout out: ChunkSeq[u8], in name: Str) {
+    let at = wrapping_add(out.len(), 16);
+    out.extend(in name.as_bytes());
+    pad_to(inout out, at);
+}
+
+// A Mach-O AArch64 object with one `__text` section and the external
+// symbol `_main` at its start, for the system linker.
+pub fn macho_object(in code: ChunkSeq[u8], inout out: ChunkSeq[u8]) {
+    let segment: u64 = 152;
+    let symtab: u64 = 24;
+    let dysymtab: u64 = 80;
+    let build: u64 = 24;
+    let sizeofcmds = wrapping_add(wrapping_add(segment, symtab), wrapping_add(dysymtab, build));
+    let code_offset = wrapping_add(wrapping_add(32, sizeofcmds), 15) & 4294967280;
+    let symoff = wrapping_add(wrapping_add(code_offset, code.len()), 7) & 4294967288;
+    let stroff = wrapping_add(symoff, 16);
+    // MH_MAGIC_64, CPU_TYPE_ARM64, subtype ALL, MH_OBJECT, 4 commands.
+    put32(inout out, 4277009103);
+    put32(inout out, 16777228);
+    put32(inout out, 0);
+    put32(inout out, 1);
+    put32(inout out, 4);
+    put32(inout out, sizeofcmds);
+    put32(inout out, 0);
+    put32(inout out, 0);
+    // LC_SEGMENT_64 with one section.
+    put32(inout out, 25);
+    put32(inout out, segment);
+    name16(inout out, "");
+    put64(inout out, 0);
+    put64(inout out, code.len());
+    put64(inout out, code_offset);
+    put64(inout out, code.len());
+    put32(inout out, 7);
+    put32(inout out, 7);
+    put32(inout out, 1);
+    put32(inout out, 0);
+    name16(inout out, "__text");
+    name16(inout out, "__TEXT");
+    put64(inout out, 0);
+    put64(inout out, code.len());
+    put32(inout out, code_offset);
+    put32(inout out, 2);
+    put32(inout out, 0);
+    put32(inout out, 0);
+    put32(inout out, 2147484672);
+    put32(inout out, 0);
+    put32(inout out, 0);
+    put32(inout out, 0);
+    // LC_BUILD_VERSION: macOS 11.0, no tools.
+    put32(inout out, 50);
+    put32(inout out, build);
+    put32(inout out, 1);
+    put32(inout out, 720896);
+    put32(inout out, 0);
+    put32(inout out, 0);
+    // LC_SYMTAB
+    put32(inout out, 2);
+    put32(inout out, symtab);
+    put32(inout out, symoff);
+    put32(inout out, 1);
+    put32(inout out, stroff);
+    put32(inout out, 8);
+    // LC_DYSYMTAB: one external defined symbol.
+    put32(inout out, 11);
+    put32(inout out, dysymtab);
+    put32(inout out, 0);
+    put32(inout out, 0);
+    put32(inout out, 0);
+    put32(inout out, 1);
+    put32(inout out, 1);
+    put32(inout out, 0);
+    pad_to(inout out, wrapping_add(out.len(), 48));
+    pad_to(inout out, code_offset);
+    out.extend(in code.as_slice());
+    pad_to(inout out, symoff);
+    // nlist_64 for _main: N_SECT | N_EXT in section 1 at 0.
+    put32(inout out, 1);
+    out.push(15);
+    out.push(1);
+    put16(inout out, 0);
+    put64(inout out, 0);
+    // "\0_main\0\0"
+    out.push(0);
+    out.extend(in "_main".as_bytes());
+    out.push(0);
+    out.push(0);
+}
+
+// The x64 `UNWIND_INFO` of one prologue: version 1, the prologue size,
+// the unwind codes (the frame allocation, then `push rbp`), padded to an
+// even count.
+fn unwind_info(in p: Prologue, inout out: ChunkSeq[u8]) {
+    let mut codes = ChunkSeq::new[u64]();
+    let alloc_end = widen_u64(p.alloc_end);
+    let frame = widen_u64(p.frame);
+    if frame > 0 {
+        if frame <= 128 {
+            // UWOP_ALLOC_SMALL
+            let info = wrapping_shl_u64(wrapping_sub(frame, 8) / 8, 4) | 2;
+            codes.push(alloc_end | wrapping_shl_u64(info, 8));
+        } else if frame <= 524280 {
+            // UWOP_ALLOC_LARGE, OpInfo 0: the size / 8 in the next slot
+            codes.push(alloc_end | 256);
+            codes.push((frame / 8) & 65535);
+        } else {
+            // UWOP_ALLOC_LARGE, OpInfo 1: the size in the next two slots
+            codes.push(alloc_end | 4352);
+            codes.push(frame & 65535);
+            codes.push(wrapping_shr_u64(frame, 16) & 65535);
+        }
+    }
+    // UWOP_PUSH_NONVOL rbp (register 5)
+    codes.push(widen_u64(p.push_end) | 20480);
+    let count = codes.len();
+    if count % 2 == 1 {
+        codes.push(0);
+    }
+    out.push(1);
+    out.push(p.alloc_end);
+    out.push(wrapping_u8(count));
+    out.push(0);
+    for i in 0..codes.len() {
+        match codes.try_get(i) {
+            Option::Some(c) => put16(inout out, c),
+            Option::None => {}
+        }
+    }
+}
+
+fn external_name(name: u8) -> Str {
+    if name == EXT_EXIT_PROCESS {
+        "ExitProcess"
+    } else if name == EXT_GET_STD_HANDLE {
+        "GetStdHandle"
+    } else {
+        "WriteFile"
+    }
+}
+
+// A COFF symbol name: inline when it fits in eight bytes, else an offset
+// into the string table.
+fn coff_name(inout out: ChunkSeq[u8], in name: Str, inout strings: ChunkSeq[u8]) {
+    let b = name.as_bytes();
+    if b.len() <= 8 {
+        let at = wrapping_add(out.len(), 8);
+        out.extend(in b);
+        pad_to(inout out, at);
+    } else {
+        put32(inout out, 0);
+        put32(inout out, wrapping_add(4, strings.len()));
+        strings.extend(in b);
+        strings.push(0);
+    }
+}
+
+fn section(
+    inout out: ChunkSeq[u8],
+    in name: Str,
+    size: u64,
+    at: u64,
+    relocs_at: u64,
+    relocs: u64,
+    flags: u64
+) {
+    let end = wrapping_add(out.len(), 8);
+    out.extend(in name.as_bytes());
+    pad_to(inout out, end);
+    put32(inout out, 0);
+    put32(inout out, 0);
+    put32(inout out, size);
+    put32(inout out, at);
+    put32(
+        inout out,
+        if relocs > 0 {
+            relocs_at
+        } else {
+            0
+        }
+    );
+    put32(inout out, 0);
+    put16(inout out, relocs);
+    put16(inout out, 0);
+    put32(inout out, flags);
+}
+
+fn symbol(
+    inout out: ChunkSeq[u8],
+    in name: Str,
+    inout strings: ChunkSeq[u8],
+    value: u64,
+    sect: u64,
+    ty: u64,
+    class: u8
+) {
+    coff_name(inout out, in name, inout strings);
+    put32(inout out, value);
+    put16(inout out, sect);
+    put16(inout out, ty);
+    out.push(class);
+    out.push(0);
+}
+
+// An x86-64 COFF object for `link.exe`: `.text` with the code and the
+// external `main` at `main`, `.xdata` with one `UNWIND_INFO` a function
+// and `.pdata` with one `RUNTIME_FUNCTION` a function, relocated with
+// `IMAGE_REL_AMD64_ADDR32NB`; calls to the externals are
+// `IMAGE_REL_AMD64_REL32`. The prologues come in address order, as the
+// encoder records them.
+pub fn coff_object(
+    in code: ChunkSeq[u8],
+    main: u64,
+    in prologues: ChunkSeq[Prologue],
+    in externals: ChunkSeq[External],
+    inout out: ChunkSeq[u8]
+) {
+    let mut xdata = ChunkSeq::new[u8]();
+    let mut pdata = ChunkSeq::new[u8]();
+    let n = prologues.len();
+    for i in 0..n {
+        match prologues.try_get(i) {
+            Option::Some(p) => {
+                let end = if p.has_end {
+                    p.end
+                } else {
+                    match prologues.try_get(wrapping_add(i, 1)) {
+                        Option::Some(q) => q.start,
+                        Option::None => code.len(),
+                    }
+                };
+                let offset = xdata.len();
+                unwind_info(in p, inout xdata);
+                put32(inout pdata, p.start);
+                put32(inout pdata, end);
+                put32(inout pdata, offset);
+            },
+            Option::None => {}
+        }
+    }
+    // The external names used, in name order (their codes' order).
+    let mut used = ChunkSeq::new[bool]();
+    for k in 0..3 {
+        used.push(false);
+    }
+    for i in 0..externals.len() {
+        match externals.try_get(i) {
+            Option::Some(e) => {
+                let ok = used.try_set(widen_u64(e.name), true);
+            },
+            Option::None => {}
+        }
+    }
+    let mut names = ChunkSeq::new[u8]();
+    for k in 0..3 {
+        match used.try_get(k) {
+            Option::Some(true) => names.push(wrapping_u8(k)),
+            _ => {}
+        }
+    }
+    let pdata_relocs = wrapping_mul(n, 3);
+    let text_at: u64 = 140;
+    let text_relocs_at = wrapping_add(text_at, code.len());
+    let xdata_at = wrapping_add(text_relocs_at, wrapping_mul(externals.len(), 10));
+    let pdata_at = wrapping_add(xdata_at, xdata.len());
+    let pdata_relocs_at = wrapping_add(pdata_at, pdata.len());
+    let symbols_at = wrapping_add(pdata_relocs_at, wrapping_mul(pdata_relocs, 10));
+    let symbol_count = wrapping_add(3, names.len());
+
+    // IMAGE_FILE_MACHINE_AMD64, 3 sections, no timestamp.
+    put16(inout out, 34404);
+    put16(inout out, 3);
+    put32(inout out, 0);
+    put32(inout out, symbols_at);
+    put32(inout out, symbol_count);
+    put16(inout out, 0);
+    put16(inout out, 0);
+    // CNT_CODE | ALIGN_16BYTES | MEM_EXECUTE | MEM_READ
+    section(inout out, ".text", code.len(), text_at, text_relocs_at, externals.len(), 1615855648);
+    // CNT_INITIALIZED_DATA | ALIGN_4BYTES | MEM_READ
+    section(inout out, ".xdata", xdata.len(), xdata_at, 0, 0, 1076887616);
+    section(inout out, ".pdata", pdata.len(), pdata_at, pdata_relocs_at, pdata_relocs, 1076887616);
+    out.extend(in code.as_slice());
+    for i in 0..externals.len() {
+        match externals.try_get(i) {
+            Option::Some(e) => {
+                let mut sym: u64 = 3;
+                for j in 0..names.len() {
+                    match names.try_get(j) {
+                        Option::Some(c) => {
+                            if c == e.name {
+                                sym = wrapping_add(3, j);
+                            }
+                        },
+                        Option::None => {}
+                    }
+                }
+                put32(inout out, e.at);
+                put32(inout out, sym);
+                // IMAGE_REL_AMD64_REL32
+                put16(inout out, 4);
+            },
+            Option::None => {}
+        }
+    }
+    out.extend(in xdata.as_slice());
+    out.extend(in pdata.as_slice());
+    // Symbol 0 is `.text`, symbol 1 is `.xdata`; IMAGE_REL_AMD64_ADDR32NB.
+    for i in 0..n {
+        let row = wrapping_mul(i, 12);
+        put32(inout out, row);
+        put32(inout out, 0);
+        put16(inout out, 3);
+        put32(inout out, wrapping_add(row, 4));
+        put32(inout out, 0);
+        put16(inout out, 3);
+        put32(inout out, wrapping_add(row, 8));
+        put32(inout out, 1);
+        put16(inout out, 3);
+    }
+    let mut strings = ChunkSeq::new[u8]();
+    symbol(inout out, ".text", inout strings, 0, 1, 0, 3);
+    symbol(inout out, ".xdata", inout strings, 0, 2, 0, 3);
+    symbol(inout out, "main", inout strings, main, 1, 32, 2);
+    for j in 0..names.len() {
+        match names.try_get(j) {
+            Option::Some(c) => symbol(inout out, external_name(c), inout strings, 0, 0, 32, 2),
+            Option::None => {}
+        }
+    }
+    put32(inout out, wrapping_add(4, strings.len()));
+    out.extend(in strings.as_slice());
+}

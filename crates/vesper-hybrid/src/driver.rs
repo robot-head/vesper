@@ -27,6 +27,13 @@ use vesper::{
 #[allow(clippy::all)]
 #[path = "../port/driver.rs"]
 mod binding;
+// `Session::step`, one file a group of steps (#1896).
+#[path = "driver/backends.rs"]
+mod backends;
+#[path = "driver/front.rs"]
+mod front;
+#[path = "driver/native.rs"]
+mod native_steps;
 
 /// The process entry: the Vesper driver on the CLI thread (the same name
 /// and stack as the Rust CLI's), or the Rust CLI when the driver hands the
@@ -284,11 +291,31 @@ pub struct Session {
     source_map: Vec<vesper::forge_frontend::SourceMapSegment>,
     parsed: Option<parser::Parse>,
     checked: Option<check::Checked>,
+    /// `check::check`'s state between its parts.
+    checking: Checking,
     /// The last error message or pass result (`hd_text`).
     text: Vec<u8>,
 }
 
+/// What `check::check` keeps between the parts the Vesper driver
+/// sequences (`check` in modules/driver/src/lib.ves, #1900).
+#[derive(Default)]
+struct Checking {
+    /// The module the next part checks when the untyped value-enum members
+    /// rewrote the parse's (the latest rewrite).
+    rewritten: Option<vesper::ast::Module>,
+    /// The diagnostics of each rewrite, outermost first: `check` appends
+    /// them innermost first once the rewritten module is checked.
+    pending: Vec<Vec<vesper::ast::Diagnostic>>,
+}
+
 /// The passes (`step_*` in modules/driver/src/lib.ves).
+///
+/// New steps take a number from their group's range, so lanes adding steps
+/// in parallel (#1896) don't collide: 28-39 the front-end passes (#1900),
+/// 40-49 front end (driver/front.rs, #1893), 50-59 IR and native
+/// (driver/native.rs, #1894), 60-69 the other backends
+/// (driver/backends.rs, #1895), 70-79 session and I/O (this file, #1896).
 #[derive(Clone, Copy)]
 enum Step {
     IsPackage = 1,
@@ -317,9 +344,18 @@ enum Step {
     EmitLean,
     EmitClif = 26,
     IoError,
+    // `check::check`'s parts, sequenced by `check` in
+    // modules/driver/src/lib.ves (#1900).
+    CheckUntyped,
+    CheckTensor,
+    CheckFrontend,
+    CheckUses,
+    CheckFinish,
+    CheckReport,
+    InterfaceWrite = 40,
 }
 
-const STEPS: [Step; 26] = [
+const STEPS: [Step; 33] = [
     Step::IsPackage,
     Step::Load,
     Step::EbpfBuild,
@@ -346,6 +382,13 @@ const STEPS: [Step; 26] = [
     Step::EmitLean,
     Step::EmitClif,
     Step::IoError,
+    Step::CheckUntyped,
+    Step::CheckTensor,
+    Step::CheckFrontend,
+    Step::CheckUses,
+    Step::CheckFinish,
+    Step::CheckReport,
+    Step::InterfaceWrite,
 ];
 
 /// A pass failed; its message is the session's text.
@@ -368,18 +411,6 @@ impl Session {
 
     fn package_vsys(&self) -> &[packages::PackageVsys] {
         self.loaded.as_ref().map_or(&[][..], |p| &p.vsys[..])
-    }
-
-    fn native_code(&self) -> Result<(Vec<u8>, String), String> {
-        crate::native_code(
-            &self.checked()?.world,
-            self.o.entry(),
-            self.o.target(),
-            self.o.optimize,
-            &self.o.verifiers,
-            self.o.policy(),
-            (self.o.input(), &self.source),
-        )
     }
 
     fn step(&mut self, step: Step, arg: &[u8]) -> Result<i64, String> {
@@ -407,80 +438,6 @@ impl Session {
                 }
                 Ok(0)
             }
-            Step::EbpfBuild => {
-                // Compiler eBPF target (§27): verified BPF ELF object with BTF.
-                let summary = vesper::ebpf_backend::build_command(
-                    o.input(),
-                    &self.original,
-                    o.entry(),
-                    o.output().as_deref(),
-                )?;
-                print!("{summary}");
-                Ok(0)
-            }
-            Step::Parse => {
-                let parsed = match &self.loaded {
-                    Some(p) => {
-                        self.source = self.original.clone();
-                        parser::Parse {
-                            module: p.module.clone(),
-                            green: parser::parse("").green,
-                            diagnostics: vec![],
-                        }
-                    }
-                    // `--emit cst` parses in its own pass.
-                    None if o.command == "emit" && o.format() == "cst" => return Ok(0),
-                    None => {
-                        let (source, parsed, map) = vesper::forge_frontend::parse_compiler_input(
-                            &self.original,
-                            o.include_tests,
-                        )
-                        .map_err(|diagnostic| {
-                            crate::diagnostics(
-                                o.input(),
-                                &self.original,
-                                std::slice::from_ref(&diagnostic),
-                                o.json,
-                            );
-                            format!("{}: {}", diagnostic.code, diagnostic.message)
-                        })?;
-                        self.source = source.into_owned();
-                        self.source_map = map;
-                        parsed
-                    }
-                };
-                let n = count(parsed.diagnostics.len());
-                self.parsed = Some(parsed);
-                Ok(n)
-            }
-            Step::EmitCst => {
-                let original = &self.original;
-                let core = parser::parse(original);
-                let syntax = if core.diagnostics.is_empty() {
-                    core.syntax()
-                } else if let Ok(surface) =
-                    parser::parse_surface_with_limits(original, Default::default())
-                    && surface.diagnostics.is_empty()
-                {
-                    surface.syntax()
-                } else {
-                    crate::diagnostics(o.input(), original, &core.diagnostics, o.json);
-                    core.syntax()
-                };
-                crate::write(o.output(), format!("{syntax:#?}\n").as_bytes())?;
-                Ok(0)
-            }
-            Step::ReportSyntax => {
-                let parsed = self.parsed()?;
-                crate::compiler_diagnostics(
-                    o.input(),
-                    &self.original,
-                    &parsed.diagnostics,
-                    &self.source_map,
-                    o.json,
-                );
-                Ok(0)
-            }
             Step::PackageVsys => Ok(count(self.package_vsys().len())),
             Step::VsysRun => {
                 // Programs over package-carried imports check and run only
@@ -502,142 +459,6 @@ impl Session {
                 })?;
                 Ok(0)
             }
-            Step::Check => {
-                let checked = check::check(&self.parsed()?.module);
-                let lib = o.lib_flags()?;
-                // A library with `.vsys` imports checks only through the
-                // Bridge lowering, which the export path runs.
-                let sugar_rejection = checked
-                    .diagnostics
-                    .iter()
-                    .any(|d| matches!(d.code.as_str(), "E0143" | "E0144"));
-                let n = if !checked.diagnostics.is_empty()
-                    && (sugar_rejection
-                        || !lib.needs_module(&self.source, !self.package_vsys().is_empty()))
-                {
-                    match &self.loaded {
-                        Some(p) => {
-                            let localized: Vec<_> = checked
-                                .diagnostics
-                                .iter()
-                                .map(|d| p.sources.localize(d))
-                                .collect();
-                            crate::package_diagnostics(p, &localized, o.json);
-                        }
-                        None => crate::compiler_diagnostics(
-                            o.input(),
-                            &self.original,
-                            &checked.diagnostics,
-                            &self.source_map,
-                            o.json,
-                        ),
-                    }
-                    count(checked.diagnostics.len())
-                } else {
-                    0
-                };
-                self.checked = Some(checked);
-                Ok(n)
-            }
-            Step::LibBuild => {
-                self.lib_build()?;
-                Ok(0)
-            }
-            Step::EmitInterface => {
-                // A package directory exports under its manifest name by
-                // default.
-                let package = o
-                    .slot(PACKAGE)
-                    .map(str::to_owned)
-                    .or_else(|| self.loaded.as_ref().map(|p| p.package.clone()))
-                    .ok_or("interface export requires --package @org/name or std/name")?;
-                let interface = vesper::interface::export(&self.checked()?.world, &package)?;
-                let bytes = serde_json::to_vec_pretty(&interface).map_err(|e| e.to_string())?;
-                if let Some(path) = o.output() {
-                    vesper::atomic_file::atomic_write(&path, &bytes)?;
-                } else {
-                    crate::write(None, &bytes)?;
-                }
-                Ok(0)
-            }
-            Step::Optimize => {
-                let expression_types = &self
-                    .checked
-                    .as_ref()
-                    .ok_or("driver: no check yet")?
-                    .expression_types;
-                let parsed = self.parsed.as_mut().ok_or("driver: no parse yet")?;
-                optimize::optimize(&mut parsed.module, expression_types);
-                let checked = check::check(&parsed.module);
-                if !checked.diagnostics.is_empty() {
-                    return Err(format!(
-                        "optimizer validation failed: {:?}",
-                        checked.diagnostics
-                    ));
-                }
-                self.checked = Some(checked);
-                Ok(0)
-            }
-            Step::Run => {
-                let world = &self.checked()?.world;
-                let entry = o.entry();
-                let f = world.functions.get(entry).ok_or("missing entry function")?;
-                if !f.params.is_empty() {
-                    return Err("entry function must take no arguments".into());
-                }
-                if !f.effects.instances.is_empty() || f.effects.tail.is_some() {
-                    return Err("entry must handle all effects".into());
-                }
-                let mut runtime = Runtime::new(world);
-                runtime.fuel = o.fuel;
-                runtime.optimize = o.optimize;
-                println!("{}", runtime.run(entry, vec![])?);
-                Ok(0)
-            }
-            Step::Jit => {
-                println!(
-                    "{}",
-                    native::jit_with_options(&self.checked()?.world, o.entry(), o.optimize)?
-                );
-                Ok(0)
-            }
-            Step::VerifiedBuild => {
-                let world = &self.checked()?.world;
-                vesper::dyn_trait::refuse(world, "verified code generator")
-                    .map_err(|d| format!("{}: {}", d.code, d.message))?;
-                let path = o.output().unwrap_or_else(|| PathBuf::from("a.out"));
-                println!(
-                    "{}",
-                    vesper::verified_codegen::build_command(
-                        world,
-                        o.entry(),
-                        o.target(),
-                        o.optimize,
-                        o.linker(),
-                        &path,
-                    )?
-                );
-                Ok(0)
-            }
-            Step::WasmBuild => {
-                let world = &self.checked()?.world;
-                vesper::dyn_trait::refuse(world, "WebAssembly backend")
-                    .map_err(|d| format!("{}: {}", d.code, d.message))?;
-                let options = vesper::wasm_backend::WasmOptions {
-                    optimize: o.optimize,
-                    ..Default::default()
-                };
-                let artifact = vesper::wasm_backend::compile(world, o.entry(), &options)
-                    .map_err(|e| e.to_string())?;
-                let path = o.output().unwrap_or_else(|| PathBuf::from("a.wasm"));
-                vesper::atomic_file::atomic_write(&path, &artifact.component)?;
-                println!(
-                    "built {} ({} component)",
-                    path.display(),
-                    vesper::wasm_backend::TARGET
-                );
-                Ok(0)
-            }
             Step::CheckMain => {
                 let f = self
                     .checked()?
@@ -656,58 +477,9 @@ impl Session {
                 }
                 Ok(0)
             }
-            Step::NativeObject => {
-                let (bytes, _) = self.native_code()?;
-                self.text = bytes;
-                Ok(0)
-            }
             Step::IsWindowsTarget => Ok(i64::from(native::windows::is_windows_target(o.target()))),
-            Step::WindowsLink => {
-                let object = PathBuf::from(utf8(arg)?);
-                let path = o.output().unwrap_or_else(|| PathBuf::from("a.out"));
-                let linker = o.linker();
-                let explicit = (linker != "cc").then(|| PathBuf::from(linker));
-                let path = native::windows::link_executable(&object, &path, explicit.as_deref())?;
-                self.text = path.display().to_string().into_bytes();
-                Ok(0)
-            }
             Step::Tee => {
                 crate::measure_tee(Path::new(utf8(arg)?))?;
-                Ok(0)
-            }
-            Step::EmitHir => {
-                crate::write(
-                    o.output(),
-                    serde_json::to_string_pretty(&self.parsed()?.module)
-                        .map_err(|e| e.to_string())?
-                        .as_bytes(),
-                )?;
-                Ok(0)
-            }
-            Step::EmitIr => {
-                let checked = self.checked()?;
-                let mut program = ir::lower(checked);
-                if o.optimize {
-                    vesper::ir_opt_policy::optimize(&checked.world, &mut program)?;
-                }
-                crate::write(
-                    o.output(),
-                    serde_json::to_string_pretty(&program)
-                        .map_err(|e| e.to_string())?
-                        .as_bytes(),
-                )?;
-                Ok(0)
-            }
-            Step::EmitLean => {
-                crate::write(
-                    o.output(),
-                    lean::extract(&self.checked()?.world)?.as_bytes(),
-                )?;
-                Ok(0)
-            }
-            Step::EmitClif => {
-                let (_, clif) = self.native_code()?;
-                crate::write(o.output(), clif.as_bytes())?;
                 Ok(0)
             }
             Step::IoError => {
@@ -716,61 +488,30 @@ impl Session {
                 self.text = io_error(word).to_string().into_bytes();
                 Ok(0)
             }
+            Step::Parse
+            | Step::EmitCst
+            | Step::ReportSyntax
+            | Step::Check
+            | Step::CheckUntyped
+            | Step::CheckTensor
+            | Step::CheckFrontend
+            | Step::CheckUses
+            | Step::CheckFinish
+            | Step::CheckReport
+            | Step::EmitHir
+            | Step::EmitInterface
+            | Step::InterfaceWrite
+            | Step::LibBuild => self.front_step(step, arg),
+            Step::Optimize
+            | Step::EmitIr
+            | Step::EmitClif
+            | Step::EmitLean
+            | Step::NativeObject
+            | Step::WindowsLink
+            | Step::Run
+            | Step::Jit => self.native_step(step, arg),
+            Step::WasmBuild | Step::EbpfBuild | Step::VerifiedBuild => self.backends_step(step),
         }
-    }
-
-    /// `build --lib` (and any library option): the export path, as in
-    /// `cli()`.
-    fn lib_build(&mut self) -> Result<(), String> {
-        let o = &self.o;
-        let parsed = self.parsed.take().ok_or("driver: no parse yet")?;
-        let loaded = &self.loaded;
-        let package_vsys = loaded.as_ref().map_or(&[][..], |p| &p.vsys[..]);
-        let lib = o.lib_flags()?;
-        // Exports are the root module's `pub` functions. Items of package
-        // submodules and dependencies are renamed and stay internal.
-        let public = parsed
-            .module
-            .public_items
-            .iter()
-            .filter(|n| {
-                loaded
-                    .as_ref()
-                    .is_none_or(|p| !p.sources.qualified.contains_key(*n))
-            })
-            .cloned()
-            .collect();
-        let directives_source = match loaded {
-            Some(p) => crate::export_directives_source(p)?,
-            None => self.source.clone(),
-        };
-        let foreign = loaded.is_some() && lib.needs_module(&self.source, !package_vsys.is_empty());
-        let module = foreign.then(|| parsed.module.clone());
-        let built = lib.build(
-            o.command,
-            parsed.module,
-            &public,
-            o.input(),
-            &directives_source,
-            package_vsys,
-            o.output(),
-            o.target(),
-            o.optimize,
-            o.json,
-            o.exclusive(),
-        );
-        // A package that imports `.vsys` libraries is checked by the
-        // export path; on failure, check it again through the Bridge
-        // lowering to report each diagnostic at its own file and line.
-        if built.is_err()
-            && let (Some(p), Some(module)) = (loaded, module)
-            && let Some(ds) =
-                crate::foreign_package_diagnostics(p, &module, &directives_source, o.target())
-        {
-            crate::package_diagnostics(p, &ds, o.json);
-            return Err(format!("{} semantic error(s)", ds.len()));
-        }
-        built
     }
 }
 
@@ -874,6 +615,7 @@ pub mod host {
                     source_map: Vec::new(),
                     parsed: None,
                     checked: None,
+                    checking: Checking::default(),
                     text: vec![],
                 }))
             }
@@ -919,6 +661,61 @@ pub mod host {
                 FAIL
             }
             Err(_) => PANIC,
+        }
+    }
+
+    /// The session's `Parse` from a parse the Vesper driver ran over the
+    /// source `Load` read (`front.ves` `parse_source`): its diagnostic
+    /// count. The text compiled is the source as read, with no sugar map.
+    ///
+    /// # Safety
+    /// `s` is a live session lent `inout`; `words` a lent word slice.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hd_parsed(s: *mut Session, words: *const u64, len: usize) -> i64 {
+        // SAFETY: lent for the call.
+        let s = unsafe { &mut *s };
+        let words = if len == 0 || words.is_null() {
+            &[][..]
+        } else {
+            // SAFETY: `words` is valid for `len` words for the call.
+            unsafe { std::slice::from_raw_parts(words, len) }
+        };
+        PASSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        match panic::catch_unwind(AssertUnwindSafe(|| {
+            let parsed = crate::vesper_hybrid::driver_parse(&s.original, words);
+            let n = count(parsed.diagnostics.len());
+            s.source = s.original.clone();
+            s.source_map = Vec::new();
+            s.parsed = Some(parsed);
+            n
+        })) {
+            Ok(n) => n,
+            Err(_) => PANIC,
+        }
+    }
+
+    /// 1 when the Vesper driver parses a standalone source itself (the
+    /// parse swap is installed), else 0.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn hd_front_begin() -> u32 {
+        u32::from(crate::vesper_hybrid::driver_parse_begin())
+    }
+
+    /// `crate::write(None, ..)` of `cli()`: `text` to stdout, 0 or `FAIL`
+    /// with the write error as the session's text.
+    ///
+    /// # Safety
+    /// `s` is a live session lent `inout`; `text` a lent byte slice.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hd_write(s: *mut Session, text: *const u8, len: usize) -> i64 {
+        // SAFETY: lent for the call.
+        let (s, text) = unsafe { (&mut *s, bytes(text, len)) };
+        match crate::write(None, text) {
+            Ok(()) => 0,
+            Err(message) => {
+                s.text = message.into_bytes();
+                FAIL
+            }
         }
     }
 

@@ -40,6 +40,13 @@ use self::doc_links::{
 use self::proof::{
     proof_models
 };
+use self::ownership::{
+    lens_facts,
+    lens_view
+};
+use self::repair::{
+    lens_repair
+};
 use self::hover::{
     Facts,
     facts_new,
@@ -611,4 +618,25 @@ fn map_type(in f: Facts, i: u64) -> u32 {
 // every checked function with a body (proof.ves).
 pub fn lsp_proof_models(in input: Str) -> ChunkSeq[u64] {
     proof_models(in input)
+}
+
+// The ownership facts behind Lens views (src/lsp/lens.rs `facts`) and the
+// live linear obligations at each cursor (`View::outstanding`;
+// ownership.ves).
+pub fn lsp_lens_facts(in input: Str) -> ChunkSeq[u64] {
+    lens_facts(in input)
+}
+
+// The repaired view of syntax-damaged source (src/lsp/lens.rs `repair`;
+// repair.ves).
+pub fn lsp_lens_repair(in input: Str) -> ChunkSeq[u64] {
+    lens_repair(in input)
+}
+
+// A Lens view of source with semantic errors, or of a repaired prefix:
+// its live obligations read at the cut, the poisoned bindings, resolved
+// names and ranked member completions (src/lsp/lens.rs `View::from_text`,
+// `poisoned`, `binding`, `complete_member`, `signature`; ownership.ves).
+pub fn lsp_lens_view(in input: Str) -> ChunkSeq[u64] {
+    lens_view(in input)
 }

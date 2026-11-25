@@ -16,6 +16,13 @@
 // - discover.ves: `case_rows`, `discover` and `classify`.
 // - doctest.ves: doctest fence extraction and the token preflight of
 //   `vesper test --doc` (src/doctest_extract.rs).
+// - mutants.ves: the mutation sites of `vesper test --mutate`
+//   (src/test_mutants.rs), over @vesper/ast.
+// - graph.ves: the Anvil function graph and per-function BLAKE3 digests
+//   (`FunctionGraph::from_module` of src/anvil_hash.rs), over @vesper/ast
+//   and @vesper-std/hash.
+// - guard.ves: the fail-closed source profile a doctest module passes
+//   before checking (src/doctest_guard.rs), over @vesper/ast.
 
 use self::discover::{
     case_rows,
@@ -24,6 +31,15 @@ use self::discover::{
 use self::doctest::{
     extract,
     preflight
+};
+use self::graph::{
+    graph
+};
+use self::guard::{
+    guard
+};
+use self::mutants::{
+    collect
 };
 
 // The word format of the entries; tests/common/test_runner_words.rs
@@ -67,4 +83,31 @@ pub fn doctest_preflight_str(in input: Str) -> ChunkSeq[u64] {
 
 pub fn doctest_extract_str(in input: Str) -> ChunkSeq[u64] {
     extract(in input.as_bytes())
+}
+
+// `test_mutants::collect` over the input words.
+pub fn mutants_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    collect(in input)
+}
+
+pub fn mutants_str(in input: Str) -> ChunkSeq[u64] {
+    collect(in input.as_bytes())
+}
+
+// `anvil_hash::FunctionGraph::from_module` of a source.
+pub fn anvil_graph_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    graph(in input)
+}
+
+pub fn anvil_graph_str(in input: Str) -> ChunkSeq[u64] {
+    graph(in input.as_bytes())
+}
+
+// `doctest_guard::rust_guard` of a source under the given limits.
+pub fn doctest_guard_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    guard(in input)
+}
+
+pub fn doctest_guard_str(in input: Str) -> ChunkSeq[u64] {
+    guard(in input.as_bytes())
 }

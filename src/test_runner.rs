@@ -11,18 +11,16 @@ use vesper::{
     anvil_sim::{
         format_value_literal, run_property_test, run_simpulse_test_on_world, write_vchrono_capsule,
     },
-    ast::{Diagnostic, Expr, ExprKind, Function, Item, Literal, Module, Span, Statement, Type},
+    ast::{Diagnostic, Function, Item, Module, Span, Type},
     check::{self, World},
     ffi_lowering::{self, EvalHost, FfiError, ForeignChecked, Imports},
-    lexer::{self, TokenKind as K},
     native::batch::{BatchLimits, NativeBatch},
     packages::{self, Assembled, SourceMap},
     parser,
     runtime::{Runtime, Value},
     test_attrs::{self, AttrValue},
-    test_discovery::{
-        self, CaseRow, CaseRows, case_marker, is_test_marker, location, preceding_comments,
-    },
+    test_discovery::{self, CaseRow, CaseRows, location},
+    test_mutants,
     tooling::doc::sources::{SourceLimits, discover},
 };
 #[path = "test_engines.rs"]
@@ -1692,251 +1690,24 @@ struct MutantCandidate {
     replacement: String,
 }
 
-fn find_operator_span(
-    source: &str,
-    tokens: &[vesper::lexer::Token],
-    range_start: usize,
-    range_end: usize,
-    op: &str,
-) -> Option<(usize, usize)> {
-    let start_idx = tokens.partition_point(|t| t.span.start < range_start);
-    for tok in &tokens[start_idx..] {
-        if tok.span.end > range_end {
-            break;
-        }
-        if matches!(tok.kind, K::Whitespace | K::Comment | K::BlockComment) {
-            continue;
-        }
-        if &source[tok.span.clone()] == op {
-            return Some((tok.span.start, tok.span.end));
-        }
-    }
-    None
-}
-
-fn collect_mutants_in_fn(
-    file: &str,
-    source: &str,
-    tokens: &[vesper::lexer::Token],
-    func: &Function,
-    out: &mut Vec<MutantCandidate>,
-) {
-    let Some(body) = &func.body else {
-        return;
-    };
-    let mut stack: Vec<&Expr> = vec![body];
-    let mut visited = 0usize;
-    while let Some(expr) = stack.pop() {
-        visited += 1;
-        if visited > 16_384 {
-            break;
-        }
-        match &expr.kind {
-            ExprKind::Literal(Literal::Bool(val)) => {
-                if let Some(slice) = source.get(expr.span.start..expr.span.end) {
-                    let trimmed = slice.trim();
-                    if (trimmed == "true" && *val) || (trimmed == "false" && !*val) {
-                        let lead = slice.len() - slice.trim_start().len();
-                        let start = expr.span.start + lead;
-                        let end = start + trimmed.len();
-                        out.push(MutantCandidate {
-                            file: file.to_string(),
-                            function: func.name.clone(),
-                            start,
-                            end,
-                            original: trimmed.to_string(),
-                            replacement: if *val { "false" } else { "true" }.into(),
-                        });
-                    }
-                }
-            }
-            ExprKind::Unary(op, inner) => {
-                if op == "!"
-                    && let Some((start, end)) =
-                        find_operator_span(source, tokens, expr.span.start, inner.span.start, "!")
-                {
-                    out.push(MutantCandidate {
-                        file: file.to_string(),
-                        function: func.name.clone(),
-                        start,
-                        end,
-                        original: "!".into(),
-                        replacement: " ".into(),
-                    });
-                }
-                stack.push(inner);
-            }
-            ExprKind::Binary(op, lhs, rhs) => {
-                let replacements: &[&str] = match op.as_str() {
-                    "+" => &["-"],
-                    "-" => &["+"],
-                    "*" => &["+"],
-                    "==" => &["!="],
-                    "!=" => &["=="],
-                    "<" => &["<=", ">="],
-                    "<=" => &["<", ">"],
-                    ">" => &[">=", "<="],
-                    ">=" => &[">", "<"],
-                    "&&" => &["||"],
-                    "||" => &["&&"],
-                    _ => &[],
-                };
-                if !replacements.is_empty()
-                    && let Some((start, end)) =
-                        find_operator_span(source, tokens, lhs.span.end, rhs.span.start, op)
-                {
-                    for rep in replacements {
-                        out.push(MutantCandidate {
-                            file: file.to_string(),
-                            function: func.name.clone(),
-                            start,
-                            end,
-                            original: op.clone(),
-                            replacement: (*rep).to_string(),
-                        });
-                    }
-                }
-                stack.push(rhs);
-                stack.push(lhs);
-            }
-            ExprKind::Assign(op, lhs, rhs) => {
-                let rep = match op.as_str() {
-                    "+=" => Some("-="),
-                    "-=" => Some("+="),
-                    _ => None,
-                };
-                if let Some(rep) = rep
-                    && let Some((start, end)) =
-                        find_operator_span(source, tokens, lhs.span.end, rhs.span.start, op)
-                {
-                    out.push(MutantCandidate {
-                        file: file.to_string(),
-                        function: func.name.clone(),
-                        start,
-                        end,
-                        original: op.clone(),
-                        replacement: rep.to_string(),
-                    });
-                }
-                stack.push(rhs);
-                stack.push(lhs);
-            }
-            ExprKind::Tuple(es) => {
-                for e in es.iter().rev() {
-                    stack.push(e);
-                }
-            }
-            ExprKind::Struct { fields, .. } => {
-                for (_, e) in fields.iter().rev() {
-                    stack.push(e);
-                }
-            }
-            ExprKind::Block { statements, tail } => {
-                if let Some(t) = tail {
-                    stack.push(t);
-                }
-                for st in statements.iter().rev() {
-                    match st {
-                        Statement::Let { value, .. } => stack.push(value),
-                        Statement::Expr(e) => stack.push(e),
-                    }
-                }
-            }
-            ExprKind::Call { callee, args, .. } => {
-                for a in args.iter().rev() {
-                    stack.push(&a.expr);
-                }
-                stack.push(callee);
-            }
-            ExprKind::Field(inner, _) | ExprKind::Try(inner) => stack.push(inner),
-            ExprKind::Index(a, b) => {
-                stack.push(b);
-                stack.push(a);
-            }
-            ExprKind::If {
-                condition,
-                then,
-                otherwise,
-            } => {
-                if let Some(e) = otherwise {
-                    stack.push(e);
-                }
-                stack.push(then);
-                stack.push(condition);
-            }
-            ExprKind::Match { value, arms } => {
-                for (_, e) in arms.iter().rev() {
-                    stack.push(e);
-                }
-                stack.push(value);
-            }
-            ExprKind::Closure { body, .. } => stack.push(body),
-            k @ (ExprKind::Loop(_)
-            | ExprKind::For { .. }
-            | ExprKind::Range { .. }
-            | ExprKind::Break(_)
-            | ExprKind::Continue
-            | ExprKind::Return(_)) => {
-                let mut children = k.control_children().unwrap_or_default();
-                children.reverse();
-                stack.extend(children);
-            }
-            ExprKind::Handle {
-                state,
-                body,
-                ret,
-                ops,
-                ..
-            } => {
-                for c in ops.iter().rev() {
-                    stack.push(&c.body);
-                }
-                stack.push(&ret.body);
-                stack.push(body);
-                if let Some((_, e)) = state {
-                    stack.push(e);
-                }
-            }
-            ExprKind::Literal(_) | ExprKind::Name(_) => {}
-        }
-    }
-}
-
+/// The mutation sites of `source` outside its tests
+/// ([`test_mutants::collect`]), labelled with `display`.
 fn collect_source_mutants(
     display: &str,
     source: &str,
     test_names: &BTreeSet<&str>,
 ) -> Vec<MutantCandidate> {
-    let (tokens, _) = lexer::lex(source);
-    let mut candidates = Vec::new();
-    for item in &parser::parse(source).module.items {
-        match item {
-            Item::Function(f) => {
-                if !test_names.contains(f.name.as_str())
-                    && !f.name.starts_with("test_")
-                    && !preceding_comments(&tokens, f.span.start).any(|comment| {
-                        let text = &source[comment.span.clone()];
-                        is_test_marker(text) || case_marker(text).is_some()
-                    })
-                {
-                    collect_mutants_in_fn(display, source, &tokens, f, &mut candidates);
-                }
-            }
-            Item::Impl { methods, .. } => {
-                for m in methods {
-                    collect_mutants_in_fn(display, source, &tokens, m, &mut candidates);
-                }
-            }
-            Item::Conformance(c) => {
-                for m in &c.methods {
-                    collect_mutants_in_fn(display, source, &tokens, m, &mut candidates);
-                }
-            }
-            Item::Adt(_) | Item::Effect(_) | Item::Trait(_) => {}
-        }
-    }
-    candidates.sort_by_key(|c| (c.start, c.end, c.replacement.clone()));
-    candidates
+    test_mutants::collect(source, test_names)
+        .into_iter()
+        .map(|site| MutantCandidate {
+            file: display.to_string(),
+            function: site.function,
+            start: site.start,
+            end: site.end,
+            original: site.original,
+            replacement: site.replacement,
+        })
+        .collect()
 }
 
 fn run_mutation_gate(opts: &Options) -> Result<(), String> {

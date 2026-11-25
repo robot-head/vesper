@@ -355,8 +355,13 @@ pub struct Artifact {
 /// current function (see `Asm::bind_copy`).
 const EXIT_SPACING: usize = 256 * 1024;
 
-/// Compile `entry` (no parameters) and everything it reaches.
-pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact, VerifiedError> {
+/// The program [`compile`] lowers: `entry`'s world after IR lowering, the
+/// optional `ir_opt` pass, monomorphization and evidence passing.
+fn prepare(
+    world: &World,
+    entry: &str,
+    options: &Options,
+) -> Result<(crate::ir::Program, evidence::Sites), VerifiedError> {
     let f = world
         .functions
         .get(entry)
@@ -379,7 +384,21 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
     )?;
     // Tail-resumptive user-effect handlers by evidence passing.
     let sites = evidence::rewrite(world, &mut program, &[entry.to_owned()], None)?;
-    let plan = lower::plan(world, &program, entry, options.max_functions, &sites)?;
+    Ok((program, sites))
+}
+
+/// The slot IR of every planned function, by name.
+type Lowered = Vec<(String, Vec<Lir>)>;
+
+/// The plan and the slot IR of every planned function of `program`.
+fn lower_program(
+    world: &World,
+    program: &crate::ir::Program,
+    entry: &str,
+    options: &Options,
+    sites: &evidence::Sites,
+) -> Result<(lower::Plan, Lowered), VerifiedError> {
+    let plan = lower::plan(world, program, entry, options.max_functions, sites)?;
     let mut next_label = plan
         .functions
         .last()
@@ -390,7 +409,7 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
     for index in 0..plan.functions.len() {
         let lowered = lower::function(
             world,
-            &program,
+            program,
             &plan,
             index,
             &mut next_label,
@@ -400,6 +419,49 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
         let _ = (lowered.slots, lowered.out_words);
         lir.push((plan.functions[index].name.clone(), lowered.rows));
     }
+    Ok((plan, lir))
+}
+
+/// The lowering's input and result, for the Vesper port's differential
+/// (tests/self_host_verified_codegen.rs): the program [`compile`] lowers,
+/// whether evidence passing left handler sites in it, and the slot IR of
+/// every planned function or the lowering's error.
+#[doc(hidden)]
+#[allow(clippy::type_complexity)]
+pub fn lowering_for_test(
+    world: &World,
+    entry: &str,
+    options: &Options,
+) -> Result<
+    (
+        crate::ir::Program,
+        bool,
+        Result<Vec<(String, Vec<Lir>)>, VerifiedError>,
+    ),
+    VerifiedError,
+> {
+    let (program, sites) = prepare(world, entry, options)?;
+    let lowered = lower_program(world, &program, entry, options, &sites).map(|(_, lir)| lir);
+    let has_sites = !sites.escape.is_empty() || !sites.restore.is_empty();
+    Ok((program, has_sites, lowered))
+}
+
+/// [`lower_program`] alone, for a program without handler sites (the
+/// timing half of the Vesper port's flip gate).
+#[doc(hidden)]
+pub fn lower_for_test(
+    world: &World,
+    program: &crate::ir::Program,
+    entry: &str,
+    options: &Options,
+) -> Result<Lowered, VerifiedError> {
+    lower_program(world, program, entry, options, &evidence::Sites::default()).map(|(_, lir)| lir)
+}
+
+/// Compile `entry` (no parameters) and everything it reaches.
+pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact, VerifiedError> {
+    let (program, sites) = prepare(world, entry, options)?;
+    let (plan, lir) = lower_program(world, &program, entry, options, &sites)?;
     let certificate = certificate::check(&lir);
     if let (true, Err(r)) = (options.require_certificate, &certificate) {
         return Err(VerifiedError::Invalid(r.to_string()));

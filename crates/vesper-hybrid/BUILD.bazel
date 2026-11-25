@@ -2,31 +2,19 @@ load("//tools/bazel:vesper_hybrid.bzl", "vesper_hybrid")
 
 # The hybrid Stage 2 compiler (self-hosting SH0 lane 1, #1123): the default
 # CLI with swapped modules linked from Vesper objects that //:bin/vesper
-# builds. It is never the default compiler. Keep `modules` and `divergent`
-# in step with MODULES and DIVERGENT_EDIT in build.rs.
+# builds. It is never the default compiler. Every directory of modules/
+# with a Loom.toml is a module (`hybrid_<dir>`, as in build.rs), so a new
+# module adds no list entry here, only its `module_deps` entry, kept in
+# sorted order so parallel PRs touch different lines (#1897). Keep
+# `divergent` in step with the DIVERGENT_* edits in build.rs.
 vesper_hybrid(
     divergent = {
-        "hybrid_layout": {
-            "edit_src": "modules/layout/src/lib.ves",
-            "edits": {"        8\n    } else {\n        0\n": "        16\n    } else {\n        0\n"},
-        },
         "hybrid_check_layout": {
             "edit_src": "modules/check_layout/src/lib.ves",
             "edits": {
                 "    layout_words(in input)\n": "    layout_words(in input[0..0])\n",
                 "    layout_part(inout s.c, in part)\n": "    layout_part(inout s.c, in part[0..0])\n",
             },
-        },
-        "hybrid_ir_check": {
-            "edit_src": "modules/ir_check/src/lib.ves",
-            "edits": {
-                "    ir_check_words(in input)\n": "    divergent_words(in input)\n",
-                "    ir_check_part(inout s.c, in part)\n": "    divergent_words(in part)\n",
-            },
-        },
-        "hybrid_doc": {
-            "edit_src": "modules/doc/src/lib.ves",
-            "edits": {"(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    page\n": "(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    let mut p = page;\n    p.push(32);\n    p\n"},
         },
         # SH5 lane 10 (#1333): the shared-world module gets both
         # divergences (the bzl applies every edit in the divergent build).
@@ -37,21 +25,32 @@ vesper_hybrid(
                 "    ir_check_task(inout r, in part, inout s.c)\n": "    divergent_words(in part)\n",
             },
         },
-        "hybrid_stack_bound": {
-            "edit_src": "modules/stack_bound/src/lib.ves",
-            "edits": {"    stack_bound_words(in input)\n": "    divergent_words(in input)\n"},
+        "hybrid_doc": {
+            "edit_src": "modules/doc/src/lib.ves",
+            "edits": {"(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    page\n": "(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    let mut p = page;\n    p.push(32);\n    p\n"},
+        },
+        "hybrid_ir_check": {
+            "edit_src": "modules/ir_check/src/lib.ves",
+            "edits": {
+                "    ir_check_words(in input)\n": "    divergent_words(in input)\n",
+                "    ir_check_part(inout s.c, in part)\n": "    divergent_words(in part)\n",
+            },
         },
         "hybrid_ir_inline": {
             "edit_src": "modules/ir_inline/src/lib.ves",
             "edits": {"    inline_program_words(in input)\n": "    divergent_words(in input)\n"},
         },
-        "hybrid_optimize": {
-            "edit_src": "modules/optimize/src/lib.ves",
-            "edits": {"    optimize_propose_split(in input, in names)\n": "    divergent_words(in input, in names)\n"},
-        },
         "hybrid_ir_opt": {
             "edit_src": "modules/ir_opt/src/lib.ves",
             "edits": {"    policy_words(in input)\n": "    divergent_words(in input)\n"},
+        },
+        "hybrid_layout": {
+            "edit_src": "modules/layout/src/lib.ves",
+            "edits": {"        8\n    } else {\n        0\n": "        16\n    } else {\n        0\n"},
+        },
+        "hybrid_optimize": {
+            "edit_src": "modules/optimize/src/lib.ves",
+            "edits": {"    optimize_propose_split(in input, in names)\n": "    divergent_words(in input, in names)\n"},
         },
         "hybrid_pact": {
             "edit_src": "modules/pact/src/lib.ves",
@@ -60,6 +59,10 @@ vesper_hybrid(
         "hybrid_parse": {
             "edit_src": "modules/parse/src/lib.ves",
             "edits": {"    if b {\n        1\n    } else {\n        0\n    }": "    if b {\n        0\n    } else {\n        1\n    }"},
+        },
+        "hybrid_stack_bound": {
+            "edit_src": "modules/stack_bound/src/lib.ves",
+            "edits": {"    stack_bound_words(in input)\n": "    divergent_words(in input)\n"},
         },
     },
     # The included CLI sources (src/main.rs and its command modules) and
@@ -73,27 +76,21 @@ vesper_hybrid(
         "//bootstrap:files",
         "//crates/vesper-syntax:files",
     ],
-    # The parse module (#1155) builds on the front end v2 and the AST.
     module_deps = {
+        # The backend verifiers swap (#1291) builds on @vesper/backend-checks.
+        "hybrid_backend_checks": [
+            "//:backend_checks_package",
+        ],
+        # The IR swap point's `hoist` hook (#1251).
+        "hybrid_bounds_hoist": [
+            "//:bounds_hoist_package",
+            "//:check_data_package",
+            "//:place_ir_package",
+        ],
         # The checker swaps (#1177) build on @vesper/check-data.
         "hybrid_check_layout": [
             "//:check_data_package",
             "//:check_layout_package",
-        ],
-        # The doc renderers (#1338) build on @vesper/doc and @vesper/serde.
-        "hybrid_doc": [
-            "//:doc_package",
-            "//crates/vesper-serde:port_package",
-        ],
-        # The driver (#1335) builds on @vesper/driver and @vesper-std I/O.
-        # The command layers (#1336) add @vesper/driver-commands.
-        "hybrid_driver": [
-            "//:driver_commands_package",
-            "//:driver_package",
-            "//:std_env_package",
-            "//:std_fmt_package",
-            "//:std_fs_package",
-            "//:std_process_package",
         ],
         "hybrid_checks": [
             "//:check_data_package",
@@ -111,25 +108,26 @@ vesper_hybrid(
             "//:codegen_calls_emit_package",
             "//packages/vesper-cranelift:cranelift_package",
         ],
-        # Vector and TiledSeq operations (#1285), through the shim too.
-        "hybrid_codegen_numeric": [
-            "//packages/vesper-codegen-numeric:codegen_numeric_package",
-            "//packages/vesper-cranelift:cranelift_package",
-        ],
-        # ChunkSeq and Slice operations (#1283), through the shim.
-        "hybrid_codegen_seq": [
-            "//:codegen_seq_emit_package",
-            "//packages/vesper-cranelift:cranelift_package",
-        ],
         # Closures, handlers and effect calls (#1284), through the shim.
         "hybrid_codegen_control": [
             "//:codegen_control_emit_package",
             "//packages/vesper-cranelift:cranelift_package",
         ],
-        # Foreign (.vsys) call emission (#1287), through the shim.
-        "hybrid_ffi_lowering": [
-            "//:codegen_base_package",
-            "//:ffi_emit_package",
+        # The drops swap (#1282) builds on @vesper/codegen-aggregates-emit.
+        "hybrid_codegen_drops": [
+            "//:codegen_aggregates_emit_package",
+            "//packages/vesper-cranelift:cranelift_package",
+        ],
+        # The export planner and glue (#1286); the glue emits through the
+        # Cranelift shim too.
+        "hybrid_codegen_export": [
+            "//:codegen_export_glue_package",
+            "//:codegen_export_package",
+            "//packages/vesper-cranelift:cranelift_package",
+        ],
+        # Vector and TiledSeq operations (#1285), through the shim too.
+        "hybrid_codegen_numeric": [
+            "//packages/vesper-codegen-numeric:codegen_numeric_package",
             "//packages/vesper-cranelift:cranelift_package",
         ],
         # Scalars, locals and control flow (#1280): the plan, and emission
@@ -142,25 +140,76 @@ vesper_hybrid(
             "//:place_ir_package",
             "//packages/vesper-cranelift:cranelift_package",
         ],
-        # The export planner and glue (#1286); the glue emits through the
-        # Cranelift shim too.
-        "hybrid_codegen_export": [
-            "//:codegen_export_glue_package",
-            "//:codegen_export_package",
+        # ChunkSeq and Slice operations (#1283), through the shim.
+        "hybrid_codegen_seq": [
+            "//:codegen_seq_emit_package",
             "//packages/vesper-cranelift:cranelift_package",
+        ],
+        # The native walk swap (#1509) builds on @vesper/native-walk.
+        "hybrid_codegen_walk": [
+            "//:codegen_walk_package",
+        ],
+        # The doc renderers (#1338) build on @vesper/doc and @vesper/serde.
+        "hybrid_doc": [
+            "//:doc_package",
+            "//crates/vesper-serde:port_package",
+        ],
+        # The driver (#1335) builds on @vesper/driver and @vesper-std I/O.
+        # The command layers (#1336) add @vesper/driver-commands; the
+        # front-end passes (#1893) the parse module, the front end v2, the
+        # AST and @vesper-std/toml's Debug text.
+        "hybrid_driver": [
+            ":hybrid_parse_package",
+            "//:ast_package",
+            "//:driver_commands_package",
+            "//:driver_package",
+            "//:front_package",
+            "//:std_env_package",
+            "//:std_fmt_package",
+            "//:std_fs_package",
+            "//:std_process_package",
+            "//:std_toml_package",
+        ],
+        # The eBPF backend swap (#1290) builds on @vesper/ebpf-backend.
+        "hybrid_ebpf_backend": [
+            "//:check_data_package",
+            "//:place_ir_package",
+            "//:ebpf_backend_package",
+        ],
+        # The capability effect checker (#1180) builds on @vesper/check-effects.
+        "hybrid_effects": [
+            "//:check_data_package",
+            "//:check_effects_package",
+        ],
+        # Foreign (.vsys) call emission (#1287), through the shim.
+        "hybrid_ffi_lowering": [
+            "//:codegen_base_package",
+            "//:ffi_emit_package",
+            "//packages/vesper-cranelift:cranelift_package",
+        ],
+        # The fip checker (#1184) builds on @vesper/check-fip.
+        "hybrid_fip": [
+            "//:check_data_package",
+            "//:check_fip_package",
+        ],
+        # The freestanding swap (#1288) builds on @vesper/codegen-freestanding.
+        "hybrid_freestanding": [
+            "//:codegen_freestanding_package",
         ],
         "hybrid_ir_check": [
             "//:check_data_package",
             "//:ir_check_package",
         ],
-        # The stack-bound swap (#1182) builds on @vesper/check-loops-atomics.
-        "hybrid_stack_bound": [
-            "//:check_data_package",
-            "//:check_loops_atomics_package",
-        ],
         "hybrid_ir_inline": [
             "//:check_data_package",
             "//:ir_inline_package",
+        ],
+        "hybrid_ir_opt": [
+            "//:check_data_package",
+            "//:egraph_package",
+            "//:ir_opt_package",
+            "//:ir_opt_policy_package",
+            "//:place_ir_package",
         ],
         # The AST optimizer (#1249): its producer and checker.
         "hybrid_optimize": [
@@ -171,29 +220,27 @@ vesper_hybrid(
             "//:std_arena_package",
             "//:std_intern_package",
         ],
-        "hybrid_ir_opt": [
+        # The trait declaration pass and Pact session (#1185) build on @vesper/check-pact and @vesper/pact.
+        "hybrid_pact": [
             "//:check_data_package",
-            "//:egraph_package",
-            "//:ir_opt_package",
-            "//:ir_opt_policy_package",
-            "//:place_ir_package",
+            "//:check_pact_package",
+            "//crates/vesper-pact:port_package",
+        ],
+        # The parse module (#1155) builds on the front end v2 and the AST.
+        "hybrid_parse": [
+            "//:ast_package",
+            "//:front_package",
+            "//:std_intern_package",
         ],
         # The IR swap point's identity round trip (#1240).
         "hybrid_place_ir": [
             "//:check_data_package",
             "//:place_ir_package",
         ],
-        # The IR swap point's `hoist` hook (#1251).
-        "hybrid_bounds_hoist": [
-            "//:bounds_hoist_package",
+        # The stack-bound swap (#1182) builds on @vesper/check-loops-atomics.
+        "hybrid_stack_bound": [
             "//:check_data_package",
-            "//:place_ir_package",
-        ],
-        # The trait declaration pass and Pact session (#1185) build on @vesper/check-pact and @vesper/pact.
-        "hybrid_pact": [
-            "//:check_data_package",
-            "//:check_pact_package",
-            "//crates/vesper-pact:port_package",
+            "//:check_loops_atomics_package",
         ],
         # The tensor type checker (#1186) builds on @vesper/check-tensor-types.
         "hybrid_tensor_types": [
@@ -202,20 +249,16 @@ vesper_hybrid(
             "//:check_tensor_types_package",
             "//:std_intern_package",
         ],
-        # The capability effect checker (#1180) builds on @vesper/check-effects.
-        "hybrid_effects": [
-            "//:check_data_package",
-            "//:check_effects_package",
-        ],
-        # The fip checker (#1184) builds on @vesper/check-fip.
-        "hybrid_fip": [
-            "//:check_data_package",
-            "//:check_fip_package",
-        ],
-        "hybrid_parse": [
+        # Test discovery, doctest extraction and mutation sites (#1337)
+        # build on @vesper/test-runner.
+        "hybrid_test_runner": [
             "//:ast_package",
+            "//:check_data_package",
             "//:front_package",
+            "//:std_arena_package",
+            "//:std_hash_package",
             "//:std_intern_package",
+            "//:test_runner_package",
         ],
         # The wasm backend swap (#1289) builds on the Place IR data; the
         # component wrapping (#1334) on @vesper/wit-component.
@@ -225,68 +268,6 @@ vesper_hybrid(
             "//:wasm_backend_package",
             "//:wit_component_package",
         ],
-        # The eBPF backend swap (#1290) builds on @vesper/ebpf-backend.
-        "hybrid_ebpf_backend": [
-            "//:check_data_package",
-            "//:place_ir_package",
-            "//:ebpf_backend_package",
-        ],
-        # The freestanding swap (#1288) builds on @vesper/codegen-freestanding.
-        "hybrid_freestanding": [
-            "//:codegen_freestanding_package",
-        ],
-        # The backend verifiers swap (#1291) builds on @vesper/backend-checks.
-        "hybrid_backend_checks": [
-            "//:backend_checks_package",
-        ],
-        # The native walk swap (#1509) builds on @vesper/native-walk.
-        "hybrid_codegen_walk": [
-            "//:codegen_walk_package",
-        ],
-        # The drops swap (#1282) builds on @vesper/codegen-aggregates-emit.
-        "hybrid_codegen_drops": [
-            "//:codegen_aggregates_emit_package",
-            "//packages/vesper-cranelift:cranelift_package",
-        ],
-        # Test discovery (#1337) builds on @vesper/test-runner.
-        "hybrid_test_runner": [
-            "//:front_package",
-            "//:test_runner_package",
-        ],
-    },
-    modules = {
-        "hybrid_check_layout": "modules/check_layout",
-        "hybrid_doc": "modules/doc",
-        "hybrid_driver": "modules/driver",
-        "hybrid_checks": "modules/checks",
-        "hybrid_codegen": "modules/codegen",
-        "hybrid_codegen_calls": "modules/codegen_calls",
-        "hybrid_codegen_export": "modules/codegen_export",
-        "hybrid_codegen_numeric": "modules/codegen_numeric",
-        "hybrid_codegen_scalar": "modules/codegen_scalar",
-        "hybrid_codegen_seq": "modules/codegen_seq",
-        "hybrid_codegen_control": "modules/codegen_control",
-        "hybrid_ffi_lowering": "modules/ffi_lowering",
-        "hybrid_ir_check": "modules/ir_check",
-        "hybrid_ir_inline": "modules/ir_inline",
-        "hybrid_ir_opt": "modules/ir_opt",
-        "hybrid_layout": "modules/layout",
-        "hybrid_optimize": "modules/optimize",
-        "hybrid_pact": "modules/pact",
-        "hybrid_effects": "modules/effects",
-        "hybrid_fip": "modules/fip",
-        "hybrid_tensor_types": "modules/tensor_types",
-        "hybrid_parse": "modules/parse",
-        "hybrid_wasm_backend": "modules/wasm_backend",
-        "hybrid_ebpf_backend": "modules/ebpf_backend",
-        "hybrid_freestanding": "modules/freestanding",
-        "hybrid_backend_checks": "modules/backend_checks",
-        "hybrid_codegen_walk": "modules/codegen_walk",
-        "hybrid_codegen_drops": "modules/codegen_drops",
-        "hybrid_test_runner": "modules/test_runner",
-        "hybrid_place_ir": "modules/place_ir",
-        "hybrid_stack_bound": "modules/stack_bound",
-        "hybrid_bounds_hoist": "modules/bounds_hoist",
     },
     # The export glue swap (#1286) builds every library a port crate links
     # (tests/self_host_codegen_export/ports.rs) with both compilers.
@@ -342,9 +323,20 @@ vesper_hybrid(
     test_env = {
         "VESPER_DEFAULT_COMPILER": "vesper",
         "VESPER_DOC_STRIDE": "8",
+        # The gated differential (#1397) runs every 4th corpus file here;
+        # Cargo runs them all.
+        "VESPER_GATED_STRIDE": "4",
+        # The interface export differential (#1893) runs every 8th source
+        # and package here; Cargo runs them all.
+        "VESPER_DRIVER_INTERFACE_STRIDE": "8",
     },
     # 51 libraries, each built by both compilers.
-    test_timeouts = {"test/codegen_export": "long"},
+    # The differential runs the corpus twice since the gated set (#1397).
+    test_timeouts = {
+        "test/codegen_export": "long",
+        "test/differential": "long",
+        "test/driver_front": "long",
+    },
     test_path_binaries = {
         "test/codegen_export": [
             ":bin/vesper-hybrid",
@@ -358,7 +350,13 @@ vesper_hybrid(
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],
+        "test/swaps": [":bin/vesper-hybrid"],
         "test/driver": [
+            ":bin/vesper-hybrid",
+            "//:bin/vesper",
+        ],
+        # hd_step group 2 (#1893): the front-end passes in the driver.
+        "test/driver_front": [
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],

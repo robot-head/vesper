@@ -1,0 +1,520 @@
+// The x86-64 encoding of each abstract machine instruction:
+// src/verified_codegen/x86_64.rs in Vesper (#1886, part 2).
+//
+// `R0`, `R1`, `R2` are `rax`, `rcx`, `rdx`; frame words are `[rsp + 8n]`
+// (slots and the outgoing area) and `[rbp + 16 + 8n]` (the incoming area).
+// lean/CodegenX64Encoding.lean models these encodings.
+
+use self::asm::{
+    Asm,
+    EXT_EXIT_PROCESS,
+    EXT_GET_STD_HANDLE,
+    EXT_WRITE_FILE,
+    External,
+    FIX_REL32,
+    Prologue,
+    bind,
+    byte,
+    fixup,
+    here,
+    put_u32,
+    put_u64,
+    set_scope,
+    trap_label
+};
+use self::machine::{
+    C_EQ,
+    C_GE,
+    C_GT,
+    C_LE,
+    C_LT,
+    C_NE,
+    L_IN,
+    M,
+    M_ADD_CHK,
+    M_AND_R2,
+    M_BZ,
+    M_CALL,
+    M_CMP,
+    M_DIV,
+    M_ENTER,
+    M_FCMP,
+    M_FNEG,
+    M_FOP,
+    M_IMM,
+    M_JMP,
+    M_LABEL,
+    M_LD,
+    M_LDH,
+    M_LEAVE,
+    M_MUL_CHK,
+    M_NEG_CHK,
+    M_REM,
+    M_ST,
+    M_STH,
+    M_SUB_CHK,
+    M_TRAP,
+    M_TRAP_DIV_OVF,
+    M_TRAP_GT_U,
+    M_TRAP_ZERO,
+    M_WRAP,
+    M_XOR_ONE,
+    OP_ADD,
+    OP_DIV,
+    OP_MUL,
+    OP_SUB,
+    S_S
+};
+
+pub const HEAP_BASE: u64 = 268435456;
+
+// The `ExitStatus` and `Words` result protocols.
+pub const P_EXIT_STATUS: u8 = 0;
+pub const P_WORDS: u8 = 1;
+
+const JO: u8 = 0;
+const JB: u8 = 2;
+const JE: u8 = 4;
+const JNE: u8 = 5;
+const JA: u8 = 7;
+
+fn bytes2(inout a: Asm, x: u8, y: u8) {
+    byte(inout a, x);
+    byte(inout a, y);
+}
+
+fn bytes3(inout a: Asm, x: u8, y: u8, z: u8) {
+    byte(inout a, x);
+    byte(inout a, y);
+    byte(inout a, z);
+}
+
+fn bytes4(inout a: Asm, x: u8, y: u8, z: u8, t: u8) {
+    bytes2(inout a, x, y);
+    bytes2(inout a, z, t);
+}
+
+fn mem(inout a: Asm, opcode: u8, r: u8, loc: u8, n: u64) {
+    let rr = wrapping_mul(r, 8);
+    if loc == L_IN {
+        bytes3(inout a, 72, opcode, 133 | rr);
+        put_u32(inout a, wrapping_u32(wrapping_add(16, wrapping_mul(n, 8))));
+    } else {
+        bytes4(inout a, 72, opcode, 132 | rr, 36);
+        put_u32(inout a, wrapping_u32(wrapping_mul(n, 8)));
+    }
+}
+
+// `jcc rel32` (`0f 8x`) to a label.
+fn jcc(inout a: Asm, cc: u8, l: u64) {
+    bytes2(inout a, 15, 128 | cc);
+    let at = here(in a);
+    put_u32(inout a, 0);
+    fixup(inout a, at, l, FIX_REL32);
+}
+
+// `jmp`/`call` to a label.
+fn rel(inout a: Asm, opcode: u8, l: u64) {
+    byte(inout a, opcode);
+    let at = here(in a);
+    put_u32(inout a, 0);
+    fixup(inout a, at, l, FIX_REL32);
+}
+
+fn signed_cc(s: u8, signed: u8, unsigned: u8) -> u8 {
+    if s == S_S {
+        signed
+    } else {
+        unsigned
+    }
+}
+
+// `emit`: the bytes of one instruction.
+pub fn emit(inout a: Asm, in m: M) {
+    let ovf = trap_label(in a, 0);
+    let o = m.op;
+    if o == M_LD {
+        mem(inout a, 139, m.a, m.b, m.n);
+    } else if o == M_ST {
+        mem(inout a, 137, m.a, m.b, m.n);
+    } else if o == M_IMM {
+        bytes2(inout a, 72, wrapping_add(184, m.a));
+        put_u64(inout a, m.n);
+    } else if o == M_ADD_CHK {
+        // add rax, rcx; jo/jb
+        bytes3(inout a, 72, 1, 200);
+        jcc(inout a, signed_cc(m.a, JO, JB), ovf);
+    } else if o == M_SUB_CHK {
+        // sub rax, rcx; jo/jb
+        bytes3(inout a, 72, 41, 200);
+        jcc(inout a, signed_cc(m.a, JO, JB), ovf);
+    } else if o == M_MUL_CHK {
+        if m.a == S_S {
+            // imul rax, rcx; jo
+            bytes4(inout a, 72, 15, 175, 193);
+        } else {
+            // mul rcx (rdx:rax); jo
+            bytes3(inout a, 72, 247, 225);
+        }
+        jcc(inout a, JO, ovf);
+    } else if o == M_WRAP {
+        if m.a == OP_ADD {
+            bytes3(inout a, 72, 1, 200);
+        } else if m.a == OP_SUB {
+            bytes3(inout a, 72, 41, 200);
+        } else {
+            bytes4(inout a, 72, 15, 175, 193);
+        }
+    } else if o == M_AND_R2 {
+        // and rax, rdx
+        bytes3(inout a, 72, 33, 208);
+    } else if o == M_TRAP_GT_U {
+        // cmp rax, rdx; ja
+        bytes3(inout a, 72, 57, 208);
+        jcc(inout a, JA, ovf);
+    } else if o == M_TRAP_ZERO {
+        // test rcx, rcx; je
+        bytes3(inout a, 72, 133, 201);
+        let l = trap_label(in a, 1);
+        jcc(inout a, JE, l);
+    } else if o == M_TRAP_DIV_OVF {
+        // movabs rdx, MIN; cmp rax, rdx; jne +10; cmp rcx, -1; je ovf
+        bytes2(inout a, 72, 186);
+        put_u64(inout a, 9223372036854775808);
+        bytes4(inout a, 72, 57, 208, 117);
+        bytes4(inout a, 10, 72, 131, 249);
+        byte(inout a, 255);
+        jcc(inout a, JE, ovf);
+    } else if o == M_DIV {
+        if m.a == S_S {
+            // cqo; idiv rcx
+            bytes3(inout a, 72, 153, 72);
+            bytes2(inout a, 247, 249);
+        } else {
+            // xor edx, edx; div rcx
+            bytes3(inout a, 49, 210, 72);
+            bytes2(inout a, 247, 241);
+        }
+    } else if o == M_REM {
+        if m.a == S_S {
+            // cmp rcx, -1; jne +4; xor eax, eax; jmp +8; cqo; idiv rcx;
+            // mov rax, rdx (`idiv` faults on MIN / -1).
+            bytes4(inout a, 72, 131, 249, 255);
+            bytes4(inout a, 117, 4, 49, 192);
+            bytes4(inout a, 235, 8, 72, 153);
+            bytes4(inout a, 72, 247, 249, 72);
+            bytes2(inout a, 137, 208);
+        } else {
+            bytes4(inout a, 49, 210, 72, 247);
+            bytes4(inout a, 241, 72, 137, 208);
+        }
+    } else if o == M_NEG_CHK {
+        if m.a == S_S {
+            // neg rax; jo
+            bytes3(inout a, 72, 247, 216);
+            jcc(inout a, JO, ovf);
+        } else {
+            // test rax, rax; jne
+            bytes3(inout a, 72, 133, 192);
+            jcc(inout a, JNE, ovf);
+        }
+    } else if o == M_XOR_ONE {
+        // xor rax, 1
+        bytes4(inout a, 72, 131, 240, 1);
+    } else if o == M_CMP {
+        // cmp rax, rcx; setcc al; movzx eax, al
+        let c = m.a;
+        let cc: u8 = if c == C_EQ {
+            148
+        } else if c == C_NE {
+            149
+        } else if c == C_LT {
+            signed_cc(m.b, 156, 146)
+        } else if c == C_LE {
+            signed_cc(m.b, 158, 150)
+        } else if c == C_GT {
+            signed_cc(m.b, 159, 151)
+        } else {
+            signed_cc(m.b, 157, 147)
+        };
+        bytes3(inout a, 72, 57, 200);
+        bytes3(inout a, 15, cc, 192);
+        bytes3(inout a, 15, 182, 192);
+    } else if o == M_FOP {
+        // movq xmm0, rax; movq xmm1, rcx; <op>sd xmm0, xmm1; movq rax, xmm0
+        let opcode: u8 = if m.a == OP_ADD {
+            88
+        } else if m.a == OP_SUB {
+            92
+        } else if m.a == OP_MUL {
+            89
+        } else {
+            94
+        };
+        movq_in(inout a);
+        bytes4(inout a, 242, 15, opcode, 193);
+        bytes4(inout a, 102, 72, 15, 126);
+        byte(inout a, 192);
+    } else if o == M_FNEG {
+        // btc rax, 63
+        bytes4(inout a, 72, 15, 186, 248);
+        byte(inout a, 63);
+    } else if o == M_FCMP {
+        movq_in(inout a);
+        let c = m.a;
+        if c == C_EQ || c == C_NE {
+            // ucomisd xmm0, xmm1; mov eax, 0|1; jp +3; sete/setne al
+            let init: u8 = if c == C_EQ {
+                0
+            } else {
+                1
+            };
+            let cc: u8 = if c == C_EQ {
+                148
+            } else {
+                149
+            };
+            bytes4(inout a, 102, 15, 46, 193);
+            bytes2(inout a, 184, init);
+            bytes3(inout a, 0, 0, 0);
+            bytes2(inout a, 122, 3);
+            bytes3(inout a, 15, cc, 192);
+        } else {
+            // a > b: seta; a >= b: setae. a < b and a <= b swap operands.
+            let modrm: u8 = if c == C_GT || c == C_GE {
+                193
+            } else {
+                200
+            };
+            let cc: u8 = if c == C_GT || c == C_LT {
+                151
+            } else {
+                147
+            };
+            bytes4(inout a, 102, 15, 46, modrm);
+            bytes3(inout a, 15, cc, 192);
+            bytes3(inout a, 15, 182, 192);
+        }
+    } else if o == M_LDH || o == M_STH {
+        // mov r11d, HEAP_BASE; mov rax, [r11 + rcx*8 + 8*off] (or the store)
+        bytes2(inout a, 65, 187);
+        put_u32(inout a, wrapping_u32(HEAP_BASE));
+        let opcode: u8 = if o == M_LDH {
+            139
+        } else {
+            137
+        };
+        bytes4(inout a, 73, opcode, 132, 203);
+        put_u32(inout a, wrapping_u32(wrapping_mul(m.n, 8)));
+    } else if o == M_LABEL {
+        bind(inout a, m.n);
+    } else if o == M_JMP {
+        rel(inout a, 233, m.n);
+    } else if o == M_BZ {
+        // test rax, rax; je
+        bytes3(inout a, 72, 133, 192);
+        jcc(inout a, JE, m.n);
+    } else if o == M_CALL {
+        rel(inout a, 232, m.n);
+    } else if o == M_ENTER {
+        prologue(inout a, wrapping_u32(wrapping_mul(m.n, 8)));
+    } else if o == M_LEAVE {
+        if a.windows {
+            // add rsp, frame; pop rbp; ret
+            let frame = a.frame;
+            bytes3(inout a, 72, 129, 196);
+            put_u32(inout a, frame);
+            bytes2(inout a, 93, 195);
+        } else {
+            // mov rsp, rbp; pop rbp; ret
+            bytes4(inout a, 72, 137, 236, 93);
+            byte(inout a, 195);
+        }
+    } else if o == M_TRAP {
+        let l = trap_label(in a, m.a);
+        rel(inout a, 233, l);
+    } else {
+        set_scope(inout a, m.n, m.n2);
+    }
+}
+
+// movq xmm0, rax; movq xmm1, rcx
+fn movq_in(inout a: Asm) {
+    bytes4(inout a, 102, 72, 15, 110);
+    byte(inout a, 192);
+    bytes4(inout a, 102, 72, 15, 110);
+    byte(inout a, 201);
+}
+
+// `push rbp; mov rbp, rsp; sub rsp, bytes`. On Windows, frames of a page
+// or more first touch each page below `rsp` in order (`test [rsp -
+// 4096k], esp`), as `__chkstk` would, and the prologue is recorded for the
+// unwind tables.
+fn prologue(inout a: Asm, n: u32) {
+    let start = here(in a);
+    byte(inout a, 85);
+    let push_end = wrapping_u8(wrapping_sub(here(in a), start));
+    bytes3(inout a, 72, 137, 229);
+    if a.windows {
+        let pages = n / 4096;
+        for page in 1..wrapping_add(widen_u64(pages), 1) {
+            bytes3(inout a, 133, 164, 36);
+            put_u32(inout a, wrapping_sub(0, wrapping_u32(wrapping_mul(page, 4096))));
+        }
+    }
+    bytes3(inout a, 72, 129, 236);
+    put_u32(inout a, n);
+    a.frame = n;
+    if a.windows {
+        let alloc_end = wrapping_u8(wrapping_sub(here(in a), start));
+        a
+            .prologues
+            .push(
+                Prologue {
+                    start: start,
+                    push_end: push_end,
+                    alloc_end: alloc_end,
+                    frame: n,
+                    has_end: false,
+                    end: 0
+                }
+            );
+    }
+}
+
+// `call` an external symbol (resolved by the linker).
+fn call_external(inout a: Asm, name: u8) {
+    byte(inout a, 232);
+    let at = here(in a);
+    put_u32(inout a, 0);
+    a
+        .externals
+        .push(
+            External {
+                at: at,
+                name: name
+            }
+        );
+}
+
+// The Windows C `main`: reserve the result area, call the entry,
+// optionally write the result words with `WriteFile`, and return the
+// status to the C runtime. The abort exits call `ExitProcess`. Returns the
+// offset of `main` in the code.
+pub fn start_windows(inout a: Asm, protocol: u8, result_words: u32, entry: u64) -> u64 {
+    let main = here(in a);
+    let words: u32 = if result_words == 0 {
+        1
+    } else {
+        result_words
+    };
+    let area = wrapping_mul(wrapping_add(words, 1) & 4294967294, 8);
+    prologue(inout a, area);
+    rel(inout a, 232, entry);
+    if protocol == P_WORDS && result_words > 0 {
+        // sub rsp, 48
+        bytes4(inout a, 72, 131, 236, 48);
+        // mov ecx, -11 (STD_OUTPUT_HANDLE); call GetStdHandle
+        bytes4(inout a, 185, 245, 255, 255);
+        byte(inout a, 255);
+        call_external(inout a, EXT_GET_STD_HANDLE);
+        // mov rcx, rax; lea rdx, [rsp + 48]; mov r8d, len
+        bytes4(inout a, 72, 137, 193, 72);
+        bytes4(inout a, 141, 84, 36, 48);
+        bytes2(inout a, 65, 184);
+        put_u32(inout a, wrapping_mul(result_words, 8));
+        // lea r9, [rsp + 40]; mov qword [rsp + 32], 0
+        bytes4(inout a, 76, 141, 76, 36);
+        byte(inout a, 40);
+        bytes4(inout a, 72, 199, 68, 36);
+        bytes4(inout a, 32, 0, 0, 0);
+        byte(inout a, 0);
+        call_external(inout a, EXT_WRITE_FILE);
+        // add rsp, 48
+        bytes4(inout a, 72, 131, 196, 48);
+    }
+    if protocol == P_EXIT_STATUS && result_words > 0 {
+        // movzx eax, byte [rsp]
+        bytes4(inout a, 15, 182, 4, 36);
+    } else {
+        // xor eax, eax
+        bytes2(inout a, 49, 192);
+    }
+    // add rsp, frame; pop rbp; ret
+    let frame = a.frame;
+    bytes3(inout a, 72, 129, 196);
+    put_u32(inout a, frame);
+    bytes2(inout a, 93, 195);
+    let end = here(in a);
+    let last = wrapping_sub(a.prologues.len(), 1);
+    match a.prologues.try_get(last) {
+        Option::Some(p) => {
+            let ok = a
+                .prologues
+                .try_set(
+                    last,
+                    Prologue {
+                        start: p.start,
+                        push_end: p.push_end,
+                        alloc_end: p.alloc_end,
+                        frame: p.frame,
+                        has_end: true,
+                        end: end
+                    }
+                );
+        },
+        Option::None => {}
+    }
+    for k in 0..4 {
+        bind(inout a, k);
+        // sub rsp, 32; mov ecx, status; call ExitProcess; int3
+        bytes4(inout a, 72, 131, 236, 32);
+        bytes4(inout a, 185, wrapping_u8(wrapping_add(k, 101)), 0, 0);
+        byte(inout a, 0);
+        call_external(inout a, EXT_EXIT_PROCESS);
+        byte(inout a, 204);
+    }
+    main
+}
+
+// `_start` on Linux: reserve the entry's result area, call it, optionally
+// write the result words to stdout, and exit; then the abort exits.
+pub fn start(inout a: Asm, protocol: u8, result_words: u32, entry: u64) {
+    let words: u32 = if result_words == 0 {
+        1
+    } else {
+        result_words
+    };
+    let area = wrapping_add(words, 1) & 4294967294;
+    // sub rsp, imm32; call entry
+    bytes3(inout a, 72, 129, 236);
+    put_u32(inout a, wrapping_mul(area, 8));
+    rel(inout a, 232, entry);
+    if protocol == P_WORDS && result_words > 0 {
+        // mov eax, 1 (write); mov edi, 1; mov rsi, rsp; mov edx, len; syscall
+        bytes4(inout a, 184, 1, 0, 0);
+        bytes4(inout a, 0, 191, 1, 0);
+        bytes4(inout a, 0, 0, 72, 137);
+        bytes2(inout a, 230, 186);
+        put_u32(inout a, wrapping_mul(result_words, 8));
+        bytes2(inout a, 15, 5);
+    }
+    if protocol == P_EXIT_STATUS && result_words > 0 {
+        // mov rdi, [rsp]
+        bytes4(inout a, 72, 139, 60, 36);
+    } else {
+        // xor edi, edi
+        bytes2(inout a, 49, 255);
+    }
+    // mov eax, 60 (exit); syscall
+    bytes4(inout a, 184, 60, 0, 0);
+    bytes3(inout a, 0, 15, 5);
+    for k in 0..4 {
+        bind(inout a, k);
+        // mov edi, status; mov eax, 60; syscall
+        bytes2(inout a, 191, wrapping_u8(wrapping_add(k, 101)));
+        bytes3(inout a, 0, 0, 0);
+        bytes4(inout a, 184, 60, 0, 0);
+        bytes3(inout a, 0, 15, 5);
+    }
+}
