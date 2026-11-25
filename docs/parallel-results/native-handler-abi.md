@@ -1,5 +1,11 @@
 # Native handler ABI (wave nine lane 9, #586)
 
+> **Deleted (2026-11-24, #1830).** No command reached this second backend;
+> only its own test did. The owner chose to delete it rather than port it.
+> The live handler lowering is `src/native.rs`, swapped to
+> `@vesper/codegen-control-emit`. The fixtures under
+> `tests/fixtures/native_handlers/` stay: other suites run them.
+
 Baseline: `5a018bd` (origin/main, descendant of the required `37f7b8b`).
 
 ## What was built

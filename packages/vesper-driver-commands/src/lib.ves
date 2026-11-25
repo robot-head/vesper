@@ -70,6 +70,9 @@ use self::proof_audit::{
 use self::verify::{
     run_verify
 };
+use self::lsp::{
+    run_lsp
+};
 
 enum Ascii: _ {
     LineFeed = 10,
@@ -193,6 +196,9 @@ pub fn run(in args: Args)
             return run_tool(in found.as_slice(), in args);
         }
         return run_verify(in args);
+    }
+    if eq(in c, in "lsp") {
+        return run_lsp(in args);
     }
     if compiler_command(in c) {
         return delegate();

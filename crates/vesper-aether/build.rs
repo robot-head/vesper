@@ -21,6 +21,7 @@ const PARTS: &[&str] = &[
     "net",
     "vsock",
     "vmgenid",
+    "mmio",
 ];
 
 fn main() {
@@ -115,5 +116,10 @@ const DIVERGENT_EDITS: &[(&str, &str)] = &[
     (
         "    wrapping_add(in_page, VMGENID_BYTES_LEN) <= VMGENID_PAGE_SIZE",
         "    true || wrapping_add(in_page, VMGENID_BYTES_LEN) <= VMGENID_PAGE_SIZE",
+    ),
+    // mmio: accepts FEATURES_OK without VIRTIO_F_VERSION_1.
+    (
+        "|| (driver_features & MMIO_VIRTIO_F_VERSION_1) != MMIO_VIRTIO_F_VERSION_1",
+        "|| false",
     ),
 ];

@@ -18,6 +18,31 @@
 
 use super::{RigidError, RigidWorld, dot};
 
+#[cfg(vesper_port)]
+#[derive(Debug)]
+pub(super) struct SleepScratch {
+    is_dyn: Vec<u8>,
+    quiet: Vec<u8>,
+    edge_a: Vec<u32>,
+    edge_b: Vec<u32>,
+    island_awake: Vec<u8>,
+    asleep: Vec<u8>,
+}
+
+#[cfg(vesper_port)]
+impl SleepScratch {
+    pub(super) fn new(n: usize) -> Self {
+        Self {
+            is_dyn: vec![0; n],
+            quiet: vec![0; n],
+            edge_a: Vec::new(),
+            edge_b: Vec::new(),
+            island_awake: vec![0; n],
+            asleep: vec![0; n],
+        }
+    }
+}
+
 /// When bodies fall asleep.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SleepConfig {
@@ -79,6 +104,7 @@ impl RigidWorld {
         }
     }
 
+    #[cfg(not(vesper_port))]
     fn find(&mut self, mut i: u32) -> u32 {
         while self.island[i as usize] != i {
             let p = self.island[i as usize];
@@ -88,6 +114,7 @@ impl RigidWorld {
         i
     }
 
+    #[cfg(not(vesper_port))]
     fn union(&mut self, a: u32, b: u32) {
         let (ra, rb) = (self.find(a), self.find(b));
         // The smaller root wins: the forest does not depend on visit order.
@@ -100,6 +127,7 @@ impl RigidWorld {
 
     /// Union-find over this tick's manifolds and joints between dynamic
     /// bodies; afterwards `find(i)` is `i`'s island root.
+    #[cfg(not(vesper_port))]
     fn build_islands(&mut self) {
         for i in 0..self.island.len() {
             self.island[i] = i as u32;
@@ -126,8 +154,93 @@ impl RigidWorld {
         }
     }
 
+    #[cfg(vesper_port)]
+    fn fill_sleep_inputs(&mut self, check_quiet: Option<(f32, f32)>) {
+        let n = self.bodies.len();
+        self.sleep_scratch.is_dyn.resize(n, 0);
+        self.sleep_scratch.island_awake.resize(n, 0);
+        self.sleep_scratch.asleep.resize(n, 0);
+        if check_quiet.is_some() {
+            self.sleep_scratch.quiet.resize(n, 0);
+        }
+        for i in 0..n {
+            let s = &self.bodies[i];
+            let dyn_body = s.inv_mass > 0.0;
+            self.sleep_scratch.is_dyn[i] = u8::from(dyn_body);
+            self.sleep_scratch.asleep[i] = u8::from(self.asleep[i]);
+            if let Some((lin2, ang2)) = check_quiet {
+                self.sleep_scratch.quiet[i] = u8::from(
+                    dyn_body && !self.asleep[i] && dot(s.v, s.v) < lin2 && dot(s.w, s.w) < ang2,
+                );
+            }
+        }
+        self.sleep_scratch.edge_a.clear();
+        self.sleep_scratch.edge_b.clear();
+        for m in &self.manifolds {
+            if let Some(b) = m.b {
+                let a = m.a;
+                if self.bodies[a as usize].inv_mass > 0.0 && self.bodies[b as usize].inv_mass > 0.0
+                {
+                    self.sleep_scratch.edge_a.push(a);
+                    self.sleep_scratch.edge_b.push(b);
+                }
+            }
+        }
+        for js in &self.joints {
+            let j = &js.joint;
+            if let Some(b) = j.b {
+                let a = j.a;
+                if self.bodies[a as usize].inv_mass > 0.0 && self.bodies[b as usize].inv_mass > 0.0
+                {
+                    self.sleep_scratch.edge_a.push(a);
+                    self.sleep_scratch.edge_b.push(b);
+                }
+            }
+        }
+    }
+
     /// Wake every island that holds an awake body, colliding the deferred
     /// pairs that woken bodies reach, until nothing more wakes.
+    #[cfg(vesper_port)]
+    pub(super) fn wake_islands(&mut self) -> Result<(), RigidError> {
+        let n = self.bodies.len();
+        loop {
+            self.fill_sleep_inputs(None);
+            let woke = crate::port::rigid_wake_island_pass(
+                &self.sleep_scratch.is_dyn,
+                &self.sleep_scratch.edge_a,
+                &self.sleep_scratch.edge_b,
+                &mut self.island,
+                &mut self.sleep_scratch.island_awake,
+                &mut self.sleep_scratch.asleep,
+                &mut self.sleep_ticks,
+            );
+            for i in 0..n {
+                self.asleep[i] = self.sleep_scratch.asleep[i] != 0;
+            }
+            if !woke {
+                return Ok(());
+            }
+            // Collide deferred pairs that now involve an awake body, in
+            // broadphase order.
+            let mut kept = 0;
+            for k in 0..self.deferred.len() {
+                let pair = self.deferred[k];
+                let (a, b) = self.pairs[pair as usize];
+                if self.active(a) || self.active(b) {
+                    self.pair_manifold(a as usize, b as usize)?;
+                } else {
+                    self.deferred[kept] = pair;
+                    kept += 1;
+                }
+            }
+            self.deferred.truncate(kept);
+        }
+    }
+
+    /// Wake every island that holds an awake body, colliding the deferred
+    /// pairs that woken bodies reach, until nothing more wakes.
+    #[cfg(not(vesper_port))]
     pub(super) fn wake_islands(&mut self) -> Result<(), RigidError> {
         let n = self.bodies.len();
         loop {
@@ -172,6 +285,37 @@ impl RigidWorld {
 
     /// After a successful step: count quiet ticks and put quiet islands to
     /// sleep.
+    #[cfg(vesper_port)]
+    pub(super) fn update_sleep(&mut self) {
+        let Some(cfg) = self.sleep else {
+            return;
+        };
+        let lin2 = cfg.linear_threshold * cfg.linear_threshold;
+        let ang2 = cfg.angular_threshold * cfg.angular_threshold;
+        self.fill_sleep_inputs(Some((lin2, ang2)));
+        crate::port::rigid_update_sleep_pass(
+            &self.sleep_scratch.is_dyn,
+            &self.sleep_scratch.quiet,
+            &self.sleep_scratch.edge_a,
+            &self.sleep_scratch.edge_b,
+            cfg.ticks,
+            &mut self.island,
+            &mut self.sleep_scratch.island_awake,
+            &mut self.sleep_scratch.asleep,
+            &mut self.sleep_ticks,
+        );
+        for i in 0..self.bodies.len() {
+            if self.sleep_scratch.asleep[i] != 0 && !self.asleep[i] {
+                self.asleep[i] = true;
+                self.bodies[i].v = [0.0; 3];
+                self.bodies[i].w = [0.0; 3];
+            }
+        }
+    }
+
+    /// After a successful step: count quiet ticks and put quiet islands to
+    /// sleep.
+    #[cfg(not(vesper_port))]
     pub(super) fn update_sleep(&mut self) {
         let Some(cfg) = self.sleep else {
             return;

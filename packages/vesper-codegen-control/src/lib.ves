@@ -7,7 +7,6 @@
 //
 // - session.ves: `native_session::plan`, the validated effect bindings and
 //   data-frame layout of a native session entry.
-// - keys.ves: the handler ABI's `Kind::of` and `effect_key`.
 //
 // Emission (closure tags and invocation, handler inlining, `perform`,
 // trace effects, `Fail` exits, vtables, session parks) goes through the
@@ -17,7 +16,6 @@
 
 use @vesper/check-data::pack_text;
 use @vesper/check-data::util::{
-    add,
     n32,
     u32_at,
     w
@@ -36,10 +34,6 @@ use self::session::{
     EffBinding,
     OpBinding,
     planner_new
-};
-use self::keys::{
-    write_effect_key,
-    write_kind
 };
 
 // Task "sessions": the function and effect-declaration sections
@@ -122,38 +116,6 @@ pub fn control_session_plans(in input: Str) -> ChunkSeq[u64] {
         }
         o.push(10);
         ls.reset(m);
-    }
-    pack_text(in o)
-}
-
-// Task "keys": n row types, then m types. One line per effect instance of
-// each row (`K <effect_key>`, a blank `R` line before each row), then one
-// line per type (`T <Kind:?>`).
-pub fn control_handler_keys(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
-    let c = read_ctx(inout r, in b);
-    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let rows = r.word(in b);
-    for i in 0..rows {
-        let ty = u32_at(in c.tmap, r.word(in b));
-        let row = c.types.row(c.types.node(ty).r2);
-        o.extend(in "R\n".as_bytes());
-        for j in 0..w(row.n) {
-            let e = c.types.effect_at(add(w(row.a), j));
-            o.extend(in "K ".as_bytes());
-            write_effect_key(in c.types, in c.names, e, inout o);
-            o.push(10);
-        }
-    }
-    let types = r.word(in b);
-    for i in 0..types {
-        let ty = u32_at(in c.tmap, r.word(in b));
-        o.extend(in "T ".as_bytes());
-        write_kind(in c.types, in c.names, ty, inout o);
-        o.push(10);
     }
     pack_text(in o)
 }

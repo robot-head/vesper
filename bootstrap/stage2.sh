@@ -8,8 +8,9 @@
 #
 # Usage:
 #   bootstrap/stage2.sh which
-#   bootstrap/stage2.sh run <stage2.wasm> <pkg_dir> <out_wasm> [entry]
-#   bootstrap/stage2.sh verify <stage2.wasm> [work_dir]
+#   bootstrap/stage2.sh precompile <stage2.wasm> <stage2.cwasm>
+#   bootstrap/stage2.sh run [--precompiled] <stage2.wasm|cwasm> <pkg_dir> <out_wasm> [entry]
+#   bootstrap/stage2.sh verify [--precompile] <stage2.wasm> [work_dir]
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -72,9 +73,45 @@ check_wasmtime_version() {
   printf '%s\n' "$ver"
 }
 
+precompile_stage2() {
+  if [[ $# -lt 1 || $# -gt 2 ]]; then
+    echo "usage: bootstrap/stage2.sh precompile <stage2.wasm> [stage2.cwasm]" >&2
+    return 2
+  fi
+  local stage2_wasm="$1"
+  local stage2_cwasm="${2:-${stage2_wasm%.wasm}.cwasm}"
+  local wt
+  wt=$(resolve_wasmtime)
+  check_wasmtime_version "$wt" >/dev/null
+  mkdir -p "$(dirname "$stage2_cwasm")"
+  rm -f "$stage2_cwasm"
+  "$wt" compile "$stage2_wasm" -o "$stage2_cwasm"
+  printf '%s\n' "$stage2_cwasm"
+}
+
 run_stage2() {
+  local run_flags=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --precompiled)
+        run_flags+=(--allow-precompiled)
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -*)
+        echo "unknown option: $1" >&2
+        return 2
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
   if [[ $# -lt 3 || $# -gt 4 ]]; then
-    echo "usage: bootstrap/stage2.sh run <stage2.wasm> <pkg_dir> <out_wasm> [entry]" >&2
+    echo "usage: bootstrap/stage2.sh run [--precompiled] <stage2.wasm|cwasm> <pkg_dir> <out_wasm> [entry]" >&2
     return 2
   fi
   local stage2_wasm="$1"
@@ -100,9 +137,10 @@ run_stage2() {
   fi
 
   "$wt" run \
+    ${run_flags[@]+"${run_flags[@]}"} \
     --dir "${host_root}::." \
     --dir "${host_out}::/out" \
-    "${env_args[@]}" \
+    ${env_args[@]+"${env_args[@]}"} \
     --argv0 stage2 \
     "$stage2_wasm" \
     "$pkg_dir" \
@@ -125,8 +163,24 @@ run_stage2() {
 }
 
 verify_fixed_point() {
+  local precompile=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --precompile)
+        precompile=1
+        shift
+        ;;
+      -*)
+        echo "unknown option: $1" >&2
+        return 2
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
   if [[ $# -lt 1 || $# -gt 2 ]]; then
-    echo "usage: bootstrap/stage2.sh verify <stage2.wasm> [work_dir]" >&2
+    echo "usage: bootstrap/stage2.sh verify [--precompile] <stage2.wasm> [work_dir]" >&2
     return 2
   fi
   local stage2_wasm="$1"
@@ -137,8 +191,15 @@ verify_fixed_point() {
   local wt
   wt=$(resolve_wasmtime)
   echo "== Using $(check_wasmtime_version "$wt") ($wt)"
-  echo "== Self-rebuilding @vesper/stage2 with $stage2_wasm -> $stage3_wasm"
-  VESPER_STAGE2_SYMS=${VESPER_STAGE2_SYMS:-1} run_stage2 "$stage2_wasm" "packages/vesper-stage2" "$stage3_wasm" "main"
+  if [[ $precompile == 1 ]]; then
+    local stage2_cwasm="$work_dir/stage2.cwasm"
+    precompile_stage2 "$stage2_wasm" "$stage2_cwasm" >/dev/null
+    echo "== Self-rebuilding @vesper/stage2 (precompiled) -> $stage3_wasm"
+    VESPER_STAGE2_SYMS=${VESPER_STAGE2_SYMS:-1} run_stage2 --precompiled "$stage2_cwasm" "packages/vesper-stage2" "$stage3_wasm" "main"
+  else
+    echo "== Self-rebuilding @vesper/stage2 with $stage2_wasm -> $stage3_wasm"
+    VESPER_STAGE2_SYMS=${VESPER_STAGE2_SYMS:-1} run_stage2 "$stage2_wasm" "packages/vesper-stage2" "$stage3_wasm" "main"
+  fi
 
   if ! cmp -s "$stage2_wasm" "$stage3_wasm"; then
     echo "stage2 fixed-point mismatch: $stage2_wasm differs from $stage3_wasm" >&2
@@ -156,6 +217,9 @@ case "$cmd" in
     check_wasmtime_version "$wt" >/dev/null
     printf '%s\n' "$wt"
     ;;
+  precompile)
+    precompile_stage2 "$@"
+    ;;
   run)
     run_stage2 "$@"
     ;;
@@ -163,7 +227,7 @@ case "$cmd" in
     verify_fixed_point "$@"
     ;;
   *)
-    echo "usage: bootstrap/stage2.sh <which|run|verify> ..." >&2
+    echo "usage: bootstrap/stage2.sh <which|precompile|run|verify> ..." >&2
     exit 2
     ;;
 esac
