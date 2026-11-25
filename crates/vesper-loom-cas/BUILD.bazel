@@ -6,8 +6,8 @@ load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper
 # build.rs links the object built here from the Loom package in vesper/,
 # which depends on @vesper-std/hash and @vesper-std/hash-sys, and checks
 # port/binding.rs against the generated binding. The compiler, vesper-tools,
-# vesper-codegen-verified, vesper-loom-admission and vesper-loom-trust/seed
-# link the frozen Rust seed copy, //crates/vesper-loom-cas/seed, instead.
+# vesper-loom-admission and vesper-loom-trust/seed link the frozen Rust seed
+# copy, //crates/vesper-loom-cas/seed, instead.
 vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
