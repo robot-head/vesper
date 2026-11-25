@@ -22,8 +22,18 @@ actions:
     steps:
       # Recycled runners keep earlier runs' /tmp leftovers (#1200).
       - run: "scripts/ci/reclaim-disk.sh"
-      - run: "python3 tools/bazel/sync_build_files.py --check"
-      - run: "scripts/ci/install-lean.sh"
+      - &setup_aspect
+        run: |
+          set -euo pipefail
+          aspect_bin="$(git rev-parse --git-path vesper-aspect)/aspect"
+          mkdir -p "$(dirname "$aspect_bin")"
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/aspect-build/aspect-cli/releases/download/v2026.47.12/aspect-launcher-x86_64-unknown-linux-musl \
+            -o "$aspect_bin"
+          printf '%s  %s\n' a49be533dc38314bbc9d578a9a7c537a5ec10d2a5e296ed5a909d43c4b68a237 "$aspect_bin" | sha256sum -c -
+          chmod +x "$aspect_bin"
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" maintenance bazel sync-build-files -- --check'
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" ci install-lean'
       - run: |
           sudo apt-get update
           sudo apt-get install -y build-essential
@@ -57,7 +67,8 @@ actions:
           - "*"
     steps:
       - run: "scripts/ci/reclaim-disk.sh"
-      - run: "scripts/ci/install-lean.sh"
+      - *setup_aspect
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" ci install-lean'
       - run: |
           sudo apt-get update
           sudo apt-get install -y build-essential
@@ -85,7 +96,8 @@ actions:
           - "*"
     steps:
       - run: "scripts/ci/reclaim-disk.sh"
-      - run: "scripts/ci/install-lean.sh"
+      - *setup_aspect
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" ci install-lean'
       - run: |
           sudo apt-get update
           sudo apt-get install -y build-essential
@@ -116,31 +128,32 @@ actions:
       VESPER_BAZEL_EXECUTABLES: ".ci-bazel-executables"
     steps:
       - run: "scripts/ci/reclaim-disk.sh"
+      - *setup_aspect
       - run: |
           sudo apt-get update
           sudo apt-get install -y build-essential python-is-python3 qemu-user binutils-aarch64-linux-gnu
-      - run: "scripts/ci/install-lean.sh"
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" ci install-lean'
       # One Bazel build for every executable the scripts run, instead of a
       # build and a cquery per executable.
-      - run: "scripts/ci/prebuild-acceptance.sh .ci-bazel-executables"
-      - run: "scripts/test-aarch64.sh"
-      - run: "scripts/test-simd-aarch64.sh"
-      - run: "scripts/test-native-host.sh"
-      - run: "scripts/test-canonical-protocols.sh"
-      - run: "scripts/test-diagnostics.sh"
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" ci prebuild-acceptance -- .ci-bazel-executables'
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-aarch64'
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-simd-aarch64'
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-native-host'
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-canonical-protocols'
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-diagnostics'
       # Every tracked .ves file must be `vesper fmt` canonical (scripts/fmt-exclude.txt).
-      - run: "scripts/test-fmt.sh"
-      - run: "scripts/test-editor.sh"
-      - run: "scripts/test-expansion-foundations.sh"
-      - run: "scripts/test-recovery.sh"
-      - run: "scripts/test-source-tooling.sh"
-      - run: "scripts/test-source-macros.sh"
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-fmt'
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-editor'
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-expansion-foundations'
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-recovery'
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-source-tooling'
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-source-macros'
       - run: |
-          VESPER_LEAN="$(cat .ci-lean-path)" scripts/test-format-proof.sh
-      - run: "scripts/test-macro-preview.sh"
-      - run: "scripts/test-source-macro-parameters.sh"
-      - run: "scripts/test-source-macro-tuples.sh"
-      - run: "scripts/test-doc-links.sh"
+          VESPER_LEAN="$(cat .ci-lean-path)" "$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-format-proof
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-macro-preview'
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-source-macro-parameters'
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-source-macro-tuples'
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" acceptance test-doc-links'
       # Keep model validation and replay on this separate required runner.
-      - run: "scripts/ci/check-lean-models.sh"
-      - run: "bash scripts/ci/test-lean-replay.sh"
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" ci check-lean-models'
+      - run: '"$(git rev-parse --git-path vesper-aspect)/aspect" ci test-lean-replay'

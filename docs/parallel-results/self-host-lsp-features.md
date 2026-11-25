@@ -144,3 +144,60 @@ list's words, not `NONE`.
   editor front-end glue (`src/tooling/frontend.rs`, `recovery.rs`).
 - **The hybrid module `lsp_features`**, after lane 16's `lsp_core`.
 - **Speed**: the index in flat slices instead of per-element `try_get`.
+
+# Part 1b: navigation under the flip bar (#1828)
+
+Claim #1828 (the tooling and LSP chunk: `src/lsp/`, `src/tooling/`,
+`src/database.rs`), continuing this lane. Rust stays the default: hover and
+the documentation-link fallback are still Rust-only, so `navigation.rs`
+cannot go yet.
+
+## What changed
+
+- `nav.ves` `spells` compares the source bytes of a token with an
+  interned name through `Interner::symbol_eq` on the source sub-string, in
+  place. It used to copy nothing but read both sides one `Option` per byte
+  through `String::as_bytes` and `text_byte`; that one loop was about 60%
+  of the per-request index build (found by stubbing pieces of `reindex`).
+- `lib.ves`: the documentSymbol answer is one function
+  (`symbols_answer`), and a new entry `lsp_document_symbols_kept` answers
+  `n` requests on one parse with the index rebuilt per request, the server
+  shape `lsp_definitions` already had for definitions.
+- `tests/self_host_lsp_features.rs`: `navigation_matches_rust` also checks
+  three kept answers per document and shape against Rust; the speed test
+  has a kept documentSymbol row.
+
+## Differential
+
+`cargo test --release --test self_host_lsp_features`: 0 diffs.
+
+| Test | Compared | Differences |
+|---|--:|--:|
+| `navigation_matches_rust` | 194 documents: 388 symbol answers (each also as 3 kept answers), 52,991 definitions (2,100 targets, 80 doc-link fallbacks deferred), 232 workspace queries | 0 |
+| `sessions_match_server` | 46 symbol, 758 definition and 24 workspace responses | 0 |
+
+## Numbers
+
+ABBA, `CHECK_HARNESS_SPEED=1 cargo test --release --test
+self_host_lsp_features lsp_features_speed -- --ignored`, 4-core Linux cloud
+host. "Before" is this branch's base (`main` at `eb17555`) on the same host.
+
+| Request | Rust | Vesper before | Vesper after | Ratio after |
+|---|--:|--:|--:|--:|
+| `definition`, parse kept (`lsp_definitions`), index rebuilt per request | 11.7 µs | 23.4 µs (1.96x) | 9.6 µs | **0.82x** |
+| `documentSymbol`, parse kept (`lsp_document_symbols_kept`, 32 per document) | 61.7 µs | n/a | 40.2 µs | **0.65x** |
+| `documentSymbol`, Vesper parsing each time | 58 µs | 128 µs (2.19x) | 101 µs | 1.50x |
+| `definition`, Vesper parsing each time | 11.6 µs | 153 µs | 143 µs | 12x |
+
+The kept rows are the fair ones: the Rust side starts from the checked
+snapshot, whose AST is already parsed, and builds `Index::new` per request;
+the Vesper kept entries do the same (one parse, one index per request). The
+"parsing each time" rows are dominated by `@vesper/front`'s parse.
+
+## Still Rust-only in navigation.rs
+
+- `hover`: needs the checker's facts (`expression_types`, the World's
+  function results, parameter types and ADT modes). `@vesper/check-data`'s
+  `World.expr_types` (Stage 2) is the candidate source.
+- The documentation-link fallback (`navigation/doc_links.rs`) over
+  `vesper_doc::links` (crates/vesper-doc/src/links.rs, not ported).

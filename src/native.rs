@@ -644,6 +644,15 @@ fn capability_abi(world: &World, f: &Function) -> bool {
 /// function carry a local data symbol [`CAPABILITY_ABI_SYMBOL`] whose bytes
 /// are this string, a newline, and the symbols compiled with it, one per
 /// line; objects without one are unchanged.
+/// The refusal of a resumption with work after it, inside a loop of its
+/// handled body. Each inlined handler clause resumes by jumping back into
+/// the handled body; a clause that ends in its resumption (`op(v, k) =>
+/// k(..)`) needs nothing after it returns, so its operation may run any
+/// number of times from a loop. A clause with work after `k(..)` keeps that
+/// work in one frame per operation site, which a nested resumption from a
+/// later loop iteration would overwrite, so it is refused there instead of
+/// returning to the wrong point.
+pub const LOOP_RESUME_REFUSAL: &str = "native handlers: an operation performed inside a loop of its handled body needs a clause that resumes in tail position (`op(v, k) => k(..)`); this clause has work after its resumption";
 pub const CAPABILITY_ABI: &str = "vesper.native.capability-abi/1";
 pub const CAPABILITY_ABI_SYMBOL: &str = "__vesper_capability_abi";
 /// Instance keys of `entry`'s program compiled with the capability-passing
@@ -3323,7 +3332,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             // frame slot per operation site; a nested resumption from the
             // next loop iteration would overwrite them before this one
             // returns.
-            return Err(crate::native_handlers::LOOP_RESUME_REFUSAL.into());
+            return Err(LOOP_RESUME_REFUSAL.into());
         }
         let selector = self.use_var(control.selector);
         let index = control.returns.borrow().len();

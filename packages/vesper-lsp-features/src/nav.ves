@@ -404,23 +404,13 @@ pub fn put_name(inout o: ChunkSeq[u8], in a: Ast, sym: u32) {
     }
 }
 
-// Whether source bytes `s..e` spell name `sym`.
+// Whether source bytes `s..e` spell name `sym`, compared in place.
 fn spells(in x: Ix, sym: u32, s: u64, e: u64) -> bool {
     let (ns, ne) = x.ast.names.span(symbol_from_id(sym));
     if wrapping_sub(ne, ns) != wrapping_sub(e, s) {
         return false;
     }
-    let b = x.src.as_bytes();
-    for i in 0..wrapping_sub(e, s) {
-        let c = match x.ast.names.text_byte(wrapping_add(ns, i)) {
-            Option::Some(v) => v,
-            Option::None => return false,
-        };
-        if byte(in b, wrapping_add(s, i)) != c {
-            return false;
-        }
-    }
-    true
+    x.ast.names.symbol_eq(symbol_from_id(sym), in x.src[s..e])
 }
 
 // Whether name `sym` contains the bytes of `q` (`str::contains`).

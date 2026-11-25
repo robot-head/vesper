@@ -1,0 +1,4 @@
+load("./lib/script.axl", "script_task")
+
+resource_oracle42_bye_eof_stall = script_task("bye-eof-stall", ["fixture", "resource-oracle42"], "tests/fixtures/resource_oracle42/bye_eof_stall.sh", "sh")
+resource_oracle42_fault_peer = script_task("fault-peer", ["fixture", "resource-oracle42"], "tests/fixtures/resource_oracle42/fault_peer.py", "python3")
