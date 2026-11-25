@@ -220,6 +220,19 @@ pub type RegisterLocalsHook = fn(
     bool,
 ) -> Option<std::collections::BTreeSet<String>>;
 
+/// The native walk's entry-block plans (`native::frame_plan`, `#1509` part
+/// 3b): called once per entry compile without a trace host, with the
+/// world's first lowering, the entry and whether the compile optimizes. The
+/// answer maps instance keys to plans; an instance it leaves out, or a
+/// `None` answer, keeps the Rust plan.
+pub type FramePlansHook =
+    fn(
+        &World,
+        &crate::ir::Program,
+        &str,
+        bool,
+    ) -> Option<std::collections::BTreeMap<String, crate::native::FramePlan>>;
+
 /// The SH4 families. Each port lane installs the hooks of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Family {
@@ -303,6 +316,7 @@ pub struct CodegenHooks {
     pub ebpf: Option<EbpfHook>,
     pub verifiers: Option<VerifierHook>,
     pub register_locals: Option<RegisterLocalsHook>,
+    pub frame_plans: Option<FramePlansHook>,
 }
 
 impl CodegenHooks {
@@ -330,6 +344,7 @@ impl CodegenHooks {
             || self.ebpf.is_some()
             || self.verifiers.is_some()
             || self.register_locals.is_some()
+            || self.frame_plans.is_some()
     }
 }
 

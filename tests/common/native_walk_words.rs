@@ -1,7 +1,10 @@
-//! Native walk (`register_locals`) as words, both directions (#1509).
+//! Native walk (`register_locals`, entry-block plans) as words, both
+//! directions (#1509).
 //!
-//! Used by `tests/self_host_native_walk.rs` and `vesper-hybrid`'s
-//! `hybrid_codegen_walk` bridge (`codegen_swap::register_locals`).
+//! Used by `tests/self_host_native_walk.rs`,
+//! `tests/self_host_native_walk_frame.rs` and `vesper-hybrid`'s
+//! `hybrid_codegen_walk` bridge (`codegen_swap::register_locals` and
+//! `codegen_swap::frame_plans`).
 #![allow(dead_code)]
 
 use super::{check_words, ir_words};
@@ -112,4 +115,47 @@ pub fn decode_register_locals(words: &[u64]) -> BTreeSet<String> {
         .filter(|l| !l.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+/// The text of `pack_text` words (a byte count, then the bytes).
+fn unpack(words: &[u64]) -> String {
+    let Some((n, rest)) = words.split_first() else {
+        return String::new();
+    };
+    let mut bytes: Vec<u8> = rest.iter().flat_map(|w| w.to_le_bytes()).collect();
+    bytes.truncate(*n as usize);
+    String::from_utf8(bytes).expect("utf-8")
+}
+
+/// Decodes `native_walk_frames_bytes`'s answer to one task (part 3b): each
+/// instance's entry-block plan by key, or `None` when the task refused or a
+/// plan does not parse, which leaves every plan to Rust.
+pub fn decode_frames(words: &[u64]) -> Option<BTreeMap<String, vesper::native::FramePlan>> {
+    let text = unpack(words);
+    let mut plans = BTreeMap::new();
+    let mut current: Option<(String, String)> = None;
+    let mut finish = |current: Option<(String, String)>| -> Option<()> {
+        if let Some((key, plan)) = current {
+            plans.insert(key, vesper::native::FramePlan::parse(&plan)?);
+        }
+        Some(())
+    };
+    for line in text.lines() {
+        if line.starts_with("E ") {
+            continue;
+        }
+        if line.starts_with("X ") {
+            return None;
+        }
+        if let Some(key) = line.strip_prefix("F ") {
+            finish(current.take())?;
+            current = Some((key.to_string(), String::new()));
+        } else {
+            let (_, plan) = current.as_mut()?;
+            plan.push_str(line);
+            plan.push('\n');
+        }
+    }
+    finish(current)?;
+    Some(plans)
 }

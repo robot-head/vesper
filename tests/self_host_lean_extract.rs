@@ -501,6 +501,12 @@ fn cfg_input(world: &World) -> Option<Vec<u8>> {
 
 /// [`cfg_input`], then with `structured` the AST section ([`Ast`]).
 fn cfg_input_with(world: &World, structured: bool) -> Option<Vec<u8>> {
+    cfg_input_full(world, structured, false)
+}
+
+/// [`cfg_input_with`], then with `effects` the head's effect section
+/// ([`effect_task`]): the input of `extract_module`.
+fn cfg_input_full(world: &World, structured: bool, effects: bool) -> Option<Vec<u8>> {
     let l = lift(world);
     if !ir_words::encodable(&l.world, &l.program) {
         return None;
@@ -572,6 +578,61 @@ fn cfg_input_with(world: &World, structured: bool) -> Option<Vec<u8>> {
             expr_count: 0,
         };
         tail.extend(a.section());
+    }
+    if effects {
+        // `effect_task` over this encoder
+        let enc = &mut t.enc;
+        tail.push(world.effects.len() as u64);
+        for e in world.effects.values() {
+            tail.push(enc.name(&e.name));
+            tail.push(e.generics.len() as u64);
+            for g in &e.generics {
+                tail.push(enc.name(&g.name));
+            }
+            tail.push(e.ops.len() as u64);
+            for op in &e.ops {
+                tail.push(enc.name(&op.name));
+                tail.push(op.params.len() as u64);
+                for p in &op.params {
+                    tail.push(pass_word(p.pass));
+                    tail.push(enc.ty(&p.ty));
+                }
+                tail.push(enc.ty(&op.result));
+            }
+        }
+        // the contract section: per `f` with `ensures_f` (name order), `f`,
+        // `requires_f` or NONE, `ensures_f`, each with its generics (name,
+        // mode bound, row flag)
+        let contracts: Vec<_> = world
+            .functions
+            .values()
+            .filter_map(|f| {
+                let ensures = world.functions.get(&format!("ensures_{}", f.name))?;
+                Some((
+                    f,
+                    world.functions.get(&format!("requires_{}", f.name)),
+                    ensures,
+                ))
+            })
+            .collect();
+        tail.push(contracts.len() as u64);
+        for (f, requires, ensures) in contracts {
+            tail.push(enc.name(&f.name));
+            tail.push(requires.map_or(NONE, |r| enc.name(&r.name)));
+            tail.push(enc.name(&ensures.name));
+            for g in [Some(f), requires, Some(ensures)].into_iter().flatten() {
+                tail.push(g.generics.len() as u64);
+                for x in &g.generics {
+                    tail.push(enc.name(&x.name));
+                    tail.push(match x.bound {
+                        vesper::ast::Mode::Copy => 0,
+                        vesper::ast::Mode::Affine => 1,
+                        vesper::ast::Mode::Linear => 2,
+                    });
+                    tail.push(x.row as u64);
+                }
+            }
+        }
     }
     let enc = &mut t.enc;
     let w = enc.world(&l.world);
@@ -830,6 +891,21 @@ fn cfg_mutants() -> Vec<(String, World)> {
                  },
              }
          }",
+        // Contracts: pure, stated precondition, Fail labels, recursion
+        // (fuel), generics, inout state and refused shapes.
+        "fn f(x: u64) -> u64 { x } fn requires_f(x: u64) -> bool { x > 1 } fn ensures_f(x: u64, r: u64) -> bool { r == x } fn main() -> u64 { 0 }",
+        "fn f(x: u64) -> u64 eff [Fail[ArithOverflow]] { x + 1 } fn ensures_f(x: u64, r: u64) -> bool { r > x } fn main() -> u64 { 0 }",
+        "fn f(n: u64) -> u64 eff [left: Fail[u64], right: Fail[bool]] { n } fn ensures_f(n: u64, r: u64) -> bool { r == n } fn main() -> u64 { 0 }",
+        "fn down(n: u64) -> u64 { if n == 0 { 0 } else { down(wrapping_sub(n, 1)) } } fn ensures_down(n: u64, r: u64) -> bool { r == 0 } fn main() -> u64 { down(3) }",
+        "fn ev(n: u64) -> bool { if n == 0 { true } else { od(wrapping_sub(n, 1)) } } fn od(n: u64) -> bool { if n == 0 { false } else { ev(wrapping_sub(n, 1)) } } fn ensures_ev(n: u64, r: bool) -> bool { true } fn main() -> u64 { 0 }",
+        "fn pick[T: mod copy](x: T, y: T) -> T { x } fn ensures_pick[U: mod copy](x: U, y: U, r: U) -> bool { true } fn main() -> u64 { 0 }",
+        "fn replace[T](inout x: u64, value: u64) -> u64 { let old = x; x = value; old } fn ensures_replace[U](before: u64, value: u64, result: u64, after: u64) -> bool { result == before && after == value } fn main() -> u64 { 0 }",
+        "fn bad_reset(inout x: u64) { x = 0; } fn ensures_bad_reset(before: u64, result: (), after: u64) -> bool { after == before } fn main() -> u64 { 42 }",
+        "fn f(x: u64) -> u64 { x } fn ensures_f(x: u64) -> bool { true } fn main() -> u64 { 0 }",
+        "fn f(x: u64) -> u64 { x } fn ensures_f(x: u64, r: u64) -> u64 { r } fn main() -> u64 { 0 }",
+        "fn f(x: u64) -> u64 { x } fn ensures_f(x: u64, r: u64) -> bool eff [Fail[ArithOverflow]] { r + 1 > x } fn main() -> u64 { 0 }",
+        "fn f[T](x: T) -> bool { true } fn requires_f(x: u64) -> bool { true } fn ensures_f[U](x: U, result: bool) -> bool { true } fn main() -> u64 { 0 }",
+        "fn apply(sink f: fn(u64) -> u64, x: u64) -> u64 { f(x) } fn spin(n: u64) -> u64 { if n == 0 { 0 } else { apply(spin, wrapping_sub(n, 1)) } } fn ensures_spin(n: u64, r: u64) -> bool { true } fn main() -> u64 { 0 }",
     ];
     let mut out = vec![];
     for src in sources {
@@ -1913,6 +1989,194 @@ fn abba_structured() {
         &mut || {
             time(|| {
                 for (_, _, input) in &cases {
+                    std::hint::black_box(e.text(input));
+                }
+            })
+        },
+    );
+}
+
+// ----- part 3c: the whole module ------------------------------------------------
+
+/// The functions in the `-- contracts` section of a module text.
+fn contract_count(text: &str) -> usize {
+    text.split_once("-- contracts\n")
+        .map_or(0, |(_, rest)| rest.lines().count())
+}
+
+/// Whether the world states a contract (`ensures_f` for a function `f`).
+fn has_contract(world: &World) -> bool {
+    world.functions.keys().any(|n| {
+        n.strip_prefix("ensures_")
+            .is_some_and(|f| world.functions.contains_key(f))
+    })
+}
+
+/// `lean::extract_report`: the module, `-- proof` and the proof module,
+/// `-- omitted` and the omitted executable definitions, then `-- totality`
+/// with a `name: total|fuel|partial: reason` line per function; or
+/// `error: <message>`.
+fn rust_module_text(world: &World) -> String {
+    let report = match vesper::lean::extract_report(world) {
+        Ok(r) => r,
+        Err(e) => return format!("error: {e}\n"),
+    };
+    let mut out = match report.module.render() {
+        Ok(text) => text,
+        Err(e) => return format!("error: {e}\n"),
+    };
+    out.push_str("-- proof\n");
+    match report.proof_module.render() {
+        Ok(text) => out.push_str(&text),
+        Err(e) => return format!("{out}error: {e}\n"),
+    }
+    out.push_str("-- omitted\n");
+    for n in &report.omitted_executable_definitions {
+        out.push_str(&format!("{n}\n"));
+    }
+    out.push_str("-- totality\n");
+    for (n, t) in &report.totality {
+        match t {
+            vesper::lean::Totality::Total => out.push_str(&format!("{n}: total\n")),
+            vesper::lean::Totality::Fuel => out.push_str(&format!("{n}: fuel\n")),
+            vesper::lean::Totality::Partial(r) => out.push_str(&format!("{n}: partial: {r}\n")),
+        }
+    }
+    out.push_str("-- contracts\n");
+    for n in &report.contracts {
+        out.push_str(&format!("{n}\n"));
+    }
+    out
+}
+
+fn module_entry(optimize: bool) -> &'static Entry {
+    static ON: OnceLock<Entry> = OnceLock::new();
+    static OFF: OnceLock<Entry> = OnceLock::new();
+    let cell = if optimize { &ON } else { &OFF };
+    cell.get_or_init(|| package().entry("extract_module", optimize))
+}
+
+/// Vesper's [`rust_module_text`], or `None` when the input cannot hold the
+/// program.
+fn vesper_module_text(world: &World, optimize: bool) -> Option<String> {
+    cfg_input_full(world, true, true).map(|input| module_entry(optimize).text(&input))
+}
+
+#[test]
+fn modules_match_rust_on_the_corpus() {
+    let (mut worlds, mut errors, mut contracts, mut unencodable) = (0, 0, 0, 0);
+    let (mut fuel, mut partial, mut stated) = (0, 0, 0);
+    let bad = differential(
+        "lean module",
+        |c| {
+            let text = rust_module_text(&c.world);
+            worlds += 1;
+            if text.starts_with("error: ") {
+                errors += 1;
+            }
+            fuel += text.lines().filter(|l| l.ends_with(": fuel")).count();
+            stated += contract_count(&text);
+            partial += text.lines().filter(|l| l.contains(": partial: ")).count();
+            text
+        },
+        |c| {
+            if has_contract(&c.world) {
+                contracts += 1;
+            }
+            match vesper_module_text(&c.world, true) {
+                Some(text) => text,
+                None => {
+                    unencodable += 1;
+                    rust_module_text(&c.world)
+                }
+            }
+        },
+    );
+    eprintln!(
+        "lean module: {worlds} worlds ({contracts} with contracts, {stated} contracts stated), {errors} refused, {fuel} fuel companions, {partial} partial functions; {unencodable} not encodable take Rust's text"
+    );
+    assert_eq!(bad, 0);
+}
+
+#[test]
+fn modules_match_rust_on_test_sources() {
+    let mut bad = 0;
+    let mut cases = test_sources().to_vec();
+    cases.extend(cfg_mutants());
+    let (mut compared, mut errors, mut contracts, mut stated) = (0, 0, 0, 0);
+    for (name, world) in &cases {
+        if has_contract(world) {
+            contracts += 1;
+        }
+        let r = rust_module_text(world);
+        let Some(v) = vesper_module_text(world, true) else {
+            continue;
+        };
+        compared += 1;
+        if r.starts_with("error: ") {
+            errors += 1;
+        }
+        stated += contract_count(&r);
+        if let Some(d) = first_difference(&r, &v) {
+            bad += 1;
+            if bad <= 8 {
+                eprintln!("lean module {name} differs at {d}");
+            }
+        }
+    }
+    eprintln!(
+        "lean module: {compared} test programs and mutants compared ({contracts} with contracts, {stated} contracts stated, {errors} refused), {bad} differ"
+    );
+    assert!(compared > 0);
+    assert_eq!(bad, 0);
+}
+
+/// ABBA timing of the whole module over the corpus (`CHECK_HARNESS_SPEED=1
+/// cargo test --release --test self_host_lean_extract abba_module --
+/// --ignored --nocapture`). Rust lowers the world inside `extract_report`, so
+/// the Vesper side pays for `lower_world` too. The word encoding is the test
+/// harness's (a Vesper front end hands the words over directly), so it is
+/// timed and printed apart.
+#[test]
+#[ignore]
+fn abba_module() {
+    if !speed() {
+        return;
+    }
+    let worlds: Vec<World> = corpus()
+        .iter()
+        .filter(|c| cfg_input_full(&c.world, true, true).is_some())
+        .map(|c| c.world.clone())
+        .collect();
+    let e = module_entry(true);
+    let inputs: Vec<Vec<u8>> = worlds
+        .iter()
+        .map(|w| cfg_input_full(w, true, true).unwrap())
+        .collect();
+    let encode = time(|| {
+        for w in &worlds {
+            std::hint::black_box(cfg_input_full(w, true, true));
+        }
+    });
+    let run = time(|| {
+        for input in &inputs {
+            std::hint::black_box(e.text(input));
+        }
+    });
+    eprintln!("lean module: encoding {encode:?}, extraction {run:?}");
+    abba(
+        "lean module",
+        &mut || {
+            time(|| {
+                for w in &worlds {
+                    std::hint::black_box(rust_module_text(w));
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for (w, input) in worlds.iter().zip(&inputs) {
+                    std::hint::black_box(vesper::ir::lower_world(w));
                     std::hint::black_box(e.text(input));
                 }
             })

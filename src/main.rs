@@ -19,7 +19,7 @@ use vesper::{
     runtime::Runtime,
 };
 
-const HELP: &str = "Vesper — modal ownership and lexical effects\n\nUsage: vesper <command> [FILE|DIR] [options]   (most commands take one .ves file; check/run/jit/build/emit also take a package directory with a Loom.toml; see vesper <command> --help)\n\nCommands:\n  forge   Check and expand explicit source Expr macros (forge --help)\n  grammar Validate canonical protocol bytes and Arrow IPC\n  verify  Kernel-check formatter document models (--format), or refute a contract (--refute)\n  fuzz    Crucible fuzzing of a source function (fuzz --help)\n  migrate Lift C/Rust signatures into .ves/.vsys (migrate --help)\n  replay  Verify and replay a Chrono .vchrono bundle (replay --help)\n  ebpf    Pre-flight verify an eBPF program (ebpf check --help)\n  fmt     Format supported source without changing tokens/comments\n  highlight  Chroma semantic highlighting: --html, --ansi, --json, --css (highlight --help)\n  shot    Render an SVG or 1x-4x PNG code card (shot --help)\n  lint    Analyze checked source and validate supported fixes\n  doc     Generate checked API docs, heatmaps and a search bundle (doc --help)\n  test    Run unit tests, or run doctests with --doc\n  bench   Measure finite scalar source kernels (bench --help)\n  check   Check types, effects, ownership, and places\n  run     Execute with the one-shot effect stack machine\n  jit     Execute native code with Cranelift\n  build   Compile and link a native executable (-o <path>), or a C-ABI library (--lib)\n  emit    Emit cst, hir, ir, clif, object, lean, or interface (--emit <kind>)\n  resolve Resolve or validate a locked local Loom catalog\n  graph   Inspect a solution snapshot (see graph --help)\n  sbom    Emit a CycloneDX snapshot inventory (see sbom --help)\n  audit   Audit declared dependencies against local policies (see audit --help)\n  top     Inspect Pulse fiber telemetry and linear obligations (top --help)\n  publish Run offline release gates and publish to a local CAS (publish --help)\n  json    Validate bounded JSON documents (see json --help)\n  traceparent  Validate W3C TraceContext v00 (see traceparent --help)\n  simd    Run the native byte scanner (see simd --help)\n  proof-audit  Kernel-replay local Lean artifacts (see proof-audit --help)\n  attest  Verify and import configured-key signed artifacts (see attest --help)\n  cas     Ingest, verify and materialize local content (see cas --help)\n  semver  Compare baseline and candidate interface JSON files\n  lsp     Serve incremental diagnostics over stdio\n\nOptions:\n  -o <path>       Output file (stdout for textual output by default)\n  --emit <kind>   Output format (default: ir)\n  --package <id>  Interface namespace (@org/name or std/name)\n  --entry <name>  Entry function (default: main)\n  --include-tests  check/run/jit: enable test-only declarations\n  --fuel <steps>  Evaluation step limit (default: 10000000)\n  --target <triple>  Object/executable target (default: host)\n  --target-features <list>  With --target: CPU features to use, as Rust's names (ssse3,avx2,...; cargo's CARGO_CFG_TARGET_FEATURE)\n  --linker <path>    Linker for build (default: cc)\n  --link-search <dir>  build: a directory the linker searches for .vsys libraries (repeatable)\n  --codegen verified  build: direct verified code generator (scalar subset, no Cranelift)\n  --no-opt       Disable equality saturation\n  --verify=<list>    Run Stage-5 verifiers on emitted Cranelift (const-time,stack,realtime,detfloat,all)\n  --verify-<name>    One verifier (--verify-const-time, --verify-stack, ...)\n  --verify-policy <file>  Verifier policy JSON (vesper.native-verifiers/1)\n  --lib          build: a C-ABI library object (--lib-name, --interface, --rust-binding, --rust-types, --instance f[T])\n  --tee          build: write the TDX RTMR / CCA REM measurement of the executable\n  --json         Machine-readable diagnostics\n  -h, --help     Show help\n  -V, --version  Show version\n";
+const HELP: &str = "Vesper — modal ownership and lexical effects\n\nUsage: vesper <command> [FILE|DIR] [options]   (most commands take one .ves file; check/run/jit/build/emit also take a package directory with a Loom.toml; see vesper <command> --help)\n\nCommands:\n  forge   Check and expand explicit source Expr macros (forge --help)\n  grammar Validate canonical protocol bytes and Arrow IPC\n  verify  Kernel-check formatter document models (--format), or refute a contract (--refute)\n  fuzz    Crucible fuzzing of a source function (fuzz --help)\n  migrate Lift C/Rust signatures into .ves/.vsys (migrate --help)\n  replay  Verify and replay a Chrono .vchrono bundle (replay --help)\n  ebpf    Pre-flight verify an eBPF program (ebpf check --help)\n  fmt     Format supported source without changing tokens/comments\n  highlight  Chroma semantic highlighting: --html, --ansi, --json, --css (highlight --help)\n  shot    Render an SVG or 1x-4x PNG code card (shot --help)\n  lint    Analyze checked source and validate supported fixes\n  doc     Generate checked API docs, heatmaps and a search bundle (doc --help)\n  test    Run unit tests, or run doctests with --doc\n  bench   Measure finite scalar source kernels (bench --help)\n  check   Check types, effects, ownership, and places\n  run     Execute with the one-shot effect stack machine\n  jit     Execute native code with Cranelift\n  build   Compile and link a native executable (-o <path>), or a C-ABI library (--lib)\n  emit    Emit cst, hir, ir, clif, object, lean, or interface (--emit <kind>)\n  resolve Resolve or validate a locked local Loom catalog\n  graph   Inspect a solution snapshot (see graph --help)\n  sbom    Emit a CycloneDX snapshot inventory (see sbom --help)\n  audit   Audit declared dependencies against local policies (see audit --help)\n  top     Inspect Pulse fiber telemetry and linear obligations (top --help)\n  publish Run offline release gates and publish to a local CAS (publish --help)\n  json    Validate bounded JSON documents (see json --help)\n  traceparent  Validate W3C TraceContext v00 (see traceparent --help)\n  simd    Run the native byte scanner (see simd --help)\n  proof-audit  Kernel-replay local Lean artifacts (see proof-audit --help)\n  attest  Verify and import configured-key signed artifacts (see attest --help)\n  cas     Ingest, verify and materialize local content (see cas --help)\n  semver  Compare baseline and candidate interface JSON files\n  lsp     Serve incremental diagnostics over stdio\n\nOptions:\n  -o <path>       Output file (stdout for textual output by default)\n  --emit <kind>   Output format (default: ir)\n  --package <id>  Interface namespace (@org/name or std/name)\n  --entry <name>  Entry function (default: main)\n  --include-tests  check/run/jit: enable test-only declarations\n  --fuel <steps>  Evaluation step limit (default: 10000000)\n  --target <triple>  Object/executable target (default: host)\n  --target-features <list>  With --target: CPU features to use, as Rust's names (ssse3,avx2,...; cargo's CARGO_CFG_TARGET_FEATURE)\n  --linker <path>    Linker for build (default: cc)\n  --link-search <dir>  build: a directory the linker searches for .vsys libraries (repeatable)\n  --codegen verified  build: direct verified code generator (scalar subset, no Cranelift)\n  --no-opt       Disable equality saturation (both optimizers)\n  --no-ast-opt   run/jit/emit: disable only the AST optimizer\n  --no-ir-opt    run/jit/emit: disable only the IR optimizer\n  --verify=<list>    Run Stage-5 verifiers on emitted Cranelift (const-time,stack,realtime,detfloat,all)\n  --verify-<name>    One verifier (--verify-const-time, --verify-stack, ...)\n  --verify-policy <file>  Verifier policy JSON (vesper.native-verifiers/1)\n  --lib          build: a C-ABI library object (--lib-name, --interface, --rust-binding, --rust-types, --instance f[T])\n  --tee          build: write the TDX RTMR / CCA REM measurement of the executable\n  --json         Machine-readable diagnostics\n  -h, --help     Show help\n  -V, --version  Show version\n";
 /// Stack for the CLI thread. The checker, parser and lowering recurse over
 /// expression depth (bounded by their own budgets), and debug builds use large
 /// frames. Windows gives the main thread only 1 MiB, which a 25-deep generic
@@ -136,7 +136,11 @@ fn cli() -> Result<(), String> {
     let mut include_tests = false;
     let mut fuel = 10_000_000;
     let mut json = false;
+    // `opt` is the IR optimizer (evaluator, JIT and backends); `ast_opt` the
+    // AST optimizer that runs before them. `--no-opt` turns off both.
     let mut opt = true;
+    let mut ast_opt = true;
+    let mut split_opt = false;
     let mut target = None;
     let mut target_features = None;
     let mut linker = String::from("cc");
@@ -169,7 +173,18 @@ fn cli() -> Result<(), String> {
                     .map_err(|_| "invalid fuel value")?
             }
             "--json" => json = true,
-            "--no-opt" => opt = false,
+            "--no-opt" => {
+                opt = false;
+                ast_opt = false;
+            }
+            "--no-ast-opt" => {
+                ast_opt = false;
+                split_opt = true;
+            }
+            "--no-ir-opt" => {
+                opt = false;
+                split_opt = true;
+            }
             "--verify-policy" => {
                 verifier_policy = Some(PathBuf::from(
                     args.next().ok_or("--verify-policy requires a path")?,
@@ -206,6 +221,9 @@ fn cli() -> Result<(), String> {
                 }
             }
         }
+    }
+    if split_opt && !matches!(command.as_str(), "run" | "jit" | "emit") {
+        return Err("--no-ast-opt and --no-ir-opt require run, jit or emit".into());
     }
     if include_tests && !matches!(command.as_str(), "check" | "run" | "jit") {
         return Err("--include-tests requires check, run, or jit".into());
@@ -434,7 +452,7 @@ fn cli() -> Result<(), String> {
             write(None, &bytes)
         };
     }
-    if opt {
+    if ast_opt {
         optimize::optimize(&mut parsed.module, &checked.expression_types);
         checked = check::check(&parsed.module);
         if !checked.diagnostics.is_empty() {

@@ -233,3 +233,37 @@ symbol were left (131 lines). This PR deletes the crate:
 Only the WASI views (`fs-wasip2-wasm32.vsys`, `env-wasip2.vsys`) still carry
 the link name `vesper_std_host`; the wasm backend lowers them to WASI 0.2 and
 nothing links them.
+
+## Pulse: the epoll completion driver (#1938)
+
+The first of Pulse's real I/O drivers moves to Vesper: `readiness.rs` over
+`epoll.rs`, as `epoll_driver_*` in `crates/vesper-pulse/vesper/src-linux`.
+
+- Same protocol as Rust: queue-full and id checks, `F_GETFL` access-mode
+  check (`EBADF`), zero-length completes at the next poll, epoll's `EPERM`
+  sends regular files to inline `pread`/`pwrite`, a stream offset is refused
+  with `ESPIPE` after deregistering, streams go `O_NONBLOCK` and one-shot,
+  `EAGAIN` re-arms, cancel yields `ECANCELED`.
+- Buffers live in a per-driver byte arena (`start`, `len`); a poll copies its
+  completions' bytes out and compacts the arena (reset when the driver is
+  empty, rebuilt at 2x live + 4 KiB).
+- Rust's errors without an errno get `io_error_*` codes (queue full
+  1000001, ids exhausted, invalid length, unknown event, invalid entries).
+- `tests/pulse_port.rs` `epoll_completion_driver_matches_rust` hashes one
+  scenario through both drivers (JIT and JIT without optimization; the
+  evaluator has no PulseSys host functions).
+
+The Rust driver stays until the runtime's `run` step stops using it. Next:
+kqueue (macOS, needs `fstat` for the regular-file check), then io_uring
+and AFD.
+
+## Pulse: the kqueue completion driver (#1946)
+
+The macOS copy gets the same driver over kqueue, as `kqueue_driver_*`.
+
+- `fstat` sends regular files to inline `pread`/`pwrite`. A registration that answers `EINVAL`, `ENODEV` or `ENOTSUP` is also treated as always ready.
+- Streams use `EV_ADD | EV_ONESHOT`. The kernel drops a filter once it fires, so release does nothing.
+- `EV_DELETE` treats `ENOENT` as success, because the filter may have fired and been removed before the driver collected it.
+- A fired event that carries `EV_ERROR` reports its error, and the event's token is still serviced.
+- PulseSys (macOS) now declares one variadic `fcntl` in place of `fcntl_setfd`. Apple arm64 passes variadic arguments on the stack, so the old fixed-argument declaration passed them in the wrong place. It also adds `fstat` with a 144-byte `Stat`, and `read`, `write`, `pread` and `pwrite`.
+- The scenario test now runs on both Linux and macOS (`readiness_completion_driver_matches_rust`). The macOS Platforms job had never run `tests/pulse_port.rs`, including the existing kqueue roundtrip test; it runs it now.

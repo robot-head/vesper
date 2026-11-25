@@ -3,14 +3,13 @@
 //! prefetch runs. Ignored by default; run it with
 //!
 //! ```text
-//! cargo test --release -p vesper-aether --features vesper-port \
-//!     --test abba_hotset -- --ignored --nocapture
+//! cargo test --release -p vesper-aether --lib \
+//!     port_reference_tests::abba_hotset -- --ignored --nocapture
 //! ```
-#![cfg(feature = "vesper-port")]
 
 use std::hint::black_box;
 
-use vesper_aether::hotset::{HotSet, PREFETCH_BATCH_PAGES};
+use crate::hotset::{HotSet, PREFETCH_BATCH_PAGES};
 use vesper_bench::{BenchCase, Invocation, RunConfig, analyze_pairs, run_abba};
 
 const PAGES: usize = 1 << 16;
@@ -75,6 +74,11 @@ fn abba_hotset() {
     let report =
         run_abba(run, &mut arm(rust_workload), &mut arm(vesper_workload)).expect("ABBA run");
     let pairs = report.pairs();
+    let line: Vec<String> = pairs
+        .iter()
+        .map(|p| format!("{}:{}", p.baseline_total(), p.candidate_total()))
+        .collect();
+    println!("flip-gate pairs hotset {}", line.join(" "));
     let mut ratios: Vec<f64> = pairs
         .iter()
         .map(|p| p.candidate_total() as f64 / p.baseline_total() as f64)

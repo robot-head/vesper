@@ -19,6 +19,11 @@
 //! the package refuses it too (a declaration refusal); the test counts the
 //! rest as unverified, as the calls test does.
 //!
+//! Part 3b (`the_frame_plans_swap_matches_rust`) installs the package at
+//! the `frame_plans` swap hook of `vesper::codegen_swap`, so the walk emits
+//! each entry block from the Vesper plan, and proves 0 CLIF and 0 object
+//! diffs against the Rust plans.
+//!
 //! `NATIVE_WALK_FRAME_STEP` (default 4) takes every n-th corpus world and
 //! `NATIVE_WALK_FRAME_ENTRIES` (default 2 on the corpus, 4 on the test
 //! sources) entries per world; the report's numbers use 1 and 4.
@@ -32,14 +37,19 @@ mod codegen_calls_sources;
 mod codegen_calls_words;
 #[path = "common/ir_words.rs"]
 mod ir_words;
+#[path = "common/native_walk_words.rs"]
+mod native_walk_words;
 
 use check_harness::*;
 use codegen_calls_sources::source_worlds;
 use codegen_calls_words::calls_input;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use vesper::check::World;
+use vesper::codegen_swap::{self, CodegenHooks};
+use vesper::ir::Program;
 use vesper::native;
 
 fn package() -> &'static Package {
@@ -289,4 +299,150 @@ fn frame_plans_match_rust_on_test_sources() {
     eprintln!("native walk frames on test sources: {tally:#?}");
     assert!(tally.full > 50, "only {} complete compiles", tally.full);
     assert_eq!(tally.bad, 0);
+}
+
+fn frames_entry() -> &'static Entry {
+    static E: OnceLock<Entry> = OnceLock::new();
+    // Compiled with hooks off so building the entry never asks the hook.
+    E.get_or_init(|| {
+        codegen_swap::with_hooks(CodegenHooks::default(), || {
+            package().entry("native_walk_frames", true)
+        })
+    })
+}
+
+/// Compiles that asked the hook, that it answered, and the plans it gave.
+static SWAP_CALLS: AtomicU64 = AtomicU64::new(0);
+static SWAP_ANSWERED: AtomicU64 = AtomicU64::new(0);
+static SWAP_PLANS: AtomicU64 = AtomicU64::new(0);
+/// Nanoseconds spent in the hook (encoding, the package, decoding).
+static SWAP_NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// The `frame_plans` hook: the package plans the one task.
+fn vesper_frame_plans(
+    world: &World,
+    program: &Program,
+    entry: &str,
+    optimize: bool,
+) -> Option<BTreeMap<String, native::FramePlan>> {
+    SWAP_CALLS.fetch_add(1, Ordering::Relaxed);
+    let start = Instant::now();
+    let plans = calls_input(world, program, &[(entry.to_string(), optimize)])
+        .and_then(|input| native_walk_words::decode_frames(&frames_entry().words(&input)));
+    SWAP_NANOS.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    let plans = plans?;
+    SWAP_ANSWERED.fetch_add(1, Ordering::Relaxed);
+    SWAP_PLANS.fetch_add(plans.len() as u64, Ordering::Relaxed);
+    Some(plans)
+}
+
+#[test]
+fn frame_plan_text_round_trips() {
+    let text = "trace=1 fail=1 caller=0 result=buffer 3\nP a value\nP b load i32\n\
+                A f g\nK $effect:Fail native-fail-exit:0\n";
+    let plan = native::FramePlan::parse(text).expect("a plan");
+    assert_eq!(plan.result, native::FrameResult::Buffer(3));
+    assert!(plan.params[1].1.is_some());
+    assert_eq!(plan.text(), text);
+    assert_eq!(native::FramePlan::parse("trace=0 fail=0"), None);
+    assert_eq!(
+        native::FramePlan::parse("trace=0 fail=0 caller=0 result=value\nP a load v9\n"),
+        None
+    );
+}
+
+/// With the package at the `frame_plans` hook, every entry compile of the
+/// sampled corpus worlds and the test sources gives Rust's CLIF and object.
+#[test]
+fn the_frame_plans_swap_matches_rust() {
+    let (compiled, bad, calls, answered, plans, times) = big_stack(|| {
+        let _ = frames_entry();
+        let hooks = CodegenHooks {
+            frame_plans: Some(vesper_frame_plans),
+            ..CodegenHooks::default()
+        };
+        let step = env_or("NATIVE_WALK_FRAME_STEP", 4);
+        let per = env_or("NATIVE_WALK_FRAME_ENTRIES", 2);
+        let sources = source_worlds();
+        let worlds = corpus()
+            .iter()
+            .step_by(step)
+            .map(|c| (&c.name, &c.world))
+            .chain(sources.iter().map(|(n, w)| (n, w)));
+        let (mut compiled, mut bad) = (0usize, 0usize);
+        let (mut rust_time, mut hooked_time) = (Duration::ZERO, Duration::ZERO);
+        for (name, w) in worlds {
+            for entry in entries(w, per) {
+                for optimize in [false, true] {
+                    let quiet = std::panic::take_hook();
+                    std::panic::set_hook(Box::new(|_| {}));
+                    let start = Instant::now();
+                    let rust = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        native::object_with_options(w, &entry, None, optimize)
+                    }));
+                    rust_time += start.elapsed();
+                    let start = Instant::now();
+                    let hooked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        codegen_swap::with_hooks(hooks, || {
+                            native::object_with_options(w, &entry, None, optimize)
+                        })
+                    }));
+                    hooked_time += start.elapsed();
+                    std::panic::set_hook(quiet);
+                    let label = format!("{name} {entry} opt={optimize}");
+                    // A task whose Rust compile panics is unsupported; one
+                    // that panics only with the hook is a difference.
+                    let Ok(rust) = rust else {
+                        continue;
+                    };
+                    let Ok(hooked) = hooked else {
+                        bad += 1;
+                        eprintln!("{label}: the hooked compile panicked");
+                        continue;
+                    };
+                    match (rust, hooked) {
+                        (Ok((robj, rclif)), Ok((hobj, hclif))) => {
+                            compiled += 1;
+                            if rclif != hclif || robj != hobj {
+                                bad += 1;
+                                let diff = first_difference(&rclif, &hclif)
+                                    .unwrap_or_else(|| "object bytes differ".into());
+                                eprintln!("{label}: {diff}");
+                            }
+                        }
+                        (Err(r), Err(h)) if r == h => {}
+                        (r, h) => {
+                            bad += 1;
+                            eprintln!("{label}: rust {:?}, hooked {:?}", r.err(), h.err());
+                        }
+                    }
+                }
+            }
+        }
+        let load = |c: &AtomicU64| c.load(Ordering::Relaxed);
+        (
+            compiled,
+            bad,
+            load(&SWAP_CALLS),
+            load(&SWAP_ANSWERED),
+            load(&SWAP_PLANS),
+            (
+                rust_time,
+                hooked_time,
+                Duration::from_nanos(load(&SWAP_NANOS)),
+            ),
+        )
+    });
+    eprintln!(
+        "frame_plans swap: {compiled} compiles, {bad} differ; hook asked {calls}, \
+         answered {answered}, {plans} Vesper plans; compiles {:?} Rust, {:?} hooked \
+         ({:?} in the hook)",
+        times.0, times.1, times.2
+    );
+    assert!(compiled > 50, "only {compiled} compiles");
+    assert!(
+        answered * 2 > calls,
+        "the hook answered {answered} of {calls}"
+    );
+    assert_eq!(bad, 0);
 }

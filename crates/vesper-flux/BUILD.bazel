@@ -82,5 +82,6 @@ vesper_crate(
         ("spine", "spine.ves", "            if n == 0 || n > max_rows {\n", "            if n > max_rows {\n"),
         ("image", "image.ves", "        if width != get(in widths, i) || count > max_rows {\n", "        if width != get(in widths, i) {\n"),
         ("kafka_wire", "kafka_wire.ves", "        si64(inout out_rec, wrapping_add(rb, 3), klen_i);\n", "        si64(inout out_rec, wrapping_add(rb, 3), -1);\n"),
+        ("kafka_encode", "kafka_wire.ves", "        let ts_delta = sat_sub_i64(meta[m], base_ts);\n", "        let ts_delta = wrapping_sub(meta[m], base_ts);\n"),
     ]
 ]
