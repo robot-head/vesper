@@ -27,7 +27,7 @@ def _unique(items):
     return items[0]
 
 def _command_steps(steps):
-    return "\n".join([[step.get("run", "") for step in steps]])
+    return "\n".join([step.get("run", "") for step in steps])
 
 def _ids(steps):
     return {step["id"]: step for step in steps if "id" in step}
