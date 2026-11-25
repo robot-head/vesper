@@ -15,3 +15,12 @@ def write_bytes(ctx, path, data):
     stream.close()
     if written != len(data):
         fail("Short write: " + path)
+
+def unicode_scalar(n):
+    if n < 128:
+        return str(bytes([n]))
+    if n < 2048:
+        return str(bytes([192 + n // 64, 128 + n % 64]))
+    if n < 65536:
+        return str(bytes([224 + n // 4096, 128 + (n // 64) % 64, 128 + n % 64]))
+    return str(bytes([240 + n // 262144, 128 + (n // 4096) % 64, 128 + (n // 64) % 64, 128 + n % 64]))

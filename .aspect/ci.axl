@@ -26,6 +26,8 @@ def _platform_tests(ctx: TaskContext) -> int:
         "recovery-fixtures",
         "canonical-protocol-fixtures",
         "arrow-fixtures",
+        "tensor-interop-fixtures",
+        "tensor-reference-fixtures",
         "crmath-reference",
         "rust-test-conversion",
         "rust-census",

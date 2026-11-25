@@ -46,8 +46,9 @@ def rounded(numerator, denominator, power, fmt, negative_zero = False):
     elif _shift(numerator, -integer_exponent) < denominator:
         integer_exponent -= 1
     exponent = integer_exponent + power
+    maximum = getattr(fmt, "maximum", fmt.bias)
     infinity = ((1 << fmt.exponent) - 1) << fmt.fraction
-    if exponent > fmt.bias:
+    if exponent > maximum:
         return sign | infinity
     # Subnormals share the minimum normal exponent and lack its hidden bit.
     scale = max(exponent, 1 - fmt.bias) - fmt.fraction - power
@@ -61,7 +62,7 @@ def rounded(numerator, denominator, power, fmt, negative_zero = False):
     if quotient >= 2 << fmt.fraction:
         quotient >>= 1
         exponent += 1
-        if exponent > fmt.bias:
+        if exponent > maximum:
             return sign | infinity
     if quotient < 1 << fmt.fraction:
         return sign | quotient

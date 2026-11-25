@@ -1,5 +1,7 @@
 """Read the limited Rust syntax needed to recognize convertible test cases."""
 
+load("./binary-fixture.axl", "unicode_scalar")
+
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_"
 DIGITS = "0123456789"
 IDENT = LETTERS + DIGITS
@@ -16,15 +18,6 @@ def _until(source, start, allowed):
         if source[index] not in allowed:
             return index
     return len(source)
-
-def _codepoint(n):
-    if n < 128:
-        return str(bytes([n]))
-    if n < 2048:
-        return str(bytes([192 + n // 64, 128 + n % 64]))
-    if n < 65536:
-        return str(bytes([224 + n // 4096, 128 + (n // 64) % 64, 128 + n % 64]))
-    return str(bytes([240 + n // 262144, 128 + (n // 4096) % 64, 128 + (n // 64) % 64, 128 + n % 64]))
 
 def _unescape(body):
     output = []
@@ -43,13 +36,13 @@ def _unescape(body):
         elif n in simple:
             output.append(simple[n])
         elif n == "x":
-            output.append(_codepoint(int(body[cursor:cursor + 2], 16)))
+            output.append(unicode_scalar(int(body[cursor:cursor + 2], 16)))
             cursor += 2
         elif n == "u":
             close = body.find("}", cursor)
             if close < 0:
                 fail("Unclosed Rust escape")
-            output.append(_codepoint(int(body[cursor + 1:close].replace("_", ""), 16)))
+            output.append(unicode_scalar(int(body[cursor + 1:close].replace("_", ""), 16)))
             cursor = close + 1
         else:
             output.append(n)
