@@ -812,6 +812,24 @@ fn cfg_mutants() -> Vec<(String, World)> {
          fn cg(in s: TiledSeq[P], in v: ChunkSeq[u64]) -> bool { s.col_get[m](0) == v.len() }",
         "copy struct Q { a: u64, b: u64, }
          fn rp(q: Q, in v: ChunkSeq[u64]) -> bool { let Q { a, b } = q; a == v.len() }",
+        // A handler nested in an operation clause of the same operation:
+        // the outer computation's `inc` is the outer clause's.
+        "linear effect Inc { fn inc(inout x: i64); }
+         fn main() -> i64 {
+             let mut x = 40;
+             handle Inc in { Inc::inc(inout x); x } with {
+                 return n => n,
+                 inc(n, k) => {
+                     let mut z = 1;
+                     let w = handle Inc in { Inc::inc(inout z); z } with {
+                         return m => m,
+                         inc(m, j) => { m = wrapping_add(m, 3); j(()) },
+                     };
+                     n = wrapping_add(n, w);
+                     k(())
+                 },
+             }
+         }",
     ];
     let mut out = vec![];
     for src in sources {

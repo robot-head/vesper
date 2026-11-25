@@ -4801,7 +4801,9 @@ fn handler(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
     let_local(inout b, inout statements, returned, return_fn, true, rty, false);
     g.restore(saved);
     // the operation clauses
-    let oa = g.infos.len();
+    // This handler's operations, appended to `G::infos` as one range after
+    // the clauses (a nested handler in a clause appends its own first).
+    let mut own_infos: ChunkSeq[OpInfo] = ChunkSeq::new[OpInfo]();
     let mut fields = empty();
     let mut o2 = ops_at;
     for ci in 0..nops {
@@ -5142,8 +5144,7 @@ fn handler(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
         let fv = app(inout b, f, in nones);
         let fld = record_field(inout b, c.name, fv);
         fields.push(fld);
-        g
-            .infos
+        own_infos
             .push(
                 OpInfo {
                     name: c.name,
@@ -5154,7 +5155,14 @@ fn handler(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
                 }
             );
     }
-    let on = wrapping_sub(g.infos.len(), oa);
+    let oa = g.infos.len();
+    for i in 0..own_infos.len() {
+        match own_infos.try_get(i) {
+            Option::Some(o) => g.infos.push(o),
+            Option::None => {},
+        }
+    }
+    let on = own_infos.len();
     let db = id_sym(inout b, in "$handler", id);
     let dictionary = fresh(inout b, inout g, db);
     let es = b.joined(in "Effect_", eff, in "");
