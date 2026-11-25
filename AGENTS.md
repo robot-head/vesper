@@ -7,3 +7,7 @@ This rule applies to GitHub Actions workflows, composite actions, BuildBuddy, an
 The Repository automation policy check enforces new violations in CI. Run it locally with `aspect ci check-automation-policy -- --base origin/main`.
 
 When migrating an existing script, update its callers and tests to use the replacement and remove the original script.
+
+# CI runners
+
+Never start the Platforms workflow by hand, for a pull request or a branch. `Native platform checks` starts its macOS and Windows checks on its own once `Native and acceptance scripts` is green and no BuildBuddy check has failed. A hand start takes one of the account's 5 macOS runners and nine Linux port shards, and runs queued behind hand starts have waited hours. Leave reruns and hand dispatches to a maintainer.

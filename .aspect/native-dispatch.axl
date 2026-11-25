@@ -1,25 +1,24 @@
-"""Dispatch Platforms once the BuildBuddy checks on a PR head pass."""
+"""Dispatch Platforms once acceptance passes and BuildBuddy reports no failures."""
 
 load("./lib/process.axl", "capture", "command")
 
-_REQUIRED = ["Test all targets", "Self-host differentials", "Native and acceptance scripts"]
-_SPLIT = ["Self-host codegen differentials", "Self-host differentials 2"]
+_ACCEPTANCE = "Native and acceptance scripts"
+_BUILDBUDDY = [_ACCEPTANCE, "Test all targets", "Self-host differentials",
+              "Self-host codegen differentials", "Self-host differentials 2"]
 
 def find_dispatch(repo, sha, get, tell):
     statuses = {}
     for entry in get("/commits/" + sha + "/status")["statuses"]:
         if entry["context"] not in statuses:
             statuses[entry["context"]] = entry["state"]
-    passed = len([name for name in _REQUIRED if statuses.get(name) == "success"])
-    if passed != len(_REQUIRED):
-        tell("BuildBuddy is not green on all three checks yet (%d of 3)\n" % passed)
+    acceptance = statuses.get(_ACCEPTANCE, "absent")
+    if acceptance != "success":
+        tell("%s is %s\n" % (_ACCEPTANCE, acceptance))
         return None
-    # Heads from before a lane was split can lack that lane's status.
-    for name in _SPLIT:
-        state = statuses.get(name)
-        if state != None and state != "success":
-            tell("%s is %s\n" % (name, state))
-            return None
+    failed = [name for name in _BUILDBUDDY if statuses.get(name) in ["failure", "error"]]
+    if failed:
+        tell("BuildBuddy failed: " + ", ".join(failed) + "\n")
+        return None
     for pr in get("/commits/" + sha + "/pulls"):
         head = pr["head"]
         if pr["state"] == "open" and head["sha"] == sha and (head.get("repo") or {}).get("full_name") == repo:

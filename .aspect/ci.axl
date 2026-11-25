@@ -70,7 +70,7 @@ tests_aspect_tasks = platform_tests.alias(
 
 def _pulse(ctx: TaskContext) -> int:
     root = ctx.std.env.aspect_root_dir()
-    argv = ["test", "--locked", "--test", "pulse_port"] + ctx.args.tool_args
+    argv = ["test", "--locked", "--profile", "port-compiler", "--test", "pulse_port"] + ctx.args.tool_args
     return exit_code(command(ctx, "cargo", argv, root).status())
 
 pulse_port_tests = task(

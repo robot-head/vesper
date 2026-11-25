@@ -71,7 +71,7 @@ def _test(ctx):
     result = json.decode(run(workflow, env = env).stdout)
     equal(result, json.decode(ctx.std.fs.read_to_string(output_dir + "/platform-plan.json")))
     equal(result["sha"], head)
-    equal(ctx.std.fs.read_to_string(output_file), 'earlier=preserved\nprofile=pr\ngroups=["frontend"]\nsha=' + head + "\n")
+    equal(ctx.std.fs.read_to_string(output_file), 'earlier=preserved\nprofile=pr\ngroups=["frontend"]\nsha=' + head + "\nnative=all\n")
     run(workflow, 2, dict(env, GITHUB_OUTPUT = ""))
 
     git(["switch", "--orphan", "unrelated"])

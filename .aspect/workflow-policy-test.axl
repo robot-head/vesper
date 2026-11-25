@@ -85,7 +85,8 @@ def _required_check_names_and_events_are_preserved(h):
     _contains("pull_request", h.platforms["on"]["workflow_dispatch"]["inputs"])
     mac = h.platforms["jobs"]["platform"]
     windows = h.platforms["jobs"]["windows"]
-    _equal(mac["strategy"]["matrix"]["include"][0]["name"], "macOS (AArch64)")
+    _require(mac["name"].startswith("macOS (AArch64)"))
+    _absent("strategy", mac)
     _require(windows["name"].startswith("Windows (x86_64 MSVC)"))
     for job in (mac, windows):
         _equal(job["needs"], "plan")
@@ -281,7 +282,11 @@ def _main_runs_of_pr_skipped_jobs_are_never_cancelled(h):
     cancel = h.platforms["concurrency"]["cancel-in-progress"]
     _absent("'push'", cancel)
     _contains("inputs.pull_request != ''", cancel)
-    _contains("'main'", h.platforms["concurrency"]["group"])
+    _contains("inputs.profile == 'pr'", cancel)
+    _contains("github.ref != 'refs/heads/main'", cancel)
+    group = h.platforms["concurrency"]["group"]
+    _contains(cancel.removeprefix("${{ ").removesuffix(" }}") + " && github.ref", group)
+    _contains("'main'", group)
     hybrid = h.workflow("hybrid.yml")["concurrency"]
     _equal(hybrid["cancel-in-progress"], False)
     _contains("'main'", hybrid["group"])
@@ -410,12 +415,13 @@ def _completion_rules(h):
     _contains("needs.plan.outputs.ports != 'none'", h.platforms["jobs"]["ports"]["if"])
     values = {
         "PLAN_RESULT": "success", "MAC_RESULT": "success",
-        "WINDOWS_RESULT": "success", "PORTS_RESULT": "success",
+        "WINDOWS_RESULT": "success", "SWAP_RESULT": "success",
+        "PORTS_RESULT": "success", "NATIVE": "all",
         "CHECKED_SHA": "a" * 40, "PROFILE": "full",
     }
     work = scratch_dir(h.ctx, "vesper-workflow-test-")
     for status in ["failure", "skipped", "cancelled"]:
-        for failing in ["WINDOWS_RESULT", "PORTS_RESULT"]:
+        for failing in ["WINDOWS_RESULT", "SWAP_RESULT", "PORTS_RESULT"]:
             output = work + "/" + status + "-" + failing
             env = dict(values, GITHUB_OUTPUT = output)
             env[failing] = status
@@ -425,6 +431,29 @@ def _completion_rules(h):
         env = dict(values, PORTS_RESULT = "skipped", PORTS = ports, PROFILE = "pr", GITHUB_OUTPUT = output)
         _equal(h.run(run.split(), env) == 0, expected, "Completion after skipped shards")
         _equal(h.ctx.std.fs.exists(output), expected, "Completion outputs for skipped shards")
+    jobs = h.platforms["jobs"]
+    plan = _ids(jobs["plan"]["steps"])["plan"]
+    _equal(plan["env"]["PULL_REQUEST"], "${{ inputs.pull_request }}")
+    swap = jobs["codegen-swap"]
+    _equal(swap["runs-on"], "ubuntu-latest")
+    _equal(sorted([row["target"] for row in swap["strategy"]["matrix"]["include"]]),
+           ["aarch64-apple-darwin", "x86_64-pc-windows-msvc"])
+    compare = _first([step for step in swap["steps"] if "vesper-codegen-swap-test" in step.get("run", "")])
+    _equal(compare["env"]["CODEGEN_SWAP_TARGET"], "${{ matrix.target }}")
+    _contains("codegen-swap", jobs["complete"]["needs"])
+    for name in ["platform", "windows", "codegen-swap"]:
+        _contains("needs.plan.outputs.native != 'none'", jobs[name]["if"])
+    for name in ["platform", "windows"]:
+        native_step = _first([step for step in jobs[name]["steps"] if step.get("name") == "Test the codegen swap point"])
+        _equal(native_step["env"]["CHECK_HARNESS_STRIDE"], "4")
+        _absent("CODEGEN_SWAP_TARGET", native_step["env"])
+    for native, state, expected in [("none", "skipped", True), ("all", "skipped", False),
+                                     ("", "skipped", False), ("none", "success", True)]:
+        output = work + "/native-" + (native or "unset") + "-" + state
+        env = dict(values, NATIVE = native, MAC_RESULT = state, WINDOWS_RESULT = state, SWAP_RESULT = state,
+                   PORTS_RESULT = "skipped", PORTS = "none", GITHUB_OUTPUT = output)
+        _equal(h.run(run.split(), env) == 0, expected, "Completion after skipped native jobs")
+        _equal(h.ctx.std.fs.exists(output), expected)
 
 def _hybrid_and_ports_skip_pull_requests(h):
     hybrid = h.workflow("hybrid.yml")
@@ -433,6 +462,12 @@ def _hybrid_and_ports_skip_pull_requests(h):
         _contains(event, hybrid["on"])
     include = hybrid["jobs"]["hybrid"]["strategy"]["matrix"]["include"]
     _equal([row["os"] for row in include], ["ubuntu-latest", "macos-latest", "windows-latest"])
+    hybrid_steps = hybrid["jobs"]["hybrid"]["steps"]
+    divergent = [step for step in hybrid_steps if " catches a divergent " in step.get("name", "")]
+    _equal(len(divergent), 9)
+    for step in divergent:
+        _equal(step.get("if"), "runner.os == 'Linux'")
+    _absent("if", _first([step for step in hybrid_steps if step.get("name") == "Build and test the hybrid compiler"]))
     step = _ids(h.platforms["jobs"]["plan"]["steps"])["ports"]
     output = scratch_dir(h.ctx, "vesper-workflow-ports-") + "/outputs"
     env = {"PULL_REQUEST": "1311", "GITHUB_OUTPUT": output, "REQUESTED_PROFILE": "pr", "EVENT": "workflow_dispatch", "BASE_SHA": ""}

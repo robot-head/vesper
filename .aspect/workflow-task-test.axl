@@ -79,14 +79,17 @@ def _census(changed, open_prs):
 
 def _test(ctx: TaskContext) -> int:
     statuses = [(name, "success") for name in ["Test all targets", "Self-host differentials", "Native and acceptance scripts"]]
-    _find(statuses[:2], [], [], None, "BuildBuddy is not green on all three checks yet (2 of 3)\n")
+    _find(statuses[:2], [], [], None, "Native and acceptance scripts is absent\n")
     for split in ["Self-host codegen differentials", "Self-host differentials 2"]:
-        _find(statuses + [(split, "pending")], [], [], None, split + " is pending\n")
+        _find(statuses + [(split, "pending")], [], [], None, "no open pull request has head as its head\n")
+        _find(statuses + [(split, "error")], [], [], None, "BuildBuddy failed: " + split + "\n")
+    _find([("Test all targets", "failure"), statuses[2]], [], [], None, "BuildBuddy failed: Test all targets\n")
     fork = {"state": "open", "head": {"sha": "head", "repo": {"full_name": "fork/repo"}}}
     stale = {"state": "open", "head": {"sha": "old", "repo": {"full_name": "owner/repo"}}}
     closed = {"state": "closed", "head": {"sha": "head", "repo": {"full_name": "owner/repo"}}}
     _find(statuses, [fork, stale, closed], [], None, "no open pull request has head as its head\n")
     allowed = {"number": 13, "state": "open", "head": {"sha": "head", "ref": "branch", "repo": {"full_name": "owner/repo"}}, "base": {"ref": "main"}}
+    _find([statuses[2], ("Test all targets", "pending")], [allowed], [], {"number": "13", "base": "main", "branch": "branch"})
     _find(statuses, [allowed], [{"conclusion": None}], None, "Platforms already started for PR #13 at head\n")
     _find(statuses, [fork, allowed], [{"conclusion": "cancelled"}], {"number": "13", "base": "main", "branch": "branch"})
     _dispatch("later", True, "")
