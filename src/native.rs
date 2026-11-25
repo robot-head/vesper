@@ -1961,6 +1961,7 @@ impl WordFunction {
             .map_err(|e| e.to_string())?;
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         register_jit_runtime_symbols(&mut builder, false);
+        keep_code_near(&mut builder);
         let mut m = JITModule::new(builder);
         let (ids, _) = compile_entry(
             &mut m,
@@ -2061,6 +2062,27 @@ pub(crate) fn local_symbol(i: usize, key: &str) -> String {
         .collect();
     format!("vesper_function_{i}_{name}")
 }
+/// Keeps a JIT module's code in one contiguous reservation on AArch64.
+///
+/// Calls between a module's functions are `bl`, which reaches ±128 MiB.
+/// The default memory provider maps each allocation on its own, and in a
+/// long-lived process (a test that JIT-runs hundreds of programs) the
+/// mappings of one module can land further apart than that, so cranelift-jit
+/// aborts on the call relocation (`compiled_blob.rs`: `diff >> 26`). An arena
+/// keeps every function of the module within its reservation.
+pub(crate) fn keep_code_near(builder: &mut JITBuilder) {
+    #[cfg(all(target_arch = "aarch64", not(windows)))]
+    if let Ok(arena) = cranelift_jit::ArenaMemoryProvider::new_with_size(JIT_ARENA_BYTES) {
+        builder.memory_provider(Box::new(arena));
+    }
+    #[cfg(not(all(target_arch = "aarch64", not(windows))))]
+    let _ = builder;
+}
+/// The reservation of [`keep_code_near`]: address space only (pages are
+/// committed as the module grows), and short enough that a `bl` from any
+/// byte of it reaches any other.
+#[cfg(all(target_arch = "aarch64", not(windows)))]
+const JIT_ARENA_BYTES: usize = 120 << 20;
 pub(crate) fn register_jit_runtime_symbols(builder: &mut JITBuilder, trace_host: bool) {
     builder.symbol("fmod", native_float_remainder as *const u8);
     builder.symbol("fmodf", float_math::native_float_remainder_f32 as *const u8);
@@ -2116,6 +2138,7 @@ fn jit_run_entry(
         .map_err(|e| e.to_string())?;
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     register_jit_runtime_symbols(&mut builder, entry_effects == EntryEffects::TraceHost);
+    keep_code_near(&mut builder);
     let mut m = JITModule::new(builder);
     let (ids, _) = compile_entry(
         &mut m,
@@ -2191,6 +2214,11 @@ fn jit_run_entry(
     crate::regions::native_runtime::finish().map_err(|e| format!("native region fault: {e}"))?;
     crate::tiled::native_runtime::finish().map_err(|e| format!("native tiled fault: {e}"))?;
     crate::fip::native_runtime::finish();
+    // SAFETY: the result was decoded into an owned value and the runtimes
+    // above have finished, so nothing still points into the module's code
+    // or data. Without this every run would leak its mappings (an arena's
+    // whole reservation on AArch64).
+    unsafe { m.free_memory() };
     sequences?;
     Ok(value)
 }

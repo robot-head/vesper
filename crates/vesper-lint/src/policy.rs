@@ -255,8 +255,9 @@ impl Policy {
         let lint = match finding {
             FindingKind::UnusedEffectCapability { .. } => LintName::UnusedEffectCapability,
             FindingKind::OverbroadInoutProjection { .. } => LintName::OverbroadInoutProjection,
+            FindingKind::OverlyRestrictiveMode { .. } => LintName::OverlyRestrictiveMode,
         };
-        self.levels[&lint]
+        self.levels.get(&lint).copied().unwrap_or(Severity::Warn)
     }
     pub fn rules(&self) -> Vec<RuleStatus> {
         self.levels

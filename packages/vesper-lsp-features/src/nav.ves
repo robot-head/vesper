@@ -341,7 +341,7 @@ pub fn conf_at(in a: Ast, i: u32) -> ConfNode {
         )
 }
 
-fn stmt_at(in a: Ast, s: u32) -> StmtNode {
+pub fn stmt_at(in a: Ast, s: u32) -> StmtNode {
     a
         .stmts
         .get_or(
@@ -356,7 +356,7 @@ fn stmt_at(in a: Ast, s: u32) -> StmtNode {
         )
 }
 
-fn arg_at(in a: Ast, i: u32) -> ArgNode {
+pub fn arg_at(in a: Ast, i: u32) -> ArgNode {
     a
         .args
         .get_or(
@@ -369,7 +369,7 @@ fn arg_at(in a: Ast, i: u32) -> ArgNode {
         )
 }
 
-fn clause_at(in a: Ast, c: u32) -> ClauseNode {
+pub fn clause_at(in a: Ast, c: u32) -> ClauseNode {
     a
         .clauses
         .get_or(

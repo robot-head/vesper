@@ -249,3 +249,195 @@ Rust stays the default until the hybrid wiring part.
 
 Rust lines deleted: 0. Rust code is deleted only after the hybrid swap
 (session and dispatch part).
+
+# Part 3 (#1828): proof-lens models
+
+`src/lsp/proof_model.rs` (`proof_model::all`: the scalar model of each
+checked function, with its exact-integer and bit-vector Lean renderings and
+the model key) is ported, with 0 diffs. Rust stays the default until the
+hybrid wiring part.
+
+## What changed
+
+- `packages/vesper-lsp-features/src/proof.ves`: the builder (`Builder`:
+  scopes, kinds from the checker's expression types, inlining, the node
+  budget and every reason a function has no model) and the entry
+  `lsp_proof_models`.
+- `proof_types.ves`: `Kind::of` of source types, and `Display` and `Debug`
+  of `ast::Type` for the reasons.
+- `lean.ves`: `Exact::render` and `BitVecs::render`, byte for byte.
+- The checker's functions come from `World::functions`, with their spans.
+  Their trees are parsed from one text: the source, then each prelude the
+  checker added (String, Atomic, workers). A per-function `delta` maps that
+  text's spans back to the checker's, because preludes are parsed at an
+  offset past the source.
+- The key is BLAKE3 over both renderings. The entry hashes it with the
+  portable `@vesper-std/hash` BLAKE3, or leaves it to the host. The hosted
+  build would hash through `@vesper-std/hash-sys` (the C BLAKE3), as the
+  formatter port does.
+- `src/lsp.rs`: a hidden `proof_models_for_port` hook for the test (the
+  module is private).
+- Generated sources cover every scalar shape and each reachable reason.
+  These include the inlining depth limit (8), the node budget (4,096),
+  17 parameters, a disallowed effect and a non-scalar `let`.
+
+## Differential
+
+`proof_models_match_rust`: 203 documents, 490 models and 507 reasons, 0
+diffs. Keys hashed by the host also match.
+
+## Numbers
+
+Per document round, with the parse and facts kept (the session builds every
+model once per snapshot). The one-time encode, decode and parse is timed
+apart and taken off.
+
+| Key hashed by | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| the host's C BLAKE3 (the hosted build's `@vesper-std/hash-sys`) | 18.3 µs | 17.5 µs | **0.96x** |
+| the portable Vesper BLAKE3 | 18.3 µs | 32.5 µs | 1.78x |
+
+The portable BLAKE3 alone is about 15 µs of a round, so the hybrid wiring
+must hash through hash-sys. Rust lines deleted: 0.
+
+# Part 4 (#1828): Lens ownership facts
+
+The ownership facts behind every Lens view in `src/lsp/lens.rs` are ported
+with 0 diffs, at 0.76x Rust's time. That covers the `facts` walker
+(`Walker`), and the live linear obligations at a cursor
+(`View::outstanding` through `live` and `resolve`). Rust stays the
+default until the hybrid wiring part.
+
+## What changed
+
+- `packages/vesper-lsp-features/src/ownership.ves`: the walker over the
+  source's tree (@vesper/ast). It records each binding of each checked
+  function with its origin, scope, type, linearity and ownership. It also
+  records each consumption with the branch arms around it. The walker
+  follows the Rust rules for:
+  - parameter passes (explicit, from the callee, else `sink`)
+  - method receivers (`Type::method` with a `self` first parameter)
+  - effect operations (`Effect::op`)
+  - function values (their type's passes)
+  - constructor patterns (field types with the ADT's arguments
+    substituted, or `_` when an unknown argument would decide the mode)
+  - closures and handler clauses
+  - loops and early exits, which make the document opaque
+
+  The resource budget is the same: 2^18 steps, and 4,096 bindings per
+  function. The queries use the same rules: the function at a cursor is the
+  shortest one containing it, and the innermost binding of a name wins.
+- Types are check-data type ids. Annotations are interned into the
+  checker's type table, an unannotated `let` takes the type the checker gave
+  its value, and the mode is `World::mode` (`mode_of`). The harness lays out
+  the callee table from `World::functions` and `World::effects`, with each
+  parameter's pass.
+- Two lookups are cached per parse, as Rust caches modes per world: the
+  mode of each type and `World::constructor` for each name. A query index
+  per view holds each function's owned linear bindings and allows a binary
+  search over the function spans when they are in order.
+- `src/lsp/lens.rs`: `facts_dump` writes the facts and the answers at given
+  cursors as text. `src/lsp.rs` adds a hidden `lens_facts_for_port` hook
+  for the test.
+- `tests/self_host_lsp_features.rs` adds `lens_facts_match_rust` and a speed
+  row. It also adds generated Lens sources, which cover:
+  - the linear transaction of `src/lsp/lens_tests.rs`, with lets, branches,
+    shadowing, a closure value, destructuring, a handler and an early exit
+  - generic payloads (`Option` and a generic linear enum), match arms,
+    `in` and `sink` parameters and struct fields
+
+  Generic constructors send the editor guard through tuple admission, which
+  refuses inherent `self` receivers, so those sources use free functions.
+
+## Differential
+
+`lens_facts_match_rust` covers 212 documents, 8 of them without facts
+(loops or early exits). In all, 955 functions, 1,939 bindings (140 linear)
+and 877 consumptions are compared at 42,536 cursors, with 0 diffs. The
+cursors are every offset a fact names and its neighbours, plus a stride of
+29 bytes over each source.
+
+## Numbers
+
+Each row is one view and its queries per document round, with the parse and
+facts kept. The one-time encode, decode and parse (273 µs per document) is
+timed separately and taken off.
+
+| | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| facts and outstanding obligations at every cursor | 25.1 µs | 18.9 µs | **0.76x** |
+| facts only | 6.2 µs | 7.6 µs | 1.22x |
+
+Rust lines deleted: 0.
+
+## Left in lens.rs
+
+- The repaired view of syntax-damaged functions (`repair`, `candidates`,
+  `open_at`; part 5), and the semantic-error view.
+- Member completion (`complete_member`) and `signature`.
+
+# Part 5 (#1828): Lens repair of syntax-damaged source
+
+The repaired view's text and regions in `src/lsp/lens.rs` are ported with
+0 diffs, at 0.92x Rust's time. That covers `repair`, `candidates`,
+`open_at`, `closers`, `apply` and `parses`. Rust stays the default until
+the hybrid wiring part.
+
+## What changed
+
+- `packages/vesper-lsp-features/src/repair.ves` (entry `lsp_lens_repair`)
+  follows the Rust rules:
+  - Each damaged declaration gets its candidate cuts, most specific first:
+    - a statement cut at each enclosing block, innermost first (in an
+      impl, first keeping the later methods)
+    - a header cut at the last complete parameter, keeping the body
+    - a member cut for structs, enums and effects
+  - Each candidate is validated by parsing it alone: the declaration with
+    its patch, and every other damaged declaration blanked. Parses are
+    capped at 64 across all declarations.
+  - The chosen cuts are then applied together, keeping every byte offset.
+  - Region names, cuts, scopes and the unfinished-code span are worked out
+    as in Rust, including Unicode white space after the cut.
+  - Every `Unavailable` reason is reported as in Rust.
+- The tokens and the validating parses come from @vesper/front
+  (`lex_with_limits`, `parse_tokens`). The recovery parse's declarations,
+  sites and diagnostic spans come from the harness, as the checker's facts
+  do for the other entries (@vesper/front's `parse_recovery_tables` is
+  tested separately against Rust).
+- `src/lsp/lens.rs`: `repair_dump`. `src/lsp.rs`: a hidden
+  `lens_repair_for_port` hook.
+- `tests/self_host_lsp_features.rs` adds `lens_repair_matches_rust` and a
+  speed row. The damaged sources are:
+  - Lens's own scenarios: an unfinished member access, `let`, nested
+    block and match arm; a damaged impl method; a broken parameter list;
+    an unfinished struct member
+  - variants of every corpus document: an unfinished `let`, member
+    access, call or `if` at a few statement ends; truncated prefixes; a
+    dropped `)` in the first signature; an unfinished struct member
+
+## Differential
+
+`lens_repair_matches_rust` ran on 1,043 sources with a recovery parse (10
+more have none). Rust repaired 670 of them, with 621 regions. The other
+373 have no repaired view:
+
+| Reason | Sources |
+|---|--:|
+| `repaired_prefix_does_not_parse` | 216 |
+| `opaque_declaration` | 121 |
+| `damaged_function_header` | 34 |
+| `damaged_non_function_context` | 2 |
+
+The Vesper port matched every regions list and repaired text, with 0 diffs.
+
+## Numbers
+
+One repaired view per damaged document, including its validating parses.
+The one-time encode and decode is timed separately and taken off.
+
+| | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| repair, per damaged document | 51.2 µs | 47.4 µs | **0.92x** |
+
+Rust lines deleted: 0.
+

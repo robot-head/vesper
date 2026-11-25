@@ -27,6 +27,41 @@ mod session;
 
 use serde_json::json;
 pub use session::LensConfig;
+
+/// Every proof-lens model of a checked source, for the differential test of
+/// its Vesper port (`tests/self_host_lsp_features.rs`): per function, the
+/// exact and bit-vector renderings and the model key as hex, or the reason
+/// there is no model.
+#[doc(hidden)]
+pub fn proof_models_for_port(
+    snapshot: &crate::tooling::frontend::CheckedSource,
+) -> Vec<(String, Result<[String; 3], String>)> {
+    proof_model::all(snapshot.checked())
+        .into_iter()
+        .map(|(name, model)| {
+            let model = model.map(|m| [m.exact, m.bitvec, proof_model::hex(&m.key)]);
+            (name, model)
+        })
+        .collect()
+}
+/// The ownership facts behind Lens views (`lens::View::checked`) as text,
+/// for the Vesper port's differential test.
+#[doc(hidden)]
+pub fn lens_facts_for_port(
+    snapshot: std::sync::Arc<crate::tooling::frontend::CheckedSource>,
+    cursors: &[usize],
+) -> String {
+    lens::facts_dump(snapshot, cursors)
+}
+/// The repaired text and regions of a syntax-damaged document
+/// (`lens::repair`) as text, for the Vesper port's differential test.
+#[doc(hidden)]
+pub fn lens_repair_for_port(
+    syntax: &vesper_syntax::recovery::RecoverySyntax,
+    limits: crate::tooling::frontend::AnalysisLimits,
+) -> String {
+    lens::repair_dump(syntax, limits)
+}
 use std::{
     cell::RefCell,
     io::{BufRead, Write},

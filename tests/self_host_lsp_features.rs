@@ -28,6 +28,7 @@ use check_harness::*;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use vesper::lsp::navigation::{self, OpenDocument};
 use vesper::tooling::frontend::{AnalysisFailure, AnalysisLimits, CheckedSource, check_source};
 use vesper_lsp::{ContentChange, DocumentStore, StoreLimits};
@@ -52,6 +53,9 @@ fn entry(name: &'static str) -> &'static Entry {
             "lsp_definitions",
             "lsp_document_symbols_kept",
             "lsp_hovers",
+            "lsp_proof_models",
+            "lsp_lens_facts",
+            "lsp_lens_repair",
         ]
         .into_iter()
         .map(|n| (n, features().entry(n, optimize())))
@@ -446,6 +450,410 @@ fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 
 /// Generated sources at the navigation limits and with the shapes the
 /// index treats specially.
+const PROOF_SCALAR: &str = "fn inc(x: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if x < 100 {
+        x + 1
+    } else {
+        0
+    }
+}
+
+fn add(a: i64, b: i64) -> i64 eff [Fail[ArithOverflow]] {
+    a + b
+}
+
+fn half(x: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let q = x / 2;
+    let r = x % 3;
+    wrapping_add(q, r)
+}
+
+fn ratio(x: u64, y: u64) -> u64 eff [Fail[RuntimeError]] {
+    x / y
+}
+
+fn both(a: bool, b: bool, x: u8) -> bool eff [Fail[ArithOverflow]] {
+    a && (x < 200) && (wrapping_add(x, 100) > 3)
+}
+
+fn negate(x: i64) -> i64 eff [Fail[ArithOverflow]] {
+    -x
+}
+
+fn counted(x: u32) -> u32 eff [Fail[ArithOverflow]] {
+    let mut total = x;
+    total += 1;
+    if total > 10 {
+        total - 10
+    } else {
+        total
+    }
+}
+
+fn main() -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    add(inc(3), half(4))
+}
+
+fn answer() -> i64 {
+    42
+}
+";
+
+const PROOF_OPS: &str =
+    "fn signed(x: i64, y: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let a = x / -3;
+    let b = x % -3;
+    let c = x / y;
+    let d = x % y;
+    let e = wrapping_sub(a, b);
+    let f = wrapping_mul(c, d);
+    let mut g = e * 2;
+    g -= 1;
+    g *= 3;
+    g /= 5;
+    g %= 7;
+    g = g - f;
+    if x >= y || x <= -5 {
+        -g
+    } else {
+        g
+    }
+}
+
+fn unsigned(x: u8, y: u32, z: u64) -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let a = wrapping_mul(x, 3);
+    let b = wrapping_sub(y, 9) / 7;
+    let c = z % 10;
+    let d = z * 2 - 1;
+    let ok = a != 0 && b > 1 || c == d;
+    let flag = !ok;
+    flag == true
+}
+
+fn units(x: u64) eff [Fail[ArithOverflow]] {
+    let y = x + 1;
+    if y > 3 {
+        ()
+    }
+}
+
+fn nothing() {
+}
+
+fn small(x: u8) -> u8 eff [Fail[ArithOverflow]] {
+    let y: u8 = 7;
+    x + y + 255
+}
+
+fn wide_literals(x: u64, y: i64) -> bool eff [Fail[ArithOverflow]] {
+    x + 18446744073709551000 > 5 && y - 9223372036854775807 < 0
+}
+
+fn calls(x: u32) -> u32 eff [Fail[ArithOverflow]] {
+    helper(x, true) + helper(1, false)
+}
+
+fn helper(v: u32, on: bool) -> u32 eff [Fail[ArithOverflow]] {
+    if on {
+        v * 2
+    } else {
+        v
+    }
+}
+";
+
+const PROOF_REASONS: &str = "linear struct Tx {
+    slot: u64
+}
+
+enum Shape { Dot, Square(u64) }
+
+fn make(x: u64) -> Tx {
+    Tx {
+        slot: x
+    }
+}
+
+fn loop_forever(x: u64) -> u64 {
+    loop_forever(x)
+}
+
+fn ping(x: u64) -> u64 {
+    pong(x)
+}
+
+fn pong(x: u64) -> u64 {
+    ping(x)
+}
+
+fn pick[T](sink x: T) -> T {
+    x
+}
+
+fn bump(inout x: u64) {
+    x = wrapping_add(x, 1);
+}
+
+fn floaty(x: f64) -> f64 {
+    x
+}
+
+fn helper(x: u64) -> u64 {
+    x
+}
+
+fn opt(x: Option[u64]) -> u64 {
+    0
+}
+
+fn matched(x: u64) -> u64 {
+    match x {
+        0 => 1,
+        _ => 2,
+    }
+}
+
+fn looped(x: u64) -> u64 {
+    let mut i = 0;
+    loop {
+        if i > x {
+            break;
+        }
+        i = wrapping_add(i, 1);
+    }
+    i
+}
+
+fn early(x: u64) -> u64 {
+    return x;
+}
+
+fn typed_let(x: Option[u64]) -> u64 {
+    let s: Option[u64] = x;
+    0
+}
+
+fn shapes(s: Shape) -> u64 {
+    0
+}
+
+fn outer(x: u64, c: bool) -> u64 {
+    let mut t = x;
+    if c {
+        t = 1;
+    }
+    t
+}
+
+fn none() {
+}
+
+fn unit_cmp(a: u64) -> bool {
+    none() == none()
+}
+
+fn text() -> u64 {
+    let s = \"hi\";
+    1
+}
+
+effect Log { fn note(x: u64) -> Unit; }
+
+fn many(p0: u64, p1: u64, p2: u64, p3: u64, p4: u64, p5: u64, p6: u64, p7: u64, p8: u64, p9: u64, p10: u64, p11: u64, p12: u64, p13: u64, p14: u64, p15: u64, p16: u64) -> u64 {
+    p0
+}
+
+fn logged(x: u64) -> u64 eff [Log] {
+    x
+}
+
+fn shape_let(x: u64) -> u64 {
+    let s: Shape = Shape::Dot;
+    x
+}
+
+fn shape_value(x: u64) -> u64 {
+    let s = Shape::Square(x);
+    x
+}
+
+struct Pt { x: u64 }
+
+fn built(x: u64) -> u64 {
+    let t = Pt { x: x };
+    0
+}
+
+fn calls_unknown(x: u64) -> u64 eff [Fail[ArithOverflow]] {
+    helper(x) + 1
+}
+";
+
+/// The linear transaction of src/lsp/lens_tests.rs, for the Lens
+/// ownership-facts sources.
+const LENS_PREFIX: &str = "effect Storage {
+    fn write(slot: u64) -> Unit;
+}
+
+linear struct WriteTxn {
+    wal_slot: u64
+}
+
+impl WriteTxn {
+    fn commit(sink self) -> u64 {
+        let WriteTxn {
+            wal_slot
+        }
+        = self;
+        wal_slot
+    }
+    fn abort(sink self) {
+        let WriteTxn {
+            wal_slot
+        }
+        = self;
+    }
+    fn slot(self) -> u64 {
+        self.wal_slot
+    }
+    fn persist(self) -> u64 eff [Storage] {
+        Storage::write(self.wal_slot);
+        self.wal_slot
+    }
+}
+
+fn open_txn(slot: u64) -> WriteTxn {
+    WriteTxn {
+        wal_slot: slot
+    }
+}
+";
+
+/// `main` bodies over `LENS_PREFIX`.
+const LENS_BODIES: [(&str, &str); 8] = [
+    (
+        "plain",
+        "    let tx = open_txn(1);\n    let other = open_txn(2);\n    other.abort();\n    tx.commit()\n",
+    ),
+    (
+        "branch",
+        "    let tx = open_txn(1);\n    let n = if tx.slot() > 0 { tx.commit() } else { tx.commit() };\n    n\n",
+    ),
+    (
+        "closure",
+        "    let f: fn @copy (sink WriteTxn) -> u64 = | sink t: WriteTxn | t.commit();\n    let tx = open_txn(1);\n    f(tx)\n",
+    ),
+    (
+        "destructure",
+        "    let WriteTxn { wal_slot } = open_txn(4);\n    wal_slot\n",
+    ),
+    (
+        "shadow",
+        "    let tx = open_txn(1);\n    let kept = tx;\n    let tx = open_txn(2);\n    kept.abort();\n    tx.commit()\n",
+    ),
+    (
+        "handled",
+        "    handle Storage in {\n        stored(5)\n    } with {\n        return v => v,\n        write(s, k) => k(()),\n    }\n}\n\nfn stored(slot: u64) -> u64 eff [Storage] {\n    Storage::write(slot);\n    let tx = open_txn(slot);\n    tx.commit()\n",
+    ),
+    (
+        "unconsumed_branch",
+        "    let tx = open_txn(1);\n    let n = tx.slot();\n    if n > 3 {\n        tx.abort();\n        0\n    } else {\n        tx.commit()\n    }\n",
+    ),
+    (
+        "early",
+        "    let tx = open_txn(1);\n    if tx.slot() > 9 {\n        return tx.commit();\n    }\n    tx.commit()\n",
+    ),
+];
+
+/// Generic payloads (`Option`, a generic linear enum), match arms,
+/// `in` and `sink` parameters and struct fields. Generic constructors send
+/// the editor's guard through tuple admission, which refuses inherent
+/// `self` receivers, so these sources use free functions.
+const LENS_SHAPES: &str = "linear struct Txn {
+    slot: u64
+}
+
+linear enum Slot[T] {
+    Empty,
+    Full(T)
+}
+
+linear struct Pair {
+    left: Txn,
+    right: Txn
+}
+
+fn open(slot: u64) -> Txn {
+    Txn {
+        slot: slot
+    }
+}
+
+fn close(sink t: Txn) -> u64 {
+    let Txn {
+        slot
+    }
+    = t;
+    slot
+}
+
+fn look(t: Txn) -> u64 {
+    t.slot
+}
+
+fn fill(sink t: Txn) -> Slot[Txn] {
+    Slot::Full(t)
+}
+
+fn drain(sink s: Slot[Txn]) -> u64 {
+    match s {
+        Slot::Empty => 0,
+        Slot::Full(t) => close(t),
+    }
+}
+
+fn split(sink p: Pair) -> u64 {
+    let Pair {
+        left,
+        right
+    }
+    = p;
+    let n = look(left);
+    let m = close(right);
+    wrapping_add(wrapping_add(n, m), close(left))
+}
+
+fn maybe(sink o: Option[Txn]) -> u64 {
+    match o {
+        Option::Some(t) => close(t),
+        Option::None => 0,
+    }
+}
+
+fn nested(c: bool) -> u64 {
+    let a = open(1);
+    let b = open(2);
+    let n = if c {
+        maybe(Option::Some(a))
+    } else {
+        close(a)
+    };
+    wrapping_add(n, close(b))
+}
+
+fn main() -> u64 {
+    let p = Pair {
+        left: open(1),
+        right: open(2)
+    };
+    let tx = open(3);
+    let n = look(tx);
+    let o = Option::Some(open(4));
+    let total = wrapping_add(wrapping_add(drain(fill(tx)), split(p)), n);
+    wrapping_add(wrapping_add(total, maybe(o)), nested(true))
+}
+";
+
 fn generated() -> Vec<(String, String)> {
     let mut out = vec![];
     // Long names: three of these overflow `max_output_bytes` (256 KiB)
@@ -488,6 +896,27 @@ fn generated() -> Vec<(String, String)> {
         s.push_str("fn f() -> u64 { 1 }\n");
         out.push((name.into(), s));
     }
+    // Proof-lens models: the scalar shapes the model covers, and each
+    // reason a function has none.
+    out.push(("proof_scalar".into(), PROOF_SCALAR.into()));
+    out.push(("proof_reasons".into(), PROOF_REASONS.into()));
+    out.push(("proof_ops".into(), PROOF_OPS.into()));
+    // A call chain deeper than the inlining limit (8), and a body past the
+    // node budget (4,096).
+    let mut chain = String::new();
+    for i in 0..11 {
+        if i == 10 {
+            chain.push_str("fn c10(x: u64) -> u64 { x }\n");
+        } else {
+            chain.push_str(&format!("fn c{i}(x: u64) -> u64 {{ c{}(x) }}\n", i + 1));
+        }
+    }
+    out.push(("proof_chain".into(), chain));
+    let mut wide = String::from("fn wide(x: u64) -> u64 eff [Fail[ArithOverflow]] {\n");
+    for i in 0..460 {
+        wide.push_str(&format!("    let a{i} = x + x + x + x + {i};\n"));
+    }
+    out.push(("proof_budget".into(), format!("{wide}    x\n}}\n")));
     // Documentation links of every target kind and the Markdown shapes
     // the link scanner skips: code spans and fences, inline and
     // reference-style links, images, definitions with titles, escapes,
@@ -558,6 +987,17 @@ fn main() -> u64 { wrapping_add(sum(3), wrapping_add(area(Shape::Dot), quiet(1))
 "#
         .into(),
     ));
+    // Lens ownership facts: linear obligations through lets, branches,
+    // matches with payloads, destructuring, closures, function values,
+    // handlers, method receivers and effect operations, and an early exit
+    // (no facts).
+    for (name, body) in LENS_BODIES {
+        out.push((
+            format!("lens_{name}"),
+            format!("{LENS_PREFIX}\nfn main() -> u64 {{\n{body}}}\n"),
+        ));
+    }
+    out.push(("lens_shapes".into(), LENS_SHAPES.into()));
     out.push((
         "unicode".into(),
         "// 😀 ünïcödé 𝄞\r\nfn first()->u64{1}\r\nfn main()->u64{first()}\r\n".into(),
@@ -1453,6 +1893,161 @@ fn lsp_features_speed() {
         r / requests as u32,
         v / requests as u32
     );
+    // The session builds every model once per snapshot from the parse it
+    // keeps. Vesper's one-time cost per document (the harness encoding the
+    // facts, decoding them, the parse) is timed with 0 rounds and taken off
+    // 64 rounds; the best of five runs each, interleaved.
+    const ROUNDS: u64 = 64;
+    let (mut rust, mut fixed, mut full) = (Duration::MAX, Duration::MAX, Duration::MAX);
+    let mut hosted = Duration::MAX;
+    for _ in 0..5 {
+        hosted = hosted.min(time(|| {
+            for d in docs {
+                std::hint::black_box(vesper_proof_models_kept(&d.checked, ROUNDS, false));
+            }
+        }));
+        rust = rust.min(time(|| {
+            for d in docs {
+                for _ in 0..ROUNDS {
+                    std::hint::black_box(vesper::lsp::proof_models_for_port(&d.checked));
+                }
+            }
+        }));
+        fixed = fixed.min(time(|| {
+            for d in docs {
+                std::hint::black_box(vesper_proof_models_kept(&d.checked, 0, false));
+            }
+        }));
+        full = full.min(time(|| {
+            for d in docs {
+                std::hint::black_box(vesper_proof_models_kept(&d.checked, ROUNDS, true));
+            }
+        }));
+    }
+    let rounds = docs.len() as u32 * ROUNDS as u32;
+    // The host hashes once per answer, not per round: its hashing is in
+    // `fixed` and `hosted` alike, so the difference is the port's rounds.
+    // That hashing is charged per round too: the host's C BLAKE3 over every
+    // model's renderings, best of five.
+    let renderings: Vec<Vec<[String; 3]>> = docs
+        .iter()
+        .map(|d| {
+            vesper::lsp::proof_models_for_port(&d.checked)
+                .into_iter()
+                .filter_map(|(_, m)| m.ok())
+                .collect()
+        })
+        .collect();
+    let mut hashing = Duration::MAX;
+    for _ in 0..5 {
+        hashing = hashing.min(time(|| {
+            for ms in &renderings {
+                for m in ms {
+                    let mut h = blake3::Hasher::new();
+                    h.update(b"vesper.lens.model/1\0");
+                    h.update(m[0].as_bytes());
+                    h.update(b"\0");
+                    h.update(m[1].as_bytes());
+                    std::hint::black_box(h.finalize().to_hex());
+                }
+            }
+        }));
+    }
+    let h = hosted.saturating_sub(fixed) / rounds + hashing / docs.len() as u32;
+    let r = rust / rounds;
+    eprintln!(
+        "proof-lens models per document round, key hashed by the host's C BLAKE3: rust {r:?} \
+         vesper {h:?} ratio {:.2}",
+        h.as_secs_f64() / r.as_secs_f64()
+    );
+    let v = full.saturating_sub(fixed) / rounds;
+    eprintln!(
+        "proof-lens models per document round ({} x {ROUNDS}), key hashed by the portable \
+         Vesper BLAKE3: rust {r:?} vesper {v:?} ratio {:.2} (vesper's one-time encode, decode and parse: {:?} per document)",
+        docs.len(),
+        v.as_secs_f64() / r.as_secs_f64(),
+        fixed / docs.len() as u32
+    );
+    // Lens facts: one view per snapshot and its queries (`View::checked`,
+    // then `View::outstanding` at each cursor), on the parse the session
+    // keeps; Vesper's one-time cost is taken off as for the proof models.
+    let lens: Vec<(&Doc, Vec<usize>)> = docs
+        .iter()
+        .map(|d| {
+            let facts = vesper::lsp::lens_facts_for_port(d.checked.clone(), &[]);
+            (*d, lens_cursors(d.checked.source(), &facts))
+        })
+        .collect();
+    let (mut rust, mut fixed, mut full) = (Duration::MAX, Duration::MAX, Duration::MAX);
+    for _ in 0..5 {
+        rust = rust.min(time(|| {
+            for (d, at) in &lens {
+                for _ in 0..ROUNDS {
+                    std::hint::black_box(vesper::lsp::lens_facts_for_port(d.checked.clone(), at));
+                }
+            }
+        }));
+        fixed = fixed.min(time(|| {
+            for (d, at) in &lens {
+                std::hint::black_box(vesper_lens_facts(&d.checked, at, 0));
+            }
+        }));
+        full = full.min(time(|| {
+            for (d, at) in &lens {
+                std::hint::black_box(vesper_lens_facts(&d.checked, at, ROUNDS));
+            }
+        }));
+    }
+    let r = rust / rounds;
+    let v = full.saturating_sub(fixed) / rounds;
+    eprintln!(
+        "lens facts and outstanding obligations per document round ({} x {ROUNDS}): rust {r:?} \
+         vesper {v:?} ratio {:.2} (vesper's one-time encode, decode and parse: {:?} per document)",
+        docs.len(),
+        v.as_secs_f64() / r.as_secs_f64(),
+        fixed / docs.len() as u32
+    );
+    // Lens repair: one repaired view per damaged snapshot (its validating
+    // parses included); Vesper's one-time cost is taken off as above.
+    let damaged: Vec<_> = damaged_docs()
+        .into_iter()
+        .filter_map(|(_, source)| {
+            vesper_syntax::parser::parse_recovery(
+                &source,
+                vesper_syntax::recovery::Limits::default(),
+            )
+            .ok()
+        })
+        .collect();
+    const REPAIRS: u64 = 8;
+    let limits = lens_limits();
+    let (mut rust, mut fixed, mut full) = (Duration::MAX, Duration::MAX, Duration::MAX);
+    for _ in 0..3 {
+        rust = rust.min(time(|| {
+            for syntax in &damaged {
+                for _ in 0..REPAIRS {
+                    std::hint::black_box(vesper::lsp::lens_repair_for_port(syntax, limits));
+                }
+            }
+        }));
+        fixed = fixed.min(time(|| {
+            for syntax in &damaged {
+                std::hint::black_box(vesper_lens_repair(syntax, limits, 0));
+            }
+        }));
+        full = full.min(time(|| {
+            for syntax in &damaged {
+                std::hint::black_box(vesper_lens_repair(syntax, limits, REPAIRS));
+            }
+        }));
+    }
+    let repairs = damaged.len() as u32 * REPAIRS as u32;
+    let (r, v) = (rust / repairs, full.saturating_sub(fixed) / repairs);
+    eprintln!(
+        "lens repair per damaged document ({} x {REPAIRS}): rust {r:?} vesper {v:?} ratio {:.2}",
+        damaged.len(),
+        v.as_secs_f64() / r.as_secs_f64()
+    );
     let per_doc: Vec<Vec<Position>> = docs
         .iter()
         .map(|d| positions(d).into_iter().step_by(8).collect())
@@ -1512,4 +2107,527 @@ fn lsp_features_speed() {
         r / cursors.len() as u32,
         v / cursors.len() as u32
     );
+}
+
+// ------------------------------------------------------------ proof models
+
+/// The preludes the checker can add to a module (their functions reach
+/// `World::functions` with spans into the prelude's own text).
+fn preludes() -> [&'static str; 5] {
+    [
+        vesper::strings::PRELUDE,
+        vesper::atomics::PRELUDE,
+        vesper::atomics::WORKERS_PRELUDE,
+        vesper::trace_effects::PRELUDE,
+        vesper::trace_effects::TELEMETRABLE_PRELUDE,
+    ]
+}
+
+/// The function trees of a parsed text, as the checker names them.
+fn trees(module: &vesper::ast::Module) -> Vec<Tree> {
+    let mut out = vec![];
+    for item in &module.items {
+        match item {
+            vesper::ast::Item::Function(f) => out.push((f.name.clone(), f.span.clone())),
+            vesper::ast::Item::Impl { ty, methods, .. } => {
+                for f in methods {
+                    out.push((format!("{}::{}", ty.name(), f.name), f.span.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `lsp_proof_models`: the checker's facts, the function table and one text
+/// (the source, then each prelude a function comes from). `None` when a
+/// function's tree is in no known text.
+/// One function's proof-lens model from the port: its renderings and key,
+/// or the reason it has none.
+type PortModel = (String, Result<[String; 3], String>);
+
+/// A function's tree, as the checker names it, and its span.
+type Tree = (String, std::ops::Range<usize>);
+
+fn vesper_proof_models(s: &CheckedSource) -> Option<Vec<PortModel>> {
+    vesper_proof_models_kept(s, 1, true)
+}
+
+/// `lsp_proof_models` with `reps` rounds of every model on one parse. With
+/// `hash` false the port leaves the key to the host, which hashes the
+/// renderings with the C BLAKE3 (the `blake3` crate), as the hosted build
+/// does through `@vesper-std/hash-sys`.
+fn vesper_proof_models_kept(s: &CheckedSource, reps: u64, hash: bool) -> Option<Vec<PortModel>> {
+    let checked = s.checked();
+    let mut world = checked.world.clone();
+    world.types = checked.expression_types.clone();
+    let mut texts: Vec<(&str, Vec<Tree>)> = vec![(s.source(), trees(&s.parsed().module))];
+    for p in preludes() {
+        texts.push((p, trees(&vesper::parser::parse(p).module)));
+    }
+    // A prelude is parsed at an offset (after the source), so its spans in
+    // the world are its own spans plus that offset.
+    let mut offset: Vec<Option<usize>> = vec![None; texts.len()];
+    offset[0] = Some(0);
+    let mut rows = vec![];
+    for (name, f) in &world.functions {
+        let mut placed = None;
+        for (t, (_, fs)) in texts.iter().enumerate() {
+            for (n, sp) in fs {
+                if n != name
+                    || sp.end - sp.start != f.span.end - f.span.start
+                    || f.span.start < sp.start
+                {
+                    continue;
+                }
+                let o = f.span.start - sp.start;
+                if offset[t].is_none_or(|x| x == o) {
+                    offset[t] = Some(o);
+                    placed = Some(t);
+                    break;
+                }
+            }
+            if placed.is_some() {
+                break;
+            }
+        }
+        let Some(t) = placed else {
+            eprintln!("  unplaced {name} {:?}", f.span);
+            return None;
+        };
+        rows.push((name.clone(), t, f.span.clone(), f.body.is_some()));
+    }
+    // The one text: the source, then each prelude used; `delta` is a
+    // text's place in it less its offset in the world.
+    let mut text = String::new();
+    let mut delta = vec![0usize; texts.len()];
+    for (t, (src, _)) in texts.iter().enumerate() {
+        if let Some(o) = offset[t] {
+            if t > 0 {
+                text.push('\n');
+            }
+            delta[t] = text.len().wrapping_sub(o);
+            text.push_str(src);
+        }
+    }
+    let mut names = String::new();
+    let input = encode(&world, |_, tail| {
+        tail.push(rows.len() as u64);
+        for (name, t, span, body) in &rows {
+            tail.extend([names.len() as u64, name.len() as u64]);
+            names.push_str(name);
+            let d = delta[*t];
+            tail.extend([
+                span.start.wrapping_add(d) as u64,
+                span.end.wrapping_add(d) as u64,
+                d as u64,
+                *body as u64,
+            ]);
+        }
+        tail.push(text.len() as u64);
+        tail.push(names.len() as u64);
+        tail.push(reps);
+        tail.push(hash as u64);
+    });
+    let mut input = input;
+    input.extend_from_slice(text.as_bytes());
+    input.extend_from_slice(names.as_bytes());
+    let out = entry("lsp_proof_models").text(&input);
+    if out.is_empty() {
+        return Some(vec![]);
+    }
+    Some(
+        out.split('\u{1e}')
+            .map(|record| {
+                let (name, model) = record.split_once('\u{1f}').expect("record name");
+                let model = match model.strip_prefix('O') {
+                    Some(rest) => {
+                        let parts: Vec<&str> = rest.split('\u{1f}').collect();
+                        let key = if hash {
+                            parts[2].to_string()
+                        } else {
+                            let mut h = blake3::Hasher::new();
+                            h.update(b"vesper.lens.model/1\0");
+                            h.update(parts[0].as_bytes());
+                            h.update(b"\0");
+                            h.update(parts[1].as_bytes());
+                            h.finalize().to_hex().to_string()
+                        };
+                        Ok([parts[0].to_string(), parts[1].to_string(), key])
+                    }
+                    None => Err(model.strip_prefix('E').unwrap_or(model).to_string()),
+                };
+                (name.to_string(), model)
+            })
+            .collect(),
+    )
+}
+
+/// Every proof-lens model of every corpus document (Rust
+/// `proof_model::all`) against the Vesper port: renderings, keys and
+/// reasons.
+#[test]
+fn proof_models_match_rust() {
+    let (mut docs, mut models, mut reasons, mut unplaced) = (0, 0, 0, 0);
+    let mut diffs = 0;
+    for d in corpus_docs() {
+        let rust = vesper::lsp::proof_models_for_port(&d.checked);
+        assert_eq!(
+            vesper_proof_models_kept(&d.checked, 1, false),
+            vesper_proof_models(&d.checked),
+            "{}: host-hashed keys",
+            d.name
+        );
+        let Some(port) = vesper_proof_models(&d.checked) else {
+            unplaced += 1;
+            eprintln!("{}: a function's tree is in no known text", d.name);
+            continue;
+        };
+        docs += 1;
+        assert_eq!(rust.len(), port.len(), "{}", d.name);
+        for (r, v) in rust.iter().zip(&port) {
+            match &r.1 {
+                Ok(_) => models += 1,
+                Err(_) => reasons += 1,
+            }
+            if std::env::var("PROOF_SHOW").is_ok() && d.uri.starts_with("untitled:proof") {
+                eprintln!(
+                    "  {} {}: {:?}",
+                    d.name,
+                    r.0,
+                    r.1.as_ref().map(|m| m[2].clone())
+                );
+            }
+            if r != v {
+                diffs += 1;
+                if diffs <= 12 {
+                    eprintln!(
+                        "{} {}:\n  rust   {:?}\n  vesper {:?}",
+                        d.name, r.0, r.1, v.1
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "proof models: {docs} documents, {models} models, {reasons} reasons, {unplaced} unplaced, {diffs} differ"
+    );
+    assert_eq!(diffs, 0);
+    assert_eq!(unplaced, 0);
+}
+
+// ------------------------------------------------------------ lens facts
+
+/// `lsp_lens_facts`: the checker's facts, the callee table
+/// (`World::functions` and `World::effects` with their parameter passes),
+/// the cursors and the source text.
+fn vesper_lens_facts(s: &CheckedSource, cursors: &[usize], reps: u64) -> String {
+    let checked = s.checked();
+    let mut world = checked.world.clone();
+    world.types = checked.expression_types.clone();
+    let pass = |p: vesper::ast::Pass| match p {
+        vesper::ast::Pass::In => 0u64,
+        vesper::ast::Pass::Inout => 1,
+        vesper::ast::Pass::Sink => 2,
+    };
+    let mut names = String::new();
+    let input = encode(&world, |_, tail| {
+        tail.push(world.functions.len() as u64);
+        for (name, f) in &world.functions {
+            tail.extend([names.len() as u64, name.len() as u64]);
+            names.push_str(name);
+            tail.push(f.params.len() as u64);
+            tail.push(f.params.first().is_some_and(|p| p.name == "self") as u64);
+            tail.extend(f.params.iter().map(|p| pass(p.pass)));
+        }
+        tail.push(world.effects.len() as u64);
+        for (name, e) in &world.effects {
+            tail.extend([names.len() as u64, name.len() as u64]);
+            names.push_str(name);
+            tail.push(e.ops.len() as u64);
+            for op in &e.ops {
+                tail.extend([names.len() as u64, op.name.len() as u64]);
+                names.push_str(&op.name);
+                tail.push(op.params.len() as u64);
+                tail.extend(op.params.iter().map(|p| pass(p.pass)));
+            }
+        }
+        tail.push(cursors.len() as u64);
+        tail.extend(cursors.iter().map(|&c| c as u64));
+        tail.push(s.source().len() as u64);
+        tail.push(names.len() as u64);
+        tail.push(reps);
+    });
+    let mut input = input;
+    input.extend_from_slice(s.source().as_bytes());
+    input.extend_from_slice(names.as_bytes());
+    entry("lsp_lens_facts").text(&input)
+}
+
+/// Cursors for `View::outstanding`: every offset a fact names and its
+/// neighbours, and a stride over the whole source.
+fn lens_cursors(source: &str, facts: &str) -> Vec<usize> {
+    let mut at = std::collections::BTreeSet::new();
+    for line in facts.lines() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let numbers: &[&str] = match fields.first() {
+            Some(&"F") | Some(&"E") => &fields[1..],
+            Some(&"B") if fields.len() > 7 => &fields[2..8],
+            _ => &[],
+        };
+        for n in numbers {
+            if let Ok(v) = n.parse::<usize>() {
+                at.extend([v.saturating_sub(1), v, v + 1]);
+            }
+        }
+    }
+    at.extend((0..=source.len()).step_by(29));
+    at.into_iter().collect()
+}
+
+/// The ownership facts behind every Lens view (Rust `lens::View::checked`
+/// and `View::outstanding`) against the Vesper port, on every corpus
+/// document.
+#[test]
+fn lens_facts_match_rust() {
+    let (mut docs, mut functions, mut bindings, mut linear, mut events, mut cursors) =
+        (0, 0, 0, 0, 0, 0);
+    let (mut unavailable, mut diffs) = (0, 0);
+    for d in corpus_docs() {
+        let facts = vesper::lsp::lens_facts_for_port(d.checked.clone(), &[]);
+        let at = lens_cursors(d.checked.source(), &facts);
+        let rust = vesper::lsp::lens_facts_for_port(d.checked.clone(), &at);
+        let port = vesper_lens_facts(&d.checked, &at, 1);
+        docs += 1;
+        for line in rust.lines() {
+            match line.split('\t').next() {
+                Some("F") => functions += 1,
+                Some("B") => {
+                    bindings += 1;
+                    if line.split('\t').nth(4) == Some("1") {
+                        linear += 1;
+                    }
+                }
+                Some("E") => events += 1,
+                Some("O") => cursors += 1,
+                Some("U") => unavailable += 1,
+                _ => {}
+            }
+        }
+        if std::env::var("LENS_SHOW").is_ok() && d.uri.starts_with("untitled:lens") {
+            eprintln!("{}:\n{rust}", d.name);
+        }
+        if rust != port {
+            diffs += 1;
+            if diffs <= 6 {
+                let (r, v): (Vec<_>, Vec<_>) = (rust.lines().collect(), port.lines().collect());
+                let i = r
+                    .iter()
+                    .zip(&v)
+                    .position(|(a, b)| a != b)
+                    .unwrap_or(r.len().min(v.len()));
+                eprintln!(
+                    "{} line {i}:\n  rust   {:?}\n  vesper {:?}",
+                    d.name,
+                    r.get(i),
+                    v.get(i)
+                );
+            }
+        }
+    }
+    eprintln!(
+        "lens facts: {docs} documents ({unavailable} without facts), {functions} functions, \
+         {bindings} bindings ({linear} linear), {events} consumptions, {cursors} cursors, {diffs} differ"
+    );
+    assert_eq!(diffs, 0);
+}
+
+// ------------------------------------------------------------ lens repair
+
+/// `lsp_lens_repair`: the recovery parse's declarations, sites and
+/// diagnostics, the limits and the source.
+fn vesper_lens_repair(
+    syntax: &vesper_syntax::recovery::RecoverySyntax,
+    limits: AnalysisLimits,
+    reps: u64,
+) -> String {
+    use vesper_syntax::recovery::{DeclarationKind as D, DeclarationStatus as S};
+    let none = u64::MAX;
+    let mut words: Vec<u64> = vec![syntax.declarations().len() as u64];
+    for d in syntax.declarations() {
+        words.push(match d.kind {
+            D::Function => 1,
+            D::Impl => 2,
+            D::Struct => 3,
+            D::Enum => 4,
+            D::Effect => 5,
+            _ => 0,
+        });
+        words.push(match d.status {
+            S::Complete => 0,
+            S::Recovered => 1,
+            S::Opaque => 2,
+        });
+        words.extend([d.span.start as u64, d.span.end as u64]);
+        match &d.name_span {
+            Some(n) => words.extend([n.start as u64, n.end as u64]),
+            None => words.extend([none, none]),
+        }
+    }
+    words.push(syntax.sites().len() as u64);
+    for site in syntax.sites() {
+        words.push(site.owner.map_or(none, |o| o as u64));
+        words.extend([site.span.start as u64, site.span.end as u64]);
+    }
+    words.push(syntax.diagnostics().len() as u64);
+    for d in syntax.diagnostics() {
+        words.extend([d.span.start as u64, d.span.end as u64]);
+    }
+    words.extend([
+        limits.max_source_bytes as u64,
+        limits.max_diagnostics as u64,
+        limits.max_depth as u64,
+        reps,
+        syntax.source().len() as u64,
+    ]);
+    let mut input: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    input.extend_from_slice(syntax.source().as_bytes());
+    entry("lsp_lens_repair").text(&input)
+}
+
+/// Syntax-damaged variants of a source: each mutation at a few statement
+/// ends inside its bodies (an unfinished `let`, a member access, an open
+/// call), a truncated prefix, a broken parameter list and an unfinished
+/// struct member.
+fn damaged_variants(source: &str) -> Vec<String> {
+    let mut out = vec![];
+    let ends: Vec<usize> = source.match_indices(";\n").map(|(i, _)| i + 2).collect();
+    let step = (ends.len() / 3).max(1);
+    for (k, &at) in ends.iter().step_by(step).take(4).enumerate() {
+        let insert = [
+            "    let broken = \n",
+            "    x.\n",
+            "    call(1, \n",
+            "    if x {\n",
+        ][k % 4];
+        out.push(format!("{}{insert}{}", &source[..at], &source[at..]));
+        out.push(source[..at].to_string());
+    }
+    if let Some(f) = source.find("fn ")
+        && let Some(close) = source[f..].find(')')
+    {
+        let at = f + close;
+        out.push(format!("{}{}", &source[..at], &source[at + 1..]));
+    }
+    if let Some(s) = source.find("struct ")
+        && let Some(close) = source[s..].find('}')
+    {
+        let at = s + close;
+        out.push(format!("{} oops: {}", &source[..at], &source[at..]));
+    }
+    out
+}
+
+/// The damaged sources: Lens's own scenarios and variants of every corpus
+/// document.
+fn damaged_docs() -> Vec<(String, String)> {
+    let mut out = vec![];
+    for (name, body) in [
+        ("member", "    let tx = open_txn(1);\n    tx.\n"),
+        (
+            "let",
+            "    let tx = open_txn(1);\n    let other = open_txn(2);\n    let n = \n",
+        ),
+        (
+            "nested",
+            "    let tx = open_txn(1);\n    if tx.slot() > 0 {\n        let y = tx.\n",
+        ),
+        (
+            "arm",
+            "    let tx = open_txn(1);\n    match 1 {\n        0 => tx.commit(),\n        _ => tx.\n",
+        ),
+    ] {
+        out.push((
+            format!("lens_damaged_{name}"),
+            format!("{LENS_PREFIX}\nfn main() -> u64 {{\n{body}}}\n"),
+        ));
+    }
+    out.push((
+        "lens_damaged_impl".into(),
+        LENS_PREFIX.replace(
+            "fn slot(self) -> u64 {\n        self.wal_slot",
+            "fn slot(self) -> u64 {\n        self.",
+        ),
+    ));
+    out.push((
+        "lens_damaged_header".into(),
+        LENS_PREFIX.replace(
+            "fn open_txn(slot: u64) -> WriteTxn {",
+            "fn open_txn(slot: u64, -> WriteTxn {",
+        ),
+    ));
+    out.push((
+        "lens_damaged_struct".into(),
+        LENS_PREFIX.replace("    wal_slot: u64\n}", "    wal_slot: u64,\n    extra:\n}"),
+    ));
+    for d in corpus_docs() {
+        for (i, v) in damaged_variants(d.checked.source()).into_iter().enumerate() {
+            out.push((format!("{}#{i}", d.name), v));
+        }
+    }
+    out
+}
+
+/// The repaired view of every damaged source (Rust `lens::repair`) against
+/// the Vesper port: regions and repaired text, or the reason there is none.
+#[test]
+fn lens_repair_matches_rust() {
+    let limits = lens_limits();
+    let (mut docs, mut repaired, mut regions, mut unavailable, mut failed) = (0, 0, 0, 0, 0);
+    let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
+    let mut diffs = 0;
+    for (name, source) in damaged_docs() {
+        let Ok(syntax) = vesper_syntax::parser::parse_recovery(
+            &source,
+            vesper_syntax::recovery::Limits::default(),
+        ) else {
+            failed += 1;
+            continue;
+        };
+        docs += 1;
+        let rust = vesper::lsp::lens_repair_for_port(&syntax, limits);
+        let port = vesper_lens_repair(&syntax, limits, 1);
+        if let Some(reason) = rust.strip_prefix("U\t") {
+            unavailable += 1;
+            *reasons.entry(reason.trim().to_string()).or_default() += 1;
+        } else {
+            repaired += 1;
+            regions += rust.lines().take_while(|l| l.starts_with("G\t")).count();
+        }
+        if std::env::var("LENS_SHOW").is_ok() && name.starts_with("lens_damaged") {
+            eprintln!("{name}:\n{rust}");
+        }
+        if rust != port {
+            diffs += 1;
+            if diffs <= 6 {
+                let (r, v): (Vec<_>, Vec<_>) = (rust.lines().collect(), port.lines().collect());
+                let i = r
+                    .iter()
+                    .zip(&v)
+                    .position(|(a, b)| a != b)
+                    .unwrap_or(r.len().min(v.len()));
+                eprintln!(
+                    "{name} line {i}:\n  rust   {:?}\n  vesper {:?}",
+                    r.get(i),
+                    v.get(i)
+                );
+            }
+        }
+    }
+    eprintln!(
+        "lens repair: {docs} sources ({failed} without a recovery parse), {repaired} repaired \
+         ({regions} regions), {unavailable} unavailable {reasons:?}, {diffs} differ"
+    );
+    assert_eq!(diffs, 0);
 }
