@@ -1,0 +1,69 @@
+// ---------------------------------------------------------------------------
+// AetherVmGenIdWire 24-byte codec (src/fork.rs).
+
+const FORK_VMGENID_WIRE_BYTES: u64 = 24;
+
+pub copy struct VmGenIdWire {
+    pub vm_gen_lo: u64,
+    pub vm_gen_hi: u64,
+    pub host_tsc_khz: u32,
+    pub virtio_mmio_count: u32,
+}
+
+fn fork_byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn fork_read_u32_le(in s: Slice[u8], off: u64) -> u32 {
+    let b0 = widen_u32(fork_byte(in s, off));
+    let b1 = widen_u32(fork_byte(in s, wrapping_add(off, 1))) << 8;
+    let b2 = widen_u32(fork_byte(in s, wrapping_add(off, 2))) << 16;
+    let b3 = widen_u32(fork_byte(in s, wrapping_add(off, 3))) << 24;
+    b0 | b1 | b2 | b3
+}
+
+fn fork_read_u64_le(in s: Slice[u8], off: u64) -> u64 {
+    let lo = widen_u64(fork_read_u32_le(in s, off));
+    let hi = widen_u64(fork_read_u32_le(in s, wrapping_add(off, 4))) << 32;
+    lo | hi
+}
+
+fn fork_write_u32_le(inout out: Slice[u8], off: u64, val: u32) {
+    out.try_set(off, wrapping_u8(val));
+    out.try_set(wrapping_add(off, 1), wrapping_u8(val >> 8));
+    out.try_set(wrapping_add(off, 2), wrapping_u8(val >> 16));
+    out.try_set(wrapping_add(off, 3), wrapping_u8(val >> 24));
+}
+
+fn fork_write_u64_le(inout out: Slice[u8], off: u64, val: u64) {
+    fork_write_u32_le(inout out, off, wrapping_u32(val));
+    fork_write_u32_le(inout out, wrapping_add(off, 4), wrapping_u32(val >> 32));
+}
+
+pub fn fork_encode_vmgenid_wire(w: VmGenIdWire, inout out: Slice[u8]) -> u64 {
+    if out.len() < FORK_VMGENID_WIRE_BYTES {
+        return 0;
+    }
+    fork_write_u64_le(inout out, 0, w.vm_gen_lo);
+    fork_write_u64_le(inout out, 8, w.vm_gen_hi);
+    fork_write_u32_le(inout out, 16, w.host_tsc_khz);
+    fork_write_u32_le(inout out, 20, w.virtio_mmio_count);
+    FORK_VMGENID_WIRE_BYTES
+}
+
+pub fn fork_decode_vmgenid_wire(in bytes: Slice[u8]) -> Option[VmGenIdWire] {
+    if bytes.len() != FORK_VMGENID_WIRE_BYTES {
+        return Option::None;
+    }
+    Option::Some(
+        VmGenIdWire {
+            vm_gen_lo: fork_read_u64_le(in bytes, 0),
+            vm_gen_hi: fork_read_u64_le(in bytes, 8),
+            host_tsc_khz: fork_read_u32_le(in bytes, 16),
+            virtio_mmio_count: fork_read_u32_le(in bytes, 20),
+        }
+    )
+}
