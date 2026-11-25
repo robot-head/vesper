@@ -2137,6 +2137,46 @@ pub mod plan_probe {
         }
     }
 
+    /// What `check_module` hands `buffers::check` (the pinned-buffer and
+    /// mapping rules, §16.3), and what it returns.
+    pub struct BufferProbe {
+        /// The pass-2 arities, computed with the drop items appended.
+        pub arities: Arities,
+        /// The source types that hold foreign memory (`Generated::is_buffer`).
+        pub buffers: Vec<String>,
+        /// The checked module's expression types.
+        pub types: TypeMap,
+        pub result: Result<(), FfiError>,
+    }
+
+    /// `check_module` up to and including `buffers::check`, or `None` when
+    /// it stops before it (an import, rewrite or checker error).
+    pub fn buffer_check(module: &Module, imports: &Imports) -> Option<BufferProbe> {
+        let generated = types::Generated::new(imports).ok()?;
+        generated.check_collisions(module).ok()?;
+        let mut module = module.clone();
+        append_drops(&mut module, imports);
+        let arities = arities(&module, imports, &Generated(generated)).ok()?;
+        let generated = types::Generated::new(imports).ok()?;
+        let mut second = module;
+        let mut rewriter = Rewriter::new(imports, &generated, Some(&arities));
+        rewriter.module(&mut second);
+        rewriter.finish().ok()?;
+        let instances = rewriter.instances;
+        generated.append(&mut second, Some(&instances));
+        let checked = check::check(&second);
+        if !checked.diagnostics.is_empty() {
+            return None;
+        }
+        let result = buffers::check(&second, &checked.expression_types, &generated);
+        Some(BufferProbe {
+            arities,
+            buffers: generated.buffer_names(),
+            types: checked.expression_types,
+            result,
+        })
+    }
+
     /// The pass-2 arities `check_module` computes from pass 1 (without the
     /// drop items it appends first), or the error it stops at.
     pub fn arities(
