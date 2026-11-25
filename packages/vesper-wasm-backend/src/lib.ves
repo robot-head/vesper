@@ -290,6 +290,23 @@ pub fn wasm_backend_compile_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
     }
 }
 
+// `wasm_backend_compile_bytes` without the word packing (the Vesper
+// driver's `vesper build --target wasm32-wasip2`, #1895): true with the
+// core module and the WIT in `core` and `wit`, false on an error or a
+// construct not ported yet.
+pub fn wasm_backend_module(in input: Slice[u8], inout core: ChunkSeq[u8], inout wit: ChunkSeq[u8])
+    -> bool {
+    handle Fail[WErr] in {
+        let (c, t, functions, handlers) = compile(in input);
+        core = c;
+        wit = t;
+        true
+    } with {
+        return value => value,
+        raise(e, resume) => false,
+    }
+}
+
 pub fn wasm_backend_compile_diag(in input: Str) -> ChunkSeq[u64] {
     wasm_backend_compile_diag_bytes(in input.as_bytes())
 }

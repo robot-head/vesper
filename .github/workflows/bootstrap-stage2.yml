@@ -40,7 +40,7 @@ jobs:
         run: cargo build --locked -p vesper --bin vesper
       - name: Compare the C seed runner with Wasmtime and the Stage 1 lock
         run: cargo test --locked -p vesper --test stage2_seed_runner -- --test-threads=1
-      - name: Exercise Wasm packages and verify the backend fixed point
+      - name: Exercise Wasm packages and verify the Stage 2 and per-package fixed points
         env:
           WASMTIME_BIN: ${{ runner.temp }}/wasmtime/wasmtime
         run: cargo test --locked -p vesper --test wasm_seed_breadth --test wasm_seed_package_io -- --test-threads=1

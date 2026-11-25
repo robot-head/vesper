@@ -1,0 +1,365 @@
+// @vesper/quarry::leaf: validation of a B+Tree PAX leaf (`leaf_decode` in
+// `src/store/pages.rs`): the heap offset, the right sibling, the directory
+// permutation, the occupancy bitmap, tombstone flags, values (finite
+// floats, 0/1 booleans, heap bounds, UTF-8 text), key order, tombstones
+// without values, disjoint heap values and zeroed free slots, in the order
+// the Rust decoder checked them. The Rust wrapper has already checked the
+// header and capacity (`layout_of`).
+
+const PAGE_SIZE: u64 = 16384;
+const FSM_PAGE: u64 = 1;
+const HIGH_BITS: u64 = 9259542123273814144;
+// 0x8080808080808080
+const EXP_MASK: u64 = 9218868437227405312;
+// 0x7ff0000000000000
+
+fn get(in b: Slice[u8], i: u64) -> u64 {
+    match b.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn rd16(in b: Slice[u8], at: u64) -> u64 {
+    get(in b, at) | (get(in b, wrapping_add(at, 1)) << 8)
+}
+
+fn rd32(in b: Slice[u8], at: u64) -> u64 {
+    match b.try_read_u32_le(at) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn rd64(in b: Slice[u8], at: u64) -> u64 {
+    match b.try_read_u64_le(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn bit(in b: Slice[u8], base: u64, i: u64) -> bool {
+    let one: u64 = 1;
+    (get(in b, wrapping_add(base, i >> 3)) & wrapping_shl_u64(one, wrapping_u32(i & 7))) != 0
+}
+
+fn g8(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn g64(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Fixed width of a column of type tag `t` (4: an (offset, length) pair).
+fn width(t: u64) -> u64 {
+    if t == 4 {
+        1
+    } else if t == 5 || t == 6 {
+        4
+    } else {
+        8
+    }
+}
+
+fn cont(in b: Slice[u8], i: u64, lo: u64, hi: u64) -> bool {
+    let x = get(in b, i);
+    x >= lo && x <= hi
+}
+
+// `std::str::from_utf8(&b[start..end]).is_ok()`.
+fn utf8_ok(in b: Slice[u8], start: u64, end: u64) -> bool {
+    let mut i = start;
+    loop {
+        if i >= end {
+            return true;
+        }
+        if wrapping_add(i, 8) <= end && (rd64(in b, i) & HIGH_BITS) == 0 {
+            i = wrapping_add(i, 8);
+            continue;
+        }
+        let x = get(in b, i);
+        if x < 128 {
+            i = wrapping_add(i, 1);
+        } else if x < 194 {
+            return false;
+        } else if x < 224 {
+            if wrapping_add(i, 2) > end || !cont(in b, wrapping_add(i, 1), 128, 191) {
+                return false;
+            }
+            i = wrapping_add(i, 2);
+        } else if x < 240 {
+            let lo = if x == 224 {
+                160
+            } else {
+                128
+            };
+            let hi = if x == 237 {
+                159
+            } else {
+                191
+            };
+            if wrapping_add(i, 3) > end
+                || !cont(in b, wrapping_add(i, 1), lo, hi)
+                || !cont(in b, wrapping_add(i, 2), 128, 191) {
+                return false;
+            }
+            i = wrapping_add(i, 3);
+        } else if x < 245 {
+            let lo = if x == 240 {
+                144
+            } else {
+                128
+            };
+            let hi = if x == 244 {
+                143
+            } else {
+                191
+            };
+            if wrapping_add(i, 4) > end
+                || !cont(in b, wrapping_add(i, 1), lo, hi)
+                || !cont(in b, wrapping_add(i, 2), 128, 191)
+                || !cont(in b, wrapping_add(i, 3), 128, 191) {
+                return false;
+            }
+            i = wrapping_add(i, 4);
+        } else {
+            return false;
+        }
+    }
+}
+
+// Mark heap bytes [off, off + len) in `mask` (one bit per page byte);
+// true when one of them was already marked.
+fn mark(inout mask: Slice[u64], off: u64, len: u64) -> bool {
+    let end = wrapping_add(off, len);
+    let mut hit = false;
+    let mut i = off;
+    loop {
+        if i >= end {
+            break;
+        }
+        let w = i >> 6;
+        let lo = i & 63;
+        let span = if wrapping_sub(end, i) < wrapping_sub(64, lo) {
+            wrapping_sub(end, i)
+        } else {
+            wrapping_sub(64, lo)
+        };
+        let ones = if span == 64 {
+            18446744073709551615
+        } else {
+            let one: u64 = 1;
+            wrapping_sub(wrapping_shl_u64(one, wrapping_u32(span)), 1)
+        };
+        let m = wrapping_shl_u64(ones, wrapping_u32(lo));
+        let old = g64(in mask, w);
+        if (old & m) != 0 {
+            hit = true;
+        }
+        mask.try_set(w, old | m);
+        i = wrapping_add(i, span);
+    }
+    hit
+}
+
+fn all_zero(in b: Slice[u8], start: u64, len: u64) -> bool {
+    let end = wrapping_add(start, len);
+    let mut i = start;
+    loop {
+        if wrapping_add(i, 8) > end {
+            break;
+        }
+        if rd64(in b, i) != 0 {
+            return false;
+        }
+        i = wrapping_add(i, 8);
+    }
+    loop {
+        if i >= end {
+            return true;
+        }
+        if get(in b, i) != 0 {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+}
+
+// Status: 0 valid, 1 leaf heap offset, 2 leaf right sibling, 3 leaf
+// directory, 4 leaf occupancy bitmap, 5 leaf tombstone flag, 6 non-finite
+// float in leaf, 7 leaf boolean, 8 leaf value outside the heap, 9 leaf text
+// is not UTF-8, 10 leaf keys out of order, 11 tombstone with values, 12
+// leaf heap values overlap, 13 free leaf slot is not zeroed.
+// Scratch: `seen` at least `c` bytes, `mask` 256 words, `cols` 3 words per
+// column.
+pub fn check(in b: Slice[u8], inout seen: Slice[u8], inout mask: Slice[u64], inout cols: Slice[u64])
+    -> u64 {
+    let ncols = rd16(in b, 32);
+    let c = rd16(in b, 26);
+    let n = rd16(in b, 20);
+    // The layout (`leaf_layout`).
+    let mut at = wrapping_add(34, ncols);
+    at = wrapping_add(at, at & 1);
+    let dir = at;
+    at = wrapping_add(at, wrapping_mul(2, c));
+    let used = at;
+    let bm = wrapping_add(c, 7) >> 3;
+    at = wrapping_add(at, bm);
+    let keys = at;
+    at = wrapping_add(at, wrapping_mul(16, c));
+    let tomb = at;
+    at = wrapping_add(at, c);
+    for k in 0..ncols {
+        let t = get(in b, wrapping_add(34, k));
+        let kb = wrapping_mul(k, 3);
+        cols.try_set(kb, at);
+        at = wrapping_add(at, bm);
+        cols.try_set(wrapping_add(kb, 1), at);
+        cols.try_set(wrapping_add(kb, 2), t);
+        at = wrapping_add(at, wrapping_mul(c, width(t)));
+    }
+    let end = at;
+    let heap = rd16(in b, 22);
+    if heap < end || heap > PAGE_SIZE {
+        return 1;
+    }
+    let sib = rd32(in b, 28);
+    if sib != 0 && (sib <= FSM_PAGE || sib == rd64(in b, 8)) {
+        return 2;
+    }
+    seen.fill(0);
+    mask.fill(0);
+    for pos in 0..n {
+        let s = rd16(in b, wrapping_add(dir, wrapping_mul(2, pos)));
+        if s >= c || g8(in seen, s) != 0 {
+            return 3;
+        }
+        seen.try_set(s, 1);
+    }
+    for s in 0..c {
+        if bit(in b, used, s) != (g8(in seen, s) != 0) {
+            return 4;
+        }
+    }
+    let mut overlap = false;
+    let mut pr: u64 = 0;
+    let mut pt: u64 = 0;
+    for pos in 0..n {
+        let s = rd16(in b, wrapping_add(dir, wrapping_mul(2, pos)));
+        let ko = wrapping_add(keys, wrapping_mul(16, s));
+        let kr = rd64(in b, ko);
+        let kt = rd64(in b, wrapping_add(ko, 8));
+        let tf = get(in b, wrapping_add(tomb, s));
+        if tf > 1 {
+            return 5;
+        }
+        if tf == 1 {
+            // A tombstone: no values to read, then key order, then no
+            // column may hold a value.
+            if pos > 0 && (pr > kr || (pr == kr && pt >= kt)) {
+                return 10;
+            }
+            for k in 0..ncols {
+                if !bit(in b, g64(in cols, wrapping_mul(k, 3)), s) {
+                    return 11;
+                }
+            }
+        } else {
+            // The values, column by column, then key order. Heap ranges
+            // are marked on the way; an overlap is reported after every
+            // entry has been read, as the Rust decoder sorted them last.
+            for k in 0..ncols {
+                let kb = wrapping_mul(k, 3);
+                if bit(in b, g64(in cols, kb), s) {
+                    continue;
+                }
+                let data = g64(in cols, wrapping_add(kb, 1));
+                let t = g64(in cols, wrapping_add(kb, 2));
+                if t == 3 {
+                    if (rd64(in b, wrapping_add(data, wrapping_mul(8, s))) & EXP_MASK) == EXP_MASK {
+                        return 6;
+                    }
+                } else if t == 4 {
+                    if get(in b, wrapping_add(data, s)) > 1 {
+                        return 7;
+                    }
+                } else if t == 5 || t == 6 {
+                    let vo = wrapping_add(data, wrapping_mul(4, s));
+                    let off = rd16(in b, vo);
+                    let len = rd16(in b, wrapping_add(vo, 2));
+                    if len != 0 {
+                        if off < heap || wrapping_add(off, len) > PAGE_SIZE {
+                            return 8;
+                        }
+                        if t == 5 && !utf8_ok(in b, off, wrapping_add(off, len)) {
+                            return 9;
+                        }
+                        if mark(inout mask, off, len) {
+                            overlap = true;
+                        }
+                    }
+                }
+            }
+            if pos > 0 && (pr > kr || (pr == kr && pt >= kt)) {
+                return 10;
+            }
+        }
+        pr = kr;
+        pt = kt;
+    }
+    if overlap {
+        return 12;
+    }
+    // Zeroed free slots (13): every failure is the same status, so the
+    // check goes key by key and then column by column. `used` matches
+    // `seen` here, so the free slots are its clear bits below `c`.
+    for s in 0..c {
+        if g8(in seen, s) == 0 {
+            let ko = wrapping_add(keys, wrapping_mul(16, s));
+            if (rd64(in b, ko) | rd64(in b, wrapping_add(ko, 8))) != 0
+                || get(in b, wrapping_add(tomb, s)) != 0 {
+                return 13;
+            }
+        }
+    }
+    let one: u64 = 1;
+    let tail = c & 7;
+    for k in 0..ncols {
+        let kb = wrapping_mul(k, 3);
+        let nulls = g64(in cols, kb);
+        for j in 0..bm {
+            let mut free = get(in b, wrapping_add(used, j)) ^ 255;
+            if tail != 0 && wrapping_add(j, 1) == bm {
+                free = free & wrapping_sub(wrapping_shl_u64(one, wrapping_u32(tail)), 1);
+            }
+            if (get(in b, wrapping_add(nulls, j)) & free) != 0 {
+                return 13;
+            }
+        }
+        let data = g64(in cols, wrapping_add(kb, 1));
+        let w = width(g64(in cols, wrapping_add(kb, 2)));
+        for s in 0..c {
+            if g8(in seen, s) == 0 {
+                let at = wrapping_add(data, wrapping_mul(w, s));
+                let v = if w == 8 {
+                    rd64(in b, at)
+                } else if w == 4 {
+                    rd32(in b, at)
+                } else {
+                    get(in b, at)
+                };
+                if v != 0 {
+                    return 13;
+                }
+            }
+        }
+    }
+    0
+}

@@ -25,6 +25,10 @@
 //! - `durable`: the same state checkpointed durably (manifest and one spine
 //!   batch per node) into a fresh store and restored into a fresh executor
 //!   [`IMAGE_ROUNDS`] times. Point `TMPDIR` at a RAM disk.
+//! - `kafka_encode`: Kafka v2 record batches (uncompressed, so the record
+//!   encoder and the CRC dominate): [`KAFKA_BATCHES`] batches of
+//!   [`KAFKA_RECORDS`] CDC-shaped records (8-24 byte keys, 40-300 byte
+//!   values, 0-2 headers, some tombstones) encoded per request.
 //!
 //! The two arms are two builds of this example, in separate worker
 //! processes: before #1069 replaced the Rust kernels they were the Rust
@@ -36,8 +40,8 @@
 //! both builds agree.
 //!
 //! ```text
-//! abba worker <join|example|resume|ingest|log|image|durable>                 # one arm
-//! abba drive <join|example|resume|ingest|log|image|durable> <rust-worker> <vesper-worker>
+//! abba worker <join|example|resume|ingest|log|image|durable|kafka_encode>                 # one arm
+//! abba drive <join|example|resume|ingest|log|image|durable|kafka_encode> <rust-worker> <vesper-worker>
 //! ```
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -63,6 +67,9 @@ const LOG_ROWS: u64 = 1024;
 /// `image` batch.
 const IMAGE_TICKS: u64 = 8;
 const IMAGE_ROUNDS: u64 = 8;
+/// `kafka_encode`: batches per request and records per batch.
+const KAFKA_BATCHES: u64 = 64;
+const KAFKA_RECORDS: u64 = 500;
 
 fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
     for &b in bytes {
@@ -445,6 +452,49 @@ fn durable_batch(e: &Executor, n: u64) -> u64 {
     h
 }
 
+fn kafka_batches() -> Vec<Vec<vesper_flux::KafkaRecord>> {
+    let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    (0..KAFKA_BATCHES)
+        .map(|b| {
+            (0..KAFKA_RECORDS)
+                .map(|i| {
+                    let key: Vec<u8> = (0..8 + next() % 17).map(|_| next() as u8).collect();
+                    let value = (next() % 10 != 0)
+                        .then(|| (0..40 + next() % 261).map(|_| next() as u8).collect());
+                    let mut headers = std::collections::BTreeMap::new();
+                    for h in 0..next() % 3 {
+                        headers.insert(
+                            format!("hdr-{h}"),
+                            (0..next() % 24).map(|_| next() as u8).collect(),
+                        );
+                    }
+                    vesper_flux::KafkaRecord {
+                        key: Some(key),
+                        value,
+                        headers,
+                        timestamp: 1_700_000_000_000 + (b * KAFKA_RECORDS + i) as i64 * 3,
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn kafka_encode_batch(batches: &[Vec<vesper_flux::KafkaRecord>]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325;
+    for records in batches {
+        let bytes = vesper_flux::kafka_encode_batch(records).expect("encode");
+        h = fnv(h, &bytes);
+    }
+    h
+}
+
 /// Serve batches: each stdin line `go <n>` runs batch `n` and answers with
 /// its digest.
 fn worker(workload: &str) {
@@ -461,6 +511,11 @@ fn worker(workload: &str) {
         Vec::new()
     };
     let image = (workload == "image" || workload == "durable").then(image_state);
+    let kafka = if workload == "kafka_encode" {
+        kafka_batches()
+    } else {
+        Vec::new()
+    };
     for line in stdin.lock().lines() {
         let line = line.expect("read request");
         let n: u64 = line
@@ -475,6 +530,7 @@ fn worker(workload: &str) {
             "log" => log_batch(&epochs, n),
             "image" => image_batch(image.as_ref().expect("image state")),
             "durable" => durable_batch(image.as_ref().expect("image state"), n),
+            "kafka_encode" => kafka_encode_batch(&kafka),
             other => panic!("unknown workload {other}"),
         };
         writeln!(out, "{digest}").expect("answer");
@@ -542,6 +598,7 @@ fn drive(workload: &str, rust: &str, vesper: &str) {
         "log" => (4, LOG_EPOCHS),
         "image" => (4, IMAGE_ROUNDS),
         "durable" => (4, IMAGE_ROUNDS),
+        "kafka_encode" => (4, KAFKA_BATCHES),
         other => panic!("unknown workload {other}"),
     };
     let config = RunConfig {
@@ -621,7 +678,7 @@ fn main() {
         ["drive", workload, rust, vesper] => drive(workload, rust, vesper),
         _ => {
             eprintln!(
-                "usage: abba worker <join|example|resume|ingest|log|image|durable>| abba drive <join|example|resume|ingest|log|image|durable> <rust-worker> <vesper-worker>"
+                "usage: abba worker <join|example|resume|ingest|log|image|durable|kafka_encode>| abba drive <join|example|resume|ingest|log|image|durable|kafka_encode> <rust-worker> <vesper-worker>"
             );
             std::process::exit(2);
         }

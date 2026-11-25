@@ -45,12 +45,12 @@ aether_test_port = port_checks(
             ("slot_plan", ["--test", "slot_plan"], ["accepts_adjacent_aligned_slots", "overlap_check_matches_pairwise_definition"], ["rejects_each_malformed_region"]),
             ("slot_plan_port", ["--test", "slot_plan_port"], ["verify_matches_the_rust_verifier"], []),
             ("pvh_port", ["--test", "pvh_port"], ["truncations_and_bit_flips_match"], []),
-            ("hotset_port", ["--test", "hotset_port"], ["decode_matches_on_valid_and_mutated_encodings"], ["runs_match"]),
+            ("hotset (lib)", ["--lib"], ["port_reference_tests::hotset::decode_matches_on_valid_and_mutated_encodings"], ["port_reference_tests::hotset::runs_match"]),
             ("hotset", ["--test", "hotset"], ["encoded_form_is_validated"], ["runs_coalesce_and_split_at_the_batch_size"]),
-            ("packed_port", ["--test", "packed_port"], ["capture_matches_the_rust_capture"], []),
+            ("packed (lib)", ["--lib"], ["port_reference_tests::packed::capture_matches_the_rust_capture"], []),
             ("lib", ["--lib"], ["devices::queue::reference::differential::capture_matches_the_rust_capture"], ["devices::queue::reference::abba::both_builds_compute_the_same_workload"]),
             ("seccomp", ["--test", "seccomp"], ["malformed_programs_are_rejected"], ["compiled_profile_allows_exactly_the_allowlist"]),
-            ("seccomp_port", ["--test", "seccomp_port"], ["validate_and_evaluate_match_rust"], ["compile_matches_rust"]),
+            ("seccomp evaluate (lib)", ["--lib"], ["port_reference_tests::seccomp::validate_and_evaluate_match_rust"], ["port_reference_tests::seccomp::compile_matches_rust"]),
             ("guest_mem_port", ["--test", "guest_mem_port"], ["layout_and_locate_match_rust"], ["out_of_bounds_and_overflow_match_rust"]),
             ("block_port", ["--test", "block_port"], ["discard_and_write_zeroes_match_rust"], ["span_and_config_match_rust"]),
             ("net_port", ["--test", "net_port"], ["tx_and_ctrl_match_rust"], ["config_space_matches_rust"]),
@@ -210,6 +210,7 @@ flux_check = port_checks(
             ("image", ["--lib"], "circuit::checkpoint::differential::checkpoint_codec_matches_the_rust_codec", "differential::input_log_codec_matches_the_rust_codec"),
             ("spine", ["--lib"], "circuit::checkpoint::differential::durable_codecs_match_the_rust_codecs", "circuit::checkpoint::differential::checkpoint_codec_matches_the_rust_codec"),
             ("kafka_wire", ["--lib"], "circuit::wire::tests::batches_round_trip_in_every_codec", "circuit::checkpoint::differential::checkpoint_codec_matches_the_rust_codec"),
+            ("kafka_encode", ["--lib"], "circuit::wire::tests::record_encoder_matches_the_rust_encoder", "circuit::wire::tests::batches_round_trip_in_every_codec"),
         ]
     ],
 )

@@ -10,9 +10,9 @@ description = "The diverse `*42` test oracles (arithmetic, resource model, Logos
 # root package's src/bin, so `cargo build --bin logos42` still works from the
 # workspace root.
 [dependencies]
-# The arithmetic oracle's worker drives the compiler's parser, checker,
-# optimizer, evaluator and native backend as its system under test.
-vesper = { path = "../.." }
+# No compiler crate: the arithmetic oracle's worker drives the `vesper`
+# binary as a process (src/bin/arithmetic_oracle42/compiler.rs), so the
+# oracle tests whichever compiler it is given, Rust or Vesper.
 blake3 = "1.8"
 serde = { workspace = true }
 serde_json = { workspace = true }

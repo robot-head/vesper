@@ -151,7 +151,7 @@ impl BlockDevice {
     }
 
     /// Byte range of `len` bytes starting at `sector`, if inside the disk.
-    fn span(&self, sector: u64, len: u64) -> Option<std::ops::Range<usize>> {
+    pub(crate) fn span(&self, sector: u64, len: u64) -> Option<std::ops::Range<usize>> {
         #[cfg(feature = "vesper-port")]
         {
             crate::binding::blk_span(self.disk.len() as u64, sector, len)
@@ -282,7 +282,7 @@ impl BlockDevice {
 
     /// `DISCARD` / `WRITE_ZEROES` (§5.2.6.2): validates every segment, then
     /// zeroes them all.
-    fn discard_or_zero(&mut self, payload: &[u8], data_in: u64, discard: bool) -> u8 {
+    pub(crate) fn discard_or_zero(&mut self, payload: &[u8], data_in: u64, discard: bool) -> u8 {
         #[cfg(feature = "vesper-port")]
         {
             let mut spans_buf = [0u64; 2 * (MAX_DISCARD_SEG as usize)];

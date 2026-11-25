@@ -118,8 +118,9 @@ impl Abi for crate::port_types::MmioStatusFault {
                 Abi::put(f0, &mut out[1..]);
                 Abi::put(f1, &mut out[2..]);
             }
-            crate::port_types::MmioStatusFault::DriverOkWithoutFeaturesOk => {
+            crate::port_types::MmioStatusFault::DriverOkWithoutFeaturesOk { rejected_features: f0 } => {
                 out[0] = 2;
+                Abi::put(f0, &mut out[1..]);
             }
         }
     }
@@ -127,7 +128,7 @@ impl Abi for crate::port_types::MmioStatusFault {
         match words[0] {
             0 => crate::port_types::MmioStatusFault::DriverSetNeedsReset,
             1 => crate::port_types::MmioStatusFault::StatusRegression { from: Abi::get(&words[1..]), to: Abi::get(&words[2..]) },
-            2 => crate::port_types::MmioStatusFault::DriverOkWithoutFeaturesOk,
+            2 => crate::port_types::MmioStatusFault::DriverOkWithoutFeaturesOk { rejected_features: Abi::get(&words[1..]) },
             tag => panic!("invalid MmioStatusFault tag {tag} from Vesper"),
         }
     }

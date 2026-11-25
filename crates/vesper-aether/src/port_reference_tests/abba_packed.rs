@@ -4,15 +4,14 @@
 //! with
 //!
 //! ```text
-//! cargo test --release -p vesper-aether --features vesper-port \
-//!     --test abba_packed -- --ignored --nocapture
+//! cargo test --release -p vesper-aether --lib \
+//!     port_reference_tests::abba_packed -- --ignored --nocapture
 //! ```
-#![cfg(feature = "vesper-port")]
 
 use std::hint::black_box;
 
-use vesper_aether::virtio::*;
-use vesper_aether::{Limits, MemorySlot, PageMapping, Permission, SlotSnapshot, SnapshotMap};
+use crate::virtio::*;
+use crate::{Limits, MemorySlot, PageMapping, Permission, SlotSnapshot, SnapshotMap};
 use vesper_bench::{BenchCase, Invocation, RunConfig, analyze_pairs, run_abba};
 
 const SIZE: usize = 256;
@@ -136,6 +135,11 @@ fn abba_packed_capture() {
     let report =
         run_abba(run, &mut arm(rust_workload), &mut arm(vesper_workload)).expect("ABBA run");
     let pairs = report.pairs();
+    let line: Vec<String> = pairs
+        .iter()
+        .map(|p| format!("{}:{}", p.baseline_total(), p.candidate_total()))
+        .collect();
+    println!("flip-gate pairs packed {}", line.join(" "));
     let mut ratios: Vec<f64> = pairs
         .iter()
         .map(|p| p.candidate_total() as f64 / p.baseline_total() as f64)

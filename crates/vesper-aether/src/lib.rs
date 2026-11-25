@@ -83,6 +83,10 @@ mod linux_host;
 ))]
 pub mod mapped_fork;
 pub mod page_source;
+#[cfg(all(test, feature = "vesper-port"))]
+mod port_abba;
+#[cfg(test)]
+mod port_reference_tests;
 pub mod pvh;
 pub mod seccomp;
 pub mod slot_plan;
