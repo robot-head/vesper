@@ -216,12 +216,13 @@ the same key replaces the digest and callees; callers gather every edge).
 
 - **Differential** (tests/self_host_anvil_graph.rs): every `.ves` file, the
   inline sources of src/anvil_hash.rs, tests/anvil_cli.rs and
-  tests/test_runner_cli.rs, and 3 mutants per source from 14 rows that add
+  tests/test_runner_cli.rs, and 3 mutants per source from 15 rows that add
   every literal kind (including i128 extremes), operators, patterns,
   effects, generics with modes, `fip`, closures, handlers, impls on named
-  and applied types, duplicate keys and a parse error. Graphs equal against
+  and applied types, tuple and fn impl owners with effect rows (`Type::Row`
+  displays as `eff {:?}`), duplicate keys and a parse error. Graphs equal against
   `FunctionGraph::from_module(&parser::parse(src).module)`.
-- **Numbers:** 0 diffs over 4,915 sources (117,232 functions, 171,713 call
+- **Numbers:** 0 diffs over 4,948 sources (120,092 functions, 176,575 call
   edges); unoptimized build 0 diffs on every 13th source. ABBA best of six
   over the corpus: Rust 5.51 s, Vesper 4.06 s, **0.74x**.
 - **No hybrid swap yet.** The call site (test_runner.rs) passes the

@@ -160,6 +160,7 @@ const ROWS: &[&str] = &[
     "fn ret(a: i64) -> i64 { if !(a == 0) { return a - 1; } { let b = a; b } }\n",
     "fn spans(a: i64) -> i64 {\n    a\n        +\n    1\n}\n",
     "fn ret(a: i64) -> i64 { a }\n",
+    "impl (Box[e], i64) { fn m() -> i64 { 0 } }\nimpl (Box[f], i64) { fn m() -> i64 { 1 } }\nimpl (Box[l: Fail | r], fn(in u8, sink (u8, _)) -> Box[State[i64] | s]) { fn m() -> i64 { 2 } }\nfn use_m() -> i64 { m() }\n",
     "fn broken(a: i64) -> i64 { a + }\n",
 ];
 

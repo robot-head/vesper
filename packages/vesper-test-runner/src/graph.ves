@@ -684,9 +684,122 @@ fn type_text(in a: Ast, t: u32, inout out: String, inout tmp: String) {
         }
         out.push_str(in ") -> ");
         type_text(in a, n.b, inout out, inout tmp);
+    } else if n.kind == 4 {
+        // `Type::Row(e)` displays as `eff {e:?}`.
+        out.push_str(in "eff ");
+        effects_debug(in a, n.a, inout out, inout tmp);
     } else {
         out.push_str(in "_");
     }
+}
+
+// The `Debug` text of a symbol as a Rust `String`: its quoted name.
+fn sym_debug(in a: Ast, s: u32, inout out: String, inout tmp: String) {
+    tmp.clear();
+    let ok = a.names.resolve_into(symbol_from_id(s), inout tmp);
+    out.push_str(in "\"");
+    out.push_str(in tmp.as_str());
+    out.push_str(in "\"");
+}
+
+// The `Debug` text of a list of types: `[t, u]`.
+fn types_debug(in a: Ast, list: u32, inout out: String, inout tmp: String) {
+    out.push_str(in "[");
+    let m = list_len(in a, list);
+    for i in 0..m {
+        if i > 0 {
+            out.push_str(in ", ");
+        }
+        type_debug(in a, list_at(in a, list, i), inout out, inout tmp);
+    }
+    out.push_str(in "]");
+}
+
+// The derived `Debug` text of a `Type`.
+fn type_debug(in a: Ast, t: u32, inout out: String, inout tmp: String) {
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        out.push_str(in "Named(");
+        sym_debug(in a, n.a, inout out, inout tmp);
+        out.push_str(in ", ");
+        types_debug(in a, n.b, inout out, inout tmp);
+        out.push_str(in ")");
+    } else if n.kind == 2 {
+        out.push_str(in "Tuple(");
+        types_debug(in a, n.a, inout out, inout tmp);
+        out.push_str(in ")");
+    } else if n.kind == 3 {
+        out.push_str(in "Function { params: [");
+        let m = list_len(in a, n.a) / 2;
+        for i in 0..m {
+            if i > 0 {
+                out.push_str(in ", ");
+            }
+            let k = wrapping_mul(i, 2);
+            let pass = list_at(in a, n.a, k);
+            if pass == 0 {
+                out.push_str(in "(In, ");
+            } else if pass == 1 {
+                out.push_str(in "(Inout, ");
+            } else {
+                out.push_str(in "(Sink, ");
+            }
+            type_debug(in a, list_at(in a, n.a, wrapping_add(k, 1)), inout out, inout tmp);
+            out.push_str(in ")");
+        }
+        out.push_str(in "], result: ");
+        type_debug(in a, n.b, inout out, inout tmp);
+        out.push_str(in ", effects: ");
+        effects_debug(in a, n.c, inout out, inout tmp);
+        if n.d == 0 {
+            out.push_str(in ", mode: Copy }");
+        } else if n.d == 2 {
+            out.push_str(in ", mode: Linear }");
+        } else {
+            out.push_str(in ", mode: Affine }");
+        }
+    } else if n.kind == 4 {
+        out.push_str(in "Row(");
+        effects_debug(in a, n.a, inout out, inout tmp);
+        out.push_str(in ")");
+    } else {
+        out.push_str(in "Infer");
+    }
+}
+
+// The derived `Debug` text of an `Effects`.
+fn effects_debug(in a: Ast, effs: u32, inout out: String, inout tmp: String) {
+    let n = effects_at(in a, effs);
+    out.push_str(in "Effects { instances: [");
+    let m = list_len(in a, n.instances);
+    for i in 0..m {
+        if i > 0 {
+            out.push_str(in ", ");
+        }
+        let e = effect_at(in a, list_at(in a, n.instances, i));
+        out.push_str(in "Effect { label: ");
+        if e.label != none() {
+            out.push_str(in "Some(");
+            sym_debug(in a, e.label, inout out, inout tmp);
+            out.push_str(in ")");
+        } else {
+            out.push_str(in "None");
+        }
+        out.push_str(in ", name: ");
+        sym_debug(in a, e.name, inout out, inout tmp);
+        out.push_str(in ", args: ");
+        types_debug(in a, e.args, inout out, inout tmp);
+        out.push_str(in " }");
+    }
+    out.push_str(in "], tail: ");
+    if n.tail != none() {
+        out.push_str(in "Some(");
+        sym_debug(in a, n.tail, inout out, inout tmp);
+        out.push_str(in ")");
+    } else {
+        out.push_str(in "None");
+    }
+    out.push_str(in " }");
 }
 
 // ------------------------------------------------------------------ calls
