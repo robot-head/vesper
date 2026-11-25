@@ -2260,6 +2260,8 @@ shutil.copy2({str(installer)!r}, Path(directory) / entry)
         self.assertIn("flip_gate.py", result.stderr)
 
     def test_platform_suite_discovers_tests_from_workspace_root(self):
+        for name in ("commented", "macro", "hostile"):
+            self.copy_fixture(f"tests/fixtures/format_proof/{name}.ves")
         self.write("scripts/ci/tests/test_platform_fixture.py", """\
 from pathlib import Path
 import unittest
