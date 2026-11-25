@@ -20,13 +20,14 @@ workflow runs the Cargo divergence check.
 load("//tools/bazel:defs.bzl", "vesper_crate")
 load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
-def vesper_hybrid(modules, module_deps = {}, divergent = {}, **kwargs):
+def vesper_hybrid(module_deps = {}, divergent = {}, **kwargs):
     """The hybrid compiler crate in this package.
 
+    Every directory of `modules/` with a Loom.toml is a module: library
+    `hybrid_<dir>` (`vesper_<library>_<fn>` symbols), package
+    `modules/<dir>`, as build.rs's `modules()` derives them (#1897).
+
     Args:
-      modules: dict from Vesper library name (`vesper_<library>_<fn>`
-        symbols, as in build.rs's MODULES) to its Loom package directory,
-        relative to this package.
       module_deps: dict from library name to the `vesper_package` labels of
         its package's path dependencies.
       divergent: dict from library name to a struct-like dict
@@ -35,6 +36,13 @@ def vesper_hybrid(modules, module_deps = {}, divergent = {}, **kwargs):
     """
     data = []
     env = {}
+    modules = {}
+    for manifest in native.glob(["modules/*/Loom.toml"]):
+        package = manifest[:-len("/Loom.toml")]
+        modules["hybrid_" + package[len("modules/"):]] = package
+    for name in list(module_deps) + list(divergent):
+        if name not in modules:
+            fail("%s names no directory of modules/ with a Loom.toml" % name)
     for library, package in modules.items():
         vesper_package(
             name = library + "_package",

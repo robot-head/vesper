@@ -114,15 +114,33 @@ For a compiler module `src/<m>.rs`:
    per table entry with the same meaning, total where the Rust is total.
    Encode `Option` results as an out-of-range sentinel when the hot path
    would otherwise allocate (gap 1). Run `vesper fmt`.
-4. **Register it**: append `("hybrid_<m>", "modules/<m>", "port/<m>.rs")`
-   to `MODULES` in `build.rs` and `"hybrid_<m>": "modules/<m>"` to
-   `modules` in `BUILD.bazel`, then
+4. **Register it**: nothing to list. build.rs and BUILD.bazel take every
+   directory of `modules/` with a `Loom.toml` as a module (`hybrid_<m>`,
+   `modules/<m>`, `port/<m>.rs`, #1897). Add the package's path
+   dependencies to `module_deps` in `BUILD.bazel` in sorted order, then
    `VESPER_PORT_BLESS=1 cargo build -p vesper-hybrid` and commit
    `port/<m>.rs`.
-5. **Install it** in `src/hybrid.rs`: include the binding
-   (`#[path = "../port/<m>.rs"] mod <m>_binding;`), build a `<M>Table` of
-   non-capturing closures over it (count calls for `VESPER_HYBRID_STATS`),
-   and call `vesper::<m>::install_<m>` in `install`.
+5. **Install it** in its own file, `src/swap/<m>.rs` (#1897). The file
+   holds everything the swap needs: its binding
+   (`#[path = "../../port/<m>.rs"] mod <m>_binding;`, with
+   `#[rustfmt::skip]` and `#[allow(clippy::all)]`), the word encoders only
+   it uses (`#[path = "../../../../tests/common/<m>_words.rs"]`), its
+   `VESPER_HYBRID_STATS` counters, a `<M>Table` of non-capturing closures
+   over the binding, and three items `src/hybrid.rs` calls:
+   - `pub(super) const SWAPS: &[Swap]`: one flip-gate row per hook or slot
+     the file fills (`open("<name>", "<why>")`, or `pass(..)` once its gate
+     passes; `swaps.rs`);
+   - `pub(super) fn register(r: &mut Registry)`: installs its table when
+     `on("<name>")` (`must(vesper::<m>::install_<m>(..))`), or fills its
+     field of the shared `r.codegen` (`vesper::codegen_swap`) or `r.ir`
+     (`vesper::ir_swap`) table;
+   - `pub(super) fn report()`: its `VESPER_HYBRID_STATS` lines.
+
+   build.rs lists `src/swap/` into `$OUT_DIR/swap_registry.rs`, so the new
+   file is installed and reported with no edit to `src/hybrid.rs`. Swap
+   files are `include!`d, so they use `//` comments, not `//!`. What
+   several swaps share stays in `src/hybrid.rs` (`check_words`,
+   `ir_words`, `stats`, `lend_codegen_op`).
 6. **Test it**: a `tests/<m>.rs` that compares each Vesper function with
    the Rust table on edge values, as `tests/kernel.rs` does; extend
    `pilot_module_runs_from_vesper` so the module reports calls; add a
@@ -132,6 +150,28 @@ For a compiler module `src/<m>.rs`:
 7. **Measure** callgrind instructions inside the module's entry points
    (default vs hybrid) and ABBA wall clock on a large package, and list the
    gaps. Rust stays the default; nothing is deleted.
+
+## Merging hybrid PRs in parallel (#1897)
+
+Until #1897 every hybrid PR edited the same lists (the binding `mod`s,
+the counters, `install`, the `CodegenHooks` literal and `report` in
+`src/hybrid.rs`, `MODULES` in build.rs, `modules` in BUILD.bazel), so
+only one could merge at a time. Now each swap is its own file, so:
+
+- **A hybrid PR may merge in parallel with other hybrid PRs** when, inside
+  `crates/vesper-hybrid`, it only adds or changes its own module's files:
+  `modules/<m>/`, `port/<m>.rs`, `src/swap/<m>.rs`, its own `tests/` file,
+  and its own sorted `module_deps` (or `divergent`) entry in `BUILD.bazel`.
+  Its own `src/<m>.rs` swap-in point and word encoder outside the crate
+  count as its own files too.
+- **It still takes the serialized hybrid slot** when it edits a shared
+  file: `src/hybrid.rs`, `src/swaps.rs`, `src/crossing.rs`, `build.rs`,
+  `Cargo.toml`, `tools/bazel/vesper_hybrid.bzl`, another swap's files, or
+  a shared word encoder (`tests/common/check_words.rs`, `ir_words.rs`),
+  or when it touches the root `Cargo.toml` or `Cargo.lock`.
+- Before merging a parallel one, update it from `main` if `main` moved;
+  GitHub's "merges cleanly" plus green required checks is the bar, as for
+  any PR.
 
 ## The pilot
 
