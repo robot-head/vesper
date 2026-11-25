@@ -25,7 +25,6 @@ ring = "0.17.14"
 rustls-pki-types = { version = "1.16", features = ["std"] }
 webpki = { package = "rustls-webpki", version = "0.103.16", default-features = false, features = ["std", "ring"] }
 spki = { version = "0.7.3", default-features = false }
-chacha20poly1305 = { workspace = true }
 subtle = { workspace = true }
 zeroize = { workspace = true }
 vesper-loom-cas = { path = "../vesper-loom-cas" }
