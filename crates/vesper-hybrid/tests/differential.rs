@@ -501,35 +501,60 @@ fn pact_module_runs_from_vesper() {
 
 /// The wasm backend module (#1289) really compiles from Vesper in the
 /// hybrid build, and its component is wrapped from Vesper (#1334):
-/// `transaction.ves` has no handler and no host capability.
+/// `transaction.ves` has no handler and no host capability. By default the
+/// Vesper driver builds it (#1895); with `VESPER_HYBRID_DRIVER_WASM=0` the
+/// Rust step does, through the hybrid's `wasm` and `component` swaps.
 #[test]
 fn wasm_module_runs_from_vesper() {
     let root = repository();
     let out = std::env::temp_dir().join(format!("vesper-hybrid-wasm-{}.wasm", std::process::id()));
-    let output = Command::new(hybrid())
-        .current_dir(&root)
-        .env("VESPER_HYBRID_STATS", "1")
-        .args(["build", "--target", "wasm32-wasip2", "-o"])
-        .arg(&out)
-        .arg("examples/transaction.ves")
-        .output()
-        .expect("run vesper-hybrid");
-    let _ = std::fs::remove_file(&out);
-    assert!(output.status.success(), "{output:?}");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let compiled: Option<u64> = stderr
-        .lines()
-        .find_map(|l| l.strip_prefix("vesper-hybrid: wasm backend compiled "))
-        .and_then(|l| l.split(' ').next())
-        .and_then(|n| n.parse().ok());
-    assert_eq!(compiled, Some(1), "{stderr}");
+    let stats = |driver: bool| {
+        let mut c = Command::new(hybrid());
+        c.current_dir(&root).env("VESPER_HYBRID_STATS", "1");
+        if !driver {
+            c.env("VESPER_HYBRID_DRIVER_WASM", "0");
+        }
+        let output = c
+            .args(["build", "--target", "wasm32-wasip2", "-o"])
+            .arg(&out)
+            .arg("examples/transaction.ves")
+            .output()
+            .expect("run vesper-hybrid");
+        let _ = std::fs::remove_file(&out);
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    let count = |stderr: &str, prefix: &str| -> Option<u64> {
+        stderr
+            .lines()
+            .find_map(|l| l.strip_prefix(prefix))
+            .and_then(|l| l.split(' ').next())
+            .and_then(|n| n.parse().ok())
+    };
+    // The Vesper driver compiles and wraps it itself, with no fallback ...
+    let stderr = stats(true);
+    assert_eq!(
+        count(&stderr, "vesper-hybrid: driver built "),
+        Some(1),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("driver built 1 wasm components in Vesper (0 fell back to Rust)"),
+        "{stderr}"
+    );
+    // ... and the Rust step's swaps compile it from Vesper too ...
+    let stderr = stats(false);
+    assert_eq!(
+        count(&stderr, "vesper-hybrid: wasm backend compiled "),
+        Some(1),
+        "{stderr}"
+    );
     // ... and @vesper/wit-component wraps its component (#1334).
-    let wrapped: Option<u64> = stderr
-        .lines()
-        .find_map(|l| l.strip_prefix("vesper-hybrid: wit-component wrapped "))
-        .and_then(|l| l.split(' ').next())
-        .and_then(|n| n.parse().ok());
-    assert_eq!(wrapped, Some(1), "{stderr}");
+    assert_eq!(
+        count(&stderr, "vesper-hybrid: wit-component wrapped "),
+        Some(1),
+        "{stderr}"
+    );
 }
 
 /// A program with a host import, which the Vesper wasm backend leaves to
