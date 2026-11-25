@@ -42,6 +42,25 @@ fn declined(reason: u64) -> ChunkSeq[u64] {
     out
 }
 
+// The component of a command module, as bytes (the Vesper driver's
+// `vesper build --target wasm32-wasip2`, #1895): 0 with the component in
+// `out`, or the reason `wit_component_wrap_bytes` would decline with.
+pub fn wit_component_command(in wit: Slice[u8], in core: Slice[u8], inout out: ChunkSeq[u8])
+    -> u64 {
+    let w = parse(in wit);
+    if w.err != 0 {
+        return wrapping_add(D_WIT, w.err);
+    }
+    if w.plugin {
+        return D_WORLD;
+    }
+    let x = encode(in core, in w, inout out);
+    if x != 0 {
+        return wrapping_add(D_ENCODE, x);
+    }
+    0
+}
+
 // The harness entry over a `Str` (see `wit_component_wrap_bytes`).
 pub fn wit_component_wrap(in input: Str) -> ChunkSeq[u64] {
     wit_component_wrap_bytes(in input.as_bytes())
