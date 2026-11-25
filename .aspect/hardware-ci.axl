@@ -220,11 +220,12 @@ def gpu_validation_result(output, status, tell):
 def _validate_gpu(ctx: TaskContext) -> int:
     root = ctx.std.env.aspect_root_dir()
     path = root + "/validation.log"
-    log = ctx.std.fs.create(path)
+    diagnostics = scratch_dir(ctx, "vesper-vulkan-validation-") + "/stderr"
     argv = ["test", "--locked", "-p", "vesper-gpu-compute", "-p", "vesper-kinetic-gpu", "--", "--nocapture", "--test-threads=1"]
-    status = command(ctx, "cargo", argv, root).stdout(log).stderr(log).status()
-    log.close()
-    return gpu_validation_result(ctx.std.fs.read_to_string(path), exit_code(status), ctx.std.io.stdout.write)
+    status = command(ctx, "cargo", argv, root).stdout(ctx.std.fs.create(path)).stderr(ctx.std.fs.create(diagnostics)).status()
+    output = ctx.std.fs.read_to_string(path) + ctx.std.fs.read_to_string(diagnostics)
+    ctx.std.fs.write(path, output)
+    return gpu_validation_result(output, exit_code(status), ctx.std.io.stdout.write)
 
 validate_gpu = task(
     kind = "validate-gpu",

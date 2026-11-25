@@ -67,9 +67,9 @@ def _platform_workflow_checks_identity_and_plans_before_test_lanes(h):
     _contains("== ''", historical["if"])
     _equal(historical["run"], report["run"])
     _equal(historical["env"]["PLATFORM_WORKSPACE"], "${{ github.workspace }}")
-    historical_tests = _first([step for step in steps if step.get("run") == "aspect ci test-historical-platform-regressions"])
+    historical_tests = _first([step for step in steps if step.get("name") == "Check CI policy and workflow regressions for a historical checkout"])
     _equal(historical_tests["working-directory"], ".platform-legacy-tools")
-    _equal(historical_tests["env"]["PLATFORM_WORKSPACE"], "${{ github.workspace }}")
+    _equal(historical_tests["run"], "aspect ci platform-tests")
     _contains("hashFiles('.aspect/workflow-policy-test.axl') == ''", historical_tests["if"])
     _equal(h.platforms["jobs"]["complete"]["steps"][-1]["run"], "aspect ci complete-platform-validation")
     for name in ("sha", "profile", "groups"):
@@ -99,6 +99,7 @@ def _required_check_names_and_events_are_preserved(h):
         _require(any([s.get("name") == "Verify exact checkout" for s in job["steps"]]))
     _equal(mac["timeout-minutes"], 120)
     _equal(windows["timeout-minutes"], 120)
+    _equal(windows["defaults"]["run"]["shell"], "pwsh")
     for job, command in [(mac, "aspect ci verify-platform-checkout"),
                          (windows, "./scripts/windows/verify-platform-checkout.ps1")]:
         check = _first([s for s in job["steps"] if s.get("name") == "Verify exact checkout"])

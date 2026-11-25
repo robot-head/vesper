@@ -41,5 +41,6 @@ def fixture_launcher(ctx, workspace, variant, names):
         "VESPER_FIXTURE_SOURCE": workspace.source,
         "VESPER_FIXTURE_CASE": variant,
         "VESPER_FIXTURE_LAUNCHER": launcher,
+        "VESPER_FIXTURE_PATH": ctx.std.env.var("PATH"),
         "PATH": bin_dir + ":" + ctx.std.env.var("PATH"),
     }

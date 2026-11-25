@@ -26,6 +26,9 @@ def _forbidden_path(path):
     name = path.rsplit("/", 1)[-1].lower()
     return name in _SCRIPT_NAMES or any([name.endswith(suffix) for suffix in _SCRIPT_SUFFIXES])
 
+def _identifier(value):
+    return bool(value) and not value[0].isdigit() and all([ch.isalnum() or ch == "_" for ch in value.elems()])
+
 def _script_content(path, mode, prefix):
     if mode not in ["100644", "100755"]:
         return None
@@ -42,7 +45,10 @@ def _script_content(path, mode, prefix):
             stripped = source_line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
-            if stripped.startswith("set -") or stripped.startswith("from ") and " import " in stripped:
+            if (any([stripped.startswith(prologue) for prologue in ["set -", "export ", "print("]]) or
+                (stripped.startswith("from ") and " import " in stripped)):
+                return "extensionless Python or shell script"
+            if stripped.startswith("import ") and all([_identifier(part) for part in stripped.split()[1].split(".")]):
                 return "extensionless Python or shell script"
             break
     if mode == "100755" and extensionless and prefix and not line.startswith("#!"):
@@ -124,6 +130,9 @@ def _argv_reason(words):
     if not words:
         return None
     names = [_basename(word.strip("\"'")) for word in words]
+    key, assigned, _ = words[0].partition("=")
+    if assigned and _identifier(key):
+        return "inline environment assignment"
     for index, name in enumerate(names):
         flags = names[index + 1:]
         if (name in _INTERPRETERS or _python(name) or name in _POWERSHELL or name in ["cmd", "uv"]) and flags:
@@ -201,6 +210,11 @@ def _structured_violations(data, workflow, budget):
                 continue
             if workflow and key == "script":
                 _record(out, "inline workflow script", node)
+                continue
+            if workflow and key == "shell":
+                words = _words(node)
+                if _syntax(node) or any([flag.lower() in _INLINE_FLAGS for flag in words[1:]]):
+                    _record(out, "inline workflow shell command", node)
                 continue
             if _command_key(key):
                 reason = _command_reason(node)
@@ -400,6 +414,7 @@ def _test(ctx):
     _fixture_blob(ctx, root, "scripts/windows/legacy.cmd", "")
     _fixture_blob(ctx, root, "tools/no extension", "#!" + "/usr/bin/env -S python3.13 -I\n")
     _fixture_blob(ctx, root, "tools/no shebang", "set -eu\n", "100755")
+    _fixture_blob(ctx, root, "tools/python text", "import pathlib\n")
     _fixture_blob(ctx, root, "tools/plain wrapper", "printf example\n", "100755")
     _fixture_blob(ctx, root, "tools/entrypoint.dat", "#!" + "/usr/bin/env bash\n")
     _fixture_blob(ctx, root, "tools/powershell", "#!" + "/usr/bin/env pwsh\n")
@@ -424,6 +439,9 @@ runs:
       run: pwsh -NoProfile -Command Get-Item
     - shell: pwsh
       run: '& { Write-Output one }'
+    - shell: bash -c '{0}'
+      run: echo harmless
+    - run: TEST=1 cargo test
     - run: |
         printf foo
         printf bar
@@ -432,10 +450,10 @@ runs:
     found = _inspect(ctx, root, valid, invalid, root)
     want = {
         "scripts/new test.PY": 1, "scripts/new.zsh": 1, "scripts/windows/legacy.cmd": 1,
-        "tools/no extension": 1, "tools/no shebang": 1,
+        "tools/no extension": 1, "tools/no shebang": 1, "tools/python text": 1,
         "tools/plain wrapper": 1, "tools/entrypoint.dat": 1, "tools/powershell": 1, "scripts/lint.conf": 1,
         "task.toml": 1, "portable.toml": 1, "container.yml": 1, "package.json": 1, "Dockerfile": 1,
-        "buildbuddy.yaml": 1, ".github/actions/nested/action.yml": 5,
+        "buildbuddy.yaml": 1, ".github/actions/nested/action.yml": 7,
     }
     actual = {}
     for path, _, _ in found:

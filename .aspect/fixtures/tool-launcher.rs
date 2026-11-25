@@ -16,6 +16,7 @@ fn run() -> io::Result<ExitCode> {
         .expect("fixture tool name");
     let status = Command::new(required("VESPER_FIXTURE_ASPECT")?)
         .current_dir(required("VESPER_FIXTURE_SOURCE")?)
+        .env("PATH", required("VESPER_FIXTURE_PATH")?)
         .args(["ci", "tests", "internal", "tool-fixture", "--"])
         .arg(required("VESPER_FIXTURE_CASE")?)
         .arg(tool)

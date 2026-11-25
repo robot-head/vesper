@@ -64,7 +64,7 @@ jobs:
   plan:
     name: Plan platform coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     outputs:
       sha: ${{ steps.plan.outputs.sha || steps.legacy_plan.outputs.sha }}
       profile: ${{ steps.plan.outputs.profile || steps.legacy_plan.outputs.profile }}
@@ -85,15 +85,8 @@ jobs:
           ref: ${{ github.workflow_sha }}
           path: .platform-legacy-tools
           persist-credentials: false
-          sparse-checkout: |
-            .aspect
-            .github/actions/aspect
       - if: ${{ hashFiles('.aspect/platform-plan.axl') == '' || hashFiles('.aspect/port-harness-selection.axl') == '' || hashFiles('.aspect/workflow-policy-test.axl') == '' }}
         uses: ./.platform-legacy-tools/.github/actions/aspect
-      - if: ${{ hashFiles('.aspect/workflow-policy-test.axl') == '' }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
       - name: Verify the dispatched pull request commit
         # The checks report on the commit the run was dispatched on, so it
         # must be the PR head that went green: the checkout is that head or
@@ -109,10 +102,7 @@ jobs:
           PLATFORM_WORKSPACE: ${{ github.workspace }}
           PR_HEAD: ${{ github.sha }}
         run: aspect ci verify-platform-dispatch
-      - name: Check the Aspect command runner
-        if: ${{ hashFiles('.aspect/version.axl') != '' }}
-        run: aspect ci tests aspect-unit
-      - if: ${{ hashFiles('.aspect/fixtures/tool-launcher.rs') != '' }}
+      - if: ${{ hashFiles('.aspect/fixtures/tool-launcher.rs') != '' || hashFiles('.aspect/workflow-policy-test.axl') == '' }}
         uses: dtolnay/rust-toolchain@stable
       - name: Check CI policy and workflow regressions
         if: ${{ hashFiles('.aspect/workflow-policy-test.axl') != '' }}
@@ -120,9 +110,7 @@ jobs:
       - name: Check CI policy and workflow regressions for a historical checkout
         if: ${{ hashFiles('.aspect/workflow-policy-test.axl') == '' }}
         working-directory: .platform-legacy-tools
-        env:
-          PLATFORM_WORKSPACE: ${{ github.workspace }}
-        run: aspect ci test-historical-platform-regressions
+        run: aspect ci platform-tests
       - id: plan
         if: ${{ hashFiles('.aspect/platform-plan.axl') != '' }}
         env:
@@ -306,7 +294,7 @@ jobs:
     timeout-minutes: 120
     defaults:
       run:
-        shell: bash
+        shell: pwsh
     steps:
       - name: Fail when profile planning failed
         if: needs.plan.result != 'success'

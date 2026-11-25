@@ -1,7 +1,14 @@
 """Check native task argument forwarding and diagnostics at CLI entry points."""
 
 load("./bazel-cli-test.axl", "mock_bazel_cli")
+load("./bootstrap-seed-test.axl", "mock_bootstrap")
 load("./cargo-metadata-test.axl", "mock_cargo_metadata")
+load("./disk-ci-test.axl", "mock_disk_tool")
+load("./lean-workflow-test.axl", "mock_lean_workflow")
+load("./port-abi-test.axl", "mock_port_abi")
+load("./port-regression-test.axl", "mock_port_regression")
+load("./simd-fixture-test.axl", "mock_simd_tool")
+load("./wasmtime-test.axl", "mock_wasmtime")
 load("./lib/process.axl", "check")
 load("./lib/task-fixture.axl", "contains", "equal", "fixture_launcher", "fixture_workspace", "invoke_fixture", "write_fixture")
 load("./wasm-fixture-test.axl", "mock_wasm_cargo")
@@ -12,6 +19,27 @@ _ORACLE_ARGS = ["run", "--locked", "--quiet", "-p", "vesper-oracles", "--bin", "
 def _tool_fixture(ctx):
     variant, tool, cwd, executable = ctx.args.tool_args[:4]
     argv = ctx.args.tool_args[4:]
+    if variant == "gpu-validation":
+        equal(tool, "cargo")
+        equal(argv, ["test", "--locked", "-p", "vesper-gpu-compute", "-p", "vesper-kinetic-gpu", "--", "--nocapture", "--test-threads=1"])
+        ctx.std.io.stdout.write("GPU test output\n")
+        ctx.std.io.stderr.write(ctx.std.env.var("FIXTURE_GPU_STDERR") + "\n")
+        return int(ctx.std.env.var("FIXTURE_GPU_CODE"))
+    if variant == "simd":
+        return mock_simd_tool(ctx, cwd, tool, argv)
+    if variant.startswith("port-regression-"):
+        return mock_port_regression(ctx, cwd, variant.removeprefix("port-regression-"), tool, argv)
+    if variant.startswith("bootstrap-"):
+        return mock_bootstrap(ctx, cwd, tool, argv)
+    if variant in ["wasmtime-modes", "wasmtime-discovery", "wasmtime-install"]:
+        return mock_wasmtime(ctx, cwd, tool, argv)
+    if variant in ["disk-clean", "disk-watch"]:
+        return mock_disk_tool(ctx, cwd, tool, argv)
+    if variant == "port-abi":
+        equal(tool, "cargo")
+        return mock_port_abi(ctx, cwd, argv)
+    if variant in ["lean-scope", "lean-model", "lean-replay"]:
+        return mock_lean_workflow(ctx, cwd, variant, tool, argv)
     if variant == "bazel-cli":
         return mock_bazel_cli(ctx, cwd, tool, argv)
     if variant == "metadata":
@@ -157,6 +185,16 @@ def _test(ctx):
     contains("flip-gate pairs sample 16:12 16:12", output.stdout)
     contains("Vesper/Rust mean 0.750", output.stdout)
     contains("digests DIFFER: different digest", run(abba, 1, "abba", {"FIXTURE_DIGEST": "different"}).stdout)
+
+    for message, cargo_code, expected in [("clean", 0, 0), ("Validation Error on stderr", 0, 1), ("cargo failed", 23, 23)]:
+        output = run(["ci", "validate-gpu"], expected, "gpu-validation", {
+            "FIXTURE_GPU_STDERR": message, "FIXTURE_GPU_CODE": str(cargo_code),
+        })
+        log = ctx.std.fs.read_to_string(root + "/validation.log")
+        equal(log.startswith("GPU test output\n"), True)
+        contains(message + "\n", log)
+        contains(log, output.stdout)
+        equal("::error::the Vulkan validation layer reported errors" in output.stdout, expected == 1)
 
     historical = root + "/historical checkout"
     ctx.std.fs.create_dir_all(historical)

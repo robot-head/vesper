@@ -46,15 +46,16 @@ The Linux job runs as nine parallel shards, `Vesper ports (Linux 1/9)` to
 `(Linux 9/9)` (`VESPER_PORT_HARNESS_SHARD`, #1019, #1100, #1924). With one job, a run
 took 52 minutes and others hit the 60 minute limit once Loom, Crucible and
 serde landed; with three, the last shard ran past its 90 minute limit once
-the P3a ports landed. Each shard is a run of consecutive blocks of the
-script: 1 the ABI tier through Ignis, 2 Quarry through pact, 3 semver through
+the P3a ports landed. Each shard runs consecutive port tasks. Shard 1 covers
+the ABI tier through Ignis, 2 Quarry through pact, 3 semver through
 Crucible, 4 serde, 5 aegis through bench, 6 eBPF and silicon, 7 Warp through
 diagnostics, 8 fmt through lint, and 9 sim-session and every port appended
 after it. Each takes about 10-30 minutes after a 2-4
 minute compiler build; the 60 minute job timeout is a backstop. When a shard
 passes about 35 minutes, move a shard boundary or add a shard in
-`scripts/port-harness-plan.json`. The workflow gets the shard count from the
-selected checkout so it can also run older revisions with seven shards.
+`scripts/port-harness-plan.json`. The workflow uses the selected checkout's
+plan when present. For older revisions it uses the plan pinned to the
+workflow and runs the available port tasks against the selected revision.
 
 Nearly all of the harness's time is the compiler compiling Vesper sources:
 the Rust tests themselves finish in seconds. So one `Vesper ports compiler`

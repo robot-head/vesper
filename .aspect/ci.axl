@@ -1,12 +1,9 @@
-load("./lib/process.axl", "check")
-load("./lib/script.axl", "command_task", "run_command", "script_task")
-
-
-tests_aspect_tasks = script_task("aspect-tasks", ["ci", "tests"], "scripts/ci/tests/test_platform_aspect_tasks.py", "python3")
+load("./lib/process.axl", "check", "command", "exit_code")
 
 def _platform_tests(ctx: TaskContext) -> int:
     root = ctx.std.env.aspect_root_dir()
     for suite in [
+        "aspect-unit",
         "merge-gate",
         "hardware-ci",
         "workflow-tasks",
@@ -47,40 +44,38 @@ def _platform_tests(ctx: TaskContext) -> int:
         "logos-pins",
         "logos-setup",
         "lean-toolchains",
+        "lean-workflow",
+        "disk-ci",
+        "port-abi-parity",
+        "port-regression",
+        "stage2-wasmtime",
+        "bootstrap-seeds",
+        "simd-fixture",
     ]:
         check(ctx, ctx.std.env.current_exe(), ["ci", "tests", suite], root)
-    return run_command(ctx, "python3", ["-m", "unittest", "discover", "-s", "scripts/ci/tests", "-p", "test_platform*.py"], True, "")
+    return 0
 
 platform_tests = task(
     kind = "platform-tests",
     group = ["ci"],
     summary = "Run the platform planning, policy and workflow tests",
     implementation = _platform_tests,
-    args = {"tool_args": args.trailing_var_args(description = "Optional unittest flags for the platform tests.")},
 )
 
-def _historical_platform_tests(ctx):
-    root = ctx.std.env.var("PLATFORM_WORKSPACE")
-    if not root or root == ctx.std.env.aspect_root_dir():
-        ctx.std.process.exit(2, "Set PLATFORM_WORKSPACE to the historical checkout")
-    check(ctx, "python3", ["-m", "pip", "install", "PyYAML==6.0.2"], root)
-    if ctx.std.fs.exists(root + "/.aspect/version.axl"):
-        check(ctx, ctx.std.env.current_exe(), ["ci", "platform-tests"], root)
-    else:
-        check(ctx, "python3", ["-m", "unittest", "discover", "-s", "scripts/ci/tests", "-p", "test_platform*.py"], root)
-    return 0
-
-historical_platform_tests = task(
-    kind = "test-historical-platform-regressions",
-    group = ["ci"],
-    summary = "Run the regression suite shipped with an older release checkout",
-    implementation = _historical_platform_tests,
+tests_aspect_tasks = platform_tests.alias(
+    kind = "aspect-tasks",
+    group = ["ci", "tests"],
+    summary = "Run the native Aspect regression suite",
 )
 
-pulse_port_tests = command_task(
-    "test-pulse-port",
-    ["ci"],
-    "Run the @vesper/pulse port differentials against vesper_pulse",
-    "cargo",
-    ["test", "--locked", "--test", "pulse_port"],
+def _pulse(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    argv = ["test", "--locked", "--test", "pulse_port"] + ctx.args.tool_args
+    return exit_code(command(ctx, "cargo", argv, root).status())
+
+pulse_port_tests = task(
+    kind = "test-pulse-port", group = ["ci"],
+    summary = "Run the @vesper/pulse port differentials against vesper_pulse",
+    implementation = _pulse,
+    args = {"tool_args": args.trailing_var_args(description = "Additional Cargo test arguments.")},
 )
