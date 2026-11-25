@@ -66,6 +66,30 @@ pub fn run(func: &mut ir::Function, simd: bool) -> usize {
             c.push(func.clone());
         }
     });
+    if let Some(hook) = HOOK.get() {
+        return hook(func, simd);
+    }
+    run_rust(func, simd)
+}
+
+/// A replacement for the pass ([`install`]): what [`run`] calls, once its
+/// `simd` and `VESPER_VECTORIZE` checks pass, instead of [`run_rust`].
+pub type Hook = fn(&mut ir::Function, bool) -> usize;
+
+static HOOK: std::sync::OnceLock<Hook> = std::sync::OnceLock::new();
+
+/// Installs `hook` for the rest of the process (the Vesper port's
+/// differential and flip gate, #1829). Only the first call takes effect;
+/// nothing in the default compiler calls it.
+pub fn install(hook: Hook) -> Result<(), Hook> {
+    HOOK.set(hook)
+}
+
+/// The Rust pass itself, whatever [`install`] installed.
+pub fn run_rust(func: &mut ir::Function, simd: bool) -> usize {
+    if !simd {
+        return 0;
+    }
     let headers: Vec<Block> = func
         .layout
         .blocks()

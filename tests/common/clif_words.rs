@@ -204,17 +204,36 @@ const CONDS: &[IntCC] = &[
 ];
 
 pub fn opcode_code(op: Opcode) -> u64 {
-    OPCODES
-        .iter()
-        .position(|&o| o == op)
-        .map_or(0, |i| i as u64 + 1)
+    static TABLE: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let mut t = [0u8; 256];
+        for (i, &o) in OPCODES.iter().enumerate() {
+            t[o as usize] = i as u8 + 1;
+        }
+        t
+    });
+    table[op as usize] as u64
 }
 
 pub fn type_code(t: Type) -> u64 {
-    TYPES
-        .iter()
-        .position(|&x| x == t)
-        .map_or(0, |i| i as u64 + 1)
+    match t {
+        types::I8 => 1,
+        types::I16 => 2,
+        types::I32 => 3,
+        types::I64 => 4,
+        types::I128 => 5,
+        types::F16 => 6,
+        types::F32 => 7,
+        types::F64 => 8,
+        types::F128 => 9,
+        types::I8X16 => 10,
+        types::I16X8 => 11,
+        types::I32X4 => 12,
+        types::I64X2 => 13,
+        types::F32X4 => 14,
+        types::F64X2 => 15,
+        _ => 0,
+    }
 }
 
 fn type_of(code: u64) -> Result<Type, String> {
@@ -325,10 +344,6 @@ fn no_outline(func: &ir::Function) -> bool {
             .all(|p| matches!(p.purpose, ir::ArgumentPurpose::Normal))
 }
 
-fn push_bytes(out: &mut Vec<u8>, w: u64) {
-    out.extend_from_slice(&w.to_le_bytes());
-}
-
 /// The words of `func` (see the module comment), as bytes.
 pub fn encode(func: &ir::Function, simd: bool) -> Vec<u8> {
     encode_with(func, simd, None)
@@ -337,7 +352,9 @@ pub fn encode(func: &ir::Function, simd: bool) -> Vec<u8> {
 /// [`encode`] with the module's pointer type (the cold outliner's).
 pub fn encode_with(func: &ir::Function, simd: bool, ptr: Option<Type>) -> Vec<u8> {
     let dfg = &func.dfg;
-    let mut w: Vec<u64> = vec![
+    let mut w: Vec<u64> =
+        Vec::with_capacity(16 + 3 * dfg.num_values() + 14 * dfg.num_insts() + 6 * dfg.num_blocks());
+    w.extend([
         VERSION,
         (simd as u64) | if no_outline(func) { H_NO_OUTLINE } else { 0 },
         dfg.num_values() as u64,
@@ -345,7 +362,7 @@ pub fn encode_with(func: &ir::Function, simd: bool, ptr: Option<Type>) -> Vec<u8
         dfg.num_blocks() as u64,
         ptr.map_or(0, type_code),
         func.signature.returns.len() as u64,
-    ];
+    ]);
     w.extend(
         func.signature
             .returns
@@ -444,21 +461,18 @@ pub fn encode_with(func: &ir::Function, simd: bool, ptr: Option<Type>) -> Vec<u8
         w.push(dests.len() as u64);
         for c in dests {
             w.push(c.block(&dfg.value_lists).as_u32() as u64);
-            let args: Vec<BlockArg> = c.args(&dfg.value_lists).collect();
-            w.push(args.len() as u64);
-            for a in args {
+            let at = w.len();
+            w.push(0);
+            for a in c.args(&dfg.value_lists) {
                 w.push(match a {
                     BlockArg::Value(v) => v.as_u32() as u64,
                     _ => NONE,
                 });
             }
+            w[at] = (w.len() - at - 1) as u64;
         }
     }
-    let mut out = Vec::with_capacity(w.len() * 8);
-    for x in w {
-        push_bytes(&mut out, x);
-    }
-    out
+    w.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
 
 struct Script<'a> {

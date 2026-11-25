@@ -40,7 +40,11 @@ fn through_vesper(f: &ir::Function, simd: bool) -> Result<(ir::Function, u64), S
 /// How the two passes compare on `f`: `Ok(loops)` when they agree.
 fn compare(f: &ir::Function, simd: bool) -> Result<usize, String> {
     let mut rust = f.clone();
-    let n = native_vectorize::run(&mut rust, simd);
+    let n = if simd {
+        native_vectorize::run_rust(&mut rust, simd)
+    } else {
+        native_vectorize::run(&mut rust, simd)
+    };
     let (vesper, count) = through_vesper(f, simd)?;
     if count != n as u64 {
         return Err(format!("Rust vectorizes {n} loops, Vesper {count}"));
@@ -341,19 +345,34 @@ fn corpus_matches_native_vectorize_run() {
     assert_eq!(bad, 0);
 }
 
+static VESPER_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The flip gate's hook: the Vesper pass while `VESPER_ON`, else Rust's.
+fn switched(f: &mut ir::Function, simd: bool) -> usize {
+    if !VESPER_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        return native_vectorize::run_rust(f, simd);
+    }
+    let (g, n) = through_vesper(f, simd).expect("the Vesper pass");
+    *f = g;
+    n as usize
+}
+
 /// ABBA: `native_vectorize::run` against the Vesper pass with its
-/// encode, call and apply, over every captured corpus function.
+/// encode, call and apply, over every captured corpus and kernel function.
 #[test]
 fn flip_gate() {
     if !speed() {
         return;
     }
-    let funcs: Vec<ir::Function> = corpus().iter().flat_map(|c| captured(&c.world)).collect();
+    let mut funcs: Vec<ir::Function> = corpus().iter().flat_map(|c| captured(&c.world)).collect();
+    for (_, source) in kernel_programs() {
+        funcs.extend(captured(&checked(&source)));
+    }
     let rust = || {
         let mut c = funcs.clone();
         time(|| {
             for f in &mut c {
-                native_vectorize::run(f, true);
+                native_vectorize::run_rust(f, true);
             }
         })
         .as_nanos()
@@ -366,8 +385,59 @@ fn flip_gate() {
         })
         .as_nanos()
     };
+    // The boundary alone: encode, read the tables, an empty script.
+    let identity = || {
+        time(|| {
+            for f in &funcs {
+                std::hint::black_box(through_vesper(f, false).unwrap());
+            }
+        })
+        .as_nanos()
+    };
+    let encode = || {
+        time(|| {
+            for f in &funcs {
+                std::hint::black_box(clif_words::encode(f, true));
+            }
+        })
+        .as_nanos()
+    };
+    // `build`: the whole optimized object of every world's `main`, with the
+    // installed hook switched to the Vesper pass or left on Rust's.
+    // Compile the package first: its own build runs this pass.
+    entry();
+    let _ = native_vectorize::install(switched);
+    let kernels: Vec<vesper::check::World> = kernel_programs()
+        .into_iter()
+        .map(|(_, source)| checked(&source))
+        .collect();
+    let worlds: Vec<&vesper::check::World> = kernels
+        .iter()
+        .chain(corpus().iter().map(|c| &c.world))
+        .collect();
+    let build = |on: bool| {
+        VESPER_ON.store(on, std::sync::atomic::Ordering::Relaxed);
+        let t = time(|| {
+            for w in &worlds {
+                std::hint::black_box(native::object_with_options(w, "main", None, true).ok());
+            }
+        })
+        .as_nanos();
+        VESPER_ON.store(false, std::sync::atomic::Ordering::Relaxed);
+        t
+    };
+    for _ in 0..6 {
+        let (a, b, c, d) = (build(false), build(true), build(true), build(false));
+        println!("flip-gate build pairs rust={} vesper={}", a + d, b + c);
+    }
     for _ in 0..8 {
         let (a, b, c, d) = (rust(), vesper(), vesper(), rust());
-        println!("flip-gate pairs rust={} vesper={}", a + d, b + c);
+        println!(
+            "flip-gate pairs rust={} vesper={} (boundary {}, encode {})",
+            a + d,
+            b + c,
+            2 * identity(),
+            2 * encode()
+        );
     }
 }
