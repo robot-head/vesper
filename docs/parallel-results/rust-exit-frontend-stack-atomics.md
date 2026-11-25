@@ -171,12 +171,45 @@ Each part is one host call, so the change in speed is noise: a
 The Rust `Step::Check` stays in place until the driver-steps lane has
 moved every caller.
 
+## Slice 3: the checker AST crosses into `@vesper/ast` (#1910)
+
+The dyn, atomics/control and regions ports are all blocked on the same
+thing. Their Rust swap points hold an `ast::Module`, often one a Rust pass
+has rewritten, while the ports read an `@vesper/ast` `Ast`.
+
+- `tests/common/ast_words.rs` (shared with the hybrid) writes any
+  `Module` as the `ast` section of the `parse_words` stream. That is
+  format 1: names, 29 arenas, the pool and the five module lists, with
+  nodes in preorder.
+- `packages/vesper-ast/src/words.ves` (`read_ast_words`, plus the
+  `ast_words_dump` and `ast_words_count` entries) reads that section
+  back.
+- Two things no parse makes also cross. `Type::IntLiteral` is type kind
+  6, carrying its literal (the hybrid's reader accepts it too).
+  `sugar_origins` is dropped, because no Vesper pass reads it.
+
+| Check | Inputs | Differences |
+|---|--:|--:|
+| `modules_cross_into_vesper_as_words` | 1,372 repository modules, plus their constant, untyped-member and Beacon-prelude rewrites | 0 |
+| `built_modules_cross_into_vesper_as_words` | a built module with integer literal types, wide and negative literals, absent and present children | 0 |
+
+| Cost (repository corpus, release, native CPU) | Time |
+|---|--:|
+| Crossing: encode plus Vesper decode, 1.55M rows | 0.42-0.49 s |
+| `check::check` of the same modules | 16.6-17.7 s |
+| Crossing / check | **0.028** (median of 5) |
+
+The crossing adds about 3% to the check it feeds. While making the
+differential, I found that the Rust dumper in `tests/self_host_ast.rs`
+left out a literal pattern's integer type, which `dump.ves` prints. It
+prints it now.
+
 ## What is left
 
 - Port the parts of `check::check` one at a time: the core spine
   (#1179), effects (#1180), regions (#1181), dyn (#1183) and Pact (#1185).
-- Swap atomics and the control rules into the hybrid, once the checker's
-  AST crosses the boundary (this goes with core typing's spine, #1179).
+- Swap dyn, atomics/control and regions into the hybrid over the
+  crossing (#1910).
 - `read_expr` still costs about 360 instructions per node, mostly in
   generated code that moves 17-word rows (each `u8` and `bool` field
   takes a word). A packed row layout or narrower fields would cut it
