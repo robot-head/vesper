@@ -18,8 +18,11 @@ these families decline nothing.
 |---|---|--:|---|
 | `src/native_handlers` deleted (owner's choice, 2026-11-24) | n/a (dead code: no command reached it) | -2,293 now | #1836 |
 | `scalar_enums` decisions (#1330) ported to `@vesper/codegen-aggregates` | 0 of 354 corpus worlds differ (52,690 graphs; 15,563 enum values, 116 locals, 11,064 calls and 271 returns kept as words) | 0 now (goes at the retirement) | #1854 |
-| `scalar_enums` graph rewrite ported (`scalar_enum_rewrite`) | 0 of 54,236 graphs differ, 2,347 of them rewritten (`Debug`-equal `FunctionIr`) | 0 now (goes at the retirement) | this PR |
-| `ffi_lowering/cpu.rs` machine-code tables ported (`@vesper/ffi-lowering` `cpu.ves`) | 0 of 72 symbol and target pairs differ (every function, unknown and plain symbols, x86_64, AArch64, RISC-V) | 0 now (goes at the retirement) | this PR |
+| `scalar_enums` graph rewrite ported (`scalar_enum_rewrite`) | 0 of 54,236 graphs differ, 2,347 of them rewritten (`Debug`-equal `FunctionIr`) | 0 now (goes at the retirement) | #1868 |
+| `ffi_lowering/cpu.rs` machine-code tables ported (`@vesper/ffi-lowering` `cpu.ves`) | 0 of 72 symbol and target pairs differ (every function, unknown and plain symbols, x86_64, AArch64, RISC-V) | 0 now (goes at the retirement) | #1868 |
+| `ffi_lowering/buffers.rs` check pass ported (`@vesper/ffi-rewrite` `buffers.ves`) | 0 of 35 sources differ that reach the check (27 refused, with the same span and message); the foreign-memory suite, the xsk fixture and 13 hand sources | 0 now (goes at the retirement) | this PR |
+| `native_session::check_data_base_freshness` ported (`@vesper/codegen-control` `freshness.ves`) | 0 of 229 functions differ: 217 corpus session entries as emitted, and 12 hand-built ones (4 refused) | 0 now (goes at the retirement) | this PR |
+| `vector::check_world` (the `Isa` discipline, E1401-E1403) ported (`@vesper/check-regions-seqs` `isa.ves`) | 0 of 329 worlds differ (the corpus files, the vector and tiled tests' sources, 19 hand sources); 35 diagnostics: 2 E1401, 5 E1402, 28 E1403 | 0 now (goes at the retirement) | this PR |
 
 ### `native_handlers`: deleted
 
@@ -109,6 +112,64 @@ and a plain symbol, on x86_64, AArch64 and RISC-V targets. The callee
 declaration that uses it is still Rust's (`foreign_perform` keeps the
 callee's declaration; the hook emits the rest).
 
+## The buffer check
+
+`buffers.ves` ports the foreign-memory check pass (§16.3): after the
+checker, a buffer of a `linear extern struct` or `Pinned[T]` must not be
+resized, moved or viewed across a call that may reach a foreign import.
+The entry `ffi_buffer_text` runs pass 2 of the source rewrite in Vesper,
+then walks the result with the checker's recorded types, which the Rust
+side passes as input (the checker is not part of this port). It prints
+`ok` or the refusal's span and message.
+
+- Differential `buffer_check_matches_rust`: 35 sources reach the check,
+  27 refused, 0 differ.
+- Cost (`buffer_check_cost`, ABBA): Rust 28.1 ms, Vesper 2.3 ms over the
+  35 sources. This is not a like-for-like ratio: Rust's probe also runs
+  the type checker, which the Vesper entry takes as input. It shows the
+  walk is not a bottleneck.
+
+## The data-frame freshness check
+
+`freshness.ves` ports `check_data_base_freshness`, the check every
+session entry passes after emission: no address derived from a
+`data_base` loaded before a park is used after it. The entry
+`control_session_freshness` reads the emitted function as tables; what
+Cranelift computes (aliases, value definitions, whether an opcode touches
+memory, whether a call is `park`) is input. The derivation fixpoint and
+the path search are Vesper.
+
+- Differential `freshness::freshness_matches_rust`
+  (tests/self_host_codegen_control.rs): every corpus session entry that
+  plans is compiled to an object and captured before the check
+  (`native::session::capture_freshness_inputs`), 217 functions, plus 12
+  hand-built ones (a stale base, a reload from `ctx`, a reload from the
+  park's signal; through a block parameter or not; in a loop or not).
+  0 of 229 differ; the 4 stale functions are refused with Rust's message.
+- Cost (`freshness_cost`, ABBA): Rust 3.32 ms, Vesper 3.23 ms (0.98x),
+  with input decoding on the Vesper side.
+
+## The Isa discipline walk
+
+`isa.ves` ports `vector::check_world`: a two-parameter `Vec` or `Mask`
+ADT (E1401), `==` and the other comparisons on values holding vector
+lanes (E1402), and every vector operation, `load_tile_vec` profile and
+call whose `Isa[P]` the scope does not grant (E1403), with
+`if Isa::supported[P]()` granting `P` in its branch and closures
+granted only their own row. The entry `regions_seqs_isa` parses the
+source with @vesper/ast; the input carries the world facts the walk
+reads (ADTs with their fields, the functions in `world.functions` order
+with their rows and body spans, the checker's expression types).
+`Intrinsic::lookup`, `VectorOp::resolve`, `SliceIo::resolve`, `shape_of`,
+`contains_vector` and `substitute` are ported with it.
+
+- Differential `isa::isa_walk_matches_rust`
+  (tests/self_host_check_regions_seqs.rs): 0 of 329 worlds differ. 121
+  functions of the checker's prelude have bodies outside the source and
+  are skipped on both sides' terms: none of them reports anything.
+- Cost (`isa_walk_cost`, ABBA): Rust's parse and walk 19.2 ms, the
+  Vesper entry (parse, input decoding and walk) 17.4 ms (0.91x).
+
 ## Hybrid swap coverage
 
 The release `vesper-hybrid` against the release default compiler, `emit
@@ -139,16 +200,16 @@ side stands:
 | `src/ffi_lowering.rs`, `ffi_lowering/types.rs` | 1,830 + 840 | `@vesper/ffi-lowering` (plans, type mapping), `@vesper/ffi-rewrite` (the source rewrite) | |
 | `ffi_lowering/native.rs` | 2,555 | `@vesper/ffi-emit` (every step swapped) | the walk's orchestration (native walk port, #1509) |
 | `ffi_lowering/drops.rs` | 533 | `@vesper/ffi-drops` | |
-| `ffi_lowering/buffers.rs` | 523 | none | the foreign-memory check pass (§16.3 pinned buffers) |
+| `ffi_lowering/buffers.rs` | 583 | `@vesper/ffi-rewrite` `buffers.ves` (0 diffs) | the call that runs it after `check::check` |
 | `ffi_lowering/cpu.rs` | 99 | `@vesper/ffi-lowering` `cpu.ves` (0 diffs) | the call that picks it in `foreign_perform` |
 | `ffi_lowering/eval_host.rs` | 596 | none | the evaluator's foreign-call host (`vesper run`) |
 | `src/native_aggregates.rs` | 1,746 | `@vesper/codegen-aggregates` (decisions and the scalar-enum rewrite), `@vesper/codegen-base` and `@vesper/codegen-aggregates-emit` (emission) | `enum_words` and the split-local reads and writes (the native walk, #1509) |
-| `src/native_session.rs` | 1,478 | `codegen-control/session.ves` (plans), `codegen-control-emit` (ops 38-42) | `copy_bytes`/`store_constructor`, the session object and entry symbol glue |
+| `src/native_session.rs` | 1,498 | `codegen-control/session.ves` (plans), `freshness.ves` (the data-frame check, 0 diffs), `codegen-control-emit` (ops 38-42) | `copy_bytes`/`store_constructor` and the entry function's Cranelift setup, which are the native walk's (#1509) |
 | `src/tiled.rs`, `tiled/native.rs`, `tiled/aot_runtime.rs` | 468 + 612 + 697 | `@vesper/codegen-numeric` (`tiled.ves`, `tiled_ops.ves`, AOT runtime) | |
 | `tiled/check.rs`, `src/vector/check.rs` | 577 + 441 | `@vesper/check-regions-seqs` (`tiled.ves`, `vector.ves`) | |
 | `tiled/eval.rs`, `vector/eval.rs` | 311 + 432 | none | the evaluator's tile and vector operations |
 | `tiled/native_runtime.rs` | 377 | AOT runtime only | the JIT's Rust host symbols |
-| `src/vector.rs` | 1,020 | `codegen-numeric/shapes.ves` (lane shapes) | the expression typing walk |
+| `src/vector.rs` | 1,027 | `codegen-numeric/shapes.ves` (lane shapes), `check-regions-seqs` `vector.ves` (type rules) and `isa.ves` (the `Isa` walk, 0 diffs) | |
 | `src/native_vector.rs` | 1,131 | `codegen-numeric/vector.ves` (every intrinsic) | slot fusion and access retyping (gap lane 3, #1500) |
 
 ## Checks

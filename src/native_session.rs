@@ -1168,12 +1168,36 @@ fn compile_session_with_linkage<M: Module>(
     };
     super::wide_native::fuse_wide_divisions(&mut ctx.func, &wide_divisions);
     linkage.normalize_references(&mut ctx.func);
+    FRESHNESS_INPUTS.with(|c| {
+        if let Some(v) = c.borrow_mut().as_mut() {
+            v.push((ctx.func.clone(), context, park));
+        }
+    });
     check_data_base_freshness(&ctx.func, context, park)?;
     text.push_str(&format!("; {name}\n{}\n", ctx.func.display()));
     m.define_function(id, &mut ctx)
         .map_err(|e| format!("native session codegen '{}': {e}", plan.entry))?;
     m.clear_context(&mut ctx);
     Ok((id, text))
+}
+
+/// An emitted session entry with its `ctx` parameter and `park` reference,
+/// as [`check_data_base_freshness`] receives them.
+pub type FreshnessInput = (ir::Function, ir::Value, ir::FuncRef);
+
+thread_local! {
+    static FRESHNESS_INPUTS: std::cell::RefCell<Option<Vec<FreshnessInput>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` and return, beside its result, every session entry it compiled
+/// before the freshness check (the differential of `@vesper/codegen-control`
+/// reads them).
+pub fn capture_freshness_inputs<R>(f: impl FnOnce() -> R) -> (R, Vec<FreshnessInput>) {
+    FRESHNESS_INPUTS.with(|c| *c.borrow_mut() = Some(Vec::new()));
+    let r = f();
+    let inputs = FRESHNESS_INPUTS.with(|c| c.borrow_mut().take().unwrap_or_default());
+    (r, inputs)
 }
 
 /// Reject any use, after a park, of a data-frame address derived from a base

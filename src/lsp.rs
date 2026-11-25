@@ -27,6 +27,23 @@ mod session;
 
 use serde_json::json;
 pub use session::LensConfig;
+
+/// Every proof-lens model of a checked source, for the differential test of
+/// its Vesper port (`tests/self_host_lsp_features.rs`): per function, the
+/// exact and bit-vector renderings and the model key as hex, or the reason
+/// there is no model.
+#[doc(hidden)]
+pub fn proof_models_for_port(
+    snapshot: &crate::tooling::frontend::CheckedSource,
+) -> Vec<(String, Result<[String; 3], String>)> {
+    proof_model::all(snapshot.checked())
+        .into_iter()
+        .map(|(name, model)| {
+            let model = model.map(|m| [m.exact, m.bitvec, proof_model::hex(&m.key)]);
+            (name, model)
+        })
+        .collect()
+}
 use std::{
     cell::RefCell,
     io::{BufRead, Write},

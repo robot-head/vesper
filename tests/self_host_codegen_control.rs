@@ -721,3 +721,303 @@ fn handwritten_refusals_match_rust() {
         assert!(rust.contains(r), "no case refused with {r:?}");
     }
 }
+
+// ------------------------------------------------------------------ freshness
+
+mod freshness {
+    use super::*;
+    use cranelift_codegen::ir::{
+        self, AbiParam, ExtFuncData, ExternalName, InstBuilder, InstructionData, MemFlags, Opcode,
+        Signature, UserExternalName, UserFuncName, ValueDef, types,
+    };
+    use cranelift_codegen::isa::CallConv;
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+    use std::collections::HashMap;
+    use vesper::native::session::{
+        FreshnessInput, capture_freshness_inputs, check_data_base_freshness, object,
+    };
+    use vesper_fiber_abi::abi::offsets;
+
+    fn list(out: &mut Vec<u64>, v: impl IntoIterator<Item = u64>) {
+        let v: Vec<u64> = v.into_iter().collect();
+        out.push(v.len() as u64);
+        out.extend(v);
+    }
+
+    /// One function as freshness.ves reads it: what Cranelift computes
+    /// (aliases, value definitions, memory and `park` flags, the load
+    /// offsets) and the layout.
+    fn words(func: &ir::Function, ctx: ir::Value, park: ir::FuncRef) -> Vec<u64> {
+        let dfg = &func.dfg;
+        let mut w = vec![ctx.as_u32() as u64];
+        let nv = dfg.num_values();
+        w.push(nv as u64);
+        for i in 0..nv {
+            let v = ir::Value::from_u32(i as u32);
+            let (def, k) = match dfg.value_def(v) {
+                ValueDef::Result(inst, k) => (inst.as_u32() as u64 + 1, k as u64),
+                _ => (0, 0),
+            };
+            w.extend([dfg.resolve_aliases(v).as_u32() as u64, def, k]);
+        }
+        w.push(dfg.num_insts() as u64);
+        let blocks: Vec<ir::Block> = func.layout.blocks().collect();
+        let pos: HashMap<ir::Block, u64> = blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (*b, i as u64))
+            .collect();
+        w.push(blocks.len() as u64);
+        for b in &blocks {
+            list(
+                &mut w,
+                dfg.block_params(*b).iter().map(|v| v.as_u32() as u64),
+            );
+            let insts: Vec<ir::Inst> = func.layout.block_insts(*b).collect();
+            w.push(insts.len() as u64);
+            for inst in insts {
+                let data = &dfg.insts[inst];
+                let op = data.opcode();
+                let memory = matches!(
+                    op,
+                    Opcode::Load | Opcode::Store | Opcode::Call | Opcode::CallIndirect
+                ) || op.can_load()
+                    || op.can_store();
+                let is_park =
+                    matches!(data, InstructionData::Call { func_ref, .. } if *func_ref == park);
+                let (load, arg, offset) = match *data {
+                    InstructionData::Load {
+                        opcode: Opcode::Load,
+                        arg,
+                        offset,
+                        ..
+                    } => (
+                        true,
+                        arg.as_u32() as u64,
+                        i64::from(i32::from(offset)) as u64,
+                    ),
+                    _ => (false, 0, 0),
+                };
+                let flags = u64::from(memory) | u64::from(is_park) << 1 | u64::from(load) << 2;
+                w.extend([inst.as_u32() as u64, flags, arg, offset]);
+                list(
+                    &mut w,
+                    dfg.inst_args(inst).iter().map(|v| v.as_u32() as u64),
+                );
+                list(
+                    &mut w,
+                    dfg.inst_results(inst).iter().map(|v| v.as_u32() as u64),
+                );
+                list(&mut w, dfg.inst_values(inst).map(|v| v.as_u32() as u64));
+                let dests = data.branch_destination(&dfg.jump_tables, &dfg.exception_tables);
+                w.push(dests.len() as u64);
+                for call in dests {
+                    w.push(pos[&call.block(&dfg.value_lists)]);
+                    let args: Vec<ir::BlockArg> = call.args(&dfg.value_lists).collect();
+                    w.push(args.len() as u64);
+                    for a in args {
+                        match a.as_value() {
+                            Some(v) => w.extend([0, v.as_u32() as u64]),
+                            None => w.extend([1, 0]),
+                        }
+                    }
+                }
+            }
+        }
+        w
+    }
+
+    fn input(funcs: &[FreshnessInput]) -> Vec<u8> {
+        let mut out = vec![funcs.len() as u64];
+        for (f, ctx, park) in funcs {
+            let w = words(f, *ctx, *park);
+            out.push(w.len() as u64);
+            out.extend(w);
+        }
+        out.iter().flat_map(|x| x.to_le_bytes()).collect()
+    }
+
+    fn rust(funcs: &[FreshnessInput]) -> String {
+        funcs
+            .iter()
+            .map(
+                |(f, ctx, park)| match check_data_base_freshness(f, *ctx, *park) {
+                    Ok(()) => "ok\n".to_owned(),
+                    Err(e) => format!("err {e}\n"),
+                },
+            )
+            .collect()
+    }
+
+    /// `fn(ctx)` that loads a base, parks, then reads through `after`: the
+    /// old base, a reload from `ctx`, or the park's signal. `through` sends
+    /// the derived address through a block parameter; `again` reloads the
+    /// base in a loop that parks.
+    fn hand(after: &str, through: bool, again: bool) -> FreshnessInput {
+        let mut sig = Signature::new(CallConv::SystemV);
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let mut func = ir::Function::with_name_signature(UserFuncName::user(0, 0), sig);
+        let mut fctx = FunctionBuilderContext::new();
+        let mut b = FunctionBuilder::new(&mut func, &mut fctx);
+        let mut park_sig = Signature::new(CallConv::SystemV);
+        park_sig.params.push(AbiParam::new(types::I64));
+        park_sig.returns.push(AbiParam::new(types::I64));
+        let park_sig = b.import_signature(park_sig);
+        let name = b
+            .func
+            .declare_imported_user_function(UserExternalName::new(0, 1));
+        let park = b.import_function(ExtFuncData {
+            name: ExternalName::user(name),
+            signature: park_sig,
+            colocated: false,
+        });
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let ctx = b.block_params(entry)[0];
+        let top = if again {
+            let top = b.create_block();
+            b.ins().jump(top, &[]);
+            b.switch_to_block(top);
+            Some(top)
+        } else {
+            None
+        };
+        let old = b
+            .ins()
+            .load(types::I64, MemFlags::trusted(), ctx, offsets::CTX_DATA_BASE);
+        let field = b.ins().iadd_imm(old, 8);
+        let early = b.ins().load(types::I64, MemFlags::trusted(), field, 0);
+        let field = if through {
+            let next = b.create_block();
+            let p = b.append_block_param(next, types::I64);
+            b.ins().jump(next, &[field.into()]);
+            b.switch_to_block(next);
+            p
+        } else {
+            field
+        };
+        let call = b.ins().call(park, &[ctx]);
+        let signal = b.inst_results(call)[0];
+        let address = match after {
+            "stale" => field,
+            "ctx" => {
+                let fresh =
+                    b.ins()
+                        .load(types::I64, MemFlags::trusted(), ctx, offsets::CTX_DATA_BASE);
+                b.ins().iadd_imm(fresh, 8)
+            }
+            "signal" => {
+                let fresh = b.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    signal,
+                    offsets::RESUME_DATA_BASE,
+                );
+                b.ins().iadd_imm(fresh, 8)
+            }
+            _ => unreachable!(),
+        };
+        let late = b.ins().load(types::I64, MemFlags::trusted(), address, 0);
+        let sum = b.ins().iadd(early, late);
+        if let Some(top) = top {
+            let done = b.create_block();
+            b.ins().brif(sum, top, &[], done, &[]);
+            b.switch_to_block(done);
+        }
+        b.ins().return_(&[sum]);
+        b.seal_all_blocks();
+        b.finalize();
+        let ctx = func.dfg.block_params(func.layout.entry_block().unwrap())[0];
+        (func, ctx, park)
+    }
+
+    /// Every session entry the corpus plans, compiled to an object with the
+    /// Rust check on, and the hand-built functions.
+    fn cases() -> Vec<FreshnessInput> {
+        let mut out = Vec::new();
+        for after in ["stale", "ctx", "signal"] {
+            for through in [false, true] {
+                for again in [false, true] {
+                    out.push(hand(after, through, again));
+                }
+            }
+        }
+        let quiet = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        for c in corpus() {
+            let w = &c.world;
+            for (entry, bindings) in session_cases(w) {
+                let planned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    plan(w, &entry, &bindings).is_ok()
+                }));
+                if !matches!(planned, Ok(true)) {
+                    continue;
+                }
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    capture_freshness_inputs(|| object(w, &entry, &bindings, None)).1
+                }));
+                if let Ok(funcs) = r {
+                    out.extend(funcs);
+                }
+            }
+        }
+        std::panic::set_hook(quiet);
+        out
+    }
+
+    #[test]
+    fn freshness_matches_rust() {
+        let entry = package().entry("control_session_freshness", true);
+        let funcs = cases();
+        let rust = rust(&funcs);
+        let vesper = entry.text(&input(&funcs));
+        let refused = rust.lines().filter(|l| l.starts_with("err ")).count();
+        let mut bad = 0;
+        for (i, (r, v)) in rust.lines().zip(vesper.lines()).enumerate() {
+            if r != v {
+                bad += 1;
+                if bad <= 5 {
+                    eprintln!("freshness: function {i}:\n  rust:   {r}\n  vesper: {v}");
+                }
+            }
+        }
+        assert_eq!(rust.lines().count(), vesper.lines().count());
+        eprintln!(
+            "freshness: {} functions ({} sessions), {refused} refused; {bad} differ",
+            funcs.len(),
+            funcs.len() - 12
+        );
+        assert!(funcs.len() > 12, "no corpus session compiled");
+        assert!(refused >= 4, "only {refused} refusals");
+        assert_eq!(bad, 0);
+    }
+
+    /// What the check costs, Rust against Vesper (the Vesper side also
+    /// decodes its input).
+    #[test]
+    #[ignore = "timing; run with CHECK_HARNESS_SPEED=1 and --ignored"]
+    fn freshness_cost() {
+        let entry = package().entry("control_session_freshness", true);
+        let funcs = cases();
+        let bytes = input(&funcs);
+        let (r, v) = abba(
+            "session freshness",
+            &mut || {
+                time(|| {
+                    std::hint::black_box(rust(&funcs));
+                })
+            },
+            &mut || {
+                time(|| {
+                    std::hint::black_box(entry.text(&bytes));
+                })
+            },
+        );
+        eprintln!(
+            "rust {r:?} vesper {v:?} ({:.2}x)",
+            v.as_secs_f64() / r.as_secs_f64()
+        );
+    }
+}
