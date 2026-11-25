@@ -5085,6 +5085,177 @@ pub fn analyze_fn_substructural_lints(
 ```
 
 
+=== 19.6 Vesper Lint: Substructural, Effect, and Capability Linting (`vesper lint`)
+<ch-18-6>
+
+Conventional systems linters such as Rust's `cargo clippy` operate as heuristic syntax and HIR visitors layered atop an already-erased borrow representation, while project-specific lints (`dylint`) require dynamic linking against unstable `rustc_private` compiler internals. Because whole-record mutable references (`&mut T`) erase per-field mutability at call boundaries, syntactic linters cannot distinguish an intentionally exclusive state transition from an overbroad borrow that needlessly blocks caller-side disjoint field access, nor can purely textual autofixes guarantee macro hygiene, drop-timing preservation, or SemVer variance across public package interfaces.
+
+*Vesper Lint* (`vesper lint`, implemented in `crates/vesper-lint` and self-hosted in Vesper via `@vesper/lint`) elevates static linting from heuristic pattern matching to _typed capability minimization_. Rather than walking untyped syntax trees in isolation, `vesper-lint` consumes the compiler's `CheckedProgram`—retaining resolved `FieldTree` read/write footprints, Place Capability Graph (PCG) loans, range-discharged residual effect rows, and lexical region escape sets—alongside the lossless Rowan concrete syntax tree (CST). Every diagnostic with an automated repair emits budgeted, hygiene-checked CST splices that are incrementally re-parsed and re-checked before commitment.
+
+#figure(
+  table(
+    columns: (1.25fr, 1.45fr, 1.35fr, 1.75fr),
+    align: (left, left, left, left),
+    table.header(
+      [*Dimension*],
+      [*`cargo clippy` + `dylint`*],
+      [*`clang-tidy`*],
+      [*Vesper Lint (`vesper lint`)*],
+    ),
+    [*Primary IR*],
+    [AST / HIR / MIR visitors],
+    [Clang AST matchers + CFG],
+    [Lossless CST + `CheckedProgram` (PCG, `FieldTree`, residual `eff`)],
+    [*Borrow Precision*],
+    [Whole-reference (`&T` / `&mut T`)],
+    [Pointer/reference heuristics],
+    [Exact per-field read/write footprints ($W_x, R_x subset.eq upright("Fields")(S)$)],
+    [*Effect & Authority*],
+    [None (ad-hoc panic/unwrap lints)],
+    [`noexcept` checks only],
+    [Residual `eff` row contraction + `Loom.toml` `capability_ceiling` audit],
+    [*Rewrite Engine*],
+    [Imperative per-lint callbacks],
+    [Imperative AST transformers],
+    [Substructural footprint solver + deterministic bounded saturation],
+    [*Autofix Safety*],
+    [Text splices (`MachineApplicable`)],
+    [Source-range replacements],
+    [`ScopeSet` hygiene + byte budgets + `--semver-safe` + `CheckedProgram` replay],
+    [*Extensibility*],
+    [Unstable `rustc_private` dylibs],
+    [C++ out-of-tree plugins],
+    [Single static `vesper` binary; self-hosted `@vesper/lint` port],
+  ),
+  caption: [Architectural comparison of Vesper Lint against `cargo clippy` and `clang-tidy`.],
+  kind: table,
+) <tab:lint-comparison>
+
+==== Lint Taxonomy and Core Diagnostic Catalog <sec:vesper-lint-catalog>
+
+Vesper Lint organizes diagnostics into four stable code families (`L01xx`–`L04xx`) so package manifests can govern substructural precision, memory-hierarchy discipline, algebraic canonicalization, and package authority independently:
+
+#figure(
+  table(
+    columns: (0.72fr, 1.48fr, 0.75fr, 2.05fr),
+    align: (left, left, left, left),
+    table.header(
+      [*Code*],
+      [*Lint Name*],
+      [*Default*],
+      [*Checked Condition and Repair*],
+    ),
+    [`L0101`],
+    [`overbroad_inout_projection`],
+    [`warn`],
+    [Parameter `inout x: S` (or `inout x.P: S`) accesses proper field subset $F = W_x union R_x subset.neq P$ with $W_x != emptyset$; narrows to `inout x.{F}: S`.],
+    [`L0102`],
+    [`unused_effect_capability`],
+    [`warn`],
+    [Declared `eff` row contains capability $E_i in.not E_(upright("body"))$ after lexical `handle` discharge and range-proven `Fail` elimination; contracts `eff` clause.],
+    [`L0103`],
+    [`overly_restrictive_mode`],
+    [`warn`],
+    [`inout` parameter has $W_x = emptyset$ (demotes to `in`), or `sink` parameter of a `copy` type is never moved into an owning slot (demotes to `in`).],
+    [`L0104`],
+    [`redundant_view_copy`],
+    [`warn`],
+    [Clones or re-allocates a backing buffer solely for read inspection where a §13 bound view (`as_slice()`) satisfies non-overlap (`E1531`).],
+    [`L0204`],
+    [`demote_alloc_to_region`],
+    [`warn`],
+    [Heap `Alloc` allocation has empty PCG return/out-loan escape set ($upright("Esc")(a) = emptyset$); suggests lexical `Region` arena demotion (`vesper-alloc`).],
+    [`L0205`],
+    [`missed_fip_opportunity`],
+    [`allow`],
+    [Destructive `match` on a `sink` `linear`/`affine` value reconstructs a size-compatible variant without preserving reuse-slot field layout.],
+    [`L0301`],
+    [`checked_arith_in_loan_hazard`],
+    [`warn`],
+    [Checked scalar arithmetic precedes an intended `inout` refactor site where an unhandled `Fail` would violate `E0402` abort-frame loan discipline.],
+    [`L0302`],
+    [`algebraic_canonicalization`],
+    [`warn`],
+    [Bounded equality saturation simplifies redundant bitmask, shift-reduce, or SIMD lane-broadcast expressions to canonical zero-cost forms.],
+    [`L0401`],
+    [`unused_package_capability`],
+    [`warn`],
+    [`Loom.toml` `capability_ceiling` declares host authority (`Fs`, `Net`, `Env`) unreferenced by the package's transitive effect closure.],
+  ),
+  caption: [Core Vesper Lint diagnostic families and default severity levels.],
+  kind: table,
+) <tab:lint-catalog>
+
+==== Substructural Narrowing and Autofix Soundness <sec:vesper-lint-soundness>
+
+Because narrowing a function's parameter projection or effect row alters its static interface, Vesper Lint restricts automated `--fix` rewrites to derivations satisfying four soundness judgements:
+
++ *Contravariant `FieldTree` Projection Narrowing (`[Lint-Narrow-Proj]`):* Let function `f` declare parameter `inout x.P: S` (where whole-struct `inout x: S` abbreviates $P = upright("Fields")(S)$), and let $W_x subset.eq P$ and $R_x subset.eq P backslash W_x$ denote the static write and read leaf sets of `x` across `f`'s body in `CheckedProgram`. When `f` is neither a `pact` implementation member, address-taken as a first-class `fn` value, nor bound to an `extern` ABI ($not upright("ImplMember")(f) and not upright("AddrTaken")(f) and not upright("ExternAbi")(f)$), if $W_x != emptyset$ and $F = W_x union R_x subset.neq P$, `L0101` narrows the parameter to `inout x.{F}: S`:
+  $ upright("Cap")_(upright("caller"))(p, upright("excl"), P) and F subset.neq P ==> upright("Cap")_(upright("caller"))(p, upright("excl"), F) * upright("Cap")_(upright("caller"))(p, upright("excl"), P backslash F) $
+  By PCG framing, narrowing $P$ to $F$ is _contravariantly wider_ for every existing source call site: any caller holding exclusive capability on $P$ satisfies the narrowed loan $F$ while retaining disjoint capability on $P backslash F$. When $R_x != emptyset$, the linter emits a secondary advisory note that $R_x$ is read-only and may be split into a shared `in` projection if callers require concurrent readers, without applying arity-changing edits automatically.
+
++ *Residual Effect-Row Contraction (`[Lint-Narrow-Eff]`):* Let $E_(upright("decl"))$ be `f`'s declared effect row and $E_(upright("body"))$ be the residual effect row inferred after lexical `handle` elimination and static interval-range discharge of unreachable `Fail[RuntimeError]` checks. If $Delta E = E_(upright("decl")) backslash E_(upright("body")) != emptyset$ and $not upright("ImplMember")(f) and not upright("AddrTaken")(f) and not upright("ExternAbi")(f)$, `L0102` rewrites `eff E_decl` to `eff E_body` (eliding the `eff` clause entirely when $E_(upright("body")) = emptyset$). Effect row subtyping ($E_(upright("body")) subset.eq E_(upright("decl"))$) preserves typing at all direct call sites.
+
++ *Mode Demotion and Drop-Timing Preservation (`[Lint-Demote-Mode]`):* If `inout x.P: S` has $W_x = emptyset$, `L0103` demotes the pass mode to shared `in x.P: S`. Conversely, if `sink x: T` is never consumed by a move or destructive bind, automatic demotion to `in x: T` is permitted _only_ when $T : upright("copy")$. For `affine` types with observable destructors or `linear` obligations, shifting `sink` to `in` moves destruction across the call boundary or leaves an unconsumed obligation in the caller; `L0103` therefore reports `linear`/`affine` mode demotions strictly as non-autofixed advisories.
+
++ *`ScopeSet` Hygiene, Pre-Port Budgets, and Replay Gate (`[Lint-CST-Fix]`):* Every candidate edit batch $Delta = {(s_i, e_i, r_i)}_(i=1)^k$ over source buffer $S$ must satisfy:
+  1. _Macro and sugar hygiene:_ Every span $s_i .. e_i$ resolves to a single unsplit, program-backed root `ScopeSet` ($upright("ScopeSet")(s_i .. e_i) = {emptyset_(upright("root"))}$), preventing corruptions inside `sugar` or `Forge` expansions, with pairwise non-overlapping byte offsets ($e_i <= s_(i+1)$).
+  2. _SemVer variance gate (`--semver-safe`):_ On `pub` items, `--fix --semver-safe` permits body-internal repairs (such as `L0204` local region demotion or `L0302` canonicalization) and suppresses signature rewrites whenever module-interface (`mif:blake3`) signature stability is locked.
+  3. _Bounded preflight and compiler replay:_ Complexity limits (`Limits.max_type_depth` $<= 32$, checked via an explicit iterative stack prior to type encoding) and candidate byte budgets ($abs(S) - sum_i (e_i - s_i) + sum_i abs(r_i) <= B_(upright("max"))$, validated _before_ copying replacement slices across the port boundary) guard against pathological inputs. Rewritten text $S'$ is committed if and only if `check(parse(S'))` succeeds with zero new diagnostics and `stylus::format(S')` is idempotent.
+
+Consider a broker accounting routine that borrows an entire `Broker` record mutably and declares an unused `Fail[RuntimeError]` capability despite using modular wrapping arithmetic:
+
+```vesper
+copy struct Broker { index: u64, metrics: u64, config: u64 }
+
+// Before `vesper lint --fix`: overbroad `inout` (`L0101`) + unused `eff` (`L0102`).
+fn record_batch(inout broker: Broker, count: u64) eff [Fail[RuntimeError]] {
+    broker.index = wrapping_add(broker.index, count);
+    broker.metrics = wrapping_add(broker.metrics, 1);
+}
+
+// After `vesper lint --fix`: minimal disjoint projection and contracted effect row.
+fn record_batch(inout broker.{index, metrics}: Broker, count: u64) {
+    broker.index = wrapping_add(broker.index, count);
+    broker.metrics = wrapping_add(broker.metrics, 1);
+}
+```
+
+After narrowing, a caller can pass `inout broker.{index, metrics}` and simultaneously lend `broker.config` by shared `in` reference to a sibling argument without tripping `FieldTree` overlap errors.
+
+==== Package Policy Discovery and CLI Contract <sec:vesper-lint-cli>
+
+`vesper lint` ships inside the single static `vesper` binary (`crates/vesper-cli`) with its CLI command layer self-hosted in Vesper (`hc_lint_run`), automatically discovering `[lints]` policy from the enclosing workspace or package `Loom.toml` unless overridden via `--config`:
+
+```toml
+[package]
+name = "@vesper-std/broker"
+version = "0.4.0"
+capability_ceiling = []
+
+[lints]
+overbroad_inout_projection = "deny"     # L0101
+unused_effect_capability   = "deny"     # L0102
+demote_alloc_to_region     = "warn"     # L0204
+missed_fip_opportunity     = "warn"     # L0205
+```
+
+```sh
+vesper lint src/lib.ves                          # Human-readable multi-span diagnostics
+vesper lint src/lib.ves --fix --semver-safe      # Hygiene- & SemVer-gated CST autofixes
+vesper lint src/lib.ves --json --config ci.toml  # Machine-readable SARIF/JSON report
+```
+
+Across the C ABI boundary between the Vesper CLI layer and host I/O (`hc_lint_run`), standard-output write panics (such as broken pipes or `/dev/full` redirection) are caught before unwinding across `extern "C"`, preserving the toolchain's standard exit code `101` rather than aborting the process. Oversized inputs deterministically return structured `LintError` diagnostics (`"type complexity limit"` or `"candidate byte limit"`) without stack overflow or unbounded intermediate allocation.
+
+==== Self-Hosting, Differential Conformance, and Verification <sec:vesper-lint-verification>
+
+The lint engine is self-hosted in Vesper (`crates/vesper-lint/vesper/`) and validated against the Rust seed oracle (`vesper-lint-seed`) under three continuous verification gates:
+
++ *Bit-Identical Differential and Zero-Leak Suites:* `tests/differential.rs` runs every corpus program, TOML policy configuration, and autofix splice batch through both the seed engine and `@vesper/lint`, asserting identical diagnostic codes, primary/secondary spans, and rewritten source bytes, while serialized allocation-counter checks (`port_frees_its_allocations`) verify zero leaked port buffers per invocation.
++ *Four-Subsystem Divergent Mutation Gate:* Under `vesper-port-divergent` (`VESPER_LINT_DIVERGE`), `port/test-port.sh` and `BUILD.bazel` inject targeted semantic mutations into each of the four ported subsystems—the _effect rule_, the _projection rule_, the _TOML policy reader_, and the _source-edit engine_—requiring the differential suite to catch and reject every mutant before a port change can land.
++ *Kernel-Replayed Narrowing Proofs:* Extracted Lean 4 models of the projection-subtyping and PCG-framing obligations (`LintNarrowingSafety`) are replayed from `.olean` artifacts by the pinned *Logos* kernel checker (`logos-sweep`), certifying that `[Lint-Narrow-Proj]` and `[Lint-Narrow-Eff]` preserve caller disjointness and effect soundness across all well-typed call graphs.
+
 == 20. Vesper Codex: Living Documentation and Hermetic JIT Doctests
 <ch-19>
 #chapter-deck[Obligation Diagrams, Mutation Footprints, Signature Search, and Doctests]
