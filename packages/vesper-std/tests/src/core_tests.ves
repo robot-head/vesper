@@ -35,6 +35,7 @@ test {
         and_then as result_and_then,
         or as result_or
     };
+    use @vesper-std/core::guard::guard;
     use self::support::{
         check,
         some_u64,
@@ -194,7 +195,20 @@ test {
             raise(error, k) => 77,
         };
         r = check(missing == 77, 18, r);
+        r = check(guard_sum(some, some) == 8, 19, r);
+        r = check(guard_sum(none, some) == 100, 20, r);
+        r = check(guard_sum(some, none) == 101, 21, r);
         r
+    }
+
+    fn guard_sum(first: Option[u64], second: Option[u64]) -> u64 {
+        guard let Option::Some(x) = first else {
+            return 100;
+        };
+        guard let Option::Some(y) = second else {
+            return 101;
+        };
+        wrapping_add(x, y)
     }
 
     pub fn check_core_result() -> u64 {

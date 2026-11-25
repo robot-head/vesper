@@ -1,0 +1,15 @@
+// Refutable binding from manuscript §7.6. On success the pattern binds
+// names for the enclosing block tail; the failure block must diverge.
+pub sugar guard: stmt {
+    rule (guard let $pattern:pat = $subject:expr else $failure:block; $..rest:stmts) => {
+        match $subject {
+            $pattern => {
+                $..rest
+            },
+            _ => {
+                let rejected: Never = $failure;
+                rejected
+            },
+        }
+    }
+}
