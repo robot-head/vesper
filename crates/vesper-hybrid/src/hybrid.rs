@@ -233,6 +233,10 @@ mod doctest_extract_words;
 // package's tests/self_host_test_mutants.rs.
 #[path = "../../../tests/common/test_mutants_words.rs"]
 mod test_mutants_words;
+// The doctest source guard words (SH5 lane 14 part 5), shared with the
+// root package's tests/self_host_doctest_guard.rs.
+#[path = "../../../tests/common/doctest_guard_words.rs"]
+mod doctest_guard_words;
 
 // The inliner swap's encoder and decoder (#1250), shared with the root
 // package's tests/self_host_ir_inline.rs.
@@ -1693,6 +1697,17 @@ const VESPER_TEST_MUTANTS: vesper::test_mutants::TestMutantsTable =
         },
     };
 
+/// `vesper::doctest_guard::DocTestGuardTable` from `modules/test_runner`:
+/// the doctest source profile of `@vesper/test-runner`, which parses the
+/// source again with `@vesper/ast`.
+const VESPER_DOCTEST_GUARD: vesper::doctest_guard::DocTestGuardTable =
+    vesper::doctest_guard::DocTestGuardTable {
+        guard: |source, _, limits| {
+            let input = doctest_guard_words::guard_input(source, limits);
+            doctest_guard_words::decode_guard(&test_runner_binding::doctest_guard_words(&input))
+        },
+    };
+
 /// `ir_swap`'s `inline` hook from `modules/ir_inline`: the inliner of
 /// `@vesper/ir-inline`. The package decides and splices; the hook encodes
 /// the world's answers and the program, and reads the report and the
@@ -1973,6 +1988,11 @@ extern "C" fn install() {
     }
     if on("test_mutants")
         && vesper::test_mutants::install_test_mutants(VESPER_TEST_MUTANTS).is_err()
+    {
+        std::process::abort();
+    }
+    if on("doctest_guard")
+        && vesper::doctest_guard::install_doctest_guard(VESPER_DOCTEST_GUARD).is_err()
     {
         std::process::abort();
     }
