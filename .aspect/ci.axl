@@ -39,6 +39,7 @@ def _platform_tests(ctx: TaskContext) -> int:
         "logos-sweep-summary",
         "logos-pins",
         "logos-setup",
+        "lean-toolchains",
     ]:
         check(ctx, ctx.std.env.current_exe(), ["ci", "tests", suite], root)
     return run_command(ctx, "python3", ["-m", "unittest", "discover", "-s", "scripts/ci/tests", "-p", "test_platform*.py"], True, "")
