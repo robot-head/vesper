@@ -491,7 +491,7 @@ fn drive(inout s: Session, in o: Options)
     if r > 0 && !lib {
         return pass(inout s, step_vsys_run());
     }
-    let r = step(inout s, step_check());
+    let r = check(inout s);
     if is_failure(r) {
         return pass_failed(in s, r);
     }
@@ -976,4 +976,92 @@ fn windows_link_request(in object: Slice[u8], in path: Slice[u8], in o: Options)
 // the host checks it before decoding.
 pub fn record_format() -> u64 {
     driver_record_format()
+}
+
+// ---- The semantic check ----
+//
+// `check::check` of src/check.rs, sequenced in Vesper (front-end wiring
+// slice 2, #1900): the driver's semantic check runs here instead of one
+// Rust `Check` pass. Each part is still the Rust checker's own code, one
+// `hd_step` over the session (the `Check*` steps of
+// crates/vesper-hybrid/src/driver.rs), so the hybrid prints what the
+// default compiler prints; later slices swap each part for its Vesper
+// port (#1179 core typing, #1180 effects, #1185 pact). The checked world
+// stays in the session, where the passes after the check read it.
+
+// The parts (`Step::Check*` in crates/vesper-hybrid/src/driver.rs).
+fn part_untyped() -> u32 {
+    28
+}
+
+fn part_tensor() -> u32 {
+    29
+}
+
+fn part_frontend() -> u32 {
+    30
+}
+
+fn part_uses() -> u32 {
+    31
+}
+
+fn part_finish() -> u32 {
+    32
+}
+
+fn part_report() -> u32 {
+    33
+}
+
+fn failed(r: i64) -> bool {
+    r < 0
+}
+
+fn part(inout s: Session, which: u32) -> i64 eff [Ffi[HybridDriver]] {
+    HybridDriver::hd_step(inout s, which, in "".as_bytes())
+}
+
+// The semantic check of the session's parse: the number of diagnostics it
+// printed (0 when it printed none), or a pass failure (`hd_step`'s
+// negative codes). The steps of `check::check`:
+// 1. Untyped value-enum members are literals at every use (§2.2): while a
+//    rewrite applies, the rewritten module is checked instead and the
+//    rewrite's diagnostics follow the check's.
+// 2. A module with source tensor types (§28.2) is checked and elaborated
+//    by `tensor_types`, which runs the core checker itself.
+// 3. Otherwise the Beacon prelude is added when the module uses it, Pact
+//    elaborates traits and models and the core checker runs, then the
+//    Beacon rules (§22) and the `use`-outside-a-package diagnostics.
+// 4. The diagnostics are printed unless the library export path reports
+//    them.
+fn check(inout s: Session) -> i64 eff [Ffi[HybridDriver]] {
+    loop {
+        let r = part(inout s, part_untyped());
+        if failed(r) {
+            return r;
+        }
+        if r == 0 {
+            break;
+        }
+    }
+    let tensor = part(inout s, part_tensor());
+    if failed(tensor) {
+        return tensor;
+    }
+    if tensor == 0 {
+        let r = part(inout s, part_frontend());
+        if failed(r) {
+            return r;
+        }
+        let r = part(inout s, part_uses());
+        if failed(r) {
+            return r;
+        }
+    }
+    let r = part(inout s, part_finish());
+    if failed(r) {
+        return r;
+    }
+    part(inout s, part_report())
 }

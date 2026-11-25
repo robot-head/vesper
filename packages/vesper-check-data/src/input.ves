@@ -9,6 +9,7 @@ use self::util::{
     u32_at
 };
 use self::names::{
+    names_sized,
     Names,
     names_new
 };
@@ -312,6 +313,52 @@ pub fn read_ctx(inout r: Reader, in b: Slice[u8]) -> Ctx {
         world: world,
         tmap: tmap,
         nmap: nmap
+    }
+}
+
+// The names of an input whose types section is empty and whose world is
+// empty (a task that needs no checker data, such as the stack bound):
+// the names in a table sized for them, and the name map. `r` is left at
+// the first task section. For any other input `ok` is false and `r` is
+// unmoved: its reader is `read_ctx`.
+pub struct NamesCtx {
+    names: Names,
+    nmap: ChunkSeq[u32],
+    ok: bool,
+}
+
+pub fn read_names_ctx(inout r: Reader, in b: Slice[u8]) -> NamesCtx {
+    let start = r.pos;
+    let count = r.word(in b);
+    r.pos = start;
+    let mut slots: u64 = 16;
+    loop {
+        if slots >= wrapping_mul(count, 4) || slots >= 4096 {
+            break;
+        }
+        slots = wrapping_mul(slots, 2);
+    }
+    let mut names = names_sized(slots);
+    names.reserve_names(wrapping_add(count, 1), wrapping_mul(count, 16));
+    let mut nmap: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](count);
+    read_names(inout r, in b, inout names, inout nmap);
+    // The types count, then the empty world: the fip flag (either), the
+    // ADT and effect counts and the three span tables.
+    let types = r.word(in b);
+    let fip = r.word(in b);
+    let mut empty = types == 0;
+    for i in 0..5 {
+        if r.word(in b) != 0 {
+            empty = false;
+        }
+    }
+    if !empty {
+        r.pos = start;
+    }
+    NamesCtx {
+        names: names,
+        nmap: nmap,
+        ok: empty
     }
 }
 

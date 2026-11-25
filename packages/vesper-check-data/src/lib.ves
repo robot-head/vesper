@@ -20,6 +20,7 @@
 
 use self::util::{
     n32,
+    put_text_words,
     u32_at,
     u8_at,
     w
@@ -71,22 +72,7 @@ fn put_u64(inout o: ChunkSeq[u8], v: u64) {
 pub fn pack_text(in text: ChunkSeq[u8]) -> ChunkSeq[u64] {
     let n = text.len();
     let mut out = ChunkSeq::with_capacity[u64](wrapping_add(n >> 3, 2));
-    out.push(n);
-    let mut x: u64 = 0;
-    let mut k: u32 = 0;
-    for i in 0..n {
-        let b = widen_u64(u8_at(in text, i));
-        x = x | wrapping_shl_u64(b, wrapping_mul(k, 8));
-        k = wrapping_add(k, 1);
-        if k == 8 {
-            out.push(x);
-            x = 0;
-            k = 0;
-        }
-    }
-    if k != 0 {
-        out.push(x);
-    }
+    put_text_words(inout out, in text[0..n]);
     out
 }
 

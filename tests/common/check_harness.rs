@@ -813,6 +813,49 @@ pub fn abba(
     (r, v)
 }
 
+/// ABBA timing for the flip gate: `rounds` paired rounds (rust, vesper,
+/// vesper, rust), each round's ratio the sum of its two Vesper times over
+/// its two Rust times. Prints and returns the median ratio and the 95%
+/// confidence interval of the geometric mean ratio (Student's t over the
+/// log ratios).
+pub fn abba_ci(
+    label: &str,
+    rounds: usize,
+    rust: &mut dyn FnMut() -> Duration,
+    vesper: &mut dyn FnMut() -> Duration,
+) -> (f64, f64, f64) {
+    // warm both sides once
+    rust();
+    vesper();
+    let mut ratios = vec![];
+    for _ in 0..rounds {
+        let r1 = rust();
+        let v1 = vesper();
+        let v2 = vesper();
+        let r2 = rust();
+        ratios.push((v1 + v2).as_secs_f64() / (r1 + r2).as_secs_f64());
+    }
+    let logs: Vec<f64> = ratios.iter().map(|r| r.ln()).collect();
+    let n = logs.len() as f64;
+    let mean = logs.iter().sum::<f64>() / n;
+    let var = logs.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / (n - 1.0);
+    // two-sided 97.5% t quantiles by degrees of freedom; 1.96 beyond 30
+    let t = match rounds - 1 {
+        0..=4 => 2.776,
+        5..=9 => 2.262,
+        10..=14 => 2.145,
+        15..=19 => 2.093,
+        20..=29 => 2.045,
+        _ => 1.96,
+    };
+    let half = t * (var / n).sqrt();
+    let (lo, hi) = ((mean - half).exp(), (mean + half).exp());
+    ratios.sort_by(f64::total_cmp);
+    let median = ratios[ratios.len() / 2];
+    eprintln!("ABBA-CI {label}: {rounds} rounds, median {median:.3}x, 95% CI {lo:.3}x..{hi:.3}x");
+    (median, lo, hi)
+}
+
 /// The wall time of `f`.
 pub fn time(f: impl FnOnce()) -> Duration {
     let t = Instant::now();

@@ -291,12 +291,26 @@ pub struct Session {
     source_map: Vec<vesper::forge_frontend::SourceMapSegment>,
     parsed: Option<parser::Parse>,
     checked: Option<check::Checked>,
+    /// `check::check`'s state between its parts.
+    checking: Checking,
     /// The last error message or pass result (`hd_text`).
     text: Vec<u8>,
     /// `WasmInput` handed the build to the Vesper driver (#1895).
     wasm_input: bool,
     /// `EbpfInput` did.
     ebpf_input: bool,
+}
+
+/// What `check::check` keeps between the parts the Vesper driver
+/// sequences (`check` in modules/driver/src/lib.ves, #1900).
+#[derive(Default)]
+struct Checking {
+    /// The module the next part checks when the untyped value-enum members
+    /// rewrote the parse's (the latest rewrite).
+    rewritten: Option<vesper::ast::Module>,
+    /// The diagnostics of each rewrite, outermost first: `check` appends
+    /// them innermost first once the rewritten module is checked.
+    pending: Vec<Vec<vesper::ast::Diagnostic>>,
 }
 
 /// The passes (`step_*` in modules/driver/src/lib.ves).
@@ -334,11 +348,19 @@ enum Step {
     EmitLean,
     EmitClif = 26,
     IoError,
+    // `check::check`'s parts, sequenced by `check` in
+    // modules/driver/src/lib.ves (#1900).
+    CheckUntyped,
+    CheckTensor,
+    CheckFrontend,
+    CheckUses,
+    CheckFinish,
+    CheckReport,
     WasmInput = 60,
     EbpfInput,
 }
 
-const STEPS: [Step; 28] = [
+const STEPS: [Step; 34] = [
     Step::IsPackage,
     Step::Load,
     Step::EbpfBuild,
@@ -365,6 +387,12 @@ const STEPS: [Step; 28] = [
     Step::EmitLean,
     Step::EmitClif,
     Step::IoError,
+    Step::CheckUntyped,
+    Step::CheckTensor,
+    Step::CheckFrontend,
+    Step::CheckUses,
+    Step::CheckFinish,
+    Step::CheckReport,
     Step::WasmInput,
     Step::EbpfInput,
 ];
@@ -470,6 +498,12 @@ impl Session {
             | Step::EmitCst
             | Step::ReportSyntax
             | Step::Check
+            | Step::CheckUntyped
+            | Step::CheckTensor
+            | Step::CheckFrontend
+            | Step::CheckUses
+            | Step::CheckFinish
+            | Step::CheckReport
             | Step::EmitHir
             | Step::EmitInterface
             | Step::LibBuild => self.front_step(step),
@@ -590,6 +624,7 @@ pub mod host {
                     source_map: Vec::new(),
                     parsed: None,
                     checked: None,
+                    checking: Checking::default(),
                     text: vec![],
                     wasm_input: false,
                     ebpf_input: false,

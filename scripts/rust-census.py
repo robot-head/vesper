@@ -133,7 +133,7 @@ CRATES = {
 
 # Root compiler module -> (owner lane(s), Vesper package, status note)
 MODULES = {
-    "verified_codegen": ("#1886", "vesper-verified-codegen", "owner 2026-11-25: port to Vesper; parts 1-3: slot IR, select, encoders, ELF/Mach-O/COFF containers, range certificate (0 diffs: 12,488 rows, 1,034 builds over 5 targets, 13,749 certificate checks; select 0.91x, certificate 0.93x); left: lowering, fail, swap"),
+    "verified_codegen": ("#1886", "vesper-verified-codegen", "owner 2026-11-25: port to Vesper; parts 1-4a: slot IR, select, encoders, ELF/Mach-O/COFF containers, range certificate, plan + lowering without handlers (0 diffs: 12,488 rows, 1,034 builds over 5 targets, 13,749 certificate checks, 222 lowerings; select 0.91x, certificate 0.93x, lowering 1.07x); left: mono, handlers/evidence/regions, coverage, cli, swap"),
     "lean": ("SH5-18", "vesper-lean-extract", "part 3a 2.37x"),
     "lean_ir": ("SH5-18", "vesper-lean-extract", ""),
     "lean_nodes": ("SH5-18", "vesper-lean-extract", ""),
@@ -168,8 +168,9 @@ MODULES = {
     "integer_widths": ("SH2-7", "vesper-check-core-typing", ""),
     "loops": ("SH2-10", "vesper-check-loops-atomics", ""),
     "ir": ("SH3-13", "vesper-place-ir-lower", "0.40x"),
-    "doctest": ("SH5-14", "vesper-test-runner", "fence extraction + preflight moved to doctest_extract"),
+    "doctest": ("SH5-14", "vesper-test-runner", "fence extraction + preflight moved to doctest_extract, source guard to doctest_guard"),
     "doctest_extract": ("SH5-14", "vesper-test-runner", "0 diffs, 1.12x; swapped in the hybrid"),
+    "doctest_guard": ("SH5-14", "vesper-test-runner", "0 diffs, 0.39x; swapped in the hybrid"),
     "native_session": ("SH4-10, #1830", "vesper-codegen-control", "plans, data-frame freshness check (0 diffs) + park/fail/return emission swapped, 0 declined; left: copy_bytes/store_constructor and the entry glue (native walk)"),
     "runtime": ("SH4-17", "vesper-backend-checks", ""),
     "dyn_trait": ("SH2-11", "vesper-check-dyn", "0.28x"),
@@ -181,7 +182,7 @@ MODULES = {
     "main": ("SH5-12", "vesper-driver", "#1367"),
     "arrays": ("SH2-9", "", ""),
     "anvil_hash": ("SH5-14", "vesper-test-runner", "0 diffs, 0.74x; source graph, no swap until Stage 2"),
-    "atomics": ("SH2-10", "vesper-check-loops-atomics", "2.31x"),
+    "atomics": ("SH2-10, #1875", "vesper-check-loops-atomics", "port 1.25x (95% CI 1.17-1.26x), 0 diffs; not swapped (needs the checker AST in the hybrid)"),
     "anvil_sim": ("SH5-14", "", ""),
     "native_freestanding": ("SH4-14", "", ""),
     "native_vector": ("SH4-11, G1-3", "", "vectors in registers (#1500): simd 40x -> 5.0x"),
@@ -196,7 +197,7 @@ MODULES = {
     "interface": ("SH2-6", "", ""),
     "codegen_swap": ("2", "", "goes with the hybrid"),
     "ir_swap": ("2", "", "goes with the hybrid"),
-    "stack_bound": ("SH2-10", "vesper-check-loops-atomics", "2.54x"),
+    "stack_bound": ("SH2-10, #1875", "vesper-check-loops-atomics", "flip gate PASS: hybrid path 1.20x (95% CI 1.18-1.26x), port 1.08x; swapped in the hybrid"),
     "io_session": ("SH2-10", "", ""),
     "native_arrays": ("SH4-8", "", ""),
     "lib": ("SH5-12", "", ""),

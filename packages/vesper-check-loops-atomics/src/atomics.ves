@@ -565,49 +565,44 @@ fn pattern_mentions(in names: Names, in x: Exprs, in sy: Syms, p: u32) -> bool {
     false
 }
 
-// `expr_mentions`: the walk of one body.
+// `expr_mentions`: the walk of one body, as one pass over its subtree's
+// rows (the walk's answer is whether any node mentions the names, so the
+// order does not matter). A block's `let` values and a match's arm bodies
+// carry the `let` type and pattern, and the arm pattern, on their own rows.
 fn expr_mentions(in names: Names, in t: Types, in x: Exprs, in sy: Syms, e: u32) -> bool {
-    let r = x.row(e);
-    let k = r.kind;
-    if k == E_NAME || k == E_STRUCT {
-        if path_mentions(in names, in sy, r.name) {
+    let end = x.subtree_end(e);
+    for i in widen_u64(e)..widen_u64(end) {
+        let id = wrapping_u32(i);
+        let r = x.row(id);
+        let k = r.kind;
+        if k == E_NAME || k == E_STRUCT {
+            if path_mentions(in names, in sy, r.name) {
+                return true;
+            }
+        } else if k == E_CALL {
+            for j in 0..widen_u64(r.tn) {
+                if type_mentions(in t, in sy, x.ty_at(id, j)) {
+                    return true;
+                }
+            }
+        } else if k == E_CLOSURE {
+            if type_mentions(in t, in sy, r.ty) {
+                return true;
+            }
+            for j in 0..widen_u64(r.tn) {
+                if type_mentions(in t, in sy, x.ty_at(id, j)) {
+                    return true;
+                }
+            }
+        }
+        if r.is_let
+            && (
+                type_mentions(in t, in sy, r.let_ty)
+                    || pattern_mentions(in names, in x, in sy, r.pat)
+            ) {
             return true;
         }
-    } else if k == E_CALL {
-        for i in 0..widen_u64(r.tn) {
-            if type_mentions(in t, in sy, x.ty_at(e, i)) {
-                return true;
-            }
-        }
-    } else if k == E_BLOCK {
-        for i in 0..x.kid_count(e) {
-            let s = x.row(x.kid(e, i));
-            if s.is_let
-                && (
-                    type_mentions(in t, in sy, s.let_ty)
-                        || pattern_mentions(in names, in x, in sy, s.pat)
-                ) {
-                return true;
-            }
-        }
-    } else if k == E_MATCH {
-        for i in 1..x.kid_count(e) {
-            if pattern_mentions(in names, in x, in sy, x.row(x.kid(e, i)).pat) {
-                return true;
-            }
-        }
-    } else if k == E_CLOSURE {
-        if type_mentions(in t, in sy, r.ty) {
-            return true;
-        }
-        for i in 0..widen_u64(r.tn) {
-            if type_mentions(in t, in sy, x.ty_at(e, i)) {
-                return true;
-            }
-        }
-    }
-    for i in 0..x.kid_count(e) {
-        if expr_mentions(in names, in t, in x, in sy, x.kid(e, i)) {
+        if r.arm && pattern_mentions(in names, in x, in sy, r.pat) {
             return true;
         }
     }
@@ -627,12 +622,10 @@ fn function_mentions(in names: Names, in t: Types, in x: Exprs, in sy: Syms, f: 
 }
 
 fn calls_workers(in x: Exprs, in sy: Syms, e: u32) -> bool {
-    let r = x.row(e);
-    if r.kind == E_NAME && r.name == sy.parallel_for {
-        return true;
-    }
-    for i in 0..x.kid_count(e) {
-        if calls_workers(in x, in sy, x.kid(e, i)) {
+    let end = x.subtree_end(e);
+    for i in widen_u64(e)..widen_u64(end) {
+        let r = x.row(wrapping_u32(i));
+        if r.kind == E_NAME && r.name == sy.parallel_for {
             return true;
         }
     }
@@ -886,6 +879,7 @@ pub fn read_ir(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tmap
         insts: ChunkSeq::new[IrInst]()
     };
     let n = r.word(in b);
+    ir.fns.reserve(n);
     for i in 0..n {
         let name = at32(in nmap, r.word(in b));
         let la = wrapping_u32(ir.typed.len());
@@ -896,6 +890,7 @@ pub fn read_ir(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tmap
         let vn = read_typed(inout r, in b, inout ir, in nmap, in tmap, false);
         let ia = wrapping_u32(ir.insts.len());
         let k = r.word(in b);
+        ir.insts.reserve(k);
         for j in 0..k {
             let tag = wrapping_u8(r.word(in b));
             let start = r.word(in b);

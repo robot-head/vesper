@@ -670,6 +670,16 @@ vesper_crate(
             "tests/anvil_cli.rs",
             "tests/test_runner_cli.rs",
         ]),
+        # Part 5: the doctest source guard against doctest_guard::rust_guard
+        # on the same .ves files, their functions and the doctest suites.
+        "test/self_host_doctest_guard": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+            "src/doctest.rs",
+            "tests/doctest_cli.rs",
+        ]),
         # Self-hosting SH4 lane 17 (#1291): @vesper/backend-checks against
         # native_verifiers on the verifier fixtures and the corpus. Anchored
         # globs; @vesper/resonance comes from its crate's package.
@@ -1194,6 +1204,9 @@ vesper_crate(
         "test/self_host_test_mutants": "long",
         # The Anvil graph differential (#1337) runs the corpus twice.
         "test/self_host_anvil_graph": "long",
+        # The doctest guard differential (#1337) runs the corpus and every
+        # top-level function under four limit sets, twice.
+        "test/self_host_doctest_guard": "long",
         # The backend-checks differential emits every corpus program 4 times.
         "test/self_host_backend_checks": "long",
         # The optimizer policy (#1279) optimizes every corpus world three times.
