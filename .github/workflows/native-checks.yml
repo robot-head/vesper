@@ -2,8 +2,8 @@ name: Native platform checks
 # Starts the required `macOS (AArch64)` and `Windows (x86_64 MSVC)` checks for
 # a pull request only once it is ready to merge (#1479): the merge gate passes
 # (scripts/ci/merge_gate.py, #1321) and the BuildBuddy checks, `Test all
-# targets`, `Self-host differentials`, `Self-host codegen differentials`
-# (#1519) and `Native and acceptance scripts`, are green on its head commit.
+# targets`, `Self-host differentials`, `Self-host differentials 2` (#1882),
+# `Self-host codegen differentials` (#1519) and `Native and acceptance scripts`, are green on its head commit.
 # Before, every push queued for one of the account's 5 macOS runners at once,
 # and a pull request waited hours behind runs that later pushes replaced.
 #
@@ -37,7 +37,7 @@ jobs:
     name: Start macOS and Windows checks
     if: >-
       github.event.state == 'success' &&
-      (github.event.context == 'Test all targets' || github.event.context == 'Self-host differentials' || github.event.context == 'Self-host codegen differentials' || github.event.context == 'Native and acceptance scripts')
+      (github.event.context == 'Test all targets' || github.event.context == 'Self-host differentials' || github.event.context == 'Self-host codegen differentials' || github.event.context == 'Self-host differentials 2' || github.event.context == 'Native and acceptance scripts')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -62,6 +62,14 @@ jobs:
             --jq '[.statuses[] | select(.context == "Self-host codegen differentials") | .state] | first // "absent"')
           if [ "$codegen" != success ] && [ "$codegen" != absent ]; then
             echo "Self-host codegen differentials is $codegen"
+            exit 0
+          fi
+          # Likewise a head from before the second self-host split (#1882)
+          # has no `Self-host differentials 2` status.
+          part2=$(gh api "repos/$REPO/commits/$SHA/status" \
+            --jq '[.statuses[] | select(.context == "Self-host differentials 2") | .state] | first // "absent"')
+          if [ "$part2" != success ] && [ "$part2" != absent ]; then
+            echo "Self-host differentials 2 is $part2"
             exit 0
           fi
           pr=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq "[.[] | select(.state == \"open\" and .head.sha == \"$SHA\" and .head.repo.full_name == \"$REPO\")] | first // empty")
