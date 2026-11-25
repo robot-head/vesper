@@ -339,11 +339,15 @@ class PlatformWorkflowTests(unittest.TestCase):
         source_steps = source["jobs"]["native-tier1-source"]["steps"]
         commands = "\n".join(s.get("run", "") for s in source_steps)
         self.assertIn("--no-default-features", commands)
-        self.assertIn("cargo tree --locked", commands)
         self.assertIn("--test forge_authority", commands)
         self.assertIn("structured-component-foundation", source["jobs"])
-        self.assertEqual(workflow("stylus.yml")["jobs"]["native-stylus"]["strategy"]["matrix"]["os"],
-                         ["ubuntu-latest"])
+        stylus = workflow("stylus.yml")["jobs"]["native-stylus"]
+        self.assertEqual(stylus["strategy"]["matrix"]["os"], ["ubuntu-latest"])
+        for steps in (source_steps, stylus["steps"]):
+            runner = next(i for i, step in enumerate(steps) if step.get("uses") == "./.github/actions/aspect")
+            graph = next(i for i, step in enumerate(steps) if step.get("run") == "aspect ci check-default-cli-dependencies")
+            self.assertLess(runner, graph)
+            self.assertTrue(all("python -c" not in step.get("run", "") for step in steps))
 
     def test_release_is_read_only_full_validation_before_ready(self):
         self.assertEqual(set(self.release["on"]), {"workflow_dispatch"})

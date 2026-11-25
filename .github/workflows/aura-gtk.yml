@@ -73,12 +73,11 @@ jobs:
           base-ref: ${{ github.event.pull_request.base.ref }}
           head-sha: ${{ github.event.pull_request.head.sha }}
       - uses: actions/checkout@v4
+      - run: sudo apt-get update
       - name: Install GTK 4, Xvfb and at-spi2-core
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-4-dev xvfb xauth dbus-x11 dbus-daemon at-spi2-core
-          pkg-config --modversion gtk4
-          dpkg-query -W at-spi2-core
+        run: sudo apt-get install -y --no-install-recommends libgtk-4-dev xvfb xauth dbus-x11 dbus-daemon at-spi2-core
+      - run: pkg-config --modversion gtk4
+      - run: dpkg-query -W at-spi2-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

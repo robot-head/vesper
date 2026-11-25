@@ -1,6 +1,6 @@
 //! Checksums and parsing against hand-constructed pcap fixtures
-//! (fixtures/gen_fixtures.py; checksums computed there by an independent
-//! Python RFC 1071 implementation).
+//! (`aspect crate warp-tcp gen-fixtures` computes checksums with an independent
+//! RFC 1071 implementation).
 
 use vesper_warp_tcp::wire::{self, HeaderFields};
 use vesper_warp_tcp::{Flags, IpPair, Segment};
@@ -93,7 +93,7 @@ fn fixture_checksums_verify_and_recompute() {
 #[test]
 fn fixture_known_checksum_values() {
     let pkts = load();
-    // Values printed by gen_fixtures.py (independent implementation).
+    // Values printed by the Aspect task (independent implementation).
     let sums: Vec<u16> = pkts
         .iter()
         .map(|p| u16::from_be_bytes([p.tcp[16], p.tcp[17]]))

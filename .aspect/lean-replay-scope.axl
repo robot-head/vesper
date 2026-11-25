@@ -115,7 +115,7 @@ def _test_scope(ctx: TaskContext) -> int:
     for path in [
         "lean/Model.lean", "tools/logos42/pins.json", "src/lean_ir.rs",
         "tests/lean4lean_map42.rs", "MODULE.bazel", "src/optimize/witness_lean.rs",
-        "crates/vesper-oracles/tests/fixtures/resource_oracle42/fault_peer.py",
+        "crates/vesper-oracles/src/bin/resource_oracle42/fault_peer.rs",
         "docs/rfcs/resource-model42-source-manifest.json", ".aspect/logos-ci.axl",
     ]:
         if _skip_replay("feature", [path], ""):

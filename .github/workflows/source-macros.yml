@@ -25,6 +25,7 @@ on:
       - '.github/workflows/source-macros.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.aspect/default-cli.axl'
   pull_request:
     paths:
       - 'crates/vesper-syntax/**'
@@ -47,6 +48,7 @@ on:
       - '.github/workflows/source-macros.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.aspect/default-cli.axl'
 
 permissions:
   contents: read
@@ -96,13 +98,11 @@ jobs:
           head-sha: ${{ github.event.pull_request.head.sha }}
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/aspect
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
       # cargo-fmt hands every workspace target root to one rustfmt command,
       # which is longer than Windows allows (os error 206). Formatting does
       # not depend on the host, so the Linux leg checks it for everyone.
@@ -110,9 +110,7 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
       - name: Assert default CLI graph does not require Wasmtime
-        run: >-
-          cargo tree --locked -p vesper --edges normal --prefix none |
-          python -c 'import sys; names={line.split()[0] for line in sys.stdin if line.strip()}; assert not names.intersection({"wasmtime", "wasmtime-wasi", "vesper-loom-sandbox"})'
+        run: aspect ci check-default-cli-dependencies
       - name: Test real pure host quotations and actual source parser
         run: cargo test --locked -p vesper-forge -p vesper-syntax --no-default-features --all-targets
       # Selecting the root package alone preserves its pure-host dependency

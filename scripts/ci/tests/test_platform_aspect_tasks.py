@@ -84,13 +84,23 @@ print("child stderr", file=sys.stderr)
         result = self.aspect("acceptance", "check-doc-links")
         self.assertEqual(result.stdout.splitlines(), [str(self.root)])
 
-    def test_legacy_shell_task_selects_the_registered_interpreter(self):
-        self.write("bin/sh", '#!/bin/sh\nVESPER_TASK_TEST_SHELL=sh exec /bin/sh "$@"\n', executable=True)
-        env = {"PATH": os.pathsep.join([str(self.root / "bin"), os.environ["PATH"]])}
-        path = "crates/vesper-oracles/tests/fixtures/resource_oracle42/bye_eof_stall.sh"
-        self.write(path, 'printf "%s|%s\\n" "$VESPER_TASK_TEST_SHELL" "$1"\n')
-        result = self.aspect("fixture", "resource-oracle42", "bye-eof-stall", "--", "two words", env=env)
-        self.assertEqual(result.stdout, "sh|two words\n")
+    def test_resource_oracle_fixtures_pass_the_mode_and_native_status(self):
+        cargo = self.write("bin/cargo", """\
+#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+assert Path(".aspect").is_dir()
+print(json.dumps(sys.argv[1:]))
+if sys.argv[-1] == "crash":
+    sys.exit(7)
+""", executable=True)
+        env = {"PATH": os.pathsep.join([str(cargo.parent), os.environ["PATH"]])}
+        flags = ["run", "--locked", "--quiet", "-p", "vesper-oracles", "--bin", "resource_oracle42", "--", "--fault-peer"]
+        for args, mode, code in (("bye-eof-stall", "bye_eof_stall", 0), ("fault-peer", "crash", 7)):
+            argv = (args, "--", mode) if args == "fault-peer" else (args,)
+            result = self.aspect("fixture", "resource-oracle42", *argv, env=env, status=code)
+            self.assertEqual(json.loads(result.stdout), flags + [mode])
 
     def test_acceptance_suites_forward_binary_root_and_scratch_and_run_examples(self):
         env = {
@@ -850,6 +860,52 @@ else:
                 self.assertEqual(order.read_text().splitlines(), ["emit", "assemble", "link", "emulate"])
                 self.assertFalse(Path((self.root / "scratch").read_text()).exists())
                 self.assertEqual("9600 scalar-reference comparisons passed" in result.stdout, status == 0)
+
+    def test_default_cli_dependency_check_reports_exact_forbidden_packages(self):
+        cargo = self.write("bin/cargo", """\
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+assert sys.argv[1:] == ["tree", "--locked", "-p", "vesper", "--edges", "normal", "--prefix", "none"]
+assert Path(".aspect").is_dir()
+print(os.environ["FIXTURE_CARGO_TREE"])
+if os.environ.get("FIXTURE_CARGO_FAILURE"):
+    print("failed to load dependency graph", file=sys.stderr)
+    sys.exit(29)
+""", executable=True)
+        env = {"PATH": os.pathsep.join([str(cargo.parent), os.environ["PATH"]])}
+        command = ("ci", "check-default-cli-dependencies")
+        allowed = "\nvesper v0.1.0 (path with wasmtime)\n wasmtime-adapter v1.0.0\n"
+        self.aspect(*command, env={**env, "FIXTURE_CARGO_TREE": allowed})
+        for package in ("wasmtime", "wasmtime-wasi", "vesper-loom-sandbox"):
+            result = self.aspect(*command, env={**env, "FIXTURE_CARGO_TREE": allowed + f"{package} v1.0.0\n"}, status=1)
+            self.assertIn("forbidden normal dependencies: " + package, result.stderr)
+        output = "wasmtime v1.0.0\nvesper-loom-sandbox v0.0.1\nwasmtime v2.0.0\n"
+        result = self.aspect(*command, env={**env, "FIXTURE_CARGO_TREE": output}, status=1)
+        self.assertIn("forbidden normal dependencies: vesper-loom-sandbox, wasmtime\n", result.stderr)
+        result = self.aspect(*command, env={**env, "FIXTURE_CARGO_TREE": "", "FIXTURE_CARGO_FAILURE": "1"}, status=29)
+        self.assertIn("failed to load dependency graph", result.stderr)
+
+    def test_native_tcp_fixture_matches_committed_bytes_and_reported_packets(self):
+        import struct
+
+        path = Path("crates/vesper-warp-tcp/fixtures/tcp_fixtures.pcap")
+        (self.root / path.parent).mkdir(parents=True)
+        result = self.aspect("crate", "warp-tcp", "gen-fixtures")
+        data = (self.root / path).read_bytes()
+        self.assertEqual(data, (ROOT / path).read_bytes())
+        heading, *packets = result.stdout.splitlines()
+        self.assertEqual(heading, f"{self.root / path} 8 packets")
+        self.assertEqual(len(packets), 8)
+        offset = 24
+        for index, reported in enumerate(packets):
+            timestamp, micros, captured, length = struct.unpack_from("<4I", data, offset)
+            self.assertEqual((timestamp, micros, captured), (1_700_000_000 + index, 0, length))
+            offset += 16
+            self.assertEqual(bytes.fromhex(reported), data[offset:offset + length])
+            offset += length
+        self.assertEqual(offset, len(data))
 
     def test_stage1_compiles_and_reproduces_with_distinct_clean_targets(self):
         self.write("bootstrap/stage1.rs", "fixture")

@@ -18,6 +18,3 @@ serde_gen_lean_quotes = script_task("gen-lean-quotes", ["crate", "serde"], "crat
 
 tensor_make_interop = script_task("make-interop", ["crate", "tensor"], "crates/vesper-tensor/fixtures/make_interop.py", "python3")
 tensor_make_reference = script_task("make-reference", ["crate", "tensor"], "crates/vesper-tensor/fixtures/reference/make_reference.py", "python3")
-
-
-warp_tcp_gen_fixtures = script_task("gen-fixtures", ["crate", "warp-tcp"], "crates/vesper-warp-tcp/fixtures/gen_fixtures.py", "python3")
