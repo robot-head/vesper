@@ -111,7 +111,6 @@ members = [
     "crates/vesper-test",
     "crates/vesper-hybrid",
     "crates/vesper-std-driver",
-    "crates/vesper-std-host",
     "crates/vesper-tools",
     "experiments/native-pulse",
     "crates/vesper-cranelift-sys",
@@ -230,7 +229,6 @@ default-members = [
     "crates/vesper-port-pilot",
     "crates/vesper-test",
     "crates/vesper-std-driver",
-    "crates/vesper-std-host",
     "crates/vesper-tools",
     "experiments/native-pulse",
     "crates/vesper-oracles",
@@ -279,10 +277,6 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-# The host shim of @vesper-std/fs, process and env (#1125). `vesper jit`
-# binds the packages' `.vsys` imports to it (#1150), and tests/std_fs.rs,
-# std_process.rs and std_env.rs bind it into the JIT. It has no dependencies.
-vesper-std-host = { path = "crates/vesper-std-host" }
 blake3 = "1.8"
 # Grows the native lowering's stack on deep specialization (#1329).
 stacker = "0.1"

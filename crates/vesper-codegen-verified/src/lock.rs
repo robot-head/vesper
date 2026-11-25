@@ -9,7 +9,7 @@ pub const MAX_LOCK_BYTES: usize = 64 * 1024;
 /// Axioms a lock may allow; anything else is rejected while parsing.
 pub const ALLOWED_AXIOM_UNIVERSE: [&str; 3] = ["propext", "Quot.sound", "Classical.choice"];
 /// Upper bound on `lila_builder_signatures` (the trust policy's key limit).
-const MAX_QUORUM: usize = vesper_loom_trust::MAX_POLICY_KEYS;
+const MAX_QUORUM: usize = crate::trust::MAX_POLICY_KEYS;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,7 +81,7 @@ impl BootstrapLock {
 
     pub(crate) fn validate(&self) -> Result<(), BootstrapVerifyError> {
         let b = &self.bootstrap;
-        vesper_loom_calculus::PackageName::parse(b.compiler_package.clone())
+        crate::trust::PackageName::parse(b.compiler_package.clone())
             .map_err(|_| invalid("compiler_package", "not a scoped package name"))?;
         if b.version.is_empty() || b.version.len() > 64 || !canonical_semver(&b.version) {
             return Err(invalid(

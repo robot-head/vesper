@@ -352,9 +352,10 @@ enum Step {
     CheckUses,
     CheckFinish,
     CheckReport,
+    InterfaceWrite = 40,
 }
 
-const STEPS: [Step; 32] = [
+const STEPS: [Step; 33] = [
     Step::IsPackage,
     Step::Load,
     Step::EbpfBuild,
@@ -387,6 +388,7 @@ const STEPS: [Step; 32] = [
     Step::CheckUses,
     Step::CheckFinish,
     Step::CheckReport,
+    Step::InterfaceWrite,
 ];
 
 /// A pass failed; its message is the session's text.
@@ -498,7 +500,8 @@ impl Session {
             | Step::CheckReport
             | Step::EmitHir
             | Step::EmitInterface
-            | Step::LibBuild => self.front_step(step),
+            | Step::InterfaceWrite
+            | Step::LibBuild => self.front_step(step, arg),
             Step::Optimize
             | Step::EmitIr
             | Step::EmitClif

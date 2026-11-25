@@ -90,7 +90,7 @@ fn hash(s: &[u8]) -> u64 {
 }
 
 fn bytes(s: &std::ffi::OsStr) -> Vec<u8> {
-    vesper_std_host::os_bytes(s)
+    std_io_support::oracle::os_bytes(s)
 }
 
 /// The variables these tests read, set once for the whole test binary

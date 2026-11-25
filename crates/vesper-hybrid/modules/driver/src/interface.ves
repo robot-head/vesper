@@ -1,0 +1,1473 @@
+// `vesper emit --emit interface` (hd_step group 2, #1893): the source
+// contract export of src/interface.rs over the checked world's
+// declarations, as serde_json's pretty text of `vesper_semver::Interface`.
+// The session encodes the world (`interface_words` of
+// crates/vesper-hybrid/src/driver/front.rs): LEB128 numbers, and texts as
+// their length and bytes.
+//
+// Builtins export under `std/core`; traits, conformances, named enum
+// payloads, effectful arrows and the like export as `unsupported`, as the
+// Rust exporter does.
+use @vesper-std/fmt::{
+    write_u64
+};
+
+const NONE: u64 = 18446744073709551615;
+
+const MODE_COPY: u64 = 0;
+const MODE_AFFINE: u64 = 1;
+const MODE_LINEAR: u64 = 2;
+
+const T_NAMED: u64 = 0;
+const T_TUPLE: u64 = 1;
+const T_FUNCTION: u64 = 2;
+const T_ROW: u64 = 3;
+
+const E_ADT: u64 = 0;
+const E_EFFECT: u64 = 1;
+const E_TRAIT: u64 = 2;
+const E_CONFORMANCE: u64 = 3;
+const E_FUNCTION: u64 = 4;
+
+// ---------------------------------------------------------- the stream
+
+fn byte_at(in b: Slice[u8], i: u64) -> u64 {
+    match b.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn word(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn num(in b: Slice[u8], inout p: u64) -> u64 {
+    let mut v: u64 = 0;
+    let mut shift: u64 = 0;
+    loop {
+        let c = byte_at(in b, p);
+        p = wrapping_add(p, 1);
+        v = v | wrapping_shl_u64(c & 127, wrapping_u32(shift));
+        if c < 128 || shift >= 63 {
+            break;
+        }
+        shift = wrapping_add(shift, 7);
+    }
+    v
+}
+
+// A text: its start and length.
+fn text(in b: Slice[u8], inout p: u64) -> (u64, u64) {
+    let n = num(in b, inout p);
+    let start = p;
+    p = wrapping_add(p, n);
+    (start, n)
+}
+
+fn cmp_bytes(in a: Slice[u8], sa: u64, la: u64, in c: Slice[u8], sc: u64, lc: u64) -> i64 {
+    let n = if la < lc {
+        la
+    } else {
+        lc
+    };
+    for i in 0..n {
+        let x = byte_at(in a, wrapping_add(sa, i));
+        let y = byte_at(in c, wrapping_add(sc, i));
+        if x != y {
+            return if x < y {
+                -1
+            } else {
+                1
+            };
+        }
+    }
+    if la < lc {
+        -1
+    } else if la > lc {
+        1
+    } else {
+        0
+    }
+}
+
+fn same(in b: Slice[u8], s1: u64, l1: u64, s2: u64, l2: u64) -> bool {
+    cmp_bytes(in b, s1, l1, in b, s2, l2) == 0
+}
+
+fn is_name(in b: Slice[u8], s: u64, l: u64, in lit: Str) -> bool {
+    let t = lit.as_bytes();
+    cmp_bytes(in b, s, l, in t, 0, t.len()) == 0
+}
+
+fn skip_effects(in b: Slice[u8], inout p: u64) {
+    let n = num(in b, inout p);
+    for _ in 0..n {
+        num(in b, inout p);
+        text(in b, inout p);
+        let args = num(in b, inout p);
+        for _ in 0..args {
+            skip_ty(in b, inout p);
+        }
+    }
+    num(in b, inout p);
+    text(in b, inout p);
+}
+
+fn skip_ty(in b: Slice[u8], inout p: u64) {
+    let tag = num(in b, inout p);
+    if tag == T_NAMED {
+        text(in b, inout p);
+        let n = num(in b, inout p);
+        for _ in 0..n {
+            skip_ty(in b, inout p);
+        }
+    } else if tag == T_TUPLE {
+        let n = num(in b, inout p);
+        for _ in 0..n {
+            skip_ty(in b, inout p);
+        }
+    } else if tag == T_FUNCTION {
+        let n = num(in b, inout p);
+        for _ in 0..n {
+            num(in b, inout p);
+            skip_ty(in b, inout p);
+        }
+        skip_ty(in b, inout p);
+        skip_effects(in b, inout p);
+        num(in b, inout p);
+    }
+}
+
+fn skip_generics(in b: Slice[u8], inout p: u64) {
+    let n = num(in b, inout p);
+    for _ in 0..n {
+        text(in b, inout p);
+        num(in b, inout p);
+        num(in b, inout p);
+    }
+}
+
+fn skip_projections(in b: Slice[u8], inout p: u64) {
+    let n = num(in b, inout p);
+    for _ in 0..n {
+        let parts = num(in b, inout p);
+        for _ in 0..parts {
+            text(in b, inout p);
+        }
+    }
+}
+
+// Past a function's parameters and result: the position of its effects.
+fn effects_at(in b: Slice[u8], p: u64) -> u64 {
+    let mut q = p;
+    let n = num(in b, inout q);
+    for _ in 0..n {
+        num(in b, inout q);
+        skip_projections(in b, inout q);
+        skip_ty(in b, inout q);
+    }
+    skip_ty(in b, inout q);
+    q
+}
+
+fn skip_function(in b: Slice[u8], inout p: u64) {
+    p = effects_at(in b, p);
+    skip_effects(in b, inout p);
+}
+
+// ---------------------------------------------------------- the world
+
+struct X {
+    pkg_start: u64,
+    pkg_len: u64,
+    adt_start: ChunkSeq[u64],
+    adt_len: ChunkSeq[u64],
+    adt_generics: ChunkSeq[u64],
+    adt_mode: ChunkSeq[u64],
+    eff_start: ChunkSeq[u64],
+    eff_len: ChunkSeq[u64],
+    eff_generics: ChunkSeq[u64],
+    eff_linear: ChunkSeq[u64]
+}
+
+// The index of name `s`/`l` among the sorted keys, or NONE.
+fn find(in b: Slice[u8], in starts: ChunkSeq[u64], in lens: ChunkSeq[u64], s: u64, l: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = starts.len();
+    loop {
+        if lo >= hi {
+            break NONE;
+        }
+        let mid = wrapping_shr_u64(wrapping_add(lo, hi), 1);
+        let c = cmp_bytes(in b, word(in starts, mid), word(in lens, mid), in b, s, l);
+        if c < 0 {
+            lo = wrapping_add(mid, 1);
+        } else if c > 0 {
+            hi = mid;
+        } else {
+            break mid;
+        }
+    }
+}
+
+fn adt_find(in b: Slice[u8], in x: X, s: u64, l: u64) -> u64 {
+    find(in b, in x.adt_start, in x.adt_len, s, l)
+}
+
+fn eff_find(in b: Slice[u8], in x: X, s: u64, l: u64) -> u64 {
+    find(in b, in x.eff_start, in x.eff_len, s, l)
+}
+
+// The generic named `s`/`l` in the list at `gp` (NONE: no binders): its
+// index, row flag and bound; the index is NONE when there is none. With
+// `rows`, only row binders match.
+fn generic(in b: Slice[u8], gp: u64, s: u64, l: u64, rows: bool) -> (u64, bool, u64) {
+    if gp == NONE {
+        return (NONE, false, 0);
+    }
+    let mut p = gp;
+    let n = num(in b, inout p);
+    for i in 0..n {
+        let (ns, nl) = text(in b, inout p);
+        let row = num(in b, inout p) == 1;
+        let bound = num(in b, inout p);
+        if (row || !rows) && same(in b, ns, nl, s, l) {
+            return (i, row, bound);
+        }
+    }
+    (NONE, false, 0)
+}
+
+// `primitive` of src/interface.rs: 1 + the `Primitive`, or 0.
+fn primitive(in b: Slice[u8], s: u64, l: u64) -> u64 {
+    if is_name(in b, s, l, "Unit") {
+        1
+    } else if is_name(in b, s, l, "Never") {
+        2
+    } else if is_name(in b, s, l, "bool") {
+        3
+    } else if is_name(in b, s, l, "u8") {
+        4
+    } else if is_name(in b, s, l, "u32") {
+        5
+    } else if is_name(in b, s, l, "u64") {
+        6
+    } else if is_name(in b, s, l, "i64") {
+        7
+    } else if is_name(in b, s, l, "f64") {
+        8
+    } else if is_name(in b, s, l, "String") {
+        9
+    } else {
+        0
+    }
+}
+
+fn primitive_name(k: u64) -> Str {
+    if k == 1 {
+        "unit"
+    } else if k == 2 {
+        "never"
+    } else if k == 3 {
+        "bool"
+    } else if k == 4 {
+        "u8"
+    } else if k == 5 {
+        "u32"
+    } else if k == 6 {
+        "u64"
+    } else if k == 7 {
+        "i64"
+    } else if k == 8 {
+        "f64"
+    } else {
+        "string"
+    }
+}
+
+fn mode_name(m: u64) -> Str {
+    if m == MODE_COPY {
+        "copy"
+    } else if m == MODE_AFFINE {
+        "affine"
+    } else {
+        "linear"
+    }
+}
+
+fn pass_name(p: u64) -> Str {
+    if p == 0 {
+        "in"
+    } else if p == 1 {
+        "inout"
+    } else {
+        "sink"
+    }
+}
+
+fn resumption_name(linear: bool) -> Str {
+    if linear {
+        "linear"
+    } else {
+        "affine"
+    }
+}
+
+// `Exporter::id`: `<package>::<kind>::<name>`, builtins under `std/core`.
+fn put_id(inout out: ChunkSeq[u8], in b: Slice[u8], in x: X, in kind: Str, s: u64, l: u64) {
+    let k = kind.as_bytes();
+    let ty = cmp_bytes(in k, 0, k.len(), in "type".as_bytes(), 0, 4) == 0;
+    let effect = cmp_bytes(in k, 0, k.len(), in "effect".as_bytes(), 0, 6) == 0;
+    let builtin = (
+        ty
+            && (
+                is_name(in b, s, l, "Option")
+                    || is_name(in b, s, l, "Result")
+                    || is_name(in b, s, l, "RuntimeError")
+                    || is_name(in b, s, l, "ArithOverflow")
+            )
+    )
+        || (effect && is_name(in b, s, l, "Fail"));
+    if builtin {
+        out.extend(in "std/core".as_bytes());
+    } else {
+        out.extend(in b[x.pkg_start..wrapping_add(x.pkg_start, x.pkg_len)]);
+    }
+    out.extend(in "::".as_bytes());
+    out.extend(in k);
+    out.extend(in "::".as_bytes());
+    out.extend(in b[s..wrapping_add(s, l)]);
+}
+
+// ---------------------------------------------------------- JSON
+
+// serde_json's writer: pretty (two-space indent, `": "`) or compact.
+struct J {
+    out: ChunkSeq[u8],
+    pretty: bool,
+    depth: u64,
+    // Whether each open container has an element yet.
+    open: ChunkSeq[u8]
+}
+
+fn writer(pretty: bool) -> J {
+    J {
+        out: ChunkSeq::new[u8](),
+        pretty: pretty,
+        depth: 0,
+        open: ChunkSeq::new[u8]()
+    }
+}
+
+fn newline(inout j: J) {
+    j.out.push(10);
+    for _ in 0..j.depth {
+        j.out.push(32);
+        j.out.push(32);
+    }
+}
+
+fn begin(inout j: J, c: u8) {
+    j.out.push(c);
+    j.open.push(0);
+    j.depth = wrapping_add(j.depth, 1);
+}
+
+fn end(inout j: J, c: u8) {
+    let top = wrapping_sub(j.open.len(), 1);
+    let any = match j.open.try_get(top) {
+        Option::Some(v) => v == 1,
+        Option::None => false,
+    };
+    j.open.truncate(top);
+    j.depth = wrapping_sub(j.depth, 1);
+    if any && j.pretty {
+        newline(inout j);
+    }
+    j.out.push(c);
+}
+
+fn begin_object(inout j: J) {
+    begin(inout j, 123);
+}
+
+fn end_object(inout j: J) {
+    end(inout j, 125);
+}
+
+fn begin_array(inout j: J) {
+    begin(inout j, 91);
+}
+
+fn end_array(inout j: J) {
+    end(inout j, 93);
+}
+
+// Before an element or member.
+fn elem(inout j: J) {
+    let top = wrapping_sub(j.open.len(), 1);
+    let any = match j.open.try_get(top) {
+        Option::Some(v) => v == 1,
+        Option::None => false,
+    };
+    if any {
+        j.out.push(44);
+    }
+    j.open.try_set(top, 1);
+    if j.pretty {
+        newline(inout j);
+    }
+}
+
+fn hex_digit(v: u64) -> u8 {
+    if v < 10 {
+        wrapping_u8(wrapping_add(v, 48))
+    } else {
+        wrapping_u8(wrapping_add(v, 87))
+    }
+}
+
+// A JSON string of `t[s..s + l]`, escaped as serde_json does.
+fn put_str(inout out: ChunkSeq[u8], in t: Slice[u8], s: u64, l: u64) {
+    out.push(34);
+    for i in 0..l {
+        let c = byte_at(in t, wrapping_add(s, i));
+        if c == 34 {
+            out.extend(in "\\\"".as_bytes());
+        } else if c == 92 {
+            out.extend(in "\\\\".as_bytes());
+        } else if c == 10 {
+            out.extend(in "\\n".as_bytes());
+        } else if c == 13 {
+            out.extend(in "\\r".as_bytes());
+        } else if c == 9 {
+            out.extend(in "\\t".as_bytes());
+        } else if c == 8 {
+            out.extend(in "\\b".as_bytes());
+        } else if c == 12 {
+            out.extend(in "\\f".as_bytes());
+        } else if c < 32 {
+            out.extend(in "\\u00".as_bytes());
+            out.push(hex_digit(wrapping_shr_u64(c, 4)));
+            out.push(hex_digit(c & 15));
+        } else {
+            out.push(wrapping_u8(c));
+        }
+    }
+    out.push(34);
+}
+
+fn key_bytes(inout j: J, in t: Slice[u8], s: u64, l: u64) {
+    elem(inout j);
+    put_str(inout j.out, in t, s, l);
+    j.out.push(58);
+    if j.pretty {
+        j.out.push(32);
+    }
+}
+
+fn key(inout j: J, in k: Str) {
+    let t = k.as_bytes();
+    key_bytes(inout j, in t, 0, t.len());
+}
+
+fn str_value(inout j: J, in v: Str) {
+    let t = v.as_bytes();
+    put_str(inout j.out, in t, 0, t.len());
+}
+
+fn bytes_value(inout j: J, in t: Slice[u8], s: u64, l: u64) {
+    put_str(inout j.out, in t, s, l);
+}
+
+// `"k": "v"`.
+fn member(inout j: J, in k: Str, in v: Str) {
+    key(inout j, in k);
+    str_value(inout j, in v);
+}
+
+// ---------------------------------------------------------- sorting
+
+// The order of the keys (`pool[starts[i]..][..lens[i]]`) as a BTreeMap
+// built by inserting them in order iterates them: sorted, and of equal
+// keys the last.
+fn map_order(in pool: Slice[u8], in starts: ChunkSeq[u64], in lens: ChunkSeq[u64])
+    -> ChunkSeq[u64] {
+    let n = starts.len();
+    let mut a: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut t: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..n {
+        a.push(i);
+        t.push(i);
+    }
+    // Bottom-up merge sort (stable).
+    let mut width: u64 = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        let mut lo: u64 = 0;
+        loop {
+            if lo >= n {
+                break;
+            }
+            let mid = if wrapping_add(lo, width) < n {
+                wrapping_add(lo, width)
+            } else {
+                n
+            };
+            let hi = if wrapping_add(mid, width) < n {
+                wrapping_add(mid, width)
+            } else {
+                n
+            };
+            let mut i = lo;
+            let mut k = mid;
+            let mut o = lo;
+            loop {
+                if o >= hi {
+                    break;
+                }
+                let take_right = if i >= mid {
+                    true
+                } else if k >= hi {
+                    false
+                } else {
+                    let l = word(in a, i);
+                    let r = word(in a, k);
+                    cmp_bytes(
+                        in pool,
+                        word(in starts, r),
+                        word(in lens, r),
+                        in pool,
+                        word(in starts, l),
+                        word(in lens, l)
+                    )
+                        < 0
+                };
+                if take_right {
+                    t.try_set(o, word(in a, k));
+                    k = wrapping_add(k, 1);
+                } else {
+                    t.try_set(o, word(in a, i));
+                    i = wrapping_add(i, 1);
+                }
+                o = wrapping_add(o, 1);
+            }
+            lo = hi;
+        }
+        for i in 0..n {
+            a.try_set(i, word(in t, i));
+        }
+        width = wrapping_add(width, width);
+    }
+    let mut kept: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..n {
+        let e = word(in a, i);
+        let next = wrapping_add(i, 1);
+        let mut last = true;
+        if next < n {
+            let f = word(in a, next);
+            last = cmp_bytes(
+                in pool,
+                word(in starts, e),
+                word(in lens, e),
+                in pool,
+                word(in starts, f),
+                word(in lens, f)
+            )
+                != 0;
+        }
+        if last {
+            kept.push(e);
+        }
+    }
+    kept
+}
+
+// Two projection paths (`Vec<String>` order) at `p` and `q`.
+fn cmp_path(in b: Slice[u8], p: u64, q: u64) -> i64 {
+    let mut a = p;
+    let mut c = q;
+    let na = num(in b, inout a);
+    let nc = num(in b, inout c);
+    let n = if na < nc {
+        na
+    } else {
+        nc
+    };
+    for _ in 0..n {
+        let (sa, la) = text(in b, inout a);
+        let (sc, lc) = text(in b, inout c);
+        let r = cmp_bytes(in b, sa, la, in b, sc, lc);
+        if r != 0 {
+            return r;
+        }
+    }
+    if na < nc {
+        -1
+    } else if na > nc {
+        1
+    } else {
+        0
+    }
+}
+
+// ---------------------------------------------------------- types
+
+fn unsupported_type(inout j: J, in description: Str) {
+    begin_object(inout j);
+    member(inout j, "kind", "unsupported");
+    member(inout j, "description", in description);
+    end_object(inout j);
+}
+
+fn primitive_type(inout j: J, in name: Str) {
+    begin_object(inout j);
+    member(inout j, "kind", "primitive");
+    member(inout j, "name", in name);
+    end_object(inout j);
+}
+
+// `refers_to`: whether the type at `p` names one of the generics at `gp`.
+fn refers(in b: Slice[u8], inout p: u64, gp: u64) -> bool {
+    let tag = num(in b, inout p);
+    if tag == T_NAMED {
+        let (s, l) = text(in b, inout p);
+        let (index, _, _) = generic(in b, gp, s, l, false);
+        let mut r = index != NONE;
+        let n = num(in b, inout p);
+        for _ in 0..n {
+            if refers(in b, inout p, gp) {
+                r = true;
+            }
+        }
+        r
+    } else if tag == T_TUPLE {
+        let mut r = false;
+        let n = num(in b, inout p);
+        for _ in 0..n {
+            if refers(in b, inout p, gp) {
+                r = true;
+            }
+        }
+        r
+    } else if tag == T_FUNCTION {
+        let mut r = false;
+        let n = num(in b, inout p);
+        for _ in 0..n {
+            num(in b, inout p);
+            if refers(in b, inout p, gp) {
+                r = true;
+            }
+        }
+        if refers(in b, inout p, gp) {
+            r = true;
+        }
+        let instances = num(in b, inout p);
+        for _ in 0..instances {
+            num(in b, inout p);
+            text(in b, inout p);
+            let args = num(in b, inout p);
+            for _ in 0..args {
+                if refers(in b, inout p, gp) {
+                    r = true;
+                }
+            }
+        }
+        let tail = num(in b, inout p) == 1;
+        let (s, l) = text(in b, inout p);
+        if tail {
+            let (index, _, _) = generic(in b, gp, s, l, false);
+            if index != NONE {
+                r = true;
+            }
+        }
+        num(in b, inout p);
+        r
+    } else {
+        false
+    }
+}
+
+// `Exporter::ty_mode` of the type at `p`.
+fn ty_mode(in b: Slice[u8], in x: X, inout p: u64, gp: u64) -> u64 {
+    let tag = num(in b, inout p);
+    if tag == T_NAMED {
+        let (s, l) = text(in b, inout p);
+        let (index, _, bound) = generic(in b, gp, s, l, false);
+        let mut m = if index != NONE {
+            bound
+        } else if is_name(in b, s, l, "String") {
+            MODE_AFFINE
+        } else if primitive(in b, s, l) != 0 {
+            MODE_COPY
+        } else {
+            let a = adt_find(in b, in x, s, l);
+            if a != NONE {
+                word(in x.adt_mode, a)
+            } else {
+                MODE_LINEAR
+            }
+        };
+        let n = num(in b, inout p);
+        for _ in 0..n {
+            let am = ty_mode(in b, in x, inout p, gp);
+            if am > m {
+                m = am;
+            }
+        }
+        m
+    } else if tag == T_TUPLE {
+        let mut m = MODE_COPY;
+        let n = num(in b, inout p);
+        for _ in 0..n {
+            let am = ty_mode(in b, in x, inout p, gp);
+            if am > m {
+                m = am;
+            }
+        }
+        m
+    } else if tag == T_FUNCTION {
+        let n = num(in b, inout p);
+        for _ in 0..n {
+            num(in b, inout p);
+            skip_ty(in b, inout p);
+        }
+        skip_ty(in b, inout p);
+        skip_effects(in b, inout p);
+        num(in b, inout p)
+    } else {
+        MODE_LINEAR
+    }
+}
+
+fn ty_mode_at(in b: Slice[u8], in x: X, p: u64, gp: u64) -> u64 {
+    let mut q = p;
+    ty_mode(in b, in x, inout q, gp)
+}
+
+// `Exporter::ty` of the type at `p`.
+fn ty(inout j: J, in b: Slice[u8], in x: X, inout p: u64, gp: u64) {
+    let start = p;
+    let tag = num(in b, inout p);
+    if tag == T_NAMED {
+        let (s, l) = text(in b, inout p);
+        let n = num(in b, inout p);
+        let (index, row, _) = generic(in b, gp, s, l, false);
+        let prim = primitive(in b, s, l);
+        let a = adt_find(in b, in x, s, l);
+        if index != NONE {
+            if n == 0 && !row {
+                begin_object(inout j);
+                member(inout j, "kind", "parameter");
+                key(inout j, "index");
+                write_u64(inout j.out, index);
+                end_object(inout j);
+            } else {
+                unsupported_type(inout j, "row or applied generic in value type");
+            }
+        } else if prim != 0 {
+            if n == 0 {
+                primitive_type(inout j, primitive_name(prim));
+            } else {
+                unsupported_type(inout j, "applied primitive type");
+            }
+        } else if a != NONE && word(in x.adt_generics, a) == n {
+            begin_object(inout j);
+            member(inout j, "kind", "named");
+            key(inout j, "name");
+            let mut id: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            put_id(inout id, in b, in x, "type", s, l);
+            bytes_value(inout j, in id.as_slice(), 0, id.len());
+            key(inout j, "arguments");
+            begin_array(inout j);
+            for _ in 0..n {
+                elem(inout j);
+                ty(inout j, in b, in x, inout p, gp);
+            }
+            end_array(inout j);
+            end_object(inout j);
+            return;
+        } else {
+            unsupported_type(inout j, "unresolved nominal type or captured arrow binder");
+        }
+        for _ in 0..n {
+            skip_ty(in b, inout p);
+        }
+    } else if tag == T_TUPLE {
+        let n = num(in b, inout p);
+        if n == 0 {
+            primitive_type(inout j, "unit");
+            return;
+        }
+        begin_object(inout j);
+        member(inout j, "kind", "tuple");
+        key(inout j, "elements");
+        begin_array(inout j);
+        for _ in 0..n {
+            elem(inout j);
+            ty(inout j, in b, in x, inout p, gp);
+        }
+        end_array(inout j);
+        end_object(inout j);
+    } else if tag == T_FUNCTION {
+        let mut q = start;
+        let captures = refers(in b, inout q, gp);
+        // The arrow's mode is its last byte (0..2).
+        let m = byte_at(in b, wrapping_sub(q, 1));
+        let mut e = p;
+        let n = num(in b, inout e);
+        for _ in 0..n {
+            num(in b, inout e);
+            skip_ty(in b, inout e);
+        }
+        skip_ty(in b, inout e);
+        let instances = num(in b, inout e);
+        for _ in 0..instances {
+            num(in b, inout e);
+            text(in b, inout e);
+            let args = num(in b, inout e);
+            for _ in 0..args {
+                skip_ty(in b, inout e);
+            }
+        }
+        let tail = num(in b, inout e) == 1;
+        if captures {
+            unsupported_type(
+                inout j,
+                "arrows capturing outer generic binders require a richer schema"
+            );
+        } else if instances != 0 || tail {
+            unsupported_type(inout j, "effectful arrows require lexical capability binder scopes");
+        } else {
+            begin_object(inout j);
+            member(inout j, "kind", "function");
+            key(inout j, "signature");
+            begin_object(inout j);
+            key(inout j, "generics");
+            begin_array(inout j);
+            end_array(inout j);
+            member(inout j, "mode", mode_name(m));
+            key(inout j, "parameters");
+            begin_array(inout j);
+            let n = num(in b, inout p);
+            for _ in 0..n {
+                let pass = num(in b, inout p);
+                elem(inout j);
+                begin_object(inout j);
+                member(inout j, "pass", pass_name(pass));
+                key(inout j, "ty");
+                ty(inout j, in b, in x, inout p, NONE);
+                key(inout j, "projection");
+                all_projection(inout j);
+                end_object(inout j);
+            }
+            end_array(inout j);
+            let result = p;
+            key(inout j, "result");
+            ty(inout j, in b, in x, inout p, NONE);
+            member(inout j, "result_mode", mode_name(ty_mode_at(in b, in x, result, NONE)));
+            key(inout j, "effects");
+            begin_object(inout j);
+            key(inout j, "capabilities");
+            begin_array(inout j);
+            end_array(inout j);
+            key(inout j, "row_variables");
+            begin_array(inout j);
+            end_array(inout j);
+            end_object(inout j);
+            end_object(inout j);
+            end_object(inout j);
+        }
+        p = q;
+    } else if tag == T_ROW {
+        unsupported_type(inout j, "nominal row arguments are not representable");
+    } else {
+        unsupported_type(inout j, "unresolved source type");
+    }
+}
+
+fn all_projection(inout j: J) {
+    begin_object(inout j);
+    member(inout j, "selection", "all");
+    end_object(inout j);
+}
+
+// ---------------------------------------------------------- functions
+
+fn generics(inout j: J, in b: Slice[u8], gp: u64) {
+    begin_array(inout j);
+    let mut p = gp;
+    let n = num(in b, inout p);
+    for _ in 0..n {
+        text(in b, inout p);
+        let row = num(in b, inout p) == 1;
+        let bound = num(in b, inout p);
+        elem(inout j);
+        begin_object(inout j);
+        if row {
+            // Source row binders admit abortable effects.
+            member(inout j, "kind", "row");
+            member(inout j, "minimum_resumption", "affine");
+        } else {
+            member(inout j, "kind", "type");
+            member(inout j, "bound", mode_name(bound));
+        }
+        end_object(inout j);
+    }
+    end_array(inout j);
+}
+
+// Why `Exporter::effects` rejects the effects at `p`, or "".
+fn effects_error(in b: Slice[u8], in x: X, p: u64, gp: u64) -> Str {
+    let mut q = p;
+    let n = num(in b, inout q);
+    for _ in 0..n {
+        let labeled = num(in b, inout q) == 1;
+        if labeled {
+            return "named capabilities require lexical binder scopes";
+        }
+        let (s, l) = text(in b, inout q);
+        let e = eff_find(in b, in x, s, l);
+        if e == NONE {
+            return "unresolved effect declaration";
+        }
+        let args = num(in b, inout q);
+        if word(in x.eff_generics, e) != args {
+            return "effect argument arity mismatch";
+        }
+        for _ in 0..args {
+            skip_ty(in b, inout q);
+        }
+    }
+    let tail = num(in b, inout q) == 1;
+    let (s, l) = text(in b, inout q);
+    if tail {
+        let (index, _, _) = generic(in b, gp, s, l, true);
+        if index == NONE {
+            return "unresolved effect row binder";
+        }
+    }
+    ""
+}
+
+// `Exporter::effects` of the effects at `p` (`effects_error` passed).
+fn effects(inout j: J, in b: Slice[u8], in x: X, inout p: u64, gp: u64) {
+    let mut pool: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut lens: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut ids: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut args_at: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut linear: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let n = num(in b, inout p);
+    for _ in 0..n {
+        num(in b, inout p);
+        let (s, l) = text(in b, inout p);
+        let e = eff_find(in b, in x, s, l);
+        linear.push(word(in x.eff_linear, e));
+        args_at.push(p);
+        let args = num(in b, inout p);
+        // The identity: the effect and the compact JSON of the arguments.
+        let start = pool.len();
+        ids.push(start);
+        put_id(inout pool, in b, in x, "effect", s, l);
+        ids.push(pool.len());
+        pool.push(58);
+        let mut c = writer(false);
+        begin_array(inout c);
+        for _ in 0..args {
+            elem(inout c);
+            ty(inout c, in b, in x, inout p, gp);
+        }
+        end_array(inout c);
+        pool.extend(in c.out.as_slice());
+        starts.push(start);
+        lens.push(wrapping_sub(pool.len(), start));
+    }
+    let tail = num(in b, inout p) == 1;
+    let (ts, tl) = text(in b, inout p);
+    begin_object(inout j);
+    key(inout j, "capabilities");
+    begin_array(inout j);
+    let order = map_order(in pool.as_slice(), in starts, in lens);
+    for k in 0..order.len() {
+        let i = word(in order, k);
+        let start = word(in starts, i);
+        elem(inout j);
+        begin_object(inout j);
+        key(inout j, "identity");
+        bytes_value(inout j, in pool.as_slice(), start, word(in lens, i));
+        key(inout j, "effect");
+        let id_start = word(in ids, wrapping_mul(i, 2));
+        let id_end = word(in ids, wrapping_add(wrapping_mul(i, 2), 1));
+        bytes_value(inout j, in pool.as_slice(), id_start, wrapping_sub(id_end, id_start));
+        key(inout j, "arguments");
+        begin_array(inout j);
+        let mut q = word(in args_at, i);
+        let args = num(in b, inout q);
+        for _ in 0..args {
+            elem(inout j);
+            ty(inout j, in b, in x, inout q, gp);
+        }
+        end_array(inout j);
+        member(inout j, "resumption", resumption_name(word(in linear, i) == 1));
+        end_object(inout j);
+    }
+    end_array(inout j);
+    key(inout j, "row_variables");
+    begin_array(inout j);
+    if tail {
+        let (index, _, _) = generic(in b, gp, ts, tl, true);
+        elem(inout j);
+        write_u64(inout j.out, index);
+    }
+    end_array(inout j);
+    end_object(inout j);
+}
+
+fn projection(inout j: J, in b: Slice[u8], p: u64) {
+    let mut q = p;
+    let n = num(in b, inout q);
+    if n == 0 {
+        all_projection(inout j);
+        return;
+    }
+    // The paths as a BTreeSet: sorted, without repeats.
+    let mut at: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for _ in 0..n {
+        let path = q;
+        let parts = num(in b, inout q);
+        for _ in 0..parts {
+            text(in b, inout q);
+        }
+        let mut k = at.len();
+        at.push(path);
+        loop {
+            if k == 0 {
+                break;
+            }
+            let prev = word(in at, wrapping_sub(k, 1));
+            if cmp_path(in b, prev, path) <= 0 {
+                break;
+            }
+            at.try_set(k, prev);
+            k = wrapping_sub(k, 1);
+        }
+        at.try_set(k, path);
+    }
+    begin_object(inout j);
+    member(inout j, "selection", "paths");
+    key(inout j, "paths");
+    begin_array(inout j);
+    for i in 0..at.len() {
+        let path = word(in at, i);
+        if i != 0 && cmp_path(in b, word(in at, wrapping_sub(i, 1)), path) == 0 {
+            continue;
+        }
+        elem(inout j);
+        begin_array(inout j);
+        let mut r = path;
+        let parts = num(in b, inout r);
+        for _ in 0..parts {
+            let (s, l) = text(in b, inout r);
+            elem(inout j);
+            bytes_value(inout j, in b, s, l);
+        }
+        end_array(inout j);
+    }
+    end_array(inout j);
+    end_object(inout j);
+}
+
+// `Exporter::function` of the function at `p` (its effects passed
+// `effects_error`) under the generics at `gp`.
+fn function(inout j: J, in b: Slice[u8], in x: X, inout p: u64, gp: u64) {
+    begin_object(inout j);
+    key(inout j, "generics");
+    generics(inout j, in b, gp);
+    member(inout j, "mode", "copy");
+    key(inout j, "parameters");
+    begin_array(inout j);
+    let n = num(in b, inout p);
+    for _ in 0..n {
+        let pass = num(in b, inout p);
+        let projections = p;
+        skip_projections(in b, inout p);
+        elem(inout j);
+        begin_object(inout j);
+        member(inout j, "pass", pass_name(pass));
+        key(inout j, "ty");
+        ty(inout j, in b, in x, inout p, gp);
+        key(inout j, "projection");
+        projection(inout j, in b, projections);
+        end_object(inout j);
+    }
+    end_array(inout j);
+    let result = p;
+    key(inout j, "result");
+    ty(inout j, in b, in x, inout p, gp);
+    member(inout j, "result_mode", mode_name(ty_mode_at(in b, in x, result, gp)));
+    key(inout j, "effects");
+    effects(inout j, in b, in x, inout p, gp);
+    end_object(inout j);
+}
+
+// ---------------------------------------------------------- declarations
+
+fn unsupported_bytes(inout j: J, in t: Slice[u8]) {
+    begin_object(inout j);
+    member(inout j, "declaration", "unsupported");
+    key(inout j, "description");
+    bytes_value(inout j, in t, 0, t.len());
+    end_object(inout j);
+}
+
+fn unsupported(inout j: J, in description: Str) {
+    unsupported_bytes(inout j, in description.as_bytes());
+}
+
+// `Exporter::adt` of the ADT at `p` (its index `a`).
+fn adt(inout j: J, in b: Slice[u8], in x: X, p: u64, a: u64) {
+    let mut q = p;
+    text(in b, inout q);
+    let gp = q;
+    skip_generics(in b, inout q);
+    let is_enum = num(in b, inout q) == 1;
+    let n = num(in b, inout q);
+    // Names, `named` flags and field lists of the variants; the fields.
+    let mut vs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut vl: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut vat: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut fs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut fl: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut fat: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut named = false;
+    for _ in 0..n {
+        let (s, l) = text(in b, inout q);
+        vs.push(s);
+        vl.push(l);
+        if num(in b, inout q) == 1 {
+            named = true;
+        }
+        vat.push(q);
+        let fields = num(in b, inout q);
+        for _ in 0..fields {
+            let (s, l) = text(in b, inout q);
+            fs.push(s);
+            fl.push(l);
+            fat.push(q);
+            skip_ty(in b, inout q);
+        }
+    }
+    if is_enum && named {
+        unsupported(inout j, "named enum payloads require field-name contracts");
+        return;
+    }
+    begin_object(inout j);
+    if is_enum {
+        member(inout j, "declaration", "enum");
+    } else {
+        member(inout j, "declaration", "struct");
+    }
+    key(inout j, "generics");
+    generics(inout j, in b, gp);
+    member(inout j, "mode", mode_name(word(in x.adt_mode, a)));
+    if is_enum {
+        key(inout j, "open");
+        j.out.extend(in "false".as_bytes());
+        key(inout j, "variants");
+        begin_object(inout j);
+        let order = map_order(in b, in vs, in vl);
+        for k in 0..order.len() {
+            let v = word(in order, k);
+            key_bytes(inout j, in b, word(in vs, v), word(in vl, v));
+            begin_array(inout j);
+            let mut r = word(in vat, v);
+            let fields = num(in b, inout r);
+            for _ in 0..fields {
+                text(in b, inout r);
+                elem(inout j);
+                ty(inout j, in b, in x, inout r, gp);
+            }
+            end_array(inout j);
+        }
+        end_object(inout j);
+    } else {
+        key(inout j, "fields");
+        begin_object(inout j);
+        member(inout j, "visibility", "public");
+        key(inout j, "fields");
+        begin_object(inout j);
+        let order = map_order(in b, in fs, in fl);
+        for k in 0..order.len() {
+            let f = word(in order, k);
+            key_bytes(inout j, in b, word(in fs, f), word(in fl, f));
+            let mut r = word(in fat, f);
+            ty(inout j, in b, in x, inout r, gp);
+        }
+        end_object(inout j);
+        end_object(inout j);
+    }
+    end_object(inout j);
+}
+
+// `Exporter::effect` of the effect declaration at `p`.
+fn effect(inout j: J, in b: Slice[u8], in x: X, p: u64) {
+    let mut q = p;
+    text(in b, inout q);
+    let linear = num(in b, inout q) == 1;
+    let gp = q;
+    skip_generics(in b, inout q);
+    let n = num(in b, inout q);
+    let mut os: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut ol: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut oat: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for _ in 0..n {
+        let (s, l) = text(in b, inout q);
+        if num(in b, inout q) == 1 {
+            unsupported(
+                inout j,
+                "effect-local operation generics, bodies or outgoing effects are not supported"
+            );
+            return;
+        }
+        os.push(s);
+        ol.push(l);
+        oat.push(q);
+        skip_function(in b, inout q);
+    }
+    begin_object(inout j);
+    member(inout j, "declaration", "effect");
+    key(inout j, "generics");
+    generics(inout j, in b, gp);
+    key(inout j, "sealed");
+    j.out.extend(in "false".as_bytes());
+    member(inout j, "resumption", resumption_name(linear));
+    key(inout j, "operations");
+    begin_object(inout j);
+    let order = map_order(in b, in os, in ol);
+    for k in 0..order.len() {
+        let o = word(in order, k);
+        key_bytes(inout j, in b, word(in os, o), word(in ol, o));
+        let mut r = word(in oat, o);
+        function(inout j, in b, in x, inout r, gp);
+    }
+    end_object(inout j);
+    end_object(inout j);
+}
+
+fn trait_decl(inout j: J, in b: Slice[u8], p: u64) {
+    let mut q = p;
+    let (s, l) = text(in b, inout q);
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m.extend(in "trait '".as_bytes());
+    m.extend(in b[s..wrapping_add(s, l)]);
+    m.extend(in "': trait contracts are not representable in interface schema 1".as_bytes());
+    unsupported_bytes(inout j, in m.as_slice());
+}
+
+fn conformance(inout j: J, in b: Slice[u8], p: u64) {
+    let mut q = p;
+    let has_model = num(in b, inout q) == 1;
+    text(in b, inout q);
+    let (ps, pl) = text(in b, inout q);
+    let (ts, tl) = text(in b, inout q);
+    let (ss, sl) = text(in b, inout q);
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if has_model {
+        m.extend(in "model ".as_bytes());
+    } else {
+        m.extend(in "impl ".as_bytes());
+    }
+    m.extend(in b[ps..wrapping_add(ps, pl)]);
+    m.extend(in " of trait '".as_bytes());
+    m.extend(in b[ts..wrapping_add(ts, tl)]);
+    m.extend(in "' for ".as_bytes());
+    m.extend(in b[ss..wrapping_add(ss, sl)]);
+    m.extend(in ": conformances are not representable in this interface schema".as_bytes());
+    unsupported_bytes(inout j, in m.as_slice());
+}
+
+fn function_decl(inout j: J, in b: Slice[u8], in x: X, p: u64) {
+    let mut q = p;
+    text(in b, inout q);
+    let gp = q;
+    skip_generics(in b, inout q);
+    let error = effects_error(in b, in x, effects_at(in b, q), gp);
+    if error.as_bytes().len() != 0 {
+        unsupported(inout j, in error);
+        return;
+    }
+    begin_object(inout j);
+    member(inout j, "declaration", "function");
+    key(inout j, "signature");
+    function(inout j, in b, in x, inout q, gp);
+    end_object(inout j);
+}
+
+// ---------------------------------------------------------- the export
+
+// `serde_json::to_vec_pretty(&interface::export(world, package))` of the
+// session's world encoding.
+pub fn interface_json(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let mut p: u64 = 0;
+    let (pkg_start, pkg_len) = text(in b, inout p);
+    let mut x = X {
+        pkg_start: pkg_start,
+        pkg_len: pkg_len,
+        adt_start: ChunkSeq::new[u64](),
+        adt_len: ChunkSeq::new[u64](),
+        adt_generics: ChunkSeq::new[u64](),
+        adt_mode: ChunkSeq::new[u64](),
+        eff_start: ChunkSeq::new[u64](),
+        eff_len: ChunkSeq::new[u64](),
+        eff_generics: ChunkSeq::new[u64](),
+        eff_linear: ChunkSeq::new[u64]()
+    };
+    let adts = num(in b, inout p);
+    for _ in 0..adts {
+        let (s, l) = text(in b, inout p);
+        x.adt_start.push(s);
+        x.adt_len.push(l);
+        x.adt_generics.push(num(in b, inout p));
+        x.adt_mode.push(num(in b, inout p));
+    }
+    let effs = num(in b, inout p);
+    for _ in 0..effs {
+        let (s, l) = text(in b, inout p);
+        x.eff_start.push(s);
+        x.eff_len.push(l);
+        x.eff_generics.push(num(in b, inout p));
+        x.eff_linear.push(num(in b, inout p));
+    }
+    // The exports: their ids (in `pool`), kinds and positions.
+    let mut pool: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut lens: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut kinds: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut at: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut aux: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for a in 0..adts {
+        at.push(p);
+        let (s, l) = text(in b, inout p);
+        starts.push(pool.len());
+        put_id(inout pool, in b, in x, "type", s, l);
+        kinds.push(E_ADT);
+        aux.push(a);
+        skip_generics(in b, inout p);
+        num(in b, inout p);
+        let n = num(in b, inout p);
+        for _ in 0..n {
+            text(in b, inout p);
+            num(in b, inout p);
+            let fields = num(in b, inout p);
+            for _ in 0..fields {
+                text(in b, inout p);
+                skip_ty(in b, inout p);
+            }
+        }
+        lens.push(wrapping_sub(pool.len(), word(in starts, wrapping_sub(starts.len(), 1))));
+    }
+    for _ in 0..effs {
+        at.push(p);
+        let (s, l) = text(in b, inout p);
+        starts.push(pool.len());
+        put_id(inout pool, in b, in x, "effect", s, l);
+        lens.push(wrapping_sub(pool.len(), word(in starts, wrapping_sub(starts.len(), 1))));
+        kinds.push(E_EFFECT);
+        aux.push(0);
+        num(in b, inout p);
+        skip_generics(in b, inout p);
+        let n = num(in b, inout p);
+        for _ in 0..n {
+            text(in b, inout p);
+            num(in b, inout p);
+            skip_function(in b, inout p);
+        }
+    }
+    let traits = num(in b, inout p);
+    for _ in 0..traits {
+        at.push(p);
+        let (s, l) = text(in b, inout p);
+        starts.push(pool.len());
+        put_id(inout pool, in b, in x, "trait", s, l);
+        lens.push(wrapping_sub(pool.len(), word(in starts, wrapping_sub(starts.len(), 1))));
+        kinds.push(E_TRAIT);
+        aux.push(0);
+    }
+    let conformances = num(in b, inout p);
+    for _ in 0..conformances {
+        at.push(p);
+        let has_model = num(in b, inout p) == 1;
+        let (ms, ml) = text(in b, inout p);
+        text(in b, inout p);
+        let (ts, tl) = text(in b, inout p);
+        let (ss, sl) = text(in b, inout p);
+        let start = pool.len();
+        starts.push(start);
+        if has_model {
+            put_id(inout pool, in b, in x, "model", ms, ml);
+        } else {
+            // `<trait>.<self type>`, in the pool's tail first.
+            let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            name.extend(in b[ts..wrapping_add(ts, tl)]);
+            name.push(46);
+            name.extend(in b[ss..wrapping_add(ss, sl)]);
+            pool.extend(in b[x.pkg_start..wrapping_add(x.pkg_start, x.pkg_len)]);
+            pool.extend(in "::impl::".as_bytes());
+            pool.extend(in name.as_slice());
+        }
+        lens.push(wrapping_sub(pool.len(), start));
+        kinds.push(E_CONFORMANCE);
+        aux.push(0);
+    }
+    let functions = num(in b, inout p);
+    for _ in 0..functions {
+        at.push(p);
+        let (s, l) = text(in b, inout p);
+        starts.push(pool.len());
+        put_id(inout pool, in b, in x, "fn", s, l);
+        lens.push(wrapping_sub(pool.len(), word(in starts, wrapping_sub(starts.len(), 1))));
+        kinds.push(E_FUNCTION);
+        aux.push(0);
+        skip_generics(in b, inout p);
+        skip_function(in b, inout p);
+    }
+    let mut j = writer(true);
+    begin_object(inout j);
+    key(inout j, "schema_version");
+    j.out.push(49);
+    key(inout j, "semantics_version");
+    j.out.push(50);
+    key(inout j, "exports");
+    begin_object(inout j);
+    let order = map_order(in pool.as_slice(), in starts, in lens);
+    for k in 0..order.len() {
+        let e = word(in order, k);
+        key_bytes(inout j, in pool.as_slice(), word(in starts, e), word(in lens, e));
+        let kind = word(in kinds, e);
+        let q = word(in at, e);
+        if kind == E_ADT {
+            adt(inout j, in b, in x, q, word(in aux, e));
+        } else if kind == E_EFFECT {
+            effect(inout j, in b, in x, q);
+        } else if kind == E_TRAIT {
+            trait_decl(inout j, in b, q);
+        } else if kind == E_CONFORMANCE {
+            conformance(inout j, in b, q);
+        } else {
+            function_decl(inout j, in b, in x, q);
+        }
+    }
+    end_object(inout j);
+    key(inout j, "external_types");
+    begin_object(inout j);
+    end_object(inout j);
+    end_object(inout j);
+    j.out
+}
