@@ -1125,3 +1125,58 @@ fn abba_module() {
         },
     );
 }
+
+/// Literals past `i128::MAX` (`Literal::WideInt`): every path agrees with
+/// Rust, which refuses `u128` today. The Vesper emitters print them as
+/// natural numbers and refuse them as patterns, as Rust does, for when
+/// `u128` is modeled.
+#[test]
+fn wide_literals_match_rust() {
+    const WIDE: &str = "170141183460469231731687303715884105728";
+    let sources = [
+        format!("fn top() -> u128 {{ {WIDE} }}"),
+        format!("fn above(x: u128) -> bool {{ x > {WIDE} }}"),
+        format!(
+            "fn once(n: u64) -> u128 {{ let mut x: u128 = 0; for i in 0..n {{ x = {WIDE}; }} x }}"
+        ),
+        format!("fn is_top(x: u128) -> bool {{ match x {{ {WIDE} => true, _ => false }} }}"),
+        format!(
+            "fn loop_top(n: u64) -> bool {{ let mut i: u128 = 0; for k in 0..n {{ i = {WIDE}; }} match i {{ {WIDE} => true, _ => false }} }}"
+        ),
+    ];
+    let mut compared = 0;
+    for src in &sources {
+        let parsed = vesper::parser::parse(src);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{src}: {:?}",
+            parsed.diagnostics
+        );
+        let checked = vesper::check::check(&parsed.module);
+        assert!(
+            checked.diagnostics.is_empty(),
+            "{src}: {:?}",
+            checked.diagnostics
+        );
+        let world = &checked.world;
+        let pairs = [
+            (rust_cfg_text(world), vesper_cfg_text(world, true)),
+            (
+                rust_structured_text(world),
+                vesper_structured_text(world, true),
+            ),
+            (rust_module_text(world), vesper_module_text(world, true)),
+        ];
+        for (k, (rust, vesper)) in pairs.into_iter().enumerate() {
+            let Some(vesper) = vesper else { continue };
+            let vesper = if k == 1 {
+                fill_skips(&rust, &vesper).0
+            } else {
+                vesper
+            };
+            compared += 1;
+            assert_eq!(rust, vesper, "{src} (path {k})");
+        }
+    }
+    assert!(compared >= sources.len(), "only {compared} texts compared");
+}

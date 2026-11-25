@@ -341,7 +341,7 @@ class PlatformWorkflowTests(unittest.TestCase):
         # host, so only Linux runs them; macOS and Windows keep the tests.
         steps = hybrid["jobs"]["hybrid"]["steps"]
         divergent = [s for s in steps if " catches a divergent " in s.get("name", "")]
-        self.assertEqual(len(divergent), 9)
+        self.assertEqual(len(divergent), 10)
         for s in divergent:
             self.assertEqual(s.get("if"), "runner.os == 'Linux'", s["name"])
         tests = next(s for s in steps if s.get("name") == "Build and test the hybrid compiler")

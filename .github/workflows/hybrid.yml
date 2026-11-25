@@ -139,6 +139,7 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo test --locked -p vesper-hybrid --features divergent-doc --test doc hybrid_docs_match_the_default_compiler -- --nocapture
       - name: The Lean differential catches a divergent Lean extraction module
+        if: runner.os == 'Linux'
         run: cargo test --locked -p vesper-hybrid --features divergent-lean-extract --test lean_extract hybrid_lean_matches_the_default_compiler -- --nocapture
       - name: The stack-bound check catches a divergent stack bound
         if: runner.os == 'Linux'
