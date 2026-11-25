@@ -1418,6 +1418,42 @@ vesper_package(
 )
 
 vesper_package(
+    name = "backend_checks_package",
+    srcs = glob(["packages/vesper-backend-checks/src/**/*.ves"]),
+    manifest = "packages/vesper-backend-checks/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        "//crates/vesper-resonance:port_package",
+    ],
+)
+
+vesper_package(
+    name = "codegen_calls_package",
+    srcs = glob(["packages/vesper-codegen-calls/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-calls/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":check_layout_package",
+        ":place_ir_package",
+    ],
+)
+
+vesper_package(
+    name = "codegen_walk_package",
+    srcs = glob(["packages/vesper-codegen-walk/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-walk/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":check_layout_package",
+        ":codegen_calls_package",
+        ":place_ir_package",
+    ],
+)
+
+vesper_package(
     name = "wit_component_package",
     srcs = glob(["packages/vesper-wit-component/src/**/*.ves"]),
     manifest = "packages/vesper-wit-component/Loom.toml",

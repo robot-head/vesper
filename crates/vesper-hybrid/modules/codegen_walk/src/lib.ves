@@ -1,0 +1,13 @@
+// @vesper/hybrid-codegen-walk: `vesper::native::register_locals` served from
+// Vesper in the hybrid Stage 2 build (Rust-exit gap wave 1 lane 11, #1509),
+// through the `register_locals` hook of `vesper::codegen_swap`.
+
+// @export abi 4
+
+use @vesper/native-walk::{
+    native_walk_register_locals_bytes
+};
+
+pub fn register_locals_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    native_walk_register_locals_bytes(in input)
+}
