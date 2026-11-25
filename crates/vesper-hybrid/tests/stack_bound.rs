@@ -79,6 +79,9 @@ fn run(compiler: &Path, args: &[String], out: Option<&Path>, stats: bool) -> Run
     }
     let mut cmd = Command::new(compiler);
     cmd.current_dir(repository()).args(args);
+    // Test `VESPER_STACK_BOUND` directly without `codegen_swap::verifiers`
+    // intercepting `--verify-stack` first.
+    cmd.env("VESPER_HYBRID_VERIFIERS", "0");
     if stats {
         cmd.env("VESPER_HYBRID_STATS", "1");
     } else {
