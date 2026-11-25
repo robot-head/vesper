@@ -7,12 +7,13 @@ description = "Reference-evaluator Vesper source sessions under the deterministi
 publish = false
 build = "build.rs"
 
-# Under `vesper-port`, build.rs links the Vesper port in port/ (self-hosting
-# wave SH5 lane 19, #1342) and the datagram link model forwards to it. Rust
-# stays the default build until the port reaches parity
-# (docs/parallel-results/self-host-sim-session.md).
+# build.rs links the Vesper port in port/ (self-hosting wave SH5 lane 19,
+# #1342) into every build: the datagram link model, the net-v1 network and
+# the QUIC wire codec are Vesper-only. `vesper-port` also switches the WAL,
+# SHA-256, process epochs, failure injection and the model validators to it;
+# those stay Rust by default until they reach the 1.5x bar.
 [features]
-vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
+vesper-port = []
 # A deliberately wrong Vesper build: the port test run must fail.
 vesper-port-divergent = ["vesper-port"]
 
@@ -27,7 +28,7 @@ vesper-warp-umem = { path = "../vesper-warp-umem" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+vesper-port-abi = { path = "../vesper-port-abi" }
 
 [build-dependencies]
-vesper-port-harness = { path = "../vesper-port-harness", optional = true }
+vesper-port-harness = { path = "../vesper-port-harness" }

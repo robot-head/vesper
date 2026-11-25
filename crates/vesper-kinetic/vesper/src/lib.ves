@@ -58,6 +58,7 @@ use self::fastmath::{
     sin as f_sin
 };
 use self::ccd::pair_toi as c_pair_toi;
+use self::solve::solve as r_solve;
 
 // ---------------------------------------------------------------------------
 // morton.rs
@@ -667,5 +668,47 @@ pub fn diff_detect_contacts(
         inout sweep,
         inout out_a,
         inout out_b
+    )
+}
+
+// ---------------------------------------------------------------------------
+// rigid.rs `RigidWorld::solve`: the substep solver (solve.ves has the lane
+// layouts of the packed bodies, manifolds, joints and scratch).
+
+pub fn rigid_solve(
+    dt: f32,
+    substeps: u32,
+    gx: f32,
+    gy: f32,
+    gz: f32,
+    sleeping: bool,
+    gyroscopic: bool,
+    inout bodies: Slice[f32],
+    in asleep: Slice[u8],
+    inout mf: Slice[f32],
+    in mu: Slice[u32],
+    inout jf: Slice[f32],
+    in ju: Slice[u32],
+    in layer_off: Slice[u32],
+    in layer_idx: Slice[u32],
+    inout scratch: Slice[f32]
+) {
+    r_solve(
+        dt,
+        substeps,
+        gx,
+        gy,
+        gz,
+        sleeping,
+        gyroscopic,
+        inout bodies,
+        in asleep,
+        inout mf,
+        in mu,
+        inout jf,
+        in ju,
+        in layer_off,
+        in layer_idx,
+        inout scratch
     )
 }

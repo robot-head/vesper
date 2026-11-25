@@ -49,6 +49,7 @@ use crate::world::det;
 use sha2::Digest;
 
 mod ccd;
+#[cfg(not(vesper_port))]
 mod gyro;
 mod joints;
 mod sleep;
@@ -298,6 +299,7 @@ const CONTACT_MERGE_FLOOR: f64 = 1e-3;
 const MANIFOLD_MARGIN_FRACTION: f64 = 0.25;
 const MANIFOLD_REL_TOL: f64 = 1e-6;
 /// Tangential (or rolling) motion below this length gets no friction direction.
+#[cfg(not(vesper_port))]
 const TANGENT_MIN: f32 = 1.0e-9;
 
 /// The shortest-arc unit quaternion rotating unit `from` onto unit `to`.
@@ -508,6 +510,20 @@ impl State {
     }
 }
 
+/// The port solver's packed tick state (`RigidWorld::solve`), kept to
+/// reuse its buffers.
+#[cfg(vesper_port)]
+#[derive(Debug, Default)]
+struct SolveScratch {
+    bodies: Vec<f32>,
+    asleep: Vec<u8>,
+    mf: Vec<f32>,
+    mu: Vec<u32>,
+    jf: Vec<f32>,
+    ju: Vec<u32>,
+    scratch: Vec<f32>,
+}
+
 /// A deterministic XPBD rigid-body world.
 #[derive(Debug)]
 pub struct RigidWorld {
@@ -516,8 +532,11 @@ pub struct RigidWorld {
     bodies: Vec<State>,
     tick: u64,
     // Per-tick scratch.
+    #[cfg(not(vesper_port))]
     prev: Vec<(V3, Q)>,
+    #[cfg(not(vesper_port))]
     prev_vel: Vec<(V3, V3)>,
+    #[cfg(not(vesper_port))]
     integrated: Vec<(V3, Q)>,
     manifolds: Vec<ContactManifold>,
     saved_manifolds: Vec<ContactManifold>,
@@ -546,6 +565,8 @@ pub struct RigidWorld {
     island_awake: Vec<bool>,
     #[cfg(vesper_port)]
     sleep_scratch: sleep::SleepScratch,
+    #[cfg(vesper_port)]
+    solve_scratch: SolveScratch,
     deferred: Vec<u32>,
     // Continuous collision detection.
     ccd: Option<CcdConfig>,
@@ -612,6 +633,7 @@ fn qmul(q: Q, p: Q) -> Q {
 }
 
 #[inline]
+#[cfg(not(vesper_port))]
 fn scale4(q: Q, s: f32) -> Q {
     [
         det::mul(q[0], s),
@@ -1105,8 +1127,11 @@ impl RigidWorld {
             colliders: colliders.to_vec(),
             bodies: states,
             tick: 0,
+            #[cfg(not(vesper_port))]
             prev: vec![([0.0; 3], [0.0, 0.0, 0.0, 1.0]); n],
+            #[cfg(not(vesper_port))]
             prev_vel: vec![([0.0; 3], [0.0; 3]); n],
+            #[cfg(not(vesper_port))]
             integrated: vec![([0.0; 3], [0.0, 0.0, 0.0, 1.0]); n],
             manifolds: Vec::with_capacity(config.max_manifolds),
             saved_manifolds: Vec::with_capacity(config.max_manifolds),
@@ -1133,6 +1158,8 @@ impl RigidWorld {
             island_awake: vec![false; n],
             #[cfg(vesper_port)]
             sleep_scratch: sleep::SleepScratch::new(n),
+            #[cfg(vesper_port)]
+            solve_scratch: SolveScratch::default(),
             deferred: Vec::with_capacity(max_pairs),
             ccd: None,
             ccd_hits: 0,
@@ -1191,6 +1218,13 @@ impl RigidWorld {
     /// Colours used by the last step.
     pub fn last_layer_count(&self) -> usize {
         self.layers
+    }
+
+    /// Runs the substep solver once more on the last tick's manifolds (the
+    /// `rigid-solve` workload of examples/abba.rs).
+    #[doc(hidden)]
+    pub fn bench_solve(&mut self) {
+        self.solve();
     }
 
     /// Enable or disable the implicit gyroscopic term (off by default,
@@ -1672,6 +1706,7 @@ impl RigidWorld {
 
     /// Whether a constraint between `a` and `b` has anything to move.
     #[inline]
+    #[cfg(not(vesper_port))]
     fn live(&self, a: u32, b: Option<u32>) -> bool {
         self.active(a) || b.is_some_and(|b| self.active(b))
     }
@@ -1996,6 +2031,7 @@ impl RigidWorld {
 
     /// World contact points (current state) of point `k` of manifold `m`.
     #[inline]
+    #[cfg(not(vesper_port))]
     fn points_of(&self, m: &ContactManifold, k: usize) -> (V3, V3, V3, V3) {
         let p = &m.points[k];
         let sa = &self.bodies[m.a as usize];
@@ -2014,6 +2050,7 @@ impl RigidWorld {
     /// Generalized inverse mass of a manifold's bodies in direction `d` at
     /// arms `ra`, `rb`.
     #[inline]
+    #[cfg(not(vesper_port))]
     fn weight(&self, m: &ContactManifold, ra: V3, rb: V3, d: V3) -> f32 {
         let sa = &self.bodies[m.a as usize];
         let mut w = det::add(sa.inv_mass, angular_weight(sa, cross(ra, d)));
@@ -2026,11 +2063,13 @@ impl RigidWorld {
 
     /// Apply the positional impulse `p` at arms `ra` (to `a`) and `rb`
     /// (`-p` to `b`): position and orientation (Müller et al. eq. 6–9).
+    #[cfg(not(vesper_port))]
     fn apply_positional(&mut self, m: &ContactManifold, ra: V3, rb: V3, p: V3) {
         self.apply_positional_to(m.a, m.b, ra, rb, p);
     }
 
     /// [`RigidWorld::apply_positional`] for any body pair.
+    #[cfg(not(vesper_port))]
     fn apply_positional_to(&mut self, a: u32, b: Option<u32>, ra: V3, rb: V3, p: V3) {
         let a = &mut self.bodies[a as usize];
         if a.inv_mass > 0.0 {
@@ -2049,6 +2088,7 @@ impl RigidWorld {
 
     /// Apply the angular positional impulse `p` (world) to `a` and `-p` to
     /// `b`: orientation only (Müller et al. eq. 14–15).
+    #[cfg(not(vesper_port))]
     fn apply_rotation_to(&mut self, a: u32, b: Option<u32>, p: V3) {
         let a = &mut self.bodies[a as usize];
         if a.inv_mass > 0.0 {
@@ -2064,6 +2104,7 @@ impl RigidWorld {
 
     /// Apply the velocity impulse `p` at arms `ra` (to `a`) and `rb` (`-p`
     /// to `b`).
+    #[cfg(not(vesper_port))]
     fn apply_impulse(&mut self, m: &ContactManifold, ra: V3, rb: V3, p: V3) {
         let a = &mut self.bodies[m.a as usize];
         if a.inv_mass > 0.0 {
@@ -2081,6 +2122,7 @@ impl RigidWorld {
     }
 
     /// Relative velocity of the contact points (`a` minus `b`).
+    #[cfg(not(vesper_port))]
     fn relative_velocity(&self, m: &ContactManifold, ra: V3, rb: V3, prev: bool) -> V3 {
         let (va, wa) = if prev {
             self.prev_vel[m.a as usize]
@@ -2101,6 +2143,95 @@ impl RigidWorld {
         rel
     }
 
+    /// The substep solver in the port (vesper/src/solve.ves): the bodies,
+    /// manifolds, joints and colour layers are packed once per tick.
+    #[cfg(vesper_port)]
+    fn solve(&mut self) {
+        const BODY: usize = 22;
+        const MAN: usize = 9 + 8 * MAX_MANIFOLD_POINTS;
+        const SCRATCH: usize = 20;
+        let p = &mut self.solve_scratch;
+        p.bodies.clear();
+        p.asleep.clear();
+        for (i, s) in self.bodies.iter().enumerate() {
+            p.bodies.extend_from_slice(&s.x);
+            p.bodies.extend_from_slice(&s.q);
+            p.bodies.extend_from_slice(&s.v);
+            p.bodies.extend_from_slice(&s.w);
+            p.bodies.push(s.inv_mass);
+            p.bodies.extend_from_slice(&s.inv_inertia);
+            p.bodies.extend_from_slice(&s.frame.unwrap_or(IDENTITY));
+            p.bodies.push(if s.frame.is_some() { 1.0 } else { 0.0 });
+            p.asleep.push(u8::from(self.asleep[i]));
+        }
+        p.mf.clear();
+        p.mu.clear();
+        for m in &self.manifolds {
+            p.mf.extend_from_slice(&m.normal);
+            let mat = &m.material;
+            p.mf.extend_from_slice(&[
+                m.radius_a,
+                m.radius_b,
+                mat.static_friction,
+                mat.dynamic_friction,
+                mat.restitution,
+                mat.rolling_friction,
+            ]);
+            for pt in &m.points {
+                p.mf.extend_from_slice(&pt.local_a);
+                p.mf.extend_from_slice(&pt.local_b);
+                p.mf.extend_from_slice(&[pt.vn_prev, pt.lambda_n]);
+            }
+            p.mu.extend_from_slice(&[m.a, m.b.unwrap_or(u32::MAX), m.count as u32]);
+        }
+        p.jf.clear();
+        p.ju.clear();
+        for j in &self.joints {
+            j.pack(&mut p.jf, &mut p.ju);
+        }
+        p.scratch.resize(SCRATCH * self.bodies.len(), 0.0);
+        let layers = self.colorer.layer_count();
+        let g = self.config.gravity;
+        crate::port::rigid_solve(
+            self.config.dt,
+            self.config.substeps,
+            g[0],
+            g[1],
+            g[2],
+            self.sleep.is_some(),
+            self.gyroscopic,
+            &mut p.bodies,
+            &p.asleep,
+            &mut p.mf,
+            &p.mu,
+            &mut p.jf,
+            &p.ju,
+            &self.colorer.layer_offsets[..=layers],
+            &self.colorer.sorted,
+            &mut p.scratch,
+        );
+        for (s, f) in self.bodies.iter_mut().zip(p.bodies.as_chunks::<BODY>().0) {
+            s.x = [f[0], f[1], f[2]];
+            s.q = [f[3], f[4], f[5], f[6]];
+            s.v = [f[7], f[8], f[9]];
+            s.w = [f[10], f[11], f[12]];
+        }
+        for (m, f) in self.manifolds.iter_mut().zip(p.mf.as_chunks::<MAN>().0) {
+            for (k, pt) in m.points.iter_mut().enumerate() {
+                pt.vn_prev = f[9 + 8 * k + 6];
+                pt.lambda_n = f[9 + 8 * k + 7];
+            }
+        }
+        for (j, f) in self
+            .joints
+            .iter_mut()
+            .zip(p.jf.as_chunks::<{ joints::JOINT_F32 }>().0)
+        {
+            j.unpack(f);
+        }
+    }
+
+    #[cfg(not(vesper_port))]
     fn solve(&mut self) {
         let h = det::div(self.config.dt, self.config.substeps as f32);
         let inv_h = det::div(1.0, h);
@@ -2207,6 +2338,7 @@ impl RigidWorld {
 
     /// Centroid of the manifold's anchors: arms and world points of the
     /// patch's centre now and at the start of the substep.
+    #[cfg(not(vesper_port))]
     fn centroid(&self, m: &ContactManifold) -> (V3, V3, V3, V3) {
         let inv = det::div(1.0, m.count as f32);
         let mut la = [0.0f32; 3];
@@ -2239,6 +2371,7 @@ impl RigidWorld {
     /// friction on the whole patch at its centroid: the patch's tangential
     /// motion this substep is undone while the needed tangential impulse is
     /// below `μ_s ×` the patch's normal impulse.
+    #[cfg(not(vesper_port))]
     fn project_manifold(&mut self, m: &mut ContactManifold) {
         let n = m.normal;
         let mut dl_sum = 0.0f32;
@@ -2280,6 +2413,7 @@ impl RigidWorld {
     /// `2·|g|₁·h`); then dynamic friction and rolling friction act on the
     /// patch, with impulses bounded by `μ_d` and `μ_r` times the patch's
     /// normal impulse `Σλ_n / h`.
+    #[cfg(not(vesper_port))]
     fn velocity_manifold(&mut self, m: &ContactManifold, h: f32, bounce_floor: f32) {
         let n = m.normal;
         let mut lambda_sum = 0.0f32;
@@ -2367,6 +2501,7 @@ impl RigidWorld {
 
     /// Opposes the relative angular velocity of `m`'s bodies about the unit
     /// `axis` with an angular impulse of at most `bound`.
+    #[cfg(not(vesper_port))]
     fn angular_friction(&mut self, m: &ContactManifold, axis: V3, bound: f32) {
         let wa = self.bodies[m.a as usize].w;
         let wb = m.b.map_or([0.0; 3], |b| self.bodies[b as usize].w);
