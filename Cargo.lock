@@ -6781,6 +6781,9 @@ dependencies = [
  "libc",
  "object 0.37.3",
  "target-lexicon",
+ "vesper-cranelift-sys",
+ "vesper-port-abi",
+ "vesper-port-harness",
 ]
 
 [[package]]
