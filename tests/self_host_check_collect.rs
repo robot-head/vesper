@@ -282,6 +282,14 @@ const CASES: &[&str] = &[
     "linear effect Once { fn once() -> Unit; } affine struct H { v: i64 }",
     "struct S { hot x: i64, cold y: i64, linear z: i64 }",
     "enum E { A { x: i64 }, B(i64, bool), C }",
+    // The string and option preludes, and methods a module defines itself.
+    "fn f(s: Str) -> u64 { s.len() }",
+    "fn f() -> String { String::new() }",
+    "impl Str { fn concat(in self, in o: Str) -> String { String::new() } } fn f(s: Str) -> u64 { 1 }",
+    "fn f(o: Option[u64]) -> u64 { o.unwrap_or(0) }",
+    "impl[T: mod copy] Option[T] { fn unwrap_or(self, f: T) -> T { f } } fn f(o: Option[u64]) -> u64 { o.or(Option::None).unwrap_or(0) }",
+    "impl[T: mod copy] Option[T] { fn is_some(self) -> bool { true } } fn f(o: Option[u64]) -> bool { o.is_some() }",
+    "fn f(s: Str, o: Option[u64]) -> u64 { s.char_count() + o.unwrap_or(1) }",
 ];
 
 #[test]
