@@ -9,7 +9,7 @@ mod binding;
 
 use cranelift_codegen::{
     binemit::Reloc,
-    ir::{AbiParam, Function, InstBuilder, MemFlags, types},
+    ir::{AbiParam, Function, InstBuilder, MemFlags, StackSlotData, StackSlotKind, types},
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -253,6 +253,9 @@ fn void_calls_and_conditional_returns_preserve_side_effects() {
 #[test]
 fn paired_call_results_survive_live_registers_and_spills() {
     type Entry = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64;
+    const LARGE_LOCAL_BYTES: u32 = 256;
+    const STACK_ALIGNMENT_LOG2: u8 = 4;
+    const LOCAL_VALUE_OFFSET: i32 = (LARGE_LOCAL_BYTES - size_of::<u64>() as u32) as i32;
     let mut module = jit_module();
     let scalar = AbiParam::new(types::I64);
     let mut pair_signature = module.make_signature();
@@ -282,11 +285,12 @@ fn paired_call_results_survive_live_registers_and_spills() {
     let mut signature = module.make_signature();
     signature.params = vec![scalar; 6];
     signature.returns.push(scalar);
-    for (name, keep_low, keep_high, pressure) in [
-        ("low", true, false, false),
-        ("high", false, true, false),
-        ("pair", true, true, false),
-        ("spills", true, true, true),
+    for (name, keep_low, keep_high, pressure, large_local) in [
+        ("low", true, false, false, false),
+        ("high", false, true, false, false),
+        ("pair", true, true, false, false),
+        ("spills", true, true, true, false),
+        ("spills_large_local", true, true, true, true),
     ] {
         let baseline = module
             .declare_function(&format!("{name}_base"), Linkage::Local, &signature)
@@ -304,6 +308,15 @@ fn paired_call_results_survive_live_registers_and_spills() {
         let [a, b_arg, c, d, e, f] = *b.block_params(entry) else {
             unreachable!();
         };
+        let local = large_local.then(|| {
+            let slot = b.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                LARGE_LOCAL_BYTES,
+                STACK_ALIGNMENT_LOG2,
+            ));
+            b.ins().stack_store(f, slot, LOCAL_VALUE_OFFSET);
+            slot
+        });
         let sum = b.ins().iadd(c, d);
         let diff = b.ins().isub(e, f);
         let call = b.ins().call(target, &[b_arg, a]);
@@ -319,6 +332,13 @@ fn paired_call_results_survive_live_registers_and_spills() {
             for value in [a, b_arg, c, d, e, f, sum, diff] {
                 result = b.ins().iadd(result, value);
             }
+        }
+        if let Some(slot) = local {
+            let value = b.ins().stack_load(types::I64, slot, LOCAL_VALUE_OFFSET);
+            let address = b.ins().stack_addr(types::I64, slot, 0);
+            let misalignment = b.ins().band_imm(address, (1 << STACK_ALIGNMENT_LOG2) - 1);
+            result = b.ins().iadd(result, value);
+            result = b.ins().iadd(result, misalignment);
         }
         b.ins().return_(&[result]);
         b.seal_all_blocks();

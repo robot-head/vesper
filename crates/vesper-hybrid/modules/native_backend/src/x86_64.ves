@@ -281,7 +281,7 @@ fn immediate(inout out: ChunkSeq[u8], bits: u64, size: u64) {
     }
 }
 
-fn fits_signed_byte(bits: u32) -> bool {
+pub fn fits_signed_byte(bits: u32) -> bool {
     bits <= DISP8_MAX || bits >= DISP8_MIN_AS_DISP32
 }
 

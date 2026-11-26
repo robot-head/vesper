@@ -4,7 +4,7 @@ use self::x86_64::{
     CC_AE, CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, FixedArithmetic, Instruction,
     NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION,
     SHR_EXTENSION, SUB_RM_R64, UNASSIGNED, XOR_RM_R64, REGISTER_CODES, arg_register, emit,
-    emit_direct_call, emit_symbol_address, find_register, patch_forward_branch,
+    emit_direct_call, emit_symbol_address, find_register, fits_signed_byte, patch_forward_branch,
     patch_relative_branch, register_bit, home_register, HOME_REGISTERS
 };
 
@@ -175,6 +175,7 @@ struct Allocation {
     locations: ChunkSeq[Location],
     frame_size: u32,
     saved_masks: ChunkSeq[u32],
+    local_frame: u64,
     save_frame: u64,
     home_save_frame: u64,
 }
@@ -926,10 +927,43 @@ fn allocate(
         };
         locations.push(location);
     }
-    let save_frame = stack_end;
-    stack_end = wrapping_add(stack_end, wrapping_mul(save_slots, SPILL_SLOT_BYTES));
-    let home_save_frame = stack_end;
-    stack_end = wrapping_add(stack_end, wrapping_mul(frame.promoted, SPILL_SLOT_BYTES));
+    let save_bytes = wrapping_mul(save_slots, SPILL_SLOT_BYTES);
+    let home_save_bytes = wrapping_mul(frame.promoted, SPILL_SLOT_BYTES);
+    let mut local_frame = frame.outgoing;
+    let mut save_frame = stack_end;
+    let mut home_save_frame = wrapping_add(stack_end, save_bytes);
+    if save_slots != 0
+        && !fits_signed_byte(wrapping_u32(save_frame))
+        && fits_signed_byte(wrapping_u32(frame.outgoing))
+    {
+        // Save slots are reused at each call. Keep them in short reach of RSP
+        // when large locals would otherwise require wider displacements.
+        let shifted_local_frame = align_up(
+            wrapping_add(frame.outgoing, save_bytes),
+            STACK_ALIGNMENT
+        );
+        let shift = wrapping_sub(shifted_local_frame, frame.outgoing);
+        let shifted_home_save = wrapping_add(stack_end, shift);
+        if aligned_frame_size(wrapping_add(shifted_home_save, home_save_bytes))
+            <= STACK_PROBE_INTERVAL
+        {
+            local_frame = shifted_local_frame;
+            save_frame = frame.outgoing;
+            home_save_frame = shifted_home_save;
+            if spills {
+                for value in arguments..wrapping_add(arguments, count) {
+                    match assigned(in locations, value) {
+                        Location::Spill(offset) => {
+                            let shifted = wrapping_u32(wrapping_add(widen_u64(offset), shift));
+                            let _ = locations.try_set(value, Location::Spill(shifted));
+                        },
+                        _ => {},
+                    };
+                }
+            }
+        }
+    }
+    stack_end = wrapping_add(home_save_frame, home_save_bytes);
     let size = if stack_end == 0 && !has_calls {
         0
     } else {
@@ -951,6 +985,7 @@ fn allocate(
         locations: locations,
         frame_size: wrapping_u32(size),
         saved_masks: saved_masks,
+        local_frame: local_frame,
         save_frame: save_frame,
         home_save_frame: home_save_frame
     })
@@ -1533,7 +1568,7 @@ pub fn encode_block(
         } else if is_stack_operation(record.op) {
             let offset = match stack_displacement(in frame, in record) {
                 Option::Some(offset) => wrapping_u32(wrapping_add(
-                    frame.outgoing,
+                    allocation.local_frame,
                     widen_u64(offset)
                 )),
                 Option::None => return ChunkSeq::new[u8](),
