@@ -12,8 +12,8 @@
 use @vesper/check-data::util::{add, u32_at, w};
 use @vesper/check-data::types::{default_type, substitute, vars_new, TyKind, TyMode};
 use self::exprs::{
-    Ck, Ex, actual_arg, mode, note, binding, error, expect_type, expr, expr_expected, field_path, fn_index,
-    fn_generics, is_named, lookup, named, place_of, record, constrain_literals
+    Ck, Ex, actual_arg, mode, note, binding, error, expect_type, expr, expr_expected, field_path,
+    fn_index, fn_generics, is_named, lookup, named, place_of, record, constrain_literals
 };
 use self::relations::{infer, mk_lit};
 use self::ints::{Lit};
@@ -554,8 +554,10 @@ pub fn seq_method(inout ck: Ck, ex: Ex, callee: Ex) -> Typed {
     let elem_known = elem_ty != hole;
     let elem_mode = mode(inout ck, elem_ty);
     let reads_element = op == SEQ_GET || op == SEQ_TRY_GET || op == SEQ_LAST;
-    let drops_elements =
-        op == SEQ_SET || op == SEQ_TRY_SET || op == SEQ_CLEAR || op == SEQ_TRUNCATE;
+    let drops_elements = op == SEQ_SET
+        || op == SEQ_TRY_SET
+        || op == SEQ_CLEAR
+        || op == SEQ_TRUNCATE;
     if elem_known
         && ((reads_element && elem_mode != TyMode::Copy)
             || (drops_elements && elem_mode == TyMode::Linear))

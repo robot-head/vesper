@@ -7,8 +7,9 @@
 //
 // The checker reports a function it cannot check yet as skipped: one that
 // reaches an expression kind not ported here, a type of another lane
-// (strings, sequences, vectors, boxes, regions, `f32`, function types and
-// effect rows), an effectful callee or an intrinsic. Modes, moves and
+// (tiled sequences, vectors, boxes, regions, `f32`, function types and
+// effect rows), an effectful callee or an intrinsic. String literals and
+// the string and sequence methods are methods.ves's. Modes, moves and
 // loans (part 3), effects (lane 8) and literal typing (part 4) are not
 // here; the clean corpus needs none of them for its expression types.
 
