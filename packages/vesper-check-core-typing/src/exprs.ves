@@ -12,17 +12,8 @@
 // loans (part 3), effects (lane 8) and literal typing (part 4) are not
 // here; the clean corpus needs none of them for its expression types.
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u8_at, w};
+use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
     Types,
     Vars,
@@ -47,17 +38,8 @@ use @vesper/check-data::world::{
     mode_of,
     set_by_symbol
 };
-use @vesper/check-data::input::{
-    Ctx,
-    Reader
-};
-use self::ints::{
-    Lit,
-    default_fits,
-    default_of,
-    fits,
-    lit_max
-};
+use @vesper/check-data::input::{Ctx, Reader};
+use self::ints::{Lit, default_fits, default_of, fits, lit_max};
 use self::relations::{
     compatible,
     infer,
@@ -68,12 +50,7 @@ use self::relations::{
     refine_annotation,
     unresolved
 };
-use self::patterns::{
-    Pats,
-    arms_cover,
-    irrefutable,
-    pats_new
-};
+use self::patterns::{Pats, arms_cover, irrefutable, pats_new};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
@@ -293,19 +270,7 @@ pub fn ck_new(sink c: Ctx) -> Ck {
     let s = ck.c.names.intern(in "Atomic".as_bytes());
     ck.s_atomic = s;
     // Pattern 0, the wildcard, has no extras.
-    ck
-        .px
-        .push(
-            PatX {
-                start: 0,
-                end: 0,
-                name: 0,
-                qual: 0,
-                lit: 0,
-                neg: false,
-                mag: 0
-            }
-        );
+    ck.px.push(PatX { start: 0, end: 0, name: 0, qual: 0, lit: 0, neg: false, mag: 0 });
     ck
 }
 
@@ -340,48 +305,28 @@ impl Ck {
     fn patx(in self, p: u32) -> PatX {
         match self.px.try_get(w(p)) {
             Option::Some(x) => x,
-            Option::None => PatX {
-                start: 0,
-                end: 0,
-                name: 0,
-                qual: 0,
-                lit: 0,
-                neg: false,
-                mag: 0
-            },
+            Option::None => PatX { start: 0, end: 0, name: 0, qual: 0, lit: 0, neg: false, mag: 0 },
         }
     }
 
     fn stmt(in self, i: u64) -> Stmt {
         match self.stmts.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Stmt {
-                is_let: false,
-                pat: 0,
-                ty: 0,
-                value: NONE32
-            },
+            Option::None => Stmt { is_let: false, pat: 0, ty: 0, value: NONE32 },
         }
     }
 
     fn arg(in self, i: u64) -> Arg {
         match self.args.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Arg {
-                pass: 0,
-                explicit: false,
-                expr: NONE32
-            },
+            Option::None => Arg { pass: 0, explicit: false, expr: NONE32 },
         }
     }
 
     fn arm(in self, i: u64) -> Arm {
         match self.arms.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Arm {
-                pat: 0,
-                body: NONE32
-            },
+            Option::None => Arm { pat: 0, body: NONE32 },
         }
     }
 
@@ -404,25 +349,14 @@ impl Ck {
     fn param(in self, i: u64) -> ParamSig {
         match self.params.try_get(i) {
             Option::Some(x) => x,
-            Option::None => ParamSig {
-                pass: 0,
-                name: 0,
-                ty: 0,
-                projections: 0,
-                start: 0,
-                end: 0
-            },
+            Option::None => ParamSig { pass: 0, name: 0, ty: 0, projections: 0, start: 0, end: 0 },
         }
     }
 
     fn gen(in self, i: u64) -> Generic {
         match self.gens.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Generic {
-                name: 0,
-                bound: 0,
-                row: false
-            },
+            Option::None => Generic { name: 0, bound: 0, row: false },
         }
     }
 
@@ -460,15 +394,7 @@ fn read_xpat(inout r: Reader, in b: Slice[u8], inout ck: Ck) -> u32 {
     let kind = wrapping_u8(r.word(in b));
     let start = r.word(in b);
     let end = r.word(in b);
-    let mut x = PatX {
-        start: start,
-        end: end,
-        name: 0,
-        qual: 0,
-        lit: 0,
-        neg: false,
-        mag: 0
-    };
+    let mut x = PatX { start: start, end: end, name: 0, qual: 0, lit: 0, neg: false, mag: 0 };
     let mut short: u32 = 0;
     let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut knames: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -562,26 +488,10 @@ fn read_expr(inout r: Reader, in b: Slice[u8], inout ck: Ck) -> u32 {
                 let ty = tyw(in ck.c, r.word(in b));
                 let mutable = r.word(in b);
                 let v = read_expr(inout r, in b, inout ck);
-                ss
-                    .push(
-                        Stmt {
-                            is_let: true,
-                            pat: p,
-                            ty: ty,
-                            value: v
-                        }
-                    );
+                ss.push(Stmt { is_let: true, pat: p, ty: ty, value: v });
             } else {
                 let v = read_expr(inout r, in b, inout ck);
-                ss
-                    .push(
-                        Stmt {
-                            is_let: false,
-                            pat: 0,
-                            ty: 0,
-                            value: v
-                        }
-                    );
+                ss.push(Stmt { is_let: false, pat: 0, ty: 0, value: v });
             }
         }
         x.a = n32(ck.stmts.len());
@@ -610,14 +520,7 @@ fn read_expr(inout r: Reader, in b: Slice[u8], inout ck: Ck) -> u32 {
             let pass = wrapping_u8(r.word(in b));
             let explicit = r.word(in b) != 0;
             let e = read_expr(inout r, in b, inout ck);
-            as_
-                .push(
-                    Arg {
-                        pass: pass,
-                        explicit: explicit,
-                        expr: e
-                    }
-                );
+            as_.push(Arg { pass: pass, explicit: explicit, expr: e });
         }
         x.a = n32(ck.args.len());
         x.n = n32(n);
@@ -650,13 +553,7 @@ fn read_expr(inout r: Reader, in b: Slice[u8], inout ck: Ck) -> u32 {
         for i in 0..n {
             let p = read_xpat(inout r, in b, inout ck);
             let e = read_expr(inout r, in b, inout ck);
-            ms
-                .push(
-                    Arm {
-                        pat: p,
-                        body: e
-                    }
-                );
+            ms.push(Arm { pat: p, body: e });
         }
         x.a = n32(ck.arms.len());
         x.n = n32(n);
@@ -813,25 +710,13 @@ fn lookup(in ck: Ck, name: u32) -> u32 {
 fn binding(in ck: Ck, i: u32) -> Bind {
     match ck.env.try_get(w(i)) {
         Option::Some(x) => x,
-        Option::None => Bind {
-            name: 0,
-            ty: 0,
-            pass: 0
-        },
+        Option::None => Bind { name: 0, ty: 0, pass: 0 },
     }
 }
 
 fn bind_name(inout ck: Ck, name: u32, ty: u32, pass: u8) {
     note(inout ck, ty);
-    ck
-        .env
-        .push(
-            Bind {
-                name: name,
-                ty: ty,
-                pass: pass
-            }
-        );
+    ck.env.push(Bind { name: name, ty: ty, pass: pass });
 }
 
 fn named(inout ck: Ck, s: u32) -> u32 {
@@ -974,10 +859,7 @@ pub fn expr_expected(inout ck: Ck, e: u32, expected: u32) -> u32 {
 }
 
 fn int_literal(inout ck: Ck, x: Ex, expected: u32) -> u32 {
-    let v = Lit {
-        neg: x.neg,
-        mag: x.mag
-    };
+    let v = Lit { neg: x.neg, mag: x.mag };
     let k = ck.c.world.k;
     let kind = int_kind(in ck, expected);
     if kind != NONE32 {
@@ -1347,13 +1229,7 @@ fn bind_mode(inout ck: Ck, p: u32, ty: u32, pass: u8) {
         let lt = if pt.kind == P_LIT && px.lit == 4 {
             named(inout ck, px.name)
         } else if pt.kind == P_LIT && px.lit == 0 {
-            mk_lit(
-                inout ck.c.types,
-                Lit {
-                    neg: px.neg,
-                    mag: px.mag
-                }
-            )
+            mk_lit(inout ck.c.types, Lit { neg: px.neg, mag: px.mag })
         } else if pt.kind == P_LIT && px.lit == 1 {
             if is_named(in ck, ty, k.f32_) {
                 ck.skip = true;

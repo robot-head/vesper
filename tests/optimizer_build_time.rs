@@ -31,42 +31,70 @@ fn worlds() -> impl Iterator<Item = &'static check_harness::Case> {
 
 #[test]
 fn policy_matches_optimize_on_lowered_worlds() {
-    let (mut worlds, mut functions, mut rejected) = (0, 0, 0);
-    for case in self::worlds() {
-        let input = ir::lower_world(&case.world);
-        let mut reference = input.clone();
-        let expected = ir_opt::optimize(&case.world, &mut reference);
-        let mut program = input;
-        let got = ir_opt_policy::optimize_with_stats(&case.world, &mut program);
-        match (&expected, &got) {
-            (Ok(n), Ok(stats)) => {
-                assert_eq!(*n, stats.eliminated, "{}: count", case.name);
-                assert_eq!(
-                    serde_json::to_string(&reference).unwrap(),
-                    serde_json::to_string(&program).unwrap(),
-                    "{}: emitted IR",
-                    case.name
-                );
-                assert_eq!(
-                    format!("{reference:?}"),
-                    format!("{program:?}"),
-                    "{}: program",
-                    case.name
-                );
-                functions += stats.functions;
-            }
-            (Err(_), Err(_)) => rejected += 1,
-            _ => panic!(
-                "{}: optimize {:?} vs policy {:?}",
-                case.name,
-                expected.as_ref().map(|_| ()),
-                got.as_ref().map(|_| ())
-            ),
-        }
-        worlds += 1;
-    }
+    // Each world is independent, so the comparisons run on 4 threads: run
+    // serially they were the slowest tail of "Test all targets" (7 min). Each
+    // thread adds about 0.5 GiB, so BUILD.bazel reserves 4 CPUs and 5 GiB.
+    let cases: Vec<_> = self::worlds().collect();
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(4));
+    let counts: Vec<(usize, usize, usize)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|w| {
+                let cases = &cases;
+                scope.spawn(move || {
+                    let (mut worlds, mut functions, mut rejected) = (0, 0, 0);
+                    for case in cases.iter().skip(w).step_by(workers) {
+                        match compare(case) {
+                            Some(n) => functions += n,
+                            None => rejected += 1,
+                        }
+                        worlds += 1;
+                    }
+                    (worlds, functions, rejected)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let (worlds, functions, rejected) = counts
+        .iter()
+        .fold((0, 0, 0), |(w, f, r), (a, b, c)| (w + a, f + b, r + c));
     println!("{worlds} worlds ({rejected} rejected by both), {functions} functions");
     assert!(worlds > 0);
+}
+
+/// Optimizes `case`'s lowered program both ways and checks they agree: the
+/// policy's function count, or `None` when both reject the world.
+fn compare(case: &check_harness::Case) -> Option<usize> {
+    let input = ir::lower_world(&case.world);
+    let mut reference = input.clone();
+    let expected = ir_opt::optimize(&case.world, &mut reference);
+    let mut program = input;
+    let got = ir_opt_policy::optimize_with_stats(&case.world, &mut program);
+    match (&expected, &got) {
+        (Ok(n), Ok(stats)) => {
+            assert_eq!(*n, stats.eliminated, "{}: count", case.name);
+            assert_eq!(
+                serde_json::to_string(&reference).unwrap(),
+                serde_json::to_string(&program).unwrap(),
+                "{}: emitted IR",
+                case.name
+            );
+            assert_eq!(
+                format!("{reference:?}"),
+                format!("{program:?}"),
+                "{}: program",
+                case.name
+            );
+            Some(stats.functions)
+        }
+        (Err(_), Err(_)) => None,
+        _ => panic!(
+            "{}: optimize {:?} vs policy {:?}",
+            case.name,
+            expected.as_ref().map(|_| ()),
+            got.as_ref().map(|_| ())
+        ),
+    }
 }
 
 #[test]

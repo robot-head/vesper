@@ -29,7 +29,10 @@ use self::sys::{
     os_sync_dir,
     os_parent_len,
     os_unique,
-    os_word_kind
+    os_word_kind,
+    os_error_message,
+    os_is_executable,
+    os_canonicalize
 };
 
 // Why an operation failed. `kind` is one of the codes below
@@ -171,6 +174,13 @@ pub fn read(in path: Str) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
 }
 
 pub fn read_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    read_path_limit(in path, 18446744073709551615)
+}
+
+// At most the first `limit` bytes of the file at `path` (`Read::take`):
+// no more is read, however long the file is.
+pub fn read_path_limit(in path: Slice[u8], limit: u64)
+    -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
     let fd = os_open(in path, mode_read(), inout err);
     if fd < 0 {
@@ -178,16 +188,30 @@ pub fn read_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoErr
     }
     // Read the length the file has now and one byte more, so a file that
     // did not grow ends at the same `read` that finds its end; a file that
-    // grew is read on to its end.
+    // grew is read on to its end (or the limit).
     let n = os_file_len(fd);
+    let first = if n < limit {
+        wrapping_add(n, 1)
+    } else {
+        limit
+    };
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    buf.resize(wrapping_add(n, 1), 0);
+    buf.resize(first, 0);
     let got = os_read(fd, inout buf, 0, inout err);
     buf.truncate(got);
-    if err == 0 && got > n {
+    if err == 0 && got > n && got < limit {
         loop {
             let at = buf.len();
-            buf.resize(wrapping_add(at, 4096), 0);
+            if at >= limit {
+                break;
+            }
+            let room = wrapping_sub(limit, at);
+            let step: u64 = if room < 4096 {
+                room
+            } else {
+                4096
+            };
+            buf.resize(wrapping_add(at, step), 0);
             let m = os_read(fd, inout buf, at, inout err);
             buf.truncate(wrapping_add(at, m));
             if m == 0 || err != 0 {
@@ -227,6 +251,28 @@ fn write_mode(in path: Slice[u8], in data: Slice[u8], mode: u32, sync: bool) eff
     }
     os_close(fd);
     if err != 0 {
+        raise_io(err)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Standard output and standard error.
+
+// Write all of `data` to standard output, unbuffered: one `write` loop on
+// descriptor 1 (retrying `EINTR`), so it never reorders with other writers
+// of the descriptor that flush before returning.
+pub fn write_stdout(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_stream(1, in data);
+}
+
+// Write all of `data` to standard error (descriptor 2), as `write_stdout`.
+pub fn write_stderr(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_stream(2, in data);
+}
+
+fn write_stream(fd: i32, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    let mut err: u64 = 0;
+    if os_write(fd, in data, inout err) != 0 {
         raise_io(err)
     }
 }
@@ -441,9 +487,132 @@ pub fn symlink_metadata(in path: Str) -> Metadata eff [Ffi[StdFs], Fail[IoError]
     meta_path(in path.as_bytes(), false)
 }
 
+// Whether `path` (following symbolic links) is a regular file with an
+// execute bit: the check a shell makes before running it. Never fails.
+pub fn is_executable(in path: Str) -> bool eff [Ffi[StdFs]] {
+    os_is_executable(in path.as_bytes())
+}
+
+pub fn is_executable_path(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    os_is_executable(in path)
+}
+
+// `std::fs::canonicalize`: the absolute path of `path` with every symbolic
+// link, `.` and `..` resolved (`realpath`). The path must exist.
+pub fn canonicalize(in path: Str) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    canonicalize_path(in path.as_bytes())
+}
+
+pub fn canonicalize_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    let mut err: u64 = 0;
+    let out = os_canonicalize(in path, inout err);
+    if err != 0 {
+        return raise_io(err);
+    }
+    out
+}
+
 // Whether `path` names anything (following symbolic links). Never fails.
 pub fn exists(in path: Str) -> bool eff [Ffi[StdFs]] {
     let mut err: u64 = 0;
     let m = os_metadata(in path.as_bytes(), true, inout err);
     err == 0
+}
+
+// `Path::is_dir`: whether `path` names a directory, following symbolic
+// links. Never fails.
+pub fn is_dir_path(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    let mut err: u64 = 0;
+    let m = os_metadata(in path, true, inout err);
+    err == 0 && m.kind == kind_dir()
+}
+
+// `Path::is_file`: whether `path` names a regular file, following
+// symbolic links. Never fails.
+pub fn is_file_path(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    let mut err: u64 = 0;
+    let m = os_metadata(in path, true, inout err);
+    err == 0 && m.kind == kind_file()
+}
+
+// ---------------------------------------------------------------------------
+// Error text.
+
+// Rust's `Display` of the `io::Error` that `e` stands for (#1896): the OS
+// error's message and number (`No such file or directory (os error 2)`)
+// when it has one, else its kind's text (`entity not found`).
+pub fn error_text(e: IoError) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if e.os != 0 {
+        os_error_message(inout out, e.os);
+        os_error_suffix(inout out, e.os);
+        return out;
+    }
+    out.extend(in kind_text(e.kind).as_bytes());
+    out
+}
+
+// ` (os error <n>)`, with the number as Rust's `i32`.
+fn os_error_suffix(inout out: ChunkSeq[u8], os: u32) {
+    out.extend(in " (os error ".as_bytes());
+    let mut n = widen_u64(os);
+    if os >= 2147483648 {
+        out.push(45);
+        n = wrapping_sub(4294967296, n);
+    }
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    loop {
+        digits.push(wrapping_u8(wrapping_add(48, n % 10)));
+        n = n / 10;
+        if n == 0 {
+            break;
+        }
+    }
+    let len = digits.len();
+    for i in 0..len {
+        match digits.try_get(wrapping_sub(wrapping_sub(len, 1), i)) {
+            Option::Some(d) => out.push(d),
+            Option::None => (),
+        }
+    }
+    out.push(41);
+}
+
+// `ErrorKind::as_str` of the kind the hybrid's error words decode to
+// (`io_error` in crates/vesper-hybrid/src/driver.rs): every other code is
+// `Other`.
+fn kind_text(kind: u32) -> Str {
+    match kind {
+        1 => "entity not found",
+        2 => "permission denied",
+        3 => "entity already exists",
+        4 => "not a directory",
+        5 => "is a directory",
+        6 => "directory not empty",
+        7 => "invalid input parameter",
+        8 => "operation interrupted",
+        9 => "unexpected end of file",
+        10 => "write zero",
+        11 => "unsupported",
+        12 => "out of memory",
+        _ => "other error",
+    }
+}
+
+// The architecture this package was built for: `arch_x86_64()`,
+// `arch_aarch64()` or `arch_wasm32()` (the vsys file's `ARCH`).
+pub fn arch() -> u32 {
+    StdFs::ARCH
+}
+
+pub fn arch_x86_64() -> u32 {
+    1
+}
+
+pub fn arch_aarch64() -> u32 {
+    2
+}
+
+pub fn arch_wasm32() -> u32 {
+    3
 }

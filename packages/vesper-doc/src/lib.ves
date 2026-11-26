@@ -20,13 +20,8 @@
 
 // @export abi 4
 
-use self::json::{
-    pretty
-};
-use self::page::{
-    linked,
-    page
-};
+use self::json::{pretty};
+use self::page::{linked, page};
 
 // The layout version of the requests and results; the Rust encoder
 // (crates/vesper-doc/src/swap.rs `FORMAT`) checks it.
@@ -80,9 +75,7 @@ pub fn result_err(in text: Str) -> ChunkSeq[u8] {
 // `to_json(value, max_bytes)`: request = max_bytes, then the compact JSON
 // (the rest of the request).
 pub fn pretty_json(in b: Slice[u8]) -> ChunkSeq[u8] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let max = read_word(inout r, in b);
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let status = pretty(in b, r.pos, b.len(), max, inout out);
@@ -96,9 +89,7 @@ pub fn pretty_json(in b: Slice[u8]) -> ChunkSeq[u8] {
 // `render_html(value, limits)` after `limits.validate()`: request =
 // max_output_bytes, then the compact JSON.
 pub fn static_page(in b: Slice[u8]) -> ChunkSeq[u8] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let max = read_word(inout r, in b);
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let status = page(in b, r.pos, b.len(), max, inout out);

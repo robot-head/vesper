@@ -106,17 +106,6 @@ impl RelPlan {
             }
         }
     }
-    pub(crate) fn slots(&self) -> Vec<usize> {
-        match self {
-            Self::Scan { columns, .. } => columns.clone(),
-            Self::Filter { input, .. } => input.slots(),
-            Self::Join { lhs, rhs, .. } => {
-                let mut x = lhs.slots();
-                x.extend(rhs.slots());
-                x
-            }
-        }
-    }
 }
 #[derive(Clone, Debug)]
 pub struct PreparedQuery {

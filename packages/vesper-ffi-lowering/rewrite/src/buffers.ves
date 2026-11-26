@@ -48,12 +48,8 @@ use @vesper/ast::{
     pat_at,
     type_at
 };
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
 
 const NONE: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
@@ -423,14 +419,7 @@ fn param_at(in a: Ast, i: u32) -> ParamNode {
         .params
         .get_or(
             idx_from_raw[ParamNode](i),
-            ParamNode {
-                name: NONE,
-                pass: 0,
-                projections: 0,
-                ty: NONE,
-                start: 0,
-                end: 0
-            }
+            ParamNode { name: NONE, pass: 0, projections: 0, ty: NONE, start: 0, end: 0 }
         )
 }
 
@@ -439,40 +428,16 @@ fn stmt_at(in a: Ast, i: u32) -> StmtNode {
         .stmts
         .get_or(
             idx_from_raw[StmtNode](i),
-            StmtNode {
-                kind: 0,
-                pat: NONE,
-                ty: NONE,
-                value: NONE,
-                mutable: false
-            }
+            StmtNode { kind: 0, pat: NONE, ty: NONE, value: NONE, mutable: false }
         )
 }
 
 fn arg_at(in a: Ast, i: u32) -> ArgNode {
-    a
-        .args
-        .get_or(
-            idx_from_raw[ArgNode](i),
-            ArgNode {
-                pass: 0,
-                explicit: false,
-                expr: NONE
-            }
-        )
+    a.args.get_or(idx_from_raw[ArgNode](i), ArgNode { pass: 0, explicit: false, expr: NONE })
 }
 
 fn clause_at(in a: Ast, i: u32) -> ClauseNode {
-    a
-        .clauses
-        .get_or(
-            idx_from_raw[ClauseNode](i),
-            ClauseNode {
-                name: NONE,
-                pats: 0,
-                body: NONE
-            }
-        )
+    a.clauses.get_or(idx_from_raw[ClauseNode](i), ClauseNode { name: NONE, pats: 0, body: NONE })
 }
 
 fn adt_at(in a: Ast, i: u32) -> AdtNode {
@@ -497,14 +462,7 @@ fn adt_at(in a: Ast, i: u32) -> AdtNode {
 fn variant_at(in a: Ast, i: u32) -> VariantNode {
     a
         .variants
-        .get_or(
-            idx_from_raw[VariantNode](i),
-            VariantNode {
-                name: NONE,
-                fields: 0,
-                named: false
-            }
-        )
+        .get_or(idx_from_raw[VariantNode](i), VariantNode { name: NONE, fields: 0, named: false })
 }
 
 fn field_at(in a: Ast, i: u32) -> FieldNode {
@@ -512,12 +470,7 @@ fn field_at(in a: Ast, i: u32) -> FieldNode {
         .fields
         .get_or(
             idx_from_raw[FieldNode](i),
-            FieldNode {
-                name: NONE,
-                ty: NONE,
-                modality: 3,
-                temperature: 0
-            }
+            FieldNode { name: NONE, ty: NONE, modality: 3, temperature: 0 }
         )
 }
 
@@ -531,14 +484,7 @@ fn generic_name(in a: Ast, i: u32) -> u32 {
 fn effect_node(in a: Ast, i: u32) -> EffectNode {
     a
         .effect_nodes
-        .get_or(
-            idx_from_raw[EffectNode](i),
-            EffectNode {
-                label: NONE,
-                name: NONE,
-                args: 0
-            }
-        )
+        .get_or(idx_from_raw[EffectNode](i), EffectNode { label: NONE, name: NONE, args: 0 })
 }
 
 fn effect_decl(in a: Ast, i: u32) -> EffectDeclNode {
@@ -546,14 +492,7 @@ fn effect_decl(in a: Ast, i: u32) -> EffectDeclNode {
         .effect_decls
         .get_or(
             idx_from_raw[EffectDeclNode](i),
-            EffectDeclNode {
-                name: NONE,
-                linear: false,
-                generics: 0,
-                ops: 0,
-                start: 0,
-                end: 0
-            }
+            EffectDeclNode { name: NONE, linear: false, generics: 0, ops: 0, start: 0, end: 0 }
         )
 }
 
@@ -1292,15 +1231,7 @@ fn item_at(in a: Ast, i: u64) -> ItemNode {
         Option::Some(x) => x,
         Option::None => NONE,
     };
-    a
-        .items
-        .get_or(
-            idx_from_raw[ItemNode](it),
-            ItemNode {
-                kind: 0,
-                node: NONE
-            }
-        )
+    a.items.get_or(idx_from_raw[ItemNode](it), ItemNode { kind: 0, node: NONE })
 }
 
 // The methods list of impl or conformance item `item`, or 0 (the empty

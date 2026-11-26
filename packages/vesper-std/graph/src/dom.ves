@@ -1,14 +1,8 @@
 // @vesper-std/graph::dom: immediate dominators (Cooper, Harvey and Kennedy,
 // "A Simple, Fast Dominance Algorithm", 2001).
-use self::{
-    Graph,
-    GraphIndex
-};
+use self::{Graph, GraphIndex};
 use self::reach::reverse_postorder;
-use self::util::{
-    get32,
-    filled32
-};
+use self::util::{get32, filled32};
 
 // The dominator tree of the nodes reachable from a root.
 pub struct Dominators {
@@ -93,10 +87,7 @@ pub fn dominators(in g: Graph, root: u32) -> Dominators {
             }
         }
     }
-    Dominators {
-        root: root,
-        idom: idom
-    }
+    Dominators { root: root, idom: idom }
 }
 
 // The nearest common dominator of `a` and `b` in the partial tree `idom`:

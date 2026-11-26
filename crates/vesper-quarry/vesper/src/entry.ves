@@ -1,10 +1,5 @@
 // Module entry of @vesper/quarry (see lib.ves).
-use self::{
-    CCol,
-    CTab,
-    D,
-    Q
-};
+use self::{CCol, CTab, D, Q};
 use self::util::{
     bound,
     cw,
@@ -22,30 +17,19 @@ use self::util::{
     sw,
     vat
 };
-use self::check::{
-    ex_end
-};
-use self::plan::{
-    decode_plan
-};
-use self::values::{
-    dtab,
-    eval,
-    size_value,
-    size_vec,
-    tick,
-    val_at,
-    valid,
-    vbytes,
-    vheap
-};
+use self::check::{ex_end};
+use self::plan::{decode_plan};
+use self::values::{dtab, eval, size_value, size_vec, tick, val_at, valid, vbytes, vheap};
 use self::rows::{
     check_inputs,
     load_catalog_ex,
     load_data,
+    load_data_in,
     run,
     table_bytes,
-    validate_rows
+    table_bytes_in,
+    validate_rows,
+    validate_rows_in
 };
 
 // `PreparedQuery::execute` after the Rust snapshot check. prog is
@@ -61,9 +45,32 @@ pub fn execute_q(in prog: Slice[u64], in text: Slice[u8]) -> Q {
     q
 }
 
-pub fn execute_run(inout q: Q, inout ds: D, in prog: Slice[u64], in text: Slice[u8]) {
+// Decode an execution input (the `prog` of `execute_q`) and run the Rust
+// `check_call` checks on it: parameters, input row and byte limits, row
+// validation and missing inputs. The row executor also charges one work
+// unit per input value (`tick_rows`); `validate` false skips the row
+// validation. Only `prog[0 .. data_at]` is
+// copied into `ex` (the data is read in place), all of it for none.
+// Returns the plan root; the position of each projection expression in
+// `ex` is appended to `projs`.
+pub fn load_query(
+    inout q: Q,
+    inout ds: D,
+    in prog: Slice[u64],
+    in text: Slice[u8],
+    inout projs: ChunkSeq[u64],
+    tick_rows: bool,
+    validate: bool,
+    data_at: u64
+) -> u64 {
     q.pool.extend(in text);
-    q.ex.extend(in prog);
+    if data_at == none() {
+        q.ex.extend(in prog);
+    } else {
+        for i in 0..data_at {
+            q.ex.push(sw(in prog, i));
+        }
+    }
     let nlim: u64 = 16;
     for i in 0..nlim {
         q.lim.push(sw(in prog, i));
@@ -71,8 +78,6 @@ pub fn execute_run(inout q: Q, inout ds: D, in prog: Slice[u64], in text: Slice[
     let (root, plan_end) = decode_plan(inout q, 17);
     let nproj = ex(in q, plan_end);
     let mut p = wrapping_add(plan_end, 1);
-    // The position of each projection expression in `ex`.
-    let mut projs = ChunkSeq::new[u64]();
     for k in 0..nproj {
         projs.push(p);
         p = ex_end(in q, p);
@@ -106,10 +111,10 @@ pub fn execute_run(inout q: Q, inout ds: D, in prog: Slice[u64], in text: Slice[
         p = wrapping_add(p, 5);
     }
     p = load_catalog_ex(inout q, p);
-    load_data(inout ds, inout q, p);
+    load_data_in(inout ds, in prog, p);
     if nbinds != ndecl {
         fail(inout q, 8, "parameter set differs from declarations");
-        return;
+        return root;
     }
     let mut parameter_bytes: u64 = 0;
     for k in 0..ndecl {
@@ -126,49 +131,66 @@ pub fn execute_run(inout q: Q, inout ds: D, in prog: Slice[u64], in text: Slice[
         }
         if found == none() {
             fail_name(inout q, 8, "missing parameter :", d.noff, d.nlen);
-            return;
+            return root;
         }
         let v = vat(in ds, in q, param(in q, found).ty);
         if !valid(v, d.ty, d.nullable) {
             fail_name(inout q, 5, "parameter :", d.noff, d.nlen);
-            return;
+            return root;
         }
         parameter_bytes = wrapping_add(wrapping_add(parameter_bytes, size_value(in q)), vbytes(v));
     }
     if !bound(inout q, parameter_bytes, 8, "parameter byte limit") {
-        return;
+        return root;
     }
     let mut count: u64 = 0;
     let mut bytes = parameter_bytes;
     for i in 0..ds.dtabs.len() {
         let t = dtab(in ds, in q, i);
         count = wrapping_add(count, t.n);
-        bytes = wrapping_add(bytes, table_bytes(in q, t));
+        bytes = wrapping_add(bytes, table_bytes_in(in q, in prog, t));
         if !bound(inout q, count, 7, "input row limit") {
-            return;
+            return root;
         }
         if !bound(inout q, bytes, 8, "input byte limit") {
-            return;
+            return root;
         }
-        validate_rows(inout q, t);
+        if validate {
+            validate_rows_in(inout q, in prog, t);
+        }
         let mut at = t.start;
-        for r in 0..t.n {
+        let nticks = if tick_rows {
+            t.n
+        } else {
+            0
+        };
+        for r in 0..nticks {
             if q.err != 0 {
-                return;
+                return root;
             }
-            let nvals = ex(in q, at);
+            let nvals = sw(in prog, at);
             tick(inout q, wrapping_add(1, nvals));
             at = wrapping_add(wrapping_add(at, 1), wrapping_mul(nvals, 3));
         }
         if q.err != 0 {
-            return;
+            return root;
         }
     }
     // Missing input must fail even if an optimizer could eliminate its rows.
     check_inputs(in ds, inout q, root);
     if q.err != 0 {
+        return root;
+    }
+    root
+}
+
+pub fn execute_run(inout q: Q, inout ds: D, in prog: Slice[u64], in text: Slice[u8]) {
+    let mut projs = ChunkSeq::new[u64]();
+    let root = load_query(inout q, inout ds, in prog, in text, inout projs, true, true, none());
+    if q.err != 0 {
         return;
     }
+    let nproj = projs.len();
     let (s, e) = run(inout ds, inout q, root);
     if q.err != 0 {
         return;
@@ -233,12 +255,7 @@ pub fn set_rows_run(inout q: Q, inout ds: D, in prog: Slice[u64], in text: Slice
         return;
     }
     let nrows = ex(in q, p);
-    let rows = CTab {
-        noff: name,
-        nlen: tlen,
-        start: wrapping_add(p, 1),
-        n: nrows
-    };
+    let rows = CTab { noff: name, nlen: tlen, start: wrapping_add(p, 1), n: nrows };
     if !bound(inout q, nrows, 7, "input row limit") {
         return;
     }

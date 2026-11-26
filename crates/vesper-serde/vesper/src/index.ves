@@ -2,18 +2,8 @@
 // of src/index.rs: UTF-8 validation, the parser with its work, entry and
 // limit accounting, duplicate-key checks, JSON escapes, decoded string
 // comparison and decoding, and schema-directed field lookup.
-use self::{
-    Doc,
-    Error,
-    ErrorKind,
-    Kind,
-    Limits,
-    Token
-};
-use self::ascii::{
-    Ascii,
-    Utf8
-};
+use self::{Doc, Error, ErrorKind, Kind, Limits, Token};
+use self::ascii::{Ascii, Utf8};
 
 // `at` past the end: no byte has this value.
 const NO_BYTE: u64 = 256;
@@ -53,12 +43,7 @@ const TOKEN_BYTES: u64 = 48;
 const ENTRY_BYTES: u64 = 4;
 
 pub fn raise(kind: ErrorKind, offset: u64) -> Unit eff [Fail[Error]] {
-    Fail::raise(
-        Error {
-            kind: kind,
-            offset: offset
-        }
-    )
+    Fail::raise(Error { kind: kind, offset: offset })
 }
 
 // src/index.rs `HARD_DEPTH`.
@@ -235,13 +220,7 @@ pub copy struct Esc {
 }
 
 fn esc_fail(kind: u64, at: u64, budget: u64) -> Esc {
-    Esc {
-        code: 0,
-        pos: 0,
-        err: kind,
-        at: at,
-        budget: budget
-    }
+    Esc { code: 0, pos: 0, err: kind, at: at, budget: budget }
 }
 
 fn hex_digit(b: u64) -> u64 {
@@ -347,13 +326,7 @@ pub fn escape_body(in t: Slice[u8], pos0: u64, mode: u64, budget0: u64) -> Esc {
     } else {
         return esc_fail(1, pos0, budget);
     };
-    Esc {
-        code: code,
-        pos: pos,
-        err: 0,
-        at: 0,
-        budget: budget
-    }
+    Esc { code: code, pos: pos, err: 0, at: 0, budget: budget }
 }
 
 // The next decoded scalar of validated string content `t[pos..end]`, and

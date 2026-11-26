@@ -14,29 +14,11 @@
 // The entries below are the differential's tasks
 // (tests/self_host_egraph.rs).
 
-use self::util::{
-    fold,
-    u32_at
-};
-use self::graph::{
-    EGraph,
-    egraph_new
-};
-use self::rules::{
-    Rules,
-    rules_new
-};
-use self::run::{
-    Config,
-    Records,
-    records_new,
-    run_egg,
-    run_rounds
-};
-use self::extract::{
-    Extracted,
-    extractor
-};
+use self::util::{fold, u32_at};
+use self::graph::{EGraph, egraph_new};
+use self::rules::{Rules, rules_new};
+use self::run::{Config, Records, records_new, run_egg, run_rounds};
+use self::extract::{Extracted, extractor};
 
 const NONE: u32 = 4294967295;
 const G_NONE: u8 = 0;
@@ -237,9 +219,7 @@ fn push_u32s(inout out: ChunkSeq[u64], in r: Records) {
 // cost, and the best expression's nodes (op, data, child, child).
 pub fn egraph_math(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut rd = Reader {
-        pos: 0
-    };
+    let mut rd = Reader { pos: 0 };
     let rules = math_rules();
     let arity = math_arity();
     let cases = rd.word(in b);
@@ -412,9 +392,7 @@ fn set_token(inout s: ChunkSeq[u32], t: u64, id: u32) -> bool {
 // candidate in the read's class, or u32::MAX.
 pub fn egraph_memory(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut rd = Reader {
-        pos: 0
-    };
+    let mut rd = Reader { pos: 0 };
     let arity = memory_arity();
     let rounds = rd.word(in b);
     let blocks = rd.word(in b);

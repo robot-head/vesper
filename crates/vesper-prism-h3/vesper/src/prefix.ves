@@ -2,26 +2,9 @@
 // §5.2, RFC 9204 §4.1.1 and §4.1.2). Offsets are absolute positions in the
 // buffer, so callers never re-slice.
 
-use self::{
-    PrefixError,
-    HuffmanError,
-    Huff
-};
-use self::int::{
-    inc,
-    byte,
-    bit,
-    max64,
-    sat_mul,
-    div_ceil,
-    shl,
-    shr
-};
-use self::huffman::{
-    huff_encoded_len,
-    huff_encode,
-    huff_decode
-};
+use self::{PrefixError, HuffmanError, Huff};
+use self::int::{inc, byte, bit, max64, sat_mul, div_ceil, shl, shr};
+use self::huffman::{huff_encoded_len, huff_encode, huff_decode};
 
 // RFC 7541 §5.1: each byte after the prefix carries 7 bits and a
 // continuation flag; past a 56-bit shift the value cannot fit.
@@ -55,12 +38,7 @@ pub fn decode_int(in buf: Slice[u8], at: u64, bits: u64) -> Result[Num, PrefixEr
     let mask = wrapping_sub(bit(bits), 1);
     let mut value = first & mask;
     if value < mask {
-        return Result::Ok(
-            Num {
-                value: value,
-                used: 1
-            }
-        );
+        return Result::Ok(Num { value: value, used: 1 });
     }
     let mut shift: u64 = 0;
     let n = buf.len();
@@ -79,12 +57,7 @@ pub fn decode_int(in buf: Slice[u8], at: u64, bits: u64) -> Result[Num, PrefixEr
         }
         value = v;
         if b & CONTINUATION == 0 {
-            return Result::Ok(
-                Num {
-                    value: value,
-                    used: wrapping_sub(inc(i), at)
-                }
-            );
+            return Result::Ok(Num { value: value, used: wrapping_sub(inc(i), at) });
         }
         shift = wrapping_add(shift, PAYLOAD_BITS);
         i = inc(i);

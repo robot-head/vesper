@@ -8,14 +8,7 @@
 // two limbs by one use `u128` division. The constant cache that crmath
 // keeps in a lent `Slice[u32]` stays in 32-bit limbs (`big_from_limbs`,
 // `big_limbs`, `big_store`).
-use self::util::{
-    dec,
-    g32,
-    g64,
-    inc,
-    shl_u64,
-    shr_u64
-};
+use self::util::{dec, g32, g64, inc, shl_u64, shr_u64};
 
 pub struct Big {
     neg: bool,
@@ -489,10 +482,7 @@ fn nat_sqrt(in a: Slice[u64]) -> ChunkSeq[u64] {
 
 fn make(neg: bool, sink mag: ChunkSeq[u64]) -> Big {
     let z = nat_len(in mag.as_slice()) == 0;
-    Big {
-        neg: neg && !z,
-        mag: mag
-    }
+    Big { neg: neg && !z, mag: mag }
 }
 
 pub fn big_zero() -> Big {

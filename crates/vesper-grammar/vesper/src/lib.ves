@@ -20,13 +20,7 @@ use self::framing::{
     u24_frame_parts
 };
 
-use self::arrow::{
-    checked_buffer_range,
-    checked_sum,
-    get,
-    validate,
-    wire_pair
-};
+use self::arrow::{checked_buffer_range, checked_sum, get, validate, wire_pair};
 
 use self::capnp::{
     list_pointer,
@@ -38,16 +32,8 @@ use self::capnp::{
     unpacked_len
 };
 
-use self::grammar::{
-    parse_prefix as grammar_parse_prefix,
-    validate as grammar_validate
-};
-use self::codec::{
-    decode_exact,
-    validate_limits,
-    encode_into,
-    encoded_len
-};
+use self::grammar::{parse_prefix as grammar_parse_prefix, validate as grammar_validate};
+use self::codec::{decode_exact, validate_limits, encode_into, encoded_len};
 
 use self::der::{
     as_i64 as der_as_i64_impl,
@@ -57,9 +43,7 @@ use self::der::{
     reencode_into as der_reencode
 };
 
-use self::ipc::{
-    parse_prefix as ipc_parse
-};
+use self::ipc::{parse_prefix as ipc_parse};
 
 use self::protobuf::{
     encode_into as pb_encode,
@@ -333,12 +317,7 @@ pub fn der_encoding_plan(
     in lim: Slice[u64]
 ) -> P4 eff [Fail[GErr]] {
     let p = der_plan(in vals, in arena, in sch, in lim);
-    P4 {
-        a: p.encoded,
-        b: p.nodes,
-        c: p.metadata,
-        d: p.intermediate
-    }
+    P4 { a: p.encoded, b: p.nodes, c: p.metadata, d: p.intermediate }
 }
 
 pub fn der_encode_into(

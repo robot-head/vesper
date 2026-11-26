@@ -4,31 +4,11 @@
 // on top. Patterns are rows of a flat table; pattern 0 is the wildcard the
 // specialization fills missing payloads with.
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    Vars,
-    substitute,
-    TyKind
-};
-use @vesper/check-data::world::{
-    Adt,
-    Field,
-    Variant,
-    World
-};
-use self::relations::{
-    item
-};
+use @vesper/check-data::util::{add, inc, n32, u32_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, Vars, substitute, TyKind};
+use @vesper/check-data::world::{Adt, Field, Variant, World};
+use self::relations::{item};
 
 const NONE32: u32 = 4294967295;
 
@@ -85,12 +65,7 @@ impl Pats {
     pub fn pat(in self, i: u32) -> Pat {
         match self.pats.try_get(w(i)) {
             Option::Some(x) => x,
-            Option::None => Pat {
-                kind: P_WILD,
-                name: 0,
-                a: 0,
-                n: 0
-            },
+            Option::None => Pat { kind: P_WILD, name: 0, a: 0, n: 0 },
         }
     }
 
@@ -115,16 +90,7 @@ impl Pats {
             }
         }
         let id = n32(self.pats.len());
-        self
-            .pats
-            .push(
-                Pat {
-                    kind: kind,
-                    name: name,
-                    a: a,
-                    n: n32(kids.len())
-                }
-            );
+        self.pats.push(Pat { kind: kind, name: name, a: a, n: n32(kids.len()) });
         id
     }
 
@@ -229,11 +195,7 @@ pub fn matrix_new(in types: ChunkSeq[u32]) -> Matrix {
     for i in 0..types.len() {
         ts.push(u32_at(in types, i));
     }
-    Matrix {
-        cells: ChunkSeq::new[u32](),
-        rows: 0,
-        types: ts
-    }
+    Matrix { cells: ChunkSeq::new[u32](), rows: 0, types: ts }
 }
 
 impl Matrix {

@@ -7,30 +7,9 @@
 // error, 2 "drop the ready sections of this stream", 3 the section
 // `decode_section` returns.
 
-use self::{
-    DecoderCore,
-    Sections,
-    QpackError,
-    Reason,
-    PrefixError,
-    Huff
-};
-use self::int::{
-    inc,
-    word,
-    byte,
-    max64,
-    sat_add,
-    sat_mul,
-    remove_word,
-    drain_front
-};
-use self::prefix::{
-    Num,
-    decode_int,
-    encode_int,
-    decode_string
-};
+use self::{DecoderCore, Sections, QpackError, Reason, PrefixError, Huff};
+use self::int::{inc, word, byte, max64, sat_add, sat_mul, remove_word, drain_front};
+use self::prefix::{Num, decode_int, encode_int, decode_string};
 use self::table::{
     Static,
     Table,
@@ -45,9 +24,7 @@ use self::table::{
     slot_value_hi
 };
 
-use self::reason::{
-    reason_of
-};
+use self::reason::{reason_of};
 use self::wire::{
     Duplicate,
     Indexed,
@@ -381,12 +358,7 @@ fn lines(
         size = sat_add(size, wrapping_add(total, ENTRY_OVERHEAD));
         if size > limit {
             sec.bytes.truncate(start);
-            return Result::Ok(
-                Lines {
-                    size: size,
-                    count: count
-                }
-            );
+            return Result::Ok(Lines { size: size, count: count });
         }
         sec.fields.push(split);
         sec.fields.push(wrapping_sub(total, split));
@@ -404,12 +376,7 @@ fn lines(
     if ric > 0 && max_ref != ric {
         return Result::Err(Reason::BadRequiredInsertCount);
     }
-    Result::Ok(
-        Lines {
-            size: size,
-            count: count
-        }
-    )
+    Result::Ok(Lines { size: size, count: count })
 }
 
 fn fail(inout d: DecoderCore, e: QpackError) -> QpackError {
@@ -484,9 +451,7 @@ fn conclude(
                 }
             }
             if too_large {
-                let err = QpackError::FieldSectionTooLarge {
-                    stream_id: stream_id
-                };
+                let err = QpackError::FieldSectionTooLarge { stream_id: stream_id };
                 if queued {
                     head(inout d.sec, 1, stream_id, ric, 0);
                     return Result::Ok(());

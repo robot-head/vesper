@@ -1,8 +1,5 @@
 // Module ddl of @vesper/quarry (see lib.ves).
-use self::{
-    CTab,
-    Q
-};
+use self::{CTab, Q};
 use self::util::{
     bound,
     ctab,
@@ -18,9 +15,7 @@ use self::util::{
     same,
     syntax
 };
-use self::lex::{
-    lex
-};
+use self::lex::{lex};
 use self::parse::{
     at_end,
     kw_create,
@@ -221,16 +216,7 @@ pub fn ddl_apply_q(
             if !bound(inout q, bn, 4, "catalog table limit") {
                 return q;
             }
-            q
-                .tabs
-                .push(
-                    CTab {
-                        noff: noff,
-                        nlen: nlen,
-                        start: 0,
-                        n: 0
-                    }
-                );
+            q.tabs.push(CTab { noff: noff, nlen: nlen, start: 0, n: 0 });
             live = wrapping_add(live, 1);
             p = wrapping_add(
                 wrapping_add(p, 4),

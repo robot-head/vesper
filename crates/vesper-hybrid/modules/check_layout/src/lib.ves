@@ -9,14 +9,8 @@
 
 // @export abi 4
 
-use @vesper/check-data::input::{
-    Ctx,
-    ctx_new
-};
-use @vesper/check-layout::{
-    layout_part,
-    layout_words
-};
+use @vesper/check-data::input::{Ctx, ctx_new};
+use @vesper/check-layout::{layout_part, layout_words};
 
 // The layout version of `layout_of_words`; tests/check_words.rs checks it.
 pub fn format() -> u64 {
@@ -38,9 +32,7 @@ pub struct LayoutInput {
 }
 
 pub fn layout_input_new() -> LayoutInput {
-    LayoutInput {
-        c: ctx_new()
-    }
+    LayoutInput { c: ctx_new() }
 }
 
 // `layout_of_words` over the world this input holds, after adding `part`.

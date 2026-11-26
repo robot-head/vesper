@@ -2,22 +2,9 @@
 // reader used by connection, client, and session state machines so that
 // active streams store scalar handles instead of per-stream ChunkSeqs.
 
-use self::{
-    FrameError,
-    FrameOut,
-    CapsuleError,
-    CapsuleOut
-};
-use self::int::{
-    inc,
-    min64,
-    word,
-    byte,
-    remove_word
-};
-use self::varint::{
-    vdec
-};
+use self::{FrameError, FrameOut, CapsuleError, CapsuleOut};
+use self::int::{inc, min64, word, byte, remove_word};
+use self::varint::{vdec};
 use self::frame::{
     data_type,
     headers_type,
@@ -296,18 +283,12 @@ pub fn q_push(inout p: BytePool, q: u64, in src: Slice[u8]) -> u64 {
 
 pub fn q_head_range(in p: BytePool, q: u64) -> PoolRange {
     if q == 0 {
-        return PoolRange {
-            off: 0,
-            len: 0
-        };
+        return PoolRange { off: 0, len: 0 };
     }
     let qi = wrapping_sub(q, 1);
     let href = word(in p.q_head.as_slice(), qi);
     if href == 0 {
-        return PoolRange {
-            off: 0,
-            len: 0
-        };
+        return PoolRange { off: 0, len: 0 };
     }
     let hc = wrapping_sub(href, 1);
     let start = word(in p.chunk_start.as_slice(), hc);
@@ -464,10 +445,7 @@ pub fn q_gather(in p: BytePool, q: u64, want: u64, inout out: ChunkSeq[u8]) {
 pub fn q_drain_to(inout p: BytePool, q: u64, max_n: u64, inout out: ChunkSeq[u8]) -> PoolDrain {
     let len = min64(max_n, q_len(in p, q));
     if len == 0 {
-        return PoolDrain {
-            q: q,
-            len: 0
-        };
+        return PoolDrain { q: q, len: 0 };
     }
     let qi = wrapping_sub(q, 1);
     let mut cur = word(in p.q_head.as_slice(), qi);
@@ -487,10 +465,7 @@ pub fn q_drain_to(inout p: BytePool, q: u64, max_n: u64, inout out: ChunkSeq[u8]
         cur = word(in p.chunk_next.as_slice(), c);
     }
     let next_q = q_consume(inout p, q, len);
-    PoolDrain {
-        q: next_q,
-        len: len
-    }
+    PoolDrain { q: next_q, len: len }
 }
 
 pub fn put_u64_le(inout out: ChunkSeq[u8], v: u64) {
@@ -539,21 +514,11 @@ copy struct PooledHdr {
 fn decode_two_hdr(in s: Slice[u8]) -> PooledHdr {
     let t = match vdec(in s, 0) {
         Option::Some(n) => n,
-        Option::None => return PooledHdr {
-            ok: false,
-            ty: 0,
-            len: 0,
-            used: 0
-        },
+        Option::None => return PooledHdr { ok: false, ty: 0, len: 0, used: 0 },
     };
     let l = match vdec(in s, t.used) {
         Option::Some(n) => n,
-        Option::None => return PooledHdr {
-            ok: false,
-            ty: 0,
-            len: 0,
-            used: 0
-        },
+        Option::None => return PooledHdr { ok: false, ty: 0, len: 0, used: 0 },
     };
     PooledHdr {
         ok: true,
@@ -930,10 +895,7 @@ pub fn bsearch_u64(in s: Slice[u64], key: u64) -> FindU64 {
     let mut hi: u64 = s.len();
     loop {
         if lo >= hi {
-            return FindU64 {
-                idx: lo,
-                found: false
-            };
+            return FindU64 { idx: lo, found: false };
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
         let v = word(in s, mid);
@@ -942,10 +904,7 @@ pub fn bsearch_u64(in s: Slice[u64], key: u64) -> FindU64 {
         } else if v > key {
             hi = mid;
         } else {
-            return FindU64 {
-                idx: mid,
-                found: true
-            };
+            return FindU64 { idx: mid, found: true };
         }
     }
 }

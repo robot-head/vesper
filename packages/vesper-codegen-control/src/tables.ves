@@ -9,17 +9,8 @@
 // neither checked bodies nor the closure and handler expressions of the
 // Place IR are in the Vesper tables yet (report, gap 1).
 
-use @vesper/check-data::util::{
-    add,
-    inc32,
-    n32,
-    u32_at,
-    w
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader
-};
+use @vesper/check-data::util::{add, inc32, n32, u32_at, w};
+use @vesper/check-data::input::{Ctx, Reader};
 
 const NONE32: u32 = 4294967295;
 
@@ -78,17 +69,7 @@ fn set_at(inout table: ChunkSeq[u32], at: u32, v: u32) {
 }
 
 fn empty_func() -> Func {
-    Func {
-        name: 0,
-        body: false,
-        generics: 0,
-        pa: 0,
-        pn: 0,
-        result: 0,
-        row: 0,
-        ca: 0,
-        cn: 0
-    }
+    Func { name: 0, body: false, generics: 0, pa: 0, pn: 0, result: 0, row: 0, ca: 0, cn: 0 }
 }
 
 impl Tables {
@@ -109,11 +90,7 @@ impl Tables {
     pub fn param(in self, i: u64) -> Param {
         match self.params.try_get(i) {
             Option::Some(p) => p,
-            Option::None => Param {
-                name: 0,
-                pass: 0,
-                ty: 0
-            },
+            Option::None => Param { name: 0, pass: 0, ty: 0 },
         }
     }
 
@@ -124,13 +101,7 @@ impl Tables {
     pub fn decl(in self, i: u32) -> Decl {
         match self.decls.try_get(w(i)) {
             Option::Some(d) => d,
-            Option::None => Decl {
-                name: 0,
-                linear: false,
-                generics: 0,
-                oa: 0,
-                on: 0
-            },
+            Option::None => Decl { name: 0, linear: false, generics: 0, oa: 0, on: 0 },
         }
     }
 
@@ -161,14 +132,7 @@ fn read_params(inout r: Reader, in b: Slice[u8], in c: Ctx, inout params: ChunkS
         let name = u32_at(in c.nmap, r.word(in b));
         let pass = wrapping_u8(r.word(in b));
         let ty = u32_at(in c.tmap, r.word(in b));
-        params
-            .push(
-                Param {
-                    name: name,
-                    pass: pass,
-                    ty: ty
-                }
-            );
+        params.push(Param { name: name, pass: pass, ty: ty });
     }
     n32(n)
 }
@@ -252,17 +216,7 @@ pub fn read_tables(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Tables {
                 );
         }
         set_at(inout t.decl_by_name, name, inc32(n32(t.decls.len())));
-        t
-            .decls
-            .push(
-                Decl {
-                    name: name,
-                    linear: linear,
-                    generics: generics,
-                    oa: oa,
-                    on: n32(on)
-                }
-            );
+        t.decls.push(Decl { name: name, linear: linear, generics: generics, oa: oa, on: n32(on) });
     }
     t
 }

@@ -1,0 +1,247 @@
+// The expressions of the Place IR's payload pool that the verified
+// backend needs (#1886, part 4c): closures and `handle` expressions, by
+// pool index, as tests/self_host_verified_codegen.rs `expr_rows` writes
+// them after the program section. The AST stays on the Rust side; a row
+// keeps the spans that name the nested functions, the free names, and a
+// `handle`'s effect, state flag and clause patterns.
+
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::input::{Ctx, Reader};
+
+// Row kinds.
+pub const X_NONE: u8 = 0;
+pub const X_CLOSURE: u8 = 1;
+pub const X_HANDLE: u8 = 2;
+
+// Pattern kinds of a clause.
+pub const P_WILD: u8 = 0;
+pub const P_BIND: u8 = 1;
+pub const P_OTHER: u8 = 2;
+
+// One pool entry. Free names `syms[fa..fa+fnn]`; for a `handle`: the
+// effect name, label (symbol + 1, or 0), argument types `tys[ea..ea+en]`,
+// whether it is stateful, the body span, the `return` clause `cls[ret]`
+// and the operation clauses `cls[oa..oa+on]`.
+pub copy struct Hx {
+    kind: u8,
+    s0: u64,
+    s1: u64,
+    fa: u64,
+    fnn: u64,
+    effect: u32,
+    label: u32,
+    ea: u64,
+    en: u64,
+    state: bool,
+    b0: u64,
+    b1: u64,
+    ret: u64,
+    oa: u64,
+    on: u64,
+}
+
+// One clause: its operation name, patterns `pk[pa..pa+pn]` (with the bound
+// names in `pname`, 0 when not a name) and body span.
+pub copy struct Cl {
+    name: u32,
+    pa: u64,
+    pn: u64,
+    s0: u64,
+    s1: u64,
+}
+
+pub struct Ex {
+    hx: ChunkSeq[Hx],
+    cls: ChunkSeq[Cl],
+    syms: ChunkSeq[u32],
+    tys: ChunkSeq[u32],
+    pk: ChunkSeq[u8],
+    pname: ChunkSeq[u32],
+}
+
+pub fn hx0() -> Hx {
+    Hx {
+        kind: X_NONE,
+        s0: 0,
+        s1: 0,
+        fa: 0,
+        fnn: 0,
+        effect: 0,
+        label: 0,
+        ea: 0,
+        en: 0,
+        state: false,
+        b0: 0,
+        b1: 0,
+        ret: 0,
+        oa: 0,
+        on: 0
+    }
+}
+
+pub fn cl0() -> Cl {
+    Cl { name: 0, pa: 0, pn: 0, s0: 0, s1: 0 }
+}
+
+impl Ex {
+    // The row of pool entry `i`.
+    pub fn row(in self, i: u64) -> Hx {
+        match self.hx.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => hx0(),
+        }
+    }
+
+    pub fn clause(in self, i: u64) -> Cl {
+        match self.cls.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => cl0(),
+        }
+    }
+
+    pub fn pat_kind(in self, c: Cl, i: u64) -> u8 {
+        u8_at(in self.pk, add(c.pa, i))
+    }
+
+    pub fn pat_name(in self, c: Cl, i: u64) -> u32 {
+        u32_at(in self.pname, add(c.pa, i))
+    }
+
+    pub fn free(in self, x: Hx, i: u64) -> u32 {
+        u32_at(in self.syms, add(x.fa, i))
+    }
+
+    pub fn arg(in self, x: Hx, i: u64) -> u32 {
+        u32_at(in self.tys, add(x.ea, i))
+    }
+}
+
+pub fn ex_new() -> Ex {
+    Ex {
+        hx: ChunkSeq::new[Hx](),
+        cls: ChunkSeq::new[Cl](),
+        syms: ChunkSeq::new[u32](),
+        tys: ChunkSeq::new[u32](),
+        pk: ChunkSeq::new[u8](),
+        pname: ChunkSeq::new[u32](),
+    }
+}
+
+fn sym(inout r: Reader, in b: Slice[u8], in c: Ctx) -> u32 {
+    u32_at(in c.nmap, r.word(in b))
+}
+
+fn read_clause(inout r: Reader, in b: Slice[u8], in c: Ctx, inout ex: Ex) -> u64 {
+    let name = sym(inout r, in b, in c);
+    let pa = ex.pk.len();
+    let pn = r.word(in b);
+    for i in 0..pn {
+        let k = wrapping_u8(r.word(in b));
+        ex.pk.push(k);
+        if k == P_BIND {
+            let s = sym(inout r, in b, in c);
+            ex.pname.push(s);
+        } else {
+            ex.pname.push(0);
+        }
+    }
+    let s0 = r.word(in b);
+    let s1 = r.word(in b);
+    let i = ex.cls.len();
+    ex.cls.push(Cl { name: name, pa: pa, pn: pn, s0: s0, s1: s1 });
+    i
+}
+
+// The expression rows, right after the program section.
+pub fn read_exprs(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Ex {
+    let mut ex = ex_new();
+    let n = r.word(in b);
+    for i in 0..n {
+        let kind = wrapping_u8(r.word(in b));
+        if kind == X_NONE {
+            ex.hx.push(hx0());
+            continue;
+        }
+        let mut x = hx0();
+        x.kind = kind;
+        x.s0 = r.word(in b);
+        x.s1 = r.word(in b);
+        x.fa = ex.syms.len();
+        x.fnn = r.word(in b);
+        for j in 0..x.fnn {
+            let s = sym(inout r, in b, in c);
+            ex.syms.push(s);
+        }
+        if kind == X_HANDLE {
+            x.effect = sym(inout r, in b, in c);
+            let l = r.word(in b);
+            x.label = if l == 0 {
+                0
+            } else {
+                n32(inc(w(u32_at(in c.nmap, wrapping_sub(l, 1)))))
+            };
+            x.ea = ex.tys.len();
+            x.en = r.word(in b);
+            for j in 0..x.en {
+                ex.tys.push(u32_at(in c.tmap, r.word(in b)));
+            }
+            x.state = r.word(in b) != 0;
+            x.b0 = r.word(in b);
+            x.b1 = r.word(in b);
+            x.ret = read_clause(inout r, in b, in c, inout ex);
+            x.on = r.word(in b);
+            let oa = ex.cls.len();
+            for j in 0..x.on {
+                let k = read_clause(inout r, in b, in c, inout ex);
+            }
+            x.oa = oa;
+        }
+        ex.hx.push(x);
+    }
+    ex
+}
+
+fn put_decimal(inout t: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_decimal(inout t, v / 10);
+    }
+    t.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+// `ir::nested_name(kind, span)`: `$kind_start_end`, interned.
+pub fn nested_name(inout names: Names, in kind: Str, s0: u64, s1: u64) -> u32 {
+    let mut t = ChunkSeq::new[u8]();
+    t.push(36);
+    t.extend(in kind.as_bytes());
+    t.push(95);
+    put_decimal(inout t, s0);
+    t.push(95);
+    put_decimal(inout t, s1);
+    names.intern(in t.as_slice())
+}
+
+// `mono::nested_instance(parent, nested)`: `nested` with the instance
+// suffix of `parent` (from its first `<`, when it ends with `>`).
+pub fn nested_instance(inout names: Names, parent: u32, nested: u32) -> u32 {
+    let n = names.size(parent);
+    if n == 0 || names.byte(parent, wrapping_sub(n, 1)) != 62 {
+        return nested;
+    }
+    let mut at = n;
+    for i in 0..n {
+        if names.byte(parent, i) == 60 {
+            at = i;
+            break;
+        }
+    }
+    if at == n {
+        return nested;
+    }
+    let mut t = ChunkSeq::new[u8]();
+    names.write(nested, inout t);
+    for i in at..n {
+        t.push(names.byte(parent, i));
+    }
+    names.intern(in t.as_slice())
+}

@@ -19,17 +19,9 @@
 // message, start, end, line, column), and the decision (0, or 1, passed
 // and the message) (tests/common/doctest_verdict_words.rs).
 
-use @vesper-std/intern::{
-    Interner,
-    interner_new
-};
-use @vesper/front::kinds::{
-    k_lower,
-    k_upper
-};
-use self::discover::{
-    toks
-};
+use @vesper-std/intern::{Interner, interner_new};
+use @vesper/front::kinds::{k_lower, k_upper};
+use self::discover::{toks};
 use self::util::{
     Reader,
     add,
@@ -73,9 +65,7 @@ fn error_text(in text: Str) -> ChunkSeq[u64] {
 
 // `rust_wrappers` over the input words.
 pub fn wrappers(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut names = interner_new();
     let nf = r.word(in b);
     for i in 0..nf {
@@ -281,9 +271,7 @@ fn map_offset(in segs: ChunkSeq[u64], in lines: ChunkSeq[u64], offset: u64, code
 
 // `rust_verdict` over the input words.
 pub fn verdict(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let (ss, se) = r.text(in b);
     let offset = r.word(in b);
     let nl = r.word(in b);

@@ -1,10 +1,7 @@
 // Module wire of @vesper/ebpf (see lib.ves): src/wire.rs, the §27.2 wire
 // structs. The six-byte MAC addresses cross as the low 48 bits of a word,
 // first byte most significant.
-use self::common::{
-    shl,
-    shr
-};
+use self::common::{shl, shr};
 
 // The frame of `EthIpv4TcpWire`: field byte offsets and size (src/wire.rs
 // `eth_ipv4_tcp`).
@@ -103,12 +100,7 @@ fn be(in s: Slice[u8], at: u64, n: u64) -> u64 {
 }
 
 fn short(need: u64, got: u64) -> Never eff [Fail[WireError]] {
-    Fail::raise(
-        WireError::Short {
-            need: narrow_usize(need),
-            got: narrow_usize(got)
-        }
-    )
+    Fail::raise(WireError::Short { need: narrow_usize(need), got: narrow_usize(got) })
 }
 
 pub fn eth_encode(w: EthIpv4TcpWire) -> ChunkSeq[u8] {

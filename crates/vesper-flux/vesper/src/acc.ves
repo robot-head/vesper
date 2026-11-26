@@ -12,16 +12,9 @@
 // inserted (rows whose sums later cancel still count), an i128 sum that
 // overflows fails at that addition, and an i64 range failure is reported
 // when the input finishes.
-use self::util::{
-    cell,
-    push_row,
-    word
-};
+use self::util::{cell, push_row, word};
 use self::sort::sort_rows;
-use self::{
-    ZAcc,
-    ZErr
-};
+use self::{ZAcc, ZErr};
 
 const START_SLOTS: u64 = 16;
 
@@ -84,29 +77,12 @@ fn sip_round(s: Sip) -> Sip {
     v2 = wrapping_add(v2, v1);
     v1 = rotl(v1, 17) ^ v2;
     v2 = rotl(v2, 32);
-    Sip {
-        v0: v0,
-        v1: v1,
-        v2: v2,
-        v3: v3
-    }
+    Sip { v0: v0, v1: v1, v2: v2, v3: v3 }
 }
 
 fn sip_word(s: Sip, m: u64) -> Sip {
-    let t = sip_round(
-        Sip {
-            v0: s.v0,
-            v1: s.v1,
-            v2: s.v2,
-            v3: s.v3 ^ m
-        }
-    );
-    Sip {
-        v0: t.v0 ^ m,
-        v1: t.v1,
-        v2: t.v2,
-        v3: t.v3
-    }
+    let t = sip_round(Sip { v0: s.v0, v1: s.v1, v2: s.v2, v3: s.v3 ^ m });
+    Sip { v0: t.v0 ^ m, v1: t.v1, v2: t.v2, v3: t.v3 }
 }
 
 // SipHash-1-3 under (k0, k1) of the words `input, row[at..at + width]`.
@@ -124,18 +100,7 @@ fn hash_row(k0: u64, k1: u64, input: u64, in row: Slice[i64], at: u64, width: u6
     // The final block: the message length in bytes, in the top byte.
     let b = wrapping_shl_u64(wrapping_mul(wrapping_add(width, 1), 8) & 255, 56);
     s = sip_word(s, b);
-    let f = sip_round(
-        sip_round(
-            sip_round(
-                Sip {
-                    v0: s.v0,
-                    v1: s.v1,
-                    v2: s.v2 ^ 255,
-                    v3: s.v3
-                }
-            )
-        )
-    );
+    let f = sip_round(sip_round(sip_round(Sip { v0: s.v0, v1: s.v1, v2: s.v2 ^ 255, v3: s.v3 })));
     f.v0 ^ f.v1 ^ f.v2 ^ f.v3
 }
 

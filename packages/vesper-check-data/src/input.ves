@@ -3,22 +3,9 @@
 // words in one `Str`, which any JIT entry can take. This decoder rebuilds
 // the tables; `r` is left at the task's own words.
 
-use self::util::{
-    inc32,
-    n32,
-    u32_at
-};
-use self::names::{
-    names_sized,
-    Names,
-    names_new
-};
-use self::types::{
-    EffNode,
-    Types,
-    types_new,
-    TyKind
-};
+use self::util::{inc32, n32, u32_at};
+use self::names::{names_sized, Names, names_new};
+use self::types::{EffNode, Types, types_new, TyKind};
 use self::world::{
     Adt,
     EffectRow,
@@ -102,15 +89,7 @@ fn read_row(
         for j in 0..n {
             args.push(u32_at(in tmap, r.word(in b)));
         }
-        es
-            .push(
-                EffNode {
-                    label: label,
-                    name: name,
-                    a: a,
-                    n: n32(n)
-                }
-            );
+        es.push(EffNode { label: label, name: name, a: a, n: n32(n) });
     }
     let tail = opt_sym(in nmap, r.word(in b));
     t.mk_row(in es, in args, tail)
@@ -186,15 +165,7 @@ fn read_world(
             let g = sym(in nmap, r.word(in b));
             let bound = wrapping_u8(r.word(in b));
             let row = r.word(in b) != 0;
-            wd
-                .generics
-                .push(
-                    Generic {
-                        name: g,
-                        bound: bound,
-                        row: row
-                    }
-                );
+            wd.generics.push(Generic { name: g, bound: bound, row: row });
         }
         let is_enum = r.word(in b) != 0;
         let tile = n32(r.word(in b));
@@ -210,26 +181,9 @@ fn read_world(
                 let fname = sym(in nmap, r.word(in b));
                 let fty = u32_at(in tmap, r.word(in b));
                 let modality = wrapping_u8(r.word(in b));
-                wd
-                    .fields
-                    .push(
-                        Field {
-                            name: fname,
-                            ty: fty,
-                            modality: modality
-                        }
-                    );
+                wd.fields.push(Field { name: fname, ty: fty, modality: modality });
             }
-            wd
-                .variants
-                .push(
-                    Variant {
-                        name: vname,
-                        fa: fa,
-                        fc: n32(fc),
-                        named: named
-                    }
-                );
+            wd.variants.push(Variant { name: vname, fa: fa, fc: n32(fc), named: named });
         }
         let id = n32(wd.adts.len());
         wd
@@ -254,14 +208,7 @@ fn read_world(
         let name = sym(in nmap, r.word(in b));
         let linear = r.word(in b) != 0;
         set_by_symbol(inout wd.effect_by_name, name, inc32(n32(wd.effects.len())));
-        wd
-            .effects
-            .push(
-                EffectRow {
-                    name: name,
-                    linear: linear
-                }
-            );
+        wd.effects.push(EffectRow { name: name, linear: linear });
     }
     read_spans(inout r, in b, inout wd.expr_types, in tmap, true);
     read_spans(inout r, in b, inout wd.partial_ops, in tmap, false);
@@ -285,14 +232,7 @@ fn read_spans(
         } else {
             NONE32
         };
-        rows
-            .push(
-                SpanRow {
-                    start: start,
-                    end: end,
-                    ty: ty
-                }
-            );
+        rows.push(SpanRow { start: start, end: end, ty: ty });
     }
 }
 
@@ -307,13 +247,7 @@ pub fn read_ctx(inout r: Reader, in b: Slice[u8]) -> Ctx {
     read_types(inout r, in b, inout types, in nmap, inout tmap);
     let mut world = world_new(k);
     read_world(inout r, in b, inout world, in nmap, in tmap);
-    Ctx {
-        names: names,
-        types: types,
-        world: world,
-        tmap: tmap,
-        nmap: nmap
-    }
+    Ctx { names: names, types: types, world: world, tmap: tmap, nmap: nmap }
 }
 
 // The names of an input whose types section is empty and whose world is
@@ -355,11 +289,7 @@ pub fn read_names_ctx(inout r: Reader, in b: Slice[u8]) -> NamesCtx {
     if !empty {
         r.pos = start;
     }
-    NamesCtx {
-        names: names,
-        nmap: nmap,
-        ok: empty
-    }
+    NamesCtx { names: names, nmap: nmap, ok: empty }
 }
 
 // An empty context, for inputs that arrive in parts (self-hosting SH4 lane

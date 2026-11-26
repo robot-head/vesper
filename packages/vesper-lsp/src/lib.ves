@@ -8,32 +8,11 @@
 // - encode.ves: `encode_frame` (the output budget and serde_json's writer).
 // - lib.ves: the entries, and `lsp_serve`, the transport half of the stdio
 //   loop of src/lsp.rs (`dispatch`).
-use self::limits::{
-    Le,
-    LimitWord,
-    Perr,
-    Plimits,
-    perr_code,
-    perr_name,
-    read_limits
-};
-use self::envelope::{
-    Env,
-    Envelope,
-    Id,
-    NO_TOKEN,
-    decoded,
-    new_doc,
-    parse_envelope,
-    raw_span
-};
+use self::limits::{Le, LimitWord, Perr, Plimits, perr_code, perr_name, read_limits};
+use self::envelope::{Env, Envelope, Id, NO_TOKEN, decoded, new_doc, parse_envelope, raw_span};
 use @vesper/serde::Doc;
 use self::encode::encode_frame;
-use self::frame::{
-    Body,
-    Cursor,
-    read_frame
-};
+use self::frame::{Body, Cursor, read_frame};
 
 // A `read_frame` step's status.
 enum Status: _ {
@@ -61,24 +40,12 @@ copy struct Step {
 fn frame_step(in s: Slice[u8], inout c: Cursor, l: Plimits) -> Step {
     handle Fail[Perr] in {
         match read_frame(in s, inout c, l) {
-            Option::Some(body) => Step {
-                status: Status::Body,
-                a: body.start,
-                b: body.len
-            },
-            Option::None => Step {
-                status: Status::End,
-                a: 0,
-                b: 0
-            },
+            Option::Some(body) => Step { status: Status::Body, a: body.start, b: body.len },
+            Option::None => Step { status: Status::End, a: 0, b: 0 },
         }
     } with {
         return v => v,
-        raise(e, resume) => Step {
-            status: Status::Error,
-            a: perr_code(e),
-            b: 0
-        },
+        raise(e, resume) => Step { status: Status::Error, a: perr_code(e), b: 0 },
     }
 }
 
@@ -91,9 +58,7 @@ pub fn lsp_frames(in input: Str) -> ChunkSeq[u64] {
     let at = STREAM_AT;
     let s = b[at..b.len()];
     let mut out: ChunkSeq[u64] = ChunkSeq::new();
-    let mut c = Cursor {
-        pos: 0
-    };
+    let mut c = Cursor { pos: 0 };
     loop {
         let step = frame_step(in s, inout c, l);
         out.push(step.status);
@@ -318,9 +283,7 @@ pub fn lsp_serve(in input: Str) -> ChunkSeq[u64] {
     let at = STREAM_AT;
     let s = b[at..b.len()];
     let mut out: ChunkSeq[u64] = ChunkSeq::new();
-    let mut c = Cursor {
-        pos: 0
-    };
+    let mut c = Cursor { pos: 0 };
     loop {
         let step = frame_step(in s, inout c, l);
         if step.status == Status::End {

@@ -4,19 +4,7 @@
 // over in one piece; chunking does not change which error is raised
 // (crates/vesper-lsp/tests/transport.rs reads at every chunk size).
 
-use self::limits::{
-    Ascii,
-    Crlf,
-    Perr,
-    Plimits,
-    add,
-    bound,
-    byte,
-    min64,
-    sat_add,
-    sat_sub,
-    validate
-};
+use self::limits::{Ascii, Crlf, Perr, Plimits, add, bound, byte, min64, sat_add, sat_sub, validate};
 
 // The bit that tells a lower-case ASCII letter from its capital.
 const CASE_BIT: u8 = 32;
@@ -71,12 +59,7 @@ fn header_line(in s: Slice[u8], inout c: Cursor, inout total: u64, l: Plimits)
             if len < Crlf::Len || byte(in s, wrapping_sub(c.pos, Crlf::Len)) != Ascii::Cr {
                 Fail::raise(Perr::PInvalidHeader);
             }
-            return Option::Some(
-                Line {
-                    start: start,
-                    len: len
-                }
-            );
+            return Option::Some(Line { start: start, len: len });
         }
     }
 }
@@ -270,10 +253,7 @@ pub fn read_frame(in s: Slice[u8], inout c: Cursor, l: Plimits) -> Option[Body] 
         c.pos = s.len();
         Fail::raise(Perr::PTruncated);
     }
-    let body = Body {
-        start: c.pos,
-        len: length
-    };
+    let body = Body { start: c.pos, len: length };
     c.pos = wrapping_add(c.pos, length);
     Option::Some(body)
 }

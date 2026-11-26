@@ -1,0 +1,207 @@
+// JSON text as serde_json writes it: `to_vec` (compact) and
+// `to_string_pretty` (two-space indent, `"key": value`, `[]` and `{}` for
+// empty containers). Strings escape `"`, `\`, `\b`, `\f`, `\n`, `\r`,
+// `\t` and the other control bytes as `\u00xx`; everything else, UTF-8
+// included, is copied.
+pub struct Json {
+    pub out: ChunkSeq[u8],
+    pretty: bool,
+    depth: u64,
+    // Nothing written yet in the container just opened.
+    fresh: bool,
+    // A key was just written: its value follows with no separator.
+    keyed: bool,
+}
+
+pub fn json_new(pretty: bool) -> Json {
+    Json { out: ChunkSeq::new[u8](), pretty: pretty, depth: 0, fresh: true, keyed: false }
+}
+
+fn newline(inout j: Json) {
+    j.out.push(10);
+    for _i in 0..j.depth {
+        j.out.push(32);
+        j.out.push(32);
+    }
+}
+
+// What comes before an array element or an object key.
+fn element(inout j: Json) {
+    if j.keyed {
+        j.keyed = false;
+        return;
+    }
+    if j.depth == 0 {
+        return;
+    }
+    if !j.fresh {
+        j.out.push(44);
+    }
+    if j.pretty {
+        newline(inout j);
+    }
+    j.fresh = false;
+}
+
+pub fn begin_object(inout j: Json) {
+    element(inout j);
+    j.out.push(123);
+    j.depth = wrapping_add(j.depth, 1);
+    j.fresh = true;
+}
+
+pub fn end_object(inout j: Json) {
+    j.depth = wrapping_sub(j.depth, 1);
+    if !j.fresh && j.pretty {
+        newline(inout j);
+    }
+    j.out.push(125);
+    j.fresh = false;
+}
+
+pub fn begin_array(inout j: Json) {
+    element(inout j);
+    j.out.push(91);
+    j.depth = wrapping_add(j.depth, 1);
+    j.fresh = true;
+}
+
+pub fn end_array(inout j: Json) {
+    j.depth = wrapping_sub(j.depth, 1);
+    if !j.fresh && j.pretty {
+        newline(inout j);
+    }
+    j.out.push(93);
+    j.fresh = false;
+}
+
+pub fn key(inout j: Json, in k: Str) {
+    element(inout j);
+    put_string(inout j.out, in k.as_bytes());
+    j.out.push(58);
+    if j.pretty {
+        j.out.push(32);
+    }
+    j.keyed = true;
+}
+
+fn hex_digit(n: u8) -> u8 {
+    if n < 10 {
+        wrapping_add(n, 48)
+    } else {
+        wrapping_add(n, 87)
+    }
+}
+
+// `s` as a JSON string, serde_json's escapes.
+pub fn put_string(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+    out.push(34);
+    for i in 0..s.len() {
+        let b = match s.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        if b == 34 {
+            out.push(92);
+            out.push(34);
+        } else if b == 92 {
+            out.push(92);
+            out.push(92);
+        } else if b == 10 {
+            out.push(92);
+            out.push(110);
+        } else if b == 13 {
+            out.push(92);
+            out.push(114);
+        } else if b == 9 {
+            out.push(92);
+            out.push(116);
+        } else if b == 8 {
+            out.push(92);
+            out.push(98);
+        } else if b == 12 {
+            out.push(92);
+            out.push(102);
+        } else if b < 32 {
+            out.push(92);
+            out.push(117);
+            out.push(48);
+            out.push(48);
+            out.push(hex_digit(b >> 4));
+            out.push(hex_digit(b & 15));
+        } else {
+            out.push(b);
+        }
+    }
+    out.push(34);
+}
+
+pub fn string(inout j: Json, in s: Slice[u8]) {
+    element(inout j);
+    put_string(inout j.out, in s);
+}
+
+pub fn put_u64(inout out: ChunkSeq[u8], n: u64) {
+    if n == 0 {
+        out.push(48);
+        return;
+    }
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut m = n;
+    loop {
+        if m == 0 {
+            break;
+        }
+        digits.push(wrapping_add(wrapping_u8(m % 10), 48));
+        m = m / 10;
+    }
+    let mut i = digits.len();
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        out
+            .push(
+                match digits.try_get(i) {
+                    Option::Some(d) => d,
+                    Option::None => 48,
+                }
+            );
+    }
+}
+
+pub fn number(inout j: Json, n: u64) {
+    element(inout j);
+    put_u64(inout j.out, n);
+}
+
+pub fn boolean(inout j: Json, b: bool) {
+    element(inout j);
+    if b {
+        j.out.extend(in "true".as_bytes());
+    } else {
+        j.out.extend(in "false".as_bytes());
+    }
+}
+
+pub fn null(inout j: Json) {
+    element(inout j);
+    j.out.extend(in "null".as_bytes());
+}
+
+// `"k": "v"`.
+pub fn field_string(inout j: Json, in k: Str, in v: Slice[u8]) {
+    key(inout j, in k);
+    string(inout j, in v);
+}
+
+pub fn field_u64(inout j: Json, in k: Str, n: u64) {
+    key(inout j, in k);
+    number(inout j, n);
+}
+
+pub fn field_bool(inout j: Json, in k: Str, b: bool) {
+    key(inout j, in k);
+    boolean(inout j, b);
+}

@@ -1,9 +1,6 @@
 // `impl From<prefix::PrefixError> for Reason` (qpack/mod.rs).
 
-use self::{
-    PrefixError,
-    Reason
-};
+use self::{PrefixError, Reason};
 
 pub fn reason_of(e: PrefixError) -> Reason {
     match e {

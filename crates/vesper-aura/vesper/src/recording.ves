@@ -1,25 +1,7 @@
 // recording.rs: the recording backend's state and lookups.
-use self::codes::{
-    NONE_ID
-};
-use self::{
-    BackendFault,
-    Edge,
-    Op,
-    RSlot,
-    RState,
-    RSub,
-    RWidget,
-    Recorder
-};
-use self::util::{
-    add,
-    dec,
-    fits,
-    inc,
-    limits_from,
-    seq_bool
-};
+use self::codes::{NONE_ID};
+use self::{BackendFault, Edge, Op, RSlot, RState, RSub, RWidget, Recorder};
+use self::util::{add, dec, fits, inc, limits_from, seq_bool};
 
 pub fn rstate_new() -> RState {
     RState {
@@ -49,23 +31,14 @@ pub fn rstate_new() -> RState {
 pub fn rwidget(in s: ChunkSeq[RWidget], i: u64) -> RWidget {
     match s.try_get(i) {
         Option::Some(w) => w,
-        Option::None => RWidget {
-            serial: 0,
-            kind: 0,
-            has_parent: false,
-            parent: 0,
-            user_state: 0
-        },
+        Option::None => RWidget { serial: 0, kind: 0, has_parent: false, parent: 0, user_state: 0 },
     }
 }
 
 pub fn redge(in s: ChunkSeq[Edge], i: u64) -> Edge {
     match s.try_get(i) {
         Option::Some(e) => e,
-        Option::None => Edge {
-            parent: NONE_ID,
-            child: NONE_ID
-        },
+        Option::None => Edge { parent: NONE_ID, child: NONE_ID },
     }
 }
 
@@ -87,12 +60,7 @@ pub fn rslot(in s: ChunkSeq[RSlot], i: u64) -> RSlot {
 pub fn rsub(in s: ChunkSeq[RSub], i: u64) -> RSub {
     match s.try_get(i) {
         Option::Some(v) => v,
-        Option::None => RSub {
-            serial: 0,
-            widget: 0,
-            event: 0,
-            handler: 0
-        },
+        Option::None => RSub { serial: 0, widget: 0, event: 0, handler: 0 },
     }
 }
 
@@ -305,10 +273,7 @@ pub fn insert_edge(inout s: RState, at: u64, e: Edge) {
 
 // Insert `child` as the `index`-th child of `parent` (index <= count).
 pub fn insert_child(inout s: RState, parent: u64, child: u64, index: u64) {
-    let e = Edge {
-        parent: parent,
-        child: child
-    };
+    let e = Edge { parent: parent, child: child };
     let at = child_edge(in s, parent, index);
     if at == NONE_ID {
         s.edges.push(e);

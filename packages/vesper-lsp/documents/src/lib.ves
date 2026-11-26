@@ -26,12 +26,7 @@ use self::document::{
     store_set_revision,
     store_total
 };
-use @vesper/span::{
-    Limits,
-    Position,
-    Range,
-    Resource
-};
+use @vesper/span::{Limits, Position, Range, Resource};
 use @vesper/span::Error as SpanError;
 
 // An op's tag.
@@ -270,9 +265,7 @@ fn after(inout out: ChunkSeq[u64], in s: Store, r: Result[u64, StoreError]) {
 // `DocumentStore::new`, then `put_state` per op.
 pub fn lsp_documents(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let l = read_limits(in b, inout r);
     let n = word(in b, inout r);
     let start = r.pos;
@@ -326,14 +319,8 @@ pub fn lsp_documents(in input: Str) -> ChunkSeq[u64] {
                         Change {
                             has_range: has_range,
                             range: Range {
-                                start: Position {
-                                    line: sl,
-                                    character: sc
-                                },
-                                end: Position {
-                                    line: el,
-                                    character: ec
-                                }
+                                start: Position { line: sl, character: sc },
+                                end: Position { line: el, character: ec }
                             },
                             has_len: has_len,
                             len: len,

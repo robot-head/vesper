@@ -5,33 +5,18 @@
 // of the `t`-th test. `trace_*` entries return the hash of a regenerated
 // conformance trace (see `traces.ves`), and `trace_digest` folds them all.
 test {
-    use self::core_tests::{
-        check_core_ordering,
-        check_core_option,
-        check_core_result
-    };
-    use self::text_tests::{
-        check_fmt_write,
-        check_fmt_parse,
-        check_bytes
-    };
+    use self::core_tests::{check_core_ordering, check_core_option, check_core_result};
+    use self::text_tests::{check_fmt_write, check_fmt_parse, check_bytes};
     use self::map_tests::{
         check_btree,
         check_struct_keys,
         check_flat_table,
         check_flat_table_differential
     };
-    use self::seq_tests::{
-        check_sets,
-        check_radix_seq,
-        check_version
-    };
+    use self::seq_tests::{check_sets, check_radix_seq, check_version};
     use self::string_tests::check_fmt_string;
     use self::control_tests::check_core_control;
-    use self::traces::{
-        map_trace,
-        seq_trace
-    };
+    use self::traces::{map_trace, seq_trace};
 
     // `1000 * t + c` for check `c` failing in test `t`, else `prior`.
     fn first_failure(t: u64, c: u64, prior: u64) -> u64 {
@@ -129,5 +114,50 @@ test {
 
     fn main() -> u64 {
         run_all()
+    }
+}
+
+test {
+    use @vesper-std/core::secret::{ct_if};
+    copy struct SecU64 {
+        value: u64,
+    }
+
+    copy struct SecMask64 {
+        bits: u64,
+    }
+
+    fn mark(inout log: u64, digit: u64) -> SecU64 eff [ConstTime] {
+        log = wrapping_add(wrapping_mul(log, 10), digit);
+        SecU64 { value: digit }
+    }
+
+    fn mask(inout log: u64, enabled: bool) -> SecMask64 eff [ConstTime] {
+        let three = mark(inout log, 3);
+        let other = SecU64 {
+            value: if enabled {
+                3
+            } else {
+                4
+            }
+        };
+        three.ct_eq(other)
+    }
+
+    fn select_with_log(inout log: u64, enabled: bool) -> SecU64 eff [ConstTime] {
+        ct_if mask(inout log, enabled) {
+            mark(inout log, 1)
+        } else {
+            mark(inout log, 2)
+        }
+    }
+
+    // @case selects_first(true, 1)
+    // @case selects_second(false, 2)
+    fn eager_arms_once_and_select(enabled: bool, expected: u64) -> bool {
+        let mut log: u64 = 0;
+        let got = select_with_log(inout log, enabled);
+        let matches = got.ct_eq(SecU64 { value: expected }).declassify_bool();
+        matches && log == 123
     }
 }

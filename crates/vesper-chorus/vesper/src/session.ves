@@ -1,42 +1,10 @@
 // Module session of @vesper/chorus (see lib.ves): dynamic protocol Monitor,
 // LeakAuditor, and Endpoint sequence-dedup / reorder state machine (src/session.rs).
-use self::{
-    new_c,
-    C
-};
-use self::util::{
-    add,
-    inc,
-    intern_slice,
-    iw,
-    none,
-    setw,
-    sw,
-    tb_str,
-    tb_sym,
-    Br,
-    LTag,
-    Out
-};
-use self::local::{
-    alpha_eq,
-    emit_l,
-    la,
-    lb,
-    lbr,
-    lc,
-    ld,
-    lkn,
-    lt,
-    read_local,
-    unfold
-};
-use self::tree::{
-    read_chor
-};
-use self::project::{
-    project_role
-};
+use self::{new_c, C};
+use self::util::{add, inc, intern_slice, iw, none, setw, sw, tb_str, tb_sym, Br, LTag, Out};
+use self::local::{alpha_eq, emit_l, la, lb, lbr, lc, ld, lkn, lt, read_local, unfold};
+use self::tree::{read_chor};
+use self::project::{project_role};
 
 const MAX_U64: u64 = 18446744073709551615;
 const REORDER_LIMIT: u64 = 1024;
@@ -832,33 +800,17 @@ pub fn mon_ep_send(inout m: Mon, in to_name: Str, in label: Str, in payload: Str
     if peer == none() {
         m.err_a.clear();
         m.err_a.extend(in to_name.as_bytes());
-        return EpSendOut {
-            status: EpSendStatus::UnknownRole,
-            peer: 0,
-            seq: 0
-        };
+        return EpSendOut { status: EpSendStatus::UnknownRole, peer: 0, seq: 0 };
     }
     if step_slice(inout m, true, peer, in label.as_bytes(), in payload.as_bytes()) != StepErr::Ok {
-        return EpSendOut {
-            status: EpSendStatus::ProtocolViolation,
-            peer: peer,
-            seq: 0
-        };
+        return EpSendOut { status: EpSendStatus::ProtocolViolation, peer: peer, seq: 0 };
     }
     let seq = sw(in m.send_seq, peer);
     if seq == MAX_U64 {
-        return EpSendOut {
-            status: EpSendStatus::NetClosed,
-            peer: peer,
-            seq: 0
-        };
+        return EpSendOut { status: EpSendStatus::NetClosed, peer: peer, seq: 0 };
     }
     setw(inout m.send_seq, peer, inc(seq));
-    EpSendOut {
-        status: EpSendStatus::Ok,
-        peer: peer,
-        seq: seq
-    }
+    EpSendOut { status: EpSendStatus::Ok, peer: peer, seq: seq }
 }
 
 fn reorder_find(in m: Mon, peer: u64, seq: u64) -> u64 {
@@ -891,20 +843,12 @@ pub fn mon_ep_pre_recv(inout m: Mon, in from_name: Str) -> EpPreRecvOut {
     if peer == none() {
         m.err_a.clear();
         m.err_a.extend(in from_name.as_bytes());
-        return EpPreRecvOut {
-            status: EpPreRecvStatus::UnknownRole,
-            peer: 0,
-            slot: 0
-        };
+        return EpPreRecvOut { status: EpPreRecvStatus::UnknownRole, peer: 0, slot: 0 };
     }
     let want = sw(in m.recv_seq, peer);
     let idx = reorder_find(in m, peer, want);
     if idx == none() {
-        return EpPreRecvOut {
-            status: EpPreRecvStatus::NeedTransport,
-            peer: peer,
-            slot: 0
-        };
+        return EpPreRecvOut { status: EpPreRecvStatus::NeedTransport, peer: peer, slot: 0 };
     }
     let base = wrapping_mul(idx, REORDER_STRIDE);
     let slot = sw(in m.reorder, add(base, 2));
@@ -913,17 +857,9 @@ pub fn mon_ep_pre_recv(inout m: Mon, in from_name: Str) -> EpPreRecvOut {
     reorder_remove(inout m, idx);
     setw(inout m.recv_seq, peer, inc(want));
     if step_syms(inout m, false, peer, lsym, psym) != StepErr::Ok {
-        return EpPreRecvOut {
-            status: EpPreRecvStatus::ProtocolViolation,
-            peer: peer,
-            slot: slot
-        };
+        return EpPreRecvOut { status: EpPreRecvStatus::ProtocolViolation, peer: peer, slot: slot };
     }
-    EpPreRecvOut {
-        status: EpPreRecvStatus::Hit,
-        peer: peer,
-        slot: slot
-    }
+    EpPreRecvOut { status: EpPreRecvStatus::Hit, peer: peer, slot: slot }
 }
 
 pub fn mon_ep_on_frame(

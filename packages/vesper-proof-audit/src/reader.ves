@@ -1,0 +1,621 @@
+// The two JSON documents proof-audit reads, as serde_json reads them into
+// the structs of src/proof_commands.rs and src/forge_frontend/provenance.rs:
+// the Lean auditor's `RawAudit` record and the `ProvenanceTable` manifest.
+// Both deny unknown fields (but `ByteRange`, which ignores them), refuse a
+// missing field (but `Theorem::dependencies`, which defaults to empty) and
+// take integers as plain digits within the field's width. The tape is
+// @vesper/serde's, with serde_json's nesting limit: it refuses invalid
+// JSON, duplicate keys and trailing text as serde_json does.
+//
+// The error texts name the field but not serde_json's line and column.
+use @vesper/serde::{Doc, Error, Kind, Limits, Token, doc_new, doc_parse};
+use @vesper/serde::index::{next_decoded, tok};
+use self::strs::{Strs, count, end, push, put_str, same, same_str, start, strs_new};
+
+// serde_json's recursion limit of 128: the tape refuses a container that
+// opens at depth 127, as serde_json refuses the 128th.
+const NESTING: u64 = 127;
+const NO_LIMIT: u64 = 4611686018427387904;
+const NO_CHAR: u64 = 0x110000;
+const NONE: u64 = 18446744073709551615;
+const U32_MAX: u64 = 4294967295;
+
+// A parsed document and the first error found reading it.
+pub struct Rd {
+    pub doc: Doc,
+    pub input: ChunkSeq[u8],
+    pub failed: bool,
+    pub err: ChunkSeq[u8],
+}
+
+// `input` parsed; `failed` with a reason when it is not JSON.
+pub fn rd_parse(in input: Slice[u8]) -> Rd {
+    let mut doc = doc_new();
+    let lim = Limits {
+        max_input_bytes: NO_LIMIT,
+        max_depth: NESTING,
+        max_tokens: NO_LIMIT,
+        max_string_bytes: NO_LIMIT,
+        max_total_string_bytes: NO_LIMIT,
+        max_work: NO_LIMIT,
+        max_index_bytes: NO_LIMIT
+    };
+    let ok = handle Fail[Error] in {
+        doc_parse(inout doc, in input, lim);
+        true
+    } with {
+        return v => v,
+        raise(_e, _k) => false,
+    };
+    let mut copy: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    copy.extend(in input);
+    let mut r = Rd { doc: doc, input: copy, failed: false, err: ChunkSeq::new[u8]() };
+    if !ok {
+        fail(inout r, in "the text is not valid JSON");
+    }
+    r
+}
+
+pub fn fail(inout r: Rd, in why: Str) {
+    if !r.failed {
+        r.failed = true;
+        put_str(inout r.err, in why);
+    }
+}
+
+fn fail_field(inout r: Rd, in what: Str, in name: Str) {
+    if !r.failed {
+        r.failed = true;
+        put_str(inout r.err, in what);
+        put_str(inout r.err, in " `");
+        put_str(inout r.err, in name);
+        put_str(inout r.err, in "`");
+    }
+}
+
+fn token(in r: Rd, i: u64) -> Token {
+    tok(in r.doc.tokens, i)
+}
+
+// The index after the value at `i`.
+pub fn after(in r: Rd, i: u64) -> u64 {
+    token(in r, i).next
+}
+
+fn push_utf8(inout o: ChunkSeq[u8], c: u64) {
+    if c < 0x80 {
+        o.push(wrapping_u8(c));
+    } else if c < 0x800 {
+        o.push(wrapping_u8(0xc0 | (c >> 6)));
+        o.push(wrapping_u8(0x80 | (c & 0x3f)));
+    } else if c < 0x10000 {
+        o.push(wrapping_u8(0xe0 | (c >> 12)));
+        o.push(wrapping_u8(0x80 | ((c >> 6) & 0x3f)));
+        o.push(wrapping_u8(0x80 | (c & 0x3f)));
+    } else {
+        o.push(wrapping_u8(0xf0 | (c >> 18)));
+        o.push(wrapping_u8(0x80 | ((c >> 12) & 0x3f)));
+        o.push(wrapping_u8(0x80 | ((c >> 6) & 0x3f)));
+        o.push(wrapping_u8(0x80 | (c & 0x3f)));
+    }
+}
+
+// The decoded text of the string at `i`, appended to `out`; false (and
+// nothing appended) when `i` is not a string.
+fn put_text(in r: Rd, i: u64, inout out: ChunkSeq[u8]) -> bool {
+    let t = token(in r, i);
+    if t.kind != Kind::String {
+        return false;
+    }
+    let start = wrapping_add(t.start, 1);
+    let end = wrapping_sub(t.end, 1);
+    if !t.escaped {
+        out.extend(in r.input[start..end]);
+        return true;
+    }
+    let mut p = start;
+    loop {
+        let (c, next) = next_decoded(in r.input.as_slice(), p, end);
+        if c == NO_CHAR {
+            break;
+        }
+        push_utf8(inout out, c);
+        p = next;
+    }
+    true
+}
+
+// The string at `i`, or a type error naming `field`.
+pub fn text(inout r: Rd, i: u64, in field: Str) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if !put_text(in r, i, inout out) {
+        fail_field(inout r, in "expected a string for", in field);
+    }
+    out
+}
+
+// The string at `i` pushed onto `s`.
+pub fn text_into(inout r: Rd, i: u64, in field: Str, inout s: Strs) {
+    let t = text(inout r, i, in field);
+    push(inout s, in t[0..t.len()]);
+}
+
+// The unsigned integer at `i` no wider than `max`.
+pub fn integer(inout r: Rd, i: u64, max: u64, in field: Str) -> u64 {
+    let t = token(in r, i);
+    if t.kind != Kind::Number {
+        fail_field(inout r, in "expected an integer for", in field);
+        return 0;
+    }
+    let mut n: u64 = 0;
+    for p in t.start..t.end {
+        let b = match r.input.try_get(p) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        if b < 48 || b > 57 {
+            fail_field(inout r, in "expected an integer for", in field);
+            return 0;
+        }
+        let d = widen_u64(wrapping_sub(b, 48));
+        if n > wrapping_sub(max, d) / 10 {
+            fail_field(inout r, in "integer out of range for", in field);
+            return 0;
+        }
+        n = wrapping_add(wrapping_mul(n, 10), d);
+    }
+    n
+}
+
+pub fn u32_at(inout r: Rd, i: u64, in field: Str) -> u64 {
+    integer(inout r, i, U32_MAX, in field)
+}
+
+pub fn u64_at(inout r: Rd, i: u64, in field: Str) -> u64 {
+    integer(inout r, i, NONE, in field)
+}
+
+pub fn boolean(inout r: Rd, i: u64, in field: Str) -> bool {
+    let t = token(in r, i);
+    if t.kind != Kind::Bool {
+        fail_field(inout r, in "expected a boolean for", in field);
+        return false;
+    }
+    match r.input.try_get(t.start) {
+        Option::Some(b) => b == 116,
+        Option::None => false,
+    }
+}
+
+// The element indices of the array at `i`.
+pub fn elements(inout r: Rd, i: u64, in field: Str) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let t = token(in r, i);
+    if t.kind != Kind::Array {
+        fail_field(inout r, in "expected an array for", in field);
+        return out;
+    }
+    let mut k = wrapping_add(i, 1);
+    loop {
+        if k >= t.next {
+            break;
+        }
+        out.push(k);
+        k = after(in r, k);
+    }
+    out
+}
+
+// The value index of each of `names` in the object at `i` (NONE when it is
+// absent). A key outside `names` fails unless `open`. `what` names the
+// struct in errors.
+pub fn fields(inout r: Rd, i: u64, in names: Strs, open: bool, in what: Str) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for _n in 0..count(in names) {
+        out.push(NONE);
+    }
+    let t = token(in r, i);
+    if t.kind != Kind::Object {
+        fail_field(inout r, in "expected an object for", in what);
+        return out;
+    }
+    let mut k = wrapping_add(i, 1);
+    loop {
+        if k >= t.next {
+            break;
+        }
+        let mut key: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let _ = put_text(in r, k, inout key);
+        let v = wrapping_add(k, 1);
+        let mut found = false;
+        for n in 0..count(in names) {
+            if !found
+                && same(
+                    in key[0..key.len()],
+                    in names.bytes[start(in names, n)..end(in names, n)]
+                ) {
+                let _ = out.try_set(n, v);
+                found = true;
+            }
+        }
+        if !found && !open {
+            if !r.failed {
+                r.failed = true;
+                put_str(inout r.err, in "unknown field `");
+                r.err.extend(in key[0..key.len()]);
+                put_str(inout r.err, in "` in ");
+                put_str(inout r.err, in what);
+            }
+        }
+        k = after(in r, v);
+    }
+    out
+}
+
+pub fn slot(in f: ChunkSeq[u64], n: u64) -> u64 {
+    match f.try_get(n) {
+        Option::Some(v) => v,
+        Option::None => NONE,
+    }
+}
+
+// Field `n` of `f`, required: a missing-field error naming `name`.
+pub fn need(inout r: Rd, in f: ChunkSeq[u64], n: u64, in name: Str) -> u64 {
+    let v = slot(in f, n);
+    if v == NONE {
+        fail_field(inout r, in "missing field", in name);
+    }
+    v
+}
+
+pub fn absent(v: u64) -> bool {
+    v == NONE
+}
+
+pub fn names_of(in a: Str, in b: Str, in c: Str, in d: Str, in e: Str, in f: Str, in g: Str)
+    -> Strs {
+    let mut s = strs_new();
+    push(inout s, in a.as_bytes());
+    push(inout s, in b.as_bytes());
+    push(inout s, in c.as_bytes());
+    push(inout s, in d.as_bytes());
+    push(inout s, in e.as_bytes());
+    push(inout s, in f.as_bytes());
+    push(inout s, in g.as_bytes());
+    s
+}
+
+// `names_of` without its empty names.
+pub fn names(in a: Str, in b: Str, in c: Str, in d: Str, in e: Str, in f: Str, in g: Str) -> Strs {
+    let all = names_of(in a, in b, in c, in d, in e, in f, in g);
+    let mut s = strs_new();
+    for i in 0..count(in all) {
+        let x = start(in all, i);
+        let y = end(in all, i);
+        if x != y {
+            push(inout s, in all.bytes[x..y]);
+        }
+    }
+    s
+}
+
+// ---------------------------------------------------------------------------
+// `RawAudit`.
+
+// The theorems flattened: theorem `i`'s axioms are
+// `axioms[ax_ends[i - 1]..ax_ends[i]]`, its dependencies likewise.
+pub struct Raw {
+    pub schema_version: u64,
+    pub kernel_replayed: bool,
+    pub checked_constants: u64,
+    pub th_names: Strs,
+    pub th_types: Strs,
+    pub axioms: Strs,
+    pub ax_ends: ChunkSeq[u64],
+    pub deps: Strs,
+    pub dep_ends: ChunkSeq[u64],
+    pub marker_names: Strs,
+    pub marker_values: Strs,
+    pub mod_names: Strs,
+    pub mod_paths: Strs,
+}
+
+fn strings(inout r: Rd, i: u64, in field: Str, inout s: Strs) {
+    let items = elements(inout r, i, in field);
+    for k in 0..items.len() {
+        text_into(inout r, slot(in items, k), in field, inout s);
+    }
+}
+
+fn theorem(inout r: Rd, i: u64, inout raw: Raw) {
+    let f = fields(
+        inout r,
+        i,
+        in names(in "name", in "axioms", in "type_repr", in "dependencies", in "", in "", in ""),
+        false,
+        in "Theorem"
+    );
+    let name = need(inout r, in f, 0, in "name");
+    let axioms = need(inout r, in f, 1, in "axioms");
+    let ty = need(inout r, in f, 2, in "type_repr");
+    if r.failed {
+        return;
+    }
+    text_into(inout r, name, in "name", inout raw.th_names);
+    strings(inout r, axioms, in "axioms", inout raw.axioms);
+    raw.ax_ends.push(count(in raw.axioms));
+    text_into(inout r, ty, in "type_repr", inout raw.th_types);
+    let deps = slot(in f, 3);
+    if !absent(deps) {
+        strings(inout r, deps, in "dependencies", inout raw.deps);
+    }
+    raw.dep_ends.push(count(in raw.deps));
+}
+
+// `serde_json::from_str::<RawAudit>`.
+pub fn raw_audit(inout r: Rd) -> Raw {
+    let mut raw = Raw {
+        schema_version: 0,
+        kernel_replayed: false,
+        checked_constants: 0,
+        th_names: strs_new(),
+        th_types: strs_new(),
+        axioms: strs_new(),
+        ax_ends: ChunkSeq::new[u64](),
+        deps: strs_new(),
+        dep_ends: ChunkSeq::new[u64](),
+        marker_names: strs_new(),
+        marker_values: strs_new(),
+        mod_names: strs_new(),
+        mod_paths: strs_new()
+    };
+    if r.failed {
+        return raw;
+    }
+    let f = fields(
+        inout r,
+        0,
+        in names(
+            in "schema_version",
+            in "kernel_replayed",
+            in "checked_constants",
+            in "theorems",
+            in "macro_markers",
+            in "modules",
+            in ""
+        ),
+        false,
+        in "RawAudit"
+    );
+    let sv = need(inout r, in f, 0, in "schema_version");
+    let kr = need(inout r, in f, 1, in "kernel_replayed");
+    let cc = need(inout r, in f, 2, in "checked_constants");
+    let th = need(inout r, in f, 3, in "theorems");
+    let mm = need(inout r, in f, 4, in "macro_markers");
+    let ms = need(inout r, in f, 5, in "modules");
+    if r.failed {
+        return raw;
+    }
+    raw.schema_version = u32_at(inout r, sv, in "schema_version");
+    raw.kernel_replayed = boolean(inout r, kr, in "kernel_replayed");
+    raw.checked_constants = u64_at(inout r, cc, in "checked_constants");
+    let ts = elements(inout r, th, in "theorems");
+    for k in 0..ts.len() {
+        theorem(inout r, slot(in ts, k), inout raw);
+    }
+    let marks = elements(inout r, mm, in "macro_markers");
+    for k in 0..marks.len() {
+        let g = fields(
+            inout r,
+            slot(in marks, k),
+            in names(in "name", in "value", in "", in "", in "", in "", in ""),
+            false,
+            in "RawMarker"
+        );
+        let n = need(inout r, in g, 0, in "name");
+        let v = need(inout r, in g, 1, in "value");
+        if !r.failed {
+            text_into(inout r, n, in "name", inout raw.marker_names);
+            text_into(inout r, v, in "value", inout raw.marker_values);
+        }
+    }
+    let mods = elements(inout r, ms, in "modules");
+    for k in 0..mods.len() {
+        let g = fields(
+            inout r,
+            slot(in mods, k),
+            in names(in "name", in "path", in "", in "", in "", in "", in ""),
+            false,
+            in "RawModule"
+        );
+        let n = need(inout r, in g, 0, in "name");
+        let p = need(inout r, in g, 1, in "path");
+        if !r.failed {
+            text_into(inout r, n, in "name", inout raw.mod_names);
+            text_into(inout r, p, in "path", inout raw.mod_paths);
+        }
+    }
+    raw
+}
+
+// ---------------------------------------------------------------------------
+// `ProvenanceTable`.
+
+// Expansion `i`'s generated ranges are `gen_starts/gen_ends[gen_cut[i - 1]..
+// gen_cut[i]]`; function `i`'s expansion ordinals `fn_exps[fn_cut[i - 1]..
+// fn_cut[i]]`.
+pub struct Table {
+    pub schema: ChunkSeq[u8],
+    pub package: ChunkSeq[u8],
+    pub source_blake3: ChunkSeq[u8],
+    pub expanded_blake3: ChunkSeq[u8],
+    pub digest: ChunkSeq[u8],
+    pub ex_ordinals: ChunkSeq[u64],
+    pub ex_macros: Strs,
+    pub inv_starts: ChunkSeq[u64],
+    pub inv_ends: ChunkSeq[u64],
+    pub ex_hosts: Strs,
+    pub gen_starts: ChunkSeq[u64],
+    pub gen_ends: ChunkSeq[u64],
+    pub gen_cut: ChunkSeq[u64],
+    pub fn_names: Strs,
+    // 1 for `expanded`, 0 for `source`.
+    pub fn_expanded: ChunkSeq[u8],
+    pub fn_exps: ChunkSeq[u64],
+    pub fn_cut: ChunkSeq[u64],
+    pub fn_digests: Strs,
+}
+
+// A `ByteRange` (unknown fields ignored): (start, end).
+fn range(inout r: Rd, i: u64) -> (u64, u64) {
+    let f = fields(
+        inout r,
+        i,
+        in names(in "start", in "end", in "", in "", in "", in "", in ""),
+        true,
+        in "ByteRange"
+    );
+    let s = need(inout r, in f, 0, in "start");
+    let e = need(inout r, in f, 1, in "end");
+    if r.failed {
+        return (0, 0);
+    }
+    (u64_at(inout r, s, in "start"), u64_at(inout r, e, in "end"))
+}
+
+fn expansion(inout r: Rd, i: u64, inout t: Table) {
+    let f = fields(
+        inout r,
+        i,
+        in names(
+            in "ordinal",
+            in "macro",
+            in "invocation",
+            in "host_function",
+            in "generated",
+            in "",
+            in ""
+        ),
+        false,
+        in "ExpansionRecord"
+    );
+    let o = need(inout r, in f, 0, in "ordinal");
+    let m = need(inout r, in f, 1, in "macro");
+    let inv = need(inout r, in f, 2, in "invocation");
+    let h = need(inout r, in f, 3, in "host_function");
+    let g = need(inout r, in f, 4, in "generated");
+    if r.failed {
+        return;
+    }
+    t.ex_ordinals.push(u32_at(inout r, o, in "ordinal"));
+    text_into(inout r, m, in "macro", inout t.ex_macros);
+    let (a, b) = range(inout r, inv);
+    t.inv_starts.push(a);
+    t.inv_ends.push(b);
+    text_into(inout r, h, in "host_function", inout t.ex_hosts);
+    let gs = elements(inout r, g, in "generated");
+    for k in 0..gs.len() {
+        let (x, y) = range(inout r, slot(in gs, k));
+        t.gen_starts.push(x);
+        t.gen_ends.push(y);
+    }
+    t.gen_cut.push(t.gen_starts.len());
+}
+
+fn function(inout r: Rd, i: u64, inout t: Table) {
+    let f = fields(
+        inout r,
+        i,
+        in names(in "function", in "origin", in "expansions", in "digest", in "", in "", in ""),
+        false,
+        in "FunctionProvenance"
+    );
+    let n = need(inout r, in f, 0, in "function");
+    let o = need(inout r, in f, 1, in "origin");
+    let e = need(inout r, in f, 2, in "expansions");
+    let d = need(inout r, in f, 3, in "digest");
+    if r.failed {
+        return;
+    }
+    text_into(inout r, n, in "function", inout t.fn_names);
+    let origin = text(inout r, o, in "origin");
+    if same_str(in origin[0..origin.len()], in "expanded") {
+        t.fn_expanded.push(1);
+    } else if same_str(in origin[0..origin.len()], in "source") {
+        t.fn_expanded.push(0);
+    } else {
+        fail(inout r, in "unknown variant for `origin`, expected `source` or `expanded`");
+    }
+    let es = elements(inout r, e, in "expansions");
+    for k in 0..es.len() {
+        t.fn_exps.push(u32_at(inout r, slot(in es, k), in "expansions"));
+    }
+    t.fn_cut.push(t.fn_exps.len());
+    text_into(inout r, d, in "digest", inout t.fn_digests);
+}
+
+// `serde_json::from_str::<ProvenanceTable>`.
+pub fn table(inout r: Rd) -> Table {
+    let mut t = Table {
+        schema: ChunkSeq::new[u8](),
+        package: ChunkSeq::new[u8](),
+        source_blake3: ChunkSeq::new[u8](),
+        expanded_blake3: ChunkSeq::new[u8](),
+        digest: ChunkSeq::new[u8](),
+        ex_ordinals: ChunkSeq::new[u64](),
+        ex_macros: strs_new(),
+        inv_starts: ChunkSeq::new[u64](),
+        inv_ends: ChunkSeq::new[u64](),
+        ex_hosts: strs_new(),
+        gen_starts: ChunkSeq::new[u64](),
+        gen_ends: ChunkSeq::new[u64](),
+        gen_cut: ChunkSeq::new[u64](),
+        fn_names: strs_new(),
+        fn_expanded: ChunkSeq::new[u8](),
+        fn_exps: ChunkSeq::new[u64](),
+        fn_cut: ChunkSeq::new[u64](),
+        fn_digests: strs_new()
+    };
+    if r.failed {
+        return t;
+    }
+    let f = fields(
+        inout r,
+        0,
+        in names(
+            in "schema",
+            in "package",
+            in "source_blake3",
+            in "expanded_blake3",
+            in "expansions",
+            in "functions",
+            in "digest"
+        ),
+        false,
+        in "ProvenanceTable"
+    );
+    let sc = need(inout r, in f, 0, in "schema");
+    let pk = need(inout r, in f, 1, in "package");
+    let sb = need(inout r, in f, 2, in "source_blake3");
+    let eb = need(inout r, in f, 3, in "expanded_blake3");
+    let ex = need(inout r, in f, 4, in "expansions");
+    let fs = need(inout r, in f, 5, in "functions");
+    let dg = need(inout r, in f, 6, in "digest");
+    if r.failed {
+        return t;
+    }
+    t.schema = text(inout r, sc, in "schema");
+    t.package = text(inout r, pk, in "package");
+    t.source_blake3 = text(inout r, sb, in "source_blake3");
+    t.expanded_blake3 = text(inout r, eb, in "expanded_blake3");
+    let es = elements(inout r, ex, in "expansions");
+    for k in 0..es.len() {
+        expansion(inout r, slot(in es, k), inout t);
+    }
+    let fns = elements(inout r, fs, in "functions");
+    for k in 0..fns.len() {
+        function(inout r, slot(in fns, k), inout t);
+    }
+    t.digest = text(inout r, dg, in "digest");
+    t
+}

@@ -5,9 +5,7 @@
 // `codegen_swap::drops::DROP_BOX`) emitted in Vesper through the lent
 // Cranelift builder.
 
-use @vesper/codegen-aggregates-emit::{
-    drops_hook
-};
+use @vesper/codegen-aggregates-emit::{drops_hook};
 
 // One request of the `drops` family: `call` is the address of the lent
 // call. Returns 1 when it emitted the request, 0 to leave it to Rust.

@@ -5,10 +5,7 @@
 // numbers instead of text (`Parser::at_word` and the name checks of
 // crates/vesper-syntax/src/parser.rs).
 
-use self::util::{
-    add,
-    byte
-};
+use self::util::{add, byte};
 
 fn is(in b: Slice[u8], s: u64, in w: Slice[u8]) -> bool {
     for i in 0..w.len() {

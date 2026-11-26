@@ -7,13 +7,8 @@
 // An error result is the status word 1 and the message; an ok result is
 // the status word 0 and the payload.
 
-use @vesper/front::lex::{
-    lex_raw,
-    token_end
-};
-use @vesper/front::diag::{
-    diags_new
-};
+use @vesper/front::lex::{lex_raw, token_end};
+use @vesper/front::diag::{diags_new};
 use @vesper/front::kinds::{
     k_affine,
     k_block_comment,
@@ -36,9 +31,7 @@ use @vesper/front::kinds::{
     k_struct,
     k_whitespace
 };
-use @vesper/front::util::{
-    w32
-};
+use @vesper/front::util::{w32};
 use self::util::{
     Reader,
     add,
@@ -109,9 +102,7 @@ fn is_contextual_item(in src: Slice[u8], s: u64, e: u64) -> bool {
 // `rust_preflight`: input words are the source, `max_tokens`,
 // `max_nesting`, `max_segment_tokens` and `max_declarations`.
 pub fn preflight(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let (ss, se) = r.text(in b);
     let max_tokens = r.word(in b);
     let max_nesting = r.word(in b);
@@ -604,9 +595,7 @@ fn put_example(
 // `max_examples`; an ok result is the example count and each example's
 // words (`put_example`).
 pub fn extract(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let (ss, se) = r.text(in b);
     let max_snippet = r.word(in b);
     let max_examples = r.word(in b);

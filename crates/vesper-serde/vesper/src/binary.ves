@@ -1,13 +1,7 @@
 // @vesper/serde: the binary host codecs of src/streamvbyte.rs (raw,
 // non-delta 1/2/3/4-byte StreamVByte) and src/archive.rs (the VSPA tree
 // archive, version 1, schema 1), with the common errors of src/binary.rs.
-use self::{
-    ArchiveLimits,
-    BinError,
-    BinErrorKind,
-    Span,
-    VbyteLimits
-};
+use self::{ArchiveLimits, BinError, BinErrorKind, Span, VbyteLimits};
 use self::index::utf8_valid_up_to;
 
 // StreamVByte: four 2-bit width tags per control byte; values of 1 to 4
@@ -65,12 +59,7 @@ const META_WORDS: u64 = 2;
 const U32_MAX: u64 = 0xffffffff;
 
 fn raise(kind: BinErrorKind, offset: u64) -> Unit eff [Fail[BinError]] {
-    Fail::raise(
-        BinError {
-            kind: kind,
-            offset: offset
-        }
-    )
+    Fail::raise(BinError { kind: kind, offset: offset })
 }
 
 fn max64() -> u64 {
@@ -315,10 +304,7 @@ pub fn relptr_resolve(offset: i32, field_offset: u64, size: u64, alignment: u64,
     if end > archive_len {
         raise(BinErrorKind::BOffset, field_offset);
     }
-    Span {
-        start: target,
-        end: end
-    }
+    Span { start: target, end: end }
 }
 
 // `RelSlice32::resolve`.
@@ -339,10 +325,7 @@ pub fn relslice_resolve(
         if offset != 0 {
             raise(BinErrorKind::BLayout, field_offset);
         }
-        return Span {
-            start: 0,
-            end: 0
-        };
+        return Span { start: 0, end: 0 };
     }
     relptr_resolve(offset, field_offset, mul(widen_u64(count), item_size), alignment, archive_len)
 }
@@ -421,13 +404,7 @@ fn check_new(count: u64, lim: ArchiveLimits, inout meta: ChunkSeq[u64])
         meta.push(0);
     }
     meta.try_set(1, 1);
-    Check {
-        lim: lim,
-        remaining: remaining,
-        edges: 0,
-        labels: 0,
-        count: count
-    }
+    Check { lim: lim, remaining: remaining, edges: 0, labels: 0, count: count }
 }
 
 fn check_label(inout c: Check, len: u64) -> Unit eff [Fail[BinError]] {

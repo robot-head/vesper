@@ -1,35 +1,13 @@
 // Module snap of @vesper/loom-solver (see lib.ves): the calculus
 // validator on the current assignment, and putting the calculus state
 // back afterwards.
-use @vesper/loom-calculus::{
-    Root,
-    Snap
-};
-use @vesper/loom-calculus::solve::{
-    solve
-};
-use @vesper/loom-calculus::util::{
-    Code,
-    add,
-    diag,
-    gnode,
-    man,
-    none,
-    sw
-};
-use self::{
-    S
-};
-use self::closure::{
-    assigned,
-    has_entry
-};
-use self::diag::{
-    copy_calculus
-};
-use self::input::{
-    sysv
-};
+use @vesper/loom-calculus::{Root, Snap};
+use @vesper/loom-calculus::solve::{solve};
+use @vesper/loom-calculus::util::{Code, add, diag, gnode, man, none, sw};
+use self::{S};
+use self::closure::{assigned, has_entry};
+use self::diag::{copy_calculus};
+use self::input::{sysv};
 
 // The calculus table lengths in `marks`, in the order `mark` pushes them.
 enum Mark: _ {
@@ -151,17 +129,7 @@ pub fn run_solve(inout s: S, with_systems: bool, partial: bool) -> bool {
     let root = man(in s.l, s.root).name;
     s.l.root_at = s.l.roots.len();
     s.l.root_n = 1;
-    s
-        .l
-        .roots
-        .push(
-            Root {
-                name: root,
-                req: s.rexact,
-                feat_at: s.rf_at,
-                feat_n: s.rf_n
-            }
-        );
+    s.l.roots.push(Root { name: root, req: s.rexact, feat_at: s.rf_at, feat_n: s.rf_n });
     s.l.ss_at = s.l.ssels.len();
     s.l.ss_n = 0;
     if with_systems {

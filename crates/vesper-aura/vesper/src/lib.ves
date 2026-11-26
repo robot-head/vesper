@@ -22,9 +22,7 @@
 // frees the sequences inside it (#985).
 //
 // @export abi 3
-use self::apply::{
-    do_recorder_apply
-};
+use self::apply::{do_recorder_apply};
 use self::recording::{
     do_recorder_assign,
     do_recorder_check_slot,
@@ -69,9 +67,7 @@ use self::sim::{
     do_sim_still_focusable,
     do_sim_trigger
 };
-use self::util::{
-    do_limits_valid
-};
+use self::util::{do_limits_valid};
 
 // view::Limits.
 pub copy struct Lim {

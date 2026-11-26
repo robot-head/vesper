@@ -1,0 +1,6 @@
+// `String` here is the type: this module sees no `Kind`.
+pub fn size() -> u64 {
+    let mut s: String = String::new();
+    s.push_str(in "four");
+    s.len()
+}

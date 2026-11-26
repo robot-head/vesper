@@ -5,29 +5,9 @@
 // The pending stack holds node indices; a node's assignment is its chain
 // to the root node. Nodes are allocated in push order, so when node n is
 // popped every node above n is dead and the node list is cut back to n.
-use @vesper/loom-calculus::util::{
-    add,
-    dep,
-    feat,
-    find_feat,
-    id_at,
-    inc,
-    man,
-    none,
-    sw,
-    ver
-};
-use self::{
-    Node,
-    S
-};
-use self::closure::{
-    all_reqs_match,
-    assigned,
-    closure,
-    has_entry,
-    matches_req
-};
+use @vesper/loom-calculus::util::{add, dep, feat, find_feat, id_at, inc, man, none, sw, ver};
+use self::{Node, S};
+use self::closure::{all_reqs_match, assigned, closure, has_entry, matches_req};
 use self::diag::{
     ErrorKind,
     Objective,
@@ -45,26 +25,10 @@ use self::diag::{
     subj_id,
     subj_lit
 };
-use self::input::{
-    find_meta,
-    mxv
-};
-use self::metrics::{
-    metrics_of_current,
-    score_key
-};
-use self::output::{
-    objective_of_id,
-    out_error,
-    out_solution,
-    reset_diags,
-    solution_words,
-    table,
-    w
-};
-use self::snap::{
-    run_solve
-};
+use self::input::{find_meta, mxv};
+use self::metrics::{metrics_of_current, score_key};
+use self::output::{objective_of_id, out_error, out_solution, reset_diags, solution_words, table, w};
+use self::snap::{run_solve};
 
 // `unsupported_policy` (resolve) for manifest mi.
 pub fn unsupported(in s: S, mi: u64) -> bool {
@@ -387,15 +351,7 @@ fn branch(inout s: S, n: u64, next: u64, opt: bool, needs_meta: bool) {
         let mi = sw(in s.cbuf, j);
         if !opt || admit(inout s, mi, needs_meta) {
             let at = s.nodes.len();
-            s
-                .nodes
-                .push(
-                    Node {
-                        parent: n,
-                        name: next,
-                        man: mi
-                    }
-                );
+            s.nodes.push(Node { parent: n, name: next, man: mi });
             s.stack.push(at);
         }
     }
@@ -623,15 +579,7 @@ pub fn search(inout s: S, opt: bool) {
     let root = man(in s.l, s.root).name;
     s.nodes.clear();
     s.stack.clear();
-    s
-        .nodes
-        .push(
-            Node {
-                parent: none(),
-                name: root,
-                man: rm
-            }
-        );
+    s.nodes.push(Node { parent: none(), name: root, man: rm });
     s.stack.push(0);
     s.sdec = 0;
     s.sunsup = false;

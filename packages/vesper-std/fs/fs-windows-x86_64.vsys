@@ -4,6 +4,8 @@ sys library StdFs (
     link = "dynamic", name = "kernel32",
     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
 ) {
+    // The architecture: 1 x86_64, 2 aarch64, 3 wasm32 (`arch` in src).
+    const ARCH: u32 = 1;
     const INVALID_HANDLE_VALUE: u64 = 18446744073709551615;
     const GENERIC_READ: u32 = 2147483648;
     const GENERIC_WRITE: u32 = 1073741824;
@@ -17,6 +19,9 @@ sys library StdFs (
     const FILE_ATTRIBUTE_DIRECTORY: u32 = 16;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 1024;
     const MOVEFILE_REPLACE_EXISTING: u32 = 1;
+    const STD_OUTPUT_HANDLE: i32 = -11;
+    const STD_ERROR_HANDLE: i32 = -12;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 33554432;
     const ERROR_FILE_NOT_FOUND: u32 = 2;
     const ERROR_PATH_NOT_FOUND: u32 = 3;
     const ERROR_NO_MORE_FILES: u32 = 18;
@@ -57,6 +62,14 @@ sys library StdFs (
         lpOverlapped: u64
     ) -> ForeignVal[i32] errno;
     fn FlushFileBuffers(hFile: u64) -> ForeignVal[i32] errno;
+    fn GetStdHandle(nStdHandle: i32) -> ForeignVal[u64];
+    // `lpszFilePath` holds two UTF-16 units per word; `cchFilePath` is the
+    // word count, half what the buffer holds.
+    fn GetFinalPathNameByHandleW(
+        hFile: u64,
+        nocapture inout lpszFilePath: CSlice[u32],
+        dwFlags: u32
+    ) -> ForeignVal[u32] errno;
     fn CloseHandle(hObject: u64) -> ForeignVal[i32];
     fn GetFileSizeEx(hFile: u64, nocapture inout lpFileSize: i64) -> ForeignVal[i32] errno;
     fn GetFileAttributesExW(
@@ -93,4 +106,27 @@ sys library StdFs (
         bFailIfExists: i32
     ) -> ForeignVal[i32] errno;
     fn GetCurrentProcessId() -> ForeignVal[u32];
+    // `std`'s OS error message (`format_error` of
+    // library/std/src/sys/io/error/windows.rs). The message comes back in a
+    // buffer `FormatMessageW` allocates, read out as UTF-8.
+    fn GetModuleHandleW(nocapture in lpModuleName: CWStr) -> ForeignVal[u64];
+    fn FormatMessageW(
+        dwFlags: u32,
+        lpSource: u64,
+        dwMessageId: u32,
+        dwLanguageId: u32,
+        nocapture inout lpBuffer: u64,
+        nSize: u32,
+        Arguments: u64
+    ) -> ForeignVal[u32] errno;
+    fn WideCharToMultiByte(
+        CodePage: u32,
+        dwFlags: u32,
+        lpWideCharStr: u64,
+        cchWideChar: i32,
+        nocapture inout lpMultiByteStr: CSlice[u8],
+        lpDefaultChar: u64,
+        lpUsedDefaultChar: u64
+    ) -> ForeignVal[i32];
+    fn LocalFree(hMem: u64) -> ForeignVal[u64];
 }

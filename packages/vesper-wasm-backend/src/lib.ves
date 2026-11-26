@@ -3,58 +3,18 @@
 // boundary (WIT text and export wrappers). Not yet: handlers, WASI host
 // frames, evidence binding (`K_NOT_PORTED`); wit-component stays in Rust.
 
-use self::enc::{
-    Code,
-    code_new
-};
-use self::err::{
-    WErr,
-    werr,
-    werr_syms
-};
-use @vesper/check-data::util::{
-    push_decimal,
-    w
-};
-use self::module::{
-    Builder,
-    builder_new
-};
-use self::ir::{
-    Facts,
-    read_facts,
-    ir_new
-};
-use self::plan::{
-    Cx,
-    Plan,
-    cx_new,
-    plan
-};
-use self::lower::{
-    L,
-    lowerer_new
-};
-use self::component::{
-    exports
-};
-use self::tables::{
-    dummy_l,
-    rebuild_l,
-    stage2_heap_mark,
-    stage2_heap_reset,
-    stage2_heap_swap
-};
+use self::enc::{Code, code_new};
+use self::err::{WErr, werr, werr_syms};
+use @vesper/check-data::util::{push_decimal, w};
+use self::module::{Builder, builder_new};
+use self::ir::{Facts, read_facts, ir_new};
+use self::plan::{Cx, Plan, cx_new, plan};
+use self::lower::{L, lowerer_new};
+use self::component::{exports};
+use self::tables::{dummy_l, rebuild_l, stage2_heap_mark, stage2_heap_reset, stage2_heap_swap};
 use @vesper/check-data::pack_text;
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/place-ir::{
-    Program,
-    read_program
-};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/place-ir::{Program, read_program};
 
 const K_ENTRY: u8 = 1;
 const K_LIMIT: u8 = 2;
@@ -62,9 +22,7 @@ const K_LIMIT: u8 = 2;
 // `wasm_backend::compile` up to the core module: the core bytes and the
 // WIT text, or the error. Component encoding stays in Rust.
 fn compile(in b: Slice[u8]) -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64]) eff [Fail[WErr]] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let pool = p.pool.len();
@@ -74,9 +32,7 @@ fn compile(in b: Slice[u8]) -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64]) 
 
 fn compile_diag(in b: Slice[u8], want_syms: bool)
     -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64], ChunkSeq[u8]) eff [Fail[WErr]] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let pool = p.pool.len();

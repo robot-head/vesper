@@ -4,23 +4,10 @@
 // link budget counts up, charge for charge with the Rust one, with the Rust
 // `size_of` of each value it counts.
 
-use @vesper/front::lex::{
-    lex_with_limits,
-    token_end
-};
-use @vesper/front::diag::{
-    diags_new
-};
-use self::json::{
-    byte
-};
-use self::nav::{
-    Ix,
-    MAX_SOURCE_BYTES,
-    u32_at,
-    u8_at,
-    w
-};
+use @vesper/front::lex::{lex_with_limits, token_end};
+use @vesper/front::diag::{diags_new};
+use self::json::{byte};
+use self::nav::{Ix, MAX_SOURCE_BYTES, u32_at, u8_at, w};
 
 pub const NOT_FOUND: u64 = 18446744073709551615;
 

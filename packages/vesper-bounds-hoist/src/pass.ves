@@ -3,41 +3,12 @@
 // is made by plans.ves on the function as it stands (encoded afresh after
 // each rewrite), and rewrite.ves applies it to the tables.
 
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    TyPass
-};
-use @vesper/check-data::input::{
-    Reader,
-    read_ctx
-};
-use @vesper/place-ir::{
-    InstRow,
-    Program,
-    put_program,
-    read_program
-};
-use self::fun::{
-    Fun,
-    add,
-    inc,
-    insert,
-    n32,
-    read_fun,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use self::encode::{
-    POOL_GUARD,
-    TypeCache,
-    encode_fun,
-    type_cache
-};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, TyPass};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/place-ir::{InstRow, Program, put_program, read_program};
+use self::fun::{Fun, add, inc, insert, n32, read_fun, u32_at, u64_at, u8_at, w};
+use self::encode::{POOL_GUARD, TypeCache, encode_fun, type_cache};
 use self::plans::{
     BoundRow,
     CountedPlan,
@@ -61,10 +32,7 @@ use self::rewrite::{
     pool_entry,
     prog_inst
 };
-use @vesper/place-ir::codes::{
-    Op,
-    Tag
-};
+use @vesper/place-ir::codes::{Op, Tag};
 
 const O_VALUE: u64 = 0;
 const O_LOCAL: u64 = 1;
@@ -430,11 +398,7 @@ fn guard_and_copy(
     for k in 0..n {
         let gb = match lp.gbound.try_get(k) {
             Option::Some(x) => x,
-            Option::None => BoundRow {
-                kind: 2,
-                a: 0,
-                b: 0
-            },
+            Option::None => BoundRow { kind: 2, a: 0, b: 0 },
         };
         let hi = if gb.kind == 2 {
             gb.a
@@ -592,9 +556,7 @@ pub fn hoist_words(in input: Str) -> ChunkSeq[u64] {
 // (names, types, the world, the program section): the `put_program` words
 // of the hoisted program. The hybrid's `hoist` hook calls it.
 pub fn hoist_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let mut p = read_program(inout r, in b, in c);
     let s_bool = c.names.intern(in "bool".as_bytes());

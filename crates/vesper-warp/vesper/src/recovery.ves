@@ -19,15 +19,9 @@ use self::{
     Rtt,
     TimeoutOut
 };
-use self::frame::{
-    fr_wire_next
-};
-use self::pn::{
-    pn_limit
-};
-use self::varint::{
-    sat_add
-};
+use self::frame::{fr_wire_next};
+use self::pn::{pn_limit};
+use self::varint::{sat_add};
 
 // RFC 9002 §6.1.1 kPacketThreshold; RFC 9000 §18.2: ACK delay exponents
 // above 20 are invalid.
@@ -206,11 +200,7 @@ pub fn rtt_loss_delay_ns(in r: Rtt) -> u64 {
 // RFC 9000 §19.3: the encoded ACK Delay in nanoseconds, saturating.
 pub fn rec_ack_delay_ns(encoded: u64, exponent: u8) -> u64 eff [Fail[RecErr]] {
     if exponent > MAX_ACK_DELAY_EXPONENT {
-        Fail::raise(
-            RecErr::BadAckDelayExponent {
-                exponent: exponent
-            }
-        );
+        Fail::raise(RecErr::BadAckDelayExponent { exponent: exponent });
     }
     let e = widen_u32(exponent);
     let shifted = wrapping_shl_u64(encoded, e);
@@ -274,14 +264,7 @@ pub fn rec_space_new() -> RecSpace {
 }
 
 fn no_entry() -> RecEntry {
-    RecEntry {
-        pn: 0,
-        sent_ns: 0,
-        bytes: 0,
-        ack_eliciting: false,
-        in_flight: false,
-        status: 0
-    }
+    RecEntry { pn: 0, sent_ns: 0, bytes: 0, ack_eliciting: false, in_flight: false, status: 0 }
 }
 
 fn sp_get(in spaces: Slice[RecSpace], i: u64) -> RecSpace {
@@ -311,13 +294,7 @@ fn emit(inout st: RecState, inout evs: Slice[RecEvent], kind: u8, e: RecEntry, c
     evs
         .try_set(
             st.n_events,
-            RecEvent {
-                kind: kind,
-                pn: e.pn,
-                sent_ns: e.sent_ns,
-                bytes: e.bytes,
-                count: count
-            }
+            RecEvent { kind: kind, pn: e.pn, sent_ns: e.sent_ns, bytes: e.bytes, count: count }
         );
     st.n_events = wrapping_add(st.n_events, 1);
 }
@@ -378,11 +355,7 @@ copy struct Scan {
 }
 
 fn none_at() -> PtoOut {
-    PtoOut {
-        has: false,
-        t: 0,
-        space: 0
-    }
+    PtoOut { has: false, t: 0, space: 0 }
 }
 
 fn scan(in st: RecState, in r: Rtt, in spaces: Slice[RecSpace], now_ns: u64) -> Scan {
@@ -433,16 +406,8 @@ fn scan(in st: RecState, in r: Rtt, in spaces: Slice[RecSpace], now_ns: u64) -> 
         };
     }
     Scan {
-        loss: PtoOut {
-            has: has_loss,
-            t: loss_t,
-            space: wrapping_u8(loss_space)
-        },
-        pto: PtoOut {
-            has: has_pto,
-            t: pto_t,
-            space: wrapping_u8(pto_space)
-        }
+        loss: PtoOut { has: has_loss, t: loss_t, space: wrapping_u8(loss_space) },
+        pto: PtoOut { has: has_pto, t: pto_t, space: wrapping_u8(pto_space) }
     }
 }
 
@@ -518,26 +483,13 @@ pub fn rec_on_packet_sent(
 ) eff [Fail[RecErr]] {
     let mut s = sp_get(in spaces, i);
     if s.discarded {
-        Fail::raise(
-            RecErr::SpaceDiscarded {
-                space: wrapping_u8(i)
-            }
-        );
+        Fail::raise(RecErr::SpaceDiscarded { space: wrapping_u8(i) });
     }
     if pkt.pn >= pn_limit() {
-        Fail::raise(
-            RecErr::PnOutOfRange {
-                pn: pkt.pn
-            }
-        );
+        Fail::raise(RecErr::PnOutOfRange { pn: pkt.pn });
     }
     if s.has_last_sent && pkt.pn <= s.last_sent_pn {
-        Fail::raise(
-            RecErr::NonIncreasingPn {
-                pn: pkt.pn,
-                last: s.last_sent_pn
-            }
-        );
+        Fail::raise(RecErr::NonIncreasingPn { pn: pkt.pn, last: s.last_sent_pn });
     }
     if pkt.sent_ns < st.last_sent_ns {
         Fail::raise(RecErr::ClockWentBackwards);
@@ -672,11 +624,7 @@ fn detect_lost(
     let loss_delay = rtt_loss_delay_ns(in r);
     let pc_duration = rec_pc_duration_ns(in st, in r);
     let mut s = sp_get(in spaces, i);
-    let mut batch = Batch {
-        lost: 0,
-        lost_bytes: 0,
-        persistent_congestion: false
-    };
+    let mut batch = Batch { lost: 0, lost_bytes: 0, persistent_congestion: false };
     s.has_loss_time = false;
     if !s.has_largest_acked {
         sp_set(inout spaces, i, s);
@@ -775,18 +723,10 @@ pub fn rec_on_ack_received(
     st.n_events = 0;
     let mut s = sp_get(in spaces, i);
     if s.discarded {
-        Fail::raise(
-            RecErr::SpaceDiscarded {
-                space: wrapping_u8(i)
-            }
-        );
+        Fail::raise(RecErr::SpaceDiscarded { space: wrapping_u8(i) });
     }
     if !s.has_last_sent || largest > s.last_sent_pn {
-        Fail::raise(
-            RecErr::AckOfUnsentPacket {
-                largest_acked: largest
-            }
-        );
+        Fail::raise(RecErr::AckOfUnsentPacket { largest_acked: largest });
     }
     if !s.has_largest_acked || largest > s.largest_acked {
         s.has_largest_acked = true;
@@ -921,13 +861,7 @@ pub fn rec_on_timeout(
     now_ns: u64,
 ) -> TimeoutOut {
     st.n_events = 0;
-    let mut out = TimeoutOut {
-        kind: 0,
-        space: 0,
-        lost: 0,
-        packets: 0,
-        anti_deadlock: false
-    };
+    let mut out = TimeoutOut { kind: 0, space: 0, lost: 0, packets: 0, anti_deadlock: false };
     if !st.has_timer || now_ns < st.timer_deadline_ns {
         return out;
     }

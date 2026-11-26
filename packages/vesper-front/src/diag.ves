@@ -3,11 +3,7 @@
 // messages are the Rust parser's, byte for byte.
 
 use self::Diags;
-use self::util::{
-    narrow,
-    w32,
-    push_decimal
-};
+use self::util::{narrow, w32, push_decimal};
 
 pub fn diags_new() -> Diags {
     Diags {

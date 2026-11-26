@@ -1,13 +1,6 @@
 // @vesper-std/sort::keyed: sorting by a parallel key slice.
-use self::unstable::{
-    lt,
-    swap_at,
-    depth_limit
-};
-use @vesper-std/sugar::{
-    guard,
-    when
-};
+use self::unstable::{lt, swap_at, depth_limit};
+use @vesper-std/sugar::{guard, when};
 
 // Whether index `x` sorts before `y`: by key, then by the index itself.
 // Indices past the end of `keys` sort after every key, by index.
@@ -44,27 +37,21 @@ fn insertion_by[K: mod copy + Ord](in keys: Slice[K], inout order: Slice[u32], l
         if i >= hi {
             break;
         }
-        match order.try_get(i) {
-            Option::Some(x) => {
-                let mut j = i;
-                loop {
-                    if j <= lo {
-                        break;
-                    }
-                    let k = wrapping_sub(j, 1);
-                    let y = match order.try_get(k) {
-                        Option::Some(y) => y,
-                        Option::None => x,
-                    };
-                    if !before(in keys, x, y) {
-                        break;
-                    }
-                    order.try_set(j, y);
-                    j = k;
+        when let Option::Some(x) = order.try_get(i) {
+            let mut j = i;
+            loop {
+                if j <= lo {
+                    break;
                 }
-                order.try_set(j, x);
-            },
-            Option::None => {},
+                let k = wrapping_sub(j, 1);
+                let y = order.try_get(k).unwrap_or(x);
+                if !before(in keys, x, y) {
+                    break;
+                }
+                order.try_set(j, y);
+                j = k;
+            }
+            order.try_set(j, x);
         }
         i = wrapping_add(i, 1);
     }
@@ -154,20 +141,14 @@ fn partition_by[K: mod copy + Ord](
             if i >= last {
                 break;
             }
-            xi = match order.try_get(i) {
-                Option::Some(x) => x,
-                Option::None => p,
-            };
+            xi = order.try_get(i).unwrap_or(p);
             if !before(in keys, xi, p) {
                 break;
             }
         }
         loop {
             j = wrapping_sub(j, 1);
-            xj = match order.try_get(j) {
-                Option::Some(x) => x,
-                Option::None => p,
-            };
+            xj = order.try_get(j).unwrap_or(p);
             if !before(in keys, p, xj) {
                 break;
             }
@@ -437,10 +418,17 @@ test {
         order.push(1);
         order.push(0);
         insertion_by(in "abcd".as_bytes(), inout order.as_slice_mut(), 1, 3);
-        order.try_get(0) == Option::Some(3)
+        let neighbors_unchanged = order.try_get(0) == Option::Some(3)
             && order.try_get(1) == Option::Some(1)
             && order.try_get(2) == Option::Some(2)
-            && order.try_get(3) == Option::Some(0)
+            && order.try_get(3) == Option::Some(0);
+        // With a range longer than the slice, sort the available indices.
+        insertion_by(in "abcd".as_bytes(), inout order.as_slice_mut(), 0, 6);
+        neighbors_unchanged
+            && order.try_get(0) == Option::Some(0)
+            && order.try_get(1) == Option::Some(1)
+            && order.try_get(2) == Option::Some(2)
+            && order.try_get(3) == Option::Some(3)
     }
 
     fn test_heapsort_orders_pair() -> bool {

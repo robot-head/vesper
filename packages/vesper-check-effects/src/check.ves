@@ -2,36 +2,12 @@
 // walks of every function, the realtime recursion check over the call
 // graph, and the diagnostics in source order.
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    inc32,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::input::{
-    Ctx
-};
-use @vesper/check-data::world::{
-    set_by_symbol
-};
-use @vesper/check-data::types::{
-    display
-};
-use self::keys::{
-    Keys,
-    Sums,
-    keys_new,
-    pair,
-    sums_new
-};
-use self::prog::{
-    Prog
-};
+use @vesper/check-data::util::{add, inc, inc32, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::input::{Ctx};
+use @vesper/check-data::world::{set_by_symbol};
+use @vesper/check-data::types::{display};
+use self::keys::{Keys, Sums, keys_new, pair, sums_new};
+use self::prog::{Prog};
 use self::walker::{
     DRow,
     Edge,
@@ -63,18 +39,7 @@ fn begin(inout s: Walk, in code: Str) -> u64 {
 fn finish(inout s: Walk, a: u64, in help: Str, start: u64, end: u64) {
     let h = s.text.len();
     put(inout s, help);
-    s
-        .rows
-        .push(
-            DRow {
-                start: start,
-                end: end,
-                a: a,
-                m: add(a, 5),
-                h: h,
-                z: s.text.len()
-            }
-        );
+    s.rows.push(DRow { start: start, end: end, a: a, m: add(a, 5), h: h, z: s.text.len() });
 }
 
 // `summarise`: the facts to a fixpoint; left in `s.cur`.
@@ -210,12 +175,7 @@ fn walker_gate(in c: Ctx, name: u32) -> bool {
 fn edge_at(in s: Walk, i: u64) -> Edge {
     match s.edges.try_get(i) {
         Option::Some(e) => e,
-        Option::None => Edge {
-            node: 0,
-            callee: 0,
-            start: 0,
-            end: 0
-        },
+        Option::None => Edge { node: 0, callee: 0, start: 0, end: 0 },
     }
 }
 
@@ -298,15 +258,7 @@ fn realtime_recursion(inout c: Ctx, inout s: Walk, in indirect: Keys) {
     first.resize(inc(count), 0);
     let mut extra: ChunkSeq[Edge] = ChunkSeq::new[Edge]();
     for i in 0..indirect.len() {
-        extra
-            .push(
-                Edge {
-                    node: ind,
-                    callee: n32(indirect.get(i)),
-                    start: 0,
-                    end: 0
-                }
-            );
+        extra.push(Edge { node: ind, callee: n32(indirect.get(i)), start: 0, end: 0 });
     }
     let total = add(s.edges.len(), extra.len());
     for i in 0..total {
@@ -445,14 +397,7 @@ fn put_shown(in c: Ctx, inout s: Walk, root: u32) {
 fn row(in s: Walk, i: u64) -> DRow {
     match s.rows.try_get(i) {
         Option::Some(r) => r,
-        Option::None => DRow {
-            start: 0,
-            end: 0,
-            a: 0,
-            m: 0,
-            h: 0,
-            z: 0
-        },
+        Option::None => DRow { start: 0, end: 0, a: 0, m: 0, h: 0, z: 0 },
     }
 }
 

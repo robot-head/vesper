@@ -8,29 +8,16 @@
 //   effect operation signatures, bodies as expression and pattern rows).
 // - lower.ves: the lowering, token threading and the program rows.
 
-use @vesper/check-data::input::{
-    Reader,
-    read_ctx
-};
-use @vesper/place-ir::{
-    put_program
-};
-use self::ast::{
-    read_ast
-};
-use self::lower::{
-    L,
-    l_new,
-    lower_all
-};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/place-ir::{put_program};
+use self::ast::{read_ast};
+use self::lower::{L, l_new, lower_all};
 
 // The lowered program as `put_program` words (names, types, the program
 // section), then two words: functions lowered and functions skipped.
 pub fn ir_lower_words(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let a = read_ast(inout r, in b, in c);
     let mut l = l_new(sink c, sink a);
@@ -46,9 +33,7 @@ pub fn ir_lower_words(in input: Str) -> ChunkSeq[u64] {
 // subtracts from `ir_lower_words`. Returns the expression row count.
 pub fn ir_lower_read(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let a = read_ast(inout r, in b, in c);
     let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();

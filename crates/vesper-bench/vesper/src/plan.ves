@@ -17,11 +17,7 @@ use self::{
     UnavailableEvidence,
     UnavailableReason
 };
-use self::stats::{
-    Limit,
-    cadd,
-    do_paired_sample_new
-};
+use self::stats::{Limit, cadd, do_paired_sample_new};
 use self::util::{
     BP_SCALE,
     I64_MIN_MAGNITUDE,
@@ -149,11 +145,7 @@ pub fn do_layout_plan(seed: u64, run: u32) -> LayoutPlan {
 
 // Error::InvalidConfig codes (src/port.rs CONFIG_MESSAGES).
 fn invalid(code: u64) eff [Fail[PortError]] {
-    Fail::raise(
-        PortError::InvalidConfig {
-            code: code
-        }
-    );
+    Fail::raise(PortError::InvalidConfig { code: code });
 }
 
 fn cmul(a: u64, b: u64) -> u64 eff [Fail[PortError]] {
@@ -193,11 +185,7 @@ pub fn do_validate_config(
     }
     let calls = cmul(cmul(cadd(e, w), WINDOWS_PER_EPOCH), o);
     if calls > c {
-        Fail::raise(
-            PortError::Limit {
-                code: Limit::BodyCalls
-            }
-        );
+        Fail::raise(PortError::Limit { code: Limit::BodyCalls });
     }
     widen_usize(calls)
 }
@@ -220,12 +208,7 @@ pub fn do_experiment_run(elapsed: u64, delay: u64, progress: u64)
         Fail::raise(CausalErr::EmptyEvidence);
     }
     if delay >= elapsed {
-        Fail::raise(
-            CausalErr::DelayExceedsElapsed {
-                elapsed: elapsed,
-                delay: delay
-            }
-        );
+        Fail::raise(CausalErr::DelayExceedsElapsed { elapsed: elapsed, delay: delay });
     }
     ExperimentRun {
         elapsed_ns: elapsed,
@@ -335,10 +318,7 @@ pub fn do_unavailable_evidence(requirement: EvidenceRequirement) -> UnavailableE
         EvidenceRequirement::Vectorization => UnavailableReason::NoCompilerVectorizationEvidence,
         _ => UnavailableReason::NoPmuProvider,
     };
-    UnavailableEvidence {
-        requirement: requirement,
-        reason: reason
-    }
+    UnavailableEvidence { requirement: requirement, reason: reason }
 }
 
 pub fn do_evaluate_evidence_requirement(requirement: EvidenceRequirement) -> EvidenceGate {

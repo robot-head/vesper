@@ -42,7 +42,7 @@ vesper_port_object(
 vesper_port_object(
     name = "crucible_vesper_divergent_draws",
     edit_src = "vesper/src/lib.ves",
-    edits = {"            value: min_u64(replay, max)\n": "            value: replay\n"},
+    edits = {"value: min_u64(replay, max) }": "value: replay }"},
     library = "crucible",
     package = ":port_package",
     target = VESPER_TARGET,

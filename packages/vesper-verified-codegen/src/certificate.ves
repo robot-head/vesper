@@ -26,10 +26,7 @@
 // worklist, successors in the same order), so the certificates are equal
 // word for word, not just equally valid.
 
-use @vesper-std/collections::flat_table::{
-    FlatTable,
-    flat_table_new
-};
+use @vesper-std/collections::flat_table::{FlatTable, flat_table_new};
 use self::machine::{
     K_BOOL,
     K_F64,
@@ -65,6 +62,7 @@ use self::machine::{
     L_OUT,
     L_SLOT,
     Lir,
+    Lowered,
     T_DIV0,
     T_OVERFLOW,
     put_decimal
@@ -485,14 +483,7 @@ struct Prog {
 }
 
 fn no_row() -> Lir {
-    Lir {
-        tag: 255,
-        op: 0,
-        kind: 0,
-        f1: 0,
-        f2: 0,
-        f3: 0
-    }
+    Lir { tag: 255, op: 0, kind: 0, f1: 0, f2: 0, f3: 0 }
 }
 
 fn nfun(in p: Prog) -> u64 {
@@ -1357,11 +1348,7 @@ fn summ_new(n: u64) -> Summ {
         o.push(ChunkSeq::new[u64]());
         h.push(false);
     }
-    Summ {
-        f: f,
-        o: o,
-        h: h
-    }
+    Summ { f: f, o: o, h: h }
 }
 
 fn summ_facts(in s: Summ, i: u64) -> ChunkSeq[u64] {
@@ -2317,14 +2304,7 @@ fn widen(r: Lir) -> Lir {
         } else {
             K_U64
         };
-        return Lir {
-            tag: r.tag,
-            op: r.op,
-            kind: k,
-            f1: r.f1,
-            f2: r.f2,
-            f3: r.f3
-        };
+        return Lir { tag: r.tag, op: r.op, kind: k, f1: r.f1, f2: r.f2, f3: r.f3 };
     }
     r
 }
@@ -2492,6 +2472,36 @@ pub fn check_input(in b: Slice[u8], inout out: ChunkSeq[u8]) {
     } else {
         out.extend(in why.as_slice());
         out.push(10);
+    }
+}
+
+// `check` of a lowered program (`compile`'s certificate): whether it
+// passed, with `check_input`'s text in `out`.
+pub fn certify(in lo: Lowered, inout out: ChunkSeq[u8]) -> bool {
+    let mut p = Prog {
+        rows: ChunkSeq::new[Lir](),
+        starts: ChunkSeq::new[u64](),
+        names: ChunkSeq::new[u8](),
+        name_at: ChunkSeq::new[u64]()
+    };
+    for i in 0..lo.rows.len() {
+        match lo.rows.try_get(i) {
+            Option::Some(r) => p.rows.push(widen(r)),
+            Option::None => {}
+        }
+    }
+    p.starts.extend(in lo.starts.as_slice());
+    p.names.extend(in lo.names.as_slice());
+    p.name_at.extend(in lo.name_at.as_slice());
+    let c = generate(in p);
+    let mut why = ChunkSeq::new[u8]();
+    if validate(in p, in c, inout why) {
+        put_cert(inout out, in c);
+        true
+    } else {
+        out.extend(in why.as_slice());
+        out.push(10);
+        false
     }
 }
 

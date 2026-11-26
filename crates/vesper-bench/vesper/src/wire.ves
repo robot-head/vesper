@@ -2,25 +2,9 @@
 // `PmuSampleWire` record (seven u64le then two u32le), its range checks,
 // the per-field availability checks of `PmuSample`, and
 // `backend_bound_bp`. Field indices are `PmuField::ALL` order.
-use self::{
-    PmuSampleWire,
-    WireErr
-};
-use self::util::{
-    BP_SCALE,
-    add,
-    gb,
-    gu,
-    inc,
-    mul,
-    pow2,
-    rem
-};
-use self::wide::{
-    w_mul_u64,
-    w_u64,
-    w_udivrem
-};
+use self::{PmuSampleWire, WireErr};
+use self::util::{BP_SCALE, add, gb, gu, inc, mul, pow2, rem};
+use self::wide::{w_mul_u64, w_u64, w_udivrem};
 
 // PmuField::ALL order.
 enum Field: _ {
@@ -51,18 +35,10 @@ const CACHE_LINE_BYTES: u64 = 64;
 
 fn check_ranges(bp: u64, offset: u64) eff [Fail[WireErr]] {
     if bp > BP_SCALE {
-        Fail::raise(
-            WireErr::BasisPointsOutOfRange {
-                value: bp
-            }
-        );
+        Fail::raise(WireErr::BasisPointsOutOfRange { value: bp });
     }
     if offset >= MAX_OFFSET || rem(offset, CACHE_LINE_BYTES) != 0 {
-        Fail::raise(
-            WireErr::LayoutOffsetOutOfRange {
-                value: offset
-            }
-        );
+        Fail::raise(WireErr::LayoutOffsetOutOfRange { value: offset });
     }
 }
 
@@ -98,11 +74,7 @@ fn field_value(in wire: PmuSampleWire, field: u64) -> u64 {
 // `PmuSampleWire::set`'s narrowing check of the two 32-bit fields.
 fn check_width(field: u64, value: u64) eff [Fail[WireErr]] {
     if field >= Field::TmaBackendBoundSlotsBp && value > NARROW_FIELD_MAX {
-        Fail::raise(
-            WireErr::FieldOverflow {
-                field: field
-            }
-        );
+        Fail::raise(WireErr::FieldOverflow { field: field });
     }
 }
 
@@ -140,11 +112,7 @@ pub fn do_wire_encode(in wire: PmuSampleWire) -> ChunkSeq[u8] eff [Fail[WireErr]
 pub fn do_wire_decode(in bytes: Slice[u8]) -> PmuSampleWire eff [Fail[WireErr]] {
     let len = bytes.len();
     if len != WIRE_BYTES {
-        Fail::raise(
-            WireErr::Length {
-                len: widen_usize(len)
-            }
-        );
+        Fail::raise(WireErr::Length { len: widen_usize(len) });
     }
     let mut values: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](FIELD_COUNT);
     let mut offset: u64 = 0;
@@ -201,11 +169,7 @@ pub fn do_wire_from_values(in values: Slice[u64], present: u64)
 
 pub fn do_mask_check(bits: u16) eff [Fail[WireErr]] {
     if bits & ~ALL_FIELDS != 0 {
-        Fail::raise(
-            WireErr::InvalidMask {
-                bits: bits
-            }
-        );
+        Fail::raise(WireErr::InvalidMask { bits: bits });
     }
 }
 

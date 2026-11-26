@@ -18,33 +18,12 @@
 //   Send/Recv `next.. 1|2 peer label payload`;
 //   Select/Offer `next_1.. next_n 3|4 peer n (label payload)*n`.
 // Output words use the same forms with one word, a symbol id, per string.
-use self::util::{
-    inc,
-    none,
-    iw,
-    Out
-};
-use self::tree::{
-    read_chor,
-    read_roles,
-    validate
-};
-use self::local::{
-    are_dual,
-    emit_l,
-    l_init,
-    read_local
-};
-use self::project::{
-    project_role
-};
-use self::explore::{
-    explore_run,
-    XErr
-};
-use self::parse::{
-    parse_src
-};
+use self::util::{inc, none, iw, Out};
+use self::tree::{read_chor, read_roles, validate};
+use self::local::{are_dual, emit_l, l_init, read_local};
+use self::project::{project_role};
+use self::explore::{explore_run, XErr};
+use self::parse::{parse_src};
 use self::simnet::{
     sm_chance,
     sm_next,

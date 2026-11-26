@@ -15,11 +15,7 @@
 // share a section, and every index space counts its items and keeps the
 // debug names given.
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    w
-};
+use @vesper/check-data::util::{add, inc, w};
 use self::host::{
     Core,
     Imp,
@@ -42,19 +38,7 @@ use self::host::{
     read_core,
     shim_module
 };
-use self::wit::{
-    Wit,
-    Ty,
-    Def,
-    Field,
-    Func,
-    ty_at,
-    def_at,
-    field_at,
-    func_at,
-    arg_at,
-    text_at
-};
+use self::wit::{Wit, Ty, Def, Field, Func, ty_at, def_at, field_at, func_at, arg_at, text_at};
 
 // wit.ves's constants (a `use` of a constant is not read by the Vesper
 // package assembler yet, so they are repeated here).
@@ -282,16 +266,7 @@ impl B {
         let r = self.next(ns);
         let n0 = self.text.len();
         self.text.extend(in name);
-        self
-            .names
-            .push(
-                NameRow {
-                    ns: ns,
-                    idx: r,
-                    n0: n0,
-                    nn: name.len()
-                }
-            );
+        self.names.push(NameRow { ns: ns, idx: r, n0: n0, nn: name.len() });
         r
     }
 
@@ -666,17 +641,9 @@ copy struct Iface {
 
 fn iface(in w: Wit, kind: u8) -> Iface {
     if kind == I_RUN {
-        Iface {
-            kind: kind,
-            f0: w.run_func,
-            fnum: 1
-        }
+        Iface { kind: kind, f0: w.run_func, fnum: 1 }
     } else {
-        Iface {
-            kind: kind,
-            f0: w.e0,
-            fnum: wrapping_sub(w.funcs.len(), w.e0)
-        }
+        Iface { kind: kind, f0: w.e0, fnum: wrapping_sub(w.funcs.len(), w.e0) }
     }
 }
 

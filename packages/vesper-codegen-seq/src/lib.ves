@@ -23,52 +23,14 @@
 // types, world, program) followed by one `fip` flag per function.
 
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    debug_type,
-    default_type,
-    substitute,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::world::{
-    World,
-    vector_words
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/check-layout::{
-    Layouts,
-    layout_of,
-    layouts_new
-};
-use @vesper/place-ir::{
-    FnRow,
-    InstRow,
-    Program,
-    read_program
-};
-use @vesper/place-ir::codes::{
-    Op,
-    Pat,
-    Term
-};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, debug_type, default_type, substitute, TyKind, TyPass};
+use @vesper/check-data::world::{World, vector_words};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/check-layout::{Layouts, layout_of, layouts_new};
+use @vesper/place-ir::{FnRow, InstRow, Program, read_program};
+use @vesper/place-ir::codes::{Op, Pat, Term};
 
 const NONE32: u32 = 4294967295;
 
@@ -322,10 +284,7 @@ fn walk_pattern(
     k = add(k, 3);
     let mut has_box = false;
     if depth > MAX_DEPTH {
-        return PatInfo {
-            kind: kind,
-            has_box: false
-        };
+        return PatInfo { kind: kind, has_box: false };
     }
     if kind == Pat::Bind {
         names.push(n32(p.op(k)));
@@ -353,10 +312,7 @@ fn walk_pattern(
             has_box = has_box || c.has_box;
         }
     }
-    PatInfo {
-        kind: kind,
-        has_box: has_box
-    }
+    PatInfo { kind: kind, has_box: has_box }
 }
 
 // ----- type predicates ----------------------------------------------------------
@@ -975,12 +931,7 @@ fn op_info(in a: ChunkSeq[u8]) -> OpInfo {
         i0 = inc(h1);
         i1 = head_end(in a, i0);
     }
-    OpInfo {
-        h0: 0,
-        h1: h1,
-        i0: i0,
-        i1: i1
-    }
+    OpInfo { h0: 0, h1: h1, i0: i0, i1: i1 }
 }
 
 fn head_is(in a: ChunkSeq[u8], o: OpInfo, in s: Str) -> bool {
@@ -1382,9 +1333,7 @@ impl Dec {
 // `pack_text`.
 pub fn codegen_seq_decisions(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let nf = r.word(in b);

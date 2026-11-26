@@ -1,12 +1,6 @@
 // @vesper-std/sort::stable: a stable bottom-up merge sort.
-use self::unstable::{
-    lt,
-    insertion
-};
-use @vesper-std/sugar::{
-    guard,
-    when
-};
+use self::unstable::{lt, insertion};
+use @vesper-std/sugar::{guard, when};
 
 // The length of the runs `stable_sort` insertion sorts before merging.
 const RUN: u64 = 16;
@@ -152,13 +146,7 @@ test {
         use model StableProbeOrder;
         let mut items = ChunkSeq::new[StableProbe]();
         for i in 0..count {
-            items
-                .push(
-                    StableProbe {
-                        key: 1 ^ (i & 1),
-                        payload: wrapping_sub(count, i)
-                    }
-                );
+            items.push(StableProbe { key: 1 ^ (i & 1), payload: wrapping_sub(count, i) });
         }
         stable_sort(inout items.as_slice_mut());
         let zeros = count >> 1;

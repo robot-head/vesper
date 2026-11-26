@@ -27,60 +27,15 @@
 // Tables are dense and indexed by value id, block, local or symbol; a
 // Rust map of the decision functions is one of these tables here.
 
-use @vesper/place-ir::codes::{
-    Lit,
-    Op,
-    Pat,
-    Tag,
-    Term
-};
+use @vesper/place-ir::codes::{Lit, Op, Pat, Tag, Term};
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    push_signed,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    default_type,
-    substitute,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::world::{
-    SpanRow,
-    World,
-    find_span,
-    set_by_symbol,
-    vector_words
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/check-layout::{
-    Layouts,
-    layout_of,
-    layouts_new
-};
-use @vesper/place-ir::{
-    BlockRow,
-    FnRow,
-    InstRow,
-    Program,
-    put_program,
-    read_program
-};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, push_signed, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, default_type, substitute, TyKind, TyPass};
+use @vesper/check-data::world::{SpanRow, World, find_span, set_by_symbol, vector_words};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/check-layout::{Layouts, layout_of, layouts_new};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, Program, put_program, read_program};
 
 const NONE32: u32 = 4294967295;
 const NONE32_64: u64 = 4294967295;
@@ -270,15 +225,7 @@ fn read_env(inout r: Reader, in b: Slice[u8], inout names: Names, functions: u64
     for i in 0..nv {
         let start = r.word(in b);
         let end = r.word(in b);
-        e
-            .views
-            .push(
-                SpanRow {
-                    start: start,
-                    end: end,
-                    ty: 0
-                }
-            );
+        e.views.push(SpanRow { start: start, end: end, ty: 0 });
     }
     for f in 0..functions {
         e.free_a.push(e.free.len());
@@ -976,10 +923,7 @@ pub copy struct FieldAt {
     offset: i32,
 }
 
-const NO_FIELD: FieldAt = FieldAt {
-    ty: NONE32,
-    offset: 0
-};
+const NO_FIELD: FieldAt = FieldAt { ty: NONE32, offset: 0 };
 
 // `field_type` / `field_home`: field `field` of `ty`, of variant `variant`
 // (NONE32 for none) for an enum.
@@ -1015,10 +959,7 @@ fn field_at(inout e: Env, inout c: Ctx, ty: u32, variant: u32, field: u32) -> Fi
         let f = e.ls.lfield(add(fa, i));
         if f.name == field {
             let t = default_type(inout c.types, f.ty);
-            return FieldAt {
-                ty: t,
-                offset: f.offset
-            };
+            return FieldAt { ty: t, offset: f.offset };
         }
     }
     NO_FIELD
@@ -1036,12 +977,7 @@ pub copy struct Home {
     c: u64,
 }
 
-const NO_HOME: Home = Home {
-    kind: H_NONE,
-    a: 0,
-    b: 0,
-    c: 0
-};
+const NO_HOME: Home = Home { kind: H_NONE, a: 0, b: 0, c: 0 };
 
 fn same_home(x: Home, y: Home) -> bool {
     x.kind == y.kind && x.a == y.a && x.b == y.b && x.c == y.c
@@ -1724,11 +1660,7 @@ pub copy struct Through {
     read: u32,
 }
 
-const NO_THROUGH: Through = Through {
-    found: false,
-    k: 0,
-    read: 0
-};
+const NO_THROUGH: Through = Through { found: false, k: 0, read: 0 };
 
 fn pass_through(
     inout e: Env,
@@ -1763,23 +1695,14 @@ fn pass_through(
             && n32(p.op(inst.a)) == name
             && p.op(inc(inst.a)) == 0
             && p.op(add(inst.a, 2)) == TyPass::Sink {
-            return Through {
-                found: true,
-                k: k,
-                read: inst.dest
-            };
+            return Through { found: true, k: k, read: inst.dest };
         }
     }
     NO_THROUGH
 }
 
 fn field_home(parent: u32, ty: u32, offset: i32) -> Home {
-    Home {
-        kind: H_FIELD,
-        a: w(parent),
-        b: wrapping_u64(widen_i64(offset)),
-        c: w(ty)
-    }
+    Home { kind: H_FIELD, a: w(parent), b: wrapping_u64(widen_i64(offset)), c: w(ty) }
 }
 
 // `Graph::consumer_home`: the home of value `id` of type `own` from its
@@ -1845,12 +1768,7 @@ fn consumer_home(
         }
         if inst.op == Op::Exit {
             if n32(p.op(a)) == id && n32(p.op(inc(a))) == g.name && own == g.result {
-                return Home {
-                    kind: H_RESULT,
-                    a: 0,
-                    b: 0,
-                    c: 0
-                };
+                return Home { kind: H_RESULT, a: 0, b: 0, c: 0 };
             }
             return NO_HOME;
         }
@@ -1893,24 +1811,14 @@ fn consumer_home(
             if g.split_local(in s, root) {
                 return NO_HOME;
             }
-            return Home {
-                kind: H_PLACE,
-                a: w(place),
-                b: b,
-                c: k
-            };
+            return Home { kind: H_PLACE, a: w(place), b: b, c: k };
         }
         return NO_HOME;
     }
     let t = blk.ta;
     if blk.term == Term::Return {
         if n32(p.op(t)) == id && own == g.result {
-            return Home {
-                kind: H_RESULT,
-                a: 0,
-                b: 0,
-                c: 0
-            };
+            return Home { kind: H_RESULT, a: 0, b: 0, c: 0 };
         }
         return NO_HOME;
     }
@@ -2266,11 +2174,7 @@ fn drop_unsafe_once(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s:
         if h.kind != H_PLACE {
             continue;
         }
-        let x = Group {
-            place: n32(h.a),
-            b: h.b,
-            i: h.c
-        };
+        let x = Group { place: n32(h.a), b: h.b, i: h.c };
         let mut dup = false;
         for j in 0..groups.len() {
             match groups.try_get(j) {
@@ -2315,11 +2219,7 @@ fn drop_unsafe_once(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s:
     for gi in 0..groups.len() {
         let grp = match groups.try_get(gi) {
             Option::Some(y) => y,
-            Option::None => Group {
-                place: 0,
-                b: 0,
-                i: 0
-            },
+            Option::None => Group { place: 0, b: 0, i: 0 },
         };
         let mut members: ChunkSeq[u8] = filled8(g.nv, 0);
         for v in 0..g.nv {
@@ -4340,76 +4240,36 @@ fn plan_none() -> Plan {
     }
 }
 
-// `native_aggregates::scalar_enums`: which values and locals of graph `g`
-// are kept as words, and their word values (`Plan`).
-fn scalar_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms, inout sh: Shapes)
-    -> Plan {
-    let f = p.function(g.fi);
-    // Graphs with fip slots or `Box` drops keep the old lowering.
-    for i in 0..f.tn {
-        if p.op(add(f.ta, i)) != 0 {
-            return plan_none();
-        }
-    }
-    // Shapes of values (shape + 1, 0 for none) and the call facts.
-    let mut cv: ChunkSeq[u64] = filled64(g.nv, 0);
-    let mut any = false;
+// Whether the type of any value or local of `g` mentions `Box`.
+fn mentions_box_anywhere(inout c: Ctx, in g: G) -> bool {
     for v in 0..g.nv {
         let t = u32_at(in g.vty, v);
         if t != NONE32 {
-            let k = enum_shape(inout e, inout c, inout sh, t);
-            if k != NONE32_64 {
-                set64(inout cv, v, inc(k));
-                any = true;
-            }
-        }
-    }
-    if !any {
-        return plan_none();
-    }
-    if c.world.box_active {
-        for v in 0..g.nv {
-            let t = u32_at(in g.vty, v);
-            if t != NONE32 {
-                let d = default_type(inout c.types, t);
-                if mentions_box(in c, d, 0) {
-                    return plan_none();
-                }
-            }
-        }
-        for li in 0..g.lsym.len() {
-            let d = default_type(inout c.types, u32_at(in g.lty, li));
+            let d = default_type(inout c.types, t);
             if mentions_box(in c, d, 0) {
-                return plan_none();
+                return true;
             }
         }
     }
+    for li in 0..g.lsym.len() {
+        let d = default_type(inout c.types, u32_at(in g.lty, li));
+        if mentions_box(in c, d, 0) {
+            return true;
+        }
+    }
+    false
+}
+
+// Marks the locals of `g` that an instruction, or the graph's free list,
+// keeps in memory.
+fn memory_locals(inout c: Ctx, in e: Env, in p: Program, in g: G, in s: Syms) -> ChunkSeq[u8] {
     let nl = g.lsym.len();
-    let mut cl: ChunkSeq[u64] = filled64(nl, 0);
-    for li in 0..nl {
-        let sym = u32_at(in g.lsym, li);
-        if !s.has(sym, S_PARAM) && !s.has(sym, S_CAPTURE) {
-            let k = enum_shape(inout e, inout c, inout sh, u32_at(in g.lty, li));
-            if k != NONE32_64 {
-                set64(inout cl, li, inc(k));
-            }
-        }
-    }
-    // Locals some mention keeps in memory.
     let mut banned: ChunkSeq[u8] = filled8(nl, 0);
     let mut bound: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    // The call facts by graph instruction (1 when the callee returns the
-    // words of its result's shape).
-    let mut call_ok: ChunkSeq[u8] = filled8(g.ni, 0);
-    let mut calls = u64_at(in e.ca, g.fi);
     for k in 0..g.ni {
         let inst = p.inst(add(g.i0, k));
         let a = inst.a;
         let op = inst.op;
-        if op == Op::Call {
-            set8(inout call_ok, k, u8_at(in e.cflag, calls));
-            calls = inc(calls);
-        }
         if op == Op::Read {
             if p.op(inc(a)) != 0 || p.op(add(a, 3)) != 0 {
                 ban(in s, inout banned, n32(p.op(a)));
@@ -4452,12 +4312,34 @@ fn scalar_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms, i
     for i in 0..u64_at(in e.free_n, g.fi) {
         ban(in s, inout banned, u32_at(in e.free, add(fa, i)));
     }
-    for li in 0..nl {
-        if u8_at(in banned, li) != 0 {
-            set64(inout cl, li, 0);
+    banned
+}
+
+// The call facts by graph instruction: 1 when the callee returns the words
+// of its result's shape.
+fn call_flags(in e: Env, in p: Program, in g: G) -> ChunkSeq[u8] {
+    let mut call_ok: ChunkSeq[u8] = filled8(g.ni, 0);
+    let mut calls = u64_at(in e.ca, g.fi);
+    for k in 0..g.ni {
+        if p.inst(add(g.i0, k)).op == Op::Call {
+            set8(inout call_ok, k, u8_at(in e.cflag, calls));
+            calls = inc(calls);
         }
     }
-    // Uses, by value: (kind, index) pairs ua[v]..ua[v]+un[v].
+    call_ok
+}
+
+// The uses of each value of a graph, as `(kind, at)` pairs in
+// `start[v]..start[v] + count[v]`: kind `U_INST` with an instruction index,
+// or `U_TERM` with a block index.
+struct ValueUses {
+    start: ChunkSeq[u64],
+    count: ChunkSeq[u64],
+    kind: ChunkSeq[u8],
+    at: ChunkSeq[u64],
+}
+
+fn value_uses(in g: G) -> ValueUses {
     let mut un: ChunkSeq[u64] = filled64(g.nv, 0);
     for i in 0..g.opv.len() {
         let v = w(u32_at(in g.opv, i));
@@ -4496,14 +4378,29 @@ fn scalar_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms, i
             set64(inout fill, v, inc(u64_at(in fill, v)));
         }
     }
-    // The shape the graph returns as words (shape + 1, 0 for none).
-    let mut ret: u64 = 0;
-    if u8_at(in e.ret, g.fi) != 0 {
-        let k = enum_shape(inout e, inout c, inout sh, g.result);
-        if k != NONE32_64 {
-            ret = inc(k);
-        }
+    ValueUses {
+        start: ua,
+        count: un,
+        kind: ukind,
+        at: uat,
     }
+}
+
+// Clears the shape of every value whose definition or uses cannot be split
+// into words, and of every local such a value is bound from or read into,
+// until nothing changes.
+fn drop_unsplittable(
+    inout c: Ctx,
+    in p: Program,
+    in g: G,
+    in s: Syms,
+    in sh: Shapes,
+    inout cv: ChunkSeq[u64],
+    inout cl: ChunkSeq[u64],
+    in call_ok: ChunkSeq[u8],
+    in uses: ValueUses,
+    ret: u64
+) {
     let mut drop_values: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut drop_locals: ChunkSeq[u64] = ChunkSeq::new[u64]();
     loop {
@@ -4535,10 +4432,10 @@ fn scalar_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms, i
                     in sh,
                     in cv,
                     in cl,
-                    in ukind,
-                    in uat,
-                    u64_at(in ua, v),
-                    u64_at(in un, v),
+                    in uses.kind,
+                    in uses.at,
+                    u64_at(in uses.start, v),
+                    u64_at(in uses.count, v),
                     n32(v),
                     k,
                     ret
@@ -4572,8 +4469,11 @@ fn scalar_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms, i
             set64(inout cl, u64_at(in drop_locals, i), 0);
         }
     }
-    // Only a value that some `match` or field binding takes apart is worth
-    // its words; a set that is only passed along keeps its storage.
+}
+
+// Whether the kept values are worth their words: only a value that some
+// `match` or field binding takes apart, or the returned shape, is.
+fn worth_words(in p: Program, in g: G, in cv: ChunkSeq[u64], in uses: ValueUses, ret: u64) -> bool {
     let mut taken_apart = false;
     let mut kept = false;
     for v in 0..g.nv {
@@ -4581,11 +4481,11 @@ fn scalar_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms, i
             continue;
         }
         kept = true;
-        let a = u64_at(in ua, v);
-        for i in 0..u64_at(in un, v) {
+        let a = u64_at(in uses.start, v);
+        for i in 0..u64_at(in uses.count, v) {
             let at = add(a, i);
-            let x = u64_at(in uat, at);
-            if u8_at(in ukind, at) == U_INST {
+            let x = u64_at(in uses.at, at);
+            if u8_at(in uses.kind, at) == U_INST {
                 let inst = p.inst(add(g.i0, x));
                 if inst.op == Op::Bind && p.op(inc(inst.a)) == Pat::Constructor {
                     taken_apart = true;
@@ -4595,11 +4495,12 @@ fn scalar_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms, i
             }
         }
     }
-    if !kept || (!taken_apart && ret == 0) {
-        return plan_none();
-    }
-    // The words of each value: a constructor's field values, else fresh
-    // values after the graph's largest id.
+    kept && (taken_apart || ret != 0)
+}
+
+// The first value id after every id `g` uses: its typed values, block
+// parameters and instruction results. Fresh word values start here.
+fn first_fresh_value(in p: Program, in g: G) -> u64 {
     let mut next: u64 = 0;
     let mut seen = false;
     for v in 0..g.nv {
@@ -4627,6 +4528,84 @@ fn scalar_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms, i
     if seen {
         next = inc(next);
     }
+    next
+}
+
+// `native_aggregates::scalar_enums`: which values and locals of graph `g`
+// are kept as words, and their word values (`Plan`).
+fn scalar_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms, inout sh: Shapes)
+    -> Plan {
+    let f = p.function(g.fi);
+    // Graphs with fip slots or `Box` drops keep the old lowering.
+    for i in 0..f.tn {
+        if p.op(add(f.ta, i)) != 0 {
+            return plan_none();
+        }
+    }
+    // Shapes of values (shape + 1, 0 for none).
+    let mut cv: ChunkSeq[u64] = filled64(g.nv, 0);
+    let mut any = false;
+    for v in 0..g.nv {
+        let t = u32_at(in g.vty, v);
+        if t != NONE32 {
+            let k = enum_shape(inout e, inout c, inout sh, t);
+            if k != NONE32_64 {
+                set64(inout cv, v, inc(k));
+                any = true;
+            }
+        }
+    }
+    if !any {
+        return plan_none();
+    }
+    if c.world.box_active && mentions_box_anywhere(inout c, in g) {
+        return plan_none();
+    }
+    let nl = g.lsym.len();
+    let mut cl: ChunkSeq[u64] = filled64(nl, 0);
+    for li in 0..nl {
+        let sym = u32_at(in g.lsym, li);
+        if !s.has(sym, S_PARAM) && !s.has(sym, S_CAPTURE) {
+            let k = enum_shape(inout e, inout c, inout sh, u32_at(in g.lty, li));
+            if k != NONE32_64 {
+                set64(inout cl, li, inc(k));
+            }
+        }
+    }
+    let banned = memory_locals(inout c, in e, in p, in g, in s);
+    let call_ok = call_flags(in e, in p, in g);
+    for li in 0..nl {
+        if u8_at(in banned, li) != 0 {
+            set64(inout cl, li, 0);
+        }
+    }
+    let uses = value_uses(in g);
+    // The shape the graph returns as words (shape + 1, 0 for none).
+    let mut ret: u64 = 0;
+    if u8_at(in e.ret, g.fi) != 0 {
+        let k = enum_shape(inout e, inout c, inout sh, g.result);
+        if k != NONE32_64 {
+            ret = inc(k);
+        }
+    }
+    drop_unsplittable(
+        inout c,
+        in p,
+        in g,
+        in s,
+        in sh,
+        inout cv,
+        inout cl,
+        in call_ok,
+        in uses,
+        ret
+    );
+    if !worth_words(in p, in g, in cv, in uses, ret) {
+        return plan_none();
+    }
+    // The words of each value: a constructor's field values, else fresh
+    // values after the graph's largest id.
+    let mut next = first_fresh_value(in p, in g);
     let first = next;
     let mut wa: ChunkSeq[u64] = filled64(g.nv, 0);
     let mut ws: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -5111,9 +5090,7 @@ fn function_decisions(
 // of every graph the native optimize path plans, packed by `pack_text`.
 pub fn aggregate_decisions(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let mut e = read_env(inout r, in b, inout c.names, p.fn_count());
@@ -5469,15 +5446,7 @@ fn rewrite_scalar_enums(
         }
         blocks
             .push(
-                BlockRow {
-                    ha: ha,
-                    hn: hn,
-                    i0: i0,
-                    ic: rows.len(),
-                    term: bk.term,
-                    ta: ta,
-                    tn: tn
-                }
+                BlockRow { ha: ha, hn: hn, i0: i0, ic: rows.len(), term: bk.term, ta: ta, tn: tn }
             );
     }
     let b0 = p.blocks.len();
@@ -5562,15 +5531,7 @@ fn rewrite_scalar_enums(
         .fns
         .try_set(
             g.fi,
-            FnRow {
-                name: fr.name,
-                ha: ha,
-                hn: hn,
-                b0: b0,
-                bc: fr.bc,
-                ta: fr.ta,
-                tn: fr.tn
-            }
+            FnRow { name: fr.name, ha: ha, hn: hn, b0: b0, bc: fr.bc, ta: fr.ta, tn: fr.tn }
         );
 }
 
@@ -5580,9 +5541,7 @@ fn rewrite_scalar_enums(
 // `put_program`.
 pub fn scalar_enum_rewrite(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let mut p = read_program(inout r, in b, in c);
     let mut e = read_env(inout r, in b, inout c.names, p.fn_count());

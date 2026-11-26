@@ -1,9 +1,6 @@
 // @vesper-std/collections::btree_cursor: ordered traversal of
 // `CacheBTree[K, V]` (the layout is described in `btree.ves`).
-use self::btree::{
-    CacheBTree,
-    BTreeCursor
-};
+use self::btree::{CacheBTree, BTreeCursor};
 
 fn none_id() -> u64 {
     18446744073709551615
@@ -23,16 +20,10 @@ impl [K: mod copy + Ord, V: mod affine] CacheBTree[K, V] {
         let mut pos = c.pos;
         loop {
             if leaf == none_id() {
-                break BTreeCursor {
-                    leaf: none_id(),
-                    pos: 0
-                };
+                break BTreeCursor { leaf: none_id(), pos: 0 };
             }
             if pos < self.leaf_count(leaf) {
-                break BTreeCursor {
-                    leaf: leaf,
-                    pos: pos
-                };
+                break BTreeCursor { leaf: leaf, pos: pos };
             }
             leaf = self.leaf_next(leaf);
             pos = 0;
@@ -42,10 +33,7 @@ impl [K: mod copy + Ord, V: mod affine] CacheBTree[K, V] {
     // The cursor at the smallest entry (the end when empty).
     pub fn cursor_first(in self) -> BTreeCursor {
         if self.root == none_id() {
-            return BTreeCursor {
-                leaf: none_id(),
-                pos: 0
-            };
+            return BTreeCursor { leaf: none_id(), pos: 0 };
         }
         let mut node = self.root;
         let mut h = self.height;
@@ -56,31 +44,16 @@ impl [K: mod copy + Ord, V: mod affine] CacheBTree[K, V] {
             node = self.kid(node, 0);
             h = wrapping_sub(h, 1);
         }
-        self
-            .settle(
-                BTreeCursor {
-                    leaf: node,
-                    pos: 0
-                }
-            )
+        self.settle(BTreeCursor { leaf: node, pos: 0 })
     }
 
     // The cursor at the first entry whose key is not below `k`.
     pub fn lower_bound(in self, k: K) -> BTreeCursor {
         if self.root == none_id() {
-            return BTreeCursor {
-                leaf: none_id(),
-                pos: 0
-            };
+            return BTreeCursor { leaf: none_id(), pos: 0 };
         }
         let leaf = self.find_leaf(k);
-        self
-            .settle(
-                BTreeCursor {
-                    leaf: leaf,
-                    pos: self.leaf_pos(leaf, k)
-                }
-            )
+        self.settle(BTreeCursor { leaf: leaf, pos: self.leaf_pos(leaf, k) })
     }
 
     // The key and value position (in `vals`) at `c`, or `None` at the end.
@@ -100,13 +73,7 @@ impl [K: mod copy + Ord, V: mod affine] CacheBTree[K, V] {
         if c.leaf == none_id() {
             return c;
         }
-        self
-            .settle(
-                BTreeCursor {
-                    leaf: c.leaf,
-                    pos: wrapping_add(c.pos, 1)
-                }
-            )
+        self.settle(BTreeCursor { leaf: c.leaf, pos: wrapping_add(c.pos, 1) })
     }
 }
 
@@ -149,13 +116,7 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
             }
             let n = self.leaf_count(node);
             if n > 0 {
-                break self
-                    .entry(
-                        BTreeCursor {
-                            leaf: node,
-                            pos: wrapping_sub(n, 1)
-                        }
-                    );
+                break self.entry(BTreeCursor { leaf: node, pos: wrapping_sub(n, 1) });
             }
             node = self.leaf_prev(node);
         }
@@ -175,22 +136,10 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
             let n = self.leaf_count(c.leaf);
             let room = wrapping_sub(n, c.pos);
             if left < room {
-                break self
-                    .entry(
-                        BTreeCursor {
-                            leaf: c.leaf,
-                            pos: wrapping_add(c.pos, left)
-                        }
-                    );
+                break self.entry(BTreeCursor { leaf: c.leaf, pos: wrapping_add(c.pos, left) });
             }
             left = wrapping_sub(left, room);
-            c = self
-                .settle(
-                    BTreeCursor {
-                        leaf: self.leaf_next(c.leaf),
-                        pos: 0
-                    }
-                );
+            c = self.settle(BTreeCursor { leaf: self.leaf_next(c.leaf), pos: 0 });
         }
     }
 

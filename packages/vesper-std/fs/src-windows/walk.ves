@@ -1,13 +1,5 @@
 // @vesper-std/fs::walk (Windows): directory listings and recursive walks directly over Win32 `kernel32`.
-use self::{
-    IoError,
-    raise_io,
-    raise_kind,
-    invalid_input,
-    kind_file,
-    kind_dir,
-    kind_symlink
-};
+use self::{IoError, raise_io, raise_kind, invalid_input, kind_file, kind_dir, kind_symlink};
 
 pub struct Entries {
     pub bytes: ChunkSeq[u8],

@@ -7,21 +7,9 @@
 // two equal `AbiType`s have the same id. An optional name is its symbol
 // plus one, 0 for none.
 
-use @vesper/check-data::util::{
-    inc,
-    inc32,
-    n32,
-    u32_at,
-    u64_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
-use @vesper/check-data::input::{
-    Reader
-};
+use @vesper/check-data::util::{inc, inc32, n32, u32_at, u64_at, w};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/check-data::input::{Reader};
 
 // `AbiType` kinds (words.rs `K_*`).
 pub const K_SCALAR: u8 = 0;
@@ -195,9 +183,7 @@ fn intern_str(inout names: Names, in s: Str) -> u32 {
 
 // Reads the whole input of `binding_text`.
 pub fn read_iface(in b: Slice[u8]) -> Iface {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut names = names_new();
     let mut nmap = ChunkSeq::new[u32]();
     let count = r.word(in b);
@@ -234,16 +220,7 @@ pub fn read_iface(in b: Slice[u8]) -> Iface {
         for j in 0..n {
             kids.push(n32(r.word(in b)));
         }
-        nodes
-            .push(
-                TyNode {
-                    kind: kind,
-                    name: name,
-                    owned: owned,
-                    a: a,
-                    n: n
-                }
-            );
+        nodes.push(TyNode { kind: kind, name: name, owned: owned, a: a, n: n });
     }
     let abi = nsym(in nmap, r.word(in b));
     let library = nsym(in nmap, r.word(in b));
@@ -284,23 +261,9 @@ pub fn read_iface(in b: Slice[u8]) -> Iface {
                 let fname = nsym(in nmap, r.word(in b));
                 let fty = n32(r.word(in b));
                 let off = r.word(in b);
-                fields
-                    .push(
-                        FieldRow {
-                            name: fname,
-                            ty: fty,
-                            offset: off
-                        }
-                    );
+                fields.push(FieldRow { name: fname, ty: fty, offset: off });
             }
-            vars
-                .push(
-                    VarRow {
-                        name: vname,
-                        f0: f0,
-                        fc: fc
-                    }
-                );
+            vars.push(VarRow { name: vname, f0: f0, fc: fc });
         }
         decls
             .push(
@@ -399,16 +362,7 @@ pub fn read_iface(in b: Slice[u8]) -> Iface {
             lib_syms.push(nsym(in nmap, r.word(in b)));
         }
         let rust_path = osym(in nmap, r.word(in b));
-        libs
-            .push(
-                LibRow {
-                    name: name,
-                    handler: handler,
-                    s0: s0,
-                    sn: sn,
-                    rust_path: rust_path
-                }
-            );
+        libs.push(LibRow { name: name, handler: handler, s0: s0, sn: sn, rust_path: rust_path });
     }
     let mut by_name = ChunkSeq::with_capacity[u32](names.len());
     by_name.resize(names.len(), 0);
@@ -466,13 +420,7 @@ impl Iface {
     pub fn node(in self, t: u32) -> TyNode {
         match self.nodes.try_get(w(t)) {
             Option::Some(n) => n,
-            Option::None => TyNode {
-                kind: 0,
-                name: 0,
-                owned: false,
-                a: 0,
-                n: 0
-            },
+            Option::None => TyNode { kind: 0, name: 0, owned: false, a: 0, n: 0 },
         }
     }
 
@@ -494,22 +442,14 @@ impl Iface {
     pub fn var(in self, i: u64) -> VarRow {
         match self.vars.try_get(i) {
             Option::Some(v) => v,
-            Option::None => VarRow {
-                name: 0,
-                f0: 0,
-                fc: 0
-            },
+            Option::None => VarRow { name: 0, f0: 0, fc: 0 },
         }
     }
 
     pub fn field(in self, i: u64) -> FieldRow {
         match self.fields.try_get(i) {
             Option::Some(f) => f,
-            Option::None => FieldRow {
-                name: 0,
-                ty: 0,
-                offset: 0
-            },
+            Option::None => FieldRow { name: 0, ty: 0, offset: 0 },
         }
     }
 
@@ -552,13 +492,7 @@ impl Iface {
     pub fn lib(in self, i: u64) -> LibRow {
         match self.libs.try_get(i) {
             Option::Some(l) => l,
-            Option::None => LibRow {
-                name: 0,
-                handler: 0,
-                s0: 0,
-                sn: 0,
-                rust_path: 0
-            },
+            Option::None => LibRow { name: 0, handler: 0, s0: 0, sn: 0, rust_path: 0 },
         }
     }
 

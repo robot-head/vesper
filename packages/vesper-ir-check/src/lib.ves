@@ -18,21 +18,8 @@
 //   (tests/hybrid_ir_check.rs).
 
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{
-    add,
-    fold,
-    inc,
-    inc32,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
+use @vesper/check-data::util::{add, fold, inc, inc32, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
     Types,
     default_type,
@@ -43,28 +30,9 @@ use @vesper/check-data::types::{
     TyMode,
     TyPass
 };
-use @vesper/check-data::world::{
-    Bounds,
-    Known,
-    World,
-    bounds_new,
-    constructor,
-    field_step,
-    mode_of
-};
-use @vesper/check-data::diag::{
-    DiagRow,
-    Diags,
-    RelRow,
-    diags_new
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    ctx_new,
-    extend_ctx,
-    read_ctx
-};
+use @vesper/check-data::world::{Bounds, Known, World, bounds_new, constructor, field_step, mode_of};
+use @vesper/check-data::diag::{DiagRow, Diags, RelRow, diags_new};
+use @vesper/check-data::input::{Ctx, Reader, ctx_new, extend_ctx, read_ctx};
 
 // Constants cannot be imported across modules yet (check-data gap 1); these
 // copies equal check-data's.
@@ -105,15 +73,7 @@ pub fn paths_new() -> Paths {
         slots: zero_slots(1024),
         mask: 1023
     };
-    p
-        .nodes
-        .push(
-            PathNode {
-                parent: 0,
-                last: 0,
-                len: 0
-            }
-        );
+    p.nodes.push(PathNode { parent: 0, last: 0, len: 0 });
     p.hashes.push(0);
     p
 }
@@ -122,11 +82,7 @@ impl Paths {
     pub fn node(in self, p: u32) -> PathNode {
         match self.nodes.try_get(w(p)) {
             Option::Some(n) => n,
-            Option::None => PathNode {
-                parent: 0,
-                last: 0,
-                len: 0
-            },
+            Option::None => PathNode { parent: 0, last: 0, len: 0 },
         }
     }
 
@@ -169,15 +125,7 @@ impl Paths {
         }
         let id = n32(self.nodes.len());
         let len = inc32(self.len(parent));
-        self
-            .nodes
-            .push(
-                PathNode {
-                    parent: parent,
-                    last: sym,
-                    len: len
-                }
-            );
+        self.nodes.push(PathNode { parent: parent, last: sym, len: len });
         self.hashes.push(h);
         let ok = self.slots.try_set(at, id);
         if wrapping_mul(self.nodes.len(), 2) > self.mask {
@@ -600,17 +548,7 @@ pub fn read_program(
             let ty = u32_at(in tmap, r.word(in b));
             let s0 = r.word(in b);
             let s1 = r.word(in b);
-            p
-                .params
-                .push(
-                    ParamRow {
-                        name: name,
-                        pass: pass,
-                        ty: ty,
-                        s0: s0,
-                        s1: s1
-                    }
-                );
+            p.params.push(ParamRow { name: name, pass: pass, ty: ty, s0: s0, s1: s1 });
         }
         let ba = n32(p.ops.len());
         let bn = r.word(in b);
@@ -999,21 +937,8 @@ pub fn state_new() -> State {
     }
 }
 
-const NOSLOT: SlotS = SlotS {
-    rank: 0,
-    name: 0,
-    ty: 0,
-    pass: 0
-};
-const NOVAL: ValS = ValS {
-    id: 0,
-    ty: 0,
-    owned: false,
-    consumed: false,
-    lpass: 255,
-    la: 0,
-    ln: 0
-};
+const NOSLOT: SlotS = SlotS { rank: 0, name: 0, ty: 0, pass: 0 };
+const NOVAL: ValS = ValS { id: 0, ty: 0, owned: false, consumed: false, lpass: 255, la: 0, ln: 0 };
 
 fn key(rank: u32, path: u32) -> u64 {
     wrapping_add(wrapping_mul(w(rank), 4294967296), w(path))
@@ -1340,16 +1265,7 @@ impl Pool {
         }
         let rec = match self.stored.try_get(w(wrapping_sub(x, 1))) {
             Option::Some(r) => r,
-            Option::None => Stored {
-                sa: 0,
-                sn: 0,
-                ma: 0,
-                mn: 0,
-                va: 0,
-                vn: 0,
-                la: 0,
-                ln: 0
-            },
+            Option::None => Stored { sa: 0, sn: 0, ma: 0, mn: 0, va: 0, vn: 0, la: 0, ln: 0 },
         };
         s.slots.extend(in self.slots[rec.sa..add(rec.sa, rec.sn)]);
         s.moved.extend(in self.moved[rec.ma..add(rec.ma, rec.mn)]);
@@ -1522,42 +1438,18 @@ pub copy struct Cause {
     msg: u8,
 }
 
-const NOCAUSE: Cause = Cause {
-    kind: 0,
-    id: 0,
-    s0: 0,
-    s1: 0,
-    msg: 0
-};
+const NOCAUSE: Cause = Cause { kind: 0, id: 0, s0: 0, s1: 0, msg: 0 };
 
 fn value_cause(id: u32) -> Cause {
-    Cause {
-        kind: 1,
-        id: id,
-        s0: 0,
-        s1: 0,
-        msg: 0
-    }
+    Cause { kind: 1, id: id, s0: 0, s1: 0, msg: 0 }
 }
 
 fn value_cause_as(id: u32, msg: u8) -> Cause {
-    Cause {
-        kind: 1,
-        id: id,
-        s0: 0,
-        s1: 0,
-        msg: msg
-    }
+    Cause { kind: 1, id: id, s0: 0, s1: 0, msg: msg }
 }
 
 fn slot_cause(rank: u32) -> Cause {
-    Cause {
-        kind: 2,
-        id: rank,
-        s0: 0,
-        s1: 0,
-        msg: 0
-    }
+    Cause { kind: 2, id: rank, s0: 0, s1: 0, msg: 0 }
 }
 
 fn push_label(inout d: Diags, m: u8, param: bool) {
@@ -1636,17 +1528,7 @@ impl Flow {
         if x.kind == 3 && x.s0 < x.s1 && !(x.s0 == s0 && x.s1 == s1) {
             let la = self.d.text.len();
             push_label(inout self.d, x.msg, x.id == 1);
-            self
-                .d
-                .rel
-                .push(
-                    RelRow {
-                        a: la,
-                        b: self.d.text.len(),
-                        start: x.s0,
-                        stop: x.s1
-                    }
-                );
+            self.d.rel.push(RelRow { a: la, b: self.d.text.len(), start: x.s0, stop: x.s1 });
             n = 1;
         }
         if y.kind == 3
@@ -1655,17 +1537,7 @@ impl Flow {
             && !(n == 1 && x.s0 == y.s0 && x.s1 == y.s1) {
             let la = self.d.text.len();
             push_label(inout self.d, y.msg, y.id == 1);
-            self
-                .d
-                .rel
-                .push(
-                    RelRow {
-                        a: la,
-                        b: self.d.text.len(),
-                        start: y.s0,
-                        stop: y.s1
-                    }
-                );
+            self.d.rel.push(RelRow { a: la, b: self.d.text.len(), start: y.s0, stop: y.s1 });
             n = inc32(n);
         }
         if n > 0 {
@@ -2093,15 +1965,7 @@ impl Flow {
         let s1 = p.pat(add(pat, 2));
         if kind == 1 {
             let name = n32(p.pat(add(pat, 3)));
-            s
-                .put_slot(
-                    SlotS {
-                        rank: p.rank_of(name),
-                        name: name,
-                        ty: ty,
-                        pass: pass
-                    }
-                );
+            s.put_slot(SlotS { rank: p.rank_of(name), name: name, ty: ty, pass: pass });
         } else if kind == 0 {
             if pass == TyPass::Sink && self.mode(inout t, in names, in wd, ty) == TyMode::Linear {
                 self.say("IR wildcard discards a linear value");
@@ -2769,13 +2633,7 @@ impl Flow {
         for i in 0..w(f.pn) {
             let pr = match p.params.try_get(add(w(f.pa), i)) {
                 Option::Some(x) => x,
-                Option::None => ParamRow {
-                    name: 0,
-                    pass: 0,
-                    ty: 0,
-                    s0: 0,
-                    s1: 0
-                },
+                Option::None => ParamRow { name: 0, pass: 0, ty: 0, s0: 0, s1: 0 },
             };
             if !charge(inout work) || !charge_name(in names, pr.name, inout text) {
                 ok = false;
@@ -2936,22 +2794,11 @@ impl Flow {
         for i in 0..w(f.pn) {
             let pr = match p.params.try_get(add(w(f.pa), i)) {
                 Option::Some(x) => x,
-                Option::None => ParamRow {
-                    name: 0,
-                    pass: 0,
-                    ty: 0,
-                    s0: 0,
-                    s1: 0
-                },
+                Option::None => ParamRow { name: 0, pass: 0, ty: 0, s0: 0, s1: 0 },
             };
             state
                 .put_slot(
-                    SlotS {
-                        rank: p.rank_of(pr.name),
-                        name: pr.name,
-                        ty: pr.ty,
-                        pass: pr.pass
-                    }
+                    SlotS { rank: p.rank_of(pr.name), name: pr.name, ty: pr.ty, pass: pr.pass }
                 );
         }
         pool.store(0, in state);
@@ -3270,12 +3117,7 @@ fn put_range(inout o: ChunkSeq[u64], in text: ChunkSeq[u8], a: u64, b: u64) {
 fn rel_at(in d: Diags, i: u64) -> RelRow {
     match d.rel.try_get(i) {
         Option::Some(l) => l,
-        Option::None => RelRow {
-            a: 0,
-            b: 0,
-            start: 0,
-            stop: 0
-        },
+        Option::None => RelRow { a: 0, b: 0, start: 0, stop: 0 },
     }
 }
 
@@ -3303,9 +3145,7 @@ fn put_diags(in d: Diags, in kept: ChunkSeq[u64], inout o: ChunkSeq[u64]) {
 
 // The hybrid task: the world and the program; the diagnostics as words.
 pub fn ir_check_words(in input: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in input);
     ir_check_task(inout r, in input, inout c)
 }
@@ -3342,9 +3182,7 @@ pub fn ir_check_task(inout r: Reader, in input: Slice[u8], inout c: Ctx) -> Chun
 // `c`, then the IR check of the part's program, as `ir_check_words` writes
 // it.
 pub fn ir_check_part(inout c: Ctx, in part: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     extend_ctx(inout r, in part, inout c);
     ir_check_task(inout r, in part, inout c)
 }
@@ -3354,9 +3192,7 @@ pub fn ir_check_part(inout c: Ctx, in part: Slice[u8]) -> ChunkSeq[u64] {
 // returns each part's answer as a word count and the words.
 pub fn check_ir_parts(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = ctx_new();
     let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let n = r.word(in b);
@@ -3389,9 +3225,7 @@ fn put_text(inout o: ChunkSeq[u8], in text: ChunkSeq[u8], a: u64, b: u64) {
 // label as ` [start-end message]`, then ` help: text` when there is help.
 pub fn check_ir_text(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c.names, in c.nmap, in c.tmap);
     let mut fl = flow_new();

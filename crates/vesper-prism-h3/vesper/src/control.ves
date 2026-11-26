@@ -6,24 +6,9 @@
 // QPACK codecs, the priority table and the session layer live there.
 // Streams are kept in stream ID order, as the Rust driver's map was.
 
-use self::{
-    Settings,
-    FrameError,
-    FrameOut,
-    FrameReaderCore,
-    ConnectionError,
-    UniCmd,
-    UniCore
-};
-use self::int::{
-    inc,
-    word,
-    byte,
-    remove_word
-};
-use self::varint::{
-    vdec
-};
+use self::{Settings, FrameError, FrameOut, FrameReaderCore, ConnectionError, UniCmd, UniCore};
+use self::int::{inc, word, byte, remove_word};
+use self::varint::{vdec};
 use self::frame::{
     cancel_push_type,
     data_type,
@@ -37,10 +22,7 @@ use self::frame::{
     settings_type,
     webtransport_stream_type
 };
-use self::priority::{
-    priority_update_push,
-    priority_update_request
-};
+use self::priority::{priority_update_push, priority_update_request};
 
 // Stream types (RFC 9114 §6.2, draft-ietf-webtrans-http3 §4.2).
 const STREAM_CONTROL: u64 = 0x00;
@@ -140,14 +122,7 @@ pub fn uni_clear(inout c: UniCore) {
 // driver refuses it with H3_EXCESSIVE_LOAD).
 pub fn uni_accept(inout c: UniCore, id: u64) -> bool {
     if c.ids.len() >= c.max_streams {
-        c
-            .cmds
-            .push(
-                UniCmd::StopSending {
-                    stream_id: id,
-                    code: EXCESSIVE_LOAD
-                }
-            );
+        c.cmds.push(UniCmd::StopSending { stream_id: id, code: EXCESSIVE_LOAD });
         c.cmds.push(UniCmd::UnknownStream);
         return false;
     }
@@ -198,11 +173,7 @@ pub fn uni_closed(inout c: UniCore, id: u64) -> Result[bool, ConnectionError] {
     let kind = kind_at(in c, i);
     remove_at(inout c, i);
     if kind == KIND_CONTROL || kind == KIND_ENCODER || kind == KIND_DECODER {
-        return Result::Err(
-            ConnectionError::ClosedCriticalStream {
-                stream_id: id
-            }
-        );
+        return Result::Err(ConnectionError::ClosedCriticalStream { stream_id: id });
     }
     Result::Ok(true)
 }
@@ -231,24 +202,10 @@ fn typed_bytes(inout c: UniCore, id: u64, kind: u64, in bytes: Slice[u8])
     }
     if kind == KIND_ENCODER {
         let at = put_out(inout c, in bytes);
-        c
-            .cmds
-            .push(
-                UniCmd::ToDecoder {
-                    at: at,
-                    len: bytes.len()
-                }
-            );
+        c.cmds.push(UniCmd::ToDecoder { at: at, len: bytes.len() });
     } else if kind == KIND_DECODER {
         let at = put_out(inout c, in bytes);
-        c
-            .cmds
-            .push(
-                UniCmd::ToEncoder {
-                    at: at,
-                    len: bytes.len()
-                }
-            );
+        c.cmds.push(UniCmd::ToEncoder { at: at, len: bytes.len() });
     }
     Result::Ok(true)
 }
@@ -295,20 +252,9 @@ fn pending_bytes(inout c: UniCore, i: u64, id: u64, in bytes: Slice[u8])
         KIND_DECODER
     } else if ty == STREAM_PUSH {
         // Only servers push, and push is never enabled here.
-        return Result::Err(
-            ConnectionError::StreamCreation {
-                stream_id: id
-            }
-        );
+        return Result::Err(ConnectionError::StreamCreation { stream_id: id });
     } else {
-        c
-            .cmds
-            .push(
-                UniCmd::StopSending {
-                    stream_id: id,
-                    code: STREAM_CREATION_ERROR
-                }
-            );
+        c.cmds.push(UniCmd::StopSending { stream_id: id, code: STREAM_CREATION_ERROR });
         c.cmds.push(UniCmd::UnknownStream);
         set_kind(inout c, i, KIND_IGNORED);
         let _cleared = c.held_len.try_set(i, 0);
@@ -322,11 +268,7 @@ fn pending_bytes(inout c: UniCore, i: u64, id: u64, in bytes: Slice[u8])
         claim(inout c.peer_decoder, id)
     };
     if !taken {
-        return Result::Err(
-            ConnectionError::StreamCreation {
-                stream_id: id
-            }
-        );
+        return Result::Err(ConnectionError::StreamCreation { stream_id: id });
     }
     set_kind(inout c, i, kind);
     let _cleared = c.held_len.try_set(i, 0);
@@ -360,10 +302,7 @@ fn control_frames(inout c: UniCore, id: u64) -> Result[bool, ConnectionError] {
         let f = match reader_next(inout c.reader) {
             Result::Ok(f) => f,
             Result::Err(e) => return Result::Err(
-                ConnectionError::Frame {
-                    stream_id: id,
-                    error: e
-                }
+                ConnectionError::Frame { stream_id: id, error: e }
             ),
         };
         let done = match f {
@@ -409,12 +348,7 @@ fn frame_type(f: FrameOut) -> u64 {
 }
 
 fn unexpected(id: u64, f: FrameOut) -> Result[bool, ConnectionError] {
-    Result::Err(
-        ConnectionError::FrameUnexpected {
-            stream_id: id,
-            frame_type: frame_type(f)
-        }
-    )
+    Result::Err(ConnectionError::FrameUnexpected { stream_id: id, frame_type: frame_type(f) })
 }
 
 fn control_frame(inout c: UniCore, id: u64, f: FrameOut) -> Result[bool, ConnectionError] {

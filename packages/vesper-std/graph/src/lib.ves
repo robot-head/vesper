@@ -18,10 +18,7 @@
 //
 // Every function is total: out-of-range ids are refused (`add_edge` returns
 // `false`) or answered as absent (`none()` / `Option::None`).
-use self::util::{
-    get32,
-    get64
-};
+use self::util::{get32, get64};
 
 // The reserved index for missing nodes and components.
 pub enum GraphIndex: _ {
@@ -41,11 +38,7 @@ pub struct GraphBuilder {
 
 // A builder with `n` nodes and no edges.
 pub fn graph_builder(n: u32) -> GraphBuilder {
-    GraphBuilder {
-        n: widen_u64(n),
-        src: ChunkSeq::new[u32](),
-        dst: ChunkSeq::new[u32]()
-    }
+    GraphBuilder { n: widen_u64(n), src: ChunkSeq::new[u32](), dst: ChunkSeq::new[u32]() }
 }
 
 impl GraphBuilder {
@@ -84,13 +77,7 @@ impl GraphBuilder {
     pub fn build(in self) -> Graph {
         let (succ_start, succ) = csr(self.n, in self.src.as_slice(), in self.dst.as_slice());
         let (pred_start, pred) = csr(self.n, in self.dst.as_slice(), in self.src.as_slice());
-        Graph {
-            n: self.n,
-            succ_start: succ_start,
-            succ: succ,
-            pred_start: pred_start,
-            pred: pred
-        }
+        Graph { n: self.n, succ_start: succ_start, succ: succ, pred_start: pred_start, pred: pred }
     }
 }
 

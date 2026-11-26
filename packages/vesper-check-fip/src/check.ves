@@ -9,19 +9,8 @@
 // message, separated by single spaces. The fip checks attach no help or
 // related labels.
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    inc32,
-    n32,
-    push_decimal,
-    u32_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
+use @vesper/check-data::util::{add, inc, inc32, n32, push_decimal, u32_at, u8_at, w};
+use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
     Types,
     Vars,
@@ -32,25 +21,10 @@ use @vesper/check-data::types::{
     TyKind,
     TyPass
 };
-use @vesper/check-data::world::{
-    World,
-    constructor,
-    field_step
-};
-use @vesper/check-data::input::{
-    Ctx
-};
-use self::ast::{
-    Ast,
-    ExprRow,
-    FnRow,
-    PatRow
-};
-use self::layout::{
-    Sizes,
-    layout_size,
-    sizes_new
-};
+use @vesper/check-data::world::{World, constructor, field_step};
+use @vesper/check-data::input::{Ctx};
+use self::ast::{Ast, ExprRow, FnRow, PatRow};
+use self::layout::{Sizes, layout_size, sizes_new};
 use self::state::{
     BindRow,
     Binds,
@@ -1147,12 +1121,7 @@ impl Fip {
                     .binds
                     .insert(
                         in self.c.names,
-                        BindRow {
-                            name: p.a,
-                            ty: ty,
-                            start: p.start,
-                            end: p.end
-                        }
+                        BindRow { name: p.a, ty: ty, start: p.start, end: p.end }
                     );
             }
             return;
@@ -1180,15 +1149,7 @@ impl Fip {
                 if inner == NONE32 {
                     inner = self.c.types.infer;
                 }
-                st
-                    .slots
-                    .push(
-                        SlotRow {
-                            ty: inner,
-                            start: p.start,
-                            end: p.end
-                        }
-                    );
+                st.slots.push(SlotRow { ty: inner, start: p.start, end: p.end });
                 self.bind_pattern(self.ast.at(inc(w(p.b))), inner, inout st);
                 return;
             }
@@ -1851,12 +1812,7 @@ impl Fip {
                     .binds
                     .insert(
                         in self.c.names,
-                        BindRow {
-                            name: p.name,
-                            ty: p.ty,
-                            start: p.start,
-                            end: p.end
-                        }
+                        BindRow { name: p.name, ty: p.ty, start: p.start, end: p.end }
                     );
             }
         }

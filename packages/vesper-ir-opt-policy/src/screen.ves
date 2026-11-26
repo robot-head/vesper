@@ -13,37 +13,12 @@
 // define, a cycle of states, or two steps from one state keep the block, so
 // the pass reports what it reports.
 
-use @vesper/place-ir::codes::{
-    Op,
-    Pat
-};
-use @vesper/check-data::types::{
-    TyPass
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    w
-};
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
-use @vesper/place-ir::{
-    BlockRow,
-    FnRow,
-    InstRow,
-    Program
-};
-use @vesper/ir-opt::view::{
-    at32,
-    block_entry,
-    class_of,
-    fn_view,
-    overlaps,
-    place_text
-};
+use @vesper/place-ir::codes::{Op, Pat};
+use @vesper/check-data::types::{TyPass};
+use @vesper/check-data::util::{add, inc, n32, w};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, Program};
+use @vesper/ir-opt::view::{at32, block_entry, class_of, fn_view, overlaps, place_text};
 
 // Constants are copied, not imported: the Vesper package assembler
 // (@vesper/check-names-packages) does not resolve an imported constant

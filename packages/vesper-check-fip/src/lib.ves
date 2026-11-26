@@ -14,28 +14,16 @@
 // - state.ves: `FipState` as rows.
 // - check.ves: the checks.
 
-use @vesper/check-data::input::{
-    Reader,
-    read_ctx
-};
-use @vesper/check-data::{
-    pack_text
-};
-use self::ast::{
-    read_ast
-};
-use self::check::{
-    Fip,
-    fip_new
-};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/check-data::{pack_text};
+use self::ast::{read_ast};
+use self::check::{Fip, fip_new};
 
 // Every diagnostic of `fip::check_world` as text, one per line: code, span
 // start, span end and message (packed by `pack_text`).
 pub fn check_fip(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let ast = read_ast(inout r, in b, in c.nmap, in c.tmap);
     let mut cx = fip_new(c, ast);
@@ -46,9 +34,7 @@ pub fn check_fip(in input: Str) -> ChunkSeq[u64] {
 // Binary entrypoint for `vesper-hybrid`: takes the encoded world+task bytes
 // directly and returns packed diagnostic lines (`pack_text`).
 pub fn check_fip_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let ast = read_ast(inout r, in b, in c.nmap, in c.tmap);
     let mut cx = fip_new(c, ast);
@@ -59,9 +45,7 @@ pub fn check_fip_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
 // The number of diagnostics only (for timing without the text copy).
 pub fn check_fip_count(in input: Str) -> u64 {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let ast = read_ast(inout r, in b, in c.nmap, in c.tmap);
     let mut cx = fip_new(c, ast);
@@ -72,9 +56,7 @@ pub fn check_fip_count(in input: Str) -> u64 {
 // Decoding only: the baseline the timing subtracts.
 pub fn check_fip_decode(in input: Str) -> u64 {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let ast = read_ast(inout r, in b, in c.nmap, in c.tmap);
     wrapping_add(ast.exprs.len(), c.world.adts.len())

@@ -110,7 +110,10 @@ actions:
   # The codegen swap point and backend differentials (`self_host_codegen`).
   # These carry no resources:memory tag, so the VM gets the same 25GB as the
   # other differentials: at 22GB the check failed after about 50 minutes on
-  # #1950 and #1970.
+  # #1950 and #1970, before self_host_native_walk reserved its 8GiB (#1993).
+  # It keeps ci_tests' 18GiB local test budget: at 20GiB (#2047), five
+  # codegen differentials at once ran the VM out of memory and the kernel
+  # killed the Bazel server (exit 37) on #2040 and #2048.
   - name: "Self-host codegen differentials"
     container_image: "ubuntu-24.04"
     resource_requests:

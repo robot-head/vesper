@@ -66,12 +66,16 @@ def _git_cases(ctx):
     git("commit", "-qm", "take main's census")
     _equal(reasons(5, "lane"), [])
 
-def _workflow_case(reasons, open_prs, candidates):
+def _workflow_case(reasons, open_prs, candidates, unfetchable = []):
     calls = []
     published = {}
 
     def run(tool, args):
         calls.append((tool, args))
+
+    def attempt(tool, args):
+        calls.append((tool, args))
+        return not [spec for spec in args[3:] if spec in unfetchable]
 
     def get(endpoint, query):
         calls.append(("get", endpoint))
@@ -93,19 +97,25 @@ def _workflow_case(reasons, open_prs, candidates):
 
     settings = struct(repo = "owner/repo", number = 9, head = "exact-sha", run_id = "51", output = "output", summary = "summary")
     output = []
-    result = gate_workflow(settings, run, get, cancel, analyze, append, lambda text: output.append(text))
+    result = gate_workflow(settings, run, attempt, get, cancel, analyze, append, lambda text: output.append(text))
     repo = "repos/owner/repo"
     preparation = [
         ("git", ["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"]),
         ("get", repo + "/pulls?state=open&per_page=100"),
     ]
+    skipped = []
     if open_prs:
         preparation.append(("git", ["fetch", "--quiet", "origin", "+refs/pull/8/head:refs/gate/pr/8", "+refs/pull/9/head:refs/gate/pr/9"]))
+    if unfetchable:
+        one = lambda spec: ("git", ["fetch", "--quiet", "origin", spec])
+        preparation += [one("+refs/pull/8/head:refs/gate/pr/8"), one("+refs/pull/9/head:refs/gate/pr/9")]
+        preparation += [("sleep", ["10"])] + [one(spec) for spec in unfetchable]
+        skipped = ["skipping open PR #9: its head ref cannot be fetched yet\n"]
     if not reasons:
         _equal(result, 0)
         _equal(calls, preparation)
         _equal(published, {"output": "blocked=false\n"})
-        _equal(output, ["PR #9 can merge: CI runs\n"])
+        _equal(output, skipped + ["PR #9 can merge: CI runs\n"])
         return
     _equal(result, 1)
     _equal(published["output"], "blocked=true\n")
@@ -114,7 +124,7 @@ def _workflow_case(reasons, open_prs, candidates):
     sibling = ("cancel", repo + "/actions/runs/53/cancel")
     delay = ("sleep", ["20"])
     _equal(calls, preparation + [page, sibling, delay, page, sibling, delay, page, sibling, ("cancel", repo + "/actions/runs/51/cancel")])
-    _equal(output, ["PR #9 cannot merge yet: conflict\n"] + ["cancelling run 53\n"] * 3)
+    _equal(output, skipped + ["PR #9 cannot merge yet: conflict\n"] + ["cancelling run 53\n"] * 3)
 
 def _test(ctx: TaskContext) -> int:
     _git_cases(ctx)
@@ -123,6 +133,10 @@ def _test(ctx: TaskContext) -> int:
         {"number": 8, "base": "main", "ref": "refs/gate/pr/8"},
         {"number": 9, "base": "other", "ref": "refs/gate/pr/9"},
     ])
+    # A pull request opened a moment ago is listed before its head ref exists.
+    _workflow_case([], "8\tmain\n9\tmain\n", [
+        {"number": 8, "base": "main", "ref": "refs/gate/pr/8"},
+    ], unfetchable = ["+refs/pull/9/head:refs/gate/pr/9"])
     ctx.std.io.stdout.write("Passed merge gate Git histories and workflow cases\n")
     return 0
 

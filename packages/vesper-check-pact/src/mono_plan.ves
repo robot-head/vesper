@@ -2,39 +2,12 @@
 // (`Mono::evidence`, `Mono::callee_evidence`, `Mono::instance`,
 // `Mono::instantiate_body`) for `@vesper/check-pact` (SH2 lane 13 part 6, #1668).
 
-use @vesper/check-data::input::{
-    Reader
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::{
-    pack_text
-};
-use @vesper/check-data::types::{
-    TyKind,
-    TypeNode,
-    Types,
-    Vars,
-    default_type,
-    substitute,
-    vars_new
-};
-use @vesper/check-data::util::{
-    add,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use self::decl::{
-    Conf,
-    Decls,
-    Gen,
-    TRef,
-    TraitRow
-};
+use @vesper/check-data::input::{Reader};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::{pack_text};
+use @vesper/check-data::types::{TyKind, TypeNode, Types, Vars, default_type, substitute, vars_new};
+use @vesper/check-data::util::{add, n32, u32_at, u64_at, u8_at, w};
+use self::decl::{Conf, Decls, Gen, TRef, TraitRow};
 use self::mono_check::{
     CxPool,
     MonoDiags,
@@ -62,21 +35,9 @@ use self::resolve::{
     trait_at,
     tref_at
 };
-use self::session::{
-    PactSession,
-    session_open_reader
-};
-use self::session_input::{
-    put_num,
-    put_str,
-    read_q_names,
-    read_q_types
-};
-use self::tyops::{
-    Sy,
-    key_segment,
-    same_type
-};
+use self::session::{PactSession, session_open_reader};
+use self::session_input::{put_num, put_str, read_q_names, read_q_types};
+use self::tyops::{Sy, key_segment, same_type};
 
 const K_FN: u8 = TyKind::Fn;
 const K_NAMED: u8 = TyKind::Named;
@@ -860,9 +821,7 @@ fn mono_plan_body(
 
 // Entrypoint for an already-open `PactSession`: `[mono_input][fn_has_dyn...]`.
 pub fn session_mono_plan_words(inout sess: PactSession, in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut out = ChunkSeq::new[u64]();
     out.push(0);
     out.push(1);
@@ -872,9 +831,7 @@ pub fn session_mono_plan_words(inout sess: PactSession, in b: Slice[u8]) -> Chun
 
 // Entrypoint for `check_pact_mono_plan`: `[session_input][mono_input][fn_has_dyn...]`.
 pub fn mono_plan_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut sess = session_open_reader(inout r, in b);
     let mut out = ChunkSeq::new[u64]();
     let p_out = pack_text(in sess.out);

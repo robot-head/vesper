@@ -8,27 +8,9 @@
 // with effectful arrows (which need the `Id` monad in `ty`). The
 // differential compares the other functions.
 
-use @vesper/check-data::types::{
-    Types,
-    Vars,
-    substitute,
-    vars_new,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    w
-};
-use @vesper/check-data::world::{
-    Adt,
-    World,
-    set_by_symbol
-};
+use @vesper/check-data::types::{Types, Vars, substitute, vars_new, TyKind, TyPass};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, w};
+use @vesper/check-data::world::{Adt, World, set_by_symbol};
 use self::ast::{
     Ast,
     EffDecl,
@@ -189,23 +171,9 @@ use self::tm::{
     unit,
     update
 };
-use self::ty::{
-    E_NONE,
-    emit_ty,
-    emit_ty_m,
-    report,
-    spells,
-    ty_check,
-    ty_error,
-    ty_error_m
-};
-use self::cfg::{
-    effectful_arrow
-};
-use self::fn_input::{
-    Fns,
-    Sig
-};
+use self::ty::{E_NONE, emit_ty, emit_ty_m, report, spells, ty_check, ty_error, ty_error_m};
+use self::cfg::{effectful_arrow};
+use self::fn_input::{Fns, Sig};
 use self::emit::{
     LOOP_REFUSAL,
     X,
@@ -401,10 +369,7 @@ pub fn gen_new() -> G {
         current: ChunkSeq::new[Cur](),
         next_binding: 0,
         skip: false,
-        monad: T {
-            a: 0,
-            n: 0
-        },
+        monad: T { a: 0, n: 0 },
         monad_id: true,
         caps: ChunkSeq::new[Cap](),
         unlabeled: ChunkSeq::new[Cap](),
@@ -433,33 +398,15 @@ pub fn gen_new() -> G {
 }
 
 fn no_inst() -> Inst {
-    Inst {
-        name: 0,
-        label: NONE32,
-        aa: 0,
-        an: 0,
-        key: NONE32
-    }
+    Inst { name: 0, label: NONE32, aa: 0, an: 0, key: NONE32 }
 }
 
 fn no_cap() -> Cap {
-    Cap {
-        key: NONE32,
-        removed: true,
-        inst: no_inst(),
-        term: T {
-            a: 0,
-            n: 0
-        },
-        depth: 0
-    }
+    Cap { key: NONE32, removed: true, inst: no_inst(), term: T { a: 0, n: 0 }, depth: 0 }
 }
 
 fn no_t() -> T {
-    T {
-        a: 0,
-        n: 0
-    }
+    T { a: 0, n: 0 }
 }
 
 impl G {
@@ -531,12 +478,7 @@ impl G {
     fn local(in self, i: u64) -> Local {
         match self.scope.try_get(i) {
             Option::Some(l) => l,
-            Option::None => Local {
-                name: 0,
-                id: 0,
-                ty: 0,
-                depth: 0
-            },
+            Option::None => Local { name: 0, id: 0, ty: 0, depth: 0 },
         }
     }
 
@@ -583,14 +525,7 @@ impl G {
     }
 
     fn set_cur(inout self, id: u64, sym: u32) {
-        self
-            .current
-            .push(
-                Cur {
-                    id: id,
-                    sym: sym
-                }
-            );
+        self.current.push(Cur { id: id, sym: sym });
     }
 
     fn ix(in self, i: u64) -> u64 {
@@ -630,37 +565,20 @@ impl G {
                 Option::None => {},
             }
         }
-        OpInfo {
-            name: NONE32,
-            implementation: 0,
-            aa: 0,
-            an: 0,
-            post_access: false
-        }
+        OpInfo { name: NONE32, implementation: 0, aa: 0, an: 0, post_access: false }
     }
 
     fn alias(in self, i: u64) -> Alias {
         match self.aliases.try_get(i) {
             Option::Some(a) => a,
-            Option::None => Alias {
-                lens: 0,
-                raw: 0,
-                ty: 0,
-                pass: 0,
-                ba: 0,
-                bn: 0
-            },
+            Option::None => Alias { lens: 0, raw: 0, ty: 0, pass: 0, ba: 0, bn: 0 },
         }
     }
 
     fn abind(in self, i: u64) -> ABind {
         match self.abinds.try_get(i) {
             Option::Some(a) => a,
-            Option::None => ABind {
-                id: 0,
-                pa: 0,
-                pn: 0
-            },
+            Option::None => ABind { id: 0, pa: 0, pn: 0 },
         }
     }
 
@@ -881,16 +799,7 @@ fn declare_as(inout g: G, name: u32, ty: u32, lean: u32) -> u64 {
     let id = g.next_binding;
     g.next_binding = inc(g.next_binding);
     g.mark_used(lean);
-    g
-        .scope
-        .push(
-            Local {
-                name: name,
-                id: id,
-                ty: ty,
-                depth: g.layers.len()
-            }
-        );
+    g.scope.push(Local { name: name, id: id, ty: ty, depth: g.layers.len() });
     g.set_cur(id, lean);
     id
 }
@@ -1855,13 +1764,7 @@ fn pattern_types(
     }
     let k = y.a.pkind(p);
     if k == PK_BIND {
-        out
-            .push(
-                NameTy {
-                    name: y.a.pxs(p, 0),
-                    ty: ty
-                }
-            );
+        out.push(NameTy { name: y.a.pxs(p, 0), ty: ty });
     } else if k == PK_TUPLE {
         if is_tuple(in t, ty) {
             let n = y.a.px(p, 0);
@@ -1909,13 +1812,7 @@ fn pat(inout b: B, in t: Types, in y: Y, inout g: G, p: u64, inout rs: ChunkSeq[
         let n = y.a.pxs(p, 0);
         let base = joined(inout b, in "", n, in "$p");
         let tmp = fresh(inout b, inout g, base);
-        rs
-            .push(
-                Rename {
-                    name: n,
-                    tmp: tmp
-                }
-            );
+        rs.push(Rename { name: n, tmp: tmp });
         return p_bind(inout b, tmp);
     }
     if k == PK_LITERAL {
@@ -2321,10 +2218,7 @@ fn expr_inner(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out
         let c = expr(inout b, inout t, in y, inout g, y.a.x(e, 0), inout out);
         let yes = seq(inout b, inout t, in y, inout g, y.a.x(e, 1));
         let o = y.a.x(e, 2);
-        let mut no = T {
-            a: 0,
-            n: 0
-        };
+        let mut no = T { a: 0, n: 0 };
         if o == NONE {
             let u = unit(inout b);
             no = pure(inout b, u);
@@ -2333,10 +2227,7 @@ fn expr_inner(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out
         }
         let tmp = temp(inout b, inout g);
         let te = type_of(in y, e);
-        let mut ann = T {
-            a: 0,
-            n: 0
-        };
+        let mut ann = T { a: 0, n: 0 };
         if te != NONE32 {
             ann = ty(inout b, in t, in y, inout g, te);
         }
@@ -2672,10 +2563,7 @@ fn block_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out
     let n = y.a.x(e, 0);
     let mut at: u64 = 1;
     let mut diverged = false;
-    let mut result = T {
-        a: 0,
-        n: 0
-    };
+    let mut result = T { a: 0, n: 0 };
     for i in 0..n {
         let kind = y.a.x(e, at);
         if kind == 0 {
@@ -2738,10 +2626,7 @@ fn match_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out
     let v = expr(inout b, inout t, in y, inout g, value, inout out);
     let tmp = temp(inout b, inout g);
     let te = type_of(in y, e);
-    let mut ann = T {
-        a: 0,
-        n: 0
-    };
+    let mut ann = T { a: 0, n: 0 };
     if te != NONE32 {
         ann = ty(inout b, in t, in y, inout g, te);
     }
@@ -2815,10 +2700,7 @@ fn index_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out
     let position = fresh_fixed(inout b, inout g, in "$index");
     let rt = lref(inout b, tuple_s);
     let rp = lref(inout b, position);
-    let mut body = T {
-        a: 0,
-        n: 0
-    };
+    let mut body = T { a: 0, n: 0 };
     if partial(in y, e) {
         body = runtime_failure(inout b, in "IndexOutOfBounds");
     } else {
@@ -3818,13 +3700,7 @@ pub copy struct St {
 fn st_at(in ss: ChunkSeq[St], i: u64) -> St {
     match ss.try_get(i) {
         Option::Some(s) => s,
-        Option::None => St {
-            ty: 0,
-            src: 2,
-            qa: 0,
-            qn: 0,
-            arg: 0
-        },
+        Option::None => St { ty: 0, src: 2, qa: 0, qn: 0, arg: 0 },
     }
 }
 
@@ -3838,10 +3714,7 @@ fn st_proj(in y: Y, s: St, q: u64, inout out: ChunkSeq[u32]) {
     } else if s.src == 1 {
         let r = match y.a.eprojs.try_get(add(s.qa, q)) {
             Option::Some(r) => r,
-            Option::None => Range {
-                a: 0,
-                n: 0
-            },
+            Option::None => Range { a: 0, n: 0 },
         };
         for j in 0..r.n {
             out.push(y.a.proj_sym(r, j));
@@ -4071,13 +3944,7 @@ fn perform_op(
     let values = operands(inout b, inout t, in y, inout g, in args, inout out);
     let vars = effect_vars(in y, in g, decl, layer);
     let mut direct = false;
-    let mut info = OpInfo {
-        name: NONE32,
-        implementation: 0,
-        aa: 0,
-        an: 0,
-        post_access: false
-    };
+    let mut info = OpInfo { name: NONE32, implementation: 0, aa: 0, an: 0, post_access: false };
     if layer != NONE64 {
         let l = g.layer(layer);
         info = g.info(l, op);
@@ -4121,13 +3988,7 @@ fn perform_op(
                     let param_ty = substitute(inout t, param.ty, in vars);
                     let w1 = named(inout b, in "$w");
                     let mut component = tuple_get(inout b, w1, c, n);
-                    let st = St {
-                        ty: param.ty,
-                        src: 1,
-                        qa: param.qa,
-                        qn: param.qn,
-                        arg: arg
-                    };
+                    let st = St { ty: param.ty, src: 1, qa: param.qa, qn: param.qn, arg: arg };
                     let nq = if param.qn == 0 {
                         1
                     } else {
@@ -4488,15 +4349,7 @@ fn pattern_paths(
         for j in 0..path.len() {
             pool.push(sym_at(in path, j));
         }
-        out
-            .push(
-                PPath {
-                    name: y.a.pxs(p, 0),
-                    pa: pa,
-                    pn: path.len(),
-                    ty: ty
-                }
-            );
+        out.push(PPath { name: y.a.pxs(p, 0), pa: pa, pn: path.len(), ty: ty });
     } else if k == PK_TUPLE {
         if !is_tuple(in t, ty) {
             b.fail(in "tuple pattern lacks a tuple type");
@@ -4562,12 +4415,7 @@ fn pattern_paths(
 fn pp_at(in ps: ChunkSeq[PPath], i: u64) -> PPath {
     match ps.try_get(i) {
         Option::Some(x) => x,
-        Option::None => PPath {
-            name: 0,
-            pa: 0,
-            pn: 0,
-            ty: 0
-        },
+        Option::None => PPath { name: 0, pa: 0, pn: 0, ty: 0 },
     }
 }
 
@@ -4787,13 +4635,7 @@ fn handler(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
     for i in 0..na {
         g.eargs.push(y.a.xt(e, add(3, i)));
     }
-    let inst = Inst {
-        name: eff,
-        label: label,
-        aa: aa,
-        an: na,
-        key: key
-    };
+    let inst = Inst { name: eff, label: label, aa: aa, an: na, key: key };
     let mut vars = vars_new();
     for i in 0..decl.gn {
         if i < na {
@@ -5035,15 +4877,7 @@ fn handler(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
                 for z in 0..path.len() {
                     g.paths.push(sym_at(in path, z));
                 }
-                g
-                    .abinds
-                    .push(
-                        ABind {
-                            id: bid,
-                            pa: gpa,
-                            pn: path.len()
-                        }
-                    );
+                g.abinds.push(ABind { id: bid, pa: gpa, pn: path.len() });
             }
             g
                 .aliases
@@ -5276,32 +5110,14 @@ fn handler(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
     g.body_layers.push(index);
     g.monad = child;
     g.monad_id = false;
-    g
-        .unlabeled
-        .push(
-            Cap {
-                key: eff,
-                removed: true,
-                inst: no_inst(),
-                term: no_t(),
-                depth: 0
-            }
-        );
+    g.unlabeled.push(Cap { key: eff, removed: true, inst: no_inst(), term: no_t(), depth: 0 });
     g.clear_clause_aliases();
     g.alias_written = false;
     if label != NONE32 {
         let dt = lref(inout b, dictionary);
         g
             .caps
-            .push(
-                Cap {
-                    key: label,
-                    removed: false,
-                    inst: inst,
-                    term: dt,
-                    depth: g.layers.len()
-                }
-            );
+            .push(Cap { key: label, removed: false, inst: inst, term: dt, depth: g.layers.len() });
     }
     let mut body_statements = empty();
     for i in 0..frame.len() {
@@ -5546,15 +5362,7 @@ pub fn function(inout b: B, inout t: Types, in y: Y, inout g: G, fi: u64) -> T {
                 let vr = lref(inout b, variable);
                 g
                     .caps
-                    .push(
-                        Cap {
-                            key: inst.label,
-                            removed: false,
-                            inst: inst,
-                            term: vr,
-                            depth: 0
-                        }
-                    );
+                    .push(Cap { key: inst.label, removed: false, inst: inst, term: vr, depth: 0 });
             }
             let mut targs = empty();
             for j in 0..inst.an {

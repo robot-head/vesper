@@ -13,9 +13,7 @@
 
 // @export abi 4
 
-use @vesper/ir-opt-policy::{
-    policy_words
-};
+use @vesper/ir-opt-policy::{policy_words};
 
 // The layout version of `opt_words`.
 pub fn format() -> u64 {

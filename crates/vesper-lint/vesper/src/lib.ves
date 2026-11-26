@@ -21,35 +21,11 @@
 // port.rs's tables. tests/differential.rs runs the Rust code and this
 // package on the same inputs and requires equal results.
 
-use @vesper/ast::{
-    TypeNode,
-    EffectNode,
-    EffectsNode,
-    GenericNode,
-    ListRef
-};
-use @vesper-std/intern::{
-    Interner,
-    Symbol,
-    interner_new,
-    symbol_from_id
-};
-use self::policy::{
-    parse_policy
-};
-use self::util::{
-    fail,
-    at,
-    word,
-    u32_at,
-    inc,
-    cadd,
-    push_text,
-    put
-};
-use @vesper-std/sort::unstable::{
-    sort
-};
+use @vesper/ast::{TypeNode, EffectNode, EffectsNode, GenericNode, ListRef};
+use @vesper-std/intern::{Interner, Symbol, interner_new, symbol_from_id};
+use self::policy::{parse_policy};
+use self::util::{fail, at, word, u32_at, inc, cadd, push_text, put};
+use @vesper-std/sort::unstable::{sort};
 
 // ---------------------------------------------------------------- common
 
@@ -244,14 +220,7 @@ fn rd(in w: Slice[u64], inout r: Rd) -> u64 {
 
 fn list_new(inout p: Prog, in items: ChunkSeq[u32]) -> u32 {
     let id = wrapping_u32(p.lists.len());
-    p
-        .lists
-        .push(
-            ListRef {
-                first: wrapping_u32(p.pool.len()),
-                len: wrapping_u32(items.len())
-            }
-        );
+    p.lists.push(ListRef { first: wrapping_u32(p.pool.len()), len: wrapping_u32(items.len()) });
     p.pool.extend(in items.as_slice());
     id
 }
@@ -273,34 +242,21 @@ fn list_at(in p: Prog, l: u32, i: u64) -> u32 {
 fn type_at(in p: Prog, t: u32) -> TypeNode {
     match p.types.try_get(widen_u64(t)) {
         Option::Some(n) => n,
-        Option::None => TypeNode {
-            kind: 0,
-            a: 0,
-            b: 0,
-            c: 0,
-            d: 0
-        },
+        Option::None => TypeNode { kind: 0, a: 0, b: 0, c: 0, d: 0 },
     }
 }
 
 fn eff_at(in p: Prog, e: u32) -> EffectNode {
     match p.effs.try_get(widen_u64(e)) {
         Option::Some(n) => n,
-        Option::None => EffectNode {
-            label: NONE,
-            name: NONE,
-            args: 0
-        },
+        Option::None => EffectNode { label: NONE, name: NONE, args: 0 },
     }
 }
 
 fn row_at(in p: Prog, r: u32) -> EffectsNode {
     match p.rows.try_get(widen_u64(r)) {
         Option::Some(n) => n,
-        Option::None => EffectsNode {
-            instances: 0,
-            tail: NONE
-        },
+        Option::None => EffectsNode { instances: 0, tail: NONE },
     }
 }
 
@@ -322,13 +278,7 @@ fn param_at(in p: Prog, i: u32) -> ParamRow {
 fn act_at(in p: Prog, i: u64) -> ActRow {
     match p.acts.try_get(i) {
         Option::Some(n) => n,
-        Option::None => ActRow {
-            kind: A_OPAQUE,
-            a: NONE,
-            b: 0,
-            pass: 0,
-            moves: false
-        },
+        Option::None => ActRow { kind: A_OPAQUE, a: NONE, b: 0, pass: 0, moves: false },
     }
 }
 
@@ -393,15 +343,7 @@ fn rd_effect(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 
     let name = rd_name(in w, inout r, inout p, in blob);
     let args = rd_types(in w, inout r, inout p, in blob);
     let id = wrapping_u32(p.effs.len());
-    p
-        .effs
-        .push(
-            EffectNode {
-                label: label,
-                name: name,
-                args: args
-            }
-        );
+    p.effs.push(EffectNode { label: label, name: name, args: args });
     id
 }
 
@@ -414,14 +356,7 @@ fn rd_effects(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32
     let instances = list_new(inout p, in items);
     let tail = rd_opt_name(in w, inout r, inout p, in blob);
     let id = wrapping_u32(p.rows.len());
-    p
-        .rows
-        .push(
-            EffectsNode {
-                instances: instances,
-                tail: tail
-            }
-        );
+    p.rows.push(EffectsNode { instances: instances, tail: tail });
     id
 }
 
@@ -431,41 +366,14 @@ fn rd_type(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 {
         let at = wrapping_u32(p.ilits.len());
         p.ilits.push(rd(in w, inout r));
         p.ilits.push(rd(in w, inout r));
-        add_type(
-            inout p,
-            TypeNode {
-                kind: TY_INT_LITERAL,
-                a: at,
-                b: 0,
-                c: 0,
-                d: 0
-            }
-        )
+        add_type(inout p, TypeNode { kind: TY_INT_LITERAL, a: at, b: 0, c: 0, d: 0 })
     } else if tag == Wire::Named {
         let name = rd_name(in w, inout r, inout p, in blob);
         let args = rd_types(in w, inout r, inout p, in blob);
-        add_type(
-            inout p,
-            TypeNode {
-                kind: TY_NAMED,
-                a: name,
-                b: args,
-                c: 0,
-                d: 0
-            }
-        )
+        add_type(inout p, TypeNode { kind: TY_NAMED, a: name, b: args, c: 0, d: 0 })
     } else if tag == Wire::Tuple {
         let args = rd_types(in w, inout r, inout p, in blob);
-        add_type(
-            inout p,
-            TypeNode {
-                kind: TY_TUPLE,
-                a: args,
-                b: 0,
-                c: 0,
-                d: 0
-            }
-        )
+        add_type(inout p, TypeNode { kind: TY_TUPLE, a: args, b: 0, c: 0, d: 0 })
     } else if tag == Wire::Function {
         let n = rd(in w, inout r);
         let mut items = ChunkSeq::with_capacity[u32](wrapping_mul(n, PAIR));
@@ -477,39 +385,12 @@ fn rd_type(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 {
         let result = rd_type(in w, inout r, inout p, in blob);
         let effects = rd_effects(in w, inout r, inout p, in blob);
         let mode = wrapping_u32(rd(in w, inout r));
-        add_type(
-            inout p,
-            TypeNode {
-                kind: TY_FUNCTION,
-                a: params,
-                b: result,
-                c: effects,
-                d: mode
-            }
-        )
+        add_type(inout p, TypeNode { kind: TY_FUNCTION, a: params, b: result, c: effects, d: mode })
     } else if tag == Wire::Row {
         let effects = rd_effects(in w, inout r, inout p, in blob);
-        add_type(
-            inout p,
-            TypeNode {
-                kind: TY_ROW,
-                a: effects,
-                b: 0,
-                c: 0,
-                d: 0
-            }
-        )
+        add_type(inout p, TypeNode { kind: TY_ROW, a: effects, b: 0, c: 0, d: 0 })
     } else {
-        add_type(
-            inout p,
-            TypeNode {
-                kind: TY_INFER,
-                a: 0,
-                b: 0,
-                c: 0,
-                d: 0
-            }
-        )
+        add_type(inout p, TypeNode { kind: TY_INFER, a: 0, b: 0, c: 0, d: 0 })
     }
 }
 
@@ -560,15 +441,7 @@ fn rd_function(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) {
         let bound = wrapping_u8(rd(in w, inout r));
         let row = rd(in w, inout r) != 0;
         gs.push(wrapping_u32(p.generics.len()));
-        p
-            .generics
-            .push(
-                GenericNode {
-                    name: gname,
-                    bound: bound,
-                    row: row
-                }
-            );
+        p.generics.push(GenericNode { name: gname, bound: bound, row: row });
     }
     let generics = list_new(inout p, in gs);
     let np = rd(in w, inout r);
@@ -585,17 +458,7 @@ fn rd_function(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) {
         let kind = wrapping_u8(rd(in w, inout r));
         if kind == A_PERFORM {
             let e = rd_effect(in w, inout r, inout p, in blob);
-            p
-                .acts
-                .push(
-                    ActRow {
-                        kind: kind,
-                        a: e,
-                        b: 0,
-                        pass: 0,
-                        moves: false
-                    }
-                );
+            p.acts.push(ActRow { kind: kind, a: e, b: 0, pass: 0, moves: false });
         } else if kind == A_CALL {
             let callee = rd_name(in w, inout r, inout p, in blob);
             let n = rd(in w, inout r);
@@ -605,17 +468,7 @@ fn rd_function(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) {
                 subs.push(rd_type(in w, inout r, inout p, in blob));
             }
             let b = list_new(inout p, in subs);
-            p
-                .acts
-                .push(
-                    ActRow {
-                        kind: kind,
-                        a: callee,
-                        b: b,
-                        pass: 0,
-                        moves: false
-                    }
-                );
+            p.acts.push(ActRow { kind: kind, a: callee, b: b, pass: 0, moves: false });
         } else if kind == A_ACCESS {
             let root = rd_name(in w, inout r, inout p, in blob);
             let n = rd(in w, inout r);
@@ -626,29 +479,9 @@ fn rd_function(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) {
             let b = list_new(inout p, in path);
             let pass = wrapping_u8(rd(in w, inout r));
             let moves = rd(in w, inout r) != 0;
-            p
-                .acts
-                .push(
-                    ActRow {
-                        kind: kind,
-                        a: root,
-                        b: b,
-                        pass: pass,
-                        moves: moves
-                    }
-                );
+            p.acts.push(ActRow { kind: kind, a: root, b: b, pass: pass, moves: moves });
         } else {
-            p
-                .acts
-                .push(
-                    ActRow {
-                        kind: A_OPAQUE,
-                        a: NONE,
-                        b: 0,
-                        pass: 0,
-                        moves: false
-                    }
-                );
+            p.acts.push(ActRow { kind: A_OPAQUE, a: NONE, b: 0, pass: 0, moves: false });
         }
     }
     let nf = rd(in w, inout r);
@@ -703,9 +536,7 @@ fn decode(in w: Slice[u64], in blob: Str) -> Prog {
         fns: ChunkSeq::new[FnFacts](),
         fn_of: ChunkSeq::new[u32]()
     };
-    let mut r = Rd {
-        pos: 0
-    };
+    let mut r = Rd { pos: 0 };
     let n = rd(in w, inout r);
     for i in 0..n {
         rd_function(in w, inout r, inout p, in blob);
@@ -994,16 +825,7 @@ fn substitute(inout p: Prog, t: u32, subs: u32) -> u32 {
             items.push(substitute(inout p, a, subs));
         }
         let args = list_new(inout p, in items);
-        add_type(
-            inout p,
-            TypeNode {
-                kind: TY_NAMED,
-                a: x.a,
-                b: args,
-                c: 0,
-                d: 0
-            }
-        )
+        add_type(inout p, TypeNode { kind: TY_NAMED, a: x.a, b: args, c: 0, d: 0 })
     } else if x.kind == TY_TUPLE {
         let n = list_len(in p, x.a);
         let mut items = ChunkSeq::with_capacity[u32](n);
@@ -1012,16 +834,7 @@ fn substitute(inout p: Prog, t: u32, subs: u32) -> u32 {
             items.push(substitute(inout p, a, subs));
         }
         let args = list_new(inout p, in items);
-        add_type(
-            inout p,
-            TypeNode {
-                kind: TY_TUPLE,
-                a: args,
-                b: 0,
-                c: 0,
-                d: 0
-            }
-        )
+        add_type(inout p, TypeNode { kind: TY_TUPLE, a: args, b: 0, c: 0, d: 0 })
     } else {
         t
     }
@@ -1052,10 +865,7 @@ struct Req {
 const OK: u64 = 18446744073709551615;
 
 fn req_err(reason: u64) -> Req {
-    Req {
-        reason: reason,
-        effects: ChunkSeq::new[u32]()
-    }
+    Req { reason: reason, effects: ChunkSeq::new[u32]() }
 }
 
 // `resolve`: the last instance of `row` matching `request`, or NONE.
@@ -1131,10 +941,7 @@ fn required(inout p: Prog, name: u32, inout seen: ChunkSeq[bool], inout depth: u
         for i in 0..list_len(in p, row.instances) {
             out.push(list_at(in p, row.instances, i));
         }
-        return Req {
-            reason: OK,
-            effects: out
-        };
+        return Req { reason: OK, effects: out };
     }
     let at_seen = match seen.try_get(widen_u64(fi)) {
         Option::Some(b) => b,
@@ -1207,15 +1014,7 @@ fn required_body(
                 }
                 let args = list_new(inout p, in items);
                 let id = wrapping_u32(p.effs.len());
-                p
-                    .effs
-                    .push(
-                        EffectNode {
-                            label: e.label,
-                            name: e.name,
-                            args: args
-                        }
-                    );
+                p.effs.push(EffectNode { label: e.label, name: e.name, args: args });
                 requested.push(id);
             }
         } else if a.kind == A_OPAQUE {
@@ -1233,10 +1032,7 @@ fn required_body(
             }
         }
     }
-    Req {
-        reason: OK,
-        effects: out
-    }
+    Req { reason: OK, effects: out }
 }
 
 // ---------------------------------------------------------------- display
@@ -1666,11 +1462,7 @@ pub fn analyze(
 ) -> ChunkSeq[u64] eff [Fail[LintFail]] {
     let mut p = decode(in facts, in blob);
     check_limits(in p, functions, actions, work, call_depth);
-    let mut w = Work {
-        remaining: work,
-        used: 0,
-        depth: call_depth
-    };
+    let mut w = Work { remaining: work, used: 0, depth: call_depth };
     let mut findings = ChunkSeq::new[u64]();
     let mut nfindings: u64 = 0;
     let mut skipped = ChunkSeq::new[u64]();
@@ -1786,11 +1578,7 @@ pub fn analyze_modes(
 ) -> ChunkSeq[u64] eff [Fail[LintFail]] {
     let p = decode(in facts, in blob);
     check_limits(in p, functions, actions, work, call_depth);
-    let mut w = Work {
-        remaining: work,
-        used: 0,
-        depth: call_depth
-    };
+    let mut w = Work { remaining: work, used: 0, depth: call_depth };
     let mut findings = ChunkSeq::new[u64]();
     let mut n: u64 = 0;
     for fi in 0..p.fns.len() {
@@ -1860,11 +1648,7 @@ pub fn apply_edits(in source: Str, in edits: Slice[u64], in texts: Str, max_byte
     for k in 0..n {
         let e = match keys.try_get(k) {
             Option::Some(e) => e,
-            Option::None => EditKey {
-                start: 0,
-                end: 0,
-                index: 0
-            },
+            Option::None => EditKey { start: 0, end: 0, index: 0 },
         };
         let b = inc(wrapping_mul(e.index, Edit::Words));
         let es = word(in edits, wrapping_add(b, Edit::ExpStart));
@@ -1894,11 +1678,7 @@ pub fn apply_edits(in source: Str, in edits: Slice[u64], in texts: Str, max_byte
     for k in 0..n {
         let e = match keys.try_get(k) {
             Option::Some(e) => e,
-            Option::None => EditKey {
-                start: 0,
-                end: 0,
-                index: 0
-            },
+            Option::None => EditKey { start: 0, end: 0, index: 0 },
         };
         let b = inc(wrapping_mul(e.index, Edit::Words));
         let rs = word(in edits, wrapping_add(b, Edit::RepStart));

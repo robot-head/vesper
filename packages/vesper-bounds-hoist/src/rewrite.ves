@@ -14,41 +14,12 @@
 // POOL_HOISTED (label: the access) and POOL_GUARD (label: `inclusive`,
 // `negated << 1`, `plus << 8`, `minus << 16`).
 
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    TyPass
-};
-use @vesper/place-ir::{
-    BlockRow,
-    FnRow,
-    InstRow,
-    PoolRow,
-    Program
-};
-use self::fun::{
-    Fun,
-    add,
-    has,
-    hoistable,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    w
-};
-use self::encode::{
-    POOL_GUARD,
-    POOL_HOISTED,
-    seq_class
-};
-use @vesper/place-ir::codes::{
-    Op,
-    Tag,
-    Term
-};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, TyPass};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, PoolRow, Program};
+use self::fun::{Fun, add, has, hoistable, inc, n32, u32_at, u64_at, w};
+use self::encode::{POOL_GUARD, POOL_HOISTED, seq_class};
+use @vesper/place-ir::codes::{Op, Tag, Term};
 
 const NONE64: u64 = 18446744073709551615;
 
@@ -65,14 +36,7 @@ pub fn pool_entry(inout p: Program, kind: u64, label: u32) -> u64 {
         }
     }
     let i = p.pool.len();
-    p
-        .pool
-        .push(
-            PoolRow {
-                kind: kind,
-                label: label
-            }
-        );
+    p.pool.push(PoolRow { kind: kind, label: label });
     i
 }
 
@@ -711,15 +675,7 @@ pub fn copy_loop(
             p.insts.push(i);
         }
         let ta = copy_words(inout p, bk.ta, bk.tn, in vm, in bm, false);
-        let row = BlockRow {
-            ha: ha,
-            hn: hn,
-            i0: i0,
-            ic: bk.ic,
-            term: bk.term,
-            ta: ta,
-            tn: bk.tn
-        };
+        let row = BlockRow { ha: ha, hn: hn, i0: i0, ic: bk.ic, term: bk.term, ta: ta, tn: bk.tn };
         copy_rows.push(row);
         let succ = successors(in p, row);
         for j in 0..succ.len() {
@@ -811,14 +767,6 @@ pub fn copy_loop(
     set_fn(
         inout p,
         fi,
-        FnRow {
-            name: fr.name,
-            ha: ha,
-            hn: hn,
-            b0: b0,
-            bc: add(base, blocks.len()),
-            ta: ta,
-            tn: tn
-        }
+        FnRow { name: fr.name, ha: ha, hn: hn, b0: b0, bc: add(base, blocks.len()), ta: ta, tn: tn }
     );
 }

@@ -12,39 +12,14 @@
 // the strings. Every entry point returns one `L` handle; `out` holds the
 // result words and `pool` the text (a copy of `text` followed by the
 // generated messages). The encodings are documented in src/port.rs.
-use self::decode::{
-    decode_manifest,
-    decode_solution,
-    decode_tables,
-    new_l
-};
-use self::check::{
-    check_manifest,
-    name_valid
-};
-use self::solve::{
-    solve
-};
-use self::upgrade::{
-    upgrade
-};
-use @vesper-std/toml::{
-    parse,
-    dump
-};
-use self::manifest_toml::{
-    manifest_from_toml
-};
-use self::semver_text::{
-    SCmp,
-    parse_version,
-    parse_req
-};
-use self::encode::{
-    encode_manifest_diags,
-    encode_upgrade,
-    encode_validation
-};
+use self::decode::{decode_manifest, decode_solution, decode_tables, new_l};
+use self::check::{check_manifest, name_valid};
+use self::solve::{solve};
+use self::upgrade::{upgrade};
+use @vesper-std/toml::{parse, dump};
+use self::manifest_toml::{manifest_from_toml};
+use self::semver_text::{SCmp, parse_version, parse_req};
+use self::encode::{encode_manifest_diags, encode_upgrade, encode_validation};
 
 // A SemVer version; pre, build and text are string ids.
 pub copy struct Ver {
@@ -336,9 +311,7 @@ pub struct TomlRead {
 
 pub fn read_toml(in text: Slice[u8]) -> TomlRead {
     let d = parse(in text);
-    TomlRead {
-        pool: dump(in d, in text)
-    }
+    TomlRead { pool: dump(in d, in text) }
 }
 
 // Whether the TOML reader accepts `text`, for the reader's benchmark.
@@ -398,9 +371,7 @@ pub fn semver_text(in text: Slice[u8], kind: u64) -> TomlRead {
             }
         }
     }
-    TomlRead {
-        pool: out
-    }
+    TomlRead { pool: out }
 }
 
 fn put_dec(inout out: ChunkSeq[u8], v: u64) {
@@ -419,7 +390,5 @@ pub fn manifest_toml(in text: Slice[u8]) -> TomlRead {
         out.push(33);
     }
     out.extend(in body.as_slice());
-    TomlRead {
-        pool: out
-    }
+    TomlRead { pool: out }
 }

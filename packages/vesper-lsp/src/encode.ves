@@ -17,25 +17,9 @@
 // | 7 Object count, then per field the key (a String) and the value. An
 // object's fields come in its map order, which is the order serde_json
 // writes them in.
-use @vesper/serde::dragon::{
-    Shortest,
-    shortest
-};
-use self::limits::{
-    Ascii,
-    Crlf,
-    F64,
-    Perr,
-    Plimits,
-    add,
-    bound,
-    byte,
-    validate
-};
-use self::envelope::{
-    Envelope,
-    Id
-};
+use @vesper/serde::dragon::{Shortest, shortest};
+use self::limits::{Ascii, Crlf, F64, Perr, Plimits, add, bound, byte, validate};
+use self::envelope::{Envelope, Id};
 
 // A `Value`'s tag.
 enum Tag: _ {
@@ -284,12 +268,7 @@ fn container(in w: Slice[u64], p: u64) -> bool {
 fn validate_output(in w: Slice[u64], l: Plimits) -> Budget eff [Fail[Perr]] {
     validate(l);
     bound(Depth::Envelope, l.max_json_depth, Perr::PJsonLimit);
-    let mut b = Budget {
-        l: l,
-        nodes: 0,
-        strings: 0,
-        remaining: l.max_json_work
-    };
+    let mut b = Budget { l: l, nodes: 0, strings: 0, remaining: l.max_json_work };
     node(inout b);
     key(inout b, Key::Jsonrpc);
     node(inout b);
@@ -751,10 +730,7 @@ fn decimal_len(v: u64) -> u64 {
 pub fn encode_frame(in w: Slice[u64], in pool: Slice[u8], l: Plimits)
     -> ChunkSeq[u8] eff [Fail[Perr]] {
     let b = validate_output(in w, l);
-    let mut o = Out {
-        bytes: ChunkSeq::new(),
-        b: b
-    };
+    let mut o = Out { bytes: ChunkSeq::new(), b: b };
     put_envelope(inout o, in w, in pool);
     let n = o.bytes.len();
     let header_bytes = wrapping_add(HEADER_FIXED, decimal_len(n));

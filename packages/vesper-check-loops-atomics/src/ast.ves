@@ -5,9 +5,7 @@
 // shared pool, and types as ids of the check-data arena, so a walk is a
 // loop over indices instead of a `Box` tree.
 
-use @vesper/check-data::input::{
-    Reader
-};
+use @vesper/check-data::input::{Reader};
 
 const NONE32: u32 = 4294967295;
 
@@ -211,14 +209,7 @@ impl Exprs {
     pub fn pat(in self, p: u32) -> PatRow {
         match self.pats.try_get(widen_u64(p)) {
             Option::Some(r) => r,
-            Option::None => PatRow {
-                kind: P_WILD,
-                start: 0,
-                end: 0,
-                name: NONE32,
-                a: 0,
-                n: 0
-            },
+            Option::None => PatRow { kind: P_WILD, start: 0, end: 0, name: NONE32, a: 0, n: 0 },
         }
     }
 
@@ -291,18 +282,7 @@ pub fn read_pat(
     let start = r.word(in b);
     let end = r.word(in b);
     let id = wrapping_u32(x.pats.len());
-    x
-        .pats
-        .push(
-            PatRow {
-                kind: kind,
-                start: start,
-                end: end,
-                name: NONE32,
-                a: 0,
-                n: 0
-            }
-        );
+    x.pats.push(PatRow { kind: kind, start: start, end: end, name: NONE32, a: 0, n: 0 });
     let mut name = NONE32;
     let mark = x.stack.len();
     if kind == P_BIND {
@@ -328,14 +308,7 @@ pub fn read_pat(
         .pats
         .try_set(
             widen_u64(id),
-            PatRow {
-                kind: kind,
-                start: start,
-                end: end,
-                name: name,
-                a: a,
-                n: n
-            }
+            PatRow { kind: kind, start: start, end: end, name: name, a: a, n: n }
         );
     id
 }
@@ -362,14 +335,7 @@ pub copy struct Up {
 }
 
 pub fn up_none() -> Up {
-    Up {
-        pass: 0,
-        is_let: false,
-        arm: false,
-        unchecked: false,
-        let_ty: NONE32,
-        pat: NONE32
-    }
+    Up { pass: 0, is_let: false, arm: false, unchecked: false, let_ty: NONE32, pat: NONE32 }
 }
 
 // One expression in pre-order: kind, start, end, then the kind's words

@@ -10,15 +10,7 @@ use self::apply::{
     stale_widget,
     word
 };
-use self::codes::{
-    Budget,
-    Invalid,
-    OpTag,
-    ValueTag,
-    WidgetKind,
-    MAX_U64,
-    NONE_ID
-};
+use self::codes::{Budget, Invalid, OpTag, ValueTag, WidgetKind, MAX_U64, NONE_ID};
 use self::recording::{
     child_edge,
     child_scan,
@@ -40,22 +32,8 @@ use self::recording::{
     widget_sub,
     widget_sub_count
 };
-use self::{
-    BackendFault,
-    Edge,
-    Lim,
-    RSlot,
-    RState,
-    RSub,
-    RWidget
-};
-use self::util::{
-    dec,
-    event_valid,
-    inc,
-    op,
-    property_valid
-};
+use self::{BackendFault, Edge, Lim, RSlot, RState, RSub, RWidget};
+use self::util::{dec, event_valid, inc, op, property_valid};
 
 // Recorded event tags (Op in lib.ves, decoded by src/ported/codec.rs);
 // constants, not code functions, so that `record` inlines them (see
@@ -244,16 +222,7 @@ pub fn patch_subscribe(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, i
     if !event_valid(rwidget(in s.widgets, i).kind, event) {
         return invalid(Invalid::Event);
     }
-    s
-        .subs
-        .push(
-            RSub {
-                serial: sub,
-                widget: widget,
-                event: event,
-                handler: handler
-            }
-        );
+    s.subs.push(RSub { serial: sub, widget: widget, event: event, handler: handler });
     s.blive.push(true);
     s.nsubs = inc(s.nsubs);
     if s.created == MAX_U64 {
@@ -347,10 +316,7 @@ pub fn patch_children(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in
         if count >= lim.children {
             return budget(Budget::Children);
         }
-        let e = Edge {
-            parent: parent,
-            child: child
-        };
+        let e = Edge { parent: parent, child: child };
         if at == NONE_ID {
             s.edges.push(e);
         } else {

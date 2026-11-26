@@ -7,22 +7,11 @@
 // package, `--include-tests` (the test-block parse), a source over the
 // byte budget, and a parse with diagnostics (the session expands source
 // sugar and reports them).
-use @vesper/hybrid-parse::{
-    parse_words
-};
-use @vesper/ast::lower::{
-    lower_source
-};
-use @vesper/front::lex::{
-    max_source_bytes,
-    token_end
-};
-use @vesper-std/fmt::{
-    write_u64
-};
-use @vesper-std/toml::debug::{
-    put_debug_str
-};
+use @vesper/hybrid-parse::{parse_words};
+use @vesper/ast::lower::{lower_source};
+use @vesper/front::lex::{max_source_bytes, token_end};
+use @vesper-std/fmt::{write_u64};
+use @vesper-std/toml::debug::{put_debug_str};
 
 fn word_at(in w: ChunkSeq[u64], i: u64) -> u64 {
     match w.try_get(i) {

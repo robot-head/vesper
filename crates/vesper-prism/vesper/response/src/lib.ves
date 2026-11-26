@@ -1,10 +1,5 @@
-use self::ascii::{
-    Ascii
-};
-use @vesper/prism-bytes::{
-    first_control,
-    first_not_token
-};
+use self::ascii::{Ascii};
+use @vesper/prism-bytes::{first_control, first_not_token};
 // Vesper port of the fixed-length HTTP/1.1 response encoder of
 // crates/vesper-prism (`ResponseBuilder` in src/response.rs, port wave P1
 // lane 14, #911).
@@ -452,10 +447,7 @@ pub fn response_plan_finish(in p: ResponsePlan, in body: Slice[u8])
     }
     if body.len() != p.representation_length {
         Fail::raise(
-            ResponseError::LengthMismatch {
-                expected: p.representation_length,
-                actual: body.len()
-            }
+            ResponseError::LengthMismatch { expected: p.representation_length, actual: body.len() }
         );
     }
     match check_sizes(p.limits, p.head, p.representation_length, p.head_length, p.header_count) {

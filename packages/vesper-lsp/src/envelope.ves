@@ -20,19 +20,9 @@ use @vesper/serde::{
     string_decode,
     string_equals
 };
-use @vesper/serde::index::{
-    tok
-};
+use @vesper/serde::index::{tok};
 use self::numbers::number_out_of_range;
-use self::limits::{
-    Ascii,
-    I32,
-    Perr,
-    Plimits,
-    bound,
-    byte,
-    validate
-};
+use self::limits::{Ascii, I32, Perr, Plimits, bound, byte, validate};
 
 // `Envelope`'s variant.
 pub enum Envelope: _ {

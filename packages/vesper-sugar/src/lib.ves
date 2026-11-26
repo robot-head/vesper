@@ -3,17 +3,20 @@
 // part 4). It reads the surface profile of @vesper/front.
 //
 // Part 4a is the rule matcher (sugar_expand/matcher.rs, matcher.ves),
-// part 4b-1 the template skeleton (sugar_expand/template.rs, template.ves).
+// part 4b-1 the template skeleton (sugar_expand/template.rs, template.ves),
+// part 4b-4 its scope and flow analysis (template/flow.rs, flow.ves),
+// part 4b-5 exit-aware scope captures (sugar_expand/scope.rs, scope.ves)
+// and the pattern template hygiene (hygiene.rs `pattern`, hygiene.ves).
 // tests/self_host_sugar.rs checks `match_rule_words` and
 // `template_skeleton_words` against Rust's test hooks of the same names in
 // `vesper_syntax::sugar_expand` on a rule corpus and a fuzzed corpus.
 
-use self::matcher::{
-    match_rule_encoded
-};
-use self::template::{
-    skeleton_encoded
-};
+use self::matcher::{match_rule_encoded};
+use self::driver::{expand_words};
+use self::flow::{Rd, render};
+use self::hygiene::{pattern_hygiene};
+use self::scope::{lower};
+use self::template::{caps_read, skeleton_encoded, skeleton_run};
 
 // `match_rule(pattern, invocation, tail, work)` as words (see
 // matcher.ves `match_rule_encoded`). `text` is the pattern, then the
@@ -144,6 +147,170 @@ pub fn template_skeleton_words(in text: Str, max_bytes: u64, work: u64) -> Chunk
         return out;
     }
     skeleton_encoded(in template, words, in invocation, in tail, in mark, max_bytes)
+}
+
+// `template_render_words`: the rendered template (`template::render`,
+// flow.ves `render`) for the rule's match, with `text` as in
+// `template_skeleton_words`. The words are [0] when the rule refuses or
+// does not match, [2, len, message bytes] when rendering refuses, else
+// [1, len, text bytes, holes, (start, end)*, origins, (start, end,
+// value start, value end, from tail)*, places, (start, end, pass)*] with
+// pass 1 In, 2 Inout, 3 Out, 4 Sink.
+pub fn template_render_words(in text: Str, max_bytes: u64, work: u64) -> ChunkSeq[u64] {
+    render_encoded(in text, max_bytes, work, false, false)
+}
+
+// `template_scope_words(pattern, invocation, tail, template, mark, source,
+// call, max_bytes, work)` of `vesper_syntax::sugar_expand`: the rendered
+// template after `scope::lower` (scope.ves `lower`). `text` is as in
+// `template_skeleton_words` with three more numbers in the header (the
+// source's length, the call's start and end) and the source after the
+// mark. The words are as in `template_render_words` with the items the
+// scope adds (length, bytes) after the leading 1.
+pub fn template_scope_words(in text: Str, max_bytes: u64, work: u64) -> ChunkSeq[u64] {
+    render_encoded(in text, max_bytes, work, true, false)
+}
+
+// `template_pattern_words`: `template_render_words` followed by
+// `hygiene::pattern` (hygiene.ves `pattern`), with `text` and the words
+// as in `template_render_words`.
+pub fn template_pattern_words(in text: Str, max_bytes: u64, work: u64) -> ChunkSeq[u64] {
+    render_encoded(in text, max_bytes, work, false, true)
+}
+
+// `sugar_expand_words(source, include_tests)` of
+// `vesper_syntax::sugar_expand`: one bounded expansion round of the
+// sugar driver (sugar_expand.rs `expand`, driver.ves) over `text` with no
+// imports. `include_tests` is 0 or 1; the words are driver.ves
+// `expand_words`.
+pub fn sugar_expand_words(in text: Str, include_tests: u64, work: u64) -> ChunkSeq[u64] {
+    let b = text.as_bytes();
+    let src = copy_bytes(in b, 0, b.len());
+    expand_words(in src, include_tests != 0)
+}
+
+fn render_encoded(in text: Str, max_bytes: u64, work: u64, scoped: bool, patterned: bool)
+    -> ChunkSeq[u64] {
+    let b = text.as_bytes();
+    let np = base128(in b, 0);
+    let ni = base128(in b, 4);
+    let nt = base128(in b, 8);
+    let nl = base128(in b, 12);
+    let nm = base128(in b, 16);
+    let tail_len = wrapping_sub(
+        nt,
+        if nt == 0 {
+            0
+        } else {
+            1
+        }
+    );
+    let mut at: u64 = if scoped {
+        32
+    } else {
+        20
+    };
+    let pattern = copy_bytes(in b, at, np);
+    at = wrapping_add(at, np);
+    let invocation = copy_bytes(in b, at, ni);
+    at = wrapping_add(at, ni);
+    let tail = copy_bytes(in b, at, tail_len);
+    at = wrapping_add(at, tail_len);
+    let template = copy_bytes(in b, at, nl);
+    at = wrapping_add(at, nl);
+    let mark = copy_bytes(in b, at, nm);
+    at = wrapping_add(at, nm);
+    let ns = if scoped {
+        base128(in b, 20)
+    } else {
+        0
+    };
+    let call_s = base128(in b, 24);
+    let call_e = base128(in b, 28);
+    let source = copy_bytes(in b, at, ns);
+    let words = match_rule_encoded(in pattern, in invocation, nt != 0, tail_len, work);
+    let matched = match words.try_get(0) {
+        Option::Some(w) => w == 1,
+        Option::None => false,
+    };
+    let mut out = ChunkSeq::new[u64]();
+    if !matched {
+        out.push(0);
+        return out;
+    }
+    let c = caps_read(words);
+    let sk = skeleton_run(in template, in c, in invocation, in tail, in mark, max_bytes);
+    if sk.failed {
+        out.push(2);
+        push_bytes(inout out, in sk.msg);
+        return out;
+    }
+    let mut r = render(in sk, in c, in invocation, in tail, in mark);
+    if r.failed {
+        out.push(2);
+        push_bytes(inout out, in r.msg);
+        return out;
+    }
+    if patterned {
+        let ps = pattern_hygiene(inout r, in mark);
+        if ps.failed {
+            out.push(2);
+            push_bytes(inout out, in ps.msg);
+            return out;
+        }
+    }
+    let mut items = ChunkSeq::new[u8]();
+    if scoped {
+        let sc = lower(inout r, in c, in source, call_s, call_e, in mark, max_bytes);
+        if sc.failed {
+            out.push(2);
+            push_bytes(inout out, in sc.msg);
+            return out;
+        }
+        items = sc.items;
+    }
+    out.push(1);
+    if scoped {
+        push_bytes(inout out, in items);
+    }
+    push_bytes(inout out, in r.text);
+    push_rows(inout out, in r.holes, r.holes.len() >> 1);
+    push_rows(inout out, in r.origins, rows_of(r.origins.len(), 5));
+    push_rows(inout out, in r.places, rows_of(r.places.len(), 3));
+    out
+}
+
+fn push_bytes(inout out: ChunkSeq[u64], in b: ChunkSeq[u8]) {
+    out.push(b.len());
+    for i in 0..b.len() {
+        match b.try_get(i) {
+            Option::Some(c) => out.push(widen_u64(c)),
+            Option::None => out.push(0),
+        }
+    }
+}
+
+fn rows_of(n: u64, stride: u64) -> u64 {
+    let mut k: u64 = 0;
+    let mut m: u64 = 0;
+    loop {
+        if m >= n {
+            break;
+        }
+        m = wrapping_add(m, stride);
+        k = wrapping_add(k, 1);
+    }
+    k
+}
+
+fn push_rows(inout out: ChunkSeq[u64], in rows: ChunkSeq[u64], count: u64) {
+    out.push(count);
+    for i in 0..rows.len() {
+        match rows.try_get(i) {
+            Option::Some(w) => out.push(w),
+            Option::None => out.push(0),
+        }
+    }
 }
 
 fn copy_bytes(in b: Slice[u8], at: u64, n: u64) -> ChunkSeq[u8] {

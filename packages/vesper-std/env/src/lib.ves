@@ -4,10 +4,7 @@
 // #1408). Every operation performs `Ffi[StdEnv]`. Text comes back as
 // `String` when it is UTF-8 and as bytes from the `*_bytes` variants (Unix
 // allows any bytes; Windows text is UTF-16 converted to UTF-8).
-use @vesper-std/fs::{
-    IoError,
-    raise_kind
-};
+use @vesper-std/fs::{IoError, raise_kind};
 
 // The word of `size` bytes (at most 8, little-endian) at `address`, or 0
 // for a `NULL` address.
@@ -246,6 +243,85 @@ fn errno_kind(e: u32) -> u32 {
             13
         },
         _ => 13,
+    }
+}
+
+// The path of the running executable (`std::env::current_exe`): on Linux
+// the target of `/proc/self/exe`, on macOS `_NSGetExecutablePath`.
+pub fn current_exe_bytes() -> ChunkSeq[u8] eff [Ffi[StdEnv], Fail[IoError]] {
+    match StdEnv::dlsym_exe_path(StdEnv::RTLD_DEFAULT, in "_NSGetExecutablePath".as_bytes()) {
+        Result::Ok(Option::Some(f)) => apple_exe_path(f),
+        _ => proc_self_exe(),
+    }
+}
+
+// `fs::read_link("/proc/self/exe")`: `readlink` into a buffer that doubles
+// until the link fits. With no `/proc`, the error `std` gives
+// (`Uncategorized`, here `other()`).
+fn proc_self_exe() -> ChunkSeq[u8] eff [Ffi[StdEnv], Fail[IoError]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    buf.resize(256, 0);
+    loop {
+        let (n, e) = match StdEnv::readlink(
+            in "/proc/self/exe".as_bytes(),
+            inout buf.as_slice_mut()
+        ) {
+            Result::Ok(r) => r,
+            Result::Err(_) => return raise_kind(7),
+        };
+        if n < 0 {
+            if e == 2 {
+                return raise_kind(13);
+            }
+            return Fail::raise(
+                IoError {
+                    kind: errno_kind(e),
+                    os: e,
+                }
+            );
+        }
+        let len = wrapping_u64(n);
+        if len < buf.len() {
+            buf.truncate(len);
+            return buf;
+        }
+        let cap = buf.len();
+        buf.resize(wrapping_mul(cap, 2), 0);
+    }
+    buf
+}
+
+// `_NSGetExecutablePath` as `std` calls it: once for the size, then into a
+// buffer of that size (C memory, copied out up to its NUL).
+fn apple_exe_path(f: ExePathFn) -> ChunkSeq[u8] eff [Ffi[StdEnv], Fail[IoError]] {
+    let cell = StdEnv::malloc(8);
+    if cell == 0 {
+        return raise_kind(12);
+    }
+    let mut size: u64 = 0;
+    let _ = StdEnv::write_word(cell, inout size, 8);
+    let _ = StdEnv::ExePathFn(f, 0, cell);
+    let need = word(cell, 4);
+    if need == 0 {
+        StdEnv::free(cell);
+        return raise_kind(13);
+    }
+    let buf = StdEnv::malloc(need);
+    if buf == 0 {
+        StdEnv::free(cell);
+        return raise_kind(12);
+    }
+    let r = StdEnv::ExePathFn(f, buf, cell);
+    let path = if r == 0 {
+        Option::Some(c_string(buf))
+    } else {
+        Option::None
+    };
+    StdEnv::free(buf);
+    StdEnv::free(cell);
+    match path {
+        Option::Some(p) => p,
+        Option::None => raise_kind(13),
     }
 }
 

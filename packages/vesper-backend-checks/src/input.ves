@@ -24,19 +24,9 @@
 //
 // Lists are a count then their words; strings are symbols.
 
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
-use @vesper/check-data::util::{
-    n32
-};
-use self::util::{
-    g,
-    filled,
-    put_at,
-    st
-};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/check-data::util::{n32};
+use self::util::{g, filled, put_at, st};
 
 pub struct Reader {
     pos: u64,
@@ -528,9 +518,7 @@ fn read_fn(inout c: Cx, inout r: Reader, in b: Slice[u8]) {
 }
 
 pub fn read_input(in b: Slice[u8]) -> Cx {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut nm = names_new();
     read_strings(inout r, in b, inout nm);
     let words = r.word(in b);

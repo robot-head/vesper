@@ -41,20 +41,14 @@ pub fn bounds(a: i64, b: i64) -> (i64, i64) {
 }
 
 pub fn midpoint(in p: Point, in q: Point) -> Point eff [Fail[ArithOverflow]] {
-    Point {
-        x: (p.x + q.x) / 2,
-        y: (p.y + q.y) / 2
-    }
+    Point { x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 }
 }
 
 pub fn area(in s: Shape) -> i64 eff [Fail[ArithOverflow]] {
     match s {
         Shape::Empty => 0,
         Shape::Square(n) => n * n,
-        Shape::Rect {
-            w,
-            h
-        } => w * h,
+        Shape::Rect { w, h } => w * h,
     }
 }
 

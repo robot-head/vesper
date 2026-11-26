@@ -7,24 +7,9 @@
 // ImplNotWellFormed); subjects are (variant, a, b) in `Subject` order:
 // 0 Program, 1 TypeCtor, 2 Effect, 3 Trait, 4 Impl, 5 ImplPair, 6 Model,
 // 7 Query.
-use self::{
-    S
-};
-use self::term::{
-    add,
-    byte_at,
-    dec,
-    inc,
-    set_word,
-    sub,
-    word_at
-};
-use self::render::{
-    byte,
-    lit,
-    num,
-    r_id
-};
+use self::{S};
+use self::term::{add, byte_at, dec, inc, set_word, sub, word_at};
+use self::render::{byte, lit, num, r_id};
 
 // ASCII bytes.
 const NEWLINE: u8 = 10;

@@ -1,34 +1,7 @@
 // Module decode of @vesper/loom-calculus (see lib.ves): the input word
 // stream (documented in src/port.rs) into the tables of `L`.
-use self::{
-    Change,
-    Cmp,
-    Dep,
-    Diag,
-    Feat,
-    GNode,
-    L,
-    Man,
-    Req,
-    Root,
-    SEdge,
-    Snap,
-    Sys,
-    SysSel,
-    Ver
-};
-use self::util::{
-    Order,
-    SortKind,
-    add,
-    gb,
-    inc,
-    mul,
-    occ_ord,
-    pool_ord,
-    sort,
-    sw
-};
+use self::{Change, Cmp, Dep, Diag, Feat, GNode, L, Man, Req, Root, SEdge, Snap, Sys, SysSel, Ver};
+use self::util::{Order, SortKind, add, gb, inc, mul, occ_ord, pool_ord, sort, sw};
 
 pub fn new_l(in words: Slice[u64], in text: Slice[u8]) -> L {
     let mut l = L {
@@ -282,14 +255,7 @@ pub fn decode_tables(inout l: L) {
         l
             .vers
             .push(
-                Ver {
-                    major: major,
-                    minor: minor,
-                    patch: patch,
-                    pre: pre,
-                    build: build,
-                    text: text
-                }
+                Ver { major: major, minor: minor, patch: patch, pre: pre, build: build, text: text }
             );
     }
     let nreq = rd(inout l);
@@ -320,15 +286,7 @@ pub fn decode_tables(inout l: L) {
                     }
                 );
         }
-        l
-            .reqs
-            .push(
-                Req {
-                    at: at,
-                    n: n,
-                    text: text
-                }
-            );
+        l.reqs.push(Req { at: at, n: n, text: text });
     }
 }
 
@@ -360,16 +318,7 @@ pub fn decode_manifest(inout l: L) -> u64 {
             let ok = rd_bool(inout l);
             let sname = rd_str(inout l);
             let r = rd(inout l);
-            l
-                .syss
-                .push(
-                    Sys {
-                        raw: raw,
-                        ok: ok,
-                        name: sname,
-                        req: r
-                    }
-                );
+            l.syss.push(Sys { raw: raw, ok: ok, name: sname, req: r });
         }
         l
             .feats
@@ -457,16 +406,7 @@ pub fn decode_solution(inout l: L) {
         let name = rd_str(inout l);
         let r = rd(inout l);
         let (fa, fan) = rd_set(inout l);
-        l
-            .roots
-            .push(
-                Root {
-                    name: name,
-                    req: r,
-                    feat_at: fa,
-                    feat_n: fan
-                }
-            );
+        l.roots.push(Root { name: name, req: r, feat_at: fa, feat_n: fan });
     }
     let nsel = rd(inout l);
     l.sel_at = l.mans.len();
@@ -492,13 +432,6 @@ pub fn decode_solution(inout l: L) {
     for i in 0..nsys {
         let name = rd_str(inout l);
         let v = rd(inout l);
-        l
-            .ssels
-            .push(
-                SysSel {
-                    name: name,
-                    ver: v
-                }
-            );
+        l.ssels.push(SysSel { name: name, ver: v });
     }
 }

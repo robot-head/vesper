@@ -12,25 +12,8 @@
 // InputLimit 1, OutputLimit 2, WordLimit 3, WorkLimit 4, Overflow 5,
 // UnalignedInput 6, Truncated 7, OutputTooSmall 8; limits are
 // max_input_bytes, max_output_bytes, max_words, max_work.
-use self::{
-    GErr,
-    P2,
-    P4
-};
-use self::common::{
-    add_or,
-    bound,
-    fail,
-    fail2,
-    le32,
-    le64,
-    mul_or,
-    ones8,
-    pair,
-    sb,
-    shr,
-    sw
-};
+use self::{GErr, P2, P4};
+use self::common::{add_or, bound, fail, fail2, le32, le64, mul_or, ones8, pair, sb, shr, sw};
 
 // Cap'n Proto encoding spec (src/capnp.rs): 8-byte words; a pointer's low
 // two bits are its kind and the next 30 its signed word offset; a struct
@@ -70,12 +53,7 @@ const HARD_WORDS: u64 = 8388608;
 const HARD_WORK: u64 = 536870912;
 
 fn p4(a: u64, b: u64, c: u64, d: u64) -> P4 {
-    P4 {
-        a: a,
-        b: b,
-        c: c,
-        d: d
-    }
+    P4 { a: a, b: b, c: c, d: d }
 }
 
 // parse_prefix: (segment count, payload start, end).

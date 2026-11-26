@@ -5,13 +5,7 @@
 // order: capability_escalation 0, invalid_snapshot 1, root_mismatch 2,
 // unsafe_ffi_policy_relaxed 3. AuthorityScope: RequiredCapabilities 0,
 // CapabilityCeiling 1, DependencyCeiling 2, UnsafeFfiPolicy 3.
-use self::{
-    Change,
-    Diag,
-    GNode,
-    L,
-    Snap
-};
+use self::{Change, Diag, GNode, L, Snap};
 use self::util::{
     Code,
     Forbid,
@@ -36,10 +30,7 @@ use self::util::{
     sw,
     udiag_ord
 };
-use self::check::{
-    mark,
-    since
-};
+use self::check::{mark, since};
 
 // An edge is a (parent, child, dependency) triple.
 const EDGE_WORDS: u64 = 3;
@@ -118,18 +109,7 @@ fn udiag_at(inout l: L, code: u64, pkg: u64, dep: u64, snap: u64, mo: u64) {
     let ml = since(in l, mo);
     l
         .udiags
-        .push(
-            Diag {
-                snap: snap,
-                code: code,
-                pkg: pkg,
-                dep: dep,
-                so: 0,
-                sl: 0,
-                mo: mo,
-                ml: ml
-            }
-        );
+        .push(Diag { snap: snap, code: code, pkg: pkg, dep: dep, so: 0, sl: 0, mo: mo, ml: ml });
 }
 
 fn udiag(inout l: L, code: u64, pkg: u64, dep: u64, snap: u64, in msg: Str) {

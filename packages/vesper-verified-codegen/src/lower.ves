@@ -8,9 +8,9 @@
 // (`lower_function`) and prints the rows, or the error, as the Rust
 // `VerifiedError` prints it.
 //
-// Not ported yet (part 4c): `handle` expressions (non-resuming `Fail`
-// handlers and region blocks) and region operations; a program with one
-// is answered `not ported`.
+// Non-resuming `handle Fail[E]` handlers (part 4c-1; their AST rows are
+// exprs.ves), region blocks, region capabilities and region operations
+// (part 4c-2) are lowered.
 //
 // Representation:
 //
@@ -60,6 +60,8 @@ use self::machine::{
     LIR_TRAP,
     LIR_WRAPPING,
     Lir,
+    Lowered,
+    lowered_new,
     OP_ADD,
     OP_DIV,
     OP_MUL,
@@ -67,56 +69,20 @@ use self::machine::{
     OP_SUB,
     T_DIV0,
     T_OVERFLOW,
+    T_REGION,
     T_UNREACHABLE
 };
-use self::certificate::{
-    put_debug
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    TyKind,
-    Types,
-    Vars,
-    default_type,
-    display,
-    substitute,
-    vars_new
-};
-use @vesper/check-data::world::{
-    Adt,
-    Field,
-    Variant,
-    World,
-    constructor
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/place-ir::{
-    InstRow,
-    Program,
-    read_program
-};
-use @vesper/place-ir::codes::{
-    Lit,
-    Op,
-    Pat,
-    Term
-};
+use self::certificate::{put_debug};
+use self::evidence::{Sites, sites_new};
+use self::exprs::{Cl, Ex, Hx, P_BIND, P_OTHER, X_HANDLE, nested_instance, nested_name, read_exprs};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyKind, Types, Vars, default_type, display, substitute, vars_new};
+use @vesper/check-data::world::{Adt, Field, Variant, World, constructor};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/check-layout::{Layouts, layout_of, layouts_new};
+use @vesper/place-ir::{InstRow, Program, read_program};
+use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
 
 const NONE32: u32 = 4294967295;
 const NONE: u64 = 18446744073709551615;
@@ -127,6 +93,25 @@ const MAX_FRAME_WORDS: u64 = 4000;
 const MAX_DEPTH: u64 = 32;
 // `machine::FIRST_FREE_LABEL`: labels below it are the shared abort exits.
 const FIRST_FREE_LABEL: u64 = 4;
+// The program heap's globals (heap word indices): words in use beyond the
+// globals, the innermost open region's header and the pin.
+const G_TOP: u64 = 0;
+const G_INNER: u64 = 1;
+const G_PIN: u64 = 2;
+const GLOBALS: u64 = 3;
+// Region header words: charged bytes, allocations, the previous innermost
+// header, the heap words in use when it opened, the capacity in bytes.
+const H_USED: u64 = 0;
+const H_ALLOCS: u64 = 1;
+const H_PREV: u64 = 2;
+const H_START: u64 = 3;
+const H_CAP: u64 = 4;
+const HEADER: u64 = 5;
+const MAX_PAYLOAD_WORDS: u64 = 4000;
+// `HEAP_WORDS`, `regions::DEFAULT_CAPACITY`, `store::MAX_ALLOCATIONS`
+const HEAP_WORDS: u64 = 67108864;
+const DEFAULT_CAPACITY: u64 = 1048576;
+const MAX_ALLOCATIONS: u64 = 1048576;
 
 // ----- errors -------------------------------------------------------------------
 
@@ -143,11 +128,11 @@ pub const E_NOT_PORTED: u8 = 5;
 const U_FLOAT: u8 = 0;
 const U_STRING: u8 = 1;
 const U_ENUM: u8 = 2;
-const U_MATCH: u8 = 3;
+pub const U_MATCH: u8 = 3;
 const U_INDEX: u8 = 4;
 const U_FUNCTION_VALUE: u8 = 5;
 pub const U_GENERIC: u8 = 6;
-const U_EFFECT: u8 = 7;
+pub const U_EFFECT: u8 = 7;
 const U_EXTERNAL_FUNCTION: u8 = 8;
 const U_STRUCTURAL_EQUALITY: u8 = 9;
 const U_TYPE: u8 = 10;
@@ -274,21 +259,11 @@ fn ap_i128(inout out: ChunkSeq[u8], lo: u64, hi: u64) {
 }
 
 pub fn err(kind: u8, sink d: ChunkSeq[u8]) -> VErr {
-    VErr {
-        kind: kind,
-        construct: 0,
-        func: 0,
-        detail: d
-    }
+    VErr { kind: kind, construct: 0, func: 0, detail: d }
 }
 
 pub fn unsup(construct: u8, func: u32, sink d: ChunkSeq[u8]) -> VErr {
-    VErr {
-        kind: E_UNSUPPORTED,
-        construct: construct,
-        func: func,
-        detail: d
-    }
+    VErr { kind: E_UNSUPPORTED, construct: construct, func: func, detail: d }
 }
 
 // ----- the context --------------------------------------------------------------
@@ -310,6 +285,10 @@ pub copy struct Sy {
     region_box: u32,
     watermark: u32,
     region: u32,
+    rbox: u32,
+    rget: u32,
+    rset: u32,
+    rused: u32,
     fail: u32,
     overflow: u32,
     runtime: u32,
@@ -359,6 +338,10 @@ fn sy_new(inout n: Names) -> Sy {
         region_box: n.intern(in "RegionBox".as_bytes()),
         watermark: n.intern(in "Watermark".as_bytes()),
         region: n.intern(in "Region".as_bytes()),
+        rbox: n.intern(in "Region::box".as_bytes()),
+        rget: n.intern(in "Region::get".as_bytes()),
+        rset: n.intern(in "Region::set".as_bytes()),
+        rused: n.intern(in "Region::used".as_bytes()),
         fail: n.intern(in "Fail".as_bytes()),
         overflow: n.intern(in "ArithOverflow".as_bytes()),
         runtime: n.intern(in "RuntimeError".as_bytes()),
@@ -441,6 +424,8 @@ pub copy struct Sh {
 pub struct Lw {
     c: Ctx,
     p: Program,
+    // the pool's expression rows (closures and handlers)
+    ex: Ex,
     sy: Sy,
     fns: ChunkSeq[Fn],
     fparams: ChunkSeq[Prm],
@@ -458,25 +443,17 @@ pub struct Lw {
     // tuple element symbols "0", "1", ...
     digits: ChunkSeq[u32],
     regions_active: bool,
+    // native layouts (`Layout::of`) of region payloads
+    ls: Layouts,
+    // evidence passing's failure-code rewriting
+    sites: Sites,
     entry: u32,
     max_functions: u64,
     max_rows: u64,
 }
 
 fn fn0() -> Fn {
-    Fn {
-        name: 0,
-        p0: 0,
-        pn: 0,
-        result: 0,
-        effects: 0,
-        l0: 0,
-        ln: 0,
-        v0: 0,
-        vn: 0,
-        b0: 0,
-        bc: 0
-    }
+    Fn { name: 0, p0: 0, pn: 0, result: 0, effects: 0, l0: 0, ln: 0, v0: 0, vn: 0, b0: 0, bc: 0 }
 }
 
 impl Lw {
@@ -490,23 +467,14 @@ impl Lw {
     fn param(in self, i: u64) -> Prm {
         match self.fparams.try_get(i) {
             Option::Some(p) => p,
-            Option::None => Prm {
-                name: 0,
-                pass: 0,
-                ty: 0,
-                pa: 0,
-                pn: 0
-            },
+            Option::None => Prm { name: 0, pass: 0, ty: 0, pa: 0, pn: 0 },
         }
     }
 
     fn local_row(in self, i: u64) -> Loc {
         match self.flocals.try_get(i) {
             Option::Some(l) => l,
-            Option::None => Loc {
-                name: 0,
-                ty: 0
-            },
+            Option::None => Loc { name: 0, ty: 0 },
         }
     }
 
@@ -522,11 +490,7 @@ impl Lw {
     fn sword(in self, i: u64) -> SWord {
         match self.sw.try_get(i) {
             Option::Some(x) => x,
-            Option::None => SWord {
-                pa: 0,
-                pn: 0,
-                kind: 0
-            },
+            Option::None => SWord { pa: 0, pn: 0, kind: 0 },
         }
     }
 
@@ -632,12 +596,20 @@ fn read_string(inout r: Reader, in b: Slice[u8], inout names: Names) -> u32 {
     s
 }
 
-fn decode(sink c: Ctx, sink p: Program, inout r: Reader, in b: Slice[u8]) -> Lw {
+fn decode(
+    sink c: Ctx,
+    sink p: Program,
+    sink ex: Ex,
+    sink sites: Sites,
+    inout r: Reader,
+    in b: Slice[u8]
+) -> Lw {
     let mut c2 = c;
     let sy = sy_new(inout c2.names);
     let mut lw = Lw {
         c: c2,
         p: p,
+        ex: ex,
         sy: sy,
         fns: ChunkSeq::new[Fn](),
         fparams: ChunkSeq::new[Prm](),
@@ -651,6 +623,8 @@ fn decode(sink c: Ctx, sink p: Program, inout r: Reader, in b: Slice[u8]) -> Lw 
         shapes: ChunkSeq::new[u64](),
         digits: ChunkSeq::new[u32](),
         regions_active: false,
+        ls: layouts_new(),
+        sites: sites,
         entry: 0,
         max_functions: 0,
         max_rows: 0,
@@ -680,17 +654,7 @@ fn decode(sink c: Ctx, sink p: Program, inout r: Reader, in b: Slice[u8]) -> Lw 
             at = add(at, add(3, k));
             let ty = n32(lw.op(at));
             at = add(at, 3);
-            lw
-                .fparams
-                .push(
-                    Prm {
-                        name: name,
-                        pass: pass,
-                        ty: ty,
-                        pa: pa,
-                        pn: k
-                    }
-                );
+            lw.fparams.push(Prm { name: name, pass: pass, ty: ty, pa: pa, pn: k });
         }
         let result = n32(lw.op(at));
         let effects = n32(lw.op(inc(at)));
@@ -745,14 +709,7 @@ fn decode(sink c: Ctx, sink p: Program, inout r: Reader, in b: Slice[u8]) -> Lw 
         for i in 0..nl {
             let name = n32(lw.op(add(at, wrapping_mul(i, 2))));
             let ty = n32(lw.op(add(at, inc(wrapping_mul(i, 2)))));
-            lw
-                .flocals
-                .push(
-                    Loc {
-                        name: name,
-                        ty: ty
-                    }
-                );
+            lw.flocals.push(Loc { name: name, ty: ty });
         }
         lw
             .fns
@@ -824,10 +781,7 @@ fn one(x: u32) -> ChunkSeq[u32] {
 }
 
 fn sub(s: Sh, start: u64, len: u64) -> Sh {
-    Sh {
-        a: add(s.a, start),
-        n: len
-    }
+    Sh { a: add(s.a, start), n: len }
 }
 
 // The scalar kind of a type name, or NONE (`flatten`'s first match).
@@ -995,15 +949,7 @@ fn push_word(inout lw: Lw, in path: ChunkSeq[u32], emit: bool, kind: u8) {
     }
     let pa = lw.paths.len();
     lw.paths.extend(in path.as_slice());
-    lw
-        .sw
-        .push(
-            SWord {
-                pa: pa,
-                pn: path.len(),
-                kind: kind
-            }
-        );
+    lw.sw.push(SWord { pa: pa, pn: path.len(), kind: kind });
 }
 
 // `shape`: the flattened words of `ty`.
@@ -1011,10 +957,7 @@ fn shape(inout lw: Lw, ty: u32, func: u32) -> Sh eff [Fail[VErr]] {
     let cached = u64_at(in lw.shapes, w(ty));
     if cached != 0 {
         let x = wrapping_sub(cached, 1);
-        return Sh {
-            a: x >> 20,
-            n: x & 1048575
-        };
+        return Sh { a: x >> 20, n: x & 1048575 };
     }
     let a = lw.sw.len();
     let mut path = ChunkSeq::new[u32]();
@@ -1029,10 +972,7 @@ fn shape(inout lw: Lw, ty: u32, func: u32) -> Sh eff [Fail[VErr]] {
     if n < 1048576 {
         let ok = lw.shapes.try_set(w(ty), inc((a << 20) | n));
     }
-    Sh {
-        a: a,
-        n: n
-    }
+    Sh { a: a, n: n }
 }
 
 fn words_of(inout lw: Lw, ty: u32, func: u32) -> u64 eff [Fail[VErr]] {
@@ -1091,14 +1031,7 @@ fn variant_layout(
         let f = lw.c.world.field(add(w(v.fa), fi));
         let t = substitute(inout lw.c.types, f.ty, in vars);
         let n = words_of(inout lw, t, func);
-        out
-            .push(
-                LField {
-                    name: f.name,
-                    offset: offset,
-                    ty: t
-                }
-            );
+        out.push(LField { name: f.name, offset: offset, ty: t });
         offset = add(offset, n);
     }
     tag = found;
@@ -1263,14 +1196,7 @@ fn code_of_key(in fails: ChunkSeq[FailRow], key: u32) -> u64 {
 fn fail_row(in fails: ChunkSeq[FailRow], code: u64) -> FailRow {
     match fails.try_get(wrapping_sub(code, 1)) {
         Option::Some(r) => r,
-        Option::None => FailRow {
-            key: 0,
-            ty: 0,
-            sh: Sh {
-                a: 0,
-                n: 0
-            }
-        },
+        Option::None => FailRow { key: 0, ty: 0, sh: Sh { a: 0, n: 0 } },
     }
 }
 
@@ -1408,12 +1334,7 @@ fn local_of(inout lw: Lw, f: Fn, inout pool: ChunkSeq[u64]) -> Local eff [Fail[V
             }
         }
     }
-    Local {
-        a: a,
-        n: wrapping_sub(pool.len(), a) / 2,
-        overflow: overflow,
-        runtime: runtime
-    }
+    Local { a: a, n: wrapping_sub(pool.len(), a) / 2, overflow: overflow, runtime: runtime }
 }
 
 // `fail::local_codes`, as a mask.
@@ -1441,6 +1362,298 @@ fn local_codes(in lw: Lw, in fails: ChunkSeq[FailRow], l: Local, in pool: ChunkS
     m
 }
 
+// ----- `handle Fail` (fail.rs `handler`) ----------------------------------------
+
+// A resolved non-resuming `handle Fail[E]` in the function `site` at the
+// expression span `s0..s1`: the handled type (defaulted) and its key, the
+// nested functions, and the names the patterns bind (symbol + 1, or 0).
+pub copy struct Hd {
+    site: u32,
+    s0: u64,
+    s1: u64,
+    error: u32,
+    key: u32,
+    body: u32,
+    ret: u32,
+    raise: u32,
+    ret_bind: u32,
+    raise_bind: u32,
+    resume: u32,
+}
+
+fn hd0() -> Hd {
+    Hd {
+        site: 0,
+        s0: 0,
+        s1: 0,
+        error: 0,
+        key: 0,
+        body: 0,
+        ret: 0,
+        raise: 0,
+        ret_bind: 0,
+        raise_bind: 0,
+        resume: 0
+    }
+}
+
+fn hd_at(in hs: ChunkSeq[Hd], i: u64) -> Hd {
+    match hs.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => hd0(),
+    }
+}
+
+// `region_block(..).is_some()`: a labeled `Region` handler whose `return`
+// pattern is the reserved `$region[:capacity]` name, with regions active.
+fn is_region_block(in lw: Lw, x: Hx) -> bool {
+    region_capacity(in lw, x) != NONE
+}
+
+// `region_block(..)`'s capacity in bytes, or NONE when `x` is not a
+// region block.
+fn region_capacity(in lw: Lw, x: Hx) -> u64 {
+    if !lw.regions_active || x.kind != X_HANDLE || x.effect != lw.sy.region || x.label == 0 {
+        return NONE;
+    }
+    let r = lw.ex.clause(x.ret);
+    if r.pn != 1 || lw.ex.pat_kind(r, 0) != P_BIND {
+        return NONE;
+    }
+    let s = lw.ex.pat_name(r, 0);
+    if !starts_with(in lw.c.names, s, "$region") {
+        return NONE;
+    }
+    let n = lw.c.names.size(s);
+    if n == 7 {
+        return DEFAULT_CAPACITY;
+    }
+    if lw.c.names.byte(s, 7) != 58 {
+        return NONE;
+    }
+    // `usize::from_str`: an optional `+`, then at least one digit, in range
+    let mut i: u64 = 8;
+    if i < n && lw.c.names.byte(s, i) == 43 {
+        i = inc(i);
+    }
+    if i >= n {
+        return NONE;
+    }
+    let mut v: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let c = lw.c.names.byte(s, i);
+        if c < 48 || c > 57 {
+            return NONE;
+        }
+        let d = widen_u64(wrapping_sub(c, 48));
+        if v > wrapping_sub(NONE, d) / 10 {
+            return NONE;
+        }
+        v = wrapping_add(wrapping_mul(v, 10), d);
+        i = inc(i);
+    }
+    v
+}
+
+// The name pattern `i` of clause `c` binds: symbol + 1, 0 for `_`; raises
+// the Rust error for any other pattern.
+fn bound_name(in lw: Lw, c: Cl, i: u64, site: u32) -> u32 eff [Fail[VErr]] {
+    let k = lw.ex.pat_kind(c, i);
+    if k == P_OTHER {
+        Fail::raise(unsup(U_MATCH, site, tx("a handler clause pattern other than a name or `_`")));
+    }
+    if k == P_BIND {
+        return n32(inc(w(lw.ex.pat_name(c, i))));
+    }
+    0
+}
+
+// The enclosing local the alias map at `ops[at]` (n, then (name, local)
+// pairs) gives `s`, or NONE32.
+fn alias_of(in lw: Lw, at: u64, s: u32) -> u32 {
+    let n = lw.op(at);
+    for i in 0..n {
+        let k = add(inc(at), wrapping_mul(i, 2));
+        if n32(lw.op(k)) == s {
+            return n32(lw.op(inc(k)));
+        }
+    }
+    NONE32
+}
+
+// The alias map of a closure or `handle` instruction: the index of its
+// pair count in `ops`.
+fn aliases_at(ins: InstRow) -> u64 {
+    if ins.op == Op::Handle {
+        add(ins.a, 3)
+    } else {
+        inc(ins.a)
+    }
+}
+
+// `fail::reads`: whether function `fi` reads the local `name`, directly or
+// by an aliased free name of a nested closure or handler.
+fn reads(in lw: Lw, fi: u64, name: u32) -> bool {
+    let f = lw.func(fi);
+    for bi in 0..f.bc {
+        let blk = lw.p.block(add(f.b0, bi));
+        for k in 0..blk.ic {
+            let ins = lw.p.inst(add(blk.i0, k));
+            if ins.op == Op::Read {
+                if n32(lw.op(ins.a)) == name {
+                    return true;
+                }
+            } else if ins.op == Op::Closure || ins.op == Op::Handle {
+                let pool = if ins.op == Op::Handle {
+                    lw.op(add(ins.a, 2))
+                } else {
+                    lw.op(ins.a)
+                };
+                let x = lw.ex.row(pool);
+                let at = aliases_at(ins);
+                for j in 0..x.fnn {
+                    if alias_of(in lw, at, lw.ex.free(x, j)) == name {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+// `assigned_capture`: a parameter of function `fi` captured by value but
+// assigned in its body (symbol + 1), or 0.
+fn assigned_capture(inout lw: Lw, fi: u64) -> u32 {
+    let f = lw.func(fi);
+    for bi in 0..f.bc {
+        let blk = lw.p.block(add(f.b0, bi));
+        for k in 0..blk.ic {
+            let ins = lw.p.inst(add(blk.i0, k));
+            if ins.op == Op::Write {
+                let place = n32(lw.op(ins.a));
+                // the root: the place's text up to its first `.`
+                let n = lw.c.names.size(place);
+                let mut end = n;
+                for i in 0..n {
+                    if lw.c.names.byte(place, i) == 46 {
+                        end = i;
+                        break;
+                    }
+                }
+                let root = if end == n {
+                    place
+                } else {
+                    let mut t = ChunkSeq::new[u8]();
+                    for i in 0..end {
+                        t.push(lw.c.names.byte(place, i));
+                    }
+                    lw.c.names.intern(in t.as_slice())
+                };
+                if by_value_param(in lw, f, root) {
+                    return n32(inc(w(root)));
+                }
+            } else if ins.op == Op::Call {
+                let n = lw.op(inc(ins.a));
+                for j in 0..n {
+                    let at = add(add(ins.a, 2), wrapping_mul(j, 4));
+                    let root = lw.op(add(at, 2));
+                    if lw.op(at) == 1 && root != 0 {
+                        let r = n32(wrapping_sub(root, 1));
+                        if by_value_param(in lw, f, r) {
+                            return n32(inc(w(r)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
+fn by_value_param(in lw: Lw, f: Fn, s: u32) -> bool {
+    for i in 0..f.pn {
+        let p = lw.param(add(f.p0, i));
+        if p.pass != 1 && p.name == s {
+            return true;
+        }
+    }
+    false
+}
+
+// `fail::handler`: resolve the `handle` instruction `ins` of `site`.
+fn fail_handler(inout lw: Lw, site: u32, ins: InstRow, x: Hx) -> Hd eff [Fail[VErr]] {
+    if x.kind != X_HANDLE {
+        Fail::raise(err(E_INVALID, tx("handle instruction without a handler")));
+    }
+    if x.effect != lw.sy.fail {
+        let mut d = tx("handler for ");
+        lw.put_sym(x.effect, inout d);
+        ap(inout d, " (only Fail handlers)");
+        Fail::raise(unsup(U_EFFECT, site, d));
+    }
+    if x.label != 0 || x.en != 1 {
+        Fail::raise(
+            unsup(U_EFFECT, site, tx("labeled or ill-formed Fail handler (only `handle Fail[E]`)"))
+        );
+    }
+    if x.state || lw.op(ins.a) != 0 {
+        Fail::raise(unsup(U_EFFECT, site, tx("stateful Fail handler")));
+    }
+    if x.on != 1 {
+        Fail::raise(err(E_INVALID, tx("a Fail handler has exactly one raise clause")));
+    }
+    let clause = lw.ex.clause(x.oa);
+    if clause.pn != 2 {
+        Fail::raise(err(E_INVALID, tx("raise clause arity")));
+    }
+    let ret = lw.ex.clause(x.ret);
+    if ret.pn == 0 {
+        Fail::raise(err(E_INVALID, tx("return clause without a pattern")));
+    }
+    let error = lw.dflt(lw.ex.arg(x, 0));
+    let key = fail_key(inout lw, error);
+    let bn = nested_name(inout lw.c.names, "handler_body", x.b0, x.b1);
+    let body = nested_instance(inout lw.c.names, site, bn);
+    let rn = nested_name(inout lw.c.names, "handler_clause", ret.s0, ret.s1);
+    let retf = nested_instance(inout lw.c.names, site, rn);
+    let ret_bind = bound_name(in lw, ret, 0, site);
+    let cn = nested_name(inout lw.c.names, "handler_clause", clause.s0, clause.s1);
+    let raisef = nested_instance(inout lw.c.names, site, cn);
+    let raise_bind = bound_name(in lw, clause, 0, site);
+    let resume = bound_name(in lw, clause, 1, site);
+    for g in [body, retf, raisef] {
+        if lw.find(g) == 0 {
+            let mut d = tx("handler function ");
+            lw.put_sym(g, inout d);
+            ap(inout d, " was not lowered");
+            Fail::raise(err(E_INVALID, d));
+        }
+    }
+    if resume != 0 && reads(in lw, wrapping_sub(lw.find(raisef), 1), wrapping_sub(resume, 1)) {
+        let mut d = tx("raise clause uses its continuation '");
+        lw.put_sym(wrapping_sub(resume, 1), inout d);
+        ap(inout d, "' (only non-resuming Fail handlers)");
+        Fail::raise(unsup(U_EFFECT, site, d));
+    }
+    Hd {
+        site: site,
+        s0: x.s0,
+        s1: x.s1,
+        error: error,
+        key: key,
+        body: body,
+        ret: retf,
+        raise: raisef,
+        ret_bind: ret_bind,
+        raise_bind: raise_bind,
+        resume: resume
+    }
+}
+
 // ----- the plan -----------------------------------------------------------------
 
 // A planned parameter: pass, shape, whether it is erased and its writeback
@@ -1465,6 +1678,9 @@ pub copy struct Planned {
     raises: u64,
     status: bool,
     ret_words: u64,
+    // region capabilities `Plan.caps[cpa..cpa+cpn]` (labels)
+    cpa: u64,
+    cpn: u64,
 }
 
 pub struct Plan {
@@ -1474,6 +1690,13 @@ pub struct Plan {
     // symbol -> planned index + 1
     index: ChunkSeq[u32],
     fails: ChunkSeq[FailRow],
+    // by callee symbol: the handler site whose escape codes it uses (see
+    // `recode_mask`), and the number of codes before the escape codes
+    site: ChunkSeq[u64],
+    nbase: u64,
+    // the resolved `handle Fail` sites
+    hd: ChunkSeq[Hd],
+    caps: ChunkSeq[u32],
 }
 
 fn planned(in plan: Plan, i: u64) -> Planned {
@@ -1485,13 +1708,12 @@ fn planned(in plan: Plan, i: u64) -> Planned {
             label: 0,
             pa: 0,
             pn: 0,
-            result: Sh {
-                a: 0,
-                n: 0
-            },
+            result: Sh { a: 0, n: 0 },
             raises: 0,
             status: false,
-            ret_words: 0
+            ret_words: 0,
+            cpa: 0,
+            cpn: 0
         },
     }
 }
@@ -1499,16 +1721,7 @@ fn planned(in plan: Plan, i: u64) -> Planned {
 fn pp(in plan: Plan, i: u64) -> PP {
     match plan.pps.try_get(i) {
         Option::Some(x) => x,
-        Option::None => PP {
-            pass: 0,
-            sh: Sh {
-                a: 0,
-                n: 0
-            },
-            erased: false,
-            wa: 0,
-            wn: 0
-        },
+        Option::None => PP { pass: 0, sh: Sh { a: 0, n: 0 }, erased: false, wa: 0, wn: 0 },
     }
 }
 
@@ -1558,10 +1771,11 @@ fn effects_supported(inout lw: Lw, f: Fn) eff [Fail[VErr]] {
     }
 }
 
-// Whether the row of `f` names a region capability (`row_caps` non-empty).
-fn has_region_caps(in lw: Lw, f: Fn) -> bool {
+// `row_caps`: the region capability labels of the row of `f`, in row
+// order, pushed to `out`.
+fn row_caps(in lw: Lw, f: Fn, inout out: ChunkSeq[u32]) {
     if !lw.regions_active {
-        return false;
+        return;
     }
     let node = lw.c.types.node(f.effects);
     let row = lw.c.types.row(node.r2);
@@ -1571,10 +1785,9 @@ fn has_region_caps(in lw: Lw, f: Fn) -> bool {
             && e.label != 0
             && e.n == 0
             && lw.c.names.byte(wrapping_sub(e.label, 1), 0) != 36 {
-            return true;
+            out.push(wrapping_sub(e.label, 1));
         }
     }
-    false
 }
 
 fn is_wrapping(sy: Sy, s: u32) -> bool {
@@ -1596,6 +1809,11 @@ pub copy struct Found {
     // callees: calls[ca..ca+cn]
     ca: u64,
     cn: u64,
+    // `handle` sites: hd[ha..ha+hn]
+    ha: u64,
+    hn: u64,
+    cpa: u64,
+    cpn: u64,
 }
 
 // `plan` (`plan_with` without coverage, sites or handlers).
@@ -1608,7 +1826,15 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
     let mut lpool = ChunkSeq::new[u64]();
     let mut queue = ChunkSeq::new[u32]();
     let mut seen = ChunkSeq::new[u8]();
+    let mut hds = ChunkSeq::new[Hd]();
+    let mut caps = ChunkSeq::new[u32]();
+    // per queue entry: the inherited capabilities `caps[a..a+n]` (a = NONE:
+    // none, the row's own)
+    let mut qca = ChunkSeq::new[u64]();
+    let mut qcn = ChunkSeq::new[u64]();
     queue.push(entry);
+    qca.push(NONE);
+    qcn.push(0);
     set_table8(inout seen, w(entry), 1);
     let mut head: u64 = 0;
     loop {
@@ -1616,6 +1842,8 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
             break;
         }
         let name = u32_at(in queue, head);
+        let qa = u64_at(in qca, head);
+        let qn = u64_at(in qcn, head);
         head = inc(head);
         if found.len() >= lw.max_functions {
             let mut d = tx("more than ");
@@ -1651,31 +1879,36 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
             Fail::raise(unsup(U_GENERIC, name, tx("a type parameter without a concrete instance")));
         }
         effects_supported(inout lw, f);
-        if has_region_caps(in lw, f) {
-            Fail::raise(not_ported("region capabilities"));
+        let mut cpa = qa;
+        let mut cpn = qn;
+        if qa == NONE {
+            cpa = caps.len();
+            row_caps(in lw, f, inout caps);
+            cpn = wrapping_sub(caps.len(), cpa);
+        }
+        // Nothing supplies the entry's capabilities: the process starts with
+        // no open region.
+        if name == entry && cpn > 0 {
+            let mut d = tx("region capability on the entry (");
+            for j in 0..cpn {
+                if j > 0 {
+                    ap(inout d, ", ");
+                }
+                lw.put_sym(u32_at(in caps, add(cpa, j)), inout d);
+            }
+            ap(inout d, ")");
+            Fail::raise(unsup(U_EFFECT, name, d));
         }
         let pa = pps.len();
         for i in 0..f.pn {
             let p = lw.param(add(f.p0, i));
             let erased = nested && clause && lw.c.types.node(p.ty).kind == TyKind::Fn;
             let sh = if erased {
-                Sh {
-                    a: 0,
-                    n: 0
-                }
+                Sh { a: 0, n: 0 }
             } else {
                 shape(inout lw, p.ty, name)
             };
-            pps
-                .push(
-                    PP {
-                        pass: p.pass,
-                        sh: sh,
-                        erased: erased,
-                        wa: 0,
-                        wn: 0
-                    }
-                );
+            pps.push(PP { pass: p.pass, sh: sh, erased: erased, wa: 0, wn: 0 });
         }
         for i in 0..f.pn {
             let p = lw.param(add(f.p0, i));
@@ -1704,24 +1937,57 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
             let ok = pps
                 .try_set(
                     add(pa, i),
-                    PP {
-                        pass: q.pass,
-                        sh: q.sh,
-                        erased: q.erased,
-                        wa: wa,
-                        wn: wn
-                    }
+                    PP { pass: q.pass, sh: q.sh, erased: q.erased, wa: wa, wn: wn }
                 );
         }
         let result = shape(inout lw, f.result, name);
         let ca = calls.len();
+        let ha = hds.len();
         let sy = lw.sy;
         for bi in 0..f.bc {
             let blk = lw.p.block(add(f.b0, bi));
             for k in 0..blk.ic {
                 let ins = lw.p.inst(add(blk.i0, k));
                 if ins.op == Op::Handle {
-                    Fail::raise(not_ported("handle expressions"));
+                    let x = lw.ex.row(lw.op(add(ins.a, 2)));
+                    if is_region_block(in lw, x) {
+                        // The body sees the enclosing capabilities and its
+                        // own (which shadows an outer one of the same
+                        // label). Its failures pass through the block.
+                        let label = wrapping_sub(x.label, 1);
+                        let bn = nested_name(inout lw.c.names, "handler_body", x.b0, x.b1);
+                        let body = nested_instance(inout lw.c.names, name, bn);
+                        if u8_at(in seen, w(body)) == 0 {
+                            set_table8(inout seen, w(body), 1);
+                            queue.push(body);
+                            let mut inner = ChunkSeq::new[u32]();
+                            for j in 0..cpn {
+                                let c = u32_at(in caps, add(cpa, j));
+                                if c != label {
+                                    inner.push(c);
+                                }
+                            }
+                            inner.push(label);
+                            qca.push(caps.len());
+                            qcn.push(inner.len());
+                            for j in 0..inner.len() {
+                                caps.push(u32_at(in inner, j));
+                            }
+                        }
+                        calls.push(body);
+                        continue;
+                    }
+                    let h = fail_handler(inout lw, name, ins, x);
+                    for g in [h.body, h.ret, h.raise] {
+                        if u8_at(in seen, w(g)) == 0 {
+                            set_table8(inout seen, w(g), 1);
+                            queue.push(g);
+                            qca.push(NONE);
+                            qcn.push(0);
+                        }
+                    }
+                    hds.push(h);
+                    continue;
                 }
                 if ins.op == Op::Call {
                     let callee = n32(lw.op(ins.a));
@@ -1733,6 +1999,8 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                         if u8_at(in seen, w(callee)) == 0 {
                             set_table8(inout seen, w(callee), 1);
                             queue.push(callee);
+                            qca.push(NONE);
+                            qcn.push(0);
                         }
                         calls.push(callee);
                     }
@@ -1750,18 +2018,35 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                     result: result,
                     local: local,
                     ca: ca,
-                    cn: wrapping_sub(calls.len(), ca)
+                    cn: wrapping_sub(calls.len(), ca),
+                    ha: ha,
+                    hn: wrapping_sub(hds.len(), ha),
+                    cpa: cpa,
+                    cpn: cpn
                 }
             );
     }
     // `fail::codes`: every error type raised anywhere, in key order.
     let mut keys = ChunkSeq::new[u32]();
     let mut tys = ChunkSeq::new[u32]();
+    // the handled error types first (`codes` starts from `handled`), then
+    // every function's own
+    let mut pairs = ChunkSeq::new[u64]();
+    for i in 0..hds.len() {
+        let h = hd_at(in hds, i);
+        pairs.push(w(h.key));
+        pairs.push(w(h.error));
+    }
     for i in 0..found.len() {
         let fd = found_at(in found, i);
-        for j in 0..fd.local.n {
-            let key = n32(u64_at(in lpool, add(fd.local.a, wrapping_mul(j, 2))));
-            let ty = n32(u64_at(in lpool, inc(add(fd.local.a, wrapping_mul(j, 2)))));
+        for j in 0..wrapping_mul(fd.local.n, 2) {
+            pairs.push(u64_at(in lpool, add(fd.local.a, j)));
+        }
+    }
+    for i in 0..1 {
+        for j in 0..pairs.len() / 2 {
+            let key = n32(u64_at(in pairs, wrapping_mul(j, 2)));
+            let ty = n32(u64_at(in pairs, inc(wrapping_mul(j, 2))));
             let mut at = NONE;
             for q in 0..keys.len() {
                 if u32_at(in keys, q) == key {
@@ -1795,21 +2080,84 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
             }
         }
     }
-    if keys.len() > 63 {
+    // The handler site tags (`Sites::tags`), in text order: each adds an
+    // escape code per code (`Fails::add_escapes`).
+    let mut tags = ChunkSeq::new[u32]();
+    for j in 0..wrapping_add(lw.sites.et.len(), lw.sites.rt.len()) {
+        let t = if j < lw.sites.et.len() {
+            u32_at(in lw.sites.et, j)
+        } else {
+            u32_at(in lw.sites.rt, wrapping_sub(j, lw.sites.et.len()))
+        };
+        let mut dup = false;
+        let mut pos = tags.len();
+        for q in 0..tags.len() {
+            let c = cmp_sym(in lw.c.names, t, u32_at(in tags, q));
+            if c == 0 {
+                dup = true;
+            }
+            if c < 0 && pos == tags.len() {
+                pos = q;
+            }
+        }
+        if !dup {
+            tags.push(0);
+            let mut q = wrapping_sub(tags.len(), 1);
+            loop {
+                if q <= pos {
+                    break;
+                }
+                let ok = tags.try_set(q, u32_at(in tags, wrapping_sub(q, 1)));
+                q = wrapping_sub(q, 1);
+            }
+            let ok = tags.try_set(pos, t);
+        }
+    }
+    if wrapping_mul(keys.len(), inc(tags.len())) > 63 {
         Fail::raise(not_ported("more than 63 failure types"));
     }
     let mut fails = ChunkSeq::new[FailRow]();
     for i in 0..keys.len() {
         let ty = u32_at(in tys, i);
         let sh = shape(inout lw, ty, entry);
-        fails
-            .push(
-                FailRow {
-                    key: u32_at(in keys, i),
-                    ty: ty,
-                    sh: sh
-                }
-            );
+        fails.push(FailRow { key: u32_at(in keys, i), ty: ty, sh: sh });
+    }
+    let nbase = keys.len();
+    for t in 0..tags.len() {
+        for i in 0..nbase {
+            let r = fail_row(in fails, inc(i));
+            fails.push(FailRow { key: NONE32, ty: r.ty, sh: r.sh });
+        }
+    }
+    // By callee: the site whose escape codes it uses, ((tag index + 1) << 1)
+    // | restore.
+    let mut site = ChunkSeq::new[u64]();
+    for j in 0..wrapping_add(lw.sites.ef.len(), lw.sites.rf.len()) {
+        let escape = j < lw.sites.ef.len();
+        let (f, t) = if escape {
+            (u32_at(in lw.sites.ef, j), u32_at(in lw.sites.et, j))
+        } else {
+            let q = wrapping_sub(j, lw.sites.ef.len());
+            (u32_at(in lw.sites.rf, q), u32_at(in lw.sites.rt, q))
+        };
+        let mut ti: u64 = 0;
+        for q in 0..tags.len() {
+            if u32_at(in tags, q) == t {
+                ti = q;
+            }
+        }
+        let code = (inc(ti) << 1) | if escape {
+            0
+        } else {
+            1
+        };
+        loop {
+            if site.len() > w(f) {
+                break;
+            }
+            site.push(0);
+        }
+        let ok = site.try_set(w(f), code);
     }
     let mut index = ChunkSeq::new[u32]();
     for i in 0..found.len() {
@@ -1829,7 +2177,30 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                 let c = u32_at(in calls, add(fd.ca, j));
                 let k = w(u32_at(in index, w(c)));
                 if k != 0 {
-                    next = next | u64_at(in raises, wrapping_sub(k, 1));
+                    next = next | recode_mask(
+                        in site,
+                        nbase,
+                        c,
+                        u64_at(in raises, wrapping_sub(k, 1))
+                    );
+                }
+            }
+            for j in 0..fd.hn {
+                let h = hd_at(in hds, add(fd.ha, j));
+                let caught = code_of_key(in fails, h.key);
+                let kb = w(u32_at(in index, w(h.body)));
+                if kb != 0 {
+                    let mut m = u64_at(in raises, wrapping_sub(kb, 1));
+                    if caught != 0 {
+                        m = m & (bit(caught) ^ NONE);
+                    }
+                    next = next | m;
+                }
+                for g in [h.ret, h.raise] {
+                    let kg = w(u32_at(in index, w(g)));
+                    if kg != 0 {
+                        next = next | u64_at(in raises, wrapping_sub(kg, 1));
+                    }
                 }
             }
             if next != u64_at(in raises, n) {
@@ -1897,7 +2268,9 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                     result: fd.result,
                     raises: r,
                     status: status,
-                    ret_words: ret_words
+                    ret_words: ret_words,
+                    cpa: fd.cpa,
+                    cpn: fd.cpn
                 }
             );
         label = add(label, 2);
@@ -1908,20 +2281,15 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
         wb: wb,
         index: index,
         fails: fails,
+        site: site,
+        nbase: nbase,
+        hd: hds,
+        caps: caps,
     }
 }
 
 fn pp0() -> PP {
-    PP {
-        pass: 0,
-        sh: Sh {
-            a: 0,
-            n: 0
-        },
-        erased: false,
-        wa: 0,
-        wn: 0
-    }
+    PP { pass: 0, sh: Sh { a: 0, n: 0 }, erased: false, wa: 0, wn: 0 }
 }
 
 fn found_at(in found: ChunkSeq[Found], i: u64) -> Found {
@@ -1932,18 +2300,14 @@ fn found_at(in found: ChunkSeq[Found], i: u64) -> Found {
             fi: 0,
             pa: 0,
             pn: 0,
-            result: Sh {
-                a: 0,
-                n: 0
-            },
-            local: Local {
-                a: 0,
-                n: 0,
-                overflow: false,
-                runtime: false
-            },
+            result: Sh { a: 0, n: 0 },
+            local: Local { a: 0, n: 0, overflow: false, runtime: false },
             ca: 0,
-            cn: 0
+            cn: 0,
+            ha: 0,
+            hn: 0,
+            cpa: 0,
+            cpn: 0
         },
     }
 }
@@ -1975,17 +2339,15 @@ pub struct Fl {
     max_rows: u64,
     // raise stubs: label << 8 | kind
     stubs: ChunkSeq[u64],
+    // region capabilities in scope: (label, header slot) pairs, later
+    // ones shadowing earlier ones
+    caps: ChunkSeq[u64],
+    // the header slots of the region blocks open around the current call
+    open: ChunkSeq[u64],
 }
 
 fn lir(tag: u8, op: u8, kind: u8, f1: u64, f2: u64, f3: u64) -> Lir {
-    Lir {
-        tag: tag,
-        op: op,
-        kind: kind,
-        f1: f1,
-        f2: f2,
-        f3: f3
-    }
+    Lir { tag: tag, op: op, kind: kind, f1: f1, f2: f2, f3: f3 }
 }
 
 fn fname(in fl: Fl) -> u32 {
@@ -2023,13 +2385,7 @@ fn alloc(in lw: Lw, inout fl: Fl, words: u64) -> u64 eff [Fail[VErr]] {
 fn value_of(inout lw: Lw, inout fl: Fl, v: u64, ty: u32) -> (u64, Sh) eff [Fail[VErr]] {
     let s = u64_at(in fl.vslot, v);
     if v < fl.vslot.len() && s != NONE {
-        return (
-            s,
-            Sh {
-                a: u64_at(in fl.vsa, v),
-                n: u64_at(in fl.vsn, v)
-            }
-        );
+        return (s, Sh { a: u64_at(in fl.vsa, v), n: u64_at(in fl.vsn, v) });
     }
     let sh = shape(inout lw, ty, fl.f.name);
     let slot = alloc(in lw, inout fl, sh.n);
@@ -2059,13 +2415,7 @@ fn value(in lw: Lw, in fl: Fl, v: u64) -> (u64, Sh) eff [Fail[VErr]] {
         ap(inout d, "'");
         Fail::raise(err(E_INVALID, d));
     }
-    (
-        s,
-        Sh {
-            a: u64_at(in fl.vsa, v),
-            n: u64_at(in fl.vsn, v)
-        }
-    )
+    (s, Sh { a: u64_at(in fl.vsa, v), n: u64_at(in fl.vsn, v) })
 }
 
 // `types.get(v)`: the defaulted type value_of recorded, or NONE32.
@@ -2098,13 +2448,7 @@ fn local(inout lw: Lw, inout fl: Fl, name: u32) -> (u64, Sh) eff [Fail[VErr]] {
     let i = wrapping_sub(li, 1);
     let s = u64_at(in fl.lslot, i);
     if s != NONE {
-        return (
-            s,
-            Sh {
-                a: u64_at(in fl.lsa, i),
-                n: u64_at(in fl.lsn, i)
-            }
-        );
+        return (s, Sh { a: u64_at(in fl.lsa, i), n: u64_at(in fl.lsn, i) });
     }
     let ty = lw.local_row(add(fl.f.l0, i)).ty;
     let sh = shape(inout lw, ty, fl.f.name);
@@ -2322,14 +2666,7 @@ fn parts(inout lw: Lw, in fl: Fl, at: u64, ty0: u32, inout out: ChunkSeq[Part])
         let mut p = add(at, 4);
         for i in 0..n {
             let t = lw.c.types.arg(ty, i);
-            out
-                .push(
-                    Part {
-                        at: p,
-                        offset: offset,
-                        ty: t
-                    }
-                );
+            out.push(Part { at: p, offset: offset, ty: t });
             offset = add(offset, words_of(inout lw, t, func));
             p = pattern_end(in lw.p.ops, p, 1);
         }
@@ -2362,14 +2699,7 @@ fn parts(inout lw: Lw, in fl: Fl, at: u64, ty0: u32, inout out: ChunkSeq[Part])
                     Fail::raise(err(E_INVALID, d));
                 }
                 match layout.try_get(hit) {
-                    Option::Some(x) => out
-                        .push(
-                            Part {
-                                at: inc(p),
-                                offset: x.offset,
-                                ty: x.ty
-                            }
-                        ),
+                    Option::Some(x) => out.push(Part { at: inc(p), offset: x.offset, ty: x.ty }),
                     Option::None => {},
                 }
                 p = pattern_end(in lw.p.ops, inc(p), 1);
@@ -2399,14 +2729,7 @@ fn parts(inout lw: Lw, in fl: Fl, at: u64, ty0: u32, inout out: ChunkSeq[Part])
             let f = lw.c.world.field(add(w(v.fa), fi));
             let t = substitute(inout lw.c.types, f.ty, in vars);
             let wd = words_of(inout lw, t, func);
-            offs
-                .push(
-                    LField {
-                        name: f.name,
-                        offset: offset,
-                        ty: t
-                    }
-                );
+            offs.push(LField { name: f.name, offset: offset, ty: t });
             offset = add(offset, wd);
         }
         let mut p = add(at, 6);
@@ -2431,14 +2754,7 @@ fn parts(inout lw: Lw, in fl: Fl, at: u64, ty0: u32, inout out: ChunkSeq[Part])
                 Fail::raise(err(E_INVALID, d));
             }
             match offs.try_get(hit) {
-                Option::Some(x) => out
-                    .push(
-                        Part {
-                            at: inc(p),
-                            offset: x.offset,
-                            ty: x.ty
-                        }
-                    ),
+                Option::Some(x) => out.push(Part { at: inc(p), offset: x.offset, ty: x.ty }),
                 Option::None => {},
             }
             p = pattern_end(in lw.p.ops, inc(p), 1);
@@ -2635,6 +2951,15 @@ fn status_is(inout fl: Fl, status: u64, code: u64, tmp: u64, otherwise: u64) eff
 // `propagate`: pass a callee's failure on, or abort (the entry).
 fn propagate(inout lw: Lw, inout fl: Fl, in plan: Plan, status: u64, codes: u64) eff [Fail[VErr]] {
     if fl.me.status {
+        // A failure leaving open region blocks closes them, innermost first.
+        let mut k = fl.open.len();
+        loop {
+            if k == 0 {
+                break;
+            }
+            k = wrapping_sub(k, 1);
+            region_close(inout lw, inout fl, u64_at(in fl.open, k));
+        }
         let tmp = alloc(in lw, inout fl, 1);
         push(inout fl, lir(LIR_STORE_IN, 0, 0, 0, status, 0));
         let pw = payload_words(in plan.fails, codes);
@@ -2676,9 +3001,69 @@ pub copy struct Arg {
 fn call(inout lw: Lw, inout fl: Fl, in plan: Plan, n: u64, in args: ChunkSeq[Arg], dst: u64) eff [
     Fail[VErr]
 ] {
+    call_catch(inout lw, inout fl, in plan, n, in args, dst, 0, 0);
+}
+
+// `call` with `catch`: a failure with code `code` (0: none) jumps to
+// `handler`.
+fn call_catch(
+    inout lw: Lw,
+    inout fl: Fl,
+    in plan: Plan,
+    n: u64,
+    in args: ChunkSeq[Arg],
+    dst: u64,
+    code: u64,
+    handler: u64
+) eff [Fail[VErr]] {
+    call_opening(inout lw, inout fl, in plan, n, in args, dst, code, handler, NONE32, 0);
+}
+
+// The header slot of region capability `label` in scope (`own`, the block
+// being opened, resolves to `own_slot` first).
+fn cap_slot(in lw: Lw, in fl: Fl, label: u32, own: u32, own_slot: u64) -> u64 eff [Fail[VErr]] {
+    if own != NONE32 && label == own {
+        return own_slot;
+    }
+    let mut k = fl.caps.len() / 2;
+    loop {
+        if k == 0 {
+            break;
+        }
+        k = wrapping_sub(k, 1);
+        if u64_at(in fl.caps, wrapping_mul(k, 2)) == w(label) {
+            return u64_at(in fl.caps, inc(wrapping_mul(k, 2)));
+        }
+    }
+    let mut d = tx("region capability '");
+    lw.put_sym(label, inout d);
+    ap(inout d, "' is not in scope");
+    Fail::raise(ufail(in fl, U_EFFECT, d));
+    0
+}
+
+// `call_opening`: `call_catch`, where `own` (NONE32: none) is the label of a
+// region block being opened, whose header is in `own_slot`.
+fn call_opening(
+    inout lw: Lw,
+    inout fl: Fl,
+    in plan: Plan,
+    n: u64,
+    in args: ChunkSeq[Arg],
+    dst: u64,
+    code: u64,
+    handler: u64,
+    own: u32,
+    own_slot: u64
+) eff [Fail[VErr]] {
     let target = planned(in plan, n);
+    let mut cap_slots = ChunkSeq::new[u64]();
+    for j in 0..target.cpn {
+        let c = u32_at(in plan.caps, add(target.cpa, j));
+        cap_slots.push(cap_slot(in lw, in fl, c, own, own_slot));
+    }
     let ret = target.ret_words;
-    let mut area = ret;
+    let mut area = add(ret, cap_slots.len());
     for i in 0..args.len() {
         match args.try_get(i) {
             Option::Some(a) => area = add(area, a.words),
@@ -2694,11 +3079,7 @@ fn call(inout lw: Lw, inout fl: Fl, in plan: Plan, n: u64, in args: ChunkSeq[Arg
     for i in 0..args.len() {
         let a = match args.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Arg {
-                src: 0,
-                words: 0,
-                place: NONE
-            },
+            Option::None => Arg { src: 0, words: 0, place: NONE },
         };
         for k in 0..a.words {
             push(inout fl, lir(LIR_STORE_OUT, 0, 0, add(index, k), add(a.src, k), 0));
@@ -2709,6 +3090,10 @@ fn call(inout lw: Lw, inout fl: Fl, in plan: Plan, n: u64, in args: ChunkSeq[Arg
             wbs.push(add(target.pa, i));
         }
         index = add(index, a.words);
+    }
+    for j in 0..cap_slots.len() {
+        push(inout fl, lir(LIR_STORE_OUT, 0, 0, index, u64_at(in cap_slots, j), 0));
+        index = inc(index);
     }
     push(inout fl, lir(LIR_CALL, 0, 0, target.label, 0, 0));
     let nw = wbs.len() / 3;
@@ -2740,9 +3125,406 @@ fn call(inout lw: Lw, inout fl: Fl, in plan: Plan, n: u64, in args: ChunkSeq[Arg
         let cont = fresh(inout fl);
         push(inout fl, lir(LIR_JUMP, 0, 0, cont, 0, 0));
         push(inout fl, lir(LIR_LABEL, 0, 0, errl, 0, 0));
-        propagate(inout lw, inout fl, in plan, st, target.raises);
+        let mut rest = target.raises;
+        if u64_at(in plan.site, w(target.name)) != 0 {
+            // `recode_status`
+            let done = fresh(inout fl);
+            for c in 1..64 {
+                if has(rest, c) {
+                    let to = recode_code(in plan.site, plan.nbase, target.name, c);
+                    if to != c {
+                        let other = fresh(inout fl);
+                        status_is(inout fl, st, c, inc(st), other);
+                        push(inout fl, lir(LIR_CONST, 0, 0, st, to, 0));
+                        push(inout fl, lir(LIR_JUMP, 0, 0, done, 0, 0));
+                        push(inout fl, lir(LIR_LABEL, 0, 0, other, 0, 0));
+                    }
+                }
+            }
+            push(inout fl, lir(LIR_LABEL, 0, 0, done, 0, 0));
+            rest = recode_mask(in plan.site, plan.nbase, target.name, rest);
+        }
+        if code != 0 && has(rest, code) {
+            rest = rest & (bit(code) ^ NONE);
+            let other = fresh(inout fl);
+            status_is(inout fl, st, code, inc(st), other);
+            push(inout fl, lir(LIR_JUMP, 0, 0, handler, 0, 0));
+            push(inout fl, lir(LIR_LABEL, 0, 0, other, 0, 0));
+        }
+        propagate(inout lw, inout fl, in plan, st, rest);
         push(inout fl, lir(LIR_LABEL, 0, 0, cont, 0, 0));
     }
+}
+
+// `nested_args`: the argument words of the nested handler function `n`
+// (planned): its captures, the enclosing locals the alias map at
+// `ops[aliases]` names, and the value `bind` names (symbol + 1, or 0) at
+// `slot`.
+fn nested_args(
+    inout lw: Lw,
+    inout fl: Fl,
+    in plan: Plan,
+    n: u64,
+    aliases: u64,
+    bind: u32,
+    slot: u64
+) -> ChunkSeq[Arg] eff [Fail[VErr]] {
+    let target = planned(in plan, n);
+    let f = lw.func(target.fi);
+    let mut out = ChunkSeq::new[Arg]();
+    for i in 0..f.pn {
+        let p = lw.param(add(f.p0, i));
+        let q = pp(in plan, add(target.pa, i));
+        if q.erased {
+            out.push(Arg { src: 0, words: 0, place: NONE });
+            continue;
+        }
+        if bind != 0 && p.name == wrapping_sub(bind, 1) {
+            out.push(Arg { src: slot, words: q.sh.n, place: NONE });
+            continue;
+        }
+        let a = alias_of(in lw, aliases, p.name);
+        let name = if a == NONE32 {
+            p.name
+        } else {
+            a
+        };
+        let (ls, lsh) = local(inout lw, inout fl, name);
+        if lsh.n != q.sh.n {
+            let mut d = tx("capture '");
+            lw.put_sym(p.name, inout d);
+            ap(inout d, "' of ");
+            lw.put_sym(target.name, inout d);
+            Fail::raise(err(E_INVALID, d));
+        }
+        let place = if p.pass == 1 {
+            ls
+        } else {
+            NONE
+        };
+        out.push(Arg { src: ls, words: q.sh.n, place: place });
+    }
+    out
+}
+
+// The planned index of `name`, or the Rust `unplanned` error.
+fn planned_index(in lw: Lw, in plan: Plan, name: u32) -> u64 eff [Fail[VErr]] {
+    let k = w(u32_at(in plan.index, w(name)));
+    if k == 0 {
+        let mut d = tx("unplanned ");
+        lw.put_sym(name, inout d);
+        Fail::raise(err(E_INVALID, d));
+    }
+    wrapping_sub(k, 1)
+}
+
+// `handle`: `handle Fail[E] in body with { return v => r, raise(e, _) => h }`.
+fn handle_fail(inout lw: Lw, inout fl: Fl, in plan: Plan, ins: InstRow) eff [Fail[VErr]] {
+    let x = lw.ex.row(lw.op(add(ins.a, 2)));
+    let capacity = region_capacity(in lw, x);
+    if capacity != NONE {
+        region_block(inout lw, inout fl, in plan, ins, x, capacity);
+        return;
+    }
+    let mut found = NONE;
+    for i in 0..plan.hd.len() {
+        let h = hd_at(in plan.hd, i);
+        if found == NONE && h.site == fl.f.name && h.s0 == x.s0 && h.s1 == x.s1 {
+            found = i;
+        }
+    }
+    if found == NONE {
+        Fail::raise(err(E_INVALID, tx("unplanned handler")));
+    }
+    let h = hd_at(in plan.hd, found);
+    let body = planned_index(in lw, in plan, h.body);
+    let ret = planned_index(in lw, in plan, h.ret);
+    let raisef = planned_index(in lw, in plan, h.raise);
+    for g in [h.body, h.ret, h.raise] {
+        let fx = lw.find(g);
+        if fx != 0 {
+            let root = assigned_capture(inout lw, wrapping_sub(fx, 1));
+            if root != 0 {
+                let mut d = tx("handler assigns the captured place '");
+                lw.put_sym(wrapping_sub(root, 1), inout d);
+                ap(inout d, "'");
+                Fail::raise(ufail(in fl, U_EFFECT, d));
+            }
+        }
+    }
+    let aliases = aliases_at(ins);
+    let (dst, dsh) = value_of(inout lw, inout fl, w(ins.dest), ins.ty);
+    let value = alloc(in lw, inout fl, planned(in plan, body).result.n);
+    let code = code_of_key(in plan.fails, h.key);
+    let handler = fresh(inout fl);
+    let end = fresh(inout fl);
+    let args = nested_args(inout lw, inout fl, in plan, body, aliases, 0, 0);
+    call_catch(inout lw, inout fl, in plan, body, in args, value, code, handler);
+    let args2 = nested_args(inout lw, inout fl, in plan, ret, aliases, h.ret_bind, value);
+    call(inout lw, inout fl, in plan, ret, in args2, dst);
+    push(inout fl, lir(LIR_JUMP, 0, 0, end, 0, 0));
+    push(inout fl, lir(LIR_LABEL, 0, 0, handler, 0, 0));
+    let words = words_of(inout lw, h.error, fl.f.name);
+    let payload = alloc(in lw, inout fl, words);
+    for k in 0..words {
+        push(inout fl, lir(LIR_LOAD_OUT, 0, 0, add(payload, k), inc(k), 0));
+    }
+    let args3 = nested_args(inout lw, inout fl, in plan, raisef, aliases, h.raise_bind, payload);
+    call(inout lw, inout fl, in plan, raisef, in args3, dst);
+    push(inout fl, lir(LIR_LABEL, 0, 0, end, 0, 0));
+}
+
+// ----- regions --------------------------------------------------------------------
+
+fn word(in lw: Lw, inout fl: Fl, v: u64) -> u64 eff [Fail[VErr]] {
+    let dst = alloc(in lw, inout fl, 1);
+    push(inout fl, lir(LIR_CONST, 0, 0, dst, v, 0));
+    dst
+}
+
+fn load_ptr(in lw: Lw, inout fl: Fl, ptr: u64, offset: u64) -> u64 eff [Fail[VErr]] {
+    let dst = alloc(in lw, inout fl, 1);
+    push(inout fl, lir(LIR_LOAD_PTR, 0, 0, dst, ptr, offset));
+    dst
+}
+
+fn store_ptr(inout fl: Fl, ptr: u64, offset: u64, src: u64) eff [Fail[VErr]] {
+    push(inout fl, lir(LIR_STORE_PTR, 0, 0, ptr, offset, src));
+}
+
+fn add_u64(in lw: Lw, inout fl: Fl, a: u64, b: u64) -> u64 eff [Fail[VErr]] {
+    let dst = alloc(in lw, inout fl, 1);
+    push(inout fl, lir(LIR_ARITH, OP_ADD, K_U64, dst, a, b));
+    dst
+}
+
+// Abort with the region trap unless `a <= b` (unsigned).
+fn region_bound(in lw: Lw, inout fl: Fl, a: u64, b: u64) eff [Fail[VErr]] {
+    let ok = alloc(in lw, inout fl, 1);
+    push(inout fl, lir(LIR_COMPARE, C_LE, K_U64, ok, a, b));
+    push(inout fl, lir(LIR_BRANCH_ZERO, 0, 0, ok, widen_u64(T_REGION), 0));
+}
+
+// `heap_alloc`: bump-allocate `words` heap words: (globals pointer, first
+// word, words in use before, words in use after).
+fn heap_alloc(in lw: Lw, inout fl: Fl, words: u64) -> (u64, u64, u64, u64) eff [Fail[VErr]] {
+    let globals = word(in lw, inout fl, 0);
+    let top = load_ptr(in lw, inout fl, globals, G_TOP);
+    let base = word(in lw, inout fl, GLOBALS);
+    let first = add_u64(in lw, inout fl, top, base);
+    let n = word(in lw, inout fl, words);
+    let after = add_u64(in lw, inout fl, top, n);
+    let limit = word(in lw, inout fl, wrapping_sub(HEAP_WORDS, GLOBALS));
+    region_bound(in lw, inout fl, after, limit);
+    store_ptr(inout fl, globals, G_TOP, after);
+    (globals, first, top, after)
+}
+
+// `region label(capacity) { body }`: open a header, run the body's nested
+// function with the captured places and capabilities, close.
+fn region_block(inout lw: Lw, inout fl: Fl, in plan: Plan, ins: InstRow, x: Hx, capacity: u64) eff [
+    Fail[VErr]
+] {
+    let label = wrapping_sub(x.label, 1);
+    let bn = nested_name(inout lw.c.names, "handler_body", x.b0, x.b1);
+    let body = nested_instance(inout lw.c.names, fl.f.name, bn);
+    let k = w(u32_at(in plan.index, w(body)));
+    if k == 0 {
+        let mut d = tx("unplanned region body ");
+        lw.put_sym(body, inout d);
+        Fail::raise(err(E_INVALID, d));
+    }
+    let n = wrapping_sub(k, 1);
+    let fx = lw.find(body);
+    if fx == 0 {
+        let mut d = tx("missing region body ");
+        lw.put_sym(body, inout d);
+        Fail::raise(err(E_INVALID, d));
+    }
+    // Captured places are copied in (and `inout` ones back); a body that
+    // assigns a place captured by value would lose the write.
+    let root = assigned_capture(inout lw, wrapping_sub(fx, 1));
+    if root != 0 {
+        let mut d = tx("region block assigns the captured place '");
+        lw.put_sym(wrapping_sub(root, 1), inout d);
+        ap(inout d, "'");
+        Fail::raise(ufail(in fl, U_EFFECT, d));
+    }
+    // Open: a header in the heap.
+    let (globals, header, top, after) = heap_alloc(in lw, inout fl, HEADER);
+    let zero = word(in lw, inout fl, 0);
+    let cap = word(in lw, inout fl, capacity);
+    let prev = load_ptr(in lw, inout fl, globals, G_INNER);
+    store_ptr(inout fl, header, H_USED, zero);
+    store_ptr(inout fl, header, H_ALLOCS, zero);
+    store_ptr(inout fl, header, H_PREV, prev);
+    store_ptr(inout fl, header, H_START, top);
+    store_ptr(inout fl, header, H_CAP, cap);
+    store_ptr(inout fl, globals, G_INNER, header);
+    // The body, called like a function with the captured places and the
+    // capabilities in scope. A failure it passes on closes the block (see
+    // `propagate`).
+    let args = nested_args(inout lw, inout fl, in plan, n, aliases_at(ins), 0, 0);
+    let (dst, dsh) = value_of(inout lw, inout fl, w(ins.dest), ins.ty);
+    if dsh.n != planned(in plan, n).result.n {
+        let mut d = tx("result shape of ");
+        lw.put_sym(body, inout d);
+        Fail::raise(err(E_INVALID, d));
+    }
+    fl.open.push(header);
+    call_opening(inout lw, inout fl, in plan, n, in args, dst, 0, 0, label, header);
+    fl.open.truncate(wrapping_sub(fl.open.len(), 1));
+    region_close(inout lw, inout fl, header);
+}
+
+// `region_close`: close the region block whose header is in slot `header`:
+// the enclosing block is innermost again, and the heap words above the
+// block's start are free unless an outer region allocated while it was open
+// (the pin).
+fn region_close(inout lw: Lw, inout fl: Fl, header: u64) eff [Fail[VErr]] {
+    let globals = word(in lw, inout fl, 0);
+    let prev = load_ptr(in lw, inout fl, header, H_PREV);
+    store_ptr(inout fl, globals, G_INNER, prev);
+    let start = load_ptr(in lw, inout fl, header, H_START);
+    let pin = load_ptr(in lw, inout fl, globals, G_PIN);
+    let keep = alloc(in lw, inout fl, 1);
+    push(inout fl, lir(LIR_COMPARE, C_GT, K_U64, keep, pin, start));
+    let use_start = fresh(inout fl);
+    let done = fresh(inout fl);
+    push(inout fl, lir(LIR_BRANCH_ZERO, 0, 0, keep, use_start, 0));
+    store_ptr(inout fl, globals, G_TOP, pin);
+    push(inout fl, lir(LIR_JUMP, 0, 0, done, 0, 0));
+    push(inout fl, lir(LIR_LABEL, 0, 0, use_start, 0, 0));
+    store_ptr(inout fl, globals, G_TOP, start);
+    push(inout fl, lir(LIR_LABEL, 0, 0, done, 0, 0));
+}
+
+// Argument `i` of the call with operands at `ops[a..]` (`n` arguments).
+fn region_arg(in lw: Lw, callee: u32, a: u64, n: u64, i: u64) -> u64 eff [Fail[VErr]] {
+    if i >= n {
+        let mut d = ChunkSeq::new[u8]();
+        lw.put_sym(callee, inout d);
+        ap(inout d, " lacks an argument");
+        Fail::raise(err(E_INVALID, d));
+    }
+    lw.op(add(add(a, 3), wrapping_mul(i, 4)))
+}
+
+// `region_operation`: `label.op(args)` on a region capability.
+fn region_operation(
+    inout lw: Lw,
+    inout fl: Fl,
+    ins: InstRow,
+    label: u32,
+    callee: u32,
+    a: u64,
+    n: u64
+) eff [Fail[VErr]] {
+    if !lw.regions_active || !starts_with(in lw.c.names, callee, "Region::") {
+        let mut d = tx("effect operation ");
+        lw.put_sym(callee, inout d);
+        Fail::raise(ufail(in fl, U_EFFECT, d));
+    }
+    let header = cap_slot(in lw, in fl, label, NONE32, 0);
+    let sy = lw.sy;
+    let dest = w(ins.dest);
+    if callee == sy.rbox {
+        let v0 = region_arg(in lw, callee, a, n, 0);
+        let (src, sh) = value(in lw, in fl, v0);
+        let ty = vtype(in fl, v0);
+        if ty == NONE32 {
+            Fail::raise(err(E_INVALID, tx("untyped region payload")));
+        }
+        let l = layout_of(inout lw.ls, inout lw.c.types, inout lw.c.names, in lw.c.world, ty);
+        if l == NONE32 {
+            let mut d = tx("region payload ");
+            lw.put_ty(ty, inout d);
+            ap(inout d, ": ");
+            d.extend(in lw.ls.err.as_slice());
+            Fail::raise(ufail(in fl, U_TYPE, d));
+        }
+        let size = w(lw.ls.node(l).size);
+        // `store::slot_bytes`
+        let mut slots = wrapping_add(size, 7) / 8;
+        if slots == 0 {
+            slots = 1;
+        }
+        let bytes = wrapping_mul(slots, 8);
+        if sh.n > MAX_PAYLOAD_WORDS {
+            let mut d = tx("region payload of ");
+            apn(inout d, sh.n);
+            ap(inout d, " words in '");
+            lw.put_sym(fl.f.name, inout d);
+            ap(inout d, "'");
+            Fail::raise(err(E_LIMIT, d));
+        }
+        // `vesper.region.accounting/1`: the bytes, then the count.
+        let used = load_ptr(in lw, inout fl, header, H_USED);
+        let b = word(in lw, inout fl, bytes);
+        let used2 = add_u64(in lw, inout fl, used, b);
+        let cap = load_ptr(in lw, inout fl, header, H_CAP);
+        region_bound(in lw, inout fl, used2, cap);
+        let allocs = load_ptr(in lw, inout fl, header, H_ALLOCS);
+        let one = word(in lw, inout fl, 1);
+        let allocs2 = add_u64(in lw, inout fl, allocs, one);
+        let max = word(in lw, inout fl, MAX_ALLOCATIONS);
+        region_bound(in lw, inout fl, allocs2, max);
+        store_ptr(inout fl, header, H_USED, used2);
+        store_ptr(inout fl, header, H_ALLOCS, allocs2);
+        // A zero-word payload still takes one word, so that distinct boxes
+        // get distinct handles.
+        let words = if sh.n == 0 {
+            1
+        } else {
+            sh.n
+        };
+        let (globals, first, top, after) = heap_alloc(in lw, inout fl, words);
+        // An allocation in a region that is not the innermost pins the heap
+        // words below it until the outer region closes.
+        let inner = load_ptr(in lw, inout fl, globals, G_INNER);
+        let outer = alloc(in lw, inout fl, 1);
+        push(inout fl, lir(LIR_COMPARE, C_NE, K_U64, outer, inner, header));
+        let skip = fresh(inout fl);
+        push(inout fl, lir(LIR_BRANCH_ZERO, 0, 0, outer, skip, 0));
+        store_ptr(inout fl, globals, G_PIN, after);
+        push(inout fl, lir(LIR_LABEL, 0, 0, skip, 0, 0));
+        for k in 0..sh.n {
+            store_ptr(inout fl, first, k, add(src, k));
+        }
+        let (dst, ds) = value_of(inout lw, inout fl, dest, ins.ty);
+        push(inout fl, lir(LIR_MOVE, 0, 0, dst, first, 0));
+        return;
+    }
+    if callee == sy.rget {
+        let (ptr, ps) = value(in lw, in fl, region_arg(in lw, callee, a, n, 0));
+        let (dst, sh) = value_of(inout lw, inout fl, dest, ins.ty);
+        for k in 0..sh.n {
+            push(inout fl, lir(LIR_LOAD_PTR, 0, 0, add(dst, k), ptr, k));
+        }
+        return;
+    }
+    if callee == sy.rset {
+        let (ptr, ps) = value(in lw, in fl, region_arg(in lw, callee, a, n, 0));
+        let (src, sh) = value(in lw, in fl, region_arg(in lw, callee, a, n, 1));
+        let u = unit_ty(inout lw);
+        let x = value_of(inout lw, inout fl, dest, u);
+        for k in 0..sh.n {
+            store_ptr(inout fl, ptr, k, add(src, k));
+        }
+        return;
+    }
+    if callee == sy.rused {
+        let (dst, sh) = value_of(inout lw, inout fl, dest, ins.ty);
+        push(inout fl, lir(LIR_LOAD_PTR, 0, 0, dst, header, H_USED));
+        return;
+    }
+    let mut d = tx("region operation '");
+    let len = lw.c.names.size(callee);
+    for i in 8..len {
+        d.push(lw.c.names.byte(callee, i));
+    }
+    ap(inout d, "' (only box, get, set and used)");
+    Fail::raise(ufail(in fl, U_EFFECT, d));
 }
 
 // `try_`: `v?` on a `Result[T, E]`.
@@ -3115,7 +3897,8 @@ fn instruction(inout lw: Lw, inout fl: Fl, in plan: Plan, ins: InstRow) eff [Fai
             return;
         }
         if cap != 0 {
-            Fail::raise(not_ported("region operations"));
+            region_operation(inout lw, inout fl, ins, n32(wrapping_sub(cap, 1)), callee, a, n);
+            return;
         }
         if nt != 0 {
             let mut d = tx("call ");
@@ -3155,14 +3938,7 @@ fn instruction(inout lw: Lw, inout fl: Fl, in plan: Plan, ins: InstRow) eff [Fai
                 let (ps, psh) = place(inout lw, inout fl, n32(wrapping_sub(root, 1)), in comps);
                 pl = ps;
             }
-            args
-                .push(
-                    Arg {
-                        src: src,
-                        words: s.n,
-                        place: pl
-                    }
-                );
+            args.push(Arg { src: src, words: s.n, place: pl });
         }
         let (dst, ds) = value_of(inout lw, inout fl, dest, ins.ty);
         if ds.n != target.result.n {
@@ -3185,7 +3961,8 @@ fn instruction(inout lw: Lw, inout fl: Fl, in plan: Plan, ins: InstRow) eff [Fai
         return;
     }
     if op == Op::Handle {
-        Fail::raise(not_ported("handle expressions"));
+        handle_fail(inout lw, inout fl, in plan, ins);
+        return;
     }
     Fail::raise(ufail(in fl, U_OPERATION, tx("an IR operation this backend does not know")));
 }
@@ -3220,11 +3997,7 @@ fn data(inout lw: Lw, inout fl: Fl, ins: InstRow) eff [Fail[VErr]] {
         for j in 0..layout.len() {
             let lf = match layout.try_get(j) {
                 Option::Some(x) => x,
-                Option::None => LField {
-                    name: 0,
-                    offset: 0,
-                    ty: 0
-                },
+                Option::None => LField { name: 0, offset: 0, ty: 0 },
             };
             let v = data_field(in lw, a, n, lf.name);
             if v == NONE {
@@ -3358,6 +4131,8 @@ fn lower_function(
         next_label: next_label,
         max_rows: max_rows,
         stubs: ChunkSeq::new[u64](),
+        caps: ChunkSeq::new[u64](),
+        open: ChunkSeq::new[u64](),
     };
     // the symbol table is shared across functions and cleared after
     fl.lidx = replace(inout lidx, ChunkSeq::new[u32]());
@@ -3451,6 +4226,13 @@ fn lower_body(inout lw: Lw, inout fl: Fl, in plan: Plan) eff [Fail[VErr]] {
             push(inout fl, lir(LIR_LOAD_IN, 0, 0, add(slot, k), add(index, k), 0));
         }
         index = add(index, s.n);
+    }
+    for j in 0..me.cpn {
+        let slot = alloc(in lw, inout fl, 1);
+        push(inout fl, lir(LIR_LOAD_IN, 0, 0, slot, index, 0));
+        fl.caps.push(w(u32_at(in plan.caps, add(me.cpa, j))));
+        fl.caps.push(slot);
+        index = inc(index);
     }
     for k in 0..f.bc {
         let b = lw.p.block(add(f.b0, k));
@@ -3682,7 +4464,7 @@ fn relocate(r: Lir, out: u64) -> Lir {
 
 // ----- the entry ----------------------------------------------------------------
 
-fn lower_all(inout lw: Lw, inout out: ChunkSeq[u8]) eff [Fail[VErr]] {
+fn lower_all(inout lw: Lw, inout lo: Lowered) eff [Fail[VErr]] {
     let pl = plan(inout lw);
     let mut next_label = match pl.fs.try_get(wrapping_sub(pl.fs.len(), 1)) {
         Option::Some(x) => add(x.label, 2),
@@ -3690,7 +4472,6 @@ fn lower_all(inout lw: Lw, inout out: ChunkSeq[u8]) eff [Fail[VErr]] {
     };
     let mut lidx = ChunkSeq::new[u32]();
     let mut total: u64 = 0;
-    let mut text = ChunkSeq::new[u8]();
     for i in 0..pl.fs.len() {
         let left = if lw.max_rows > total {
             wrapping_sub(lw.max_rows, total)
@@ -3699,40 +4480,85 @@ fn lower_all(inout lw: Lw, inout out: ChunkSeq[u8]) eff [Fail[VErr]] {
         };
         let rows = lower_function(inout lw, in pl, i, inout next_label, left, inout lidx);
         total = add(total, rows.len());
-        ap(inout text, "fn ");
-        lw.put_sym(planned(in pl, i).name, inout text);
-        ap(inout text, "\n");
-        for j in 0..rows.len() {
-            match rows.try_get(j) {
-                Option::Some(r) => put_debug(inout text, in r),
+        lo.name_at.push(lo.names.len());
+        lw.put_sym(planned(in pl, i).name, inout lo.names);
+        lo.starts.push(lo.rows.len());
+        lo.rows.extend(in rows.as_slice());
+    }
+    lo.name_at.push(lo.names.len());
+    lo.starts.push(lo.rows.len());
+    let e = planned(in pl, 0);
+    lo.result_words = e.result.n;
+    lo.entry_label = e.label;
+}
+
+// `fn <name>` and the rows in the Rust `Debug` form, per function.
+pub fn put_lowered(in lo: Lowered, inout out: ChunkSeq[u8]) {
+    let nf = wrapping_sub(lo.starts.len(), 1);
+    for f in 0..nf {
+        ap(inout out, "fn ");
+        for i in u64_at(in lo.name_at, f)..u64_at(in lo.name_at, add(f, 1)) {
+            match lo.names.try_get(i) {
+                Option::Some(c) => out.push(c),
                 Option::None => {},
             }
-            ap(inout text, "\n");
+        }
+        ap(inout out, "\n");
+        for j in u64_at(in lo.starts, f)..u64_at(in lo.starts, add(f, 1)) {
+            match lo.rows.try_get(j) {
+                Option::Some(r) => put_debug(inout out, in r),
+                Option::None => {},
+            }
+            ap(inout out, "\n");
         }
     }
-    out.extend(in text.as_slice());
 }
 
 // The lowering of the harness input (see tests/self_host_verified_codegen.rs
 // `lowering_input`): per planned function `fn <name>` and its rows in the
 // Rust `Debug` form, or `error: ` and the error's text.
 pub fn lower_input(in b: Slice[u8]) -> ChunkSeq[u8] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
-    lower_program(c, p, inout r, in b)
+    let ex = read_exprs(inout r, in b, in c);
+    lower_program(c, p, ex, sites_new(), inout r, in b)
 }
 
 // The lowering of a program already read (or made by monomorphization),
 // with the lowering's extra section at `r`.
-pub fn lower_program(sink c: Ctx, sink p: Program, inout r: Reader, in b: Slice[u8])
-    -> ChunkSeq[u8] {
-    let mut lw = decode(c, p, inout r, in b);
+pub fn lower_program(
+    sink c: Ctx,
+    sink p: Program,
+    sink ex: Ex,
+    sink sites: Sites,
+    inout r: Reader,
+    in b: Slice[u8]
+) -> ChunkSeq[u8] {
+    let mut lo = lowered_new();
+    let e = lower_rows(c, p, ex, sites, inout r, in b, inout lo);
+    if e.len() != 0 {
+        return e;
+    }
     let mut out = ChunkSeq::new[u8]();
+    put_lowered(in lo, inout out);
+    out
+}
+
+// The lowering into `lo`: empty, or `error: `, the error's text and a
+// newline.
+pub fn lower_rows(
+    sink c: Ctx,
+    sink p: Program,
+    sink ex: Ex,
+    sink sites: Sites,
+    inout r: Reader,
+    in b: Slice[u8],
+    inout lo: Lowered
+) -> ChunkSeq[u8] {
+    let mut lw = decode(c, p, ex, sites, inout r, in b);
     let e = handle Fail[VErr] in {
-        lower_all(inout lw, inout out);
+        lower_all(inout lw, inout lo);
         err(255, ChunkSeq::new[u8]())
     } with {
         return v => v,
@@ -3743,6 +4569,38 @@ pub fn lower_program(sink c: Ctx, sink p: Program, inout r: Reader, in b: Slice[
         put_error(in lw.c.names, in e, inout o);
         ap(inout o, "\n");
         return o;
+    }
+    ChunkSeq::new[u8]()
+}
+
+// The code `c` becomes after a call of `callee` (an escape code on the way
+// out of an operation clause, the code it escapes on the way out of a
+// handler body).
+fn recode_code(in site: ChunkSeq[u64], nbase: u64, callee: u32, c: u64) -> u64 {
+    let s = u64_at(in site, w(callee));
+    if s == 0 {
+        return c;
+    }
+    let off = wrapping_mul(nbase, s >> 1);
+    if s & 1 == 0 {
+        if c >= 1 && c <= nbase {
+            return add(c, off);
+        }
+    } else if c > off && c <= add(off, nbase) {
+        return wrapping_sub(c, off);
+    }
+    c
+}
+
+fn recode_mask(in site: ChunkSeq[u64], nbase: u64, callee: u32, mask: u64) -> u64 {
+    if u64_at(in site, w(callee)) == 0 {
+        return mask;
+    }
+    let mut out: u64 = 0;
+    for c in 1..64 {
+        if has(mask, c) {
+            out = out | bit(recode_code(in site, nbase, callee, c));
+        }
     }
     out
 }

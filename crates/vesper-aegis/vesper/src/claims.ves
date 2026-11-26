@@ -2,21 +2,8 @@
 // pieces of src/claims.rs and src/policy.rs: AegisAttestationClaimsWire
 // decoding (format code 5, ClaimsWire), constant-time comparison and the
 // relying-party policy check verify_attestation_claims.
-use self::{
-    AErr,
-    PErr,
-    Rd
-};
-use self::reader::{
-    arr,
-    byte,
-    finish,
-    rd,
-    rd_u16,
-    rd_u32,
-    unsupported,
-    put
-};
+use self::{AErr, PErr, Rd};
+use self::reader::{arr, byte, finish, rd, rd_u16, rd_u32, unsupported, put};
 
 // src/claims.rs: the wire's architecture tags (TDX 1, SNP 2, CCA 3), the
 // known enclave flags (bits 0..3), field sizes, and format code 5.
@@ -124,14 +111,7 @@ pub fn word(in s: Slice[u64], i: u64) -> u64 {
 }
 
 pub fn deny(kind: u64, a: u64, b: u64, c: u64) -> Never eff [Fail[PErr]] {
-    Fail::raise(
-        PErr {
-            kind: kind,
-            a: a,
-            b: b,
-            c: c
-        }
-    )
+    Fail::raise(PErr { kind: kind, a: a, b: b, c: c })
 }
 
 // Byte `i` (0 = least significant) of `x`.

@@ -5,17 +5,13 @@ linear struct Token {
     n: i64
 }
 fn eat(sink t: Token) -> i64 {
-    let Token {
-        n
-    } = t;
+    let Token { n } = t;
     n
 }
 
 test {
     @test(expect_error = E0312, message = "moved in a previous iteration") fn main() -> i64 {
-        let t = Token {
-            n: 1
-        };
+        let t = Token { n: 1 };
         let mut i = 0;
         loop {
             i = wrapping_add(i, 1);

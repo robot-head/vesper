@@ -7,13 +7,7 @@
 // are copied into one name pool. The tables are small (one entry per
 // function and data object of an image), so lookups are linear scans.
 
-use self::codes::{
-    Absent,
-    Out,
-    Page,
-    RelType,
-    RvOpcode
-};
+use self::codes::{Absent, Out, Page, RelType, RvOpcode};
 use self::util::{
     Span,
     add,
@@ -60,22 +54,9 @@ use self::obj::{
     rel_count,
     rel_at
 };
-use self::stub::{
-    is_riscv,
-    machine_of
-};
-use self::script::{
-    triple
-};
-use self::elf::{
-    OutSec,
-    OutSeg,
-    OutSym,
-    Placement,
-    pf_rw,
-    pf_rx,
-    write_executable
-};
+use self::stub::{is_riscv, machine_of};
+use self::script::{triple};
+use self::elf::{OutSec, OutSeg, OutSym, Placement, pf_rw, pf_rx, write_executable};
 
 // The four sections contributed by input objects precede the stack.
 const OUTS: u64 = Out::Stack;
@@ -204,10 +185,7 @@ fn obj_at(in os: ChunkSeq[Obj], i: u64) -> Obj {
     match os.try_get(i) {
         Option::Some(o) => o,
         Option::None => Obj {
-            name: Span {
-                start: 0,
-                len: 0
-            },
+            name: Span { start: 0, len: 0 },
             base: 0,
             len: 0,
             e_type: 0,
@@ -748,22 +726,8 @@ impl Linker {
                 }
             );
         let mut segs: ChunkSeq[OutSeg] = ChunkSeq::new[OutSeg]();
-        segs
-            .push(
-                OutSeg {
-                    first: Out::Text,
-                    end: Out::Data,
-                    flags: pf_rx()
-                }
-            );
-        segs
-            .push(
-                OutSeg {
-                    first: Out::Data,
-                    end: secs.len(),
-                    flags: pf_rw()
-                }
-            );
+        segs.push(OutSeg { first: Out::Text, end: Out::Data, flags: pf_rx() });
+        segs.push(OutSeg { first: Out::Data, end: secs.len(), flags: pf_rw() });
         let mut out_syms: ChunkSeq[OutSym] = ChunkSeq::new[OutSym]();
         for i in 0..self.linked.len() {
             let l = linked_at(in self.linked, i);
@@ -840,14 +804,8 @@ impl Linker {
             let e = match entries.try_get(i) {
                 Option::Some(v) => v,
                 Option::None => TrapEntry {
-                    object: Span {
-                        start: 0,
-                        len: 0
-                    },
-                    function: Span {
-                        start: 0,
-                        len: 0
-                    },
+                    object: Span { start: 0, len: 0 },
+                    function: Span { start: 0, len: 0 },
                     offset: 0
                 },
             };
@@ -944,12 +902,7 @@ impl Linker {
         for i in 0..self.placements.len() {
             let p = match self.placements.try_get(i) {
                 Option::Some(v) => v,
-                Option::None => Placement {
-                    vaddr: 0,
-                    offset: 0,
-                    file_bytes: 0,
-                    mem_bytes: 0
-                },
+                Option::None => Placement { vaddr: 0, offset: 0, file_bytes: 0, mem_bytes: 0 },
             };
             if addr >= p.vaddr && add(addr, 8) <= add(p.vaddr, p.file_bytes) {
                 return add(p.offset, sub(addr, p.vaddr));
@@ -974,12 +927,7 @@ impl Linker {
         for i in 0..self.placements.len() {
             let p = match self.placements.try_get(i) {
                 Option::Some(v) => v,
-                Option::None => Placement {
-                    vaddr: 0,
-                    offset: 0,
-                    file_bytes: 0,
-                    mem_bytes: 0
-                },
+                Option::None => Placement { vaddr: 0, offset: 0, file_bytes: 0, mem_bytes: 0 },
             };
             push64(inout out, p.vaddr);
             push64(inout out, p.offset);

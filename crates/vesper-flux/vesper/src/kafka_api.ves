@@ -56,23 +56,11 @@ fn overflow() eff [Fail[KwErr]] {
 }
 
 fn code_err(code: i64) eff [Fail[KwErr]] {
-    Fail::raise(
-        KwErr::Code {
-            code: code,
-            at: 0,
-            len: -1
-        }
-    );
+    Fail::raise(KwErr::Code { code: code, at: 0, len: -1 });
 }
 
 fn code_msg(code: i64, at: u64, len: i64) eff [Fail[KwErr]] {
-    Fail::raise(
-        KwErr::Code {
-            code: code,
-            at: at,
-            len: len
-        }
-    );
+    Fail::raise(KwErr::Code { code: code, at: at, len: len });
 }
 
 fn check(code: i64) eff [Fail[KwErr]] {
@@ -1216,11 +1204,7 @@ fn metadata_in(
 // The error code of a failed read, 65536 when malformed.
 fn status_of(e: KwErr) -> i64 {
     match e {
-        KwErr::Code {
-            code,
-            at,
-            len
-        } => code,
+        KwErr::Code { code, at, len } => code,
         _ => 65536,
     }
 }

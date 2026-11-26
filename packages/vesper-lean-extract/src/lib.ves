@@ -30,90 +30,26 @@
 // - module.ves: the whole module: ordering, companions, the proof module.
 // - contract.ves: `f$contract` and `f$admissible`.
 
-use @vesper/check-data::input::{
-    Reader,
-    read_ctx
-};
-use @vesper/check-data::{
-    pack_text
-};
-use @vesper/lean-syntax::{
-    LeanError,
-    render_module
-};
-use @vesper/check-data::names::{
-    names_new
-};
-use self::build::{
-    B,
-    D_NAMESPACE,
-    D_OPTION,
-    K_DEF,
-    K_PARTIAL,
-    builder
-};
-use self::head::{
-    adt_groups,
-    effect_classes,
-    effect_lifts,
-    has_fail_model
-};
-use self::input::{
-    read_effects
-};
-use self::fn_input::{
-    read_fns
-};
-use self::emit::{
-    X,
-    extract
-};
-use self::head::{
-    recursive_structs
-};
-use @vesper/place-ir::{
-    read_program
-};
-use @vesper/check-data::world::{
-    set_by_symbol
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at
-};
-use self::ast::{
-    read_ast
-};
-use self::contract::{
-    contracts,
-    read_contracts
-};
-use self::module::{
-    defs_new,
-    K_NONCOMPUTABLE,
-    emit_ordered,
-    order,
-    references_symbol,
-    take_module
-};
-use self::input::{
-    Effects
-};
-use @vesper/check-data::types::{
-    Types
-};
-use @vesper/check-data::world::{
-    World
-};
-use self::gen::{
-    G,
-    Y,
-    function,
-    gen_new
-};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/check-data::{pack_text};
+use @vesper/lean-syntax::{LeanError, render_module};
+use @vesper/check-data::names::{names_new};
+use self::build::{B, D_NAMESPACE, D_OPTION, K_DEF, K_PARTIAL, builder};
+use self::head::{adt_groups, effect_classes, effect_lifts, has_fail_model};
+use self::input::{read_effects};
+use self::fn_input::{read_fns};
+use self::emit::{X, extract};
+use self::head::{recursive_structs};
+use @vesper/place-ir::{read_program};
+use @vesper/check-data::world::{set_by_symbol};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at};
+use self::ast::{read_ast};
+use self::contract::{contracts, read_contracts};
+use self::module::{defs_new, K_NONCOMPUTABLE, emit_ordered, order, references_symbol, take_module};
+use self::input::{Effects};
+use @vesper/check-data::types::{Types};
+use @vesper/check-data::world::{World};
+use self::gen::{G, Y, function, gen_new};
 use self::prelude::{
     arithmetic_semantics,
     arithmetic_simp_bundle,
@@ -133,9 +69,7 @@ const FAIL_MODEL_DECLARATIONS: u64 = 2;
 // The head module as printer words.
 fn head(in input: Str) -> B {
     let bytes = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in bytes);
     let fx = read_effects(inout r, in bytes, in c.nmap, in c.tmap);
     let mut b = builder(names_new());
@@ -279,9 +213,7 @@ const ST_OK: u64 = 2;
 // imports (tests/self_host_lean_extract.rs `rust_cfg_text`).
 pub fn extract_cfg_functions(in input: Str) -> ChunkSeq[u64] {
     let bytes = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in bytes);
     let p = read_program(inout r, in bytes, in c);
     let fx = read_fns(inout r, in bytes, in c.nmap, in c.tmap);
@@ -295,14 +227,7 @@ pub fn extract_cfg_functions(in input: Str) -> ChunkSeq[u64] {
         set_by_symbol(inout by_name, p.function(i).name, n32(inc(i)));
     }
     let fip = wd.box_active;
-    let x = X {
-        p: p,
-        wd: wd,
-        fx: fx,
-        fip: fip,
-        rec: rec,
-        fn_by_name: by_name
-    };
+    let x = X { p: p, wd: wd, fx: fx, fip: fip, rec: rec, fn_by_name: by_name };
     // per function: name, status, words[wa..wz] or errs[wa..wz]
     let mut names: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut status: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -387,9 +312,7 @@ const ST_SKIP: u64 = 3;
 // function yet (tests/self_host_lean_extract.rs `rust_structured_text`).
 pub fn extract_structured_functions(in input: Str) -> ChunkSeq[u64] {
     let bytes = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in bytes);
     let p = read_program(inout r, in bytes, in c);
     let fx = read_fns(inout r, in bytes, in c.nmap, in c.tmap);
@@ -405,21 +328,9 @@ pub fn extract_structured_functions(in input: Str) -> ChunkSeq[u64] {
     }
     let fip = wd.box_active;
     let infer = t.infer;
-    let x = X {
-        p: p,
-        wd: wd,
-        fx: fx,
-        fip: fip,
-        rec: rec,
-        fn_by_name: by_name
-    };
+    let x = X { p: p, wd: wd, fx: fx, fip: fip, rec: rec, fn_by_name: by_name };
     let fip_ast = ast.fip;
-    let y = Y {
-        x: x,
-        a: ast,
-        fip: fip_ast,
-        infer: infer
-    };
+    let y = Y { x: x, a: ast, fip: fip_ast, infer: infer };
     let mut g = gen_new();
     let mut names: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut status: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -558,9 +469,7 @@ pub fn extract_text(in input: Slice[u8]) -> ChunkSeq[u64] {
 
 // [`extract_module`], or with `full` false only its module.
 fn module_text(in bytes: Slice[u8], full: bool) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in bytes);
     let p = read_program(inout r, in bytes, in c);
     let fx = read_fns(inout r, in bytes, in c.nmap, in c.tmap);
@@ -589,21 +498,9 @@ fn module_text(in bytes: Slice[u8], full: bool) -> ChunkSeq[u64] {
     }
     let fip = wd.box_active;
     let infer = t.infer;
-    let x = X {
-        p: p,
-        wd: wd,
-        fx: fx,
-        fip: fip,
-        rec: rec,
-        fn_by_name: by_name
-    };
+    let x = X { p: p, wd: wd, fx: fx, fip: fip, rec: rec, fn_by_name: by_name };
     let fip_ast = ast.fip;
-    let y = Y {
-        x: x,
-        a: ast,
-        fip: fip_ast,
-        infer: infer
-    };
+    let y = Y { x: x, a: ast, fip: fip_ast, infer: infer };
     let mut g = gen_new();
     let mut d = defs_new();
     let nf = y.a.fns.len();

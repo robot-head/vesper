@@ -7,13 +7,7 @@
 // from `errno` to an error kind. Errors come back through `err` as the
 // error word of src/lib.ves (the kind in the low 8 bits, the OS error in
 // the high 32).
-use self::{
-    Metadata,
-    kind_file,
-    kind_dir,
-    kind_symlink,
-    kind_other
-};
+use self::{Metadata, kind_file, kind_dir, kind_symlink, kind_other};
 
 const EINTR: u32 = 4;
 const ENOENT: u32 = 2;
@@ -381,6 +375,51 @@ pub fn os_metadata(in path: Slice[u8], follow: bool, inout err: u64) -> Metadata
         Result::Err(_) => {
             err = bad_path();
             empty_metadata()
+        },
+    }
+}
+
+// Whether `path` (following symbolic links) is a regular file with an
+// execute bit, as `std` reads `metadata().permissions().mode() & 0o111`.
+pub fn os_is_executable(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    let mut st = new_stat();
+    match StdFs::stat(in path, inout st) {
+        Result::Ok((r, _e)) => {
+            if r != 0 {
+                return false;
+            }
+            let mode = wrapping_shr_u64(
+                stat_word(in st, StdFs::STAT_MODE_WORD),
+                wrapping_u32(StdFs::STAT_MODE_SHIFT)
+            );
+            mode_kind(mode) == kind_file() && (mode & 73) != 0
+        },
+        Result::Err(_) => false,
+    }
+}
+
+// `std::fs::canonicalize`: `realpath(path, NULL)`, copied out and freed;
+// empty with `err` set on failure.
+pub fn os_canonicalize(in path: Slice[u8], inout err: u64) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    match StdFs::realpath(in path, 0) {
+        Result::Ok((at, e)) => {
+            if at == 0 {
+                err = os_error_word(e);
+                return out;
+            }
+            let n = wrapping_sub(StdFs::find_byte(at, 0), at);
+            out.resize(n, 0);
+            if n != 0 {
+                StdFs::copy_from(at, inout out.as_slice_mut());
+            }
+            StdFs::free(at);
+            err = 0;
+            out
+        },
+        Result::Err(_) => {
+            err = bad_path();
+            out
         },
     }
 }
@@ -801,4 +840,49 @@ pub fn os_list(
     }
     let _ = StdFs::closedir(d);
     0
+}
+
+// ---------------------------------------------------------------------------
+// Error messages.
+
+// `std`'s message for the OS error `e` (`format_error` of
+// library/std/src/sys/io/error/unix.rs): the C library's `strerror_r`
+// (POSIX's, which glibc names `__xpg_strerror_r`) into a 128-byte buffer,
+// up to its NUL, shown as UTF-8 with each byte that is not ASCII of an
+// invalid text replaced (`CStr::display`).
+pub fn os_error_message(inout out: ChunkSeq[u8], e: u32) eff [Ffi[StdFs]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    buf.resize(128, 0);
+    let _ = StdFs::strerror_r(wrapping_i32(e), inout buf.as_slice_mut());
+    let mut n: u64 = 0;
+    for i in 0..buf.len() {
+        match buf.try_get(i) {
+            Option::Some(b) => {
+                if b == 0 {
+                    break;
+                }
+                n = wrapping_add(n, 1);
+            },
+            Option::None => break,
+        }
+    }
+    match String::from_utf8(in buf[0..n]) {
+        Option::Some(_) => out.extend(in buf[0..n]),
+        Option::None => {
+            for i in 0..n {
+                match buf.try_get(i) {
+                    Option::Some(b) => {
+                        if b < 128 {
+                            out.push(b);
+                        } else {
+                            out.push(239);
+                            out.push(191);
+                            out.push(189);
+                        }
+                    },
+                    Option::None => (),
+                }
+            }
+        },
+    }
 }

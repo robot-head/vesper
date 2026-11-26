@@ -1,15 +1,8 @@
 // Module replog of @vesper/chorus (see lib.ves): replicated-log consensus
 // state machine, partition generation, invariant checking, convergence, and
 // report digest (src/replog.rs).
-use self::util::{
-    inc,
-    none,
-    setw,
-    sw
-};
-use self::simnet::{
-    sm_chance
-};
+use self::util::{inc, none, setw, sw};
+use self::simnet::{sm_chance};
 use self::wire::{
     checker_core_committed_arena,
     checker_core_leader_elected,
@@ -115,20 +108,14 @@ pub struct ReplogCore {
 fn ge_log(in pool: ChunkSeq[RaftEntry], i: u64) -> RaftEntry {
     match pool.try_get(i) {
         Option::Some(e) => e,
-        Option::None => RaftEntry {
-            term: 0,
-            cmd: 0
-        },
+        Option::None => RaftEntry { term: 0, cmd: 0 },
     }
 }
 
 fn ge_slice(in s: Slice[RaftEntry], i: u64) -> RaftEntry {
     match s.try_get(i) {
         Option::Some(e) => e,
-        Option::None => RaftEntry {
-            term: 0,
-            cmd: 0
-        },
+        Option::None => RaftEntry { term: 0, cmd: 0 },
     }
 }
 
@@ -164,15 +151,7 @@ fn node_log_push(inout rp: ReplogCore, i: u64, e: RaftEntry) {
             wrapping_mul(cap, 2)
         };
         let new_off = rp.log_pool.len();
-        rp
-            .log_pool
-            .resize(
-                wrapping_add(new_off, new_cap),
-                RaftEntry {
-                    term: 0,
-                    cmd: 0
-                }
-            );
+        rp.log_pool.resize(wrapping_add(new_off, new_cap), RaftEntry { term: 0, cmd: 0 });
         for k in 0..len {
             let cur_e = ge_log(in rp.log_pool, wrapping_add(off, k));
             let _ = rp.log_pool.try_set(wrapping_add(new_off, k), cur_e);
@@ -246,15 +225,7 @@ pub fn replog_new(
         proposals: 0,
         partitioned_links: 0
     };
-    rp
-        .log_pool
-        .resize(
-            wrapping_mul(n, INIT_LOG_CAP),
-            RaftEntry {
-                term: 0,
-                cmd: 0
-            }
-        );
+    rp.log_pool.resize(wrapping_mul(n, INIT_LOG_CAP), RaftEntry { term: 0, cmd: 0 });
     rp.next_idx.resize(n, 0);
     rp.matched_idx.resize(n, 0);
     rp.blocked.resize(wrapping_mul(n, n), false);
@@ -327,10 +298,7 @@ pub fn replog_on_vote_req(inout rp: ReplogCore, v: u64, in r: WireVoteReq) -> Re
     if grant {
         setw(inout rp.nd_voted_for, v, cand);
     }
-    ReplogVoteDec {
-        grant: grant,
-        term: vterm
-    }
+    ReplogVoteDec { grant: grant, term: vterm }
 }
 
 pub fn replog_on_vote_fault(inout rp: ReplogCore) {
@@ -376,14 +344,7 @@ pub fn replog_propose_round(inout rp: ReplogCore, now_ns: u64, l: u64) {
     for _ in 0..rp.proposals_per_round {
         let cmd = inc(rp.next_cmd);
         rp.next_cmd = cmd;
-        node_log_push(
-            inout rp,
-            l,
-            RaftEntry {
-                term: term,
-                cmd: cmd
-            }
-        );
+        node_log_push(inout rp, l, RaftEntry { term: term, cmd: cmd });
         rp.proposals = inc(rp.proposals);
     }
     checker_core_logs_changed_arena(
@@ -581,10 +542,7 @@ pub fn replog_on_append_resp(
     if ack.term > term {
         setw(inout rp.nd_term, l, ack.term);
         setw(inout rp.nd_voted_for, l, none());
-        return ReplogAppRespOut {
-            keep_leading: false,
-            has_violation: rp.checker.has_violation
-        };
+        return ReplogAppRespOut { keep_leading: false, has_violation: rp.checker.has_violation };
     }
     if ok {
         rp.accepted = inc(rp.accepted);

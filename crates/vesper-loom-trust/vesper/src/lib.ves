@@ -15,10 +15,7 @@
 // values to the trees below (export ABI 4) and back.
 //
 // @export abi 4 options
-use @vesper/crypto::{
-    ed25519_check_public,
-    ed25519_verify
-};
+use @vesper/crypto::{ed25519_check_public, ed25519_verify};
 
 const SCHEMA_VERSION: u32 = 1;
 const MAX_POLICY_KEYS: u64 = 64;
@@ -751,15 +748,9 @@ fn signing_message(in s: Statement) -> ChunkSeq[u8] {
 pub fn signing_bytes(in s: Statement) -> Signing {
     let e = statement_error(in s);
     if e != NONE {
-        Signing {
-            error: copy_text(in message_text(e)),
-            bytes: ChunkSeq::new[u8]()
-        }
+        Signing { error: copy_text(in message_text(e)), bytes: ChunkSeq::new[u8]() }
     } else {
-        Signing {
-            error: String::new(),
-            bytes: signing_message(in s)
-        }
+        Signing { error: String::new(), bytes: signing_message(in s) }
     }
 }
 
@@ -777,23 +768,11 @@ copy struct Diag {
 }
 
 fn diag(code: u64, field: u64, message: u64) -> Diag {
-    Diag {
-        code: code,
-        key: NONE,
-        from_statement: false,
-        field: field,
-        message: message
-    }
+    Diag { code: code, key: NONE, from_statement: false, field: field, message: message }
 }
 
 fn keyed(code: u64, key: u64, from_statement: bool, field: u64, message: u64) -> Diag {
-    Diag {
-        code: code,
-        key: key,
-        from_statement: from_statement,
-        field: field,
-        message: message
-    }
+    Diag { code: code, key: key, from_statement: from_statement, field: field, message: message }
 }
 
 fn diag_cmp(in x: Diagnostic, in y: Diagnostic) -> i64 {
@@ -952,12 +931,7 @@ fn name_set(in ns: ChunkSeq[Name]) -> ChunkSeq[Name] {
         }
         last = p;
         match ns.try_get(p) {
-            Option::Some(n) => out
-                .push(
-                    Name {
-                        text: copy_text(in n.text)
-                    }
-                ),
+            Option::Some(n) => out.push(Name { text: copy_text(in n.text) }),
             Option::None => {},
         }
     }
@@ -1216,18 +1190,8 @@ pub fn verify(in expected: Identity, in bundle: Bundle, in policy: Policy, now: 
                         );
                 }
                 if ds.len() == before {
-                    keys
-                        .push(
-                            Name {
-                                text: copy_text(in env.statement.key_id)
-                            }
-                        );
-                    operators
-                        .push(
-                            Name {
-                                text: copy_text(in b.operator_id)
-                            }
-                        );
+                    keys.push(Name { text: copy_text(in env.statement.key_id) });
+                    operators.push(Name { text: copy_text(in b.operator_id) });
                 }
             },
             Option::None => {},
@@ -1760,8 +1724,5 @@ pub fn screen(
     } else {
         Decision::Quarantined
     };
-    Screening {
-        decision: decision,
-        findings: findings
-    }
+    Screening { decision: decision, findings: findings }
 }

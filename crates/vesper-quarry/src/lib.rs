@@ -68,13 +68,6 @@ impl Value {
             Self::Bytes(_) => ScalarType::Bytes,
         })
     }
-    pub(crate) fn bytes(&self) -> usize {
-        match self {
-            Self::Text(x) => x.len(),
-            Self::Bytes(x) => x.len(),
-            _ => 8,
-        }
-    }
     pub(crate) fn valid(&self, ty: ScalarType, nullable: bool) -> bool {
         match self {
             Self::Null => nullable,

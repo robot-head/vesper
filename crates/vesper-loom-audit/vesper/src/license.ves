@@ -2,27 +2,9 @@
 // subset, the tokenizer and the WITH > AND > OR parser of license.rs, and
 // the policy allowlist. Every branch is parsed before the value counts, so
 // the value is computed while parsing: a failure anywhere discards it.
-use self::{
-    A,
-    Val
-};
-use self::util::{
-    ErrorKind,
-    ascii_alnum,
-    byte,
-    copy_range,
-    fail,
-    lit,
-    str_len,
-    str_off,
-    word
-};
-use @vesper/loom-calculus::util::{
-    Ascii,
-    is_lit,
-    none,
-    sbool
-};
+use self::{A, Val};
+use self::util::{ErrorKind, ascii_alnum, byte, copy_range, fail, lit, str_len, str_off, word};
+use @vesper/loom-calculus::util::{Ascii, is_lit, none, sbool};
 
 // The supported SPDX license IDs, in license.rs order.
 enum License: _ {
@@ -239,11 +221,7 @@ fn take(inout s: A, in t: Str) -> bool {
 }
 
 fn bad() -> Val {
-    Val {
-        ok: false,
-        single: false,
-        grant: 0
-    }
+    Val { ok: false, single: false, grant: 0 }
 }
 
 fn expression(inout s: A, depth: u64) -> Val {
@@ -259,11 +237,7 @@ fn expression(inout s: A, depth: u64) -> Val {
         if s.lf != LicenseFail::None {
             return bad();
         }
-        left = Val {
-            ok: left.ok || right.ok,
-            single: false,
-            grant: 0
-        };
+        left = Val { ok: left.ok || right.ok, single: false, grant: 0 };
     }
     left
 }
@@ -281,11 +255,7 @@ fn conjunction(inout s: A, depth: u64) -> Val {
         if s.lf != LicenseFail::None {
             return bad();
         }
-        left = Val {
-            ok: left.ok && right.ok,
-            single: false,
-            grant: 0
-        };
+        left = Val { ok: left.ok && right.ok, single: false, grant: 0 };
     }
     left
 }
@@ -332,11 +302,7 @@ fn atom(inout s: A, depth: u64) -> Val {
         s.tpos = wrapping_add(q, 1);
         grant = wrapping_add(grant, wrapping_add(ei, 1));
     }
-    Val {
-        ok: sbool(in s.grants, grant),
-        single: true,
-        grant: grant
-    }
+    Val { ok: sbool(in s.grants, grant), single: true, grant: grant }
 }
 
 // `parse` of the expression with string id `id`; on failure s.lf is set.

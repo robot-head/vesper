@@ -5,13 +5,7 @@
 // capsule (1) `[ax, ay, az, bx, by, bz, r]`, a polytope (2) its vertices,
 // three numbers each. The Rust wrapper lends them; internal functions
 // return a status (0 ok, else a `GjkError` code) and the export raises.
-use self::util::{
-    dec,
-    inc,
-    shl_u64,
-    shr_u64,
-    u
-};
+use self::util::{dec, inc, shl_u64, shr_u64, u};
 
 pub copy struct V3 {
     x: f64,
@@ -77,11 +71,7 @@ fn flat() -> u64 {
 }
 
 fn v3(x: f64, y: f64, z: f64) -> V3 {
-    V3 {
-        x: x,
-        y: y,
-        z: z
-    }
+    V3 { x: x, y: y, z: z }
 }
 
 fn zero3() -> V3 {
@@ -157,34 +147,21 @@ fn vat(in s: Slice[f64], i: u64) -> V3 {
 fn sp_at(in s: ChunkSeq[Sp], i: u64) -> Sp {
     match s.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Sp {
-            w: zero3(),
-            a: zero3(),
-            b: zero3()
-        },
+        Option::None => Sp { w: zero3(), a: zero3(), b: zero3() },
     }
 }
 
 fn face_at(in s: ChunkSeq[Face], i: u64) -> Face {
     match s.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Face {
-            i: 0,
-            j: 0,
-            k: 0,
-            n: zero3(),
-            dist: 0.0
-        },
+        Option::None => Face { i: 0, j: 0, k: 0, n: zero3(), dist: 0.0 },
     }
 }
 
 fn edge_at(in s: ChunkSeq[Edge], i: u64) -> Edge {
     match s.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Edge {
-            p: 0,
-            q: 0
-        },
+        Option::None => Edge { p: 0, q: 0 },
     }
 }
 
@@ -271,11 +248,7 @@ fn some_point(kind: u32, in d: Slice[f64]) -> V3 {
 fn support_point(ka: u32, in da: Slice[f64], kb: u32, in db: Slice[f64], dir: V3) -> Sp {
     let a = core_support(ka, in da, dir);
     let b = core_support(kb, in db, scale(dir, -1.0));
-    Sp {
-        w: sub(a, b),
-        a: a,
-        b: b
-    }
+    Sp { w: sub(a, b), a: a, b: b }
 }
 
 // ----- the closest point of a simplex ----------------------------------------
@@ -584,16 +557,7 @@ fn make_face(in pts: ChunkSeq[Sp], i: u64, j: u64, k: u64, inside: V3, inout out
         jj = k;
         kk = j;
     }
-    out
-        .push(
-            Face {
-                i: i,
-                j: jj,
-                k: kk,
-                n: n,
-                dist: dot(n, a)
-            }
-        );
+    out.push(Face { i: i, j: jj, k: kk, n: n, dist: dot(n, a) });
     true
 }
 
@@ -804,13 +768,7 @@ fn toggle_edge(inout horizon: ChunkSeq[Edge], p: u64, q: u64) {
             return ();
         }
     }
-    horizon
-        .push(
-            Edge {
-                p: p,
-                q: q
-            }
-        );
+    horizon.push(Edge { p: p, q: q });
 }
 
 // ----- separation --------------------------------------------------------------

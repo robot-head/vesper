@@ -1,21 +1,6 @@
 // plan.rs: the mounted state and reconciliation.
-use self::codes::{
-    Budget,
-    OpTag,
-    ValueTag,
-    MAX_U64,
-    NONE_ID
-};
-use self::{
-    MNode,
-    MProp,
-    MSub,
-    Mounted,
-    Op,
-    Prepared,
-    Tree,
-    ViewFault
-};
+use self::codes::{Budget, OpTag, ValueTag, MAX_U64, NONE_ID};
+use self::{MNode, MProp, MSub, Mounted, Op, Prepared, Tree, ViewFault};
 use self::util::{
     add,
     bytes_eq,
@@ -35,10 +20,7 @@ use self::util::{
     tprop,
     tsub
 };
-use self::view::{
-    tree_find,
-    tree_new
-};
+use self::view::{tree_find, tree_new};
 
 pub fn mounted_new() -> Mounted {
     Mounted {
@@ -347,16 +329,7 @@ pub fn mount_next(
                     },
                 }
             };
-            p
-                .m
-                .subs
-                .push(
-                    MSub {
-                        event: ts.event,
-                        id: sid,
-                        handler: ts.handler
-                    }
-                );
+            p.m.subs.push(MSub { event: ts.event, id: sid, handler: ts.handler });
         }
         let cstart = p.m.kids.len();
         for j in 0..tn.ccount {

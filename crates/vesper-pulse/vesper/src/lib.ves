@@ -57,9 +57,7 @@ fn frame_at(in seq: ChunkSeq[Frame], idx: u64) -> Frame {
     match seq.try_get(idx) {
         Option::Some(v) => v,
         Option::None => Frame {
-            id: FrameId {
-                bits: 0
-            },
+            id: FrameId { bits: 0 },
             segment: 0,
             start: 0,
             length: 0,
@@ -140,9 +138,7 @@ pub fn frame_stack_live_id(in stack: FrameStack, bits: u64) -> FrameId eff [Fail
     if !found {
         return Fail::raise(FrameError::StaleFrame);
     }
-    FrameId {
-        bits: bits
-    }
+    FrameId { bits: bits }
 }
 
 fn resolve_range(
@@ -210,9 +206,7 @@ pub fn frame_stack_push(inout stack: FrameStack, length: u32) -> FrameId eff [Fa
         let _ok = stack.seg_bytes.try_set(wrapping_add(wrapping_add(seg_base, start), k), 0);
     }
     let _ok_u = stack.seg_used.try_set(seg_idx, wrapping_add(start, aligned));
-    let id = FrameId {
-        bits: id_bits
-    };
+    let id = FrameId { bits: id_bits };
     stack
         .frames
         .push(
@@ -327,10 +321,7 @@ pub fn frame_stack_read_address(
         off = off | wrapping_shl_u32(b, shift);
     }
     let id = frame_stack_live_id(in stack, bits);
-    let addr = Address {
-        frame: id,
-        offset: off
-    };
+    let addr = Address { frame: id, offset: off };
     let _check = resolve_range(in stack, addr, 0);
     addr
 }
@@ -518,9 +509,7 @@ fn slot_at(in seq: ChunkSeq[RequestSlot], idx: u64) -> RequestSlot {
     match seq.try_get(idx) {
         Option::Some(v) => v,
         Option::None => RequestSlot {
-            id: RequestId {
-                bits: 0
-            },
+            id: RequestId { bits: 0 },
             fd: -1,
             op: Operation::Read,
             offset: 0,
@@ -572,9 +561,7 @@ pub fn readiness_queue_submit(
     if readiness_queue_pending(in q) >= q.capacity {
         return Fail::raise(DriverError::QueueFull);
     }
-    let id = RequestId {
-        bits: q.next_id
-    };
+    let id = RequestId { bits: q.next_id };
     q.next_id = wrapping_add(q.next_id, 1);
     q
         .waiting
@@ -1139,9 +1126,7 @@ pub fn spawn_fiber(
     if pool.closed {
         return Result::Err(PoolError::PoolClosed);
     }
-    let id = FiberId {
-        bits: pool.next_id
-    };
+    let id = FiberId { bits: pool.next_id };
     pool.next_id = wrapping_add(pool.next_id, 1);
     pool.live = wrapping_add(pool.live, 1);
     let ev = if pool.cancelled {
@@ -1178,9 +1163,7 @@ pub fn spawn_pinned(
     if worker >= pool.workers.len() {
         return Result::Err(PoolError::NoSuchWorker(worker));
     }
-    let id = FiberId {
-        bits: pool.next_id
-    };
+    let id = FiberId { bits: pool.next_id };
     pool.next_id = wrapping_add(pool.next_id, 1);
     pool.live = wrapping_add(pool.live, 1);
     let ev = if pool.cancelled {
@@ -1243,9 +1226,7 @@ copy struct PickedJob {
 
 fn empty_task() -> FiberTask {
     FiberTask {
-        id: FiberId {
-            bits: 0
-        },
+        id: FiberId { bits: 0 },
         home: Option::None,
         remaining_yields: 0,
         fail_on_complete: false,
@@ -1591,9 +1572,7 @@ fn worker_step(inout pool: SeededPool, w: u64) -> bool {
     };
     match t.spawn_child_yields {
         Option::Some(cy) => {
-            let cid = FiberId {
-                bits: pool.next_id
-            };
+            let cid = FiberId { bits: pool.next_id };
             pool.next_id = wrapping_add(pool.next_id, 1);
             pool.live = wrapping_add(pool.live, 1);
             let cev = if pool.cancelled {
@@ -1632,23 +1611,9 @@ fn worker_step(inout pool: SeededPool, w: u64) -> bool {
     } else {
         if pool.config.keep_results {
             if t.fail_on_complete {
-                pool
-                    .failures
-                    .push(
-                        FailedFiber {
-                            id: t.id,
-                            code: t.result_tag
-                        }
-                    );
+                pool.failures.push(FailedFiber { id: t.id, code: t.result_tag });
             } else {
-                pool
-                    .completed
-                    .push(
-                        CompletedFiber {
-                            id: t.id,
-                            tag: t.result_tag
-                        }
-                    );
+                pool.completed.push(CompletedFiber { id: t.id, tag: t.result_tag });
             }
         }
         pool.live = wrapping_sub(pool.live, 1);

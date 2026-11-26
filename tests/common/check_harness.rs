@@ -104,6 +104,51 @@ fn relative(p: &Path) -> String {
         .replace('\\', "/")
 }
 
+thread_local! {
+    static QUIET_PANICS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with this thread's panics unreported, for corpus work where
+/// some programs are expected to panic (and are caught and skipped).
+///
+/// The panic hook is process-wide, and libtest runs a binary's tests on
+/// threads of one process. Swapping in a silent hook around the corpus load
+/// also silenced every other test's panics meanwhile, and a nested swap
+/// could leave it silent for good: a main-push failure of
+/// `certificates_match_rust_on_random_programs` after #1997 printed no
+/// message at all. So the hook is installed once and stays, and it skips
+/// only threads inside `quietly`.
+pub fn quietly<T>(f: impl FnOnce() -> T) -> T {
+    let _quiet = quiet_panics();
+    f()
+}
+
+/// Leaves this thread's panics unreported until the guard drops, as
+/// [`quietly`] does for a closure. Other threads still report theirs.
+pub fn quiet_panics() -> QuietPanics {
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let report = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !QUIET_PANICS.with(std::cell::Cell::get) {
+                report(info);
+            }
+        }));
+    });
+    QuietPanics(QUIET_PANICS.with(|q| q.replace(true)))
+}
+
+/// The guard of [`quiet_panics`]: dropping it restores whether this thread
+/// reported panics before.
+#[must_use = "panics are quiet only while the guard lives"]
+pub struct QuietPanics(bool);
+
+impl Drop for QuietPanics {
+    fn drop(&mut self) {
+        QUIET_PANICS.with(|q| q.set(self.0));
+    }
+}
+
 /// `f` of every corpus program that parses and checks with no diagnostics
 /// (the programs of [`corpus`]), given the module and its expression types,
 /// in corpus order. Each program is parsed and checked once, on a few
@@ -145,8 +190,6 @@ pub fn map_checked_corpus<T: Send>(
         Some(f(module, &checked.expression_types))
     };
     let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
-    let quiet = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
     let mut out: Vec<(usize, T)> = std::thread::scope(|scope| {
         let (programs, one) = (&programs, &one);
         let handles: Vec<_> = (0..workers)
@@ -158,9 +201,11 @@ pub fn map_checked_corpus<T: Send>(
                             .step_by(workers)
                             .filter_map(|i| {
                                 let (p, package) = &programs[i];
-                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    one(p, *package)
-                                }))
+                                quietly(|| {
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        one(p, *package)
+                                    }))
+                                })
                                 .ok()
                                 .flatten()
                                 .map(|t| (i, t))
@@ -175,7 +220,6 @@ pub fn map_checked_corpus<T: Send>(
             .flat_map(|h| h.join().unwrap())
             .collect()
     });
-    std::panic::set_hook(quiet);
     out.sort_by_key(|(i, _)| *i);
     out.into_iter().map(|(_, t)| t).collect()
 }
@@ -220,8 +264,6 @@ pub fn corpus() -> &'static [Case] {
         // Parse and check on a few worker threads (most of a corpus test's
         // fixed cost; #1519), keeping corpus order.
         let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
         let mut out: Vec<(usize, Case)> = std::thread::scope(|scope| {
             let (programs, one) = (&programs, &one);
             let handles: Vec<_> = (0..workers)
@@ -233,9 +275,11 @@ pub fn corpus() -> &'static [Case] {
                                 .step_by(workers)
                                 .filter_map(|i| {
                                     let (p, package) = &programs[i];
-                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        one(p, *package)
-                                    }))
+                                    quietly(|| {
+                                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                            || one(p, *package),
+                                        ))
+                                    })
                                     .ok()
                                     .flatten()
                                     .map(|c| (i, c))
@@ -250,7 +294,6 @@ pub fn corpus() -> &'static [Case] {
                 .flat_map(|h| h.join().unwrap())
                 .collect()
         });
-        std::panic::set_hook(quiet);
         out.sort_by_key(|(i, _)| *i);
         out.into_iter().map(|(_, c)| c).collect()
     })

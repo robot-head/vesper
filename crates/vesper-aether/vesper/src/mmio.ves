@@ -487,13 +487,8 @@ fn mmio_status_write(inout st: MmioState, value: u32, offered: u64) -> u64 {
         }
         Result::Err(fault) => match fault {
             MmioStatusFault::DriverSetNeedsReset => MMIO_E_DRIVER_SET_NEEDS_RESET,
-            MmioStatusFault::StatusRegression {
-                from: _,
-                to: _
-            } => MMIO_E_STATUS_REGRESSION,
-            MmioStatusFault::DriverOkWithoutFeaturesOk {
-                rejected_features: r
-            } => {
+            MmioStatusFault::StatusRegression { from: _, to: _ } => MMIO_E_STATUS_REGRESSION,
+            MmioStatusFault::DriverOkWithoutFeaturesOk { rejected_features: r } => {
                 if r {
                     st
                         .stats

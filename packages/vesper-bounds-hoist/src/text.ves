@@ -1,15 +1,7 @@
 // Decision text: numbers, block lists, 128-bit constants, and byte keys
 // compared and sorted the way Rust orders `String`s.
 
-use self::fun::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
+use self::fun::{add, inc, n32, u32_at, u64_at, u8_at, w};
 
 pub fn put(inout o: ChunkSeq[u8], in s: Str) {
     o.extend(in s.as_bytes());
@@ -97,11 +89,7 @@ pub struct Keys {
 }
 
 pub fn keys_new() -> Keys {
-    Keys {
-        bytes: ChunkSeq::new[u8](),
-        starts: ChunkSeq::new[u64](),
-        lens: ChunkSeq::new[u64]()
-    }
+    Keys { bytes: ChunkSeq::new[u8](), starts: ChunkSeq::new[u64](), lens: ChunkSeq::new[u64]() }
 }
 
 impl Keys {

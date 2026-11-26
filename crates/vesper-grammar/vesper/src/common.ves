@@ -1,9 +1,6 @@
 // Module common of @vesper/grammar (see lib.ves): the failure record and
 // the checked helpers every module shares.
-use self::{
-    GErr,
-    P2
-};
+use self::{GErr, P2};
 
 // The largest u64, also the "absent" marker in result streams.
 // Unsigned LEB128 (src/framing.rs `LEB128_*`): seven payload bits per byte
@@ -21,33 +18,16 @@ pub fn none() -> u64 {
 // Raise `kind` (the index of the variant in the Rust module's ErrorKind)
 // at `offset`.
 pub fn fail(kind: u64, offset: u64) -> Never eff [Fail[GErr]] {
-    Fail::raise(
-        GErr {
-            kind: kind,
-            offset: offset,
-            a: 0,
-            b: 0
-        }
-    )
+    Fail::raise(GErr { kind: kind, offset: offset, a: 0, b: 0 })
 }
 
 // Raise with two payload words (DER UnsupportedTag, IPC Column).
 pub fn fail2(kind: u64, offset: u64, a: u64, b: u64) -> Never eff [Fail[GErr]] {
-    Fail::raise(
-        GErr {
-            kind: kind,
-            offset: offset,
-            a: a,
-            b: b
-        }
-    )
+    Fail::raise(GErr { kind: kind, offset: offset, a: a, b: b })
 }
 
 pub fn pair(a: u64, b: u64) -> P2 {
-    P2 {
-        a: a,
-        b: b
-    }
+    P2 { a: a, b: b }
 }
 
 // `a + b`, raising `kind` at `offset` when it overflows.

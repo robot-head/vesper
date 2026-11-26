@@ -14,74 +14,18 @@
 // byte: 0 Unit, 1 + s a scalar, 6 a field-less enum, 7 + s `Option` of a
 // scalar, where s is 0 u8, 1 u32, 2 u64, 3 i64, 4 bool.
 
-use @vesper/place-ir::codes::{
-    Lit,
-    Op,
-    Pat,
-    Term
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    inc32,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    default_type,
-    display,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::world::{
-    Adt,
-    Variant,
-    World,
-    set_by_symbol
-};
-use @vesper/check-data::input::{
-    Ctx
-};
-use @vesper/place-ir::{
-    BlockRow,
-    FnRow,
-    InstRow,
-    Program
-};
-use @vesper/ebpf::insn::{
-    AluOp,
-    Endian,
-    JmpOp,
-    Operand,
-    Size
-};
-use @vesper/ebpf::program::{
-    ProgramType
-};
-use @vesper/ebpf::helpers::{
-    allowed
-};
-use self::asm::{
-    Asm,
-    MapRow,
-    asm_new,
-    slot_off
-};
-use self::extra::{
-    Extra,
-    XEff,
-    XFn,
-    XOp,
-    XParam
-};
+use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
+use @vesper/check-data::util::{add, inc, inc32, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, default_type, display, TyKind, TyPass};
+use @vesper/check-data::world::{Adt, Variant, World, set_by_symbol};
+use @vesper/check-data::input::{Ctx};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, Program};
+use @vesper/ebpf::insn::{AluOp, Endian, JmpOp, Operand, Size};
+use @vesper/ebpf::program::{ProgramType};
+use @vesper/ebpf::helpers::{allowed};
+use self::asm::{Asm, MapRow, asm_new, slot_off};
+use self::extra::{Extra, XEff, XFn, XOp, XParam};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
@@ -1724,14 +1668,7 @@ fn read_params(inout g: G, in p: Program, f: FnRow) {
 fn param_at(in g: G, k: u64) -> PInfo {
     match g.params.try_get(k) {
         Option::Some(x) => x,
-        Option::None => PInfo {
-            name: 0,
-            pass: 0,
-            nproj: 0,
-            ty: 0,
-            s0: 0,
-            s1: 0
-        },
+        Option::None => PInfo { name: 0, pass: 0, nproj: 0, ty: 0, s0: 0, s1: 0 },
     }
 }
 

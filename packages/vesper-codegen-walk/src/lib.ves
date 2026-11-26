@@ -19,62 +19,16 @@
 // by `native_walk_frames`.
 
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    Vars,
-    default_type,
-    substitute,
-    vars_new,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/check-layout::{
-    Layouts,
-    layout_of,
-    layouts_new
-};
-use @vesper/codegen-calls::data::{
-    ParamInfo
-};
-use @vesper/codegen-calls::instances::{
-    Conc,
-    Syms,
-    specialized,
-    syms_new
-};
-use @vesper/place-ir::{
-    FnRow,
-    InstRow,
-    Program,
-    read_program
-};
-use self::frame::{
-    frames_bytes,
-    frames_text
-};
-use @vesper/place-ir::codes::{
-    Op,
-    Pat,
-    Tag
-};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, Vars, default_type, substitute, vars_new, TyKind, TyPass};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/check-layout::{Layouts, layout_of, layouts_new};
+use @vesper/codegen-calls::data::{ParamInfo};
+use @vesper/codegen-calls::instances::{Conc, Syms, specialized, syms_new};
+use @vesper/place-ir::{FnRow, InstRow, Program, read_program};
+use self::frame::{frames_bytes, frames_text};
+use @vesper/place-ir::codes::{Op, Pat, Tag};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
@@ -168,14 +122,7 @@ struct Sigs {
 fn sig_at(in s: Sigs, i: u64) -> Sig {
     match s.rows.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Sig {
-            name: 0,
-            generics: 0,
-            result: 0,
-            row: 0,
-            pa: 0,
-            pn: 0
-        },
+        Option::None => Sig { name: 0, generics: 0, result: 0, row: 0, pa: 0, pn: 0 },
     }
 }
 
@@ -221,16 +168,7 @@ fn read_sigs(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Sigs {
         }
         s
             .rows
-            .push(
-                Sig {
-                    name: name,
-                    generics: generics,
-                    result: result,
-                    row: row,
-                    pa: pa,
-                    pn: np
-                }
-            );
+            .push(Sig { name: name, generics: generics, result: result, row: row, pa: pa, pn: np });
         if w(name) >= s.by_name.len() {
             s.by_name.resize(inc(w(name)), 0);
         }
@@ -269,12 +207,7 @@ impl Gen {
                     }
                 );
         }
-        let conc = Conc {
-            f: 0,
-            params: params,
-            result: g.result,
-            row: g.row
-        };
+        let conc = Conc { f: 0, params: params, result: g.result, row: g.row };
         let res = specialized(
             inout self.c.types,
             in self.c.names,
@@ -329,11 +262,7 @@ struct Graph {
 fn param_at(in g: Graph, i: u64) -> Param {
     match g.params.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Param {
-            name: 0,
-            pass: 0,
-            ty: 0
-        },
+        Option::None => Param { name: 0, pass: 0, ty: 0 },
     }
 }
 
@@ -351,15 +280,7 @@ fn read_header(in p: Program, f: FnRow, inout g: Graph) {
         let ty = n32(p.op(i));
         // type, span start, span end
         i = add(i, 3);
-        g
-            .params
-            .push(
-                Param {
-                    name: name,
-                    pass: pass,
-                    ty: ty
-                }
-            );
+        g.params.push(Param { name: name, pass: pass, ty: ty });
     }
     // result, effects
     i = add(i, 2);
@@ -877,9 +798,7 @@ impl Gen {
 // The harness entry: the signature lines, then each function's plan.
 pub fn native_walk_decisions(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let s = read_sigs(inout r, in b, in c);
@@ -913,9 +832,7 @@ pub fn native_walk_decisions(in input: Str) -> ChunkSeq[u64] {
 // pairs, `nested` flag, and `nh` `Op::Handle` free names. Returns the
 // local names kept in registers, one per line.
 pub fn native_walk_register_locals_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let s = read_sigs(inout r, in b, in c);

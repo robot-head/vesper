@@ -6,7 +6,14 @@
 //! sugar test suites, and on a fuzzed corpus. Part 4b-1: its template
 //! skeleton (template.ves, `template::render` before the flow analysis,
 //! through the `template_skeleton_words` hook) on the rules of the same
-//! suites and on fuzzed templates.
+//! suites and on fuzzed templates. Part 4b-4: the rendered template
+//! (flow.ves, the flow analysis of `template::render`, through
+//! `template_render_words`) on the same corpora. Part 4b-5: exit-aware
+//! scope captures (scope.ves, `scope::lower`, through
+//! `template_scope_words`) on scope rules over a corpus of callers and a
+//! fuzzed corpus. The pattern template hygiene (hygiene.ves,
+//! `hygiene::pattern`, through `template_pattern_words`) on pattern rules
+//! and on every template corpus above.
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use vesper::{check, native, packages};
@@ -22,6 +29,10 @@ struct Sugar {
     matcher: native::WordFunction,
     batch: native::WordFunction,
     skeleton: native::WordFunction,
+    render: native::WordFunction,
+    scope: native::WordFunction,
+    pattern: native::WordFunction,
+    expand: native::WordFunction,
 }
 
 fn sugar() -> &'static Sugar {
@@ -49,6 +60,10 @@ fn sugar() -> &'static Sugar {
             matcher: compile("match_rule_words"),
             batch: compile("match_rule_batch"),
             skeleton: compile("template_skeleton_words"),
+            render: compile("template_render_words"),
+            scope: compile("template_scope_words"),
+            pattern: compile("template_pattern_words"),
+            expand: compile("sugar_expand_words"),
         }
     })
 }
@@ -619,7 +634,15 @@ struct Render {
 
 const MARK: &str = "__sugar7_3_";
 
-fn vesper_skeleton(r: &Render) -> Vec<u64> {
+/// Which template stage a differential compares.
+#[derive(Clone, Copy)]
+enum Stage {
+    Skeleton,
+    Render,
+    Pattern,
+}
+
+fn vesper_template(stage: Stage, r: &Render) -> Vec<u64> {
     let mut text = String::new();
     let number = |text: &mut String, n: usize| {
         for k in 0..4 {
@@ -645,15 +668,25 @@ fn vesper_skeleton(r: &Render) -> Vec<u64> {
         .word(r.max as u64)
         .word(1 << 20);
     // SAFETY: as `vesper_match`.
-    unsafe { call.seq(JIT_RUNTIME, |w| sugar().skeleton.call(w).unwrap()) }
+    let f = match stage {
+        Stage::Skeleton => &sugar().skeleton,
+        Stage::Render => &sugar().render,
+        Stage::Pattern => &sugar().pattern,
+    };
+    unsafe { call.seq(JIT_RUNTIME, |w| f.call(w).unwrap()) }
 }
 
 /// The cases that match, and the outcomes (skeleton or refusal) seen.
-fn check_renders(renders: &[Render]) -> (usize, usize) {
+fn check_renders(stage: Stage, renders: &[Render]) -> (usize, usize) {
     let mut failures = vec![];
     let (mut matched, mut ok) = (0, 0);
     for r in renders {
-        let rust = sugar_expand::template_skeleton_words(
+        let rust_words = match stage {
+            Stage::Skeleton => sugar_expand::template_skeleton_words,
+            Stage::Render => sugar_expand::template_render_words,
+            Stage::Pattern => sugar_expand::template_pattern_words,
+        };
+        let rust = rust_words(
             &r.pattern,
             &r.invocation,
             r.tail.as_deref(),
@@ -662,7 +695,7 @@ fn check_renders(renders: &[Render]) -> (usize, usize) {
             r.max,
             1 << 20,
         );
-        let vesper = vesper_skeleton(r);
+        let vesper = vesper_template(stage, r);
         matched += usize::from(rust[0] != 0);
         ok += usize::from(rust[0] == 1);
         if rust != vesper {
@@ -861,8 +894,7 @@ fn max_bytes() -> [usize; 4] {
     [1 << 20, 4096, 24, 7]
 }
 
-#[test]
-fn skeleton_matches_on_the_template_examples() {
+fn example_renders() -> Vec<Render> {
     let mut renders = vec![];
     for &(pattern, invocation, template) in TEMPLATES {
         for max in max_bytes() {
@@ -877,7 +909,13 @@ fn skeleton_matches_on_the_template_examples() {
             }
         }
     }
-    let (matched, ok) = check_renders(&renders);
+    renders
+}
+
+#[test]
+fn skeleton_matches_on_the_template_examples() {
+    let renders = example_renders();
+    let (matched, ok) = check_renders(Stage::Skeleton, &renders);
     assert!(
         matched * 2 > renders.len() && ok > 40,
         "{matched} matched, {ok} ok"
@@ -885,11 +923,32 @@ fn skeleton_matches_on_the_template_examples() {
 }
 
 #[test]
+fn render_matches_on_the_template_examples() {
+    let renders = example_renders();
+    let (matched, ok) = check_renders(Stage::Render, &renders);
+    assert!(
+        matched * 2 > renders.len() && ok > 30,
+        "{matched} matched, {ok} ok"
+    );
+}
+
+#[test]
 fn skeleton_matches_on_the_sugar_test_suites() {
     let renders = corpus_renders();
-    let (matched, ok) = check_renders(&renders);
+    let (matched, ok) = check_renders(Stage::Skeleton, &renders);
     assert!(
         ok > 50,
+        "{} renders, {matched} matched, {ok} ok",
+        renders.len()
+    );
+}
+
+#[test]
+fn render_matches_on_the_sugar_test_suites() {
+    let renders = corpus_renders();
+    let (matched, ok) = check_renders(Stage::Render, &renders);
+    assert!(
+        ok > 40,
         "{} renders, {matched} matched, {ok} ok",
         renders.len()
     );
@@ -900,13 +959,12 @@ const TEMPLATE_FRAGMENTS: &[&str] = &[
     "(", ")", "{", "}", ";", ",", "let", "t", "=", "in", "inout", "..", "`", "\"s\"", "1",
 ];
 
-#[test]
-fn skeleton_matches_on_the_fuzzed_corpus() {
+fn fuzzed_renders(seed: u64) -> Vec<Render> {
     let rounds: usize = std::env::var("VESPER_SUGAR_FUZZ")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(4000);
-    let mut rng = Rng(0x5eed_4b01);
+    let mut rng = Rng(seed);
     let mut renders = vec![];
     for _ in 0..rounds {
         let (p, i, t) = TEMPLATES[rng.below(TEMPLATES.len())];
@@ -938,5 +996,762 @@ fn skeleton_matches_on_the_fuzzed_corpus() {
             max: max_bytes()[rng.below(4)],
         });
     }
-    check_renders(&renders);
+    renders
+}
+
+#[test]
+fn skeleton_matches_on_the_fuzzed_corpus() {
+    check_renders(Stage::Skeleton, &fuzzed_renders(0x5eed_4b01));
+}
+
+#[test]
+fn render_matches_on_the_fuzzed_corpus() {
+    check_renders(Stage::Render, &fuzzed_renders(0x5eed_4b04));
+}
+
+// ---------------------------------------------------------- scope capture
+
+/// Scope rules: the supported protocol and its refusals (unbound, resumed
+/// twice, resumed before cleanup, two scopes).
+const SCOPE_RULES: &[(&str, &str)] = &[
+    (
+        "defer $cleanup:block $..rest:scope",
+        "{\n let exit = $..rest;\n $cleanup;\n exit.resume()\n }",
+    ),
+    ("holding $body:scope", "{let result=$body;result.resume()}"),
+    (
+        "defer $cleanup:block $..rest:scope",
+        "{ $cleanup; $..rest }",
+    ),
+    (
+        "defer $cleanup:block $..rest:scope",
+        "{ let exit = $..rest; exit.resume(); exit.resume() }",
+    ),
+    (
+        "defer $cleanup:block $..rest:scope",
+        "{ let exit = $..rest; exit.resume(); $cleanup }",
+    ),
+    (
+        "defer $cleanup:block $..rest:scope",
+        "{ let exit = $..rest; let again = $..rest; $cleanup; exit.resume() }",
+    ),
+    (
+        "defer $cleanup:block $..rest:scope",
+        "{ let exit = $..rest; $cleanup; { exit.resume() } }",
+    ),
+];
+
+/// Callers of the scope rules: exits of every kind, loops, closures,
+/// handlers, regions, Fail rows and Option `?`.
+const SCOPE_PROGRAMS: &[&str] = &[
+    "fn early(inout n:i64, flag: bool)->i64 {\n defer { n = wrapping_add(n,1); }\n if flag { return 3; } 4\n}",
+    "fn failed(inout n:i64)->i64 eff [Fail[RuntimeError]] {\n defer { n = wrapping_add(n,1); }\n Fail::raise(RuntimeError::DivisionByZero)\n}",
+    "fn main()->i64 {\n let mut n:i64=0;\n let v = loop {\n defer { n = wrapping_add(n,1); }\n if n < 4 {continue;} break 5;\n };\n v\n}",
+    "fn main()->i64 {\n let mut n:i64=0;\n loop {\n defer { n = wrapping_add(n,1); }\n if n < 4 {continue;} break;\n }\n n\n}",
+    "fn f()->i64 { holding { 41 } }",
+    "fn f()->i64 { holding { if g() { return 1; } 2 } }",
+    "fn f(xs: Vec[i64])->i64 {\n defer { log(); }\n for x in xs { if x > 3 { return x; } }\n 0\n}",
+    "fn f()->i64 {\n defer { log(); }\n loop { if g() { return 7; } break; }\n 0\n}",
+    "fn f()->Option[i64] {\n defer { log(); }\n let x = g()?;\n Option::Some(x)\n}",
+    "fn f()->Option[i64] eff [Fail[RuntimeError]] {\n defer {}\n let x = Some(1)?;\n Some(x)\n}",
+    "fn f()->Option[(i64, bool)] {\n defer { log(); }\n let x = g()?.h()?;\n Option::Some((x, true))\n}",
+    "fn f()->i64 eff [Fail[RuntimeError], Fail[ParseError]] {\n defer { log(); }\n if g() { return 1; }\n parse()\n}",
+    "fn f()->i64 eff [Fail[RuntimeError], Fail[RuntimeError]] {\n defer { log(); }\n 3\n}",
+    "effect Stop {fn stop()->Never;}\nfn f()->i64 eff [Stop]{\n defer {}\n Stop::stop()\n}",
+    "linear effect Ask { fn ask() -> i64; }\nfn f()->i64 eff [Ask] {\n defer { log(); }\n Ask::ask()\n}",
+    "fn f()->i64 eff [ConstTime, DetFloat] {\n defer { log(); }\n 3\n}",
+    "fn f()->i64 {\n handle stop:Fail[i64] in {\n defer {}\n stop.raise(3)\n } with {return v=>v,raise(e,_)=>e,}\n}",
+    "fn f()->i64 {\n handle Fail[i64] in {\n defer { log(); }\n if g() { return 2; }\n 1\n } with {return v=>v,raise(e,_)=>e,}\n}",
+    "fn f()->i64 {\n defer { log(); }\n let k = |x: i64| -> i64 { return x; };\n k(2)\n}",
+    "fn f()->i64 {\n let k = || -> i64 eff [Fail[RuntimeError]] {\n defer { log(); }\n if g() { return 1; }\n 2\n };\n 3\n}",
+    "fn f()->i64 {\n let k = || {\n defer { log(); }\n 2\n };\n 3\n}",
+    "fn f()->i64 {\n defer { log(); }\n handle Fail[i64] in { if g() { return 1; } 2 } with {return v=>v,raise(e,_)=>e,}\n}",
+    "fn f()->i64 {\n defer { log(); }\n handle Fail[i64] in { 2 } with {return v=>{ return v; },raise(e,_)=>e,}\n}",
+    "fn f()->i64 {\n defer { log(); }\n region r {\n if g() { return 1; }\n }\n 2\n}",
+    "fn f()->i64 {\n loop {\n defer { log(); }\n if a() { break; }\n if b() { continue; }\n if c() { return 4; }\n }\n 0\n}",
+    "fn f()->i64 {\n let v = loop {\n defer { log(); }\n if a() { break 1; }\n if c() { return 4; }\n break 2;\n };\n v\n}",
+    "fn f()->i64 {\n for i in 0..3 {\n defer { log(); }\n if i == 1 { continue; }\n loop { if b() { return 3; } break; }\n }\n 0\n}",
+    "fn f()->fn() -> i64 {\n defer { log(); }\n for i in 0..3 { return g; }\n g\n}",
+    "fn f()->dyn Show {\n defer { log(); }\n loop { return g(); }\n}",
+    "impl Thing {\n fn m(self)->i64 {\n defer { log(); }\n if g() { return 1; }\n 2\n }\n}",
+    "fn f[e]()->i64 eff [e] {\n defer { log(); }\n 2\n}",
+    "fn f()->i64 {\n defer { log(); }\n let x = 1;\n defer { other(); }\n x\n}",
+    "fn f()->i64 {\n defer { log(); }\n match g() { 1 => return 2, _ => 3 }\n}",
+    "fn f()->Option[i64] {\n defer { log(); }\n let k = || -> Option[i64] { let y = g()?; Option::Some(y) };\n k()\n}",
+    "fn f()->Option[i64] {\n defer { log(); }\n handle Fail[i64] in { let y = g()?; Option::Some(y) } with {return v=>v,raise(e,_)=>Option::None,}\n}",
+    "fn f()->i64 {\n defer { log(); }\n return;\n}",
+    "fn f()->i64 {\n defer { log() }\n while_true { 3 }\n}",
+];
+
+struct ScopeCase {
+    render: Render,
+    source: String,
+    call: std::ops::Range<usize>,
+}
+
+fn vesper_scope(c: &ScopeCase) -> Vec<u64> {
+    let r = &c.render;
+    let mut text = String::new();
+    let number = |text: &mut String, n: usize| {
+        for k in 0..4 {
+            text.push(char::from((n >> (7 * k)) as u8 & 127));
+        }
+    };
+    number(&mut text, r.pattern.len());
+    number(&mut text, r.invocation.len());
+    number(&mut text, r.tail.as_ref().map_or(0, |t| t.len() + 1));
+    number(&mut text, r.template.len());
+    number(&mut text, MARK.len());
+    number(&mut text, c.source.len());
+    number(&mut text, c.call.start);
+    number(&mut text, c.call.end);
+    for part in [
+        r.pattern.as_str(),
+        &r.invocation,
+        r.tail.as_deref().unwrap_or(""),
+        &r.template,
+        MARK,
+        &c.source,
+    ] {
+        text.push_str(part);
+    }
+    let call = vesper_port_abi::HostCall::new()
+        .str(&text)
+        .word(r.max as u64)
+        .word(1 << 20);
+    // SAFETY: as `vesper_match`.
+    unsafe { call.seq(JIT_RUNTIME, |w| sugar().scope.call(w).unwrap()) }
+}
+
+/// The source `program` under each scope rule's declaration, with a case
+/// per statement or expression sugar use and rule.
+fn scope_cases(program: &str, cases: &mut Vec<ScopeCase>) {
+    for (k, (pattern, template)) in SCOPE_RULES.iter().enumerate() {
+        let sort = if pattern.starts_with("holding") {
+            "expr"
+        } else {
+            "stmt"
+        };
+        let name = pattern.split(' ').next().unwrap();
+        let source =
+            format!("sugar {name}:{sort} {{ rule ({pattern}) => {{{template}}} }}\n{program}");
+        let Ok(parse) = parser::parse_surface_cst(&source, Default::default(), true) else {
+            continue;
+        };
+        for node in parse.syntax().descendants() {
+            if !matches!(node.kind(), parser::SUGAR_STMT | parser::SUGAR_EXPR) {
+                continue;
+            }
+            let s = significant_start(&node);
+            let e = usize::from(node.text_range().end());
+            // `block_end`: the enclosing block's closing brace.
+            let mut depth = 0usize;
+            let mut end = None;
+            for (i, b) in source.bytes().enumerate().skip(e) {
+                if b == b'{' {
+                    depth += 1;
+                } else if b == b'}' {
+                    if depth == 0 {
+                        end = Some(i);
+                        break;
+                    }
+                    depth -= 1;
+                }
+            }
+            let tail = pattern
+                .contains("$..")
+                .then(|| end.map(|end| source[e..end].to_owned()))
+                .flatten();
+            if pattern.contains("$..") && tail.is_none() {
+                continue;
+            }
+            cases.push(ScopeCase {
+                render: Render {
+                    pattern: (*pattern).into(),
+                    invocation: source[s..e].to_owned(),
+                    tail,
+                    template: (*template).into(),
+                    max: match (k + cases.len()) % 4 {
+                        0 => 200,
+                        1 => 420,
+                        _ => 1 << 20,
+                    },
+                },
+                source: source.clone(),
+                call: s..e,
+            });
+        }
+    }
+}
+
+/// The cases that match, and those that lower.
+fn check_scopes(cases: &[ScopeCase]) -> (usize, usize) {
+    let mut failures = vec![];
+    let (mut matched, mut ok) = (0, 0);
+    let mut outcomes = std::collections::BTreeMap::<String, usize>::new();
+    for c in cases {
+        let r = &c.render;
+        let rust = sugar_expand::template_scope_words(
+            &r.pattern,
+            &r.invocation,
+            r.tail.as_deref(),
+            &r.template,
+            MARK,
+            &c.source,
+            c.call.clone(),
+            r.max,
+            1 << 20,
+        );
+        let vesper = vesper_scope(c);
+        let outcome = match rust[0] {
+            0 => "no match".to_owned(),
+            1 if rust[1] != 0 => "lowered with a return effect".to_owned(),
+            1 => "lowered".to_owned(),
+            _ => rust[2..].iter().map(|&b| char::from(b as u8)).collect(),
+        };
+        *outcomes.entry(outcome).or_default() += 1;
+        matched += usize::from(rust[0] != 0);
+        ok += usize::from(rust[0] == 1);
+        if rust != vesper {
+            let text = |w: &[u64]| -> String {
+                w.iter()
+                    .map(|&b| if b < 128 { char::from(b as u8) } else { '?' })
+                    .collect()
+            };
+            failures.push(format!(
+                "source {:?} call {:?} template {:?} max {}:\n  rust   {:?}\n  vesper {:?}",
+                c.source,
+                c.call,
+                r.template,
+                r.max,
+                text(&rust),
+                text(&vesper)
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} scope cases differ:\n{}",
+        failures.len(),
+        cases.len(),
+        failures[..failures.len().min(12)].join("\n")
+    );
+    println!("{outcomes:#?}");
+    (matched, ok)
+}
+
+#[test]
+fn scope_matches_on_the_scope_examples() {
+    let mut cases = vec![];
+    for program in SCOPE_PROGRAMS {
+        scope_cases(program, &mut cases);
+    }
+    let (matched, ok) = check_scopes(&cases);
+    assert!(
+        matched > 60 && ok > 20,
+        "{} cases, {matched} matched, {ok} ok",
+        cases.len()
+    );
+}
+
+/// Fragments the scope fuzzer splices into the callers.
+const SCOPE_FRAGMENTS: &[&str] = &[
+    "return 1;",
+    "return;",
+    "break;",
+    "break 2;",
+    "continue;",
+    "g()?;",
+    "x?",
+    "loop {",
+    "}",
+    "{",
+    "for i in xs {",
+    "|| {",
+    "|x: i64| -> i64 {",
+    "handle Fail[i64] in {",
+    "} with {return v=>v,raise(e,_)=>e,}",
+    "region r {",
+    "if a() {",
+    "defer { log(); }",
+    ";",
+    "holding { 1 }",
+    "eff [Fail[RuntimeError]]",
+    "-> Option[i64]",
+    "match x { _ => return 3 }",
+];
+
+#[test]
+fn scope_matches_on_the_fuzzed_corpus() {
+    let rounds: usize = std::env::var("VESPER_SUGAR_FUZZ")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4000)
+        / 8;
+    let mut rng = Rng(0x5eed_4b05);
+    let mut cases = vec![];
+    for _ in 0..rounds {
+        let base = SCOPE_PROGRAMS[rng.below(SCOPE_PROGRAMS.len())];
+        let mut parts: Vec<String> = base.split(' ').map(str::to_owned).collect();
+        for _ in 0..=rng.below(3) {
+            let at = rng.below(parts.len() + 1);
+            let f = SCOPE_FRAGMENTS[rng.below(SCOPE_FRAGMENTS.len())].to_owned();
+            match rng.below(3) {
+                0 if !parts.is_empty() => {
+                    parts.remove(at.min(parts.len() - 1));
+                }
+                1 if !parts.is_empty() => {
+                    let k = at.min(parts.len() - 1);
+                    parts[k] = f;
+                }
+                _ => parts.insert(at, f),
+            }
+        }
+        scope_cases(&parts.join(" "), &mut cases);
+    }
+    check_scopes(&cases);
+}
+
+/// Pattern rules: literal binders, shorthand fields, binders spliced from
+/// holes, repeated names and refusals.
+const PATTERN_TEMPLATES: &[(&str, &str, &str)] = &[
+    ("present $p:pat", "present value", "Option::Some($p)"),
+    ("present $p:pat", "present (a, _)", "Option::Some($p)"),
+    (
+        "pair $a:pat $b:pat",
+        "pair x y",
+        "(x, $a, Point { x, y: $b })",
+    ),
+    ("pt $a:pat", "pt q", "Point { x, y: $a }"),
+    ("pt $a:pat", "pt q", "Point { x: x, y }"),
+    ("pt $a:pat", "pt q", "Point { x:\n  x, y: (y, y) }"),
+    ("both $a:pat", "both z", "(w, w, Wrap { w }, $a)"),
+    (
+        "many $( $p:pat ),*",
+        "many a, b, c",
+        "($( Some($p) ),*, rest)",
+    ),
+    ("many $( $p:pat ),*", "many a, b", "[$( $p ),*]"),
+    ("lit $e:expr", "lit 3", "Option::Some(x) | y"),
+    ("lit $e:expr", "lit 3", "Num($e)"),
+    ("ign {}", "ign {}", "shadow"),
+    ("ign {}", "ign {}", "_"),
+    ("ign {}", "ign {}", "(a, b) => b"),
+    ("ign {}", "ign {}", "Ctor { a: Inner { b, c: d }, e }"),
+];
+
+fn pattern_renders() -> Vec<Render> {
+    let mut renders = example_renders();
+    for &(pattern, invocation, template) in PATTERN_TEMPLATES {
+        for max in max_bytes() {
+            renders.push(Render {
+                pattern: pattern.into(),
+                invocation: invocation.into(),
+                tail: None,
+                template: template.into(),
+                max,
+            });
+        }
+    }
+    renders
+}
+
+#[test]
+fn pattern_hygiene_matches_on_the_template_examples() {
+    let (matched, ok) = check_renders(Stage::Pattern, &pattern_renders());
+    assert!(matched > 100 && ok > 30, "{matched} matched, {ok} ok");
+}
+
+#[test]
+fn pattern_hygiene_matches_on_the_sugar_test_suites() {
+    check_renders(Stage::Pattern, &corpus_renders());
+}
+
+#[test]
+fn pattern_hygiene_matches_on_the_fuzzed_corpus() {
+    check_renders(Stage::Pattern, &fuzzed_renders(0x5eed_4b06));
+}
+
+// ---------------------------------------------------------------- driver
+
+/// One expansion of the driver, as `sugar_expand_words` encodes it and as
+/// Rust's `expand_sugar_for_execution` returns it. Effect rows compare by
+/// their `Debug` text: Vesper returns the row's source, re-parsed here the
+/// way `read_definition` does.
+#[derive(Debug, PartialEq)]
+enum Expansion {
+    Diagnostic {
+        code: String,
+        message: String,
+        span: (usize, usize),
+        related: Vec<(usize, usize, String)>,
+    },
+    Unchanged,
+    Expanded {
+        source: String,
+        fresh_prefix: String,
+        regions: Vec<String>,
+        mappings: Vec<(usize, usize, usize, usize, bool)>,
+    },
+}
+
+fn emits_row(text: &str) -> String {
+    let wrapped = format!("fn __sugar_row() {text} {{}}");
+    match parser::rust_parse(&wrapped).module.items.into_iter().next() {
+        Some(vesper_core::ast::Item::Function(f)) => format!("{:?}", f.effects),
+        _ => String::new(),
+    }
+}
+
+fn region_text(
+    expanded: (usize, usize),
+    holes: &[(usize, usize)],
+    places: &[(usize, usize, u64)],
+    emits: &str,
+    call: (usize, usize),
+    rule: (usize, usize),
+) -> String {
+    format!(
+        "{expanded:?} holes {holes:?} places {places:?} emits {emits} call {call:?} rule {rule:?}"
+    )
+}
+
+fn rust_expand(source: &str, include_tests: bool) -> Expansion {
+    match sugar_expand::expand_sugar_for_execution(source, include_tests) {
+        Err(d) => Expansion::Diagnostic {
+            code: d.code,
+            message: d.message,
+            span: (d.span.start, d.span.end),
+            related: d
+                .related
+                .into_iter()
+                .map(|l| (l.span.start, l.span.end, l.message))
+                .collect(),
+        },
+        Ok(None) => Expansion::Unchanged,
+        Ok(Some(x)) => Expansion::Expanded {
+            source: x.source,
+            fresh_prefix: x.fresh_prefix,
+            regions: x
+                .regions
+                .iter()
+                .map(|r| {
+                    let places: Vec<_> = r
+                        .places
+                        .iter()
+                        .map(|(s, p)| {
+                            let pass = match p {
+                                vesper_core::ast::SugarPass::In => 1,
+                                vesper_core::ast::SugarPass::Inout => 2,
+                                vesper_core::ast::SugarPass::Out => 3,
+                                vesper_core::ast::SugarPass::Sink => 4,
+                            };
+                            (s.start, s.end, pass)
+                        })
+                        .collect();
+                    let holes: Vec<_> = r.holes.iter().map(|h| (h.start, h.end)).collect();
+                    region_text(
+                        (r.expanded.start, r.expanded.end),
+                        &holes,
+                        &places,
+                        &format!("{:?}", r.emits),
+                        (r.call.start, r.call.end),
+                        (r.rule.start, r.rule.end),
+                    )
+                })
+                .collect(),
+            mappings: x
+                .mappings
+                .iter()
+                .map(|m| {
+                    (
+                        m.expanded.start,
+                        m.expanded.end,
+                        m.original.start,
+                        m.original.end,
+                        m.copied,
+                    )
+                })
+                .collect(),
+        },
+    }
+}
+
+struct Words<'a>(&'a [u64], usize);
+
+impl Words<'_> {
+    fn next(&mut self) -> u64 {
+        let w = self.0.get(self.1).copied().unwrap_or(u64::MAX);
+        self.1 += 1;
+        w
+    }
+    fn n(&mut self) -> usize {
+        self.next() as usize
+    }
+    fn text(&mut self) -> String {
+        let len = self.n().min(self.0.len());
+        let bytes: Vec<u8> = (0..len).map(|_| self.next() as u8).collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+fn vesper_expand(source: &str, include_tests: bool) -> Expansion {
+    let call = vesper_port_abi::HostCall::new()
+        .str(source)
+        .word(u64::from(include_tests))
+        .word(0);
+    // SAFETY: as `vesper_match`.
+    let words = unsafe { call.seq(JIT_RUNTIME, |w| sugar().expand.call(w).unwrap()) };
+    let mut w = Words(&words, 0);
+    match w.next() {
+        2 => {
+            let code = w.text();
+            let message = w.text();
+            let span = (w.n(), w.n());
+            let related = (0..w.n().min(words.len()))
+                .map(|_| (w.n(), w.n(), w.text()))
+                .collect();
+            Expansion::Diagnostic {
+                code,
+                message,
+                span,
+                related,
+            }
+        }
+        0 => Expansion::Unchanged,
+        _ => {
+            let source = w.text();
+            let fresh_prefix = w.text();
+            let regions = (0..w.n().min(words.len()))
+                .map(|_| {
+                    let expanded = (w.n(), w.n());
+                    let holes: Vec<_> = (0..w.n().min(words.len()))
+                        .map(|_| (w.n(), w.n()))
+                        .collect();
+                    let places: Vec<_> = (0..w.n().min(words.len()))
+                        .map(|_| (w.n(), w.n(), w.next()))
+                        .collect();
+                    let row = w.text();
+                    let emits = emits_text(&row);
+                    let call = (w.n(), w.n());
+                    let rule = (w.n(), w.n());
+                    region_text(expanded, &holes, &places, &emits, call, rule)
+                })
+                .collect();
+            let mappings = (0..w.n().min(words.len()))
+                .map(|_| (w.n(), w.n(), w.n(), w.n(), w.next() != 0))
+                .collect();
+            Expansion::Expanded {
+                source,
+                fresh_prefix,
+                regions,
+                mappings,
+            }
+        }
+    }
+}
+
+/// The `Debug` text of the effect row `row` (empty: no `emits` clause).
+fn emits_text(row: &str) -> String {
+    if row.is_empty() {
+        return format!("{:?}", vesper_core::ast::Effects::default());
+    }
+    emits_row(row)
+}
+
+/// Compare the driver on each program with and without test items; return
+/// (programs, expanded) and print the outcome histogram.
+fn check_expansions(programs: &[String]) -> (usize, usize) {
+    let mut failures = vec![];
+    let mut outcomes = std::collections::BTreeMap::<String, usize>::new();
+    let mut differ = std::collections::BTreeMap::<String, usize>::new();
+    let mut gaps = 0;
+    let mut expanded = 0;
+    for program in programs {
+        for include_tests in [true, false] {
+            let rust = rust_expand(program, include_tests);
+            let vesper = vesper_expand(program, include_tests);
+            let key = match &rust {
+                Expansion::Diagnostic { message, .. } => message.clone(),
+                Expansion::Unchanged => "unchanged".into(),
+                Expansion::Expanded { .. } => {
+                    expanded += 1;
+                    "expanded".into()
+                }
+            };
+            *outcomes.entry(key).or_default() += 1;
+            // Known gap (part 6): the surface profile does not yet run
+            // the expression macro validation (`macro_source::
+            // validate_surface`), so a source whose macro use Rust's
+            // reparse refuses expands in Vesper. Counted, not hidden.
+            let macro_gap = matches!(&rust, Expansion::Diagnostic { code, .. } if code == "E0002")
+                && program.contains("macro")
+                && !matches!(&vesper, Expansion::Diagnostic { .. });
+            if rust != vesper && macro_gap {
+                gaps += 1;
+            } else if rust != vesper {
+                let short = |e: &Expansion| match e {
+                    Expansion::Diagnostic { message, .. } => message.clone(),
+                    Expansion::Unchanged => "unchanged".into(),
+                    Expansion::Expanded { .. } => "expanded".into(),
+                };
+                *differ
+                    .entry(format!("{} / {}", short(&rust), short(&vesper)))
+                    .or_default() += 1;
+                failures.push(format!(
+                    "program {program:?} tests {include_tests}:\n  rust   {rust:?}\n  vesper {vesper:?}"
+                ));
+            }
+        }
+    }
+    eprintln!("{} programs, outcomes {outcomes:?}", programs.len());
+    eprintln!("differences (rust / vesper) {differ:#?}, macro validation gaps {gaps}");
+    assert!(
+        failures.is_empty(),
+        "{} of {} expansions differ:\n{}",
+        failures.len(),
+        programs.len() * 2,
+        failures
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    (programs.len(), expanded)
+}
+
+/// The scope programs under each scope rule, as `scope_cases` builds them.
+fn scope_programs(program: &str, out: &mut Vec<String>) {
+    for (pattern, template) in SCOPE_RULES {
+        let sort = if pattern.starts_with("holding") {
+            "expr"
+        } else {
+            "stmt"
+        };
+        let name = pattern.split(' ').next().unwrap();
+        out.push(format!(
+            "sugar {name}:{sort} {{ rule ({pattern}) => {{{template}}} }}\n{program}"
+        ));
+    }
+}
+
+fn suite_programs() -> Vec<String> {
+    SUGAR_FILES
+        .iter()
+        .filter_map(|file| std::fs::read_to_string(root().join(file)).ok())
+        .flat_map(|text| rust_string_literals(&text))
+        .filter(|s| s.contains("sugar"))
+        .collect()
+}
+
+#[test]
+fn driver_matches_on_the_sugar_test_suites() {
+    let (programs, expanded) = check_expansions(&suite_programs());
+    assert!(
+        programs > 50 && expanded > 50,
+        "{programs} programs, {expanded} expanded"
+    );
+}
+
+#[test]
+fn driver_matches_on_the_scope_examples() {
+    let mut programs = vec![];
+    for program in SCOPE_PROGRAMS {
+        scope_programs(program, &mut programs);
+    }
+    check_expansions(&programs);
+}
+
+#[test]
+fn driver_matches_on_the_fuzzed_corpus() {
+    let rounds: usize = std::env::var("VESPER_SUGAR_FUZZ")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4000)
+        / 8;
+    let suites = suite_programs();
+    let mut rng = Rng(0x5eed_4c01);
+    let mut programs = vec![];
+    for _ in 0..rounds {
+        let base = if rng.below(2) == 0 && !suites.is_empty() {
+            suites[rng.below(suites.len())].clone()
+        } else {
+            let mut one = vec![];
+            scope_programs(SCOPE_PROGRAMS[rng.below(SCOPE_PROGRAMS.len())], &mut one);
+            one.swap_remove(rng.below(one.len()))
+        };
+        let mut parts: Vec<String> = base.split(' ').map(str::to_owned).collect();
+        for _ in 0..=rng.below(3) {
+            let at = rng.below(parts.len() + 1);
+            let f = if rng.below(2) == 0 {
+                SCOPE_FRAGMENTS[rng.below(SCOPE_FRAGMENTS.len())]
+            } else {
+                FRAGMENTS[rng.below(FRAGMENTS.len())]
+            }
+            .to_owned();
+            match rng.below(3) {
+                0 if !parts.is_empty() => {
+                    parts.remove(at.min(parts.len() - 1));
+                }
+                1 if !parts.is_empty() => {
+                    let k = at.min(parts.len() - 1);
+                    parts[k] = f;
+                }
+                _ => parts.insert(at, f),
+            }
+        }
+        programs.push(parts.join(" "));
+    }
+    check_expansions(&programs);
+}
+
+#[test]
+#[ignore = "speed measurement; run with --ignored --nocapture in release"]
+fn driver_speed() {
+    let programs = suite_programs();
+    let time = |f: &dyn Fn(&str)| {
+        let start = std::time::Instant::now();
+        for _ in 0..5 {
+            for p in &programs {
+                f(p);
+            }
+        }
+        start.elapsed()
+    };
+    let _ = vesper_expand("", true);
+    let rust = time(&|p| {
+        std::hint::black_box(sugar_expand::expand_sugar_for_execution(p, true).ok());
+    });
+    let vesper = time(&|p| {
+        std::hint::black_box(vesper_expand(p, true));
+    });
+    eprintln!(
+        "{} programs x5: rust {rust:?}, vesper {vesper:?}, ratio {:.2}",
+        programs.len(),
+        vesper.as_secs_f64() / rust.as_secs_f64()
+    );
+}
+
+/// Caller hygiene on a source with one expansion and many distinct names:
+/// the name grouping stays near linear in the references.
+#[test]
+fn driver_matches_with_many_names() {
+    let mut program =
+        String::from("sugar twice:stmt { rule (twice $b:block) => {{ $b; $b; }} }\nfn f() {\n");
+    for i in 0..20_000 {
+        program.push_str(&format!(" let name{i} = {i};\n"));
+    }
+    program.push_str(" twice { name0; }\n}\n");
+    let _ = vesper_expand("", true);
+    let start = std::time::Instant::now();
+    let rust = rust_expand(&program, true);
+    let rust_time = start.elapsed();
+    let start = std::time::Instant::now();
+    let vesper = vesper_expand(&program, true);
+    let vesper_time = start.elapsed();
+    eprintln!("rust {rust_time:?}, vesper {vesper_time:?}");
+    assert!(matches!(rust, Expansion::Expanded { .. }), "{rust:?}");
+    assert_eq!(rust, vesper);
+    assert!(vesper_time.as_secs() < 60, "{vesper_time:?}");
 }

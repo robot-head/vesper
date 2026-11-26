@@ -155,16 +155,10 @@ impl Reader {
         let end = wrapping_add(start, len);
         if end < start || end > b.len() {
             self.bad = true;
-            return Span {
-                start: 0,
-                len: 0
-            };
+            return Span { start: 0, len: 0 };
         }
         self.pos = end;
-        Span {
-            start: start,
-            len: len
-        }
+        Span { start: start, len: len }
     }
 }
 
@@ -267,10 +261,7 @@ fn read_spec(in req: Slice[u8], inout r: Reader) -> Spec {
 fn span_of(in spans: ChunkSeq[Span], i: u64) -> Span {
     match spans.try_get(i) {
         Option::Some(s) => s,
-        Option::None => Span {
-            start: 0,
-            len: 0
-        },
+        Option::None => Span { start: 0, len: 0 },
     }
 }
 
@@ -965,10 +956,7 @@ fn isa_flags(target: u64) -> ChunkSeq[u8] {
 // pairs, then Silicon's names of main, trap and exit; or status 1 and the
 // error.
 pub fn freestanding_runtime(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
-    let mut r = Reader {
-        pos: 0,
-        bad: false
-    };
+    let mut r = Reader { pos: 0, bad: false };
     let spec = read_spec(in req, inout r);
     if r.bad {
         return failure(in "malformed runtime request".as_bytes());

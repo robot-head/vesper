@@ -47,22 +47,8 @@ use self::rules::{
     stable_place,
     stable_root
 };
-use self::facts::{
-    Edge,
-    Facts,
-    TermNode,
-    facts_new
-};
-use self::text::{
-    Keys,
-    keys_new,
-    put,
-    put_blocks,
-    put_bool,
-    put_i128,
-    put_u128,
-    put_u64
-};
+use self::facts::{Edge, Facts, TermNode, facts_new};
+use self::text::{Keys, keys_new, put, put_blocks, put_bool, put_i128, put_u128, put_u64};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
@@ -211,14 +197,7 @@ pub copy struct Head {
 }
 
 pub fn header(in f: Fun, h: u64) -> Head {
-    let no = Head {
-        ok: false,
-        index: 0,
-        bound: 0,
-        inclusive: false,
-        body: 0,
-        down: false
-    };
+    let no = Head { ok: false, index: 0, bound: 0, inclusive: false, body: 0, down: false };
     let k = f.block(h);
     if k.ic != 4 {
         return no;
@@ -418,19 +397,7 @@ const O_LOCAL: u64 = 1;
 const O_CONST: u64 = 2;
 
 pub fn fail_lin() -> Lin {
-    Lin {
-        ok: false,
-        sign: 0,
-        p0: 0,
-        pn: 0,
-        m0: 0,
-        mn: 0,
-        scale: 0,
-        q0: 0,
-        qn: 0,
-        r0: 0,
-        rn: 0
-    }
+    Lin { ok: false, sign: 0, p0: 0, pn: 0, m0: 0, mn: 0, scale: 0, q0: 0, qn: 0, r0: 0, rn: 0 }
 }
 
 // The index analysis of one counted loop (`Affine`).
@@ -459,19 +426,7 @@ impl Counted {
     fn term(inout self, kind: u64, x: u64) -> Lin {
         let p0 = n32(self.offs.len());
         self.offs.push(wrapping_shl_u64(kind, 62) | x);
-        Lin {
-            ok: true,
-            sign: 0,
-            p0: p0,
-            pn: 1,
-            m0: 0,
-            mn: 0,
-            scale: 0,
-            q0: 0,
-            qn: 0,
-            r0: 0,
-            rn: 0
-        }
+        Lin { ok: true, sign: 0, p0: p0, pn: 1, m0: 0, mn: 0, scale: 0, q0: 0, qn: 0, r0: 0, rn: 0 }
     }
 
     fn copy_range(inout self, a: u32, n: u32) -> u32 {
@@ -793,10 +748,7 @@ pub copy struct I128 {
 
 fn i128_of(neg: bool, lo: u64, hi: u64) -> I128 {
     if !neg {
-        return I128 {
-            lo: lo,
-            hi: hi
-        };
+        return I128 { lo: lo, hi: hi };
     }
     // -(hi, lo)
     let nlo = wrapping_add(lo ^ 18446744073709551615, 1);
@@ -805,10 +757,7 @@ fn i128_of(neg: bool, lo: u64, hi: u64) -> I128 {
     } else {
         0
     };
-    I128 {
-        lo: nlo,
-        hi: wrapping_add(hi ^ 18446744073709551615, carry)
-    }
+    I128 { lo: nlo, hi: wrapping_add(hi ^ 18446744073709551615, carry) }
 }
 
 fn negative(x: I128) -> bool {
@@ -824,12 +773,7 @@ pub copy struct SlotConst {
 }
 
 fn no_const() -> SlotConst {
-    SlotConst {
-        ok: false,
-        neg: false,
-        lo: 0,
-        hi: 0
-    }
+    SlotConst { ok: false, neg: false, lo: 0, hi: 0 }
 }
 
 // `constant_value`: the integer constant `v` always holds.
@@ -845,12 +789,7 @@ fn constant_value(in f: Fun, v: u32, depth: u64) -> SlotConst {
                 continue;
             }
             if i.op == OP_INT {
-                return SlotConst {
-                    ok: true,
-                    neg: i.neg,
-                    lo: i.lo,
-                    hi: i.hi
-                };
+                return SlotConst { ok: true, neg: i.neg, lo: i.lo, hi: i.hi };
             }
             if i.op == OP_READ
                 && f.depth(i.place) == 1
@@ -924,12 +863,7 @@ fn slot_constant(in f: Fun, slot: u32) -> SlotConst {
 fn trip_count(in f: Fun, head: Head) -> (bool, u64) {
     // A count-down loop's index runs over `0..s`.
     let lo = if head.down {
-        SlotConst {
-            ok: true,
-            neg: false,
-            lo: 0,
-            hi: 0
-        }
+        SlotConst { ok: true, neg: false, lo: 0, hi: 0 }
     } else {
         slot_constant(in f, head.index)
     };
@@ -953,10 +887,7 @@ fn trip_count(in f: Fun, head: Head) -> (bool, u64) {
         } else {
             0
         };
-        b = I128 {
-            lo: nlo,
-            hi: wrapping_add(b.hi, carry)
-        };
+        b = I128 { lo: nlo, hi: wrapping_add(b.hi, carry) };
     }
     // d = b - a, saturating
     let borrow: u64 = if b.lo < a.lo {
@@ -971,15 +902,9 @@ fn trip_count(in f: Fun, head: Head) -> (bool, u64) {
     if negative(b) != negative(a) && negative(d) != negative(b) {
         // overflow: saturate toward b's sign
         d = if negative(b) {
-            I128 {
-                lo: 0,
-                hi: 9223372036854775808
-            }
+            I128 { lo: 0, hi: 9223372036854775808 }
         } else {
-            I128 {
-                lo: 18446744073709551615,
-                hi: 9223372036854775807
-            }
+            I128 { lo: 18446744073709551615, hi: 9223372036854775807 }
         };
     }
     if negative(d) {
@@ -1710,11 +1635,7 @@ fn loop_candidate(in f: Fun, inout fa: Facts, in g: Graph, h: u32, in blocks: Ch
             let len = fa.length_place(in f, place);
             let t = fa.term(in f, index);
             let mut found = false;
-            let mut bound = BoundRow {
-                kind: 0,
-                a: 0,
-                b: 0
-            };
+            let mut bound = BoundRow { kind: 0, a: 0, b: 0 };
             for ei in 0..fa.nedges() {
                 let e = fa.edge(ei);
                 if !fa.holds(e, b) {
@@ -1730,18 +1651,10 @@ fn loop_candidate(in f: Fun, inout fa: Facts, in g: Graph, h: u32, in blocks: Ch
                 let r = fa.term(in f, e.rhs);
                 let rn = fa.node(r);
                 if rn.kind == K_CONST {
-                    bound = BoundRow {
-                        kind: 1,
-                        a: rn.a,
-                        b: rn.b
-                    };
+                    bound = BoundRow { kind: 1, a: rn.a, b: rn.b };
                     found = true;
                 } else if rn.kind == K_FIXED && f.depth(n32(rn.a)) == 1 {
-                    bound = BoundRow {
-                        kind: 0,
-                        a: w(f.root_of(n32(rn.a))),
-                        b: 0
-                    };
+                    bound = BoundRow { kind: 0, a: w(f.root_of(n32(rn.a))), b: 0 };
                     found = true;
                 } else if rn.kind == K_SLOT {
                     let root = n32(rn.a);
@@ -1750,11 +1663,7 @@ fn loop_candidate(in f: Fun, inout fa: Facts, in g: Graph, h: u32, in blocks: Ch
                             has(in blocks, n32(rn.b))
                                 || fa.unchanged(in f, root, n32(rn.b), rn.c, pre, pre_len)
                         ) {
-                        bound = BoundRow {
-                            kind: 0,
-                            a: rn.a,
-                            b: 0
-                        };
+                        bound = BoundRow { kind: 0, a: rn.a, b: 0 };
                         found = true;
                     }
                 } else if rn.kind == K_PARAM || rn.kind == K_VALUE {
@@ -1771,11 +1680,7 @@ fn loop_candidate(in f: Fun, inout fa: Facts, in g: Graph, h: u32, in blocks: Ch
                         }
                     };
                     if db != NONE32 && !has(in blocks, db) {
-                        bound = BoundRow {
-                            kind: 2,
-                            a: rn.a,
-                            b: 0
-                        };
+                        bound = BoundRow { kind: 2, a: rn.a, b: 0 };
                         found = true;
                     }
                 }
@@ -1842,11 +1747,7 @@ fn put_loop(in f: Fun, in lp: LoopPlan, inout o: ChunkSeq[u8]) {
         o.push(60);
         let gb = match lp.gbound.try_get(q) {
             Option::Some(x) => x,
-            Option::None => BoundRow {
-                kind: 2,
-                a: 0,
-                b: 0
-            },
+            Option::None => BoundRow { kind: 2, a: 0, b: 0 },
         };
         if gb.kind == 0 {
             put(inout o, "local:");

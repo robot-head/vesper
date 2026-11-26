@@ -14,9 +14,7 @@ use self::words::{
     SeqWord,
     Word,
 };
-use @vesper/check-data::types::{
-    TyPass
-};
+use @vesper/check-data::types::{TyPass};
 
 const NONE32: u32 = 4294967295;
 
@@ -328,23 +326,14 @@ impl Fun {
     pub fn arg(in self, i: u64) -> Arg {
         match self.args.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Arg {
-                pass: TyPass::In,
-                value: NONE32,
-                place: 0
-            },
+            Option::None => Arg { pass: TyPass::In, value: NONE32, place: 0 },
         }
     }
 
     pub fn param(in self, i: u64) -> Prm {
         match self.params.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Prm {
-                name: 0,
-                pass: TyPass::In,
-                flags: 0,
-                tyname: 0
-            },
+            Option::None => Prm { name: 0, pass: TyPass::In, flags: 0, tyname: 0 },
         }
     }
 
@@ -784,15 +773,7 @@ fn read_args(inout f: Fun, inout r: Reader, in b: Slice[u8], inout uses: ChunkSe
         } else {
             0
         };
-        f
-            .args
-            .push(
-                Arg {
-                    pass: pass,
-                    value: value,
-                    place: place
-                }
-            );
+        f.args.push(Arg { pass: pass, value: value, place: place });
         uses.push(value);
     }
     n32(n)
@@ -964,9 +945,7 @@ fn read_values(inout f: Fun, inout r: Reader, in b: Slice[u8]) -> u32 {
 }
 
 pub fn read_fun(in b: Slice[u8]) -> Fun {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut f = Fun {
         text: ChunkSeq::new[u8](),
         nstart: ChunkSeq::new[u64](),
@@ -1031,16 +1010,7 @@ pub fn read_fun(in b: Slice[u8]) -> Fun {
         let pass = wrapping_u8(r.word(in b));
         let flags = r.word(in b);
         let tyname = n32(r.word(in b));
-        f
-            .params
-            .push(
-                Prm {
-                    name: name,
-                    pass: pass,
-                    flags: flags,
-                    tyname: tyname
-                }
-            );
+        f.params.push(Prm { name: name, pass: pass, flags: flags, tyname: tyname });
     }
     // Value types.
     let nv = r.word(in b);

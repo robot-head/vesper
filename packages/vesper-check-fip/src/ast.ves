@@ -31,15 +31,8 @@
 // (pool[a..a+b]), 5 Constructor (a = name, pool[b..b+2c] = (field name,
 // pattern)).
 
-use @vesper/check-data::util::{
-    add,
-    n32,
-    u32_at,
-    w
-};
-use @vesper/check-data::input::{
-    Reader
-};
+use @vesper/check-data::util::{add, n32, u32_at, w};
+use @vesper/check-data::input::{Reader};
 
 pub copy struct ExprRow {
     kind: u8,
@@ -105,25 +98,9 @@ pub struct Ast {
 
 const NONE32: u32 = 4294967295;
 
-const NO_EXPR: ExprRow = ExprRow {
-    kind: 0,
-    start: 0,
-    end: 0,
-    a: 0,
-    b: 0,
-    c: 0,
-    d: 0,
-    e: 0
-};
+const NO_EXPR: ExprRow = ExprRow { kind: 0, start: 0, end: 0, a: 0, b: 0, c: 0, d: 0, e: 0 };
 
-const NO_PAT: PatRow = PatRow {
-    kind: 0,
-    start: 0,
-    end: 0,
-    a: 0,
-    b: 0,
-    c: 0
-};
+const NO_PAT: PatRow = PatRow { kind: 0, start: 0, end: 0, a: 0, b: 0, c: 0 };
 
 const NO_FN: FnRow = FnRow {
     name: 0,
@@ -164,23 +141,14 @@ impl Ast {
     pub fn generic(in self, i: u64) -> GenRow {
         match self.generics.try_get(i) {
             Option::Some(x) => x,
-            Option::None => GenRow {
-                name: 0,
-                row: false
-            },
+            Option::None => GenRow { name: 0, row: false },
         }
     }
 
     pub fn param(in self, i: u64) -> ParamRow {
         match self.params.try_get(i) {
             Option::Some(x) => x,
-            Option::None => ParamRow {
-                name: 0,
-                pass: 0,
-                ty: 0,
-                start: 0,
-                end: 0
-            },
+            Option::None => ParamRow { name: 0, pass: 0, ty: 0, start: 0, end: 0 },
         }
     }
 
@@ -269,19 +237,7 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
         } else {
             bb
         };
-        exprs
-            .push(
-                ExprRow {
-                    kind: kind,
-                    start: start,
-                    end: end,
-                    a: a,
-                    b: b2,
-                    c: c,
-                    d: d,
-                    e: e
-                }
-            );
+        exprs.push(ExprRow { kind: kind, start: start, end: end, a: a, b: b2, c: c, d: d, e: e });
     }
     let qn = r.word(in b);
     let mut pats: ChunkSeq[PatRow] = ChunkSeq::with_capacity[PatRow](qn);
@@ -295,17 +251,7 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
         if kind == 2 || kind == 5 {
             a = sym(in nmap, w(a));
         }
-        pats
-            .push(
-                PatRow {
-                    kind: kind,
-                    start: start,
-                    end: end,
-                    a: a,
-                    b: bb,
-                    c: c
-                }
-            );
+        pats.push(PatRow { kind: kind, start: start, end: end, a: a, b: bb, c: c });
     }
     let fnn = r.word(in b);
     let mut fns: ChunkSeq[FnRow] = ChunkSeq::with_capacity[FnRow](fnn);
@@ -322,13 +268,7 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
         for j in 0..gn {
             let g = sym(in nmap, r.word(in b));
             let row = r.word(in b) != 0;
-            generics
-                .push(
-                    GenRow {
-                        name: g,
-                        row: row
-                    }
-                );
+            generics.push(GenRow { name: g, row: row });
         }
         let qn2 = r.word(in b);
         let pa = n32(params.len());
@@ -338,16 +278,7 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
             let pty = ty(in tmap, r.word(in b));
             let ps = r.word(in b);
             let pe = r.word(in b);
-            params
-                .push(
-                    ParamRow {
-                        name: pname,
-                        pass: pass,
-                        ty: pty,
-                        start: ps,
-                        end: pe
-                    }
-                );
+            params.push(ParamRow { name: pname, pass: pass, ty: pty, start: ps, end: pe });
         }
         let result = ty(in tmap, r.word(in b));
         let effects = ty(in tmap, r.word(in b));

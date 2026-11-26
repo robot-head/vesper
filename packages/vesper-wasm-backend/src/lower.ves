@@ -8,59 +8,15 @@
 // raises `K_NOT_PORTED`. Their absence also means the evidence key set is
 // empty, so every operation finds no frame and traps, as in Rust.
 
-use @vesper/place-ir::codes::{
-    Lit,
-    Op,
-    Pat,
-    PoolKind,
-    Term
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    w
-};
-use @vesper/check-data::types::{
-    TyKind,
-    TyPass,
-    Vars,
-    vars_new
-};
-use self::enc::{
-    Code,
-    ValTy,
-    code_new,
-    function_bytes,
-    vt
-};
-use self::err::{
-    WErr,
-    werr,
-    werr_syms
-};
-use self::ir::{
-    FnInfo,
-    pattern_end
-};
-use self::module::{
-    Builder,
-    builder_new
-};
-use self::fmod::{
-    fmod_code
-};
-use self::host::{
-    Host,
-    host_new,
-    host_fn,
-    op_index,
-    returns_handle,
-    takes_handle,
-    takes_meta
-};
+use @vesper/place-ir::codes::{Lit, Op, Pat, PoolKind, Term};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, w};
+use @vesper/check-data::types::{TyKind, TyPass, Vars, vars_new};
+use self::enc::{Code, ValTy, code_new, function_bytes, vt};
+use self::err::{WErr, werr, werr_syms};
+use self::ir::{FnInfo, pattern_end};
+use self::module::{Builder, builder_new};
+use self::fmod::{fmod_code};
+use self::host::{Host, host_new, host_fn, op_index, returns_handle, takes_handle, takes_meta};
 use self::plan::{
     Cx,
     HClause,
@@ -79,11 +35,7 @@ use self::plan::{
     prefixed_key,
     tvars_new
 };
-use self::tables::{
-    alloc_code,
-    stage2_heap_mark,
-    stage2_heap_reset
-};
+use self::tables::{alloc_code, stage2_heap_mark, stage2_heap_reset};
 
 const VT_I32: u8 = 127;
 const VT_I64: u8 = 126;
@@ -625,17 +577,7 @@ fn plan_inst0() -> Inst {
 }
 
 fn info0() -> FnInfo {
-    FnInfo {
-        name: 0,
-        p0: 0,
-        pn: 0,
-        result: 0,
-        effects: 0,
-        l0: 0,
-        ln: 0,
-        v0: 0,
-        vn: 0
-    }
+    FnInfo { name: 0, p0: 0, pn: 0, result: 0, effects: 0, l0: 0, ln: 0, v0: 0, vn: 0 }
 }
 
 // A body with one `(n, i64)` locals entry.
@@ -801,11 +743,7 @@ fn cfg_of(in l: L, fi: u64, in order: ChunkSeq[u64]) -> Cfg {
             }
         }
     }
-    Cfg {
-        order: copy_u64s(in order),
-        idom: idom,
-        header: header
-    }
+    Cfg { order: copy_u64s(in order), idom: idom, header: header }
 }
 
 // The nearest common dominator of `a` and `b`.
@@ -1126,10 +1064,7 @@ impl L {
             let top = wrapping_sub(self.eq_pending.len(), 1);
             let p = match self.eq_pending.try_get(top) {
                 Option::Some(x) => x,
-                Option::None => Pending {
-                    idx: 0,
-                    ty: 0
-                },
+                Option::None => Pending { idx: 0, ty: 0 },
             };
             self.eq_pending.truncate(top);
             let body = self.eq_body(p.ty);
@@ -1431,14 +1366,7 @@ impl L {
         }
         let idx = self.b.declare(in i64s(2), in i64s(1));
         set32(inout self.eq, key, inc32(idx));
-        self
-            .eq_pending
-            .push(
-                Pending {
-                    idx: idx,
-                    ty: ty
-                }
-            );
+        self.eq_pending.push(Pending { idx: idx, ty: ty });
         idx
     }
 
@@ -1661,16 +1589,7 @@ impl L {
                 continue;
             }
             let cell = p.pass == TyPass::Inout || inst.role == R_HANDLER_BODY;
-            self
-                .e
-                .names
-                .push(
-                    NameSlot {
-                        name: p.name,
-                        local: index,
-                        cell: cell
-                    }
-                );
+            self.e.names.push(NameSlot { name: p.name, local: index, cell: cell });
             index = wrapping_add(index, 1);
         }
         if mode == M_TAIL {
@@ -1695,16 +1614,7 @@ impl L {
             let name = self.cx.ir.local(add(info.l0, i)).name;
             if self.slot_index(name) == NONE64 && name != self.e.resume {
                 let x = self.local();
-                self
-                    .e
-                    .names
-                    .push(
-                        NameSlot {
-                            name: name,
-                            local: x,
-                            cell: false
-                        }
-                    );
+                self.e.names.push(NameSlot { name: name, local: x, cell: false });
             }
         }
         self.body();
@@ -1741,11 +1651,7 @@ impl L {
         }
         match self.e.names.try_get(i) {
             Option::Some(s) => s,
-            Option::None => NameSlot {
-                name: 0,
-                local: 0,
-                cell: false
-            },
+            Option::None => NameSlot { name: 0, local: 0, cell: false },
         }
     }
 
@@ -2330,12 +2236,7 @@ impl L {
             self.cx.shape(ty)
         } with {
             return value => value,
-            raise(e, resume) => Shape {
-                kind: SH_OPAQUE,
-                scalar: 0,
-                adt: NONE32,
-                ty: ty
-            },
+            raise(e, resume) => Shape { kind: SH_OPAQUE, scalar: 0, adt: NONE32, ty: ty },
         };
         if sh.kind == SH_SCALAR || sh.kind == SH_STR {
             return true;
@@ -3540,14 +3441,7 @@ impl L {
             let cell = self.alloc_block(8);
             self.store(cell, 0, v);
             out.push(cell);
-            cells
-                .push(
-                    Cell {
-                        cell: cell,
-                        root: rs,
-                        path: path
-                    }
-                );
+            cells.push(Cell { cell: cell, root: rs, path: path });
         }
         out
     }
@@ -3821,14 +3715,7 @@ impl L {
             let cell = self.alloc_block(8);
             self.store(cell, 0, v);
             out.push(cell);
-            cells
-                .push(
-                    Cell {
-                        cell: cell,
-                        root: rs,
-                        path: path
-                    }
-                );
+            cells.push(Cell { cell: cell, root: rs, path: path });
         }
         out
     }

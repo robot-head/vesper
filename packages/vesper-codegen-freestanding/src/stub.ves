@@ -8,23 +8,9 @@
 // DAIFSet bit 1. tests/self_host_freestanding.rs checks both against the
 // Rust functions.
 
-use self::codes::{
-    Absent,
-    Em,
-    RelType,
-    RvOpcode
-};
-use self::util::{
-    add,
-    grow,
-    push32,
-    push64,
-    get32,
-    put32
-};
-use self::obj::{
-    write_stub_object
-};
+use self::codes::{Absent, Em, RelType, RvOpcode};
+use self::util::{add, grow, push32, push64, get32, put32};
+use self::obj::{write_stub_object};
 
 enum Target: _ {
     Riscv64 = 0,
@@ -194,41 +180,15 @@ impl Asm {
     }
 
     fn fix(inout self, at: u64, l: u64, kind: u8) {
-        self
-            .fixups
-            .push(
-                Fixup {
-                    at: at,
-                    label: l,
-                    kind: kind,
-                    base: 0
-                }
-            );
+        self.fixups.push(Fixup { at: at, label: l, kind: kind, base: 0 });
     }
 
     fn fix_pcrel(inout self, at: u64, l: u64, base: u64) {
-        self
-            .fixups
-            .push(
-                Fixup {
-                    at: at,
-                    label: l,
-                    kind: Fix::RvPcrelI,
-                    base: base
-                }
-            );
+        self.fixups.push(Fixup { at: at, label: l, kind: Fix::RvPcrelI, base: base });
     }
 
     fn reloc(inout self, at: u64, symbol: u64, r_type: u32) {
-        self
-            .relocs
-            .push(
-                Reloc {
-                    at: at,
-                    symbol: symbol,
-                    r_type: r_type
-                }
-            );
+        self.relocs.push(Reloc { at: at, symbol: symbol, r_type: r_type });
     }
 
     fn literal(inout self, l: u64, symbol: u64, r_type: u32) {
@@ -249,12 +209,7 @@ impl Asm {
         for k in 0..self.fixups.len() {
             let f = match self.fixups.try_get(k) {
                 Option::Some(v) => v,
-                Option::None => Fixup {
-                    at: 0,
-                    label: 0,
-                    kind: 0,
-                    base: 0
-                },
+                Option::None => Fixup { at: 0, label: 0, kind: 0, base: 0 },
             };
             let target = self.label_at(f.label);
             if target == Absent::Row {
@@ -607,11 +562,7 @@ pub fn stub_object(target: u64, exit: u64, exit_base: u64, e_flags: u32) -> Chun
     for k in 0..a.relocs.len() {
         let r = match a.relocs.try_get(k) {
             Option::Some(v) => v,
-            Option::None => Reloc {
-                at: 0,
-                symbol: 0,
-                r_type: 0
-            },
+            Option::None => Reloc { at: 0, symbol: 0, r_type: 0 },
         };
         let mut index = Absent::Row;
         for j in 0..ids.len() {

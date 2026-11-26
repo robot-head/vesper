@@ -394,31 +394,35 @@ the WAL rule each makes the test fail.
 ## Vectorized execution
 
 `vector::VectorEngine` plus `PreparedQuery::execute_vectorized` and
-`PreparedQuery::aggregate_vectorized` run single-table plans (a scan with its
-pushed predicates and any filters above it) over column batches (default
-1,024 rows, configurable 1–65,536). Each batch transposes the table's columns
-into typed vectors with byte null masks; predicates evaluate as whole-batch
-loops into three-valued byte masks (Kleene AND/OR/NOT, IS [NOT] NULL, NULL
-constants), and comparisons of fixed-width columns against constants or
-columns run as straight slice loops. The selection mask is counted by the
-`vesper-simd` Baseline128 JIT byte scanner when `VectorEngine::detect()` finds
-it (`simd_active()`), otherwise by a portable count; the count sizes the
-selection vector and answers `COUNT(*)`/`COUNT(col)`. Rustc auto-vectorization
-of the comparison loops is not claimed and no speedup was measured.
+`PreparedQuery::aggregate_vectorized` run checked plans over batches of rows
+(default 1,024 rows, configurable 1–65,536). The executor is the Vesper port
+in `vesper/src/vector.ves` (SH6 lane 6, #1999); the Rust executor it
+replaced (`src/vector.rs` column batches and `src/vector/join.rs`) was
+deleted. A relation is a list of tuples of input row positions, one per
+binding, so cells are read in place from the encoded data and no value is
+copied; predicates evaluate as whole-batch loops into three-valued byte
+masks (Kleene AND/OR/NOT, IS [NOT] NULL, NULL constants), and comparisons of
+a column against a constant run as branch-free loops. The selected rows of
+each batch answer `COUNT(*)`/`COUNT(col)`. `VectorEngine` keeps the batch
+size and `count_ones`, which counts a byte mask with the `vesper-simd`
+Baseline128 JIT scanner when `VectorEngine::detect()` finds it
+(`simd_active()`), otherwise portably.
 
 Results (rows, order and column definitions) equal the row executor's;
 `work` counts batch cells and is not comparable.
 
-Plans with joins (`src/vector/join.rs`) materialize each input as a column
-relation. An inner, left, right or full join whose ON clause has equality
-conjuncts between the two sides builds a hash table on the right side's keys
-(`-0.0` and `0.0` hash alike; NULL keys never match) and probes it from the
-left in row order; the remaining ON conjuncts run as a vectorized residual
-over batches of candidate pairs. Without an equality conjunct the join is a
-nested loop over pair batches. Outer joins null-extend in the row executor's
-order (left-major, then unmatched right rows). Pair and output budgets
-(`intermediate_rows`, `work`) are enforced as in the row executor; scratch
-vectors are reused across batches.
+Plans with joins materialize each input as a relation. An inner, left,
+right or full join whose ON clause has equality conjuncts between the two
+sides builds hash groups on the right side's keys (`-0.0` and `0.0` hash
+alike; NULL keys never match) and probes them from the left in row order;
+the remaining ON conjuncts run as a vectorized residual over batches of
+candidate pairs. Without an equality conjunct the join is a nested loop
+over pair batches. Outer joins null-extend in the row executor's order
+(left-major, then unmatched right rows). Chains of three or more inner
+joins are reordered greedily by estimated result size
+(`vectorized_join_orders` reports the order) and their result is put back
+into written order. Pair and output budgets (`intermediate_rows`,
+`intermediate_bytes`, `work`) are enforced as in the row executor.
 
 `PreparedQuery::execute_tiled` writes the result into a reusable
 `tiles::TileSet` (§35.3 `tiled(16)`): 16-row tiles, each fixed-width column a
@@ -426,7 +430,8 @@ contiguous `[u64; 16]` lane array (i64/f64 bit patterns, booleans 0/1), text
 and bytes as `(offset, len)` lanes into one arena, and a 16-bit null mask per
 column. Re-executing into a warmed set of the same shape allocates no tiles
 and grows no arena (asserted by `allocated_tiles`/`arena_capacity`, not by a
-counting allocator, so no zero-allocation claim is made). Aggregates (`vector::Aggregate`): `CountRows`,
+counting allocator, so no zero-allocation claim is made). The tiles are
+filled in Rust from the rows the port returns. Aggregates (`vector::Aggregate`): `CountRows`,
 `Count`, `Sum` (U64/I64 exact, `Overflow` iff the exact total does not fit;
 F64 in row order), `Min`, `Max` (first wins among equals), with
 `vector::aggregate_rows` as the row-at-a-time reference. SQL has no aggregate

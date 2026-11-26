@@ -810,10 +810,9 @@ fn control_mutant(module: &Module, m: usize) -> Module {
 
 /// Checks `module` (catching a checker panic) and returns both texts.
 fn control_case(module: &Module) -> Option<(String, String)> {
-    let quiet = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    let quiet = quiet_panics();
     let checked = std::panic::catch_unwind(|| vesper::check::check(module));
-    std::panic::set_hook(quiet);
+    drop(quiet);
     let checked = checked.ok()?;
     Some((
         control_rust(&checked.diagnostics),
@@ -982,10 +981,9 @@ fn atomics_vesper(module: &Module, world: &World, program: Option<&vesper::ir::P
 }
 
 fn lower(world: &World) -> Option<vesper::ir::Program> {
-    let quiet = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    let quiet = quiet_panics();
     let p = std::panic::catch_unwind(|| vesper::ir::lower_world(world)).ok();
-    std::panic::set_hook(quiet);
+    drop(quiet);
     p
 }
 
@@ -1689,7 +1687,8 @@ fn stack_bound_speed() {
 
 /// ABBA timing of the atomics task alone, with the flip gate's 95%
 /// interval (`CHECK_HARNESS_SPEED=1`; ignored by default). Vesper times
-/// include decoding the input, not encoding it.
+/// include decoding the input, not encoding it; the later runs add the
+/// encoding a per-call hybrid swap would pay.
 #[test]
 #[ignore]
 fn atomics_speed() {
@@ -1744,6 +1743,58 @@ fn atomics_speed() {
             })
         },
     );
+    // What a hybrid swap of the checker's calls (`check_world`,
+    // `check_program`) pays per call: the encoding too. Like Rust, the swap
+    // skips worlds with neither prelude on, so only active worlds cross.
+    let active: Vec<usize> = (0..corpus.len())
+        .filter(|&i| corpus[i].world.atomic_prelude || corpus[i].world.workers_prelude)
+        .collect();
+    eprintln!(
+        "{} worlds, {} with a prelude on",
+        corpus.len(),
+        active.len()
+    );
+    for (label, set) in [
+        (
+            "swap with encode, every world",
+            (0..corpus.len()).collect::<Vec<_>>(),
+        ),
+        ("swap with encode, worlds with a prelude on", active.clone()),
+    ] {
+        abba_ci(
+            label,
+            10,
+            &mut || {
+                time(|| {
+                    for &k in &set {
+                        let c = &corpus[k];
+                        std::hint::black_box(vesper::atomics::check_world(&c.world));
+                        if let Some(p) = &programs[k] {
+                            std::hint::black_box(vesper::atomics::check_program(&c.world, p));
+                        }
+                    }
+                })
+            },
+            &mut || {
+                time(|| {
+                    for &k in &set {
+                        let c = &corpus[k];
+                        if !c.world.atomic_prelude && !c.world.workers_prelude {
+                            continue;
+                        }
+                        let i = encode(&c.world, |e, t| {
+                            t.push(u64::from(c.world.atomic_prelude));
+                            t.push(u64::from(c.world.workers_prelude));
+                            world_functions(e, t, &c.world);
+                            module_items(e, t, &c.module);
+                            ir_section(e, t, programs[k].as_ref());
+                        });
+                        std::hint::black_box(f.words(&i));
+                    }
+                })
+            },
+        );
+    }
 }
 
 /// A corrupt or truncated result stream decodes to an error or garbage,

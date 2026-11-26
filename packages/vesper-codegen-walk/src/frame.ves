@@ -27,45 +27,14 @@
 // identity.
 
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{
-    add,
-    inc,
-    push_decimal,
-    u32_at,
-    u64_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    TyKind,
-    TyPass,
-    Types,
-    default_type,
-    display
-};
-use @vesper/check-data::world::{
-    World
-};
-use @vesper/check-data::input::{
-    Reader,
-    read_ctx
-};
-use @vesper/check-layout::{
-    L_ENUM,
-    Layouts,
-    layout_of,
-    layouts_new,
-    out_new
-};
-use @vesper/place-ir::{
-    read_program
-};
-use @vesper/codegen-calls::data::{
-    Calls,
-    read_calls
-};
+use @vesper/check-data::util::{add, inc, push_decimal, u32_at, u64_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyKind, TyPass, Types, default_type, display};
+use @vesper/check-data::world::{World};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/check-layout::{L_ENUM, Layouts, layout_of, layouts_new, out_new};
+use @vesper/place-ir::{read_program};
+use @vesper/codegen-calls::data::{Calls, read_calls};
 use @vesper/codegen-calls::instances::{
     Conc,
     IVars,
@@ -514,9 +483,7 @@ pub fn frames_text(in input: Str) -> ChunkSeq[u64] {
 // `frames_text` over the input's bytes: the `frame_plans` swap hook's entry
 // (part 3b, #1509).
 pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let d = read_calls(inout r, in b, in c);
@@ -542,9 +509,7 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
             k,
             task.entry
         );
-        let mut err = Errs {
-            text: ChunkSeq::new[u8]()
-        };
+        let mut err = Errs { text: ChunkSeq::new[u8]() };
         // The declarations (`declare_instances_with_trace`) come first: a
         // signature that refuses stops the build before any frame.
         let mut scratch: ChunkSeq[u8] = ChunkSeq::new[u8]();

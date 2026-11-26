@@ -148,13 +148,25 @@ pub fn read(in path: Str) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
 }
 
 pub fn read_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    read_path_limit(in path, 18446744073709551615)
+}
+
+// At most the first `limit` bytes of the file at `path` (`Read::take`):
+// no more is read, however long the file is.
+pub fn read_path_limit(in path: Slice[u8], limit: u64)
+    -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
     let mut f = match StdFs::vstd_fs_open(in path, mode_read(), inout err) {
         Option::Some(f) => f,
         Option::None => return raise_io(err),
     };
     // Read the length the file has now, then whatever it grew by since.
-    let n = StdFs::vstd_fs_file_len(in f);
+    let len = StdFs::vstd_fs_file_len(in f);
+    let n = if len < limit {
+        len
+    } else {
+        limit
+    };
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
     buf.resize(n, 0);
     let got = StdFs::vstd_fs_read(inout f, inout buf.as_slice_mut(), inout err);
@@ -162,7 +174,17 @@ pub fn read_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoErr
         let mut more: ChunkSeq[u8] = ChunkSeq::new[u8]();
         more.resize(4096, 0);
         loop {
-            let m = StdFs::vstd_fs_read(inout f, inout more.as_slice_mut(), inout err);
+            let at = buf.len();
+            if at >= limit {
+                break;
+            }
+            let room = wrapping_sub(limit, at);
+            let step: u64 = if room < 4096 {
+                room
+            } else {
+                4096
+            };
+            let m = StdFs::vstd_fs_read(inout f, inout more[0..step], inout err);
             if m == 0 || err != 0 {
                 break;
             }
@@ -206,6 +228,21 @@ fn write_mode(in path: Slice[u8], in data: Slice[u8], mode: u32, sync: bool) eff
     if err != 0 {
         raise_io(err)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Standard output and standard error.
+
+// The Wasm hosts do not yet give @vesper-std a stream to standard output
+// or standard error, so both writes raise `unsupported()`.
+pub fn write_stdout(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    let _ = data.len();
+    raise_kind(unsupported())
+}
+
+pub fn write_stderr(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    let _ = data.len();
+    raise_kind(unsupported())
 }
 
 // Write `data` as the whole file at `path`, creating it or truncating it.
@@ -436,6 +473,34 @@ pub fn symlink_metadata(in path: Str) -> Metadata eff [Ffi[StdFs], Fail[IoError]
     meta_path(in path.as_bytes(), false)
 }
 
+// `std::fs::canonicalize`: WASI 0.2 has no call for it (`std` returns
+// `Unsupported` there).
+pub fn canonicalize(in path: Str) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    canonicalize_path(in path.as_bytes())
+}
+
+pub fn canonicalize_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    let _ = path.len();
+    raise_kind(unsupported())
+}
+
+// Whether `path` (following symbolic links) is a regular file: WASI has
+// no execute bit, so any file can run (`std`'s non-Unix check). Never fails.
+pub fn is_executable(in path: Str) -> bool eff [Ffi[StdFs]] {
+    is_executable_path(in path.as_bytes())
+}
+
+pub fn is_executable_path(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    let mut err: u64 = 0;
+    let mut m = FsMeta {
+        size: 0,
+        mtime_s: 0,
+        mtime_ns: 0,
+        kind: 0,
+    };
+    StdFs::vstd_fs_metadata(in path, true, inout m, inout err) == 0 && m.kind == kind_file()
+}
+
 // Whether `path` names anything (following symbolic links). Never fails.
 pub fn exists(in path: Str) -> bool eff [Ffi[StdFs]] {
     let mut err: u64 = 0;
@@ -446,4 +511,109 @@ pub fn exists(in path: Str) -> bool eff [Ffi[StdFs]] {
         kind: 0,
     };
     StdFs::vstd_fs_metadata(in path.as_bytes(), true, inout m, inout err) == 0
+}
+
+// `Path::is_dir`: whether `path` names a directory, following symbolic
+// links. Never fails.
+pub fn is_dir_path(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    path_kind(in path) == kind_dir()
+}
+
+// `Path::is_file`: whether `path` names a regular file, following
+// symbolic links. Never fails.
+pub fn is_file_path(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    path_kind(in path) == kind_file()
+}
+
+// The kind of what `path` names, or `kind_other()` when it names nothing.
+fn path_kind(in path: Slice[u8]) -> u32 eff [Ffi[StdFs]] {
+    let mut err: u64 = 0;
+    let mut m = FsMeta {
+        size: 0,
+        mtime_s: 0,
+        mtime_ns: 0,
+        kind: 0,
+    };
+    if StdFs::vstd_fs_metadata(in path, true, inout m, inout err) != 0 {
+        return kind_other();
+    }
+    m.kind
+}
+
+// ---------------------------------------------------------------------------
+// Error text.
+
+// The text of the `io::Error` that `e` stands for (#1896). WASI gives no
+// message for an OS error, so it is the kind's text (`entity not found`),
+// followed by ` (os error <n>)` when there is an OS error.
+pub fn error_text(e: IoError) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in kind_text(e.kind).as_bytes());
+    if e.os != 0 {
+        os_error_suffix(inout out, e.os);
+    }
+    out
+}
+
+// ` (os error <n>)`, with the number as Rust's `i32`.
+fn os_error_suffix(inout out: ChunkSeq[u8], os: u32) {
+    out.extend(in " (os error ".as_bytes());
+    let mut n = widen_u64(os);
+    if os >= 2147483648 {
+        out.push(45);
+        n = wrapping_sub(4294967296, n);
+    }
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    loop {
+        digits.push(wrapping_u8(wrapping_add(48, n % 10)));
+        n = n / 10;
+        if n == 0 {
+            break;
+        }
+    }
+    let len = digits.len();
+    for i in 0..len {
+        match digits.try_get(wrapping_sub(wrapping_sub(len, 1), i)) {
+            Option::Some(d) => out.push(d),
+            Option::None => (),
+        }
+    }
+    out.push(41);
+}
+
+// `ErrorKind::as_str` of each kind code; every other code is `Other`.
+fn kind_text(kind: u32) -> Str {
+    match kind {
+        1 => "entity not found",
+        2 => "permission denied",
+        3 => "entity already exists",
+        4 => "not a directory",
+        5 => "is a directory",
+        6 => "directory not empty",
+        7 => "invalid input parameter",
+        8 => "operation interrupted",
+        9 => "unexpected end of file",
+        10 => "write zero",
+        11 => "unsupported",
+        12 => "out of memory",
+        _ => "other error",
+    }
+}
+
+// The architecture this package was built for: `arch_x86_64()`,
+// `arch_aarch64()` or `arch_wasm32()` (the vsys file's `ARCH`).
+pub fn arch() -> u32 {
+    StdFs::ARCH
+}
+
+pub fn arch_x86_64() -> u32 {
+    1
+}
+
+pub fn arch_aarch64() -> u32 {
+    2
+}
+
+pub fn arch_wasm32() -> u32 {
+    3
 }

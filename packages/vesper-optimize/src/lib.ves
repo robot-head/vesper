@@ -12,24 +12,10 @@
 // - search.ves: the proof producer of src/optimize/certificate.rs
 //   (`propose_rewrite`) on `@vesper/egraph`.
 
-use @vesper/ast::{
-    ArgNode,
-    expr_at,
-    list_at,
-    list_len,
-    lit_at,
-    none
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
-use self::budget::{
-    Budget,
-    valid_limits
-};
+use @vesper/ast::{ArgNode, expr_at, list_at, list_len, lit_at, none};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+use self::budget::{Budget, valid_limits};
 use self::input::{
     Cert,
     Reader,
@@ -44,17 +30,8 @@ use self::input::{
     read_types,
     tree_new
 };
-use self::search::{
-    Builder,
-    Proposal,
-    builder_new,
-    proposal_new,
-    propose
-};
-use self::input::{
-    ProofRow,
-    TermRow
-};
+use self::search::{Builder, Proposal, builder_new, proposal_new, propose};
+use self::input::{ProofRow, TermRow};
 use self::witness::{
     Bound,
     Ops,
@@ -151,11 +128,7 @@ pub fn dump_expr(inout o: ChunkSeq[u8], in t: Tree, e: u32) {
                 .args
                 .get_or(
                     idx_from_raw[ArgNode](list_at(in t.ast, x.c, i)),
-                    ArgNode {
-                        pass: 255,
-                        explicit: false,
-                        expr: none()
-                    }
+                    ArgNode { pass: 255, explicit: false, expr: none() }
                 );
             o.push(32);
             put_u64(inout o, widen_u64(a.pass));
@@ -258,9 +231,7 @@ fn names_of(
 }
 
 fn run_cases(in b: Slice[u8], in text: Str, split: bool, check: bool) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut o = ChunkSeq::new[u8]();
     let mut map = ChunkSeq::new[u32]();
     let mut types = ChunkSeq::new[TypeRow]();
@@ -430,9 +401,7 @@ pub fn optimize_propose_decode(in input: Str) -> ChunkSeq[u64] {
 // `mode` 0 writes each proposal, 1 proposes and writes `P`, 2 decodes and
 // writes `P`.
 fn propose_cases(in b: Slice[u8], in text: Str, split: bool, mode: u8) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut o = ChunkSeq::new[u8]();
     let mut map = ChunkSeq::new[u32]();
     let mut types = ChunkSeq::new[TypeRow]();

@@ -399,10 +399,7 @@ pub fn prepare_check(in text: Str, in input: Slice[u64], count: u64, in caps: Ca
         Res::Work
     );
     bound(work, caps.max_work, Res::Work);
-    Totals {
-        labels: narrow_usize(labels),
-        text: narrow_usize(total)
-    }
+    Totals { labels: narrow_usize(labels), text: narrow_usize(total) }
 }
 
 // `prepare`'s input: seven words per diagnostic (code, message and help

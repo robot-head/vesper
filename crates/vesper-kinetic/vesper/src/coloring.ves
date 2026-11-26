@@ -2,20 +2,9 @@
 // greedy constraint colouring of src/coloring.rs (`Colorer::color` and
 // `MultiColorer::color`). The Rust wrapper owns every buffer and lends it
 // here sized for the call, so colouring allocates nothing.
-use self::{
-    ColoringError
-};
-use self::util::{
-    g32,
-    g64,
-    g8,
-    inc,
-    shl_u64,
-    shr_u64
-};
-use @vesper-std/sort::keyed::{
-    sort_by_key
-};
+use self::{ColoringError};
+use self::util::{g32, g64, g8, inc, shl_u64, shr_u64};
+use @vesper-std/sort::keyed::{sort_by_key};
 
 // Bodies, constraints and colours are u32 indices.
 const U32_MAX: u64 = 0xffffffff;
@@ -163,10 +152,7 @@ pub fn color_pairs(
         let cb = g64(in b, c);
         if widen_u64(ca) >= bodies {
             return raise_coloring(
-                ColoringError::BodyOutOfRange {
-                    constraint: wrapping_usize(c),
-                    body: ca
-                }
+                ColoringError::BodyOutOfRange { constraint: wrapping_usize(c), body: ca }
             );
         }
         if cb <= U32_MAX && cb >= bodies {
@@ -179,10 +165,7 @@ pub fn color_pairs(
         }
         if cb == widen_u64(ca) {
             return raise_coloring(
-                ColoringError::SelfConstraint {
-                    constraint: wrapping_usize(c),
-                    body: ca
-                }
+                ColoringError::SelfConstraint { constraint: wrapping_usize(c), body: ca }
             );
         }
         // key(): (min, max) of the pair, or (a, a) against static geometry.
@@ -215,11 +198,7 @@ pub fn color_pairs(
         }
         let free = ~busy;
         if free == 0 {
-            return raise_coloring(
-                ColoringError::TooManyColors {
-                    constraint: wrapping_usize(wi)
-                }
-            );
+            return raise_coloring(ColoringError::TooManyColors { constraint: wrapping_usize(wi) });
         }
         let color = widen_u64(trailing_zeros_u64(free));
         let bit = shl_u64(1, wrapping_u32(color));
@@ -262,11 +241,7 @@ pub fn color_sets(
         );
     }
     if offs.len() > 0 && g32(in offs, 0) != 0 {
-        return raise_coloring(
-            ColoringError::BadArity {
-                constraint: 0
-            }
-        );
+        return raise_coloring(ColoringError::BadArity { constraint: 0 });
     }
     let n = masks.len();
     let nb = bodies.len();
@@ -274,11 +249,7 @@ pub fn color_sets(
         let lo = widen_u64(g32(in offs, i));
         let hi = widen_u64(g32(in offs, inc(i)));
         if hi <= lo || wrapping_sub(hi, lo) > 4 || hi > nb {
-            return raise_coloring(
-                ColoringError::BadArity {
-                    constraint: wrapping_usize(i)
-                }
-            );
+            return raise_coloring(ColoringError::BadArity { constraint: wrapping_usize(i) });
         }
         let mut min: u64 = U32_MAX;
         let mut max: u64 = 0;
@@ -287,19 +258,13 @@ pub fn color_sets(
             let wb = widen_u64(body);
             if wb >= n {
                 return raise_coloring(
-                    ColoringError::BodyOutOfRange {
-                        constraint: wrapping_usize(i),
-                        body: body
-                    }
+                    ColoringError::BodyOutOfRange { constraint: wrapping_usize(i), body: body }
                 );
             }
             for e in lo..k {
                 if g32(in bodies, e) == body {
                     return raise_coloring(
-                        ColoringError::SelfConstraint {
-                            constraint: wrapping_usize(i),
-                            body: body
-                        }
+                        ColoringError::SelfConstraint { constraint: wrapping_usize(i), body: body }
                     );
                 }
             }
@@ -328,11 +293,7 @@ pub fn color_sets(
         }
         let free = ~busy;
         if free == 0 {
-            return raise_coloring(
-                ColoringError::TooManyColors {
-                    constraint: wrapping_usize(i)
-                }
-            );
+            return raise_coloring(ColoringError::TooManyColors { constraint: wrapping_usize(i) });
         }
         let color = widen_u64(trailing_zeros_u64(free));
         let bit = shl_u64(1, wrapping_u32(color));

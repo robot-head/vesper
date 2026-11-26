@@ -11,43 +11,12 @@
 // Capabilities are bits in `BTreeSet<Capability>` order: 1 ConstTime,
 // 2 Realtime, 4 DetFloat, 8 ConstDenorm.
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    u32_at,
-    w
-};
-use @vesper/check-data::input::{
-    Ctx
-};
-use @vesper/check-data::types::{
-    EffNode,
-    Vars,
-    display,
-    substitute,
-    vars_new,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::world::{
-    constructor,
-    field_step
-};
-use self::keys::{
-    Keys,
-    Sums,
-    keys_new,
-    pair,
-    sums_new
-};
-use self::prog::{
-    ExprNode,
-    Fun,
-    PatNode,
-    Prog
-};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, w};
+use @vesper/check-data::input::{Ctx};
+use @vesper/check-data::types::{EffNode, Vars, display, substitute, vars_new, TyKind, TyPass};
+use @vesper/check-data::world::{constructor, field_step};
+use self::keys::{Keys, Sums, keys_new, pair, sums_new};
+use self::prog::{ExprNode, Fun, PatNode, Prog};
 
 const NONE32: u32 = 4294967295;
 
@@ -683,18 +652,7 @@ fn begin(inout s: Walk, in code: Str) -> u64 {
 fn finish(inout s: Walk, a: u64, in help: Str, start: u64, end: u64) {
     let h = s.text.len();
     put(inout s, help);
-    s
-        .rows
-        .push(
-            DRow {
-                start: start,
-                end: end,
-                a: a,
-                m: add(a, 5),
-                h: h,
-                z: s.text.len()
-            }
-        );
+    s.rows.push(DRow { start: start, end: end, a: a, m: add(a, 5), h: h, z: s.text.len() });
 }
 
 // " (in '<function>')"
@@ -765,16 +723,7 @@ fn add_node(inout s: Walk, node: u32) {
 
 fn edge(inout s: Walk, callee: u32, start: u64, end: u64) {
     if s.node != NONE32 {
-        s
-            .edges
-            .push(
-                Edge {
-                    node: s.node,
-                    callee: callee,
-                    start: start,
-                    end: end
-                }
-            );
+        s.edges.push(Edge { node: s.node, callee: callee, start: start, end: end });
     }
 }
 
@@ -896,14 +845,7 @@ pub fn function_body(inout c: Ctx, in p: Prog, inout s: Walk) -> bool {
     if g.body == NONE32 {
         return false;
     }
-    s
-        .returns
-        .push(
-            Ret {
-                ty: g.result,
-                tainted: false
-            }
-        );
+    s.returns.push(Ret { ty: g.result, tainted: false });
     let t = expr(inout c, in p, inout s, g.body);
     let returned = pop_return(inout s);
     coerce(inout c, in p, inout s, g.body, g.result);
@@ -1408,21 +1350,10 @@ pub fn expr(inout c: Ctx, in p: Prog, inout s: Walk, e: u32) -> bool {
                 let last = wrapping_sub(n, 1);
                 let r = match s.returns.try_get(last) {
                     Option::Some(r) => r,
-                    Option::None => Ret {
-                        ty: NONE32,
-                        tainted: false
-                    },
+                    Option::None => Ret { ty: NONE32, tainted: false },
                 };
                 coerce(inout c, in p, inout s, x.a, r.ty);
-                let ok = s
-                    .returns
-                    .try_set(
-                        last,
-                        Ret {
-                            ty: r.ty,
-                            tainted: r.tainted || t
-                        }
-                    );
+                let ok = s.returns.try_set(last, Ret { ty: r.ty, tainted: r.tainted || t });
             }
         }
         false
@@ -1683,14 +1614,7 @@ fn closure(inout c: Ctx, in p: Prog, inout s: Walk, e: u32, x: ExprNode) -> bool
         s.indirect.insert(widen_u64(node));
         s.node = node;
     }
-    s
-        .returns
-        .push(
-            Ret {
-                ty: x.c,
-                tainted: false
-            }
-        );
+    s.returns.push(Ret { ty: x.c, tainted: false });
     open_scope(inout s);
     for i in 0..w(x.b) {
         let at = add(w(x.a), wrapping_mul(i, 3));
@@ -1895,13 +1819,7 @@ fn op_clauses(
 }
 
 fn callee(kind: u8, f: u32, d: u32, ty: u32, lexical: bool) -> Callee {
-    Callee {
-        kind: kind,
-        f: f,
-        d: d,
-        ty: ty,
-        lexical: lexical
-    }
+    Callee { kind: kind, f: f, d: d, ty: ty, lexical: lexical }
 }
 
 // `Walker::resolve`.

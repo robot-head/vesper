@@ -14,39 +14,25 @@
 // `quote`) are `OpaqueMacro` here: the Rust side formats them with its own
 // macro-profile parser, which this package does not port.
 
-use @vesper/front::{
-    Tokens,
-    P
-};
-use @vesper-std/hash::blake3::{
-    Digest
-};
-use @vesper-std/hash-sys::{
-    hash
-};
-use @vesper/front::diag::{
-    diags_new
-};
-use @vesper/front::parse::{
-    parse_tokens,
-    hard_depth
-};
-use @vesper/front::{
-    Tokens
-};
-use @vesper/front::lex::{
-    lex_with_limits,
-    max_diagnostics,
-    token_end
-};
-use @vesper/front::diag::{
-    diags_new
-};
+use @vesper/front::{Tokens, P};
+use @vesper-std/hash::blake3::{Digest};
+use @vesper-std/hash-sys::{hash};
+use @vesper/front::diag::{diags_new};
+use @vesper/front::parse::{parse_tokens, hard_depth};
+use @vesper/front::{Tokens};
+use @vesper/front::lex::{lex_with_limits, max_diagnostics, token_end};
+use @vesper/front::diag::{diags_new};
 
 // ---------------------------------------------------------------- kinds
 
 // Token kinds: the discriminants of `vesper_syntax::lexer::TokenKind`, which
 // are also the `kind` rows of @vesper/front's token table.
+
+// CST events of @vesper/front (`Event`, `NodeKind` in its tree.ves).
+const EV_START_BASE: u64 = 2147483648;
+const EV_FINISH: u64 = 4294967295;
+const NODE_EXPR: u64 = 202;
+const NODE_PATTERN: u64 = 203;
 
 const K_WHITESPACE: u8 = 0;
 const K_COMMENT: u8 = 1;
@@ -160,21 +146,11 @@ const E_IDEMPOTENT: u64 = 12;
 const U64_MAX: u64 = 18446744073709551615;
 
 fn fail(code: u64) eff [Fail[FmtFail]] {
-    Fail::raise(
-        FmtFail {
-            code: code,
-            offset: 0
-        }
-    );
+    Fail::raise(FmtFail { code: code, offset: 0 });
 }
 
 fn fail_at(offset: u64) eff [Fail[FmtFail]] {
-    Fail::raise(
-        FmtFail {
-            code: E_SYNTAX,
-            offset: offset
-        }
-    );
+    Fail::raise(FmtFail { code: E_SYNTAX, offset: offset });
 }
 
 // `a + b`, or `Overflow`.
@@ -266,10 +242,7 @@ fn doc_new(in lim: Limits, capacity: u64) -> Doc {
         width: ChunkSeq::with_capacity[u64](capacity),
         depth: ChunkSeq::with_capacity[u32](capacity),
         kids: ChunkSeq::with_capacity[u32](capacity),
-        w: Work {
-            used: 0,
-            max: lim.max_work
-        },
+        w: Work { used: 0, max: lim.max_work },
         max_nodes: lim.max_doc_nodes,
         max_output: lim.max_output_bytes
     }
@@ -1196,10 +1169,7 @@ copy struct LayoutBreak {
 fn break_at(in breaks: ChunkSeq[LayoutBreak], i: u64) -> LayoutBreak {
     match breaks.try_get(i) {
         Option::Some(b) => b,
-        Option::None => LayoutBreak {
-            offset: 0,
-            level: 0
-        },
+        Option::None => LayoutBreak { offset: 0, level: 0 },
     }
 }
 
@@ -1328,6 +1298,10 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
     let mut previous_unary = false;
     let mut previous_ends_operand = false;
     let mut package = false;
+    // Inside the head of an `if`, `match`, `for` or `while` at this level,
+    // up to its `{`: the parser admits no struct literal there, so a type
+    // name before `{` ends the head (`for i in 0..N {`).
+    let mut head = false;
     loop {
         if pos >= n {
             break;
@@ -1339,7 +1313,27 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
         let f = aflags(in at, pos);
         let blank = f & 1 != 0;
         let glued = f & 2 != 0;
-        let is_block = c == K_L_BRACE && (!has_prev || prev != K_DOT);
+        let in_expr = f & 4 != 0;
+        // `{` after `.` or `::` opens a list, not a block: a tagged literal or
+        // a `use` group (`use a::{b, c};`), which stays on one line when it fits.
+        let opens_block = c == K_L_BRACE && (!has_prev || (prev != K_DOT && prev != K_COLON_COLON));
+        // A struct literal or pattern (`Point { x: 1, y: 2 }`) is a list
+        // too, spaced inside its braces.
+        let is_record = opens_block && in_expr && !head && has_prev && prev == K_UPPER;
+        let is_block = opens_block && !is_record;
+        let cs0 = w32(in at.start, pos);
+        let ce0 = w32(in at.end, pos);
+        if c == K_IF
+            || c == K_MATCH
+            || c == K_LOWER
+                && (
+                    text_is(in src, cs0, ce0, in "for".as_bytes())
+                        || text_is(in src, cs0, ce0, in "while".as_bytes())
+                ) {
+            head = true;
+        } else if c == K_L_BRACE || c == K_SEMI {
+            head = false;
+        }
         package = glued
             && has_prev
             && (
@@ -1375,13 +1369,7 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
         } else if spacing == G_RETURN {
             concat_group(inout line, inout breaks, inout d, inout output);
             let lead = push_leaf(inout d, D_SOFT_SPACE);
-            breaks
-                .push(
-                    LayoutBreak {
-                        offset: line.len(),
-                        level: 1
-                    }
-                );
+            breaks.push(LayoutBreak { offset: line.len(), level: 1 });
             line.push(wrapping_u32(lead));
         } else if spacing == G_EMPTY || spacing == G_OPERATOR {
             let lead = push_leaf(
@@ -1397,13 +1385,7 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
             } else {
                 infix_precedence(c)
             };
-            breaks
-                .push(
-                    LayoutBreak {
-                        offset: line.len(),
-                        level: level
-                    }
-                );
+            breaks.push(LayoutBreak { offset: line.len(), level: level });
             line.push(wrapping_u32(lead));
         }
         if is_block {
@@ -1449,6 +1431,8 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
                     inout d,
                     if is_block || trailing_comma {
                         D_HARD
+                    } else if is_record {
+                        D_SOFT_SPACE
                     } else {
                         D_SOFT_EMPTY
                     }
@@ -1459,6 +1443,8 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
                     inout d,
                     if is_block || last_is_line_comment || trailing_comma {
                         D_HARD
+                    } else if is_record {
+                        D_SOFT_SPACE
                     } else {
                         D_SOFT_EMPTY
                     }
@@ -1498,8 +1484,40 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
 
 // The significant tokens of a parsed token table, with the blank-line and
 // glued flags the layout reads.
-fn atoms(in src: Slice[u8], in t: Tokens) -> Atoms {
+// Per token of `t`, 1 when its CST parent (from the parser's events `ev`)
+// is an expression or pattern node: a token index, a node start (2^31 +
+// kind) or a node finish (2^32 - 1).
+fn expr_parents(in ev: ChunkSeq[u32], n: u64) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::with_capacity[u8](wrapping_add(n, 1));
+    for _ in 0..n {
+        out.push(0);
+    }
+    let mut stack = ChunkSeq::new[u32]();
+    for i in 0..ev.len() {
+        let e = u32_at(in ev, i);
+        if e == EV_FINISH {
+            let depth = stack.len();
+            if depth > 0 {
+                stack.truncate(wrapping_sub(depth, 1));
+            }
+        } else if e >= EV_START_BASE {
+            stack.push(wrapping_u32(wrapping_sub(e, EV_START_BASE)));
+        } else {
+            let depth = stack.len();
+            if depth > 0 {
+                let parent = u32_at(in stack, wrapping_sub(depth, 1));
+                if parent == NODE_EXPR || parent == NODE_PATTERN {
+                    out.try_set(e, 1);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn atoms(in src: Slice[u8], in t: Tokens, in ev: ChunkSeq[u32]) -> Atoms {
     let n = t.kind.len();
+    let parents = expr_parents(in ev, n);
     let cap = wrapping_add(wrapping_shr_u64(n, 1), 1);
     let mut a = Atoms {
         kind: ChunkSeq::with_capacity[u8](cap),
@@ -1544,6 +1562,13 @@ fn atoms(in src: Slice[u8], in t: Tokens) -> Atoms {
             }
             if glued {
                 f = f | 2;
+            }
+            let parent = match parents.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            if parent != 0 {
+                f = f | 4;
             }
             a.kind.push(k);
             a.start.push(wrapping_u32(s));
@@ -1622,7 +1647,7 @@ fn once_tokens(in src: Slice[u8], sink t: Tokens, in lim: Limits, inout w: Work)
         };
         fail_at(at);
     }
-    let at = atoms(in src, in p.t);
+    let at = atoms(in src, in p.t, in p.ev);
     let mut dl = lim;
     dl.max_work = wrapping_sub(w.max, w.used);
     let mut d = doc_new(in dl, wrapping_add(wrapping_mul(at.kind.len(), 3), 8));
@@ -1658,10 +1683,7 @@ pub fn format(
         max_depth: max_depth,
         max_work: max_work
     };
-    let mut w = Work {
-        used: 0,
-        max: max_work
-    };
+    let mut w = Work { used: 0, max: max_work };
     let t = gate(in src, in lim, inout w);
     let output = once_tokens(in src, t, in lim, inout w);
     let ts = gate(in src, in lim, inout w);
@@ -1686,12 +1708,7 @@ pub fn format(
 // `format_for_verification`'s source and output hashes.
 pub fn blake3(in data: Str) -> Hash32 eff [Ffi[Blake3]] {
     let d = hash(in data.as_bytes());
-    Hash32 {
-        w0: d.w0,
-        w1: d.w1,
-        w2: d.w2,
-        w3: d.w3
-    }
+    Hash32 { w0: d.w0, w1: d.w1, w2: d.w2, w3: d.w3 }
 }
 
 // A digest's 32 bytes as four little-endian words.

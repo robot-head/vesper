@@ -31,6 +31,83 @@ fn canonical_simple_program_and_empty() {
     assert_eq!(verify(""), "\n");
 }
 #[test]
+fn use_groups_stay_on_one_line_when_they_fit() {
+    assert_eq!(
+        verify("use @vesper/front::{\n    P\n};\nuse self::text::{parse_float,decode_string};"),
+        "use @vesper/front::{P};\nuse self::text::{parse_float, decode_string};\n"
+    );
+    // Too long for the ribbon: one name per line, as any delimited list.
+    let long = format!(
+        "use @vesper/front::kinds::{{{}}};",
+        ["k_upper_case_kind"; 6].join(",")
+    );
+    assert_eq!(
+        verify(&long),
+        format!(
+            "use @vesper/front::kinds::{{\n{}\n}};\n",
+            ["    k_upper_case_kind"; 6].join(",\n")
+        )
+    );
+    // A source trailing comma still keeps the group vertical.
+    assert_eq!(
+        verify("use self::text::{parse_float,decode_string,};"),
+        "use self::text::{\n    parse_float,\n    decode_string,\n};\n"
+    );
+}
+#[test]
+fn struct_literals_stay_on_one_line_when_they_fit() {
+    assert_eq!(
+        verify(
+            "struct P{x:u64,y:u64}\nfn f(a:u64)->P{let p=P{x:1,y:P{x:2,y:3}.x};match p{P{x:x,y:y}=>P{x:x,y:y}}}"
+        ),
+        "struct P {
+    x: u64,
+    y: u64
+}
+fn f(a: u64) -> P {
+    let p = P { x: 1, y: P { x: 2, y: 3 }.x };
+    match p {
+        P { x: x, y: y } => P { x: x, y: y }
+    }
+}
+"
+    );
+    // Blocks after a type name stay blocks: a loop bound, a condition, a
+    // return type.
+    assert_eq!(
+        verify("const N:u64=4;fn f(a:u64)->u64{for i in 0..N{g(i)}if a==N{a}else{N}}"),
+        "const N: u64 = 4;
+fn f(a: u64) -> u64 {
+    for i in 0..N {
+        g(i)
+    }
+    if a == N {
+        a
+    } else {
+        N
+    }
+}
+"
+    );
+    // Too long for the ribbon, or a trailing comma: one field per line.
+    assert_eq!(
+        verify(
+            "fn f()->P{P{x:first_long_function_name(1,2,3),y:second_long_function_name(4,5,6,7,8,9,10,11)}}"
+        ),
+        "fn f() -> P {
+    P {
+        x: first_long_function_name(1, 2, 3),
+        y: second_long_function_name(4, 5, 6, 7, 8, 9, 10, 11)
+    }
+}
+"
+    );
+    assert_eq!(
+        verify("fn f()->P{P{x:1,y:2,}}"),
+        "fn f() -> P {\n    P {\n        x: 1,\n        y: 2,\n    }\n}\n"
+    );
+}
+#[test]
 fn parser_sugar_keeps_its_surface_syntax() {
     assert_eq!(
         verify(

@@ -7,34 +7,12 @@
 // A signature is a list of value-type codes (`V_*`) for its parameters and
 // its returns; the pointer type is `I64` on every hosted target.
 
-use @vesper/check-data::util::{
-    add,
-    n32,
-    push_decimal,
-    u32_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    TyKind,
-    TyPass,
-    Types,
-    display
-};
-use @vesper/check-data::world::{
-    World
-};
-use @vesper/check-layout::{
-    Layouts,
-    layout_of
-};
-use self::data::{
-    Calls,
-    FnInfo,
-    ParamInfo
-};
+use @vesper/check-data::util::{add, n32, push_decimal, u32_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyKind, TyPass, Types, display};
+use @vesper/check-data::world::{World};
+use @vesper/check-layout::{Layouts, layout_of};
+use self::data::{Calls, FnInfo, ParamInfo};
 use self::instances::{
     Conc,
     Found,
@@ -65,10 +43,7 @@ pub copy struct FnAbi {
 }
 
 pub fn default_abi() -> FnAbi {
-    FnAbi {
-        status: false,
-        result_words: 0
-    }
+    FnAbi { status: false, result_words: 0 }
 }
 
 pub struct Sig {
@@ -109,17 +84,9 @@ pub fn layout_facts(
         err.text.clear();
         err.text.extend(in ls.err.as_slice());
         ls.reset(m);
-        return LayoutFacts {
-            ok: false,
-            aggregate: false,
-            size: 0
-        };
+        return LayoutFacts { ok: false, aggregate: false, size: 0 };
     }
-    let facts = LayoutFacts {
-        ok: true,
-        aggregate: ls.aggregate(l),
-        size: ls.node(l).size
-    };
+    let facts = LayoutFacts { ok: true, aggregate: ls.aggregate(l), size: ls.node(l).size };
     ls.reset(m);
     facts
 }

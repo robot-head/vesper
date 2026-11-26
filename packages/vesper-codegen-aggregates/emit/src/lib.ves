@@ -80,31 +80,11 @@ use @vesper/cranelift::{
     vals1,
     value_of_word
 };
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/check-data::types::{
-    default_type,
-    display,
-    TyKind
-};
-use @vesper/check-data::util::{
-    add,
-    u32_at,
-    w
-};
-use @vesper/check-layout::{
-    Layouts,
-    layout_of,
-    layouts_new
-};
-use @vesper/codegen-aggregates::{
-    contains_box,
-    is_box,
-    type_is_recursive
-};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/check-data::types::{default_type, display, TyKind};
+use @vesper/check-data::util::{add, u32_at, w};
+use @vesper/check-layout::{Layouts, layout_of, layouts_new};
+use @vesper/codegen-aggregates::{contains_box, is_box, type_is_recursive};
 
 // The request protocol (src/codegen_swap.rs): the answer of a hook.
 pub const HANDLED: u64 = 1;
@@ -600,9 +580,7 @@ fn drops(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[Cranelift
         return DECLINED;
     }
     let bytes = request_bytes(call);
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in bytes.as_slice());
     let ty = u32_at(in c.tmap, r.word(in bytes.as_slice()));
     let mut st = St {

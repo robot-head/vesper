@@ -1,14 +1,6 @@
 // @vesper-std/graph::topo: topological order with a cycle report.
-use self::{
-    Graph,
-    GraphIndex
-};
-use self::util::{
-    get32,
-    get_bool,
-    filled32,
-    filled_bool
-};
+use self::{Graph, GraphIndex};
+use self::util::{get32, get_bool, filled32, filled_bool};
 
 // The result of `toposort`: the nodes in a topological order when the graph
 // is a DAG; otherwise the nodes that could be ordered (those no cycle
@@ -56,10 +48,7 @@ pub fn toposort(in g: Graph) -> Topo {
     } else {
         ChunkSeq::new[u32]()
     };
-    Topo {
-        order: order,
-        cycle: cycle
-    }
+    Topo { order: order, cycle: cycle }
 }
 
 // The nodes Kahn's algorithm can order, in the order it takes them.

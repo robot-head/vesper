@@ -14,21 +14,9 @@
 //
 // Names are `Names` symbols; `analyze_stack` interns nothing.
 
-use @vesper/check-data::names::{
-    Names
-};
-use self::input::{
-    Report
-};
-use self::util::{
-    cmp_names,
-    filled,
-    g,
-    put,
-    putn,
-    puts,
-    st
-};
+use @vesper/check-data::names::{Names};
+use self::input::{Report};
+use self::util::{cmp_names, filled, g, put, putn, puts, st};
 
 const NONE: u64 = 18446744073709551615;
 
@@ -226,10 +214,7 @@ fn build_succ(in nm: Names, n: u64, in pending: ChunkSeq[u64]) -> Succ {
         rows.extend(in set.as_slice());
     }
     st(inout start, n, rows.len() / 3);
-    Succ {
-        start: start,
-        rows: rows
-    }
+    Succ { start: start, rows: rows }
 }
 
 fn push4(inout s: ChunkSeq[u64], a: u64, b: u64, c: u64, d: u64) {

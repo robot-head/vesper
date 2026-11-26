@@ -3,29 +3,11 @@
 // z, max x, y, z). A child is a word: an internal node `k` is `k`, a leaf
 // at sorted position `i` is `2^32 + i`. The Rust wrapper owns every buffer
 // and lends it here sized for the call.
-use @vesper-std/sort::unstable::{
-    sort
-};
-use self::{
-    LbvhError
-};
-use self::morton::{
-    morton64
-};
-use self::sap::{
-    radix_sort,
-    radix_sort_pairs
-};
-use self::util::{
-    box_valid,
-    dec,
-    g32,
-    g64,
-    gf,
-    inc,
-    shr_i64,
-    u
-};
+use @vesper-std/sort::unstable::{sort};
+use self::{LbvhError};
+use self::morton::{morton64};
+use self::sap::{radix_sort, radix_sort_pairs};
+use self::util::{box_valid, dec, g32, g64, gf, inc, shr_i64, u};
 
 // A child word: a node index, or a leaf index with bit 32 set. Keys are
 // 64-bit Morton codes (equal keys break ties by index, past bit 64); a box
@@ -165,11 +147,7 @@ pub fn build(
     let n = boxes.len() / 6;
     for i in 0..n {
         if !box_valid(in boxes, i) {
-            raise_lbvh(
-                LbvhError::InvalidBox {
-                    index: wrapping_usize(i)
-                }
-            );
+            raise_lbvh(LbvhError::InvalidBox { index: wrapping_usize(i) });
         }
     }
     if n == 0 {

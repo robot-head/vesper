@@ -1,12 +1,6 @@
 // Native activation checkpoints as Chrono snapshot epochs (§31.1 item 2).
-use @vesper-std/hash::blake3::{
-    blake3,
-    digest_bytes
-};
-use super::ring::{
-    FlightRecorder,
-    capture_snapshot
-};
+use @vesper-std/hash::blake3::{blake3, digest_bytes};
+use super::ring::{FlightRecorder, capture_snapshot};
 
 pub copy struct ParkPoint {
     pub evidence_depth: u32,

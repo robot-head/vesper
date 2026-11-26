@@ -1,0 +1,198 @@
+// Byte strings in one buffer: the `Vec<String>` and `BTreeSet<String>` of
+// src/proof_commands.rs. String order is byte order, as Rust's.
+pub struct Strs {
+    pub bytes: ChunkSeq[u8],
+    pub ends: ChunkSeq[u64],
+}
+
+pub fn strs_new() -> Strs {
+    Strs { bytes: ChunkSeq::new[u8](), ends: ChunkSeq::new[u64]() }
+}
+
+pub fn count(in s: Strs) -> u64 {
+    s.ends.len()
+}
+
+pub fn start(in s: Strs, i: u64) -> u64 {
+    if i == 0 {
+        return 0;
+    }
+    match s.ends.try_get(wrapping_sub(i, 1)) {
+        Option::Some(e) => e,
+        Option::None => 0,
+    }
+}
+
+pub fn end(in s: Strs, i: u64) -> u64 {
+    match s.ends.try_get(i) {
+        Option::Some(e) => e,
+        Option::None => 0,
+    }
+}
+
+pub fn push(inout s: Strs, in b: Slice[u8]) {
+    s.bytes.extend(in b);
+    s.ends.push(s.bytes.len());
+}
+
+// String `i` copied out.
+pub fn get(in s: Strs, i: u64) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in s.bytes[start(in s, i)..end(in s, i)]);
+    out
+}
+
+pub fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+pub fn same(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if byte(in a, i) != byte(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn same_str(in a: Slice[u8], in b: Str) -> bool {
+    same(in a, in b.as_bytes())
+}
+
+// Byte order: negative, 0 or positive as `a` sorts before, with or after `b`.
+pub fn compare(in a: Slice[u8], in b: Slice[u8]) -> i64 {
+    let n = if a.len() < b.len() {
+        a.len()
+    } else {
+        b.len()
+    };
+    for i in 0..n {
+        let x = byte(in a, i);
+        let y = byte(in b, i);
+        if x != y {
+            return if x < y {
+                -1
+            } else {
+                1
+            };
+        }
+    }
+    if a.len() < b.len() {
+        -1
+    } else if a.len() > b.len() {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn index_of(in s: Strs, in b: Slice[u8]) -> Option[u64] {
+    for i in 0..count(in s) {
+        if same(in s.bytes[start(in s, i)..end(in s, i)], in b) {
+            return Option::Some(i);
+        }
+    }
+    Option::None
+}
+
+pub fn contains(in s: Strs, in b: Slice[u8]) -> bool {
+    match index_of(in s, in b) {
+        Option::Some(_) => true,
+        Option::None => false,
+    }
+}
+
+// The order of the strings of `s` (stable).
+pub fn order(in s: Strs) -> ChunkSeq[u64] {
+    let mut idx: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..count(in s) {
+        // Insertion: the strings are few (at most a few thousand).
+        let mut at = idx.len();
+        idx.push(i);
+        loop {
+            if at == 0 {
+                break;
+            }
+            let prev = match idx.try_get(wrapping_sub(at, 1)) {
+                Option::Some(p) => p,
+                Option::None => 0,
+            };
+            let c = compare(
+                in s.bytes[start(in s, prev)..end(in s, prev)],
+                in s.bytes[start(in s, i)..end(in s, i)]
+            );
+            if c <= 0 {
+                break;
+            }
+            let _ = idx.try_set(at, prev);
+            at = wrapping_sub(at, 1);
+        }
+        let _ = idx.try_set(at, i);
+    }
+    idx
+}
+
+// `s` sorted, each string once: a `BTreeSet<String>`.
+pub fn set_of(in s: Strs) -> Strs {
+    let idx = order(in s);
+    let mut out = strs_new();
+    for k in 0..idx.len() {
+        let i = match idx.try_get(k) {
+            Option::Some(i) => i,
+            Option::None => 0,
+        };
+        let b = s.bytes[start(in s, i)..end(in s, i)];
+        let n = count(in out);
+        if n == 0
+            || !same(
+                in out.bytes[start(in out, wrapping_sub(n, 1))..end(in out, wrapping_sub(n, 1))],
+                in b
+            ) {
+            push(inout out, in b);
+        }
+    }
+    out
+}
+
+// Whether two sets hold the same strings in the same order.
+pub fn equal(in a: Strs, in b: Strs) -> bool {
+    if count(in a) != count(in b) {
+        return false;
+    }
+    for i in 0..count(in a) {
+        if !same(
+            in a.bytes[start(in a, i)..end(in a, i)],
+            in b.bytes[start(in b, i)..end(in b, i)]
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn put_str(inout out: ChunkSeq[u8], in s: Str) {
+    out.extend(in s.as_bytes());
+}
+
+// `s` with every `\` made `/`.
+pub fn slashes(in s: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..s.len() {
+        let b = byte(in s, i);
+        out
+            .push(
+                if b == 92 {
+                    47
+                } else {
+                    b
+                }
+            );
+    }
+    out
+}

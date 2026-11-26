@@ -7,22 +7,8 @@
 // and `Ty == Ty` in Rust are id equality here; names are symbols of one
 // `Names` table, compared byte by byte where Rust orders `String`s.
 
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
-use @vesper/check-data::util::{
-    add,
-    fold,
-    inc,
-    inc32,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/check-data::util::{add, fold, inc, inc32, n32, push_decimal, u32_at, u64_at, u8_at, w};
 
 // `u32::MAX`: an absent id, or a failed conversion (its text is `St.err`).
 const NONE: u32 = 4294967295;
@@ -330,11 +316,7 @@ pub fn strip_prefix(inout st: St, s: u32, in prefix: Str) -> u32 {
 pub fn dim_node(in st: St, d: u32) -> DimN {
     match st.dn.try_get(widen_u64(d)) {
         Option::Some(x) => x,
-        Option::None => DimN {
-            coeff: 1,
-            a: 0,
-            n: 0
-        },
+        Option::None => DimN { coeff: 1, a: 0, n: 0 },
     }
 }
 
@@ -405,15 +387,7 @@ pub fn mk_dim(inout st: St, coeff: u64, in items: ChunkSeq[u32]) -> u32 {
     let id = wrapping_u32(st.dn.len());
     let a = wrapping_u32(st.ditems.len());
     st.ditems.extend(in items.as_slice());
-    st
-        .dn
-        .push(
-            DimN {
-                coeff: coeff,
-                a: a,
-                n: wrapping_u32(items.len() >> 1)
-            }
-        );
+    st.dn.push(DimN { coeff: coeff, a: a, n: wrapping_u32(items.len() >> 1) });
     st.dhash.push(h);
     let ok = st.dslots.try_set(at, inc32(id));
     if wrapping_mul(st.dhash.len(), 2) > st.dmask {
@@ -702,13 +676,7 @@ pub fn put_dtype(in st: St, inout o: ChunkSeq[u8], d: u32) {
 pub fn ty_node(in st: St, t: u32) -> TyN {
     match st.tn.try_get(widen_u64(t)) {
         Option::Some(x) => x,
-        Option::None => TyN {
-            k: T_UNKNOWN,
-            a: 0,
-            c: 0,
-            b: 0,
-            n: 0
-        },
+        Option::None => TyN { k: T_UNKNOWN, a: 0, c: 0, b: 0, n: 0 },
     }
 }
 
@@ -801,17 +769,7 @@ pub fn mk_ty(inout st: St, k: u8, a: u32, c: u32, in items: ChunkSeq[u32]) -> u3
     if k == T_ADT {
         n = n >> 1;
     }
-    st
-        .tn
-        .push(
-            TyN {
-                k: k,
-                a: a,
-                c: c,
-                b: b,
-                n: wrapping_u32(n)
-            }
-        );
+    st.tn.push(TyN { k: k, a: a, c: c, b: b, n: wrapping_u32(n) });
     st.thash.push(h);
     let ok = st.tslots.try_set(at, inc32(id));
     if wrapping_mul(st.thash.len(), 2) > st.tmask {

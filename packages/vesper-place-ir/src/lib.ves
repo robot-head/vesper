@@ -28,40 +28,12 @@
 // - `place_ir_dump` / `place_ir_words`: the harness entries
 //   (tests/self_host_place_ir.rs).
 
-use self::codes::{
-    Lit,
-    Op,
-    Pat,
-    Tag,
-    Term
-};
+use self::codes::{Lit, Op, Pat, Tag, Term};
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    EffNode,
-    RowNode,
-    TypeNode,
-    Types,
-    debug_type,
-    TyKind
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{EffNode, RowNode, TypeNode, Types, debug_type, TyKind};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
 
 // Patterns nested deeper than this are corrupt input.
 const MAX_DEPTH: u64 = 512;
@@ -308,13 +280,7 @@ impl Program {
         let pt_n = wrapping_sub(s.paths.len(), n_paths);
         for i in n_paths..s.paths.len() {
             match s.paths.try_get(i) {
-                Option::Some(x) => new_paths
-                    .push(
-                        PathRow {
-                            a: x.a,
-                            n: x.n
-                        }
-                    ),
+                Option::Some(x) => new_paths.push(PathRow { a: x.a, n: x.n }),
                 Option::None => {},
             }
         }
@@ -323,14 +289,7 @@ impl Program {
         }
         for i in 0..new_paths.len() {
             match new_paths.try_get(i) {
-                Option::Some(x) => s
-                    .paths
-                    .push(
-                        PathRow {
-                            a: x.a,
-                            n: x.n
-                        }
-                    ),
+                Option::Some(x) => s.paths.push(PathRow { a: x.a, n: x.n }),
                 Option::None => {},
             }
         }
@@ -338,13 +297,7 @@ impl Program {
         let pl_n = wrapping_sub(s.pool.len(), n_pool);
         for i in n_pool..s.pool.len() {
             match s.pool.try_get(i) {
-                Option::Some(x) => new_pool
-                    .push(
-                        PoolRow {
-                            kind: x.kind,
-                            label: x.label
-                        }
-                    ),
+                Option::Some(x) => new_pool.push(PoolRow { kind: x.kind, label: x.label }),
                 Option::None => {},
             }
         }
@@ -353,14 +306,7 @@ impl Program {
         }
         for i in 0..new_pool.len() {
             match new_pool.try_get(i) {
-                Option::Some(x) => s
-                    .pool
-                    .push(
-                        PoolRow {
-                            kind: x.kind,
-                            label: x.label
-                        }
-                    ),
+                Option::Some(x) => s.pool.push(PoolRow { kind: x.kind, label: x.label }),
                 Option::None => {},
             }
         }
@@ -393,15 +339,7 @@ impl Program {
     pub fn function(in self, i: u64) -> FnRow {
         match self.fns.try_get(i) {
             Option::Some(x) => x,
-            Option::None => FnRow {
-                name: 0,
-                ha: 0,
-                hn: 0,
-                b0: 0,
-                bc: 0,
-                ta: 0,
-                tn: 0
-            },
+            Option::None => FnRow { name: 0, ha: 0, hn: 0, b0: 0, bc: 0, ta: 0, tn: 0 },
         }
     }
 
@@ -450,10 +388,7 @@ impl Program {
     pub fn path(in self, i: u64) -> PathRow {
         match self.paths.try_get(i) {
             Option::Some(x) => x,
-            Option::None => PathRow {
-                a: 0,
-                n: 0
-            },
+            Option::None => PathRow { a: 0, n: 0 },
         }
     }
 
@@ -466,10 +401,7 @@ impl Program {
     pub fn pool_row(in self, i: u64) -> PoolRow {
         match self.pool.try_get(i) {
             Option::Some(x) => x,
-            Option::None => PoolRow {
-                kind: 0,
-                label: 0
-            },
+            Option::None => PoolRow { kind: 0, label: 0 },
         }
     }
 
@@ -482,14 +414,7 @@ impl Program {
     // Appends a path of `names` symbols; returns its index.
     pub fn add_path(inout self, in names: ChunkSeq[u32]) -> u64 {
         let i = self.paths.len();
-        self
-            .paths
-            .push(
-                PathRow {
-                    a: self.path_syms.len(),
-                    n: names.len()
-                }
-            );
+        self.paths.push(PathRow { a: self.path_syms.len(), n: names.len() });
         for k in 0..names.len() {
             self.path_syms.push(u32_at(in names, k));
         }
@@ -849,14 +774,7 @@ pub fn read_program(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Program {
     for i in 0..np {
         let kind = r.word(in b);
         let label = u32_at(in c.nmap, r.word(in b));
-        p
-            .pool
-            .push(
-                PoolRow {
-                    kind: kind,
-                    label: label
-                }
-            );
+        p.pool.push(PoolRow { kind: kind, label: label });
     }
     let npaths = r.word(in b);
     for i in 0..npaths {
@@ -865,14 +783,7 @@ pub fn read_program(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Program {
         for j in 0..k {
             p.path_syms.push(u32_at(in c.nmap, r.word(in b)));
         }
-        p
-            .paths
-            .push(
-                PathRow {
-                    a: a,
-                    n: k
-                }
-            );
+        p.paths.push(PathRow { a: a, n: k });
     }
     let nf = r.word(in b);
     for fi in 0..nf {
@@ -1241,9 +1152,7 @@ pub fn put_program(in p: Program, in t: Types, in names: Names, inout o: ChunkSe
 // The canonical dump of the input's program, packed by `pack_text`.
 pub fn place_ir_dump(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -1254,9 +1163,7 @@ pub fn place_ir_dump(in input: Str) -> ChunkSeq[u64] {
 // The input's program read into tables and written back (the identity
 // pass): what an IR pass returns.
 pub fn place_ir_round_trip(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();

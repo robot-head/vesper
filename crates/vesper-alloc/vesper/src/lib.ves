@@ -342,12 +342,7 @@ fn layout_ok(size: u64, align: u64) -> bool {
 }
 
 fn empty_chunk() -> Chunk {
-    Chunk {
-        base: 0,
-        cap: 0,
-        align: 0,
-        cursor: 0
-    }
+    Chunk { base: 0, cap: 0, align: 0, cursor: 0 }
 }
 
 fn empty_slot() -> Slot {
@@ -627,12 +622,7 @@ fn check_align(in b: Book, align: u64) -> Option[Fault] {
         return Option::Some(Fault::InvalidAlignment(align));
     }
     if align > b.cfg.max_align {
-        return Option::Some(
-            Fault::AlignmentTooLarge {
-                align: align,
-                max: b.cfg.max_align
-            }
-        );
+        return Option::Some(Fault::AlignmentTooLarge { align: align, max: b.cfg.max_align });
     }
     Option::None
 }
@@ -663,24 +653,12 @@ fn fit(c: Chunk, size: u64, align: u64) -> u64 {
 fn commit_placement(inout b: Book, chunk: u64, start: u64, size: u64) -> Place {
     let prior = cursor_of(in b, chunk);
     set_cursor(inout b, chunk, wrapping_add(start, size));
-    Place::At {
-        chunk: chunk,
-        prior: prior,
-        start: start
-    }
+    Place::At { chunk: chunk, prior: prior, start: start }
 }
 
 fn queue_release(inout b: Book, c: Chunk) {
     b.reserved = wrapping_sub(b.reserved, c.cap);
-    b
-        .pending
-        .push(
-            Action::Release {
-                base: c.base,
-                cap: c.cap,
-                align: c.align
-            }
-        );
+    b.pending.push(Action::Release { base: c.base, cap: c.cap, align: c.align });
 }
 
 // Releases chunks `from..to` and closes the gap.
@@ -781,17 +759,9 @@ fn place(inout b: Book, size: u64, align: u64, fresh_base: u64, fresh_cap: u64) 
         return Place::Fail(Fault::SizeOverflow);
     }
     if fresh_cap == 0 {
-        return Place::Need {
-            cap: capacity,
-            align: lay
-        };
+        return Place::Need { cap: capacity, align: lay };
     }
-    let c = Chunk {
-        base: fresh_base,
-        cap: fresh_cap,
-        align: lay,
-        cursor: 0
-    };
+    let c = Chunk { base: fresh_base, cap: fresh_cap, align: lay, cursor: 0 };
     b.reserved = wrapping_add(b.reserved, fresh_cap);
     let start = fit(c, size, align);
     if fresh_cap != capacity || start == MAX_U64 {
@@ -979,11 +949,7 @@ pub fn book_alloc(
         Option::None => (),
     }
     match place(inout b, size, align, fresh_base, fresh_cap) {
-        Place::At {
-            chunk,
-            prior,
-            start
-        } => {
+        Place::At { chunk, prior, start } => {
             let i = push_slot(
                 inout b,
                 chunk,
@@ -1000,13 +966,7 @@ pub fn book_alloc(
             let addr = sget(in b, i, SlotWord::Addr);
             done(in b, i, addr)
         },
-        Place::Need {
-            cap,
-            align
-        } => Placed::Need {
-            cap: cap,
-            align: align
-        },
+        Place::Need { cap, align } => Placed::Need { cap: cap, align: align },
         Place::Fail(f) => Placed::Fail(f),
     }
 }
@@ -1015,23 +975,13 @@ pub fn book_alloc(
 pub fn book_alloc_raw(inout b: Book, size: u64, align: u64, fresh_base: u64, fresh_cap: u64)
     -> Placed {
     match place(inout b, size, align, fresh_base, fresh_cap) {
-        Place::At {
-            chunk,
-            prior,
-            start
-        } => Placed::Done {
+        Place::At { chunk, prior, start } => Placed::Done {
             slot: MAX_U64,
             serial: 0,
             addr: wrapping_add(chunk_at(in b, chunk).base, start),
             pending: b.pending.len()
         },
-        Place::Need {
-            cap,
-            align
-        } => Placed::Need {
-            cap: cap,
-            align: align
-        },
+        Place::Need { cap, align } => Placed::Need { cap: cap, align: align },
         Place::Fail(f) => Placed::Fail(f),
     }
 }
@@ -1070,11 +1020,7 @@ pub fn book_alloc_elems(
         Option::None => (),
     }
     match place(inout b, bytes, align, fresh_base, fresh_cap) {
-        Place::At {
-            chunk,
-            prior,
-            start
-        } => {
+        Place::At { chunk, prior, start } => {
             let i = push_slot(inout b, chunk, prior, start, bytes, align, Kind::Elements, 0);
             let mut s = slot_at(in b, i);
             s.elems = true;
@@ -1087,13 +1033,7 @@ pub fn book_alloc_elems(
             let addr = addr_of(in b, s);
             done(in b, i, addr)
         },
-        Place::Need {
-            cap,
-            align
-        } => Placed::Need {
-            cap: cap,
-            align: align
-        },
+        Place::Need { cap, align } => Placed::Need { cap: cap, align: align },
         Place::Fail(f) => Placed::Fail(f),
     }
 }
@@ -1127,9 +1067,7 @@ pub fn book_extend(inout b: Book, slot: u64, serial: u64, add: u64, fresh_base: 
         let mut t = s;
         t.len = new_len;
         set_slot(inout b, index, t);
-        return Extended::InPlace {
-            dst: wrapping_add(src, s.len)
-        };
+        return Extended::InPlace { dst: wrapping_add(src, s.len) };
     }
     match reserve_slot(in b) {
         Option::Some(f) => {
@@ -1138,11 +1076,7 @@ pub fn book_extend(inout b: Book, slot: u64, serial: u64, add: u64, fresh_base: 
         Option::None => (),
     }
     match place(inout b, new_len, s.align, fresh_base, fresh_cap) {
-        Place::At {
-            chunk,
-            prior,
-            start
-        } => {
+        Place::At { chunk, prior, start } => {
             let i = push_slot(inout b, chunk, prior, start, new_len, s.align, Kind::Bytes, 0);
             let mut old = s;
             old.st = State::Released;
@@ -1157,13 +1091,7 @@ pub fn book_extend(inout b: Book, slot: u64, serial: u64, add: u64, fresh_base: 
                 pending: b.pending.len()
             }
         },
-        Place::Need {
-            cap,
-            align
-        } => Extended::Need {
-            cap: cap,
-            align: align
-        },
+        Place::Need { cap, align } => Extended::Need { cap: cap, align: align },
         Place::Fail(f) => Extended::Fail(f),
     }
 }
@@ -1219,16 +1147,7 @@ pub fn book_checkpoint(inout b: Book) -> Result[u64, Fault] {
     } else {
         0
     };
-    b
-        .marks
-        .push(
-            Mark {
-                serial: serial,
-                slot_len: b.nslots,
-                chunk: b.current,
-                cursor: cursor
-            }
-        );
+    b.marks.push(Mark { serial: serial, slot_len: b.nslots, chunk: b.current, cursor: cursor });
     Result::Ok(serial)
 }
 
@@ -1267,28 +1186,13 @@ fn finalize_from(inout b: Book, floor: u64) {
             let addr = sget(in b, i, SlotWord::Addr);
             let fin = sget(in b, i, SlotWord::Fin);
             if fin != 0 {
-                b
-                    .pending
-                    .push(
-                        Action::Finalize {
-                            fin: fin,
-                            addr: addr
-                        }
-                    );
+                b.pending.push(Action::Finalize { fin: fin, addr: addr });
             }
             if flag(flags, Flag::Elems) {
                 let edrop = sget(in b, i, SlotWord::Edrop);
                 let elen = sget(in b, i, SlotWord::Elen);
                 if edrop != 0 && elen > 0 {
-                    b
-                        .pending
-                        .push(
-                            Action::DropElems {
-                                fin: edrop,
-                                addr: addr,
-                                len: elen
-                            }
-                        );
+                    b.pending.push(Action::DropElems { fin: edrop, addr: addr, len: elen });
                 }
             }
         }
@@ -1454,12 +1358,7 @@ fn resize(inout b: Book, index: u64, new_cap: u64, fresh_base: u64, fresh_cap: u
         t.len = new_bytes;
         t.ecap = new_cap;
         set_slot(inout b, index, t);
-        return Grown::Ready {
-            slot: index,
-            serial: s.serial,
-            base: base,
-            len: s.elen
-        };
+        return Grown::Ready { slot: index, serial: s.serial, base: base, len: s.elen };
     }
     match reserve_slot(in b) {
         Option::Some(f) => {
@@ -1468,11 +1367,7 @@ fn resize(inout b: Book, index: u64, new_cap: u64, fresh_base: u64, fresh_cap: u
         Option::None => (),
     }
     match place(inout b, new_bytes, s.align, fresh_base, fresh_cap) {
-        Place::At {
-            chunk,
-            prior,
-            start
-        } => {
+        Place::At { chunk, prior, start } => {
             let i = push_slot(inout b, chunk, prior, start, new_bytes, s.align, Kind::Elements, 0);
             let mut old = s;
             old.elems = false;
@@ -1498,10 +1393,7 @@ fn resize(inout b: Book, index: u64, new_cap: u64, fresh_base: u64, fresh_cap: u
                 pending: b.pending.len()
             }
         },
-        Place::Need {
-            cap,
-            align
-        } => Grown::Need {
+        Place::Need { cap, align } => Grown::Need {
             cap: cap,
             align: align,
             retry: false,
@@ -1515,11 +1407,7 @@ fn falls_back(g: Grown) -> bool {
     match g {
         Grown::Fail(f) => match f {
             Fault::SizeOverflow => true,
-            Fault::CapacityExceeded {
-                requested,
-                reserved,
-                limit
-            } => true,
+            Fault::CapacityExceeded { requested, reserved, limit } => true,
             _ => false,
         },
         _ => false,
@@ -1532,21 +1420,8 @@ fn claim_elems(inout b: Book, g: Grown, claim: u64) -> Grown {
         return g;
     }
     let index = match g {
-        Grown::Ready {
-            slot,
-            serial,
-            base,
-            len
-        } => slot,
-        Grown::Relocated {
-            slot,
-            serial,
-            src,
-            base,
-            len,
-            bytes,
-            pending
-        } => slot,
+        Grown::Ready { slot, serial, base, len } => slot,
+        Grown::Relocated { slot, serial, src, base, len, bytes, pending } => slot,
         _ => {
             return g;
         },
@@ -1615,12 +1490,7 @@ pub fn book_grow(
     let target = max(max(required, doubled), min_growth_cap(s.esize));
     let g = resize(inout b, index, target, fresh_base, fresh_cap);
     let g = match g {
-        Grown::Need {
-            cap,
-            align,
-            retry,
-            fallback
-        } => Grown::Need {
+        Grown::Need { cap, align, retry, fallback } => Grown::Need {
             cap: cap,
             align: align,
             retry: target > required,
@@ -1631,12 +1501,7 @@ pub fn book_grow(
     if target > required && falls_back(g) {
         let r = resize(inout b, index, required, fresh_base, fresh_cap);
         let r = match r {
-            Grown::Need {
-                cap,
-                align,
-                retry,
-                fallback
-            } => Grown::Need {
+            Grown::Need { cap, align, retry, fallback } => Grown::Need {
                 cap: cap,
                 align: align,
                 retry: false,
@@ -1673,14 +1538,7 @@ pub fn book_truncate(inout b: Book, slot: u64, serial: u64, new_len: u64) -> Res
             let mut s = slot_at(in b, i);
             let base = addr_of(in b, s);
             if new_len >= s.elen {
-                return Result::Ok(
-                    Span {
-                        base: base,
-                        from: s.elen,
-                        to: s.elen,
-                        pending: 0
-                    }
-                );
+                return Result::Ok(Span { base: base, from: s.elen, to: s.elen, pending: 0 });
             }
             if s.elin {
                 return Result::Err(Fault::Linear(wrapping_sub(s.elen, new_len)));
@@ -1688,14 +1546,7 @@ pub fn book_truncate(inout b: Book, slot: u64, serial: u64, new_len: u64) -> Res
             let len = s.elen;
             s.elen = new_len;
             set_slot(inout b, i, s);
-            Result::Ok(
-                Span {
-                    base: base,
-                    from: new_len,
-                    to: len,
-                    pending: 0
-                }
-            )
+            Result::Ok(Span { base: base, from: new_len, to: len, pending: 0 })
         },
         Result::Err(f) => Result::Err(f),
     }
@@ -1710,14 +1561,7 @@ pub fn book_drain(inout b: Book, slot: u64, serial: u64) -> Result[Span, Fault] 
             s.elen = 0;
             set_slot(inout b, i, s);
             sync_linear(inout b, i);
-            Result::Ok(
-                Span {
-                    base: addr_of(in b, s),
-                    from: 0,
-                    to: len,
-                    pending: 0
-                }
-            )
+            Result::Ok(Span { base: addr_of(in b, s), from: 0, to: len, pending: 0 })
         },
         Result::Err(f) => Result::Err(f),
     }
@@ -1743,14 +1587,7 @@ pub fn book_release_elems(inout b: Book, slot: u64, serial: u64, kind: u64) -> R
             u.st = State::Released;
             set_slot(inout b, i, u);
             reclaim_tail(inout b);
-            Result::Ok(
-                Span {
-                    base: base,
-                    from: 0,
-                    to: len,
-                    pending: b.pending.len()
-                }
-            )
+            Result::Ok(Span { base: base, from: 0, to: len, pending: b.pending.len() })
         },
         Result::Err(f) => Result::Err(f),
     }

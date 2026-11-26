@@ -9,18 +9,8 @@
 // emission reads (bound operations, buffer sizes, constructor names, the
 // failure order and the frame layout).
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    inc32,
-    n32,
-    push_decimal,
-    u32_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
+use @vesper/check-data::util::{add, inc, inc32, n32, push_decimal, u32_at, w};
+use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
     Types,
     debug_type,
@@ -30,19 +20,9 @@ use @vesper/check-data::types::{
     TyKind,
     TyPass
 };
-use @vesper/check-data::world::{
-    World
-};
-use @vesper/check-layout::{
-    Layouts,
-    layout_of
-};
-use self::tables::{
-    Decl,
-    Func,
-    Param,
-    Tables
-};
+use @vesper/check-data::world::{World};
+use @vesper/check-layout::{Layouts, layout_of};
+use self::tables::{Decl, Func, Param, Tables};
 
 const NONE32: u32 = 4294967295;
 // Copies of @vesper/check-layout's layout kinds: Rust's loader imports a
@@ -923,11 +903,7 @@ impl Planner {
             self
                 .effects
                 .push(
-                    BoundEffect {
-                        name: d.name,
-                        a: a,
-                        n: n32(wrapping_sub(self.bound.len(), w(a)))
-                    }
+                    BoundEffect { name: d.name, a: a, n: n32(wrapping_sub(self.bound.len(), w(a))) }
                 );
         }
         for i in 0..bindings.len() {
@@ -1022,11 +998,7 @@ impl Planner {
         for i in 0..self.effects.len() {
             let e = match self.effects.try_get(i) {
                 Option::Some(e) => e,
-                Option::None => BoundEffect {
-                    name: 0,
-                    a: 0,
-                    n: 0
-                },
+                Option::None => BoundEffect { name: 0, a: 0, n: 0 },
             };
             if i > 0 {
                 put(inout o, ", ");
@@ -1157,11 +1129,7 @@ fn bound_at(in s: ChunkSeq[BoundOp], i: u64) -> BoundOp {
 pub fn binding_at(in s: ChunkSeq[EffBinding], i: u64) -> EffBinding {
     match s.try_get(i) {
         Option::Some(b) => b,
-        Option::None => EffBinding {
-            eff_name: 0,
-            a: 0,
-            n: 0
-        },
+        Option::None => EffBinding { eff_name: 0, a: 0, n: 0 },
     }
 }
 

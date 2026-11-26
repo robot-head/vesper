@@ -8,12 +8,7 @@
 // features) have nf flags per package, rrow (required capabilities) nc. nfirst holds four
 // words per node: its edges ea[at .. at + n] (dependency indices) and its
 // native edges eb[at .. at + 3n] (name, text, requirement).
-use self::{
-    GNode,
-    L,
-    SEdge,
-    Snap
-};
+use self::{GNode, L, SEdge, Snap};
 use self::util::{
     Ascii,
     Code,
@@ -47,18 +42,8 @@ use self::util::{
     sw,
     sys
 };
-use self::check::{
-    check_manifest,
-    emit_at,
-    emit_id,
-    emit_lit,
-    mark,
-    since,
-    system_name_valid
-};
-use self::semver::{
-    matches
-};
+use self::check::{check_manifest, emit_at, emit_id, emit_lit, mark, since, system_name_valid};
+use self::semver::{matches};
 
 // The solution schema version this validator accepts.
 const SOLUTION_SCHEMA_VERSION: u64 = 1;
@@ -447,15 +432,7 @@ fn visit(inout l: L, p: u64) {
                 let s = sys(in l, add(ft.sys_at, j));
                 if s.ok && system_name_valid(in l, s.name) {
                     let rt = req(in l, s.req).text;
-                    l
-                        .se
-                        .push(
-                            SEdge {
-                                name: s.name,
-                                text: rt,
-                                req: s.req
-                            }
-                        );
+                    l.se.push(SEdge { name: s.name, text: rt, req: s.req });
                 }
             }
         }
@@ -836,15 +813,7 @@ fn commit_node(inout l: L, p: u64) {
             let text = sw(in l.eb, inc(b));
             let r = sw(in l.eb, add(b, 2));
             setb(inout l.usedsys, sname, true);
-            l
-                .gs
-                .push(
-                    SEdge {
-                        name: sname,
-                        text: text,
-                        req: r
-                    }
-                );
+            l.gs.push(SEdge { name: sname, text: text, req: r });
         }
         l
             .gn

@@ -3,14 +3,8 @@
 // per-byte bitmaps (`Bits`: one bit per ring byte, `cap` bits in words of
 // 64), which the Rust wrapper owns and lends; `SendSt` and `RecvSt` hold
 // the offsets. The stream state machines and `StreamSet` stay Rust.
-use self::{
-    LostRange,
-    RecvSt,
-    SendSt
-};
-use self::varint::{
-    sat_add
-};
+use self::{LostRange, RecvSt, SendSt};
+use self::varint::{sat_add};
 
 fn u64_max() -> u64 {
     18446744073709551615
@@ -168,13 +162,7 @@ fn ring_write(inout ring: Slice[u8], off: u64, in src: Slice[u8], from: u64, n: 
 // SendBuf
 
 pub fn sb_new(cap: u64) -> SendSt {
-    SendSt {
-        cap: cap,
-        base: 0,
-        next: 0,
-        end: 0,
-        lost_hint: u64_max()
-    }
+    SendSt { cap: cap, base: 0, next: 0, end: 0, lost_hint: u64_max() }
 }
 
 pub fn sb_free_space(in s: SendSt) -> u64 {
@@ -189,11 +177,7 @@ pub fn sb_write(inout s: SendSt, inout data: Slice[u8], in src: Slice[u8]) -> u6
 }
 
 pub fn sb_next_lost(inout s: SendSt, inout lost: Slice[u64], max: u64) -> LostRange {
-    let none = LostRange {
-        has: false,
-        off: 0,
-        len: 0
-    };
+    let none = LostRange { has: false, off: 0, len: 0 };
     if max == 0 || s.lost_hint >= s.next {
         return none;
     }
@@ -207,22 +191,14 @@ pub fn sb_next_lost(inout s: SendSt, inout lost: Slice[u64], max: u64) -> LostRa
     let stop = bits_find(in lost, s.cap, start, limit, false);
     bits_clear(inout lost, s.cap, start, stop);
     s.lost_hint = stop;
-    LostRange {
-        has: true,
-        off: start,
-        len: wrapping_sub(stop, start)
-    }
+    LostRange { has: true, off: start, len: wrapping_sub(stop, start) }
 }
 
 pub fn sb_take_new(inout s: SendSt, max: u64) -> LostRange {
     let off = s.next;
     let len = min64(max, wrapping_sub(s.end, s.next));
     s.next = wrapping_add(s.next, len);
-    LostRange {
-        has: true,
-        off: off,
-        len: len
-    }
+    LostRange { has: true, off: off, len: len }
 }
 
 pub fn sb_copy_out(in data: Slice[u8], off: u64, inout out: Slice[u8]) {
@@ -289,12 +265,7 @@ pub fn sb_reset_for_reuse(inout s: SendSt, inout acked: Slice[u64], inout lost: 
 // RecvBuf
 
 pub fn rb_new(cap: u64) -> RecvSt {
-    RecvSt {
-        cap: cap,
-        read: 0,
-        contig: 0,
-        highest: 0
-    }
+    RecvSt { cap: cap, read: 0, contig: 0, highest: 0 }
 }
 
 // Stores `src` at `off`; false is `WindowExceeded`.

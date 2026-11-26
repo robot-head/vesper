@@ -7,30 +7,10 @@
 // Exported functions only return `Result` values: every failure the Rust
 // code reports is a typed error, and nothing here raises.
 
-use self::int::{
-    inc
-};
-use self::huffman::{
-    huff_tables,
-    huff_encoded_len,
-    huff_encode,
-    huff_decode
-};
-use self::table::{
-    Static,
-    Table,
-    static_new,
-    table_new,
-    table_len,
-    table_first
-};
-use self::prefix::{
-    Num,
-    decode_int,
-    encode_int,
-    decode_string,
-    encode_string
-};
+use self::int::{inc};
+use self::huffman::{huff_tables, huff_encoded_len, huff_encode, huff_decode};
+use self::table::{Static, Table, static_new, table_new, table_len, table_first};
+use self::prefix::{Num, decode_int, encode_int, decode_string, encode_string};
 use self::encoder::{
     enc_encode,
     enc_on_decoder_stream,
@@ -62,33 +42,16 @@ use self::capsule::{
     capsule_next,
     capsule_write_close
 };
-use self::message::{
-    message_parse_request,
-    message_parse_response,
-    message_check_trailers
-};
-use self::varint::{
-    vput,
-    put_record
-};
+use self::message::{message_parse_request, message_parse_response, message_check_trailers};
+use self::varint::{vput, put_record};
 use self::decoder::{
     dec_on_encoder_stream,
     dec_decode_section,
     dec_cancel_stream,
     dec_take_decoder_stream
 };
-use self::wire::{
-    ENTRY_OVERHEAD
-};
-use self::control::{
-    uni_new,
-    uni_clear,
-    uni_accept,
-    uni_ids,
-    uni_contains,
-    uni_closed,
-    uni_bytes
-};
+use self::wire::{ENTRY_OVERHEAD};
+use self::control::{uni_new, uni_clear, uni_accept, uni_ids, uni_contains, uni_closed, uni_bytes};
 use self::pool::{
     BytePool,
     OutMap,
@@ -332,12 +295,7 @@ pub fn huff_unpack(in h: Huff, in data: Slice[u8], max_len: u64, inout out: Chun
 
 pub fn huff_decode_int(in h: Huff, in buf: Slice[u8], bits: u64) -> Result[IntRead, PrefixError] {
     match decode_int(in buf, 0, bits) {
-        Result::Ok(n) => Result::Ok(
-            IntRead {
-                value: n.value,
-                used: n.used
-            }
-        ),
+        Result::Ok(n) => Result::Ok(IntRead { value: n.value, used: n.used }),
         Result::Err(e) => Result::Err(e),
     }
 }

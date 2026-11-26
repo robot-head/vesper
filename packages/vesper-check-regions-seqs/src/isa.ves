@@ -31,18 +31,10 @@ use @vesper/ast::{
     type_at,
     lit_at
 };
-use @vesper/ast::lower::{
-    lower_source
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
-use @vesper/check-data::util::{
-    push_decimal
-};
+use @vesper/ast::lower::{lower_source};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+use @vesper/check-data::util::{push_decimal};
 
 const NONE: u32 = 4294967295;
 const NO_TY: u32 = 4294967295;
@@ -132,65 +124,26 @@ fn stmt_at(in a: Ast, i: u32) -> StmtNode {
         .stmts
         .get_or(
             idx_from_raw[StmtNode](i),
-            StmtNode {
-                kind: 0,
-                pat: NONE,
-                ty: NONE,
-                value: NONE,
-                mutable: false
-            }
+            StmtNode { kind: 0, pat: NONE, ty: NONE, value: NONE, mutable: false }
         )
 }
 
 fn arg_at(in a: Ast, i: u32) -> ArgNode {
-    a
-        .args
-        .get_or(
-            idx_from_raw[ArgNode](i),
-            ArgNode {
-                pass: 0,
-                explicit: false,
-                expr: NONE
-            }
-        )
+    a.args.get_or(idx_from_raw[ArgNode](i), ArgNode { pass: 0, explicit: false, expr: NONE })
 }
 
 fn clause_at(in a: Ast, i: u32) -> ClauseNode {
-    a
-        .clauses
-        .get_or(
-            idx_from_raw[ClauseNode](i),
-            ClauseNode {
-                name: NONE,
-                pats: 0,
-                body: NONE
-            }
-        )
+    a.clauses.get_or(idx_from_raw[ClauseNode](i), ClauseNode { name: NONE, pats: 0, body: NONE })
 }
 
 fn effects_at(in a: Ast, i: u32) -> EffectsNode {
-    a
-        .effects
-        .get_or(
-            idx_from_raw[EffectsNode](i),
-            EffectsNode {
-                instances: 0,
-                tail: NONE
-            }
-        )
+    a.effects.get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: 0, tail: NONE })
 }
 
 fn effect_at(in a: Ast, i: u32) -> EffectNode {
     a
         .effect_nodes
-        .get_or(
-            idx_from_raw[EffectNode](i),
-            EffectNode {
-                label: NONE,
-                name: NONE,
-                args: 0
-            }
-        )
+        .get_or(idx_from_raw[EffectNode](i), EffectNode { label: NONE, name: NONE, args: 0 })
 }
 
 fn fn_at(in a: Ast, i: u32) -> FnNode {
@@ -1375,9 +1328,7 @@ pub fn isa_text(in input: Str, in source: Str) -> ChunkSeq[u8] {
     let l = lower_source(in source);
     let mut a = l.ast;
     let mut x = i_new(inout a);
-    let mut r = Rd {
-        pos: 0
-    };
+    let mut r = Rd { pos: 0 };
     // ADTs.
     let na = r.word(in b);
     let mut spans: ChunkSeq[u64] = ChunkSeq::new[u64]();

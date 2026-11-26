@@ -10,14 +10,7 @@
 // function. `VESPER_VECTORIZE` stays with the caller; the `debug` verifier
 // run is the caller's too.
 
-use @vesper/clif::{
-    Func,
-    n32,
-    read_func,
-    u32_at,
-    u64_at,
-    w
-};
+use @vesper/clif::{Func, n32, read_func, u32_at, u64_at, w};
 use @vesper/clif::codes::{
     CC_EQ,
     CC_NE,
@@ -204,17 +197,13 @@ pub struct Map {
 }
 
 fn new_map(n: u64) -> Map {
-    let mut m = Map {
-        to: ChunkSeq::new[u32]()
-    };
+    let mut m = Map { to: ChunkSeq::new[u32]() };
     m.to.resize(n, NONE);
     m
 }
 
 fn copy_map(in m: Map) -> Map {
-    let mut c = Map {
-        to: ChunkSeq::with_capacity[u32](m.to.len())
-    };
+    let mut c = Map { to: ChunkSeq::with_capacity[u32](m.to.len()) };
     c.to.extend(in m.to.as_slice());
     c
 }

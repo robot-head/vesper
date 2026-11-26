@@ -2,12 +2,7 @@
 // words (`hi`, `lo`), with `parse_int` and `i128::to_string` of
 // crates/vesper-syntax/src/test_attrs.rs and src/test_discovery.rs.
 
-use self::util::{
-    add,
-    byte,
-    inc,
-    sub
-};
+use self::util::{add, byte, inc, sub};
 
 // A signed 128-bit integer: zero is never negative.
 pub copy struct Big {
@@ -18,12 +13,7 @@ pub copy struct Big {
 }
 
 fn none() -> Big {
-    Big {
-        ok: false,
-        neg: false,
-        hi: 0,
-        lo: 0
-    }
+    Big { ok: false, neg: false, hi: 0, lo: 0 }
 }
 
 // `x * m + a` for a magnitude below 2^127, `m` at most 16 and `a` below
@@ -41,12 +31,7 @@ fn mul_add(x: Big, m: u64, a: u64) -> Big {
     if h1 >= 2147483648 {
         return none();
     }
-    Big {
-        ok: true,
-        neg: false,
-        hi: (h0 & mask) | wrapping_shl_u64(h1, 32),
-        lo: lo
-    }
+    Big { ok: true, neg: false, hi: (h0 & mask) | wrapping_shl_u64(h1, 32), lo: lo }
 }
 
 fn digit(c: u8, hex: bool) -> u64 {
@@ -92,12 +77,7 @@ pub fn parse_int(in b: Slice[u8], s: u64, e: u64, negative: bool) -> Big {
     } else {
         10
     };
-    let mut x = Big {
-        ok: true,
-        neg: false,
-        hi: 0,
-        lo: 0
-    };
+    let mut x = Big { ok: true, neg: false, hi: 0, lo: 0 };
     let mut digits: u64 = 0;
     let mut j = start;
     loop {
@@ -123,12 +103,7 @@ pub fn parse_int(in b: Slice[u8], s: u64, e: u64, negative: bool) -> Big {
         return none();
     }
     let zero = x.hi == 0 && x.lo == 0;
-    Big {
-        ok: true,
-        neg: negative && !zero,
-        hi: x.hi,
-        lo: x.lo
-    }
+    Big { ok: true, neg: negative && !zero, hi: x.hi, lo: x.lo }
 }
 
 // `u64::try_from(n)`.

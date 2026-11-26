@@ -1,12 +1,5 @@
 // Module parse of @vesper/quarry (see lib.ves).
-use self::{
-    Bind,
-    Q,
-    Raw,
-    Rng,
-    Sel,
-    Tok
-};
+use self::{Bind, Q, Raw, Rng, Sel, Tok};
 use self::util::{
     bound,
     is_lit,
@@ -358,22 +351,13 @@ pub fn keyword(in p: ChunkSeq[u8], off: u64, len: u64) -> u64 {
 pub fn ident(inout q: Q) -> Rng {
     let t = take(inout q);
     if q.err != 0 {
-        return Rng {
-            off: 0,
-            len: 0
-        };
+        return Rng { off: 0, len: 0 };
     }
     if t.kind == tk_word() && t.kw == kw_none() {
-        Rng {
-            off: t.a,
-            len: t.b
-        }
+        Rng { off: t.a, len: t.b }
     } else {
         syntax(inout q, "expected non-keyword identifier");
-        Rng {
-            off: 0,
-            len: 0
-        }
+        Rng { off: 0, len: 0 }
     }
 }
 
@@ -392,13 +376,7 @@ pub fn push_raw(inout q: Q, r: Raw) -> u64 {
 }
 
 pub fn raw2(kind: u64, a: u64, b: u64, c: u64) -> Raw {
-    Raw {
-        kind: kind,
-        a: a,
-        b: b,
-        c: c,
-        d: 0
-    }
+    Raw { kind: kind, a: a, b: b, c: c, d: 0 }
 }
 
 pub fn parse_expr(inout q: Q, depth: u64) -> u64 {
@@ -487,29 +465,11 @@ pub fn parse_atom(inout q: Q, depth: u64) -> u64 {
     let r = if t.kind == tk_param() {
         raw2(1, t.a, t.b, 0)
     } else if t.kind == tk_int() {
-        Raw {
-            kind: 2,
-            a: 2,
-            b: t.a,
-            c: 0,
-            d: 0
-        }
+        Raw { kind: 2, a: 2, b: t.a, c: 0, d: 0 }
     } else if t.kind == tk_text() {
-        Raw {
-            kind: 2,
-            a: 5,
-            b: t.a,
-            c: t.b,
-            d: 0
-        }
+        Raw { kind: 2, a: 5, b: t.a, c: t.b, d: 0 }
     } else if t.kind == tk_word() && t.kw == kw_null() {
-        Raw {
-            kind: 2,
-            a: 0,
-            b: 0,
-            c: 0,
-            d: 0
-        }
+        Raw { kind: 2, a: 0, b: 0, c: 0, d: 0 }
     } else if t.kind == tk_word() && (t.kw == kw_true() || t.kw == kw_false()) {
         Raw {
             kind: 2,
@@ -525,21 +485,9 @@ pub fn parse_atom(inout q: Q, depth: u64) -> u64 {
     } else if t.kind == tk_word() && t.kw == kw_none() {
         if sym(inout q, DOT) {
             let name = ident(inout q);
-            Raw {
-                kind: 0,
-                a: t.a,
-                b: t.b,
-                c: name.off,
-                d: name.len
-            }
+            Raw { kind: 0, a: t.a, b: t.b, c: name.off, d: name.len }
         } else {
-            Raw {
-                kind: 0,
-                a: none(),
-                b: 0,
-                c: t.a,
-                d: t.b
-            }
+            Raw { kind: 0, a: none(), b: 0, c: t.a, d: t.b }
         }
     } else {
         syntax(inout q, "expected scalar expression");
@@ -601,15 +549,7 @@ pub fn parse_select(inout q: Q) {
             syntax(inout q, "star cannot be aliased");
             return;
         }
-        q
-            .sels
-            .push(
-                Sel {
-                    expr: expr,
-                    aoff: aoff,
-                    alen: alen
-                }
-            );
+        q.sels.push(Sel { expr: expr, aoff: aoff, alen: alen });
         let bn = q.sels.len();
         if !bound(inout q, bn, 2, "projection limit") {
             return;

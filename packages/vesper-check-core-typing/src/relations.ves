@@ -3,40 +3,15 @@
 // `infer`. Types are ids of the check-data arena, so the clones Rust makes
 // are copies and `==` on types and rows is one compare.
 
-use @vesper/check-data::util::{
-    add,
-    n32,
-    u32_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::types::{
-    EffNode,
-    RowNode,
-    TypeNode,
-    Types,
-    Vars,
-    TyKind
-};
-use @vesper/check-data::world::{
-    Known
-};
-use self::ints::{
-    Lit,
-    above_i64,
-    default_fits,
-    fits,
-    lit_max,
-    lit_min
-};
+use @vesper/check-data::util::{add, n32, u32_at, u8_at, w};
+use @vesper/check-data::types::{EffNode, RowNode, TypeNode, Types, Vars, TyKind};
+use @vesper/check-data::world::{Known};
+use self::ints::{Lit, above_i64, default_fits, fits, lit_max, lit_min};
 
 const NONE32: u32 = 4294967295;
 
 pub fn lit_of(n: TypeNode) -> Lit {
-    Lit {
-        neg: n.mode == 1,
-        mag: wrapping_u64(n.lit)
-    }
+    Lit { neg: n.mode == 1, mag: wrapping_u64(n.lit) }
 }
 
 pub fn mk_lit(inout t: Types, v: Lit) -> u32 {
@@ -216,16 +191,7 @@ impl RowBuf {
         for j in 0..w(e.n) {
             self.args.push(item(in t, add(w(e.a), j)));
         }
-        self
-            .es
-            .push(
-                EffNode {
-                    label: e.label,
-                    name: e.name,
-                    a: a,
-                    n: e.n
-                }
-            );
+        self.es.push(EffNode { label: e.label, name: e.name, a: a, n: e.n });
     }
 
     // `instances.contains(e)` for arena instance `e`.

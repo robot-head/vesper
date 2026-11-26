@@ -23,21 +23,9 @@ use self::fun::{
     u8_at,
     w
 };
-use self::graph::{
-    Graph,
-    graph,
-    successors
-};
-use self::rules::{
-    all_blocks,
-    block_drop_overlaps,
-    changes_len,
-    single_bindings,
-    stable_place
-};
-use @vesper/check-data::types::{
-    TyPass
-};
+use self::graph::{Graph, graph, successors};
+use self::rules::{all_blocks, block_drop_overlaps, changes_len, single_bindings, stable_place};
+use @vesper/check-data::types::{TyPass};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
@@ -279,42 +267,20 @@ impl Facts {
     pub fn edge(in self, e: u64) -> Edge {
         match self.edges.try_get(e) {
             Option::Some(x) => x,
-            Option::None => Edge {
-                from: 0,
-                to: 0,
-                lhs: 0,
-                rhs: 0,
-                strict: false
-            },
+            Option::None => Edge { from: 0, to: 0, lhs: 0, rhs: 0, strict: false },
         }
     }
 
     pub fn node(in self, t: u32) -> TermNode {
         match self.terms.try_get(w(t)) {
             Option::Some(x) => x,
-            Option::None => TermNode {
-                kind: K_VALUE,
-                a: 0,
-                b: 0,
-                c: 0,
-                exact: false
-            },
+            Option::None => TermNode { kind: K_VALUE, a: 0, b: 0, c: 0, exact: false },
         }
     }
 
     fn mk(inout self, kind: u8, a: u64, b: u64, c: u64, exact: bool) -> u32 {
         let id = n32(self.terms.len());
-        self
-            .terms
-            .push(
-                TermNode {
-                    kind: kind,
-                    a: a,
-                    b: b,
-                    c: c,
-                    exact: exact
-                }
-            );
+        self.terms.push(TermNode { kind: kind, a: a, b: b, c: c, exact: exact });
         id
     }
 
@@ -386,30 +352,10 @@ impl Facts {
                 ns = true;
             }
             if k.yes != d && self.g.only_pred(w(k.yes), d) {
-                self
-                    .edges
-                    .push(
-                        Edge {
-                            from: d,
-                            to: k.yes,
-                            lhs: yl,
-                            rhs: yr,
-                            strict: ys
-                        }
-                    );
+                self.edges.push(Edge { from: d, to: k.yes, lhs: yl, rhs: yr, strict: ys });
             }
             if k.no != d && self.g.only_pred(w(k.no), d) {
-                self
-                    .edges
-                    .push(
-                        Edge {
-                            from: d,
-                            to: k.no,
-                            lhs: nl,
-                            rhs: nr,
-                            strict: ns
-                        }
-                    );
+                self.edges.push(Edge { from: d, to: k.no, lhs: nl, rhs: nr, strict: ns });
             }
         }
     }

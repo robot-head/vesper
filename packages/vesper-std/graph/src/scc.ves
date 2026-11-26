@@ -1,15 +1,6 @@
 // @vesper-std/graph::scc: strongly connected components (Tarjan, iterative).
-use self::util::{
-    get32,
-    get64,
-    get_bool,
-    filled32,
-    filled_bool
-};
-use self::{
-    Graph,
-    GraphIndex
-};
+use self::util::{get32, get64, get_bool, filled32, filled_bool};
+use self::{Graph, GraphIndex};
 
 // The strongly connected components of a graph. Components are numbered
 // `0..count()` in the order Tarjan's algorithm completes them, which is a
@@ -222,11 +213,7 @@ pub fn scc(in g: Graph) -> Scc {
         starts,
         component_count,
     } = state;
-    Scc {
-        comp: comp,
-        nodes: nodes,
-        starts: starts
-    }
+    Scc { comp: comp, nodes: nodes, starts: starts }
 }
 
 test {

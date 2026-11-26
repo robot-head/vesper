@@ -10,27 +10,11 @@
 // the context's types (`read_ty`), so they need no index in the stream's
 // own type table.
 
-use @vesper/check-data::util::{
-    add,
-    inc32,
-    n32,
-    u32_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    EffNode,
-    Types,
-    TyKind
-};
-use @vesper/check-data::input::{
-    Reader
-};
-use @vesper/check-data::world::{
-    set_by_symbol
-};
+use @vesper/check-data::util::{add, inc32, n32, u32_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{EffNode, Types, TyKind};
+use @vesper/check-data::input::{Reader};
+use @vesper/check-data::world::{set_by_symbol};
 
 // A parameter of a `world.functions` entry.
 pub copy struct XParam {
@@ -132,15 +116,7 @@ fn read_row(inout r: Reader, in b: Slice[u8], inout t: Types, inout names: Names
         for j in 0..mine.len() {
             args.push(u32_at(in mine, j));
         }
-        es
-            .push(
-                EffNode {
-                    label: label,
-                    name: name,
-                    a: at,
-                    n: n32(k)
-                }
-            );
+        es.push(EffNode { label: label, name: name, a: at, n: n32(k) });
     }
     let has_tail = r.word(in b);
     let tail = if has_tail != 0 {
@@ -250,17 +226,7 @@ pub fn read_extra(inout r: Reader, in b: Slice[u8], inout t: Types, inout names:
             let ps0 = r.word(in b);
             let ps1 = r.word(in b);
             let ty = read_ty(inout r, in b, inout t, inout names);
-            x
-                .params
-                .push(
-                    XParam {
-                        name: pname,
-                        pass: pass,
-                        ty: ty,
-                        s0: ps0,
-                        s1: ps1
-                    }
-                );
+            x.params.push(XParam { name: pname, pass: pass, ty: ty, s0: ps0, s1: ps1 });
         }
         let result = read_ty(inout r, in b, inout t, inout names);
         let en = r.word(in b);
@@ -307,32 +273,10 @@ pub fn read_extra(inout r: Reader, in b: Slice[u8], inout t: Types, inout names:
                 x.op_params.push(ty);
             }
             let result = read_ty(inout r, in b, inout t, inout names);
-            x
-                .ops
-                .push(
-                    XOp {
-                        name: oname,
-                        s0: os0,
-                        s1: os1,
-                        pa: pa,
-                        pn: pn,
-                        result: result
-                    }
-                );
+            x.ops.push(XOp { name: oname, s0: os0, s1: os1, pa: pa, pn: pn, result: result });
         }
         set_by_symbol(inout x.decl_by, name, inc32(n32(x.decls.len())));
-        x
-            .decls
-            .push(
-                XEff {
-                    name: name,
-                    ngen: ngen,
-                    s0: s0,
-                    s1: s1,
-                    oa: oa,
-                    on: on
-                }
-            );
+        x.decls.push(XEff { name: name, ngen: ngen, s0: s0, s1: s1, oa: oa, on: on });
     }
     x
 }
@@ -364,13 +308,7 @@ impl Extra {
     pub fn param(in self, i: u64) -> XParam {
         match self.params.try_get(i) {
             Option::Some(p) => p,
-            Option::None => XParam {
-                name: 0,
-                pass: 0,
-                ty: 0,
-                s0: 0,
-                s1: 0
-            },
+            Option::None => XParam { name: 0, pass: 0, ty: 0, s0: 0, s1: 0 },
         }
     }
 
@@ -381,28 +319,14 @@ impl Extra {
     pub fn decl(in self, i: u64) -> XEff {
         match self.decls.try_get(i) {
             Option::Some(d) => d,
-            Option::None => XEff {
-                name: 0,
-                ngen: 0,
-                s0: 0,
-                s1: 0,
-                oa: 0,
-                on: 0
-            },
+            Option::None => XEff { name: 0, ngen: 0, s0: 0, s1: 0, oa: 0, on: 0 },
         }
     }
 
     pub fn op(in self, i: u64) -> XOp {
         match self.ops.try_get(i) {
             Option::Some(o) => o,
-            Option::None => XOp {
-                name: 0,
-                s0: 0,
-                s1: 0,
-                pa: 0,
-                pn: 0,
-                result: 0
-            },
+            Option::None => XOp { name: 0, s0: 0, s1: 0, pa: 0, pn: 0, result: 0 },
         }
     }
 }

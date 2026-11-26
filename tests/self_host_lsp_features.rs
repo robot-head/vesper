@@ -1014,8 +1014,7 @@ fn corpus_docs() -> &'static [Doc] {
         for d in ["examples", "tests/fixtures", "src/lsp/fixtures"] {
             walk(&repo().join(d), &mut files);
         }
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let quiet = quiet_panics();
         let mut docs = vec![];
         for f in files {
             let Ok(source) = std::fs::read_to_string(&f) else {
@@ -1043,7 +1042,7 @@ fn corpus_docs() -> &'static [Doc] {
                 Err(_) => eprintln!("generated {name} panicked"),
             }
         }
-        std::panic::set_hook(quiet);
+        drop(quiet);
         docs
     })
 }
@@ -2240,13 +2239,14 @@ fn lsp_features_speed() {
 
 /// The preludes the checker can add to a module (their functions reach
 /// `World::functions` with spans into the prelude's own text).
-fn preludes() -> [&'static str; 5] {
+fn preludes() -> [&'static str; 6] {
     [
         vesper::strings::PRELUDE,
         vesper::atomics::PRELUDE,
         vesper::atomics::WORKERS_PRELUDE,
         vesper::trace_effects::PRELUDE,
         vesper::trace_effects::TELEMETRABLE_PRELUDE,
+        vesper::option_methods::PRELUDE,
     ]
 }
 

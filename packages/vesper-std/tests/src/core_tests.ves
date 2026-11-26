@@ -1,13 +1,6 @@
 // Unit tests for @vesper-std/core.
 test {
-    use @vesper-std/core::{
-        min,
-        max,
-        clamp,
-        ordering_sign,
-        reverse,
-        then_cmp
-    };
+    use @vesper-std/core::{min, max, clamp, ordering_sign, reverse, then_cmp};
     use @vesper-std/core::mem::swap as swap_places;
     use @vesper-std/core::option::{
         is_some,
@@ -35,11 +28,7 @@ test {
         and_then as result_and_then,
         or as result_or
     };
-    use self::support::{
-        check,
-        some_u64,
-        some_pair
-    };
+    use self::support::{check, some_u64, some_pair};
 
     copy struct SwapFields {
         left: u64,
@@ -62,10 +51,7 @@ test {
         r = check(ordering_sign(reverse(4 .cmp(4))) == 0, 9, r);
         r = check(ordering_sign(then_cmp(1 .cmp(1), 2 .cmp(1))) == 1, 10, r);
         r = check(ordering_sign(then_cmp(1 .cmp(2), 2 .cmp(1))) == -1, 11, r);
-        let mut fields = SwapFields {
-            left: 7,
-            right: 42
-        };
+        let mut fields = SwapFields { left: 7, right: 42 };
         swap_places inout fields.left with inout fields.right;
         r = check(fields.left == 42 && fields.right == 7, 12, r);
         r

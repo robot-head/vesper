@@ -369,3 +369,67 @@ itself (part 4b-4).
 | `self_host_front_v2` surface tests with `compare_template` | the sugar corpus, 20,000 fuzzed sources locally, and depth-limit cases, both bare and wrapped as `flow::render` wraps them | 0 differences |
 | `self_host_ast` `template_scopes_*` | 899 template sources, every repository `.ves` file, and 60,000 fuzzed sources locally (CI 3,000) | 0 differences |
 | core AST and front end differentials | after the changes | pass |
+
+## Part 4b-4 to 4b-6: template flow analysis, scope captures, pattern hygiene
+
+- **4b-4, flow analysis** (`packages/vesper-sugar/src/flow.ves`): ports
+  `template/flow.rs` and `Rendered::hole`. It parses the skeleton as
+  `flow::render` does: first with the core parser (`@vesper/ast`
+  `lower_source`), then with the template-scopes profile, then unwrapped.
+  It renames the template's binders to fresh names, plans single
+  evaluation of captured expressions, and checks each place capture's
+  pass. `emit` then substitutes the captured text and records the holes,
+  origins and places. The Rust test hook is
+  `sugar_expand::template_render_words`.
+- **4b-5, scope captures** (`packages/vesper-sugar/src/scope.ves`): ports
+  `scope.rs`. A scope capture checks the `let exit = ..; cleanup;
+  exit.resume()` protocol and finds the body's exits in the core AST. It
+  reads the caller's effect rows and result type from the surface-profile
+  AST of the whole source (`@vesper/ast` `lower_surface_source`, new). It
+  then wraps the body in the exit loop and handlers, dispatches at the
+  resume, and remaps holes, origins and places through the edits. The
+  Rust test hook is `sugar_expand::template_scope_words`.
+- **4b-6, pattern hygiene** (`packages/vesper-sugar/src/hygiene.ves`):
+  ports `hygiene::pattern`. A binder that a pattern template introduces
+  literally gets a fresh name, written `field: fresh` for a shorthand
+  field. Binders spliced from holes keep their names, and holes, origins
+  and places shift with each edit. The Rust test hook is
+  `sugar_expand::template_pattern_words`. `protect`, the caller-side
+  renaming, comes with the driver (part 4c).
+  - Gap (4b-5 and 4b-6): the surface profile does not yet run Rust's expression macro
+    validation (`macro_source::validate_surface`, part 6). A source with
+    an invalid expression macro is refused by Rust's scope capture but
+    not by the Vesper one.
+
+| Test | Cases | Result |
+|---|---|---|
+| `self_host_sugar` `render_matches_on_the_template_examples` | the 48 skeleton templates × 4 byte limits × tail | 0 differences |
+| `self_host_sugar` `render_matches_on_the_sugar_test_suites` | the 732 suite renders | 0 differences |
+| `self_host_sugar` `render_matches_on_the_fuzzed_corpus` | 4,000 fuzzed templates | 0 differences |
+| `self_host_sugar` `scope_matches_on_the_scope_examples` | 7 scope rules over 37 callers (315 cases: lowered, lowered with a return effect, and 15 kinds of refusal, under 3 byte budgets) | 0 differences |
+| `self_host_sugar` `scope_matches_on_the_fuzzed_corpus` | 500 edited callers (2,123 cases, 1,117 matching) | 0 differences |
+| `self_host_sugar` `pattern_hygiene_*` | 15 pattern rules plus every render corpus above (examples, suites, 4,000 fuzzed) | 0 differences |
+| `self_host_ast` `template_scopes_*` | now also the surface-profile AST of every case | 0 differences |
+
+## Part 4c: the expansion driver
+
+- **Driver** (`packages/vesper-sugar/src/driver.ves`): a port of the
+  `sugar_expand.rs` expansion loop for sources without imports
+  (`expand_sugar_for_execution`). It covers the round parse in the surface
+  profile, definition reading and binding, the call queue with
+  postponement of scope captures (nested reparses join one growing CST
+  forest), operator associativity, the recursion rank check, the edits
+  and source mappings, and the depth, step and work limits. It also ports
+  `hygiene::protect`, the caller-side renaming, which runs after the last
+  round. The entry is `@vesper/sugar` `sugar_expand_words`.
+- Gap (part 6): as in 4b-5, the surface profile does not yet run
+  `macro_source::validate_surface`. Rust refuses 2 suite expansions
+  (`E0002` unsupported source macro category or context) that Vesper
+  expands. The test counts these and fails on any other difference.
+
+| Test | Cases | Result |
+|---|---|---|
+| `self_host_sugar` `driver_matches_on_the_scope_examples` | 7 scope rules over 37 callers, with and without tests (518 expansions) | 0 differences |
+| `self_host_sugar` `driver_matches_on_the_sugar_test_suites` | the 133 sugar programs of the test suites, with and without tests (266 expansions) | 0 differences, 2 macro-validation gaps |
+| `self_host_sugar` `driver_matches_on_the_fuzzed_corpus` | 500 edited programs, with and without tests | 0 differences |
+| `self_host_sugar` `driver_speed` (release, ignored) | the 133 suite programs ×5 | Vesper 1.38x Rust (single run) |

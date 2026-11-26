@@ -2,15 +2,9 @@
 // checking (`Mono::check_obligations`, `Mono::type_obligations`,
 // `Mono::obligation`) for `@vesper/check-pact` (SH2 lane 13 part 5, #1659).
 
-use @vesper/check-data::input::{
-    Reader
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::{
-    pack_text
-};
+use @vesper/check-data::input::{Reader};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::{pack_text};
 use @vesper/check-data::types::{
     TyKind,
     TypeNode,
@@ -20,17 +14,8 @@ use @vesper/check-data::types::{
     substitute,
     vars_new
 };
-use @vesper/check-data::util::{
-    add,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use self::decl::{
-    Gen
-};
+use @vesper/check-data::util::{add, n32, u32_at, u64_at, u8_at, w};
+use self::decl::{Gen};
 use self::resolve::{
     CxHeader,
     failure_msg,
@@ -41,21 +26,9 @@ use self::resolve::{
     select_in_cx,
     sym_starts_with
 };
-use self::session::{
-    PactSession,
-    session_open_reader
-};
-use self::session_input::{
-    QArg,
-    QGoal,
-    put_str,
-    read_q_names,
-    read_q_types,
-    sym
-};
-use self::tyops::{
-    mentions
-};
+use self::session::{PactSession, session_open_reader};
+use self::session_input::{QArg, QGoal, put_str, read_q_names, read_q_types, sym};
+use self::tyops::{mentions};
 
 const K_FN: u8 = TyKind::Fn;
 const K_LIT: u8 = TyKind::Lit;
@@ -1004,9 +977,7 @@ fn mono_check_body(
 
 // Entrypoint for an already-open `PactSession`: `[mono_input]`.
 pub fn session_mono_check_words(inout sess: PactSession, in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut out = ChunkSeq::new[u64]();
     out.push(0);
     out.push(1);
@@ -1016,9 +987,7 @@ pub fn session_mono_check_words(inout sess: PactSession, in b: Slice[u8]) -> Chu
 
 // Entrypoint for `check_pact_mono_check`: `[session_input][mono_input]`.
 pub fn mono_check_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut sess = session_open_reader(inout r, in b);
     let mut out = ChunkSeq::new[u64]();
     let p_out = pack_text(in sess.out);

@@ -1,8 +1,6 @@
 // Module util of @vesper/loom-audit (see lib.ves): errors and their text,
 // the logical work budget, saturating arithmetic and stamped marks.
-use @vesper/loom-calculus::{
-    L
-};
+use @vesper/loom-calculus::{L};
 use @vesper/loom-calculus::util::{
     Ascii,
     Order,
@@ -17,12 +15,7 @@ use @vesper/loom-calculus::util::{
     ver,
     ver_ord
 };
-use self::{
-    A,
-    Adv,
-    Nat,
-    Rng
-};
+use self::{A, Adv, Nat, Rng};
 
 // Error kinds, in the order of the Rust `Error` variants.
 pub enum ErrorKind: _ {
@@ -245,37 +238,20 @@ pub fn msort(inout s: A, kind: u64) {
 pub fn adv(in s: A, i: u64) -> Adv {
     match s.advs.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Adv {
-            id: 0,
-            kind: 0,
-            name: 0,
-            r_at: 0,
-            r_n: 0,
-            sev: 0,
-            sum: 0
-        },
+        Option::None => Adv { id: 0, kind: 0, name: 0, r_at: 0, r_n: 0, sev: 0, sum: 0 },
     }
 }
 
 pub fn rng(in s: A, i: u64) -> Rng {
     match s.rngs.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Rng {
-            intro: 0,
-            has_fixed: false,
-            fixed: 0,
-            pre: false
-        },
+        Option::None => Rng { intro: 0, has_fixed: false, fixed: 0, pre: false },
     }
 }
 
 pub fn nat(in s: A, i: u64) -> Nat {
     match s.nats.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Nat {
-            name: 0,
-            ver: 0,
-            expr: 0
-        },
+        Option::None => Nat { name: 0, ver: 0, expr: 0 },
     }
 }

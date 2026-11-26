@@ -5,22 +5,8 @@
 // is one compare. That is most of why the census samples ran at 0.34x to
 // 0.87x of Rust's time; keep it.
 
-use self::util::{
-    add,
-    copy_seq,
-    fold,
-    inc,
-    inc32,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use self::names::{
-    Names
-};
+use self::util::{add, copy_seq, fold, inc, inc32, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use self::names::{Names};
 
 const NONE32: u32 = 4294967295;
 
@@ -230,14 +216,7 @@ impl Types {
         let rn = wrapping_sub(s.rows.len(), n_rows);
         for i in n_rows..s.rows.len() {
             match s.rows.try_get(i) {
-                Option::Some(r) => new_rows
-                    .push(
-                        RowNode {
-                            a: r.a,
-                            n: r.n,
-                            tail: r.tail
-                        }
-                    ),
+                Option::Some(r) => new_rows.push(RowNode { a: r.a, n: r.n, tail: r.tail }),
                 Option::None => {},
             }
         }
@@ -246,15 +225,7 @@ impl Types {
         }
         for i in 0..new_rows.len() {
             match new_rows.try_get(i) {
-                Option::Some(r) => s
-                    .rows
-                    .push(
-                        RowNode {
-                            a: r.a,
-                            n: r.n,
-                            tail: r.tail
-                        }
-                    ),
+                Option::Some(r) => s.rows.push(RowNode { a: r.a, n: r.n, tail: r.tail }),
                 Option::None => {},
             }
         }
@@ -465,23 +436,14 @@ impl Types {
     pub fn row(in self, r: u32) -> RowNode {
         match self.rows.try_get(w(r)) {
             Option::Some(x) => x,
-            Option::None => RowNode {
-                a: 0,
-                n: 0,
-                tail: 0
-            },
+            Option::None => RowNode { a: 0, n: 0, tail: 0 },
         }
     }
 
     pub fn effect_at(in self, i: u64) -> EffNode {
         match self.effs.try_get(i) {
             Option::Some(x) => x,
-            Option::None => EffNode {
-                label: 0,
-                name: 0,
-                a: 0,
-                n: 0
-            },
+            Option::None => EffNode { label: 0, name: 0, a: 0, n: 0 },
         }
     }
 
@@ -659,12 +621,7 @@ impl Types {
         for i in 0..es.len() {
             let e = match es.try_get(i) {
                 Option::Some(e) => e,
-                Option::None => EffNode {
-                    label: 0,
-                    name: 0,
-                    a: 0,
-                    n: 0
-                },
+                Option::None => EffNode { label: 0, name: 0, a: 0, n: 0 },
             };
             h = fold(fold(fold(h, w(e.label)), w(e.name)), w(e.n));
             for j in 0..w(e.n) {
@@ -688,38 +645,16 @@ impl Types {
         for i in 0..es.len() {
             let e = match es.try_get(i) {
                 Option::Some(e) => e,
-                Option::None => EffNode {
-                    label: 0,
-                    name: 0,
-                    a: 0,
-                    n: 0
-                },
+                Option::None => EffNode { label: 0, name: 0, a: 0, n: 0 },
             };
             let ea = n32(self.items.len());
             for j in 0..w(e.n) {
                 self.items.push(u32_at(in args, add(w(e.a), j)));
                 self.passes.push(0);
             }
-            self
-                .effs
-                .push(
-                    EffNode {
-                        label: e.label,
-                        name: e.name,
-                        a: ea,
-                        n: e.n
-                    }
-                );
+            self.effs.push(EffNode { label: e.label, name: e.name, a: ea, n: e.n });
         }
-        self
-            .rows
-            .push(
-                RowNode {
-                    a: a,
-                    n: n32(es.len()),
-                    tail: tail
-                }
-            );
+        self.rows.push(RowNode { a: a, n: n32(es.len()), tail: tail });
         self.row_hashes.push(h);
         let ok = self.row_slots.try_set(at, inc32(id));
         if wrapping_mul(self.row_hashes.len(), 2) > self.row_mask {
@@ -738,12 +673,7 @@ impl Types {
             let x = self.effect_at(add(w(r.a), i));
             let y = match es.try_get(i) {
                 Option::Some(e) => e,
-                Option::None => EffNode {
-                    label: 0,
-                    name: 0,
-                    a: 0,
-                    n: 0
-                },
+                Option::None => EffNode { label: 0, name: 0, a: 0, n: 0 },
             };
             if x.label != y.label || x.name != y.name || x.n != y.n {
                 return false;
@@ -964,10 +894,7 @@ pub struct Vars {
 }
 
 pub fn vars_new() -> Vars {
-    Vars {
-        keys: ChunkSeq::new[u32](),
-        vals: ChunkSeq::new[u32]()
-    }
+    Vars { keys: ChunkSeq::new[u32](), vals: ChunkSeq::new[u32]() }
 }
 
 impl Vars {
@@ -1065,12 +992,7 @@ pub fn substitute_row(inout t: Types, r: u32, in vars: Vars) -> u32 {
             in t,
             inout es,
             in args,
-            EffNode {
-                label: e.label,
-                name: e.name,
-                a: a,
-                n: e.n
-            }
+            EffNode { label: e.label, name: e.name, a: a, n: e.n }
         );
     }
     let mut tail = row.tail;
@@ -1088,12 +1010,7 @@ pub fn substitute_row(inout t: Types, r: u32, in vars: Vars) -> u32 {
                     in t,
                     inout es,
                     in args,
-                    EffNode {
-                        label: e.label,
-                        name: e.name,
-                        a: a,
-                        n: e.n
-                    }
+                    EffNode { label: e.label, name: e.name, a: a, n: e.n }
                 );
             }
             tail = inner.tail;
@@ -1109,12 +1026,7 @@ fn push_unique(in t: Types, inout es: ChunkSeq[EffNode], in args: ChunkSeq[u32],
     for i in 0..es.len() {
         let x = match es.try_get(i) {
             Option::Some(x) => x,
-            Option::None => EffNode {
-                label: 0,
-                name: 0,
-                a: 0,
-                n: 0
-            },
+            Option::None => EffNode { label: 0, name: 0, a: 0, n: 0 },
         };
         if x.label == e.label && x.name == e.name && x.n == e.n {
             let mut same = true;
@@ -1179,15 +1091,7 @@ fn default_row(inout t: Types, r: u32) -> u32 {
             let s = default_type(inout t, u32_at(in t.items, add(w(e.a), j)));
             args.push(s);
         }
-        es
-            .push(
-                EffNode {
-                    label: e.label,
-                    name: e.name,
-                    a: a,
-                    n: e.n
-                }
-            );
+        es.push(EffNode { label: e.label, name: e.name, a: a, n: e.n });
     }
     t.mk_row(in es, in args, row.tail)
 }

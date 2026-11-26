@@ -1,0 +1,1634 @@
+// @vesper/lsp-proof-run: the proof-lens runner of src/lsp/proof_lens.rs
+// (`run`, `run_stages`, `ensure_olean`, `compile`, `bitvec_check`,
+// `child_output`, `Cache`, `Stage`), part 8 of #1828. A job (as
+// `proof_lens::job_words` lays it out) is read from a file; the runner
+// starts Lean through its launcher, compiles the obligation modules into a
+// private staging directory (reusing `.olean` files from the content-keyed
+// cache), falls back to a `bv_decide` search when `omega` fails, replays
+// every theorem through one `vesper proof-audit` run and interprets its
+// JSON report. The outcome rows (`proof_lens::outcome_rows`) are written to
+// a file.
+//
+// Modules:
+// - json.ves: serde_json's `from_slice` into a value, and its strings.
+// - text.ves: lossy UTF-8, trimming, `first_error`, error displays.
+// - numbers.ves: serde_json's "number out of range" check (as in @vesper/lsp).
+
+use @vesper-std/fs::{
+    IoError,
+    already_exists,
+    read,
+    write,
+    rename,
+    create_dir,
+    create_dir_all,
+    remove_dir_all,
+    metadata,
+    kind_dir,
+    create_dir_mode,
+    set_permissions,
+    copy
+};
+use @vesper-std/process::{
+    ExitStatus,
+    ProcCommand,
+    command_path,
+    arg,
+    arg_bytes,
+    env,
+    env_clear,
+    cwd,
+    stdio,
+    spawn,
+    wait_timeout,
+    kill_tree,
+    stdout,
+    stderr,
+    release,
+    success,
+    id,
+    stdin_stream,
+    stdout_stream,
+    stderr_stream,
+    capture,
+    null,
+    process_group,
+    capture_limit
+};
+use @vesper-std/env::{var_bytes, os, os_windows};
+use @vesper-std/hash::blake3::{blake3, digest_bytes};
+use self::json::{
+    Doc,
+    parse,
+    failed,
+    root,
+    field,
+    str_is,
+    put_str_of,
+    is_true,
+    u64_or_zero,
+    items,
+    item,
+    kind,
+    put,
+    put_u64,
+    put_error,
+    put_string,
+    STRING,
+    ARRAY
+};
+use self::text::{
+    byte,
+    put_bytes,
+    lossy,
+    trimmed,
+    contains,
+    find,
+    trim,
+    first_error,
+    bounded,
+    put_escaped,
+    put_hex,
+    put_io_error,
+    put_status
+};
+
+const MAX_CAPTURE: u64 = 8388608;
+const NONE: u64 = 18446744073709551615;
+
+fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+fn g64(in v: ChunkSeq[u64], i: u64) -> u64 {
+    match v.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// ------------------------------------------------------------ the job
+
+copy struct Rd {
+    pos: u64
+}
+
+fn word(in b: Slice[u8], inout r: Rd) -> u64 {
+    let x = match b.try_read_u64_le(r.pos) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    r.pos = wrapping_add(r.pos, 8);
+    x
+}
+
+// A length-prefixed string of the job: its offset and length.
+fn text_at(in b: Slice[u8], inout r: Rd, inout at: ChunkSeq[u64]) {
+    let n = word(in b, inout r);
+    at.push(r.pos);
+    at.push(n);
+    r.pos = wrapping_add(r.pos, n);
+}
+
+fn copy_out(in b: Slice[u8], at: u64, n: u64) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::with_capacity[u8](n);
+    for i in at..wrapping_add(at, n) {
+        out.push(byte(in b, i));
+    }
+    out
+}
+
+fn str_of(in b: Slice[u8]) -> String {
+    match String::from_utf8(in b) {
+        Option::Some(s) => s,
+        Option::None => String::new(),
+    }
+}
+
+// The decoded job. Strings are byte buffers; the models' strings live in
+// `pool` (see `Model`).
+struct Job {
+    launcher: ChunkSeq[u8],
+    has_auditor: bool,
+    auditor: ChunkSeq[u8],
+    has_cache: bool,
+    cache: ChunkSeq[u8],
+    timeout: u64,
+    has_extraction: bool,
+    extraction: ChunkSeq[u8],
+    // Functions (offset, length into `names`).
+    functions: ChunkSeq[u64],
+    names: ChunkSeq[u8],
+    models: ChunkSeq[Model],
+    pool: ChunkSeq[u8],
+    // Parameter names (offset, length into `pool`) and kinds.
+    params: ChunkSeq[u64],
+    kinds: ChunkSeq[u64]
+}
+
+// A model: offsets and lengths into the job's `pool` of its function,
+// module name, theorem, exact and bit-vector modules and 32-byte key, and
+// its parameters `p0..p0+pn` of the job's `params` and `kinds`.
+copy struct Model {
+    function: u64,
+    function_n: u64,
+    module: u64,
+    module_n: u64,
+    theorem: u64,
+    theorem_n: u64,
+    exact: u64,
+    exact_n: u64,
+    bitvec: u64,
+    bitvec_n: u64,
+    key: u64,
+    p0: u64,
+    pn: u64
+}
+
+fn take(in b: Slice[u8], inout r: Rd) -> ChunkSeq[u8] {
+    let n = word(in b, inout r);
+    let out = copy_out(in b, r.pos, n);
+    r.pos = wrapping_add(r.pos, n);
+    out
+}
+
+// A length-prefixed string into `pool`; its offset (the length is `pool`'s
+// growth).
+fn pooled(in b: Slice[u8], inout r: Rd, inout pool: ChunkSeq[u8]) -> u64 {
+    let at = pool.len();
+    let n = word(in b, inout r);
+    for i in r.pos..wrapping_add(r.pos, n) {
+        pool.push(byte(in b, i));
+    }
+    r.pos = wrapping_add(r.pos, n);
+    at
+}
+
+fn read_job(in b: Slice[u8]) -> Job {
+    let mut r = Rd { pos: 0 };
+    let launcher = take(in b, inout r);
+    let has_auditor = word(in b, inout r) != 0;
+    let auditor = if has_auditor {
+        take(in b, inout r)
+    } else {
+        ChunkSeq::new[u8]()
+    };
+    let has_cache = word(in b, inout r) != 0;
+    let cache = if has_cache {
+        take(in b, inout r)
+    } else {
+        ChunkSeq::new[u8]()
+    };
+    let timeout = word(in b, inout r);
+    let has_extraction = word(in b, inout r) != 0;
+    let mut extraction = ChunkSeq::new[u8]();
+    let mut functions = ChunkSeq::new[u64]();
+    let mut names = ChunkSeq::new[u8]();
+    if has_extraction {
+        extraction = take(in b, inout r);
+        let n = word(in b, inout r);
+        for i in 0..n {
+            let f = take(in b, inout r);
+            functions.push(names.len());
+            functions.push(f.len());
+            put_bytes(inout names, in f.as_slice());
+        }
+    }
+    let mut models = ChunkSeq::new[Model]();
+    let mut pool = ChunkSeq::new[u8]();
+    let mut params = ChunkSeq::new[u64]();
+    let mut kinds = ChunkSeq::new[u64]();
+    let nm = word(in b, inout r);
+    for i in 0..nm {
+        let function = pooled(in b, inout r, inout pool);
+        let module = pooled(in b, inout r, inout pool);
+        let theorem = pooled(in b, inout r, inout pool);
+        let exact = pooled(in b, inout r, inout pool);
+        let bitvec = pooled(in b, inout r, inout pool);
+        let key = pool.len();
+        for k in r.pos..wrapping_add(r.pos, 32) {
+            pool.push(byte(in b, k));
+        }
+        r.pos = wrapping_add(r.pos, 32);
+        let p0 = kinds.len();
+        let np = word(in b, inout r);
+        for j in 0..np {
+            let at = pooled(in b, inout r, inout pool);
+            params.push(at);
+            params.push(wrapping_sub(pool.len(), at));
+            kinds.push(word(in b, inout r));
+        }
+        models
+            .push(
+                Model {
+                    function: function,
+                    function_n: wrapping_sub(module, function),
+                    module: module,
+                    module_n: wrapping_sub(theorem, module),
+                    theorem: theorem,
+                    theorem_n: wrapping_sub(exact, theorem),
+                    exact: exact,
+                    exact_n: wrapping_sub(bitvec, exact),
+                    bitvec: bitvec,
+                    bitvec_n: wrapping_sub(key, bitvec),
+                    key: key,
+                    p0: p0,
+                    pn: np
+                }
+            );
+    }
+    Job {
+        launcher: launcher,
+        has_auditor: has_auditor,
+        auditor: auditor,
+        has_cache: has_cache,
+        cache: cache,
+        timeout: timeout,
+        has_extraction: has_extraction,
+        extraction: extraction,
+        functions: functions,
+        names: names,
+        models: models,
+        pool: pool,
+        params: params,
+        kinds: kinds
+    }
+}
+
+fn part(in job: Job, at: u64, n: u64) -> ChunkSeq[u8] {
+    copy_out(in job.pool.as_slice(), at, n)
+}
+
+fn model_at(in job: Job, i: u64) -> Model {
+    match job.models.try_get(i) {
+        Option::Some(m) => m,
+        Option::None => Model {
+            function: 0,
+            function_n: 0,
+            module: 0,
+            module_n: 0,
+            theorem: 0,
+            theorem_n: 0,
+            exact: 0,
+            exact_n: 0,
+            bitvec: 0,
+            bitvec_n: 0,
+            key: 0,
+            p0: 0,
+            pn: 0
+        },
+    }
+}
+
+fn function_name(in job: Job, i: u64) -> ChunkSeq[u8] {
+    let at = g64(in job.functions, wrapping_mul(i, 2));
+    copy_out(in job.names.as_slice(), at, g64(in job.functions, inc(wrapping_mul(i, 2))))
+}
+
+fn nfunctions(in job: Job) -> u64 {
+    job.functions.len() / 2
+}
+
+// ------------------------------------------------------------ files
+
+fn ok_unit() -> Result[bool, IoError] {
+    Result::Ok(true)
+}
+
+fn err_unit(e: IoError) -> Result[bool, IoError] {
+    Result::Err(e)
+}
+
+fn f_write(in path: ChunkSeq[u8], in data: Slice[u8]) -> Result[bool, IoError] eff [Ffi[StdFs]] {
+    let p = str_of(in path.as_slice());
+    handle Fail[IoError] in {
+        write(in p, in data);
+        ok_unit()
+    } with {
+        return v => v,
+        raise(e, resume) => err_unit(e),
+    }
+}
+
+fn read_ok(sink v: ChunkSeq[u8]) -> Result[ChunkSeq[u8], IoError] {
+    Result::Ok(v)
+}
+
+fn read_err(e: IoError) -> Result[ChunkSeq[u8], IoError] {
+    Result::Err(e)
+}
+
+fn f_read(in path: ChunkSeq[u8]) -> Result[ChunkSeq[u8], IoError] eff [Ffi[StdFs]] {
+    let p = str_of(in path.as_slice());
+    handle Fail[IoError] in {
+        read_ok(read(in p))
+    } with {
+        return v => v,
+        raise(e, resume) => read_err(e),
+    }
+}
+
+fn f_rename(in from: ChunkSeq[u8], in to: ChunkSeq[u8]) -> bool eff [Ffi[StdFs]] {
+    let a = str_of(in from.as_slice());
+    let b = str_of(in to.as_slice());
+    let r = handle Fail[IoError] in {
+        rename(in a, in b);
+        ok_unit()
+    } with {
+        return v => v,
+        raise(e, resume) => err_unit(e),
+    };
+    match r {
+        Result::Ok(_) => true,
+        Result::Err(_) => false,
+    }
+}
+
+fn f_remove_all(in path: ChunkSeq[u8]) eff [Ffi[StdFs]] {
+    let p = str_of(in path.as_slice());
+    let r = handle Fail[IoError] in {
+        remove_dir_all(in p);
+        ok_unit()
+    } with {
+        return v => v,
+        raise(e, resume) => err_unit(e),
+    };
+}
+
+fn f_create_all(in path: ChunkSeq[u8]) -> bool eff [Ffi[StdFs]] {
+    let p = str_of(in path.as_slice());
+    let r = handle Fail[IoError] in {
+        create_dir_all(in p);
+        ok_unit()
+    } with {
+        return v => v,
+        raise(e, resume) => err_unit(e),
+    };
+    match r {
+        Result::Ok(_) => true,
+        Result::Err(_) => false,
+    }
+}
+
+// `private_dir`: a new directory, mode 0o700 on Unix.
+fn private_dir(in path: ChunkSeq[u8]) -> Result[bool, IoError] eff [Ffi[StdFs]] {
+    let p = str_of(in path.as_slice());
+    handle Fail[IoError] in {
+        create_dir_mode(in p, 448);
+        ok_unit()
+    } with {
+        return v => v,
+        raise(e, resume) => err_unit(e),
+    }
+}
+
+// `Cache::open`'s Unix mode check: a directory others can reach is made
+// private, and an error says why it is not.
+fn make_private(in path: ChunkSeq[u8]) -> bool eff [Ffi[StdFs]] {
+    if os() == os_windows() {
+        return true;
+    }
+    let p = str_of(in path.as_slice());
+    let r = handle Fail[IoError] in {
+        let m = metadata(in p);
+        if (m.mode & 63) != 0 {
+            set_permissions(in p, 448);
+        }
+        ok_unit()
+    } with {
+        return v => v,
+        raise(e, resume) => err_unit(e),
+    };
+    match r {
+        Result::Ok(_) => true,
+        Result::Err(_) => false,
+    }
+}
+
+fn is_dir(in path: ChunkSeq[u8]) -> bool eff [Ffi[StdFs]] {
+    let p = str_of(in path.as_slice());
+    let r = handle Fail[IoError] in {
+        let m = metadata(in p);
+        if m.kind == kind_dir() {
+            ok_unit()
+        } else {
+            err_unit(IoError { kind: 0, os: 0 })
+        }
+    } with {
+        return v => v,
+        raise(e, resume) => err_unit(e),
+    };
+    match r {
+        Result::Ok(_) => true,
+        Result::Err(_) => false,
+    }
+}
+
+// `fs::copy`.
+fn f_copy(in from: ChunkSeq[u8], in to: ChunkSeq[u8]) -> bool eff [Ffi[StdFs]] {
+    let a = str_of(in from.as_slice());
+    let b = str_of(in to.as_slice());
+    let r = handle Fail[IoError] in {
+        let _ = copy(in a, in b);
+        ok_unit()
+    } with {
+        return v => v,
+        raise(e, resume) => err_unit(e),
+    };
+    match r {
+        Result::Ok(_) => true,
+        Result::Err(_) => false,
+    }
+}
+
+// `Path::join` of a relative `name`.
+fn join(in base: ChunkSeq[u8], in name: Str) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    put_bytes(inout out, in base.as_slice());
+    let sep: u8 = if os() == os_windows() {
+        92
+    } else {
+        47
+    };
+    let n = out.len();
+    if n > 0 {
+        let last = byte(in out.as_slice(), wrapping_sub(n, 1));
+        if last != 47 && !(last == 92 && sep == 92) {
+            out.push(sep);
+        }
+    }
+    put(inout out, in name);
+    out
+}
+
+fn join_bytes(in base: ChunkSeq[u8], in name: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let s = str_of(in name.as_slice());
+    join(in base, in s)
+}
+
+fn with_ext(in name: ChunkSeq[u8], in ext: Str) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    put_bytes(inout out, in name.as_slice());
+    put(inout out, in ext);
+    out
+}
+
+// ------------------------------------------------------------ children
+
+// A child's end: 0 success (`text` is its stdout), 1 failure (stdout, then
+// stderr after a newline, or the exit status), 2 an error (`text` is the
+// message).
+struct Ran {
+    end: u8,
+    text: ChunkSeq[u8]
+}
+
+fn ran(end: u8, sink text: ChunkSeq[u8]) -> Ran {
+    Ran { end: end, text: text }
+}
+
+// `child_output`: run with stdin null, both streams captured (8 MiB each)
+// in its own process group, killed with its tree past `seconds`.
+fn child_output(sink c: ProcCommand, seconds: u64) -> Ran eff [Ffi[StdProcess]] {
+    let mut c = c;
+    stdio(inout c, stdin_stream(), null());
+    stdio(inout c, stdout_stream(), capture());
+    stdio(inout c, stderr_stream(), capture());
+    process_group(inout c);
+    capture_limit(inout c, MAX_CAPTURE);
+    let mut ch = match spawn(c) {
+        Result::Ok(ch) => ch,
+        Result::Err(e) => {
+            let mut m = ChunkSeq::new[u8]();
+            put(inout m, in "start process: ");
+            put_io_error(inout m, e);
+            return ran(2, m);
+        }
+    };
+    let status = match wait_timeout(inout ch, wrapping_mul(seconds, 1000)) {
+        Result::Ok(Option::Some(s)) => s,
+        Result::Ok(Option::None) => {
+            let _ = kill_tree(inout ch);
+            release(ch);
+            let mut m = ChunkSeq::new[u8]();
+            put(inout m, in "process exceeded ");
+            put_u64(inout m, seconds);
+            put(inout m, in " seconds");
+            return ran(2, m);
+        }
+        Result::Err(e) => {
+            release(ch);
+            let mut m = ChunkSeq::new[u8]();
+            put_io_error(inout m, e);
+            return ran(2, m);
+        }
+    };
+    let out = stdout(in ch);
+    let err = stderr(in ch);
+    release(ch);
+    if success(status) {
+        return ran(0, lossy(in out.as_slice()));
+    }
+    let mut text = lossy(in out.as_slice());
+    if err.len() > 0 {
+        text.push(10);
+        let e = lossy(in err.as_slice());
+        put_bytes(inout text, in e.as_slice());
+    }
+    let t = trimmed(in text.as_slice());
+    if t.len() == 0 {
+        text.clear();
+        put_status(inout text, status);
+    }
+    ran(1, text)
+}
+
+// `child`: success's output, or the error (a failure's first error line).
+fn child(sink c: ProcCommand, seconds: u64) -> Ran eff [Ffi[StdProcess]] {
+    let r = child_output(c, seconds);
+    if r.end == 1 {
+        return ran(1, first_error(in r.text.as_slice()));
+    }
+    r
+}
+
+// ------------------------------------------------------------ statuses
+
+const PROVED: u8 = 0;
+const CHECKED_NATIVE: u8 = 1;
+const REFUTED: u8 = 2;
+const FAILED: u8 = 3;
+
+// A `ProofStatus`: its kind, the detail or counterexample or stage in
+// `a`, and the failure reason in `b`.
+struct Status {
+    code: u8,
+    a: ChunkSeq[u8],
+    b: ChunkSeq[u8]
+}
+
+fn status1(code: u8, in a: Str) -> Status {
+    let mut x = ChunkSeq::new[u8]();
+    put(inout x, in a);
+    Status { code: code, a: x, b: ChunkSeq::new[u8]() }
+}
+
+fn failed_status(in stage: Str, in reason: Slice[u8]) -> Status {
+    let mut s = ChunkSeq::new[u8]();
+    put(inout s, in stage);
+    let mut r = ChunkSeq::new[u8]();
+    put_bytes(inout r, in reason);
+    Status { code: FAILED, a: s, b: r }
+}
+
+// `status_row`.
+fn put_status_row(inout o: ChunkSeq[u8], in s: Status) {
+    if s.code == PROVED {
+        put(inout o, in "proved\t");
+    } else if s.code == CHECKED_NATIVE {
+        put(inout o, in "checked_native\t");
+    } else if s.code == REFUTED {
+        put(inout o, in "refuted\t");
+    } else {
+        put(inout o, in "failed\t");
+        put_bytes(inout o, in s.a.as_slice());
+        o.push(9);
+        put_escaped(inout o, in s.b.as_slice());
+        return;
+    }
+    put_escaped(inout o, in s.a.as_slice());
+}
+
+// ------------------------------------------------------------ the run
+
+struct St {
+    ext: ChunkSeq[u8],
+    sem: ChunkSeq[u8],
+    reused: u64,
+    compiled: u64,
+    pid: u64,
+    next: u64,
+    prefix: ChunkSeq[u8],
+    binary: ChunkSeq[u8],
+    version: ChunkSeq[u8],
+    has_cache: bool,
+    cache: ChunkSeq[u8],
+    has_stage: bool,
+    stage: ChunkSeq[u8],
+    // The failing stage and reason of `run_stages`, and of a compile.
+    fail_stage: ChunkSeq[u8],
+    reason: ChunkSeq[u8]
+}
+
+fn ext_row(inout st: St, in function: Slice[u8], in s: Status) {
+    put(inout st.ext, in "E\t");
+    put_bytes(inout st.ext, in function);
+    st.ext.push(9);
+    put_status_row(inout st.ext, in s);
+    st.ext.push(10);
+}
+
+fn sem_row(inout st: St, in job: Job, m: Model, in s: Status) {
+    put(inout st.sem, in "S\t");
+    let f = part(in job, m.function, m.function_n);
+    put_bytes(inout st.sem, in f.as_slice());
+    st.sem.push(9);
+    let k = part(in job, m.key, 32);
+    put_hex(inout st.sem, in k.as_slice());
+    st.sem.push(9);
+    put_status_row(inout st.sem, in s);
+    st.sem.push(10);
+}
+
+fn stop(inout st: St, in stage: Str, in reason: Slice[u8]) -> bool {
+    st.fail_stage.clear();
+    put(inout st.fail_stage, in stage);
+    st.reason.clear();
+    put_bytes(inout st.reason, in reason);
+    false
+}
+
+fn stop_s(inout st: St, in stage: Str, in reason: Str) -> bool {
+    stop(inout st, in stage, in reason.as_bytes())
+}
+
+fn stop_io(inout st: St, in stage: Str, in pre: Str, e: IoError) -> bool {
+    let mut m = ChunkSeq::new[u8]();
+    put(inout m, in pre);
+    put_io_error(inout m, e);
+    stop(inout st, in stage, in m.as_slice())
+}
+
+// `lean_command`: the Lean binary in `dir` with only `LEAN_PATH` and
+// `LEAN_ABORT_ON_PANIC` set.
+fn lean_command(in st: St, in dir: ChunkSeq[u8]) -> ProcCommand eff [Ffi[StdProcess]] {
+    let mut c = command_path(in st.binary.as_slice());
+    env_clear(inout c);
+    let mut search = ChunkSeq::new[u8]();
+    put_bytes(inout search, in dir.as_slice());
+    search
+        .push(
+            if os() == os_windows() {
+                59
+            } else {
+                58
+            }
+        );
+    let lib = join(in st.prefix, in "lib/lean");
+    put_bytes(inout search, in lib.as_slice());
+    let s = str_of(in search.as_slice());
+    env(inout c, in "LEAN_PATH", in s);
+    env(inout c, in "LEAN_ABORT_ON_PANIC", in "1");
+    let d = str_of(in dir.as_slice());
+    cwd(inout c, in d);
+    c
+}
+
+// `compile`: `<module>.lean` into `<module>.olean` in the stage. On a
+// failure the reason is in `st.reason`.
+fn compile(inout st: St, in module: ChunkSeq[u8], timeout: u64) -> bool eff [Ffi[StdProcess]] {
+    if bad_search(in st, in st.stage) {
+        st.reason.clear();
+        put_join_paths_error(inout st.reason);
+        return false;
+    }
+    let mut c = lean_command(in st, in st.stage);
+    arg(inout c, in "-j1");
+    arg(inout c, in "-M1024");
+    arg(inout c, in "-o");
+    let o = with_ext(in module, in ".olean");
+    arg_bytes(inout c, in o.as_slice());
+    let l = with_ext(in module, in ".lean");
+    arg_bytes(inout c, in l.as_slice());
+    let r = child(c, timeout);
+    if r.end == 0 {
+        return true;
+    }
+    st.reason.clear();
+    put_bytes(inout st.reason, in r.text.as_slice());
+    false
+}
+
+// `ensure_olean`: `<module>.olean` for `text` in the stage, from the cache
+// or compiled. On a failure the reason is in `st.reason`.
+fn ensure_olean(inout st: St, in module: ChunkSeq[u8], in text: ChunkSeq[u8], timeout: u64)
+    -> bool eff [Ffi[StdProcess], Ffi[StdFs]] {
+    let mut keyed = ChunkSeq::new[u8]();
+    put_bytes(inout keyed, in st.version.as_slice());
+    keyed.push(0);
+    put_bytes(inout keyed, in module.as_slice());
+    keyed.push(0);
+    put_bytes(inout keyed, in text.as_slice());
+    let mut digest = ChunkSeq::new[u8]();
+    digest_bytes(blake3(in keyed.as_slice()), inout digest);
+    let mut key = ChunkSeq::new[u8]();
+    put_hex(inout key, in digest.as_slice());
+    let oname = with_ext(in module, in ".olean");
+    let olean = join_bytes(in st.stage, in oname);
+    if st.has_cache && cache_fetch(in st, in key, in module, in text, in olean) {
+        st.reused = inc(st.reused);
+        return true;
+    }
+    let lname = with_ext(in module, in ".lean");
+    let source = join_bytes(in st.stage, in lname);
+    match f_write(in source, in text.as_slice()) {
+        Result::Ok(_) => {},
+        Result::Err(e) => {
+            st.reason.clear();
+            put_io_error(inout st.reason, e);
+            return false;
+        }
+    }
+    if !compile(inout st, in module, timeout) {
+        return false;
+    }
+    st.compiled = inc(st.compiled);
+    if st.has_cache {
+        cache_store(inout st, in key, in module, in text, in olean);
+    }
+    true
+}
+
+// ------------------------------------------------------------ the cache
+
+fn cache_fetch(
+    in st: St,
+    in key: ChunkSeq[u8],
+    in module: ChunkSeq[u8],
+    in text: ChunkSeq[u8],
+    in into: ChunkSeq[u8]
+) -> bool eff [Ffi[StdFs]] {
+    let dir = join_bytes(in st.cache, in key);
+    let lean = join_bytes(in dir, in with_ext(in module, in ".lean"));
+    let same = match f_read(in lean) {
+        Result::Ok(source) => same_bytes(in source.as_slice(), in text.as_slice()),
+        Result::Err(_) => false,
+    };
+    if !same {
+        return false;
+    }
+    let olean = join_bytes(in dir, in with_ext(in module, in ".olean"));
+    f_copy(in olean, in into)
+}
+
+fn same_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if byte(in a, i) != byte(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn cache_store(
+    inout st: St,
+    in key: ChunkSeq[u8],
+    in module: ChunkSeq[u8],
+    in text: ChunkSeq[u8],
+    in olean: ChunkSeq[u8]
+) eff [Ffi[StdFs]] {
+    let dir = join_bytes(in st.cache, in key);
+    let mut tname = ChunkSeq::new[u8]();
+    put(inout tname, in ".tmp-");
+    put_bytes(inout tname, in key.as_slice());
+    tname.push(45);
+    put_u64(inout tname, st.pid);
+    tname.push(45);
+    put_u64(inout tname, st.next);
+    st.next = inc(st.next);
+    let temp = join_bytes(in st.cache, in tname);
+    let mut written = match private_dir(in temp) {
+        Result::Ok(_) => true,
+        Result::Err(_) => false,
+    };
+    if written {
+        let lean = join_bytes(in temp, in with_ext(in module, in ".lean"));
+        written = match f_write(in lean, in text.as_slice()) {
+            Result::Ok(_) => true,
+            Result::Err(_) => false,
+        };
+    }
+    if written {
+        let to = join_bytes(in temp, in with_ext(in module, in ".olean"));
+        written = f_copy(in olean, in to);
+    }
+    if !written || !f_rename(in temp, in dir) {
+        f_remove_all(in temp);
+    }
+}
+
+// `Cache::outcome`: a cached `refuted` or `checked_native` outcome of the
+// model keyed `key` under this Lean version.
+fn cache_outcome(in st: St, in key: ChunkSeq[u8], inout out: Status) -> bool eff [Ffi[StdFs]] {
+    let dir = join_bytes(in st.cache, in key);
+    let path = join(in dir, in "outcome.json");
+    let data = match f_read(in path) {
+        Result::Ok(d) => d,
+        Result::Err(_) => return false,
+    };
+    // `read_to_string`: the file must be UTF-8.
+    match String::from_utf8(in data.as_slice()) {
+        Option::Some(_) => {},
+        Option::None => return false,
+    }
+    let d = parse(in data.as_slice());
+    if failed(in d) {
+        return false;
+    }
+    let r = root(in d);
+    if !str_is(in d, field(in d, r, in "lean"), in st.version.as_slice()) {
+        return false;
+    }
+    let s = field(in d, r, in "status");
+    let mut detail = ChunkSeq::new[u8]();
+    if str_is(in d, s, in "refuted".as_bytes()) {
+        let c = field(in d, r, in "counterexample");
+        if kind(in d, c) == STRING {
+            put_str_of(inout detail, in d, c);
+        }
+        out = Status { code: REFUTED, a: detail, b: ChunkSeq::new[u8]() };
+        return true;
+    }
+    if str_is(in d, s, in "checked_native".as_bytes()) {
+        let c = field(in d, r, in "detail");
+        if kind(in d, c) == STRING {
+            put_str_of(inout detail, in d, c);
+        }
+        out = Status { code: CHECKED_NATIVE, a: detail, b: ChunkSeq::new[u8]() };
+        return true;
+    }
+    false
+}
+
+// `Cache::record_outcome`: keep a refutation or a native check.
+fn cache_record(inout st: St, in key: ChunkSeq[u8], in s: Status) eff [Ffi[StdFs]] {
+    let mut v = ChunkSeq::new[u8]();
+    if s.code == REFUTED {
+        put(inout v, in "{\"counterexample\":");
+        put_string(inout v, in s.a.as_slice());
+        put(inout v, in ",\"lean\":");
+        put_string(inout v, in st.version.as_slice());
+        put(inout v, in ",\"status\":\"refuted\"}");
+    } else if s.code == CHECKED_NATIVE {
+        put(inout v, in "{\"detail\":");
+        put_string(inout v, in s.a.as_slice());
+        put(inout v, in ",\"lean\":");
+        put_string(inout v, in st.version.as_slice());
+        put(inout v, in ",\"status\":\"checked_native\"}");
+    } else {
+        return;
+    }
+    let dir = join_bytes(in st.cache, in key);
+    if !is_dir(in dir) {
+        match private_dir(in dir) {
+            Result::Ok(_) => {},
+            Result::Err(_) => return,
+        }
+    }
+    let mut tname = ChunkSeq::new[u8]();
+    put(inout tname, in ".outcome-");
+    put_u64(inout tname, st.pid);
+    let temp = join_bytes(in dir, in tname);
+    match f_write(in temp, in v.as_slice()) {
+        Result::Ok(_) => {
+            let to = join(in dir, in "outcome.json");
+            let _ = f_rename(in temp, in to);
+        },
+        Result::Err(_) => {},
+    }
+}
+
+// ------------------------------------------------------------ bv_decide
+
+// `env::join_paths` refuses a segment holding the separator.
+fn bad_search(in st: St, in dir: ChunkSeq[u8]) -> bool {
+    let sep: u8 = if os() == os_windows() {
+        34
+    } else {
+        58
+    };
+    let lib = join(in st.prefix, in "lib/lean");
+    has(in dir.as_slice(), sep) || has(in lib.as_slice(), sep)
+}
+
+fn has(in b: Slice[u8], c: u8) -> bool {
+    for i in 0..b.len() {
+        if byte(in b, i) == c {
+            return true;
+        }
+    }
+    false
+}
+
+fn put_join_paths_error(inout o: ChunkSeq[u8]) {
+    if os() == os_windows() {
+        put(inout o, in "path segment contains `\"`");
+    } else {
+        put(inout o, in "path segment contains separator `:`");
+    }
+}
+
+// `bitvec_check`: the `bv_decide` rendering of a model `omega` did not
+// prove.
+fn bitvec_check(inout st: St, in job: Job, m: Model, in omega: ChunkSeq[u8], timeout: u64)
+    -> Status eff [Ffi[StdProcess], Ffi[StdFs]] {
+    let name = part(in job, m.module, m.module_n);
+    let module = with_ext(in name, in "_bv");
+    let lname = with_ext(in module, in ".lean");
+    let path = join_bytes(in st.stage, in lname);
+    let text = part(in job, m.bitvec, m.bitvec_n);
+    match f_write(in path, in text.as_slice()) {
+        Result::Ok(_) => {},
+        Result::Err(e) => {
+            let mut r = ChunkSeq::new[u8]();
+            put_io_error(inout r, e);
+            return failed_status(in "io", in r.as_slice());
+        }
+    }
+    if bad_search(in st, in st.stage) {
+        let mut r = ChunkSeq::new[u8]();
+        put_join_paths_error(inout r);
+        return failed_status(in "io", in r.as_slice());
+    }
+    let mut c = lean_command(in st, in st.stage);
+    arg(inout c, in "-j1");
+    arg(inout c, in "-M1024");
+    arg_bytes(inout c, in lname.as_slice());
+    let r = child_output(c, timeout);
+    if r.end == 0 {
+        return status1(
+            CHECKED_NATIVE,
+            in "bv_decide found no counterexample (native LRAT check through Lean.ofReduceBool; not replayed by the kernel auditor); omega did not prove it"
+        );
+    }
+    if r.end == 1 {
+        let mut cex = ChunkSeq::new[u8]();
+        if counterexample(in job, m, in r.text.as_slice(), inout cex) {
+            return Status { code: REFUTED, a: cex, b: ChunkSeq::new[u8]() };
+        }
+        let mut reason = ChunkSeq::new[u8]();
+        put(inout reason, in "omega: ");
+        let a = first_error(in omega.as_slice());
+        put_bytes(inout reason, in a.as_slice());
+        put(inout reason, in "; bv_decide: ");
+        let b = first_error(in r.text.as_slice());
+        put_bytes(inout reason, in b.as_slice());
+        let bd = bounded(in reason.as_slice());
+        return failed_status(in "prove", in bd.as_slice());
+    }
+    let bd = bounded(in r.text.as_slice());
+    failed_status(in "prove", in bd.as_slice())
+}
+
+// The parameter of `m` named `t[s..e]`, or NONE.
+fn param_of(in job: Job, m: Model, in t: Slice[u8], s: u64, e: u64) -> u64 {
+    for i in 0..m.pn {
+        let k = wrapping_add(m.p0, i);
+        let at = g64(in job.params, wrapping_mul(k, 2));
+        let n = g64(in job.params, inc(wrapping_mul(k, 2)));
+        if n == wrapping_sub(e, s) {
+            let mut same = true;
+            for j in 0..n {
+                if byte(in job.pool.as_slice(), wrapping_add(at, j))
+                    != byte(in t, wrapping_add(s, j)) {
+                    same = false;
+                    break;
+                }
+            }
+            if same {
+                return k;
+            }
+        }
+    }
+    NONE
+}
+
+// `Model::counterexample`: the assignment after "found a counterexample",
+// as source values, at most 16 of them.
+fn counterexample(in job: Job, m: Model, in t: Slice[u8], inout out: ChunkSeq[u8]) -> bool {
+    let start = find(in t, 0, t.len(), in "found a counterexample".as_bytes());
+    if start == NONE {
+        return false;
+    }
+    let mut count: u64 = 0;
+    let mut s = start;
+    let mut first = true;
+    loop {
+        if s >= t.len() {
+            break;
+        }
+        // One `lines()` line.
+        let mut e = s;
+        loop {
+            if e >= t.len() || byte(in t, e) == 10 {
+                break;
+            }
+            e = inc(e);
+        }
+        let next = inc(e);
+        let mut le = e;
+        if e < t.len() && le > s && byte(in t, wrapping_sub(le, 1)) == 13 {
+            le = wrapping_sub(le, 1);
+        }
+        if first {
+            first = false;
+            s = next;
+            continue;
+        }
+        let eq = find(in t, s, le, in " = ".as_bytes());
+        if eq == NONE {
+            if count == 0 {
+                s = next;
+                continue;
+            }
+            break;
+        }
+        let mut ns = s;
+        let mut ne = eq;
+        trim(in t, inout ns, inout ne);
+        let p = param_of(in job, m, in t, ns, ne);
+        if p != NONE {
+            let mut vs = wrapping_add(eq, 3);
+            let mut ve = le;
+            trim(in t, inout vs, inout ve);
+            if count > 0 {
+                put(inout out, in ", ");
+            }
+            for i in ns..ne {
+                out.push(byte(in t, i));
+            }
+            put(inout out, in " = ");
+            render_value(inout out, in t, vs, ve, g64(in job.kinds, p));
+            count = inc(count);
+            if count >= 16 {
+                break;
+            }
+        }
+        s = next;
+    }
+    count > 0
+}
+
+fn digit_of(c: u8, hex: bool) -> u64 {
+    if c >= 48 && c <= 57 {
+        return widen_u64(wrapping_sub(c, 48));
+    }
+    if hex && c >= 97 && c <= 102 {
+        return widen_u64(wrapping_sub(c, 87));
+    }
+    if hex && c >= 65 && c <= 70 {
+        return widen_u64(wrapping_sub(c, 55));
+    }
+    NONE
+}
+
+fn put_u128(inout o: ChunkSeq[u8], v: u128) {
+    if v >= 10 {
+        put_u128(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+// `render_value`: a bool as written; else the digits before `#` (hex
+// after `0x`) as a u128, an i64 parameter as its low 64 bits signed; the
+// text itself when it does not parse.
+fn render_value(inout out: ChunkSeq[u8], in t: Slice[u8], s: u64, e: u64, kind_code: u64) {
+    if kind_code != 4 {
+        let mut de = s;
+        loop {
+            if de >= e || byte(in t, de) == 35 {
+                break;
+            }
+            de = inc(de);
+        }
+        let mut i = s;
+        let hex = wrapping_sub(de, s) >= 2 && byte(in t, s) == 48 && byte(in t, inc(s)) == 120;
+        if hex {
+            i = wrapping_add(s, 2);
+        }
+        if i < de && byte(in t, i) == 43 {
+            i = inc(i);
+        }
+        let base: u128 = if hex {
+            16
+        } else {
+            10
+        };
+        let mut v: u128 = 0;
+        let mut ok = i < de;
+        for j in i..de {
+            if ok {
+                let d = digit_of(byte(in t, j), hex);
+                if d == NONE {
+                    ok = false;
+                } else {
+                    match checked_mul_u128(v, base) {
+                        Option::Some(x) => match checked_add_u128(x, widen_u128(d)) {
+                            Option::Some(y) => {
+                                v = y;
+                            },
+                            Option::None => {
+                                ok = false;
+                            },
+                        },
+                        Option::None => {
+                            ok = false;
+                        },
+                    }
+                }
+            }
+        }
+        if ok {
+            if kind_code == 3 {
+                let bits = wrapping_u64(v);
+                if bits >= 9223372036854775808 {
+                    out.push(45);
+                    put_u64(inout out, wrapping_sub(0, bits));
+                } else {
+                    put_u64(inout out, bits);
+                }
+            } else {
+                put_u128(inout out, v);
+            }
+            return;
+        }
+    }
+    for i in s..e {
+        out.push(byte(in t, i));
+    }
+}
+
+// ------------------------------------------------------------ the stages
+
+fn copy_bytes(in b: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    copy_out(in b.as_slice(), 0, b.len())
+}
+
+// `env::temp_dir()`.
+fn temp_dir() -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
+    let mut out = ChunkSeq::new[u8]();
+    if os() == os_windows() {
+        for key in 0..3 {
+            let v = if key == 0 {
+                var_bytes(in "TMP")
+            } else if key == 1 {
+                var_bytes(in "TEMP")
+            } else {
+                var_bytes(in "USERPROFILE")
+            };
+            match v {
+                Option::Some(x) => {
+                    put_bytes(inout out, in x.as_slice());
+                    out.push(92);
+                    return out;
+                },
+                Option::None => {},
+            }
+        }
+        put(inout out, in "C:\\Windows\\");
+        return out;
+    }
+    match var_bytes(in "TMPDIR") {
+        Option::Some(x) => {
+            put_bytes(inout out, in x.as_slice());
+        },
+        Option::None => {
+            put(inout out, in "/tmp");
+        },
+    }
+    out
+}
+
+// `Stage::new`: a private staging directory.
+fn make_stage(inout st: St) -> bool eff [Ffi[StdFs], Ffi[StdEnv]] {
+    let base = temp_dir();
+    for attempt in 0..64 {
+        let mut name = ChunkSeq::new[u8]();
+        put(inout name, in "vesper-lens-proof-");
+        put_u64(inout name, st.pid);
+        name.push(45);
+        put_u64(inout name, st.next);
+        st.next = inc(st.next);
+        let path = join_bytes(in base, in name);
+        match private_dir(in path) {
+            Result::Ok(_) => {
+                st.stage = path;
+                st.has_stage = true;
+                return true;
+            },
+            Result::Err(e) => {
+                if e.kind != already_exists() {
+                    return stop_io(inout st, in "io", in "private proof staging directory: ", e);
+                }
+            },
+        }
+    }
+    stop_s(inout st, in "io", in "cannot allocate a private proof staging directory")
+}
+
+// Theorems queued for the one kernel audit: per audited module its name
+// (offset, length into `names`) and its theorems.
+struct Audit {
+    modules: ChunkSeq[u64],
+    theorems: ChunkSeq[u64],
+    names: ChunkSeq[u8]
+}
+
+fn add_name(inout a: Audit, in name: Slice[u8], module: bool) {
+    let at = a.names.len();
+    put_bytes(inout a.names, in name);
+    if module {
+        a.modules.push(at);
+        a.modules.push(name.len());
+    } else {
+        a.theorems.push(at);
+        a.theorems.push(name.len());
+    }
+}
+
+fn audit_name(in a: Audit, in list: ChunkSeq[u64], i: u64) -> ChunkSeq[u8] {
+    copy_out(
+        in a.names.as_slice(),
+        g64(in list, wrapping_mul(i, 2)),
+        g64(in list, inc(wrapping_mul(i, 2)))
+    )
+}
+
+fn audited(in a: Audit, in module: Slice[u8]) -> bool {
+    for i in 0..a.modules.len() / 2 {
+        let n = audit_name(in a, in a.modules, i);
+        if same_bytes(in n.as_slice(), in module) {
+            return true;
+        }
+    }
+    false
+}
+
+fn obligation(i: u64) -> ChunkSeq[u8] {
+    let mut t = ChunkSeq::new[u8]();
+    put(inout t, in "VesperLens.obligation_");
+    put_u64(inout t, i);
+    t
+}
+
+// The report's theorem named `name`: whether it is listed, its string
+// axioms (", "-joined into `list`), how many, and whether all are standard.
+fn axioms_of(
+    in d: Doc,
+    in name: Slice[u8],
+    inout list: ChunkSeq[u8],
+    inout n: u64,
+    inout standard: bool
+) -> bool {
+    let ts = field(in d, root(in d), in "theorems");
+    for i in 0..items(in d, ts) {
+        let t = item(in d, ts, i);
+        if str_is(in d, field(in d, t, in "name"), in name) {
+            let ax = field(in d, t, in "axioms");
+            for j in 0..items(in d, ax) {
+                let x = item(in d, ax, j);
+                if kind(in d, x) == STRING {
+                    if n > 0 {
+                        put(inout list, in ", ");
+                    }
+                    n = inc(n);
+                    let ok = str_is(in d, x, in "propext".as_bytes())
+                        || str_is(in d, x, in "Quot.sound".as_bytes())
+                        || str_is(in d, x, in "Classical.choice".as_bytes());
+                    if !ok {
+                        standard = false;
+                    }
+                    put_str_of(inout list, in d, x);
+                }
+            }
+            return true;
+        }
+    }
+    false
+}
+
+// `run_stages`; false with the failing stage and reason in `st`.
+fn run_stages(inout st: St, in job: Job) -> bool eff [Ffi[StdProcess], Ffi[StdFs], Ffi[StdEnv]] {
+    let timeout = job.timeout;
+    if !job.has_auditor {
+        return stop_s(inout st, in "toolchain", in "the vesper proof auditor is unavailable");
+    }
+    let mut c = command_path(in job.launcher.as_slice());
+    arg(inout c, in "--print-prefix");
+    let r = child(c, 30);
+    if r.end != 0 {
+        return stop(inout st, in "toolchain", in r.text.as_slice());
+    }
+    st.prefix = trimmed(in r.text.as_slice());
+    let bin = join(in st.prefix, in "bin");
+    st.binary = if os() == os_windows() {
+        join(in bin, in "lean.exe")
+    } else {
+        join(in bin, in "lean")
+    };
+    let mut c = command_path(in st.binary.as_slice());
+    arg(inout c, in "--version");
+    let r = child(c, timeout);
+    if r.end != 0 {
+        return stop(inout st, in "toolchain", in r.text.as_slice());
+    }
+    st.version = trimmed(in r.text.as_slice());
+    if !contains(in st.version.as_slice(), 0, st.version.len(), in "version 4.35.0,".as_bytes()) {
+        return stop_s(inout st, in "toolchain", in "proof lenses require Lean 4.35.0");
+    }
+    // `Cache::open`.
+    st.cache = copy_bytes(in job.cache);
+    st.has_cache = job.has_cache && f_create_all(in job.cache) && make_private(in job.cache);
+    if !make_stage(inout st) {
+        return false;
+    }
+    let mut a = Audit {
+        modules: ChunkSeq::new[u64](),
+        theorems: ChunkSeq::new[u64](),
+        names: ChunkSeq::new[u8]()
+    };
+
+    if job.has_extraction {
+        let mut name = ChunkSeq::new[u8]();
+        put(inout name, in "VesperLensObligation");
+        if ensure_olean(inout st, in name, in job.extraction, timeout) {
+            add_name(inout a, in name.as_slice(), true);
+            for i in 0..nfunctions(in job) {
+                let t = obligation(i);
+                add_name(inout a, in t.as_slice(), false);
+            }
+        } else {
+            let br = bounded(in st.reason.as_slice());
+            let s = failed_status(in "compile", in br.as_slice());
+            for i in 0..nfunctions(in job) {
+                let f = function_name(in job, i);
+                ext_row(inout st, in f.as_slice(), in s);
+            }
+        }
+    }
+
+    for mi in 0..job.models.len() {
+        let m = model_at(in job, mi);
+        let raw = part(in job, m.key, 32);
+        let mut key = ChunkSeq::new[u8]();
+        put_hex(inout key, in raw.as_slice());
+        let mut cached = status1(PROVED, in "");
+        if st.has_cache && cache_outcome(in st, in key, inout cached) {
+            sem_row(inout st, in job, m, in cached);
+        } else {
+            let module = part(in job, m.module, m.module_n);
+            let exact = part(in job, m.exact, m.exact_n);
+            if ensure_olean(inout st, in module, in exact, timeout) {
+                add_name(inout a, in module.as_slice(), true);
+                let t = part(in job, m.theorem, m.theorem_n);
+                add_name(inout a, in t.as_slice(), false);
+            } else {
+                let omega = copy_bytes(in st.reason);
+                let s = bitvec_check(inout st, in job, m, in omega, timeout);
+                if st.has_cache {
+                    cache_record(inout st, in key, in s);
+                }
+                sem_row(inout st, in job, m, in s);
+            }
+        }
+    }
+    if a.modules.len() == 0 {
+        return true;
+    }
+
+    // One aggregate module and one kernel replay for every theorem.
+    let mut imports = ChunkSeq::new[u8]();
+    for i in 0..a.modules.len() / 2 {
+        put(inout imports, in "import ");
+        let n = audit_name(in a, in a.modules, i);
+        put_bytes(inout imports, in n.as_slice());
+        imports.push(10);
+    }
+    let path = join(in st.stage, in "VesperLensRun.lean");
+    match f_write(in path, in imports.as_slice()) {
+        Result::Ok(_) => {},
+        Result::Err(e) => return stop_io(inout st, in "io", in "", e),
+    }
+    let mut run = ChunkSeq::new[u8]();
+    put(inout run, in "VesperLensRun");
+    if !compile(inout st, in run, timeout) {
+        let reason = copy_bytes(in st.reason);
+        return stop(inout st, in "compile", in reason.as_slice());
+    }
+    let mut c = command_path(in job.auditor.as_slice());
+    arg(inout c, in "proof-audit");
+    arg(inout c, in "VesperLensRun");
+    arg(inout c, in "--root");
+    arg_bytes(inout c, in st.stage.as_slice());
+    for i in 0..a.theorems.len() / 2 {
+        arg(inout c, in "--theorem");
+        let t = audit_name(in a, in a.theorems, i);
+        arg_bytes(inout c, in t.as_slice());
+    }
+    arg(inout c, in "--allow-axiom");
+    arg(inout c, in "propext");
+    arg(inout c, in "--allow-axiom");
+    arg(inout c, in "Quot.sound");
+    arg(inout c, in "--allow-axiom");
+    arg(inout c, in "Classical.choice");
+    arg(inout c, in "--json");
+    arg(inout c, in "--timeout");
+    let mut tw = ChunkSeq::new[u8]();
+    put_u64(inout tw, timeout);
+    arg_bytes(inout c, in tw.as_slice());
+    arg(inout c, in "--lean");
+    arg_bytes(inout c, in st.binary.as_slice());
+    let r = child(c, wrapping_add(timeout, 5));
+    if r.end != 0 {
+        return stop(inout st, in "kernel", in r.text.as_slice());
+    }
+    let d = parse(in r.text.as_slice());
+    if failed(in d) {
+        let mut m = ChunkSeq::new[u8]();
+        put(inout m, in "audit report: ");
+        put_error(inout m, in d, in r.text.as_slice());
+        return stop(inout st, in "kernel", in m.as_slice());
+    }
+    let rt = root(in d);
+    if !is_true(in d, field(in d, rt, in "kernel_replayed")) {
+        return stop_s(inout st, in "kernel", in "the audit did not replay the kernel");
+    }
+    let checked = u64_or_zero(in d, field(in d, rt, in "checked_constants"));
+    if job.has_extraction && audited(in a, in "VesperLensObligation".as_bytes()) {
+        for i in 0..nfunctions(in job) {
+            let t = obligation(i);
+            let mut list = ChunkSeq::new[u8]();
+            let mut n: u64 = 0;
+            let mut standard = true;
+            let found = axioms_of(in d, in t.as_slice(), inout list, inout n, inout standard);
+            let s = if found && n == 0 {
+                let mut detail = ChunkSeq::new[u8]();
+                put(inout detail, in "kernel replayed ");
+                put_u64(inout detail, checked);
+                put(inout detail, in " constants with an empty axiom policy");
+                Status { code: PROVED, a: detail, b: ChunkSeq::new[u8]() }
+            } else {
+                failed_status(
+                    in "kernel",
+                    in "the obligation failed the empty-axiom kernel audit".as_bytes()
+                )
+            };
+            let f = function_name(in job, i);
+            ext_row(inout st, in f.as_slice(), in s);
+        }
+    }
+    for mi in 0..job.models.len() {
+        let m = model_at(in job, mi);
+        let module = part(in job, m.module, m.module_n);
+        if audited(in a, in module.as_slice()) {
+            let t = part(in job, m.theorem, m.theorem_n);
+            let mut list = ChunkSeq::new[u8]();
+            let mut n: u64 = 0;
+            let mut standard = true;
+            let found = axioms_of(in d, in t.as_slice(), inout list, inout n, inout standard);
+            let s = if found && standard {
+                let mut detail = ChunkSeq::new[u8]();
+                put(inout detail, in "omega proof replayed by the kernel; axioms: ");
+                if n == 0 {
+                    put(inout detail, in "none");
+                } else {
+                    put_bytes(inout detail, in list.as_slice());
+                }
+                Status { code: PROVED, a: detail, b: ChunkSeq::new[u8]() }
+            } else {
+                failed_status(
+                    in "kernel",
+                    in "the theorem uses a forbidden axiom or was not replayed".as_bytes()
+                )
+            };
+            sem_row(inout st, in job, m, in s);
+        }
+    }
+    true
+}
+
+// ------------------------------------------------------------ the entry
+
+fn new_st(pid: u64) -> St {
+    St {
+        ext: ChunkSeq::new[u8](),
+        sem: ChunkSeq::new[u8](),
+        reused: 0,
+        compiled: 0,
+        pid: pid,
+        next: 0,
+        prefix: ChunkSeq::new[u8](),
+        binary: ChunkSeq::new[u8](),
+        version: ChunkSeq::new[u8](),
+        has_cache: false,
+        cache: ChunkSeq::new[u8](),
+        has_stage: false,
+        stage: ChunkSeq::new[u8](),
+        fail_stage: ChunkSeq::new[u8](),
+        reason: ChunkSeq::new[u8]()
+    }
+}
+
+// `run`'s `fail_all`: every function and model failed at the stage.
+fn fail_all(inout st: St, in job: Job) {
+    st.ext.clear();
+    st.sem.clear();
+    let stage = copy_bytes(in st.fail_stage);
+    let reason = bounded(in st.reason.as_slice());
+    let s = Status { code: FAILED, a: stage, b: reason };
+    for i in 0..nfunctions(in job) {
+        let f = function_name(in job, i);
+        ext_row(inout st, in f.as_slice(), in s);
+    }
+    for mi in 0..job.models.len() {
+        let m = model_at(in job, mi);
+        sem_row(inout st, in job, m, in s);
+    }
+}
+
+// Run the job in the file `job_path` (`proof_lens::job_words`) and write
+// its outcome rows (`proof_lens::outcome_rows`) to `out_path`: 0, or 1 when
+// the job cannot be read, 2 when the rows cannot be written.
+pub fn proof_run(in job_path: Str, in out_path: Str)
+    -> u64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv]] {
+    let mut jp = ChunkSeq::new[u8]();
+    put(inout jp, in job_path);
+    let data = match f_read(in jp) {
+        Result::Ok(d) => d,
+        Result::Err(_) => return 1,
+    };
+    let job = read_job(in data.as_slice());
+    let mut st = new_st(id());
+    let ok = run_stages(inout st, in job);
+    if st.has_stage {
+        f_remove_all(in st.stage);
+    }
+    if !ok {
+        fail_all(inout st, in job);
+    }
+    let mut out = ChunkSeq::new[u8]();
+    put_bytes(inout out, in st.ext.as_slice());
+    put_bytes(inout out, in st.sem.as_slice());
+    put(inout out, in "R\t");
+    put_u64(inout out, st.reused);
+    out.push(9);
+    put_u64(inout out, st.compiled);
+    out.push(10);
+    let mut op = ChunkSeq::new[u8]();
+    put(inout op, in out_path);
+    match f_write(in op, in out.as_slice()) {
+        Result::Ok(_) => 0,
+        Result::Err(_) => 2,
+    }
+}
+
+// How many obligations a job (`proof_lens::job_words`) holds: its
+// extraction functions and semantic models. Pure; the Stage 2 package
+// probe calls it.
+pub fn job_obligations(in job: Slice[u8]) -> u64 {
+    let j = read_job(in job);
+    wrapping_add(nfunctions(in j), j.models.len())
+}

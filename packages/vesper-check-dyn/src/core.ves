@@ -42,26 +42,11 @@ use @vesper/ast::{
     pat_at,
     type_at
 };
-use @vesper-std/arena::{
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
-use @vesper/check-data::types::{
-    Types,
-    EffNode,
-    types_new,
-    display
-};
-use @vesper/check-data::diag::{
-    Diags,
-    diags_new
-};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/check-data::types::{Types, EffNode, types_new, display};
+use @vesper/check-data::diag::{Diags, diags_new};
 
 const NONE: u32 = 4294967295;
 
@@ -320,15 +305,7 @@ pub fn mk_list(inout d: D, in words: ChunkSeq[u32]) -> u32 {
     for i in 0..n {
         d.ast.pool.push(u32_at(in words, i));
     }
-    let r = d
-        .ast
-        .lists
-        .alloc(
-            ListRef {
-                first: first,
-                len: n32(n)
-            }
-        );
+    let r = d.ast.lists.alloc(ListRef { first: first, len: n32(n) });
     r.raw()
 }
 
@@ -361,16 +338,7 @@ pub fn new_ex(inout d: D, n: ExprNode) -> u32 {
 }
 
 pub fn exn(kind: u8, start: u32, end: u32, a: u32, b: u32, c: u32) -> ExprNode {
-    ExprNode {
-        kind: kind,
-        start: start,
-        end: end,
-        a: a,
-        b: b,
-        c: c,
-        d: NONE,
-        e: NONE
-    }
+    ExprNode { kind: kind, start: start, end: end, a: a, b: b, c: c, d: NONE, e: NONE }
 }
 
 pub fn pt(in d: D, p: u32) -> PatNode {
@@ -378,20 +346,7 @@ pub fn pt(in d: D, p: u32) -> PatNode {
 }
 
 pub fn new_pat(inout d: D, kind: u8, start: u32, end: u32, a: u32, b: u32, c: u32) -> u32 {
-    d
-        .ast
-        .pats
-        .alloc(
-            PatNode {
-                kind: kind,
-                start: start,
-                end: end,
-                a: a,
-                b: b,
-                c: c
-            }
-        )
-        .raw()
+    d.ast.pats.alloc(PatNode { kind: kind, start: start, end: end, a: a, b: b, c: c }).raw()
 }
 
 pub fn ty(in d: D, t: u32) -> TypeNode {
@@ -399,19 +354,7 @@ pub fn ty(in d: D, t: u32) -> TypeNode {
 }
 
 pub fn new_type(inout d: D, kind: u8, a: u32, b: u32, c: u32, dd: u32) -> u32 {
-    d
-        .ast
-        .types
-        .alloc(
-            TypeNode {
-                kind: kind,
-                a: a,
-                b: b,
-                c: c,
-                d: dd
-            }
-        )
-        .raw()
+    d.ast.types.alloc(TypeNode { kind: kind, a: a, b: b, c: c, d: dd }).raw()
 }
 
 pub fn named(inout d: D, name: u32, args: u32) -> u32 {
@@ -424,13 +367,7 @@ pub fn stmt_at(in d: D, s: u32) -> StmtNode {
         .stmts
         .get_or(
             idx_from_raw[StmtNode](s),
-            StmtNode {
-                kind: 0,
-                pat: NONE,
-                ty: NONE,
-                value: NONE,
-                mutable: false
-            }
+            StmtNode { kind: 0, pat: NONE, ty: NONE, value: NONE, mutable: false }
         )
 }
 
@@ -443,31 +380,14 @@ pub fn new_stmt(inout d: D, n: StmtNode) -> u32 {
 }
 
 pub fn arg_at(in d: D, a: u32) -> ArgNode {
-    d
-        .ast
-        .args
-        .get_or(
-            idx_from_raw[ArgNode](a),
-            ArgNode {
-                pass: 0,
-                explicit: false,
-                expr: NONE
-            }
-        )
+    d.ast.args.get_or(idx_from_raw[ArgNode](a), ArgNode { pass: 0, explicit: false, expr: NONE })
 }
 
 pub fn clause_at(in d: D, c: u32) -> ClauseNode {
     d
         .ast
         .clauses
-        .get_or(
-            idx_from_raw[ClauseNode](c),
-            ClauseNode {
-                name: NONE,
-                pats: 0,
-                body: NONE
-            }
-        )
+        .get_or(idx_from_raw[ClauseNode](c), ClauseNode { name: NONE, pats: 0, body: NONE })
 }
 
 pub fn param_at(in d: D, p: u32) -> ParamNode {
@@ -476,14 +396,7 @@ pub fn param_at(in d: D, p: u32) -> ParamNode {
         .params
         .get_or(
             idx_from_raw[ParamNode](p),
-            ParamNode {
-                name: NONE,
-                pass: 0,
-                projections: 0,
-                ty: NONE,
-                start: 0,
-                end: 0
-            }
+            ParamNode { name: NONE, pass: 0, projections: 0, ty: NONE, start: 0, end: 0 }
         )
 }
 
@@ -496,85 +409,33 @@ pub fn new_param(inout d: D, n: ParamNode) -> u32 {
 }
 
 pub fn effects_at(in d: D, e: u32) -> EffectsNode {
-    d
-        .ast
-        .effects
-        .get_or(
-            idx_from_raw[EffectsNode](e),
-            EffectsNode {
-                instances: 0,
-                tail: NONE
-            }
-        )
+    d.ast.effects.get_or(idx_from_raw[EffectsNode](e), EffectsNode { instances: 0, tail: NONE })
 }
 
 pub fn new_effects(inout d: D, instances: u32, tail: u32) -> u32 {
-    d
-        .ast
-        .effects
-        .alloc(
-            EffectsNode {
-                instances: instances,
-                tail: tail
-            }
-        )
-        .raw()
+    d.ast.effects.alloc(EffectsNode { instances: instances, tail: tail }).raw()
 }
 
 pub fn effect_at(in d: D, e: u32) -> EffectNode {
     d
         .ast
         .effect_nodes
-        .get_or(
-            idx_from_raw[EffectNode](e),
-            EffectNode {
-                label: NONE,
-                name: NONE,
-                args: 0
-            }
-        )
+        .get_or(idx_from_raw[EffectNode](e), EffectNode { label: NONE, name: NONE, args: 0 })
 }
 
 pub fn new_effect(inout d: D, label: u32, name: u32, args: u32) -> u32 {
-    d
-        .ast
-        .effect_nodes
-        .alloc(
-            EffectNode {
-                label: label,
-                name: name,
-                args: args
-            }
-        )
-        .raw()
+    d.ast.effect_nodes.alloc(EffectNode { label: label, name: name, args: args }).raw()
 }
 
 pub fn generic_at(in d: D, g: u32) -> GenericNode {
     d
         .ast
         .generics
-        .get_or(
-            idx_from_raw[GenericNode](g),
-            GenericNode {
-                name: NONE,
-                bound: 0,
-                row: false
-            }
-        )
+        .get_or(idx_from_raw[GenericNode](g), GenericNode { name: NONE, bound: 0, row: false })
 }
 
 pub fn new_generic(inout d: D, name: u32, bound: u8) -> u32 {
-    d
-        .ast
-        .generics
-        .alloc(
-            GenericNode {
-                name: name,
-                bound: bound,
-                row: false
-            }
-        )
-        .raw()
+    d.ast.generics.alloc(GenericNode { name: name, bound: bound, row: false }).raw()
 }
 
 pub fn field_at(in d: D, f: u32) -> FieldNode {
@@ -583,12 +444,7 @@ pub fn field_at(in d: D, f: u32) -> FieldNode {
         .fields
         .get_or(
             idx_from_raw[FieldNode](f),
-            FieldNode {
-                name: NONE,
-                ty: NONE,
-                modality: 3,
-                temperature: 0
-            }
+            FieldNode { name: NONE, ty: NONE, modality: 3, temperature: 0 }
         )
 }
 
@@ -600,14 +456,7 @@ pub fn variant_at(in d: D, v: u32) -> VariantNode {
     d
         .ast
         .variants
-        .get_or(
-            idx_from_raw[VariantNode](v),
-            VariantNode {
-                name: NONE,
-                fields: 0,
-                named: false
-            }
-        )
+        .get_or(idx_from_raw[VariantNode](v), VariantNode { name: NONE, fields: 0, named: false })
 }
 
 pub fn adt_at(in d: D, a: u32) -> AdtNode {
@@ -660,29 +509,12 @@ pub fn effect_decl_at(in d: D, e: u32) -> EffectDeclNode {
         .effect_decls
         .get_or(
             idx_from_raw[EffectDeclNode](e),
-            EffectDeclNode {
-                name: NONE,
-                linear: false,
-                generics: 0,
-                ops: 0,
-                start: 0,
-                end: 0
-            }
+            EffectDeclNode { name: NONE, linear: false, generics: 0, ops: 0, start: 0, end: 0 }
         )
 }
 
 pub fn impl_at(in d: D, i: u32) -> ImplNode {
-    d
-        .ast
-        .impls
-        .get_or(
-            idx_from_raw[ImplNode](i),
-            ImplNode {
-                ty: NONE,
-                generics: 0,
-                methods: 0
-            }
-        )
+    d.ast.impls.get_or(idx_from_raw[ImplNode](i), ImplNode { ty: NONE, generics: 0, methods: 0 })
 }
 
 pub fn set_impl(inout d: D, i: u32, n: ImplNode) {
@@ -713,12 +545,7 @@ pub fn assoc_at(in d: D, a: u32) -> AssocDeclNode {
         .assoc_decls
         .get_or(
             idx_from_raw[AssocDeclNode](a),
-            AssocDeclNode {
-                name: NONE,
-                bound: 0,
-                start: 0,
-                end: 0
-            }
+            AssocDeclNode { name: NONE, bound: 0, start: 0, end: 0 }
         )
 }
 
@@ -728,13 +555,7 @@ pub fn trait_ref_at(in d: D, t: u32) -> TraitRefNode {
         .trait_refs
         .get_or(
             idx_from_raw[TraitRefNode](t),
-            TraitRefNode {
-                package: NONE,
-                name: NONE,
-                args: 0,
-                start: 0,
-                end: 0
-            }
+            TraitRefNode { package: NONE, name: NONE, args: 0, start: 0, end: 0 }
         )
 }
 
@@ -768,29 +589,11 @@ pub fn set_conf(inout d: D, c: u32, n: ConfNode) {
 }
 
 pub fn item_at(in d: D, i: u32) -> ItemNode {
-    d
-        .ast
-        .items
-        .get_or(
-            idx_from_raw[ItemNode](i),
-            ItemNode {
-                kind: 0,
-                node: NONE
-            }
-        )
+    d.ast.items.get_or(idx_from_raw[ItemNode](i), ItemNode { kind: 0, node: NONE })
 }
 
 pub fn new_item(inout d: D, kind: u8, node: u32) -> u32 {
-    d
-        .ast
-        .items
-        .alloc(
-            ItemNode {
-                kind: kind,
-                node: node
-            }
-        )
-        .raw()
+    d.ast.items.alloc(ItemNode { kind: kind, node: node }).raw()
 }
 
 pub fn new_bound(inout d: D, param: u32, trait_ref: u32, start: u32, end: u32, owner: u32) -> u32 {
@@ -798,13 +601,7 @@ pub fn new_bound(inout d: D, param: u32, trait_ref: u32, start: u32, end: u32, o
         .ast
         .bounds
         .alloc(
-            BoundNode {
-                param: param,
-                trait_ref: trait_ref,
-                start: start,
-                end: end,
-                owner: owner
-            }
+            BoundNode { param: param, trait_ref: trait_ref, start: start, end: end, owner: owner }
         )
         .raw()
 }
@@ -1024,15 +821,7 @@ pub fn rid(inout d: D, e: u32) -> u32 {
             wrapping_add(nsym(inout d, x.label), 1)
         };
         let name = nsym(inout d, x.name);
-        es
-            .push(
-                EffNode {
-                    label: label,
-                    name: name,
-                    a: a,
-                    n: n32(k)
-                }
-            );
+        es.push(EffNode { label: label, name: name, a: a, n: n32(k) });
     }
     let tail = if en.tail == NONE {
         0

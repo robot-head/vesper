@@ -1,27 +1,9 @@
 // Shape inference and the static tensor rules (src/tensor_types/infer.rs):
 // signatures, obligations, the body checker and `analyze`.
 
-use @vesper/ast::{
-    Ast,
-    lit_at,
-    list_len,
-    list_at,
-    type_at,
-    expr_at,
-    pat_at
-};
-use @vesper/check-data::util::{
-    push_decimal
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
+use @vesper/ast::{Ast, lit_at, list_len, list_at, type_at, expr_at, pat_at};
+use @vesper/check-data::util::{push_decimal};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at, w};
 use self::state::{
     St,
     put,
@@ -268,24 +250,14 @@ fn decide(in st: St, b: Ob) -> u8 {
 fn ob_get(in cx: Cx, i: u64) -> Ob {
     match cx.obs.try_get(i) {
         Option::Some(b) => b,
-        Option::None => Ob {
-            k: 0,
-            d1: 0,
-            d2: 0,
-            r: 0
-        },
+        Option::None => Ob { k: 0, d1: 0, d2: 0, r: 0 },
     }
 }
 
 fn bo_get(in cx: Cx, i: u64) -> Ob {
     match cx.bo.try_get(i) {
         Option::Some(b) => b,
-        Option::None => Ob {
-            k: 0,
-            d1: 0,
-            d2: 0,
-            r: 0
-        },
+        Option::None => Ob { k: 0, d1: 0, d2: 0, r: 0 },
     }
 }
 
@@ -1396,19 +1368,9 @@ fn ob_subst(inout st: St, in env: Subst, b: Ob) -> Ob {
         d2 = dim_subst1(inout st, in env, b.d2);
     }
     if d1 == NONE || d2 == NONE {
-        return Ob {
-            k: 255,
-            d1: 0,
-            d2: 0,
-            r: 0
-        };
+        return Ob { k: 255, d1: 0, d2: 0, r: 0 };
     }
-    Ob {
-        k: b.k,
-        d1: d1,
-        d2: d2,
-        r: b.r
-    }
+    Ob { k: b.k, d1: d1, d2: d2, r: b.r }
 }
 
 // `Body::apply`: instantiate signature `row` (or the constructor in the
@@ -1592,12 +1554,7 @@ fn apply(
     for i in 0..obs.len() {
         let b0 = match obs.try_get(i) {
             Option::Some(b) => b,
-            Option::None => Ob {
-                k: 0,
-                d1: 0,
-                d2: 0,
-                r: 0
-            },
+            Option::None => Ob { k: 0, d1: 0, d2: 0, r: 0 },
         };
         let b = ob_subst(inout st, in env, b0);
         if b.k == 255 {
@@ -2182,18 +2139,7 @@ fn tensor_op(
                 return mismatch(inout st, op, start, end, in m);
             }
             let r = name_s(inout st, in "RoPE head width");
-            require(
-                inout st,
-                inout cx,
-                Ob {
-                    k: 0,
-                    d1: u32_at(in s, 1),
-                    d2: 0,
-                    r: r
-                },
-                start,
-                end
-            );
+            require(inout st, inout cx, Ob { k: 0, d1: u32_at(in s, 1), d2: 0, r: r }, start, end);
             return t0;
         }
         if s.len() != 1 {
@@ -2294,18 +2240,7 @@ fn tensor_op(
     put(inout rt, in " blocks per row");
     let r = st.names.intern(in rt.as_slice());
     let k32 = dim_const(inout st, 32);
-    require(
-        inout st,
-        inout cx,
-        Ob {
-            k: 1,
-            d1: k32,
-            d2: u32_at(in sw, 1),
-            r: r
-        },
-        start,
-        end
-    );
+    require(inout st, inout cx, Ob { k: 1, d1: k32, d2: u32_at(in sw, 1), r: r }, start, end);
     if spells(in st, op, in "block_scale") {
         return ty_named(inout st, T_BASE, st.s_f64);
     }
@@ -2595,18 +2530,7 @@ fn pool_op(inout st: St, inout cx: Cx, in a: Ast, e: u32, op: u32, args: u32, ex
             return st.unknown;
         }
         let r = name_s(inout st, in "grouped-query attention (QHeads % KvHeads == 0)");
-        require(
-            inout st,
-            inout cx,
-            Ob {
-                k: 1,
-                d1: kv,
-                d2: u32_at(in s, 0),
-                r: r
-            },
-            start,
-            end
-        );
+        require(inout st, inout cx, Ob { k: 1, d1: kv, d2: u32_at(in s, 0), r: r }, start, end);
         return mk_ty(inout st, T_TENSOR, 0, 0, in s);
     }
     if spells(in st, op, in "tokens") || spells(in st, op, in "page_tokens") {

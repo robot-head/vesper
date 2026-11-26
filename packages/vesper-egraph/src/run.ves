@@ -15,18 +15,9 @@
 // searches every rule on the rebuilt graph, applies the matches, and
 // rebuilds; it stops early when a round changes nothing.
 
-use self::util::{
-    filled_u32,
-    i64_at,
-    u32_at,
-    u64_at
-};
-use self::graph::{
-    EGraph
-};
-use self::rules::{
-    Rules
-};
+use self::util::{filled_u32, i64_at, u32_at, u64_at};
+use self::graph::{EGraph};
+use self::rules::{Rules};
 
 const NONE: u32 = 4294967295;
 
@@ -116,10 +107,7 @@ pub struct Records {
 }
 
 pub fn records_new() -> Records {
-    Records {
-        words: ChunkSeq::new[u32](),
-        count: 0
-    }
+    Records { words: ChunkSeq::new[u32](), count: 0 }
 }
 
 impl Records {

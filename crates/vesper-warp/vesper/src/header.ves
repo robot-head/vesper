@@ -1,29 +1,9 @@
 // Module header of @vesper/warp (see lib.ves): RFC 9000 §17 long and short
 // headers up to the header-protection boundary (header.rs). Offsets are
 // relative to the datagram; byte fields are spans of it.
-use self::{
-    HdrErr,
-    Parsed,
-    PktType,
-    Prot,
-    Sp,
-    Unprot,
-    VarIntErr,
-    WrittenLong
-};
-use self::pn::{
-    pn_put,
-    pn_read_at
-};
-use self::varint::{
-    b8,
-    sat_add,
-    vi_len_or_zero,
-    vi_max,
-    vi_prefix_len,
-    vi_put,
-    vi_value_at
-};
+use self::{HdrErr, Parsed, PktType, Prot, Sp, Unprot, VarIntErr, WrittenLong};
+use self::pn::{pn_put, pn_read_at};
+use self::varint::{b8, sat_add, vi_len_or_zero, vi_max, vi_prefix_len, vi_put, vi_value_at};
 
 // Long header packet types (RFC 9000 Table 5), bits 4-5 of the first byte.
 const LT_INITIAL: u8 = 0;
@@ -77,19 +57,11 @@ fn retry_tag_len() -> u64 {
 }
 
 pub fn no_span() -> Sp {
-    Sp {
-        start: 0,
-        len: 0
-    }
+    Sp { start: 0, len: 0 }
 }
 
 fn truncated(needed: u64, available: u64) eff [Fail[HdrErr]] {
-    Fail::raise(
-        HdrErr::Truncated {
-            needed: needed,
-            available: available
-        }
-    );
+    Fail::raise(HdrErr::Truncated { needed: needed, available: available });
 }
 
 // `Reader::varint` at `at` of `buf`, mapped through `From<VarIntError>`:
@@ -116,21 +88,13 @@ fn take(in buf: Slice[u8], at: u64, len: u64) -> Sp eff [Fail[HdrErr]] {
     if end > buf.len() {
         truncated(end, buf.len());
     }
-    Sp {
-        start: at,
-        len: len
-    }
+    Sp { start: at, len: len }
 }
 
 fn check_sample(pn_offset: u64, end: u64) eff [Fail[HdrErr]] {
     let needed = wrapping_add(pn_offset, SAMPLE_END);
     if end < needed {
-        Fail::raise(
-            HdrErr::TooShortForSample {
-                needed: needed,
-                available: end
-            }
-        );
+        Fail::raise(HdrErr::TooShortForSample { needed: needed, available: end });
     }
 }
 
@@ -164,10 +128,7 @@ fn parse_short(in datagram: Slice[u8], first: u8, dcid_len: u64) -> Parsed eff [
             version: 0,
             has_spin: true,
             spin: first & spin_bit() != 0,
-            dcid: Sp {
-                start: 1,
-                len: dcid_len
-            },
+            dcid: Sp { start: 1, len: dcid_len },
             scid: no_span(),
             token: no_span(),
             pn_offset: pn_offset,
@@ -192,18 +153,10 @@ fn parse_long(in datagram: Slice[u8], first: u8) -> Parsed eff [Fail[HdrErr]] {
             Fail::raise(HdrErr::FixedBitClear);
         }
         if version != quic_v1() {
-            Fail::raise(
-                HdrErr::UnsupportedVersion {
-                    version: version
-                }
-            );
+            Fail::raise(HdrErr::UnsupportedVersion { version: version });
         }
         if dcid_len > max_cid_len() {
-            Fail::raise(
-                HdrErr::CidTooLong {
-                    len: dcid_len
-                }
-            );
+            Fail::raise(HdrErr::CidTooLong { len: dcid_len });
         }
     }
     let dcid = take(in datagram, 6, dcid_len);
@@ -214,11 +167,7 @@ fn parse_long(in datagram: Slice[u8], first: u8) -> Parsed eff [Fail[HdrErr]] {
     let scid_len = b8(in datagram, at);
     at = wrapping_add(at, 1);
     if version != 0 && scid_len > max_cid_len() {
-        Fail::raise(
-            HdrErr::CidTooLong {
-                len: scid_len
-            }
-        );
+        Fail::raise(HdrErr::CidTooLong { len: scid_len });
     }
     let scid = take(in datagram, at, scid_len);
     at = wrapping_add(at, scid_len);
@@ -230,10 +179,7 @@ fn parse_long(in datagram: Slice[u8], first: u8) -> Parsed eff [Fail[HdrErr]] {
         return Parsed::VersionNegotiation {
             dcid: dcid,
             scid: scid,
-            versions: Sp {
-                start: at,
-                len: rest
-            }
+            versions: Sp { start: at, len: rest }
         };
     }
     let ty = first >> LONG_TYPE_SHIFT & LONG_TYPE_MASK;
@@ -249,10 +195,7 @@ fn parse_long(in datagram: Slice[u8], first: u8) -> Parsed eff [Fail[HdrErr]] {
             version: version,
             dcid: dcid,
             scid: scid,
-            token: Sp {
-                start: at,
-                len: token_len
-            },
+            token: Sp { start: at, len: token_len },
             tag: wrapping_add(at, token_len)
         };
     }
@@ -272,12 +215,7 @@ fn parse_long(in datagram: Slice[u8], first: u8) -> Parsed eff [Fail[HdrErr]] {
     let (length, pn_offset) = hdr_varint(in datagram, at);
     let available = wrapping_sub(n, pn_offset);
     if length > available {
-        Fail::raise(
-            HdrErr::LengthExceedsDatagram {
-                length: length,
-                available: available
-            }
-        );
+        Fail::raise(HdrErr::LengthExceedsDatagram { length: length, available: available });
     }
     let packet_end = wrapping_add(pn_offset, length);
     check_sample(pn_offset, packet_end);
@@ -324,10 +262,7 @@ pub fn hdr_pn_field(h: Prot, in packet: Slice[u8]) -> Unprot eff [Fail[HdrErr]] 
         has_key_phase: !h.has_version,
         key_phase: first & key_phase_bit() != 0,
         header_len: header_len,
-        payload: Sp {
-            start: header_len,
-            len: wrapping_sub(h.packet_end, header_len)
-        }
+        payload: Sp { start: header_len, len: wrapping_sub(h.packet_end, header_len) }
     }
 }
 
@@ -371,11 +306,7 @@ pub fn hdr_write_short(
     pn_len: u64
 ) -> u64 eff [Fail[HdrErr]] {
     if dcid.len() != dcid_len {
-        Fail::raise(
-            HdrErr::BadConfiguredCidLen {
-                len: dcid.len()
-            }
-        );
+        Fail::raise(HdrErr::BadConfiguredCidLen { len: dcid.len() });
     }
     let size = wrapping_add(dcid_len, 5);
     if out.len() < size {
@@ -412,11 +343,7 @@ pub fn hdr_write_short_to_peer(
         return hdr_write_short(inout out, in dcid, dcid_len, spin, key_phase, full_pn, pn_len);
     }
     if dcid.len() > max_cid_len() {
-        Fail::raise(
-            HdrErr::CidTooLong {
-                len: dcid.len()
-            }
-        );
+        Fail::raise(HdrErr::CidTooLong { len: dcid.len() });
     }
     let needed = wrapping_add(dcid.len(), 5);
     if out.len() < needed {
@@ -431,10 +358,7 @@ fn w_bytes(inout out: Slice[u8], at: u64, in bytes: Slice[u8]) -> u64 eff [Fail[
     let end = wrapping_add(at, bytes.len());
     if end > out.len() {
         Fail::raise(
-            HdrErr::BufferTooSmall {
-                needed: bytes.len(),
-                available: wrapping_sub(out.len(), at)
-            }
+            HdrErr::BufferTooSmall { needed: bytes.len(), available: wrapping_sub(out.len(), at) }
         );
     }
     let _c = out.try_copy_from(at, in bytes);
@@ -443,12 +367,7 @@ fn w_bytes(inout out: Slice[u8], at: u64, in bytes: Slice[u8]) -> u64 eff [Fail[
 
 fn w_u8(inout out: Slice[u8], at: u64, b: u8) -> u64 eff [Fail[HdrErr]] {
     if at >= out.len() {
-        Fail::raise(
-            HdrErr::BufferTooSmall {
-                needed: 1,
-                available: wrapping_sub(out.len(), at)
-            }
-        );
+        Fail::raise(HdrErr::BufferTooSmall { needed: 1, available: wrapping_sub(out.len(), at) });
     }
     out.try_set(at, b);
     wrapping_add(at, 1)
@@ -456,12 +375,7 @@ fn w_u8(inout out: Slice[u8], at: u64, b: u8) -> u64 eff [Fail[HdrErr]] {
 
 fn w_u32(inout out: Slice[u8], at: u64, v: u32) -> u64 eff [Fail[HdrErr]] {
     if wrapping_add(at, 4) > out.len() {
-        Fail::raise(
-            HdrErr::BufferTooSmall {
-                needed: 4,
-                available: wrapping_sub(out.len(), at)
-            }
-        );
+        Fail::raise(HdrErr::BufferTooSmall { needed: 4, available: wrapping_sub(out.len(), at) });
     }
     let _w = out.try_write_u32_be(at, v);
     wrapping_add(at, 4)
@@ -471,22 +385,11 @@ fn w_u32(inout out: Slice[u8], at: u64, v: u32) -> u64 eff [Fail[HdrErr]] {
 fn w_varint(inout out: Slice[u8], at: u64, value: u64) -> u64 eff [Fail[HdrErr]] {
     let len = vi_len_or_zero(value);
     if len == 0 {
-        Fail::raise(
-            HdrErr::VarInt {
-                e: VarIntErr::TooLarge {
-                    value: value
-                }
-            }
-        );
+        Fail::raise(HdrErr::VarInt { e: VarIntErr::TooLarge { value: value } });
     }
     let room = wrapping_sub(out.len(), at);
     if room < len {
-        Fail::raise(
-            HdrErr::BufferTooSmall {
-                needed: len,
-                available: room
-            }
-        );
+        Fail::raise(HdrErr::BufferTooSmall { needed: len, available: room });
     }
     vi_put(value, len, inout out, at);
     wrapping_add(at, len)
@@ -494,11 +397,7 @@ fn w_varint(inout out: Slice[u8], at: u64, value: u64) -> u64 eff [Fail[HdrErr]]
 
 fn cid_len(in cid: Slice[u8]) -> u8 eff [Fail[HdrErr]] {
     if cid.len() > max_cid_len() {
-        Fail::raise(
-            HdrErr::CidTooLong {
-                len: cid.len()
-            }
-        );
+        Fail::raise(HdrErr::CidTooLong { len: cid.len() });
     }
     wrapping_u8(cid.len())
 }
@@ -541,10 +440,7 @@ pub fn hdr_write_long(
     let pn_offset = at;
     if wrapping_add(at, pn_len) > out.len() {
         Fail::raise(
-            HdrErr::BufferTooSmall {
-                needed: pn_len,
-                available: wrapping_sub(out.len(), at)
-            }
+            HdrErr::BufferTooSmall { needed: pn_len, available: wrapping_sub(out.len(), at) }
         );
     }
     let _p = pn_put(full_pn, pn_len, inout out, at);

@@ -27,11 +27,7 @@ use self::cbor::{
     str_len,
     text_eq_s
 };
-use self::reader::{
-    k_over_budget,
-    put,
-    raise
-};
+use self::reader::{k_over_budget, put, raise};
 
 const FORMAT_CORIM: u64 = 3;
 const FIELD_CORIM: u64 = 130;
@@ -870,9 +866,7 @@ pub fn corim_parse(
     put(inout w, 0);
     let slot_comids = cur_len(in w);
 
-    let mut sc = Scratch {
-        pos: 0
-    };
+    let mut sc = Scratch { pos: 0 };
     let mut comids = 0;
     let mut other_tags = 0;
     let mut t = 0;

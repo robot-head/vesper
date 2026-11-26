@@ -10,15 +10,7 @@
 //
 // Source modes are their `sourcecfg.SM` codes: 0 Inactive, 1 Detached,
 // 4 EdgeRising, 5 EdgeFalling, 6 LevelHigh, 7 LevelLow.
-use self::{
-    AiaFault,
-    Aplic,
-    AplicHdr,
-    Imsic,
-    ImsicHdr,
-    Msi,
-    MsiCfg
-};
+use self::{AiaFault, Aplic, AplicHdr, Imsic, ImsicHdr, Msi, MsiCfg};
 
 // The constants of src/aia.rs and src/aia/rust.rs, grouped by register
 // (RISC-V AIA 1.0 section numbers).
@@ -203,14 +195,7 @@ fn bad_iselect(isel: u64) -> Never eff [Fail[AiaFault]] {
 // ---------------------------------------------------------------- IMSIC
 
 fn no_file() -> ImsicHdr {
-    ImsicHdr {
-        ids: 0,
-        delivery: 0,
-        external: false,
-        threshold: 0,
-        off: 0,
-        words: 0
-    }
+    ImsicHdr { ids: 0, delivery: 0, external: false, threshold: 0, off: 0, words: 0 }
 }
 
 pub fn m_imsic_hdr(in f: Imsic, i: u64) -> ImsicHdr {
@@ -225,11 +210,7 @@ fn put_hdr(inout f: Imsic, i: u64, h: ImsicHdr) {
 }
 
 pub fn m_imsic_empty() -> Imsic {
-    Imsic {
-        hdr: ChunkSeq::new(),
-        eip: ChunkSeq::new(),
-        eie: ChunkSeq::new()
-    }
+    Imsic { hdr: ChunkSeq::new(), eip: ChunkSeq::new(), eie: ChunkSeq::new() }
 }
 
 // Appends a file with identities 1..=ids (`ImsicFile::new`, or
@@ -562,16 +543,7 @@ fn is_level(mode: u64) -> bool {
 }
 
 fn zero_cfg() -> MsiCfg {
-    MsiCfg {
-        m_ppn: 0,
-        s_ppn: 0,
-        hhxs: 0,
-        lhxs_m: 0,
-        lhxs_s: 0,
-        hhxw: 0,
-        lhxw: 0,
-        locked: false
-    }
+    MsiCfg { m_ppn: 0, s_ppn: 0, hhxs: 0, lhxs_m: 0, lhxs_s: 0, hhxw: 0, lhxw: 0, locked: false }
 }
 
 fn no_domain() -> AplicHdr {
@@ -640,12 +612,7 @@ pub fn m_aplic_push(
     }
     let needed = wrapping_add(AplicReg::Idc, wrapping_mul(IDC_BYTES, idcs));
     if size < needed {
-        Fail::raise(
-            AiaFault::WindowTooSmall {
-                size: size,
-                needed: needed
-            }
-        );
+        Fail::raise(AiaFault::WindowTooSmall { size: size, needed: needed });
     }
     let src_off = a.sourcecfg.len();
     let idc_off = a.idc_delivery.len();
@@ -1077,14 +1044,7 @@ pub fn m_aplic_take_msis(inout a: Aplic, d: u64) -> ChunkSeq[Msi] {
                     t >> TargetField::HartShift,
                     (t >> TargetField::GuestShift) & TargetField::Guest
                 );
-                post(
-                    inout a,
-                    d,
-                    Msi {
-                        addr: addr,
-                        data: t & TargetField::Eiid
-                    }
-                );
+                post(inout a, d, Msi { addr: addr, data: t & TargetField::Eiid });
                 let _ = a.pending.try_set(at, false);
             }
             s = wrapping_add(s, 1);
@@ -1356,14 +1316,7 @@ pub fn m_aplic_write32(inout a: Aplic, d: u64, addr: u64, v: u64) eff [Fail[AiaF
     if off == AplicReg::Genmsi {
         if h.dm {
             let addr = m_msi_address(h.msicfg, h.supervisor, v >> TargetField::HartShift, 0);
-            post(
-                inout a,
-                d,
-                Msi {
-                    addr: addr,
-                    data: v & TargetField::Eiid
-                }
-            );
+            post(inout a, d, Msi { addr: addr, data: v & TargetField::Eiid });
         }
         return;
     }

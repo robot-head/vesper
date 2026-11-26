@@ -3,25 +3,10 @@
 // three words per field: name length, value length, start in the bytes); results
 // name byte ranges of `bytes`, which the Rust wrapper turns into strings.
 
-use self::{
-    MessageError,
-    Span,
-    RequestParts,
-    ResponseParts
-};
-use self::int::{
-    inc,
-    byte,
-    word
-};
-use @vesper/prism-bytes::{
-    first_not_lower_token,
-    first_not_visible,
-    first_nul_or_line_break
-};
-use self::capsule::{
-    valid_utf8
-};
+use self::{MessageError, Span, RequestParts, ResponseParts};
+use self::int::{inc, byte, word};
+use @vesper/prism-bytes::{first_not_lower_token, first_not_visible, first_nul_or_line_break};
+use self::capsule::{valid_utf8};
 
 // Words per field in `meta`: name length, value length, and where the
 // field begins in the bytes.
@@ -167,14 +152,8 @@ fn split(in b: Slice[u8], in meta: Slice[u64]) -> Result[u64, MessageError] {
             }
             for j in 0..i {
                 let p = line(in meta, j);
-                let earlier = Span {
-                    lo: p.lo,
-                    hi: p.mid
-                };
-                let this = Span {
-                    lo: l.lo,
-                    hi: l.mid
-                };
+                let earlier = Span { lo: p.lo, hi: p.mid };
+                let this = Span { lo: l.lo, hi: l.mid };
                 if same(in b, earlier, this) {
                     return Result::Err(MessageError::DuplicatePseudoHeader);
                 }
@@ -247,12 +226,7 @@ pub fn message_parse_request(in b: Slice[u8], in meta: Slice[u64])
     let mut protocol: Option[Span] = Option::None;
     for i in 0..pseudo {
         let l = line(in meta, i);
-        let v = Option::Some(
-            Span {
-                lo: l.mid,
-                hi: l.hi
-            }
-        );
+        let v = Option::Some(Span { lo: l.mid, hi: l.hi });
         let which: u64 = if (
             wrapping_sub(l.mid, l.lo) == 7 && is(in b, l.lo, l.mid, in ":method".as_bytes())
         ) {
@@ -332,12 +306,7 @@ pub fn message_parse_request(in b: Slice[u8], in meta: Slice[u64])
         let l = line(in meta, i);
         if (wrapping_sub(l.mid, l.lo) == 4 && is(in b, l.lo, l.mid, in "host".as_bytes())) {
             if hosts == 0 {
-                host = Option::Some(
-                    Span {
-                        lo: l.mid,
-                        hi: l.hi
-                    }
-                );
+                host = Option::Some(Span { lo: l.mid, hi: l.hi });
             }
             hosts = inc(hosts);
         }
@@ -436,13 +405,7 @@ pub fn message_parse_response(in b: Slice[u8], in meta: Slice[u64])
         Result::Ok(c) => c,
         Result::Err(e) => return Result::Err(e),
     };
-    Result::Ok(
-        ResponseParts {
-            status: wrapping_u16(status),
-            pseudo: pseudo,
-            content_length: cl
-        }
-    )
+    Result::Ok(ResponseParts { status: wrapping_u16(status), pseudo: pseudo, content_length: cl })
 }
 
 pub fn message_check_trailers(in b: Slice[u8], in meta: Slice[u64]) -> Option[MessageError] {

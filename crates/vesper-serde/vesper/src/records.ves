@@ -18,18 +18,8 @@ use self::{
     TilePoint,
     Token
 };
-use self::index::{
-    at,
-    min64,
-    next_decoded,
-    raise,
-    strings_equal,
-    tok
-};
-use self::ascii::{
-    Ascii,
-    Utf8
-};
+use self::index::{at, min64, next_decoded, raise, strings_equal, tok};
+use self::ascii::{Ascii, Utf8};
 
 // `BatchLimits::HARD` and the per-record `Limits` ceilings it enforces
 // (src/ndjson.rs).
@@ -74,15 +64,7 @@ fn none() -> u64 {
 }
 
 fn fault(code: u64, detail: u64, offset: u64, record: u64, line: u64) -> Unit eff [Fail[Fault]] {
-    Fail::raise(
-        Fault {
-            code: code,
-            detail: detail,
-            offset: offset,
-            record: record,
-            line: line
-        }
-    )
+    Fail::raise(Fault { code: code, detail: detail, offset: offset, record: record, line: line })
 }
 
 // -------------------------------------------------------------------
@@ -508,11 +490,7 @@ pub fn event_check(in doc: Doc, in input: Slice[u8], root: u64, inout remaining:
     if topic_tok.kind != Kind::String {
         fault(13, 0, topic_tok.start, 0, 0);
     }
-    EventRow {
-        id: value,
-        topic: topic,
-        raw_meta: meta
-    }
+    EventRow { id: value, topic: topic, raw_meta: meta }
 }
 
 // -------------------------------------------------------------------
@@ -615,12 +593,7 @@ pub fn ndjson_admit(in input: Slice[u8], b: BatchLimits, record_size: u64)
     if work > b.max_work {
         initial(6);
     }
-    NdPlan {
-        count: count,
-        eof_line: eof_line,
-        metadata_bytes: metadata_bytes,
-        work: work
-    }
+    NdPlan { count: count, eof_line: eof_line, metadata_bytes: metadata_bytes, work: work }
 }
 
 fn here(in c: NdCursor, code: u64) -> Unit eff [Fail[Fault]] {

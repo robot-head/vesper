@@ -1,10 +1,5 @@
 // @vesper-std/process (Windows): child processes directly over kernel32.
-use @vesper-std/fs::{
-    IoError,
-    error_of,
-    invalid_input,
-    not_found
-};
+use @vesper-std/fs::{IoError, error_of, invalid_input, not_found};
 
 pub copy struct ExitStatus {
     pub code: i64,
@@ -507,12 +502,8 @@ fn close_handle_if(h: u64) eff [Ffi[StdProcess]] {
 }
 
 fn make_capture_pipe() -> Result[(u64, u64), IoError] eff [Ffi[StdProcess]] {
-    let mut r = HandleBox {
-        h: 0
-    };
-    let mut w = HandleBox {
-        h: 0
-    };
+    let mut r = HandleBox { h: 0 };
+    let mut w = HandleBox { h: 0 };
     let sa = SecAttr {
         length: 24,
         pad0: 0,
@@ -792,10 +783,7 @@ fn ends_with_exe16(in p: Slice[u16]) -> bool {
 }
 
 fn io_err(kind: u32) -> IoError {
-    IoError {
-        kind: kind,
-        os: 0
-    }
+    IoError { kind: kind, os: 0 }
 }
 
 // The application name `CreateProcessW` gets for `c.program`.
@@ -881,12 +869,7 @@ fn resolve_exe(in c: ProcCommand) -> Result[ChunkSeq[u16], IoError] eff [Ffi[Std
 
 pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProcess]] {
     if contains_byte(in c.program.as_slice(), 0) {
-        return Result::Err(
-            IoError {
-                kind: invalid_input(),
-                os: 0
-            }
-        );
+        return Result::Err(IoError { kind: invalid_input(), os: 0 });
     }
     let app = match resolve_exe(in c) {
         Result::Ok(a) => a,
@@ -894,12 +877,7 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
     };
     let mut cmd_w: ChunkSeq[u16] = ChunkSeq::new[u16]();
     if !build_cmd_line(in c, inout cmd_w) {
-        return Result::Err(
-            IoError {
-                kind: invalid_input(),
-                os: 0
-            }
-        );
+        return Result::Err(IoError { kind: invalid_input(), os: 0 });
     }
     let mut out_r: u64 = 0;
     let mut out_w: u64 = 0;
@@ -965,12 +943,7 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
             close_handle_if(nul_in);
             close_handle_if(nul_out);
             close_handle_if(nul_err);
-            return Result::Err(
-                IoError {
-                    kind: invalid_input(),
-                    os: 0
-                }
-            );
+            return Result::Err(IoError { kind: invalid_input(), os: 0 });
         }
         cwd_ptr = alloc_utf16_bytes(in cwd_w.as_slice(), false);
     }
@@ -1044,12 +1017,7 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
         Result::Err(_) => {
             close_handle_if(out_r);
             close_handle_if(err_r);
-            return Result::Err(
-                IoError {
-                    kind: invalid_input(),
-                    os: 0
-                }
-            );
+            return Result::Err(IoError { kind: invalid_input(), os: 0 });
         },
     }
     // A suspended child joins its job before it can start anything; if
@@ -1111,9 +1079,7 @@ fn drain_pipe(h: u64, inout dst: ChunkSeq[u8], limit: u64, inout cut: bool) eff 
     }
     let mut tmp: ChunkSeq[u8] = ChunkSeq::new[u8]();
     tmp.resize(4096, 0);
-    let mut n = DwordBox {
-        v: 0
-    };
+    let mut n = DwordBox { v: 0 };
     loop {
         n.v = 0;
         let (ok, _) = StdProcess::ReadFile(h, inout tmp.as_slice_mut(), inout n, 0);
@@ -1133,9 +1099,7 @@ fn pump_pipe(h: u64, inout dst: ChunkSeq[u8], limit: u64, inout cut: bool)
     if h == 0 {
         return (0, false);
     }
-    let mut avail = DwordBox {
-        v: 0
-    };
+    let mut avail = DwordBox { v: 0 };
     let (ok, _) = StdProcess::PeekNamedPipe(h, 0, 0, 0, inout avail, 0);
     if ok == 0 {
         // The writers are gone (`ERROR_BROKEN_PIPE`) or the pipe failed:
@@ -1153,9 +1117,7 @@ fn pump_pipe(h: u64, inout dst: ChunkSeq[u8], limit: u64, inout cut: bool)
     };
     let mut tmp: ChunkSeq[u8] = ChunkSeq::new[u8]();
     tmp.resize(widen_u64(want), 0);
-    let mut n = DwordBox {
-        v: 0
-    };
+    let mut n = DwordBox { v: 0 };
     let (rok, _) = StdProcess::ReadFile(h, inout tmp.as_slice_mut(), inout n, 0);
     if rok == 0 || n.v == 0 {
         close_handle_if(h);
@@ -1168,9 +1130,7 @@ fn pump_pipe(h: u64, inout dst: ChunkSeq[u8], limit: u64, inout cut: bool)
 // The exit status of an ended child; its handles (and job) are closed
 // and it counts as waited for.
 fn finish(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProcess]] {
-    let mut code = DwordBox {
-        v: 0
-    };
+    let mut code = DwordBox { v: 0 };
     let (ok, err) = StdProcess::GetExitCodeProcess(ch.h_process, inout code);
     close_handle_if(ch.h_process);
     ch.h_process = 0;
@@ -1191,12 +1151,7 @@ fn finish(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProces
 
 pub fn wait(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProcess]] {
     if ch.waited {
-        return Result::Err(
-            IoError {
-                kind: invalid_input(),
-                os: 0
-            }
-        );
+        return Result::Err(IoError { kind: invalid_input(), os: 0 });
     }
     drain_pipe(ch.stdout_h, inout ch.stdout_buf, ch.limit, inout ch.cut);
     ch.stdout_h = 0;
@@ -1215,12 +1170,7 @@ pub fn wait(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProc
 pub fn wait_timeout(inout ch: ProcChild, millis: u64)
     -> Result[Option[ExitStatus], IoError] eff [Ffi[StdProcess]] {
     if ch.waited {
-        return Result::Err(
-            IoError {
-                kind: invalid_input(),
-                os: 0
-            }
-        );
+        return Result::Err(IoError { kind: invalid_input(), os: 0 });
     }
     let start = StdProcess::GetTickCount64();
     loop {
@@ -1261,12 +1211,7 @@ pub fn wait_timeout(inout ch: ProcChild, millis: u64)
 // killed), or `invalid_input()` for a child already waited for.
 pub fn kill_tree(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProcess]] {
     if ch.waited {
-        return Result::Err(
-            IoError {
-                kind: invalid_input(),
-                os: 0
-            }
-        );
+        return Result::Err(IoError { kind: invalid_input(), os: 0 });
     }
     if ch.job != 0 {
         let _ = StdProcess::TerminateJobObject(ch.job, 1);

@@ -35,10 +35,7 @@ effect Blocklist {
 }
 
 fn blocklist_map() -> BpfMapSpec {
-    BpfMapSpec {
-        kind: BpfMapKind::Hash,
-        max_entries: 1024
-    }
+    BpfMapSpec { kind: BpfMapKind::Hash, max_entries: 1024 }
 }
 
 // Packets dropped per source address.
@@ -47,10 +44,7 @@ effect Drops {
 }
 
 fn drops_map() -> BpfMapSpec {
-    BpfMapSpec {
-        kind: BpfMapKind::LruHash,
-        max_entries: 4096
-    }
+    BpfMapSpec { kind: BpfMapKind::LruHash, max_entries: 4096 }
 }
 
 fn drop_from(src: u32) -> XdpAction eff [Drops] {

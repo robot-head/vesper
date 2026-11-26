@@ -21,42 +21,16 @@ fn c_statements(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64, start: i6
     -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if depth > 48 {
         let limit = c_limit(at);
-        c_result(
-            CType {
-                tag: 0,
-                at: 0
-            },
-            at,
-            env,
-            start,
-            end,
-            -1
-        )
+        c_result(CType { tag: 0, at: 0 }, at, env, start, end, -1)
     } else if c_kind(at) == 35 {
-        c_result(
-            CType {
-                tag: 0,
-                at: 0
-            },
-            c_next(at),
-            env,
-            start,
-            end,
-            -1
-        )
+        c_result(CType { tag: 0, at: 0 }, c_next(at), env, start, end, -1)
     } else if c_kind(at) == 13 {
         let pat = c_next(at);
         let next = c_pattern_end(pat);
         let annotation = if c_kind(next) == 40 {
             c_type(c_next(next), 0)
         } else {
-            CTypeAt {
-                ty: CType {
-                    tag: -1,
-                    at: 0
-                },
-                next: next
-            }
+            CTypeAt { ty: CType { tag: -1, at: 0 }, next: next }
         };
         let value = c_expr(c_take(annotation.next, 48), env, 2, row, loans, depth + 1, false);
         let valid = if annotation.ty.tag >= 0 {
@@ -104,30 +78,12 @@ fn c_if(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64)
     -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let start = c_token(at).start;
     let cond = c_expr(c_next(at), env, 2, row, loans, depth + 1, true);
-    let valid = c_expect_type(
-        CType {
-            tag: 1,
-            at: 0
-        },
-        cond.ty,
-        cond.start,
-        cond.end
-    );
+    let valid = c_expect_type(CType { tag: 1, at: 0 }, cond.ty, cond.start, cond.end);
     let a = c_block(cond.next, cond.env, row, loans, depth + 1);
     let b = if c_kind(a.next) == 29 {
         c_expr(c_next(a.next), cond.env, 2, row, loans, depth + 1, false)
     } else {
-        c_result(
-            CType {
-                tag: 0,
-                at: 0
-            },
-            a.next,
-            cond.env,
-            start,
-            a.end,
-            -1
-        )
+        c_result(CType { tag: 0, at: 0 }, a.next, cond.env, start, a.end, -1)
     };
     let result_ty = c_join_type(a.ty, b.ty, start, b.end);
     c_result(result_ty, b.next, c_join(cond.env, a.env, b.env, 0, start, b.end), start, b.end, -1)
@@ -154,10 +110,7 @@ fn c_match(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64)
         value.ty,
         value.env,
         value.env,
-        CType {
-            tag: -1,
-            at: 0
-        },
+        CType { tag: -1, at: 0 },
         row,
         loans,
         depth + 1,

@@ -15,18 +15,8 @@
 //   delay, buffer, 1 when it has a line, line, scratch buffer.
 // - 1 DuplicateNode(id), 2 UnknownNode(id), 3 CycleWithoutDelay(count,
 //   ids), 4 ZeroDelayFeedback(from, to), 5 LatencyOverflow(id).
-use self::{
-    PdcFault
-};
-use self::seqs::{
-    at,
-    filled,
-    get,
-    heap_pop,
-    heap_push,
-    set,
-    sort
-};
+use self::{PdcFault};
+use self::seqs::{at, filled, get, heap_pop, heap_push, set, sort};
 
 // No index, buffer or reader.
 const NONE: u64 = 18446744073709551615;

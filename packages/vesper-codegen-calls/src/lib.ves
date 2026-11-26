@@ -23,37 +23,16 @@
 //   refused the entry (`X <message>`).
 
 use @vesper/check-data::pack_text;
-use @vesper/check-data::input::{
-    Reader,
-    read_ctx
-};
-use @vesper/check-layout::{
-    layouts_new
-};
-use @vesper/place-ir::{
-    read_program
-};
-use self::data::{
-    read_calls
-};
-use self::instances::{
-    capability_abi,
-    concrete,
-    discover,
-    program_facts,
-    syms_new
-};
-use self::abi::{
-    Errs,
-    check_entry,
-    declare
-};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/check-layout::{layouts_new};
+use @vesper/place-ir::{read_program};
+use self::data::{read_calls};
+use self::instances::{capability_abi, concrete, discover, program_facts, syms_new};
+use self::abi::{Errs, check_entry, declare};
 
 pub fn codegen_calls_text(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let d = read_calls(inout r, in b, in c);
@@ -95,9 +74,7 @@ pub fn codegen_calls_text(in input: Str) -> ChunkSeq[u64] {
                 }
             }
         }
-        let mut err = Errs {
-            text: ChunkSeq::new[u8]()
-        };
+        let mut err = Errs { text: ChunkSeq::new[u8]() };
         let ok = check_entry(inout c.types, in c.names, in c.world, in d, task.entry, inout err)
             && found.err.len() == 0
             && declare(

@@ -4,11 +4,7 @@
 // strings the binding needs (Rust's `BTreeSet<String>`,
 // `BTreeSet<(String, u32)>` and `BTreeMap<String, u32>`).
 
-use @vesper/check-data::util::{
-    inc,
-    u64_at,
-    u8_at
-};
+use @vesper/check-data::util::{inc, u64_at, u8_at};
 
 pub fn put(inout o: ChunkSeq[u8], in s: Str) {
     o.extend(in s.as_bytes());

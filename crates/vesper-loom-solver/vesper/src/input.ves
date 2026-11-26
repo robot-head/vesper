@@ -1,35 +1,11 @@
 // Module input of @vesper/loom-solver (see lib.ves): the request words
 // (documented in src/port.rs) and `inputs`: catalog normalization and
 // validation.
-use @vesper/loom-calculus::{
-    SysSel
-};
-use @vesper/loom-calculus::decode::{
-    decode_manifest,
-    decode_tables,
-    rd,
-    rd_bool,
-    rd_set,
-    rd_str
-};
-use @vesper/loom-calculus::check::{
-    check_manifest,
-    system_name_valid
-};
-use @vesper/loom-calculus::util::{
-    add,
-    inc,
-    man,
-    none,
-    ssel,
-    sw,
-    ver
-};
-use self::{
-    Meta,
-    Mx,
-    S
-};
+use @vesper/loom-calculus::{SysSel};
+use @vesper/loom-calculus::decode::{decode_manifest, decode_tables, rd, rd_bool, rd_set, rd_str};
+use @vesper/loom-calculus::check::{check_manifest, system_name_valid};
+use @vesper/loom-calculus::util::{add, inc, man, none, ssel, sw, ver};
+use self::{Meta, Mx, S};
 use self::diag::{
     SolverCode,
     SolverSort,
@@ -65,10 +41,7 @@ pub fn mxv(in s: S, i: u64) -> Mx {
 pub fn sysv(in s: S, i: u64) -> SysSel {
     match s.sys.try_get(i) {
         Option::Some(x) => x,
-        Option::None => SysSel {
-            name: 0,
-            ver: 0
-        },
+        Option::None => SysSel { name: 0, ver: 0 },
     }
 }
 
@@ -132,14 +105,7 @@ pub fn decode_request(inout s: S) {
     for i in 0..nsys {
         let name = rd_str(inout s.l);
         let v = rd(inout s.l);
-        s
-            .sys
-            .push(
-                SysSel {
-                    name: name,
-                    ver: v
-                }
-            );
+        s.sys.push(SysSel { name: name, ver: v });
     }
     s.maxd = rd(inout s.l);
 }

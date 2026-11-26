@@ -13,27 +13,10 @@ use self::{
     WtReadPre,
     DgramSendPlan
 };
-use self::int::{
-    inc,
-    min64,
-    word,
-    remove_word
-};
-use self::varint::{
-    vdec,
-    vput,
-    put_record
-};
-use self::frame::{
-    data_type,
-    webtransport_stream_type
-};
-use self::capsule::{
-    datagram_type,
-    valid_utf8,
-    max_close_reason,
-    capsule_write_close
-};
+use self::int::{inc, min64, word, remove_word};
+use self::varint::{vdec, vput, put_record};
+use self::frame::{data_type, webtransport_stream_type};
+use self::capsule::{datagram_type, valid_utf8, max_close_reason, capsule_write_close};
 use self::pool::{
     BytePool,
     OutMap,
@@ -576,10 +559,7 @@ pub fn session_data(
     let f0 = bsearch_u64(in st.s_id.as_slice(), session);
     if !f0.found {
         let next_rx = q_consume(inout pool, rx_q_in, len);
-        return SessionDataRes {
-            rx_q: next_rx,
-            err_code: 0
-        };
+        return SessionDataRes { rx_q: next_rx, err_code: 0 };
     }
     let cq0 = word(in st.s_cap_q.as_slice(), f0.idx);
     let tr = q_transfer(inout pool, rx_q_in, cq0, len);
@@ -589,10 +569,7 @@ pub fn session_data(
     loop {
         let f = bsearch_u64(in st.s_id.as_slice(), session);
         if !f.found {
-            return SessionDataRes {
-                rx_q: next_rx,
-                err_code: 0
-            };
+            return SessionDataRes { rx_q: next_rx, err_code: 0 };
         }
         let cq = word(in st.s_cap_q.as_slice(), f.idx);
         let cm = word(in st.s_cap_mode.as_slice(), f.idx);
@@ -615,42 +592,24 @@ pub fn session_data(
             max_frame_payload,
         ) {
             Result::Ok(s) => s,
-            Result::Err(
-                CapsuleError::TooLarge {
-                    capsule_type,
-                    len: _len
-                }
-            ) => {
+            Result::Err(CapsuleError::TooLarge { capsule_type, len: _len }) => {
                 let code = if capsule_type == datagram_type() {
                     CODE_DATAGRAM_ERROR
                 } else {
                     CODE_MESSAGE_ERROR
                 };
-                return SessionDataRes {
-                    rx_q: next_rx,
-                    err_code: code
-                };
+                return SessionDataRes { rx_q: next_rx, err_code: code };
             }
-            Result::Err(
-                CapsuleError::Malformed {
-                    capsule_type
-                }
-            ) => {
+            Result::Err(CapsuleError::Malformed { capsule_type }) => {
                 let code = if capsule_type == datagram_type() {
                     CODE_DATAGRAM_ERROR
                 } else {
                     CODE_MESSAGE_ERROR
                 };
-                return SessionDataRes {
-                    rx_q: next_rx,
-                    err_code: code
-                };
+                return SessionDataRes { rx_q: next_rx, err_code: code };
             }
             Result::Err(CapsuleError::Truncated) => {
-                return SessionDataRes {
-                    rx_q: next_rx,
-                    err_code: CODE_MESSAGE_ERROR
-                };
+                return SessionDataRes { rx_q: next_rx, err_code: CODE_MESSAGE_ERROR };
             }
         };
 
@@ -661,10 +620,7 @@ pub fn session_data(
         let _l = st.s_cap_len.try_set(f.idx, step.flen);
 
         if step.kind == CAPSULE_NONE {
-            return SessionDataRes {
-                rx_q: next_rx,
-                err_code: 0
-            };
+            return SessionDataRes { rx_q: next_rx, err_code: 0 };
         } else if step.kind == CAPSULE_DATAGRAM {
             if closed {
                 st.stats.datagrams_dropped = inc(st.stats.datagrams_dropped);
@@ -1002,12 +958,7 @@ pub fn wt_read_pre(
     let hq = word(in st.w_held_q.as_slice(), f.idx);
     let hlen = q_len(in pool, hq);
     if recv_done && hlen == 0 {
-        return Result::Ok(
-            WtReadPre::Done {
-                len: 0,
-                fin: true
-            }
-        );
+        return Result::Ok(WtReadPre::Done { len: 0, fin: true });
     }
     if hlen > 0 {
         scratch.clear();
@@ -1017,12 +968,7 @@ pub fn wt_read_pre(
         if fin {
             retire_wt(inout st, in pool, f.idx);
         }
-        return Result::Ok(
-            WtReadPre::Done {
-                len: d.len,
-                fin: fin
-            }
-        );
+        return Result::Ok(WtReadPre::Done { len: d.len, fin: fin });
     }
     Result::Ok(WtReadPre::TryTransport)
 }

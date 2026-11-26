@@ -5,17 +5,8 @@
 // escapes syntactically (E0631, E0632). Its outputs are the rewritten
 // module and the `params`, `forwards` and `boxed` tables of `Lowered`.
 
-use @vesper/ast::{
-    ParamNode,
-    FnNode,
-    TraitRefNode,
-    StmtNode
-};
-use @vesper/check-data::types::{
-    Vars,
-    vars_new,
-    substitute_row
-};
+use @vesper/ast::{ParamNode, FnNode, TraitRefNode, StmtNode};
+use @vesper/check-data::types::{Vars, vars_new, substitute_row};
 use self::core::{
     D,
     w,
@@ -621,13 +612,7 @@ fn lower_function(inout d: D, f: u32, owner: u32) {
             .ast
             .trait_refs
             .alloc(
-                TraitRefNode {
-                    package: NONE,
-                    name: trn.a,
-                    args: trn.b,
-                    start: p.start,
-                    end: p.end
-                }
+                TraitRefNode { package: NONE, name: trn.a, args: trn.b, start: p.start, end: p.end }
             )
             .raw();
         let b = new_bound(inout d, g, tref, p.start, p.end, owner);

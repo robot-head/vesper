@@ -1,15 +1,27 @@
 // `vesper emit --emit interface` (hd_step group 2, #1893): the source
 // contract export of src/interface.rs over the checked world's
 // declarations, as serde_json's pretty text of `vesper_semver::Interface`.
-// The session encodes the world (`interface_words` of
-// crates/vesper-hybrid/src/driver/front.rs): LEB128 numbers, and texts as
-// their length and bytes.
+// It reads the interface's package name, then the world the driver holds
+// (world.ves): LEB128 numbers, and texts as their length and bytes.
 //
 // Builtins export under `std/core`; traits, conformances, named enum
 // payloads, effectful arrows and the like export as `unsupported`, as the
 // Rust exporter does.
-use @vesper-std/fmt::{
-    write_u64
+use @vesper-std/fmt::{write_u64};
+// The world's declaration stream and its readers (world.ves, #2024).
+use self::world::{
+    byte_at,
+    num,
+    text,
+    cmp_bytes,
+    same,
+    is_name,
+    skip_effects,
+    skip_ty,
+    skip_generics,
+    skip_projections,
+    effects_at,
+    skip_function
 };
 
 const NONE: u64 = 18446744073709551615;
@@ -31,152 +43,11 @@ const E_FUNCTION: u64 = 4;
 
 // ---------------------------------------------------------- the stream
 
-fn byte_at(in b: Slice[u8], i: u64) -> u64 {
-    match b.try_get(i) {
-        Option::Some(v) => widen_u64(v),
-        Option::None => 0,
-    }
-}
-
 fn word(in s: ChunkSeq[u64], i: u64) -> u64 {
     match s.try_get(i) {
         Option::Some(v) => v,
         Option::None => 0,
     }
-}
-
-fn num(in b: Slice[u8], inout p: u64) -> u64 {
-    let mut v: u64 = 0;
-    let mut shift: u64 = 0;
-    loop {
-        let c = byte_at(in b, p);
-        p = wrapping_add(p, 1);
-        v = v | wrapping_shl_u64(c & 127, wrapping_u32(shift));
-        if c < 128 || shift >= 63 {
-            break;
-        }
-        shift = wrapping_add(shift, 7);
-    }
-    v
-}
-
-// A text: its start and length.
-fn text(in b: Slice[u8], inout p: u64) -> (u64, u64) {
-    let n = num(in b, inout p);
-    let start = p;
-    p = wrapping_add(p, n);
-    (start, n)
-}
-
-fn cmp_bytes(in a: Slice[u8], sa: u64, la: u64, in c: Slice[u8], sc: u64, lc: u64) -> i64 {
-    let n = if la < lc {
-        la
-    } else {
-        lc
-    };
-    for i in 0..n {
-        let x = byte_at(in a, wrapping_add(sa, i));
-        let y = byte_at(in c, wrapping_add(sc, i));
-        if x != y {
-            return if x < y {
-                -1
-            } else {
-                1
-            };
-        }
-    }
-    if la < lc {
-        -1
-    } else if la > lc {
-        1
-    } else {
-        0
-    }
-}
-
-fn same(in b: Slice[u8], s1: u64, l1: u64, s2: u64, l2: u64) -> bool {
-    cmp_bytes(in b, s1, l1, in b, s2, l2) == 0
-}
-
-fn is_name(in b: Slice[u8], s: u64, l: u64, in lit: Str) -> bool {
-    let t = lit.as_bytes();
-    cmp_bytes(in b, s, l, in t, 0, t.len()) == 0
-}
-
-fn skip_effects(in b: Slice[u8], inout p: u64) {
-    let n = num(in b, inout p);
-    for _ in 0..n {
-        num(in b, inout p);
-        text(in b, inout p);
-        let args = num(in b, inout p);
-        for _ in 0..args {
-            skip_ty(in b, inout p);
-        }
-    }
-    num(in b, inout p);
-    text(in b, inout p);
-}
-
-fn skip_ty(in b: Slice[u8], inout p: u64) {
-    let tag = num(in b, inout p);
-    if tag == T_NAMED {
-        text(in b, inout p);
-        let n = num(in b, inout p);
-        for _ in 0..n {
-            skip_ty(in b, inout p);
-        }
-    } else if tag == T_TUPLE {
-        let n = num(in b, inout p);
-        for _ in 0..n {
-            skip_ty(in b, inout p);
-        }
-    } else if tag == T_FUNCTION {
-        let n = num(in b, inout p);
-        for _ in 0..n {
-            num(in b, inout p);
-            skip_ty(in b, inout p);
-        }
-        skip_ty(in b, inout p);
-        skip_effects(in b, inout p);
-        num(in b, inout p);
-    }
-}
-
-fn skip_generics(in b: Slice[u8], inout p: u64) {
-    let n = num(in b, inout p);
-    for _ in 0..n {
-        text(in b, inout p);
-        num(in b, inout p);
-        num(in b, inout p);
-    }
-}
-
-fn skip_projections(in b: Slice[u8], inout p: u64) {
-    let n = num(in b, inout p);
-    for _ in 0..n {
-        let parts = num(in b, inout p);
-        for _ in 0..parts {
-            text(in b, inout p);
-        }
-    }
-}
-
-// Past a function's parameters and result: the position of its effects.
-fn effects_at(in b: Slice[u8], p: u64) -> u64 {
-    let mut q = p;
-    let n = num(in b, inout q);
-    for _ in 0..n {
-        num(in b, inout q);
-        skip_projections(in b, inout q);
-        skip_ty(in b, inout q);
-    }
-    skip_ty(in b, inout q);
-    q
-}
-
-fn skip_function(in b: Slice[u8], inout p: u64) {
-    p = effects_at(in b, p);
-    skip_effects(in b, inout p);
 }
 
 // ---------------------------------------------------------- the world
@@ -355,12 +226,7 @@ struct J {
 }
 
 fn writer(pretty: bool) -> J {
-    J {
-        out: ChunkSeq::new[u8](),
-        pretty: pretty,
-        depth: 0,
-        open: ChunkSeq::new[u8]()
-    }
+    J { out: ChunkSeq::new[u8](), pretty: pretty, depth: 0, open: ChunkSeq::new[u8]() }
 }
 
 fn newline(inout j: J) {
@@ -1296,6 +1162,8 @@ fn conformance(inout j: J, in b: Slice[u8], p: u64) {
 fn function_decl(inout j: J, in b: Slice[u8], in x: X, p: u64) {
     let mut q = p;
     text(in b, inout q);
+    // Not generated.
+    num(in b, inout q);
     let gp = q;
     skip_generics(in b, inout q);
     let error = effects_error(in b, in x, effects_at(in b, q), gp);
@@ -1426,15 +1294,20 @@ pub fn interface_json(in b: Slice[u8]) -> ChunkSeq[u8] {
         kinds.push(E_CONFORMANCE);
         aux.push(0);
     }
+    // Functions the elaboration generated are not exports.
     let functions = num(in b, inout p);
     for _ in 0..functions {
-        at.push(p);
+        let q = p;
         let (s, l) = text(in b, inout p);
-        starts.push(pool.len());
-        put_id(inout pool, in b, in x, "fn", s, l);
-        lens.push(wrapping_sub(pool.len(), word(in starts, wrapping_sub(starts.len(), 1))));
-        kinds.push(E_FUNCTION);
-        aux.push(0);
+        let generated = num(in b, inout p) == 1;
+        if !generated {
+            at.push(q);
+            starts.push(pool.len());
+            put_id(inout pool, in b, in x, "fn", s, l);
+            lens.push(wrapping_sub(pool.len(), word(in starts, wrapping_sub(starts.len(), 1))));
+            kinds.push(E_FUNCTION);
+            aux.push(0);
+        }
         skip_generics(in b, inout p);
         skip_function(in b, inout p);
     }

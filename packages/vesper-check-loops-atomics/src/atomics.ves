@@ -8,35 +8,12 @@
 // Names are symbols and types are arena ids, so `Atomic[T]` is one node
 // compare and a method name one symbol compare.
 
-use @vesper/check-data::types::{
-    Types,
-    default_type,
-    display,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::world::{
-    World
-};
-use @vesper/check-data::input::{
-    Reader
-};
-use self::ast::{
-    Exprs,
-    ExprRow,
-    FnRow,
-    PatRow,
-    read_fn
-};
-use self::out::{
-    help,
-    line,
-    open,
-    put
-};
+use @vesper/check-data::types::{Types, default_type, display, TyKind, TyPass};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::world::{World};
+use @vesper/check-data::input::{Reader};
+use self::ast::{Exprs, ExprRow, FnRow, PatRow, read_fn};
+use self::out::{help, line, open, put};
 
 const NONE32: u32 = 4294967295;
 
@@ -501,11 +478,7 @@ pub fn check_world(
 }
 
 pub fn atomics_new(sink sy: Syms, atomic: bool, workers: bool) -> Atomics {
-    Atomics {
-        sy: sy,
-        atomic: atomic,
-        workers: workers
-    }
+    Atomics { sy: sy, atomic: atomic, workers: workers }
 }
 
 // ------------------------------------------------------------ preludes
@@ -675,11 +648,7 @@ pub fn read_items(
     in tmap: ChunkSeq[u32],
     sink x: Exprs
 ) -> Items {
-    let mut items = Items {
-        rows: ChunkSeq::new[ItemRow](),
-        tys: ChunkSeq::new[u32](),
-        x: x
-    };
+    let mut items = Items { rows: ChunkSeq::new[ItemRow](), tys: ChunkSeq::new[u32](), x: x };
     let n = r.word(in b);
     for i in 0..n {
         let tag = wrapping_u8(r.word(in b));
@@ -725,15 +694,7 @@ pub fn read_items(
 fn item(in items: Items, i: u64) -> ItemRow {
     match items.rows.try_get(i) {
         Option::Some(r) => r,
-        Option::None => ItemRow {
-            tag: 255,
-            name: NONE32,
-            ty: NONE32,
-            ta: 0,
-            tn: 0,
-            fa: 0,
-            fn_: 0
-        },
+        Option::None => ItemRow { tag: 255, name: NONE32, ty: NONE32, ta: 0, tn: 0, fa: 0, fn_: 0 },
     }
 }
 
@@ -859,14 +820,7 @@ fn read_typed(
         } else {
             wrapping_u32(k)
         };
-        ir
-            .typed
-            .push(
-                Typed {
-                    key: key,
-                    ty: at32(in tmap, r.word(in b))
-                }
-            );
+        ir.typed.push(Typed { key: key, ty: at32(in tmap, r.word(in b)) });
     }
     wrapping_u32(n)
 }
@@ -939,10 +893,7 @@ pub fn read_ir(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tmap
 fn typed_at(in ir: Ir, i: u64) -> Typed {
     match ir.typed.try_get(i) {
         Option::Some(t) => t,
-        Option::None => Typed {
-            key: NONE32,
-            ty: NONE32
-        },
+        Option::None => Typed { key: NONE32, ty: NONE32 },
     }
 }
 

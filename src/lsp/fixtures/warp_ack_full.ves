@@ -139,15 +139,9 @@ fn lookup_cid(conns: Conns, dcid: u64) -> Option[Conn] {
 }
 fn store(conns: Conns, c: Conn) -> Conns {
     if conns.a.cid == c.cid {
-        Conns {
-            a: c,
-            b: conns.b
-        }
+        Conns { a: c, b: conns.b }
     } else {
-        Conns {
-            a: conns.a,
-            b: c
-        }
+        Conns { a: conns.a, b: c }
     }
 }
 
@@ -171,36 +165,18 @@ fn poll_and_step(conns: Conns, now_ns: u64)
     -> Result[Stepped, QuicError] eff [XdpNic, Wire, Fail[QuicError]] {
     let headroom = pn_space_left(conns)?;
     match XdpNic::harvest_rx_single() {
-        None => Ok(
-            Stepped {
-                conns: conns,
-                kind: Idle,
-                rebound: false
-            }
-        ),
+        None => Ok(Stepped { conns: conns, kind: Idle, rebound: false }),
         Some(rx_frame) => {
             let view = XdpNic::view_frame_bytes(rx_frame);
             match Wire::split_short_header(view) {
                 Err(code) => {
                     XdpNic::recycle_to_fill_ring(rx_frame);
-                    Ok(
-                        Stepped {
-                            conns: conns,
-                            kind: Malformed,
-                            rebound: false
-                        }
-                    )
+                    Ok(Stepped { conns: conns, kind: Malformed, rebound: false })
                 },
                 Ok(hdr) => match lookup_cid(conns, hdr.dcid) {
                     None => {
                         XdpNic::recycle_to_fill_ring(rx_frame);
-                        Ok(
-                            Stepped {
-                                conns: conns,
-                                kind: UnknownCid,
-                                rebound: false
-                            }
-                        )
+                        Ok(Stepped { conns: conns, kind: UnknownCid, rebound: false })
                     },
                     Some(conn) => {
                         let full_pn = decode_packet_number_rfc9000(
@@ -320,11 +296,7 @@ copy struct Drained {
 // Drain the RX ring at one virtual instant (bounded by `budget` steps).
 fn drain(budget: u64, conns: Conns, stats: Stats) -> Drained eff [XdpNic, Wire, Clock] {
     if budget == 0 {
-        Drained {
-            conns: conns,
-            stats: stats,
-            failed: false
-        }
+        Drained { conns: conns, stats: stats, failed: false }
     } else {
         let now = Clock::now();
         let stepped = handle Fail[QuicError] in {
@@ -334,17 +306,9 @@ fn drain(budget: u64, conns: Conns, stats: Stats) -> Drained eff [XdpNic, Wire, 
             raise(error, resume) => Err(error),
         };
         match stepped {
-            Err(e) => Drained {
-                conns: conns,
-                stats: stats,
-                failed: true
-            },
+            Err(e) => Drained { conns: conns, stats: stats, failed: true },
             Ok(s) => match s.kind {
-                Idle => Drained {
-                    conns: s.conns,
-                    stats: stats,
-                    failed: false
-                },
+                Idle => Drained { conns: s.conns, stats: stats, failed: false },
                 Replied => drain(wrapping_sub(budget, 1), s.conns, count(stats, s.kind, s.rebound)),
                 Malformed => drain(
                     wrapping_sub(budget, 1),
@@ -431,15 +395,7 @@ fn poll_and_step_acked(conns: Conns, now_ns: u64)
     -> Result[AckStepped, QuicError] eff [XdpNic, Wire, AckPath, Fail[QuicError]] {
     let headroom = pn_space_left(conns)?;
     match XdpNic::harvest_rx_single() {
-        None => Ok(
-            AckStepped {
-                conns: conns,
-                kind: AIdle,
-                retired: 0,
-                largest: 0,
-                cid: 0
-            }
-        ),
+        None => Ok(AckStepped { conns: conns, kind: AIdle, retired: 0, largest: 0, cid: 0 }),
         Some(rx_frame) => {
             let view = XdpNic::view_frame_bytes(rx_frame);
             match Wire::split_short_header(view) {
@@ -620,11 +576,7 @@ copy struct AckDrained {
 fn drain_acked(budget: u64, conns: Conns, stats: AckStats)
     -> AckDrained eff [XdpNic, Wire, AckPath, Clock] {
     if budget == 0 {
-        AckDrained {
-            conns: conns,
-            stats: stats,
-            failed: false
-        }
+        AckDrained { conns: conns, stats: stats, failed: false }
     } else {
         let now = Clock::now();
         let stepped = handle Fail[QuicError] in {
@@ -634,17 +586,9 @@ fn drain_acked(budget: u64, conns: Conns, stats: AckStats)
             raise(error, resume) => Err(error),
         };
         match stepped {
-            Err(e) => AckDrained {
-                conns: conns,
-                stats: stats,
-                failed: true
-            },
+            Err(e) => AckDrained { conns: conns, stats: stats, failed: true },
             Ok(s) => match s.kind {
-                AIdle => AckDrained {
-                    conns: s.conns,
-                    stats: stats,
-                    failed: false
-                },
+                AIdle => AckDrained { conns: s.conns, stats: stats, failed: false },
                 AReplied => drain_acked(
                     wrapping_sub(budget, 1),
                     s.conns,

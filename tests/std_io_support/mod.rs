@@ -312,9 +312,14 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn kill(pid: i32, sig: i32) -> i32;
         fn clock_gettime(clock: i32, ts: *mut c_void) -> i32;
         fn exit(code: i32) -> !;
+        fn readlink(path: *const c_char, buf: *mut c_char, n: usize) -> isize;
+        fn realpath(path: *const c_char, resolved: *mut c_char) -> *mut c_char;
         #[cfg_attr(target_os = "macos", link_name = "__error")]
         #[cfg_attr(not(target_os = "macos"), link_name = "__errno_location")]
         fn errno_address() -> *mut i32;
+        // POSIX `strerror_r` (glibc's `__xpg_strerror_r`), as `std` calls it.
+        #[cfg_attr(target_os = "linux", link_name = "__xpg_strerror_r")]
+        fn strerror_r(errnum: i32, buf: *mut c_char, len: usize) -> i32;
     }
     let mut syms = vec![
         ("open", open as *const u8),
@@ -399,6 +404,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("kill", kill as *const u8),
         ("clock_gettime", clock_gettime as *const u8),
         ("exit", exit as *const u8),
+        ("readlink", readlink as *const u8),
+        ("realpath", realpath as *const u8),
         (
             if cfg!(target_os = "macos") {
                 "__error"
@@ -417,6 +424,14 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("ioctl", ioctl as *const u8),
         ("mmap", mmap as *const u8),
         ("munmap", munmap as *const u8),
+        (
+            if cfg!(target_os = "linux") {
+                "__xpg_strerror_r"
+            } else {
+                "strerror_r"
+            },
+            strerror_r as *const u8,
+        ),
     ];
     #[cfg(target_os = "linux")]
     {
@@ -525,6 +540,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ) -> i32;
         fn SetHandleInformation(h_object: *mut c_void, dw_mask: u32, dw_flags: u32) -> i32;
         fn GetStdHandle(n_std_handle: i32) -> *mut c_void;
+        fn GetFinalPathNameByHandleW(h_file: u64, path: *mut u16, n: u32, flags: u32) -> u32;
+        fn GetModuleFileNameW(h_module: *mut c_void, name: *mut u16, n: u32) -> u32;
         fn CreateProcessW(
             lp_application_name: *const u16,
             lp_command_line: *mut u16,
@@ -570,6 +587,17 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn GetModuleFileNameW(h_module: *mut c_void, lp_filename: *mut u16, n_size: u32) -> u32;
         fn GetSystemDirectoryW(lp_buffer: *mut u16, u_size: u32) -> u32;
         fn GetWindowsDirectoryW(lp_buffer: *mut u16, u_size: u32) -> u32;
+        fn GetModuleHandleW(lp_module_name: *const u16) -> *mut c_void;
+        fn FormatMessageW(
+            dw_flags: u32,
+            lp_source: *const c_void,
+            dw_message_id: u32,
+            dw_language_id: u32,
+            lp_buffer: *mut u16,
+            n_size: u32,
+            arguments: *const c_void,
+        ) -> u32;
+        fn LocalFree(h_mem: *mut c_void) -> *mut c_void;
     }
     vec![
         ("GetCommandLineW", GetCommandLineW as *const u8),
@@ -619,6 +647,11 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("CreatePipe", CreatePipe as *const u8),
         ("SetHandleInformation", SetHandleInformation as *const u8),
         ("GetStdHandle", GetStdHandle as *const u8),
+        (
+            "GetFinalPathNameByHandleW",
+            GetFinalPathNameByHandleW as *const u8,
+        ),
+        ("GetModuleFileNameW", GetModuleFileNameW as *const u8),
         ("CreateProcessW", CreateProcessW as *const u8),
         ("WaitForSingleObject", WaitForSingleObject as *const u8),
         ("GetExitCodeProcess", GetExitCodeProcess as *const u8),
@@ -639,6 +672,9 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("HeapAlloc", HeapAlloc as *const u8),
         ("HeapFree", HeapFree as *const u8),
         ("RtlMoveMemory", RtlMoveMemory as *const u8),
+        ("GetModuleHandleW", GetModuleHandleW as *const u8),
+        ("FormatMessageW", FormatMessageW as *const u8),
+        ("LocalFree", LocalFree as *const u8),
         ("GetFileAttributesW", GetFileAttributesW as *const u8),
         ("SetFileAttributesW", SetFileAttributesW as *const u8),
         ("CopyFileW", CopyFileW as *const u8),

@@ -1,0 +1,742 @@
+// The JSON the runner reads and writes: serde_json's `from_slice` into a
+// `Value` (de.rs and read.rs of serde_json 1.0, `SliceRead`), with its
+// error messages and positions, and its compact string writer.
+//
+// A parsed document is a node table. Node kinds: NULL, BOOL (`a` is 0 or
+// 1), NUMBER (`a` is 1 for a u64 and `b` its value), STRING (`a`, `b`:
+// offset and length of the decoded bytes in `pool`), ARRAY (`a`, `b`:
+// offset and count of its element ids in `kids`) and OBJECT (`a`, `b`:
+// offset and count of its key and value id pairs in `kids`; keys are
+// STRING nodes).
+
+use self::numbers::number_out_of_range;
+
+pub const NULL: u8 = 0;
+pub const BOOL: u8 = 1;
+pub const NUMBER: u8 = 2;
+pub const STRING: u8 = 3;
+pub const ARRAY: u8 = 4;
+pub const OBJECT: u8 = 5;
+
+const NONE: u64 = 18446744073709551615;
+
+// serde_json's error codes, in its `ErrorCode` order.
+const E_NONE: u8 = 0;
+const EOF_LIST: u8 = 1;
+const EOF_OBJECT: u8 = 2;
+const EOF_STRING: u8 = 3;
+const EOF_VALUE: u8 = 4;
+const EXPECTED_COLON: u8 = 5;
+const EXPECTED_LIST: u8 = 6;
+const EXPECTED_OBJECT: u8 = 7;
+const EXPECTED_IDENT: u8 = 8;
+const EXPECTED_VALUE: u8 = 9;
+const INVALID_ESCAPE: u8 = 10;
+const INVALID_NUMBER: u8 = 11;
+const OUT_OF_RANGE: u8 = 12;
+const CONTROL: u8 = 13;
+const KEY_STRING: u8 = 14;
+const LONE_SURROGATE: u8 = 15;
+const TRAILING_COMMA: u8 = 16;
+const TRAILING_CHARS: u8 = 17;
+const END_OF_HEX: u8 = 18;
+const RECURSION: u8 = 19;
+
+pub struct Doc {
+    kind: ChunkSeq[u8],
+    a: ChunkSeq[u64],
+    b: ChunkSeq[u64],
+    kids: ChunkSeq[u64],
+    pool: ChunkSeq[u8],
+    // The error (E_NONE: none) and the byte index its position is of.
+    err: u8,
+    err_at: u64
+}
+
+struct P {
+    i: u64,
+    depth: u64
+}
+
+fn byte(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn g64(in v: ChunkSeq[u64], i: u64) -> u64 {
+    match v.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn g8(in v: ChunkSeq[u8], i: u64) -> u8 {
+    match v.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn min64(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+// `error`: at the index after the last byte read.
+fn fail(inout d: Doc, code: u8, at: u64) -> u64 {
+    if d.err == E_NONE {
+        d.err = code;
+        d.err_at = at;
+    }
+    NONE
+}
+
+// `peek_error`: at the index after the peeked byte.
+fn peek_fail(inout d: Doc, in t: Slice[u8], p: P, code: u8) -> u64 {
+    fail(inout d, code, min64(t.len(), wrapping_add(p.i, 1)))
+}
+
+fn node(inout d: Doc, kind: u8, a: u64, b: u64) -> u64 {
+    d.kind.push(kind);
+    d.a.push(a);
+    d.b.push(b);
+    wrapping_sub(d.kind.len(), 1)
+}
+
+fn whitespace(in t: Slice[u8], inout p: P) -> bool {
+    loop {
+        if p.i >= t.len() {
+            return false;
+        }
+        let c = byte(in t, p.i);
+        if c == 32 || c == 10 || c == 9 || c == 13 {
+            p.i = wrapping_add(p.i, 1);
+        } else {
+            return true;
+        }
+    }
+}
+
+fn ident(inout d: Doc, in t: Slice[u8], inout p: P, in rest: Str) -> bool {
+    let r = rest.as_bytes();
+    for k in 0..r.len() {
+        if p.i >= t.len() {
+            let x = fail(inout d, EOF_VALUE, p.i);
+            return false;
+        }
+        let c = byte(in t, p.i);
+        p.i = wrapping_add(p.i, 1);
+        if c != byte(in r, k) {
+            let x = fail(inout d, EXPECTED_IDENT, p.i);
+            return false;
+        }
+    }
+    true
+}
+
+fn is_digit(c: u8) -> bool {
+    c >= 48 && c <= 57
+}
+
+// `parse_any_number` after an optional `-` (already eaten).
+fn number(inout d: Doc, in t: Slice[u8], inout p: P, positive: bool, start: u64) -> u64 {
+    if p.i >= t.len() {
+        return fail(inout d, EOF_VALUE, p.i);
+    }
+    let c = byte(in t, p.i);
+    p.i = wrapping_add(p.i, 1);
+    let mut float = false;
+    let mut sig: u64 = 0;
+    if c == 48 {
+        if is_digit(byte(in t, p.i)) {
+            return peek_fail(inout d, in t, p, INVALID_NUMBER);
+        }
+    } else if c >= 49 && c <= 57 {
+        sig = widen_u64(wrapping_sub(c, 48));
+        loop {
+            let x = byte(in t, p.i);
+            if !is_digit(x) {
+                break;
+            }
+            let digit = widen_u64(wrapping_sub(x, 48));
+            if sig > 1844674407370955161 || (sig == 1844674407370955161 && digit > 5) {
+                float = true;
+            } else {
+                sig = wrapping_add(wrapping_mul(sig, 10), digit);
+            }
+            p.i = wrapping_add(p.i, 1);
+        }
+    } else {
+        return fail(inout d, INVALID_NUMBER, p.i);
+    }
+    if byte(in t, p.i) == 46 {
+        float = true;
+        p.i = wrapping_add(p.i, 1);
+        let mut n: u64 = 0;
+        loop {
+            if !is_digit(byte(in t, p.i)) {
+                break;
+            }
+            p.i = wrapping_add(p.i, 1);
+            n = wrapping_add(n, 1);
+        }
+        if n == 0 {
+            if p.i < t.len() {
+                return peek_fail(inout d, in t, p, INVALID_NUMBER);
+            }
+            return peek_fail(inout d, in t, p, EOF_VALUE);
+        }
+    }
+    let e = byte(in t, p.i);
+    if e == 101 || e == 69 {
+        float = true;
+        p.i = wrapping_add(p.i, 1);
+        let s = byte(in t, p.i);
+        if s == 43 || s == 45 {
+            p.i = wrapping_add(p.i, 1);
+        }
+        if p.i >= t.len() {
+            return fail(inout d, EOF_VALUE, p.i);
+        }
+        let x = byte(in t, p.i);
+        p.i = wrapping_add(p.i, 1);
+        if !is_digit(x) {
+            return fail(inout d, INVALID_NUMBER, p.i);
+        }
+        loop {
+            if !is_digit(byte(in t, p.i)) {
+                break;
+            }
+            p.i = wrapping_add(p.i, 1);
+        }
+    }
+    if float && number_out_of_range(in t[start..p.i]) {
+        return fail(inout d, OUT_OF_RANGE, p.i);
+    }
+    // A negative or fractional number is not a u64.
+    let u = positive && !float;
+    node(
+        inout d,
+        NUMBER,
+        if u {
+            1
+        } else {
+            0
+        },
+        sig
+    )
+}
+
+fn hex_digit(c: u8) -> u64 {
+    if c >= 48 && c <= 57 {
+        widen_u64(wrapping_sub(c, 48))
+    } else if c >= 97 && c <= 102 {
+        widen_u64(wrapping_sub(c, 87))
+    } else if c >= 65 && c <= 70 {
+        widen_u64(wrapping_sub(c, 55))
+    } else {
+        NONE
+    }
+}
+
+// `decode_hex_escape` of `SliceRead`: NONE on an error.
+fn hex4(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
+    if wrapping_add(p.i, 4) > t.len() {
+        p.i = t.len();
+        return fail(inout d, EOF_STRING, p.i);
+    }
+    let mut n: u64 = 0;
+    let mut bad = false;
+    for k in 0..4 {
+        let h = hex_digit(byte(in t, wrapping_add(p.i, k)));
+        if h == NONE {
+            bad = true;
+        }
+        n = wrapping_add(wrapping_mul(n, 16), h);
+    }
+    p.i = wrapping_add(p.i, 4);
+    if bad {
+        return fail(inout d, INVALID_ESCAPE, p.i);
+    }
+    n
+}
+
+fn push_code(inout out: ChunkSeq[u8], n: u64) {
+    if n < 128 {
+        out.push(wrapping_u8(n));
+    } else if n < 2048 {
+        out.push(wrapping_u8(wrapping_add(192, n >> 6)));
+        out.push(wrapping_u8(wrapping_add(128, n & 63)));
+    } else if n < 65536 {
+        out.push(wrapping_u8(wrapping_add(224, n >> 12)));
+        out.push(wrapping_u8(wrapping_add(128, (n >> 6) & 63)));
+        out.push(wrapping_u8(wrapping_add(128, n & 63)));
+    } else {
+        out.push(wrapping_u8(wrapping_add(240, n >> 18)));
+        out.push(wrapping_u8(wrapping_add(128, (n >> 12) & 63)));
+        out.push(wrapping_u8(wrapping_add(128, (n >> 6) & 63)));
+        out.push(wrapping_u8(wrapping_add(128, n & 63)));
+    }
+}
+
+// `parse_str` (validating) after the opening quote: a STRING node.
+fn string(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
+    let start = d.pool.len();
+    loop {
+        if p.i >= t.len() {
+            return fail(inout d, EOF_STRING, p.i);
+        }
+        let c = byte(in t, p.i);
+        p.i = wrapping_add(p.i, 1);
+        if c == 34 {
+            break;
+        }
+        if c < 32 {
+            return fail(inout d, CONTROL, p.i);
+        }
+        if c != 92 {
+            d.pool.push(c);
+            continue;
+        }
+        if p.i >= t.len() {
+            return fail(inout d, EOF_STRING, p.i);
+        }
+        let e = byte(in t, p.i);
+        p.i = wrapping_add(p.i, 1);
+        if e == 34 || e == 92 || e == 47 {
+            d.pool.push(e);
+        } else if e == 98 {
+            d.pool.push(8);
+        } else if e == 102 {
+            d.pool.push(12);
+        } else if e == 110 {
+            d.pool.push(10);
+        } else if e == 114 {
+            d.pool.push(13);
+        } else if e == 116 {
+            d.pool.push(9);
+        } else if e == 117 {
+            let n = hex4(inout d, in t, inout p);
+            if n == NONE {
+                return NONE;
+            }
+            if n >= 56320 && n <= 57343 {
+                return fail(inout d, LONE_SURROGATE, p.i);
+            }
+            if n < 55296 || n > 56319 {
+                push_code(inout d.pool, n);
+                continue;
+            }
+            // A leading surrogate: a trailing one must follow.
+            if p.i >= t.len() {
+                return fail(inout d, EOF_STRING, p.i);
+            }
+            if byte(in t, p.i) != 92 {
+                p.i = wrapping_add(p.i, 1);
+                return fail(inout d, END_OF_HEX, p.i);
+            }
+            p.i = wrapping_add(p.i, 1);
+            if p.i >= t.len() {
+                return fail(inout d, EOF_STRING, p.i);
+            }
+            if byte(in t, p.i) != 117 {
+                p.i = wrapping_add(p.i, 1);
+                return fail(inout d, END_OF_HEX, p.i);
+            }
+            p.i = wrapping_add(p.i, 1);
+            let n2 = hex4(inout d, in t, inout p);
+            if n2 == NONE {
+                return NONE;
+            }
+            if n2 < 56320 || n2 > 57343 {
+                return fail(inout d, LONE_SURROGATE, p.i);
+            }
+            let cp = wrapping_add(
+                wrapping_shl_u64(wrapping_sub(n, 55296), 10) | wrapping_sub(n2, 56320),
+                65536
+            );
+            push_code(inout d.pool, cp);
+        } else {
+            return fail(inout d, INVALID_ESCAPE, p.i);
+        }
+    }
+    node(inout d, STRING, start, wrapping_sub(d.pool.len(), start))
+}
+
+// `deserialize_any` into a `Value`.
+fn value(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
+    if !whitespace(in t, inout p) {
+        return peek_fail(inout d, in t, p, EOF_VALUE);
+    }
+    let c = byte(in t, p.i);
+    if c == 110 {
+        p.i = wrapping_add(p.i, 1);
+        if !ident(inout d, in t, inout p, in "ull") {
+            return NONE;
+        }
+        return node(inout d, NULL, 0, 0);
+    }
+    if c == 116 {
+        p.i = wrapping_add(p.i, 1);
+        if !ident(inout d, in t, inout p, in "rue") {
+            return NONE;
+        }
+        return node(inout d, BOOL, 1, 0);
+    }
+    if c == 102 {
+        p.i = wrapping_add(p.i, 1);
+        if !ident(inout d, in t, inout p, in "alse") {
+            return NONE;
+        }
+        return node(inout d, BOOL, 0, 0);
+    }
+    if c == 45 {
+        let start = p.i;
+        p.i = wrapping_add(p.i, 1);
+        return number(inout d, in t, inout p, false, start);
+    }
+    if is_digit(c) {
+        return number(inout d, in t, inout p, true, p.i);
+    }
+    if c == 34 {
+        p.i = wrapping_add(p.i, 1);
+        return string(inout d, in t, inout p);
+    }
+    if c == 91 || c == 123 {
+        if wrapping_add(p.depth, 1) >= 128 {
+            return peek_fail(inout d, in t, p, RECURSION);
+        }
+        p.depth = wrapping_add(p.depth, 1);
+        p.i = wrapping_add(p.i, 1);
+        let x = if c == 91 {
+            array(inout d, in t, inout p)
+        } else {
+            object(inout d, in t, inout p)
+        };
+        p.depth = wrapping_sub(p.depth, 1);
+        return x;
+    }
+    peek_fail(inout d, in t, p, EXPECTED_VALUE)
+}
+
+// The elements of an array after its `[` (`SeqAccess`, then `end_seq`).
+fn array(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
+    let mut items = ChunkSeq::new[u64]();
+    let mut first = true;
+    loop {
+        if !whitespace(in t, inout p) {
+            return peek_fail(inout d, in t, p, EOF_LIST);
+        }
+        let c = byte(in t, p.i);
+        if c == 93 {
+            break;
+        }
+        if first {
+            first = false;
+        } else if c == 44 {
+            p.i = wrapping_add(p.i, 1);
+            if !whitespace(in t, inout p) {
+                return peek_fail(inout d, in t, p, EOF_VALUE);
+            }
+            if byte(in t, p.i) == 93 {
+                return peek_fail(inout d, in t, p, TRAILING_COMMA);
+            }
+        } else {
+            return peek_fail(inout d, in t, p, EXPECTED_LIST);
+        }
+        let x = value(inout d, in t, inout p);
+        if x == NONE {
+            return NONE;
+        }
+        items.push(x);
+    }
+    p.i = wrapping_add(p.i, 1);
+    let at = d.kids.len();
+    for k in 0..items.len() {
+        d.kids.push(g64(in items, k));
+    }
+    node(inout d, ARRAY, at, items.len())
+}
+
+// The entries of an object after its `{` (`MapAccess`, then `end_map`).
+fn object(inout d: Doc, in t: Slice[u8], inout p: P) -> u64 {
+    let mut items = ChunkSeq::new[u64]();
+    let mut first = true;
+    loop {
+        if !whitespace(in t, inout p) {
+            return peek_fail(inout d, in t, p, EOF_OBJECT);
+        }
+        let c = byte(in t, p.i);
+        if c == 125 {
+            break;
+        }
+        if first {
+            first = false;
+            if c != 34 {
+                return peek_fail(inout d, in t, p, KEY_STRING);
+            }
+        } else if c == 44 {
+            p.i = wrapping_add(p.i, 1);
+            if !whitespace(in t, inout p) {
+                return peek_fail(inout d, in t, p, EOF_VALUE);
+            }
+            let c2 = byte(in t, p.i);
+            if c2 == 125 {
+                return peek_fail(inout d, in t, p, TRAILING_COMMA);
+            }
+            if c2 != 34 {
+                return peek_fail(inout d, in t, p, KEY_STRING);
+            }
+        } else {
+            return peek_fail(inout d, in t, p, EXPECTED_OBJECT);
+        }
+        p.i = wrapping_add(p.i, 1);
+        let key = string(inout d, in t, inout p);
+        if key == NONE {
+            return NONE;
+        }
+        if !whitespace(in t, inout p) {
+            return peek_fail(inout d, in t, p, EOF_OBJECT);
+        }
+        if byte(in t, p.i) != 58 {
+            return peek_fail(inout d, in t, p, EXPECTED_COLON);
+        }
+        p.i = wrapping_add(p.i, 1);
+        let x = value(inout d, in t, inout p);
+        if x == NONE {
+            return NONE;
+        }
+        items.push(key);
+        items.push(x);
+    }
+    p.i = wrapping_add(p.i, 1);
+    let at = d.kids.len();
+    for k in 0..items.len() {
+        d.kids.push(g64(in items, k));
+    }
+    node(inout d, OBJECT, at, items.len() / 2)
+}
+
+// `serde_json::from_slice::<Value>`: the document; its root is the last
+// node, or `err` is set.
+pub fn parse(in t: Slice[u8]) -> Doc {
+    let mut d = Doc {
+        kind: ChunkSeq::new[u8](),
+        a: ChunkSeq::new[u64](),
+        b: ChunkSeq::new[u64](),
+        kids: ChunkSeq::new[u64](),
+        pool: ChunkSeq::new[u8](),
+        err: E_NONE,
+        err_at: 0
+    };
+    let mut p = P { i: 0, depth: 0 };
+    let root = value(inout d, in t, inout p);
+    if root != NONE && whitespace(in t, inout p) {
+        let x = peek_fail(inout d, in t, p, TRAILING_CHARS);
+    }
+    d
+}
+
+pub fn failed(in d: Doc) -> bool {
+    d.err != E_NONE
+}
+
+pub fn root(in d: Doc) -> u64 {
+    wrapping_sub(d.kind.len(), 1)
+}
+
+pub fn kind(in d: Doc, n: u64) -> u8 {
+    if n == NONE {
+        return NULL;
+    }
+    g8(in d.kind, n)
+}
+
+// `value[key]`: the last entry named `key` of an object, or NONE.
+pub fn field(in d: Doc, n: u64, in key: Str) -> u64 {
+    if kind(in d, n) != OBJECT {
+        return NONE;
+    }
+    let k = key.as_bytes();
+    let at = g64(in d.a, n);
+    let mut found = NONE;
+    for e in 0..g64(in d.b, n) {
+        let kn = g64(in d.kids, wrapping_add(at, wrapping_mul(e, 2)));
+        if str_is(in d, kn, in k) {
+            found = g64(in d.kids, wrapping_add(at, inc(wrapping_mul(e, 2))));
+        }
+    }
+    found
+}
+
+fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+// Whether `n` is a string equal to `k`.
+pub fn str_is(in d: Doc, n: u64, in k: Slice[u8]) -> bool {
+    if kind(in d, n) != STRING {
+        return false;
+    }
+    let at = g64(in d.a, n);
+    let len = g64(in d.b, n);
+    if len != k.len() {
+        return false;
+    }
+    for i in 0..len {
+        if g8(in d.pool, wrapping_add(at, i)) != byte(in k, i) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn put_str_of(inout out: ChunkSeq[u8], in d: Doc, n: u64) {
+    let at = g64(in d.a, n);
+    for i in 0..g64(in d.b, n) {
+        out.push(g8(in d.pool, wrapping_add(at, i)));
+    }
+}
+
+pub fn is_true(in d: Doc, n: u64) -> bool {
+    kind(in d, n) == BOOL && g64(in d.a, n) == 1
+}
+
+// `as_u64`, or 0.
+pub fn u64_or_zero(in d: Doc, n: u64) -> u64 {
+    if kind(in d, n) == NUMBER && g64(in d.a, n) == 1 {
+        g64(in d.b, n)
+    } else {
+        0
+    }
+}
+
+// The items of an array (`as_array`): count, and the id of item `i`.
+pub fn items(in d: Doc, n: u64) -> u64 {
+    if kind(in d, n) != ARRAY {
+        return 0;
+    }
+    g64(in d.b, n)
+}
+
+pub fn item(in d: Doc, n: u64, i: u64) -> u64 {
+    g64(in d.kids, wrapping_add(g64(in d.a, n), i))
+}
+
+pub fn put(inout o: ChunkSeq[u8], in s: Str) {
+    let b = s.as_bytes();
+    for i in 0..b.len() {
+        o.push(byte(in b, i));
+    }
+}
+
+pub fn put_u64(inout o: ChunkSeq[u8], n: u64) {
+    if n >= 10 {
+        put_u64(inout o, n / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(48, n % 10)));
+}
+
+// The error as serde_json's `Display` writes it: the message, then
+// ` at line L column C`.
+pub fn put_error(inout o: ChunkSeq[u8], in d: Doc, in t: Slice[u8]) {
+    let c = d.err;
+    if c == EOF_LIST {
+        put(inout o, in "EOF while parsing a list");
+    } else if c == EOF_OBJECT {
+        put(inout o, in "EOF while parsing an object");
+    } else if c == EOF_STRING {
+        put(inout o, in "EOF while parsing a string");
+    } else if c == EOF_VALUE {
+        put(inout o, in "EOF while parsing a value");
+    } else if c == EXPECTED_COLON {
+        put(inout o, in "expected `:`");
+    } else if c == EXPECTED_LIST {
+        put(inout o, in "expected `,` or `]`");
+    } else if c == EXPECTED_OBJECT {
+        put(inout o, in "expected `,` or `}`");
+    } else if c == EXPECTED_IDENT {
+        put(inout o, in "expected ident");
+    } else if c == EXPECTED_VALUE {
+        put(inout o, in "expected value");
+    } else if c == INVALID_ESCAPE {
+        put(inout o, in "invalid escape");
+    } else if c == INVALID_NUMBER {
+        put(inout o, in "invalid number");
+    } else if c == OUT_OF_RANGE {
+        put(inout o, in "number out of range");
+    } else if c == CONTROL {
+        put(inout o, in "control character (\\u0000-\\u001F) found while parsing a string");
+    } else if c == KEY_STRING {
+        put(inout o, in "key must be a string");
+    } else if c == LONE_SURROGATE {
+        put(inout o, in "lone leading surrogate in hex escape");
+    } else if c == TRAILING_COMMA {
+        put(inout o, in "trailing comma");
+    } else if c == TRAILING_CHARS {
+        put(inout o, in "trailing characters");
+    } else if c == END_OF_HEX {
+        put(inout o, in "unexpected end of hex escape");
+    } else {
+        put(inout o, in "recursion limit exceeded");
+    }
+    // `position_of_index`.
+    let i = d.err_at;
+    let mut line: u64 = 1;
+    let mut start: u64 = 0;
+    for k in 0..i {
+        if byte(in t, k) == 10 {
+            line = inc(line);
+            start = inc(k);
+        }
+    }
+    put(inout o, in " at line ");
+    put_u64(inout o, line);
+    put(inout o, in " column ");
+    put_u64(inout o, wrapping_sub(i, start));
+}
+
+fn hex(c: u8) -> u8 {
+    if c < 10 {
+        wrapping_add(48, c)
+    } else {
+        wrapping_add(87, c)
+    }
+}
+
+// A JSON string with serde_json's escapes.
+pub fn put_string(inout o: ChunkSeq[u8], in b: Slice[u8]) {
+    o.push(34);
+    for i in 0..b.len() {
+        let c = byte(in b, i);
+        if c == 34 || c == 92 {
+            o.push(92);
+            o.push(c);
+        } else if c < 32 {
+            o.push(92);
+            if c == 8 {
+                o.push(98);
+            } else if c == 12 {
+                o.push(102);
+            } else if c == 10 {
+                o.push(110);
+            } else if c == 13 {
+                o.push(114);
+            } else if c == 9 {
+                o.push(116);
+            } else {
+                put(inout o, in "u00");
+                o.push(hex(c >> 4));
+                o.push(hex(c & 15));
+            }
+        } else {
+            o.push(c);
+        }
+    }
+    o.push(34);
+}

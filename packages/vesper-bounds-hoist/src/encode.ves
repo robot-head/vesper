@@ -9,38 +9,16 @@
 // Names are interned locally by their bytes, so a `Fun` name id is not the
 // program's symbol; the decisions only compare names and read their text.
 
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
-use @vesper/check-data::types::{
-    Types,
-    debug_type,
-    default_type,
-    TyKind
-};
-use @vesper/place-ir::{
-    Program
-};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/check-data::types::{Types, debug_type, default_type, TyKind};
+use @vesper/place-ir::{Program};
 use self::words::{
     Ascii,
     SeqWord,
     Word,
 };
-use self::fun::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    w
-};
-use @vesper/place-ir::codes::{
-    Lit,
-    Op,
-    Pat,
-    Term
-};
+use self::fun::{add, inc, n32, u32_at, u64_at, w};
+use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
 
 const MAX_DEPTH: u64 = 512;
 

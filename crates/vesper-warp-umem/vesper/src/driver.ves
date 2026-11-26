@@ -132,11 +132,7 @@ impl Device {
 
     fn check_loc(in self, chunk: u32, expected: u64) -> Option[PortError] {
         if chunk >= self.nic.config.frame_count || self.loc(chunk) != expected {
-            return Option::Some(
-                PortError::WrongLocation {
-                    chunk: chunk
-                }
-            );
+            return Option::Some(PortError::WrongLocation { chunk: chunk });
         }
         Option::None
     }
@@ -146,23 +142,14 @@ impl Device {
         let headroom = self.nic.config.headroom;
         let frame_size = self.nic.config.frame_size;
         if offset < headroom {
-            return Option::Some(
-                PortError::HeadroomOverlap {
-                    offset: offset,
-                    headroom: headroom
-                }
-            );
+            return Option::Some(PortError::HeadroomOverlap { offset: offset, headroom: headroom });
         }
         let end = wrapping_add(widen_u64(offset), widen_u64(len));
         if len > 0 && end <= widen_u64(frame_size) {
             return Option::None;
         }
         Option::Some(
-            PortError::LengthOutOfFrame {
-                offset: offset,
-                len: len,
-                frame_size: frame_size
-            }
+            PortError::LengthOutOfFrame { offset: offset, len: len, frame_size: frame_size }
         )
     }
 
@@ -191,35 +178,16 @@ impl Device {
     fn classify_rx(in self, d: XdpDesc) -> Result[(u32, u32, u32), (DescError, Option[u32])] {
         let c = self.nic.config;
         if d.addr >= self.nic.umem_len {
-            return Result::Err(
-                (
-                    DescError::OutOfUmem {
-                        addr: d.addr
-                    },
-                    Option::None
-                )
-            );
+            return Result::Err((DescError::OutOfUmem { addr: d.addr }, Option::None));
         }
         let chunk = wrapping_u32(shr(d.addr, self.nic.shift));
         if self.loc(chunk) != L_FILL_POSTED {
-            return Result::Err(
-                (
-                    DescError::NotKernelOwned {
-                        chunk: chunk
-                    },
-                    Option::None
-                )
-            );
+            return Result::Err((DescError::NotKernelOwned { chunk: chunk }, Option::None));
         }
         let offset = wrapping_u32(d.addr & self.nic.frame_mask());
         if d.options != 0 {
             return Result::Err(
-                (
-                    DescError::UnsupportedOptions {
-                        options: d.options
-                    },
-                    Option::Some(chunk)
-                )
+                (DescError::UnsupportedOptions { options: d.options }, Option::Some(chunk))
             );
         }
         if d.len == 0 {
@@ -228,10 +196,7 @@ impl Device {
         if offset < c.headroom {
             return Result::Err(
                 (
-                    DescError::HeadroomOverlap {
-                        offset: offset,
-                        headroom: c.headroom
-                    },
+                    DescError::HeadroomOverlap { offset: offset, headroom: c.headroom },
                     Option::Some(chunk)
                 )
             );
@@ -242,11 +207,7 @@ impl Device {
         }
         Result::Err(
             (
-                DescError::OverLength {
-                    offset: offset,
-                    len: d.len,
-                    frame_size: c.frame_size
-                },
+                DescError::OverLength { offset: offset, len: d.len, frame_size: c.frame_size },
                 Option::Some(chunk)
             )
         )
@@ -612,13 +573,7 @@ pub fn xsk_harvest_rx(inout d: Device) -> Result[Option[(u32, u32, u32)], RxReje
                 },
                 Option::None => (),
             }
-            Result::Err(
-                RxRejected {
-                    reason: reason,
-                    chunk: chunk,
-                    recycled: recycled
-                }
-            )
+            Result::Err(RxRejected { reason: reason, chunk: chunk, recycled: recycled })
         },
     }
 }
@@ -640,11 +595,7 @@ pub fn xsk_submit(inout d: Device, chunk: u32, offset: u32, len: u32, pkt_num_fu
         Option::None => (),
     }
     if pkt_num_full >= max_packet_number_exclusive() {
-        return Option::Some(
-            PortError::PacketNumberOutOfRange {
-                pn: pkt_num_full
-            }
-        );
+        return Option::Some(PortError::PacketNumberOutOfRange { pn: pkt_num_full });
     }
     let desc = XdpDesc {
         addr: wrapping_add(d.base(chunk), widen_u64(offset)),
@@ -663,12 +614,7 @@ pub fn xsk_submit(inout d: Device, chunk: u32, offset: u32, len: u32, pkt_num_fu
 }
 
 pub fn xsk_harvest_completions(inout d: Device, max: u32) -> CompletionReport {
-    let mut report = CompletionReport {
-        completed_leased: 0,
-        freed: 0,
-        leaked: 0,
-        invalid: 0
-    };
+    let mut report = CompletionReport { completed_leased: 0, freed: 0, leaked: 0, invalid: 0 };
     let (count, first) = d.nic.completion.peek(max);
     for i in 0..widen_u64(count) {
         let addr = d.nic.completion.slot_a(wrapping_add(first, wrapping_u32(i)));
@@ -719,9 +665,5 @@ pub fn xsk_retire(inout d: Device, chunk: u32) -> Result[RetireOutcome, PortErro
             return Result::Ok(RetireOutcome::AwaitingCompletion);
         }
     }
-    Result::Err(
-        PortError::WrongLocation {
-            chunk: chunk
-        }
-    )
+    Result::Err(PortError::WrongLocation { chunk: chunk })
 }

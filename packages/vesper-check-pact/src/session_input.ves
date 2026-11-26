@@ -1,31 +1,13 @@
 // Input/output codecs and ASCII validation helpers for `@vesper/check-pact`'s
 // trait session (`session.ves`).
 
-use @vesper/check-data::input::{
-    Ctx,
-    Reader
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    EffNode,
-    TyKind
-};
+use @vesper/check-data::input::{Ctx, Reader};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{EffNode, TyKind};
 
 const K_FN: u8 = TyKind::Fn;
-use @vesper/check-data::util::{
-    add,
-    inc,
-    inc32,
-    n32,
-    push_decimal,
-    u32_at,
-    w
-};
-use self::decl::{
-    Gen
-};
+use @vesper/check-data::util::{add, inc, inc32, n32, push_decimal, u32_at, w};
+use self::decl::{Gen};
 
 const NONE32: u32 = 4294967295;
 
@@ -48,11 +30,7 @@ impl SessionMeta {
     pub fn eff_gen(in self, i: u64) -> Gen {
         match self.eff_gens.try_get(i) {
             Option::Some(g) => g,
-            Option::None => Gen {
-                name: 0,
-                bound: 0,
-                row: false
-            },
+            Option::None => Gen { name: 0, bound: 0, row: false },
         }
     }
 }
@@ -99,14 +77,7 @@ pub fn read_session_meta(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32
             let gname = sym(in nmap, r.word(in b));
             let gbound = wrapping_u8(r.word(in b));
             let grow = r.word(in b) != 0;
-            eff_gens
-                .push(
-                    Gen {
-                        name: gname,
-                        bound: gbound,
-                        row: grow
-                    }
-                );
+            eff_gens.push(Gen { name: gname, bound: gbound, row: grow });
         }
         eff_ga.push(ga);
         eff_gn.push(n32(gn));
@@ -188,15 +159,7 @@ fn read_q_row(
         for _ in 0..n {
             args.push(u32_at(in tmap, r.word(in b)));
         }
-        es
-            .push(
-                EffNode {
-                    label: label,
-                    name: name,
-                    a: a,
-                    n: n32(n)
-                }
-            );
+        es.push(EffNode { label: label, name: name, a: a, n: n32(n) });
     }
     let tail = opt_sym(in nmap, r.word(in b));
     c.types.mk_row(in es, in args, tail)
@@ -267,13 +230,7 @@ fn read_q_goal(
     for _ in 0..arg_n {
         let is_row = r.word(in b) != 0;
         let ty = u32_at(in tmap, r.word(in b));
-        args
-            .push(
-                QArg {
-                    is_row: is_row,
-                    ty: ty
-                }
-            );
+        args.push(QArg { is_row: is_row, ty: ty });
     }
     let brand_opt = opt_sym(in nmap, r.word(in b));
     QGoal {
@@ -286,9 +243,7 @@ fn read_q_goal(
 }
 
 pub fn read_query(in b: Slice[u8], inout c: Ctx) -> QuerySpec {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut nmap: ChunkSeq[u32] = ChunkSeq::new[u32]();
     read_q_names(inout r, in b, inout c.names, inout nmap);
     let mut tmap: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -300,14 +255,7 @@ pub fn read_query(in b: Slice[u8], inout c: Ctx) -> QuerySpec {
         let name = sym(in nmap, r.word(in b));
         let bound = wrapping_u8(r.word(in b));
         let row = r.word(in b) != 0;
-        env_params
-            .push(
-                Gen {
-                    name: name,
-                    bound: bound,
-                    row: row
-                }
-            );
+        env_params.push(Gen { name: name, bound: bound, row: row });
     }
 
     let na = r.word(in b);

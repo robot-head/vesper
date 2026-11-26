@@ -1,0 +1,6 @@
+use @accept/kinds::{Kind, rank};
+use self::text::size;
+
+fn main() -> i64 {
+    wrapping_i64(wrapping_add(wrapping_mul(rank(Kind::String), 10), size()))
+}

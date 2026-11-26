@@ -18,26 +18,9 @@
 // The entries below are the harness's own differential tasks
 // (tests/self_host_check_data.rs).
 
-use self::util::{
-    n32,
-    put_text_words,
-    u32_at,
-    u8_at,
-    w
-};
-use self::names::{
-    Names
-};
-use self::types::{
-    TyKind,
-    Types,
-    Vars,
-    debug_type,
-    default_type,
-    display,
-    substitute,
-    vars_new
-};
+use self::util::{n32, put_text_words, u32_at, u8_at, w};
+use self::names::{Names};
+use self::types::{TyKind, Types, Vars, debug_type, default_type, display, substitute, vars_new};
 use self::world::{
     Adt,
     Variant,
@@ -48,11 +31,7 @@ use self::world::{
     mode_of,
     vector_words
 };
-use self::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
+use self::input::{Ctx, Reader, read_ctx};
 
 const NONE32: u32 = 4294967295;
 
@@ -95,9 +74,7 @@ fn line_debug(inout o: ChunkSeq[u8], in c: Ctx, ty: u32) {
 // (name index, type index)).
 pub fn check_data_types(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let mut o = ChunkSeq::new[u8]();
     let n = r.word(in b);
@@ -138,9 +115,7 @@ pub fn check_data_types(in input: Str) -> ChunkSeq[u64] {
 //   `partial_ops` and `overflow_ops` membership (O: two digits).
 pub fn check_data_world(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let mut o = ChunkSeq::new[u8]();
     let none = bounds_new();
@@ -239,9 +214,7 @@ pub fn check_data_world(in input: Str) -> ChunkSeq[u64] {
 // round-trip test and as the cheapest entry to time the decoder with.
 pub fn check_data_sizes(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let mut out = ChunkSeq::new[u64]();
     out.push(c.names.len());

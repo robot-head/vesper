@@ -7,41 +7,13 @@
 // `f.values`). So a set's bits in order are Rust's `BTreeSet<Local>`
 // order: slots by name, then values by id.
 
-use @vesper/check-data::types::{
-    Types,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    w
-};
-use @vesper/check-data::world::{
-    World
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/place-ir::{
-    BlockRow,
-    FnRow,
-    InstRow,
-    Program
-};
-use self::fn_input::{
-    Fns,
-    Sig
-};
-use @vesper/place-ir::codes::{
-    Lit,
-    Op,
-    Pat,
-    Term
-};
+use @vesper/check-data::types::{Types, TyKind, TyPass};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, w};
+use @vesper/check-data::world::{World};
+use @vesper/check-data::names::{Names};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, Program};
+use self::fn_input::{Fns, Sig};
+use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
 
 pub const NONE32: u32 = 4294967295;
 pub const NONE64: u64 = 18446744073709551615;
@@ -102,17 +74,7 @@ pub fn fun(in p: Program, in fx: Fns, fi: u64) -> Fun {
         let ty = n32(p.op(i));
         // type, span start and end
         i = add(i, 3);
-        f
-            .params
-            .push(
-                PRow {
-                    name: name,
-                    pass: pass,
-                    qa: qa,
-                    qn: qn,
-                    ty: ty
-                }
-            );
+        f.params.push(PRow { name: name, pass: pass, qa: qa, qn: qn, ty: ty });
     }
     f.result = n32(p.op(i));
     f.effects = n32(p.op(inc(i)));
@@ -204,13 +166,7 @@ impl Fun {
     pub fn param(in self, k: u64) -> PRow {
         match self.params.try_get(k) {
             Option::Some(r) => r,
-            Option::None => PRow {
-                name: 0,
-                pass: 0,
-                qa: 0,
-                qn: 0,
-                ty: 0
-            },
+            Option::None => PRow { name: 0, pass: 0, qa: 0, qn: 0, ty: 0 },
         }
     }
 

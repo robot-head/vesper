@@ -21,25 +21,10 @@
 // 12, Message 13), then the scalar's 64-bit two's-complement bits, or a
 // byte range (start, length) of the input (decoding) or the arena
 // (encoding). A Message field is followed by the nested message.
-use self::{
-    GErr
-};
-use self::common::{
-    add_or,
-    fail,
-    leb_len,
-    max,
-    min,
-    mul_or,
-    put_leb,
-    sw
-};
-use self::framing::{
-    leb_decode
-};
-use self::utf8::{
-    valid_up_to
-};
+use self::{GErr};
+use self::common::{add_or, fail, leb_len, max, min, mul_or, put_leb, sw};
+use self::framing::{leb_decode};
+use self::utf8::{valid_up_to};
 
 // Kind and Value indices (see above).
 const K_U32: u64 = 0;
@@ -918,11 +903,7 @@ pub fn encode_into(
     if out.len() < size {
         fail(14, 0);
     }
-    let mut wr = Wr {
-        pos: 0,
-        cur: 0,
-        size: 0
-    };
+    let mut wr = Wr { pos: 0, cur: 0, size: 0 };
     write_message(in schema, in vals, in arena, in sizes, inout out, inout wr, root);
     size
 }

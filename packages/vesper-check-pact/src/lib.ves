@@ -17,57 +17,21 @@
 // `pact_frontend::declaration_pass` on every corpus world, the checker's
 // trait tests and mutants that make each diagnostic fire.
 
-use @vesper/check-data::input::{
-    Reader,
-    read_ctx
-};
-use @vesper/check-data::{
-    pack_text
-};
-use self::decl::{
-    read_decls
-};
-pub use self::deps::{
-    deps_words
-};
-use self::tyops::{
-    sy_new
-};
-use self::frontend::{
-    declaration_pass,
-    fe_new
-};
-pub use self::session::{
-    PactSession,
-    session_open,
-    session_solve
-};
-pub use self::builtin_traits::{
-    builtin_wanted_words
-};
-use self::builtin_traits::{
-    builtin_derive_words
-};
-pub use self::mono_check::{
-    session_mono_check_words
-};
-use self::mono_check::{
-    mono_check_words
-};
-pub use self::mono_plan::{
-    session_mono_plan_words
-};
-use self::mono_plan::{
-    mono_plan_words
-};
-use self::resolve::{
-    normalize_words,
-    resolve_words
-};
-use self::session::{
-    queries_words,
-    session_words
-};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/check-data::{pack_text};
+use self::decl::{read_decls};
+pub use self::deps::{deps_words};
+use self::tyops::{sy_new};
+use self::frontend::{declaration_pass, fe_new};
+pub use self::session::{PactSession, session_open, session_solve};
+pub use self::builtin_traits::{builtin_wanted_words};
+use self::builtin_traits::{builtin_derive_words};
+pub use self::mono_check::{session_mono_check_words};
+use self::mono_check::{mono_check_words};
+pub use self::mono_plan::{session_mono_plan_words};
+use self::mono_plan::{mono_plan_words};
+use self::resolve::{normalize_words, resolve_words};
+use self::session::{queries_words, session_words};
 
 // Task "mono_plan" (part 6): `Mono::evidence`, `Mono::instance`, `Mono::instantiate_body`.
 pub fn check_pact_mono_plan(in input: Str) -> ChunkSeq[u64] {
@@ -126,9 +90,7 @@ pub fn check_pact_declarations(in input: Str) -> ChunkSeq[u64] {
 // `check_pact_declarations` over the input's bytes: the entry of the hybrid
 // build's `modules/pact` (crates/vesper-hybrid).
 pub fn declarations_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let d = read_decls(inout r, in b, in c.nmap, in c.tmap);
     let sy = sy_new(inout c.names);

@@ -1,20 +1,10 @@
 // `vesper test`: CLI option parsing, validation, and `--help` in Vesper,
 // delegating doctest (`src/doctest_commands.rs`) and unit/mutation test
 // execution (`src/test_runner.rs`) to `HybridCommands::hc_test_run`.
-use @vesper/driver::{
-    Args,
-    args_count,
-    eq
-};
-use super::{
-    arg,
-    byte_at,
-    print,
-    fail,
-    stdout_stream
-};
+use @vesper/driver::{Args, args_count, eq};
+use super::{PrintFailed, arg, byte_at, print, fail, stdout_stream};
 
-fn print_test_help() eff [Ffi[HybridCommands]] {
+fn print_test_help() eff [Ffi[StdFs], Fail[PrintFailed]] {
     print(
         stdout_stream(),
         in "Usage: vesper test --doc [FILE|DIR] [--json]\n       vesper test <FILE|DIR> [--mutate] [--mutate-dependency <FILE>] [--filter <PAT>] [--mutant-offset <N>] [--max-mutants <N>] [--no-opt] [--fuel <N>] [--link-search <DIR>] [--json]\n\nUnit & Mutation Tests (`vesper test <FILE|DIR>`):\n  Run `test_*` functions, `@test` functions, and named `// @case` rows. For a package directory\n  or a file under its `src/`, resolve imports using `Loom.toml`. A file runs its own tests; a\n  package directory runs tests in every source module. Dependencies provide ordinary declarations.\n  Tests use JIT where supported and fall back to the evaluator. With `--mutate`, mutations\n  in the selected source scope are replayed against the suite. `--link-search` adds a directory\n  the `.vsys` library loader looks in first.\n\nDoctests (`vesper test --doc [FILE|DIR]`):\nExtract actual Vesper doc-comment fences, fully check examples, and run supported finite scalar entries in one shared JIT module per file;\nexamples outside the native subset run on the reference evaluator instead, and each result names its engine.\nWith no path (or a directory), run every .ves source of the package that has doc examples: the nearest\nLoom.toml at or above the directory (else the directory itself); hidden, target/, bazel-* and nested-package\ndirectories are skipped and symlinks are not followed. Files without examples are listed, not run; a package\nwith no examples at all fails. Each file's examples are checked against that file; the runnable examples of all\nfiles then share ONE package module and ONE JIT module when the files' top-level names are disjoint, otherwise\neach file runs in its own module and the report says why.\ncompile_fail(E...) must match exact example diagnostics; base errors and unsupported execution never count as success.\n`vesper,sim(seed=N,clock,net,disk)` fences run on the reference evaluator under a seeded SimPulse kernel with\nsimulated clock, network and disk effects, twice: the second run replays the first run's journal.\nSource/check/module budgets apply; this is not an OS sandbox or a hard deadline.\n"
@@ -53,14 +43,15 @@ fn any_help(in args: Args, n: u64) -> bool {
     false
 }
 
-fn fail_test(has_json: bool, in message: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
+fn fail_test(has_json: bool, in message: Slice[u8])
+    -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     if has_json {
         HybridCommands::hc_test_json_err(in message);
     }
     fail(in message)
 }
 
-fn fail_usage(has_json: bool) -> i64 eff [Ffi[HybridCommands]] {
+fn fail_usage(has_json: bool) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     fail_test(
         has_json,
         in "usage: vesper test --doc [FILE|DIR] [--json]\n       vesper test <FILE|DIR> [--mutate] [--mutate-dependency <FILE>] [--filter <PAT>] [--mutant-offset <N>] [--max-mutants <N>] [--no-opt] [--fuel <N>] [--engines all|unit] [--no-cache] [--json]"
@@ -83,7 +74,8 @@ fn pack_args(in args: Args, n: u64) -> ChunkSeq[u8] {
     packed
 }
 
-fn run_packed(in args: Args, n: u64) -> i64 eff [Ffi[HybridCommands]] {
+fn run_packed(in args: Args, n: u64)
+    -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let packed = pack_args(in args, n);
     let err_len = HybridCommands::hc_test_run(in packed.as_slice());
     if err_len == 0 {
@@ -155,7 +147,8 @@ fn parse_u64(in text: Slice[u8], inout out: u64) -> bool {
     true
 }
 
-fn run_doctest_cli(in args: Args, n: u64, has_json: bool) -> i64 eff [Ffi[HybridCommands]] {
+fn run_doctest_cli(in args: Args, n: u64, has_json: bool)
+    -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let mut doc = false;
     let mut json = false;
     let mut has_file = false;
@@ -183,7 +176,7 @@ fn run_doctest_cli(in args: Args, n: u64, has_json: bool) -> i64 eff [Ffi[Hybrid
     run_packed(in args, n)
 }
 
-pub fn run_test(in args: Args) -> i64 eff [Ffi[HybridCommands]] {
+pub fn run_test(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let n = args_count(in args);
     if any_help(in args, n) {
         print_test_help();

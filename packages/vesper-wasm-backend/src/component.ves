@@ -5,39 +5,13 @@
 // wit-parser) stays in Rust: the harness wraps this port's core module and
 // WIT text with it.
 
-use @vesper/check-data::types::{
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    w
-};
-use self::enc::{
-    Code,
-    ValTy,
-    code_new,
-    function_bytes,
-    vt
-};
-use self::err::{
-    WErr,
-    werr
-};
-use self::lower::{
-    L,
-    body_each,
-    body_n,
-    get32
-};
-use self::host::{
-    active,
-    wit_imports
-};
-use self::plan::{
-    Shape
-};
+use @vesper/check-data::types::{TyKind, TyPass};
+use @vesper/check-data::util::{add, inc, w};
+use self::enc::{Code, ValTy, code_new, function_bytes, vt};
+use self::err::{WErr, werr};
+use self::lower::{L, body_each, body_n, get32};
+use self::host::{active, wit_imports};
+use self::plan::{Shape};
 
 const NONE32: u32 = 4294967295;
 const K_UNSUPPORTED: u8 = 0;
@@ -217,11 +191,7 @@ pub struct Wit {
 }
 
 pub fn wit_new() -> Wit {
-    Wit {
-        defs: ChunkSeq::new[u8](),
-        names: ChunkSeq::new[u32](),
-        active: ChunkSeq::new[u32]()
-    }
+    Wit { defs: ChunkSeq::new[u8](), names: ChunkSeq::new[u32](), active: ChunkSeq::new[u32]() }
 }
 
 fn set32(inout t: ChunkSeq[u32], k: u32, v: u32) {
@@ -824,12 +794,7 @@ fn has_string(inout l: L, t: u32) -> bool {
         l.cx.shape(t)
     } with {
         return value => value,
-        raise(e, resume) => Shape {
-            kind: 255,
-            scalar: 0,
-            adt: NONE32,
-            ty: 0
-        },
+        raise(e, resume) => Shape { kind: 255, scalar: 0, adt: NONE32, ty: 0 },
     };
     if sh.kind == SH_STR {
         return true;

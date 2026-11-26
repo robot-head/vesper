@@ -96,6 +96,29 @@ pub copy struct Lir {
     f3: u64,
 }
 
+// A lowered program (`compile`'s `lir`): function `f` is the rows
+// `rows[starts[f]..starts[f + 1]]` named `names[name_at[f]..name_at[f + 1]]`,
+// with the entry's result word count and label.
+pub struct Lowered {
+    rows: ChunkSeq[Lir],
+    starts: ChunkSeq[u64],
+    names: ChunkSeq[u8],
+    name_at: ChunkSeq[u64],
+    result_words: u64,
+    entry_label: u64,
+}
+
+pub fn lowered_new() -> Lowered {
+    Lowered {
+        rows: ChunkSeq::new[Lir](),
+        starts: ChunkSeq::new[u64](),
+        names: ChunkSeq::new[u8](),
+        name_at: ChunkSeq::new[u64](),
+        result_words: 0,
+        entry_label: 0
+    }
+}
+
 // `M` instructions, in the order of the Rust enum.
 pub const M_LD: u8 = 0;
 pub const M_ST: u8 = 1;
@@ -140,63 +163,27 @@ pub copy struct M {
 }
 
 fn m0(op: u8) -> M {
-    M {
-        op: op,
-        a: 0,
-        b: 0,
-        n: 0,
-        n2: 0
-    }
+    M { op: op, a: 0, b: 0, n: 0, n2: 0 }
 }
 
 fn m1(op: u8, a: u8) -> M {
-    M {
-        op: op,
-        a: a,
-        b: 0,
-        n: 0,
-        n2: 0
-    }
+    M { op: op, a: a, b: 0, n: 0, n2: 0 }
 }
 
 fn mn(op: u8, n: u64) -> M {
-    M {
-        op: op,
-        a: 0,
-        b: 0,
-        n: n,
-        n2: 0
-    }
+    M { op: op, a: 0, b: 0, n: n, n2: 0 }
 }
 
 fn ld(r: u8, loc: u8, n: u64) -> M {
-    M {
-        op: M_LD,
-        a: r,
-        b: loc,
-        n: n,
-        n2: 0
-    }
+    M { op: M_LD, a: r, b: loc, n: n, n2: 0 }
 }
 
 fn st(loc: u8, n: u64, r: u8) -> M {
-    M {
-        op: M_ST,
-        a: r,
-        b: loc,
-        n: n,
-        n2: 0
-    }
+    M { op: M_ST, a: r, b: loc, n: n, n2: 0 }
 }
 
 fn imm(r: u8, w: u64) -> M {
-    M {
-        op: M_IMM,
-        a: r,
-        b: 0,
-        n: w,
-        n2: 0
-    }
+    M { op: M_IMM, a: r, b: 0, n: w, n2: 0 }
 }
 
 // `Kind::signed`, then `Kind::sign`.
@@ -293,16 +280,7 @@ pub fn select(in row: Lir, inout out: ChunkSeq[M]) {
         out.push(st(L_SLOT, row.f1, R0));
     } else if t == LIR_COMPARE {
         let mut body = ChunkSeq::new[M]();
-        body
-            .push(
-                M {
-                    op: M_CMP,
-                    a: row.op,
-                    b: sign(row.kind),
-                    n: 0,
-                    n2: 0
-                }
-            );
+        body.push(M { op: M_CMP, a: row.op, b: sign(row.kind), n: 0, n2: 0 });
         binary(inout out, row.f2, row.f3, in body, row.f1);
     } else if t == LIR_FARITH {
         let mut body = ChunkSeq::new[M]();
@@ -357,16 +335,7 @@ pub fn select(in row: Lir, inout out: ChunkSeq[M]) {
     } else if t == LIR_TRAP {
         out.push(m1(M_TRAP, row.op));
     } else {
-        out
-            .push(
-                M {
-                    op: M_SCOPE,
-                    a: 0,
-                    b: 0,
-                    n: row.f1,
-                    n2: row.f2
-                }
-            );
+        out.push(M { op: M_SCOPE, a: 0, b: 0, n: row.f1, n2: row.f2 });
     }
 }
 
@@ -582,14 +551,7 @@ pub fn put_selected(inout out: ChunkSeq[u8], in row: Lir) {
 }
 
 fn row(tag: u8, op: u8, kind: u8, f1: u64, f2: u64, f3: u64) -> Lir {
-    Lir {
-        tag: tag,
-        op: op,
-        kind: kind,
-        f1: f1,
-        f2: f2,
-        f3: f3
-    }
+    Lir { tag: tag, op: op, kind: kind, f1: f1, f2: f2, f3: f3 }
 }
 
 fn line(inout out: ChunkSeq[u8], in r: Lir) {

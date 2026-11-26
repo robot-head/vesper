@@ -12,29 +12,10 @@
 // Every write goes to a writer bounded by `max_output_bytes` that refuses a
 // write that does not fit, so the page fails with "output byte budget
 // exceeded" exactly when its full text is longer than the budget.
-use @vesper/serde::{
-    Doc,
-    Error,
-    Kind,
-    Limits,
-    Token,
-    doc_field,
-    doc_new,
-    doc_parse
-};
-use @vesper/serde::index::{
-    next_decoded,
-    tok
-};
-use self::json::{
-    PRETTY_OK,
-    pretty
-};
-use self::{
-    Reader,
-    read_bytes,
-    read_word
-};
+use @vesper/serde::{Doc, Error, Kind, Limits, Token, doc_field, doc_new, doc_parse};
+use @vesper/serde::index::{next_decoded, tok};
+use self::json::{PRETTY_OK, pretty};
+use self::{Reader, read_bytes, read_word};
 
 const AMP: u8 = 38;
 const LT: u8 = 60;
@@ -311,9 +292,7 @@ pub fn page(in b: Slice[u8], from: u64, to: u64, max: u64, inout o: ChunkSeq[u8]
 // `render_preflight` and the retained-text checks), so each reference lies
 // inside one comment, after the one before it.
 pub fn linked(in b: Slice[u8], inout o: ChunkSeq[u8]) -> u64 {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let max = read_word(inout r, in b);
     let (js, je) = read_bytes(inout r, in b);
     let status = page_body(in b, js, je, max, inout o);
@@ -345,13 +324,9 @@ pub fn linked(in b: Slice[u8], inout o: ChunkSeq[u8]) -> u64 {
         read_word(inout r, in b);
         read_word(inout r, in b);
     }
-    let mut refs = Reader {
-        pos: r.pos
-    };
+    let mut refs = Reader { pos: r.pos };
     let mut left = read_word(inout refs, in b);
-    let mut c = Reader {
-        pos: first_comment
-    };
+    let mut c = Reader { pos: first_comment };
     for _c in 0..comments {
         let (ts, te) = read_bytes(inout c, in b);
         let start = read_word(inout c, in b);
@@ -363,9 +338,7 @@ pub fn linked(in b: Slice[u8], inout o: ChunkSeq[u8]) -> u64 {
                 break;
             }
             // Peek at the next reference.
-            let mut peek = Reader {
-                pos: refs.pos
-            };
+            let mut peek = Reader { pos: refs.pos };
             let rs = read_word(inout peek, in b);
             if rs >= end {
                 break;

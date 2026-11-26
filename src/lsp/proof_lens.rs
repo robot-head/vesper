@@ -826,3 +826,105 @@ impl Drop for Stage {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+
+/// One word, then the bytes, of a string in a port job.
+fn put_text(out: &mut Vec<u8>, text: &[u8]) {
+    out.extend_from_slice(&(text.len() as u64).to_le_bytes());
+    out.extend_from_slice(text);
+}
+
+fn put_word(out: &mut Vec<u8>, word: u64) {
+    out.extend_from_slice(&word.to_le_bytes());
+}
+
+/// The prepared job as the Vesper port's runner reads it: the launcher;
+/// the auditor and the cache (a presence word, then the path); the clamped
+/// timeout; the extraction (presence, module text, functions); then per
+/// model its function, module and theorem names, exact and bit-vector
+/// modules, key, and parameters (name and kind: 0 u8, 1 u32, 2 u64, 3 i64,
+/// 4 bool, 5 unit). Strings are a length word and their bytes.
+pub(crate) fn job_words(job: &Job) -> Vec<u8> {
+    let mut out = Vec::new();
+    let t = &job.toolchain;
+    put_text(&mut out, t.launcher.as_bytes());
+    for path in [&t.auditor, &t.cache] {
+        match path {
+            Some(path) => {
+                put_word(&mut out, 1);
+                put_text(&mut out, path.to_string_lossy().as_bytes());
+            }
+            None => put_word(&mut out, 0),
+        }
+    }
+    put_word(&mut out, t.timeout);
+    match &job.extraction {
+        Some((text, functions)) => {
+            put_word(&mut out, 1);
+            put_text(&mut out, text.as_bytes());
+            put_word(&mut out, functions.len() as u64);
+            for f in functions {
+                put_text(&mut out, f.as_bytes());
+            }
+        }
+        None => put_word(&mut out, 0),
+    }
+    put_word(&mut out, job.models.len() as u64);
+    for model in &job.models {
+        put_text(&mut out, model.function.as_bytes());
+        put_text(&mut out, model.module_name().as_bytes());
+        put_text(&mut out, model.theorem().as_bytes());
+        put_text(&mut out, model.exact_module().as_bytes());
+        put_text(&mut out, model.bitvec_module().as_bytes());
+        out.extend_from_slice(&model.key);
+        put_word(&mut out, model.params.len() as u64);
+        for (name, kind) in &model.params {
+            put_text(&mut out, name.as_bytes());
+            put_word(&mut out, kind.code());
+        }
+    }
+    out
+}
+
+/// `text` with `\\`, tabs, carriage returns and newlines escaped.
+fn escaped(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+}
+
+fn status_row(status: &ProofStatus) -> String {
+    match status {
+        ProofStatus::NotAttempted => "not_attempted".into(),
+        ProofStatus::Proved { detail } => format!("proved\t{}", escaped(detail)),
+        ProofStatus::Checked { detail } => format!("checked_native\t{}", escaped(detail)),
+        ProofStatus::Refuted { counterexample } => {
+            format!("refuted\t{}", escaped(counterexample))
+        }
+        ProofStatus::Failed { stage, reason } => {
+            format!("failed\t{stage}\t{}", escaped(reason))
+        }
+    }
+}
+
+/// A job's outcome as text (`cancelled`, or an `E` row per extraction
+/// obligation, an `S` row per semantic one, then the reuse counts), for the
+/// Vesper port's differential test. The elapsed time is left out.
+pub(crate) fn outcome_rows(outcome: Option<&Outcome>) -> String {
+    let Some(outcome) = outcome else {
+        return "cancelled\n".into();
+    };
+    let mut out = String::new();
+    for (function, status) in &outcome.extraction {
+        out.push_str(&format!("E\t{function}\t{}\n", status_row(status)));
+    }
+    for (function, key, status) in &outcome.semantic {
+        out.push_str(&format!(
+            "S\t{function}\t{}\t{}\n",
+            hex(key),
+            status_row(status)
+        ));
+    }
+    out.push_str(&format!("R\t{}\t{}\n", outcome.reused, outcome.compiled));
+    out
+}

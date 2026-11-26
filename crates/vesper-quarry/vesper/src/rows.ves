@@ -1,27 +1,10 @@
 // Module rows of @vesper/quarry (see lib.ves).
-use self::{
-    CCol,
-    CTab,
-    D,
-    Q,
-    Val
-};
-use self::util::{
-    ccol,
-    ctab,
-    cw,
-    ex,
-    fail_name,
-    find_table,
-    link,
-    node,
-    none,
-    put,
-    put_range
-};
+use self::{CCol, CTab, D, Q, Val};
+use self::util::{ccol, ctab, cw, ex, fail_name, find_table, link, node, none, put, put_range, sw};
 use self::values::{
     charge_row,
     dtab,
+    finite,
     find_data,
     holds,
     row_val,
@@ -229,16 +212,7 @@ pub fn load_data(inout ds: D, inout q: Q, p: u64) -> u64 {
         let nlen = ex(in q, wrapping_add(at, 1));
         let nrows = ex(in q, wrapping_add(at, 2));
         at = wrapping_add(at, 3);
-        ds
-            .dtabs
-            .push(
-                CTab {
-                    noff: noff,
-                    nlen: nlen,
-                    start: at,
-                    n: nrows
-                }
-            );
+        ds.dtabs.push(CTab { noff: noff, nlen: nlen, start: at, n: nrows });
         for r in 0..nrows {
             at = wrapping_add(wrapping_add(at, 1), wrapping_mul(ex(in q, at), 3));
         }
@@ -306,16 +280,7 @@ pub fn load_catalog_ex(inout q: Q, p: u64) -> u64 {
         let nc = ex(in q, wrapping_add(at, 2));
         at = wrapping_add(at, 3);
         let start = q.cols.len();
-        q
-            .tabs
-            .push(
-                CTab {
-                    noff: noff,
-                    nlen: nlen,
-                    start: start,
-                    n: nc
-                }
-            );
+        q.tabs.push(CTab { noff: noff, nlen: nlen, start: start, n: nc });
         for c in 0..nc {
             let col = CCol {
                 noff: ex(in q, at),
@@ -329,4 +294,95 @@ pub fn load_catalog_ex(inout q: Q, p: u64) -> u64 {
         }
     }
     at
+}
+
+// `load_data` reading the encoded input `s` (the call's `prog`) in place.
+pub fn load_data_in(inout ds: D, in s: Slice[u64], p: u64) -> u64 {
+    let n = sw(in s, p);
+    let mut at = wrapping_add(p, 1);
+    for t in 0..n {
+        let noff = sw(in s, at);
+        let nlen = sw(in s, wrapping_add(at, 1));
+        let nrows = sw(in s, wrapping_add(at, 2));
+        at = wrapping_add(at, 3);
+        ds.dtabs.push(CTab { noff: noff, nlen: nlen, start: at, n: nrows });
+        for r in 0..nrows {
+            at = wrapping_add(wrapping_add(at, 1), wrapping_mul(sw(in s, at), 3));
+        }
+    }
+    at
+}
+
+// `table_bytes` reading `s` in place.
+pub fn table_bytes_in(in q: Q, in s: Slice[u64], t: CTab) -> u64 {
+    let sv = size_value(in q);
+    let mut bytes = wrapping_mul(t.n, size_vec(in q));
+    let mut p = t.start;
+    for r in 0..t.n {
+        let nvals = sw(in s, p);
+        bytes = wrapping_add(bytes, wrapping_mul(nvals, sv));
+        let mut at = wrapping_add(p, 1);
+        for k in 0..nvals {
+            let tag = sw(in s, at);
+            if tag == 5 || tag == 6 {
+                bytes = wrapping_add(bytes, sw(in s, wrapping_add(at, 2)));
+            }
+            at = wrapping_add(at, 3);
+        }
+        p = at;
+    }
+    bytes
+}
+
+// `validate_rows` reading `s` in place, with the table's column types and
+// nullability looked up once.
+pub fn validate_rows_in(inout q: Q, in s: Slice[u64], t: CTab) {
+    let c = find_table(in q, t.noff, t.nlen);
+    if c == none() {
+        fail_name(inout q, 2, "data table ", t.noff, t.nlen);
+        return;
+    }
+    let tab = ctab(in q, c);
+    // Per column: the tag a non-null value must have, and whether NULL is
+    // allowed.
+    let mut tags = ChunkSeq::with_capacity[u64](tab.n);
+    let mut nulls = ChunkSeq::with_capacity[bool](tab.n);
+    for k in 0..tab.n {
+        let col = ccol(in q, wrapping_add(tab.start, k));
+        tags.push(wrapping_add(col.ty, 1));
+        nulls.push(col.nullable);
+    }
+    let mut p = t.start;
+    for r in 0..t.n {
+        let nvals = sw(in s, p);
+        if nvals != tab.n {
+            fail_name(inout q, 8, "row width for ", t.noff, t.nlen);
+            return;
+        }
+        let mut at = wrapping_add(p, 1);
+        for k in 0..nvals {
+            let tag = sw(in s, at);
+            let ok = if tag == 0 {
+                match nulls.try_get(k) {
+                    Option::Some(b) => b,
+                    Option::None => false,
+                }
+            } else {
+                tag == cw(in tags, k) && (tag != 3 || finite(sw(in s, wrapping_add(at, 1))))
+            };
+            if !ok {
+                let col = ccol(in q, wrapping_add(tab.start, k));
+                if q.err == 0 {
+                    q.err = 8;
+                    put(inout q.msg, "invalid value for ");
+                    put_range(inout q.msg, in q.pool, t.noff, t.nlen);
+                    q.msg.push(46);
+                    put_range(inout q.msg, in q.pool, col.noff, col.nlen);
+                }
+                return;
+            }
+            at = wrapping_add(at, 3);
+        }
+        p = at;
+    }
 }

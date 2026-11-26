@@ -4,10 +4,7 @@
 // in the Rust build's order, and the result is a tape of offsets into the
 // blob that the Rust wrapper (src/dtb/port.rs) turns into nodes and
 // properties. Failures are DtbFault codes (see lib.ves).
-use self::{
-    DtbFault,
-    Fdt
-};
+use self::{DtbFault, Fdt};
 
 fn truncated(what: u64) -> Never eff [Fail[DtbFault]] {
     Fail::raise(DtbFault::Truncated(what))
@@ -357,12 +354,7 @@ pub fn m_parse(in b: Slice[u8]) -> Fdt eff [Fail[DtbFault]] {
     let boot = be32(in b, 0, blen, 28, 0);
     let size_strings = be32(in b, 0, blen, 32, 0);
     if version < 16 || last > 17 || last > version {
-        Fail::raise(
-            DtbFault::UnsupportedVersion {
-                version: version,
-                last_compatible: last
-            }
-        );
+        Fail::raise(DtbFault::UnsupportedVersion { version: version, last_compatible: last });
     }
     let header: u64 = if version >= 17 {
         40
@@ -503,10 +495,7 @@ pub fn m_parse(in b: Slice[u8]) -> Fdt eff [Fail[DtbFault]] {
             break;
         } else {
             Fail::raise(
-                DtbFault::BadToken {
-                    offset: wrapping_add(off_struct, tok_at),
-                    token: token
-                }
+                DtbFault::BadToken { offset: wrapping_add(off_struct, tok_at), token: token }
             );
         }
     }

@@ -8,14 +8,8 @@
 // few maps the Rust code iterates in key order are sorted by the names'
 // bytes (`cmp_syms`), as `String`'s `Ord` is.
 
-use @vesper/place-ir::{
-    program_new
-};
-use @vesper/place-ir::codes::{
-    Op,
-    Pat,
-    Term
-};
+use @vesper/place-ir::{program_new};
+use @vesper/place-ir::codes::{Op, Pat, Term};
 use @vesper/check-data::util::{
     add,
     inc,
@@ -27,10 +21,7 @@ use @vesper/check-data::util::{
     u64_at,
     w
 };
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
+use @vesper/check-data::names::{Names, names_new};
 use @vesper/check-data::types::{
     TyKind,
     TyPass,
@@ -42,33 +33,10 @@ use @vesper/check-data::types::{
     types_new,
     vars_new
 };
-use @vesper/check-data::world::{
-    Adt,
-    Known,
-    Variant,
-    World,
-    set_by_symbol,
-    world_new
-};
-use @vesper/check-data::input::{
-    Ctx
-};
-use self::err::{
-    WErr,
-    werr,
-    werr_syms
-};
-use self::ir::{
-    EffInst,
-    ExprFactKind,
-    Facts,
-    FnInfo,
-    Ir,
-    Sig,
-    empty_facts,
-    ir_new,
-    pattern_end
-};
+use @vesper/check-data::world::{Adt, Known, Variant, World, set_by_symbol, world_new};
+use @vesper/check-data::input::{Ctx};
+use self::err::{WErr, werr, werr_syms};
+use self::ir::{EffInst, ExprFactKind, Facts, FnInfo, Ir, Sig, empty_facts, ir_new, pattern_end};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
@@ -208,13 +176,7 @@ pub struct Cx {
 }
 
 pub fn cx_new(sink c: Ctx, sink f: Facts, sink ir: Ir) -> Cx {
-    let Ctx {
-        names,
-        types,
-        world,
-        tmap,
-        nmap
-    } = c;
+    let Ctx { names, types, world, tmap, nmap } = c;
     let mut names = names;
     let s = syms_new(inout names);
     let k = world.k;
@@ -310,12 +272,7 @@ pub copy struct Shape {
 }
 
 fn shape_of(kind: u8, scalar: u8, adt: u32, ty: u32) -> Shape {
-    Shape {
-        kind: kind,
-        scalar: scalar,
-        adt: adt,
-        ty: ty
-    }
+    Shape { kind: kind, scalar: scalar, adt: adt, ty: ty }
 }
 
 impl Cx {
@@ -654,10 +611,7 @@ pub struct TVars {
 }
 
 pub fn tvars_new() -> TVars {
-    TVars {
-        keys: ChunkSeq::new[u32](),
-        vals: ChunkSeq::new[u32]()
-    }
+    TVars { keys: ChunkSeq::new[u32](), vals: ChunkSeq::new[u32]() }
 }
 
 impl TVars {
@@ -1227,13 +1181,7 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                     let cv = call_vars(inout cx, callee, ins.s0, ins.s1, in explicit, in vars);
                     let key = instance_name(inout cx, callee, in cv);
                     let s_pc = stage2_heap_swap(perm);
-                    p_calls
-                        .push(
-                            CallTarget {
-                                dest: widen_u64(ins.dest),
-                                callee: key
-                            }
-                        );
+                    p_calls.push(CallTarget { dest: widen_u64(ins.dest), callee: key });
                     perm = stage2_heap_swap(s_pc);
                     let mut ls = ChunkSeq::new[u32]();
                     row_labels(in cx, inout ls, callee);

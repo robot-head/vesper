@@ -41,12 +41,7 @@ use self::bignum::{
     big_u64,
     big_zero
 };
-use self::util::{
-    g32,
-    inc,
-    shl_u64,
-    u
-};
+use self::util::{g32, inc, shl_u64, u};
 
 // IEEE 754 binary64 and binary32: precision (with the hidden bit), emin,
 // emax, +infinity, the sign bit, the quiet NaN and 1.0; and binary64's
@@ -286,11 +281,7 @@ fn decode(bits: u64) -> Exact {
     let biased = wrapping_i64((bits >> F64_FRAC_BITS) & F64_EXP_FIELD);
     let frac = bits & F64_FRAC_MASK;
     if biased == 0 {
-        Exact {
-            neg: neg,
-            mant: frac,
-            exp: F64_SUBNORMAL_EXP
-        }
+        Exact { neg: neg, mant: frac, exp: F64_SUBNORMAL_EXP }
     } else {
         Exact {
             neg: neg,
@@ -874,12 +865,7 @@ fn atan2_eval(inout c: Slice[u32], ey: Exact, ex: Exact, ly: i64, lx: i64, y_le_
         v = big_sub(in pi, in v);
         err = wrapping_add(err, 4);
     }
-    Approx {
-        negative: ey.neg,
-        value: v,
-        error: err,
-        exp: wrapping_sub(0, wrapping_i64(f))
-    }
+    Approx { negative: ey.neg, value: v, error: err, exp: wrapping_sub(0, wrapping_i64(f)) }
 }
 
 pub fn atan2_bits(inout c: Slice[u32], ybits: u64, xbits: u64, is64: bool) -> u64 {

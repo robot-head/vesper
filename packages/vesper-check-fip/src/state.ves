@@ -5,16 +5,8 @@
 // order (byte order of the names, as the map iterates) and moved paths are
 // (name, path id) rows over the checker's path table.
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
+use @vesper/check-data::util::{add, inc, n32, u32_at, w};
+use @vesper/check-data::names::{Names};
 
 pub copy struct SlotRow {
     ty: u32,
@@ -46,31 +38,16 @@ pub struct FipState {
     diverged: bool,
 }
 
-const NO_BIND: BindRow = BindRow {
-    name: 0,
-    ty: 0,
-    start: 0,
-    end: 0
-};
+const NO_BIND: BindRow = BindRow { name: 0, ty: 0, start: 0, end: 0 };
 
-const NO_MOVE: MoveRow = MoveRow {
-    name: 0,
-    path: 0
-};
+const NO_MOVE: MoveRow = MoveRow { name: 0, path: 0 };
 
-const NO_SLOT: SlotRow = SlotRow {
-    ty: 0,
-    start: 0,
-    end: 0
-};
+const NO_SLOT: SlotRow = SlotRow { ty: 0, start: 0, end: 0 };
 
 const NONE64: u64 = 18446744073709551615;
 
 pub fn binds_new() -> Binds {
-    Binds {
-        rows: ChunkSeq::new[BindRow](),
-        moves: ChunkSeq::new[MoveRow]()
-    }
+    Binds { rows: ChunkSeq::new[BindRow](), moves: ChunkSeq::new[MoveRow]() }
 }
 
 pub fn state_new(diverged: bool) -> FipState {
@@ -87,10 +64,7 @@ pub fn copy_binds(in b: Binds) -> Binds {
     rows.extend(in b.rows.as_slice());
     let mut moves: ChunkSeq[MoveRow] = ChunkSeq::with_capacity[MoveRow](b.moves.len());
     moves.extend(in b.moves.as_slice());
-    Binds {
-        rows: rows,
-        moves: moves
-    }
+    Binds { rows: rows, moves: moves }
 }
 
 // `state.clone()`.
@@ -185,14 +159,7 @@ impl Binds {
             return;
         }
         if !self.has_move(name, path) {
-            self
-                .moves
-                .push(
-                    MoveRow {
-                        name: name,
-                        path: path
-                    }
-                );
+            self.moves.push(MoveRow { name: name, path: path });
         }
     }
 

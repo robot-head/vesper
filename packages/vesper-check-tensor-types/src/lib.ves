@@ -9,31 +9,12 @@
 // @vesper/ast and returns the report text (`pack_text`) the Rust side
 // prints from `tensor_types::active` and `tensor_types::analyze`.
 
-use @vesper/ast::{
-    Ast
-};
-use @vesper/ast::lower::{
-    lower_source
-};
-use @vesper/check-data::input::{
-    Reader
-};
-use @vesper/check-data::{
-    pack_text
-};
-use @vesper/check-data::util::{
-    push_decimal,
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper-std/intern::{
-    symbol_from_id
-};
+use @vesper/ast::{Ast};
+use @vesper/ast::lower::{lower_source};
+use @vesper/check-data::input::{Reader};
+use @vesper/check-data::{pack_text};
+use @vesper/check-data::util::{push_decimal, add, inc, n32, u32_at, u64_at, u8_at, w};
+use @vesper-std/intern::{symbol_from_id};
 use self::state::{
     St,
     st_new,
@@ -53,12 +34,8 @@ use self::kinds::{
 use self::infer::{
     analyze,
 };
-use self::ast_input::{
-    read_ast
-};
-use self::elaborate::{
-    elaborate_report
-};
+use self::ast_input::{read_ast};
+use self::elaborate::{elaborate_report};
 
 const NONE: u32 = 4294967295;
 
@@ -218,12 +195,7 @@ fn report(in st: St, in cx: Cx, inout o: ChunkSeq[u8]) {
         for k in 0..widen_u64(u32_at(in cx.sg_on, row)) {
             let b = match cx.obs.try_get(wrapping_add(oa, k)) {
                 Option::Some(x) => x,
-                Option::None => Ob {
-                    k: 0,
-                    d1: 0,
-                    d2: 0,
-                    r: 0
-                },
+                Option::None => Ob { k: 0, d1: 0, d2: 0, r: 0 },
             };
             put(inout o, in " O ");
             put_ob(in st, inout o, b);
@@ -244,9 +216,7 @@ fn map_names(inout st: St, in a: Ast) {
 
 fn setup_and_analyze(in input: Str) -> (bool, St, Cx, Ast) {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let n = r.word(in b);
     let l = lower_source(in input[8..wrapping_add(8, n)]);
     r.pos = wrapping_add(8, wrapping_mul(wrapping_add(n, 7) / 8, 8));
@@ -318,9 +288,7 @@ pub fn check_tensor_types_elaborate(in input: Str) -> ChunkSeq[u64] {
 }
 
 pub fn check_tensor_types_diags_bytes(in names: Str, in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let a = read_ast(in names, inout r, in b);
     let mut st = st_new();
     map_names(inout st, in a);

@@ -4,9 +4,7 @@
 // result says so and the Rust wrapper asks `str::parse`, which is the
 // Fallback path of the Rust build too.
 use self::Decoded;
-use self::ascii::{
-    Ascii
-};
+use self::ascii::{Ascii};
 
 const DECIMAL_BASE: u64 = 10;
 const EXP_BASE: i64 = 10;
@@ -155,13 +153,7 @@ fn digits_from(in text: Slice[u8], p0: u64, w0: u64) -> (u64, u64) {
 }
 
 fn not_number() -> Decimal {
-    Decimal {
-        ok: false,
-        negative: false,
-        w: 0,
-        q: 0,
-        truncated: false
-    }
+    Decimal { ok: false, negative: false, w: 0, q: 0, truncated: false }
 }
 
 // The JSON number grammar and its significand (src/lemire.rs `decimal`).
@@ -317,11 +309,7 @@ pub fn clz64(v: u64) -> u64 {
 }
 
 fn fp(power2: i64, mantissa: u64) -> Fp {
-    Fp {
-        ok: true,
-        power2: power2,
-        mantissa: mantissa
-    }
+    Fp { ok: true, power2: power2, mantissa: mantissa }
 }
 
 // floor(log2(10^q)) + 63.
@@ -364,11 +352,7 @@ fn eisel_lemire(q: i64, w: u64, in pow5: Slice[u64]) -> Fp {
         // The truncated low half may hide a carry into the bits we keep;
         // Lemire shows this cannot change the result for q in -27..=55.
         if q < MIN_SAFE_Q || q > MAX_SAFE_Q {
-            return Fp {
-                ok: false,
-                power2: 0,
-                mantissa: 0
-            };
+            return Fp { ok: false, power2: 0, mantissa: 0 };
         }
     }
     let upperbit = hi >> 63;
@@ -443,10 +427,7 @@ fn pow10(k: i64) -> f64 {
 pub fn decode_bits(in text: Slice[u8], in pow5: Slice[u64]) -> Decoded {
     let d = decimal(in text);
     if !d.ok {
-        return Decoded {
-            path: 0,
-            bits: 0
-        };
+        return Decoded { path: 0, bits: 0 };
     }
     let sign: u64 = if d.negative {
         SIGN_BIT
@@ -454,10 +435,7 @@ pub fn decode_bits(in text: Slice[u8], in pow5: Slice[u64]) -> Decoded {
         0
     };
     if d.w == 0 {
-        return Decoded {
-            path: 1,
-            bits: sign
-        };
+        return Decoded { path: 1, bits: sign };
     }
     if !d.truncated && d.w <= MAX_EXACT_INT && d.q >= MIN_EXACT_POW10 && d.q <= MAX_EXACT_POW10 {
         let w = nearest_f64(d.w);
@@ -466,10 +444,7 @@ pub fn decode_bits(in text: Slice[u8], in pow5: Slice[u64]) -> Decoded {
         } else {
             w * pow10(d.q)
         };
-        return Decoded {
-            path: 1,
-            bits: to_bits_f64(value) | sign
-        };
+        return Decoded { path: 1, bits: to_bits_f64(value) | sign };
     }
     let f = eisel_lemire(d.q, d.w, in pow5);
     if f.ok {
@@ -477,20 +452,11 @@ pub fn decode_bits(in text: Slice[u8], in pow5: Slice[u64]) -> Decoded {
             // The true significand lies in (w, w + 1): both ends must agree.
             let up = eisel_lemire(d.q, wrapping_add(d.w, 1), in pow5);
             if up.ok && up.power2 == f.power2 && up.mantissa == f.mantissa {
-                return Decoded {
-                    path: 2,
-                    bits: assemble(d.negative, f)
-                };
+                return Decoded { path: 2, bits: assemble(d.negative, f) };
             }
         } else {
-            return Decoded {
-                path: 2,
-                bits: assemble(d.negative, f)
-            };
+            return Decoded { path: 2, bits: assemble(d.negative, f) };
         }
     }
-    Decoded {
-        path: 3,
-        bits: 0
-    }
+    Decoded { path: 3, bits: 0 }
 }

@@ -17,10 +17,7 @@ const W_BITS: u64 = 128;
 const WORD_BITS: u64 = 64;
 
 pub fn w(hi: u64, lo: u64) -> W {
-    W {
-        hi: hi,
-        lo: lo
-    }
+    W { hi: hi, lo: lo }
 }
 
 pub fn w_zero() -> W {

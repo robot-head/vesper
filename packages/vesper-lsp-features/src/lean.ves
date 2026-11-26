@@ -2,9 +2,7 @@
 // src/lsp/proof_model.rs), byte for byte, over the model terms proof.ves
 // builds.
 
-use self::nav::{
-    put_u
-};
+use self::nav::{put_u};
 
 // Model kinds (`proof_model::Kind`).
 pub const K_U8: u8 = 0;
@@ -415,11 +413,7 @@ struct Any {
 }
 
 fn any_new() -> Any {
-    Any {
-        out: ChunkSeq::new[u8](),
-        first: ChunkSeq::new[u8](),
-        n: 0
-    }
+    Any { out: ChunkSeq::new[u8](), first: ChunkSeq::new[u8](), n: 0 }
 }
 
 fn any_add(inout a: Any, in p: ChunkSeq[u8]) {
@@ -544,20 +538,14 @@ fn emit(inout ex: Ex, in m: Tm, t: u32) -> Vf {
     if k == TM_VAR {
         let mut v = ChunkSeq::new[u8]();
         var_name(inout v, in m, ta(in m, t));
-        return Vf {
-            v: v,
-            f: lit(in "False")
-        };
+        return Vf { v: v, f: lit(in "False") };
     }
     if k == TM_INT {
         let mut v = ChunkSeq::new[u8]();
         s(inout v, in "(");
         put_int(inout v, t_neg(in m, t), t_mag(in m, t));
         s(inout v, in " : Int)");
-        return Vf {
-            v: v,
-            f: lit(in "False")
-        };
+        return Vf { v: v, f: lit(in "False") };
     }
     if k == TM_BOOL {
         return Vf {
@@ -572,10 +560,7 @@ fn emit(inout ex: Ex, in m: Tm, t: u32) -> Vf {
         };
     }
     if k == TM_UNIT {
-        return Vf {
-            v: lit(in "0"),
-            f: lit(in "False")
-        };
+        return Vf { v: lit(in "0"), f: lit(in "False") };
     }
     let kind = t_kind(in m, t);
     if k == TM_ARITH {
@@ -628,10 +613,7 @@ fn emit(inout ex: Ex, in m: Tm, t: u32) -> Vf {
             }
             def(inout ex, in d);
         }
-        return Vf {
-            v: tt,
-            f: any_end(a)
-        };
+        return Vf { v: tt, f: any_end(a) };
     }
     if k == TM_DIV {
         let bt = tb(in m, t);
@@ -712,10 +694,7 @@ fn emit(inout ex: Ex, in m: Tm, t: u32) -> Vf {
             }
             def(inout ex, in d2);
         }
-        return Vf {
-            v: tt,
-            f: any_end(a)
-        };
+        return Vf { v: tt, f: any_end(a) };
     }
     if k == TM_NEG {
         let x = emit(inout ex, in m, ta(in m, t));
@@ -737,10 +716,7 @@ fn emit(inout ex: Ex, in m: Tm, t: u32) -> Vf {
         let mut a = any_new();
         any_add(inout a, in x.f);
         any_add(inout a, in fault);
-        return Vf {
-            v: tt,
-            f: any_end(a)
-        };
+        return Vf { v: tt, f: any_end(a) };
     }
     if k == TM_NOT {
         let x = emit(inout ex, in m, ta(in m, t));
@@ -750,10 +726,7 @@ fn emit(inout ex: Ex, in m: Tm, t: u32) -> Vf {
         s(inout d, in " = 1 - ");
         sb(inout d, in x.v);
         def(inout ex, in d);
-        return Vf {
-            v: tt,
-            f: x.f
-        };
+        return Vf { v: tt, f: x.f };
     }
     if k == TM_CMP {
         let x = emit(inout ex, in m, ta(in m, t));
@@ -783,10 +756,7 @@ fn emit(inout ex: Ex, in m: Tm, t: u32) -> Vf {
         let mut a = any_new();
         any_add(inout a, in x.f);
         any_add(inout a, in y.f);
-        return Vf {
-            v: tt,
-            f: any_end(a)
-        };
+        return Vf { v: tt, f: any_end(a) };
     }
     if k == TM_AND || k == TM_OR {
         let and = k == TM_AND;
@@ -815,10 +785,7 @@ fn emit(inout ex: Ex, in m: Tm, t: u32) -> Vf {
         let mut a = any_new();
         any_add(inout a, in x.f);
         any_add(inout a, in both(in runs, in y.f));
-        return Vf {
-            v: tt,
-            f: any_end(a)
-        };
+        return Vf { v: tt, f: any_end(a) };
     }
     if k == TM_ITE {
         let x = emit(inout ex, in m, ta(in m, t));
@@ -845,10 +812,7 @@ fn emit(inout ex: Ex, in m: Tm, t: u32) -> Vf {
         any_add(inout a, in x.f);
         any_add(inout a, in both(in cx, in vt.f));
         any_add(inout a, in both(in not_of(in cx), in ve.f));
-        return Vf {
-            v: v,
-            f: any_end(a)
-        };
+        return Vf { v: v, f: any_end(a) };
     }
     // Let
     let x = emit(inout ex, in m, tb(in m, t));
@@ -864,10 +828,7 @@ fn emit(inout ex: Ex, in m: Tm, t: u32) -> Vf {
     let mut a = any_new();
     any_add(inout a, in x.f);
     any_add(inout a, in body.f);
-    Vf {
-        v: body.v,
-        f: any_end(a)
-    }
+    Vf { v: body.v, f: any_end(a) }
 }
 
 fn copy_bytes(in b: ChunkSeq[u8]) -> ChunkSeq[u8] {
@@ -878,12 +839,7 @@ fn copy_bytes(in b: ChunkSeq[u8]) -> ChunkSeq[u8] {
 
 // `Exact::render`.
 pub fn exact(inout o: ChunkSeq[u8], in m: Tm, root: u32) {
-    let mut ex = Ex {
-        temps: 0,
-        binders: ChunkSeq::new[u8](),
-        nb: 0,
-        defs: ChunkSeq::new[u8]()
-    };
+    let mut ex = Ex { temps: 0, binders: ChunkSeq::new[u8](), nb: 0, defs: ChunkSeq::new[u8]() };
     let mut ranges = ChunkSeq::new[u8]();
     for i in 0..var_count(in m) {
         let v = wrapping_u32(i);
