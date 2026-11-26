@@ -186,7 +186,10 @@ fn region_marker(in a: Ast, sym: u32) -> bool {
         if i >= e {
             break;
         }
-        let c = a.names.text_byte(i).unwrap_or(0);
+        let c = match a.names.text_byte(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
         if c < 48 || c > 57 {
             return false;
         }
