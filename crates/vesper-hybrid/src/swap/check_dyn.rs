@@ -13,11 +13,9 @@ mod check_dyn_binding;
 #[path = "../../../../tests/common/ast_words.rs"]
 mod ast_words;
 
-// The lowered module's `ast` section, read back as the parse swap reads
-// its own (`dyn_words` reads it through `super::parse_words`).
-#[allow(dead_code)]
-#[path = "../parse_words.rs"]
-mod parse_words;
+// The lowered module's `ast` section, read back with the parse swap's
+// reader (`dyn_words` reads it through `super::parse_words`).
+use super::parse::parse_words;
 
 // The outcome's decoder, shared with tests/self_host_check_dyn.rs.
 #[path = "../../../../tests/common/dyn_words.rs"]
