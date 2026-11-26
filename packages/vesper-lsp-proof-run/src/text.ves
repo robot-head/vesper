@@ -8,7 +8,10 @@ use @vesper-std/process::ExitStatus;
 use self::json::{put, put_u64};
 
 pub fn byte(in b: Slice[u8], i: u64) -> u8 {
-    b.try_get(i).unwrap_or(0)
+    match b.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
 }
 
 fn inc(x: u64) -> u64 {
