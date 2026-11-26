@@ -102,12 +102,9 @@ test {
     // @case error(Result::Err(7), 99, 8)
     fn test_result_fallback(input: Result[u64, u8], eager: u64, lazy: u64) -> bool {
         unwrap_or(input, 99) == eager
-            && unwrap_or_else(
-                input,
-                |x: u8| -> u64 {
-                    wrapping_add(widen_u64(x), 1)
-                }
-            )
+            && unwrap_or_else(input, |x: u8| -> u64 {
+                wrapping_add(widen_u64(x), 1)
+            })
                 == lazy
     }
 
@@ -118,18 +115,12 @@ test {
         mapped: Result[u32, u8],
         mapped_error: Result[u64, u16]
     ) -> bool {
-        let value = map(
-            input,
-            |x: u64| -> u32 {
-                wrapping_add(wrapping_u32(x), 1)
-            }
-        );
-        let error = map_err(
-            input,
-            |x: u8| -> u16 {
-                wrapping_add(wrapping_u16(x), 2)
-            }
-        );
+        let value = map(input, |x: u64| -> u32 {
+            wrapping_add(wrapping_u32(x), 1)
+        });
+        let error = map_err(input, |x: u8| -> u16 {
+            wrapping_add(wrapping_u16(x), 2)
+        });
         value == mapped && error == mapped_error
     }
 
@@ -137,16 +128,13 @@ test {
     // @case callback_error(Result::Ok(7), Result::Err(2))
     // @case original_error(Result::Err(9), Result::Err(9))
     fn test_result_and_then(input: Result[u64, u8], expected: Result[u32, u8]) -> bool {
-        and_then(
-            input,
-            |x: u64| -> Result[u32, u8] {
-                if (x & 1) == 0 {
-                    Result::Ok(wrapping_u32(x >> 1))
-                } else {
-                    Result::Err(2)
-                }
+        and_then(input, |x: u64| -> Result[u32, u8] {
+            if (x & 1) == 0 {
+                Result::Ok(wrapping_u32(x >> 1))
+            } else {
+                Result::Err(2)
             }
-        )
+        })
             == expected
     }
 

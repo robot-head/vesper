@@ -451,14 +451,8 @@ fn str_eq_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
         return false;
     }
     for i in 0..a.len() {
-        let ca = match a.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let cb = match b.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let ca = a.try_get(i).unwrap_or(0);
+        let cb = b.try_get(i).unwrap_or(0);
         if ca != cb {
             return false;
         }
@@ -938,14 +932,8 @@ fn bytes_contains(in hay: Slice[u8], start: u64, end: u64, in needle: Str) -> bo
         let base = add(start, off);
         let mut eq = true;
         for j in 0..nl {
-            let hb = match hay.try_get(add(base, j)) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
-            let nbb = match nb.try_get(j) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
+            let hb = hay.try_get(add(base, j)).unwrap_or(0);
+            let nbb = nb.try_get(j).unwrap_or(0);
             if hb != nbb {
                 eq = false;
                 break;
