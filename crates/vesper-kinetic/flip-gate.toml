@@ -75,3 +75,9 @@ run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate rigid-solve 5
 [[abba]]
 workload = "world-substeps"
 run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate world-substeps 5"
+
+# The soft-body substeps (SoftWorld::step, vesper/src/soft.ves): a
+# tetrahedral box of 8 x 4 x 8 cells on a frictional ground, 12 ticks.
+[[abba]]
+workload = "soft-step"
+run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate soft-step 5"

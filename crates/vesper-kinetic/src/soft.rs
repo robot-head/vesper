@@ -209,6 +209,66 @@ pub struct SoftWorld {
     threads: usize,
     parallel_threshold: usize,
     tick: u64,
+    #[cfg(vesper_port)]
+    port: PortState,
+}
+
+/// The port substeps' state (`SoftWorld::step_port`): the constraints,
+/// packed once (the topology is fixed), and the per-tick particle words,
+/// reserved at construction so a step stays allocation-free.
+#[cfg(vesper_port)]
+#[derive(Debug)]
+struct PortState {
+    constraints: Vec<u64>,
+    particles: Vec<u64>,
+    prev: Vec<u64>,
+}
+
+/// Two 32-bit lanes in one word (low, high), as the port reads them.
+#[cfg(vesper_port)]
+fn lanes(lo: u32, hi: u32) -> u64 {
+    u64::from(lo) | (u64::from(hi) << 32)
+}
+
+#[cfg(vesper_port)]
+fn flanes(lo: f32, hi: f32) -> u64 {
+    lanes(lo.to_bits(), hi.to_bits())
+}
+
+#[cfg(vesper_port)]
+fn unlanes(w: u64) -> [f32; 2] {
+    [f32::from_bits(w as u32), f32::from_bits((w >> 32) as u32)]
+}
+
+#[cfg(vesper_port)]
+impl PortState {
+    fn new(particles: usize, constraints: &[SoftConstraint]) -> Self {
+        let mut packed = Vec::with_capacity(3 * constraints.len());
+        for c in constraints {
+            match *c {
+                SoftConstraint::Distance {
+                    a,
+                    b,
+                    rest,
+                    compliance,
+                } => packed.extend([flanes(rest, compliance), lanes(a, b), lanes(u32::MAX, 0)]),
+                SoftConstraint::Volume {
+                    tet,
+                    rest_volume,
+                    compliance,
+                } => packed.extend([
+                    flanes(rest_volume, compliance),
+                    lanes(tet[0], tet[1]),
+                    lanes(tet[2], tet[3]),
+                ]),
+            }
+        }
+        Self {
+            constraints: packed,
+            particles: Vec::with_capacity(4 * particles),
+            prev: vec![0; 2 * particles],
+        }
+    }
 }
 
 impl SoftWorld {
@@ -314,6 +374,8 @@ impl SoftWorld {
             threads: 1,
             parallel_threshold: 64,
             tick: 0,
+            #[cfg(vesper_port)]
+            port: PortState::new(particles.len(), constraints),
         })
     }
 
@@ -610,7 +672,66 @@ impl SoftWorld {
 
     /// Advance one tick. On error the world is unchanged.
     pub fn step(&mut self) -> Result<WorldHashes, SoftError> {
+        #[cfg(vesper_port)]
+        return self.step_port();
+        #[cfg(not(vesper_port))]
         self.step_with(&mut |_: &mut [V3], _: &mut [V3], _: &[f32], _: f32| {})
+    }
+
+    /// [`SoftWorld::step`] in the port (`@vesper/kinetic::soft`): the same
+    /// substeps as the one-thread pass, which every thread count equals.
+    /// The particles are packed per tick and written back only when every
+    /// lane is finite, so a failed step leaves the world unchanged.
+    #[cfg(vesper_port)]
+    fn step_port(&mut self) -> Result<WorldHashes, SoftError> {
+        let next = self.tick.checked_add(1).ok_or(SoftError::TickOverflow)?;
+        let p = &mut self.port;
+        p.particles.clear();
+        for i in 0..self.pos.len() {
+            let ([x, y, z], [u, v, w]) = (self.pos[i], self.vel[i]);
+            p.particles.extend([
+                flanes(x, y),
+                flanes(z, self.inv_mass[i]),
+                flanes(u, v),
+                flanes(w, 0.0),
+            ]);
+        }
+        let g = self.config.gravity;
+        let params = [
+            self.config.dt.to_bits(),
+            g[0].to_bits(),
+            g[1].to_bits(),
+            g[2].to_bits(),
+            u32::from(self.config.ground.is_some()),
+            self.config.ground.unwrap_or(0.0).to_bits(),
+            self.config.ground_friction.to_bits(),
+        ];
+        let layers = self.colorer.layer_count();
+        crate::port::soft_substeps(
+            self.config.substeps,
+            &mut p.particles,
+            &mut p.prev,
+            &p.constraints,
+            &self.colorer.layer_offsets[..=layers],
+            &self.colorer.sorted,
+            &params,
+        );
+        let words = p.particles.as_chunks::<4>().0;
+        if let Some(particle) = words.iter().position(|f| {
+            let ([x, y], [z, _], [u, v], [w, _]) =
+                (unlanes(f[0]), unlanes(f[1]), unlanes(f[2]), unlanes(f[3]));
+            ![x, y, z, u, v, w].iter().all(|v| v.is_finite())
+        }) {
+            return Err(SoftError::NonFinite { particle });
+        }
+        for (i, f) in words.iter().enumerate() {
+            let ([x, y], [z, _], [u, v], [w, _]) =
+                (unlanes(f[0]), unlanes(f[1]), unlanes(f[2]), unlanes(f[3]));
+            self.pos[i] = [x, y, z];
+            self.vel[i] = [u, v, w];
+        }
+        self.tick = next;
+        Ok(self.hash())
     }
 
     /// [`SoftWorld::step`] with an extra contact pass after the ground

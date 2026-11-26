@@ -1482,3 +1482,105 @@ fn world_substeps_match_the_rust_build() {
     assert!(cases > 2000 && contacts > 100_000);
     assert_eq!(differences, 0);
 }
+
+macro_rules! soft_scene {
+    ($k:ident, $seed:expr) => {{
+        use $k::{SoftConfig, SoftConstraint, SoftWorld};
+        let mut rng = Lcg($seed);
+        let cells = [1 + rng.next() % 4, 1 + rng.next() % 3, 1 + rng.next() % 4];
+        let (mut particles, mut constraints) = SoftWorld::tetrahedral_box(
+            [0.0, 0.2 + rng.range(0.0, 0.6) as f32, 0.0],
+            0.2 + rng.range(0.0, 0.3) as f32,
+            cells,
+            1.0 + rng.range(0.0, 4.0) as f32,
+            if rng.next() % 3 == 0 {
+                0.0
+            } else {
+                rng.range(0.0, 1e-3) as f32
+            },
+            if rng.next() % 3 == 0 {
+                0.0
+            } else {
+                rng.range(0.0, 1e-4) as f32
+            },
+        )
+        .unwrap();
+        for p in &mut particles {
+            for k in 0..3 {
+                p.pos[k] += rng.range(-0.02, 0.02) as f32;
+                p.vel[k] = rng.range(-1.0, 1.0) as f32;
+            }
+            if rng.next() % 9 == 0 {
+                p.inv_mass = 0.0;
+            }
+        }
+        // A few long-range springs between random particles.
+        let n = particles.len() as u32;
+        for _ in 0..rng.next() % 6 {
+            let a = rng.next() % n;
+            let b = (a + 1 + rng.next() % (n - 1)) % n;
+            constraints.push(SoftConstraint::Distance {
+                a,
+                b,
+                rest: rng.range(0.0, 1.0) as f32,
+                compliance: rng.range(0.0, 1e-2) as f32,
+            });
+        }
+        let config = SoftConfig {
+            dt: 1.0 / (60.0 + (rng.next() % 3) as f32 * 60.0),
+            substeps: 1 + rng.next() % 16,
+            gravity: [
+                rng.range(-1.0, 1.0) as f32,
+                -9.81 + rng.range(-2.0, 2.0) as f32,
+                rng.range(-1.0, 1.0) as f32,
+            ],
+            ground: (rng.next() % 4 != 0).then(|| rng.range(-0.1, 0.3) as f32),
+            ground_friction: if rng.next() % 3 == 0 {
+                0.0
+            } else {
+                rng.range(0.0, 1.5) as f32
+            },
+        };
+        let mut w = SoftWorld::new(config, &particles, &constraints).unwrap();
+        w.set_solver_threads(1 + (rng.next() % 3) as usize).unwrap();
+        w
+    }};
+}
+
+/// The port's soft-body substeps (`SoftWorld::step`, vesper/src/soft.ves)
+/// against the frozen Rust build: the world hashes after every tick of
+/// random tetrahedral boxes with pinned particles, springs, compliance,
+/// ground friction and thread counts (SH6 lane 9, #1404).
+#[test]
+fn soft_substeps_match_the_rust_build() {
+    let mut differences = 0usize;
+    let mut cases = 0usize;
+    let mut errors = 0usize;
+    for round in 0..96u64 {
+        let seed = 0x736f_6674_0000 + round;
+        let mut pw = soft_scene!(vesper_kinetic, seed);
+        let mut rw = soft_scene!(vesper_kinetic_rust, seed);
+        for step in 0..90 {
+            match (pw.step(), rw.step()) {
+                (Ok(p), Ok(r)) => {
+                    cases += 1;
+                    if p.blake3 != r.blake3 || p.sha256 != r.sha256 {
+                        differences += 1;
+                    }
+                }
+                (p, r) => {
+                    assert_eq!(
+                        format!("{p:?}"),
+                        format!("{r:?}"),
+                        "round {round} step {step}"
+                    );
+                    errors += 1;
+                    break;
+                }
+            }
+        }
+    }
+    println!("soft substeps differential differences={differences} cases={cases} errors={errors}");
+    assert!(cases > 8000);
+    assert_eq!(differences, 0);
+}
