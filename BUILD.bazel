@@ -543,9 +543,9 @@ vesper_crate(
             "tests/fixtures/**",
         ]) + ["//crates/vesper-ebpf:files"],
         # #2024 slice 2: the checker's declaration collector in Vesper against
-        # World::collect over every .ves source of the repository.
+        # World::collect over the repository's .ves sources (the crates' are
+        # their own Bazel packages, so only `cargo test` sees them).
         "test/self_host_check_collect": glob([
-            "crates/**/*.ves",
             "examples/**/*.ves",
             "packages/**",
             "src/**/*.ves",
