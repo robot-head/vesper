@@ -79,7 +79,7 @@ vesper_hybrid(
     },
     # The included CLI sources (src/main.rs and its command modules) and
     # what they embed.
-    # The proof-audit module (#1341) links hash-sys's `[package] objects`
+    # The proof-audit, verify and driver modules link hash-sys's `[package] objects`
     # (the BLAKE3 C library), which the harness compiles into its archive.
     build_script_data = [
         "//:std_hash_sys_manifest",
@@ -89,6 +89,8 @@ vesper_hybrid(
         # Path dependencies are not beside the crate in Bazel.
         "VESPER_HYBRID_OBJECT_PACKAGES_HYBRID_PROOF_AUDIT": "$(execpath //:std_hash_sys_manifest)",
         "VESPER_HYBRID_OBJECT_PACKAGES_HYBRID_VERIFY": "$(execpath //:std_hash_sys_manifest)",
+        # @vesper/fmt (driver-commands' `fmt`) depends on hash-sys too.
+        "VESPER_HYBRID_OBJECT_PACKAGES_HYBRID_DRIVER": "$(execpath //:std_hash_sys_manifest)",
     },
     extra_compile_data = ["//:files"],
     # The differential harness runs the default compiler beside the hybrid
@@ -207,12 +209,16 @@ vesper_hybrid(
             "//:std_env_package",
             "//:std_fmt_package",
             "//:std_fs_package",
+            "//:std_hash_package",
+            "//:std_hash_sys_package",
             "//:std_intern_package",
             "//:std_process_package",
             "//:std_toml_package",
             "//:verified_codegen_package",
             "//:wasm_backend_package",
             "//:wit_component_package",
+            # `vesper fmt`'s formatter (#1996 part 3d).
+            "//crates/vesper-fmt:port_package",
         ],
         # The eBPF backend swap (#1290) builds on @vesper/ebpf-backend.
         "hybrid_ebpf_backend": [

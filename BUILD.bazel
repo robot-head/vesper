@@ -2116,6 +2116,7 @@ vesper_package(
         ":std_env_package",
         ":std_fs_package",
         ":std_process_package",
+        "//crates/vesper-fmt:port_package",
     ],
 )
 

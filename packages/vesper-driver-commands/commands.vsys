@@ -10,9 +10,6 @@ sys library HybridCommands (
     link = "static", name = "vesper_hybrid",
     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
 ) {
-    fn hc_fmt_source(nocapture in text: CSlice[u8], flags: u32, nocapture inout stats: CSlice[u64]) -> ForeignVal[u32];
-    fn hc_fmt_output(nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
-    fn hc_fmt_error(nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
     fn hc_graph_run(
         nocapture in input: CSlice[u8],
         has_focus: bool,
