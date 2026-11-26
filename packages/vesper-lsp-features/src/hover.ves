@@ -99,10 +99,7 @@ pub fn fact_param(inout f: Facts, start: u64, end: u64, name: u32, ty: u32) {
 }
 
 fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 // One hover's output text and work budget (`Text`, `Budget`).

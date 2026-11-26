@@ -41,8 +41,40 @@ pub const TRAP_ENTRY_BYTES: u64 = 24;
 /// Namespaces of the function names handed to Silicon: the backend's
 /// functions keep `u0:<FuncId>`, runtime functions are `u1:<FuncId>` and the
 /// stub's `vesper_board_exit` is the external `u2:0`.
+pub const BACKEND_NAMESPACE: u32 = 0;
 pub const RUNTIME_NAMESPACE: u32 = 1;
 pub const STUB_NAMESPACE: u32 = 2;
+
+/// Offsets of a trap-table entry's `message` and `len` fields (`pc` is at 0).
+const TRAP_ENTRY_MESSAGE: u64 = 8;
+const TRAP_ENTRY_LEN: u64 = 16;
+
+/// NS16550 line status register offset and its transmit-holding-empty bit.
+const NS16550_LSR: u64 = 5;
+const NS16550_LSR_THRE: i64 = 0x20;
+/// PL011 flag register offset and its transmit-FIFO-full bit.
+const PL011_FR: u64 = 0x18;
+const PL011_FR_TXFF: i64 = 0x20;
+
+/// `put_udec`'s digit buffer: the 20 digits of `u64::MAX`, in whole words.
+const UDEC_BUFFER_BYTES: u32 = 24;
+/// log2 of the alignment of the runtime's stack slots (8 bytes).
+const STACK_SLOT_ALIGN_SHIFT: u8 = 3;
+/// `put_hex` prints the 16 nibbles of a `u64` from the top one down.
+const NIBBLE_BITS: i64 = 4;
+const NIBBLE_MASK: i64 = 0xf;
+const HEX_FIRST_SHIFT: i64 = 64 - NIBBLE_BITS;
+
+/// Text the runtime prints.
+const TRUE_TEXT: &[u8] = b"true";
+const FALSE_TEXT: &[u8] = b"false";
+const UNIT_TEXT: &[u8] = b"()";
+const NEWLINE_TEXT: &[u8] = b"\n";
+const ABORT_TEXT: &[u8] = b"vesper: abort: ";
+const UNEXPECTED_TEXT: &[u8] = b"unexpected exception";
+const PC_TEXT: &[u8] = b" pc=0x";
+const CAUSE_TEXT: &[u8] = b" cause=0x";
+const TVAL_TEXT: &[u8] = b" tval=0x";
 
 pub struct RuntimeSpec {
     pub target: FreestandingTarget,
@@ -130,7 +162,7 @@ impl Gen {
     ) -> Result<(), FreestandingError> {
         let mut ctx = self.m.make_context();
         ctx.func.signature = signature;
-        ctx.func.name = ir::UserFuncName::user(0, id.as_u32());
+        ctx.func.name = ir::UserFuncName::user(BACKEND_NAMESPACE, id.as_u32());
         let mut fctx = FunctionBuilderContext::new();
         {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
@@ -224,18 +256,18 @@ pub fn build(spec: &RuntimeSpec) -> Result<Runtime, FreestandingError> {
         let flags = MemFlags::new();
         match uart {
             Uart::Ns16550 { base } => {
-                let lsr = b.ins().iconst(I64, (base + 5) as i64);
+                let lsr = b.ins().iconst(I64, (base + NS16550_LSR) as i64);
                 let s = b.ins().uload8(I64, flags, lsr, 0);
-                let empty = b.ins().band_imm(s, 0x20);
+                let empty = b.ins().band_imm(s, NS16550_LSR_THRE);
                 b.ins().brif(empty, send, &[], wait, &[]);
                 b.switch_to_block(send);
                 let thr = b.ins().iconst(I64, base as i64);
                 b.ins().istore8(flags, byte, thr, 0);
             }
             Uart::Pl011 { base } => {
-                let fr = b.ins().iconst(I64, (base + 0x18) as i64);
+                let fr = b.ins().iconst(I64, (base + PL011_FR) as i64);
                 let s = b.ins().uload32(flags, fr, 0);
-                let full = b.ins().band_imm(s, 0x20);
+                let full = b.ins().band_imm(s, PL011_FR_TXFF);
                 b.ins().brif(full, wait, &[], send, &[]);
                 b.switch_to_block(send);
                 let dr = b.ins().iconst(I64, base as i64);
@@ -274,10 +306,10 @@ pub fn build(spec: &RuntimeSpec) -> Result<Runtime, FreestandingError> {
     g.define("vesper_rt_put_udec", ids.put_udec, s1.clone(), |b, m, p| {
         let slot = b.create_sized_stack_slot(ir::StackSlotData::new(
             ir::StackSlotKind::ExplicitSlot,
-            24,
-            3,
+            UDEC_BUFFER_BYTES,
+            STACK_SLOT_ALIGN_SHIFT,
         ));
-        let end = b.ins().stack_addr(I64, slot, 24);
+        let end = b.ins().stack_addr(I64, slot, UDEC_BUFFER_BYTES as i32);
         let lp = b.create_block();
         let out = b.create_block();
         b.append_block_param(lp, I64);
@@ -297,7 +329,7 @@ pub fn build(spec: &RuntimeSpec) -> Result<Runtime, FreestandingError> {
             .brif(q, lp, &[q.into(), at1.into()], out, &[at1.into()]);
         b.switch_to_block(out);
         let start = b.block_params(out)[0];
-        let end = b.ins().stack_addr(I64, slot, 24);
+        let end = b.ins().stack_addr(I64, slot, UDEC_BUFFER_BYTES as i32);
         let len = b.ins().isub(end, start);
         call(b, m, puts, &[start, len]);
         b.ins().return_(&[]);
@@ -309,18 +341,18 @@ pub fn build(spec: &RuntimeSpec) -> Result<Runtime, FreestandingError> {
         let lp = b.create_block();
         let done = b.create_block();
         b.append_block_param(lp, I64);
-        let sixty = b.ins().iconst(I64, 60);
+        let sixty = b.ins().iconst(I64, HEX_FIRST_SHIFT);
         b.ins().jump(lp, &[sixty.into()]);
         b.switch_to_block(lp);
         let shift = b.block_params(lp)[0];
         let v = b.ins().ushr(p[0], shift);
-        let nib = b.ins().band_imm(v, 15);
+        let nib = b.ins().band_imm(v, NIBBLE_MASK);
         let is_digit = b.ins().icmp_imm(IntCC::UnsignedLessThan, nib, 10);
         let as_digit = b.ins().iadd_imm(nib, i64::from(b'0'));
         let as_letter = b.ins().iadd_imm(nib, i64::from(b'a') - 10);
         let c = b.ins().select(is_digit, as_digit, as_letter);
         call(b, m, putc, &[c]);
-        let next = b.ins().iadd_imm(shift, -4);
+        let next = b.ins().iadd_imm(shift, -NIBBLE_BITS);
         let more = b.ins().icmp_imm(IntCC::SignedGreaterThanOrEqual, next, 0);
         b.ins().brif(more, lp, &[next.into()], done, &[]);
         b.switch_to_block(done);
@@ -331,10 +363,10 @@ pub fn build(spec: &RuntimeSpec) -> Result<Runtime, FreestandingError> {
     // main
     let prefix = format!("vesper: {}() = ", spec.entry).into_bytes();
     let prefix_id = g.string(&prefix)?;
-    let true_id = g.string(b"true")?;
-    let false_id = g.string(b"false")?;
-    let unit_id = g.string(b"()")?;
-    let newline_id = g.string(b"\n")?;
+    let true_id = g.string(TRUE_TEXT)?;
+    let false_id = g.string(FALSE_TEXT)?;
+    let unit_id = g.string(UNIT_TEXT)?;
+    let newline_id = g.string(NEWLINE_TEXT)?;
     let (put_udec, put_hex, exit) = (ids.put_udec, ids.put_hex, ids.exit);
     let kind = spec.result;
     let fail = spec.fail.clone();
@@ -343,7 +375,7 @@ pub fn build(spec: &RuntimeSpec) -> Result<Runtime, FreestandingError> {
             let slot = b.create_sized_stack_slot(ir::StackSlotData::new(
                 ir::StackSlotKind::ExplicitSlot,
                 fail.record_bytes,
-                3,
+                STACK_SLOT_ALIGN_SHIFT,
             ));
             let record = b.ins().stack_addr(I64, slot, 0);
             let zero = b.ins().iconst(I64, 0);
@@ -409,19 +441,19 @@ pub fn build(spec: &RuntimeSpec) -> Result<Runtime, FreestandingError> {
                 let f = b.create_block();
                 b.ins().brif(r, t, &[], f, &[]);
                 b.switch_to_block(t);
-                Gen::emit_puts(b, m, puts, true_id, 4);
+                Gen::emit_puts(b, m, puts, true_id, TRUE_TEXT.len());
                 b.ins().jump(done, &[]);
                 b.switch_to_block(f);
-                Gen::emit_puts(b, m, puts, false_id, 5);
+                Gen::emit_puts(b, m, puts, false_id, FALSE_TEXT.len());
                 b.ins().jump(done, &[]);
             }
             ResultKind::Unit => {
-                Gen::emit_puts(b, m, puts, unit_id, 2);
+                Gen::emit_puts(b, m, puts, unit_id, UNIT_TEXT.len());
                 b.ins().jump(done, &[]);
             }
         }
         b.switch_to_block(done);
-        Gen::emit_puts(b, m, puts, newline_id, 1);
+        Gen::emit_puts(b, m, puts, newline_id, NEWLINE_TEXT.len());
         let ok = b.ins().iconst(I64, 0);
         call(b, m, exit, &[ok]);
         b.ins().return_(&[]);
@@ -443,24 +475,25 @@ pub fn build(spec: &RuntimeSpec) -> Result<Runtime, FreestandingError> {
     for (i, &msg) in spec.trap_entries.iter().enumerate() {
         let at = (TRAP_HEADER_BYTES + i as u64 * TRAP_ENTRY_BYTES) as usize;
         let len = spec.trap_messages[msg].len() as u64;
-        bytes[at + 16..at + 24].copy_from_slice(&len.to_le_bytes());
+        bytes[at + TRAP_ENTRY_LEN as usize..at + TRAP_ENTRY_BYTES as usize]
+            .copy_from_slice(&len.to_le_bytes());
     }
     table.define(bytes.into_boxed_slice());
     table.set_align(8);
     for (i, &msg) in spec.trap_entries.iter().enumerate() {
         let gv = g.m.declare_data_in_data(message_ids[msg], &mut table);
-        let at = (TRAP_HEADER_BYTES + i as u64 * TRAP_ENTRY_BYTES + 8) as u32;
+        let at = (TRAP_HEADER_BYTES + i as u64 * TRAP_ENTRY_BYTES + TRAP_ENTRY_MESSAGE) as u32;
         table.write_data_addr(at, gv, 0);
     }
     g.m.define_data(table_id, &table).map_err(codegen)?;
-    let abort_id = g.string(b"vesper: abort: ")?;
-    let unexpected_id = g.string(b"unexpected exception")?;
-    let pc_id = g.string(b" pc=0x")?;
-    let cause_id = g.string(b" cause=0x")?;
-    let tval_id = g.string(b" tval=0x")?;
+    let abort_id = g.string(ABORT_TEXT)?;
+    let unexpected_id = g.string(UNEXPECTED_TEXT)?;
+    let pc_id = g.string(PC_TEXT)?;
+    let cause_id = g.string(CAUSE_TEXT)?;
+    let tval_id = g.string(TVAL_TEXT)?;
     g.define(TRAP_SYMBOL, trap_id, s3, |b, m, p| {
         let (cause, epc, tval) = (p[0], p[1], p[2]);
-        Gen::emit_puts(b, m, puts, abort_id, 15);
+        Gen::emit_puts(b, m, puts, abort_id, ABORT_TEXT.len());
         let table = data_address(b, m, table_id);
         let count = b.ins().load(I64, MemFlags::trusted(), table, 0);
         let head = b.create_block();
@@ -493,30 +526,30 @@ pub fn build(spec: &RuntimeSpec) -> Result<Runtime, FreestandingError> {
             I64,
             MemFlags::trusted(),
             entry,
-            TRAP_HEADER_BYTES as i32 + 8,
+            (TRAP_HEADER_BYTES + TRAP_ENTRY_MESSAGE) as i32,
         );
         let len = b.ins().load(
             I64,
             MemFlags::trusted(),
             entry,
-            TRAP_HEADER_BYTES as i32 + 16,
+            (TRAP_HEADER_BYTES + TRAP_ENTRY_LEN) as i32,
         );
         call(b, m, puts, &[msg, len]);
         let code = b.ins().iconst(I64, i64::from(EXIT_ABORT));
         b.ins().jump(tail, &[code.into()]);
         b.switch_to_block(missing);
-        Gen::emit_puts(b, m, puts, unexpected_id, 20);
+        Gen::emit_puts(b, m, puts, unexpected_id, UNEXPECTED_TEXT.len());
         let code = b.ins().iconst(I64, i64::from(EXIT_EXCEPTION));
         b.ins().jump(tail, &[code.into()]);
         b.switch_to_block(tail);
         let status = b.block_params(tail)[0];
-        Gen::emit_puts(b, m, puts, pc_id, 6);
+        Gen::emit_puts(b, m, puts, pc_id, PC_TEXT.len());
         call(b, m, put_hex, &[epc]);
-        Gen::emit_puts(b, m, puts, cause_id, 9);
+        Gen::emit_puts(b, m, puts, cause_id, CAUSE_TEXT.len());
         call(b, m, put_hex, &[cause]);
-        Gen::emit_puts(b, m, puts, tval_id, 8);
+        Gen::emit_puts(b, m, puts, tval_id, TVAL_TEXT.len());
         call(b, m, put_hex, &[tval]);
-        Gen::emit_puts(b, m, puts, newline_id, 1);
+        Gen::emit_puts(b, m, puts, newline_id, NEWLINE_TEXT.len());
         call(b, m, exit, &[status]);
         b.ins().return_(&[]);
         Ok(())
@@ -525,7 +558,7 @@ pub fn build(spec: &RuntimeSpec) -> Result<Runtime, FreestandingError> {
     // Silicon's view: rename every function reference.
     let rename = |id: FuncId| -> UserExternalName {
         if id == entry_id {
-            UserExternalName::new(0, spec.entry_func_id)
+            UserExternalName::new(BACKEND_NAMESPACE, spec.entry_func_id)
         } else if id == ids.exit {
             UserExternalName::new(STUB_NAMESPACE, 0)
         } else {
@@ -542,7 +575,7 @@ pub fn build(spec: &RuntimeSpec) -> Result<Runtime, FreestandingError> {
             .map(|(r, n)| (r, n.clone()))
             .collect();
         for (r, n) in refs {
-            if n.namespace == 0 {
+            if n.namespace == BACKEND_NAMESPACE {
                 func.params
                     .reset_user_func_name(r, rename(FuncId::from_u32(n.index)));
             }

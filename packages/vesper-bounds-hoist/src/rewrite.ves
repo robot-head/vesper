@@ -184,21 +184,34 @@ impl Fresh {
     }
 }
 
-// The type of value `v` in the function's value table, or `infer`.
-fn value_type(in p: Program, fr: FnRow, in fresh: Fresh, v: u64, infer: u32) -> u32 {
+// The type of every value the function has so far (its value table, then
+// the fresh values), keyed by value; `typed` reads one, `infer` if absent.
+// `copy_loop` types each value it copies with it.
+fn value_types(in p: Program, fr: FnRow, in fresh: Fresh) -> Map {
+    let mut m = map_new();
     let (va, vn) = values_at(in p, fr);
     for i in 0..vn {
         let at = add(va, wrapping_mul(i, 2));
-        if p.op(at) == v {
-            return n32(p.op(inc(at)));
+        if m.find(p.op(at)) == NONE64 {
+            m.insert(p.op(at), p.op(inc(at)));
         }
     }
     for i in 0..fresh.vals.len() {
-        if u64_at(in fresh.vals, i) == v {
-            return u32_at(in fresh.tys, i);
+        let v = u64_at(in fresh.vals, i);
+        if m.find(v) == NONE64 {
+            m.insert(v, w(u32_at(in fresh.tys, i)));
         }
     }
-    infer
+    m
+}
+
+fn typed(in m: Map, v: u64, infer: u32) -> u32 {
+    let at = m.find(v);
+    if at == NONE64 {
+        infer
+    } else {
+        n32(u64_at(in m.vals, at))
+    }
 }
 
 // ----- new instructions -----------------------------------------------------------
@@ -606,13 +619,22 @@ pub fn copy_loop(
     }
     let mut vm = map_new();
     let mut tm = map_new();
+    let types = value_types(in p, fr, in fresh);
     for k in 0..blocks.len() {
         let b = w(u32_at(in blocks, k));
         let bk = p.block(add(fr.b0, b));
         let hd = read_head(in p, bk);
         for j in 0..hd.params.len() {
             let v = u64_at(in hd.params, j);
-            let ty = value_type(in p, fr, in fresh, v, infer);
+            let ty = typed(in types, v, infer);
+            let n = fresh.value(ty);
+            vm.insert(v, n);
+        }
+        // Every value the copy defines gets a fresh id, as its parameters
+        // do (`copy_loop`, #2022).
+        for q in 0..bk.ic {
+            let v = w(p.inst(add(bk.i0, q)).dest);
+            let ty = typed(in types, v, infer);
             let n = fresh.value(ty);
             vm.insert(v, n);
         }

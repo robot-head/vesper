@@ -1,0 +1,52 @@
+{
+  "notes": [
+    "Flip gate for sugar expansion (`sugar_expand::expand_sugar_with_scopes_for_execution`),",
+    "ported as @vesper/sugar (SH1 lane 14, #1157) and installed as the hybrid's",
+    "`sugar` swap. A compiler module: its Rust (crates/vesper-syntax/src/sugar_expand*)",
+    "is deleted by the Rust compiler's retirement (SH6 lane 2), not by this flip.",
+    "The differential is every driver test: the sugar test suites, the scope",
+    "examples, the import examples and refusals, the suites moved into imports",
+    "and the fuzzed corpus, with and without tests.",
+    "The `expand` workload times the swap's whole path (input text, Vesper driver,",
+    "words read back by tests/common/sugar_words.rs) against `rust_expand_sugar`",
+    "over the suite and scope programs, plain and imported."
+  ],
+  "name": "sugar",
+  "lane": "SH1-14",
+  "rust": [
+    "crates/vesper-syntax/src/sugar_expand.rs",
+    "crates/vesper-syntax/src/sugar_expand/hygiene.rs",
+    "crates/vesper-syntax/src/sugar_expand/matcher.rs",
+    "crates/vesper-syntax/src/sugar_expand/scope.rs",
+    "crates/vesper-syntax/src/sugar_expand/template.rs"
+  ],
+  "env": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0"
+  },
+  "build": [
+    ["cargo", "test", "--locked", "--release", "--test", "self_host_sugar", "--no-run"]
+  ],
+  "tests": [
+    {
+      "run": ["cargo", "test", "--locked", "--release", "--test", "self_host_sugar"]
+    }
+  ],
+  "differential": {
+    "run": {
+      "argv": ["cargo", "test", "--locked", "--release", "--test", "self_host_sugar", "driver_matches", "--", "--nocapture"]
+    }
+  },
+  "abba": [
+    {
+      "workload": "expand",
+      "run": {
+        "argv": ["cargo", "test", "--locked", "--release", "--test", "self_host_sugar", "flip_gate", "--", "--nocapture"],
+        "env": {
+          "CHECK_HARNESS_SPEED": "1"
+        }
+      }
+    }
+  ]
+}
