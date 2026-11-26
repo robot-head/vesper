@@ -1550,7 +1550,7 @@ fn front_cases(options: &verified::Options) -> Vec<FrontCase> {
             continue;
         };
         let rust = match outcome {
-            Ok(o) if o.evidence_unchanged && !o.has_sites => rust_lowering_text(&o.lowered),
+            Ok(o) if !o.has_sites => rust_lowering_text(&o.lowered),
             Ok(_) => continue,
             Err(e) => format!("error: {e}\n"),
         };

@@ -37,6 +37,9 @@ use self::lower::{
     tx,
     unsup
 };
+use self::evidence::{
+    evidence
+};
 use self::exprs::{
     Ex,
     X_HANDLE,
@@ -995,9 +998,9 @@ fn min_u64(a: u64, b: u64) -> u64 {
     }
 }
 
-// Monomorphization and then the lowering (lower.ves) in one pass over one
-// input: the mono extras, then the lowering's. Evidence passing is part
-// 4c's; the harness compares only programs it leaves unchanged.
+// Monomorphization, evidence passing (evidence.ves) and then the lowering
+// (lower.ves) in one pass over one input: the mono extras, then the
+// lowering's.
 pub fn front_input(in b: Slice[u8]) -> ChunkSeq[u8] {
     let mut r = Reader {
         pos: 0
@@ -1016,6 +1019,21 @@ pub fn front_input(in b: Slice[u8]) -> ChunkSeq[u8] {
     if e.kind != 255 {
         let mut t = tx("error: ");
         put_error(in m.c.names, in e, inout t);
+        ap(inout t, "\n");
+        return t;
+    }
+    sort_fns(in m.c.names, inout m.p.fns);
+    let entry0 = m.entry;
+    let e2 = handle Fail[VErr] in {
+        evidence(inout m.c, inout m.p, in m.ex, entry0);
+        err(255, ChunkSeq::new[u8]())
+    } with {
+        return v => v,
+        raise(e, k) => e,
+    };
+    if e2.kind != 255 {
+        let mut t = tx("error: ");
+        put_error(in m.c.names, in e2, inout t);
         ap(inout t, "\n");
         return t;
     }
