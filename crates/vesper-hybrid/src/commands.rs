@@ -22,6 +22,38 @@ thread_local! {
     static FMT_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
+/// `vesper proof-audit` from `modules/proof_audit` (#1341), when its swap
+/// is on (src/swap/proof_audit.rs): it takes the packed arguments and
+/// returns the module's result bytes.
+static PROOF_AUDIT: std::sync::OnceLock<fn(&[u8]) -> Vec<u8>> = std::sync::OnceLock::new();
+
+/// Serve `hc_proof_audit_run` from `run` (`modules/proof_audit`).
+pub(crate) fn install_proof_audit(run: fn(&[u8]) -> Vec<u8>) -> Result<(), fn(&[u8]) -> Vec<u8>> {
+    PROOF_AUDIT.set(run)
+}
+
+/// Print what `modules/proof_audit` printed and return its error: a
+/// status byte, the stdout length (8 bytes, little-endian), stdout, then
+/// the error text.
+fn proof_audit_result(result: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let (Some(&status), Some(len)) = (result.first(), result.get(1..9)) else {
+        std::process::abort();
+    };
+    let len = u64::from_le_bytes(len.try_into().expect("8 bytes")) as usize;
+    let Some(out) = result.get(9..9 + len) else {
+        std::process::abort();
+    };
+    let mut stdout = io::stdout().lock();
+    let _ = stdout.write_all(out);
+    let _ = stdout.flush();
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&result[9 + len..]).into_owned())
+    }
+}
+
 /// Prints of the Vesper command layers (`hc_print` and `hc_help`);
 /// `VESPER_HYBRID_STATS=1` reports it. A command handed back to the Rust
 /// CLI makes none.
@@ -1744,8 +1776,11 @@ pub mod host {
     pub unsafe extern "C" fn hc_proof_audit_run(packed: *const u8, packed_len: usize) -> u64 {
         // SAFETY: lent for the call.
         let raw = unsafe { bytes(packed, packed_len) };
-        let args = unpack_test_args(raw);
-        match crate::proof_commands::run(args) {
+        let result = match super::PROOF_AUDIT.get() {
+            Some(run) => super::proof_audit_result(&run(raw)),
+            None => crate::proof_commands::run(unpack_test_args(raw)),
+        };
+        match result {
             Ok(()) => 0,
             Err(err) => {
                 let bytes = err.into_bytes();

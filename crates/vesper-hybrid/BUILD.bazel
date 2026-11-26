@@ -71,6 +71,16 @@ vesper_hybrid(
     },
     # The included CLI sources (src/main.rs and its command modules) and
     # what they embed.
+    # The proof-audit module (#1341) links hash-sys's `[package] objects`
+    # (the BLAKE3 C library), which the harness compiles into its archive.
+    build_script_data = [
+        "//:std_hash_sys_manifest",
+        "//:std_hash_sys_package",
+    ],
+    build_script_env = {
+        # Path dependencies are not beside the crate in Bazel.
+        "VESPER_HYBRID_OBJECT_PACKAGES_HYBRID_PROOF_AUDIT": "$(execpath //:std_hash_sys_manifest)",
+    },
     extra_compile_data = ["//:files"],
     # The differential harness runs the default compiler beside the hybrid
     # over the bootstrap corpus, examples/ and tests/; tests/parse.rs also
@@ -236,6 +246,16 @@ vesper_hybrid(
             "//:lean_extract_package",
             "//:place_ir_package",
             "//crates/vesper-lean-syntax:port_package",
+        ],
+        # `vesper proof-audit` (#1341) is @vesper/proof-audit.
+        "hybrid_proof_audit": [
+            "//:proof_audit_package",
+            "//:std_env_package",
+            "//:std_fs_package",
+            "//:std_hash_package",
+            "//:std_hash_sys_package",
+            "//:std_process_package",
+            "//crates/vesper-serde:port_package",
         ],
         # The AST optimizer (#1249): its producer and checker.
         "hybrid_optimize": [

@@ -1551,6 +1551,23 @@ vesper_package(
 
 # Self-hosting SH5 lane 18 (#1341): Lean extraction, for the hybrid's
 # `lean_extract` swap.
+# @vesper/proof-audit, `vesper proof-audit` in Vesper (SH5 lane 18, #1341),
+# for the hybrid's `proof_audit` swap.
+vesper_package(
+    name = "proof_audit_package",
+    srcs = glob(["packages/vesper-proof-audit/src/**/*.ves"]),
+    manifest = "packages/vesper-proof-audit/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":std_env_package",
+        ":std_fs_package",
+        ":std_hash_package",
+        ":std_hash_sys_package",
+        ":std_process_package",
+        "//crates/vesper-serde:port_package",
+    ],
+)
+
 vesper_package(
     name = "lean_extract_package",
     srcs = glob(["packages/vesper-lean-extract/src/**/*.ves"]),
