@@ -231,8 +231,7 @@ fn words_eq(in text: ChunkSeq[u8], in ts: ChunkSeq[u64], i: u64, k: u64) -> bool
 // ---------------------------------------------------------------- AST
 
 fn effect_of(in a: Ast, i: u32) -> EffectNode {
-    a
-        .effect_nodes
+    a.effect_nodes
         .get_or(idx_from_raw[EffectNode](i), EffectNode { label: none(), name: none(), args: 0 })
 }
 
@@ -449,16 +448,15 @@ fn jumps(in body: ChunkSeq[u8], inout ctl: Ctl) -> Sc {
             tries.push(rel_s(in a, n.a));
             tries.push(rel_e(in a, n.a));
         } else if k == 20 || k == 21 || k == 22 {
-            js
-                .push(
-                    if k == 20 {
-                        X_BREAK
-                    } else if k == 21 {
-                        X_RETURN
-                    } else {
-                        X_CONTINUE
-                    }
-                );
+            js.push(
+                if k == 20 {
+                    X_BREAK
+                } else if k == 21 {
+                    X_RETURN
+                } else {
+                    X_CONTINUE
+                }
+            );
             js.push(rel_s(in a, e));
             js.push(rel_e(in a, e));
             if k != 22 && n.a != none() {
@@ -655,19 +653,17 @@ fn ambient(in source: ChunkSeq[u8], call_s: u64, call_e: u64, inout amb: Amb) ->
     for k in 0..a.m_items.len() {
         let it = item_of(in a, k);
         if it.kind == 3 {
-            let d = a
-                .effect_decls
-                .get_or(
-                    idx_from_raw[EffectDeclNode](it.node),
-                    EffectDeclNode {
-                        name: none(),
-                        linear: false,
-                        generics: 0,
-                        ops: 0,
-                        start: 0,
-                        end: 0
-                    }
-                );
+            let d = a.effect_decls.get_or(
+                idx_from_raw[EffectDeclNode](it.node),
+                EffectDeclNode {
+                    name: none(),
+                    linear: false,
+                    generics: 0,
+                    ops: 0,
+                    start: 0,
+                    end: 0
+                }
+            );
             if d.linear {
                 linear.push(d.name);
             }
@@ -685,33 +681,29 @@ fn ambient(in source: ChunkSeq[u8], call_s: u64, call_e: u64, inout amb: Amb) ->
         if it.kind == 2 {
             fns.push(it.node);
         } else if it.kind == 4 {
-            let n = a
-                .impls
-                .get_or(
-                    idx_from_raw[ImplNode](it.node),
-                    ImplNode { ty: none(), generics: 0, methods: 0 }
-                );
+            let n = a.impls.get_or(
+                idx_from_raw[ImplNode](it.node),
+                ImplNode { ty: none(), generics: 0, methods: 0 }
+            );
             for m in 0..list_len(in a, n.methods) {
                 fns.push(list_at(in a, n.methods, m));
             }
         } else if it.kind == 6 {
-            let n = a
-                .confs
-                .get_or(
-                    idx_from_raw[ConfNode](it.node),
-                    ConfNode {
-                        model: none(),
-                        public: false,
-                        generics: 0,
-                        trait_ref: none(),
-                        self_ty: none(),
-                        wheres: 0,
-                        assoc: 0,
-                        methods: 0,
-                        start: 0,
-                        end: 0
-                    }
-                );
+            let n = a.confs.get_or(
+                idx_from_raw[ConfNode](it.node),
+                ConfNode {
+                    model: none(),
+                    public: false,
+                    generics: 0,
+                    trait_ref: none(),
+                    self_ty: none(),
+                    wheres: 0,
+                    assoc: 0,
+                    methods: 0,
+                    start: 0,
+                    end: 0
+                }
+            );
             for m in 0..list_len(in a, n.methods) {
                 fns.push(list_at(in a, n.methods, m));
             }
@@ -869,10 +861,9 @@ fn ambient(in source: ChunkSeq[u8], call_s: u64, call_e: u64, inout amb: Amb) ->
             }
             if !is_linear {
                 let mut m = ChunkSeq::new[u8]();
-                m
-                    .extend(
-                        in "exit-aware scope cannot relay potentially abortive effect `".as_bytes()
-                    );
+                m.extend(
+                    in "exit-aware scope cannot relay potentially abortive effect `".as_bytes()
+                );
                 push_name(inout m, in a, e.name);
                 m.push(96);
                 return sc_err_seq(in m);
@@ -902,14 +893,13 @@ fn push_change(
     eds.push(e);
     eds.push(pool.len());
     eds.push(text.len());
-    eds
-        .push(
-            if forwarded {
-                1
-            } else {
-                0
-            }
-        );
+    eds.push(
+        if forwarded {
+            1
+        } else {
+            0
+        }
+    );
     pool.extend(in text.as_slice());
 }
 

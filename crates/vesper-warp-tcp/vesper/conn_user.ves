@@ -147,16 +147,15 @@ pub fn tcb_abort(inout t: Tcb) {
     if state_is_synchronized(t.st) && t.st != State::TimeWait {
         match t.ips {
             Option::Some(ips) => {
-                t
-                    .pending_rst = Option::Some(
-                        RstSpec {
-                            ips: ips,
-                            src_port: t.cfg.local_port,
-                            dst_port: t.remote_port,
-                            seq: seqmap_seq(t.snd_isn, t.snd_nxt),
-                            ack: Option::None
-                        }
-                    );
+                t.pending_rst = Option::Some(
+                    RstSpec {
+                        ips: ips,
+                        src_port: t.cfg.local_port,
+                        dst_port: t.remote_port,
+                        seq: seqmap_seq(t.snd_isn, t.snd_nxt),
+                        ack: Option::None
+                    }
+                );
             },
             Option::None => (),
         }

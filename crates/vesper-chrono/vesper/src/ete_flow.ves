@@ -429,18 +429,16 @@ fn walker_push(
     in kind: BranchKind,
     element_index: u64
 ) {
-    w
-        .open
-        .push(
-            Branch {
-                from: from,
-                to: clone_opt_u64(in to),
-                kind: clone_branch_kind(in kind),
-                tsc_lo: clone_opt_u64(in w.ts),
-                tsc_hi: Option::None,
-                packet_index: element_index,
-            }
-        );
+    w.open.push(
+        Branch {
+            from: from,
+            to: clone_opt_u64(in to),
+            kind: clone_branch_kind(in kind),
+            tsc_lo: clone_opt_u64(in w.ts),
+            tsc_hi: Option::None,
+            packet_index: element_index,
+        }
+    );
 }
 
 fn flush_open(inout w: Walker, ts: Option[u64]) {
@@ -591,11 +589,10 @@ fn walker_atom(
             if !executed {
                 return Result::Err(EteFlowError::UnexpectedNotTaken { ip: ip, element_index: i });
             }
-            w
-                .waiting = Waiting::WaitIndirect {
-                    from: ip,
-                    kind: BranchKind::Return { compressed: false },
-                };
+            w.waiting = Waiting::WaitIndirect {
+                from: ip,
+                kind: BranchKind::Return { compressed: false },
+            };
             w.pending_lo = clone_opt_u64(in w.ts);
             w.pending_hi = Option::None;
             w.pc = Option::None;

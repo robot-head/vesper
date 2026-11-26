@@ -234,6 +234,10 @@ impl<'a> Document<'a> {
         frames.push((id, flat, 0));
         Ok(())
     }
+    /// The flat width of a node, or `None` when it holds a line break.
+    pub(crate) fn width(&self, id: DocId) -> Result<Option<usize>, Error> {
+        Ok(self.node(id)?.width)
+    }
     pub(crate) fn work_used(&self) -> usize {
         self.work.used
     }

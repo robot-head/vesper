@@ -349,11 +349,9 @@ pub fn lookup(
     s.err_msg.push_str(in msg);
     let c = sym_byte(in s, name, 0);
     if sym_len(in s, name) > 0 && c >= 65 && c <= 90 && mod_path_len(in s, tm) == 0 {
-        s
-            .err_help
-            .push_str(
-                in "a `.vsys` library is not an item: every module names it directly, as `Lib::f(..)` and `eff [Ffi[Lib]]`, with no import"
-            );
+        s.err_help.push_str(
+            in "a `.vsys` library is not an item: every module names it directly, as `Lib::f(..)` and `eff [Ffi[Lib]]`, with no import"
+        );
         s.err_has_help = true;
     }
     (no_key(), 0)

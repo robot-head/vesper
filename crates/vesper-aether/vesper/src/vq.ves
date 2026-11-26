@@ -137,15 +137,14 @@ fn vq_store(inout out: Slice[u64], count: u64, gpa: u64, len: u64, writable: boo
     let at = wrapping_add(VQ_HEADER, wrapping_mul(count, 4));
     out.try_set(at, gpa);
     out.try_set(wrapping_add(at, 1), len);
-    out
-        .try_set(
-            wrapping_add(at, 2),
-            if writable {
-                1
-            } else {
-                0
-            }
-        );
+    out.try_set(
+        wrapping_add(at, 2),
+        if writable {
+            1
+        } else {
+            0
+        }
+    );
     out.try_set(wrapping_add(at, 3), tag);
 }
 

@@ -383,12 +383,10 @@ fn is_nested(in f: Fx, s: u64, e: u64) -> bool {
 // ---------------------------------------------------------------- AST
 
 pub fn stmt_of(in a: Ast, i: u32) -> StmtNode {
-    a
-        .stmts
-        .get_or(
-            idx_from_raw[StmtNode](i),
-            StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
-        )
+    a.stmts.get_or(
+        idx_from_raw[StmtNode](i),
+        StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
+    )
 }
 
 pub fn arg_of(in a: Ast, i: u32) -> ArgNode {
@@ -396,37 +394,32 @@ pub fn arg_of(in a: Ast, i: u32) -> ArgNode {
 }
 
 pub fn clause_of(in a: Ast, i: u32) -> ClauseNode {
-    a
-        .clauses
+    a.clauses
         .get_or(idx_from_raw[ClauseNode](i), ClauseNode { name: none(), pats: 0, body: none() })
 }
 
 pub fn param_of(in a: Ast, i: u32) -> ParamNode {
-    a
-        .params
-        .get_or(
-            idx_from_raw[ParamNode](i),
-            ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
-        )
+    a.params.get_or(
+        idx_from_raw[ParamNode](i),
+        ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
+    )
 }
 
 pub fn fn_of(in a: Ast, i: u32) -> FnNode {
-    a
-        .fns
-        .get_or(
-            idx_from_raw[FnNode](i),
-            FnNode {
-                name: none(),
-                fip: false,
-                generics: 0,
-                params: 0,
-                result: none(),
-                effects: none(),
-                body: none(),
-                start: 0,
-                end: 0
-            }
-        )
+    a.fns.get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: none(),
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: none(),
+            effects: none(),
+            body: none(),
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 pub fn es(in a: Ast, e: u32) -> u64 {
@@ -1343,28 +1336,24 @@ fn plan(
     f.decls.push(end);
     f.decls.push(id);
     f.decls.push(num);
-    f
-        .decls
-        .push(
+    f.decls.push(
+        if lazy {
+            1
+        } else {
+            0
+        }
+    );
+    for u in from..add(from, count) {
+        let slot = w64(in rows, wrapping_mul(u, 3));
+        f.memo.try_set(slot, num);
+        f.lazy.try_set(
+            slot,
             if lazy {
                 1
             } else {
                 0
             }
         );
-    for u in from..add(from, count) {
-        let slot = w64(in rows, wrapping_mul(u, 3));
-        f.memo.try_set(slot, num);
-        f
-            .lazy
-            .try_set(
-                slot,
-                if lazy {
-                    1
-                } else {
-                    0
-                }
-            );
     }
 }
 
@@ -1455,15 +1444,13 @@ fn rd_hole(
     r.origins.push(r.text.len());
     r.origins.push(vs);
     r.origins.push(ve);
-    r
-        .origins
-        .push(
-            if from_tail {
-                1
-            } else {
-                0
-            }
-        );
+    r.origins.push(
+        if from_tail {
+            1
+        } else {
+            0
+        }
+    );
     let p = permission(in c, in sk, h);
     if p != 0 {
         r.places.push(add(start, w64(in sk.holes, add(h << 2, 2))));
@@ -1820,26 +1807,22 @@ pub fn render(
     let a = l.ast;
     if l.p.d.code.len() == 0 && a.m_items.len() != 0 {
         for i in 0..a.m_items.len() {
-            let it = a
-                .items
-                .get_or(
-                    idx_from_raw[ItemNode](
-                        match a.m_items.try_get(i) {
-                            Option::Some(v) => v,
-                            Option::None => 0,
-                        }
-                    ),
-                    ItemNode { kind: 0, node: 0 }
-                );
+            let it = a.items.get_or(
+                idx_from_raw[ItemNode](
+                    match a.m_items.try_get(i) {
+                        Option::Some(v) => v,
+                        Option::None => 0,
+                    }
+                ),
+                ItemNode { kind: 0, node: 0 }
+            );
             if it.kind == 2 {
                 function(inout f, in sk, in c, in a, it.node, wrapped);
             } else if it.kind == 4 {
-                let n = a
-                    .impls
-                    .get_or(
-                        idx_from_raw[ImplNode](it.node),
-                        ImplNode { ty: none(), generics: 0, methods: 0 }
-                    );
+                let n = a.impls.get_or(
+                    idx_from_raw[ImplNode](it.node),
+                    ImplNode { ty: none(), generics: 0, methods: 0 }
+                );
                 for m in 0..list_len(in a, n.methods) {
                     function(inout f, in sk, in c, in a, list_at(in a, n.methods, m), wrapped);
                     if f.failed {
@@ -1847,20 +1830,18 @@ pub fn render(
                     }
                 }
             } else if it.kind == 5 {
-                let n = a
-                    .traits
-                    .get_or(
-                        idx_from_raw[TraitNode](it.node),
-                        TraitNode {
-                            name: none(),
-                            public: false,
-                            generics: 0,
-                            assoc: 0,
-                            methods: 0,
-                            start: 0,
-                            end: 0
-                        }
-                    );
+                let n = a.traits.get_or(
+                    idx_from_raw[TraitNode](it.node),
+                    TraitNode {
+                        name: none(),
+                        public: false,
+                        generics: 0,
+                        assoc: 0,
+                        methods: 0,
+                        start: 0,
+                        end: 0
+                    }
+                );
                 for m in 0..list_len(in a, n.methods) {
                     function(inout f, in sk, in c, in a, list_at(in a, n.methods, m), wrapped);
                     if f.failed {
@@ -1868,23 +1849,21 @@ pub fn render(
                     }
                 }
             } else if it.kind == 6 {
-                let n = a
-                    .confs
-                    .get_or(
-                        idx_from_raw[ConfNode](it.node),
-                        ConfNode {
-                            model: none(),
-                            public: false,
-                            generics: 0,
-                            trait_ref: none(),
-                            self_ty: none(),
-                            wheres: 0,
-                            assoc: 0,
-                            methods: 0,
-                            start: 0,
-                            end: 0
-                        }
-                    );
+                let n = a.confs.get_or(
+                    idx_from_raw[ConfNode](it.node),
+                    ConfNode {
+                        model: none(),
+                        public: false,
+                        generics: 0,
+                        trait_ref: none(),
+                        self_ty: none(),
+                        wheres: 0,
+                        assoc: 0,
+                        methods: 0,
+                        start: 0,
+                        end: 0
+                    }
+                );
                 for m in 0..list_len(in a, n.methods) {
                     function(inout f, in sk, in c, in a, list_at(in a, n.methods, m), wrapped);
                     if f.failed {

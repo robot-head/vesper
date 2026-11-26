@@ -416,8 +416,7 @@ fn hidden_trait(inout d: D, kind: u32, sig: u32) -> u32 {
         ps.push(p);
     }
     let pl = mk_list(inout d, in ps);
-    let f = d
-        .ast
+    let f = d.ast
         .fns
         .alloc(
             FnNode {
@@ -434,8 +433,7 @@ fn hidden_trait(inout d: D, kind: u32, sig: u32) -> u32 {
         )
         .raw();
     let ml = list1(inout d, f);
-    let t = d
-        .ast
+    let t = d.ast
         .traits
         .alloc(
             TraitNode {
@@ -925,8 +923,7 @@ fn trim_new(inout d: D, n: u32) -> u32 {
 fn infer(inout d: D, e: u32) -> u32 {
     let n = ex(in d, e);
     if n.kind == 1 {
-        let lit = d
-            .ast
+        let lit = d.ast
             .lits
             .get_or(idx_from_raw[Lit](n.a), Lit { kind: 0, neg: false, bits: 0, hi: 0 });
         if lit.kind == 1 {
@@ -1426,14 +1423,13 @@ fn call(inout d: D, e: u32) {
             && ex(in d, a.expr).kind == 15
             && want != NONE
             && fn_sig(in d, want) != NONE;
-        lends
-            .push(
-                if lend {
-                    1
-                } else {
-                    0
-                }
-            );
+        lends.push(
+            if lend {
+                1
+            } else {
+                0
+            }
+        );
         if lend {
             last_lend = i;
             has_lend = true;
@@ -1728,8 +1724,7 @@ fn coerce(inout d: D, e: u32, kind: u32, sig: u32) {
     let mut fields = ChunkSeq::new[u32]();
     for i in 0..ncap {
         let fname = field_name(in d, u32_at(in cap_n, i));
-        let f = d
-            .ast
+        let f = d.ast
             .fields
             .alloc(FieldNode { name: fname, ty: u32_at(in cap_t, i), modality: 3, temperature: 0 })
             .raw();
@@ -1739,8 +1734,7 @@ fn coerce(inout d: D, e: u32, kind: u32, sig: u32) {
     let v = d.ast.variants.alloc(VariantNode { name: struct_name, fields: fl, named: true }).raw();
     let vl = list1(inout d, v);
     let adt_span = span(inout d);
-    let adt = d
-        .ast
+    let adt = d.ast
         .adts
         .alloc(
             AdtNode {
@@ -1833,8 +1827,7 @@ fn coerce(inout d: D, e: u32, kind: u32, sig: u32) {
     }
     let mpl = mk_list(inout d, in mps);
     let ms = span(inout d);
-    let method_fn = d
-        .ast
+    let method_fn = d.ast
         .fns
         .alloc(
             FnNode {
@@ -1851,8 +1844,7 @@ fn coerce(inout d: D, e: u32, kind: u32, sig: u32) {
         )
         .raw();
     let trs = span(inout d);
-    let tref = d
-        .ast
+    let tref = d.ast
         .trait_refs
         .alloc(
             TraitRefNode { package: NONE, name: trait_name, args: 0, start: trs, end: inc32(trs) }
@@ -1861,8 +1853,7 @@ fn coerce(inout d: D, e: u32, kind: u32, sig: u32) {
     let self_t = named(inout d, struct_name, 0);
     let ml = list1(inout d, method_fn);
     let cfs = span(inout d);
-    let conf = d
-        .ast
+    let conf = d.ast
         .confs
         .alloc(
             ConfNode {

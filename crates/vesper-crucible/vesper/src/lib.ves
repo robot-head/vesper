@@ -3600,14 +3600,13 @@ test {
         let mut limits = ChunkSeq::new[u64]();
         for i in 0..sample.len() {
             values.push(byte(in sample, i));
-            kinds
-                .push(
-                    if i == 2 {
-                        0
-                    } else {
-                        1
-                    }
-                );
+            kinds.push(
+                if i == 2 {
+                    0
+                } else {
+                    1
+                }
+            );
             limits.push(255);
         }
         let mut comparisons = ChunkSeq::new[u64]();
