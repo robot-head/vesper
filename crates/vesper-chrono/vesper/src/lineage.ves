@@ -264,14 +264,12 @@ pub fn record(inout l: ObligationLineage, id: u64, hop: ObligationHop) -> u32 {
         }
         l.next_id = wrapping_add(id, 1);
         l.minted_ids.push(id);
-        l
-            .hops
-            .push(
-                StoredHop {
-                    obligation_id: id,
-                    hop: hop,
-                }
-            );
+        l.hops.push(
+            StoredHop {
+                obligation_id: id,
+                hop: hop,
+            }
+        );
     } else {
         if contains_u64(in l.minted_ids.as_slice(), id) {
             match last_hop_for(in l, id) {
@@ -282,14 +280,12 @@ pub fn record(inout l: ObligationLineage, id: u64, hop: ObligationHop) -> u32 {
                 }
                 Option::None => {}
             }
-            l
-                .hops
-                .push(
-                    StoredHop {
-                        obligation_id: id,
-                        hop: hop,
-                    }
-                );
+            l.hops.push(
+                StoredHop {
+                    obligation_id: id,
+                    hop: hop,
+                }
+            );
         } else if is_pre_window(in l, id) {
             if !contains_u64(in l.truncated.as_slice(), id) {
                 l.truncated.push(id);

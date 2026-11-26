@@ -108,12 +108,10 @@ fn w64(x: u32) -> u64 {
 }
 
 fn stmt_at(in a: Ast, i: u32) -> StmtNode {
-    a
-        .stmts
-        .get_or(
-            idx_from_raw[StmtNode](i),
-            StmtNode { kind: 0, pat: NONE, ty: NONE, value: NONE, mutable: false }
-        )
+    a.stmts.get_or(
+        idx_from_raw[StmtNode](i),
+        StmtNode { kind: 0, pat: NONE, ty: NONE, value: NONE, mutable: false }
+    )
 }
 
 fn arg_at(in a: Ast, i: u32) -> ArgNode {
@@ -129,28 +127,25 @@ fn effects_at(in a: Ast, i: u32) -> EffectsNode {
 }
 
 fn effect_at(in a: Ast, i: u32) -> EffectNode {
-    a
-        .effect_nodes
+    a.effect_nodes
         .get_or(idx_from_raw[EffectNode](i), EffectNode { label: NONE, name: NONE, args: 0 })
 }
 
 fn fn_at(in a: Ast, i: u32) -> FnNode {
-    a
-        .fns
-        .get_or(
-            idx_from_raw[FnNode](i),
-            FnNode {
-                name: NONE,
-                fip: false,
-                generics: 0,
-                params: 0,
-                result: NONE,
-                effects: NONE,
-                body: NONE,
-                start: 0,
-                end: 0
-            }
-        )
+    a.fns.get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: NONE,
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: NONE,
+            effects: NONE,
+            body: NONE,
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 // Whether symbol `x` of the tree is `text`.
@@ -1004,12 +999,10 @@ fn require(
     }
     x.out.extend(in " | add Isa[".as_bytes());
     profile_name(needed, inout x.out);
-    x
-        .out
-        .extend(
-            in "] to the function's effect row, or call it from the checked dispatch `if Isa::supported["
-                .as_bytes()
-        );
+    x.out.extend(
+        in "] to the function's effect row, or call it from the checked dispatch `if Isa::supported["
+            .as_bytes()
+    );
     profile_name(needed, inout x.out);
     x.out.extend(in "]() { ... }`\n".as_bytes());
 }
@@ -1173,8 +1166,10 @@ fn expr(inout a: Ast, inout x: I, id: u32, in available: ChunkSeq[u8]) {
             }
         } else {
             if callee.kind == E_FIELD {
-                let base_ty = x
-                    .recorded(expr_at(in a, callee.a).start, expr_at(in a, callee.a).end);
+                let base_ty = x.recorded(
+                    expr_at(in a, callee.a).start,
+                    expr_at(in a, callee.a).end
+                );
                 if callee.b == x.s_load_tile_vec && is_tiled_seq(in x, base_ty) {
                     let p = if list_len(in a, e.b) == 2 {
                         type_arg_profile(in a, e.b, 0)
@@ -1265,12 +1260,10 @@ fn expr(inout a: Ast, inout x: I, id: u32, in available: ChunkSeq[u8]) {
         diag_head(inout x, in "E1402", e.start, e.end);
         x.out.push(39);
         sym_text(in a, e.a, inout x.out);
-        x
-            .out
-            .extend(
-                in "' is not defined on vector and mask values | compare lanes with Vec::eq, Vec::ne, Vec::lt, ... and reduce the mask with Mask::all or Mask::any\n"
-                    .as_bytes()
-            );
+        x.out.extend(
+            in "' is not defined on vector and mask values | compare lanes with Vec::eq, Vec::ne, Vec::lt, ... and reduce the mask with Mask::all or Mask::any\n"
+                .as_bytes()
+        );
     } else if k == E_INDEX {
         expr(inout a, inout x, e.a, in available);
         expr(inout a, inout x, e.b, in available);

@@ -143,8 +143,7 @@ pub fn add_int(inout t: Tree, v: i128, start: u32, end: u32) -> u32 {
             v
         }
     );
-    let l = t
-        .ast
+    let l = t.ast
         .lits
         .alloc(Lit { kind: 1, neg: neg, bits: wrapping_u64(m), hi: wrapping_u64(m >> 64) });
     add_expr(inout t, node(1, start, end, l.raw(), 0, 0), 0, 0)

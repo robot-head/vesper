@@ -345,15 +345,13 @@ fn lines(
         }
         sec.fields.push(split);
         sec.fields.push(wrapping_sub(total, split));
-        sec
-            .fields
-            .push(
-                if sensitive {
-                    1
-                } else {
-                    0
-                }
-            );
+        sec.fields.push(
+            if sensitive {
+                1
+            } else {
+                0
+            }
+        );
         count = inc(count);
     }
     if ric > 0 && max_ref != ric {

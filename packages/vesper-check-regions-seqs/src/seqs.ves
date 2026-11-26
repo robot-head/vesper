@@ -818,14 +818,13 @@ fn second_class_open(inout d: Diags) -> u64 {
 }
 
 fn second_class_close(inout d: Diags, c: u64, m: u64, start: u64, stop: u64) {
-    d
-        .close(
-            c,
-            m,
-            "take the slice as an 'in' or 'inout' parameter and pass s[a..b] or s.as_slice() at the call",
-            start,
-            stop
-        );
+    d.close(
+        c,
+        m,
+        "take the slice as an 'in' or 'inout' parameter and pass s[a..b] or s.as_slice() at the call",
+        start,
+        stop
+    );
 }
 
 fn lower(b: u8) -> u8 {
@@ -862,11 +861,9 @@ pub fn seq_check_world(in t: Types, in names: Names, in wd: World, in sg: Sigs, 
             if nested || (is_slice && !top) {
                 let c = d.open("E1520");
                 let m = d.text.len();
-                d
-                    .text
-                    .extend(
-                        in "Slice[T] is a second-class borrow and cannot appear in the ".as_bytes()
-                    );
+                d.text.extend(
+                    in "Slice[T] is a second-class borrow and cannot appear in the ".as_bytes()
+                );
                 if p.pass == TyPass::In {
                     put(inout d.text, "in");
                 } else if p.pass == TyPass::Inout {
@@ -883,12 +880,10 @@ pub fn seq_check_world(in t: Types, in names: Names, in wd: World, in sg: Sigs, 
         if mentions_slice(in t, k, f.result) {
             let c = d.open("E1520");
             let m = d.text.len();
-            d
-                .text
-                .extend(
-                    in "Slice[T] is a second-class borrow and cannot appear in the result of '"
-                        .as_bytes()
-                );
+            d.text.extend(
+                in "Slice[T] is a second-class borrow and cannot appear in the result of '"
+                    .as_bytes()
+            );
             names.write(f.name, inout d.text);
             d.text.push(39);
             second_class_close(inout d, c, m, f.start, f.stop);
@@ -903,12 +898,10 @@ pub fn seq_check_world(in t: Types, in names: Names, in wd: World, in sg: Sigs, 
                 if mentions_slice(in t, k, fd.ty) {
                     let c = d.open("E1520");
                     let m = d.text.len();
-                    d
-                        .text
-                        .extend(
-                            in "Slice[T] is a second-class borrow and cannot appear in field '"
-                                .as_bytes()
-                        );
+                    d.text.extend(
+                        in "Slice[T] is a second-class borrow and cannot appear in field '"
+                            .as_bytes()
+                    );
                     names.write(a.name, inout d.text);
                     d.text.push(46);
                     names.write(fd.name, inout d.text);

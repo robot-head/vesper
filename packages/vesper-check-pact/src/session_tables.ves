@@ -185,14 +185,13 @@ pub fn emit_line(
     put_str(inout out, ": ");
     for i in 0..msg.len() {
         let ch = u8_at_slice(in msg, i);
-        out
-            .push(
-                if ch == 10 {
-                    1
-                } else {
-                    ch
-                }
-            );
+        out.push(
+            if ch == 10 {
+                1
+            } else {
+                ch
+            }
+        );
     }
     if has_subj {
         put_str(inout out, " (");
@@ -473,15 +472,13 @@ pub fn build_tables(
         tb.tr_pn.push(tr.gn);
         for g_i in 0..w(tr.gn) {
             let g = d.gen(add(w(tr.ga), g_i));
-            tb
-                .tr_pkinds
-                .push(
-                    if g.row {
-                        wrapping_u8(kd_row())
-                    } else {
-                        wrapping_u8(kd_type())
-                    }
-                );
+            tb.tr_pkinds.push(
+                if g.row {
+                    wrapping_u8(kd_row())
+                } else {
+                    wrapping_u8(kd_type())
+                }
+            );
         }
         tb.tr_aa.push(n32(tb.tr_assoc_names.len()));
         tb.tr_an.push(tr.an);
@@ -553,15 +550,13 @@ pub fn build_tables(
         let k = w(u32_at(in ef_order, i));
         let loc = is_eff_local(in meta, k);
         let ename = u32_at(in meta.eff_name, k);
-        tb
-            .ef_pkg
-            .push(
-                if loc {
-                    tb.local_pkg
-                } else {
-                    tb.builtin_pkg
-                }
-            );
+        tb.ef_pkg.push(
+            if loc {
+                tb.local_pkg
+            } else {
+                tb.builtin_pkg
+            }
+        );
         tb.ef_name.push(ename);
         if loc {
             let (ss, se) = local_item_span(in d, false, ename);
@@ -578,24 +573,20 @@ pub fn build_tables(
         for g_i in 0..w(gn) {
             let g = meta.eff_gen(add(w(ga), g_i));
             tb.ef_pnames.push(g.name);
-            tb
-                .ef_pkinds
-                .push(
-                    if g.row {
-                        wrapping_u8(kd_row())
-                    } else {
-                        wrapping_u8(kd_type())
-                    }
-                );
-            tb
-                .ef_pbounds
-                .push(
-                    if g.row {
-                        M_LINEAR
-                    } else {
-                        g.bound
-                    }
-                );
+            tb.ef_pkinds.push(
+                if g.row {
+                    wrapping_u8(kd_row())
+                } else {
+                    wrapping_u8(kd_type())
+                }
+            );
+            tb.ef_pbounds.push(
+                if g.row {
+                    M_LINEAR
+                } else {
+                    g.bound
+                }
+            );
         }
     }
 
@@ -759,15 +750,13 @@ pub fn build_tables(
             for g_i in 0..w(a.gn) {
                 let g = c.world.generic(add(w(a.ga), g_i));
                 tb.ty_pnames.push(g.name);
-                tb
-                    .ty_pkinds
-                    .push(
-                        if g.row {
-                            wrapping_u8(kd_row())
-                        } else {
-                            wrapping_u8(kd_type())
-                        }
-                    );
+                tb.ty_pkinds.push(
+                    if g.row {
+                        wrapping_u8(kd_row())
+                    } else {
+                        wrapping_u8(kd_type())
+                    }
+                );
                 tb.ty_pbounds.push(g.bound);
             }
             let ds = derive_adt_scheme(inout c.types, inout c.names, in c.world, adt_idx);

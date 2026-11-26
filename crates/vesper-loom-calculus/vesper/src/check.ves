@@ -204,8 +204,7 @@ pub fn since(in l: L, from: u64) -> u64 {
 // message is the range from `mo` to the end of the pool.
 pub fn emit_at(inout l: L, code: u64, pkg: u64, so: u64, sl: u64, mo: u64) {
     let ml = since(in l, mo);
-    l
-        .diags
+    l.diags
         .push(Diag { snap: 0, code: code, pkg: pkg, dep: none(), so: so, sl: sl, mo: mo, ml: ml });
 }
 
