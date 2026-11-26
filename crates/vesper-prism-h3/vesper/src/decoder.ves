@@ -345,15 +345,7 @@ fn lines(
         }
         sec.fields.push(split);
         sec.fields.push(wrapping_sub(total, split));
-        sec
-            .fields
-            .push(
-                if sensitive {
-                    1
-                } else {
-                    0
-                }
-            );
+        sec.fields.push(if sensitive { 1 } else { 0 });
         count = inc(count);
     }
     if ric > 0 && max_ref != ric {
@@ -441,11 +433,7 @@ fn conclude(
                 }
                 return Result::Err(err);
             }
-            let kind: u64 = if queued {
-                0
-            } else {
-                3
-            };
+            let kind: u64 = if queued { 0 } else { 3 };
             head(inout d.sec, kind, stream_id, ric, l.count);
             Result::Ok(())
         },

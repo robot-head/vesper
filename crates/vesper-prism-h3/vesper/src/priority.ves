@@ -201,11 +201,7 @@ fn parsed(item: Item, end: u64) -> Option[Parsed] {
 
 fn number(in v: Slice[u8], at: u64) -> Option[Parsed] {
     let neg = at_is(in v, at, ASCII_MINUS);
-    let digits = if neg {
-        inc(at)
-    } else {
-        at
-    };
+    let digits = if neg { inc(at) } else { at };
     let mut i = digits;
     let mut mag: u64 = 0;
     loop {
@@ -563,11 +559,7 @@ pub fn schedule_into(in streams: Slice[u64], rotate: u64, inout out: ChunkSeq[u6
             let r = rotate % m;
             for i in 0..m {
                 let j = wrapping_add(i, r);
-                let k = if j >= m {
-                    wrapping_sub(j, m)
-                } else {
-                    j
-                };
+                let k = if j >= m { wrapping_sub(j, m) } else { j };
                 out.push(word(in incr.as_slice(), k));
             }
         }

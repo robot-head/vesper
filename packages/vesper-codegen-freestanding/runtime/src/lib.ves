@@ -198,10 +198,7 @@ fn span_of(in spans: ChunkSeq[Span], i: u64) -> Span {
 }
 
 fn word_of(in words: ChunkSeq[u64], i: u64) -> u64 {
-    match words.try_get(i) {
-        Option::Some(w) => w,
-        Option::None => 0,
-    }
+    words.try_get(i).unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -227,14 +224,8 @@ fn same(in a: Slice[u8], in b: Slice[u8]) -> bool {
 impl Strings {
     fn find(in self, in s: Slice[u8]) -> Option[DataId] {
         for i in 0..self.ids.len() {
-            let start = match self.starts.try_get(i) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
-            let len = match self.lens.try_get(i) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
+            let start = self.starts.try_get(i).unwrap_or(0);
+            let len = self.lens.try_get(i).unwrap_or(0);
             let end = wrapping_add(start, len);
             if end <= self.bytes.len() && start <= end {
                 let have = self.bytes[start..end];
@@ -890,11 +881,10 @@ fn emit(
 fn isa_flags(target: u64) -> ChunkSeq[u8] {
     let mut f: ChunkSeq[u8] = ChunkSeq::new[u8]();
     // `vesper_silicon::stack::target_isa_with`: the ISA Silicon measures.
-    f
-        .extend(
-            in "opt_level=speed;enable_probestack=false;unwind_info=true;preserve_frame_pointers=true"
-                .as_bytes()
-        );
+    f.extend(
+        in "opt_level=speed;enable_probestack=false;unwind_info=true;preserve_frame_pointers=true"
+            .as_bytes()
+    );
     if target == TARGET_RISCV {
         // `FreestandingTarget::isa_flags`.
         f.extend(in ";has_zca=true;has_zcd=false".as_bytes());

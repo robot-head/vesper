@@ -126,52 +126,52 @@ const N_FNS: u64 = 33;
 // The operation's `.vsys` name, its parameter count and the passing mode
 // of each parameter (0 in, 1 inout, 2 sink: `P_*` of plan.ves), as the
 // Bridge declares them; `op_index` checks a call against it.
-fn op_name(k: u64) -> Str {
-    if k == ENV_ARG_COUNT {
+fn op_name(op_code: u64) -> Str {
+    if op_code == ENV_ARG_COUNT {
         "vstd_env_arg_count"
-    } else if k == ENV_ARG {
+    } else if op_code == ENV_ARG {
         "vstd_env_arg"
-    } else if k == ENV_VAR {
+    } else if op_code == ENV_VAR {
         "vstd_env_var"
-    } else if k == ENV_VAR_COUNT {
+    } else if op_code == ENV_VAR_COUNT {
         "vstd_env_var_count"
-    } else if k == ENV_VAR_AT {
+    } else if op_code == ENV_VAR_AT {
         "vstd_env_var_at"
-    } else if k == ENV_CURRENT_DIR {
+    } else if op_code == ENV_CURRENT_DIR {
         "vstd_env_current_dir"
-    } else if k == ENV_OS {
+    } else if op_code == ENV_OS {
         "vstd_env_os"
-    } else if k == FS_OPEN {
+    } else if op_code == FS_OPEN {
         "vstd_fs_open"
-    } else if k == FS_FILE_LEN {
+    } else if op_code == FS_FILE_LEN {
         "vstd_fs_file_len"
-    } else if k == FS_READ {
+    } else if op_code == FS_READ {
         "vstd_fs_read"
-    } else if k == FS_WRITE {
+    } else if op_code == FS_WRITE {
         "vstd_fs_write"
-    } else if k == FS_SYNC {
+    } else if op_code == FS_SYNC {
         "vstd_fs_sync"
-    } else if k == FS_CLOSE {
+    } else if op_code == FS_CLOSE {
         "vstd_fs_close"
-    } else if k == FS_RENAME {
+    } else if op_code == FS_RENAME {
         "vstd_fs_rename"
-    } else if k == FS_REMOVE_FILE {
+    } else if op_code == FS_REMOVE_FILE {
         "vstd_fs_remove_file"
-    } else if k == FS_REMOVE_DIR {
+    } else if op_code == FS_REMOVE_DIR {
         "vstd_fs_remove_dir"
-    } else if k == FS_CREATE_DIR {
+    } else if op_code == FS_CREATE_DIR {
         "vstd_fs_create_dir"
-    } else if k == FS_METADATA {
+    } else if op_code == FS_METADATA {
         "vstd_fs_metadata"
-    } else if k == FS_SYNC_DIR {
+    } else if op_code == FS_SYNC_DIR {
         "vstd_fs_sync_dir"
-    } else if k == FS_PARENT_LEN {
+    } else if op_code == FS_PARENT_LEN {
         "vstd_fs_parent_len"
-    } else if k == FS_UNIQUE {
+    } else if op_code == FS_UNIQUE {
         "vstd_fs_unique"
-    } else if k == FS_READ_DIR {
+    } else if op_code == FS_READ_DIR {
         "vstd_fs_read_dir"
-    } else if k == FS_DIR_NEXT {
+    } else if op_code == FS_DIR_NEXT {
         "vstd_fs_dir_next"
     } else {
         "vstd_fs_dir_close"
@@ -179,28 +179,31 @@ fn op_name(k: u64) -> Str {
 }
 
 // Passing modes, one character per parameter: `i` in, `o` inout, `s` sink.
-fn op_passes(k: u64) -> Str {
-    if k == ENV_ARG_COUNT || k == ENV_VAR_COUNT || k == ENV_OS || k == FS_UNIQUE {
+fn op_passes(op_code: u64) -> Str {
+    if op_code == ENV_ARG_COUNT
+        || op_code == ENV_VAR_COUNT
+        || op_code == ENV_OS
+        || op_code == FS_UNIQUE {
         ""
-    } else if k == ENV_ARG || k == ENV_VAR || k == ENV_VAR_AT {
+    } else if op_code == ENV_ARG || op_code == ENV_VAR || op_code == ENV_VAR_AT {
         "io"
-    } else if k == ENV_CURRENT_DIR {
+    } else if op_code == ENV_CURRENT_DIR {
         "oo"
-    } else if k == FS_OPEN || k == FS_REMOVE_DIR || k == FS_CREATE_DIR {
+    } else if op_code == FS_OPEN || op_code == FS_REMOVE_DIR || op_code == FS_CREATE_DIR {
         "iio"
-    } else if k == FS_FILE_LEN || k == FS_PARENT_LEN {
+    } else if op_code == FS_FILE_LEN || op_code == FS_PARENT_LEN {
         "i"
-    } else if k == FS_READ || k == FS_DIR_NEXT {
+    } else if op_code == FS_READ || op_code == FS_DIR_NEXT {
         "ooo"
-    } else if k == FS_WRITE {
+    } else if op_code == FS_WRITE {
         "oio"
-    } else if k == FS_SYNC {
+    } else if op_code == FS_SYNC {
         "oo"
-    } else if k == FS_CLOSE || k == FS_DIR_CLOSE {
+    } else if op_code == FS_CLOSE || op_code == FS_DIR_CLOSE {
         "s"
-    } else if k == FS_RENAME {
+    } else if op_code == FS_RENAME {
         "iio"
-    } else if k == FS_REMOVE_FILE || k == FS_SYNC_DIR || k == FS_READ_DIR {
+    } else if op_code == FS_REMOVE_FILE || op_code == FS_SYNC_DIR || op_code == FS_READ_DIR {
         "io"
     } else {
         // FS_METADATA
@@ -209,31 +212,31 @@ fn op_passes(k: u64) -> Str {
 }
 
 // Whether parameter 0 is a handle (`FsFile` or `FsDir`).
-pub fn takes_handle(k: u64) -> bool {
-    k == FS_FILE_LEN
-        || k == FS_READ
-        || k == FS_WRITE
-        || k == FS_SYNC
-        || k == FS_CLOSE
-        || k == FS_DIR_NEXT
-        || k == FS_DIR_CLOSE
+pub fn takes_handle(op_code: u64) -> bool {
+    op_code == FS_FILE_LEN
+        || op_code == FS_READ
+        || op_code == FS_WRITE
+        || op_code == FS_SYNC
+        || op_code == FS_CLOSE
+        || op_code == FS_DIR_NEXT
+        || op_code == FS_DIR_CLOSE
 }
 
 // Whether the result is `Option[FsFile]` or `Option[FsDir]` (the shim
 // returns the handle, 0 for `None`).
-pub fn returns_handle(k: u64) -> bool {
-    k == FS_OPEN || k == FS_READ_DIR
+pub fn returns_handle(op_code: u64) -> bool {
+    op_code == FS_OPEN || op_code == FS_READ_DIR
 }
 
-// Whether operation `k` takes an `inout FsMeta` (parameter 2, which the
+// Whether operation `op_code` takes an `inout FsMeta` (parameter 2, which the
 // shim fills in place: the call site passes a fresh copy).
-pub fn takes_meta(k: u64) -> bool {
-    k == FS_METADATA
+pub fn takes_meta(op_code: u64) -> bool {
+    op_code == FS_METADATA
 }
 
-fn byte(in s: Slice[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(b) => b,
+fn byte(in bytes: Slice[u8], i: u64) -> u8 {
+    match bytes.try_get(i) {
+        Option::Some(value) => value,
         Option::None => 0,
     }
 }
@@ -245,8 +248,8 @@ pub fn op_index(in name: Slice[u8], lib: u8, in passes: ChunkSeq[u8]) -> u64 eff
     let mut n = name.len();
     for i in 0..name.len() {
         match name.try_get(i) {
-            Option::Some(b) => {
-                if b == 36 {
+            Option::Some(ch) => {
+                if ch == 36 {
                     n = i;
                     break;
                 }
@@ -259,8 +262,8 @@ pub fn op_index(in name: Slice[u8], lib: u8, in passes: ChunkSeq[u8]) -> u64 eff
     } else {
         (FS_OPEN, N_OPS)
     };
-    for k in lo..hi {
-        let want = op_name(k).as_bytes();
+    for op_code in lo..hi {
+        let want = op_name(op_code).as_bytes();
         if want.len() != n {
             continue;
         }
@@ -274,15 +277,15 @@ pub fn op_index(in name: Slice[u8], lib: u8, in passes: ChunkSeq[u8]) -> u64 eff
         if !same {
             continue;
         }
-        let ps = op_passes(k).as_bytes();
-        if ps.len() != passes.len() {
+        let want_passes = op_passes(op_code).as_bytes();
+        if want_passes.len() != passes.len() {
             Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 240));
         }
-        for i in 0..ps.len() {
-            let want = match ps.try_get(i) {
-                Option::Some(c) => if c == 105 {
+        for i in 0..want_passes.len() {
+            let want = match want_passes.try_get(i) {
+                Option::Some(pass_char) => if pass_char == 105 {
                     0
-                } else if c == 111 {
+                } else if pass_char == 111 {
                     1
                 } else {
                     2
@@ -290,7 +293,7 @@ pub fn op_index(in name: Slice[u8], lib: u8, in passes: ChunkSeq[u8]) -> u64 eff
                 Option::None => 0,
             };
             let have = match passes.try_get(i) {
-                Option::Some(p) => p,
+                Option::Some(pass) => pass,
                 Option::None => 9,
             };
             // A sink handle is passed like an in one.
@@ -299,7 +302,7 @@ pub fn op_index(in name: Slice[u8], lib: u8, in passes: ChunkSeq[u8]) -> u64 eff
                 Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 241));
             }
         }
-        return k;
+        return op_code;
     }
     Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 242))
 }
@@ -328,15 +331,15 @@ pub struct Host {
     i_drop_desc: u32,
     i_drop_stream: u32,
     // the canonical ABI's return area (112 bytes)
-    scr: u64,
+    ret_area: u64,
     // [0] preopens read, [8] the last resolved relative path (a view),
     // [16] the `vstd_fs_unique` counter, [24] the text "."
     misc: u64,
     // 37 `IoKind`s, then 37 errnos, by WASI `error-code`
-    errs: u64,
+    err_table: u64,
     // the preopen table: count, then 16 x (descriptor, name address,
     // name length)
-    pre: u64,
+    preopen_table: u64,
     names: u64,
     // NSLOT slots of SLOT bytes: a file is [descriptor + 1, position,
     // append]; a listing is [stream + 1, has a pending entry, its name
@@ -373,10 +376,10 @@ pub fn host_none() -> Host {
         i_read_entry: NONE32,
         i_drop_desc: NONE32,
         i_drop_stream: NONE32,
-        scr: 0,
+        ret_area: 0,
         misc: 0,
-        errs: 0,
-        pre: 0,
+        err_table: 0,
+        preopen_table: 0,
         names: 0,
         slots: 0,
         fns: ChunkSeq::new[u32](),
@@ -384,11 +387,11 @@ pub fn host_none() -> Host {
 }
 
 fn i32s(n: u64) -> ChunkSeq[ValTy] {
-    let mut v = ChunkSeq::new[ValTy]();
+    let mut tys = ChunkSeq::new[ValTy]();
     for _i in 0..n {
-        v.push(vt(VT_I32));
+        tys.push(vt(VT_I32));
     }
-    v
+    tys
 }
 
 fn no_vals() -> ChunkSeq[ValTy] {
@@ -397,32 +400,32 @@ fn no_vals() -> ChunkSeq[ValTy] {
 
 // module 0 `wasi:cli/environment`, 1 `wasi:filesystem/types`, 2 preopens
 fn imp(
-    inout b: Builder,
+    inout builder: Builder,
     module: u8,
     in name: Str,
     in params: ChunkSeq[ValTy]
 ) -> u32 eff [Fail[WErr]] {
-    let m = if module == 0 {
+    let module_name = if module == 0 {
         "wasi:cli/environment@0.2.0"
     } else if module == 1 {
         "wasi:filesystem/types@0.2.0"
     } else {
         "wasi:filesystem/preopens@0.2.0"
     };
-    b.import(in m.as_bytes(), in name.as_bytes(), in params, in no_vals())
+    builder.import(in module_name.as_bytes(), in name.as_bytes(), in params, in no_vals())
 }
 
 // (i32 x n) with an `i64` at each position in `wide`.
-fn sig(n: u64, w1: u64, w2: u64) -> ChunkSeq[ValTy] {
-    let mut v = ChunkSeq::new[ValTy]();
+fn sig(n: u64, wide_a: u64, wide_b: u64) -> ChunkSeq[ValTy] {
+    let mut tys = ChunkSeq::new[ValTy]();
     for i in 0..n {
-        if i == w1 || i == w2 {
-            v.push(vt(VT_I64));
+        if i == wide_a || i == wide_b {
+            tys.push(vt(VT_I64));
         } else {
-            v.push(vt(VT_I32));
+            tys.push(vt(VT_I32));
         }
     }
-    v
+    tys
 }
 
 // The WASI kinds and errnos of `error-code` 0..36 (`access` .. `cross-device`).
@@ -519,156 +522,158 @@ fn zeros(n: u64) -> ChunkSeq[u8] {
 
 // Import what the libraries in `host` (`Plan.host` codes) need, before any
 // function is declared, and reserve their static memory.
-pub fn host_new(inout b: Builder, in codes: ChunkSeq[u8]) -> Host eff [Fail[WErr]] {
-    let mut h = host_none();
+pub fn host_new(inout builder: Builder, in codes: ChunkSeq[u8]) -> Host eff [Fail[WErr]] {
+    let mut host = host_none();
     for i in 0..codes.len() {
         match codes.try_get(i) {
-            Option::Some(c) => {
-                if c == HOST_ENV {
-                    h.env = true;
+            Option::Some(code) => {
+                if code == HOST_ENV {
+                    host.env = true;
                 }
-                if c == HOST_FS {
-                    h.fs = true;
+                if code == HOST_FS {
+                    host.fs = true;
                 }
             },
             Option::None => {},
         }
     }
-    if !h.env && !h.fs {
-        return h;
+    if !host.env && !host.fs {
+        return host;
     }
-    if h.env {
-        h.i_args = imp(inout b, 0, "get-arguments", in i32s(1));
-        h.i_environ = imp(inout b, 0, "get-environment", in i32s(1));
-        h.i_cwd = imp(inout b, 0, "initial-cwd", in i32s(1));
+    if host.env {
+        host.i_args = imp(inout builder, 0, "get-arguments", in i32s(1));
+        host.i_environ = imp(inout builder, 0, "get-environment", in i32s(1));
+        host.i_cwd = imp(inout builder, 0, "initial-cwd", in i32s(1));
     }
-    if h.fs {
-        h.i_preopens = imp(inout b, 2, "get-directories", in i32s(1));
-        h.i_open_at = imp(inout b, 1, "[method]descriptor.open-at", in i32s(7));
-        h.i_read = imp(inout b, 1, "[method]descriptor.read", in sig(4, 1, 2));
-        h.i_write = imp(inout b, 1, "[method]descriptor.write", in sig(5, 3, 9));
-        h.i_stat = imp(inout b, 1, "[method]descriptor.stat", in i32s(2));
-        h.i_stat_at = imp(inout b, 1, "[method]descriptor.stat-at", in i32s(5));
-        h.i_sync = imp(inout b, 1, "[method]descriptor.sync", in i32s(2));
-        h.i_mkdir = imp(inout b, 1, "[method]descriptor.create-directory-at", in i32s(4));
-        h.i_rmdir = imp(inout b, 1, "[method]descriptor.remove-directory-at", in i32s(4));
-        h.i_unlink = imp(inout b, 1, "[method]descriptor.unlink-file-at", in i32s(4));
-        h.i_rename = imp(inout b, 1, "[method]descriptor.rename-at", in i32s(7));
-        h.i_readdir = imp(inout b, 1, "[method]descriptor.read-directory", in i32s(2));
-        h
-            .i_read_entry = imp(
-                inout b,
-                1,
-                "[method]directory-entry-stream.read-directory-entry",
-                in i32s(2)
-            );
-        h.i_drop_desc = imp(inout b, 1, "[resource-drop]descriptor", in i32s(1));
-        h.i_drop_stream = imp(inout b, 1, "[resource-drop]directory-entry-stream", in i32s(1));
+    if host.fs {
+        host.i_preopens = imp(inout builder, 2, "get-directories", in i32s(1));
+        host.i_open_at = imp(inout builder, 1, "[method]descriptor.open-at", in i32s(7));
+        host.i_read = imp(inout builder, 1, "[method]descriptor.read", in sig(4, 1, 2));
+        host.i_write = imp(inout builder, 1, "[method]descriptor.write", in sig(5, 3, 9));
+        host.i_stat = imp(inout builder, 1, "[method]descriptor.stat", in i32s(2));
+        host.i_stat_at = imp(inout builder, 1, "[method]descriptor.stat-at", in i32s(5));
+        host.i_sync = imp(inout builder, 1, "[method]descriptor.sync", in i32s(2));
+        host.i_mkdir = imp(inout builder, 1, "[method]descriptor.create-directory-at", in i32s(4));
+        host.i_rmdir = imp(inout builder, 1, "[method]descriptor.remove-directory-at", in i32s(4));
+        host.i_unlink = imp(inout builder, 1, "[method]descriptor.unlink-file-at", in i32s(4));
+        host.i_rename = imp(inout builder, 1, "[method]descriptor.rename-at", in i32s(7));
+        host.i_readdir = imp(inout builder, 1, "[method]descriptor.read-directory", in i32s(2));
+        host.i_read_entry = imp(
+            inout builder,
+            1,
+            "[method]directory-entry-stream.read-directory-entry",
+            in i32s(2)
+        );
+        host.i_drop_desc = imp(inout builder, 1, "[resource-drop]descriptor", in i32s(1));
+        host.i_drop_stream = imp(
+            inout builder,
+            1,
+            "[resource-drop]directory-entry-stream",
+            in i32s(1)
+        );
     }
-    h.scr = b.data(in zeros(112));
-    if h.fs {
+    host.ret_area = builder.data(in zeros(112));
+    if host.fs {
         let mut misc = zeros(32);
         let ok = misc.try_set(24, 46);
-        h.misc = b.data(in misc);
-        h.errs = b.data(in error_table());
-        h.pre = b.data(in zeros(add(8, wrapping_mul(NPRE, 24))));
-        h.names = b.data(in zeros(NAMES));
-        h.slots = b.data(in zeros(wrapping_mul(NSLOT, SLOT)));
+        host.misc = builder.data(in misc);
+        host.err_table = builder.data(in error_table());
+        host.preopen_table = builder.data(in zeros(add(8, wrapping_mul(NPRE, 24))));
+        host.names = builder.data(in zeros(NAMES));
+        host.slots = builder.data(in zeros(wrapping_mul(NSLOT, SLOT)));
     }
     for _i in 0..N_FNS {
-        h.fns.push(0);
+        host.fns.push(0);
     }
-    h
+    host
 }
 
 // The WIT world lines for the imported interfaces.
-pub fn wit_imports(in h: Host) -> Str {
-    if h.env && h.fs {
+pub fn wit_imports(in host: Host) -> Str {
+    if host.env && host.fs {
         "  import wasi:cli/environment@0.2.0;\n  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n"
-    } else if h.env {
+    } else if host.env {
         "  import wasi:cli/environment@0.2.0;\n"
-    } else if h.fs {
+    } else if host.fs {
         "  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n"
     } else {
         ""
     }
 }
 
-pub fn active(in h: Host) -> bool {
-    h.env || h.fs
+pub fn active(in host: Host) -> bool {
+    host.env || host.fs
 }
 
 // ----- a small assembler over `Code` (every local is an `i64`) -----------
 
 struct A {
-    c: Code,
+    code: Code,
     params: u32,
-    next: u32,
+    next_local: u32,
 }
 
 fn asm(params: u64) -> A {
-    A { c: code_new(), params: wrapping_u32(params), next: wrapping_u32(params) }
+    A { code: code_new(), params: wrapping_u32(params), next_local: wrapping_u32(params) }
 }
 
 impl A {
     fn loc(inout self) -> u32 {
-        let x = self.next;
-        self.next = wrapping_add(self.next, 1);
-        x
+        let local = self.next_local;
+        self.next_local = wrapping_add(self.next_local, 1);
+        local
     }
 
-    fn get(inout self, x: u32) {
-        self.c.get(x);
+    fn get(inout self, local: u32) {
+        self.code.get(local);
     }
 
-    fn set(inout self, x: u32) {
-        self.c.set(x);
+    fn set(inout self, local: u32) {
+        self.code.set(local);
     }
 
-    fn k(inout self, v: i64) {
-        self.c.i64_const(v);
+    fn k(inout self, value: i64) {
+        self.code.i64_const(value);
     }
 
-    fn ku(inout self, v: u64) {
-        self.c.u64_const(v);
+    fn ku(inout self, value: u64) {
+        self.code.u64_const(value);
     }
 
-    fn op(inout self, o: u8) {
-        self.c.op(o);
+    fn op(inout self, opcode: u8) {
+        self.code.op(opcode);
     }
 
-    // local `x` = constant `v`
-    fn setk(inout self, x: u32, v: i64) {
-        self.c.i64_const(v);
-        self.c.set(x);
+    // local `local` = constant `value`
+    fn setk(inout self, local: u32, value: i64) {
+        self.code.i64_const(value);
+        self.code.set(local);
     }
 
-    // local `x` as an `i32` operand
-    fn w32(inout self, x: u32) {
-        self.c.get(x);
-        self.c.op(OP_I32_WRAP_I64);
+    // local `local` as an `i32` operand
+    fn w32(inout self, local: u32) {
+        self.code.get(local);
+        self.code.op(OP_I32_WRAP_I64);
     }
 
-    fn i32k(inout self, v: u64) {
-        self.c.i32_const(wrapping_i64(v));
+    fn i32k(inout self, value: u64) {
+        self.code.i32_const(wrapping_i64(value));
     }
 
     // an `i64` load of width `op` at `base + off` (a local base)
     fn ldw(inout self, base: u32, off: u64, op: u8) {
         self.w32(base);
-        self
-            .c
-            .mem(
-                op,
-                if op == OP_I64_LOAD {
-                    3
-                } else if op == OP_I64_LOAD32_U {
-                    2
-                } else {
-                    0
-                },
-                off
-            );
+        self.code.mem(
+            op,
+            if op == OP_I64_LOAD {
+                3
+            } else if op == OP_I64_LOAD32_U {
+                2
+            } else {
+                0
+            },
+            off
+        );
     }
 
     fn ld(inout self, base: u32, off: u64) {
@@ -685,27 +690,25 @@ impl A {
 
     // loads at a static address
     fn lda(inout self, addr: u64, op: u8) {
-        self.c.i32_const(0);
-        self
-            .c
-            .mem(
-                op,
-                if op == OP_I64_LOAD {
-                    3
-                } else if op == OP_I64_LOAD32_U {
-                    2
-                } else {
-                    0
-                },
-                addr
-            );
+        self.code.i32_const(0);
+        self.code.mem(
+            op,
+            if op == OP_I64_LOAD {
+                3
+            } else if op == OP_I64_LOAD32_U {
+                2
+            } else {
+                0
+            },
+            addr
+        );
     }
 
-    // store local `v` at `base + off`
-    fn st(inout self, base: u32, off: u64, v: u32) {
+    // store local `value` at `base + off`
+    fn st(inout self, base: u32, off: u64, value: u32) {
         self.w32(base);
-        self.c.get(v);
-        self.c.mem(OP_I64_STORE, 3, off);
+        self.code.get(value);
+        self.code.mem(OP_I64_STORE, 3, off);
     }
 
     // store the `i64` on the stack top... at `base + off`: pushes the
@@ -715,76 +718,76 @@ impl A {
     }
 
     fn st_end(inout self, off: u64) {
-        self.c.mem(OP_I64_STORE, 3, off);
+        self.code.mem(OP_I64_STORE, 3, off);
     }
 
     fn st8_end(inout self, off: u64) {
-        self.c.mem(OP_I64_STORE8, 0, off);
+        self.code.mem(OP_I64_STORE8, 0, off);
     }
 
     fn sta_begin(inout self) {
-        self.c.i32_const(0);
+        self.code.i32_const(0);
     }
 
-    // store constant `v` at `base + off`
-    fn stk(inout self, base: u32, off: u64, v: i64) {
+    // store constant `value` at `base + off`
+    fn stk(inout self, base: u32, off: u64, value: i64) {
         self.w32(base);
-        self.c.i64_const(v);
-        self.c.mem(OP_I64_STORE, 3, off);
+        self.code.i64_const(value);
+        self.code.mem(OP_I64_STORE, 3, off);
     }
 
-    fn call(inout self, f: u32) {
-        self.c.call(f);
+    fn call(inout self, func: u32) {
+        self.code.call(func);
     }
 
-    fn open(inout self, o: u8) {
-        self.c.open(o);
+    fn open(inout self, opcode: u8) {
+        self.code.open(opcode);
     }
 
     fn end(inout self) {
-        self.c.op(OP_END);
+        self.code.op(OP_END);
     }
 
-    fn br(inout self, d: u32) {
-        self.c.br(d);
+    fn br(inout self, depth: u32) {
+        self.code.br(depth);
     }
 
-    fn br_if(inout self, d: u32) {
-        self.c.br_if(d);
+    fn br_if(inout self, depth: u32) {
+        self.code.br_if(depth);
     }
 
     // `return local x`
-    fn ret(inout self, x: u32) {
-        self.c.get(x);
-        self.c.op(OP_RETURN);
+    fn ret(inout self, local: u32) {
+        self.code.get(local);
+        self.code.op(OP_RETURN);
     }
 
-    fn retk(inout self, v: i64) {
-        self.c.i64_const(v);
-        self.c.op(OP_RETURN);
+    fn retk(inout self, value: i64) {
+        self.code.i64_const(value);
+        self.code.op(OP_RETURN);
     }
 
     // x = x + local y / + constant
-    fn addk(inout self, x: u32, v: i64) {
-        self.c.get(x);
-        self.c.i64_const(v);
-        self.c.op(OP_I64_ADD);
-        self.c.set(x);
+    fn addk(inout self, local: u32, delta: i64) {
+        self.code.get(local);
+        self.code.i64_const(delta);
+        self.code.op(OP_I64_ADD);
+        self.code.set(local);
     }
 
     // local x = view's address / length
-    fn view_addr(inout self, view: u32, x: u32) {
-        self.c.get(view);
-        self.c.u64_const(MASK32);
-        self.c.op(OP_I64_AND);
-        self.c.set(x);
+    fn view_addr(inout self, view: u32, dest: u32) {
+        self.code.get(view);
+        self.code.u64_const(MASK32);
+        self.code.op(OP_I64_AND);
+        self.code.set(dest);
     }
 
-    fn view_len(inout self, view: u32, x: u32) {
-        self.c.get(view);
-        self.c.i64_const(32);
-        self.c.op(OP_I64_SHR_U);
-        self.c.set(x);
+    fn view_len(inout self, view: u32, dest: u32) {
+        self.code.get(view);
+        self.code.i64_const(32);
+        self.code.op(OP_I64_SHR_U);
+        self.code.set(dest);
     }
 
     // memory.copy(dst, src, n) of locals
@@ -792,676 +795,692 @@ impl A {
         self.w32(dst);
         self.w32(src);
         self.w32(n);
-        self.c.memory_copy();
+        self.code.memory_copy();
     }
 
     fn body(in self) -> ChunkSeq[u8] {
         let mut counts = ChunkSeq::new[u32]();
         let mut types = ChunkSeq::new[ValTy]();
-        let n = wrapping_sub(self.next, self.params);
+        let n = wrapping_sub(self.next_local, self.params);
         if n > 0 {
             counts.push(n);
             types.push(vt(VT_I64));
         }
-        let mut c = code_new();
-        c.extend(in self.c);
-        c.op(OP_END);
-        function_bytes(in counts, in types, in c)
+        let mut code = code_new();
+        code.extend(in self.code);
+        code.op(OP_END);
+        function_bytes(in counts, in types, in code)
     }
 }
 
 fn i64s(n: u64) -> ChunkSeq[ValTy] {
-    let mut v = ChunkSeq::new[ValTy]();
+    let mut tys = ChunkSeq::new[ValTy]();
     for _i in 0..n {
-        v.push(vt(VT_I64));
+        tys.push(vt(VT_I64));
     }
-    v
+    tys
 }
 
-fn params_of(k: u64) -> u64 {
-    if k == H_ERR || k == H_RESOLVE || k == H_KIND {
+fn params_of(op_code: u64) -> u64 {
+    if op_code == H_ERR || op_code == H_RESOLVE || op_code == H_KIND {
         1
-    } else if k == H_PREOPENS || k == H_SLOT {
+    } else if op_code == H_PREOPENS || op_code == H_SLOT {
         0
-    } else if k == H_COPYOUT {
+    } else if op_code == H_COPYOUT {
         3
-    } else if k >= H_PATH_OP {
+    } else if op_code >= H_PATH_OP {
         2
     } else {
-        op_passes(k).len()
+        op_passes(op_code).len()
     }
 }
 
-// The function of shim or helper `k`, declared and defined on first use.
-pub fn host_fn(inout b: Builder, inout h: Host, k: u64) -> u32 eff [Fail[WErr]] {
-    let cached = match h.fns.try_get(k) {
-        Option::Some(x) => x,
+// The function of shim or helper `op_code`, declared and defined on first use.
+pub fn host_fn(inout builder: Builder, inout host: Host, op_code: u64) -> u32 eff [Fail[WErr]] {
+    let cached = match host.fns.try_get(op_code) {
+        Option::Some(entry) => entry,
         Option::None => 0,
     };
     if cached != 0 {
         return wrapping_sub(cached, 1);
     }
-    let np = params_of(k);
-    let idx = b.declare(in i64s(np), in i64s(1));
-    let ok = h.fns.try_set(k, inc32(idx));
-    let mut a = asm(np);
-    emit(inout b, inout h, inout a, k);
-    b.define(idx, in a.body());
-    idx
+    let n_params = params_of(op_code);
+    let func = builder.declare(in i64s(n_params), in i64s(1));
+    let ok = host.fns.try_set(op_code, inc32(func));
+    let mut body_asm = asm(n_params);
+    emit(inout builder, inout host, inout body_asm, op_code);
+    builder.define(func, in body_asm.body());
+    func
 }
 
 fn inc32(x: u32) -> u32 {
     wrapping_add(x, 1)
 }
 
-// The body of `k`; it leaves the result on the stack (or returns).
-fn emit(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]] {
-    if k == H_ERR {
-        emit_err(inout a, in h);
-    } else if k == H_PREOPENS {
-        emit_preopens(inout a, in h);
-    } else if k == H_RESOLVE {
-        let pre = host_fn(inout b, inout h, H_PREOPENS);
-        emit_resolve(inout a, in h, pre);
-    } else if k == H_SLOT {
-        emit_slot(inout a, in h);
-    } else if k == H_COPYOUT {
-        emit_copyout(inout a);
-    } else if k == H_KIND {
-        emit_kind(inout a);
-    } else if k >= H_PATH_OP {
-        emit_path_op(inout b, inout h, inout a, k);
-    } else if k < FS_OPEN {
-        emit_env(inout b, inout h, inout a, k);
+// The body of `op_code`; it leaves the result on the stack (or returns).
+fn emit(inout builder: Builder, inout host: Host, inout asm: A, op_code: u64) eff [Fail[WErr]] {
+    if op_code == H_ERR {
+        emit_err(inout asm, in host);
+    } else if op_code == H_PREOPENS {
+        emit_preopens(inout asm, in host);
+    } else if op_code == H_RESOLVE {
+        let preopens_fn = host_fn(inout builder, inout host, H_PREOPENS);
+        emit_resolve(inout asm, in host, preopens_fn);
+    } else if op_code == H_SLOT {
+        emit_slot(inout asm, in host);
+    } else if op_code == H_COPYOUT {
+        emit_copyout(inout asm);
+    } else if op_code == H_KIND {
+        emit_kind(inout asm);
+    } else if op_code >= H_PATH_OP {
+        emit_path_op(inout builder, inout host, inout asm, op_code);
+    } else if op_code < FS_OPEN {
+        emit_env(inout builder, inout host, inout asm, op_code);
     } else {
-        emit_fs(inout b, inout h, inout a, k);
+        emit_fs(inout builder, inout host, inout asm, op_code);
     }
 }
 
 // H_ERR(code) -> the error word of WASI `error-code` `code`.
-fn emit_err(inout a: A, in h: Host) {
-    a.get(0);
-    a.k(37);
-    a.op(OP_I64_GE_U);
-    a.open(OP_IF);
-    a.retk(13);
-    a.end();
-    a.ldw(0, h.errs, OP_I64_LOAD8_U);
-    a.ldw(0, add(h.errs, 37), OP_I64_LOAD8_U);
-    a.k(32);
-    a.op(OP_I64_SHL);
-    a.op(OP_I64_OR);
+fn emit_err(inout asm: A, in host: Host) {
+    asm.get(0);
+    asm.k(37);
+    asm.op(OP_I64_GE_U);
+    asm.open(OP_IF);
+    asm.retk(13);
+    asm.end();
+    asm.ldw(0, host.err_table, OP_I64_LOAD8_U);
+    asm.ldw(0, add(host.err_table, 37), OP_I64_LOAD8_U);
+    asm.k(32);
+    asm.op(OP_I64_SHL);
+    asm.op(OP_I64_OR);
 }
 
 // H_PREOPENS() -> 0: read the preopens into the table once.
-fn emit_preopens(inout a: A, in h: Host) {
-    let lp = a.loc();
-    let ln = a.loc();
-    let i = a.loc();
-    let cnt = a.loc();
-    let off = a.loc();
-    let e = a.loc();
-    let nl = a.loc();
-    let s = a.loc();
-    let t = a.loc();
-    let over = a.loc();
-    a.setk(over, 0);
-    a.lda(h.misc, OP_I64_LOAD);
-    a.op(OP_I64_EQZ);
-    a.op(OP_I32_EQZ);
-    a.open(OP_IF);
-    a.retk(0);
-    a.end();
-    a.sta_begin();
-    a.k(1);
-    a.st_end(h.misc);
-    a.i32k(h.scr);
-    a.call(h.i_preopens);
-    a.lda(h.scr, OP_I64_LOAD32_U);
-    a.set(lp);
-    a.lda(add(h.scr, 4), OP_I64_LOAD32_U);
-    a.set(ln);
-    a.setk(i, 0);
-    a.setk(cnt, 0);
-    a.setk(off, 0);
-    a.open(OP_BLOCK);
-    a.open(OP_LOOP);
-    // i < ln && cnt < NPRE
-    a.get(i);
-    a.get(ln);
-    a.op(OP_I64_GE_U);
-    a.br_if(1);
+fn emit_preopens(inout asm: A, in host: Host) {
+    let list_addr = asm.loc();
+    let list_len = asm.loc();
+    let i = asm.loc();
+    let count = asm.loc();
+    let off = asm.loc();
+    let entry = asm.loc();
+    let name_len = asm.loc();
+    let ptr = asm.loc();
+    let name_at = asm.loc();
+    let over = asm.loc();
+    asm.setk(over, 0);
+    asm.lda(host.misc, OP_I64_LOAD);
+    asm.op(OP_I64_EQZ);
+    asm.op(OP_I32_EQZ);
+    asm.open(OP_IF);
+    asm.retk(0);
+    asm.end();
+    asm.sta_begin();
+    asm.k(1);
+    asm.st_end(host.misc);
+    asm.i32k(host.ret_area);
+    asm.call(host.i_preopens);
+    asm.lda(host.ret_area, OP_I64_LOAD32_U);
+    asm.set(list_addr);
+    asm.lda(add(host.ret_area, 4), OP_I64_LOAD32_U);
+    asm.set(list_len);
+    asm.setk(i, 0);
+    asm.setk(count, 0);
+    asm.setk(off, 0);
+    asm.open(OP_BLOCK);
+    asm.open(OP_LOOP);
+    // i < list_len && count < NPRE
+    asm.get(i);
+    asm.get(list_len);
+    asm.op(OP_I64_GE_U);
+    asm.br_if(1);
     // More preopens than the table holds: a partial table could resolve
     // a path under the wrong directory, so every path fails instead.
-    a.get(cnt);
-    a.ku(NPRE);
-    a.op(OP_I64_GE_U);
-    a.open(OP_IF);
-    a.setk(over, 1);
-    a.br(2);
-    a.end();
-    // e = lp + 12 i
-    a.get(lp);
-    a.get(i);
-    a.k(12);
-    a.op(OP_I64_MUL);
-    a.op(OP_I64_ADD);
-    a.set(e);
-    a.ld32(e, 8);
-    a.set(nl);
-    // if off + nl <= NAMES
-    a.get(off);
-    a.get(nl);
-    a.op(OP_I64_ADD);
-    a.ku(NAMES);
-    a.op(OP_I64_LE_U);
-    a.open(OP_IF);
-    // t = names + off; copy the name
-    a.get(off);
-    a.ku(h.names);
-    a.op(OP_I64_ADD);
-    a.set(t);
-    a.ld32(e, 4);
-    a.set(s);
-    a.copy(t, s, nl);
-    // s = pre + 8 + 24 cnt
-    a.get(cnt);
-    a.k(24);
-    a.op(OP_I64_MUL);
-    a.ku(add(h.pre, 8));
-    a.op(OP_I64_ADD);
-    a.set(s);
-    a.st_begin(s);
-    a.ld32(e, 0);
-    a.st_end(0);
-    a.st(s, 8, t);
-    a.st(s, 16, nl);
-    a.get(off);
-    a.get(nl);
-    a.op(OP_I64_ADD);
-    a.set(off);
-    a.addk(cnt, 1);
-    a.op(OP_ELSE);
-    a.setk(over, 1);
-    a.br(2);
-    a.end();
-    a.addk(i, 1);
-    a.br(0);
-    a.end();
-    a.end();
+    asm.get(count);
+    asm.ku(NPRE);
+    asm.op(OP_I64_GE_U);
+    asm.open(OP_IF);
+    asm.setk(over, 1);
+    asm.br(2);
+    asm.end();
+    // entry = list_addr + 12 i
+    asm.get(list_addr);
+    asm.get(i);
+    asm.k(12);
+    asm.op(OP_I64_MUL);
+    asm.op(OP_I64_ADD);
+    asm.set(entry);
+    asm.ld32(entry, 8);
+    asm.set(name_len);
+    // if off + name_len <= NAMES
+    asm.get(off);
+    asm.get(name_len);
+    asm.op(OP_I64_ADD);
+    asm.ku(NAMES);
+    asm.op(OP_I64_LE_U);
+    asm.open(OP_IF);
+    // name_at = names + off; copy the name
+    asm.get(off);
+    asm.ku(host.names);
+    asm.op(OP_I64_ADD);
+    asm.set(name_at);
+    asm.ld32(entry, 4);
+    asm.set(ptr);
+    asm.copy(name_at, ptr, name_len);
+    // ptr = preopen_table + 8 + 24 count
+    asm.get(count);
+    asm.k(24);
+    asm.op(OP_I64_MUL);
+    asm.ku(add(host.preopen_table, 8));
+    asm.op(OP_I64_ADD);
+    asm.set(ptr);
+    asm.st_begin(ptr);
+    asm.ld32(entry, 0);
+    asm.st_end(0);
+    asm.st(ptr, 8, name_at);
+    asm.st(ptr, 16, name_len);
+    asm.get(off);
+    asm.get(name_len);
+    asm.op(OP_I64_ADD);
+    asm.set(off);
+    asm.addk(count, 1);
+    asm.op(OP_ELSE);
+    asm.setk(over, 1);
+    asm.br(2);
+    asm.end();
+    asm.addk(i, 1);
+    asm.br(0);
+    asm.end();
+    asm.end();
     // count, or -1 when the preopens did not fit
-    a.sta_begin();
-    a.k(-1);
-    a.get(cnt);
-    a.get(over);
-    a.op(OP_I64_EQZ);
-    a.op(OP_I32_EQZ);
-    a.op(OP_SELECT);
-    a.st_end(h.pre);
-    a.k(0);
+    asm.sta_begin();
+    asm.k(-1);
+    asm.get(count);
+    asm.get(over);
+    asm.op(OP_I64_EQZ);
+    asm.op(OP_I32_EQZ);
+    asm.op(OP_SELECT);
+    asm.st_end(host.preopen_table);
+    asm.k(0);
 }
 
 // H_RESOLVE(path view) -> the preopen's descriptor, -1 when none fits, -2
 // for a NUL byte, -3 when the preopens overflowed the table; the relative path's view goes to misc[8].
-fn emit_resolve(inout a: A, in h: Host, pre: u32) {
-    let pa = a.loc();
-    let pn = a.loc();
-    let i = a.loc();
-    let cnt = a.loc();
-    let best = a.loc();
-    let bl = a.loc();
-    let s = a.loc();
-    let na = a.loc();
-    let nl = a.loc();
-    let eq = a.loc();
-    a.call(pre);
-    a.op(OP_DROP);
-    a.view_addr(0, pa);
-    a.view_len(0, pn);
+fn emit_resolve(inout asm: A, in host: Host, preopens_fn: u32) {
+    let path_addr = asm.loc();
+    let path_len = asm.loc();
+    let i = asm.loc();
+    let count = asm.loc();
+    let best = asm.loc();
+    let best_len = asm.loc();
+    let ptr = asm.loc();
+    let name_addr = asm.loc();
+    let name_len = asm.loc();
+    let eq = asm.loc();
+    asm.call(preopens_fn);
+    asm.op(OP_DROP);
+    asm.view_addr(0, path_addr);
+    asm.view_len(0, path_len);
     // An empty path names nothing (ENOENT, as natively).
-    a.get(pn);
-    a.op(OP_I64_EQZ);
-    a.open(OP_IF);
-    a.retk(-1);
-    a.end();
+    asm.get(path_len);
+    asm.op(OP_I64_EQZ);
+    asm.open(OP_IF);
+    asm.retk(-1);
+    asm.end();
     // NUL check
-    a.setk(i, 0);
-    a.open(OP_BLOCK);
-    a.open(OP_LOOP);
-    a.get(i);
-    a.get(pn);
-    a.op(OP_I64_GE_U);
-    a.br_if(1);
-    a.get(pa);
-    a.get(i);
-    a.op(OP_I64_ADD);
-    a.set(s);
-    a.ld8(s, 0);
-    a.op(OP_I64_EQZ);
-    a.open(OP_IF);
-    a.retk(-2);
-    a.end();
-    a.addk(i, 1);
-    a.br(0);
-    a.end();
-    a.end();
-    a.lda(h.pre, OP_I64_LOAD);
-    a.set(cnt);
-    a.get(cnt);
-    a.k(-1);
-    a.op(OP_I64_EQ);
-    a.open(OP_IF);
-    a.retk(-3);
-    a.end();
-    a.setk(best, -1);
-    a.setk(bl, 0);
-    // absolute: pn > 0 && byte 0 == '/'
-    a.get(pn);
-    a.op(OP_I64_EQZ);
-    a.open(OP_IF);
-    a.k(0);
-    a.set(eq);
-    a.op(OP_ELSE);
-    a.ld8(pa, 0);
-    a.k(47);
-    a.op(OP_I64_EQ);
-    a.op(OP_I64_EXTEND_I32_U);
-    a.set(eq);
-    a.end();
-    a.get(eq);
-    a.op(OP_I64_EQZ);
-    a.op(OP_I32_EQZ);
-    a.open(OP_IF);
-    absolute(inout a, in h, pa, pn, i, cnt, best, bl, s, na, nl, eq);
-    a.op(OP_ELSE);
-    relative(inout a, in h, i, cnt, best, s, na);
-    a.end();
-    strip(inout a, in h, pa, pn, best);
+    asm.setk(i, 0);
+    asm.open(OP_BLOCK);
+    asm.open(OP_LOOP);
+    asm.get(i);
+    asm.get(path_len);
+    asm.op(OP_I64_GE_U);
+    asm.br_if(1);
+    asm.get(path_addr);
+    asm.get(i);
+    asm.op(OP_I64_ADD);
+    asm.set(ptr);
+    asm.ld8(ptr, 0);
+    asm.op(OP_I64_EQZ);
+    asm.open(OP_IF);
+    asm.retk(-2);
+    asm.end();
+    asm.addk(i, 1);
+    asm.br(0);
+    asm.end();
+    asm.end();
+    asm.lda(host.preopen_table, OP_I64_LOAD);
+    asm.set(count);
+    asm.get(count);
+    asm.k(-1);
+    asm.op(OP_I64_EQ);
+    asm.open(OP_IF);
+    asm.retk(-3);
+    asm.end();
+    asm.setk(best, -1);
+    asm.setk(best_len, 0);
+    // absolute: path_len > 0 && byte 0 == '/'
+    asm.get(path_len);
+    asm.op(OP_I64_EQZ);
+    asm.open(OP_IF);
+    asm.k(0);
+    asm.set(eq);
+    asm.op(OP_ELSE);
+    asm.ld8(path_addr, 0);
+    asm.k(47);
+    asm.op(OP_I64_EQ);
+    asm.op(OP_I64_EXTEND_I32_U);
+    asm.set(eq);
+    asm.end();
+    asm.get(eq);
+    asm.op(OP_I64_EQZ);
+    asm.op(OP_I32_EQZ);
+    asm.open(OP_IF);
+    absolute(
+        inout asm,
+        in host,
+        path_addr,
+        path_len,
+        i,
+        count,
+        best,
+        best_len,
+        ptr,
+        name_addr,
+        name_len,
+        eq
+    );
+    asm.op(OP_ELSE);
+    relative(inout asm, in host, i, count, best, ptr, name_addr);
+    asm.end();
+    strip(inout asm, in host, path_addr, path_len, best);
 }
 
 fn absolute(
-    inout a: A,
-    in h: Host,
-    pa: u32,
-    pn: u32,
+    inout asm: A,
+    in host: Host,
+    path_addr: u32,
+    path_len: u32,
     i: u32,
-    cnt: u32,
+    count: u32,
     best: u32,
-    bl: u32,
-    s: u32,
-    na: u32,
-    nl: u32,
+    best_len: u32,
+    ptr: u32,
+    name_addr: u32,
+    name_len: u32,
     eq: u32
 ) {
-    a.setk(i, 0);
-    a.open(OP_BLOCK);
-    a.open(OP_LOOP);
-    a.get(i);
-    a.get(cnt);
-    a.op(OP_I64_GE_U);
-    a.br_if(1);
-    a.get(i);
-    a.k(24);
-    a.op(OP_I64_MUL);
-    a.ku(add(h.pre, 8));
-    a.op(OP_I64_ADD);
-    a.set(s);
-    a.ld(s, 8);
-    a.set(na);
-    a.ld(s, 16);
-    a.set(nl);
-    // candidate: nl <= pn, a prefix, on a boundary, longer than best
-    a.get(nl);
-    a.get(pn);
-    a.op(OP_I64_LE_U);
-    a.open(OP_IF);
-    prefix_eq(inout a, pa, na, nl, eq);
-    a.get(eq);
-    a.op(OP_I64_EQZ);
-    a.op(OP_I32_EQZ);
-    a.open(OP_IF);
-    // boundary: nl == pn || pa[nl] == '/' || (nl > 0 && na[nl-1] == '/')
-    a.get(nl);
-    a.get(pn);
-    a.op(OP_I64_EQ);
-    a.get(pa);
-    a.get(nl);
-    a.op(OP_I64_ADD);
-    a.set(eq);
-    a.get(nl);
-    a.get(pn);
-    a.op(OP_I64_LT_U);
-    a.open_i32();
-    a.ld8(eq, 0);
-    a.k(47);
-    a.op(OP_I64_EQ);
-    a.op(OP_ELSE);
-    a.c.i32_const(0);
-    a.end();
-    a.op(OP_I32_OR);
-    a.get(na);
-    a.get(nl);
-    a.op(OP_I64_ADD);
-    a.k(1);
-    a.op(OP_I64_SUB);
-    a.set(eq);
-    a.get(nl);
-    a.op(OP_I64_EQZ);
-    a.open_i32();
-    a.c.i32_const(0);
-    a.op(OP_ELSE);
-    a.ld8(eq, 0);
-    a.k(47);
-    a.op(OP_I64_EQ);
-    a.end();
-    a.op(OP_I32_OR);
-    // && (best < 0 || nl > bl)
-    a.get(best);
-    a.k(0);
-    a.op(OP_I64_LT_S);
-    a.get(nl);
-    a.get(bl);
-    a.op(OP_I64_GT_U);
-    a.op(OP_I32_OR);
-    a.op(OP_I32_AND);
-    a.open(OP_IF);
-    a.ld(s, 0);
-    a.set(best);
-    a.get(nl);
-    a.set(bl);
-    a.end();
-    a.end();
-    a.end();
-    a.addk(i, 1);
-    a.br(0);
-    a.end();
-    a.end();
-    a.get(pa);
-    a.get(bl);
-    a.op(OP_I64_ADD);
-    a.set(pa);
-    a.get(pn);
-    a.get(bl);
-    a.op(OP_I64_SUB);
-    a.set(pn);
+    asm.setk(i, 0);
+    asm.open(OP_BLOCK);
+    asm.open(OP_LOOP);
+    asm.get(i);
+    asm.get(count);
+    asm.op(OP_I64_GE_U);
+    asm.br_if(1);
+    asm.get(i);
+    asm.k(24);
+    asm.op(OP_I64_MUL);
+    asm.ku(add(host.preopen_table, 8));
+    asm.op(OP_I64_ADD);
+    asm.set(ptr);
+    asm.ld(ptr, 8);
+    asm.set(name_addr);
+    asm.ld(ptr, 16);
+    asm.set(name_len);
+    // candidate: name_len <= path_len, a prefix, on a boundary, longer than best
+    asm.get(name_len);
+    asm.get(path_len);
+    asm.op(OP_I64_LE_U);
+    asm.open(OP_IF);
+    prefix_eq(inout asm, path_addr, name_addr, name_len, eq);
+    asm.get(eq);
+    asm.op(OP_I64_EQZ);
+    asm.op(OP_I32_EQZ);
+    asm.open(OP_IF);
+    // boundary: name_len == path_len || path_addr[name_len] == '/'
+    //   || (name_len > 0 && name_addr[name_len-1] == '/')
+    asm.get(name_len);
+    asm.get(path_len);
+    asm.op(OP_I64_EQ);
+    asm.get(path_addr);
+    asm.get(name_len);
+    asm.op(OP_I64_ADD);
+    asm.set(eq);
+    asm.get(name_len);
+    asm.get(path_len);
+    asm.op(OP_I64_LT_U);
+    asm.open_i32();
+    asm.ld8(eq, 0);
+    asm.k(47);
+    asm.op(OP_I64_EQ);
+    asm.op(OP_ELSE);
+    asm.code.i32_const(0);
+    asm.end();
+    asm.op(OP_I32_OR);
+    asm.get(name_addr);
+    asm.get(name_len);
+    asm.op(OP_I64_ADD);
+    asm.k(1);
+    asm.op(OP_I64_SUB);
+    asm.set(eq);
+    asm.get(name_len);
+    asm.op(OP_I64_EQZ);
+    asm.open_i32();
+    asm.code.i32_const(0);
+    asm.op(OP_ELSE);
+    asm.ld8(eq, 0);
+    asm.k(47);
+    asm.op(OP_I64_EQ);
+    asm.end();
+    asm.op(OP_I32_OR);
+    // && (best < 0 || name_len > best_len)
+    asm.get(best);
+    asm.k(0);
+    asm.op(OP_I64_LT_S);
+    asm.get(name_len);
+    asm.get(best_len);
+    asm.op(OP_I64_GT_U);
+    asm.op(OP_I32_OR);
+    asm.op(OP_I32_AND);
+    asm.open(OP_IF);
+    asm.ld(ptr, 0);
+    asm.set(best);
+    asm.get(name_len);
+    asm.set(best_len);
+    asm.end();
+    asm.end();
+    asm.end();
+    asm.addk(i, 1);
+    asm.br(0);
+    asm.end();
+    asm.end();
+    asm.get(path_addr);
+    asm.get(best_len);
+    asm.op(OP_I64_ADD);
+    asm.set(path_addr);
+    asm.get(path_len);
+    asm.get(best_len);
+    asm.op(OP_I64_SUB);
+    asm.set(path_len);
 }
 
-fn relative(inout a: A, in h: Host, i: u32, cnt: u32, best: u32, s: u32, na: u32) {
+fn relative(inout asm: A, in host: Host, i: u32, count: u32, best: u32, slot: u32, name_addr: u32) {
     // relative: the preopen named ".", else the first
-    a.setk(i, 0);
-    a.open(OP_BLOCK);
-    a.open(OP_LOOP);
-    a.get(i);
-    a.get(cnt);
-    a.op(OP_I64_GE_U);
-    a.br_if(1);
-    a.get(i);
-    a.k(24);
-    a.op(OP_I64_MUL);
-    a.ku(add(h.pre, 8));
-    a.op(OP_I64_ADD);
-    a.set(s);
-    a.ld(s, 16);
-    a.k(1);
-    a.op(OP_I64_EQ);
-    a.open(OP_IF);
-    a.ld(s, 8);
-    a.set(na);
-    a.ld8(na, 0);
-    a.k(46);
-    a.op(OP_I64_EQ);
-    a.open(OP_IF);
-    a.ld(s, 0);
-    a.set(best);
-    a.br(3);
-    a.end();
-    a.end();
-    a.addk(i, 1);
-    a.br(0);
-    a.end();
-    a.end();
-    a.get(best);
-    a.k(0);
-    a.op(OP_I64_LT_S);
-    a.get(cnt);
-    a.op(OP_I64_EQZ);
-    a.op(OP_I32_EQZ);
-    a.op(OP_I32_AND);
-    a.open(OP_IF);
-    a.lda(add(h.pre, 8), OP_I64_LOAD);
-    a.set(best);
-    a.end();
+    asm.setk(i, 0);
+    asm.open(OP_BLOCK);
+    asm.open(OP_LOOP);
+    asm.get(i);
+    asm.get(count);
+    asm.op(OP_I64_GE_U);
+    asm.br_if(1);
+    asm.get(i);
+    asm.k(24);
+    asm.op(OP_I64_MUL);
+    asm.ku(add(host.preopen_table, 8));
+    asm.op(OP_I64_ADD);
+    asm.set(slot);
+    asm.ld(slot, 16);
+    asm.k(1);
+    asm.op(OP_I64_EQ);
+    asm.open(OP_IF);
+    asm.ld(slot, 8);
+    asm.set(name_addr);
+    asm.ld8(name_addr, 0);
+    asm.k(46);
+    asm.op(OP_I64_EQ);
+    asm.open(OP_IF);
+    asm.ld(slot, 0);
+    asm.set(best);
+    asm.br(3);
+    asm.end();
+    asm.end();
+    asm.addk(i, 1);
+    asm.br(0);
+    asm.end();
+    asm.end();
+    asm.get(best);
+    asm.k(0);
+    asm.op(OP_I64_LT_S);
+    asm.get(count);
+    asm.op(OP_I64_EQZ);
+    asm.op(OP_I32_EQZ);
+    asm.op(OP_I32_AND);
+    asm.open(OP_IF);
+    asm.lda(add(host.preopen_table, 8), OP_I64_LOAD);
+    asm.set(best);
+    asm.end();
 }
 
-fn strip(inout a: A, in h: Host, pa: u32, pn: u32, best: u32) {
+fn strip(inout asm: A, in host: Host, path_addr: u32, path_len: u32, best: u32) {
     // strip leading "/" and "./"; "." alone is empty
-    a.open(OP_BLOCK);
-    a.open(OP_LOOP);
-    a.get(pn);
-    a.op(OP_I64_EQZ);
-    a.br_if(1);
-    a.ld8(pa, 0);
-    a.k(47);
-    a.op(OP_I64_EQ);
-    a.open(OP_IF);
-    a.addk(pa, 1);
-    a.addk(pn, -1);
-    a.br(1);
-    a.end();
-    a.ld8(pa, 0);
-    a.k(46);
-    a.op(OP_I64_NE);
-    a.br_if(1);
-    a.get(pn);
-    a.k(1);
-    a.op(OP_I64_EQ);
-    a.open(OP_IF);
-    a.setk(pn, 0);
-    a.br(2);
-    a.end();
-    a.ld8(pa, 1);
-    a.k(47);
-    a.op(OP_I64_NE);
-    a.br_if(1);
-    a.addk(pa, 2);
-    a.addk(pn, -2);
-    a.br(0);
-    a.end();
-    a.end();
-    a.get(pn);
-    a.op(OP_I64_EQZ);
-    a.open(OP_IF);
-    a.ku(add(h.misc, 24));
-    a.set(pa);
-    a.setk(pn, 1);
-    a.end();
-    a.sta_begin();
-    a.get(pn);
-    a.k(32);
-    a.op(OP_I64_SHL);
-    a.get(pa);
-    a.op(OP_I64_OR);
-    a.st_end(add(h.misc, 8));
-    a.get(best);
+    asm.open(OP_BLOCK);
+    asm.open(OP_LOOP);
+    asm.get(path_len);
+    asm.op(OP_I64_EQZ);
+    asm.br_if(1);
+    asm.ld8(path_addr, 0);
+    asm.k(47);
+    asm.op(OP_I64_EQ);
+    asm.open(OP_IF);
+    asm.addk(path_addr, 1);
+    asm.addk(path_len, -1);
+    asm.br(1);
+    asm.end();
+    asm.ld8(path_addr, 0);
+    asm.k(46);
+    asm.op(OP_I64_NE);
+    asm.br_if(1);
+    asm.get(path_len);
+    asm.k(1);
+    asm.op(OP_I64_EQ);
+    asm.open(OP_IF);
+    asm.setk(path_len, 0);
+    asm.br(2);
+    asm.end();
+    asm.ld8(path_addr, 1);
+    asm.k(47);
+    asm.op(OP_I64_NE);
+    asm.br_if(1);
+    asm.addk(path_addr, 2);
+    asm.addk(path_len, -2);
+    asm.br(0);
+    asm.end();
+    asm.end();
+    asm.get(path_len);
+    asm.op(OP_I64_EQZ);
+    asm.open(OP_IF);
+    asm.ku(add(host.misc, 24));
+    asm.set(path_addr);
+    asm.setk(path_len, 1);
+    asm.end();
+    asm.sta_begin();
+    asm.get(path_len);
+    asm.k(32);
+    asm.op(OP_I64_SHL);
+    asm.get(path_addr);
+    asm.op(OP_I64_OR);
+    asm.st_end(add(host.misc, 8));
+    asm.get(best);
 }
 
 // eq = 1 when bytes x[0..n] == y[0..n] (locals), else 0.
-fn prefix_eq(inout a: A, x: u32, y: u32, n: u32, eq: u32) {
-    let j = a.loc();
-    let p = a.loc();
-    let q = a.loc();
-    a.setk(eq, 1);
-    a.setk(j, 0);
-    a.open(OP_BLOCK);
-    a.open(OP_LOOP);
-    a.get(j);
-    a.get(n);
-    a.op(OP_I64_GE_U);
-    a.br_if(1);
-    a.get(x);
-    a.get(j);
-    a.op(OP_I64_ADD);
-    a.set(p);
-    a.get(y);
-    a.get(j);
-    a.op(OP_I64_ADD);
-    a.set(q);
-    a.ld8(p, 0);
-    a.ld8(q, 0);
-    a.op(OP_I64_NE);
-    a.open(OP_IF);
-    a.setk(eq, 0);
-    a.br(2);
-    a.end();
-    a.addk(j, 1);
-    a.br(0);
-    a.end();
-    a.end();
+fn prefix_eq(inout asm: A, x: u32, y: u32, n: u32, eq: u32) {
+    let j = asm.loc();
+    let lhs_at = asm.loc();
+    let rhs_at = asm.loc();
+    asm.setk(eq, 1);
+    asm.setk(j, 0);
+    asm.open(OP_BLOCK);
+    asm.open(OP_LOOP);
+    asm.get(j);
+    asm.get(n);
+    asm.op(OP_I64_GE_U);
+    asm.br_if(1);
+    asm.get(x);
+    asm.get(j);
+    asm.op(OP_I64_ADD);
+    asm.set(lhs_at);
+    asm.get(y);
+    asm.get(j);
+    asm.op(OP_I64_ADD);
+    asm.set(rhs_at);
+    asm.ld8(lhs_at, 0);
+    asm.ld8(rhs_at, 0);
+    asm.op(OP_I64_NE);
+    asm.open(OP_IF);
+    asm.setk(eq, 0);
+    asm.br(2);
+    asm.end();
+    asm.addk(j, 1);
+    asm.br(0);
+    asm.end();
+    asm.end();
 }
 
 impl A {
     // `if` with an `i32` result
     fn open_i32(inout self) {
-        self.c.open_result(OP_IF, vt(VT_I32));
+        self.code.open_result(OP_IF, vt(VT_I32));
     }
 }
 
 // H_SLOT() -> a free slot's address, or 0.
-fn emit_slot(inout a: A, in h: Host) {
-    let s = a.loc();
-    let i = a.loc();
-    a.setk(i, 0);
-    a.open(OP_BLOCK);
-    a.open(OP_LOOP);
-    a.get(i);
-    a.ku(NSLOT);
-    a.op(OP_I64_GE_U);
-    a.br_if(1);
-    a.get(i);
-    a.ku(SLOT);
-    a.op(OP_I64_MUL);
-    a.ku(h.slots);
-    a.op(OP_I64_ADD);
-    a.set(s);
-    a.ld(s, 0);
-    a.op(OP_I64_EQZ);
-    a.open(OP_IF);
-    a.ret(s);
-    a.end();
-    a.addk(i, 1);
-    a.br(0);
-    a.end();
-    a.end();
-    a.k(0);
+fn emit_slot(inout asm: A, in host: Host) {
+    let slot = asm.loc();
+    let i = asm.loc();
+    asm.setk(i, 0);
+    asm.open(OP_BLOCK);
+    asm.open(OP_LOOP);
+    asm.get(i);
+    asm.ku(NSLOT);
+    asm.op(OP_I64_GE_U);
+    asm.br_if(1);
+    asm.get(i);
+    asm.ku(SLOT);
+    asm.op(OP_I64_MUL);
+    asm.ku(host.slots);
+    asm.op(OP_I64_ADD);
+    asm.set(slot);
+    asm.ld(slot, 0);
+    asm.op(OP_I64_EQZ);
+    asm.open(OP_IF);
+    asm.ret(slot);
+    asm.end();
+    asm.addk(i, 1);
+    asm.br(0);
+    asm.end();
+    asm.end();
+    asm.k(0);
 }
 
 // H_COPYOUT(src, n, view) -> n: copy when it fits (the shim's `copy_out`).
-fn emit_copyout(inout a: A) {
-    let d = a.loc();
-    a.get(1);
-    a.get(2);
-    a.k(32);
-    a.op(OP_I64_SHR_U);
-    a.op(OP_I64_LE_U);
-    a.open(OP_IF);
-    a.view_addr(2, d);
-    a.copy(d, 0, 1);
-    a.end();
-    a.get(1);
+fn emit_copyout(inout asm: A) {
+    let dest_addr = asm.loc();
+    asm.get(1);
+    asm.get(2);
+    asm.k(32);
+    asm.op(OP_I64_SHR_U);
+    asm.op(OP_I64_LE_U);
+    asm.open(OP_IF);
+    asm.view_addr(2, dest_addr);
+    asm.copy(dest_addr, 0, 1);
+    asm.end();
+    asm.get(1);
 }
 
 // H_KIND(descriptor-type) -> the shim's kind: 1 file, 2 dir, 3 symlink,
 // 4 other.
-fn emit_kind(inout a: A) {
-    a.k(1);
-    a.k(2);
-    a.k(3);
-    a.k(4);
-    a.get(0);
-    a.k(5);
-    a.op(OP_I64_EQ);
-    a.op(OP_SELECT);
-    a.get(0);
-    a.k(3);
-    a.op(OP_I64_EQ);
-    a.op(OP_SELECT);
-    a.get(0);
-    a.k(6);
-    a.op(OP_I64_EQ);
-    a.op(OP_SELECT);
+fn emit_kind(inout asm: A) {
+    asm.k(1);
+    asm.k(2);
+    asm.k(3);
+    asm.k(4);
+    asm.get(0);
+    asm.k(5);
+    asm.op(OP_I64_EQ);
+    asm.op(OP_SELECT);
+    asm.get(0);
+    asm.k(3);
+    asm.op(OP_I64_EQ);
+    asm.op(OP_SELECT);
+    asm.get(0);
+    asm.k(6);
+    asm.op(OP_I64_EQ);
+    asm.op(OP_SELECT);
 }
 
-// Store error word `v` (a local) through the `inout u64` cell `err`.
-fn put_err(inout a: A, err: u32, v: u32) {
-    a.st(err, 0, v);
+// Store error word `word_val` (a local) through the `inout u64` cell `err`.
+fn put_err(inout asm: A, err: u32, word_val: u32) {
+    asm.st(err, 0, word_val);
 }
 
-fn put_errk(inout a: A, err: u32, v: i64) {
-    a.stk(err, 0, v);
+fn put_errk(inout asm: A, err: u32, word_val: i64) {
+    asm.stk(err, 0, word_val);
 }
 
 // Raise-free failure: store the error word on the stack top... the word
 // of WASI code at static `addr` (one byte) through `err`.
-fn put_wasi_err(inout b: Builder, inout h: Host, inout a: A, err: u32, addr: u64) eff [Fail[WErr]] {
-    let f = host_fn(inout b, inout h, H_ERR);
-    a.st_begin(err);
-    a.lda(addr, OP_I64_LOAD8_U);
-    a.call(f);
-    a.st_end(0);
+fn put_wasi_err(inout builder: Builder, inout host: Host, inout asm: A, err: u32, addr: u64) eff [
+    Fail[WErr]
+] {
+    let err_fn = host_fn(inout builder, inout host, H_ERR);
+    asm.st_begin(err);
+    asm.lda(addr, OP_I64_LOAD8_U);
+    asm.call(err_fn);
+    asm.st_end(0);
 }
 
-// The result discriminant at scr[0] is nonzero (`i32` on the stack).
-fn failed(inout a: A, in h: Host) {
-    a.lda(h.scr, OP_I64_LOAD8_U);
-    a.op(OP_I64_EQZ);
-    a.op(OP_I32_EQZ);
+// The result discriminant at ret_area[0] is nonzero (`i32` on the stack).
+fn failed(inout asm: A, in host: Host) {
+    asm.lda(host.ret_area, OP_I64_LOAD8_U);
+    asm.op(OP_I64_EQZ);
+    asm.op(OP_I32_EQZ);
 }
 
 // `desc = H_RESOLVE(path)`; on -3, -2 or -1 store the error and return
 // `fail`.
-// Leaves the relative path in `ra`, `rn`.
+// Leaves the relative path in `rel_addr`, `rel_len`.
 fn resolve(
-    inout b: Builder,
-    inout h: Host,
-    inout a: A,
+    inout builder: Builder,
+    inout host: Host,
+    inout asm: A,
     path: u32,
     err: u32,
     fail: i64,
     desc: u32,
-    ra: u32,
-    rn: u32
+    rel_addr: u32,
+    rel_len: u32
 ) eff [Fail[WErr]] {
-    let f = host_fn(inout b, inout h, H_RESOLVE);
-    a.get(path);
-    a.call(f);
-    a.set(desc);
-    a.get(desc);
-    a.k(-2);
-    a.op(OP_I64_EQ);
-    a.open(OP_IF);
-    put_errk(inout a, err, 7);
-    a.retk(fail);
-    a.end();
-    a.get(desc);
-    a.k(-3);
-    a.op(OP_I64_EQ);
-    a.open(OP_IF);
+    let resolve_fn = host_fn(inout builder, inout host, H_RESOLVE);
+    asm.get(path);
+    asm.call(resolve_fn);
+    asm.set(desc);
+    asm.get(desc);
+    asm.k(-2);
+    asm.op(OP_I64_EQ);
+    asm.open(OP_IF);
+    put_errk(inout asm, err, 7);
+    asm.retk(fail);
+    asm.end();
+    asm.get(desc);
+    asm.k(-3);
+    asm.op(OP_I64_EQ);
+    asm.open(OP_IF);
     // Unsupported | ENOTSUP << 32: too many preopens for the table
-    put_errk(inout a, err, 11 | (95 << 32));
-    a.retk(fail);
-    a.end();
-    a.get(desc);
-    a.k(0);
-    a.op(OP_I64_LT_S);
-    a.open(OP_IF);
-    put_errk(inout a, err, 1 | (2 << 32));
-    a.retk(fail);
-    a.end();
-    let v = a.loc();
-    a.lda(add(h.misc, 8), OP_I64_LOAD);
-    a.set(v);
-    a.view_addr(v, ra);
-    a.view_len(v, rn);
+    put_errk(inout asm, err, 11 | (95 << 32));
+    asm.retk(fail);
+    asm.end();
+    asm.get(desc);
+    asm.k(0);
+    asm.op(OP_I64_LT_S);
+    asm.open(OP_IF);
+    put_errk(inout asm, err, 1 | (2 << 32));
+    asm.retk(fail);
+    asm.end();
+    let rel_view = asm.loc();
+    asm.lda(add(host.misc, 8), OP_I64_LOAD);
+    asm.set(rel_view);
+    asm.view_addr(rel_view, rel_addr);
+    asm.view_len(rel_view, rel_len);
 }
 
 // path ops `create-directory-at`, `remove-directory-at`, `unlink-file-at`
@@ -1470,792 +1489,766 @@ const P_MKDIR: u64 = 30;
 const P_RMDIR: u64 = 31;
 const P_UNLINK: u64 = 32;
 
-fn emit_path_op(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]] {
-    let desc = a.loc();
-    let ra = a.loc();
-    let rn = a.loc();
-    resolve(inout b, inout h, inout a, 0, 1, 1, desc, ra, rn);
-    a.w32(desc);
-    a.w32(ra);
-    a.w32(rn);
-    a.i32k(h.scr);
-    a
-        .call(
-            if k == P_MKDIR {
-                h.i_mkdir
-            } else if k == P_RMDIR {
-                h.i_rmdir
-            } else {
-                h.i_unlink
-            }
-        );
-    failed(inout a, in h);
-    a.open(OP_IF);
-    put_wasi_err(inout b, inout h, inout a, 1, add(h.scr, 1));
-    a.retk(1);
-    a.end();
-    put_errk(inout a, 1, 0);
-    a.k(0);
+fn emit_path_op(inout builder: Builder, inout host: Host, inout asm: A, op_code: u64) eff [
+    Fail[WErr]
+] {
+    let desc = asm.loc();
+    let rel_addr = asm.loc();
+    let rel_len = asm.loc();
+    resolve(inout builder, inout host, inout asm, 0, 1, 1, desc, rel_addr, rel_len);
+    asm.w32(desc);
+    asm.w32(rel_addr);
+    asm.w32(rel_len);
+    asm.i32k(host.ret_area);
+    asm.call(
+        if op_code == P_MKDIR {
+            host.i_mkdir
+        } else if op_code == P_RMDIR {
+            host.i_rmdir
+        } else {
+            host.i_unlink
+        }
+    );
+    failed(inout asm, in host);
+    asm.open(OP_IF);
+    put_wasi_err(inout builder, inout host, inout asm, 1, add(host.ret_area, 1));
+    asm.retk(1);
+    asm.end();
+    put_errk(inout asm, 1, 0);
+    asm.k(0);
 }
 
-fn emit_env(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]] {
-    if k == ENV_OS {
-        a.k(0);
+fn emit_env(inout builder: Builder, inout host: Host, inout asm: A, op_code: u64) eff [Fail[WErr]] {
+    if op_code == ENV_OS {
+        asm.k(0);
         return;
     }
-    let lp = a.loc();
-    let ln = a.loc();
-    let e = a.loc();
-    let copy = host_fn(inout b, inout h, H_COPYOUT);
-    if k == ENV_CURRENT_DIR {
+    let list_addr = asm.loc();
+    let list_len = asm.loc();
+    let entry = asm.loc();
+    let copy = host_fn(inout builder, inout host, H_COPYOUT);
+    if op_code == ENV_CURRENT_DIR {
         // (buf cell, err cell)
-        a.i32k(h.scr);
-        a.call(h.i_cwd);
-        a.lda(h.scr, OP_I64_LOAD8_U);
-        a.op(OP_I64_EQZ);
-        a.open(OP_IF);
-        put_errk(inout a, 1, 11);
-        a.retk(-1);
-        a.end();
-        put_errk(inout a, 1, 0);
-        a.lda(add(h.scr, 4), OP_I64_LOAD32_U);
-        a.lda(add(h.scr, 8), OP_I64_LOAD32_U);
-        a.ld(0, 0);
-        a.call(copy);
+        asm.i32k(host.ret_area);
+        asm.call(host.i_cwd);
+        asm.lda(host.ret_area, OP_I64_LOAD8_U);
+        asm.op(OP_I64_EQZ);
+        asm.open(OP_IF);
+        put_errk(inout asm, 1, 11);
+        asm.retk(-1);
+        asm.end();
+        put_errk(inout asm, 1, 0);
+        asm.lda(add(host.ret_area, 4), OP_I64_LOAD32_U);
+        asm.lda(add(host.ret_area, 8), OP_I64_LOAD32_U);
+        asm.ld(0, 0);
+        asm.call(copy);
         return;
     }
-    let args = k == ENV_ARG_COUNT || k == ENV_ARG;
-    a.i32k(h.scr);
-    a
-        .call(
-            if args {
-                h.i_args
-            } else {
-                h.i_environ
-            }
-        );
-    a.lda(h.scr, OP_I64_LOAD32_U);
-    a.set(lp);
-    a.lda(add(h.scr, 4), OP_I64_LOAD32_U);
-    a.set(ln);
-    if k == ENV_ARG_COUNT || k == ENV_VAR_COUNT {
-        a.get(ln);
+    let args = op_code == ENV_ARG_COUNT || op_code == ENV_ARG;
+    asm.i32k(host.ret_area);
+    asm.call(if args { host.i_args } else { host.i_environ });
+    asm.lda(host.ret_area, OP_I64_LOAD32_U);
+    asm.set(list_addr);
+    asm.lda(add(host.ret_area, 4), OP_I64_LOAD32_U);
+    asm.set(list_len);
+    if op_code == ENV_ARG_COUNT || op_code == ENV_VAR_COUNT {
+        asm.get(list_len);
         return;
     }
-    if k == ENV_ARG || k == ENV_VAR_AT {
+    if op_code == ENV_ARG || op_code == ENV_VAR_AT {
         // (index, buf cell)
-        a.get(0);
-        a.get(ln);
-        a.op(OP_I64_GE_U);
-        a.open(OP_IF);
-        a.retk(-1);
-        a.end();
-        a.get(lp);
-        a.get(0);
-        a
-            .k(
-                if args {
-                    8
-                } else {
-                    16
-                }
-            );
-        a.op(OP_I64_MUL);
-        a.op(OP_I64_ADD);
-        a.set(e);
+        asm.get(0);
+        asm.get(list_len);
+        asm.op(OP_I64_GE_U);
+        asm.open(OP_IF);
+        asm.retk(-1);
+        asm.end();
+        asm.get(list_addr);
+        asm.get(0);
+        asm.k(if args { 8 } else { 16 });
+        asm.op(OP_I64_MUL);
+        asm.op(OP_I64_ADD);
+        asm.set(entry);
         if args {
-            a.ld32(e, 0);
-            a.ld32(e, 4);
-            a.ld(1, 0);
-            a.call(copy);
+            asm.ld32(entry, 0);
+            asm.ld32(entry, 4);
+            asm.ld(1, 0);
+            asm.call(copy);
             return;
         }
         // "key=value"
-        let total = a.loc();
-        let view = a.loc();
-        let d = a.loc();
-        let x = a.loc();
-        let n = a.loc();
-        a.ld32(e, 4);
-        a.k(1);
-        a.op(OP_I64_ADD);
-        a.ld32(e, 12);
-        a.op(OP_I64_ADD);
-        a.set(total);
-        a.ld(1, 0);
-        a.set(view);
-        a.get(total);
-        a.get(view);
-        a.k(32);
-        a.op(OP_I64_SHR_U);
-        a.op(OP_I64_LE_U);
-        a.open(OP_IF);
-        a.view_addr(view, d);
-        a.ld32(e, 0);
-        a.set(x);
-        a.ld32(e, 4);
-        a.set(n);
-        a.copy(d, x, n);
-        a.get(d);
-        a.get(n);
-        a.op(OP_I64_ADD);
-        a.set(d);
-        a.st_begin(d);
-        a.k(61);
-        a.st8_end(0);
-        a.addk(d, 1);
-        a.ld32(e, 8);
-        a.set(x);
-        a.ld32(e, 12);
-        a.set(n);
-        a.copy(d, x, n);
-        a.end();
-        a.get(total);
+        let total = asm.loc();
+        let view = asm.loc();
+        let dest = asm.loc();
+        let src = asm.loc();
+        let n = asm.loc();
+        asm.ld32(entry, 4);
+        asm.k(1);
+        asm.op(OP_I64_ADD);
+        asm.ld32(entry, 12);
+        asm.op(OP_I64_ADD);
+        asm.set(total);
+        asm.ld(1, 0);
+        asm.set(view);
+        asm.get(total);
+        asm.get(view);
+        asm.k(32);
+        asm.op(OP_I64_SHR_U);
+        asm.op(OP_I64_LE_U);
+        asm.open(OP_IF);
+        asm.view_addr(view, dest);
+        asm.ld32(entry, 0);
+        asm.set(src);
+        asm.ld32(entry, 4);
+        asm.set(n);
+        asm.copy(dest, src, n);
+        asm.get(dest);
+        asm.get(n);
+        asm.op(OP_I64_ADD);
+        asm.set(dest);
+        asm.st_begin(dest);
+        asm.k(61);
+        asm.st8_end(0);
+        asm.addk(dest, 1);
+        asm.ld32(entry, 8);
+        asm.set(src);
+        asm.ld32(entry, 12);
+        asm.set(n);
+        asm.copy(dest, src, n);
+        asm.end();
+        asm.get(total);
         return;
     }
     // ENV_VAR (key view, buf cell): the first entry with that key
-    let ka = a.loc();
-    let kn = a.loc();
-    let i = a.loc();
-    let s = a.loc();
-    let eq = a.loc();
-    let x = a.loc();
-    a.view_addr(0, ka);
-    a.view_len(0, kn);
-    a.get(kn);
-    a.op(OP_I64_EQZ);
-    a.open(OP_IF);
-    a.retk(-1);
-    a.end();
-    a.setk(i, 0);
-    a.open(OP_BLOCK);
-    a.open(OP_LOOP);
-    a.get(i);
-    a.get(kn);
-    a.op(OP_I64_GE_U);
-    a.br_if(1);
-    a.get(ka);
-    a.get(i);
-    a.op(OP_I64_ADD);
-    a.set(s);
-    a.ld8(s, 0);
-    a.k(61);
-    a.op(OP_I64_EQ);
-    a.ld8(s, 0);
-    a.op(OP_I64_EQZ);
-    a.op(OP_I32_OR);
-    a.open(OP_IF);
-    a.retk(-1);
-    a.end();
-    a.addk(i, 1);
-    a.br(0);
-    a.end();
-    a.end();
-    a.setk(i, 0);
-    a.open(OP_BLOCK);
-    a.open(OP_LOOP);
-    a.get(i);
-    a.get(ln);
-    a.op(OP_I64_GE_U);
-    a.br_if(1);
-    a.get(lp);
-    a.get(i);
-    a.k(16);
-    a.op(OP_I64_MUL);
-    a.op(OP_I64_ADD);
-    a.set(e);
-    a.ld32(e, 4);
-    a.get(kn);
-    a.op(OP_I64_EQ);
-    a.open(OP_IF);
-    a.ld32(e, 0);
-    a.set(x);
-    prefix_eq(inout a, x, ka, kn, eq);
-    a.get(eq);
-    a.op(OP_I64_EQZ);
-    a.op(OP_I32_EQZ);
-    a.open(OP_IF);
-    a.ld32(e, 8);
-    a.ld32(e, 12);
-    a.ld(1, 0);
-    a.call(copy);
-    a.op(OP_RETURN);
-    a.end();
-    a.end();
-    a.addk(i, 1);
-    a.br(0);
-    a.end();
-    a.end();
-    a.k(-1);
+    let key_addr = asm.loc();
+    let key_len = asm.loc();
+    let i = asm.loc();
+    let key_byte_at = asm.loc();
+    let eq = asm.loc();
+    let src = asm.loc();
+    asm.view_addr(0, key_addr);
+    asm.view_len(0, key_len);
+    asm.get(key_len);
+    asm.op(OP_I64_EQZ);
+    asm.open(OP_IF);
+    asm.retk(-1);
+    asm.end();
+    asm.setk(i, 0);
+    asm.open(OP_BLOCK);
+    asm.open(OP_LOOP);
+    asm.get(i);
+    asm.get(key_len);
+    asm.op(OP_I64_GE_U);
+    asm.br_if(1);
+    asm.get(key_addr);
+    asm.get(i);
+    asm.op(OP_I64_ADD);
+    asm.set(key_byte_at);
+    asm.ld8(key_byte_at, 0);
+    asm.k(61);
+    asm.op(OP_I64_EQ);
+    asm.ld8(key_byte_at, 0);
+    asm.op(OP_I64_EQZ);
+    asm.op(OP_I32_OR);
+    asm.open(OP_IF);
+    asm.retk(-1);
+    asm.end();
+    asm.addk(i, 1);
+    asm.br(0);
+    asm.end();
+    asm.end();
+    asm.setk(i, 0);
+    asm.open(OP_BLOCK);
+    asm.open(OP_LOOP);
+    asm.get(i);
+    asm.get(list_len);
+    asm.op(OP_I64_GE_U);
+    asm.br_if(1);
+    asm.get(list_addr);
+    asm.get(i);
+    asm.k(16);
+    asm.op(OP_I64_MUL);
+    asm.op(OP_I64_ADD);
+    asm.set(entry);
+    asm.ld32(entry, 4);
+    asm.get(key_len);
+    asm.op(OP_I64_EQ);
+    asm.open(OP_IF);
+    asm.ld32(entry, 0);
+    asm.set(src);
+    prefix_eq(inout asm, src, key_addr, key_len, eq);
+    asm.get(eq);
+    asm.op(OP_I64_EQZ);
+    asm.op(OP_I32_EQZ);
+    asm.open(OP_IF);
+    asm.ld32(entry, 8);
+    asm.ld32(entry, 12);
+    asm.ld(1, 0);
+    asm.call(copy);
+    asm.op(OP_RETURN);
+    asm.end();
+    asm.end();
+    asm.addk(i, 1);
+    asm.br(0);
+    asm.end();
+    asm.end();
+    asm.k(-1);
 }
 
-// The descriptor of handle (slot) `s` into local `d`.
-fn slot_desc(inout a: A, s: u32, off: u64, d: u32) {
-    a.ld(s, off);
-    a.k(1);
-    a.op(OP_I64_SUB);
-    a.set(d);
+// The descriptor of handle (slot) `slot` into local `desc`.
+fn slot_desc(inout asm: A, slot: u32, off: u64, desc: u32) {
+    asm.ld(slot, off);
+    asm.k(1);
+    asm.op(OP_I64_SUB);
+    asm.set(desc);
 }
 
-fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]] {
-    if k == FS_REMOVE_FILE || k == FS_REMOVE_DIR || k == FS_CREATE_DIR {
+fn emit_fs(inout builder: Builder, inout host: Host, inout asm: A, op_code: u64) eff [Fail[WErr]] {
+    if op_code == FS_REMOVE_FILE || op_code == FS_REMOVE_DIR || op_code == FS_CREATE_DIR {
         let path: u32 = 0;
         let flag: u32 = 1;
-        let err: u32 = if k == FS_REMOVE_FILE {
-            1
-        } else {
-            2
-        };
-        if k == FS_REMOVE_DIR {
-            a.get(flag);
-            a.op(OP_I64_EQZ);
-            a.op(OP_I32_EQZ);
-            a.open(OP_IF);
-            put_errk(inout a, err, 11 | (95 << 32));
-            a.retk(1);
-            a.end();
+        let err: u32 = if op_code == FS_REMOVE_FILE { 1 } else { 2 };
+        if op_code == FS_REMOVE_DIR {
+            asm.get(flag);
+            asm.op(OP_I64_EQZ);
+            asm.op(OP_I32_EQZ);
+            asm.open(OP_IF);
+            put_errk(inout asm, err, 11 | (95 << 32));
+            asm.retk(1);
+            asm.end();
         }
-        if k == FS_CREATE_DIR {
-            a.get(flag);
-            a.op(OP_I64_EQZ);
-            a.op(OP_I32_EQZ);
-            a.open(OP_IF);
-            create_dir_all(inout b, inout h, inout a);
-            a.end();
+        if op_code == FS_CREATE_DIR {
+            asm.get(flag);
+            asm.op(OP_I64_EQZ);
+            asm.op(OP_I32_EQZ);
+            asm.open(OP_IF);
+            create_dir_all(inout builder, inout host, inout asm);
+            asm.end();
         }
-        let f = host_fn(
-            inout b,
-            inout h,
-            if k == FS_REMOVE_FILE {
+        let path_op_fn = host_fn(
+            inout builder,
+            inout host,
+            if op_code == FS_REMOVE_FILE {
                 P_UNLINK
-            } else if k == FS_REMOVE_DIR {
+            } else if op_code == FS_REMOVE_DIR {
                 P_RMDIR
             } else {
                 P_MKDIR
             }
         );
-        a.get(path);
-        a.get(err);
-        a.call(f);
+        asm.get(path);
+        asm.get(err);
+        asm.call(path_op_fn);
         return;
     }
-    if k == FS_PARENT_LEN {
-        let pa = a.loc();
-        let i = a.loc();
-        let s = a.loc();
-        a.view_addr(0, pa);
-        a.view_len(0, i);
-        a.open(OP_BLOCK);
-        a.open(OP_LOOP);
-        a.get(i);
-        a.op(OP_I64_EQZ);
-        a.br_if(1);
-        a.get(pa);
-        a.get(i);
-        a.op(OP_I64_ADD);
-        a.k(1);
-        a.op(OP_I64_SUB);
-        a.set(s);
-        a.ld8(s, 0);
-        a.k(47);
-        a.op(OP_I64_EQ);
-        a.open(OP_IF);
-        a.ret(i);
-        a.end();
-        a.addk(i, -1);
-        a.br(0);
-        a.end();
-        a.end();
-        a.k(0);
+    if op_code == FS_PARENT_LEN {
+        let path_addr = asm.loc();
+        let i = asm.loc();
+        let byte_ptr = asm.loc();
+        asm.view_addr(0, path_addr);
+        asm.view_len(0, i);
+        asm.open(OP_BLOCK);
+        asm.open(OP_LOOP);
+        asm.get(i);
+        asm.op(OP_I64_EQZ);
+        asm.br_if(1);
+        asm.get(path_addr);
+        asm.get(i);
+        asm.op(OP_I64_ADD);
+        asm.k(1);
+        asm.op(OP_I64_SUB);
+        asm.set(byte_ptr);
+        asm.ld8(byte_ptr, 0);
+        asm.k(47);
+        asm.op(OP_I64_EQ);
+        asm.open(OP_IF);
+        asm.ret(i);
+        asm.end();
+        asm.addk(i, -1);
+        asm.br(0);
+        asm.end();
+        asm.end();
+        asm.k(0);
         return;
     }
-    if k == FS_UNIQUE {
-        let v = a.loc();
-        a.lda(add(h.misc, 16), OP_I64_LOAD);
-        a.set(v);
-        a.sta_begin();
-        a.get(v);
-        a.k(1);
-        a.op(OP_I64_ADD);
-        a.st_end(add(h.misc, 16));
-        a.get(v);
-        a.ku(MASK32);
-        a.op(OP_I64_AND);
+    if op_code == FS_UNIQUE {
+        let counter = asm.loc();
+        asm.lda(add(host.misc, 16), OP_I64_LOAD);
+        asm.set(counter);
+        asm.sta_begin();
+        asm.get(counter);
+        asm.k(1);
+        asm.op(OP_I64_ADD);
+        asm.st_end(add(host.misc, 16));
+        asm.get(counter);
+        asm.ku(MASK32);
+        asm.op(OP_I64_AND);
         return;
     }
-    let desc = a.loc();
-    let ra = a.loc();
-    let rn = a.loc();
-    if k == FS_OPEN || k == FS_READ_DIR || k == FS_SYNC_DIR {
+    let desc = asm.loc();
+    let rel_addr = asm.loc();
+    let rel_len = asm.loc();
+    if op_code == FS_OPEN || op_code == FS_READ_DIR || op_code == FS_SYNC_DIR {
         // (path, mode, err) / (path, err)
-        let err: u32 = if k == FS_OPEN {
-            2
-        } else {
-            1
-        };
-        let o = a.loc();
-        let d = a.loc();
-        let ap = a.loc();
-        a.setk(ap, 0);
-        a.setk(o, 2);
-        a.setk(d, 1);
-        if k == FS_OPEN {
+        let err: u32 = if op_code == FS_OPEN { 2 } else { 1 };
+        let open_flags = asm.loc();
+        let desc_flags = asm.loc();
+        let append_mode = asm.loc();
+        asm.setk(append_mode, 0);
+        asm.setk(open_flags, 2);
+        asm.setk(desc_flags, 1);
+        if op_code == FS_OPEN {
             // modes: 0 read, 1 truncate, 2 create new, 3 append
-            a.get(1);
-            a.k(3);
-            a.op(OP_I64_GT_U);
-            a.open(OP_IF);
-            put_errk(inout a, err, 7);
-            a.retk(0);
-            a.end();
-            a.setk(o, 0);
-            a.get(1);
-            a.op(OP_I64_EQZ);
-            a.op(OP_I32_EQZ);
-            a.open(OP_IF);
-            a.setk(d, 2);
-            a.k(9);
-            a.k(5);
-            a.k(1);
-            a.get(1);
-            a.k(2);
-            a.op(OP_I64_EQ);
-            a.op(OP_SELECT);
-            a.get(1);
-            a.k(1);
-            a.op(OP_I64_EQ);
-            a.op(OP_SELECT);
-            a.set(o);
-            a.get(1);
-            a.k(3);
-            a.op(OP_I64_EQ);
-            a.op(OP_I64_EXTEND_I32_U);
-            a.set(ap);
-            a.end();
+            asm.get(1);
+            asm.k(3);
+            asm.op(OP_I64_GT_U);
+            asm.open(OP_IF);
+            put_errk(inout asm, err, 7);
+            asm.retk(0);
+            asm.end();
+            asm.setk(open_flags, 0);
+            asm.get(1);
+            asm.op(OP_I64_EQZ);
+            asm.op(OP_I32_EQZ);
+            asm.open(OP_IF);
+            asm.setk(desc_flags, 2);
+            asm.k(9);
+            asm.k(5);
+            asm.k(1);
+            asm.get(1);
+            asm.k(2);
+            asm.op(OP_I64_EQ);
+            asm.op(OP_SELECT);
+            asm.get(1);
+            asm.k(1);
+            asm.op(OP_I64_EQ);
+            asm.op(OP_SELECT);
+            asm.set(open_flags);
+            asm.get(1);
+            asm.k(3);
+            asm.op(OP_I64_EQ);
+            asm.op(OP_I64_EXTEND_I32_U);
+            asm.set(append_mode);
+            asm.end();
         }
-        let fail: i64 = if k == FS_SYNC_DIR {
-            1
-        } else {
-            0
-        };
-        resolve(inout b, inout h, inout a, 0, err, fail, desc, ra, rn);
-        a.w32(desc);
-        a.i32k(1);
-        a.w32(ra);
-        a.w32(rn);
-        a.w32(o);
-        a.w32(d);
-        a.i32k(h.scr);
-        a.call(h.i_open_at);
-        failed(inout a, in h);
-        a.open(OP_IF);
-        put_wasi_err(inout b, inout h, inout a, err, add(h.scr, 4));
-        a.retk(fail);
-        a.end();
-        let nd = a.loc();
-        a.lda(add(h.scr, 4), OP_I64_LOAD32_U);
-        a.set(nd);
-        if k == FS_SYNC_DIR {
+        let fail: i64 = if op_code == FS_SYNC_DIR { 1 } else { 0 };
+        resolve(inout builder, inout host, inout asm, 0, err, fail, desc, rel_addr, rel_len);
+        asm.w32(desc);
+        asm.i32k(1);
+        asm.w32(rel_addr);
+        asm.w32(rel_len);
+        asm.w32(open_flags);
+        asm.w32(desc_flags);
+        asm.i32k(host.ret_area);
+        asm.call(host.i_open_at);
+        failed(inout asm, in host);
+        asm.open(OP_IF);
+        put_wasi_err(inout builder, inout host, inout asm, err, add(host.ret_area, 4));
+        asm.retk(fail);
+        asm.end();
+        let new_desc = asm.loc();
+        asm.lda(add(host.ret_area, 4), OP_I64_LOAD32_U);
+        asm.set(new_desc);
+        if op_code == FS_SYNC_DIR {
             // Flush the directory entries (a rename into it), then release
             // the descriptor on both paths.
-            a.w32(nd);
-            a.i32k(h.scr);
-            a.call(h.i_sync);
-            a.w32(nd);
-            a.call(h.i_drop_desc);
-            failed(inout a, in h);
-            a.open(OP_IF);
-            put_wasi_err(inout b, inout h, inout a, err, add(h.scr, 1));
-            a.retk(1);
-            a.end();
-            put_errk(inout a, err, 0);
-            a.k(0);
+            asm.w32(new_desc);
+            asm.i32k(host.ret_area);
+            asm.call(host.i_sync);
+            asm.w32(new_desc);
+            asm.call(host.i_drop_desc);
+            failed(inout asm, in host);
+            asm.open(OP_IF);
+            put_wasi_err(inout builder, inout host, inout asm, err, add(host.ret_area, 1));
+            asm.retk(1);
+            asm.end();
+            put_errk(inout asm, err, 0);
+            asm.k(0);
             return;
         }
-        let st = a.loc();
-        if k == FS_READ_DIR {
-            a.w32(nd);
-            a.i32k(h.scr);
-            a.call(h.i_readdir);
-            failed(inout a, in h);
-            a.open(OP_IF);
-            put_wasi_err(inout b, inout h, inout a, err, add(h.scr, 4));
-            a.w32(nd);
-            a.call(h.i_drop_desc);
-            a.retk(0);
-            a.end();
-            a.lda(add(h.scr, 4), OP_I64_LOAD32_U);
-            a.set(st);
+        let stream = asm.loc();
+        if op_code == FS_READ_DIR {
+            asm.w32(new_desc);
+            asm.i32k(host.ret_area);
+            asm.call(host.i_readdir);
+            failed(inout asm, in host);
+            asm.open(OP_IF);
+            put_wasi_err(inout builder, inout host, inout asm, err, add(host.ret_area, 4));
+            asm.w32(new_desc);
+            asm.call(host.i_drop_desc);
+            asm.retk(0);
+            asm.end();
+            asm.lda(add(host.ret_area, 4), OP_I64_LOAD32_U);
+            asm.set(stream);
         }
-        let s = a.loc();
-        let slot = host_fn(inout b, inout h, H_SLOT);
-        a.call(slot);
-        a.set(s);
-        a.get(s);
-        a.op(OP_I64_EQZ);
-        a.open(OP_IF);
-        if k == FS_READ_DIR {
-            a.w32(st);
-            a.call(h.i_drop_stream);
+        let slot_addr = asm.loc();
+        let slot = host_fn(inout builder, inout host, H_SLOT);
+        asm.call(slot);
+        asm.set(slot_addr);
+        asm.get(slot_addr);
+        asm.op(OP_I64_EQZ);
+        asm.open(OP_IF);
+        if op_code == FS_READ_DIR {
+            asm.w32(stream);
+            asm.call(host.i_drop_stream);
         }
-        a.w32(nd);
-        a.call(h.i_drop_desc);
-        put_errk(inout a, err, 13 | (24 << 32));
-        a.retk(0);
-        a.end();
-        if k == FS_OPEN {
-            a.st_begin(s);
-            a.get(nd);
-            a.k(1);
-            a.op(OP_I64_ADD);
-            a.st_end(0);
-            a.stk(s, 8, 0);
-            a.st(s, 16, ap);
+        asm.w32(new_desc);
+        asm.call(host.i_drop_desc);
+        put_errk(inout asm, err, 13 | (24 << 32));
+        asm.retk(0);
+        asm.end();
+        if op_code == FS_OPEN {
+            asm.st_begin(slot_addr);
+            asm.get(new_desc);
+            asm.k(1);
+            asm.op(OP_I64_ADD);
+            asm.st_end(0);
+            asm.stk(slot_addr, 8, 0);
+            asm.st(slot_addr, 16, append_mode);
         } else {
-            a.st_begin(s);
-            a.get(st);
-            a.k(1);
-            a.op(OP_I64_ADD);
-            a.st_end(0);
-            a.stk(s, 8, 0);
-            a.st_begin(s);
-            a.get(nd);
-            a.k(1);
-            a.op(OP_I64_ADD);
-            a.st_end(32);
+            asm.st_begin(slot_addr);
+            asm.get(stream);
+            asm.k(1);
+            asm.op(OP_I64_ADD);
+            asm.st_end(0);
+            asm.stk(slot_addr, 8, 0);
+            asm.st_begin(slot_addr);
+            asm.get(new_desc);
+            asm.k(1);
+            asm.op(OP_I64_ADD);
+            asm.st_end(32);
         }
-        put_errk(inout a, err, 0);
-        a.get(s);
+        put_errk(inout asm, err, 0);
+        asm.get(slot_addr);
         return;
     }
-    if k == FS_FILE_LEN {
-        slot_desc(inout a, 0, 0, desc);
-        a.w32(desc);
-        a.i32k(h.scr);
-        a.call(h.i_stat);
-        failed(inout a, in h);
-        a.open(OP_IF);
-        a.retk(0);
-        a.end();
-        a.lda(add(h.scr, 24), OP_I64_LOAD);
+    if op_code == FS_FILE_LEN {
+        slot_desc(inout asm, 0, 0, desc);
+        asm.w32(desc);
+        asm.i32k(host.ret_area);
+        asm.call(host.i_stat);
+        failed(inout asm, in host);
+        asm.open(OP_IF);
+        asm.retk(0);
+        asm.end();
+        asm.lda(add(host.ret_area, 24), OP_I64_LOAD);
         return;
     }
-    if k == FS_CLOSE || k == FS_DIR_CLOSE {
-        slot_desc(inout a, 0, 0, desc);
-        a.w32(desc);
-        a
-            .call(
-                if k == FS_CLOSE {
-                    h.i_drop_desc
-                } else {
-                    h.i_drop_stream
-                }
-            );
-        if k == FS_DIR_CLOSE {
-            slot_desc(inout a, 0, 32, desc);
-            a.w32(desc);
-            a.call(h.i_drop_desc);
+    if op_code == FS_CLOSE || op_code == FS_DIR_CLOSE {
+        slot_desc(inout asm, 0, 0, desc);
+        asm.w32(desc);
+        asm.call(
+            if op_code == FS_CLOSE {
+                host.i_drop_desc
+            } else {
+                host.i_drop_stream
+            }
+        );
+        if op_code == FS_DIR_CLOSE {
+            slot_desc(inout asm, 0, 32, desc);
+            asm.w32(desc);
+            asm.call(host.i_drop_desc);
         }
-        a.stk(0, 0, 0);
-        a.k(0);
+        asm.stk(0, 0, 0);
+        asm.k(0);
         return;
     }
-    if k == FS_SYNC {
-        slot_desc(inout a, 0, 0, desc);
-        a.w32(desc);
-        a.i32k(h.scr);
-        a.call(h.i_sync);
-        failed(inout a, in h);
-        a.open(OP_IF);
-        put_wasi_err(inout b, inout h, inout a, 1, add(h.scr, 1));
-        a.retk(1);
-        a.end();
-        put_errk(inout a, 1, 0);
-        a.k(0);
+    if op_code == FS_SYNC {
+        slot_desc(inout asm, 0, 0, desc);
+        asm.w32(desc);
+        asm.i32k(host.ret_area);
+        asm.call(host.i_sync);
+        failed(inout asm, in host);
+        asm.open(OP_IF);
+        put_wasi_err(inout builder, inout host, inout asm, 1, add(host.ret_area, 1));
+        asm.retk(1);
+        asm.end();
+        put_errk(inout asm, 1, 0);
+        asm.k(0);
         return;
     }
-    if k == FS_READ {
+    if op_code == FS_READ {
         // (file, buf cell, err cell)
-        let va = a.loc();
-        let vn = a.loc();
-        let done = a.loc();
-        let lp = a.loc();
-        let ll = a.loc();
-        let t = a.loc();
-        slot_desc(inout a, 0, 0, desc);
-        a.ld(1, 0);
-        a.set(t);
-        a.view_addr(t, va);
-        a.view_len(t, vn);
-        a.setk(done, 0);
-        a.open(OP_BLOCK);
-        a.open(OP_LOOP);
-        a.get(done);
-        a.get(vn);
-        a.op(OP_I64_GE_U);
-        a.br_if(1);
-        a.w32(desc);
-        a.get(vn);
-        a.get(done);
-        a.op(OP_I64_SUB);
-        a.ld(0, 8);
-        a.i32k(h.scr);
-        a.call(h.i_read);
-        failed(inout a, in h);
-        a.open(OP_IF);
-        put_wasi_err(inout b, inout h, inout a, 2, add(h.scr, 4));
-        a.ret(done);
-        a.end();
-        a.lda(add(h.scr, 4), OP_I64_LOAD32_U);
-        a.set(lp);
-        a.lda(add(h.scr, 8), OP_I64_LOAD32_U);
-        a.set(ll);
-        a.get(ll);
-        a.op(OP_I64_EQZ);
-        a.br_if(1);
-        // ll = min(ll, vn - done)
-        a.get(ll);
-        a.get(vn);
-        a.get(done);
-        a.op(OP_I64_SUB);
-        a.set(t);
-        a.get(t);
-        a.get(ll);
-        a.get(t);
-        a.op(OP_I64_LT_U);
-        a.op(OP_SELECT);
-        a.set(ll);
-        a.get(va);
-        a.get(done);
-        a.op(OP_I64_ADD);
-        a.set(t);
-        a.copy(t, lp, ll);
-        a.get(done);
-        a.get(ll);
-        a.op(OP_I64_ADD);
-        a.set(done);
-        a.st_begin(0);
-        a.ld(0, 8);
-        a.get(ll);
-        a.op(OP_I64_ADD);
-        a.st_end(8);
-        a.br(0);
-        a.end();
-        a.end();
-        put_errk(inout a, 2, 0);
-        a.get(done);
+        let buf_addr = asm.loc();
+        let buf_len = asm.loc();
+        let done = asm.loc();
+        let read_addr = asm.loc();
+        let read_len = asm.loc();
+        let scratch = asm.loc();
+        slot_desc(inout asm, 0, 0, desc);
+        asm.ld(1, 0);
+        asm.set(scratch);
+        asm.view_addr(scratch, buf_addr);
+        asm.view_len(scratch, buf_len);
+        asm.setk(done, 0);
+        asm.open(OP_BLOCK);
+        asm.open(OP_LOOP);
+        asm.get(done);
+        asm.get(buf_len);
+        asm.op(OP_I64_GE_U);
+        asm.br_if(1);
+        asm.w32(desc);
+        asm.get(buf_len);
+        asm.get(done);
+        asm.op(OP_I64_SUB);
+        asm.ld(0, 8);
+        asm.i32k(host.ret_area);
+        asm.call(host.i_read);
+        failed(inout asm, in host);
+        asm.open(OP_IF);
+        put_wasi_err(inout builder, inout host, inout asm, 2, add(host.ret_area, 4));
+        asm.ret(done);
+        asm.end();
+        asm.lda(add(host.ret_area, 4), OP_I64_LOAD32_U);
+        asm.set(read_addr);
+        asm.lda(add(host.ret_area, 8), OP_I64_LOAD32_U);
+        asm.set(read_len);
+        asm.get(read_len);
+        asm.op(OP_I64_EQZ);
+        asm.br_if(1);
+        // read_len = min(read_len, buf_len - done)
+        asm.get(read_len);
+        asm.get(buf_len);
+        asm.get(done);
+        asm.op(OP_I64_SUB);
+        asm.set(scratch);
+        asm.get(scratch);
+        asm.get(read_len);
+        asm.get(scratch);
+        asm.op(OP_I64_LT_U);
+        asm.op(OP_SELECT);
+        asm.set(read_len);
+        asm.get(buf_addr);
+        asm.get(done);
+        asm.op(OP_I64_ADD);
+        asm.set(scratch);
+        asm.copy(scratch, read_addr, read_len);
+        asm.get(done);
+        asm.get(read_len);
+        asm.op(OP_I64_ADD);
+        asm.set(done);
+        asm.st_begin(0);
+        asm.ld(0, 8);
+        asm.get(read_len);
+        asm.op(OP_I64_ADD);
+        asm.st_end(8);
+        asm.br(0);
+        asm.end();
+        asm.end();
+        put_errk(inout asm, 2, 0);
+        asm.get(done);
         return;
     }
-    if k == FS_WRITE {
+    if op_code == FS_WRITE {
         // (file, buf view, err cell)
-        let va = a.loc();
-        let vn = a.loc();
-        let done = a.loc();
-        let off = a.loc();
-        let n = a.loc();
-        slot_desc(inout a, 0, 0, desc);
-        a.view_addr(1, va);
-        a.view_len(1, vn);
-        a.ld(0, 8);
-        a.set(off);
-        a.ld(0, 16);
-        a.op(OP_I64_EQZ);
-        a.op(OP_I32_EQZ);
-        a.open(OP_IF);
-        a.w32(desc);
-        a.i32k(h.scr);
-        a.call(h.i_stat);
-        failed(inout a, in h);
-        a.open(OP_IF);
-        put_wasi_err(inout b, inout h, inout a, 2, add(h.scr, 8));
-        a.retk(1);
-        a.end();
-        a.lda(add(h.scr, 24), OP_I64_LOAD);
-        a.set(off);
-        a.end();
-        a.setk(done, 0);
-        a.open(OP_BLOCK);
-        a.open(OP_LOOP);
-        a.get(done);
-        a.get(vn);
-        a.op(OP_I64_GE_U);
-        a.br_if(1);
-        a.w32(desc);
-        a.get(va);
-        a.get(done);
-        a.op(OP_I64_ADD);
-        a.op(OP_I32_WRAP_I64);
-        a.get(vn);
-        a.get(done);
-        a.op(OP_I64_SUB);
-        a.op(OP_I32_WRAP_I64);
-        a.get(off);
-        a.get(done);
-        a.op(OP_I64_ADD);
-        a.i32k(h.scr);
-        a.call(h.i_write);
-        failed(inout a, in h);
-        a.open(OP_IF);
-        keep_pos(inout a, off, done);
-        put_wasi_err(inout b, inout h, inout a, 2, add(h.scr, 8));
-        a.retk(1);
-        a.end();
-        a.lda(add(h.scr, 8), OP_I64_LOAD);
-        a.set(n);
-        a.get(n);
-        a.op(OP_I64_EQZ);
-        a.open(OP_IF);
-        keep_pos(inout a, off, done);
-        put_errk(inout a, 2, 10);
-        a.retk(1);
-        a.end();
-        a.get(done);
-        a.get(n);
-        a.op(OP_I64_ADD);
-        a.set(done);
-        a.br(0);
-        a.end();
-        a.end();
-        a.st_begin(0);
-        a.get(off);
-        a.get(vn);
-        a.op(OP_I64_ADD);
-        a.st_end(8);
-        put_errk(inout a, 2, 0);
-        a.k(0);
+        let buf_addr = asm.loc();
+        let buf_len = asm.loc();
+        let done = asm.loc();
+        let off = asm.loc();
+        let n = asm.loc();
+        slot_desc(inout asm, 0, 0, desc);
+        asm.view_addr(1, buf_addr);
+        asm.view_len(1, buf_len);
+        asm.ld(0, 8);
+        asm.set(off);
+        asm.ld(0, 16);
+        asm.op(OP_I64_EQZ);
+        asm.op(OP_I32_EQZ);
+        asm.open(OP_IF);
+        asm.w32(desc);
+        asm.i32k(host.ret_area);
+        asm.call(host.i_stat);
+        failed(inout asm, in host);
+        asm.open(OP_IF);
+        put_wasi_err(inout builder, inout host, inout asm, 2, add(host.ret_area, 8));
+        asm.retk(1);
+        asm.end();
+        asm.lda(add(host.ret_area, 24), OP_I64_LOAD);
+        asm.set(off);
+        asm.end();
+        asm.setk(done, 0);
+        asm.open(OP_BLOCK);
+        asm.open(OP_LOOP);
+        asm.get(done);
+        asm.get(buf_len);
+        asm.op(OP_I64_GE_U);
+        asm.br_if(1);
+        asm.w32(desc);
+        asm.get(buf_addr);
+        asm.get(done);
+        asm.op(OP_I64_ADD);
+        asm.op(OP_I32_WRAP_I64);
+        asm.get(buf_len);
+        asm.get(done);
+        asm.op(OP_I64_SUB);
+        asm.op(OP_I32_WRAP_I64);
+        asm.get(off);
+        asm.get(done);
+        asm.op(OP_I64_ADD);
+        asm.i32k(host.ret_area);
+        asm.call(host.i_write);
+        failed(inout asm, in host);
+        asm.open(OP_IF);
+        keep_pos(inout asm, off, done);
+        put_wasi_err(inout builder, inout host, inout asm, 2, add(host.ret_area, 8));
+        asm.retk(1);
+        asm.end();
+        asm.lda(add(host.ret_area, 8), OP_I64_LOAD);
+        asm.set(n);
+        asm.get(n);
+        asm.op(OP_I64_EQZ);
+        asm.open(OP_IF);
+        keep_pos(inout asm, off, done);
+        put_errk(inout asm, 2, 10);
+        asm.retk(1);
+        asm.end();
+        asm.get(done);
+        asm.get(n);
+        asm.op(OP_I64_ADD);
+        asm.set(done);
+        asm.br(0);
+        asm.end();
+        asm.end();
+        asm.st_begin(0);
+        asm.get(off);
+        asm.get(buf_len);
+        asm.op(OP_I64_ADD);
+        asm.st_end(8);
+        put_errk(inout asm, 2, 0);
+        asm.k(0);
         return;
     }
-    if k == FS_RENAME {
+    if op_code == FS_RENAME {
         // (from, to, err)
-        let d2 = a.loc();
-        let ra2 = a.loc();
-        let rn2 = a.loc();
-        resolve(inout b, inout h, inout a, 0, 2, 1, desc, ra, rn);
-        resolve(inout b, inout h, inout a, 1, 2, 1, d2, ra2, rn2);
-        a.w32(desc);
-        a.w32(ra);
-        a.w32(rn);
-        a.w32(d2);
-        a.w32(ra2);
-        a.w32(rn2);
-        a.i32k(h.scr);
-        a.call(h.i_rename);
-        failed(inout a, in h);
-        a.open(OP_IF);
-        put_wasi_err(inout b, inout h, inout a, 2, add(h.scr, 1));
-        a.retk(1);
-        a.end();
-        put_errk(inout a, 2, 0);
-        a.k(0);
+        let to_desc = asm.loc();
+        let to_rel_addr = asm.loc();
+        let to_rel_len = asm.loc();
+        resolve(inout builder, inout host, inout asm, 0, 2, 1, desc, rel_addr, rel_len);
+        resolve(inout builder, inout host, inout asm, 1, 2, 1, to_desc, to_rel_addr, to_rel_len);
+        asm.w32(desc);
+        asm.w32(rel_addr);
+        asm.w32(rel_len);
+        asm.w32(to_desc);
+        asm.w32(to_rel_addr);
+        asm.w32(to_rel_len);
+        asm.i32k(host.ret_area);
+        asm.call(host.i_rename);
+        failed(inout asm, in host);
+        asm.open(OP_IF);
+        put_wasi_err(inout builder, inout host, inout asm, 2, add(host.ret_area, 1));
+        asm.retk(1);
+        asm.end();
+        put_errk(inout asm, 2, 0);
+        asm.k(0);
         return;
     }
-    if k == FS_METADATA {
+    if op_code == FS_METADATA {
         // (path, follow, meta block, err cell)
-        let kind = host_fn(inout b, inout h, H_KIND);
-        resolve(inout b, inout h, inout a, 0, 3, 1, desc, ra, rn);
-        a.w32(desc);
-        a.get(1);
-        a.op(OP_I64_EQZ);
-        a.op(OP_I32_EQZ);
-        a.w32(ra);
-        a.w32(rn);
-        a.i32k(h.scr);
-        a.call(h.i_stat_at);
-        failed(inout a, in h);
-        a.open(OP_IF);
-        put_wasi_err(inout b, inout h, inout a, 3, add(h.scr, 8));
-        a.retk(1);
-        a.end();
-        a.st_begin(2);
-        a.lda(add(h.scr, 24), OP_I64_LOAD);
-        a.st_end(0);
-        a.lda(add(h.scr, 56), OP_I64_LOAD8_U);
-        a.op(OP_I64_EQZ);
-        a.open(OP_IF);
-        a.stk(2, 8, 0);
-        a.stk(2, 16, 0);
-        a.op(OP_ELSE);
-        a.st_begin(2);
-        a.lda(add(h.scr, 64), OP_I64_LOAD);
-        a.st_end(8);
-        a.st_begin(2);
-        a.lda(add(h.scr, 72), OP_I64_LOAD32_U);
-        a.st_end(16);
-        a.end();
-        a.st_begin(2);
-        a.lda(add(h.scr, 8), OP_I64_LOAD8_U);
-        a.call(kind);
-        a.st_end(24);
-        put_errk(inout a, 3, 0);
-        a.k(0);
+        let kind = host_fn(inout builder, inout host, H_KIND);
+        resolve(inout builder, inout host, inout asm, 0, 3, 1, desc, rel_addr, rel_len);
+        asm.w32(desc);
+        asm.get(1);
+        asm.op(OP_I64_EQZ);
+        asm.op(OP_I32_EQZ);
+        asm.w32(rel_addr);
+        asm.w32(rel_len);
+        asm.i32k(host.ret_area);
+        asm.call(host.i_stat_at);
+        failed(inout asm, in host);
+        asm.open(OP_IF);
+        put_wasi_err(inout builder, inout host, inout asm, 3, add(host.ret_area, 8));
+        asm.retk(1);
+        asm.end();
+        asm.st_begin(2);
+        asm.lda(add(host.ret_area, 24), OP_I64_LOAD);
+        asm.st_end(0);
+        asm.lda(add(host.ret_area, 56), OP_I64_LOAD8_U);
+        asm.op(OP_I64_EQZ);
+        asm.open(OP_IF);
+        asm.stk(2, 8, 0);
+        asm.stk(2, 16, 0);
+        asm.op(OP_ELSE);
+        asm.st_begin(2);
+        asm.lda(add(host.ret_area, 64), OP_I64_LOAD);
+        asm.st_end(8);
+        asm.st_begin(2);
+        asm.lda(add(host.ret_area, 72), OP_I64_LOAD32_U);
+        asm.st_end(16);
+        asm.end();
+        asm.st_begin(2);
+        asm.lda(add(host.ret_area, 8), OP_I64_LOAD8_U);
+        asm.call(kind);
+        asm.st_end(24);
+        put_errk(inout asm, 3, 0);
+        asm.k(0);
         return;
     }
     // FS_DIR_NEXT (dir, buf cell, kind cell)
-    let kind = host_fn(inout b, inout h, H_KIND);
-    let nl = a.loc();
-    let np = a.loc();
-    let t = a.loc();
-    let view = a.loc();
-    a.ld(0, 8);
-    a.op(OP_I64_EQZ);
-    a.open(OP_IF);
-    slot_desc(inout a, 0, 0, desc);
-    a.w32(desc);
-    a.i32k(h.scr);
-    a.call(h.i_read_entry);
-    failed(inout a, in h);
-    a.open(OP_IF);
-    a.retk(-1);
-    a.end();
-    a.lda(add(h.scr, 4), OP_I64_LOAD8_U);
-    a.op(OP_I64_EQZ);
-    a.open(OP_IF);
-    a.retk(-1);
-    a.end();
-    a.lda(add(h.scr, 12), OP_I64_LOAD32_U);
-    a.set(np);
-    a.lda(add(h.scr, 16), OP_I64_LOAD32_U);
-    a.set(nl);
-    a.get(nl);
-    a.ku(wrapping_sub(SLOT, 48));
-    a.op(OP_I64_GT_U);
-    a.open(OP_IF);
-    a.retk(-1);
-    a.end();
-    a.get(0);
-    a.k(48);
-    a.op(OP_I64_ADD);
-    a.set(t);
-    a.copy(t, np, nl);
-    a.st(0, 16, nl);
-    a.st_begin(0);
-    a.lda(add(h.scr, 8), OP_I64_LOAD8_U);
-    a.call(kind);
-    a.st_end(24);
-    a.stk(0, 8, 1);
-    a.end();
-    a.ld(0, 16);
-    a.set(nl);
-    a.ld(1, 0);
-    a.set(view);
-    a.get(nl);
-    a.get(view);
-    a.k(32);
-    a.op(OP_I64_SHR_U);
-    a.op(OP_I64_LE_U);
-    a.open(OP_IF);
-    a.view_addr(view, t);
-    a.get(0);
-    a.k(48);
-    a.op(OP_I64_ADD);
-    a.set(np);
-    a.copy(t, np, nl);
-    a.stk(0, 8, 0);
-    a.st_begin(2);
-    a.ld(0, 24);
-    a.st_end(0);
-    a.end();
-    a.get(nl);
+    let kind = host_fn(inout builder, inout host, H_KIND);
+    let name_len = asm.loc();
+    let name_addr = asm.loc();
+    let name_dst = asm.loc();
+    let view = asm.loc();
+    asm.ld(0, 8);
+    asm.op(OP_I64_EQZ);
+    asm.open(OP_IF);
+    slot_desc(inout asm, 0, 0, desc);
+    asm.w32(desc);
+    asm.i32k(host.ret_area);
+    asm.call(host.i_read_entry);
+    failed(inout asm, in host);
+    asm.open(OP_IF);
+    asm.retk(-1);
+    asm.end();
+    asm.lda(add(host.ret_area, 4), OP_I64_LOAD8_U);
+    asm.op(OP_I64_EQZ);
+    asm.open(OP_IF);
+    asm.retk(-1);
+    asm.end();
+    asm.lda(add(host.ret_area, 12), OP_I64_LOAD32_U);
+    asm.set(name_addr);
+    asm.lda(add(host.ret_area, 16), OP_I64_LOAD32_U);
+    asm.set(name_len);
+    asm.get(name_len);
+    asm.ku(wrapping_sub(SLOT, 48));
+    asm.op(OP_I64_GT_U);
+    asm.open(OP_IF);
+    asm.retk(-1);
+    asm.end();
+    asm.get(0);
+    asm.k(48);
+    asm.op(OP_I64_ADD);
+    asm.set(name_dst);
+    asm.copy(name_dst, name_addr, name_len);
+    asm.st(0, 16, name_len);
+    asm.st_begin(0);
+    asm.lda(add(host.ret_area, 8), OP_I64_LOAD8_U);
+    asm.call(kind);
+    asm.st_end(24);
+    asm.stk(0, 8, 1);
+    asm.end();
+    asm.ld(0, 16);
+    asm.set(name_len);
+    asm.ld(1, 0);
+    asm.set(view);
+    asm.get(name_len);
+    asm.get(view);
+    asm.k(32);
+    asm.op(OP_I64_SHR_U);
+    asm.op(OP_I64_LE_U);
+    asm.open(OP_IF);
+    asm.view_addr(view, name_dst);
+    asm.get(0);
+    asm.k(48);
+    asm.op(OP_I64_ADD);
+    asm.set(name_addr);
+    asm.copy(name_dst, name_addr, name_len);
+    asm.stk(0, 8, 0);
+    asm.st_begin(2);
+    asm.ld(0, 24);
+    asm.st_end(0);
+    asm.end();
+    asm.get(name_len);
 }
 
 // `create_dir(path, true, err)`: create each prefix ending before a `/`
@@ -2263,89 +2256,89 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
 // the shim.
 // The file slot's position after a write that stopped early: the bytes
 // already written still move it, as natively.
-fn keep_pos(inout a: A, off: u32, done: u32) {
-    a.st_begin(0);
-    a.get(off);
-    a.get(done);
-    a.op(OP_I64_ADD);
-    a.st_end(8);
+fn keep_pos(inout asm: A, off: u32, done: u32) {
+    asm.st_begin(0);
+    asm.get(off);
+    asm.get(done);
+    asm.op(OP_I64_ADD);
+    asm.st_end(8);
 }
 
-fn create_dir_all(inout b: Builder, inout h: Host, inout a: A) eff [Fail[WErr]] {
-    let desc = a.loc();
-    let ra = a.loc();
-    let rn = a.loc();
-    let j = a.loc();
-    let s = a.loc();
-    resolve(inout b, inout h, inout a, 0, 2, 1, desc, ra, rn);
-    a.setk(j, 1);
-    a.open(OP_BLOCK);
-    a.open(OP_LOOP);
-    a.get(j);
-    a.get(rn);
-    a.op(OP_I64_GT_U);
-    a.br_if(1);
-    a.get(ra);
-    a.get(j);
-    a.op(OP_I64_ADD);
-    a.set(s);
-    // j == rn || ra[j] == '/'
-    a.get(j);
-    a.get(rn);
-    a.op(OP_I64_EQ);
-    a.open_i32();
-    a.c.i32_const(1);
-    a.op(OP_ELSE);
-    a.ld8(s, 0);
-    a.k(47);
-    a.op(OP_I64_EQ);
-    a.end();
-    a.open(OP_IF);
-    a.w32(desc);
-    a.w32(ra);
-    a.w32(j);
-    a.i32k(h.scr);
-    a.call(h.i_mkdir);
-    failed(inout a, in h);
-    a.open(OP_IF);
-    a.lda(add(h.scr, 1), OP_I64_LOAD8_U);
-    a.k(7);
-    a.op(OP_I64_NE);
-    a.open(OP_IF);
-    put_wasi_err(inout b, inout h, inout a, 2, add(h.scr, 1));
-    a.retk(1);
-    a.end();
+fn create_dir_all(inout builder: Builder, inout host: Host, inout asm: A) eff [Fail[WErr]] {
+    let desc = asm.loc();
+    let rel_addr = asm.loc();
+    let rel_len = asm.loc();
+    let j = asm.loc();
+    let byte_ptr = asm.loc();
+    resolve(inout builder, inout host, inout asm, 0, 2, 1, desc, rel_addr, rel_len);
+    asm.setk(j, 1);
+    asm.open(OP_BLOCK);
+    asm.open(OP_LOOP);
+    asm.get(j);
+    asm.get(rel_len);
+    asm.op(OP_I64_GT_U);
+    asm.br_if(1);
+    asm.get(rel_addr);
+    asm.get(j);
+    asm.op(OP_I64_ADD);
+    asm.set(byte_ptr);
+    // j == rel_len || rel_addr[j] == '/'
+    asm.get(j);
+    asm.get(rel_len);
+    asm.op(OP_I64_EQ);
+    asm.open_i32();
+    asm.code.i32_const(1);
+    asm.op(OP_ELSE);
+    asm.ld8(byte_ptr, 0);
+    asm.k(47);
+    asm.op(OP_I64_EQ);
+    asm.end();
+    asm.open(OP_IF);
+    asm.w32(desc);
+    asm.w32(rel_addr);
+    asm.w32(j);
+    asm.i32k(host.ret_area);
+    asm.call(host.i_mkdir);
+    failed(inout asm, in host);
+    asm.open(OP_IF);
+    asm.lda(add(host.ret_area, 1), OP_I64_LOAD8_U);
+    asm.k(7);
+    asm.op(OP_I64_NE);
+    asm.open(OP_IF);
+    put_wasi_err(inout builder, inout host, inout asm, 2, add(host.ret_area, 1));
+    asm.retk(1);
+    asm.end();
     // The whole path exists: fine only when it is a directory.
-    a.get(j);
-    a.get(rn);
-    a.op(OP_I64_EQ);
-    a.open(OP_IF);
-    a.w32(desc);
-    a.c.i32_const(1);
-    a.w32(ra);
-    a.w32(rn);
-    a.i32k(h.scr);
-    a.call(h.i_stat_at);
-    failed(inout a, in h);
-    a.open(OP_IF);
-    put_wasi_err(inout b, inout h, inout a, 2, add(h.scr, 8));
-    a.retk(1);
-    a.end();
-    a.lda(add(h.scr, 8), OP_I64_LOAD8_U);
-    a.k(3);
-    a.op(OP_I64_NE);
-    a.open(OP_IF);
+    asm.get(j);
+    asm.get(rel_len);
+    asm.op(OP_I64_EQ);
+    asm.open(OP_IF);
+    asm.w32(desc);
+    asm.code.i32_const(1);
+    asm.w32(rel_addr);
+    asm.w32(rel_len);
+    asm.i32k(host.ret_area);
+    asm.call(host.i_stat_at);
+    failed(inout asm, in host);
+    asm.open(OP_IF);
+    put_wasi_err(inout builder, inout host, inout asm, 2, add(host.ret_area, 8));
+    asm.retk(1);
+    asm.end();
+    asm.lda(add(host.ret_area, 8), OP_I64_LOAD8_U);
+    asm.k(3);
+    asm.op(OP_I64_NE);
+    asm.open(OP_IF);
     // AlreadyExists | EEXIST << 32
-    put_errk(inout a, 2, 73014444035);
-    a.retk(1);
-    a.end();
-    a.end();
-    a.end();
-    a.end();
-    a.addk(j, 1);
-    a.br(0);
-    a.end();
-    a.end();
-    put_errk(inout a, 2, 0);
-    a.retk(0);
+    put_errk(inout asm, 2, 73014444035);
+    asm.retk(1);
+    asm.end();
+    asm.end();
+    asm.end();
+    asm.end();
+    asm.addk(j, 1);
+    asm.br(0);
+    asm.end();
+    asm.end();
+    put_errk(inout asm, 2, 0);
+    asm.retk(0);
 }

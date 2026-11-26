@@ -163,8 +163,8 @@ fn find_eop_result(in a: Ast, inout names: Names, cname: u32) -> u32 {
     }
     match a.effs.try_get(wrapping_sub(w(idx), 1)) {
         Option::Some(ef) => {
-            for oi in 0..ef.on {
-                match a.eops.try_get(wrapping_add(ef.oa, oi)) {
+            for oi in 0..ef.op_count {
+                match a.eops.try_get(wrapping_add(ef.op_start, oi)) {
                     Option::Some(op) => {
                         if op.name == opname {
                             return op.result;
@@ -423,17 +423,13 @@ fn join_method_sym(inout names: Names, tname: u32, mname: u32) -> u32 {
 }
 
 fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: Ex) -> u32 {
-    if f.gn == 0 {
-        let p_off: u64 = if receiver_ty != NONE32 {
-            1
-        } else {
-            0
-        };
+    if f.generic_count == 0 {
+        let p_off: u64 = if receiver_ty != NONE32 { 1 } else { 0 };
         for ai in 0..e.n {
             let av = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(ai, 2), 1)));
             let pi = wrapping_add(ai, p_off);
-            let pt = if pi < f.pn {
-                match a.pms.try_get(wrapping_add(f.pa, pi)) {
+            let pt = if pi < f.param_count {
+                match a.pms.try_get(wrapping_add(f.param_start, pi)) {
                     Option::Some(pm) => pm.ty,
                     Option::None => tc.infer_ty,
                 }
@@ -448,8 +444,8 @@ fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: E
     }
     let mut vars = vars_new();
     let mut gnames = ChunkSeq::new[u32]();
-    for gi in 0..f.gn {
-        match a.gens.try_get(wrapping_add(f.ga, gi)) {
+    for gi in 0..f.generic_count {
+        match a.gens.try_get(wrapping_add(f.generic_start, gi)) {
             Option::Some(gn) => {
                 gnames.push(gn.name);
                 if gi < e.m {
@@ -462,10 +458,10 @@ fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: E
     }
     let has_recv = receiver_ty != NONE32;
     let mut p_off: u64 = 0;
-    if has_recv && f.pn > 0 {
-        match a.pms.try_get(f.pa) {
+    if has_recv && f.param_count > 0 {
+        match a.pms.try_get(f.param_start) {
             Option::Some(pm0) => {
-                if f.gn > 0 && e.m == 0 {
+                if f.generic_count > 0 && e.m == 0 {
                     infer(inout tc.types, tc.world.k, pm0.ty, receiver_ty, in gnames, inout vars);
                 }
             },
@@ -477,12 +473,12 @@ fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: E
         let av = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(ai, 2), 1)));
         let pi = wrapping_add(ai, p_off);
         let mut pt = tc.infer_ty;
-        if pi < f.pn {
-            match a.pms.try_get(wrapping_add(f.pa, pi)) {
+        if pi < f.param_count {
+            match a.pms.try_get(wrapping_add(f.param_start, pi)) {
                 Option::Some(pm) => {
                     pt = substitute(inout tc.types, pm.ty, in vars);
                     let at = check_expr(inout tc, in a, av, pt);
-                    if f.gn > 0 && e.m == 0 {
+                    if f.generic_count > 0 && e.m == 0 {
                         infer(inout tc.types, tc.world.k, pm.ty, at, in gnames, inout vars);
                     }
                 },
@@ -494,7 +490,7 @@ fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: E
             let _at = check_expr(inout tc, in a, av, pt);
         }
     }
-    if f.gn > 0 {
+    if f.generic_count > 0 {
         let v0 = tc.pairs.len();
         let mut vn: u64 = 0;
         for gi in 0..gnames.len() {
@@ -606,11 +602,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
     } else if e.kind == X_FIELD {
         let bt = check_expr(inout tc, in a, e.a, tc.infer_ty);
         let ft = field_step(inout tc.types, inout tc.names, in tc.world, bt, n32(e.b), false);
-        if ft == NONE32 {
-            expected
-        } else {
-            ft
-        }
+        if ft == NONE32 { expected } else { ft }
     } else if e.kind == X_INDEX {
         let bt = check_expr(inout tc, in a, e.a, tc.infer_ty);
         let _it = check_expr(inout tc, in a, e.b, tc.infer_ty);
@@ -721,11 +713,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         if e.c == NONE64 {
             tc.unit_ty
         } else {
-            let exp_e = if tt == tc.never_ty {
-                expected
-            } else {
-                tt
-            };
+            let exp_e = if tt == tc.never_ty { expected } else { tt };
             let et = check_expr(inout tc, in a, e.c, exp_e);
             if tt == tc.never_ty || tc.types.kind(tt) == TyKind::Infer {
                 et
@@ -741,11 +729,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             let body = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)));
             push_scope(inout tc);
             bind_pat(inout tc, in a, pt, vt);
-            let exp_b = if res == tc.never_ty {
-                expected
-            } else {
-                res
-            };
+            let exp_b = if res == tc.never_ty { expected } else { res };
             let bt = check_expr(inout tc, in a, body, exp_b);
             if (tc.types.kind(res) == TyKind::Infer || res == tc.never_ty) && bt != tc.never_ty {
                 res = bt;
@@ -783,36 +767,36 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         match a.hds.try_get(e.a) {
             Option::Some(h) => {
                 if h.has_state {
-                    let st = check_expr(inout tc, in a, h.sexpr, tc.infer_ty);
-                    bind_pat(inout tc, in a, h.spat, st);
+                    let st = check_expr(inout tc, in a, h.state_expr, tc.infer_ty);
+                    bind_pat(inout tc, in a, h.state_pattern, st);
                 }
                 let bt = check_expr(inout tc, in a, h.body, expected);
                 let mut rt = expected;
-                match a.cls.try_get(h.ret) {
+                match a.cls.try_get(h.return_clause) {
                     Option::Some(rc) => {
                         push_scope(inout tc);
-                        if rc.pn > 0 {
-                            bind_pat(inout tc, in a, u64_at(in a.xs, rc.pa), bt);
+                        if rc.pattern_count > 0 {
+                            bind_pat(inout tc, in a, u64_at(in a.xs, rc.pattern_start), bt);
                         }
                         rt = check_expr(inout tc, in a, rc.body, expected);
                         pop_scope(inout tc);
                     },
                     Option::None => {},
                 }
-                for oi in 0..h.on {
-                    match a.cls.try_get(wrapping_add(h.ret, wrapping_add(oi, 1))) {
+                for oi in 0..h.op_count {
+                    match a.cls.try_get(wrapping_add(h.return_clause, wrapping_add(oi, 1))) {
                         Option::Some(oc) => {
                             push_scope(inout tc);
-                            for pi in 0..oc.pn {
-                                let pty = if pi == 0 && h.tn > 0 {
-                                    n32(u64_at(in a.xs, h.ta))
+                            for pi in 0..oc.pattern_count {
+                                let pty = if pi == 0 && h.arg_ty_count > 0 {
+                                    n32(u64_at(in a.xs, h.arg_ty_start))
                                 } else {
                                     tc.infer_ty
                                 };
                                 bind_pat(
                                     inout tc,
                                     in a,
-                                    u64_at(in a.xs, wrapping_add(oc.pa, pi)),
+                                    u64_at(in a.xs, wrapping_add(oc.pattern_start, pi)),
                                     pty
                                 );
                             }
@@ -967,11 +951,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 }
                             } else {
                                 let eres = find_eop_result(in a, inout tc.names, cname);
-                                if eres != NONE32 {
-                                    eres
-                                } else {
-                                    expected
-                                }
+                                if eres != NONE32 { eres } else { expected }
                             };
                             record_span(inout tc, ce.s0, ce.s1, rty);
                             record_span(inout tc, e.s0, e.s1, rty);
@@ -1094,11 +1074,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 tc.bool_ty
                             } else {
                                 let eres = find_eop_result(in a, inout tc.names, cname);
-                                if eres != NONE32 {
-                                    eres
-                                } else {
-                                    expected
-                                }
+                                if eres != NONE32 { eres } else { expected }
                             };
                             record_span(inout tc, ce.s0, ce.s1, rty);
                             record_span(inout tc, e.s0, e.s1, rty);
@@ -1447,8 +1423,8 @@ pub fn typecheck_ast(
         let n_rows = tc.types.rows.len();
         let n_effs = tc.types.effs_len();
         push_scope(inout tc);
-        for pi in 0..f.pn {
-            match a.pms.try_get(wrapping_add(f.pa, pi)) {
+        for pi in 0..f.param_count {
+            match a.pms.try_get(wrapping_add(f.param_start, pi)) {
                 Option::Some(pm) => bind_var(inout tc, pm.name, pm.ty),
                 Option::None => {},
             }

@@ -196,11 +196,7 @@ fn identifier(in t: ChunkSeq[u8], start: u64, pos: u64, inout v: Ver) -> u64 {
     loop {
         let i = wrapping_add(wrapping_add(start, acc), seg);
         // END stands for the end of input.
-        let b: u64 = if i < n {
-            widen_u64(byte(in t, i))
-        } else {
-            END
-        };
+        let b: u64 = if i < n { widen_u64(byte(in t, i)) } else { END };
         if b < END && is_ident_letter(byte(in t, i)) {
             seg = wrapping_add(seg, 1);
             nondigit = true;

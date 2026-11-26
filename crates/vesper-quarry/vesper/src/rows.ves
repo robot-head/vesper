@@ -58,11 +58,7 @@ pub fn run(inout ds: D, inout q: Q, n: u64) -> (u64, u64) {
             }
             let nvals = ex(in q, p);
             let row = new_row(inout q);
-            let m = if nvals < x.e {
-                nvals
-            } else {
-                x.e
-            };
+            let m = if nvals < x.e { nvals } else { x.e };
             for k in 0..m {
                 let v = val_at(in q, in q.ex, wrapping_add(wrapping_add(p, 1), wrapping_mul(k, 3)));
                 let slot = ex(in q, wrapping_add(x.d, k));

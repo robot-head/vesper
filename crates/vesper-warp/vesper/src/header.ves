@@ -420,8 +420,10 @@ pub fn hdr_write_long(
     if ty != LT_INITIAL && token.len() != 0 {
         Fail::raise(HdrErr::FieldOverflow);
     }
-    let first = header_form() | fixed_bit() | ty
-        << LONG_TYPE_SHIFT | wrapping_u8(wrapping_sub(pn_len, 1));
+    let first = header_form()
+        | fixed_bit()
+        | ty << LONG_TYPE_SHIFT
+        | wrapping_u8(wrapping_sub(pn_len, 1));
     let mut at = w_u8(inout out, 0, first);
     at = w_u32(inout out, at, quic_v1());
     at = w_u8(inout out, at, cid_len(in dcid));

@@ -2,11 +2,10 @@
 //! record of the Vesper formatter (`vesper/src/lib.ves`) and the forwarding
 //! of [`crate::format_source`].
 //!
-//! The port formats every source the Rust code formats with its ordinary
-//! parser, lexing with the same hard ceilings (`lex_with_limits`). Sources
-//! in the macro profile (`m!`, `quote`) come back as `OpaqueMacro`, and the
-//! Rust code formats them from the start, so the result is the Rust
-//! result.
+//! The port formats every source the Rust code formats, lexing with the
+//! same hard ceilings (`lex_with_limits`): ordinary modules, sugar, test
+//! blocks and the expression macro profile (`m!`, `quote`), so its result
+//! is the Rust result.
 
 pub use crate::port_binding::*;
 use crate::{Error, FormatResult, Limits};
@@ -27,6 +26,27 @@ pub struct Hash32 {
     pub w1: u64,
     pub w2: u64,
     pub w3: u64,
+}
+
+/// `ProofError` of the port's `format_for_verification` (#1341): `code` is
+/// 0 for none, else the variant (1 `InvalidLimits` to 7 `LeanSyntax`),
+/// `resource` names a `Resource` limit and `fmt` is a `Formatter` error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProofFail {
+    pub code: u64,
+    pub resource: u64,
+    pub fmt: FmtFail,
+}
+
+/// [`crate::ProofLimits`] in the port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProofLimits {
+    pub max_nodes: u64,
+    pub max_text_bytes: u64,
+    pub max_depth: u64,
+    pub max_metadata_bytes: u64,
+    pub max_lean_bytes: u64,
+    pub max_work: u64,
 }
 
 /// `blake3::hash(data)` through `@vesper-std/hash-sys`.
@@ -53,9 +73,9 @@ fn error(e: FmtFail) -> Option<Error> {
         9 => Error::Syntax {
             offset: e.offset as usize,
         },
+        10 => Error::OpaqueMacro,
         11 => Error::Conservation,
         12 => Error::NotIdempotent,
-        // OpaqueMacro (10): the Rust build formats the macro profile.
         _ => return None,
     })
 }

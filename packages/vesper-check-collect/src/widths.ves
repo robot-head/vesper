@@ -78,11 +78,7 @@ fn kind_flip(k: u8) -> u8 {
 
 // The unsigned kind of `k`'s width.
 fn kind_unsigned(k: u8) -> u8 {
-    if kind_signed(k) {
-        kind_flip(k)
-    } else {
-        k
-    }
+    if kind_signed(k) { kind_flip(k) } else { k }
 }
 
 // `kind.min()` and `kind.max()` of the kinds of 32 bits or fewer.
@@ -553,8 +549,7 @@ fn w_item(in a: Ast, i: u32) -> ItemNode {
 }
 
 fn w_fn_name(in a: Ast, i: u32) -> u32 {
-    a
-        .fns
+    a.fns
         .get_or(
             idx_from_raw[FnNode](i),
             FnNode {

@@ -99,35 +99,19 @@ fn sat_mul1000(x: u64) -> u64 {
 }
 
 fn sat_sub(a: u64, b: u64) -> u64 {
-    if b > a {
-        0
-    } else {
-        wrapping_sub(a, b)
-    }
+    if b > a { 0 } else { wrapping_sub(a, b) }
 }
 
 fn max64(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn min64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn rem(a: u64, b: u64) -> u64 {
-    if b == 0 {
-        0
-    } else {
-        a % b
-    }
+    if b == 0 { 0 } else { a % b }
 }
 
 // ---------------------------------------------------------------------------
@@ -282,11 +266,10 @@ fn ent_get(in ents: Slice[RecEntry], at: u64) -> RecEntry {
 }
 
 fn emit(inout st: RecState, inout evs: Slice[RecEvent], kind: u8, e: RecEntry, count: u64) {
-    evs
-        .try_set(
-            st.n_events,
-            RecEvent { kind: kind, pn: e.pn, sent_ns: e.sent_ns, bytes: e.bytes, count: count }
-        );
+    evs.try_set(
+        st.n_events,
+        RecEvent { kind: kind, pn: e.pn, sent_ns: e.sent_ns, bytes: e.bytes, count: count }
+    );
     st.n_events = wrapping_add(st.n_events, 1);
 }
 
@@ -330,11 +313,7 @@ fn backoff(in st: RecState, d: u64) -> u64 {
 }
 
 fn probe_space(in st: RecState) -> u8 {
-    if st.has_handshake_keys {
-        1
-    } else {
-        0
-    }
+    if st.has_handshake_keys { 1 } else { 0 }
 }
 
 // The earliest loss time (the first space on a tie) and A.8
@@ -506,18 +485,17 @@ pub fn rec_on_packet_sent(
     s.last_sent_pn = pkt.pn;
     st.last_sent_ns = pkt.sent_ns;
     let at = slot(in st, in s, i, s.len);
-    ents
-        .try_set(
-            at,
-            RecEntry {
-                pn: pkt.pn,
-                sent_ns: pkt.sent_ns,
-                bytes: pkt.bytes,
-                ack_eliciting: pkt.ack_eliciting,
-                in_flight: true,
-                status: in_flight_st()
-            }
-        );
+    ents.try_set(
+        at,
+        RecEntry {
+            pn: pkt.pn,
+            sent_ns: pkt.sent_ns,
+            bytes: pkt.bytes,
+            ack_eliciting: pkt.ack_eliciting,
+            in_flight: true,
+            status: in_flight_st()
+        }
+    );
     s.len = wrapping_add(s.len, 1);
     if pkt.ack_eliciting {
         s.has_last_ack_eliciting = true;
@@ -885,11 +863,7 @@ pub fn rec_on_timeout(
         out.packets = 1;
         out.anti_deadlock = true;
     } else {
-        out.space = if sc.pto.has {
-            sc.pto.space
-        } else {
-            0
-        };
+        out.space = if sc.pto.has { sc.pto.space } else { 0 };
         out.packets = 2;
     }
     if st.pto_count != U32_MAX {

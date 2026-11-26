@@ -269,25 +269,20 @@ pub fn validate_type(
             names.write(n.name, inout d.text);
             d.text.extend(in " must name a region capability in scope, found ".as_bytes());
             region_display(in t, in names, k, arg, inout d.text);
-            d
-                .close(
-                    c,
-                    m,
-                    "bind one with `region r { ... }` or declare `eff [r: Region]`",
-                    start,
-                    stop
-                );
+            d.close(
+                c,
+                m,
+                "bind one with `region r { ... }` or declare `eff [r: Region]`",
+                start,
+                stop
+            );
         }
         return true;
     }
     if !is_handle_name(k, n.name) {
         return false;
     }
-    let arity: u32 = if n.name == k.region_box {
-        2
-    } else {
-        1
-    };
+    let arity: u32 = if n.name == k.region_box { 2 } else { 1 };
     if n.n != arity {
         let c = d.open("E0797");
         let m = d.text.len();

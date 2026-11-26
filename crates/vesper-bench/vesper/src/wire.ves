@@ -124,10 +124,8 @@ pub fn do_wire_decode(in bytes: Slice[u8]) -> PmuSampleWire eff [Fail[WireErr]] 
         };
         let mut value: u64 = 0;
         for k in 0..width {
-            value = value | wrapping_shl_u64(
-                gb(in bytes, add(offset, k)),
-                wrapping_u32(mul(BYTE_BITS, k))
-            );
+            value = value
+                | wrapping_shl_u64(gb(in bytes, add(offset, k)), wrapping_u32(mul(BYTE_BITS, k)));
         }
         check_width(field, value);
         values.push(value);

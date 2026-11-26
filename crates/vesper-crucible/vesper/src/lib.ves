@@ -104,11 +104,7 @@ fn inc(x: u64) -> u64 {
 }
 
 fn min_u64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // `a % b` for `b > 0`.
@@ -241,11 +237,7 @@ pub fn source_draw(
             if !random {
                 Draw { code: DrawCode::Overrun, value: 0 }
             } else if bernoulli {
-                let one: u64 = if rng_chance(inout r, n) {
-                    1
-                } else {
-                    0
-                };
+                let one: u64 = if rng_chance(inout r, n) { 1 } else { 0 };
                 Draw { code: DrawCode::Ok, value: min_u64(one, max) }
             } else {
                 Draw { code: DrawCode::Ok, value: rng_below_inclusive(inout r, max) }
@@ -463,14 +455,7 @@ fn hex_value(in s: Slice[u8], start: u64, end: u64) -> (bool, u64) {
         if !(digit || letter) {
             break(false, 0);
         }
-        let d = wrapping_sub(
-            c,
-            if letter {
-                HEX_LETTER_BIAS
-            } else {
-                DIGIT_ZERO
-            }
-        );
+        let d = wrapping_sub(c, if letter { HEX_LETTER_BIAS } else { DIGIT_ZERO });
         v = (v << HEX_DIGIT_BITS) | d;
         i = inc(i);
     }
@@ -1207,19 +1192,11 @@ fn insert_at(inout s: ChunkSeq[u64], pos: u64, x: u64) {
 
 fn sat_add(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
-    if s < a {
-        max_u64()
-    } else {
-        s
-    }
+    if s < a { max_u64() } else { s }
 }
 
 fn sat_sub(a: u64, b: u64) -> u64 {
-    if b > a {
-        0
-    } else {
-        wrapping_sub(a, b)
-    }
+    if b > a { 0 } else { wrapping_sub(a, b) }
 }
 
 // `1 << bit` for `bit < 64`.
@@ -1378,11 +1355,7 @@ impl Fuzzer {
             let a = at(in self.scratch.as_slice(), j);
             let b = self.row_at(row, j);
             if a != b {
-                break if a < b {
-                    Order::Less
-                } else {
-                    Order::Greater
-                };
+                break if a < b { Order::Less } else { Order::Greater };
             }
             j = inc(j);
         }
@@ -2279,11 +2252,7 @@ impl Search {
         if !self.has_bound {
             return true;
         }
-        let extra: u64 = if self.preempts(n, p) {
-            1
-        } else {
-            0
-        };
+        let extra: u64 = if self.preempts(n, p) { 1 } else { 0 };
         wrapping_add(at(in self.n_pre.as_slice(), n), extra) <= self.bound
     }
 
@@ -2502,11 +2471,7 @@ impl Search {
                 j = inc(j);
             } else {
                 self.t2.push(ap);
-                let v = if av > bv {
-                    av
-                } else {
-                    bv
-                };
+                let v = if av > bv { av } else { bv };
                 self.t2.push(v);
                 i = inc(i);
                 j = inc(j);
@@ -2855,11 +2820,7 @@ pub fn search_choose(inout s: Search) -> Draw {
             }
         }
     }
-    let extra: u64 = if s.preempts(d, p) {
-        1
-    } else {
-        0
-    };
+    let extra: u64 = if s.preempts(d, p) { 1 } else { 0 };
     s.p_pre = wrapping_add(at(in s.n_pre.as_slice(), d), extra);
     // The happens-before clock of the new event.
     s.t1.clear();
@@ -2929,11 +2890,7 @@ pub fn search_child(
     let d = wrapping_sub(s.ev_proc.len(), 1);
     let p = s.p_proc;
     let running = if proc_tag(p) == Proc::Task {
-        if still_ready {
-            p
-        } else {
-            none()
-        }
+        if still_ready { p } else { none() }
     } else {
         at(in s.n_running.as_slice(), d)
     };
@@ -3180,11 +3137,7 @@ test {
             return false;
         }
         let result = fuzzer_observe(inout fuzzer, verdict, in features.as_slice());
-        let expected: u64 = if verdict == 1 {
-            2
-        } else {
-            0
-        };
+        let expected: u64 = if verdict == 1 { 2 } else { 0 };
         let stopped = !fuzzer_next(inout fuzzer);
         let stats = fuzzer_stats(in fuzzer);
         result == expected && stopped && stats.execs == 2 && stats.invalid == 1
@@ -3600,14 +3553,7 @@ test {
         let mut limits = ChunkSeq::new[u64]();
         for i in 0..sample.len() {
             values.push(byte(in sample, i));
-            kinds
-                .push(
-                    if i == 2 {
-                        0
-                    } else {
-                        1
-                    }
-                );
+            kinds.push(if i == 2 { 0 } else { 1 });
             limits.push(255);
         }
         let mut comparisons = ChunkSeq::new[u64]();
@@ -3679,11 +3625,7 @@ test {
                 }
                 zeroed = true;
             }
-            let outcome: u64 = if candidate.len() == 8 {
-                0
-            } else {
-                1
-            };
+            let outcome: u64 = if candidate.len() == 8 { 0 } else { 1 };
             shrinker_record(inout shrinker, outcome, in candidate.as_slice());
         }
         let best = shrinker_best(in shrinker);
@@ -3711,11 +3653,7 @@ test {
             }
             let candidate = shrinker_candidate(in shrinker);
             let reproduces = candidate.len() == 1 && at(in candidate.as_slice(), 0) >= 13;
-            let outcome: u64 = if reproduces {
-                0
-            } else {
-                2
-            };
+            let outcome: u64 = if reproduces { 0 } else { 2 };
             shrinker_record(inout shrinker, outcome, in candidate.as_slice());
         }
         let best = shrinker_best(in shrinker);
@@ -3744,11 +3682,7 @@ test {
             let candidate = shrinker_candidate(in shrinker);
             let valid = candidate.len() > 0
                 && wrapping_add(at(in candidate.as_slice(), 0), 1) == candidate.len();
-            let outcome: u64 = if valid {
-                0
-            } else {
-                1
-            };
+            let outcome: u64 = if valid { 0 } else { 1 };
             shrinker_record(inout shrinker, outcome, in candidate.as_slice());
         }
         let best = shrinker_best(in shrinker);
@@ -3854,11 +3788,7 @@ test {
         let result = shrinker_record(inout shrinker, outcome, in candidate.as_slice());
         let stats = shrinker_stats(in shrinker);
         let best = shrinker_best(in shrinker);
-        let expected_len: u64 = if accepted {
-            1
-        } else {
-            2
-        };
+        let expected_len: u64 = if accepted { 1 } else { 2 };
         result == accepted
             && stats.accepted == improvements
             && stats.invalid == invalid
@@ -4197,11 +4127,7 @@ test {
         let mut explored: u64 = 0;
         loop {
             let first = search_choose(inout search);
-            let expected_first: u64 = if explored == 0 {
-                1
-            } else {
-                2
-            };
+            let expected_first: u64 = if explored == 0 { 1 } else { 2 };
             if first.code != 0 || first.value != expected_first || explored >= expected {
                 return false;
             }
@@ -4210,11 +4136,7 @@ test {
             let mut last_transition = ChunkSeq::new[u64]();
             remaining.push(other);
             last_transition.push(other);
-            let footprint = if other == 1 {
-                first_fp
-            } else {
-                second_fp
-            };
+            let footprint = if other == 1 { first_fp } else { second_fp };
             last_transition.push(footprint);
             search_child(
                 inout search,
@@ -4407,11 +4329,7 @@ test {
             return false;
         }
         search.sleep_keep(0, 2, 1, first_fp);
-        let expected: Option[u64] = if kept {
-            Option::Some(2)
-        } else {
-            Option::None
-        };
+        let expected: Option[u64] = if kept { Option::Some(2) } else { Option::None };
         search.p_sleep.try_get(0) == expected
     }
 
@@ -4470,11 +4388,7 @@ test {
     ) -> bool {
         let mut search = search_new(true, bounded, 2, false);
         let first_fp = footprint_from_masks(inout search, 0, 2, 0, false);
-        let writes: u64 = if conflict {
-            2
-        } else {
-            0
-        };
+        let writes: u64 = if conflict { 2 } else { 0 };
         let second_fp = footprint_from_masks(inout search, 0, writes, 0, false);
         let mut enabled = ChunkSeq::new[u64]();
         enabled.push(1);

@@ -1,0 +1,102 @@
+// Run an attempt under one unlabelled `Fail[E]`. The two explicit types
+// select the error to intercept and the success result's native layout.
+// On normal completion, pass the result to `commit`. On failure, run
+// cleanup outside the handler, then re-raise the original error if cleanup
+// completes normally. Failures raised during commit do not run cleanup.
+//
+// The attempt can borrow a linear resource, but its terminal consumption
+// belongs in the two continuations outside the handler. The ownership
+// checker rejects losing the reservation on either path.
+pub sugar errdefer: expr emits eff [Fail] {
+    rule (
+        errdefer($failure:ident) on[$ty:ty] returning[
+            $out:ty
+        ] $cleanup:block attempt $body:block commit($success:ident) $finish:block
+    ) => {
+        {
+            let outcome: Result[$out, $ty] = handle Fail[$ty] in {
+                $body
+            } with {
+                return value => Result::Ok(value),
+                raise(error, _) => Result::Err(error),
+            };
+            match outcome {
+                Result::Ok($success) => $finish,
+                Result::Err($failure) => {
+                    $cleanup;
+                    Fail::raise($failure)
+                },
+            }
+        }
+    }
+}
+
+test {
+    copy struct StageError {
+        code: u64,
+    }
+
+    linear struct Ticket {
+        amount: u64,
+    }
+
+    fn take(sink ticket: Ticket) -> u64 {
+        let Ticket { amount } = ticket;
+        amount
+    }
+
+    fn stage(inout ticket: Ticket, amount: u64, reject: bool) -> Result[u64, StageError] {
+        ticket.amount = amount;
+        if reject {
+            Result::Err(StageError { code: amount })
+        } else {
+            Result::Ok(amount)
+        }
+    }
+
+    fn edit(inout trace: u64, stop: u64) -> u64 eff [Fail[StageError]] {
+        let mut ticket = Ticket { amount: 0 };
+        errdefer(reason) on[StageError] returning[u64] {
+            let discarded = take(sink ticket);
+            trace = wrapping_add(discarded, reason.code);
+        } attempt {
+            let first = stage(inout ticket, 20, stop == 1)?;
+            let second = stage(inout ticket, 22, stop == 2)?;
+            wrapping_add(first, second)
+        } commit(total) {
+            trace = take(sink ticket);
+            if stop == 3 {
+                Fail::raise(
+                    StageError {
+                        code: 99
+                    }
+                );
+            }
+            total
+        }
+    }
+
+    // @case committed(0, 42, 22)
+    // @case first_failure(1, 20, 40)
+    // @case second_failure(2, 22, 44)
+    // @case commit_fails_without_cleanup(3, 99, 22)
+    fn test_errdefer_owns_the_ticket_on_both_paths(
+        stop: u64,
+        expected: u64,
+        expected_trace: u64
+    ) -> bool {
+        let mut trace: u64 = 0;
+        let outcome: Result[u64, u64] = handle Fail[StageError] in {
+            edit(inout trace, stop)
+        } with {
+            return total => Result::Ok(total),
+            raise(reason, _) => Result::Err(reason.code),
+        };
+        let ok = if stop == 0 {
+            outcome == Result::Ok(expected)
+        } else {
+            outcome == Result::Err(expected)
+        };
+        ok && trace == expected_trace
+    }
+}

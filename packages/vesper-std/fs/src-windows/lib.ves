@@ -189,10 +189,10 @@ fn utf8_to_utf16(in src: Slice[u8]) -> ChunkSeq[u16] eff [Fail[IoError]] {
             if (b1 & 192) != 128 || (b2 & 192) != 128 || (b3 & 192) != 128 {
                 return raise_kind(invalid_input());
             }
-            let cp = wrapping_shl_u32(b0 & 7, 18) | wrapping_shl_u32(
-                b1 & 63,
-                12
-            ) | wrapping_shl_u32(b2 & 63, 6) | (b3 & 63);
+            let cp = wrapping_shl_u32(b0 & 7, 18)
+                | wrapping_shl_u32(b1 & 63, 12)
+                | wrapping_shl_u32(b2 & 63, 6)
+                | (b3 & 63);
             let adj = wrapping_sub(cp, 65536);
             out.push(wrapping_u16(wrapping_add(55296, wrapping_shr_u32(adj, 10))));
             out.push(wrapping_u16(wrapping_add(56320, adj & 1023)));
@@ -304,11 +304,7 @@ pub fn read_path_limit(
     } else {
         4096
     };
-    let hint = if wanted < limit {
-        wanted
-    } else {
-        limit
-    };
+    let hint = if wanted < limit { wanted } else { limit };
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
     buf.resize(hint, 0);
     let mut total: u64 = 0;
@@ -324,11 +320,7 @@ pub fn read_path_limit(
             } else {
                 wrapping_mul(cap, 2)
             };
-            let next_cap = if grown < limit {
-                grown
-            } else {
-                limit
-            };
+            let next_cap = if grown < limit { grown } else { limit };
             buf.resize(next_cap, 0);
         }
         let end = buf.len();
@@ -595,11 +587,7 @@ pub fn read_nofollow_limit(
                 break;
             }
             let room = wrapping_sub(limit, total);
-            let step: u64 = if room < 65536 {
-                room
-            } else {
-                65536
-            };
+            let step: u64 = if room < 65536 { room } else { 65536 };
             buf.resize(wrapping_add(total, step), 0);
             let end = buf.len();
             let mut got: u32 = 0;
@@ -1029,9 +1017,8 @@ fn meta_path(in path: Slice[u8], follow: bool) -> Metadata eff [Ffi[StdFs], Fail
             if ok == 0 {
                 return raise_io(widen_u64(err));
             }
-            let size = wrapping_shl_u64(widen_u64(info.nFileSizeHigh), 32) | widen_u64(
-                info.nFileSizeLow
-            );
+            let size = wrapping_shl_u64(widen_u64(info.nFileSizeHigh), 32)
+                | widen_u64(info.nFileSizeLow);
             let (ms, mns) = filetime_to_unix(info.ftLastWriteTimeLow, info.ftLastWriteTimeHigh);
             let kind = if !follow
                 && (info.dwFileAttributes & StdFs::FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
@@ -1353,7 +1340,10 @@ fn os_error_message(inout out: ChunkSeq[u8], e: u32) eff [Ffi[StdFs]] {
     }
     let mut buffer: u64 = 0;
     let (units, fm_err) = StdFs::FormatMessageW(
-        flags | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_ALLOCATE_BUFFER,
+        flags
+            | FORMAT_MESSAGE_FROM_SYSTEM
+            | FORMAT_MESSAGE_IGNORE_INSERTS
+            | FORMAT_MESSAGE_ALLOCATE_BUFFER,
         module,
         errnum,
         0,

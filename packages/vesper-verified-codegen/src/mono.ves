@@ -407,11 +407,7 @@ fn mentions_generic(in m: Mo, t: u32) -> bool {
 fn text_less(in names: Names, a: u32, b: u32) -> bool {
     let na = names.size(a);
     let nb = names.size(b);
-    let n = if na < nb {
-        na
-    } else {
-        nb
-    };
+    let n = if na < nb { na } else { nb };
     for i in 0..n {
         let x = names.byte(a, i);
         let y = names.byte(b, i);
@@ -765,20 +761,17 @@ fn instantiate(inout m: Mo, f: FnRow, name: u32, in vars: Vars) eff [Fail[VErr]]
             let row = instruction(inout m, i, name, in vars, in bound);
             m.p.insts.push(row);
         }
-        m
-            .p
-            .blocks
-            .push(
-                BlockRow {
-                    ha: blk.ha,
-                    hn: blk.hn,
-                    i0: i0,
-                    ic: blk.ic,
-                    term: blk.term,
-                    ta: blk.ta,
-                    tn: blk.tn
-                }
-            );
+        m.p.blocks.push(
+            BlockRow {
+                ha: blk.ha,
+                hn: blk.hn,
+                i0: i0,
+                ic: blk.ic,
+                term: blk.term,
+                ta: blk.ta,
+                tn: blk.tn
+            }
+        );
     }
     m.p.fns.push(FnRow { name: name, ha: ha, hn: f.hn, b0: b0, bc: f.bc, ta: f.ta, tn: f.tn });
 }
@@ -914,11 +907,7 @@ fn sort_fns(in names: Names, inout fns: ChunkSeq[FnRow]) {
 }
 
 fn min_u64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // Monomorphization, evidence passing (evidence.ves) and then the lowering

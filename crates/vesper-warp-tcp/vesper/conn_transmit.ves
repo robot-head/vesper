@@ -137,11 +137,7 @@ fn try_retransmit(
 ) -> Result[Option[Tx], TcpFail] {
     let mut found: Option[u64] = Option::None;
     // `sent_lost` counts the entries this scan looks for.
-    let n = if t.sent_lost == 0 {
-        0
-    } else {
-        t.sent_len
-    };
+    let n = if t.sent_lost == 0 { 0 } else { t.sent_len };
     for i in 0..n {
         let s = sq_get(in t, i);
         if s.lost && !s.sacked {

@@ -516,11 +516,7 @@ fn atan(x0: f64) -> f64 {
         return x - x * (s1 + s2);
     }
     let z2 = atan_hi(id) - ((x * (s1 + s2) - atan_lo(id)) - x);
-    if negative {
-        -z2
-    } else {
-        z2
-    }
+    if negative { -z2 } else { z2 }
 }
 
 // Whether `sin`/`cos` of `x` takes the correctly rounded path.

@@ -150,11 +150,7 @@ fn t_vals(a: Value, c: Value, d: Value, e: Value, f: Value, n: u32) -> ChunkSeq[
 
 // `alloc`: a zeroed stack slot of `max(size, 8)` bytes.
 fn t_alloc(inout b: Builder, inout m: Module, size: u32) -> Value eff [Ffi[Cranelift]] {
-    let bytes = if size < 8 {
-        8
-    } else {
-        size
-    };
+    let bytes = if size < 8 { 8 } else { size };
     let slot = create_stack_slot(inout b, bytes, 3);
     let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
     for i in 0..(widen_u64(bytes) >> 3) {
@@ -220,11 +216,7 @@ fn t_store_row(
         let words = tw_next(inout w);
         let offset = wrapping_i32(tw_next(inout w));
         let word_offset = tw_next(inout w);
-        let n = if aggregate {
-            words
-        } else {
-            1
-        };
+        let n = if aggregate { words } else { 1 };
         for k in 0..n {
             let off = wrapping_add(offset, wrapping_i32(wrapping_mul(k, T_WORD)));
             let word = ins_load(inout b, tt(TyCode::I64), TF_PLAIN, record, off);
@@ -269,11 +261,7 @@ fn t_load_row(
         let words = tw_next(inout w);
         let offset = wrapping_i32(tw_next(inout w));
         let word_offset = tw_next(inout w);
-        let n = if aggregate {
-            words
-        } else {
-            1
-        };
+        let n = if aggregate { words } else { 1 };
         for k in 0..n {
             let woff = t_iconst(inout b, wrapping_add(word_offset, k));
             let args = t_vals(seq, row, woff, woff, woff, 3);

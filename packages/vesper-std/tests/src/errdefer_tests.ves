@@ -1,0 +1,63 @@
+// Check the public sugar with a borrowed linear reservation and a typed guard.
+use @vesper-std/core::control::ensure;
+use @vesper-std/core::errdefer::errdefer;
+
+test {
+    linear struct Reservation {
+        amount: u64,
+    }
+
+    fn release(sink reservation: Reservation) -> u64 {
+        let Reservation { amount } = reservation;
+        amount
+    }
+
+    fn resize(inout reservation: Reservation, proposed: u64) -> u64 eff [Fail[u64]] {
+        reservation.amount = proposed;
+        ensure proposed <= 32 else proposed;
+        proposed
+    }
+
+    fn reserve(inout published: u64, inout rolled_back: u64, proposed: u64) -> u64 eff [Fail[u64]] {
+        let mut reservation = Reservation { amount: 0 };
+        errdefer(reason) on[u64] returning[u64] {
+            let failed_amount = release(sink reservation);
+            rolled_back = if failed_amount == reason {
+                failed_amount
+            } else {
+                999
+            };
+        } attempt {
+            resize(inout reservation, proposed)
+        } commit(count) {
+            published = release(sink reservation);
+            count
+        }
+    }
+
+    fn observe(inout published: u64, inout rolled_back: u64, proposed: u64) -> Result[u64, u64] {
+        let outcome: Result[u64, u64] = handle Fail[u64] in {
+            reserve(inout published, inout rolled_back, proposed)
+        } with {
+            return count => Result::Ok(count),
+            raise(reason, _) => Result::Err(reason),
+        };
+        outcome
+    }
+
+    pub fn check_core_errdefer() -> u64 {
+        let mut published: u64 = 0;
+        let mut rolled_back: u64 = 0;
+        if observe(inout published, inout rolled_back, 20) != Result::Ok(20)
+            || published != 20
+            || rolled_back != 0 {
+            return 1;
+        }
+        if observe(inout published, inout rolled_back, 77) != Result::Err(77)
+            || published != 20
+            || rolled_back != 77 {
+            return 2;
+        }
+        0
+    }
+}

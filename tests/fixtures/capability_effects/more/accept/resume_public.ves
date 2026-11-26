@@ -11,11 +11,7 @@ fn padded(x: u64) -> u64 eff [ConstTime] {
         return value => value,
         pad(resume) => {
             let total = resume(16);
-            if total > 100 {
-                100
-            } else {
-                total
-            }
+            if total > 100 { 100 } else { total }
         },
     }
 }

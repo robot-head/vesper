@@ -1,0 +1,1021 @@
+// Proof code lenses and the `vesper.proofAudit` results
+// (src/lsp/session/lens_requests.rs `code_lenses_of`, `record_of`,
+// `proof_result_of`, `proof_status_of`) in Vesper, with the bounded proof
+// ledgers they read (crates/vesper-lsp/src/lens.rs `ProofLedger`).
+//
+// The caller lends the document, its proof-lens functions (name and span
+// start, `lens_functions`), its model keys or the reasons there are none
+// (by name, sorted as a `BTreeMap` sorts them), and a sequence of
+// finished proof jobs. Everything else is computed here: what each ledger
+// keeps and evicts, the lens titles and data, and the JSON the session
+// sends.
+
+use self::json::{pack, put_i64, put_u64};
+use self::nav::{put_span_error};
+use @vesper/span::{Limits, Position, line_table, position};
+use @vesper/span::Error as SpanError;
+
+const NONE: u64 = 18446744073709551615;
+const MAX_LENSES: u64 = 256;
+
+// `ProofStatus` codes.
+const NOT_ATTEMPTED: u64 = 0;
+const PROVED: u64 = 1;
+const CHECKED: u64 = 2;
+const REFUTED: u64 = 3;
+const FAILED: u64 = 4;
+
+// What a rendered result belongs to: a command result (with the cache
+// counts and time), or a background result (with its obligation).
+const COMMAND: u8 = 0;
+const BACKGROUND: u8 = 1;
+
+copy struct Rd {
+    pos: u64
+}
+
+fn word(in b: Slice[u8], inout r: Rd) -> u64 {
+    let x = match b.try_read_u64_le(r.pos) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    r.pos = wrapping_add(r.pos, 8);
+    x
+}
+
+// The next `n` bytes of the blob: their offset.
+fn take(inout t: Rd, n: u64) -> u64 {
+    let at = t.pos;
+    t.pos = wrapping_add(t.pos, n);
+    at
+}
+
+fn g64(in v: ChunkSeq[u64], i: u64) -> u64 {
+    match v.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn bt(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn same(in b: Slice[u8], x: u64, y: u64, n: u64) -> bool {
+    let words = n >> 3;
+    for k in 0..words {
+        let i = wrapping_mul(k, 8);
+        if b.try_read_u64_le(wrapping_add(x, i)) != b.try_read_u64_le(wrapping_add(y, i)) {
+            return false;
+        }
+    }
+    for i in wrapping_mul(words, 8)..n {
+        if bt(in b, wrapping_add(x, i)) != bt(in b, wrapping_add(y, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// Byte-wise order of `b[x..x+xn]` against `b[y..y+yn]`: -1, 0 or 1.
+fn compare(in b: Slice[u8], x: u64, xn: u64, y: u64, yn: u64) -> i64 {
+    let n = if xn < yn { xn } else { yn };
+    for i in 0..n {
+        let p = bt(in b, wrapping_add(x, i));
+        let q = bt(in b, wrapping_add(y, i));
+        if p < q {
+            return -1;
+        }
+        if p > q {
+            return 1;
+        }
+    }
+    if xn < yn {
+        -1
+    } else if xn > yn {
+        1
+    } else {
+        0
+    }
+}
+
+fn is(in b: Slice[u8], at: u64, len: u64, in s: Str) -> bool {
+    let w = s.as_bytes();
+    if len != w.len() {
+        return false;
+    }
+    for i in 0..len {
+        if bt(in b, wrapping_add(at, i)) != bt(in w, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn put_span(inout o: ChunkSeq[u8], in b: Slice[u8], at: u64, len: u64) {
+    o.extend(in b[at..wrapping_add(at, len)]);
+}
+
+const ONES: u64 = 72340172838076673;
+const HIGHS: u64 = 9259542123273814144;
+
+// Whether a byte of `x` is 0.
+fn has_zero(x: u64) -> bool {
+    wrapping_sub(x, ONES) & !x & HIGHS != 0
+}
+
+// Whether a byte of `w` is a control byte, `"` or `\\`.
+fn special(w: u64) -> bool {
+    wrapping_sub(w, wrapping_mul(ONES, 32)) & !w & HIGHS != 0
+        || has_zero(w ^ wrapping_mul(ONES, 34))
+        || has_zero(w ^ wrapping_mul(ONES, 92))
+}
+
+// `b[at..at+len]` as a JSON string with serde_json's escapes (json.ves
+// `put_string`), copying the runs between escaped bytes whole.
+fn put_json(inout o: ChunkSeq[u8], in b: Slice[u8], at: u64, len: u64) {
+    o.push(34);
+    let end = wrapping_add(at, len);
+    let mut run = at;
+    let mut i = at;
+    loop {
+        if i >= end {
+            break;
+        }
+        // Eight bytes at a time while none needs an escape.
+        if wrapping_add(i, 8) <= end {
+            let w = match b.try_read_u64_le(i) {
+                Option::Some(w) => w,
+                Option::None => 0,
+            };
+            if !special(w) {
+                i = wrapping_add(i, 8);
+                continue;
+            }
+        }
+        let c = bt(in b, i);
+        i = wrapping_add(i, 1);
+        if c == 34 || c == 92 || c < 32 {
+            let i = wrapping_sub(i, 1);
+            o.extend(in b[run..i]);
+            run = wrapping_add(i, 1);
+            o.push(92);
+            if c == 34 || c == 92 {
+                o.push(c);
+            } else if c == 8 {
+                o.push(98);
+            } else if c == 12 {
+                o.push(102);
+            } else if c == 10 {
+                o.push(110);
+            } else if c == 13 {
+                o.push(114);
+            } else if c == 9 {
+                o.push(116);
+            } else {
+                put(inout o, in "u00");
+                o.push(hex(c >> 4));
+                o.push(hex(c & 15));
+            }
+        }
+    }
+    o.extend(in b[run..end]);
+    o.push(34);
+}
+
+fn hex(d: u8) -> u8 {
+    if d < 10 {
+        wrapping_add(d, 48)
+    } else {
+        wrapping_add(d, 87)
+    }
+}
+
+// The 32 bytes at `at` as a quoted lowercase hex string.
+fn put_hash(inout o: ChunkSeq[u8], in b: Slice[u8], at: u64) {
+    o.push(34);
+    for i in 0..32 {
+        let x = bt(in b, wrapping_add(at, i));
+        o.push(hex(x >> 4));
+        o.push(hex(x & 15));
+    }
+    o.push(34);
+}
+
+fn status_name(code: u64) -> Str {
+    if code == PROVED {
+        "proved"
+    } else if code == CHECKED {
+        "checked_native"
+    } else if code == REFUTED {
+        "refuted"
+    } else if code == FAILED {
+        "failed"
+    } else {
+        "not_attempted"
+    }
+}
+
+// A status: its code and its two texts (detail or counterexample, or the
+// failed stage and reason) as blob spans.
+copy struct Status {
+    code: u64,
+    a_at: u64,
+    a_len: u64,
+    b_at: u64,
+    b_len: u64
+}
+
+fn not_attempted() -> Status {
+    Status { code: NOT_ATTEMPTED, a_at: 0, a_len: 0, b_at: 0, b_len: 0 }
+}
+
+// `ProofLedger`: outcomes keyed by (32-byte key, function), stamped by a
+// clock; a new key into a full ledger evicts the oldest entry.
+struct Ledger {
+    cap: u64,
+    clock: u64,
+    key: ChunkSeq[u64],
+    f_at: ChunkSeq[u64],
+    f_len: ChunkSeq[u64],
+    stamp: ChunkSeq[u64],
+    code: ChunkSeq[u64],
+    a_at: ChunkSeq[u64],
+    a_len: ChunkSeq[u64],
+    b_at: ChunkSeq[u64],
+    b_len: ChunkSeq[u64]
+}
+
+fn ledger(cap: u64) -> Ledger {
+    Ledger {
+        cap: cap,
+        clock: 0,
+        key: ChunkSeq::new[u64](),
+        f_at: ChunkSeq::new[u64](),
+        f_len: ChunkSeq::new[u64](),
+        stamp: ChunkSeq::new[u64](),
+        code: ChunkSeq::new[u64](),
+        a_at: ChunkSeq::new[u64](),
+        a_len: ChunkSeq::new[u64](),
+        b_at: ChunkSeq::new[u64](),
+        b_len: ChunkSeq::new[u64]()
+    }
+}
+
+fn clear(inout l: Ledger, cap: u64) {
+    l.cap = cap;
+    l.clock = 0;
+    l.key.truncate(0);
+    l.f_at.truncate(0);
+    l.f_len.truncate(0);
+    l.stamp.truncate(0);
+    l.code.truncate(0);
+    l.a_at.truncate(0);
+    l.a_len.truncate(0);
+    l.b_at.truncate(0);
+    l.b_len.truncate(0);
+}
+
+fn find(in l: Ledger, in b: Slice[u8], key: u64, f_at: u64, f_len: u64) -> u64 {
+    for i in 0..l.key.len() {
+        if g64(in l.f_len, i) == f_len
+            && same(in b, g64(in l.key, i), key, 32)
+            && same(in b, g64(in l.f_at, i), f_at, f_len) {
+            return i;
+        }
+    }
+    NONE
+}
+
+fn status(in l: Ledger, in b: Slice[u8], key: u64, f_at: u64, f_len: u64) -> Status {
+    let i = find(in l, in b, key, f_at, f_len);
+    if i == NONE {
+        return not_attempted();
+    }
+    Status {
+        code: g64(in l.code, i),
+        a_at: g64(in l.a_at, i),
+        a_len: g64(in l.a_len, i),
+        b_at: g64(in l.b_at, i),
+        b_len: g64(in l.b_len, i)
+    }
+}
+
+fn swap_out(inout v: ChunkSeq[u64], i: u64) {
+    let last = wrapping_sub(v.len(), 1);
+    let _ = v.try_set(i, g64(in v, last));
+    v.truncate(last);
+}
+
+fn record(inout l: Ledger, in b: Slice[u8], key: u64, f_at: u64, f_len: u64, s: Status) {
+    l.clock = wrapping_add(l.clock, 1);
+    let mut i = find(in l, in b, key, f_at, f_len);
+    if i == NONE {
+        if l.key.len() >= l.cap {
+            let mut oldest: u64 = NONE;
+            let mut low: u64 = NONE;
+            for j in 0..l.stamp.len() {
+                let s = g64(in l.stamp, j);
+                if oldest == NONE || s < low {
+                    oldest = j;
+                    low = s;
+                }
+            }
+            if oldest != NONE {
+                swap_out(inout l.key, oldest);
+                swap_out(inout l.f_at, oldest);
+                swap_out(inout l.f_len, oldest);
+                swap_out(inout l.stamp, oldest);
+                swap_out(inout l.code, oldest);
+                swap_out(inout l.a_at, oldest);
+                swap_out(inout l.a_len, oldest);
+                swap_out(inout l.b_at, oldest);
+                swap_out(inout l.b_len, oldest);
+            }
+        }
+        l.key.push(key);
+        l.f_at.push(f_at);
+        l.f_len.push(f_len);
+        l.stamp.push(l.clock);
+        l.code.push(s.code);
+        l.a_at.push(s.a_at);
+        l.a_len.push(s.a_len);
+        l.b_at.push(s.b_at);
+        l.b_len.push(s.b_len);
+        return;
+    }
+    let _ = l.stamp.try_set(i, l.clock);
+    let _ = l.code.try_set(i, s.code);
+    let _ = l.a_at.try_set(i, s.a_at);
+    let _ = l.a_len.try_set(i, s.a_len);
+    let _ = l.b_at.try_set(i, s.b_at);
+    let _ = l.b_len.try_set(i, s.b_len);
+}
+
+// One finished job's outcomes, as blob spans.
+struct Outcome {
+    source: u64,
+    current: u64,
+    generation: u64,
+    requested: u64,
+    req_at: u64,
+    req_len: u64,
+    reused: u64,
+    compiled: u64,
+    elapsed: u64,
+    // extraction: function, status
+    x_at: ChunkSeq[u64],
+    x_len: ChunkSeq[u64],
+    x_st: ChunkSeq[Status],
+    // semantic: function, model key, status
+    s_at: ChunkSeq[u64],
+    s_len: ChunkSeq[u64],
+    s_key: ChunkSeq[u64],
+    s_st: ChunkSeq[Status]
+}
+
+fn st_at(in v: ChunkSeq[Status], i: u64) -> Status {
+    match v.try_get(i) {
+        Option::Some(s) => s,
+        Option::None => not_attempted(),
+    }
+}
+
+fn read_status(in b: Slice[u8], inout r: Rd, inout t: Rd, code: u64) -> Status {
+    let a_len = word(in b, inout r);
+    let b_len = word(in b, inout r);
+    let a_at = take(inout t, a_len);
+    let b_at = take(inout t, b_len);
+    Status { code: code, a_at: a_at, a_len: a_len, b_at: b_at, b_len: b_len }
+}
+
+fn outcome() -> Outcome {
+    Outcome {
+        source: 0,
+        current: 0,
+        generation: 0,
+        requested: 0,
+        req_at: 0,
+        req_len: 0,
+        reused: 0,
+        compiled: 0,
+        elapsed: 0,
+        x_at: ChunkSeq::new[u64](),
+        x_len: ChunkSeq::new[u64](),
+        x_st: ChunkSeq::new[Status](),
+        s_at: ChunkSeq::new[u64](),
+        s_len: ChunkSeq::new[u64](),
+        s_key: ChunkSeq::new[u64](),
+        s_st: ChunkSeq::new[Status]()
+    }
+}
+
+// The next job's outcomes into `o` (its sequences reused).
+fn read_outcome(in b: Slice[u8], inout r: Rd, inout t: Rd, inout o: Outcome) {
+    o.generation = word(in b, inout r);
+    o.requested = word(in b, inout r);
+    o.req_len = word(in b, inout r);
+    let n_x = word(in b, inout r);
+    let n_s = word(in b, inout r);
+    o.reused = word(in b, inout r);
+    o.compiled = word(in b, inout r);
+    o.elapsed = word(in b, inout r);
+    o.source = take(inout t, 32);
+    o.current = take(inout t, 32);
+    o.req_at = take(inout t, o.req_len);
+    o.x_at.truncate(0);
+    o.x_len.truncate(0);
+    o.x_st.truncate(0);
+    o.s_at.truncate(0);
+    o.s_len.truncate(0);
+    o.s_key.truncate(0);
+    o.s_st.truncate(0);
+    for i in 0..n_x {
+        let len = word(in b, inout r);
+        let code = word(in b, inout r);
+        o.x_at.push(take(inout t, len));
+        o.x_len.push(len);
+        o.x_st.push(read_status(in b, inout r, inout t, code));
+    }
+    for i in 0..n_s {
+        let len = word(in b, inout r);
+        let code = word(in b, inout r);
+        o.s_at.push(take(inout t, len));
+        o.s_len.push(len);
+        o.s_key.push(take(inout t, 32));
+        o.s_st.push(read_status(in b, inout r, inout t, code));
+    }
+}
+
+// `record_of`: every extraction outcome, and every semantic outcome except
+// a failure before the prover ran (toolchain or I/O), which says nothing
+// about the model.
+fn record_outcome(inout proofs: Ledger, inout models: Ledger, in b: Slice[u8], in o: Outcome) {
+    for i in 0..o.x_at.len() {
+        record(
+            inout proofs,
+            in b,
+            o.source,
+            g64(in o.x_at, i),
+            g64(in o.x_len, i),
+            st_at(in o.x_st, i)
+        );
+    }
+    for i in 0..o.s_at.len() {
+        let s = st_at(in o.s_st, i);
+        if s.code == FAILED
+            && !is(in b, s.a_at, s.a_len, in "prove")
+            && !is(in b, s.a_at, s.a_len, in "kernel") {
+            continue;
+        }
+        record(inout models, in b, g64(in o.s_key, i), g64(in o.s_at, i), g64(in o.s_len, i), s);
+    }
+}
+
+// `proof_value` / `semantic_value` and the fields the session adds, with
+// serde_json's sorted keys: a command result carries `elapsed_ms`,
+// `olean_compiled` and `olean_reused`; a background result its
+// `obligation`.
+fn put_result(
+    inout out: ChunkSeq[u8],
+    in b: Slice[u8],
+    semantic: bool,
+    f_at: u64,
+    f_len: u64,
+    hash: u64,
+    s: Status,
+    kind: u8,
+    in o: Outcome
+) {
+    out.push(123);
+    if s.code == REFUTED {
+        put(inout out, in "\"counterexample\":");
+        put_json(inout out, in b, s.a_at, s.a_len);
+        out.push(44);
+    }
+    if s.code == PROVED || s.code == CHECKED {
+        put(inout out, in "\"detail\":");
+        put_json(inout out, in b, s.a_at, s.a_len);
+        out.push(44);
+    }
+    if kind == COMMAND {
+        put(inout out, in "\"elapsed_ms\":");
+        put_u64(inout out, o.elapsed);
+        out.push(44);
+    }
+    put(inout out, in "\"function\":");
+    put_json(inout out, in b, f_at, f_len);
+    if semantic && hash != NONE {
+        put(inout out, in ",\"model_blake3\":");
+        put_hash(inout out, in b, hash);
+    }
+    if kind == BACKGROUND {
+        if semantic {
+            put(inout out, in ",\"obligation\":\"semantic\"");
+        } else {
+            put(inout out, in ",\"obligation\":\"extraction\"");
+        }
+    }
+    if kind == COMMAND {
+        put(inout out, in ",\"olean_compiled\":");
+        put_u64(inout out, o.compiled);
+        put(inout out, in ",\"olean_reused\":");
+        put_u64(inout out, o.reused);
+    }
+    if s.code == FAILED {
+        put(inout out, in ",\"reason\":");
+        put_json(inout out, in b, s.b_at, s.b_len);
+    }
+    if semantic {
+        put(inout out, in ",\"scope\":\"lean_model_arith_fault_free\"");
+    } else {
+        put(inout out, in ",\"scope\":\"lean_extraction_axiom_free\",\"source_blake3\":");
+        put_hash(inout out, in b, hash);
+    }
+    if s.code == FAILED {
+        put(inout out, in ",\"stage\":");
+        put_json(inout out, in b, s.a_at, s.a_len);
+    }
+    put(inout out, in ",\"status\":\"");
+    put(inout out, status_name(s.code));
+    out.push(34);
+    if semantic {
+        put(
+            inout out,
+            in ",\"theorem\":\"no arithmetic fault (Fail[ArithOverflow], DivisionByZero) for any input in range, under vesper.arith.checked/1, about Lens's scalar model of the source function\""
+        );
+    }
+    out.push(125);
+}
+
+// `proof_result_of`: the requested obligation's outcome (not attempted
+// when the job has none for it), or null for a job no command asked for.
+fn put_proof_result(inout out: ChunkSeq[u8], in b: Slice[u8], in o: Outcome) {
+    if o.requested == 0 {
+        put(inout out, in "null");
+        return;
+    }
+    if o.requested == 2 {
+        for i in 0..o.s_at.len() {
+            if g64(in o.s_len, i) == o.req_len
+                && same(in b, g64(in o.s_at, i), o.req_at, o.req_len) {
+                put_result(
+                    inout out,
+                    in b,
+                    true,
+                    o.req_at,
+                    o.req_len,
+                    g64(in o.s_key, i),
+                    st_at(in o.s_st, i),
+                    COMMAND,
+                    in o
+                );
+                return;
+            }
+        }
+        put_result(
+            inout out,
+            in b,
+            true,
+            o.req_at,
+            o.req_len,
+            NONE,
+            not_attempted(),
+            COMMAND,
+            in o
+        );
+        return;
+    }
+    let mut s = not_attempted();
+    for i in 0..o.x_at.len() {
+        if g64(in o.x_len, i) == o.req_len && same(in b, g64(in o.x_at, i), o.req_at, o.req_len) {
+            s = st_at(in o.x_st, i);
+            break;
+        }
+    }
+    put_result(inout out, in b, false, o.req_at, o.req_len, o.source, s, COMMAND, in o);
+}
+
+// The proof-lens inputs every request reads.
+struct Doc {
+    uri_at: u64,
+    uri_len: u64,
+    version: i64,
+    text: String,
+    lines: ChunkSeq[u64],
+    max_work: usize,
+    // functions: name, span start
+    f_at: ChunkSeq[u64],
+    f_len: ChunkSeq[u64],
+    f_start: ChunkSeq[u64],
+    // models, sorted by name: name, ok, key or reason
+    m_at: ChunkSeq[u64],
+    m_len: ChunkSeq[u64],
+    m_ok: ChunkSeq[u64],
+    m_v_at: ChunkSeq[u64],
+    m_v_len: ChunkSeq[u64]
+}
+
+// `proof_status_of`: the `vesper/proofStatus` parameters of a finished background run.
+fn put_proof_status(inout out: ChunkSeq[u8], in b: Slice[u8], in d: Doc, in o: Outcome) {
+    put(inout out, in "{\"elapsed_ms\":");
+    put_u64(inout out, o.elapsed);
+    put(inout out, in ",\"generation\":");
+    put_u64(inout out, o.generation);
+    put(inout out, in ",\"olean_compiled\":");
+    put_u64(inout out, o.compiled);
+    put(inout out, in ",\"olean_reused\":");
+    put_u64(inout out, o.reused);
+    put(inout out, in ",\"results\":[");
+    let mut first = true;
+    for i in 0..o.x_at.len() {
+        if !first {
+            out.push(44);
+        }
+        first = false;
+        put_result(
+            inout out,
+            in b,
+            false,
+            g64(in o.x_at, i),
+            g64(in o.x_len, i),
+            o.source,
+            st_at(in o.x_st, i),
+            BACKGROUND,
+            in o
+        );
+    }
+    for i in 0..o.s_at.len() {
+        if !first {
+            out.push(44);
+        }
+        first = false;
+        put_result(
+            inout out,
+            in b,
+            true,
+            g64(in o.s_at, i),
+            g64(in o.s_len, i),
+            g64(in o.s_key, i),
+            st_at(in o.s_st, i),
+            BACKGROUND,
+            in o
+        );
+    }
+    put(inout out, in "],\"source_blake3\":");
+    put_hash(inout out, in b, o.source);
+    put(inout out, in ",\"uri\":");
+    put_json(inout out, in b, d.uri_at, d.uri_len);
+    put(inout out, in ",\"version\":");
+    put_i64(inout out, d.version);
+    out.push(125);
+}
+
+fn pos_ok(p: Position) -> Result[Position, SpanError] {
+    Result::Ok(p)
+}
+
+fn pos_err(e: SpanError) -> Result[Position, SpanError] {
+    Result::Err(e)
+}
+
+fn lens_position(in d: Doc, at: u64) -> Result[Position, SpanError] {
+    handle Fail[SpanError] in {
+        pos_ok(position(in d.text, in d.lines.as_slice(), d.max_work, narrow_usize(at)))
+    } with {
+        return v => v,
+        raise(err, resume) => pos_err(err),
+    }
+}
+
+fn lines_ok(sink v: ChunkSeq[u64]) -> Result[ChunkSeq[u64], SpanError] {
+    Result::Ok(v)
+}
+
+fn lines_err(e: SpanError) -> Result[ChunkSeq[u64], SpanError] {
+    Result::Err(e)
+}
+
+fn lines_of(in text: Str, in l: Limits) -> Result[ChunkSeq[u64], SpanError] {
+    handle Fail[SpanError] in {
+        lines_ok(line_table(in text, in l, narrow_usize(16)))
+    } with {
+        return v => v,
+        raise(err, resume) => lines_err(err),
+    }
+}
+
+// The model of function `f_at, f_len` (binary search by name), or NONE.
+fn model_of(in d: Doc, in b: Slice[u8], f_at: u64, f_len: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = d.m_at.len();
+    loop {
+        if lo >= hi {
+            return NONE;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        let c = compare(in b, g64(in d.m_at, mid), g64(in d.m_len, mid), f_at, f_len);
+        if c == 0 {
+            return mid;
+        }
+        if c < 0 {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+// Up to 80 characters of the UTF-8 text `b[at..at+len]`.
+fn put_chars(inout o: ChunkSeq[u8], in b: Slice[u8], at: u64, len: u64, max: u64) {
+    let mut chars: u64 = 0;
+    for i in 0..len {
+        let x = bt(in b, wrapping_add(at, i));
+        if x & 192 != 128 {
+            if chars == max {
+                return;
+            }
+            chars = wrapping_add(chars, 1);
+        }
+        o.push(x);
+    }
+}
+
+fn put_lens_head(
+    inout out: ChunkSeq[u8],
+    in b: Slice[u8],
+    in d: Doc,
+    f_at: u64,
+    f_len: u64,
+    semantic: bool
+) {
+    put(inout out, in "{\"command\":{\"arguments\":[{\"function\":");
+    put_json(inout out, in b, f_at, f_len);
+    if semantic {
+        put(inout out, in ",\"obligation\":\"semantic\"");
+    }
+    put(inout out, in ",\"uri\":");
+    put_json(inout out, in b, d.uri_at, d.uri_len);
+    put(inout out, in ",\"version\":");
+    put_i64(inout out, d.version);
+    put(inout out, in "}],\"command\":\"vesper.proofAudit\",\"title\":");
+}
+
+fn put_pos(inout o: ChunkSeq[u8], p: Position) {
+    put(inout o, in "{\"character\":");
+    put_u64(inout o, widen_u64(p.character));
+    put(inout o, in ",\"line\":");
+    put_u64(inout o, widen_u64(p.line));
+    o.push(125);
+}
+
+fn put_lens_tail(inout out: ChunkSeq[u8], p: Position) {
+    put(inout out, in "},\"range\":{\"end\":");
+    put_pos(inout out, p);
+    put(inout out, in ",\"start\":");
+    put_pos(inout out, p);
+    put(inout out, in "}}");
+}
+
+// `code_lenses_of`: an extraction lens per function (at most 256) and a
+// semantic lens per function with a model, or the internal error of a
+// span the document has no position for.
+fn put_code_lenses(
+    inout out: ChunkSeq[u8],
+    in b: Slice[u8],
+    in d: Doc,
+    source: u64,
+    in proofs: Ledger,
+    in models: Ledger,
+    inout title: ChunkSeq[u8]
+) {
+    let mark = out.len();
+    out.push(91);
+    let n = if d.f_at.len() < MAX_LENSES {
+        d.f_at.len()
+    } else {
+        MAX_LENSES
+    };
+    for i in 0..n {
+        let f_at = g64(in d.f_at, i);
+        let f_len = g64(in d.f_len, i);
+        let s = status(in proofs, in b, source, f_at, f_len);
+        title.truncate(0);
+        if s.code == NOT_ATTEMPTED {
+            put(inout title, in "Lean: not attempted (run proof audit)");
+        } else if s.code == PROVED {
+            put(inout title, in "Lean: proved (extraction kernel-checked, no axioms)");
+        } else if s.code == FAILED {
+            put(inout title, in "Lean: failed at ");
+            put_span(inout title, in b, s.a_at, s.a_len);
+            put(inout title, in " (rerun)");
+        } else {
+            put(inout title, in "Lean: ");
+            put(inout title, status_name(s.code));
+        }
+        let p = match lens_position(in d, g64(in d.f_start, i)) {
+            Result::Ok(p) => p,
+            Result::Err(_) => {
+                out.truncate(mark);
+                put(
+                    inout out,
+                    in "{\"error\":{\"code\":-32603,\"data\":null,\"message\":\"function span is invalid\"}}"
+                );
+                return;
+            }
+        };
+        if i > 0 {
+            out.push(44);
+        }
+        put_lens_head(inout out, in b, in d, f_at, f_len, false);
+        put_json(inout out, in title.as_slice(), 0, title.len());
+        put(inout out, in "},\"data\":{\"vesper\":{\"function\":");
+        put_json(inout out, in b, f_at, f_len);
+        put(inout out, in ",\"scope\":\"lean_extraction_axiom_free\",\"status\":\"");
+        put(inout out, status_name(s.code));
+        put(inout out, in "\"}");
+        put_lens_tail(inout out, p);
+        let m = model_of(in d, in b, f_at, f_len);
+        if m == NONE {
+            continue;
+        }
+        let ok = g64(in d.m_ok, m) == 1;
+        let v_at = g64(in d.m_v_at, m);
+        let v_len = g64(in d.m_v_len, m);
+        let s = if ok {
+            status(in models, in b, v_at, f_at, f_len)
+        } else {
+            not_attempted()
+        };
+        title.truncate(0);
+        if !ok {
+            put(inout title, in "Lean model: unavailable (");
+            put_chars(inout title, in b, v_at, v_len, 80);
+            put(inout title, in ")");
+        } else if s.code == NOT_ATTEMPTED {
+            put(inout title, in "Lean model: not attempted (check arithmetic faults)");
+        } else if s.code == PROVED {
+            put(inout title, in "Lean model: no arithmetic fault (proved, kernel-replayed)");
+        } else if s.code == CHECKED {
+            put(inout title, in "Lean model: no counterexample (bv_decide, not kernel-replayed)");
+        } else if s.code == REFUTED {
+            put(inout title, in "Lean model: arithmetic fault when ");
+            put_span(inout title, in b, s.a_at, s.a_len);
+        } else {
+            put(inout title, in "Lean model: failed at ");
+            put_span(inout title, in b, s.a_at, s.a_len);
+            put(inout title, in " (rerun)");
+        }
+        out.push(44);
+        put_lens_head(inout out, in b, in d, f_at, f_len, true);
+        put_json(inout out, in title.as_slice(), 0, title.len());
+        put(inout out, in "},\"data\":{\"vesper\":{");
+        if ok && s.code == REFUTED {
+            put(inout out, in "\"counterexample\":");
+            put_json(inout out, in b, s.a_at, s.a_len);
+            out.push(44);
+        }
+        put(inout out, in "\"function\":");
+        put_json(inout out, in b, f_at, f_len);
+        if ok {
+            put(inout out, in ",\"model_blake3\":");
+            put_hash(inout out, in b, v_at);
+        } else {
+            put(inout out, in ",\"reason\":");
+            put_json(inout out, in b, v_at, v_len);
+        }
+        put(inout out, in ",\"scope\":\"lean_model_arith_fault_free\",\"status\":\"");
+        if ok {
+            put(inout out, status_name(s.code));
+        } else {
+            put(inout out, in "unavailable");
+        }
+        put(inout out, in "\"}");
+        put_lens_tail(inout out, p);
+    }
+    out.push(93);
+}
+
+// The harness input: the word count, the line-index limits, then the uri
+// and document lengths, version, ledger capacities and rounds; the
+// functions, models and operations (`proof_lenses_input` in
+// tests/self_host_lsp_features.rs); then the bytes they name, in order.
+// The answers (`proof_lenses_for_port`) are built `rounds` times.
+pub fn proof_lenses(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Rd { pos: 0 };
+    let words = word(in b, inout r);
+    let mut t = Rd { pos: wrapping_mul(words, 8) };
+    let l = Limits {
+        max_source_bytes: narrow_usize(word(in b, inout r)),
+        max_lines: narrow_usize(word(in b, inout r)),
+        max_metadata_bytes: narrow_usize(word(in b, inout r)),
+        max_work: narrow_usize(word(in b, inout r)),
+        max_edits: narrow_usize(word(in b, inout r)),
+        max_output_bytes: narrow_usize(word(in b, inout r)),
+        max_diagnostics: narrow_usize(word(in b, inout r)),
+        max_labels: narrow_usize(word(in b, inout r)),
+        max_fixes: narrow_usize(word(in b, inout r)),
+        max_text_bytes: narrow_usize(word(in b, inout r))
+    };
+    let uri_len = word(in b, inout r);
+    let doc_len = word(in b, inout r);
+    let version = wrapping_i64(word(in b, inout r));
+    let cap_proofs = word(in b, inout r);
+    let cap_models = word(in b, inout r);
+    let rounds = word(in b, inout r);
+    let uri_at = take(inout t, uri_len);
+    let doc_at = take(inout t, doc_len);
+    let text = match String::from_utf8(in b[doc_at..wrapping_add(doc_at, doc_len)]) {
+        Option::Some(s) => s,
+        Option::None => String::new(),
+    };
+    let mut out = ChunkSeq::new[u8]();
+    let lines = match lines_of(in text, in l) {
+        Result::Ok(x) => x,
+        Result::Err(e) => {
+            put(inout out, in "E\t");
+            put_span_error(inout out, e);
+            out.push(10);
+            return pack(in out.as_slice());
+        }
+    };
+    let mut d = Doc {
+        uri_at: uri_at,
+        uri_len: uri_len,
+        version: version,
+        text: text,
+        lines: lines,
+        max_work: l.max_work,
+        f_at: ChunkSeq::new[u64](),
+        f_len: ChunkSeq::new[u64](),
+        f_start: ChunkSeq::new[u64](),
+        m_at: ChunkSeq::new[u64](),
+        m_len: ChunkSeq::new[u64](),
+        m_ok: ChunkSeq::new[u64](),
+        m_v_at: ChunkSeq::new[u64](),
+        m_v_len: ChunkSeq::new[u64]()
+    };
+    let n_f = word(in b, inout r);
+    for i in 0..n_f {
+        let len = word(in b, inout r);
+        d.f_start.push(word(in b, inout r));
+        d.f_len.push(len);
+        d.f_at.push(take(inout t, len));
+    }
+    let n_m = word(in b, inout r);
+    for i in 0..n_m {
+        let len = word(in b, inout r);
+        let ok = word(in b, inout r);
+        let reason = word(in b, inout r);
+        d.m_len.push(len);
+        d.m_at.push(take(inout t, len));
+        d.m_ok.push(ok);
+        let v_len = if ok == 1 { 32 } else { reason };
+        d.m_v_len.push(v_len);
+        d.m_v_at.push(take(inout t, v_len));
+    }
+    let n_ops = word(in b, inout r);
+    let ops_r = r;
+    let ops_t = t;
+    let mut proofs = ledger(cap_proofs);
+    let mut models = ledger(cap_models);
+    let mut o = outcome();
+    let mut title = ChunkSeq::new[u8]();
+    for round in 0..rounds {
+        out.truncate(0);
+        r = ops_r;
+        t = ops_t;
+        clear(inout proofs, cap_proofs);
+        clear(inout models, cap_models);
+        for k in 0..n_ops {
+            let kind = word(in b, inout r);
+            read_outcome(in b, inout r, inout t, inout o);
+            if kind == 76 {
+                put(inout out, in "L\t");
+                put_code_lenses(inout out, in b, in d, o.source, in proofs, in models, inout title);
+            } else if kind == 80 {
+                record_outcome(inout proofs, inout models, in b, in o);
+                put(inout out, in "P\t");
+                put_proof_result(inout out, in b, in o);
+            } else {
+                record_outcome(inout proofs, inout models, in b, in o);
+                put(inout out, in "B\t");
+                if same(in b, o.source, o.current, 32) {
+                    put_proof_status(inout out, in b, in d, in o);
+                } else {
+                    out.push(45);
+                }
+            }
+            out.push(10);
+        }
+    }
+    pack(in out.as_slice())
+}

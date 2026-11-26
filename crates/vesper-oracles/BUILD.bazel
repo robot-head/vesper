@@ -26,12 +26,13 @@ vesper_crate(
             "resources:cpu:1",
             "lean_replay",
         ],
-        # Serial Lean -j1/-M4096 stages plus estimated wrapper overhead (#615).
+        # Serial Lean -j1/-M4096 stages (#615); measured peak 0.4 GB.
         "test/resource_oracle42": [
-            "resources:memory:5120",
+            "resources:memory:1024",
             "resources:cpu:1",
             "lean_replay",
         ],
+        # Measured peak: 4.3 GB anonymous memory.
         "test/oracle42_acceptance": [
             "resources:memory:5120",
             "resources:cpu:1",

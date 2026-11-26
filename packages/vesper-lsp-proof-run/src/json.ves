@@ -80,11 +80,7 @@ fn g8(in v: ChunkSeq[u8], i: u64) -> u8 {
 }
 
 fn min64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // `error`: at the index after the last byte read.
@@ -220,16 +216,7 @@ fn number(inout d: Doc, in t: Slice[u8], inout p: P, positive: bool, start: u64)
     }
     // A negative or fractional number is not a u64.
     let u = positive && !float;
-    node(
-        inout d,
-        NUMBER,
-        if u {
-            1
-        } else {
-            0
-        },
-        sig
-    )
+    node(inout d, NUMBER, if u { 1 } else { 0 }, sig)
 }
 
 fn hex_digit(c: u8) -> u64 {

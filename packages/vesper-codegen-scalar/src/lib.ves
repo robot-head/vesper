@@ -566,14 +566,7 @@ impl Gen {
         let ops = self.ops;
         if (op == ops.slash || op == ops.percent) && a == LANE_I128 {
             put(inout self.o, in "wide-divide ");
-            put(
-                inout self.o,
-                if unsigned {
-                    "u"
-                } else {
-                    "s"
-                }
-            );
+            put(inout self.o, if unsigned { "u" } else { "s" });
             return;
         }
         if ops.is_comparison(op) {
@@ -595,17 +588,9 @@ impl Gen {
         } else if !float && (op == ops.star || op == ops.wrapping_mul) {
             "imul"
         } else if !float && op == ops.slash {
-            if unsigned {
-                "udiv"
-            } else {
-                "sdiv-guarded"
-            }
+            if unsigned { "udiv" } else { "sdiv-guarded" }
         } else if !float && op == ops.percent {
-            if unsigned {
-                "urem"
-            } else {
-                "srem"
-            }
+            if unsigned { "urem" } else { "srem" }
         } else if float && op == ops.plus {
             "fadd"
         } else if float && op == ops.minus {
@@ -741,11 +726,7 @@ impl Gen {
             ""
         };
         let r = if op == self.ops.minus {
-            if float {
-                "fneg"
-            } else {
-                "ineg"
-            }
+            if float { "fneg" } else { "ineg" }
         } else if op == self.ops.bang && !float {
             "not"
         } else if op == self.ops.widen_u64 && !float {
@@ -797,11 +778,7 @@ impl Gen {
             let how = if op == ops.shl {
                 "ishl"
             } else if op == ops.shr {
-                if kind_unsigned(k) {
-                    "ushr"
-                } else {
-                    "sshr"
-                }
+                if kind_unsigned(k) { "ushr" } else { "sshr" }
             } else if rot == 1 {
                 "rotl"
             } else {
@@ -902,7 +879,8 @@ impl Gen {
     // The `const` decision: Rust asks the checker's type at the span.
     fn decide_constant(inout self, i: InstRow) {
         let lit = self.p.op(i.a);
-        if lit == Lit::Int {
+        // A literal past `i128::MAX` is an integer too (`Literal::WideInt`).
+        if lit == Lit::Int || lit == Lit::WideInt {
             let t = self.c.world.expr_type(i.s0, i.s1);
             let wide = if t == NONE32 {
                 false
@@ -910,14 +888,7 @@ impl Gen {
                 let d = default_type(inout self.c.types, t);
                 self.c.types.kind(d) != TyKind::Lit && kind_wide(self.kind_of(d))
             };
-            put(
-                inout self.o,
-                if wide {
-                    "const wide"
-                } else {
-                    "const int"
-                }
-            );
+            put(inout self.o, if wide { "const wide" } else { "const int" });
         } else if lit == Lit::Float {
             let t = self.c.world.expr_type(i.s0, i.s1);
             let f32 = if t == NONE32 {
@@ -926,14 +897,7 @@ impl Gen {
                 let d = default_type(inout self.c.types, t);
                 self.c.types.name(d) == self.ops.f32_
             };
-            put(
-                inout self.o,
-                if f32 {
-                    "const f32"
-                } else {
-                    "const f64"
-                }
-            );
+            put(inout self.o, if f32 { "const f32" } else { "const f64" });
         } else if lit == Lit::Bool {
             put(inout self.o, in "const bool");
         } else {
@@ -1015,14 +979,13 @@ impl Gen {
                         put(inout self.o, in "binary ");
                         self.name(op);
                         self.o.push(32);
-                        self
-                            .decide_binary(
-                                op,
-                                self.p.op(inc(i.a)),
-                                self.p.op(add(i.a, 2)),
-                                i.s0,
-                                i.s1
-                            );
+                        self.decide_binary(
+                            op,
+                            self.p.op(inc(i.a)),
+                            self.p.op(add(i.a, 2)),
+                            i.s0,
+                            i.s1
+                        );
                     } else if i.op == Op::Loop {
                         put(inout self.o, in "loop");
                     } else {

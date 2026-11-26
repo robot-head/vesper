@@ -309,6 +309,8 @@ pub struct Session {
     wasm_input: bool,
     /// `EbpfInput` did.
     ebpf_input: bool,
+    /// `VerifiedInput` did.
+    verified_input: bool,
 }
 
 /// What `check::check` keeps between the parts the Vesper driver
@@ -368,13 +370,14 @@ enum Step {
     InterfaceWrite = 40,
     WasmInput = 60,
     EbpfInput = 61,
+    VerifiedInput = 62,
     /// Load the package the Vesper driver found at the input (#1896).
     LoadPackage = 70,
     /// The checked world's declarations, for the Vesper driver to hold.
     WorldDecls = 80,
 }
 
-const STEPS: [Step; 32] = [
+const STEPS: [Step; 33] = [
     Step::Load,
     Step::EbpfBuild,
     Step::Parse,
@@ -405,6 +408,7 @@ const STEPS: [Step; 32] = [
     Step::InterfaceWrite,
     Step::WasmInput,
     Step::EbpfInput,
+    Step::VerifiedInput,
     Step::LoadPackage,
     Step::WorldDecls,
 ];
@@ -525,7 +529,8 @@ impl Session {
             | Step::EbpfBuild
             | Step::VerifiedBuild
             | Step::WasmInput
-            | Step::EbpfInput => self.backends_step(step, arg),
+            | Step::EbpfInput
+            | Step::VerifiedInput => self.backends_step(step, arg),
             Step::WorldDecls => self.world_step(step),
         }
     }
@@ -616,6 +621,7 @@ pub mod host {
                     text: vec![],
                     wasm_input: false,
                     ebpf_input: false,
+                    verified_input: false,
                 }))
             }
             None => std::ptr::null_mut(),

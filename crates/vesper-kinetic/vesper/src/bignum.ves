@@ -97,11 +97,7 @@ fn nat_cmp(in a: Slice[u64], in b: Slice[u64]) -> i64 {
     let na = nat_len(in a);
     let nb = nat_len(in b);
     if na != nb {
-        return if na < nb {
-            -1
-        } else {
-            1
-        };
+        return if na < nb { -1 } else { 1 };
     }
     let mut i = na;
     loop {
@@ -112,11 +108,7 @@ fn nat_cmp(in a: Slice[u64], in b: Slice[u64]) -> i64 {
         let x = g64(in a, i);
         let y = g64(in b, i);
         if x != y {
-            return if x < y {
-                -1
-            } else {
-                1
-            };
+            return if x < y { -1 } else { 1 };
         }
     }
     0
@@ -135,11 +127,7 @@ pub fn nat_bits(in a: Slice[u64]) -> u64 {
 fn add_carry(x: u64, y: u64, c: u64) -> (u64, u64) {
     let s = wrapping_add(x, y);
     let s2 = wrapping_add(s, c);
-    let out: u64 = if s < x || s2 < s {
-        1
-    } else {
-        0
-    };
+    let out: u64 = if s < x || s2 < s { 1 } else { 0 };
     (s2, out)
 }
 
@@ -148,22 +136,14 @@ fn add_carry(x: u64, y: u64, c: u64) -> (u64, u64) {
 fn sub_borrow(x: u64, y: u64, b: u64) -> (u64, u64) {
     let d = wrapping_sub(x, y);
     let d2 = wrapping_sub(d, b);
-    let out: u64 = if x < y || d < b {
-        1
-    } else {
-        0
-    };
+    let out: u64 = if x < y || d < b { 1 } else { 0 };
     (d2, out)
 }
 
 fn nat_add(in a: Slice[u64], in b: Slice[u64]) -> ChunkSeq[u64] {
     let na = nat_len(in a);
     let nb = nat_len(in b);
-    let n = if na > nb {
-        na
-    } else {
-        nb
-    };
+    let n = if na > nb { na } else { nb };
     let mut r: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](inc(n));
     let mut carry: u64 = 0;
     for i in 0..n {
@@ -536,18 +516,10 @@ pub fn big_abs(in a: Big) -> Big {
 
 pub fn big_cmp(in a: Big, in b: Big) -> i64 {
     if a.neg != b.neg {
-        return if a.neg {
-            -1
-        } else {
-            1
-        };
+        return if a.neg { -1 } else { 1 };
     }
     let c = nat_cmp(in a.mag.as_slice(), in b.mag.as_slice());
-    if a.neg {
-        wrapping_sub(0, c)
-    } else {
-        c
-    }
+    if a.neg { wrapping_sub(0, c) } else { c }
 }
 
 fn signed_add(an: bool, in a: Slice[u64], bn: bool, in b: Slice[u64]) -> Big {
@@ -739,11 +711,7 @@ fn nat_add_assign(inout a: ChunkSeq[u64], in b: Slice[u64]) {
     trim(inout a);
     let na = a.len();
     let nb = nat_len(in b);
-    let n = if na > nb {
-        na
-    } else {
-        nb
-    };
+    let n = if na > nb { na } else { nb };
     a.resize(inc(n), 0);
     add_rows(inout a.as_slice_mut(), in b, n);
     trim(inout a);

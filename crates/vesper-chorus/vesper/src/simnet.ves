@@ -568,11 +568,7 @@ fn copy_sym_to_rx_pty(inout net: SimNetCore, y: u64) {
 
 fn sat_add(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
-    if s < a {
-        MAX_U64
-    } else {
-        s
-    }
+    if s < a { MAX_U64 } else { s }
 }
 
 pub fn simnet_core_new(seed: u64, min_lat: u64, max_lat: u64, dup_pm: u64) -> SimNetCore {
@@ -734,11 +730,7 @@ pub fn simnet_core_deliver_due(inout net: SimNetCore, now: u64) -> SimDeliverOut
 
 fn next_delivery(in net: SimNetCore, delivered: bool) -> SimDeliverOut {
     let has_next = net.h_at.len() > 0;
-    let next_at = if has_next {
-        sw(in net.h_at, 0)
-    } else {
-        0
-    };
+    let next_at = if has_next { sw(in net.h_at, 0) } else { 0 };
     SimDeliverOut { delivered: delivered, has_next: has_next, next_at: next_at }
 }
 

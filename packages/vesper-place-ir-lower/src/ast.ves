@@ -91,30 +91,30 @@ pub copy struct FnR {
     name: u32,
     has_body: bool,
     body: u64,
-    // params pms[pa..pa+pn]
-    pa: u64,
-    pn: u64,
+    // params pms[param_start..param_start+param_count]
+    param_start: u64,
+    param_count: u64,
     result: u32,
     effects: u32,
-    // generics gens[ga..ga+gn]
-    ga: u64,
-    gn: u64,
-    // capabilities caps[ca..ca+2cn] (label, effect)
-    ca: u64,
-    cn: u64,
+    // generics gens[generic_start..generic_start+generic_count]
+    generic_start: u64,
+    generic_count: u64,
+    // capabilities caps[cap_start..cap_start+2*cap_count] (label, effect)
+    cap_start: u64,
+    cap_count: u64,
     // the function a `return` leaves (a handler body's enclosing owner)
     owner: u32,
-    // external captures exts[xa..xa+xn]
-    xa: u64,
-    xn: u64,
+    // external captures exts[ext_start..ext_start+ext_count]
+    ext_start: u64,
+    ext_count: u64,
 }
 
-// A parameter: projections are path ids projs[qa..qa+qn].
+// A parameter: projections are path ids projs[proj_start..proj_start+proj_count].
 pub copy struct Pm {
     name: u32,
     pass: u8,
-    qa: u64,
-    qn: u64,
+    proj_start: u64,
+    proj_count: u64,
     ty: u32,
     s0: u64,
     s1: u64,
@@ -123,56 +123,56 @@ pub copy struct Pm {
 pub copy struct Gn {
     name: u32,
     bound: u8,
-    row: bool,
+    is_row: bool,
 }
 
-// An effect declaration: generic names egens[ga..ga+gn], operations
-// eops[oa..oa+on].
+// An effect declaration: generic names egens[generic_start..generic_start+generic_count],
+// operations eops[op_start..op_start+op_count].
 pub copy struct Ef {
     name: u32,
     linear: bool,
-    ga: u64,
-    gn: u64,
-    oa: u64,
-    on: u64,
+    generic_start: u64,
+    generic_count: u64,
+    op_start: u64,
+    op_count: u64,
 }
 
-// An effect operation: parameters pms[pa..pa+pn] and result type.
+// An effect operation: parameters pms[param_start..param_start+param_count] and result type.
 pub copy struct Eop {
     name: u32,
-    pa: u64,
-    pn: u64,
+    param_start: u64,
+    param_count: u64,
     result: u32,
 }
 
-// A handler clause: patterns xs[pa..pa+pn], body.
+// A handler clause: patterns xs[pattern_start..pattern_start+pattern_count], body.
 pub copy struct Cl {
     name: u32,
-    pa: u64,
-    pn: u64,
+    pattern_start: u64,
+    pattern_count: u64,
     body: u64,
 }
 
 // A handler (`ExprKind::Handle`): effect label (symbol + 1, or 0), name
-// and argument types xs[ta..ta+tn]; state pattern and expression (NONE
-// without state); the return clause cls[ret] and operation clauses
-// cls[ret+1..ret+1+on]; outgoing effects (a Row type); moves
-// xs[ma..ma+2mn].
+// and argument types xs[arg_ty_start..arg_ty_start+arg_ty_count]; state pattern and
+// expression (NONE without state); the return clause cls[return_clause] and
+// operation clauses cls[return_clause+1..return_clause+1+op_count]; outgoing
+// effects (a Row type); moves xs[move_start..move_start+2*move_count].
 pub copy struct Hd {
     pool: u64,
     label: u32,
     eff_name: u32,
-    ta: u64,
-    tn: u64,
+    arg_ty_start: u64,
+    arg_ty_count: u64,
     has_state: bool,
-    spat: u64,
-    sexpr: u64,
+    state_pattern: u64,
+    state_expr: u64,
     body: u64,
-    ret: u64,
-    on: u64,
+    return_clause: u64,
+    op_count: u64,
     outgoing: u32,
-    ma: u64,
-    mn: u64,
+    move_start: u64,
+    move_count: u64,
 }
 
 pub struct Ast {
@@ -241,100 +241,94 @@ impl Ast {
     }
 
     pub fn clone_tail_in_heap(sink self, n_fns: u64, n_pms: u64) -> Ast {
-        let mut s = self;
+        let mut ast = self;
         let mut new_fns = ChunkSeq::new[FnR]();
-        let fn_n = wrapping_sub(s.fns.len(), n_fns);
-        for i in n_fns..s.fns.len() {
-            match s.fns.try_get(i) {
-                Option::Some(x) => new_fns
-                    .push(
-                        FnR {
-                            key: x.key,
-                            name: x.name,
-                            has_body: x.has_body,
-                            body: x.body,
-                            pa: x.pa,
-                            pn: x.pn,
-                            result: x.result,
-                            effects: x.effects,
-                            ga: x.ga,
-                            gn: x.gn,
-                            ca: x.ca,
-                            cn: x.cn,
-                            owner: x.owner,
-                            xa: x.xa,
-                            xn: x.xn
-                        }
-                    ),
+        let fn_tail_count = wrapping_sub(ast.fns.len(), n_fns);
+        for i in n_fns..ast.fns.len() {
+            match ast.fns.try_get(i) {
+                Option::Some(row) => new_fns.push(
+                    FnR {
+                        key: row.key,
+                        name: row.name,
+                        has_body: row.has_body,
+                        body: row.body,
+                        param_start: row.param_start,
+                        param_count: row.param_count,
+                        result: row.result,
+                        effects: row.effects,
+                        generic_start: row.generic_start,
+                        generic_count: row.generic_count,
+                        cap_start: row.cap_start,
+                        cap_count: row.cap_count,
+                        owner: row.owner,
+                        ext_start: row.ext_start,
+                        ext_count: row.ext_count
+                    }
+                ),
                 Option::None => {},
             }
         }
-        for _ in 0..fn_n {
-            let _ = s.fns.pop();
+        for _ in 0..fn_tail_count {
+            let _ = ast.fns.pop();
         }
         for i in 0..new_fns.len() {
             match new_fns.try_get(i) {
-                Option::Some(x) => s
-                    .fns
-                    .push(
-                        FnR {
-                            key: x.key,
-                            name: x.name,
-                            has_body: x.has_body,
-                            body: x.body,
-                            pa: x.pa,
-                            pn: x.pn,
-                            result: x.result,
-                            effects: x.effects,
-                            ga: x.ga,
-                            gn: x.gn,
-                            ca: x.ca,
-                            cn: x.cn,
-                            owner: x.owner,
-                            xa: x.xa,
-                            xn: x.xn
-                        }
-                    ),
+                Option::Some(row) => ast.fns.push(
+                    FnR {
+                        key: row.key,
+                        name: row.name,
+                        has_body: row.has_body,
+                        body: row.body,
+                        param_start: row.param_start,
+                        param_count: row.param_count,
+                        result: row.result,
+                        effects: row.effects,
+                        generic_start: row.generic_start,
+                        generic_count: row.generic_count,
+                        cap_start: row.cap_start,
+                        cap_count: row.cap_count,
+                        owner: row.owner,
+                        ext_start: row.ext_start,
+                        ext_count: row.ext_count
+                    }
+                ),
                 Option::None => {},
             }
         }
         let mut new_pms = ChunkSeq::new[Pm]();
-        let pm_n = wrapping_sub(s.pms.len(), n_pms);
-        for i in n_pms..s.pms.len() {
-            match s.pms.try_get(i) {
-                Option::Some(x) => new_pms
-                    .push(
-                        Pm {
-                            name: x.name,
-                            pass: x.pass,
-                            qa: x.qa,
-                            qn: x.qn,
-                            ty: x.ty,
-                            s0: x.s0,
-                            s1: x.s1
-                        }
-                    ),
+        let pm_tail_count = wrapping_sub(ast.pms.len(), n_pms);
+        for i in n_pms..ast.pms.len() {
+            match ast.pms.try_get(i) {
+                Option::Some(row) => new_pms.push(
+                    Pm {
+                        name: row.name,
+                        pass: row.pass,
+                        proj_start: row.proj_start,
+                        proj_count: row.proj_count,
+                        ty: row.ty,
+                        s0: row.s0,
+                        s1: row.s1
+                    }
+                ),
                 Option::None => {},
             }
         }
-        for _ in 0..pm_n {
-            let _ = s.pms.pop();
+        for _ in 0..pm_tail_count {
+            let _ = ast.pms.pop();
         }
         for i in 0..new_pms.len() {
             match new_pms.try_get(i) {
-                Option::Some(x) => s
-                    .pms
-                    .push(
-                        Pm {
-                            name: x.name,
-                            pass: x.pass,
-                            qa: x.qa,
-                            qn: x.qn,
-                            ty: x.ty,
-                            s0: x.s0,
-                            s1: x.s1
-                        }
-                    ),
+                Option::Some(row) => ast.pms.push(
+                    Pm {
+                        name: row.name,
+                        pass: row.pass,
+                        proj_start: row.proj_start,
+                        proj_count: row.proj_count,
+                        ty: row.ty,
+                        s0: row.s0,
+                        s1: row.s1
+                    }
+                ),
                 Option::None => {},
             }
         }
@@ -359,7 +353,7 @@ impl Ast {
             hds,
             cls,
             pool_count,
-        } = s;
+        } = ast;
         Ast {
             exs: exs,
             xs: xs,
@@ -388,168 +382,162 @@ impl Ast {
         let mut exs = ChunkSeq::with_capacity[Ex](self.exs.len());
         for i in 0..self.exs.len() {
             match self.exs.try_get(i) {
-                Option::Some(v) => exs
-                    .push(
-                        Ex {
-                            kind: v.kind,
-                            s0: v.s0,
-                            s1: v.s1,
-                            a: v.a,
-                            b: v.b,
-                            c: v.c,
-                            n: v.n,
-                            m: v.m,
-                            x: v.x,
-                        }
-                    ),
+                Option::Some(src) => exs.push(
+                    Ex {
+                        kind: src.kind,
+                        s0: src.s0,
+                        s1: src.s1,
+                        a: src.a,
+                        b: src.b,
+                        c: src.c,
+                        n: src.n,
+                        m: src.m,
+                        x: src.x,
+                    }
+                ),
                 Option::None => {},
             }
         }
         let mut pts = ChunkSeq::with_capacity[Pt](self.pts.len());
         for i in 0..self.pts.len() {
             match self.pts.try_get(i) {
-                Option::Some(v) => pts
-                    .push(
-                        Pt {
-                            kind: v.kind,
-                            s0: v.s0,
-                            s1: v.s1,
-                            a: v.a,
-                            b: v.b,
-                            c: v.c,
-                            n: v.n,
-                        }
-                    ),
+                Option::Some(src) => pts.push(
+                    Pt {
+                        kind: src.kind,
+                        s0: src.s0,
+                        s1: src.s1,
+                        a: src.a,
+                        b: src.b,
+                        c: src.c,
+                        n: src.n,
+                    }
+                ),
                 Option::None => {},
             }
         }
         let mut fns = ChunkSeq::with_capacity[FnR](self.fns.len());
         for i in 0..self.fns.len() {
             match self.fns.try_get(i) {
-                Option::Some(v) => fns
-                    .push(
-                        FnR {
-                            key: v.key,
-                            name: v.name,
-                            has_body: v.has_body,
-                            body: v.body,
-                            pa: v.pa,
-                            pn: v.pn,
-                            result: v.result,
-                            effects: v.effects,
-                            ga: v.ga,
-                            gn: v.gn,
-                            ca: v.ca,
-                            cn: v.cn,
-                            owner: v.owner,
-                            xa: v.xa,
-                            xn: v.xn,
-                        }
-                    ),
+                Option::Some(src) => fns.push(
+                    FnR {
+                        key: src.key,
+                        name: src.name,
+                        has_body: src.has_body,
+                        body: src.body,
+                        param_start: src.param_start,
+                        param_count: src.param_count,
+                        result: src.result,
+                        effects: src.effects,
+                        generic_start: src.generic_start,
+                        generic_count: src.generic_count,
+                        cap_start: src.cap_start,
+                        cap_count: src.cap_count,
+                        owner: src.owner,
+                        ext_start: src.ext_start,
+                        ext_count: src.ext_count,
+                    }
+                ),
                 Option::None => {},
             }
         }
         let mut pms = ChunkSeq::with_capacity[Pm](self.pms.len());
         for i in 0..self.pms.len() {
             match self.pms.try_get(i) {
-                Option::Some(v) => pms
-                    .push(
-                        Pm {
-                            name: v.name,
-                            pass: v.pass,
-                            qa: v.qa,
-                            qn: v.qn,
-                            ty: v.ty,
-                            s0: v.s0,
-                            s1: v.s1,
-                        }
-                    ),
+                Option::Some(src) => pms.push(
+                    Pm {
+                        name: src.name,
+                        pass: src.pass,
+                        proj_start: src.proj_start,
+                        proj_count: src.proj_count,
+                        ty: src.ty,
+                        s0: src.s0,
+                        s1: src.s1,
+                    }
+                ),
                 Option::None => {},
             }
         }
         let mut paths = ChunkSeq::with_capacity[PathR](self.paths.len());
         for i in 0..self.paths.len() {
             match self.paths.try_get(i) {
-                Option::Some(v) => paths.push(PathR { a: v.a, n: v.n }),
+                Option::Some(src) => paths.push(PathR { a: src.a, n: src.n }),
                 Option::None => {},
             }
         }
         let mut gens = ChunkSeq::with_capacity[Gn](self.gens.len());
         for i in 0..self.gens.len() {
             match self.gens.try_get(i) {
-                Option::Some(v) => gens.push(Gn { name: v.name, bound: v.bound, row: v.row }),
+                Option::Some(src) => gens.push(
+                    Gn { name: src.name, bound: src.bound, is_row: src.is_row }
+                ),
                 Option::None => {},
             }
         }
         let mut effs = ChunkSeq::with_capacity[Ef](self.effs.len());
         for i in 0..self.effs.len() {
             match self.effs.try_get(i) {
-                Option::Some(v) => effs
-                    .push(
-                        Ef {
-                            name: v.name,
-                            linear: v.linear,
-                            ga: v.ga,
-                            gn: v.gn,
-                            oa: v.oa,
-                            on: v.on,
-                        }
-                    ),
+                Option::Some(src) => effs.push(
+                    Ef {
+                        name: src.name,
+                        linear: src.linear,
+                        generic_start: src.generic_start,
+                        generic_count: src.generic_count,
+                        op_start: src.op_start,
+                        op_count: src.op_count,
+                    }
+                ),
                 Option::None => {},
             }
         }
         let mut eops = ChunkSeq::with_capacity[Eop](self.eops.len());
         for i in 0..self.eops.len() {
             match self.eops.try_get(i) {
-                Option::Some(v) => eops
-                    .push(
-                        Eop {
-                            name: v.name,
-                            pa: v.pa,
-                            pn: v.pn,
-                            result: v.result,
-                        }
-                    ),
+                Option::Some(src) => eops.push(
+                    Eop {
+                        name: src.name,
+                        param_start: src.param_start,
+                        param_count: src.param_count,
+                        result: src.result,
+                    }
+                ),
                 Option::None => {},
             }
         }
         let mut hds = ChunkSeq::with_capacity[Hd](self.hds.len());
         for i in 0..self.hds.len() {
             match self.hds.try_get(i) {
-                Option::Some(v) => hds
-                    .push(
-                        Hd {
-                            pool: v.pool,
-                            label: v.label,
-                            eff_name: v.eff_name,
-                            ta: v.ta,
-                            tn: v.tn,
-                            has_state: v.has_state,
-                            spat: v.spat,
-                            sexpr: v.sexpr,
-                            body: v.body,
-                            ret: v.ret,
-                            on: v.on,
-                            outgoing: v.outgoing,
-                            ma: v.ma,
-                            mn: v.mn,
-                        }
-                    ),
+                Option::Some(src) => hds.push(
+                    Hd {
+                        pool: src.pool,
+                        label: src.label,
+                        eff_name: src.eff_name,
+                        arg_ty_start: src.arg_ty_start,
+                        arg_ty_count: src.arg_ty_count,
+                        has_state: src.has_state,
+                        state_pattern: src.state_pattern,
+                        state_expr: src.state_expr,
+                        body: src.body,
+                        return_clause: src.return_clause,
+                        op_count: src.op_count,
+                        outgoing: src.outgoing,
+                        move_start: src.move_start,
+                        move_count: src.move_count,
+                    }
+                ),
                 Option::None => {},
             }
         }
         let mut cls = ChunkSeq::with_capacity[Cl](self.cls.len());
         for i in 0..self.cls.len() {
             match self.cls.try_get(i) {
-                Option::Some(v) => cls
-                    .push(
-                        Cl {
-                            name: v.name,
-                            pa: v.pa,
-                            pn: v.pn,
-                            body: v.body,
-                        }
-                    ),
+                Option::Some(src) => cls.push(
+                    Cl {
+                        name: src.name,
+                        pattern_start: src.pattern_start,
+                        pattern_count: src.pattern_count,
+                        body: src.body,
+                    }
+                ),
                 Option::None => {},
             }
         }
@@ -579,7 +567,7 @@ impl Ast {
 
     pub fn ex(in self, i: u64) -> Ex {
         match self.exs.try_get(i) {
-            Option::Some(x) => x,
+            Option::Some(row) => row,
             Option::None => Ex {
                 kind: X_FOREIGN,
                 s0: 0,
@@ -596,7 +584,7 @@ impl Ast {
 
     pub fn pt(in self, i: u64) -> Pt {
         match self.pts.try_get(i) {
-            Option::Some(x) => x,
+            Option::Some(row) => row,
             Option::None => Pt { kind: 0, s0: 0, s1: 0, a: 0, b: 0, c: 0, n: 0 },
         }
     }
@@ -611,44 +599,52 @@ impl Ast {
 
     pub fn function(in self, i: u64) -> FnR {
         match self.fns.try_get(i) {
-            Option::Some(x) => x,
+            Option::Some(row) => row,
             Option::None => FnR {
                 key: 0,
                 name: 0,
                 has_body: false,
                 body: NONE64,
-                pa: 0,
-                pn: 0,
+                param_start: 0,
+                param_count: 0,
                 result: 0,
                 effects: 0,
-                ga: 0,
-                gn: 0,
-                ca: 0,
-                cn: 0,
+                generic_start: 0,
+                generic_count: 0,
+                cap_start: 0,
+                cap_count: 0,
                 owner: 0,
-                xa: 0,
-                xn: 0
+                ext_start: 0,
+                ext_count: 0
             },
         }
     }
 
     pub fn param(in self, i: u64) -> Pm {
         match self.pms.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => Pm { name: 0, pass: 0, qa: 0, qn: 0, ty: 0, s0: 0, s1: 0 },
+            Option::Some(row) => row,
+            Option::None => Pm {
+                name: 0,
+                pass: 0,
+                proj_start: 0,
+                proj_count: 0,
+                ty: 0,
+                s0: 0,
+                s1: 0
+            },
         }
     }
 
     pub fn generic(in self, i: u64) -> Gn {
         match self.gens.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => Gn { name: 0, bound: 0, row: false },
+            Option::Some(row) => row,
+            Option::None => Gn { name: 0, bound: 0, is_row: false },
         }
     }
 
     pub fn path(in self, i: u64) -> PathR {
         match self.paths.try_get(i) {
-            Option::Some(x) => x,
+            Option::Some(row) => row,
             Option::None => PathR { a: 0, n: 0 },
         }
     }
@@ -665,23 +661,30 @@ impl Ast {
         u32_at(in self.caps, i)
     }
 
-    // The index of the world function keyed `s`, or NONE.
-    pub fn fn_index(in self, s: u32) -> u64 {
-        if s == NONE32 {
+    // The index of the world function keyed `key`, or NONE.
+    pub fn fn_index(in self, key: u32) -> u64 {
+        if key == NONE32 {
             return NONE64;
         }
-        let x = u32_at(in self.fn_by_key, w(s));
-        if x == 0 {
+        let entry = u32_at(in self.fn_by_key, w(key));
+        if entry == 0 {
             NONE64
         } else {
-            w(wrapping_sub(x, 1))
+            w(wrapping_sub(entry, 1))
         }
     }
 
     pub fn effect_decl(in self, i: u64) -> Ef {
         match self.effs.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => Ef { name: 0, linear: false, ga: 0, gn: 0, oa: 0, on: 0 },
+            Option::Some(row) => row,
+            Option::None => Ef {
+                name: 0,
+                linear: false,
+                generic_start: 0,
+                generic_count: 0,
+                op_start: 0,
+                op_count: 0
+            },
         }
     }
 
@@ -691,50 +694,50 @@ impl Ast {
 
     pub fn eop(in self, i: u64) -> Eop {
         match self.eops.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => Eop { name: 0, pa: 0, pn: 0, result: 0 },
+            Option::Some(row) => row,
+            Option::None => Eop { name: 0, param_start: 0, param_count: 0, result: 0 },
         }
     }
 
     pub fn handler(in self, i: u64) -> Hd {
         match self.hds.try_get(i) {
-            Option::Some(x) => x,
+            Option::Some(row) => row,
             Option::None => Hd {
                 pool: 0,
                 label: 0,
                 eff_name: 0,
-                ta: 0,
-                tn: 0,
+                arg_ty_start: 0,
+                arg_ty_count: 0,
                 has_state: false,
-                spat: NONE64,
-                sexpr: NONE64,
+                state_pattern: NONE64,
+                state_expr: NONE64,
                 body: NONE64,
-                ret: 0,
-                on: 0,
+                return_clause: 0,
+                op_count: 0,
                 outgoing: 0,
-                ma: 0,
-                mn: 0
+                move_start: 0,
+                move_count: 0
             },
         }
     }
 
     pub fn clause(in self, i: u64) -> Cl {
         match self.cls.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => Cl { name: 0, pa: 0, pn: 0, body: NONE64 },
+            Option::Some(row) => row,
+            Option::None => Cl { name: 0, pattern_start: 0, pattern_count: 0, body: NONE64 },
         }
     }
 
     // Appends a parameter row; returns its index.
-    pub fn add_param(inout self, p: Pm) -> u64 {
+    pub fn add_param(inout self, row: Pm) -> u64 {
         let i = self.pms.len();
-        self.pms.push(p);
+        self.pms.push(row);
         i
     }
 
     // Appends a function row (a nested closure or handler function).
-    pub fn add_function(inout self, f: FnR) {
-        self.fns.push(f);
+    pub fn add_function(inout self, func: FnR) {
+        self.fns.push(func);
     }
 
     // Appends a capability pair (label, effect).
@@ -744,117 +747,135 @@ impl Ast {
     }
 
     // Appends an external capture name.
-    pub fn add_ext(inout self, s: u32) {
-        self.exts.push(s);
+    pub fn add_ext(inout self, name: u32) {
+        self.exts.push(name);
     }
 
     pub fn ext(in self, i: u64) -> u32 {
         u32_at(in self.exts, i)
     }
 
-    // The index of the effect named `s`, or NONE.
-    pub fn effect_index(in self, s: u32) -> u64 {
-        if s == NONE32 {
+    // The index of the effect named `name`, or NONE.
+    pub fn effect_index(in self, name: u32) -> u64 {
+        if name == NONE32 {
             return NONE64;
         }
-        let x = u32_at(in self.eff_by_name, w(s));
-        if x == 0 {
+        let entry = u32_at(in self.eff_by_name, w(name));
+        if entry == 0 {
             NONE64
         } else {
-            w(wrapping_sub(x, 1))
+            w(wrapping_sub(entry, 1))
         }
     }
 }
 
-fn sym(in c: Ctx, x: u64) -> u32 {
-    u32_at(in c.nmap, x)
+fn sym(in ctx: Ctx, raw_id: u64) -> u32 {
+    u32_at(in ctx.nmap, raw_id)
 }
 
-fn tyw(in c: Ctx, x: u64) -> u32 {
-    u32_at(in c.tmap, x)
+fn tyw(in ctx: Ctx, raw_id: u64) -> u32 {
+    u32_at(in ctx.tmap, raw_id)
 }
 
-fn read_path(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) -> u64 {
-    let k = r.word(in b);
-    let at = a.psyms.len();
-    for i in 0..k {
-        a.psyms.push(sym(in c, r.word(in b)));
+fn read_path(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx, inout ast: Ast) -> u64 {
+    let count = reader.word(in bytes);
+    let start = ast.psyms.len();
+    for i in 0..count {
+        ast.psyms.push(sym(in ctx, reader.word(in bytes)));
     }
-    let id = a.paths.len();
-    a.paths.push(PathR { a: at, n: k });
+    let id = ast.paths.len();
+    ast.paths.push(PathR { a: start, n: count });
     id
 }
 
 // n, then n parameters (name, pass, projections, type, span).
-fn read_params(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) -> u64 {
-    let n = r.word(in b);
+fn read_params(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx, inout ast: Ast) -> u64 {
+    let n = reader.word(in bytes);
     for i in 0..n {
-        let name = sym(in c, r.word(in b));
-        let pass = wrapping_u8(r.word(in b));
-        let qn = r.word(in b);
+        let name = sym(in ctx, reader.word(in bytes));
+        let pass = wrapping_u8(reader.word(in bytes));
+        let proj_count = reader.word(in bytes);
         let mut ids: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        for j in 0..qn {
-            let id = read_path(inout r, in b, in c, inout a);
+        for j in 0..proj_count {
+            let id = read_path(inout reader, in bytes, in ctx, inout ast);
             ids.push(id);
         }
-        let qa = a.projs.len();
-        for j in 0..qn {
-            a.projs.push(u64_at(in ids, j));
+        let proj_start = ast.projs.len();
+        for j in 0..proj_count {
+            ast.projs.push(u64_at(in ids, j));
         }
-        let ty = tyw(in c, r.word(in b));
-        let s0 = r.word(in b);
-        let s1 = r.word(in b);
-        a.pms.push(Pm { name: name, pass: pass, qa: qa, qn: qn, ty: ty, s0: s0, s1: s1 });
+        let ty = tyw(in ctx, reader.word(in bytes));
+        let s0 = reader.word(in bytes);
+        let s1 = reader.word(in bytes);
+        ast.pms.push(
+            Pm {
+                name: name,
+                pass: pass,
+                proj_start: proj_start,
+                proj_count: proj_count,
+                ty: ty,
+                s0: s0,
+                s1: s1
+            }
+        );
     }
     n
 }
 
-fn read_literal(inout r: Reader, in b: Slice[u8], in c: Ctx, inout x: Ex) {
-    x.a = r.word(in b);
-    x.b = r.word(in b);
-    if x.a == Lit::String {
-        x.b = w(sym(in c, x.b));
+fn read_literal(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx, inout expr: Ex) {
+    expr.a = reader.word(in bytes);
+    expr.b = reader.word(in bytes);
+    if expr.a == Lit::String {
+        expr.b = w(sym(in ctx, expr.b));
     }
-    x.c = r.word(in b);
+    expr.c = reader.word(in bytes);
 }
 
-fn read_pattern(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) {
-    let kind = wrapping_u8(r.word(in b));
-    let mut p = Pt { kind: kind, s0: r.word(in b), s1: r.word(in b), a: 0, b: 0, c: 0, n: 0 };
+fn read_pattern(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx, inout ast: Ast) {
+    let kind = wrapping_u8(reader.word(in bytes));
+    let mut pat = Pt {
+        kind: kind,
+        s0: reader.word(in bytes),
+        s1: reader.word(in bytes),
+        a: 0,
+        b: 0,
+        c: 0,
+        n: 0
+    };
     if kind == Pat::Bind {
-        p.a = w(sym(in c, r.word(in b)));
+        pat.a = w(sym(in ctx, reader.word(in bytes)));
     } else if kind == Pat::Literal {
-        p.a = r.word(in b);
-        p.b = r.word(in b);
-        if p.a == Lit::String {
-            p.b = w(sym(in c, p.b));
+        pat.a = reader.word(in bytes);
+        pat.b = reader.word(in bytes);
+        if pat.a == Lit::String {
+            pat.b = w(sym(in ctx, pat.b));
         }
-        p.c = r.word(in b);
+        pat.c = reader.word(in bytes);
     } else if kind == Pat::Tuple {
-        p.n = r.word(in b);
-        p.b = a.pxs.len();
-        for i in 0..p.n {
-            a.pxs.push(r.word(in b));
+        pat.n = reader.word(in bytes);
+        pat.b = ast.pxs.len();
+        for i in 0..pat.n {
+            ast.pxs.push(reader.word(in bytes));
         }
     } else if kind == Pat::Constructor {
-        p.a = w(sym(in c, r.word(in b)));
-        p.c = r.word(in b);
-        p.n = r.word(in b);
-        p.b = a.pxs.len();
-        for i in 0..p.n {
-            a.pxs.push(w(sym(in c, r.word(in b))));
-            a.pxs.push(r.word(in b));
+        pat.a = w(sym(in ctx, reader.word(in bytes)));
+        pat.c = reader.word(in bytes);
+        pat.n = reader.word(in bytes);
+        pat.b = ast.pxs.len();
+        for i in 0..pat.n {
+            ast.pxs.push(w(sym(in ctx, reader.word(in bytes))));
+            ast.pxs.push(reader.word(in bytes));
         }
     }
-    a.pts.push(p);
+    ast.pts.push(pat);
 }
 
-fn read_expr(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) {
-    let kind = wrapping_u8(r.word(in b));
-    let mut x = Ex {
+fn read_expr(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx, inout ast: Ast) {
+    let kind = wrapping_u8(reader.word(in bytes));
+    let mut expr = Ex {
         kind: kind,
-        s0: r.word(in b),
-        s1: r.word(in b),
+        s0: reader.word(in bytes),
+        s1: reader.word(in bytes),
         a: NONE64,
         b: NONE64,
         c: NONE64,
@@ -863,170 +884,176 @@ fn read_expr(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) {
         x: 0
     };
     if kind == X_LITERAL {
-        read_literal(inout r, in b, in c, inout x);
+        read_literal(inout reader, in bytes, in ctx, inout expr);
     } else if kind == X_NAME {
-        x.a = w(sym(in c, r.word(in b)));
+        expr.a = w(sym(in ctx, reader.word(in bytes)));
     } else if kind == X_TUPLE {
-        x.n = r.word(in b);
-        x.a = a.xs.len();
-        for i in 0..x.n {
-            a.xs.push(r.word(in b));
+        expr.n = reader.word(in bytes);
+        expr.a = ast.xs.len();
+        for i in 0..expr.n {
+            ast.xs.push(reader.word(in bytes));
         }
     } else if kind == X_STRUCT {
-        x.a = w(sym(in c, r.word(in b)));
-        x.n = r.word(in b);
-        x.b = a.xs.len();
-        for i in 0..x.n {
-            a.xs.push(w(sym(in c, r.word(in b))));
-            a.xs.push(r.word(in b));
+        expr.a = w(sym(in ctx, reader.word(in bytes)));
+        expr.n = reader.word(in bytes);
+        expr.b = ast.xs.len();
+        for i in 0..expr.n {
+            ast.xs.push(w(sym(in ctx, reader.word(in bytes))));
+            ast.xs.push(reader.word(in bytes));
         }
     } else if kind == X_FIELD {
-        x.a = r.word(in b);
-        x.b = w(sym(in c, r.word(in b)));
+        expr.a = reader.word(in bytes);
+        expr.b = w(sym(in ctx, reader.word(in bytes)));
     } else if kind == X_INDEX {
-        x.a = r.word(in b);
-        x.b = r.word(in b);
+        expr.a = reader.word(in bytes);
+        expr.b = reader.word(in bytes);
     } else if kind == X_UNARY {
-        x.a = w(sym(in c, r.word(in b)));
-        x.b = r.word(in b);
+        expr.a = w(sym(in ctx, reader.word(in bytes)));
+        expr.b = reader.word(in bytes);
     } else if kind == X_BINARY || kind == X_ASSIGN {
-        x.a = w(sym(in c, r.word(in b)));
-        x.b = r.word(in b);
-        x.c = r.word(in b);
+        expr.a = w(sym(in ctx, reader.word(in bytes)));
+        expr.b = reader.word(in bytes);
+        expr.c = reader.word(in bytes);
     } else if kind == X_BLOCK {
-        x.n = r.word(in b);
-        x.a = a.xs.len();
-        for i in 0..x.n {
-            let is_let = r.word(in b);
-            a.xs.push(is_let);
+        expr.n = reader.word(in bytes);
+        expr.a = ast.xs.len();
+        for i in 0..expr.n {
+            let is_let = reader.word(in bytes);
+            ast.xs.push(is_let);
             if is_let == 1 {
-                a.xs.push(r.word(in b));
+                ast.xs.push(reader.word(in bytes));
             } else {
-                a.xs.push(NONE64);
+                ast.xs.push(NONE64);
             }
-            a.xs.push(r.word(in b));
+            ast.xs.push(reader.word(in bytes));
         }
-        x.b = r.word(in b);
+        expr.b = reader.word(in bytes);
     } else if kind == X_CALL {
-        x.a = r.word(in b);
-        x.x = r.word(in b);
-        x.n = r.word(in b);
-        x.b = a.xs.len();
-        for i in 0..x.n {
-            a.xs.push(r.word(in b));
-            a.xs.push(r.word(in b));
+        expr.a = reader.word(in bytes);
+        expr.x = reader.word(in bytes);
+        expr.n = reader.word(in bytes);
+        expr.b = ast.xs.len();
+        for i in 0..expr.n {
+            ast.xs.push(reader.word(in bytes));
+            ast.xs.push(reader.word(in bytes));
         }
-        x.m = r.word(in b);
-        x.c = a.xs.len();
-        for i in 0..x.m {
-            a.xs.push(w(tyw(in c, r.word(in b))));
+        expr.m = reader.word(in bytes);
+        expr.c = ast.xs.len();
+        for i in 0..expr.m {
+            ast.xs.push(w(tyw(in ctx, reader.word(in bytes))));
         }
     } else if kind == X_TRY || kind == X_LOOP || kind == X_BREAK || kind == X_RETURN {
-        x.a = r.word(in b);
+        expr.a = reader.word(in bytes);
     } else if kind == X_IF || kind == X_FOR || kind == X_RANGE {
-        x.a = r.word(in b);
-        x.b = r.word(in b);
-        x.c = r.word(in b);
+        expr.a = reader.word(in bytes);
+        expr.b = reader.word(in bytes);
+        expr.c = reader.word(in bytes);
     } else if kind == X_MATCH {
-        x.a = r.word(in b);
-        x.n = r.word(in b);
-        x.b = a.xs.len();
-        for i in 0..x.n {
-            a.xs.push(r.word(in b));
-            a.xs.push(r.word(in b));
+        expr.a = reader.word(in bytes);
+        expr.n = reader.word(in bytes);
+        expr.b = ast.xs.len();
+        for i in 0..expr.n {
+            ast.xs.push(reader.word(in bytes));
+            ast.xs.push(reader.word(in bytes));
         }
     } else if kind == X_CLOSURE {
-        x.a = r.word(in b);
-        x.b = a.pms.len();
-        x.n = read_params(inout r, in b, in c, inout a);
-        x.c = r.word(in b);
-        x.m = r.word(in b);
-        x.x = a.xs.len();
-        read_moves(inout r, in b, in c, inout a, x.m);
+        expr.a = reader.word(in bytes);
+        expr.b = ast.pms.len();
+        expr.n = read_params(inout reader, in bytes, in ctx, inout ast);
+        expr.c = reader.word(in bytes);
+        expr.m = reader.word(in bytes);
+        expr.x = ast.xs.len();
+        read_moves(inout reader, in bytes, in ctx, inout ast, expr.m);
     } else if kind == X_HANDLE {
-        x.a = a.hds.len();
-        read_handler(inout r, in b, in c, inout a);
+        expr.a = ast.hds.len();
+        read_handler(inout reader, in bytes, in ctx, inout ast);
     }
-    a.exs.push(x);
+    ast.exs.push(expr);
 }
 
 // m moves (root, path) into xs as (root symbol, path id) pairs.
-fn read_moves(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast, m: u64) {
-    for i in 0..m {
-        let root = sym(in c, r.word(in b));
-        let p = read_path(inout r, in b, in c, inout a);
-        a.xs.push(w(root));
-        a.xs.push(p);
+fn read_moves(
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    in ctx: Ctx,
+    inout ast: Ast,
+    move_count: u64
+) {
+    for i in 0..move_count {
+        let root = sym(in ctx, reader.word(in bytes));
+        let path_id = read_path(inout reader, in bytes, in ctx, inout ast);
+        ast.xs.push(w(root));
+        ast.xs.push(path_id);
     }
 }
 
-fn read_clause(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) {
-    let name = sym(in c, r.word(in b));
-    let pn = r.word(in b);
-    let pa = a.xs.len();
-    for i in 0..pn {
-        a.xs.push(r.word(in b));
+fn read_clause(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx, inout ast: Ast) {
+    let name = sym(in ctx, reader.word(in bytes));
+    let pattern_count = reader.word(in bytes);
+    let pattern_start = ast.xs.len();
+    for i in 0..pattern_count {
+        ast.xs.push(reader.word(in bytes));
     }
-    let body = r.word(in b);
-    a.cls.push(Cl { name: name, pa: pa, pn: pn, body: body });
+    let body = reader.word(in bytes);
+    ast.cls.push(
+        Cl { name: name, pattern_start: pattern_start, pattern_count: pattern_count, body: body }
+    );
 }
 
-fn read_handler(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) {
-    let pool = r.word(in b);
-    let lw = r.word(in b);
-    let label = if lw == 0 {
+fn read_handler(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx, inout ast: Ast) {
+    let pool = reader.word(in bytes);
+    let label_word = reader.word(in bytes);
+    let label = if label_word == 0 {
         0
     } else {
-        inc32w(sym(in c, wrapping_sub(lw, 1)))
+        inc32w(sym(in ctx, wrapping_sub(label_word, 1)))
     };
-    let eff_name = sym(in c, r.word(in b));
-    let tn = r.word(in b);
-    let ta = a.xs.len();
-    for i in 0..tn {
-        a.xs.push(w(tyw(in c, r.word(in b))));
+    let eff_name = sym(in ctx, reader.word(in bytes));
+    let arg_ty_count = reader.word(in bytes);
+    let arg_ty_start = ast.xs.len();
+    for i in 0..arg_ty_count {
+        ast.xs.push(w(tyw(in ctx, reader.word(in bytes))));
     }
-    let has_state = r.word(in b) != 0;
-    let spat = r.word(in b);
-    let sexpr = r.word(in b);
-    let body = r.word(in b);
-    let on = r.word(in b);
-    let ret = a.cls.len();
-    for i in 0..inc(on) {
-        read_clause(inout r, in b, in c, inout a);
+    let has_state = reader.word(in bytes) != 0;
+    let state_pattern = reader.word(in bytes);
+    let state_expr = reader.word(in bytes);
+    let body = reader.word(in bytes);
+    let op_count = reader.word(in bytes);
+    let return_clause = ast.cls.len();
+    for i in 0..inc(op_count) {
+        read_clause(inout reader, in bytes, in ctx, inout ast);
     }
-    let outgoing = tyw(in c, r.word(in b));
-    let mn = r.word(in b);
-    let ma = a.xs.len();
-    read_moves(inout r, in b, in c, inout a, mn);
-    a
-        .hds
-        .push(
-            Hd {
-                pool: pool,
-                label: label,
-                eff_name: eff_name,
-                ta: ta,
-                tn: tn,
-                has_state: has_state,
-                spat: spat,
-                sexpr: sexpr,
-                body: body,
-                ret: ret,
-                on: on,
-                outgoing: outgoing,
-                ma: ma,
-                mn: mn
-            }
-        );
+    let outgoing = tyw(in ctx, reader.word(in bytes));
+    let move_count = reader.word(in bytes);
+    let move_start = ast.xs.len();
+    read_moves(inout reader, in bytes, in ctx, inout ast, move_count);
+    ast.hds.push(
+        Hd {
+            pool: pool,
+            label: label,
+            eff_name: eff_name,
+            arg_ty_start: arg_ty_start,
+            arg_ty_count: arg_ty_count,
+            has_state: has_state,
+            state_pattern: state_pattern,
+            state_expr: state_expr,
+            body: body,
+            return_clause: return_clause,
+            op_count: op_count,
+            outgoing: outgoing,
+            move_start: move_start,
+            move_count: move_count
+        }
+    );
 }
 
-fn inc32w(x: u32) -> u32 {
-    wrapping_add(x, 1)
+fn inc32w(value: u32) -> u32 {
+    wrapping_add(value, 1)
 }
 
 // The lowering section, after `read_ctx`.
-pub fn read_ast(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Ast {
-    let mut a = Ast {
+pub fn read_ast(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Ast {
+    let mut ast = Ast {
         exs: ChunkSeq::new[Ex](),
         xs: ChunkSeq::new[u64](),
         pts: ChunkSeq::new[Pt](),
@@ -1048,84 +1075,93 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Ast {
         pool_count: 0,
         exts: ChunkSeq::new[u32](),
     };
-    a.pool_count = r.word(in b);
-    let nf = r.word(in b);
-    for i in 0..nf {
-        let key = sym(in c, r.word(in b));
-        let name = sym(in c, r.word(in b));
-        let has_body = r.word(in b) != 0;
-        let body = r.word(in b);
-        let pa = a.pms.len();
-        let pn = read_params(inout r, in b, in c, inout a);
-        let result = tyw(in c, r.word(in b));
-        let effects = tyw(in c, r.word(in b));
-        let gn = r.word(in b);
-        let ga = a.gens.len();
-        for j in 0..gn {
-            let g = Gn {
-                name: sym(in c, r.word(in b)),
-                bound: wrapping_u8(r.word(in b)),
-                row: r.word(in b) != 0
+    ast.pool_count = reader.word(in bytes);
+    let fn_count = reader.word(in bytes);
+    for i in 0..fn_count {
+        let key = sym(in ctx, reader.word(in bytes));
+        let name = sym(in ctx, reader.word(in bytes));
+        let has_body = reader.word(in bytes) != 0;
+        let body = reader.word(in bytes);
+        let param_start = ast.pms.len();
+        let param_count = read_params(inout reader, in bytes, in ctx, inout ast);
+        let result = tyw(in ctx, reader.word(in bytes));
+        let effects = tyw(in ctx, reader.word(in bytes));
+        let generic_count = reader.word(in bytes);
+        let generic_start = ast.gens.len();
+        for j in 0..generic_count {
+            let generic = Gn {
+                name: sym(in ctx, reader.word(in bytes)),
+                bound: wrapping_u8(reader.word(in bytes)),
+                is_row: reader.word(in bytes) != 0
             };
-            a.gens.push(g);
+            ast.gens.push(generic);
         }
-        let cn = r.word(in b);
-        let ca = a.caps.len();
-        for j in 0..cn {
-            a.caps.push(sym(in c, r.word(in b)));
-            a.caps.push(sym(in c, r.word(in b)));
+        let cap_count = reader.word(in bytes);
+        let cap_start = ast.caps.len();
+        for j in 0..cap_count {
+            ast.caps.push(sym(in ctx, reader.word(in bytes)));
+            ast.caps.push(sym(in ctx, reader.word(in bytes)));
         }
-        a
-            .fns
-            .push(
-                FnR {
-                    key: key,
-                    name: name,
-                    has_body: has_body,
-                    body: body,
-                    pa: pa,
-                    pn: pn,
-                    result: result,
-                    effects: effects,
-                    ga: ga,
-                    gn: gn,
-                    ca: ca,
-                    cn: cn,
-                    owner: name,
-                    xa: 0,
-                    xn: 0
-                }
+        ast.fns.push(
+            FnR {
+                key: key,
+                name: name,
+                has_body: has_body,
+                body: body,
+                param_start: param_start,
+                param_count: param_count,
+                result: result,
+                effects: effects,
+                generic_start: generic_start,
+                generic_count: generic_count,
+                cap_start: cap_start,
+                cap_count: cap_count,
+                owner: name,
+                ext_start: 0,
+                ext_count: 0
+            }
+        );
+        set_by_symbol(inout ast.fn_by_key, key, n32(inc(i)));
+    }
+    let effect_count = reader.word(in bytes);
+    for i in 0..effect_count {
+        let name = sym(in ctx, reader.word(in bytes));
+        let linear = reader.word(in bytes) != 0;
+        let generic_count = reader.word(in bytes);
+        let generic_start = ast.egens.len();
+        for j in 0..generic_count {
+            ast.egens.push(sym(in ctx, reader.word(in bytes)));
+        }
+        let op_count = reader.word(in bytes);
+        let op_start = ast.eops.len();
+        for j in 0..op_count {
+            let op = sym(in ctx, reader.word(in bytes));
+            let param_start = ast.pms.len();
+            let param_count = read_params(inout reader, in bytes, in ctx, inout ast);
+            let result = tyw(in ctx, reader.word(in bytes));
+            ast.eops.push(
+                Eop { name: op, param_start: param_start, param_count: param_count, result: result }
             );
-        set_by_symbol(inout a.fn_by_key, key, n32(inc(i)));
-    }
-    let ne = r.word(in b);
-    for i in 0..ne {
-        let name = sym(in c, r.word(in b));
-        let linear = r.word(in b) != 0;
-        let gn = r.word(in b);
-        let ga = a.egens.len();
-        for j in 0..gn {
-            a.egens.push(sym(in c, r.word(in b)));
         }
-        let on = r.word(in b);
-        let oa = a.eops.len();
-        for j in 0..on {
-            let op = sym(in c, r.word(in b));
-            let pa = a.pms.len();
-            let pn = read_params(inout r, in b, in c, inout a);
-            let result = tyw(in c, r.word(in b));
-            a.eops.push(Eop { name: op, pa: pa, pn: pn, result: result });
-        }
-        a.effs.push(Ef { name: name, linear: linear, ga: ga, gn: gn, oa: oa, on: on });
-        set_by_symbol(inout a.eff_by_name, name, n32(inc(i)));
+        ast.effs.push(
+            Ef {
+                name: name,
+                linear: linear,
+                generic_start: generic_start,
+                generic_count: generic_count,
+                op_start: op_start,
+                op_count: op_count
+            }
+        );
+        set_by_symbol(inout ast.eff_by_name, name, n32(inc(i)));
     }
-    let np = r.word(in b);
-    for i in 0..np {
-        read_pattern(inout r, in b, in c, inout a);
+    let pattern_count = reader.word(in bytes);
+    for i in 0..pattern_count {
+        read_pattern(inout reader, in bytes, in ctx, inout ast);
     }
-    let nx = r.word(in b);
-    for i in 0..nx {
-        read_expr(inout r, in b, in c, inout a);
+    let expr_count = reader.word(in bytes);
+    for i in 0..expr_count {
+        read_expr(inout reader, in bytes, in ctx, inout ast);
     }
-    a
+    ast
 }

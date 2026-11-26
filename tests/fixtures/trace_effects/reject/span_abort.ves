@@ -1,10 +1,6 @@
 // expect: E0402
 fn may(n: u64) -> u64 eff [Fail[u32]] {
-    if n == 0 {
-        Fail::raise(7)
-    } else {
-        n
-    }
+    if n == 0 { Fail::raise(7) } else { n }
 }
 
 fn work(n: u64) -> u64 eff [Trace, Fail[u32]] {

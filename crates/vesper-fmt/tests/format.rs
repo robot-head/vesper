@@ -102,11 +102,7 @@ fn f(a: u64) -> u64 {
     for i in 0..N {
         g(i)
     }
-    if a == N {
-        a
-    } else {
-        N
-    }
+    if a == N { a } else { N }
 }
 "
     );
@@ -538,7 +534,7 @@ fn large_module(items: usize) -> String {
     let mut source = String::new();
     for i in 0..items {
         source.push_str(&format!(
-            "// item {i}\nfn item_{i}(in x: u64, in y: u64) -> u64 {{\n    let pair = (x, y);\n    if x > y {{\n        add(x, y) * 2\n    }} else {{\n        y\n    }}\n}}\n\n"
+            "// item {i}\nfn item_{i}(in x: u64, in y: u64) -> u64 {{\n    let pair = (x, y);\n    if x > y {{ add(x, y) * 2 }} else {{ y }}\n}}\n\n"
         ));
     }
     source.pop();
@@ -745,14 +741,15 @@ fn wrapped_method_arguments_nest_under_the_method() {
         "fn f() { long_receiver_name.some_method_with_a_long_name(\
          first_argument_with_a_long_name, second_argument_with_a_long_name) }",
     );
+    // The call cannot fit on a line of its own, so it stays on the
+    // receiver's line, as in rustfmt, and only its arguments break.
     assert_eq!(
         output,
         "fn f() {
-    long_receiver_name
-        .some_method_with_a_long_name(
-            first_argument_with_a_long_name,
-            second_argument_with_a_long_name
-        )
+    long_receiver_name.some_method_with_a_long_name(
+        first_argument_with_a_long_name,
+        second_argument_with_a_long_name
+    )
 }
 "
     );
@@ -812,5 +809,162 @@ fn trailing_comma_before_block_comments_keeps_list_vertical() {
     assert_eq!(
         output,
         "fn f() {\n    call(\n        alpha,\n        beta,\n        /* keep */\n    )\n}\n"
+    );
+}
+#[test]
+fn member_chains_keep_a_short_receiver_and_overflow_their_one_call() {
+    // A receiver of at most four columns keeps its first step, as in rustfmt.
+    assert_eq!(
+        verify(&format!(
+            "fn f(){{self.caused(first_argument_name,second_argument_name,third_argument_name,{});}}",
+            "fourth_argument_name"
+        )),
+        "fn f() {
+    self.caused(
+        first_argument_name,
+        second_argument_name,
+        third_argument_name,
+        fourth_argument_name
+    );
+}
+"
+    );
+    // The chain's one call ends it and could not fit on a line of its own, so
+    // its arguments break and its dots stay on the receiver's line.
+    assert_eq!(
+        verify(
+            "fn f(){p.blocks.push(Blk{entry:entry,ia:first_index,in_n:n32(inn),out_tok:out_tok,pa:block_pa,pn:n32(bpn)});}"
+        ),
+        "fn f() {
+    p.blocks.push(
+        Blk {
+            entry: entry,
+            ia: first_index,
+            in_n: n32(inn),
+            out_tok: out_tok,
+            pa: block_pa,
+            pn: n32(bpn)
+        }
+    );
+}
+"
+    );
+    // A call that fits on a line of its own still moves there.
+    assert_eq!(
+        verify(
+            "fn f(){let ok=assoc_binds.alloc(AssocBindNode{name:value_name,ty:value_type,start:v.start,end:v.end});}"
+        ),
+        "fn f() {
+    let ok = assoc_binds
+        .alloc(AssocBindNode { name: value_name, ty: value_type, start: v.start, end: v.end });
+}
+"
+    );
+}
+#[test]
+fn short_if_else_expressions_stay_on_one_line_like_rustfmt() {
+    // An `if` used as a value, with one expression in each branch, stays on
+    // one line when it is at most 50 columns.
+    assert_eq!(
+        verify("fn f(a:u64)->u64{let x=if a>1{a}else{2};x}"),
+        "fn f(a: u64) -> u64 {
+    let x = if a > 1 { a } else { 2 };
+    x
+}
+"
+    );
+    // So does one in an argument or a match arm.
+    assert_eq!(
+        verify("fn f(a:bool,k:u8)->u64{g(if a{1}else{2},3);match k{0=>if a{1}else{2},_=>3}}"),
+        "fn f(a: bool, k: u8) -> u64 {
+    g(if a { 1 } else { 2 }, 3);
+    match k {
+        0 => if a { 1 } else { 2 },
+        _ => 3
+    }
+}
+"
+    );
+    // A longer one, or an `if` statement, stays vertical; a block's last
+    // expression is a value, so it stays on one line.
+    assert_eq!(
+        verify(
+            "fn f(a:u64)->u64{let x=if a>first_limit_value{a}else{second_limit_value};if a>1{g()}else{h()}if a>1{a}else{2}}"
+        ),
+        "fn f(a: u64) -> u64 {
+    let x = if a > first_limit_value {
+        a
+    } else {
+        second_limit_value
+    };
+    if a > 1 {
+        g()
+    } else {
+        h()
+    }
+    if a > 1 { a } else { 2 }
+}
+"
+    );
+}
+#[test]
+fn long_bitwise_or_chains_break_before_each_pipe_like_rustfmt() {
+    // A `|` chain too long for its line breaks before each `|`.
+    assert_eq!(
+        verify(&format!(
+            "fn f()->u64{{let m=first_flag_value_name|second_flag_value_name|third_flag_value_name|{};m}}",
+            "fourth_flag_value"
+        )),
+        "fn f() -> u64 {
+    let m = first_flag_value_name
+        | second_flag_value_name
+        | third_flag_value_name
+        | fourth_flag_value;
+    m
+}
+"
+    );
+    // Tighter operators stay whole on each line.
+    assert_eq!(
+        verify(&format!(
+            "fn f(b:u64,c:u64,d:u64)->u64{{((b&15)<<12)|((byte_at_index(c,1)&63)<<6)|({})}}",
+            "byte_at_index_of_the_input_bytes(d,2)&63"
+        )),
+        "fn f(b: u64, c: u64, d: u64) -> u64 {
+    ((b & 15) << 12)
+        | ((byte_at_index(c, 1) & 63) << 6)
+        | (byte_at_index_of_the_input_bytes(d, 2) & 63)
+}
+"
+    );
+    // A closure's parameters hug their pipes, and a short `|` keeps its
+    // place.
+    assert_eq!(
+        verify("fn f(a:u64)->u64{let g=sink|x|x+1;let h=|x:u64,y:u64|x+y;match a{1|2=>a|1,_=>0}}"),
+        "fn f(a: u64) -> u64 {
+    let g = sink |x| x + 1;
+    let h = |x: u64, y: u64| x + y;
+    match a {
+        1 | 2 => a | 1,
+        _ => 0
+    }
+}
+"
+    );
+}
+#[test]
+fn closure_pipes_keep_comments_and_empty_closures_apart() {
+    // A line comment before a closing pipe keeps its line break, and an
+    // empty `| |` keeps two pipes.
+    assert_eq!(
+        verify("fn f(){let g=|x // parameter\n| x;let h=| | 1;let k=|/* a */x|x;}"),
+        "fn f() {
+    let g = |x
+    // parameter
+    | x;
+    let h = | | 1;
+    let k = |/* a */ x| x;
+}
+"
     );
 }

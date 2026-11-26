@@ -958,12 +958,10 @@ pub fn program_words(program: &Program) -> Option<(Vec<u64>, Pool)> {
 // lowering): the pool kinds a Vesper pass creates rather than keeps:
 //
 // - 5, `SeqOp::Hoisted(access)`: label 0 `Get`, 1 `Set`, 2 `TryGet`,
-//   3 `TrySet`, `32 + w.code()` `Wide(w)` (numeric label, not a name).
+//   3 `TrySet` (numeric label, not a name).
 // - 6, `SeqOp::BoundsGuard`: label bit 0 `inclusive`, bit 1
-//   `form.negated`, bit 2 `form.scaled`, bits 8..12 `form.plus`, bits
-//   12..16 `form.minus`, bits 16..20 `form.outer_plus`, bits 20..24
-//   `form.outer_minus`, bits 24..32 `form.width` (0 for 1) (numeric
-//   label, not a name).
+//   `form.negated`, bits 8..16 `form.plus`, bits 16..24 `form.minus`
+//   (numeric label, not a name).
 // - 7, `SeqOp` (`POOL_MAKE_SEQ`): label is a name symbol holding the
 //   `Debug` string of the `SeqOp`.
 // - 8, `VectorOp` (`POOL_MAKE_VECTOR`): label is a name symbol holding
@@ -1137,10 +1135,7 @@ fn parse_seq_op(s: &str) -> Option<SeqOp> {
                 "Set" => Access::Set,
                 "TryGet" => Access::TryGet,
                 "TrySet" => Access::TrySet,
-                inner => (0..24)
-                    .filter_map(Wide::from_code)
-                    .find(|w| format!("Wide({w:?})") == inner)
-                    .map(Access::Wide)?,
+                _ => return None,
             })
         }
         _ if s.starts_with("BoundsGuard { ") && s.ends_with(" }") => {
@@ -1154,10 +1149,6 @@ fn parse_seq_op(s: &str) -> Option<SeqOp> {
             let negated = parse_bool(parts.next()?.strip_prefix("negated: ")?)?;
             let plus: u8 = parts.next()?.strip_prefix("plus: ")?.parse().ok()?;
             let minus: u8 = parts.next()?.strip_prefix("minus: ")?.parse().ok()?;
-            let scaled = parse_bool(parts.next()?.strip_prefix("scaled: ")?)?;
-            let outer_plus: u8 = parts.next()?.strip_prefix("outer_plus: ")?.parse().ok()?;
-            let outer_minus: u8 = parts.next()?.strip_prefix("outer_minus: ")?.parse().ok()?;
-            let width: u8 = parts.next()?.strip_prefix("width: ")?.parse().ok()?;
             if parts.next().is_some() {
                 return None;
             }
@@ -1167,10 +1158,6 @@ fn parse_seq_op(s: &str) -> Option<SeqOp> {
                     negated,
                     plus,
                     minus,
-                    scaled,
-                    outer_plus,
-                    outer_minus,
-                    width,
                 },
             }
         }
@@ -1382,28 +1369,20 @@ fn parse_fip_op(s: &str) -> Option<FipOp> {
 /// The payload a Vesper pass made for pool `kind` with `label`, or `None`
 /// for an entry of the input pool.
 fn made_payload(kind: u64, label: u64, names: &[String]) -> Option<Payload> {
-    use vesper::seq::{Access, IndexForm, Wide};
+    use vesper::seq::{Access, IndexForm};
     match kind {
         5 => Some(Payload::Seq(SeqOp::Hoisted(match label {
             0 => Access::Get,
             1 => Access::Set,
             2 => Access::TryGet,
-            32..56 => Access::Wide(Wide::from_code((label - 32) as u8)?),
             _ => Access::TrySet,
         }))),
         6 => Some(Payload::Seq(SeqOp::BoundsGuard {
             inclusive: label & 1 != 0,
             form: IndexForm {
                 negated: label & 2 != 0,
-                plus: ((label >> 8) & 15) as u8,
-                minus: ((label >> 12) & 15) as u8,
-                scaled: label & 4 != 0,
-                outer_plus: ((label >> 16) & 15) as u8,
-                outer_minus: ((label >> 20) & 15) as u8,
-                width: match ((label >> 24) & 255) as u8 {
-                    0 => 1,
-                    w => w,
-                },
+                plus: (label >> 8) as u8,
+                minus: (label >> 16) as u8,
             },
         })),
         POOL_MAKE_SEQ => names

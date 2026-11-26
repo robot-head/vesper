@@ -95,11 +95,7 @@ fn parse_u64(in t: Slice[u8], s: u64, e: u64) -> Option[u64] {
 // (negative, magnitude) of an `i64`.
 fn parse_i64(in t: Slice[u8], s: u64, e: u64) -> Option[(bool, u64)] {
     let neg = at(in t, s) == Ascii::Minus;
-    let from = if neg {
-        wrapping_add(s, 1)
-    } else {
-        s
-    };
+    let from = if neg { wrapping_add(s, 1) } else { s };
     match digits_u64(in t, from, e) {
         Option::Some(m) => {
             if neg {
@@ -344,21 +340,17 @@ fn utf8_bytes(c: u64) -> (u64, u64) {
     } else if c < Utf8::FourByteMin {
         (
             3,
-            (Utf8::Lead3Tag | (c >> 12)) | bit_shl(
-                Utf8::Cont | ((c >> 6) & Utf8::ContPayload),
-                8
-            ) | bit_shl(Utf8::Cont | (c & Utf8::ContPayload), 16)
+            (Utf8::Lead3Tag | (c >> 12))
+                | bit_shl(Utf8::Cont | ((c >> 6) & Utf8::ContPayload), 8)
+                | bit_shl(Utf8::Cont | (c & Utf8::ContPayload), 16)
         )
     } else {
         (
             4,
-            (Utf8::Lead4Tag | (c >> 18)) | bit_shl(
-                Utf8::Cont | ((c >> 12) & Utf8::ContPayload),
-                8
-            ) | bit_shl(Utf8::Cont | ((c >> 6) & Utf8::ContPayload), 16) | bit_shl(
-                Utf8::Cont | (c & Utf8::ContPayload),
-                24
-            )
+            (Utf8::Lead4Tag | (c >> 18))
+                | bit_shl(Utf8::Cont | ((c >> 12) & Utf8::ContPayload), 8)
+                | bit_shl(Utf8::Cont | ((c >> 6) & Utf8::ContPayload), 16)
+                | bit_shl(Utf8::Cont | (c & Utf8::ContPayload), 24)
         )
     }
 }

@@ -1,0 +1,44 @@
+"""Refresh the apt package index on CI, riding out Ubuntu mirror syncs."""
+
+load("./lib/process.axl", "command", "exit_code")
+
+_ATTEMPTS = 3
+_PAUSE_SECONDS = "60"
+
+def update_with(run, pause, attempts) -> int:
+    """Run `apt-get update` up to `attempts` times, pausing between tries.
+
+    A mirror that is mid-sync serves index files whose hash or size does not
+    match the release file (`Hash Sum mismatch`, `File has unexpected size`);
+    it settles within a minute or two, so a short pause and retry is enough.
+    """
+    code = 0
+    for attempt in range(attempts):
+        if attempt:
+            pause()
+        code = run()
+        if code == 0:
+            return 0
+    return code
+
+def _apt_update(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+
+    def run():
+        return exit_code(command(ctx, "sudo", ["apt-get", "update", "-o", "Acquire::Retries=5"], root).status())
+
+    def pause():
+        ctx.std.io.stderr.write("apt-update: retrying in %ss (mirror sync?)\n" % _PAUSE_SECONDS)
+        command(ctx, "sleep", [_PAUSE_SECONDS], root).status()
+
+    code = update_with(run, pause, _ATTEMPTS)
+    if code:
+        ctx.std.process.exit(code, "apt-get update failed %d times" % _ATTEMPTS)
+    return 0
+
+apt_update = task(
+    kind = "apt-update",
+    group = ["ci"],
+    summary = "Refresh the apt index, retrying while an Ubuntu mirror syncs",
+    implementation = _apt_update,
+)

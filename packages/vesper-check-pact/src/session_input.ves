@@ -345,11 +345,7 @@ pub fn cmp_sym_ascii(in names: Names, a: u32, b: u32) -> u8 {
     }
     let na = names.size(a);
     let nb = names.size(b);
-    let min_n = if na < nb {
-        na
-    } else {
-        nb
-    };
+    let min_n = if na < nb { na } else { nb };
     for i in 0..min_n {
         let ba = names.byte(a, i);
         let bb = names.byte(b, i);

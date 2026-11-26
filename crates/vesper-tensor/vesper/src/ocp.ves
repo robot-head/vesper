@@ -63,27 +63,15 @@ pub fn e8m0_half(e: u8) -> f32 eff [Fail[ArithOverflow]] {
 }
 
 fn mantissa_bits(e5m2: bool) -> i32 {
-    if e5m2 {
-        2
-    } else {
-        3
-    }
+    if e5m2 { 2 } else { 3 }
 }
 
 fn bias(e5m2: bool) -> i32 {
-    if e5m2 {
-        15
-    } else {
-        7
-    }
+    if e5m2 { 15 } else { 7 }
 }
 
 pub fn max_finite(e5m2: bool) -> f32 {
-    if e5m2 {
-        57344.0
-    } else {
-        448.0
-    }
+    if e5m2 { 57344.0 } else { 448.0 }
 }
 
 // `Fp8::decode_exact`: NaN codes give the quiet NaN, E5M2 infinity codes
@@ -145,11 +133,7 @@ pub fn fp8_encode(e5m2: bool, value: f32) -> u8 eff [Fail[ArithOverflow]] {
         max
     } else {
         let lg = floor_log2(abs(value));
-        let e = if lg > emin {
-            lg
-        } else {
-            emin
-        };
+        let e = if lg > emin { lg } else { emin };
         let quantum = pow2(e - m_bits);
         let scaled = a / quantum;
         let mut r = floor(scaled);
@@ -158,11 +142,7 @@ pub fn fp8_encode(e5m2: bool, value: f32) -> u8 eff [Fail[ArithOverflow]] {
             r = r + 1.0;
         }
         let q = r * quantum;
-        if q < max {
-            q
-        } else {
-            max
-        }
+        if q < max { q } else { max }
     };
     if rounded == 0.0 {
         return sign;

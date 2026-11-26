@@ -4,11 +4,7 @@
 // const-time: a branch on a secret parameter (planted) and a secret that only
 // flows to the result (clean).
 fn select(secret: u64, a: u64, b: u64) -> u64 {
-    if secret == 0 {
-        a
-    } else {
-        b
-    }
+    if secret == 0 { a } else { b }
 }
 
 fn forward(secret: u64, a: u64) -> u64 {
@@ -17,11 +13,7 @@ fn forward(secret: u64, a: u64) -> u64 {
 
 // stack and realtime: unbounded recursion (planted).
 fn count(n: u64) -> u64 eff [Fail[ArithOverflow]] {
-    if n == 0 {
-        0
-    } else {
-        count(n - 1)
-    }
+    if n == 0 { 0 } else { count(n - 1) }
 }
 
 // detfloat and realtime: a remainder lowers to an imported `fmod` call.

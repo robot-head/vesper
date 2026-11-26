@@ -94,9 +94,9 @@ pub fn decode_fp16(bits: u16) -> f32 eff [Fail[ArithOverflow]] {
         } else {
             let shift = clz32(fraction) - F16_SUBNORMAL_CLZ;
             let normalized = fraction << shift;
-            sign | ((F16_SUBNORMAL_EXP - shift) << F32_MANT_BITS) | (
-                (normalized & widen_u32(F16_MANT_MASK)) << F32_TO_F16_SHIFT
-            )
+            sign
+                | ((F16_SUBNORMAL_EXP - shift) << F32_MANT_BITS)
+                | ((normalized & widen_u32(F16_MANT_MASK)) << F32_TO_F16_SHIFT)
         }
     } else if exponent == widen_u32(F16_EXP_FIELD) {
         sign | F32_EXP_MASK | (fraction << F32_TO_F16_SHIFT)
@@ -143,9 +143,8 @@ pub fn encode_fp16(value: f32) -> u16 eff [Fail[ArithOverflow]] {
         let shift = wrapping_u32(F16_SUBNORMAL_SHIFT - e);
         return sign | wrapping_u16(round_shift(m, shift));
     }
-    sign | wrapping_u16(
-        round_shift((wrapping_u32(e) << F32_MANT_BITS) | mantissa, F32_TO_F16_SHIFT)
-    )
+    sign
+        | wrapping_u16(round_shift((wrapping_u32(e) << F32_MANT_BITS) | mantissa, F32_TO_F16_SHIFT))
 }
 
 pub fn encode_bf16(value: f32) -> u16 eff [Fail[ArithOverflow]] {

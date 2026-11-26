@@ -85,14 +85,7 @@ pub fn encode_validation(inout l: L, si: u64) {
         ids(inout l, true, g.feat_at, g.feat_n);
         ids(inout l, false, m.ceil_at, m.ceil_n);
         ids(inout l, true, g.req_at, g.req_n);
-        w(
-            inout l,
-            if m.forbid {
-                1
-            } else {
-                0
-            }
-        );
+        w(inout l, if m.forbid { 1 } else { 0 });
         w(inout l, g.e_n);
         for e in 0..g.e_n {
             let x = sw(in l.ge, add(g.e_at, e));
@@ -121,14 +114,7 @@ pub fn encode_validation(inout l: L, si: u64) {
 pub fn encode_upgrade(inout l: L) {
     table(inout l);
     let n = l.queue.len();
-    w(
-        inout l,
-        if n == 0 {
-            1
-        } else {
-            0
-        }
-    );
+    w(inout l, if n == 0 { 1 } else { 0 });
     w(inout l, n);
     for i in 0..n {
         let d = diag(in l.udiags, sw(in l.queue, i));
@@ -155,14 +141,7 @@ pub fn encode_upgrade(inout l: L) {
         cid_list(inout l, c.rem_at, c.rem_n);
         w(inout l, c.bf);
         w(inout l, c.af);
-        w(
-            inout l,
-            if c.relaxed {
-                1
-            } else {
-                0
-            }
-        );
+        w(inout l, if c.relaxed { 1 } else { 0 });
     }
 }
 

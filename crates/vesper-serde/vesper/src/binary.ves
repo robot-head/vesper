@@ -178,11 +178,10 @@ pub fn vbyte_encode(
         let old = byte(in out, c);
         out.try_set(c, wrapping_u8(old | tag));
         for k in 0..w {
-            out
-                .try_set(
-                    wrapping_add(pos, k),
-                    wrapping_u8(bit_shr(v, wrapping_mul(k, 8)) & BYTE_MASK)
-                );
+            out.try_set(
+                wrapping_add(pos, k),
+                wrapping_u8(bit_shr(v, wrapping_mul(k, 8)) & BYTE_MASK)
+            );
         }
         pos = wrapping_add(pos, w);
     }
@@ -561,11 +560,10 @@ pub fn archive_encode(
             put_relative(inout out, wrapping_add(offset, NODE_LABEL), cursor);
             put_u32(inout out, wrapping_add(offset, NODE_LABEL_COUNT), label_len);
             for k in 0..label_len {
-                out
-                    .try_set(
-                        wrapping_add(cursor, k),
-                        wrapping_u8(byte(in labels, wrapping_add(label_off, k)))
-                    );
+                out.try_set(
+                    wrapping_add(cursor, k),
+                    wrapping_u8(byte(in labels, wrapping_add(label_off, k)))
+                );
             }
             cursor = wrapping_add(cursor, label_len);
         }

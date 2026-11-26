@@ -138,9 +138,5 @@ pub fn b8(in buf: Slice[u8], at: u64) -> u64 {
 
 pub fn sat_add(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
-    if s < a {
-        U64_MAX
-    } else {
-        s
-    }
+    if s < a { U64_MAX } else { s }
 }

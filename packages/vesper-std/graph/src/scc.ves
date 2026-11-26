@@ -47,11 +47,7 @@ impl Scc {
 }
 
 fn min32(a: u32, b: u32) -> u32 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // The discovery number of a node `scc` has not reached yet.
@@ -242,21 +238,13 @@ test {
             if expected.try_byte_at(node) != Option::Some(digit) {
                 return false;
             }
-            let member_index = if close_cycle {
-                widen_u64(id)
-            } else {
-                0
-            };
+            let member_index = if close_cycle { widen_u64(id) } else { 0 };
             let expected_member = if close_cycle {
                 wrapping_sub(nodes, 1)
             } else {
                 wrapping_u32(node)
             };
-            let size = if close_cycle {
-                widen_u64(nodes)
-            } else {
-                1
-            };
+            let size = if close_cycle { widen_u64(nodes) } else { 1 };
             if result.member(id, member_index) != expected_member
                 || result.size(id) != size
                 || result.member(id, size) != 4294967295 {

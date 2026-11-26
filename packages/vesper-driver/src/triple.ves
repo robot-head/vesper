@@ -191,11 +191,7 @@ fn version_ok(in s: Slice[u8]) -> bool {
     let mut part: u64 = 0;
     for i in 0..wrapping_add(s.len(), 1) {
         if i == s.len() || byte_at(in s, i) == 46 {
-            let max = if part == 0 {
-                65535
-            } else {
-                255
-            };
+            let max = if part == 0 { 65535 } else { 255 };
             if part > 2 || !parses_unsigned(in s[start..i], max) {
                 return false;
             }

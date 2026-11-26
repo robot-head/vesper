@@ -22,6 +22,7 @@ use self::doc_links::{DocFacts, WordReader, doc_facts_new, doc_target, read_doc_
 use self::proof::{proof_models};
 use self::ownership::{lens_facts, lens_requests, lens_view};
 use self::repair::{lens_repair};
+use self::proof_lenses::{proof_lenses};
 use self::hover::{Facts, facts_new, fact_function, fact_param, hover_answer};
 use self::nav::{
     Ix, MAX_DOCUMENTS, MAX_OUTPUT_BYTES, MAX_QUERY_BYTES, MAX_SYMBOLS, MAX_URI_BYTES, ERR_NONE,
@@ -474,17 +475,7 @@ pub fn lsp_hovers(in input: Str) -> ChunkSeq[u64] {
         let end = word(in b, inout r);
         let has = word(in b, inout r);
         let result = map_type(in f, word(in b, inout r));
-        fact_function(
-            inout f,
-            name,
-            start,
-            end,
-            if has == 1 {
-                result
-            } else {
-                4294967295
-            }
-        );
+        fact_function(inout f, name, start, end, if has == 1 { result } else { 4294967295 });
         let np = word(in b, inout r);
         for j in 0..np {
             let ps = word(in b, inout r);
@@ -576,4 +567,12 @@ pub fn lsp_lens_view(in input: Str) -> ChunkSeq[u64] {
 // ownership.ves).
 pub fn lsp_lens_requests(in input: Str) -> ChunkSeq[u64] {
     lens_requests(in input)
+}
+
+// Proof code lenses, `vesper.proofAudit` command results and background
+// `vesper/proofStatus` notifications over the bounded proof ledgers
+// (src/lsp/session/lens_requests.rs `code_lenses_of`, `record_of`,
+// `proof_result_of`, `proof_status_of`; proof_lenses.ves).
+pub fn lsp_proof_lenses(in input: Str) -> ChunkSeq[u64] {
+    proof_lenses(in input)
 }

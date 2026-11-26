@@ -12,11 +12,7 @@ fn mix(a: u64) -> u64 eff [ConstTime] {
 fn leak(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
     let Secret { value } = s;
     let m = mix(value);
-    if m == 0 {
-        s
-    } else {
-        s
-    }
+    if m == 0 { s } else { s }
 }
 
 fn main() -> u64 {

@@ -59,16 +59,16 @@ const SC_I32: u8 = 9;
 const SC_I16: u8 = 10;
 const SC_I8: u8 = 11;
 
-fn sc_signed(s: u8) -> bool {
-    s == SC_I64 || s == SC_I32 || s == SC_I16 || s == SC_I8
+fn sc_signed(scalar: u8) -> bool {
+    scalar == SC_I64 || scalar == SC_I32 || scalar == SC_I16 || scalar == SC_I8
 }
 
-fn sc_bits(s: u8) -> u64 {
-    if s == SC_U8 || s == SC_I8 {
+fn sc_bits(scalar: u8) -> u64 {
+    if scalar == SC_U8 || scalar == SC_I8 {
         8
-    } else if s == SC_U16 || s == SC_I16 {
+    } else if scalar == SC_U16 || scalar == SC_I16 {
         16
-    } else if s == SC_U32 || s == SC_I32 {
+    } else if scalar == SC_U32 || scalar == SC_I32 {
         32
     } else {
         64
@@ -76,268 +76,262 @@ fn sc_bits(s: u8) -> u64 {
 }
 
 fn i64s(n: u64) -> ChunkSeq[ValTy] {
-    let mut v = ChunkSeq::new[ValTy]();
+    let mut tys = ChunkSeq::new[ValTy]();
     for _i in 0..n {
-        v.push(vt(VT_I64));
+        tys.push(vt(VT_I64));
     }
-    v
+    tys
 }
 
-// `c` loads word `k` (0 low, 1 high) of the block in local `p`.
-fn word(inout c: Code, p: u32, k: u64) {
-    c.get(p);
-    c.op(OP_I32_WRAP_I64);
-    c
-        .load(
-            if k == 0 {
-                0
-            } else {
-                8
-            }
-        );
+// `code` loads word `word_index` (0 low, 1 high) of the block in local `block`.
+fn word(inout code: Code, block: u32, word_index: u64) {
+    code.get(block);
+    code.op(OP_I32_WRAP_I64);
+    code.load(if word_index == 0 { 0 } else { 8 });
 }
 
 impl L {
-    // Is `t` a `u128` or `i128`?
-    pub fn is_u128(inout self, t: u32) -> bool {
-        let ty = self.cx.default_ty(t);
-        let node = self.cx.types.node(ty);
-        node.kind == TyKind::Named && (node.name == self.cx.s.u128_ || node.name == self.cx.s.i128_)
+    // Is `raw_ty` a `u128` or `i128`?
+    pub fn is_u128(inout self, raw_ty: u32) -> bool {
+        let ty = self.ctx.default_ty(raw_ty);
+        let node = self.ctx.types.node(ty);
+        node.kind == TyKind::Named
+            && (node.name == self.ctx.syms.u128_ || node.name == self.ctx.syms.i128_)
     }
 
-    // Is `t` an `i128`?
-    pub fn is_i128(inout self, t: u32) -> bool {
-        let ty = self.cx.default_ty(t);
-        let node = self.cx.types.node(ty);
-        node.kind == TyKind::Named && node.name == self.cx.s.i128_
+    // Is `raw_ty` an `i128`?
+    pub fn is_i128(inout self, raw_ty: u32) -> bool {
+        let ty = self.ctx.default_ty(raw_ty);
+        let node = self.ctx.types.node(ty);
+        node.kind == TyKind::Named && node.name == self.ctx.syms.i128_
     }
 
     // A fresh block holding locals `lo`, `hi`.
     fn wide_block(inout self, lo: u32, hi: u32) -> u32 {
-        let b = self.alloc_block(16);
-        self.store(b, 0, lo);
-        self.store(b, 8, hi);
-        b
+        let block = self.alloc_block(16);
+        self.store(block, 0, lo);
+        self.store(block, 8, hi);
+        block
     }
 
-    fn word_of(inout self, p: u32, k: u64) -> u32 {
-        let d = self.local();
-        word(inout self.e.code, p, k);
-        self.e.code.set(d);
-        d
+    fn word_of(inout self, block: u32, word_index: u64) -> u32 {
+        let word_local = self.local();
+        word(inout self.cur_fn.code, block, word_index);
+        self.cur_fn.code.set(word_local);
+        word_local
     }
 
     // Two's complement negation of `(lo, hi)` into a fresh 16-byte block.
     fn wide_neg_words(inout self, lo: u32, hi: u32) -> u32 {
-        let nlo = self.local();
-        let nhi = self.local();
-        self.e.code.i64_const(0);
-        self.e.code.get(lo);
-        self.e.code.op(OP_I64_SUB);
-        self.e.code.set(nlo);
-        self.e.code.i64_const(0);
-        self.e.code.get(hi);
-        self.e.code.op(OP_I64_SUB);
-        self.e.code.get(lo);
-        self.e.code.op(OP_I64_EQZ);
-        self.e.code.op(OP_I32_EQZ);
-        self.e.code.op(OP_I64_EXTEND_I32_U);
-        self.e.code.op(OP_I64_SUB);
-        self.e.code.set(nhi);
-        self.wide_block(nlo, nhi)
+        let neg_lo = self.local();
+        let neg_hi = self.local();
+        self.cur_fn.code.i64_const(0);
+        self.cur_fn.code.get(lo);
+        self.cur_fn.code.op(OP_I64_SUB);
+        self.cur_fn.code.set(neg_lo);
+        self.cur_fn.code.i64_const(0);
+        self.cur_fn.code.get(hi);
+        self.cur_fn.code.op(OP_I64_SUB);
+        self.cur_fn.code.get(lo);
+        self.cur_fn.code.op(OP_I64_EQZ);
+        self.cur_fn.code.op(OP_I32_EQZ);
+        self.cur_fn.code.op(OP_I64_EXTEND_I32_U);
+        self.cur_fn.code.op(OP_I64_SUB);
+        self.cur_fn.code.set(neg_hi);
+        self.wide_block(neg_lo, neg_hi)
     }
 
     // Emit `i128::MIN` check for `(lo, hi)`: leaves an `i32` (1 if MIN).
     fn is_i128_min(inout self, lo: u32, hi: u32) {
-        self.e.code.get(lo);
-        self.e.code.op(OP_I64_EQZ);
-        self.e.code.get(hi);
-        self.e.code.u64_const(9223372036854775808);
-        self.e.code.op(OP_I64_EQ);
-        self.e.code.op(OP_I32_AND);
+        self.cur_fn.code.get(lo);
+        self.cur_fn.code.op(OP_I64_EQZ);
+        self.cur_fn.code.get(hi);
+        self.cur_fn.code.u64_const(9223372036854775808);
+        self.cur_fn.code.op(OP_I64_EQ);
+        self.cur_fn.code.op(OP_I32_AND);
     }
 
-    // A literal pattern `hi:lo` against the `u128` block `v`, which the
+    // A literal pattern `hi:lo` against the `u128` block `value`, which the
     // caller pushed: an `i32` condition.
-    pub fn wide_lit_eq(inout self, v: u32, lo: u64, hi: u64) {
-        self.e.code.op(OP_DROP);
-        word(inout self.e.code, v, 0);
-        self.e.code.u64_const(lo);
-        self.e.code.op(OP_I64_EQ);
-        word(inout self.e.code, v, 1);
-        self.e.code.u64_const(hi);
-        self.e.code.op(OP_I64_EQ);
-        self.e.code.op(OP_I32_AND);
+    pub fn wide_lit_eq(inout self, value: u32, lo: u64, hi: u64) {
+        self.cur_fn.code.op(OP_DROP);
+        word(inout self.cur_fn.code, value, 0);
+        self.cur_fn.code.u64_const(lo);
+        self.cur_fn.code.op(OP_I64_EQ);
+        word(inout self.cur_fn.code, value, 1);
+        self.cur_fn.code.u64_const(hi);
+        self.cur_fn.code.op(OP_I64_EQ);
+        self.cur_fn.code.op(OP_I32_AND);
     }
 
-    // A `u128` literal `hi:lo` into `dv`.
-    pub fn wide_const(inout self, dv: u64, lo: u64, hi: u64) {
-        let l = self.local();
-        let h = self.local();
-        self.e.code.u64_const(lo);
-        self.e.code.set(l);
-        self.e.code.u64_const(hi);
-        self.e.code.set(h);
-        let b = self.wide_block(l, h);
-        self.set_value(dv, b);
+    // A `u128` literal `hi:lo` into `dest_val`.
+    pub fn wide_const(inout self, dest_val: u64, lo: u64, hi: u64) {
+        let lo_local = self.local();
+        let hi_local = self.local();
+        self.cur_fn.code.u64_const(lo);
+        self.cur_fn.code.set(lo_local);
+        self.cur_fn.code.u64_const(hi);
+        self.cur_fn.code.set(hi_local);
+        let block = self.wide_block(lo_local, hi_local);
+        self.set_value(dest_val, block);
     }
 
     // A unary operation with a `u128` operand or result; false when
     // neither is one.
     pub fn wide_unary(
         inout self,
-        dv: u64,
-        opn: u32,
-        x: u32,
+        dest_val: u64,
+        op_sym: u32,
+        operand: u32,
         from: u32,
         to: u32
     ) -> bool eff [Fail[WErr]] {
-        let wf = self.is_u128(from);
-        let wt = self.is_u128(to);
-        if self.is_op(opn, "~") && !wf {
+        let from_wide = self.is_u128(from);
+        let to_wide = self.is_u128(to);
+        if self.is_op(op_sym, "~") && !from_wide {
             // bitwise not of an integer word, within its width
-            let sc = self.scalar_of(from);
-            let d = self.local();
-            self.e.code.get(x);
-            if sc == 3 {
-                self.e.code.i64_const(255);
-            } else if sc == 8 {
-                self.e.code.i64_const(65535);
-            } else if sc == 2 {
-                self.e.code.u64_const(LOW32);
-            } else if sc == 0 || sc == 1 || sc == 9 || sc == 10 || sc == 11 {
-                self.e.code.i64_const(-1);
+            let scalar = self.scalar_of(from);
+            let dest = self.local();
+            self.cur_fn.code.get(operand);
+            if scalar == 3 {
+                self.cur_fn.code.i64_const(255);
+            } else if scalar == 8 {
+                self.cur_fn.code.i64_const(65535);
+            } else if scalar == 2 {
+                self.cur_fn.code.u64_const(LOW32);
+            } else if scalar == 0 || scalar == 1 || scalar == 9 || scalar == 10 || scalar == 11 {
+                self.cur_fn.code.i64_const(-1);
             } else {
                 Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 249));
             }
-            self.e.code.op(OP_I64_XOR);
-            self.e.code.set(d);
-            self.set_value(dv, d);
+            self.cur_fn.code.op(OP_I64_XOR);
+            self.cur_fn.code.set(dest);
+            self.set_value(dest_val, dest);
             return true;
         }
-        if !wf && !wt {
+        if !from_wide && !to_wide {
             return false;
         }
-        if self.is_op(opn, "~") && wf {
+        if self.is_op(op_sym, "~") && from_wide {
             let lo = self.local();
             let hi = self.local();
-            word(inout self.e.code, x, 0);
-            self.e.code.i64_const(-1);
-            self.e.code.op(OP_I64_XOR);
-            self.e.code.set(lo);
-            word(inout self.e.code, x, 1);
-            self.e.code.i64_const(-1);
-            self.e.code.op(OP_I64_XOR);
-            self.e.code.set(hi);
-            let b = self.wide_block(lo, hi);
-            self.set_value(dv, b);
-        } else if self.is_op(opn, "-") && wf {
-            let lo = self.word_of(x, 0);
-            let hi = self.word_of(x, 1);
+            word(inout self.cur_fn.code, operand, 0);
+            self.cur_fn.code.i64_const(-1);
+            self.cur_fn.code.op(OP_I64_XOR);
+            self.cur_fn.code.set(lo);
+            word(inout self.cur_fn.code, operand, 1);
+            self.cur_fn.code.i64_const(-1);
+            self.cur_fn.code.op(OP_I64_XOR);
+            self.cur_fn.code.set(hi);
+            let block = self.wide_block(lo, hi);
+            self.set_value(dest_val, block);
+        } else if self.is_op(op_sym, "-") && from_wide {
+            let lo = self.word_of(operand, 0);
+            let hi = self.word_of(operand, 1);
             if self.is_i128(from) {
                 self.is_i128_min(lo, hi);
-                self.e.code.open(OP_IF);
+                self.cur_fn.code.open(OP_IF);
                 self.raise_overflow();
-                self.e.code.op(OP_END);
-                let b = self.wide_neg_words(lo, hi);
-                self.set_value(dv, b);
+                self.cur_fn.code.op(OP_END);
+                let block = self.wide_neg_words(lo, hi);
+                self.set_value(dest_val, block);
             } else {
-                self.e.code.get(lo);
-                self.e.code.get(hi);
-                self.e.code.op(OP_I64_OR);
-                self.e.code.op(OP_I64_EQZ);
-                self.e.code.op(OP_I32_EQZ);
-                self.e.code.open(OP_IF);
+                self.cur_fn.code.get(lo);
+                self.cur_fn.code.get(hi);
+                self.cur_fn.code.op(OP_I64_OR);
+                self.cur_fn.code.op(OP_I64_EQZ);
+                self.cur_fn.code.op(OP_I32_EQZ);
+                self.cur_fn.code.open(OP_IF);
                 self.raise_overflow();
-                self.e.code.op(OP_END);
-                let z = self.const_local(0);
-                let b = self.wide_block(z, z);
-                self.set_value(dv, b);
+                self.cur_fn.code.op(OP_END);
+                let zero = self.const_local(0);
+                let block = self.wide_block(zero, zero);
+                self.set_value(dest_val, block);
             }
         } else if (
-            self.is_op(opn, "widen_u128")
-                || self.is_op(opn, "widen_i128")
-                || self.is_op(opn, "wrapping_u128")
-                || self.is_op(opn, "wrapping_i128")
+            self.is_op(op_sym, "widen_u128")
+                || self.is_op(op_sym, "widen_i128")
+                || self.is_op(op_sym, "wrapping_u128")
+                || self.is_op(op_sym, "wrapping_i128")
         )
-            && wf {
-            self.set_value(dv, x);
-        } else if self.is_op(opn, "widen_u128")
-            || self.is_op(opn, "widen_i128")
-            || self.is_op(opn, "wrapping_u128")
-            || self.is_op(opn, "wrapping_i128") {
-            let sc = self.scalar_of(from);
-            let hi = if sc_signed(sc) {
-                let h = self.local();
-                self.e.code.get(x);
-                self.e.code.i64_const(63);
-                self.e.code.op(OP_I64_SHR_S);
-                self.e.code.set(h);
-                h
+            && from_wide {
+            self.set_value(dest_val, operand);
+        } else if self.is_op(op_sym, "widen_u128")
+            || self.is_op(op_sym, "widen_i128")
+            || self.is_op(op_sym, "wrapping_u128")
+            || self.is_op(op_sym, "wrapping_i128") {
+            let scalar = self.scalar_of(from);
+            let hi = if sc_signed(scalar) {
+                let sign_word = self.local();
+                self.cur_fn.code.get(operand);
+                self.cur_fn.code.i64_const(63);
+                self.cur_fn.code.op(OP_I64_SHR_S);
+                self.cur_fn.code.set(sign_word);
+                sign_word
             } else {
                 self.const_local(0)
             };
-            let b = self.wide_block(x, hi);
-            self.set_value(dv, b);
-        } else if (self.is_op(opn, "wrapping_u64") || self.is_op(opn, "wrapping_i64"))
-            && wf
-            && !wt {
-            let lo = self.word_of(x, 0);
-            self.set_value(dv, lo);
+            let block = self.wide_block(operand, hi);
+            self.set_value(dest_val, block);
+        } else if (self.is_op(op_sym, "wrapping_u64") || self.is_op(op_sym, "wrapping_i64"))
+            && from_wide
+            && !to_wide {
+            let lo = self.word_of(operand, 0);
+            self.set_value(dest_val, lo);
         } else if (
-            self.is_op(opn, "wrapping_u32")
-                || self.is_op(opn, "wrapping_u16")
-                || self.is_op(opn, "wrapping_u8")
-                || self.is_op(opn, "wrapping_i32")
-                || self.is_op(opn, "wrapping_i16")
-                || self.is_op(opn, "wrapping_i8")
+            self.is_op(op_sym, "wrapping_u32")
+                || self.is_op(op_sym, "wrapping_u16")
+                || self.is_op(op_sym, "wrapping_u8")
+                || self.is_op(op_sym, "wrapping_i32")
+                || self.is_op(op_sym, "wrapping_i16")
+                || self.is_op(op_sym, "wrapping_i8")
         )
-            && wf
-            && !wt {
-            let lo = self.word_of(x, 0);
-            let d = self.dest(dv);
-            let sc = self.scalar_of(to);
-            let bits = sc_bits(sc);
-            self.e.code.get(lo);
-            if sc_signed(sc) {
-                let sh = wrapping_sub(64, bits);
-                self.e.code.u64_const(sh);
-                self.e.code.op(OP_I64_SHL);
-                self.e.code.u64_const(sh);
-                self.e.code.op(OP_I64_SHR_S);
+            && from_wide
+            && !to_wide {
+            let lo = self.word_of(operand, 0);
+            let dest = self.dest(dest_val);
+            let scalar = self.scalar_of(to);
+            let bits = sc_bits(scalar);
+            self.cur_fn.code.get(lo);
+            if sc_signed(scalar) {
+                let shift = wrapping_sub(64, bits);
+                self.cur_fn.code.u64_const(shift);
+                self.cur_fn.code.op(OP_I64_SHL);
+                self.cur_fn.code.u64_const(shift);
+                self.cur_fn.code.op(OP_I64_SHR_S);
             } else if bits == 32 {
-                self.e.code.u64_const(LOW32);
-                self.e.code.op(OP_I64_AND);
+                self.cur_fn.code.u64_const(LOW32);
+                self.cur_fn.code.op(OP_I64_AND);
             } else if bits == 16 {
-                self.e.code.i64_const(65535);
-                self.e.code.op(OP_I64_AND);
+                self.cur_fn.code.i64_const(65535);
+                self.cur_fn.code.op(OP_I64_AND);
             } else {
-                self.e.code.i64_const(255);
-                self.e.code.op(OP_I64_AND);
+                self.cur_fn.code.i64_const(255);
+                self.cur_fn.code.op(OP_I64_AND);
             }
-            self.e.code.set(d);
-        } else if self.is_op(opn, "narrow_u64") && wf && !wt {
-            let lo = self.word_of(x, 0);
-            let hi = self.word_of(x, 1);
-            self.e.code.get(hi);
-            self.e.code.op(OP_I64_EQZ);
-            self.e.code.op(OP_I32_EQZ);
-            self.e.code.open(OP_IF);
+            self.cur_fn.code.set(dest);
+        } else if self.is_op(op_sym, "narrow_u64") && from_wide && !to_wide {
+            let lo = self.word_of(operand, 0);
+            let hi = self.word_of(operand, 1);
+            self.cur_fn.code.get(hi);
+            self.cur_fn.code.op(OP_I64_EQZ);
+            self.cur_fn.code.op(OP_I32_EQZ);
+            self.cur_fn.code.open(OP_IF);
             self.raise_overflow();
-            self.e.code.op(OP_END);
-            self.set_value(dv, lo);
-        } else if self.is_op(opn, "narrow_i64") && wf && !wt {
-            let lo = self.word_of(x, 0);
-            let hi = self.word_of(x, 1);
-            self.e.code.get(hi);
-            self.e.code.get(lo);
-            self.e.code.i64_const(63);
-            self.e.code.op(OP_I64_SHR_S);
-            self.e.code.op(OP_I64_NE);
-            self.e.code.open(OP_IF);
+            self.cur_fn.code.op(OP_END);
+            self.set_value(dest_val, lo);
+        } else if self.is_op(op_sym, "narrow_i64") && from_wide && !to_wide {
+            let lo = self.word_of(operand, 0);
+            let hi = self.word_of(operand, 1);
+            self.cur_fn.code.get(hi);
+            self.cur_fn.code.get(lo);
+            self.cur_fn.code.i64_const(63);
+            self.cur_fn.code.op(OP_I64_SHR_S);
+            self.cur_fn.code.op(OP_I64_NE);
+            self.cur_fn.code.open(OP_IF);
             self.raise_overflow();
-            self.e.code.op(OP_END);
-            self.set_value(dv, lo);
+            self.cur_fn.code.op(OP_END);
+            self.set_value(dest_val, lo);
         } else {
             Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 249));
         }
@@ -348,810 +342,793 @@ impl L {
     // `==` and `!=` stay the tuple's.
     pub fn wide_binary(
         inout self,
-        dv: u64,
-        opn: u32,
-        x: u32,
-        y: u32,
-        sa: u32,
-        sb: u32
+        dest_val: u64,
+        op_sym: u32,
+        lhs: u32,
+        rhs: u32,
+        lhs_ty: u32,
+        rhs_ty: u32
     ) -> bool eff [Fail[WErr]] {
-        if !self.is_u128(sa) || self.is_op(opn, "==") || self.is_op(opn, "!=") {
+        if !self.is_u128(lhs_ty) || self.is_op(op_sym, "==") || self.is_op(op_sym, "!=") {
             return false;
         }
-        let signed = self.is_i128(sa);
-        let right = self.is_op(opn, ">>");
-        if right || self.is_op(opn, "<<") {
-            let k = if self.is_u128(sb) {
+        let signed = self.is_i128(lhs_ty);
+        let right = self.is_op(op_sym, ">>");
+        if right || self.is_op(op_sym, "<<") {
+            let amount = if self.is_u128(rhs_ty) {
                 // a 128-bit amount: its low word, or 128 (out of range) when
                 // the high word is set
-                let kv = self.local();
-                word(inout self.e.code, y, 0);
-                self.e.code.i64_const(128);
-                word(inout self.e.code, y, 1);
-                self.e.code.op(OP_I64_EQZ);
-                self.e.code.op(OP_SELECT);
-                self.e.code.set(kv);
-                kv
+                let amount_word = self.local();
+                word(inout self.cur_fn.code, rhs, 0);
+                self.cur_fn.code.i64_const(128);
+                word(inout self.cur_fn.code, rhs, 1);
+                self.cur_fn.code.op(OP_I64_EQZ);
+                self.cur_fn.code.op(OP_SELECT);
+                self.cur_fn.code.set(amount_word);
+                amount_word
             } else {
-                y
+                rhs
             };
-            self.wide_shift(dv, x, k, right, signed);
-        } else if self.is_op(opn, "rotate_left") || self.is_op(opn, "rotate_right") {
-            self.wide_rotate(dv, x, y, sb, self.is_op(opn, "rotate_right"));
-        } else if self.is_op(opn, "&") || self.is_op(opn, "|") || self.is_op(opn, "^") {
-            let bop = if self.is_op(opn, "&") {
+            self.wide_shift(dest_val, lhs, amount, right, signed);
+        } else if self.is_op(op_sym, "rotate_left") || self.is_op(op_sym, "rotate_right") {
+            self.wide_rotate(dest_val, lhs, rhs, rhs_ty, self.is_op(op_sym, "rotate_right"));
+        } else if self.is_op(op_sym, "&") || self.is_op(op_sym, "|") || self.is_op(op_sym, "^") {
+            let bit_op = if self.is_op(op_sym, "&") {
                 OP_I64_AND
-            } else if self.is_op(opn, "|") {
+            } else if self.is_op(op_sym, "|") {
                 OP_I64_OR
             } else {
                 OP_I64_XOR
             };
             let lo = self.local();
             let hi = self.local();
-            word(inout self.e.code, x, 0);
-            word(inout self.e.code, y, 0);
-            self.e.code.op(bop);
-            self.e.code.set(lo);
-            word(inout self.e.code, x, 1);
-            word(inout self.e.code, y, 1);
-            self.e.code.op(bop);
-            self.e.code.set(hi);
-            let b = self.wide_block(lo, hi);
-            self.set_value(dv, b);
-        } else if self.is_op(opn, "wrapping_add") || self.is_op(opn, "+") {
-            self.wide_add(dv, x, y, self.is_op(opn, "+"), signed);
-        } else if self.is_op(opn, "wrapping_sub") || self.is_op(opn, "-") {
-            self.wide_sub(dv, x, y, self.is_op(opn, "-"), signed);
-        } else if self.is_op(opn, "wrapping_mul") || self.is_op(opn, "*") {
-            let f = self.wide_helper(0);
-            let b = self.alloc_block(16);
-            self.e.code.get(b);
-            self.e.code.get(x);
-            self.e.code.get(y);
-            self.e.code.call(f);
-            if self.is_op(opn, "*") {
-                let x0 = self.word_of(x, 0);
-                let x1 = self.word_of(x, 1);
-                self.e.code.get(x0);
-                self.e.code.get(x1);
-                self.e.code.op(OP_I64_OR);
-                self.e.code.op(OP_I64_EQZ);
-                self.e.code.op(OP_I32_EQZ);
-                self.e.code.open(OP_IF);
+            word(inout self.cur_fn.code, lhs, 0);
+            word(inout self.cur_fn.code, rhs, 0);
+            self.cur_fn.code.op(bit_op);
+            self.cur_fn.code.set(lo);
+            word(inout self.cur_fn.code, lhs, 1);
+            word(inout self.cur_fn.code, rhs, 1);
+            self.cur_fn.code.op(bit_op);
+            self.cur_fn.code.set(hi);
+            let result = self.wide_block(lo, hi);
+            self.set_value(dest_val, result);
+        } else if self.is_op(op_sym, "wrapping_add") || self.is_op(op_sym, "+") {
+            self.wide_add(dest_val, lhs, rhs, self.is_op(op_sym, "+"), signed);
+        } else if self.is_op(op_sym, "wrapping_sub") || self.is_op(op_sym, "-") {
+            self.wide_sub(dest_val, lhs, rhs, self.is_op(op_sym, "-"), signed);
+        } else if self.is_op(op_sym, "wrapping_mul") || self.is_op(op_sym, "*") {
+            let helper = self.wide_helper(0);
+            let result = self.alloc_block(16);
+            self.cur_fn.code.get(result);
+            self.cur_fn.code.get(lhs);
+            self.cur_fn.code.get(rhs);
+            self.cur_fn.code.call(helper);
+            if self.is_op(op_sym, "*") {
+                let lhs_lo = self.word_of(lhs, 0);
+                let lhs_hi = self.word_of(lhs, 1);
+                self.cur_fn.code.get(lhs_lo);
+                self.cur_fn.code.get(lhs_hi);
+                self.cur_fn.code.op(OP_I64_OR);
+                self.cur_fn.code.op(OP_I64_EQZ);
+                self.cur_fn.code.op(OP_I32_EQZ);
+                self.cur_fn.code.open(OP_IF);
                 if signed {
-                    let y0 = self.word_of(y, 0);
-                    let y1 = self.word_of(y, 1);
-                    self.e.code.get(x0);
-                    self.e.code.i64_const(-1);
-                    self.e.code.op(OP_I64_EQ);
-                    self.e.code.get(x1);
-                    self.e.code.i64_const(-1);
-                    self.e.code.op(OP_I64_EQ);
-                    self.e.code.op(OP_I32_AND);
-                    self.is_i128_min(y0, y1);
-                    self.e.code.op(OP_I32_AND);
-                    self.e.code.open(OP_IF);
+                    let rhs_lo = self.word_of(rhs, 0);
+                    let rhs_hi = self.word_of(rhs, 1);
+                    self.cur_fn.code.get(lhs_lo);
+                    self.cur_fn.code.i64_const(-1);
+                    self.cur_fn.code.op(OP_I64_EQ);
+                    self.cur_fn.code.get(lhs_hi);
+                    self.cur_fn.code.i64_const(-1);
+                    self.cur_fn.code.op(OP_I64_EQ);
+                    self.cur_fn.code.op(OP_I32_AND);
+                    self.is_i128_min(rhs_lo, rhs_hi);
+                    self.cur_fn.code.op(OP_I32_AND);
+                    self.cur_fn.code.open(OP_IF);
                     self.raise_overflow();
-                    self.e.code.op(OP_END);
+                    self.cur_fn.code.op(OP_END);
                 }
-                let df = self.wide_helper(1);
-                let q = self.alloc_block(16);
-                let ax = if signed {
-                    let t = self.local();
-                    self.e.code.get(x);
-                    self.e.code.set(t);
-                    self.e.code.get(x1);
-                    self.e.code.i64_const(0);
-                    self.e.code.op(OP_I64_LT_S);
-                    self.e.code.open(OP_IF);
-                    let nx = self.wide_neg_words(x0, x1);
-                    self.e.code.get(nx);
-                    self.e.code.set(t);
-                    self.e.code.op(OP_END);
-                    t
+                let divrem = self.wide_helper(1);
+                let quot = self.alloc_block(16);
+                let abs_lhs = if signed {
+                    let abs = self.local();
+                    self.cur_fn.code.get(lhs);
+                    self.cur_fn.code.set(abs);
+                    self.cur_fn.code.get(lhs_hi);
+                    self.cur_fn.code.i64_const(0);
+                    self.cur_fn.code.op(OP_I64_LT_S);
+                    self.cur_fn.code.open(OP_IF);
+                    let neg_lhs = self.wide_neg_words(lhs_lo, lhs_hi);
+                    self.cur_fn.code.get(neg_lhs);
+                    self.cur_fn.code.set(abs);
+                    self.cur_fn.code.op(OP_END);
+                    abs
                 } else {
-                    x
+                    lhs
                 };
-                let ab = if signed {
-                    let b0 = self.word_of(b, 0);
-                    let b1 = self.word_of(b, 1);
-                    let t = self.local();
-                    self.e.code.get(b);
-                    self.e.code.set(t);
-                    self.e.code.get(b1);
-                    self.e.code.i64_const(0);
-                    self.e.code.op(OP_I64_LT_S);
-                    self.e.code.open(OP_IF);
-                    let nb = self.wide_neg_words(b0, b1);
-                    self.e.code.get(nb);
-                    self.e.code.set(t);
-                    self.e.code.op(OP_END);
-                    t
+                let abs_result = if signed {
+                    let result_lo = self.word_of(result, 0);
+                    let result_hi = self.word_of(result, 1);
+                    let abs = self.local();
+                    self.cur_fn.code.get(result);
+                    self.cur_fn.code.set(abs);
+                    self.cur_fn.code.get(result_hi);
+                    self.cur_fn.code.i64_const(0);
+                    self.cur_fn.code.op(OP_I64_LT_S);
+                    self.cur_fn.code.open(OP_IF);
+                    let neg_result = self.wide_neg_words(result_lo, result_hi);
+                    self.cur_fn.code.get(neg_result);
+                    self.cur_fn.code.set(abs);
+                    self.cur_fn.code.op(OP_END);
+                    abs
                 } else {
-                    b
+                    result
                 };
-                self.e.code.get(q);
-                self.e.code.get(ab);
-                self.e.code.get(ax);
-                self.e.code.i64_const(0);
-                self.e.code.call(df);
+                self.cur_fn.code.get(quot);
+                self.cur_fn.code.get(abs_result);
+                self.cur_fn.code.get(abs_lhs);
+                self.cur_fn.code.i64_const(0);
+                self.cur_fn.code.call(divrem);
                 if signed {
-                    let b1 = self.word_of(b, 1);
-                    let q0 = self.word_of(q, 0);
-                    let q1 = self.word_of(q, 1);
-                    self.e.code.get(b1);
-                    self.e.code.get(x1);
-                    self.e.code.op(OP_I64_XOR);
-                    self.e.code.i64_const(0);
-                    self.e.code.op(OP_I64_LT_S);
-                    self.e.code.open(OP_IF);
-                    let nq = self.wide_neg_words(q0, q1);
-                    self.e.code.get(nq);
-                    self.e.code.set(q);
-                    self.e.code.op(OP_END);
+                    let result_hi = self.word_of(result, 1);
+                    let quot_lo = self.word_of(quot, 0);
+                    let quot_hi = self.word_of(quot, 1);
+                    self.cur_fn.code.get(result_hi);
+                    self.cur_fn.code.get(lhs_hi);
+                    self.cur_fn.code.op(OP_I64_XOR);
+                    self.cur_fn.code.i64_const(0);
+                    self.cur_fn.code.op(OP_I64_LT_S);
+                    self.cur_fn.code.open(OP_IF);
+                    let neg_quot = self.wide_neg_words(quot_lo, quot_hi);
+                    self.cur_fn.code.get(neg_quot);
+                    self.cur_fn.code.set(quot);
+                    self.cur_fn.code.op(OP_END);
                 }
-                let q0 = self.word_of(q, 0);
-                let q1 = self.word_of(q, 1);
-                let y0 = self.word_of(y, 0);
-                let y1 = self.word_of(y, 1);
-                self.e.code.get(q0);
-                self.e.code.get(y0);
-                self.e.code.op(OP_I64_NE);
-                self.e.code.get(q1);
-                self.e.code.get(y1);
-                self.e.code.op(OP_I64_NE);
-                self.e.code.op(OP_I32_OR);
-                self.e.code.open(OP_IF);
+                let quot_lo = self.word_of(quot, 0);
+                let quot_hi = self.word_of(quot, 1);
+                let rhs_lo = self.word_of(rhs, 0);
+                let rhs_hi = self.word_of(rhs, 1);
+                self.cur_fn.code.get(quot_lo);
+                self.cur_fn.code.get(rhs_lo);
+                self.cur_fn.code.op(OP_I64_NE);
+                self.cur_fn.code.get(quot_hi);
+                self.cur_fn.code.get(rhs_hi);
+                self.cur_fn.code.op(OP_I64_NE);
+                self.cur_fn.code.op(OP_I32_OR);
+                self.cur_fn.code.open(OP_IF);
                 self.raise_overflow();
-                self.e.code.op(OP_END);
-                self.e.code.op(OP_END);
+                self.cur_fn.code.op(OP_END);
+                self.cur_fn.code.op(OP_END);
             }
-            self.set_value(dv, b);
-        } else if self.is_op(opn, "/") || self.is_op(opn, "%") {
-            let is_rem = self.is_op(opn, "%");
-            let x0 = self.word_of(x, 0);
-            let x1 = self.word_of(x, 1);
-            let y0 = self.word_of(y, 0);
-            let y1 = self.word_of(y, 1);
-            self.e.code.get(y0);
-            self.e.code.get(y1);
-            self.e.code.op(OP_I64_OR);
-            self.e.code.op(OP_I64_EQZ);
-            self.e.code.open(OP_IF);
-            let dz = self.cx.s.div_zero;
-            self.raise_runtime_error(dz);
-            self.e.code.op(OP_END);
+            self.set_value(dest_val, result);
+        } else if self.is_op(op_sym, "/") || self.is_op(op_sym, "%") {
+            let is_rem = self.is_op(op_sym, "%");
+            let lhs_lo = self.word_of(lhs, 0);
+            let lhs_hi = self.word_of(lhs, 1);
+            let rhs_lo = self.word_of(rhs, 0);
+            let rhs_hi = self.word_of(rhs, 1);
+            self.cur_fn.code.get(rhs_lo);
+            self.cur_fn.code.get(rhs_hi);
+            self.cur_fn.code.op(OP_I64_OR);
+            self.cur_fn.code.op(OP_I64_EQZ);
+            self.cur_fn.code.open(OP_IF);
+            let div_zero = self.ctx.syms.div_zero;
+            self.raise_runtime_error(div_zero);
+            self.cur_fn.code.op(OP_END);
             if signed {
-                self.is_i128_min(x0, x1);
-                self.e.code.get(y0);
-                self.e.code.i64_const(-1);
-                self.e.code.op(OP_I64_EQ);
-                self.e.code.get(y1);
-                self.e.code.i64_const(-1);
-                self.e.code.op(OP_I64_EQ);
-                self.e.code.op(OP_I32_AND);
-                self.e.code.op(OP_I32_AND);
-                self.e.code.open(OP_IF);
+                self.is_i128_min(lhs_lo, lhs_hi);
+                self.cur_fn.code.get(rhs_lo);
+                self.cur_fn.code.i64_const(-1);
+                self.cur_fn.code.op(OP_I64_EQ);
+                self.cur_fn.code.get(rhs_hi);
+                self.cur_fn.code.i64_const(-1);
+                self.cur_fn.code.op(OP_I64_EQ);
+                self.cur_fn.code.op(OP_I32_AND);
+                self.cur_fn.code.op(OP_I32_AND);
+                self.cur_fn.code.open(OP_IF);
                 self.raise_overflow();
-                self.e.code.op(OP_END);
+                self.cur_fn.code.op(OP_END);
             }
-            let ax = if signed {
-                let t = self.local();
-                self.e.code.get(x);
-                self.e.code.set(t);
-                self.e.code.get(x1);
-                self.e.code.i64_const(0);
-                self.e.code.op(OP_I64_LT_S);
-                self.e.code.open(OP_IF);
-                let nx = self.wide_neg_words(x0, x1);
-                self.e.code.get(nx);
-                self.e.code.set(t);
-                self.e.code.op(OP_END);
-                t
+            let abs_lhs = if signed {
+                let abs = self.local();
+                self.cur_fn.code.get(lhs);
+                self.cur_fn.code.set(abs);
+                self.cur_fn.code.get(lhs_hi);
+                self.cur_fn.code.i64_const(0);
+                self.cur_fn.code.op(OP_I64_LT_S);
+                self.cur_fn.code.open(OP_IF);
+                let neg_lhs = self.wide_neg_words(lhs_lo, lhs_hi);
+                self.cur_fn.code.get(neg_lhs);
+                self.cur_fn.code.set(abs);
+                self.cur_fn.code.op(OP_END);
+                abs
             } else {
-                x
+                lhs
             };
-            let ay = if signed {
-                let t = self.local();
-                self.e.code.get(y);
-                self.e.code.set(t);
-                self.e.code.get(y1);
-                self.e.code.i64_const(0);
-                self.e.code.op(OP_I64_LT_S);
-                self.e.code.open(OP_IF);
-                let ny = self.wide_neg_words(y0, y1);
-                self.e.code.get(ny);
-                self.e.code.set(t);
-                self.e.code.op(OP_END);
-                t
+            let abs_rhs = if signed {
+                let abs = self.local();
+                self.cur_fn.code.get(rhs);
+                self.cur_fn.code.set(abs);
+                self.cur_fn.code.get(rhs_hi);
+                self.cur_fn.code.i64_const(0);
+                self.cur_fn.code.op(OP_I64_LT_S);
+                self.cur_fn.code.open(OP_IF);
+                let neg_rhs = self.wide_neg_words(rhs_lo, rhs_hi);
+                self.cur_fn.code.get(neg_rhs);
+                self.cur_fn.code.set(abs);
+                self.cur_fn.code.op(OP_END);
+                abs
             } else {
-                y
+                rhs
             };
-            let f = self.wide_helper(1);
-            let b = self.alloc_block(16);
-            self.e.code.get(b);
-            self.e.code.get(ax);
-            self.e.code.get(ay);
-            self
-                .e
-                .code
-                .i64_const(
-                    if is_rem {
-                        1
-                    } else {
-                        0
-                    }
-                );
-            self.e.code.call(f);
+            let helper = self.wide_helper(1);
+            let result = self.alloc_block(16);
+            self.cur_fn.code.get(result);
+            self.cur_fn.code.get(abs_lhs);
+            self.cur_fn.code.get(abs_rhs);
+            self.cur_fn.code.i64_const(if is_rem { 1 } else { 0 });
+            self.cur_fn.code.call(helper);
             if signed {
                 if is_rem {
-                    self.e.code.get(x1);
+                    self.cur_fn.code.get(lhs_hi);
                 } else {
-                    self.e.code.get(x1);
-                    self.e.code.get(y1);
-                    self.e.code.op(OP_I64_XOR);
+                    self.cur_fn.code.get(lhs_hi);
+                    self.cur_fn.code.get(rhs_hi);
+                    self.cur_fn.code.op(OP_I64_XOR);
                 }
-                self.e.code.i64_const(0);
-                self.e.code.op(OP_I64_LT_S);
-                self.e.code.open(OP_IF);
-                let b0 = self.word_of(b, 0);
-                let b1 = self.word_of(b, 1);
-                let nb = self.wide_neg_words(b0, b1);
-                self.e.code.get(nb);
-                self.e.code.set(b);
-                self.e.code.op(OP_END);
+                self.cur_fn.code.i64_const(0);
+                self.cur_fn.code.op(OP_I64_LT_S);
+                self.cur_fn.code.open(OP_IF);
+                let result_lo = self.word_of(result, 0);
+                let result_hi = self.word_of(result, 1);
+                let neg_result = self.wide_neg_words(result_lo, result_hi);
+                self.cur_fn.code.get(neg_result);
+                self.cur_fn.code.set(result);
+                self.cur_fn.code.op(OP_END);
             }
-            self.set_value(dv, b);
-        } else if self.is_op(opn, "<")
-            || self.is_op(opn, ">")
-            || self.is_op(opn, "<=")
-            || self.is_op(opn, ">=") {
+            self.set_value(dest_val, result);
+        } else if self.is_op(op_sym, "<")
+            || self.is_op(op_sym, ">")
+            || self.is_op(op_sym, "<=")
+            || self.is_op(op_sym, ">=") {
             // a < b, with the operands swapped for > and <=, negated for
             // <= and >=
-            let swap = self.is_op(opn, ">") || self.is_op(opn, "<=");
-            let neg = self.is_op(opn, "<=") || self.is_op(opn, ">=");
-            let (p, q) = if swap {
-                (y, x)
-            } else {
-                (x, y)
-            };
-            let p0 = self.word_of(p, 0);
-            let p1 = self.word_of(p, 1);
-            let q0 = self.word_of(q, 0);
-            let q1 = self.word_of(q, 1);
-            let d = self.local();
-            self.e.code.get(p1);
-            self.e.code.get(q1);
-            self
-                .e
-                .code
-                .op(
-                    if signed {
-                        OP_I64_LT_S
-                    } else {
-                        OP_I64_LT_U
-                    }
-                );
-            self.e.code.get(p1);
-            self.e.code.get(q1);
-            self.e.code.op(OP_I64_EQ);
-            self.e.code.get(p0);
-            self.e.code.get(q0);
-            self.e.code.op(OP_I64_LT_U);
-            self.e.code.op(OP_I32_AND);
-            self.e.code.op(OP_I32_OR);
+            let swap = self.is_op(op_sym, ">") || self.is_op(op_sym, "<=");
+            let neg = self.is_op(op_sym, "<=") || self.is_op(op_sym, ">=");
+            let (first, second) = if swap { (rhs, lhs) } else { (lhs, rhs) };
+            let first_lo = self.word_of(first, 0);
+            let first_hi = self.word_of(first, 1);
+            let second_lo = self.word_of(second, 0);
+            let second_hi = self.word_of(second, 1);
+            let ordered = self.local();
+            self.cur_fn.code.get(first_hi);
+            self.cur_fn.code.get(second_hi);
+            self.cur_fn.code.op(if signed { OP_I64_LT_S } else { OP_I64_LT_U });
+            self.cur_fn.code.get(first_hi);
+            self.cur_fn.code.get(second_hi);
+            self.cur_fn.code.op(OP_I64_EQ);
+            self.cur_fn.code.get(first_lo);
+            self.cur_fn.code.get(second_lo);
+            self.cur_fn.code.op(OP_I64_LT_U);
+            self.cur_fn.code.op(OP_I32_AND);
+            self.cur_fn.code.op(OP_I32_OR);
             if neg {
-                self.e.code.op(OP_I32_EQZ);
+                self.cur_fn.code.op(OP_I32_EQZ);
             }
-            self.e.code.op(OP_I64_EXTEND_I32_U);
-            self.e.code.set(d);
-            self.set_value(dv, d);
+            self.cur_fn.code.op(OP_I64_EXTEND_I32_U);
+            self.cur_fn.code.set(ordered);
+            self.set_value(dest_val, ordered);
         } else {
             Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 249));
         }
         true
     }
 
-    fn wide_add(inout self, dv: u64, x: u32, y: u32, checked: bool, signed: bool) eff [Fail[WErr]] {
-        let x0 = self.word_of(x, 0);
-        let x1 = self.word_of(x, 1);
-        let y0 = self.word_of(y, 0);
-        let y1 = self.word_of(y, 1);
+    fn wide_add(inout self, dest_val: u64, lhs: u32, rhs: u32, checked: bool, signed: bool) eff [
+        Fail[WErr]
+    ] {
+        let lhs_lo = self.word_of(lhs, 0);
+        let lhs_hi = self.word_of(lhs, 1);
+        let rhs_lo = self.word_of(rhs, 0);
+        let rhs_hi = self.word_of(rhs, 1);
         let lo = self.local();
-        let t = self.local();
+        let hi_sum = self.local();
         let hi = self.local();
-        self.e.code.get(x0);
-        self.e.code.get(y0);
-        self.e.code.op(OP_I64_ADD);
-        self.e.code.set(lo);
-        self.e.code.get(x1);
-        self.e.code.get(y1);
-        self.e.code.op(OP_I64_ADD);
-        self.e.code.set(t);
+        self.cur_fn.code.get(lhs_lo);
+        self.cur_fn.code.get(rhs_lo);
+        self.cur_fn.code.op(OP_I64_ADD);
+        self.cur_fn.code.set(lo);
+        self.cur_fn.code.get(lhs_hi);
+        self.cur_fn.code.get(rhs_hi);
+        self.cur_fn.code.op(OP_I64_ADD);
+        self.cur_fn.code.set(hi_sum);
         // hi = t + carry
-        self.e.code.get(t);
-        self.e.code.get(lo);
-        self.e.code.get(x0);
-        self.e.code.op(OP_I64_LT_U);
-        self.e.code.op(OP_I64_EXTEND_I32_U);
-        self.e.code.op(OP_I64_ADD);
-        self.e.code.set(hi);
+        self.cur_fn.code.get(hi_sum);
+        self.cur_fn.code.get(lo);
+        self.cur_fn.code.get(lhs_lo);
+        self.cur_fn.code.op(OP_I64_LT_U);
+        self.cur_fn.code.op(OP_I64_EXTEND_I32_U);
+        self.cur_fn.code.op(OP_I64_ADD);
+        self.cur_fn.code.set(hi);
         if checked {
             if signed {
-                self.e.code.get(x1);
-                self.e.code.get(y1);
-                self.e.code.op(OP_I64_XOR);
-                self.e.code.i64_const(-1);
-                self.e.code.op(OP_I64_XOR);
-                self.e.code.get(x1);
-                self.e.code.get(hi);
-                self.e.code.op(OP_I64_XOR);
-                self.e.code.op(OP_I64_AND);
-                self.e.code.i64_const(0);
-                self.e.code.op(OP_I64_LT_S);
+                self.cur_fn.code.get(lhs_hi);
+                self.cur_fn.code.get(rhs_hi);
+                self.cur_fn.code.op(OP_I64_XOR);
+                self.cur_fn.code.i64_const(-1);
+                self.cur_fn.code.op(OP_I64_XOR);
+                self.cur_fn.code.get(lhs_hi);
+                self.cur_fn.code.get(hi);
+                self.cur_fn.code.op(OP_I64_XOR);
+                self.cur_fn.code.op(OP_I64_AND);
+                self.cur_fn.code.i64_const(0);
+                self.cur_fn.code.op(OP_I64_LT_S);
             } else {
-                self.e.code.get(t);
-                self.e.code.get(x1);
-                self.e.code.op(OP_I64_LT_U);
-                self.e.code.get(hi);
-                self.e.code.get(t);
-                self.e.code.op(OP_I64_LT_U);
-                self.e.code.op(OP_I32_OR);
+                self.cur_fn.code.get(hi_sum);
+                self.cur_fn.code.get(lhs_hi);
+                self.cur_fn.code.op(OP_I64_LT_U);
+                self.cur_fn.code.get(hi);
+                self.cur_fn.code.get(hi_sum);
+                self.cur_fn.code.op(OP_I64_LT_U);
+                self.cur_fn.code.op(OP_I32_OR);
             }
-            self.e.code.open(OP_IF);
+            self.cur_fn.code.open(OP_IF);
             self.raise_overflow();
-            self.e.code.op(OP_END);
+            self.cur_fn.code.op(OP_END);
         }
-        let b = self.wide_block(lo, hi);
-        self.set_value(dv, b);
+        let result = self.wide_block(lo, hi);
+        self.set_value(dest_val, result);
     }
 
-    fn wide_sub(inout self, dv: u64, x: u32, y: u32, checked: bool, signed: bool) eff [Fail[WErr]] {
-        let x0 = self.word_of(x, 0);
-        let x1 = self.word_of(x, 1);
-        let y0 = self.word_of(y, 0);
-        let y1 = self.word_of(y, 1);
+    fn wide_sub(inout self, dest_val: u64, lhs: u32, rhs: u32, checked: bool, signed: bool) eff [
+        Fail[WErr]
+    ] {
+        let lhs_lo = self.word_of(lhs, 0);
+        let lhs_hi = self.word_of(lhs, 1);
+        let rhs_lo = self.word_of(rhs, 0);
+        let rhs_hi = self.word_of(rhs, 1);
         let lo = self.local();
         let hi = self.local();
-        self.e.code.get(x0);
-        self.e.code.get(y0);
-        self.e.code.op(OP_I64_SUB);
-        self.e.code.set(lo);
-        self.e.code.get(x1);
-        self.e.code.get(y1);
-        self.e.code.op(OP_I64_SUB);
-        self.e.code.get(x0);
-        self.e.code.get(y0);
-        self.e.code.op(OP_I64_LT_U);
-        self.e.code.op(OP_I64_EXTEND_I32_U);
-        self.e.code.op(OP_I64_SUB);
-        self.e.code.set(hi);
+        self.cur_fn.code.get(lhs_lo);
+        self.cur_fn.code.get(rhs_lo);
+        self.cur_fn.code.op(OP_I64_SUB);
+        self.cur_fn.code.set(lo);
+        self.cur_fn.code.get(lhs_hi);
+        self.cur_fn.code.get(rhs_hi);
+        self.cur_fn.code.op(OP_I64_SUB);
+        self.cur_fn.code.get(lhs_lo);
+        self.cur_fn.code.get(rhs_lo);
+        self.cur_fn.code.op(OP_I64_LT_U);
+        self.cur_fn.code.op(OP_I64_EXTEND_I32_U);
+        self.cur_fn.code.op(OP_I64_SUB);
+        self.cur_fn.code.set(hi);
         if checked {
             if signed {
-                self.e.code.get(x1);
-                self.e.code.get(y1);
-                self.e.code.op(OP_I64_XOR);
-                self.e.code.get(x1);
-                self.e.code.get(hi);
-                self.e.code.op(OP_I64_XOR);
-                self.e.code.op(OP_I64_AND);
-                self.e.code.i64_const(0);
-                self.e.code.op(OP_I64_LT_S);
+                self.cur_fn.code.get(lhs_hi);
+                self.cur_fn.code.get(rhs_hi);
+                self.cur_fn.code.op(OP_I64_XOR);
+                self.cur_fn.code.get(lhs_hi);
+                self.cur_fn.code.get(hi);
+                self.cur_fn.code.op(OP_I64_XOR);
+                self.cur_fn.code.op(OP_I64_AND);
+                self.cur_fn.code.i64_const(0);
+                self.cur_fn.code.op(OP_I64_LT_S);
             } else {
-                self.e.code.get(x1);
-                self.e.code.get(y1);
-                self.e.code.op(OP_I64_LT_U);
-                self.e.code.get(x1);
-                self.e.code.get(y1);
-                self.e.code.op(OP_I64_EQ);
-                self.e.code.get(x0);
-                self.e.code.get(y0);
-                self.e.code.op(OP_I64_LT_U);
-                self.e.code.op(OP_I32_AND);
-                self.e.code.op(OP_I32_OR);
+                self.cur_fn.code.get(lhs_hi);
+                self.cur_fn.code.get(rhs_hi);
+                self.cur_fn.code.op(OP_I64_LT_U);
+                self.cur_fn.code.get(lhs_hi);
+                self.cur_fn.code.get(rhs_hi);
+                self.cur_fn.code.op(OP_I64_EQ);
+                self.cur_fn.code.get(lhs_lo);
+                self.cur_fn.code.get(rhs_lo);
+                self.cur_fn.code.op(OP_I64_LT_U);
+                self.cur_fn.code.op(OP_I32_AND);
+                self.cur_fn.code.op(OP_I32_OR);
             }
-            self.e.code.open(OP_IF);
+            self.cur_fn.code.open(OP_IF);
             self.raise_overflow();
-            self.e.code.op(OP_END);
+            self.cur_fn.code.op(OP_END);
         }
-        let b = self.wide_block(lo, hi);
-        self.set_value(dv, b);
+        let result = self.wide_block(lo, hi);
+        self.set_value(dest_val, result);
     }
 
-    fn wide_rotate(inout self, dv: u64, x: u32, y: u32, sb: u32, right: bool) {
-        let k = self.local();
-        if self.is_u128(sb) {
-            word(inout self.e.code, y, 0);
+    fn wide_rotate(
+        inout self,
+        dest_val: u64,
+        value: u32,
+        amount: u32,
+        amount_ty: u32,
+        right: bool
+    ) {
+        let shift = self.local();
+        if self.is_u128(amount_ty) {
+            word(inout self.cur_fn.code, amount, 0);
         } else {
-            self.e.code.get(y);
+            self.cur_fn.code.get(amount);
         }
-        self.e.code.i64_const(127);
-        self.e.code.op(OP_I64_AND);
+        self.cur_fn.code.i64_const(127);
+        self.cur_fn.code.op(OP_I64_AND);
         if right {
-            let tmp = self.local();
-            self.e.code.set(tmp);
-            self.e.code.i64_const(128);
-            self.e.code.get(tmp);
-            self.e.code.op(OP_I64_SUB);
-            self.e.code.i64_const(127);
-            self.e.code.op(OP_I64_AND);
+            let raw_shift = self.local();
+            self.cur_fn.code.set(raw_shift);
+            self.cur_fn.code.i64_const(128);
+            self.cur_fn.code.get(raw_shift);
+            self.cur_fn.code.op(OP_I64_SUB);
+            self.cur_fn.code.i64_const(127);
+            self.cur_fn.code.op(OP_I64_AND);
         }
-        self.e.code.set(k);
-        let x0 = self.word_of(x, 0);
-        let x1 = self.word_of(x, 1);
+        self.cur_fn.code.set(shift);
+        let value_lo = self.word_of(value, 0);
+        let value_hi = self.word_of(value, 1);
         let lo = self.local();
         let hi = self.local();
-        self.e.code.get(k);
-        self.e.code.op(OP_I64_EQZ);
-        self.e.code.open(OP_IF);
-        self.e.code.get(x0);
-        self.e.code.set(lo);
-        self.e.code.get(x1);
-        self.e.code.set(hi);
-        self.e.code.op(OP_ELSE);
-        self.e.code.get(k);
-        self.e.code.i64_const(64);
-        self.e.code.op(OP_I64_EQ);
-        self.e.code.open(OP_IF);
-        self.e.code.get(x1);
-        self.e.code.set(lo);
-        self.e.code.get(x0);
-        self.e.code.set(hi);
-        self.e.code.op(OP_ELSE);
-        let s1 = self.local();
-        let s2 = self.local();
-        self.e.code.get(x0);
-        self.e.code.get(k);
-        self.e.code.op(OP_I64_SHL);
-        self.e.code.get(x1);
-        self.e.code.i64_const(64);
-        self.e.code.get(k);
-        self.e.code.op(OP_I64_SUB);
-        self.e.code.op(OP_I64_SHR_U);
-        self.e.code.op(OP_I64_OR);
-        self.e.code.set(s1);
-        self.e.code.get(x1);
-        self.e.code.get(k);
-        self.e.code.op(OP_I64_SHL);
-        self.e.code.get(x0);
-        self.e.code.i64_const(64);
-        self.e.code.get(k);
-        self.e.code.op(OP_I64_SUB);
-        self.e.code.op(OP_I64_SHR_U);
-        self.e.code.op(OP_I64_OR);
-        self.e.code.set(s2);
-        self.e.code.get(k);
-        self.e.code.i64_const(64);
-        self.e.code.op(OP_I64_LT_U);
-        self.e.code.open(OP_IF);
-        self.e.code.get(s1);
-        self.e.code.set(lo);
-        self.e.code.get(s2);
-        self.e.code.set(hi);
-        self.e.code.op(OP_ELSE);
-        self.e.code.get(s2);
-        self.e.code.set(lo);
-        self.e.code.get(s1);
-        self.e.code.set(hi);
-        self.e.code.op(OP_END);
-        self.e.code.op(OP_END);
-        self.e.code.op(OP_END);
-        let b = self.wide_block(lo, hi);
-        self.set_value(dv, b);
+        self.cur_fn.code.get(shift);
+        self.cur_fn.code.op(OP_I64_EQZ);
+        self.cur_fn.code.open(OP_IF);
+        self.cur_fn.code.get(value_lo);
+        self.cur_fn.code.set(lo);
+        self.cur_fn.code.get(value_hi);
+        self.cur_fn.code.set(hi);
+        self.cur_fn.code.op(OP_ELSE);
+        self.cur_fn.code.get(shift);
+        self.cur_fn.code.i64_const(64);
+        self.cur_fn.code.op(OP_I64_EQ);
+        self.cur_fn.code.open(OP_IF);
+        self.cur_fn.code.get(value_hi);
+        self.cur_fn.code.set(lo);
+        self.cur_fn.code.get(value_lo);
+        self.cur_fn.code.set(hi);
+        self.cur_fn.code.op(OP_ELSE);
+        let rot_lo = self.local();
+        let rot_hi = self.local();
+        self.cur_fn.code.get(value_lo);
+        self.cur_fn.code.get(shift);
+        self.cur_fn.code.op(OP_I64_SHL);
+        self.cur_fn.code.get(value_hi);
+        self.cur_fn.code.i64_const(64);
+        self.cur_fn.code.get(shift);
+        self.cur_fn.code.op(OP_I64_SUB);
+        self.cur_fn.code.op(OP_I64_SHR_U);
+        self.cur_fn.code.op(OP_I64_OR);
+        self.cur_fn.code.set(rot_lo);
+        self.cur_fn.code.get(value_hi);
+        self.cur_fn.code.get(shift);
+        self.cur_fn.code.op(OP_I64_SHL);
+        self.cur_fn.code.get(value_lo);
+        self.cur_fn.code.i64_const(64);
+        self.cur_fn.code.get(shift);
+        self.cur_fn.code.op(OP_I64_SUB);
+        self.cur_fn.code.op(OP_I64_SHR_U);
+        self.cur_fn.code.op(OP_I64_OR);
+        self.cur_fn.code.set(rot_hi);
+        self.cur_fn.code.get(shift);
+        self.cur_fn.code.i64_const(64);
+        self.cur_fn.code.op(OP_I64_LT_U);
+        self.cur_fn.code.open(OP_IF);
+        self.cur_fn.code.get(rot_lo);
+        self.cur_fn.code.set(lo);
+        self.cur_fn.code.get(rot_hi);
+        self.cur_fn.code.set(hi);
+        self.cur_fn.code.op(OP_ELSE);
+        self.cur_fn.code.get(rot_hi);
+        self.cur_fn.code.set(lo);
+        self.cur_fn.code.get(rot_lo);
+        self.cur_fn.code.set(hi);
+        self.cur_fn.code.op(OP_END);
+        self.cur_fn.code.op(OP_END);
+        self.cur_fn.code.op(OP_END);
+        let result = self.wide_block(lo, hi);
+        self.set_value(dest_val, result);
     }
 
     // Shifts raise Fail[ArithOverflow] unless k < 128.
-    fn wide_shift(inout self, dv: u64, x: u32, k: u32, right: bool, signed: bool) eff [Fail[WErr]] {
-        self.e.code.get(k);
-        self.e.code.u64_const(128);
-        self.e.code.op(OP_I64_GE_U);
-        self.e.code.open(OP_IF);
+    fn wide_shift(
+        inout self,
+        dest_val: u64,
+        value: u32,
+        amount: u32,
+        right: bool,
+        signed: bool
+    ) eff [Fail[WErr]] {
+        self.cur_fn.code.get(amount);
+        self.cur_fn.code.u64_const(128);
+        self.cur_fn.code.op(OP_I64_GE_U);
+        self.cur_fn.code.open(OP_IF);
         self.raise_overflow();
-        self.e.code.op(OP_END);
+        self.cur_fn.code.op(OP_END);
         let (first, second, shift, cross) = if right {
             (
-                self.word_of(x, 1),
-                self.word_of(x, 0),
-                if signed {
-                    OP_I64_SHR_S
-                } else {
-                    OP_I64_SHR_U
-                },
+                self.word_of(value, 1),
+                self.word_of(value, 0),
+                if signed { OP_I64_SHR_S } else { OP_I64_SHR_U },
                 OP_I64_SHL
             )
         } else {
-            (self.word_of(x, 0), self.word_of(x, 1), OP_I64_SHL, OP_I64_SHR_U)
+            (self.word_of(value, 0), self.word_of(value, 1), OP_I64_SHL, OP_I64_SHR_U)
         };
-        let a = self.local();
-        let b = self.local();
-        self.e.code.get(k);
-        self.e.code.u64_const(64);
-        self.e.code.op(OP_I64_GE_U);
-        self.e.code.open(OP_IF);
+        let first_out = self.local();
+        let second_out = self.local();
+        self.cur_fn.code.get(amount);
+        self.cur_fn.code.u64_const(64);
+        self.cur_fn.code.op(OP_I64_GE_U);
+        self.cur_fn.code.open(OP_IF);
         if right && signed {
-            self.e.code.get(first);
-            self.e.code.i64_const(63);
-            self.e.code.op(OP_I64_SHR_S);
+            self.cur_fn.code.get(first);
+            self.cur_fn.code.i64_const(63);
+            self.cur_fn.code.op(OP_I64_SHR_S);
         } else {
-            self.e.code.i64_const(0);
+            self.cur_fn.code.i64_const(0);
         }
-        self.e.code.set(a);
-        self.e.code.get(first);
-        self.e.code.get(k);
-        self.e.code.op(shift);
-        self.e.code.set(b);
-        self.e.code.op(OP_ELSE);
-        self.e.code.get(first);
-        self.e.code.get(k);
-        self.e.code.op(shift);
-        self.e.code.set(a);
+        self.cur_fn.code.set(first_out);
+        self.cur_fn.code.get(first);
+        self.cur_fn.code.get(amount);
+        self.cur_fn.code.op(shift);
+        self.cur_fn.code.set(second_out);
+        self.cur_fn.code.op(OP_ELSE);
+        self.cur_fn.code.get(first);
+        self.cur_fn.code.get(amount);
+        self.cur_fn.code.op(shift);
+        self.cur_fn.code.set(first_out);
         // A Wasm shift takes its amount modulo 64. At zero, select the
         // unmodified second word so there is no cross-word contribution.
-        self.e.code.get(second);
-        self.e.code.get(second);
-        self.e.code.get(k);
-        self
-            .e
-            .code
-            .op(
-                if right {
-                    OP_I64_SHR_U
-                } else {
-                    OP_I64_SHL
-                }
-            );
-        self.e.code.get(first);
-        self.e.code.i64_const(64);
-        self.e.code.get(k);
-        self.e.code.op(OP_I64_SUB);
-        self.e.code.op(cross);
-        self.e.code.op(OP_I64_OR);
-        self.e.code.get(k);
-        self.e.code.op(OP_I64_EQZ);
-        self.e.code.op(OP_SELECT);
-        self.e.code.set(b);
-        self.e.code.op(OP_END);
+        self.cur_fn.code.get(second);
+        self.cur_fn.code.get(second);
+        self.cur_fn.code.get(amount);
+        self.cur_fn.code.op(if right { OP_I64_SHR_U } else { OP_I64_SHL });
+        self.cur_fn.code.get(first);
+        self.cur_fn.code.i64_const(64);
+        self.cur_fn.code.get(amount);
+        self.cur_fn.code.op(OP_I64_SUB);
+        self.cur_fn.code.op(cross);
+        self.cur_fn.code.op(OP_I64_OR);
+        self.cur_fn.code.get(amount);
+        self.cur_fn.code.op(OP_I64_EQZ);
+        self.cur_fn.code.op(OP_SELECT);
+        self.cur_fn.code.set(second_out);
+        self.cur_fn.code.op(OP_END);
         let result = if right {
-            self.wide_block(b, a)
+            self.wide_block(second_out, first_out)
         } else {
-            self.wide_block(a, b)
+            self.wide_block(first_out, second_out)
         };
-        self.set_value(dv, result);
+        self.set_value(dest_val, result);
     }
 
-    // Helper `k`: 0 `$u128_mul(dst, a, b)`, 1
+    // Helper `which`: 0 `$u128_mul(dst, a, b)`, 1
     // `$u128_divrem(dst, a, b, rem)`. Declared once.
-    fn wide_helper(inout self, k: u64) -> u32 {
+    fn wide_helper(inout self, which: u64) -> u32 {
         loop {
             if self.wide_fns.len() >= 2 {
                 break;
             }
             self.wide_fns.push(NONE32);
         }
-        let have = u32_at(in self.wide_fns, k);
+        let have = u32_at(in self.wide_fns, which);
         if have != NONE32 {
             return have;
         }
-        let idx = if k == 0 {
-            self.b.declare(in i64s(3), in ChunkSeq::new[ValTy]())
+        let func = if which == 0 {
+            self.builder.declare(in i64s(3), in ChunkSeq::new[ValTy]())
         } else {
-            self.b.declare(in i64s(4), in ChunkSeq::new[ValTy]())
+            self.builder.declare(in i64s(4), in ChunkSeq::new[ValTy]())
         };
-        let ok = self.wide_fns.try_set(k, idx);
-        let mut c = code_new();
-        if k == 0 {
-            mul_code(inout c);
-            self.b.define(idx, in body_n(9, in c));
+        let ok = self.wide_fns.try_set(which, func);
+        let mut code = code_new();
+        if which == 0 {
+            mul_code(inout code);
+            self.builder.define(func, in body_n(9, in code));
         } else {
-            divrem_code(inout c);
-            self.b.define(idx, in body_n(8, in c));
+            divrem_code(inout code);
+            self.builder.define(func, in body_n(8, in code));
         }
-        idx
+        func
     }
 }
 
 // `$u128_mul(dst 0, a 1, b 2)`, wrapping; locals a0 3, a1 4, b0 5,
 // b1 6, ll 7, lh 8, hl 9, mid 10, hi 11, (lo in ll).
-fn mul_code(inout c: Code) {
-    word(inout c, 1, 0);
-    c.set(3);
-    word(inout c, 1, 1);
-    c.set(4);
-    word(inout c, 2, 0);
-    c.set(5);
-    word(inout c, 2, 1);
-    c.set(6);
+fn mul_code(inout code: Code) {
+    word(inout code, 1, 0);
+    code.set(3);
+    word(inout code, 1, 1);
+    code.set(4);
+    word(inout code, 2, 0);
+    code.set(5);
+    word(inout code, 2, 1);
+    code.set(6);
     // the 128-bit product of a0 and b0 from 32-bit halves
-    half(inout c, 3, false);
-    half(inout c, 5, false);
-    c.op(OP_I64_MUL);
-    c.set(7);
-    half(inout c, 3, false);
-    half(inout c, 5, true);
-    c.op(OP_I64_MUL);
-    c.set(8);
-    half(inout c, 3, true);
-    half(inout c, 5, false);
-    c.op(OP_I64_MUL);
-    c.set(9);
-    c.get(7);
-    c.i64_const(32);
-    c.op(OP_I64_SHR_U);
-    c.get(8);
-    c.u64_const(LOW32);
-    c.op(OP_I64_AND);
-    c.op(OP_I64_ADD);
-    c.get(9);
-    c.u64_const(LOW32);
-    c.op(OP_I64_AND);
-    c.op(OP_I64_ADD);
-    c.set(10);
-    half(inout c, 3, true);
-    half(inout c, 5, true);
-    c.op(OP_I64_MUL);
-    c.get(8);
-    c.i64_const(32);
-    c.op(OP_I64_SHR_U);
-    c.op(OP_I64_ADD);
-    c.get(9);
-    c.i64_const(32);
-    c.op(OP_I64_SHR_U);
-    c.op(OP_I64_ADD);
-    c.get(10);
-    c.i64_const(32);
-    c.op(OP_I64_SHR_U);
-    c.op(OP_I64_ADD);
+    half(inout code, 3, false);
+    half(inout code, 5, false);
+    code.op(OP_I64_MUL);
+    code.set(7);
+    half(inout code, 3, false);
+    half(inout code, 5, true);
+    code.op(OP_I64_MUL);
+    code.set(8);
+    half(inout code, 3, true);
+    half(inout code, 5, false);
+    code.op(OP_I64_MUL);
+    code.set(9);
+    code.get(7);
+    code.i64_const(32);
+    code.op(OP_I64_SHR_U);
+    code.get(8);
+    code.u64_const(LOW32);
+    code.op(OP_I64_AND);
+    code.op(OP_I64_ADD);
+    code.get(9);
+    code.u64_const(LOW32);
+    code.op(OP_I64_AND);
+    code.op(OP_I64_ADD);
+    code.set(10);
+    half(inout code, 3, true);
+    half(inout code, 5, true);
+    code.op(OP_I64_MUL);
+    code.get(8);
+    code.i64_const(32);
+    code.op(OP_I64_SHR_U);
+    code.op(OP_I64_ADD);
+    code.get(9);
+    code.i64_const(32);
+    code.op(OP_I64_SHR_U);
+    code.op(OP_I64_ADD);
+    code.get(10);
+    code.i64_const(32);
+    code.op(OP_I64_SHR_U);
+    code.op(OP_I64_ADD);
     // + a0 * b1 + a1 * b0 (wrapping)
-    c.get(3);
-    c.get(6);
-    c.op(OP_I64_MUL);
-    c.op(OP_I64_ADD);
-    c.get(4);
-    c.get(5);
-    c.op(OP_I64_MUL);
-    c.op(OP_I64_ADD);
-    c.set(11);
+    code.get(3);
+    code.get(6);
+    code.op(OP_I64_MUL);
+    code.op(OP_I64_ADD);
+    code.get(4);
+    code.get(5);
+    code.op(OP_I64_MUL);
+    code.op(OP_I64_ADD);
+    code.set(11);
     // dst = lo, hi
-    c.get(0);
-    c.op(OP_I32_WRAP_I64);
-    c.get(7);
-    c.u64_const(LOW32);
-    c.op(OP_I64_AND);
-    c.get(10);
-    c.i64_const(32);
-    c.op(OP_I64_SHL);
-    c.op(OP_I64_OR);
-    c.store(0);
-    c.get(0);
-    c.op(OP_I32_WRAP_I64);
-    c.get(11);
-    c.store(8);
-    c.op(OP_END);
+    code.get(0);
+    code.op(OP_I32_WRAP_I64);
+    code.get(7);
+    code.u64_const(LOW32);
+    code.op(OP_I64_AND);
+    code.get(10);
+    code.i64_const(32);
+    code.op(OP_I64_SHL);
+    code.op(OP_I64_OR);
+    code.store(0);
+    code.get(0);
+    code.op(OP_I32_WRAP_I64);
+    code.get(11);
+    code.store(8);
+    code.op(OP_END);
 }
 
-// `c` pushes the low (`high` false) or high 32 bits of local `l`.
-fn half(inout c: Code, l: u32, high: bool) {
-    c.get(l);
+// `code` pushes the low (`high` false) or high 32 bits of local `local`.
+fn half(inout code: Code, local: u32, high: bool) {
+    code.get(local);
     if high {
-        c.i64_const(32);
-        c.op(OP_I64_SHR_U);
+        code.i64_const(32);
+        code.op(OP_I64_SHR_U);
     } else {
-        c.u64_const(LOW32);
-        c.op(OP_I64_AND);
+        code.u64_const(LOW32);
+        code.op(OP_I64_AND);
     }
 }
 
 // `$u128_divrem(dst 0, a 1, b 2, rem 3)`: restoring division, one bit per
 // step from bit 127 down; dst gets the quotient, or the remainder when
 // `rem` is 1. Locals: i 4, r0 5, r1 6, q0 7, q1 8, bit 9, b0 10, b1 11.
-fn divrem_code(inout c: Code) {
-    word(inout c, 2, 0);
-    c.set(10);
-    word(inout c, 2, 1);
-    c.set(11);
-    c.i64_const(128);
-    c.set(4);
-    c.open(OP_BLOCK);
-    c.open(OP_LOOP);
-    c.get(4);
-    c.op(OP_I64_EQZ);
-    c.br_if(1);
-    c.get(4);
-    c.i64_const(1);
-    c.op(OP_I64_SUB);
-    c.set(4);
+fn divrem_code(inout code: Code) {
+    word(inout code, 2, 0);
+    code.set(10);
+    word(inout code, 2, 1);
+    code.set(11);
+    code.i64_const(128);
+    code.set(4);
+    code.open(OP_BLOCK);
+    code.open(OP_LOOP);
+    code.get(4);
+    code.op(OP_I64_EQZ);
+    code.br_if(1);
+    code.get(4);
+    code.i64_const(1);
+    code.op(OP_I64_SUB);
+    code.set(4);
     // bit = (i >= 64 ? a1 >> (i - 64) : a0 >> i) & 1
-    word(inout c, 1, 1);
-    c.get(4);
-    c.op(OP_I64_SHR_U);
-    word(inout c, 1, 0);
-    c.get(4);
-    c.op(OP_I64_SHR_U);
-    c.get(4);
-    c.i64_const(64);
-    c.op(OP_I64_GE_U);
-    c.op(OP_SELECT);
-    c.i64_const(1);
-    c.op(OP_I64_AND);
-    c.set(9);
+    word(inout code, 1, 1);
+    code.get(4);
+    code.op(OP_I64_SHR_U);
+    word(inout code, 1, 0);
+    code.get(4);
+    code.op(OP_I64_SHR_U);
+    code.get(4);
+    code.i64_const(64);
+    code.op(OP_I64_GE_U);
+    code.op(OP_SELECT);
+    code.i64_const(1);
+    code.op(OP_I64_AND);
+    code.set(9);
     // r = r << 1 | bit
-    c.get(6);
-    c.i64_const(1);
-    c.op(OP_I64_SHL);
-    c.get(5);
-    c.i64_const(63);
-    c.op(OP_I64_SHR_U);
-    c.op(OP_I64_OR);
-    c.set(6);
-    c.get(5);
-    c.i64_const(1);
-    c.op(OP_I64_SHL);
-    c.get(9);
-    c.op(OP_I64_OR);
-    c.set(5);
+    code.get(6);
+    code.i64_const(1);
+    code.op(OP_I64_SHL);
+    code.get(5);
+    code.i64_const(63);
+    code.op(OP_I64_SHR_U);
+    code.op(OP_I64_OR);
+    code.set(6);
+    code.get(5);
+    code.i64_const(1);
+    code.op(OP_I64_SHL);
+    code.get(9);
+    code.op(OP_I64_OR);
+    code.set(5);
     // if r >= b: r -= b, q |= 1 << i
-    c.get(6);
-    c.get(11);
-    c.op(OP_I64_GT_U);
-    c.get(6);
-    c.get(11);
-    c.op(OP_I64_EQ);
-    c.get(5);
-    c.get(10);
-    c.op(OP_I64_GE_U);
-    c.op(OP_I32_AND);
-    c.op(OP_I32_OR);
-    c.open(OP_IF);
-    c.get(6);
-    c.get(11);
-    c.op(OP_I64_SUB);
-    c.get(5);
-    c.get(10);
-    c.op(OP_I64_LT_U);
-    c.op(OP_I64_EXTEND_I32_U);
-    c.op(OP_I64_SUB);
-    c.set(6);
-    c.get(5);
-    c.get(10);
-    c.op(OP_I64_SUB);
-    c.set(5);
-    c.get(4);
-    c.i64_const(64);
-    c.op(OP_I64_GE_U);
-    c.open(OP_IF);
-    c.get(8);
-    c.i64_const(1);
-    c.get(4);
-    c.op(OP_I64_SHL);
-    c.op(OP_I64_OR);
-    c.set(8);
-    c.op(OP_ELSE);
-    c.get(7);
-    c.i64_const(1);
-    c.get(4);
-    c.op(OP_I64_SHL);
-    c.op(OP_I64_OR);
-    c.set(7);
-    c.op(OP_END);
-    c.op(OP_END);
-    c.br(0);
-    c.op(OP_END);
-    c.op(OP_END);
-    c.get(0);
-    c.op(OP_I32_WRAP_I64);
-    c.get(5);
-    c.get(7);
-    c.get(3);
-    c.op(OP_I32_WRAP_I64);
-    c.op(OP_SELECT);
-    c.store(0);
-    c.get(0);
-    c.op(OP_I32_WRAP_I64);
-    c.get(6);
-    c.get(8);
-    c.get(3);
-    c.op(OP_I32_WRAP_I64);
-    c.op(OP_SELECT);
-    c.store(8);
-    c.op(OP_END);
+    code.get(6);
+    code.get(11);
+    code.op(OP_I64_GT_U);
+    code.get(6);
+    code.get(11);
+    code.op(OP_I64_EQ);
+    code.get(5);
+    code.get(10);
+    code.op(OP_I64_GE_U);
+    code.op(OP_I32_AND);
+    code.op(OP_I32_OR);
+    code.open(OP_IF);
+    code.get(6);
+    code.get(11);
+    code.op(OP_I64_SUB);
+    code.get(5);
+    code.get(10);
+    code.op(OP_I64_LT_U);
+    code.op(OP_I64_EXTEND_I32_U);
+    code.op(OP_I64_SUB);
+    code.set(6);
+    code.get(5);
+    code.get(10);
+    code.op(OP_I64_SUB);
+    code.set(5);
+    code.get(4);
+    code.i64_const(64);
+    code.op(OP_I64_GE_U);
+    code.open(OP_IF);
+    code.get(8);
+    code.i64_const(1);
+    code.get(4);
+    code.op(OP_I64_SHL);
+    code.op(OP_I64_OR);
+    code.set(8);
+    code.op(OP_ELSE);
+    code.get(7);
+    code.i64_const(1);
+    code.get(4);
+    code.op(OP_I64_SHL);
+    code.op(OP_I64_OR);
+    code.set(7);
+    code.op(OP_END);
+    code.op(OP_END);
+    code.br(0);
+    code.op(OP_END);
+    code.op(OP_END);
+    code.get(0);
+    code.op(OP_I32_WRAP_I64);
+    code.get(5);
+    code.get(7);
+    code.get(3);
+    code.op(OP_I32_WRAP_I64);
+    code.op(OP_SELECT);
+    code.store(0);
+    code.get(0);
+    code.op(OP_I32_WRAP_I64);
+    code.get(6);
+    code.get(8);
+    code.get(3);
+    code.op(OP_I32_WRAP_I64);
+    code.op(OP_SELECT);
+    code.store(8);
+    code.op(OP_END);
 }

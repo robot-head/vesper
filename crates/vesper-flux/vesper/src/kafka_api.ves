@@ -625,11 +625,7 @@ pub fn req_end_txn(
 // Whether `data[a..a + la]` sorts before `data[b..b + lb]` (bytewise, as
 // `str`'s `Ord`).
 fn bytes_lt(in data: Slice[u8], a: u64, la: u64, b: u64, lb: u64) -> bool {
-    let n = if la < lb {
-        la
-    } else {
-        lb
-    };
+    let n = if la < lb { la } else { lb };
     for i in 0..n {
         let x = sb(in data, wrapping_add(a, i));
         let y = sb(in data, wrapping_add(b, i));
@@ -830,16 +826,8 @@ fn utf8_ok(in b: Slice[u8], start: u64, end: u64) -> bool {
             }
             i = wrapping_add(i, 2);
         } else if x < 240 {
-            let lo: u8 = if x == 224 {
-                160
-            } else {
-                128
-            };
-            let hi: u8 = if x == 237 {
-                159
-            } else {
-                191
-            };
+            let lo: u8 = if x == 224 { 160 } else { 128 };
+            let hi: u8 = if x == 237 { 159 } else { 191 };
             if wrapping_add(i, 3) > end
                 || !ok_byte(in b, wrapping_add(i, 1), lo, hi)
                 || !ok_byte(in b, wrapping_add(i, 2), 128, 191) {
@@ -847,16 +835,8 @@ fn utf8_ok(in b: Slice[u8], start: u64, end: u64) -> bool {
             }
             i = wrapping_add(i, 3);
         } else if x < 245 {
-            let lo: u8 = if x == 240 {
-                144
-            } else {
-                128
-            };
-            let hi: u8 = if x == 244 {
-                143
-            } else {
-                191
-            };
+            let lo: u8 = if x == 240 { 144 } else { 128 };
+            let hi: u8 = if x == 244 { 143 } else { 191 };
             if wrapping_add(i, 4) > end
                 || !ok_byte(in b, wrapping_add(i, 1), lo, hi)
                 || !ok_byte(in b, wrapping_add(i, 2), 128, 191)
@@ -885,11 +865,7 @@ fn r8(in b: Slice[u8], inout at: u64) -> i64 eff [Fail[KwErr]] {
         Option::Some(x) => {
             at = wrapping_add(at, 1);
             let v = wrapping_i64(widen_u64(x));
-            if v >= 128 {
-                wrapping_sub(v, 256)
-            } else {
-                v
-            }
+            if v >= 128 { wrapping_sub(v, 256) } else { v }
         },
         Option::None => {
             malformed();
@@ -994,11 +970,7 @@ fn rlen(in b: Slice[u8], inout at: u64, flex: bool) -> i64 eff [Fail[KwErr]] {
 
 fn rarray(in b: Slice[u8], inout at: u64, flex: bool) -> u64 eff [Fail[KwErr]] {
     let n = rlen(in b, inout at, flex);
-    if n < 0 {
-        0
-    } else {
-        wrapping_u64(n)
-    }
+    if n < 0 { 0 } else { wrapping_u64(n) }
 }
 
 // `R::nstr`: the string's length, -1 for null; it starts at `at` minus
@@ -1139,18 +1111,7 @@ pub fn resp_sasl_authenticate(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]
     let code = r16(in b, inout at);
     let m = rnstr(in b, inout at, false);
     if code != 0 {
-        code_msg(
-            code,
-            wrapping_sub(
-                at,
-                if m < 0 {
-                    0
-                } else {
-                    wrapping_u64(m)
-                }
-            ),
-            m
-        );
+        code_msg(code, wrapping_sub(at, if m < 0 { 0 } else { wrapping_u64(m) }), m);
     }
     let mut out = ChunkSeq::with_capacity[i64](2);
     push_bytes(in b, inout at, false, inout out);
@@ -1283,18 +1244,7 @@ pub fn resp_create_topic(in b: Slice[u8]) eff [Fail[KwErr]] {
         let code = r16(in b, inout at);
         let m = rnstr(in b, inout at, false);
         if code != 0 {
-            code_msg(
-                code,
-                wrapping_sub(
-                    at,
-                    if m < 0 {
-                        0
-                    } else {
-                        wrapping_u64(m)
-                    }
-                ),
-                m
-            );
+            code_msg(code, wrapping_sub(at, if m < 0 { 0 } else { wrapping_u64(m) }), m);
         }
     }
 }
@@ -1450,15 +1400,14 @@ pub fn resp_produce(in b: Slice[u8], partition: i64) -> ChunkSeq[i64] eff [Fail[
                 let _ = out.try_set(0, 1);
                 let _ = out.try_set(1, code);
                 let _ = out.try_set(2, base);
-                let _ = out
-                    .try_set(
-                        3,
-                        if m < 0 {
-                            0
-                        } else {
-                            wrapping_i64(wrapping_sub(at, wrapping_u64(m)))
-                        }
-                    );
+                let _ = out.try_set(
+                    3,
+                    if m < 0 {
+                        0
+                    } else {
+                        wrapping_i64(wrapping_sub(at, wrapping_u64(m)))
+                    }
+                );
                 let _ = out.try_set(4, m);
             }
         }
@@ -1870,11 +1819,7 @@ pub fn batch_head(in b: Slice[u8], at0: u64) -> ChunkSeq[i64] {
     let res = handle Fail[KwErr] in {
         let _ = r32(in body, inout at);
         let magic = r8(in body, inout at);
-        if magic != 2 {
-            4
-        } else {
-            0
-        }
+        if magic != 2 { 4 } else { 0 }
     } with {
         return x => x,
         raise(e, k) => 3,
@@ -1913,11 +1858,7 @@ pub fn batch_head(in b: Slice[u8], at0: u64) -> ChunkSeq[i64] {
         let _ = out.try_set(7, base_ts);
         let _ = out.try_set(8, producer_id);
         let _ = out.try_set(9, count);
-        if count < 0 || last_delta < 0 {
-            2
-        } else {
-            0
-        }
+        if count < 0 || last_delta < 0 { 2 } else { 0 }
     } with {
         return x => x,
         raise(e, k) => 1,
