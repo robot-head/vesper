@@ -10,6 +10,8 @@ sys library StdFs (
     link = "dynamic", name = "c",
     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
 ) {
+    // The architecture: 1 x86_64, 2 aarch64, 3 wasm32 (`arch` in src).
+    const ARCH: u32 = 1;
     const OS: u32 = 1;
     const O_WRONLY: i32 = 1;
     const O_CREAT: i32 = 64;
