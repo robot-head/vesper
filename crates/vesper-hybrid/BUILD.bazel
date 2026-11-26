@@ -1,3 +1,4 @@
+load("@bazel_skylib//rules:native_binary.bzl", "native_binary")
 load("//tools/bazel:vesper_hybrid.bzl", "vesper_hybrid")
 
 # The hybrid Stage 2 compiler (self-hosting SH0 lane 1, #1123): the default
@@ -79,8 +80,8 @@ vesper_hybrid(
     },
     # The included CLI sources (src/main.rs and its command modules) and
     # what they embed.
-    # The driver module (proof-audit and verify, #1341, #2091, and
-    # @vesper/fmt for driver-commands' `fmt`) links hash-sys's
+    # The driver module (driver-commands' proof-audit, verify and fmt over
+    # @vesper/proof-audit, @vesper/verify and @vesper/fmt) links hash-sys's
     # `[package] objects` (the BLAKE3 C library), which the harness compiles
     # into its archive.
     build_script_data = [
@@ -91,7 +92,12 @@ vesper_hybrid(
         # Path dependencies are not beside the crate in Bazel.
         "VESPER_HYBRID_OBJECT_PACKAGES_HYBRID_DRIVER": "$(execpath //:std_hash_sys_manifest)",
     },
-    extra_compile_data = ["//:files"],
+    extra_compile_data = [
+        "//:files",
+        # src/swap/wasm_backend.rs includes tests/common/wasm_words.rs, which
+        # embeds the Cranelift component's WIT (#2210).
+        "//crates/vesper-cranelift-component:wit/vcl.wit",
+    ],
     # The differential harness runs the default compiler beside the hybrid
     # over the bootstrap corpus, examples/ and tests/; tests/parse.rs also
     # reads the parser test sources.
@@ -193,12 +199,13 @@ vesper_hybrid(
         # front-end passes (#1893) the parse module, the front end v2, the
         # AST and @vesper-std/toml's Debug text; the wasm and eBPF builds
         # (#1895) those backends and wit-component; the package load
-        # (#1986) the package assembler; `vesper proof-audit` (#1341, #2091)
-        # @vesper/proof-audit; `vesper verify SOURCE --format` (#1341)
-        # @vesper/verify and @vesper/lean-syntax.
+        # (#1986) the package assembler; driver-commands' `vesper
+        # proof-audit` @vesper/proof-audit and `vesper verify SOURCE
+        # --format` @vesper/verify and @vesper/lean-syntax (#1341, #1996).
         "hybrid_driver": [
             ":hybrid_parse_package",
             "//:ast_package",
+            "//:check_collect_package",
             "//:check_data_package",
             "//:check_layout_package",
             "//:check_names_packages_package",
@@ -224,6 +231,8 @@ vesper_hybrid(
             # `vesper fmt`'s formatter (#1996 part 3d).
             "//crates/vesper-fmt:port_package",
             "//crates/vesper-lean-syntax:port_package",
+            # `vesper graph`'s lockfile reader and report (#1996).
+            "//crates/vesper-loom-calculus:port_package",
             "//crates/vesper-serde:port_package",
         ],
         # The eBPF backend swap (#1290) builds on @vesper/ebpf-backend.
@@ -493,4 +502,18 @@ vesper_hybrid(
         # SH5 lane 10 (#1333): the shared-world cost report.
         "test/swap_crossing": [":bin/vesper-hybrid"],
     },
+)
+
+# The hybrid under the name the default compiler ships as (#1397, the
+# default switch, piece S2): started as `vesper`, it runs the gated swap
+# set with no variable (src/swaps.rs), so this is the compiler the default
+# `vesper` switches to. A copy, not a second build of the crate.
+native_binary(
+    name = "vesper",
+    src = ":bin/vesper-hybrid",
+    out = select({
+        "@platforms//os:windows": "shipped/vesper.exe",
+        "//conditions:default": "shipped/vesper",
+    }),
+    visibility = ["//visibility:public"],
 )

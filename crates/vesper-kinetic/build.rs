@@ -82,4 +82,9 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // soft.rs (substeps): the volume constraint keeps 6 V at 6 V0.
     ("e3z) - 6.0 * rest_volume;", "e3z) - 5.0 * rest_volume;"),
+    // couple.rs: contact projection pulls particles into rigid bodies instead of separating.
+    (
+        "let dl = (-nearest_f32(d)) / wsum;",
+        "let dl = nearest_f32(d) / wsum;",
+    ),
 ];

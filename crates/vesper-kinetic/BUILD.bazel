@@ -133,6 +133,12 @@ filegroup(
             "e3z) - 6.0 * rest_volume;",
             "e3z) - 5.0 * rest_volume;",
         ),
+        (
+            "couple",
+            "couple",
+            "let dl = (-nearest_f32(d)) / wsum;",
+            "let dl = nearest_f32(d) / wsum;",
+        ),
     ]
 ]
 

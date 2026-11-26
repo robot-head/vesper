@@ -124,6 +124,76 @@ Stage 1 guard: no guarded path changed; the change is inside
 
 **Rust lines deleted:** 0. This part adds the switch and its tests.
 
+## Part 5a: the gated default build and the verified codegen gate
+
+### What changed
+
+- **`gated-default`** (`crates/vesper-hybrid`): a feature that makes
+  `gated` the set when neither `VESPER_HYBRID_SWAPS` nor
+  `VESPER_HYBRID_GATED` names one. It is the build the default `vesper`
+  switches to (piece S1 of the default switch, below), so that build needs
+  no environment variable. Without the feature nothing changes: the
+  default stays `all`, and an empty `VESPER_HYBRID_SWAPS` means the build's
+  default.
+- **`scripts/ci/flip-gate/verified-codegen.json`**: the verified code
+  generator's gate. The differential is every corpus world through
+  monomorphization, the front half, the lowering and the whole compile on
+  five targets; the `compile` workload times the swap's whole path from the
+  checked world (optimized program, `compile_input`'s encoding,
+  `compile_words`, decoding) against Rust's `build` from the same world.
+  `compile_flip_gate` (tests/self_host_verified_codegen.rs) now prints one
+  pair per epoch for the gate. The `verified_codegen` row is
+  `pass("verified_codegen", "verified-codegen", "#1886")`, so the gated
+  set runs it.
+
+### Evidence (Linux x86_64, release, `-C target-cpu=native`)
+
+| Check | Result |
+|---|---|
+| `aspect ci flip-gate -- verified-codegen` | **PASS**: 0 differences on 4,724 cases, tests 1/1, compile **1.02x** [0.97x, 1.05x] n=12 |
+
+**Rust lines deleted:** 0. `src/verified_codegen` (9,760 lines) goes at
+the retirement.
+
+## Part 5b: the gated hybrid under the shipped name (piece S2)
+
+### What changed
+
+- **`src/swaps.rs`**: a hybrid started as `vesper` (the file name without
+  `.exe`) defaults to `gated`, like a `gated-default` build. Started as
+  `vesper-hybrid`, as the port lanes and their tests run it, it still
+  defaults to `all`. The variables override both.
+- **`//crates/vesper-hybrid:vesper`**: the hybrid binary copied under the
+  shipped name (`shipped/vesper`, `shipped/vesper.exe` on Windows), so
+  Bazel has the gated compiler without a second build of the crate. The
+  Rust `//:bin/vesper` is unchanged: it still builds the port objects and
+  is what every task runs until piece S4 moves them.
+- **`tests/swaps.rs`**: `the_shipped_name_runs_the_gated_set` copies the
+  hybrid to a `vesper` file and checks that it runs exactly the gated set
+  with no variable, that the parser stays on Rust, and that
+  `VESPER_HYBRID_SWAPS=all` still turns every swap on.
+
+**Rust lines deleted:** 0.
+
+## The default switch, in pieces
+
+Plan of 2026-11-26. The default `vesper` switches to the gated hybrid
+in pieces, each of which keeps the Rust binary and changes no output:
+
+- S1: the `gated-default` build (part 5a).
+- S2: Bazel's `//crates/vesper-hybrid:vesper`, the gated hybrid under the
+  shipped name (part 5b); the Rust binary stays the boot compiler of the
+  port rules.
+- S3: the same for Cargo: the root package's binary is renamed and the
+  hybrid crate's binary becomes `vesper`.
+- S4: the required checks run their CLI tests against the gated hybrid.
+- S5: docs, release validation and the default-CLI dependency check.
+
+That switch alone deletes no Rust: the ports are still compiled by the
+Rust compiler. A flipped module's Rust can go one PR at a time once Stage 2
+builds the port objects, which needs `hd_step` gone and Stage 2 to emit
+native objects (the `codegen-*` gaps in `STAGE2_PACKAGE_GAPS`).
+
 ## Retirement blockers found
 
 Besides the compiler rows that have not passed the gate (checklist item
@@ -157,7 +227,7 @@ Besides the compiler rows that have not passed the gate (checklist item
   once the complete compiler builds to wasm; the no-Rust CI check.
 - Part 3: `bootstrap/stage2.lock` for the complete compiler and the CI
   gate on it.
-- Part 5: the default switch to `gated` for the shipped `vesper`, then the
+- Part 5c onward: pieces S3 to S5 of the default switch, then the
   retirement PR (the plan's checklist).
 - Census: lane 2's rows (`codegen_swap`, `ir_swap`, `swap_input`,
   `compiler_modules`, `vesper-hybrid`) change only at the retirement.

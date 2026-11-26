@@ -1245,6 +1245,64 @@ fn seed_graph_tree(dir: &Path) {
     )
     .unwrap();
     std::fs::write(dir.join("bad.lock"), "{not-json").unwrap();
+    // A snapshot in the `Solution` schema that validates, with a native
+    // dependency, an unused native selection and an unreachable package,
+    // and one that does not (a root the selections do not meet).
+    let valid = serde_json::json!({
+        "schema_version": 1,
+        "roots": [{ "name": "@acme/app", "version": "^1" }],
+        "packages": [
+            {
+                "manifest": {
+                    "package": {
+                        "name": "@acme/app",
+                        "version": "1.0.0",
+                        "edition": "2026",
+                        "capability_ceiling": ["Fail", "Net"]
+                    },
+                    "dependencies": {
+                        "@acme/lib": { "version": "^1.2", "effects": ["Fail", "Net"], "features": ["std"] }
+                    },
+                    "features": {
+                        "default": { "enables_effects": ["Fail"], "sys_deps": ["zlib ^1.2"] }
+                    }
+                },
+                "features": ["default"]
+            },
+            {
+                "manifest": {
+                    "package": {
+                        "name": "@acme/lib",
+                        "version": "1.2.0",
+                        "edition": "2026",
+                        "capability_ceiling": ["Fail", "Net"]
+                    },
+                    "features": { "std": { "enables_effects": ["Net"] } }
+                }
+            },
+            {
+                "manifest": {
+                    "package": { "name": "@acme/unused", "version": "0.1.0", "edition": "2026" }
+                }
+            }
+        ],
+        "system_packages": [
+            { "name": "zlib", "version": "1.2.13" },
+            { "name": "libc", "version": "0.2.0" }
+        ]
+    });
+    std::fs::write(
+        dir.join("valid.lock"),
+        serde_json::to_vec_pretty(&valid).unwrap(),
+    )
+    .unwrap();
+    let mut invalid = valid;
+    invalid["roots"][0]["version"] = serde_json::json!("^9");
+    std::fs::write(
+        dir.join("invalid.lock"),
+        serde_json::to_vec(&invalid).unwrap(),
+    )
+    .unwrap();
     std::fs::write(
         dir.join("empty.lock"),
         r#"{"schema_version":1,"roots":[],"packages":[],"system_packages":[]}"#,
@@ -1275,6 +1333,22 @@ fn graph_matches_the_default_compiler() {
         &["graph", "Loom.lock", "--dot"],
         &["graph", "--package", "@acme/lib", "--invert"],
         &["graph", "--package", "@acme/missing", "--json"],
+        &["graph", "valid.lock"],
+        &["graph", "valid.lock", "--json"],
+        &["graph", "valid.lock", "--dot"],
+        &[
+            "graph",
+            "valid.lock",
+            "--package",
+            "@acme/lib",
+            "--invert",
+            "--dot",
+        ],
+        &["graph", "valid.lock", "--package", "@acme/app", "--json"],
+        &["graph", "valid.lock", "--package", "@acme/lib"],
+        &["graph", "valid.lock", "--package", "@acme/unused", "--json"],
+        &["graph", "invalid.lock"],
+        &["graph", "invalid.lock", "--json"],
     ];
     let mut diffs = vec![];
     for argv in cases {
@@ -1772,6 +1846,18 @@ fn proof_audit_matches_the_default_compiler() {
     );
 }
 
+/// The count in the `VESPER_HYBRID_STATS` report of the command layers.
+fn layer_answers(stderr: &str) -> u64 {
+    stderr
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("vesper-hybrid: the command layers answered ")
+                .and_then(|s| s.strip_suffix(" commands from Vesper"))
+                .and_then(|n| n.parse().ok())
+        })
+        .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"))
+}
+
 #[test]
 fn proof_audit_runs_in_vesper() {
     let hybrid = hybrid();
@@ -1797,7 +1883,8 @@ fn proof_audit_runs_in_vesper() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// An audit past the command layer runs in the driver module (#1341).
+/// An audit past the command layer runs in @vesper/proof-audit, which the
+/// command layer calls (#1341, #1996).
 #[test]
 fn proof_audit_audits_in_vesper() {
     let hybrid = hybrid();
@@ -1811,15 +1898,12 @@ fn proof_audit_audits_in_vesper() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("vesper-hybrid: proof_audit answered 1 calls from Vesper"),
-        "{stderr}"
-    );
+    assert_eq!(layer_answers(&stderr), 1, "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `vesper verify SOURCE --format` past the command layer runs in
-/// the driver module's `verify_run` (#1341).
+/// @vesper/verify, which the command layer calls (#1341, #1996).
 #[test]
 fn verify_format_runs_in_vesper() {
     let hybrid = hybrid();
@@ -1833,10 +1917,7 @@ fn verify_format_runs_in_vesper() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("vesper-hybrid: verify answered 1 calls from Vesper"),
-        "{stderr}"
-    );
+    assert_eq!(layer_answers(&stderr), 1, "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

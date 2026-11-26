@@ -15,7 +15,7 @@ mod verified_codegen_binding;
 #[path = "../../../../tests/common/verified_words.rs"]
 mod verified_words;
 
-use super::{Registry, Swap, env_off, ir_words, must, on, open};
+use super::{Registry, Swap, env_off, ir_words, must, on, open, pass};
 use verified_words::{COMPILE_INPUT_FORMAT, compile_input, decode_build};
 use vesper::verified_codegen as verified;
 
@@ -83,10 +83,7 @@ pub(crate) fn verified_build_input(
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[
-    open(
-        "verified_codegen",
-        "0 diffs over 3,640 corpus compiles, 1.03x end to end; no flip-gate configuration",
-    ),
+    pass("verified_codegen", "verified-codegen", "#1886"),
     open(
         "verified_coverage_listing",
         "opt-in through VESPER_HYBRID_VERIFIED_COVERAGE=1",

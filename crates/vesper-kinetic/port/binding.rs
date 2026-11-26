@@ -145,6 +145,7 @@ unsafe extern "C" {
     fn vesper_kinetic_live_allocations() -> i64;
     fn vesper_kinetic_ccd_pair_toi(poses: *mut u64, ka: i64, na: i64, ra: f64, kb: i64, nb: i64, rb: f64, local_pts: *mut u64, dt: f32, gx: f32, gy: f32, gz: f32, margin: f64, target: f64, mu: f64, max_iter: i64, va: *mut u64, vb: *mut u64, gjk_out: *mut u64, out_poses: *mut u64, out_s: *mut u64) -> i64;
     fn vesper_kinetic_colorer_color(a: *mut u64, b: *mut u64, capacity: i64, masks: *mut u64, keys: *mut u64, order: *mut u64, colors: *mut u64, offsets: *mut u64, sorted: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_kinetic_couple_substep(pos: *mut u64, prev: *mut u64, p_inv_mass: *mut u64, nb: i64, bodies: *mut u64, shape_meta: *mut u64, shape_rad: *mut u64, local_pts: *mut u64, radius: f32, mu: f32, h: f32, dt: f32, acc: *mut u64, probe_buf: *mut u64, body_verts: *mut u64, gjk_out: *mut u64, out_meta: *mut u64) -> i64;
     fn vesper_kinetic_crmath_atan2(y: f64, x: f64, cache: *mut u64) -> f64;
     fn vesper_kinetic_crmath_atan2f(y: i64, x: i64, cache: *mut u64) -> i64;
     fn vesper_kinetic_crmath_cos(x: f64, cache: *mut u64) -> f64;
@@ -225,6 +226,15 @@ pub fn colorer_color(a: &[u32], b: &[u64], capacity: u64, masks: &mut [u64], key
         1 => Err(<crate::port::ColoringError as Abi>::get(&fail[1..])),
         status => panic!("invalid failure status {status} from vesper_kinetic_colorer_color"),
     }
+}
+
+/// Calls `couple_substep` of the Vesper library `kinetic` (`vesper_kinetic_couple_substep`).
+pub fn couple_substep(pos: &mut [f32], prev: &mut [f32], p_inv_mass: &[f32], nb: u64, bodies: &mut [f32], shape_meta: &[u64], shape_rad: &[f64], local_pts: &[f64], radius: f32, mu: f32, h: f32, dt: f32, acc: &mut [f32], probe_buf: &mut [f64], body_verts: &mut [f64], gjk_out: &mut [f64], out_meta: &mut [u64]) -> () {
+    // SAFETY: `vesper_kinetic_couple_substep` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(pos, |view_pos| vesper_port_abi::with_slice_mut(prev, |view_prev| vesper_port_abi::with_slice(p_inv_mass, |view_p_inv_mass| vesper_port_abi::with_slice_mut(bodies, |view_bodies| vesper_port_abi::with_slice(shape_meta, |view_shape_meta| vesper_port_abi::with_slice(shape_rad, |view_shape_rad| vesper_port_abi::with_slice(local_pts, |view_local_pts| vesper_port_abi::with_slice_mut(acc, |view_acc| vesper_port_abi::with_slice_mut(probe_buf, |view_probe_buf| vesper_port_abi::with_slice_mut(body_verts, |view_body_verts| vesper_port_abi::with_slice_mut(gjk_out, |view_gjk_out| vesper_port_abi::with_slice_mut(out_meta, |view_out_meta| unsafe { vesper_kinetic_couple_substep(view_pos, view_prev, view_p_inv_mass, nb as i64, view_bodies, view_shape_meta, view_shape_rad, view_local_pts, radius, mu, h, dt, view_acc, view_probe_buf, view_body_verts, view_gjk_out, view_out_meta) }))))))))))));
+    { let _ = raw; }
 }
 
 /// Calls `crmath_atan2` of the Vesper library `kinetic` (`vesper_kinetic_crmath_atan2`).

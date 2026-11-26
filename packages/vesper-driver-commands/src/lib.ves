@@ -88,7 +88,7 @@ fn cli_version() -> Str {
 // program name), or `delegate()`.
 pub fn run(
     in args: Args
-) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] {
+) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3], Ffi[HybridCommands]] {
     handle Fail[PrintFailed] in {
         route(in args)
     } with {
@@ -99,7 +99,14 @@ pub fn run(
 
 fn route(
     in args: Args
-) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands], Fail[PrintFailed]] {
+) -> i64 eff [
+    Ffi[StdFs],
+    Ffi[StdEnv],
+    Ffi[StdProcess],
+    Ffi[Blake3],
+    Ffi[HybridCommands],
+    Fail[PrintFailed]
+] {
     let n = args_count(in args);
     if n == 0 {
         print(stdout_stream(), in cli_help().as_bytes());

@@ -4,3 +4,19 @@ load("//tools/bazel:defs.bzl", "vesper_crate")
 vesper_crate(
     extra_test_data = ["//packages/vesper-cranelift:files"],
 )
+
+# crates/vesper-cranelift-component's object comparison runs these
+# fixtures through the same support module.
+exports_files(
+    ["tests/support/mod.rs"],
+    visibility = ["//crates/vesper-cranelift-component:__pkg__"],
+)
+
+filegroup(
+    name = "test_fixtures",
+    srcs = glob(["tests/fixtures/**"]),
+    visibility = [
+        "//:__pkg__",
+        "//crates/vesper-cranelift-component:__pkg__",
+    ],
+)
