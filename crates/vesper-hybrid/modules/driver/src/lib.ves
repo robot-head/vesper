@@ -807,18 +807,23 @@ fn starts_with(in text: Slice[u8], in prefix: Slice[u8]) -> bool {
     true
 }
 
+// Length of the `error: ` prefix in front of a code generator error summary.
+const ERROR_PREFIX_LEN: u64 = 7;
+// The newline byte that ends a summary line.
+const NEWLINE: u8 = 10;
+
 // Whether the code generator's summary is an `error: <display>` line whose
 // display Rust's `VerifiedError::from_display` reads back to the same text.
 fn verified_error_text(in summary: Slice[u8]) -> bool {
     let n = summary.len();
-    if n < 8 {
+    if n <= ERROR_PREFIX_LEN {
         return false;
     }
     let last = match summary.try_get(wrapping_sub(n, 1)) {
         Option::Some(c) => c,
         Option::None => 0,
     };
-    if last != 10 {
+    if last != NEWLINE {
         return false;
     }
     for i in 0..wrapping_sub(n, 1) {
@@ -826,7 +831,7 @@ fn verified_error_text(in summary: Slice[u8]) -> bool {
             Option::Some(c) => c,
             Option::None => 0,
         };
-        if c == 10 {
+        if c == NEWLINE {
             return false;
         }
     }
@@ -865,7 +870,7 @@ fn verified_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[H
     // one `VerifiedError::from_display` reads back exactly).
     if verified_error_text(in summary.as_slice()) {
         let line = summary.as_slice();
-        return error(in line[7..wrapping_sub(line.len(), 1)]);
+        return error(in line[ERROR_PREFIX_LEN..wrapping_sub(line.len(), 1)]);
     }
     let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let rest = unpack(in words, at, inout bytes);
@@ -892,9 +897,9 @@ fn verified_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[H
     for i in prefix.len()..summary.len() {
         let c = match summary.try_get(i) {
             Option::Some(c) => c,
-            Option::None => 10,
+            Option::None => NEWLINE,
         };
-        if c == 10 {
+        if c == NEWLINE {
             break;
         }
         code.push(c);
