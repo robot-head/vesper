@@ -33,21 +33,21 @@ const NONE: u32 = 4294967295;
 
 // ---------------------------------------------------------------- uses_fn_objects
 
-fn fn_mentions(in d: D, f: u32) -> bool {
-    let mut ts = ChunkSeq::new[u32]();
-    fn_types(in d, f, false, inout ts);
-    let n = ts.len() / 3;
+fn fn_mentions(in ctx: D, func: u32) -> bool {
+    let mut type_spans = ChunkSeq::new[u32]();
+    fn_types(in ctx, func, false, inout type_spans);
+    let n = type_spans.len() / 3;
     for i in 0..n {
-        if mentions_fn_object(in d, u32_at(in ts, wrapping_mul(i, 3))) {
+        if mentions_fn_object(in ctx, u32_at(in type_spans, wrapping_mul(i, 3))) {
             return true;
         }
     }
     false
 }
 
-fn fns_mention(in d: D, list: u32) -> bool {
-    for i in 0..ll(in d, list) {
-        if fn_mentions(in d, la(in d, list, i)) {
+fn fns_mention(in ctx: D, list: u32) -> bool {
+    for i in 0..ll(in ctx, list) {
+        if fn_mentions(in ctx, la(in ctx, list, i)) {
             return true;
         }
     }
@@ -56,49 +56,52 @@ fn fns_mention(in d: D, list: u32) -> bool {
 
 // `dyn_fn::uses_fn_objects`: whether the module writes a function-object
 // type anywhere (`for_each_type`'s positions).
-pub fn uses_fn_objects(in d: D) -> bool {
-    for i in 0..d.ast.m_items.len() {
-        let it = item_at(in d, u32_at(in d.ast.m_items, i));
-        let x = it.node;
-        if it.kind == 1 {
-            let an = adt_at(in d, x);
-            for j in 0..ll(in d, an.variants) {
-                let v = variant_at(in d, la(in d, an.variants, j));
-                for q in 0..ll(in d, v.fields) {
-                    if mentions_fn_object(in d, field_at(in d, la(in d, v.fields, q)).ty) {
+pub fn uses_fn_objects(in ctx: D) -> bool {
+    for i in 0..ctx.ast.m_items.len() {
+        let item = item_at(in ctx, u32_at(in ctx.ast.m_items, i));
+        let node = item.node;
+        if item.kind == 1 {
+            let adt = adt_at(in ctx, node);
+            for j in 0..ll(in ctx, adt.variants) {
+                let variant = variant_at(in ctx, la(in ctx, adt.variants, j));
+                for field_index in 0..ll(in ctx, variant.fields) {
+                    if mentions_fn_object(
+                        in ctx,
+                        field_at(in ctx, la(in ctx, variant.fields, field_index)).ty
+                    ) {
                         return true;
                     }
                 }
             }
-        } else if it.kind == 2 {
-            if fn_mentions(in d, x) {
+        } else if item.kind == 2 {
+            if fn_mentions(in ctx, node) {
                 return true;
             }
-        } else if it.kind == 4 {
-            let im = impl_at(in d, x);
-            if mentions_fn_object(in d, im.ty) || fns_mention(in d, im.methods) {
+        } else if item.kind == 4 {
+            let impl_ = impl_at(in ctx, node);
+            if mentions_fn_object(in ctx, impl_.ty) || fns_mention(in ctx, impl_.methods) {
                 return true;
             }
-        } else if it.kind == 5 {
-            if fns_mention(in d, trait_at(in d, x).methods) {
+        } else if item.kind == 5 {
+            if fns_mention(in ctx, trait_at(in ctx, node).methods) {
                 return true;
             }
-        } else if it.kind == 6 {
-            let c = conf_at(in d, x);
-            if mentions_fn_object(in d, c.self_ty) {
+        } else if item.kind == 6 {
+            let conf = conf_at(in ctx, node);
+            if mentions_fn_object(in ctx, conf.self_ty) {
                 return true;
             }
-            let tr = trait_ref_at(in d, c.trait_ref);
-            for j in 0..ll(in d, tr.args) {
-                if mentions_fn_object(in d, la(in d, tr.args, j)) {
+            let trait_ref = trait_ref_at(in ctx, conf.trait_ref);
+            for j in 0..ll(in ctx, trait_ref.args) {
+                if mentions_fn_object(in ctx, la(in ctx, trait_ref.args, j)) {
                     return true;
                 }
             }
-            if fns_mention(in d, c.methods) {
+            if fns_mention(in ctx, conf.methods) {
                 return true;
             }
-        } else if it.kind == 3 {
-            if fns_mention(in d, effect_decl_at(in d, x).ops) {
+        } else if item.kind == 3 {
+            if fns_mention(in ctx, effect_decl_at(in ctx, node).ops) {
                 return true;
             }
         }
@@ -108,109 +111,109 @@ pub fn uses_fn_objects(in d: D) -> bool {
 
 // ---------------------------------------------------------------- Decls
 
-// Adds method `m` of type `t` (`insert` when `replace`, else
+// Adds method `method_name` of type `ty_name` (`insert` when `replace`, else
 // `entry().or_insert`).
-fn add_method(inout d: D, t: u32, m: u32, f: u32, replace: bool) {
-    let mut r = table_get(in d.m_head, m);
+fn add_method(inout ctx: D, ty_name: u32, method_name: u32, func: u32, replace: bool) {
+    let mut link = table_get(in ctx.method_head, method_name);
     loop {
-        if r == 0 {
+        if link == 0 {
             break;
         }
-        let i = w(wrapping_sub(r, 1));
-        if u32_at(in d.m_ty, i) == t {
+        let index = w(wrapping_sub(link, 1));
+        if u32_at(in ctx.method_owner, index) == ty_name {
             if replace {
-                let ok = d.m_fn.try_set(i, f);
+                let ok = ctx.method_fn.try_set(index, func);
             }
             return;
         }
-        r = u32_at(in d.m_next, i);
+        link = u32_at(in ctx.method_next, index);
     }
-    let row = n32(d.m_ty.len());
-    d.m_ty.push(t);
-    d.m_fn.push(f);
-    d.m_next.push(table_get(in d.m_head, m));
-    table_set(inout d.m_head, m, wrapping_add(row, 1));
+    let row = n32(ctx.method_owner.len());
+    ctx.method_owner.push(ty_name);
+    ctx.method_fn.push(func);
+    ctx.method_next.push(table_get(in ctx.method_head, method_name));
+    table_set(inout ctx.method_head, method_name, wrapping_add(row, 1));
 }
 
-// The method `m` of type `t`, or NONE.
-fn method(in d: D, t: u32, m: u32) -> u32 {
-    let mut r = table_get(in d.m_head, m);
+// The method `method_name` of type `ty_name`, or NONE.
+fn method(in ctx: D, ty_name: u32, method_name: u32) -> u32 {
+    let mut link = table_get(in ctx.method_head, method_name);
     loop {
-        if r == 0 {
+        if link == 0 {
             return NONE;
         }
-        let i = w(wrapping_sub(r, 1));
-        if u32_at(in d.m_ty, i) == t {
-            return u32_at(in d.m_fn, i);
+        let index = w(wrapping_sub(link, 1));
+        if u32_at(in ctx.method_owner, index) == ty_name {
+            return u32_at(in ctx.method_fn, index);
         }
-        r = u32_at(in d.m_next, i);
+        link = u32_at(in ctx.method_next, index);
     }
 }
 
 // `Decls::of`.
-fn decls(inout d: D) {
-    for i in 0..d.ast.m_items.len() {
-        let it = item_at(in d, u32_at(in d.ast.m_items, i));
-        let x = it.node;
-        if it.kind == 2 {
-            table_set(inout d.fn_by, fn_at(in d, x).name, wrapping_add(x, 1));
-        } else if it.kind == 4 {
-            let im = impl_at(in d, x);
-            let t = tname(in d, im.ty);
-            for j in 0..ll(in d, im.methods) {
-                let f = la(in d, im.methods, j);
-                add_method(inout d, t, fn_at(in d, f).name, f, true);
+fn decls(inout ctx: D) {
+    for i in 0..ctx.ast.m_items.len() {
+        let item = item_at(in ctx, u32_at(in ctx.ast.m_items, i));
+        let node = item.node;
+        if item.kind == 2 {
+            table_set(inout ctx.fn_by_name, fn_at(in ctx, node).name, wrapping_add(node, 1));
+        } else if item.kind == 4 {
+            let impl_ = impl_at(in ctx, node);
+            let ty_name = tname(in ctx, impl_.ty);
+            for j in 0..ll(in ctx, impl_.methods) {
+                let func = la(in ctx, impl_.methods, j);
+                add_method(inout ctx, ty_name, fn_at(in ctx, func).name, func, true);
             }
-        } else if it.kind == 6 {
-            let c = conf_at(in d, x);
-            let t = tname(in d, c.self_ty);
-            for j in 0..ll(in d, c.methods) {
-                let f = la(in d, c.methods, j);
-                add_method(inout d, t, fn_at(in d, f).name, f, false);
+        } else if item.kind == 6 {
+            let conf = conf_at(in ctx, node);
+            let ty_name = tname(in ctx, conf.self_ty);
+            for j in 0..ll(in ctx, conf.methods) {
+                let func = la(in ctx, conf.methods, j);
+                add_method(inout ctx, ty_name, fn_at(in ctx, func).name, func, false);
             }
-        } else if it.kind == 1 {
-            let an = adt_at(in d, x);
-            if an.mode == 2 {
-                if d.linear.len() <= w(an.name) {
-                    d.linear.resize(inc(w(an.name)), 0);
+        } else if item.kind == 1 {
+            let adt = adt_at(in ctx, node);
+            if adt.mode == 2 {
+                if ctx.linear.len() <= w(adt.name) {
+                    ctx.linear.resize(inc(w(adt.name)), 0);
                 }
-                let ok = d.linear.try_set(w(an.name), 1);
+                let ok = ctx.linear.try_set(w(adt.name), 1);
             }
-            if !an.is_enum {
-                table_set(inout d.adt_by, an.name, wrapping_add(x, 1));
+            if !adt.is_enum {
+                table_set(inout ctx.adt_by_name, adt.name, wrapping_add(node, 1));
             }
         }
     }
 }
 
 // `Type::name` as a symbol: "" for a type that is not Named.
-fn tname(in d: D, t: u32) -> u32 {
-    let n = type_name(in d, t);
-    if n == NONE { d.k.empty } else { n }
+fn tname(in ctx: D, ast_ty: u32) -> u32 {
+    let name = type_name(in ctx, ast_ty);
+    if name == NONE { ctx.known.empty } else { name }
 }
 
-fn is_linear(in d: D, name: u32) -> bool {
+fn is_linear(in ctx: D, name: u32) -> bool {
     if name == NONE {
         return false;
     }
-    u8_at(in d.linear, w(name)) == 1
+    u8_at(in ctx.linear, w(name)) == 1
 }
 
-// The declared type of field `f` of struct `s` (the last of that name),
-// or NONE.
-fn field_type(in d: D, s: u32, f: u32) -> u32 {
-    let a = table_get(in d.adt_by, s);
-    if a == 0 {
+// The declared type of field `name` of struct `struct_name` (the last field of
+// that name), or NONE.
+fn field_type(in ctx: D, struct_name: u32, name: u32) -> u32 {
+    let adt_entry = table_get(in ctx.adt_by_name, struct_name);
+    if adt_entry == 0 {
         return NONE;
     }
-    let an = adt_at(in d, wrapping_sub(a, 1));
+    let adt = adt_at(in ctx, wrapping_sub(adt_entry, 1));
     let mut out = NONE;
-    for i in 0..ll(in d, an.variants) {
-        let v = variant_at(in d, la(in d, an.variants, i));
-        for j in 0..ll(in d, v.fields) {
-            let fd = field_at(in d, la(in d, v.fields, j));
-            if fd.name == f {
-                out = fd.ty;
+    for i in 0..ll(in ctx, adt.variants) {
+        let variant = variant_at(in ctx, la(in ctx, adt.variants, i));
+        for j in 0..ll(in ctx, variant.fields) {
+            let field = field_at(in ctx, la(in ctx, variant.fields, j));
+            if field.name == name {
+                out = field.ty;
             }
         }
     }
@@ -219,112 +222,112 @@ fn field_type(in d: D, s: u32, f: u32) -> u32 {
 
 // ---------------------------------------------------------------- env
 
-fn env_get(in d: D, n: u32) -> u32 {
-    let mut i = d.env_k.len();
+fn env_get(in ctx: D, name: u32) -> u32 {
+    let mut i = ctx.env_names.len();
     loop {
         if i == 0 {
             return NONE;
         }
         i = wrapping_sub(i, 1);
-        if u32_at(in d.env_k, i) == n {
-            return u32_at(in d.env_t, i);
+        if u32_at(in ctx.env_names, i) == name {
+            return u32_at(in ctx.env_types, i);
         }
     }
 }
 
-fn env_has(in d: D, n: u32) -> bool {
-    env_get(in d, n) != NONE
+fn env_has(in ctx: D, name: u32) -> bool {
+    env_get(in ctx, name) != NONE
 }
 
-fn env_put(inout d: D, n: u32, t: u32) {
-    d.env_k.push(n);
-    d.env_t.push(t);
+fn env_put(inout ctx: D, name: u32, ast_ty: u32) {
+    ctx.env_names.push(name);
+    ctx.env_types.push(ast_ty);
 }
 
-fn env_mark(in d: D) -> u64 {
-    d.env_k.len()
+fn env_mark(in ctx: D) -> u64 {
+    ctx.env_names.len()
 }
 
-fn env_restore(inout d: D, m: u64) {
-    d.env_k.truncate(m);
-    d.env_t.truncate(m);
+fn env_restore(inout ctx: D, mark: u64) {
+    ctx.env_names.truncate(mark);
+    ctx.env_types.truncate(mark);
 }
 
-// `bind`: a plain binding at `t`, a tuple element-wise, anything else at
+// `bind`: a plain binding at `ast_ty`, a tuple element-wise, anything else at
 // an unknown type.
-fn bind(inout d: D, p: u32, t: u32) {
-    let n = pt(in d, p);
-    if n.kind == 2 {
-        env_put(inout d, n.a, t);
-    } else if n.kind == 4 {
-        let tn = ty(in d, t);
-        for i in 0..ll(in d, n.a) {
-            let mut et = d.t_infer;
-            if tn.kind == 2 && i < ll(in d, tn.a) {
-                et = la(in d, tn.a, i);
+fn bind(inout ctx: D, pat: u32, ast_ty: u32) {
+    let node = pt(in ctx, pat);
+    if node.kind == 2 {
+        env_put(inout ctx, node.a, ast_ty);
+    } else if node.kind == 4 {
+        let ty_node = ty(in ctx, ast_ty);
+        for i in 0..ll(in ctx, node.a) {
+            let mut elem_ty = ctx.t_infer;
+            if ty_node.kind == 2 && i < ll(in ctx, ty_node.a) {
+                elem_ty = la(in ctx, ty_node.a, i);
             }
-            bind(inout d, la(in d, n.a, i), et);
+            bind(inout ctx, la(in ctx, node.a, i), elem_ty);
         }
     } else {
         let mut names = ChunkSeq::new[u32]();
-        pattern_names(in d, p, inout names);
+        pattern_names(in ctx, pat, inout names);
         for i in 0..names.len() {
-            env_put(inout d, u32_at(in names, i), d.t_infer);
+            env_put(inout ctx, u32_at(in names, i), ctx.t_infer);
         }
     }
 }
 
 // ---------------------------------------------------------------- spans
 
-// `Lowering::span`: the next synthetic span (s..s+1), recorded with the
+// `Lowering::span`: the next synthetic span (start..start+1), recorded with the
 // current origin.
-fn span(inout d: D) -> u32 {
-    let s = d.next_span;
-    d.next_span = wrapping_add(s, 2);
-    d.origins.push(s);
-    d.origins.push(w(d.o_start));
-    d.origins.push(w(d.o_end));
-    n32(s)
+fn span(inout ctx: D) -> u32 {
+    let start = ctx.next_span;
+    ctx.next_span = wrapping_add(start, 2);
+    ctx.origins.push(start);
+    ctx.origins.push(w(ctx.origin_start));
+    ctx.origins.push(w(ctx.origin_end));
+    n32(start)
 }
 
-fn mk_expr(inout d: D, kind: u8, a: u32, b: u32) -> u32 {
-    let s = span(inout d);
-    new_ex(inout d, exn(kind, s, inc32(s), a, b, NONE))
+fn mk_expr(inout ctx: D, kind: u8, a: u32, b: u32) -> u32 {
+    let start = span(inout ctx);
+    new_ex(inout ctx, exn(kind, start, inc32(start), a, b, NONE))
 }
 
-fn inc32(x: u32) -> u32 {
-    wrapping_add(x, 1)
+fn inc32(value: u32) -> u32 {
+    wrapping_add(value, 1)
 }
 
-fn set_origin(inout d: D, start: u32, end: u32) {
-    d.o_start = start;
-    d.o_end = end;
+fn set_origin(inout ctx: D, start: u32, end: u32) {
+    ctx.origin_start = start;
+    ctx.origin_end = end;
 }
 
 // ---------------------------------------------------------------- hidden traits
 
-fn put_pass(inout o: ChunkSeq[u8], p: u32) {
-    if p == 0 {
-        o.extend(in "In".as_bytes());
-    } else if p == 1 {
-        o.extend(in "Inout".as_bytes());
+fn put_pass(inout out: ChunkSeq[u8], pass: u32) {
+    if pass == 0 {
+        out.extend(in "In".as_bytes());
+    } else if pass == 1 {
+        out.extend(in "Inout".as_bytes());
     } else {
-        o.extend(in "Sink".as_bytes());
+        out.extend(in "Sink".as_bytes());
     }
 }
 
-fn hex_char(v: u64) -> u32 {
-    if v < 10 {
-        wrapping_u32(wrapping_add(v, 48))
+fn hex_char(nibble: u64) -> u32 {
+    if nibble < 10 {
+        wrapping_u32(wrapping_add(nibble, 48))
     } else {
-        wrapping_u32(wrapping_add(v, 87))
+        wrapping_u32(wrapping_add(nibble, 87))
     }
 }
 
-fn pass_of(kind: u32, in d: D) -> u8 {
-    if kind == d.k.fn_ {
+fn pass_of(kind: u32, in ctx: D) -> u8 {
+    if kind == ctx.known.fn_ {
         0
-    } else if kind == d.k.fn_mut {
+    } else if kind == ctx.known.fn_mut {
         1
     } else {
         2
@@ -334,102 +337,104 @@ fn pass_of(kind: u32, in d: D) -> u8 {
 // `hidden_trait`: the hidden trait of function-object `kind` and signature
 // `sig` (a Function type), created on first use. Its name hashes the Rust
 // `Debug` text of the signature's parameters, result and effects.
-fn hidden_trait(inout d: D, kind: u32, sig: u32) -> u32 {
-    let sn = ty(in d, sig);
+fn hidden_trait(inout ctx: D, kind: u32, sig: u32) -> u32 {
+    let sig_node = ty(in ctx, sig);
     let mut key = ChunkSeq::new[u8]();
-    let ok = put_kind(inout d, kind, inout key);
+    let ok = put_kind(inout ctx, kind, inout key);
     key.push(124);
     key.push(91);
-    let np = ll(in d, sn.a) / 2;
-    for i in 0..np {
+    let param_count = ll(in ctx, sig_node.a) / 2;
+    for i in 0..param_count {
         if i > 0 {
             key.extend(in ", ".as_bytes());
         }
         key.push(40);
-        put_pass(inout key, la(in d, sn.a, wrapping_mul(i, 2)));
+        put_pass(inout key, la(in ctx, sig_node.a, wrapping_mul(i, 2)));
         key.extend(in ", ".as_bytes());
-        let t = tid(inout d, la(in d, sn.a, inc(wrapping_mul(i, 2))));
-        debug_type(in d.types, in d.names, t, inout key);
+        let param_id = tid(inout ctx, la(in ctx, sig_node.a, inc(wrapping_mul(i, 2))));
+        debug_type(in ctx.types, in ctx.names, param_id, inout key);
         key.push(41);
     }
     key.push(93);
     key.push(124);
-    let r = tid(inout d, sn.b);
-    debug_type(in d.types, in d.names, r, inout key);
+    let result_id = tid(inout ctx, sig_node.b);
+    debug_type(in ctx.types, in ctx.names, result_id, inout key);
     key.push(124);
-    let row = rid(inout d, sn.c);
-    debug_row(in d.types, in d.names, row, inout key);
-    let mut h: u64 = 14695981039346656037;
+    let row = rid(inout ctx, sig_node.c);
+    debug_row(in ctx.types, in ctx.names, row, inout key);
+    let mut hash: u64 = 14695981039346656037;
     for i in 0..key.len() {
-        h = wrapping_mul(h ^ widen_u64(u8_at(in key, i)), 1099511628211);
+        hash = wrapping_mul(hash ^ widen_u64(u8_at(in key, i)), 1099511628211);
     }
-    d.buf.clear();
-    d.buf.push_str(in "__FnObject");
-    buf_sym(inout d, kind);
-    d.buf.push_str(in "_");
-    let mut k: u64 = 16;
+    ctx.buf.clear();
+    ctx.buf.push_str(in "__FnObject");
+    buf_sym(inout ctx, kind);
+    ctx.buf.push_str(in "_");
+    let mut digit: u64 = 16;
     loop {
-        if k == 0 {
+        if digit == 0 {
             break;
         }
-        k = wrapping_sub(k, 1);
-        d.buf.push_char(hex_char(wrapping_shr_u64(h, wrapping_u32(wrapping_mul(k, 4))) & 15));
+        digit = wrapping_sub(digit, 1);
+        ctx.buf.push_char(
+            hex_char(wrapping_shr_u64(hash, wrapping_u32(wrapping_mul(digit, 4))) & 15)
+        );
     }
-    let name = intern_buf(inout d);
-    if contains(in d.tr_names, name) {
+    let name = intern_buf(inout ctx);
+    if contains(in ctx.trait_names, name) {
         return name;
     }
-    let receiver = pass_of(kind, in d);
-    let mut ps = ChunkSeq::new[u32]();
-    let sp = new_param(
-        inout d,
+    let receiver = pass_of(kind, in ctx);
+    let mut params = ChunkSeq::new[u32]();
+    let self_param = new_param(
+        inout ctx,
         ParamNode {
-            name: d.k.self_,
+            name: ctx.known.self_,
             pass: receiver,
             projections: 0,
-            ty: d.t_infer,
+            ty: ctx.t_infer,
             start: 0,
             end: 0
         }
     );
-    ps.push(sp);
-    for i in 0..np {
-        d.buf.clear();
-        d.buf.push_str(in "a");
-        buf_decimal(inout d, i);
-        let an = intern_buf(inout d);
-        let p = new_param(
-            inout d,
+    params.push(self_param);
+    for i in 0..param_count {
+        ctx.buf.clear();
+        ctx.buf.push_str(in "a");
+        buf_decimal(inout ctx, i);
+        let param_name = intern_buf(inout ctx);
+        let param = new_param(
+            inout ctx,
             ParamNode {
-                name: an,
-                pass: wrapping_u8(la(in d, sn.a, wrapping_mul(i, 2))),
+                name: param_name,
+                pass: wrapping_u8(la(in ctx, sig_node.a, wrapping_mul(i, 2))),
                 projections: 0,
-                ty: la(in d, sn.a, inc(wrapping_mul(i, 2))),
+                ty: la(in ctx, sig_node.a, inc(wrapping_mul(i, 2))),
                 start: 0,
                 end: 0
             }
         );
-        ps.push(p);
+        params.push(param);
     }
-    let pl = mk_list(inout d, in ps);
-    let f = d.ast
+    let param_list = mk_list(inout ctx, in params);
+    let func = ctx.ast
         .fns
         .alloc(
             FnNode {
-                name: d.k.call,
+                name: ctx.known.call,
                 fip: false,
                 generics: 0,
-                params: pl,
-                result: sn.b,
-                effects: sn.c,
+                params: param_list,
+                result: sig_node.b,
+                effects: sig_node.c,
                 body: NONE,
                 start: 0,
                 end: 0
             }
         )
         .raw();
-    let ml = list1(inout d, f);
-    let t = d.ast
+    let method_list = list1(inout ctx, func);
+    let trait_node = ctx.ast
         .traits
         .alloc(
             TraitNode {
@@ -437,187 +442,187 @@ fn hidden_trait(inout d: D, kind: u32, sig: u32) -> u32 {
                 public: false,
                 generics: 0,
                 assoc: 0,
-                methods: ml,
+                methods: method_list,
                 start: 0,
                 end: 0
             }
         )
         .raw();
-    d.tr_names.push(name);
-    d.tr_nodes.push(t);
+    ctx.trait_names.push(name);
+    ctx.trait_nodes.push(trait_node);
     name
 }
 
-fn put_kind(inout d: D, kind: u32, inout o: ChunkSeq[u8]) -> bool {
-    let (x, y) = d.ast.names.span(symbol_from_id(kind));
-    for i in x..y {
-        match d.ast.names.text_byte(i) {
-            Option::Some(c) => o.push(c),
+fn put_kind(inout ctx: D, kind: u32, inout out: ChunkSeq[u8]) -> bool {
+    let (text_start, text_end) = ctx.ast.names.span(symbol_from_id(kind));
+    for i in text_start..text_end {
+        match ctx.ast.names.text_byte(i) {
+            Option::Some(byte) => out.push(byte),
             Option::None => {},
         }
     }
     true
 }
 
-// `erase`: every function-object type in `t` replaced by its hidden
-// trait's object type; returns `t` itself when nothing changes.
-fn erase(inout d: D, t: u32) -> u32 {
-    let sig = fn_sig(in d, t);
+// `erase`: every function-object type in `ast_ty` replaced by its hidden
+// trait's object type; returns `ast_ty` itself when nothing changes.
+fn erase(inout ctx: D, ast_ty: u32) -> u32 {
+    let sig = fn_sig(in ctx, ast_ty);
     if sig != NONE {
-        let kind = fn_kind(in d, t);
-        let es = erase_sig(inout d, sig);
-        let name = hidden_trait(inout d, kind, es);
-        let inner = named(inout d, name, 0);
-        let args = list1(inout d, inner);
-        return named(inout d, d.k.dyn_, args);
+        let kind = fn_kind(in ctx, ast_ty);
+        let erased_sig = erase_sig(inout ctx, sig);
+        let name = hidden_trait(inout ctx, kind, erased_sig);
+        let inner = named(inout ctx, name, 0);
+        let args = list1(inout ctx, inner);
+        return named(inout ctx, ctx.known.dyn_, args);
     }
-    let n = ty(in d, t);
-    if n.kind == 1 || n.kind == 2 {
-        let list = if n.kind == 1 { n.b } else { n.a };
-        let len = ll(in d, list);
+    let node = ty(in ctx, ast_ty);
+    if node.kind == 1 || node.kind == 2 {
+        let list = if node.kind == 1 { node.b } else { node.a };
+        let len = ll(in ctx, list);
         let mut words = ChunkSeq::with_capacity[u32](len);
         let mut changed = false;
         for i in 0..len {
-            let x = la(in d, list, i);
-            let y = erase(inout d, x);
-            if y != x {
+            let elem = la(in ctx, list, i);
+            let erased = erase(inout ctx, elem);
+            if erased != elem {
                 changed = true;
             }
-            words.push(y);
+            words.push(erased);
         }
         if !changed {
-            return t;
+            return ast_ty;
         }
-        let nl = mk_list(inout d, in words);
-        if n.kind == 1 {
-            return new_type(inout d, 1, n.a, nl, 0, 0);
+        let new_list = mk_list(inout ctx, in words);
+        if node.kind == 1 {
+            return new_type(inout ctx, 1, node.a, new_list, 0, 0);
         }
-        return new_type(inout d, 2, nl, 0, 0, 0);
+        return new_type(inout ctx, 2, new_list, 0, 0, 0);
     }
-    if n.kind == 3 {
-        return erase_sig(inout d, t);
+    if node.kind == 3 {
+        return erase_sig(inout ctx, ast_ty);
     }
-    t
+    ast_ty
 }
 
 // A Function type with its parameters and result erased (not its effects).
-fn erase_sig(inout d: D, t: u32) -> u32 {
-    let n = ty(in d, t);
-    let len = ll(in d, n.a);
+fn erase_sig(inout ctx: D, ast_ty: u32) -> u32 {
+    let node = ty(in ctx, ast_ty);
+    let len = ll(in ctx, node.a);
     let mut words = ChunkSeq::with_capacity[u32](len);
     let mut changed = false;
     for i in 0..len {
-        let x = la(in d, n.a, i);
+        let word = la(in ctx, node.a, i);
         if i % 2 == 1 {
-            let y = erase(inout d, x);
-            if y != x {
+            let erased = erase(inout ctx, word);
+            if erased != word {
                 changed = true;
             }
-            words.push(y);
+            words.push(erased);
         } else {
-            words.push(x);
+            words.push(word);
         }
     }
-    let r = erase(inout d, n.b);
-    if !changed && r == n.b {
-        return t;
+    let result = erase(inout ctx, node.b);
+    if !changed && result == node.b {
+        return ast_ty;
     }
-    let nl = if changed {
-        mk_list(inout d, in words)
+    let new_list = if changed {
+        mk_list(inout ctx, in words)
     } else {
-        n.a
+        node.a
     };
-    new_type(inout d, 3, nl, r, n.c, n.d)
+    new_type(inout ctx, 3, new_list, result, node.c, node.d)
 }
 
-fn erase_list(inout d: D, list: u32) -> u32 {
-    let len = ll(in d, list);
+fn erase_list(inout ctx: D, list: u32) -> u32 {
+    let len = ll(in ctx, list);
     let mut words = ChunkSeq::with_capacity[u32](len);
     let mut changed = false;
     for i in 0..len {
-        let x = la(in d, list, i);
-        let y = erase(inout d, x);
-        if y != x {
+        let elem = la(in ctx, list, i);
+        let erased = erase(inout ctx, elem);
+        if erased != elem {
             changed = true;
         }
-        words.push(y);
+        words.push(erased);
     }
     if changed {
-        mk_list(inout d, in words)
+        mk_list(inout ctx, in words)
     } else {
         list
     }
 }
 
-fn erase_effect(inout d: D, e: u32) -> u32 {
-    let x = effect_at(in d, e);
-    let a = erase_list(inout d, x.args);
-    if a == x.args {
-        e
+fn erase_effect(inout ctx: D, effect: u32) -> u32 {
+    let effect_row = effect_at(in ctx, effect);
+    let args = erase_list(inout ctx, effect_row.args);
+    if args == effect_row.args {
+        effect
     } else {
-        new_effect(inout d, x.label, x.name, a)
+        new_effect(inout ctx, effect_row.label, effect_row.name, args)
     }
 }
 
-fn erase_effects(inout d: D, e: u32) -> u32 {
-    let en = effects_at(in d, e);
-    let len = ll(in d, en.instances);
+fn erase_effects(inout ctx: D, effects: u32) -> u32 {
+    let effects_row = effects_at(in ctx, effects);
+    let len = ll(in ctx, effects_row.instances);
     let mut words = ChunkSeq::with_capacity[u32](len);
     let mut changed = false;
     for i in 0..len {
-        let x = la(in d, en.instances, i);
-        let y = erase_effect(inout d, x);
-        if y != x {
+        let effect = la(in ctx, effects_row.instances, i);
+        let erased = erase_effect(inout ctx, effect);
+        if erased != effect {
             changed = true;
         }
-        words.push(y);
+        words.push(erased);
     }
     if !changed {
-        return e;
+        return effects;
     }
-    let nl = mk_list(inout d, in words);
-    new_effects(inout d, nl, en.tail)
+    let new_list = mk_list(inout ctx, in words);
+    new_effects(inout ctx, new_list, effects_row.tail)
 }
 
-fn erase_param(inout d: D, p: u32) {
-    let pn = param_at(in d, p);
-    let t = erase(inout d, pn.ty);
-    if t != pn.ty {
+fn erase_param(inout ctx: D, param: u32) {
+    let param_row = param_at(in ctx, param);
+    let erased = erase(inout ctx, param_row.ty);
+    if erased != param_row.ty {
         set_param(
-            inout d,
-            p,
+            inout ctx,
+            param,
             ParamNode {
-                name: pn.name,
-                pass: pn.pass,
-                projections: pn.projections,
-                ty: t,
-                start: pn.start,
-                end: pn.end
+                name: param_row.name,
+                pass: param_row.pass,
+                projections: param_row.projections,
+                ty: erased,
+                start: param_row.start,
+                end: param_row.end
             }
         );
     }
 }
 
 // `walk_function` with `erase` at every type position.
-fn erase_fn(inout d: D, f: u32) {
-    let fnode = fn_at(in d, f);
-    for i in 0..ll(in d, fnode.params) {
-        erase_param(inout d, la(in d, fnode.params, i));
+fn erase_fn(inout ctx: D, func: u32) {
+    let fnode = fn_at(in ctx, func);
+    for i in 0..ll(in ctx, fnode.params) {
+        erase_param(inout ctx, la(in ctx, fnode.params, i));
     }
-    let r = erase(inout d, fnode.result);
-    let e = erase_effects(inout d, fnode.effects);
-    if r != fnode.result || e != fnode.effects {
-        let cur = fn_at(in d, f);
+    let result = erase(inout ctx, fnode.result);
+    let effects = erase_effects(inout ctx, fnode.effects);
+    if result != fnode.result || effects != fnode.effects {
+        let cur = fn_at(in ctx, func);
         set_fn(
-            inout d,
-            f,
+            inout ctx,
+            func,
             FnNode {
                 name: cur.name,
                 fip: cur.fip,
                 generics: cur.generics,
                 params: cur.params,
-                result: r,
-                effects: e,
+                result: result,
+                effects: effects,
                 body: cur.body,
                 start: cur.start,
                 end: cur.end
@@ -625,133 +630,133 @@ fn erase_fn(inout d: D, f: u32) {
         );
     }
     if fnode.body != NONE {
-        erase_expr(inout d, fnode.body);
+        erase_expr(inout ctx, fnode.body);
     }
 }
 
-fn erase_fns(inout d: D, list: u32) {
-    for i in 0..ll(in d, list) {
-        erase_fn(inout d, la(in d, list, i));
+fn erase_fns(inout ctx: D, list: u32) {
+    for i in 0..ll(in ctx, list) {
+        erase_fn(inout ctx, la(in ctx, list, i));
     }
 }
 
-fn erase_opt(inout d: D, e: u32) {
-    if e != NONE {
-        erase_expr(inout d, e);
+fn erase_opt(inout ctx: D, expr: u32) {
+    if expr != NONE {
+        erase_expr(inout ctx, expr);
     }
 }
 
-fn erase_expr(inout d: D, e: u32) {
-    let n = ex(in d, e);
-    let k = n.kind;
-    if k == 3 {
-        for i in 0..ll(in d, n.a) {
-            erase_expr(inout d, la(in d, n.a, i));
+fn erase_expr(inout ctx: D, expr: u32) {
+    let node = ex(in ctx, expr);
+    let kind = node.kind;
+    if kind == 3 {
+        for i in 0..ll(in ctx, node.a) {
+            erase_expr(inout ctx, la(in ctx, node.a, i));
         }
-    } else if k == 4 {
-        let len = ll(in d, n.b) / 2;
+    } else if kind == 4 {
+        let len = ll(in ctx, node.b) / 2;
         for i in 0..len {
-            erase_expr(inout d, la(in d, n.b, inc(wrapping_mul(i, 2))));
+            erase_expr(inout ctx, la(in ctx, node.b, inc(wrapping_mul(i, 2))));
         }
-    } else if k == 5 {
-        for i in 0..ll(in d, n.a) {
-            let si = la(in d, n.a, i);
-            let s = stmt_at(in d, si);
-            if s.kind == 1 {
-                let t = erase(inout d, s.ty);
-                if t != s.ty {
+    } else if kind == 5 {
+        for i in 0..ll(in ctx, node.a) {
+            let stmt = la(in ctx, node.a, i);
+            let stmt_row = stmt_at(in ctx, stmt);
+            if stmt_row.kind == 1 {
+                let erased = erase(inout ctx, stmt_row.ty);
+                if erased != stmt_row.ty {
                     set_stmt(
-                        inout d,
-                        si,
+                        inout ctx,
+                        stmt,
                         StmtNode {
-                            kind: s.kind,
-                            pat: s.pat,
-                            ty: t,
-                            value: s.value,
-                            mutable: s.mutable
+                            kind: stmt_row.kind,
+                            pat: stmt_row.pat,
+                            ty: erased,
+                            value: stmt_row.value,
+                            mutable: stmt_row.mutable
                         }
                     );
                 }
             }
-            erase_expr(inout d, s.value);
+            erase_expr(inout ctx, stmt_row.value);
         }
-        erase_opt(inout d, n.b);
-    } else if k == 6 {
-        erase_expr(inout d, n.a);
-        let tl = erase_list(inout d, n.b);
-        if tl != n.b {
-            let cur = ex(in d, e);
-            set_ex(inout d, e, exn(cur.kind, cur.start, cur.end, cur.a, tl, cur.c));
+        erase_opt(inout ctx, node.b);
+    } else if kind == 6 {
+        erase_expr(inout ctx, node.a);
+        let type_args = erase_list(inout ctx, node.b);
+        if type_args != node.b {
+            let cur = ex(in ctx, expr);
+            set_ex(inout ctx, expr, exn(cur.kind, cur.start, cur.end, cur.a, type_args, cur.c));
         }
-        for i in 0..ll(in d, n.c) {
-            erase_expr(inout d, arg_at(in d, la(in d, n.c, i)).expr);
+        for i in 0..ll(in ctx, node.c) {
+            erase_expr(inout ctx, arg_at(in ctx, la(in ctx, node.c, i)).expr);
         }
-    } else if k == 7 || k == 9 {
-        erase_expr(inout d, n.a);
-    } else if k == 10 {
-        erase_expr(inout d, n.b);
-    } else if k == 8 {
-        erase_expr(inout d, n.a);
-        erase_expr(inout d, n.b);
-    } else if k == 11 || k == 12 {
-        erase_expr(inout d, n.b);
-        erase_expr(inout d, n.c);
-    } else if k == 13 {
-        erase_expr(inout d, n.a);
-        erase_expr(inout d, n.b);
-        erase_opt(inout d, n.c);
-    } else if k == 14 {
-        erase_expr(inout d, n.a);
-        let len = ll(in d, n.b) / 2;
+    } else if kind == 7 || kind == 9 {
+        erase_expr(inout ctx, node.a);
+    } else if kind == 10 {
+        erase_expr(inout ctx, node.b);
+    } else if kind == 8 {
+        erase_expr(inout ctx, node.a);
+        erase_expr(inout ctx, node.b);
+    } else if kind == 11 || kind == 12 {
+        erase_expr(inout ctx, node.b);
+        erase_expr(inout ctx, node.c);
+    } else if kind == 13 {
+        erase_expr(inout ctx, node.a);
+        erase_expr(inout ctx, node.b);
+        erase_opt(inout ctx, node.c);
+    } else if kind == 14 {
+        erase_expr(inout ctx, node.a);
+        let len = ll(in ctx, node.b) / 2;
         for i in 0..len {
-            erase_expr(inout d, la(in d, n.b, inc(wrapping_mul(i, 2))));
+            erase_expr(inout ctx, la(in ctx, node.b, inc(wrapping_mul(i, 2))));
         }
-    } else if k == 17 {
-        erase_expr(inout d, n.a);
-    } else if k == 18 {
-        erase_expr(inout d, n.b);
-        erase_expr(inout d, n.c);
-    } else if k == 19 {
-        erase_expr(inout d, n.a);
-        erase_expr(inout d, n.b);
-    } else if k == 20 || k == 21 {
-        erase_opt(inout d, n.a);
-    } else if k == 15 {
-        for i in 0..ll(in d, n.a) {
-            erase_param(inout d, la(in d, n.a, i));
+    } else if kind == 17 {
+        erase_expr(inout ctx, node.a);
+    } else if kind == 18 {
+        erase_expr(inout ctx, node.b);
+        erase_expr(inout ctx, node.c);
+    } else if kind == 19 {
+        erase_expr(inout ctx, node.a);
+        erase_expr(inout ctx, node.b);
+    } else if kind == 20 || kind == 21 {
+        erase_opt(inout ctx, node.a);
+    } else if kind == 15 {
+        for i in 0..ll(in ctx, node.a) {
+            erase_param(inout ctx, la(in ctx, node.a, i));
         }
-        let r = erase(inout d, n.c);
-        let ef = erase_effects(inout d, n.d);
-        if r != n.c || ef != n.d {
-            let cur = ex(in d, e);
+        let result = erase(inout ctx, node.c);
+        let effects = erase_effects(inout ctx, node.d);
+        if result != node.c || effects != node.d {
+            let cur = ex(in ctx, expr);
             set_ex(
-                inout d,
-                e,
+                inout ctx,
+                expr,
                 ExprNode {
                     kind: cur.kind,
                     start: cur.start,
                     end: cur.end,
                     a: cur.a,
                     b: cur.b,
-                    c: r,
-                    d: ef,
+                    c: result,
+                    d: effects,
                     e: cur.e
                 }
             );
         }
-        erase_expr(inout d, n.e);
-    } else if k == 16 {
-        let ef = erase_effect(inout d, n.a);
-        if ef != n.a {
-            let cur = ex(in d, e);
+        erase_expr(inout ctx, node.e);
+    } else if kind == 16 {
+        let effect = erase_effect(inout ctx, node.a);
+        if effect != node.a {
+            let cur = ex(in ctx, expr);
             set_ex(
-                inout d,
-                e,
+                inout ctx,
+                expr,
                 ExprNode {
                     kind: cur.kind,
                     start: cur.start,
                     end: cur.end,
-                    a: ef,
+                    a: effect,
                     b: cur.b,
                     c: cur.c,
                     d: cur.d,
@@ -759,72 +764,72 @@ fn erase_expr(inout d: D, e: u32) {
                 }
             );
         }
-        if n.b != NONE {
-            erase_expr(inout d, n.c);
+        if node.b != NONE {
+            erase_expr(inout ctx, node.c);
         }
-        erase_expr(inout d, n.d);
-        for i in 0..ll(in d, n.e) {
-            erase_expr(inout d, clause_at(in d, la(in d, n.e, i)).body);
+        erase_expr(inout ctx, node.d);
+        for i in 0..ll(in ctx, node.e) {
+            erase_expr(inout ctx, clause_at(in ctx, la(in ctx, node.e, i)).body);
         }
     }
 }
 
 // `for_each_type(module, erase)`.
-fn erase_module(inout d: D) {
-    for i in 0..d.ast.m_items.len() {
-        let it = item_at(in d, u32_at(in d.ast.m_items, i));
-        let x = it.node;
-        if it.kind == 1 {
-            let an = adt_at(in d, x);
-            for j in 0..ll(in d, an.variants) {
-                let v = variant_at(in d, la(in d, an.variants, j));
-                for q in 0..ll(in d, v.fields) {
-                    let fi = la(in d, v.fields, q);
-                    let f = field_at(in d, fi);
-                    let t = erase(inout d, f.ty);
-                    if t != f.ty {
+fn erase_module(inout ctx: D) {
+    for i in 0..ctx.ast.m_items.len() {
+        let item = item_at(in ctx, u32_at(in ctx.ast.m_items, i));
+        let node = item.node;
+        if item.kind == 1 {
+            let adt = adt_at(in ctx, node);
+            for j in 0..ll(in ctx, adt.variants) {
+                let variant = variant_at(in ctx, la(in ctx, adt.variants, j));
+                for field_index in 0..ll(in ctx, variant.fields) {
+                    let field = la(in ctx, variant.fields, field_index);
+                    let field_row = field_at(in ctx, field);
+                    let erased = erase(inout ctx, field_row.ty);
+                    if erased != field_row.ty {
                         set_field(
-                            inout d,
-                            fi,
+                            inout ctx,
+                            field,
                             FieldNode {
-                                name: f.name,
-                                ty: t,
-                                modality: f.modality,
-                                temperature: f.temperature
+                                name: field_row.name,
+                                ty: erased,
+                                modality: field_row.modality,
+                                temperature: field_row.temperature
                             }
                         );
                     }
                 }
             }
-        } else if it.kind == 2 {
-            erase_fn(inout d, x);
-        } else if it.kind == 4 {
-            let im = impl_at(in d, x);
-            let t = erase(inout d, im.ty);
-            if t != im.ty {
+        } else if item.kind == 2 {
+            erase_fn(inout ctx, node);
+        } else if item.kind == 4 {
+            let impl_ = impl_at(in ctx, node);
+            let erased = erase(inout ctx, impl_.ty);
+            if erased != impl_.ty {
                 set_impl(
-                    inout d,
-                    x,
-                    ImplNode { ty: t, generics: im.generics, methods: im.methods }
+                    inout ctx,
+                    node,
+                    ImplNode { ty: erased, generics: impl_.generics, methods: impl_.methods }
                 );
             }
-            erase_fns(inout d, im.methods);
-        } else if it.kind == 5 {
-            erase_fns(inout d, trait_at(in d, x).methods);
-        } else if it.kind == 6 {
-            let c = conf_at(in d, x);
-            let st = erase(inout d, c.self_ty);
-            if st != c.self_ty {
-                let cur = conf_at(in d, x);
+            erase_fns(inout ctx, impl_.methods);
+        } else if item.kind == 5 {
+            erase_fns(inout ctx, trait_at(in ctx, node).methods);
+        } else if item.kind == 6 {
+            let conf = conf_at(in ctx, node);
+            let self_ty = erase(inout ctx, conf.self_ty);
+            if self_ty != conf.self_ty {
+                let cur = conf_at(in ctx, node);
                 set_conf(
-                    inout d,
-                    x,
+                    inout ctx,
+                    node,
                     ConfNode {
                         model: cur.model,
                         public: cur.public,
                         generics: cur.generics,
                         trait_ref: cur.trait_ref,
-                        self_ty: st,
+                        self_ty: self_ty,
                         wheres: cur.wheres,
                         assoc: cur.assoc,
                         methods: cur.methods,
@@ -833,157 +838,161 @@ fn erase_module(inout d: D) {
                     }
                 );
             }
-            let tr = trait_ref_at(in d, c.trait_ref);
-            let al = erase_list(inout d, tr.args);
-            if al != tr.args {
+            let trait_ref = trait_ref_at(in ctx, conf.trait_ref);
+            let args = erase_list(inout ctx, trait_ref.args);
+            if args != trait_ref.args {
                 set_trait_ref(
-                    inout d,
-                    c.trait_ref,
+                    inout ctx,
+                    conf.trait_ref,
                     TraitRefNode {
-                        package: tr.package,
-                        name: tr.name,
-                        args: al,
-                        start: tr.start,
-                        end: tr.end
+                        package: trait_ref.package,
+                        name: trait_ref.name,
+                        args: args,
+                        start: trait_ref.start,
+                        end: trait_ref.end
                     }
                 );
             }
-            erase_fns(inout d, c.methods);
-        } else if it.kind == 3 {
-            erase_fns(inout d, effect_decl_at(in d, x).ops);
+            erase_fns(inout ctx, conf.methods);
+        } else if item.kind == 3 {
+            erase_fns(inout ctx, effect_decl_at(in ctx, node).ops);
         }
     }
 }
 
 // ---------------------------------------------------------------- syntactic types
 
-// `type_of`: the syntactic type of `e`, when the pass can tell it, else
+// `type_of`: the syntactic type of `expr`, when the pass can tell it, else
 // NONE.
-fn type_of(in d: D, e: u32) -> u32 {
-    let n = ex(in d, e);
-    if n.kind == 2 {
-        return env_get(in d, n.a);
+fn type_of(in ctx: D, expr: u32) -> u32 {
+    let node = ex(in ctx, expr);
+    if node.kind == 2 {
+        return env_get(in ctx, node.a);
     }
-    if n.kind == 7 {
-        let t = type_of(in d, n.a);
-        if t == NONE {
+    if node.kind == 7 {
+        let base_ty = type_of(in ctx, node.a);
+        if base_ty == NONE {
             return NONE;
         }
-        return field_type(in d, type_name(in d, t), n.b);
+        return field_type(in ctx, type_name(in ctx, base_ty), node.b);
     }
-    if n.kind == 8 {
-        let t = type_of(in d, n.a);
-        if t == NONE {
+    if node.kind == 8 {
+        let base_ty = type_of(in ctx, node.a);
+        if base_ty == NONE {
             return NONE;
         }
-        let tn = ty(in d, t);
-        if tn.kind == 1 && ll(in d, tn.b) == 1 {
-            return la(in d, tn.b, 0);
+        let ty_node = ty(in ctx, base_ty);
+        if ty_node.kind == 1 && ll(in ctx, ty_node.b) == 1 {
+            return la(in ctx, ty_node.b, 0);
         }
         return NONE;
     }
     NONE
 }
 
-// `n.trim_end_matches("::new")` as a symbol.
-fn trim_new(inout d: D, n: u32) -> u32 {
-    let mut len = sym_len(in d.ast, n);
+// `name.trim_end_matches("::new")` as a symbol.
+fn trim_new(inout ctx: D, name: u32) -> u32 {
+    let mut len = sym_len(in ctx.ast, name);
     loop {
         if len < 5 {
             break;
         }
         let at = wrapping_sub(len, 5);
-        if sym_byte(in d.ast, n, at) == 58
-            && sym_byte(in d.ast, n, inc(at)) == 58
-            && sym_byte(in d.ast, n, wrapping_add(at, 2)) == 110
-            && sym_byte(in d.ast, n, wrapping_add(at, 3)) == 101
-            && sym_byte(in d.ast, n, wrapping_add(at, 4)) == 119 {
+        if sym_byte(in ctx.ast, name, at) == 58
+            && sym_byte(in ctx.ast, name, inc(at)) == 58
+            && sym_byte(in ctx.ast, name, wrapping_add(at, 2)) == 110
+            && sym_byte(in ctx.ast, name, wrapping_add(at, 3)) == 101
+            && sym_byte(in ctx.ast, name, wrapping_add(at, 4)) == 119 {
             len = at;
         } else {
             break;
         }
     }
-    d.buf.clear();
+    ctx.buf.clear();
     for i in 0..len {
-        d.buf.push_char(widen_u32(sym_byte(in d.ast, n, i)));
+        ctx.buf.push_char(widen_u32(sym_byte(in ctx.ast, name, i)));
     }
-    intern_buf(inout d)
+    intern_buf(inout ctx)
 }
 
 // `infer`: the type a `let` without an annotation binds, when evident
 // (`Type::Infer` otherwise).
-fn infer(inout d: D, e: u32) -> u32 {
-    let n = ex(in d, e);
-    if n.kind == 1 {
-        let lit = d.ast
+fn infer(inout ctx: D, expr: u32) -> u32 {
+    let node = ex(in ctx, expr);
+    if node.kind == 1 {
+        let lit = ctx.ast
             .lits
-            .get_or(idx_from_raw[Lit](n.a), Lit { kind: 0, neg: false, bits: 0, hi: 0 });
+            .get_or(idx_from_raw[Lit](node.a), Lit { kind: 0, neg: false, bits: 0, hi: 0 });
         if lit.kind == 1 {
-            return d.t_i64;
+            return ctx.t_i64;
         }
         // A literal past `i128::MAX` (`Literal::WideInt`): not evident.
         if lit.kind == 5 {
-            return d.t_infer;
+            return ctx.t_infer;
         }
         if lit.kind == 3 {
-            return d.t_bool;
+            return ctx.t_bool;
         }
         if lit.kind == 2 {
-            return d.t_f64;
+            return ctx.t_f64;
         }
-        return d.t_string;
+        return ctx.t_string;
     }
-    if n.kind == 4 {
-        if table_get(in d.adt_by, n.a) != 0 {
-            return named(inout d, n.a, 0);
+    if node.kind == 4 {
+        if table_get(in ctx.adt_by_name, node.a) != 0 {
+            return named(inout ctx, node.a, 0);
         }
-        return d.t_infer;
+        return ctx.t_infer;
     }
-    if n.kind == 6 {
-        let c = ex(in d, n.a);
-        if c.kind != 2 {
-            return d.t_infer;
+    if node.kind == 6 {
+        let callee = ex(in ctx, node.a);
+        if callee.kind != 2 {
+            return ctx.t_infer;
         }
-        let name = c.a;
-        let nt = ll(in d, n.b);
-        if name == d.k.box_new && nt == 1 {
-            return named(inout d, d.k.box_, n.b);
+        let name = callee.a;
+        let type_arg_count = ll(in ctx, node.b);
+        if name == ctx.known.box_new && type_arg_count == 1 {
+            return named(inout ctx, ctx.known.box_, node.b);
         }
-        if nt == 1 && sym_ends_with(in d.ast, name, in "::new") {
-            let head = trim_new(inout d, name);
-            return named(inout d, head, n.b);
+        if type_arg_count == 1 && sym_ends_with(in ctx.ast, name, in "::new") {
+            let head = trim_new(inout ctx, name);
+            return named(inout ctx, head, node.b);
         }
-        if !env_has(in d, name) {
-            let f = table_get(in d.fn_by, name);
-            if f != 0 {
-                let fnode = fn_at(in d, wrapping_sub(f, 1));
-                if ll(in d, fnode.generics) == 0 {
+        if !env_has(in ctx, name) {
+            let fn_entry = table_get(in ctx.fn_by_name, name);
+            if fn_entry != 0 {
+                let fnode = fn_at(in ctx, wrapping_sub(fn_entry, 1));
+                if ll(in ctx, fnode.generics) == 0 {
                     return fnode.result;
                 }
             }
         }
-        return d.t_infer;
+        return ctx.t_infer;
     }
-    let t = type_of(in d, e);
-    if t == NONE { d.t_infer } else { t }
-}
-
-// The parameter types of function `f`, from parameter `skip` on.
-fn param_types(in d: D, f: u32, skip: u64, inout out: ChunkSeq[u32]) {
-    let fnode = fn_at(in d, f);
-    for i in skip..ll(in d, fnode.params) {
-        out.push(param_at(in d, la(in d, fnode.params, i)).ty);
+    let syntactic_ty = type_of(in ctx, expr);
+    if syntactic_ty == NONE {
+        ctx.t_infer
+    } else {
+        syntactic_ty
     }
 }
 
-// The function-object shape of method `f`'s parameters: each parameter's
+// The parameter types of function `func`, from parameter `skip` on.
+fn param_types(in ctx: D, func: u32, skip: u64, inout out: ChunkSeq[u32]) {
+    let fnode = fn_at(in ctx, func);
+    for i in skip..ll(in ctx, fnode.params) {
+        out.push(param_at(in ctx, la(in ctx, fnode.params, i)).ty);
+    }
+}
+
+// The function-object shape of method `func`'s parameters: each parameter's
 // type id when it is a function object, else NONE.
-fn shape(inout d: D, f: u32, inout out: ChunkSeq[u32]) {
-    let fnode = fn_at(in d, f);
-    for i in 0..ll(in d, fnode.params) {
-        let t = param_at(in d, la(in d, fnode.params, i)).ty;
-        if any_fn_sig(in d, t) != NONE {
-            let id = tid(inout d, t);
+fn shape(inout ctx: D, func: u32, inout out: ChunkSeq[u32]) {
+    let fnode = fn_at(in ctx, func);
+    for i in 0..ll(in ctx, fnode.params) {
+        let param_ty = param_at(in ctx, la(in ctx, fnode.params, i)).ty;
+        if any_fn_sig(in ctx, param_ty) != NONE {
+            let id = tid(inout ctx, param_ty);
             out.push(id);
         } else {
             out.push(NONE);
@@ -1003,131 +1012,131 @@ fn same_words(in a: ChunkSeq[u32], in b: ChunkSeq[u32]) -> bool {
     true
 }
 
-// The symbol of `d.buf` if it is interned, else NONE (a name never written
+// The symbol of `ctx.buf` if it is interned, else NONE (a name never written
 // is no declaration's).
-fn lookup_buf(in d: D) -> u32 {
-    match d.ast.names.lookup(in d.buf) {
-        Option::Some(s) => s.id(),
+fn lookup_buf(in ctx: D) -> u32 {
+    match ctx.ast.names.lookup(in ctx.buf) {
+        Option::Some(sym) => sym.id(),
         Option::None => NONE,
     }
 }
 
 // `callee_params`: the declared parameter types of the call `callee(..)`,
 // aligned with its arguments, into `out`; false when unknown.
-fn callee_params(inout d: D, callee: u32, inout out: ChunkSeq[u32]) -> bool {
-    let c = ex(in d, callee);
-    if c.kind == 2 {
-        if env_has(in d, c.a) {
+fn callee_params(inout ctx: D, callee: u32, inout out: ChunkSeq[u32]) -> bool {
+    let callee_node = ex(in ctx, callee);
+    if callee_node.kind == 2 {
+        if env_has(in ctx, callee_node.a) {
             return false;
         }
-        let f = table_get(in d.fn_by, c.a);
-        if f != 0 {
-            param_types(in d, wrapping_sub(f, 1), 0, inout out);
+        let fn_entry = table_get(in ctx.fn_by_name, callee_node.a);
+        if fn_entry != 0 {
+            param_types(in ctx, wrapping_sub(fn_entry, 1), 0, inout out);
             return true;
         }
         // `n.rsplit_once("::")`.
-        let len = sym_len(in d.ast, c.a);
+        let len = sym_len(in ctx.ast, callee_node.a);
         let mut cut = NONE;
-        let mut i = len;
+        let mut index = len;
         loop {
-            if i < 2 {
+            if index < 2 {
                 break;
             }
-            i = wrapping_sub(i, 1);
-            if sym_byte(in d.ast, c.a, i) == 58
-                && sym_byte(in d.ast, c.a, wrapping_sub(i, 1)) == 58 {
-                cut = n32(wrapping_sub(i, 1));
+            index = wrapping_sub(index, 1);
+            if sym_byte(in ctx.ast, callee_node.a, index) == 58
+                && sym_byte(in ctx.ast, callee_node.a, wrapping_sub(index, 1)) == 58 {
+                cut = n32(wrapping_sub(index, 1));
                 break;
             }
         }
         if cut == NONE {
             return false;
         }
-        d.buf.clear();
+        ctx.buf.clear();
         for j in 0..w(cut) {
-            d.buf.push_char(widen_u32(sym_byte(in d.ast, c.a, j)));
+            ctx.buf.push_char(widen_u32(sym_byte(in ctx.ast, callee_node.a, j)));
         }
-        let t = lookup_buf(in d);
-        d.buf.clear();
+        let ty_name = lookup_buf(in ctx);
+        ctx.buf.clear();
         for j in wrapping_add(w(cut), 2)..len {
-            d.buf.push_char(widen_u32(sym_byte(in d.ast, c.a, j)));
+            ctx.buf.push_char(widen_u32(sym_byte(in ctx.ast, callee_node.a, j)));
         }
-        let m = lookup_buf(in d);
-        if t == NONE || m == NONE {
+        let method_name = lookup_buf(in ctx);
+        if ty_name == NONE || method_name == NONE {
             return false;
         }
-        let f2 = method(in d, t, m);
-        if f2 == NONE {
+        let method_fn = method(in ctx, ty_name, method_name);
+        if method_fn == NONE {
             return false;
         }
-        param_types(in d, f2, 0, inout out);
+        param_types(in ctx, method_fn, 0, inout out);
         return true;
     }
-    if c.kind == 7 {
-        let recv = infer(inout d, c.a);
-        let m = c.b;
-        let mut f = NONE;
-        if !is_infer(in d, recv) {
-            f = method(in d, tname(in d, recv), m);
-            if f == NONE {
+    if callee_node.kind == 7 {
+        let recv = infer(inout ctx, callee_node.a);
+        let method_name = callee_node.b;
+        let mut method_fn = NONE;
+        if !is_infer(in ctx, recv) {
+            method_fn = method(in ctx, tname(in ctx, recv), method_name);
+            if method_fn == NONE {
                 return false;
             }
         } else {
             // Every candidate must agree on its function-object
             // parameters, type for type; the first is the smallest type
             // name (BTreeMap order).
-            let mut r = table_get(in d.m_head, m);
+            let mut link = table_get(in ctx.method_head, method_name);
             let mut first = NONE;
             let mut first_ty = NONE;
             loop {
-                if r == 0 {
+                if link == 0 {
                     break;
                 }
-                let i = w(wrapping_sub(r, 1));
-                let t = u32_at(in d.m_ty, i);
-                if first == NONE || sym_cmp(in d.ast, t, first_ty) < 0 {
-                    first = u32_at(in d.m_fn, i);
-                    first_ty = t;
+                let index = w(wrapping_sub(link, 1));
+                let ty_name = u32_at(in ctx.method_owner, index);
+                if first == NONE || sym_cmp(in ctx.ast, ty_name, first_ty) < 0 {
+                    first = u32_at(in ctx.method_fn, index);
+                    first_ty = ty_name;
                 }
-                r = u32_at(in d.m_next, i);
+                link = u32_at(in ctx.method_next, index);
             }
             if first == NONE {
                 return false;
             }
-            let mut s0 = ChunkSeq::new[u32]();
-            shape(inout d, first, inout s0);
-            r = table_get(in d.m_head, m);
+            let mut first_shape = ChunkSeq::new[u32]();
+            shape(inout ctx, first, inout first_shape);
+            link = table_get(in ctx.method_head, method_name);
             loop {
-                if r == 0 {
+                if link == 0 {
                     break;
                 }
-                let i = w(wrapping_sub(r, 1));
-                let mut s1 = ChunkSeq::new[u32]();
-                shape(inout d, u32_at(in d.m_fn, i), inout s1);
-                if !same_words(in s0, in s1) {
+                let index = w(wrapping_sub(link, 1));
+                let mut other_shape = ChunkSeq::new[u32]();
+                shape(inout ctx, u32_at(in ctx.method_fn, index), inout other_shape);
+                if !same_words(in first_shape, in other_shape) {
                     return false;
                 }
-                r = u32_at(in d.m_next, i);
+                link = u32_at(in ctx.method_next, index);
             }
-            f = first;
+            method_fn = first;
         }
-        param_types(in d, f, 1, inout out);
+        param_types(in ctx, method_fn, 1, inout out);
         return true;
     }
     false
 }
 
 // `trivial`: a literal or a path of names, fields and literal indices.
-fn trivial(in d: D, e: u32) -> bool {
-    let n = ex(in d, e);
-    if n.kind == 1 || n.kind == 2 {
+fn trivial(in ctx: D, expr: u32) -> bool {
+    let node = ex(in ctx, expr);
+    if node.kind == 1 || node.kind == 2 {
         return true;
     }
-    if n.kind == 7 {
-        return trivial(in d, n.a);
+    if node.kind == 7 {
+        return trivial(in ctx, node.a);
     }
-    if n.kind == 8 {
-        return trivial(in d, n.a) && trivial(in d, n.b);
+    if node.kind == 8 {
+        return trivial(in ctx, node.a) && trivial(in ctx, node.b);
     }
     false
 }
@@ -1135,259 +1144,279 @@ fn trivial(in d: D, e: u32) -> bool {
 // ---------------------------------------------------------------- lowering
 
 // `Lowering::function`.
-fn function(inout d: D, f: u32, self_ty: u32) {
-    let fnode = fn_at(in d, f);
-    env_restore(inout d, 0);
-    for i in 0..ll(in d, fnode.params) {
-        let p = param_at(in d, la(in d, fnode.params, i));
-        let mut t = p.ty;
+fn function(inout ctx: D, func: u32, self_ty: u32) {
+    let fnode = fn_at(in ctx, func);
+    env_restore(inout ctx, 0);
+    for i in 0..ll(in ctx, fnode.params) {
+        let param = param_at(in ctx, la(in ctx, fnode.params, i));
+        let mut param_ty = param.ty;
         if self_ty != NONE {
-            let tn = ty(in d, p.ty);
-            if tn.kind == 5 && p.name == d.k.self_ {
-                t = self_ty;
-            } else if tn.kind == 1 && tn.a == d.k.self_ty && ll(in d, tn.b) == 0 {
-                t = self_ty;
+            let ty_node = ty(in ctx, param.ty);
+            if ty_node.kind == 5 && param.name == ctx.known.self_ {
+                param_ty = self_ty;
+            } else if ty_node.kind == 1
+                && ty_node.a == ctx.known.self_ty
+                && ll(in ctx, ty_node.b) == 0 {
+                param_ty = self_ty;
             }
         }
-        env_put(inout d, p.name, t);
+        env_put(inout ctx, param.name, param_ty);
     }
-    if self_ty != NONE && !env_has(in d, d.k.self_) {
-        env_put(inout d, d.k.self_, self_ty);
+    if self_ty != NONE && !env_has(in ctx, ctx.known.self_) {
+        env_put(inout ctx, ctx.known.self_, self_ty);
     }
-    d.generics.clear();
-    for i in 0..ll(in d, fnode.generics) {
-        let gn = generic_at(in d, la(in d, fnode.generics, i));
-        d.generics.push(gn.name);
+    ctx.generics.clear();
+    for i in 0..ll(in ctx, fnode.generics) {
+        let generic = generic_at(in ctx, la(in ctx, fnode.generics, i));
+        ctx.generics.push(generic.name);
     }
-    d.result = fnode.result;
+    ctx.result = fnode.result;
     if fnode.body != NONE {
-        lower(inout d, fnode.body, fnode.result);
+        lower(inout ctx, fnode.body, fnode.result);
     }
-    env_restore(inout d, 0);
+    env_restore(inout ctx, 0);
 }
 
-fn lower_opt(inout d: D, e: u32, expected: u32) {
-    if e != NONE {
-        lower(inout d, e, expected);
+fn lower_opt(inout ctx: D, expr: u32, expected: u32) {
+    if expr != NONE {
+        lower(inout ctx, expr, expected);
     }
 }
 
-// `Lowering::lower`: lowers `e` where a value of `expected` (NONE when
+// `Lowering::lower`: lowers `expr` where a value of `expected` (NONE when
 // unknown) is wanted.
-fn lower(inout d: D, e: u32, expected: u32) {
-    let n = ex(in d, e);
-    if expected != NONE && n.kind == 15 {
-        let sig = fn_sig(in d, expected);
+fn lower(inout ctx: D, expr: u32, expected: u32) {
+    let node = ex(in ctx, expr);
+    if expected != NONE && node.kind == 15 {
+        let sig = fn_sig(in ctx, expected);
         if sig != NONE {
-            let kind = fn_kind(in d, expected);
-            coerce(inout d, e, kind, sig);
+            let object_kind = fn_kind(in ctx, expected);
+            coerce(inout ctx, expr, object_kind, sig);
             return;
         }
     }
-    if n.kind == 6 && ll(in d, n.c) == 1 {
-        let c = ex(in d, n.a);
-        let a0 = arg_at(in d, la(in d, n.c, 0)).expr;
-        if c.kind == 2 && c.a == d.k.box_new && !env_has(in d, c.a) && ex(in d, a0).kind == 15 {
+    if node.kind == 6 && ll(in ctx, node.c) == 1 {
+        let callee = ex(in ctx, node.a);
+        let arg = arg_at(in ctx, la(in ctx, node.c, 0)).expr;
+        if callee.kind == 2
+            && callee.a == ctx.known.box_new
+            && !env_has(in ctx, callee.a)
+            && ex(in ctx, arg).kind == 15 {
             let mut object = NONE;
-            if ll(in d, n.b) > 0 {
-                let t0 = la(in d, n.b, 0);
-                if fn_sig(in d, t0) != NONE {
-                    object = t0;
+            if ll(in ctx, node.b) > 0 {
+                let type_arg = la(in ctx, node.b, 0);
+                if fn_sig(in ctx, type_arg) != NONE {
+                    object = type_arg;
                 }
-            } else if expected != NONE && boxed_fn_sig(in d, expected) != NONE {
-                object = la(in d, ty(in d, expected).b, 0);
+            } else if expected != NONE && boxed_fn_sig(in ctx, expected) != NONE {
+                object = la(in ctx, ty(in ctx, expected).b, 0);
             }
             if object != NONE {
-                let sig = fn_sig(in d, object);
+                let sig = fn_sig(in ctx, object);
                 if sig != NONE {
-                    let kind = fn_kind(in d, object);
-                    coerce(inout d, a0, kind, sig);
-                    if ll(in d, n.b) == 0 {
-                        let tl = list1(inout d, object);
-                        let cur = ex(in d, e);
-                        set_ex(inout d, e, exn(cur.kind, cur.start, cur.end, cur.a, tl, cur.c));
+                    let object_kind = fn_kind(in ctx, object);
+                    coerce(inout ctx, arg, object_kind, sig);
+                    if ll(in ctx, node.b) == 0 {
+                        let type_args = list1(inout ctx, object);
+                        let cur = ex(in ctx, expr);
+                        set_ex(
+                            inout ctx,
+                            expr,
+                            exn(cur.kind, cur.start, cur.end, cur.a, type_args, cur.c)
+                        );
                     }
                     return;
                 }
             }
         }
     }
-    let k = n.kind;
-    if k == 1 || k == 2 {} else if k == 3 {
-        let en = ty(
-            in d,
+    let kind = node.kind;
+    if kind == 1 || kind == 2 {} else if kind == 3 {
+        let expected_node = ty(
+            in ctx,
             if expected == NONE {
-                d.t_infer
+                ctx.t_infer
             } else {
                 expected
             }
         );
-        let len = ll(in d, n.a);
-        let tuple = expected != NONE && en.kind == 2 && ll(in d, en.a) == len;
+        let len = ll(in ctx, node.a);
+        let tuple = expected != NONE
+            && expected_node.kind == 2
+            && ll(in ctx, expected_node.a) == len;
         for i in 0..len {
-            let want = if tuple { la(in d, en.a, i) } else { d.t_infer };
-            lower(inout d, la(in d, n.a, i), want);
+            let want = if tuple {
+                la(in ctx, expected_node.a, i)
+            } else {
+                ctx.t_infer
+            };
+            lower(inout ctx, la(in ctx, node.a, i), want);
         }
-    } else if k == 4 {
-        let len = ll(in d, n.b) / 2;
+    } else if kind == 4 {
+        let len = ll(in ctx, node.b) / 2;
         for i in 0..len {
-            let f = la(in d, n.b, wrapping_mul(i, 2));
-            let want = field_type(in d, n.a, f);
-            lower(inout d, la(in d, n.b, inc(wrapping_mul(i, 2))), want);
+            let field = la(in ctx, node.b, wrapping_mul(i, 2));
+            let want = field_type(in ctx, node.a, field);
+            lower(inout ctx, la(in ctx, node.b, inc(wrapping_mul(i, 2))), want);
         }
-    } else if k == 5 {
-        let m = env_mark(in d);
-        for i in 0..ll(in d, n.a) {
-            let s = stmt_at(in d, la(in d, n.a, i));
-            if s.kind == 1 {
-                let want = if is_infer(in d, s.ty) { NONE } else { s.ty };
-                lower(inout d, s.value, want);
+    } else if kind == 5 {
+        let mark = env_mark(in ctx);
+        for i in 0..ll(in ctx, node.a) {
+            let stmt = stmt_at(in ctx, la(in ctx, node.a, i));
+            if stmt.kind == 1 {
+                let want = if is_infer(in ctx, stmt.ty) {
+                    NONE
+                } else {
+                    stmt.ty
+                };
+                lower(inout ctx, stmt.value, want);
                 let bound = if want != NONE {
                     want
                 } else {
-                    infer(inout d, s.value)
+                    infer(inout ctx, stmt.value)
                 };
-                bind(inout d, s.pat, bound);
+                bind(inout ctx, stmt.pat, bound);
             } else {
-                lower(inout d, s.value, NONE);
+                lower(inout ctx, stmt.value, NONE);
             }
         }
-        lower_opt(inout d, n.b, expected);
-        env_restore(inout d, m);
-    } else if k == 6 {
-        call(inout d, e);
-    } else if k == 7 || k == 9 {
-        lower(inout d, n.a, NONE);
-    } else if k == 10 {
-        lower(inout d, n.b, NONE);
-    } else if k == 8 {
-        lower(inout d, n.a, NONE);
-        lower(inout d, n.b, NONE);
-    } else if k == 11 {
-        lower(inout d, n.b, NONE);
-        lower(inout d, n.c, NONE);
-    } else if k == 12 {
-        let t = type_of(in d, n.b);
-        lower(inout d, n.b, NONE);
-        lower(inout d, n.c, t);
-    } else if k == 13 {
-        lower(inout d, n.a, NONE);
-        lower(inout d, n.b, expected);
-        lower_opt(inout d, n.c, expected);
-    } else if k == 14 {
-        lower(inout d, n.a, NONE);
-        let len = ll(in d, n.b) / 2;
+        lower_opt(inout ctx, node.b, expected);
+        env_restore(inout ctx, mark);
+    } else if kind == 6 {
+        call(inout ctx, expr);
+    } else if kind == 7 || kind == 9 {
+        lower(inout ctx, node.a, NONE);
+    } else if kind == 10 {
+        lower(inout ctx, node.b, NONE);
+    } else if kind == 8 {
+        lower(inout ctx, node.a, NONE);
+        lower(inout ctx, node.b, NONE);
+    } else if kind == 11 {
+        lower(inout ctx, node.b, NONE);
+        lower(inout ctx, node.c, NONE);
+    } else if kind == 12 {
+        let target_ty = type_of(in ctx, node.b);
+        lower(inout ctx, node.b, NONE);
+        lower(inout ctx, node.c, target_ty);
+    } else if kind == 13 {
+        lower(inout ctx, node.a, NONE);
+        lower(inout ctx, node.b, expected);
+        lower_opt(inout ctx, node.c, expected);
+    } else if kind == 14 {
+        lower(inout ctx, node.a, NONE);
+        let len = ll(in ctx, node.b) / 2;
         for i in 0..len {
-            let m = env_mark(in d);
-            bind(inout d, la(in d, n.b, wrapping_mul(i, 2)), d.t_infer);
-            lower(inout d, la(in d, n.b, inc(wrapping_mul(i, 2))), expected);
-            env_restore(inout d, m);
+            let mark = env_mark(in ctx);
+            bind(inout ctx, la(in ctx, node.b, wrapping_mul(i, 2)), ctx.t_infer);
+            lower(inout ctx, la(in ctx, node.b, inc(wrapping_mul(i, 2))), expected);
+            env_restore(inout ctx, mark);
         }
-    } else if k == 15 {
-        let m = env_mark(in d);
-        for i in 0..ll(in d, n.a) {
-            let p = param_at(in d, la(in d, n.a, i));
-            env_put(inout d, p.name, p.ty);
+    } else if kind == 15 {
+        let mark = env_mark(in ctx);
+        for i in 0..ll(in ctx, node.a) {
+            let param = param_at(in ctx, la(in ctx, node.a, i));
+            env_put(inout ctx, param.name, param.ty);
         }
-        lower(inout d, n.e, NONE);
-        env_restore(inout d, m);
-    } else if k == 16 {
-        if n.b != NONE {
-            lower(inout d, n.c, NONE);
+        lower(inout ctx, node.e, NONE);
+        env_restore(inout ctx, mark);
+    } else if kind == 16 {
+        if node.b != NONE {
+            lower(inout ctx, node.c, NONE);
         }
-        lower(inout d, n.d, NONE);
-        for i in 0..ll(in d, n.e) {
-            let c = clause_at(in d, la(in d, n.e, i));
-            let m = env_mark(in d);
-            for j in 0..ll(in d, c.pats) {
-                bind(inout d, la(in d, c.pats, j), d.t_infer);
+        lower(inout ctx, node.d, NONE);
+        for i in 0..ll(in ctx, node.e) {
+            let clause = clause_at(in ctx, la(in ctx, node.e, i));
+            let mark = env_mark(in ctx);
+            for j in 0..ll(in ctx, clause.pats) {
+                bind(inout ctx, la(in ctx, clause.pats, j), ctx.t_infer);
             }
-            lower(inout d, c.body, NONE);
-            env_restore(inout d, m);
+            lower(inout ctx, clause.body, NONE);
+            env_restore(inout ctx, mark);
         }
-    } else if k == 18 {
-        lower(inout d, n.b, NONE);
-        let m = env_mark(in d);
-        let t = if ex(in d, n.b).kind == 19 {
-            d.t_i64
+    } else if kind == 18 {
+        lower(inout ctx, node.b, NONE);
+        let mark = env_mark(in ctx);
+        let bind_ty = if ex(in ctx, node.b).kind == 19 {
+            ctx.t_i64
         } else {
-            d.t_infer
+            ctx.t_infer
         };
-        bind(inout d, n.a, t);
-        lower(inout d, n.c, NONE);
-        env_restore(inout d, m);
-    } else if k == 21 && n.a != NONE {
-        let r = d.result;
-        lower(inout d, n.a, r);
-    } else if k == 17 {
-        lower(inout d, n.a, NONE);
-    } else if k == 19 {
-        lower(inout d, n.a, NONE);
-        lower(inout d, n.b, NONE);
-    } else if k == 20 {
-        lower_opt(inout d, n.a, NONE);
+        bind(inout ctx, node.a, bind_ty);
+        lower(inout ctx, node.c, NONE);
+        env_restore(inout ctx, mark);
+    } else if kind == 21 && node.a != NONE {
+        let result = ctx.result;
+        lower(inout ctx, node.a, result);
+    } else if kind == 17 {
+        lower(inout ctx, node.a, NONE);
+    } else if kind == 19 {
+        lower(inout ctx, node.a, NONE);
+        lower(inout ctx, node.b, NONE);
+    } else if kind == 20 {
+        lower_opt(inout ctx, node.a, NONE);
     }
 }
 
-// Moves expression `e`'s node to a new index and puts `Name(name)` with a
-// new synthetic span at `e`; returns the moved node's index.
-fn hoist(inout d: D, e: u32, in prefix: Str, mutable: bool, inout stmts: ChunkSeq[u32]) {
-    let old = ex(in d, e);
-    d.buf.clear();
-    d.buf.push_str(in prefix);
-    buf_decimal(inout d, w(old.start));
-    let name = intern_buf(inout d);
-    let value = new_ex(inout d, old);
-    let s = span(inout d);
-    set_ex(inout d, e, exn(2, s, inc32(s), name, NONE, NONE));
-    let ps = span(inout d);
-    let pat = new_pat(inout d, 2, ps, inc32(ps), name, NONE, NONE);
-    let st = new_stmt(
-        inout d,
-        StmtNode { kind: 1, pat: pat, ty: d.t_infer, value: value, mutable: mutable }
+// Moves expression `expr`'s node to a new index and puts `Name(name)` with a
+// new synthetic span at `expr`; returns the moved node's index.
+fn hoist(inout ctx: D, expr: u32, in prefix: Str, mutable: bool, inout stmts: ChunkSeq[u32]) {
+    let old = ex(in ctx, expr);
+    ctx.buf.clear();
+    ctx.buf.push_str(in prefix);
+    buf_decimal(inout ctx, w(old.start));
+    let name = intern_buf(inout ctx);
+    let value = new_ex(inout ctx, old);
+    let start = span(inout ctx);
+    set_ex(inout ctx, expr, exn(2, start, inc32(start), name, NONE, NONE));
+    let pat_start = span(inout ctx);
+    let pat = new_pat(inout ctx, 2, pat_start, inc32(pat_start), name, NONE, NONE);
+    let stmt = new_stmt(
+        inout ctx,
+        StmtNode { kind: 1, pat: pat, ty: ctx.t_infer, value: value, mutable: mutable }
     );
-    stmts.push(st);
+    stmts.push(stmt);
 }
 
 // `Lowering::call`: closure arguments for function-object parameters
 // become objects, and a call of a function object becomes a call of
 // `call`.
-fn call(inout d: D, e: u32) {
-    let n = ex(in d, e);
-    let callee = n.a;
+fn call(inout ctx: D, expr: u32) {
+    let node = ex(in ctx, expr);
+    let callee = node.a;
     let mut params = ChunkSeq::new[u32]();
-    let known = callee_params(inout d, callee, inout params);
-    let cs = n.start;
-    let ce = n.end;
-    let c = ex(in d, callee);
+    let known = callee_params(inout ctx, callee, inout params);
+    let call_start = node.start;
+    let call_end = node.end;
+    let callee_node = ex(in ctx, callee);
     let mut callee_object = false;
-    if c.kind == 2 || c.kind == 8 {
-        let t = type_of(in d, callee);
-        callee_object = t != NONE && any_fn_sig(in d, t) != NONE;
-    } else if c.kind == 7 {
-        let rt = type_of(in d, c.a);
-        let has_method = rt != NONE && method(in d, tname(in d, rt), c.b) != NONE;
+    if callee_node.kind == 2 || callee_node.kind == 8 {
+        let callee_ty = type_of(in ctx, callee);
+        callee_object = callee_ty != NONE && any_fn_sig(in ctx, callee_ty) != NONE;
+    } else if callee_node.kind == 7 {
+        let receiver_ty = type_of(in ctx, callee_node.a);
+        let has_method = receiver_ty != NONE
+            && method(in ctx, tname(in ctx, receiver_ty), callee_node.b) != NONE;
         if !has_method {
-            let t = type_of(in d, callee);
-            callee_object = t != NONE && any_fn_sig(in d, t) != NONE;
+            let callee_ty = type_of(in ctx, callee);
+            callee_object = callee_ty != NONE && any_fn_sig(in ctx, callee_ty) != NONE;
         }
     }
     let mut push_element = NONE;
-    if c.kind == 7 && c.b == d.k.push {
-        let rt = type_of(in d, c.a);
-        if rt != NONE {
-            let rn = ty(in d, rt);
-            if rn.kind == 1 && ll(in d, rn.b) == 1 {
-                let a0 = la(in d, rn.b, 0);
-                if boxed_fn_sig(in d, a0) != NONE {
-                    push_element = a0;
+    if callee_node.kind == 7 && callee_node.b == ctx.known.push {
+        let receiver_ty = type_of(in ctx, callee_node.a);
+        if receiver_ty != NONE {
+            let receiver_node = ty(in ctx, receiver_ty);
+            if receiver_node.kind == 1 && ll(in ctx, receiver_node.b) == 1 {
+                let elem_ty = la(in ctx, receiver_node.b, 0);
+                if boxed_fn_sig(in ctx, elem_ty) != NONE {
+                    push_element = elem_ty;
                 }
             }
         }
     }
-    lower(inout d, callee, NONE);
-    set_origin(inout d, cs, ce);
-    let nargs = ll(in d, n.c);
+    lower(inout ctx, callee, NONE);
+    set_origin(inout ctx, call_start, call_end);
+    let nargs = ll(in ctx, node.c);
     let mut wants = ChunkSeq::with_capacity[u32](nargs);
     let mut lends = ChunkSeq::with_capacity[u8](nargs);
     let mut last_lend: u64 = 0;
@@ -1398,11 +1427,11 @@ fn call(inout d: D, e: u32) {
             want = u32_at(in params, i);
         }
         wants.push(want);
-        let a = arg_at(in d, la(in d, n.c, i));
-        let lend = a.pass == 1
-            && ex(in d, a.expr).kind == 15
+        let arg = arg_at(in ctx, la(in ctx, node.c, i));
+        let lend = arg.pass == 1
+            && ex(in ctx, arg.expr).kind == 15
             && want != NONE
-            && fn_sig(in d, want) != NONE;
+            && fn_sig(in ctx, want) != NONE;
         lends.push(if lend { 1 } else { 0 });
         if lend {
             last_lend = i;
@@ -1411,151 +1440,155 @@ fn call(inout d: D, e: u32) {
     }
     let mut hoisted = ChunkSeq::new[u32]();
     for i in 0..nargs {
-        let a = arg_at(in d, la(in d, n.c, i));
+        let arg = arg_at(in ctx, la(in ctx, node.c, i));
         let want = u32_at(in wants, i);
         let lend_mut = u8_at(in lends, i) == 1;
-        lower(inout d, a.expr, want);
-        set_origin(inout d, cs, ce);
-        if !lend_mut && a.pass != 1 && has_lend && i < last_lend && !trivial(in d, a.expr) {
+        lower(inout ctx, arg.expr, want);
+        set_origin(inout ctx, call_start, call_end);
+        if !lend_mut && arg.pass != 1 && has_lend && i < last_lend && !trivial(in ctx, arg.expr) {
             // An argument before a hoisted closure is evaluated first too,
             // so the closure captures what it left behind.
-            hoist(inout d, a.expr, in "$arg", false, inout hoisted);
+            hoist(inout ctx, arg.expr, in "$arg", false, inout hoisted);
             continue;
         }
         if lend_mut {
             // An `inout` lend needs a place: the object is a local of the
             // call's own block.
-            hoist(inout d, a.expr, in "$closure", true, inout hoisted);
+            hoist(inout ctx, arg.expr, in "$closure", true, inout hoisted);
         }
     }
-    set_origin(inout d, cs, ce);
+    set_origin(inout ctx, call_start, call_end);
     if callee_object {
-        let old = ex(in d, callee);
-        let moved = new_ex(inout d, old);
-        let s = span(inout d);
-        set_ex(inout d, callee, exn(7, s, inc32(s), moved, d.k.call, NONE));
+        let old = ex(in ctx, callee);
+        let moved = new_ex(inout ctx, old);
+        let start = span(inout ctx);
+        set_ex(inout ctx, callee, exn(7, start, inc32(start), moved, ctx.known.call, NONE));
     }
     if hoisted.len() > 0 {
-        let call_node = ex(in d, e);
-        let moved = new_ex(inout d, call_node);
-        let s = span(inout d);
-        let sl = mk_list(inout d, in hoisted);
-        set_ex(inout d, e, exn(5, s, inc32(s), sl, moved, NONE));
+        let call_node = ex(in ctx, expr);
+        let moved = new_ex(inout ctx, call_node);
+        let start = span(inout ctx);
+        let stmt_list = mk_list(inout ctx, in hoisted);
+        set_ex(inout ctx, expr, exn(5, start, inc32(start), stmt_list, moved, NONE));
     }
 }
 
-fn field_name(in d: D, n: u32) -> u32 {
-    if n == d.k.self_ { d.k.self_field } else { n }
+fn field_name(in ctx: D, name: u32) -> u32 {
+    if name == ctx.known.self_ {
+        ctx.known.self_field
+    } else {
+        name
+    }
 }
 
 // The instance and tail names of an effect row, ", "-joined, into the
 // diagnostic (`names`).
-fn deffect_names(inout d: D, e: u32) {
-    let en = effects_at(in d, e);
-    let n = ll(in d, en.instances);
+fn deffect_names(inout ctx: D, effects: u32) {
+    let effects_row = effects_at(in ctx, effects);
+    let n = ll(in ctx, effects_row.instances);
     for i in 0..n {
         if i > 0 {
-            dput(inout d, in ", ");
+            dput(inout ctx, in ", ");
         }
-        dsym(inout d, effect_at(in d, la(in d, en.instances, i)).name);
+        dsym(inout ctx, effect_at(in ctx, la(in ctx, effects_row.instances, i)).name);
     }
-    if en.tail != NONE {
+    if effects_row.tail != NONE {
         if n > 0 {
-            dput(inout d, in ", ");
+            dput(inout ctx, in ", ");
         }
-        dsym(inout d, en.tail);
+        dsym(inout ctx, effects_row.tail);
     }
 }
 
-fn dpass(inout d: D, p: u8) {
-    if p == 0 {
-        dput(inout d, in "In");
-    } else if p == 1 {
-        dput(inout d, in "Inout");
+fn dpass(inout ctx: D, pass: u8) {
+    if pass == 0 {
+        dput(inout ctx, in "In");
+    } else if pass == 1 {
+        dput(inout ctx, in "Inout");
     } else {
-        dput(inout d, in "Sink");
+        dput(inout ctx, in "Sink");
     }
 }
 
-// `Lowering::coerce`: replaces the closure literal `e` by a value of a
+// `Lowering::coerce`: replaces the closure literal `expr` by a value of a
 // hidden struct that conforms to the hidden trait of `kind` and `sig`.
-fn coerce(inout d: D, e: u32, kind: u32, sig: u32) {
-    let n = ex(in d, e);
-    let sn = ty(in d, sig);
-    let start = n.start;
-    let end = n.end;
-    set_origin(inout d, start, end);
-    let nparams = ll(in d, n.a);
-    let nsig = ll(in d, sn.a) / 2;
-    if nparams != nsig {
-        let at = diag_open(inout d, in "E0207");
-        dput(inout d, in "the closure takes ");
-        ddec(inout d, nparams);
-        dput(inout d, in " parameters; `dyn ");
-        dsym(inout d, kind);
-        dput(inout d, in "` takes ");
-        ddec(inout d, nsig);
-        diag_close(inout d, at, start, end);
+fn coerce(inout ctx: D, expr: u32, kind: u32, sig: u32) {
+    let node = ex(in ctx, expr);
+    let sig_node = ty(in ctx, sig);
+    let start = node.start;
+    let end = node.end;
+    set_origin(inout ctx, start, end);
+    let param_count = ll(in ctx, node.a);
+    let sig_param_count = ll(in ctx, sig_node.a) / 2;
+    if param_count != sig_param_count {
+        let diag = diag_open(inout ctx, in "E0207");
+        dput(inout ctx, in "the closure takes ");
+        ddec(inout ctx, param_count);
+        dput(inout ctx, in " parameters; `dyn ");
+        dsym(inout ctx, kind);
+        dput(inout ctx, in "` takes ");
+        ddec(inout ctx, sig_param_count);
+        diag_close(inout ctx, diag, start, end);
         return;
     }
-    for i in 0..nparams {
-        let p = param_at(in d, la(in d, n.a, i));
-        let pass = wrapping_u8(la(in d, sn.a, wrapping_mul(i, 2)));
-        let t = la(in d, sn.a, inc(wrapping_mul(i, 2)));
-        if !is_infer(in d, p.ty) && !teq(inout d, p.ty, t) {
-            let at = diag_open(inout d, in "E0200");
-            dput(inout d, in "the closure's parameter '");
-            dsym(inout d, p.name);
-            dput(inout d, in "' is written `");
-            dtype(inout d, p.ty);
-            dput(inout d, in "`; `dyn ");
-            dsym(inout d, kind);
-            dput(inout d, in "` passes `");
-            dtype(inout d, t);
-            dput(inout d, in "`");
-            diag_close(inout d, at, p.start, p.end);
+    for i in 0..param_count {
+        let param = param_at(in ctx, la(in ctx, node.a, i));
+        let pass = wrapping_u8(la(in ctx, sig_node.a, wrapping_mul(i, 2)));
+        let sig_ty = la(in ctx, sig_node.a, inc(wrapping_mul(i, 2)));
+        if !is_infer(in ctx, param.ty) && !teq(inout ctx, param.ty, sig_ty) {
+            let diag = diag_open(inout ctx, in "E0200");
+            dput(inout ctx, in "the closure's parameter '");
+            dsym(inout ctx, param.name);
+            dput(inout ctx, in "' is written `");
+            dtype(inout ctx, param.ty);
+            dput(inout ctx, in "`; `dyn ");
+            dsym(inout ctx, kind);
+            dput(inout ctx, in "` passes `");
+            dtype(inout ctx, sig_ty);
+            dput(inout ctx, in "`");
+            diag_close(inout ctx, diag, param.start, param.end);
             return;
         }
-        if p.pass != 0 && p.pass != pass {
-            let at = diag_open(inout d, in "E0200");
-            dput(inout d, in "the closure takes '");
-            dsym(inout d, p.name);
-            dput(inout d, in "' by `");
-            dpass(inout d, p.pass);
-            dput(inout d, in "`; `dyn ");
-            dsym(inout d, kind);
-            dput(inout d, in "` passes it by `");
-            dpass(inout d, pass);
-            dput(inout d, in "`");
-            diag_close(inout d, at, p.start, p.end);
+        if param.pass != 0 && param.pass != pass {
+            let diag = diag_open(inout ctx, in "E0200");
+            dput(inout ctx, in "the closure takes '");
+            dsym(inout ctx, param.name);
+            dput(inout ctx, in "' by `");
+            dpass(inout ctx, param.pass);
+            dput(inout ctx, in "`; `dyn ");
+            dsym(inout ctx, kind);
+            dput(inout ctx, in "` passes it by `");
+            dpass(inout ctx, pass);
+            dput(inout ctx, in "`");
+            diag_close(inout ctx, diag, param.start, param.end);
             return;
         }
     }
-    if !is_infer(in d, n.c) && !teq(inout d, n.c, sn.b) {
-        let at = diag_open(inout d, in "E0200");
-        dput(inout d, in "the closure returns `");
-        dtype(inout d, n.c);
-        dput(inout d, in "`; `dyn ");
-        dsym(inout d, kind);
-        dput(inout d, in "` returns `");
-        dtype(inout d, sn.b);
-        dput(inout d, in "`");
-        diag_close(inout d, at, start, end);
+    if !is_infer(in ctx, node.c) && !teq(inout ctx, node.c, sig_node.b) {
+        let diag = diag_open(inout ctx, in "E0200");
+        dput(inout ctx, in "the closure returns `");
+        dtype(inout ctx, node.c);
+        dput(inout ctx, in "`; `dyn ");
+        dsym(inout ctx, kind);
+        dput(inout ctx, in "` returns `");
+        dtype(inout ctx, sig_node.b);
+        dput(inout ctx, in "`");
+        diag_close(inout ctx, diag, start, end);
         return;
     }
     // A written effect row restricts the body; it must fit the object's.
-    let infer_effects = n.b >= 256;
-    let mode = n.b & 255;
-    let mut body_effects = sn.c;
+    let infer_effects = node.b >= 256;
+    let mode = node.b & 255;
+    let mut body_effects = sig_node.c;
     if !infer_effects {
-        let wn = effects_at(in d, n.d);
-        let sigfx = effects_at(in d, sn.c);
-        let mut fits = wn.tail == NONE;
-        for i in 0..ll(in d, wn.instances) {
-            let x = la(in d, wn.instances, i);
+        let written = effects_at(in ctx, node.d);
+        let sig_effects = effects_at(in ctx, sig_node.c);
+        let mut fits = written.tail == NONE;
+        for i in 0..ll(in ctx, written.instances) {
+            let effect = la(in ctx, written.instances, i);
             let mut any = false;
-            for j in 0..ll(in d, sigfx.instances) {
-                if effect_eq(inout d, la(in d, sigfx.instances, j), x) {
+            for j in 0..ll(in ctx, sig_effects.instances) {
+                if effect_eq(inout ctx, la(in ctx, sig_effects.instances, j), effect) {
                     any = true;
                 }
             }
@@ -1564,154 +1597,174 @@ fn coerce(inout d: D, e: u32, kind: u32, sig: u32) {
             }
         }
         if !fits {
-            let at = diag_open(inout d, in "E0401");
-            dput(inout d, in "the closure's written effects [");
-            deffect_names(inout d, n.d);
-            dput(inout d, in "] are not within those of `dyn ");
-            dsym(inout d, kind);
-            dput(inout d, in "`: [");
-            deffect_names(inout d, sn.c);
-            dput(inout d, in "]");
-            diag_close(inout d, at, start, end);
+            let diag = diag_open(inout ctx, in "E0401");
+            dput(inout ctx, in "the closure's written effects [");
+            deffect_names(inout ctx, node.d);
+            dput(inout ctx, in "] are not within those of `dyn ");
+            dsym(inout ctx, kind);
+            dput(inout ctx, in "`: [");
+            deffect_names(inout ctx, sig_node.c);
+            dput(inout ctx, in "]");
+            diag_close(inout ctx, diag, start, end);
             return;
         }
-        body_effects = n.d;
+        body_effects = node.d;
     }
-    if mode == 2 && kind != d.k.fn_once {
-        let at = diag_open(inout d, in "E0310");
-        dput(inout d, in "a linear closure can be called once: it is a `dyn FnOnce`, not a `dyn ");
-        dsym(inout d, kind);
-        dput(inout d, in "`");
-        diag_close(inout d, at, start, end);
+    if mode == 2 && kind != ctx.known.fn_once {
+        let diag = diag_open(inout ctx, in "E0310");
+        dput(
+            inout ctx,
+            in "a linear closure can be called once: it is a `dyn FnOnce`, not a `dyn "
+        );
+        dsym(inout ctx, kind);
+        dput(inout ctx, in "`");
+        diag_close(inout ctx, diag, start, end);
     }
     // Lower nested objects inside the body first, with the closure's
     // parameters in scope.
-    let m = env_mark(in d);
-    for i in 0..nparams {
-        let p = param_at(in d, la(in d, n.a, i));
-        env_put(inout d, p.name, la(in d, sn.a, inc(wrapping_mul(i, 2))));
+    let mark = env_mark(in ctx);
+    for i in 0..param_count {
+        let param = param_at(in ctx, la(in ctx, node.a, i));
+        env_put(inout ctx, param.name, la(in ctx, sig_node.a, inc(wrapping_mul(i, 2))));
     }
-    let saved = d.result;
-    d.result = sn.b;
-    lower(inout d, n.e, sn.b);
-    d.result = saved;
-    env_restore(inout d, m);
+    let saved = ctx.result;
+    ctx.result = sig_node.b;
+    lower(inout ctx, node.e, sig_node.b);
+    ctx.result = saved;
+    env_restore(inout ctx, mark);
     // Captures: the body's free names bound outside, sorted by text.
-    let free = free_names(in d, n.e);
-    let mut cap_n = ChunkSeq::new[u32]();
-    let mut cap_t = ChunkSeq::new[u32]();
+    let free = free_names(in ctx, node.e);
+    let mut cap_names = ChunkSeq::new[u32]();
+    let mut cap_types = ChunkSeq::new[u32]();
     for i in 0..free.len() {
-        let x = u32_at(in free, i);
+        let name = u32_at(in free, i);
         let mut is_param = false;
-        for j in 0..nparams {
-            if param_at(in d, la(in d, n.a, j)).name == x {
+        for j in 0..param_count {
+            if param_at(in ctx, la(in ctx, node.a, j)).name == name {
                 is_param = true;
             }
         }
         if is_param {
             continue;
         }
-        let t = env_get(in d, x);
-        if t != NONE {
-            cap_n.push(x);
-            cap_t.push(t);
+        let cap_ty = env_get(in ctx, name);
+        if cap_ty != NONE {
+            cap_names.push(name);
+            cap_types.push(cap_ty);
         }
     }
-    let ncap = cap_n.len();
-    for i in 0..ncap {
-        let x = u32_at(in cap_n, i);
-        let t = u32_at(in cap_t, i);
-        if contains_infer(in d, t) {
-            let at = diag_open(inout d, in "E0102");
-            dput(inout d, in "the closure captures '");
-            dsym(inout d, x);
-            dput(inout d, in "', whose type is not written where it is bound; annotate it (`let ");
-            dsym(inout d, x);
-            dput(inout d, in ": T = ..`) to lower the closure to `dyn ");
-            dsym(inout d, kind);
-            dput(inout d, in "`");
-            diag_close(inout d, at, start, end);
+    let cap_count = cap_names.len();
+    for i in 0..cap_count {
+        let name = u32_at(in cap_names, i);
+        let cap_ty = u32_at(in cap_types, i);
+        if contains_infer(in ctx, cap_ty) {
+            let diag = diag_open(inout ctx, in "E0102");
+            dput(inout ctx, in "the closure captures '");
+            dsym(inout ctx, name);
+            dput(
+                inout ctx,
+                in "', whose type is not written where it is bound; annotate it (`let "
+            );
+            dsym(inout ctx, name);
+            dput(inout ctx, in ": T = ..`) to lower the closure to `dyn ");
+            dsym(inout ctx, kind);
+            dput(inout ctx, in "`");
+            diag_close(inout ctx, diag, start, end);
             return;
         }
-        if is_linear(in d, type_name(in d, t)) {
-            let once = kind == d.k.fn_once;
-            let at = if once {
-                diag_open(inout d, in "E0205")
+        if is_linear(in ctx, type_name(in ctx, cap_ty)) {
+            let once = kind == ctx.known.fn_once;
+            let diag = if once {
+                diag_open(inout ctx, in "E0205")
             } else {
-                diag_open(inout d, in "E0310")
+                diag_open(inout ctx, in "E0310")
             };
-            dput(inout d, in "the closure captures the linear '");
-            dsym(inout d, x);
-            dput(inout d, in "' (");
-            dtype(inout d, t);
-            dput(inout d, in "); ");
+            dput(inout ctx, in "the closure captures the linear '");
+            dsym(inout ctx, name);
+            dput(inout ctx, in "' (");
+            dtype(inout ctx, cap_ty);
+            dput(inout ctx, in "); ");
             if once {
                 dput(
-                    inout d,
+                    inout ctx,
                     in "a `dyn FnOnce` object may be dropped uncalled, so it cannot own a linear value"
                 );
             } else {
                 dput(
-                    inout d,
+                    inout ctx,
                     in "a closure capturing a linear value can be called once only: it is never a `dyn Fn` or `dyn FnMut`"
                 );
             }
-            diag_close(inout d, at, start, end);
+            diag_close(inout ctx, diag, start, end);
             return;
         }
-        let mut generic = mentions_any(in d, t, in d.generics)
-            || mentions_any(in d, sn.b, in d.generics);
-        for j in 0..nsig {
-            if mentions_any(in d, la(in d, sn.a, inc(wrapping_mul(j, 2))), in d.generics) {
+        let mut generic = mentions_any(in ctx, cap_ty, in ctx.generics)
+            || mentions_any(in ctx, sig_node.b, in ctx.generics);
+        for j in 0..sig_param_count {
+            if mentions_any(
+                in ctx,
+                la(in ctx, sig_node.a, inc(wrapping_mul(j, 2))),
+                in ctx.generics
+            ) {
                 generic = true;
             }
         }
         if generic {
-            let at = diag_open(inout d, in "E0633");
-            dput(inout d, in "a closure lowered to `dyn ");
-            dsym(inout d, kind);
+            let diag = diag_open(inout ctx, in "E0633");
+            dput(inout ctx, in "a closure lowered to `dyn ");
+            dsym(inout ctx, kind);
             dput(
-                inout d,
+                inout ctx,
                 in "` cannot mention the type parameters of its enclosing function yet ('"
             );
-            dsym(inout d, x);
-            dput(inout d, in "': ");
-            dtype(inout d, t);
-            dput(inout d, in ")");
-            diag_close(inout d, at, start, end);
+            dsym(inout ctx, name);
+            dput(inout ctx, in "': ");
+            dtype(inout ctx, cap_ty);
+            dput(inout ctx, in ")");
+            diag_close(inout ctx, diag, start, end);
             return;
         }
     }
-    let erased = erase_sig(inout d, sig);
-    let trait_name = hidden_trait(inout d, kind, erased);
-    let index = d.gen_adts.len();
-    d.buf.clear();
-    d.buf.push_str(in "__Closure");
-    buf_decimal(inout d, index);
-    d.buf.push_str(in "_");
-    buf_decimal(inout d, w(start));
-    let struct_name = intern_buf(inout d);
+    let erased = erase_sig(inout ctx, sig);
+    let trait_name = hidden_trait(inout ctx, kind, erased);
+    let index = ctx.gen_adts.len();
+    ctx.buf.clear();
+    ctx.buf.push_str(in "__Closure");
+    buf_decimal(inout ctx, index);
+    ctx.buf.push_str(in "_");
+    buf_decimal(inout ctx, w(start));
+    let struct_name = intern_buf(inout ctx);
     let mut fields = ChunkSeq::new[u32]();
-    for i in 0..ncap {
-        let fname = field_name(in d, u32_at(in cap_n, i));
-        let f = d.ast
+    for i in 0..cap_count {
+        let cap_field = field_name(in ctx, u32_at(in cap_names, i));
+        let field = ctx.ast
             .fields
-            .alloc(FieldNode { name: fname, ty: u32_at(in cap_t, i), modality: 3, temperature: 0 })
+            .alloc(
+                FieldNode {
+                    name: cap_field,
+                    ty: u32_at(in cap_types, i),
+                    modality: 3,
+                    temperature: 0
+                }
+            )
             .raw();
-        fields.push(f);
+        fields.push(field);
     }
-    let fl = mk_list(inout d, in fields);
-    let v = d.ast.variants.alloc(VariantNode { name: struct_name, fields: fl, named: true }).raw();
-    let vl = list1(inout d, v);
-    let adt_span = span(inout d);
-    let adt = d.ast
+    let field_list = mk_list(inout ctx, in fields);
+    let variant = ctx.ast
+        .variants
+        .alloc(VariantNode { name: struct_name, fields: field_list, named: true })
+        .raw();
+    let variant_list = list1(inout ctx, variant);
+    let adt_span = span(inout ctx);
+    let adt = ctx.ast
         .adts
         .alloc(
             AdtNode {
                 name: struct_name,
                 mode: 1,
                 generics: 0,
-                variants: vl,
+                variants: variant_list,
                 is_enum: false,
                 tiled: false,
                 tile_width: 0,
@@ -1720,142 +1773,151 @@ fn coerce(inout d: D, e: u32, kind: u32, sig: u32) {
             }
         )
         .raw();
-    let receiver = pass_of(kind, in d);
-    let mut mps = ChunkSeq::new[u32]();
-    let ss = span(inout d);
-    let sp = new_param(
-        inout d,
+    let receiver = pass_of(kind, in ctx);
+    let mut method_params = ChunkSeq::new[u32]();
+    let self_start = span(inout ctx);
+    let self_param = new_param(
+        inout ctx,
         ParamNode {
-            name: d.k.self_,
+            name: ctx.known.self_,
             pass: receiver,
             projections: 0,
-            ty: d.t_infer,
-            start: ss,
-            end: inc32(ss)
+            ty: ctx.t_infer,
+            start: self_start,
+            end: inc32(self_start)
         }
     );
-    mps.push(sp);
-    for i in 0..nparams {
-        let p = param_at(in d, la(in d, n.a, i));
-        let q = new_param(
-            inout d,
+    method_params.push(self_param);
+    for i in 0..param_count {
+        let param = param_at(in ctx, la(in ctx, node.a, i));
+        let method_param = new_param(
+            inout ctx,
             ParamNode {
-                name: p.name,
-                pass: wrapping_u8(la(in d, sn.a, wrapping_mul(i, 2))),
+                name: param.name,
+                pass: wrapping_u8(la(in ctx, sig_node.a, wrapping_mul(i, 2))),
                 projections: 0,
-                ty: la(in d, sn.a, inc(wrapping_mul(i, 2))),
-                start: p.start,
-                end: p.end
+                ty: la(in ctx, sig_node.a, inc(wrapping_mul(i, 2))),
+                start: param.start,
+                end: param.end
             }
         );
-        mps.push(q);
+        method_params.push(method_param);
     }
-    let body = n.e;
+    let body = node.e;
     let mut new_body = body;
     if receiver == 2 {
         // `FnOnce`: the object is consumed whole, binding each capture
         // under its own name (`self` as `$self`).
         let mut from = ChunkSeq::new[u32]();
         let mut to = ChunkSeq::new[u32]();
-        for i in 0..ncap {
-            if u32_at(in cap_n, i) == d.k.self_ {
-                from.push(d.k.self_);
-                to.push(d.k.dollar_self);
+        for i in 0..cap_count {
+            if u32_at(in cap_names, i) == ctx.known.self_ {
+                from.push(ctx.known.self_);
+                to.push(ctx.known.dollar_self);
             }
         }
-        substitute(inout d, body, in from, in to, false);
+        substitute(inout ctx, body, in from, in to, false);
         let mut pats = ChunkSeq::new[u32]();
-        for i in 0..ncap {
-            let x = u32_at(in cap_n, i);
-            let ps = span(inout d);
-            let bind_name = if x == d.k.self_ && from.len() > 0 {
-                d.k.dollar_self
+        for i in 0..cap_count {
+            let name = u32_at(in cap_names, i);
+            let pat_start = span(inout ctx);
+            let bind_name = if name == ctx.known.self_ && from.len() > 0 {
+                ctx.known.dollar_self
             } else {
-                x
+                name
             };
-            let p = new_pat(inout d, 2, ps, inc32(ps), bind_name, NONE, NONE);
-            pats.push(field_name(in d, x));
-            pats.push(p);
+            let pat = new_pat(inout ctx, 2, pat_start, inc32(pat_start), bind_name, NONE, NONE);
+            pats.push(field_name(in ctx, name));
+            pats.push(pat);
         }
-        let pl = mk_list(inout d, in pats);
-        let pat_span = span(inout d);
-        let self_expr = mk_expr(inout d, 2, d.k.self_, NONE);
-        let bs = span(inout d);
-        let cp = new_pat(inout d, 5, pat_span, inc32(pat_span), struct_name, pl, 1);
-        let st = new_stmt(
-            inout d,
-            StmtNode { kind: 1, pat: cp, ty: d.t_infer, value: self_expr, mutable: true }
+        let pat_list = mk_list(inout ctx, in pats);
+        let pat_span = span(inout ctx);
+        let self_expr = mk_expr(inout ctx, 2, ctx.known.self_, NONE);
+        let block_start = span(inout ctx);
+        let struct_pat = new_pat(inout ctx, 5, pat_span, inc32(pat_span), struct_name, pat_list, 1);
+        let stmt = new_stmt(
+            inout ctx,
+            StmtNode { kind: 1, pat: struct_pat, ty: ctx.t_infer, value: self_expr, mutable: true }
         );
-        let stl = list1(inout d, st);
-        new_body = new_ex(inout d, exn(5, bs, inc32(bs), stl, body, NONE));
+        let stmt_list = list1(inout ctx, stmt);
+        new_body = new_ex(
+            inout ctx,
+            exn(5, block_start, inc32(block_start), stmt_list, body, NONE)
+        );
     } else {
         let mut to = ChunkSeq::new[u32]();
-        for i in 0..ncap {
-            to.push(field_name(in d, u32_at(in cap_n, i)));
+        for i in 0..cap_count {
+            to.push(field_name(in ctx, u32_at(in cap_names, i)));
         }
-        substitute(inout d, body, in cap_n, in to, true);
+        substitute(inout ctx, body, in cap_names, in to, true);
     }
-    let mpl = mk_list(inout d, in mps);
-    let ms = span(inout d);
-    let method_fn = d.ast
+    let param_list = mk_list(inout ctx, in method_params);
+    let method_start = span(inout ctx);
+    let method_fn = ctx.ast
         .fns
         .alloc(
             FnNode {
-                name: d.k.call,
+                name: ctx.known.call,
                 fip: false,
                 generics: 0,
-                params: mpl,
-                result: sn.b,
+                params: param_list,
+                result: sig_node.b,
                 effects: body_effects,
                 body: new_body,
-                start: ms,
-                end: inc32(ms)
+                start: method_start,
+                end: inc32(method_start)
             }
         )
         .raw();
-    let trs = span(inout d);
-    let tref = d.ast
+    let trait_ref_start = span(inout ctx);
+    let trait_ref = ctx.ast
         .trait_refs
         .alloc(
-            TraitRefNode { package: NONE, name: trait_name, args: 0, start: trs, end: inc32(trs) }
+            TraitRefNode {
+                package: NONE,
+                name: trait_name,
+                args: 0,
+                start: trait_ref_start,
+                end: inc32(trait_ref_start)
+            }
         )
         .raw();
-    let self_t = named(inout d, struct_name, 0);
-    let ml = list1(inout d, method_fn);
-    let cfs = span(inout d);
-    let conf = d.ast
+    let self_ty = named(inout ctx, struct_name, 0);
+    let method_list = list1(inout ctx, method_fn);
+    let conf_start = span(inout ctx);
+    let conf = ctx.ast
         .confs
         .alloc(
             ConfNode {
                 model: NONE,
                 public: false,
                 generics: 0,
-                trait_ref: tref,
-                self_ty: self_t,
+                trait_ref: trait_ref,
+                self_ty: self_ty,
                 wheres: 0,
                 assoc: 0,
-                methods: ml,
-                start: cfs,
-                end: inc32(cfs)
+                methods: method_list,
+                start: conf_start,
+                end: inc32(conf_start)
             }
         )
         .raw();
-    d.gen_adts.push(adt);
-    d.gen_confs.push(conf);
-    let mut sf = ChunkSeq::new[u32]();
-    for i in 0..ncap {
-        let x = u32_at(in cap_n, i);
-        let v2 = mk_expr(inout d, 2, x, NONE);
-        sf.push(field_name(in d, x));
-        sf.push(v2);
+    ctx.gen_adts.push(adt);
+    ctx.gen_confs.push(conf);
+    let mut field_inits = ChunkSeq::new[u32]();
+    for i in 0..cap_count {
+        let name = u32_at(in cap_names, i);
+        let field_value = mk_expr(inout ctx, 2, name, NONE);
+        field_inits.push(field_name(in ctx, name));
+        field_inits.push(field_value);
     }
-    let sfl = mk_list(inout d, in sf);
-    set_ex(inout d, e, exn(4, start, end, struct_name, sfl, NONE));
+    let field_init_list = mk_list(inout ctx, in field_inits);
+    set_ex(inout ctx, expr, exn(4, start, end, struct_name, field_init_list, NONE));
 }
 
-fn map_get(in from: ChunkSeq[u32], in to: ChunkSeq[u32], x: u32) -> u32 {
+fn map_get(in from: ChunkSeq[u32], in to: ChunkSeq[u32], key: u32) -> u32 {
     for i in 0..from.len() {
-        if u32_at(in from, i) == x {
+        if u32_at(in from, i) == key {
             return u32_at(in to, i);
         }
     }
@@ -1867,225 +1929,237 @@ fn map_without(
     in from: ChunkSeq[u32],
     in to: ChunkSeq[u32],
     in bound: ChunkSeq[u32],
-    inout f2: ChunkSeq[u32],
-    inout t2: ChunkSeq[u32]
+    inout kept_from: ChunkSeq[u32],
+    inout kept_to: ChunkSeq[u32]
 ) {
     for i in 0..from.len() {
-        let x = u32_at(in from, i);
-        if !contains(in bound, x) {
-            f2.push(x);
-            t2.push(u32_at(in to, i));
+        let key = u32_at(in from, i);
+        if !contains(in bound, key) {
+            kept_from.push(key);
+            kept_to.push(u32_at(in to, i));
         }
     }
 }
 
 fn subst_scoped(
-    inout d: D,
-    e: u32,
+    inout ctx: D,
+    expr: u32,
     in from: ChunkSeq[u32],
     in to: ChunkSeq[u32],
     in bound: ChunkSeq[u32],
     fields: bool
 ) {
-    let mut f2 = ChunkSeq::new[u32]();
-    let mut t2 = ChunkSeq::new[u32]();
-    map_without(in from, in to, in bound, inout f2, inout t2);
-    substitute(inout d, e, in f2, in t2, fields);
+    let mut kept_from = ChunkSeq::new[u32]();
+    let mut kept_to = ChunkSeq::new[u32]();
+    map_without(in from, in to, in bound, inout kept_from, inout kept_to);
+    substitute(inout ctx, expr, in kept_from, in kept_to, fields);
 }
 
-fn subst_opt(inout d: D, e: u32, in from: ChunkSeq[u32], in to: ChunkSeq[u32], fields: bool) {
-    if e != NONE {
-        substitute(inout d, e, in from, in to, fields);
+fn subst_opt(inout ctx: D, expr: u32, in from: ChunkSeq[u32], in to: ChunkSeq[u32], fields: bool) {
+    if expr != NONE {
+        substitute(inout ctx, expr, in from, in to, fields);
     }
 }
 
 // `Lowering::substitute`: rewrites the free uses of the map's names in
-// `e`, to `self.field` (`fields`) or to another name.
-fn substitute(inout d: D, e: u32, in from: ChunkSeq[u32], in to: ChunkSeq[u32], fields: bool) {
+// `expr`, to `self.field` (`fields`) or to another name.
+fn substitute(inout ctx: D, expr: u32, in from: ChunkSeq[u32], in to: ChunkSeq[u32], fields: bool) {
     if from.len() == 0 {
         return;
     }
-    let n = ex(in d, e);
-    let k = n.kind;
-    if k == 2 {
-        let t = map_get(in from, in to, n.a);
-        if t != NONE {
+    let node = ex(in ctx, expr);
+    let kind = node.kind;
+    if kind == 2 {
+        let target = map_get(in from, in to, node.a);
+        if target != NONE {
             if fields {
-                let base = mk_expr(inout d, 2, d.k.self_, NONE);
-                set_ex(inout d, e, exn(7, n.start, n.end, base, t, NONE));
+                let base = mk_expr(inout ctx, 2, ctx.known.self_, NONE);
+                set_ex(inout ctx, expr, exn(7, node.start, node.end, base, target, NONE));
             } else {
-                set_ex(inout d, e, exn(2, n.start, n.end, t, NONE, NONE));
+                set_ex(inout ctx, expr, exn(2, node.start, node.end, target, NONE, NONE));
             }
         }
-    } else if k == 3 {
-        for i in 0..ll(in d, n.a) {
-            substitute(inout d, la(in d, n.a, i), in from, in to, fields);
+    } else if kind == 3 {
+        for i in 0..ll(in ctx, node.a) {
+            substitute(inout ctx, la(in ctx, node.a, i), in from, in to, fields);
         }
-    } else if k == 4 {
-        let len = ll(in d, n.b) / 2;
+    } else if kind == 4 {
+        let len = ll(in ctx, node.b) / 2;
         for i in 0..len {
-            substitute(inout d, la(in d, n.b, inc(wrapping_mul(i, 2))), in from, in to, fields);
+            substitute(
+                inout ctx,
+                la(in ctx, node.b, inc(wrapping_mul(i, 2))),
+                in from,
+                in to,
+                fields
+            );
         }
-    } else if k == 5 {
-        let mut f2 = list_copy(in from);
-        let mut t2 = list_copy(in to);
-        for i in 0..ll(in d, n.a) {
-            let s = stmt_at(in d, la(in d, n.a, i));
-            substitute(inout d, s.value, in f2, in t2, fields);
-            if s.kind == 1 {
+    } else if kind == 5 {
+        let mut cur_from = list_copy(in from);
+        let mut cur_to = list_copy(in to);
+        for i in 0..ll(in ctx, node.a) {
+            let stmt = stmt_at(in ctx, la(in ctx, node.a, i));
+            substitute(inout ctx, stmt.value, in cur_from, in cur_to, fields);
+            if stmt.kind == 1 {
                 let mut bound = ChunkSeq::new[u32]();
-                pattern_names(in d, s.pat, inout bound);
-                let mut f3 = ChunkSeq::new[u32]();
-                let mut t3 = ChunkSeq::new[u32]();
-                map_without(in f2, in t2, in bound, inout f3, inout t3);
-                f2 = f3;
-                t2 = t3;
+                pattern_names(in ctx, stmt.pat, inout bound);
+                let mut kept_from = ChunkSeq::new[u32]();
+                let mut kept_to = ChunkSeq::new[u32]();
+                map_without(in cur_from, in cur_to, in bound, inout kept_from, inout kept_to);
+                cur_from = kept_from;
+                cur_to = kept_to;
             }
         }
-        subst_opt(inout d, n.b, in f2, in t2, fields);
-    } else if k == 6 {
+        subst_opt(inout ctx, node.b, in cur_from, in cur_to, fields);
+    } else if kind == 6 {
         // A path or function name is not a capture.
-        let c = ex(in d, n.a);
-        if c.kind != 2 || map_get(in from, in to, c.a) != NONE {
-            substitute(inout d, n.a, in from, in to, fields);
+        let callee = ex(in ctx, node.a);
+        if callee.kind != 2 || map_get(in from, in to, callee.a) != NONE {
+            substitute(inout ctx, node.a, in from, in to, fields);
         }
-        for i in 0..ll(in d, n.c) {
-            substitute(inout d, arg_at(in d, la(in d, n.c, i)).expr, in from, in to, fields);
+        for i in 0..ll(in ctx, node.c) {
+            substitute(
+                inout ctx,
+                arg_at(in ctx, la(in ctx, node.c, i)).expr,
+                in from,
+                in to,
+                fields
+            );
         }
-    } else if k == 7 || k == 9 {
-        substitute(inout d, n.a, in from, in to, fields);
-    } else if k == 10 {
-        substitute(inout d, n.b, in from, in to, fields);
-    } else if k == 8 {
-        substitute(inout d, n.a, in from, in to, fields);
-        substitute(inout d, n.b, in from, in to, fields);
-    } else if k == 11 || k == 12 {
-        substitute(inout d, n.b, in from, in to, fields);
-        substitute(inout d, n.c, in from, in to, fields);
-    } else if k == 13 {
-        substitute(inout d, n.a, in from, in to, fields);
-        substitute(inout d, n.b, in from, in to, fields);
-        subst_opt(inout d, n.c, in from, in to, fields);
-    } else if k == 14 {
-        substitute(inout d, n.a, in from, in to, fields);
-        let len = ll(in d, n.b) / 2;
+    } else if kind == 7 || kind == 9 {
+        substitute(inout ctx, node.a, in from, in to, fields);
+    } else if kind == 10 {
+        substitute(inout ctx, node.b, in from, in to, fields);
+    } else if kind == 8 {
+        substitute(inout ctx, node.a, in from, in to, fields);
+        substitute(inout ctx, node.b, in from, in to, fields);
+    } else if kind == 11 || kind == 12 {
+        substitute(inout ctx, node.b, in from, in to, fields);
+        substitute(inout ctx, node.c, in from, in to, fields);
+    } else if kind == 13 {
+        substitute(inout ctx, node.a, in from, in to, fields);
+        substitute(inout ctx, node.b, in from, in to, fields);
+        subst_opt(inout ctx, node.c, in from, in to, fields);
+    } else if kind == 14 {
+        substitute(inout ctx, node.a, in from, in to, fields);
+        let len = ll(in ctx, node.b) / 2;
         for i in 0..len {
             let mut bound = ChunkSeq::new[u32]();
-            pattern_names(in d, la(in d, n.b, wrapping_mul(i, 2)), inout bound);
+            pattern_names(in ctx, la(in ctx, node.b, wrapping_mul(i, 2)), inout bound);
             subst_scoped(
-                inout d,
-                la(in d, n.b, inc(wrapping_mul(i, 2))),
+                inout ctx,
+                la(in ctx, node.b, inc(wrapping_mul(i, 2))),
                 in from,
                 in to,
                 in bound,
                 fields
             );
         }
-    } else if k == 15 {
+    } else if kind == 15 {
         let mut bound = ChunkSeq::new[u32]();
-        for i in 0..ll(in d, n.a) {
-            bound.push(param_at(in d, la(in d, n.a, i)).name);
+        for i in 0..ll(in ctx, node.a) {
+            bound.push(param_at(in ctx, la(in ctx, node.a, i)).name);
         }
-        subst_scoped(inout d, n.e, in from, in to, in bound, fields);
-    } else if k == 16 {
-        if n.b != NONE {
-            substitute(inout d, n.c, in from, in to, fields);
+        subst_scoped(inout ctx, node.e, in from, in to, in bound, fields);
+    } else if kind == 16 {
+        if node.b != NONE {
+            substitute(inout ctx, node.c, in from, in to, fields);
         }
-        substitute(inout d, n.d, in from, in to, fields);
-        for i in 0..ll(in d, n.e) {
-            let c = clause_at(in d, la(in d, n.e, i));
+        substitute(inout ctx, node.d, in from, in to, fields);
+        for i in 0..ll(in ctx, node.e) {
+            let clause = clause_at(in ctx, la(in ctx, node.e, i));
             let mut bound = ChunkSeq::new[u32]();
-            for j in 0..ll(in d, c.pats) {
-                pattern_names(in d, la(in d, c.pats, j), inout bound);
+            for j in 0..ll(in ctx, clause.pats) {
+                pattern_names(in ctx, la(in ctx, clause.pats, j), inout bound);
             }
-            subst_scoped(inout d, c.body, in from, in to, in bound, fields);
+            subst_scoped(inout ctx, clause.body, in from, in to, in bound, fields);
         }
-    } else if k == 18 {
-        substitute(inout d, n.b, in from, in to, fields);
+    } else if kind == 18 {
+        substitute(inout ctx, node.b, in from, in to, fields);
         let mut bound = ChunkSeq::new[u32]();
-        pattern_names(in d, n.a, inout bound);
-        subst_scoped(inout d, n.c, in from, in to, in bound, fields);
-    } else if k == 17 {
-        substitute(inout d, n.a, in from, in to, fields);
-    } else if k == 19 {
-        substitute(inout d, n.a, in from, in to, fields);
-        substitute(inout d, n.b, in from, in to, fields);
-    } else if k == 20 || k == 21 {
-        subst_opt(inout d, n.a, in from, in to, fields);
+        pattern_names(in ctx, node.a, inout bound);
+        subst_scoped(inout ctx, node.c, in from, in to, in bound, fields);
+    } else if kind == 17 {
+        substitute(inout ctx, node.a, in from, in to, fields);
+    } else if kind == 19 {
+        substitute(inout ctx, node.a, in from, in to, fields);
+        substitute(inout ctx, node.b, in from, in to, fields);
+    } else if kind == 20 || kind == 21 {
+        subst_opt(inout ctx, node.a, in from, in to, fields);
     }
 }
 
-fn list_copy(in s: ChunkSeq[u32]) -> ChunkSeq[u32] {
-    let mut out = ChunkSeq::with_capacity[u32](s.len());
-    for i in 0..s.len() {
-        out.push(u32_at(in s, i));
+fn list_copy(in seq: ChunkSeq[u32]) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::with_capacity[u32](seq.len());
+    for i in 0..seq.len() {
+        out.push(u32_at(in seq, i));
     }
     out
 }
 
 // `dyn_fn::lower`. Returns whether it succeeded (no diagnostics).
-pub fn lower_fn_objects(inout d: D) -> bool {
-    let first_diag = d.diags.len();
-    decls(inout d);
-    let nitems = d.ast.m_items.len();
-    for i in 0..nitems {
-        let it = item_at(in d, u32_at(in d.ast.m_items, i));
-        let x = it.node;
-        if it.kind == 2 {
-            function(inout d, x, NONE);
-        } else if it.kind == 4 {
-            let im = impl_at(in d, x);
-            for j in 0..ll(in d, im.methods) {
-                function(inout d, la(in d, im.methods, j), im.ty);
+pub fn lower_fn_objects(inout ctx: D) -> bool {
+    let first_diag = ctx.diags.len();
+    decls(inout ctx);
+    let item_count = ctx.ast.m_items.len();
+    for i in 0..item_count {
+        let item = item_at(in ctx, u32_at(in ctx.ast.m_items, i));
+        let node = item.node;
+        if item.kind == 2 {
+            function(inout ctx, node, NONE);
+        } else if item.kind == 4 {
+            let impl_ = impl_at(in ctx, node);
+            for j in 0..ll(in ctx, impl_.methods) {
+                function(inout ctx, la(in ctx, impl_.methods, j), impl_.ty);
             }
-        } else if it.kind == 6 {
-            let c = conf_at(in d, x);
-            for j in 0..ll(in d, c.methods) {
-                function(inout d, la(in d, c.methods, j), c.self_ty);
+        } else if item.kind == 6 {
+            let conf = conf_at(in ctx, node);
+            for j in 0..ll(in ctx, conf.methods) {
+                function(inout ctx, la(in ctx, conf.methods, j), conf.self_ty);
             }
         }
     }
-    for i in 0..d.gen_adts.len() {
-        let a = new_item(inout d, 1, u32_at(in d.gen_adts, i));
-        d.ast.m_items.push(a);
-        let c = new_item(inout d, 6, u32_at(in d.gen_confs, i));
-        d.ast.m_items.push(c);
+    for i in 0..ctx.gen_adts.len() {
+        let adt_item = new_item(inout ctx, 1, u32_at(in ctx.gen_adts, i));
+        ctx.ast.m_items.push(adt_item);
+        let conf_item = new_item(inout ctx, 6, u32_at(in ctx.gen_confs, i));
+        ctx.ast.m_items.push(conf_item);
     }
     // Every function-object type, in source and generated items alike,
     // becomes its hidden trait's object type.
-    erase_module(inout d);
-    if d.diags.len() != first_diag {
+    erase_module(inout ctx);
+    if ctx.diags.len() != first_diag {
         return false;
     }
     // The hidden traits first, in name order.
-    let mut order = list_copy(in d.tr_names);
-    sort_syms(in d.ast, inout order);
-    let mut items = ChunkSeq::with_capacity[u32](wrapping_add(order.len(), d.ast.m_items.len()));
+    let mut order = list_copy(in ctx.trait_names);
+    sort_syms(in ctx.ast, inout order);
+    let mut items = ChunkSeq::with_capacity[u32](wrapping_add(order.len(), ctx.ast.m_items.len()));
     for i in 0..order.len() {
         let name = u32_at(in order, i);
-        let mut node = NONE;
-        for j in 0..d.tr_names.len() {
-            if u32_at(in d.tr_names, j) == name {
-                node = u32_at(in d.tr_nodes, j);
+        let mut trait_node = NONE;
+        for j in 0..ctx.trait_names.len() {
+            if u32_at(in ctx.trait_names, j) == name {
+                trait_node = u32_at(in ctx.trait_nodes, j);
             }
         }
-        let it = new_item(inout d, 5, node);
-        items.push(it);
+        let trait_item = new_item(inout ctx, 5, trait_node);
+        items.push(trait_item);
     }
-    for i in 0..d.ast.m_items.len() {
-        items.push(u32_at(in d.ast.m_items, i));
+    for i in 0..ctx.ast.m_items.len() {
+        items.push(u32_at(in ctx.ast.m_items, i));
     }
-    d.ast.m_items = items;
+    ctx.ast.m_items = items;
     true
 }
 
 // `Lowered::relocate` of the span `start..end`: a span of generated code
 // is reported at the source span it came from.
-pub fn relocate(in d: D, start: u64, end: u64) -> (u64, u64) {
-    if start < d.base || start >= d.next_span {
+pub fn relocate(in ctx: D, start: u64, end: u64) -> (u64, u64) {
+    if start < ctx.base || start >= ctx.next_span {
         return (start, end);
     }
-    let n = d.origins.len() / 3;
+    let n = ctx.origins.len() / 3;
     // `partition_point(|(s, _)| *s <= start)`.
     let mut lo: u64 = 0;
     let mut hi = n;
@@ -2094,7 +2168,7 @@ pub fn relocate(in d: D, start: u64, end: u64) -> (u64, u64) {
             break;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
-        if u64_at(in d.origins, wrapping_mul(mid, 3)) <= start {
+        if u64_at(in ctx.origins, wrapping_mul(mid, 3)) <= start {
             lo = inc(mid);
         } else {
             hi = mid;
@@ -2104,5 +2178,5 @@ pub fn relocate(in d: D, start: u64, end: u64) -> (u64, u64) {
         return (start, end);
     }
     let at = wrapping_mul(wrapping_sub(lo, 1), 3);
-    (u64_at(in d.origins, inc(at)), u64_at(in d.origins, wrapping_add(at, 2)))
+    (u64_at(in ctx.origins, inc(at)), u64_at(in ctx.origins, wrapping_add(at, 2)))
 }
