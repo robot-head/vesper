@@ -161,8 +161,14 @@ impl Paths {
     }
 
     // `World::field(ty, path)`; NONE32 for None.
-    pub fn field_type(in self, inout t: Types, inout names: Names, in wd: World, ty: u32, p: u32)
-        -> u32 {
+    pub fn field_type(
+        in self,
+        inout t: Types,
+        inout names: Names,
+        in wd: World,
+        ty: u32,
+        p: u32
+    ) -> u32 {
         if p == 0 {
             return ty;
         }
@@ -362,8 +368,12 @@ fn read_path(
 // Constructor: qualifier + 1 (0 none), short, n, (field, child)*;
 // multi-segment path constructors are kind 3 (never resolve). Children are
 // pool positions.
-fn read_pattern(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], inout pats: ChunkSeq[u64])
-    -> u64 {
+fn read_pattern(
+    inout r: Reader,
+    in b: Slice[u8],
+    in nmap: ChunkSeq[u32],
+    inout pats: ChunkSeq[u64]
+) -> u64 {
     let kind = r.word(in b);
     let s0 = r.word(in b);
     let s1 = r.word(in b);
@@ -589,21 +599,19 @@ pub fn read_program(
                 let op = wrapping_u8(r.word(in b));
                 let a = n32(p.ops.len());
                 read_op(inout r, in b, in nmap, inout p, op);
-                p
-                    .insts
-                    .push(
-                        Inst {
-                            dest: dest,
-                            ty: ty,
-                            s0: s0,
-                            s1: s1,
-                            tok_in: tin,
-                            tok_out: tout,
-                            flags: flags,
-                            op: op,
-                            a: a
-                        }
-                    );
+                p.insts.push(
+                    Inst {
+                        dest: dest,
+                        ty: ty,
+                        s0: s0,
+                        s1: s1,
+                        tok_in: tin,
+                        tok_out: tout,
+                        flags: flags,
+                        op: op,
+                        a: a
+                    }
+                );
             }
             let term = wrapping_u8(r.word(in b));
             let ta = n32(p.ops.len());
@@ -628,39 +636,35 @@ pub fn read_program(
                 p.ops.push(r.word(in b));
                 p.ops.push(r.word(in b));
             }
-            p
-                .blocks
-                .push(
-                    Blk {
-                        entry: entry,
-                        ia: ia,
-                        in_n: n32(inn),
-                        out_tok: out_tok,
-                        pa: bpa,
-                        pn: n32(bpn),
-                        i0: i0,
-                        ic: n32(ic),
-                        term: term,
-                        ta: ta
-                    }
-                );
-        }
-        p
-            .fns
-            .push(
-                FnRow {
-                    pa: pa,
-                    pn: n32(pn),
-                    ba: ba,
-                    bn: n32(bn),
-                    ea: ea,
-                    en: n32(en),
-                    va: va,
-                    vn: n32(vn),
-                    b0: b0,
-                    bc: n32(nb)
+            p.blocks.push(
+                Blk {
+                    entry: entry,
+                    ia: ia,
+                    in_n: n32(inn),
+                    out_tok: out_tok,
+                    pa: bpa,
+                    pn: n32(bpn),
+                    i0: i0,
+                    ic: n32(ic),
+                    term: term,
+                    ta: ta
                 }
             );
+        }
+        p.fns.push(
+            FnRow {
+                pa: pa,
+                pn: n32(pn),
+                ba: ba,
+                bn: n32(bn),
+                ea: ea,
+                en: n32(en),
+                va: va,
+                vn: n32(vn),
+                b0: b0,
+                bc: n32(nb)
+            }
+        );
     }
     p
 }
@@ -1357,16 +1361,7 @@ impl Origins {
                 let ok = self.sstate.try_set(w(rank), 1);
                 let ok2 = self.ss0.try_set(w(rank), s0);
                 let ok3 = self.ss1.try_set(w(rank), s1);
-                let ok4 = self
-                    .sparam
-                    .try_set(
-                        w(rank),
-                        if param {
-                            1
-                        } else {
-                            0
-                        }
-                    );
+                let ok4 = self.sparam.try_set(w(rank), if param { 1 } else { 0 });
             } else {
                 let ok = self.sstate.try_set(w(rank), 2);
             }
@@ -1540,23 +1535,20 @@ impl Flow {
         }
         let last = wrapping_sub(self.d.rows.len(), 1);
         let row = self.d.row(last);
-        let ok = self
-            .d
-            .rows
-            .try_set(
-                last,
-                DiagRow {
-                    code_a: row.code_a,
-                    msg_a: row.msg_a,
-                    msg_b: mend,
-                    help_a: row.help_a,
-                    end: row.end,
-                    start: row.start,
-                    stop: row.stop,
-                    ra: ra,
-                    rn: n
-                }
-            );
+        let ok = self.d.rows.try_set(
+            last,
+            DiagRow {
+                code_a: row.code_a,
+                msg_a: row.msg_a,
+                msg_b: mend,
+                help_a: row.help_a,
+                end: row.end,
+                start: row.start,
+                stop: row.stop,
+                ra: ra,
+                rn: n
+            }
+        );
     }
 
     fn say(inout self, in s: Str) {
@@ -1633,14 +1625,13 @@ impl Flow {
         }
         if !v.owned {
             self.say("a borrowed non-copy temporary cannot be moved into an owned value");
-            self
-                .caused(
-                    s0,
-                    s1,
-                    value_cause(id),
-                    NOCAUSE,
-                    "A borrowed non-copy temporary cannot transfer ownership to an owned value."
-                );
+            self.caused(
+                s0,
+                s1,
+                value_cause(id),
+                NOCAUSE,
+                "A borrowed non-copy temporary cannot transfer ownership to an owned value."
+            );
         }
         if v.consumed {
             let prior = if u8_at(in self.lc_has, w(id)) == 1 {
@@ -1655,31 +1646,21 @@ impl Flow {
                 NOCAUSE
             };
             self.say_id("IR temporary ", id, " is consumed more than once");
-            self
-                .caused(
-                    s0,
-                    s1,
-                    value_cause(id),
-                    prior,
-                    "A non-copy IR temporary may be consumed only once on an execution path."
-                );
+            self.caused(
+                s0,
+                s1,
+                value_cause(id),
+                prior,
+                "A non-copy IR temporary may be consumed only once on an execution path."
+            );
         }
         if v.owned && !v.consumed {
             self.note_consume(id, s0, s1);
         }
-        s
-            .set_val_at(
-                at,
-                ValS {
-                    id: v.id,
-                    ty: v.ty,
-                    owned: v.owned,
-                    consumed: true,
-                    lpass: 255,
-                    la: 0,
-                    ln: 0
-                }
-            );
+        s.set_val_at(
+            at,
+            ValS { id: v.id, ty: v.ty, owned: v.owned, consumed: true, lpass: 255, la: 0, ln: 0 }
+        );
     }
 
     fn release(inout self, inout s: State, id: u32) -> bool {
@@ -1688,19 +1669,10 @@ impl Flow {
             return false;
         }
         let v = s.val_at(at);
-        s
-            .set_val_at(
-                at,
-                ValS {
-                    id: v.id,
-                    ty: v.ty,
-                    owned: v.owned,
-                    consumed: true,
-                    lpass: 255,
-                    la: 0,
-                    ln: 0
-                }
-            );
+        s.set_val_at(
+            at,
+            ValS { id: v.id, ty: v.ty, owned: v.owned, consumed: true, lpass: 255, la: 0, ln: 0 }
+        );
         true
     }
 
@@ -1757,21 +1729,16 @@ impl Flow {
         let slot = s.slot_at(si);
         if s.moved_overlaps(in p.paths, rank, path) {
             self.say_place(in names, in p.paths, "IR uses moved place '", pl, "'");
-            self
-                .caused(
-                    s0,
-                    s1,
-                    slot_cause(rank),
-                    NOCAUSE,
-                    "A moved place cannot be used again until ownership is re-established."
-                );
+            self.caused(
+                s0,
+                s1,
+                slot_cause(rank),
+                NOCAUSE,
+                "A moved place cannot be used again until ownership is re-established."
+            );
         }
         let ft = p.paths.field_type(inout t, inout names, in wd, slot.ty, path);
-        let ty = if ft == NONE32 {
-            t.infer
-        } else {
-            ft
-        };
+        let ty = if ft == NONE32 { t.infer } else { ft };
         let tymode = self.mode(inout t, in names, in wd, ty);
         let exclusive = pass == TyPass::Inout || (pass == TyPass::Sink && tymode != TyMode::Copy);
         for vi in 0..s.values.len() {
@@ -1801,50 +1768,46 @@ impl Flow {
                         p.paths.write(in names, place_path(q), inout self.msg);
                     }
                     self.msg.push(39);
-                    self
-                        .caused(
-                            s0,
-                            s1,
-                            value_cause_as(v.id, 1),
-                            slot_cause(rank),
-                            "Overlapping access must respect the shared or exclusive permission of each active loan."
-                        );
+                    self.caused(
+                        s0,
+                        s1,
+                        value_cause_as(v.id, 1),
+                        slot_cause(rank),
+                        "Overlapping access must respect the shared or exclusive permission of each active loan."
+                    );
                 }
             }
         }
         if pass == TyPass::Inout && slot.pass == TyPass::In {
             self.say("IR mutates a shared parameter");
-            self
-                .caused(
-                    s0,
-                    s1,
-                    slot_cause(rank),
-                    NOCAUSE,
-                    "Shared parameters do not grant mutation permission."
-                );
+            self.caused(
+                s0,
+                s1,
+                slot_cause(rank),
+                NOCAUSE,
+                "Shared parameters do not grant mutation permission."
+            );
         }
         if pass == TyPass::Sink && tymode != TyMode::Copy {
             if slot.pass != TyPass::Sink {
                 self.say("IR moves from a borrowed parameter");
-                self
-                    .caused(
-                        s0,
-                        s1,
-                        slot_cause(rank),
-                        NOCAUSE,
-                        "Borrowed parameters do not transfer ownership to this function."
-                    );
+                self.caused(
+                    s0,
+                    s1,
+                    slot_cause(rank),
+                    NOCAUSE,
+                    "Borrowed parameters do not transfer ownership to this function."
+                );
             }
             if path != 0 && self.mode(inout t, in names, in wd, slot.ty) == TyMode::Linear {
                 self.say("IR must destructure a linear aggregate before moving fields");
-                self
-                    .caused(
-                        s0,
-                        s1,
-                        slot_cause(rank),
-                        NOCAUSE,
-                        "Consume the full linear aggregate through its supported destructuring rules."
-                    );
+                self.caused(
+                    s0,
+                    s1,
+                    slot_cause(rank),
+                    NOCAUSE,
+                    "Consume the full linear aggregate through its supported destructuring rules."
+                );
             }
             s.moved_insert(rank, path);
         }
@@ -1914,14 +1877,13 @@ impl Flow {
                     names.write(place_root(found), inout self.msg);
                     p.paths.write(in names, place_path(found), inout self.msg);
                     self.msg.extend(in "' is live".as_bytes());
-                    self
-                        .caused(
-                            s0,
-                            s1,
-                            value_cause_as(bv, 2),
-                            NOCAUSE,
-                            "A reserved inout loan becomes exclusive when its call runs, so no argument of the same call may borrow its place."
-                        );
+                    self.caused(
+                        s0,
+                        s1,
+                        value_cause_as(bv, 2),
+                        NOCAUSE,
+                        "A reserved inout loan becomes exclusive when its call runs, so no argument of the same call may borrow its place."
+                    );
                 }
             }
         }
@@ -1962,14 +1924,13 @@ impl Flow {
         } else if kind == 0 {
             if pass == TyPass::Sink && self.mode(inout t, in names, in wd, ty) == TyMode::Linear {
                 self.say("IR wildcard discards a linear value");
-                self
-                    .caused(
-                        s0,
-                        s1,
-                        value_cause(origin),
-                        NOCAUSE,
-                        "Linear components must be consumed rather than discarded by a wildcard."
-                    );
+                self.caused(
+                    s0,
+                    s1,
+                    value_cause(origin),
+                    NOCAUSE,
+                    "Linear components must be consumed rather than discarded by a wildcard."
+                );
             }
         } else if kind == 2 {
             if t.kind(ty) == TyKind::Tuple {
@@ -1980,18 +1941,17 @@ impl Flow {
                         break;
                     }
                     let child = p.pat(add(add(pat, 4), i));
-                    self
-                        .bind(
-                            inout s,
-                            inout t,
-                            inout names,
-                            in wd,
-                            in p,
-                            child,
-                            t.arg(ty, i),
-                            origin,
-                            pass
-                        );
+                    self.bind(
+                        inout s,
+                        inout t,
+                        inout names,
+                        in wd,
+                        in p,
+                        child,
+                        t.arg(ty, i),
+                        origin,
+                        pass
+                    );
                 }
             }
         } else if kind == 4 {
@@ -2013,18 +1973,17 @@ impl Flow {
                     let fi = wd.find_field(v, fname);
                     if fi != NONE32 {
                         let ft = substitute(inout t, wd.field(w(fi)).ty, in vars);
-                        self
-                            .bind(
-                                inout s,
-                                inout t,
-                                inout names,
-                                in wd,
-                                in p,
-                                child,
-                                ft,
-                                origin,
-                                pass
-                            );
+                        self.bind(
+                            inout s,
+                            inout t,
+                            inout names,
+                            in wd,
+                            in p,
+                            child,
+                            ft,
+                            origin,
+                            pass
+                        );
                     }
                 }
             }
@@ -2069,37 +2028,33 @@ impl Flow {
             if self.live_linear_slot(in s, inout t, in names, in wd, sl)
                 && !self.external_has(sl.name) {
                 if end {
-                    self
-                        .say_name(
-                            in names,
-                            "linear place '",
-                            sl.name,
-                            "' remains live at IR return"
-                        );
-                    self
-                        .caused(
-                            s0,
-                            s1,
-                            slot_cause(sl.rank),
-                            NOCAUSE,
-                            "Each owned linear place must be consumed on every returning path."
-                        );
+                    self.say_name(
+                        in names,
+                        "linear place '",
+                        sl.name,
+                        "' remains live at IR return"
+                    );
+                    self.caused(
+                        s0,
+                        s1,
+                        slot_cause(sl.rank),
+                        NOCAUSE,
+                        "Each owned linear place must be consumed on every returning path."
+                    );
                 } else {
-                    self
-                        .say_name(
-                            in names,
-                            "abortable effect may abandon linear place '",
-                            sl.name,
-                            "'"
-                        );
-                    self
-                        .caused(
-                            s0,
-                            s1,
-                            slot_cause(sl.rank),
-                            NOCAUSE,
-                            "An abortable operation must not abandon a live owned linear place."
-                        );
+                    self.say_name(
+                        in names,
+                        "abortable effect may abandon linear place '",
+                        sl.name,
+                        "'"
+                    );
+                    self.caused(
+                        s0,
+                        s1,
+                        slot_cause(sl.rank),
+                        NOCAUSE,
+                        "An abortable operation must not abandon a live owned linear place."
+                    );
                 }
             }
         }
@@ -2110,24 +2065,22 @@ impl Flow {
                 && self.mode(inout t, in names, in wd, v.ty) == TyMode::Linear {
                 if end {
                     self.say_id("linear temporary ", v.id, " remains live at IR return");
-                    self
-                        .caused(
-                            s0,
-                            s1,
-                            value_cause(v.id),
-                            NOCAUSE,
-                            "Each owned linear temporary must be consumed on every returning path."
-                        );
+                    self.caused(
+                        s0,
+                        s1,
+                        value_cause(v.id),
+                        NOCAUSE,
+                        "Each owned linear temporary must be consumed on every returning path."
+                    );
                 } else {
                     self.say_id("abortable effect may abandon linear temporary ", v.id, "");
-                    self
-                        .caused(
-                            s0,
-                            s1,
-                            value_cause(v.id),
-                            NOCAUSE,
-                            "An abortable operation must not abandon a live owned linear temporary."
-                        );
+                    self.caused(
+                        s0,
+                        s1,
+                        value_cause(v.id),
+                        NOCAUSE,
+                        "An abortable operation must not abandon a live owned linear temporary."
+                    );
                 }
             }
         }
@@ -2229,18 +2182,17 @@ impl Flow {
             if s.find_slot(p.rank_of(root)) < 9223372036854775808 || !is_fn {
                 for j in 0..np {
                     let path = n32(p.op(add(add(a, 4), j)));
-                    self
-                        .access(
-                            inout s,
-                            inout t,
-                            inout names,
-                            in wd,
-                            in p,
-                            place(root, path),
-                            pass,
-                            s0,
-                            s1
-                        );
+                    self.access(
+                        inout s,
+                        inout t,
+                        inout names,
+                        in wd,
+                        in p,
+                        place(root, path),
+                        pass,
+                        s0,
+                        s1
+                    );
                 }
             }
             if pass != TyPass::Sink {
@@ -2281,36 +2233,30 @@ impl Flow {
             if assign && s.find_slot(rank) < 9223372036854775808 {
                 s.moved_retain_not_under(in p.paths, rank, path);
             }
-            self
-                .access(
-                    inout s,
-                    inout t,
-                    inout names,
-                    in wd,
-                    in p,
-                    place(root, path),
-                    TyPass::Inout,
-                    s0,
-                    s1
-                );
+            self.access(
+                inout s,
+                inout t,
+                inout names,
+                in wd,
+                in p,
+                place(root, path),
+                TyPass::Inout,
+                s0,
+                s1
+            );
             let si = s.find_slot(rank);
             if si < 9223372036854775808 {
                 let ft = p.paths.field_type(inout t, inout names, in wd, s.slot_at(si).ty, path);
-                let fty = if ft == NONE32 {
-                    t.infer
-                } else {
-                    ft
-                };
+                let fty = if ft == NONE32 { t.infer } else { ft };
                 if self.mode(inout t, in names, in wd, fty) == TyMode::Linear {
                     self.say("IR assignment overwrites a linear obligation");
-                    self
-                        .caused(
-                            s0,
-                            s1,
-                            slot_cause(rank),
-                            NOCAUSE,
-                            "Overwriting an owned linear obligation would discard it."
-                        );
+                    self.caused(
+                        s0,
+                        s1,
+                        slot_cause(rank),
+                        NOCAUSE,
+                        "Overwriting an owned linear obligation would discard it."
+                    );
                 }
             }
         } else if i.op == OP_CONSUME1 {
@@ -2328,19 +2274,18 @@ impl Flow {
                         && n.kind == TyKind::Named
                         && n.n == 0
                         && (n.name == k.string || n.name == k.str_) {
-                        s
-                            .set_val_at(
-                                at,
-                                ValS {
-                                    id: x.id,
-                                    ty: x.ty,
-                                    owned: x.owned,
-                                    consumed: true,
-                                    lpass: 255,
-                                    la: 0,
-                                    ln: 0
-                                }
-                            );
+                        s.set_val_at(
+                            at,
+                            ValS {
+                                id: x.id,
+                                ty: x.ty,
+                                owned: x.owned,
+                                consumed: true,
+                                lpass: 255,
+                                la: 0,
+                                ln: 0
+                            }
+                        );
                         done = true;
                     }
                 }
@@ -2373,14 +2318,13 @@ impl Flow {
             if at < 9223372036854775808
                 && self.mode(inout t, in names, in wd, s.val_at(at).ty) == TyMode::Linear {
                 self.say("projection would abandon a temporary linear aggregate");
-                self
-                    .caused(
-                        s0,
-                        s1,
-                        value_cause(v),
-                        NOCAUSE,
-                        "A linear aggregate must retain all of its ownership obligations when destructured."
-                    );
+                self.caused(
+                    s0,
+                    s1,
+                    value_cause(v),
+                    NOCAUSE,
+                    "A linear aggregate must retain all of its ownership obligations when destructured."
+                );
             }
             self.consume(inout s, inout t, in names, in wd, v, s0, s1);
         } else if i.op == OP_INDEX {
@@ -2401,19 +2345,18 @@ impl Flow {
             if lent {
                 // A lent function parameter is read by its call (§4.2).
                 let v = s.val_at(at);
-                s
-                    .set_val_at(
-                        at,
-                        ValS {
-                            id: v.id,
-                            ty: v.ty,
-                            owned: v.owned,
-                            consumed: true,
-                            lpass: 255,
-                            la: 0,
-                            ln: 0
-                        }
-                    );
+                s.set_val_at(
+                    at,
+                    ValS {
+                        id: v.id,
+                        ty: v.ty,
+                        owned: v.owned,
+                        consumed: true,
+                        lpass: 255,
+                        la: 0,
+                        ln: 0
+                    }
+                );
             } else {
                 self.consume(inout s, inout t, in names, in wd, callee, s0, s1);
             }
@@ -2428,18 +2371,17 @@ impl Flow {
         } else if i.op == OP_MOVES || i.op == OP_HANDLE {
             let n = p.op(a);
             for j in 0..n {
-                self
-                    .access(
-                        inout s,
-                        inout t,
-                        inout names,
-                        in wd,
-                        in p,
-                        p.op(add(inc(a), j)),
-                        TyPass::Sink,
-                        s0,
-                        s1
-                    );
+                self.access(
+                    inout s,
+                    inout t,
+                    inout names,
+                    in wd,
+                    in p,
+                    p.op(add(inc(a), j)),
+                    TyPass::Sink,
+                    s0,
+                    s1
+                );
             }
         }
         if (i.flags & F_ABORT) != 0 {
@@ -2448,16 +2390,15 @@ impl Flow {
         if i.op == OP_HANDLE {
             let n = p.op(a);
             if p.op(add(inc(a), n)) != 0 {
-                self
-                    .consume(
-                        inout s,
-                        inout t,
-                        in names,
-                        in wd,
-                        n32(p.op(add(add(a, 2), n))),
-                        s0,
-                        s1
-                    );
+                self.consume(
+                    inout s,
+                    inout t,
+                    in names,
+                    in wd,
+                    n32(p.op(add(add(a, 2), n))),
+                    s0,
+                    s1
+                );
             }
             if (i.flags & F_EFFECTFUL) != 0 {
                 self.frame(in s, inout t, in names, in wd, s0, s1, false);
@@ -2474,18 +2415,17 @@ impl Flow {
                 s.loans.push(place(n32(p.op(a)), n32(p.op(add(loan_from, j)))));
             }
         }
-        s
-            .put_val(
-                ValS {
-                    id: i.dest,
-                    ty: ty,
-                    owned: owned,
-                    consumed: false,
-                    lpass: lpass,
-                    la: la,
-                    ln: n32(loan_n)
-                }
-            );
+        s.put_val(
+            ValS {
+                id: i.dest,
+                ty: ty,
+                owned: owned,
+                consumed: false,
+                lpass: lpass,
+                la: la,
+                ln: n32(loan_n)
+            }
+        );
     }
 
     // `out = merge(out, b)`: `out` holds a clone of the old state.
@@ -2507,21 +2447,19 @@ impl Flow {
                 let x = self.live_linear_slot(in out, inout t, in names, in wd, old);
                 let y = self.live_linear_slot(in b, inout t, in names, in wd, sl);
                 if x != y {
-                    self
-                        .say_name(
-                            in names,
-                            "linear place '",
-                            sl.name,
-                            "' has inconsistent ownership at a CFG join"
-                        );
-                    self
-                        .caused(
-                            s0,
-                            s1,
-                            slot_cause(sl.rank),
-                            NOCAUSE,
-                            "Ownership of a linear place must agree on the incoming control-flow edges."
-                        );
+                    self.say_name(
+                        in names,
+                        "linear place '",
+                        sl.name,
+                        "' has inconsistent ownership at a CFG join"
+                    );
+                    self.caused(
+                        s0,
+                        s1,
+                        slot_cause(sl.rank),
+                        NOCAUSE,
+                        "Ownership of a linear place must agree on the incoming control-flow edges."
+                    );
                 }
                 let (ma, mb) = b.moved_range(sl.rank);
                 for j in ma..mb {
@@ -2529,21 +2467,19 @@ impl Flow {
                 }
             } else {
                 if self.live_linear_slot(in b, inout t, in names, in wd, sl) {
-                    self
-                        .say_name(
-                            in names,
-                            "linear place '",
-                            sl.name,
-                            "' survives only one CFG edge"
-                        );
-                    self
-                        .caused(
-                            s0,
-                            s1,
-                            slot_cause(sl.rank),
-                            NOCAUSE,
-                            "An owned linear place cannot disappear on another incoming control-flow edge."
-                        );
+                    self.say_name(
+                        in names,
+                        "linear place '",
+                        sl.name,
+                        "' survives only one CFG edge"
+                    );
+                    self.caused(
+                        s0,
+                        s1,
+                        slot_cause(sl.rank),
+                        NOCAUSE,
+                        "An owned linear place cannot disappear on another incoming control-flow edge."
+                    );
                 }
                 out.put_slot(sl);
                 let (ma, mb) = b.moved_range(sl.rank);
@@ -2560,36 +2496,33 @@ impl Flow {
                 if self.mode(inout t, in names, in wd, old.ty) == TyMode::Linear
                     && old.owned
                     && old.consumed != v.consumed {
-                    self
-                        .say_id(
-                            "linear temporary ",
-                            v.id,
-                            " has inconsistent ownership at a CFG join"
-                        );
-                    self
-                        .caused(
-                            s0,
-                            s1,
-                            value_cause(v.id),
-                            NOCAUSE,
-                            "Ownership of a linear temporary must agree on incoming control-flow edges."
-                        );
+                    self.say_id(
+                        "linear temporary ",
+                        v.id,
+                        " has inconsistent ownership at a CFG join"
+                    );
+                    self.caused(
+                        s0,
+                        s1,
+                        value_cause(v.id),
+                        NOCAUSE,
+                        "Ownership of a linear temporary must agree on incoming control-flow edges."
+                    );
                 }
                 let consumed = old.consumed || v.consumed;
                 if consumed {
-                    out
-                        .set_val_at(
-                            at,
-                            ValS {
-                                id: old.id,
-                                ty: old.ty,
-                                owned: old.owned,
-                                consumed: true,
-                                lpass: 255,
-                                la: 0,
-                                ln: 0
-                            }
-                        );
+                    out.set_val_at(
+                        at,
+                        ValS {
+                            id: old.id,
+                            ty: old.ty,
+                            owned: old.owned,
+                            consumed: true,
+                            lpass: 255,
+                            la: 0,
+                            ln: 0
+                        }
+                    );
                 }
             } else {
                 let la = n32(out.loans.len());
@@ -2598,18 +2531,17 @@ impl Flow {
                         out.loans.push(b.loan(add(w(v.la), j)));
                     }
                 }
-                out
-                    .put_val(
-                        ValS {
-                            id: v.id,
-                            ty: v.ty,
-                            owned: v.owned,
-                            consumed: v.consumed,
-                            lpass: v.lpass,
-                            la: la,
-                            ln: v.ln
-                        }
-                    );
+                out.put_val(
+                    ValS {
+                        id: v.id,
+                        ty: v.ty,
+                        owned: v.owned,
+                        consumed: v.consumed,
+                        lpass: v.lpass,
+                        la: la,
+                        ln: v.ln
+                    }
+                );
             }
         }
     }
@@ -2675,8 +2607,7 @@ impl Flow {
                                 ok = false;
                                 break;
                             }
-                            self
-                                .origins
+                            self.origins
                                 .slot(p.rank_of(name), p.pat(inc(at)), p.pat(add(at, 2)), false);
                         } else if kind == 2 {
                             let n = p.pat(add(at, 3));
@@ -2789,10 +2720,9 @@ impl Flow {
                 Option::Some(x) => x,
                 Option::None => ParamRow { name: 0, pass: 0, ty: 0, s0: 0, s1: 0 },
             };
-            state
-                .put_slot(
-                    SlotS { rank: p.rank_of(pr.name), name: pr.name, ty: pr.ty, pass: pr.pass }
-                );
+            state.put_slot(
+                SlotS { rank: p.rank_of(pr.name), name: pr.name, ty: pr.ty, pass: pr.pass }
+            );
         }
         pool.store(0, in state);
         let mut queue: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -2859,18 +2789,17 @@ impl Flow {
                         let arg = n32(p.op(add(add(ta, 2), j)));
                         let param = n32(p.op(add(w(tb.pa), j)));
                         self.consume(inout edge, inout t, in names, in wd, arg, s0, s1);
-                        edge
-                            .put_val(
-                                ValS {
-                                    id: param,
-                                    ty: param_type(in p, f, param),
-                                    owned: true,
-                                    consumed: false,
-                                    lpass: 255,
-                                    la: 0,
-                                    ln: 0
-                                }
-                            );
+                        edge.put_val(
+                            ValS {
+                                id: param,
+                                ty: param_type(in p, f, param),
+                                owned: true,
+                                consumed: false,
+                                lpass: 255,
+                                la: 0,
+                                ln: 0
+                            }
+                        );
                     }
                 }
                 let had = pool.has(w(target));
@@ -2939,38 +2868,29 @@ pub fn validate_digest(
                 bc: 0
             },
         };
-        fl
-            .function(
-                inout t,
-                inout names,
-                in wd,
-                in p,
-                f,
-                inout pool,
-                inout a,
-                inout b,
-                inout c,
-                inout e
-            );
+        fl.function(
+            inout t,
+            inout names,
+            in wd,
+            in p,
+            f,
+            inout pool,
+            inout a,
+            inout b,
+            inout c,
+            inout e
+        );
     }
     let mut seen: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut h: u64 = 14695981039346656037;
     let mut kept: u64 = 0;
     for i in 0..fl.d.len() {
         let r = fl.d.row(i);
-        let k = fl
-            .d
-            .fold_range(
-                fl
-                    .d
-                    .fold_range(
-                        fold(fold(14695981039346656037, r.start), r.stop),
-                        r.code_a,
-                        r.msg_a
-                    ),
-                r.msg_a,
-                r.msg_b
-            );
+        let k = fl.d.fold_range(
+            fl.d.fold_range(fold(fold(14695981039346656037, r.start), r.stop), r.code_a, r.msg_a),
+            r.msg_a,
+            r.msg_b
+        );
         let mut dup = false;
         for j in 0..seen.len() {
             if u64_at(in seen, j) == k {
@@ -3020,37 +2940,28 @@ pub fn validate_into(
                 bc: 0
             },
         };
-        fl
-            .function(
-                inout t,
-                inout names,
-                in wd,
-                in p,
-                f,
-                inout pool,
-                inout a,
-                inout b,
-                inout c,
-                inout e
-            );
+        fl.function(
+            inout t,
+            inout names,
+            in wd,
+            in p,
+            f,
+            inout pool,
+            inout a,
+            inout b,
+            inout c,
+            inout e
+        );
     }
     let mut seen: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut kept: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for i in 0..fl.d.len() {
         let r = fl.d.row(i);
-        let k = fl
-            .d
-            .fold_range(
-                fl
-                    .d
-                    .fold_range(
-                        fold(fold(14695981039346656037, r.start), r.stop),
-                        r.code_a,
-                        r.msg_a
-                    ),
-                r.msg_a,
-                r.msg_b
-            );
+        let k = fl.d.fold_range(
+            fl.d.fold_range(fold(fold(14695981039346656037, r.start), r.stop), r.code_a, r.msg_a),
+            r.msg_a,
+            r.msg_b
+        );
         let mut dup = false;
         for j in 0..seen.len() {
             if u64_at(in seen, j) == k && same_key(in fl.d, u64_at(in kept, j), i) {

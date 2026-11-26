@@ -47,8 +47,12 @@ pub fn hash(in data: Slice[u8]) -> Digest eff [Ffi[Blake3]] {
 // Append `n` bytes of the key-derivation hash of `data` under `context` to
 // `out`, in one call with no hasher handle; false (appending nothing) unless
 // `context` is UTF-8.
-pub fn derive_key_hash(in context: Slice[u8], in data: Slice[u8], n: u64, inout out: ChunkSeq[u8])
-    -> bool eff [Ffi[Blake3]] {
+pub fn derive_key_hash(
+    in context: Slice[u8],
+    in data: Slice[u8],
+    n: u64,
+    inout out: ChunkSeq[u8]
+) -> bool eff [Ffi[Blake3]] {
     let at = out.len();
     out.resize(wrapping_add(at, n), 0);
     let end = out.len();

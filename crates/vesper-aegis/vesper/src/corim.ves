@@ -325,8 +325,12 @@ fn parse_time(in n: Slice[u64], v: u64, field: u64) -> u64 eff [Fail[AErr]] {
 }
 
 // CorimValidity: has_not_before, [nb], not_after.
-fn put_validity(in n: Slice[u64], v: u64, field: u64, inout w: Slice[u64])
-    -> Unit eff [Fail[AErr]] {
+fn put_validity(
+    in n: Slice[u64],
+    v: u64,
+    field: u64,
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
     int_map(in n, v, field);
     map_only(in n, v, 3, field);
     let nb_node = map_find(in n, v, K_VAL_NOT_BEFORE);
@@ -412,11 +416,7 @@ fn put_environment(in n: Slice[u64], v: u64, inout w: Slice[u64]) -> Unit eff [F
     int_map(in n, v, F_ENV);
     map_only(in n, v, 7, F_ENV);
     let cls = map_find(in n, v, K_ENV_CLASS);
-    let has_class = if cls == NONE {
-        0
-    } else {
-        1
-    };
+    let has_class = if cls == NONE { 0 } else { 1 };
     put(inout w, has_class);
     if has_class == 1 {
         int_map(in n, cls, F_CLASS);
@@ -564,8 +564,13 @@ fn put_crypto_key(in n: Slice[u64], v: u64, inout w: Slice[u64]) -> Unit eff [Fa
 // 3 (name): str;
 // 4 (cryptokeys): count, cryptokeys...;
 // 5 (other): k_bits.
-fn put_mval(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], v: u64, inout w: Slice[u64])
-    -> Unit eff [Fail[AErr]] {
+fn put_mval(
+    in b: Slice[u8],
+    in s: Slice[u8],
+    in n: Slice[u64],
+    v: u64,
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
     int_map(in n, v, F_MVAL);
     let count = arg(in n, v);
     put(inout w, count);
@@ -664,8 +669,13 @@ fn put_mval(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], v: u64, inout w:
     }
 }
 
-fn put_measurement(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], v: u64, inout w: Slice[u64])
-    -> Unit eff [Fail[AErr]] {
+fn put_measurement(
+    in b: Slice[u8],
+    in s: Slice[u8],
+    in n: Slice[u64],
+    v: u64,
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
     int_map(in n, v, F_MEASUREMENT);
     map_only(in n, v, 7, F_MEASUREMENT);
     let mkey = map_find(in n, v, K_MEAS_MKEY);
@@ -786,11 +796,7 @@ fn parse_comid_node(
                 }
                 let env = wrapping_add(aat, 2);
                 let keys = skip(in n, env);
-                let has_cond = if arity == 3 {
-                    1
-                } else {
-                    0
-                };
+                let has_cond = if arity == 3 { 1 } else { 0 };
                 put_environment(in n, env, inout w);
                 let kc = check_array(in n, keys, F_ATTEST_KEYS);
                 put(inout w, kc);

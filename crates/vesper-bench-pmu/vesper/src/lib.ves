@@ -291,8 +291,14 @@ fn parse_u64_dec(in s: Slice[u8], start: u64, end: u64) -> Option[u64] {
     Option::Some(val)
 }
 
-fn eq_slice(in a: Slice[u8], a_start: u64, a_end: u64, in b: Slice[u8], b_start: u64, b_end: u64)
-    -> bool {
+fn eq_slice(
+    in a: Slice[u8],
+    a_start: u64,
+    a_end: u64,
+    in b: Slice[u8],
+    b_start: u64,
+    b_end: u64
+) -> bool {
     let la = wrapping_sub(a_end, a_start);
     let lb = wrapping_sub(b_end, b_start);
     if la != lb {

@@ -237,11 +237,7 @@ fn merge_pairs[K: mod copy + Ord, V: mod copy](
         match ka.try_get(i) {
             Option::Some(a) => match ka.try_get(j) {
                 Option::Some(b) => {
-                    let from = if lt(b, a) {
-                        j
-                    } else {
-                        i
-                    };
+                    let from = if lt(b, a) { j } else { i };
                     when let Option::Some(v) = va.try_get(from) {
                         vb.try_set(k, v);
                     }
@@ -286,17 +282,9 @@ fn pass_pairs[K: mod copy + Ord, V: mod copy](
             break;
         }
         let mid0 = wrapping_add(lo, width);
-        let mid = if mid0 < n {
-            mid0
-        } else {
-            n
-        };
+        let mid = if mid0 < n { mid0 } else { n };
         let hi0 = wrapping_add(mid, width);
-        let hi = if hi0 < n && hi0 > mid {
-            hi0
-        } else {
-            n
-        };
+        let hi = if hi0 < n && hi0 > mid { hi0 } else { n };
         merge_pairs(in ka, in va, inout kb, inout vb, lo, mid, hi);
         lo = hi;
     }
@@ -457,8 +445,12 @@ test {
     // @case extra_keys(in "bac!", in "012", in "abc!", in "102")
     // @case extra_values(in "bac", in "012!", in "abc", in "102!")
     // @case empty_common_prefix(in "", in "012", in "", in "012")
-    fn test_sort_pairs(in keys: Str, in values: Str, in expected_keys: Str, in expected_values: Str)
-        -> bool {
+    fn test_sort_pairs(
+        in keys: Str,
+        in values: Str,
+        in expected_keys: Str,
+        in expected_values: Str
+    ) -> bool {
         let mut ks = ChunkSeq::new[u8]();
         let mut vs = ChunkSeq::new[u8]();
         ks.extend(in keys.as_bytes());

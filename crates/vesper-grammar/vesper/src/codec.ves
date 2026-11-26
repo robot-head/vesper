@@ -190,8 +190,13 @@ fn number(in input: Slice[u8], inout cx: Cx) -> u64 eff [Fail[GErr]] {
     p.a
 }
 
-fn literal(in input: Slice[u8], in lits: Slice[u8], inout cx: Cx, start: u64, len: u64)
-    -> Unit eff [Fail[GErr]] {
+fn literal(
+    in input: Slice[u8],
+    in lits: Slice[u8],
+    inout cx: Cx,
+    start: u64,
+    len: u64
+) -> Unit eff [Fail[GErr]] {
     work(inout cx, len);
     let end = add_or(cx.pos, len, 2, 0);
     if end > cx.end {
@@ -365,14 +370,15 @@ fn node(
 // length), U24 (2, n) and Bytes (3, start, length; of `arena` when `lit`
 // is 0, of `lits` when it is 1, in word 0's high half: kind 3 or 4).
 
-fn push_write(inout cx: Cx, inout writes: ChunkSeq[u64], kind: u64, a: u64, b: u64)
-    -> u64 eff [Fail[GErr]] {
+fn push_write(
+    inout cx: Cx,
+    inout writes: ChunkSeq[u64],
+    kind: u64,
+    a: u64,
+    b: u64
+) -> u64 eff [Fail[GErr]] {
     if cx.writes == cx.capacity {
-        let base = if cx.capacity < 2 {
-            2
-        } else {
-            cx.capacity
-        };
+        let base = if cx.capacity < 2 { 2 } else { cx.capacity };
         let capacity = mul_or(base, 2, 2, 0);
         let reserved = mul_or(capacity, cx.write_size, 2, 0);
         metadata(inout cx, reserved);
@@ -401,8 +407,13 @@ fn plan_number(inout cx: Cx, inout writes: ChunkSeq[u64], n: u64) -> Unit eff [F
     push_write(inout cx, inout writes, W_NUMBER, n, len);
 }
 
-fn plan_bytes(inout cx: Cx, inout writes: ChunkSeq[u64], kind: u64, start: u64, len: u64)
-    -> Unit eff [Fail[GErr]] {
+fn plan_bytes(
+    inout cx: Cx,
+    inout writes: ChunkSeq[u64],
+    kind: u64,
+    start: u64,
+    len: u64
+) -> Unit eff [Fail[GErr]] {
     length(inout cx, len);
     if len != 0 {
         push_write(inout cx, inout writes, kind, start, len);

@@ -432,8 +432,12 @@ fn mask_byte(mask: u64, i: u64) -> u8 {
 
 // The AES header-protection mask (RFC 9001 §5.4.3) of the sample of `buf`
 // for a packet number at `pn_offset`.
-pub fn hp_mask_aes(in hp: Block, in buf: Slice[u8], pn_offset: u64, inout scratch: Slice[u8])
-    -> u64 eff [Ffi[Crypto], Fail[WcErr]] {
+pub fn hp_mask_aes(
+    in hp: Block,
+    in buf: Slice[u8],
+    pn_offset: u64,
+    inout scratch: Slice[u8]
+) -> u64 eff [Ffi[Crypto], Fail[WcErr]] {
     let start = sample_start(buf.len(), pn_offset);
     let _c = scratch.try_copy_from(0, in buf[start..wrapping_add(start, SAMPLE_LEN)]);
     let ok = handle Fail[CryptoError] in {
@@ -495,11 +499,7 @@ pub fn hp_mask_chacha(
 }
 
 fn first_byte_mask(first: u8) -> u8 {
-    if first & LONG_HEADER_BIT != 0 {
-        15
-    } else {
-        31
-    }
+    if first & LONG_HEADER_BIT != 0 { 15 } else { 31 }
 }
 
 // The top `pn_len` bytes of a 32-bit word.
@@ -515,8 +515,10 @@ fn apply_mask(inout buf: Slice[u8], pn_offset: u64, pn_len: u64, mask: u64) {
     // word of `mask`).
     match buf.try_read_u32_be(pn_offset) {
         Option::Some(field) => {
-            let _w = buf
-                .try_write_u32_be(pn_offset, field ^ (wrapping_u32(mask) & field_keep(pn_len)));
+            let _w = buf.try_write_u32_be(
+                pn_offset,
+                field ^ (wrapping_u32(mask) & field_keep(pn_len))
+            );
         },
         Option::None => {
             let mut i: u64 = 0;
@@ -589,8 +591,12 @@ pub fn hp_apply_chacha(
 }
 
 // `hp_remove` with the AES mask of the protected packet.
-pub fn hp_remove_aes(in hp: Block, inout buf: Slice[u8], pn_offset: u64, inout scratch: Slice[u8])
-    -> Unprot eff [Ffi[Crypto], Fail[WcErr]] {
+pub fn hp_remove_aes(
+    in hp: Block,
+    inout buf: Slice[u8],
+    pn_offset: u64,
+    inout scratch: Slice[u8]
+) -> Unprot eff [Ffi[Crypto], Fail[WcErr]] {
     let mask = hp_mask_aes(in hp, in buf, pn_offset, inout scratch);
     hp_remove(inout buf, pn_offset, mask)
 }
@@ -1078,11 +1084,7 @@ pub fn onertt_open(
             k.has_previous = true;
             k.previous_generation = k.recv_generation;
             let deadline = wrapping_add(now_ns, k.retire_window_ns);
-            k.previous_deadline = if deadline < now_ns {
-                U64_MAX
-            } else {
-                deadline
-            };
+            k.previous_deadline = if deadline < now_ns { U64_MAX } else { deadline };
             k.recv_generation = generation;
             k.recv_has_first = true;
             k.recv_first_pn = pn;

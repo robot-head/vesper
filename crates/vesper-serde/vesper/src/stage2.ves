@@ -106,13 +106,22 @@ fn fail(
     raise(kind, at_pos);
 }
 
-fn err(in b: B, in t: Slice[u8], in escapes: Slice[u32], kind: ErrorKind, at_pos: u64)
-    -> Unit eff [Fail[Error]] {
+fn err(
+    in b: B,
+    in t: Slice[u8],
+    in escapes: Slice[u32],
+    kind: ErrorKind,
+    at_pos: u64
+) -> Unit eff [Fail[Error]] {
     fail(in b, in t, in escapes, kind, at_pos, at_pos)
 }
 
-fn check_frontier(in b: B, in t: Slice[u8], in escapes: Slice[u32], stepped: u64)
-    -> Unit eff [Fail[Error]] {
+fn check_frontier(
+    in b: B,
+    in t: Slice[u8],
+    in escapes: Slice[u32],
+    stepped: u64
+) -> Unit eff [Fail[Error]] {
     let f = frontier(in b);
     if f < stepped {
         raise(ErrorKind::WorkLimit, work_offset(in t, in escapes, f));
@@ -150,13 +159,24 @@ fn entry(in b: B, in t: Slice[u8], in escapes: Slice[u32], i: u64) -> Unit eff [
     }
 }
 
-fn syntax(in b: B, in t: Slice[u8], in s: Slice[u32], in escapes: Slice[u32], i: u64)
-    -> Unit eff [Fail[Error]] {
+fn syntax(
+    in b: B,
+    in t: Slice[u8],
+    in s: Slice[u32],
+    in escapes: Slice[u32],
+    i: u64
+) -> Unit eff [Fail[Error]] {
     err(in b, in t, in escapes, ErrorKind::Syntax, pos(in b, in s, i))
 }
 
-fn op(in b: B, in t: Slice[u8], in s: Slice[u32], in escapes: Slice[u32], i: u64, c: u64)
-    -> Unit eff [Fail[Error]] {
+fn op(
+    in b: B,
+    in t: Slice[u8],
+    in s: Slice[u32],
+    in escapes: Slice[u32],
+    i: u64,
+    c: u64
+) -> Unit eff [Fail[Error]] {
     if byte(in b, in t, in s, i) != c {
         syntax(in b, in t, in s, in escapes, i);
     }
@@ -179,18 +199,17 @@ fn push(
     if n >= b.capacity {
         err(in b, in t, in escapes, ErrorKind::AllocationLimit, start);
     }
-    toks
-        .push(
-            Token {
-                start: start,
-                end: 0,
-                next: wrapping_add(n, 1),
-                kind: kind,
-                decoded_len: 0,
-                escaped: false,
-                depth: depth
-            }
-        );
+    toks.push(
+        Token {
+            start: start,
+            end: 0,
+            next: wrapping_add(n, 1),
+            kind: kind,
+            decoded_len: 0,
+            escaped: false,
+            depth: depth
+        }
+    );
     n
 }
 
@@ -360,11 +379,7 @@ fn number(in t: Slice[u8], start: u64, end: u64) -> (u64, bool) {
     if p < end && at(in t, p) == Ascii::Minus {
         p = wrapping_add(p, 1);
     }
-    let first = if p < end {
-        at(in t, p)
-    } else {
-        NO_BYTE
-    };
+    let first = if p < end { at(in t, p) } else { NO_BYTE };
     if first == Ascii::Zero {
         p = wrapping_add(p, 1);
     } else if first >= Ascii::One && first <= Ascii::Nine {
@@ -395,11 +410,7 @@ fn number(in t: Slice[u8], start: u64, end: u64) -> (u64, bool) {
 // The first offset in `0..lit_len` where `t[start..end]` differs from the
 // literal `which` (0 null, 1 true, 2 false), or `lit_len`.
 fn literal_mismatch(in t: Slice[u8], start: u64, end: u64, which: u64) -> u64 {
-    let n: u64 = if which == 2 {
-        FALSE_LEN
-    } else {
-        NULL_TRUE_LEN
-    };
+    let n: u64 = if which == 2 { FALSE_LEN } else { NULL_TRUE_LEN };
     for k in 0..n {
         let want: u64 = if which == 0 {
             if k == 0 {
@@ -475,16 +486,8 @@ fn scalar(
         } else {
             2
         };
-        kind = if which == 0 {
-            Kind::Null
-        } else {
-            Kind::Bool
-        };
-        let lit_len: u64 = if which == 2 {
-            FALSE_LEN
-        } else {
-            NULL_TRUE_LEN
-        };
+        kind = if which == 0 { Kind::Null } else { Kind::Bool };
+        let lit_len: u64 = if which == 2 { FALSE_LEN } else { NULL_TRUE_LEN };
         let k = literal_mismatch(in t, start, end, which);
         if k < lit_len {
             err(in b, in t, in escapes, ErrorKind::Syntax, wrapping_add(start, k));
@@ -570,11 +573,7 @@ fn document(
             if depth >= b.lim.max_depth || depth >= hard_depth() {
                 err(in b, in t, in escapes, ErrorKind::DepthLimit, pos(in b, in s, i));
             }
-            let kind = if object {
-                Kind::Object
-            } else {
-                Kind::Array
-            };
+            let kind = if object { Kind::Object } else { Kind::Array };
             let start = pos(in b, in s, i);
             let token = push(in b, inout toks, in t, in escapes, kind, depth, start);
             entry(in b, in t, in escapes, i);
@@ -589,14 +588,7 @@ fn document(
                 set_end(inout toks, token, wrapping_add(pos(in b, in s, i), 1));
                 i = wrapping_add(i, 1);
             } else {
-                let frame = wrapping_add(
-                    wrapping_mul(token, 2),
-                    if object {
-                        1
-                    } else {
-                        0
-                    }
-                );
+                let frame = wrapping_add(wrapping_mul(token, 2), if object { 1 } else { 0 });
                 if stack.len() > depth {
                     stack.try_set(depth, frame);
                 } else {

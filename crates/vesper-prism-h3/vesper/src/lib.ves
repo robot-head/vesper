@@ -212,8 +212,12 @@ pub fn huff_append(in h: Huff, in data: Slice[u8], inout out: ChunkSeq[u8]) {
 }
 
 // Decodes into `out` (cleared first); the error, if any.
-pub fn huff_unpack(in h: Huff, in data: Slice[u8], max_len: u64, inout out: ChunkSeq[u8])
-    -> Option[HuffmanError] {
+pub fn huff_unpack(
+    in h: Huff,
+    in data: Slice[u8],
+    max_len: u64,
+    inout out: ChunkSeq[u8]
+) -> Option[HuffmanError] {
     out.clear();
     huff_decode(in h, in data, max_len, inout out)
 }
@@ -318,8 +322,10 @@ pub fn encoder_core_encode(
     enc_encode(inout e, in h, stream_id, in bytes, in meta)
 }
 
-pub fn encoder_core_on_decoder_stream(inout e: EncoderCore, in bytes: Slice[u8])
-    -> Result[Unit, QpackError] {
+pub fn encoder_core_on_decoder_stream(
+    inout e: EncoderCore,
+    in bytes: Slice[u8]
+) -> Result[Unit, QpackError] {
     enc_on_decoder_stream(inout e, in bytes)
 }
 
@@ -376,8 +382,11 @@ pub fn decoder_core_blocked_streams(in d: DecoderCore) -> u64 {
     d.blk_stream.len()
 }
 
-pub fn decoder_core_on_encoder_stream(inout d: DecoderCore, in h: Huff, in bytes: Slice[u8])
-    -> Result[Unit, QpackError] {
+pub fn decoder_core_on_encoder_stream(
+    inout d: DecoderCore,
+    in h: Huff,
+    in bytes: Slice[u8]
+) -> Result[Unit, QpackError] {
     dec_on_encoder_stream(inout d, in h, in bytes)
 }
 
@@ -554,8 +563,10 @@ pub fn h3_priority_serialize(p: Priority) -> ChunkSeq[u8] {
     out
 }
 
-pub fn h3_priority_update_parse(frame_type: u64, in payload: Slice[u8])
-    -> Result[PriorityUpdate, FrameError] {
+pub fn h3_priority_update_parse(
+    frame_type: u64,
+    in payload: Slice[u8]
+) -> Result[PriorityUpdate, FrameError] {
     priority_update_parse(frame_type, in payload)
 }
 
@@ -672,13 +683,17 @@ pub copy struct ResponseParts {
     content_length: Option[u64]
 }
 
-pub fn h3_parse_request(in bytes: Slice[u8], in meta: Slice[u64])
-    -> Result[RequestParts, MessageError] {
+pub fn h3_parse_request(
+    in bytes: Slice[u8],
+    in meta: Slice[u64]
+) -> Result[RequestParts, MessageError] {
     message_parse_request(in bytes, in meta)
 }
 
-pub fn h3_parse_response(in bytes: Slice[u8], in meta: Slice[u64])
-    -> Result[ResponseParts, MessageError] {
+pub fn h3_parse_response(
+    in bytes: Slice[u8],
+    in meta: Slice[u64]
+) -> Result[ResponseParts, MessageError] {
     message_parse_response(in bytes, in meta)
 }
 
@@ -787,8 +802,12 @@ pub struct UniCore {
     out: ChunkSeq[u8]
 }
 
-pub fn uni_core_new(server: bool, webtransport: bool, max_frame_payload: u64, max_streams: u64)
-    -> UniCore {
+pub fn uni_core_new(
+    server: bool,
+    webtransport: bool,
+    max_frame_payload: u64,
+    max_streams: u64
+) -> UniCore {
     uni_new(server, webtransport, max_frame_payload, max_streams)
 }
 
@@ -814,8 +833,11 @@ pub fn uni_core_closed(inout c: UniCore, id: u64) -> Result[bool, ConnectionErro
     uni_closed(inout c, id)
 }
 
-pub fn uni_core_bytes(inout c: UniCore, id: u64, in bytes: Slice[u8])
-    -> Result[bool, ConnectionError] {
+pub fn uni_core_bytes(
+    inout c: UniCore,
+    id: u64,
+    in bytes: Slice[u8]
+) -> Result[bool, ConnectionError] {
     uni_clear(inout c);
     uni_bytes(inout c, id, in bytes)
 }
@@ -1136,8 +1158,11 @@ pub fn server_core_report_goaway(inout s: ServerCore) {
     server_report_goaway(inout s);
 }
 
-pub fn server_core_drain_unblocked(inout s: ServerCore, inout dec: DecoderCore, in h: Huff)
-    -> Result[Unit, ConnectionError] {
+pub fn server_core_drain_unblocked(
+    inout s: ServerCore,
+    inout dec: DecoderCore,
+    in h: Huff
+) -> Result[Unit, ConnectionError] {
     server_drain_unblocked(inout s, inout dec, in h)
 }
 
@@ -1174,8 +1199,10 @@ pub fn server_core_relieve_budget(inout s: ServerCore, inout dec: DecoderCore) {
     server_relieve_budget(inout s, inout dec);
 }
 
-pub fn server_core_on_quic_datagram(inout s: ServerCore, in bytes: Slice[u8])
-    -> Result[Unit, ConnectionError] {
+pub fn server_core_on_quic_datagram(
+    inout s: ServerCore,
+    in bytes: Slice[u8]
+) -> Result[Unit, ConnectionError] {
     on_quic_datagram(
         inout s.conn.sess,
         inout s.conn.pool,
@@ -1193,13 +1220,20 @@ pub fn server_core_fail(inout s: ServerCore, e: ConnectionError) {
     core_fail(inout s.conn, e);
 }
 
-pub fn server_core_flush_begin(inout s: ServerCore, inout enc: EncoderCore, inout dec: DecoderCore)
-    -> FlushStep {
+pub fn server_core_flush_begin(
+    inout s: ServerCore,
+    inout enc: EncoderCore,
+    inout dec: DecoderCore
+) -> FlushStep {
     core_flush_begin(inout s.conn, inout enc, inout dec)
 }
 
-pub fn server_core_flush_step(inout s: ServerCore, status: u64, wrote: u64, err_code: u64)
-    -> FlushStep {
+pub fn server_core_flush_step(
+    inout s: ServerCore,
+    status: u64,
+    wrote: u64,
+    err_code: u64
+) -> FlushStep {
     core_flush_step(inout s.conn, status, wrote, err_code)
 }
 
@@ -1232,8 +1266,11 @@ pub fn server_core_buffered_request_bytes(in s: ServerCore) -> u64 {
     server_buffered_request_bytes(in s)
 }
 
-pub fn server_core_read_body_pre(inout s: ServerCore, id: u64, max_n: u64)
-    -> Result[BodyReadStep, SendError] {
+pub fn server_core_read_body_pre(
+    inout s: ServerCore,
+    id: u64,
+    max_n: u64
+) -> Result[BodyReadStep, SendError] {
     server_read_body_pre(inout s, id, max_n)
 }
 
@@ -1316,8 +1353,11 @@ pub fn server_core_accept_session_establish(inout s: ServerCore, id: u64) {
     server_accept_session_establish(inout s, id);
 }
 
-pub fn server_core_send_data(inout s: ServerCore, id: u64, in data: Slice[u8])
-    -> Result[Unit, SendError] {
+pub fn server_core_send_data(
+    inout s: ServerCore,
+    id: u64,
+    in data: Slice[u8]
+) -> Result[Unit, SendError] {
     server_send_data(inout s, id, in data)
 }
 
@@ -1333,8 +1373,12 @@ pub fn server_core_finish_response(
     server_finish_response(inout s, inout enc, inout dec, in h, id, in trl_bytes, in trl_meta)
 }
 
-pub fn server_core_close_session(inout s: ServerCore, id: u64, code: u32, in reason: Slice[u8])
-    -> Result[Option[u64], SendError] {
+pub fn server_core_close_session(
+    inout s: ServerCore,
+    id: u64,
+    code: u32,
+    in reason: Slice[u8]
+) -> Result[Option[u64], SendError] {
     server_close_session(inout s, id, code, in reason)
 }
 
@@ -1380,8 +1424,11 @@ pub fn server_core_wt_can_write(in s: ServerCore, id: u64) -> Result[bool, Sessi
     wt_can_write(in s.conn.sess, in s.conn.out, in s.conn.pool, id)
 }
 
-pub fn server_core_wt_on_write_reset(inout s: ServerCore, id: u64, code: u64)
-    -> Result[u64, SessionError] {
+pub fn server_core_wt_on_write_reset(
+    inout s: ServerCore,
+    id: u64,
+    code: u64
+) -> Result[u64, SessionError] {
     wt_on_write_reset(inout s.conn.sess, in s.conn.pool, id, code)
 }
 
@@ -1389,8 +1436,11 @@ pub fn server_core_wt_finish(inout s: ServerCore, id: u64) -> Result[bool, Sessi
     wt_finish_prepare(inout s.conn.sess, in s.conn.pool, inout s.conn.out, id)
 }
 
-pub fn server_core_wt_read_pre(inout s: ServerCore, id: u64, max_n: u64)
-    -> Result[WtReadPre, SessionError] {
+pub fn server_core_wt_read_pre(
+    inout s: ServerCore,
+    id: u64,
+    max_n: u64
+) -> Result[WtReadPre, SessionError] {
     wt_read_pre(inout s.conn.sess, inout s.conn.pool, inout s.conn.scratch, id, max_n)
 }
 
@@ -1402,8 +1452,11 @@ pub fn server_core_wt_reset(inout s: ServerCore, id: u64, code: u32) -> Result[U
     wt_reset(inout s.conn.sess, inout s.conn.pool, inout s.conn.out, inout s.conn.cmd, id, code)
 }
 
-pub fn server_core_wt_stop_sending(inout s: ServerCore, id: u64, code: u32)
-    -> Result[Unit, SessionError] {
+pub fn server_core_wt_stop_sending(
+    inout s: ServerCore,
+    id: u64,
+    code: u32
+) -> Result[Unit, SessionError] {
     wt_stop_sending(inout s.conn.sess, inout s.conn.pool, inout s.conn.cmd, id, code)
 }
 
@@ -1467,8 +1520,11 @@ pub fn client_core_register_request(
     );
 }
 
-pub fn client_core_send_body(inout c: ClientCore, id: u64, in data: Slice[u8])
-    -> Result[Unit, ClientError] {
+pub fn client_core_send_body(
+    inout c: ClientCore,
+    id: u64,
+    in data: Slice[u8]
+) -> Result[Unit, ClientError] {
     client_send_body(inout c, id, in data)
 }
 
@@ -1476,13 +1532,20 @@ pub fn client_core_finish_body(inout c: ClientCore, id: u64) -> Result[Unit, Cli
     client_finish_body(inout c, id)
 }
 
-pub fn client_core_close_session(inout c: ClientCore, session: u64, code: u32, in reason: Slice[u8])
-    -> Result[Unit, SessionError] {
+pub fn client_core_close_session(
+    inout c: ClientCore,
+    session: u64,
+    code: u32,
+    in reason: Slice[u8]
+) -> Result[Unit, SessionError] {
     client_close_session(inout c, session, code, in reason)
 }
 
-pub fn client_core_update_priority(inout c: ClientCore, stream_id: u64, priority: Priority)
-    -> Result[Unit, ClientError] {
+pub fn client_core_update_priority(
+    inout c: ClientCore,
+    stream_id: u64,
+    priority: Priority
+) -> Result[Unit, ClientError] {
     client_update_priority(inout c, stream_id, priority)
 }
 
@@ -1516,8 +1579,10 @@ pub fn client_core_uni_bytes(
     core_uni_bytes(inout c.conn, inout enc, inout dec, in h, id, in bytes, fin)
 }
 
-pub fn client_core_accept_bidi_need_sniff(in c: ClientCore, id: u64)
-    -> Result[bool, ConnectionError] {
+pub fn client_core_accept_bidi_need_sniff(
+    in c: ClientCore,
+    id: u64
+) -> Result[bool, ConnectionError] {
     client_accept_bidi_need_sniff(in c, id)
 }
 
@@ -1529,8 +1594,12 @@ pub fn client_core_sniff_err(inout c: ClientCore, id: u64) {
     client_sniff_err(inout c, id);
 }
 
-pub fn client_core_sniff_data(inout c: ClientCore, id: u64, in bytes: Slice[u8], fin: bool)
-    -> Result[Unit, ConnectionError] {
+pub fn client_core_sniff_data(
+    inout c: ClientCore,
+    id: u64,
+    in bytes: Slice[u8],
+    fin: bool
+) -> Result[Unit, ConnectionError] {
     client_sniff_data(inout c, id, in bytes, fin)
 }
 
@@ -1538,8 +1607,11 @@ pub fn client_core_handle_goaway(inout c: ClientCore) {
     client_handle_goaway(inout c);
 }
 
-pub fn client_core_drain_unblocked(inout c: ClientCore, inout dec: DecoderCore, in h: Huff)
-    -> Result[Unit, ConnectionError] {
+pub fn client_core_drain_unblocked(
+    inout c: ClientCore,
+    inout dec: DecoderCore,
+    in h: Huff
+) -> Result[Unit, ConnectionError] {
     client_drain_unblocked(inout c, inout dec, in h)
 }
 
@@ -1562,8 +1634,10 @@ pub fn client_core_stream_data(
     client_stream_data(inout c, inout dec, in h, id, in bytes, fin)
 }
 
-pub fn client_core_on_quic_datagram(inout c: ClientCore, in bytes: Slice[u8])
-    -> Result[Unit, ConnectionError] {
+pub fn client_core_on_quic_datagram(
+    inout c: ClientCore,
+    in bytes: Slice[u8]
+) -> Result[Unit, ConnectionError] {
     on_quic_datagram(
         inout c.conn.sess,
         inout c.conn.pool,
@@ -1577,13 +1651,20 @@ pub fn client_core_fail(inout c: ClientCore, e: ConnectionError) {
     core_fail(inout c.conn, e);
 }
 
-pub fn client_core_flush_begin(inout c: ClientCore, inout enc: EncoderCore, inout dec: DecoderCore)
-    -> FlushStep {
+pub fn client_core_flush_begin(
+    inout c: ClientCore,
+    inout enc: EncoderCore,
+    inout dec: DecoderCore
+) -> FlushStep {
     core_flush_begin(inout c.conn, inout enc, inout dec)
 }
 
-pub fn client_core_flush_step(inout c: ClientCore, status: u64, wrote: u64, err_code: u64)
-    -> FlushStep {
+pub fn client_core_flush_step(
+    inout c: ClientCore,
+    status: u64,
+    wrote: u64,
+    err_code: u64
+) -> FlushStep {
     core_flush_step(inout c.conn, status, wrote, err_code)
 }
 
@@ -1634,8 +1715,11 @@ pub fn client_core_wt_can_write(in c: ClientCore, id: u64) -> Result[bool, Sessi
     wt_can_write(in c.conn.sess, in c.conn.out, in c.conn.pool, id)
 }
 
-pub fn client_core_wt_on_write_reset(inout c: ClientCore, id: u64, code: u64)
-    -> Result[u64, SessionError] {
+pub fn client_core_wt_on_write_reset(
+    inout c: ClientCore,
+    id: u64,
+    code: u64
+) -> Result[u64, SessionError] {
     wt_on_write_reset(inout c.conn.sess, in c.conn.pool, id, code)
 }
 
@@ -1643,8 +1727,11 @@ pub fn client_core_wt_finish(inout c: ClientCore, id: u64) -> Result[bool, Sessi
     wt_finish_prepare(inout c.conn.sess, in c.conn.pool, inout c.conn.out, id)
 }
 
-pub fn client_core_wt_read_pre(inout c: ClientCore, id: u64, max_n: u64)
-    -> Result[WtReadPre, SessionError] {
+pub fn client_core_wt_read_pre(
+    inout c: ClientCore,
+    id: u64,
+    max_n: u64
+) -> Result[WtReadPre, SessionError] {
     wt_read_pre(inout c.conn.sess, inout c.conn.pool, inout c.conn.scratch, id, max_n)
 }
 
@@ -1656,7 +1743,10 @@ pub fn client_core_wt_reset(inout c: ClientCore, id: u64, code: u32) -> Result[U
     wt_reset(inout c.conn.sess, inout c.conn.pool, inout c.conn.out, inout c.conn.cmd, id, code)
 }
 
-pub fn client_core_wt_stop_sending(inout c: ClientCore, id: u64, code: u32)
-    -> Result[Unit, SessionError] {
+pub fn client_core_wt_stop_sending(
+    inout c: ClientCore,
+    id: u64,
+    code: u32
+) -> Result[Unit, SessionError] {
     wt_stop_sending(inout c.conn.sess, inout c.conn.pool, inout c.conn.cmd, id, code)
 }

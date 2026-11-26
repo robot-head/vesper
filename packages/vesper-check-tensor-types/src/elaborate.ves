@@ -303,8 +303,15 @@ fn emit_dim_expr_str(in st: St, d: u32, os: u64, oe: u64, inout eo: ElabOut) -> 
     acc
 }
 
-fn emit_dims_value(in st: St, in cx: Cx, da: u64, dn: u64, os: u64, oe: u64, inout eo: ElabOut)
-    -> ChunkSeq[u8] {
+fn emit_dims_value(
+    in st: St,
+    in cx: Cx,
+    da: u64,
+    dn: u64,
+    os: u64,
+    oe: u64,
+    inout eo: ElabOut
+) -> ChunkSeq[u8] {
     let mut o = ChunkSeq::new[u8]();
     let rsp = alloc_span(inout eo, os, oe);
     put(inout o, in "struct(Dims, rank: lit(");

@@ -202,8 +202,13 @@ fn guard(inout b: Builder, g: u64, v: Value, ty: Ty) -> Value eff [Ffi[Cranelift
     }
 }
 
-fn swap(inout b: Builder, v: Value, int: u64, endian: u64, little: bool)
-    -> Value eff [Ffi[Cranelift]] {
+fn swap(
+    inout b: Builder,
+    v: Value,
+    int: u64,
+    endian: u64,
+    little: bool
+) -> Value eff [Ffi[Cranelift]] {
     let swapped = if endian == ENDIAN_NATIVE {
         false
     } else if endian == ENDIAN_LITTLE {
@@ -219,8 +224,13 @@ fn swap(inout b: Builder, v: Value, int: u64, endian: u64, little: bool)
 }
 
 // A C library function of 64-bit word parameters (`foreign_libc`).
-fn libc(inout b: Builder, inout m: Module, which: u32, params: u64, returns: bool)
-    -> FuncRef eff [Ffi[Cranelift]] {
+fn libc(
+    inout b: Builder,
+    inout m: Module,
+    which: u32,
+    params: u64,
+    returns: bool
+) -> FuncRef eff [Ffi[Cranelift]] {
     let sig = sig_new(inout m, call_conv_default());
     for _ in 0..params {
         sig_param(inout m, sig, ty_i64());
@@ -514,8 +524,12 @@ fn foreign_mapping(
     block_param(inout b, join, 0)
 }
 
-fn foreign_cstr_copy(inout b: Builder, inout m: Module, address: Value, jit: bool)
-    -> Value eff [Ffi[Cranelift]] {
+fn foreign_cstr_copy(
+    inout b: Builder,
+    inout m: Module,
+    address: Value,
+    jit: bool
+) -> Value eff [Ffi[Cranelift]] {
     let copy = create_block(inout b);
     let join = create_block(inout b);
     append_block_param(inout b, join, ty_i64());
@@ -557,8 +571,12 @@ fn foreign_cstr_copy(inout b: Builder, inout m: Module, address: Value, jit: boo
     block_param(inout b, join, 0)
 }
 
-fn foreign_cwstr_copy(inout b: Builder, inout m: Module, address: Value, jit: bool)
-    -> Value eff [Ffi[Cranelift]] {
+fn foreign_cwstr_copy(
+    inout b: Builder,
+    inout m: Module,
+    address: Value,
+    jit: bool
+) -> Value eff [Ffi[Cranelift]] {
     let scan = create_block(inout b);
     let step = create_block(inout b);
     let copy = create_block(inout b);
@@ -896,28 +914,14 @@ fn value_arg(inout b: Builder, inout r: R, kind: u64, source: Value) -> Value ef
         if kind == SOURCE_SCALAR {
             source
         } else {
-            ins_load(
-                inout b,
-                if bits == 32 {
-                    ty_f32()
-                } else {
-                    ty_f64()
-                },
-                PLAIN,
-                source,
-                0
-            )
+            ins_load(inout b, if bits == 32 { ty_f32() } else { ty_f64() }, PLAIN, source, 0)
         }
     } else {
         // An enum (the Rust code checked that its source is in memory).
         let s = next(inout r);
         let n = next(inout r);
         let tag = ins_load(inout b, ty_i64(), PLAIN, source, 0);
-        let first = if n > 0 {
-            at(in r, r.i)
-        } else {
-            0
-        };
+        let first = if n > 0 { at(in r, r.i) } else { 0 };
         let mut value = ins_iconst(inout b, ty_i64(), imm(first));
         for i in 1..n {
             let hit = ins_icmp_imm(inout b, cc_eq(), tag, imm(i));
@@ -1012,15 +1016,7 @@ fn arg(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[Cranelift]]
         let ptr = if at(in r, p) == P_SCALAR {
             let s = at(in r, wrapping_add(p, 1));
             let buffer = alloc(inout b, in m, 8, true);
-            let word = source_word(
-                inout b,
-                if nullable {
-                    1
-                } else {
-                    source_kind
-                },
-                payload
-            );
+            let word = source_word(inout b, if nullable { 1 } else { source_kind }, payload);
             let v = narrow(inout b, word, bits_of(s));
             ins_store(inout b, PLAIN, v, buffer, 0);
             if writes {
@@ -1133,15 +1129,7 @@ fn refuse(call: u64, inout b: Builder, in m: Module) eff [Ffi[Cranelift]] {
 fn os_error(inout b: Builder, inout m: Module, which: u64) -> Value eff [Ffi[Cranelift]] {
     let location = which == ERRNO_LOCATION || which == ERRNO_ERROR;
     let sig = sig_new(inout m, call_conv_default());
-    sig_return(
-        inout m,
-        sig,
-        if location {
-            ty_i64()
-        } else {
-            ty_i32()
-        }
-    );
+    sig_return(inout m, sig, if location { ty_i64() } else { ty_i32() });
     let id = if which == ERRNO_LOCATION {
         declare_function(inout m, in "__errno_location".as_bytes(), linkage_import(), sig)
     } else if which == ERRNO_ERROR {
@@ -1278,11 +1266,7 @@ fn the_call(call: u64, inout b: Builder, inout m: Module, indirect: bool) eff [F
         w: call_args(call),
         i: 0,
     };
-    let base: u64 = if indirect {
-        2
-    } else {
-        1
-    };
+    let base: u64 = if indirect { 2 } else { 1 };
     let errno = at(in r, base);
     let saved = at(in r, wrapping_add(base, 1));
     let returns = at(in r, wrapping_add(base, 2)) == 1;
@@ -1352,8 +1336,15 @@ fn the_call(call: u64, inout b: Builder, inout m: Module, indirect: bool) eff [F
 
 // `foreign_validated`: `Ok(ok)` when `valid`, else `Err(ForeignInvalid {
 // raw })`, from layout words `[size, ok, ok offset, err, err offset]`.
-fn validated(inout b: Builder, in m: Module, in r: R, l: u64, valid: Value, ok: Value, raw: Value)
-    -> Value eff [Ffi[Cranelift]] {
+fn validated(
+    inout b: Builder,
+    in m: Module,
+    in r: R,
+    l: u64,
+    valid: Value,
+    ok: Value,
+    raw: Value
+) -> Value eff [Ffi[Cranelift]] {
     let ptr = alloc(inout b, in m, wrapping_u32(at(in r, l)), true);
     let ok_tag = ins_iconst(inout b, ty_i64(), imm(at(in r, wrapping_add(l, 1))));
     let err_tag = ins_iconst(inout b, ty_i64(), imm(at(in r, wrapping_add(l, 3))));

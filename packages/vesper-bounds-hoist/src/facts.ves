@@ -221,11 +221,7 @@ impl Facts {
     // The global index of the definition of `v`, NONE64 for none.
     pub fn def(in self, v: u32) -> u64 {
         let d = u64_at(in self.defs, w(v));
-        if d == 0 {
-            NONE64
-        } else {
-            wrapping_sub(d, 1)
-        }
+        if d == 0 { NONE64 } else { wrapping_sub(d, 1) }
     }
 
     pub fn def_block(in self, x: u64) -> u32 {
@@ -376,15 +372,7 @@ impl Facts {
             }
         }
         let ok = slice_once || borrowed || stable_place(in f, in self.all, place);
-        set_u8(
-            inout self.stable,
-            w(place),
-            if ok {
-                2
-            } else {
-                1
-            }
-        );
+        set_u8(inout self.stable, w(place), if ok { 2 } else { 1 });
         ok
     }
 
@@ -541,11 +529,7 @@ impl Facts {
 
     fn any_changes(in self, in f: Fun, b: u32, from: u64, to: u64, mode: u8, arg: u32) -> bool {
         let k = f.block(w(b));
-        let end = if to < w(k.ic) {
-            to
-        } else {
-            w(k.ic)
-        };
+        let end = if to < w(k.ic) { to } else { w(k.ic) };
         let mut j = from;
         loop {
             if j >= end {
@@ -584,11 +568,7 @@ impl Facts {
             qk = pk0;
         }
         if pb == qb && pk <= qk {
-            let from = if inc(pk) < qk {
-                inc(pk)
-            } else {
-                qk
-            };
+            let from = if inc(pk) < qk { inc(pk) } else { qk };
             return !self.block_changes(in f, pb, mode, arg)
                 && !self.any_changes(in f, pb, from, qk, mode, arg);
         }
@@ -664,8 +644,15 @@ impl Facts {
 
     // `length_kept`: whether the length of `place` is the same at the two
     // points.
-    pub fn length_kept(inout self, in f: Fun, place: u32, pb: u32, pk: u64, qb: u32, qk: u64)
-        -> bool {
+    pub fn length_kept(
+        inout self,
+        in f: Fun,
+        place: u32,
+        pb: u32,
+        pk: u64,
+        qb: u32,
+        qk: u64
+    ) -> bool {
         self.is_stable(in f, place) || self.unchanged_by(in f, pb, pk, qb, qk, 1, place)
     }
 

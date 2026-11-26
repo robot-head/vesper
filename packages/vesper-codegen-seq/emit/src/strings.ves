@@ -32,8 +32,13 @@ fn str_word(inout b: Builder, ptr: Value, offset: i32) -> Value eff [Ffi[Craneli
     ins_load(inout b, ty_i64(), PLAIN, ptr, offset)
 }
 
-fn str_value(inout b: Builder, in m: Module, len: Value, cap: Value, data: Value)
-    -> Value eff [Ffi[Cranelift]] {
+fn str_value(
+    inout b: Builder,
+    in m: Module,
+    len: Value,
+    cap: Value,
+    data: Value
+) -> Value eff [Ffi[Cranelift]] {
     let ptr = alloc(inout b, in m, 24);
     ins_store(inout b, PLAIN, len, ptr, LEN);
     ins_store(inout b, PLAIN, cap, ptr, CAP);
@@ -47,8 +52,13 @@ fn str_byte(inout b: Builder, value: Value, i: Value) -> Value eff [Ffi[Cranelif
     ins_uload8(inout b, ty_i64(), PLAIN, at, 0)
 }
 
-fn str_boundary(inout b: Builder, in m: Module, value: Value, i: Value, len: Value)
-    -> Value eff [Ffi[Cranelift]] {
+fn str_boundary(
+    inout b: Builder,
+    in m: Module,
+    value: Value,
+    i: Value,
+    len: Value
+) -> Value eff [Ffi[Cranelift]] {
     let at_end = ins_icmp(inout b, cc_eq(), i, len);
     let scratch = alloc(inout b, in m, 8);
     let data = str_word(inout b, value, DATA);
@@ -138,8 +148,12 @@ fn lead_byte(inout b: Builder, c: Value, shift: i64, tag: i64) -> Value eff [Ffi
     ins_bor_imm(inout b, v, tag)
 }
 
-fn str_push_char(inout b: Builder, inout m: Module, s: Value, c: Value)
-    -> Value eff [Ffi[Cranelift]] {
+fn str_push_char(
+    inout b: Builder,
+    inout m: Module,
+    s: Value,
+    c: Value
+) -> Value eff [Ffi[Cranelift]] {
     let scratch = alloc(inout b, in m, 8);
     let one = ins_icmp_imm(inout b, cc_ult(), c, 128);
     let two = ins_icmp_imm(inout b, cc_ult(), c, 2048);

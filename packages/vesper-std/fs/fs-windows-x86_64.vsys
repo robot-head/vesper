@@ -22,6 +22,7 @@ sys library StdFs (
     const STD_OUTPUT_HANDLE: i32 = -11;
     const STD_ERROR_HANDLE: i32 = -12;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 33554432;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 2097152;
     const ERROR_FILE_NOT_FOUND: u32 = 2;
     const ERROR_PATH_NOT_FOUND: u32 = 3;
     const ERROR_NO_MORE_FILES: u32 = 18;
@@ -38,6 +39,23 @@ sys library StdFs (
         ftLastWriteTimeHigh: u32,
         nFileSizeHigh: u32,
         nFileSizeLow: u32,
+    }
+
+    // `BY_HANDLE_FILE_INFORMATION` (52 bytes).
+    wire struct Win32HandleInfo {
+        dwFileAttributes: u32,
+        ftCreationTimeLow: u32,
+        ftCreationTimeHigh: u32,
+        ftLastAccessTimeLow: u32,
+        ftLastAccessTimeHigh: u32,
+        ftLastWriteTimeLow: u32,
+        ftLastWriteTimeHigh: u32,
+        dwVolumeSerialNumber: u32,
+        nFileSizeHigh: u32,
+        nFileSizeLow: u32,
+        nNumberOfLinks: u32,
+        nFileIndexHigh: u32,
+        nFileIndexLow: u32,
     }
 
     fn CreateFileW(
@@ -71,6 +89,7 @@ sys library StdFs (
         dwFlags: u32
     ) -> ForeignVal[u32] errno;
     fn CloseHandle(hObject: u64) -> ForeignVal[i32];
+    fn GetFileInformationByHandle(hFile: u64, nocapture inout lpFileInformation: Win32HandleInfo) -> ForeignVal[i32] errno;
     fn GetFileSizeEx(hFile: u64, nocapture inout lpFileSize: i64) -> ForeignVal[i32] errno;
     fn GetFileAttributesExW(
         nocapture in lpFileName: CWStr,

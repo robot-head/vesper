@@ -424,11 +424,7 @@ fn join_method_sym(inout names: Names, tname: u32, mname: u32) -> u32 {
 
 fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: Ex) -> u32 {
     if f.gn == 0 {
-        let p_off: u64 = if receiver_ty != NONE32 {
-            1
-        } else {
-            0
-        };
+        let p_off: u64 = if receiver_ty != NONE32 { 1 } else { 0 };
         for ai in 0..e.n {
             let av = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(ai, 2), 1)));
             let pi = wrapping_add(ai, p_off);
@@ -606,11 +602,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
     } else if e.kind == X_FIELD {
         let bt = check_expr(inout tc, in a, e.a, tc.infer_ty);
         let ft = field_step(inout tc.types, inout tc.names, in tc.world, bt, n32(e.b), false);
-        if ft == NONE32 {
-            expected
-        } else {
-            ft
-        }
+        if ft == NONE32 { expected } else { ft }
     } else if e.kind == X_INDEX {
         let bt = check_expr(inout tc, in a, e.a, tc.infer_ty);
         let _it = check_expr(inout tc, in a, e.b, tc.infer_ty);
@@ -721,11 +713,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         if e.c == NONE64 {
             tc.unit_ty
         } else {
-            let exp_e = if tt == tc.never_ty {
-                expected
-            } else {
-                tt
-            };
+            let exp_e = if tt == tc.never_ty { expected } else { tt };
             let et = check_expr(inout tc, in a, e.c, exp_e);
             if tt == tc.never_ty || tc.types.kind(tt) == TyKind::Infer {
                 et
@@ -741,11 +729,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             let body = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)));
             push_scope(inout tc);
             bind_pat(inout tc, in a, pt, vt);
-            let exp_b = if res == tc.never_ty {
-                expected
-            } else {
-                res
-            };
+            let exp_b = if res == tc.never_ty { expected } else { res };
             let bt = check_expr(inout tc, in a, body, exp_b);
             if (tc.types.kind(res) == TyKind::Infer || res == tc.never_ty) && bt != tc.never_ty {
                 res = bt;
@@ -967,11 +951,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 }
                             } else {
                                 let eres = find_eop_result(in a, inout tc.names, cname);
-                                if eres != NONE32 {
-                                    eres
-                                } else {
-                                    expected
-                                }
+                                if eres != NONE32 { eres } else { expected }
                             };
                             record_span(inout tc, ce.s0, ce.s1, rty);
                             record_span(inout tc, e.s0, e.s1, rty);
@@ -1094,11 +1074,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 tc.bool_ty
                             } else {
                                 let eres = find_eop_result(in a, inout tc.names, cname);
-                                if eres != NONE32 {
-                                    eres
-                                } else {
-                                    expected
-                                }
+                                if eres != NONE32 { eres } else { expected }
                             };
                             record_span(inout tc, ce.s0, ce.s1, rty);
                             record_span(inout tc, e.s0, e.s1, rty);
@@ -1395,8 +1371,12 @@ fn rebuild_tc(
     (fresh_tc, next_perm)
 }
 
-pub fn typecheck_ast(in a: Ast, sink names: Names, sink types: Types, sink world: World)
-    -> (Names, Types, World, ChunkSeq[CallRow], ChunkSeq[Pair]) {
+pub fn typecheck_ast(
+    in a: Ast,
+    sink names: Names,
+    sink types: Types,
+    sink world: World
+) -> (Names, Types, World, ChunkSeq[CallRow], ChunkSeq[Pair]) {
     let mut tc = tc_new(sink names, sink types, sink world);
     let mut max_spans = 262144;
     let mut max_calls = 131072;

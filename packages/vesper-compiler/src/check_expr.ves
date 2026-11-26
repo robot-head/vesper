@@ -1,7 +1,14 @@
 // Expressions in adapter v1: literals, names, calls, nominal constructors,
 // lexical blocks, if/match, comparisons and copy-place assignment.
-fn c_expr(at: i64, env: CEnv, usage: i64, row: i64, loans: CEnv, depth: i64, restricted: bool)
-    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_expr(
+    at: i64,
+    env: CEnv,
+    usage: i64,
+    row: i64,
+    loans: CEnv,
+    depth: i64,
+    restricted: bool
+) -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if depth > 48 {
         let limit = c_limit(at);
         c_result(CType { tag: 0, at: 0 }, at, env, at, at, -1)
@@ -43,8 +50,15 @@ fn c_expr(at: i64, env: CEnv, usage: i64, row: i64, loans: CEnv, depth: i64, res
         }
     }
 }
-fn c_primary(at: i64, env: CEnv, usage: i64, row: i64, loans: CEnv, depth: i64, restricted: bool)
-    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_primary(
+    at: i64,
+    env: CEnv,
+    usage: i64,
+    row: i64,
+    loans: CEnv,
+    depth: i64,
+    restricted: bool
+) -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let k = c_kind(at);
     if k == 4 {
         c_name_primary(at, env, usage, row, loans, depth, restricted)
@@ -112,11 +126,7 @@ fn c_name_primary(
     let t = c_token(at);
     let special = c_word(at, 0x726567696f6e)
         || (t.end - t.start >= 6 && word(t.start, t.start + 6) == 0x777261707069);
-    let valid = if special {
-        c_unsupported(4, at)
-    } else {
-        0
-    };
+    let valid = if special { c_unsupported(4, at) } else { 0 };
     let slot = c_lookup(env, t, env.count);
     if slot >= 0 {
         c_result(
@@ -151,23 +161,11 @@ fn c_nominal_primary(
         || c_word(at, 0x457272)
         || c_word(at, 0x536f6d65)
         || c_word(at, 0x4e6f6e65);
-    let valid = if special {
-        c_unsupported(8, at)
-    } else {
-        0
-    };
+    let valid = if special { c_unsupported(8, at) } else { 0 };
     let qualified = c_kind(t.end) == 41;
-    let variant = if qualified {
-        c_token(c_next(t.end))
-    } else {
-        t
-    };
+    let variant = if qualified { c_token(c_next(t.end)) } else { t };
     let ctor = c_ctor_find(t, variant, qualified, 0);
-    let next = if qualified {
-        variant.end
-    } else {
-        t.end
-    };
+    let next = if qualified { variant.end } else { t.end };
     let ty = CType { tag: 3, at: ctor.adt.name.start };
     if ctor.fields < 0 && c_kind(next) == 32 {
         let end = c_group(next, 0);
@@ -201,8 +199,12 @@ fn c_nominal_primary(
         c_result(ty, value.next, value.env, t.start, end, -1)
     }
 }
-fn c_compare(left: CExpr, row: i64, loans: CEnv, depth: i64)
-    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_compare(
+    left: CExpr,
+    row: i64,
+    loans: CEnv,
+    depth: i64
+) -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let op = c_kind(left.next);
     if op == 59 || op == 60 {
         let right = c_order(
@@ -232,8 +234,12 @@ fn c_compare(left: CExpr, row: i64, loans: CEnv, depth: i64)
         left
     }
 }
-fn c_order(left: CExpr, row: i64, loans: CEnv, depth: i64)
-    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_order(
+    left: CExpr,
+    row: i64,
+    loans: CEnv,
+    depth: i64
+) -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let op = c_kind(left.next);
     if op >= 61 && op <= 64 {
         let right = c_postfix(
@@ -258,18 +264,15 @@ fn c_order(left: CExpr, row: i64, loans: CEnv, depth: i64)
         left
     }
 }
-fn c_postfix(value: CExpr, row: i64, loans: CEnv, depth: i64)
-    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_postfix(
+    value: CExpr,
+    row: i64,
+    loans: CEnv,
+    depth: i64
+) -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let k = c_kind(value.next);
     if k == 42 || k == 43 || k == 36 {
-        let unsupported = c_unsupported(
-            if k == 42 {
-                6
-            } else {
-                4
-            },
-            value.next
-        );
+        let unsupported = c_unsupported(if k == 42 { 6 } else { 4 }, value.next);
         value
     } else if k == 32 {
         let end = c_group(value.next, 0);
@@ -314,8 +317,10 @@ fn c_arg_count(at: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOver
         c_arg_count_tail(at, 0)
     }
 }
-fn c_arg_count_tail(at: i64, n: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_arg_count_tail(
+    at: i64,
+    n: i64
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let k = c_kind(at);
     if k == 33 {
         n + 1
@@ -329,8 +334,10 @@ fn c_arg_count_tail(at: i64, n: i64)
         c_arg_count_tail(c_group(at, 0), n)
     }
 }
-fn c_param_count(at: i64, named: bool)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_param_count(
+    at: i64,
+    named: bool
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(at) == 33 {
         0
     } else {
@@ -345,8 +352,15 @@ fn c_param_count(at: i64, named: bool)
             )
     }
 }
-fn c_args(at: i64, param: i64, named: bool, env: CEnv, row: i64, loans: CEnv, depth: i64)
-    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_args(
+    at: i64,
+    param: i64,
+    named: bool,
+    env: CEnv,
+    row: i64,
+    loans: CEnv,
+    depth: i64
+) -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(at) == 33 {
         c_result(CType { tag: 0, at: 0 }, c_next(at), env, at, c_next(at), -1)
     } else {
@@ -417,8 +431,10 @@ fn c_args(at: i64, param: i64, named: bool, env: CEnv, row: i64, loans: CEnv, de
         c_args(next, next_param, named, value.env, row, loans, depth)
     }
 }
-fn c_argument_end(at: i64, last: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_argument_end(
+    at: i64,
+    last: i64
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let k = c_kind(at);
     if k == 38 || k == 33 {
         last
@@ -427,8 +443,14 @@ fn c_argument_end(at: i64, last: i64)
         c_argument_end(next, next)
     }
 }
-fn c_arg_overlap(loans: CEnv, i: i64, slot: i64, pass: i64, start: i64, end: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_arg_overlap(
+    loans: CEnv,
+    i: i64,
+    slot: i64,
+    pass: i64,
+    start: i64,
+    end: i64
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if i == loans.count {
         0
     } else {
@@ -441,8 +463,13 @@ fn c_arg_overlap(loans: CEnv, i: i64, slot: i64, pass: i64, start: i64, end: i64
         c_arg_overlap(loans, i + 1, slot, pass, start, end)
     }
 }
-fn c_assign(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64)
-    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_assign(
+    at: i64,
+    env: CEnv,
+    row: i64,
+    loans: CEnv,
+    depth: i64
+) -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let name = c_token(at);
     let slot = c_lookup(env, name, env.count);
     let valid = if slot < 0 {
@@ -467,8 +494,10 @@ fn c_assign(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64)
     c_result(CType { tag: 0, at: 0 }, value.next, value.env, name.start, value.end, -1)
 }
 
-fn c_place_shape(at: i64, end: i64)
-    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_place_shape(
+    at: i64,
+    end: i64
+) -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let t = c_token(at);
     if t.kind == 4 {
         t.end == end
@@ -480,8 +509,10 @@ fn c_place_shape(at: i64, end: i64)
 }
 
 // Calling a function owns the callee, independently of the result's usage.
-fn c_callee_usage(at: i64, usage: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_callee_usage(
+    at: i64,
+    usage: i64
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let t = c_token(at);
     if t.kind == 4 && c_kind(t.end) == 32 {
         2

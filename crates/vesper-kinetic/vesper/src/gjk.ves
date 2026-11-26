@@ -126,11 +126,7 @@ fn fmax(a: f64, b: f64) -> f64 {
     if b != b {
         return a;
     }
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn gd(in s: Slice[f64], i: u64) -> f64 {
@@ -187,11 +183,7 @@ pub fn shape_valid(kind: u32, in d: Slice[f64]) -> bool {
         }
         return true;
     }
-    let want: u64 = if kind == 0 {
-        4
-    } else {
-        7
-    };
+    let want: u64 = if kind == 0 { 4 } else { 7 };
     if kind > 1 || n != want {
         return false;
     }
@@ -221,11 +213,7 @@ fn core_support(kind: u32, in d: Slice[f64], dir: V3) -> V3 {
     if kind == 1 {
         let a = vat(in d, 0);
         let b = vat(in d, 3);
-        return if dot(b, dir) > dot(a, dir) {
-            b
-        } else {
-            a
-        };
+        return if dot(b, dir) > dot(a, dir) { b } else { a };
     }
     let count = d.len() / 3;
     let mut best = vat(in d, 0);
@@ -283,8 +271,12 @@ fn bit_count(mask: u64) -> u64 {
 // The barycentric weights (into `lam`) of the origin's projection onto the
 // affine hull of the points of `pts` that `mask` selects, if it lies
 // strictly inside that face (src/gjk.rs affine_closest).
-fn affine_closest(in pts: ChunkSeq[Sp], mask: u64, inout lam: ChunkSeq[f64], inout g: ChunkSeq[f64])
-    -> bool {
+fn affine_closest(
+    in pts: ChunkSeq[Sp],
+    mask: u64,
+    inout lam: ChunkSeq[f64],
+    inout g: ChunkSeq[f64]
+) -> bool {
     let k = bit_count(mask);
     for i in 0..u(4) {
         lam.try_set(i, 0.0);
@@ -528,19 +520,21 @@ fn canonical_sign(v: V3) -> V3 {
     } else {
         1.0
     };
-    if first < 0.0 {
-        scale(v, -1.0)
-    } else {
-        v
-    }
+    if first < 0.0 { scale(v, -1.0) } else { v }
 }
 
 // src/gjk.rs EPA_TOL: EPA stops when a face is this close (relative).
 const EPA_TOL: f64 = 0.000000001;
 
 // make_face of src/gjk.rs; `false` when the face has no normal.
-fn make_face(in pts: ChunkSeq[Sp], i: u64, j: u64, k: u64, inside: V3, inout out: ChunkSeq[Face])
-    -> bool {
+fn make_face(
+    in pts: ChunkSeq[Sp],
+    i: u64,
+    j: u64,
+    k: u64,
+    inside: V3,
+    inout out: ChunkSeq[Face]
+) -> bool {
     let a = sp_at(in pts, i).w;
     let b = sp_at(in pts, j).w;
     let c = sp_at(in pts, k).w;
@@ -775,8 +769,13 @@ fn toggle_edge(inout horizon: ChunkSeq[Edge], p: u64, q: u64) {
 
 // src/gjk.rs separation into `out` ([distance, normal (3), point_a (3),
 // point_b (3)]); a status.
-pub fn separation(ka: u32, in da: Slice[f64], kb: u32, in db: Slice[f64], inout out: Slice[f64])
-    -> u64 {
+pub fn separation(
+    ka: u32,
+    in da: Slice[f64],
+    kb: u32,
+    in db: Slice[f64],
+    inout out: Slice[f64]
+) -> u64 {
     if !shape_valid(ka, in da) || !shape_valid(kb, in db) {
         return invalid_shape();
     }

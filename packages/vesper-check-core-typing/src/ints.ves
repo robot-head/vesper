@@ -25,27 +25,15 @@ pub fn lit_cmp(a: Lit, b: Lit) -> i64 {
         return 0;
     }
     let below = a.mag < b.mag;
-    if below != a.neg {
-        -1
-    } else {
-        1
-    }
+    if below != a.neg { -1 } else { 1 }
 }
 
 pub fn lit_max(a: Lit, b: Lit) -> Lit {
-    if lit_cmp(a, b) < 0 {
-        b
-    } else {
-        a
-    }
+    if lit_cmp(a, b) < 0 { b } else { a }
 }
 
 pub fn lit_min(a: Lit, b: Lit) -> Lit {
-    if lit_cmp(a, b) > 0 {
-        b
-    } else {
-        a
-    }
+    if lit_cmp(a, b) > 0 { b } else { a }
 }
 
 // `n > i64::MAX as i128`.
@@ -94,11 +82,7 @@ pub fn fits(k: Known, s: u32, v: Lit) -> bool {
         return true;
     }
     let half = wrapping_shl_u64(1, wrapping_sub(bits, 1));
-    if v.neg {
-        v.mag <= half
-    } else {
-        v.mag < half
-    }
+    if v.neg { v.mag <= half } else { v.mag < half }
 }
 
 // `IntegerKind::default_for(n).fits(m)`.

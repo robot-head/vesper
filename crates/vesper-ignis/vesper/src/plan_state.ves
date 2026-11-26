@@ -206,26 +206,24 @@ fn push_pending(
     after: Layout
 ) {
     if has_sub && has_layouts {
-        pl
-            .tex
-            .push(
-                TexEntry {
-                    pk0: at.pk0,
-                    pk1: at.pk1,
-                    pk2: at.pk2,
-                    resource: resource,
-                    sync_before: sync_before,
-                    sync_after: sync_after,
-                    access_before: access_before,
-                    access_after: access_after,
-                    layout_before: layout_ord(before),
-                    layout_after: layout_ord(after),
-                    sub: sub.flat,
-                    mip: sub.mip,
-                    slice: sub.slice,
-                    plane: sub.plane
-                }
-            );
+        pl.tex.push(
+            TexEntry {
+                pk0: at.pk0,
+                pk1: at.pk1,
+                pk2: at.pk2,
+                resource: resource,
+                sync_before: sync_before,
+                sync_after: sync_after,
+                access_before: access_before,
+                access_after: access_after,
+                layout_before: layout_ord(before),
+                layout_after: layout_ord(after),
+                sub: sub.flat,
+                mip: sub.mip,
+                slice: sub.slice,
+                plane: sub.plane
+            }
+        );
         return;
     }
     for i in 0..pl.buf.len() {
@@ -244,26 +242,29 @@ fn push_pending(
             Option::None => (),
         }
     }
-    pl
-        .buf
-        .push(
-            BufEntry {
-                pk0: at.pk0,
-                pk1: at.pk1,
-                pk2: at.pk2,
-                resource: resource,
-                sync_before: sync_before,
-                sync_after: sync_after,
-                access_before: access_before,
-                access_after: access_after
-            }
-        );
+    pl.buf.push(
+        BufEntry {
+            pk0: at.pk0,
+            pk1: at.pk1,
+            pk2: at.pk2,
+            resource: resource,
+            sync_before: sync_before,
+            sync_after: sync_after,
+            access_before: access_before,
+            access_after: access_after
+        }
+    );
 }
 
 // Split or single placement for a barrier ordering earlier work on the same
 // queue before pass `p`.
-fn placement(in pl: Planner, p: u32, queue: u32, resource: u32, has_same_queue_prior: bool)
-    -> Placement {
+fn placement(
+    in pl: Planner,
+    p: u32,
+    queue: u32,
+    resource: u32,
+    has_same_queue_prior: bool
+) -> Placement {
     if pl.split && has_same_queue_prior {
         let t = touch_at(in pl, resource, queue);
         if t != none32() && t != p {
@@ -403,11 +404,7 @@ fn process(
             match first_auto_layout(kind, req.access) {
                 Option::Some(l) => l,
                 Option::None => {
-                    let s = if has_sub {
-                        sub.flat
-                    } else {
-                        0
-                    };
+                    let s = if has_sub { sub.flat } else { 0 };
                     return StepOutcome::Failed(
                         PlanFault::NoLayoutForAccess {
                             pass: p,
@@ -420,11 +417,7 @@ fn process(
             }
         };
         if cur != target && !queue_can_transition(kind, cur, target) {
-            let s = if has_sub {
-                sub
-            } else {
-                no_sub()
-            };
+            let s = if has_sub { sub } else { no_sub() };
             match handoff(inout pl, in g, p, queue, resource, s, st, cur, target) {
                 StepOutcome::Done(next) => {
                     st = next;

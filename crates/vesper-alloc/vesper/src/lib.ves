@@ -291,19 +291,11 @@ enum ConfigError: _ {
 }
 
 fn max(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn min(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn dec(n: u64) -> u64 {
@@ -702,11 +694,7 @@ fn place(inout b: Book, size: u64, align: u64, fresh_base: u64, fresh_cap: u64) 
     // Reuse spare chunks retained by an earlier rewind. Spares before the
     // first one that fits are released, so the chunk list stays
     // allocation-ordered.
-    let first_spare = if n == 0 {
-        0
-    } else {
-        inc(b.current)
-    };
+    let first_spare = if n == 0 { 0 } else { inc(b.current) };
     let mut found = MAX_U64;
     let mut found_start: u64 = 0;
     for i in first_spare..n {
@@ -972,8 +960,13 @@ pub fn book_alloc(
 }
 
 // An untracked raw bump allocation (no slot, no finalizer).
-pub fn book_alloc_raw(inout b: Book, size: u64, align: u64, fresh_base: u64, fresh_cap: u64)
-    -> Placed {
+pub fn book_alloc_raw(
+    inout b: Book,
+    size: u64,
+    align: u64,
+    fresh_base: u64,
+    fresh_cap: u64
+) -> Placed {
     match place(inout b, size, align, fresh_base, fresh_cap) {
         Place::At { chunk, prior, start } => Placed::Done {
             slot: MAX_U64,
@@ -998,11 +991,7 @@ pub fn book_alloc_elems(
     fresh_base: u64,
     fresh_cap: u64
 ) -> Placed {
-    let ecap = if esize == 0 {
-        MAX_U64
-    } else {
-        cap
-    };
+    let ecap = if esize == 0 { MAX_U64 } else { cap };
     let bytes = if esize == 0 {
         0
     } else {
@@ -1042,8 +1031,14 @@ pub fn book_alloc_elems(
 
 // Appends `add` bytes to a byte allocation: in place at the unprotected tip,
 // otherwise by relocation (the old slot is released).
-pub fn book_extend(inout b: Book, slot: u64, serial: u64, add: u64, fresh_base: u64, fresh_cap: u64)
-    -> Extended {
+pub fn book_extend(
+    inout b: Book,
+    slot: u64,
+    serial: u64,
+    add: u64,
+    fresh_base: u64,
+    fresh_cap: u64
+) -> Extended {
     let index = match resolve(in b, slot, serial, Kind::Bytes) {
         Result::Ok(i) => i,
         Result::Err(f) => {

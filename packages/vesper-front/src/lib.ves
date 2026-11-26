@@ -234,8 +234,11 @@ pub fn parse_tables_with_limits(
 // `parse_tables_with_limits` with the token limit in the low 32 bits of
 // `counts` and the diagnostic limit in the high 32 bits: the host entry of
 // tests/self_host_front_v2.rs, whose native calls take at most three words.
-pub fn parse_tables_with_packed_limits(in source: Str, max_source_bytes: u64, counts: u64)
-    -> ChunkSeq[u64] {
+pub fn parse_tables_with_packed_limits(
+    in source: Str,
+    max_source_bytes: u64,
+    counts: u64
+) -> ChunkSeq[u64] {
     parse_tables_with_limits(in source, max_source_bytes, counts & 4294967295, counts >> 32)
 }
 
@@ -318,11 +321,7 @@ pub fn surface_fragment_status(in b: Slice[u8], inout m: ChunkSeq[u8]) -> u64 {
         return 1;
     }
     let p = parse_surface_tokens(in b, t, d, max_diagnostics(), hard_depth(), false);
-    if p.d.code.len() != 0 {
-        1
-    } else {
-        0
-    }
+    if p.d.code.len() != 0 { 1 } else { 0 }
 }
 
 // The tables of a refused parse: no tokens or nodes, the diagnostics of `d`.
@@ -351,11 +350,7 @@ fn report_rejected(in d: Diags) -> ChunkSeq[u64] {
 
 fn report_oversized(retained: u64, in d: Diags) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u64]();
-    let leaves: u64 = if retained == 0 {
-        0
-    } else {
-        1
-    };
+    let leaves: u64 = if retained == 0 { 0 } else { 1 };
     out.push(leaves);
     out.push(1);
     out.push(1);
@@ -374,13 +369,12 @@ fn report_oversized(retained: u64, in d: Diags) -> ChunkSeq[u64] {
     out.push(retained);
     out.push(d.text.len());
     for i in 0..d.text.len() {
-        out
-            .push(
-                match d.text.try_get(i) {
-                    Option::Some(c) => widen_u64(c),
-                    Option::None => 0,
-                }
-            );
+        out.push(
+            match d.text.try_get(i) {
+                Option::Some(c) => widen_u64(c),
+                Option::None => 0,
+            }
+        );
     }
     out
 }
@@ -467,14 +461,13 @@ test {
     // @case first_continuation_byte(in "a\u0080x", 2, 1)
     // @case interior_continuation_byte(in "a𐀀x", 3, 1)
     // @case following_lead_byte(in "aéz", 1, 1)
-    fn test_oversized_parse_retains_valid_prefix(in source: Str, limit: u64, retained: u64)
-        -> bool {
+    fn test_oversized_parse_retains_valid_prefix(
+        in source: Str,
+        limit: u64,
+        retained: u64
+    ) -> bool {
         let rows = parse_tables_at_limit(in source, limit);
-        let leaves: u64 = if retained == 0 {
-            0
-        } else {
-            1
-        };
+        let leaves: u64 = if retained == 0 { 0 } else { 1 };
         if rows.try_get(0) != Option::Some(leaves)
             || rows.try_get(1) != Option::Some(1)
             || rows.try_get(2) != Option::Some(1) {
@@ -579,8 +572,13 @@ test {
     // @case exactly_at_byte_limit(in "fn f() {}", 9, 20, 2, false)
     // @case exceeds_byte_limit(in "fn f() {}", 8, 20, 2, true)
     // @case bad_configuration(in "", 8388609, 20, 2, true)
-    fn test_batch_limits(in source: Str, bytes: u64, tokens: u64, diags: u64, rejected: bool)
-        -> bool {
+    fn test_batch_limits(
+        in source: Str,
+        bytes: u64,
+        tokens: u64,
+        diags: u64,
+        rejected: bool
+    ) -> bool {
         let direct = parse_tables_with_limits(in source, bytes, tokens, diags);
         let packed = parse_tables_with_packed_limits(in source, bytes, tokens | (diags << 32));
         if direct.len() != packed.len() {

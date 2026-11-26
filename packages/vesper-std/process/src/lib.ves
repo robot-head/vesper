@@ -692,11 +692,7 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
         flags = flags | StdProcess::POSIX_SPAWN_SETPGROUP;
     }
     let _ = StdProcess::posix_spawnattr_setflags(inout attr, flags);
-    let mut failed: u32 = if fa == 0 {
-        12
-    } else {
-        0
-    };
+    let mut failed: u32 = if fa == 0 { 12 } else { 0 };
     let (_, _) = if failed != 0 {
         (-1, -1)
     } else {
@@ -814,8 +810,13 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
 // One `read` of up to 8 KiB from `fd` onto the end of `buf`: the bytes
 // read (0 at end of file), or -1 with `err` set. `EINTR` is retried.
 // With a `limit` (not 0), bytes past it are dropped and `cut` is set.
-fn read_some(fd: i32, inout buf: ChunkSeq[u8], limit: u64, inout cut: bool, inout err: u64)
-    -> i64 eff [Ffi[StdProcess]] {
+fn read_some(
+    fd: i32,
+    inout buf: ChunkSeq[u8],
+    limit: u64,
+    inout cut: bool,
+    inout err: u64
+) -> i64 eff [Ffi[StdProcess]] {
     let at = buf.len();
     let end = wrapping_add(at, 8192);
     buf.resize(end, 0);
@@ -1044,8 +1045,10 @@ fn pump(inout ch: ProcChild, ms: u64, inout err: u64) -> u32 eff [Ffi[StdProcess
 // waited for), or `None` when the time runs out first (the child, and
 // what it wrote so far, stay; wait again, or `kill_tree`). 0 milliseconds
 // only checks. Waiting for a waited child is an `invalid_input()` error.
-pub fn wait_timeout(inout ch: ProcChild, millis: u64)
-    -> Result[Option[ExitStatus], IoError] eff [Ffi[StdProcess]] {
+pub fn wait_timeout(
+    inout ch: ProcChild,
+    millis: u64
+) -> Result[Option[ExitStatus], IoError] eff [Ffi[StdProcess]] {
     if ch.pid <= 0 {
         return Result::Err(io_kind(invalid_input()));
     }
@@ -1077,21 +1080,9 @@ pub fn wait_timeout(inout ch: ProcChild, millis: u64)
         last = spent >= millis;
         // An ended child is only waited on for end of file, which `poll`
         // reports at once; a running one is checked every 10 ms.
-        let left = if last {
-            0
-        } else {
-            wrapping_sub(millis, spent)
-        };
-        let slice = if ch.reaped || left < 10 {
-            left
-        } else {
-            10
-        };
-        let slice = if slice > 1000000 {
-            1000000
-        } else {
-            slice
-        };
+        let left = if last { 0 } else { wrapping_sub(millis, spent) };
+        let slice = if ch.reaped || left < 10 { left } else { 10 };
+        let slice = if slice > 1000000 { 1000000 } else { slice };
         if pump(inout ch, slice, inout err) != 0 {
             return Result::Err(io_word(err));
         }

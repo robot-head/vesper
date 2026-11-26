@@ -101,11 +101,7 @@ fn div_ceil_u64(a: u64, b: u64) -> u64 {
             q = q | 1;
         }
     }
-    if rem != 0 {
-        wrapping_add(q, 1)
-    } else {
-        q
-    }
+    if rem != 0 { wrapping_add(q, 1) } else { q }
 }
 
 fn div_rem_u64(a: u64, b: u64) -> (u64, u64) {
@@ -220,23 +216,17 @@ pub fn write_arena(inout arena: ShardArena, offset: u64, in bytes: Slice[u8]) ->
         let (idx, off) = div_rem_u64(at, arena.shard_len);
         let avail = wrapping_sub(arena.shard_len, off);
         let rem = wrapping_sub(n, done);
-        let chunk = if avail < rem {
-            avail
-        } else {
-            rem
-        };
+        let chunk = if avail < rem { avail } else { rem };
         mark_shard_dirty(inout arena, idx);
         let mut k: u64 = 0;
         loop {
             if k >= chunk {
                 break;
             }
-            let _ = arena
-                .data
-                .try_set(
-                    wrapping_add(at, k),
-                    byte_at(in bytes, wrapping_add(done, k)),
-                );
+            let _ = arena.data.try_set(
+                wrapping_add(at, k),
+                byte_at(in bytes, wrapping_add(done, k)),
+            );
             k = wrapping_add(k, 1);
         }
         done = wrapping_add(done, chunk);
@@ -394,12 +384,11 @@ fn push_u64_le(inout out: ChunkSeq[u8], v: u64) {
         if i >= 8 {
             break;
         }
-        out
-            .push(
-                wrapping_u8(
-                    wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8))) & 255,
-                )
-            );
+        out.push(
+            wrapping_u8(
+                wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8))) & 255,
+            )
+        );
         i = wrapping_add(i, 1);
     }
 }
@@ -432,14 +421,7 @@ pub fn encode_delta(in d: ArenaDelta) -> ChunkSeq[u8] {
     push_u64_le(inout out, d.epoch);
     push_u64_le(inout out, d.len);
     push_u32_le(inout out, d.shard_len);
-    push_u32_le(
-        inout out,
-        if d.keyframe {
-            1
-        } else {
-            0
-        }
-    );
+    push_u32_le(inout out, if d.keyframe { 1 } else { 0 });
     let count = d.shard_ids.as_slice().len();
     push_u32_le(inout out, wrapping_u32(count));
     let slen = widen_u64(d.shard_len);
@@ -614,12 +596,10 @@ pub fn apply_delta(in d: ArenaDelta, inout arena: ShardArena) -> u32 {
             if i >= slen {
                 break;
             }
-            let _ = arena
-                .data
-                .try_set(
-                    wrapping_add(dst_base, i),
-                    byte_at(in sbytes, wrapping_add(src_base, i)),
-                );
+            let _ = arena.data.try_set(
+                wrapping_add(dst_base, i),
+                byte_at(in sbytes, wrapping_add(src_base, i)),
+            );
             i = wrapping_add(i, 1);
         }
         k = wrapping_add(k, 1);

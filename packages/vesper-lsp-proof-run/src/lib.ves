@@ -199,24 +199,23 @@ fn read_job(in b: Slice[u8]) -> Job {
             params.push(wrapping_sub(pool.len(), at));
             kinds.push(word(in b, inout r));
         }
-        models
-            .push(
-                Model {
-                    function: function,
-                    function_n: wrapping_sub(module, function),
-                    module: module,
-                    module_n: wrapping_sub(theorem, module),
-                    theorem: theorem,
-                    theorem_n: wrapping_sub(exact, theorem),
-                    exact: exact,
-                    exact_n: wrapping_sub(bitvec, exact),
-                    bitvec: bitvec,
-                    bitvec_n: wrapping_sub(key, bitvec),
-                    key: key,
-                    p0: p0,
-                    pn: np
-                }
-            );
+        models.push(
+            Model {
+                function: function,
+                function_n: wrapping_sub(module, function),
+                module: module,
+                module_n: wrapping_sub(theorem, module),
+                theorem: theorem,
+                theorem_n: wrapping_sub(exact, theorem),
+                exact: exact,
+                exact_n: wrapping_sub(bitvec, exact),
+                bitvec: bitvec,
+                bitvec_n: wrapping_sub(key, bitvec),
+                key: key,
+                p0: p0,
+                pn: np
+            }
+        );
     }
     Job {
         launcher: launcher,
@@ -426,11 +425,7 @@ fn f_copy(in from: ChunkSeq[u8], in to: ChunkSeq[u8]) -> bool eff [Ffi[StdFs]] {
 fn join(in base: ChunkSeq[u8], in name: Str) -> ChunkSeq[u8] {
     let mut out = ChunkSeq::new[u8]();
     put_bytes(inout out, in base.as_slice());
-    let sep: u8 = if os() == os_windows() {
-        92
-    } else {
-        47
-    };
+    let sep: u8 = if os() == os_windows() { 92 } else { 47 };
     let n = out.len();
     if n > 0 {
         let last = byte(in out.as_slice(), wrapping_sub(n, 1));
@@ -647,14 +642,7 @@ fn lean_command(in st: St, in dir: ChunkSeq[u8]) -> ProcCommand eff [Ffi[StdProc
     env_clear(inout c);
     let mut search = ChunkSeq::new[u8]();
     put_bytes(inout search, in dir.as_slice());
-    search
-        .push(
-            if os() == os_windows() {
-                59
-            } else {
-                58
-            }
-        );
+    search.push(if os() == os_windows() { 59 } else { 58 });
     let lib = join(in st.prefix, in "lib/lean");
     put_bytes(inout search, in lib.as_slice());
     let s = str_of(in search.as_slice());
@@ -692,8 +680,12 @@ fn compile(inout st: St, in module: ChunkSeq[u8], timeout: u64) -> bool eff [Ffi
 
 // `ensure_olean`: `<module>.olean` for `text` in the stage, from the cache
 // or compiled. On a failure the reason is in `st.reason`.
-fn ensure_olean(inout st: St, in module: ChunkSeq[u8], in text: ChunkSeq[u8], timeout: u64)
-    -> bool eff [Ffi[StdProcess], Ffi[StdFs]] {
+fn ensure_olean(
+    inout st: St,
+    in module: ChunkSeq[u8],
+    in text: ChunkSeq[u8],
+    timeout: u64
+) -> bool eff [Ffi[StdProcess], Ffi[StdFs]] {
     let mut keyed = ChunkSeq::new[u8]();
     put_bytes(inout keyed, in st.version.as_slice());
     keyed.push(0);
@@ -886,11 +878,7 @@ fn cache_record(inout st: St, in key: ChunkSeq[u8], in s: Status) eff [Ffi[StdFs
 
 // `env::join_paths` refuses a segment holding the separator.
 fn bad_search(in st: St, in dir: ChunkSeq[u8]) -> bool {
-    let sep: u8 = if os() == os_windows() {
-        34
-    } else {
-        58
-    };
+    let sep: u8 = if os() == os_windows() { 34 } else { 58 };
     let lib = join(in st.prefix, in "lib/lean");
     has(in dir.as_slice(), sep) || has(in lib.as_slice(), sep)
 }
@@ -914,8 +902,13 @@ fn put_join_paths_error(inout o: ChunkSeq[u8]) {
 
 // `bitvec_check`: the `bv_decide` rendering of a model `omega` did not
 // prove.
-fn bitvec_check(inout st: St, in job: Job, m: Model, in omega: ChunkSeq[u8], timeout: u64)
-    -> Status eff [Ffi[StdProcess], Ffi[StdFs]] {
+fn bitvec_check(
+    inout st: St,
+    in job: Job,
+    m: Model,
+    in omega: ChunkSeq[u8],
+    timeout: u64
+) -> Status eff [Ffi[StdProcess], Ffi[StdFs]] {
     let name = part(in job, m.module, m.module_n);
     let module = with_ext(in name, in "_bv");
     let lname = with_ext(in module, in ".lean");
@@ -1093,11 +1086,7 @@ fn render_value(inout out: ChunkSeq[u8], in t: Slice[u8], s: u64, e: u64, kind_c
         if i < de && byte(in t, i) == 43 {
             i = inc(i);
         }
-        let base: u128 = if hex {
-            16
-        } else {
-            10
-        };
+        let base: u128 = if hex { 16 } else { 10 };
         let mut v: u128 = 0;
         let mut ok = i < de;
         for j in i..de {
@@ -1533,8 +1522,10 @@ fn fail_all(inout st: St, in job: Job) {
 // Run the job in the file `job_path` (`proof_lens::job_words`) and write
 // its outcome rows (`proof_lens::outcome_rows`) to `out_path`: 0, or 1 when
 // the job cannot be read, 2 when the rows cannot be written.
-pub fn proof_run(in job_path: Str, in out_path: Str)
-    -> u64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv]] {
+pub fn proof_run(
+    in job_path: Str,
+    in out_path: Str
+) -> u64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv]] {
     let mut jp = ChunkSeq::new[u8]();
     put(inout jp, in job_path);
     let data = match f_read(in jp) {

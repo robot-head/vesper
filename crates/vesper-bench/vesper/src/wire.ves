@@ -150,8 +150,10 @@ pub fn do_sample_check(field: u64, value: u64) eff [Fail[WireErr]] {
 
 // `PmuSample::to_wire_masked`: unavailable fields (bit clear in
 // `present`) are zero.
-pub fn do_wire_from_values(in values: Slice[u64], present: u64)
-    -> PmuSampleWire eff [Fail[WireErr]] {
+pub fn do_wire_from_values(
+    in values: Slice[u64],
+    present: u64
+) -> PmuSampleWire eff [Fail[WireErr]] {
     let mut v: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](FIELD_COUNT);
     for field in 0..FIELD_COUNT {
         let value = if present & pow2(field) != 0 {

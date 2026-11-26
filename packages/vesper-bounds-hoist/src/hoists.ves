@@ -337,16 +337,9 @@ fn stable_views(in f: Fun, in us: Users, inout out: Hoists) {
     for z in 0..order.len() {
         let key = w(u32_at(in order, z));
         let k = out.rows.len();
-        out
-            .rows
-            .push(
-                Hoist {
-                    pre: 0,
-                    place: u32_at(in kplace, key),
-                    ty: u32_at(in kty, key),
-                    entry: true
-                }
-            );
+        out.rows.push(
+            Hoist { pre: 0, place: u32_at(in kplace, key), ty: u32_at(in kty, key), entry: true }
+        );
         for q in 0..kreads.len() {
             let r = u64_at(in kreads, q);
             if (r >> 32) == key {
@@ -444,11 +437,7 @@ fn header_hoists(in f: Fun, in us: Users, inout out: Hoists) {
         let mut both = copy_set(in blocks);
         let pk = f.block(w(pre));
         if pk.term == T_BRANCH && (pk.yes == h || pk.no == h) {
-            let other = if pk.yes == h {
-                pk.no
-            } else {
-                pk.yes
-            };
+            let other = if pk.yes == h { pk.no } else { pk.yes };
             let twin = natural_loop(in g, other);
             let mut disjoint = true;
             for q in 0..twin.len() {
@@ -538,16 +527,14 @@ fn header_hoists(in f: Fun, in us: Users, inout out: Hoists) {
         for z in 0..order.len() {
             let key = w(u32_at(in order, z));
             let r = found.rows.len();
-            found
-                .rows
-                .push(
-                    Hoist {
-                        pre: pre,
-                        place: u32_at(in kplace, key),
-                        ty: u32_at(in kty, key),
-                        entry: false
-                    }
-                );
+            found.rows.push(
+                Hoist {
+                    pre: pre,
+                    place: u32_at(in kplace, key),
+                    ty: u32_at(in kty, key),
+                    entry: false
+                }
+            );
             flen.push(blocks.len());
             for q in 0..kreads.len() {
                 let x = u64_at(in kreads, q);

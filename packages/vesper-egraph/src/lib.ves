@@ -246,16 +246,8 @@ pub fn egraph_math(in input: Str) -> ChunkSeq[u64] {
             let x0 = u32_at(in ids, c0);
             let x1 = u32_at(in ids, c1);
             let a = g.arity_of(op);
-            let k0 = if a >= 1 {
-                x0
-            } else {
-                0
-            };
-            let k1 = if a >= 2 {
-                x1
-            } else {
-                0
-            };
+            let k0 = if a >= 1 { x0 } else { 0 };
+            let k1 = if a >= 2 { x1 } else { 0 };
             // egg's add_expr: add_uncanonical per node, root found last.
             let id = g.add_uncanonical(op, data, k0, k1);
             ids.push(id);

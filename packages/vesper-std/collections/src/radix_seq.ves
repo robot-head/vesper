@@ -306,11 +306,7 @@ test {
         let leaf_count = seq.leaf_epoch.len();
         let node_count = seq.node_epoch.len();
         seq.push(99);
-        let expected_nodes = if boundary == 32 {
-            1
-        } else {
-            2
-        };
+        let expected_nodes = if boundary == 32 { 1 } else { 2 };
         let live = seq.get(boundary) == Option::Some(99);
         let frozen = seq.snapshot_get(snapshot, boundary) == Option::Some(boundary);
         live

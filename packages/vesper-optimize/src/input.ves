@@ -136,15 +136,8 @@ pub fn add_expr(inout t: Tree, n: ExprNode, cap1: u64, cap2: u64) -> u32 {
 pub fn add_int(inout t: Tree, v: i128, start: u32, end: u32) -> u32 {
     let neg = v < 0;
     // `i128::MIN` negates to itself; its magnitude 2^127 is that bit pattern.
-    let m = wrapping_u128(
-        if neg {
-            wrapping_neg_i128(v)
-        } else {
-            v
-        }
-    );
-    let l = t
-        .ast
+    let m = wrapping_u128(if neg { wrapping_neg_i128(v) } else { v });
+    let l = t.ast
         .lits
         .alloc(Lit { kind: 1, neg: neg, bits: wrapping_u64(m), hi: wrapping_u64(m >> 64) });
     add_expr(inout t, node(1, start, end, l.raw(), 0, 0), 0, 0)
@@ -154,8 +147,15 @@ pub fn add_name(inout t: Tree, sym: u32, len: u64, start: u32, end: u32) -> u32 
     add_expr(inout t, node(2, start, end, sym, 0, 0), len, 0)
 }
 
-pub fn add_binary(inout t: Tree, op: u32, cap: u64, left: u32, right: u32, start: u32, end: u32)
-    -> u32 {
+pub fn add_binary(
+    inout t: Tree,
+    op: u32,
+    cap: u64,
+    left: u32,
+    right: u32,
+    start: u32,
+    end: u32
+) -> u32 {
     add_expr(inout t, node(11, start, end, op, left, right), cap, 0)
 }
 

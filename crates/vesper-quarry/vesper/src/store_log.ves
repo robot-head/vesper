@@ -28,8 +28,11 @@ fn le64(in b: Slice[u8], at: u64) -> u64 {
 }
 
 // Returns 0 = Ok, 1 = truncated, 2 = unknown tag, 3 = page diff range, 4 = trailing, 5 = grow out_ranges.
-pub fn record_decode(in payload: Slice[u8], inout out_hdr: Slice[u64], inout out_ranges: Slice[u64])
-    -> u64 {
+pub fn record_decode(
+    in payload: Slice[u8],
+    inout out_hdr: Slice[u64],
+    inout out_ranges: Slice[u64]
+) -> u64 {
     let plen = payload.len();
     if plen == 0 {
         return 1;

@@ -400,8 +400,11 @@ pub fn varint_decode(in buf: Slice[u8]) -> (u64, u64) eff [Fail[VarIntErr]] {
     vi_decode(in buf)
 }
 
-pub fn varint_encode_with_len(value: u64, len: u64, inout out: Slice[u8])
-    -> u64 eff [Fail[VarIntErr]] {
+pub fn varint_encode_with_len(
+    value: u64,
+    len: u64,
+    inout out: Slice[u8]
+) -> u64 eff [Fail[VarIntErr]] {
     vi_encode_with_len(value, len, inout out)
 }
 
@@ -515,8 +518,11 @@ pub fn frame_allowed(frame_type: u64, packet_type: PktType) -> bool {
     fr_allowed(frame_type, packet_type)
 }
 
-pub fn frame_parse_at(in buf: Slice[u8], at: u64, packet_type: PktType)
-    -> FrameAt eff [Fail[FrameErr]] {
+pub fn frame_parse_at(
+    in buf: Slice[u8],
+    at: u64,
+    packet_type: PktType
+) -> FrameAt eff [Fail[FrameErr]] {
     fr_parse_at(in buf, at, packet_type)
 }
 
@@ -562,8 +568,11 @@ pub fn frame_encode_stream_header(
     fr_encode_stream_header(inout out, stream_id, offset, len, fin)
 }
 
-pub fn frame_encode_crypto_header(inout out: Slice[u8], offset: u64, len: u64)
-    -> u64 eff [Fail[FrameErr]] {
+pub fn frame_encode_crypto_header(
+    inout out: Slice[u8],
+    offset: u64,
+    len: u64
+) -> u64 eff [Fail[FrameErr]] {
     fr_encode_crypto_header(inout out, offset, len)
 }
 
@@ -597,8 +606,11 @@ pub fn received_on_packet(
     rx_on_packet_received(inout s, inout ranges, pn, now_ns, ack_eliciting, ecn)
 }
 
-pub fn received_ack_delay(in s: RxState, now_ns: u64, ack_delay_exponent: u8)
-    -> Option[u64] eff [Fail[AckErr]] {
+pub fn received_ack_delay(
+    in s: RxState,
+    now_ns: u64,
+    ack_delay_exponent: u8
+) -> Option[u64] eff [Fail[AckErr]] {
     rx_ack_delay(in s, now_ns, ack_delay_exponent)
 }
 
@@ -996,11 +1008,10 @@ fn tk_put_be64(inout b: Slice[u8], at: u64, v: u64) {
         if i >= 8 {
             break;
         }
-        b
-            .try_set(
-                wrapping_add(at, i),
-                wrapping_u8(wrapping_shr_u64(v, wrapping_u32(wrapping_mul(wrapping_sub(7, i), 8))))
-            );
+        b.try_set(
+            wrapping_add(at, i),
+            wrapping_u8(wrapping_shr_u64(v, wrapping_u32(wrapping_mul(wrapping_sub(7, i), 8))))
+        );
         i = wrapping_add(i, 1);
     }
 }

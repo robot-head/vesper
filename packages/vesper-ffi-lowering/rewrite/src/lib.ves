@@ -258,16 +258,7 @@ fn is_handle(inout r: R, x: u32) -> bool {
             yes = true;
         }
     }
-    let ok = r
-        .handle_of
-        .try_set(
-            k,
-            if yes {
-                2
-            } else {
-                1
-            }
-        );
+    let ok = r.handle_of.try_set(k, if yes { 2 } else { 1 });
     yes
 }
 
@@ -376,16 +367,14 @@ fn module(inout r: R) {
                 Option::None => continue,
             };
             for v in 0..list_len(in r.ast, a.variants) {
-                let vn = match r
-                    .ast
+                let vn = match r.ast
                     .variants
                     .get(idx_from_raw[VariantNode](list_at(in r.ast, a.variants, v))) {
                     Option::Some(x) => x,
                     Option::None => continue,
                 };
                 for f in 0..list_len(in r.ast, vn.fields) {
-                    match r
-                        .ast
+                    match r.ast
                         .fields
                         .get(idx_from_raw[FieldNode](list_at(in r.ast, vn.fields, f))) {
                         Option::Some(fd) => ty(inout r, fd.ty, a.start, a.end),
@@ -519,16 +508,14 @@ fn effects(inout r: R, es: u32, start: u32, end: u32) {
         r.buf.push_str(in "Ffi$");
         let ok = r.ast.names.resolve_into(symbol_from_id(library), inout r.buf);
         let name = intern_buf(inout r);
-        let ok2 = r
-            .ast
+        let ok2 = r.ast
             .effect_nodes
             .set(idx_from_raw[EffectNode](ei), EffectNode { label: e.label, name: name, args: 0 });
     }
 }
 
 fn effect_at(in r: R, i: u32) -> EffectNode {
-    r
-        .ast
+    r.ast
         .effect_nodes
         .get_or(idx_from_raw[EffectNode](i), EffectNode { label: NONE, name: NONE, args: 0 })
 }
@@ -573,37 +560,31 @@ fn expr(inout r: R, x: u32) {
             if ci != NONE64 {
                 let cname = r.s.const_row(ci).name;
                 let fn_name = const_fn_sym(inout r, lib, cname);
-                let callee_idx = r
-                    .ast
-                    .exprs
-                    .alloc(
-                        ExprNode {
-                            kind: E_NAME,
-                            start: e.start,
-                            end: e.start,
-                            a: fn_name,
-                            b: 0,
-                            c: 0,
-                            d: 0,
-                            e: 0
-                        }
-                    );
-                let ok = r
-                    .ast
-                    .exprs
-                    .set(
-                        idx_from_raw[ExprNode](x),
-                        ExprNode {
-                            kind: E_CALL,
-                            start: e.start,
-                            end: e.end,
-                            a: callee_idx.raw(),
-                            b: 0,
-                            c: 0,
-                            d: 0,
-                            e: 0
-                        }
-                    );
+                let callee_idx = r.ast.exprs.alloc(
+                    ExprNode {
+                        kind: E_NAME,
+                        start: e.start,
+                        end: e.start,
+                        a: fn_name,
+                        b: 0,
+                        c: 0,
+                        d: 0,
+                        e: 0
+                    }
+                );
+                let ok = r.ast.exprs.set(
+                    idx_from_raw[ExprNode](x),
+                    ExprNode {
+                        kind: E_CALL,
+                        start: e.start,
+                        end: e.end,
+                        a: callee_idx.raw(),
+                        b: 0,
+                        c: 0,
+                        d: 0,
+                        e: 0
+                    }
+                );
             } else {
                 let mark = r.s.out.len();
                 r.s.put(in "foreign function ");
@@ -638,22 +619,19 @@ fn expr(inout r: R, x: u32) {
         if lib != NONE64 {
             let name = call(inout r, lib, callee.a, at, e.c, e.start, e.end);
             if name != NONE {
-                let ok = r
-                    .ast
-                    .exprs
-                    .set(
-                        idx_from_raw[ExprNode](e.a),
-                        ExprNode {
-                            kind: E_NAME,
-                            start: callee.start,
-                            end: callee.end,
-                            a: name,
-                            b: callee.b,
-                            c: callee.c,
-                            d: callee.d,
-                            e: callee.e
-                        }
-                    );
+                let ok = r.ast.exprs.set(
+                    idx_from_raw[ExprNode](e.a),
+                    ExprNode {
+                        kind: E_NAME,
+                        start: callee.start,
+                        end: callee.end,
+                        a: name,
+                        b: callee.b,
+                        c: callee.c,
+                        d: callee.d,
+                        e: callee.e
+                    }
+                );
             }
         } else {
             expr(inout r, e.a);
@@ -725,11 +703,9 @@ fn expr(inout r: R, x: u32) {
         let eff = effect_at(in r, e.a);
         if sym_is(in r, eff.name, in "Ffi") || is_library(inout r, eff.name) {
             let mark = r.s.out.len();
-            r
-                .s
-                .put(
-                    in "foreign capabilities are granted by the package's import, not handled in source"
-                );
+            r.s.put(
+                in "foreign capabilities are granted by the package's import, not handled in source"
+            );
             let m = message(inout r, mark);
             raise(inout r, K_FOREIGN_HANDLER, m, e.start, e.end);
         }
@@ -769,20 +745,17 @@ fn pattern(inout r: R, p: u32) {
                     let lit = r.ast.lits.alloc(Lit { kind: 1, neg: c.neg, bits: c.value, hi: 0 });
                     buf_name(inout r, wrapping_u32(widen_u64(c.scalar)));
                     let scalar = intern_buf(inout r);
-                    let ok = r
-                        .ast
-                        .pats
-                        .set(
-                            idx_from_raw[PatNode](p),
-                            PatNode {
-                                kind: P_LIT,
-                                start: n.start,
-                                end: n.end,
-                                a: lit.raw(),
-                                b: scalar,
-                                c: NONE
-                            }
-                        );
+                    let ok = r.ast.pats.set(
+                        idx_from_raw[PatNode](p),
+                        PatNode {
+                            kind: P_LIT,
+                            start: n.start,
+                            end: n.end,
+                            a: lit.raw(),
+                            b: scalar,
+                            c: NONE
+                        }
+                    );
                     return;
                 }
             }
@@ -950,24 +923,8 @@ fn call(inout r: R, lib: u64, x: u32, at: u64, args: u32, start: u32, end: u32) 
                 r.sites.push(w(ae.start));
                 r.sites.push(w(ae.end));
                 r.sites.push(w(p.ty));
-                r
-                    .sites
-                    .push(
-                        if p.nullable {
-                            1
-                        } else {
-                            0
-                        }
-                    );
-                r
-                    .sites
-                    .push(
-                        if p.in_place {
-                            1
-                        } else {
-                            0
-                        }
-                    );
+                r.sites.push(if p.nullable { 1 } else { 0 });
+                r.sites.push(if p.in_place { 1 } else { 0 });
             }
             if count > 0 {
                 let ok = r.sites.try_set(wrapping_add(head, 2), count);
@@ -1086,11 +1043,7 @@ fn put_flag(inout s: S, b: bool) {
 // Byte order of two S names (`str::cmp`), then of two length vectors
 // (`Vec<usize>`'s `Ord`): -1, 0 or 1.
 fn vector_cmp(in r: R, a: u64, n: u64, b: u64, m: u64) -> i32 {
-    let k = if n < m {
-        n
-    } else {
-        m
-    };
+    let k = if n < m { n } else { m };
     for i in 0..k {
         let x = u64_at(in r.ilens, wrapping_add(a, i));
         let y = u64_at(in r.ilens, wrapping_add(b, i));
@@ -1388,16 +1341,7 @@ fn read_ty(inout rd: Reader, in b: Slice[u8], inout ast: Ast, inout w: W) -> u32
         let t = read_ty(inout rd, in b, inout ast, inout w);
         items.push(t);
     }
-    w
-        .ty(
-            if kind == 1 {
-                1
-            } else {
-                2
-            },
-            name,
-            in items
-        )
+    w.ty(if kind == 1 { 1 } else { 2 }, name, in items)
 }
 
 // The harness entry of buffers.ves: the case `input` (the rewrite's, then

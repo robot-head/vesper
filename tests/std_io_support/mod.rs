@@ -514,6 +514,7 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ) -> i32;
         fn FlushFileBuffers(h_file: u64) -> i32;
         fn GetFileSizeEx(h_file: u64, lp_file_size: *mut i64) -> i32;
+        fn GetFileInformationByHandle(h_file: u64, lp_file_information: *mut u8) -> i32;
         fn GetFileAttributesExW(
             lp_file_name: *const u16,
             f_info_level_id: i32,
@@ -635,6 +636,10 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("WriteFile", WriteFile as *const u8),
         ("FlushFileBuffers", FlushFileBuffers as *const u8),
         ("GetFileSizeEx", GetFileSizeEx as *const u8),
+        (
+            "GetFileInformationByHandle",
+            GetFileInformationByHandle as *const u8,
+        ),
         ("GetFileAttributesExW", GetFileAttributesExW as *const u8),
         ("FindFirstFileW", FindFirstFileW as *const u8),
         ("FindNextFileW", FindNextFileW as *const u8),

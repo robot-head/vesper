@@ -544,6 +544,124 @@ pub fn lower_for_test(
     lower_program(world, program, entry, options, &evidence::Sites::default()).map(|(_, lir)| lir)
 }
 
+/// What a build writes: the container, its bytes and the machine-code
+/// size (the part of [`Artifact`] that [`build_command`] reads).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Built {
+    pub container: Container,
+    pub bytes: Vec<u8>,
+    pub code_len: usize,
+}
+
+/// The [`compile`] behind [`build_command`] (`vesper build --codegen
+/// verified` and the driver's verified build step). The hybrid Stage 2
+/// build installs the Vesper port's (#1886).
+#[derive(Clone, Copy)]
+pub struct VerifiedBuildTable {
+    /// [`build`].
+    pub build: fn(&World, &str, &Options) -> Result<Built, VerifiedError>,
+}
+
+/// The Rust implementation, the default [`VerifiedBuildTable`].
+pub const RUST_VERIFIED_BUILD: VerifiedBuildTable = VerifiedBuildTable { build: rust_build };
+
+static VERIFIED_BUILD: std::sync::OnceLock<VerifiedBuildTable> = std::sync::OnceLock::new();
+
+/// Replace [`RUST_VERIFIED_BUILD`] for the rest of the process. Only the
+/// first call takes effect; a later one returns its table back.
+pub fn install_verified_build(table: VerifiedBuildTable) -> Result<(), VerifiedBuildTable> {
+    VERIFIED_BUILD.set(table)
+}
+
+/// [`compile`]'s container, bytes and code size, from whatever is
+/// installed.
+pub fn build(world: &World, entry: &str, options: &Options) -> Result<Built, VerifiedError> {
+    (VERIFIED_BUILD.get().unwrap_or(&RUST_VERIFIED_BUILD).build)(world, entry, options)
+}
+
+/// [`build`] in Rust, whatever is installed.
+pub fn rust_build(world: &World, entry: &str, options: &Options) -> Result<Built, VerifiedError> {
+    compile(world, entry, options).map(|a| Built {
+        container: a.container,
+        bytes: a.bytes,
+        code_len: a.code_len,
+    })
+}
+
+/// The program [`compile`] monomorphizes (after ir_opt) and its instance
+/// limit: the input of the Vesper port.
+pub fn optimized_program(
+    world: &World,
+    entry: &str,
+    options: &Options,
+) -> Result<(crate::ir::Program, usize), VerifiedError> {
+    Ok((optimized(world, entry, options)?, max_instances(options)))
+}
+
+/// The container [`compile`] writes for `target`, if it is one.
+pub fn container_of(target: Target) -> Option<Container> {
+    match (target.arch, target.os) {
+        (Arch::X86_64 | Arch::Aarch64 | Arch::Riscv64, Os::Linux) => Some(Container::ElfExecutable),
+        (Arch::Aarch64, Os::MacOs) => Some(Container::MachOObject),
+        (Arch::X86_64, Os::Windows) => Some(Container::CoffObject),
+        _ => None,
+    }
+}
+
+impl VerifiedError {
+    /// The error whose display is `text` (the Vesper port's error text).
+    /// Text in no error's form is `Invalid`.
+    pub fn from_display(text: &str) -> Self {
+        let Some(rest) = text.strip_prefix("verified codegen: ") else {
+            return Self::Invalid(text.to_owned());
+        };
+        for (prefix, make) in [
+            ("entry: ", Self::Entry as fn(String) -> Self),
+            ("target: ", Self::Target),
+            ("limit: ", Self::Limit),
+            ("invalid input: ", Self::Invalid),
+        ] {
+            if let Some(e) = rest.strip_prefix(prefix) {
+                return make(e.to_owned());
+            }
+        }
+        if let Some(u) = rest.strip_prefix("unsupported ")
+            && let Some((construct, f)) = u.split_once(" in '")
+            && let Some((function, detail)) = f.split_once("': ")
+            && let Some(construct) = Unsupported::from_debug(construct)
+        {
+            return Self::Unsupported {
+                construct,
+                function: function.to_owned(),
+                detail: detail.to_owned(),
+            };
+        }
+        Self::Invalid(text.to_owned())
+    }
+}
+
+impl Unsupported {
+    fn from_debug(name: &str) -> Option<Self> {
+        use Unsupported::*;
+        [
+            Float,
+            String,
+            Enum,
+            Match,
+            Index,
+            FunctionValue,
+            Generic,
+            Effect,
+            ExternalFunction,
+            StructuralEquality,
+            Type,
+            Operation,
+        ]
+        .into_iter()
+        .find(|u| format!("{u:?}") == name)
+    }
+}
+
 /// Compile `entry` (no parameters) and everything it reaches.
 pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact, VerifiedError> {
     let (program, sites) = prepare(world, entry, options)?;

@@ -171,11 +171,7 @@ fn pass_name(p: u64) -> Str {
 }
 
 fn resumption_name(linear: bool) -> Str {
-    if linear {
-        "linear"
-    } else {
-        "affine"
-    }
+    if linear { "linear" } else { "affine" }
 }
 
 // `Exporter::id`: `<package>::<kind>::<name>`, builtins under `std/core`.
@@ -351,8 +347,11 @@ fn member(inout j: J, in k: Str, in v: Str) {
 // The order of the keys (`pool[starts[i]..][..lens[i]]`) as a BTreeMap
 // built by inserting them in order iterates them: sorted, and of equal
 // keys the last.
-fn map_order(in pool: Slice[u8], in starts: ChunkSeq[u64], in lens: ChunkSeq[u64])
-    -> ChunkSeq[u64] {
+fn map_order(
+    in pool: Slice[u8],
+    in starts: ChunkSeq[u64],
+    in lens: ChunkSeq[u64]
+) -> ChunkSeq[u64] {
     let n = starts.len();
     let mut a: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut t: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -451,11 +450,7 @@ fn cmp_path(in b: Slice[u8], p: u64, q: u64) -> i64 {
     let mut c = q;
     let na = num(in b, inout a);
     let nc = num(in b, inout c);
-    let n = if na < nc {
-        na
-    } else {
-        nc
-    };
+    let n = if na < nc { na } else { nc };
     for _ in 0..n {
         let (sa, la) = text(in b, inout a);
         let (sc, lc) = text(in b, inout c);

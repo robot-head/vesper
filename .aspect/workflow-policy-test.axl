@@ -353,6 +353,7 @@ def _self_host_differentials_run_as_their_own_buildbuddy_check(h):
         _contains("--test_summary=short", command(name))
         _contains("--config=ci_opt", command(name).split())
     _contains("--config=ci_opt", everything.split())
+    _contains("--config=ci_opt", actions["Native and acceptance scripts"]["env"]["BAZEL_FLAGS"].split())
     bazelrc = h.read(".bazelrc").splitlines()
     for option in ["--compilation_mode=opt",
                    "--@rules_rust//rust/settings:extra_rustc_flag=-Cdebug-assertions=on",
@@ -474,7 +475,7 @@ def _hybrid_and_ports_skip_pull_requests(h):
     _equal([row["os"] for row in include], ["ubuntu-latest", "macos-latest", "windows-latest"])
     hybrid_steps = hybrid["jobs"]["hybrid"]["steps"]
     divergent = [step for step in hybrid_steps if " catches a divergent " in step.get("name", "")]
-    _equal(len(divergent), 10)
+    _equal(len(divergent), 11)
     for step in divergent:
         _equal(step.get("if"), "runner.os == 'Linux'")
     _absent("if", _first([step for step in hybrid_steps if step.get("name") == "Build and test the hybrid compiler"]))

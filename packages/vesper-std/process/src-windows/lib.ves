@@ -311,11 +311,7 @@ fn env_override_state(in c: ProcCommand, in key: Slice[u8]) -> u8 {
         let (a, b) = env_key_bounds(in c, i);
         if slice_eq_nocase(in c.env_keys[a..b], in key) {
             let op = byte(in c.env_ops.as_slice(), i);
-            break if op == 1 {
-                1
-            } else {
-                2
-            };
+            break if op == 1 { 1 } else { 2 };
         }
     }
 }
@@ -468,11 +464,7 @@ pub fn cwd(inout c: ProcCommand, in dir: Str) {
 
 pub fn stdio(inout c: ProcCommand, stream: u32, mode: u32) {
     if stream == stdin_stream() {
-        c.stdin_mode = if mode == capture() {
-            null()
-        } else {
-            mode
-        };
+        c.stdin_mode = if mode == capture() { null() } else { mode };
     } else if stream == stdout_stream() {
         c.stdout_mode = mode;
     } else if stream == stderr_stream() {
@@ -738,8 +730,11 @@ fn exists16(in path: Slice[u16]) -> bool eff [Ffi[StdProcess]] {
 
 // The first `dir\name` that exists, over the `;`-separated entries of
 // `paths` (quotes stripped, empty entries skipped), or empty.
-fn search16(in paths: Slice[u16], in name: Slice[u16], has_extension: bool)
-    -> ChunkSeq[u16] eff [Ffi[StdProcess]] {
+fn search16(
+    in paths: Slice[u16],
+    in name: Slice[u16],
+    has_extension: bool
+) -> ChunkSeq[u16] eff [Ffi[StdProcess]] {
     let mut dir: ChunkSeq[u16] = ChunkSeq::new[u16]();
     let mut quoted = false;
     let n = paths.len();
@@ -1062,11 +1057,7 @@ fn keep(inout dst: ChunkSeq[u8], in src: Slice[u8], n: u64, limit: u64, inout cu
     } else {
         wrapping_sub(limit, dst.len())
     };
-    let take = if n < room {
-        n
-    } else {
-        room
-    };
+    let take = if n < room { n } else { room };
     if take < n {
         cut = true;
     }
@@ -1094,8 +1085,12 @@ fn drain_pipe(h: u64, inout dst: ChunkSeq[u8], limit: u64, inout cut: bool) eff 
 
 // Read what is waiting in pipe `h` now, without blocking: the new handle
 // (0 once the pipe has ended and is closed) and whether bytes came.
-fn pump_pipe(h: u64, inout dst: ChunkSeq[u8], limit: u64, inout cut: bool)
-    -> (u64, bool) eff [Ffi[StdProcess]] {
+fn pump_pipe(
+    h: u64,
+    inout dst: ChunkSeq[u8],
+    limit: u64,
+    inout cut: bool
+) -> (u64, bool) eff [Ffi[StdProcess]] {
     if h == 0 {
         return (0, false);
     }
@@ -1110,11 +1105,7 @@ fn pump_pipe(h: u64, inout dst: ChunkSeq[u8], limit: u64, inout cut: bool)
     if avail.v == 0 {
         return (h, false);
     }
-    let want = if avail.v > 65536 {
-        65536
-    } else {
-        avail.v
-    };
+    let want = if avail.v > 65536 { 65536 } else { avail.v };
     let mut tmp: ChunkSeq[u8] = ChunkSeq::new[u8]();
     tmp.resize(widen_u64(want), 0);
     let mut n = DwordBox { v: 0 };
@@ -1167,8 +1158,10 @@ pub fn wait(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProc
 // waited for), or `None` when the time runs out first (the child, and
 // what it wrote so far, stay; wait again, or `kill_tree`). 0 milliseconds
 // only checks. Waiting for a waited child is an `invalid_input()` error.
-pub fn wait_timeout(inout ch: ProcChild, millis: u64)
-    -> Result[Option[ExitStatus], IoError] eff [Ffi[StdProcess]] {
+pub fn wait_timeout(
+    inout ch: ProcChild,
+    millis: u64
+) -> Result[Option[ExitStatus], IoError] eff [Ffi[StdProcess]] {
     if ch.waited {
         return Result::Err(IoError { kind: invalid_input(), os: 0 });
     }
@@ -1191,11 +1184,7 @@ pub fn wait_timeout(inout ch: ProcChild, millis: u64)
         }
         if !ogot && !egot {
             let left = wrapping_sub(millis, spent);
-            let slice = if left < 5 {
-                left
-            } else {
-                5
-            };
+            let slice = if left < 5 { left } else { 5 };
             if ended {
                 StdProcess::Sleep(wrapping_u32(slice));
             } else {

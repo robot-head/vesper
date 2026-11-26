@@ -314,11 +314,7 @@ impl Enc {
                 // two's complement words to a sign and a magnitude
                 if (hi >> 63) != 0 {
                     let nlo = wrapping_add(lo ^ 18446744073709551615, 1);
-                    let carry: u64 = if nlo == 0 {
-                        1
-                    } else {
-                        0
-                    };
+                    let carry: u64 = if nlo == 0 { 1 } else { 0 };
                     self.put(Word::Int);
                     self.put(1);
                     self.put(nlo);
@@ -501,8 +497,13 @@ fn inst_drops(in p: Program, at: u64, inout drops: ChunkSeq[u64]) -> u64 {
 }
 
 // Function `fi` of `p` as the input words of words.rs (step words zero).
-pub fn encode_fun(in p: Program, inout t: Types, in names: Names, inout tc: TypeCache, fi: u64)
-    -> ChunkSeq[u8] {
+pub fn encode_fun(
+    in p: Program,
+    inout t: Types,
+    in names: Names,
+    inout tc: TypeCache,
+    fi: u64
+) -> ChunkSeq[u8] {
     let mut e = Enc {
         out: ChunkSeq::new[u64](),
         loc: names_new(),

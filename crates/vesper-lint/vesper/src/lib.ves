@@ -96,8 +96,14 @@ pub copy struct LintFail {
 // `Policy::parse` (policy.ves `parse_policy`). The result: the severities of
 // the seven lints in `LintName` order (0 none, 1 allow, 2 warn, 3 deny), the
 // configured mask, then the usage: decoded bytes, tokens, nodes and work.
-pub fn policy_parse(in source: Str, bytes: u64, depth: u64, tokens: u64, nodes: u64, work: u64)
-    -> ChunkSeq[u64] eff [Fail[LintFail]] {
+pub fn policy_parse(
+    in source: Str,
+    bytes: u64,
+    depth: u64,
+    tokens: u64,
+    nodes: u64,
+    work: u64
+) -> ChunkSeq[u64] eff [Fail[LintFail]] {
     parse_policy(in source, bytes, depth, tokens, nodes, work)
 }
 
@@ -412,19 +418,17 @@ fn rd_param(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 {
     let start = rd(in w, inout r);
     let end = rd(in w, inout r);
     let id = wrapping_u32(p.params.len());
-    p
-        .params
-        .push(
-            ParamRow {
-                name: name,
-                pass: pass,
-                projections: projections,
-                ty: ty,
-                start: start,
-                end: end,
-                fields: 0
-            }
-        );
+    p.params.push(
+        ParamRow {
+            name: name,
+            pass: pass,
+            projections: projections,
+            ty: ty,
+            start: start,
+            end: end,
+            fields: 0
+        }
+    );
     id
 }
 
@@ -499,24 +503,22 @@ fn rd_function(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) {
         fs.push(id);
     }
     let facts = list_new(inout p, in fs);
-    p
-        .fns
-        .push(
-            FnFacts {
-                name: name,
-                owned: owned,
-                body: body,
-                start: start,
-                end: end,
-                generics: generics,
-                params: params,
-                result: result,
-                effects: effects,
-                act_first: act_first,
-                act_len: wrapping_u32(na),
-                facts: facts
-            }
-        );
+    p.fns.push(
+        FnFacts {
+            name: name,
+            owned: owned,
+            body: body,
+            start: start,
+            end: end,
+            generics: generics,
+            params: params,
+            result: result,
+            effects: effects,
+            act_first: act_first,
+            act_len: wrapping_u32(na),
+            facts: facts
+        }
+    );
 }
 
 fn decode(in w: Slice[u64], in blob: Str) -> Prog {
@@ -573,11 +575,7 @@ fn validate_type(in p: Prog, ty: u32) eff [Fail[LintFail]] {
         let x = type_at(in p, t);
         let d = inc(depth);
         if x.kind == TY_NAMED || x.kind == TY_TUPLE {
-            let args = if x.kind == TY_NAMED {
-                x.b
-            } else {
-                x.a
-            };
+            let args = if x.kind == TY_NAMED { x.b } else { x.a };
             let len = list_len(in p, args);
             if len > MAX_TYPE_ARGS {
                 fail(L_TYPE_ARITY);
@@ -706,11 +704,7 @@ fn check_limits(in p: Prog, functions: u64, actions: u64, work: u64, depth: u64)
 fn opaque_type(in p: Prog, t: u32) -> bool {
     let x = type_at(in p, t);
     if x.kind == TY_NAMED || x.kind == TY_TUPLE {
-        let args = if x.kind == TY_NAMED {
-            x.b
-        } else {
-            x.a
-        };
+        let args = if x.kind == TY_NAMED { x.b } else { x.a };
         for i in 0..list_len(in p, args) {
             if opaque_type(in p, list_at(in p, args, i)) {
                 return true;
@@ -898,8 +892,13 @@ fn contains_effect(in p: Prog, in list: ChunkSeq[u32], e: u32) -> bool {
     false
 }
 
-fn required(inout p: Prog, name: u32, inout seen: ChunkSeq[bool], inout depth: u64, inout w: Work)
-    -> Req eff [Fail[LintFail]] {
+fn required(
+    inout p: Prog,
+    name: u32,
+    inout seen: ChunkSeq[bool],
+    inout depth: u64,
+    inout w: Work
+) -> Req eff [Fail[LintFail]] {
     tick(inout w);
     let fi = u32_at(in p.fn_of, widen_u64(name));
     if fi == NONE {
@@ -1136,20 +1135,12 @@ fn sym_cmp(in p: Prog, in blob: Str, a: u32, b: u32) -> i64 {
     let la = word(in p.sym_len.as_slice(), widen_u64(a));
     let sb = word(in p.sym_start.as_slice(), widen_u64(b));
     let lb = word(in p.sym_len.as_slice(), widen_u64(b));
-    let n = if la < lb {
-        la
-    } else {
-        lb
-    };
+    let n = if la < lb { la } else { lb };
     for i in 0..n {
         let u = at(in x, wrapping_add(sa, i));
         let v = at(in x, wrapping_add(sb, i));
         if u != v {
-            return if u < v {
-                -1
-            } else {
-                1
-            };
+            return if u < v { -1 } else { 1 };
         }
     }
     if la < lb {
@@ -1165,11 +1156,7 @@ fn sym_cmp(in p: Prog, in blob: Str, a: u32, b: u32) -> i64 {
 fn path_lt(in p: Prog, in blob: Str, a: u32, b: u32) -> bool {
     let n = list_len(in p, a);
     let m = list_len(in p, b);
-    let k = if n < m {
-        n
-    } else {
-        m
-    };
+    let k = if n < m { n } else { m };
     for i in 0..k {
         let c = sym_cmp(in p, in blob, list_at(in p, a, i), list_at(in p, b, i));
         if c != 0 {
@@ -1622,8 +1609,12 @@ fn char_boundary(in s: Slice[u8], i: u64) -> bool {
 
 // `apply_edits`: `edits` holds the count, then per edit its span and the
 // (start, len) of its expected text and replacement in `texts`.
-pub fn apply_edits(in source: Str, in edits: Slice[u64], in texts: Str, max_bytes: u64)
-    -> ChunkSeq[u8] eff [Fail[LintFail]] {
+pub fn apply_edits(
+    in source: Str,
+    in edits: Slice[u64],
+    in texts: Str,
+    max_bytes: u64
+) -> ChunkSeq[u8] eff [Fail[LintFail]] {
     let n = word(in edits, 0);
     let s = source.as_bytes();
     let x = texts.as_bytes();
@@ -1633,14 +1624,13 @@ pub fn apply_edits(in source: Str, in edits: Slice[u64], in texts: Str, max_byte
     let mut keys = ChunkSeq::with_capacity[EditKey](n);
     for i in 0..n {
         let b = inc(wrapping_mul(i, Edit::Words));
-        keys
-            .push(
-                EditKey {
-                    start: word(in edits, b),
-                    end: word(in edits, wrapping_add(b, Edit::End)),
-                    index: i
-                }
-            );
+        keys.push(
+            EditKey {
+                start: word(in edits, b),
+                end: word(in edits, wrapping_add(b, Edit::End)),
+                index: i
+            }
+        );
     }
     sort(inout keys.as_slice_mut());
     let mut end: u64 = 0;

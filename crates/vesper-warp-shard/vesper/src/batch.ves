@@ -27,8 +27,12 @@ impl TableCore {
     }
 
     // Scatter the descriptors into stages; the number of stages opened.
-    fn scatter(inout self, in batch: Slice[u64], n: u64, inout opened: u64)
-        -> Option[CoreBatchFault] {
+    fn scatter(
+        inout self,
+        in batch: Slice[u64],
+        n: u64,
+        inout opened: u64
+    ) -> Option[CoreBatchFault] {
         for i in 0..n {
             let base = wrapping_mul(i, 4);
             let index = match batch.try_get(base) {
@@ -188,12 +192,10 @@ impl TableCore {
                 if cwnd_set & bit(l) != 0 {
                     self.cwnd.try_set(slot, wrapping_u32(get32(in self.st_cwnd, at)));
                 }
-                self
-                    .rx_p1
-                    .try_set(
-                        slot,
-                        max64(get64(in self.rx_p1, slot), get64(in self.st_max_pn_p1, at))
-                    );
+                self.rx_p1.try_set(
+                    slot,
+                    max64(get64(in self.rx_p1, slot), get64(in self.st_max_pn_p1, at))
+                );
                 m = m & wrapping_sub(m, 1);
             }
         }
@@ -214,8 +216,11 @@ fn lane_count(mask: u64) -> u64 {
     n
 }
 
-pub fn table_core_apply_batch(inout c: TableCore, in batch: Slice[u64], vector: bool)
-    -> Option[CoreBatchFault] {
+pub fn table_core_apply_batch(
+    inout c: TableCore,
+    in batch: Slice[u64],
+    vector: bool
+) -> Option[CoreBatchFault] {
     let n = batch.len() / 4;
     if n > MAX_BATCH {
         return Option::Some(CoreBatchFault::TooLong(n));

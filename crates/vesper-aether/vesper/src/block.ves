@@ -133,8 +133,12 @@ pub fn blk_validate_discard_or_zero(
     (BLK_S_OK, seg_count)
 }
 
-pub fn blk_config_space(disk_bytes: u64, read_only: bool, queues: u16, inout out: Slice[u8])
-    -> u64 {
+pub fn blk_config_space(
+    disk_bytes: u64,
+    read_only: bool,
+    queues: u16,
+    inout out: Slice[u8]
+) -> u64 {
     if out.len() < BLK_CONFIG_BYTES {
         return 0;
     }
@@ -258,11 +262,7 @@ pub fn blk_device_features(in st: BlkState) -> u64 {
     } else {
         BLK_F_DISCARD | BLK_F_WRITE_ZEROES
     };
-    let mq = if st.queues > 1 {
-        BLK_F_MQ
-    } else {
-        0
-    };
+    let mq = if st.queues > 1 { BLK_F_MQ } else { 0 };
     BLK_F_BLK_SIZE | BLK_F_FLUSH | rw | mq
 }
 

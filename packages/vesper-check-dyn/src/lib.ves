@@ -328,14 +328,7 @@ pub fn dyn_fn_bytes(in input: Slice[u8], base: u64) -> ChunkSeq[u64] {
     let mut d = read_input(in input, base);
     let ok = lower_fn_objects(inout d);
     let mut o = ChunkSeq::new[u64]();
-    o
-        .push(
-            if ok {
-                1
-            } else {
-                0
-            }
-        );
+    o.push(if ok { 1 } else { 0 });
     put_diag_words(inout o, in d, 0);
     if !ok {
         return o;
@@ -356,14 +349,7 @@ pub fn dyn_trait_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
     let mut d = read_input(in input, 0);
     let ok = lower_dyn(inout d);
     let mut o = ChunkSeq::new[u64]();
-    o
-        .push(
-            if ok {
-                1
-            } else {
-                0
-            }
-        );
+    o.push(if ok { 1 } else { 0 });
     put_diag_words(inout o, in d, 0);
     if !ok {
         return o;

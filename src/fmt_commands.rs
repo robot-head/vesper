@@ -184,14 +184,15 @@ fn walk(root: &Path, files: &mut Vec<PathBuf>, visited: &mut usize) -> Result<()
     }
     Ok(())
 }
-pub(crate) fn format_file(
-    path: &Path,
-    check: bool,
+/// The formatter of one file's text: the output and whether it changed,
+/// with recovery mode's edit count. The Vesper `fmt` command layer
+/// (`hc_fmt_source`) calls this after its own bounded read.
+pub(crate) fn format_text(
+    text: &str,
     recovery: bool,
-) -> Result<serde_json::Value, String> {
-    let input = open_input(path)?;
-    let (result, edits) = if recovery {
-        let partial = format_recovery_source(&input.text, Limits::default())
+) -> Result<(FormatResult, Option<usize>), String> {
+    Ok(if recovery {
+        let partial = format_recovery_source(text, Limits::default())
             .map_err(|e| format!("cannot format recovery source: {e}"))?;
         let count = partial.edits().len();
         (
@@ -203,11 +204,19 @@ pub(crate) fn format_file(
         )
     } else {
         (
-            format_source(&input.text, Limits::default())
+            format_source(text, Limits::default())
                 .map_err(|e| format!("cannot format source: {e}"))?,
             None,
         )
-    };
+    })
+}
+pub(crate) fn format_file(
+    path: &Path,
+    check: bool,
+    recovery: bool,
+) -> Result<serde_json::Value, String> {
+    let input = open_input(path)?;
+    let (result, edits) = format_text(&input.text, recovery)?;
     let status = if check && result.changed {
         "needs_format"
     } else if result.changed {

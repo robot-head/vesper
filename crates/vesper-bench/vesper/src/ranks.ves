@@ -92,8 +92,10 @@ fn validate_len(len: u64) eff [Fail[SignedRankError]] {
     }
 }
 
-fn rank_observations(inout obs: ChunkSeq[Obs], input_len: u64)
-    -> SignedRankProbability eff [Fail[SignedRankError]] {
+fn rank_observations(
+    inout obs: ChunkSeq[Obs],
+    input_len: u64
+) -> SignedRankProbability eff [Fail[SignedRankError]] {
     let n = obs.len();
     if n == 0 {
         Fail::raise(SignedRankError::NoNonzeroDifferences);
@@ -143,8 +145,9 @@ fn rank_observations(inout obs: ChunkSeq[Obs], input_len: u64)
     }
 }
 
-pub fn do_signed_rank_exact(in differences: Slice[i64])
-    -> SignedRankProbability eff [Fail[SignedRankError]] {
+pub fn do_signed_rank_exact(
+    in differences: Slice[i64]
+) -> SignedRankProbability eff [Fail[SignedRankError]] {
     let len = differences.len();
     validate_len(len);
     let mut obs: ChunkSeq[Obs] = ChunkSeq::with_capacity[Obs](len);
@@ -157,8 +160,9 @@ pub fn do_signed_rank_exact(in differences: Slice[i64])
     rank_observations(inout obs, len)
 }
 
-pub fn do_signed_rank_exact_paired_samples(in samples: Slice[Sample])
-    -> SignedRankProbability eff [Fail[SignedRankError]] {
+pub fn do_signed_rank_exact_paired_samples(
+    in samples: Slice[Sample]
+) -> SignedRankProbability eff [Fail[SignedRankError]] {
     let len = samples.len();
     validate_len(len);
     let mut obs: ChunkSeq[Obs] = ChunkSeq::with_capacity[Obs](len);
@@ -301,8 +305,12 @@ fn accepts(
     mul(TAIL_LIMIT_SCALE, tail) > pow2(n)
 }
 
-fn segment(lower: Option[W], lower_inclusive: bool, upper: Option[W], upper_inclusive: bool)
-    -> Segment {
+fn segment(
+    lower: Option[W],
+    lower_inclusive: bool,
+    upper: Option[W],
+    upper_inclusive: bool
+) -> Segment {
     let (lb, l) = match lower {
         Option::Some(v) => (true, v),
         Option::None => (false, w_zero()),
@@ -349,20 +357,19 @@ fn append(inout result: ChunkSeq[Segment], next: Segment) {
                     || (last.upper_hi == next.lower_hi && last.upper_lo == next.lower_lo)
             );
         if same && (last.upper_inclusive || next.lower_inclusive) {
-            result
-                .try_set(
-                    dec(n),
-                    Segment {
-                        lower_bounded: last.lower_bounded,
-                        lower_hi: last.lower_hi,
-                        lower_lo: last.lower_lo,
-                        lower_inclusive: last.lower_inclusive,
-                        upper_bounded: next.upper_bounded,
-                        upper_hi: next.upper_hi,
-                        upper_lo: next.upper_lo,
-                        upper_inclusive: next.upper_inclusive
-                    }
-                );
+            result.try_set(
+                dec(n),
+                Segment {
+                    lower_bounded: last.lower_bounded,
+                    lower_hi: last.lower_hi,
+                    lower_lo: last.lower_lo,
+                    lower_inclusive: last.lower_inclusive,
+                    upper_bounded: next.upper_bounded,
+                    upper_hi: next.upper_hi,
+                    upper_lo: next.upper_lo,
+                    upper_inclusive: next.upper_inclusive
+                }
+            );
             return;
         }
     }
@@ -415,8 +422,9 @@ fn confidence_core(in differences: Slice[i64]) -> ChunkSeq[Segment] {
     result
 }
 
-pub fn do_signed_rank_confidence_set(in differences: Slice[i64])
-    -> ChunkSeq[Segment] eff [Fail[SignedRankConfidenceError]] {
+pub fn do_signed_rank_confidence_set(
+    in differences: Slice[i64]
+) -> ChunkSeq[Segment] eff [Fail[SignedRankConfidenceError]] {
     let n = differences.len();
     if n == 0 {
         Fail::raise(SignedRankConfidenceError::EmptyEvidence);
@@ -427,8 +435,9 @@ pub fn do_signed_rank_confidence_set(in differences: Slice[i64])
     confidence_core(in differences)
 }
 
-pub fn do_paired_samples_confidence_set(in samples: Slice[Sample])
-    -> ChunkSeq[Segment] eff [Fail[PairedConfError]] {
+pub fn do_paired_samples_confidence_set(
+    in samples: Slice[Sample]
+) -> ChunkSeq[Segment] eff [Fail[PairedConfError]] {
     let n = samples.len();
     if n == 0 {
         Fail::raise(PairedConfError::EmptyEvidence);
@@ -506,8 +515,11 @@ pub fn do_compare_endpoint(endpoint: W, operations: u64, max_difference: i64) ->
     }
 }
 
-pub fn do_classify_samples(in segments: Slice[Segment], operations: u64, max_difference: i64)
-    -> u64 {
+pub fn do_classify_samples(
+    in segments: Slice[Segment],
+    operations: u64,
+    max_difference: i64
+) -> u64 {
     let n = segments.len();
     if n == 0 {
         return Outcome::NoInterval;
@@ -554,8 +566,9 @@ fn median_times_four(in sums: ChunkSeq[W]) -> W {
     }
 }
 
-pub fn do_walsh_pseudomedian(in differences: Slice[i64])
-    -> WalshOut eff [Fail[WalshEstimateError]] {
+pub fn do_walsh_pseudomedian(
+    in differences: Slice[i64]
+) -> WalshOut eff [Fail[WalshEstimateError]] {
     let n = differences.len();
     if n == 0 {
         Fail::raise(WalshEstimateError::EmptyEvidence);
@@ -574,8 +587,9 @@ pub fn do_walsh_pseudomedian(in differences: Slice[i64])
 // ---------------------------------------------------------------------------
 // hodges_lehmann.rs
 
-pub fn do_hodges_lehmann_paired(in differences: Slice[i64])
-    -> HlOut eff [Fail[HodgesLehmannError]] {
+pub fn do_hodges_lehmann_paired(
+    in differences: Slice[i64]
+) -> HlOut eff [Fail[HodgesLehmannError]] {
     let n = differences.len();
     if n == 0 {
         Fail::raise(HodgesLehmannError::EmptyEvidence);
@@ -653,8 +667,10 @@ pub fn do_hodges_lehmann_paired(in differences: Slice[i64])
 }
 
 // Gate outcomes are Outcome codes.
-pub fn do_gate_paired_difference(in differences: Slice[i64], max_difference: i64)
-    -> HlGate eff [Fail[HodgesLehmannError]] {
+pub fn do_gate_paired_difference(
+    in differences: Slice[i64],
+    max_difference: i64
+) -> HlGate eff [Fail[HodgesLehmannError]] {
     let estimate = do_hodges_lehmann_paired(in differences);
     let threshold = w_twice(w_i64(max_difference));
     let outcome: u64 = if !estimate.has_interval {
@@ -698,8 +714,9 @@ fn per_op_difference(s: Sample) -> (u64, i64) {
     }
 }
 
-pub fn do_exact_paired_differences(in samples: Slice[Sample])
-    -> ChunkSeq[i64] eff [Fail[PairedDifferenceError]] {
+pub fn do_exact_paired_differences(
+    in samples: Slice[Sample]
+) -> ChunkSeq[i64] eff [Fail[PairedDifferenceError]] {
     let n = samples.len();
     if n == 0 {
         Fail::raise(PairedDifferenceError::EmptyEvidence);

@@ -92,8 +92,12 @@ fn ty(inout r: Reader, in b: Slice[u8], in tmap: ChunkSeq[u32]) -> u32 {
     u32_at(in tmap, x)
 }
 
-pub fn read_fns(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tmap: ChunkSeq[u32])
-    -> Fns {
+pub fn read_fns(
+    inout r: Reader,
+    in b: Slice[u8],
+    in nmap: ChunkSeq[u32],
+    in tmap: ChunkSeq[u32]
+) -> Fns {
     let mut out = Fns {
         sigs: ChunkSeq::new[Sig](),
         gens: ChunkSeq::new[Generic](),
@@ -136,19 +140,9 @@ pub fn read_fns(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
         }
         let effectful = r.word(in b) != 0;
         set_by_symbol(inout out.by_name, name, n32(add(out.sigs.len(), 1)));
-        out
-            .sigs
-            .push(
-                Sig {
-                    name: name,
-                    source: source,
-                    ga: ga,
-                    gn: gn,
-                    pa: pa,
-                    pn: pn,
-                    effectful: effectful
-                }
-            );
+        out.sigs.push(
+            Sig { name: name, source: source, ga: ga, gn: gn, pa: pa, pn: pn, effectful: effectful }
+        );
     }
     let nc = r.word(in b);
     for i in 0..nc {
@@ -183,11 +177,7 @@ impl Fns {
     // `world.functions.get(name)`: the signature index, or NONE32.
     pub fn find(in self, name: u32) -> u32 {
         let x = u32_at(in self.by_name, w(name));
-        if x == 0 {
-            NONE32
-        } else {
-            wrapping_sub(x, 1)
-        }
+        if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
     }
 
     pub fn sig(in self, i: u64) -> Sig {

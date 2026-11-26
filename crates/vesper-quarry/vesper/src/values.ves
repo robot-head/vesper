@@ -11,20 +11,12 @@ pub fn val_at(in q: Q, in s: ChunkSeq[u64], p: u64) -> Val {
 
 // `Value::bytes`: the payload length of text and bytes, 8 otherwise.
 pub fn vbytes(v: Val) -> u64 {
-    if v.t == 5 || v.t == 6 {
-        v.b
-    } else {
-        8
-    }
+    if v.t == 5 || v.t == 6 { v.b } else { 8 }
 }
 
 // The heap bytes `row_bytes` adds besides `size_of::<Value>()`.
 pub fn vheap(v: Val) -> u64 {
-    if v.t == 5 || v.t == 6 {
-        v.b
-    } else {
-        0
-    }
+    if v.t == 5 || v.t == 6 { v.b } else { 0 }
 }
 
 // IEEE 754 binary64 fields, and the sign bit of a 64-bit word.
@@ -58,11 +50,7 @@ pub fn size_vec(in q: Q) -> u64 {
 
 // A total order key for a finite f64 (-0.0 equals 0.0).
 pub fn f64_key(bits: u64) -> u64 {
-    let b = if bits == SIGN_BIT {
-        0
-    } else {
-        bits
-    };
+    let b = if bits == SIGN_BIT { 0 } else { bits };
     if (b >> SIGN_SHIFT) == 1 {
         ~b
     } else {
@@ -149,11 +137,7 @@ pub fn truth(inout q: Q, v: Val) -> u64 {
     if v.t == 0 {
         0
     } else if v.t == 4 {
-        if v.a != 0 {
-            2
-        } else {
-            1
-        }
+        if v.a != 0 { 2 } else { 1 }
     } else {
         fail(inout q, 5, "non-boolean checked predicate");
         0
@@ -161,11 +145,7 @@ pub fn truth(inout q: Q, v: Val) -> u64 {
 }
 
 pub fn three(t: u64) -> Val {
-    if t == 0 {
-        null_val()
-    } else {
-        bool_val(t == 2)
-    }
+    if t == 0 { null_val() } else { bool_val(t == 2) }
 }
 
 // `eval` of the expression at p over the row starting at `row`.
@@ -247,11 +227,7 @@ pub fn eval(in ds: D, inout q: Q, p: u64, row: u64) -> Val {
     } else if tag == 6 {
         let xv = eval(in ds, inout q, wrapping_add(p, 3), row);
         let x = truth(inout q, xv);
-        if x == 0 {
-            null_val()
-        } else {
-            bool_val(x == 1)
-        }
+        if x == 0 { null_val() } else { bool_val(x == 1) }
     } else {
         let negated = ex(in q, wrapping_add(p, 3)) != 0;
         let v = eval(in ds, inout q, wrapping_add(p, 4), row);

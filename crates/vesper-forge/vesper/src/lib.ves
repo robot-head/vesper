@@ -88,8 +88,12 @@ pub fn fg_parse(in toks: Slice[u64], in text: Slice[u8], max_depth: u64) -> Chun
 //   [3, kind, a, b, c, d, token, n, origin..] an operation,
 // and `extra`, the last n words, holds the ambiguous candidates as
 // (tag, a, b) triples.
-pub fn fg_resolve(in w: Slice[u64], in text: Slice[u8], in g: Slice[u64], in gt: Slice[u8])
-    -> ChunkSeq[u64] {
+pub fn fg_resolve(
+    in w: Slice[u64],
+    in text: Slice[u8],
+    in g: Slice[u64],
+    in gt: Slice[u8]
+) -> ChunkSeq[u64] {
     let mut r = resolver_new(in w);
     let mut at: u64 = 0;
     let e = delimiters(
@@ -140,7 +144,13 @@ pub fn fg_resolve(in w: Slice[u64], in text: Slice[u8], in g: Slice[u64], in gt:
     out
 }
 
-pub fn fg_requirements(in g: Slice[u64], op_kind: u64, op_a: u64, op_b: u64, op_c: u64, op_d: u64)
-    -> ChunkSeq[u64] {
+pub fn fg_requirements(
+    in g: Slice[u64],
+    op_kind: u64,
+    op_a: u64,
+    op_b: u64,
+    op_c: u64,
+    op_d: u64
+) -> ChunkSeq[u64] {
     requirements(in g, op_kind, op_a, op_b, op_c, op_d)
 }

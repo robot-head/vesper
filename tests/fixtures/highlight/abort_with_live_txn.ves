@@ -25,8 +25,10 @@ copy struct BrokerConfig {
     max_batch_bytes: u64
 }
 
-fn append_verified_batch(inout broker.{index, metrics}: Broker, in config: BrokerConfig)
-    -> u64 eff [Storage, Fail[u64]] {
+fn append_verified_batch(
+    inout broker.{index, metrics}: Broker,
+    in config: BrokerConfig
+) -> u64 eff [Storage, Fail[u64]] {
     let tx: WriteTxn = Storage::begin_txn(config.max_batch_bytes);
     if config.max_batch_bytes == 0 {
         Fail::raise(0)

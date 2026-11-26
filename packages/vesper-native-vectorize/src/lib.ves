@@ -105,16 +105,7 @@ impl Kinds {
 
     fn set(inout self, v: u32, kind: u64, known: bool, step: i64) {
         let a = self.kind.try_set(w(v), wrapping_u8(kind));
-        let b = self
-            .known
-            .try_set(
-                w(v),
-                if known {
-                    1
-                } else {
-                    0
-                }
-            );
+        let b = self.known.try_set(w(v), if known { 1 } else { 0 });
         let c = self.step.try_set(w(v), step);
     }
 
@@ -166,11 +157,7 @@ impl Map {
     // `map.get(&v).copied().unwrap_or(v)`.
     fn or(in self, v: u32) -> u32 {
         let x = self.get(v);
-        if x == NONE {
-            v
-        } else {
-            x
-        }
+        if x == NONE { v } else { x }
     }
 
     fn put(inout self, k: u32, v: u32) {
@@ -233,11 +220,7 @@ fn compare(in f: Func, c: u32) -> u32 {
     if i == NONE || f.def_num(c) != 0 {
         return NONE;
     }
-    if f.op(i) == OP_ICMP {
-        i
-    } else {
-        NONE
-    }
+    if f.op(i) == OP_ICMP { i } else { NONE }
 }
 
 // `constant`: whether `v` is an `iconst` (and `out` its value).
@@ -361,8 +344,13 @@ fn kind_step(kind: u64, known: bool, st: i64, inout out: i64) -> bool {
 // `step`: how much an operation of `j` grows per iteration, when it is
 // affine; whether it is (into `out`). `arg_kinds` holds its arguments'
 // kinds and steps.
-fn step(in f: Func, i: u32, in args: ChunkSeq[u32], in arg_kinds: ArgKinds, inout out: i64)
-    -> bool {
+fn step(
+    in f: Func,
+    i: u32,
+    in args: ChunkSeq[u32],
+    in arg_kinds: ArgKinds,
+    inout out: i64
+) -> bool {
     let row = f.inst(w(i));
     let op = row.op;
     let binary = op == OP_IADD
@@ -485,15 +473,7 @@ impl ArgKinds {
     // Appends argument `v` of kind `kind`, with its step from `values`.
     fn push(inout self, in values: Kinds, v: u32, kind: u64) {
         self.kinds.push(kind);
-        self
-            .known
-            .push(
-                if values.known_step(v) {
-                    1
-                } else {
-                    0
-                }
-            );
+        self.known.push(if values.known_step(v) { 1 } else { 0 });
         self.steps.push(values.step_of(v));
     }
 
@@ -694,11 +674,7 @@ fn plan(in f: Func, h: u32, inout p: Plan) -> bool {
             q = f.next_inst(q);
         }
     }
-    let back_edge = if latch != NONE {
-        latch
-    } else {
-        body
-    };
+    let back_edge = if latch != NONE { latch } else { body };
     let mut pred_blocks = ChunkSeq::new[u32]();
     let mut pred_insts = ChunkSeq::new[u32]();
     if !preds_all_from(in f, body, h, inout pred_blocks, inout pred_insts) {
@@ -841,11 +817,7 @@ fn plan(in f: Func, h: u32, inout p: Plan) -> bool {
     }
     // Lane values stay in the body: nothing else may read them.
     for z in 0..2 {
-        let b = if z == 0 {
-            h
-        } else {
-            latch
-        };
+        let b = if z == 0 { h } else { latch };
         if b == NONE {
             continue;
         }
@@ -1131,8 +1103,14 @@ fn lower(inout f: Func, direction: i64, lanes: u32, e: u32) -> u32 {
 }
 
 // A lane operand: its vector, or the splat of its scalar (made once).
-fn operand(inout f: Func, lanes: u32, in vectors: Map, inout splats: Map, in lane0: Map, v0: u32)
-    -> u32 {
+fn operand(
+    inout f: Func,
+    lanes: u32,
+    in vectors: Map,
+    inout splats: Map,
+    in lane0: Map,
+    v0: u32
+) -> u32 {
     let v = f.resolve(v0);
     let x = vectors.get(v);
     if x != NONE {
@@ -1249,11 +1227,7 @@ fn plan_widen(in f: Func, h: u32, inout p: WidenPlan) -> bool {
             }
             src_addr = a0;
             src_offset = row.off;
-            let stage = if op == OP_SLOAD8 {
-                S_SINT
-            } else {
-                S_U8
-            };
+            let stage = if op == OP_SLOAD8 { S_SINT } else { S_U8 };
             kinds.set_stage(f.resolve(f.result(i, 0)), stage, NONE);
             i = f.next_inst(i);
             continue;
@@ -1502,8 +1476,17 @@ fn emit_widen(inout f: Func, in p: WidenPlan) {
     let dst_v = u32_at(in sd, 1);
     let wv = load(inout f, lanes, TY_I64, 0, src_v);
     let v_i64x2 = un(inout f, lanes, OP_SCALAR_TO_VECTOR, TY_I64X2, wv);
-    let v_i8x16 = f
-        .ins(lanes, OP_BITCAST, TY_I8X16, 0, 0, 0, M_ENDIAN | M_LITTLE, in one(v_i64x2), in none);
+    let v_i8x16 = f.ins(
+        lanes,
+        OP_BITCAST,
+        TY_I8X16,
+        0,
+        0,
+        0,
+        M_ENDIAN | M_LITTLE,
+        in one(v_i64x2),
+        in none
+    );
     let v_i16x8 = un(inout f, lanes, OP_SWIDEN_LOW, TY_OTHER, f.result(v_i8x16, 0));
     let lo_i32x4 = un(inout f, lanes, OP_SWIDEN_LOW, TY_OTHER, v_i16x8);
     let hi_i32x4 = un(inout f, lanes, OP_SWIDEN_HIGH, TY_OTHER, v_i16x8);

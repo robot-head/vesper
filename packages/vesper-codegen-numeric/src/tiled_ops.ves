@@ -107,8 +107,13 @@ fn t_iconst(inout b: Builder, v: u64) -> Value eff [Ffi[Cranelift]] {
 
 // `tiled_runtime_call`: declare `name` with one `i64` per argument and an
 // `i64` result (imported in a JIT module, local otherwise), and call it.
-fn t_call(inout b: Builder, inout m: Module, jit: bool, in name: Str, in args: Slice[u32])
-    -> Value eff [Ffi[Cranelift]] {
+fn t_call(
+    inout b: Builder,
+    inout m: Module,
+    jit: bool,
+    in name: Str,
+    in args: Slice[u32]
+) -> Value eff [Ffi[Cranelift]] {
     let s = sig_new(inout m, call_conv_default());
     for _ in 0..args.len() {
         sig_param(inout m, s, tt(TyCode::I64));
@@ -145,11 +150,7 @@ fn t_vals(a: Value, c: Value, d: Value, e: Value, f: Value, n: u32) -> ChunkSeq[
 
 // `alloc`: a zeroed stack slot of `max(size, 8)` bytes.
 fn t_alloc(inout b: Builder, inout m: Module, size: u32) -> Value eff [Ffi[Cranelift]] {
-    let bytes = if size < 8 {
-        8
-    } else {
-        size
-    };
+    let bytes = if size < 8 { 8 } else { size };
     let slot = create_stack_slot(inout b, bytes, 3);
     let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
     for i in 0..(widen_u64(bytes) >> 3) {
@@ -215,11 +216,7 @@ fn t_store_row(
         let words = tw_next(inout w);
         let offset = wrapping_i32(tw_next(inout w));
         let word_offset = tw_next(inout w);
-        let n = if aggregate {
-            words
-        } else {
-            1
-        };
+        let n = if aggregate { words } else { 1 };
         for k in 0..n {
             let off = wrapping_add(offset, wrapping_i32(wrapping_mul(k, T_WORD)));
             let word = ins_load(inout b, tt(TyCode::I64), TF_PLAIN, record, off);
@@ -264,11 +261,7 @@ fn t_load_row(
         let words = tw_next(inout w);
         let offset = wrapping_i32(tw_next(inout w));
         let word_offset = tw_next(inout w);
-        let n = if aggregate {
-            words
-        } else {
-            1
-        };
+        let n = if aggregate { words } else { 1 };
         for k in 0..n {
             let woff = t_iconst(inout b, wrapping_add(word_offset, k));
             let args = t_vals(seq, row, woff, woff, woff, 3);
@@ -287,8 +280,13 @@ fn t_load_row(
 }
 
 // `TiledSeq::new`, `with_capacity` and `with_region`.
-fn t_new(inout b: Builder, inout m: Module, jit: bool, kind: u64, inout w: Words)
-    -> Value eff [Ffi[Cranelift]] {
+fn t_new(
+    inout b: Builder,
+    inout m: Module,
+    jit: bool,
+    kind: u64,
+    inout w: Words
+) -> Value eff [Ffi[Cranelift]] {
     let width = tw_next(inout w);
     let stride = tw_next(inout w);
     let cold = tw_next(inout w);
@@ -316,8 +314,12 @@ fn t_new(inout b: Builder, inout m: Module, jit: bool, kind: u64, inout w: Words
     t_call(inout b, inout m, jit, in "vesper_tiled_new", in args.as_slice())
 }
 
-fn t_col_get(inout b: Builder, inout m: Module, jit: bool, inout w: Words)
-    -> Value eff [Ffi[Cranelift]] {
+fn t_col_get(
+    inout b: Builder,
+    inout m: Module,
+    jit: bool,
+    inout w: Words
+) -> Value eff [Ffi[Cranelift]] {
     let seq = tw_value(inout w);
     let row = tw_value(inout w);
     if tw_next(inout w) == TC_HOT {
@@ -356,8 +358,12 @@ fn t_col_get(inout b: Builder, inout m: Module, jit: bool, inout w: Words)
     }
 }
 
-fn t_col_set(inout b: Builder, inout m: Module, jit: bool, inout w: Words)
-    -> Value eff [Ffi[Cranelift]] {
+fn t_col_set(
+    inout b: Builder,
+    inout m: Module,
+    jit: bool,
+    inout w: Words
+) -> Value eff [Ffi[Cranelift]] {
     let seq = tw_value(inout w);
     let row = tw_value(inout w);
     let val = tw_value(inout w);
@@ -401,8 +407,12 @@ fn t_col_set(inout b: Builder, inout m: Module, jit: bool, inout w: Words)
     ins_iconst(inout b, tt(TyCode::I64), 0)
 }
 
-fn t_load_tile_vec(inout b: Builder, inout m: Module, jit: bool, inout w: Words)
-    -> Value eff [Ffi[Cranelift]] {
+fn t_load_tile_vec(
+    inout b: Builder,
+    inout m: Module,
+    jit: bool,
+    inout w: Words
+) -> Value eff [Ffi[Cranelift]] {
     let seq = tw_value(inout w);
     let tile = tw_value(inout w);
     let col_off = t_iconst(inout b, tw_next(inout w));

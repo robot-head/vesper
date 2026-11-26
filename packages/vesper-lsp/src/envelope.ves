@@ -78,8 +78,13 @@ fn parse_doc(inout doc: Doc, in body: Slice[u8], l: Limits) -> Option[Error] {
 }
 
 // `get`: the value token of `name` in the object at `index`.
-fn get(in doc: Doc, in body: Slice[u8], index: u64, in name: Str, l: Plimits)
-    -> u64 eff [Fail[Perr]] {
+fn get(
+    in doc: Doc,
+    in body: Slice[u8],
+    index: u64,
+    in name: Str,
+    l: Plimits
+) -> u64 eff [Fail[Perr]] {
     let found: Result[Option[u64], Error] = handle Fail[Error] in {
         field_ok(doc_field(in doc, in body, index, in name.as_bytes(), l.max_json_work))
     } with {
@@ -143,8 +148,13 @@ fn parse_i32(in body: Slice[u8], t: Token) -> Option[i64] {
 }
 
 // `node_id`.
-fn node_id(in doc: Doc, in body: Slice[u8], i: u64, nullable: bool, l: Plimits)
-    -> Unit eff [Fail[Perr]] {
+fn node_id(
+    in doc: Doc,
+    in body: Slice[u8],
+    i: u64,
+    nullable: bool,
+    l: Plimits
+) -> Unit eff [Fail[Perr]] {
     let t = token(in doc, i);
     match t.kind {
         Kind::Null => {

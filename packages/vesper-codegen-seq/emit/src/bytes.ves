@@ -230,8 +230,12 @@ fn short_load_safe1(inout b: Builder, p: Value, len: Value) -> Value eff [Ffi[Cr
     ins_band(inout b, safe, inside)
 }
 
-fn short_load_safe2(inout b: Builder, p: Value, q: Value, len: Value)
-    -> Value eff [Ffi[Cranelift]] {
+fn short_load_safe2(
+    inout b: Builder,
+    p: Value,
+    q: Value,
+    len: Value
+) -> Value eff [Ffi[Cranelift]] {
     let s1 = short_load_safe1(inout b, p, len);
     let offset = ins_band_imm(inout b, q, PAGE - 1);
     let inside = ins_icmp_imm(inout b, cc_ule(), offset, PAGE - LANES);
@@ -245,8 +249,11 @@ fn short_mask(inout b: Builder, len: Value) -> Value eff [Ffi[Cranelift]] {
     ins_iadd_imm(inout b, bit, -1)
 }
 
-fn loop_invariants(inout b: Builder, head: Block, in values: Slice[Value])
-    -> ChunkSeq[Value] eff [Ffi[Cranelift]] {
+fn loop_invariants(
+    inout b: Builder,
+    head: Block,
+    in values: Slice[Value]
+) -> ChunkSeq[Value] eff [Ffi[Cranelift]] {
     let mut out = ChunkSeq::with_capacity[Value](values.len());
     let mut i: u64 = 0;
     loop {
@@ -292,16 +299,26 @@ fn lower_scalar(inout b: Builder, bv: Value) -> Value eff [Ffi[Cranelift]] {
     ins_bor(inout b, bv, case_bit)
 }
 
-fn lower_vector(inout b: Builder, a: Value, span: Value, case_bit: Value, v: Value)
-    -> Value eff [Ffi[Cranelift]] {
+fn lower_vector(
+    inout b: Builder,
+    a: Value,
+    span: Value,
+    case_bit: Value,
+    v: Value
+) -> Value eff [Ffi[Cranelift]] {
     let from_a = ins_isub(inout b, v, a);
     let upper = ins_icmp(inout b, cc_ult(), from_a, span);
     let add = ins_band(inout b, upper, case_bit);
     ins_bor(inout b, v, add)
 }
 
-fn sum_be16_scalar(inout b: Builder, p: Value, from: Value, len: Value, acc: Value)
-    -> Value eff [Ffi[Cranelift]] {
+fn sum_be16_scalar(
+    inout b: Builder,
+    p: Value,
+    from: Value,
+    len: Value,
+    acc: Value
+) -> Value eff [Ffi[Cranelift]] {
     let head = create_block(inout b);
     let body = create_block(inout b);
     let pairs_done = create_block(inout b);
@@ -361,8 +378,12 @@ fn sum_pairs(inout b: Builder, v: Value, low16: Value) -> Value eff [Ffi[Craneli
     ins_iadd(inout b, lo, hi)
 }
 
-fn sum_be16_vector(inout b: Builder, in m: Module, p: Value, len: Value)
-    -> (Value, Value) eff [Ffi[Cranelift]] {
+fn sum_be16_vector(
+    inout b: Builder,
+    in m: Module,
+    p: Value,
+    len: Value
+) -> (Value, Value) eff [Ffi[Cranelift]] {
     let end = vector_end(inout b, len);
     let z = zero(inout b);
     let z16 = ins_iconst(inout b, ty_i16(), 0);
@@ -804,8 +825,13 @@ fn needle_splat(inout b: Builder, n: Needle) -> ChunkSeq[Value] eff [Ffi[Craneli
     out
 }
 
-fn needle_vector(inout b: Builder, kind: u64, in s: Slice[Value], off: u64, v: Value)
-    -> Value eff [Ffi[Cranelift]] {
+fn needle_vector(
+    inout b: Builder,
+    kind: u64,
+    in s: Slice[Value],
+    off: u64,
+    v: Value
+) -> Value eff [Ffi[Cranelift]] {
     if kind == 0 {
         ins_icmp(inout b, cc_eq(), v, at_val(in s, off))
     } else if kind == 1 {
@@ -961,8 +987,14 @@ fn find_first(
     (block_param(inout b, done, 0), block_param(inout b, done, 1))
 }
 
-fn find_not_in_runs(inout b: Builder, p: Value, len: Value, lo: Value, hi: Value, high: Value)
-    -> (Value, Value) eff [Ffi[Cranelift]] {
+fn find_not_in_runs(
+    inout b: Builder,
+    p: Value,
+    len: Value,
+    lo: Value,
+    hi: Value,
+    high: Value
+) -> (Value, Value) eff [Ffi[Cranelift]] {
     let n = Needle {
         kind: 2,
         a: lo,
@@ -1059,11 +1091,7 @@ fn find_not_in_runs(inout b: Builder, p: Value, len: Value, lo: Value, hi: Value
 }
 
 fn rep_byte(byte: u64, is_i64: bool) -> i64 {
-    let n = if is_i64 {
-        8
-    } else {
-        4
-    };
+    let n = if is_i64 { 8 } else { 4 };
     let mut acc: u64 = 0;
     for _ in 0..n {
         acc = (acc << 8) | (byte & 255);
@@ -1102,22 +1130,10 @@ fn lowercase_words(
     let eargs = empty_args();
     ins_brif(inout b, wide, four, in eargs.as_slice(), scalar, in zargs.as_slice());
     for pass in 0..2 {
-        let blk = if pass == 0 {
-            eight
-        } else {
-            four
-        };
+        let blk = if pass == 0 { eight } else { four };
         let is_i64 = pass == 0;
-        let ty = if is_i64 {
-            ty_i64()
-        } else {
-            ty_i32()
-        };
-        let neg_width: i64 = if is_i64 {
-            -8
-        } else {
-            -4
-        };
+        let ty = if is_i64 { ty_i64() } else { ty_i32() };
+        let neg_width: i64 = if is_i64 { -8 } else { -4 };
         switch_to_block(inout b, blk);
         let back = ins_iadd_imm(inout b, n, neg_width);
         let src2 = ins_iadd(inout b, src, back);

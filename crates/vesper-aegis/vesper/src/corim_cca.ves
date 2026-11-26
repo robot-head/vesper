@@ -109,8 +109,14 @@ fn at_err(kind: u64, what: u64) -> Never eff [Fail[AtErr]] {
     Fail::raise(AtErr { kind: kind, what: what, reason: 0, index: 0, extra: 0, off: 0, len: 0 })
 }
 
-fn col_err(prefix: u64, reason: u64, index: u64, extra: u64, off: u64, len: u64)
-    -> Never eff [Fail[AtErr]] {
+fn col_err(
+    prefix: u64,
+    reason: u64,
+    index: u64,
+    extra: u64,
+    off: u64,
+    len: u64
+) -> Never eff [Fail[AtErr]] {
     Fail::raise(
         AtErr {
             kind: AT_COLLATERAL,
@@ -294,8 +300,13 @@ fn check_plain_values(
     }
 }
 
-fn check_class_bytes(has_class: u64, class_kind: u64, class_len: u64, prefix: u64, idx: u64)
-    -> Unit eff [Fail[AtErr]] {
+fn check_class_bytes(
+    has_class: u64,
+    class_kind: u64,
+    class_len: u64,
+    prefix: u64,
+    idx: u64
+) -> Unit eff [Fail[AtErr]] {
     if has_class == 0 {
         col_err(prefix, R_ENV_CLASS_REQ, idx, 0, 0, 0);
     }
@@ -413,16 +424,8 @@ fn validate_plat_refs(in w: Slice[u64], in b: Slice[u8], inout c: Cur) -> Unit e
             if mk_kind != 1 {
                 col_err(P_PLAT_REF, R_MKEY_STRING, j, 0, 0, 0);
             }
-            let has_dig = if dcount > 0 {
-                1
-            } else {
-                0
-            };
-            let has_ck = if ck_count > 0 {
-                1
-            } else {
-                0
-            };
+            let has_dig = if dcount > 0 { 1 } else { 0 };
+            let has_ck = if ck_count > 0 { 1 } else { 0 };
             if slice_eq_lit(in b, mk_off, mk_len, "cca.software-component".as_bytes()) {
                 check_plain_values(
                     has_other,
@@ -654,16 +657,8 @@ fn validate_realm_comid(in w: Slice[u64], in b: Slice[u8], inout c: Cur) -> Unit
             if mk_kind != 1 {
                 col_err(P_REALM_REF, R_MKEY_STRING, j, 0, 0, 0);
             }
-            let has_dig = if dcount > 0 {
-                1
-            } else {
-                0
-            };
-            let has_ck = if ck_count > 0 {
-                1
-            } else {
-                0
-            };
+            let has_dig = if dcount > 0 { 1 } else { 0 };
+            let has_ck = if ck_count > 0 { 1 } else { 0 };
             let is_rim = slice_eq_lit(in b, mk_off, mk_len, "cca.rim".as_bytes());
             let rem_idx = if slice_eq_lit(in b, mk_off, mk_len, "cca.rem0".as_bytes()) {
                 0
@@ -770,8 +765,11 @@ fn validate_realm_comid(in w: Slice[u64], in b: Slice[u8], inout c: Cur) -> Unit
 // op = 0: header (validity, profile) + optional all comids (`run_all == 1` or realm). Returns mode (0=plat, 1=realm).
 // op = 1: one platform CoMID's reference_values.
 // op = 2: one platform CoMID's attest_key triple at `ak_idx`.
-pub fn corim_validate_cca(now_sec: u64, in w: Slice[u64], in b: Slice[u8])
-    -> u64 eff [Fail[AtErr]] {
+pub fn corim_validate_cca(
+    now_sec: u64,
+    in w: Slice[u64],
+    in b: Slice[u8]
+) -> u64 eff [Fail[AtErr]] {
     let mut c = Cur { pos: 0 };
     let op = rd(in w, inout c);
     if op == 1 {
@@ -1091,8 +1089,11 @@ fn try_plat_candidate(
 // platform_reference, sw_components_matched, config_matched,
 // manufacturing_config_matched, rotpks_matched, realm_reference,
 // rems_constrained[0..4], personalization_matched.
-pub fn cca_appraise(in w: Slice[u64], in b: Slice[u8], inout w_out: Slice[u64])
-    -> Unit eff [Fail[AtErr]] {
+pub fn cca_appraise(
+    in w: Slice[u64],
+    in b: Slice[u8],
+    inout w_out: Slice[u64]
+) -> Unit eff [Fail[AtErr]] {
     let mut c = Cur { pos: 0 };
     let cmp_signer = rd(in w, inout c);
     let tok_impl_off = rd(in w, inout c);

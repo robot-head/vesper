@@ -214,8 +214,14 @@ fn tiled_function_params(i: u32) -> u32 {
 // `compile`: a fresh function whose entry block is sealed at once; `which`
 // is 0-8 for the entry points in `define` order and 100-102 for the fault,
 // charge and ensure helpers.
-fn tl_compile(inout m: Module, in im: TiledImports, id: FuncId, params: u32, ret: bool, which: u32)
-    -> bool eff [Ffi[Cranelift]] {
+fn tl_compile(
+    inout m: Module,
+    in im: TiledImports,
+    id: FuncId,
+    params: u32,
+    ret: bool,
+    which: u32
+) -> bool eff [Ffi[Cranelift]] {
     let sig = rt_sig(inout m, params, ret);
     let mut b = match builder_new(in m, sig) {
         Some(b) => b,
@@ -374,8 +380,13 @@ fn tl_checked_mul(
 }
 
 // `checked_add_imm_or_fault` for `imm` = 63, the one use.
-fn tl_checked_add63(inout b: Builder, inout m: Module, in im: TiledImports, lhs: Value, fault: i64)
-    -> Value eff [Ffi[Cranelift]] {
+fn tl_checked_add63(
+    inout b: Builder,
+    inout m: Module,
+    in im: TiledImports,
+    lhs: Value,
+    fault: i64
+) -> Value eff [Ffi[Cranelift]] {
     // (u64::MAX - 63) as i64
     let overflow = ins_icmp_imm(inout b, cc_ugt(), lhs, -64);
     let fail_blk = create_block(inout b);
@@ -387,8 +398,13 @@ fn tl_checked_add63(inout b: Builder, inout m: Module, in im: TiledImports, lhs:
     ins_iadd_imm(inout b, lhs, 63)
 }
 
-fn tl_checked_shl3(inout b: Builder, inout m: Module, in im: TiledImports, val: Value, fault: i64)
-    -> Value eff [Ffi[Cranelift]] {
+fn tl_checked_shl3(
+    inout b: Builder,
+    inout m: Module,
+    in im: TiledImports,
+    val: Value,
+    fault: i64
+) -> Value eff [Ffi[Cranelift]] {
     // (u64::MAX >> 3) as i64
     let overflow = ins_icmp_imm(inout b, cc_ugt(), val, 2305843009213693951);
     let fail_blk = create_block(inout b);

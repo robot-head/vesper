@@ -352,16 +352,17 @@ fn sat_sub_i64(a: i64, b: i64) -> i64 {
 
 // The bytes of `data` a length field takes: none (-1) takes nothing.
 fn field_bytes(n: i64) -> u64 {
-    if n < 0 {
-        0
-    } else {
-        wrapping_u64(n)
-    }
+    if n < 0 { 0 } else { wrapping_u64(n) }
 }
 
 // `varint(n)` and then, for n > 0, `data[src..src + n]`.
-fn put_field(inout out: Slice[u8], at: u64, in data: Slice[u8], src: u64, n: i64)
-    -> u64 eff [Fail[RuntimeError]] {
+fn put_field(
+    inout out: Slice[u8],
+    at: u64,
+    in data: Slice[u8],
+    src: u64,
+    n: i64
+) -> u64 eff [Fail[RuntimeError]] {
     let pos = put_uvarint(inout out, at, zigzag(n));
     if n <= 0 {
         return pos;

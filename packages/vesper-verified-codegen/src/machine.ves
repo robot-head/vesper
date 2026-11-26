@@ -188,11 +188,7 @@ fn imm(r: u8, w: u64) -> M {
 
 // `Kind::signed`, then `Kind::sign`.
 fn sign(kind: u8) -> u8 {
-    if kind == K_I64 {
-        S_S
-    } else {
-        S_U
-    }
+    if kind == K_I64 { S_S } else { S_U }
 }
 
 // `Kind::narrow_mask`: the largest value of a narrow unsigned kind, whose

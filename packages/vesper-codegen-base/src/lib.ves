@@ -87,13 +87,13 @@ fn words(bytes: u64) -> u64 {
 
 // A stack slot of `max(size, 8)` bytes, aligned to 8, and its address;
 // zeroed word by word when `zeroed`.
-pub fn alloc(inout b: Builder, in m: Module, size: u32, zeroed: bool)
-    -> Value eff [Ffi[Cranelift]] {
-    let bytes = if size < 8 {
-        8
-    } else {
-        size
-    };
+pub fn alloc(
+    inout b: Builder,
+    in m: Module,
+    size: u32,
+    zeroed: bool
+) -> Value eff [Ffi[Cranelift]] {
+    let bytes = if size < 8 { 8 } else { size };
     let slot = create_stack_slot(inout b, bytes, WORD_ALIGN_SHIFT);
     let ptr = ins_stack_addr(inout b, pointer_type(in m), slot, 0);
     if zeroed {

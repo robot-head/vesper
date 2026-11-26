@@ -465,14 +465,7 @@ pub fn let_local(
 ) {
     let m = b.at();
     b.w(S_LET);
-    b
-        .w(
-            if mutable {
-                1
-            } else {
-                0
-            }
-        );
+    b.w(if mutable { 1 } else { 0 });
     b.w(P_BIND);
     b.sym(name);
     if has_ty {
@@ -554,8 +547,14 @@ pub fn extend(inout out: ChunkSeq[T], in more: ChunkSeq[T]) {
 }
 
 // `DS::Match` with two arms.
-pub fn match_stmt2(inout b: B, scrutinee: T, p1: T, in s1: ChunkSeq[T], p2: T, in s2: ChunkSeq[T])
-    -> T {
+pub fn match_stmt2(
+    inout b: B,
+    scrutinee: T,
+    p1: T,
+    in s1: ChunkSeq[T],
+    p2: T,
+    in s2: ChunkSeq[T]
+) -> T {
     let m = b.at();
     b.w(7);
     b.w(2);

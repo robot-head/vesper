@@ -145,11 +145,7 @@ fn node(inout b: Pb, depth: u64) -> Unit eff [Fail[GErr]] {
 fn reserve(inout b: Pb, len: u64, inout cap: u64) -> Unit eff [Fail[GErr]] {
     if len == cap {
         let old = cap;
-        let doubled = if old == 0 {
-            4
-        } else {
-            mul_or(old, 2, 10, 0)
-        };
+        let doubled = if old == 0 { 4 } else { mul_or(old, 2, 10, 0) };
         let next = min(doubled, b.max_nodes);
         if next <= old {
             fail(16, 0);
@@ -263,8 +259,13 @@ fn mget(in meta: ChunkSeq[u64], i: u64) -> u64 {
     }
 }
 
-fn schema_depth(in schema: Slice[u64], inout meta: ChunkSeq[u64], inout b: Pb, id: u64, depth: u64)
-    -> u64 eff [Fail[GErr]] {
+fn schema_depth(
+    in schema: Slice[u64],
+    inout meta: ChunkSeq[u64],
+    inout b: Pb,
+    id: u64,
+    depth: u64
+) -> u64 eff [Fail[GErr]] {
     work(inout b, 1);
     let color = mget(in meta, wrapping_mul(id, META_WORDS));
     if color == VISITING {
@@ -296,8 +297,13 @@ fn schema_depth(in schema: Slice[u64], inout meta: ChunkSeq[u64], inout b: Pb, i
 }
 
 // Schema::lookup: the offset of field `number` of message `id`.
-fn lookup(in schema: Slice[u64], inout b: Pb, id: u64, number: u64, at: u64)
-    -> u64 eff [Fail[GErr]] {
+fn lookup(
+    in schema: Slice[u64],
+    inout b: Pb,
+    id: u64,
+    number: u64,
+    at: u64
+) -> u64 eff [Fail[GErr]] {
     let mut lo: u64 = 0;
     let mut hi = sw(in schema, msg_rec(in schema, id));
     loop {
@@ -346,8 +352,12 @@ fn find(in schema: Slice[u64], id: u64, number: u64) -> u64 {
 
 // Parsing.
 
-pub fn parse_exact(in schema: Slice[u64], root: u64, in lim: Slice[u64], in input: Slice[u8])
-    -> ChunkSeq[u64] eff [Fail[GErr]] {
+pub fn parse_exact(
+    in schema: Slice[u64],
+    root: u64,
+    in lim: Slice[u64],
+    in input: Slice[u8]
+) -> ChunkSeq[u64] eff [Fail[GErr]] {
     let n = input.len();
     bound(n, sw(in lim, 4), 12);
     bound(n, max_wire(), 10);
@@ -425,11 +435,7 @@ fn message(
         if number == previous && (!repeated || numeric(kind)) {
             fail(4, at);
         }
-        let expected = if packed {
-            2
-        } else {
-            wire(kind)
-        };
+        let expected = if packed { 2 } else { wire(kind) };
         if w != expected {
             fail(6, at);
         }
@@ -515,11 +521,7 @@ fn scalar(in input: Slice[u8], inout b: Pb, kind: u64, end: u64) -> u64 eff [Fai
                 Option::Some(v) => widen_u64(v),
                 Option::None => 0,
             };
-            return if kind == K_SFIXED32 {
-                sext32(v)
-            } else {
-                v
-            };
+            return if kind == K_SFIXED32 { sext32(v) } else { v };
         }
         return match input.try_read_u64_le(at) {
             Option::Some(v) => v,
@@ -545,11 +547,7 @@ fn scalar(in input: Slice[u8], inout b: Pb, kind: u64, end: u64) -> u64 eff [Fai
             fail(10, at);
         }
         let half = n >> 1;
-        let v = if n & 1 == 0 {
-            half
-        } else {
-            (~half) & U32_MAX
-        };
+        let v = if n & 1 == 0 { half } else { (~half) & U32_MAX };
         sext32(v)
     } else if kind == K_SINT64 {
         (n >> 1) ^ wrapping_sub(0, n & 1)
@@ -570,18 +568,10 @@ fn scalar(in input: Slice[u8], inout b: Pb, kind: u64, end: u64) -> u64 eff [Fai
 fn var_bits(tag: u64, x: u64) -> u64 {
     if tag == K_SINT32 {
         let n = x & U32_MAX;
-        let neg: u64 = if n >= I32_SIGN {
-            U32_MAX
-        } else {
-            0
-        };
+        let neg: u64 = if n >= I32_SIGN { U32_MAX } else { 0 };
         ((n << 1) & U32_MAX) ^ neg
     } else if tag == K_SINT64 {
-        let neg: u64 = if x >= I64_SIGN {
-            ALL_ONES
-        } else {
-            0
-        };
+        let neg: u64 = if x >= I64_SIGN { ALL_ONES } else { 0 };
         ((x & LOW_63_BITS) << 1) ^ neg
     } else {
         x
@@ -767,8 +757,12 @@ pub fn encoded_size(
     size
 }
 
-pub fn encoded_len(in schema: Slice[u64], root: u64, in lim: Slice[u64], in vals: Slice[u64])
-    -> u64 eff [Fail[GErr]] {
+pub fn encoded_len(
+    in schema: Slice[u64],
+    root: u64,
+    in lim: Slice[u64],
+    in vals: Slice[u64]
+) -> u64 eff [Fail[GErr]] {
     let mut sizes = ChunkSeq::new[u64]();
     encoded_size(in schema, root, in lim, in vals, inout sizes)
 }

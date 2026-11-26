@@ -58,11 +58,7 @@ fn digit_value(b: u8, radix: u64) -> u64 {
     } else {
         radix
     };
-    if value < radix {
-        value
-    } else {
-        radix
-    }
+    if value < radix { value } else { radix }
 }
 
 // `(v / d, v % d)`, and `(0, 0)` when `d` is 0.
@@ -205,11 +201,7 @@ pub fn parse_i64(in s: Slice[u8]) -> Result[i64, ParseIntError] {
     if signed && n == 1 {
         return Result::Err(ParseIntError::EmptyInput);
     }
-    let digits_start: u64 = if signed {
-        1
-    } else {
-        0
-    };
+    let digits_start: u64 = if signed { 1 } else { 0 };
     // The largest magnitude the sign allows.
     let bound: u64 = if negative {
         I64_MIN_MAGNITUDE
@@ -335,8 +327,10 @@ test {
         }
     }
 
-    fn unsigned_matches(actual: Result[u64, ParseIntError], expected: Result[u64, ParseIntError])
-        -> bool {
+    fn unsigned_matches(
+        actual: Result[u64, ParseIntError],
+        expected: Result[u64, ParseIntError]
+    ) -> bool {
         match (actual, expected) {
             (Result::Ok(a), Result::Ok(b)) => a == b,
             (Result::Err(a), Result::Err(b)) => parse_error_matches(a, b),

@@ -1,0 +1,634 @@
+// The byte-order, wide-multiply, bit and checked builtins a module calls,
+// as the checker's width prelude generates them (`integer_widths::prelude`,
+// `numeric::byte_order_source`, `wide_source`, `bit_source`,
+// `checked_source`): the same Vesper text byte for byte, since the
+// collected spans are its offsets.
+
+use @vesper/ast::{Ast, FnNode, ItemNode, none};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{Interner, interner_new, symbol_from_id};
+use self::prelude::{Uses, sorted_symbols};
+
+// ---------------------------------------------------------------- kinds
+
+// An integer kind (`IntegerKind`), by index into `KIND_NAMES`: u8 u16 u32
+// u64 usize i8 i16 i32 i64 isize i128 u128; 255 for none.
+fn kind_name(k: u8) -> Str {
+    if k == 0 {
+        "u8"
+    } else if k == 1 {
+        "u16"
+    } else if k == 2 {
+        "u32"
+    } else if k == 3 {
+        "u64"
+    } else if k == 4 {
+        "usize"
+    } else if k == 5 {
+        "i8"
+    } else if k == 6 {
+        "i16"
+    } else if k == 7 {
+        "i32"
+    } else if k == 8 {
+        "i64"
+    } else if k == 9 {
+        "isize"
+    } else if k == 10 {
+        "i128"
+    } else {
+        "u128"
+    }
+}
+
+fn kind_bits(k: u8) -> u64 {
+    if k == 0 || k == 5 {
+        8
+    } else if k == 1 || k == 6 {
+        16
+    } else if k == 2 || k == 7 {
+        32
+    } else if k == 10 || k == 11 {
+        128
+    } else {
+        64
+    }
+}
+
+fn kind_signed(k: u8) -> bool {
+    k >= 5 && k <= 10
+}
+
+fn kind_wide(k: u8) -> bool {
+    k == 10 || k == 11
+}
+
+// The kind of the other signedness and the same width.
+fn kind_flip(k: u8) -> u8 {
+    if k == 10 {
+        11
+    } else if k == 11 {
+        10
+    } else if k >= 5 {
+        wrapping_sub(k, 5)
+    } else {
+        wrapping_add(k, 5)
+    }
+}
+
+// The unsigned kind of `k`'s width.
+fn kind_unsigned(k: u8) -> u8 {
+    if kind_signed(k) { kind_flip(k) } else { k }
+}
+
+// `kind.min()` and `kind.max()` of the kinds of 32 bits or fewer.
+fn kind_min(k: u8) -> Str {
+    if k == 5 {
+        "-128"
+    } else if k == 6 {
+        "-32768"
+    } else if k == 7 {
+        "-2147483648"
+    } else {
+        "0"
+    }
+}
+
+fn kind_max(k: u8) -> Str {
+    if k == 0 {
+        "255"
+    } else if k == 1 {
+        "65535"
+    } else if k == 2 {
+        "4294967295"
+    } else if k == 5 {
+        "127"
+    } else if k == 6 {
+        "32767"
+    } else {
+        "2147483647"
+    }
+}
+
+fn same(in b: Slice[u8], from: u64, in lit: Str) -> bool {
+    let t = lit.as_bytes();
+    if wrapping_sub(b.len(), from) != t.len() || from > b.len() {
+        return false;
+    }
+    for i in 0..t.len() {
+        if b.try_get(wrapping_add(from, i)) != t.try_get(i) {
+            return false;
+        }
+    }
+    true
+}
+
+// The kind spelled by `b` from byte `from` (`IntegerKind::from_name`).
+fn kind_at(in b: Slice[u8], from: u64) -> u8 {
+    for k in 0..12 {
+        let kk = wrapping_u8(k);
+        if same(in b, from, kind_name(kk)) {
+            return kk;
+        }
+    }
+    255
+}
+
+fn starts(in b: Slice[u8], in lit: Str) -> bool {
+    let t = lit.as_bytes();
+    if b.len() < t.len() {
+        return false;
+    }
+    for i in 0..t.len() {
+        if b.try_get(i) != t.try_get(i) {
+            return false;
+        }
+    }
+    true
+}
+
+// The family of builtin `name` and its kind: 1-4 the byte-order prefixes
+// (to_le, to_be, from_le, from_be; kinds of 16 bits or more), 11-16 the
+// bit builtins (leading_zeros, trailing_zeros, count_ones, wrapping_shl,
+// wrapping_shr, wrapping_neg), 21-23 the checked ones (add, sub, mul); 0
+// for none.
+fn family(in b: Slice[u8]) -> (u8, u8) {
+    let (f, n): (u8, u64) = if starts(in b, "to_le_bytes_") {
+        (1, 12)
+    } else if starts(in b, "to_be_bytes_") {
+        (2, 12)
+    } else if starts(in b, "from_le_bytes_") {
+        (3, 14)
+    } else if starts(in b, "from_be_bytes_") {
+        (4, 14)
+    } else if starts(in b, "leading_zeros_") {
+        (11, 14)
+    } else if starts(in b, "trailing_zeros_") {
+        (12, 15)
+    } else if starts(in b, "count_ones_") {
+        (13, 11)
+    } else if starts(in b, "wrapping_shl_") {
+        (14, 13)
+    } else if starts(in b, "wrapping_shr_") {
+        (15, 13)
+    } else if starts(in b, "wrapping_neg_") {
+        (16, 13)
+    } else if starts(in b, "checked_add_") {
+        (21, 12)
+    } else if starts(in b, "checked_sub_") {
+        (22, 12)
+    } else if starts(in b, "checked_mul_") {
+        (23, 12)
+    } else {
+        (0, 0)
+    };
+    if f == 0 {
+        return (0, 255);
+    }
+    let k = kind_at(in b, n);
+    if k == 255 || (f <= 4 && kind_bits(k) < 16) {
+        return (0, 255);
+    }
+    (f, k)
+}
+
+// Whether `name` is `mul_wide` or a bit or checked builtin: the names a
+// module's own function may not take (`World::collect`).
+pub fn reserved_width_name(in name: Str) -> bool {
+    let b = name.as_bytes();
+    if same(in b, 0, "mul_wide") {
+        return true;
+    }
+    let (f, k) = family(in b);
+    f >= 11
+}
+
+// ---------------------------------------------------------------- text
+
+fn put(inout s: String, in t: Str) {
+    s.push_str(in t);
+}
+
+fn put_num(inout s: String, v: u64) {
+    if v >= 10 {
+        put_num(inout s, v / 10);
+    }
+    let d = wrapping_add(48, v % 10);
+    s.push_char(wrapping_u32(d));
+}
+
+// `numeric::byte_order_source`.
+fn byte_order_source(inout s: String, in name: Str, f: u8, k: u8) {
+    let kn = kind_name(k);
+    let un = kind_name(kind_unsigned(k));
+    let n = kind_bits(k) / 8;
+    let mut tuple = String::new();
+    tuple.push_str(in "(");
+    for i in 0..n {
+        if i > 0 {
+            tuple.push_str(in ", ");
+        }
+        tuple.push_str(in "u8");
+    }
+    tuple.push_str(in ")");
+    let little = f == 1 || f == 3;
+    if f <= 2 {
+        put(inout s, "fn ");
+        put(inout s, name);
+        put(inout s, "(x: ");
+        put(inout s, kn);
+        put(inout s, ") -> ");
+        put(inout s, tuple.as_str());
+        put(inout s, " { let p: ");
+        put(inout s, un);
+        put(inout s, " = wrapping_");
+        put(inout s, un);
+        put(inout s, "(x); (");
+        for j in 0..n {
+            let i = if little {
+                j
+            } else {
+                wrapping_sub(wrapping_sub(n, 1), j)
+            };
+            if j > 0 {
+                put(inout s, ", ");
+            }
+            put(inout s, "wrapping_u8(p >> ");
+            put_num(inout s, wrapping_mul(8, i));
+            put(inout s, ")");
+        }
+        put(inout s, ") }");
+    } else {
+        put(inout s, "fn ");
+        put(inout s, name);
+        put(inout s, "(bytes: ");
+        put(inout s, tuple.as_str());
+        put(inout s, ") -> ");
+        put(inout s, kn);
+        put(inout s, " { let (");
+        for i in 0..n {
+            if i > 0 {
+                put(inout s, ", ");
+            }
+            put(inout s, "b");
+            put_num(inout s, i);
+        }
+        put(inout s, ") = bytes; let p: ");
+        put(inout s, un);
+        put(inout s, " = ");
+        for position in 0..n {
+            let i = if little {
+                position
+            } else {
+                wrapping_sub(wrapping_sub(n, 1), position)
+            };
+            if position > 0 {
+                put(inout s, " | ");
+            }
+            put(inout s, "(widen_");
+            put(inout s, un);
+            put(inout s, "(b");
+            put_num(inout s, position);
+            put(inout s, ") << ");
+            put_num(inout s, wrapping_mul(8, i));
+            put(inout s, ")");
+        }
+        put(inout s, "; wrapping_");
+        put(inout s, kn);
+        put(inout s, "(p) }");
+    }
+}
+
+// `integer_widths::wide_source`.
+fn wide_source(inout s: String) {
+    put(
+        inout s,
+        "fn mul_wide(a: u64, b: u64) -> (u64, u64) { let m: u64 = 4294967295; let a0 = a & m; let a1 = a >> 32; let b0 = b & m; let b1 = b >> 32; let p00 = wrapping_mul(a0, b0); let p01 = wrapping_mul(a0, b1); let p10 = wrapping_mul(a1, b0); let p11 = wrapping_mul(a1, b1); let mid = wrapping_add(wrapping_add(p00 >> 32, p01 & m), p10 & m); let hi = wrapping_add(wrapping_add(wrapping_add(p11, p01 >> 32), p10 >> 32), mid >> 32); (wrapping_mul(a, b), hi) }"
+    );
+}
+
+// A SWAR population count of the `u64` value `v0{x}` into `c{x}`.
+fn swar(inout s: String, in x: Str) {
+    put(inout s, "let v1");
+    put(inout s, x);
+    put(inout s, " = wrapping_sub(v0");
+    put(inout s, x);
+    put(inout s, ", (v0");
+    put(inout s, x);
+    put(inout s, " >> 1) & 0x5555555555555555); let v2");
+    put(inout s, x);
+    put(inout s, " = wrapping_add(v1");
+    put(inout s, x);
+    put(inout s, " & 0x3333333333333333, (v1");
+    put(inout s, x);
+    put(inout s, " >> 2) & 0x3333333333333333); let v3");
+    put(inout s, x);
+    put(inout s, " = wrapping_add(v2");
+    put(inout s, x);
+    put(inout s, ", v2");
+    put(inout s, x);
+    put(inout s, " >> 4) & 0x0f0f0f0f0f0f0f0f; let c");
+    put(inout s, x);
+    put(inout s, ": u32 = wrapping_u32(wrapping_mul(v3");
+    put(inout s, x);
+    put(inout s, ", 0x0101010101010101) >> 56);");
+}
+
+// The population count `c` of the value `bits_of`.
+fn popcount(inout s: String, k: u8, in bits_of: Str) {
+    if kind_wide(k) {
+        put(inout s, "let w: u128 = ");
+        put(inout s, bits_of);
+        put(inout s, "; let v0lo: u64 = wrapping_u64(w); ");
+        swar(inout s, "lo");
+        put(inout s, " let v0hi: u64 = wrapping_u64(w >> 64); ");
+        swar(inout s, "hi");
+        put(inout s, " let c: u32 = wrapping_add(clo, chi);");
+    } else {
+        put(inout s, "let v0: u64 = widen_u64(");
+        put(inout s, bits_of);
+        put(inout s, "); ");
+        swar(inout s, "");
+    }
+}
+
+fn head(inout s: String, in name: Str, in kn: Str, shift: bool, in result: Str) {
+    put(inout s, "fn ");
+    put(inout s, name);
+    put(inout s, "(x: ");
+    put(inout s, kn);
+    if shift {
+        put(inout s, ", n: u32");
+    }
+    put(inout s, ") -> ");
+    put(inout s, result);
+    put(inout s, " { ");
+}
+
+// `integer_widths::bit_source`.
+fn bit_source(inout s: String, in name: Str, f: u8, k: u8) {
+    let kn = kind_name(k);
+    let un = kind_name(kind_unsigned(k));
+    let bits = kind_bits(k);
+    let mut pattern = String::new();
+    if kind_signed(k) {
+        pattern.push_str(in "wrapping_");
+        pattern.push_str(in un);
+        pattern.push_str(in "(x)");
+    } else {
+        pattern.push_str(in "x");
+    }
+    if f == 13 {
+        head(inout s, name, kn, false, "u32");
+        popcount(inout s, k, pattern.as_str());
+        put(inout s, " c }");
+    } else if f == 12 {
+        head(inout s, name, kn, false, "u32");
+        put(inout s, "let p: ");
+        put(inout s, un);
+        put(inout s, " = ");
+        put(inout s, pattern.as_str());
+        put(inout s, "; ");
+        popcount(inout s, k, "~p & wrapping_sub(p, 1)");
+        put(inout s, " c }");
+    } else if f == 11 {
+        head(inout s, name, kn, false, "u32");
+        put(inout s, "let mut p: ");
+        put(inout s, un);
+        put(inout s, " = ");
+        put(inout s, pattern.as_str());
+        put(inout s, "; ");
+        let mut sh: u64 = 1;
+        loop {
+            if sh >= bits {
+                break;
+            }
+            put(inout s, "p = p | (p >> ");
+            put_num(inout s, sh);
+            put(inout s, "); ");
+            sh = wrapping_mul(sh, 2);
+        }
+        popcount(inout s, k, "p");
+        put(inout s, " let width: u32 = ");
+        put_num(inout s, bits);
+        put(inout s, "; wrapping_sub(width, c) }");
+    } else if f == 16 {
+        head(inout s, name, kn, false, kn);
+        put(inout s, "let zero: ");
+        put(inout s, kn);
+        put(inout s, " = 0; wrapping_sub(zero, x) }");
+    } else if f == 14 {
+        head(inout s, name, kn, true, kn);
+        put(inout s, "let one: ");
+        put(inout s, kn);
+        put(inout s, " = 1; wrapping_mul(x, rotate_left(one, n)) }");
+    } else {
+        head(inout s, name, kn, true, kn);
+        put(inout s, "let s: u32 = n & ");
+        put_num(inout s, wrapping_sub(bits, 1));
+        put(inout s, "; if s == 0 { x } else { let p: ");
+        put(inout s, un);
+        put(inout s, " = ");
+        put(inout s, pattern.as_str());
+        put(inout s, "; let one: ");
+        put(inout s, un);
+        put(inout s, " = 1; let keep: ");
+        put(inout s, un);
+        put(inout s, " = wrapping_sub(rotate_right(one, s), one); let r: ");
+        put(inout s, un);
+        put(inout s, " = rotate_right(p, s) & keep; ");
+        if kind_signed(k) {
+            put(inout s, "if x < 0 { wrapping_");
+            put(inout s, kn);
+            put(inout s, "(r | ~keep) } else { wrapping_");
+            put(inout s, kn);
+            put(inout s, "(r) }");
+        } else {
+            put(inout s, "r");
+        }
+        put(inout s, " } }");
+    }
+}
+
+// `Option::Some(wrapping_{k}({v}))`.
+fn some_wrapped(inout s: String, in kn: Str, in v: Str) {
+    put(inout s, "Option::Some(wrapping_");
+    put(inout s, kn);
+    put(inout s, "(");
+    put(inout s, v);
+    put(inout s, "))");
+}
+
+// `integer_widths::checked_source`.
+fn checked_source(inout s: String, in name: Str, f: u8, k: u8) {
+    let kn = kind_name(k);
+    let bits = kind_bits(k);
+    let signed = kind_signed(k);
+    put(inout s, "fn ");
+    put(inout s, name);
+    put(inout s, "(a: ");
+    put(inout s, kn);
+    put(inout s, ", b: ");
+    put(inout s, kn);
+    put(inout s, ") -> Option[");
+    put(inout s, kn);
+    put(inout s, "] { ");
+    if f == 21 && !signed {
+        put(inout s, "let s: ");
+        put(inout s, kn);
+        put(inout s, " = wrapping_add(a, b); if s < a { Option::None } else { Option::Some(s) }");
+    } else if f == 22 && !signed {
+        put(inout s, "if b > a { Option::None } else { Option::Some(wrapping_sub(a, b)) }");
+    } else if f != 23 {
+        put(inout s, "let s: ");
+        put(inout s, kn);
+        if f == 21 {
+            put(inout s, " = wrapping_add(a, b); if (a < 0) == (b < 0)");
+        } else {
+            put(inout s, " = wrapping_sub(a, b); if (a < 0) != (b < 0)");
+        }
+        put(inout s, " && (s < 0) != (a < 0) { Option::None } else { Option::Some(s) }");
+    } else if bits <= 32 && !signed {
+        put(inout s, "let p: u64 = wrapping_mul(widen_u64(a), widen_u64(b)); if p > ");
+        put(inout s, kind_max(k));
+        put(inout s, " { Option::None } else { ");
+        some_wrapped(inout s, kn, "p");
+        put(inout s, " }");
+    } else if bits <= 32 {
+        put(inout s, "let p: i64 = wrapping_mul(widen_i64(a), widen_i64(b)); if p < ");
+        put(inout s, kind_min(k));
+        put(inout s, " || p > ");
+        put(inout s, kind_max(k));
+        put(inout s, " { Option::None } else { ");
+        some_wrapped(inout s, kn, "p");
+        put(inout s, " }");
+    } else if bits == 128 && !signed {
+        put(inout s, "if a == 0 { Option::Some(a) } else { let p: ");
+        put(inout s, kn);
+        put(
+            inout s,
+            " = wrapping_mul(a, b); if p / a != b { Option::None } else { Option::Some(p) } }"
+        );
+    } else if bits == 128 {
+        put(inout s, "let zero: ");
+        put(inout s, kn);
+        put(
+            inout s,
+            " = 0; let uzero: u128 = 0; let ua: u128 = if a < 0 { wrapping_u128(wrapping_sub(zero, a)) } else { wrapping_u128(a) }; let ub: u128 = if b < 0 { wrapping_u128(wrapping_sub(zero, b)) } else { wrapping_u128(b) }; if ua == 0 { Option::Some(zero) } else { let p: u128 = wrapping_mul(ua, ub); let one: u128 = 1; let limit: u128 = rotate_right(one, 1); if p / ua != ub { Option::None } else if (a < 0) != (b < 0) { if p > limit { Option::None } else { "
+        );
+        some_wrapped(inout s, kn, "wrapping_sub(uzero, p)");
+        put(inout s, " } } else if p >= limit { Option::None } else { ");
+        some_wrapped(inout s, kn, "p");
+        put(inout s, " } }");
+    } else if !signed {
+        put(
+            inout s,
+            "let (lo, hi) = mul_wide(wrapping_u64(a), wrapping_u64(b)); if hi != 0 { Option::None } else { "
+        );
+        some_wrapped(inout s, kn, "lo");
+        put(inout s, " }");
+    } else {
+        put(inout s, "let zero: ");
+        put(inout s, kn);
+        put(
+            inout s,
+            " = 0; let ua: u64 = if a < 0 { wrapping_u64(wrapping_sub(zero, a)) } else { wrapping_u64(a) }; let ub: u64 = if b < 0 { wrapping_u64(wrapping_sub(zero, b)) } else { wrapping_u64(b) }; let (lo, hi) = mul_wide(ua, ub); let limit: u64 = 9223372036854775807; if hi != 0 { Option::None } else if (a < 0) != (b < 0) { if lo > wrapping_add(limit, 1) { Option::None } else { "
+        );
+        some_wrapped(inout s, kn, "wrapping_sub(0, lo)");
+        put(inout s, " } } else if lo > limit { Option::None } else { ");
+        some_wrapped(inout s, kn, "lo");
+        put(inout s, " }");
+    }
+    put(inout s, " }");
+}
+
+// ---------------------------------------------------------------- prelude
+
+fn w_item(in a: Ast, i: u32) -> ItemNode {
+    a.items.get_or(idx_from_raw[ItemNode](i), ItemNode { kind: 0, node: none() })
+}
+
+fn w_fn_name(in a: Ast, i: u32) -> u32 {
+    a.fns
+        .get_or(
+            idx_from_raw[FnNode](i),
+            FnNode {
+                name: none(),
+                fip: false,
+                generics: 0,
+                params: 0,
+                result: none(),
+                effects: none(),
+                body: none(),
+                start: 0,
+                end: 0
+            }
+        )
+        .name
+}
+
+// The width prelude's source for a module with uses `u`: each builtin it
+// names and does not define as a function, in name order, one per line;
+// a 64-bit `checked_mul` brings in `mul_wide` (`integer_widths::prelude`).
+pub fn width_source(in u: Uses, in module: Ast) -> String {
+    let mut defined = interner_new();
+    for i in 0..module.m_items.len() {
+        let it = match module.m_items.try_get(i) {
+            Option::Some(v) => w_item(in module, v),
+            Option::None => ItemNode { kind: 0, node: none() },
+        };
+        if it.kind == 2 {
+            let mut t = String::new();
+            let ok = module
+                .names
+                .resolve_into(symbol_from_id(w_fn_name(in module, it.node)), inout t);
+            let s = defined.intern(in t.as_str());
+        }
+    }
+    let mut names = interner_new();
+    let mut wide = false;
+    for i in 0..u.names.len() {
+        let mut t = String::new();
+        let ok = u.names.resolve_into(symbol_from_id(wrapping_u32(i)), inout t);
+        let (f, k) = family(in t.as_bytes());
+        if f == 23 && kind_bits(k) == 64 {
+            wide = true;
+        }
+        let s = names.intern(in t.as_str());
+    }
+    if wide {
+        let s = names.intern(in "mul_wide");
+    }
+    let mut out = String::new();
+    let order = sorted_symbols(in names);
+    for i in 0..order.len() {
+        let id = match order.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let mut t = String::new();
+        let ok = names.resolve_into(symbol_from_id(id), inout t);
+        let d = match defined.lookup(in t.as_str()) {
+            Option::Some(x) => true,
+            Option::None => false,
+        };
+        if d {
+            continue;
+        }
+        let (f, k) = family(in t.as_bytes());
+        let start = out.len();
+        if f >= 1 && f <= 4 {
+            byte_order_source(inout out, t.as_str(), f, k);
+        } else if same(in t.as_bytes(), 0, "mul_wide") {
+            wide_source(inout out);
+        } else if f >= 11 && f <= 16 {
+            bit_source(inout out, t.as_str(), f, k);
+        } else if f >= 21 {
+            checked_source(inout out, t.as_str(), f, k);
+        }
+        if out.len() > start {
+            out.push_str(in "\n");
+        }
+    }
+    out
+}

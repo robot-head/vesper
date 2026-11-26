@@ -486,11 +486,7 @@ pub fn validate_program(inout s: S) {
         }
         let id = word_at(in s.cf_id, i);
         let is_impl = i < s.nimpl;
-        let pos = if is_impl {
-            i
-        } else {
-            sub(i, s.nimpl)
-        };
+        let pos = if is_impl { i } else { sub(i, s.nimpl) };
         if id != pos {
             if is_impl {
                 dense(inout s, "impl", pos, "impl", id);
@@ -498,11 +494,7 @@ pub fn validate_program(inout s: S) {
                 dense(inout s, "model", pos, "model", id);
             }
         }
-        let sv: u64 = if is_impl {
-            4
-        } else {
-            6
-        };
+        let sv: u64 = if is_impl { 4 } else { 6 };
         v_conformance(inout s, i, sv, id);
         i = inc(i);
     }
@@ -697,8 +689,16 @@ fn r_what(inout s: S, what: u64, x: u64) {
     }
 }
 
-fn v_args(inout s: S, params: u64, args: u64, sv: u64, sa: u64, sb: u64, what: u64, x: u64)
-    -> bool {
+fn v_args(
+    inout s: S,
+    params: u64,
+    args: u64,
+    sv: u64,
+    sa: u64,
+    sb: u64,
+    what: u64,
+    x: u64
+) -> bool {
     let np = kid_count(in s, params);
     let na = kid_count(in s, args);
     if np != na {

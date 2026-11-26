@@ -163,11 +163,7 @@ impl Ast {
             return NONE32;
         }
         let x = u32_at(in self.fn_by_name, w(name));
-        if x == 0 {
-            NONE32
-        } else {
-            wrapping_sub(x, 1)
-        }
+        if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
     }
 }
 
@@ -201,8 +197,12 @@ fn opt(x: u64) -> u32 {
 // Decodes the fip task section: the pool, the expressions, the patterns
 // and the functions. Names in pool words are tagged by the node kind that
 // owns them and mapped here, so the checker sees symbols and type ids.
-pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tmap: ChunkSeq[u32])
-    -> Ast {
+pub fn read_ast(
+    inout r: Reader,
+    in b: Slice[u8],
+    in nmap: ChunkSeq[u32],
+    in tmap: ChunkSeq[u32]
+) -> Ast {
     let pn = r.word(in b);
     let mut pool: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](pn);
     for i in 0..pn {
@@ -232,11 +232,7 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
         if kind == 2 || kind == 16 {
             a = sym(in nmap, w(a));
         }
-        let b2 = if kind == 7 {
-            sym(in nmap, w(bb))
-        } else {
-            bb
-        };
+        let b2 = if kind == 7 { sym(in nmap, w(bb)) } else { bb };
         exprs.push(ExprRow { kind: kind, start: start, end: end, a: a, b: b2, c: c, d: d, e: e });
     }
     let qn = r.word(in b);
@@ -284,22 +280,21 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
         let effects = ty(in tmap, r.word(in b));
         let body = opt(r.word(in b));
         set_index(inout by_name, name, wrapping_add(n32(i), 1));
-        fns
-            .push(
-                FnRow {
-                    name: name,
-                    fip: fip,
-                    start: start,
-                    end: end,
-                    ga: ga,
-                    gn: n32(gn),
-                    pa: pa,
-                    pn: n32(qn2),
-                    result: result,
-                    effects: effects,
-                    body: body
-                }
-            );
+        fns.push(
+            FnRow {
+                name: name,
+                fip: fip,
+                start: start,
+                end: end,
+                ga: ga,
+                gn: n32(gn),
+                pa: pa,
+                pn: n32(qn2),
+                result: result,
+                effects: effects,
+                body: body
+            }
+        );
     }
     Ast {
         pool: pool,

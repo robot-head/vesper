@@ -337,13 +337,10 @@ pub fn named(inout d: D, name: u32, args: u32) -> u32 {
 }
 
 pub fn stmt_at(in d: D, s: u32) -> StmtNode {
-    d
-        .ast
-        .stmts
-        .get_or(
-            idx_from_raw[StmtNode](s),
-            StmtNode { kind: 0, pat: NONE, ty: NONE, value: NONE, mutable: false }
-        )
+    d.ast.stmts.get_or(
+        idx_from_raw[StmtNode](s),
+        StmtNode { kind: 0, pat: NONE, ty: NONE, value: NONE, mutable: false }
+    )
 }
 
 pub fn set_stmt(inout d: D, s: u32, n: StmtNode) {
@@ -359,20 +356,16 @@ pub fn arg_at(in d: D, a: u32) -> ArgNode {
 }
 
 pub fn clause_at(in d: D, c: u32) -> ClauseNode {
-    d
-        .ast
+    d.ast
         .clauses
         .get_or(idx_from_raw[ClauseNode](c), ClauseNode { name: NONE, pats: 0, body: NONE })
 }
 
 pub fn param_at(in d: D, p: u32) -> ParamNode {
-    d
-        .ast
-        .params
-        .get_or(
-            idx_from_raw[ParamNode](p),
-            ParamNode { name: NONE, pass: 0, projections: 0, ty: NONE, start: 0, end: 0 }
-        )
+    d.ast.params.get_or(
+        idx_from_raw[ParamNode](p),
+        ParamNode { name: NONE, pass: 0, projections: 0, ty: NONE, start: 0, end: 0 }
+    )
 }
 
 pub fn set_param(inout d: D, p: u32, n: ParamNode) {
@@ -392,8 +385,7 @@ pub fn new_effects(inout d: D, instances: u32, tail: u32) -> u32 {
 }
 
 pub fn effect_at(in d: D, e: u32) -> EffectNode {
-    d
-        .ast
+    d.ast
         .effect_nodes
         .get_or(idx_from_raw[EffectNode](e), EffectNode { label: NONE, name: NONE, args: 0 })
 }
@@ -403,8 +395,7 @@ pub fn new_effect(inout d: D, label: u32, name: u32, args: u32) -> u32 {
 }
 
 pub fn generic_at(in d: D, g: u32) -> GenericNode {
-    d
-        .ast
+    d.ast
         .generics
         .get_or(idx_from_raw[GenericNode](g), GenericNode { name: NONE, bound: 0, row: false })
 }
@@ -414,13 +405,10 @@ pub fn new_generic(inout d: D, name: u32, bound: u8) -> u32 {
 }
 
 pub fn field_at(in d: D, f: u32) -> FieldNode {
-    d
-        .ast
-        .fields
-        .get_or(
-            idx_from_raw[FieldNode](f),
-            FieldNode { name: NONE, ty: NONE, modality: 3, temperature: 0 }
-        )
+    d.ast.fields.get_or(
+        idx_from_raw[FieldNode](f),
+        FieldNode { name: NONE, ty: NONE, modality: 3, temperature: 0 }
+    )
 }
 
 pub fn set_field(inout d: D, f: u32, n: FieldNode) {
@@ -428,50 +416,43 @@ pub fn set_field(inout d: D, f: u32, n: FieldNode) {
 }
 
 pub fn variant_at(in d: D, v: u32) -> VariantNode {
-    d
-        .ast
+    d.ast
         .variants
         .get_or(idx_from_raw[VariantNode](v), VariantNode { name: NONE, fields: 0, named: false })
 }
 
 pub fn adt_at(in d: D, a: u32) -> AdtNode {
-    d
-        .ast
-        .adts
-        .get_or(
-            idx_from_raw[AdtNode](a),
-            AdtNode {
-                name: NONE,
-                mode: 0,
-                generics: 0,
-                variants: 0,
-                is_enum: false,
-                tiled: false,
-                tile_width: 0,
-                start: 0,
-                end: 0
-            }
-        )
+    d.ast.adts.get_or(
+        idx_from_raw[AdtNode](a),
+        AdtNode {
+            name: NONE,
+            mode: 0,
+            generics: 0,
+            variants: 0,
+            is_enum: false,
+            tiled: false,
+            tile_width: 0,
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 pub fn fn_at(in d: D, f: u32) -> FnNode {
-    d
-        .ast
-        .fns
-        .get_or(
-            idx_from_raw[FnNode](f),
-            FnNode {
-                name: NONE,
-                fip: false,
-                generics: 0,
-                params: 0,
-                result: NONE,
-                effects: NONE,
-                body: NONE,
-                start: 0,
-                end: 0
-            }
-        )
+    d.ast.fns.get_or(
+        idx_from_raw[FnNode](f),
+        FnNode {
+            name: NONE,
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: NONE,
+            effects: NONE,
+            body: NONE,
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 pub fn set_fn(inout d: D, f: u32, n: FnNode) {
@@ -479,13 +460,10 @@ pub fn set_fn(inout d: D, f: u32, n: FnNode) {
 }
 
 pub fn effect_decl_at(in d: D, e: u32) -> EffectDeclNode {
-    d
-        .ast
-        .effect_decls
-        .get_or(
-            idx_from_raw[EffectDeclNode](e),
-            EffectDeclNode { name: NONE, linear: false, generics: 0, ops: 0, start: 0, end: 0 }
-        )
+    d.ast.effect_decls.get_or(
+        idx_from_raw[EffectDeclNode](e),
+        EffectDeclNode { name: NONE, linear: false, generics: 0, ops: 0, start: 0, end: 0 }
+    )
 }
 
 pub fn impl_at(in d: D, i: u32) -> ImplNode {
@@ -497,41 +475,24 @@ pub fn set_impl(inout d: D, i: u32, n: ImplNode) {
 }
 
 pub fn trait_at(in d: D, t: u32) -> TraitNode {
-    d
-        .ast
-        .traits
-        .get_or(
-            idx_from_raw[TraitNode](t),
-            TraitNode {
-                name: NONE,
-                public: false,
-                generics: 0,
-                assoc: 0,
-                methods: 0,
-                start: 0,
-                end: 0
-            }
-        )
+    d.ast.traits.get_or(
+        idx_from_raw[TraitNode](t),
+        TraitNode { name: NONE, public: false, generics: 0, assoc: 0, methods: 0, start: 0, end: 0 }
+    )
 }
 
 pub fn assoc_at(in d: D, a: u32) -> AssocDeclNode {
-    d
-        .ast
-        .assoc_decls
-        .get_or(
-            idx_from_raw[AssocDeclNode](a),
-            AssocDeclNode { name: NONE, bound: 0, start: 0, end: 0 }
-        )
+    d.ast.assoc_decls.get_or(
+        idx_from_raw[AssocDeclNode](a),
+        AssocDeclNode { name: NONE, bound: 0, start: 0, end: 0 }
+    )
 }
 
 pub fn trait_ref_at(in d: D, t: u32) -> TraitRefNode {
-    d
-        .ast
-        .trait_refs
-        .get_or(
-            idx_from_raw[TraitRefNode](t),
-            TraitRefNode { package: NONE, name: NONE, args: 0, start: 0, end: 0 }
-        )
+    d.ast.trait_refs.get_or(
+        idx_from_raw[TraitRefNode](t),
+        TraitRefNode { package: NONE, name: NONE, args: 0, start: 0, end: 0 }
+    )
 }
 
 pub fn set_trait_ref(inout d: D, t: u32, n: TraitRefNode) {
@@ -539,24 +500,21 @@ pub fn set_trait_ref(inout d: D, t: u32, n: TraitRefNode) {
 }
 
 pub fn conf_at(in d: D, c: u32) -> ConfNode {
-    d
-        .ast
-        .confs
-        .get_or(
-            idx_from_raw[ConfNode](c),
-            ConfNode {
-                model: NONE,
-                public: false,
-                generics: 0,
-                trait_ref: NONE,
-                self_ty: NONE,
-                wheres: 0,
-                assoc: 0,
-                methods: 0,
-                start: 0,
-                end: 0
-            }
-        )
+    d.ast.confs.get_or(
+        idx_from_raw[ConfNode](c),
+        ConfNode {
+            model: NONE,
+            public: false,
+            generics: 0,
+            trait_ref: NONE,
+            self_ty: NONE,
+            wheres: 0,
+            assoc: 0,
+            methods: 0,
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 pub fn set_conf(inout d: D, c: u32, n: ConfNode) {
@@ -572,8 +530,7 @@ pub fn new_item(inout d: D, kind: u8, node: u32) -> u32 {
 }
 
 pub fn new_bound(inout d: D, param: u32, trait_ref: u32, start: u32, end: u32, owner: u32) -> u32 {
-    d
-        .ast
+    d.ast
         .bounds
         .alloc(
             BoundNode { param: param, trait_ref: trait_ref, start: start, end: end, owner: owner }
@@ -628,11 +585,7 @@ pub fn sym_cmp(in a: Ast, x: u32, y: u32) -> i64 {
     let (ys, ye) = a.names.span(symbol_from_id(y));
     let xn = wrapping_sub(xe, xs);
     let yn = wrapping_sub(ye, ys);
-    let n = if xn < yn {
-        xn
-    } else {
-        yn
-    };
+    let n = if xn < yn { xn } else { yn };
     for i in 0..n {
         let p = match a.names.text_byte(wrapping_add(xs, i)) {
             Option::Some(c) => c,
@@ -733,11 +686,7 @@ pub fn tid(inout d: D, t: u32) -> u32 {
     let mut id: u32 = d.types.infer;
     if n.kind == 1 || n.kind == 2 {
         let len = ll(in d, n.b);
-        let list = if n.kind == 1 {
-            n.b
-        } else {
-            n.a
-        };
+        let list = if n.kind == 1 { n.b } else { n.a };
         let len2 = ll(in d, list);
         let mut args = ChunkSeq::with_capacity[u32](len2);
         for j in 0..len2 {
@@ -846,11 +795,7 @@ pub fn is_infer(in d: D, t: u32) -> bool {
 // `Type::name`: the name of a Named type, else NONE ("").
 pub fn type_name(in d: D, t: u32) -> u32 {
     let n = ty(in d, t);
-    if n.kind == 1 {
-        n.a
-    } else {
-        NONE
-    }
+    if n.kind == 1 { n.a } else { NONE }
 }
 
 // `dyn_trait::object_trait`: the trait of `dyn Trait[args]`, or NONE.
@@ -892,11 +837,7 @@ pub fn fn_sig(in d: D, t: u32) -> u32 {
         return NONE;
     }
     let sig = la(in d, n.b, 0);
-    if ty(in d, sig).kind == 3 {
-        sig
-    } else {
-        NONE
-    }
+    if ty(in d, sig).kind == 3 { sig } else { NONE }
 }
 
 pub fn fn_kind(in d: D, t: u32) -> u32 {
@@ -915,11 +856,7 @@ pub fn boxed_fn_sig(in d: D, t: u32) -> u32 {
 
 pub fn any_fn_sig(in d: D, t: u32) -> u32 {
     let s = fn_sig(in d, t);
-    if s != NONE {
-        s
-    } else {
-        boxed_fn_sig(in d, t)
-    }
+    if s != NONE { s } else { boxed_fn_sig(in d, t) }
 }
 
 fn effects_mention(in d: D, e: u32, name: u32, bare: bool) -> bool {
@@ -1003,11 +940,7 @@ pub fn boxed_traits(in d: D, t: u32, inout out: ChunkSeq[u32]) {
     }
     let n = ty(in d, t);
     if n.kind == 1 || n.kind == 2 {
-        let list = if n.kind == 1 {
-            n.b
-        } else {
-            n.a
-        };
+        let list = if n.kind == 1 { n.b } else { n.a };
         for i in 0..ll(in d, list) {
             boxed_traits(in d, la(in d, list, i), inout out);
         }
@@ -1040,11 +973,7 @@ pub fn mentions_fn_object(in d: D, t: u32) -> bool {
     }
     let n = ty(in d, t);
     if n.kind == 1 || n.kind == 2 {
-        let list = if n.kind == 1 {
-            n.b
-        } else {
-            n.a
-        };
+        let list = if n.kind == 1 { n.b } else { n.a };
         for i in 0..ll(in d, list) {
             if mentions_fn_object(in d, la(in d, list, i)) {
                 return true;
@@ -1071,11 +1000,7 @@ pub fn contains_infer(in d: D, t: u32) -> bool {
         return true;
     }
     if n.kind == 1 || n.kind == 2 {
-        let list = if n.kind == 1 {
-            n.b
-        } else {
-            n.a
-        };
+        let list = if n.kind == 1 { n.b } else { n.a };
         for i in 0..ll(in d, list) {
             if contains_infer(in d, la(in d, list, i)) {
                 return true;

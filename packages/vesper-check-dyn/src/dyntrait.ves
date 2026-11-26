@@ -150,11 +150,7 @@ fn object_safety(inout d: D, decl: u32, args: u32, start: u32, end: u32) {
     let mut vars = vars_new();
     let ng = ll(in d, tn.generics);
     let na = ll(in d, args);
-    let nz = if ng < na {
-        ng
-    } else {
-        na
-    };
+    let nz = if ng < na { ng } else { na };
     for i in 0..nz {
         let g = generic_at(in d, la(in d, tn.generics, i));
         let k = nsym(inout d, g.name);
@@ -548,15 +544,10 @@ fn lower_function(inout d: D, f: u32, owner: u32) {
         let g = intern_buf(inout d);
         // A borrowed object may be linear; a consumed one may be dropped
         // by the callee, so `sink dyn` admits affine types.
-        let bound: u8 = if p.pass == 2 {
-            1
-        } else {
-            2
-        };
+        let bound: u8 = if p.pass == 2 { 1 } else { 2 };
         let gn = new_generic(inout d, g, bound);
         generics.push(gn);
-        let tref = d
-            .ast
+        let tref = d.ast
             .trait_refs
             .alloc(
                 TraitRefNode { package: NONE, name: trn.a, args: trn.b, start: p.start, end: p.end }

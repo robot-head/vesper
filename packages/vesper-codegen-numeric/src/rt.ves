@@ -50,27 +50,43 @@ pub fn rt_sig(inout m: Module, params: u32, ret: bool) -> SigId eff [Ffi[Craneli
     s
 }
 
-fn rt_declare(inout m: Module, in name: Slice[u8], linkage: u32, params: u32, ret: bool)
-    -> FuncId eff [Ffi[Cranelift]] {
+fn rt_declare(
+    inout m: Module,
+    in name: Slice[u8],
+    linkage: u32,
+    params: u32,
+    ret: bool
+) -> FuncId eff [Ffi[Cranelift]] {
     let s = rt_sig(inout m, params, ret);
     declare_function(inout m, in name, linkage, s)
 }
 
 // `declare_function(name, Linkage::Import, sig)`.
-pub fn rt_import(inout m: Module, in name: Slice[u8], params: u32, ret: bool)
-    -> FuncId eff [Ffi[Cranelift]] {
+pub fn rt_import(
+    inout m: Module,
+    in name: Slice[u8],
+    params: u32,
+    ret: bool
+) -> FuncId eff [Ffi[Cranelift]] {
     rt_declare(inout m, in name, linkage_import(), params, ret)
 }
 
 // `declare_function(name, Linkage::Local, sig)`.
-pub fn rt_local(inout m: Module, in name: Slice[u8], params: u32, ret: bool)
-    -> FuncId eff [Ffi[Cranelift]] {
+pub fn rt_local(
+    inout m: Module,
+    in name: Slice[u8],
+    params: u32,
+    ret: bool
+) -> FuncId eff [Ffi[Cranelift]] {
     rt_declare(inout m, in name, linkage_local(), params, ret)
 }
 
 // A local, read-only data object holding `bytes`.
-pub fn rt_message(inout m: Module, in name: Slice[u8], in bytes: Slice[u8])
-    -> Option[DataId] eff [Ffi[Cranelift]] {
+pub fn rt_message(
+    inout m: Module,
+    in name: Slice[u8],
+    in bytes: Slice[u8]
+) -> Option[DataId] eff [Ffi[Cranelift]] {
     let id = declare_data(inout m, in name, linkage_local(), false);
     let mut d = match data_new() {
         Some(d) => d,
@@ -127,8 +143,12 @@ pub fn rt_call(inout b: Builder, inout m: Module, f: FuncId, in args: Slice[u32]
     ins_call(inout b, r, in args);
 }
 
-pub fn rt_call1(inout b: Builder, inout m: Module, f: FuncId, in args: Slice[u32])
-    -> Value eff [Ffi[Cranelift]] {
+pub fn rt_call1(
+    inout b: Builder,
+    inout m: Module,
+    f: FuncId,
+    in args: Slice[u32]
+) -> Value eff [Ffi[Cranelift]] {
     let r = import_function(inout b, inout m, f);
     ins_call(inout b, r, in args);
     inst_result(inout b, 0)

@@ -49,17 +49,18 @@ fn merge(
 }
 
 fn min_u64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // Entry numbers 0..n in stable order. With `by_row`, entries compare by
 // their first `width` cells; otherwise by the cell at offset `width`.
-fn sort_entries(in cells: Slice[i64], n: u64, stride: u64, width: u64, by_row: bool)
-    -> ChunkSeq[u64] {
+fn sort_entries(
+    in cells: Slice[i64],
+    n: u64,
+    stride: u64,
+    width: u64,
+    by_row: bool
+) -> ChunkSeq[u64] {
     let mut a = ChunkSeq::new[u64]();
     let mut b = ChunkSeq::new[u64]();
     for i in 0..n {
@@ -108,11 +109,7 @@ fn sort_entries(in cells: Slice[i64], n: u64, stride: u64, width: u64, by_row: b
         in_a = !in_a;
         run = step;
     }
-    if in_a {
-        a
-    } else {
-        b
-    }
+    if in_a { a } else { b }
 }
 
 // The n entries of `cells` (stride width + 1) in stable row order.

@@ -287,8 +287,12 @@ fn user_impl_covers(in m: BuiltinMod, tname: u32, ty: u32) -> bool {
     false
 }
 
-fn has_request(in req_trait: ChunkSeq[u32], in req_struct: ChunkSeq[u32], tname: u32, sname: u32)
-    -> bool {
+fn has_request(
+    in req_trait: ChunkSeq[u32],
+    in req_struct: ChunkSeq[u32],
+    tname: u32,
+    sname: u32
+) -> bool {
     for i in 0..req_trait.len() {
         if u32_at(in req_trait, i) == tname && u32_at(in req_struct, i) == sname {
             return true;
@@ -329,15 +333,7 @@ fn struct_conforms(
             break;
         }
     }
-    let _ = memo_state
-        .try_set(
-            si,
-            if ok {
-                2
-            } else {
-                1
-            }
-        );
+    let _ = memo_state.try_set(si, if ok { 2 } else { 1 });
     ok
 }
 
@@ -702,19 +698,18 @@ fn read_builtin_mod(in b: Slice[u8]) -> BuiltinMod {
             field_names.push(u32_at(in c.nmap, r.word(in b)));
             field_tys.push(u32_at(in c.tmap, r.word(in b)));
         }
-        structs
-            .push(
-                StructInfo {
-                    name: sname,
-                    mode: smode,
-                    is_enum: is_enum,
-                    has_row_gen: has_row_gen,
-                    ga: ga,
-                    gn: n32(gn),
-                    fa: fa,
-                    fn_cnt: n32(fn_cnt)
-                }
-            );
+        structs.push(
+            StructInfo {
+                name: sname,
+                mode: smode,
+                is_enum: is_enum,
+                has_row_gen: has_row_gen,
+                ga: ga,
+                gn: n32(gn),
+                fa: fa,
+                fn_cnt: n32(fn_cnt)
+            }
+        );
     }
 
     let nc = r.word(in b);
@@ -736,22 +731,21 @@ fn read_builtin_mod(in b: Slice[u8]) -> BuiltinMod {
         let empty_body = r.word(in b) != 0;
         let s = r.word(in b);
         let e = r.word(in b);
-        confs
-            .push(
-                ConfInfo {
-                    is_canonical: is_canonical,
-                    pkg_none: pkg_none,
-                    trait_name: trait_name,
-                    targ_cnt: targ_cnt,
-                    self_ty: self_ty,
-                    ga: ga,
-                    gn: n32(gn),
-                    has_where: has_where,
-                    empty_body: empty_body,
-                    s: s,
-                    e: e
-                }
-            );
+        confs.push(
+            ConfInfo {
+                is_canonical: is_canonical,
+                pkg_none: pkg_none,
+                trait_name: trait_name,
+                targ_cnt: targ_cnt,
+                self_ty: self_ty,
+                ga: ga,
+                gn: n32(gn),
+                has_where: has_where,
+                empty_body: empty_body,
+                s: s,
+                e: e
+            }
+        );
     }
 
     let nb = r.word(in b);
@@ -766,16 +760,15 @@ fn read_builtin_mod(in b: Slice[u8]) -> BuiltinMod {
         for _ in 0..arg_n {
             bound_args.push(u32_at(in c.tmap, r.word(in b)));
         }
-        own_bounds
-            .push(
-                OwnBound {
-                    owner: owner,
-                    param: param,
-                    trait_name: trait_name,
-                    arg_a: arg_a,
-                    arg_n: n32(arg_n)
-                }
-            );
+        own_bounds.push(
+            OwnBound {
+                owner: owner,
+                param: param,
+                trait_name: trait_name,
+                arg_a: arg_a,
+                arg_n: n32(arg_n)
+            }
+        );
     }
 
     BuiltinMod {
@@ -1011,13 +1004,6 @@ pub fn builtin_wanted_words(in b: Slice[u8]) -> ChunkSeq[u64] {
         || bytes_contains(in b, text_start, text_end, "\"Ord::")
         || bytes_contains(in b, text_start, text_end, "\"Hash::")
         || bytes_contains(in b, text_start, text_end, "\"Ordering\"");
-    out
-        .push(
-            if found {
-                1
-            } else {
-                0
-            }
-        );
+    out.push(if found { 1 } else { 0 });
     out
 }

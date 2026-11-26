@@ -355,16 +355,7 @@ pub fn secret_type(in c: Ctx, inout s: Walk, ty: u32) -> bool {
         }
         s.secret_memo.push(0);
     }
-    let ok = s
-        .secret_memo
-        .try_set(
-            w(ty),
-            if r {
-                2
-            } else {
-                1
-            }
-        );
+    let ok = s.secret_memo.try_set(w(ty), if r { 2 } else { 1 });
     r
 }
 
@@ -982,17 +973,7 @@ pub fn bind_pattern(
         secret_access_pattern(inout c, in p, inout s, pat, scrutinee);
     }
     let whole = p.pat(pat).kind == 2;
-    bind_names(
-        inout s,
-        in p,
-        pat,
-        tainted,
-        if whole {
-            scrutinee
-        } else {
-            NONE32
-        }
-    );
+    bind_names(inout s, in p, pat, tainted, if whole { scrutinee } else { NONE32 });
 }
 
 // Whether `name` is a decimal number (`str::parse::<usize>` succeeds).
@@ -2028,11 +2009,7 @@ fn call_function(
     let callee_ct = caps_of(in c, s.k, g.row) & CT != 0;
     // The flows: the receiver (when the callee is a method), then the
     // arguments, against the substituted parameter types.
-    let shift: u64 = if receiver {
-        1
-    } else {
-        0
-    };
+    let shift: u64 = if receiver { 1 } else { 0 };
     let flows = add(w(x.c), shift);
     for i in 0..flows {
         if i >= w(g.pn) {
@@ -2144,11 +2121,7 @@ fn call_value(
     if s.caps != 0 && !lexical {
         if is_fn {
             let row = c.types.node(ty).r2;
-            let name = if cx.kind == 2 {
-                cx.a
-            } else {
-                NONE32
-            };
+            let name = if cx.kind == 2 { cx.a } else { NONE32 };
             require_carried_row(in c, in p, inout s, name, row, x.start, x.end);
             if has(in s, RT) && c.types.row(row).tail != 0 && s.emit {
                 let a = begin(inout s, "E0721");
@@ -2454,11 +2427,7 @@ pub fn coerce(inout c: Ctx, in p: Prog, inout s: Walk, value: u32, target: u32) 
         }
         lexical = li != NONE32 && local_at(in s, li).lexical;
     }
-    let have = if actual == 16 {
-        0
-    } else {
-        actual
-    };
+    let have = if actual == 16 { 0 } else { actual };
     let mut missing = required & (have ^ 15);
     if lexical {
         missing = missing & (s.caps ^ 15);

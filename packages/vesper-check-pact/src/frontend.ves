@@ -230,11 +230,7 @@ fn where_key(in d: Decls, in fe: Fe, r: TRef) -> u32 {
         return find_dep_trait(in d, in fe, di, r.name);
     }
     let t = at_symbol(in fe.trait_of, r.name);
-    if t == 0 {
-        NONE32
-    } else {
-        wrapping_sub(t, 1)
-    }
+    if t == 0 { NONE32 } else { wrapping_sub(t, 1) }
 }
 
 fn type_of_args_equal(in d: Decls, a: Par, b: Par) -> bool {
@@ -431,8 +427,14 @@ fn cycle_visit(
 }
 
 // `assoc_cycle`: the first cycle among `cf`'s associated type bindings.
-fn assoc_cycle(in t: Types, in d: Decls, sy: Sy, tr: TraitRow, cf: Conf, inout cycle: ChunkSeq[u32])
-    -> bool {
+fn assoc_cycle(
+    in t: Types,
+    in d: Decls,
+    sy: Sy,
+    tr: TraitRow,
+    cf: Conf,
+    inout cycle: ChunkSeq[u32]
+) -> bool {
     let mut done: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for i in 0..w(cf.bn) {
         let b = d.bind(add(w(cf.ba), i));
@@ -652,8 +654,15 @@ fn validate_conformance(
     }
 }
 
-fn conform(inout c: Ctx, in d: Decls, sy: Sy, tr: TraitRow, cf: Conf, ty: u32, in vars: Vars)
-    -> u32 {
+fn conform(
+    inout c: Ctx,
+    in d: Decls,
+    sy: Sy,
+    tr: TraitRow,
+    cf: Conf,
+    ty: u32,
+    in vars: Vars
+) -> u32 {
     let mut stack: ChunkSeq[u32] = ChunkSeq::new[u32]();
     conform_type(inout c.types, in d, sy, tr, cf, ty, in vars, inout stack)
 }
@@ -976,8 +985,15 @@ fn is_generic(in d: Decls, ga: u32, gn: u32, name: u32) -> bool {
 }
 
 // The error message of `Frontend::dto` under generics `gens[ga..ga+gn]`.
-fn dto_err(in c: Ctx, in d: Decls, in fe: Fe, ga: u32, gn: u32, ty: u32, inout err: ChunkSeq[u8])
-    -> bool {
+fn dto_err(
+    in c: Ctx,
+    in d: Decls,
+    in fe: Fe,
+    ga: u32,
+    gn: u32,
+    ty: u32,
+    inout err: ChunkSeq[u8]
+) -> bool {
     let sy = fe.sy;
     if is_projection(in c.types, sy, ty) {
         let mut tn = proj_trait(in c.types, sy, ty);
@@ -1076,8 +1092,14 @@ fn trait_arg_err(
 
 // `lower_bindings`' `lower` for one accepted conformance: true with the
 // message in `err` when it fails.
-fn lower_err(inout c: Ctx, in d: Decls, in fe: Fe, cf: Conf, tr: TraitRow, inout err: ChunkSeq[u8])
-    -> bool {
+fn lower_err(
+    inout c: Ctx,
+    in d: Decls,
+    in fe: Fe,
+    cf: Conf,
+    tr: TraitRow,
+    inout err: ChunkSeq[u8]
+) -> bool {
     let sy = fe.sy;
     if dto_err(in c, in d, in fe, cf.ga, cf.gn, cf.self_ty, inout err) {
         return true;

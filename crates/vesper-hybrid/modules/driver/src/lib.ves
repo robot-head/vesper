@@ -296,8 +296,9 @@ fn value(in o: Options, k: u64) -> ChunkSeq[u8] {
 
 // A command off the compile path, in its Vesper layer; the hybrid counts
 // the ones it answers (`VESPER_HYBRID_STATS=1`).
-fn commands(in args: Args)
-    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver], Ffi[HybridCommands]] {
+fn commands(
+    in args: Args
+) -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver], Ffi[HybridCommands]] {
     let code = run_command(in args);
     if code != delegate() {
         HybridDriver::hd_commands_answered();
@@ -350,8 +351,12 @@ pub fn main_code()
 // the source bytes to the Rust session that still holds the parse and world.
 // `source` receives a standalone file's bytes; `package` is set for a
 // package: a directory holding a `Loom.toml` (`packages::is_package`).
-fn load_input(inout s: Session, in o: Options, inout source: ChunkSeq[u8], inout package: bool)
-    -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+fn load_input(
+    inout s: Session,
+    in o: Options,
+    inout source: ChunkSeq[u8],
+    inout package: bool
+) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
     let input = value(in o, slot_input());
     package = is_package(in input.as_slice());
     let r = if package {
@@ -413,8 +418,10 @@ fn is_package(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
 }
 
 // `cli()` of src/main.rs from loading the input on, pass by pass.
-fn drive(inout s: Session, in o: Options)
-    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver], Ffi[HybridCommands]] {
+fn drive(
+    inout s: Session,
+    in o: Options
+) -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver], Ffi[HybridCommands]] {
     let c = o.command;
     let mut source: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut package = false;
@@ -542,8 +549,11 @@ fn declined() -> i64 {
 
 // `crate::write` of `cli()`: the command's output to `-o`'s path, or to
 // stdout; 0, or the exit code of the write error.
-fn write_output(inout s: Session, in o: Options, in bytes: Slice[u8])
-    -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+fn write_output(
+    inout s: Session,
+    in o: Options,
+    in bytes: Slice[u8]
+) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
     if !has(in o, slot_output()) {
         let r = HybridDriver::hd_write(inout s, in bytes);
         if is_failure(r) {
@@ -583,8 +593,10 @@ fn pass_with(inout s: Session, which: u32, in a: Slice[u8]) -> i64 eff [Ffi[Hybr
     0
 }
 
-fn build(inout s: Session, in o: Options)
-    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver], Ffi[HybridCommands]] {
+fn build(
+    inout s: Session,
+    in o: Options
+) -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver], Ffi[HybridCommands]] {
     // Wave-eight lane 2: the direct verified code generator (§42).
     if has(in o, slot_codegen()) {
         if !is(in o, slot_codegen(), in "verified") {
@@ -665,8 +677,11 @@ fn build(inout s: Session, in o: Options)
 // Run `<linker> <object> -o <path> -lm` with the CLI's stdio: 0 when it
 // succeeded, 1 when it failed, or 2 plus the spawn error's word (kind in
 // the low byte, the OS error in the high half) when it could not start.
-fn link(in linker: Slice[u8], in object: Slice[u8], in path: Slice[u8])
-    -> u64 eff [Ffi[StdProcess]] {
+fn link(
+    in linker: Slice[u8],
+    in object: Slice[u8],
+    in path: Slice[u8]
+) -> u64 eff [Ffi[StdProcess]] {
     let mut c = command_path(in linker);
     proc_arg(inout c, in object);
     proc_arg(inout c, in "-o".as_bytes());
@@ -680,11 +695,7 @@ fn link(in linker: Slice[u8], in object: Slice[u8], in path: Slice[u8])
     release(ch);
     match waited {
         Result::Ok(st) => {
-            if success(st) {
-                0
-            } else {
-                1
-            }
+            if success(st) { 0 } else { 1 }
         },
         Result::Err(e) => error_word(e),
     }
@@ -839,8 +850,11 @@ fn remove(inout s: Session, in object: Slice[u8]) -> i64 eff [Ffi[StdFs], Ffi[Hy
 }
 
 // Both the link and emit paths use the same bytes from native codegen.
-fn write_object(inout s: Session, in o: Options, in path: Slice[u8])
-    -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+fn write_object(
+    inout s: Session,
+    in o: Options,
+    in path: Slice[u8]
+) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
     let mut object: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let r = native_code(inout s, in o, step_native_object(), inout object);
     if r != 0 {
@@ -895,8 +909,12 @@ fn word_at(in b: Slice[u8], at: u64) -> u64 {
 // that implies one, lane 24), this reads the `--verify-policy` file,
 // prints the report and the verified line on stderr, and fails on
 // findings, as `native_code` in src/main.rs does.
-fn native_code(inout s: Session, in o: Options, which: u32, inout out: ChunkSeq[u8])
-    -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+fn native_code(
+    inout s: Session,
+    in o: Options,
+    which: u32,
+    inout out: ChunkSeq[u8]
+) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
     let mut ask = native_request(native_needs_verify());
     ask.push(0);
     let needs = step_with(inout s, which, in ask.as_slice());
@@ -1024,8 +1042,12 @@ fn emit_optimize() -> u8 {
 
 // An `emit` pass's text, to `-o <path>` or stdout (`write_output`).
 // `request` is the pass's own argument.
-fn emit_text(inout s: Session, in o: Options, which: u32, in request: Slice[u8])
-    -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+fn emit_text(
+    inout s: Session,
+    in o: Options,
+    which: u32,
+    in request: Slice[u8]
+) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
     let r = step_with(inout s, which, in request);
     if is_failure(r) {
         return pass_failed(in s, r);
@@ -1036,8 +1058,11 @@ fn emit_text(inout s: Session, in o: Options, which: u32, in request: Slice[u8])
 
 // Write `data` to `path`: 0, or the exit code of the error (Rust's
 // `Display` of the `io::Error`, as `fs::write`'s error reads).
-fn write_file(inout s: Session, in path: Slice[u8], in data: Slice[u8])
-    -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+fn write_file(
+    inout s: Session,
+    in path: Slice[u8],
+    in data: Slice[u8]
+) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
     let failed = handle Fail[IoError] in {
         write_path(in path, in data);
         0

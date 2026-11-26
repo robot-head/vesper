@@ -126,8 +126,13 @@ fn binary_codes(in o: Ops, op: u32) -> (u64, u64, u64) {
 
 // `find_operator_span`: the first non-trivia token within
 // `[range_start, range_end]` whose text is `op`, as (found, start, end).
-fn find_operator(in src: Slice[u8], in t: Toks, range_start: u64, range_end: u64, in op: Str)
-    -> (bool, u64, u64) {
+fn find_operator(
+    in src: Slice[u8],
+    in t: Toks,
+    range_start: u64,
+    range_end: u64,
+    in op: Str
+) -> (bool, u64, u64) {
     // partition_point(|t| t.span.start < range_start)
     let mut lo: u64 = 0;
     let mut hi = t.kind.len();
@@ -166,12 +171,10 @@ fn find_operator(in src: Slice[u8], in t: Toks, range_start: u64, range_end: u64
 }
 
 fn stmt_at(in a: Ast, i: u32) -> StmtNode {
-    a
-        .stmts
-        .get_or(
-            idx_from_raw[StmtNode](i),
-            StmtNode { kind: 0, pat: 0, ty: 0, value: 0, mutable: false }
-        )
+    a.stmts.get_or(
+        idx_from_raw[StmtNode](i),
+        StmtNode { kind: 0, pat: 0, ty: 0, value: 0, mutable: false }
+    )
 }
 
 fn arg_at(in a: Ast, i: u32) -> ArgNode {
@@ -183,33 +186,27 @@ fn clause_at(in a: Ast, i: u32) -> ClauseNode {
 }
 
 fn fn_at(in a: Ast, i: u32) -> FnNode {
-    a
-        .fns
-        .get_or(
-            idx_from_raw[FnNode](i),
-            FnNode {
-                name: 0,
-                fip: false,
-                generics: 0,
-                params: 0,
-                result: 0,
-                effects: 0,
-                body: none(),
-                start: 0,
-                end: 0
-            }
-        )
+    a.fns.get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: 0,
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: 0,
+            effects: 0,
+            body: none(),
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 // Pushes the elements of `list` (`stride` words each, the expression at
 // word `at`) in reverse order.
 fn push_rev(inout stack: ChunkSeq[u32], in a: Ast, list: u32, stride: u64, at: u64) {
     let len = list_len(in a, list);
-    let n = if stride == 2 {
-        len / 2
-    } else {
-        len
-    };
+    let n = if stride == 2 { len / 2 } else { len };
     let mut k = n;
     loop {
         if k == 0 {
@@ -241,10 +238,7 @@ fn collect_in_fn(
         if n == 0 {
             break;
         }
-        let ei = match stack.try_get(sub(n, 1)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let ei = stack.try_get(sub(n, 1)).unwrap_or(0);
         stack.truncate(sub(n, 1));
         visited = inc(visited);
         if visited > 16384 {
@@ -457,10 +451,7 @@ fn site_less(in s: Sites, x: u64, y: u64) -> bool {
 }
 
 fn u8_at_slice(in s: Slice[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(c) => c,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 // `rust_collect` over the input words.
@@ -488,10 +479,7 @@ pub fn collect(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut name: String = String::new();
     let items = l.ast.m_items.len();
     for i in 0..items {
-        let it = match l.ast.m_items.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let it = l.ast.m_items.try_get(i).unwrap_or(0);
         let item = l.ast.items.get_or(idx_from_raw[ItemNode](it), ItemNode { kind: 0, node: 0 });
         if item.kind == 2 {
             let f = fn_at(in l.ast, item.node);
@@ -516,37 +504,31 @@ pub fn collect(in b: Slice[u8]) -> ChunkSeq[u64] {
                 collect_in_fn(in src, in t, in l.ast, in o, in f, inout stack, inout out);
             }
         } else if item.kind == 4 {
-            let im = l
-                .ast
-                .impls
-                .get_or(
-                    idx_from_raw[ImplNode](item.node),
-                    ImplNode { ty: 0, generics: 0, methods: 0 }
-                );
+            let im = l.ast.impls.get_or(
+                idx_from_raw[ImplNode](item.node),
+                ImplNode { ty: 0, generics: 0, methods: 0 }
+            );
             let m = list_len(in l.ast, im.methods);
             for q in 0..m {
                 let f = fn_at(in l.ast, list_at(in l.ast, im.methods, q));
                 collect_in_fn(in src, in t, in l.ast, in o, in f, inout stack, inout out);
             }
         } else if item.kind == 6 {
-            let c = l
-                .ast
-                .confs
-                .get_or(
-                    idx_from_raw[ConfNode](item.node),
-                    ConfNode {
-                        model: 0,
-                        public: false,
-                        generics: 0,
-                        trait_ref: 0,
-                        self_ty: 0,
-                        wheres: 0,
-                        assoc: 0,
-                        methods: 0,
-                        start: 0,
-                        end: 0
-                    }
-                );
+            let c = l.ast.confs.get_or(
+                idx_from_raw[ConfNode](item.node),
+                ConfNode {
+                    model: 0,
+                    public: false,
+                    generics: 0,
+                    trait_ref: 0,
+                    self_ty: 0,
+                    wheres: 0,
+                    assoc: 0,
+                    methods: 0,
+                    start: 0,
+                    end: 0
+                }
+            );
             let m = list_len(in l.ast, c.methods);
             for q in 0..m {
                 let f = fn_at(in l.ast, list_at(in l.ast, c.methods, q));
@@ -581,8 +563,7 @@ pub fn collect(in b: Slice[u8]) -> ChunkSeq[u64] {
     for i in 0..n {
         let x = u64_at(in order, i);
         name.clear();
-        let ok = l
-            .ast
+        let ok = l.ast
             .names
             .resolve_into(symbol_from_id(wrapping_u32(sw(in out, x, 0))), inout name);
         let nb = name.as_bytes();

@@ -198,11 +198,7 @@ fn put_setting(inout out: ChunkSeq[u8], id: u64, value: Option[u64]) -> bool {
 
 fn on(b: bool) -> Option[u64] {
     let one: u64 = 1;
-    if b {
-        Option::Some(one)
-    } else {
-        Option::None
-    }
+    if b { Option::Some(one) } else { Option::None }
 }
 
 // `Settings::encode`: the SETTINGS frame, with one reserved identifier as
@@ -304,8 +300,11 @@ pub fn buffered_type(ty: u64) -> bool {
         || ty == priority_update_push()
 }
 
-pub fn parse_payload(ty: u64, in p: Slice[u8], inout out: ChunkSeq[u8])
-    -> Result[FrameOut, FrameError] {
+pub fn parse_payload(
+    ty: u64,
+    in p: Slice[u8],
+    inout out: ChunkSeq[u8]
+) -> Result[FrameOut, FrameError] {
     if ty == headers_type() {
         out.extend(in p);
         return Result::Ok(FrameOut::Headers);

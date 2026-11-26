@@ -1,10 +1,6 @@
 // Modal kinding, owned bindings, path joins and the Fail frame condition.
 fn c_max(a: i64, b: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 fn c_mode(ty: CType, depth: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     c_kind_walk(ty, 0, 0, depth).mode
@@ -12,8 +8,11 @@ fn c_mode(ty: CType, depth: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[
 // Kinds are joins of reachable nominal floors and function modes. A visited
 // declaration contributes zero on subsequent visits because join is idempotent.
 // Carry the visited set across siblings to avoid exponential work on ADT DAGs.
-fn c_decl_index(wanted: i64, at: i64, index: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_decl_index(
+    wanted: i64,
+    at: i64,
+    index: i64
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_token(at).start == wanted {
         index
     } else if index >= 16 || c_kind(at) == 70 {
@@ -22,8 +21,12 @@ fn c_decl_index(wanted: i64, at: i64, index: i64)
         c_decl_index(wanted, c_decl(at).end, index + 1)
     }
 }
-fn c_kind_walk(ty: CType, seen: i64, active: i64, depth: i64)
-    -> CKind eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_kind_walk(
+    ty: CType,
+    seen: i64,
+    active: i64,
+    depth: i64
+) -> CKind eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if depth > 24 {
         let unsupported = c_unsupported(9, ty.at);
         CKind { mode: 0, seen: seen }
@@ -64,19 +67,17 @@ fn c_kind_walk(ty: CType, seen: i64, active: i64, depth: i64)
         CKind { mode: 0, seen: seen }
     }
 }
-fn c_kind_fields(at: i64, named: bool, seen: i64, active: i64, depth: i64)
-    -> CKind eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_kind_fields(
+    at: i64,
+    named: bool,
+    seen: i64,
+    active: i64,
+    depth: i64
+) -> CKind eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(at) == 35 || c_kind(at) == 33 {
         CKind { mode: 0, seen: seen }
     } else {
-        let ty = c_type(
-            if named {
-                c_take(c_next(at), 40)
-            } else {
-                at
-            },
-            0
-        );
+        let ty = c_type(if named { c_take(c_next(at), 40) } else { at }, 0);
         let head = c_kind_walk(ty.ty, seen, active, depth);
         let effective = if c_kind(ty.next) == 45 {
             c_kind(c_next(ty.next)) - 14
@@ -96,8 +97,12 @@ fn c_kind_fields(at: i64, named: bool, seen: i64, active: i64, depth: i64)
         CKind { mode: c_max(effective, tail.mode), seen: tail.seen }
     }
 }
-fn c_kind_variants(at: i64, seen: i64, active: i64, depth: i64)
-    -> CKind eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_kind_variants(
+    at: i64,
+    seen: i64,
+    active: i64,
+    depth: i64
+) -> CKind eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(at) == 35 {
         CKind { mode: 0, seen: seen }
     } else {
@@ -126,8 +131,11 @@ fn c_variant_next(at: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithO
         next
     }
 }
-fn c_validate_fields(at: i64, named: bool, d: CDecl)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_validate_fields(
+    at: i64,
+    named: bool,
+    d: CDecl
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(at) == 35 || c_kind(at) == 33 {
         0
     } else {
@@ -141,14 +149,7 @@ fn c_validate_fields(at: i64, named: bool, d: CDecl)
         } else {
             0
         };
-        let ty = c_type(
-            if named {
-                c_take(c_next(at), 40)
-            } else {
-                at
-            },
-            0
-        );
+        let ty = c_type(if named { c_take(c_next(at), 40) } else { at }, 0);
         let valid = c_valid_type(ty.ty, d.start, d.end, 0);
         let mode = c_mode(ty.ty, 0);
         let override = c_kind(ty.next) == 45;
@@ -174,8 +175,10 @@ fn c_validate_fields(at: i64, named: bool, d: CDecl)
         }
     }
 }
-fn c_validate_variants(at: i64, d: CDecl)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_validate_variants(
+    at: i64,
+    d: CDecl
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(at) == 35 {
         0
     } else {
@@ -220,8 +223,12 @@ fn c_validate_decls(at: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[Arit
         c_validate_decls(d.end)
     }
 }
-fn c_bind_name(env: CEnv, name: Tok, ty: CType, pass: i64)
-    -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_bind_name(
+    env: CEnv,
+    name: Tok,
+    ty: CType,
+    pass: i64
+) -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let old = c_lookup(env, name, env.count);
     let valid = if old >= 0
         && c_slot(env, old).pass == 2
@@ -242,8 +249,13 @@ fn c_bind_name(env: CEnv, name: Tok, ty: CType, pass: i64)
         c_push(env, CBinding { name: name, ty: ty, pass: pass })
     }
 }
-fn c_exhaust(env: CEnv, low: i64, n: i64, start: i64, end: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_exhaust(
+    env: CEnv,
+    low: i64,
+    n: i64,
+    start: i64,
+    end: i64
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if n <= low {
         0
     } else {
@@ -262,8 +274,14 @@ fn c_exhaust(env: CEnv, low: i64, n: i64, start: i64, end: i64)
 fn c_truncate(env: CEnv, n: i64) -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     CEnv { slots: env.slots, count: n, moved: c_mod(env.moved, c_power(n)) }
 }
-fn c_join(base: CEnv, a: CEnv, b: CEnv, n: i64, start: i64, end: i64)
-    -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_join(
+    base: CEnv,
+    a: CEnv,
+    b: CEnv,
+    n: i64,
+    start: i64,
+    end: i64
+) -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if n == base.count {
         base
     } else {
@@ -286,8 +304,15 @@ fn c_join(base: CEnv, a: CEnv, b: CEnv, n: i64, start: i64, end: i64)
         )
     }
 }
-fn c_check_loans(loans: CEnv, i: i64, slot: i64, usage: i64, is_copy: bool, start: i64, end: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_check_loans(
+    loans: CEnv,
+    i: i64,
+    slot: i64,
+    usage: i64,
+    is_copy: bool,
+    start: i64,
+    end: i64
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if i == loans.count {
         0
     } else {
@@ -301,8 +326,14 @@ fn c_check_loans(loans: CEnv, i: i64, slot: i64, usage: i64, is_copy: bool, star
         c_check_loans(loans, i + 1, slot, usage, is_copy, start, end)
     }
 }
-fn c_use(env: CEnv, slot: i64, usage: i64, loans: CEnv, start: i64, end: i64)
-    -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_use(
+    env: CEnv,
+    slot: i64,
+    usage: i64,
+    loans: CEnv,
+    start: i64,
+    end: i64
+) -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let b = c_slot(env, slot);
     let m = c_mode(b.ty, 0);
     let valid = if c_moved(env, slot) {
@@ -329,8 +360,12 @@ fn c_use(env: CEnv, slot: i64, usage: i64, loans: CEnv, start: i64, end: i64)
 // last write. E0402 remains only for a live owned linear binding. A torn inout
 // cannot reach this point: this checker moves whole bindings only, and moving
 // out of an inout place is E0305, so no inout has a moved-out hole.
-fn c_abort_frame(env: CEnv, i: i64, start: i64, end: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_abort_frame(
+    env: CEnv,
+    i: i64,
+    start: i64,
+    end: i64
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if i == env.count {
         0
     } else {
@@ -344,8 +379,13 @@ fn c_abort_frame(env: CEnv, i: i64, start: i64, end: i64)
         c_abort_frame(env, i + 1, start, end)
     }
 }
-fn c_require_row(needed: i64, allowed: i64, env: CEnv, start: i64, end: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_require_row(
+    needed: i64,
+    allowed: i64,
+    env: CEnv,
+    start: i64,
+    end: i64
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if needed < 0 || c_kind(needed) == 37 {
         0
     } else {
@@ -373,8 +413,11 @@ fn c_require_row(needed: i64, allowed: i64, env: CEnv, start: i64, end: i64)
     }
 }
 
-fn c_duplicate_field(name: Tok, at: i64, named: bool)
-    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_duplicate_field(
+    name: Tok,
+    at: i64,
+    named: bool
+) -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(at) == 35 || c_kind(at) == 33 {
         false
     } else if c_name(name, c_token(at)) {
@@ -384,8 +427,11 @@ fn c_duplicate_field(name: Tok, at: i64, named: bool)
     }
 }
 
-fn c_live_loans(loans: CEnv, i: i64, active: CEnv)
-    -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_live_loans(
+    loans: CEnv,
+    i: i64,
+    active: CEnv
+) -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if i == loans.count {
         active
     } else {
@@ -401,29 +447,18 @@ fn c_live_loans(loans: CEnv, i: i64, active: CEnv)
         )
     }
 }
-fn c_literal_name(t: Tok, length: i64, first: i64, second: i64, third: i64)
-    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_literal_name(
+    t: Tok,
+    length: i64,
+    first: i64,
+    second: i64,
+    third: i64
+) -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     t.end - t.start == length
-        && word(
-            t.start,
-            if length > 6 {
-                t.start + 6
-            } else {
-                t.end
-            }
-        )
-            == first
+        && word(t.start, if length > 6 { t.start + 6 } else { t.end }) == first
         && (
             length <= 6
-                || word(
-                    t.start + 6,
-                    if length > 12 {
-                        t.start + 12
-                    } else {
-                        t.end
-                    }
-                )
-                    == second
+                || word(t.start + 6, if length > 12 { t.start + 12 } else { t.end }) == second
         )
         && (length <= 12 || word(t.start + 12, t.end) == third)
 }

@@ -27,8 +27,10 @@ fn any_json_flag(in args: Args, n: u64) -> bool {
     false
 }
 
-fn fail_doc(has_json: bool, in message: Slice[u8])
-    -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
+fn fail_doc(
+    has_json: bool,
+    in message: Slice[u8]
+) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     if !has_json {
         return fail(in message);
     }
@@ -63,8 +65,10 @@ fn pack_args(in args: Args, n: u64) -> ChunkSeq[u8] {
     packed
 }
 
-fn run_packed(in args: Args, n: u64)
-    -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
+fn run_packed(
+    in args: Args,
+    n: u64
+) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let packed = pack_args(in args, n);
     let err_len = HybridCommands::hc_doc_run(in packed.as_slice());
     if err_len == 0 {
@@ -82,8 +86,11 @@ fn run_packed(in args: Args, n: u64)
     fail(in err.as_slice())
 }
 
-fn run_store_olean(in args: Args, n: u64, has_json: bool)
-    -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
+fn run_store_olean(
+    in args: Args,
+    n: u64,
+    has_json: bool
+) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let mut has_audit = false;
     let mut has_root = false;
     let mut has_store = false;

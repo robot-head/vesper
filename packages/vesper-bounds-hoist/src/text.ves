@@ -121,11 +121,7 @@ impl Keys {
         let sb = u64_at(in self.starts, b);
         let la = u64_at(in self.lens, a);
         let lb = u64_at(in self.lens, b);
-        let n = if la < lb {
-            la
-        } else {
-            lb
-        };
+        let n = if la < lb { la } else { lb };
         for i in 0..n {
             let x = u8_at(in self.bytes, add(sa, i));
             let y = u8_at(in self.bytes, add(sb, i));

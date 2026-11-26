@@ -585,11 +585,7 @@ pub fn stub_object(target: u64, exit: u64, exit_base: u64, e_flags: u32) -> Chun
     } else {
         Em::Aarch64
     };
-    let align: u64 = if target == Target::Aarch64 {
-        2048
-    } else {
-        8
-    };
+    let align: u64 = if target == Target::Aarch64 { 2048 } else { 8 };
     write_stub_object(
         machine,
         e_flags,

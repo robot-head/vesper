@@ -105,11 +105,10 @@ fn insert(inout s: RxState, inout ranges: Slice[AckRange], pn: u64) {
     let joins_below = i < s.len && wrapping_add(at(in ranges, i).largest, 1) == pn;
     if joins_above && joins_below {
         let above = at(in ranges, wrapping_sub(i, 1));
-        ranges
-            .try_set(
-                wrapping_sub(i, 1),
-                AckRange { smallest: at(in ranges, i).smallest, largest: above.largest }
-            );
+        ranges.try_set(
+            wrapping_sub(i, 1),
+            AckRange { smallest: at(in ranges, i).smallest, largest: above.largest }
+        );
         shift_down(inout ranges, wrapping_add(i, 1), s.len);
         s.len = wrapping_sub(s.len, 1);
     } else if joins_above {
@@ -184,8 +183,11 @@ pub fn rx_on_packet_received(
 
 // The ACK Delay field of the ACK frame to send now, or `None` if nothing
 // was received.
-pub fn rx_ack_delay(in s: RxState, now_ns: u64, ack_delay_exponent: u8)
-    -> Option[u64] eff [Fail[AckErr]] {
+pub fn rx_ack_delay(
+    in s: RxState,
+    now_ns: u64,
+    ack_delay_exponent: u8
+) -> Option[u64] eff [Fail[AckErr]] {
     if ack_delay_exponent > MAX_ACK_DELAY_EXPONENT {
         Fail::raise(AckErr::BadAckDelayExponent { exponent: ack_delay_exponent });
     }

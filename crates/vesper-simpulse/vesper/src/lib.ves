@@ -488,22 +488,14 @@ impl Kernel {
         let i = dec(task);
         if ready != atb(in self.in_ready.as_slice(), i) {
             self.in_ready.try_set(i, ready);
-            let d = if ready {
-                1
-            } else {
-                MAX_U64
-            };
+            let d = if ready { 1 } else { MAX_U64 };
             fen_add(inout self.f_ready, task, d);
             self.ready_total = wrapping_add(self.ready_total, d);
         }
         let cand = ready && !atb(in self.t_seen.as_slice(), i);
         if cand != atb(in self.in_cand.as_slice(), i) {
             self.in_cand.try_set(i, cand);
-            let d = if cand {
-                1
-            } else {
-                MAX_U64
-            };
+            let d = if cand { 1 } else { MAX_U64 };
             fen_add(inout self.f_cand, task, d);
             self.cand_total = wrapping_add(self.cand_total, d);
         }
@@ -835,8 +827,14 @@ pub fn kernel_park_io(inout k: Kernel, task: u64, own: bool) -> Ret {
     k.park(task, own, false, false, 0, 0, 0)
 }
 
-pub fn kernel_schedule_io(inout k: Kernel, task: u64, own: bool, delay_ns: u64, rk: u64, rv: u64)
-    -> Ret {
+pub fn kernel_schedule_io(
+    inout k: Kernel,
+    task: u64,
+    own: bool,
+    delay_ns: u64,
+    rk: u64,
+    rv: u64
+) -> Ret {
     k.begin();
     let deadline = wrapping_add(k.now, delay_ns);
     if deadline < k.now {
@@ -965,11 +963,7 @@ pub fn kernel_next_task(inout k: Kernel) -> Next {
         }
         round = inc(round);
     }
-    let count = if reset {
-        k.ready_total
-    } else {
-        k.cand_total
-    };
+    let count = if reset { k.ready_total } else { k.cand_total };
     let mut rng = k.rng;
     let mut selected: u64 = 0;
     if count > 0 {
@@ -1049,11 +1043,7 @@ test {
         let mut weights = ChunkSeq::new[u64]();
         weights.push(0);
         for i in 0..size {
-            let weight = if i == 0 {
-                0
-            } else {
-                1
-            };
+            let weight = if i == 0 { 0 } else { 1 };
             fen_push(inout weights, weight);
         }
         fen_add(inout weights, 0, 5);

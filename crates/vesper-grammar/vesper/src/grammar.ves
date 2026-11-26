@@ -89,8 +89,12 @@ pub fn first_has(in meta: Slice[u64], id: u64, byte: u64) -> bool {
 }
 
 // Grammar::validate: the metadata vector.
-pub fn validate(in rules: Slice[u64], in lits: Slice[u8], root: u64, in lim: Slice[u64])
-    -> ChunkSeq[u64] eff [Fail[GErr]] {
+pub fn validate(
+    in rules: Slice[u64],
+    in lits: Slice[u8],
+    root: u64,
+    in lim: Slice[u64]
+) -> ChunkSeq[u64] eff [Fail[GErr]] {
     let n = rule_count(in rules);
     let max_reps = sw(in lim, 11);
     if max_reps > HARD_MAX_REPETITIONS {
@@ -304,16 +308,7 @@ fn build(
     cm_set(inout meta, id, 1, f1);
     cm_set(inout meta, id, 2, f2);
     cm_set(inout meta, id, 3, f3);
-    cm_set(
-        inout meta,
-        id,
-        META_NULLABLE,
-        if nullable {
-            1
-        } else {
-            0
-        }
-    );
+    cm_set(inout meta, id, META_NULLABLE, if nullable { 1 } else { 0 });
     cm_set(inout meta, id, META_COLOR, DONE);
     cm_set(inout meta, id, META_HEIGHT, height);
 }
@@ -383,8 +378,13 @@ fn number(in input: Slice[u8], inout run: Run) -> u64 eff [Fail[GErr]] {
     p.a
 }
 
-fn literal(in input: Slice[u8], in lits: Slice[u8], inout run: Run, start: u64, len: u64)
-    -> Unit eff [Fail[GErr]] {
+fn literal(
+    in input: Slice[u8],
+    in lits: Slice[u8],
+    inout run: Run,
+    start: u64,
+    len: u64
+) -> Unit eff [Fail[GErr]] {
     let mut work = run.work;
     charge_or(inout work, len, 8);
     run.work = work;

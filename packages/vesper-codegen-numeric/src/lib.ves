@@ -60,8 +60,11 @@ pub const RT_BOX_FREE: u32 = 8;
 // runtimes `families` selects, in the order the Rust lowering defines
 // them; the object is published to the host (`take_published`), 0 on a
 // failure.
-pub fn runtime_object(in triple: Slice[u8], in flags: Slice[u8], families: u32)
-    -> u64 eff [Ffi[Cranelift]] {
+pub fn runtime_object(
+    in triple: Slice[u8],
+    in flags: Slice[u8],
+    families: u32
+) -> u64 eff [Ffi[Cranelift]] {
     let mut m = match module_new(in triple, in flags, in "vesper".as_bytes()) {
         Some(m) => m,
         None => return 0,

@@ -152,11 +152,7 @@ fn finite32(x: f32) -> bool {
 }
 
 fn fmax(a: f32, b: f32) -> f32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn zero3() -> V3 {
@@ -901,19 +897,8 @@ fn angular_friction(inout b: Slice[f32], a: u32, ob: u32, axis: V3, bound: f32) 
         return;
     }
     let stop = abs32(rel) / wsum;
-    let j = if stop < bound {
-        stop
-    } else {
-        bound
-    };
-    let ang = vscale(
-        axis,
-        if rel > 0.0 {
-            -j
-        } else {
-            j
-        }
-    );
+    let j = if stop < bound { stop } else { bound };
+    let ang = vscale(axis, if rel > 0.0 { -j } else { j });
     if bim(in b, ia) > 0.0 {
         set_w(inout b, ia, vadd(bw(in b, ia), inv_inertia_world(in b, ia, ang)));
     }
@@ -982,11 +967,7 @@ fn velocity_manifold(
             if wt > 0.0 {
                 let stop = lvt / wt;
                 let limit = mu_d * normal_impulse;
-                let j = if limit < stop {
-                    limit
-                } else {
-                    stop
-                };
+                let j = if limit < stop { limit } else { stop };
                 apply_impulse(inout b, a, ob, c.ra, c.rb, vscale(t, -j));
             }
         }
@@ -1092,14 +1073,7 @@ fn coordinate(in b: Slice[f32], in jf: Slice[f32], a: u32, ob: u32, kind: u32, k
 
 // Clamp `x` to ±bound (`det::max(-bound, min(x, bound))`).
 fn clamp_bound(x: f32, bound: f32) -> f32 {
-    fmax(
-        -bound,
-        if x < bound {
-            x
-        } else {
-            bound
-        }
-    )
+    fmax(-bound, if x < bound { x } else { bound })
 }
 
 // One XPBD positional part; returns the new λ.
@@ -1270,8 +1244,14 @@ copy struct Rate {
     rb: V3
 }
 
-fn coordinate_rate(in b: Slice[f32], in jf: Slice[f32], a: u32, ob: u32, kind: u32, k: u64)
-    -> Rate {
+fn coordinate_rate(
+    in b: Slice[f32],
+    in jf: Slice[f32],
+    a: u32,
+    ob: u32,
+    kind: u32,
+    k: u64
+) -> Rate {
     let ia = widen_u64(a);
     let axis = rotate(bq(in b, ia), gv(in jf, wrapping_add(jb(k), J_AXIS_A)));
     if kind == 2 {
@@ -1402,16 +1382,8 @@ fn joint_velocity(
     if friction > 0.0 && rate != 0.0 {
         let bound = friction * h;
         let stop = abs32(rate) / w;
-        let mag = if stop < bound {
-            stop
-        } else {
-            bound
-        };
-        let imp = if rate > 0.0 {
-            -mag
-        } else {
-            mag
-        };
+        let mag = if stop < bound { stop } else { bound };
+        let imp = if rate > 0.0 { -mag } else { mag };
         coordinate_impulse(inout b, a, ob, prismatic, r.axis, r.ra, r.rb, imp);
     }
 }
@@ -1450,14 +1422,7 @@ fn project_joint(
             let lo = gf(in jf, wrapping_add(base, J_LO));
             let hi = gf(in jf, wrapping_add(base, J_HI));
             let ang = hinge_angle(in b, in jf, a, ob, k);
-            let clamped = fmax(
-                lo,
-                if ang.phi < hi {
-                    ang.phi
-                } else {
-                    hi
-                }
-            );
+            let clamped = fmax(lo, if ang.phi < hi { ang.phi } else { hi });
             if clamped != ang.phi {
                 let target = turned(ang.ua, ang.axis, clamped);
                 let ll = wrapping_add(base, J_LAMBDA_LIM);
@@ -1472,11 +1437,7 @@ fn project_joint(
         let qa = bq(in b, ia);
         let qb = pose_q(in b, ob);
         let e0 = qmul(qmul(qb, gq(in jf, wrapping_add(base, J_REST))), conj(qa));
-        let e = if e0.w >= 0.0 {
-            e0
-        } else {
-            qscale(e0, -1.0)
-        };
+        let e = if e0.w >= 0.0 { e0 } else { qscale(e0, -1.0) };
         let la = wrapping_add(base, J_LAMBDA_ANG);
         sf(
             inout jf,
@@ -1553,14 +1514,7 @@ fn project_joint(
         let along: f32 = if has_limits {
             let lo = gf(in jf, wrapping_add(base, J_LO));
             let hi = gf(in jf, wrapping_add(base, J_HI));
-            let c = fmax(
-                lo,
-                if s < hi {
-                    s
-                } else {
-                    hi
-                }
-            );
+            let c = fmax(lo, if s < hi { s } else { hi });
             s - c
         } else {
             0.0
@@ -1754,16 +1708,8 @@ pub fn solve(
                 let q = normalize_q(q1);
                 set_q(inout b, i, q);
                 let dq0 = qmul(q, conj(iq));
-                let dq = if dq0.w >= 0.0 {
-                    dq0
-                } else {
-                    qscale(dq0, -1.0)
-                };
-                let denom = if dq.w > 0.5 {
-                    h * dq.w
-                } else {
-                    h
-                };
+                let dq = if dq0.w >= 0.0 { dq0 } else { qscale(dq0, -1.0) };
+                let denom = if dq.w > 0.5 { h * dq.w } else { h };
                 set_w(inout b, i, vadd(bw(in b, i), vscale(qv(dq), 2.0 / denom)));
             }
         }

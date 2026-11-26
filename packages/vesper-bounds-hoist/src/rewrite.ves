@@ -109,11 +109,7 @@ pub struct Fresh {
 }
 
 fn max_plus(m: u64, x: u64) -> u64 {
-    if inc(x) > m {
-        inc(x)
-    } else {
-        m
-    }
+    if inc(x) > m { inc(x) } else { m }
 }
 
 // The header's value table: (start of its pairs, count).
@@ -212,8 +208,15 @@ pub struct Guards {
     rows: ChunkSeq[InstRow],
 }
 
-fn read_inst(inout p: Program, dest: u64, ty: u32, s0: u64, s1: u64, tok: u64, root: u32)
-    -> InstRow {
+fn read_inst(
+    inout p: Program,
+    dest: u64,
+    ty: u32,
+    s0: u64,
+    s1: u64,
+    tok: u64,
+    root: u32
+) -> InstRow {
     let a = p.ops.len();
     p.put(w(root), Tag::Name);
     p.put(0, Tag::Path);
@@ -442,8 +445,13 @@ fn skip_drop(in p: Program, x: u64) -> u64 {
 }
 
 // The new trailer: the old one with the copies' box drops added.
-fn put_trailer(inout p: Program, fr: FnRow, in bm: Map, in vm: Map, in copies: ChunkSeq[u64])
-    -> (u64, u64) {
+fn put_trailer(
+    inout p: Program,
+    fr: FnRow,
+    in bm: Map,
+    in vm: Map,
+    in copies: ChunkSeq[u64]
+) -> (u64, u64) {
     let start = p.ops.len();
     let mut x = fr.ta;
     // call slots, join slots: as they are

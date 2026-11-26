@@ -24,9 +24,5 @@ fn main() -> u64 {
     let a: Secret[u8] = Secret { value: 7 };
     let b: Secret[u8] = Secret { value: 7 };
     let verdict = declassify_bool(ct_not(ct_eq(a, b)));
-    if verdict {
-        1
-    } else {
-        0
-    }
+    if verdict { 1 } else { 0 }
 }

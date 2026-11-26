@@ -147,11 +147,7 @@ fn join_mode_opt(a: u8, b: u8) -> u8 {
     if a == UNKNOWN_MODE || b == UNKNOWN_MODE {
         return UNKNOWN_MODE;
     }
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn alloc_implicit_brand(inout sc: Scope, inout names: Names) -> u64 {
@@ -168,8 +164,13 @@ fn alloc_implicit_brand(inout sc: Scope, inout names: Names) -> u64 {
     vinf(idx)
 }
 
-fn find_unique_assoc_trait(in c: Ctx, in d: Decls, in tb: Tables, assoc: u32, inout sc: Scope)
-    -> u64 {
+fn find_unique_assoc_trait(
+    in c: Ctx,
+    in d: Decls,
+    in tb: Tables,
+    assoc: u32,
+    inout sc: Scope
+) -> u64 {
     let mut found = NONE64;
     let mut cnt: u64 = 0;
     for i in 0..tb.tr_decl_idx.len() {
@@ -786,11 +787,7 @@ fn lower_conformance(
     let mut mode_bounds: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for i in 0..gn {
         let g = d.gen(add(w(cf.ga), i));
-        let pk = if g.row {
-            kd_row()
-        } else {
-            kd_type()
-        };
+        let pk = if g.row { kd_row() } else { kd_type() };
         out.push(pk);
         scope_push(inout sc, g.name, wrapping_u8(pk), vbound(i), g.bound);
         if !g.row && g.bound < 2 {
@@ -1010,8 +1007,12 @@ fn push_rev_sym(inout b: ChunkSeq[u8], in names: Names, s: u32) {
     names.write(s, inout b);
 }
 
-fn compute_revision(in tb: Tables, in names: Names, in words: ChunkSeq[u64], fingerprint: u32)
-    -> ChunkSeq[u8] {
+fn compute_revision(
+    in tb: Tables,
+    in names: Names,
+    in words: ChunkSeq[u64],
+    fingerprint: u32
+) -> ChunkSeq[u8] {
     let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
     put_str(inout b, "vesper-check-pact/revision/v1");
     b.push(0);
@@ -1345,11 +1346,7 @@ fn lower_q_goal(
             Option::None => QArg { is_row: false, ty: 0 },
         };
         let pk = widen_u64(u8_at(in sess.tb.tr_pkinds, add(tr_pa, i)));
-        let actual_pk = if qa.is_row {
-            kd_row()
-        } else {
-            kd_type()
-        };
+        let actual_pk = if qa.is_row { kd_row() } else { kd_type() };
         if pk != actual_pk {
             // Check bare parameter name rule (`lower.rs:874`).
             let n = sess.c.types.node(qa.ty);
@@ -1597,8 +1594,11 @@ fn wf_subst_node(
     true
 }
 
-fn render_from_s_txt(inout sess: PactSession, from_txt: u64, in ph_names: ChunkSeq[u32])
-    -> ChunkSeq[u8] {
+fn render_from_s_txt(
+    inout sess: PactSession,
+    from_txt: u64,
+    in ph_names: ChunkSeq[u32]
+) -> ChunkSeq[u8] {
     let mut rendered: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let end = sess.s.txt.len();
     let mut copied: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](wrapping_sub(end, from_txt));
@@ -1659,23 +1659,12 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
             Option::Some(v) => v,
             Option::None => Gen { name: 0, bound: 2, row: false },
         };
-        let pk = if g.row {
-            kd_row()
-        } else {
-            kd_type()
-        };
+        let pk = if g.row { kd_row() } else { kd_type() };
         scope_push(inout sc, g.name, wrapping_u8(pk), vph(i), g.bound);
         ph_names.push(g.name);
         ph_bounds.push(g.bound);
         env_words.push(pk);
-        env_words
-            .push(
-                if g.row {
-                    none()
-                } else {
-                    widen_u64(g.bound)
-                }
-            );
+        env_words.push(if g.row { none() } else { widen_u64(g.bound) });
     }
 
     let na = spec.assumptions.len();

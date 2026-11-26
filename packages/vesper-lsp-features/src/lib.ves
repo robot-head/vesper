@@ -475,17 +475,7 @@ pub fn lsp_hovers(in input: Str) -> ChunkSeq[u64] {
         let end = word(in b, inout r);
         let has = word(in b, inout r);
         let result = map_type(in f, word(in b, inout r));
-        fact_function(
-            inout f,
-            name,
-            start,
-            end,
-            if has == 1 {
-                result
-            } else {
-                4294967295
-            }
-        );
+        fact_function(inout f, name, start, end, if has == 1 { result } else { 4294967295 });
         let np = word(in b, inout r);
         for j in 0..np {
             let ps = word(in b, inout r);

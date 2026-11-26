@@ -211,25 +211,9 @@ pub fn client_register_request(
     if fin {
         out_queue_fin(inout c.conn.out, id);
     }
-    let flags = (
-        if is_head {
-            CF_HEAD_REQ
-        } else {
-            0
-        }
-    ) | (
-        if is_connect {
-            CF_CONNECT
-        } else {
-            0
-        }
-    ) | (
-        if !fin {
-            CF_SENDING
-        } else {
-            0
-        }
-    );
+    let flags = (if is_head { CF_HEAD_REQ } else { 0 }) | (
+        if is_connect { CF_CONNECT } else { 0 }
+    ) | (if !fin { CF_SENDING } else { 0 });
     let f = bsearch_u64(in c.c_id.as_slice(), id);
     if !f.found {
         insert_word(inout c.c_id, f.idx, id);
@@ -256,8 +240,11 @@ pub fn client_register_request(
     }
 }
 
-pub fn client_send_body(inout c: ClientCore, id: u64, in data: Slice[u8])
-    -> Result[Unit, ClientError] {
+pub fn client_send_body(
+    inout c: ClientCore,
+    id: u64,
+    in data: Slice[u8]
+) -> Result[Unit, ClientError] {
     let f = bsearch_u64(in c.c_id.as_slice(), id);
     if !f.found || (word(in c.c_flags.as_slice(), f.idx) & CF_SENDING) == 0 {
         return Result::Err(ClientError::UnknownStream);
@@ -286,8 +273,12 @@ pub fn client_finish_body(inout c: ClientCore, id: u64) -> Result[Unit, ClientEr
     Result::Ok(())
 }
 
-pub fn client_close_session(inout c: ClientCore, session: u64, code: u32, in reason: Slice[u8])
-    -> Result[Unit, SessionError] {
+pub fn client_close_session(
+    inout c: ClientCore,
+    session: u64,
+    code: u32,
+    in reason: Slice[u8]
+) -> Result[Unit, SessionError] {
     let f = bsearch_u64(in c.c_id.as_slice(), session);
     let ok = if f.found {
         let flags = word(in c.c_flags.as_slice(), f.idx);
@@ -332,8 +323,11 @@ pub fn client_close_session(inout c: ClientCore, session: u64, code: u32, in rea
     Result::Ok(())
 }
 
-pub fn client_update_priority(inout c: ClientCore, stream_id: u64, priority: Priority)
-    -> Result[Unit, ClientError] {
+pub fn client_update_priority(
+    inout c: ClientCore,
+    stream_id: u64,
+    priority: Priority
+) -> Result[Unit, ClientError] {
     if (stream_id & 2) != 0 || (stream_id & 1) != 0 {
         return Result::Err(ClientError::UnknownStream);
     }
@@ -418,8 +412,12 @@ pub fn client_sniff_err(inout c: ClientCore, id: u64) {
     }
 }
 
-pub fn client_sniff_data(inout c: ClientCore, id: u64, in bytes: Slice[u8], fin: bool)
-    -> Result[Unit, ConnectionError] {
+pub fn client_sniff_data(
+    inout c: ClientCore,
+    id: u64,
+    in bytes: Slice[u8],
+    fin: bool
+) -> Result[Unit, ConnectionError] {
     let f = bsearch_u64(in c.sn_id.as_slice(), id);
     if !f.found {
         return Result::Ok(());
@@ -844,8 +842,11 @@ fn section(
     }
 }
 
-fn response_fin(inout c: ClientCore, inout dec: DecoderCore, id: u64)
-    -> Result[Unit, ConnectionError] {
+fn response_fin(
+    inout c: ClientCore,
+    inout dec: DecoderCore,
+    id: u64
+) -> Result[Unit, ConnectionError] {
     let f = bsearch_u64(in c.c_id.as_slice(), id);
     if !f.found {
         return Result::Ok(());
@@ -962,8 +963,12 @@ fn response_fin(inout c: ClientCore, inout dec: DecoderCore, id: u64)
     Result::Ok(())
 }
 
-fn frames(inout c: ClientCore, inout dec: DecoderCore, in h: Huff, id: u64)
-    -> Result[Unit, ConnectionError] {
+fn frames(
+    inout c: ClientCore,
+    inout dec: DecoderCore,
+    in h: Huff,
+    id: u64
+) -> Result[Unit, ConnectionError] {
     loop {
         let f = bsearch_u64(in c.c_id.as_slice(), id);
         if !f.found {
@@ -1114,8 +1119,11 @@ fn frames(inout c: ClientCore, inout dec: DecoderCore, in h: Huff, id: u64)
     }
 }
 
-pub fn client_drain_unblocked(inout c: ClientCore, inout dec: DecoderCore, in h: Huff)
-    -> Result[Unit, ConnectionError] {
+pub fn client_drain_unblocked(
+    inout c: ClientCore,
+    inout dec: DecoderCore,
+    in h: Huff
+) -> Result[Unit, ConnectionError] {
     let mut i: u64 = 0;
     loop {
         if i >= c.conn.unb_kind.len() {
@@ -1147,13 +1155,12 @@ pub fn client_drain_unblocked(inout c: ClientCore, inout dec: DecoderCore, in h:
                     ubytes.extend(in c.conn.unb_bytes[boff..wrapping_add(boff, total_bytes)]);
                     let mut umeta = ChunkSeq::with_capacity[u64](wrapping_mul(count, 3));
                     for k in 0..wrapping_mul(count, 3) {
-                        umeta
-                            .push(
-                                word(
-                                    in c.conn.unb_meta.as_slice(),
-                                    wrapping_add(wrapping_mul(moff, 3), k),
-                                ),
-                            );
+                        umeta.push(
+                            word(
+                                in c.conn.unb_meta.as_slice(),
+                                wrapping_add(wrapping_mul(moff, 3), k),
+                            ),
+                        );
                     }
                     fields(
                         inout c,

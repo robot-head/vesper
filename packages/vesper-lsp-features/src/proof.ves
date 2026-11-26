@@ -233,12 +233,10 @@ fn quoted(inout b: B, in a: Ast, in pre: Str, name: u32, in post: Str) -> u32 {
 // The kind the checker gave expression `e` (`Builder::kind_at`).
 fn kind_at(inout b: B, in a: Ast, in c: Ctx, in y: Syms, e: u32) -> u8 {
     let n = expr_at(in a, e);
-    let ty = c
-        .world
-        .expr_type(
-            wrapping_sub(widen_u64(n.start), b.delta),
-            wrapping_sub(widen_u64(n.end), b.delta)
-        );
+    let ty = c.world.expr_type(
+        wrapping_sub(widen_u64(n.start), b.delta),
+        wrapping_sub(widen_u64(n.end), b.delta)
+    );
     if ty == NONE {
         return K_NONE;
     }
@@ -321,11 +319,7 @@ fn signature(inout b: B, in a: Ast, in y: Syms, in wt: Wt, fi: u64) -> Sig {
         if allowed {
             for j in 0..list_len(in a, e.args) {
                 let t = ty_at(in a, list_at(in a, e.args, j));
-                let name = if t.kind == AT_NAMED {
-                    t.a
-                } else {
-                    NONE
-                };
+                let name = if t.kind == AT_NAMED { t.a } else { NONE };
                 if name == NONE || (name != y.y_overflow && name != y.y_runtime) {
                     allowed = false;
                 }
@@ -410,16 +404,7 @@ fn var(inout b: B, in a: Ast, name: u32, kind: u8, param: bool) -> u32 {
     b.m.v_s.push(st);
     b.m.v_l.push(wrapping_sub(b.m.pool.len(), st));
     b.m.v_kind.push(kind);
-    b
-        .m
-        .v_param
-        .push(
-            if param {
-                1
-            } else {
-                0
-            }
-        );
+    b.m.v_param.push(if param { 1 } else { 0 });
     wrapping_u32(wrapping_sub(b.m.v_kind.len(), 1))
 }
 
@@ -504,8 +489,16 @@ fn unit(inout b: B) -> u32 {
     term(inout b.m, TM_UNIT, 0, 0, 0, K_UNIT, 0, 0)
 }
 
-fn expr(inout b: B, inout sc: Sc, in a: Ast, in c: Ctx, in y: Syms, in wt: Wt, e: u32, want: u8)
-    -> u32 {
+fn expr(
+    inout b: B,
+    inout sc: Sc,
+    in a: Ast,
+    in c: Ctx,
+    in y: Syms,
+    in wt: Wt,
+    e: u32,
+    want: u8
+) -> u32 {
     if !charge(inout b) {
         return NONE;
     }
@@ -516,11 +509,7 @@ fn expr(inout b: B, inout sc: Sc, in a: Ast, in c: Ctx, in y: Syms, in wt: Wt, e
         if l.kind == LIT_INT {
             let mut kind = kind_at(inout b, in a, in c, in y, e);
             if !integer(kind) {
-                kind = if integer(want) {
-                    want
-                } else {
-                    K_I64
-                };
+                kind = if integer(want) { want } else { K_I64 };
             }
             if !fits(kind, l.neg, l.hi, l.bits) {
                 b.err.clear();
@@ -536,20 +525,7 @@ fn expr(inout b: B, inout sc: Sc, in a: Ast, in c: Ctx, in y: Syms, in wt: Wt, e
             return int_term(inout b.m, l.neg, l.bits, kind);
         }
         if l.kind == LIT_BOOL {
-            return term(
-                inout b.m,
-                TM_BOOL,
-                0,
-                0,
-                0,
-                K_BOOL,
-                0,
-                if l.bits != 0 {
-                    1
-                } else {
-                    0
-                }
-            );
+            return term(inout b.m, TM_BOOL, 0, 0, 0, K_BOOL, 0, if l.bits != 0 { 1 } else { 0 });
         }
         return unsupported(inout b, in "a non-integer literal");
     }
@@ -844,11 +820,7 @@ fn binary(
         }
         return term(
             inout b.m,
-            if is_op(op, y.y_and) {
-                TM_AND
-            } else {
-                TM_OR
-            },
+            if is_op(op, y.y_and) { TM_AND } else { TM_OR },
             x,
             z,
             0,
@@ -938,11 +910,7 @@ fn binary(
             0,
             kind,
             0,
-            if is_op(op, y.y_percent) {
-                1
-            } else {
-                0
-            }
+            if is_op(op, y.y_percent) { 1 } else { 0 }
         );
     }
     quoted(inout b, in a, in "operator '", op, in "' is outside the scalar model")
@@ -1039,11 +1007,7 @@ fn block(
                     0,
                     kind,
                     0,
-                    if is_op(op, y.y_rem_assign) {
-                        1
-                    } else {
-                        0
-                    }
+                    if is_op(op, y.y_rem_assign) { 1 } else { 0 }
                 );
             } else {
                 return quoted(inout b, in a, in "assignment '", op, in "' is outside the model");

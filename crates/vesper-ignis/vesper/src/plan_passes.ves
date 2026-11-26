@@ -1,5 +1,11 @@
-fn plan_texture(inout pl: Planner, in g: Graph, p: u32, queue: u32, resource: u32, pass: PassInfo)
-    -> PlanFault {
+fn plan_texture(
+    inout pl: Planner,
+    in g: Graph,
+    p: u32,
+    queue: u32,
+    resource: u32,
+    pass: PassInfo
+) -> PlanFault {
     let res = get_resource(in g, widen_u64(resource));
     let mut entries: ChunkSeq[ReqEntry] = ChunkSeq::new[ReqEntry]();
     let mut seq: u64 = 0;
@@ -14,24 +20,19 @@ fn plan_texture(inout pl: Planner, in g: Graph, p: u32, queue: u32, resource: u3
                         let slice = wrapping_add(r.first_slice, s_i);
                         let plane = wrapping_add(r.first_plane, pl_i);
                         let sub = flat_index(res, mip, slice, plane);
-                        entries
-                            .push(
-                                ReqEntry {
-                                    sub: sub,
-                                    seq: seq,
-                                    access: u.access,
-                                    sync: u.sync,
-                                    has_layout: if u.has_layout {
-                                        1
-                                    } else {
-                                        0
-                                    },
-                                    layout: layout_ord(u.layout),
-                                    mip: mip,
-                                    slice: slice,
-                                    plane: plane
-                                }
-                            );
+                        entries.push(
+                            ReqEntry {
+                                sub: sub,
+                                seq: seq,
+                                access: u.access,
+                                sync: u.sync,
+                                has_layout: if u.has_layout { 1 } else { 0 },
+                                layout: layout_ord(u.layout),
+                                mip: mip,
+                                slice: slice,
+                                plane: plane
+                            }
+                        );
                         seq = wrapping_add(seq, 1);
                     }
                 }
@@ -101,8 +102,14 @@ fn plan_texture(inout pl: Planner, in g: Graph, p: u32, queue: u32, resource: u3
     PlanFault::None
 }
 
-fn plan_buffer(inout pl: Planner, in g: Graph, p: u32, queue: u32, resource: u32, pass: PassInfo)
-    -> PlanFault {
+fn plan_buffer(
+    inout pl: Planner,
+    in g: Graph,
+    p: u32,
+    queue: u32,
+    resource: u32,
+    pass: PassInfo
+) -> PlanFault {
     for x in 0..pass.use_count {
         let u = get_use(in g.uses, wrapping_add(pass.first_use, x));
         if u.resource == resource {
@@ -238,17 +245,16 @@ fn plan_final_layouts(inout pl: Planner, in g: Graph) -> PlanFault {
                             let mut recency: ChunkSeq[Recency] = ChunkSeq::new[Recency]();
                             for i in 0..recs.len() {
                                 match recs.try_get(i) {
-                                    Option::Some(x) => recency
-                                        .push(
-                                            Recency {
-                                                neg_gpos: wrapping_sub(
-                                                    max_u64(),
-                                                    widen_u64(get32(in pl.gpos, widen_u64(x.pass)))
-                                                ),
-                                                seq: i,
-                                                queue: x.queue
-                                            }
-                                        ),
+                                    Option::Some(x) => recency.push(
+                                        Recency {
+                                            neg_gpos: wrapping_sub(
+                                                max_u64(),
+                                                widen_u64(get32(in pl.gpos, widen_u64(x.pass)))
+                                            ),
+                                            seq: i,
+                                            queue: x.queue
+                                        }
+                                    ),
                                     Option::None => (),
                                 }
                             }
@@ -296,8 +302,7 @@ fn plan_final_layouts(inout pl: Planner, in g: Graph) -> PlanFault {
                                         if x.queue == chosen {
                                             same.push(x);
                                         } else {
-                                            pl
-                                                .final_waits
+                                            pl.final_waits
                                                 .push(Pair { key: chosen, value: x.pass });
                                         }
                                     },

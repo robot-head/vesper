@@ -18,11 +18,7 @@ fn offset_basis() -> i64 {
 
 // Clears the sign bit so that digests never look like error codes.
 fn digest(h: i64) -> i64 {
-    if h < 0 {
-        wrapping_sub(-1, h)
-    } else {
-        h
-    }
+    if h < 0 { wrapping_sub(-1, h) } else { h }
 }
 
 // Lexer phase: every token, trivia and the EOF sentinel included. The loop
@@ -139,11 +135,7 @@ fn bump(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
 }
 
 fn eat(p: P, k: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
-    if at(p, k) {
-        bump(p)
-    } else {
-        p
-    }
+    if at(p, k) { bump(p) } else { p }
 }
 
 fn ate(p: P, q: P) -> bool {

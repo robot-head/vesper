@@ -34,11 +34,7 @@ fn filled(n: u64, v: u64) -> ChunkSeq[u64] {
 }
 
 fn min32(a: u32, b: u32) -> u32 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn is_power_of_two(x: u32) -> bool {
@@ -77,9 +73,5 @@ fn shr(x: u64, s: u64) -> u64 {
 
 fn sat_add32(a: u32, b: u32) -> u32 {
     let s = wrapping_add(a, b);
-    if s < a {
-        4294967295
-    } else {
-        s
-    }
+    if s < a { 4294967295 } else { s }
 }

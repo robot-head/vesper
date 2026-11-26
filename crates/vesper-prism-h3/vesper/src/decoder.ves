@@ -111,8 +111,12 @@ fn post_base(base: u64, index: u64) -> Option[u64] {
     }
 }
 
-fn copy_static(in st: Static, index: u64, value: bool, inout out: ChunkSeq[u8])
-    -> Result[Unit, Reason] {
+fn copy_static(
+    in st: Static,
+    index: u64,
+    value: bool,
+    inout out: ChunkSeq[u8]
+) -> Result[Unit, Reason] {
     if index >= STATIC_TABLE_LEN {
         return Result::Err(Reason::BadStaticIndex(index));
     }
@@ -341,15 +345,7 @@ fn lines(
         }
         sec.fields.push(split);
         sec.fields.push(wrapping_sub(total, split));
-        sec
-            .fields
-            .push(
-                if sensitive {
-                    1
-                } else {
-                    0
-                }
-            );
+        sec.fields.push(if sensitive { 1 } else { 0 });
         count = inc(count);
     }
     if ric > 0 && max_ref != ric {
@@ -437,11 +433,7 @@ fn conclude(
                 }
                 return Result::Err(err);
             }
-            let kind: u64 = if queued {
-                0
-            } else {
-                3
-            };
+            let kind: u64 = if queued { 0 } else { 3 };
             head(inout d.sec, kind, stream_id, ric, l.count);
             Result::Ok(())
         },
@@ -459,8 +451,12 @@ fn dfail(inout d: DecoderCore, reason: Reason) -> Result[bool, QpackError] {
 
 // `Decoder::decode_section`: `true` for a section (the kind-3 record),
 // `false` when it blocked.
-pub fn dec_decode_section(inout d: DecoderCore, in h: Huff, stream_id: u64, in data: Slice[u8])
-    -> Result[bool, QpackError] {
+pub fn dec_decode_section(
+    inout d: DecoderCore,
+    in h: Huff,
+    stream_id: u64,
+    in data: Slice[u8]
+) -> Result[bool, QpackError] {
     d.sec.bytes.clear();
     d.sec.fields.clear();
     d.sec.heads.clear();
@@ -740,8 +736,11 @@ fn instruction(inout d: DecoderCore, in h: Huff, at: u64) -> Result[u64, Reason]
 }
 
 // `Decoder::on_encoder_stream`.
-pub fn dec_on_encoder_stream(inout d: DecoderCore, in h: Huff, in bytes: Slice[u8])
-    -> Result[Unit, QpackError] {
+pub fn dec_on_encoder_stream(
+    inout d: DecoderCore,
+    in h: Huff,
+    in bytes: Slice[u8]
+) -> Result[Unit, QpackError] {
     d.sec.bytes.clear();
     d.sec.fields.clear();
     d.sec.heads.clear();

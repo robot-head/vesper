@@ -315,15 +315,7 @@ impl W {
 
     fn push_binding(inout self, n: u32, t: u32) {
         self.sn.push(n);
-        self
-            .st
-            .push(
-                if t == NO_TY {
-                    OTHER
-                } else {
-                    t
-                }
-            );
+        self.st.push(if t == NO_TY { OTHER } else { t });
     }
 
     fn open(inout self) {
@@ -375,40 +367,34 @@ impl W {
 // ---------------------------------------------------------------- nodes
 
 fn fn_at(in a: Ast, i: u32) -> FnNode {
-    a
-        .fns
-        .get_or(
-            idx_from_raw[FnNode](i),
-            FnNode {
-                name: NONE,
-                fip: false,
-                generics: 0,
-                params: 0,
-                result: NONE,
-                effects: NONE,
-                body: NONE,
-                start: 0,
-                end: 0
-            }
-        )
+    a.fns.get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: NONE,
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: NONE,
+            effects: NONE,
+            body: NONE,
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 fn param_at(in a: Ast, i: u32) -> ParamNode {
-    a
-        .params
-        .get_or(
-            idx_from_raw[ParamNode](i),
-            ParamNode { name: NONE, pass: 0, projections: 0, ty: NONE, start: 0, end: 0 }
-        )
+    a.params.get_or(
+        idx_from_raw[ParamNode](i),
+        ParamNode { name: NONE, pass: 0, projections: 0, ty: NONE, start: 0, end: 0 }
+    )
 }
 
 fn stmt_at(in a: Ast, i: u32) -> StmtNode {
-    a
-        .stmts
-        .get_or(
-            idx_from_raw[StmtNode](i),
-            StmtNode { kind: 0, pat: NONE, ty: NONE, value: NONE, mutable: false }
-        )
+    a.stmts.get_or(
+        idx_from_raw[StmtNode](i),
+        StmtNode { kind: 0, pat: NONE, ty: NONE, value: NONE, mutable: false }
+    )
 }
 
 fn arg_at(in a: Ast, i: u32) -> ArgNode {
@@ -420,37 +406,32 @@ fn clause_at(in a: Ast, i: u32) -> ClauseNode {
 }
 
 fn adt_at(in a: Ast, i: u32) -> AdtNode {
-    a
-        .adts
-        .get_or(
-            idx_from_raw[AdtNode](i),
-            AdtNode {
-                name: NONE,
-                mode: 0,
-                generics: 0,
-                variants: 0,
-                is_enum: false,
-                tiled: false,
-                tile_width: 0,
-                start: 0,
-                end: 0
-            }
-        )
+    a.adts.get_or(
+        idx_from_raw[AdtNode](i),
+        AdtNode {
+            name: NONE,
+            mode: 0,
+            generics: 0,
+            variants: 0,
+            is_enum: false,
+            tiled: false,
+            tile_width: 0,
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 fn variant_at(in a: Ast, i: u32) -> VariantNode {
-    a
-        .variants
+    a.variants
         .get_or(idx_from_raw[VariantNode](i), VariantNode { name: NONE, fields: 0, named: false })
 }
 
 fn field_at(in a: Ast, i: u32) -> FieldNode {
-    a
-        .fields
-        .get_or(
-            idx_from_raw[FieldNode](i),
-            FieldNode { name: NONE, ty: NONE, modality: 3, temperature: 0 }
-        )
+    a.fields.get_or(
+        idx_from_raw[FieldNode](i),
+        FieldNode { name: NONE, ty: NONE, modality: 3, temperature: 0 }
+    )
 }
 
 fn generic_name(in a: Ast, i: u32) -> u32 {
@@ -461,18 +442,15 @@ fn generic_name(in a: Ast, i: u32) -> u32 {
 }
 
 fn effect_node(in a: Ast, i: u32) -> EffectNode {
-    a
-        .effect_nodes
+    a.effect_nodes
         .get_or(idx_from_raw[EffectNode](i), EffectNode { label: NONE, name: NONE, args: 0 })
 }
 
 fn effect_decl(in a: Ast, i: u32) -> EffectDeclNode {
-    a
-        .effect_decls
-        .get_or(
-            idx_from_raw[EffectDeclNode](i),
-            EffectDeclNode { name: NONE, linear: false, generics: 0, ops: 0, start: 0, end: 0 }
-        )
+    a.effect_decls.get_or(
+        idx_from_raw[EffectDeclNode](i),
+        EffectDeclNode { name: NONE, linear: false, generics: 0, ops: 0, start: 0, end: 0 }
+    )
 }
 
 // Whether symbol `x` starts with `p`.
@@ -586,11 +564,7 @@ fn zip_vars(
 ) {
     let n = list_len(in a, generics);
     let m = w.count(t);
-    let k = if n < m {
-        n
-    } else {
-        m
-    };
+    let k = if n < m { n } else { m };
     for i in 0..k {
         names.push(generic_name(in a, list_at(in a, generics, i)));
         vals.push(w.item(t, i));
@@ -716,11 +690,7 @@ fn bind(in a: Ast, inout w: W, p: u32, t: u32) {
         let k = list_len(in a, n.a);
         let split = w.kind(t) == TK_TUPLE && w.count(t) == k;
         for i in 0..k {
-            let ti = if split {
-                w.item(t, i)
-            } else {
-                NO_TY
-            };
+            let ti = if split { w.item(t, i) } else { NO_TY };
             bind(in a, inout w, list_at(in a, n.a, i), ti);
         }
     } else if n.kind == P_CONSTRUCTOR {
@@ -1108,11 +1078,7 @@ fn handle(in a: Ast, inout w: W, x: u32) {
         let ret = clause_at(in a, list_at(in a, e.e, 0));
         w.open();
         for i in 0..list_len(in a, ret.pats) {
-            let t = if i == 0 {
-                ret_ty
-            } else {
-                NO_TY
-            };
+            let t = if i == 0 { ret_ty } else { NO_TY };
             bind(in a, inout w, list_at(in a, ret.pats, i), t);
         }
         expr(in a, inout w, ret.body, false);
@@ -1126,11 +1092,7 @@ fn handle(in a: Ast, inout w: W, x: u32) {
         let decl = effect_decl(in a, decl_i);
         let n = list_len(in a, decl.generics);
         let m = list_len(in a, eff.args);
-        let k = if n < m {
-            n
-        } else {
-            m
-        };
+        let k = if n < m { n } else { m };
         for i in 0..k {
             names.push(generic_name(in a, list_at(in a, decl.generics, i)));
             let t = from_ast(in a, inout w, list_at(in a, eff.args, i));

@@ -713,15 +713,7 @@ fn extract(inout f: Func, in r: Region, idx: u64) -> bool {
     f.out.push(w(root));
     push_list(inout f.out, in r.owned);
     push_list(inout f.out, in r.shared);
-    f
-        .out
-        .push(
-            if r.has_return {
-                1
-            } else {
-                0
-            }
-        );
+    f.out.push(if r.has_return { 1 } else { 0 });
     f.out.push(r.first_trap);
     push_list(inout f.out, in live_ins);
     f.out.push(remat_v.len());
@@ -753,11 +745,7 @@ fn extract(inout f: Func, in r: Region, idx: u64) -> bool {
         f.stub_return(root, call);
     } else {
         // `TrapCode::unwrap_user(1)` is the byte 1.
-        let code = if r.first_trap == 0 {
-            1
-        } else {
-            r.first_trap
-        };
+        let code = if r.first_trap == 0 { 1 } else { r.first_trap };
         f.stub_trap(root, code);
     }
     f.set_cold(root);

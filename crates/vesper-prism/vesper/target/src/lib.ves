@@ -124,11 +124,7 @@ fn first_byte(in s: Slice[u8], b: u8) -> Option[u64] {
 // `lo <= hi <= s.len()`, and `b` is never 0, so bytes past the end never
 // match (as with `byte`, which reads them as 0).
 fn find(in s: Slice[u8], lo: u64, hi: u64, b: u8) -> u64 {
-    let end = if hi < s.len() {
-        hi
-    } else {
-        s.len()
-    };
+    let end = if hi < s.len() { hi } else { s.len() };
     if lo < end {
         match first_byte(in s[lo..end], b) {
             Option::Some(i) => {
@@ -337,8 +333,14 @@ fn require_utf8(policy: Utf8Policy) -> bool {
 
 // Decode one query key or value into `out`.
 // `plain`: the whole query has neither `%` nor `+`.
-fn query_part(inout out: ChunkSeq[u8], in s: Slice[u8], lo: u64, hi: u64, utf8: bool, plain: bool)
-    -> Option[TargetError] {
+fn query_part(
+    inout out: ChunkSeq[u8],
+    in s: Slice[u8],
+    lo: u64,
+    hi: u64,
+    utf8: bool,
+    plain: bool
+) -> Option[TargetError] {
     if lo <= hi
         && hi <= s.len()
         && (plain || (find(in s, lo, hi, Ascii::Percent) == hi && find(in s, lo, hi, PLUS) == hi)) {
@@ -540,8 +542,10 @@ fn parse(in raw: Slice[u8], limits: TargetLimits) -> Result[ParsedTarget, Target
 }
 
 // `Target::parse`.
-pub fn target_parse(in raw: Slice[u8], limits: TargetLimits)
-    -> ParsedTarget eff [Fail[TargetError]] {
+pub fn target_parse(
+    in raw: Slice[u8],
+    limits: TargetLimits
+) -> ParsedTarget eff [Fail[TargetError]] {
     match parse(in raw, limits) {
         Result::Ok(t) => t,
         Result::Err(e) => Fail::raise(e),

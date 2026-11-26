@@ -122,8 +122,16 @@ fn skip_ws(in b: Slice[u8], at: u64) -> u64 eff [Fail[ArithOverflow], Fail[Runti
 
 // Whether `b[at..]` starts with the ASCII bytes `word` (a 4- or 5-letter
 // literal, given as its letters).
-fn starts(in b: Slice[u8], at: u64, c0: u8, c1: u8, c2: u8, c3: u8, c4: u8, n: u64)
-    -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+fn starts(
+    in b: Slice[u8],
+    at: u64,
+    c0: u8,
+    c1: u8,
+    c2: u8,
+    c3: u8,
+    c4: u8,
+    n: u64
+) -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     if at + n > b.len() {
         return false;
     }
@@ -162,8 +170,11 @@ fn hex4(in b: Slice[u8], at: u64) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeE
 }
 
 // Writes `code` as UTF-8 at `strs[sp..]`; returns the new end.
-fn put_utf8(inout strs: Slice[u8], sp: u64, code: u64)
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+fn put_utf8(
+    inout strs: Slice[u8],
+    sp: u64,
+    code: u64
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     if code < UTF8_ONE_END {
         strs.set(sp, wrapping_u8(code));
         return sp + 1;
@@ -211,8 +222,11 @@ fn escape_mask(x: u64) -> u64 {
 
 // Whether `s[start..end]` is UTF-8 as `String::from_utf8` accepts it: no
 // overlong forms, surrogates or code points above U+10FFFF.
-pub fn utf8_ok(in s: Slice[u8], start: u64, end: u64)
-    -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn utf8_ok(
+    in s: Slice[u8],
+    start: u64,
+    end: u64
+) -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let mut i = start;
     loop {
         // Eight ASCII bytes at once.
@@ -276,8 +290,12 @@ pub fn utf8_ok(in s: Slice[u8], start: u64, end: u64)
 // Reads the string starting at the quote `b[at]` into `strs[sp..]`.
 // Returns (failure code or 0, the index after the closing quote, the new
 // end of `strs`).
-fn read_string(in b: Slice[u8], at: u64, inout strs: Slice[u8], sp: u64)
-    -> (u64, u64, u64) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+fn read_string(
+    in b: Slice[u8],
+    at: u64,
+    inout strs: Slice[u8],
+    sp: u64
+) -> (u64, u64, u64) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     if at >= b.len() || b[at] != QUOTE {
         return (1, at, sp);
     }
@@ -398,8 +416,13 @@ fn bytes_same(in a: Slice[u8], in b: Slice[u8]) -> bool {
 
 // Records key `word` of object `object`; returns 0, 4 on a duplicate, or
 // 12 when the table is half full.
-fn add_key(inout keys: Slice[u64], in strs: Slice[u8], object: u64, word: u64, count: u64)
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+fn add_key(
+    inout keys: Slice[u64],
+    in strs: Slice[u8],
+    object: u64,
+    word: u64,
+    count: u64
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let slots = keys.len() / 2;
     if 2 * (count + 1) > slots {
         return 12;
@@ -445,8 +468,11 @@ fn add_key(inout keys: Slice[u64], in strs: Slice[u8], object: u64, word: u64, c
 
 // Appends `word` to the tape; returns the new length, or 0 when the tape
 // is full.
-fn push(inout tape: Slice[u64], n: u64, word: u64)
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+fn push(
+    inout tape: Slice[u64],
+    n: u64,
+    word: u64
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     if n >= tape.len() {
         return 0;
     }
@@ -505,35 +531,15 @@ pub fn parse_json(
             if c == LEFT_BRACE || c == LEFT_BRACKET {
                 let object = c == LEFT_BRACE;
                 at = at + 1;
-                n = push(
-                    inout tape,
-                    n,
-                    if object {
-                        8
-                    } else {
-                        6
-                    }
-                );
+                n = push(inout tape, n, if object { 8 } else { 6 });
                 if n == 0 {
                     return json_failure(11);
                 }
                 at = skip_ws(in b, at);
-                let close: u8 = if object {
-                    125
-                } else {
-                    93
-                };
+                let close: u8 = if object { 125 } else { 93 };
                 if at < b.len() && b[at] == close {
                     at = at + 1;
-                    n = push(
-                        inout tape,
-                        n,
-                        if object {
-                            9
-                        } else {
-                            7
-                        }
-                    );
+                    n = push(inout tape, n, if object { 9 } else { 7 });
                     if n == 0 {
                         return json_failure(11);
                     }
@@ -633,11 +639,7 @@ pub fn parse_json(
                 return json_failure(1);
             }
             let c = b[at];
-            let close: u8 = if object {
-                RIGHT_BRACE
-            } else {
-                RIGHT_BRACKET
-            };
+            let close: u8 = if object { RIGHT_BRACE } else { RIGHT_BRACKET };
             if c == COMMA {
                 at = at + 1;
                 if object {
@@ -648,15 +650,7 @@ pub fn parse_json(
                 }
             } else if c == close {
                 at = at + 1;
-                n = push(
-                    inout tape,
-                    n,
-                    if object {
-                        9
-                    } else {
-                        7
-                    }
-                );
+                n = push(inout tape, n, if object { 9 } else { 7 });
                 if n == 0 {
                     return json_failure(11);
                 }

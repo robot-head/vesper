@@ -154,8 +154,11 @@ pub fn vbyte_size(in values: Slice[u32], lim: VbyteLimits) -> u64 eff [Fail[BinE
     size
 }
 
-pub fn vbyte_encode(in values: Slice[u32], inout out: Slice[u8], lim: VbyteLimits)
-    -> u64 eff [Fail[BinError]] {
+pub fn vbyte_encode(
+    in values: Slice[u32],
+    inout out: Slice[u8],
+    lim: VbyteLimits
+) -> u64 eff [Fail[BinError]] {
     let size = vbyte_size(in values, lim);
     if out.len() < size {
         raise(BinErrorKind::BOutputTooSmall, 0);
@@ -175,11 +178,10 @@ pub fn vbyte_encode(in values: Slice[u32], inout out: Slice[u8], lim: VbyteLimit
         let old = byte(in out, c);
         out.try_set(c, wrapping_u8(old | tag));
         for k in 0..w {
-            out
-                .try_set(
-                    wrapping_add(pos, k),
-                    wrapping_u8(bit_shr(v, wrapping_mul(k, 8)) & BYTE_MASK)
-                );
+            out.try_set(
+                wrapping_add(pos, k),
+                wrapping_u8(bit_shr(v, wrapping_mul(k, 8)) & BYTE_MASK)
+            );
         }
         pos = wrapping_add(pos, w);
     }
@@ -191,8 +193,12 @@ fn tag_width(in input: Slice[u8], i: u64) -> u64 {
     wrapping_add(bit_shr(byte(in input, i / VALUES_PER_CONTROL), shift) & TAG_MASK, 1)
 }
 
-pub fn vbyte_decode(in input: Slice[u8], count: u64, inout out: Slice[u32], lim: VbyteLimits)
-    -> u64 eff [Fail[BinError]] {
+pub fn vbyte_decode(
+    in input: Slice[u8],
+    count: u64,
+    inout out: Slice[u32],
+    lim: VbyteLimits
+) -> u64 eff [Fail[BinError]] {
     bound(count, lim.max_values, BinErrorKind::BCountLimit);
     let len = input.len();
     bound(len, lim.max_bytes, BinErrorKind::BByteLimit);
@@ -279,8 +285,13 @@ fn alignment_valid(alignment: u64) -> Unit eff [Fail[BinError]] {
 }
 
 // `RelPtr32::resolve`.
-pub fn relptr_resolve(offset: i32, field_offset: u64, size: u64, alignment: u64, archive_len: u64)
-    -> Span eff [Fail[BinError]] {
+pub fn relptr_resolve(
+    offset: i32,
+    field_offset: u64,
+    size: u64,
+    alignment: u64,
+    archive_len: u64
+) -> Span eff [Fail[BinError]] {
     field(field_offset, REL_BYTES, archive_len);
     alignment_valid(alignment);
     let o = widen_i64(offset);
@@ -385,8 +396,11 @@ fn meta_get(in meta: ChunkSeq[u64], i: u64) -> u64 {
     }
 }
 
-fn check_new(count: u64, lim: ArchiveLimits, inout meta: ChunkSeq[u64])
-    -> Check eff [Fail[BinError]] {
+fn check_new(
+    count: u64,
+    lim: ArchiveLimits,
+    inout meta: ChunkSeq[u64]
+) -> Check eff [Fail[BinError]] {
     if count == 0 {
         raise(BinErrorKind::BTree, HDR_NODE_COUNT);
     }
@@ -414,8 +428,12 @@ fn check_label(inout c: Check, len: u64) -> Unit eff [Fail[BinError]] {
     work(inout c.remaining, len);
 }
 
-fn check_node(inout c: Check, in meta: ChunkSeq[u64], index: u64, children: u64)
-    -> Unit eff [Fail[BinError]] {
+fn check_node(
+    inout c: Check,
+    in meta: ChunkSeq[u64],
+    index: u64,
+    children: u64
+) -> Unit eff [Fail[BinError]] {
     work(inout c.remaining, node_len());
     if meta_get(in meta, wrapping_add(wrapping_mul(index, 2), 1)) == 0 {
         raise(BinErrorKind::BTree, node_offset(index));
@@ -425,8 +443,12 @@ fn check_node(inout c: Check, in meta: ChunkSeq[u64], index: u64, children: u64)
     bound(c.edges, c.lim.max_edges, BinErrorKind::BCountLimit);
 }
 
-fn check_edge(inout c: Check, inout meta: ChunkSeq[u64], parent: u64, child: u64)
-    -> Unit eff [Fail[BinError]] {
+fn check_edge(
+    inout c: Check,
+    inout meta: ChunkSeq[u64],
+    parent: u64,
+    child: u64
+) -> Unit eff [Fail[BinError]] {
     work(inout c.remaining, EDGE_WORK);
     if child <= parent || child >= c.count {
         raise(BinErrorKind::BTree, node_offset(parent));
@@ -538,11 +560,10 @@ pub fn archive_encode(
             put_relative(inout out, wrapping_add(offset, NODE_LABEL), cursor);
             put_u32(inout out, wrapping_add(offset, NODE_LABEL_COUNT), label_len);
             for k in 0..label_len {
-                out
-                    .try_set(
-                        wrapping_add(cursor, k),
-                        wrapping_u8(byte(in labels, wrapping_add(label_off, k)))
-                    );
+                out.try_set(
+                    wrapping_add(cursor, k),
+                    wrapping_u8(byte(in labels, wrapping_add(label_off, k)))
+                );
             }
             cursor = wrapping_add(cursor, label_len);
         }

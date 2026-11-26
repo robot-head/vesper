@@ -205,8 +205,14 @@ fn text_is(in b: ChunkSeq[u8], in t: Toks, i: u64, in w: Slice[u8]) -> bool {
 }
 
 // `p.text(i) == t.text(j)` across two texts.
-fn same_text(in pb: ChunkSeq[u8], in p: Toks, i: u64, in tb: ChunkSeq[u8], in t: Toks, j: u64)
-    -> bool {
+fn same_text(
+    in pb: ChunkSeq[u8],
+    in p: Toks,
+    i: u64,
+    in tb: ChunkSeq[u8],
+    in t: Toks,
+    j: u64
+) -> bool {
     let pn = if i < len(in p) {
         sub(tok_e(in p, i), tok_s(in p, i))
     } else {
@@ -553,11 +559,7 @@ fn compile(in pb: ChunkSeq[u8], in p: Toks, inout m: Mx) -> bool {
                     && last_literal
                     && head_kind(kind(in p, sub(i, 1)))
                     && (kind(in p, i) == k_l_brace() || kind(in p, i) == k_string()) {
-                    if joined(in p, i) {
-                        1
-                    } else {
-                        2
-                    }
+                    if joined(in p, i) { 1 } else { 2 }
                 } else {
                     0
                 }
@@ -625,16 +627,7 @@ fn compile(in pb: ChunkSeq[u8], in p: Toks, inout m: Mx) -> bool {
         if sequence && i == n && (sc == S_SCOPE || sc == S_STMTS) {
             push_op(inout m, OP_TAIL, cap, 0);
         } else {
-            push_op(
-                inout m,
-                OP_HOLE,
-                cap,
-                if sequence {
-                    1
-                } else {
-                    0
-                }
-            );
+            push_op(inout m, OP_HOLE, cap, if sequence { 1 } else { 0 });
         }
     }
     if g_op.len() != 0 {
@@ -672,11 +665,7 @@ fn valid_fragment(
                     || k == k_linear()
                     || k == k_eff()
             );
-        return if ok {
-            1
-        } else {
-            0
-        };
+        return if ok { 1 } else { 0 };
     }
     if sort == S_PLACE {
         let k = kind(in t, rs);
@@ -768,11 +757,7 @@ fn valid_fragment(
         fail(inout m, in text.as_slice());
         return 2;
     }
-    if status == 0 {
-        1
-    } else {
-        0
-    }
+    if status == 0 { 1 } else { 0 }
 }
 
 // `State::record`: log one event under the first `nf` frames of `frames`.
@@ -873,8 +858,13 @@ fn push_text(inout out: ChunkSeq[u64], in b: ChunkSeq[u8], s: u64, e: u64) {
 
 // The captures of a match whose log ends at `log`: [1, work, captures]
 // (see `match_rule_encoded`), or false (and the refusal).
-fn collect(in pb: ChunkSeq[u8], in p: Toks, inout m: Mx, log: u64, inout out: ChunkSeq[u64])
-    -> bool {
+fn collect(
+    in pb: ChunkSeq[u8],
+    in p: Toks,
+    inout m: Mx,
+    log: u64,
+    inout out: ChunkSeq[u64]
+) -> bool {
     // The log, newest first, as Rust walks it.
     let mut chain = ChunkSeq::new[u64]();
     let mut at = log;

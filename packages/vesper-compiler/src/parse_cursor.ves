@@ -34,21 +34,27 @@ fn parse_at(p: ParseCursor, k: i64) -> bool eff [SyntaxMemory, Fail[Diag], Fail[
     parse_kind(p) == k
 }
 
-fn parse_at_end(p: ParseCursor, k: i64)
-    -> bool eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_at_end(
+    p: ParseCursor,
+    k: i64
+) -> bool eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let c = parse_kind(p);
     c == k || c == 70
 }
 
-fn parse_at_word(p: ParseCursor, n: i64, packed: i64)
-    -> bool eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_at_word(
+    p: ParseCursor,
+    n: i64,
+    packed: i64
+) -> bool eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     text_is(parse_nth(p, n), packed)
 }
 
 // Consumes the current token (and the trivia before it).
 
-fn parse_advance(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_advance(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     syntax_attach(p.token_pos, p.index + 1);
     ParseCursor {
         pos: p.cur.end,
@@ -73,21 +79,21 @@ fn parse_bump(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail
     }
 }
 
-fn parse_eat(p: ParseCursor, k: i64)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
-    if parse_at(p, k) {
-        parse_bump(p)
-    } else {
-        p
-    }
+fn parse_eat(
+    p: ParseCursor,
+    k: i64
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if parse_at(p, k) { parse_bump(p) } else { p }
 }
 
 fn parse_ate(p: ParseCursor, q: ParseCursor) -> bool eff [SyntaxMemory] {
     q.pos != p.pos
 }
 
-fn parse_expect(p: ParseCursor, k: i64)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_expect(
+    p: ParseCursor,
+    k: i64
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if p.cur.kind == k {
         parse_advance(p)
     } else {
@@ -95,8 +101,10 @@ fn parse_expect(p: ParseCursor, k: i64)
     }
 }
 
-fn parse_open(p: ParseCursor, node: i64)
-    -> ParseCursor eff [SyntaxMemory, Fail[ArithOverflow], Fail[Diag]] {
+fn parse_open(
+    p: ParseCursor,
+    node: i64
+) -> ParseCursor eff [SyntaxMemory, Fail[ArithOverflow], Fail[Diag]] {
     syntax_open(node, p.pos);
     ParseCursor {
         pos: p.pos,
@@ -173,8 +181,12 @@ fn parse_close(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[ArithOverf
     }
 }
 
-fn parse_with_flags(p: ParseCursor, nostruct: bool, rows: bool, bounds: bool)
-    -> ParseCursor eff [SyntaxMemory] {
+fn parse_with_flags(
+    p: ParseCursor,
+    nostruct: bool,
+    rows: bool,
+    bounds: bool
+) -> ParseCursor eff [SyntaxMemory] {
     ParseCursor {
         pos: p.pos,
         cur: p.cur,
@@ -196,11 +208,7 @@ fn parse_ident(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fai
         parse_bump(p)
     } else {
         let q = syntax_issue(p, 2);
-        if parse_at(q, 70) {
-            q
-        } else {
-            parse_bump(q)
-        }
+        if parse_at(q, 70) { q } else { parse_bump(q) }
     }
 }
 
@@ -231,8 +239,9 @@ fn parse_mode(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail
     }
 }
 
-fn parse_required_mode(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_required_mode(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let q = parse_mode(p);
     if parse_ate(p, q) {
         q
@@ -306,8 +315,9 @@ fn parse_at_literal(p: ParseCursor) -> bool eff [SyntaxMemory, Fail[Diag], Fail[
     k == 5 || k == 6 || k == 7 || k == 30 || k == 31
 }
 
-fn parse_literal(p: ParseCursor)
-    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn parse_literal(
+    p: ParseCursor
+) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let t = p.cur;
     let invalid_string = if t.kind == 7 {
         handle Fail[Diag] in {

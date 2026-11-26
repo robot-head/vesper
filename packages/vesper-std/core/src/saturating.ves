@@ -82,28 +82,16 @@ pub fn saturating_mul_u32(a: u32, b: u32) -> u32 {
 
 pub fn saturating_add_u64(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
-    if s < a {
-        18446744073709551615
-    } else {
-        s
-    }
+    if s < a { 18446744073709551615 } else { s }
 }
 
 pub fn saturating_sub_u64(a: u64, b: u64) -> u64 {
-    if b > a {
-        0
-    } else {
-        wrapping_sub(a, b)
-    }
+    if b > a { 0 } else { wrapping_sub(a, b) }
 }
 
 pub fn saturating_mul_u64(a: u64, b: u64) -> u64 {
     let (lo, hi) = mul_wide(a, b);
-    if hi != 0 {
-        18446744073709551615
-    } else {
-        lo
-    }
+    if hi != 0 { 18446744073709551615 } else { lo }
 }
 
 // `x` (an exact `i64` result) clamped to the range of `i8`.
@@ -212,11 +200,7 @@ pub fn saturating_sub_i64(a: i64, b: i64) -> i64 {
 // |x| as a `u64` (exact for `MIN`).
 fn magnitude_i64(x: i64) -> u64 {
     let u = wrapping_u64(x);
-    if x < 0 {
-        wrapping_sub(0, u)
-    } else {
-        u
-    }
+    if x < 0 { wrapping_sub(0, u) } else { u }
 }
 
 pub fn saturating_mul_i64(a: i64, b: i64) -> i64 {

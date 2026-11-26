@@ -170,11 +170,7 @@ pub fn do_sim_trigger(in rec: Recorder, same_session: bool, widget: u64, event: 
         return q;
     }
     dispatch_if_subscribed(in rec, inout q, widget, event);
-    q.code = if q.has_handler {
-        0
-    } else {
-        2
-    };
+    q.code = if q.has_handler { 0 } else { 2 };
     q
 }
 
@@ -392,15 +388,13 @@ pub fn do_encode_tree(in words: Slice[u64], in text: Slice[u8], in limits: Slice
             let property = kind_slot_property(node.kind, i);
             q.values.push(property);
             q.values.push(ti);
-            q
-                .values
-                .push(
-                    if tree_prop(in q.tree, node, property) == NONE_ID {
-                        0
-                    } else {
-                        1
-                    }
-                );
+            q.values.push(
+                if tree_prop(in q.tree, node, property) == NONE_ID {
+                    0
+                } else {
+                    1
+                }
+            );
             slots = inc(slots);
         }
         if node.ccount > U16_MAX {

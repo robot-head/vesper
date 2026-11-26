@@ -152,17 +152,11 @@ impl Stream {
     }
 
     fn start_at(in self, offset: u64) -> u64 {
-        match self.start.try_get(add(self.pos, offset)) {
-            Option::Some(s) => s,
-            Option::None => self.len,
-        }
+        self.start.try_get(add(self.pos, offset)).unwrap_or(self.len)
     }
 
     fn end_at(in self, offset: u64) -> u64 {
-        match self.end.try_get(add(self.pos, offset)) {
-            Option::Some(e) => e,
-            Option::None => self.len,
-        }
+        self.end.try_get(add(self.pos, offset)).unwrap_or(self.len)
     }
 
     fn at_word(in self, in b: Slice[u8], offset: u64, in w: Str) -> bool {
@@ -339,8 +333,15 @@ impl Stream {
         (v, start, end)
     }
 
-    fn int_val(inout self, in b: Slice[u8], s: u64, e: u64, neg: bool, start: u64, end: u64)
-        -> Val {
+    fn int_val(
+        inout self,
+        in b: Slice[u8],
+        s: u64,
+        e: u64,
+        neg: bool,
+        start: u64,
+        end: u64
+    ) -> Val {
         let x = parse_int(in b, s, e, neg);
         if x.ok {
             Val { tag: V_INT, a: 0, b: 0, int: x, flag: false }
@@ -493,8 +494,7 @@ impl Stream {
                 self.bump();
             }
             let (v, vs, ve) = self.value(in b);
-            self
-                .out
+            self.out
                 .args
                 .push(Arg { has_name: named, na: na, nb: nb, val: v, start: arg_start, end: ve });
             if self.kind() == k_comma() {
@@ -576,19 +576,16 @@ impl Stream {
                                 Option::None => {},
                             }
                         }
-                        self
-                            .out
-                            .fns
-                            .push(
-                                FnAttrs {
-                                    na: ns,
-                                    nb: ne,
-                                    has_test: has_test,
-                                    test: test,
-                                    ca: ca,
-                                    cn: cn
-                                }
-                            );
+                        self.out.fns.push(
+                            FnAttrs {
+                                na: ns,
+                                nb: ne,
+                                has_test: has_test,
+                                test: test,
+                                ca: ca,
+                                cn: cn
+                            }
+                        );
                     }
                 }
                 has_test = false;

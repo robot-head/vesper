@@ -77,8 +77,11 @@ fn ceiling(f: u64) -> u64 eff [Fail[ArithOverflow]] {
 }
 
 // `Config::validate`: `dims` holds the seven fields in order.
-pub fn validate(in dims: Slice[u64], rope_base: u32, rms_epsilon: u32)
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn validate(
+    in dims: Slice[u64],
+    rope_base: u32,
+    rms_epsilon: u32
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     for f in u64_zero()..7 {
         if dims[f] == 0 {
             return 1 + f;
@@ -158,8 +161,12 @@ fn floats(in b: Slice[u8], at: u64, n: u64) -> u64 eff [Fail[ArithOverflow], Fai
 // `Config::validate`, every weight run (present, then finite), the legacy
 // RoPE tables and the exact length. Writes the seven fields and whether
 // the classifier is shared to `out`.
-pub fn check_checkpoint(in b: Slice[u8], rope_base: u32, rms_epsilon: u32, inout out: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn check_checkpoint(
+    in b: Slice[u8],
+    rope_base: u32,
+    rms_epsilon: u32,
+    inout out: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     if b.len() > MAX_CHECKPOINT_BYTES {
         return 34;
     }
@@ -190,15 +197,7 @@ pub fn check_checkpoint(in b: Slice[u8], rope_base: u32, rms_epsilon: u32, inout
     if code != 0 {
         return code;
     }
-    out
-        .set(
-            7,
-            if shared {
-                1
-            } else {
-                0
-            }
-        );
+    out.set(7, if shared { 1 } else { 0 });
     let dim = out[0];
     let hidden = out[1];
     let layers = out[2];
@@ -254,8 +253,11 @@ pub fn check_checkpoint(in b: Slice[u8], rope_base: u32, rms_epsilon: u32, inout
 
 // `Tokenizer::from_llama2c`'s checks: writes the maximum token length to
 // `out[0]`, then each entry's score bits, piece offset and length.
-pub fn check_tokenizer(in b: Slice[u8], vocab: u64, inout out: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn check_tokenizer(
+    in b: Slice[u8],
+    vocab: u64,
+    inout out: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     if vocab == 0 || vocab > MAX_VOCAB {
         return 15;
     }
@@ -319,8 +321,11 @@ fn hex_digit(c: u8) -> u64 eff [Fail[ArithOverflow]] {
 
 // What `Tokenizer::decode` prints for `piece`: 0 for the piece from `out[1]`
 // with length `out[2]`, 1 for the single byte `out[1]`, 2 for nothing.
-pub fn decode_piece(in piece: Slice[u8], after_bos: bool, inout out: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn decode_piece(
+    in piece: Slice[u8],
+    after_bos: bool,
+    inout out: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let len = piece.len();
     let mut start: u64 = 0;
     if after_bos && len > 0 && piece[0] == SPACE {

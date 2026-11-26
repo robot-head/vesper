@@ -61,8 +61,10 @@ pub fn add_secret_region(inout p.{regions}: RedactionPolicy, region: ImageRegion
     0
 }
 
-pub fn add_secret_value(inout p.{secret_buf, secret_spans}: RedactionPolicy, in bytes: Slice[u8])
-    -> u32 {
+pub fn add_secret_value(
+    inout p.{secret_buf, secret_spans}: RedactionPolicy,
+    in bytes: Slice[u8]
+) -> u32 {
     if bytes.len() < min_secret_bytes() {
         return 2;
     }
@@ -79,14 +81,12 @@ pub fn add_secret_value(inout p.{secret_buf, secret_spans}: RedactionPolicy, in 
         p.secret_buf.push(b);
         i = wrapping_add(i, 1);
     }
-    p
-        .secret_spans
-        .push(
-            SecretSpan {
-                offset: off,
-                len: bytes.len(),
-            }
-        );
+    p.secret_spans.push(
+        SecretSpan {
+            offset: off,
+            len: bytes.len(),
+        }
+    );
     0
 }
 
@@ -180,11 +180,7 @@ fn zero_range(
         return;
     }
     let avail = wrapping_sub(blen, offset);
-    let clipped = if len < avail {
-        len
-    } else {
-        avail
-    };
+    let clipped = if len < avail { len } else { avail };
     let end = wrapping_add(offset, clipped);
     let mut i = offset;
     loop {
@@ -194,15 +190,14 @@ fn zero_range(
         let _ = bytes.try_set(i, 0);
         i = wrapping_add(i, 1);
     }
-    log
-        .push(
-            RedactionEntry {
-                target_tag: target_tag,
-                target_val: target_val,
-                offset: wrapping_u32(offset),
-                len: wrapping_u32(clipped),
-            }
-        );
+    log.push(
+        RedactionEntry {
+            target_tag: target_tag,
+            target_val: target_val,
+            offset: wrapping_u32(offset),
+            len: wrapping_u32(clipped),
+        }
+    );
 }
 
 fn scrub_secrets(

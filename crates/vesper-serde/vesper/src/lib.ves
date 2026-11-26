@@ -276,8 +276,13 @@ pub fn doc_reset(inout doc: Doc) {
 }
 
 // `Node::field`: the value token of key `key` in the object at `index`.
-pub fn doc_field(in doc: Doc, in input: Slice[u8], index: u64, in key: Slice[u8], max_work: u64)
-    -> Option[u64] eff [Fail[Error]] {
+pub fn doc_field(
+    in doc: Doc,
+    in input: Slice[u8],
+    index: u64,
+    in key: Slice[u8],
+    max_work: u64
+) -> Option[u64] eff [Fail[Error]] {
     field_lookup(in doc, in input, index, in key, max_work)
 }
 
@@ -323,8 +328,11 @@ pub fn doc_build(
 }
 
 // `encode::encoded_size` over a flattened value (vesper/src/encode.ves).
-pub fn value_size(in words: Slice[u64], in pool: Slice[u8], limits: EncodeLimits)
-    -> u64 eff [Fail[Error]] {
+pub fn value_size(
+    in words: Slice[u64],
+    in pool: Slice[u8],
+    limits: EncodeLimits
+) -> u64 eff [Fail[Error]] {
     encode_size(in words, in pool, limits)
 }
 
@@ -370,8 +378,12 @@ pub fn size_bound_string(max_utf8_bytes: u64) -> Bound eff [Fail[Error]] {
 }
 
 // `JsonSizeBound::combine_field`.
-pub fn size_bound_field(object: Bound, key_escaped_len: u64, field: Bound, first: bool)
-    -> Bound eff [Fail[Error]] {
+pub fn size_bound_field(
+    object: Bound,
+    key_escaped_len: u64,
+    field: Bound,
+    first: bool
+) -> Bound eff [Fail[Error]] {
     bound_field(object, key_escaped_len, field, first)
 }
 
@@ -396,14 +408,21 @@ pub fn svb_size(in values: Slice[u32], limits: VbyteLimits) -> u64 eff [Fail[Bin
 }
 
 // `streamvbyte::encode_into`.
-pub fn svb_encode(in values: Slice[u32], inout out: Slice[u8], limits: VbyteLimits)
-    -> u64 eff [Fail[BinError]] {
+pub fn svb_encode(
+    in values: Slice[u32],
+    inout out: Slice[u8],
+    limits: VbyteLimits
+) -> u64 eff [Fail[BinError]] {
     vbyte_encode(in values, inout out, limits)
 }
 
 // `streamvbyte::decode_into`.
-pub fn svb_decode(in input: Slice[u8], count: u64, inout out: Slice[u32], limits: VbyteLimits)
-    -> u64 eff [Fail[BinError]] {
+pub fn svb_decode(
+    in input: Slice[u8],
+    count: u64,
+    inout out: Slice[u32],
+    limits: VbyteLimits
+) -> u64 eff [Fail[BinError]] {
     vbyte_decode(in input, count, inout out, limits)
 }
 
@@ -413,8 +432,13 @@ pub fn vspa_validation_bytes(count: u64) -> u64 eff [Fail[BinError]] {
 }
 
 // `RelPtr32::resolve`.
-pub fn vspa_resolve(offset: i32, field_offset: u64, size: u64, alignment: u64, archive_len: u64)
-    -> Span eff [Fail[BinError]] {
+pub fn vspa_resolve(
+    offset: i32,
+    field_offset: u64,
+    size: u64,
+    alignment: u64,
+    archive_len: u64
+) -> Span eff [Fail[BinError]] {
     relptr_resolve(offset, field_offset, size, alignment, archive_len)
 }
 
@@ -480,8 +504,13 @@ pub fn doc_tile(in doc: Doc, in input: Slice[u8], root: u64) -> TilePoint eff [F
 
 // `checked_event` of src/event_columns.rs, `passes` schema passes paid
 // from `remaining`.
-pub fn doc_event(in doc: Doc, in input: Slice[u8], root: u64, inout remaining: u64, passes: u64)
-    -> EventRow eff [Fail[Fault]] {
+pub fn doc_event(
+    in doc: Doc,
+    in input: Slice[u8],
+    root: u64,
+    inout remaining: u64,
+    passes: u64
+) -> EventRow eff [Fail[Fault]] {
     event_check(in doc, in input, root, inout remaining, passes)
 }
 
@@ -491,19 +520,30 @@ pub fn batch_validate(batch: BatchLimits, record: Limits) -> Unit eff [Fail[Faul
 }
 
 // NDJSON batch admission.
-pub fn batch_admit(in input: Slice[u8], batch: BatchLimits, record_size: u64)
-    -> NdPlan eff [Fail[Fault]] {
+pub fn batch_admit(
+    in input: Slice[u8],
+    batch: BatchLimits,
+    record_size: u64
+) -> NdPlan eff [Fail[Fault]] {
     ndjson_admit(in input, batch, record_size)
 }
 
 // The next NDJSON frame.
-pub fn batch_frame(in input: Slice[u8], inout cursor: NdCursor, batch: BatchLimits, record: Limits)
-    -> Unit eff [Fail[Fault]] {
+pub fn batch_frame(
+    in input: Slice[u8],
+    inout cursor: NdCursor,
+    batch: BatchLimits,
+    record: Limits
+) -> Unit eff [Fail[Fault]] {
     ndjson_frame(in input, inout cursor, batch, record)
 }
 
 // One parsed NDJSON record's totals.
-pub fn batch_account(inout cursor: NdCursor, tokens: u64, index: u64, work: u64)
-    -> Unit eff [Fail[Fault]] {
+pub fn batch_account(
+    inout cursor: NdCursor,
+    tokens: u64,
+    index: u64,
+    work: u64
+) -> Unit eff [Fail[Fault]] {
     ndjson_account(inout cursor, tokens, index, work)
 }

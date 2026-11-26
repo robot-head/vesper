@@ -91,11 +91,7 @@ pub fn build_names(inout c: Cx) {
 
 fn by_key(in c: Cx, key: u64) -> u64 {
     let x = g(in c.by_key, key);
-    if x == 0 {
-        NONE
-    } else {
-        wrapping_sub(x, 1)
-    }
+    if x == 0 { NONE } else { wrapping_sub(x, 1) }
 }
 
 // `Names::source`: `u0:N` of a known func id -> its name.
@@ -128,11 +124,7 @@ fn names_source(in c: Cx, name: u64) -> u64 {
         i = wrapping_add(i, 1);
     }
     let s = g(in c.by_id, v);
-    if s == 0 {
-        name
-    } else {
-        wrapping_sub(s, 1)
-    }
+    if s == 0 { name } else { wrapping_sub(s, 1) }
 }
 
 // `Names::user`: `u0:<id>` of a name, or NONE.

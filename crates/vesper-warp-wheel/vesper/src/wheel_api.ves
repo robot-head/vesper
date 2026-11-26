@@ -25,13 +25,18 @@ pub fn wheel_core_now_ns(in w: WheelCore) -> u64 {
     w.now_ns
 }
 
-pub fn wheel_core_insert(inout w: WheelCore, deadline_ns: u64)
-    -> Result[(u64, u64), InsertErrorKind] {
+pub fn wheel_core_insert(
+    inout w: WheelCore,
+    deadline_ns: u64
+) -> Result[(u64, u64), InsertErrorKind] {
     w.insert(deadline_ns)
 }
 
-pub fn wheel_core_deadline(in w: WheelCore, index: u64, generation: u64)
-    -> u64 eff [Fail[HandleError]] {
+pub fn wheel_core_deadline(
+    in w: WheelCore,
+    index: u64,
+    generation: u64
+) -> u64 eff [Fail[HandleError]] {
     match w.check(index, generation) {
         Option::Some(e) => Fail::raise(e),
         Option::None => w.deadline_of(index),
@@ -54,8 +59,10 @@ pub fn wheel_core_advance(inout w: WheelCore, now_ns: u64) -> Option[AdvanceErro
 }
 
 // Advance, then the earliest due entry as `(deadline, index)`.
-pub fn wheel_core_poll(inout w: WheelCore, now_ns: u64)
-    -> Result[Option[(u64, u64)], AdvanceError] {
+pub fn wheel_core_poll(
+    inout w: WheelCore,
+    now_ns: u64
+) -> Result[Option[(u64, u64)], AdvanceError] {
     match w.advance(now_ns) {
         Option::Some(e) => Result::Err(e),
         Option::None => Result::Ok(w.pop_due()),

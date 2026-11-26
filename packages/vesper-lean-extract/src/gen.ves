@@ -777,10 +777,9 @@ fn evidence(inout b: B, in g: G, c: Cap) -> T {
 // `guard_abort(may_abort)`.
 fn guard_abort(inout b: B, in g: G, may_abort: bool) {
     if may_abort && g.has_clause_aliases() && g.alias_written {
-        b
-            .fail(
-                in "Lean extraction cannot order a write to a borrowed operation argument before a potentially aborting effect inside its clause"
-            );
+        b.fail(
+            in "Lean extraction cannot order a write to a borrowed operation argument before a potentially aborting effect inside its clause"
+        );
     }
 }
 
@@ -1555,8 +1554,14 @@ fn assign(
 }
 
 // `place_term(place)`.
-fn place_term(inout b: B, inout t: Types, in y: Y, in g: G, root: u32, in path: ChunkSeq[u32])
-    -> T {
+fn place_term(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    in g: G,
+    root: u32,
+    in path: ChunkSeq[u32]
+) -> T {
     let i = g.find(root);
     if i == NONE64 {
         b.fail(in "unknown Lean place");
@@ -2012,8 +2017,14 @@ fn checked(
     lref(inout b, tmp)
 }
 
-fn expr_inner(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
-    -> T {
+fn expr_inner(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    e: u64,
+    inout out: ChunkSeq[T]
+) -> T {
     let k = y.a.kind(e);
     if k == X_LITERAL {
         let ty_e = type_of(in y, e);
@@ -2153,10 +2164,9 @@ fn name_expr(inout b: B, inout t: Types, in y: Y, inout g: G, n: u32) -> T {
     let k = g.cont(n);
     if k.key != NONE32 {
         if k.fallback == NONE32 {
-            b
-                .fail(
-                    in "Lean extraction cannot pass this continuation as a value: its frame or borrowed arguments must be threaded by a direct resumption"
-                );
+            b.fail(
+                in "Lean extraction cannot pass this continuation as a value: its frame or borrowed arguments must be threaded by a direct resumption"
+            );
             return unit(inout b);
         }
         return lref(inout b, k.fallback);
@@ -2219,8 +2229,14 @@ fn name_expr(inout b: B, inout t: Types, in y: Y, inout g: G, n: u32) -> T {
     sref(inout b, n)
 }
 
-fn struct_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
-    -> T {
+fn struct_expr(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    e: u64,
+    inout out: ChunkSeq[T]
+) -> T {
     let n = y.a.xs(e, 0);
     let nf = y.a.x(e, 1);
     let mut es: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -2272,8 +2288,14 @@ fn struct_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout ou
     ascribe(inout b, rec, r)
 }
 
-fn unary_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
-    -> T {
+fn unary_expr(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    e: u64,
+    inout out: ChunkSeq[T]
+) -> T {
     let op = y.a.xs(e, 0);
     let v = y.a.x(e, 1);
     let value = expr(inout b, inout t, in y, inout g, v, inout out);
@@ -2313,8 +2335,14 @@ fn unary_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out
     value
 }
 
-fn binary_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
-    -> T {
+fn binary_expr(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    e: u64,
+    inout out: ChunkSeq[T]
+) -> T {
     let op = y.a.xs(e, 0);
     let l = y.a.x(e, 1);
     let r = y.a.x(e, 2);
@@ -2328,30 +2356,14 @@ fn binary_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout ou
         g.current.truncate(nc);
         let and = op_is(in b, op, in "&&");
         if rhs.len() == 0 {
-            return binary(
-                inout b,
-                if and {
-                    OP_BOOL_AND
-                } else {
-                    OP_BOOL_OR
-                },
-                left,
-                right
-            );
+            return binary(inout b, if and { OP_BOOL_AND } else { OP_BOOL_OR }, left, right);
         }
         let tmp = temp(inout b, inout g);
         let pr = pure(inout b, right);
         let s = sequence(inout b, in rhs, pr);
         let m = b.at();
         b.w(T_BOOL);
-        b
-            .w(
-                if and {
-                    0
-                } else {
-                    1
-                }
-            );
+        b.w(if and { 0 } else { 1 });
         let lit = b.since(m);
         let other = pure(inout b, lit);
         let it = if and {
@@ -2413,8 +2425,14 @@ fn assign_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout ou
     assign(inout b, inout t, in y, inout g, root, in path, new, inout out);
 }
 
-fn block_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
-    -> T {
+fn block_expr(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    e: u64,
+    inout out: ChunkSeq[T]
+) -> T {
     let ns = g.scope.len();
     let n = y.a.x(e, 0);
     let mut at: u64 = 1;
@@ -2472,8 +2490,14 @@ fn block_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out
     result
 }
 
-fn match_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
-    -> T {
+fn match_expr(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    e: u64,
+    inout out: ChunkSeq[T]
+) -> T {
     let value = y.a.x(e, 0);
     let mut st = type_of(in y, value);
     if st == NONE32 {
@@ -2510,8 +2534,14 @@ fn match_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out
     lref(inout b, tmp)
 }
 
-fn index_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
-    -> T {
+fn index_expr(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    e: u64,
+    inout out: ChunkSeq[T]
+) -> T {
     let base = y.a.x(e, 0);
     let index = y.a.x(e, 1);
     let route = y.a.x(e, 2);
@@ -2975,13 +3005,12 @@ fn call(
             }
             for i in 0..args.len() {
                 if !(skip_first && i == 0) {
-                    es
-                        .push(
-                            match args.try_get(i) {
-                                Option::Some(x) => x,
-                                Option::None => 0,
-                            }
-                        );
+                    es.push(
+                        match args.try_get(i) {
+                            Option::Some(x) => x,
+                            Option::None => 0,
+                        }
+                    );
                 }
             }
             let terms = operands(inout b, inout t, in y, inout g, in es, inout out);
@@ -3031,13 +3060,12 @@ fn call(
                 let mut actual: ChunkSeq[u64] = ChunkSeq::new[u64]();
                 actual.push(base);
                 for i in 0..args.len() {
-                    actual
-                        .push(
-                            match args.try_get(i) {
-                                Option::Some(x) => x,
-                                Option::None => 0,
-                            }
-                        );
+                    actual.push(
+                        match args.try_get(i) {
+                            Option::Some(x) => x,
+                            Option::None => 0,
+                        }
+                    );
                 }
                 return call(inout b, inout t, in y, inout g, e, callee, mn, in actual, inout out);
             }
@@ -3104,10 +3132,9 @@ fn call(
             return resume_call(inout b, inout t, in y, inout g, k, in args, inout out);
         }
         if k.fallback == NONE32 {
-            b
-                .fail(
-                    in "Lean extraction cannot resume this continuation outside its clause: its frame or borrowed arguments must be threaded by a direct resumption"
-                );
+            b.fail(
+                in "Lean extraction cannot resume this continuation outside its clause: its frame or borrowed arguments must be threaded by a direct resumption"
+            );
             return unit(inout b);
         }
         let vs = operands(inout b, inout t, in y, inout g, in args, inout out);
@@ -3239,19 +3266,18 @@ fn call(
     for i in 0..s.pn {
         let p = y.x.fx.param(s, i);
         if widen_u64(p.pass) == TyPass::Inout && i < args.len() {
-            states
-                .push(
-                    St {
-                        ty: p.ty,
-                        src: 0,
-                        qa: p.qa,
-                        qn: p.qn,
-                        arg: match args.try_get(i) {
-                            Option::Some(x) => x,
-                            Option::None => 0,
-                        }
+            states.push(
+                St {
+                    ty: p.ty,
+                    src: 0,
+                    qa: p.qa,
+                    qn: p.qn,
+                    arg: match args.try_get(i) {
+                        Option::Some(x) => x,
+                        Option::None => 0,
                     }
-                );
+                }
+            );
         }
     }
     let mut vars = vars_new();
@@ -3386,26 +3412,24 @@ fn local_call(
     let mut states: ChunkSeq[St] = ChunkSeq::new[St]();
     for i in 0..w(ft.n) {
         if i < args.len() && widen_u64(t.param_pass(l.ty, i)) == TyPass::Inout {
-            states
-                .push(
-                    St {
-                        ty: t.arg(l.ty, i),
-                        src: 2,
-                        qa: 0,
-                        qn: 0,
-                        arg: match args.try_get(i) {
-                            Option::Some(x) => x,
-                            Option::None => 0,
-                        }
+            states.push(
+                St {
+                    ty: t.arg(l.ty, i),
+                    src: 2,
+                    qa: 0,
+                    qn: 0,
+                    arg: match args.try_get(i) {
+                        Option::Some(x) => x,
+                        Option::None => 0,
                     }
-                );
+                }
+            );
         }
     }
     if states.len() > 0 && abortable_row(in t, in y, ft.r2) {
-        b
-            .fail(
-                in "Lean extraction does not model keep-writes for an abortable call through a function value with inout parameters"
-            );
+        b.fail(
+            in "Lean extraction does not model keep-writes for an abortable call through a function value with inout parameters"
+        );
         return unit(inout b);
     }
     let mut result = no_t();
@@ -3818,11 +3842,7 @@ fn perform_op(
             };
             let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
             let root = place_of(in y, arg, inout path);
-            let li = if root == NONE32 {
-                NONE64
-            } else {
-                g.find(root)
-            };
+            let li = if root == NONE32 { NONE64 } else { g.find(root) };
             let mut lens = no_t();
             let mut done = false;
             if li != NONE64 {
@@ -3845,11 +3865,7 @@ fn perform_op(
                     let w1 = named(inout b, in "$w");
                     let mut component = tuple_get(inout b, w1, c, n);
                     let st = St { ty: param.ty, src: 1, qa: param.qa, qn: param.qn, arg: arg };
-                    let nq = if param.qn == 0 {
-                        1
-                    } else {
-                        param.qn
-                    };
+                    let nq = if param.qn == 0 { 1 } else { param.qn };
                     for q in 0..nq {
                         let mut proj: ChunkSeq[u32] = ChunkSeq::new[u32]();
                         if param.qn > 0 {
@@ -3954,19 +3970,18 @@ fn perform_op(
     for i in 0..sig.pn {
         let p = y.a.op_param(sig, i);
         if p.pass == TyPass::Inout && i < args.len() {
-            states
-                .push(
-                    St {
-                        ty: p.ty,
-                        src: 1,
-                        qa: p.qa,
-                        qn: p.qn,
-                        arg: match args.try_get(i) {
-                            Option::Some(x) => x,
-                            Option::None => 0,
-                        }
+            states.push(
+                St {
+                    ty: p.ty,
+                    src: 1,
+                    qa: p.qa,
+                    qn: p.qn,
+                    arg: match args.try_get(i) {
+                        Option::Some(x) => x,
+                        Option::None => 0,
                     }
-                );
+                }
+            );
         }
     }
     if states.len() == 0 {
@@ -4241,10 +4256,9 @@ fn pattern_paths(
             return;
         }
         if adt_of(in y.x.wd, c).is_enum {
-            b
-                .fail(
-                    in "Lean extraction requires irrefutable patterns for borrowed operation arguments"
-                );
+            b.fail(
+                in "Lean extraction requires irrefutable patterns for borrowed operation arguments"
+            );
             return;
         }
         let n = y.a.px(p, 2);
@@ -4735,18 +4749,16 @@ fn handler(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
                 }
                 g.abinds.push(ABind { id: bid, pa: gpa, pn: path.len() });
             }
-            g
-                .aliases
-                .push(
-                    Alias {
-                        lens: lens,
-                        raw: whole,
-                        ty: pt,
-                        pass: param.pass,
-                        ba: ba,
-                        bn: wrapping_sub(g.abinds.len(), ba)
-                    }
-                );
+            g.aliases.push(
+                Alias {
+                    lens: lens,
+                    raw: whole,
+                    ty: pt,
+                    pass: param.pass,
+                    ba: ba,
+                    bn: wrapping_sub(g.abinds.len(), ba)
+                }
+            );
         }
         let alias_n = wrapping_sub(g.aliases.len(), alias_a);
         if stateful {
@@ -4807,22 +4819,20 @@ fn handler(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
                 let_local(inout b, inout cl, f, lam, false, none4, false);
                 fallback = f;
             }
-            g
-                .conts
-                .push(
-                    Resumption {
-                        key: k_name,
-                        resume: resume,
-                        state: st_var,
-                        stateful: stateful,
-                        frame: frame_var,
-                        context: g.context,
-                        depth: g.layers.len(),
-                        aa: alias_a,
-                        an: alias_n,
-                        fallback: fallback
-                    }
-                );
+            g.conts.push(
+                Resumption {
+                    key: k_name,
+                    resume: resume,
+                    state: st_var,
+                    stateful: stateful,
+                    frame: frame_var,
+                    context: g.context,
+                    depth: g.layers.len(),
+                    aa: alias_a,
+                    an: alias_n,
+                    fallback: fallback
+                }
+            );
         }
         let ov2 = expr(inout b, inout t, in y, inout g, c.body, inout cl);
         let r = temp(inout b, inout g);
@@ -4904,16 +4914,15 @@ fn handler(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
         let fv = app(inout b, f, in nones);
         let fld = record_field(inout b, c.name, fv);
         fields.push(fld);
-        own_infos
-            .push(
-                OpInfo {
-                    name: c.name,
-                    implementation: implementation,
-                    aa: al_a,
-                    an: al_n,
-                    post_access: post_access
-                }
-            );
+        own_infos.push(
+            OpInfo {
+                name: c.name,
+                implementation: implementation,
+                aa: al_a,
+                an: al_n,
+                post_access: post_access
+            }
+        );
     }
     let oa = g.infos.len();
     for i in 0..own_infos.len() {
@@ -4945,23 +4954,21 @@ fn handler(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
     for i in 0..frame.len() {
         g.idx.push(u64_at(in frame, i));
     }
-    g
-        .layers
-        .push(
-            Layer {
-                state: st,
-                output: answer,
-                base: parent,
-                child: child,
-                inst: inst,
-                fa: fa,
-                fz: frame.len(),
-                frame_ty: frame_ty,
-                oa: oa,
-                on: on,
-                closures: g.closures
-            }
-        );
+    g.layers.push(
+        Layer {
+            state: st,
+            output: answer,
+            base: parent,
+            child: child,
+            inst: inst,
+            fa: fa,
+            fz: frame.len(),
+            frame_ty: frame_ty,
+            oa: oa,
+            on: on,
+            closures: g.closures
+        }
+    );
     let index = wrapping_sub(g.layers.len(), 1);
     g.body_layers.push(index);
     g.monad = child;
@@ -4971,8 +4978,7 @@ fn handler(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
     g.alias_written = false;
     if label != NONE32 {
         let dt = lref(inout b, dictionary);
-        g
-            .caps
+        g.caps
             .push(Cap { key: label, removed: false, inst: inst, term: dt, depth: g.layers.len() });
     }
     let mut body_statements = empty();
@@ -5065,17 +5071,15 @@ fn closure(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
             if x.label != 0 {
                 let c = g.cap(wrapping_sub(x.label, 1));
                 if !c.removed {
-                    g
-                        .unlabeled
-                        .push(
-                            Cap {
-                                key: x.name,
-                                removed: false,
-                                inst: c.inst,
-                                term: c.term,
-                                depth: c.depth
-                            }
-                        );
+                    g.unlabeled.push(
+                        Cap {
+                            key: x.name,
+                            removed: false,
+                            inst: c.inst,
+                            term: c.term,
+                            depth: c.depth
+                        }
+                    );
                 }
             }
         }
@@ -5088,11 +5092,7 @@ fn closure(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
     }
     let mut arg_names: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut arguments = empty();
-    let pcount = if np < w(fnode.n) {
-        np
-    } else {
-        w(fnode.n)
-    };
+    let pcount = if np < w(fnode.n) { np } else { w(fnode.n) };
     for i in 0..pcount {
         let pname = y.a.xs(e, add(2, i));
         let base = joined(inout b, in "", pname, in "$a");
@@ -5114,14 +5114,13 @@ fn closure(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
         let r = lref(inout b, sym_at(in snapshot, i));
         let none = unit(inout b);
         let_local(inout b, inout ss, lean, r, false, none, true);
-        g
-            .set_cur(
-                match ids.try_get(i) {
-                    Option::Some(x) => x,
-                    Option::None => 0,
-                },
-                lean
-            );
+        g.set_cur(
+            match ids.try_get(i) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            },
+            lean
+        );
     }
     for i in 0..pcount {
         let pname = y.a.xs(e, add(2, i));
@@ -5216,8 +5215,7 @@ pub fn function(inout b: B, inout t: Types, in y: Y, inout g: G, fi: u64) -> T {
             let inst = inst_of_node(in t, inout g, u64_at(in reqs, index));
             if inst.label != NONE32 {
                 let vr = lref(inout b, variable);
-                g
-                    .caps
+                g.caps
                     .push(Cap { key: inst.label, removed: false, inst: inst, term: vr, depth: 0 });
             }
             let mut targs = empty();

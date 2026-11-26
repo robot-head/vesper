@@ -572,8 +572,13 @@ fn clear(inout s: ChunkSeq[u64]) {
 }
 
 // `liveness`: per block, the locals live on entry (nw words each).
-pub fn liveness(in p: Program, inout names: Names, in fx: Fns, in f: Fun, in arms: ChunkSeq[u64])
-    -> ChunkSeq[u64] {
+pub fn liveness(
+    in p: Program,
+    inout names: Names,
+    in fx: Fns,
+    in f: Fun,
+    in arms: ChunkSeq[u64]
+) -> ChunkSeq[u64] {
     let nw = f.nw;
     let nb = f.row.bc;
     let mut live = set_new(wrapping_mul(nb, nw));

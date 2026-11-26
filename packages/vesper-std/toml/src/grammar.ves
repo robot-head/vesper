@@ -508,11 +508,7 @@ fn escaped(in s: Slice[u8], inout p: P) -> u64 {
         push_char(inout p, c);
         return 1;
     }
-    if p.cut {
-        2
-    } else {
-        0
-    }
+    if p.cut { 2 } else { 0 }
 }
 
 fn basic_string(in s: Slice[u8], inout p: P) -> bool {
@@ -1045,22 +1041,11 @@ fn parse_i64(in s: Slice[u8], a: u64, b: u64, radix: u64) -> (u64, u64) {
             None => wrapping_add(limit, 1),
         };
         if lo > limit || wrapping_sub(limit, lo) < dv {
-            return (
-                if neg {
-                    2
-                } else {
-                    1
-                },
-                0
-            );
+            return (if neg { 2 } else { 1 }, 0);
         }
         v = wrapping_add(lo, dv);
     }
-    if neg {
-        (0, wrapping_sub(0, v))
-    } else {
-        (0, v)
-    }
+    if neg { (0, wrapping_sub(0, v)) } else { (0, v) }
 }
 
 fn overflow_message(code: u64) -> Str {
@@ -1250,25 +1235,11 @@ fn float(in s: Slice[u8], inout p: P) -> (bool, u64) {
     }
     if tag(in s, p, "inf") {
         p.pos = wrapping_add(p.pos, 3);
-        return (
-            true,
-            if neg {
-                F_NEG_INF
-            } else {
-                F_INF
-            }
-        );
+        return (true, if neg { F_NEG_INF } else { F_INF });
     }
     if tag(in s, p, "nan") {
         p.pos = wrapping_add(p.pos, 3);
-        return (
-            true,
-            if neg {
-                F_NEG_NAN
-            } else {
-                F_NAN
-            }
-        );
+        return (true, if neg { F_NEG_NAN } else { F_NAN });
     }
     fresh(inout p);
     cx(inout p, L_FLOAT);
@@ -1413,11 +1384,7 @@ fn full_date(in s: Slice[u8], inout p: P) -> bool {
     }
     let leap = (year % 4 == 0) && ((year % 100 != 0) || (year % 400 == 0));
     let max: u64 = if month == 2 {
-        if leap {
-            29
-        } else {
-            28
-        }
+        if leap { 29 } else { 28 }
     } else if month == 4 || month == 6 || month == 9 || month == 11 {
         30
     } else {
@@ -1558,20 +1525,18 @@ fn set_span(inout p: P, id: u32, s: u64, e: u64) {
 // it into container `c`.
 fn add_entry(inout p: P, c: u32, keyed: bool, k: Part, child: u32) -> u32 {
     let e = wrapping_u32(p.ents.len());
-    p
-        .ents
-        .push(
-            Ent {
-                has_key: keyed,
-                koff: k.koff,
-                klen: k.klen,
-                hash: k.hash,
-                ks: k.ks,
-                ke: k.ke,
-                child: child,
-                next: NONE
-            }
-        );
+    p.ents.push(
+        Ent {
+            has_key: keyed,
+            koff: k.koff,
+            klen: k.klen,
+            hash: k.hash,
+            ks: k.ks,
+            ke: k.ke,
+            child: child,
+            next: NONE
+        }
+    );
     link(inout p.nodes, inout p.ents, c, e);
     e
 }
@@ -1683,33 +1648,24 @@ fn value(in s: Slice[u8], inout p: P) -> u32 {
             cx(inout p, wrapping_add(E_CHAR, APOS));
             return NONE;
         }
-        p
-            .pos = wrapping_add(
-                p.pos,
-                if c == 102 {
-                    5
-                } else if c == 116 {
-                    4
-                } else {
-                    3
-                }
-            );
+        p.pos = wrapping_add(
+            p.pos,
+            if c == 102 {
+                5
+            } else if c == 116 {
+                4
+            } else {
+                3
+            }
+        );
         if c == 116 || c == 102 {
             let mut n = empty_node(K_BOOL);
-            n.a = if c == 116 {
-                1
-            } else {
-                0
-            };
+            n.a = if c == 116 { 1 } else { 0 };
             id = new_node(inout p, n);
         } else {
             let mut n = empty_node(K_FLOAT);
             n.a = start;
-            n.b = if c == 105 {
-                F_INF
-            } else {
-                F_NAN
-            };
+            n.b = if c == 105 { F_INF } else { F_NAN };
             id = new_node(inout p, n);
         }
     } else {
@@ -2078,8 +2034,14 @@ fn duplicate_key_err(inout p: P, in s: Slice[u8], in path: ChunkSeq[Part], i: u6
 }
 
 // `ParseState::descend_path(table, path[from..to], dotted)`.
-fn descend(inout p: P, in path: ChunkSeq[Part], table: u32, from: u64, to: u64, dotted: bool)
-    -> u32 {
+fn descend(
+    inout p: P,
+    in path: ChunkSeq[Part],
+    table: u32,
+    from: u64,
+    to: u64,
+    dotted: bool
+) -> u32 {
     let mut t = table;
     for i in from..to {
         let k = part_at(in path, i);
@@ -2284,11 +2246,7 @@ fn table(in s: Slice[u8], inout p: P) -> bool {
         return false;
     }
     let is_array = ahead(in s, p, 1) == OPEN;
-    let width: u64 = if is_array {
-        2
-    } else {
-        1
-    };
+    let width: u64 = if is_array { 2 } else { 1 };
     p.pos = wrapping_add(p.pos, width);
     let base = p.path.len();
     if !key(in s, inout p) {
@@ -2306,14 +2264,7 @@ fn table(in s: Slice[u8], inout p: P) -> bool {
         fresh(inout p);
         cut(inout p);
         cx(inout p, wrapping_add(E_CHAR, DOT));
-        cx(
-            inout p,
-            if is_array {
-                E_CLOSE2
-            } else {
-                E_CLOSE
-            }
-        );
+        cx(inout p, if is_array { E_CLOSE2 } else { E_CLOSE });
         cx(inout p, L_TABLE_HEADER);
         return false;
     }

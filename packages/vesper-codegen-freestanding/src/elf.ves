@@ -154,15 +154,14 @@ pub fn write_executable(
             }
             mem_end = max64(mem_end, add(s.address, s.mem_bytes));
         }
-        placements
-            .push(
-                Placement {
-                    vaddr: seg_base,
-                    offset: off,
-                    file_bytes: sub(file_end, off),
-                    mem_bytes: sub(mem_end, seg_base)
-                }
-            );
+        placements.push(
+            Placement {
+                vaddr: seg_base,
+                offset: off,
+                file_bytes: sub(file_end, off),
+                mem_bytes: sub(mem_end, seg_base)
+            }
+        );
     }
     // String tables and symbols.
     let mut shstrtab: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -203,16 +202,8 @@ pub fn write_executable(
                     in names[s.name_at..add(s.name_at, s.name_len)]
                 );
                 push32(inout symtab, name);
-                let bind: u8 = if s.global {
-                    Stb::Global
-                } else {
-                    Stb::Local
-                };
-                let kind: u8 = if s.function {
-                    Stt::Func
-                } else {
-                    Stt::Notype
-                };
+                let bind: u8 = if s.global { Stb::Global } else { Stb::Local };
+                let kind: u8 = if s.function { Stt::Func } else { Stt::Notype };
                 symtab.push((bind << Stb::Shift) | kind);
                 symtab.push(0);
                 let shndx: u16 = if s.section == Absent::Row {
@@ -248,11 +239,7 @@ pub fn write_executable(
         if s.executable {
             flags = flags | Shf::Execinstr;
         }
-        let kind = if s.nobits {
-            Sht::Nobits
-        } else {
-            Sht::Progbits
-        };
+        let kind = if s.nobits { Sht::Nobits } else { Sht::Progbits };
         let name = match sh_names.try_get(i) {
             Option::Some(v) => widen_u64(v),
             Option::None => 0,
@@ -346,8 +333,10 @@ pub fn write_executable(
         push64(inout ph, p.file_bytes);
         push64(inout ph, p.mem_bytes);
         push64(inout ph, Page::Bytes);
-        let ok2 = out
-            .try_copy_from(add(Ehdr::Bytes, wrapping_mul(k, Phdr::Bytes)), in ph.as_slice());
+        let ok2 = out.try_copy_from(
+            add(Ehdr::Bytes, wrapping_mul(k, Phdr::Bytes)),
+            in ph.as_slice()
+        );
     }
     out
 }

@@ -212,15 +212,7 @@ pub fn param_child_of(in r: RouterCore, i: u64) -> u64 {
 
 // Node `i`'s first terminal for a path with or without the trailing slash.
 pub fn terms_at(in r: RouterCore, i: u64, trailing: bool) -> u64 {
-    node_word(
-        in r,
-        i,
-        if trailing {
-            TERMS_SLASH
-        } else {
-            TERMS
-        }
-    )
+    node_word(in r, i, if trailing { TERMS_SLASH } else { TERMS })
 }
 
 fn node_count(in r: RouterCore) -> u64 {
@@ -262,11 +254,7 @@ fn fresh_node() -> Node {
 }
 
 fn terms_of(n: Node, trailing: bool) -> u64 {
-    if trailing {
-        n.terms_slash
-    } else {
-        n.terms
-    }
+    if trailing { n.terms_slash } else { n.terms }
 }
 
 pub fn router_core_new(limits: RouterLimits) -> RouterCore eff [Fail[RouteFault]] {
@@ -363,8 +351,11 @@ fn set_node(inout r: RouterCore, i: u64, n: Node) {
 
 // `Router::insert`: the route id, or why it was refused. The router is
 // unchanged on every refusal: conflicts are found by a dry run first.
-pub fn router_core_insert(inout r: RouterCore, in method: Slice[u8], in pattern: Slice[u8])
-    -> Result[u64, RouteFault] {
+pub fn router_core_insert(
+    inout r: RouterCore,
+    in method: Slice[u8],
+    in pattern: Slice[u8]
+) -> Result[u64, RouteFault] {
     if method.len() == 0 {
         return Result::Err(RouteFault::InvalidMethod);
     }
@@ -491,16 +482,14 @@ pub fn router_core_insert(inout r: RouterCore, in method: Slice[u8], in pattern:
         r.methods.push(byte(in method, i));
     }
     let t = r.terms.len();
-    r
-        .terms
-        .push(
-            Term {
-                next: terms_of(last, parsed.trailing),
-                method_lo: method_lo,
-                method_hi: r.methods.len(),
-                route: id
-            }
-        );
+    r.terms.push(
+        Term {
+            next: terms_of(last, parsed.trailing),
+            method_lo: method_lo,
+            method_hi: r.methods.len(),
+            route: id
+        }
+    );
     if parsed.trailing {
         last.terms_slash = t;
     } else {

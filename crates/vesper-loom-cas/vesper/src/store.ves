@@ -291,11 +291,7 @@ fn domain_name(tag: u8) -> Str {
 }
 
 fn kind_name(tag: u8) -> Str {
-    if tag == 1 {
-        "blob"
-    } else {
-        "tree"
-    }
+    if tag == 1 { "blob" } else { "tree" }
 }
 
 fn hex_of(in digest: Slice[u8]) -> ChunkSeq[u8] {
@@ -467,8 +463,11 @@ fn ensure_plain_dir(inout r: ChunkSeq[u8], in dir: Slice[u8]) eff [Ffi[CasFs], F
 }
 
 // Create a fresh staging file under `tmp/`; its path goes to `path`.
-fn new_staging(inout r: ChunkSeq[u8], in root: Slice[u8], inout path: ChunkSeq[u8])
-    -> CasFile eff [Ffi[CasFs], Fail[StoreErr]] {
+fn new_staging(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    inout path: ChunkSeq[u8]
+) -> CasFile eff [Ffi[CasFs], Fail[StoreErr]] {
     let mut err: u64 = 0;
     match try_staging(in root, inout path, inout err) {
         Option::Some(f) => f,
@@ -481,8 +480,11 @@ fn new_staging(inout r: ChunkSeq[u8], in root: Slice[u8], inout path: ChunkSeq[u
 
 // `new_staging` without raising: None with the failed path in `path` and
 // the error in `err`.
-fn try_staging(in root: Slice[u8], inout path: ChunkSeq[u8], inout err: u64)
-    -> Option[CasFile] eff [Ffi[CasFs]] {
+fn try_staging(
+    in root: Slice[u8],
+    inout path: ChunkSeq[u8],
+    inout err: u64
+) -> Option[CasFile] eff [Ffi[CasFs]] {
     loop {
         let name = unique_name(in "stage-".as_bytes());
         let p = under2(in root, in "tmp".as_bytes(), in name.as_slice());
@@ -503,8 +505,12 @@ fn try_staging(in root: Slice[u8], inout path: ChunkSeq[u8], inout err: u64)
 }
 
 // `stage_bytes`: a flushed staging file holding `bytes`; its path.
-fn stage_bytes(inout r: ChunkSeq[u8], in root: Slice[u8], durable: bool, in bytes: Slice[u8])
-    -> ChunkSeq[u8] eff [Ffi[CasFs], Fail[StoreErr]] {
+fn stage_bytes(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    durable: bool,
+    in bytes: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Fail[StoreErr]] {
     let mut path: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut f = new_staging(inout r, in root, inout path);
     let mut err: u64 = 0;
@@ -544,8 +550,11 @@ fn finish_id(domain: u8, kind: u8, sink h: Hasher) -> ChunkSeq[u8] eff [Ffi[Blak
 // NotFound, 2 for UnsafeStoreLayout ("object is not a regular file"), 3
 // for an `inspect object` error and 4 for an `open object` error (in
 // `err`).
-fn open_object(in path: Slice[u8], inout why: u8, inout err: u64)
-    -> Option[CasFile] eff [Ffi[CasFs]] {
+fn open_object(
+    in path: Slice[u8],
+    inout why: u8,
+    inout err: u64
+) -> Option[CasFile] eff [Ffi[CasFs]] {
     let mut m = new_meta();
     err = meta_of(in path, inout m);
     if err != 0 {
@@ -592,8 +601,11 @@ fn fail_open(inout r: ChunkSeq[u8], in id: Slice[u8], in path: Slice[u8], why: u
     fail_io(inout r, OP_OPEN_OBJECT, in path, err);
 }
 
-fn open_object_or_fail(inout r: ChunkSeq[u8], in id: Slice[u8], in path: Slice[u8])
-    -> CasFile eff [Ffi[CasFs], Fail[StoreErr]] {
+fn open_object_or_fail(
+    inout r: ChunkSeq[u8],
+    in id: Slice[u8],
+    in path: Slice[u8]
+) -> CasFile eff [Ffi[CasFs], Fail[StoreErr]] {
     let mut why: u8 = 0;
     let mut err: u64 = 0;
     match open_object(in path, inout why, inout err) {
@@ -606,8 +618,12 @@ fn open_object_or_fail(inout r: ChunkSeq[u8], in id: Slice[u8], in path: Slice[u
 }
 
 // `check_existing_object`: 0 Valid, 1 Invalid, 2 Gone.
-fn check_existing(inout r: ChunkSeq[u8], in id: Slice[u8], in path: Slice[u8], size: u64)
-    -> u8 eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+fn check_existing(
+    inout r: ChunkSeq[u8],
+    in id: Slice[u8],
+    in path: Slice[u8],
+    size: u64
+) -> u8 eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
     let mut why: u8 = 0;
     let mut err: u64 = 0;
     let mut f = match open_object(in path, inout why, inout err) {
@@ -1081,8 +1097,11 @@ fn check_children(inout r: ChunkSeq[u8], in root: Slice[u8], domain: u8, in enc:
 // Readback.
 
 // `Store::contains`.
-fn contains(inout r: ChunkSeq[u8], in root: Slice[u8], in id: Slice[u8])
-    -> bool eff [Ffi[CasFs], Fail[StoreErr]] {
+fn contains(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    in id: Slice[u8]
+) -> bool eff [Ffi[CasFs], Fail[StoreErr]] {
     let path = object_path(in root, in id);
     let mut m = new_meta();
     let err = meta_of(in path.as_slice(), inout m);
@@ -1734,8 +1753,10 @@ fn fail_too_deep(inout r: ChunkSeq[u8]) eff [Fail[StoreErr]] {
 }
 
 // `open_input_file`: a regular file, not following symlinks.
-fn open_input(inout r: ChunkSeq[u8], in path: Slice[u8])
-    -> CasFile eff [Ffi[CasFs], Fail[StoreErr]] {
+fn open_input(
+    inout r: ChunkSeq[u8],
+    in path: Slice[u8]
+) -> CasFile eff [Ffi[CasFs], Fail[StoreErr]] {
     let mut m = new_meta();
     let err = meta_of(in path, inout m);
     if err != 0 {
@@ -1915,8 +1936,12 @@ fn fnv(in s: Slice[u8]) -> u64 {
 // A set of the folded names `folded` (each ending at its `fends` word) for
 // the case-collision check: insert name `k`, or answer the position plus
 // one of the earlier name that folds the same.
-fn fold_insert(in folded: Slice[u8], in fends: Slice[u64], inout slots: ChunkSeq[u64], k: u64)
-    -> u64 {
+fn fold_insert(
+    in folded: Slice[u8],
+    in fends: Slice[u64],
+    inout slots: ChunkSeq[u64],
+    k: u64
+) -> u64 {
     let a = start_of(in fends, k);
     let b = word(in fends, k);
     let mask = wrapping_sub(slots.len(), 1);
@@ -2044,11 +2069,7 @@ fn sorted_names(in names: Slice[u8], in ends: Slice[u64], n: u64) -> ChunkSeq[u6
         in_b = !in_b;
         width = wrapping_mul(width, 2);
     }
-    if in_b {
-        b
-    } else {
-        a
-    }
+    if in_b { b } else { a }
 }
 
 // `Store::ingest_dir`: the tree's `Ingested` reply.
@@ -2238,8 +2259,11 @@ fn tree_ok(in enc: Slice[u8]) -> bool {
 
 // `Store::read_tree`: the verified encoding of the tree `id`. A tree
 // object that does not decode raises `InvalidTree` with its bytes.
-fn read_tree_checked(inout r: ChunkSeq[u8], in root: Slice[u8], in id: Slice[u8])
-    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+fn read_tree_checked(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    in id: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
     let mut t: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let failed = handle Fail[StoreErr] in {
         read_verified(inout t, in root, in id, 2);
@@ -2279,8 +2303,13 @@ fn remove_all(in path: Slice[u8]) eff [Ffi[CasFs]] {
 
 // `hash_file`: the id and length of the file at `path` as an object of
 // `domain` and `kind`.
-fn hash_file(inout r: ChunkSeq[u8], domain: u8, kind: u8, in path: Slice[u8], inout size: u64)
-    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+fn hash_file(
+    inout r: ChunkSeq[u8],
+    domain: u8,
+    kind: u8,
+    in path: Slice[u8],
+    inout size: u64
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
     let mut oerr: u64 = 0;
     let mut f = match CasFs::cfs_open_regular(in path, inout oerr) {
         Option::Some(f) => f,
@@ -3354,11 +3383,7 @@ fn grow(
     }
     let mut target: u64 = 0;
     if cap == 0 {
-        target = if max < 4 {
-            max
-        } else {
-            4
-        };
+        target = if max < 4 { max } else { 4 };
     } else {
         target = t_mul(inout r, cap, 2, N_GRAPH_METADATA);
         if target > max {

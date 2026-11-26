@@ -213,13 +213,20 @@ fn move_front_to_perm(
 
 /// Compile a Loom package from `root_dir` to a core Wasm module at `out_wasm`
 /// with no Rust compiler calls. Returns `(ok_flag_or_code, core_len_or_site)`.
-pub fn stage2_compile_dir(in root_dir: Str, in out_wasm: Str, in entry_name: Str)
-    -> (u64, u64) eff [Ffi[StdFs]] {
+pub fn stage2_compile_dir(
+    in root_dir: Str,
+    in out_wasm: Str,
+    in entry_name: Str
+) -> (u64, u64) eff [Ffi[StdFs]] {
     stage2_compile_dir_impl(in root_dir, in out_wasm, in entry_name, false)
 }
 
-fn stage2_compile_dir_impl(in root_dir: Str, in out_wasm: Str, in entry_name: Str, want_syms: bool)
-    -> (u64, u64) eff [Ffi[StdFs]] {
+fn stage2_compile_dir_impl(
+    in root_dir: Str,
+    in out_wasm: Str,
+    in entry_name: Str,
+    want_syms: bool
+) -> (u64, u64) eff [Ffi[StdFs]] {
     let mut stage_log = ChunkSeq::new[u8]();
     stage_log.reserve(4096);
     write_stage(want_syms, in out_wasm, in "load_package_graph", inout stage_log);
@@ -441,14 +448,7 @@ fn stage2_compile_dir_impl(in root_dir: Str, in out_wasm: Str, in entry_name: St
                     };
                     push_hop(inout facts, ta);
                 }
-                push_hop(
-                    inout facts,
-                    if h.has_state {
-                        1
-                    } else {
-                        0
-                    }
-                );
+                push_hop(inout facts, if h.has_state { 1 } else { 0 });
                 let bx = low.a.ex(h.body);
                 let body_fn = nested_sym(inout c2, in "$handler_body_", bx.s0, bx.s1);
                 push_hop(inout facts, widen_u64(body_fn));
@@ -457,11 +457,7 @@ fn stage2_compile_dir_impl(in root_dir: Str, in out_wasm: Str, in entry_name: St
                 let ret_fn = nested_sym(inout c2, in "$handler_clause_", rx.s0, rx.s1);
                 push_hop(inout facts, widen_u64(ret_fn));
                 push_hop(inout facts, rc.pn);
-                let mut r_binds: u64 = if h.has_state {
-                    1
-                } else {
-                    0
-                };
+                let mut r_binds: u64 = if h.has_state { 1 } else { 0 };
                 for pi in 0..rc.pn {
                     let pid = match low.a.xs.try_get(wrapping_add(rc.pa, pi)) {
                         Option::Some(v) => v,
@@ -498,11 +494,7 @@ fn stage2_compile_dir_impl(in root_dir: Str, in out_wasm: Str, in entry_name: St
                     let op_fn = nested_sym(inout c2, in "$handler_clause_", ox.s0, ox.s1);
                     push_hop(inout facts, widen_u64(op_fn));
                     push_hop(inout facts, oc.pn);
-                    let mut o_binds: u64 = if h.has_state {
-                        1
-                    } else {
-                        0
-                    };
+                    let mut o_binds: u64 = if h.has_state { 1 } else { 0 };
                     for pi in 0..oc.pn {
                         let pid = match low.a.xs.try_get(wrapping_add(oc.pa, pi)) {
                             Option::Some(v) => v,
@@ -533,11 +525,7 @@ fn stage2_compile_dir_impl(in root_dir: Str, in out_wasm: Str, in entry_name: St
                     }
                 }
                 let b_ps = prog_fn_params(in prog, in fn_by_sym, body_fn);
-                let b_non = if h.has_state {
-                    1
-                } else {
-                    0
-                };
+                let b_non = if h.has_state { 1 } else { 0 };
                 let b_nfree = if b_ps.len() > b_non {
                     wrapping_sub(b_ps.len(), b_non)
                 } else {

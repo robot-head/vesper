@@ -45,8 +45,10 @@ fn tpp() -> u64 {
 // The layout of a pool for `config` (heads, head_dim, pages, max_sequences,
 // max_tokens_per_sequence, max_bytes, element bytes): writes token_bytes,
 // page_bytes, total bytes and refs to `out`.
-pub fn kv_layout(in config: Slice[u64], inout out: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn kv_layout(
+    in config: Slice[u64],
+    inout out: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let heads = config[0];
     let head_dim = config[1];
     let pages = config[2];
@@ -101,8 +103,11 @@ pub fn kv_layout(in config: Slice[u64], inout out: Slice[u64])
 }
 
 // Whether `(slot, generation)` names an active sequence: 0 or 4.
-fn state_code(in slots: Slice[u64], slot: u64, generation: u64)
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+fn state_code(
+    in slots: Slice[u64],
+    slot: u64,
+    generation: u64
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     if 5 * slot + 5 > slots.len() {
         return 4;
     }
@@ -113,8 +118,13 @@ fn state_code(in slots: Slice[u64], slot: u64, generation: u64)
 }
 
 // Whether lease `(page, page_generation)` is held by `(slot, generation)`.
-fn lease_ok(in pages: Slice[u64], slot: u64, generation: u64, page: u64, page_generation: u64)
-    -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+fn lease_ok(
+    in pages: Slice[u64],
+    slot: u64,
+    generation: u64,
+    page: u64,
+    page_generation: u64
+) -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     if 4 * page + 4 > pages.len() {
         return false;
     }
@@ -158,8 +168,12 @@ fn validate_pages(
 
 // The state check alone (`len`, `page_count`, and the start of the other
 // calls): writes tokens and the leased page count.
-pub fn kv_len(in slots: Slice[u64], slot: u64, generation: u64, inout out: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn kv_len(
+    in slots: Slice[u64],
+    slot: u64,
+    generation: u64,
+    inout out: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let code = state_code(in slots, slot, generation);
     if code != 0 {
         return code;
@@ -170,8 +184,11 @@ pub fn kv_len(in slots: Slice[u64], slot: u64, generation: u64, inout out: Slice
 }
 
 // Writes active sequences and allocated pages.
-pub fn kv_stats(in pages: Slice[u64], in slots: Slice[u64], inout out: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn kv_stats(
+    in pages: Slice[u64],
+    in slots: Slice[u64],
+    inout out: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let mut active: u64 = 0;
     for s in u64_zero()..slots.len() / 5 {
         if slots[5 * s + 1] == 1 {
@@ -191,8 +208,10 @@ pub fn kv_stats(in pages: Slice[u64], in slots: Slice[u64], inout out: Slice[u64
 
 // Starts a sequence in the first inactive slot whose generation can grow:
 // writes its slot and generation.
-pub fn kv_begin(inout slots: Slice[u64], inout out: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn kv_begin(
+    inout slots: Slice[u64],
+    inout out: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let n = slots.len() / 5;
     let mut any_inactive = false;
     for s in u64_zero()..n {
@@ -210,11 +229,7 @@ pub fn kv_begin(inout slots: Slice[u64], inout out: Slice[u64])
             }
         }
     }
-    if any_inactive {
-        6
-    } else {
-        7
-    }
+    if any_inactive { 6 } else { 7 }
 }
 
 fn zero_view(inout view: Slice[u8]) {
@@ -306,11 +321,7 @@ pub fn kv_append(
             p = wrapping_add(p, 1);
         }
         if !found {
-            return if any_free {
-                6
-            } else {
-                5
-            };
+            return if any_free { 6 } else { 5 };
         }
         page_generation = pages[4 * page + 3] + 1;
     } else {
@@ -403,8 +414,12 @@ pub fn kv_read_page(
 }
 
 // Writes the epoch and token count a checkpoint records.
-pub fn kv_checkpoint(in slots: Slice[u64], slot: u64, generation: u64, inout out: Slice[u64])
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+pub fn kv_checkpoint(
+    in slots: Slice[u64],
+    slot: u64,
+    generation: u64,
+    inout out: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let code = state_code(in slots, slot, generation);
     if code != 0 {
         return code;

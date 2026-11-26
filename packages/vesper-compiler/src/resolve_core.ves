@@ -70,20 +70,22 @@ fn c_pass_next(at: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOver
         at
     }
 }
-fn c_param(at: i64, named: bool, depth: i64)
-    -> CParam eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_param(
+    at: i64,
+    named: bool,
+    depth: i64
+) -> CParam eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let start = c_pass_next(at);
     let name = c_token(start);
-    let ty_at = if named {
-        c_take(name.end, 40)
-    } else {
-        start
-    };
+    let ty_at = if named { c_take(name.end, 40) } else { start };
     let ty = c_type(ty_at, depth + 1);
     CParam { name: name, ty: ty.ty, pass: c_pass(at), next: ty.next }
 }
-fn c_params_end(at: i64, named: bool, depth: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_params_end(
+    at: i64,
+    named: bool,
+    depth: i64
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(at) == 33 {
         c_next(at)
     } else {
@@ -95,14 +97,13 @@ fn c_params_end(at: i64, named: bool, depth: i64)
         }
     }
 }
-fn c_signature(at: i64, named: bool, depth: i64)
-    -> CSignature eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_signature(
+    at: i64,
+    named: bool,
+    depth: i64
+) -> CSignature eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let next = c_take(at, 12);
-    let next = if named {
-        c_next(next)
-    } else {
-        next
-    };
+    let next = if named { c_next(next) } else { next };
     let next = if c_kind(next) == 44 {
         c_next(c_next(next))
     } else {
@@ -181,8 +182,11 @@ fn c_decl(at: i64) -> CDecl eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflo
         }
     }
 }
-fn c_find(name: Tok, kind: i64, at: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_find(
+    name: Tok,
+    kind: i64,
+    at: i64
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(at) == 70 {
         -1
     } else {
@@ -194,8 +198,12 @@ fn c_find(name: Tok, kind: i64, at: i64)
         }
     }
 }
-fn c_valid_type(ty: CType, start: i64, end: i64, depth: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_valid_type(
+    ty: CType,
+    start: i64,
+    end: i64,
+    depth: i64
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if depth > 32 {
         c_unsupported(9, start)
     } else if ty.tag == 3 {
@@ -213,8 +221,13 @@ fn c_valid_type(ty: CType, start: i64, end: i64, depth: i64)
         0
     }
 }
-fn c_valid_params(at: i64, named: bool, start: i64, end: i64, depth: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_valid_params(
+    at: i64,
+    named: bool,
+    start: i64,
+    end: i64,
+    depth: i64
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(at) == 33 {
         0
     } else {
@@ -227,8 +240,11 @@ fn c_valid_params(at: i64, named: bool, start: i64, end: i64, depth: i64)
         }
     }
 }
-fn c_same(a: CType, b: CType, depth: i64)
-    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_same(
+    a: CType,
+    b: CType,
+    depth: i64
+) -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if depth > 32 {
         let limit = c_limit(0);
         false
@@ -254,8 +270,13 @@ fn c_same(a: CType, b: CType, depth: i64)
         true
     }
 }
-fn c_same_params(a: i64, b: i64, an: bool, bn: bool, depth: i64)
-    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_same_params(
+    a: i64,
+    b: i64,
+    an: bool,
+    bn: bool,
+    depth: i64
+) -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(a) == 33 || c_kind(b) == 33 {
         c_kind(a) == c_kind(b)
     } else {
@@ -280,8 +301,12 @@ fn c_same_params(a: i64, b: i64, an: bool, bn: bool, depth: i64)
             )
     }
 }
-fn c_expect_type(expected: CType, actual: CType, start: i64, end: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_expect_type(
+    expected: CType,
+    actual: CType,
+    start: i64,
+    end: i64
+) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_compatible(expected, actual, 0) {
         0
     } else {
@@ -322,8 +347,11 @@ fn c_row_subset(a: i64, b: i64) -> bool eff [Fail[CheckError], Fail[Diag], Fail[
     }
 }
 
-fn c_compatible(expected: CType, actual: CType, depth: i64)
-    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_compatible(
+    expected: CType,
+    actual: CType,
+    depth: i64
+) -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if depth > 32 {
         let limit = c_limit(0);
         false
@@ -340,8 +368,13 @@ fn c_compatible(expected: CType, actual: CType, depth: i64)
         c_same(expected, actual, depth)
     }
 }
-fn c_compatible_params(e: i64, a: i64, en: bool, an: bool, depth: i64)
-    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_compatible_params(
+    e: i64,
+    a: i64,
+    en: bool,
+    an: bool,
+    depth: i64
+) -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(e) == 33 || c_kind(a) == 33 {
         c_kind(e) == c_kind(a)
     } else {
@@ -369,8 +402,12 @@ fn c_compatible_params(e: i64, a: i64, en: bool, an: bool, depth: i64)
 
 // Use an existing common supertype only when it represents the join exactly.
 // Incomparable function rows need a synthesized type arena, not a source handle.
-fn c_join_type(a: CType, b: CType, start: i64, end: i64)
-    -> CType eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_join_type(
+    a: CType,
+    b: CType,
+    start: i64,
+    end: i64
+) -> CType eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_same(a, b, 0) {
         a
     } else if a.tag == 4 && b.tag == 4 {
@@ -392,8 +429,10 @@ fn c_join_type(a: CType, b: CType, start: i64, end: i64)
         a
     }
 }
-fn c_type_has_effects(ty: CType, depth: i64)
-    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_type_has_effects(
+    ty: CType,
+    depth: i64
+) -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if depth > 32 {
         let limit = c_limit(ty.at);
         false
@@ -407,8 +446,11 @@ fn c_type_has_effects(ty: CType, depth: i64)
             || c_params_have_effects(sig.params, named, depth + 1)
     }
 }
-fn c_params_have_effects(at: i64, named: bool, depth: i64)
-    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_params_have_effects(
+    at: i64,
+    named: bool,
+    depth: i64
+) -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(at) == 33 {
         false
     } else {
@@ -426,8 +468,10 @@ fn c_params_have_effects(at: i64, named: bool, depth: i64)
 
 // Function payloads have no concrete instance key in the seed. An unlabelled
 // request therefore selects the last Fail capability before compatibility.
-fn c_row_satisfies(row: i64, ty: CType)
-    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_row_satisfies(
+    row: i64,
+    ty: CType
+) -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if row < 0 || c_kind(row) == 37 {
         false
     } else if ty.tag != 4 {
@@ -445,8 +489,11 @@ fn c_row_satisfies(row: i64, ty: CType)
 
 // The seed retains the first arrow's parameter types at each result layer.
 // Subtyping alone cannot choose a different contravariant parameter shape.
-fn c_join_shape(a: CType, b: CType, depth: i64)
-    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_join_shape(
+    a: CType,
+    b: CType,
+    depth: i64
+) -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if depth > 32 {
         let limit = c_limit(a.at);
         false

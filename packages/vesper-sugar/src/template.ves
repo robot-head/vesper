@@ -183,11 +183,7 @@ fn find_cap(in c: Caps, in b: ChunkSeq[u8], s: u64, e: u64) -> u64 {
 // 0 less, 1 equal, 2 greater.
 fn indices_cmp(in c: Caps, at: u64, in ix: ChunkSeq[u64], n: u64) -> u64 {
     let len = w64(in c.w, at);
-    let common = if len < n {
-        len
-    } else {
-        n
-    };
+    let common = if len < n { len } else { n };
     for j in 0..common {
         let a = w64(in c.w, add(inc(at), j));
         let b = w64(in ix, j);
@@ -303,8 +299,17 @@ fn part_at(in x: Tx, p: u64, k: u64) -> u64 {
     w64(in x.parts, add(wrapping_mul(p, PW), k))
 }
 
-fn push_part(inout x: Tx, kind: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64)
-    -> u64 {
+fn push_part(
+    inout x: Tx,
+    kind: u64,
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    e: u64,
+    f: u64,
+    g: u64
+) -> u64 {
     let id = x.parts.len() / PW;
     x.parts.push(kind);
     x.parts.push(a);
@@ -321,11 +326,7 @@ fn push_part(inout x: Tx, kind: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: 
 fn range_less(in b: ChunkSeq[u8], s1: u64, e1: u64, s2: u64, e2: u64) -> bool {
     let n1 = sub(e1, s1);
     let n2 = sub(e2, s2);
-    let common = if n1 < n2 {
-        n1
-    } else {
-        n2
-    };
+    let common = if n1 < n2 { n1 } else { n2 };
     for j in 0..common {
         let a = b8(in b, add(s1, j));
         let c = b8(in b, add(s2, j));
@@ -484,25 +485,20 @@ fn parse(in s: ChunkSeq[u8], in t: Tt, inout x: Tx, start: u64, end: u64, depth:
                 tx_fail(inout x, in "expected * or + after template repetition".as_bytes());
                 return 0;
             }
-            let plus: u64 = if q == k_plus() {
-                1
-            } else {
-                0
-            };
-            ids
-                .push(
-                    push_part(
-                        inout x,
-                        P_REPEAT,
-                        body >> 32,
-                        body & 4294967295,
-                        sep_s,
-                        sep_e,
-                        plus,
-                        first,
-                        count
-                    )
-                );
+            let plus: u64 = if q == k_plus() { 1 } else { 0 };
+            ids.push(
+                push_part(
+                    inout x,
+                    P_REPEAT,
+                    body >> 32,
+                    body & 4294967295,
+                    sep_s,
+                    sep_e,
+                    plus,
+                    first,
+                    count
+                )
+            );
         } else {
             let seq = i < tt_len(in t) && tt_kind(in t, i) == k_dot_dot();
             if seq {
@@ -512,11 +508,7 @@ fn parse(in s: ChunkSeq[u8], in t: Tt, inout x: Tx, start: u64, end: u64, depth:
                 tx_fail(inout x, in "expected a template hole name".as_bytes());
                 return 0;
             }
-            let sq: u64 = if seq {
-                1
-            } else {
-                0
-            };
+            let sq: u64 = if seq { 1 } else { 0 };
             ids.push(push_part(inout x, P_HOLE, tt_s(in t, i), tt_e(in t, i), sq, 0, 0, 0, 0));
         }
         i = inc(i);

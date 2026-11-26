@@ -178,8 +178,12 @@ pub fn frame_ok(in body: Slice[u8], len: u64) -> bool eff [Ffi[Blake3]] {
 // Decodes a checked payload of epoch `epoch` for inputs of `widths`: per
 // input its row count, then its cells (rows and weights). The errors and
 // their order are `InputLog::decode`'s.
-pub fn frame_decode(in payload: Slice[u8], epoch: u64, in widths: Slice[u64], max_rows: u64)
-    -> ChunkSeq[i64] eff [Fail[LogErr]] {
+pub fn frame_decode(
+    in payload: Slice[u8],
+    epoch: u64,
+    in widths: Slice[u64],
+    max_rows: u64
+) -> ChunkSeq[i64] eff [Fail[LogErr]] {
     let n = payload.len();
     if n < 8 {
         Fail::raise(LogErr::Frame);
@@ -228,11 +232,7 @@ pub fn frame_decode(in payload: Slice[u8], epoch: u64, in widths: Slice[u64], ma
                     let x = cell(in out.as_slice(), wrapping_add(prev, k));
                     let y = cell(in out.as_slice(), wrapping_add(at, k));
                     if x != y {
-                        c = if x < y {
-                            -1
-                        } else {
-                            1
-                        };
+                        c = if x < y { -1 } else { 1 };
                         break;
                     }
                 }

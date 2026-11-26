@@ -184,11 +184,7 @@ fn adt_ty_arg(in st: St, t: u32, i: u64) -> u32 {
 }
 
 fn or_unknown(in st: St, t: u32) -> u32 {
-    if t == NONE {
-        st.unknown
-    } else {
-        t
-    }
+    if t == NONE { st.unknown } else { t }
 }
 
 // ----- obligations ------------------------------------------------------------------------
@@ -471,11 +467,7 @@ fn signature(inout st: St, inout cx: Cx, in a: Ast, f: u32) {
 fn info_gen_count(in cx: Cx, r: u32) -> u64 {
     let g = widen_u64(u32_at(in cx.ai_gn, widen_u64(r)));
     let k = widen_u64(u32_at(in cx.ai_kn, widen_u64(r)));
-    if k < g {
-        k
-    } else {
-        g
-    }
+    if k < g { k } else { g }
 }
 
 // All generics of the info (not zipped with kinds), for `adt_subst`.
@@ -552,13 +544,12 @@ fn adt_infos(inout st: St, inout cx: Cx, in a: Ast) {
         let mut kinds = ChunkSeq::new[u8]();
         if krow != NONE {
             for k in 0..widen_u64(u32_at(in cx.ak_n, widen_u64(krow))) {
-                kinds
-                    .push(
-                        u8_at(
-                            in cx.ak_k,
-                            wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(krow))), k)
-                        )
-                    );
+                kinds.push(
+                    u8_at(
+                        in cx.ak_k,
+                        wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(krow))), k)
+                    )
+                );
             }
         }
         set_scope_from(inout cx, in names, in kinds);
@@ -903,10 +894,9 @@ fn variant_fields(
     }
     let s = adt_subst(in st, in cx, r, t);
     for i in 0..widen_u64(u32_at(in cx.vr_fn, widen_u64(v))) {
-        names
-            .push(
-                u32_at(in cx.fr_name, wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(v))), i))
-            );
+        names.push(
+            u32_at(in cx.fr_name, wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(v))), i))
+        );
         let ft = sub_ty_or(
             inout st,
             in s,
@@ -1121,14 +1111,12 @@ fn struct_literal(
     let mut gnames = ChunkSeq::new[u32]();
     let mut gkinds = ChunkSeq::new[u8]();
     for i in 0..gn {
-        gnames
-            .push(
-                u32_at(in cx.ai_syms, wrapping_add(widen_u64(u32_at(in cx.ai_ga, widen_u64(r))), i))
-            );
-        gkinds
-            .push(
-                u8_at(in cx.ai_kinds, wrapping_add(widen_u64(u32_at(in cx.ai_ka, widen_u64(r))), i))
-            );
+        gnames.push(
+            u32_at(in cx.ai_syms, wrapping_add(widen_u64(u32_at(in cx.ai_ga, widen_u64(r))), i))
+        );
+        gkinds.push(
+            u8_at(in cx.ai_kinds, wrapping_add(widen_u64(u32_at(in cx.ai_ka, widen_u64(r))), i))
+        );
     }
     let mut renaming = subst_new();
     let mut fresh = ChunkSeq::new[u32]();
@@ -1285,8 +1273,15 @@ fn function_value(inout st: St, in cx: Cx, n: u32, start: u64, end: u64) -> u32 
 }
 
 // `Body::indirect`.
-fn indirect(inout st: St, inout cx: Cx, in a: Ast, e: u32, f: u32, args: u32, expected: u32)
-    -> u32 {
+fn indirect(
+    inout st: St,
+    inout cx: Cx,
+    in a: Ast,
+    e: u32,
+    f: u32,
+    args: u32,
+    expected: u32
+) -> u32 {
     let x = ty_node(in st, f);
     let argc = list_len(in a, args);
     if x.k == T_FN && widen_u64(x.n) == argc {
@@ -1593,30 +1588,18 @@ fn apply_sig(
     let mut gnames = ChunkSeq::new[u32]();
     let mut gkinds = ChunkSeq::new[u8]();
     for i in 0..widen_u64(u32_at(in cx.sg_gn, widen_u64(row))) {
-        gnames
-            .push(
-                u32_at(
-                    in cx.sg_gsym,
-                    wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i)
-                )
-            );
-        gkinds
-            .push(
-                u8_at(
-                    in cx.sg_gkind,
-                    wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i)
-                )
-            );
+        gnames.push(
+            u32_at(in cx.sg_gsym, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
+        );
+        gkinds.push(
+            u8_at(in cx.sg_gkind, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
+        );
     }
     let mut ptys = ChunkSeq::new[u32]();
     for i in 0..widen_u64(u32_at(in cx.sg_pn, widen_u64(row))) {
-        ptys
-            .push(
-                u32_at(
-                    in cx.sg_pty,
-                    wrapping_add(widen_u64(u32_at(in cx.sg_pa, widen_u64(row))), i)
-                )
-            );
+        ptys.push(
+            u32_at(in cx.sg_pty, wrapping_add(widen_u64(u32_at(in cx.sg_pa, widen_u64(row))), i))
+        );
     }
     let mut obs = ChunkSeq::new[Ob]();
     for i in 0..widen_u64(u32_at(in cx.sg_on, widen_u64(row))) {
@@ -1703,13 +1686,9 @@ fn call(inout st: St, inout cx: Cx, in a: Ast, e: u32, expected: u32) -> u32 {
         let v = info_variant(in st, in cx, r, variant);
         let mut ptys = ChunkSeq::new[u32]();
         for i in 0..widen_u64(u32_at(in cx.vr_fn, widen_u64(v))) {
-            ptys
-                .push(
-                    u32_at(
-                        in cx.fr_ty,
-                        wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(v))), i)
-                    )
-                );
+            ptys.push(
+                u32_at(in cx.fr_ty, wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(v))), i))
+            );
         }
         let gn = info_gen_count(in cx, r);
         let mut gnames = ChunkSeq::new[u32]();
@@ -2317,8 +2296,15 @@ fn result_of(inout st: St, t: u32) -> u32 {
 }
 
 // `Body::pool_op`.
-fn pool_op(inout st: St, inout cx: Cx, in a: Ast, e: u32, op: u32, args: u32, expected: u32)
-    -> u32 {
+fn pool_op(
+    inout st: St,
+    inout cx: Cx,
+    in a: Ast,
+    e: u32,
+    op: u32,
+    args: u32,
+    expected: u32
+) -> u32 {
     let start = widen_u64(expr_at(in a, e).start);
     let end = widen_u64(expr_at(in a, e).end);
     let n = pool_arity(in st, op);
@@ -2870,22 +2856,12 @@ fn check_body(inout st: St, inout cx: Cx, in a: Ast, f: u32, row: u32) {
     cx.sc_name.clear();
     cx.sc_kind.clear();
     for i in 0..widen_u64(u32_at(in cx.sg_gn, widen_u64(row))) {
-        cx
-            .sc_name
-            .push(
-                u32_at(
-                    in cx.sg_gsym,
-                    wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i)
-                )
-            );
-        cx
-            .sc_kind
-            .push(
-                u8_at(
-                    in cx.sg_gkind,
-                    wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i)
-                )
-            );
+        cx.sc_name.push(
+            u32_at(in cx.sg_gsym, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
+        );
+        cx.sc_kind.push(
+            u8_at(in cx.sg_gkind, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
+        );
     }
     let mut pc = list_len(in a, x.params);
     if widen_u64(u32_at(in cx.sg_pn, widen_u64(row))) < pc {

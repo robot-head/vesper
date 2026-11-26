@@ -196,8 +196,13 @@ fn cell_kind(inout t: Types, in sy: Syms, ty: u32) -> u8 {
 
 // Whether `name` is a function of the atomic prelude
 // (`is_prelude_function`).
-pub fn is_prelude_function(in names: Names, in sy: Syms, atomic: bool, workers: bool, name: u32)
-    -> bool {
+pub fn is_prelude_function(
+    in names: Names,
+    in sy: Syms,
+    atomic: bool,
+    workers: bool,
+    name: u32
+) -> bool {
     if workers && name == sy.parallel_for {
         return true;
     }
@@ -407,11 +412,7 @@ fn check_workers(inout o: ChunkSeq[u8], in names: Names, in x: Exprs, in a: Atom
         }
     }
     if shared_inout || body_inout {
-        let at = if shared_inout {
-            data
-        } else {
-            body
-        };
+        let at = if shared_inout { data } else { body };
         open(inout o, "E0824", at.start, at.end);
         put(inout o, "workers of 'parallel_for' share their data only by 'in'");
         help(
@@ -698,8 +699,13 @@ fn item(in items: Items, i: u64) -> ItemRow {
     }
 }
 
-fn item_functions_mention(in names: Names, in t: Types, in items: Items, in sy: Syms, r: ItemRow)
-    -> bool {
+fn item_functions_mention(
+    in names: Names,
+    in t: Types,
+    in items: Items,
+    in sy: Syms,
+    r: ItemRow
+) -> bool {
     for j in 0..widen_u64(r.fn_) {
         let f = items.x.function(wrapping_add(widen_u64(r.fa), j));
         if function_mentions(in names, in t, in items.x, in sy, f) {
@@ -825,8 +831,12 @@ fn read_typed(
     wrapping_u32(n)
 }
 
-pub fn read_ir(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tmap: ChunkSeq[u32])
-    -> Ir {
+pub fn read_ir(
+    inout r: Reader,
+    in b: Slice[u8],
+    in nmap: ChunkSeq[u32],
+    in tmap: ChunkSeq[u32]
+) -> Ir {
     let mut ir = Ir {
         fns: ChunkSeq::new[IrFn](),
         typed: ChunkSeq::new[Typed](),
@@ -871,21 +881,19 @@ pub fn read_ir(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tmap
             }
             ir.insts.push(inst);
         }
-        ir
-            .fns
-            .push(
-                IrFn {
-                    name: name,
-                    la: la,
-                    ln: ln,
-                    pa: pa,
-                    pn: pn,
-                    va: va,
-                    vn: vn,
-                    ia: ia,
-                    in_: wrapping_u32(k)
-                }
-            );
+        ir.fns.push(
+            IrFn {
+                name: name,
+                la: la,
+                ln: ln,
+                pa: pa,
+                pn: pn,
+                va: va,
+                vn: vn,
+                ia: ia,
+                in_: wrapping_u32(k)
+            }
+        );
     }
     ir
 }

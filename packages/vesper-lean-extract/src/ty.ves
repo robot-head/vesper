@@ -123,8 +123,14 @@ pub fn ty_error(in b: B, in t: Types, ty: u32, erase_box: bool, inout name: u32)
 
 // `ty_error` of `typed(ty, monad, erase_box)`: with an ambient monad an
 // effectful arrow is no error.
-pub fn ty_error_m(in b: B, in t: Types, ty: u32, erase_box: bool, monad: bool, inout name: u32)
-    -> u64 {
+pub fn ty_error_m(
+    in b: B,
+    in t: Types,
+    ty: u32,
+    erase_box: bool,
+    monad: bool,
+    inout name: u32
+) -> u64 {
     let n = t.node(ty);
     if n.kind == TyKind::Lit || n.kind == T_INFER_KIND {
         return E_NONE;

@@ -133,11 +133,7 @@ fn tri_opd(off: u64) -> Opd {
 }
 
 fn tri_of(b: bool) -> u8 {
-    if b {
-        T_TRUE
-    } else {
-        T_FALSE
-    }
+    if b { T_TRUE } else { T_FALSE }
 }
 
 fn tri_val(t: u8) -> Val {
@@ -189,17 +185,19 @@ fn opd_tri(in v: V, in prog: Slice[u64], in r: Rel, ti0: u64, o: Opd, i: u64) ->
         return cb(in v.tri, wrapping_add(o.s, i));
     }
     let x = opd_val(in v, in prog, in r, ti0, o, i);
-    if x.t == 0 {
-        T_NULL
-    } else {
-        tri_of(x.a != 0)
-    }
+    if x.t == 0 { T_NULL } else { tri_of(x.a != 0) }
 }
 
 // `cell_bytes` summed over the slots of the bindings in `mask` for tuple
 // `ti` of `t` (none: a NULL-extended tuple, every cell NULL).
-fn tuple_bytes(in v: V, in q: Q, in prog: Slice[u64], in t: ChunkSeq[u64], ti: u64, mask: u64)
-    -> u64 {
+fn tuple_bytes(
+    in v: V,
+    in q: Q,
+    in prog: Slice[u64],
+    in t: ChunkSeq[u64],
+    ti: u64,
+    mask: u64
+) -> u64 {
     let mut bytes: u64 = 0;
     let sv = size_value(in q);
     for s in 0..v.sbind.len() {
@@ -392,11 +390,7 @@ pub fn eval(
         }
         let a = to_tri(inout v, in prog, in r, ti0, n, a1);
         let b = to_tri(inout v, in prog, in r, ti0, n, b1);
-        let or_bit: u64 = if tag == 5 {
-            1
-        } else {
-            0
-        };
+        let or_bit: u64 = if tag == 5 { 1 } else { 0 };
         let off = v.tri.len();
         for i in 0..n {
             let x = widen_u64(cb(in v.tri, wrapping_add(a.s, i)));
@@ -448,16 +442,8 @@ fn fixed_key(t: u64, a: u64) -> u64 {
     if t == 2 {
         a ^ SIGN_BIT
     } else if t == 3 {
-        let b = if a == SIGN_BIT {
-            0
-        } else {
-            a
-        };
-        if (b >> 63) == 1 {
-            ~b
-        } else {
-            b | SIGN_BIT
-        }
+        let b = if a == SIGN_BIT { 0 } else { a };
+        if (b >> 63) == 1 { ~b } else { b | SIGN_BIT }
     } else {
         a
     }
@@ -721,16 +707,8 @@ fn new_acc(inout q: Q, agg: u64, idx: u64, in outty: ChunkSeq[u64]) -> Acc {
 fn add128(a: Acc, x: u64, negative: bool) -> Acc {
     let mut r = a;
     let lo = wrapping_add(a.lo, x);
-    let carry: u64 = if lo < a.lo {
-        1
-    } else {
-        0
-    };
-    let xh = if negative {
-        ALL_ONES
-    } else {
-        0
-    };
+    let carry: u64 = if lo < a.lo { 1 } else { 0 };
+    let xh = if negative { ALL_ONES } else { 0 };
     r.lo = lo;
     r.hi = wrapping_add(wrapping_add(a.hi, xh), carry);
     r
@@ -796,11 +774,7 @@ fn acc_push(inout q: Q, a: Acc, has: bool, x: Val) -> Acc {
             if q.err != 0 {
                 return r;
             }
-            if a.max {
-                o == 2
-            } else {
-                o == 0
-            }
+            if a.max { o == 2 } else { o == 0 }
         };
         if replace {
             r.best = x;
@@ -899,11 +873,7 @@ fn acc_column(
     if a.kind != 3 {
         // COUNT and SUM without branches: masked-out cells add nothing
         // (+0.0 to a float sum that is never -0.0).
-        let signed: u64 = if a.unsigned {
-            0
-        } else {
-            1
-        };
+        let signed: u64 = if a.unsigned { 0 } else { 1 };
         for i in 0..n {
             let addr = cw(in r.t, ti);
             ti = wrapping_add(ti, nb);
@@ -947,11 +917,7 @@ fn acc_column(
                     cnt = inc(cnt);
                 } else if a.kind == 1 {
                     let nlo = wrapping_add(lo, x);
-                    let carry: u64 = if nlo < lo {
-                        1
-                    } else {
-                        0
-                    };
+                    let carry: u64 = if nlo < lo { 1 } else { 0 };
                     let xh: u64 = if tag == 2 && (x >> 63) == 1 {
                         ALL_ONES
                     } else {
@@ -973,11 +939,7 @@ fn acc_column(
                         } else {
                             key_order(fixed_key(tag, x), fixed_key(best.t, best.a))
                         };
-                        if a.max {
-                            o == 2
-                        } else {
-                            o == 0
-                        }
+                        if a.max { o == 2 } else { o == 0 }
                     };
                     if replace {
                         best = y;
@@ -1321,11 +1283,7 @@ fn flatten_inner(in q: Q, n: u64, inout leaves: ChunkSeq[u64], inout on: ChunkSe
 
 // The non-null key word of a value (`KeyPart::Word`; -0.0 is 0.0).
 fn key_word(x: Val) -> u64 {
-    if x.t == 3 && x.a == SIGN_BIT {
-        0
-    } else {
-        x.a
-    }
+    if x.t == 3 && x.a == SIGN_BIT { 0 } else { x.a }
 }
 
 fn mix(h: u64, x: u64) -> u64 {
@@ -1542,11 +1500,7 @@ fn rel(inout v: V, inout q: Q, in ds: D, in prog: Slice[u64], n: u64) -> Rel {
     let x = node(in q, n);
     if x.kind == 0 {
         let src = scan_rel(inout v, in q, in ds, in prog, n);
-        let cols = if x.e > 1 {
-            x.e
-        } else {
-            1
-        };
+        let cols = if x.e > 1 { x.e } else { 1 };
         tick(inout q, wrapping_mul(src.n, cols));
         let mut preds = ChunkSeq::new[u64]();
         let mut l = x.f;
@@ -1786,11 +1740,7 @@ fn join(
             }
             let room = wrapping_sub(batch, cand_l.len());
             let left = wrapping_sub(cur_n, k);
-            let take = if room < left {
-                room
-            } else {
-                left
-            };
+            let take = if room < left { room } else { left };
             for x in 0..take {
                 cand_l.push(i);
                 let j = if nk == 0 {
@@ -1958,11 +1908,7 @@ fn join_order(
                 let e = if connected {
                     let g = groups(in v, in q, in prog, in all, cw(in lbase, c), nc, in kslots);
                     tick(inout q, wrapping_mul(nc, kslots.len()));
-                    let d = if g.rep.len() > 1 {
-                        g.rep.len()
-                    } else {
-                        1
-                    };
+                    let d = if g.rep.len() > 1 { g.rep.len() } else { 1 };
                     est * size / nearest_f64(d)
                 } else {
                     est * size
@@ -2277,11 +2223,7 @@ fn inner_chain(
                 return new_rel(0);
             }
         }
-        let nbase = if step == 0 {
-            1
-        } else {
-            quot(tuples.len(), m)
-        };
+        let nbase = if step == 0 { 1 } else { quot(tuples.len(), m) };
         let members = joined | bit(c);
         let mut next = ChunkSeq::new[u64]();
         let mut cand = ChunkSeq::new[u64]();
@@ -2300,13 +2242,9 @@ fn inner_chain(
                 idx.truncate(0);
                 for kk in 0..nk {
                     let leaf = cw(in kleaf, kk);
-                    idx
-                        .push(
-                            wrapping_add(
-                                cw(in lbase, leaf),
-                                cw(in tuples, wrapping_add(tpos, leaf))
-                            )
-                        );
+                    idx.push(
+                        wrapping_add(cw(in lbase, leaf), cw(in tuples, wrapping_add(tpos, leaf)))
+                    );
                 }
                 let e = lookup(
                     in v,
@@ -2328,11 +2266,7 @@ fn inner_chain(
                     js_start = cw(in g.start, e);
                     js_n = cw(in g.count, e);
                 }
-                let charge = if js_n > 1 {
-                    js_n
-                } else {
-                    1
-                };
+                let charge = if js_n > 1 { js_n } else { 1 };
                 tick(inout q, charge);
                 produced(inout v, inout q, js_n);
             }
@@ -2450,11 +2384,7 @@ fn project(
     inout accs: ChunkSeq[Acc]
 ) {
     let mut out_bytes: u64 = 0;
-    let np = if projs.len() > 1 {
-        projs.len()
-    } else {
-        1
-    };
+    let np = if projs.len() > 1 { projs.len() } else { 1 };
     let mut start: u64 = 0;
     loop {
         if start >= r.n || q.err != 0 {

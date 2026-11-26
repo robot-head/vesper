@@ -126,8 +126,14 @@ fn at_of(v: u64) -> u64 {
 
 // `close_ticks`: the end of the run of `count` backticks closing the one
 // at line `line`, byte `at`; NOT_FOUND when unclosed.
-fn close_ticks(inout k: Link, in b: Slice[u8], line: u64, at: u64, count: u64, inout out: u64)
-    -> bool {
+fn close_ticks(
+    inout k: Link,
+    in b: Slice[u8],
+    line: u64,
+    at: u64,
+    count: u64,
+    inout out: u64
+) -> bool {
     out = NOT_FOUND;
     let n = k.l_start.len();
     for i in line..n {
@@ -288,11 +294,7 @@ fn next_markdown(inout k: Link, in b: Slice[u8], line: u64, start: u64, inout ou
     }
     for i in line..last {
         let len = line_len(in k, i);
-        let mut at = if i == line {
-            start
-        } else {
-            0
-        };
+        let mut at = if i == line { start } else { 0 };
         loop {
             if at >= len {
                 break;
@@ -333,11 +335,7 @@ fn continued_title(inout k: Link, in b: Slice[u8], line: u64, inout out: u64) ->
     if open != 39 && open != 34 && open != 40 {
         return true;
     }
-    let close = if open == 40 {
-        41
-    } else {
-        open
-    };
+    let close = if open == 40 { 41 } else { open };
     let mut at = wrapping_add(ind, 1);
     let mut depth: u64 = 1;
     for i in line..n {
@@ -402,11 +400,7 @@ fn occurrence(inout k: Link, in b: Slice[u8], s: u64, e: u64, span_s: u64, span_
         if !check_path(inout k, in b, ps, pe) {
             return false;
         }
-        kind = if has_self_segment(in b, ps, pe) {
-            2
-        } else {
-            1
-        };
+        kind = if has_self_segment(in b, ps, pe) { 2 } else { 1 };
     } else {
         let mut bracket = NOT_FOUND;
         for i in ps..pe {
@@ -588,11 +582,7 @@ fn group(inout k: Link, in b: Slice[u8]) -> bool {
                     && lb(in k, in b, line, wrapping_add(at, 1)) == 91
             ) {
             let image = c == 33;
-            let start = if image {
-                wrapping_add(at, 1)
-            } else {
-                at
-            };
+            let start = if image { wrapping_add(at, 1) } else { at };
             let mut close: u64 = 0;
             if !balanced_end(inout k, in b, line, start, 91, 93, inout close) {
                 return false;

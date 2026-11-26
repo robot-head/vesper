@@ -464,9 +464,9 @@ fn def(inout c: Cur, in b: Slice[u8], inout w: Wit, kind: u8) {
     let n0 = name(inout w, in b, s, e);
     let d = w.defs.len();
     let t = intern(inout w, T_NAMED, d, 0);
-    w
-        .defs
-        .push(Def { kind: kind, n0: n0, nn: wrapping_sub(e, s), f0: f0, fnum: items.len(), ty: t });
+    w.defs.push(
+        Def { kind: kind, n0: n0, nn: wrapping_sub(e, s), f0: f0, fnum: items.len(), ty: t }
+    );
 }
 
 // `name: func(%p: ty, ...) [-> ty];` after its name `b[s..e]`.

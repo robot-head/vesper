@@ -125,8 +125,13 @@ fn word_type(in t: Types, in wd: World, ty: u32) -> bool {
 
 // The word count of `native_aggregates::enum_shape(ty)`: the tag word plus
 // one per field of every variant, or NONE64 when `ty` has no shape.
-fn enum_words(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty0: u32)
-    -> u64 {
+fn enum_words(
+    inout ls: Layouts,
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    ty0: u32
+) -> u64 {
     let ty = default_type(inout t, ty0);
     if wd.box_active && mentions_box(in t, in wd, ty, 0) {
         return NONE64;
@@ -205,11 +210,7 @@ impl Caps {
         let an = wrapping_sub(at64(in self.ke, i), a);
         let b = at64(in self.ka, j);
         let bn = wrapping_sub(at64(in self.ke, j), b);
-        let n = if an < bn {
-            an
-        } else {
-            bn
-        };
+        let n = if an < bn { an } else { bn };
         for k in 0..n {
             let x = at8(in self.text, add(a, k));
             let y = at8(in self.text, add(b, k));
@@ -501,8 +502,12 @@ pub fn frame_plan(
 
 // `compile_exports`' check that every export is a standalone instance;
 // false with the message in `err` for the first that is not.
-fn all_roots_found(in names: Names, in found: Found, in roots: ChunkSeq[u32], inout err: Errs)
-    -> bool {
+fn all_roots_found(
+    in names: Names,
+    in found: Found,
+    in roots: ChunkSeq[u32],
+    inout err: Errs
+) -> bool {
     for i in 0..roots.len() {
         let root = u32_at(in roots, i);
         let mut seen = false;
