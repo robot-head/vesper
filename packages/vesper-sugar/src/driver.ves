@@ -3,8 +3,9 @@
 // without imports, `read_definition`, the registry, `ExpandedSugar::apply`
 // and `original_span`) and `hygiene::protect`.
 //
-// Each round parses the expanded source in the surface profile (@vesper/front
-// `parse_surface_tokens` under sugar expansion's limits), reads new sugar
+// Each round parses the expanded source in the surface profile with its
+// expression macro check (@vesper/front `parse_macro_surface_tokens` under
+// sugar expansion's limits), reads new sugar
 // declarations, and expands every outermost sugar use with the rule matcher
 // (matcher.ves), the template (template.ves, flow.ves), pattern hygiene and
 // scope captures (hygiene.ves, scope.ves). Edits keep a map from expanded
@@ -17,7 +18,7 @@
 // places and copies in their own row pools.
 
 use @vesper/ast::{Ast, ConfNode, ImplNode, ItemNode, expr_at, list_at, list_len, none, pat_at};
-use @vesper/ast::lower::{lower_source, lower_surface_source_limits};
+use @vesper/ast::lower::{lower_source, lower_surface_parsed};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper/front::{P};
 use @vesper/front::lex::{
@@ -26,6 +27,7 @@ use @vesper/front::lex::{
 };
 use @vesper/front::diag::{diags_new};
 use @vesper/front::parse::{hard_depth, parse_surface_tokens};
+use @vesper/front::source_macro::{macro_limits_default, parse_macro_surface_tokens};
 use @vesper/front::kinds::{
     k_amp, k_amp_eq, k_and, k_arrow, k_caret, k_colon, k_dot, k_eff, k_eq_eq, k_ge, k_gt, k_l_brace,
     k_le, k_linear, k_lower, k_lt, k_minus, k_minus_eq, k_ne, k_or, k_percent, k_percent_eq, k_pipe,
@@ -47,6 +49,10 @@ const MAX_STEPS: u64 = 8192;
 // `lexer::HARD_SOURCE_BYTES` and `HARD_TOKENS`.
 const MAX_BYTES: u64 = 8388608;
 const HARD_TOKENS: u64 = 262144;
+// `surface_macro_limits`: those limits capped by `macro_source::Limits::HARD`
+// (the depth stays the default 48, under `HARD_PARSE_DEPTH`).
+const MACRO_BYTES: u64 = 1048576;
+const MACRO_TOKENS: u64 = 65536;
 const WORK: u64 = 67108864;
 
 // Node kinds of the surface CST.
@@ -74,6 +80,10 @@ fn cat_seq(inout out: ChunkSeq[u8], in piece: ChunkSeq[u8]) {
 }
 
 fn cat_range(inout out: ChunkSeq[u8], in bytes: ChunkSeq[u8], start: u64, end: u64) {
+    if start <= end && end <= bytes.len() {
+        out.extend(in bytes[start..end]);
+        return;
+    }
     for j in start..end {
         out.push(b8(in bytes, j));
     }
@@ -280,17 +290,15 @@ fn build_cst(in surface: P) -> Cst {
                 wrapping_u32(w64(in open, sub(open.len(), 1)))
             };
             open.push(cst.nodes.len());
-            cst.nodes.push(
-                Node {
-                    kind: wrapping_u8(sub(event, 2147483648)),
-                    parent: parent,
-                    start: wrapping_u32(offset),
-                    end: wrapping_u32(offset),
-                    lo: wrapping_u32(cst.leaves.len()),
-                    hi: wrapping_u32(cst.leaves.len()),
-                    after: 0
-                }
-            );
+            cst.nodes.push(Node {
+                kind: wrapping_u8(sub(event, 2147483648)),
+                parent: parent,
+                start: wrapping_u32(offset),
+                end: wrapping_u32(offset),
+                lo: wrapping_u32(cst.leaves.len()),
+                hi: wrapping_u32(cst.leaves.len()),
+                after: 0
+            });
         } else {
             offset = w64(in cst.token_ends, event);
             cst.leaves.push(wrapping_u32(event));
@@ -468,7 +476,11 @@ struct Parsed {
     // Diagnostics as rows (code, start, end, message first, message length).
     diags: ChunkSeq[u64],
     diag_text: ChunkSeq[u8],
-    refused: Dg
+    refused: Dg,
+    // The surface parse itself, so the caller hygiene of the last round
+    // lowers it without parsing the source again (Rust's `protect` takes
+    // that round's AST).
+    surface: P
 }
 
 fn parse(in src: ChunkSeq[u8], include_tests: bool) -> Parsed {
@@ -497,16 +509,23 @@ fn parse(in src: ChunkSeq[u8], include_tests: bool) -> Parsed {
             },
             diags: ChunkSeq::new[u64](),
             diag_text: ChunkSeq::new[u8](),
-            refused: dg_new(in "E0003", in message, 0, 0)
+            refused: dg_new(in "E0003", in message, 0, 0),
+            surface: empty_surface()
         };
     }
-    let surface = parse_surface_tokens(
+    // `parse_expansion_scopes`: the surface profile, then the expression
+    // macro check under `surface_macro_limits` of sugar's limits.
+    let mut lim = macro_limits_default();
+    lim.max_source_bytes = MACRO_BYTES;
+    lim.max_tokens = MACRO_TOKENS;
+    let surface = parse_macro_surface_tokens(
         in src.as_slice(),
         lexed,
         diags,
         max_diagnostics(),
         hard_depth(),
-        include_tests
+        include_tests,
+        lim
     );
     let mut rows = ChunkSeq::new[u64]();
     let mut text = ChunkSeq::new[u8]();
@@ -525,7 +544,22 @@ fn parse(in src: ChunkSeq[u8], include_tests: bool) -> Parsed {
         rows.push(sub(msg_end, msg_start));
         cat_range(inout text, in surface.d.text, msg_start, msg_end);
     }
-    Parsed { cst: build_cst(in surface), diags: rows, diag_text: text, refused: dg_ok() }
+    let cst = build_cst(in surface);
+    Parsed { cst: cst, diags: rows, diag_text: text, refused: dg_ok(), surface: surface }
+}
+
+// The parse of an empty source, for a refused `Parsed`.
+fn empty_surface() -> P {
+    let empty = ChunkSeq::new[u8]();
+    let mut diags = diags_new();
+    let lexed = lex_sugar_with_limits(
+        in empty.as_slice(),
+        inout diags,
+        MAX_BYTES,
+        HARD_TOKENS,
+        max_diagnostics()
+    );
+    parse_surface_tokens(in empty.as_slice(), lexed, diags, max_diagnostics(), hard_depth(), false)
 }
 
 // ---------------------------------------------------------------- definitions
@@ -1468,6 +1502,11 @@ fn collect_used(in src: ChunkSeq[u8], inout used: ChunkSeq[u64]) {
         if add(at, base_len) > n {
             break;
         }
+        // Every match starts with `__`.
+        if b8(in src, at) != 95 || b8(in src, inc(at)) != 95 {
+            at = inc(at);
+            continue;
+        }
         let mut hit = true;
         for j in 0..base_len {
             let byte = match base.try_get(j) {
@@ -1825,7 +1864,7 @@ pub fn expand(in source: ChunkSeq[u8], in imports: Imports, include_tests: bool)
         let cst = parsed.cst;
         if !has_calls && decls.len() == 0 {
             if changed {
-                let protected = protect(inout state, include_tests, inout work);
+                let protected = protect(inout state, parsed.surface, include_tests, inout work);
                 if protected.failed {
                     return ex_err(protected, state, registry);
                 }
@@ -2100,14 +2139,12 @@ fn expand_call(
             if (df(in registry, def, 6) == 1 || df(in registry, inner, 6) == 1)
                 && !same_symbol
                 && operator_level(in registry, def) == operator_level(in registry, inner) {
-                return step_err(
-                    dg_str(
-                        in "E0140",
-                        in "parenthesize mixed non-associative sugar operators",
-                        orig_start,
-                        orig_end
-                    )
-                );
+                return step_err(dg_str(
+                    in "E0140",
+                    in "parenthesize mixed non-associative sugar operators",
+                    orig_start,
+                    orig_end
+                ));
             }
         }
     }
@@ -2219,9 +2256,11 @@ fn expand_call(
                 postpone = true;
             } else if !from_tail {
                 if start < 6 {
-                    return step_err(
-                        diag(in "scope has no enclosing function", orig_start, orig_end)
-                    );
+                    return step_err(diag(
+                        in "scope has no enclosing function",
+                        orig_start,
+                        orig_end
+                    ));
                 }
                 let spent = charge(inout work, end, orig_start, orig_end);
                 if spent.failed {
@@ -2519,7 +2558,7 @@ fn append_cst(inout forest: Cst, in cst: Cst) -> u64 {
 // ---------------------------------------------------------------- protect
 
 // `hygiene::protect(state, mark, work, ast)`.
-fn protect(inout state: St, include_tests: bool, inout work: u64) -> Dg {
+fn protect(inout state: St, sink surface: P, include_tests: bool, inout work: u64) -> Dg {
     if nregs(in state) == 0 {
         return dg_ok();
     }
@@ -2558,12 +2597,7 @@ fn protect(inout state: St, include_tests: bool, inout work: u64) -> Dg {
         Option::Some(decoded) => decoded,
         Option::None => String::new(),
     };
-    let lowered = lower_surface_source_limits(
-        in text.as_str(),
-        MAX_BYTES,
-        HARD_TOKENS,
-        include_tests
-    );
+    let lowered = lower_surface_parsed(in text.as_str(), surface, include_tests);
     let ast = lowered.ast;
     let mut names = Names {
         bindings: ChunkSeq::new[u64](),

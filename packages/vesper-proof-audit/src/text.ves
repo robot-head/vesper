@@ -2,14 +2,22 @@
 // carry: `io::Error`, `ExitStatus` and `FromUtf8Error` as `Display`
 // writes them, and the UTF-8 handling of `String::from_utf8`,
 // `from_utf8_lossy` and `str::trim`.
-use @vesper-std/fs::IoError;
+use @vesper-std/fs::{IoError, program_not_found};
 use @vesper-std/process::ExitStatus;
 use @vesper-std/env::{os, os_linux as linux_os, os_windows as windows_os};
-use self::strs::{
-    CARRIAGE_RETURN, CLOSE_PAREN, DIGIT_ZERO, HEX_LETTER_BASE, HYPHEN, NEWLINE, SPACE, TAB, byte,
-    put_str
+use @vesper-std/bytes::ascii::{
+    CARRIAGE_RETURN, CLOSE_PAREN, DIGIT_ZERO, HYPHEN, NEWLINE, SPACE, TAB
 };
+use self::strs::{HEX_LETTER_BASE, byte, put_str};
 use self::json::put_u64;
+
+// U+FFFD REPLACEMENT CHARACTER in UTF-8.
+const REPLACEMENT_FIRST: u8 = 239;
+const REPLACEMENT_SECOND: u8 = 191;
+const REPLACEMENT_THIRD: u8 = 189;
+// A UTF-8 continuation byte is `0b10xx_xxxx`: these top two bits, `0b10`.
+const UTF8_CONTINUATION_MASK: u8 = 192;
+const UTF8_CONTINUATION: u8 = 128;
 
 fn os_linux() -> bool {
     os() == linux_os()
@@ -85,6 +93,10 @@ fn os_text(code: u32) -> Str {
 // The description of an error kind with no OS code (`io::ErrorKind`'s
 // `Display`), as @vesper-std/fs numbers the kinds.
 fn kind_text(kind: u32) -> Str {
+    // A Windows program that `CreateProcessW` would not find.
+    if kind == program_not_found() {
+        return "program not found";
+    }
     match kind {
         1 => "entity not found",
         2 => "permission denied",
@@ -328,9 +340,9 @@ pub fn lossy(in b: Slice[u8]) -> ChunkSeq[u8] {
         if at >= b.len() {
             break;
         }
-        out.push(239);
-        out.push(191);
-        out.push(189);
+        out.push(REPLACEMENT_FIRST);
+        out.push(REPLACEMENT_SECOND);
+        out.push(REPLACEMENT_THIRD);
         if len == 0 {
             break;
         }
@@ -348,7 +360,7 @@ pub fn take_chars(in s: Slice[u8], n: u64) -> ChunkSeq[u8] {
             break;
         }
         let c = byte(in s, i);
-        if (c & 192) != 128 {
+        if (c & UTF8_CONTINUATION_MASK) != UTF8_CONTINUATION {
             if seen == n {
                 break;
             }

@@ -597,10 +597,7 @@ fn rpo(in f: Func, in g: Graph, root: u32, in region: ChunkSeq[u32]) -> ChunkSeq
         }
         let top = wrapping_sub(n, 1);
         let b = u32_at(in sb, top);
-        let k = match sk.try_get(top) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let k = sk.try_get(top).unwrap_or(0);
         if k >= g.nsuccs(b) {
             post.push(b);
             sb.truncate(top);

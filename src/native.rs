@@ -1095,9 +1095,8 @@ fn compile_entry<M: Module>(
         // the world, never on the observer or instrument hooks, so a
         // verified build stays byte-identical to the plain one and the
         // verifiers check the code that ships.
-        inlined_into =
-            crate::ir_swap::inline(world, &mut program, &crate::ir_inline::Budget::default())
-                .inlined_into;
+        let budget = crate::ir_inline::Budget::for_program(world, &program);
+        inlined_into = crate::ir_swap::inline(world, &mut program, &budget).inlined_into;
     } else {
         crate::ir_opt::fip_reuse_pass(world, &mut program)?;
     }

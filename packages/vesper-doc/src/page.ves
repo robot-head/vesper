@@ -43,10 +43,7 @@ fn put(inout o: ChunkSeq[u8], in s: Str) {
 }
 
 fn byte(in b: Slice[u8], i: u64) -> u8 {
-    match b.try_get(i) {
-        Option::Some(c) => c,
-        Option::None => 0,
-    }
+    b.try_get(i).unwrap_or(0)
 }
 
 // `escape_html` of one byte.
@@ -241,10 +238,7 @@ fn overview(inout o: ChunkSeq[u8], in json: Slice[u8]) {
         return;
     }
     // `value.get("document").unwrap_or(&value)`.
-    let top = match field(in doc, in json, 0, in "document") {
-        Option::Some(v) => v,
-        Option::None => 0,
-    };
+    let top = field(in doc, in json, 0, in "document").unwrap_or(0);
     section(inout o, in doc, in json, top, in "functions", in "Functions");
     section(inout o, in doc, in json, top, in "types", in "Types");
     section(inout o, in doc, in json, top, in "effects", in "Effects");

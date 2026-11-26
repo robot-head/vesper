@@ -200,15 +200,13 @@ impl Builder {
             self.vals.push(val_at(in results, j));
         }
         let i = self.types.len();
-        self.types.push(
-            TypeDef {
-                kind: TD_FUNC,
-                p0: first_val,
-                pn: params.len(),
-                result_count: results.len(),
-                func: 0
-            }
-        );
+        self.types.push(TypeDef {
+            kind: TD_FUNC,
+            p0: first_val,
+            pn: params.len(),
+            result_count: results.len(),
+            func: 0
+        });
         wrapping_u32(i)
     }
 
@@ -284,15 +282,13 @@ impl Builder {
         let ty = self.func_type(in params, in results);
         let module_at = self.put_text(in module);
         let name_at = self.put_text(in name);
-        self.imports.push(
-            ImportRow {
-                module_start: module_at,
-                module_len: module.len(),
-                name_start: name_at,
-                name_len: name.len(),
-                ty: ty
-            }
-        );
+        self.imports.push(ImportRow {
+            module_start: module_at,
+            module_len: module.len(),
+            name_start: name_at,
+            name_len: name.len(),
+            ty: ty
+        });
         wrapping_u32(wrapping_sub(self.imports.len(), 1))
     }
 
@@ -373,9 +369,12 @@ impl Builder {
 
     pub fn export_func(inout self, in name: Slice[u8], func: u32) {
         let name_at = self.put_text(in name);
-        self.exports.push(
-            ExportRow { name_start: name_at, name_len: name.len(), kind: EXPORT_FUNC, index: func }
-        );
+        self.exports.push(ExportRow {
+            name_start: name_at,
+            name_len: name.len(),
+            kind: EXPORT_FUNC,
+            index: func
+        });
     }
 
     // The module's bytes (`Builder::finish`).

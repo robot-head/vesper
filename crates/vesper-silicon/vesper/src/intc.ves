@@ -480,9 +480,13 @@ pub fn m_add_aplic(
             Option::None => (),
         }
     }
-    f.dom.push(
-        DomTopo { parent: none(), child_off: 0, nchild: 0, idc_off: idc_off, nidc: idcs.len() }
-    );
+    f.dom.push(DomTopo {
+        parent: none(),
+        child_off: 0,
+        nchild: 0,
+        idc_off: idc_off,
+        nidc: idcs.len()
+    });
 }
 
 // The domain's parent (none() for a root, or a parent not modelled) and its

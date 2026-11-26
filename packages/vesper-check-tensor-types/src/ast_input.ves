@@ -20,244 +20,204 @@ pub fn read_ast(in names: Str, inout reader: Reader, in bytes: Slice[u8]) -> Ast
     }
     let n_lits = reader.word(in bytes);
     for _ in 0..n_lits {
-        let _ = ast.lits.alloc(
-            Lit {
-                kind: wrapping_u8(reader.word(in bytes)),
-                neg: reader.word(in bytes) != 0,
-                bits: reader.word(in bytes),
-                hi: reader.word(in bytes)
-            }
-        );
+        let _ = ast.lits.alloc(Lit {
+            kind: wrapping_u8(reader.word(in bytes)),
+            neg: reader.word(in bytes) != 0,
+            bits: reader.word(in bytes),
+            hi: reader.word(in bytes)
+        });
     }
     let n_exprs = reader.word(in bytes);
     for _ in 0..n_exprs {
-        let _ = ast.exprs.alloc(
-            ExprNode {
-                kind: wrapping_u8(reader.word(in bytes)),
-                start: wrapping_u32(reader.word(in bytes)),
-                end: wrapping_u32(reader.word(in bytes)),
-                a: wrapping_u32(reader.word(in bytes)),
-                b: wrapping_u32(reader.word(in bytes)),
-                c: wrapping_u32(reader.word(in bytes)),
-                d: wrapping_u32(reader.word(in bytes)),
-                e: wrapping_u32(reader.word(in bytes))
-            }
-        );
+        let _ = ast.exprs.alloc(ExprNode {
+            kind: wrapping_u8(reader.word(in bytes)),
+            start: wrapping_u32(reader.word(in bytes)),
+            end: wrapping_u32(reader.word(in bytes)),
+            a: wrapping_u32(reader.word(in bytes)),
+            b: wrapping_u32(reader.word(in bytes)),
+            c: wrapping_u32(reader.word(in bytes)),
+            d: wrapping_u32(reader.word(in bytes)),
+            e: wrapping_u32(reader.word(in bytes))
+        });
     }
     let n_pats = reader.word(in bytes);
     for _ in 0..n_pats {
-        let _ = ast.pats.alloc(
-            PatNode {
-                kind: wrapping_u8(reader.word(in bytes)),
-                start: wrapping_u32(reader.word(in bytes)),
-                end: wrapping_u32(reader.word(in bytes)),
-                a: wrapping_u32(reader.word(in bytes)),
-                b: wrapping_u32(reader.word(in bytes)),
-                c: wrapping_u32(reader.word(in bytes))
-            }
-        );
+        let _ = ast.pats.alloc(PatNode {
+            kind: wrapping_u8(reader.word(in bytes)),
+            start: wrapping_u32(reader.word(in bytes)),
+            end: wrapping_u32(reader.word(in bytes)),
+            a: wrapping_u32(reader.word(in bytes)),
+            b: wrapping_u32(reader.word(in bytes)),
+            c: wrapping_u32(reader.word(in bytes))
+        });
     }
     let n_types = reader.word(in bytes);
     for _ in 0..n_types {
-        let _ = ast.types.alloc(
-            TypeNode {
-                kind: wrapping_u8(reader.word(in bytes)),
-                a: wrapping_u32(reader.word(in bytes)),
-                b: wrapping_u32(reader.word(in bytes)),
-                c: wrapping_u32(reader.word(in bytes)),
-                d: wrapping_u32(reader.word(in bytes))
-            }
-        );
+        let _ = ast.types.alloc(TypeNode {
+            kind: wrapping_u8(reader.word(in bytes)),
+            a: wrapping_u32(reader.word(in bytes)),
+            b: wrapping_u32(reader.word(in bytes)),
+            c: wrapping_u32(reader.word(in bytes)),
+            d: wrapping_u32(reader.word(in bytes))
+        });
     }
     let n_stmts = reader.word(in bytes);
     for _ in 0..n_stmts {
-        let _ = ast.stmts.alloc(
-            StmtNode {
-                kind: wrapping_u8(reader.word(in bytes)),
-                pat: wrapping_u32(reader.word(in bytes)),
-                ty: wrapping_u32(reader.word(in bytes)),
-                value: wrapping_u32(reader.word(in bytes)),
-                mutable: reader.word(in bytes) != 0
-            }
-        );
+        let _ = ast.stmts.alloc(StmtNode {
+            kind: wrapping_u8(reader.word(in bytes)),
+            pat: wrapping_u32(reader.word(in bytes)),
+            ty: wrapping_u32(reader.word(in bytes)),
+            value: wrapping_u32(reader.word(in bytes)),
+            mutable: reader.word(in bytes) != 0
+        });
     }
     let n_args = reader.word(in bytes);
     for _ in 0..n_args {
-        let _ = ast.args.alloc(
-            ArgNode {
-                pass: wrapping_u8(reader.word(in bytes)),
-                explicit: reader.word(in bytes) != 0,
-                expr: wrapping_u32(reader.word(in bytes))
-            }
-        );
+        let _ = ast.args.alloc(ArgNode {
+            pass: wrapping_u8(reader.word(in bytes)),
+            explicit: reader.word(in bytes) != 0,
+            expr: wrapping_u32(reader.word(in bytes))
+        });
     }
     let n_clauses = reader.word(in bytes);
     for _ in 0..n_clauses {
-        let _ = ast.clauses.alloc(
-            ClauseNode {
-                name: wrapping_u32(reader.word(in bytes)),
-                pats: wrapping_u32(reader.word(in bytes)),
-                body: wrapping_u32(reader.word(in bytes))
-            }
-        );
+        let _ = ast.clauses.alloc(ClauseNode {
+            name: wrapping_u32(reader.word(in bytes)),
+            pats: wrapping_u32(reader.word(in bytes)),
+            body: wrapping_u32(reader.word(in bytes))
+        });
     }
     let n_params = reader.word(in bytes);
     for _ in 0..n_params {
-        let _ = ast.params.alloc(
-            ParamNode {
-                name: wrapping_u32(reader.word(in bytes)),
-                pass: wrapping_u8(reader.word(in bytes)),
-                projections: wrapping_u32(reader.word(in bytes)),
-                ty: wrapping_u32(reader.word(in bytes)),
-                start: wrapping_u32(reader.word(in bytes)),
-                end: wrapping_u32(reader.word(in bytes))
-            }
-        );
+        let _ = ast.params.alloc(ParamNode {
+            name: wrapping_u32(reader.word(in bytes)),
+            pass: wrapping_u8(reader.word(in bytes)),
+            projections: wrapping_u32(reader.word(in bytes)),
+            ty: wrapping_u32(reader.word(in bytes)),
+            start: wrapping_u32(reader.word(in bytes)),
+            end: wrapping_u32(reader.word(in bytes))
+        });
     }
     let n_effects = reader.word(in bytes);
     for _ in 0..n_effects {
-        let _ = ast.effects.alloc(
-            EffectsNode {
-                instances: wrapping_u32(reader.word(in bytes)),
-                tail: wrapping_u32(reader.word(in bytes))
-            }
-        );
+        let _ = ast.effects.alloc(EffectsNode {
+            instances: wrapping_u32(reader.word(in bytes)),
+            tail: wrapping_u32(reader.word(in bytes))
+        });
     }
     let n_effect_nodes = reader.word(in bytes);
     for _ in 0..n_effect_nodes {
-        let _ = ast.effect_nodes.alloc(
-            EffectNode {
-                label: wrapping_u32(reader.word(in bytes)),
-                name: wrapping_u32(reader.word(in bytes)),
-                args: wrapping_u32(reader.word(in bytes))
-            }
-        );
+        let _ = ast.effect_nodes.alloc(EffectNode {
+            label: wrapping_u32(reader.word(in bytes)),
+            name: wrapping_u32(reader.word(in bytes)),
+            args: wrapping_u32(reader.word(in bytes))
+        });
     }
     let n_generics = reader.word(in bytes);
     for _ in 0..n_generics {
-        let _ = ast.generics.alloc(
-            GenericNode {
-                name: wrapping_u32(reader.word(in bytes)),
-                bound: wrapping_u8(reader.word(in bytes)),
-                row: reader.word(in bytes) != 0
-            }
-        );
+        let _ = ast.generics.alloc(GenericNode {
+            name: wrapping_u32(reader.word(in bytes)),
+            bound: wrapping_u8(reader.word(in bytes)),
+            row: reader.word(in bytes) != 0
+        });
     }
     let n_fields = reader.word(in bytes);
     for _ in 0..n_fields {
-        let _ = ast.fields.alloc(
-            FieldNode {
-                name: wrapping_u32(reader.word(in bytes)),
-                ty: wrapping_u32(reader.word(in bytes)),
-                modality: wrapping_u8(reader.word(in bytes)),
-                temperature: wrapping_u8(reader.word(in bytes))
-            }
-        );
+        let _ = ast.fields.alloc(FieldNode {
+            name: wrapping_u32(reader.word(in bytes)),
+            ty: wrapping_u32(reader.word(in bytes)),
+            modality: wrapping_u8(reader.word(in bytes)),
+            temperature: wrapping_u8(reader.word(in bytes))
+        });
     }
     let n_variants = reader.word(in bytes);
     for _ in 0..n_variants {
-        let _ = ast.variants.alloc(
-            VariantNode {
-                name: wrapping_u32(reader.word(in bytes)),
-                fields: wrapping_u32(reader.word(in bytes)),
-                named: reader.word(in bytes) != 0
-            }
-        );
+        let _ = ast.variants.alloc(VariantNode {
+            name: wrapping_u32(reader.word(in bytes)),
+            fields: wrapping_u32(reader.word(in bytes)),
+            named: reader.word(in bytes) != 0
+        });
     }
     let n_adts = reader.word(in bytes);
     for _ in 0..n_adts {
-        let _ = ast.adts.alloc(
-            AdtNode {
-                name: wrapping_u32(reader.word(in bytes)),
-                mode: wrapping_u8(reader.word(in bytes)),
-                generics: wrapping_u32(reader.word(in bytes)),
-                variants: wrapping_u32(reader.word(in bytes)),
-                is_enum: reader.word(in bytes) != 0,
-                tiled: reader.word(in bytes) != 0,
-                tile_width: wrapping_u32(reader.word(in bytes)),
-                start: wrapping_u32(reader.word(in bytes)),
-                end: wrapping_u32(reader.word(in bytes))
-            }
-        );
+        let _ = ast.adts.alloc(AdtNode {
+            name: wrapping_u32(reader.word(in bytes)),
+            mode: wrapping_u8(reader.word(in bytes)),
+            generics: wrapping_u32(reader.word(in bytes)),
+            variants: wrapping_u32(reader.word(in bytes)),
+            is_enum: reader.word(in bytes) != 0,
+            tiled: reader.word(in bytes) != 0,
+            tile_width: wrapping_u32(reader.word(in bytes)),
+            start: wrapping_u32(reader.word(in bytes)),
+            end: wrapping_u32(reader.word(in bytes))
+        });
     }
     let n_fns = reader.word(in bytes);
     for _ in 0..n_fns {
-        let _ = ast.fns.alloc(
-            FnNode {
-                name: wrapping_u32(reader.word(in bytes)),
-                fip: reader.word(in bytes) != 0,
-                generics: wrapping_u32(reader.word(in bytes)),
-                params: wrapping_u32(reader.word(in bytes)),
-                result: wrapping_u32(reader.word(in bytes)),
-                effects: wrapping_u32(reader.word(in bytes)),
-                body: wrapping_u32(reader.word(in bytes)),
-                start: wrapping_u32(reader.word(in bytes)),
-                end: wrapping_u32(reader.word(in bytes))
-            }
-        );
+        let _ = ast.fns.alloc(FnNode {
+            name: wrapping_u32(reader.word(in bytes)),
+            fip: reader.word(in bytes) != 0,
+            generics: wrapping_u32(reader.word(in bytes)),
+            params: wrapping_u32(reader.word(in bytes)),
+            result: wrapping_u32(reader.word(in bytes)),
+            effects: wrapping_u32(reader.word(in bytes)),
+            body: wrapping_u32(reader.word(in bytes)),
+            start: wrapping_u32(reader.word(in bytes)),
+            end: wrapping_u32(reader.word(in bytes))
+        });
     }
     let n_effect_decls = reader.word(in bytes);
     for _ in 0..n_effect_decls {
-        let _ = ast.effect_decls.alloc(
-            EffectDeclNode {
-                name: wrapping_u32(reader.word(in bytes)),
-                linear: reader.word(in bytes) != 0,
-                generics: wrapping_u32(reader.word(in bytes)),
-                ops: wrapping_u32(reader.word(in bytes)),
-                start: wrapping_u32(reader.word(in bytes)),
-                end: wrapping_u32(reader.word(in bytes))
-            }
-        );
+        let _ = ast.effect_decls.alloc(EffectDeclNode {
+            name: wrapping_u32(reader.word(in bytes)),
+            linear: reader.word(in bytes) != 0,
+            generics: wrapping_u32(reader.word(in bytes)),
+            ops: wrapping_u32(reader.word(in bytes)),
+            start: wrapping_u32(reader.word(in bytes)),
+            end: wrapping_u32(reader.word(in bytes))
+        });
     }
     let n_impls = reader.word(in bytes);
     for _ in 0..n_impls {
-        let _ = ast.impls.alloc(
-            ImplNode {
-                ty: wrapping_u32(reader.word(in bytes)),
-                generics: wrapping_u32(reader.word(in bytes)),
-                methods: wrapping_u32(reader.word(in bytes))
-            }
-        );
+        let _ = ast.impls.alloc(ImplNode {
+            ty: wrapping_u32(reader.word(in bytes)),
+            generics: wrapping_u32(reader.word(in bytes)),
+            methods: wrapping_u32(reader.word(in bytes))
+        });
     }
     let n_traits = reader.word(in bytes);
     for _ in 0..n_traits {
-        let _ = ast.traits.alloc(
-            TraitNode {
-                name: wrapping_u32(reader.word(in bytes)),
-                public: reader.word(in bytes) != 0,
-                generics: wrapping_u32(reader.word(in bytes)),
-                assoc: wrapping_u32(reader.word(in bytes)),
-                methods: wrapping_u32(reader.word(in bytes)),
-                start: wrapping_u32(reader.word(in bytes)),
-                end: wrapping_u32(reader.word(in bytes))
-            }
-        );
+        let _ = ast.traits.alloc(TraitNode {
+            name: wrapping_u32(reader.word(in bytes)),
+            public: reader.word(in bytes) != 0,
+            generics: wrapping_u32(reader.word(in bytes)),
+            assoc: wrapping_u32(reader.word(in bytes)),
+            methods: wrapping_u32(reader.word(in bytes)),
+            start: wrapping_u32(reader.word(in bytes)),
+            end: wrapping_u32(reader.word(in bytes))
+        });
     }
     let n_confs = reader.word(in bytes);
     for _ in 0..n_confs {
-        let _ = ast.confs.alloc(
-            ConfNode {
-                model: wrapping_u32(reader.word(in bytes)),
-                public: reader.word(in bytes) != 0,
-                generics: wrapping_u32(reader.word(in bytes)),
-                trait_ref: wrapping_u32(reader.word(in bytes)),
-                self_ty: wrapping_u32(reader.word(in bytes)),
-                wheres: wrapping_u32(reader.word(in bytes)),
-                assoc: wrapping_u32(reader.word(in bytes)),
-                methods: wrapping_u32(reader.word(in bytes)),
-                start: wrapping_u32(reader.word(in bytes)),
-                end: wrapping_u32(reader.word(in bytes))
-            }
-        );
+        let _ = ast.confs.alloc(ConfNode {
+            model: wrapping_u32(reader.word(in bytes)),
+            public: reader.word(in bytes) != 0,
+            generics: wrapping_u32(reader.word(in bytes)),
+            trait_ref: wrapping_u32(reader.word(in bytes)),
+            self_ty: wrapping_u32(reader.word(in bytes)),
+            wheres: wrapping_u32(reader.word(in bytes)),
+            assoc: wrapping_u32(reader.word(in bytes)),
+            methods: wrapping_u32(reader.word(in bytes)),
+            start: wrapping_u32(reader.word(in bytes)),
+            end: wrapping_u32(reader.word(in bytes))
+        });
     }
     let n_items = reader.word(in bytes);
     for _ in 0..n_items {
-        let _ = ast.items.alloc(
-            ItemNode {
-                kind: wrapping_u8(reader.word(in bytes)),
-                node: wrapping_u32(reader.word(in bytes))
-            }
-        );
+        let _ = ast.items.alloc(ItemNode {
+            kind: wrapping_u8(reader.word(in bytes)),
+            node: wrapping_u32(reader.word(in bytes))
+        });
     }
     let n_lists = reader.word(in bytes);
     for _ in 0..n_lists {

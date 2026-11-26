@@ -1,0 +1,41 @@
+// @vesper/hybrid-verify: `vesper verify SOURCE --format` in the hybrid
+// Stage 2 build (SH5 lane 18, #1341). `hc_verify_run` (src/commands.rs)
+// hands over the arguments after the command name, each followed by a NUL
+// byte, when they ask for `--format`, and reads back the result: one
+// status byte (0 when the command succeeded, 1 when it failed), the length
+// of what it prints on stdout as 8 little-endian bytes, those bytes, then
+// the error text.
+
+// @export abi 4
+
+use @vesper/verify::run_format;
+use @vesper/proof-audit::strs::{byte, push, strs_new};
+
+// `verify_commands::run` for `--format`.
+pub fn verify_run(
+    in packed: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
+    let mut args = strs_new();
+    let mut from: u64 = 0;
+    for i in 0..packed.len() {
+        if byte(in packed, i) == 0 {
+            push(inout args, in packed[from..i]);
+            from = wrapping_add(i, 1);
+        }
+    }
+    let o = run_format(in args);
+    let mut result: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if o.failed {
+        result.push(1);
+    } else {
+        result.push(0);
+    }
+    let mut n = o.out.len();
+    for _k in 0..8 {
+        result.push(wrapping_u8(n % 256));
+        n = n / 256;
+    }
+    result.extend(in o.out.as_slice());
+    result.extend(in o.err.as_slice());
+    result
+}

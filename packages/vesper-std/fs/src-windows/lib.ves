@@ -61,6 +61,12 @@ pub fn other() -> u32 {
     13
 }
 
+// `NotFound` from Rust's Windows `resolve_exe`, whose text is
+// `program not found` rather than the kind's own (#2147).
+pub fn program_not_found() -> u32 {
+    15
+}
+
 fn errno_kind(os: u32) -> u32 {
     match os {
         2 => not_found(),
@@ -94,12 +100,10 @@ pub fn raise_io[T](os: u64) -> T eff [Fail[IoError]] {
 }
 
 pub fn raise_kind[T](kind: u32) -> T eff [Fail[IoError]] {
-    Fail::raise(
-        IoError {
-            kind: kind,
-            os: 0,
-        }
-    )
+    Fail::raise(IoError {
+        kind: kind,
+        os: 0,
+    })
 }
 
 // `mode` mirrors the Unix permission bits as far as Windows has them:
@@ -703,17 +707,21 @@ fn check_win32(res: Result[(i32, u32), ForeignInvalid]) eff [Fail[IoError]] {
 pub fn rename(in from: Str, in to: Str) eff [Ffi[StdFs], Fail[IoError]] {
     let wf = utf8_to_utf16(in from.as_bytes());
     let wt = utf8_to_utf16(in to.as_bytes());
-    check_win32(
-        StdFs::MoveFileExW(in wf.as_slice(), in wt.as_slice(), StdFs::MOVEFILE_REPLACE_EXISTING)
-    );
+    check_win32(StdFs::MoveFileExW(
+        in wf.as_slice(),
+        in wt.as_slice(),
+        StdFs::MOVEFILE_REPLACE_EXISTING
+    ));
 }
 
 pub fn rename_path(in from: Slice[u8], in to: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
     let wf = utf8_to_utf16(in from);
     let wt = utf8_to_utf16(in to);
-    check_win32(
-        StdFs::MoveFileExW(in wf.as_slice(), in wt.as_slice(), StdFs::MOVEFILE_REPLACE_EXISTING)
-    );
+    check_win32(StdFs::MoveFileExW(
+        in wf.as_slice(),
+        in wt.as_slice(),
+        StdFs::MOVEFILE_REPLACE_EXISTING
+    ));
 }
 
 pub fn remove_file(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
@@ -1273,6 +1281,9 @@ fn os_error_suffix(inout out: ChunkSeq[u8], os: u32) {
 // (`io_error` in crates/vesper-hybrid/src/driver.rs): every other code is
 // `Other`.
 fn kind_text(kind: u32) -> Str {
+    if kind == program_not_found() {
+        return "program not found";
+    }
     match kind {
         1 => "entity not found",
         2 => "permission denied",

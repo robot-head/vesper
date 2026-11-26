@@ -2242,9 +2242,10 @@ fn inner_chain(
                 idx.truncate(0);
                 for kk in 0..nk {
                     let leaf = cw(in kleaf, kk);
-                    idx.push(
-                        wrapping_add(cw(in lbase, leaf), cw(in tuples, wrapping_add(tpos, leaf)))
-                    );
+                    idx.push(wrapping_add(
+                        cw(in lbase, leaf),
+                        cw(in tuples, wrapping_add(tpos, leaf))
+                    ));
                 }
                 let e = lookup(
                     in v,

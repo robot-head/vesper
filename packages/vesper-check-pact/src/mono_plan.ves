@@ -283,10 +283,7 @@ fn select_evidence(
             for ai in 0..ban {
                 let raw_a = u32_at(in m.bnd_args, add(baa, ai));
                 let sub_a = substitute(inout sess.c.types, raw_a, in origin_vars);
-                let act_a = match args.try_get(ai) {
-                    Option::Some(v) => v,
-                    Option::None => 0,
-                };
+                let act_a = args.try_get(ai).unwrap_or(0);
                 if !same_type(in sess.c.types, sess.sy, sub_a, act_a) {
                     ok = false;
                     break;

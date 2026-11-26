@@ -362,24 +362,15 @@ fn tokenize(in s: Slice[u8], inout l: Lx) -> Toks {
 }
 
 fn get64(in v: ChunkSeq[u64], i: u64) -> u64 {
-    match v.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    v.try_get(i).unwrap_or(0)
 }
 
 fn get8(in v: ChunkSeq[u8], i: u64) -> u8 {
-    match v.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    v.try_get(i).unwrap_or(0)
 }
 
 fn getb(in v: ChunkSeq[bool], i: u64) -> bool {
-    match v.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => false,
-    }
+    v.try_get(i).unwrap_or(false)
 }
 
 // Rust's `Failure::new` keeps at most 4096 bytes, cut on a character

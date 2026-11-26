@@ -1,0 +1,671 @@
+// `vesper verify SOURCE --format` (src/verify_commands.rs `run` and
+// `execute` for `Mode::Format`): read the bounded source, capture the
+// formatter model (@vesper/fmt), emit its Lean witness (format.ves),
+// compile the pinned model and the witness with Lean, replay both theorems
+// through the kernel (@vesper/proof-audit's `audit`, as `audit_generated`)
+// and print the witness, the text line or the `vesper.format-proof/1`
+// report. The driver-commands layer validated the arguments; `--extract`
+// stays in Rust.
+
+use @vesper/fmt::{
+    format_for_verification, hash_hex, model_comments, model_node_count, proof_limits_default,
+    verified_error, verified_output, verified_output_hash, verified_source_hash
+};
+use @vesper/proof-audit::audit::{Au, Options, execute, join, lean_toolchain, stage_drop, stage_new};
+use @vesper/proof-audit::audit::audit as audit_module;
+use @vesper/proof-audit::json::{put_string, put_u64};
+use @vesper/proof-audit::strs::{
+    Strs, byte, count, end, order, push, put_str, same_str, set_of, start, strs_new
+};
+use @vesper/proof-audit::text::{put_io, utf8_valid};
+use @vesper-std/env::{os, os_windows, var, var_bytes};
+use @vesper-std/fs::{IoError, kind_file, read_nofollow_limit, symlink_metadata_path, write_path};
+use @vesper-std/process::{arg_bytes, command_path, cwd, env, env_clear, id};
+use self::format::{emit, message};
+use self::model::MODEL;
+
+const MAX_INPUT: u64 = 131072;
+const MAX_JSON: u64 = 2097152;
+const SCHEMA: Str = "vesper.format-proof/1";
+
+// What `run` prints and returns: stdout, and the error when it failed.
+pub struct Ran {
+    pub out: ChunkSeq[u8],
+    pub failed: bool,
+    pub err: ChunkSeq[u8]
+}
+
+// A `Failure`: its stage (0: none; see `stage_name`) and message.
+struct Failure {
+    stage: u8,
+    message: ChunkSeq[u8]
+}
+
+fn ok() -> Failure {
+    Failure { stage: 0, message: ChunkSeq::new[u8]() }
+}
+
+const CONFIG: u8 = 1;
+const IO: u8 = 2;
+const RESOURCE: u8 = 3;
+const PARSE: u8 = 4;
+const TOOLCHAIN: u8 = 5;
+const COMPILE: u8 = 6;
+const FORMAT_MODEL: u8 = 7;
+const EMIT: u8 = 8;
+const KERNEL: u8 = 9;
+
+// The `Stage` as `serde` names it (snake case).
+fn stage_name(stage: u8) -> Str {
+    if stage == CONFIG {
+        "config"
+    } else if stage == IO {
+        "io"
+    } else if stage == RESOURCE {
+        "resource"
+    } else if stage == PARSE {
+        "parse"
+    } else if stage == TOOLCHAIN {
+        "toolchain"
+    } else if stage == COMPILE {
+        "compile"
+    } else if stage == FORMAT_MODEL {
+        "format_model"
+    } else if stage == EMIT {
+        "emit"
+    } else {
+        "kernel"
+    }
+}
+
+fn failure(stage: u8, in m: Slice[u8]) -> Failure {
+    let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    // `Failure::new` keeps at most 4096 bytes, cut on a char boundary.
+    let mut n = m.len();
+    if n > 4096 {
+        n = 4096;
+        loop {
+            if n == 0 || byte(in m, n) & 192 != 128 {
+                break;
+            }
+            n = wrapping_sub(n, 1);
+        }
+    }
+    message.extend(in m[0..n]);
+    Failure { stage: stage, message: message }
+}
+
+fn failure_str(stage: u8, in m: Str) -> Failure {
+    failure(stage, in m.as_bytes())
+}
+
+fn failure_io(stage: u8, e: IoError) -> Failure {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_io(inout m, e);
+    failure(stage, in m.as_slice())
+}
+
+fn failed(in f: Failure) -> bool {
+    f.stage != 0
+}
+
+// The options `execute` reads for `--format`.
+struct Opts {
+    source: ChunkSeq[u8],
+    lean: ChunkSeq[u8],
+    timeout: u64,
+    json: bool,
+    emit_lean: bool
+}
+
+fn arg_at(in args: Strs, i: u64) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in args.bytes[start(in args, i)..end(in args, i)]);
+    out
+}
+
+// `options` for an argument list the command layer accepted with
+// `--format`: the source, `--json`, `--emit-lean`, `--lean` (else
+// `VESPER_LEAN`, else `lean`) and `--timeout` (default 30).
+fn options(in args: Strs, inout f: Failure) -> Opts eff [Ffi[StdEnv]] {
+    let mut o = Opts {
+        source: ChunkSeq::new[u8](),
+        lean: ChunkSeq::new[u8](),
+        timeout: 30,
+        json: false,
+        emit_lean: false
+    };
+    let mut has_lean = false;
+    let mut positional = false;
+    let mut i: u64 = 0;
+    let n = count(in args);
+    loop {
+        if i >= n {
+            break;
+        }
+        let a = arg_at(in args, i);
+        i = wrapping_add(i, 1);
+        let s = a.as_slice();
+        if !positional {
+            if same_str(in s, in "--json") {
+                o.json = true;
+                continue;
+            }
+            if same_str(in s, in "--emit-lean") {
+                o.emit_lean = true;
+                continue;
+            }
+            if same_str(in s, in "--format") {
+                continue;
+            }
+            if same_str(in s, in "--lean") {
+                o.lean = arg_at(in args, i);
+                has_lean = true;
+                i = wrapping_add(i, 1);
+                continue;
+            }
+            if same_str(in s, in "--timeout") {
+                let v = arg_at(in args, i);
+                i = wrapping_add(i, 1);
+                let mut t: u64 = 0;
+                for k in 0..v.len() {
+                    t = wrapping_add(wrapping_mul(t, 10), widen_u64(byte(in v.as_slice(), k)) % 48);
+                }
+                o.timeout = t;
+                continue;
+            }
+            if same_str(in s, in "--") {
+                positional = true;
+                continue;
+            }
+        }
+        o.source = arg_at(in args, wrapping_sub(i, 1));
+    }
+    if !has_lean {
+        o.lean = match var_bytes(in "VESPER_LEAN") {
+            Option::Some(v) => v,
+            Option::None => {
+                let mut l: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                put_str(inout l, in "lean");
+                l
+            },
+        };
+    }
+    if o.lean.len() == 0 || o.lean.len() > 4096 {
+        f = failure_str(CONFIG, in "invalid Lean executable path");
+    }
+    o
+}
+
+// `read_source`: a regular file (no final symlink) of at most 128 KiB, in
+// UTF-8.
+fn read_source(in path: Slice[u8], inout f: Failure) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    let meta = handle Fail[IoError] in {
+        let m = symlink_metadata_path(in path);
+        (m.kind, IoError { kind: 0, os: 0 })
+    } with {
+        return v => v,
+        raise(e, _k) => (0, e),
+    };
+    let (kind, e) = meta;
+    if e.kind != 0 || e.os != 0 {
+        f = failure_io(IO, e);
+        return ChunkSeq::new[u8]();
+    }
+    if kind != kind_file() {
+        f = failure_str(IO, in "verification requires a regular file without final symlinks");
+        return ChunkSeq::new[u8]();
+    }
+    let opened = handle Fail[IoError] in {
+        let o = read_nofollow_limit(in path, wrapping_add(MAX_INPUT, 1));
+        (o.id.regular, o.id.size, o.bytes, IoError { kind: 0, os: 0 })
+    } with {
+        return v => v,
+        raise(e, _k) => (false, 0, ChunkSeq::new[u8](), e),
+    };
+    let (regular, size, bytes, e) = opened;
+    if e.kind != 0 || e.os != 0 {
+        f = failure_io(IO, e);
+        return ChunkSeq::new[u8]();
+    }
+    if !regular || size > MAX_INPUT {
+        f = failure_str(RESOURCE, in "verification requires a regular file of at most 128 KiB");
+        return ChunkSeq::new[u8]();
+    }
+    if bytes.len() > MAX_INPUT {
+        f = failure_str(RESOURCE, in "verification source exceeds 128 KiB");
+        return ChunkSeq::new[u8]();
+    }
+    if !utf8_valid(in bytes.as_slice()) {
+        f = failure_str(PARSE, in "verification source must be UTF-8");
+        return ChunkSeq::new[u8]();
+    }
+    bytes
+}
+
+fn windows() -> bool {
+    os() == os_windows()
+}
+
+fn has_byte(in s: Slice[u8], b: u8) -> bool {
+    for i in 0..s.len() {
+        if byte(in s, i) == b {
+            return true;
+        }
+    }
+    false
+}
+
+// `compile`: `lean -j1 -M1024 -o NAME.olean NAME.lean` in the stage, with
+// only `LEAN_PATH` (the stage, then the toolchain's library) and
+// `LEAN_ABORT_ON_PANIC`.
+fn compile(
+    in binary: Slice[u8],
+    in prefix: Slice[u8],
+    in stage: Slice[u8],
+    in name: Str,
+    timeout: u64,
+    inout f: Failure
+) eff [Ffi[StdProcess], Ffi[StdEnv]] {
+    let lib = join(in prefix, in "lib/lean".as_bytes());
+    // `env::join_paths`.
+    let joiner: u8 = if windows() { 59 } else { 58 };
+    if has_byte(in stage, joiner) || has_byte(in lib.as_slice(), joiner) {
+        if windows() {
+            f = failure_str(TOOLCHAIN, in "path segment contains separator `;`");
+        } else {
+            f = failure_str(TOOLCHAIN, in "path segment contains separator `:`");
+        }
+        return;
+    }
+    if windows() && (has_byte(in stage, 34) || has_byte(in lib.as_slice(), 34)) {
+        f = failure_str(TOOLCHAIN, in "path segment contains `\"`");
+        return;
+    }
+    let mut search: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    search.extend(in stage);
+    search.push(joiner);
+    search.extend(in lib.as_slice());
+    let search_text = text(in search.as_slice());
+    let stage_text = text(in stage);
+    let mut c = command_path(in binary);
+    env_clear(inout c);
+    env(inout c, in "LEAN_PATH", in search_text.as_str());
+    env(inout c, in "LEAN_ABORT_ON_PANIC", in "1");
+    if windows() {
+        keep(inout c, in "SystemRoot");
+        keep(inout c, in "WINDIR");
+        keep(inout c, in "TEMP");
+        keep(inout c, in "TMP");
+    }
+    cwd(inout c, in stage_text.as_str());
+    arg_bytes(inout c, in "-j1".as_bytes());
+    arg_bytes(inout c, in "-M1024".as_bytes());
+    arg_bytes(inout c, in "-o".as_bytes());
+    let mut olean: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout olean, in name);
+    put_str(inout olean, in ".olean");
+    arg_bytes(inout c, in olean.as_slice());
+    let mut lean: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout lean, in name);
+    put_str(inout lean, in ".lean");
+    arg_bytes(inout c, in lean.as_slice());
+    let mut a = Au { failed: false, err: ChunkSeq::new[u8]() };
+    let _ = execute(inout a, c, timeout);
+    if a.failed {
+        f = failure(COMPILE, in a.err.as_slice());
+    }
+}
+
+fn keep(inout c: @vesper-std/process::ProcCommand, in key: Str) eff [Ffi[StdEnv], Ffi[StdProcess]] {
+    match var(in key) {
+        Option::Some(v) => env(inout c, in key, in v.as_str()),
+        Option::None => {},
+    }
+}
+
+fn text(in b: Slice[u8]) -> String {
+    match String::from_utf8(in b) {
+        Option::Some(s) => s,
+        Option::None => String::new(),
+    }
+}
+
+fn write_file(in stage: Slice[u8], in name: Str, in data: Slice[u8], inout f: Failure) eff [
+    Ffi[StdFs]
+] {
+    let path = join(in stage, in name.as_bytes());
+    let e = handle Fail[IoError] in {
+        write_path(in path.as_slice(), in data);
+        IoError { kind: 0, os: 0 }
+    } with {
+        return v => v,
+        raise(x, _k) => x,
+    };
+    if e.kind != 0 || e.os != 0 {
+        f = failure_io(IO, e);
+    }
+}
+
+// `execute` for `--format`: the bytes to print, or the failure.
+fn execute_format(
+    in o: Opts,
+    inout f: Failure
+) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
+    let none: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let source = read_source(in o.source.as_slice(), inout f);
+    if failed(in f) {
+        return none;
+    }
+    let source_text = text(in source.as_slice());
+    let v = format_for_verification(in source_text.as_str());
+    let vf = verified_error(in v);
+    if vf.code != 0 {
+        let m = message(vf);
+        f = failure(FORMAT_MODEL, in m.as_slice());
+        return none;
+    }
+    let e = emit(in v, in proof_limits_default());
+    if e.fail.code != 0 {
+        let m = message(e.fail);
+        f = failure(EMIT, in m.as_slice());
+        return none;
+    }
+    let mut a = Au { failed: false, err: ChunkSeq::new[u8]() };
+    let tc = lean_toolchain(inout a, in o.lean.as_slice());
+    if a.failed {
+        f = failure(TOOLCHAIN, in a.err.as_slice());
+        return none;
+    }
+    let stage = stage_new(inout a, id());
+    if a.failed {
+        stage_drop(in stage.as_slice());
+        f = failure(IO, in a.err.as_slice());
+        return none;
+    }
+    let out = in_stage(in o, in v, in e.lean, in tc, in stage.as_slice(), source.len(), inout f);
+    stage_drop(in stage.as_slice());
+    out
+}
+
+fn in_stage(
+    in o: Opts,
+    in v: @vesper/fmt::Verified,
+    in witness: ChunkSeq[u8],
+    in tc: @vesper/proof-audit::audit::Toolchain,
+    in stage: Slice[u8],
+    input_bytes: u64,
+    inout f: Failure
+) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
+    let none: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    write_file(in stage, in "StylusAndLintSafety.lean", in MODEL.as_bytes(), inout f);
+    if failed(in f) {
+        return none;
+    }
+    write_file(in stage, in "FormatWitness.lean", in witness.as_slice(), inout f);
+    if failed(in f) {
+        return none;
+    }
+    compile(
+        in tc.binary.as_slice(),
+        in tc.prefix.as_slice(),
+        in stage,
+        in "StylusAndLintSafety",
+        o.timeout,
+        inout f
+    );
+    if failed(in f) {
+        return none;
+    }
+    compile(
+        in tc.binary.as_slice(),
+        in tc.prefix.as_slice(),
+        in stage,
+        in "FormatWitness",
+        o.timeout,
+        inout f
+    );
+    if failed(in f) {
+        return none;
+    }
+    // `audit_generated(stage, "FormatWitness", [the two theorems], lean,
+    // timeout)`.
+    let mut theorems = strs_new();
+    push(inout theorems, in "Vesper.StylusGenerated.comments_preserved".as_bytes());
+    push(
+        inout theorems,
+        in "Vesper.StylusSafety.projection_narrowing_preserves_disjointness".as_bytes()
+    );
+    let mut module: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout module, in "FormatWitness");
+    let mut root: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    root.extend(in stage);
+    let mut lean: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    lean.extend(in o.lean.as_slice());
+    let options = Options {
+        module: module,
+        root: root,
+        theorems: set_of(in theorems),
+        allowed: strs_new(),
+        lean: lean,
+        has_lean: true,
+        timeout: o.timeout,
+        manifest: ChunkSeq::new[u8](),
+        has_manifest: false
+    };
+    let mut a = Au { failed: false, err: ChunkSeq::new[u8]() };
+    let report = audit_module(inout a, in options, id());
+    if a.failed {
+        f = failure(KERNEL, in a.err.as_slice());
+        return none;
+    }
+    if !report.accepted || count(in report.forbidden) != 0 {
+        f = failure_str(KERNEL, in "generated theorem failed the kernel axiom policy");
+        return none;
+    }
+    if o.emit_lean {
+        let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        out.extend(in witness.as_slice());
+        return out;
+    }
+    if !o.json {
+        let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_str(
+            inout out,
+            in "Formatter document model: kernel checked; no program-semantics or Rust-refinement claim.\n"
+        );
+        return out;
+    }
+    // `Success`, fields in order; `audit` is the report as a
+    // `serde_json::Value` (keys sorted).
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout out, in "{\"schema\":");
+    put_string(inout out, in SCHEMA.as_bytes());
+    put_str(inout out, in ",\"status\":\"kernel_checked\",\"scope\":\"formatter_document_model\"");
+    put_str(inout out, in ",\"source_blake3\":");
+    let sh = hash_hex(verified_source_hash(in v));
+    put_string(inout out, in sh.as_slice());
+    put_str(inout out, in ",\"output_blake3\":");
+    let oh = hash_hex(verified_output_hash(in v));
+    put_string(inout out, in oh.as_slice());
+    put_str(inout out, in ",\"input_bytes\":");
+    put_u64(inout out, input_bytes);
+    put_str(inout out, in ",\"output_bytes\":");
+    let output = verified_output(in v);
+    put_u64(inout out, output.len());
+    put_str(inout out, in ",\"document_nodes\":");
+    put_u64(inout out, model_node_count(in v));
+    put_str(inout out, in ",\"comment_tokens\":");
+    put_u64(inout out, model_comments(in v));
+    put_str(inout out, in ",\"lean_version\":");
+    put_string(inout out, in report.version.as_slice());
+    put_str(inout out, in ",\"audit\":");
+    let mut at: u64 = 0;
+    canon(in report.json.as_slice(), inout at, inout out);
+    put_str(inout out, in "}\n");
+    if out.len() > MAX_JSON {
+        f = failure_str(RESOURCE, in "verification JSON exceeds 2 MiB");
+        return none;
+    }
+    out
+}
+
+// ---------------------------------------------------------------- JSON
+
+fn skip_ws(in s: Slice[u8], inout at: u64) {
+    loop {
+        if at >= s.len() {
+            break;
+        }
+        let b = byte(in s, at);
+        if b != 32 && b != 10 && b != 13 && b != 9 {
+            break;
+        }
+        at = wrapping_add(at, 1);
+    }
+}
+
+// The string token at `at` (quotes included), copied verbatim.
+fn string_token(in s: Slice[u8], inout at: u64, inout out: ChunkSeq[u8]) {
+    let from = at;
+    at = wrapping_add(at, 1);
+    loop {
+        if at >= s.len() {
+            break;
+        }
+        let b = byte(in s, at);
+        if b == 92 {
+            at = wrapping_add(at, 2);
+            continue;
+        }
+        at = wrapping_add(at, 1);
+        if b == 34 {
+            break;
+        }
+    }
+    out.extend(in s[from..at]);
+}
+
+// Re-serialize the JSON value at `at` compactly with object keys sorted,
+// as `serde_json::to_value` then `to_writer` print it.
+fn canon(in s: Slice[u8], inout at: u64, inout out: ChunkSeq[u8]) {
+    skip_ws(in s, inout at);
+    let b = byte(in s, at);
+    if b == 123 {
+        at = wrapping_add(at, 1);
+        let mut keys = strs_new();
+        let mut values = strs_new();
+        loop {
+            skip_ws(in s, inout at);
+            if byte(in s, at) == 125 {
+                at = wrapping_add(at, 1);
+                break;
+            }
+            let mut k: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            string_token(in s, inout at, inout k);
+            skip_ws(in s, inout at);
+            // `:`
+            at = wrapping_add(at, 1);
+            let mut v: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            canon(in s, inout at, inout v);
+            push(inout keys, in k.as_slice());
+            push(inout values, in v.as_slice());
+            skip_ws(in s, inout at);
+            if byte(in s, at) == 44 {
+                at = wrapping_add(at, 1);
+            }
+        }
+        let idx = order(in keys);
+        out.push(123);
+        for j in 0..idx.len() {
+            let i = match idx.try_get(j) {
+                Option::Some(i) => i,
+                Option::None => 0,
+            };
+            if j > 0 {
+                out.push(44);
+            }
+            out.extend(in keys.bytes[start(in keys, i)..end(in keys, i)]);
+            out.push(58);
+            out.extend(in values.bytes[start(in values, i)..end(in values, i)]);
+        }
+        out.push(125);
+    } else if b == 91 {
+        at = wrapping_add(at, 1);
+        out.push(91);
+        let mut first = true;
+        loop {
+            skip_ws(in s, inout at);
+            if byte(in s, at) == 93 {
+                at = wrapping_add(at, 1);
+                break;
+            }
+            if !first {
+                out.push(44);
+            }
+            first = false;
+            canon(in s, inout at, inout out);
+            skip_ws(in s, inout at);
+            if byte(in s, at) == 44 {
+                at = wrapping_add(at, 1);
+            }
+        }
+        out.push(93);
+    } else if b == 34 {
+        string_token(in s, inout at, inout out);
+    } else {
+        loop {
+            if at >= s.len() {
+                break;
+            }
+            let c = byte(in s, at);
+            if c == 44 || c == 125 || c == 93 || c == 32 || c == 10 || c == 13 || c == 9 {
+                break;
+            }
+            out.push(c);
+            at = wrapping_add(at, 1);
+        }
+    }
+}
+
+// `verify_commands::run` for `--format`: stdout and the error. With
+// `--json`, a failure also prints its rejection document.
+pub fn run_format(
+    in args: Strs
+) -> Ran eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
+    let mut r = Ran { out: ChunkSeq::new[u8](), failed: false, err: ChunkSeq::new[u8]() };
+    let mut json = false;
+    for i in 0..count(in args) {
+        let a = arg_at(in args, i);
+        if same_str(in a.as_slice(), in "--") {
+            break;
+        }
+        if same_str(in a.as_slice(), in "--json") {
+            json = true;
+        }
+    }
+    let mut f = ok();
+    let o = options(in args, inout f);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if !failed(in f) {
+        out = execute_format(in o, inout f);
+    }
+    if !failed(in f) {
+        r.out = out;
+        return r;
+    }
+    if json {
+        // `json!({...})`: keys sorted.
+        put_str(inout r.out, in "{\"message\":");
+        put_string(inout r.out, in f.message.as_slice());
+        put_str(inout r.out, in ",\"schema\":");
+        put_string(inout r.out, in SCHEMA.as_bytes());
+        put_str(inout r.out, in ",\"stage\":");
+        put_string(inout r.out, in stage_name(f.stage).as_bytes());
+        put_str(inout r.out, in ",\"status\":\"rejected\"}\n");
+    }
+    r.failed = true;
+    put_str(inout r.err, in "formatter model verification failed: ");
+    r.err.extend(in f.message.as_slice());
+    r
+}

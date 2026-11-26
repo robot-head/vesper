@@ -98,8 +98,11 @@ pub fn seq_word(op: SeqOp) -> u64 {
         SeqOp::SubSlice => 11,
         SeqOp::Str(StrOp::AsBytes) => 12,
         SeqOp::Str(StrOp::Len) => 13,
+        SeqOp::Hoisted(Access::Wide(w)) => 64 + u64::from(w.code()),
         SeqOp::Hoisted(a) => 14 + access_word(a),
         SeqOp::BoundsGuard { .. } => 18,
+        // A fixed-width access (#2022).
+        SeqOp::Wide(w) => 32 + u64::from(w.code()),
         // Every other operation has a receiver and may change its length.
         _ => 0,
     }
@@ -111,6 +114,7 @@ pub fn access_word(a: Access) -> u64 {
         Access::Set => 1,
         Access::TryGet => 2,
         Access::TrySet => 3,
+        Access::Wide(w) => 32 + u64::from(w.code()),
     }
 }
 

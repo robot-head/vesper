@@ -11,3 +11,4 @@ capability_ceiling = ["Fail", "Alloc"]
 "@vesper-std/arena" = { version = "^0.1", path = "../vesper-std/arena" }
 "@vesper-std/intern" = { version = "^0.1", path = "../vesper-std/intern" }
 "@vesper-std/hash" = { version = "^0.1", path = "../vesper-std/hash" }
+"@vesper-std/bytes" = { version = "^0.1", path = "../vesper-std/bytes" }

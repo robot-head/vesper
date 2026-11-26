@@ -47,69 +47,83 @@ use self::vector::{
 
 const NONE32: u32 = 4294967295;
 
-fn put(inout o: ChunkSeq[u8], in s: Str) {
-    o.extend(in s.as_bytes());
+fn put(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
 }
 
-fn bit(inout o: ChunkSeq[u8], b: bool) {
-    o.push(32);
-    if b {
-        o.push(49);
+fn bit(inout out: ChunkSeq[u8], value: bool) {
+    out.push(32);
+    if value {
+        out.push(49);
     } else {
-        o.push(48);
+        out.push(48);
     }
 }
 
-fn range(inout o: ChunkSeq[u8], in d: Diags, a: u64, b: u64) {
-    for i in a..b {
-        o.push(u8_at(in d.text, i));
+fn range(inout out: ChunkSeq[u8], in diags: Diags, start: u64, end: u64) {
+    for i in start..end {
+        out.push(u8_at(in diags.text, i));
     }
 }
 
 // One diagnostic: `code|message|help|start|stop`.
-fn diag_line(inout o: ChunkSeq[u8], in d: Diags, i: u64) {
-    let r = d.row(i);
-    range(inout o, in d, r.code_a, r.msg_a);
-    o.push(124);
-    range(inout o, in d, r.msg_a, r.msg_b);
-    o.push(124);
-    range(inout o, in d, r.help_a, r.end);
-    o.push(124);
-    push_decimal(inout o, r.start);
-    o.push(124);
-    push_decimal(inout o, r.stop);
-    o.push(10);
+fn diag_line(inout out: ChunkSeq[u8], in diags: Diags, i: u64) {
+    let row = diags.row(i);
+    range(inout out, in diags, row.code_a, row.msg_a);
+    out.push(124);
+    range(inout out, in diags, row.msg_a, row.msg_b);
+    out.push(124);
+    range(inout out, in diags, row.help_a, row.end);
+    out.push(124);
+    push_decimal(inout out, row.start);
+    out.push(124);
+    push_decimal(inout out, row.stop);
+    out.push(10);
 }
 
-fn ty_or_dash(inout o: ChunkSeq[u8], in c: Ctx, ty: u32) {
-    o.push(32);
+fn ty_or_dash(inout out: ChunkSeq[u8], in ctx: Ctx, ty: u32) {
+    out.push(32);
     if ty == NONE32 {
-        o.push(45);
+        out.push(45);
     } else {
-        display(in c.types, in c.names, ty, inout o);
+        display(in ctx.types, in ctx.names, ty, inout out);
     }
 }
 
-fn shape_or_dash(inout o: ChunkSeq[u8], s: Shape) {
-    o.push(32);
-    if s.elem == 0 {
-        o.push(45);
+fn shape_or_dash(inout out: ChunkSeq[u8], shape: Shape) {
+    out.push(32);
+    if shape.elem == 0 {
+        out.push(45);
     } else {
-        shape_display(s, inout o);
+        shape_display(shape, inout out);
     }
 }
 
 // The isa entries of a row: `I` lines.
-fn isa_lines(inout o: ChunkSeq[u8], in c: Ctx, in vn: VecNames, row: u32, i: u64) {
-    let rw = c.types.row(row);
-    for j in 0..w(rw.n) {
-        let e = c.types.effect_at(add(w(rw.a), j));
-        let mut d = diags_new();
-        put(inout o, "I ");
-        if isa_row_entry(in c.types, in c.names, in vn, e, i, wrapping_add(i, 1), inout d) {
-            diag_line(inout o, in d, 0);
+fn isa_lines(
+    inout out: ChunkSeq[u8],
+    in ctx: Ctx,
+    in vec_names: VecNames,
+    row: u32,
+    type_index: u64
+) {
+    let row_node = ctx.types.row(row);
+    for j in 0..w(row_node.n) {
+        let effect = ctx.types.effect_at(add(w(row_node.a), j));
+        let mut diags = diags_new();
+        put(inout out, "I ");
+        if isa_row_entry(
+            in ctx.types,
+            in ctx.names,
+            in vec_names,
+            effect,
+            type_index,
+            wrapping_add(type_index, 1),
+            inout diags
+        ) {
+            diag_line(inout out, in diags, 0);
         } else {
-            put(inout o, "-\n");
+            put(inout out, "-\n");
         }
     }
 }
@@ -118,256 +132,276 @@ fn isa_lines(inout o: ChunkSeq[u8], in c: Ctx, in vn: VecNames, row: u32, i: u64
 // tests/self_host_check_regions_seqs.rs `types_text` for the lines).
 // Task words: l, l pairs (source label, capability) of names; n, n types.
 pub fn regions_seqs_types(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let mut c = read_ctx(inout r, in b);
-    let k = c.world.k;
-    let vn = vec_names_new(inout c.names);
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let mut ctx = read_ctx(inout reader, in bytes);
+    let known = ctx.world.k;
+    let vec_names = vec_names_new(inout ctx.names);
     let mut labels = vars_new();
-    let nl = r.word(in b);
-    for i in 0..nl {
-        let from = u32_at(in c.nmap, r.word(in b));
-        let to = u32_at(in c.nmap, r.word(in b));
-        labels.set(from, to);
+    let label_count = reader.word(in bytes);
+    for i in 0..label_count {
+        let source_label = u32_at(in ctx.nmap, reader.word(in bytes));
+        let capability = u32_at(in ctx.nmap, reader.word(in bytes));
+        labels.set(source_label, capability);
     }
-    let n = r.word(in b);
-    let mut o = ChunkSeq::new[u8]();
-    let mut prev = NONE32;
-    for i in 0..n {
-        let ty = u32_at(in c.tmap, r.word(in b));
-        let start = i;
-        let stop = wrapping_add(i, 1);
-        put(inout o, "T ");
-        display(in c.types, in c.names, ty, inout o);
-        o.push(10);
+    let type_count = reader.word(in bytes);
+    let mut out = ChunkSeq::new[u8]();
+    let mut prev_ty = NONE32;
+    for type_index in 0..type_count {
+        let ty = u32_at(in ctx.tmap, reader.word(in bytes));
+        let start = type_index;
+        let stop = wrapping_add(type_index, 1);
+        put(inout out, "T ");
+        display(in ctx.types, in ctx.names, ty, inout out);
+        out.push(10);
         // regions
-        let mut d = diags_new();
-        put(inout o, "R");
-        bit(inout o, is_handle_type(in c.types, k, ty));
-        if validate_type(in c.types, in c.names, k, ty, start, stop, inout d) {
-            o.push(32);
-            push_decimal(inout o, d.len());
-            o.push(10);
-            for j in 0..d.len() {
-                put(inout o, "  ");
-                diag_line(inout o, in d, j);
+        let mut diags = diags_new();
+        put(inout out, "R");
+        bit(inout out, is_handle_type(in ctx.types, known, ty));
+        if validate_type(in ctx.types, in ctx.names, known, ty, start, stop, inout diags) {
+            out.push(32);
+            push_decimal(inout out, diags.len());
+            out.push(10);
+            for j in 0..diags.len() {
+                put(inout out, "  ");
+                diag_line(inout out, in diags, j);
             }
         } else {
-            put(inout o, " -\n");
+            put(inout out, " -\n");
         }
-        let norm = normalize(inout c.types, k, ty, in labels);
-        put(inout o, "N ");
-        region_display(in c.types, in c.names, k, norm, inout o);
-        o.push(10);
-        put(inout o, "M ");
-        let mut dm = diags_new();
-        if prev != NONE32
-            && mismatch(in c.types, in c.names, k, prev, norm, start, stop, inout dm) {
-            diag_line(inout o, in dm, 0);
+        let normalized = normalize(inout ctx.types, known, ty, in labels);
+        put(inout out, "N ");
+        region_display(in ctx.types, in ctx.names, known, normalized, inout out);
+        out.push(10);
+        put(inout out, "M ");
+        let mut mismatch_diags = diags_new();
+        if prev_ty != NONE32
+            && mismatch(
+                in ctx.types,
+                in ctx.names,
+                known,
+                prev_ty,
+                normalized,
+                start,
+                stop,
+                inout mismatch_diags
+            ) {
+            diag_line(inout out, in mismatch_diags, 0);
         } else {
-            put(inout o, "-\n");
+            put(inout out, "-\n");
         }
-        prev = norm;
+        prev_ty = normalized;
         // sequences, strings, arrays
-        put(inout o, "S");
-        bit(inout o, is_seq_type(in c.types, k, ty));
-        bit(inout o, is_slice_type(in c.types, k, ty));
-        ty_or_dash(inout o, in c, elem(in c.types, k, ty));
-        bit(inout o, mentions_slice(in c.types, k, ty));
-        bit(inout o, holds_sequence(in c.types, in c.world, k, ty));
-        o.push(10);
-        put(inout o, "X");
-        bit(inout o, is_string_type(in c.types, k, ty));
-        bit(inout o, is_str_type(in c.types, k, ty));
-        bit(inout o, mentions_str(in c.types, k, ty));
-        let ae = array_element(in c.types, ty);
-        ty_or_dash(inout o, in c, ae);
-        if ae != NONE32 {
-            o.push(32);
-            push_decimal(inout o, c.types.arity(ty));
+        put(inout out, "S");
+        bit(inout out, is_seq_type(in ctx.types, known, ty));
+        bit(inout out, is_slice_type(in ctx.types, known, ty));
+        ty_or_dash(inout out, in ctx, elem(in ctx.types, known, ty));
+        bit(inout out, mentions_slice(in ctx.types, known, ty));
+        bit(inout out, holds_sequence(in ctx.types, in ctx.world, known, ty));
+        out.push(10);
+        put(inout out, "X");
+        bit(inout out, is_string_type(in ctx.types, known, ty));
+        bit(inout out, is_str_type(in ctx.types, known, ty));
+        bit(inout out, mentions_str(in ctx.types, known, ty));
+        let array_elem = array_element(in ctx.types, ty);
+        ty_or_dash(inout out, in ctx, array_elem);
+        if array_elem != NONE32 {
+            out.push(32);
+            push_decimal(inout out, ctx.types.arity(ty));
         }
-        o.push(10);
+        out.push(10);
         // tiled
-        put(inout o, "L");
-        bit(inout o, is_tiled_seq(in c.types, k, ty));
-        ty_or_dash(inout o, in c, seq_elem(in c.types, k, ty));
-        o.push(32);
-        let label = self::regions::seq_region_label(in c.types, k, ty);
+        put(inout out, "L");
+        bit(inout out, is_tiled_seq(in ctx.types, known, ty));
+        ty_or_dash(inout out, in ctx, seq_elem(in ctx.types, known, ty));
+        out.push(32);
+        let label = self::regions::seq_region_label(in ctx.types, known, ty);
         if label == 0 {
-            o.push(45);
+            out.push(45);
         } else {
-            c.names.write(wrapping_sub(label, 1), inout o);
+            ctx.names.write(wrapping_sub(label, 1), inout out);
         }
-        o.push(32);
-        let adt = seq_adt(in c.types, in c.world, k, ty);
+        out.push(32);
+        let adt = seq_adt(in ctx.types, in ctx.world, known, ty);
         if adt == NONE32 {
-            o.push(45);
+            out.push(45);
         } else {
-            let a = c.world.adt(adt);
-            c.names.write(a.name, inout o);
-            o.push(47);
-            push_decimal(inout o, w(wrapping_sub(a.tile, 1)));
+            let adt_row = ctx.world.adt(adt);
+            ctx.names.write(adt_row.name, inout out);
+            out.push(47);
+            push_decimal(inout out, w(wrapping_sub(adt_row.tile, 1)));
         }
-        o.push(32);
-        push_decimal(inout o, hot_elem_bytes(in c.types, k, ty));
-        shape_or_dash(inout o, hot_vector_shape(in c.types, k, ty, 8));
-        shape_or_dash(inout o, hot_vector_shape(in c.types, k, ty, 16));
-        shape_or_dash(inout o, hot_vector_shape(in c.types, k, ty, 32));
-        shape_or_dash(inout o, hot_vector_shape(in c.types, k, ty, 64));
-        o.push(10);
+        out.push(32);
+        push_decimal(inout out, hot_elem_bytes(in ctx.types, known, ty));
+        shape_or_dash(inout out, hot_vector_shape(in ctx.types, known, ty, 8));
+        shape_or_dash(inout out, hot_vector_shape(in ctx.types, known, ty, 16));
+        shape_or_dash(inout out, hot_vector_shape(in ctx.types, known, ty, 32));
+        shape_or_dash(inout out, hot_vector_shape(in ctx.types, known, ty, 64));
+        out.push(10);
         // vectors
-        put(inout o, "V");
-        bit(inout o, is_vector_spelling(in c.types, in c.names, k, ty));
-        let s = shape_of(in c.types, in c.names, k, ty);
-        o.push(32);
-        if s.elem == 0 {
-            o.push(45);
+        put(inout out, "V");
+        bit(inout out, is_vector_spelling(in ctx.types, in ctx.names, known, ty));
+        let shape = shape_of(in ctx.types, in ctx.names, known, ty);
+        out.push(32);
+        if shape.elem == 0 {
+            out.push(45);
         } else {
-            if s.kind == 1 {
-                put(inout o, "Vec");
+            if shape.kind == 1 {
+                put(inout out, "Vec");
             } else {
-                put(inout o, "Mask");
+                put(inout out, "Mask");
             }
-            shape_display(s, inout o);
-            o.push(32);
-            push_decimal(inout o, shape_bits(s));
-            o.push(32);
-            push_decimal(inout o, shape_bits(s) / 128);
-            o.push(32);
-            push_decimal(inout o, lanes_per_chunk(s));
-            o.push(32);
-            profile_name(required_profile(s), inout o);
+            shape_display(shape, inout out);
+            out.push(32);
+            push_decimal(inout out, shape_bits(shape));
+            out.push(32);
+            push_decimal(inout out, shape_bits(shape) / 128);
+            out.push(32);
+            push_decimal(inout out, lanes_per_chunk(shape));
+            out.push(32);
+            profile_name(required_profile(shape), inout out);
         }
-        o.push(32);
-        if !type_error(in c.types, in c.names, k, ty, inout o) {
-            o.push(45);
+        out.push(32);
+        if !type_error(in ctx.types, in ctx.names, known, ty, inout out) {
+            out.push(45);
         }
-        o.push(32);
-        let lw = layout_words(in c.types, in c.names, k, ty);
-        if lw == NONE32 {
-            o.push(45);
+        out.push(32);
+        let layout_word_count = layout_words(in ctx.types, in ctx.names, known, ty);
+        if layout_word_count == NONE32 {
+            out.push(45);
         } else {
-            push_decimal(inout o, w(lw));
+            push_decimal(inout out, w(layout_word_count));
         }
-        o.push(10);
-        let node = c.types.node(ty);
+        out.push(10);
+        let node = ctx.types.node(ty);
         if node.kind == TyKind::Row || node.kind == TyKind::Fn {
-            isa_lines(inout o, in c, in vn, node.r2, i);
+            isa_lines(inout out, in ctx, in vec_names, node.r2, type_index);
         }
     }
-    pack_text(in o)
+    pack_text(in out)
 }
 
 // The lane 9 world section: function signatures in name order (name,
 // span, result, params of (name, pass, type, span)), then each ADT's span
 // and each field's temperature (0 none, 1 hot, 2 cold) in `World` order.
-fn read_sigs(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Sigs {
-    let mut sg = sigs_new();
-    let nf = r.word(in b);
-    for i in 0..nf {
-        let name = u32_at(in c.nmap, r.word(in b));
-        let start = r.word(in b);
-        let stop = r.word(in b);
-        let result = u32_at(in c.tmap, r.word(in b));
-        let np = r.word(in b);
-        let pa = n32(sg.params.len());
-        for j in 0..np {
-            let pname = u32_at(in c.nmap, r.word(in b));
-            let pass = wrapping_u8(r.word(in b));
-            let ty = u32_at(in c.tmap, r.word(in b));
-            let ps = r.word(in b);
-            let pe = r.word(in b);
-            sg.params.push(Param { name: pname, pass: pass, ty: ty, start: ps, stop: pe });
+fn read_sigs(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Sigs {
+    let mut sigs = sigs_new();
+    let fn_count = reader.word(in bytes);
+    for i in 0..fn_count {
+        let name = u32_at(in ctx.nmap, reader.word(in bytes));
+        let start = reader.word(in bytes);
+        let stop = reader.word(in bytes);
+        let result = u32_at(in ctx.tmap, reader.word(in bytes));
+        let param_count = reader.word(in bytes);
+        let first_param = n32(sigs.params.len());
+        for j in 0..param_count {
+            let param_name = u32_at(in ctx.nmap, reader.word(in bytes));
+            let param_pass = wrapping_u8(reader.word(in bytes));
+            let param_ty = u32_at(in ctx.tmap, reader.word(in bytes));
+            let param_span_start = reader.word(in bytes);
+            let param_span_stop = reader.word(in bytes);
+            sigs.params.push(Param {
+                name: param_name,
+                pass: param_pass,
+                ty: param_ty,
+                start: param_span_start,
+                stop: param_span_stop
+            });
         }
-        sg.sigs.push(
-            Sig { name: name, start: start, stop: stop, result: result, pa: pa, pn: n32(np) }
-        );
+        sigs.sigs.push(Sig {
+            name: name,
+            start: start,
+            stop: stop,
+            result: result,
+            param_start: first_param,
+            param_count: n32(param_count)
+        });
     }
-    for i in 0..c.world.adts.len() {
-        sg.adt_start.push(r.word(in b));
-        sg.adt_stop.push(r.word(in b));
+    for i in 0..ctx.world.adts.len() {
+        sigs.adt_start.push(reader.word(in bytes));
+        sigs.adt_stop.push(reader.word(in bytes));
     }
-    for i in 0..c.world.fields.len() {
-        sg.temps.push(wrapping_u8(r.word(in b)));
+    for i in 0..ctx.world.fields.len() {
+        sigs.field_temps.push(wrapping_u8(reader.word(in bytes)));
     }
-    sg
+    sigs
 }
 
 // Task "world": `seq::check_world` then `tiled::check_world_adts`, one
 // diagnostic per line. Task words: the lane 9 world section.
 pub fn regions_seqs_world(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let c = read_ctx(inout r, in b);
-    let sg = read_sigs(inout r, in b, in c);
-    let mut d = diags_new();
-    seq_check_world(in c.types, in c.names, in c.world, in sg, inout d);
-    let mut o = ChunkSeq::new[u8]();
-    for i in 0..d.len() {
-        diag_line(inout o, in d, i);
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let ctx = read_ctx(inout reader, in bytes);
+    let sigs = read_sigs(inout reader, in bytes, in ctx);
+    let mut seq_diags = diags_new();
+    seq_check_world(in ctx.types, in ctx.names, in ctx.world, in sigs, inout seq_diags);
+    let mut out = ChunkSeq::new[u8]();
+    for i in 0..seq_diags.len() {
+        diag_line(inout out, in seq_diags, i);
     }
-    let mut dt = diags_new();
-    check_world_adts(in c.types, in c.names, in c.world, in sg, inout dt);
-    for i in 0..dt.len() {
-        diag_line(inout o, in dt, i);
+    let mut tiled_diags = diags_new();
+    check_world_adts(in ctx.types, in ctx.names, in ctx.world, in sigs, inout tiled_diags);
+    for i in 0..tiled_diags.len() {
+        diag_line(inout out, in tiled_diags, i);
     }
-    pack_text(in o)
+    pack_text(in out)
 }
 
 // Task "resolve": `seq::resolve(callee, receiver)` and the operation's
 // properties. Task words: n, n queries of (callee name, receiver type + 1
 // or 0 for a free call).
 pub fn regions_seqs_resolve(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let mut c = read_ctx(inout r, in b);
-    let k = c.world.k;
-    let sn = seq_names_new(inout c.names);
-    let n = r.word(in b);
-    let mut o = ChunkSeq::new[u8]();
-    for i in 0..n {
-        let callee = u32_at(in c.nmap, r.word(in b));
-        let rx = r.word(in b);
-        let receiver = if rx == 0 {
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let mut ctx = read_ctx(inout reader, in bytes);
+    let known = ctx.world.k;
+    let seq_names = seq_names_new(inout ctx.names);
+    let query_count = reader.word(in bytes);
+    let mut out = ChunkSeq::new[u8]();
+    for i in 0..query_count {
+        let callee = u32_at(in ctx.nmap, reader.word(in bytes));
+        let receiver_code = reader.word(in bytes);
+        let receiver = if receiver_code == 0 {
             NONE32
         } else {
-            u32_at(in c.tmap, wrapping_sub(rx, 1))
+            u32_at(in ctx.tmap, wrapping_sub(receiver_code, 1))
         };
-        let op = resolve(inout c.names, in sn, in c.types, k, callee, receiver);
+        let op = resolve(inout ctx.names, in seq_names, in ctx.types, known, callee, receiver);
         if op == 0 {
-            put(inout o, "-\n");
+            put(inout out, "-\n");
             continue;
         }
-        op_debug(op, inout o);
-        o.push(32);
-        op_name(in c.names, in sn, op, inout o);
-        bit(inout o, fallible(op));
-        bit(inout o, mutates(op));
+        op_debug(op, inout out);
+        out.push(32);
+        op_name(in ctx.names, in seq_names, op, inout out);
+        bit(inout out, fallible(op));
+        bit(inout out, mutates(op));
         if receiver_pass(op) == 0 {
-            put(inout o, " In");
+            put(inout out, " In");
         } else {
-            put(inout o, " Inout");
+            put(inout out, " Inout");
         }
-        bit(inout o, byte_scan(op));
-        bit(inout o, has_receiver(op));
-        bit(inout o, place_primitive(op));
-        bit(inout o, grows(op));
-        o.push(32);
-        op_debug(with_arity(op, 3), inout o);
-        o.push(10);
+        bit(inout out, byte_scan(op));
+        bit(inout out, has_receiver(op));
+        bit(inout out, place_primitive(op));
+        bit(inout out, grows(op));
+        out.push(32);
+        op_debug(with_arity(op, 3), inout out);
+        out.push(10);
     }
-    pack_text(in o)
+    pack_text(in out)
 }
 
 // The decode alone (`read_ctx` and the vector names), which the speed
 // test subtracts from the type task's time.
 pub fn regions_seqs_decode(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let mut c = read_ctx(inout r, in b);
-    let vn = vec_names_new(inout c.names);
-    let o = ChunkSeq::new[u8]();
-    pack_text(in o)
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let mut ctx = read_ctx(inout reader, in bytes);
+    let vec_names = vec_names_new(inout ctx.names);
+    let out = ChunkSeq::new[u8]();
+    pack_text(in out)
 }
 
 // `vector::check_world` (isa.ves): the world facts in `input`, the tree

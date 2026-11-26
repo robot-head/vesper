@@ -77,85 +77,58 @@ test {
         );
         r = check(
             some_u64(
-                option_map(
-                    some,
-                    |x: u64| -> u64 {
-                        wrapping_add(x, 1)
-                    }
-                ),
+                option_map(some, |x: u64| -> u64 {
+                    wrapping_add(x, 1)
+                }),
                 5
             ),
             6,
             r
         );
         r = check(
-            is_none(
-                option_map(
-                    none,
-                    |x: u64| -> u64 {
-                        x
-                    }
-                )
-            ),
+            is_none(option_map(none, |x: u64| -> u64 {
+                x
+            })),
             7,
             r
         );
         r = check(
-            map_or(
-                some,
-                0,
-                |x: u64| -> u64 {
-                    wrapping_mul(x, 10)
-                }
-            )
+            map_or(some, 0, |x: u64| -> u64 {
+                wrapping_mul(x, 10)
+            })
                 == 40,
             8,
             r
         );
         r = check(
-            map_or(
-                none,
-                3,
-                |x: u64| -> u64 {
-                    x
-                }
-            )
+            map_or(none, 3, |x: u64| -> u64 {
+                x
+            })
                 == 3,
             9,
             r
         );
-        let half = option_and_then(
-            some,
-            |x: u64| -> Option[u64] {
-                if x % 2 == 0 {
-                    Option::Some(x / 2)
-                } else {
-                    Option::None
-                }
+        let half = option_and_then(some, |x: u64| -> Option[u64] {
+            if x % 2 == 0 {
+                Option::Some(x / 2)
+            } else {
+                Option::None
             }
-        );
+        });
         r = check(some_u64(half, 2), 10, r);
         r = check(some_u64(option_or(none, some), 4) && some_u64(option_or(some, none), 4), 11, r);
         r = check(
-            is_none(
-                filter(
-                    some,
-                    |x: u64| -> bool {
-                        x > 10
-                    }
-                )
-            ),
+            is_none(filter(some, |x: u64| -> bool {
+                x > 10
+            })),
             12,
             r
         );
         r = check(
             some_u64(
-                filter(
-                    some,
-                    |x: u64| -> bool {
-                        x < 10
-                    }
-                ),
+                filter(some, |x: u64| -> bool {
+                    x < 10
+                }),
                 4
             ),
             13,
@@ -193,84 +166,54 @@ test {
         r = check(some_u64(err(bad), 3) && is_none(err(good)), 4, r);
         r = check(result_unwrap_or(bad, 1) == 1 && result_unwrap_or(good, 1) == 6, 5, r);
         r = check(
-            result_unwrap_or_else(
-                bad,
-                |e: u64| -> u64 {
-                    wrapping_mul(e, 2)
-                }
-            )
+            result_unwrap_or_else(bad, |e: u64| -> u64 {
+                wrapping_mul(e, 2)
+            })
                 == 6,
             6,
             r
         );
         r = check(
-            result_unwrap_or_else(
-                good,
-                |e: u64| -> u64 {
-                    e
-                }
-            )
+            result_unwrap_or_else(good, |e: u64| -> u64 {
+                e
+            })
                 == 6,
             7,
             r
         );
-        let doubled = result_map(
-            good,
-            |x: u64| -> u64 {
-                wrapping_mul(x, 2)
-            }
-        );
+        let doubled = result_map(good, |x: u64| -> u64 {
+            wrapping_mul(x, 2)
+        });
         r = check(result_unwrap_or(doubled, 0) == 12, 8, r);
         r = check(
-            is_err(
-                result_map(
-                    bad,
-                    |x: u64| -> u64 {
-                        x
-                    }
-                )
-            ),
+            is_err(result_map(bad, |x: u64| -> u64 {
+                x
+            })),
             9,
             r
         );
-        let relabeled = map_err(
-            bad,
-            |e: u64| -> u64 {
-                wrapping_add(e, 100)
-            }
-        );
+        let relabeled = map_err(bad, |e: u64| -> u64 {
+            wrapping_add(e, 100)
+        });
         r = check(some_u64(err(relabeled), 103), 10, r);
         r = check(
             some_u64(
-                ok(
-                    map_err(
-                        good,
-                        |e: u64| -> u64 {
-                            e
-                        }
-                    )
-                ),
+                ok(map_err(good, |e: u64| -> u64 {
+                    e
+                })),
                 6
             ),
             11,
             r
         );
-        let chained = result_and_then(
-            good,
-            |x: u64| -> Result[u64, u64] {
-                if x > 5 { Result::Err(x) } else { Result::Ok(x) }
-            }
-        );
+        let chained = result_and_then(good, |x: u64| -> Result[u64, u64] {
+            if x > 5 { Result::Err(x) } else { Result::Ok(x) }
+        });
         r = check(some_u64(err(chained), 6), 12, r);
         r = check(
-            is_err(
-                result_and_then(
-                    bad,
-                    |x: u64| -> Result[u64, u64] {
-                        Result::Ok(x)
-                    }
-                )
-            ),
+            is_err(result_and_then(bad, |x: u64| -> Result[u64, u64] {
+                Result::Ok(x)
+            })),
             13,
             r
         );

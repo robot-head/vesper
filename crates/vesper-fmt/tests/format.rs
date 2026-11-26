@@ -830,22 +830,21 @@ fn member_chains_keep_a_short_receiver_and_overflow_their_one_call() {
 "
     );
     // The chain's one call ends it and could not fit on a line of its own, so
-    // its arguments break and its dots stay on the receiver's line.
+    // its arguments break and its dots stay on the receiver's line. Its one
+    // argument stays on the call's line too.
     assert_eq!(
         verify(
             "fn f(){p.blocks.push(Blk{entry:entry,ia:first_index,in_n:n32(inn),out_tok:out_tok,pa:block_pa,pn:n32(bpn)});}"
         ),
         "fn f() {
-    p.blocks.push(
-        Blk {
-            entry: entry,
-            ia: first_index,
-            in_n: n32(inn),
-            out_tok: out_tok,
-            pa: block_pa,
-            pn: n32(bpn)
-        }
-    );
+    p.blocks.push(Blk {
+        entry: entry,
+        ia: first_index,
+        in_n: n32(inn),
+        out_tok: out_tok,
+        pa: block_pa,
+        pn: n32(bpn)
+    });
 }
 "
     );
@@ -964,6 +963,146 @@ fn closure_pipes_keep_comments_and_empty_closures_apart() {
     | x;
     let h = | | 1;
     let k = |/* a */ x| x;
+}
+"
+    );
+}
+#[test]
+fn a_calls_one_argument_stays_on_its_line_and_breaks_inside_like_rustfmt() {
+    // A struct literal, a call and a `match` keep the call's line.
+    assert_eq!(
+        verify(
+            "fn f(){rows.push(Row{name:first_long_field_value,width:second_long_field_value,kind:kind_value});\
+             out.push(combine_the_values(first_long_argument_value,second_long_argument_value,third_value));\
+             let n=widen(match lookup(table,key){Option::Some(v)=>v,Option::None=>0,});}"
+        ),
+        "fn f() {
+    rows.push(Row {
+        name: first_long_field_value,
+        width: second_long_field_value,
+        kind: kind_value
+    });
+    out.push(combine_the_values(
+        first_long_argument_value,
+        second_long_argument_value,
+        third_value
+    ));
+    let n = widen(match lookup(table, key) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    });
+}
+"
+    );
+    // Nested calls each keep the line, and what fits stays on one line.
+    assert_eq!(
+        verify(
+            "fn f()->u64{wrap(Option::Some(Pair{left:first_long_field_value,right:second_long_field_value_name_here}))}\
+             fn g()->u64{wrap(Pair{left:a,right:b})}"
+        ),
+        "fn f() -> u64 {
+    wrap(Option::Some(Pair {
+        left: first_long_field_value,
+        right: second_long_field_value_name_here
+    }))
+}
+fn g() -> u64 {
+    wrap(Pair { left: a, right: b })
+}
+"
+    );
+    // Several arguments, an argument with more after its delimiter, a
+    // trailing comma, and a first line too long for the call's line all
+    // break as before.
+    assert_eq!(
+        verify(
+            "fn f(){out.push(a,Row{name:first_long_field_value,width:second_long_field_value,kind:kind_value});\
+             out.push(lookup(first_long_argument_value,second_long_argument_value,third_value_names).value);\
+             out.push(Row{name:first_long_field_value,width:second_long_field_value,kind:k},);\
+             if a{if b{if c{if d{the_outer_function_with_a_long_name(the_inner_function_with_a_longer_name_too_xy(first,second));}}}}}"
+        ),
+        "fn f() {
+    out.push(
+        a,
+        Row { name: first_long_field_value, width: second_long_field_value, kind: kind_value }
+    );
+    out.push(
+        lookup(first_long_argument_value, second_long_argument_value, third_value_names).value
+    );
+    out.push(
+        Row { name: first_long_field_value, width: second_long_field_value, kind: k },
+    );
+    if a {
+        if b {
+            if c {
+                if d {
+                    the_outer_function_with_a_long_name(
+                        the_inner_function_with_a_longer_name_too_xy(first, second)
+                    );
+                }
+            }
+        }
+    }
+}
+"
+    );
+}
+#[test]
+fn a_closure_or_block_after_a_calls_other_arguments_stays_on_its_line_like_rustfmt() {
+    // A closure with a block body, or a block, as the last argument keeps the
+    // call's line with the arguments before it, up to the full width.
+    assert_eq!(
+        verify(
+            "fn f(){let half=option_and_then(some,|x:u64|->Option[u64]{let y=x/2;Option::Some(y)});\
+             each(|item|{put(item);});keep(a,{let v=1;v});\
+             fold_all_the_values(first_long_argument_value,second_long_argument_value,|acc,next_item_ab|{acc+next_item_ab});}"
+        ),
+        "fn f() {
+    let half = option_and_then(some, |x: u64| -> Option[u64] {
+        let y = x / 2;
+        Option::Some(y)
+    });
+    each(|item| {
+        put(item);
+    });
+    keep(a, {
+        let v = 1;
+        v
+    });
+    fold_all_the_values(first_long_argument_value, second_long_argument_value, |acc, next_item_ab| {
+        acc + next_item_ab
+    });
+}
+"
+    );
+    // A first line past the width, a closure before another argument, and a
+    // trailing comma break as before; a closure without a block fits.
+    assert_eq!(
+        verify(
+            "fn f(){fold_all_the_values(first_long_argument_value,second_long_argument_value,|acc,next_item_abc|{acc+next_item_abc});\
+             apply(|x|{x},y);apply(a,|x|{x},);apply(a,|x|x+1);}"
+        ),
+        "fn f() {
+    fold_all_the_values(
+        first_long_argument_value,
+        second_long_argument_value,
+        |acc, next_item_abc| {
+            acc + next_item_abc
+        }
+    );
+    apply(
+        |x| {
+            x
+        },
+        y
+    );
+    apply(
+        a,
+        |x| {
+            x
+        },
+    );
+    apply(a, |x| x + 1);
 }
 "
     );

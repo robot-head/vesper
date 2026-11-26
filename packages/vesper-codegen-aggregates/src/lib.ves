@@ -4218,7 +4218,8 @@ fn seq_option_op(in p: Program, in names: Names, in sh: Shapes, shape: u64, pool
         || label_is(in p, in names, pool, "Last", false) {
         return true;
     }
-    if label_is(in p, in names, pool, "Wide(", true) {
+    if label_is(in p, in names, pool, "Wide(", true)
+        || label_is(in p, in names, pool, "Hoisted(Wide(", true) {
         return label_has(in p, in names, pool, "write: false")
             && label_has(in p, in names, pool, "total: true");
     }
@@ -5505,9 +5506,15 @@ fn rewrite_scalar_enums(
             }
             tn = wrapping_sub(p.ops.len(), ta);
         }
-        blocks.push(
-            BlockRow { ha: ha, hn: hn, i0: i0, ic: rows.len(), term: block.term, ta: ta, tn: tn }
-        );
+        blocks.push(BlockRow {
+            ha: ha,
+            hn: hn,
+            i0: i0,
+            ic: rows.len(),
+            term: block.term,
+            ta: ta,
+            tn: tn
+        });
     }
     let b0 = p.blocks.len();
     for i in 0..blocks.len() {

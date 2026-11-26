@@ -141,8 +141,8 @@ below, and changes the swap's row in its `src/swap/` file to `pass(...)`.
 both and that the others really stay on Rust, and
 `gated_hybrid_matches_the_default_compiler` (tests/differential.rs) runs the
 gated set over the whole corpus with 0 differences. Today `gated` holds
-`component` (wit-component), `hoist` (bounds-hoist), `optimize`, and
-`entry_plans` and `export_plans` (native-walk).
+`component` (wit-component), `hoist` (bounds-hoist), `optimize`,
+`entry_plans` and `export_plans` (native-walk), and `sugar`.
 
 ### Before the retirement PR
 
@@ -302,3 +302,4 @@ the Rust lines deleted.
 | `wit-component` (PASS; compiler module, `src/wasm_backend/component.rs` and the wit-component dependency go at the retirement) | SH5-11 | 0 differences on 1,383 cases; tests 1/1 pass | wrap 0.05x [0.05x, 0.05x] n=12; build 0.67x [0.65x, 0.68x] n=12 | 0 (933 at the retirement) | #1334 flip |
 | `vesper-aether` virtqueue walks (PASS) | SH6-14 | 0 differences; tests 2/2 pass | virtqueue 1.44x [1.36x, 1.47x] n=30 | 331 (now the tests' reference) | #1494 |
 | `native-walk` (PASS; compiler module, the walk's planning in `src/native.rs` and `src/native_export.rs` goes at the retirement) | G1-11 | 0 differences on 978 cases; tests 1/1 pass | entries 1.00x [0.98x, 1.03x] n=12; exports 0.99x [0.93x, 1.03x] n=12 | 0 | #2056 |
+| `sugar` (PASS; compiler module, `crates/vesper-syntax/src/sugar_expand*.rs` goes at the retirement) | SH1-14 | 0 differences on 3,872 cases; tests 1/1 pass | expand 1.33x [1.28x, 1.36x] n=12 | 0 (3,282 at the retirement) | #1157 part 7 |

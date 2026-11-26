@@ -34,141 +34,141 @@ pub fn ambiguous() -> u32 {
 
 // Appends bytes `from..to` of `sym`, escaped (`escape_component`): `_`
 // becomes `_1` and `-` becomes `_2`.
-fn push_escaped(inout s: St, sym: u32, from: u64, to: u64) {
-    let (a, z) = s.g.span(symbol_from_id(sym));
-    let mut run = wrapping_add(a, from);
-    let end = wrapping_add(a, to);
+fn push_escaped(inout loader: St, sym: u32, from: u64, to: u64) {
+    let (sym_start, sym_end) = loader.interner.span(symbol_from_id(sym));
+    let mut run = wrapping_add(sym_start, from);
+    let end = wrapping_add(sym_start, to);
     let mut i = run;
     loop {
-        if i >= end || i >= z {
+        if i >= end || i >= sym_end {
             break;
         }
-        let c = match s.g.text_byte(i) {
-            Option::Some(c) => c,
+        let byte = match loader.interner.text_byte(i) {
+            Option::Some(byte) => byte,
             Option::None => 0,
         };
-        if c == 95 || c == 45 {
-            s.buf.push_str(in s.g.text[run..i]);
-            if c == 95 {
-                s.buf.push_str(in "_1");
+        if byte == 95 || byte == 45 {
+            loader.buf.push_str(in loader.interner.text[run..i]);
+            if byte == 95 {
+                loader.buf.push_str(in "_1");
             } else {
-                s.buf.push_str(in "_2");
+                loader.buf.push_str(in "_2");
             }
             run = inc(i);
         }
         i = inc(i);
     }
-    let stop = if end < z { end } else { z };
+    let stop = if end < sym_end { end } else { sym_end };
     if run < stop {
-        s.buf.push_str(in s.g.text[run..stop]);
+        loader.buf.push_str(in loader.interner.text[run..stop]);
     }
 }
 
 // `mangled(name, path, item)`: the escaped components of the package's
 // scope and name, the module path and the item, joined by `__`.
-fn mangle(inout s: St, m: u32, item: u32) -> u32 {
-    let name = at32(in s.pkg_name, w(at32(in s.mod_pkg, w(m))));
-    let n = sym_len(in s, name);
+fn mangle(inout loader: St, module: u32, item: u32) -> u32 {
+    let pkg_name = at32(in loader.pkg_name, w(at32(in loader.mod_pkg, w(module))));
+    let len = sym_len(in loader, pkg_name);
     // `trim_start_matches('@')`.
     let mut start: u64 = 0;
     loop {
-        if start >= n || sym_byte(in s, name, start) != 64 {
+        if start >= len || sym_byte(in loader, pkg_name, start) != 64 {
             break;
         }
         start = inc(start);
     }
-    let mut slash = n;
+    let mut slash = len;
     let mut i = start;
     loop {
-        if i >= n {
+        if i >= len {
             break;
         }
-        if sym_byte(in s, name, i) == 47 {
+        if sym_byte(in loader, pkg_name, i) == 47 {
             slash = i;
             break;
         }
         i = inc(i);
     }
-    s.buf.clear();
-    if slash == n {
+    loader.buf.clear();
+    if slash == len {
         // No scope: `("", name)`, the name untrimmed.
-        s.buf.push_str(in "__");
-        push_escaped(inout s, name, 0, n);
+        loader.buf.push_str(in "__");
+        push_escaped(inout loader, pkg_name, 0, len);
     } else {
-        push_escaped(inout s, name, start, slash);
-        s.buf.push_str(in "__");
-        push_escaped(inout s, name, inc(slash), n);
+        push_escaped(inout loader, pkg_name, start, slash);
+        loader.buf.push_str(in "__");
+        push_escaped(inout loader, pkg_name, inc(slash), len);
     }
-    for k in 0..mod_path_len(in s, m) {
-        s.buf.push_str(in "__");
-        let x = mod_seg(in s, m, k);
-        push_escaped(inout s, x, 0, sym_len(in s, x));
+    for k in 0..mod_path_len(in loader, module) {
+        loader.buf.push_str(in "__");
+        let seg = mod_seg(in loader, module, k);
+        push_escaped(inout loader, seg, 0, sym_len(in loader, seg));
     }
-    s.buf.push_str(in "__");
-    push_escaped(inout s, item, 0, sym_len(in s, item));
-    s.g.intern(in s.buf).id()
+    loader.buf.push_str(in "__");
+    push_escaped(inout loader, item, 0, sym_len(in loader, item));
+    loader.interner.intern(in loader.buf).id()
 }
 
 // Source items shadow foreign types of the same name.
-pub fn is_foreign(in s: St, key: u64) -> bool {
-    s.foreign_types.contains_key(key) && !s.item_kind.contains_key(key)
+pub fn is_foreign(in loader: St, key: u64) -> bool {
+    loader.foreign_types.contains_key(key) && !loader.item_kind.contains_key(key)
 }
 
 // `Resolver::name_of`: its root re-export name, its plain name in the root
 // package's root module, else the mangled name.
-pub fn name_of(inout s: St, key: u64) -> u32 {
-    if is_foreign(in s, key) {
+pub fn name_of(inout loader: St, key: u64) -> u32 {
+    if is_foreign(in loader, key) {
         return lo(key);
     }
-    match s.renamed.get(key) {
-        Option::Some(n) => {
-            return n;
+    match loader.renamed.get(key) {
+        Option::Some(name) => {
+            return name;
         },
         Option::None => {},
     }
-    let m = hi(key);
+    let module = hi(key);
     let item = lo(key);
-    if m == s.root_mod {
+    if module == loader.root_mod {
         return item;
     }
-    match s.mangled.get(key) {
-        Option::Some(n) => {
-            return n;
+    match loader.mangled.get(key) {
+        Option::Some(name) => {
+            return name;
         },
         Option::None => {},
     }
-    let x = mangle(inout s, m, item);
-    s.mangled.insert(key, x);
-    x
+    let mangled = mangle(inout loader, module, item);
+    loader.mangled.insert(key, mangled);
+    mangled
 }
 
 // `Resolver::shown`: `@scope/name::m::item`, appended to `out`.
-pub fn push_shown(in s: St, key: u64, inout out: String) {
-    let m = hi(key);
-    push_sym(in s, at32(in s.pkg_name, w(at32(in s.mod_pkg, w(m)))), inout out);
-    for k in 0..mod_path_len(in s, m) {
+pub fn push_shown(in loader: St, key: u64, inout out: String) {
+    let module = hi(key);
+    push_sym(in loader, at32(in loader.pkg_name, w(at32(in loader.mod_pkg, w(module)))), inout out);
+    for k in 0..mod_path_len(in loader, module) {
         out.push_str(in "::");
-        push_sym(in s, mod_seg(in s, m, k), inout out);
+        push_sym(in loader, mod_seg(in loader, module, k), inout out);
     }
     out.push_str(in "::");
-    push_sym(in s, lo(key), inout out);
+    push_sym(in loader, lo(key), inout out);
 }
 
-pub fn shown(inout s: St, key: u64) -> u32 {
-    let mut t = String::new();
-    push_shown(in s, key, inout t);
-    s.g.intern(in t).id()
+pub fn shown(inout loader: St, key: u64) -> u32 {
+    let mut text = String::new();
+    push_shown(in loader, key, inout text);
+    loader.interner.intern(in text).id()
 }
 
 // ---------------------------------------------------------------- paths
 
 // `Resolver::root_of`: a path root, `self` (the package root), `super`
-// repeated `supers` times (ancestors of module `cur`) or the dependency
-// `package` of `cur`'s package. Returns the package (or `none()`), writes
-// the base module path to `base` and its display name to `shown`.
+// repeated `supers` times (ancestors of `cur_module`) or the dependency
+// `package` of `cur_module`'s package. Returns the package (or `none()`),
+// writes the base module path to `base` and its display name to `shown`.
 fn root_of(
-    inout s: St,
-    cur: u32,
+    inout loader: St,
+    cur_module: u32,
     package: u32,
     supers: u32,
     start: u32,
@@ -176,84 +176,84 @@ fn root_of(
     inout base: ChunkSeq[u32],
     inout shown: String
 ) -> u32 {
-    let p = at32(in s.mod_pkg, w(cur));
+    let pkg = at32(in loader.mod_pkg, w(cur_module));
     base.clear();
     shown.clear();
     if package != none() {
-        let f = w(at32(in s.pkg_dep_first, w(p)));
-        let n = w(at32(in s.pkg_dep_len, w(p)));
-        for i in 0..n {
-            if at32(in s.dep_name, wrapping_add(f, i)) == package {
-                let d = at32(in s.dep_target, wrapping_add(f, i));
-                push_sym(in s, at32(in s.pkg_name, w(d)), inout shown);
-                return d;
+        let first = w(at32(in loader.pkg_dep_first, w(pkg)));
+        let count = w(at32(in loader.pkg_dep_len, w(pkg)));
+        for i in 0..count {
+            if at32(in loader.dep_name, wrapping_add(first, i)) == package {
+                let dep = at32(in loader.dep_target, wrapping_add(first, i));
+                push_sym(in loader, at32(in loader.pkg_name, w(dep)), inout shown);
+                return dep;
             }
         }
         let mut optional = false;
-        let of = w(at32(in s.pkg_opt_first, w(p)));
-        let on = w(at32(in s.pkg_opt_len, w(p)));
-        for i in 0..on {
-            if at32(in s.opt_name, wrapping_add(of, i)) == package {
+        let opt_first = w(at32(in loader.pkg_opt_first, w(pkg)));
+        let opt_count = w(at32(in loader.pkg_opt_len, w(pkg)));
+        for i in 0..opt_count {
+            if at32(in loader.opt_name, wrapping_add(opt_first, i)) == package {
                 optional = true;
             }
         }
-        err(inout s, unknown_import(), start, end);
+        err(inout loader, unknown_import(), start, end);
         let mut msg = String::new();
-        push_sym(in s, package, inout msg);
+        push_sym(in loader, package, inout msg);
         if optional {
             msg.push_str(in " is an optional dependency of ");
-            push_sym(in s, at32(in s.pkg_name, w(p)), inout msg);
+            push_sym(in loader, at32(in loader.pkg_name, w(pkg)), inout msg);
             msg.push_str(in ", and package checking does not enable optional dependencies yet");
         } else {
             msg.push_str(in " is not a dependency of ");
-            push_sym(in s, at32(in s.pkg_name, w(p)), inout msg);
+            push_sym(in loader, at32(in loader.pkg_name, w(pkg)), inout msg);
             msg.push_str(in "; add it to [dependencies] in Loom.toml");
         }
-        s.err_msg.push_str(in msg);
+        loader.err_msg.push_str(in msg);
         return none();
     }
-    let depth = mod_path_len(in s, cur);
+    let depth = mod_path_len(in loader, cur_module);
     if supers == 0 {
         shown.push_str(in "self");
-        return p;
+        return pkg;
     }
     if w(supers) > depth {
-        err(inout s, unknown_import(), start, end);
+        err(inout loader, unknown_import(), start, end);
         let mut msg = String::new();
         msg.push_str(in "`super` goes above the package root: module ");
         msg.push_str(in "self");
         for k in 0..depth {
             msg.push_str(in "::");
-            push_sym(in s, mod_seg(in s, cur, k), inout msg);
+            push_sym(in loader, mod_seg(in loader, cur_module, k), inout msg);
         }
         msg.push_str(in " has ");
         push_decimal(inout msg, depth);
         msg.push_str(in " ancestor module(s)");
-        s.err_msg.push_str(in msg);
+        loader.err_msg.push_str(in msg);
         return none();
     }
     shown.push_str(in "self");
     let keep = wrapping_sub(depth, w(supers));
     for k in 0..keep {
-        let x = mod_seg(in s, cur, k);
-        base.push(x);
+        let seg = mod_seg(in loader, cur_module, k);
+        base.push(seg);
         shown.push_str(in "::");
-        push_sym(in s, x, inout shown);
+        push_sym(in loader, seg, inout shown);
     }
-    p
+    pkg
 }
 
-// `Resolver::use_module`: the module use row `u` of module `cur` names, or
-// `none()`; writes its display name to `shown`.
-pub fn use_module(inout s: St, cur: u32, u: u32, inout shown: String) -> u32 {
-    let start = at32(in s.use_start, w(u));
-    let end = at32(in s.use_end, w(u));
+// `Resolver::use_module`: the module use row `use_row` of `cur_module`
+// names, or `none()`; writes its display name to `shown`.
+pub fn use_module(inout loader: St, cur_module: u32, use_row: u32, inout shown: String) -> u32 {
+    let start = at32(in loader.use_start, w(use_row));
+    let end = at32(in loader.use_end, w(use_row));
     let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let pkg = root_of(
-        inout s,
-        cur,
-        at32(in s.use_package, w(u)),
-        at32(in s.use_supers, w(u)),
+        inout loader,
+        cur_module,
+        at32(in loader.use_package, w(use_row)),
+        at32(in loader.use_supers, w(use_row)),
         start,
         end,
         inout path,
@@ -262,31 +262,31 @@ pub fn use_module(inout s: St, cur: u32, u: u32, inout shown: String) -> u32 {
     if pkg == none() {
         return none();
     }
-    let f = w(at32(in s.use_path_first, w(u)));
-    let n = w(at32(in s.use_path_len, w(u)));
-    for i in 0..n {
-        let x = at32(in s.seg, wrapping_add(f, i));
-        path.push(x);
+    let first = w(at32(in loader.use_path_first, w(use_row)));
+    let count = w(at32(in loader.use_path_len, w(use_row)));
+    for i in 0..count {
+        let seg = at32(in loader.segments, wrapping_add(first, i));
+        path.push(seg);
         shown.push_str(in "::");
-        push_sym(in s, x, inout shown);
+        push_sym(in loader, seg, inout shown);
     }
-    let m = find_module(in s, pkg, in path);
-    if m == none() {
-        err(inout s, unknown_import(), start, end);
+    let module = find_module(in loader, pkg, in path);
+    if module == none() {
+        err(inout loader, unknown_import(), start, end);
         let mut msg = String::new();
         msg.push_str(in "no module ");
         msg.push_str(in shown);
-        s.err_msg.push_str(in msg);
+        loader.err_msg.push_str(in msg);
     }
-    m
+    module
 }
 
-// `Resolver::lookup`: item `name` of module `tm`, declared there (and
+// `Resolver::lookup`: item `name` of `target_module`, declared there (and
 // `pub`, unless the lookup comes from that module) or one of its `pub use`
 // names. Returns the item key (or `no_key()`) and its kind.
 pub fn lookup(
-    inout s: St,
-    tm: u32,
+    inout loader: St,
+    target_module: u32,
     name: u32,
     same: bool,
     in shown: String,
@@ -296,250 +296,270 @@ pub fn lookup(
     // A constant `NAME` (or a value enum member `E::M`) is the function
     // `const$NAME`.
     let mut item = name;
-    if !s.item_kind.contains_key(pair(tm, name)) {
-        let c = const_of(inout s, name);
-        if s.item_kind.contains_key(pair(tm, c)) {
-            item = c;
+    if !loader.item_kind.contains_key(pair(target_module, name)) {
+        let const_name = const_of(inout loader, name);
+        if loader.item_kind.contains_key(pair(target_module, const_name)) {
+            item = const_name;
         }
     }
-    let k = pair(tm, item);
-    match s.item_kind.get(k) {
+    let key = pair(target_module, item);
+    match loader.item_kind.get(key) {
         Option::Some(kind) => {
-            if !same && !s.public.contains_key(k) {
-                err(inout s, private_item(), start, end);
+            if !same && !loader.public.contains_key(key) {
+                err(inout loader, private_item(), start, end);
                 let mut msg = String::new();
                 msg.push_str(in "'");
-                push_sym(in s, name, inout msg);
+                push_sym(in loader, name, inout msg);
                 msg.push_str(in "' is private to module ");
                 msg.push_str(in shown);
-                s.err_msg.push_str(in msg);
-                s.err_help.push_str(in "mark the item `pub` to export it");
-                s.err_has_help = true;
+                loader.err_msg.push_str(in msg);
+                loader.err_help.push_str(in "mark the item `pub` to export it");
+                loader.err_has_help = true;
                 return (no_key(), 0);
             }
-            return (k, kind);
+            return (key, kind);
         },
         Option::None => {},
     }
-    let rk = pair(tm, name);
-    match s.reexp_key.get(rk) {
+    let local_key = pair(target_module, name);
+    match loader.reexport_key.get(local_key) {
         Option::Some(target) => {
-            let kind = match s.reexp_kind.get(rk) {
-                Option::Some(x) => x,
+            let kind = match loader.reexport_kind.get(local_key) {
+                Option::Some(stored_kind) => stored_kind,
                 Option::None => 0,
             };
             return (target, kind);
         },
         Option::None => {},
     }
-    if s.foreign_types.contains_key(rk) {
-        return (rk, kind_both());
+    if loader.foreign_types.contains_key(local_key) {
+        return (local_key, kind_both());
     }
-    err(inout s, unknown_import(), start, end);
+    err(inout loader, unknown_import(), start, end);
     let mut msg = String::new();
     msg.push_str(in "module ");
     msg.push_str(in shown);
     msg.push_str(in " has no item '");
-    push_sym(in s, name, inout msg);
+    push_sym(in loader, name, inout msg);
     msg.push_str(in "'");
-    s.err_msg.push_str(in msg);
-    let c = sym_byte(in s, name, 0);
-    if sym_len(in s, name) > 0 && c >= 65 && c <= 90 && mod_path_len(in s, tm) == 0 {
-        s.err_help.push_str(
+    loader.err_msg.push_str(in msg);
+    let first_byte = sym_byte(in loader, name, 0);
+    if sym_len(in loader, name) > 0
+        && first_byte >= 65
+        && first_byte <= 90
+        && mod_path_len(in loader, target_module) == 0 {
+        loader.err_help.push_str(
             in "a `.vsys` library is not an item: every module names it directly, as `Lib::f(..)` and `eff [Ffi[Lib]]`, with no import"
         );
-        s.err_has_help = true;
+        loader.err_has_help = true;
     }
     (no_key(), 0)
 }
 
-// The local name of use-name row `n` (`UseName::local`).
-pub fn local_of(in s: St, n: u64) -> u32 {
-    let alias = at32(in s.un_alias, n);
+// The local name of use-name row `name_row` (`UseName::local`).
+pub fn local_of(in loader: St, name_row: u64) -> u32 {
+    let alias = at32(in loader.import_alias, name_row);
     if alias != none() {
         alias
     } else {
-        at32(in s.un_name, n)
+        at32(in loader.import_name, name_row)
     }
 }
 
-// Inserts member `member` with item key `key` into `s.grp_m`/`s.grp_k`,
-// keeping them in the members' byte order.
-fn grp_insert(inout s: St, member: u32, key: u64) {
-    s.grp_m.push(member);
-    s.grp_k.push(key);
-    let mut j = wrapping_sub(s.grp_m.len(), 1);
+// Inserts member `member` with item key `key` into `loader.result_members`
+// and `loader.result_keys`, keeping them in the members' byte order.
+fn grp_insert(inout loader: St, member: u32, key: u64) {
+    loader.result_members.push(member);
+    loader.result_keys.push(key);
+    let mut j = wrapping_sub(loader.result_members.len(), 1);
     loop {
         if j == 0 {
             break;
         }
-        let a = at32(in s.grp_m, wrapping_sub(j, 1));
-        if !sym_less(in s, member, a) {
+        let prev = at32(in loader.result_members, wrapping_sub(j, 1));
+        if !sym_less(in loader, member, prev) {
             break;
         }
-        let ka = at64(in s.grp_k, wrapping_sub(j, 1));
-        s.grp_m.try_set(j, a);
-        s.grp_k.try_set(j, ka);
-        s.grp_m.try_set(wrapping_sub(j, 1), member);
-        s.grp_k.try_set(wrapping_sub(j, 1), key);
+        let prev_key = at64(in loader.result_keys, wrapping_sub(j, 1));
+        loader.result_members.try_set(j, prev);
+        loader.result_keys.try_set(j, prev_key);
+        loader.result_members.try_set(wrapping_sub(j, 1), member);
+        loader.result_keys.try_set(wrapping_sub(j, 1), key);
         j = wrapping_sub(j, 1);
     }
 }
 
-// `Resolver::group`: the members of a value enum `name` of module `tm`,
+// `Resolver::group`: the members of a value enum `name` of `target_module`,
 // declared there (and `pub`, unless the lookup comes from that module) or
-// re-exported by it, into `s.grp_m` (member names, in byte order) and
-// `s.grp_k` (their constants' item keys). Returns 0 when the module has no
+// re-exported by it, into `loader.result_members` (member names, in byte
+// order) and `loader.result_keys` (their constants' item keys). Returns 0 when the module has no
 // value enum of that name, 1 with the members, 2 with a pending error.
 pub fn group(
-    inout s: St,
-    tm: u32,
+    inout loader: St,
+    target_module: u32,
     name: u32,
     same: bool,
     in shown: String,
     start: u32,
     end: u32
 ) -> u8 {
-    s.grp_m.clear();
-    s.grp_k.clear();
-    match s.grp_head.get(pair(tm, name)) {
+    loader.result_members.clear();
+    loader.result_keys.clear();
+    match loader.group_head.get(pair(target_module, name)) {
         Option::Some(first) => {
-            let mut r = first;
+            let mut row = first;
             loop {
-                if r == none() {
+                if row == none() {
                     break;
                 }
-                let item = at32(in s.grp_item, w(r));
-                if !same && !s.public.contains_key(pair(tm, item)) {
-                    err(inout s, private_item(), start, end);
+                let item = at32(in loader.group_const, w(row));
+                if !same && !loader.public.contains_key(pair(target_module, item)) {
+                    err(inout loader, private_item(), start, end);
                     let mut msg = String::new();
                     msg.push_str(in "value enum '");
-                    push_sym(in s, name, inout msg);
+                    push_sym(in loader, name, inout msg);
                     msg.push_str(in "' is private to module ");
                     msg.push_str(in shown);
-                    s.err_msg.push_str(in msg);
-                    s.err_help.push_str(in "mark the enum `pub` to export it");
-                    s.err_has_help = true;
-                    s.grp_m.clear();
-                    s.grp_k.clear();
+                    loader.err_msg.push_str(in msg);
+                    loader.err_help.push_str(in "mark the enum `pub` to export it");
+                    loader.err_has_help = true;
+                    loader.result_members.clear();
+                    loader.result_keys.clear();
                     return 2;
                 }
-                let member = at32(in s.grp_member, w(r));
-                grp_insert(inout s, member, pair(tm, item));
-                r = at32(in s.grp_next, w(r));
+                let member = at32(in loader.group_member, w(row));
+                grp_insert(inout loader, member, pair(target_module, item));
+                row = at32(in loader.group_next, w(row));
             }
             return 1;
         },
         Option::None => {},
     }
     // Re-exported members `name::M` (listed by their head `name`).
-    let mut r = match s.rx_head.get(pair(tm, name)) {
-        Option::Some(x) => x,
+    let mut row = match loader.path_reexport_head.get(pair(target_module, name)) {
+        Option::Some(head_row) => head_row,
         Option::None => none(),
     };
-    if r == none() {
+    if row == none() {
         return 0;
     }
-    let pn = wrapping_add(sym_len(in s, name), 2);
+    let prefix_len = wrapping_add(sym_len(in loader, name), 2);
     loop {
-        if r == none() {
+        if row == none() {
             break;
         }
-        let local = at32(in s.rx_local, w(r));
-        let member = sym_slice(inout s, local, pn, sym_len(in s, local));
-        let key = at64_key(in s, pair(tm, local));
-        grp_insert(inout s, member, key);
-        r = at32(in s.rx_next, w(r));
+        let local = at32(in loader.path_reexport_name, w(row));
+        let member = sym_slice(inout loader, local, prefix_len, sym_len(in loader, local));
+        let key = at64_key(in loader, pair(target_module, local));
+        grp_insert(inout loader, member, key);
+        row = at32(in loader.path_reexport_next, w(row));
     }
-    if s.grp_m.len() == 0 { 0 } else { 1 }
+    if loader.result_members.len() == 0 {
+        0
+    } else {
+        1
+    }
 }
 
-// Records the re-export of `local` by module `m`.
-fn reexp_add(inout s: St, m: u32, local: u32, target: u64, kind: u8) {
-    let key = pair(m, local);
-    s.reexp_key.insert(key, target);
-    s.reexp_kind.insert(key, kind);
+// Records the re-export of `local` by `module`.
+fn reexp_add(inout loader: St, module: u32, local: u32, target: u64, kind: u8) {
+    let key = pair(module, local);
+    loader.reexport_key.insert(key, target);
+    loader.reexport_kind.insert(key, kind);
     // A path local `E::M` is listed under its head `E` for `group`.
-    let cut = sym_path_split(in s, local);
-    if cut < sym_len(in s, local) {
-        let head = sym_slice(inout s, local, 0, cut);
-        let hk = pair(m, head);
-        let next = match s.rx_head.get(hk) {
-            Option::Some(x) => x,
+    let cut = sym_path_split(in loader, local);
+    if cut < sym_len(in loader, local) {
+        let head = sym_slice(inout loader, local, 0, cut);
+        let head_key = pair(module, head);
+        let next = match loader.path_reexport_head.get(head_key) {
+            Option::Some(head_row) => head_row,
             Option::None => none(),
         };
-        s.rx_head.insert(hk, n32(s.rx_local.len()));
-        s.rx_local.push(local);
-        s.rx_next.push(next);
+        loader.path_reexport_head.insert(head_key, n32(loader.path_reexport_name.len()));
+        loader.path_reexport_name.push(local);
+        loader.path_reexport_next.push(next);
     }
-    if m == s.root_mod {
-        s.root_reexports.push(local);
+    if module == loader.root_mod {
+        loader.root_reexports.push(local);
     }
 }
 
 // `Resolver::reexports`: every module's `pub use` names, resolved to the
 // items they re-export, following chains to a fixed point. Names that do
 // not resolve are reported when the module's imports are bound.
-pub fn reexports(inout s: St) {
+pub fn reexports(inout loader: St) {
     let mut shown = String::new();
     loop {
         let mut changed = false;
-        for m in 0..s.mod_pkg.len() {
-            let uf = w(at32(in s.mod_use_first, m));
-            let un = w(at32(in s.mod_use_len, m));
-            for ui in 0..un {
-                let u = wrapping_add(uf, ui);
-                let public = match s.use_public.try_get(u) {
-                    Option::Some(x) => x != 0,
+        for module in 0..loader.mod_pkg.len() {
+            let use_first = w(at32(in loader.mod_use_first, module));
+            let use_count = w(at32(in loader.mod_use_len, module));
+            for use_index in 0..use_count {
+                let use_row = wrapping_add(use_first, use_index);
+                let public = match loader.use_public.try_get(use_row) {
+                    Option::Some(byte) => byte != 0,
                     Option::None => false,
                 };
                 if public {
-                    let tm = use_module(inout s, n32(m), n32(u), inout shown);
-                    s.err_code = 0;
-                    if tm != none() {
-                        let same = tm == n32(m);
-                        let nf = w(at32(in s.use_names_first, u));
-                        let nn = w(at32(in s.use_names_len, u));
-                        for k in 0..nn {
-                            let n = wrapping_add(nf, k);
-                            let local = local_of(in s, n);
-                            let key = pair(n32(m), local);
-                            if !s.reexp_key.contains_key(key) {
-                                let g = group(
-                                    inout s,
-                                    tm,
-                                    at32(in s.un_name, n),
+                    let target_module = use_module(
+                        inout loader,
+                        n32(module),
+                        n32(use_row),
+                        inout shown
+                    );
+                    loader.err_code = 0;
+                    if target_module != none() {
+                        let same = target_module == n32(module);
+                        let names_first = w(at32(in loader.use_names_first, use_row));
+                        let name_count = w(at32(in loader.use_names_len, use_row));
+                        for k in 0..name_count {
+                            let name_row = wrapping_add(names_first, k);
+                            let local = local_of(in loader, name_row);
+                            let key = pair(n32(module), local);
+                            if !loader.reexport_key.contains_key(key) {
+                                let group_status = group(
+                                    inout loader,
+                                    target_module,
+                                    at32(in loader.import_name, name_row),
                                     same,
                                     in shown,
-                                    at32(in s.un_start, n),
-                                    at32(in s.un_end, n)
+                                    at32(in loader.import_start, name_row),
+                                    at32(in loader.import_end, name_row)
                                 );
-                                s.err_code = 0;
-                                if g == 1 {
+                                loader.err_code = 0;
+                                if group_status == 1 {
                                     // A value enum re-exports each member
                                     // `E::M`.
-                                    for i in 0..s.grp_m.len() {
-                                        let member = at32(in s.grp_m, i);
-                                        let target = at64(in s.grp_k, i);
-                                        let ml = join_path(inout s, local, member);
-                                        if !s.reexp_key.contains_key(pair(n32(m), ml)) {
-                                            reexp_add(inout s, n32(m), ml, target, kind_value());
+                                    for i in 0..loader.result_members.len() {
+                                        let member = at32(in loader.result_members, i);
+                                        let target = at64(in loader.result_keys, i);
+                                        let local_member = join_path(inout loader, local, member);
+                                        if !loader
+                                            .reexport_key
+                                            .contains_key(pair(n32(module), local_member)) {
+                                            reexp_add(
+                                                inout loader,
+                                                n32(module),
+                                                local_member,
+                                                target,
+                                                kind_value()
+                                            );
                                             changed = true;
                                         }
                                     }
                                 } else {
                                     let (found, kind) = lookup(
-                                        inout s,
-                                        tm,
-                                        at32(in s.un_name, n),
+                                        inout loader,
+                                        target_module,
+                                        at32(in loader.import_name, name_row),
                                         same,
                                         in shown,
-                                        at32(in s.un_start, n),
-                                        at32(in s.un_end, n)
+                                        at32(in loader.import_start, name_row),
+                                        at32(in loader.import_end, name_row)
                                     );
-                                    s.err_code = 0;
+                                    loader.err_code = 0;
                                     if found != no_key() {
-                                        reexp_add(inout s, n32(m), local, found, kind);
+                                        reexp_add(inout loader, n32(module), local, found, kind);
                                         changed = true;
                                     }
                                 }
@@ -559,238 +579,247 @@ pub fn reexports(inout s: St) {
 // re-exports take their root names (`pub use self::m::f as g;` exports
 // `m::f` as `g`). Visits the re-exported names in byte order, as Rust's
 // `BTreeMap` does.
-pub fn overrides(inout s: St) {
-    let r = s.root_mod;
-    if r == none() {
+pub fn overrides(inout loader: St) {
+    let root = loader.root_mod;
+    if root == none() {
         return;
     }
     // Insertion sort by text: a root module re-exports few names.
     let mut order: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    for i in 0..s.root_reexports.len() {
-        let x = at32(in s.root_reexports, i);
-        order.push(x);
+    for i in 0..loader.root_reexports.len() {
+        let name = at32(in loader.root_reexports, i);
+        order.push(name);
         let mut j = i;
         loop {
             if j == 0 {
                 break;
             }
-            let a = at32(in order, wrapping_sub(j, 1));
-            let b = at32(in order, j);
-            if !sym_less(in s, b, a) {
+            let left = at32(in order, wrapping_sub(j, 1));
+            let right = at32(in order, j);
+            if !sym_less(in loader, right, left) {
                 break;
             }
-            order.try_set(wrapping_sub(j, 1), b);
-            order.try_set(j, a);
+            order.try_set(wrapping_sub(j, 1), right);
+            order.try_set(j, left);
             j = wrapping_sub(j, 1);
         }
     }
-    let file = at32(in s.mod_file, w(r));
+    let file = at32(in loader.mod_file, w(root));
     for i in 0..order.len() {
         let written = at32(in order, i);
         // A re-exported sugar renames nothing.
-        let sugar = match s.reexp_kind.get(pair(r, written)) {
+        let sugar = match loader.reexport_kind.get(pair(root, written)) {
             Option::Some(k) => k == kind_sugar(),
             Option::None => false,
         };
         if sugar {
             continue;
         }
-        let item = at64_key(in s, pair(r, written));
+        let item = at64_key(in loader, pair(root, written));
         // A constant keeps its function prefix under its new name.
-        let local = if sym_starts(in s, lo(item), in const_prefix()) {
-            const_of(inout s, written)
+        let local = if sym_starts(in loader, lo(item), in const_prefix()) {
+            const_of(inout loader, written)
         } else {
             written
         };
-        if hi(item) == r && lo(item) == local {
+        if hi(item) == root && lo(item) == local {
             continue;
         }
-        match s.renamed.get(item) {
+        match loader.renamed.get(item) {
             Option::Some(first) => {
                 // The span of the first use name of the root module whose
                 // local name is `local`.
                 let mut start: u32 = 0;
                 let mut end: u32 = 0;
-                let uf = w(at32(in s.mod_use_first, w(r)));
-                let un = w(at32(in s.mod_use_len, w(r)));
+                let use_first = w(at32(in loader.mod_use_first, w(root)));
+                let use_count = w(at32(in loader.mod_use_len, w(root)));
                 let mut found = false;
-                for ui in 0..un {
-                    let u = wrapping_add(uf, ui);
-                    let nf = w(at32(in s.use_names_first, u));
-                    let nn = w(at32(in s.use_names_len, u));
-                    for k in 0..nn {
-                        let n = wrapping_add(nf, k);
-                        if !found && local_of(in s, n) == local {
+                for use_index in 0..use_count {
+                    let use_row = wrapping_add(use_first, use_index);
+                    let names_first = w(at32(in loader.use_names_first, use_row));
+                    let name_count = w(at32(in loader.use_names_len, use_row));
+                    for k in 0..name_count {
+                        let name_row = wrapping_add(names_first, k);
+                        if !found && local_of(in loader, name_row) == local {
                             found = true;
-                            start = at32(in s.un_start, n);
-                            end = at32(in s.un_end, n);
+                            start = at32(in loader.import_start, name_row);
+                            end = at32(in loader.import_end, name_row);
                         }
                     }
                 }
-                err(inout s, ambiguous(), start, end);
+                err(inout loader, ambiguous(), start, end);
                 let mut msg = String::new();
-                push_shown(in s, item, inout msg);
+                push_shown(in loader, item, inout msg);
                 msg.push_str(in " is re-exported by the root module as both '");
-                push_sym(in s, first, inout msg);
+                push_sym(in loader, first, inout msg);
                 msg.push_str(in "' and '");
-                push_sym(in s, local, inout msg);
+                push_sym(in loader, local, inout msg);
                 msg.push_str(in "'");
-                s.err_msg.push_str(in msg);
-                s.err_help.push_str(in "an item has one exported name; keep one `pub use`");
-                s.err_has_help = true;
-                emit(inout s, file);
+                loader.err_msg.push_str(in msg);
+                loader.err_help.push_str(in "an item has one exported name; keep one `pub use`");
+                loader.err_has_help = true;
+                emit(inout loader, file);
             },
             Option::None => {
-                s.renamed.insert(item, local);
+                loader.renamed.insert(item, local);
             },
         }
     }
 }
 
-fn at64_key(in s: St, k: u64) -> u64 {
-    match s.reexp_key.get(k) {
-        Option::Some(x) => x,
+fn at64_key(in loader: St, key: u64) -> u64 {
+    match loader.reexport_key.get(key) {
+        Option::Some(target) => target,
         Option::None => no_key(),
     }
 }
 
 // `Resolver::qualified`: a qualified path `self::m::f`, `super::m::T::new`
-// or `@scope/name::m::E::V`, from module `cur`: its root, the longest
+// or `@scope/name::m::E::V`, from `cur_module`: its root, the longest
 // module path that leaves an item, the item, then any `::rest`, as the
 // item's internal name followed by `::rest`. Returns `none()` on error.
-pub fn qualified(inout s: St, cur: u32, path: u32, start: u32, end: u32) -> u32 {
+pub fn qualified(inout loader: St, cur_module: u32, path: u32, start: u32, end: u32) -> u32 {
     // `path.split("::")`.
     let mut segs: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    let n = sym_len(in s, path);
-    let mut a: u64 = 0;
+    let len = sym_len(in loader, path);
+    let mut seg_start: u64 = 0;
     loop {
-        let mut i = a;
-        let mut cut = n;
+        let mut i = seg_start;
+        let mut cut = len;
         loop {
-            if inc(i) >= n {
+            if inc(i) >= len {
                 break;
             }
-            if sym_byte(in s, path, i) == 58 && sym_byte(in s, path, inc(i)) == 58 {
+            if sym_byte(in loader, path, i) == 58 && sym_byte(in loader, path, inc(i)) == 58 {
                 cut = i;
                 break;
             }
             i = inc(i);
         }
-        let x = sym_slice(inout s, path, a, cut);
-        segs.push(x);
-        if cut >= n {
+        let seg = sym_slice(inout loader, path, seg_start, cut);
+        segs.push(seg);
+        if cut >= len {
             break;
         }
-        a = wrapping_add(cut, 2);
+        seg_start = wrapping_add(cut, 2);
     }
-    let s0 = at32(in segs, 0);
+    let head = at32(in segs, 0);
     let mut package = none();
     let mut supers: u32 = 0;
     let mut first: u64 = 1;
-    if sym_byte(in s, s0, 0) == 64 && sym_len(in s, s0) > 0 {
-        package = s0;
-    } else if s0 == s.s_super {
-        let mut k: u64 = 0;
+    if sym_byte(in loader, head, 0) == 64 && sym_len(in loader, head) > 0 {
+        package = head;
+    } else if head == loader.super_sym {
+        let mut super_count: u64 = 0;
         loop {
-            if k >= segs.len() || at32(in segs, k) != s.s_super {
+            if super_count >= segs.len() || at32(in segs, super_count) != loader.super_sym {
                 break;
             }
-            k = inc(k);
+            super_count = inc(super_count);
         }
-        supers = n32(k);
-        first = k;
+        supers = n32(super_count);
+        first = super_count;
     }
     let mut base: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut shown = String::new();
-    let pkg = root_of(inout s, cur, package, supers, start, end, inout base, inout shown);
+    let pkg = root_of(
+        inout loader,
+        cur_module,
+        package,
+        supers,
+        start,
+        end,
+        inout base,
+        inout shown
+    );
     if pkg == none() {
         return none();
     }
     let rest = wrapping_sub(segs.len(), first);
     if first >= segs.len() {
-        err(inout s, unknown_import(), start, end);
+        err(inout loader, unknown_import(), start, end);
         let mut msg = String::new();
         msg.push_str(in "the path `");
-        push_sym(in s, path, inout msg);
+        push_sym(in loader, path, inout msg);
         msg.push_str(in "` names a module, not an item");
-        s.err_msg.push_str(in msg);
+        loader.err_msg.push_str(in msg);
         return none();
     }
     // The longest prefix of `rest` that is a module, leaving an item.
-    let mut j = rest;
+    let mut module_len = rest;
     let mut module = none();
     let mut probe: ChunkSeq[u32] = ChunkSeq::new[u32]();
     loop {
-        if j == 0 {
+        if module_len == 0 {
             break;
         }
-        j = wrapping_sub(j, 1);
+        module_len = wrapping_sub(module_len, 1);
         probe.clear();
         probe.extend(in base.as_slice());
-        for k in 0..j {
+        for k in 0..module_len {
             probe.push(at32(in segs, wrapping_add(first, k)));
         }
-        let m = find_module(in s, pkg, in probe);
-        if m != none() {
-            module = m;
+        let found = find_module(in loader, pkg, in probe);
+        if found != none() {
+            module = found;
             break;
         }
     }
     if module == none() {
-        err(inout s, unknown_import(), start, end);
+        err(inout loader, unknown_import(), start, end);
         let mut msg = String::new();
         msg.push_str(in "no module ");
         msg.push_str(in shown);
-        s.err_msg.push_str(in msg);
+        loader.err_msg.push_str(in msg);
         return none();
     }
-    for k in 0..j {
+    for k in 0..module_len {
         shown.push_str(in "::");
-        push_sym(in s, at32(in segs, wrapping_add(first, k)), inout shown);
+        push_sym(in loader, at32(in segs, wrapping_add(first, k)), inout shown);
     }
-    let same = module == cur;
-    let item = at32(in segs, wrapping_add(first, j));
+    let same = module == cur_module;
+    let item = at32(in segs, wrapping_add(first, module_len));
     // `m::E::M` names the member `M` of the value enum `E` of `m`.
-    if wrapping_add(j, 2) == rest {
-        let g = group(inout s, module, item, same, in shown, start, end);
-        s.err_code = 0;
-        if g == 1 {
-            let member = at32(in segs, wrapping_add(first, inc(j)));
-            for i in 0..s.grp_m.len() {
-                if at32(in s.grp_m, i) == member {
-                    let key = at64(in s.grp_k, i);
-                    return name_of(inout s, key);
+    if wrapping_add(module_len, 2) == rest {
+        let group_status = group(inout loader, module, item, same, in shown, start, end);
+        loader.err_code = 0;
+        if group_status == 1 {
+            let member = at32(in segs, wrapping_add(first, inc(module_len)));
+            for i in 0..loader.result_members.len() {
+                if at32(in loader.result_members, i) == member {
+                    let key = at64(in loader.result_keys, i);
+                    return name_of(inout loader, key);
                 }
             }
         }
     }
-    let (key, kind) = lookup(inout s, module, item, same, in shown, start, end);
+    let (key, kind) = lookup(inout loader, module, item, same, in shown, start, end);
     if key == no_key() {
-        let c = sym_byte(in s, item, 0);
-        if s.err_code == unknown_import()
-            && inc(j) < rest
-            && sym_len(in s, item) > 0
-            && c >= 97
-            && c <= 122 {
-            err(inout s, unknown_import(), start, end);
+        let first_byte = sym_byte(in loader, item, 0);
+        if loader.err_code == unknown_import()
+            && inc(module_len) < rest
+            && sym_len(in loader, item) > 0
+            && first_byte >= 97
+            && first_byte <= 122 {
+            err(inout loader, unknown_import(), start, end);
             let mut msg = String::new();
             msg.push_str(in "no module ");
             msg.push_str(in shown);
             msg.push_str(in "::");
-            push_sym(in s, item, inout msg);
-            s.err_msg.push_str(in msg);
+            push_sym(in loader, item, inout msg);
+            loader.err_msg.push_str(in msg);
         }
         return none();
     }
-    let target = name_of(inout s, key);
-    if inc(j) >= rest {
+    let target = name_of(inout loader, key);
+    if inc(module_len) >= rest {
         return target;
     }
     let mut out = String::new();
-    push_sym(in s, target, inout out);
-    for k in inc(j)..rest {
+    push_sym(in loader, target, inout out);
+    for k in inc(module_len)..rest {
         out.push_str(in "::");
-        push_sym(in s, at32(in segs, wrapping_add(first, k)), inout out);
+        push_sym(in loader, at32(in segs, wrapping_add(first, k)), inout out);
     }
-    s.g.intern(in out).id()
+    loader.interner.intern(in out).id()
 }

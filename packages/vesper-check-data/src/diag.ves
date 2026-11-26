@@ -46,32 +46,30 @@ impl Diags {
     // Starts a diagnostic: the code is written; the caller then writes the
     // message into `text` and calls `help` (or `close`).
     pub fn open(inout self, in code: Str) -> u64 {
-        let a = self.text.len();
+        let code_start = self.text.len();
         self.text.extend(in code.as_bytes());
-        a
+        code_start
     }
 
-    pub fn close(inout self, code_a: u64, msg_a: u64, in help: Str, start: u64, stop: u64) {
-        let help_a = self.text.len();
+    pub fn close(inout self, code_start: u64, msg_start: u64, in help: Str, start: u64, stop: u64) {
+        let help_start = self.text.len();
         self.text.extend(in help.as_bytes());
-        self.rows.push(
-            DiagRow {
-                code_a: code_a,
-                msg_a: msg_a,
-                msg_b: help_a,
-                help_a: help_a,
-                end: self.text.len(),
-                start: start,
-                stop: stop,
-                ra: n32(self.rel.len()),
-                rn: 0
-            }
-        );
+        self.rows.push(DiagRow {
+            code_a: code_start,
+            msg_a: msg_start,
+            msg_b: help_start,
+            help_a: help_start,
+            end: self.text.len(),
+            start: start,
+            stop: stop,
+            ra: n32(self.rel.len()),
+            rn: 0
+        });
     }
 
     pub fn row(in self, i: u64) -> DiagRow {
         match self.rows.try_get(i) {
-            Option::Some(r) => r,
+            Option::Some(row) => row,
             Option::None => DiagRow {
                 code_a: 0,
                 msg_a: 0,
@@ -92,50 +90,50 @@ impl Diags {
         self.rel.clear();
     }
 
-    pub fn fold_range(in self, h: u64, a: u64, b: u64) -> u64 {
-        let mut x = h;
-        for i in a..b {
-            x = fold(x, widen_u64(u8_at(in self.text, i)));
+    pub fn fold_range(in self, seed: u64, start: u64, end: u64) -> u64 {
+        let mut hash = seed;
+        for i in start..end {
+            hash = fold(hash, widen_u64(u8_at(in self.text, i)));
         }
-        fold(x, 255)
+        fold(hash, 255)
     }
 
-    pub fn digest_row(in self, h0: u64, i: u64) -> u64 {
-        let r = self.row(i);
-        let mut h = self.fold_range(h0, r.code_a, r.msg_a);
-        h = self.fold_range(h, r.msg_a, r.msg_b);
-        h = fold(fold(h, r.start), r.stop);
-        h = fold(h, w(r.rn));
-        for j in 0..w(r.rn) {
-            let l = match self.rel.try_get(add(w(r.ra), j)) {
-                Option::Some(l) => l,
+    pub fn digest_row(in self, seed: u64, i: u64) -> u64 {
+        let row = self.row(i);
+        let mut hash = self.fold_range(seed, row.code_a, row.msg_a);
+        hash = self.fold_range(hash, row.msg_a, row.msg_b);
+        hash = fold(fold(hash, row.start), row.stop);
+        hash = fold(hash, w(row.rn));
+        for j in 0..w(row.rn) {
+            let label = match self.rel.try_get(add(w(row.ra), j)) {
+                Option::Some(label) => label,
                 Option::None => RelRow { a: 0, b: 0, start: 0, stop: 0 },
             };
-            h = fold(fold(h, l.start), l.stop);
-            h = self.fold_range(h, l.a, l.b);
+            hash = fold(fold(hash, label.start), label.stop);
+            hash = self.fold_range(hash, label.a, label.b);
         }
-        self.fold_range(h, r.help_a, r.end)
+        self.fold_range(hash, row.help_a, row.end)
     }
 
     // The census digest of the diagnostics from row `from` on.
-    pub fn digest(in self, h0: u64, from: u64) -> u64 {
-        let mut h = fold(h0, wrapping_sub(self.rows.len(), from));
+    pub fn digest(in self, seed: u64, from: u64) -> u64 {
+        let mut hash = fold(seed, wrapping_sub(self.rows.len(), from));
         for i in from..self.rows.len() {
-            let r = self.row(i);
-            h = self.fold_range(h, r.code_a, r.msg_a);
-            h = self.fold_range(h, r.msg_a, r.msg_b);
-            h = fold(fold(h, r.start), r.stop);
-            h = fold(h, w(r.rn));
-            for j in 0..w(r.rn) {
-                let l = match self.rel.try_get(add(w(r.ra), j)) {
-                    Option::Some(l) => l,
+            let row = self.row(i);
+            hash = self.fold_range(hash, row.code_a, row.msg_a);
+            hash = self.fold_range(hash, row.msg_a, row.msg_b);
+            hash = fold(fold(hash, row.start), row.stop);
+            hash = fold(hash, w(row.rn));
+            for j in 0..w(row.rn) {
+                let label = match self.rel.try_get(add(w(row.ra), j)) {
+                    Option::Some(label) => label,
                     Option::None => RelRow { a: 0, b: 0, start: 0, stop: 0 },
                 };
-                h = fold(fold(h, l.start), l.stop);
-                h = self.fold_range(h, l.a, l.b);
+                hash = fold(fold(hash, label.start), label.stop);
+                hash = self.fold_range(hash, label.a, label.b);
             }
-            h = self.fold_range(h, r.help_a, r.end);
+            hash = self.fold_range(hash, row.help_a, row.end);
         }
-        h
+        hash
     }
 }

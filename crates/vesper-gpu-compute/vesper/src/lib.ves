@@ -55,23 +55,19 @@ pub fn unsupported() -> u32 {
 }
 
 fn raise[T](kind: u32, detail: u32, code: i64) -> T eff [Fail[GpuErr]] {
-    Fail::raise(
-        GpuErr {
-            kind: kind,
-            detail: detail,
-            code: code,
-        }
-    )
+    Fail::raise(GpuErr {
+        kind: kind,
+        detail: detail,
+        code: code,
+    })
 }
 
 fn fail(kind: u32, detail: u32, code: i64) eff [Fail[GpuErr]] {
-    Fail::raise(
-        GpuErr {
-            kind: kind,
-            detail: detail,
-            code: code,
-        }
-    )
+    Fail::raise(GpuErr {
+        kind: kind,
+        detail: detail,
+        code: code,
+    })
 }
 
 // A VkResult below zero is an error of call `call`.
@@ -1474,23 +1470,22 @@ fn open_on(
         if fits {
             match compute_family(library, physical) {
                 Option::Some(family) => {
-                    chosen = Option::Some(
-                        Dev {
-                            instance: instance,
-                            physical: physical,
-                            device: 0,
-                            queue: 0,
-                            family: family,
-                            timeline: 0,
-                            api_version: widen_u64(api),
-                            device_type: widen_u64(get32(in p, Properties2::DeviceType)),
-                            max_invocations: widen_u64(
-                                get32(in p, Properties2::MaxComputeWorkGroupInvocations)
-                            ),
-                            max_range: widen_u64(get32(in p, Properties2::MaxStorageBufferRange)),
-                            library: library,
-                        }
-                    );
+                    chosen = Option::Some(Dev {
+                        instance: instance,
+                        physical: physical,
+                        device: 0,
+                        queue: 0,
+                        family: family,
+                        timeline: 0,
+                        api_version: widen_u64(api),
+                        device_type: widen_u64(get32(in p, Properties2::DeviceType)),
+                        max_invocations: widen_u64(get32(
+                            in p,
+                            Properties2::MaxComputeWorkGroupInvocations
+                        )),
+                        max_range: widen_u64(get32(in p, Properties2::MaxStorageBufferRange)),
+                        library: library,
+                    });
                 }
                 Option::None => {}
             }

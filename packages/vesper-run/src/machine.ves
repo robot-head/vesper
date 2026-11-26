@@ -2,18 +2,19 @@
 //
 // Values are two words (`Val`): a tag and a payload. Integers carry their
 // kind in the tag (arith.ves); tuples and data point at a row of `heap`,
-// whose children are `kids[a..a+n]` (and, for data, the field names
-// `knames[a..a+n]`). Values never change once made, so a Rust `clone` is a
-// copy here, and assigning through a place rebuilds the aggregates along
-// its path (`put_path`), as Rust's `slot_set` changes a clone.
+// whose children are `kids[kid_start..kid_start+kid_count]` (and, for data,
+// the field names at the same indices of `kid_names`). Values never change
+// once made, so a Rust `clone` is a copy here, and assigning through a place
+// rebuilds the aggregates along its path (`put_path`), as Rust's `slot_set`
+// changes a clone.
 //
-// An activation (`IrState`) is a frame `Fr` over four stacks: its IR
-// values `vals[vb..]` (one per value id of its function), its environment
-// `env[eb..]` (name, cell, path; the latest binding of a name wins, as a
-// `BTreeMap` insert), the cells its bindings own `cells[cb..]` and the
-// path segments of its `inout` slots `segs[sb..]`. Without closures and
-// handlers nothing outlives its activation but the returned value, so a
-// return truncates all four.
+// An activation (`IrState`) is a frame `Fr` over four stacks: its IR values
+// `vals[val_base..]` (one per value id of its function), its environment
+// `env[env_base..]` (name, cell, path; the latest binding of a name wins, as
+// a `BTreeMap` insert), the cells its bindings own `cells[cell_base..]` and
+// the path segments of its `inout` slots `segs[seg_base..]`. Without
+// closures and handlers nothing outlives its activation but the returned
+// value, so a return truncates all four.
 
 use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_at, w};
 use @vesper/check-data::names::{Names};
@@ -62,24 +63,24 @@ const TK_UNSEEN: u8 = 254;
 const TK_NONE: u8 = 255;
 
 pub copy struct Val {
-    t: u8,
-    x: u64,
+    tag: u8,
+    payload: u64,
 }
 
 copy struct Agg {
     ctor: u32,
-    a: u64,
-    n: u64,
+    kid_start: u64,
+    kid_count: u64,
 }
 
 copy struct Fr {
-    f: u64,
-    blk: u64,
+    func_index: u64,
+    block: u64,
     ip: u64,
-    vb: u64,
-    eb: u64,
-    cb: u64,
-    sb: u64,
+    val_base: u64,
+    env_base: u64,
+    cell_base: u64,
+    seg_base: u64,
     dest: u32,
     ty: u32,
     kind: u8,
@@ -88,19 +89,19 @@ copy struct Fr {
 copy struct En {
     name: u32,
     cell: u64,
-    pa: u64,
-    pn: u64,
+    seg_start: u64,
+    seg_count: u64,
 }
 
-// A function: its parameters `prm[pa..pa+pn]`, its value count, its
-// first block and whether `scan` reached it.
+// A function: its parameters `params[param_start..param_start+param_count]`,
+// its value count, its first block and whether `scan` reached it.
 copy struct Fi {
     name: u32,
-    pa: u64,
-    pn: u64,
-    nv: u64,
-    b0: u64,
-    reach: bool,
+    param_start: u64,
+    param_count: u64,
+    value_count: u64,
+    first_block: u64,
+    reached: bool,
 }
 
 copy struct Pm {
@@ -108,377 +109,391 @@ copy struct Pm {
     pass: u64,
 }
 
-// A `Write` place split at its dots: root, segments `wsegs[sa..sa+sn]`,
-// and the compound operator's code (0 for `=`).
+// A `Write` place split at its dots: root, segments
+// `write_segs[seg_start..seg_start+seg_count]` and the compound operator's
+// code (0 for `=`).
 copy struct Wr {
     root: u32,
-    sa: u64,
-    sn: u64,
+    seg_start: u64,
+    seg_count: u64,
     code: u64,
 }
 
 pub struct M {
-    c: Ctx,
-    p: Program,
+    ctx: Ctx,
+    program: Program,
     fuel: u64,
     entry: u64,
     fns: ChunkSeq[Fi],
-    prm: ChunkSeq[Pm],
+    params: ChunkSeq[Pm],
     // symbol -> function index + 1
     fn_of: ChunkSeq[u32],
     // per instruction: its operator code, callee, constructor or `Write` row
     aux: ChunkSeq[u64],
-    wr: ChunkSeq[Wr],
-    wsegs: ChunkSeq[u32],
+    writes: ChunkSeq[Wr],
+    write_segs: ChunkSeq[u32],
     // per block: the operand index of its parameter count
-    bparams: ChunkSeq[u64],
+    block_params: ChunkSeq[u64],
     // per type id: its integer kind, TK_NONE, or TK_UNSEEN
-    tk: ChunkSeq[u8],
+    type_kinds: ChunkSeq[u8],
     // per symbol: the symbol of its last `::` segment + 1, or 0 unseen
-    short: ChunkSeq[u32],
+    short_syms: ChunkSeq[u32],
     vals: ChunkSeq[Val],
     env: ChunkSeq[En],
     cells: ChunkSeq[Val],
     segs: ChunkSeq[u32],
     heap: ChunkSeq[Agg],
     kids: ChunkSeq[Val],
-    knames: ChunkSeq[u32],
+    kid_names: ChunkSeq[u32],
     stack: ChunkSeq[Fr],
-    cur: Fr,
-    rv: Val,
-    ctrl: u8,
+    frame: Fr,
+    ret_value: Val,
+    control: u8,
     // scratch: a slot path being read or written, call arguments
     path: ChunkSeq[u32],
-    argv: ChunkSeq[Val],
-    argc: ChunkSeq[u64],
-    argp: ChunkSeq[u64],
+    arg_vals: ChunkSeq[Val],
+    arg_roots: ChunkSeq[u64],
+    arg_paths: ChunkSeq[u64],
     failed: bool,
     declined: bool,
-    msg: ChunkSeq[u8],
+    message: ChunkSeq[u8],
     // well-known symbols
-    s_ok: u32,
-    s_err: u32,
-    s_zero: u32,
-    s_dot: u32,
+    ok_sym: u32,
+    err_sym: u32,
+    zero_sym: u32,
+    dot_sym: u32,
 }
 
 fn fr_zero() -> Fr {
-    Fr { f: 0, blk: 0, ip: 0, vb: 0, eb: 0, cb: 0, sb: 0, dest: 0, ty: 0, kind: FR_IR }
+    Fr {
+        func_index: 0,
+        block: 0,
+        ip: 0,
+        val_base: 0,
+        env_base: 0,
+        cell_base: 0,
+        seg_base: 0,
+        dest: 0,
+        ty: 0,
+        kind: FR_IR
+    }
 }
 
 fn undef() -> Val {
-    Val { t: T_UNDEF, x: 0 }
+    Val { tag: T_UNDEF, payload: 0 }
 }
 
 fn unit() -> Val {
-    Val { t: T_TUPLE, x: NONE64 }
+    Val { tag: T_TUPLE, payload: NONE64 }
 }
 
-pub fn machine_new(sink c: Ctx, sink p: Program, fuel: u64) -> M {
+pub fn machine_new(sink ctx: Ctx, sink program: Program, fuel: u64) -> M {
     M {
-        c: c,
-        p: p,
+        ctx: ctx,
+        program: program,
         fuel: fuel,
         entry: NONE64,
         fns: ChunkSeq::new[Fi](),
-        prm: ChunkSeq::new[Pm](),
+        params: ChunkSeq::new[Pm](),
         fn_of: ChunkSeq::new[u32](),
         aux: ChunkSeq::new[u64](),
-        wr: ChunkSeq::new[Wr](),
-        wsegs: ChunkSeq::new[u32](),
-        bparams: ChunkSeq::new[u64](),
-        tk: ChunkSeq::new[u8](),
-        short: ChunkSeq::new[u32](),
+        writes: ChunkSeq::new[Wr](),
+        write_segs: ChunkSeq::new[u32](),
+        block_params: ChunkSeq::new[u64](),
+        type_kinds: ChunkSeq::new[u8](),
+        short_syms: ChunkSeq::new[u32](),
         vals: ChunkSeq::new[Val](),
         env: ChunkSeq::new[En](),
         cells: ChunkSeq::new[Val](),
         segs: ChunkSeq::new[u32](),
         heap: ChunkSeq::new[Agg](),
         kids: ChunkSeq::new[Val](),
-        knames: ChunkSeq::new[u32](),
+        kid_names: ChunkSeq::new[u32](),
         stack: ChunkSeq::new[Fr](),
-        cur: fr_zero(),
-        rv: unit(),
-        ctrl: C_IR,
+        frame: fr_zero(),
+        ret_value: unit(),
+        control: C_IR,
         path: ChunkSeq::new[u32](),
-        argv: ChunkSeq::new[Val](),
-        argc: ChunkSeq::new[u64](),
-        argp: ChunkSeq::new[u64](),
+        arg_vals: ChunkSeq::new[Val](),
+        arg_roots: ChunkSeq::new[u64](),
+        arg_paths: ChunkSeq::new[u64](),
         failed: false,
         declined: false,
-        msg: ChunkSeq::new[u8](),
-        s_ok: 0,
-        s_err: 0,
-        s_zero: 0,
-        s_dot: 0,
+        message: ChunkSeq::new[u8](),
+        ok_sym: 0,
+        err_sym: 0,
+        zero_sym: 0,
+        dot_sym: 0,
     }
 }
 
 // ----- text --------------------------------------------------------------------
 
-fn put(inout o: ChunkSeq[u8], in s: Str) {
-    o.extend(in s.as_bytes());
+fn put(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
 }
 
-fn put_sym(inout o: ChunkSeq[u8], in names: Names, s: u32) {
-    let a = names.start(s);
-    let e = names.end(s);
-    for i in a..e {
-        o.push(u8_at(in names.text, i));
+fn put_sym(inout out: ChunkSeq[u8], in names: Names, sym: u32) {
+    let text_start = names.start(sym);
+    let text_end = names.end(sym);
+    for i in text_start..text_end {
+        out.push(u8_at(in names.text, i));
     }
 }
 
-fn put_signed(inout o: ChunkSeq[u8], v: i64) {
-    if v < 0 {
-        o.push(45);
-        push_decimal(inout o, wrapping_u64(wrapping_sub(0, v)));
+fn put_signed(inout out: ChunkSeq[u8], value: i64) {
+    if value < 0 {
+        out.push(45);
+        push_decimal(inout out, wrapping_u64(wrapping_sub(0, value)));
     } else {
-        push_decimal(inout o, wrapping_u64(v));
+        push_decimal(inout out, wrapping_u64(value));
     }
 }
 
-fn fail(inout m: M, in s: Str) {
-    if !m.failed {
-        m.failed = true;
-        m.msg.clear();
-        put(inout m.msg, s);
+fn fail(inout machine: M, in text: Str) {
+    if !machine.failed {
+        machine.failed = true;
+        machine.message.clear();
+        put(inout machine.message, text);
     }
 }
 
-// `"<a>'<sym>'<b>"`, as Rust's `format!("{a}'{sym}'{b}")`.
-fn fail_sym(inout m: M, in a: Str, s: u32, in b: Str) {
-    if !m.failed {
-        m.failed = true;
-        m.msg.clear();
-        put(inout m.msg, a);
-        put_sym(inout m.msg, in m.c.names, s);
-        put(inout m.msg, b);
+// `"<prefix>'<sym>'<suffix>"`, as Rust's `format!("{prefix}'{sym}'{suffix}")`.
+fn fail_sym(inout machine: M, in prefix: Str, sym: u32, in suffix: Str) {
+    if !machine.failed {
+        machine.failed = true;
+        machine.message.clear();
+        put(inout machine.message, prefix);
+        put_sym(inout machine.message, in machine.ctx.names, sym);
+        put(inout machine.message, suffix);
     }
 }
 
-fn decline(inout m: M, in a: Str, s: u32) {
-    if !m.declined {
-        m.declined = true;
-        m.msg.clear();
-        put(inout m.msg, a);
-        if s != NONE32 {
-            put_sym(inout m.msg, in m.c.names, s);
+fn decline(inout machine: M, in reason: Str, sym: u32) {
+    if !machine.declined {
+        machine.declined = true;
+        machine.message.clear();
+        put(inout machine.message, reason);
+        if sym != NONE32 {
+            put_sym(inout machine.message, in machine.ctx.names, sym);
         }
     }
 }
 
 // A primitive failure (`raise_primitive`): with no handler installed the
 // `Fail::raise` it performs is unhandled.
-fn raise(inout m: M) {
-    fail(inout m, "unhandled effect Fail::raise");
+fn raise(inout machine: M) {
+    fail(inout machine, "unhandled effect Fail::raise");
 }
 
 // ----- symbols -----------------------------------------------------------------
 
-fn lookup(in m: M, in s: Str) -> u32 {
-    m.c.names.lookup(in s.as_bytes())
+fn lookup(in machine: M, in text: Str) -> u32 {
+    machine.ctx.names.lookup(in text.as_bytes())
 }
 
-fn spells(in m: M, s: u32, in t: Str) -> bool {
-    m.c.names.spells(s, in t.as_bytes())
+fn spells(in machine: M, sym: u32, in text: Str) -> bool {
+    machine.ctx.names.spells(sym, in text.as_bytes())
 }
 
 // `s.parse::<usize>()` of a symbol's text, or NONE64.
-fn index_of(in m: M, s: u32) -> u64 {
-    let a = m.c.names.start(s);
-    let e = m.c.names.end(s);
-    let mut i = a;
-    if i < e && u8_at(in m.c.names.text, i) == 43 {
-        i = inc(i);
+fn index_of(in machine: M, sym: u32) -> u64 {
+    let text_start = machine.ctx.names.start(sym);
+    let text_end = machine.ctx.names.end(sym);
+    let mut digit_start = text_start;
+    if digit_start < text_end && u8_at(in machine.ctx.names.text, digit_start) == 43 {
+        digit_start = inc(digit_start);
     }
-    if i >= e {
+    if digit_start >= text_end {
         return NONE64;
     }
-    let mut n: u64 = 0;
-    for j in i..e {
-        let c = u8_at(in m.c.names.text, j);
-        if c < 48 || c > 57 {
+    let mut value: u64 = 0;
+    for j in digit_start..text_end {
+        let byte = u8_at(in machine.ctx.names.text, j);
+        if byte < 48 || byte > 57 {
             return NONE64;
         }
-        let d = widen_u64(wrapping_sub(c, 48));
-        if n > 1844674407370955161 || (n == 1844674407370955161 && d > 5) {
+        let digit = widen_u64(wrapping_sub(byte, 48));
+        if value > 1844674407370955161 || (value == 1844674407370955161 && digit > 5) {
             return NONE64;
         }
-        n = wrapping_add(wrapping_mul(n, 10), d);
+        value = wrapping_add(wrapping_mul(value, 10), digit);
     }
-    n
+    value
 }
 
-// The symbol of the text after the last `::` of `s` (`rsplit("::")`).
-fn short_of(inout m: M, s: u32) -> u32 {
-    let cached = u32_at(in m.short, w(s));
+// The symbol of the text after the last `::` of `sym` (`rsplit("::")`).
+fn short_of(inout machine: M, sym: u32) -> u32 {
+    let cached = u32_at(in machine.short_syms, w(sym));
     if cached != 0 {
         return wrapping_sub(cached, 1);
     }
-    let a = m.c.names.start(s);
-    let e = m.c.names.end(s);
-    let mut cut = a;
-    let mut i = a;
+    let text_start = machine.ctx.names.start(sym);
+    let text_end = machine.ctx.names.end(sym);
+    let mut tail_start = text_start;
+    let mut pos = text_start;
     loop {
-        if inc(i) >= e {
+        if inc(pos) >= text_end {
             break;
         }
-        if u8_at(in m.c.names.text, i) == 58 && u8_at(in m.c.names.text, inc(i)) == 58 {
-            cut = add(i, 2);
-            i = add(i, 2);
+        if u8_at(in machine.ctx.names.text, pos) == 58
+            && u8_at(in machine.ctx.names.text, inc(pos)) == 58 {
+            tail_start = add(pos, 2);
+            pos = add(pos, 2);
         } else {
-            i = inc(i);
+            pos = inc(pos);
         }
     }
     let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    for j in cut..e {
-        bytes.push(u8_at(in m.c.names.text, j));
+    for j in tail_start..text_end {
+        bytes.push(u8_at(in machine.ctx.names.text, j));
     }
-    let r = m.c.names.intern(in bytes[0..bytes.len()]);
-    if w(s) >= m.short.len() {
-        m.short.resize(inc(w(s)), 0);
+    let short_sym = machine.ctx.names.intern(in bytes[0..bytes.len()]);
+    if w(sym) >= machine.short_syms.len() {
+        machine.short_syms.resize(inc(w(sym)), 0);
     }
-    let ok = m.short.try_set(w(s), wrapping_add(r, 1));
-    r
+    let ok = machine.short_syms.try_set(w(sym), wrapping_add(short_sym, 1));
+    short_sym
 }
 
 // `World::constructor(name)`: the variant's symbol, or NONE32.
-fn ctor_of(inout m: M, s: u32) -> u32 {
-    let a = m.c.names.start(s);
-    let e = m.c.names.end(s);
-    let mut seps: u64 = 0;
-    let mut cut = a;
-    let mut i = a;
+fn ctor_of(inout machine: M, sym: u32) -> u32 {
+    let text_start = machine.ctx.names.start(sym);
+    let text_end = machine.ctx.names.end(sym);
+    let mut sep_count: u64 = 0;
+    let mut sep_at = text_start;
+    let mut pos = text_start;
     loop {
-        if inc(i) >= e {
+        if inc(pos) >= text_end {
             break;
         }
-        if u8_at(in m.c.names.text, i) == 58 && u8_at(in m.c.names.text, inc(i)) == 58 {
-            seps = inc(seps);
-            cut = i;
-            i = add(i, 2);
+        if u8_at(in machine.ctx.names.text, pos) == 58
+            && u8_at(in machine.ctx.names.text, inc(pos)) == 58 {
+            sep_count = inc(sep_count);
+            sep_at = pos;
+            pos = add(pos, 2);
         } else {
-            i = inc(i);
+            pos = inc(pos);
         }
     }
-    if seps > 1 {
+    if sep_count > 1 {
         return NONE32;
     }
-    let mut qual = NONE32;
-    let mut short = s;
-    if seps == 1 {
-        let mut q: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        for j in a..cut {
-            q.push(u8_at(in m.c.names.text, j));
+    let mut qualifier = NONE32;
+    let mut short_sym = sym;
+    if sep_count == 1 {
+        let mut qual_text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        for j in text_start..sep_at {
+            qual_text.push(u8_at(in machine.ctx.names.text, j));
         }
-        let mut t: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        for j in add(cut, 2)..e {
-            t.push(u8_at(in m.c.names.text, j));
+        let mut short_text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        for j in add(sep_at, 2)..text_end {
+            short_text.push(u8_at(in machine.ctx.names.text, j));
         }
-        qual = m.c.names.lookup(in q[0..q.len()]);
-        short = m.c.names.lookup(in t[0..t.len()]);
-        if qual == NONE32 || short == NONE32 {
+        qualifier = machine.ctx.names.lookup(in qual_text[0..qual_text.len()]);
+        short_sym = machine.ctx.names.lookup(in short_text[0..short_text.len()]);
+        if qualifier == NONE32 || short_sym == NONE32 {
             return NONE32;
         }
     }
-    if constructor(in m.c.world, qual, short) == NONE64 {
+    if constructor(in machine.ctx.world, qualifier, short_sym) == NONE64 {
         NONE32
     } else {
-        short
+        short_sym
     }
 }
 
 // ----- types -------------------------------------------------------------------
 
-fn int_kind(inout m: M, ty: u32) -> u8 {
-    let i = w(ty);
-    let cached = u8_at(in m.tk, i);
-    if i < m.tk.len() && cached != TK_UNSEEN {
+fn int_kind(inout machine: M, ty: u32) -> u8 {
+    let ty_index = w(ty);
+    let cached = u8_at(in machine.type_kinds, ty_index);
+    if ty_index < machine.type_kinds.len() && cached != TK_UNSEEN {
         return cached;
     }
-    let k = if m.c.types.kind(ty) != TyKind::Named || m.c.types.arity(ty) != 0 {
+    let kind = if machine.ctx.types.kind(ty) != TyKind::Named || machine.ctx.types.arity(ty) != 0 {
         TK_NONE
     } else {
-        let s = m.c.types.name(ty);
-        let kn = m.c.world.k;
-        if s == kn.i64_ || s == kn.isize_ {
+        let name = machine.ctx.types.name(ty);
+        let known = machine.ctx.world.k;
+        if name == known.i64_ || name == known.isize_ {
             K_I64
-        } else if s == kn.u8_ {
+        } else if name == known.u8_ {
             K_U8
-        } else if s == kn.u16_ {
+        } else if name == known.u16_ {
             K_U16
-        } else if s == kn.u32_ {
+        } else if name == known.u32_ {
             K_U32
-        } else if s == kn.u64_ || s == kn.usize_ {
+        } else if name == known.u64_ || name == known.usize_ {
             K_U64
-        } else if s == kn.i8_ {
+        } else if name == known.i8_ {
             K_I8
-        } else if s == kn.i16_ {
+        } else if name == known.i16_ {
             K_I16
-        } else if s == kn.i32_ {
+        } else if name == known.i32_ {
             K_I32
         } else {
             TK_NONE
         }
     };
-    if i >= m.tk.len() {
-        m.tk.resize(inc(i), TK_UNSEEN);
+    if ty_index >= machine.type_kinds.len() {
+        machine.type_kinds.resize(inc(ty_index), TK_UNSEEN);
     }
-    let ok = m.tk.try_set(i, k);
-    k
+    let ok = machine.type_kinds.try_set(ty_index, kind);
+    kind
 }
 
 // `coerce_value`: an integer takes the kind of an integer type.
-fn coerce(inout m: M, v: Val, ty: u32) -> Val {
-    if v.t > K_I32 {
-        return v;
+fn coerce(inout machine: M, value: Val, ty: u32) -> Val {
+    if value.tag > K_I32 {
+        return value;
     }
-    let k = int_kind(inout m, ty);
-    if k == TK_NONE {
-        return v;
+    let kind = int_kind(inout machine, ty);
+    if kind == TK_NONE {
+        return value;
     }
-    Val { t: k, x: wrap(k, exact(v.t, v.x)) }
+    Val { tag: kind, payload: wrap(kind, exact(value.tag, value.payload)) }
 }
 
 // Whether the machine runs values of type `ty` (`scan`).
-fn type_ok(in m: M, ty: u32, depth: u64) -> bool {
+fn type_ok(in machine: M, ty: u32, depth: u64) -> bool {
     if depth > 64 {
         return false;
     }
-    let n = m.c.types.node(ty);
-    if n.kind == TyKind::Named {
-        let s = n.name;
-        let kn = m.c.world.k;
-        if s == kn.f32_
-            || s == kn.f64_
-            || s == kn.i128_
-            || s == kn.u128_
-            || s == kn.chunk_seq
-            || s == kn.slice
-            || s == kn.tiled_seq
-            || s == kn.box_
-            || s == kn.vec
-            || s == kn.mask
-            || s == kn.region
-            || s == kn.region_box
-            || s == kn.watermark
-            || s == kn.dyn_
-            || spells(in m, s, "Atomic") {
+    let node = machine.ctx.types.node(ty);
+    if node.kind == TyKind::Named {
+        let name = node.name;
+        let known = machine.ctx.world.k;
+        if name == known.f32_
+            || name == known.f64_
+            || name == known.i128_
+            || name == known.u128_
+            || name == known.chunk_seq
+            || name == known.slice
+            || name == known.tiled_seq
+            || name == known.box_
+            || name == known.vec
+            || name == known.mask
+            || name == known.region
+            || name == known.region_box
+            || name == known.watermark
+            || name == known.dyn_
+            || spells(in machine, name, "Atomic") {
             return false;
         }
     }
-    if n.kind == TyKind::Fn {
-        let r = m.c.types.row(n.r2);
-        if r.n != 0 || r.tail != 0 {
+    if node.kind == TyKind::Fn {
+        let row = machine.ctx.types.row(node.r2);
+        if row.n != 0 || row.tail != 0 {
             return false;
         }
-        if !type_ok(in m, n.r, inc(depth)) {
+        if !type_ok(in machine, node.r, inc(depth)) {
             return false;
         }
     }
-    if n.kind == TyKind::Named || n.kind == TyKind::Tuple || n.kind == TyKind::Fn {
-        for i in 0..w(n.n) {
-            if !type_ok(in m, m.c.types.arg(ty, i), inc(depth)) {
+    if node.kind == TyKind::Named || node.kind == TyKind::Tuple || node.kind == TyKind::Fn {
+        for i in 0..w(node.n) {
+            if !type_ok(in machine, machine.ctx.types.arg(ty, i), inc(depth)) {
                 return false;
             }
         }
@@ -488,70 +503,70 @@ fn type_ok(in m: M, ty: u32, depth: u64) -> bool {
 
 // ----- loading -----------------------------------------------------------------
 
-fn op_code(in m: M, s: u32) -> u64 {
-    let a = m.c.names.start(s);
-    let e = m.c.names.end(s);
-    let n = wrapping_sub(e, a);
-    if n == 1 {
-        let c = u8_at(in m.c.names.text, a);
-        if c == 43 {
+fn op_code(in machine: M, sym: u32) -> u64 {
+    let text_start = machine.ctx.names.start(sym);
+    let text_end = machine.ctx.names.end(sym);
+    let len = wrapping_sub(text_end, text_start);
+    if len == 1 {
+        let byte = u8_at(in machine.ctx.names.text, text_start);
+        if byte == 43 {
             return widen_u64(B_ADD);
-        } else if c == 45 {
+        } else if byte == 45 {
             return widen_u64(B_SUB);
-        } else if c == 42 {
+        } else if byte == 42 {
             return widen_u64(B_MUL);
-        } else if c == 47 {
+        } else if byte == 47 {
             return widen_u64(B_DIV);
-        } else if c == 37 {
+        } else if byte == 37 {
             return widen_u64(B_REM);
-        } else if c == 38 {
+        } else if byte == 38 {
             return widen_u64(B_AND);
-        } else if c == 124 {
+        } else if byte == 124 {
             return widen_u64(B_OR);
-        } else if c == 94 {
+        } else if byte == 94 {
             return widen_u64(B_XOR);
-        } else if c == 60 {
+        } else if byte == 60 {
             return widen_u64(B_LT);
-        } else if c == 62 {
+        } else if byte == 62 {
             return widen_u64(B_GT);
         }
         return 0;
     }
-    if spells(in m, s, "<<") {
+    if spells(in machine, sym, "<<") {
         widen_u64(B_SHL)
-    } else if spells(in m, s, ">>") {
+    } else if spells(in machine, sym, ">>") {
         widen_u64(B_SHR)
-    } else if spells(in m, s, "==") {
+    } else if spells(in machine, sym, "==") {
         widen_u64(B_EQ)
-    } else if spells(in m, s, "!=") {
+    } else if spells(in machine, sym, "!=") {
         widen_u64(B_NE)
-    } else if spells(in m, s, "<=") {
+    } else if spells(in machine, sym, "<=") {
         widen_u64(B_LE)
-    } else if spells(in m, s, ">=") {
+    } else if spells(in machine, sym, ">=") {
         widen_u64(B_GE)
-    } else if spells(in m, s, "&&") {
+    } else if spells(in machine, sym, "&&") {
         widen_u64(B_LAND)
-    } else if spells(in m, s, "||") {
+    } else if spells(in machine, sym, "||") {
         widen_u64(B_LOR)
-    } else if spells(in m, s, "wrapping_add") {
+    } else if spells(in machine, sym, "wrapping_add") {
         widen_u64(B_WADD)
-    } else if spells(in m, s, "wrapping_sub") {
+    } else if spells(in machine, sym, "wrapping_sub") {
         widen_u64(B_WSUB)
-    } else if spells(in m, s, "wrapping_mul") {
+    } else if spells(in machine, sym, "wrapping_mul") {
         widen_u64(B_WMUL)
-    } else if spells(in m, s, "rotate_left") {
+    } else if spells(in machine, sym, "rotate_left") {
         widen_u64(B_ROTL)
-    } else if spells(in m, s, "rotate_right") {
+    } else if spells(in machine, sym, "rotate_right") {
         widen_u64(B_ROTR)
-    } else if spells(in m, s, "bit_and") {
+    } else if spells(in machine, sym, "bit_and") {
         widen_u64(B_BAND)
-    } else if spells(in m, s, "bit_or") {
+    } else if spells(in machine, sym, "bit_or") {
         widen_u64(B_BOR)
-    } else if spells(in m, s, "bit_xor") {
+    } else if spells(in machine, sym, "bit_xor") {
         widen_u64(B_BXOR)
-    } else if spells(in m, s, "bit_shl") {
+    } else if spells(in machine, sym, "bit_shl") {
         widen_u64(B_BSHL)
-    } else if spells(in m, s, "bit_shr") {
+    } else if spells(in machine, sym, "bit_shr") {
         widen_u64(B_BSHR)
     } else {
         0
@@ -559,378 +574,398 @@ fn op_code(in m: M, s: u32) -> u64 {
 }
 
 // The kind named by the text `names.text[a..e]`, or TK_NONE.
-fn kind_named(in m: M, a: u64, e: u64) -> u8 {
-    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    for j in a..e {
-        b.push(u8_at(in m.c.names.text, j));
+fn kind_named(in machine: M, text_start: u64, text_end: u64) -> u8 {
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for j in text_start..text_end {
+        bytes.push(u8_at(in machine.ctx.names.text, j));
     }
-    let s = m.c.names.lookup(in b[0..b.len()]);
-    if s == NONE32 {
+    let sym = machine.ctx.names.lookup(in bytes[0..bytes.len()]);
+    if sym == NONE32 {
         return TK_NONE;
     }
-    let kn = m.c.world.k;
-    if s == kn.i64_ || s == kn.isize_ {
+    let known = machine.ctx.world.k;
+    if sym == known.i64_ || sym == known.isize_ {
         K_I64
-    } else if s == kn.u8_ {
+    } else if sym == known.u8_ {
         K_U8
-    } else if s == kn.u16_ {
+    } else if sym == known.u16_ {
         K_U16
-    } else if s == kn.u32_ {
+    } else if sym == known.u32_ {
         K_U32
-    } else if s == kn.u64_ || s == kn.usize_ {
+    } else if sym == known.u64_ || sym == known.usize_ {
         K_U64
-    } else if s == kn.i8_ {
+    } else if sym == known.i8_ {
         K_I8
-    } else if s == kn.i16_ {
+    } else if sym == known.i16_ {
         K_I16
-    } else if s == kn.i32_ {
+    } else if sym == known.i32_ {
         K_I32
     } else {
         TK_NONE
     }
 }
 
-fn has_prefix(in m: M, s: u32, in pre: Str) -> bool {
-    m.c.names.has_prefix(s, in pre.as_bytes())
+fn has_prefix(in machine: M, sym: u32, in prefix: Str) -> bool {
+    machine.ctx.names.has_prefix(sym, in prefix.as_bytes())
 }
 
-fn unary_code(in m: M, s: u32) -> u64 {
-    if spells(in m, s, "-") {
+fn unary_code(in machine: M, sym: u32) -> u64 {
+    if spells(in machine, sym, "-") {
         return U_NEG;
     }
-    if spells(in m, s, "!") {
+    if spells(in machine, sym, "!") {
         return U_NOT;
     }
-    if spells(in m, s, "~") {
+    if spells(in machine, sym, "~") {
         return U_INV;
     }
-    let a = m.c.names.start(s);
-    let e = m.c.names.end(s);
-    let mut fam = NONE64;
-    let mut at = a;
-    if has_prefix(in m, s, "widen_") {
-        fam = C_WIDEN;
-        at = add(a, 6);
-    } else if has_prefix(in m, s, "narrow_") {
-        fam = C_NARROW;
-        at = add(a, 7);
-    } else if has_prefix(in m, s, "wrapping_") {
-        fam = C_WRAPPING;
-        at = add(a, 9);
+    let text_start = machine.ctx.names.start(sym);
+    let text_end = machine.ctx.names.end(sym);
+    let mut family = NONE64;
+    let mut kind_at = text_start;
+    if has_prefix(in machine, sym, "widen_") {
+        family = C_WIDEN;
+        kind_at = add(text_start, 6);
+    } else if has_prefix(in machine, sym, "narrow_") {
+        family = C_NARROW;
+        kind_at = add(text_start, 7);
+    } else if has_prefix(in machine, sym, "wrapping_") {
+        family = C_WRAPPING;
+        kind_at = add(text_start, 9);
     }
-    if fam == NONE64 {
+    if family == NONE64 {
         return 0;
     }
-    let k = kind_named(in m, at, e);
-    if k == TK_NONE {
+    let kind = kind_named(in machine, kind_at, text_end);
+    if kind == TK_NONE {
         return 0;
     }
-    add(add(U_CONV, wrapping_mul(fam, 16)), widen_u64(k))
+    add(add(U_CONV, wrapping_mul(family, 16)), widen_u64(kind))
 }
 
 // Reads every function's header: parameters, value count, first block.
-pub fn load(inout m: M, entry_index: u64) {
-    m.s_ok = m.c.names.intern(in "Ok".as_bytes());
-    m.s_err = m.c.names.intern(in "Err".as_bytes());
-    m.s_zero = m.c.names.intern(in "0".as_bytes());
-    m.s_dot = m.c.names.intern(in ".".as_bytes());
-    let entry = u32_at(in m.c.nmap, entry_index);
-    m.aux.resize(m.p.insts.len(), 0);
-    m.bparams.resize(m.p.blocks.len(), 0);
-    for fi in 0..m.p.fns.len() {
-        let f = m.p.function(fi);
-        let mut q = f.ha;
-        let np = m.p.op(q);
-        q = inc(q);
-        let pa = m.prm.len();
-        for i in 0..np {
-            let name = n32(m.p.op(q));
-            let pass = m.p.op(inc(q));
-            let k = m.p.op(add(q, 2));
-            q = add(q, add(3, k));
+pub fn load(inout machine: M, entry_index: u64) {
+    machine.ok_sym = machine.ctx.names.intern(in "Ok".as_bytes());
+    machine.err_sym = machine.ctx.names.intern(in "Err".as_bytes());
+    machine.zero_sym = machine.ctx.names.intern(in "0".as_bytes());
+    machine.dot_sym = machine.ctx.names.intern(in ".".as_bytes());
+    let entry_sym = u32_at(in machine.ctx.nmap, entry_index);
+    machine.aux.resize(machine.program.insts.len(), 0);
+    machine.block_params.resize(machine.program.blocks.len(), 0);
+    for func_index in 0..machine.program.fns.len() {
+        let fn_row = machine.program.function(func_index);
+        let mut cursor = fn_row.ha;
+        let param_count = machine.program.op(cursor);
+        cursor = inc(cursor);
+        let param_start = machine.params.len();
+        for i in 0..param_count {
+            let name = n32(machine.program.op(cursor));
+            let pass = machine.program.op(inc(cursor));
+            let path_count = machine.program.op(add(cursor, 2));
+            cursor = add(cursor, add(3, path_count));
             // type, span start, end
-            q = add(q, 3);
-            m.prm.push(Pm { name: name, pass: pass });
+            cursor = add(cursor, 3);
+            machine.params.push(Pm { name: name, pass: pass });
         }
         // result, effects
-        q = add(q, 2);
-        let nb = m.p.op(q);
-        q = add(inc(q), wrapping_mul(nb, 2));
-        let nc = m.p.op(q);
-        q = add(inc(q), nc);
-        let nv = m.p.op(q);
-        q = inc(q);
-        let mut most: u64 = 0;
-        for i in 0..nv {
-            let v = m.p.op(q);
-            if inc(v) > most {
-                most = inc(v);
+        cursor = add(cursor, 2);
+        let bound_count = machine.program.op(cursor);
+        cursor = add(inc(cursor), wrapping_mul(bound_count, 2));
+        let name_count = machine.program.op(cursor);
+        cursor = add(inc(cursor), name_count);
+        let value_entries = machine.program.op(cursor);
+        cursor = inc(cursor);
+        let mut value_count: u64 = 0;
+        for i in 0..value_entries {
+            let value_id = machine.program.op(cursor);
+            if inc(value_id) > value_count {
+                value_count = inc(value_id);
             }
-            q = add(q, 2);
+            cursor = add(cursor, 2);
         }
         // Instruction destinations and block parameters too.
-        for bi in 0..f.bc {
-            let bx = add(f.b0, bi);
-            let b = m.p.block(bx);
-            let ni = m.p.op(inc(b.ha));
-            let at = add(add(b.ha, 3), wrapping_mul(ni, 2));
-            let ok = m.bparams.try_set(bx, at);
-            let npar = m.p.op(at);
-            for j in 0..npar {
-                let v = m.p.op(add(inc(at), j));
-                if inc(v) > most {
-                    most = inc(v);
+        for block_index in 0..fn_row.bc {
+            let block_id = add(fn_row.b0, block_index);
+            let block = machine.program.block(block_id);
+            let token_in_count = machine.program.op(inc(block.ha));
+            let params_at = add(add(block.ha, 3), wrapping_mul(token_in_count, 2));
+            let ok = machine.block_params.try_set(block_id, params_at);
+            let block_param_count = machine.program.op(params_at);
+            for j in 0..block_param_count {
+                let value_id = machine.program.op(add(inc(params_at), j));
+                if inc(value_id) > value_count {
+                    value_count = inc(value_id);
                 }
             }
-            for ii in 0..b.ic {
-                let inst = m.p.inst(add(b.i0, ii));
-                if inc(w(inst.dest)) > most {
-                    most = inc(w(inst.dest));
+            for inst_index in 0..block.ic {
+                let inst = machine.program.inst(add(block.i0, inst_index));
+                if inc(w(inst.dest)) > value_count {
+                    value_count = inc(w(inst.dest));
                 }
             }
         }
-        m.fns.push(Fi { name: f.name, pa: pa, pn: np, nv: most, b0: f.b0, reach: false });
-        if w(f.name) >= m.fn_of.len() {
-            m.fn_of.resize(inc(w(f.name)), 0);
+        machine.fns.push(Fi {
+            name: fn_row.name,
+            param_start: param_start,
+            param_count: param_count,
+            value_count: value_count,
+            first_block: fn_row.b0,
+            reached: false
+        });
+        if w(fn_row.name) >= machine.fn_of.len() {
+            machine.fn_of.resize(inc(w(fn_row.name)), 0);
         }
-        let ok = m.fn_of.try_set(w(f.name), n32(inc(fi)));
+        let ok = machine.fn_of.try_set(w(fn_row.name), n32(inc(func_index)));
     }
-    let e = u32_at(in m.fn_of, w(entry));
-    if entry_index == NONE64 || e == 0 {
-        decline(inout m, "the entry has no lowered body", NONE32);
+    let entry_slot = u32_at(in machine.fn_of, w(entry_sym));
+    if entry_index == NONE64 || entry_slot == 0 {
+        decline(inout machine, "the entry has no lowered body", NONE32);
         return;
     }
-    m.entry = w(wrapping_sub(e, 1));
+    machine.entry = w(wrapping_sub(entry_slot, 1));
 }
 
-fn fn_index(in m: M, s: u32) -> u64 {
-    let e = u32_at(in m.fn_of, w(s));
-    if e == 0 {
+fn fn_index(in machine: M, sym: u32) -> u64 {
+    let slot = u32_at(in machine.fn_of, w(sym));
+    if slot == 0 {
         NONE64
     } else {
-        w(wrapping_sub(e, 1))
+        w(wrapping_sub(slot, 1))
     }
 }
 
 // The end of the pattern at operand `at`.
-fn pat_end(in m: M, at: u64) -> u64 {
-    let kind = m.p.op(at);
-    let q = add(at, 3);
+fn pat_end(in machine: M, at: u64) -> u64 {
+    let kind = machine.program.op(at);
+    let body_at = add(at, 3);
     if kind == widen_u64(Pat::Bind) {
-        inc(q)
+        inc(body_at)
     } else if kind == widen_u64(Pat::Literal) {
-        add(q, 3)
+        add(body_at, 3)
     } else if kind == widen_u64(Pat::Tuple) {
-        let n = m.p.op(q);
-        let mut r = inc(q);
+        let n = machine.program.op(body_at);
+        let mut sub_at = inc(body_at);
         for i in 0..n {
-            r = pat_end(in m, r);
+            sub_at = pat_end(in machine, sub_at);
         }
-        r
+        sub_at
     } else if kind == widen_u64(Pat::Constructor) {
-        let n = m.p.op(add(q, 2));
-        let mut r = add(q, 3);
+        let n = machine.program.op(add(body_at, 2));
+        let mut sub_at = add(body_at, 3);
         for i in 0..n {
-            r = pat_end(in m, inc(r));
+            sub_at = pat_end(in machine, inc(sub_at));
         }
-        r
+        sub_at
     } else {
-        q
+        body_at
     }
 }
 
 // Declines a literal the machine has no value for (a float, a 128-bit
 // integer, a non-ASCII string, whose `Debug` text needs Unicode tables).
-fn scan_literal(inout m: M, at: u64) {
-    let kind = m.p.op(at);
-    let lo = m.p.op(inc(at));
-    let hi = m.p.op(add(at, 2));
+fn scan_literal(inout machine: M, at: u64) {
+    let kind = machine.program.op(at);
+    let lo = machine.program.op(inc(at));
+    let hi = machine.program.op(add(at, 2));
     if kind == widen_u64(Lit::Int) {
         let neg = hi == NONE64 && (lo >> 63) == 1;
         if !(hi == 0 || neg) {
-            decline(inout m, "a 128-bit integer literal", NONE32);
+            decline(inout machine, "a 128-bit integer literal", NONE32);
         }
     } else if kind == widen_u64(Lit::String) {
-        let s = n32(lo);
-        let a = m.c.names.start(s);
-        let e = m.c.names.end(s);
-        for i in a..e {
-            if u8_at(in m.c.names.text, i) >= 128 {
-                decline(inout m, "a non-ASCII string literal", NONE32);
+        let sym = n32(lo);
+        let text_start = machine.ctx.names.start(sym);
+        let text_end = machine.ctx.names.end(sym);
+        for i in text_start..text_end {
+            if u8_at(in machine.ctx.names.text, i) >= 128 {
+                decline(inout machine, "a non-ASCII string literal", NONE32);
             }
         }
     } else if kind != widen_u64(Lit::Bool) {
-        decline(inout m, "a float or wide literal", NONE32);
+        decline(inout machine, "a float or wide literal", NONE32);
     }
 }
 
-fn scan_pattern(inout m: M, at: u64) {
-    let kind = m.p.op(at);
-    let q = add(at, 3);
+fn scan_pattern(inout machine: M, at: u64) {
+    let kind = machine.program.op(at);
+    let body_at = add(at, 3);
     if kind == widen_u64(Pat::Literal) {
-        scan_literal(inout m, q);
+        scan_literal(inout machine, body_at);
     } else if kind == widen_u64(Pat::Tuple) {
-        let n = m.p.op(q);
-        let mut r = inc(q);
+        let n = machine.program.op(body_at);
+        let mut sub_at = inc(body_at);
         for i in 0..n {
-            scan_pattern(inout m, r);
-            r = pat_end(in m, r);
+            scan_pattern(inout machine, sub_at);
+            sub_at = pat_end(in machine, sub_at);
         }
     } else if kind == widen_u64(Pat::Constructor) {
-        let n = m.p.op(add(q, 2));
-        let mut r = add(q, 3);
+        let n = machine.program.op(add(body_at, 2));
+        let mut sub_at = add(body_at, 3);
         for i in 0..n {
-            scan_pattern(inout m, inc(r));
-            r = pat_end(in m, inc(r));
+            scan_pattern(inout machine, inc(sub_at));
+            sub_at = pat_end(in machine, inc(sub_at));
         }
     }
 }
 
-fn reach(inout m: M, f: u64, inout work: ChunkSeq[u64]) {
-    match m.fns.try_get(f) {
-        Option::Some(x) => {
-            if !x.reach {
-                let mut y = x;
-                y.reach = true;
-                let ok = m.fns.try_set(f, y);
-                work.push(f);
+fn reach(inout machine: M, func_index: u64, inout work: ChunkSeq[u64]) {
+    match machine.fns.try_get(func_index) {
+        Option::Some(fn_info) => {
+            if !fn_info.reached {
+                let mut updated = fn_info;
+                updated.reached = true;
+                let ok = machine.fns.try_set(func_index, updated);
+                work.push(func_index);
             }
         },
         Option::None => {},
     }
 }
 
-// Splits a `Write` place at its dots into a `wr` row.
-fn split_place(inout m: M, place: u32, code: u64) -> u64 {
-    let a = m.c.names.start(place);
-    let e = m.c.names.end(place);
+// Splits a `Write` place at its dots into a `writes` row.
+fn split_place(inout machine: M, place: u32, code: u64) -> u64 {
+    let text_start = machine.ctx.names.start(place);
+    let text_end = machine.ctx.names.end(place);
     let mut parts: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    let mut cur: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    for i in a..e {
-        let c = u8_at(in m.c.names.text, i);
-        if c == 46 {
-            parts.push(m.c.names.intern(in cur[0..cur.len()]));
-            cur.clear();
+    let mut part: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in text_start..text_end {
+        let byte = u8_at(in machine.ctx.names.text, i);
+        if byte == 46 {
+            parts.push(machine.ctx.names.intern(in part[0..part.len()]));
+            part.clear();
         } else {
-            cur.push(c);
+            part.push(byte);
         }
     }
-    parts.push(m.c.names.intern(in cur[0..cur.len()]));
-    let sa = m.wsegs.len();
+    parts.push(machine.ctx.names.intern(in part[0..part.len()]));
+    let seg_start = machine.write_segs.len();
     for i in 1..parts.len() {
-        m.wsegs.push(u32_at(in parts, i));
+        machine.write_segs.push(u32_at(in parts, i));
     }
-    let row = m.wr.len();
-    m.wr.push(
-        Wr { root: u32_at(in parts, 0), sa: sa, sn: wrapping_sub(parts.len(), 1), code: code }
-    );
+    let row = machine.writes.len();
+    machine.writes.push(Wr {
+        root: u32_at(in parts, 0),
+        seg_start: seg_start,
+        seg_count: wrapping_sub(parts.len(), 1),
+        code: code
+    });
     row
 }
 
 // Whether every function the entry reaches runs on this machine; fills
 // `aux` for their instructions.
-pub fn scan(inout m: M) {
+pub fn scan(inout machine: M) {
     let mut work: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    reach(inout m, m.entry, inout work);
+    reach(inout machine, machine.entry, inout work);
     loop {
-        if m.declined {
+        if machine.declined {
             return;
         }
-        let f = match work.pop() {
-            Option::Some(f) => f,
+        let func_index = match work.pop() {
+            Option::Some(func_index) => func_index,
             Option::None => {
                 break;
             },
         };
-        let fi = match m.fns.try_get(f) {
-            Option::Some(x) => x,
+        let fn_info = match machine.fns.try_get(func_index) {
+            Option::Some(found) => found,
             Option::None => {
                 break;
             },
         };
-        let fr = m.p.function(f);
+        let fn_row = machine.program.function(func_index);
         // Header types: parameters, result, effects aside, values.
-        let mut q = fr.ha;
-        let np = m.p.op(q);
-        q = inc(q);
-        for i in 0..np {
-            let k = m.p.op(add(q, 2));
-            q = add(q, add(3, k));
-            if !type_ok(in m, n32(m.p.op(q)), 0) {
-                decline(inout m, "a parameter type of ", fi.name);
+        let mut cursor = fn_row.ha;
+        let param_count = machine.program.op(cursor);
+        cursor = inc(cursor);
+        for i in 0..param_count {
+            let path_count = machine.program.op(add(cursor, 2));
+            cursor = add(cursor, add(3, path_count));
+            if !type_ok(in machine, n32(machine.program.op(cursor)), 0) {
+                decline(inout machine, "a parameter type of ", fn_info.name);
             }
-            q = add(q, 3);
+            cursor = add(cursor, 3);
         }
-        if !type_ok(in m, n32(m.p.op(q)), 0) {
-            decline(inout m, "the result type of ", fi.name);
+        if !type_ok(in machine, n32(machine.program.op(cursor)), 0) {
+            decline(inout machine, "the result type of ", fn_info.name);
         }
-        for bi in 0..fr.bc {
-            let bx = add(fr.b0, bi);
-            let b = m.p.block(bx);
-            for ii in 0..b.ic {
-                let ix = add(b.i0, ii);
-                let inst = m.p.inst(ix);
-                if !type_ok(in m, inst.ty, 0) {
-                    decline(inout m, "a value type in ", fi.name);
+        for block_index in 0..fn_row.bc {
+            let block_id = add(fn_row.b0, block_index);
+            let block = machine.program.block(block_id);
+            for inst_index in 0..block.ic {
+                let inst_id = add(block.i0, inst_index);
+                let inst = machine.program.inst(inst_id);
+                if !type_ok(in machine, inst.ty, 0) {
+                    decline(inout machine, "a value type in ", fn_info.name);
                 }
-                let a = inst.a;
+                let operand_at = inst.a;
                 let op = inst.op;
                 if op == Op::Const {
-                    scan_literal(inout m, a);
+                    scan_literal(inout machine, operand_at);
                 } else if op == Op::Read {
-                    let root = n32(m.p.op(a));
-                    let path = m.p.op(inc(a));
-                    let g = fn_index(in m, root);
-                    if g != NONE64 && path == 0 {
-                        reach(inout m, g, inout work);
+                    let root = n32(machine.program.op(operand_at));
+                    let path = machine.program.op(inc(operand_at));
+                    let callee_index = fn_index(in machine, root);
+                    if callee_index != NONE64 && path == 0 {
+                        reach(inout machine, callee_index, inout work);
                     }
                 } else if op == Op::Bind {
-                    scan_pattern(inout m, inc(a));
+                    scan_pattern(inout machine, inc(operand_at));
                 } else if op == Op::Write {
-                    let o = n32(m.p.op(inc(a)));
+                    let op_sym = n32(machine.program.op(inc(operand_at)));
                     let mut code: u64 = 0;
-                    if !spells(in m, o, "=") {
-                        if has_prefix(in m, o, "[]") {
-                            decline(inout m, "an array element write", NONE32);
+                    if !spells(in machine, op_sym, "=") {
+                        if has_prefix(in machine, op_sym, "[]") {
+                            decline(inout machine, "an array element write", NONE32);
                         }
-                        let s0 = m.c.names.start(o);
-                        let mut first: ChunkSeq[u8] = ChunkSeq::new[u8]();
-                        first.push(u8_at(in m.c.names.text, s0));
-                        let fs = m.c.names.intern(in first[0..1]);
-                        code = op_code(in m, fs);
+                        let op_start = machine.ctx.names.start(op_sym);
+                        let mut first_text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                        first_text.push(u8_at(in machine.ctx.names.text, op_start));
+                        let first_sym = machine.ctx.names.intern(in first_text[0..1]);
+                        code = op_code(in machine, first_sym);
                         if code == 0 {
-                            decline(inout m, "the compound assignment ", o);
+                            decline(inout machine, "the compound assignment ", op_sym);
                         }
                     }
-                    let row = split_place(inout m, n32(m.p.op(a)), code);
-                    let ok = m.aux.try_set(ix, row);
+                    let row = split_place(inout machine, n32(machine.program.op(operand_at)), code);
+                    let ok = machine.aux.try_set(inst_id, row);
                 } else if op == Op::Unary {
-                    let code = unary_code(in m, n32(m.p.op(a)));
+                    let code = unary_code(in machine, n32(machine.program.op(operand_at)));
                     if code == 0 {
-                        decline(inout m, "the unary operator ", n32(m.p.op(a)));
+                        decline(
+                            inout machine,
+                            "the unary operator ",
+                            n32(machine.program.op(operand_at))
+                        );
                     }
-                    let ok = m.aux.try_set(ix, code);
+                    let ok = machine.aux.try_set(inst_id, code);
                 } else if op == Op::Binary {
-                    let code = op_code(in m, n32(m.p.op(a)));
+                    let code = op_code(in machine, n32(machine.program.op(operand_at)));
                     if code == 0 {
-                        decline(inout m, "the binary operator ", n32(m.p.op(a)));
+                        decline(
+                            inout machine,
+                            "the binary operator ",
+                            n32(machine.program.op(operand_at))
+                        );
                     }
-                    let ok = m.aux.try_set(ix, code);
+                    let ok = machine.aux.try_set(inst_id, code);
                 } else if op == Op::Data {
-                    let c = ctor_of(inout m, n32(m.p.op(a)));
-                    let ok = m.aux.try_set(ix, if c == NONE32 { 0 } else { inc(w(c)) });
+                    let ctor = ctor_of(inout machine, n32(machine.program.op(operand_at)));
+                    let ok = machine
+                        .aux
+                        .try_set(inst_id, if ctor == NONE32 { 0 } else { inc(w(ctor)) });
                 } else if op == Op::Call {
-                    let callee = n32(m.p.op(a));
-                    let g = fn_index(in m, callee);
-                    if g == NONE64 {
-                        decline(inout m, "a call of ", callee);
+                    let callee = n32(machine.program.op(operand_at));
+                    let callee_index = fn_index(in machine, callee);
+                    if callee_index == NONE64 {
+                        decline(inout machine, "a call of ", callee);
                     } else {
-                        reach(inout m, g, inout work);
-                        let ok = m.aux.try_set(ix, g);
+                        reach(inout machine, callee_index, inout work);
+                        let ok = machine.aux.try_set(inst_id, callee_index);
                     }
                 } else if op == Op::Exit {
-                    if n32(m.p.op(inc(a))) != fi.name {
-                        decline(inout m, "a `return` out of a nested body", NONE32);
+                    if n32(machine.program.op(inc(operand_at))) != fn_info.name {
+                        decline(inout machine, "a `return` out of a nested body", NONE32);
                     }
                 } else if op == Op::Tuple
                     || op == Op::Unit
@@ -939,21 +974,21 @@ pub fn scan(inout m: M) {
                     || op == Op::Indirect
                     || op == Op::Try
                     || op == Op::Loop {} else if op == Op::Closure {
-                    decline(inout m, "a closure in ", fi.name);
+                    decline(inout machine, "a closure in ", fn_info.name);
                 } else if op == Op::Handle {
-                    decline(inout m, "a handler in ", fi.name);
+                    decline(inout machine, "a handler in ", fn_info.name);
                 } else if op == Op::Seq {
-                    decline(inout m, "a sequence operation in ", fi.name);
+                    decline(inout machine, "a sequence operation in ", fn_info.name);
                 } else {
-                    decline(inout m, "a vector, tiled or Box operation in ", fi.name);
+                    decline(inout machine, "a vector, tiled or Box operation in ", fn_info.name);
                 }
             }
-            if b.term == Term::Match {
-                let n = m.p.op(inc(b.ta));
-                let mut r = add(b.ta, 2);
+            if block.term == Term::Match {
+                let n = machine.program.op(inc(block.ta));
+                let mut pat_at = add(block.ta, 2);
                 for i in 0..n {
-                    scan_pattern(inout m, r);
-                    r = inc(pat_end(in m, r));
+                    scan_pattern(inout machine, pat_at);
+                    pat_at = inc(pat_end(in machine, pat_at));
                 }
             }
         }
@@ -962,241 +997,259 @@ pub fn scan(inout m: M) {
 
 // ----- values ------------------------------------------------------------------
 
-fn agg(in m: M, v: Val) -> Agg {
-    if v.x == NONE64 {
-        return Agg { ctor: 0, a: 0, n: 0 };
+fn agg(in machine: M, value: Val) -> Agg {
+    if value.payload == NONE64 {
+        return Agg { ctor: 0, kid_start: 0, kid_count: 0 };
     }
-    match m.heap.try_get(v.x) {
-        Option::Some(a) => a,
-        Option::None => Agg { ctor: 0, a: 0, n: 0 },
+    match machine.heap.try_get(value.payload) {
+        Option::Some(found) => found,
+        Option::None => Agg { ctor: 0, kid_start: 0, kid_count: 0 },
     }
 }
 
-fn kid(in m: M, i: u64) -> Val {
-    match m.kids.try_get(i) {
+fn kid(in machine: M, kid_index: u64) -> Val {
+    match machine.kids.try_get(kid_index) {
         Option::Some(v) => v,
         Option::None => undef(),
     }
 }
 
 // A new aggregate from `kids[a..]` (appended by the caller).
-fn make(inout m: M, t: u8, ctor: u32, a: u64) -> Val {
-    let n = wrapping_sub(m.kids.len(), a);
-    if t == T_TUPLE && n == 0 {
+fn make(inout machine: M, tag: u8, ctor: u32, kid_start: u64) -> Val {
+    let kid_count = wrapping_sub(machine.kids.len(), kid_start);
+    if tag == T_TUPLE && kid_count == 0 {
         return unit();
     }
-    let h = m.heap.len();
-    m.heap.push(Agg { ctor: ctor, a: a, n: n });
-    Val { t: t, x: h }
+    let heap_index = machine.heap.len();
+    machine.heap.push(Agg { ctor: ctor, kid_start: kid_start, kid_count: kid_count });
+    Val { tag: tag, payload: heap_index }
 }
 
-fn push_kid(inout m: M, name: u32, v: Val) {
-    m.kids.push(v);
-    m.knames.push(name);
+fn push_kid(inout machine: M, name: u32, value: Val) {
+    machine.kids.push(value);
+    machine.kid_names.push(name);
 }
 
 // The index of field `name` of a data value, or NONE64.
-fn field_index(in m: M, g: Agg, name: u32) -> u64 {
-    for i in 0..g.n {
-        if u32_at(in m.knames, add(g.a, i)) == name {
+fn field_index(in machine: M, aggregate: Agg, name: u32) -> u64 {
+    for i in 0..aggregate.kid_count {
+        if u32_at(in machine.kid_names, add(aggregate.kid_start, i)) == name {
             return i;
         }
     }
     NONE64
 }
 
-fn sym_less(in m: M, a: u32, b: u32) -> bool {
-    let a0 = m.c.names.start(a);
-    let a1 = m.c.names.end(a);
-    let b0 = m.c.names.start(b);
-    let b1 = m.c.names.end(b);
-    let la = wrapping_sub(a1, a0);
-    let lb = wrapping_sub(b1, b0);
-    let n = if la < lb { la } else { lb };
-    for i in 0..n {
-        let x = u8_at(in m.c.names.text, add(a0, i));
-        let y = u8_at(in m.c.names.text, add(b0, i));
-        if x != y {
-            return x < y;
+fn sym_less(in machine: M, lhs: u32, rhs: u32) -> bool {
+    let lhs_start = machine.ctx.names.start(lhs);
+    let lhs_end = machine.ctx.names.end(lhs);
+    let rhs_start = machine.ctx.names.start(rhs);
+    let rhs_end = machine.ctx.names.end(rhs);
+    let lhs_len = wrapping_sub(lhs_end, lhs_start);
+    let rhs_len = wrapping_sub(rhs_end, rhs_start);
+    let common_len = if lhs_len < rhs_len { lhs_len } else { rhs_len };
+    for i in 0..common_len {
+        let lhs_byte = u8_at(in machine.ctx.names.text, add(lhs_start, i));
+        let rhs_byte = u8_at(in machine.ctx.names.text, add(rhs_start, i));
+        if lhs_byte != rhs_byte {
+            return lhs_byte < rhs_byte;
         }
     }
-    la < lb
+    lhs_len < rhs_len
 }
 
 // `Value::Display`.
-fn display(in m: M, v: Val, inout o: ChunkSeq[u8], depth: u64) {
-    if v.t <= K_I32 {
-        if is_signed(v.t) {
-            put_signed(inout o, wrapping_i64(v.x));
+fn display(in machine: M, value: Val, inout out: ChunkSeq[u8], depth: u64) {
+    if value.tag <= K_I32 {
+        if is_signed(value.tag) {
+            put_signed(inout out, wrapping_i64(value.payload));
         } else {
-            push_decimal(inout o, v.x);
+            push_decimal(inout out, value.payload);
         }
-    } else if v.t == T_BOOL {
-        if v.x != 0 {
-            put(inout o, "true");
+    } else if value.tag == T_BOOL {
+        if value.payload != 0 {
+            put(inout out, "true");
         } else {
-            put(inout o, "false");
+            put(inout out, "false");
         }
-    } else if v.t == T_STR {
-        debug_str(inout o, in m.c.names, n32(v.x));
-    } else if v.t == T_FN {
-        put(inout o, "<fn ");
-        put_sym(inout o, in m.c.names, n32(v.x));
-        put(inout o, ">");
-    } else if v.t == T_TUPLE {
-        let g = agg(in m, v);
-        o.push(40);
-        for i in 0..g.n {
+    } else if value.tag == T_STR {
+        debug_str(inout out, in machine.ctx.names, n32(value.payload));
+    } else if value.tag == T_FN {
+        put(inout out, "<fn ");
+        put_sym(inout out, in machine.ctx.names, n32(value.payload));
+        put(inout out, ">");
+    } else if value.tag == T_TUPLE {
+        let aggregate = agg(in machine, value);
+        out.push(40);
+        for i in 0..aggregate.kid_count {
             if i > 0 {
-                put(inout o, ", ");
+                put(inout out, ", ");
             }
-            display(in m, kid(in m, add(g.a, i)), inout o, inc(depth));
+            display(
+                in machine,
+                kid(in machine, add(aggregate.kid_start, i)),
+                inout out,
+                inc(depth)
+            );
         }
-        o.push(41);
-    } else if v.t == T_DATA {
-        let g = agg(in m, v);
-        put_sym(inout o, in m.c.names, g.ctor);
-        if g.n == 0 {
+        out.push(41);
+    } else if value.tag == T_DATA {
+        let aggregate = agg(in machine, value);
+        put_sym(inout out, in machine.ctx.names, aggregate.ctor);
+        if aggregate.kid_count == 0 {
             return;
         }
         // The fields in `BTreeMap` order, or by number when every name
         // is one.
         let mut numeric = true;
-        for i in 0..g.n {
-            if index_of(in m, u32_at(in m.knames, add(g.a, i))) == NONE64 {
+        for i in 0..aggregate.kid_count {
+            if index_of(in machine, u32_at(in machine.kid_names, add(aggregate.kid_start, i)))
+                == NONE64 {
                 numeric = false;
             }
         }
         let mut order: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        for i in 0..g.n {
+        for i in 0..aggregate.kid_count {
             order.push(i);
         }
         // insertion sort (data values have few fields)
-        for i in 1..g.n {
+        for i in 1..aggregate.kid_count {
             let mut j = i;
             loop {
                 if j == 0 {
                     break;
                 }
-                let x = u64_at(in order, wrapping_sub(j, 1));
-                let y = u64_at(in order, j);
-                let sx = u32_at(in m.knames, add(g.a, x));
-                let sy = u32_at(in m.knames, add(g.a, y));
+                let prev_field = u64_at(in order, wrapping_sub(j, 1));
+                let cur_field = u64_at(in order, j);
+                let prev_sym = u32_at(in machine.kid_names, add(aggregate.kid_start, prev_field));
+                let cur_sym = u32_at(in machine.kid_names, add(aggregate.kid_start, cur_field));
                 let less = if numeric {
-                    index_of(in m, sy) < index_of(in m, sx)
+                    index_of(in machine, cur_sym) < index_of(in machine, prev_sym)
                 } else {
-                    sym_less(in m, sy, sx)
+                    sym_less(in machine, cur_sym, prev_sym)
                 };
                 if !less {
                     break;
                 }
-                let ok1 = order.try_set(wrapping_sub(j, 1), y);
-                let ok2 = order.try_set(j, x);
+                let ok1 = order.try_set(wrapping_sub(j, 1), cur_field);
+                let ok2 = order.try_set(j, prev_field);
                 j = wrapping_sub(j, 1);
             }
         }
         if numeric {
-            o.push(40);
+            out.push(40);
         } else {
-            put(inout o, " { ");
+            put(inout out, " { ");
         }
-        for i in 0..g.n {
+        for i in 0..aggregate.kid_count {
             if i > 0 {
-                put(inout o, ", ");
+                put(inout out, ", ");
             }
-            let k = add(g.a, u64_at(in order, i));
+            let kid_index = add(aggregate.kid_start, u64_at(in order, i));
             if !numeric {
-                put_sym(inout o, in m.c.names, u32_at(in m.knames, k));
-                put(inout o, ": ");
+                put_sym(inout out, in machine.ctx.names, u32_at(in machine.kid_names, kid_index));
+                put(inout out, ": ");
             }
-            display(in m, kid(in m, k), inout o, inc(depth));
+            display(in machine, kid(in machine, kid_index), inout out, inc(depth));
         }
         if numeric {
-            o.push(41);
+            out.push(41);
         } else {
-            put(inout o, " }");
+            put(inout out, " }");
         }
     }
 }
 
-fn hex(d: u64) -> u8 {
-    if d < 10 {
-        wrapping_u8(add(d, 48))
+fn hex(digit: u64) -> u8 {
+    if digit < 10 {
+        wrapping_u8(add(digit, 48))
     } else {
-        wrapping_u8(add(d, 87))
+        wrapping_u8(add(digit, 87))
     }
 }
 
 // Rust's `{:?}` of an ASCII string (`scan` declines the others).
-fn debug_str(inout o: ChunkSeq[u8], in names: Names, s: u32) {
-    o.push(34);
-    let a = names.start(s);
-    let e = names.end(s);
-    for i in a..e {
-        let c = u8_at(in names.text, i);
-        if c == 34 {
-            o.push(92);
-            o.push(34);
-        } else if c == 92 {
-            o.push(92);
-            o.push(92);
-        } else if c == 10 {
-            o.push(92);
-            o.push(110);
-        } else if c == 13 {
-            o.push(92);
-            o.push(114);
-        } else if c == 9 {
-            o.push(92);
-            o.push(116);
-        } else if c == 0 {
-            o.push(92);
-            o.push(48);
-        } else if c < 32 || c == 127 {
-            put(inout o, "\\u{");
-            let d = widen_u64(c);
-            if d >= 16 {
-                o.push(hex(d / 16));
+fn debug_str(inout out: ChunkSeq[u8], in names: Names, sym: u32) {
+    out.push(34);
+    let text_start = names.start(sym);
+    let text_end = names.end(sym);
+    for i in text_start..text_end {
+        let byte = u8_at(in names.text, i);
+        if byte == 34 {
+            out.push(92);
+            out.push(34);
+        } else if byte == 92 {
+            out.push(92);
+            out.push(92);
+        } else if byte == 10 {
+            out.push(92);
+            out.push(110);
+        } else if byte == 13 {
+            out.push(92);
+            out.push(114);
+        } else if byte == 9 {
+            out.push(92);
+            out.push(116);
+        } else if byte == 0 {
+            out.push(92);
+            out.push(48);
+        } else if byte < 32 || byte == 127 {
+            put(inout out, "\\u{");
+            let code_point = widen_u64(byte);
+            if code_point >= 16 {
+                out.push(hex(code_point / 16));
             }
-            o.push(hex(d % 16));
-            o.push(125);
+            out.push(hex(code_point % 16));
+            out.push(125);
         } else {
-            o.push(c);
+            out.push(byte);
         }
     }
-    o.push(34);
+    out.push(34);
 }
 
 // `equal`.
-fn equal(in m: M, a: Val, b: Val) -> bool {
-    if a.t <= K_I32 || a.t == T_BOOL || a.t == T_STR {
-        return a.t == b.t && a.x == b.x;
+fn equal(in machine: M, lhs: Val, rhs: Val) -> bool {
+    if lhs.tag <= K_I32 || lhs.tag == T_BOOL || lhs.tag == T_STR {
+        return lhs.tag == rhs.tag && lhs.payload == rhs.payload;
     }
-    if a.t == T_TUPLE && b.t == T_TUPLE {
-        let ga = agg(in m, a);
-        let gb = agg(in m, b);
-        if ga.n != gb.n {
+    if lhs.tag == T_TUPLE && rhs.tag == T_TUPLE {
+        let lhs_agg = agg(in machine, lhs);
+        let rhs_agg = agg(in machine, rhs);
+        if lhs_agg.kid_count != rhs_agg.kid_count {
             return false;
         }
-        for i in 0..ga.n {
-            if !equal(in m, kid(in m, add(ga.a, i)), kid(in m, add(gb.a, i))) {
+        for i in 0..lhs_agg.kid_count {
+            if !equal(
+                in machine,
+                kid(in machine, add(lhs_agg.kid_start, i)),
+                kid(in machine, add(rhs_agg.kid_start, i))
+            ) {
                 return false;
             }
         }
         return true;
     }
-    if a.t == T_DATA && b.t == T_DATA {
-        let ga = agg(in m, a);
-        let gb = agg(in m, b);
-        if ga.ctor != gb.ctor || ga.n != gb.n {
+    if lhs.tag == T_DATA && rhs.tag == T_DATA {
+        let lhs_agg = agg(in machine, lhs);
+        let rhs_agg = agg(in machine, rhs);
+        if lhs_agg.ctor != rhs_agg.ctor || lhs_agg.kid_count != rhs_agg.kid_count {
             return false;
         }
-        for i in 0..ga.n {
-            let j = field_index(in m, gb, u32_at(in m.knames, add(ga.a, i)));
-            if j == NONE64 {
+        for i in 0..lhs_agg.kid_count {
+            let rhs_field = field_index(
+                in machine,
+                rhs_agg,
+                u32_at(in machine.kid_names, add(lhs_agg.kid_start, i))
+            );
+            if rhs_field == NONE64 {
                 return false;
             }
-            if !equal(in m, kid(in m, add(ga.a, i)), kid(in m, add(gb.a, j))) {
+            if !equal(
+                in machine,
+                kid(in machine, add(lhs_agg.kid_start, i)),
+                kid(in machine, add(rhs_agg.kid_start, rhs_field))
+            ) {
                 return false;
             }
         }
@@ -1207,128 +1260,133 @@ fn equal(in m: M, a: Val, b: Val) -> bool {
 
 // ----- places ------------------------------------------------------------------
 
-// The child of `v` named by segment `seg` (`slot_get`'s step), or an
+// The child of `value` named by segment `seg` (`slot_get`'s step), or an
 // error: 1 unknown field, 2 not a tuple index, 3 out of bounds, 4 not an
 // aggregate.
-fn child(in m: M, v: Val, seg: u32, inout err: u64) -> u64 {
-    let g = agg(in m, v);
-    if v.t == T_DATA {
-        let i = field_index(in m, g, seg);
-        if i == NONE64 {
+fn child(in machine: M, value: Val, seg: u32, inout err: u64) -> u64 {
+    let aggregate = agg(in machine, value);
+    if value.tag == T_DATA {
+        let index = field_index(in machine, aggregate, seg);
+        if index == NONE64 {
             err = 1;
         }
-        return i;
+        return index;
     }
-    if v.t == T_TUPLE {
-        let i = index_of(in m, seg);
-        if i == NONE64 {
+    if value.tag == T_TUPLE {
+        let index = index_of(in machine, seg);
+        if index == NONE64 {
             err = 2;
-            return i;
+            return index;
         }
-        if i >= g.n {
+        if index >= aggregate.kid_count {
             err = 3;
             return NONE64;
         }
-        return i;
+        return index;
     }
     err = 4;
     NONE64
 }
 
-// `slot_get` of `cells[cell]` along `m.path`.
-fn read_path(inout m: M, cell: u64) -> Val {
-    let mut v = match m.cells.try_get(cell) {
-        Option::Some(v) => v,
+// `slot_get` of `cells[cell]` along `machine.path`.
+fn read_path(inout machine: M, cell: u64) -> Val {
+    let mut value = match machine.cells.try_get(cell) {
+        Option::Some(value) => value,
         Option::None => undef(),
     };
-    for i in 0..m.path.len() {
-        let seg = u32_at(in m.path, i);
+    for i in 0..machine.path.len() {
+        let seg = u32_at(in machine.path, i);
         let mut err: u64 = 0;
-        let k = child(in m, v, seg, inout err);
+        let child_index = child(in machine, value, seg, inout err);
         if err == 1 {
-            fail_sym(inout m, "unknown field ", seg, "");
+            fail_sym(inout machine, "unknown field ", seg, "");
             // Rust quotes the field: `unknown field 'f'`.
-            m.msg.clear();
-            put(inout m.msg, "unknown field '");
-            put_sym(inout m.msg, in m.c.names, seg);
-            put(inout m.msg, "'");
+            machine.message.clear();
+            put(inout machine.message, "unknown field '");
+            put_sym(inout machine.message, in machine.ctx.names, seg);
+            put(inout machine.message, "'");
             return undef();
         } else if err == 2 {
-            fail(inout m, "invalid tuple index");
+            fail(inout machine, "invalid tuple index");
             return undef();
         } else if err == 3 {
-            fail(inout m, "tuple index out of bounds");
+            fail(inout machine, "tuple index out of bounds");
             return undef();
         } else if err == 4 {
-            fail(inout m, "field access requires aggregate");
+            fail(inout machine, "field access requires aggregate");
             return undef();
         }
-        v = kid(in m, add(agg(in m, v).a, k));
+        value = kid(in machine, add(agg(in machine, value).kid_start, child_index));
     }
-    v
+    value
 }
 
-// `v` with the value at `m.path[i..]` replaced by `new`.
-fn put_path(inout m: M, v: Val, i: u64, new: Val) -> Val {
-    if i >= m.path.len() {
+// `value` with the value at `machine.path[seg_index..]` replaced by `new`.
+fn put_path(inout machine: M, value: Val, seg_index: u64, new: Val) -> Val {
+    if seg_index >= machine.path.len() {
         return new;
     }
-    let seg = u32_at(in m.path, i);
+    let seg = u32_at(in machine.path, seg_index);
     let mut err: u64 = 0;
-    let k = child(in m, v, seg, inout err);
+    let child_index = child(in machine, value, seg, inout err);
     if err == 1 {
-        fail(inout m, "unknown field");
+        fail(inout machine, "unknown field");
         return undef();
     } else if err == 2 {
-        fail(inout m, "invalid index");
+        fail(inout machine, "invalid index");
         return undef();
     } else if err == 3 {
-        fail(inout m, "index out of bounds");
+        fail(inout machine, "index out of bounds");
         return undef();
     } else if err == 4 {
-        fail(inout m, "assignment requires aggregate");
+        fail(inout machine, "assignment requires aggregate");
         return undef();
     }
-    let g = agg(in m, v);
-    let inner = put_path(inout m, kid(in m, add(g.a, k)), inc(i), new);
-    if m.failed {
+    let aggregate = agg(in machine, value);
+    let inner = put_path(
+        inout machine,
+        kid(in machine, add(aggregate.kid_start, child_index)),
+        inc(seg_index),
+        new
+    );
+    if machine.failed {
         return undef();
     }
-    let a = m.kids.len();
-    for j in 0..g.n {
-        let name = u32_at(in m.knames, add(g.a, j));
-        if j == k {
-            push_kid(inout m, name, inner);
+    let kid_start = machine.kids.len();
+    for j in 0..aggregate.kid_count {
+        let name = u32_at(in machine.kid_names, add(aggregate.kid_start, j));
+        if j == child_index {
+            push_kid(inout machine, name, inner);
         } else {
-            push_kid(inout m, name, kid(in m, add(g.a, j)));
+            push_kid(inout machine, name, kid(in machine, add(aggregate.kid_start, j)));
         }
     }
-    make(inout m, v.t, g.ctor, a)
+    make(inout machine, value.tag, aggregate.ctor, kid_start)
 }
 
-fn write_path(inout m: M, cell: u64, new: Val) {
-    let old = match m.cells.try_get(cell) {
-        Option::Some(v) => v,
+fn write_path(inout machine: M, cell: u64, new: Val) {
+    let old = match machine.cells.try_get(cell) {
+        Option::Some(value) => value,
         Option::None => undef(),
     };
-    let v = put_path(inout m, old, 0, new);
-    if !m.failed {
-        let ok = m.cells.try_set(cell, v);
+    let updated = put_path(inout machine, old, 0, new);
+    if !machine.failed {
+        let ok = machine.cells.try_set(cell, updated);
     }
 }
 
 // The latest binding of `name` in the current activation, or NONE64.
-fn binding(in m: M, name: u32) -> u64 {
-    let mut i = m.env.len();
+fn binding(in machine: M, name: u32) -> u64 {
+    let mut index = machine.env.len();
     loop {
-        if i <= m.cur.eb {
+        if index <= machine.frame.env_base {
             return NONE64;
         }
-        i = wrapping_sub(i, 1);
-        match m.env.try_get(i) {
-            Option::Some(e) => {
-                if e.name == name {
-                    return i;
+        index = wrapping_sub(index, 1);
+        match machine.env.try_get(index) {
+            Option::Some(env_entry) => {
+                if env_entry.name == name {
+                    return index;
                 }
             },
             Option::None => {},
@@ -1336,117 +1394,123 @@ fn binding(in m: M, name: u32) -> u64 {
     }
 }
 
-fn entry(in m: M, i: u64) -> En {
-    match m.env.try_get(i) {
-        Option::Some(e) => e,
-        Option::None => En { name: 0, cell: 0, pa: 0, pn: 0 },
+fn entry(in machine: M, index: u64) -> En {
+    match machine.env.try_get(index) {
+        Option::Some(found) => found,
+        Option::None => En { name: 0, cell: 0, seg_start: 0, seg_count: 0 },
     }
 }
 
-// `m.path` = the slot path of binding `e`.
-fn slot_path(inout m: M, e: En) {
-    m.path.clear();
-    for i in 0..e.pn {
-        m.path.push(u32_at(in m.segs, add(e.pa, i)));
+// `machine.path` = the slot path of binding `env_entry`.
+fn slot_path(inout machine: M, env_entry: En) {
+    machine.path.clear();
+    for i in 0..env_entry.seg_count {
+        machine.path.push(u32_at(in machine.segs, add(env_entry.seg_start, i)));
     }
 }
 
-// Binds `name` to `v`. The Rust evaluator's environment is a map, so a
+// Binds `name` to `value`. The Rust evaluator's environment is a map, so a
 // rebinding (a loop body's pattern, each iteration) replaces the entry,
 // reusing the entry's own cell: nothing else refers to it once no call is
 // in flight. The environment stays as small as Rust's.
-fn bind_new(inout m: M, name: u32, v: Val) {
-    let b = binding(in m, name);
-    if b != NONE64 {
-        let e = entry(in m, b);
-        if e.pn == 0 && e.cell >= m.cur.cb {
-            let ok = m.cells.try_set(e.cell, v);
+fn bind_new(inout machine: M, name: u32, value: Val) {
+    let bound_index = binding(in machine, name);
+    if bound_index != NONE64 {
+        let env_entry = entry(in machine, bound_index);
+        if env_entry.seg_count == 0 && env_entry.cell >= machine.frame.cell_base {
+            let ok = machine.cells.try_set(env_entry.cell, value);
             return;
         }
-        let cell = m.cells.len();
-        m.cells.push(v);
-        let ok = m.env.try_set(b, En { name: name, cell: cell, pa: 0, pn: 0 });
+        let cell = machine.cells.len();
+        machine.cells.push(value);
+        let ok = machine
+            .env
+            .try_set(bound_index, En { name: name, cell: cell, seg_start: 0, seg_count: 0 });
         return;
     }
-    let cell = m.cells.len();
-    m.cells.push(v);
-    m.env.push(En { name: name, cell: cell, pa: 0, pn: 0 });
+    let cell = machine.cells.len();
+    machine.cells.push(value);
+    machine.env.push(En { name: name, cell: cell, seg_start: 0, seg_count: 0 });
 }
 
 // ----- patterns ----------------------------------------------------------------
 
-// Whether literal words `at` (kind, lo, hi) match `v` (`bind_pattern`).
-fn literal_matches(in m: M, at: u64, v: Val) -> bool {
-    let kind = m.p.op(at);
-    let lo = m.p.op(inc(at));
-    let hi = m.p.op(add(at, 2));
+// Whether literal words `at` (kind, lo, hi) match `value` (`bind_pattern`).
+fn literal_matches(in machine: M, at: u64, value: Val) -> bool {
+    let kind = machine.program.op(at);
+    let lo = machine.program.op(inc(at));
+    let hi = machine.program.op(add(at, 2));
     if kind == widen_u64(Lit::Int) {
-        if v.t > K_I32 {
+        if value.tag > K_I32 {
             return false;
         }
-        let vhi = if is_signed(v.t) && wrapping_i64(v.x) < 0 {
+        let value_hi = if is_signed(value.tag) && wrapping_i64(value.payload) < 0 {
             NONE64
         } else {
             0
         };
-        return lo == v.x && hi == vhi;
+        return lo == value.payload && hi == value_hi;
     }
     if kind == widen_u64(Lit::Bool) {
-        return v.t == T_BOOL && v.x == lo;
+        return value.tag == T_BOOL && value.payload == lo;
     }
     if kind == widen_u64(Lit::String) {
-        return v.t == T_STR && v.x == lo;
+        return value.tag == T_STR && value.payload == lo;
     }
     false
 }
 
-fn pat_matches(inout m: M, at: u64, v: Val) -> bool {
-    let kind = m.p.op(at);
-    let q = add(at, 3);
+fn pat_matches(inout machine: M, at: u64, value: Val) -> bool {
+    let kind = machine.program.op(at);
+    let body_at = add(at, 3);
     if kind == widen_u64(Pat::Wild) || kind == widen_u64(Pat::Bind) {
         return true;
     }
     if kind == widen_u64(Pat::Literal) {
-        return literal_matches(in m, q, v);
+        return literal_matches(in machine, body_at, value);
     }
     if kind == widen_u64(Pat::Tuple) {
-        if v.t != T_TUPLE {
+        if value.tag != T_TUPLE {
             return false;
         }
-        let g = agg(in m, v);
-        let n = m.p.op(q);
-        if n != g.n {
+        let aggregate = agg(in machine, value);
+        let n = machine.program.op(body_at);
+        if n != aggregate.kid_count {
             return false;
         }
-        let mut r = inc(q);
+        let mut sub_at = inc(body_at);
         for i in 0..n {
-            if !pat_matches(inout m, r, kid(in m, add(g.a, i))) {
+            if !pat_matches(inout machine, sub_at, kid(in machine, add(aggregate.kid_start, i))) {
                 return false;
             }
-            r = pat_end(in m, r);
+            sub_at = pat_end(in machine, sub_at);
         }
         return true;
     }
     if kind == widen_u64(Pat::Constructor) {
-        if v.t != T_DATA {
+        if value.tag != T_DATA {
             return false;
         }
-        let g = agg(in m, v);
-        if short_of(inout m, n32(m.p.op(q))) != g.ctor {
+        let aggregate = agg(in machine, value);
+        if short_of(inout machine, n32(machine.program.op(body_at))) != aggregate.ctor {
             return false;
         }
-        let n = m.p.op(add(q, 2));
-        let mut r = add(q, 3);
+        let n = machine.program.op(add(body_at, 2));
+        let mut sub_at = add(body_at, 3);
         for i in 0..n {
-            let f = n32(m.p.op(r));
-            let j = field_index(in m, g, f);
-            if j == NONE64 {
+            let field_sym = n32(machine.program.op(sub_at));
+            let field_pos = field_index(in machine, aggregate, field_sym);
+            if field_pos == NONE64 {
                 return false;
             }
-            if !pat_matches(inout m, inc(r), kid(in m, add(g.a, j))) {
+            if !pat_matches(
+                inout machine,
+                inc(sub_at),
+                kid(in machine, add(aggregate.kid_start, field_pos))
+            ) {
                 return false;
             }
-            r = pat_end(in m, inc(r));
+            sub_at = pat_end(in machine, inc(sub_at));
         }
         return true;
     }
@@ -1454,740 +1518,762 @@ fn pat_matches(inout m: M, at: u64, v: Val) -> bool {
 }
 
 // Binds a pattern `pat_matches` accepted, each name in a new cell.
-fn pat_bind(inout m: M, at: u64, v: Val) {
-    let kind = m.p.op(at);
-    let q = add(at, 3);
+fn pat_bind(inout machine: M, at: u64, value: Val) {
+    let kind = machine.program.op(at);
+    let body_at = add(at, 3);
     if kind == widen_u64(Pat::Bind) {
-        bind_new(inout m, n32(m.p.op(q)), v);
+        bind_new(inout machine, n32(machine.program.op(body_at)), value);
     } else if kind == widen_u64(Pat::Tuple) {
-        let g = agg(in m, v);
-        let n = m.p.op(q);
-        let mut r = inc(q);
+        let aggregate = agg(in machine, value);
+        let n = machine.program.op(body_at);
+        let mut sub_at = inc(body_at);
         for i in 0..n {
-            pat_bind(inout m, r, kid(in m, add(g.a, i)));
-            r = pat_end(in m, r);
+            pat_bind(inout machine, sub_at, kid(in machine, add(aggregate.kid_start, i)));
+            sub_at = pat_end(in machine, sub_at);
         }
     } else if kind == widen_u64(Pat::Constructor) {
-        let g = agg(in m, v);
-        let n = m.p.op(add(q, 2));
-        let mut r = add(q, 3);
+        let aggregate = agg(in machine, value);
+        let n = machine.program.op(add(body_at, 2));
+        let mut sub_at = add(body_at, 3);
         for i in 0..n {
-            let j = field_index(in m, g, n32(m.p.op(r)));
-            pat_bind(inout m, inc(r), kid(in m, add(g.a, j)));
-            r = pat_end(in m, inc(r));
+            let field_pos = field_index(in machine, aggregate, n32(machine.program.op(sub_at)));
+            pat_bind(
+                inout machine,
+                inc(sub_at),
+                kid(in machine, add(aggregate.kid_start, field_pos))
+            );
+            sub_at = pat_end(in machine, inc(sub_at));
         }
     }
 }
 
 // ----- operators ---------------------------------------------------------------
 
-fn int_val(k: u8, n: i128) -> Val {
-    Val { t: k, x: wrap(k, n) }
+fn int_val(kind: u8, value: i128) -> Val {
+    Val { tag: kind, payload: wrap(kind, value) }
 }
 
-fn bool_val(b: bool) -> Val {
-    Val { t: T_BOOL, x: if b { 1 } else { 0 } }
+fn bool_val(value: bool) -> Val {
+    Val { tag: T_BOOL, payload: if value { 1 } else { 0 } }
 }
 
-// `binary` (without floats and 128-bit integers); a failure in `st`.
-fn binary(inout m: M, code: u64, a: Val, b: Val, inout st: u8) -> Val {
+// `binary` (without floats and 128-bit integers); the failure code in `failure`.
+fn binary(inout machine: M, code: u64, lhs: Val, rhs: Val, inout failure: u8) -> Val {
     let op = wrapping_u8(code);
-    if a.t <= K_I32 && b.t <= K_I32 {
-        let ak = a.t;
+    if lhs.tag <= K_I32 && rhs.tag <= K_I32 {
+        let lhs_kind = lhs.tag;
         if op == B_SHL || op == B_SHR {
-            let r = shift(ak, op, exact(ak, a.x), exact(b.t, b.x), inout st);
-            return int_val(ak, r);
+            let result = shift(
+                lhs_kind,
+                op,
+                exact(lhs_kind, lhs.payload),
+                exact(rhs.tag, rhs.payload),
+                inout failure
+            );
+            return int_val(lhs_kind, result);
         }
         if op == B_ROTL || op == B_ROTR {
-            return int_val(ak, rotate(ak, op == B_ROTL, exact(ak, a.x), exact(b.t, b.x)));
+            return int_val(
+                lhs_kind,
+                rotate(
+                    lhs_kind,
+                    op == B_ROTL,
+                    exact(lhs_kind, lhs.payload),
+                    exact(rhs.tag, rhs.payload)
+                )
+            );
         }
-        let k = if ak != K_I64 { ak } else { b.t };
-        let x = exact(k, wrap(k, exact(ak, a.x)));
-        let y = exact(k, wrap(k, exact(b.t, b.x)));
+        let kind = if lhs_kind != K_I64 { lhs_kind } else { rhs.tag };
+        let lhs_int = exact(kind, wrap(kind, exact(lhs_kind, lhs.payload)));
+        let rhs_int = exact(kind, wrap(kind, exact(rhs.tag, rhs.payload)));
         if op == B_ADD || op == B_SUB || op == B_MUL || op == B_DIV || op == B_REM {
-            let r = checked(k, op, x, y, inout st);
-            return int_val(k, r);
+            let result = checked(kind, op, lhs_int, rhs_int, inout failure);
+            return int_val(kind, result);
         }
         if op == B_WADD || op == B_WSUB || op == B_WMUL {
-            return int_val(k, wrapping(k, op, x, y));
+            return int_val(kind, wrapping(kind, op, lhs_int, rhs_int));
         }
         if op == B_BAND || op == B_BOR || op == B_BXOR || op == B_BSHL || op == B_BSHR {
-            return int_val(k, bitwise(k, op, x, y));
+            return int_val(kind, bitwise(kind, op, lhs_int, rhs_int));
         }
         if op == B_AND || op == B_OR || op == B_XOR {
-            return int_val(k, bit(k, op, x, y));
+            return int_val(kind, bit(kind, op, lhs_int, rhs_int));
         }
         if op == B_EQ {
-            return bool_val(x == y);
+            return bool_val(lhs_int == rhs_int);
         } else if op == B_NE {
-            return bool_val(x != y);
+            return bool_val(lhs_int != rhs_int);
         } else if op == B_LT {
-            return bool_val(x < y);
+            return bool_val(lhs_int < rhs_int);
         } else if op == B_LE {
-            return bool_val(x <= y);
+            return bool_val(lhs_int <= rhs_int);
         } else if op == B_GT {
-            return bool_val(x > y);
+            return bool_val(lhs_int > rhs_int);
         } else if op == B_GE {
-            return bool_val(x >= y);
+            return bool_val(lhs_int >= rhs_int);
         }
-        fail(inout m, "invalid integer operator");
+        fail(inout machine, "invalid integer operator");
         return undef();
     }
-    if a.t == T_BOOL && b.t == T_BOOL {
+    if lhs.tag == T_BOOL && rhs.tag == T_BOOL {
         if op == B_LAND {
-            return bool_val(a.x != 0 && b.x != 0);
+            return bool_val(lhs.payload != 0 && rhs.payload != 0);
         } else if op == B_LOR {
-            return bool_val(a.x != 0 || b.x != 0);
+            return bool_val(lhs.payload != 0 || rhs.payload != 0);
         } else if op == B_EQ {
-            return bool_val(a.x == b.x);
+            return bool_val(lhs.payload == rhs.payload);
         } else if op == B_NE {
-            return bool_val(a.x != b.x);
+            return bool_val(lhs.payload != rhs.payload);
         }
-        fail(inout m, "invalid boolean operator");
+        fail(inout machine, "invalid boolean operator");
         return undef();
     }
-    if a.t == T_STR && b.t == T_STR {
-        let sa = n32(a.x);
-        let sb = n32(b.x);
+    if lhs.tag == T_STR && rhs.tag == T_STR {
+        let lhs_sym = n32(lhs.payload);
+        let rhs_sym = n32(rhs.payload);
         if op == B_EQ {
-            return bool_val(sa == sb);
+            return bool_val(lhs_sym == rhs_sym);
         } else if op == B_NE {
-            return bool_val(sa != sb);
+            return bool_val(lhs_sym != rhs_sym);
         } else if op == B_LT {
-            return bool_val(sym_less(in m, sa, sb));
+            return bool_val(sym_less(in machine, lhs_sym, rhs_sym));
         } else if op == B_LE {
-            return bool_val(!sym_less(in m, sb, sa));
+            return bool_val(!sym_less(in machine, rhs_sym, lhs_sym));
         } else if op == B_GT {
-            return bool_val(sym_less(in m, sb, sa));
+            return bool_val(sym_less(in machine, rhs_sym, lhs_sym));
         } else if op == B_GE {
-            return bool_val(!sym_less(in m, sa, sb));
+            return bool_val(!sym_less(in machine, lhs_sym, rhs_sym));
         }
-        fail(inout m, "invalid string operator");
+        fail(inout machine, "invalid string operator");
         return undef();
     }
     if op == B_EQ {
-        return bool_val(equal(in m, a, b));
+        return bool_val(equal(in machine, lhs, rhs));
     } else if op == B_NE {
-        return bool_val(!equal(in m, a, b));
+        return bool_val(!equal(in machine, lhs, rhs));
     }
-    fail(inout m, "incompatible binary operands");
+    fail(inout machine, "incompatible binary operands");
     undef()
 }
 
 // `unary` (without floats and 128-bit integers).
-fn unary(inout m: M, code: u64, v: Val, inout st: u8) -> Val {
-    if code == U_NOT && v.t == T_BOOL {
-        return bool_val(v.x == 0);
+fn unary(inout machine: M, code: u64, value: Val, inout failure: u8) -> Val {
+    if code == U_NOT && value.tag == T_BOOL {
+        return bool_val(value.payload == 0);
     }
     if code >= U_CONV {
-        let fam = wrapping_sub(code, U_CONV) / 16;
-        let to = wrapping_u8(wrapping_sub(code, U_CONV) % 16);
-        if v.t > K_I32 {
-            fail(inout m, "invalid conversion operand");
+        let family = wrapping_sub(code, U_CONV) / 16;
+        let target_kind = wrapping_u8(wrapping_sub(code, U_CONV) % 16);
+        if value.tag > K_I32 {
+            fail(inout machine, "invalid conversion operand");
             return undef();
         }
-        let n = exact(v.t, v.x);
-        if fam == C_WRAPPING {
-            return int_val(to, n);
+        let exact_value = exact(value.tag, value.payload);
+        if family == C_WRAPPING {
+            return int_val(target_kind, exact_value);
         }
-        if !fits(to, n) {
-            st = F_OVERFLOW;
+        if !fits(target_kind, exact_value) {
+            failure = F_OVERFLOW;
             return undef();
         }
-        return int_val(to, n);
+        return int_val(target_kind, exact_value);
     }
-    if v.t > K_I32 {
-        fail(inout m, "invalid unary operands");
+    if value.tag > K_I32 {
+        fail(inout machine, "invalid unary operands");
         return undef();
     }
-    let n = exact(v.t, v.x);
+    let exact_value = exact(value.tag, value.payload);
     if code == U_NOT || code == U_INV {
-        return int_val(v.t, not(v.t, n));
+        return int_val(value.tag, not(value.tag, exact_value));
     }
-    let r = wrapping_sub(0, n);
-    if !fits(v.t, r) {
-        st = F_OVERFLOW;
+    let negated = wrapping_sub(0, exact_value);
+    if !fits(value.tag, negated) {
+        failure = F_OVERFLOW;
         return undef();
     }
-    int_val(v.t, r)
+    int_val(value.tag, negated)
 }
 
 // ----- the machine -------------------------------------------------------------
 
-fn val(in m: M, id: u64) -> Val {
-    match m.vals.try_get(add(m.cur.vb, id)) {
-        Option::Some(v) => v,
+fn val(in machine: M, id: u64) -> Val {
+    match machine.vals.try_get(add(machine.frame.val_base, id)) {
+        Option::Some(value) => value,
         Option::None => undef(),
     }
 }
 
-fn set_val(inout m: M, id: u64, v: Val) {
-    let ok = m.vals.try_set(add(m.cur.vb, id), v);
+fn set_val(inout machine: M, id: u64, value: Val) {
+    let ok = machine.vals.try_set(add(machine.frame.val_base, id), value);
 }
 
-fn undefined(inout m: M, id: u64) {
-    if !m.failed {
-        m.failed = true;
-        m.msg.clear();
-        put(inout m.msg, "undefined IR value %");
-        push_decimal(inout m.msg, id);
+fn undefined(inout machine: M, id: u64) {
+    if !machine.failed {
+        machine.failed = true;
+        machine.message.clear();
+        put(inout machine.message, "undefined IR value %");
+        push_decimal(inout machine.message, id);
     }
 }
 
 // The operand value `id`, or an `undefined IR value` failure.
-fn get(inout m: M, id: u64) -> Val {
-    let v = val(in m, id);
-    if v.t == T_UNDEF {
-        undefined(inout m, id);
+fn get(inout machine: M, id: u64) -> Val {
+    let value = val(in machine, id);
+    if value.tag == T_UNDEF {
+        undefined(inout machine, id);
     }
-    v
+    value
 }
 
-fn func(in m: M, f: u64) -> Fi {
-    match m.fns.try_get(f) {
-        Option::Some(x) => x,
-        Option::None => Fi { name: 0, pa: 0, pn: 0, nv: 0, b0: 0, reach: false },
+fn func(in machine: M, func_index: u64) -> Fi {
+    match machine.fns.try_get(func_index) {
+        Option::Some(found) => found,
+        Option::None => Fi {
+            name: 0,
+            param_start: 0,
+            param_count: 0,
+            value_count: 0,
+            first_block: 0,
+            reached: false
+        },
     }
 }
 
-fn param(in m: M, i: u64) -> Pm {
-    match m.prm.try_get(i) {
-        Option::Some(x) => x,
+fn param(in machine: M, index: u64) -> Pm {
+    match machine.params.try_get(index) {
+        Option::Some(found) => found,
         Option::None => Pm { name: 0, pass: 0 },
     }
 }
 
-// Ends the current activation with value `v` (`Control::Return`).
-fn leave(inout m: M, v: Val) {
-    let fr = m.cur;
-    m.vals.truncate(fr.vb);
-    m.env.truncate(fr.eb);
-    m.cells.truncate(fr.cb);
-    m.segs.truncate(fr.sb);
-    m.rv = v;
-    m.ctrl = C_RET;
+// Ends the current activation with `value` (`Control::Return`).
+fn leave(inout machine: M, value: Val) {
+    let frame = machine.frame;
+    machine.vals.truncate(frame.val_base);
+    machine.env.truncate(frame.env_base);
+    machine.cells.truncate(frame.cell_base);
+    machine.segs.truncate(frame.seg_base);
+    machine.ret_value = value;
+    machine.control = C_RET;
 }
 
 // Suspends the current activation for a call or `?` (`Frame::IrResume`).
-fn suspend(inout m: M, dest: u32, ty: u32) {
-    let mut fr = m.cur;
-    fr.dest = dest;
-    fr.ty = ty;
-    fr.kind = FR_IR;
-    m.stack.push(fr);
+fn suspend(inout machine: M, dest: u32, ty: u32) {
+    let mut frame = machine.frame;
+    frame.dest = dest;
+    frame.ty = ty;
+    frame.kind = FR_IR;
+    machine.stack.push(frame);
 }
 
-// Collects call arguments at operand `q` (`n`, then pass, value, root + 1,
-// path each) into `argv` (values) and `argc`/`argp` (place root + 1 and
-// path, or 0).
-fn collect_args(inout m: M, q: u64) -> u64 {
-    let n = m.p.op(q);
-    m.argv.clear();
-    m.argc.clear();
-    m.argp.clear();
+// Collects call arguments at operand `args_at` (`n`, then pass, value, root + 1,
+// path each) into `arg_vals` (values) and `arg_roots`/`arg_paths` (place
+// root + 1 and path, or 0).
+fn collect_args(inout machine: M, args_at: u64) -> u64 {
+    let n = machine.program.op(args_at);
+    machine.arg_vals.clear();
+    machine.arg_roots.clear();
+    machine.arg_paths.clear();
     for i in 0..n {
-        let at = add(inc(q), wrapping_mul(i, 4));
-        let v = get(inout m, m.p.op(inc(at)));
-        m.argv.push(v);
-        m.argc.push(m.p.op(add(at, 2)));
-        m.argp.push(m.p.op(add(at, 3)));
+        let arg_at = add(inc(args_at), wrapping_mul(i, 4));
+        let value = get(inout machine, machine.program.op(inc(arg_at)));
+        machine.arg_vals.push(value);
+        machine.arg_roots.push(machine.program.op(add(arg_at, 2)));
+        machine.arg_paths.push(machine.program.op(add(arg_at, 3)));
     }
     n
 }
 
-// `invoke_scoped` of function `f` on the collected arguments, after the
+// `invoke_scoped` of function `func_index` on the collected arguments, after the
 // caller was suspended: the callee's activation becomes current.
-fn invoke(inout m: M, f: u64) {
-    let fi = func(in m, f);
-    if m.argv.len() != fi.pn {
-        fail(inout m, "argument arity mismatch");
+fn invoke(inout machine: M, func_index: u64) {
+    let fn_info = func(in machine, func_index);
+    if machine.arg_vals.len() != fn_info.param_count {
+        fail(inout machine, "argument arity mismatch");
         return;
     }
-    let vb = m.vals.len();
-    let eb = m.env.len();
-    let cb = m.cells.len();
-    let sb = m.segs.len();
+    let val_base = machine.vals.len();
+    let env_base = machine.env.len();
+    let cell_base = machine.cells.len();
+    let seg_base = machine.segs.len();
     // The `inout` places resolve in the caller's environment.
     let mut slots: ChunkSeq[En] = ChunkSeq::new[En]();
-    for i in 0..fi.pn {
-        let p = param(in m, add(fi.pa, i));
-        if p.pass == 1 {
-            let root = u64_at(in m.argc, i);
+    for i in 0..fn_info.param_count {
+        let param_row = param(in machine, add(fn_info.param_start, i));
+        if param_row.pass == 1 {
+            let root = u64_at(in machine.arg_roots, i);
             let mut found = false;
             if root != 0 {
-                let b = binding(in m, n32(wrapping_sub(root, 1)));
-                if b != NONE64 {
-                    let e = entry(in m, b);
-                    let pa = m.segs.len();
-                    for j in 0..e.pn {
-                        m.segs.push(u32_at(in m.segs, add(e.pa, j)));
+                let bound_index = binding(in machine, n32(wrapping_sub(root, 1)));
+                if bound_index != NONE64 {
+                    let env_entry = entry(in machine, bound_index);
+                    let seg_start = machine.segs.len();
+                    for j in 0..env_entry.seg_count {
+                        machine.segs.push(u32_at(in machine.segs, add(env_entry.seg_start, j)));
                     }
-                    let path = u64_at(in m.argp, i);
-                    let pr = m.p.path(path);
-                    for j in 0..pr.n {
-                        m.segs.push(m.p.path_name(path, j));
+                    let path = u64_at(in machine.arg_paths, i);
+                    let path_row = machine.program.path(path);
+                    for j in 0..path_row.n {
+                        machine.segs.push(machine.program.path_name(path, j));
                     }
-                    slots.push(
-                        En {
-                            name: p.name,
-                            cell: e.cell,
-                            pa: pa,
-                            pn: wrapping_sub(m.segs.len(), pa)
-                        }
-                    );
+                    slots.push(En {
+                        name: param_row.name,
+                        cell: env_entry.cell,
+                        seg_start: seg_start,
+                        seg_count: wrapping_sub(machine.segs.len(), seg_start)
+                    });
                     found = true;
                 }
             }
             if !found {
-                fail(inout m, "inout argument requires place");
+                fail(inout machine, "inout argument requires place");
                 return;
             }
         } else {
-            let cell = m.cells.len();
-            m.cells.push(
-                match m.argv.try_get(i) {
-                    Option::Some(v) => v,
-                    Option::None => undef(),
-                }
-            );
-            slots.push(En { name: p.name, cell: cell, pa: 0, pn: 0 });
+            let cell = machine.cells.len();
+            machine.cells.push(match machine.arg_vals.try_get(i) {
+                Option::Some(value) => value,
+                Option::None => undef(),
+            });
+            slots.push(En { name: param_row.name, cell: cell, seg_start: 0, seg_count: 0 });
         }
     }
     for i in 0..slots.len() {
         match slots.try_get(i) {
-            Option::Some(e) => m.env.push(e),
+            Option::Some(env_entry) => machine.env.push(env_entry),
             Option::None => {},
         }
     }
-    m.vals.resize(add(vb, fi.nv), undef());
-    m.cur = Fr {
-        f: f,
-        blk: fi.b0,
-        ip: 0,
-        vb: vb,
-        eb: eb,
-        cb: cb,
-        sb: sb,
-        dest: 0,
-        ty: 0,
-        kind: FR_IR
-    };
+    machine.vals.resize(add(val_base, fn_info.value_count), undef());
+    machine
+        .frame = Fr {
+            func_index: func_index,
+            block: fn_info.first_block,
+            ip: 0,
+            val_base: val_base,
+            env_base: env_base,
+            cell_base: cell_base,
+            seg_base: seg_base,
+            dest: 0,
+            ty: 0,
+            kind: FR_IR
+        };
 }
 
 // Calls value `callee` (`Op::Indirect`).
-fn call_value(inout m: M, callee: Val) {
-    if callee.t == T_FN {
-        let f = fn_index(in m, n32(callee.x));
-        if f == NONE64 {
-            fail_sym(inout m, "unknown function '", n32(callee.x), "'");
+fn call_value(inout machine: M, callee: Val) {
+    if callee.tag == T_FN {
+        let func_index = fn_index(in machine, n32(callee.payload));
+        if func_index == NONE64 {
+            fail_sym(inout machine, "unknown function '", n32(callee.payload), "'");
             return;
         }
-        invoke(inout m, f);
+        invoke(inout machine, func_index);
         return;
     }
-    fail(inout m, "value is not callable");
+    fail(inout machine, "value is not callable");
 }
 
 // One `ir_step` of the current activation.
-fn step(inout m: M) {
-    let b = m.p.block(m.cur.blk);
-    if m.cur.ip >= b.ic {
-        terminate(inout m, b);
+fn step(inout machine: M) {
+    let block = machine.program.block(machine.frame.block);
+    if machine.frame.ip >= block.ic {
+        terminate(inout machine, block);
         return;
     }
-    let ix = add(b.i0, m.cur.ip);
-    let inst = m.p.inst(ix);
-    m.cur.ip = inc(m.cur.ip);
-    let a = inst.a;
+    let inst_id = add(block.i0, machine.frame.ip);
+    let inst = machine.program.inst(inst_id);
+    machine.frame.ip = inc(machine.frame.ip);
+    let operand_at = inst.a;
     let op = inst.op;
-    let mut st: u8 = F_OK;
-    let mut r = unit();
+    let mut failure: u8 = F_OK;
+    let mut result = unit();
     if op == Op::Loop || op == Op::Unit {
-        r = unit();
+        result = unit();
     } else if op == Op::Exit {
-        let v = get(inout m, m.p.op(a));
-        if m.failed {
+        let value = get(inout machine, machine.program.op(operand_at));
+        if machine.failed {
             return;
         }
-        leave(inout m, v);
+        leave(inout machine, value);
         return;
     } else if op == Op::Const {
-        let kind = m.p.op(a);
-        let lo = m.p.op(inc(a));
+        let kind = machine.program.op(operand_at);
+        let lo = machine.program.op(inc(operand_at));
         if kind == widen_u64(Lit::Int) {
-            let hi = m.p.op(add(a, 2));
-            r = if hi == 0 && (lo >> 63) == 1 {
-                Val { t: K_U64, x: lo }
+            let hi = machine.program.op(add(operand_at, 2));
+            result = if hi == 0 && (lo >> 63) == 1 {
+                Val { tag: K_U64, payload: lo }
             } else {
-                Val { t: K_I64, x: lo }
+                Val { tag: K_I64, payload: lo }
             };
         } else if kind == widen_u64(Lit::Bool) {
-            r = bool_val(lo != 0);
+            result = bool_val(lo != 0);
         } else {
-            r = Val { t: T_STR, x: lo };
+            result = Val { tag: T_STR, payload: lo };
         }
     } else if op == Op::Read {
-        let root = n32(m.p.op(a));
-        let path = m.p.op(inc(a));
-        let bnd = binding(in m, root);
-        if path == 0 && bnd == NONE64 && fn_index(in m, root) != NONE64 {
-            r = Val { t: T_FN, x: w(root) };
+        let root = n32(machine.program.op(operand_at));
+        let path = machine.program.op(inc(operand_at));
+        let bound_index = binding(in machine, root);
+        if path == 0 && bound_index == NONE64 && fn_index(in machine, root) != NONE64 {
+            result = Val { tag: T_FN, payload: w(root) };
         } else {
-            if bnd == NONE64 {
-                fail_sym(inout m, "undefined IR place '", root, "'");
+            if bound_index == NONE64 {
+                fail_sym(inout machine, "undefined IR place '", root, "'");
                 return;
             }
-            let e = entry(in m, bnd);
-            slot_path(inout m, e);
-            let pr = m.p.path(path);
-            for j in 0..pr.n {
-                m.path.push(m.p.path_name(path, j));
+            let env_entry = entry(in machine, bound_index);
+            slot_path(inout machine, env_entry);
+            let path_row = machine.program.path(path);
+            for j in 0..path_row.n {
+                machine.path.push(machine.program.path_name(path, j));
             }
-            r = read_path(inout m, e.cell);
+            result = read_path(inout machine, env_entry.cell);
         }
     } else if op == Op::Bind {
-        let v = get(inout m, m.p.op(a));
-        if m.failed {
+        let value = get(inout machine, machine.program.op(operand_at));
+        if machine.failed {
             return;
         }
-        if !pat_matches(inout m, inc(a), v) {
-            fail(inout m, "IR binding pattern mismatch");
+        if !pat_matches(inout machine, inc(operand_at), value) {
+            fail(inout machine, "IR binding pattern mismatch");
             return;
         }
-        pat_bind(inout m, inc(a), v);
-        r = unit();
+        pat_bind(inout machine, inc(operand_at), value);
+        result = unit();
     } else if op == Op::Write {
-        let v = get(inout m, m.p.op(add(a, 2)));
-        if m.failed {
+        let value = get(inout machine, machine.program.op(add(operand_at, 2)));
+        if machine.failed {
             return;
         }
-        let wrow = match m.wr.try_get(u64_at(in m.aux, ix)) {
-            Option::Some(x) => x,
-            Option::None => Wr { root: 0, sa: 0, sn: 0, code: 0 },
+        let write_row = match machine.writes.try_get(u64_at(in machine.aux, inst_id)) {
+            Option::Some(found) => found,
+            Option::None => Wr { root: 0, seg_start: 0, seg_count: 0, code: 0 },
         };
-        let bnd = binding(in m, wrow.root);
-        if bnd == NONE64 {
-            fail(inout m, "undefined IR assignment place");
+        let bound_index = binding(in machine, write_row.root);
+        if bound_index == NONE64 {
+            fail(inout machine, "undefined IR assignment place");
             return;
         }
-        let e = entry(in m, bnd);
-        slot_path(inout m, e);
-        for j in 0..wrow.sn {
-            m.path.push(u32_at(in m.wsegs, add(wrow.sa, j)));
+        let env_entry = entry(in machine, bound_index);
+        slot_path(inout machine, env_entry);
+        for j in 0..write_row.seg_count {
+            machine.path.push(u32_at(in machine.write_segs, add(write_row.seg_start, j)));
         }
-        let mut new = v;
-        if wrow.code != 0 {
-            let old = read_path(inout m, e.cell);
-            if m.failed {
+        let mut new = value;
+        if write_row.code != 0 {
+            let old = read_path(inout machine, env_entry.cell);
+            if machine.failed {
                 return;
             }
-            new = binary(inout m, wrow.code, old, v, inout st);
-            if st != F_OK {
-                suspend(inout m, inst.dest, inst.ty);
-                raise(inout m);
+            new = binary(inout machine, write_row.code, old, value, inout failure);
+            if failure != F_OK {
+                suspend(inout machine, inst.dest, inst.ty);
+                raise(inout machine);
                 return;
             }
-            if m.failed {
+            if machine.failed {
                 return;
             }
         }
-        write_path(inout m, e.cell, new);
-        r = unit();
+        write_path(inout machine, env_entry.cell, new);
+        result = unit();
     } else if op == Op::Unary {
-        let v = get(inout m, m.p.op(inc(a)));
-        if m.failed {
+        let value = get(inout machine, machine.program.op(inc(operand_at)));
+        if machine.failed {
             return;
         }
-        r = unary(inout m, u64_at(in m.aux, ix), v, inout st);
+        result = unary(inout machine, u64_at(in machine.aux, inst_id), value, inout failure);
     } else if op == Op::Binary {
-        let x = get(inout m, m.p.op(inc(a)));
-        let y = get(inout m, m.p.op(add(a, 2)));
-        if m.failed {
+        let lhs = get(inout machine, machine.program.op(inc(operand_at)));
+        let rhs = get(inout machine, machine.program.op(add(operand_at, 2)));
+        if machine.failed {
             return;
         }
-        r = binary(inout m, u64_at(in m.aux, ix), x, y, inout st);
+        result = binary(inout machine, u64_at(in machine.aux, inst_id), lhs, rhs, inout failure);
     } else if op == Op::Tuple {
-        let n = m.p.op(a);
-        let k0 = m.kids.len();
+        let n = machine.program.op(operand_at);
+        let kid_start = machine.kids.len();
         for i in 0..n {
-            let v = get(inout m, m.p.op(add(inc(a), i)));
-            push_kid(inout m, 0, v);
+            let value = get(inout machine, machine.program.op(add(inc(operand_at), i)));
+            push_kid(inout machine, 0, value);
         }
-        if m.failed {
+        if machine.failed {
             return;
         }
-        r = make(inout m, T_TUPLE, 0, k0);
+        result = make(inout machine, T_TUPLE, 0, kid_start);
     } else if op == Op::Data {
-        let c = u64_at(in m.aux, ix);
-        if c == 0 {
-            fail(inout m, "unknown IR constructor");
+        let ctor_code = u64_at(in machine.aux, inst_id);
+        if ctor_code == 0 {
+            fail(inout machine, "unknown IR constructor");
             return;
         }
-        let n = m.p.op(inc(a));
-        let k0 = m.kids.len();
+        let n = machine.program.op(inc(operand_at));
+        let kid_start = machine.kids.len();
         for i in 0..n {
-            let at = add(add(a, 2), wrapping_mul(i, 2));
-            let v = get(inout m, m.p.op(inc(at)));
-            push_kid(inout m, n32(m.p.op(at)), v);
+            let field_at = add(add(operand_at, 2), wrapping_mul(i, 2));
+            let value = get(inout machine, machine.program.op(inc(field_at)));
+            push_kid(inout machine, n32(machine.program.op(field_at)), value);
         }
-        if m.failed {
+        if machine.failed {
             return;
         }
-        r = make(inout m, T_DATA, n32(wrapping_sub(c, 1)), k0);
+        result = make(inout machine, T_DATA, n32(wrapping_sub(ctor_code, 1)), kid_start);
     } else if op == Op::Project {
-        let v = get(inout m, m.p.op(a));
-        if m.failed {
+        let value = get(inout machine, machine.program.op(operand_at));
+        if machine.failed {
             return;
         }
-        let f = n32(m.p.op(inc(a)));
-        let g = agg(in m, v);
-        if v.t == T_DATA {
-            let j = field_index(in m, g, f);
+        let field_sym = n32(machine.program.op(inc(operand_at)));
+        let aggregate = agg(in machine, value);
+        if value.tag == T_DATA {
+            let j = field_index(in machine, aggregate, field_sym);
             if j == NONE64 {
-                fail(inout m, "unknown IR field");
+                fail(inout machine, "unknown IR field");
                 return;
             }
-            r = kid(in m, add(g.a, j));
-        } else if v.t == T_TUPLE {
-            let j = index_of(in m, f);
+            result = kid(in machine, add(aggregate.kid_start, j));
+        } else if value.tag == T_TUPLE {
+            let j = index_of(in machine, field_sym);
             if j == NONE64 {
-                fail(inout m, "invalid IR tuple field");
+                fail(inout machine, "invalid IR tuple field");
                 return;
             }
-            if j >= g.n {
-                fail(inout m, "IR tuple field out of bounds");
+            if j >= aggregate.kid_count {
+                fail(inout machine, "IR tuple field out of bounds");
                 return;
             }
-            r = kid(in m, add(g.a, j));
+            result = kid(in machine, add(aggregate.kid_start, j));
         } else {
-            fail(inout m, "IR projection requires data");
+            fail(inout machine, "IR projection requires data");
             return;
         }
     } else if op == Op::Index {
-        let iv = get(inout m, m.p.op(inc(a)));
-        if m.failed {
+        let index_value = get(inout machine, machine.program.op(inc(operand_at)));
+        if machine.failed {
             return;
         }
-        if iv.t > K_I32 {
-            fail(inout m, "IR index must be integer");
+        if index_value.tag > K_I32 {
+            fail(inout machine, "IR index must be integer");
             return;
         }
-        let neg = is_signed(iv.t) && wrapping_i64(iv.x) < 0;
-        let base = get(inout m, m.p.op(a));
-        if m.failed {
+        let neg = is_signed(index_value.tag) && wrapping_i64(index_value.payload) < 0;
+        let base = get(inout machine, machine.program.op(operand_at));
+        if machine.failed {
             return;
         }
-        if base.t != T_TUPLE {
-            fail(inout m, "IR index requires tuple");
+        if base.tag != T_TUPLE {
+            fail(inout machine, "IR index requires tuple");
             return;
         }
-        let g = agg(in m, base);
-        if neg || iv.x >= g.n {
-            suspend(inout m, inst.dest, inst.ty);
-            raise(inout m);
+        let aggregate = agg(in machine, base);
+        if neg || index_value.payload >= aggregate.kid_count {
+            suspend(inout machine, inst.dest, inst.ty);
+            raise(inout machine);
             return;
         }
-        r = kid(in m, add(g.a, iv.x));
+        result = kid(in machine, add(aggregate.kid_start, index_value.payload));
     } else if op == Op::Call {
-        let n = collect_args(inout m, inc(a));
-        if m.failed {
+        let n = collect_args(inout machine, inc(operand_at));
+        if machine.failed {
             return;
         }
-        suspend(inout m, inst.dest, inst.ty);
-        invoke(inout m, u64_at(in m.aux, ix));
+        suspend(inout machine, inst.dest, inst.ty);
+        invoke(inout machine, u64_at(in machine.aux, inst_id));
         return;
     } else if op == Op::Indirect {
-        let callee = get(inout m, m.p.op(a));
-        let n = collect_args(inout m, inc(a));
-        if m.failed {
+        let callee = get(inout machine, machine.program.op(operand_at));
+        let n = collect_args(inout machine, inc(operand_at));
+        if machine.failed {
             return;
         }
-        suspend(inout m, inst.dest, inst.ty);
-        call_value(inout m, callee);
+        suspend(inout machine, inst.dest, inst.ty);
+        call_value(inout machine, callee);
         return;
     } else if op == Op::Try {
-        let v = get(inout m, m.p.op(a));
-        if m.failed {
+        let value = get(inout machine, machine.program.op(operand_at));
+        if machine.failed {
             return;
         }
-        suspend(inout m, inst.dest, inst.ty);
-        let mut t = m.cur;
-        t.kind = FR_TRY;
-        m.stack.push(t);
-        m.rv = v;
-        m.ctrl = C_RET;
+        suspend(inout machine, inst.dest, inst.ty);
+        let mut try_frame = machine.frame;
+        try_frame.kind = FR_TRY;
+        machine.stack.push(try_frame);
+        machine.ret_value = value;
+        machine.control = C_RET;
         return;
     } else {
-        fail(inout m, "the run machine does not know this operation");
+        fail(inout machine, "the run machine does not know this operation");
         return;
     }
-    if m.failed {
+    if machine.failed {
         return;
     }
-    if st != F_OK {
+    if failure != F_OK {
         // `primitive_failure`: the raise is unhandled.
-        suspend(inout m, inst.dest, inst.ty);
-        raise(inout m);
+        suspend(inout machine, inst.dest, inst.ty);
+        raise(inout machine);
         return;
     }
-    let c = coerce(inout m, r, inst.ty);
-    set_val(inout m, w(inst.dest), c);
+    let coerced = coerce(inout machine, result, inst.ty);
+    set_val(inout machine, w(inst.dest), coerced);
 }
 
 // A block's terminator.
-fn terminate(inout m: M, b: BlockRow) {
-    let at = b.ta;
-    let f = func(in m, m.cur.f);
-    if b.term == Term::Return {
-        let id = m.p.op(at);
-        let v = val(in m, id);
-        if v.t == T_UNDEF {
-            fail(inout m, "missing IR return value");
+fn terminate(inout machine: M, block: BlockRow) {
+    let term_at = block.ta;
+    let fn_info = func(in machine, machine.frame.func_index);
+    if block.term == Term::Return {
+        let id = machine.program.op(term_at);
+        let value = val(in machine, id);
+        if value.tag == T_UNDEF {
+            fail(inout machine, "missing IR return value");
             return;
         }
-        leave(inout m, v);
+        leave(inout machine, value);
         return;
     }
-    if b.term == Term::Jump {
-        let target = add(f.b0, m.p.op(at));
-        let n = m.p.op(inc(at));
-        let k0 = m.argv.len();
-        m.argv.clear();
+    if block.term == Term::Jump {
+        let target = add(fn_info.first_block, machine.program.op(term_at));
+        let n = machine.program.op(inc(term_at));
+        let prev_arg_count = machine.arg_vals.len();
+        machine.arg_vals.clear();
         for i in 0..n {
-            let v = val(in m, m.p.op(add(add(at, 2), i)));
-            if v.t == T_UNDEF {
-                fail(inout m, "missing IR edge argument");
+            let value = val(in machine, machine.program.op(add(add(term_at, 2), i)));
+            if value.tag == T_UNDEF {
+                fail(inout machine, "missing IR edge argument");
                 return;
             }
-            m.argv.push(v);
+            machine.arg_vals.push(value);
         }
-        let pa = u64_at(in m.bparams, target);
-        let np = m.p.op(pa);
-        for i in 0..np {
+        let params_at = u64_at(in machine.block_params, target);
+        let param_count = machine.program.op(params_at);
+        for i in 0..param_count {
             if i < n {
-                let id = m.p.op(add(inc(pa), i));
-                match m.argv.try_get(i) {
-                    Option::Some(v) => set_val(inout m, id, v),
+                let id = machine.program.op(add(inc(params_at), i));
+                match machine.arg_vals.try_get(i) {
+                    Option::Some(value) => set_val(inout machine, id, value),
                     Option::None => {},
                 }
             }
         }
-        let _ = k0;
-        m.cur.blk = target;
-        m.cur.ip = 0;
+        let _ = prev_arg_count;
+        machine.frame.block = target;
+        machine.frame.ip = 0;
         return;
     }
-    if b.term == Term::Branch {
-        let v = val(in m, m.p.op(at));
-        if v.t == T_UNDEF {
-            fail(inout m, "missing IR condition");
+    if block.term == Term::Branch {
+        let value = val(in machine, machine.program.op(term_at));
+        if value.tag == T_UNDEF {
+            fail(inout machine, "missing IR condition");
             return;
         }
-        if v.t != T_BOOL {
-            fail(inout m, "IR branch condition must be bool");
+        if value.tag != T_BOOL {
+            fail(inout machine, "IR branch condition must be bool");
             return;
         }
-        let target = if v.x != 0 {
-            m.p.op(inc(at))
+        let target = if value.payload != 0 {
+            machine.program.op(inc(term_at))
         } else {
-            m.p.op(add(at, 2))
+            machine.program.op(add(term_at, 2))
         };
-        m.cur.blk = add(f.b0, target);
-        m.cur.ip = 0;
+        machine.frame.block = add(fn_info.first_block, target);
+        machine.frame.ip = 0;
         return;
     }
-    if b.term == Term::Match {
-        let v = val(in m, m.p.op(at));
-        if v.t == T_UNDEF {
-            fail(inout m, "missing IR match value");
+    if block.term == Term::Match {
+        let value = val(in machine, machine.program.op(term_at));
+        if value.tag == T_UNDEF {
+            fail(inout machine, "missing IR match value");
             return;
         }
-        let n = m.p.op(inc(at));
-        let mut r = add(at, 2);
+        let n = machine.program.op(inc(term_at));
+        let mut pat_at = add(term_at, 2);
         for i in 0..n {
-            let e = pat_end(in m, r);
-            if pat_matches(inout m, r, v) {
-                m.cur.blk = add(f.b0, m.p.op(e));
-                m.cur.ip = 0;
+            let target_at = pat_end(in machine, pat_at);
+            if pat_matches(inout machine, pat_at, value) {
+                machine.frame.block = add(fn_info.first_block, machine.program.op(target_at));
+                machine.frame.ip = 0;
                 return;
             }
-            r = inc(e);
+            pat_at = inc(target_at);
         }
-        fail(inout m, "non-exhaustive IR match");
+        fail(inout machine, "non-exhaustive IR match");
         return;
     }
-    fail(inout m, "reached an unreachable IR block");
+    fail(inout machine, "reached an unreachable IR block");
 }
 
 // A returned value meets the top frame (`Control::Return` in `drive`);
 // false when the run is complete.
-fn resume(inout m: M) -> bool {
-    let fr = match m.stack.pop() {
-        Option::Some(f) => f,
+fn resume(inout machine: M) -> bool {
+    let frame = match machine.stack.pop() {
+        Option::Some(popped) => popped,
         Option::None => {
             return false;
         },
     };
-    if fr.kind == FR_TRY {
-        let v = m.rv;
-        if v.t == T_DATA {
-            let g = agg(in m, v);
-            if g.ctor == m.s_ok || g.ctor == m.s_err {
-                let j = field_index(in m, g, m.s_zero);
-                if j == NONE64 {
-                    if g.ctor == m.s_ok {
-                        fail(inout m, "missing Ok payload");
+    if frame.kind == FR_TRY {
+        let value = machine.ret_value;
+        if value.tag == T_DATA {
+            let aggregate = agg(in machine, value);
+            if aggregate.ctor == machine.ok_sym || aggregate.ctor == machine.err_sym {
+                let payload_index = field_index(in machine, aggregate, machine.zero_sym);
+                if payload_index == NONE64 {
+                    if aggregate.ctor == machine.ok_sym {
+                        fail(inout machine, "missing Ok payload");
                     } else {
-                        fail(inout m, "missing Err payload");
+                        fail(inout machine, "missing Err payload");
                     }
                     return true;
                 }
-                if g.ctor == m.s_ok {
-                    m.rv = kid(in m, add(g.a, j));
+                if aggregate.ctor == machine.ok_sym {
+                    machine.ret_value = kid(in machine, add(aggregate.kid_start, payload_index));
                     return true;
                 }
-                raise(inout m);
+                raise(inout machine);
                 return true;
             }
         }
-        fail(inout m, "'?' requires Result");
+        fail(inout machine, "'?' requires Result");
         return true;
     }
-    m.cur = fr;
-    let rv = m.rv;
-    let c = coerce(inout m, rv, fr.ty);
-    set_val(inout m, w(fr.dest), c);
-    m.ctrl = C_IR;
+    machine.frame = frame;
+    let ret_value = machine.ret_value;
+    let coerced = coerce(inout machine, ret_value, frame.ty);
+    set_val(inout machine, w(frame.dest), coerced);
+    machine.control = C_IR;
     true
 }
 
 // `Runtime::run` of the entry with no arguments: the value's text in
-// `msg`, or the error in `msg` with `failed`.
-pub fn drive(inout m: M) {
-    m.argv.clear();
-    m.argc.clear();
-    m.argp.clear();
-    m.cur = fr_zero();
-    invoke(inout m, m.entry);
-    m.ctrl = C_IR;
+// `message`, or the error in `message` with `failed`.
+pub fn drive(inout machine: M) {
+    machine.arg_vals.clear();
+    machine.arg_roots.clear();
+    machine.arg_paths.clear();
+    machine.frame = fr_zero();
+    invoke(inout machine, machine.entry);
+    machine.control = C_IR;
     loop {
-        if m.failed {
+        if machine.failed {
             return;
         }
-        if m.fuel == 0 {
-            fail(inout m, "execution fuel exhausted");
+        if machine.fuel == 0 {
+            fail(inout machine, "execution fuel exhausted");
             return;
         }
-        m.fuel = wrapping_sub(m.fuel, 1);
-        if m.ctrl == C_IR {
-            step(inout m);
-        } else if !resume(inout m) {
+        machine.fuel = wrapping_sub(machine.fuel, 1);
+        if machine.control == C_IR {
+            step(inout machine);
+        } else if !resume(inout machine) {
             break;
         }
     }
-    m.msg.clear();
-    let v = m.rv;
-    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    display(in m, v, inout o, 0);
-    m.msg = o;
+    machine.message.clear();
+    let value = machine.ret_value;
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    display(in machine, value, inout out, 0);
+    machine.message = out;
 }

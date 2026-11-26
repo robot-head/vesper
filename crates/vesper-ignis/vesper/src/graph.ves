@@ -218,18 +218,16 @@ pub fn graph_add_buffer(inout g: Graph, size: u64) -> ResourceOutcome {
         ResourceOutcome::TooManyResources
     } else {
         let index = wrapping_u32(g.resources.len());
-        g.resources.push(
-            Resource {
-                texture: false,
-                size: size,
-                mips: 0,
-                slices: 0,
-                planes: 0,
-                initial_layout: Layout::Undefined,
-                has_final: false,
-                final_layout: Layout::Undefined
-            }
-        );
+        g.resources.push(Resource {
+            texture: false,
+            size: size,
+            mips: 0,
+            slices: 0,
+            planes: 0,
+            initial_layout: Layout::Undefined,
+            has_final: false,
+            final_layout: Layout::Undefined
+        });
         ResourceOutcome::Added(index)
     }
 }
@@ -258,18 +256,16 @@ pub fn graph_add_texture(
             ResourceOutcome::TooManyResources
         } else {
             let index = wrapping_u32(g.resources.len());
-            g.resources.push(
-                Resource {
-                    texture: true,
-                    size: 0,
-                    mips: mips,
-                    slices: slices,
-                    planes: planes,
-                    initial_layout: initial_layout,
-                    has_final: has_final,
-                    final_layout: final_layout
-                }
-            );
+            g.resources.push(Resource {
+                texture: true,
+                size: 0,
+                mips: mips,
+                slices: slices,
+                planes: planes,
+                initial_layout: initial_layout,
+                has_final: has_final,
+                final_layout: final_layout
+            });
             ResourceOutcome::Added(index)
         }
     }
@@ -317,16 +313,14 @@ fn resolve_range(r: SubresourceRange, res: Resource) -> Option[SubresourceRange]
     if mips == 0 || slices == 0 || planes == 0 {
         Option::None
     } else {
-        Option::Some(
-            SubresourceRange {
-                first_mip: r.first_mip,
-                mip_count: mips,
-                first_slice: r.first_slice,
-                slice_count: slices,
-                first_plane: r.first_plane,
-                plane_count: planes
-            }
-        )
+        Option::Some(SubresourceRange {
+            first_mip: r.first_mip,
+            mip_count: mips,
+            first_slice: r.first_slice,
+            slice_count: slices,
+            first_plane: r.first_plane,
+            plane_count: planes
+        })
     }
 }
 
@@ -387,9 +381,10 @@ fn validate_use(in g: Graph, queue: QueueKind, use_index: u64, u: UseDesc) -> Us
     };
     let access = u.access;
     if access == 0 || access == no_access() || (access & ~known_access()) != 0 {
-        return UseCheck::Refused(
-            PassOutcome::InvalidAccess { use_index: use_index, access: access }
-        );
+        return UseCheck::Refused(PassOutcome::InvalidAccess {
+            use_index: use_index,
+            access: access
+        });
     }
     let sync = u.sync;
     if sync == 0 || (sync & split_bit()) != 0 {
@@ -397,9 +392,11 @@ fn validate_use(in g: Graph, queue: QueueKind, use_index: u64, u: UseDesc) -> Us
     }
     let bad = access_incompatible_with_sync(access, sync);
     if bad != 0 {
-        return UseCheck::Refused(
-            PassOutcome::AccessSyncMismatch { use_index: use_index, access: bad, sync: sync }
-        );
+        return UseCheck::Refused(PassOutcome::AccessSyncMismatch {
+            use_index: use_index,
+            access: bad,
+            sync: sync
+        });
     }
     if !access_contains(queue_supported_access(queue), access) {
         return UseCheck::Refused(PassOutcome::QueueAccess { use_index: use_index, access: access });
@@ -409,62 +406,59 @@ fn validate_use(in g: Graph, queue: QueueKind, use_index: u64, u: UseDesc) -> Us
     }
     if !info.texture && u.bytes {
         if (access & texture_only_access()) != 0 {
-            return UseCheck::Refused(
-                PassOutcome::AccessResourceKindMismatch { use_index: use_index, access: access }
-            );
+            return UseCheck::Refused(PassOutcome::AccessResourceKindMismatch {
+                use_index: use_index,
+                access: access
+            });
         }
         match resolve_bytes(u.offset, u.size, info.size) {
-            Option::Some((start, end)) => UseCheck::Valid(
-                Use {
-                    resource: u.resource,
-                    bytes: true,
-                    start: start,
-                    end: end,
-                    range: empty_range(),
-                    access: access,
-                    sync: sync,
-                    has_layout: false,
-                    layout: Layout::Undefined
-                }
-            ),
+            Option::Some((start, end)) => UseCheck::Valid(Use {
+                resource: u.resource,
+                bytes: true,
+                start: start,
+                end: end,
+                range: empty_range(),
+                access: access,
+                sync: sync,
+                has_layout: false,
+                layout: Layout::Undefined
+            }),
             Option::None => UseCheck::Refused(PassOutcome::InvalidRange { use_index: use_index }),
         }
     } else if info.texture && !u.bytes {
         if (access & buffer_only_access()) != 0 {
-            return UseCheck::Refused(
-                PassOutcome::AccessResourceKindMismatch { use_index: use_index, access: access }
-            );
+            return UseCheck::Refused(PassOutcome::AccessResourceKindMismatch {
+                use_index: use_index,
+                access: access
+            });
         }
         if u.has_layout {
             if u.layout == Layout::Undefined || !layout_allows(u.layout, access) {
-                return UseCheck::Refused(
-                    PassOutcome::AccessLayoutMismatch {
-                        use_index: use_index,
-                        access: access,
-                        layout: u.layout
-                    }
-                );
+                return UseCheck::Refused(PassOutcome::AccessLayoutMismatch {
+                    use_index: use_index,
+                    access: access,
+                    layout: u.layout
+                });
             }
             if !queue_supports_layout(queue, u.layout) {
-                return UseCheck::Refused(
-                    PassOutcome::QueueLayout { use_index: use_index, layout: u.layout }
-                );
+                return UseCheck::Refused(PassOutcome::QueueLayout {
+                    use_index: use_index,
+                    layout: u.layout
+                });
             }
         }
         match resolve_range(u.range, info) {
-            Option::Some(r) => UseCheck::Valid(
-                Use {
-                    resource: u.resource,
-                    bytes: false,
-                    start: 0,
-                    end: 0,
-                    range: r,
-                    access: access,
-                    sync: sync,
-                    has_layout: u.has_layout,
-                    layout: u.layout
-                }
-            ),
+            Option::Some(r) => UseCheck::Valid(Use {
+                resource: u.resource,
+                bytes: false,
+                start: 0,
+                end: 0,
+                range: r,
+                access: access,
+                sync: sync,
+                has_layout: u.has_layout,
+                layout: u.layout
+            }),
             Option::None => UseCheck::Refused(PassOutcome::InvalidRange { use_index: use_index }),
         }
     } else {

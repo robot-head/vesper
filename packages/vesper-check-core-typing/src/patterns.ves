@@ -95,9 +95,12 @@ impl Pats {
             }
         }
         let id = n32(self.pats.len());
-        self.pats.push(
-            Pat { kind: kind, name: name, kid_start: kid_start, kid_count: n32(kids.len()) }
-        );
+        self.pats.push(Pat {
+            kind: kind,
+            name: name,
+            kid_start: kid_start,
+            kid_count: n32(kids.len())
+        });
         id
     }
 

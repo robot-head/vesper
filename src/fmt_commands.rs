@@ -186,7 +186,8 @@ fn walk(root: &Path, files: &mut Vec<PathBuf>, visited: &mut usize) -> Result<()
 }
 /// The formatter of one file's text: the output and whether it changed,
 /// with recovery mode's edit count. The Vesper `fmt` command layer
-/// (`hc_fmt_source`) calls this after its own bounded read.
+/// (packages/vesper-driver-commands, `fmt_run`) does the same over
+/// @vesper/fmt.
 pub(crate) fn format_text(
     text: &str,
     recovery: bool,

@@ -361,18 +361,16 @@ pub fn read_prog(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Prog
             cc = widen_u64(ty_or_none(in ctx, cc));
             d = widen_u64(ty_or_none(in ctx, d));
         }
-        exprs.push(
-            ExprNode {
-                kind: kind,
-                start: start,
-                end: end,
-                a: n32(a),
-                b: n32(bb),
-                c: n32(cc),
-                d: n32(d),
-                e: n32(e)
-            }
-        );
+        exprs.push(ExprNode {
+            kind: kind,
+            start: start,
+            end: end,
+            a: n32(a),
+            b: n32(bb),
+            c: n32(cc),
+            d: n32(d),
+            e: n32(e)
+        });
     }
     let pat_count = reader.word(in bytes);
     let mut pats: ChunkSeq[PatNode] = ChunkSeq::with_capacity[PatNode](pat_count);
@@ -386,9 +384,14 @@ pub fn read_prog(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Prog
         if kind == 2 || kind == 5 {
             a = widen_u64(sym_or_none(in ctx, a));
         }
-        pats.push(
-            PatNode { kind: kind, start: start, end: end, a: n32(a), b: n32(pb), c: n32(pc) }
-        );
+        pats.push(PatNode {
+            kind: kind,
+            start: start,
+            end: end,
+            a: n32(a),
+            b: n32(pb),
+            c: n32(pc)
+        });
     }
     // The pool holds expression and pattern indices and passes, and the
     // names and types of the lists that have them, which are mapped to
@@ -466,18 +469,16 @@ pub fn read_prog(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Prog
             ops.push(op);
         }
         set_by_symbol(inout eff_by_name, name, inc32(n32(effs.len())));
-        effs.push(
-            EffDecl {
-                name: name,
-                linear: linear,
-                start: start,
-                end: end,
-                gen_start: gen_start,
-                gen_count: n32(gen_count),
-                op_start: op_start,
-                op_count: n32(op_count)
-            }
-        );
+        effs.push(EffDecl {
+            name: name,
+            linear: linear,
+            start: start,
+            end: end,
+            gen_start: gen_start,
+            gen_count: n32(gen_count),
+            op_start: op_start,
+            op_count: n32(op_count)
+        });
     }
     let call_count = reader.word(in bytes);
     let mut calls: ChunkSeq[CallRow] = ChunkSeq::with_capacity[CallRow](call_count);
@@ -491,9 +492,12 @@ pub fn read_prog(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx) -> Prog
             call_vars.push(u32_at(in ctx.nmap, reader.word(in bytes)));
             call_vars.push(u32_at(in ctx.tmap, reader.word(in bytes)));
         }
-        calls.push(
-            CallRow { start: start, end: end, var_start: var_start, var_count: n32(var_count) }
-        );
+        calls.push(CallRow {
+            start: start,
+            end: end,
+            var_start: var_start,
+            var_count: n32(var_count)
+        });
     }
     Prog {
         exprs: exprs,

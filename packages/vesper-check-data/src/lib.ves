@@ -28,15 +28,15 @@ use self::input::{Ctx, Reader, read_ctx};
 
 const NONE32: u32 = 4294967295;
 
-fn put(inout o: ChunkSeq[u8], in s: Str) {
-    o.extend(in s.as_bytes());
+fn put(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
 }
 
-fn put_u64(inout o: ChunkSeq[u8], v: u64) {
-    if v >= 10 {
-        put_u64(inout o, v / 10);
+fn put_u64(inout out: ChunkSeq[u8], value: u64) {
+    if value >= 10 {
+        put_u64(inout out, value / 10);
     }
-    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+    out.push(wrapping_u8(wrapping_add(value % 10, 48)));
 }
 
 // `text` packed little-endian eight bytes per word after one header word,
@@ -48,17 +48,17 @@ pub fn pack_text(in text: ChunkSeq[u8]) -> ChunkSeq[u64] {
     out
 }
 
-fn line_type(inout o: ChunkSeq[u8], in c: Ctx, tag: u8, ty: u32) {
-    o.push(tag);
-    o.push(32);
-    display(in c.types, in c.names, ty, inout o);
-    o.push(10);
+fn line_type(inout out: ChunkSeq[u8], in ctx: Ctx, tag: u8, ty: u32) {
+    out.push(tag);
+    out.push(32);
+    display(in ctx.types, in ctx.names, ty, inout out);
+    out.push(10);
 }
 
-fn line_debug(inout o: ChunkSeq[u8], in c: Ctx, ty: u32) {
-    put(inout o, "G ");
-    debug_type(in c.types, in c.names, ty, inout o);
-    o.push(10);
+fn line_debug(inout out: ChunkSeq[u8], in ctx: Ctx, ty: u32) {
+    put(inout out, "G ");
+    debug_type(in ctx.types, in ctx.names, ty, inout out);
+    out.push(10);
 }
 
 // Task "types": for every listed type its `Display` (D), `Debug` (G) and
@@ -66,33 +66,33 @@ fn line_debug(inout o: ChunkSeq[u8], in c: Ctx, ty: u32) {
 // Task words: n, n type indices; m, then m cases of (type, k, k pairs of
 // (name index, type index)).
 pub fn check_data_types(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let mut c = read_ctx(inout r, in b);
-    let mut o = ChunkSeq::new[u8]();
-    let n = r.word(in b);
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let mut ctx = read_ctx(inout reader, in bytes);
+    let mut out = ChunkSeq::new[u8]();
+    let n = reader.word(in bytes);
     for i in 0..n {
-        let ty = u32_at(in c.tmap, r.word(in b));
-        line_type(inout o, in c, 68, ty);
-        line_debug(inout o, in c, ty);
-        let d = default_type(inout c.types, ty);
-        line_type(inout o, in c, 70, d);
+        let ty = u32_at(in ctx.tmap, reader.word(in bytes));
+        line_type(inout out, in ctx, 68, ty);
+        line_debug(inout out, in ctx, ty);
+        let default_ty = default_type(inout ctx.types, ty);
+        line_type(inout out, in ctx, 70, default_ty);
     }
-    let m = r.word(in b);
-    for i in 0..m {
-        let ty = u32_at(in c.tmap, r.word(in b));
-        let k = r.word(in b);
+    let subst_count = reader.word(in bytes);
+    for i in 0..subst_count {
+        let ty = u32_at(in ctx.tmap, reader.word(in bytes));
+        let pair_count = reader.word(in bytes);
         let mut vars = vars_new();
-        for j in 0..k {
-            let name = u32_at(in c.nmap, r.word(in b));
-            let v = u32_at(in c.tmap, r.word(in b));
-            vars.set(name, v);
+        for j in 0..pair_count {
+            let name = u32_at(in ctx.nmap, reader.word(in bytes));
+            let bound_ty = u32_at(in ctx.tmap, reader.word(in bytes));
+            vars.set(name, bound_ty);
         }
-        let s = substitute(inout c.types, ty, in vars);
-        line_type(inout o, in c, 83, s);
-        line_debug(inout o, in c, s);
+        let substituted = substitute(inout ctx.types, ty, in vars);
+        line_type(inout out, in ctx, 83, substituted);
+        line_debug(inout out, in ctx, substituted);
     }
-    pack_text(in o)
+    pack_text(in out)
 }
 
 // Task "world": the `World` lookups.
@@ -107,118 +107,131 @@ pub fn check_data_types(in input: Str) -> ChunkSeq[u64] {
 // - s span probes (start, end): the expression type (T: type or `-`),
 //   `partial_ops` and `overflow_ops` membership (O: two digits).
 pub fn check_data_world(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let mut c = read_ctx(inout r, in b);
-    let mut o = ChunkSeq::new[u8]();
-    let none = bounds_new();
-    let n = r.word(in b);
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let mut ctx = read_ctx(inout reader, in bytes);
+    let mut out = ChunkSeq::new[u8]();
+    let no_bounds = bounds_new();
+    let n = reader.word(in bytes);
     for i in 0..n {
-        let ty = u32_at(in c.tmap, r.word(in b));
-        put(inout o, "M ");
-        put_u64(inout o, widen_u64(mode_of(inout c.types, in c.names, in c.world, ty, in none)));
-        put(inout o, "\nV ");
-        put_u64(inout o, w(vector_words(in c.types, in c.names, c.world.k, ty)));
-        o.push(10);
-        let k = r.word(in b);
-        for j in 0..k {
-            let name = u32_at(in c.nmap, r.word(in b));
-            let seg = c.names.has_prefix(name, in "[".as_bytes());
-            let f = field_step(inout c.types, inout c.names, in c.world, ty, name, seg);
-            if f == NONE32 {
-                put(inout o, "P -\n");
+        let ty = u32_at(in ctx.tmap, reader.word(in bytes));
+        put(inout out, "M ");
+        put_u64(
+            inout out,
+            widen_u64(mode_of(inout ctx.types, in ctx.names, in ctx.world, ty, in no_bounds))
+        );
+        put(inout out, "\nV ");
+        put_u64(inout out, w(vector_words(in ctx.types, in ctx.names, ctx.world.k, ty)));
+        out.push(10);
+        let name_count = reader.word(in bytes);
+        for j in 0..name_count {
+            let name = u32_at(in ctx.nmap, reader.word(in bytes));
+            let is_segment = ctx.names.has_prefix(name, in "[".as_bytes());
+            let field_ty = field_step(
+                inout ctx.types,
+                inout ctx.names,
+                in ctx.world,
+                ty,
+                name,
+                is_segment
+            );
+            if field_ty == NONE32 {
+                put(inout out, "P -\n");
             } else {
-                line_type(inout o, in c, 80, f);
+                line_type(inout out, in ctx, 80, field_ty);
             }
         }
-        let node = c.types.node(ty);
+        let node = ctx.types.node(ty);
         if node.kind == TyKind::Fn || node.kind == TyKind::Row {
-            put(inout o, "E ");
-            if effectful_row(in c.types, in c.world, node.r2) {
-                o.push(49);
+            put(inout out, "E ");
+            if effectful_row(in ctx.types, in ctx.world, node.r2) {
+                out.push(49);
             } else {
-                o.push(48);
+                out.push(48);
             }
-            o.push(10);
+            out.push(10);
         }
     }
-    let m = r.word(in b);
-    for i in 0..m {
-        let ty = u32_at(in c.tmap, r.word(in b));
-        let k = r.word(in b);
+    let bound_case_count = reader.word(in bytes);
+    for i in 0..bound_case_count {
+        let ty = u32_at(in ctx.tmap, reader.word(in bytes));
+        let bound_count = reader.word(in bytes);
         let mut bounds = bounds_new();
-        for j in 0..k {
-            let name = u32_at(in c.nmap, r.word(in b));
-            bounds.set(name, wrapping_u8(r.word(in b)));
+        for j in 0..bound_count {
+            let name = u32_at(in ctx.nmap, reader.word(in bytes));
+            bounds.set(name, wrapping_u8(reader.word(in bytes)));
         }
-        put(inout o, "B ");
-        put_u64(inout o, widen_u64(mode_of(inout c.types, in c.names, in c.world, ty, in bounds)));
-        o.push(10);
+        put(inout out, "B ");
+        put_u64(
+            inout out,
+            widen_u64(mode_of(inout ctx.types, in ctx.names, in ctx.world, ty, in bounds))
+        );
+        out.push(10);
     }
-    let q = r.word(in b);
-    for i in 0..q {
-        let qx = r.word(in b);
-        let qual = if qx == 0 {
+    let query_count = reader.word(in bytes);
+    for i in 0..query_count {
+        let qual_index = reader.word(in bytes);
+        let qual = if qual_index == 0 {
             NONE32
         } else {
-            u32_at(in c.nmap, wrapping_sub(qx, 1))
+            u32_at(in ctx.nmap, wrapping_sub(qual_index, 1))
         };
-        let short = u32_at(in c.nmap, r.word(in b));
-        let found = constructor(in c.world, qual, short);
-        put(inout o, "C ");
+        let short = u32_at(in ctx.nmap, reader.word(in bytes));
+        let found = constructor(in ctx.world, qual, short);
+        put(inout out, "C ");
         if found == 18446744073709551615 {
-            o.push(45);
+            out.push(45);
         } else {
-            let a = c.world.adt(n32(found >> 32));
-            let v = c.world.variant(found & 4294967295);
-            c.names.write(a.name, inout o);
-            put(inout o, "::");
-            c.names.write(v.name, inout o);
+            let adt = ctx.world.adt(n32(found >> 32));
+            let variant = ctx.world.variant(found & 4294967295);
+            ctx.names.write(adt.name, inout out);
+            put(inout out, "::");
+            ctx.names.write(variant.name, inout out);
         }
-        o.push(10);
+        out.push(10);
     }
-    let s = r.word(in b);
-    for i in 0..s {
-        let start = r.word(in b);
-        let end = r.word(in b);
-        let ty = c.world.expr_type(start, end);
+    let probe_count = reader.word(in bytes);
+    for i in 0..probe_count {
+        let start = reader.word(in bytes);
+        let end = reader.word(in bytes);
+        let ty = ctx.world.expr_type(start, end);
         if ty == NONE32 {
-            put(inout o, "T -\n");
+            put(inout out, "T -\n");
         } else {
-            line_type(inout o, in c, 84, ty);
+            line_type(inout out, in ctx, 84, ty);
         }
-        put(inout o, "O ");
-        if c.world.is_partial(start, end) {
-            o.push(49);
+        put(inout out, "O ");
+        if ctx.world.is_partial(start, end) {
+            out.push(49);
         } else {
-            o.push(48);
+            out.push(48);
         }
-        if c.world.may_overflow(start, end) {
-            o.push(49);
+        if ctx.world.may_overflow(start, end) {
+            out.push(49);
         } else {
-            o.push(48);
+            out.push(48);
         }
-        o.push(10);
+        out.push(10);
     }
-    pack_text(in o)
+    pack_text(in out)
 }
 
 // Task "decode": the table sizes after decoding, for the harness's own
 // round-trip test and as the cheapest entry to time the decoder with.
 pub fn check_data_sizes(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let c = read_ctx(inout r, in b);
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let ctx = read_ctx(inout reader, in bytes);
     let mut out = ChunkSeq::new[u64]();
-    out.push(c.names.len());
-    out.push(c.types.nodes.len());
-    out.push(c.types.rows.len());
-    out.push(c.world.adts.len());
-    out.push(c.world.variants.len());
-    out.push(c.world.fields.len());
-    out.push(c.world.effects.len());
-    out.push(c.world.expr_types.len());
-    out.push(c.world.partial_ops.len());
-    out.push(c.world.overflow_ops.len());
+    out.push(ctx.names.len());
+    out.push(ctx.types.nodes.len());
+    out.push(ctx.types.rows.len());
+    out.push(ctx.world.adts.len());
+    out.push(ctx.world.variants.len());
+    out.push(ctx.world.fields.len());
+    out.push(ctx.world.effects.len());
+    out.push(ctx.world.expr_types.len());
+    out.push(ctx.world.partial_ops.len());
+    out.push(ctx.world.overflow_ops.len());
     out
 }

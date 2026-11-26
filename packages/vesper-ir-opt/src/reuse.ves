@@ -526,16 +526,14 @@ fn reuse_function(
                         let key = u64_of(in facts.skey, add(fa, j));
                         let size = u64_of(in facts.ssize, add(fa, j));
                         let r = bump_rank(inout ranks, inout touched, key);
-                        live.push(
-                            Slot {
-                                slot_id: next_slot,
-                                bind: i.dest,
-                                sidx: j,
-                                key: key,
-                                rank: r,
-                                size: size
-                            }
-                        );
+                        live.push(Slot {
+                            slot_id: next_slot,
+                            bind: i.dest,
+                            sidx: j,
+                            key: key,
+                            rank: r,
+                            size: size
+                        });
                         next_slot = wrapping_add(next_slot, 1);
                     }
                 }
@@ -702,9 +700,14 @@ fn join(
                 jin.push(w(sp.bind));
                 jin.push(sp.sidx);
             }
-            live.push(
-                Slot { slot_id: 0, bind: n32(canon), sidx: 0, key: s0.key, rank: 0, size: s0.size }
-            );
+            live.push(Slot {
+                slot_id: 0,
+                bind: n32(canon),
+                sidx: 0,
+                key: s0.key,
+                rank: 0,
+                size: s0.size
+            });
         }
     }
 }

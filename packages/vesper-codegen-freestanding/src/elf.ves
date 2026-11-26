@@ -16,14 +16,14 @@ pub fn pf_rw() -> u32 {
 }
 
 // Output section names (link.rs `OUT_NAMES` and `.stack`).
-pub fn section_name(i: u64) -> Str {
-    if i == Out::Text {
+pub fn section_name(out_index: u64) -> Str {
+    if out_index == Out::Text {
         ".text"
-    } else if i == Out::Rodata {
+    } else if out_index == Out::Rodata {
         ".rodata"
-    } else if i == Out::Data {
+    } else if out_index == Out::Data {
         ".data"
-    } else if i == Out::Bss {
+    } else if out_index == Out::Bss {
         ".bss"
     } else {
         ".stack"
@@ -87,10 +87,10 @@ fn s_at(in secs: ChunkSeq[OutSec], i: u64) -> OutSec {
     }
 }
 
-fn append_name(inout t: ChunkSeq[u8], in s: Slice[u8]) -> u32 {
-    let at = wrapping_u32(t.len());
-    t.extend(in s);
-    t.push(0);
+fn append_name(inout table: ChunkSeq[u8], in name: Slice[u8]) -> u32 {
+    let at = wrapping_u32(table.len());
+    table.extend(in name);
+    table.push(0);
     at
 }
 
@@ -135,33 +135,31 @@ pub fn write_executable(
         };
         let first = s_at(in secs, seg.first);
         let mut off = out.len();
-        let want = first.address % Page::Bytes;
-        if off % Page::Bytes != want {
-            off = add(off, (add(want, sub(Page::Bytes, off % Page::Bytes))) % Page::Bytes);
+        let page_offset = first.address % Page::Bytes;
+        if off % Page::Bytes != page_offset {
+            off = add(off, (add(page_offset, sub(Page::Bytes, off % Page::Bytes))) % Page::Bytes);
         }
         out.resize(off, 0);
         let seg_base = first.address;
         let mut file_end = off;
         let mut mem_end = seg_base;
         for i in seg.first..seg.end {
-            let s = s_at(in secs, i);
-            let at = add(off, sub(s.address, seg_base));
+            let out_sec = s_at(in secs, i);
+            let at = add(off, sub(out_sec.address, seg_base));
             let ok = file_offsets.try_set(i, at);
-            if !s.nobits {
+            if !out_sec.nobits {
                 out.resize(at, 0);
-                out.extend(in data[s.data_at..add(s.data_at, s.data_len)]);
-                file_end = add(at, s.data_len);
+                out.extend(in data[out_sec.data_at..add(out_sec.data_at, out_sec.data_len)]);
+                file_end = add(at, out_sec.data_len);
             }
-            mem_end = max64(mem_end, add(s.address, s.mem_bytes));
+            mem_end = max64(mem_end, add(out_sec.address, out_sec.mem_bytes));
         }
-        placements.push(
-            Placement {
-                vaddr: seg_base,
-                offset: off,
-                file_bytes: sub(file_end, off),
-                mem_bytes: sub(mem_end, seg_base)
-            }
-        );
+        placements.push(Placement {
+            vaddr: seg_base,
+            offset: off,
+            file_bytes: sub(file_end, off),
+            mem_bytes: sub(mem_end, seg_base)
+        });
     }
     // String tables and symbols.
     let mut shstrtab: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -181,7 +179,7 @@ pub fn write_executable(
     let mut locals: u64 = 0;
     for pass in 0..2 {
         for i in 0..syms.len() {
-            let s = match syms.try_get(i) {
+            let symbol = match syms.try_get(i) {
                 Option::Some(v) => v,
                 Option::None => OutSym {
                     name_at: 0,
@@ -193,27 +191,35 @@ pub fn write_executable(
                     section: Absent::Row
                 },
             };
-            if s.global == (pass == 1) {
-                if !s.global {
+            if symbol.global == (pass == 1) {
+                if !symbol.global {
                     locals = add(locals, 1);
                 }
                 let name = append_name(
                     inout strtab,
-                    in names[s.name_at..add(s.name_at, s.name_len)]
+                    in names[symbol.name_at..add(symbol.name_at, symbol.name_len)]
                 );
                 push32(inout symtab, name);
-                let bind: u8 = if s.global { Stb::Global } else { Stb::Local };
-                let kind: u8 = if s.function { Stt::Func } else { Stt::Notype };
+                let bind: u8 = if symbol.global {
+                    Stb::Global
+                } else {
+                    Stb::Local
+                };
+                let kind: u8 = if symbol.function {
+                    Stt::Func
+                } else {
+                    Stt::Notype
+                };
                 symtab.push((bind << Stb::Shift) | kind);
                 symtab.push(0);
-                let shndx: u16 = if s.section == Absent::Row {
+                let shndx: u16 = if symbol.section == Absent::Row {
                     Shn::Abs
                 } else {
-                    wrapping_u16(add(s.section, 1))
+                    wrapping_u16(add(symbol.section, 1))
                 };
                 push16(inout symtab, shndx);
-                push64(inout symtab, s.value);
-                push64(inout symtab, s.size);
+                push64(inout symtab, symbol.value);
+                push64(inout symtab, symbol.size);
             }
         }
     }
@@ -229,23 +235,39 @@ pub fn write_executable(
     };
     out.resize(shoff, 0);
     let shnum = add(secs.len(), 4);
-    let z = grow(inout out, Shdr::Bytes);
+    let null_header = grow(inout out, Shdr::Bytes);
     for i in 0..secs.len() {
-        let s = s_at(in secs, i);
+        let out_sec = s_at(in secs, i);
         let mut flags = Shf::Alloc;
-        if s.writable {
+        if out_sec.writable {
             flags = flags | Shf::Write;
         }
-        if s.executable {
+        if out_sec.executable {
             flags = flags | Shf::Execinstr;
         }
-        let kind = if s.nobits { Sht::Nobits } else { Sht::Progbits };
+        let kind = if out_sec.nobits {
+            Sht::Nobits
+        } else {
+            Sht::Progbits
+        };
         let name = match sh_names.try_get(i) {
             Option::Some(v) => widen_u64(v),
             Option::None => 0,
         };
         let off = file_offsets.try_get(i).unwrap_or(0);
-        header_at(inout out, name, kind, flags, s.address, off, s.mem_bytes, 0, 0, 8, 0);
+        header_at(
+            inout out,
+            name,
+            kind,
+            flags,
+            out_sec.address,
+            off,
+            out_sec.mem_bytes,
+            0,
+            0,
+            8,
+            0
+        );
     }
     let strtab_index = add(secs.len(), 2);
     header_at(
@@ -288,51 +310,51 @@ pub fn write_executable(
         0
     );
     // ELF header.
-    let mut h: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    h.push(Ident::Mag0);
-    h.push(Ident::Mag1);
-    h.push(Ident::Mag2);
-    h.push(Ident::Mag3);
-    h.push(Ident::Class64);
-    h.push(Ident::Data2Lsb);
-    h.push(Ident::Current);
-    h.push(0);
-    let pad = grow(inout h, 8);
-    push16(inout h, Et::Exec);
-    push16(inout h, machine);
-    push32(inout h, Ident::Current);
-    push64(inout h, entry);
-    push64(inout h, Ehdr::Bytes);
-    push64(inout h, shoff);
-    push32(inout h, e_flags);
-    push16(inout h, Ehdr::Bytes);
-    push16(inout h, Phdr::Bytes);
-    push16(inout h, wrapping_u16(phnum));
-    push16(inout h, Shdr::Bytes);
-    push16(inout h, wrapping_u16(shnum));
-    push16(inout h, wrapping_u16(sub(shnum, 1)));
-    let ok = out.try_copy_from(0, in h.as_slice());
+    let mut header: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    header.push(Ident::Mag0);
+    header.push(Ident::Mag1);
+    header.push(Ident::Mag2);
+    header.push(Ident::Mag3);
+    header.push(Ident::Class64);
+    header.push(Ident::Data2Lsb);
+    header.push(Ident::Current);
+    header.push(0);
+    let pad = grow(inout header, 8);
+    push16(inout header, Et::Exec);
+    push16(inout header, machine);
+    push32(inout header, Ident::Current);
+    push64(inout header, entry);
+    push64(inout header, Ehdr::Bytes);
+    push64(inout header, shoff);
+    push32(inout header, e_flags);
+    push16(inout header, Ehdr::Bytes);
+    push16(inout header, Phdr::Bytes);
+    push16(inout header, wrapping_u16(phnum));
+    push16(inout header, Shdr::Bytes);
+    push16(inout header, wrapping_u16(shnum));
+    push16(inout header, wrapping_u16(sub(shnum, 1)));
+    let ok = out.try_copy_from(0, in header.as_slice());
     for k in 0..phnum {
         let seg = match segs.try_get(k) {
             Option::Some(v) => v,
             Option::None => OutSeg { first: 0, end: 0, flags: 0 },
         };
-        let p = match placements.try_get(k) {
+        let placement = match placements.try_get(k) {
             Option::Some(v) => v,
             Option::None => Placement { vaddr: 0, offset: 0, file_bytes: 0, mem_bytes: 0 },
         };
-        let mut ph: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        push32(inout ph, Pt::Load);
-        push32(inout ph, seg.flags);
-        push64(inout ph, p.offset);
-        push64(inout ph, p.vaddr);
-        push64(inout ph, p.vaddr);
-        push64(inout ph, p.file_bytes);
-        push64(inout ph, p.mem_bytes);
-        push64(inout ph, Page::Bytes);
+        let mut phdr: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        push32(inout phdr, Pt::Load);
+        push32(inout phdr, seg.flags);
+        push64(inout phdr, placement.offset);
+        push64(inout phdr, placement.vaddr);
+        push64(inout phdr, placement.vaddr);
+        push64(inout phdr, placement.file_bytes);
+        push64(inout phdr, placement.mem_bytes);
+        push64(inout phdr, Page::Bytes);
         let ok2 = out.try_copy_from(
             add(Ehdr::Bytes, wrapping_mul(k, Phdr::Bytes)),
-            in ph.as_slice()
+            in phdr.as_slice()
         );
     }
     out
@@ -346,7 +368,7 @@ fn header_at(
     kind: u64,
     flags: u64,
     addr: u64,
-    off: u64,
+    offset: u64,
     size: u64,
     link: u64,
     info: u64,
@@ -357,7 +379,7 @@ fn header_at(
     push32(inout out, wrapping_u32(kind));
     push64(inout out, flags);
     push64(inout out, addr);
-    push64(inout out, off);
+    push64(inout out, offset);
     push64(inout out, size);
     push32(inout out, wrapping_u32(link));
     push32(inout out, wrapping_u32(info));
@@ -373,11 +395,11 @@ fn trunc(inout err: ChunkSeq[u8], at: u64) {
     push_dec_into(inout err, at);
 }
 
-fn push_dec_into(inout out: ChunkSeq[u8], x: u64) {
-    if x >= 10 {
-        push_dec_into(inout out, x / 10);
+fn push_dec_into(inout out: ChunkSeq[u8], value: u64) {
+    if value >= 10 {
+        push_dec_into(inout out, value / 10);
     }
-    out.push(wrapping_u8(add(x % 10, 48)));
+    out.push(wrapping_u8(add(value % 10, 48)));
 }
 
 fn set_err(inout err: ChunkSeq[u8], in msg: Str) {
@@ -385,8 +407,8 @@ fn set_err(inout err: ChunkSeq[u8], in msg: Str) {
     err.extend(in msg.as_bytes());
 }
 
-fn r16(in b: Slice[u8], at: u64, inout err: ChunkSeq[u8]) -> u64 {
-    match rd16(in b, at) {
+fn r16(in elf: Slice[u8], at: u64, inout err: ChunkSeq[u8]) -> u64 {
+    match rd16(in elf, at) {
         Option::Some(v) => widen_u64(v),
         Option::None => {
             if err.len() == 0 {
@@ -397,8 +419,8 @@ fn r16(in b: Slice[u8], at: u64, inout err: ChunkSeq[u8]) -> u64 {
     }
 }
 
-fn r32(in b: Slice[u8], at: u64, inout err: ChunkSeq[u8]) -> u64 {
-    match rd32(in b, at) {
+fn r32(in elf: Slice[u8], at: u64, inout err: ChunkSeq[u8]) -> u64 {
+    match rd32(in elf, at) {
         Option::Some(v) => widen_u64(v),
         Option::None => {
             if err.len() == 0 {
@@ -409,8 +431,8 @@ fn r32(in b: Slice[u8], at: u64, inout err: ChunkSeq[u8]) -> u64 {
     }
 }
 
-fn r64(in b: Slice[u8], at: u64, inout err: ChunkSeq[u8]) -> u64 {
-    match rd64(in b, at) {
+fn r64(in elf: Slice[u8], at: u64, inout err: ChunkSeq[u8]) -> u64 {
+    match rd64(in elf, at) {
         Option::Some(v) => v,
         Option::None => {
             if err.len() == 0 {
@@ -425,44 +447,44 @@ fn r64(in b: Slice[u8], at: u64, inout err: ChunkSeq[u8]) -> u64 {
 // e_type, the `PT_LOAD` count and per segment (vaddr, offset, file bytes,
 // memory bytes, flags), then the symbol count and per symbol (name, value);
 // on failure 1 and the message.
-pub fn read_executable(in b: Slice[u8]) -> ChunkSeq[u8] {
+pub fn read_executable(in elf: Slice[u8]) -> ChunkSeq[u8] {
     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    read_into(in b, inout out, inout err);
+    read_into(in elf, inout out, inout err);
     if err.len() != 0 {
-        let mut e: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        push64(inout e, 1);
-        put_str(inout e, in err.as_slice());
-        return e;
+        let mut failure: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        push64(inout failure, 1);
+        put_str(inout failure, in err.as_slice());
+        return failure;
     }
-    let mut r: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    push64(inout r, 0);
-    r.extend(in out.as_slice());
-    r
+    let mut result: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push64(inout result, 0);
+    result.extend(in out.as_slice());
+    result
 }
 
-fn read_into(in b: Slice[u8], inout out: ChunkSeq[u8], inout err: ChunkSeq[u8]) {
-    if b.len() < Ehdr::Bytes
-        || rd8(in b, 0) != Ident::Mag0
-        || rd8(in b, 1) != Ident::Mag1
-        || rd8(in b, 2) != Ident::Mag2
-        || rd8(in b, 3) != Ident::Mag3 {
+fn read_into(in elf: Slice[u8], inout out: ChunkSeq[u8], inout err: ChunkSeq[u8]) {
+    if elf.len() < Ehdr::Bytes
+        || rd8(in elf, 0) != Ident::Mag0
+        || rd8(in elf, 1) != Ident::Mag1
+        || rd8(in elf, 2) != Ident::Mag2
+        || rd8(in elf, 3) != Ident::Mag3 {
         set_err(inout err, in "not an ELF file");
         return;
     }
-    if rd8(in b, Ehdr::Class) != Ident::Class64 || rd8(in b, Ehdr::Data) != Ident::Data2Lsb {
+    if rd8(in elf, Ehdr::Class) != Ident::Class64 || rd8(in elf, Ehdr::Data) != Ident::Data2Lsb {
         set_err(inout err, in "not a little-endian ELF64 file");
         return;
     }
-    let e_type = r16(in b, Ehdr::Kind, inout err);
-    let machine = r16(in b, Ehdr::Machine, inout err);
-    let entry = r64(in b, Ehdr::Entry, inout err);
-    let phoff = r64(in b, Ehdr::Phoff, inout err);
-    let shoff = r64(in b, Ehdr::Shoff, inout err);
-    let phentsize = r16(in b, Ehdr::Phentsize, inout err);
-    let phnum = r16(in b, Ehdr::Phnum, inout err);
-    let shentsize = r16(in b, Ehdr::Shentsize, inout err);
-    let shnum = r16(in b, Ehdr::Shnum, inout err);
+    let e_type = r16(in elf, Ehdr::Kind, inout err);
+    let machine = r16(in elf, Ehdr::Machine, inout err);
+    let entry = r64(in elf, Ehdr::Entry, inout err);
+    let phoff = r64(in elf, Ehdr::Phoff, inout err);
+    let shoff = r64(in elf, Ehdr::Shoff, inout err);
+    let phentsize = r16(in elf, Ehdr::Phentsize, inout err);
+    let phnum = r16(in elf, Ehdr::Phnum, inout err);
+    let shentsize = r16(in elf, Ehdr::Shentsize, inout err);
+    let shnum = r16(in elf, Ehdr::Shnum, inout err);
     if err.len() != 0 {
         return;
     }
@@ -471,25 +493,25 @@ fn read_into(in b: Slice[u8], inout out: ChunkSeq[u8], inout err: ChunkSeq[u8]) 
         return;
     }
     let mut segs: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut nseg: u64 = 0;
+    let mut seg_count: u64 = 0;
     for i in 0..phnum {
-        let p = add(phoff, wrapping_mul(i, phentsize));
-        if p < phoff {
+        let phdr_at = add(phoff, wrapping_mul(i, phentsize));
+        if phdr_at < phoff {
             set_err(inout err, in "overflow");
             return;
         }
-        if r32(in b, p, inout err) == widen_u64(Pt::Load) {
-            let flags = r32(in b, add(p, Phdr::Flags), inout err);
-            let offset = r64(in b, add(p, Phdr::Offset), inout err);
-            let vaddr = r64(in b, add(p, Phdr::Vaddr), inout err);
-            let filesz = r64(in b, add(p, Phdr::Filesz), inout err);
-            let memsz = r64(in b, add(p, Phdr::Memsz), inout err);
+        if r32(in elf, phdr_at, inout err) == widen_u64(Pt::Load) {
+            let flags = r32(in elf, add(phdr_at, Phdr::Flags), inout err);
+            let offset = r64(in elf, add(phdr_at, Phdr::Offset), inout err);
+            let vaddr = r64(in elf, add(phdr_at, Phdr::Vaddr), inout err);
+            let filesz = r64(in elf, add(phdr_at, Phdr::Filesz), inout err);
+            let memsz = r64(in elf, add(phdr_at, Phdr::Memsz), inout err);
             push64(inout segs, vaddr);
             push64(inout segs, offset);
             push64(inout segs, filesz);
             push64(inout segs, memsz);
             push64(inout segs, flags);
-            nseg = add(nseg, 1);
+            seg_count = add(seg_count, 1);
         }
         if err.len() != 0 {
             return;
@@ -500,14 +522,14 @@ fn read_into(in b: Slice[u8], inout out: ChunkSeq[u8], inout err: ChunkSeq[u8]) 
         return;
     }
     let mut syms: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut nsym: u64 = 0;
+    let mut sym_count: u64 = 0;
     for i in 0..shnum {
-        let s = add(shoff, wrapping_mul(i, shentsize));
-        let kind = r32(in b, add(s, Shdr::Kind), inout err);
-        let offset = r64(in b, add(s, Shdr::Offset), inout err);
-        let size = r64(in b, add(s, Shdr::Size), inout err);
-        let link = r32(in b, add(s, Shdr::Link), inout err);
-        let entsize = r64(in b, add(s, Shdr::Entsize), inout err);
+        let shdr_at = add(shoff, wrapping_mul(i, shentsize));
+        let kind = r32(in elf, add(shdr_at, Shdr::Kind), inout err);
+        let offset = r64(in elf, add(shdr_at, Shdr::Offset), inout err);
+        let size = r64(in elf, add(shdr_at, Shdr::Size), inout err);
+        let link = r32(in elf, add(shdr_at, Shdr::Link), inout err);
+        let entsize = r64(in elf, add(shdr_at, Shdr::Entsize), inout err);
         if err.len() != 0 {
             return;
         }
@@ -516,22 +538,22 @@ fn read_into(in b: Slice[u8], inout out: ChunkSeq[u8], inout err: ChunkSeq[u8]) 
                 set_err(inout err, in "bad symbol size");
                 return;
             }
-            let t = add(shoff, wrapping_mul(link, shentsize));
-            let str_off = r64(in b, add(t, Shdr::Offset), inout err);
-            let str_size = r64(in b, add(t, Shdr::Size), inout err);
+            let link_hdr = add(shoff, wrapping_mul(link, shentsize));
+            let str_off = r64(in elf, add(link_hdr, Shdr::Offset), inout err);
+            let str_size = r64(in elf, add(link_hdr, Shdr::Size), inout err);
             if err.len() != 0 {
                 return;
             }
             let str_end = add(str_off, str_size);
-            if str_end < str_off || str_off > str_end || str_end > b.len() {
+            if str_end < str_off || str_off > str_end || str_end > elf.len() {
                 set_err(inout err, in "truncated string table");
                 return;
             }
             let count = size / entsize;
             for k in 0..count {
                 let at = add(offset, wrapping_mul(k, entsize));
-                let name_off = r32(in b, at, inout err);
-                let value = r64(in b, add(at, SymEnt::Value), inout err);
+                let name_off = r32(in elf, at, inout err);
+                let value = r64(in elf, add(at, SymEnt::Value), inout err);
                 if err.len() != 0 {
                     return;
                 }
@@ -542,15 +564,15 @@ fn read_into(in b: Slice[u8], inout out: ChunkSeq[u8], inout err: ChunkSeq[u8]) 
                 let start = add(str_off, name_off);
                 let mut end = start;
                 loop {
-                    if end >= str_end || rd8(in b, end) == 0 {
+                    if end >= str_end || rd8(in elf, end) == 0 {
                         break;
                     }
                     end = add(end, 1);
                 }
                 if end > start {
-                    put_str(inout syms, in b[start..end]);
+                    put_str(inout syms, in elf[start..end]);
                     push64(inout syms, value);
-                    nsym = add(nsym, 1);
+                    sym_count = add(sym_count, 1);
                 }
             }
         }
@@ -558,8 +580,8 @@ fn read_into(in b: Slice[u8], inout out: ChunkSeq[u8], inout err: ChunkSeq[u8]) 
     push64(inout out, entry);
     push64(inout out, machine);
     push64(inout out, e_type);
-    push64(inout out, nseg);
+    push64(inout out, seg_count);
     out.extend(in segs.as_slice());
-    push64(inout out, nsym);
+    push64(inout out, sym_count);
     out.extend(in syms.as_slice());
 }

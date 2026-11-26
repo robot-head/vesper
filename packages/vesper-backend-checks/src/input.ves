@@ -33,21 +33,21 @@ pub struct Reader {
 }
 
 impl Reader {
-    pub fn word(inout self, in b: Slice[u8]) -> u64 {
-        let x = match b.try_read_u64_le(self.pos) {
-            Option::Some(x) => x,
+    pub fn word(inout self, in bytes: Slice[u8]) -> u64 {
+        let value = match bytes.try_read_u64_le(self.pos) {
+            Option::Some(value) => value,
             Option::None => 0,
         };
         self.pos = wrapping_add(self.pos, 8);
-        x
+        value
     }
 
     // A list: appends its words to `pool` and returns (at, n).
-    pub fn list(inout self, in b: Slice[u8], inout pool: ChunkSeq[u64]) -> (u64, u64) {
-        let n = self.word(in b);
+    pub fn list(inout self, in bytes: Slice[u8], inout pool: ChunkSeq[u64]) -> (u64, u64) {
+        let n = self.word(in bytes);
         let at = pool.len();
         for i in 0..n {
-            pool.push(self.word(in b));
+            pool.push(self.word(in bytes));
         }
         (at, n)
     }
@@ -158,46 +158,46 @@ pub const CAP_RT: u64 = 2;
 pub const CAP_DF: u64 = 4;
 pub const CAP_DENORM: u64 = 8;
 
-// `NativeVerifierPolicy` as rows over its own list pool `pp`. Map rows are
+// `NativeVerifierPolicy` as rows over its own list pool `list_pool`. Map rows are
 // kept in key order (`BTreeMap`).
 pub struct Policy {
-    pp: ChunkSeq[u64],
+    list_pool: ChunkSeq[u64],
     // key, secret (at, n), declassify (at, n), constant-time callees (at, n)
-    ct: ChunkSeq[u64],
+    const_time: ChunkSeq[u64],
     // key, budget
-    sroots: ChunkSeq[u64],
-    sext: ChunkSeq[u64],
+    stack_roots: ChunkSeq[u64],
+    stack_ext_bounds: ChunkSeq[u64],
     // key, has budget, budget
-    rroots: ChunkSeq[u64],
-    rallowed_has: bool,
-    rallowed: ChunkSeq[u64],
+    rt_roots: ChunkSeq[u64],
+    rt_has_allowed: bool,
+    rt_allowed: ChunkSeq[u64],
     // key, effects (at, n), frame bytes
-    rsym: ChunkSeq[u64],
+    rt_symbols: ChunkSeq[u64],
     // key, effects (at, n)
-    reff: ChunkSeq[u64],
+    rt_effects: ChunkSeq[u64],
     // key, bound
-    rloop: ChunkSeq[u64],
-    rreject: bool,
-    rhas_max: bool,
-    rmax: u64,
-    dfun_has: bool,
-    dfun: ChunkSeq[u64],
-    dfma: bool,
-    dallowed: ChunkSeq[u64],
-    dred_has: bool,
-    dred: u64,
+    rt_loop_bounds: ChunkSeq[u64],
+    rt_reject_unbounded: bool,
+    rt_has_max_iters: bool,
+    rt_max_iters: u64,
+    df_has_functions: bool,
+    df_functions: ChunkSeq[u64],
+    df_allow_fma: bool,
+    df_allowed_calls: ChunkSeq[u64],
+    df_has_reduction: bool,
+    df_reduction_order: u64,
 }
 
-// `NativeVerifierReport`, its text in `tx`.
+// `NativeVerifierReport`, its text in `text`.
 pub struct Report {
-    pub tx: ChunkSeq[u8],
+    pub text: ChunkSeq[u8],
     pub verifiers: u64,
     pub functions: u64,
-    // (at, len) in tx
+    // (at, len) in text
     pub notes: ChunkSeq[u64],
     // FDW: verifier bit, function, has inst, inst, rule (at, len), message
     // (at, len), has span, start, end, has location, location
-    pub fd: ChunkSeq[u64],
+    pub findings: ChunkSeq[u64],
     pub has_stack: bool,
     // root, budget, has worst, worst, within, path (at, n in spool)
     pub sr: ChunkSeq[u64],
@@ -208,11 +208,11 @@ pub struct Report {
 
 pub fn report_new() -> Report {
     Report {
-        tx: ChunkSeq::new[u8](),
+        text: ChunkSeq::new[u8](),
         verifiers: 0,
         functions: 0,
         notes: ChunkSeq::new[u64](),
-        fd: ChunkSeq::new[u64](),
+        findings: ChunkSeq::new[u64](),
         has_stack: false,
         sr: ChunkSeq::new[u64](),
         spool: ChunkSeq::new[u64](),
@@ -221,34 +221,34 @@ pub fn report_new() -> Report {
 }
 
 pub struct Cx {
-    nm: Names,
+    names: Names,
     mode: u64,
     requested: u64,
     file: u64,
     source: u64,
-    nan: bool,
-    wf: ChunkSeq[u64],
+    canonical_nan: bool,
+    world_fns: ChunkSeq[u64],
     // symbol -> world function row + 1
-    wf_by: ChunkSeq[u64],
+    world_by_name: ChunkSeq[u64],
     pool: ChunkSeq[u64],
     // capability facts
-    cct: ChunkSeq[u64],
-    crt: ChunkSeq[u64],
-    crt_reject: bool,
-    cdf: ChunkSeq[u64],
-    p: Policy,
+    cap_const_time: ChunkSeq[u64],
+    cap_realtime: ChunkSeq[u64],
+    cap_reject_unbounded: bool,
+    cap_det_float: ChunkSeq[u64],
+    policy: Policy,
     isa_err: bool,
     arch: u64,
     arch_name: u64,
-    nfns: u64,
+    fn_count: u64,
     fns: ChunkSeq[u64],
     vals: ChunkSeq[u64],
     blocks: ChunkSeq[u64],
     insts: ChunkSeq[u64],
     code: ChunkSeq[u64],
-    r: Report,
-    err: bool,
-    emsg: ChunkSeq[u8],
+    report: Report,
+    failed: bool,
+    error_text: ChunkSeq[u8],
     // `Names` of native_verifiers.rs: func id -> symbol + 1, symbol ->
     // func id + 1, defined func ids; and key -> emitted function + 1.
     by_id: ChunkSeq[u64],
@@ -256,441 +256,444 @@ pub struct Cx {
     defined: ChunkSeq[u64],
     by_key: ChunkSeq[u64],
     // notes of the derived policy (mode 1), after the verifiers' own
-    dnotes: ChunkSeq[u64],
+    derived_notes: ChunkSeq[u64],
     // a verifier's own findings before `push` maps them to source (RW):
-    // function, has inst, inst, rule (at, len), message (at, len) in r.tx
-    raw: ChunkSeq[u64],
+    // function, has inst, inst, rule (at, len), message (at, len) in report.text
+    raw_findings: ChunkSeq[u64],
 }
 
-fn read_strings(inout r: Reader, in b: Slice[u8], inout nm: Names) {
-    let count = r.word(in b);
+fn read_strings(inout reader: Reader, in bytes: Slice[u8], inout names: Names) {
+    let count = reader.word(in bytes);
     for i in 0..count {
-        let len = r.word(in b);
-        let start = r.pos;
-        let s = nm.intern(in b[start..wrapping_add(start, len)]);
-        r.pos = wrapping_add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
+        let len = reader.word(in bytes);
+        let start = reader.pos;
+        let sym = names.intern(in bytes[start..wrapping_add(start, len)]);
+        reader.pos = wrapping_add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
     }
 }
 
-fn row2(inout rows: ChunkSeq[u64], inout r: Reader, in b: Slice[u8]) {
-    let n = r.word(in b);
+fn row2(inout rows: ChunkSeq[u64], inout reader: Reader, in bytes: Slice[u8]) {
+    let n = reader.word(in bytes);
     for i in 0..n {
-        rows.push(r.word(in b));
-        rows.push(r.word(in b));
+        rows.push(reader.word(in bytes));
+        rows.push(reader.word(in bytes));
     }
 }
 
-fn read_policy(inout r: Reader, in b: Slice[u8]) -> Policy {
-    let mut p = Policy {
-        pp: ChunkSeq::new[u64](),
-        ct: ChunkSeq::new[u64](),
-        sroots: ChunkSeq::new[u64](),
-        sext: ChunkSeq::new[u64](),
-        rroots: ChunkSeq::new[u64](),
-        rallowed_has: false,
-        rallowed: ChunkSeq::new[u64](),
-        rsym: ChunkSeq::new[u64](),
-        reff: ChunkSeq::new[u64](),
-        rloop: ChunkSeq::new[u64](),
-        rreject: true,
-        rhas_max: false,
-        rmax: 0,
-        dfun_has: false,
-        dfun: ChunkSeq::new[u64](),
-        dfma: false,
-        dallowed: ChunkSeq::new[u64](),
-        dred_has: false,
-        dred: 0,
+fn read_policy(inout reader: Reader, in bytes: Slice[u8]) -> Policy {
+    let mut policy = Policy {
+        list_pool: ChunkSeq::new[u64](),
+        const_time: ChunkSeq::new[u64](),
+        stack_roots: ChunkSeq::new[u64](),
+        stack_ext_bounds: ChunkSeq::new[u64](),
+        rt_roots: ChunkSeq::new[u64](),
+        rt_has_allowed: false,
+        rt_allowed: ChunkSeq::new[u64](),
+        rt_symbols: ChunkSeq::new[u64](),
+        rt_effects: ChunkSeq::new[u64](),
+        rt_loop_bounds: ChunkSeq::new[u64](),
+        rt_reject_unbounded: true,
+        rt_has_max_iters: false,
+        rt_max_iters: 0,
+        df_has_functions: false,
+        df_functions: ChunkSeq::new[u64](),
+        df_allow_fma: false,
+        df_allowed_calls: ChunkSeq::new[u64](),
+        df_has_reduction: false,
+        df_reduction_order: 0,
     };
-    let nct = r.word(in b);
-    for i in 0..nct {
-        p.ct.push(r.word(in b));
+    let ct_count = reader.word(in bytes);
+    for i in 0..ct_count {
+        policy.const_time.push(reader.word(in bytes));
         for k in 0..3 {
-            let (at, n) = r.list(in b, inout p.pp);
-            p.ct.push(at);
-            p.ct.push(n);
+            let (at, n) = reader.list(in bytes, inout policy.list_pool);
+            policy.const_time.push(at);
+            policy.const_time.push(n);
         }
     }
-    row2(inout p.sroots, inout r, in b);
-    row2(inout p.sext, inout r, in b);
-    let nroots = r.word(in b);
-    for i in 0..nroots {
-        p.rroots.push(r.word(in b));
-        p.rroots.push(r.word(in b));
-        p.rroots.push(r.word(in b));
+    row2(inout policy.stack_roots, inout reader, in bytes);
+    row2(inout policy.stack_ext_bounds, inout reader, in bytes);
+    let root_count = reader.word(in bytes);
+    for i in 0..root_count {
+        policy.rt_roots.push(reader.word(in bytes));
+        policy.rt_roots.push(reader.word(in bytes));
+        policy.rt_roots.push(reader.word(in bytes));
     }
-    p.rallowed_has = r.word(in b) == 1;
-    let (aat, an) = r.list(in b, inout p.pp);
-    for k in 0..an {
-        p.rallowed.push(g(in p.pp, wrapping_add(aat, k)));
+    policy.rt_has_allowed = reader.word(in bytes) == 1;
+    let (rt_allowed_at, rt_allowed_count) = reader.list(in bytes, inout policy.list_pool);
+    for k in 0..rt_allowed_count {
+        policy.rt_allowed.push(g(in policy.list_pool, wrapping_add(rt_allowed_at, k)));
     }
-    let nsym = r.word(in b);
-    for i in 0..nsym {
-        p.rsym.push(r.word(in b));
-        let (at, n) = r.list(in b, inout p.pp);
-        p.rsym.push(at);
-        p.rsym.push(n);
-        p.rsym.push(r.word(in b));
+    let symbol_count = reader.word(in bytes);
+    for i in 0..symbol_count {
+        policy.rt_symbols.push(reader.word(in bytes));
+        let (at, n) = reader.list(in bytes, inout policy.list_pool);
+        policy.rt_symbols.push(at);
+        policy.rt_symbols.push(n);
+        policy.rt_symbols.push(reader.word(in bytes));
     }
-    let neff = r.word(in b);
-    for i in 0..neff {
-        p.reff.push(r.word(in b));
-        let (at, n) = r.list(in b, inout p.pp);
-        p.reff.push(at);
-        p.reff.push(n);
+    let effect_count = reader.word(in bytes);
+    for i in 0..effect_count {
+        policy.rt_effects.push(reader.word(in bytes));
+        let (at, n) = reader.list(in bytes, inout policy.list_pool);
+        policy.rt_effects.push(at);
+        policy.rt_effects.push(n);
     }
-    row2(inout p.rloop, inout r, in b);
-    p.rreject = r.word(in b) == 1;
-    p.rhas_max = r.word(in b) == 1;
-    p.rmax = r.word(in b);
-    p.dfun_has = r.word(in b) == 1;
-    let (fat, fnn) = r.list(in b, inout p.pp);
-    for k in 0..fnn {
-        p.dfun.push(g(in p.pp, wrapping_add(fat, k)));
+    row2(inout policy.rt_loop_bounds, inout reader, in bytes);
+    policy.rt_reject_unbounded = reader.word(in bytes) == 1;
+    policy.rt_has_max_iters = reader.word(in bytes) == 1;
+    policy.rt_max_iters = reader.word(in bytes);
+    policy.df_has_functions = reader.word(in bytes) == 1;
+    let (df_fn_at, df_fn_count) = reader.list(in bytes, inout policy.list_pool);
+    for k in 0..df_fn_count {
+        policy.df_functions.push(g(in policy.list_pool, wrapping_add(df_fn_at, k)));
     }
-    p.dfma = r.word(in b) == 1;
-    let (dat, dn) = r.list(in b, inout p.pp);
-    for k in 0..dn {
-        p.dallowed.push(g(in p.pp, wrapping_add(dat, k)));
+    policy.df_allow_fma = reader.word(in bytes) == 1;
+    let (df_allowed_at, df_allowed_count) = reader.list(in bytes, inout policy.list_pool);
+    for k in 0..df_allowed_count {
+        policy.df_allowed_calls.push(g(in policy.list_pool, wrapping_add(df_allowed_at, k)));
     }
-    p.dred_has = r.word(in b) == 1;
-    p.dred = r.word(in b);
-    p
+    policy.df_has_reduction = reader.word(in bytes) == 1;
+    policy.df_reduction_order = reader.word(in bytes);
+    policy
 }
 
 // An external name record: appended to `pool`, its index returned.
-fn read_ext(inout r: Reader, in b: Slice[u8], inout pool: ChunkSeq[u64]) -> u64 {
+fn read_ext(inout reader: Reader, in bytes: Slice[u8], inout pool: ChunkSeq[u64]) -> u64 {
     let at = pool.len();
     for k in 0..6 {
-        pool.push(r.word(in b));
+        pool.push(reader.word(in bytes));
     }
     at
 }
 
 // One emitted function: its header row and its CLIF tables.
-fn read_fn(inout c: Cx, inout r: Reader, in b: Slice[u8]) {
-    let base = c.fns.len();
-    c.fns.resize(wrapping_add(base, FW), 0);
-    st(inout c.fns, wrapping_add(base, F_KEY), r.word(in b));
-    st(inout c.fns, wrapping_add(base, F_SOURCE), r.word(in b));
-    st(inout c.fns, wrapping_add(base, F_SYMBOL), r.word(in b));
-    st(inout c.fns, wrapping_add(base, F_ID), r.word(in b));
-    st(inout c.fns, wrapping_add(base, F_OPTIMIZED), r.word(in b));
-    let (ia, inn) = r.list(in b, inout c.pool);
-    st(inout c.fns, wrapping_add(base, F_INLINED), ia);
-    st(inout c.fns, wrapping_add(base, wrapping_add(F_INLINED, 1)), inn);
-    let ncal = r.word(in b);
-    st(inout c.fns, wrapping_add(base, F_CALLEES), c.pool.len());
-    st(inout c.fns, wrapping_add(base, wrapping_add(F_CALLEES, 1)), ncal);
-    for k in 0..ncal {
-        c.pool.push(r.word(in b));
-        c.pool.push(r.word(in b));
+fn read_fn(inout ctx: Cx, inout reader: Reader, in bytes: Slice[u8]) {
+    let base = ctx.fns.len();
+    ctx.fns.resize(wrapping_add(base, FW), 0);
+    st(inout ctx.fns, wrapping_add(base, F_KEY), reader.word(in bytes));
+    st(inout ctx.fns, wrapping_add(base, F_SOURCE), reader.word(in bytes));
+    st(inout ctx.fns, wrapping_add(base, F_SYMBOL), reader.word(in bytes));
+    st(inout ctx.fns, wrapping_add(base, F_ID), reader.word(in bytes));
+    st(inout ctx.fns, wrapping_add(base, F_OPTIMIZED), reader.word(in bytes));
+    let (inlined_at, inlined_count) = reader.list(in bytes, inout ctx.pool);
+    st(inout ctx.fns, wrapping_add(base, F_INLINED), inlined_at);
+    st(inout ctx.fns, wrapping_add(base, wrapping_add(F_INLINED, 1)), inlined_count);
+    let callee_count = reader.word(in bytes);
+    st(inout ctx.fns, wrapping_add(base, F_CALLEES), ctx.pool.len());
+    st(inout ctx.fns, wrapping_add(base, wrapping_add(F_CALLEES, 1)), callee_count);
+    for k in 0..callee_count {
+        ctx.pool.push(reader.word(in bytes));
+        ctx.pool.push(reader.word(in bytes));
     }
-    let (ba, bn) = r.list(in b, inout c.pool);
-    st(inout c.fns, wrapping_add(base, F_BOUND), ba);
-    st(inout c.fns, wrapping_add(base, wrapping_add(F_BOUND, 1)), bn);
-    let inst_err = r.word(in b);
-    st(inout c.fns, wrapping_add(base, F_INST_ERR), inst_err);
+    let (bound_at, bound_count) = reader.list(in bytes, inout ctx.pool);
+    st(inout ctx.fns, wrapping_add(base, F_BOUND), bound_at);
+    st(inout ctx.fns, wrapping_add(base, wrapping_add(F_BOUND, 1)), bound_count);
+    let inst_err = reader.word(in bytes);
+    st(inout ctx.fns, wrapping_add(base, F_INST_ERR), inst_err);
     if inst_err == 1 {
-        st(inout c.fns, wrapping_add(base, F_INST_MSG), r.word(in b));
+        st(inout ctx.fns, wrapping_add(base, F_INST_MSG), reader.word(in bytes));
     } else {
-        st(inout c.fns, wrapping_add(base, F_SRET), r.word(in b));
-        st(inout c.fns, wrapping_add(base, F_SRET_MSG), r.word(in b));
-        let np = r.word(in b);
-        st(inout c.fns, wrapping_add(base, F_PARAMS), c.pool.len());
-        st(inout c.fns, wrapping_add(base, wrapping_add(F_PARAMS, 1)), np);
-        for k in 0..np {
-            c.pool.push(r.word(in b));
-            c.pool.push(r.word(in b));
-            c.pool.push(r.word(in b));
+        st(inout ctx.fns, wrapping_add(base, F_SRET), reader.word(in bytes));
+        st(inout ctx.fns, wrapping_add(base, F_SRET_MSG), reader.word(in bytes));
+        let fn_param_count = reader.word(in bytes);
+        st(inout ctx.fns, wrapping_add(base, F_PARAMS), ctx.pool.len());
+        st(inout ctx.fns, wrapping_add(base, wrapping_add(F_PARAMS, 1)), fn_param_count);
+        for k in 0..fn_param_count {
+            ctx.pool.push(reader.word(in bytes));
+            ctx.pool.push(reader.word(in bytes));
+            ctx.pool.push(reader.word(in bytes));
         }
     }
-    st(inout c.fns, wrapping_add(base, F_VERIFY_ERR), r.word(in b));
-    st(inout c.fns, wrapping_add(base, F_VERIFY_MSG), r.word(in b));
-    let status = r.word(in b);
-    st(inout c.fns, wrapping_add(base, F_COMPILE), status);
+    st(inout ctx.fns, wrapping_add(base, F_VERIFY_ERR), reader.word(in bytes));
+    st(inout ctx.fns, wrapping_add(base, F_VERIFY_MSG), reader.word(in bytes));
+    let status = reader.word(in bytes);
+    st(inout ctx.fns, wrapping_add(base, F_COMPILE), status);
     if status == 0 {
-        st(inout c.fns, wrapping_add(base, F_CODE_LEN), r.word(in b));
-        let (ca, cn) = r.list(in b, inout c.code);
-        st(inout c.fns, wrapping_add(base, F_CODE_AT), ca);
-        st(inout c.fns, wrapping_add(base, F_FRAME_SIZE), r.word(in b));
-        let (la, ln) = r.list(in b, inout c.pool);
-        st(inout c.fns, wrapping_add(base, F_LIBCALLS), la);
-        st(inout c.fns, wrapping_add(base, wrapping_add(F_LIBCALLS, 1)), ln);
+        st(inout ctx.fns, wrapping_add(base, F_CODE_LEN), reader.word(in bytes));
+        let (code_at, code_words) = reader.list(in bytes, inout ctx.code);
+        st(inout ctx.fns, wrapping_add(base, F_CODE_AT), code_at);
+        st(inout ctx.fns, wrapping_add(base, F_FRAME_SIZE), reader.word(in bytes));
+        let (libcalls_at, libcall_count) = reader.list(in bytes, inout ctx.pool);
+        st(inout ctx.fns, wrapping_add(base, F_LIBCALLS), libcalls_at);
+        st(inout ctx.fns, wrapping_add(base, wrapping_add(F_LIBCALLS, 1)), libcall_count);
     } else if status == 1 {
-        st(inout c.fns, wrapping_add(base, F_COMPILE_MSG), r.word(in b));
+        st(inout ctx.fns, wrapping_add(base, F_COMPILE_MSG), reader.word(in bytes));
     }
     // CLIF
-    st(inout c.fns, wrapping_add(base, F_NAME), r.word(in b));
-    let nv = r.word(in b);
-    st(inout c.fns, wrapping_add(base, F_VALS), c.vals.len() / VW);
-    st(inout c.fns, wrapping_add(base, F_NVALS), nv);
-    for k in 0..nv {
-        c.vals.push(r.word(in b));
-        c.vals.push(r.word(in b));
-        c.vals.push(r.word(in b));
+    st(inout ctx.fns, wrapping_add(base, F_NAME), reader.word(in bytes));
+    let value_count = reader.word(in bytes);
+    st(inout ctx.fns, wrapping_add(base, F_VALS), ctx.vals.len() / VW);
+    st(inout ctx.fns, wrapping_add(base, F_NVALS), value_count);
+    for k in 0..value_count {
+        ctx.vals.push(reader.word(in bytes));
+        ctx.vals.push(reader.word(in bytes));
+        ctx.vals.push(reader.word(in bytes));
     }
-    let (sa, sn) = r.list(in b, inout c.pool);
-    st(inout c.fns, wrapping_add(base, F_SLOTS), sa);
-    st(inout c.fns, wrapping_add(base, wrapping_add(F_SLOTS, 1)), sn);
-    let nb = r.word(in b);
-    let block_base = c.blocks.len() / BW;
-    let inst_base = c.insts.len() / IW;
-    st(inout c.fns, wrapping_add(base, F_BLOCKS), block_base);
-    st(inout c.fns, wrapping_add(base, F_NBLOCKS), nb);
-    st(inout c.fns, wrapping_add(base, F_INSTS), inst_base);
-    for blk in 0..nb {
-        let (pa, pn) = r.list(in b, inout c.pool);
-        let ni = r.word(in b);
-        c.blocks.push(pa);
-        c.blocks.push(pn);
-        c.blocks.push(c.insts.len() / IW);
-        c.blocks.push(ni);
-        for k in 0..ni {
-            let row = c.insts.len();
-            c.insts.resize(wrapping_add(row, IW), 0);
-            st(inout c.insts, wrapping_add(row, I_ENT), r.word(in b));
-            st(inout c.insts, wrapping_add(row, I_OP), r.word(in b));
-            st(inout c.insts, wrapping_add(row, I_FLAGS), r.word(in b));
-            st(inout c.insts, wrapping_add(row, I_FMT), r.word(in b));
-            st(inout c.insts, wrapping_add(row, I_OPNAME), r.word(in b));
-            let (aa, an) = r.list(in b, inout c.pool);
-            st(inout c.insts, wrapping_add(row, I_ARGS), aa);
-            st(inout c.insts, wrapping_add(row, wrapping_add(I_ARGS, 1)), an);
-            let (ra, rn) = r.list(in b, inout c.pool);
-            st(inout c.insts, wrapping_add(row, I_RESULTS), ra);
-            st(inout c.insts, wrapping_add(row, wrapping_add(I_RESULTS, 1)), rn);
-            st(inout c.insts, wrapping_add(row, I_SLOT), r.word(in b));
-            st(inout c.insts, wrapping_add(row, I_IMM), r.word(in b));
-            st(inout c.insts, wrapping_add(row, I_COND), r.word(in b));
-            st(inout c.insts, wrapping_add(row, I_CONST_LEN), r.word(in b));
-            let (ka, kn) = r.list(in b, inout c.pool);
-            st(inout c.insts, wrapping_add(row, I_CONST), ka);
-            st(inout c.insts, wrapping_add(row, wrapping_add(I_CONST, 1)), kn);
-            let call = r.word(in b);
-            st(inout c.insts, wrapping_add(row, I_CALL), call);
-            if call != 0 {
-                let (xa, xn) = r.list(in b, inout c.pool);
-                st(inout c.insts, wrapping_add(row, I_CARGS), xa);
-                st(inout c.insts, wrapping_add(row, wrapping_add(I_CARGS, 1)), xn);
-                st(inout c.insts, wrapping_add(row, I_SIG_FLOAT), r.word(in b));
-                if call == 1 {
-                    let e = read_ext(inout r, in b, inout c.pool);
-                    st(inout c.insts, wrapping_add(row, I_EXT), e);
+    let (slots_at, slot_count) = reader.list(in bytes, inout ctx.pool);
+    st(inout ctx.fns, wrapping_add(base, F_SLOTS), slots_at);
+    st(inout ctx.fns, wrapping_add(base, wrapping_add(F_SLOTS, 1)), slot_count);
+    let block_count = reader.word(in bytes);
+    let block_base = ctx.blocks.len() / BW;
+    let inst_base = ctx.insts.len() / IW;
+    st(inout ctx.fns, wrapping_add(base, F_BLOCKS), block_base);
+    st(inout ctx.fns, wrapping_add(base, F_NBLOCKS), block_count);
+    st(inout ctx.fns, wrapping_add(base, F_INSTS), inst_base);
+    for blk in 0..block_count {
+        let (block_param_at, block_param_count) = reader.list(in bytes, inout ctx.pool);
+        let block_inst_count = reader.word(in bytes);
+        ctx.blocks.push(block_param_at);
+        ctx.blocks.push(block_param_count);
+        ctx.blocks.push(ctx.insts.len() / IW);
+        ctx.blocks.push(block_inst_count);
+        for k in 0..block_inst_count {
+            let row = ctx.insts.len();
+            ctx.insts.resize(wrapping_add(row, IW), 0);
+            st(inout ctx.insts, wrapping_add(row, I_ENT), reader.word(in bytes));
+            st(inout ctx.insts, wrapping_add(row, I_OP), reader.word(in bytes));
+            st(inout ctx.insts, wrapping_add(row, I_FLAGS), reader.word(in bytes));
+            st(inout ctx.insts, wrapping_add(row, I_FMT), reader.word(in bytes));
+            st(inout ctx.insts, wrapping_add(row, I_OPNAME), reader.word(in bytes));
+            let (args_at, arg_count) = reader.list(in bytes, inout ctx.pool);
+            st(inout ctx.insts, wrapping_add(row, I_ARGS), args_at);
+            st(inout ctx.insts, wrapping_add(row, wrapping_add(I_ARGS, 1)), arg_count);
+            let (results_at, result_count) = reader.list(in bytes, inout ctx.pool);
+            st(inout ctx.insts, wrapping_add(row, I_RESULTS), results_at);
+            st(inout ctx.insts, wrapping_add(row, wrapping_add(I_RESULTS, 1)), result_count);
+            st(inout ctx.insts, wrapping_add(row, I_SLOT), reader.word(in bytes));
+            st(inout ctx.insts, wrapping_add(row, I_IMM), reader.word(in bytes));
+            st(inout ctx.insts, wrapping_add(row, I_COND), reader.word(in bytes));
+            st(inout ctx.insts, wrapping_add(row, I_CONST_LEN), reader.word(in bytes));
+            let (const_at, const_words) = reader.list(in bytes, inout ctx.pool);
+            st(inout ctx.insts, wrapping_add(row, I_CONST), const_at);
+            st(inout ctx.insts, wrapping_add(row, wrapping_add(I_CONST, 1)), const_words);
+            let call_kind = reader.word(in bytes);
+            st(inout ctx.insts, wrapping_add(row, I_CALL), call_kind);
+            if call_kind != 0 {
+                let (call_args_at, call_arg_count) = reader.list(in bytes, inout ctx.pool);
+                st(inout ctx.insts, wrapping_add(row, I_CARGS), call_args_at);
+                st(inout ctx.insts, wrapping_add(row, wrapping_add(I_CARGS, 1)), call_arg_count);
+                st(inout ctx.insts, wrapping_add(row, I_SIG_FLOAT), reader.word(in bytes));
+                if call_kind == 1 {
+                    let ext_at = read_ext(inout reader, in bytes, inout ctx.pool);
+                    st(inout ctx.insts, wrapping_add(row, I_EXT), ext_at);
                 }
             }
-            if r.word(in b) == 1 {
-                let e = read_ext(inout r, in b, inout c.pool);
-                st(inout c.insts, wrapping_add(row, I_DATA_EXT), wrapping_add(e, 1));
+            if reader.word(in bytes) == 1 {
+                let ext_at = read_ext(inout reader, in bytes, inout ctx.pool);
+                st(inout ctx.insts, wrapping_add(row, I_DATA_EXT), wrapping_add(ext_at, 1));
             }
-            let nd = r.word(in b);
-            st(inout c.insts, wrapping_add(row, I_DESTS), c.pool.len());
-            st(inout c.insts, wrapping_add(row, wrapping_add(I_DESTS, 1)), nd);
-            for d in 0..nd {
-                c.pool.push(r.word(in b));
-                let na = r.word(in b);
-                c.pool.push(na);
-                for k2 in 0..na {
-                    c.pool.push(r.word(in b));
-                    c.pool.push(r.word(in b));
+            let dest_count = reader.word(in bytes);
+            st(inout ctx.insts, wrapping_add(row, I_DESTS), ctx.pool.len());
+            st(inout ctx.insts, wrapping_add(row, wrapping_add(I_DESTS, 1)), dest_count);
+            for d in 0..dest_count {
+                ctx.pool.push(reader.word(in bytes));
+                let block_arg_count = reader.word(in bytes);
+                ctx.pool.push(block_arg_count);
+                for k2 in 0..block_arg_count {
+                    ctx.pool.push(reader.word(in bytes));
+                    ctx.pool.push(reader.word(in bytes));
                 }
             }
-            st(inout c.insts, wrapping_add(row, I_HAS_LOC), r.word(in b));
-            st(inout c.insts, wrapping_add(row, I_LOC), r.word(in b));
-            st(inout c.insts, wrapping_add(row, I_BLOCK), blk);
+            st(inout ctx.insts, wrapping_add(row, I_HAS_LOC), reader.word(in bytes));
+            st(inout ctx.insts, wrapping_add(row, I_LOC), reader.word(in bytes));
+            st(inout ctx.insts, wrapping_add(row, I_BLOCK), blk);
         }
     }
-    let ninsts = wrapping_sub(c.insts.len() / IW, inst_base);
-    st(inout c.fns, wrapping_add(base, F_NINSTS), ninsts);
-    let num = r.word(in b);
-    st(inout c.fns, wrapping_add(base, F_NUM_INSTS), num);
+    let inst_count = wrapping_sub(ctx.insts.len() / IW, inst_base);
+    st(inout ctx.fns, wrapping_add(base, F_NINSTS), inst_count);
+    let entity_count = reader.word(in bytes);
+    st(inout ctx.fns, wrapping_add(base, F_NUM_INSTS), entity_count);
     // entity -> layout row + 1 (global row)
-    let ents = c.pool.len();
-    c.pool.resize(wrapping_add(ents, num), 0);
-    for k in 0..ninsts {
+    let entity_map = ctx.pool.len();
+    ctx.pool.resize(wrapping_add(entity_map, entity_count), 0);
+    for k in 0..inst_count {
         let row = wrapping_add(inst_base, k);
-        let ent = g(in c.insts, wrapping_add(wrapping_mul(row, IW), I_ENT));
-        if ent < num {
-            st(inout c.pool, wrapping_add(ents, ent), wrapping_add(row, 1));
+        let ent = g(in ctx.insts, wrapping_add(wrapping_mul(row, IW), I_ENT));
+        if ent < entity_count {
+            st(inout ctx.pool, wrapping_add(entity_map, ent), wrapping_add(row, 1));
         }
     }
-    st(inout c.fns, wrapping_add(base, F_ENTS), ents);
+    st(inout ctx.fns, wrapping_add(base, F_ENTS), entity_map);
 }
 
-pub fn read_input(in b: Slice[u8]) -> Cx {
-    let mut r = Reader { pos: 0 };
-    let mut nm = names_new();
-    read_strings(inout r, in b, inout nm);
-    let words = r.word(in b);
-    let mode = r.word(in b);
-    let requested = r.word(in b);
-    let file = r.word(in b);
-    let source = r.word(in b);
-    let nan = r.word(in b) == 1;
-    let mut c = Cx {
-        nm: nm,
+pub fn read_input(in bytes: Slice[u8]) -> Cx {
+    let mut reader = Reader { pos: 0 };
+    let mut names = names_new();
+    read_strings(inout reader, in bytes, inout names);
+    let word_count = reader.word(in bytes);
+    let mode = reader.word(in bytes);
+    let requested = reader.word(in bytes);
+    let file = reader.word(in bytes);
+    let source = reader.word(in bytes);
+    let canonical_nan = reader.word(in bytes) == 1;
+    let mut ctx = Cx {
+        names: names,
         mode: mode,
         requested: requested,
         file: file,
         source: source,
-        nan: nan,
-        wf: ChunkSeq::new[u64](),
-        wf_by: ChunkSeq::new[u64](),
+        canonical_nan: canonical_nan,
+        world_fns: ChunkSeq::new[u64](),
+        world_by_name: ChunkSeq::new[u64](),
         pool: ChunkSeq::new[u64](),
-        cct: ChunkSeq::new[u64](),
-        crt: ChunkSeq::new[u64](),
-        crt_reject: false,
-        cdf: ChunkSeq::new[u64](),
-        p: read_policy_placeholder(),
+        cap_const_time: ChunkSeq::new[u64](),
+        cap_realtime: ChunkSeq::new[u64](),
+        cap_reject_unbounded: false,
+        cap_det_float: ChunkSeq::new[u64](),
+        policy: read_policy_placeholder(),
         isa_err: false,
         arch: 0,
         arch_name: 0,
-        nfns: 0,
+        fn_count: 0,
         fns: ChunkSeq::new[u64](),
         vals: ChunkSeq::new[u64](),
         blocks: ChunkSeq::new[u64](),
         insts: ChunkSeq::new[u64](),
         code: ChunkSeq::new[u64](),
-        r: report_new(),
-        err: false,
-        emsg: ChunkSeq::new[u8](),
+        report: report_new(),
+        failed: false,
+        error_text: ChunkSeq::new[u8](),
         by_id: ChunkSeq::new[u64](),
         by_name: ChunkSeq::new[u64](),
         defined: ChunkSeq::new[u64](),
         by_key: ChunkSeq::new[u64](),
-        dnotes: ChunkSeq::new[u64](),
-        raw: ChunkSeq::new[u64](),
+        derived_notes: ChunkSeq::new[u64](),
+        raw_findings: ChunkSeq::new[u64](),
     };
-    let nwf = r.word(in b);
-    for i in 0..nwf {
-        let name = r.word(in b);
-        c.wf.push(name);
+    let world_fn_count = reader.word(in bytes);
+    for i in 0..world_fn_count {
+        let name = reader.word(in bytes);
+        ctx.world_fns.push(name);
         for k in 0..6 {
-            c.wf.push(r.word(in b));
+            ctx.world_fns.push(reader.word(in bytes));
         }
-        let (pa, pn) = r.list(in b, inout c.pool);
-        c.wf.push(pa);
-        c.wf.push(pn);
-        put_at(inout c.wf_by, name, wrapping_add(i, 1));
+        let (param_at, param_count) = reader.list(in bytes, inout ctx.pool);
+        ctx.world_fns.push(param_at);
+        ctx.world_fns.push(param_count);
+        put_at(inout ctx.world_by_name, name, wrapping_add(i, 1));
     }
     if mode == 1 {
-        let nct = r.word(in b);
-        for i in 0..nct {
-            c.cct.push(r.word(in b));
+        let ct_count = reader.word(in bytes);
+        for i in 0..ct_count {
+            ctx.cap_const_time.push(reader.word(in bytes));
             for k in 0..3 {
-                let (at, n) = r.list(in b, inout c.pool);
-                c.cct.push(at);
-                c.cct.push(n);
+                let (at, n) = reader.list(in bytes, inout ctx.pool);
+                ctx.cap_const_time.push(at);
+                ctx.cap_const_time.push(n);
             }
         }
-        let nrt = r.word(in b);
-        for i in 0..nrt {
-            c.crt.push(r.word(in b));
-            c.crt.push(r.word(in b));
-            c.crt.push(r.word(in b));
+        let rt_count = reader.word(in bytes);
+        for i in 0..rt_count {
+            ctx.cap_realtime.push(reader.word(in bytes));
+            ctx.cap_realtime.push(reader.word(in bytes));
+            ctx.cap_realtime.push(reader.word(in bytes));
         }
-        c.crt_reject = r.word(in b) == 1;
-        let ndf = r.word(in b);
-        for i in 0..ndf {
-            c.cdf.push(r.word(in b));
-            let (at, n) = r.list(in b, inout c.pool);
-            c.cdf.push(at);
-            c.cdf.push(n);
-            c.cdf.push(r.word(in b));
+        ctx.cap_reject_unbounded = reader.word(in bytes) == 1;
+        let df_count = reader.word(in bytes);
+        for i in 0..df_count {
+            ctx.cap_det_float.push(reader.word(in bytes));
+            let (at, n) = reader.list(in bytes, inout ctx.pool);
+            ctx.cap_det_float.push(at);
+            ctx.cap_det_float.push(n);
+            ctx.cap_det_float.push(reader.word(in bytes));
         }
     }
-    c.p = read_policy(inout r, in b);
-    c.isa_err = r.word(in b) == 1;
-    c.arch = r.word(in b);
-    c.arch_name = r.word(in b);
-    let nf = r.word(in b);
-    c.nfns = nf;
-    for i in 0..nf {
-        read_fn(inout c, inout r, in b);
+    ctx.policy = read_policy(inout reader, in bytes);
+    ctx.isa_err = reader.word(in bytes) == 1;
+    ctx.arch = reader.word(in bytes);
+    ctx.arch_name = reader.word(in bytes);
+    let fn_count = reader.word(in bytes);
+    ctx.fn_count = fn_count;
+    for i in 0..fn_count {
+        read_fn(inout ctx, inout reader, in bytes);
     }
-    c
+    ctx
 }
 
 fn read_policy_placeholder() -> Policy {
     Policy {
-        pp: ChunkSeq::new[u64](),
-        ct: ChunkSeq::new[u64](),
-        sroots: ChunkSeq::new[u64](),
-        sext: ChunkSeq::new[u64](),
-        rroots: ChunkSeq::new[u64](),
-        rallowed_has: false,
-        rallowed: ChunkSeq::new[u64](),
-        rsym: ChunkSeq::new[u64](),
-        reff: ChunkSeq::new[u64](),
-        rloop: ChunkSeq::new[u64](),
-        rreject: true,
-        rhas_max: false,
-        rmax: 0,
-        dfun_has: false,
-        dfun: ChunkSeq::new[u64](),
-        dfma: false,
-        dallowed: ChunkSeq::new[u64](),
-        dred_has: false,
-        dred: 0,
+        list_pool: ChunkSeq::new[u64](),
+        const_time: ChunkSeq::new[u64](),
+        stack_roots: ChunkSeq::new[u64](),
+        stack_ext_bounds: ChunkSeq::new[u64](),
+        rt_roots: ChunkSeq::new[u64](),
+        rt_has_allowed: false,
+        rt_allowed: ChunkSeq::new[u64](),
+        rt_symbols: ChunkSeq::new[u64](),
+        rt_effects: ChunkSeq::new[u64](),
+        rt_loop_bounds: ChunkSeq::new[u64](),
+        rt_reject_unbounded: true,
+        rt_has_max_iters: false,
+        rt_max_iters: 0,
+        df_has_functions: false,
+        df_functions: ChunkSeq::new[u64](),
+        df_allow_fma: false,
+        df_allowed_calls: ChunkSeq::new[u64](),
+        df_has_reduction: false,
+        df_reduction_order: 0,
     }
 }
 
 // ----- accessors -------------------------------------------------------------
 
-pub fn fw(in c: Cx, f: u64, field: u64) -> u64 {
-    g(in c.fns, wrapping_add(wrapping_mul(f, FW), field))
+pub fn fw(in ctx: Cx, func: u64, field: u64) -> u64 {
+    g(in ctx.fns, wrapping_add(wrapping_mul(func, FW), field))
 }
 
-pub fn iw(in c: Cx, row: u64, field: u64) -> u64 {
-    g(in c.insts, wrapping_add(wrapping_mul(row, IW), field))
+pub fn iw(in ctx: Cx, row: u64, field: u64) -> u64 {
+    g(in ctx.insts, wrapping_add(wrapping_mul(row, IW), field))
 }
 
-pub fn pw(in c: Cx, i: u64) -> u64 {
-    g(in c.pool, i)
+pub fn pw(in ctx: Cx, i: u64) -> u64 {
+    g(in ctx.pool, i)
 }
 
-pub fn wfw(in c: Cx, row: u64, field: u64) -> u64 {
-    g(in c.wf, wrapping_add(wrapping_mul(row, WFW), field))
+pub fn wfw(in ctx: Cx, row: u64, field: u64) -> u64 {
+    g(in ctx.world_fns, wrapping_add(wrapping_mul(row, WFW), field))
 }
 
-// The world function named `s` (row), or NONE.
-pub fn world_fn(in c: Cx, s: u64) -> u64 {
-    let x = g(in c.wf_by, s);
-    if x == 0 {
+// The world function named `sym` (row), or NONE.
+pub fn world_fn(in ctx: Cx, sym: u64) -> u64 {
+    let entry = g(in ctx.world_by_name, sym);
+    if entry == 0 {
         18446744073709551615
     } else {
-        wrapping_sub(x, 1)
+        wrapping_sub(entry, 1)
     }
 }
 
-// Value `v` of function `f`: the alias-resolved value, the type word and the
+// Value `v` of function `func`: the alias-resolved value, the type word and the
 // defining instruction entity + 1.
-pub fn val(in c: Cx, f: u64, v: u64, field: u64) -> u64 {
-    g(in c.vals, wrapping_add(wrapping_mul(wrapping_add(fw(in c, f, F_VALS), v), VW), field))
+pub fn val(in ctx: Cx, func: u64, v: u64, field: u64) -> u64 {
+    g(in ctx.vals, wrapping_add(wrapping_mul(wrapping_add(fw(in ctx, func, F_VALS), v), VW), field))
 }
 
-// The global layout row of entity `ent` of function `f`, or NONE.
-pub fn ent_row(in c: Cx, f: u64, ent: u64) -> u64 {
-    if ent >= fw(in c, f, F_NUM_INSTS) {
+// The global layout row of entity `ent` of function `func`, or NONE.
+pub fn ent_row(in ctx: Cx, func: u64, ent: u64) -> u64 {
+    if ent >= fw(in ctx, func, F_NUM_INSTS) {
         return 18446744073709551615;
     }
-    let x = g(in c.pool, wrapping_add(fw(in c, f, F_ENTS), ent));
-    if x == 0 {
+    let entry = g(in ctx.pool, wrapping_add(fw(in ctx, func, F_ENTS), ent));
+    if entry == 0 {
         18446744073709551615
     } else {
-        wrapping_sub(x, 1)
+        wrapping_sub(entry, 1)
     }
 }
 
 // The i-th argument of instruction row `row`.
-pub fn arg(in c: Cx, row: u64, i: u64) -> u64 {
-    g(in c.pool, wrapping_add(iw(in c, row, I_ARGS), i))
+pub fn arg(in ctx: Cx, row: u64, i: u64) -> u64 {
+    g(in ctx.pool, wrapping_add(iw(in ctx, row, I_ARGS), i))
 }
 
-pub fn nargs(in c: Cx, row: u64) -> u64 {
-    iw(in c, row, wrapping_add(I_ARGS, 1))
+pub fn nargs(in ctx: Cx, row: u64) -> u64 {
+    iw(in ctx, row, wrapping_add(I_ARGS, 1))
 }
 
-pub fn block_row(in c: Cx, f: u64, blk: u64, field: u64) -> u64 {
-    g(in c.blocks, wrapping_add(wrapping_mul(wrapping_add(fw(in c, f, F_BLOCKS), blk), BW), field))
+pub fn block_row(in ctx: Cx, func: u64, blk: u64, field: u64) -> u64 {
+    g(
+        in ctx.blocks,
+        wrapping_add(wrapping_mul(wrapping_add(fw(in ctx, func, F_BLOCKS), blk), BW), field)
+    )
 }

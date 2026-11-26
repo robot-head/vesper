@@ -1,5 +1,6 @@
 //! The GNU ld / ld.lld linker script equivalent to [`super::link::link`].
 
+use super::link::SECTION_ALIGN;
 use super::{Board, FreestandingTarget};
 
 /// Linker script for `target` on `board` with a `stack_bytes` stack. Every
@@ -10,7 +11,7 @@ pub fn linker_script(target: FreestandingTarget, board: &Board, stack_bytes: u32
         FreestandingTarget::Riscv64Imac => "riscv",
         FreestandingTarget::Aarch64 => "aarch64",
     };
-    let stack = u64::from(stack_bytes).div_ceil(16) * 16;
+    let stack = u64::from(stack_bytes).div_ceil(SECTION_ALIGN) * SECTION_ALIGN;
     format!(
         "/* {schema}: {triple} on {board} */
 OUTPUT_ARCH({arch})

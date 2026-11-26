@@ -1449,17 +1449,15 @@ fn the_call(call: u64, inout builder: Builder, inout module: Module, indirect: b
         NO_VALUE
     };
     if len_word != NO_VALUE && raw != NO_VALUE {
-        raw = value_word(
-            foreign_mapping(
-                inout builder,
-                inout module,
-                val(raw),
-                val(len_word),
-                len_i64,
-                map_stride,
-                reg_id
-            )
-        );
+        raw = value_word(foreign_mapping(
+            inout builder,
+            inout module,
+            val(raw),
+            val(len_word),
+            len_i64,
+            map_stride,
+            reg_id
+        ));
     }
     if release_count > 0 {
         let free = libc(inout builder, inout module, FREE, 1, false);

@@ -58,12 +58,10 @@ pub fn fork_decode_vmgenid_wire(in bytes: Slice[u8]) -> Option[VmGenIdWire] {
     if bytes.len() != FORK_VMGENID_WIRE_BYTES {
         return Option::None;
     }
-    Option::Some(
-        VmGenIdWire {
-            vm_gen_lo: fork_read_u64_le(in bytes, 0),
-            vm_gen_hi: fork_read_u64_le(in bytes, 8),
-            host_tsc_khz: fork_read_u32_le(in bytes, 16),
-            virtio_mmio_count: fork_read_u32_le(in bytes, 20),
-        }
-    )
+    Option::Some(VmGenIdWire {
+        vm_gen_lo: fork_read_u64_le(in bytes, 0),
+        vm_gen_hi: fork_read_u64_le(in bytes, 8),
+        host_tsc_khz: fork_read_u32_le(in bytes, 16),
+        virtio_mmio_count: fork_read_u32_le(in bytes, 20),
+    })
 }

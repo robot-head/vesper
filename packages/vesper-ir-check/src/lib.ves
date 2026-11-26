@@ -611,19 +611,17 @@ pub fn read_program(
                 let op = wrapping_u8(reader.word(in bytes));
                 let operand_start = n32(program.operands.len());
                 read_op(inout reader, in bytes, in name_map, inout program, op);
-                program.insts.push(
-                    Inst {
-                        dest: dest,
-                        ty: ty,
-                        s0: s0,
-                        s1: s1,
-                        tok_in: tok_in,
-                        tok_out: tok_out,
-                        flags: flags,
-                        op: op,
-                        operand_start: operand_start
-                    }
-                );
+                program.insts.push(Inst {
+                    dest: dest,
+                    ty: ty,
+                    s0: s0,
+                    s1: s1,
+                    tok_in: tok_in,
+                    tok_out: tok_out,
+                    flags: flags,
+                    op: op,
+                    operand_start: operand_start
+                });
             }
             let term = wrapping_u8(reader.word(in bytes));
             let term_start = n32(program.operands.len());
@@ -648,35 +646,31 @@ pub fn read_program(
                 program.operands.push(reader.word(in bytes));
                 program.operands.push(reader.word(in bytes));
             }
-            program.blocks.push(
-                Blk {
-                    entry: entry,
-                    in_start: in_start,
-                    in_count: n32(in_count),
-                    out_tok: out_tok,
-                    param_start: block_param_start,
-                    param_count: n32(block_param_count),
-                    inst_start: inst_start,
-                    inst_count: n32(inst_count),
-                    term: term,
-                    term_start: term_start
-                }
-            );
+            program.blocks.push(Blk {
+                entry: entry,
+                in_start: in_start,
+                in_count: n32(in_count),
+                out_tok: out_tok,
+                param_start: block_param_start,
+                param_count: n32(block_param_count),
+                inst_start: inst_start,
+                inst_count: n32(inst_count),
+                term: term,
+                term_start: term_start
+            });
         }
-        program.fns.push(
-            FnRow {
-                param_start: param_start,
-                param_count: n32(param_count),
-                bound_start: bound_start,
-                bound_count: n32(bound_count),
-                capture_start: capture_start,
-                capture_count: n32(capture_count),
-                value_ty_start: value_ty_start,
-                value_ty_count: n32(value_ty_count),
-                block_start: block_start,
-                block_count: n32(block_count)
-            }
-        );
+        program.fns.push(FnRow {
+            param_start: param_start,
+            param_count: n32(param_count),
+            bound_start: bound_start,
+            bound_count: n32(bound_count),
+            capture_start: capture_start,
+            capture_count: n32(capture_count),
+            value_ty_start: value_ty_start,
+            value_ty_count: n32(value_ty_count),
+            block_start: block_start,
+            block_count: n32(block_count)
+        });
     }
     program
 }
@@ -1562,14 +1556,12 @@ impl Flow {
             && !(first_span.s0 == s0 && first_span.s1 == s1) {
             let label_start = self.diags.text.len();
             push_label(inout self.diags, first_span.label, first_span.id == 1);
-            self.diags.rel.push(
-                RelRow {
-                    a: label_start,
-                    b: self.diags.text.len(),
-                    start: first_span.s0,
-                    stop: first_span.s1
-                }
-            );
+            self.diags.rel.push(RelRow {
+                a: label_start,
+                b: self.diags.text.len(),
+                start: first_span.s0,
+                stop: first_span.s1
+            });
             label_count = 1;
         }
         if second_span.kind == 3
@@ -1582,14 +1574,12 @@ impl Flow {
             ) {
             let label_start = self.diags.text.len();
             push_label(inout self.diags, second_span.label, second_span.id == 1);
-            self.diags.rel.push(
-                RelRow {
-                    a: label_start,
-                    b: self.diags.text.len(),
-                    start: second_span.s0,
-                    stop: second_span.s1
-                }
-            );
+            self.diags.rel.push(RelRow {
+                a: label_start,
+                b: self.diags.text.len(),
+                start: second_span.s0,
+                stop: second_span.s1
+            });
             label_count = inc32(label_count);
         }
         if label_count > 0 {
@@ -2613,22 +2603,21 @@ impl Flow {
         let loan_start = n32(state.loans.len());
         if loan_pass != 255 {
             for j in 0..loan_count {
-                state.loans.push(
-                    place(n32(program.op(operand_start)), n32(program.op(add(loan_from, j))))
-                );
+                state.loans.push(place(
+                    n32(program.op(operand_start)),
+                    n32(program.op(add(loan_from, j)))
+                ));
             }
         }
-        state.put_val(
-            ValS {
-                id: inst.dest,
-                ty: ty,
-                owned: owned,
-                consumed: false,
-                loan_pass: loan_pass,
-                loan_start: loan_start,
-                loan_count: n32(loan_count)
-            }
-        );
+        state.put_val(ValS {
+            id: inst.dest,
+            ty: ty,
+            owned: owned,
+            consumed: false,
+            loan_pass: loan_pass,
+            loan_start: loan_start,
+            loan_count: n32(loan_count)
+        });
     }
 
     // `out = merge(out, incoming)`: `out` holds a clone of the old state.
@@ -2746,17 +2735,15 @@ impl Flow {
                         out.loans.push(incoming.loan(add(w(val.loan_start), j)));
                     }
                 }
-                out.put_val(
-                    ValS {
-                        id: val.id,
-                        ty: val.ty,
-                        owned: val.owned,
-                        consumed: val.consumed,
-                        loan_pass: val.loan_pass,
-                        loan_start: loan_start,
-                        loan_count: val.loan_count
-                    }
-                );
+                out.put_val(ValS {
+                    id: val.id,
+                    ty: val.ty,
+                    owned: val.owned,
+                    consumed: val.consumed,
+                    loan_pass: val.loan_pass,
+                    loan_start: loan_start,
+                    loan_count: val.loan_count
+                });
             }
         }
     }
@@ -2948,14 +2935,12 @@ impl Flow {
                 Option::Some(row) => row,
                 Option::None => ParamRow { name: 0, pass: 0, ty: 0, s0: 0, s1: 0 },
             };
-            state.put_slot(
-                SlotS {
-                    rank: program.rank_of(param_row.name),
-                    name: param_row.name,
-                    ty: param_row.ty,
-                    pass: param_row.pass
-                }
-            );
+            state.put_slot(SlotS {
+                rank: program.rank_of(param_row.name),
+                name: param_row.name,
+                ty: param_row.ty,
+                pass: param_row.pass
+            });
         }
         pool.store(0, in state);
         let mut queue: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -3030,17 +3015,15 @@ impl Flow {
                         let arg = n32(program.op(add(add(term_start, 2), j)));
                         let param = n32(program.op(add(w(target_block.param_start), j)));
                         self.consume(inout edge, inout types, in names, in world, arg, s0, s1);
-                        edge.put_val(
-                            ValS {
-                                id: param,
-                                ty: param_type(in program, func, param),
-                                owned: true,
-                                consumed: false,
-                                loan_pass: 255,
-                                loan_start: 0,
-                                loan_count: 0
-                            }
-                        );
+                        edge.put_val(ValS {
+                            id: param,
+                            ty: param_type(in program, func, param),
+                            owned: true,
+                            consumed: false,
+                            loan_pass: 255,
+                            loan_start: 0,
+                            loan_count: 0
+                        });
                     }
                 }
                 let had = pool.has(w(target));

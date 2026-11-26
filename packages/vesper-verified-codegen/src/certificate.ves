@@ -45,17 +45,11 @@ const TWO_63: u64 = 9223372036854775808;
 // Small sequence helpers.
 
 fn at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn at_bool(in s: ChunkSeq[bool], i: u64) -> bool {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => false,
-    }
+    s.try_get(i).unwrap_or(false)
 }
 
 fn copy_of(in s: ChunkSeq[u64]) -> ChunkSeq[u64] {
@@ -594,10 +588,7 @@ fn labels_of(in p: Prog) -> FlatTable[u64, u64] {
 }
 
 fn label_row(in t: FlatTable[u64, u64], f: u64, l: u64) -> u64 {
-    match t.get((f << 32) | l) {
-        Option::Some(pc) => pc,
-        Option::None => MISSING,
-    }
+    t.get((f << 32) | l).unwrap_or(MISSING)
 }
 
 // `caught_targets`: the handler labels each row (by global row) can jump to
@@ -2261,10 +2252,7 @@ fn widen(r: Lir) -> Lir {
 // The harness: programs and certificates as little-endian words.
 
 fn word_at(in b: Slice[u8], i: u64) -> u64 {
-    match b.try_read_u64_le(wrapping_mul(i, 8)) {
-        Option::Some(w) => w,
-        Option::None => 0,
-    }
+    b.try_read_u64_le(wrapping_mul(i, 8)).unwrap_or(0)
 }
 
 fn read_row(in b: Slice[u8], at: u64) -> Lir {
