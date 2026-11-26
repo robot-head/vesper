@@ -31,7 +31,11 @@ under the 1.5x bar, and part 2 adds hover and the documentation links:
 - the Lens views of semantic-error and repaired text and their queries
   (`lsp_lens_view`, `ownership.ves`): `View::from_text`, `outstanding` at
   the cut, `poisoned`, `binding`, `complete_member`, `signature` and
-  `rank_methods_within`, part 6 (#1828).
+  `rank_methods_within`, part 6 (#1828);
+- the Lens request layer of the server (`lsp_lens_requests`,
+  `ownership.ves`): poison notices and Lens metadata, completion items,
+  obligation hover text and inlay hints of
+  `src/lsp/session/lens_requests.rs`, part 7 (#1828).
 
 The source is parsed with `@vesper/front` and `@vesper/ast`, positions use
 `@vesper/span`, and the JSON is written byte for byte as serde_json writes
