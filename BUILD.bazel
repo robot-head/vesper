@@ -1590,13 +1590,6 @@ vesper_package(
     deps = ["//crates/vesper-serde:port_package"],
 )
 
-vesper_package(
-    name = "std_collections_package",
-    srcs = glob(["packages/vesper-std/collections/src/**/*.ves"]),
-    manifest = "packages/vesper-std/collections/Loom.toml",
-    visibility = ["//visibility:public"],
-)
-
 # The verified code generator (#1886, part 4d-2), for the hybrid's
 # `verified_codegen` swap.
 vesper_package(
