@@ -1818,6 +1818,28 @@ fn proof_audit_audits_in_vesper() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `vesper verify SOURCE --format` past the command layer runs in
+/// `modules/verify` (#1341).
+#[test]
+fn verify_format_runs_in_vesper() {
+    let hybrid = hybrid();
+    let dir = scratch("vesper-cli-verify-format");
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = Command::new(&hybrid)
+        .current_dir(&dir)
+        .env("VESPER_HYBRID_STATS", "1")
+        .args(["verify", "missing.ves", "--format", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("vesper-hybrid: verify answered 1 calls from Vesper"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn verify_matches_the_default_compiler() {
     let hybrid = hybrid();
@@ -1851,6 +1873,16 @@ fn verify_matches_the_default_compiler() {
         &["verify", "--format", "--lean", ""],
         &["verify", "--format", "a.ves", "b.ves"],
         &["verify", "--format", "--", "-dash.ves"],
+        // Past the command layer, in modules/verify (#1341): a missing
+        // source and a directory, in text and JSON, and a Lean that is not
+        // there.
+        &["verify", "missing.ves", "--format"],
+        &["verify", "missing.ves", "--format", "--json"],
+        &["verify", ".", "--format", "--json"],
+        &["verify", "--format", "--", "."],
+        &["verify", ".", "--format", "--lean", "no-such-lean"],
+        // `--format` as `--proofs`'s value is an `--extract` run.
+        &["verify", "--extract", "--proofs", "--format", "missing.ves"],
     ];
     let mut diffs = vec![];
     for argv in cases {

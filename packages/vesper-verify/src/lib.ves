@@ -7,3 +7,4 @@
 pub use self::discover::{discover, Found};
 pub use self::contracts::{bindings, Bound};
 pub use self::format::{emit, message, Emitted};
+pub use self::run::{run_format, Ran};
