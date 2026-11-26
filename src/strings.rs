@@ -174,7 +174,7 @@ pub fn is_comparison(op: &str) -> bool {
 /// The string prelude: every UTF-8 operation, in Vesper. `String` methods
 /// that only read delegate to the `Str` method of the same name, through
 /// the whole-view coercion of their receiver.
-pub const PRELUDE: &str = include_str!("preludes/strings.ves");
+pub const PRELUDE: &str = include_str!("../packages/vesper-preludes/preludes/strings.ves");
 
 /// The method names that bring in the prelude when a module mentions
 /// them. Its static functions bring it in only by path

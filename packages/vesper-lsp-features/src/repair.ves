@@ -217,7 +217,8 @@ fn open_at(in tk: Tk, from: u64, damage: u64) -> Opens {
                 if g8(in st.kind, parent) == k_l_brace()
                     && j < n
                     && g64(in tk.s, j) < damage
-                    && starts_element(g8(in tk.kind, j)) {
+                    && starts_element(g8(in tk.kind, j))
+                {
                     set64(inout st.cut, parent, end);
                 }
             }

@@ -403,7 +403,8 @@ pub fn lower_kind(i: u8, in f: Slice[u8]) -> u8 {
         }
         if eq(in f, in "start-span".as_bytes())
             || eq(in f, in "start-child".as_bytes())
-            || eq(in f, in "emit-err".as_bytes()) {
+            || eq(in f, in "emit-err".as_bytes())
+        {
             return L_MEMORY_UTF8;
         }
         if eq(in f, in "emit-ok".as_bytes()) || eq(in f, in "emit-attr".as_bytes()) {
@@ -412,7 +413,8 @@ pub fn lower_kind(i: u8, in f: Slice[u8]) -> u8 {
     } else if i == IF_ENV {
         if eq(in f, in "get-arguments".as_bytes())
             || eq(in f, in "get-environment".as_bytes())
-            || eq(in f, in "initial-cwd".as_bytes()) {
+            || eq(in f, in "initial-cwd".as_bytes())
+        {
             return L_MEMORY_REALLOC_UTF8;
         }
     } else if i == IF_FS_PREOPENS {
@@ -431,17 +433,20 @@ pub fn lower_kind(i: u8, in f: Slice[u8]) -> u8 {
             || eq(in f, in "[method]descriptor.create-directory-at".as_bytes())
             || eq(in f, in "[method]descriptor.remove-directory-at".as_bytes())
             || eq(in f, in "[method]descriptor.unlink-file-at".as_bytes())
-            || eq(in f, in "[method]descriptor.rename-at".as_bytes()) {
+            || eq(in f, in "[method]descriptor.rename-at".as_bytes())
+        {
             return L_MEMORY_UTF8;
         }
         if eq(in f, in "[method]descriptor.write".as_bytes())
             || eq(in f, in "[method]descriptor.stat".as_bytes())
             || eq(in f, in "[method]descriptor.sync".as_bytes())
-            || eq(in f, in "[method]descriptor.read-directory".as_bytes()) {
+            || eq(in f, in "[method]descriptor.read-directory".as_bytes())
+        {
             return L_MEMORY;
         }
         if eq(in f, in "[resource-drop]descriptor".as_bytes())
-            || eq(in f, in "[resource-drop]directory-entry-stream".as_bytes()) {
+            || eq(in f, in "[resource-drop]directory-entry-stream".as_bytes())
+        {
             return L_DROP;
         }
     }

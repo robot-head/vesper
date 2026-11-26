@@ -91,10 +91,11 @@ pub const OPERATIONS: [&str; 6] = [
 ];
 
 /// The built-in Beacon declarations.
-pub const PRELUDE: &str = include_str!("preludes/trace.ves");
+pub const PRELUDE: &str = include_str!("../packages/vesper-preludes/preludes/trace.ves");
 
 /// The `Telemetrable` trait, added only when the module names it.
-pub const TELEMETRABLE_PRELUDE: &str = include_str!("preludes/telemetrable.ves");
+pub const TELEMETRABLE_PRELUDE: &str =
+    include_str!("../packages/vesper-preludes/preludes/telemetrable.ves");
 
 /// A module together with whether it runs under the built-in Beacon prelude.
 pub struct BeaconModule<'a> {

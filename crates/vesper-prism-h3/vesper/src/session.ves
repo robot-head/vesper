@@ -701,7 +701,8 @@ pub fn send_datagram_prepare(
     let mut cap = ChunkSeq::new[u8]();
     let _ok1 = put_record(inout cap, datagram_type(), in payload);
     if wrapping_add(wrapping_add(out_queued(in out, in pool, session), cap.len()), 9)
-        > cfg_max_stream_buffer {
+        > cfg_max_stream_buffer
+    {
         return Result::Err(SessionError::TooLarge);
     }
     scratch.clear();
@@ -799,7 +800,8 @@ fn retire_wt(inout st: SessionTable, in pool: BytePool, idx: u64) {
     let hq = word(in st.w_held_q.as_slice(), idx);
     if (flags & WT_FLAG_RECV_DONE) != 0
         && (flags & WT_FLAG_SEND_DONE) != 0
-        && q_len(in pool, hq) == 0 {
+        && q_len(in pool, hq) == 0
+    {
         remove_word(inout st.w_id, idx);
         remove_word(inout st.w_session, idx);
         remove_word(inout st.w_held_q, idx);

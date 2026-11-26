@@ -17,7 +17,8 @@ const MAX_LICENSE_TOKENS: u64 = 1024;
 pub fn check_limits(inout s: A) {
     if s.m_jdepth > MAX_JSON_DEPTH
         || s.m_ldepth > MAX_LICENSE_DEPTH
-        || s.m_ltokens > MAX_LICENSE_TOKENS {
+        || s.m_ltokens > MAX_LICENSE_TOKENS
+    {
         fail(inout s, ErrorKind::Limit, "unsafe parser depth/token limit (maximum 64/64/1024)");
     }
 }

@@ -698,11 +698,13 @@ fn classify(
             )
         } else if k == K_AT
             && after == K_LOWER
-            && next_is(in src, in t, in sig, p, in "proof".as_bytes()) {
+            && next_is(in src, in t, in sig, p, in "proof".as_bytes())
+        {
             C_DOC_PROOF_ANCHOR
         } else if k == K_AT
             && after == K_LOWER
-            && next_is(in src, in t, in sig, p, in "fip".as_bytes()) {
+            && next_is(in src, in t, in sig, p, in "fip".as_bytes())
+        {
             C_KEYWORD_CONTROL
         } else if k == K_ARROW
             || k == K_FAT_ARROW
@@ -712,7 +714,8 @@ fn classify(
             || k == K_LE
             || k == K_GE
             || k == K_AND
-            || k == K_OR {
+            || k == K_OR
+        {
             flags = flags | F_LIGATURE;
             C_PUNCT_LIGATURE
         } else {
@@ -881,7 +884,8 @@ fn classify_lower(
     } else if before == K_AT && w == W_FIP
         || is_tiled_decl
         || is_field_temp
-        || is_loop_keyword(w, before, after) {
+        || is_loop_keyword(w, before, after)
+    {
         C_KEYWORD_CONTROL
     } else if before == K_FN || after == K_L_PAREN {
         C_FUNCTION_IDENT
@@ -901,14 +905,16 @@ fn classify_lower(
         )
         || (w == W_AS || w == W_FOR)
             && (before == K_UPPER || before == K_R_BRACKET)
-            && after == K_UPPER {
+            && after == K_UPPER
+    {
         C_KEYWORD_CONTROL
     } else if in_type
         || token_mode
             && is_primitive(w)
             && (
                 before == K_COLON || before == K_ARROW || before == K_L_BRACKET || before == K_COMMA
-            ) {
+            )
+    {
         C_TYPE_NOMINAL
     } else {
         C_PASS_MODE_IN

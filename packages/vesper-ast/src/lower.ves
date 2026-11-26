@@ -831,7 +831,8 @@ fn at_path_root(in l: L) -> bool {
     loop {
         let kn = nth(in l, n);
         if !(kn == k_lower() || kn == k_minus() || kn == k_slash() || kn == k_int())
-            || tstart(in l, idx(in l, n)) != end {
+            || tstart(in l, idx(in l, n)) != end
+        {
             break;
         }
         end = tend(in l, idx(in l, n));
@@ -847,7 +848,8 @@ fn package_name_buf(inout l: L) {
     loop {
         let k = kind(in l);
         if !(k == k_lower() || k == k_minus() || k == k_slash() || k == k_int())
-            || cur_start(in l) != l.last {
+            || cur_start(in l) != l.last
+        {
             return;
         }
         let j = bump(inout l);
@@ -874,7 +876,8 @@ fn qualified_path(inout l: L) -> (u32, bool) {
     loop {
         let n1 = nth(in l, 1);
         if !at(in l, k_colon_colon())
-            || !(n1 == k_lower() || n1 == k_upper() || contextual_name(n1)) {
+            || !(n1 == k_lower() || n1 == k_upper() || contextual_name(n1))
+        {
             break;
         }
         bump(inout l);
@@ -1000,7 +1003,8 @@ fn fields(inout l: L) -> u32 {
                             && nth(in l, 2) == k_lower()
                             && nth(in l, 3) == k_colon()
                     )
-            ) {
+            )
+        {
             bump(inout l);
         }
         let mut temperature: u8 = 0;
@@ -2244,7 +2248,8 @@ fn type_args(inout l: L) -> u32 {
         if at(in l, k_lower())
             && !is_primitive_word(tword(in l, cur))
             && !at_path_root(in l)
-            && !(tword(in l, cur) == w_dyn() && nth(in l, 1) == k_upper()) {
+            && !(tword(in l, cur) == w_dyn() && nth(in l, 1) == k_upper())
+        {
             let li = bump(inout l);
             let label = tok_name(inout l, li);
             if eat(inout l, k_colon()) {
@@ -2742,7 +2747,8 @@ fn block(inout l: L) -> u32 {
                 if is_block_like(en.kind)
                     && closes
                     && !at(in l, k_r_brace())
-                    && !at(in l, k_eof()) {
+                    && !at(in l, k_eof())
+                {
                     push_stmt(inout l, e);
                 } else {
                     tail = e;
@@ -2790,7 +2796,8 @@ fn expr(inout l: L) -> u32 {
     } else if k == k_lower()
         && at_word(in l, 0, w_region())
         && nth(in l, 1) == k_lower()
-        && (nth(in l, 2) == k_l_brace() || nth(in l, 2) == k_l_paren()) {
+        && (nth(in l, 2) == k_l_brace() || nth(in l, 2) == k_l_paren())
+    {
         region(inout l)
     } else if k == k_match() {
         match_expr(inout l)
@@ -3153,7 +3160,8 @@ fn precedence(k: u8) -> (u8, bool) {
         || k == k_minus_eq()
         || k == k_star_eq()
         || k == k_slash_eq()
-        || k == k_percent_eq() {
+        || k == k_percent_eq()
+    {
         (1, true)
     } else if k == k_or() {
         (2, false)
@@ -3343,7 +3351,8 @@ fn primary(inout l: L) -> u32 {
     if l.p.surface
         && k == k_lower()
         && nth(in l, 1) == k_bang()
-        && !at_word(in l, 0, w_underscore()) {
+        && !at_word(in l, 0, w_underscore())
+    {
         return surface_macro_call(inout l, start);
     }
     if l.p.surface && node_ahead(in l, 223) && !at_word(in l, 0, w_underscore()) {
@@ -4256,7 +4265,8 @@ fn sugar_heads(inout l: L) {
             || k == k_r_brace()
             || k == k_r_paren()
             || k == k_r_bracket()
-            || k == k_comma() {
+            || k == k_comma()
+        {
             return;
         }
         let before = l.pos;
@@ -4271,7 +4281,8 @@ fn sugar_heads(inout l: L) {
         } else if k == k_in()
             || k == k_inout()
             || k == k_sink()
-            || (k == k_lower() && at_text(in l, 0, in "out")) {
+            || (k == k_lower() && at_text(in l, 0, in "out"))
+        {
             bump(inout l);
             let old = l.no_struct;
             l.no_struct = true;

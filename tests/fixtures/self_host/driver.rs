@@ -449,6 +449,9 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     // (#880) and `pub const`.
                     || path.ends_with("packages/vesper-proof-audit")
                     || path.ends_with("packages/vesper-verify")
+                    // The preludes package exports with `pub fn`; its
+                    // preludes/ files stay in the corpus.
+                    || path.ends_with("packages/vesper-preludes/src")
                 {
                     continue;
                 }

@@ -285,7 +285,8 @@ fn append_record(
         let gap = if avail < len { avail } else { 0 };
         let need = wrapping_add(gap, len);
         if r.slot_len < r.config.max_records
-            && wrapping_sub(cap, wrapping_sub(r.tail, r.head)) >= need {
+            && wrapping_sub(cap, wrapping_sub(r.tail, r.head)) >= need
+        {
             pos = wrapping_add(r.tail, gap);
             break;
         }

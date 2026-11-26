@@ -693,7 +693,8 @@ impl Func {
             || op == OP_SCALAR_TO_VECTOR
             || op == OP_FCVT_FROM_SINT
             || op == OP_BITCAST
-            || op == OP_LOAD {
+            || op == OP_LOAD
+        {
             self.result_of(new, 0, ty);
             rn = 1;
         } else if op == OP_SWIDEN_LOW || op == OP_SWIDEN_HIGH {

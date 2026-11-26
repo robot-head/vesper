@@ -100,7 +100,8 @@ fn preflight(in lim: ChunkSeq[u64], n: u64, work: u64) -> u64 {
         || l_sites(in lim) > 4096
         || l_decls(in lim) > 4096
         || work > 134217728
-        || l_ident(in lim) > 1024 {
+        || l_ident(in lim) > 1024
+    {
         return 1;
     }
     if n > l_source(in lim) {
@@ -212,9 +213,8 @@ fn prefix(in t: Tokens, at: u64) -> (u64, u64) {
         }
         let k = kind_at(in t, i);
         if k != k_fn()
-            && (
-                saw_fip || (!is_type(k) && !word(in t, i, w_trait()) && !word(in t, i, w_model()))
-            ) {
+            && (saw_fip || (!is_type(k) && !word(in t, i, w_trait()) && !word(in t, i, w_model())))
+        {
             return (none(), none());
         }
     }
@@ -244,7 +244,8 @@ fn prefix(in t: Tokens, at: u64) -> (u64, u64) {
     };
     let nk = kind_at(in t, n);
     let name = if name_kind != TokenSentinel::Missing
-        && (nk == name_kind || (kind == DECL_FUNCTION && nk == k_self_kw())) {
+        && (nk == name_kind || (kind == DECL_FUNCTION && nk == k_self_kw()))
+    {
         n
     } else {
         none()
@@ -316,7 +317,8 @@ fn macro_start(in b: Slice[u8], in t: Tokens, at: u64) -> u64 {
             spelled(in b, in t, at, in "quote".as_bytes())
                 || spelled(in b, in t, at, in "quasiquote".as_bytes())
                 || spelled(in b, in t, at, in "syntax_quote".as_bytes())
-        ) {
+        )
+    {
         return n;
     }
     none()
@@ -662,7 +664,8 @@ pub fn recover(in b: Slice[u8], in lim: ChunkSeq[u64]) -> Recovered {
         }
         let k = u8_at(in t.kind, i);
         if (k == k_upper() || k == k_lower())
-            && wrapping_sub(token_end(in t, i), w32(in t.start, i)) > l_ident(in lim) {
+            && wrapping_sub(token_end(in t, i), w32(in t.start, i)) > l_ident(in lim)
+        {
             return failed(18);
         }
         if k == k_error() && opaque == n {
@@ -796,7 +799,8 @@ pub fn recover(in b: Slice[u8], in lim: ChunkSeq[u64]) -> Recovered {
                 if has_header
                     && u64_at(in p.hdr, 2) == 1
                     && has_body
-                    && ext.body_start == u64_at(in p.hdr, 1) {
+                    && ext.body_start == u64_at(in p.hdr, 1)
+                {
                     header_start = u64_at(in p.hdr, 0);
                     header_end = u64_at(in p.hdr, 1);
                 } else {
@@ -1202,7 +1206,8 @@ fn assemble(
                 }
                 if w32(in tree.node_start, k) == green_start
                     && w32(in tree.node_end, k) == green_end
-                    && (context == none() || u8_at(in tree.node_kind, k) == NodeKind::Block) {
+                    && (context == none() || u8_at(in tree.node_kind, k) == NodeKind::Block)
+                {
                     found = k;
                     break;
                 }

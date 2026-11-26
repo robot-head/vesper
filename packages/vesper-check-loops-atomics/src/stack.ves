@@ -190,7 +190,8 @@ fn sift(inout seq: ChunkSeq[u64], root: u64, n: u64) {
         }
         let mut larger = child;
         if wrapping_add(child, 1) < n
-            && u64_at(in seq, wrapping_add(child, 1)) > u64_at(in seq, child) {
+            && u64_at(in seq, wrapping_add(child, 1)) > u64_at(in seq, child)
+        {
             larger = wrapping_add(child, 1);
         }
         if u64_at(in seq, larger) <= u64_at(in seq, at) {
@@ -584,7 +585,8 @@ pub fn report(inout output: ChunkSeq[u8], in names: Names, in graph: Graph) -> R
             let callee = wrapping_u32(edge & 4294967295);
             let adj_len = adj.len();
             if adj_len == u64_at(in adj_start, v)
-                || u32_at(in adj, wrapping_sub(adj_len, 1)) != callee {
+                || u32_at(in adj, wrapping_sub(adj_len, 1)) != callee
+            {
                 adj.push(callee);
             }
             edge_at = wrapping_add(edge_at, 1);

@@ -694,7 +694,8 @@ fn instruction(
             && fw != 0
             && u64_at(in m.gn, wrapping_sub(fw, 1)) == 0
             && m.program_fn(root) != 0
-            && !is_bound(in bound, root) {
+            && !is_bound(in bound, root)
+        {
             enqueue(inout m, root, in vars_new());
         }
         return row;

@@ -698,66 +698,65 @@ fn decls_match_rust() {
     assert_eq!(differ.len(), 0);
 }
 
-// ------------------------------------------------------------ prelude copies
+// ------------------------------------------------------------ prelude sources
 
-/// The string literal that `pub fn <name>() -> Str` returns in `text`,
-/// unescaped.
-fn returned_literal(text: &str, name: &str) -> String {
-    let head = format!("pub fn {name}() -> Str {{");
-    let start = text.find(&head).unwrap_or_else(|| panic!("no `{head}`"));
-    let rest = &text[start + head.len()..];
-    let open = rest.find('"').expect("no string literal");
-    let mut out = String::new();
-    let mut chars = rest[open + 1..].chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '"' => return out,
-            '\\' => match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some(c) => out.push(c),
-                None => break,
-            },
-            c => out.push(c),
-        }
-    }
-    panic!("unterminated string literal in `{name}`")
-}
-
-/// The package keeps its own copy of each prelude it lowers (it cannot
-/// embed a file); every copy must be the checker's `src/preludes/*.ves`
-/// file byte for byte, so its spans land where the checker's do.
+/// The package lowers the checker's preludes from @vesper/preludes, whose
+/// functions embed the files the Rust checker embeds: the loader must give
+/// each one's text byte for byte, so the spans land where the checker's do.
 #[test]
-fn prelude_copies_match_rust() {
-    let dir = repo().join(PACKAGE).join("src");
-    let mut texts = vec![];
-    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
-        if entry.path().extension().is_some_and(|e| e == "ves") {
-            texts.push((entry.path(), std::fs::read_to_string(entry.path()).unwrap()));
+fn preludes_package_embeds_the_checkers_preludes() {
+    let dir = repo().join("packages/vesper-preludes");
+    let text = std::fs::read_to_string(dir.join("src/lib.ves")).unwrap();
+    let expanded = vesper::packages::expand_includes(&text, &dir).unwrap();
+    let parsed = vesper::parser::parse(&expanded);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let returned = |name: &str| -> String {
+        let f = parsed
+            .module
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Function(f) if f.name == name => Some(f),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no `{name}` in @vesper/preludes"));
+        match &f.body.as_ref().unwrap().kind {
+            ExprKind::Block {
+                statements,
+                tail: Some(tail),
+            } if statements.is_empty() => match &tail.kind {
+                ExprKind::Literal(Literal::String(s)) => s.clone(),
+                other => panic!("`{name}` returns {other:?}"),
+            },
+            other => panic!("`{name}` is {other:?}"),
         }
-    }
-    let copies = [
-        ("strings_source", vesper::strings::PRELUDE),
-        ("option_source", vesper::option_methods::PRELUDE),
-        ("atomics_source", vesper::atomics::PRELUDE),
-        ("workers_source", vesper::atomics::WORKERS_PRELUDE),
-        ("region_source", vesper::regions::PRELUDE),
+    };
+    let rust = [
+        ("atomics", vesper::atomics::PRELUDE),
+        ("option", vesper::option_methods::PRELUDE),
+        ("regions", vesper::regions::PRELUDE),
+        ("strings", vesper::strings::PRELUDE),
+        ("telemetrable", vesper::trace_effects::TELEMETRABLE_PRELUDE),
+        ("trace", vesper::trace_effects::PRELUDE),
+        ("workers", vesper::atomics::WORKERS_PRELUDE),
     ];
-    let mut checked = 0;
-    for (name, rust) in copies {
-        let head = format!("pub fn {name}() -> Str {{");
-        for (path, text) in texts.iter().filter(|(_, t)| t.contains(&head)) {
-            assert!(
-                returned_literal(text, name) == rust,
-                "`{name}` in {} is not the checker's prelude; copy src/preludes again",
-                path.display()
-            );
-            checked += 1;
+    let mut files = 0;
+    for entry in std::fs::read_dir(dir.join("preludes")).unwrap().flatten() {
+        let path = entry.path();
+        let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+        let file = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            returned(&format!("{stem}_source")),
+            file,
+            "{}",
+            path.display()
+        );
+        if let Some((_, rust)) = rust.iter().find(|(n, _)| *n == stem) {
+            assert_eq!(*rust, file, "the checker does not embed {}", path.display());
         }
+        files += 1;
     }
-    assert!(
-        checked >= 2,
-        "found {checked} prelude copies in {}",
-        dir.display()
-    );
+    assert_eq!(files, 8, "one function per prelude file");
+    let loaded = vesper::packages::load(&dir).unwrap();
+    assert!(loaded.ok(), "{:?}", loaded.diagnostics);
 }

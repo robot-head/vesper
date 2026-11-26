@@ -346,7 +346,8 @@ fn cycle_refs(in t: Types, in d: Decls, sy: Sy, tr: TraitRow, ty: u32, inout out
         let assoc = proj_assoc(in t, ty);
         if is_self(in t, sy, proj_self(in t, ty))
             && (pt == NONE32 || pt == tr.name)
-            && trait_has_assoc(in d, tr, assoc) {
+            && trait_has_assoc(in d, tr, assoc)
+        {
             out.push(assoc);
             return;
         }
@@ -1005,7 +1006,8 @@ fn dto_err(
             for i in 0..local_n {
                 let t = d.trait_row(i);
                 if at_symbol(in fe.trait_of, t.name) == n32(inc(i))
-                    && trait_has_assoc(in d, t, assoc) {
+                    && trait_has_assoc(in d, t, assoc)
+                {
                     count = inc(count);
                     tn = t.name;
                 }

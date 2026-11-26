@@ -675,7 +675,8 @@ impl Eng {
         let out = self.kid(cmd, Cmd::Out);
         if (n != Cmd::CtorItems && n != Cmd::CostedCtorItems)
             || self.kind(name) != SX_ATOM
-            || self.kind(args) != SX_LIST {
+            || self.kind(args) != SX_LIST
+        {
             self.fail(Code::Command, self.sx_at(cmd));
             return;
         }
@@ -685,7 +686,8 @@ impl Eng {
             let val = self.kid(cmd, Cmd::CostValue);
             if self.kind(kw) != SX_ATOM
                 || self.sym_of(kw) != self.kw_cost
-                || self.kind(val) != SX_ATOM {
+                || self.kind(val) != SX_ATOM
+            {
                 self.fail(Code::Command, self.sx_at(kw));
                 return;
             }
@@ -1671,7 +1673,8 @@ impl Eng {
             let (cost, r) = self.node_cost(m);
             if cost != MAX_COST
                 && cost == at64(in self.best_cost, c)
-                && at64(in self.best_rank, c) > r {
+                && at64(in self.best_rank, c) > r
+            {
                 self.best_node.try_set(c, m);
             }
         }

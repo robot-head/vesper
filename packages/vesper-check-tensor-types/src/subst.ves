@@ -301,7 +301,8 @@ pub fn unify_dtype(inout state: St, inout subst: Subst, lhs_raw: u32, rhs_raw: u
         && (
             state.names.size(((wrapping_sub(lhs, 2) >> 1))) > 0
                 && state.names.byte(((wrapping_sub(lhs, 2) >> 1)), 0) == 63
-        ) {
+        )
+    {
         set_dtype(inout subst, (wrapping_sub(lhs, 2) >> 1), rhs);
         return 0;
     }
@@ -309,7 +310,8 @@ pub fn unify_dtype(inout state: St, inout subst: Subst, lhs_raw: u32, rhs_raw: u
         && (
             state.names.size(((wrapping_sub(rhs, 2) >> 1))) > 0
                 && state.names.byte(((wrapping_sub(rhs, 2) >> 1)), 0) == 63
-        ) {
+        )
+    {
         set_dtype(inout subst, (wrapping_sub(rhs, 2) >> 1), lhs);
         return 0;
     }
@@ -406,12 +408,14 @@ pub fn unify(inout state: St, inout subst: Subst, exp_raw: u32, act_raw: u32) ->
         return 0;
     }
     if exp_node.kind == T_VAR
-        && (state.names.size(exp_node.primary) > 0 && state.names.byte(exp_node.primary, 0) == 63) {
+        && (state.names.size(exp_node.primary) > 0 && state.names.byte(exp_node.primary, 0) == 63)
+    {
         set_ty(inout subst, exp_node.primary, act);
         return 0;
     }
     if act_node.kind == T_VAR
-        && (state.names.size(act_node.primary) > 0 && state.names.byte(act_node.primary, 0) == 63) {
+        && (state.names.size(act_node.primary) > 0 && state.names.byte(act_node.primary, 0) == 63)
+    {
         set_ty(inout subst, act_node.primary, exp);
         return 0;
     }
@@ -444,7 +448,8 @@ pub fn unify(inout state: St, inout subst: Subst, exp_raw: u32, act_raw: u32) ->
         return 0;
     }
     if (exp_node.kind == T_LEASE && act_node.kind == T_LEASE)
-        || (exp_node.kind == T_SEQ && act_node.kind == T_SEQ) {
+        || (exp_node.kind == T_SEQ && act_node.kind == T_SEQ)
+    {
         let kv_heads_code = unify_dim(inout state, inout subst, exp_node.primary, act_node.primary);
         if kv_heads_code != 0 {
             prefix_err(inout state, in "KvHeads", false, 0);
@@ -465,7 +470,8 @@ pub fn unify(inout state: St, inout subst: Subst, exp_raw: u32, act_raw: u32) ->
     if exp_node.kind == T_ADT
         && act_node.kind == T_ADT
         && exp_node.primary == act_node.primary
-        && exp_node.arity == act_node.arity {
+        && exp_node.arity == act_node.arity
+    {
         for i in 0..widen_u64(exp_node.arity) {
             let exp_tag = ty_item(in state, exp, wrapping_mul(i, 2));
             let act_tag = ty_item(in state, act, wrapping_mul(i, 2));
@@ -486,7 +492,8 @@ pub fn unify(inout state: St, inout subst: Subst, exp_raw: u32, act_raw: u32) ->
         return 0;
     }
     if (exp_node.kind == T_TUPLE && act_node.kind == T_TUPLE && exp_node.arity == act_node.arity)
-        || (exp_node.kind == T_FN && act_node.kind == T_FN && exp_node.arity == act_node.arity) {
+        || (exp_node.kind == T_FN && act_node.kind == T_FN && exp_node.arity == act_node.arity)
+    {
         for i in 0..widen_u64(exp_node.arity) {
             let code = unify(
                 inout state,

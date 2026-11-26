@@ -154,7 +154,8 @@ pub fn conformance_env(inout s: S, c: u64) -> u64 {
             let bd = field_b(in s, w);
             if tag_of(in s, ty) == t_var()
                 && vkind(field_a(in s, ty)) == 0
-                && tag_of(in s, bd) == m_const() {
+                && tag_of(in s, bd) == m_const()
+            {
                 let p = vidx(field_a(in s, ty));
                 if p >= np {
                     // The Rust build panics on an out-of-range parameter.

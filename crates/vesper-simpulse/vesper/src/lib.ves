@@ -396,7 +396,8 @@ impl Kernel {
             Code::ForeignToken
         } else if self.running != task
             || !self.known(task)
-            || self.state_of(task) != State::Running {
+            || self.state_of(task) != State::Running
+        {
             Code::InvalidToken
         } else {
             Code::Ok
@@ -1172,7 +1173,8 @@ test {
             || !dispatched
             || !blocked
             || running.kind != 1
-            || kernel_is_complete(in kernel) {
+            || kernel_is_complete(in kernel)
+        {
             return false;
         }
         let yielded = kernel_yield_task(inout kernel, 1, true);
@@ -1249,7 +1251,8 @@ test {
             ev(4, task, wait.value, 0, 0)
         };
         if kernel.out.try_get(0) != Option::Some(expected_event)
-            || atb(in kernel.p_io.as_slice(), dec(wait.value)) != scheduled {
+            || atb(in kernel.p_io.as_slice(), dec(wait.value)) != scheduled
+        {
             return false;
         }
         if cancel {

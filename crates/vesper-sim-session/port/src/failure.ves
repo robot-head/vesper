@@ -67,7 +67,8 @@ pub fn failure_table_next(inout t: FailureTable, target_id: u64, op: u64) -> (u6
         }
         let k_off = wrapping_mul(idx, KEY_WORDS);
         if word_at(in t.keys, k_off) == target_id
-            && word_at(in t.keys, wrapping_add(k_off, 1)) == op {
+            && word_at(in t.keys, wrapping_add(k_off, 1)) == op
+        {
             found = true;
             break;
         }
@@ -90,7 +91,8 @@ pub fn failure_table_next(inout t: FailureTable, target_id: u64, op: u64) -> (u6
         }
         if word_at(in t.rules, r_off) == target_id
             && word_at(in t.rules, wrapping_add(r_off, 1)) == op
-            && word_at(in t.rules, wrapping_add(r_off, 2)) == occ {
+            && word_at(in t.rules, wrapping_add(r_off, 2)) == occ
+        {
             return (occ, true, word_at(in t.rules, wrapping_add(r_off, 3)));
         }
         r_off = wrapping_add(r_off, RULE_WORDS);

@@ -1011,7 +1011,8 @@ fn param_of(in job: Job, m: Model, in t: Slice[u8], s: u64, e: u64) -> u64 {
             let mut same = true;
             for j in 0..n {
                 if byte(in job.pool.as_slice(), wrapping_add(at, j))
-                    != byte(in t, wrapping_add(s, j)) {
+                    != byte(in t, wrapping_add(s, j))
+                {
                     same = false;
                     break;
                 }

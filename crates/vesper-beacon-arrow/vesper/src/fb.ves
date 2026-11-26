@@ -200,7 +200,8 @@ impl Fb {
                 let mut same = true;
                 for b in 0..vt_len {
                     if byte(in self.buf, wrapping_add(old, b))
-                        != byte(in self.buf, wrapping_add(vt, b)) {
+                        != byte(in self.buf, wrapping_add(vt, b))
+                    {
                         same = false;
                         break;
                     }
