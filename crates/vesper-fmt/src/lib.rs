@@ -45,6 +45,17 @@ pub fn port_live_allocations() -> i64 {
 pub fn port_format_source(source: &str, limits: Limits) -> Option<Result<FormatResult, Error>> {
     port::format_source(source, limits)
 }
+/// [`recovery::format_recovery_source`] through the port alone, for the
+/// differential tests: `None` only for an error code the port does not
+/// define.
+#[cfg(vesper_port)]
+#[doc(hidden)]
+pub fn port_format_recovery_source(
+    source: &str,
+    limits: Limits,
+) -> Option<Result<recovery::RecoveryFormatResult, Error>> {
+    port::format_recovery_source(source, limits)
+}
 pub use doc::{DEFAULT_LINE_WIDTH, Doc, DocId, Document};
 pub use proof_model::{DocumentModel, ProofError, ProofLimits};
 pub use proof_source::{FormatVerification, format_for_verification};
