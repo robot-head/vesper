@@ -63,12 +63,12 @@ const PTS_SECRET_BUF: u64 = 2;
 const PTS_HIGH_SLOT: u64 = 4;
 
 struct Ct {
-    f: u64,
+    func: u64,
     a: ChunkSeq[u64],
     s: ChunkSeq[u64],
     untracked: bool,
-    mslots: u64,
-    mhigh: bool,
+    secret_slots: u64,
+    secret_high: bool,
 }
 
 fn pts(a: u64) -> u64 {
@@ -79,81 +79,85 @@ fn secret(a: u64) -> bool {
     a & SECRET != 0
 }
 
-fn get_a(in c: Cx, in t: Ct, v: u64) -> u64 {
-    g(in t.a, val(in c, t.f, v, 0))
+fn get_a(in ctx: Cx, in taint: Ct, v: u64) -> u64 {
+    g(in taint.a, val(in ctx, taint.func, v, 0))
 }
 
-fn get_s(in c: Cx, in t: Ct, v: u64) -> u64 {
-    g(in t.s, val(in c, t.f, v, 0))
+fn get_s(in ctx: Cx, in taint: Ct, v: u64) -> u64 {
+    g(in taint.s, val(in ctx, taint.func, v, 0))
 }
 
-fn join_into(in c: Cx, inout t: Ct, v: u64, a: u64, s: u64) -> bool {
-    let r = val(in c, t.f, v, 0);
-    if r >= t.a.len() {
+fn join_into(in ctx: Cx, inout taint: Ct, v: u64, a: u64, s: u64) -> bool {
+    let resolved = val(in ctx, taint.func, v, 0);
+    if resolved >= taint.a.len() {
         return false;
     }
-    let oa = g(in t.a, r);
-    let os = g(in t.s, r);
-    let na = oa | a;
-    let ns = os | s;
-    if na != oa || ns != os {
-        st(inout t.a, r, na);
-        st(inout t.s, r, ns);
+    let old_a = g(in taint.a, resolved);
+    let old_s = g(in taint.s, resolved);
+    let new_a = old_a | a;
+    let new_s = old_s | s;
+    if new_a != old_a || new_s != old_s {
+        st(inout taint.a, resolved, new_a);
+        st(inout taint.s, resolved, new_s);
         return true;
     }
     false
 }
 
-fn points_to_secret_memory(in t: Ct, a: u64, s: u64) -> bool {
-    pts(a) & PTS_SECRET_BUF != 0 || s & t.mslots != 0 || (pts(a) & PTS_HIGH_SLOT != 0 && t.mhigh)
+fn points_to_secret_memory(in taint: Ct, a: u64, s: u64) -> bool {
+    pts(a) & PTS_SECRET_BUF != 0
+        || s & taint.secret_slots != 0
+        || (pts(a) & PTS_HIGH_SLOT != 0 && taint.secret_high)
 }
 
 fn untracked(a: u64, s: u64) -> bool {
     pts(a) & PTS_UNTRACKED != 0 || (pts(a) == 0 && s == 0)
 }
 
-fn exposes(in c: Cx, in t: Ct, v: u64) -> bool {
-    let a = get_a(in c, in t, v);
-    let s = get_s(in c, in t, v);
-    secret(a) || points_to_secret_memory(in t, a, s) || (t.untracked && untracked(a, s))
+fn exposes(in ctx: Cx, in taint: Ct, v: u64) -> bool {
+    let a = get_a(in ctx, in taint, v);
+    let s = get_s(in ctx, in taint, v);
+    secret(a) || points_to_secret_memory(in taint, a, s) || (taint.untracked && untracked(a, s))
 }
 
-fn record_store(inout t: Ct, aa: u64, as_: u64, va: u64) -> bool {
-    if !secret(va) {
+fn record_store(inout taint: Ct, addr_a: u64, addr_s: u64, value_a: u64) -> bool {
+    if !secret(value_a) {
         return false;
     }
-    let bu = t.untracked;
-    let bs = t.mslots;
-    let bh = t.mhigh;
-    if untracked(aa, as_) {
-        t.untracked = true;
+    let was_untracked = taint.untracked;
+    let old_slots = taint.secret_slots;
+    let old_high = taint.secret_high;
+    if untracked(addr_a, addr_s) {
+        taint.untracked = true;
     }
-    t.mslots = t.mslots | as_;
-    if pts(aa) & PTS_HIGH_SLOT != 0 {
-        t.mhigh = true;
+    taint.secret_slots = taint.secret_slots | addr_s;
+    if pts(addr_a) & PTS_HIGH_SLOT != 0 {
+        taint.secret_high = true;
     }
-    bu != t.untracked || bs != t.mslots || bh != t.mhigh
+    was_untracked != taint.untracked
+        || old_slots != taint.secret_slots
+        || old_high != taint.secret_high
 }
 
-fn any_exposes(in c: Cx, in t: Ct, at: u64, n: u64) -> bool {
+fn any_exposes(in ctx: Cx, in taint: Ct, at: u64, n: u64) -> bool {
     for k in 0..n {
-        if exposes(in c, in t, pw(in c, wrapping_add(at, k))) {
+        if exposes(in ctx, in taint, pw(in ctx, wrapping_add(at, k))) {
             return true;
         }
     }
     false
 }
 
-fn record_callee_writes(in c: Cx, inout t: Ct, at: u64, n: u64) -> bool {
-    if !any_exposes(in c, in t, at, n) {
+fn record_callee_writes(in ctx: Cx, inout taint: Ct, at: u64, n: u64) -> bool {
+    if !any_exposes(in ctx, in taint, at, n) {
         return false;
     }
     let mut changed = false;
     for k in 0..n {
-        let v = pw(in c, wrapping_add(at, k));
-        let aa = get_a(in c, in t, v);
-        let as_ = get_s(in c, in t, v);
-        if record_store(inout t, aa, as_, SECRET) {
+        let v = pw(in ctx, wrapping_add(at, k));
+        let addr_a = get_a(in ctx, in taint, v);
+        let addr_s = get_s(in ctx, in taint, v);
+        if record_store(inout taint, addr_a, addr_s, SECRET) {
             changed = true;
         }
     }
@@ -161,12 +165,12 @@ fn record_callee_writes(in c: Cx, inout t: Ct, at: u64, n: u64) -> bool {
 }
 
 // `load_result`: secret when the address may reach secret memory.
-fn load_secret(in t: Ct, a: u64, s: u64) -> u64 {
-    let mut sec = points_to_secret_memory(in t, a, s);
-    if untracked(a, s) && t.untracked {
-        sec = true;
+fn load_secret(in taint: Ct, a: u64, s: u64) -> u64 {
+    let mut is_secret = points_to_secret_memory(in taint, a, s);
+    if untracked(a, s) && taint.untracked {
+        is_secret = true;
     }
-    if sec { SECRET } else { 0 }
+    if is_secret { SECRET } else { 0 }
 }
 
 fn slot_a(slot: u64) -> u64 {
@@ -181,135 +185,173 @@ fn slot_s(slot: u64) -> u64 {
     }
 }
 
-fn join_args(in c: Cx, in t: Ct, row: u64) -> (u64, u64) {
+fn join_args(in ctx: Cx, in taint: Ct, row: u64) -> (u64, u64) {
     let mut a: u64 = 0;
     let mut s: u64 = 0;
-    for k in 0..nargs(in c, row) {
-        let v = arg(in c, row, k);
-        a = a | get_a(in c, in t, v);
-        s = s | get_s(in c, in t, v);
+    for k in 0..nargs(in ctx, row) {
+        let v = arg(in ctx, row, k);
+        a = a | get_a(in ctx, in taint, v);
+        s = s | get_s(in ctx, in taint, v);
     }
     (a, s)
 }
 
-fn in_list(in c: Cx, in list: ChunkSeq[u64], row: u64) -> bool {
-    let name = pw(in c, wrapping_add(iw(in c, row, I_EXT), X_DISPLAY));
+fn in_list(in ctx: Cx, in list: ChunkSeq[u64], row: u64) -> bool {
+    let name = pw(in ctx, wrapping_add(iw(in ctx, row, I_EXT), X_DISPLAY));
     contains(in list, name)
 }
 
 // The abstract result (a, s) of one instruction and whether memory changed.
-fn transfer(in c: Cx, inout t: Ct, row: u64, in declassify: ChunkSeq[u64]) -> (u64, u64, bool) {
-    let op = iw(in c, row, I_OP);
-    let fmt = iw(in c, row, I_FMT);
-    let flags = iw(in c, row, I_FLAGS);
+fn transfer(
+    in ctx: Cx,
+    inout taint: Ct,
+    row: u64,
+    in declassify: ChunkSeq[u64]
+) -> (u64, u64, bool) {
+    let op = iw(in ctx, row, I_OP);
+    let fmt = iw(in ctx, row, I_FMT);
+    let flags = iw(in ctx, row, I_FLAGS);
     if op == OP_STACK_ADDR && fmt == FMT_STACK_LOAD {
-        let slot = iw(in c, row, I_SLOT);
+        let slot = iw(in ctx, row, I_SLOT);
         return (slot_a(slot), slot_s(slot), false);
     }
     if op == OP_STACK_LOAD && fmt == FMT_STACK_LOAD {
-        let slot = iw(in c, row, I_SLOT);
-        return (load_secret(in t, slot_a(slot), slot_s(slot)), 0, false);
+        let slot = iw(in ctx, row, I_SLOT);
+        return (load_secret(in taint, slot_a(slot), slot_s(slot)), 0, false);
     }
     if op == OP_STACK_STORE && fmt == FMT_STACK_STORE {
-        let slot = iw(in c, row, I_SLOT);
-        let va = get_a(in c, in t, arg(in c, row, 0));
-        let m = record_store(inout t, slot_a(slot), slot_s(slot), va);
-        return (0, 0, m);
+        let slot = iw(in ctx, row, I_SLOT);
+        let value_a = get_a(in ctx, in taint, arg(in ctx, row, 0));
+        let memory_changed = record_store(inout taint, slot_a(slot), slot_s(slot), value_a);
+        return (0, 0, memory_changed);
     }
     if (fmt == FMT_LOAD || fmt == FMT_LOAD_NO_OFFSET) && flags & CAN_LOAD != 0 {
-        let v = arg(in c, row, 0);
-        return (load_secret(in t, get_a(in c, in t, v), get_s(in c, in t, v)), 0, false);
+        let v = arg(in ctx, row, 0);
+        return (
+            load_secret(in taint, get_a(in ctx, in taint, v), get_s(in ctx, in taint, v)),
+            0,
+            false
+        );
     }
     if (fmt == FMT_STORE || fmt == FMT_STORE_NO_OFFSET) && flags & CAN_STORE != 0 {
-        let va = get_a(in c, in t, arg(in c, row, 0));
-        let addr = arg(in c, row, 1);
-        let m = record_store(inout t, get_a(in c, in t, addr), get_s(in c, in t, addr), va);
-        return (0, 0, m);
+        let value_a = get_a(in ctx, in taint, arg(in ctx, row, 0));
+        let addr = arg(in ctx, row, 1);
+        let memory_changed = record_store(
+            inout taint,
+            get_a(in ctx, in taint, addr),
+            get_s(in ctx, in taint, addr),
+            value_a
+        );
+        return (0, 0, memory_changed);
     }
     if op == OP_ATOMIC_RMW || op == OP_ATOMIC_CAS {
-        let addr = arg(in c, row, 0);
-        let aa = get_a(in c, in t, addr);
-        let as_ = get_s(in c, in t, addr);
-        let mut va: u64 = 0;
-        for k in 1..nargs(in c, row) {
-            va = va | get_a(in c, in t, arg(in c, row, k));
+        let addr = arg(in ctx, row, 0);
+        let addr_a = get_a(in ctx, in taint, addr);
+        let addr_s = get_s(in ctx, in taint, addr);
+        let mut value_a: u64 = 0;
+        for k in 1..nargs(in ctx, row) {
+            value_a = value_a | get_a(in ctx, in taint, arg(in ctx, row, k));
         }
-        let m = record_store(inout t, aa, as_, va);
-        let r = load_secret(in t, aa, as_) | (va & SECRET);
-        return (r, 0, m);
+        let memory_changed = record_store(inout taint, addr_a, addr_s, value_a);
+        let result_a = load_secret(in taint, addr_a, addr_s) | (value_a & SECRET);
+        return (result_a, 0, memory_changed);
     }
     if flags & IS_CALL != 0 {
-        let kind = iw(in c, row, I_CALL);
-        let ca = iw(in c, row, I_CARGS);
-        let cn = iw(in c, row, wrapping_add(I_CARGS, 1));
+        let kind = iw(in ctx, row, I_CALL);
+        let call_args_at = iw(in ctx, row, I_CARGS);
+        let call_arg_count = iw(in ctx, row, wrapping_add(I_CARGS, 1));
         if kind == CALL_DIRECT {
-            if in_list(in c, in declassify, row) {
+            if in_list(in ctx, in declassify, row) {
                 return (0, 0, false);
             }
-            let sec = any_exposes(in c, in t, ca, cn);
-            let m = record_callee_writes(in c, inout t, ca, cn);
-            if sec {
-                return (SECRET, 0, m);
+            let is_secret = any_exposes(in ctx, in taint, call_args_at, call_arg_count);
+            let memory_changed = record_callee_writes(
+                in ctx,
+                inout taint,
+                call_args_at,
+                call_arg_count
+            );
+            if is_secret {
+                return (SECRET, 0, memory_changed);
             }
-            return (0, 0, m);
+            return (0, 0, memory_changed);
         }
         if kind == CALL_INDIRECT {
-            let sec = any_exposes(in c, in t, ca, cn)
-                || (nargs(in c, row) > 0 && secret(get_a(in c, in t, arg(in c, row, 0))));
-            let m = record_callee_writes(in c, inout t, ca, cn);
-            if sec {
-                return (SECRET, 0, m);
+            let is_secret = any_exposes(in ctx, in taint, call_args_at, call_arg_count)
+                || (nargs(in ctx, row) > 0 && secret(get_a(in ctx, in taint, arg(in ctx, row, 0))));
+            let memory_changed = record_callee_writes(
+                in ctx,
+                inout taint,
+                call_args_at,
+                call_arg_count
+            );
+            if is_secret {
+                return (SECRET, 0, memory_changed);
             }
-            return (0, 0, m);
+            return (0, 0, memory_changed);
         }
     }
-    let (a, s) = join_args(in c, in t, row);
+    let (a, s) = join_args(in ctx, in taint, row);
     (a, s, false)
 }
 
-fn fixpoint(in c: Cx, inout t: Ct, in declassify: ChunkSeq[u64]) {
-    let first = fw(in c, t.f, F_INSTS);
-    let n = fw(in c, t.f, F_NINSTS);
+fn fixpoint(in ctx: Cx, inout taint: Ct, in declassify: ChunkSeq[u64]) {
+    let first = fw(in ctx, taint.func, F_INSTS);
+    let n = fw(in ctx, taint.func, F_NINSTS);
     loop {
         let mut changed = false;
         for k in 0..n {
             let row = wrapping_add(first, k);
-            let (ra, rs, m) = transfer(in c, inout t, row, in declassify);
-            if m {
+            let (result_a, result_s, memory_changed) = transfer(
+                in ctx,
+                inout taint,
+                row,
+                in declassify
+            );
+            if memory_changed {
                 changed = true;
             }
-            let res = iw(in c, row, I_RESULTS);
-            for j in 0..iw(in c, row, wrapping_add(I_RESULTS, 1)) {
-                if join_into(in c, inout t, pw(in c, wrapping_add(res, j)), ra, rs) {
+            let results_at = iw(in ctx, row, I_RESULTS);
+            for j in 0..iw(in ctx, row, wrapping_add(I_RESULTS, 1)) {
+                if join_into(
+                    in ctx,
+                    inout taint,
+                    pw(in ctx, wrapping_add(results_at, j)),
+                    result_a,
+                    result_s
+                ) {
                     changed = true;
                 }
             }
-            let mut d = iw(in c, row, I_DESTS);
-            for j in 0..iw(in c, row, wrapping_add(I_DESTS, 1)) {
-                let blk = pw(in c, d);
-                let na = pw(in c, wrapping_add(d, 1));
-                let pa = block_row(in c, t.f, blk, 0);
-                let pn = block_row(in c, t.f, blk, 1);
-                for q in 0..na {
-                    let kind = pw(in c, wrapping_add(d, wrapping_add(2, wrapping_mul(q, 2))));
-                    let v = pw(in c, wrapping_add(d, wrapping_add(3, wrapping_mul(q, 2))));
-                    if q < pn {
-                        let param = pw(in c, wrapping_add(pa, q));
+            let mut dest_at = iw(in ctx, row, I_DESTS);
+            for j in 0..iw(in ctx, row, wrapping_add(I_DESTS, 1)) {
+                let blk = pw(in ctx, dest_at);
+                let arg_count = pw(in ctx, wrapping_add(dest_at, 1));
+                let param_start = block_row(in ctx, taint.func, blk, 0);
+                let param_count = block_row(in ctx, taint.func, blk, 1);
+                for q in 0..arg_count {
+                    let kind = pw(
+                        in ctx,
+                        wrapping_add(dest_at, wrapping_add(2, wrapping_mul(q, 2)))
+                    );
+                    let v = pw(in ctx, wrapping_add(dest_at, wrapping_add(3, wrapping_mul(q, 2))));
+                    if q < param_count {
+                        let param = pw(in ctx, wrapping_add(param_start, q));
                         let mut a: u64 = 0;
                         let mut s: u64 = 0;
                         if kind == BA_TRY_RET {
-                            a = ra;
-                            s = rs;
+                            a = result_a;
+                            s = result_s;
                         } else if kind != BA_TRY_EXN {
-                            a = get_a(in c, in t, v);
-                            s = get_s(in c, in t, v);
+                            a = get_a(in ctx, in taint, v);
+                            s = get_s(in ctx, in taint, v);
                         }
-                        if join_into(in c, inout t, param, a, s) {
+                        if join_into(in ctx, inout taint, param, a, s) {
                             changed = true;
                         }
                     }
                 }
-                d = wrapping_add(d, wrapping_add(2, wrapping_mul(na, 2)));
+                dest_at = wrapping_add(dest_at, wrapping_add(2, wrapping_mul(arg_count, 2)));
             }
         }
         if !changed {
@@ -320,244 +362,248 @@ fn fixpoint(in c: Cx, inout t: Ct, in declassify: ChunkSeq[u64]) {
 
 // One finding per (instruction, rule): `seen` holds rule codes per row.
 fn report(
-    inout c: Cx,
+    inout ctx: Cx,
     inout seen: ChunkSeq[u64],
-    k: u64,
+    inst_index: u64,
     rule: u64,
-    fname: u64,
+    func_name: u64,
     ent: u64,
     msg: u64
 ) {
     let bit = wrapping_shl_u64(1, wrapping_u32(rule));
-    if g(in seen, k) & bit != 0 {
-        c.r.tx.truncate(msg);
+    if g(in seen, inst_index) & bit != 0 {
+        ctx.report.text.truncate(msg);
         return;
     }
-    st(inout seen, k, g(in seen, k) | bit);
+    st(inout seen, inst_index, g(in seen, inst_index) | bit);
     if rule == 0 {
-        raw_finding(inout c, fname, true, ent, "secret-branch", msg);
+        raw_finding(inout ctx, func_name, true, ent, "secret-branch", msg);
     } else if rule == 1 {
-        raw_finding(inout c, fname, true, ent, "secret-branch-table", msg);
+        raw_finding(inout ctx, func_name, true, ent, "secret-branch-table", msg);
     } else if rule == 2 {
-        raw_finding(inout c, fname, true, ent, "variable-latency-div", msg);
+        raw_finding(inout ctx, func_name, true, ent, "variable-latency-div", msg);
     } else if rule == 3 {
-        raw_finding(inout c, fname, true, ent, "secret-load-address", msg);
+        raw_finding(inout ctx, func_name, true, ent, "secret-load-address", msg);
     } else if rule == 4 {
-        raw_finding(inout c, fname, true, ent, "secret-store-address", msg);
+        raw_finding(inout ctx, func_name, true, ent, "secret-store-address", msg);
     } else if rule == 5 {
-        raw_finding(inout c, fname, true, ent, "secret-call-unknown", msg);
+        raw_finding(inout ctx, func_name, true, ent, "secret-call-unknown", msg);
     } else if rule == 6 {
-        raw_finding(inout c, fname, true, ent, "secret-call-target", msg);
+        raw_finding(inout ctx, func_name, true, ent, "secret-call-target", msg);
     } else if rule == 7 {
-        raw_finding(inout c, fname, true, ent, "unsupported-secret-operand", msg);
+        raw_finding(inout ctx, func_name, true, ent, "unsupported-secret-operand", msg);
     } else {
-        raw_finding(inout c, fname, true, ent, "secret-trap", msg);
+        raw_finding(inout ctx, func_name, true, ent, "secret-trap", msg);
     }
 }
 
-fn opname(inout c: Cx, row: u64) {
-    let s = iw(in c, row, I_OPNAME);
-    puts(inout c.r.tx, in c.nm, s);
+fn opname(inout ctx: Cx, row: u64) {
+    let name = iw(in ctx, row, I_OPNAME);
+    puts(inout ctx.report.text, in ctx.names, name);
 }
 
-fn any_secret(in c: Cx, in t: Ct, row: u64) -> bool {
-    for k in 0..nargs(in c, row) {
-        if secret(get_a(in c, in t, arg(in c, row, k))) {
+fn any_secret(in ctx: Cx, in taint: Ct, row: u64) -> bool {
+    for k in 0..nargs(in ctx, row) {
+        if secret(get_a(in ctx, in taint, arg(in ctx, row, k))) {
             return true;
         }
     }
     false
 }
 
-fn check(inout c: Cx, in t: Ct, in declassify: ChunkSeq[u64], in trusted: ChunkSeq[u64]) {
-    let fname = fw(in c, t.f, F_NAME);
-    let first = fw(in c, t.f, F_INSTS);
-    let n = fw(in c, t.f, F_NINSTS);
+fn check(inout ctx: Cx, in taint: Ct, in declassify: ChunkSeq[u64], in trusted: ChunkSeq[u64]) {
+    let func_name = fw(in ctx, taint.func, F_NAME);
+    let first = fw(in ctx, taint.func, F_INSTS);
+    let n = fw(in ctx, taint.func, F_NINSTS);
     let mut seen = filled(n, 0);
     for k in 0..n {
         let row = wrapping_add(first, k);
-        let op = iw(in c, row, I_OP);
-        let fmt = iw(in c, row, I_FMT);
-        let flags = iw(in c, row, I_FLAGS);
-        let ent = iw(in c, row, I_ENT);
+        let op = iw(in ctx, row, I_OP);
+        let fmt = iw(in ctx, row, I_FMT);
+        let flags = iw(in ctx, row, I_FLAGS);
+        let ent = iw(in ctx, row, I_ENT);
         if op == OP_BRIF {
-            let v = arg(in c, row, 0);
-            if secret(get_a(in c, in t, v)) {
-                let m = c.r.tx.len();
-                put(inout c.r.tx, "brif on secret condition v");
-                putn(inout c.r.tx, v);
-                report(inout c, inout seen, k, 0, fname, ent, m);
+            let v = arg(in ctx, row, 0);
+            if secret(get_a(in ctx, in taint, v)) {
+                let message_at = ctx.report.text.len();
+                put(inout ctx.report.text, "brif on secret condition v");
+                putn(inout ctx.report.text, v);
+                report(inout ctx, inout seen, k, 0, func_name, ent, message_at);
             }
         } else if op == OP_BR_TABLE {
-            let v = arg(in c, row, 0);
-            if secret(get_a(in c, in t, v)) {
-                let m = c.r.tx.len();
-                put(inout c.r.tx, "br_table on secret index v");
-                putn(inout c.r.tx, v);
-                report(inout c, inout seen, k, 1, fname, ent, m);
+            let v = arg(in ctx, row, 0);
+            if secret(get_a(in ctx, in taint, v)) {
+                let message_at = ctx.report.text.len();
+                put(inout ctx.report.text, "br_table on secret index v");
+                putn(inout ctx.report.text, v);
+                report(inout ctx, inout seen, k, 1, func_name, ent, message_at);
             }
         } else if op == OP_UDIV || op == OP_SDIV || op == OP_UREM || op == OP_SREM {
-            for j in 0..nargs(in c, row) {
-                let v = arg(in c, row, j);
-                if secret(get_a(in c, in t, v)) {
-                    let m = c.r.tx.len();
-                    opname(inout c, row);
-                    put(inout c.r.tx, " has secret operand v");
-                    putn(inout c.r.tx, v);
-                    report(inout c, inout seen, k, 2, fname, ent, m);
+            for j in 0..nargs(in ctx, row) {
+                let v = arg(in ctx, row, j);
+                if secret(get_a(in ctx, in taint, v)) {
+                    let message_at = ctx.report.text.len();
+                    opname(inout ctx, row);
+                    put(inout ctx.report.text, " has secret operand v");
+                    putn(inout ctx.report.text, v);
+                    report(inout ctx, inout seen, k, 2, func_name, ent, message_at);
                 }
             }
         } else if op == OP_STACK_ADDR || op == OP_STACK_LOAD || op == OP_STACK_STORE {} else if (
             fmt == FMT_LOAD || fmt == FMT_LOAD_NO_OFFSET
         )
             && flags & CAN_LOAD != 0 {
-            let v = arg(in c, row, 0);
-            if secret(get_a(in c, in t, v)) {
-                let m = c.r.tx.len();
-                opname(inout c, row);
-                put(inout c.r.tx, " address v");
-                putn(inout c.r.tx, v);
-                put(inout c.r.tx, " is secret-derived");
-                report(inout c, inout seen, k, 3, fname, ent, m);
+            let v = arg(in ctx, row, 0);
+            if secret(get_a(in ctx, in taint, v)) {
+                let message_at = ctx.report.text.len();
+                opname(inout ctx, row);
+                put(inout ctx.report.text, " address v");
+                putn(inout ctx.report.text, v);
+                put(inout ctx.report.text, " is secret-derived");
+                report(inout ctx, inout seen, k, 3, func_name, ent, message_at);
             }
         } else if (fmt == FMT_STORE || fmt == FMT_STORE_NO_OFFSET) && flags & CAN_STORE != 0 {
-            let v = arg(in c, row, 1);
-            if secret(get_a(in c, in t, v)) {
-                let m = c.r.tx.len();
-                opname(inout c, row);
-                put(inout c.r.tx, " address v");
-                putn(inout c.r.tx, v);
-                put(inout c.r.tx, " is secret-derived");
-                report(inout c, inout seen, k, 4, fname, ent, m);
+            let v = arg(in ctx, row, 1);
+            if secret(get_a(in ctx, in taint, v)) {
+                let message_at = ctx.report.text.len();
+                opname(inout ctx, row);
+                put(inout ctx.report.text, " address v");
+                putn(inout ctx.report.text, v);
+                put(inout ctx.report.text, " is secret-derived");
+                report(inout ctx, inout seen, k, 4, func_name, ent, message_at);
             }
         } else if op == OP_ATOMIC_RMW || op == OP_ATOMIC_CAS {
-            let v = arg(in c, row, 0);
-            if secret(get_a(in c, in t, v)) {
-                let m = c.r.tx.len();
-                opname(inout c, row);
-                put(inout c.r.tx, " address v");
-                putn(inout c.r.tx, v);
-                put(inout c.r.tx, " is secret-derived");
-                report(inout c, inout seen, k, 4, fname, ent, m);
+            let v = arg(in ctx, row, 0);
+            if secret(get_a(in ctx, in taint, v)) {
+                let message_at = ctx.report.text.len();
+                opname(inout ctx, row);
+                put(inout ctx.report.text, " address v");
+                putn(inout ctx.report.text, v);
+                put(inout ctx.report.text, " is secret-derived");
+                report(inout ctx, inout seen, k, 4, func_name, ent, message_at);
             }
         } else if flags & IS_CALL != 0 {
-            let kind = iw(in c, row, I_CALL);
-            let ca = iw(in c, row, I_CARGS);
-            let cn = iw(in c, row, wrapping_add(I_CARGS, 1));
+            let kind = iw(in ctx, row, I_CALL);
+            let call_args_at = iw(in ctx, row, I_CARGS);
+            let call_arg_count = iw(in ctx, row, wrapping_add(I_CARGS, 1));
             if kind == CALL_DIRECT {
-                let name = pw(in c, wrapping_add(iw(in c, row, I_EXT), X_DISPLAY));
-                let ok = contains(in declassify, name) || contains(in trusted, name);
-                if !ok {
-                    for j in 0..cn {
-                        let v = pw(in c, wrapping_add(ca, j));
-                        if exposes(in c, in t, v) {
-                            let m = c.r.tx.len();
-                            opname(inout c, row);
-                            put(inout c.r.tx, " ");
-                            puts(inout c.r.tx, in c.nm, name);
-                            put(inout c.r.tx, " receives secret v");
-                            putn(inout c.r.tx, v);
-                            put(inout c.r.tx, " but is not a trusted constant-time callee");
-                            report(inout c, inout seen, k, 5, fname, ent, m);
+                let name = pw(in ctx, wrapping_add(iw(in ctx, row, I_EXT), X_DISPLAY));
+                let is_trusted = contains(in declassify, name) || contains(in trusted, name);
+                if !is_trusted {
+                    for j in 0..call_arg_count {
+                        let v = pw(in ctx, wrapping_add(call_args_at, j));
+                        if exposes(in ctx, in taint, v) {
+                            let message_at = ctx.report.text.len();
+                            opname(inout ctx, row);
+                            put(inout ctx.report.text, " ");
+                            puts(inout ctx.report.text, in ctx.names, name);
+                            put(inout ctx.report.text, " receives secret v");
+                            putn(inout ctx.report.text, v);
+                            put(
+                                inout ctx.report.text,
+                                " but is not a trusted constant-time callee"
+                            );
+                            report(inout ctx, inout seen, k, 5, func_name, ent, message_at);
                         }
                     }
                 }
             } else if kind == CALL_INDIRECT {
-                let target = arg(in c, row, 0);
-                if secret(get_a(in c, in t, target)) {
-                    let m = c.r.tx.len();
-                    opname(inout c, row);
-                    put(inout c.r.tx, " target v");
-                    putn(inout c.r.tx, target);
-                    put(inout c.r.tx, " is secret");
-                    report(inout c, inout seen, k, 6, fname, ent, m);
+                let target = arg(in ctx, row, 0);
+                if secret(get_a(in ctx, in taint, target)) {
+                    let message_at = ctx.report.text.len();
+                    opname(inout ctx, row);
+                    put(inout ctx.report.text, " target v");
+                    putn(inout ctx.report.text, target);
+                    put(inout ctx.report.text, " is secret");
+                    report(inout ctx, inout seen, k, 6, func_name, ent, message_at);
                 }
-                for j in 0..cn {
-                    let v = pw(in c, wrapping_add(ca, j));
-                    if exposes(in c, in t, v) {
-                        let m = c.r.tx.len();
-                        opname(inout c, row);
-                        put(inout c.r.tx, " passes secret v");
-                        putn(inout c.r.tx, v);
-                        put(inout c.r.tx, " to an unknown callee");
-                        report(inout c, inout seen, k, 5, fname, ent, m);
+                for j in 0..call_arg_count {
+                    let v = pw(in ctx, wrapping_add(call_args_at, j));
+                    if exposes(in ctx, in taint, v) {
+                        let message_at = ctx.report.text.len();
+                        opname(inout ctx, row);
+                        put(inout ctx.report.text, " passes secret v");
+                        putn(inout ctx.report.text, v);
+                        put(inout ctx.report.text, " to an unknown callee");
+                        report(inout ctx, inout seen, k, 5, func_name, ent, message_at);
                     }
                 }
-            } else if any_secret(in c, in t, row) {
-                let m = c.r.tx.len();
-                opname(inout c, row);
-                put(inout c.r.tx, " is not modelled with secret operands");
-                report(inout c, inout seen, k, 7, fname, ent, m);
+            } else if any_secret(in ctx, in taint, row) {
+                let message_at = ctx.report.text.len();
+                opname(inout ctx, row);
+                put(inout ctx.report.text, " is not modelled with secret operands");
+                report(inout ctx, inout seen, k, 7, func_name, ent, message_at);
             }
         } else if flags & CAN_TRAP != 0 {
-            for j in 0..nargs(in c, row) {
-                let v = arg(in c, row, j);
-                if secret(get_a(in c, in t, v)) {
-                    let m = c.r.tx.len();
-                    opname(inout c, row);
-                    put(inout c.r.tx, " may trap depending on secret v");
-                    putn(inout c.r.tx, v);
-                    report(inout c, inout seen, k, 8, fname, ent, m);
+            for j in 0..nargs(in ctx, row) {
+                let v = arg(in ctx, row, j);
+                if secret(get_a(in ctx, in taint, v)) {
+                    let message_at = ctx.report.text.len();
+                    opname(inout ctx, row);
+                    put(inout ctx.report.text, " may trap depending on secret v");
+                    putn(inout ctx.report.text, v);
+                    report(inout ctx, inout seen, k, 8, func_name, ent, message_at);
                 }
             }
         } else if fmt == FMT_DYNAMIC_STACK_LOAD || fmt == FMT_DYNAMIC_STACK_STORE {
-            if any_secret(in c, in t, row) {
-                let m = c.r.tx.len();
-                opname(inout c, row);
-                put(inout c.r.tx, " is not modelled with secret operands");
-                report(inout c, inout seen, k, 7, fname, ent, m);
+            if any_secret(in ctx, in taint, row) {
+                let message_at = ctx.report.text.len();
+                opname(inout ctx, row);
+                put(inout ctx.report.text, " is not modelled with secret operands");
+                report(inout ctx, inout seen, k, 7, func_name, ent, message_at);
             }
-        } else if (flags & CAN_LOAD != 0 || flags & CAN_STORE != 0) && any_secret(in c, in t, row) {
-            let m = c.r.tx.len();
-            put(inout c.r.tx, "memory operation ");
-            opname(inout c, row);
-            put(inout c.r.tx, " is not modelled with secret operands");
-            report(inout c, inout seen, k, 7, fname, ent, m);
+        } else if (flags & CAN_LOAD != 0 || flags & CAN_STORE != 0)
+            && any_secret(in ctx, in taint, row) {
+            let message_at = ctx.report.text.len();
+            put(inout ctx.report.text, "memory operation ");
+            opname(inout ctx, row);
+            put(inout ctx.report.text, " is not modelled with secret operands");
+            report(inout ctx, inout seen, k, 7, func_name, ent, message_at);
         }
     }
 }
 
 // `verify_constant_time(function, policy)`: `secret` and `pointers` are
 // entry-parameter indices, `declassify` and `trusted` callee display names.
-// Findings go to `c.raw`.
+// Findings go to `ctx.raw_findings`.
 pub fn verify_constant_time(
-    inout c: Cx,
-    f: u64,
+    inout ctx: Cx,
+    func: u64,
     in secret_params: ChunkSeq[u64],
     in pointers: ChunkSeq[u64],
     in declassify: ChunkSeq[u64],
     in trusted: ChunkSeq[u64]
 ) {
-    if fw(in c, f, F_NBLOCKS) == 0 {
+    if fw(in ctx, func, F_NBLOCKS) == 0 {
         return;
     }
-    let fname = fw(in c, f, F_NAME);
-    let pa = block_row(in c, f, 0, 0);
-    let pn = block_row(in c, f, 0, 1);
+    let func_name = fw(in ctx, func, F_NAME);
+    let param_start = block_row(in ctx, func, 0, 0);
+    let param_count = block_row(in ctx, func, 0, 1);
     let mut bad = false;
     for which in 0..2 {
-        let mut list_n = secret_params.len();
+        let mut list_len = secret_params.len();
         if which == 1 {
-            list_n = pointers.len();
+            list_len = pointers.len();
         }
-        for k in 0..list_n {
-            let mut i = g(in secret_params, k);
+        for k in 0..list_len {
+            let mut param_index = g(in secret_params, k);
             if which == 1 {
-                i = g(in pointers, k);
+                param_index = g(in pointers, k);
             }
-            if i >= pn {
-                let m = c.r.tx.len();
+            if param_index >= param_count {
+                let message_at = ctx.report.text.len();
                 if which == 0 {
-                    put(inout c.r.tx, "secret_params");
+                    put(inout ctx.report.text, "secret_params");
                 } else {
-                    put(inout c.r.tx, "secret_pointer_params");
+                    put(inout ctx.report.text, "secret_pointer_params");
                 }
-                put(inout c.r.tx, " names parameter ");
-                putn(inout c.r.tx, i);
-                put(inout c.r.tx, ", but the entry block has ");
-                putn(inout c.r.tx, pn);
-                put(inout c.r.tx, " parameters");
-                raw_finding(inout c, fname, false, 0, "invalid-policy", m);
+                put(inout ctx.report.text, " names parameter ");
+                putn(inout ctx.report.text, param_index);
+                put(inout ctx.report.text, ", but the entry block has ");
+                putn(inout ctx.report.text, param_count);
+                put(inout ctx.report.text, " parameters");
+                raw_finding(inout ctx, func_name, false, 0, "invalid-policy", message_at);
                 bad = true;
             }
         }
@@ -565,23 +611,33 @@ pub fn verify_constant_time(
     if bad {
         return;
     }
-    let nv = fw(in c, f, F_NVALS);
-    let mut t = Ct {
-        f: f,
-        a: filled(nv, 0),
-        s: filled(nv, 0),
+    let value_count = fw(in ctx, func, F_NVALS);
+    let mut taint = Ct {
+        func: func,
+        a: filled(value_count, 0),
+        s: filled(value_count, 0),
         untracked: false,
-        mslots: 0,
-        mhigh: false,
+        secret_slots: 0,
+        secret_high: false,
     };
     for k in 0..secret_params.len() {
-        let v = val(in c, f, pw(in c, wrapping_add(pa, g(in secret_params, k))), 0);
-        st(inout t.a, v, g(in t.a, v) | SECRET);
+        let resolved = val(
+            in ctx,
+            func,
+            pw(in ctx, wrapping_add(param_start, g(in secret_params, k))),
+            0
+        );
+        st(inout taint.a, resolved, g(in taint.a, resolved) | SECRET);
     }
     for k in 0..pointers.len() {
-        let v = val(in c, f, pw(in c, wrapping_add(pa, g(in pointers, k))), 0);
-        st(inout t.a, v, g(in t.a, v) | (PTS_SECRET_BUF << 1));
+        let resolved = val(
+            in ctx,
+            func,
+            pw(in ctx, wrapping_add(param_start, g(in pointers, k))),
+            0
+        );
+        st(inout taint.a, resolved, g(in taint.a, resolved) | (PTS_SECRET_BUF << 1));
     }
-    fixpoint(in c, inout t, in declassify);
-    check(inout c, in t, in declassify, in trusted);
+    fixpoint(in ctx, inout taint, in declassify);
+    check(inout ctx, in taint, in declassify, in trusted);
 }

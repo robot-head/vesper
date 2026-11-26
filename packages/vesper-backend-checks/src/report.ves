@@ -6,45 +6,52 @@ use self::util::{put};
 
 const RW: u64 = 7;
 
-// Records a verifier's own finding: its message is `c.r.tx[msg..]` (just
+// Records a verifier's own finding: its message is `ctx.report.text[msg..]` (just
 // written); the rule text is appended after it.
-pub fn raw_finding(inout c: Cx, function: u64, has_inst: bool, inst: u64, in rule: Str, msg: u64) {
-    let len = wrapping_sub(c.r.tx.len(), msg);
-    let at = c.r.tx.len();
-    put(inout c.r.tx, rule);
-    c.raw.push(function);
+pub fn raw_finding(
+    inout ctx: Cx,
+    function: u64,
+    has_inst: bool,
+    inst: u64,
+    in rule: Str,
+    msg: u64
+) {
+    let msg_len = wrapping_sub(ctx.report.text.len(), msg);
+    let rule_at = ctx.report.text.len();
+    put(inout ctx.report.text, rule);
+    ctx.raw_findings.push(function);
     if has_inst {
-        c.raw.push(1);
+        ctx.raw_findings.push(1);
     } else {
-        c.raw.push(0);
+        ctx.raw_findings.push(0);
     }
-    c.raw.push(inst);
-    c.raw.push(at);
-    c.raw.push(wrapping_sub(c.r.tx.len(), at));
-    c.raw.push(msg);
-    c.raw.push(len);
+    ctx.raw_findings.push(inst);
+    ctx.raw_findings.push(rule_at);
+    ctx.raw_findings.push(wrapping_sub(ctx.report.text.len(), rule_at));
+    ctx.raw_findings.push(msg);
+    ctx.raw_findings.push(msg_len);
 }
 
-// A note whose text is `c.r.tx[at..]`.
-pub fn note(inout c: Cx, at: u64) {
-    c.r.notes.push(at);
-    c.r.notes.push(wrapping_sub(c.r.tx.len(), at));
+// A note whose text is `ctx.report.text[at..]`.
+pub fn note(inout ctx: Cx, at: u64) {
+    ctx.report.notes.push(at);
+    ctx.report.notes.push(wrapping_sub(ctx.report.text.len(), at));
 }
 
-pub fn dnote(inout c: Cx, at: u64) {
-    c.dnotes.push(at);
-    c.dnotes.push(wrapping_sub(c.r.tx.len(), at));
+pub fn dnote(inout ctx: Cx, at: u64) {
+    ctx.derived_notes.push(at);
+    ctx.derived_notes.push(wrapping_sub(ctx.report.text.len(), at));
 }
 
-// Fails the run: `c.emsg` holds the error.
-pub fn fail(inout c: Cx) {
-    c.err = true;
+// Fails the run: `ctx.error_text` holds the error.
+pub fn fail(inout ctx: Cx) {
+    ctx.failed = true;
 }
 
-pub fn clear_raw(inout c: Cx) {
-    c.raw.truncate(0);
+pub fn clear_raw(inout ctx: Cx) {
+    ctx.raw_findings.truncate(0);
 }
 
-pub fn raw_count(in c: Cx) -> u64 {
-    c.raw.len() / RW
+pub fn raw_count(in ctx: Cx) -> u64 {
+    ctx.raw_findings.len() / RW
 }
