@@ -1673,3 +1673,11 @@ pub fn proof_run(in job_path: Str, in out_path: Str)
         Result::Err(_) => 2,
     }
 }
+
+// How many obligations a job (`proof_lens::job_words`) holds: its
+// extraction functions and semantic models. Pure; the Stage 2 package
+// probe calls it.
+pub fn job_obligations(in job: Slice[u8]) -> u64 {
+    let j = read_job(in job);
+    wrapping_add(nfunctions(in j), j.models.len())
+}
