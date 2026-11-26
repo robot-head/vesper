@@ -4,8 +4,8 @@ use cranelift_codegen::{
     entity::SecondaryMap,
     ir::{
         AbiParam, AtomicRmwOp, Block, BlockCall, Endianness, ExternalName, Function, GlobalValue,
-        GlobalValueData, Inst, InstructionData, MemFlags, Opcode, StackSlot, StackSlotKind,
-        TrapCode, Type, Value, ValueDef,
+        GlobalValueData, Inst, InstructionData, LibCall, MemFlags, Opcode, StackSlot,
+        StackSlotKind, TrapCode, Type, Value, ValueDef,
         condcodes::{FloatCC, IntCC},
         immediates::Offset32,
         types,
@@ -166,6 +166,10 @@ const REL32_BYTES: i64 = size_of::<i32>() as i64;
 const PLT_CALL: u64 = 0;
 const RELATIVE_DATA: u64 = 1;
 const GOT_DATA: u64 = 2;
+const PLT_LIBCALL: u64 = 3;
+const LIBCALL_TARGET_BASE: u64 = u32::MAX as u64 + 1;
+const MEMMOVE_LIBCALL: u32 = 0;
+const MEMCPY_LIBCALL: u32 = 1;
 
 fn binary_op(opcode: Opcode) -> Option<IntegerOp> {
     Some(match opcode {
@@ -516,18 +520,32 @@ impl IntegerBlocks<'_> {
         values: &mut Values,
     ) -> Option<()> {
         let dfg = &self.function.dfg;
-        let ExternalName::User(name) = callee.name else {
-            return None;
-        };
-        let name = self.function.params.user_named_funcs().get(name)?;
         let signature = &dfg.signatures[callee.signature];
         let args = dfg.inst_args(inst);
-        if name.namespace != FUNCTION_NAMESPACE
-            || signature.call_conv != CallConv::SystemV
-            || signature.params.len() != args.len()
-        {
+        if signature.call_conv != CallConv::SystemV || signature.params.len() != args.len() {
             return None;
         }
+        let target = match callee.name {
+            ExternalName::User(name) => {
+                let name = self.function.params.user_named_funcs().get(name)?;
+                if name.namespace != FUNCTION_NAMESPACE {
+                    return None;
+                }
+                u64::from(name.index)
+            }
+            ExternalName::LibCall(call @ (LibCall::Memmove | LibCall::Memcpy)) => {
+                if *signature != call.signature(CallConv::SystemV, types::I64) {
+                    return None;
+                }
+                let libcall = if call == LibCall::Memmove {
+                    MEMMOVE_LIBCALL
+                } else {
+                    MEMCPY_LIBCALL
+                };
+                LIBCALL_TARGET_BASE + u64::from(libcall)
+            }
+            _ => return None,
+        };
         let (gp_arguments, float_arguments) = argument_cells(&signature.params)?;
         let float_return = returns_float(&signature.returns);
         let return_cells = if float_return {
@@ -578,7 +596,7 @@ impl IntegerBlocks<'_> {
         let id = self.append(
             op,
             [
-                u64::from(name.index),
+                target,
                 (gp_arguments + float_arguments) as u64,
                 float_arguments as u64,
             ],
@@ -1687,6 +1705,7 @@ impl IntegerBlocks<'_> {
 /// then XMM cells. The call's left operand is the function ID, its right
 /// operand is the total cell count, and its extra operand is the XMM count.
 /// Argument records leave unreferenced slots. CallFloat returns through XMM0.
+/// Call targets above the u32 symbol-ID range identify approved runtime libcalls.
 /// CallPair writes its low result and the immediately following CallHigh's
 /// slot holds its high result.
 /// Checked arithmetic writes its integer result, followed by OverflowFlag
@@ -1832,10 +1851,27 @@ fn decode_relocatable(packet: &[u8]) -> Option<MachineCode> {
         };
         let offset = u32::try_from(u64::from_le_bytes(*offset)).ok()?;
         let target = u32::try_from(u64::from_le_bytes(*target)).ok()?;
-        let (kind, namespace) = match u64::from_le_bytes(*kind) {
-            PLT_CALL => (Reloc::X86CallPLTRel4, FUNCTION_NAMESPACE),
-            RELATIVE_DATA => (Reloc::X86PCRel4, DATA_NAMESPACE),
-            GOT_DATA => (Reloc::X86GOTPCRel4, DATA_NAMESPACE),
+        let (kind, name) = match u64::from_le_bytes(*kind) {
+            PLT_CALL => (
+                Reloc::X86CallPLTRel4,
+                ModuleRelocTarget::user(FUNCTION_NAMESPACE, target),
+            ),
+            RELATIVE_DATA => (
+                Reloc::X86PCRel4,
+                ModuleRelocTarget::user(DATA_NAMESPACE, target),
+            ),
+            GOT_DATA => (
+                Reloc::X86GOTPCRel4,
+                ModuleRelocTarget::user(DATA_NAMESPACE, target),
+            ),
+            PLT_LIBCALL => {
+                let call = match target {
+                    MEMMOVE_LIBCALL => LibCall::Memmove,
+                    MEMCPY_LIBCALL => LibCall::Memcpy,
+                    _ => return None,
+                };
+                (Reloc::X86CallPLTRel4, ModuleRelocTarget::LibCall(call))
+            }
             _ => return None,
         };
         if (offset as usize).checked_add(REL32_BYTES as usize)? > bytes.len() {
@@ -1844,7 +1880,7 @@ fn decode_relocatable(packet: &[u8]) -> Option<MachineCode> {
         relocations.push(ModuleReloc {
             offset,
             kind,
-            name: ModuleRelocTarget::user(namespace, target),
+            name,
             addend: -REL32_BYTES,
         });
     }

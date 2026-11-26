@@ -10,14 +10,16 @@ mod binding;
 use cranelift_codegen::{
     binemit::Reloc,
     ir::{
-        AbiParam, BlockArg, Function, InstBuilder, MemFlags, StackSlotData, StackSlotKind, types,
+        AbiParam, BlockArg, ExtFuncData, ExternalName, Function, InstBuilder, LibCall, MemFlags,
+        StackSlotData, StackSlotKind, types,
     },
     settings::{self, Configurable},
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, ModuleReloc, ModuleRelocTarget};
-use object::{Object, ObjectSection, RelocationFlags, elf};
+use cranelift_object::{ObjectBuilder, ObjectModule};
+use object::{Object, ObjectSection, ObjectSymbol, RelocationFlags, RelocationTarget, elf};
 use std::{
     fs,
     process::Command,
@@ -655,6 +657,139 @@ fn float_cfg_homes_survive_a_callee_clobbering_the_xmm_home_bank() {
         assert_eq!(unsafe { entry(3, value) }.to_bits(), value.to_bits());
     }
     unsafe { module.free_memory() };
+}
+
+#[test]
+fn compiler_memory_calls_relocate_to_the_runtime_symbols() {
+    const WORD_BYTES: usize = size_of::<u64>();
+    const PLT_LIBCALL: u64 = 3;
+    const PC_RELATIVE_ADDEND: i64 = -(size_of::<i32>() as i64);
+    let mut flags = settings::builder();
+    flags.set("is_pic", "true").unwrap();
+    let isa = cranelift_native::builder()
+        .unwrap()
+        .finish(settings::Flags::new(flags))
+        .unwrap();
+    let names = cranelift_module::default_libcall_names();
+    let mut module = ObjectModule::new(ObjectBuilder::new(isa, "memory_calls", names).unwrap());
+    for (call, id, name) in [
+        (LibCall::Memmove, 0, "move_bytes"),
+        (LibCall::Memcpy, 1, "copy_bytes"),
+    ] {
+        let signature = call.signature(module.isa().default_call_conv(), types::I64);
+        let mut context = module.make_context();
+        context.func.signature = signature.clone();
+        let callee_signature = context.func.import_signature(signature.clone());
+        let callee = context.func.import_function(ExtFuncData {
+            name: ExternalName::LibCall(call),
+            signature: callee_signature,
+            colocated: false,
+        });
+        let mut state = FunctionBuilderContext::new();
+        let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let args = b.block_params(entry).to_vec();
+        let invoke = b.ins().call(callee, &args);
+        let result = b.inst_results(invoke)[0];
+        b.ins().return_(&[result]);
+        b.seal_all_blocks();
+        b.finalize();
+
+        let request = native::machine::integer_block_words(&context.func).unwrap();
+        let packet = binding::x86_64_relocatable_block(&request);
+        let (length, body) = packet.split_first_chunk::<WORD_BYTES>().unwrap();
+        let (code, relocation) = body.split_at(u64::from_le_bytes(*length) as usize);
+        let ([offset, kind, target], rest) = relocation.as_chunks::<WORD_BYTES>() else {
+            unreachable!()
+        };
+        assert!(rest.is_empty());
+        assert_eq!(u64::from_le_bytes(*kind), PLT_LIBCALL);
+        assert_eq!(u64::from_le_bytes(*target), id);
+        let candidate = module
+            .declare_function(name, Linkage::Export, &signature)
+            .unwrap();
+        let alignment = u64::from(module.isa().function_alignment().minimum);
+        module
+            .define_function_bytes(
+                candidate,
+                alignment,
+                code,
+                &[ModuleReloc {
+                    offset: u32::try_from(u64::from_le_bytes(*offset)).unwrap(),
+                    kind: Reloc::X86CallPLTRel4,
+                    name: ModuleRelocTarget::LibCall(call),
+                    addend: PC_RELATIVE_ADDEND,
+                }],
+            )
+            .unwrap();
+    }
+    let bytes = module.finish().emit().unwrap();
+    let object = object::File::parse(bytes.as_slice()).unwrap();
+    let symbols: Vec<_> = object
+        .section_by_name(".text")
+        .unwrap()
+        .relocations()
+        .map(|(_, relocation)| {
+            assert_eq!(
+                relocation.flags(),
+                RelocationFlags::Elf {
+                    r_type: elf::R_X86_64_PLT32,
+                },
+            );
+            assert_eq!(relocation.addend(), PC_RELATIVE_ADDEND);
+            let RelocationTarget::Symbol(index) = relocation.target() else {
+                panic!("expected a libcall symbol");
+            };
+            object.symbol_by_index(index).unwrap().name().unwrap()
+        })
+        .collect();
+    assert_eq!(symbols, ["memmove", "memcpy"]);
+
+    if Command::new("cc").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("vesper-sh7-memcalls-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let obj = dir.join("memory_calls.o");
+    let harness = dir.join("memory_calls.c");
+    let exe = dir.join("memory_calls");
+    fs::write(&obj, bytes).unwrap();
+    fs::write(
+        &harness,
+        r#"
+#include <stddef.h>
+#include <string.h>
+void *move_bytes(void *, const void *, size_t);
+void *copy_bytes(void *, const void *, size_t);
+int main(void) {
+    char expected[16] = "0123456789abcde";
+    char actual[16] = "0123456789abcde";
+    memmove(expected + 2, expected, 5);
+    if (move_bytes(actual + 2, actual, 5) != actual + 2) return 1;
+    if (memcmp(expected, actual, sizeof(actual)) != 0) return 2;
+    memcpy(expected + 8, expected, 5);
+    if (copy_bytes(actual + 8, actual, 5) != actual + 8) return 3;
+    return memcmp(expected, actual, sizeof(actual)) != 0;
+}
+"#,
+    )
+    .unwrap();
+    let link = Command::new("cc")
+        .arg(&harness)
+        .arg(&obj)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .unwrap();
+    assert!(
+        link.status.success(),
+        "{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    assert!(Command::new(&exe).status().unwrap().success());
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
