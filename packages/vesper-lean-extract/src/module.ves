@@ -47,10 +47,7 @@ pub fn defs_new() -> Defs {
 }
 
 fn wd_at(in s: Slice[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn def_at(in d: Defs, i: u64) -> Def {
@@ -81,14 +78,8 @@ fn starts_with(in b: B, off: u64, len: u64, in prefix: Str) -> bool {
         return false;
     }
     for i in 0..p.len() {
-        let x = match b.names.text.try_get(add(off, i)) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
-        let y = match p.try_get(i) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let x = b.names.text.try_get(add(off, i)).unwrap_or(0);
+        let y = p.try_get(i).unwrap_or(0);
         if x != y {
             return false;
         }
@@ -122,18 +113,16 @@ pub fn take_module(inout b: B, inout d: Defs, owner: u64) -> bool {
         }
         let key = text_symbol(in b, off, len);
         let block = starts_with(in b, off, len, in "$block_");
-        d.defs.push(
-            Def {
-                owner: owner,
-                key: key,
-                at: base,
-                binders: add(base, wrapping_sub(ba, kind_at)),
-                body: add(base, wrapping_sub(bo, kind_at)),
-                end: add(base, wrapping_sub(end, kind_at)),
-                nullary: wd_at(in s, ba) == 0,
-                block: block
-            }
-        );
+        d.defs.push(Def {
+            owner: owner,
+            key: key,
+            at: base,
+            binders: add(base, wrapping_sub(ba, kind_at)),
+            body: add(base, wrapping_sub(bo, kind_at)),
+            end: add(base, wrapping_sub(end, kind_at)),
+            nullary: wd_at(in s, ba) == 0,
+            block: block
+        });
         at = end;
     }
     true
@@ -349,10 +338,7 @@ pub fn emit_ordered(
                 continue;
             }
         }
-        let cyclic = match o.cyclic.try_get(k) {
-            Option::Some(c) => c,
-            Option::None => false,
-        };
+        let cyclic = o.cyclic.try_get(k).unwrap_or(false);
         if cyclic {
             b.w(D_MUTUAL_DEFS);
             b.w(mn);

@@ -209,9 +209,10 @@ impl WheelCore {
     // Move the clock to `now_ns`, opening every tick with work up to it.
     fn advance(inout self, now_ns: u64) -> Option[AdvanceError] {
         if now_ns < self.now_ns {
-            return Option::Some(
-                AdvanceError::Backwards { now_ns: self.now_ns, requested_ns: now_ns }
-            );
+            return Option::Some(AdvanceError::Backwards {
+                now_ns: self.now_ns,
+                requested_ns: now_ns
+            });
         }
         if now_ns > max_time_ns() {
             return Option::Some(AdvanceError::OutOfRange);

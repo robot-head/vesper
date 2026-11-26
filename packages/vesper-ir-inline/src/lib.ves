@@ -916,18 +916,16 @@ fn read_function(
             let ops_at = n32(prog.ops.len());
             read_op(inout reader, in bytes, in symbols, inout prog, op);
             inst_ids.push(n32(prog.insts.len()));
-            prog.insts.push(
-                Inst {
-                    dest: dest,
-                    ty: ty,
-                    span_start: span_start,
-                    span_end: span_end,
-                    flags: inst_flags,
-                    opaque: opaque,
-                    op: op,
-                    ops_at: ops_at
-                }
-            );
+            prog.insts.push(Inst {
+                dest: dest,
+                ty: ty,
+                span_start: span_start,
+                span_end: span_end,
+                flags: inst_flags,
+                opaque: opaque,
+                op: op,
+                ops_at: ops_at
+            });
         }
         let inst_start = n32(prog.ids.len());
         prog.ids.extend(in inst_ids.as_slice());
@@ -935,36 +933,32 @@ fn read_function(
         let term_at = n32(prog.ops.len());
         read_terminator(inout reader, in bytes, in symbols, inout prog, term);
         prog.fun_block_ids.push(n32(prog.block_rows.len()));
-        prog.block_rows.push(
-            Blk {
-                param_start: block_param_start,
-                param_count: n32(block_param_count),
-                inst_start: inst_start,
-                inst_count: n32(inst_count),
-                term: term,
-                term_at: term_at
-            }
-        );
+        prog.block_rows.push(Blk {
+            param_start: block_param_start,
+            param_count: n32(block_param_count),
+            inst_start: inst_start,
+            inst_count: n32(inst_count),
+            term: term,
+            term_at: term_at
+        });
     }
     let index = n32(prog.funs.len());
-    prog.funs.push(
-        Fun {
-            name: name,
-            flags: flags,
-            result_ty: result_ty,
-            row: row,
-            param_start: param_start,
-            param_count: n32(param_count),
-            bound_start: bound_start,
-            bound_count: n32(bound_count),
-            local_start: local_start,
-            local_count: n32(local_count),
-            value_start: n32(value_start),
-            value_count: n32(value_count),
-            block_start: block_start,
-            block_count: n32(block_count)
-        }
-    );
+    prog.funs.push(Fun {
+        name: name,
+        flags: flags,
+        result_ty: result_ty,
+        row: row,
+        param_start: param_start,
+        param_count: n32(param_count),
+        bound_start: bound_start,
+        bound_count: n32(bound_count),
+        local_start: local_start,
+        local_count: n32(local_count),
+        value_start: n32(value_start),
+        value_count: n32(value_count),
+        block_start: block_start,
+        block_count: n32(block_count)
+    });
     if w(name) >= prog.fun_of.len() {
         prog.fun_of.resize(inc(w(name)), NONE32);
     }
@@ -1091,17 +1085,15 @@ pub fn read_input(in bytes: Slice[u8]) -> Prog {
             }
             row = n32(reader.word(in bytes));
         }
-        prog.instances.push(
-            Instance {
-                callee: callee,
-                span_start: span_start,
-                span_end: span_end,
-                has_types: has_types,
-                pair_start: pair_start,
-                pair_count: n32(pair_count),
-                row: row
-            }
-        );
+        prog.instances.push(Instance {
+            callee: callee,
+            span_start: span_start,
+            span_end: span_end,
+            has_types: has_types,
+            pair_start: pair_start,
+            pair_count: n32(pair_count),
+            row: row
+        });
     }
     prog
 }
@@ -1294,9 +1286,10 @@ fn row_has_capability(in prog: Prog, row: u32) -> bool {
     let row_at = w(u32_at(in prog.row_starts, w(row)));
     let label_count = u64_at(in prog.row_words, row_at);
     for i in 0..label_count {
-        let name = n32(
-            u64_at(in prog.row_words, add(add(inc(row_at), wrapping_mul(i, ROW_STRIDE)), 1))
-        );
+        let name = n32(u64_at(
+            in prog.row_words,
+            add(add(inc(row_at), wrapping_mul(i, ROW_STRIDE)), 1)
+        ));
         for k in 0..prog.capability_names.len() {
             if u32_at(in prog.capability_names, k) == name {
                 return true;
@@ -3348,16 +3341,14 @@ fn new_block(
     let inst_start = n32(prog.ids.len());
     prog.ids.extend(in inst_ids.as_slice());
     let id = n32(prog.block_rows.len());
-    prog.block_rows.push(
-        Blk {
-            param_start: param_start,
-            param_count: n32(params.len()),
-            inst_start: inst_start,
-            inst_count: n32(inst_ids.len()),
-            term: term,
-            term_at: term_at
-        }
-    );
+    prog.block_rows.push(Blk {
+        param_start: param_start,
+        param_count: n32(params.len()),
+        inst_start: inst_start,
+        inst_count: n32(inst_ids.len()),
+        term: term,
+        term_at: term_at
+    });
     id
 }
 
@@ -3557,9 +3548,13 @@ fn splice(
                     let value = add(prog.op(source_term_at), next_value);
                     term_at = put_back(inout prog, continuation, value);
                 } else if source.term == T_JUMP {
-                    prog.ops.push(
-                        target(in split_plan, k, prog.op(source_term_at), first, cold_block)
-                    );
+                    prog.ops.push(target(
+                        in split_plan,
+                        k,
+                        prog.op(source_term_at),
+                        first,
+                        cold_block
+                    ));
                     let n = prog.op(inc(source_term_at));
                     prog.ops.push(n);
                     for j in 0..n {
@@ -3568,12 +3563,20 @@ fn splice(
                 } else if source.term == T_BRANCH {
                     term = T_BRANCH;
                     prog.ops.push(add(prog.op(source_term_at), next_value));
-                    prog.ops.push(
-                        target(in split_plan, k, prog.op(inc(source_term_at)), first, cold_block)
-                    );
-                    prog.ops.push(
-                        target(in split_plan, k, prog.op(add(source_term_at, 2)), first, cold_block)
-                    );
+                    prog.ops.push(target(
+                        in split_plan,
+                        k,
+                        prog.op(inc(source_term_at)),
+                        first,
+                        cold_block
+                    ));
+                    prog.ops.push(target(
+                        in split_plan,
+                        k,
+                        prog.op(add(source_term_at, 2)),
+                        first,
+                        cold_block
+                    ));
                 } else if source.term == T_MATCH {
                     term = T_MATCH;
                     let arms = prog.op(inc(source_term_at));
@@ -3587,15 +3590,13 @@ fn splice(
                             prog.op(add(add(source_term_at, 2), wrapping_mul(j, 2)))
                         );
                         words.push(pattern_at);
-                        words.push(
-                            target(
-                                in split_plan,
-                                k,
-                                prog.op(add(add(source_term_at, 3), wrapping_mul(j, 2))),
-                                first,
-                                cold_block
-                            )
-                        );
+                        words.push(target(
+                            in split_plan,
+                            k,
+                            prog.op(add(add(source_term_at, 3), wrapping_mul(j, 2))),
+                            first,
+                            cold_block
+                        ));
                     }
                     term_at = n32(prog.ops.len());
                     prog.ops.extend(in words.as_slice());

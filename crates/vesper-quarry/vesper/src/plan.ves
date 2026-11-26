@@ -107,9 +107,16 @@ pub fn decode_plan(inout q: Q, p: u64) -> (u64, u64) {
         let ta = ex(in q, wrapping_add(p, 1));
         let tb = ex(in q, wrapping_add(p, 2));
         let tc = ex(in q, wrapping_add(p, 3));
-        q.plan.push(
-            Node { kind: 0, a: ta, b: tb, c: tc, d: slots_at, e: nslots, f: first, g: last }
-        );
+        q.plan.push(Node {
+            kind: 0,
+            a: ta,
+            b: tb,
+            c: tc,
+            d: slots_at,
+            e: nslots,
+            f: first,
+            g: last
+        });
         (wrapping_sub(q.plan.len(), 1), e)
     } else if kind == 1 {
         let pred = wrapping_add(p, 1);

@@ -393,13 +393,11 @@ pub fn mk_dim(inout state: St, coeff: u64, in items: ChunkSeq[u32]) -> u32 {
     let id = wrapping_u32(state.dim_nodes.len());
     let items_start = wrapping_u32(state.dim_factors.len());
     state.dim_factors.extend(in items.as_slice());
-    state.dim_nodes.push(
-        DimN {
-            coeff: coeff,
-            factors_start: items_start,
-            factor_count: wrapping_u32(items.len() >> 1)
-        }
-    );
+    state.dim_nodes.push(DimN {
+        coeff: coeff,
+        factors_start: items_start,
+        factor_count: wrapping_u32(items.len() >> 1)
+    });
     state.dim_hashes.push(hash);
     let ok = state.dim_slots.try_set(at, inc32(id));
     if wrapping_mul(state.dim_hashes.len(), 2) > state.dim_mask {
@@ -806,15 +804,13 @@ pub fn mk_ty(
     if kind == T_ADT {
         arity = arity >> 1;
     }
-    state.ty_nodes.push(
-        TyN {
-            kind: kind,
-            primary: primary,
-            secondary: secondary,
-            items_start: items_start,
-            arity: wrapping_u32(arity)
-        }
-    );
+    state.ty_nodes.push(TyN {
+        kind: kind,
+        primary: primary,
+        secondary: secondary,
+        items_start: items_start,
+        arity: wrapping_u32(arity)
+    });
     state.ty_hashes.push(hash);
     let ok = state.ty_slots.try_set(at, inc32(id));
     if wrapping_mul(state.ty_hashes.len(), 2) > state.ty_mask {

@@ -61,28 +61,24 @@ fn poll_and_step_acked(
             match Wire::split_short_header(view) {
                 Err(code) => {
                     XdpNic::recycle_to_fill_ring(rx_frame);
-                    Ok(
-                        AckStepped {
-                            conns: conns,
-                            kind: AMalformed,
-                            retired: 0,
-                            largest: 0,
-                            cid: 0
-                        }
-                    )
+                    Ok(AckStepped {
+                        conns: conns,
+                        kind: AMalformed,
+                        retired: 0,
+                        largest: 0,
+                        cid: 0
+                    })
                 },
                 Ok(hdr) => match lookup_cid(conns, hdr.dcid) {
                     None => {
                         XdpNic::recycle_to_fill_ring(rx_frame);
-                        Ok(
-                            AckStepped {
-                                conns: conns,
-                                kind: AUnknownCid,
-                                retired: 0,
-                                largest: 0,
-                                cid: 0
-                            }
-                        )
+                        Ok(AckStepped {
+                            conns: conns,
+                            kind: AUnknownCid,
+                            retired: 0,
+                            largest: 0,
+                            cid: 0
+                        })
                     },
                     Some(conn) => {
                         let full_pn = decode_packet_number_rfc9000(
@@ -93,15 +89,13 @@ fn poll_and_step_acked(
                         match AckPath::on_ack(view) {
                             Ok(summary) => {
                                 XdpNic::recycle_to_fill_ring(rx_frame);
-                                Ok(
-                                    AckStepped {
-                                        conns: store(conns, updated),
-                                        kind: AAcked,
-                                        retired: summary.retired,
-                                        largest: summary.largest_acked,
-                                        cid: conn.cid
-                                    }
-                                )
+                                Ok(AckStepped {
+                                    conns: store(conns, updated),
+                                    kind: AAcked,
+                                    retired: summary.retired,
+                                    largest: summary.largest_acked,
+                                    cid: conn.cid
+                                })
                             },
                             Err(code) => {
                                 let edt = advance_edt(conn.next_edt_ns, now_ns, conn.pacing_ns);
@@ -121,15 +115,13 @@ fn poll_and_step_acked(
                                     peer_addr: updated.peer_addr,
                                     peer_port: updated.peer_port
                                 };
-                                Ok(
-                                    AckStepped {
-                                        conns: store(conns, replied),
-                                        kind: AReplied,
-                                        retired: 0,
-                                        largest: 0,
-                                        cid: conn.cid
-                                    }
-                                )
+                                Ok(AckStepped {
+                                    conns: store(conns, replied),
+                                    kind: AReplied,
+                                    retired: 0,
+                                    largest: 0,
+                                    cid: conn.cid
+                                })
                             },
                         }
                     },

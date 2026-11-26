@@ -303,14 +303,12 @@ fn build(
             text.push(36);
             push_decimal(inout text, i);
             let fname = names.intern(in text.as_slice());
-            fs.push(
-                LField {
-                    name: fname,
-                    ty: word_ty,
-                    offset: wrapping_i32(wrapping_mul(i, 8)),
-                    layout: wl
-                }
-            );
+            fs.push(LField {
+                name: fname,
+                ty: word_ty,
+                offset: wrapping_i32(wrapping_mul(i, 8)),
+                layout: wl
+            });
         }
         return ls.product(ty, wrapping_mul(words, 8), in fs);
     }
@@ -401,15 +399,13 @@ fn build(
             Option::None => LVariant { name: 0, fa: 0, fc: 0 },
         };
         let id = n32(ls.nodes.len());
-        ls.nodes.push(
-            LNode {
-                ty: ty,
-                size: size,
-                kind: L_PRODUCT,
-                a: wrapping_add(first.fa, base),
-                n: first.fc
-            }
-        );
+        ls.nodes.push(LNode {
+            ty: ty,
+            size: size,
+            kind: L_PRODUCT,
+            a: wrapping_add(first.fa, base),
+            n: first.fc
+        });
         id
     }
 }
@@ -532,12 +528,10 @@ impl Out {
             out.push(name);
             out.push(w(e.n));
             for j in 0..args.len() {
-                out.push(
-                    match args.try_get(j) {
-                        Option::Some(a) => a,
-                        Option::None => 0,
-                    }
-                );
+                out.push(match args.try_get(j) {
+                    Option::Some(a) => a,
+                    Option::None => 0,
+                });
             }
         }
         let tail = self.opt_name(in names, row.tail);
@@ -572,12 +566,10 @@ impl Out {
             }
             words.push(w(n.n));
             for i in 0..args.len() {
-                words.push(
-                    match args.try_get(i) {
-                        Option::Some(a) => a,
-                        Option::None => 0,
-                    }
-                );
+                words.push(match args.try_get(i) {
+                    Option::Some(a) => a,
+                    Option::None => 0,
+                });
             }
         } else if n.kind == TyKind::Fn {
             let mut ps: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -590,12 +582,10 @@ impl Out {
             words.push(w(n.n));
             for i in 0..ps.len() {
                 words.push(widen_u64(t.param_pass(ty, i)));
-                words.push(
-                    match ps.try_get(i) {
-                        Option::Some(a) => a,
-                        Option::None => 0,
-                    }
-                );
+                words.push(match ps.try_get(i) {
+                    Option::Some(a) => a,
+                    Option::None => 0,
+                });
             }
             words.push(r);
             self.row(in t, in names, n.r2, inout words);

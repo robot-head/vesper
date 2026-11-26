@@ -390,10 +390,7 @@ fn trim_end_len(in b: Slice[u8]) -> u64 {
         if len == 0 {
             break;
         }
-        let c = match b.try_get(wrapping_sub(len, 1)) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let c = b.try_get(wrapping_sub(len, 1)).unwrap_or(0);
         if c == 32 || c == 9 || c == 10 || c == 13 {
             len = wrapping_sub(len, 1);
         } else {
@@ -437,10 +434,7 @@ fn unique_assoc_trait(in d: Decls, in names: Names, assoc: u32) -> (bool, u64, C
 
 pub fn put_bytes(inout out: ChunkSeq[u8], in b: Slice[u8]) {
     for i in 0..b.len() {
-        let c = match b.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let c = b.try_get(i).unwrap_or(0);
         out.push(c);
     }
 }
@@ -647,10 +641,7 @@ fn add_gen_bounds(
     for bi in 0..b_trait.len() {
         let gi = w(u32_at(in b_gen_idx, bi));
         let gname = u32_at(in gen_names, gi);
-        let grow = match gen_rows.try_get(gi) {
-            Option::Some(v) => v,
-            Option::None => false,
-        };
+        let grow = gen_rows.try_get(gi).unwrap_or(false);
         if grow {
             continue;
         }
@@ -677,9 +668,13 @@ fn add_gen_bounds(
             };
             args.push(QArg { is_row: tg.row, ty: arg_ty });
         }
-        assumptions.push(
-            QGoal { self_ty: self_ty, trait_name: tname, brand_opt: 0, arg_a: arg_a, arg_n: tr.gn }
-        );
+        assumptions.push(QGoal {
+            self_ty: self_ty,
+            trait_name: tname,
+            brand_opt: 0,
+            arg_a: arg_a,
+            arg_n: tr.gn
+        });
     }
 }
 
@@ -747,15 +742,13 @@ pub fn read_cx_header(
                             };
                             args.push(QArg { is_row: tg.row, ty: arg_ty });
                         }
-                        assumptions.push(
-                            QGoal {
-                                self_ty: wh.ty,
-                                trait_name: tref.name,
-                                brand_opt: 0,
-                                arg_a: arg_a,
-                                arg_n: tr.gn
-                            }
-                        );
+                        assumptions.push(QGoal {
+                            self_ty: wh.ty,
+                            trait_name: tref.name,
+                            brand_opt: 0,
+                            arg_a: arg_a,
+                            arg_n: tr.gn
+                        });
                     }
                 }
             }
@@ -789,9 +782,13 @@ pub fn read_cx_header(
                 }
             }
             if ok {
-                assumptions.push(
-                    QGoal { self_ty: gty, trait_name: bt, brand_opt: 0, arg_a: arg_a, arg_n: tr.gn }
-                );
+                assumptions.push(QGoal {
+                    self_ty: gty,
+                    trait_name: bt,
+                    brand_opt: 0,
+                    arg_a: arg_a,
+                    arg_n: tr.gn
+                });
             }
         } else {
             for _ in 0..na {
@@ -848,10 +845,7 @@ pub fn select_in_cx(
     args.extend(in cx.args.as_slice());
     let arg_a = n32(args.len());
     for i in 0..targs.len() {
-        let ty = match targs.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let ty = targs.try_get(i).unwrap_or(0);
         args.push(QArg { is_row: false, ty: ty });
     }
     let mut env_params = ChunkSeq::with_capacity[Gen](cx.env_params.len());
@@ -1313,14 +1307,8 @@ fn eq_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
         return false;
     }
     for i in 0..a.len() {
-        let ca = match a.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let cb = match b.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let ca = a.try_get(i).unwrap_or(0);
+        let cb = b.try_get(i).unwrap_or(0);
         if ca != cb {
             return false;
         }
@@ -1404,51 +1392,45 @@ fn conform_type_vars(
     if n.kind == K_NAMED {
         let mut nargs = ChunkSeq::with_capacity[u32](w(n.n));
         for i in 0..w(n.n) {
-            nargs.push(
-                conform_type_vars(
-                    inout t,
-                    sy,
-                    in d,
-                    u32_at(in t.items, add(w(n.a), i)),
-                    c,
-                    in vnames,
-                    in vtys
-                )
-            );
+            nargs.push(conform_type_vars(
+                inout t,
+                sy,
+                in d,
+                u32_at(in t.items, add(w(n.a), i)),
+                c,
+                in vnames,
+                in vtys
+            ));
         }
         return t.named(n.name, in nargs);
     }
     if n.kind == K_TUPLE {
         let mut nargs = ChunkSeq::with_capacity[u32](w(n.n));
         for i in 0..w(n.n) {
-            nargs.push(
-                conform_type_vars(
-                    inout t,
-                    sy,
-                    in d,
-                    u32_at(in t.items, add(w(n.a), i)),
-                    c,
-                    in vnames,
-                    in vtys
-                )
-            );
+            nargs.push(conform_type_vars(
+                inout t,
+                sy,
+                in d,
+                u32_at(in t.items, add(w(n.a), i)),
+                c,
+                in vnames,
+                in vtys
+            ));
         }
         return t.tuple(in nargs);
     }
     if n.kind == K_FN {
         let mut ptys = ChunkSeq::with_capacity[u32](w(n.n));
         for i in 0..w(n.n) {
-            ptys.push(
-                conform_type_vars(
-                    inout t,
-                    sy,
-                    in d,
-                    u32_at(in t.items, add(w(n.a), i)),
-                    c,
-                    in vnames,
-                    in vtys
-                )
-            );
+            ptys.push(conform_type_vars(
+                inout t,
+                sy,
+                in d,
+                u32_at(in t.items, add(w(n.a), i)),
+                c,
+                in vnames,
+                in vtys
+            ));
         }
         let nres = conform_type_vars(inout t, sy, in d, n.r, c, in vnames, in vtys);
         let nrow = conform_row_vars(inout t, sy, in d, n.r2, c, in vnames, in vtys);
@@ -1481,17 +1463,15 @@ fn conform_row_vars(
         let en = t.effect_at(add(w(rn.a), i));
         let ea = n32(eargs.len());
         for j in 0..w(en.n) {
-            eargs.push(
-                conform_type_vars(
-                    inout t,
-                    sy,
-                    in d,
-                    u32_at(in t.items, add(w(en.a), j)),
-                    c,
-                    in vnames,
-                    in vtys
-                )
-            );
+            eargs.push(conform_type_vars(
+                inout t,
+                sy,
+                in d,
+                u32_at(in t.items, add(w(en.a), j)),
+                c,
+                in vnames,
+                in vtys
+            ));
         }
         effs.push(EffNode { label: en.label, name: en.name, a: ea, n: en.n });
     }

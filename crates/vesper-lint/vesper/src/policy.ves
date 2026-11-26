@@ -618,9 +618,14 @@ fn set_node(inout t: Toml, id: u32, n: TNode) {
 
 fn new_node(inout t: Toml, kind: u8, implicit: bool, dotted: bool) -> u32 {
     let id = wrapping_u32(t.nodes.len());
-    t.nodes.push(
-        TNode { kind: kind, implicit: implicit, dotted: dotted, first: NONE, last: NONE, count: 0 }
-    );
+    t.nodes.push(TNode {
+        kind: kind,
+        implicit: implicit,
+        dotted: dotted,
+        first: NONE,
+        last: NONE,
+        count: 0
+    });
     id
 }
 
@@ -632,15 +637,13 @@ fn scalar(inout t: Toml, kind: u8) -> u32 {
 // container `c`.
 fn append(inout t: Toml, c: u32, kstart: u64, klen: u64, hash: u64, child: u32) {
     let e = wrapping_u32(t.ents.len());
-    t.ents.push(
-        TEnt {
-            kstart: wrapping_u32(kstart),
-            klen: wrapping_u32(klen),
-            hash: hash,
-            child: child,
-            next: NONE
-        }
-    );
+    t.ents.push(TEnt {
+        kstart: wrapping_u32(kstart),
+        klen: wrapping_u32(klen),
+        hash: hash,
+        child: child,
+        next: NONE
+    });
     let mut n = node(in t, c);
     if n.last == NONE {
         n.first = e;

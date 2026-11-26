@@ -660,13 +660,11 @@ fn release_wildcards(
             let _ = program.insts.try_set(ii, inst);
             fn_set_value_type(inout program, fi, inst.dest, target_res);
             let handle_index = list_find_u32(in handles, handle);
-            sites.push(
-                DropSite {
-                    graph: func.name,
-                    handle: handle,
-                    effect: u32_at(in effects, handle_index)
-                }
-            );
+            sites.push(DropSite {
+                graph: func.name,
+                handle: handle,
+                effect: u32_at(in effects, handle_index)
+            });
         }
     }
 }
@@ -886,17 +884,15 @@ fn split_edge(inout program: Program, fi: u64, from_rel: u64, to_rel: u64) {
         }
         func.b0 = new_b0;
     }
-    program.blocks.push(
-        BlockRow {
-            ha: header_start,
-            hn: header_len,
-            i0: 0,
-            ic: 0,
-            term: Term::Jump,
-            ta: term_start,
-            tn: term_len
-        }
-    );
+    program.blocks.push(BlockRow {
+        ha: header_start,
+        hn: header_len,
+        i0: 0,
+        ic: 0,
+        term: Term::Jump,
+        ta: term_start,
+        tn: term_len
+    });
     func.bc = inc(func.bc);
     let _ = program.fns.try_set(fi, func);
     // Rewrite `from_blk`'s terminator target `to_rel -> at_rel`.
@@ -982,21 +978,19 @@ fn emit_drop(
         program.put(item.path, Tag::Path);
         program.put(w(TyPass::Sink), Tag::Raw);
         program.put(0, Tag::Raw);
-        program.insts.push(
-            InstRow {
-                dest: value,
-                ty: item.ty,
-                s0: 0,
-                s1: 0,
-                has_token: 0,
-                tin: 0,
-                tout: 0,
-                fallible: 0,
-                op: Op::Read,
-                a: read_ops,
-                n: 4
-            }
-        );
+        program.insts.push(InstRow {
+            dest: value,
+            ty: item.ty,
+            s0: 0,
+            s1: 0,
+            has_token: 0,
+            tin: 0,
+            tout: 0,
+            fallible: 0,
+            op: Op::Read,
+            a: read_ops,
+            n: 4
+        });
     }
     let dest = next_val;
     next_val = wrapping_add(next_val, 1);
@@ -1010,25 +1004,25 @@ fn emit_drop(
     program.put(0, Tag::Path);
     program.put(0, Tag::Raw);
     program.put(0, Tag::OptName);
-    program.insts.push(
-        InstRow {
-            dest: dest,
-            ty: target_res,
-            s0: 0,
-            s1: 0,
-            has_token: 0,
-            tin: 0,
-            tout: 0,
-            fallible: 0,
-            op: Op::Call,
-            a: call_ops,
-            n: 8
-        }
-    );
+    program.insts.push(InstRow {
+        dest: dest,
+        ty: target_res,
+        s0: 0,
+        s1: 0,
+        has_token: 0,
+        tin: 0,
+        tout: 0,
+        fallible: 0,
+        op: Op::Call,
+        a: call_ops,
+        n: 8
+    });
     let handle_index = list_find_u32(in handles, handle);
-    sites.push(
-        DropSite { graph: func.name, handle: handle, effect: u32_at(in effects, handle_index) }
-    );
+    sites.push(DropSite {
+        graph: func.name,
+        handle: handle,
+        effect: u32_at(in effects, handle_index)
+    });
     true
 }
 
@@ -1652,17 +1646,27 @@ pub fn ffi_drops_entry(in input: Str) -> ChunkSeq[u64] {
             for k in 0..before_inst_count {
                 let block = reader.word(in bytes);
                 let at = reader.word(in bytes);
-                before_inst.push(
-                    read_drop_item(inout reader, in bytes, in ctx, inout program, block, at)
-                );
+                before_inst.push(read_drop_item(
+                    inout reader,
+                    in bytes,
+                    in ctx,
+                    inout program,
+                    block,
+                    at
+                ));
             }
             let after_inst_count = reader.word(in bytes);
             for k in 0..after_inst_count {
                 let block = reader.word(in bytes);
                 let at = reader.word(in bytes);
-                after_inst.push(
-                    read_drop_item(inout reader, in bytes, in ctx, inout program, block, at)
-                );
+                after_inst.push(read_drop_item(
+                    inout reader,
+                    in bytes,
+                    in ctx,
+                    inout program,
+                    block,
+                    at
+                ));
             }
             let before_term_count = reader.word(in bytes);
             for k in 0..before_term_count {
@@ -1671,16 +1675,14 @@ pub fn ffi_drops_entry(in input: Str) -> ChunkSeq[u64] {
                     .push(read_drop_item(inout reader, in bytes, in ctx, inout program, block, 0));
             }
         }
-        plans.push(
-            FnPlan {
-                fi: fi,
-                ok: ok,
-                splits: splits,
-                before_inst: before_inst,
-                after_inst: after_inst,
-                before_term: before_term
-            }
-        );
+        plans.push(FnPlan {
+            fi: fi,
+            ok: ok,
+            splits: splits,
+            before_inst: before_inst,
+            after_inst: after_inst,
+            before_term: before_term
+        });
     }
     let (handles, effects) = droppable_resolved(inout ctx, in program);
     let mut sites = ChunkSeq::new[DropSite]();

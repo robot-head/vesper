@@ -55,10 +55,7 @@ const ITEM_IMPL: u8 = 4;
 const ITEM_TRAIT: u8 = 5;
 
 fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 // ------------------------------------------------------------ facts
@@ -127,10 +124,7 @@ pub struct WordReader {
 }
 
 pub fn read_word(in b: Slice[u8], inout r: WordReader) -> u64 {
-    let x = match b.try_read_u64_le(r.pos) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    };
+    let x = b.try_read_u64_le(r.pos).unwrap_or(0);
     r.pos = wrapping_add(r.pos, 8);
     x
 }

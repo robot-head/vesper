@@ -1057,19 +1057,17 @@ pub fn plan(inout ctx: Cx) -> Plan eff [Fail[WErr]] {
     for i in 0..entry_labels.len() {
         qlabels.push(u32_at(in entry_labels, i));
     }
-    queue.push(
-        Queued {
-            key: entry,
-            base: entry,
-            v0: 0,
-            vn: 0,
-            role: R_ORDINARY,
-            handler: 0,
-            op: 0,
-            l0: entry_label_start,
-            ln: entry_labels.len()
-        }
-    );
+    queue.push(Queued {
+        key: entry,
+        base: entry,
+        v0: 0,
+        vn: 0,
+        role: R_ORDINARY,
+        handler: 0,
+        op: 0,
+        l0: entry_label_start,
+        ln: entry_labels.len()
+    });
     let mut seen = ChunkSeq::new[u32]();
     p_insts.reserve(8192);
     p_vkeys.reserve(32768);
@@ -1195,19 +1193,17 @@ pub fn plan(inout ctx: Cx) -> Plan eff [Fail[WErr]] {
                         qlabels.push(u32_at(in labels, k));
                     }
                     let scratch_at_queue = stage2_heap_swap(perm);
-                    queue.push(
-                        Queued {
-                            key: key,
-                            base: callee,
-                            v0: queued_var_start,
-                            vn: callee_vars.len(),
-                            role: R_ORDINARY,
-                            handler: 0,
-                            op: 0,
-                            l0: queued_label_start,
-                            ln: labels.len()
-                        }
-                    );
+                    queue.push(Queued {
+                        key: key,
+                        base: callee,
+                        v0: queued_var_start,
+                        vn: callee_vars.len(),
+                        role: R_ORDINARY,
+                        handler: 0,
+                        op: 0,
+                        l0: queued_label_start,
+                        ln: labels.len()
+                    });
                     perm = stage2_heap_swap(scratch_at_queue);
                 } else if instr.op == Op::Closure {
                     let (pool, aliases_at, n_aliases) = closure_operands(in ctx, instr.a);
@@ -1239,19 +1235,17 @@ pub fn plan(inout ctx: Cx) -> Plan eff [Fail[WErr]] {
                         qlabels.push(u32_at(in qlabels, add(queued.l0, k)));
                     }
                     let scratch_at_queue = stage2_heap_swap(perm);
-                    queue.push(
-                        Queued {
-                            key: key,
-                            base: fact.fn_,
-                            v0: queued_var_start,
-                            vn: vars.len(),
-                            role: R_ORDINARY,
-                            handler: 0,
-                            op: 0,
-                            l0: queued_label_start,
-                            ln: queued.ln
-                        }
-                    );
+                    queue.push(Queued {
+                        key: key,
+                        base: fact.fn_,
+                        v0: queued_var_start,
+                        vn: vars.len(),
+                        role: R_ORDINARY,
+                        handler: 0,
+                        op: 0,
+                        l0: queued_label_start,
+                        ln: queued.ln
+                    });
                     perm = stage2_heap_swap(scratch_at_queue);
                 } else if instr.op == Op::Read {
                     let root = n32(ctx.ir.word(instr.a));
@@ -1264,19 +1258,17 @@ pub fn plan(inout ctx: Cx) -> Plan eff [Fail[WErr]] {
                             qlabels.push(u32_at(in labels, k));
                         }
                         let scratch_at_queue = stage2_heap_swap(perm);
-                        queue.push(
-                            Queued {
-                                key: root,
-                                base: root,
-                                v0: 0,
-                                vn: 0,
-                                role: R_ORDINARY,
-                                handler: 0,
-                                op: 0,
-                                l0: queued_label_start,
-                                ln: labels.len()
-                            }
-                        );
+                        queue.push(Queued {
+                            key: root,
+                            base: root,
+                            v0: 0,
+                            vn: 0,
+                            role: R_ORDINARY,
+                            handler: 0,
+                            op: 0,
+                            l0: queued_label_start,
+                            ln: labels.len()
+                        });
                         perm = stage2_heap_swap(scratch_at_queue);
                     }
                 } else if instr.op == Op::Handle {
@@ -1325,19 +1317,17 @@ pub fn plan(inout ctx: Cx) -> Plan eff [Fail[WErr]] {
                                 qlabels.push(handler_row.label);
                             }
                         }
-                        queue.push(
-                            Queued {
-                                key: key,
-                                base: base,
-                                v0: queued_var_start,
-                                vn: vars.len(),
-                                role: role,
-                                handler: id,
-                                op: op,
-                                l0: queued_label_start,
-                                ln: wrapping_sub(qlabels.len(), queued_label_start)
-                            }
-                        );
+                        queue.push(Queued {
+                            key: key,
+                            base: base,
+                            v0: queued_var_start,
+                            vn: vars.len(),
+                            role: role,
+                            handler: id,
+                            op: op,
+                            l0: queued_label_start,
+                            ln: wrapping_sub(qlabels.len(), queued_label_start)
+                        });
                     }
                     for k in 0..handler_row.en {
                         sorted_insert(
@@ -1353,22 +1343,20 @@ pub fn plan(inout ctx: Cx) -> Plan eff [Fail[WErr]] {
         }
         let inst_index = p_insts.len();
         let scratch_at_inst = stage2_heap_swap(perm);
-        p_insts.push(
-            Inst {
-                key: queued.key,
-                base: queued.base,
-                fn_index: fn_index,
-                v0: var_start,
-                vn: vars.len(),
-                role: queued.role,
-                handler: queued.handler,
-                op: queued.op,
-                c0: call_start,
-                cn: wrapping_sub(p_calls.len(), call_start),
-                l0: label_start,
-                ln: queued.ln
-            }
-        );
+        p_insts.push(Inst {
+            key: queued.key,
+            base: queued.base,
+            fn_index: fn_index,
+            v0: var_start,
+            vn: vars.len(),
+            role: queued.role,
+            handler: queued.handler,
+            op: queued.op,
+            c0: call_start,
+            cn: wrapping_sub(p_calls.len(), call_start),
+            l0: label_start,
+            ln: queued.ln
+        });
         perm = stage2_heap_swap(scratch_at_inst);
         set_by_symbol(inout p_by_key, queued.key, n32(inc(inst_index)));
         if scratch_end != 0 && stage2_heap_mark() >= scratch_end {
@@ -1874,21 +1862,19 @@ fn handler(
             p_hw.push(ty);
         }
         let function = instance_name(inout ctx, clause_fn, in vars);
-        p_clauses.push(
-            HClause {
-                op: op,
-                sig: op_decl.sig,
-                function: function,
-                base: clause_fn,
-                mode: mode,
-                pat_start: pat_start,
-                pat_count: pat_count,
-                resume: resume,
-                cap_start: cap_start,
-                cap_count: caps.len(),
-                param_ty_start: param_ty_start
-            }
-        );
+        p_clauses.push(HClause {
+            op: op,
+            sig: op_decl.sig,
+            function: function,
+            base: clause_fn,
+            mode: mode,
+            pat_start: pat_start,
+            pat_count: pat_count,
+            resume: resume,
+            cap_start: cap_start,
+            cap_count: caps.len(),
+            param_ty_start: param_ty_start
+        });
     }
     if n_ret_pats == 0 {
         Fail::raise(werr(K_INVALID, 0, 55));

@@ -163,9 +163,14 @@ fn read_sigs(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Sigs {
             s.ppass.push(r.word(in b));
             s.pty.push(type_word(inout r, in b, in c));
         }
-        s.rows.push(
-            Sig { name: name, generics: generics, result: result, row: row, pa: pa, pn: np }
-        );
+        s.rows.push(Sig {
+            name: name,
+            generics: generics,
+            result: result,
+            row: row,
+            pa: pa,
+            pn: np
+        });
         if w(name) >= s.by_name.len() {
             s.by_name.resize(inc(w(name)), 0);
         }
@@ -195,13 +200,11 @@ impl Gen {
         let mut params = ChunkSeq::with_capacity[ParamInfo](g.pn);
         for i in 0..g.pn {
             let k = add(g.pa, i);
-            params.push(
-                ParamInfo {
-                    name: u32_at(in self.s.pname, k),
-                    pass: wrapping_u8(u64_at(in self.s.ppass, k)),
-                    ty: u32_at(in self.s.pty, k)
-                }
-            );
+            params.push(ParamInfo {
+                name: u32_at(in self.s.pname, k),
+                pass: wrapping_u8(u64_at(in self.s.ppass, k)),
+                ty: u32_at(in self.s.pty, k)
+            });
         }
         let conc = Conc { f: 0, params: params, result: g.result, row: g.row };
         let res = specialized(
@@ -524,7 +527,8 @@ fn calls_out(in p: Program, in names: Names, inst: InstRow) -> bool {
     )
 }
 
-// `bounds_hoist::keeps_length` of a `SeqOp`'s `Debug` text.
+// `bounds_hoist::keeps_length` of a `SeqOp`'s `Debug` text, fixed-width
+// reads and writes included (#2022).
 fn keeps_length(in names: Names, s: u32) -> bool {
     names.spells(s, in "Get".as_bytes())
         || names.spells(s, in "SliceGet".as_bytes())
@@ -536,6 +540,7 @@ fn keeps_length(in names: Names, s: u32) -> bool {
         || names.spells(s, in "SliceLen".as_bytes())
         || names.spells(s, in "AsSlice".as_bytes())
         || names.spells(s, in "SubSlice".as_bytes())
+        || names.has_prefix(s, in "Wide(".as_bytes())
 }
 
 // `keeps_in_home` (#1330).

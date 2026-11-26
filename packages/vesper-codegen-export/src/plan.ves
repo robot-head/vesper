@@ -503,23 +503,21 @@ pub fn read_planner(in b: Slice[u8]) -> Planner {
             params_in.push(ParamIn { name: pname, pass: pass, ty: pty });
         }
         let result = n32(r.word(in b));
-        fns.push(
-            FnIn {
-                name: name,
-                generated: generated,
-                public: public,
-                generics: generics,
-                dyn_param: dyn_param,
-                dyn_trait: dyn_trait,
-                tail: tail,
-                ea: ea,
-                en: en,
-                caller_slot: caller_slot,
-                pa: pa,
-                pn: pn,
-                result: result
-            }
-        );
+        fns.push(FnIn {
+            name: name,
+            generated: generated,
+            public: public,
+            generics: generics,
+            dyn_param: dyn_param,
+            dyn_trait: dyn_trait,
+            tail: tail,
+            ea: ea,
+            en: en,
+            caller_slot: caller_slot,
+            pa: pa,
+            pn: pn,
+            result: result
+        });
     }
     let s_unit = intern_text(inout names, "Unit");
     let s_fail = intern_text(inout names, "Fail");
@@ -1069,21 +1067,19 @@ impl Planner {
             }
             // Insert before recursing so a recursive type cannot loop.
             let di = self.decls.len();
-            self.decls.push(
-                Decl {
-                    name: n,
-                    is_enum: nd.is_enum,
-                    words: nd.size / 8,
-                    is_handle: is_handle,
-                    linear: linear,
-                    drop: drop,
-                    owns_sequence: false,
-                    mirror: MIRROR_NONE,
-                    reason: 0,
-                    va: 0,
-                    vn: 0
-                }
-            );
+            self.decls.push(Decl {
+                name: n,
+                is_enum: nd.is_enum,
+                words: nd.size / 8,
+                is_handle: is_handle,
+                linear: linear,
+                drop: drop,
+                owns_sequence: false,
+                mirror: MIRROR_NONE,
+                reason: 0,
+                va: 0,
+                vn: 0
+            });
             if self.decl_by.len() <= w(n) {
                 self.decl_by.resize(wrapping_add(w(n), 1), 0);
             }
@@ -1149,13 +1145,11 @@ impl Planner {
                 let fc = u64_at(in counts, v);
                 for k in 0..fc {
                     let j = wrapping_add(at, k);
-                    self.dfields.push(
-                        DField {
-                            name: u32_at(in fnames, j),
-                            ty: u32_at(in ftys, j),
-                            offset: u64_at(in foffs, j)
-                        }
-                    );
+                    self.dfields.push(DField {
+                        name: u32_at(in fnames, j),
+                        ty: u32_at(in ftys, j),
+                        offset: u64_at(in foffs, j)
+                    });
                 }
                 at = wrapping_add(at, fc);
                 self.dvars.push(DVar { name: vname, fa: fa, fc: fc });
@@ -1339,15 +1333,13 @@ impl Planner {
         let symbol = intern_buf(inout self.names, in o);
         let pa = self.pouts.len();
         for i in 0..pnames.len() {
-            self.pouts.push(
-                POut {
-                    name: u32_at(in pnames, i),
-                    ty: u32_at(in ptys, i),
-                    pointer: u8_at(in pptr, i) != 0,
-                    raw: u8_at(in ppass, i),
-                    in_place: false
-                }
-            );
+            self.pouts.push(POut {
+                name: u32_at(in pnames, i),
+                ty: u32_at(in ptys, i),
+                pointer: u8_at(in pptr, i) != 0,
+                raw: u8_at(in ppass, i),
+                in_place: false
+            });
         }
         let ea = self.errs.len();
         for i in 0..errors.len() {
@@ -1358,24 +1350,22 @@ impl Planner {
             self.fn_libs.push(u32_at(in foreign, i));
         }
         let id = n32(self.outs.len());
-        self.outs.push(
-            FnOut {
-                name: function,
-                symbol: symbol,
-                pa: pa,
-                pn: pnames.len(),
-                result: result,
-                result_words: rn.size / 8,
-                result_pointer: rn.aggregate || wide_result,
-                ea: ea,
-                en: errors.len(),
-                fail: fail,
-                instance_of: 0,
-                la: la,
-                ln: foreign.len(),
-                result_in_place: false
-            }
-        );
+        self.outs.push(FnOut {
+            name: function,
+            symbol: symbol,
+            pa: pa,
+            pn: pnames.len(),
+            result: result,
+            result_words: rn.size / 8,
+            result_pointer: rn.aggregate || wide_result,
+            ea: ea,
+            en: errors.len(),
+            fail: fail,
+            instance_of: 0,
+            la: la,
+            ln: foreign.len(),
+            result_in_place: false
+        });
         id
     }
 

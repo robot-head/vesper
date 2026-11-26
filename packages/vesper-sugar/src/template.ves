@@ -391,19 +391,17 @@ fn parse(
             break;
         }
         if tt_kind(in toks, tok) != k_dollar() {
-            ids.push(
-                push_part(
-                    inout parsed,
-                    P_TEXT,
-                    tt_s(in toks, tok),
-                    tt_e(in toks, tok),
-                    0,
-                    0,
-                    0,
-                    0,
-                    0
-                )
-            );
+            ids.push(push_part(
+                inout parsed,
+                P_TEXT,
+                tt_s(in toks, tok),
+                tt_e(in toks, tok),
+                0,
+                0,
+                0,
+                0,
+                0
+            ));
             tok = inc(tok);
             continue;
         }
@@ -524,19 +522,17 @@ fn parse(
                 return 0;
             }
             let plus: u64 = if quant == k_plus() { 1 } else { 0 };
-            ids.push(
-                push_part(
-                    inout parsed,
-                    P_REPEAT,
-                    body >> 32,
-                    body & 4294967295,
-                    sep_start,
-                    sep_end,
-                    plus,
-                    first,
-                    count
-                )
-            );
+            ids.push(push_part(
+                inout parsed,
+                P_REPEAT,
+                body >> 32,
+                body & 4294967295,
+                sep_start,
+                sep_end,
+                plus,
+                first,
+                count
+            ));
         } else {
             let seq = tok < tt_len(in toks) && tt_kind(in toks, tok) == k_dot_dot();
             if seq {
@@ -547,19 +543,17 @@ fn parse(
                 return 0;
             }
             let seq_code: u64 = if seq { 1 } else { 0 };
-            ids.push(
-                push_part(
-                    inout parsed,
-                    P_HOLE,
-                    tt_s(in toks, tok),
-                    tt_e(in toks, tok),
-                    seq_code,
-                    0,
-                    0,
-                    0,
-                    0
-                )
-            );
+            ids.push(push_part(
+                inout parsed,
+                P_HOLE,
+                tt_s(in toks, tok),
+                tt_e(in toks, tok),
+                seq_code,
+                0,
+                0,
+                0,
+                0
+            ));
         }
         tok = inc(tok);
     }

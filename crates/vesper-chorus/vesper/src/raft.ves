@@ -1251,9 +1251,12 @@ fn handle_request(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
             return;
         }
         let h_opt = handle Fail[WireErr] in {
-            Option::Some(
-                batch_decode_range(in rc.pkt_bytes.as_slice(), boff, blen, inout rc.tmp_entries)
-            )
+            Option::Some(batch_decode_range(
+                in rc.pkt_bytes.as_slice(),
+                boff,
+                blen,
+                inout rc.tmp_entries
+            ))
         } with {
             return v => v,
             raise(_e, _k) => Option::None,
@@ -1354,9 +1357,12 @@ fn handle_request(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
             return;
         }
         let h_opt = handle Fail[WireErr] in {
-            Option::Some(
-                batch_decode_range(in rc.pkt_bytes.as_slice(), boff, blen, inout rc.tmp_entries)
-            )
+            Option::Some(batch_decode_range(
+                in rc.pkt_bytes.as_slice(),
+                boff,
+                blen,
+                inout rc.tmp_entries
+            ))
         } with {
             return v => v,
             raise(_e, _k) => Option::None,

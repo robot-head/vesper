@@ -761,17 +761,15 @@ fn instantiate(inout m: Mo, f: FnRow, name: u32, in vars: Vars) eff [Fail[VErr]]
             let row = instruction(inout m, i, name, in vars, in bound);
             m.p.insts.push(row);
         }
-        m.p.blocks.push(
-            BlockRow {
-                ha: blk.ha,
-                hn: blk.hn,
-                i0: i0,
-                ic: blk.ic,
-                term: blk.term,
-                ta: blk.ta,
-                tn: blk.tn
-            }
-        );
+        m.p.blocks.push(BlockRow {
+            ha: blk.ha,
+            hn: blk.hn,
+            i0: i0,
+            ic: blk.ic,
+            term: blk.term,
+            ta: blk.ta,
+            tn: blk.tn
+        });
     }
     m.p.fns.push(FnRow { name: name, ha: ha, hn: f.hn, b0: b0, bc: f.bc, ta: f.ta, tn: f.tn });
 }
