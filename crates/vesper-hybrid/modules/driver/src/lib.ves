@@ -61,12 +61,6 @@ use @vesper/driver::triple::{is_windows as triple_is_windows};
 use self::assemble::{assembled_words};
 // The package graph read of the package load (#1986 slice 2).
 use self::load::{read_graph};
-// `vesper proof-audit` (SH5 lane 18, #1341; moved here from its own
-// module by #2091).
-use @vesper/proof-audit::{run as proof_audit_command};
-use @vesper/proof-audit::strs::{byte as audit_byte, push as audit_push, strs_new as audit_strs_new};
-// `vesper verify SOURCE --format` (SH5 lane 18, #1341).
-use @vesper/verify::{run_format as verify_format_command};
 // hd_step group 2 (#1893): the front-end passes in Vesper.
 use self::front::{parse_clean, cst_text};
 use self::interface::{interface_json};
@@ -317,7 +311,14 @@ fn value(in o: Options, k: u64) -> ChunkSeq[u8] {
 // the ones it answers (`VESPER_HYBRID_STATS=1`).
 fn commands(
     in args: Args
-) -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver], Ffi[HybridCommands]] {
+) -> i64 eff [
+    Ffi[StdFs],
+    Ffi[StdProcess],
+    Ffi[StdEnv],
+    Ffi[Blake3],
+    Ffi[HybridDriver],
+    Ffi[HybridCommands]
+] {
     let code = run_command(in args);
     if code != delegate() {
         HybridDriver::hd_commands_answered();
@@ -328,7 +329,14 @@ fn commands(
 // The hybrid's `main` for the compile commands: the process exit code, or
 // `delegate()`.
 pub fn main_code()
-    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver], Ffi[HybridCommands]] {
+    -> i64 eff [
+        Ffi[StdFs],
+        Ffi[StdProcess],
+        Ffi[StdEnv],
+        Ffi[Blake3],
+        Ffi[HybridDriver],
+        Ffi[HybridCommands]
+    ] {
     let args = match read_args() {
         Option::Some(a) => a,
         Option::None => return delegate(),
@@ -1322,76 +1330,6 @@ fn windows_link_request(in object: Slice[u8], in path: Slice[u8], in o: Options)
         request.extend(in linker.as_slice());
     }
     request
-}
-
-// The bytes of the stdout length in `proof_audit_run`'s result, and the
-// radix of one byte.
-const AUDIT_LEN_BYTES: u64 = 8;
-const BYTE_RADIX: u64 = 256;
-
-// `proof_commands::run` (the `proof_audit` swap, src/swap/proof_audit.rs).
-// `hc_proof_audit_run` (src/commands.rs) hands over the arguments after
-// the command name, each followed by a NUL byte, and reads back the
-// result: one status byte (0 when the command succeeded, 1 when it
-// failed), the length of what it prints on stdout as 8 little-endian
-// bytes, those bytes, then the error text.
-pub fn proof_audit_run(
-    in packed: Slice[u8]
-) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
-    let mut args = audit_strs_new();
-    let mut from: u64 = 0;
-    for i in 0..packed.len() {
-        if audit_byte(in packed, i) == 0 {
-            audit_push(inout args, in packed[from..i]);
-            from = wrapping_add(i, 1);
-        }
-    }
-    let o = proof_audit_command(in args);
-    let mut result: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    if o.failed {
-        result.push(1);
-    } else {
-        result.push(0);
-    }
-    let mut n = o.out.len();
-    for _k in 0..AUDIT_LEN_BYTES {
-        result.push(wrapping_u8(n % BYTE_RADIX));
-        n = n / BYTE_RADIX;
-    }
-    result.extend(in o.out.as_slice());
-    result.extend(in o.err.as_slice());
-    result
-}
-
-// `verify_commands::run` for `--format` (the `verify` swap,
-// src/swap/verify.rs): `hc_verify_run` hands over `--format` runs in
-// `proof_audit_run`'s packing and reads back the same result.
-pub fn verify_run(
-    in packed: Slice[u8]
-) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
-    let mut args = audit_strs_new();
-    let mut from: u64 = 0;
-    for i in 0..packed.len() {
-        if audit_byte(in packed, i) == 0 {
-            audit_push(inout args, in packed[from..i]);
-            from = wrapping_add(i, 1);
-        }
-    }
-    let o = verify_format_command(in args);
-    let mut result: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    if o.failed {
-        result.push(1);
-    } else {
-        result.push(0);
-    }
-    let mut n = o.out.len();
-    for _k in 0..AUDIT_LEN_BYTES {
-        result.push(wrapping_u8(n % BYTE_RADIX));
-        n = n / BYTE_RADIX;
-    }
-    result.extend(in o.out.as_slice());
-    result.extend(in o.err.as_slice());
-    result
 }
 
 // The version of the options record (`record_format` of @vesper/driver);
