@@ -17,8 +17,6 @@ impl Show for Box[i64] {
     }
 }
 fn main() -> i64 {
-    let b = Box {
-        v: 3
-    };
+    let b = Box { v: 3 };
     b.show()
 }

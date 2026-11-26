@@ -126,16 +126,7 @@ pub struct Prog {
 }
 
 pub fn no_expr() -> ExprNode {
-    ExprNode {
-        kind: 0,
-        start: 0,
-        end: 0,
-        a: NONE32,
-        b: NONE32,
-        c: NONE32,
-        d: NONE32,
-        e: NONE32
-    }
+    ExprNode { kind: 0, start: 0, end: 0, a: NONE32, b: NONE32, c: NONE32, d: NONE32, e: NONE32 }
 }
 
 pub fn no_fun() -> Fun {
@@ -164,14 +155,7 @@ impl Prog {
     pub fn pat(in self, p: u32) -> PatNode {
         match self.pats.try_get(w(p)) {
             Option::Some(x) => x,
-            Option::None => PatNode {
-                kind: 0,
-                start: 0,
-                end: 0,
-                a: NONE32,
-                b: NONE32,
-                c: NONE32
-            },
+            Option::None => PatNode { kind: 0, start: 0, end: 0, a: NONE32, b: NONE32, c: NONE32 },
         }
     }
 
@@ -196,11 +180,7 @@ impl Prog {
     pub fn param(in self, i: u64) -> ParamRow {
         match self.params.try_get(i) {
             Option::Some(p) => p,
-            Option::None => ParamRow {
-                name: 0,
-                pass: 0,
-                ty: 0
-            },
+            Option::None => ParamRow { name: 0, pass: 0, ty: 0 },
         }
     }
 
@@ -289,12 +269,7 @@ impl Prog {
     pub fn call_row(in self, i: u64) -> CallRow {
         match self.calls.try_get(i) {
             Option::Some(r) => r,
-            Option::None => CallRow {
-                start: 0,
-                end: 0,
-                va: 0,
-                vn: 0
-            },
+            Option::None => CallRow { start: 0, end: 0, va: 0, vn: 0 },
         }
     }
 }
@@ -314,14 +289,7 @@ fn read_fun(inout r: Reader, in b: Slice[u8], in c: Ctx, inout params: ChunkSeq[
         let pname = u32_at(in c.nmap, r.word(in b));
         let pass = wrapping_u8(r.word(in b));
         let ty = u32_at(in c.tmap, r.word(in b));
-        params
-            .push(
-                ParamRow {
-                    name: pname,
-                    pass: pass,
-                    ty: ty
-                }
-            );
+        params.push(ParamRow { name: pname, pass: pass, ty: ty });
     }
     Fun {
         key: key,
@@ -416,14 +384,7 @@ pub fn read_prog(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Prog {
         }
         pats
             .push(
-                PatNode {
-                    kind: kind,
-                    start: start,
-                    end: end,
-                    a: n32(a),
-                    b: n32(pb),
-                    c: n32(pc)
-                }
+                PatNode { kind: kind, start: start, end: end, a: n32(a), b: n32(pb), c: n32(pc) }
             );
     }
     // The pool holds expression and pattern indices and passes, and the
@@ -463,14 +424,7 @@ pub fn read_prog(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Prog {
     for i in 0..pats.len() {
         let p = match pats.try_get(i) {
             Option::Some(p) => p,
-            Option::None => PatNode {
-                kind: 0,
-                start: 0,
-                end: 0,
-                a: 0,
-                b: 0,
-                c: 0
-            },
+            Option::None => PatNode { kind: 0, start: 0, end: 0, a: 0, b: 0, c: 0 },
         };
         if p.kind == 5 {
             for j in 0..w(p.c) {
@@ -535,15 +489,7 @@ pub fn read_prog(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Prog {
             call_vars.push(u32_at(in c.nmap, r.word(in b)));
             call_vars.push(u32_at(in c.tmap, r.word(in b)));
         }
-        calls
-            .push(
-                CallRow {
-                    start: start,
-                    end: end,
-                    va: va,
-                    vn: n32(vn)
-                }
-            );
+        calls.push(CallRow { start: start, end: end, va: va, vn: n32(vn) });
     }
     Prog {
         exprs: exprs,

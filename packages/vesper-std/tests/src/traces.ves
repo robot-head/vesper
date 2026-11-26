@@ -105,9 +105,7 @@ test {
     // The `cache_btree_*` trace. `mode` 0 draws random keys, 1 ascending and 2
     // descending keys.
     pub fn map_trace(seed: u64, ops: u64, space: u64, mode: u64) -> u64 {
-        let mut rng = Rng {
-            bits: seed
-        };
+        let mut rng = Rng { bits: seed };
         let mut t: CacheBTree[u64, u64] = btree_new[u64, u64]();
         let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
         let mut h: u64 = 14695981039346656037;
@@ -261,9 +259,7 @@ test {
 
     // The `chunk_seq_*` trace, with `RadixSeq` as the transient sequence.
     pub fn seq_trace(seed: u64, ops: u64) -> u64 {
-        let mut rng = Rng {
-            bits: seed
-        };
+        let mut rng = Rng { bits: seed };
         let mut cur: RadixSeq[u64] = radix_seq_new[u64]();
         let mut snaps: ChunkSeq[SeqSnapshot] = ChunkSeq::new[SeqSnapshot]();
         let mut present: ChunkSeq[bool] = ChunkSeq::new[bool]();

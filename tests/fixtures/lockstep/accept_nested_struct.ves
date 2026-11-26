@@ -6,11 +6,6 @@ copy struct P {
     b: bool
 }
 fn main() -> i64 {
-    let p = P {
-        q: Q {
-            a: 5
-        },
-        b: false
-    };
+    let p = P { q: Q { a: 5 }, b: false };
     p.q.a
 }

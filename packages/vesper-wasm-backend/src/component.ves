@@ -191,11 +191,7 @@ pub struct Wit {
 }
 
 pub fn wit_new() -> Wit {
-    Wit {
-        defs: ChunkSeq::new[u8](),
-        names: ChunkSeq::new[u32](),
-        active: ChunkSeq::new[u32]()
-    }
+    Wit { defs: ChunkSeq::new[u8](), names: ChunkSeq::new[u32](), active: ChunkSeq::new[u32]() }
 }
 
 fn set32(inout t: ChunkSeq[u32], k: u32, v: u32) {
@@ -798,12 +794,7 @@ fn has_string(inout l: L, t: u32) -> bool {
         l.cx.shape(t)
     } with {
         return value => value,
-        raise(e, resume) => Shape {
-            kind: 255,
-            scalar: 0,
-            adt: NONE32,
-            ty: 0
-        },
+        raise(e, resume) => Shape { kind: 255, scalar: 0, adt: NONE32, ty: 0 },
     };
     if sh.kind == SH_STR {
         return true;

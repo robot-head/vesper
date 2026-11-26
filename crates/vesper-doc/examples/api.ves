@@ -22,8 +22,6 @@ linear struct Tx {
 }
 /// Consumes the transaction and returns its number.
 fn close(sink x: Tx) -> u64 {
-    let Tx {
-        id
-    } = x;
+    let Tx { id } = x;
     id
 }

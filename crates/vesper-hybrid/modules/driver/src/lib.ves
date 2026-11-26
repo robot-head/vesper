@@ -97,6 +97,16 @@ use self::assemble::{assembled_words};
 // hd_step group 2 (#1893): the front-end passes in Vesper.
 use self::front::{parse_clean, cst_text};
 use self::interface::{interface_json};
+// The checked world the driver holds (#2024).
+use self::world::{
+    world_of,
+    function,
+    is_none,
+    param_count,
+    has_effects,
+    main_result,
+    interface_stream
+};
 
 // `main_code`'s result when the Rust CLI should run the command instead.
 pub fn delegate() -> i64 {
@@ -176,8 +186,8 @@ fn step_wasm_build() -> u32 {
     16
 }
 
-fn step_check_main() -> u32 {
-    17
+fn step_world_decls() -> u32 {
+    80
 }
 
 fn step_native_object() -> u32 {
@@ -540,8 +550,14 @@ fn drive(inout s: Session, in o: Options)
         if is_failure(r) {
             return pass_failed(in s, r);
         }
-        let world = text(in s);
-        let json = interface_json(in world.as_slice());
+        let package = text(in s);
+        let r = step(inout s, step_world_decls());
+        if is_failure(r) {
+            return pass_failed(in s, r);
+        }
+        let world = world_of(text(in s));
+        let input = interface_stream(in world, in package.as_slice());
+        let json = interface_json(in input.as_slice());
         return pass_with(inout s, step_interface_write(), in json.as_slice());
     }
     if o.ast_optimize {
@@ -633,9 +649,20 @@ fn build(inout s: Session, in o: Options)
     if !is(in o, slot_entry(), in "main") {
         return error(in "build currently requires entry 'main'".as_bytes());
     }
-    let r = step(inout s, step_check_main());
+    // An executable's `main`, over the world the driver holds.
+    let r = step(inout s, step_world_decls());
     if is_failure(r) {
         return pass_failed(in s, r);
+    }
+    let world = world_of(text(in s));
+    let main = function(in world, in "main".as_bytes());
+    if is_none(main) {
+        return error(in "missing main function".as_bytes());
+    }
+    if param_count(in world, main) != 0 || !main_result(in world, main) {
+        return error(
+            in "executable main must take no arguments and return an integer or Unit".as_bytes()
+        );
     }
     let mut path = value(in o, slot_output());
     if !has(in o, slot_output()) {
@@ -1069,37 +1096,26 @@ fn write_file(inout s: Session, in path: Slice[u8], in data: Slice[u8])
     error(in message.as_slice())
 }
 
-// `vesper run`: the entry's checks, then the evaluator (the pass prints
-// the value).
+// `vesper run`: the entry's checks over the world the driver holds, then
+// the evaluator (the pass prints the value).
 fn run(inout s: Session, in o: Options) -> i64 eff [Ffi[HybridDriver]] {
-    let shape = step_with(inout s, step_run(), in "entry".as_bytes());
-    if is_failure(shape) {
-        return pass_failed(in s, shape);
+    let r = step(inout s, step_world_decls());
+    if is_failure(r) {
+        return pass_failed(in s, r);
     }
-    if shape == run_entry_missing() {
+    let world = world_of(text(in s));
+    let name = value(in o, slot_entry());
+    let entry = function(in world, in name.as_slice());
+    if is_none(entry) {
         return error(in "missing entry function".as_bytes());
     }
-    if shape == run_entry_params() {
+    if param_count(in world, entry) != 0 {
         return error(in "entry function must take no arguments".as_bytes());
     }
-    if shape == run_entry_effects() {
+    if has_effects(in world, entry) {
         return error(in "entry must handle all effects".as_bytes());
     }
     pass(inout s, step_run())
-}
-
-// The `Run` pass's `entry` answers (src/driver/native.rs): no such function, it takes
-// parameters, or it leaves effects unhandled; 0 when it can run.
-fn run_entry_missing() -> i64 {
-    1
-}
-
-fn run_entry_params() -> i64 {
-    2
-}
-
-fn run_entry_effects() -> i64 {
-    3
 }
 
 // `<object>\0<executable>\0<linker>` for the `WindowsLink` pass: the

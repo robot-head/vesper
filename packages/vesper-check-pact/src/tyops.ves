@@ -318,15 +318,7 @@ pub fn conform_row(
             let y = conform_type(inout t, in d, sy, tr, c, x, in vars, inout stack);
             args.push(y);
         }
-        es
-            .push(
-                EffNode {
-                    label: e.label,
-                    name: e.name,
-                    a: a,
-                    n: e.n
-                }
-            );
+        es.push(EffNode { label: e.label, name: e.name, a: a, n: e.n });
     }
     let mapped = t.mk_row(in es, in args, row.tail);
     substitute_row(inout t, mapped, in vars)
@@ -521,15 +513,7 @@ pub fn row_arg(inout t: Types, a: u32) -> u32 {
         for i in 0..w(n.n) {
             args.push(t.arg(a, i));
         }
-        es
-            .push(
-                EffNode {
-                    label: 0,
-                    name: n.name,
-                    a: 0,
-                    n: n.n
-                }
-            );
+        es.push(EffNode { label: 0, name: n.name, a: 0, n: n.n });
         let r = t.mk_row(in es, in args, 0);
         return t.row_type(r);
     }

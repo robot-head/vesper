@@ -1421,10 +1421,7 @@ fn lower_q_goal(
     for i in 0..tr_pn {
         let qa = match spec.args.try_get(add(w(g.arg_a), i)) {
             Option::Some(v) => v,
-            Option::None => QArg {
-                is_row: false,
-                ty: 0
-            },
+            Option::None => QArg { is_row: false, ty: 0 },
         };
         let pk = widen_u64(u8_at(in sess.tb.tr_pkinds, add(tr_pa, i)));
         let actual_pk = if qa.is_row {
@@ -1720,11 +1717,7 @@ pub struct SolveOutcome {
 fn outcome_str(status: u8, val: u64, in s: Str) -> SolveOutcome {
     let mut msg = ChunkSeq::new[u8]();
     put_str(inout msg, in s);
-    SolveOutcome {
-        status: status,
-        val: val,
-        msg: msg
-    }
+    SolveOutcome { status: status, val: val, msg: msg }
 }
 
 pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
@@ -1743,11 +1736,7 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
     for i in 0..np {
         let g = match spec.env_params.try_get(i) {
             Option::Some(v) => v,
-            Option::None => Gen {
-                name: 0,
-                bound: 2,
-                row: false
-            },
+            Option::None => Gen { name: 0, bound: 2, row: false },
         };
         let pk = if g.row {
             kd_row()
@@ -1773,13 +1762,7 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
     for i in 0..na {
         let a = match spec.assumptions.try_get(i) {
             Option::Some(v) => v,
-            Option::None => QGoal {
-                self_ty: 0,
-                trait_name: 0,
-                brand_opt: 0,
-                arg_a: 0,
-                arg_n: 0
-            },
+            Option::None => QGoal { self_ty: 0, trait_name: 0, brand_opt: 0, arg_a: 0, arg_n: 0 },
         };
         lower_q_goal(inout sess, inout sc, a, in spec, inout env_words);
         if sc.status != FAIL_OK {
@@ -1791,11 +1774,7 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
                 in ph_names,
                 inout rendered
             );
-            return SolveOutcome {
-                status: 1,
-                val: 0,
-                msg: rendered
-            };
+            return SolveOutcome { status: 1, val: 0, msg: rendered };
         }
     }
 
@@ -1814,11 +1793,7 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
                 put_sym(inout msg, in sess.c.names, msym);
                 put_str(inout msg, "` in ");
                 put_sym(inout msg, in sess.c.names, sess.tb.pkg_str(sess.tb.local_pkg));
-                return SolveOutcome {
-                    status: 1,
-                    val: 0,
-                    msg: msg
-                };
+                return SolveOutcome { status: 1, val: 0, msg: msg };
             }
             env_words.push(mid);
         }
@@ -1847,11 +1822,7 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
             in ph_names,
             inout rendered
         );
-        return SolveOutcome {
-            status: 1,
-            val: 0,
-            msg: rendered
-        };
+        return SolveOutcome { status: 1, val: 0, msg: rendered };
     }
 
     for i in 0..sc.infer_used.len() {
@@ -1864,11 +1835,7 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
             put_str(inout msg, "inference variable `");
             put_sym(inout msg, in sess.c.names, u32_at(in sc.infer_names, i));
             put_str(inout msg, "` does not occur in the goal");
-            return SolveOutcome {
-                status: 1,
-                val: 0,
-                msg: msg
-            };
+            return SolveOutcome { status: 1, val: 0, msg: msg };
         }
     }
 
@@ -1911,11 +1878,7 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
             );
         }
         sess.s.txt.truncate(txt_base);
-        return SolveOutcome {
-            status: 1,
-            val: 0,
-            msg: msg
-        };
+        return SolveOutcome { status: 1, val: 0, msg: msg };
     }
 
     let tag = tag_of(in sess.s, o);
@@ -1966,11 +1929,7 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
                 sess.s.txt.push(93);
             }
             let sel = render_from_s_txt(inout sess, t0, in ph_names);
-            return SolveOutcome {
-                status: 0,
-                val: conf_idx,
-                msg: sel
-            };
+            return SolveOutcome { status: 0, val: conf_idx, msg: sel };
         }
         if st == st_assume() || st == st_passume() {
             return outcome_str(
@@ -2001,22 +1960,14 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
             );
         }
         let msg = render_from_s_txt(inout sess, t0, in ph_names);
-        return SolveOutcome {
-            status: 1,
-            val: 4,
-            msg: msg
-        };
+        return SolveOutcome { status: 1, val: 4, msg: msg };
     }
 
     if tag == q_nosol() {
         let t0 = sess.s.txt.len();
         r_failure(inout sess.s, field_a(in sess.s, o), 0);
         let msg = render_from_s_txt(inout sess, t0, in ph_names);
-        return SolveOutcome {
-            status: 1,
-            val: 1,
-            msg: msg
-        };
+        return SolveOutcome { status: 1, val: 1, msg: msg };
     }
 
     if tag == q_ambig() {
@@ -2054,11 +2005,7 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
             r_goal(inout sess.s, field_a(in sess.s, a));
         }
         let msg = render_from_s_txt(inout sess, t0, in ph_names);
-        return SolveOutcome {
-            status: 1,
-            val: 2,
-            msg: msg
-        };
+        return SolveOutcome { status: 1, val: 2, msg: msg };
     }
 
     if tag == q_over() {
@@ -2094,11 +2041,7 @@ pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
         lit(inout sess.s, "internal solver limitation");
     }
     let msg = render_from_s_txt(inout sess, t0, in ph_names);
-    SolveOutcome {
-        status: 1,
-        val: 0,
-        msg: msg
-    }
+    SolveOutcome { status: 1, val: 0, msg: msg }
 }
 
 pub fn session_solve(inout sess: PactSession, in qbytes: Slice[u8]) -> ChunkSeq[u64] {
@@ -2110,9 +2053,7 @@ pub fn session_solve(inout sess: PactSession, in qbytes: Slice[u8]) -> ChunkSeq[
 }
 
 pub fn session_open(in b: Slice[u8]) -> PactSession {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     session_open_reader(inout r, in b)
 }
 
@@ -2125,9 +2066,7 @@ pub fn session_words(in b: Slice[u8]) -> ChunkSeq[u64] {
 // Stateless JIT/harness entrypoint taking `[session_input][n_queries][(qbyte_len, padded qbytes)...]`
 // and returning `[packed diag_text][ok_flag (0|1)][packed revision][n_queries, results...]`.
 pub fn queries_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut sess = session_open_reader(inout r, in b);
     let mut out = ChunkSeq::new[u64]();
     let p_out = pack_text(in sess.out);

@@ -58,14 +58,7 @@ pub fn send_allowed(bytes_in_flight: u64, cwnd: u64) -> bool {
 // Filters and the probe-wait PRNG (src/filter.rs).
 
 pub fn windowed_max_new(time: u64, value: u64) -> WindowedMax {
-    WindowedMax {
-        t0: time,
-        v0: value,
-        t1: time,
-        v1: value,
-        t2: time,
-        v2: value
-    }
+    WindowedMax { t0: time, v0: value, t1: time, v1: value, t2: time, v2: value }
 }
 
 // Add a sample and return the windowed maximum.

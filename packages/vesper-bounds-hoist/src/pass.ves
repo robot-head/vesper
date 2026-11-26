@@ -371,11 +371,7 @@ fn guard_and_copy(
     for k in 0..n {
         let gb = match lp.gbound.try_get(k) {
             Option::Some(x) => x,
-            Option::None => BoundRow {
-                kind: 2,
-                a: 0,
-                b: 0
-            },
+            Option::None => BoundRow { kind: 2, a: 0, b: 0 },
         };
         let hi = if gb.kind == 2 {
             gb.a
@@ -533,9 +529,7 @@ pub fn hoist_words(in input: Str) -> ChunkSeq[u64] {
 // (names, types, the world, the program section): the `put_program` words
 // of the hoisted program. The hybrid's `hoist` hook calls it.
 pub fn hoist_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let mut p = read_program(inout r, in b, in c);
     let s_bool = c.names.intern(in "bool".as_bytes());

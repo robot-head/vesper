@@ -374,10 +374,7 @@ pub fn position(in text: Str, in lines: Slice[u64], max_work: usize, offset: usi
     if line > MAX_U32 {
         Fail::raise(Error::LineOutOfBounds);
     }
-    Position {
-        line: wrapping_u32(line),
-        character: wrapping_u32(character)
-    }
+    Position { line: wrapping_u32(line), character: wrapping_u32(character) }
 }
 
 // `LineIndex::range`.
@@ -388,10 +385,7 @@ pub fn range(in text: Str, in lines: Slice[u64], max_work: usize, span: ByteSpan
     }
     let start = position(in text, in lines, max_work, span.start);
     let end = position(in text, in lines, max_work, span.end);
-    Range {
-        start: start,
-        end: end
-    }
+    Range { start: start, end: end }
 }
 
 // `LineIndex::span`.
@@ -403,10 +397,7 @@ pub fn span(in text: Str, in lines: Slice[u64], max_work: usize, r: Range)
     }
     let start = offset(in text, in lines, max_work, r.start);
     let end = offset(in text, in lines, max_work, r.end);
-    ByteSpan {
-        start: start,
-        end: end
-    }
+    ByteSpan { start: start, end: end }
 }
 
 // Edits.
@@ -463,10 +454,7 @@ fn check_edits(
             in text,
             in lines,
             cap,
-            ByteSpan {
-                start: narrow_usize(start),
-                end: narrow_usize(end)
-            }
+            ByteSpan { start: narrow_usize(start), end: narrow_usize(end) }
         );
         if !same_bytes(in bytes, start, end, in pool, exp_off, exp_len) {
             Fail::raise(Error::SourceMismatch);
@@ -504,10 +492,7 @@ fn check_edits(
     work = charge(work, add(n, output, Resource::Work), cap);
     work = charge(work, total_text, cap);
     work = charge(work, mul(count, count, Resource::Work), cap);
-    EditTotals {
-        output: narrow_usize(output),
-        metadata: narrow_usize(metadata)
-    }
+    EditTotals { output: narrow_usize(output), metadata: narrow_usize(metadata) }
 }
 
 // `SourceEdits::new` after `Limits::validate`: the output length.
@@ -672,10 +657,7 @@ pub fn diagnostics_check(
                 in text,
                 in lines,
                 cap,
-                ByteSpan {
-                    start: narrow_usize(start),
-                    end: narrow_usize(end)
-                }
+                ByteSpan { start: narrow_usize(start), end: narrow_usize(end) }
             );
             total_text = add(total_text, message, Resource::Text);
         }

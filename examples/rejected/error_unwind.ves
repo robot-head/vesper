@@ -6,12 +6,8 @@ fn validate() -> Result[i64, i64] {
 }
 
 fn bad() eff [Fail[i64]] {
-    let tx = WriteTxn {
-        id: 1
-    };
+    let tx = WriteTxn { id: 1 };
     validate()?;
     // E0402: an abortable effect would discard tx.
-    let WriteTxn {
-        id
-    } = tx;
+    let WriteTxn { id } = tx;
 }

@@ -440,11 +440,7 @@ fn generic_scopes(inout s: St, inout a: Ast) {
                 .impls
                 .get_or(
                     idx_from_raw[ImplNode](it.node),
-                    ImplNode {
-                        ty: ast_none(),
-                        generics: 0,
-                        methods: 0
-                    }
+                    ImplNode { ty: ast_none(), generics: 0, methods: 0 }
                 );
             let tn = ast_type_name(in a, x.ty);
             let tg = if tn == ast_none() {
@@ -643,13 +639,7 @@ fn assemble_module_bytes(inout s: St, in input: Slice[u8], m: u32) -> AssembledM
             .model_uses
             .get_or(
                 idx_from_raw[ModelUseNode](ui),
-                ModelUseNode {
-                    model: ast_none(),
-                    start: 0,
-                    end: 0,
-                    scope_start: 0,
-                    scope_end: 0
-                }
+                ModelUseNode { model: ast_none(), start: 0, end: 0, scope_start: 0, scope_end: 0 }
             );
         u.start = wrapping_add(u.start, s.shift);
         u.end = wrapping_add(u.end, s.shift);
@@ -671,10 +661,7 @@ fn assemble_module_bytes(inout s: St, in input: Slice[u8], m: u32) -> AssembledM
     // once for the whole program.
     l.ast.m_uses.clear();
     l.ast.m_public.clear();
-    AssembledModule {
-        ast: l.ast,
-        file: file
-    }
+    AssembledModule { ast: l.ast, file: file }
 }
 
 /// A prepared package graph. Pull renamed modules in load order with
@@ -721,10 +708,7 @@ pub fn assembly_begin_bytes(in input: Slice[u8]) -> Assembly {
     overrides(inout s);
     hidden_and_variants(inout s);
     literals(inout s);
-    Assembly {
-        state: s,
-        next: 0
-    }
+    Assembly { state: s, next: 0 }
 }
 
 /// The number of parse diagnostics across the graph's modules.

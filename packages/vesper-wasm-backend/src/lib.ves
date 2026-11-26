@@ -22,9 +22,7 @@ const K_LIMIT: u8 = 2;
 // `wasm_backend::compile` up to the core module: the core bytes and the
 // WIT text, or the error. Component encoding stays in Rust.
 fn compile(in b: Slice[u8]) -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64]) eff [Fail[WErr]] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let pool = p.pool.len();
@@ -34,9 +32,7 @@ fn compile(in b: Slice[u8]) -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64]) 
 
 fn compile_diag(in b: Slice[u8], want_syms: bool)
     -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64], ChunkSeq[u8]) eff [Fail[WErr]] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let pool = p.pool.len();

@@ -86,14 +86,10 @@ fn prefix_dep_diags(in dep_out: ChunkSeq[u8], in id_bytes: Slice[u8], inout out:
 // Entrypoint for `check_pact_deps`:
 // `[local_decl_input][n_deps, (pkg_name_bytes, id_bytes, dep_decl_input, dep_traits_input)...]`
 pub fn deps_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let (ls, le) = read_bytes_chunk(inout r, in b);
     let local_b = b[ls..le];
-    let mut lr = Reader {
-        pos: 0
-    };
+    let mut lr = Reader { pos: 0 };
     let mut c = read_ctx(inout lr, in local_b);
     let mut d = read_decls(inout lr, in local_b, in c.nmap, in c.tmap);
     let sy = sy_new(inout c.names);
@@ -120,9 +116,7 @@ pub fn deps_words(in b: Slice[u8]) -> ChunkSeq[u64] {
         }
 
         let dep_b = b[ds..de];
-        let mut dr = Reader {
-            pos: 0
-        };
+        let mut dr = Reader { pos: 0 };
         let mut dc = read_ctx(inout dr, in dep_b);
         let dd = read_decls(inout dr, in dep_b, in dc.nmap, in dc.tmap);
         let dsy = sy_new(inout dc.names);
@@ -148,9 +142,7 @@ pub fn deps_words(in b: Slice[u8]) -> ChunkSeq[u64] {
         fe.dep_adt_n.push(n32(adt_cnt));
 
         let tr_b = b[ts..te];
-        let mut tr_r = Reader {
-            pos: 0
-        };
+        let mut tr_r = Reader { pos: 0 };
         let mut dep_nmap = ChunkSeq::new[u32]();
         read_q_names(inout tr_r, in tr_b, inout c.names, inout dep_nmap);
         let mut dep_tmap = ChunkSeq::new[u32]();

@@ -125,18 +125,11 @@ fn check_insn(prev: u64, at: u64, w: u64, len: u64) -> u64 {
 
 fn validate_fault(c: u64, at: u64, w: u64) -> SeccompFault {
     if c == VALIDATE_BAD_LOAD {
-        SeccompFault::BadLoad {
-            at: at
-        }
+        SeccompFault::BadLoad { at: at }
     } else if c == VALIDATE_JUMP {
-        SeccompFault::JumpOutOfRange {
-            at: at
-        }
+        SeccompFault::JumpOutOfRange { at: at }
     } else {
-        SeccompFault::UnsupportedInstruction {
-            at: at,
-            code: insn_code(w)
-        }
+        SeccompFault::UnsupportedInstruction { at: at, code: insn_code(w) }
     }
 }
 
@@ -198,11 +191,7 @@ pub fn seccomp_evaluate(
         let k = insn_k(w);
         if code == BPF_LD_W_ABS {
             if k >= SECCOMP_DATA_BYTES || k % 4 != 0 {
-                return Result::Err(
-                    SeccompFault::BadLoad {
-                        at: pc
-                    }
-                );
+                return Result::Err(SeccompFault::BadLoad { at: pc });
             }
             if k == OFF_NR {
                 acc = nr;
@@ -235,12 +224,7 @@ pub fn seccomp_evaluate(
         } else if code == BPF_RET_K {
             return Result::Ok(k);
         } else {
-            return Result::Err(
-                SeccompFault::UnsupportedInstruction {
-                    at: pc,
-                    code: code
-                }
-            );
+            return Result::Err(SeccompFault::UnsupportedInstruction { at: pc, code: code });
         }
     }
 }

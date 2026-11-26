@@ -273,22 +273,12 @@ fn parse_manifest(in text: Slice[u8]) -> Manifest {
                     dn.extend(in text[da..dz]);
                     let mut dp = ChunkSeq::new[u8]();
                     dp.extend(in text[pa..pz]);
-                    deps
-                        .push(
-                            sink DepSpec {
-                                name: dn,
-                                path: dp
-                            }
-                        );
+                    deps.push(sink DepSpec { name: dn, path: dp });
                 }
             }
         }
     }
-    Manifest {
-        name: pkg_name,
-        deps: deps,
-        vsys: vsys
-    }
+    Manifest { name: pkg_name, deps: deps, vsys: vsys }
 }
 
 fn is_ident_byte(b: u8) -> bool {
@@ -652,13 +642,7 @@ fn collect_mod_files(
     let mut disp = ChunkSeq::new[u8]();
     disp.extend(in fpath);
     let len = text.len();
-    files
-        .push(
-            sink FileEntry {
-                display: disp,
-                base: base_off
-            }
-        );
+    files.push(sink FileEntry { display: disp, base: base_off });
     base_off = wrapping_add(base_off, wrapping_add(len, 1));
     let (sub_names, super_names) = scan_mods(in text.as_slice(), segs.len() > 0);
     let mut seg_copy = ChunkSeq::new[ChunkSeq[u8]]();
@@ -672,15 +656,7 @@ fn collect_mod_files(
             Option::None => {},
         }
     }
-    mods
-        .push(
-            sink ModEntry {
-                pkg: pkg_idx,
-                segs: seg_copy,
-                file: fidx,
-                text: text
-            }
-        );
+    mods.push(sink ModEntry { pkg: pkg_idx, segs: seg_copy, file: fidx, text: text });
     for i in 0..sub_names.len() {
         match sub_names.try_get(i) {
             Option::Some(sub) => {

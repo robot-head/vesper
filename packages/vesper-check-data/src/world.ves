@@ -229,11 +229,7 @@ pub fn set_by_symbol(inout table: ChunkSeq[u32], name: u32, v: u32) {
 fn span_row(in rows: ChunkSeq[SpanRow], i: u64) -> SpanRow {
     match rows.try_get(i) {
         Option::Some(r) => r,
-        Option::None => SpanRow {
-            start: 0,
-            end: 0,
-            ty: NONE32
-        },
+        Option::None => SpanRow { start: 0, end: 0, ty: NONE32 },
     }
 }
 
@@ -434,34 +430,21 @@ impl World {
     pub fn generic(in self, i: u64) -> Generic {
         match self.generics.try_get(i) {
             Option::Some(g) => g,
-            Option::None => Generic {
-                name: 0,
-                bound: 0,
-                row: false
-            },
+            Option::None => Generic { name: 0, bound: 0, row: false },
         }
     }
 
     pub fn variant(in self, i: u64) -> Variant {
         match self.variants.try_get(i) {
             Option::Some(v) => v,
-            Option::None => Variant {
-                name: 0,
-                fa: 0,
-                fc: 0,
-                named: false
-            },
+            Option::None => Variant { name: 0, fa: 0, fc: 0, named: false },
         }
     }
 
     pub fn field(in self, i: u64) -> Field {
         match self.fields.try_get(i) {
             Option::Some(f) => f,
-            Option::None => Field {
-                name: 0,
-                ty: 0,
-                modality: 0
-            },
+            Option::None => Field { name: 0, ty: 0, modality: 0 },
         }
     }
 
@@ -492,10 +475,7 @@ impl World {
     pub fn effect_row(in self, i: u32) -> EffectRow {
         match self.effects.try_get(w(i)) {
             Option::Some(e) => e,
-            Option::None => EffectRow {
-                name: 0,
-                linear: false
-            },
+            Option::None => EffectRow { name: 0, linear: false },
         }
     }
 
@@ -609,10 +589,7 @@ pub struct Bounds {
 }
 
 pub fn bounds_new() -> Bounds {
-    Bounds {
-        keys: ChunkSeq::new[u32](),
-        modes: ChunkSeq::new[u8]()
-    }
+    Bounds { keys: ChunkSeq::new[u32](), modes: ChunkSeq::new[u8]() }
 }
 
 impl Bounds {

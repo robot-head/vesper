@@ -18,33 +18,20 @@ pub fn pn_limit() -> u64 {
 pub fn pn_decode_with_largest(largest: Option[u64], truncated: u64, nbits: u32)
     -> u64 eff [Fail[PnErr]] {
     if nbits != 8 && nbits != 16 && nbits != 24 && nbits != 32 {
-        Fail::raise(
-            PnErr::InvalidBits {
-                bits: nbits
-            }
-        );
+        Fail::raise(PnErr::InvalidBits { bits: nbits });
     }
     let expected = match largest {
         Option::None => 0,
         Option::Some(l) => {
             if l >= pn_limit() {
-                Fail::raise(
-                    PnErr::OutOfRange {
-                        pn: l
-                    }
-                );
+                Fail::raise(PnErr::OutOfRange { pn: l });
             }
             wrapping_add(l, 1)
         }
     };
     let win = wrapping_shl_u64(1, nbits);
     if truncated >= win {
-        Fail::raise(
-            PnErr::TruncatedTooWide {
-                truncated: truncated,
-                nbits: nbits
-            }
-        );
+        Fail::raise(PnErr::TruncatedTooWide { truncated: truncated, nbits: nbits });
     }
     let hwin = win / 2;
     let mask = wrapping_sub(win, 1);
@@ -66,22 +53,13 @@ pub fn pn_decode_with_largest(largest: Option[u64], truncated: u64, nbits: u32)
 // The packet-number length in bytes (1-4) for `full_pn`.
 pub fn pn_encoded_len(full_pn: u64, largest_acked: Option[u64]) -> u64 eff [Fail[PnErr]] {
     if full_pn >= pn_limit() {
-        Fail::raise(
-            PnErr::OutOfRange {
-                pn: full_pn
-            }
-        );
+        Fail::raise(PnErr::OutOfRange { pn: full_pn });
     }
     let unacked = match largest_acked {
         Option::None => wrapping_add(full_pn, 1),
         Option::Some(acked) => {
             if acked >= full_pn {
-                Fail::raise(
-                    PnErr::NotAboveLargestAcked {
-                        full_pn: full_pn,
-                        largest_acked: acked
-                    }
-                );
+                Fail::raise(PnErr::NotAboveLargestAcked { full_pn: full_pn, largest_acked: acked });
             }
             wrapping_sub(full_pn, acked)
         }
@@ -95,11 +73,7 @@ pub fn pn_encoded_len(full_pn: u64, largest_acked: Option[u64]) -> u64 eff [Fail
     } else if unacked <= PN4_MAX_UNACKED {
         4
     } else {
-        Fail::raise(
-            PnErr::TooManyUnacked {
-                unacked: unacked
-            }
-        );
+        Fail::raise(PnErr::TooManyUnacked { unacked: unacked });
         0
     }
 }

@@ -283,15 +283,7 @@ struct Cst {
 fn node_at(in c: Cst, n: u64) -> Node {
     match c.nodes.try_get(n) {
         Option::Some(v) => v,
-        Option::None => Node {
-            kind: 0,
-            parent: 0,
-            start: 0,
-            end: 0,
-            lo: 0,
-            hi: 0,
-            after: 0
-        },
+        Option::None => Node { kind: 0, parent: 0, start: 0, end: 0, lo: 0, hi: 0, after: 0 },
     }
 }
 
@@ -575,12 +567,7 @@ fn parse(in src: ChunkSeq[u8], include_tests: bool) -> Parsed {
         rows.push(sub(e, s));
         cat_range(inout text, in p.d.text, s, e);
     }
-    Parsed {
-        cst: build_cst(in p),
-        d: rows,
-        dtext: text,
-        refused: dg_ok()
-    }
+    Parsed { cst: build_cst(in p), d: rows, dtext: text, refused: dg_ok() }
 }
 
 // ---------------------------------------------------------------- definitions
@@ -704,10 +691,7 @@ fn read_definition(inout r: Reg, in src: ChunkSeq[u8], in c: Cst, decl: u64) -> 
                         .effects
                         .get_or(
                             idx_from_raw[@vesper/ast::EffectsNode](f.effects),
-                            @vesper/ast::EffectsNode {
-                                instances: 0,
-                                tail: none()
-                            }
+                            @vesper/ast::EffectsNode { instances: 0, tail: none() }
                         );
                     if fx.tail != none() {
                         return diag(in "sugar emits must declare a closed effect row", ds, de);
@@ -843,15 +827,7 @@ fn item_of(in a: Ast, k: u64) -> ItemNode {
         Option::Some(v) => v,
         Option::None => none(),
     };
-    a
-        .items
-        .get_or(
-            idx_from_raw[ItemNode](raw),
-            ItemNode {
-                kind: 0,
-                node: 0
-            }
-        )
+    a.items.get_or(idx_from_raw[ItemNode](raw), ItemNode { kind: 0, node: 0 })
 }
 
 // `bind(defs, heads, id, visible)` with `visible` the definition's name.
@@ -1503,12 +1479,7 @@ pub struct Ex {
 }
 
 fn ex_err(sink d: Dg, sink st: St, sink reg: Reg) -> Ex {
-    Ex {
-        d: d,
-        some: false,
-        st: st,
-        reg: reg
-    }
+    Ex { d: d, some: false, st: st, reg: reg }
 }
 
 // `expand_sugar_for_execution(source, include_tests)`.
@@ -1714,10 +1685,7 @@ struct Step {
 }
 
 fn step_ok() -> Step {
-    Step {
-        d: dg_ok(),
-        calls: ChunkSeq::new[u64]()
-    }
+    Step { d: dg_ok(), calls: ChunkSeq::new[u64]() }
 }
 
 fn step_err(sink d: Dg) -> Step {
@@ -2273,11 +2241,7 @@ fn protect(inout st: St, include_tests: bool, inout work: u64) -> Dg {
                 .impls
                 .get_or(
                     idx_from_raw[ImplNode](it.node),
-                    ImplNode {
-                        ty: none(),
-                        generics: 0,
-                        methods: 0
-                    }
+                    ImplNode { ty: none(), generics: 0, methods: 0 }
                 );
             for m in 0..list_len(in a, n.methods) {
                 scan(inout nm, in st, in tokens, in a, list_at(in a, n.methods, m));

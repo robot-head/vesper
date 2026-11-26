@@ -4,12 +4,8 @@ linear struct Holder {
 }
 
 fn main() -> u64 eff [Trace] {
-    let h = Holder {
-        span: Trace::start_span(0, "held")
-    };
-    let Holder {
-        span
-    } = h;
+    let h = Holder { span: Trace::start_span(0, "held") };
+    let Holder { span } = h;
     Trace::emit_ok(span, 0);
     0
 }

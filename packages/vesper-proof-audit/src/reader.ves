@@ -49,12 +49,7 @@ pub fn rd_parse(in input: Slice[u8]) -> Rd {
     };
     let mut copy: ChunkSeq[u8] = ChunkSeq::new[u8]();
     copy.extend(in input);
-    let mut r = Rd {
-        doc: doc,
-        input: copy,
-        failed: false,
-        err: ChunkSeq::new[u8]()
-    };
+    let mut r = Rd { doc: doc, input: copy, failed: false, err: ChunkSeq::new[u8]() };
     if !ok {
         fail(inout r, in "the text is not valid JSON");
     }

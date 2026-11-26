@@ -8,9 +8,7 @@ linear struct Token {
 test {
     @test(expect_error = E0302) fn main() -> i64 {
         for i in 0..3 {
-            let t = Token {
-                n: i
-            };
+            let t = Token { n: i };
             continue;
         }
         0

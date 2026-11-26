@@ -10,9 +10,7 @@ fn count_one(inout tally: Tally, i: u64) {
 }
 
 fn main() -> u64 {
-    let mut tally = Tally {
-        count: 0
-    };
+    let mut tally = Tally { count: 0 };
     parallel_for(inout tally, 8, count_one);
     tally.count
 }

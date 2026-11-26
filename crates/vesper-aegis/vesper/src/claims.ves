@@ -111,14 +111,7 @@ pub fn word(in s: Slice[u64], i: u64) -> u64 {
 }
 
 pub fn deny(kind: u64, a: u64, b: u64, c: u64) -> Never eff [Fail[PErr]] {
-    Fail::raise(
-        PErr {
-            kind: kind,
-            a: a,
-            b: b,
-            c: c
-        }
-    )
+    Fail::raise(PErr { kind: kind, a: a, b: b, c: c })
 }
 
 // Byte `i` (0 = least significant) of `x`.

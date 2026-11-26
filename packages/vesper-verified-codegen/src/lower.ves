@@ -259,21 +259,11 @@ fn ap_i128(inout out: ChunkSeq[u8], lo: u64, hi: u64) {
 }
 
 pub fn err(kind: u8, sink d: ChunkSeq[u8]) -> VErr {
-    VErr {
-        kind: kind,
-        construct: 0,
-        func: 0,
-        detail: d
-    }
+    VErr { kind: kind, construct: 0, func: 0, detail: d }
 }
 
 pub fn unsup(construct: u8, func: u32, sink d: ChunkSeq[u8]) -> VErr {
-    VErr {
-        kind: E_UNSUPPORTED,
-        construct: construct,
-        func: func,
-        detail: d
-    }
+    VErr { kind: E_UNSUPPORTED, construct: construct, func: func, detail: d }
 }
 
 // ----- the context --------------------------------------------------------------
@@ -463,19 +453,7 @@ pub struct Lw {
 }
 
 fn fn0() -> Fn {
-    Fn {
-        name: 0,
-        p0: 0,
-        pn: 0,
-        result: 0,
-        effects: 0,
-        l0: 0,
-        ln: 0,
-        v0: 0,
-        vn: 0,
-        b0: 0,
-        bc: 0
-    }
+    Fn { name: 0, p0: 0, pn: 0, result: 0, effects: 0, l0: 0, ln: 0, v0: 0, vn: 0, b0: 0, bc: 0 }
 }
 
 impl Lw {
@@ -489,23 +467,14 @@ impl Lw {
     fn param(in self, i: u64) -> Prm {
         match self.fparams.try_get(i) {
             Option::Some(p) => p,
-            Option::None => Prm {
-                name: 0,
-                pass: 0,
-                ty: 0,
-                pa: 0,
-                pn: 0
-            },
+            Option::None => Prm { name: 0, pass: 0, ty: 0, pa: 0, pn: 0 },
         }
     }
 
     fn local_row(in self, i: u64) -> Loc {
         match self.flocals.try_get(i) {
             Option::Some(l) => l,
-            Option::None => Loc {
-                name: 0,
-                ty: 0
-            },
+            Option::None => Loc { name: 0, ty: 0 },
         }
     }
 
@@ -521,11 +490,7 @@ impl Lw {
     fn sword(in self, i: u64) -> SWord {
         match self.sw.try_get(i) {
             Option::Some(x) => x,
-            Option::None => SWord {
-                pa: 0,
-                pn: 0,
-                kind: 0
-            },
+            Option::None => SWord { pa: 0, pn: 0, kind: 0 },
         }
     }
 
@@ -689,17 +654,7 @@ fn decode(
             at = add(at, add(3, k));
             let ty = n32(lw.op(at));
             at = add(at, 3);
-            lw
-                .fparams
-                .push(
-                    Prm {
-                        name: name,
-                        pass: pass,
-                        ty: ty,
-                        pa: pa,
-                        pn: k
-                    }
-                );
+            lw.fparams.push(Prm { name: name, pass: pass, ty: ty, pa: pa, pn: k });
         }
         let result = n32(lw.op(at));
         let effects = n32(lw.op(inc(at)));
@@ -754,14 +709,7 @@ fn decode(
         for i in 0..nl {
             let name = n32(lw.op(add(at, wrapping_mul(i, 2))));
             let ty = n32(lw.op(add(at, inc(wrapping_mul(i, 2)))));
-            lw
-                .flocals
-                .push(
-                    Loc {
-                        name: name,
-                        ty: ty
-                    }
-                );
+            lw.flocals.push(Loc { name: name, ty: ty });
         }
         lw
             .fns
@@ -833,10 +781,7 @@ fn one(x: u32) -> ChunkSeq[u32] {
 }
 
 fn sub(s: Sh, start: u64, len: u64) -> Sh {
-    Sh {
-        a: add(s.a, start),
-        n: len
-    }
+    Sh { a: add(s.a, start), n: len }
 }
 
 // The scalar kind of a type name, or NONE (`flatten`'s first match).
@@ -1004,15 +949,7 @@ fn push_word(inout lw: Lw, in path: ChunkSeq[u32], emit: bool, kind: u8) {
     }
     let pa = lw.paths.len();
     lw.paths.extend(in path.as_slice());
-    lw
-        .sw
-        .push(
-            SWord {
-                pa: pa,
-                pn: path.len(),
-                kind: kind
-            }
-        );
+    lw.sw.push(SWord { pa: pa, pn: path.len(), kind: kind });
 }
 
 // `shape`: the flattened words of `ty`.
@@ -1020,10 +957,7 @@ fn shape(inout lw: Lw, ty: u32, func: u32) -> Sh eff [Fail[VErr]] {
     let cached = u64_at(in lw.shapes, w(ty));
     if cached != 0 {
         let x = wrapping_sub(cached, 1);
-        return Sh {
-            a: x >> 20,
-            n: x & 1048575
-        };
+        return Sh { a: x >> 20, n: x & 1048575 };
     }
     let a = lw.sw.len();
     let mut path = ChunkSeq::new[u32]();
@@ -1038,10 +972,7 @@ fn shape(inout lw: Lw, ty: u32, func: u32) -> Sh eff [Fail[VErr]] {
     if n < 1048576 {
         let ok = lw.shapes.try_set(w(ty), inc((a << 20) | n));
     }
-    Sh {
-        a: a,
-        n: n
-    }
+    Sh { a: a, n: n }
 }
 
 fn words_of(inout lw: Lw, ty: u32, func: u32) -> u64 eff [Fail[VErr]] {
@@ -1100,14 +1031,7 @@ fn variant_layout(
         let f = lw.c.world.field(add(w(v.fa), fi));
         let t = substitute(inout lw.c.types, f.ty, in vars);
         let n = words_of(inout lw, t, func);
-        out
-            .push(
-                LField {
-                    name: f.name,
-                    offset: offset,
-                    ty: t
-                }
-            );
+        out.push(LField { name: f.name, offset: offset, ty: t });
         offset = add(offset, n);
     }
     tag = found;
@@ -1272,14 +1196,7 @@ fn code_of_key(in fails: ChunkSeq[FailRow], key: u32) -> u64 {
 fn fail_row(in fails: ChunkSeq[FailRow], code: u64) -> FailRow {
     match fails.try_get(wrapping_sub(code, 1)) {
         Option::Some(r) => r,
-        Option::None => FailRow {
-            key: 0,
-            ty: 0,
-            sh: Sh {
-                a: 0,
-                n: 0
-            }
-        },
+        Option::None => FailRow { key: 0, ty: 0, sh: Sh { a: 0, n: 0 } },
     }
 }
 
@@ -1417,12 +1334,7 @@ fn local_of(inout lw: Lw, f: Fn, inout pool: ChunkSeq[u64]) -> Local eff [Fail[V
             }
         }
     }
-    Local {
-        a: a,
-        n: wrapping_sub(pool.len(), a) / 2,
-        overflow: overflow,
-        runtime: runtime
-    }
+    Local { a: a, n: wrapping_sub(pool.len(), a) / 2, overflow: overflow, runtime: runtime }
 }
 
 // `fail::local_codes`, as a mask.
@@ -1796,10 +1708,7 @@ fn planned(in plan: Plan, i: u64) -> Planned {
             label: 0,
             pa: 0,
             pn: 0,
-            result: Sh {
-                a: 0,
-                n: 0
-            },
+            result: Sh { a: 0, n: 0 },
             raises: 0,
             status: false,
             ret_words: 0,
@@ -1812,16 +1721,7 @@ fn planned(in plan: Plan, i: u64) -> Planned {
 fn pp(in plan: Plan, i: u64) -> PP {
     match plan.pps.try_get(i) {
         Option::Some(x) => x,
-        Option::None => PP {
-            pass: 0,
-            sh: Sh {
-                a: 0,
-                n: 0
-            },
-            erased: false,
-            wa: 0,
-            wn: 0
-        },
+        Option::None => PP { pass: 0, sh: Sh { a: 0, n: 0 }, erased: false, wa: 0, wn: 0 },
     }
 }
 
@@ -2004,23 +1904,11 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
             let p = lw.param(add(f.p0, i));
             let erased = nested && clause && lw.c.types.node(p.ty).kind == TyKind::Fn;
             let sh = if erased {
-                Sh {
-                    a: 0,
-                    n: 0
-                }
+                Sh { a: 0, n: 0 }
             } else {
                 shape(inout lw, p.ty, name)
             };
-            pps
-                .push(
-                    PP {
-                        pass: p.pass,
-                        sh: sh,
-                        erased: erased,
-                        wa: 0,
-                        wn: 0
-                    }
-                );
+            pps.push(PP { pass: p.pass, sh: sh, erased: erased, wa: 0, wn: 0 });
         }
         for i in 0..f.pn {
             let p = lw.param(add(f.p0, i));
@@ -2049,13 +1937,7 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
             let ok = pps
                 .try_set(
                     add(pa, i),
-                    PP {
-                        pass: q.pass,
-                        sh: q.sh,
-                        erased: q.erased,
-                        wa: wa,
-                        wn: wn
-                    }
+                    PP { pass: q.pass, sh: q.sh, erased: q.erased, wa: wa, wn: wn }
                 );
         }
         let result = shape(inout lw, f.result, name);
@@ -2238,27 +2120,13 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
     for i in 0..keys.len() {
         let ty = u32_at(in tys, i);
         let sh = shape(inout lw, ty, entry);
-        fails
-            .push(
-                FailRow {
-                    key: u32_at(in keys, i),
-                    ty: ty,
-                    sh: sh
-                }
-            );
+        fails.push(FailRow { key: u32_at(in keys, i), ty: ty, sh: sh });
     }
     let nbase = keys.len();
     for t in 0..tags.len() {
         for i in 0..nbase {
             let r = fail_row(in fails, inc(i));
-            fails
-                .push(
-                    FailRow {
-                        key: NONE32,
-                        ty: r.ty,
-                        sh: r.sh
-                    }
-                );
+            fails.push(FailRow { key: NONE32, ty: r.ty, sh: r.sh });
         }
     }
     // By callee: the site whose escape codes it uses, ((tag index + 1) << 1)
@@ -2421,16 +2289,7 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
 }
 
 fn pp0() -> PP {
-    PP {
-        pass: 0,
-        sh: Sh {
-            a: 0,
-            n: 0
-        },
-        erased: false,
-        wa: 0,
-        wn: 0
-    }
+    PP { pass: 0, sh: Sh { a: 0, n: 0 }, erased: false, wa: 0, wn: 0 }
 }
 
 fn found_at(in found: ChunkSeq[Found], i: u64) -> Found {
@@ -2441,16 +2300,8 @@ fn found_at(in found: ChunkSeq[Found], i: u64) -> Found {
             fi: 0,
             pa: 0,
             pn: 0,
-            result: Sh {
-                a: 0,
-                n: 0
-            },
-            local: Local {
-                a: 0,
-                n: 0,
-                overflow: false,
-                runtime: false
-            },
+            result: Sh { a: 0, n: 0 },
+            local: Local { a: 0, n: 0, overflow: false, runtime: false },
             ca: 0,
             cn: 0,
             ha: 0,
@@ -2496,14 +2347,7 @@ pub struct Fl {
 }
 
 fn lir(tag: u8, op: u8, kind: u8, f1: u64, f2: u64, f3: u64) -> Lir {
-    Lir {
-        tag: tag,
-        op: op,
-        kind: kind,
-        f1: f1,
-        f2: f2,
-        f3: f3
-    }
+    Lir { tag: tag, op: op, kind: kind, f1: f1, f2: f2, f3: f3 }
 }
 
 fn fname(in fl: Fl) -> u32 {
@@ -2541,13 +2385,7 @@ fn alloc(in lw: Lw, inout fl: Fl, words: u64) -> u64 eff [Fail[VErr]] {
 fn value_of(inout lw: Lw, inout fl: Fl, v: u64, ty: u32) -> (u64, Sh) eff [Fail[VErr]] {
     let s = u64_at(in fl.vslot, v);
     if v < fl.vslot.len() && s != NONE {
-        return (
-            s,
-            Sh {
-                a: u64_at(in fl.vsa, v),
-                n: u64_at(in fl.vsn, v)
-            }
-        );
+        return (s, Sh { a: u64_at(in fl.vsa, v), n: u64_at(in fl.vsn, v) });
     }
     let sh = shape(inout lw, ty, fl.f.name);
     let slot = alloc(in lw, inout fl, sh.n);
@@ -2577,13 +2415,7 @@ fn value(in lw: Lw, in fl: Fl, v: u64) -> (u64, Sh) eff [Fail[VErr]] {
         ap(inout d, "'");
         Fail::raise(err(E_INVALID, d));
     }
-    (
-        s,
-        Sh {
-            a: u64_at(in fl.vsa, v),
-            n: u64_at(in fl.vsn, v)
-        }
-    )
+    (s, Sh { a: u64_at(in fl.vsa, v), n: u64_at(in fl.vsn, v) })
 }
 
 // `types.get(v)`: the defaulted type value_of recorded, or NONE32.
@@ -2616,13 +2448,7 @@ fn local(inout lw: Lw, inout fl: Fl, name: u32) -> (u64, Sh) eff [Fail[VErr]] {
     let i = wrapping_sub(li, 1);
     let s = u64_at(in fl.lslot, i);
     if s != NONE {
-        return (
-            s,
-            Sh {
-                a: u64_at(in fl.lsa, i),
-                n: u64_at(in fl.lsn, i)
-            }
-        );
+        return (s, Sh { a: u64_at(in fl.lsa, i), n: u64_at(in fl.lsn, i) });
     }
     let ty = lw.local_row(add(fl.f.l0, i)).ty;
     let sh = shape(inout lw, ty, fl.f.name);
@@ -2840,14 +2666,7 @@ fn parts(inout lw: Lw, in fl: Fl, at: u64, ty0: u32, inout out: ChunkSeq[Part])
         let mut p = add(at, 4);
         for i in 0..n {
             let t = lw.c.types.arg(ty, i);
-            out
-                .push(
-                    Part {
-                        at: p,
-                        offset: offset,
-                        ty: t
-                    }
-                );
+            out.push(Part { at: p, offset: offset, ty: t });
             offset = add(offset, words_of(inout lw, t, func));
             p = pattern_end(in lw.p.ops, p, 1);
         }
@@ -2880,14 +2699,7 @@ fn parts(inout lw: Lw, in fl: Fl, at: u64, ty0: u32, inout out: ChunkSeq[Part])
                     Fail::raise(err(E_INVALID, d));
                 }
                 match layout.try_get(hit) {
-                    Option::Some(x) => out
-                        .push(
-                            Part {
-                                at: inc(p),
-                                offset: x.offset,
-                                ty: x.ty
-                            }
-                        ),
+                    Option::Some(x) => out.push(Part { at: inc(p), offset: x.offset, ty: x.ty }),
                     Option::None => {},
                 }
                 p = pattern_end(in lw.p.ops, inc(p), 1);
@@ -2917,14 +2729,7 @@ fn parts(inout lw: Lw, in fl: Fl, at: u64, ty0: u32, inout out: ChunkSeq[Part])
             let f = lw.c.world.field(add(w(v.fa), fi));
             let t = substitute(inout lw.c.types, f.ty, in vars);
             let wd = words_of(inout lw, t, func);
-            offs
-                .push(
-                    LField {
-                        name: f.name,
-                        offset: offset,
-                        ty: t
-                    }
-                );
+            offs.push(LField { name: f.name, offset: offset, ty: t });
             offset = add(offset, wd);
         }
         let mut p = add(at, 6);
@@ -2949,14 +2754,7 @@ fn parts(inout lw: Lw, in fl: Fl, at: u64, ty0: u32, inout out: ChunkSeq[Part])
                 Fail::raise(err(E_INVALID, d));
             }
             match offs.try_get(hit) {
-                Option::Some(x) => out
-                    .push(
-                        Part {
-                            at: inc(p),
-                            offset: x.offset,
-                            ty: x.ty
-                        }
-                    ),
+                Option::Some(x) => out.push(Part { at: inc(p), offset: x.offset, ty: x.ty }),
                 Option::None => {},
             }
             p = pattern_end(in lw.p.ops, inc(p), 1);
@@ -3281,11 +3079,7 @@ fn call_opening(
     for i in 0..args.len() {
         let a = match args.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Arg {
-                src: 0,
-                words: 0,
-                place: NONE
-            },
+            Option::None => Arg { src: 0, words: 0, place: NONE },
         };
         for k in 0..a.words {
             push(inout fl, lir(LIR_STORE_OUT, 0, 0, add(index, k), add(a.src, k), 0));
@@ -3382,25 +3176,11 @@ fn nested_args(
         let p = lw.param(add(f.p0, i));
         let q = pp(in plan, add(target.pa, i));
         if q.erased {
-            out
-                .push(
-                    Arg {
-                        src: 0,
-                        words: 0,
-                        place: NONE
-                    }
-                );
+            out.push(Arg { src: 0, words: 0, place: NONE });
             continue;
         }
         if bind != 0 && p.name == wrapping_sub(bind, 1) {
-            out
-                .push(
-                    Arg {
-                        src: slot,
-                        words: q.sh.n,
-                        place: NONE
-                    }
-                );
+            out.push(Arg { src: slot, words: q.sh.n, place: NONE });
             continue;
         }
         let a = alias_of(in lw, aliases, p.name);
@@ -3422,14 +3202,7 @@ fn nested_args(
         } else {
             NONE
         };
-        out
-            .push(
-                Arg {
-                    src: ls,
-                    words: q.sh.n,
-                    place: place
-                }
-            );
+        out.push(Arg { src: ls, words: q.sh.n, place: place });
     }
     out
 }
@@ -4165,14 +3938,7 @@ fn instruction(inout lw: Lw, inout fl: Fl, in plan: Plan, ins: InstRow) eff [Fai
                 let (ps, psh) = place(inout lw, inout fl, n32(wrapping_sub(root, 1)), in comps);
                 pl = ps;
             }
-            args
-                .push(
-                    Arg {
-                        src: src,
-                        words: s.n,
-                        place: pl
-                    }
-                );
+            args.push(Arg { src: src, words: s.n, place: pl });
         }
         let (dst, ds) = value_of(inout lw, inout fl, dest, ins.ty);
         if ds.n != target.result.n {
@@ -4231,11 +3997,7 @@ fn data(inout lw: Lw, inout fl: Fl, ins: InstRow) eff [Fail[VErr]] {
         for j in 0..layout.len() {
             let lf = match layout.try_get(j) {
                 Option::Some(x) => x,
-                Option::None => LField {
-                    name: 0,
-                    offset: 0,
-                    ty: 0
-                },
+                Option::None => LField { name: 0, offset: 0, ty: 0 },
             };
             let v = data_field(in lw, a, n, lf.name);
             if v == NONE {
@@ -4756,9 +4518,7 @@ pub fn put_lowered(in lo: Lowered, inout out: ChunkSeq[u8]) {
 // `lowering_input`): per planned function `fn <name>` and its rows in the
 // Rust `Debug` form, or `error: ` and the error's text.
 pub fn lower_input(in b: Slice[u8]) -> ChunkSeq[u8] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let ex = read_exprs(inout r, in b, in c);

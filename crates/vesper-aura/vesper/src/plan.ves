@@ -329,16 +329,7 @@ pub fn mount_next(
                     },
                 }
             };
-            p
-                .m
-                .subs
-                .push(
-                    MSub {
-                        event: ts.event,
-                        id: sid,
-                        handler: ts.handler
-                    }
-                );
+            p.m.subs.push(MSub { event: ts.event, id: sid, handler: ts.handler });
         }
         let cstart = p.m.kids.len();
         for j in 0..tn.ccount {

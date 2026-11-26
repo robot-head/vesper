@@ -106,17 +106,7 @@ const MM_REALM_RPV: u64 = 4;
 const MM_REALM_REM: u64 = 5;
 
 fn at_err(kind: u64, what: u64) -> Never eff [Fail[AtErr]] {
-    Fail::raise(
-        AtErr {
-            kind: kind,
-            what: what,
-            reason: 0,
-            index: 0,
-            extra: 0,
-            off: 0,
-            len: 0
-        }
-    )
+    Fail::raise(AtErr { kind: kind, what: what, reason: 0, index: 0, extra: 0, off: 0, len: 0 })
 }
 
 fn col_err(prefix: u64, reason: u64, index: u64, extra: u64, off: u64, len: u64)
@@ -782,9 +772,7 @@ fn validate_realm_comid(in w: Slice[u64], in b: Slice[u8], inout c: Cur) -> Unit
 // op = 2: one platform CoMID's attest_key triple at `ak_idx`.
 pub fn corim_validate_cca(now_sec: u64, in w: Slice[u64], in b: Slice[u8])
     -> u64 eff [Fail[AtErr]] {
-    let mut c = Cur {
-        pos: 0
-    };
+    let mut c = Cur { pos: 0 };
     let op = rd(in w, inout c);
     if op == 1 {
         validate_plat_refs(in w, in b, inout c);
@@ -1105,9 +1093,7 @@ fn try_plat_candidate(
 // rems_constrained[0..4], personalization_matched.
 pub fn cca_appraise(in w: Slice[u64], in b: Slice[u8], inout w_out: Slice[u64])
     -> Unit eff [Fail[AtErr]] {
-    let mut c = Cur {
-        pos: 0
-    };
+    let mut c = Cur { pos: 0 };
     let cmp_signer = rd(in w, inout c);
     let tok_impl_off = rd(in w, inout c);
     let tok_impl_len = rd(in w, inout c);
@@ -1145,15 +1131,7 @@ pub fn cca_appraise(in w: Slice[u64], in b: Slice[u8], inout w_out: Slice[u64])
     let mut p_cfg = 0;
     let mut p_mfg = 0;
     let mut p_rotpks = 0;
-    let mut p_err = AtErr {
-        kind: 0,
-        what: 0,
-        reason: 0,
-        index: 0,
-        extra: 0,
-        off: 0,
-        len: 0
-    };
+    let mut p_err = AtErr { kind: 0, what: 0, reason: 0, index: 0, extra: 0, off: 0, len: 0 };
     let mut pi = 0;
     loop {
         if pi == plat_count {
@@ -1219,15 +1197,7 @@ pub fn cca_appraise(in w: Slice[u64], in b: Slice[u8], inout w_out: Slice[u64])
     let mut c2 = 0;
     let mut c3 = 0;
     let mut r_pers = 0;
-    let mut r_err = AtErr {
-        kind: 0,
-        what: 0,
-        reason: 0,
-        index: 0,
-        extra: 0,
-        off: 0,
-        len: 0
-    };
+    let mut r_err = AtErr { kind: 0, what: 0, reason: 0, index: 0, extra: 0, off: 0, len: 0 };
     let mut ri = 0;
     loop {
         if ri == realm_count {

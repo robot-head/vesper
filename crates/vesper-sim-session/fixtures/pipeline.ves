@@ -33,9 +33,7 @@ fn received(r: Result[u64, u32]) -> u64 {
 }
 
 fn worker(id: u64, port: u64, delay: u64) -> Report eff [Clock, Sched, Net] {
-    let ticket = Ticket {
-        id: id
-    };
+    let ticket = Ticket { id: id };
     let started = Clock::now();
     Clock::sleep(delay);
     let woke = Clock::now();
@@ -50,9 +48,7 @@ fn worker(id: u64, port: u64, delay: u64) -> Report eff [Clock, Sched, Net] {
     };
     let cancelled = Sched::cancelled();
     let finished = Clock::now();
-    let Ticket {
-        id
-    } = ticket;
+    let Ticket { id } = ticket;
     Report {
         ticket: id,
         started: started,

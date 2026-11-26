@@ -443,10 +443,7 @@ pub fn decoder_core_next(inout d: DecoderCore, in front: Slice[u8], in back: Sli
     d.scan = 0;
     d.line_start = 0;
     d.after_cr = false;
-    Step::Ready {
-        head_bytes: d.head_bytes,
-        consumed: consumed
-    }
+    Step::Ready { head_bytes: d.head_bytes, consumed: consumed }
 }
 
 // The status of the minimal `Connection: close` response the connection

@@ -311,23 +311,13 @@ fn zero_stats() -> Stats {
 }
 
 fn no_recv() -> RecvOut {
-    RecvOut {
-        seg_start: 0,
-        seg_len: 0,
-        ring_start: 0,
-        ring_len1: 0,
-        ring_len2: 0,
-        fin: false
-    }
+    RecvOut { seg_start: 0, seg_len: 0, ring_start: 0, ring_len1: 0, ring_len2: 0, fin: false }
 }
 
 fn some_ips(o: Option[Ips]) -> Ips {
     match o {
         Option::Some(i) => i,
-        Option::None => Ips::V4 {
-            src: 0,
-            dst: 0
-        },
+        Option::None => Ips::V4 { src: 0, dst: 0 },
     }
 }
 
@@ -441,11 +431,7 @@ fn ooo_remove(inout t: Tcb, i: u64) {
 fn ooo_at(in t: Tcb, i: u64) -> OooRange {
     match t.ooo.try_get(i) {
         Option::Some(r) => r,
-        Option::None => OooRange {
-            start: 0,
-            end: 0,
-            stamp: 0
-        },
+        Option::None => OooRange { start: 0, end: 0, stamp: 0 },
     }
 }
 
@@ -454,14 +440,7 @@ fn cc_cmd(inout t: Tcb, c: CcCmd) {
 }
 
 fn cc_event(inout t: Tcb, event: CongestionEvent, now: u64) {
-    t
-        .cmds
-        .push(
-            CcCmd::Event {
-                event: event,
-                now: now
-            }
-        );
+    t.cmds.push(CcCmd::Event { event: event, now: now });
 }
 
 pub fn config_validate(cfg: Config) -> Result[Unit, TcpFail] {

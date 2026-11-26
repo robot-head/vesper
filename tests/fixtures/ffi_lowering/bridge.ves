@@ -73,20 +73,12 @@ fn slices() -> u64 eff [Ffi[Bridge]] {
 }
 
 fn structs() -> u64 eff [Ffi[Bridge]] {
-    let mut pair = Pair {
-        lo: 0,
-        hi: 0
-    };
+    let mut pair = Pair { lo: 0, hi: 0 };
     let ok = Bridge::bridge_split(77309411333, inout pair);
     Bridge::bridge_report32(30, pair.lo);
     Bridge::bridge_report32(31, pair.hi);
     Bridge::bridge_report_signed(32, widen_i64(ok));
-    let mut h = Hdr {
-        magic: 16909060,
-        version: 5,
-        tag: (1, 2, 3),
-        length: 1000
-    };
+    let mut h = Hdr { magic: 16909060, version: 5, tag: (1, 2, 3), length: 1000 };
     Bridge::bridge_report(33, Bridge::bridge_hdr_sum(in h));
     Bridge::bridge_hdr_bump(inout h);
     Bridge::bridge_report32(34, h.magic);
@@ -99,36 +91,14 @@ fn structs() -> u64 eff [Ffi[Bridge]] {
 }
 
 fn records() -> u64 eff [Ffi[Bridge]] {
-    let mut recs = (
-        Rec {
-            id: 2,
-            value: 10
-        },
-        Rec {
-            id: 3,
-            value: -4
-        },
-        Rec {
-            id: 5,
-            value: 1
-        }
-    );
+    let mut recs = (Rec { id: 2, value: 10 }, Rec { id: 3, value: -4 }, Rec { id: 5, value: 1 });
     Bridge::bridge_report_signed(40, Bridge::bridge_rec_total(in recs));
     Bridge::bridge_rec_scale(inout recs, 3);
     let (r0, r1, r2) = recs;
     Bridge::bridge_report_signed(41, r0.value);
     Bridge::bridge_report_signed(42, r1.value);
     Bridge::bridge_report_signed(43, r2.value);
-    let single = (
-        Rec {
-            id: 7,
-            value: 6
-        },
-        Rec {
-            id: 1,
-            value: 0
-        }
-    );
+    let single = (Rec { id: 7, value: 6 }, Rec { id: 1, value: 0 });
     Bridge::bridge_report_signed(44, Bridge::bridge_rec_total(in single));
     0
 }

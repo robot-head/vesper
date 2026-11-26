@@ -90,9 +90,7 @@ pub fn check_pact_declarations(in input: Str) -> ChunkSeq[u64] {
 // `check_pact_declarations` over the input's bytes: the entry of the hybrid
 // build's `modules/pact` (crates/vesper-hybrid).
 pub fn declarations_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let d = read_decls(inout r, in b, in c.nmap, in c.tmap);
     let sy = sy_new(inout c.names);

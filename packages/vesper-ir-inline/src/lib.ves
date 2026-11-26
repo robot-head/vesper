@@ -237,13 +237,7 @@ pub fn map_new(cap: u64) -> MapU {
     vals.resize(cap, 0);
     let mut used: ChunkSeq[u8] = ChunkSeq::new[u8]();
     used.resize(cap, 0);
-    MapU {
-        keys: keys,
-        vals: vals,
-        used: used,
-        mask: sub(cap, 1),
-        count: 0
-    }
+    MapU { keys: keys, vals: vals, used: used, mask: sub(cap, 1), count: 0 }
 }
 
 fn hash64(k: u64) -> u64 {
@@ -422,27 +416,11 @@ fn no_fun() -> Fun {
 }
 
 fn no_inst() -> Inst {
-    Inst {
-        dest: 0,
-        ty: 0,
-        s0: 0,
-        s1: 0,
-        flags: 0,
-        opq: 0,
-        op: O_UNIT,
-        a: 0
-    }
+    Inst { dest: 0, ty: 0, s0: 0, s1: 0, flags: 0, opq: 0, op: O_UNIT, a: 0 }
 }
 
 fn no_blk() -> Blk {
-    Blk {
-        pa: 0,
-        pn: 0,
-        ia: 0,
-        ic: 0,
-        term: T_UNREACHABLE,
-        ta: 0
-    }
+    Blk { pa: 0, pn: 0, ia: 0, ic: 0, term: T_UNREACHABLE, ta: 0 }
 }
 
 impl Prog {
@@ -474,11 +452,7 @@ impl Prog {
     pub fn param(in self, f: Fun, k: u64) -> ParamRow {
         match self.prm.try_get(add(w(f.pa), k)) {
             Option::Some(x) => x,
-            Option::None => ParamRow {
-                name: 0,
-                pass: 0,
-                ty: 0
-            },
+            Option::None => ParamRow { name: 0, pass: 0, ty: 0 },
         }
     }
 
@@ -854,15 +828,7 @@ fn read_function(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], inout
         let pname = sym(in nmap, r.word(in b));
         let pass = r.word(in b);
         let ty = n32(r.word(in b));
-        p
-            .prm
-            .push(
-                ParamRow {
-                    name: pname,
-                    pass: pass,
-                    ty: ty
-                }
-            );
+        p.prm.push(ParamRow { name: pname, pass: pass, ty: ty });
     }
     let ba = n32(p.ids.len());
     let bn = r.word(in b);
@@ -933,18 +899,7 @@ fn read_function(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], inout
         let ta = n32(p.ops.len());
         read_terminator(inout r, in b, in nmap, inout p, term);
         p.fblk.push(n32(p.blks.len()));
-        p
-            .blks
-            .push(
-                Blk {
-                    pa: bpa,
-                    pn: n32(bpn),
-                    ia: ia,
-                    ic: n32(ic),
-                    term: term,
-                    ta: ta
-                }
-            );
+        p.blks.push(Blk { pa: bpa, pn: n32(bpn), ia: ia, ic: n32(ic), term: term, ta: ta });
     }
     let index = n32(p.funs.len());
     p
@@ -978,9 +933,7 @@ fn intern_text(inout names: Names, in s: Str) -> u32 {
 }
 
 pub fn read_input(in b: Slice[u8]) -> Prog {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let mut names = names_new();
     let mut nmap: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let count = r.word(in b);
@@ -1098,15 +1051,7 @@ pub fn read_input(in b: Slice[u8]) -> Prog {
         p
             .instances
             .push(
-                Instance {
-                    callee: callee,
-                    s0: s0,
-                    s1: s1,
-                    has: has,
-                    pa: pa,
-                    pn: n32(pn),
-                    row: row
-                }
+                Instance { callee: callee, s0: s0, s1: s1, has: has, pa: pa, pn: n32(pn), row: row }
             );
     }
     p
@@ -1392,12 +1337,7 @@ fn folded_none(blocks: u64) -> Folded {
     for k in 0..blocks {
         set_u8(inout live, k, 1);
     }
-    Folded {
-        live: live,
-        jumps: fill32(blocks, NONE32),
-        known: ChunkSeq::new[u8](),
-        njumps: 0
-    }
+    Folded { live: live, jumps: fill32(blocks, NONE32), known: ChunkSeq::new[u8](), njumps: 0 }
 }
 
 impl Folded {
@@ -1564,16 +1504,7 @@ fn handler_sum(in p: Prog, fi: u32, count: bool) -> u64 {
         if count {
             total = add(total, own_handles(in p, g));
         } else {
-            total = add(
-                total,
-                cost(
-                    in p,
-                    Tgt {
-                        f: g,
-                        inst: NONE32
-                    }
-                )
-            );
+            total = add(total, cost(in p, Tgt { f: g, inst: NONE32 }));
         }
         handler_graphs(in p, g, inout pending);
     }
@@ -1608,10 +1539,7 @@ fn generic_body(in p: Prog, f: Fun) -> u32 {
 // `inlinable`: callee properties that do not depend on the call site.
 fn inlinable(in p: Prog, fi: u32) -> u32 {
     let f = p.fun(fi);
-    let g = Tgt {
-        f: fi,
-        inst: NONE32
-    };
+    let g = Tgt { f: fi, inst: NONE32 };
     if (f.flags & W_WORLD) == 0 {
         return R_NOT_WORLD;
     }
@@ -1690,18 +1618,7 @@ fn caller_eligible(in p: Prog, fi: u32) -> bool {
     if (f.flags & W_SLOTS) != 0 || row_has_capability(in p, f.row) {
         return false;
     }
-    ! any_type(
-        in p,
-        Tgt {
-            f: fi,
-            inst: NONE32
-        },
-        F_BOX,
-        true,
-        true,
-        true,
-        false
-    )
+    ! any_type(in p, Tgt { f: fi, inst: NONE32 }, F_BOX, true, true, true, false)
 }
 
 // ----- literal constants ----------------------------------------------------------
@@ -1973,11 +1890,7 @@ pub struct Bindings {
 }
 
 fn bindings_new() -> Bindings {
-    Bindings {
-        place: ChunkSeq::new[u8](),
-        value: ChunkSeq::new[u32](),
-        at: ChunkSeq::new[u64]()
-    }
+    Bindings { place: ChunkSeq::new[u8](), value: ChunkSeq::new[u32](), at: ChunkSeq::new[u64]() }
 }
 
 impl Bindings {
@@ -2182,11 +2095,7 @@ pub copy struct Kn {
 }
 
 fn unknown() -> Kn {
-    Kn {
-        k: 0,
-        lo: 0,
-        hi: 0
-    }
+    Kn { k: 0, lo: 0, hi: 0 }
 }
 
 fn kn_at(in s: ChunkSeq[Kn], i: u64) -> Kn {
@@ -2210,28 +2119,16 @@ fn constant(inout p: Prog, g: Tgt, i: Inst) -> Kn {
     if i.op == O_CONST {
         let kind = p.op(a);
         if kind == L_INT {
-            return Kn {
-                k: 1,
-                lo: p.op(inc(a)),
-                hi: p.op(add(a, 2))
-            };
+            return Kn { k: 1, lo: p.op(inc(a)), hi: p.op(add(a, 2)) };
         }
         if kind == L_BOOL {
-            return Kn {
-                k: 2,
-                lo: p.op(inc(a)),
-                hi: 0
-            };
+            return Kn { k: 2, lo: p.op(inc(a)), hi: 0 };
         }
         return unknown();
     }
     if i.op == O_DATA && p.op(inc(a)) == 0 && p.has(p.map(g.inst, i.ty), F_PLAIN) {
         let s = short(inout p, n32(p.op(a)));
-        return Kn {
-            k: 3,
-            lo: w(s),
-            hi: 0
-        };
+        return Kn { k: 3, lo: w(s), hi: 0 };
     }
     unknown()
 }
@@ -2333,10 +2230,7 @@ pub struct Assoc {
 }
 
 fn assoc_new() -> Assoc {
-    Assoc {
-        keys: ChunkSeq::new[u32](),
-        vals: ChunkSeq::new[Kn]()
-    }
+    Assoc { keys: ChunkSeq::new[u32](), vals: ChunkSeq::new[Kn]() }
 }
 
 impl Assoc {
@@ -2490,10 +2384,7 @@ fn fold_seeds(inout p: Prog, c: u32, g: Tgt, in bs: Bindings, in stable: ChunkSe
             }
         }
     }
-    let own = Tgt {
-        f: c,
-        inst: NONE32
-    };
+    let own = Tgt { f: c, inst: NONE32 };
     let mut seeds = assoc_new();
     for k in 0..w(f.pn) {
         if bs.is_place(k) {
@@ -2556,11 +2447,7 @@ fn eval_inst(inout p: Prog, g: Tgt, i: Inst, inout st: Round, in stable: ChunkSe
         if p.op(a) == 1 {
             let v = kn_at(in st.values, p.op(inc(a)));
             if v.k == 2 {
-                return Kn {
-                    k: 2,
-                    lo: 1 ^ v.lo,
-                    hi: 0
-                };
+                return Kn { k: 2, lo: 1 ^ v.lo, hi: 0 };
             }
         }
         return unknown();
@@ -2810,12 +2697,7 @@ fn fold(inout p: Prog, c: u32, g: Tgt, in bs: Bindings, inout ok: bool) -> Folde
                 }
             }
             ok = true;
-            return Folded {
-                live: st.live,
-                jumps: st.jumps,
-                known: known,
-                njumps: st.njumps
-            };
+            return Folded { live: st.live, jumps: st.jumps, known: known, njumps: st.njumps };
         }
         prev = st;
         params = next;
@@ -2848,14 +2730,7 @@ pub struct Split {
 }
 
 fn no_split() -> Split {
-    Split {
-        found: false,
-        block: 0,
-        cold: 0,
-        hot: ChunkSeq::new[u8](),
-        hot_cost: 0,
-        cold_cost: 0
-    }
+    Split { found: false, block: 0, cold: 0, hot: ChunkSeq::new[u8](), hot_cost: 0, cold_cost: 0 }
 }
 
 // `site::pure`: an instruction a head may run twice.
@@ -3326,14 +3201,7 @@ fn new_block(inout p: Prog, in params: ChunkSeq[u32], in list: ChunkSeq[u32], te
     p
         .blks
         .push(
-            Blk {
-                pa: pa,
-                pn: n32(params.len()),
-                ia: ia,
-                ic: n32(list.len()),
-                term: term,
-                ta: ta
-            }
+            Blk { pa: pa, pn: n32(params.len()), ia: ia, ic: n32(list.len()), term: term, ta: ta }
         );
     id
 }
@@ -3840,10 +3708,7 @@ fn inline_into(
                 continue;
             }
             let mut why = u32_at(in cand, w(fi));
-            let mut g = Tgt {
-                f: fi,
-                inst: NONE32
-            };
+            let mut g = Tgt { f: fi, inst: NONE32 };
             let mut bs = bindings_new();
             let mut fd = folded_none(0);
             let mut s = no_split();
@@ -4177,16 +4042,7 @@ fn put_report(in p: Prog, in rep: Report, inout o: ChunkSeq[u64]) {
         let fi = n32(f);
         o.push(p.input_name(p.fun(fi).name));
         o.push(size(in p, fi));
-        o
-            .push(
-                cost(
-                    in p,
-                    Tgt {
-                        f: fi,
-                        inst: NONE32
-                    }
-                )
-            );
+        o.push(cost(in p, Tgt { f: fi, inst: NONE32 }));
     }
 }
 

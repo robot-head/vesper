@@ -355,12 +355,7 @@ pub fn shortest(bits: u64) -> Shortest {
     let biased = (bits >> MANTISSA_BITS) & EXPONENT_MASK;
     let frac = bits & MANTISSA_MASK;
     if biased == 0 && frac == 0 {
-        return Shortest {
-            neg: neg,
-            digits: 0,
-            n: 0,
-            k: 0
-        };
+        return Shortest { neg: neg, digits: 0, n: 0, k: 0 };
     }
     // `integer_decode` then `flt2dec::decode`: (mant, minus, plus, exp).
     let mut mant = frac;
@@ -386,21 +381,11 @@ pub fn shortest(bits: u64) -> Shortest {
     }
     let g = grisu_shortest(mant, minus, plus, exp);
     if g.ok {
-        return Shortest {
-            neg: neg,
-            digits: g.digits,
-            n: g.n,
-            k: g.k
-        };
+        return Shortest { neg: neg, digits: g.digits, n: g.n, k: g.k };
     }
     let mut d: ChunkSeq[u8] = ChunkSeq::with_capacity(DIGIT_CAPACITY);
     let k = format_shortest(mant, minus, plus, exp, even, inout d);
-    Shortest {
-        neg: neg,
-        digits: digits_value(in d),
-        n: d.len(),
-        k: k
-    }
+    Shortest { neg: neg, digits: digits_value(in d), n: d.len(), k: k }
 }
 
 // The length of the text `{}` writes for `s` (`digits_to_dec_str` with

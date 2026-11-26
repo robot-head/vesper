@@ -42,18 +42,8 @@ fn logs() -> u64 eff [Log] {
 
 fn pick(p: Port) -> u64 {
     match p {
-        Port {
-            effect: 0,
-            handle,
-            sink: _,
-            inout: _
-        } => handle,
-        Port {
-            effect,
-            handle: _,
-            sink: _,
-            inout: _
-        } => effect,
+        Port { effect: 0, handle, sink: _, inout: _ } => handle,
+        Port { effect, handle: _, sink: _, inout: _ } => effect,
     }
 }
 
@@ -62,12 +52,7 @@ fn run() -> u64 {
     let mut inout = 2;
     bump(inout inout);
     let handle = handle(inout);
-    let port = Port {
-        effect: effect,
-        handle: handle,
-        sink: sink(1),
-        inout: 4
-    };
+    let port = Port { effect: effect, handle: handle, sink: sink(1), inout: 4 };
     let n = handle Log in {
         logs()
     } with {
@@ -90,12 +75,7 @@ fn run() -> u64 {
     let both = pair(effect, handle);
     let picked = pick(port);
     let total = wrapping_add(wrapping_add(wrapping_add(n, m), k), wrapping_add(both, picked));
-    let sink = Port {
-        effect: 0,
-        handle: 5,
-        sink: 6,
-        inout: 7
-    };
+    let sink = Port { effect: 0, handle: 5, sink: 6, inout: 7 };
     wrapping_add(total, take(sink sink))
 }
 

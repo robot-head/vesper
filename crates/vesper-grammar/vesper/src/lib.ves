@@ -317,12 +317,7 @@ pub fn der_encoding_plan(
     in lim: Slice[u64]
 ) -> P4 eff [Fail[GErr]] {
     let p = der_plan(in vals, in arena, in sch, in lim);
-    P4 {
-        a: p.encoded,
-        b: p.nodes,
-        c: p.metadata,
-        d: p.intermediate
-    }
+    P4 { a: p.encoded, b: p.nodes, c: p.metadata, d: p.intermediate }
 }
 
 pub fn der_encode_into(

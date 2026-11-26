@@ -216,41 +216,19 @@ fn rem(a: u64, b: u64) -> u64 {
 }
 
 fn ok(value: u64) -> Ret {
-    Ret {
-        code: Code::Ok,
-        value: value
-    }
+    Ret { code: Code::Ok, value: value }
 }
 
 fn err(code: u64, value: u64) -> Ret {
-    Ret {
-        code: code,
-        value: value
-    }
+    Ret { code: code, value: value }
 }
 
 fn ev(kind: u64, task: u64, completion: u64, a: u64, b: u64) -> Ev {
-    Ev {
-        kind: kind,
-        task: task,
-        completion: completion,
-        a: a,
-        b: b,
-        rk: 0,
-        rv: 0
-    }
+    Ev { kind: kind, task: task, completion: completion, a: a, b: b, rk: 0, rv: 0 }
 }
 
 fn ev_io(kind: u64, task: u64, completion: u64, a: u64, b: u64, rk: u64, rv: u64) -> Ev {
-    Ev {
-        kind: kind,
-        task: task,
-        completion: completion,
-        a: a,
-        b: b,
-        rk: rk,
-        rv: rv
-    }
+    Ev { kind: kind, task: task, completion: completion, a: a, b: b, rk: rk, rv: rv }
 }
 
 // SplitMix64 increment and finalizer multipliers.
@@ -732,11 +710,7 @@ pub fn kernel_now_ns(in k: Kernel) -> u64 {
 
 pub fn kernel_task_state(in k: Kernel, task: u64) -> St {
     if !k.known(task) {
-        return St {
-            kind: State::None,
-            completion: 0,
-            deadline: 0
-        };
+        return St { kind: State::None, completion: 0, deadline: 0 };
     }
     let i = dec(task);
     St {

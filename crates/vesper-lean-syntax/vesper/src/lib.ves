@@ -890,10 +890,7 @@ fn app(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64) {
     term(inout p, in s, in pool, inout at);
     if p.err != 0 {
         at = wrapping_add(function, size);
-        let mut scratch = P {
-            out: String::new(),
-            err: 0
-        };
+        let mut scratch = P { out: String::new(), err: 0 };
         args(inout scratch, in s, in pool, inout at, n);
         if scratch.err != 0 {
             p.err = scratch.err;
@@ -1882,11 +1879,7 @@ fn ref_statements(inout r: R, in s: Slice[u64], in pool: Str, inout at: u64) {
 
 // `Term::free_references`: parameter binders, then the body.
 pub fn free_references(in s: Slice[u64], in pool: Str) -> ChunkSeq[u64] {
-    let mut r = R {
-        found: ChunkSeq::new(),
-        scope: ChunkSeq::new(),
-        all: false
-    };
+    let mut r = R { found: ChunkSeq::new(), scope: ChunkSeq::new(), all: false };
     let mut at: u64 = 0;
     ref_binders(inout r, in s, in pool, inout at);
     ref_term(inout r, in s, in pool, inout at);
@@ -1898,11 +1891,7 @@ pub fn free_references(in s: Slice[u64], in pool: Str) -> ChunkSeq[u64] {
 // them, is not walked).
 pub fn free_references_at(in s: Slice[u64], in pool: Str, binders_at: u64, body_at: u64)
     -> ChunkSeq[u64] {
-    let mut r = R {
-        found: ChunkSeq::new(),
-        scope: ChunkSeq::new(),
-        all: false
-    };
+    let mut r = R { found: ChunkSeq::new(), scope: ChunkSeq::new(), all: false };
     let mut at = binders_at;
     ref_binders(inout r, in s, in pool, inout at);
     at = body_at;
@@ -1912,11 +1901,7 @@ pub fn free_references_at(in s: Slice[u64], in pool: Str, binders_at: u64, body_
 
 // Where the term starting at `at` ends.
 pub fn term_end(in s: Slice[u64], in pool: Str, at: u64) -> u64 {
-    let mut r = R {
-        found: ChunkSeq::new(),
-        scope: ChunkSeq::new(),
-        all: true
-    };
+    let mut r = R { found: ChunkSeq::new(), scope: ChunkSeq::new(), all: true };
     let mut p = at;
     ref_term(inout r, in s, in pool, inout p);
     p
@@ -1924,11 +1909,7 @@ pub fn term_end(in s: Slice[u64], in pool: Str, at: u64) -> u64 {
 
 // Where the binder list (count, then binders) starting at `at` ends.
 pub fn binders_end(in s: Slice[u64], in pool: Str, at: u64) -> u64 {
-    let mut r = R {
-        found: ChunkSeq::new(),
-        scope: ChunkSeq::new(),
-        all: true
-    };
+    let mut r = R { found: ChunkSeq::new(), scope: ChunkSeq::new(), all: true };
     let mut p = at;
     ref_binders(inout r, in s, in pool, inout p);
     p
@@ -1936,11 +1917,7 @@ pub fn binders_end(in s: Slice[u64], in pool: Str, at: u64) -> u64 {
 
 // `Term::references`: every `Ref` name, binders included.
 pub fn references(in s: Slice[u64], in pool: Str) -> ChunkSeq[u64] {
-    let mut r = R {
-        found: ChunkSeq::new(),
-        scope: ChunkSeq::new(),
-        all: true
-    };
+    let mut r = R { found: ChunkSeq::new(), scope: ChunkSeq::new(), all: true };
     let mut at: u64 = 0;
     ref_term(inout r, in s, in pool, inout at);
     r.found

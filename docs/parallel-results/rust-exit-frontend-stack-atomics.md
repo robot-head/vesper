@@ -243,12 +243,39 @@ in the hybrid, over the checker AST crossing of slice 3.
 Rust lines deleted: 0. `src/dyn_fn.rs` and `src/dyn_trait.rs` go with
 `src/` in the Stage 2 retirement PR (#1397).
 
+## Slice 5: what an atomics swap would cost (#1182)
+
+`atomics_speed` now also times what a hybrid swap of the checker's calls
+(`check_world` and `check_program`) would pay per call: encoding the
+check-data context (names and types), the world's function bodies, the
+module items and the IR section, then the Vesper task. Rust returns at once
+when a world turns on neither the atomics nor the workers prelude, and the
+swap skips the crossing the same way. Of the 367 corpus worlds, 1 turns a
+prelude on.
+
+| Timing (`atomics_speed`, release, `-C target-cpu=native`, JIT entry, 10 ABBA rounds) | Ratio | 95% CI |
+|---|--:|--:|
+| Vesper task alone, input already encoded, every world | 1.54x | 1.46x..1.58x |
+| Swap with encoding, every world (inactive worlds skipped on both sides) | **23.5x** | **15.0x..28.3x** |
+| Swap with encoding, the world with a prelude on | 73.7x | 64.7x..80.5x |
+
+On the world that crosses, encoding the whole context and every body costs
+far more than the Rust rules, which read only the few functions that touch
+atomics. A per-call swap cannot reach the 1.50x bar. The atomics swap waits
+for the checked world held in Vesper (#2024): once the context and bodies
+live on the Vesper side, the swap only runs the task. The regions world
+rules (`seq::check_world`, `tiled::check_world_adts`, #1181) read the same
+context plus signatures, so they wait for it too (not measured).
+
+Rust lines deleted: 0.
+
 ## What is left
 
 - Port the parts of `check::check` one at a time: the core spine
   (#1179), effects (#1180), regions (#1181), dyn (#1183) and Pact (#1185).
-- Swap atomics/control and regions into the hybrid over the crossing
-  (#1910). Dyn is done (slice 4).
+- Swap atomics/control and regions into the hybrid once the checked world
+  is held in Vesper (#2024); a per-call encoding costs 23.5x (slice 5).
+  Dyn is done (slice 4).
 - `read_expr` still costs about 360 instructions per node, mostly in
   generated code that moves 17-word rows (each `u8` and `bool` field
   takes a word). A packed row layout or narrower fields would cut it

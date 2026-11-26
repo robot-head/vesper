@@ -122,10 +122,7 @@ pub fn bbrv3_new(config: BbrConfig, now_ns: u64) -> Result[Bbrv3, BbrFault] {
         next_round_delivered: 0,
         idle_restart: false,
         drain_start_round: 0,
-        max_bw_filter: CycleMax {
-            previous: 0,
-            current: 0
-        },
+        max_bw_filter: CycleMax { previous: 0, current: 0 },
         max_bw: 0,
         bw_shortterm: INFINITY,
         bw: 0,
@@ -183,22 +180,13 @@ pub fn bbrv3_new(config: BbrConfig, now_ns: u64) -> Result[Bbrv3, BbrFault] {
 // The event time must not precede the latest one.
 pub fn check_time(last_ns: u64, now_ns: u64) eff [Fail[BbrFault]] {
     if now_ns < last_ns {
-        Fail::raise(
-            BbrFault::TimeWentBackwards {
-                last_ns: last_ns,
-                now_ns: now_ns
-            }
-        );
+        Fail::raise(BbrFault::TimeWentBackwards { last_ns: last_ns, now_ns: now_ns });
     }
 }
 
 fn pn_fault(pn: u64) -> Option[BbrFault] {
     if pn > MAX_PACKET_NUMBER {
-        Option::Some(
-            BbrFault::PacketNumberOutOfRange {
-                pn: pn
-            }
-        )
+        Option::Some(BbrFault::PacketNumberOutOfRange { pn: pn })
     } else {
         Option::None
     }
@@ -211,11 +199,7 @@ fn congested(in b: Bbrv3) -> u64 {
 fn snapshot_fault(pn: u64, s: PacketDeliveryState, delivered: u64, congested_bytes: u64)
     -> Option[BbrFault] {
     if s.delivered > delivered || s.lost > congested_bytes {
-        Option::Some(
-            BbrFault::ForeignSnapshot {
-                pn: pn
-            }
-        )
+        Option::Some(BbrFault::ForeignSnapshot { pn: pn })
     } else {
         Option::None
     }

@@ -35,13 +35,7 @@ fn find(in name: Str) -> Option[Binary] eff [Ffi[Ops]] {
 pub fn open(scale: u64) -> Option[Table] eff [Ffi[Ops]] {
     match find(in "add") {
         Option::Some(add) => match find(in "mul") {
-            Option::Some(mul) => Option::Some(
-                Table {
-                    add: add,
-                    mul: mul,
-                    scale: scale
-                }
-            ),
+            Option::Some(mul) => Option::Some(Table { add: add, mul: mul, scale: scale }),
             Option::None => Option::None,
         },
         Option::None => Option::None,

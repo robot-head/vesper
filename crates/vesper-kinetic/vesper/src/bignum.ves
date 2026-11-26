@@ -482,10 +482,7 @@ fn nat_sqrt(in a: Slice[u64]) -> ChunkSeq[u64] {
 
 fn make(neg: bool, sink mag: ChunkSeq[u64]) -> Big {
     let z = nat_len(in mag.as_slice()) == 0;
-    Big {
-        neg: neg && !z,
-        mag: mag
-    }
+    Big { neg: neg && !z, mag: mag }
 }
 
 pub fn big_zero() -> Big {

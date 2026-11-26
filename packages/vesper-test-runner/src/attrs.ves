@@ -113,27 +113,15 @@ pub struct Attrs {
 }
 
 fn no_text() -> OptText {
-    OptText {
-        has: false,
-        a: 0,
-        b: 0
-    }
+    OptText { has: false, a: 0, b: 0 }
 }
 
 fn no_num() -> OptNum {
-    OptNum {
-        has: false,
-        v: 0
-    }
+    OptNum { has: false, v: 0 }
 }
 
 fn no_big() -> Big {
-    Big {
-        ok: false,
-        neg: false,
-        hi: 0,
-        lo: 0
-    }
+    Big { ok: false, neg: false, hi: 0, lo: 0 }
 }
 
 pub fn test_attr_new(start: u64, end: u64) -> TestAttr {
@@ -255,13 +243,7 @@ impl Stream {
 
     fn text_val(inout self, tag: u8, in b: Slice[u8], s: u64, e: u64) -> Val {
         let (a, z) = self.put_text(in b, s, e);
-        Val {
-            tag: tag,
-            a: a,
-            b: z,
-            int: no_big(),
-            flag: false
-        }
+        Val { tag: tag, a: a, b: z, int: no_big(), flag: false }
     }
 
     // `unescape_string` of a String token `b[s..e]`.
@@ -312,13 +294,7 @@ impl Stream {
                 self.out.txt.push(d);
             }
         }
-        Val {
-            tag: V_STRING,
-            a: a,
-            b: self.out.txt.len(),
-            int: no_big(),
-            flag: false
-        }
+        Val { tag: V_STRING, a: a, b: self.out.txt.len(), int: no_big(), flag: false }
     }
 
     // `parse_attr_value`: the value up to the next top-level `,` or `)`
@@ -358,13 +334,7 @@ impl Stream {
         let v = if n == 1 && k0 == k_string() {
             self.string_val(in b, s0, e0)
         } else if n == 1 && (k0 == k_true() || k0 == k_false()) {
-            Val {
-                tag: V_BOOL,
-                a: 0,
-                b: 0,
-                int: no_big(),
-                flag: k0 == k_true()
-            }
+            Val { tag: V_BOOL, a: 0, b: 0, int: no_big(), flag: k0 == k_true() }
         } else if n == 1 && k0 == k_int() {
             self.int_val(in b, s0, e0, false, start, end)
         } else if n == 2 && k0 == k_minus() && k1 == k_int() {
@@ -375,13 +345,7 @@ impl Stream {
             let a = self.out.txt.len();
             self.out.txt.push(45);
             push_range(inout self.out.txt, in b, s1, e1);
-            Val {
-                tag: V_FLOAT,
-                a: a,
-                b: self.out.txt.len(),
-                int: no_big(),
-                flag: false
-            }
+            Val { tag: V_FLOAT, a: a, b: self.out.txt.len(), int: no_big(), flag: false }
         } else if n == 1 && (k0 == k_lower() || k0 == k_upper()) {
             self.text_val(V_IDENT, in b, s0, e0)
         } else {
@@ -396,13 +360,7 @@ impl Stream {
         -> Val {
         let x = parse_int(in b, s, e, neg);
         if x.ok {
-            Val {
-                tag: V_INT,
-                a: 0,
-                b: 0,
-                int: x,
-                flag: false
-            }
+            Val { tag: V_INT, a: 0, b: 0, int: x, flag: false }
         } else {
             self.text_val(V_RAW, in b, start, end)
         }
@@ -410,11 +368,7 @@ impl Stream {
 
     fn opt_str(in self, v: Val) -> OptText {
         if v.tag == V_STRING || v.tag == V_IDENT {
-            OptText {
-                has: true,
-                a: v.a,
-                b: v.b
-            }
+            OptText { has: true, a: v.a, b: v.b }
         } else {
             no_text()
         }
@@ -425,10 +379,7 @@ impl Stream {
             return no_num();
         }
         let (ok, n) = as_u64(v.int);
-        OptNum {
-            has: ok,
-            v: n
-        }
+        OptNum { has: ok, v: n }
     }
 
     // `apply_test_kv`: an invalid value leaves the field as it was (and
@@ -541,12 +492,7 @@ impl Stream {
         let a = self.out.args.len();
         let mut end = kw;
         if self.kind() != k_l_paren() {
-            return CaseAttr {
-                a: a,
-                n: 0,
-                start: at,
-                end: end
-            };
+            return CaseAttr { a: a, n: 0, start: at, end: end };
         }
         self.bump();
         loop {
@@ -567,16 +513,7 @@ impl Stream {
             self
                 .out
                 .args
-                .push(
-                    Arg {
-                        has_name: named,
-                        na: na,
-                        nb: nb,
-                        val: v,
-                        start: arg_start,
-                        end: ve
-                    }
-                );
+                .push(Arg { has_name: named, na: na, nb: nb, val: v, start: arg_start, end: ve });
             if self.kind() == k_comma() {
                 self.bump();
             } else if self.kind() != k_r_paren() {
@@ -587,12 +524,7 @@ impl Stream {
             let (s, e) = self.bump();
             end = e;
         }
-        CaseAttr {
-            a: a,
-            n: sub(self.out.args.len(), a),
-            start: at,
-            end: end
-        }
+        CaseAttr { a: a, n: sub(self.out.args.len(), a), start: at, end: end }
     }
 
     // `extract_all`.

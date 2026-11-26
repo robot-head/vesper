@@ -721,9 +721,7 @@ pub fn cca_token_parse(
     let r_node = collection_member(in n, inner, collection, CCA_REALM_TOKEN_KEY, F_REALM_TOKEN);
     put(inout w, collection);
 
-    let mut sc = Scratch {
-        pos: 0
-    };
+    let mut sc = Scratch { pos: 0 };
     let saved = cur_len(in n);
     let p_sp = materialize_bytes(in b, inout s, inout sc, in n, p_node);
     let p_root = handle Fail[AErr] in {

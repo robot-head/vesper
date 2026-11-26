@@ -32,9 +32,7 @@ pub struct LayoutInput {
 }
 
 pub fn layout_input_new() -> LayoutInput {
-    LayoutInput {
-        c: ctx_new()
-    }
+    LayoutInput { c: ctx_new() }
 }
 
 // `layout_of_words` over the world this input holds, after adding `part`.

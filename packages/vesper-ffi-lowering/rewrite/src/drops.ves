@@ -199,15 +199,7 @@ fn alloc_list(inout dst: Ast, in items: ChunkSeq[u32]) -> u32 {
         };
         dst.pool.push(v);
     }
-    dst
-        .lists
-        .alloc(
-            ListRef {
-                first: first,
-                len: wrapping_u32(items.len())
-            }
-        )
-        .raw
+    dst.lists.alloc(ListRef { first: first, len: wrapping_u32(items.len()) }).raw
 }
 
 fn copy_type(inout dst: Ast, in src: Ast, id: u32) -> u32 {
@@ -223,18 +215,7 @@ fn copy_type(inout dst: Ast, in src: Ast, id: u32) -> u32 {
         }
         let a = copy_sym(inout dst, in src, t.a);
         let b = alloc_list(inout dst, in args);
-        return dst
-            .types
-            .alloc(
-                TypeNode {
-                    kind: 1,
-                    a: a,
-                    b: b,
-                    c: 0,
-                    d: 0
-                }
-            )
-            .raw;
+        return dst.types.alloc(TypeNode { kind: 1, a: a, b: b, c: 0, d: 0 }).raw;
     }
     if t.kind == 2 {
         let n = list_len(in src, t.a);
@@ -243,18 +224,7 @@ fn copy_type(inout dst: Ast, in src: Ast, id: u32) -> u32 {
             args.push(copy_type(inout dst, in src, list_at(in src, t.a, i)));
         }
         let a = alloc_list(inout dst, in args);
-        return dst
-            .types
-            .alloc(
-                TypeNode {
-                    kind: 2,
-                    a: a,
-                    b: 0,
-                    c: 0,
-                    d: 0
-                }
-            )
-            .raw;
+        return dst.types.alloc(TypeNode { kind: 2, a: a, b: 0, c: 0, d: 0 }).raw;
     }
     dst.types.alloc(t).raw
 }
@@ -262,14 +232,7 @@ fn copy_type(inout dst: Ast, in src: Ast, id: u32) -> u32 {
 fn copy_effect(inout dst: Ast, in src: Ast, id: u32) -> u32 {
     let e = src
         .effect_nodes
-        .get_or(
-            idx_from_raw[EffectNode](id),
-            EffectNode {
-                label: NONE,
-                name: NONE,
-                args: 0
-            }
-        );
+        .get_or(idx_from_raw[EffectNode](id), EffectNode { label: NONE, name: NONE, args: 0 });
     let n = list_len(in src, e.args);
     let mut args = ChunkSeq::new[u32]();
     for i in 0..n {
@@ -278,28 +241,13 @@ fn copy_effect(inout dst: Ast, in src: Ast, id: u32) -> u32 {
     let label = copy_sym(inout dst, in src, e.label);
     let name = copy_sym(inout dst, in src, e.name);
     let arg_list = alloc_list(inout dst, in args);
-    dst
-        .effect_nodes
-        .alloc(
-            EffectNode {
-                label: label,
-                name: name,
-                args: arg_list
-            }
-        )
-        .raw
+    dst.effect_nodes.alloc(EffectNode { label: label, name: name, args: arg_list }).raw
 }
 
 fn copy_effects(inout dst: Ast, in src: Ast, id: u32) -> u32 {
     let e = src
         .effects
-        .get_or(
-            idx_from_raw[EffectsNode](id),
-            EffectsNode {
-                instances: 0,
-                tail: NONE
-            }
-        );
+        .get_or(idx_from_raw[EffectsNode](id), EffectsNode { instances: 0, tail: NONE });
     let n = list_len(in src, e.instances);
     let mut insts = ChunkSeq::new[u32]();
     for i in 0..n {
@@ -307,15 +255,7 @@ fn copy_effects(inout dst: Ast, in src: Ast, id: u32) -> u32 {
     }
     let instances = alloc_list(inout dst, in insts);
     let tail = copy_sym(inout dst, in src, e.tail);
-    dst
-        .effects
-        .alloc(
-            EffectsNode {
-                instances: instances,
-                tail: tail
-            }
-        )
-        .raw
+    dst.effects.alloc(EffectsNode { instances: instances, tail: tail }).raw
 }
 
 fn copy_param(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
@@ -323,14 +263,7 @@ fn copy_param(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
         .params
         .get_or(
             idx_from_raw[ParamNode](id),
-            ParamNode {
-                name: NONE,
-                pass: 0,
-                projections: 0,
-                ty: NONE,
-                start: 0,
-                end: 0
-            }
+            ParamNode { name: NONE, pass: 0, projections: 0, ty: NONE, start: 0, end: 0 }
         );
     let name = copy_sym(inout dst, in src, p.name);
     let ty = copy_type(inout dst, in src, p.ty);
@@ -392,25 +325,9 @@ fn copy_pat(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
 fn copy_arg(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
     let a = src
         .args
-        .get_or(
-            idx_from_raw[ArgNode](id),
-            ArgNode {
-                pass: 0,
-                explicit: false,
-                expr: NONE
-            }
-        );
+        .get_or(idx_from_raw[ArgNode](id), ArgNode { pass: 0, explicit: false, expr: NONE });
     let expr = copy_expr(inout dst, in src, a.expr, base);
-    dst
-        .args
-        .alloc(
-            ArgNode {
-                pass: a.pass,
-                explicit: a.explicit,
-                expr: expr
-            }
-        )
-        .raw
+    dst.args.alloc(ArgNode { pass: a.pass, explicit: a.explicit, expr: expr }).raw
 }
 
 fn copy_expr(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
@@ -567,13 +484,7 @@ pub fn append_drops(inout dst: Ast, in s: S) {
                 let it = parsed
                     .ast
                     .items
-                    .get_or(
-                        idx_from_raw[ItemNode](item_id),
-                        ItemNode {
-                            kind: 0,
-                            node: 0
-                        }
-                    );
+                    .get_or(idx_from_raw[ItemNode](item_id), ItemNode { kind: 0, node: 0 });
                 if it.kind != 2 {
                     continue;
                 }
@@ -583,15 +494,7 @@ pub fn append_drops(inout dst: Ast, in s: S) {
                     s2
                 };
                 let fn_id = copy_fn(inout dst, in parsed.ast, it.node, base, name);
-                let new_item = dst
-                    .items
-                    .alloc(
-                        ItemNode {
-                            kind: 2,
-                            node: fn_id
-                        }
-                    )
-                    .raw;
+                let new_item = dst.items.alloc(ItemNode { kind: 2, node: fn_id }).raw;
                 dst.m_items.push(new_item);
             }
             base = wrapping_add(base, wrapping_add(wrapping_u32(text.len()), 1));

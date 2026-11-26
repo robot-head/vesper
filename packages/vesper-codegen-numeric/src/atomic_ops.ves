@@ -64,9 +64,7 @@ const AR_XCHG: u32 = 7;
 // Type codes, and the `sextend`/`uextend` convert ops.
 
 fn aty(code: u32) -> Ty {
-    Ty {
-        code: code
-    }
+    Ty { code: code }
 }
 
 // Whether `call` is an atomic or `parallel_for` request this file emits.
@@ -116,9 +114,7 @@ pub fn atomic_request(call: u64, op: u32, inout b: Builder, inout m: Module)
         return ins_load(inout b, aty(TyCode::I64), flags, handle, 16);
     }
     if op == NUM_PARALLEL_FOR {
-        let fun = FuncRef {
-            id: wrapping_u32(call_arg(call, 0))
-        };
+        let fun = FuncRef { id: wrapping_u32(call_arg(call, 0)) };
         let pointer = ins_func_addr(inout b, aty(TyCode::I64), fun);
         let s = sig_new(inout m, call_conv_default());
         for _ in 0..3 {
