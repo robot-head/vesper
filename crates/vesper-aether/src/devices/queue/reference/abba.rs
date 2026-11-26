@@ -9,7 +9,7 @@
 //! ```
 //!
 //! It prints the flip gate's `flip-gate pairs` line
-//! (crates/vesper-aether/flip-gate.toml).
+//! (crates/vesper-aether/flip-gate.json).
 
 use std::hint::black_box;
 

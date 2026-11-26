@@ -1,0 +1,269 @@
+"""Exercise the default witness-gated optimizer with the actual compiler."""
+
+load("./bounded-stdio.axl", "bounded_run", "utf8")
+load("./lib/process.axl", "root_path", "scratch_dir")
+load("./lib/strict-json.axl", "decode_list", "decode_object")
+
+def _require(condition, message):
+    if not condition:
+        fail(message)
+
+def _equal(actual, expected, message):
+    if actual != expected:
+        fail("%s: expected %r, got %r" % (message, expected, actual))
+
+def _body(module, name):
+    found = [item["Function"]["body"] for item in module["items"] if "Function" in item and item["Function"]["name"] == name]
+    _require(len(found) == 1, "Expected one function body for " + name)
+    return found[0]
+
+def _tail(expression):
+    for _ in range(65536):
+        kind = expression["kind"]
+        if type(kind) != "dict" or "Block" not in kind:
+            return expression
+        expression = kind["Block"]["tail"]
+        _require(expression != None, "Missing block tail")
+    fail("Block nesting exceeded the acceptance fixture budget")
+
+def _intrinsic_calls(expression):
+    found = []
+    pending = [expression]
+    for _ in range(65536):
+        if not pending:
+            return found
+        value = pending.pop()
+        if type(value) == "list":
+            pending.extend(reversed(value))
+        elif type(value) == "dict":
+            kind = value.get("kind")
+            if "span" in value and type(kind) == "dict" and "Call" in kind:
+                call = kind["Call"]
+                callee = call["callee"]["kind"]
+                name = callee.get("Name") if type(callee) == "dict" else None
+                if name in ["wrapping_add", "wrapping_sub", "wrapping_mul"]:
+                    found.append((name, call))
+            pending.extend(reversed(value.values()))
+    fail("AST traversal exceeded the acceptance fixture budget")
+
+def _source(ctx, h, source):
+    path = "%s/program-%d.ves" % (h.work, h.counts["programs"])
+    ctx.std.fs.write(path, source)
+    h.counts["programs"] += 1
+    return path
+
+def _execute(ctx, h, mode, path, options, expected = 0):
+    original = ctx.std.fs.open(path).read()
+    output = bounded_run(
+        ctx, h.root, h.work, h.binary, [mode, path] + options, timeout = 60,
+        stdout_limit = 4 * 1024 * 1024, stderr_limit = 1024 * 1024, label = "Optimizer compiler",
+    )
+    h.counts["commands"] += 1
+    if output.code != expected:
+        ctx.std.io.stderr.write(output.stdout)
+        ctx.std.io.stderr.write(output.stderr)
+        fail("Expected exit %d, got %d: %s %s %r" % (expected, output.code, mode, path, options))
+    _equal(ctx.std.fs.open(path).read(), original, "Optimizer must preserve source")
+    return output
+
+def _hir(ctx, h, path, no_opt = False):
+    return _execute(ctx, h, "emit", path, ["--emit", "hir"] + (["--no-opt"] if no_opt else [])).stdout
+
+def _json(data):
+    return decode_object(utf8(data))
+
+def _agree(ctx, h, source, expected):
+    path = _source(ctx, h, source)
+    _equal(decode_list(utf8(_execute(ctx, h, "check", path, ["--json"]).stdout)), [], "Baseline diagnostic report")
+    for mode in ["run", "jit"]:
+        for options in [[], ["--no-opt"]]:
+            _equal(utf8(_execute(ctx, h, mode, path, options).stdout).strip(), expected, "%s %r observable output" % (mode, options))
+    return path
+
+def _guarded(kind, expression, fallback = "42"):
+    return "fn main() -> %s { handle Fail[ArithOverflow] in { %s } with { return v => v, raise(e, k) => %s, } }" % (kind, expression, fallback)
+
+def _balanced_addition(leaves):
+    _require(bool(leaves), "Balanced expression needs at least one leaf")
+    pending = [(0, len(leaves))]
+    tokens = []
+    for _ in range(5 * len(leaves)):
+        if not pending:
+            return "".join(tokens)
+        item = pending.pop()
+        if type(item) == "string":
+            tokens.append(item)
+        else:
+            start, end = item
+            if end - start == 1:
+                tokens.append(leaves[start])
+            else:
+                middle = start + (end - start) // 2
+                pending.extend([")", (middle, end), " + ", (start, middle), "("])
+    fail("Balanced expression exceeded its token budget")
+
+def _arithmetic(ctx, h):
+    folds = [("2 + 3", 5), ("9 - 4", 5), ("2 * 3", 6),
+             ("wrapping_add(2, 3)", 5), ("wrapping_sub(9, 4)", 5), ("wrapping_mul(2, 3)", 6)]
+    for kind in ["u8", "u32", "u64", "i64"]:
+        for expression, expected in folds:
+            path = _agree(ctx, h, "fn main() -> %s { %s }" % (kind, expression), str(expected))
+            original, encoded = _hir(ctx, h, path, True), _hir(ctx, h, path)
+            before, after = _json(original), _json(encoded)
+            _require(_tail(_body(before, "main"))["kind"] != _tail(_body(after, "main"))["kind"], "Expression was not folded")
+            _equal(_tail(_body(after, "main"))["kind"], {"Literal": {"Int": expected}}, "Folded literal")
+            _equal(_hir(ctx, h, path), encoded, "Deterministic HIR")
+
+    for kind, maximum in [("u8", "255"), ("u32", "4294967295"), ("u64", "18446744073709551615"), ("i64", "9223372036854775807")]:
+        source = "fn f(x: %s) -> %s eff [Fail[ArithOverflow]] { (x + 0) * 0 } " % (kind, kind) + _guarded(kind, "f(42)")
+        path = _agree(ctx, h, source, "0")
+        _equal(_tail(_body(_json(_hir(ctx, h, path)), "f"))["kind"], {"Literal": {"Int": 0}}, "Safe zero fold")
+        source = "fn f(x: %s) -> %s eff [Fail[ArithOverflow]] { (x + 1) * 0 } " % (kind, kind) + _guarded(kind, "f(%s)" % maximum)
+        path = _agree(ctx, h, source, "42")
+        _require(_tail(_body(_json(_hir(ctx, h, path)), "f"))["kind"] != {"Literal": {"Int": 0}}, "Overflow must survive zero multiplication")
+
+    for kind, expression, expected in [
+        ("u64", "wrapping_mul(18446744073709551615, 18446744073709551615)", 1),
+        ("u64", "9223372036854775808 * 1", 9223372036854775808),
+        ("u64", "wrapping_add(18446744073709551615, 0)", 18446744073709551615),
+        ("u64", "wrapping_mul(9223372036854775808, 2)", 0),
+        ("i64", "wrapping_mul(-9223372036854775808, -1)", -9223372036854775808),
+    ]:
+        path = _agree(ctx, h, "fn main() -> %s { %s }" % (kind, expression), str(expected))
+        _equal(_tail(_body(_json(_hir(ctx, h, path)), "main"))["kind"], {"Literal": {"Int": expected}}, "Wide arithmetic fold")
+    _agree(ctx, h, _guarded("u64", "18446744073709551615 * 18446744073709551615"), "42")
+
+def _calls(ctx, h):
+    source = "// original source é🦀\nfn f(x: i64, y: i64) -> i64 { wrapping_add(wrapping_add(x, 0), y) } fn main() -> i64 { f(40, 2) }"
+    path = _agree(ctx, h, source, "42")
+    before, after = _json(_hir(ctx, h, path, True)), _json(_hir(ctx, h, path))
+    original = [(name, call["callee"]["span"]) for name, call in _intrinsic_calls(_body(before, "f"))]
+    calls = _intrinsic_calls(_body(after, "f"))
+    _require(len(original) == 2 and len(calls) == 1, "Expected one call to survive optimization")
+    for name, call in calls:
+        span = call["callee"]["span"]
+        _require((name, span) in original and span["start"] < span["end"], "Surviving intrinsic must keep its source span")
+        _equal(utf8(bytes(source)[span["start"]:span["end"]]), name, "Intrinsic source bytes")
+        _require(call["types"] == [] and len(call["args"]) == 2, "Unexpected intrinsic types or arity")
+        _require(all([arg["pass"] == "In" and arg["explicit"] == False for arg in call["args"]]), "Intrinsic must keep implicit inputs")
+
+    for name, implementation, a, b in [
+        ("wrapping_add", "wrapping_mul(a, b)", 6, 7),
+        ("wrapping_sub", "wrapping_add(a, b)", 40, 2),
+        ("wrapping_mul", "wrapping_add(a, b)", 40, 2),
+    ]:
+        source = "fn main() -> i64 { let %s = |a: i64, b: i64| %s; %s(%d + 0, %d + 0) }" % (name, implementation, name, a, b)
+        path = _agree(ctx, h, source, "42")
+        before, after = _json(_hir(ctx, h, path, True)), _json(_hir(ctx, h, path))
+        original = _tail(_body(before, "main"))["kind"]["Call"]
+        call = _tail(_body(after, "main"))["kind"]["Call"]
+        _equal(call["callee"], original["callee"], "Shadowed intrinsic callee")
+        _equal([argument["expr"]["kind"] for argument in call["args"]], [{"Literal": {"Int": a}}, {"Literal": {"Int": b}}], "Shadowed intrinsic arguments")
+
+def _effects(ctx, h):
+    source = "fn f(x: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] { (x + 0) / 2 } fn main() -> i64 { handle Fail[RuntimeError] in { handle Fail[ArithOverflow] in { f(84) } with { return v => v, raise(e, k) => 43, } } with { return v => v, raise(e, k) => 44, } }"
+    path = _agree(ctx, h, source, "42")
+    division = _tail(_body(_json(_hir(ctx, h, path)), "f"))["kind"]["Binary"]
+    _require(division[0] == "/" and division[1]["kind"] == {"Name": "x"}, "Division and effect must survive the neutral-element fold")
+    source = "fn f(x: i64) -> i64 eff [Fail[RuntimeError]] { x / 1 } fn main() -> i64 { handle Fail[ArithOverflow] in { handle Fail[RuntimeError] in { f(20 + 22) } with { return v => v + 0, raise(e, k) => 42 + 0, } } with { return v => v, raise(e, k) => 43, } }"
+    path = _agree(ctx, h, source, "42")
+    outer = _tail(_body(_json(_hir(ctx, h, path)), "main"))["kind"]["Handle"]
+    handler = _tail(outer["body"])["kind"]["Handle"]
+    _equal(_tail(handler["ret"]["body"])["kind"], {"Name": "v"}, "Handler return")
+    _equal(_tail(handler["ops"][0]["body"])["kind"], {"Literal": {"Int": 42}}, "Handler operation")
+    _equal(_tail(handler["body"])["kind"]["Call"]["args"][0]["expr"]["kind"], {"Literal": {"Int": 42}}, "Handled call argument")
+    _agree(ctx, h, "fn next(inout n: i64) -> i64 { n = wrapping_add(n, 1); n } fn main() -> i64 { let mut n = 0; let a = wrapping_mul(next(inout n), 0); let b = next(inout n); wrapping_add(wrapping_mul(n, 100), wrapping_add(wrapping_mul(a, 10), b)) }", "202")
+    for arguments, expected in [("overflow(), division()", "10"), ("division(), overflow()", "20")]:
+        source = "fn overflow() -> i64 eff [Fail[ArithOverflow]] { 9223372036854775807 + 1 } fn division() -> i64 eff [Fail[RuntimeError]] { 1 / 0 } " + "fn main() -> i64 { handle Fail[RuntimeError] in { handle Fail[ArithOverflow] in { wrapping_mul(%s) } with { return v => v, raise(e, k) => 10, } } with { return v => v, raise(e, k) => 20, } }" % arguments
+        _agree(ctx, h, source, expected)
+
+def _admission(ctx, h):
+    # 513 AST occurrences exceed the 512-node admission budget without deep recursion.
+    expression = _balanced_addition(["x"] + ["0"] * 256)
+    source = "fn f(x: i64) -> i64 eff [Fail[ArithOverflow]] { %s } " % expression + _guarded("i64", "f(42)", "43")
+    path = _agree(ctx, h, source, "42")
+    original, rewritten = _hir(ctx, h, path, True), _hir(ctx, h, path)
+    pending = [(_tail(_body(_json(original), "f")), 1)]
+    depths = []
+    for _ in range(513):
+        if not pending:
+            break
+        expression, level = pending.pop()
+        depths.append(level)
+        kind = expression["kind"]
+        if type(kind) == "dict" and "Binary" in kind:
+            operator, left, right = kind["Binary"]
+            _equal(operator, "+", "Budget fixture operator")
+            pending.extend([(left, level + 1), (right, level + 1)])
+        else:
+            _require(kind in [{"Name": "x"}, {"Literal": {"Int": 0}}], "Unexpected budget fixture leaf")
+    _require(not pending and len(depths) == 513 and max(depths) == 10, "Unexpected budget fixture shape")
+    _require(original == rewritten and original == _hir(ctx, h, path), "Input-node refusal must keep the complete island unchanged")
+
+    path = _source(ctx, h, "fn main() -> u8 { 255 + 1 }")
+    original = _execute(ctx, h, "run", path, ["--json", "--no-opt"], expected = 1)
+    rewritten = _execute(ctx, h, "run", path, ["--json"], expected = 1)
+    _require(original.stdout == rewritten.stdout and original.stderr == rewritten.stderr, "Rewriting must preserve overflow diagnostics")
+    _require(any([diagnostic["code"] == "E0401" for diagnostic in decode_list(utf8(rewritten.stdout))]), "Expected an overflow diagnostic")
+
+def _file(ctx, path):
+    return ctx.std.fs.exists(path) and ctx.std.fs.metadata(path).is_file
+
+def _check(ctx: TaskContext) -> int:
+    values = ctx.args.tool_args
+    if len(values) == 2 and values[0] == "--binary":
+        binary = values[1]
+    elif len(values) == 1 and values[0].startswith("--binary="):
+        binary = values[0].removeprefix("--binary=")
+    elif values == ["--help"] or values == ["-h"]:
+        ctx.std.io.stdout.write("Pass -- --binary <vesper>.\n")
+        return 0
+    else:
+        ctx.std.process.exit(2, "Expected --binary <vesper>")
+    root = ctx.std.env.aspect_root_dir()
+    binary = root_path(root, binary)
+    if not _file(ctx, binary):
+        binary += ".exe"
+    _require(_file(ctx, binary), "Compiler not found: " + binary)
+    work = scratch_dir(ctx, "vesper-rewrite-witness-")
+    h = struct(root = root, binary = binary, work = work, counts = {"commands": 0, "programs": 0})
+    _arithmetic(ctx, h)
+    _calls(ctx, h)
+    _effects(ctx, h)
+    _admission(ctx, h)
+    ctx.std.io.stdout.write(json.encode({
+        "status": "passed",
+        "commands": h.counts["commands"],
+        "programs": h.counts["programs"],
+        "scope": "actual default witness-gated AST optimizer/evaluator/JIT; no proof certificate or performance claim",
+    }) + "\n")
+    return 0
+
+check_rewrite_witness = task(
+    kind = "check-rewrite-witness",
+    group = ["acceptance"],
+    summary = "Check the witness optimizer, unoptimized baseline and observable semantics",
+    implementation = _check,
+    args = {"tool_args": args.trailing_var_args(description = "Pass -- --binary <vesper>.")},
+)
+
+def _test(ctx: TaskContext) -> int:
+    _equal(_balanced_addition(["x"]), "x", "Single leaf")
+    _equal(_balanced_addition(["x", "0", "0"]), "(x + (0 + 0))", "Odd leaf count")
+    _equal(_balanced_addition(["a", "b", "c", "d"]), "((a + b) + (c + d))", "Balanced even leaf count")
+    kind = {"kind": {"Literal": {"Int": 17}}, "span": {"start": 4, "end": 6}}
+    block = {"kind": {"Block": {"tail": kind}}}
+    _equal(_tail(_body({"items": [{"Function": {"name": "main", "body": block}}]}, "main")), kind, "Body and block-tail selection")
+    call = {"callee": {"kind": {"Name": "wrapping_mul"}}, "args": []}
+    intrinsic = {"kind": {"Call": call}, "span": {"start": 1, "end": 2}}
+    ordinary = {"kind": {"Call": {"callee": {"kind": {"Name": "other"}}}}, "span": {"start": 2, "end": 3}}
+    _equal(_intrinsic_calls({"nested": [block, [intrinsic], ordinary]}), [("wrapping_mul", call)], "Intrinsic AST traversal")
+    ctx.std.io.stdout.write("Passed optimizer oracle AST and admission fixture cases\n")
+    return 0
+
+test_rewrite_witness = task(
+    kind = "rewrite-witness",
+    group = ["ci", "tests"],
+    summary = "Test AST selections and the balanced admission-budget fixture",
+    implementation = _test,
+)

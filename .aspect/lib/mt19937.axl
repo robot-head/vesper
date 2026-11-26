@@ -1,0 +1,66 @@
+"""Reproduce the MT19937 stream used to establish committed fixture inputs."""
+
+load("./ieee-reference.axl", "bit_length")
+
+_WORD = (1 << 32) - 1
+
+def mt19937(seed):
+    seed = abs(seed)
+    key = [(seed >> (32 * index)) & _WORD for index in range(max(1, (bit_length(seed) + 31) // 32))]
+    state = [19650218]
+    for index in range(1, 624):
+        previous = state[index - 1]
+        state.append((1812433253 * (previous ^ (previous >> 30)) + index) & _WORD)
+    i, j = 1, 0
+    for _ in range(max(624, len(key))):
+        previous = state[i - 1]
+        state[i] = ((state[i] ^ ((previous ^ (previous >> 30)) * 1664525)) + key[j] + j) & _WORD
+        i += 1
+        j = (j + 1) % len(key)
+        if i == 624:
+            state[0] = state[-1]
+            i = 1
+    for _ in range(623):
+        previous = state[i - 1]
+        state[i] = ((state[i] ^ ((previous ^ (previous >> 30)) * 1566083941)) - i) & _WORD
+        i += 1
+        if i == 624:
+            state[0] = state[-1]
+            i = 1
+    state[0] = 2147483648
+    cursor = [624]
+
+    def word():
+        if cursor[0] == 624:
+            for index in range(624):
+                bits = (state[index] & (2147483648)) | (state[(index + 1) % 624] & ((2147483648) - 1))
+                state[index] = state[(index + 397) % 624] ^ (bits >> 1) ^ (0x9908b0df if bits & 1 else 0)
+            cursor[0] = 0
+        value = state[cursor[0]]
+        cursor[0] += 1
+        value ^= value >> 11
+        value ^= (value << 7) & 0x9d2c5680
+        value ^= (value << 15) & 0xefc60000
+        return value ^ (value >> 18)
+
+    def bits(width):
+        value = 0
+        for offset in range(0, width, 32):
+            take = min(32, width - offset)
+            value |= (word() >> (32 - take)) << offset
+        return value
+
+    def double_numerator():
+        high, low = word() >> 5, word() >> 6
+        return high * 67108864 + low
+
+    def integer(lo, hi):
+        size = hi - lo + 1
+        width = bit_length(size)
+        for _ in range(1024):
+            value = bits(width)
+            if value < size:
+                return lo + value
+        fail("Fixture random rejection limit exceeded")
+
+    return struct(bits = bits, double_numerator = double_numerator, integer = integer)
