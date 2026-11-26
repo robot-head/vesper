@@ -171,9 +171,8 @@ fn adopt_stream(
     fin: bool,
 ) {
     st.stats.streams_accepted = inc(st.stats.streams_accepted);
-    let flags = (if fin { WT_FLAG_RECV_DONE } else { 0 }) | (
-        if !bidi { WT_FLAG_SEND_DONE } else { 0 }
-    );
+    let flags = (if fin { WT_FLAG_RECV_DONE } else { 0 })
+        | (if !bidi { WT_FLAG_SEND_DONE } else { 0 });
     let f = bsearch_u64(in st.w_id.as_slice(), id);
     if f.found {
         let _a = st.w_session.try_set(f.idx, session);

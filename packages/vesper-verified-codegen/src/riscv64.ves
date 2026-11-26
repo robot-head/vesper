@@ -89,10 +89,14 @@ fn b(inout a: Asm, funct3: u32, rs1: u32, rs2: u32, offset: u32) {
     let x = offset;
     put_u32(
         inout a,
-        sh(shr(x, 12) & 1, 31) | sh(shr(x, 5) & 63, 25) | sh(rs2, 20) | sh(rs1, 15) | sh(
-            funct3,
-            12
-        ) | sh(shr(x, 1) & 15, 8) | sh(shr(x, 11) & 1, 7) | BRANCH
+        sh(shr(x, 12) & 1, 31)
+            | sh(shr(x, 5) & 63, 25)
+            | sh(rs2, 20)
+            | sh(rs1, 15)
+            | sh(funct3, 12)
+            | sh(shr(x, 1) & 15, 8)
+            | sh(shr(x, 11) & 1, 7)
+            | BRANCH
     );
 }
 

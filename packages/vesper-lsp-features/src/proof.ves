@@ -164,9 +164,8 @@ fn sc_lookup(in sc: Sc, name: u32) -> u64 {
         }
         i = wrapping_sub(i, 1);
         if g32(in sc.sym, i) == name {
-            return wrapping_shl_u64(widen_u64(g32(in sc.var, i)), 32) | widen_u64(
-                g32(in sc.frame, i)
-            );
+            return wrapping_shl_u64(widen_u64(g32(in sc.var, i)), 32)
+                | widen_u64(g32(in sc.frame, i));
         }
     }
 }

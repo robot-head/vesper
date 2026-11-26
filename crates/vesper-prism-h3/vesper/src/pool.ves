@@ -462,13 +462,14 @@ pub fn put_u64_le(inout out: ChunkSeq[u8], v: u64) {
 }
 
 pub fn get_u64_le(in s: Slice[u8], at: u64) -> u64 {
-    widen_u64(byte(in s, at)) | (widen_u64(byte(in s, wrapping_add(at, 1))) << 8) | (
-        widen_u64(byte(in s, wrapping_add(at, 2))) << 16
-    ) | (widen_u64(byte(in s, wrapping_add(at, 3))) << 24) | (
-        widen_u64(byte(in s, wrapping_add(at, 4))) << 32
-    ) | (widen_u64(byte(in s, wrapping_add(at, 5))) << 40) | (
-        widen_u64(byte(in s, wrapping_add(at, 6))) << 48
-    ) | (widen_u64(byte(in s, wrapping_add(at, 7))) << 56)
+    widen_u64(byte(in s, at))
+        | (widen_u64(byte(in s, wrapping_add(at, 1))) << 8)
+        | (widen_u64(byte(in s, wrapping_add(at, 2))) << 16)
+        | (widen_u64(byte(in s, wrapping_add(at, 3))) << 24)
+        | (widen_u64(byte(in s, wrapping_add(at, 4))) << 32)
+        | (widen_u64(byte(in s, wrapping_add(at, 5))) << 40)
+        | (widen_u64(byte(in s, wrapping_add(at, 6))) << 48)
+        | (widen_u64(byte(in s, wrapping_add(at, 7))) << 56)
 }
 
 pub fn q_drain_all_to(inout p: BytePool, q: u64, inout out: ChunkSeq[u8]) -> PoolRange {

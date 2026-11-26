@@ -734,6 +734,10 @@ enum Gap {
 fn is_binary_operator(kind: K) -> bool {
     infix_precedence(kind).is_some()
 }
+/// The break level of a bitwise `|`, between `<` and `^` as the parser
+/// ranks it. It is not in `infix_precedence`, since a `|` may also open a
+/// closure.
+const PIPE_PRECEDENCE: u8 = 6;
 fn infix_precedence(kind: K) -> Option<u8> {
     Some(match kind {
         K::Or => 2,
@@ -826,6 +830,11 @@ fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) 
     if let Some(precedence) = infix_precedence(current.kind).filter(|_| ends_operand(previous.kind))
     {
         return Gap::Operator(precedence);
+    }
+    // A bitwise `|` after an operand; `sequence` keeps a closure's closing
+    // `|` (`|x: T| e`) from breaking.
+    if current.kind == K::Pipe && ends_operand(previous.kind) {
+        return Gap::Operator(PIPE_PRECEDENCE);
     }
     if matches!(
         current.kind,
@@ -1058,6 +1067,10 @@ fn sequence<'a>(
     // A short `if c { a } else { b }` laid out on `line` as one group: the
     // index of its last `}`, and where its docs and breaks start on `line`.
     let mut short_if: Option<(usize, usize, usize)> = None;
+    // Inside a closure's parameters (`|x: T|`), after its opening `|`.
+    let mut closure_params = false;
+    // Right after a closure's opening `|`.
+    let mut closure_open = false;
     while *pos < atoms.len() && Some(atoms[*pos].kind) != end {
         let current = atoms[*pos];
         // An `if` used as a value (`let x = if ..`, an argument, a match arm,
@@ -1133,6 +1146,42 @@ fn sequence<'a>(
         let spacing = match spacing {
             Gap::Return if previous_params => Gap::Soft,
             spacing => spacing,
+        };
+        // A `|` that follows no operand opens a closure's parameters, and the
+        // next `|` closes them: only a bitwise `|` breaks like an operator.
+        // The parameters hug their pipes, as in `|x: T| e`.
+        let spacing = if current.kind == K::Pipe && current.sugar_gap.is_none() {
+            let operator = matches!(spacing, Gap::Operator(_));
+            if closure_params {
+                closure_params = false;
+                closure_open = false;
+                // A line comment keeps its line break, and the two pipes of
+                // an empty `| |` keep their space so they don't become `||`.
+                if previous.is_some_and(|p| p.kind == K::Pipe) {
+                    Gap::Space
+                } else if matches!(spacing, Gap::Hard) {
+                    spacing
+                } else {
+                    Gap::None
+                }
+            } else {
+                // A `|` after an operand that isn't spaced as an operator
+                // (a comprehension's `{ .. } | x in xs`) opens nothing.
+                closure_params = !operator && !previous.is_some_and(|p| ends_operand(p.kind));
+                closure_open = closure_params;
+                spacing
+            }
+        } else if closure_open {
+            closure_open = false;
+            if matches!(spacing, Gap::Hard) {
+                spacing
+            } else {
+                Gap::None
+            }
+        } else if closure_params && previous.is_some_and(|p| p.kind == K::Comma) {
+            Gap::Space
+        } else {
+            spacing
         };
         // Anything but an attached token ends the operand and its chain.
         if is_block || !matches!(spacing, Gap::None | Gap::Empty) {

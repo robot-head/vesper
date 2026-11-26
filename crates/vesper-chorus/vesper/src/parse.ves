@@ -122,9 +122,10 @@ fn decode(in t: Slice[u8], p: u64) -> (u64, u64) {
         (((b0 & 15) << 12) | ((ib(in t, inc(p)) & 63) << 6) | (ib(in t, add(p, 2)) & 63), 3)
     } else {
         (
-            ((b0 & 7) << 18) | ((ib(in t, inc(p)) & 63) << 12) | (
-                (ib(in t, add(p, 2)) & 63) << 6
-            ) | (ib(in t, add(p, 3)) & 63),
+            ((b0 & 7) << 18)
+                | ((ib(in t, inc(p)) & 63) << 12)
+                | ((ib(in t, add(p, 2)) & 63) << 6)
+                | (ib(in t, add(p, 3)) & 63),
             4
         )
     }

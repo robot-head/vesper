@@ -971,14 +971,12 @@ pub fn slots_from_bytes(in bytes: Slice[u8]) -> ChunkSeq[RawInsn] eff [Fail[Deco
             break;
         }
         let b1 = byte(in bytes, wrapping_add(at, 1));
-        let off = widen_u16(byte(in bytes, wrapping_add(at, 2))) | (
-            widen_u16(byte(in bytes, wrapping_add(at, 3))) << 8
-        );
-        let imm = widen_u32(byte(in bytes, wrapping_add(at, 4))) | (
-            widen_u32(byte(in bytes, wrapping_add(at, 5))) << 8
-        ) | (widen_u32(byte(in bytes, wrapping_add(at, 6))) << 16) | (
-            widen_u32(byte(in bytes, wrapping_add(at, 7))) << 24
-        );
+        let off = widen_u16(byte(in bytes, wrapping_add(at, 2)))
+            | (widen_u16(byte(in bytes, wrapping_add(at, 3))) << 8);
+        let imm = widen_u32(byte(in bytes, wrapping_add(at, 4)))
+            | (widen_u32(byte(in bytes, wrapping_add(at, 5))) << 8)
+            | (widen_u32(byte(in bytes, wrapping_add(at, 6))) << 16)
+            | (widen_u32(byte(in bytes, wrapping_add(at, 7))) << 24);
         out.push(raw(byte(in bytes, at), b1 & 15, b1 >> 4, wrapping_i16(off), wrapping_i32(imm)));
         at = wrapping_add(at, 8);
     }

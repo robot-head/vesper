@@ -735,6 +735,11 @@ fn trivia(k: u8) -> bool {
     k <= K_BLOCK_COMMENT
 }
 
+// The break level of a bitwise `|`, between `<` and `^` as the parser
+// ranks it. It is not in `infix_precedence`, since a `|` may also open a
+// closure.
+const PIPE_PRECEDENCE: u8 = 6;
+
 // Weakest to strongest, matching the parser. A pipe can also open a closure.
 fn infix_precedence(k: u8) -> u8 {
     if k == K_OR {
@@ -1155,6 +1160,11 @@ fn gap(p: u8, c: u8, block: bool, after_block: bool) -> u8 {
         return G_RETURN;
     }
     if is_binary_operator(c) && ends_operand(p) {
+        return G_OPERATOR;
+    }
+    // A bitwise `|` after an operand; `sequence` keeps a closure's closing
+    // `|` (`|x: T| e`) from breaking.
+    if c == K_PIPE && ends_operand(p) {
         return G_OPERATOR;
     }
     if c == K_COMMA
@@ -1611,6 +1621,10 @@ fn sequence(
     // index of its last `}` (NONE: none is open), and where its docs and
     // breaks start on `line`.
     let mut short_close = NONE;
+    // Inside a closure's parameters (`|x: T|`), after its opening `|`.
+    let mut closure_params = false;
+    // Right after a closure's opening `|`.
+    let mut closure_open = false;
     let mut short_docs: u64 = 0;
     let mut short_breaks: u64 = 0;
     loop {
@@ -1719,6 +1733,38 @@ fn sequence(
         } else {
             G_NONE
         };
+        // A `|` that follows no operand opens a closure's parameters, and the
+        // next `|` closes them: only a bitwise `|` breaks like an operator.
+        // The parameters hug their pipes, as in `|x: T| e`.
+        let spacing = if c == K_PIPE && sugar == SGAP_NONE {
+            let operator = spacing == G_OPERATOR;
+            if closure_params {
+                closure_params = false;
+                closure_open = false;
+                // A line comment keeps its line break, and the two pipes of
+                // an empty `| |` keep their space so they don't become `||`.
+                if has_prev && prev == K_PIPE {
+                    G_SPACE
+                } else if spacing == G_HARD {
+                    spacing
+                } else {
+                    G_NONE
+                }
+            } else {
+                // A `|` after an operand that isn't spaced as an operator
+                // (a comprehension's `{ .. } | x in xs`) opens nothing.
+                closure_params = !operator && !(has_prev && ends_operand(prev));
+                closure_open = closure_params;
+                spacing
+            }
+        } else if closure_open {
+            closure_open = false;
+            if spacing == G_HARD { spacing } else { G_NONE }
+        } else if closure_params && has_prev && prev == K_COMMA {
+            G_SPACE
+        } else {
+            spacing
+        };
         // Anything but an attached token ends the operand and its chain.
         if is_block || spacing != G_NONE && spacing != G_EMPTY {
             chain_finish(inout chain, inout line, inout breaks, indent, inout d);
@@ -1765,6 +1811,8 @@ fn sequence(
                     Option::Some(l) => l,
                     Option::None => 0,
                 }
+            } else if c == K_PIPE {
+                PIPE_PRECEDENCE
             } else {
                 infix_precedence(c)
             };

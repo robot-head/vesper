@@ -266,13 +266,14 @@ fn decode(in t: Slice[u8], i: u64) -> u64 {
     } else if b < 224 {
         ((b & 31) << 6) | (widen_u64(byte(in t, wrapping_add(i, 1))) & 63)
     } else if b < 240 {
-        ((b & 15) << 12) | ((widen_u64(byte(in t, wrapping_add(i, 1))) & 63) << 6) | (
-            widen_u64(byte(in t, wrapping_add(i, 2))) & 63
-        )
+        ((b & 15) << 12)
+            | ((widen_u64(byte(in t, wrapping_add(i, 1))) & 63) << 6)
+            | (widen_u64(byte(in t, wrapping_add(i, 2))) & 63)
     } else {
-        ((b & 7) << 18) | ((widen_u64(byte(in t, wrapping_add(i, 1))) & 63) << 12) | (
-            (widen_u64(byte(in t, wrapping_add(i, 2))) & 63) << 6
-        ) | (widen_u64(byte(in t, wrapping_add(i, 3))) & 63)
+        ((b & 7) << 18)
+            | ((widen_u64(byte(in t, wrapping_add(i, 1))) & 63) << 12)
+            | ((widen_u64(byte(in t, wrapping_add(i, 2))) & 63) << 6)
+            | (widen_u64(byte(in t, wrapping_add(i, 3))) & 63)
     }
 }
 

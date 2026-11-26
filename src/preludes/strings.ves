@@ -43,10 +43,10 @@ impl Str {
                     let c3 = Str::utf8_continuation(in self, wrapping_add(i, 3));
                     Option::Some(
                         (
-                            wrapping_mul(b0 & 7, 262144) | wrapping_mul(c1, 4096) | wrapping_mul(
-                                c2,
-                                64
-                            ) | c3,
+                            wrapping_mul(b0 & 7, 262144)
+                                | wrapping_mul(c1, 4096)
+                                | wrapping_mul(c2, 64)
+                                | c3,
                             wrapping_add(i, 4)
                         )
                     )

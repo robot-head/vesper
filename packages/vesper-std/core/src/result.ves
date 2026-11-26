@@ -104,7 +104,7 @@ test {
         unwrap_or(input, 99) == eager
             && unwrap_or_else(
                 input,
-                | x: u8 | -> u64 {
+                |x: u8| -> u64 {
                     wrapping_add(widen_u64(x), 1)
                 }
             )
@@ -120,13 +120,13 @@ test {
     ) -> bool {
         let value = map(
             input,
-            | x: u64 | -> u32 {
+            |x: u64| -> u32 {
                 wrapping_add(wrapping_u32(x), 1)
             }
         );
         let error = map_err(
             input,
-            | x: u8 | -> u16 {
+            |x: u8| -> u16 {
                 wrapping_add(wrapping_u16(x), 2)
             }
         );
@@ -139,7 +139,7 @@ test {
     fn test_result_and_then(input: Result[u64, u8], expected: Result[u32, u8]) -> bool {
         and_then(
             input,
-            | x: u64 | -> Result[u32, u8] {
+            |x: u64| -> Result[u32, u8] {
                 if (x & 1) == 0 {
                     Result::Ok(wrapping_u32(x >> 1))
                 } else {
