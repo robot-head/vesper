@@ -93,6 +93,7 @@ fn access_text(a: Access) -> &'static str {
         Access::Set => "set",
         Access::TryGet => "try_get",
         Access::TrySet => "try_set",
+        Access::Wide(wide) => wide.name(),
     }
 }
 
@@ -688,13 +689,32 @@ fn hoistable(op: SeqOp) -> Option<Access> {
     })
 }
 
+/// The access a checked element or fixed-width operation becomes in the
+/// fast copy of a counted loop: [`hoistable`], and the fixed-width reads
+/// and writes of a byte sequence (#2022), whose guard covers all their
+/// bytes.
+fn counted_access(op: SeqOp) -> Option<Access> {
+    match op {
+        SeqOp::Wide(wide) => Some(Access::Wide(wide)),
+        op => hoistable(op),
+    }
+}
+
 /// Operations on a sequence that never change its length.
 fn keeps_length(op: SeqOp) -> bool {
-    hoistable(op).is_some()
+    counted_access(op).is_some()
         || matches!(
             op,
             SeqOp::Len | SeqOp::SliceLen | SeqOp::AsSlice | SeqOp::SubSlice
         )
+}
+
+/// How many elements from its index `access` touches.
+fn access_width(access: Access) -> u8 {
+    match access {
+        Access::Wide(wide) => wide.bytes,
+        _ => 1,
+    }
 }
 
 /// What versioning the counted loop headed by `h` takes: its preheader,
@@ -714,7 +734,13 @@ impl CountedPlan {
         let receivers = self
             .receivers
             .iter()
-            .map(|r| format!("{}@{}:{}", r.place.display(), r.form.key(), r.read.dest))
+            .map(|r| {
+                format!(
+                    "{}:{}",
+                    receiver_key(&r.place, &r.form, r.width),
+                    r.read.dest
+                )
+            })
             .collect::<Vec<_>>()
             .join(" ");
         let accesses = self
@@ -929,7 +955,7 @@ fn counted_plan(
             continue;
         };
         let (Some(access), Some(receiver), Some(index)) =
-            (hoistable(*op), args.first(), args.get(1))
+            (counted_access(*op), args.first(), args.get(1))
         else {
             continue;
         };
@@ -942,7 +968,7 @@ fn counted_plan(
         let Some(form) = analysis.linear(index.value, 0) else {
             continue;
         };
-        if form.sign == 0 || form.plus.len() + form.minus.len() > MAX_TERMS {
+        if form.sign == 0 || form.terms() > MAX_TERMS {
             continue;
         }
         let Op::Read { root, path, .. } = &read.op else {
@@ -951,12 +977,18 @@ fn counted_plan(
         if root != &place.root || path != &place.path {
             continue;
         }
-        let key = format!("{}@{}", place.display(), form.key());
-        receivers.entry(key.clone()).or_insert_with(|| Receiver {
+        // Constant offsets added last widen the guarded window instead of
+        // keying a guard of their own: `s[5i]`..`s[5i + 4]` share one.
+        let (form, extra) = form.without_constants();
+        let width = access_width(access) + extra;
+        let key = receiver_key(place, &form, 1);
+        let r = receivers.entry(key.clone()).or_insert_with(|| Receiver {
             place: place.clone(),
             read: (*read).clone(),
             form,
+            width,
         });
+        r.width = r.width.max(width);
         candidates.insert(i.dest, (access, key));
     }
     // Keep only receivers whose length the loop cannot change.
@@ -1279,13 +1311,24 @@ impl Offset {
 }
 
 /// An index `sign * i + plus.. - minus..` in the loop index `i` (`sign` is
-/// -1, 0 or 1) with loop-invariant terms.
+/// -1, 0 or 1) with loop-invariant terms; with a `scale` `c`, `c * (sign *
+/// i + plus.. - minus..) + outer_plus.. - outer_minus..` (#2022).
 #[derive(Clone)]
 struct Linear {
     sign: i8,
     plus: Vec<Offset>,
     minus: Vec<Offset>,
+    scale: Option<u64>,
+    outer_plus: Vec<Offset>,
+    outer_minus: Vec<Offset>,
 }
+
+/// The largest sum of constant offsets [`Linear::without_constants`] folds
+/// into a guard's width.
+const MAX_EXTENT: i128 = 64;
+
+/// The largest constant a scaled index multiplies by (`i << 31` at most).
+const MAX_SCALE: i128 = 1 << 31;
 
 impl Linear {
     fn term(offset: Offset) -> Self {
@@ -1293,34 +1336,129 @@ impl Linear {
             sign: 0,
             plus: vec![offset],
             minus: vec![],
+            scale: None,
+            outer_plus: vec![],
+            outer_minus: vec![],
         }
     }
 
+    /// How many loop-invariant terms the form has.
+    fn terms(&self) -> usize {
+        self.plus.len() + self.minus.len() + self.outer_plus.len() + self.outer_minus.len()
+    }
+
     /// `self + other` (`self - other` when `negate`), when the loop index
-    /// keeps a coefficient of -1, 0 or 1.
+    /// keeps a coefficient of -1, 0 or 1 (times one scale). The terms of the
+    /// side without the loop index join the scaled side's outer terms.
     fn combine(mut self, other: Self, negate: bool) -> Option<Self> {
         let sign = if negate { -other.sign } else { other.sign };
         if self.sign != 0 && sign != 0 {
             return None;
         }
-        self.sign += sign;
-        let (plus, minus) = if negate {
-            (other.minus, other.plus)
+        let (plus, minus, outer_plus, outer_minus) = if negate {
+            (other.minus, other.plus, other.outer_minus, other.outer_plus)
         } else {
-            (other.plus, other.minus)
+            (other.plus, other.minus, other.outer_plus, other.outer_minus)
         };
-        self.plus.extend(plus);
-        self.minus.extend(minus);
+        match (self.scale, other.scale) {
+            (None, None) => {
+                self.sign += sign;
+                self.plus.extend(plus);
+                self.minus.extend(minus);
+                Some(self)
+            }
+            (Some(_), None) => {
+                self.outer_plus.extend(plus);
+                self.outer_minus.extend(minus);
+                Some(self)
+            }
+            (None, Some(c)) => {
+                let mut outer_p = self.plus;
+                outer_p.extend(outer_plus);
+                let mut outer_m = self.minus;
+                outer_m.extend(outer_minus);
+                Some(Self {
+                    sign,
+                    plus,
+                    minus,
+                    scale: Some(c),
+                    outer_plus: outer_p,
+                    outer_minus: outer_m,
+                })
+            }
+            (Some(_), Some(_)) => None,
+        }
+    }
+
+    /// `c * self`, for an unscaled form in the loop index.
+    fn scaled(mut self, c: i128) -> Option<Self> {
+        if c == 1 {
+            return Some(self);
+        }
+        if self.sign == 0 || self.scale.is_some() || !(2..=MAX_SCALE).contains(&c) {
+            return None;
+        }
+        self.scale = Some(c as u64);
         Some(self)
+    }
+
+    /// The form without its constant terms added last (the outer plus
+    /// terms when scaled, else the plus terms), and their sum, when that is
+    /// at most [`MAX_EXTENT`]: an access `k` past the form's index is in
+    /// bounds when the window from the index, `k` wider, is. The window's
+    /// low end is the form's index, at most the access's, so the guard
+    /// stays sound (and may fail where the access alone fits).
+    fn without_constants(mut self) -> (Self, u8) {
+        let terms = if self.scale.is_some() {
+            &mut self.outer_plus
+        } else {
+            &mut self.plus
+        };
+        let mut sum: i128 = 0;
+        for t in terms.iter() {
+            if let Offset::Const(c) = t
+                && let Op::Constant(crate::ast::Literal::Int(n)) = &c.op
+            {
+                sum += n;
+            }
+        }
+        if sum == 0 || sum > MAX_EXTENT {
+            return (self, 0);
+        }
+        terms.retain(|t| !matches!(t, Offset::Const(_)));
+        (self, sum as u8)
     }
 
     /// A key that tells apart the forms one guard can cover.
     fn key(&self) -> String {
-        let mut plus: Vec<String> = self.plus.iter().map(Offset::key).collect();
-        let mut minus: Vec<String> = self.minus.iter().map(Offset::key).collect();
-        plus.sort();
-        minus.sort();
-        format!("{}i+{}-{}", self.sign, plus.join("+"), minus.join("-"))
+        let sorted = |terms: &[Offset]| {
+            let mut keys: Vec<String> = terms.iter().map(Offset::key).collect();
+            keys.sort();
+            keys
+        };
+        let base = format!(
+            "{}i+{}-{}",
+            self.sign,
+            sorted(&self.plus).join("+"),
+            sorted(&self.minus).join("-")
+        );
+        match self.scale {
+            None => base,
+            Some(c) => format!(
+                "{base}*{c}+{}-{}",
+                sorted(&self.outer_plus).join("+"),
+                sorted(&self.outer_minus).join("-")
+            ),
+        }
+    }
+}
+
+/// The key of the guard for `form` of `place`, `width` elements wide.
+fn receiver_key(place: &Place, form: &Linear, width: u8) -> String {
+    if width == 1 {
+        format!("{}@{}", place.display(), form.key())
+    } else {
+        format!("{}@{}/{width}", place.display(), form.key())
     }
 }
 
@@ -1364,6 +1502,9 @@ impl Affine<'_> {
                 sign: 1,
                 plus: vec![],
                 minus: vec![],
+                scale: None,
+                outer_plus: vec![],
+                outer_minus: vec![],
             });
         }
         if !self.defined.contains(&v) {
@@ -1389,6 +1530,22 @@ impl Affine<'_> {
                 let negate = match op.as_str() {
                     "+" | "wrapping_add" => false,
                     "-" | "wrapping_sub" => true,
+                    // `x * c` or `c * x` for a constant `c` (#2022).
+                    "*" | "wrapping_mul" => {
+                        if let Some(c) = constant_value(self.f, *b, 0) {
+                            return self.linear(*a, depth + 1)?.scaled(c);
+                        }
+                        let c = constant_value(self.f, *a, 0)?;
+                        return self.linear(*b, depth + 1)?.scaled(c);
+                    }
+                    // `x << c` for a constant `c` below 32.
+                    "<<" => {
+                        let c = constant_value(self.f, *b, 0)?;
+                        if !(0..32).contains(&c) {
+                            return None;
+                        }
+                        return self.linear(*a, depth + 1)?.scaled(1 << c);
+                    }
                     _ => return None,
                 };
                 let a = self.linear(*a, depth + 1)?;
@@ -1405,6 +1562,9 @@ struct Receiver {
     place: Place,
     read: Instruction,
     form: Linear,
+    /// The elements each access touches from its index (1, or the bytes
+    /// of a fixed-width access).
+    width: u8,
 }
 
 /// Whether `op` lends the local `root` to an operation other than as `in` or
@@ -1596,7 +1756,32 @@ fn clone_loop(
                 place: Some(r.place.clone()),
             },
         ];
-        for term in r.form.plus.iter().chain(&r.form.minus) {
+        // The terms, then (scaled) the scale and the outer terms.
+        let scale = r.form.scale.map(|c| {
+            let v = fresh.value(f, u64_ty.clone());
+            guard_insts.push(Instruction {
+                dest: v,
+                op: Op::Constant(crate::ast::Literal::Int(i128::from(c))),
+                ty: u64_ty.clone(),
+                span: span.clone(),
+                token: None,
+                fallible: false,
+            });
+            v
+        });
+        let inner = r.form.plus.iter().chain(&r.form.minus).map(Some);
+        let outer = scale.map(|_| None).into_iter().chain(
+            r.form
+                .outer_plus
+                .iter()
+                .chain(&r.form.outer_minus)
+                .map(Some),
+        );
+        for term in inner.chain(outer) {
+            let Some(term) = term else {
+                args.push(sink(scale.expect("a scaled form has a scale")));
+                continue;
+            };
             let value = match term {
                 Offset::Value(c) => *c,
                 Offset::Local(read) => {
@@ -1641,6 +1826,10 @@ fn clone_loop(
                         negated: r.form.sign < 0,
                         plus: r.form.plus.len() as u8,
                         minus: r.form.minus.len() as u8,
+                        scaled: r.form.scale.is_some(),
+                        outer_plus: r.form.outer_plus.len() as u8,
+                        outer_minus: r.form.outer_minus.len() as u8,
+                        width: r.width,
                     },
                 },
                 args,
