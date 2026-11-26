@@ -115,22 +115,14 @@ fn lower_run(c: u64) -> u64 {
             break;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
-        let first = if mid < {N} {
-            LOWER_LO[mid]
-        } else {
-            0
-        };
+        let first = if mid < {N} { LOWER_LO[mid] } else { 0 };
         if first <= c {
             lo = wrapping_add(mid, 1);
         } else {
             hi = mid;
         }
     }
-    if lo == 0 {
-        {N}
-    } else {
-        wrapping_sub(lo, 1)
-    }
+    if lo == 0 { {N} } else { wrapping_sub(lo, 1) }
 }
 
 // The char `c` lowers to, for every char but U+0130 (`char::to_lowercase`).
@@ -157,11 +149,7 @@ pub fn case_class(c: u64) -> u64 {
             break;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
-        let first = if mid < {C} {
-            CASE_LO[mid]
-        } else {
-            0
-        };
+        let first = if mid < {C} { CASE_LO[mid] } else { 0 };
         if first <= c {
             lo = wrapping_add(mid, 1);
         } else {
