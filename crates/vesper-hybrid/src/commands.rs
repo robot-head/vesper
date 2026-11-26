@@ -1,10 +1,8 @@
 //! The host side of `@vesper/driver-commands` (self-hosting SH5 lane 13,
 //! #1336): the `HybridCommands` import (packages/vesper-driver-commands/
 //! commands.vsys). The routing in front of every command (help, version,
-//! the unknown-command error, the hand-off to `vesper-<tool>`) is Vesper;
-//! this prints for it as Rust's macros do and answers the few questions
-//! @vesper-std cannot (the running executable's directory, the help text,
-//! whether a file is executable).
+//! the unknown-command error, the hand-off to `vesper-<tool>`) is Vesper,
+//! over @vesper-std (#1996); this is the command engines it calls.
 use std::cell::RefCell;
 use std::io;
 use std::path::Path;
@@ -54,18 +52,21 @@ fn proof_audit_result(result: &[u8]) -> Result<(), String> {
     }
 }
 
-/// Prints of the Vesper command layers (`hc_print` and `hc_help`);
-/// `VESPER_HYBRID_STATS=1` reports it. A command handed back to the Rust
-/// CLI makes none.
-pub static PRINTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Commands the Vesper command layers answered (the driver's
+/// `hd_commands_answered`); `VESPER_HYBRID_STATS=1` reports it. A command
+/// handed back to the Rust CLI counts none.
+pub static ANSWERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Print as the Rust commands do (`print!`, `println!`, `eprintln!`): a
-/// failed write panics with std's own message, and the CLI exits 101 as the
-/// Rust CLI does when its thread panics. The panic must not unwind into
-/// the Vesper caller, so it is caught here and the process exits.
-fn rust_print(print: impl FnOnce()) {
-    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(print)).is_err() {
-        std::process::exit(101);
+/// Flushes Rust's stdout when an engine call returns: the Vesper layers
+/// write the streams directly, so text an engine printed with `print!`
+/// must not wait in Rust's line buffer behind theirs. A failed flush is
+/// left to the next write, as Rust's line buffer leaves it.
+struct FlushOnReturn;
+
+impl Drop for FlushOnReturn {
+    fn drop(&mut self) {
+        use std::io::Write as _;
+        let _ = io::stdout().flush();
     }
 }
 
@@ -100,76 +101,6 @@ pub mod host {
         i64::try_from(text.len()).unwrap_or(i64::MAX)
     }
 
-    /// Write `text` to stdout (1) or stderr (2).
-    ///
-    /// # Safety
-    /// `text` is a lent byte slice.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_print(stream: u32, text: *const u8, len: usize) {
-        PRINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // SAFETY: lent for the call.
-        let text = String::from_utf8_lossy(unsafe { bytes(text, len) });
-        if stream == 2 {
-            rust_print(|| eprint!("{text}"));
-        } else {
-            rust_print(|| print!("{text}"));
-        }
-    }
-
-    /// The CLI's help (no command, `--help` or `-h`).
-    #[unsafe(no_mangle)]
-    pub extern "C" fn hc_help() {
-        PRINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        rust_print(|| print!("{}", crate::HELP));
-    }
-
-    /// Text `which`: see `text_*` in the package. `index` is unused.
-    ///
-    /// # Safety
-    /// `buf` is a lent writable slice.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_text(which: u32, _index: u64, buf: *mut u8, len: usize) -> i64 {
-        let exe = std::env::current_exe().ok();
-        let dir = |p: Option<std::path::PathBuf>| p.and_then(|p| p.parent().map(Path::to_path_buf));
-        let owned = match which {
-            4 => dir(exe.clone()),
-            5 => dir(exe.and_then(|e| e.canonicalize().ok())),
-            _ => None,
-        };
-        let text: Option<&[u8]> = match which {
-            1 => Some(env!("CARGO_PKG_VERSION").as_bytes()),
-            2 => Some(std::env::consts::ARCH.as_bytes()),
-            3 => Some(std::env::consts::OS.as_bytes()),
-            4 | 5 => owned.as_ref().map(|p| p.as_os_str().as_encoded_bytes()),
-            _ => None,
-        };
-        // SAFETY: lent for the call.
-        unsafe { copy_out(text, buf, len) }
-    }
-
-    /// 1 when `path` is a regular file the host would run (on Unix, with an
-    /// execute bit), as `tool_commands::executable` decides.
-    ///
-    /// # Safety
-    /// `path` is a lent byte slice.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_executable(path: *const u8, len: usize) -> u32 {
-        // SAFETY: lent for the call; the bytes came from the OS (the
-        // executable's directory or PATH) or from the command line.
-        let path = unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(bytes(path, len)) };
-        let Ok(meta) = Path::new(path).metadata() else {
-            return 0;
-        };
-        #[cfg(unix)]
-        let ok = {
-            use std::os::unix::fs::PermissionsExt;
-            meta.is_file() && meta.permissions().mode() & 0o111 != 0
-        };
-        #[cfg(not(unix))]
-        let ok = meta.is_file();
-        u32::from(ok)
-    }
-
     /// One file of `vesper fmt` (`fmt_commands::format_file`: the bounded
     /// read, the formatter and the checked atomic replace). Flag 1 is
     /// `--check`, 2 `--recovery`. The status is 0 unchanged, 1 formatted,
@@ -188,6 +119,7 @@ pub mod host {
         stats: *mut u64,
         slen: usize,
     ) -> u32 {
+        let _flush = FlushOnReturn;
         // SAFETY: lent for the call; the bytes came from the command line
         // or from a directory listing.
         let path = unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(bytes(path, len)) };
@@ -252,6 +184,7 @@ pub mod host {
         disassemble: bool,
         budget: u64,
     ) -> u64 {
+        let _flush = FlushOnReturn;
         // SAFETY: lent for the call.
         let path =
             Path::new(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(bytes(path, len)) });
@@ -440,6 +373,7 @@ pub mod host {
         provenance: *const u8,
         provenance_len: usize,
     ) -> u64 {
+        let _flush = FlushOnReturn;
         // SAFETY: all slices are lent for the duration of the call.
         let input = Path::new(unsafe {
             std::ffi::OsStr::from_encoded_bytes_unchecked(bytes(input, input_len))
@@ -780,6 +714,7 @@ pub mod host {
         json: bool,
         dot: bool,
     ) -> u64 {
+        let _flush = FlushOnReturn;
         // SAFETY: lent for the call.
         let input = String::from_utf8_lossy(unsafe { bytes(input, input_len) }).into_owned();
         let focus = has_focus
@@ -1219,6 +1154,7 @@ pub mod host {
         config: *const u8,
         config_len: usize,
     ) -> u64 {
+        let _flush = FlushOnReturn;
         // SAFETY: lent for the call.
         let path = has_path.then(|| {
             Path::new(unsafe {
@@ -1650,6 +1586,7 @@ pub mod host {
     /// `packed` is a lent readable slice of `packed_len` bytes.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn hc_doc_run(packed: *const u8, packed_len: usize) -> u64 {
+        let _flush = FlushOnReturn;
         // SAFETY: lent for the call.
         let raw = unsafe { bytes(packed, packed_len) };
         let result = unpack_doc_args(raw).and_then(crate::doc_commands::run);
@@ -1671,6 +1608,7 @@ pub mod host {
     /// `message` is a lent readable slice of `message_len` bytes.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn hc_doc_json_err(message: *const u8, message_len: usize) -> u64 {
+        let _flush = FlushOnReturn;
         // SAFETY: lent for the call.
         let msg = String::from_utf8_lossy(unsafe { bytes(message, message_len) }).into_owned();
         let msg = truncate_doc_error(msg);
@@ -1723,6 +1661,7 @@ pub mod host {
     /// `packed` is a lent readable slice of `packed_len` bytes.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn hc_test_run(packed: *const u8, packed_len: usize) -> u64 {
+        let _flush = FlushOnReturn;
         // SAFETY: lent for the call.
         let raw = unsafe { bytes(packed, packed_len) };
         let args = unpack_test_args(raw);
@@ -1743,6 +1682,7 @@ pub mod host {
     /// `message` is a lent readable slice of `message_len` bytes.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn hc_test_json_err(message: *const u8, message_len: usize) {
+        let _flush = FlushOnReturn;
         // SAFETY: lent for the call.
         let msg = String::from_utf8_lossy(unsafe { bytes(message, message_len) });
         println!("{}", serde_json::json!({"passed": false, "error": msg}));
@@ -1774,6 +1714,7 @@ pub mod host {
     /// `packed` is a lent readable slice of `packed_len` bytes.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn hc_proof_audit_run(packed: *const u8, packed_len: usize) -> u64 {
+        let _flush = FlushOnReturn;
         // SAFETY: lent for the call.
         let raw = unsafe { bytes(packed, packed_len) };
         let result = match super::PROOF_AUDIT.get() {
@@ -1817,6 +1758,7 @@ pub mod host {
     /// `packed` is a lent readable slice of `packed_len` bytes.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn hc_verify_run(packed: *const u8, packed_len: usize) -> u64 {
+        let _flush = FlushOnReturn;
         // SAFETY: lent for the call.
         let raw = unsafe { bytes(packed, packed_len) };
         let args = unpack_test_args(raw);
@@ -1842,6 +1784,7 @@ pub mod host {
         message: *const u8,
         message_len: usize,
     ) {
+        let _flush = FlushOnReturn;
         // SAFETY: lent for the call.
         let msg = String::from_utf8_lossy(unsafe { bytes(message, message_len) });
         let schema = if extract {
@@ -1878,6 +1821,7 @@ pub mod host {
     /// `LAST_LSP_ERR`.
     #[unsafe(no_mangle)]
     pub extern "C" fn hc_lsp_serve() -> u64 {
+        let _flush = FlushOnReturn;
         match crate::lsp::serve(io::BufReader::new(io::stdin()), io::stdout()) {
             Ok(()) => 0,
             Err(err) => {

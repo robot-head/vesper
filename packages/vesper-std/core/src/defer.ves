@@ -1,0 +1,91 @@
+// Run cleanup once before resuming an exit from the rest of this block.
+// Nested defers clean up in reverse order, including on return or failure.
+pub sugar defer: stmt {
+    rule (defer $cleanup:block $..rest:scope) => {
+        {
+            let exit = $..rest;
+            $cleanup;
+            exit.resume()
+        }
+    }
+}
+
+test {
+    fn mark(inout log: i64, digit: i64) {
+        log = wrapping_add(wrapping_mul(log, 10), digit);
+    }
+
+    fn block_or_return(inout log: i64, early: bool) -> i64 {
+        let value: i64 = {
+            defer {
+                mark(inout log, 1);
+            }
+            defer {
+                mark(inout log, 2);
+            }
+            mark(inout log, 3);
+            if early {
+                return 7;
+            }
+            41
+        };
+        wrapping_add(value, 1)
+    }
+
+    // @case fallthrough(false, 42)
+    // @case returning(true, 7)
+    fn test_nested_cleanup_order(early: bool, expected: i64) -> bool {
+        let mut log: i64 = 0;
+        block_or_return(inout log, early) == expected && log == 321
+    }
+
+    fn leave_on_failure(inout log: i64) -> i64 eff [Fail[RuntimeError]] {
+        defer {
+            mark(inout log, 1);
+        }
+        defer {
+            mark(inout log, 2);
+        }
+        let result: Result[i64, RuntimeError] = Result::Err(RuntimeError::DivisionByZero);
+        result?
+    }
+
+    fn test_cleanup_before_rethrow() -> bool {
+        let mut log: i64 = 0;
+        let result = handle Fail[RuntimeError] in {
+            leave_on_failure(inout log)
+        } with {
+            return _ => false,
+            raise(error, _) => error == RuntimeError::DivisionByZero,
+        };
+        result && log == 21
+    }
+
+    fn test_cleanup_on_loop_exits() -> bool {
+        let mut visits: i64 = 0;
+        let outcome: i64 = loop {
+            defer {
+                visits = wrapping_add(visits, 1);
+            }
+            if visits == 0 {
+                continue;
+            }
+            break 42;
+        };
+        outcome == 42 && visits == 2
+    }
+
+    fn missing(inout log: i64) -> Option[i64] {
+        defer {
+            mark(inout log, 1);
+        }
+        let input: Option[i64] = Option::None;
+        let value = input?;
+        Option::Some(value)
+    }
+
+    fn test_cleanup_before_option_exit() -> bool {
+        let mut log: i64 = 0;
+        missing(inout log) == Option::None && log == 1
+    }
+}

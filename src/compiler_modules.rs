@@ -75,6 +75,7 @@ pub mod native_vectorize;
 pub mod native_verifiers;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod optimize;
+pub mod option_methods;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod packages;
 pub mod pact_frontend;

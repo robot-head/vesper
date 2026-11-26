@@ -43,18 +43,10 @@ impl Session {
                 Ok(0)
             }
             Step::Run => {
+                // The Vesper driver checked the entry's shape over the world
+                // it holds (`run` in modules/driver/src/lib.ves, #2024).
                 let world = &self.checked()?.world;
                 let entry = o.entry();
-                // `entry`: the entry's shape, which the Vesper driver checks
-                // (`run_entry_*` in modules/driver/src/lib.ves).
-                if arg == b"entry" {
-                    return Ok(match world.functions.get(entry) {
-                        None => 1,
-                        Some(f) if !f.params.is_empty() => 2,
-                        Some(f) if !f.effects.instances.is_empty() || f.effects.tail.is_some() => 3,
-                        Some(_) => 0,
-                    });
-                }
                 let mut runtime = Runtime::new(world);
                 runtime.fuel = o.fuel;
                 runtime.optimize = o.optimize;

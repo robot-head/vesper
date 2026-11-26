@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2026"
 # The routing in front of every command of the `vesper` CLI (self-hosting
 # SH5 lane 13, #1336): help, version, the unknown-command error and the
-# hand-off to `vesper-<tool>` programs (src/tool_commands.rs). It finds
-# tools through @vesper-std/env and runs them through @vesper-std/process,
-# and prints through the `HybridCommands` import (commands.vsys), which the
-# hybrid compiler implements (crates/vesper-hybrid/src/commands.rs).
+# hand-off to `vesper-<tool>` programs (src/tool_commands.rs). It prints
+# and finds tools through @vesper-std/fs and @vesper-std/env and runs them
+# through @vesper-std/process; the command engines it calls are the
+# `HybridCommands` import (commands.vsys), which the hybrid compiler
+# implements (crates/vesper-hybrid/src/commands.rs).
 capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdEnv]", "Ffi[StdProcess]", "Ffi[HybridCommands]"]
 vsys = ["commands.vsys"]
 

@@ -1,0 +1,77 @@
+// A resource whose owner can release it without additional authority.
+pub trait Release {
+    fn release(sink self);
+}
+
+fn release_held[T: mod linear + Release](sink resource: T) {
+    resource.release();
+}
+
+// Hold one resource for a block, release it, then resume the block's exit.
+// Parenthesize an acquisition that itself contains an ungrouped brace.
+pub sugar holding: expr {
+    rule (holding $resource:ident = $acquire:expr $body:scope) => {
+        {
+            let $resource = $acquire;
+            let exit = $body;
+            release_held(sink $resource);
+            exit.resume()
+        }
+    }
+}
+
+test {
+    linear struct HoldingTestTicket {
+        id: i64,
+    }
+
+    impl Release for HoldingTestTicket {
+        fn release(sink self) {
+            let HoldingTestTicket {
+                id: _
+            } = self;
+        }
+    }
+
+    fn acquire_ticket(inout acquisitions: i64) -> HoldingTestTicket {
+        acquisitions = wrapping_add(acquisitions, 1);
+        HoldingTestTicket {
+            id: 42,
+        }
+    }
+
+    fn return_from_holding(inout acquisitions: i64, early: bool) -> i64 {
+        let answer: i64 = holding ticket = acquire_ticket(inout acquisitions) {
+            if early {
+                return ticket.id;
+            }
+            ticket.id
+        };
+        wrapping_add(answer, 1)
+    }
+
+    // @case normal(false, 43)
+    // @case returning(true, 42)
+    fn test_holding_releases_ticket(early: bool, expected: i64) -> bool {
+        let mut acquisitions: i64 = 0;
+        return_from_holding(inout acquisitions, early) == expected && acquisitions == 1
+    }
+
+    fn fail_with_ticket(inout acquisitions: i64) -> i64 eff [Fail[RuntimeError]] {
+        holding ticket = acquire_ticket(inout acquisitions) {
+            let _id = ticket.id;
+            Fail::raise(RuntimeError::DivisionByZero)
+        }
+    }
+
+    fn test_holding_releases_before_failure_escapes() -> bool {
+        let mut acquisitions: i64 = 0;
+        let caught = handle Fail[RuntimeError] in {
+            fail_with_ticket(inout acquisitions)
+        } with {
+            return _ => false,
+            raise(error, _) => error == RuntimeError::DivisionByZero,
+        };
+        caught && acquisitions == 1
+    }
+}
