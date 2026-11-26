@@ -1,0 +1,5 @@
+[package]
+name = "@vesper/hybrid-native-backend"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Alloc", "Fail"]

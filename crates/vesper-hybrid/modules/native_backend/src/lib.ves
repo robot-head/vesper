@@ -1,0 +1,8 @@
+// @export abi 4
+
+use self::scalar::{encode_block};
+
+// An empty result declines the block before the hybrid defines its symbol.
+pub fn x86_64_integer_block(in words: Slice[u64]) -> ChunkSeq[u8] {
+    encode_block(in words)
+}

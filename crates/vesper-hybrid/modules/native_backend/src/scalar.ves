@@ -1,0 +1,786 @@
+use self::x86_64::{
+    ADD_RM_R64, AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A, CC_AE,
+    CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, Instruction, NEG_EXTENSION, NOT_EXTENSION,
+    OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION, SHR_EXTENSION, SUB_RM_R64,
+    UNASSIGNED, XOR_RM_R64, arg_register, emit, find_register, patch_forward_branch, register_bit
+};
+
+// Integer block opcodes shared with src/native_machine.rs.
+const CONSTANT: u64 = 0;
+const ADD: u64 = 1;
+const SUB: u64 = 2;
+const MUL: u64 = 3;
+const AND: u64 = 4;
+const OR: u64 = 5;
+const XOR: u64 = 6;
+const NEG: u64 = 7;
+const NOT: u64 = 8;
+const SHL: u64 = 9;
+const SHR: u64 = 10;
+const SAR: u64 = 11;
+const COMPARE: u64 = 12;
+const COMPARE_BYTE: u64 = 13;
+const SELECT: u64 = 14;
+const TRUNCATE: u64 = 15;
+const ZERO_EXTEND: u64 = 16;
+const SIGN_EXTEND: u64 = 17;
+const COMPARE_WORD: u64 = 18;
+const COMPARE_DWORD: u64 = 19;
+const SHL_REGISTER: u64 = 20;
+const SHR_REGISTER: u64 = 21;
+const SAR_REGISTER: u64 = 22;
+const LOAD: u64 = 23;
+const STORE_BYTE: u64 = 24;
+const STORE_WORD: u64 = 25;
+const STORE_DWORD: u64 = 26;
+const STORE_QWORD: u64 = 27;
+const BRANCH_ZERO: u64 = 28;
+const EARLY_RETURN: u64 = 29;
+const STACK_SLOT: u64 = 30;
+const STACK_ADDRESS: u64 = 31;
+const STACK_LOAD: u64 = 32;
+const STACK_STORE_BYTE: u64 = 33;
+const STACK_STORE_WORD: u64 = 34;
+const STACK_STORE_DWORD: u64 = 35;
+const STACK_STORE_QWORD: u64 = 36;
+const RETURN_PAIR: u64 = 37;
+
+const EQUAL: u64 = 0;
+const NOT_EQUAL: u64 = 1;
+const SIGNED_LESS: u64 = 2;
+const SIGNED_GREATER_EQUAL: u64 = 3;
+const SIGNED_GREATER: u64 = 4;
+const SIGNED_LESS_EQUAL: u64 = 5;
+const UNSIGNED_LESS: u64 = 6;
+const UNSIGNED_GREATER_EQUAL: u64 = 7;
+const UNSIGNED_GREATER: u64 = 8;
+const UNSIGNED_LESS_EQUAL: u64 = 9;
+
+const ARGUMENT_COUNT: u64 = 0;
+const RETURN_VALUE: u64 = 1;
+const HEADER_WORDS: u64 = 2;
+const OP: u64 = 0;
+const LEFT: u64 = 1;
+const RIGHT: u64 = 2;
+const EXTRA: u64 = 3;
+const RECORD_WORDS: u64 = 4;
+const NEVER_READ: u64 = 0;
+const NO_SECOND_RESULT: u64 = 0xffffffffffffffff;
+const DISP32_MASK: u64 = 0xffffffff;
+const STACK_ALIGNMENT: u64 = 16;
+const RETURN_ADDRESS_BYTES: u64 = 8;
+const SPILL_SLOT_BYTES: u64 = 8;
+const LEFT_SCRATCH: u8 = RAX;
+const RIGHT_SCRATCH: u8 = R10;
+const THIRD_SCRATCH: u8 = R11;
+// One Linux x86-64 base page. Larger frames need stack probes.
+const STACK_PROBE_INTERVAL: u64 = 4096;
+
+copy struct Record {
+    op: u64,
+    left: u64,
+    right: u64,
+    extra: u64,
+}
+
+copy struct FrameSlot {
+    offset: u64,
+    size: u64,
+}
+
+struct FrameLayout {
+    slots: ChunkSeq[FrameSlot],
+    size: u64,
+    used: bool,
+}
+
+copy enum Location {
+    Absent,
+    Register(u8),
+    Spill(u32),
+}
+
+struct Allocation {
+    locations: ChunkSeq[Location],
+    frame_size: u32,
+}
+
+fn word_at(in words: Slice[u64], position: u64) -> u64 {
+    match words.try_get(position) {
+        Option::Some(word) => word,
+        Option::None => 0,
+    }
+}
+
+fn read_record(in words: Slice[u64], index: u64) -> Record {
+    let start = wrapping_add(HEADER_WORDS, wrapping_mul(index, RECORD_WORDS));
+    Record {
+        op: word_at(in words, wrapping_add(start, OP)),
+        left: word_at(in words, wrapping_add(start, LEFT)),
+        right: word_at(in words, wrapping_add(start, RIGHT)),
+        extra: word_at(in words, wrapping_add(start, EXTRA))
+    }
+}
+
+fn align_up(size: u64, alignment: u64) -> u64 {
+    let mask = wrapping_sub(alignment, 1);
+    wrapping_add(size, mask) & ~mask
+}
+
+fn aligned_frame_size(used: u64) -> u64 {
+    // Incoming RSP is one return address below a 16-byte boundary.
+    wrapping_sub(
+        align_up(wrapping_add(used, RETURN_ADDRESS_BYTES), STACK_ALIGNMENT),
+        RETURN_ADDRESS_BYTES
+    )
+}
+
+fn frame_layout(in words: Slice[u64], count: u64) -> Option[FrameLayout] {
+    let mut slots = ChunkSeq::new[FrameSlot]();
+    let mut used: u64 = 0;
+    for index in 0..count {
+        let record = read_record(in words, index);
+        if record.op != STACK_SLOT {
+            break;
+        }
+        let alignment = record.right;
+        if alignment == 0
+            || alignment > STACK_ALIGNMENT
+            || (alignment & wrapping_sub(alignment, 1)) != 0
+            || record.left > STACK_PROBE_INTERVAL
+        {
+            return Option::None;
+        }
+        let offset = align_up(used, alignment);
+        used = wrapping_add(offset, record.left);
+        if used > STACK_PROBE_INTERVAL {
+            return Option::None;
+        }
+        slots.push(FrameSlot { offset: offset, size: record.left });
+    }
+    let size = if slots.len() == 0 {
+        0
+    } else {
+        aligned_frame_size(used)
+    };
+    if size > STACK_PROBE_INTERVAL {
+        return Option::None;
+    }
+    Option::Some(FrameLayout { slots: slots, size: size, used: false })
+}
+
+fn last_read(in reads: ChunkSeq[u64], value: u64) -> u64 {
+    match reads.try_get(value) {
+        Option::Some(user) => user,
+        Option::None => NEVER_READ,
+    }
+}
+
+fn first_read_backwards(inout reads: ChunkSeq[u64], value: u64, user: u64) {
+    if last_read(in reads, value) == NEVER_READ {
+        let _ = reads.try_set(value, user);
+    }
+}
+
+fn is_comparison(op: u64) -> bool {
+    op == COMPARE || op == COMPARE_BYTE || op == COMPARE_WORD || op == COMPARE_DWORD
+}
+
+fn comparison_width(op: u64) -> u64 {
+    match op {
+        COMPARE_BYTE => BYTE_BITS,
+        COMPARE_WORD => WORD_BITS,
+        COMPARE_DWORD => DWORD_BITS,
+        _ => QWORD_BITS,
+    }
+}
+
+fn valid_width(width: u64) -> bool {
+    width == BYTE_BITS || width == WORD_BITS || width == DWORD_BITS || width == QWORD_BITS
+}
+
+fn is_register_shift(op: u64) -> bool {
+    op >= SHL_REGISTER && op <= SAR_REGISTER
+}
+
+fn is_store(op: u64) -> bool {
+    op >= STORE_BYTE && op <= STORE_QWORD
+}
+
+fn is_stack_store(op: u64) -> bool {
+    op >= STACK_STORE_BYTE && op <= STACK_STORE_QWORD
+}
+
+fn is_stack_operation(op: u64) -> bool {
+    op >= STACK_ADDRESS && op <= STACK_STORE_QWORD
+}
+
+fn has_no_result(op: u64) -> bool {
+    (op >= STORE_BYTE && op <= STACK_SLOT) || is_stack_store(op) || op == RETURN_PAIR
+}
+
+fn store_width(op: u64) -> u64 {
+    match op {
+        STORE_BYTE | STACK_STORE_BYTE => BYTE_BITS,
+        STORE_WORD | STACK_STORE_WORD => WORD_BITS,
+        STORE_DWORD | STACK_STORE_DWORD => DWORD_BITS,
+        _ => QWORD_BITS,
+    }
+}
+
+fn stack_displacement(in frame: FrameLayout, in record: Record) -> Option[u32] {
+    let store = is_stack_store(record.op);
+    let index = if store { record.right } else { record.left };
+    let offset = if store { record.extra } else { record.right };
+    let width = if store {
+        store_width(record.op)
+    } else if record.op == STACK_LOAD {
+        if !valid_width(record.extra) {
+            return Option::None;
+        }
+        record.extra
+    } else {
+        0
+    };
+    match frame.slots.try_get(index) {
+        Option::Some(slot) => {
+            if offset <= slot.size && width / BYTE_BITS <= wrapping_sub(slot.size, offset) {
+                Option::Some(wrapping_u32(wrapping_add(slot.offset, offset)))
+            } else {
+                Option::None
+            }
+        },
+        Option::None => Option::None,
+    }
+}
+
+fn reads_left(op: u64) -> bool {
+    op != CONSTANT
+        && op != STACK_SLOT
+        && op != STACK_ADDRESS
+        && op != STACK_LOAD
+        && op != RETURN_PAIR
+}
+
+fn reads_right(op: u64, paired: bool) -> bool {
+    (op >= ADD && op <= XOR)
+        || is_comparison(op)
+        || op == SELECT
+        || is_register_shift(op)
+        || is_store(op)
+        || (op == EARLY_RETURN && paired)
+}
+
+// A shift must keep its count until the destructive instruction reads it.
+fn can_reuse_right(op: u64) -> bool {
+    op != SUB && !is_register_shift(op)
+}
+
+fn condition_code(condition: u64) -> u8 {
+    match condition {
+        EQUAL => CC_E,
+        NOT_EQUAL => CC_NE,
+        SIGNED_LESS => CC_L,
+        SIGNED_GREATER_EQUAL => CC_GE,
+        SIGNED_GREATER => CC_G,
+        SIGNED_LESS_EQUAL => CC_LE,
+        UNSIGNED_LESS => CC_B,
+        UNSIGNED_GREATER_EQUAL => CC_AE,
+        UNSIGNED_GREATER => CC_A,
+        _ => CC_BE,
+    }
+}
+
+// Walk backwards to discard dead arithmetic while keeping memory operations
+// and their inputs in program order.
+fn find_last_reads(
+    in words: Slice[u64],
+    arguments: u64,
+    count: u64,
+    result: u64,
+    second: u64,
+    inout frame: FrameLayout
+) -> Option[ChunkSeq[u64]] {
+    let values = wrapping_add(arguments, count);
+    let mut reads = ChunkSeq::with_capacity[u64](values);
+    for i in 0..values {
+        reads.push(NEVER_READ);
+    }
+    let _ = reads.try_set(result, values);
+    let paired = second != NO_SECOND_RESULT;
+    if paired {
+        let _ = reads.try_set(second, values);
+    }
+    let mut early_return_at = NEVER_READ;
+    let mut has_branch = false;
+    for reverse_index in 0..count {
+        let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
+        let value = wrapping_add(arguments, index);
+        let record = read_record(in words, index);
+        if record.op > RETURN_PAIR
+            || (record.op == STACK_SLOT && index >= frame.slots.len())
+            || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
+        {
+            return Option::None;
+        }
+        let last = last_read(in reads, value);
+        if is_stack_operation(record.op) {
+            match stack_displacement(in frame, in record) {
+                Option::Some(_) => {},
+                Option::None => return Option::None,
+            };
+            frame.used = frame.used || record.op != STACK_ADDRESS || last != NEVER_READ;
+        }
+        if record.op >= ADD && record.op <= SAR && !valid_width(record.extra) {
+            return Option::None;
+        }
+        if is_register_shift(record.op)
+            && record.extra != DWORD_BITS
+            && record.extra != QWORD_BITS
+        {
+            return Option::None;
+        }
+        if record.op >= TRUNCATE && record.op <= SIGN_EXTEND {
+            if !valid_width(record.extra) || !valid_width(record.right) {
+                return Option::None;
+            }
+            if (record.op == TRUNCATE && record.extra >= record.right)
+                || (record.op != TRUNCATE && record.extra <= record.right)
+            {
+                return Option::None;
+            }
+        }
+        if record.op == LOAD && (!valid_width(record.extra) || record.right > DISP32_MASK) {
+            return Option::None;
+        }
+        let no_result = has_no_result(record.op);
+        if (no_result && last != NEVER_READ)
+            || (is_store(record.op) && record.extra > DISP32_MASK)
+        {
+            return Option::None;
+        }
+        if record.op == EARLY_RETURN {
+            if early_return_at != NEVER_READ {
+                return Option::None;
+            }
+            early_return_at = value;
+        } else if record.op == BRANCH_ZERO {
+            if early_return_at == NEVER_READ || has_branch {
+                return Option::None;
+            }
+            has_branch = true;
+        } else if early_return_at != NEVER_READ && !has_branch && last > early_return_at {
+            // The false arm cannot use a value created in the true arm.
+            return Option::None;
+        }
+        let has_left = reads_left(record.op);
+        let has_right = reads_right(record.op, paired);
+        let has_third = record.op == SELECT;
+        if (has_left && record.left >= value)
+            || (has_right && record.right >= value)
+            || (has_third && record.extra >= value)
+            || (is_comparison(record.op) && record.extra > UNSIGNED_LESS_EQUAL)
+        {
+            return Option::None;
+        }
+        if last != NEVER_READ || record.op == LOAD || record.op == STACK_LOAD || no_result {
+            if has_left {
+                first_read_backwards(inout reads, record.left, value);
+            }
+            if has_right {
+                first_read_backwards(inout reads, record.right, value);
+            }
+            if has_third {
+                first_read_backwards(inout reads, record.extra, value);
+            }
+        }
+    }
+    if early_return_at != NEVER_READ && !has_branch {
+        return Option::None;
+    }
+    Option::Some(reads)
+}
+
+fn assigned(in locations: ChunkSeq[Location], value: u64) -> Location {
+    match locations.try_get(value) {
+        Option::Some(location) => location,
+        Option::None => Location::Absent,
+    }
+}
+
+fn without_register(used: u32, register: u8) -> u32 {
+    used ^ (used & register_bit(register))
+}
+
+fn emits_instruction(op: u64, result_live: bool) -> bool {
+    op != STACK_SLOT
+        && op != RETURN_PAIR
+        && (result_live || op == LOAD || op == STACK_LOAD || has_no_result(op))
+}
+
+fn dying_register(
+    in reads: ChunkSeq[u64],
+    in locations: ChunkSeq[Location],
+    operand: u64,
+    current: u64
+) -> u8 {
+    if last_read(in reads, operand) != current {
+        return UNASSIGNED;
+    }
+    match assigned(in locations, operand) {
+        Location::Register(reg) => reg,
+        _ => UNASSIGNED,
+    }
+}
+
+// Scan in instruction order. Expire a register at its last use. If the
+// register-only pass fills up, retry with three reload registers reserved
+// and give new values that cannot fit in registers their own stack homes.
+fn allocate(
+    in words: Slice[u64],
+    in reads: ChunkSeq[u64],
+    arguments: u64,
+    count: u64,
+    explicit_frame: u64,
+    paired: bool,
+    spills: bool
+) -> Option[Allocation] {
+    let mut locations = ChunkSeq::with_capacity[Location](wrapping_add(arguments, count));
+    let mut used = if spills {
+        register_bit(LEFT_SCRATCH) | register_bit(RIGHT_SCRATCH) | register_bit(THIRD_SCRATCH)
+    } else {
+        0
+    };
+    let mut stack_end = explicit_frame;
+    for argument in 0..arguments {
+        let reg = arg_register(argument);
+        locations.push(Location::Register(reg));
+        if last_read(in reads, argument) != NEVER_READ {
+            used = used | register_bit(reg);
+        }
+    }
+
+    for index in 0..count {
+        let value = wrapping_add(arguments, index);
+        let record = read_record(in words, index);
+        let result_live = last_read(in reads, value) != NEVER_READ;
+        if !emits_instruction(record.op, result_live) {
+            locations.push(Location::Absent);
+            continue;
+        }
+        let left = if reads_left(record.op) {
+            dying_register(in reads, in locations, record.left, value)
+        } else {
+            UNASSIGNED
+        };
+        let right = if reads_right(record.op, paired) {
+            dying_register(in reads, in locations, record.right, value)
+        } else {
+            UNASSIGNED
+        };
+        let third = if record.op == SELECT {
+            dying_register(in reads, in locations, record.extra, value)
+        } else {
+            UNASSIGNED
+        };
+        let register = if record.op == SELECT && right != UNASSIGNED {
+            right
+        } else if third != UNASSIGNED {
+            third
+        } else if left != UNASSIGNED {
+            left
+        } else if right != UNASSIGNED && can_reuse_right(record.op) {
+            right
+        } else {
+            find_register(used)
+        };
+        used = without_register(without_register(without_register(used, left), right), third);
+        let location = if has_no_result(record.op) {
+            Location::Absent
+        } else if register != UNASSIGNED {
+            if result_live {
+                used = used | register_bit(register);
+            }
+            Location::Register(register)
+        } else if !spills {
+            return Option::None;
+        } else if !result_live {
+            // A retained load can finish in a scratch register.
+            Location::Register(LEFT_SCRATCH)
+        } else {
+            let offset = stack_end;
+            stack_end = wrapping_add(stack_end, SPILL_SLOT_BYTES);
+            if aligned_frame_size(stack_end) > STACK_PROBE_INTERVAL {
+                return Option::None;
+            }
+            Location::Spill(wrapping_u32(offset))
+        };
+        locations.push(location);
+    }
+    let size = if stack_end == 0 {
+        0
+    } else {
+        aligned_frame_size(stack_end)
+    };
+    Option::Some(Allocation { locations: locations, frame_size: wrapping_u32(size) })
+}
+
+fn materialize(inout output: ChunkSeq[u8], in location: Location, scratch: u8) -> u8 {
+    match location {
+        Location::Register(reg) => reg,
+        Location::Spill(offset) => {
+            emit(inout output, in Instruction::Load(scratch, RSP, offset, QWORD_BITS));
+            scratch
+        },
+        Location::Absent => UNASSIGNED,
+    }
+}
+
+fn operation(in record: Record, destination: u8, source: u8) -> Instruction {
+    let width = record.extra;
+    let count = wrapping_u8(record.right & wrapping_sub(width, 1));
+    match record.op {
+        ADD => Instruction::Binary(ADD_RM_R64, destination, source, width),
+        SUB => Instruction::Binary(SUB_RM_R64, destination, source, width),
+        MUL => Instruction::Multiply(destination, source, width),
+        AND => Instruction::Binary(AND_RM_R64, destination, source, width),
+        OR => Instruction::Binary(OR_RM_R64, destination, source, width),
+        XOR => Instruction::Binary(XOR_RM_R64, destination, source, width),
+        NEG => Instruction::Unary(NEG_EXTENSION, destination, width),
+        NOT => Instruction::Unary(NOT_EXTENSION, destination, width),
+        SHL => Instruction::Shift(SHL_EXTENSION, destination, count, width),
+        SHR => Instruction::Shift(SHR_EXTENSION, destination, count, width),
+        SHL_REGISTER => Instruction::ShiftRegister(SHL_EXTENSION, destination, source, width),
+        SHR_REGISTER => Instruction::ShiftRegister(SHR_EXTENSION, destination, source, width),
+        SAR_REGISTER => Instruction::ShiftRegister(SAR_EXTENSION, destination, source, width),
+        _ => Instruction::Shift(SAR_EXTENSION, destination, count, width),
+    }
+}
+
+fn in_register(in location: Location, expected: u8) -> bool {
+    match location {
+        Location::Register(reg) => reg == expected,
+        _ => false,
+    }
+}
+
+fn move_return(inout output: ChunkSeq[u8], in location: Location, destination: u8) {
+    let source = materialize(inout output, in location, destination);
+    if source != UNASSIGNED {
+        emit(inout output, in Instruction::Move(destination, source));
+    }
+}
+
+fn emit_return(inout output: ChunkSeq[u8], in low: Location, in high: Location, frame_size: u32) {
+    // Treat the ABI return registers as a parallel copy. Moving the high
+    // result first preserves RAX when it holds that result.
+    if in_register(in high, RAX) {
+        if in_register(in low, RDX) {
+            emit(inout output, in Instruction::Exchange(RAX, RDX));
+        } else {
+            move_return(inout output, in high, RDX);
+            move_return(inout output, in low, RAX);
+        }
+    } else {
+        move_return(inout output, in low, RAX);
+        move_return(inout output, in high, RDX);
+    }
+    emit(inout output, in Instruction::FrameLeave(frame_size));
+    emit(inout output, in Instruction::Return);
+}
+
+pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
+    if words.len() < HEADER_WORDS {
+        return ChunkSeq::new[u8]();
+    }
+    let body_words = wrapping_sub(words.len(), HEADER_WORDS);
+    let count = body_words / RECORD_WORDS;
+    let arguments = word_at(in words, ARGUMENT_COUNT);
+    let result = word_at(in words, RETURN_VALUE);
+    if wrapping_mul(count, RECORD_WORDS) != body_words
+        || arguments > ARGUMENTS
+        || result >= wrapping_add(arguments, count)
+    {
+        return ChunkSeq::new[u8]();
+    }
+    let second = if count == 0 {
+        NO_SECOND_RESULT
+    } else {
+        let tail = read_record(in words, wrapping_sub(count, 1));
+        if tail.op == RETURN_PAIR {
+            tail.left
+        } else {
+            NO_SECOND_RESULT
+        }
+    };
+    let paired = second != NO_SECOND_RESULT;
+    let mut frame = match frame_layout(in words, count) {
+        Option::Some(layout) => layout,
+        Option::None => return ChunkSeq::new[u8](),
+    };
+    let reads = match find_last_reads(in words, arguments, count, result, second, inout frame) {
+        Option::Some(last) => last,
+        Option::None => return ChunkSeq::new[u8](),
+    };
+    let explicit_frame = if frame.used { frame.size } else { 0 };
+    let allocation = match allocate(
+        in words,
+        in reads,
+        arguments,
+        count,
+        explicit_frame,
+        paired,
+        false
+    ) {
+        Option::Some(result) => result,
+        Option::None => match allocate(
+            in words,
+            in reads,
+            arguments,
+            count,
+            explicit_frame,
+            paired,
+            true
+        ) {
+            Option::Some(result) => result,
+            Option::None => return ChunkSeq::new[u8](),
+        },
+    };
+    let frame_size = allocation.frame_size;
+
+    let mut output = ChunkSeq::new[u8]();
+    emit(inout output, in Instruction::FrameEnter(frame_size));
+    let mut branch_end: u64 = 0;
+
+    for index in 0..count {
+        let value = wrapping_add(arguments, index);
+        let record = read_record(in words, index);
+        let result_live = last_read(in reads, value) != NEVER_READ;
+        if !emits_instruction(record.op, result_live) {
+            continue;
+        }
+        if record.op == EARLY_RETURN {
+            let low = assigned(in allocation.locations, record.left);
+            let high = if paired {
+                assigned(in allocation.locations, record.right)
+            } else {
+                Location::Absent
+            };
+            // Values in scope on the false path retain their homes. This
+            // return and its stack adjustment run only on the true path.
+            emit_return(inout output, in low, in high, frame_size);
+            if !patch_forward_branch(inout output, branch_end) {
+                return ChunkSeq::new[u8]();
+            }
+            continue;
+        }
+        let has_right = reads_right(record.op, paired);
+        let left = if reads_left(record.op) {
+            let location = assigned(in allocation.locations, record.left);
+            materialize(inout output, in location, LEFT_SCRATCH)
+        } else {
+            UNASSIGNED
+        };
+        let right = if has_right {
+            let location = assigned(in allocation.locations, record.right);
+            materialize(inout output, in location, RIGHT_SCRATCH)
+        } else {
+            UNASSIGNED
+        };
+        let conditional = record.op == SELECT;
+        let third = if conditional {
+            let location = assigned(in allocation.locations, record.extra);
+            materialize(inout output, in location, THIRD_SCRATCH)
+        } else {
+            UNASSIGNED
+        };
+        let home = assigned(in allocation.locations, value);
+        let destination = match home {
+            Location::Register(reg) => reg,
+            Location::Spill(_) => LEFT_SCRATCH,
+            Location::Absent => UNASSIGNED,
+        };
+        if record.op == BRANCH_ZERO {
+            emit(inout output, in Instruction::BranchZero(left));
+            branch_end = output.len();
+        } else if is_store(record.op) {
+            emit(
+                inout output,
+                in Instruction::Store(
+                    right,
+                    left,
+                    wrapping_u32(record.extra),
+                    store_width(record.op)
+                )
+            );
+        } else if record.op == CONSTANT {
+            emit(inout output, in Instruction::Immediate(destination, record.left));
+        } else if is_stack_operation(record.op) {
+            let offset = match stack_displacement(in frame, in record) {
+                Option::Some(offset) => offset,
+                Option::None => return ChunkSeq::new[u8](),
+            };
+            let instruction = if is_stack_store(record.op) {
+                Instruction::Store(left, RSP, offset, store_width(record.op))
+            } else if record.op == STACK_LOAD {
+                Instruction::Load(destination, RSP, offset, record.extra)
+            } else {
+                Instruction::StackAddress(destination, offset)
+            };
+            emit(inout output, in instruction);
+        } else if record.op == LOAD {
+            emit(
+                inout output,
+                in Instruction::Load(destination, left, wrapping_u32(record.right), record.extra)
+            );
+        } else if conditional {
+            if destination == right {
+                emit(inout output, in Instruction::Select(destination, left, right, third, CC_E));
+            } else {
+                emit(inout output, in Instruction::Select(destination, left, third, right, CC_NE));
+            }
+        } else if is_comparison(record.op) {
+            emit(
+                inout output,
+                in Instruction::Compare(
+                    destination,
+                    left,
+                    right,
+                    condition_code(record.extra),
+                    comparison_width(record.op)
+                )
+            );
+        } else if record.op == TRUNCATE {
+            emit(inout output, in Instruction::Truncate(destination, left, record.extra));
+        } else if record.op == SIGN_EXTEND {
+            emit(
+                inout output,
+                in Instruction::SignExtend(destination, left, record.right, record.extra)
+            );
+        } else if record.op == ZERO_EXTEND {
+            // Narrow results stay zero-extended in their physical registers.
+            emit(inout output, in Instruction::Move(destination, left));
+        } else {
+            let reuse_right = has_right && destination == right && can_reuse_right(record.op);
+            let first = if reuse_right { right } else { left };
+            let second = if reuse_right { left } else { right };
+            emit(inout output, in Instruction::Move(destination, first));
+            emit(inout output, in operation(in record, destination, second));
+        }
+
+        match home {
+            Location::Spill(offset) => {
+                emit(inout output, in Instruction::Store(destination, RSP, offset, QWORD_BITS));
+            },
+            _ => {},
+        };
+    }
+    let low = assigned(in allocation.locations, result);
+    let high = if paired {
+        assigned(in allocation.locations, second)
+    } else {
+        Location::Absent
+    };
+    emit_return(inout output, in low, in high, frame_size);
+    output
+}
