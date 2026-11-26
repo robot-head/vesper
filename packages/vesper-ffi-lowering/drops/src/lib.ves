@@ -578,10 +578,8 @@ fn borrowed_scrutinees(in ctx: Ctx, in program: Program, fi: u64) -> ChunkSeq[u3
                     }
                 } else if inst.op == Op::Seq {
                     let row = program.pool_row(program.op(inst.a));
-                    if (
-                        sym_eq_str(in ctx.names, row.label, in "TryGet")
-                            || sym_eq_str(in ctx.names, row.label, in "Hoisted(TryGet)")
-                    )
+                    if (sym_eq_str(in ctx.names, row.label, in "TryGet")
+                        || sym_eq_str(in ctx.names, row.label, in "Hoisted(TryGet)"))
                         && list_has_u32(in matched, inst.dest)
                         && !list_has_u32(in out, inst.dest)
                     {

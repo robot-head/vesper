@@ -47,10 +47,8 @@ const SIG_RESERVED_AT: u64 = 816;
 // "Venice": family 1Ah, model 50h..5Fh or C0h..CFh.
 pub fn is_venice(family: u64, model: u64) -> bool {
     family == VENICE_FAMILY
-        && (
-            (model >= VENICE_MODELS_A_FIRST && model <= VENICE_MODELS_A_LAST)
-                || (model >= VENICE_MODELS_B_FIRST && model <= VENICE_MODELS_B_LAST)
-        )
+        && ((model >= VENICE_MODELS_A_FIRST && model <= VENICE_MODELS_A_LAST)
+            || (model >= VENICE_MODELS_B_FIRST && model <= VENICE_MODELS_B_LAST))
 }
 
 // One ETCB_VERSION at `b[at..at + 32]`: bytes 14..32 are reserved; the

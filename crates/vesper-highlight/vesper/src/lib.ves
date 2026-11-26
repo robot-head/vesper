@@ -415,23 +415,19 @@ fn is_loop_keyword(w: u8, before: u8, after: u8) -> bool {
         statement_start && (after == K_LOWER || after == K_L_PAREN)
     } else if w == W_BREAK {
         statement_start
-            && !(
-                after == K_EQ
-                    || after == K_DOT
-                    || after == K_COLON
-                    || after == K_COLON_COLON
-                    || after == K_COMMA
-            )
+            && !(after == K_EQ
+                || after == K_DOT
+                || after == K_COLON
+                || after == K_COLON_COLON
+                || after == K_COMMA)
     } else if w == W_CONTINUE {
         statement_start
-            && (
-                after == K_EOF
-                    || after == K_SEMI
-                    || after == K_R_BRACE
-                    || after == K_R_PAREN
-                    || after == K_R_BRACKET
-                    || after == K_COMMA
-            )
+            && (after == K_EOF
+                || after == K_SEMI
+                || after == K_R_BRACE
+                || after == K_R_PAREN
+                || after == K_R_BRACKET
+                || after == K_COMMA)
     } else if w == W_MUT {
         before == K_LET
     } else {
@@ -890,19 +886,17 @@ fn classify_lower(
     } else if before == K_FN || after == K_L_PAREN {
         C_FUNCTION_IDENT
     } else if is_contextual_decl(w)
-        && (
-            after == K_UPPER
-                || after == K_LOWER
-                || after == K_FN
-                || after == K_STRUCT
-                || after == K_ENUM
-                || after == K_EFFECT
-                || after == K_IMPL
-                || after == K_LINEAR
-                || after == K_COPY
-                || after == K_AFFINE
-                || after == K_L_BRACE
-        )
+        && (after == K_UPPER
+            || after == K_LOWER
+            || after == K_FN
+            || after == K_STRUCT
+            || after == K_ENUM
+            || after == K_EFFECT
+            || after == K_IMPL
+            || after == K_LINEAR
+            || after == K_COPY
+            || after == K_AFFINE
+            || after == K_L_BRACE)
         || (w == W_AS || w == W_FOR)
             && (before == K_UPPER || before == K_R_BRACKET)
             && after == K_UPPER
@@ -911,9 +905,10 @@ fn classify_lower(
     } else if in_type
         || token_mode
             && is_primitive(w)
-            && (
-                before == K_COLON || before == K_ARROW || before == K_L_BRACKET || before == K_COMMA
-            )
+            && (before == K_COLON
+                || before == K_ARROW
+                || before == K_L_BRACKET
+                || before == K_COMMA)
     {
         C_TYPE_NOMINAL
     } else {

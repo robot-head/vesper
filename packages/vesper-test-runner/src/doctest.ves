@@ -128,11 +128,9 @@ pub fn preflight(in b: Slice[u8]) -> ChunkSeq[u64] {
             return error_of(in "doctest token/declaration limit");
         }
         if stack.len() == 0
-            && (
-                is_item_start(k)
-                    || k == k_lower()
-                        && is_contextual_item(in src, w32(in t.start, i), token_end(in t, i))
-            )
+            && (is_item_start(k)
+                || k == k_lower()
+                    && is_contextual_item(in src, w32(in t.start, i), token_end(in t, i)))
         {
             top_item = true;
         }

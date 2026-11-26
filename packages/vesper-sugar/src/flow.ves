@@ -1665,9 +1665,13 @@ fn emit(
                 };
                 // `str::trim`: Unicode whitespace; the captured text is a
                 // token span, so only ASCII whitespace occurs at its ends.
-                if !(
-                    byte == 32 || byte == 9 || byte == 10 || byte == 13 || byte == 11 || byte == 12
-                ) {
+                if !(byte == 32
+                    || byte == 9
+                    || byte == 10
+                    || byte == 13
+                    || byte == 11
+                    || byte == 12)
+                {
                     blank = false;
                     break;
                 }

@@ -487,9 +487,8 @@ fn sorted_rows(in walk: Walk) -> ChunkSeq[u64] {
                     break;
                 }
                 let take_left = j >= hi
-                    || (
-                        i < mid && cmp_rows(in walk, u64_at(in order, i), u64_at(in order, j)) <= 0
-                    );
+                    || (i < mid
+                        && cmp_rows(in walk, u64_at(in order, i), u64_at(in order, j)) <= 0);
                 if take_left {
                     let ok = merged.try_set(k, u64_at(in order, i));
                     i = inc(i);

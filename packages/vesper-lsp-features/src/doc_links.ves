@@ -757,13 +757,9 @@ pub fn doc_target(in x: Ix, in f: DocFacts, at: u64, inout err: u64) -> u64 {
     let doc = l >= 3
         && byte(in b, s) == 47
         && byte(in b, wrapping_add(s, 1)) == 47
-        && (
-            byte(in b, wrapping_add(s, 2)) == 33
-                || (
-                    byte(in b, wrapping_add(s, 2)) == 47
-                        && !(l >= 4 && byte(in b, wrapping_add(s, 3)) == 47)
-                )
-        );
+        && (byte(in b, wrapping_add(s, 2)) == 33
+            || (byte(in b, wrapping_add(s, 2)) == 47
+                && !(l >= 4 && byte(in b, wrapping_add(s, 3)) == 47)));
     if !doc {
         return 0;
     }

@@ -565,12 +565,10 @@ test {
             return false;
         }
         if leaves == 1
-            && (
-                rows.try_get(3) != Option::Some(69)
-                    || rows.try_get(4) != Option::Some(0)
-                    || rows.try_get(5) != Option::Some(retained)
-                    || rows.try_get(6) != Option::Some(0)
-            )
+            && (rows.try_get(3) != Option::Some(69)
+                || rows.try_get(4) != Option::Some(0)
+                || rows.try_get(5) != Option::Some(retained)
+                || rows.try_get(6) != Option::Some(0))
         {
             return false;
         }

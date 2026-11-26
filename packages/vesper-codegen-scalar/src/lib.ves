@@ -1240,10 +1240,8 @@ impl Gen {
             // checker could not prove in range stays on the Rust code.
             let kind = self.kind_of(lhs_ty);
             if kind == 0
-                || (
-                    (op == ops.shl || op == ops.shr)
-                        && self.ctx.world.may_overflow(inst.s0, inst.s1)
-                )
+                || ((op == ops.shl || op == ops.shr)
+                    && self.ctx.world.may_overflow(inst.s0, inst.s1))
             {
                 return;
             }

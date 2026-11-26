@@ -284,11 +284,9 @@ fn mk_fn(inout types: Types, like: u32, result: u32, row: u32, mode: u8) -> u32 
 pub fn refine_annotation(inout types: Types, expected: u32, actual: u32) -> u32 {
     let expected_node = types.node(expected);
     let actual_node = types.node(actual);
-    if (
-        expected_node.kind == TyKind::Named
-            && actual_node.kind == TyKind::Named
-            && expected_node.name == actual_node.name
-    )
+    if (expected_node.kind == TyKind::Named
+        && actual_node.kind == TyKind::Named
+        && expected_node.name == actual_node.name)
         || (expected_node.kind == TyKind::Tuple && actual_node.kind == TyKind::Tuple)
     {
         // `zip`: the shorter list wins.
@@ -357,12 +355,10 @@ pub fn join_types(inout types: Types, known: Known, a: u32, b: u32, inout errors
     if b_node.kind == TyKind::Lit {
         return a;
     }
-    if (
-        a_node.kind == TyKind::Named
-            && b_node.kind == TyKind::Named
-            && a_node.name == b_node.name
-            && a_node.n == b_node.n
-    )
+    if (a_node.kind == TyKind::Named
+        && b_node.kind == TyKind::Named
+        && a_node.name == b_node.name
+        && a_node.n == b_node.n)
         || (a_node.kind == TyKind::Tuple && b_node.kind == TyKind::Tuple && a_node.n == b_node.n)
     {
         let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(a_node.n));

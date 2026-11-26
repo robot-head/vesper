@@ -738,13 +738,12 @@ fn read_definition(
             (n_start(in cst, op), n_end(in cst, op), true)
         } else {
             let head_kind = leaf_k(in cst, head);
-            if !(
-                head_kind == k_lower()
-                    || head_kind == k_state()
-                    || head_kind == k_linear()
-                    || head_kind == k_with()
-                    || head_kind == k_eff()
-            ) {
+            if !(head_kind == k_lower()
+                || head_kind == k_state()
+                || head_kind == k_linear()
+                || head_kind == k_with()
+                || head_kind == k_eff())
+            {
                 return diag(in "sugar rule needs a literal head word", pat_start, pat_end);
             }
             (leaf_s(in cst, head), leaf_e(in cst, head), true)

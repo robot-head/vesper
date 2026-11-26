@@ -418,10 +418,8 @@ impl Linker {
                 let name = req[symbol.name_at..add(symbol.name_at, symbol.name_len)];
                 let hash = fnv(in name);
                 if global
-                    && (
-                        self.is_linker_symbol(in name)
-                            || self.global_hashed(in name, hash) != Absent::Row
-                    )
+                    && (self.is_linker_symbol(in name)
+                        || self.global_hashed(in name, hash) != Absent::Row)
                 {
                     fail_duplicate(inout err, in name);
                     return false;

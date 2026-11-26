@@ -3219,13 +3219,10 @@ pub fn analyze(inout state: St, inout ctx: Cx, in ast: Ast) {
             for generic_idx in 0..list_len(in ast, effect_decl.generics) {
                 if at32(
                     in ctx.adt_kind_rows,
-                    (
-                        nm(
-                            in state,
-                            genericn(in ast, list_at(in ast, effect_decl.generics, generic_idx))
-                                .name
-                        )
-                    )
+                    (nm(
+                        in state,
+                        genericn(in ast, list_at(in ast, effect_decl.generics, generic_idx)).name
+                    ))
                 )
                     != NONE
                 {

@@ -1719,13 +1719,11 @@ fn pointee(inout state: S, param: Par) -> u32 {
 
 fn in_place_element(param: Par) -> bool {
     !param.elem_is_struct
-        && (
-            param.elem_scalar == SC_U8
-                || param.elem_scalar == SC_U32
-                || param.elem_scalar == SC_U64
-                || param.elem_scalar == SC_I64
-                || param.elem_scalar == SC_USIZE
-        )
+        && (param.elem_scalar == SC_U8
+            || param.elem_scalar == SC_U32
+            || param.elem_scalar == SC_U64
+            || param.elem_scalar == SC_I64
+            || param.elem_scalar == SC_USIZE)
 }
 
 fn handle_pass(access: u8) -> u8 {

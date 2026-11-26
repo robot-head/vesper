@@ -647,13 +647,11 @@ pub fn diagnostics_check(
         bound(labels, limits.max_labels, Resource::Labels);
         let mut primary = false;
         for l in 0..label_count {
-            if (
-                word(
-                    in data,
-                    wrapping_add(at, wrapping_add(wrapping_mul(l, Label::Words), Label::Message))
-                )
-                    & PRIMARY_BIT
+            if (word(
+                in data,
+                wrapping_add(at, wrapping_add(wrapping_mul(l, Label::Words), Label::Message))
             )
+                & PRIMARY_BIT)
                 != 0
             {
                 primary = true;

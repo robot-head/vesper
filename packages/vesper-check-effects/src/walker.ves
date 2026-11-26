@@ -1614,10 +1614,8 @@ fn binary(
         }
     } else if const_time
         && tainted
-        && (
-            ctx.world.may_overflow(node.start, node.end)
-                || ctx.world.is_partial(node.start, node.end)
-        )
+        && (ctx.world.may_overflow(node.start, node.end)
+            || ctx.world.is_partial(node.start, node.end))
     {
         if walk.emit {
             let code_start = begin(inout walk, "E0703");
@@ -1757,10 +1755,8 @@ fn closure(inout ctx: Ctx, in prog: Prog, inout walk: Walk, expr_id: u32, node: 
             NONE32
         };
         if declared_ty == NONE32
-            || (
-                !secret_type(in ctx, inout walk, declared_ty)
-                    && !carries_no_information(in ctx, walk.syms, declared_ty)
-            )
+            || (!secret_type(in ctx, inout walk, declared_ty)
+                && !carries_no_information(in ctx, walk.syms, declared_ty))
         {
             let tail_node = tail_span(in prog, node.e);
             let code_start = begin(inout walk, "E0706");

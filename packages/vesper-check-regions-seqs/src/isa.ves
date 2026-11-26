@@ -824,11 +824,9 @@ fn op_shape(
     let applies = intrinsic_class == I_LOAD
         || intrinsic_class == I_STORE
         || intrinsic_class == I_STORE_MASKED
-        || (
-            intrinsic_class == I_LOAD_MASKED
-                && first_ty != NO_TY
-                && is_seq_or_slice(in walk, first_ty)
-        );
+        || (intrinsic_class == I_LOAD_MASKED
+            && first_ty != NO_TY
+            && is_seq_or_slice(in walk, first_ty));
     if applies {
         let store = intrinsic_class == I_STORE || intrinsic_class == I_STORE_MASKED;
         let io_shape = if store {
