@@ -19,8 +19,6 @@ mod frontier;
 mod port;
 mod zset;
 
-#[doc(hidden)]
-pub use circuit::kafka_encode_batch;
 pub use circuit::{
     BINS, CdcHeader, CdcPolicy, CheckpointLimits, CheckpointMode, CheckpointPhase, Circuit,
     CircuitBuilder, ClusterConfig, ClusterRun, CommitRecord, CommitSink, CommittedCheckpoint,
@@ -34,6 +32,8 @@ pub use circuit::{
     SinkRecovery, SourceBinding, TickInput, WeightPolicy, cdc_value, kafka_record,
     read_kafka_output, run_cluster, run_cluster_with,
 };
+#[doc(hidden)]
+pub use circuit::{kafka_encode_batch, kafka_wire_rounds};
 pub use frontier::{Frontier, FrontierTicket, TicketError};
 
 /// Live allocations of the Vesper port's runtime, for leak tests

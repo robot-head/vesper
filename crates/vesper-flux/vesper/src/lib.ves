@@ -24,6 +24,51 @@
 // a limit is known to fail.
 use self::kafka_wire::decode_records as kw_dec_records;
 use self::kafka_wire::encode_records as kw_enc_records;
+use self::kafka_api::{
+    assignment,
+    batch_frame,
+    batch_head,
+    parse_assignment,
+    req_add_offsets,
+    req_add_partitions,
+    req_api_versions,
+    req_create_topic,
+    req_delete_records,
+    req_end_txn,
+    req_fetch,
+    req_find_coordinator,
+    req_heartbeat,
+    req_init_producer,
+    req_join_group,
+    req_leave_group,
+    req_list_offsets,
+    req_metadata,
+    req_offset_fetch,
+    req_produce,
+    req_sasl_authenticate,
+    req_sasl_handshake,
+    req_sync_group,
+    req_txn_offset_commit,
+    resp_add_partitions,
+    resp_api_versions,
+    resp_code,
+    resp_create_topic,
+    resp_delete_records,
+    resp_fetch,
+    resp_find_coordinator,
+    resp_header,
+    resp_init_producer,
+    resp_join_group,
+    resp_lead_code,
+    resp_list_offsets,
+    resp_metadata,
+    resp_offset_errors,
+    resp_offset_fetch,
+    resp_produce,
+    resp_sasl_authenticate,
+    resp_sync_group,
+    subscription
+};
 use self::util::{
     affordable,
     cell,
@@ -1130,4 +1175,389 @@ pub fn kw_encode_records(
     inout out: Slice[u8]
 ) -> u64 {
     kw_enc_records(in data, in meta, in hdr, count, base_ts, inout out)
+}
+
+// ---------------------------------------------------------------------
+// Kafka requests and responses (module kafka_api: `Conn`, `Client` and
+// the consumer protocol in src/kafka_wire.rs, src/kafka_client.rs and
+// src/kafka_group.rs), one export per API. A `Code` error carries the
+// broker's error code and the span of its message (`len` -1 for none).
+
+pub copy enum KwErr {
+    Malformed,
+    Overflow,
+    Proto(u64),
+    Code {
+        code: i64,
+        at: u64,
+        len: i64
+    }
+}
+
+pub fn kw_req_api_versions(version: i64, corr: i64, in cid: Slice[u8])
+    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_api_versions(version, corr, in cid)
+}
+
+pub fn kw_req_sasl_handshake(version: i64, corr: i64, in cid: Slice[u8], in mech: Slice[u8])
+    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_sasl_handshake(version, corr, in cid, in mech)
+}
+
+pub fn kw_req_sasl_authenticate(version: i64, corr: i64, in cid: Slice[u8], in msg: Slice[u8])
+    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_sasl_authenticate(version, corr, in cid, in msg)
+}
+
+pub fn kw_req_metadata(version: i64, corr: i64, in cid: Slice[u8], in topic: Slice[u8])
+    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_metadata(version, corr, in cid, in topic)
+}
+
+pub fn kw_req_create_topic(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in topic: Slice[u8],
+    partitions: i64
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_create_topic(version, corr, in cid, in topic, partitions)
+}
+
+pub fn kw_req_delete_records(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in topic: Slice[u8],
+    partition: i64,
+    offset: i64
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_delete_records(version, corr, in cid, in topic, partition, offset)
+}
+
+pub fn kw_req_list_offsets(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in topic: Slice[u8],
+    partition: i64,
+    ts: i64,
+    committed: bool
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_list_offsets(version, corr, in cid, in topic, partition, ts, committed)
+}
+
+pub fn kw_req_fetch(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in topic: Slice[u8],
+    partition: i64,
+    offset: i64,
+    max_bytes: i64,
+    committed: bool
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_fetch(version, corr, in cid, in topic, partition, offset, max_bytes, committed)
+}
+
+pub fn kw_req_produce(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    has_txn: bool,
+    in txn: Slice[u8],
+    in topic: Slice[u8],
+    partition: i64,
+    in batch: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_produce(version, corr, in cid, has_txn, in txn, in topic, partition, in batch)
+}
+
+pub fn kw_req_find_coordinator(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in key: Slice[u8],
+    kind: i64
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_find_coordinator(version, corr, in cid, in key, kind)
+}
+
+pub fn kw_req_offset_fetch(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in group: Slice[u8],
+    in topic: Slice[u8],
+    in partitions: Slice[i64]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_offset_fetch(version, corr, in cid, in group, in topic, in partitions)
+}
+
+pub fn kw_req_join_group(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in group: Slice[u8],
+    session_ms: i64,
+    rebalance_ms: i64,
+    in member: Slice[u8],
+    has_instance: bool,
+    in instance: Slice[u8],
+    in protocol: Slice[u8],
+    in metadata: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_join_group(
+        version,
+        corr,
+        in cid,
+        in group,
+        session_ms,
+        rebalance_ms,
+        in member,
+        has_instance,
+        in instance,
+        in protocol,
+        in metadata
+    )
+}
+
+pub fn kw_req_sync_group(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in group: Slice[u8],
+    generation: i64,
+    in member: Slice[u8],
+    has_instance: bool,
+    in instance: Slice[u8],
+    in data: Slice[u8],
+    in lens: Slice[u64]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_sync_group(
+        version,
+        corr,
+        in cid,
+        in group,
+        generation,
+        in member,
+        has_instance,
+        in instance,
+        in data,
+        in lens
+    )
+}
+
+pub fn kw_req_heartbeat(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in group: Slice[u8],
+    generation: i64,
+    in member: Slice[u8],
+    has_instance: bool,
+    in instance: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_heartbeat(version, corr, in cid, in group, generation, in member, has_instance, in instance)
+}
+
+pub fn kw_req_leave_group(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in group: Slice[u8],
+    in member: Slice[u8],
+    has_instance: bool,
+    in instance: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_leave_group(version, corr, in cid, in group, in member, has_instance, in instance)
+}
+
+pub fn kw_req_init_producer(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    has_txn: bool,
+    in txn: Slice[u8],
+    timeout_ms: i64
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_init_producer(version, corr, in cid, has_txn, in txn, timeout_ms)
+}
+
+pub fn kw_req_add_partitions(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in txn: Slice[u8],
+    pid: i64,
+    epoch: i64,
+    in topic: Slice[u8],
+    partition: i64
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_add_partitions(version, corr, in cid, in txn, pid, epoch, in topic, partition)
+}
+
+pub fn kw_req_add_offsets(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in txn: Slice[u8],
+    pid: i64,
+    epoch: i64,
+    in group: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_add_offsets(version, corr, in cid, in txn, pid, epoch, in group)
+}
+
+pub fn kw_req_end_txn(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in txn: Slice[u8],
+    pid: i64,
+    epoch: i64,
+    commit: bool
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_end_txn(version, corr, in cid, in txn, pid, epoch, commit)
+}
+
+pub fn kw_req_txn_offset_commit(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in txn: Slice[u8],
+    in group: Slice[u8],
+    pid: i64,
+    epoch: i64,
+    generation: i64,
+    in member: Slice[u8],
+    has_instance: bool,
+    in instance: Slice[u8],
+    in data: Slice[u8],
+    in lens: Slice[u64],
+    in nums: Slice[i64]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    req_txn_offset_commit(
+        version,
+        corr,
+        in cid,
+        in txn,
+        in group,
+        pid,
+        epoch,
+        generation,
+        in member,
+        has_instance,
+        in instance,
+        in data,
+        in lens,
+        in nums
+    )
+}
+
+pub fn kw_resp_header(in b: Slice[u8], corr: i64, flex: bool) -> u64 eff [Fail[KwErr]] {
+    resp_header(in b, corr, flex)
+}
+
+pub fn kw_resp_api_versions(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    resp_api_versions(in b)
+}
+
+pub fn kw_resp_lead_code(in b: Slice[u8]) eff [Fail[KwErr]] {
+    resp_lead_code(in b)
+}
+
+pub fn kw_resp_code(in b: Slice[u8]) eff [Fail[KwErr]] {
+    resp_code(in b)
+}
+
+pub fn kw_resp_sasl_authenticate(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    resp_sasl_authenticate(in b)
+}
+
+pub fn kw_resp_metadata(in b: Slice[u8], in topic: Slice[u8]) -> ChunkSeq[i64] {
+    resp_metadata(in b, in topic)
+}
+
+pub fn kw_resp_create_topic(in b: Slice[u8]) eff [Fail[KwErr]] {
+    resp_create_topic(in b)
+}
+
+pub fn kw_resp_delete_records(in b: Slice[u8]) eff [Fail[KwErr]] {
+    resp_delete_records(in b)
+}
+
+pub fn kw_resp_list_offsets(in b: Slice[u8], partition: i64) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    resp_list_offsets(in b, partition)
+}
+
+pub fn kw_resp_fetch(in b: Slice[u8], partition: i64) -> ChunkSeq[i64] {
+    resp_fetch(in b, partition)
+}
+
+pub fn kw_resp_produce(in b: Slice[u8], partition: i64) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    resp_produce(in b, partition)
+}
+
+pub fn kw_resp_find_coordinator(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    resp_find_coordinator(in b)
+}
+
+pub fn kw_resp_offset_fetch(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    resp_offset_fetch(in b)
+}
+
+pub fn kw_resp_join_group(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    resp_join_group(in b)
+}
+
+pub fn kw_resp_sync_group(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    resp_sync_group(in b)
+}
+
+pub fn kw_resp_init_producer(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    resp_init_producer(in b)
+}
+
+pub fn kw_resp_add_partitions(in b: Slice[u8]) eff [Fail[KwErr]] {
+    resp_add_partitions(in b)
+}
+
+pub fn kw_resp_offset_errors(in b: Slice[u8], flex: bool) eff [Fail[KwErr]] {
+    resp_offset_errors(in b, flex)
+}
+
+pub fn kw_subscription(in data: Slice[u8], in lens: Slice[u64], in parts: Slice[i64])
+    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    subscription(in data, in lens, in parts)
+}
+
+pub fn kw_assignment(
+    in data: Slice[u8],
+    in lens: Slice[u64],
+    in counts: Slice[u64],
+    in parts: Slice[i64]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    assignment(in data, in lens, in counts, in parts)
+}
+
+pub fn kw_parse_assignment(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    parse_assignment(in b)
+}
+
+pub fn kw_batch_frame(
+    in payload: Slice[u8],
+    attributes: i64,
+    count: i64,
+    base_ts: i64,
+    max_ts: i64,
+    pid: i64,
+    epoch: i64,
+    sequence: i64
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    batch_frame(in payload, attributes, count, base_ts, max_ts, pid, epoch, sequence)
+}
+
+pub fn kw_batch_head(in b: Slice[u8], at0: u64) -> ChunkSeq[i64] {
+    batch_head(in b, at0)
 }

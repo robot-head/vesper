@@ -99,4 +99,17 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
         "        let ts_delta = sat_sub_i64(meta[m], base_ts);\n",
         "        let ts_delta = wrapping_sub(meta[m], base_ts);\n",
     ),
+    // kafka_api responses (vesper/src/kafka_api.ves): strings are not
+    // checked to be UTF-8.
+    (
+        "kafka_api",
+        "    if !utf8_ok(in b, start, at) {\n",
+        "    if false {\n",
+    ),
+    // kafka_api requests: a string's i16 length may overflow.
+    (
+        "kafka_request",
+        "        if n > I16_MAX {\n",
+        "        if n > I32_MAX {\n",
+    ),
 ];

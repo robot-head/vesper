@@ -9,6 +9,7 @@
 //! are typed errors, never panics. Only the API versions listed in
 //! [`VERSIONS`] are spoken; a broker that does not offer one of them fails
 //! the call with `Error::Kafka("unsupported api version")`.
+use super::codec::{self, Head};
 use crate::Error;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -74,7 +75,7 @@ pub enum KafkaCompression {
     Zstd,
 }
 impl KafkaCompression {
-    fn code(self) -> i16 {
+    pub(crate) fn code(self) -> i16 {
         match self {
             Self::None => 0,
             Self::Gzip => 1,
@@ -225,234 +226,9 @@ fn code_name(c: i16) -> &'static str {
         _ => "ERROR",
     }
 }
-fn check(code: i16, what: &str) -> KResult<()> {
-    if code == 0 {
-        Ok(())
-    } else {
-        Err(Fail::Code(code, what.to_string()))
-    }
-}
 
-// ----------------------------------------------------------------------
-// Encoding
-// ----------------------------------------------------------------------
-
-/// A request body writer. `flex` selects the compact (KIP-482) encodings.
-pub(crate) struct W {
-    pub(crate) buf: Vec<u8>,
-    flex: bool,
-}
-impl W {
-    pub(crate) fn new(flex: bool) -> Self {
-        Self {
-            buf: Vec::new(),
-            flex,
-        }
-    }
-    pub(crate) fn i8(&mut self, v: i8) -> &mut Self {
-        self.buf.push(v as u8);
-        self
-    }
-    pub(crate) fn bool(&mut self, v: bool) -> &mut Self {
-        self.buf.push(u8::from(v));
-        self
-    }
-    pub(crate) fn i16(&mut self, v: i16) -> &mut Self {
-        self.buf.extend_from_slice(&v.to_be_bytes());
-        self
-    }
-    pub(crate) fn i32(&mut self, v: i32) -> &mut Self {
-        self.buf.extend_from_slice(&v.to_be_bytes());
-        self
-    }
-    pub(crate) fn i64(&mut self, v: i64) -> &mut Self {
-        self.buf.extend_from_slice(&v.to_be_bytes());
-        self
-    }
-    pub(crate) fn uvarint(&mut self, mut v: u64) -> &mut Self {
-        loop {
-            let b = (v & 0x7f) as u8;
-            v >>= 7;
-            if v == 0 {
-                self.buf.push(b);
-                return self;
-            }
-            self.buf.push(b | 0x80);
-        }
-    }
-    #[cfg(test)]
-    pub(crate) fn varint(&mut self, v: i64) -> &mut Self {
-        self.uvarint(((v << 1) ^ (v >> 63)) as u64)
-    }
-    fn len(&mut self, n: usize) -> KResult<&mut Self> {
-        if self.flex {
-            Ok(self.uvarint(n as u64 + 1))
-        } else {
-            Ok(self.i32(i32::try_from(n).map_err(|_| Fail::Local(Error::Overflow))?))
-        }
-    }
-    pub(crate) fn str(&mut self, s: &str) -> KResult<&mut Self> {
-        if self.flex {
-            self.uvarint(s.len() as u64 + 1);
-        } else {
-            self.i16(i16::try_from(s.len()).map_err(|_| Fail::Local(Error::Overflow))?);
-        }
-        self.buf.extend_from_slice(s.as_bytes());
-        Ok(self)
-    }
-    pub(crate) fn nstr(&mut self, s: Option<&str>) -> KResult<&mut Self> {
-        match s {
-            Some(s) => self.str(s),
-            None if self.flex => Ok(self.uvarint(0)),
-            None => Ok(self.i16(-1)),
-        }
-    }
-    pub(crate) fn bytes(&mut self, b: &[u8]) -> KResult<&mut Self> {
-        self.len(b.len())?;
-        self.buf.extend_from_slice(b);
-        Ok(self)
-    }
-    pub(crate) fn array(&mut self, n: usize) -> KResult<&mut Self> {
-        self.len(n)
-    }
-    /// Empty tagged-field section (flexible versions only).
-    pub(crate) fn tags(&mut self) -> &mut Self {
-        if self.flex {
-            self.uvarint(0);
-        }
-        self
-    }
-}
-
-/// A bounds-checked response reader.
-pub(crate) struct R<'a> {
-    b: &'a [u8],
-    at: usize,
-    flex: bool,
-}
-const MALFORMED: Fail = Fail::Proto("malformed response");
-impl<'a> R<'a> {
-    pub(crate) fn new(b: &'a [u8], flex: bool) -> Self {
-        Self { b, at: 0, flex }
-    }
-    pub(crate) fn rest(&self) -> usize {
-        self.b.len() - self.at
-    }
-    pub(crate) fn take(&mut self, n: usize) -> KResult<&'a [u8]> {
-        let end = self.at.checked_add(n).ok_or(MALFORMED)?;
-        let s = self.b.get(self.at..end).ok_or(MALFORMED)?;
-        self.at = end;
-        Ok(s)
-    }
-    pub(crate) fn i8(&mut self) -> KResult<i8> {
-        Ok(self.take(1)?[0] as i8)
-    }
-    pub(crate) fn bool(&mut self) -> KResult<bool> {
-        Ok(self.take(1)?[0] != 0)
-    }
-    pub(crate) fn i16(&mut self) -> KResult<i16> {
-        Ok(i16::from_be_bytes(
-            self.take(2)?.try_into().map_err(|_| MALFORMED)?,
-        ))
-    }
-    pub(crate) fn i32(&mut self) -> KResult<i32> {
-        Ok(i32::from_be_bytes(
-            self.take(4)?.try_into().map_err(|_| MALFORMED)?,
-        ))
-    }
-    pub(crate) fn u32(&mut self) -> KResult<u32> {
-        Ok(u32::from_be_bytes(
-            self.take(4)?.try_into().map_err(|_| MALFORMED)?,
-        ))
-    }
-    pub(crate) fn i64(&mut self) -> KResult<i64> {
-        Ok(i64::from_be_bytes(
-            self.take(8)?.try_into().map_err(|_| MALFORMED)?,
-        ))
-    }
-    pub(crate) fn uvarint(&mut self) -> KResult<u64> {
-        let mut v = 0u64;
-        for i in 0..10 {
-            let b = self.take(1)?[0];
-            v |= u64::from(b & 0x7f) << (7 * i);
-            if b & 0x80 == 0 {
-                return Ok(v);
-            }
-        }
-        Err(MALFORMED)
-    }
-    #[cfg(test)]
-    pub(crate) fn varint(&mut self) -> KResult<i64> {
-        let v = self.uvarint()?;
-        Ok(((v >> 1) as i64) ^ -((v & 1) as i64))
-    }
-    /// A length prefix: `None` for null. Bounded by the bytes left (each
-    /// element takes at least one byte), so a hostile count cannot allocate.
-    fn len(&mut self) -> KResult<Option<usize>> {
-        let n = if self.flex {
-            match self.uvarint()? {
-                0 => return Ok(None),
-                n => n - 1,
-            }
-        } else {
-            match self.i32()? {
-                -1 => return Ok(None),
-                n if n < 0 => return Err(MALFORMED),
-                n => n as u64,
-            }
-        };
-        let n = usize::try_from(n).map_err(|_| MALFORMED)?;
-        if n > self.rest() {
-            return Err(MALFORMED);
-        }
-        Ok(Some(n))
-    }
-    pub(crate) fn array(&mut self) -> KResult<usize> {
-        Ok(self.len()?.unwrap_or(0))
-    }
-    pub(crate) fn nstr(&mut self) -> KResult<Option<String>> {
-        let n = if self.flex {
-            match self.uvarint()? {
-                0 => return Ok(None),
-                n => usize::try_from(n - 1).map_err(|_| MALFORMED)?,
-            }
-        } else {
-            match self.i16()? {
-                -1 => return Ok(None),
-                n if n < 0 => return Err(MALFORMED),
-                n => n as usize,
-            }
-        };
-        let s = self.take(n)?;
-        Ok(Some(
-            std::str::from_utf8(s).map_err(|_| MALFORMED)?.to_string(),
-        ))
-    }
-    pub(crate) fn str(&mut self) -> KResult<String> {
-        self.nstr()?.ok_or(MALFORMED)
-    }
-    pub(crate) fn nbytes(&mut self) -> KResult<Option<&'a [u8]>> {
-        match self.len()? {
-            None => Ok(None),
-            Some(n) => self.take(n).map(Some),
-        }
-    }
-    pub(crate) fn bytes(&mut self) -> KResult<&'a [u8]> {
-        Ok(self.nbytes()?.unwrap_or(&[]))
-    }
-    pub(crate) fn tags(&mut self) -> KResult<()> {
-        if !self.flex {
-            return Ok(());
-        }
-        let n = self.uvarint()?;
-        for _ in 0..n {
-            self.uvarint()?;
-            let size = usize::try_from(self.uvarint()?).map_err(|_| MALFORMED)?;
-            self.take(size)?;
-        }
-        Ok(())
-    }
-}
+/// A malformed or truncated response.
+pub(crate) const MALFORMED: Fail = Fail::Proto("malformed response");
 
 // ----------------------------------------------------------------------
 // API keys and versions
@@ -680,15 +456,8 @@ impl Conn {
     }
 
     fn api_versions(&mut self) -> KResult<()> {
-        let body = self.call(api::API_VERSIONS, |_| Ok(()))?;
-        let mut r = R::new(&body, false);
-        let code = r.i16()?;
-        check(code, "api versions")?;
-        let n = r.array()?;
-        for _ in 0..n {
-            let key = r.i16()?;
-            let min = r.i16()?;
-            let max = r.i16()?;
+        let body = self.call(api::API_VERSIONS, codec::api_versions_request)?;
+        for (key, min, max) in codec::api_versions(&body)? {
             self.versions.insert(key, (min, max));
         }
         Ok(())
@@ -696,13 +465,10 @@ impl Conn {
 
     fn authenticate(&mut self, sasl: &KafkaSasl) -> KResult<()> {
         use rsasl::prelude::{Mechname, SASLClient, SASLConfig};
-        let body = self.call(api::SASL_HANDSHAKE, |w| {
-            w.str(sasl.mechanism.name())?;
-            Ok(())
+        let body = self.call(api::SASL_HANDSHAKE, |h| {
+            codec::sasl_handshake_request(h, sasl.mechanism.name())
         })?;
-        let mut r = R::new(&body, false);
-        let code = r.i16()?;
-        check(code, "sasl handshake")?;
+        codec::sasl_handshake(&body)?;
         let config =
             SASLConfig::with_credentials(None, sasl.username.clone(), sasl.password.clone())
                 .map_err(|_| Fail::Local(Error::Kafka("sasl configuration")))?;
@@ -720,21 +486,10 @@ impl Conn {
                 .map_err(|e| Fail::Io(format!("sasl: {e}")))?;
             if state.has_sent_message() {
                 let message = out.into_inner();
-                let body = self.call(api::SASL_AUTHENTICATE, |w| {
-                    w.bytes(&message)?;
-                    Ok(())
+                let body = self.call(api::SASL_AUTHENTICATE, |h| {
+                    codec::sasl_authenticate_request(h, &message)
                 })?;
-                let mut r = R::new(&body, false);
-                let code = r.i16()?;
-                let msg = r.nstr()?;
-                if code != 0 {
-                    return Err(Fail::Code(
-                        code,
-                        format!("sasl authenticate: {}", msg.unwrap_or_default()),
-                    ));
-                }
-                received = Some(r.bytes()?.to_vec());
-                r.i64()?;
+                received = Some(codec::sasl_authenticate(&body)?);
             }
             if state.is_finished() {
                 return Ok(());
@@ -743,11 +498,12 @@ impl Conn {
         Err(Fail::Proto("sasl exchange did not finish"))
     }
 
-    /// Encode a request frame for `key` (header plus body).
+    /// Encode a request frame for `key` (header plus body): `encode` is
+    /// one of the request functions of `kafka_codec`.
     pub(crate) fn frame(
         &mut self,
         key: i16,
-        body: impl FnOnce(&mut W) -> KResult<()>,
+        encode: impl FnOnce(&Head) -> KResult<Vec<u8>>,
     ) -> KResult<(Vec<u8>, i32, bool)> {
         let (version, flex) = version_of(key)?;
         if key != api::API_VERSIONS
@@ -760,23 +516,11 @@ impl Conn {
             return Err(Fail::Local(Error::Kafka("unsupported api version")));
         }
         self.corr = self.corr.wrapping_add(1);
-        let mut header = W::new(false);
-        header.i16(key).i16(version).i32(self.corr);
-        header.str(&self.settings.client_id)?;
-        if flex {
-            header.uvarint(0);
-        }
-        let mut w = W::new(flex);
-        body(&mut w)?;
-        let len = header.buf.len() + w.buf.len();
-        let mut frame = Vec::with_capacity(4 + len);
-        frame.extend_from_slice(
-            &i32::try_from(len)
-                .map_err(|_| Fail::Local(Error::Overflow))?
-                .to_be_bytes(),
-        );
-        frame.extend_from_slice(&header.buf);
-        frame.extend_from_slice(&w.buf);
+        let frame = encode(&Head {
+            version,
+            corr: self.corr,
+            cid: &self.settings.client_id,
+        })?;
         Ok((frame, self.corr, flex && key != api::API_VERSIONS))
     }
 
@@ -795,23 +539,16 @@ impl Conn {
         }
         let mut body = vec![0u8; len];
         self.stream.read_exact(&mut body).map_err(io_fail)?;
-        let mut r = R::new(&body, flex_header);
-        if r.i32()? != corr {
-            return Err(Fail::Proto("correlation id"));
-        }
-        r.tags()?;
-        let at = r.at;
-        body.drain(..at);
-        Ok(body)
+        codec::response_body(body, corr, flex_header)
     }
 
     /// Send one request and read its response body (after the header).
     pub(crate) fn call(
         &mut self,
         key: i16,
-        body: impl FnOnce(&mut W) -> KResult<()>,
+        encode: impl FnOnce(&Head) -> KResult<Vec<u8>>,
     ) -> KResult<Vec<u8>> {
-        let (frame, corr, flex) = self.frame(key, body)?;
+        let (frame, corr, flex) = self.frame(key, encode)?;
         self.send_frame(&frame)?;
         self.recv(corr, flex)
     }
@@ -855,7 +592,7 @@ impl ProducerStamp {
 /// The records of one batch in the v2 record format, offset deltas
 /// `0..records.len()`: packed here and encoded by the Vesper port
 /// (`kw_encode_records`, vesper/src/kafka_wire.ves).
-fn encode_records(records: &[KafkaRecord], base_ts: i64) -> KResult<Vec<u8>> {
+pub(crate) fn encode_records(records: &[KafkaRecord], base_ts: i64) -> KResult<Vec<u8>> {
     let mut data = Vec::new();
     let mut meta = Vec::with_capacity(records.len() * 4);
     let mut hdr = Vec::new();
@@ -915,32 +652,25 @@ pub(crate) fn encode_batch(
     let max_ts = records.iter().map(|r| r.timestamp).max().unwrap_or(0);
     let raw = encode_records(records, base_ts)?;
     let payload = compress(compression, &raw)?;
-    let mut tail = W::new(false);
     let mut attributes = compression.code();
     if stamp.transactional {
         attributes |= 1 << 4;
     }
-    tail.i16(attributes)
-        .i32(count - 1)
-        .i64(base_ts)
-        .i64(max_ts)
-        .i64(stamp.id)
-        .i16(stamp.epoch)
-        .i32(stamp.sequence)
-        .i32(count);
-    tail.buf.extend_from_slice(&payload);
-    let crc = crc32c::crc32c(&tail.buf);
-    let mut batch = W::new(false);
-    // batchLength counts from partitionLeaderEpoch to the end.
-    let length = 4 + 1 + 4 + tail.buf.len();
-    batch
-        .i64(0)
-        .i32(i32::try_from(length).map_err(|_| Fail::Local(Error::Overflow))?)
-        .i32(-1)
-        .i8(2);
-    batch.buf.extend_from_slice(&crc.to_be_bytes());
-    batch.buf.extend_from_slice(&tail.buf);
-    Ok(batch.buf)
+    let mut batch = crate::port::binding::kw_batch_frame(
+        &payload,
+        i64::from(attributes),
+        i64::from(count),
+        base_ts,
+        max_ts,
+        stamp.id,
+        i64::from(stamp.epoch),
+        i64::from(stamp.sequence),
+    )
+    .map_err(|_| Fail::Local(Error::Overflow))?;
+    // The CRC-32C covers attributes to the end; it sits at [17..21].
+    let crc = crc32c::crc32c(&batch[21..]);
+    batch[17..21].copy_from_slice(&crc.to_be_bytes());
+    Ok(batch)
 }
 
 /// One decoded batch.
@@ -961,53 +691,83 @@ pub(crate) struct Batch {
 /// for batches `keep` accepts (by base offset and producer id).
 pub(crate) fn decode_batches(bytes: &[u8], max_decoded: usize) -> KResult<Vec<Batch>> {
     let mut out = Vec::new();
-    let mut r = R::new(bytes, false);
-    while r.rest() >= 12 {
-        let start = r.at;
-        let base_offset = r.i64()?;
-        let length = r.i32()?;
-        let length = usize::try_from(length).map_err(|_| Fail::Proto("batch length"))?;
-        if length > r.rest() {
-            // Partial trailing batch.
-            break;
+    let mut at = 0u64;
+    loop {
+        // The header reads are the port's (`kw_batch_head`); see there for
+        // the words.
+        let h = crate::port::binding::kw_batch_head(bytes, at);
+        match h[0] {
+            0 => break,
+            1 => {}
+            2 => return Err(Fail::Proto("batch length")),
+            4 => return Err(Fail::Proto("legacy message format")),
+            _ => return Err(MALFORMED),
         }
-        let body = r.take(length)?;
-        let mut b = R::new(body, false);
-        let _leader_epoch = b.i32()?;
-        let magic = b.i8()?;
-        if magic != 2 {
-            return Err(Fail::Proto("legacy message format"));
-        }
-        let crc = b.u32()?;
-        if crc32c::crc32c(&body[b.at..]) != crc {
+        let (start, end) = (h[2] as usize, h[3] as usize);
+        let body = &bytes[start..end];
+        if crc32c::crc32c(&body[9..]) != h[4] as u32 {
             return Err(Fail::Proto("batch checksum"));
         }
-        let attributes = b.i16()?;
-        let last_delta = b.i32()?;
-        let base_ts = b.i64()?;
-        let _max_ts = b.i64()?;
-        let producer_id = b.i64()?;
-        let _epoch = b.i16()?;
-        let _seq = b.i32()?;
-        let count = b.i32()?;
-        if count < 0 || last_delta < 0 {
-            return Err(Fail::Proto("batch header"));
+        match h[10] {
+            0 => {}
+            1 => return Err(MALFORMED),
+            _ => return Err(Fail::Proto("batch header")),
         }
+        let (base_offset, attributes, last_delta) = (h[1], h[5], h[6]);
+        let (base_ts, producer_id, count) = (h[7], h[8], h[9] as i32);
         let transactional = attributes & (1 << 4) != 0;
         let is_control = attributes & (1 << 5) != 0;
-        let codec = attributes & 0x7;
-        let payload = &body[b.at..];
-        let raw = decompress(codec, payload, max_decoded)?;
-        let n_rec = count as usize;
-        if n_rec > raw.len() {
-            return Err(MALFORMED);
-        }
-        let mut cur = [0u64; 3];
-        let mut out_rec = vec![0i64; n_rec * 7];
-        let mut out_hdr = vec![0u64; (n_rec * 16).min(raw.len() * 2)];
-        let mut out_ctrl = [-1i64; 1];
-        let mut status = crate::port::binding::kw_decode_records(
-            &raw,
+        let codec = (attributes & 0x7) as i16;
+        let raw = decompress(codec, &body[49..], max_decoded)?;
+        let (control, records) = decode_records(&raw, count, base_offset, base_ts, is_control)?;
+        out.push(Batch {
+            base_offset,
+            last_offset: base_offset
+                .checked_add(last_delta)
+                .ok_or(Fail::Proto("batch offset"))?,
+            producer_id,
+            transactional,
+            control,
+            records,
+        });
+        at = end as u64;
+    }
+    Ok(out)
+}
+
+/// The records of one decompressed batch (`kw_decode_records`): the
+/// control marker (`Some(commit)`) of a control batch, else the records.
+#[allow(clippy::type_complexity)]
+pub(crate) fn decode_records(
+    raw: &[u8],
+    count: i32,
+    base_offset: i64,
+    base_ts: i64,
+    is_control: bool,
+) -> KResult<(Option<bool>, Vec<(i64, KafkaRecord)>)> {
+    let n_rec = count as usize;
+    if n_rec > raw.len() {
+        return Err(MALFORMED);
+    }
+    let mut cur = [0u64; 3];
+    let mut out_rec = vec![0i64; n_rec * 7];
+    let mut out_hdr = vec![0u64; (n_rec * 16).min(raw.len() * 2)];
+    let mut out_ctrl = [-1i64; 1];
+    let mut status = crate::port::binding::kw_decode_records(
+        raw,
+        n_rec as u64,
+        base_offset,
+        base_ts,
+        u32::from(is_control),
+        &mut cur,
+        &mut out_rec,
+        &mut out_hdr,
+        &mut out_ctrl,
+    );
+    if status == 7 {
+        out_hdr.resize(raw.len() * 2, 0);
+        status = crate::port::binding::kw_decode_records(
+            raw,
             n_rec as u64,
             base_offset,
             base_ts,
@@ -1017,94 +777,69 @@ pub(crate) fn decode_batches(bytes: &[u8], max_decoded: usize) -> KResult<Vec<Ba
             &mut out_hdr,
             &mut out_ctrl,
         );
-        if status == 7 {
-            out_hdr.resize(raw.len() * 2, 0);
-            status = crate::port::binding::kw_decode_records(
-                &raw,
-                n_rec as u64,
-                base_offset,
-                base_ts,
-                u32::from(is_control),
-                &mut cur,
-                &mut out_rec,
-                &mut out_hdr,
-                &mut out_ctrl,
-            );
-        }
-        match status {
-            0 => {}
-            1 => return Err(Fail::Proto("record length")),
-            2 => return Err(Fail::Proto("record headers")),
-            3 => return Err(Fail::Proto("record trailing bytes")),
-            4 => return Err(Fail::Proto("record offset")),
-            5 => return Err(Fail::Proto("control record")),
-            _ => return Err(MALFORMED),
-        }
-        let control = if is_control {
-            if out_ctrl[0] < 0 {
-                return Err(Fail::Proto("control record"));
-            }
-            Some(out_ctrl[0] == 1)
-        } else {
-            None
-        };
-        let mut records = Vec::with_capacity(if is_control { 0 } else { n_rec });
-        if !is_control {
-            let mut h_idx = 0usize;
-            for i in 0..n_rec {
-                let rb = i * 7;
-                let offset = out_rec[rb];
-                let timestamp = out_rec[rb + 1];
-                let key = if out_rec[rb + 3] < 0 {
-                    None
-                } else {
-                    let s = out_rec[rb + 2] as usize;
-                    Some(raw[s..s + out_rec[rb + 3] as usize].to_vec())
-                };
-                let value = if out_rec[rb + 5] < 0 {
-                    None
-                } else {
-                    let s = out_rec[rb + 4] as usize;
-                    Some(raw[s..s + out_rec[rb + 5] as usize].to_vec())
-                };
-                let nh = out_rec[rb + 6] as usize;
-                let mut headers = BTreeMap::new();
-                for _ in 0..nh {
-                    let hb = h_idx * 4;
-                    let ks = out_hdr[hb] as usize;
-                    let kl = out_hdr[hb + 1] as usize;
-                    let k = std::str::from_utf8(&raw[ks..ks + kl])
-                        .map_err(|_| Fail::Proto("record headers"))?
-                        .to_string();
-                    let vs = out_hdr[hb + 2] as usize;
-                    let vl = out_hdr[hb + 3] as usize;
-                    headers.insert(k, raw[vs..vs + vl].to_vec());
-                    h_idx += 1;
-                }
-                records.push((
-                    offset,
-                    KafkaRecord {
-                        key,
-                        value,
-                        headers,
-                        timestamp,
-                    },
-                ));
-            }
-        }
-        let _ = start;
-        out.push(Batch {
-            base_offset,
-            last_offset: base_offset
-                .checked_add(i64::from(last_delta))
-                .ok_or(Fail::Proto("batch offset"))?,
-            producer_id,
-            transactional,
-            control,
-            records,
-        });
     }
-    Ok(out)
+    match status {
+        0 => {}
+        1 => return Err(Fail::Proto("record length")),
+        2 => return Err(Fail::Proto("record headers")),
+        3 => return Err(Fail::Proto("record trailing bytes")),
+        4 => return Err(Fail::Proto("record offset")),
+        5 => return Err(Fail::Proto("control record")),
+        _ => return Err(MALFORMED),
+    }
+    let control = if is_control {
+        if out_ctrl[0] < 0 {
+            return Err(Fail::Proto("control record"));
+        }
+        Some(out_ctrl[0] == 1)
+    } else {
+        None
+    };
+    let mut records = Vec::with_capacity(if is_control { 0 } else { n_rec });
+    if !is_control {
+        let mut h_idx = 0usize;
+        for i in 0..n_rec {
+            let rb = i * 7;
+            let offset = out_rec[rb];
+            let timestamp = out_rec[rb + 1];
+            let key = if out_rec[rb + 3] < 0 {
+                None
+            } else {
+                let s = out_rec[rb + 2] as usize;
+                Some(raw[s..s + out_rec[rb + 3] as usize].to_vec())
+            };
+            let value = if out_rec[rb + 5] < 0 {
+                None
+            } else {
+                let s = out_rec[rb + 4] as usize;
+                Some(raw[s..s + out_rec[rb + 5] as usize].to_vec())
+            };
+            let nh = out_rec[rb + 6] as usize;
+            let mut headers = BTreeMap::new();
+            for _ in 0..nh {
+                let hb = h_idx * 4;
+                let ks = out_hdr[hb] as usize;
+                let kl = out_hdr[hb + 1] as usize;
+                let k = std::str::from_utf8(&raw[ks..ks + kl])
+                    .map_err(|_| Fail::Proto("record headers"))?
+                    .to_string();
+                let vs = out_hdr[hb + 2] as usize;
+                let vl = out_hdr[hb + 3] as usize;
+                headers.insert(k, raw[vs..vs + vl].to_vec());
+                h_idx += 1;
+            }
+            records.push((
+                offset,
+                KafkaRecord {
+                    key,
+                    value,
+                    headers,
+                    timestamp,
+                },
+            ));
+        }
+    }
+    Ok((control, records))
 }
 
 // ----------------------------------------------------------------------
@@ -1114,7 +849,7 @@ pub(crate) fn decode_batches(bytes: &[u8], max_decoded: usize) -> KResult<Vec<Ba
 const XERIAL_MAGIC: [u8; 8] = [0x82, b'S', b'N', b'A', b'P', b'P', b'Y', 0];
 const XERIAL_BLOCK: usize = 32 * 1024;
 
-fn compress(codec: KafkaCompression, raw: &[u8]) -> KResult<Vec<u8>> {
+pub(crate) fn compress(codec: KafkaCompression, raw: &[u8]) -> KResult<Vec<u8>> {
     let io = |e: std::io::Error| Fail::Io(format!("compress: {e}"));
     Ok(match codec {
         KafkaCompression::None => raw.to_vec(),
@@ -1165,7 +900,7 @@ fn read_bounded(mut r: impl Read, max: usize) -> KResult<Vec<u8>> {
     Ok(out)
 }
 
-fn decompress(codec: i16, payload: &[u8], max: usize) -> KResult<Vec<u8>> {
+pub(crate) fn decompress(codec: i16, payload: &[u8], max: usize) -> KResult<Vec<u8>> {
     match codec {
         0 => Ok(payload.to_vec()),
         1 => read_bounded(flate2::read::GzDecoder::new(payload), max),
@@ -1185,13 +920,15 @@ fn decompress(codec: i16, payload: &[u8], max: usize) -> KResult<Vec<u8>> {
             };
             let mut out = Vec::new();
             if payload.starts_with(&XERIAL_MAGIC) {
-                let mut r = R::new(&payload[XERIAL_MAGIC.len()..], false);
-                r.i32()?;
-                r.i32()?;
-                while r.rest() > 0 {
-                    let n = usize::try_from(r.i32()?)
+                // Two i32 versions, then length-prefixed raw blocks.
+                let mut rest = payload.get(XERIAL_MAGIC.len() + 8..).ok_or(MALFORMED)?;
+                while !rest.is_empty() {
+                    let (len, tail) = rest.split_first_chunk::<4>().ok_or(MALFORMED)?;
+                    let n = usize::try_from(i32::from_be_bytes(*len))
                         .map_err(|_| Fail::Proto("corrupt compressed batch"))?;
-                    one(r.take(n)?, &mut out)?;
+                    let block = tail.get(..n).ok_or(MALFORMED)?;
+                    one(block, &mut out)?;
+                    rest = &tail[n..];
                 }
             } else {
                 one(payload, &mut out)?;
@@ -1253,6 +990,7 @@ pub(crate) fn committed_records(
 
 #[cfg(test)]
 mod tests {
+    use super::super::codec::reference::{R, W};
     use super::*;
 
     fn rec(i: u8) -> KafkaRecord {

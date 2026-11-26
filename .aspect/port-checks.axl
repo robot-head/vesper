@@ -211,6 +211,8 @@ flux_check = port_checks(
             ("spine", ["--lib"], "circuit::checkpoint::differential::durable_codecs_match_the_rust_codecs", "circuit::checkpoint::differential::checkpoint_codec_matches_the_rust_codec"),
             ("kafka_wire", ["--lib"], "circuit::wire::tests::batches_round_trip_in_every_codec", "circuit::checkpoint::differential::checkpoint_codec_matches_the_rust_codec"),
             ("kafka_encode", ["--lib"], "circuit::wire::tests::record_encoder_matches_the_rust_encoder", "circuit::wire::tests::batches_round_trip_in_every_codec"),
+            ("kafka_api", ["--lib"], "circuit::codec::tests::response_decoders_match_the_rust_decoders", "circuit::codec::tests::request_encoders_match_the_rust_encoders"),
+            ("kafka_request", ["--lib"], "circuit::codec::tests::request_encoders_match_the_rust_encoders", "circuit::codec::tests::response_decoders_match_the_rust_decoders"),
         ]
     ],
 )

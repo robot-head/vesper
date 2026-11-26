@@ -1,0 +1,1919 @@
+// Module kafka_api of @vesper/flux: the Kafka wire protocol's request
+// frames and response bodies, one whole encoder or decoder per API
+// (`Conn`, `Client` and the consumer-protocol codecs in src/kafka_wire.rs,
+// src/kafka_client.rs and src/kafka_group.rs). The Rust side keeps the
+// sockets, TLS, SASL, retries and the client state: it passes each
+// request's fields in and gets back the frame, and it passes each response
+// body in and gets back its fields as words, strings as (offset, length)
+// spans into the body.
+//
+// Every decoder fails like the Rust reader it replaces: the same first
+// failure in the same order, each string checked to be UTF-8 even when it
+// is skipped, and each length bounded by the bytes left.
+use self::KwErr;
+
+const I16_MAX: u64 = 32767;
+const I32_MAX: u64 = 2147483647;
+
+// `KwErr::Proto` reasons (`PROTO` in src/kafka_wire.rs).
+pub const P_CORRELATION: u64 = 0;
+pub const P_METADATA: u64 = 1;
+
+fn su(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn si(in s: Slice[i64], i: u64) -> i64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn sb(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn qu(in q: ChunkSeq[u64], i: u64) -> u64 {
+    match q.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn malformed() eff [Fail[KwErr]] {
+    Fail::raise(KwErr::Malformed);
+}
+
+fn overflow() eff [Fail[KwErr]] {
+    Fail::raise(KwErr::Overflow);
+}
+
+fn code_err(code: i64) eff [Fail[KwErr]] {
+    Fail::raise(
+        KwErr::Code {
+            code: code,
+            at: 0,
+            len: -1
+        }
+    );
+}
+
+fn code_msg(code: i64, at: u64, len: i64) eff [Fail[KwErr]] {
+    Fail::raise(
+        KwErr::Code {
+            code: code,
+            at: at,
+            len: len
+        }
+    );
+}
+
+fn check(code: i64) eff [Fail[KwErr]] {
+    if code != 0 {
+        code_err(code);
+    }
+}
+
+// ---------------------------------------------------------------------
+// Request writing (`W`)
+// ---------------------------------------------------------------------
+
+fn p8(inout o: ChunkSeq[u8], v: i64) {
+    o.push(wrapping_u8(wrapping_u64(v) & 255));
+}
+
+// Big-endian integers, a byte at a time: the request buffers are sized up
+// front, so each push is a store (a `resize` would zero-fill first).
+fn p16(inout o: ChunkSeq[u8], v: i64) {
+    let x = wrapping_u64(v);
+    o.push(wrapping_u8((x >> 8) & 255));
+    o.push(wrapping_u8(x & 255));
+}
+
+fn p32(inout o: ChunkSeq[u8], v: i64) {
+    let x = wrapping_u64(v);
+    o.push(wrapping_u8((x >> 24) & 255));
+    o.push(wrapping_u8((x >> 16) & 255));
+    o.push(wrapping_u8((x >> 8) & 255));
+    o.push(wrapping_u8(x & 255));
+}
+
+fn p64(inout o: ChunkSeq[u8], v: i64) {
+    let x = wrapping_u64(v);
+    p32(inout o, wrapping_i64(x >> 32));
+    p32(inout o, wrapping_i64(x & 4294967295));
+}
+
+fn pbool(inout o: ChunkSeq[u8], v: bool) {
+    if v {
+        o.push(1);
+    } else {
+        o.push(0);
+    }
+}
+
+fn puv(inout o: ChunkSeq[u8], v: u64) {
+    let mut x = v;
+    loop {
+        let b = wrapping_u8(x & 127);
+        x = x >> 7;
+        if x == 0 {
+            o.push(b);
+            return;
+        }
+        o.push(b | 128);
+    }
+}
+
+// A length or array count (`W::len`).
+fn plen(inout o: ChunkSeq[u8], flex: bool, n: u64) eff [Fail[KwErr]] {
+    if flex {
+        puv(inout o, wrapping_add(n, 1));
+    } else {
+        if n > I32_MAX {
+            overflow();
+        }
+        p32(inout o, wrapping_i64(n));
+    }
+}
+
+fn pstr(inout o: ChunkSeq[u8], flex: bool, in s: Slice[u8]) eff [Fail[KwErr]] {
+    let n = s.len();
+    if flex {
+        puv(inout o, wrapping_add(n, 1));
+    } else {
+        if n > I16_MAX {
+            overflow();
+        }
+        p16(inout o, wrapping_i64(n));
+    }
+    o.extend(in s);
+}
+
+// A nullable string: `has` false is null.
+fn pnstr(inout o: ChunkSeq[u8], flex: bool, has: bool, in s: Slice[u8]) eff [Fail[KwErr]] {
+    if has {
+        pstr(inout o, flex, in s);
+    } else if flex {
+        puv(inout o, 0);
+    } else {
+        p16(inout o, -1);
+    }
+}
+
+fn pbytes(inout o: ChunkSeq[u8], flex: bool, in b: Slice[u8]) eff [Fail[KwErr]] {
+    plen(inout o, flex, b.len());
+    o.extend(in b);
+}
+
+fn ptags(inout o: ChunkSeq[u8], flex: bool) {
+    if flex {
+        puv(inout o, 0);
+    }
+}
+
+// The frame's length field (written by `finish`) and the request header
+// v1 (v2 with its tag section for a flexible body): api key, version,
+// correlation id and client id.
+fn head(key: i64, version: i64, corr: i64, in cid: Slice[u8], flex: bool, body: u64)
+    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let mut o = ChunkSeq::with_capacity[u8](wrapping_add(wrapping_add(16, cid.len()), body));
+    p32(inout o, 0);
+    p16(inout o, key);
+    p16(inout o, version);
+    p32(inout o, corr);
+    pstr(inout o, false, in cid);
+    if flex {
+        puv(inout o, 0);
+    }
+    o
+}
+
+fn finish(inout o: ChunkSeq[u8]) eff [Fail[KwErr]] {
+    let len = wrapping_sub(o.len(), 4);
+    if len > I32_MAX {
+        overflow();
+    }
+    let _ = o.try_write_u32_be(0, wrapping_u32(len));
+}
+
+// API keys (`api` in src/kafka_wire.rs).
+const PRODUCE: i64 = 0;
+const FETCH: i64 = 1;
+const LIST_OFFSETS: i64 = 2;
+const METADATA: i64 = 3;
+const OFFSET_FETCH: i64 = 9;
+const FIND_COORDINATOR: i64 = 10;
+const JOIN_GROUP: i64 = 11;
+const HEARTBEAT: i64 = 12;
+const LEAVE_GROUP: i64 = 13;
+const SYNC_GROUP: i64 = 14;
+const SASL_HANDSHAKE: i64 = 17;
+const API_VERSIONS: i64 = 18;
+const CREATE_TOPICS: i64 = 19;
+const DELETE_RECORDS: i64 = 21;
+const INIT_PRODUCER_ID: i64 = 22;
+const ADD_PARTITIONS_TO_TXN: i64 = 24;
+const ADD_OFFSETS_TO_TXN: i64 = 25;
+const END_TXN: i64 = 26;
+const TXN_OFFSET_COMMIT: i64 = 28;
+const SASL_AUTHENTICATE: i64 = 36;
+
+pub fn req_api_versions(version: i64, corr: i64, in cid: Slice[u8])
+    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let mut o = head(API_VERSIONS, version, corr, in cid, false, 0);
+    finish(inout o);
+    o
+}
+
+pub fn req_sasl_handshake(version: i64, corr: i64, in cid: Slice[u8], in mech: Slice[u8])
+    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let mut o = head(SASL_HANDSHAKE, version, corr, in cid, false, wrapping_add(2, mech.len()));
+    pstr(inout o, false, in mech);
+    finish(inout o);
+    o
+}
+
+pub fn req_sasl_authenticate(version: i64, corr: i64, in cid: Slice[u8], in msg: Slice[u8])
+    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let mut o = head(SASL_AUTHENTICATE, version, corr, in cid, false, wrapping_add(4, msg.len()));
+    pbytes(inout o, false, in msg);
+    finish(inout o);
+    o
+}
+
+pub fn req_metadata(version: i64, corr: i64, in cid: Slice[u8], in topic: Slice[u8])
+    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let mut o = head(METADATA, version, corr, in cid, false, wrapping_add(9, topic.len()));
+    plen(inout o, false, 1);
+    pstr(inout o, false, in topic);
+    pbool(inout o, false);
+    pbool(inout o, false);
+    pbool(inout o, false);
+    finish(inout o);
+    o
+}
+
+pub fn req_create_topic(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in topic: Slice[u8],
+    partitions: i64
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let mut o = head(CREATE_TOPICS, version, corr, in cid, false, wrapping_add(25, topic.len()));
+    plen(inout o, false, 1);
+    pstr(inout o, false, in topic);
+    p32(inout o, partitions);
+    p16(inout o, 1);
+    plen(inout o, false, 0);
+    plen(inout o, false, 0);
+    p32(inout o, 30000);
+    pbool(inout o, false);
+    finish(inout o);
+    o
+}
+
+pub fn req_delete_records(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in topic: Slice[u8],
+    partition: i64,
+    offset: i64
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let mut o = head(DELETE_RECORDS, version, corr, in cid, false, wrapping_add(26, topic.len()));
+    plen(inout o, false, 1);
+    pstr(inout o, false, in topic);
+    plen(inout o, false, 1);
+    p32(inout o, partition);
+    p64(inout o, offset);
+    p32(inout o, 30000);
+    finish(inout o);
+    o
+}
+
+pub fn req_list_offsets(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in topic: Slice[u8],
+    partition: i64,
+    ts: i64,
+    committed: bool
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let mut o = head(LIST_OFFSETS, version, corr, in cid, false, wrapping_add(31, topic.len()));
+    p32(inout o, -1);
+    pbool(inout o, committed);
+    plen(inout o, false, 1);
+    pstr(inout o, false, in topic);
+    plen(inout o, false, 1);
+    p32(inout o, partition);
+    p32(inout o, -1);
+    p64(inout o, ts);
+    finish(inout o);
+    o
+}
+
+pub fn req_fetch(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in topic: Slice[u8],
+    partition: i64,
+    offset: i64,
+    max_bytes: i64,
+    committed: bool
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let mut o = head(FETCH, version, corr, in cid, false, wrapping_add(71, topic.len()));
+    p32(inout o, -1);
+    p32(inout o, 50);
+    p32(inout o, 1);
+    p32(inout o, max_bytes);
+    pbool(inout o, committed);
+    p32(inout o, 0);
+    p32(inout o, -1);
+    plen(inout o, false, 1);
+    pstr(inout o, false, in topic);
+    plen(inout o, false, 1);
+    p32(inout o, partition);
+    p32(inout o, -1);
+    p64(inout o, offset);
+    p64(inout o, -1);
+    p32(inout o, max_bytes);
+    plen(inout o, false, 0);
+    pstr(inout o, false, in "".as_bytes());
+    finish(inout o);
+    o
+}
+
+pub fn req_produce(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    has_txn: bool,
+    in txn: Slice[u8],
+    in topic: Slice[u8],
+    partition: i64,
+    in batch: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let body = wrapping_add(wrapping_add(26, txn.len()), wrapping_add(topic.len(), batch.len()));
+    let mut o = head(PRODUCE, version, corr, in cid, false, body);
+    pnstr(inout o, false, has_txn, in txn);
+    p16(inout o, -1);
+    p32(inout o, 30000);
+    plen(inout o, false, 1);
+    pstr(inout o, false, in topic);
+    plen(inout o, false, 1);
+    p32(inout o, partition);
+    pbytes(inout o, false, in batch);
+    finish(inout o);
+    o
+}
+
+pub fn req_find_coordinator(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in key: Slice[u8],
+    kind: i64
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let mut o = head(FIND_COORDINATOR, version, corr, in cid, false, wrapping_add(3, key.len()));
+    pstr(inout o, false, in key);
+    p8(inout o, kind);
+    finish(inout o);
+    o
+}
+
+// OffsetFetch v7 (flexible).
+pub fn req_offset_fetch(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in group: Slice[u8],
+    in topic: Slice[u8],
+    in partitions: Slice[i64]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let n = partitions.len();
+    let body = wrapping_add(
+        wrapping_add(40, wrapping_mul(4, n)),
+        wrapping_add(group.len(), topic.len())
+    );
+    let mut o = head(OFFSET_FETCH, version, corr, in cid, true, body);
+    pstr(inout o, true, in group);
+    plen(inout o, true, 1);
+    pstr(inout o, true, in topic);
+    plen(inout o, true, n);
+    for p in partitions {
+        p32(inout o, p);
+    }
+    ptags(inout o, true);
+    pbool(inout o, true);
+    ptags(inout o, true);
+    finish(inout o);
+    o
+}
+
+pub fn req_join_group(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in group: Slice[u8],
+    session_ms: i64,
+    rebalance_ms: i64,
+    in member: Slice[u8],
+    has_instance: bool,
+    in instance: Slice[u8],
+    in protocol: Slice[u8],
+    in metadata: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let mut body = wrapping_add(40, wrapping_add(group.len(), member.len()));
+    body = wrapping_add(
+        body,
+        wrapping_add(instance.len(), wrapping_add(protocol.len(), metadata.len()))
+    );
+    let mut o = head(JOIN_GROUP, version, corr, in cid, false, body);
+    pstr(inout o, false, in group);
+    p32(inout o, session_ms);
+    p32(inout o, rebalance_ms);
+    pstr(inout o, false, in member);
+    pnstr(inout o, false, has_instance, in instance);
+    pstr(inout o, false, in "consumer".as_bytes());
+    plen(inout o, false, 1);
+    pstr(inout o, false, in protocol);
+    pbytes(inout o, false, in metadata);
+    finish(inout o);
+    o
+}
+
+// `data` holds each assignment's member id and then its bytes, `lens` the
+// two lengths per assignment.
+pub fn req_sync_group(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in group: Slice[u8],
+    generation: i64,
+    in member: Slice[u8],
+    has_instance: bool,
+    in instance: Slice[u8],
+    in data: Slice[u8],
+    in lens: Slice[u64]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let n = lens.len() / 2;
+    let mut body = wrapping_add(wrapping_add(20, data.len()), wrapping_mul(6, n));
+    body = wrapping_add(
+        body,
+        wrapping_add(group.len(), wrapping_add(member.len(), instance.len()))
+    );
+    let mut o = head(SYNC_GROUP, version, corr, in cid, false, body);
+    pstr(inout o, false, in group);
+    p32(inout o, generation);
+    pstr(inout o, false, in member);
+    pnstr(inout o, false, has_instance, in instance);
+    plen(inout o, false, n);
+    let mut at: u64 = 0;
+    for i in 0..n {
+        let ml = su(in lens, wrapping_mul(i, 2));
+        let al = su(in lens, wrapping_add(wrapping_mul(i, 2), 1));
+        let m_end = wrapping_add(at, ml);
+        pstr(inout o, false, in data[at..m_end]);
+        let a_end = wrapping_add(m_end, al);
+        pbytes(inout o, false, in data[m_end..a_end]);
+        at = a_end;
+    }
+    finish(inout o);
+    o
+}
+
+pub fn req_heartbeat(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in group: Slice[u8],
+    generation: i64,
+    in member: Slice[u8],
+    has_instance: bool,
+    in instance: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let body = wrapping_add(
+        10,
+        wrapping_add(group.len(), wrapping_add(member.len(), instance.len()))
+    );
+    let mut o = head(HEARTBEAT, version, corr, in cid, false, body);
+    pstr(inout o, false, in group);
+    p32(inout o, generation);
+    pstr(inout o, false, in member);
+    pnstr(inout o, false, has_instance, in instance);
+    finish(inout o);
+    o
+}
+
+pub fn req_leave_group(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in group: Slice[u8],
+    in member: Slice[u8],
+    has_instance: bool,
+    in instance: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let body = wrapping_add(
+        10,
+        wrapping_add(group.len(), wrapping_add(member.len(), instance.len()))
+    );
+    let mut o = head(LEAVE_GROUP, version, corr, in cid, false, body);
+    pstr(inout o, false, in group);
+    plen(inout o, false, 1);
+    pstr(inout o, false, in member);
+    pnstr(inout o, false, has_instance, in instance);
+    finish(inout o);
+    o
+}
+
+pub fn req_init_producer(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    has_txn: bool,
+    in txn: Slice[u8],
+    timeout_ms: i64
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let mut o = head(INIT_PRODUCER_ID, version, corr, in cid, false, wrapping_add(6, txn.len()));
+    pnstr(inout o, false, has_txn, in txn);
+    p32(inout o, timeout_ms);
+    finish(inout o);
+    o
+}
+
+pub fn req_add_partitions(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in txn: Slice[u8],
+    pid: i64,
+    epoch: i64,
+    in topic: Slice[u8],
+    partition: i64
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let body = wrapping_add(26, wrapping_add(txn.len(), topic.len()));
+    let mut o = head(ADD_PARTITIONS_TO_TXN, version, corr, in cid, false, body);
+    pstr(inout o, false, in txn);
+    p64(inout o, pid);
+    p16(inout o, epoch);
+    plen(inout o, false, 1);
+    pstr(inout o, false, in topic);
+    plen(inout o, false, 1);
+    p32(inout o, partition);
+    finish(inout o);
+    o
+}
+
+pub fn req_add_offsets(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in txn: Slice[u8],
+    pid: i64,
+    epoch: i64,
+    in group: Slice[u8]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let body = wrapping_add(14, wrapping_add(txn.len(), group.len()));
+    let mut o = head(ADD_OFFSETS_TO_TXN, version, corr, in cid, false, body);
+    pstr(inout o, false, in txn);
+    p64(inout o, pid);
+    p16(inout o, epoch);
+    pstr(inout o, false, in group);
+    finish(inout o);
+    o
+}
+
+pub fn req_end_txn(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in txn: Slice[u8],
+    pid: i64,
+    epoch: i64,
+    commit: bool
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let mut o = head(END_TXN, version, corr, in cid, false, wrapping_add(13, txn.len()));
+    pstr(inout o, false, in txn);
+    p64(inout o, pid);
+    p16(inout o, epoch);
+    pbool(inout o, commit);
+    finish(inout o);
+    o
+}
+
+// Whether `data[a..a + la]` sorts before `data[b..b + lb]` (bytewise, as
+// `str`'s `Ord`).
+fn bytes_lt(in data: Slice[u8], a: u64, la: u64, b: u64, lb: u64) -> bool {
+    let n = if la < lb {
+        la
+    } else {
+        lb
+    };
+    for i in 0..n {
+        let x = sb(in data, wrapping_add(a, i));
+        let y = sb(in data, wrapping_add(b, i));
+        if x != y {
+            return x < y;
+        }
+    }
+    la < lb
+}
+
+fn bytes_eq(in data: Slice[u8], a: u64, la: u64, b: u64, lb: u64) -> bool {
+    if la != lb {
+        return false;
+    }
+    for i in 0..la {
+        if sb(in data, wrapping_add(a, i)) != sb(in data, wrapping_add(b, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// TxnOffsetCommit v3 (flexible). Entry i is the topic `data[at..]` of
+// `su(in lens, 2i)` bytes and then its metadata of `su(in lens, 2i + 1)` bytes, with
+// `si(in nums, 2i)` the partition and `si(in nums, 2i + 1)` the offset. Entries are
+// grouped by topic in sorted order, keeping their order inside a topic
+// (`write_offsets`' `BTreeMap`).
+pub fn req_txn_offset_commit(
+    version: i64,
+    corr: i64,
+    in cid: Slice[u8],
+    in txn: Slice[u8],
+    in group: Slice[u8],
+    pid: i64,
+    epoch: i64,
+    generation: i64,
+    in member: Slice[u8],
+    has_instance: bool,
+    in instance: Slice[u8],
+    in data: Slice[u8],
+    in lens: Slice[u64],
+    in nums: Slice[i64]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let n = lens.len() / 2;
+    // Each entry's start in `data`, then a stable insertion sort of the
+    // entry indices by topic.
+    let mut starts = ChunkSeq::with_capacity[u64](n);
+    let mut at: u64 = 0;
+    for i in 0..n {
+        starts.push(at);
+        at = wrapping_add(
+            at,
+            wrapping_add(
+                su(in lens, wrapping_mul(i, 2)),
+                su(in lens, wrapping_add(wrapping_mul(i, 2), 1))
+            )
+        );
+    }
+    let mut order = ChunkSeq::with_capacity[u64](n);
+    for i in 0..n {
+        order.push(i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let a = qu(in order, wrapping_sub(j, 1));
+            let b = qu(in order, j);
+            if !bytes_lt(
+                in data,
+                qu(in starts, b),
+                su(in lens, wrapping_mul(b, 2)),
+                qu(in starts, a),
+                su(in lens, wrapping_mul(a, 2))
+            ) {
+                break;
+            }
+            let _ = order.try_set(wrapping_sub(j, 1), b);
+            let _ = order.try_set(j, a);
+            j = wrapping_sub(j, 1);
+        }
+    }
+    let mut body = wrapping_add(40, data.len());
+    body = wrapping_add(
+        body,
+        wrapping_add(
+            txn.len(),
+            wrapping_add(group.len(), wrapping_add(member.len(), instance.len()))
+        )
+    );
+    body = wrapping_add(body, wrapping_mul(30, n));
+    let mut o = head(TXN_OFFSET_COMMIT, version, corr, in cid, true, body);
+    pstr(inout o, true, in txn);
+    pstr(inout o, true, in group);
+    p64(inout o, pid);
+    p16(inout o, epoch);
+    p32(inout o, generation);
+    pstr(inout o, true, in member);
+    pnstr(inout o, true, has_instance, in instance);
+    // The distinct topics.
+    let mut topics: u64 = 0;
+    for k in 0..n {
+        if k == 0 {
+            topics = 1;
+        } else {
+            let a = qu(in order, wrapping_sub(k, 1));
+            let b = qu(in order, k);
+            if !bytes_eq(
+                in data,
+                qu(in starts, a),
+                su(in lens, wrapping_mul(a, 2)),
+                qu(in starts, b),
+                su(in lens, wrapping_mul(b, 2))
+            ) {
+                topics = wrapping_add(topics, 1);
+            }
+        }
+    }
+    plen(inout o, true, topics);
+    let mut k: u64 = 0;
+    loop {
+        if k >= n {
+            break;
+        }
+        let first = qu(in order, k);
+        let ts = qu(in starts, first);
+        let tl = su(in lens, wrapping_mul(first, 2));
+        let mut end = wrapping_add(k, 1);
+        loop {
+            if end >= n {
+                break;
+            }
+            let e = qu(in order, end);
+            if !bytes_eq(in data, ts, tl, qu(in starts, e), su(in lens, wrapping_mul(e, 2))) {
+                break;
+            }
+            end = wrapping_add(end, 1);
+        }
+        pstr(inout o, true, in data[ts..wrapping_add(ts, tl)]);
+        plen(inout o, true, wrapping_sub(end, k));
+        for q in k..end {
+            let e = qu(in order, q);
+            p32(inout o, si(in nums, wrapping_mul(e, 2)));
+            p64(inout o, si(in nums, wrapping_add(wrapping_mul(e, 2), 1)));
+            p32(inout o, -1);
+            let ms = wrapping_add(qu(in starts, e), su(in lens, wrapping_mul(e, 2)));
+            let ml = su(in lens, wrapping_add(wrapping_mul(e, 2), 1));
+            pstr(inout o, true, in data[ms..wrapping_add(ms, ml)]);
+            ptags(inout o, true);
+        }
+        ptags(inout o, true);
+        k = end;
+    }
+    ptags(inout o, true);
+    finish(inout o);
+    o
+}
+
+// ---------------------------------------------------------------------
+// Response reading (`R`)
+// ---------------------------------------------------------------------
+
+const HIGH_BITS: u64 = 9259542123273814144;
+
+fn ok_byte(in b: Slice[u8], i: u64, lo: u8, hi: u8) -> bool {
+    match b.try_get(i) {
+        Option::Some(x) => x >= lo && x <= hi,
+        Option::None => false,
+    }
+}
+
+// `std::str::from_utf8(&b[start..end]).is_ok()`.
+fn utf8_ok(in b: Slice[u8], start: u64, end: u64) -> bool {
+    let mut i = start;
+    loop {
+        if i >= end {
+            return true;
+        }
+        if wrapping_add(i, 8) <= end {
+            match b.try_read_u64_le(i) {
+                Option::Some(w) => {
+                    if (w & HIGH_BITS) == 0 {
+                        i = wrapping_add(i, 8);
+                        continue;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        let x = sb(in b, i);
+        if x < 128 {
+            i = wrapping_add(i, 1);
+        } else if x < 194 {
+            return false;
+        } else if x < 224 {
+            if wrapping_add(i, 2) > end || !ok_byte(in b, wrapping_add(i, 1), 128, 191) {
+                return false;
+            }
+            i = wrapping_add(i, 2);
+        } else if x < 240 {
+            let lo: u8 = if x == 224 {
+                160
+            } else {
+                128
+            };
+            let hi: u8 = if x == 237 {
+                159
+            } else {
+                191
+            };
+            if wrapping_add(i, 3) > end
+                || !ok_byte(in b, wrapping_add(i, 1), lo, hi)
+                || !ok_byte(in b, wrapping_add(i, 2), 128, 191) {
+                return false;
+            }
+            i = wrapping_add(i, 3);
+        } else if x < 245 {
+            let lo: u8 = if x == 240 {
+                144
+            } else {
+                128
+            };
+            let hi: u8 = if x == 244 {
+                143
+            } else {
+                191
+            };
+            if wrapping_add(i, 4) > end
+                || !ok_byte(in b, wrapping_add(i, 1), lo, hi)
+                || !ok_byte(in b, wrapping_add(i, 2), 128, 191)
+                || !ok_byte(in b, wrapping_add(i, 3), 128, 191) {
+                return false;
+            }
+            i = wrapping_add(i, 4);
+        } else {
+            return false;
+        }
+    }
+}
+
+// `R::take(n)`: the start of the next `n` bytes.
+fn take(in b: Slice[u8], inout at: u64, n: u64) -> u64 eff [Fail[KwErr]] {
+    let start = at;
+    if n > wrapping_sub(b.len(), start) {
+        malformed();
+    }
+    at = wrapping_add(start, n);
+    start
+}
+
+fn r8(in b: Slice[u8], inout at: u64) -> i64 eff [Fail[KwErr]] {
+    match b.try_get(at) {
+        Option::Some(x) => {
+            at = wrapping_add(at, 1);
+            let v = wrapping_i64(widen_u64(x));
+            if v >= 128 {
+                wrapping_sub(v, 256)
+            } else {
+                v
+            }
+        },
+        Option::None => {
+            malformed();
+            0
+        },
+    }
+}
+
+fn r16(in b: Slice[u8], inout at: u64) -> i64 eff [Fail[KwErr]] {
+    match b.try_read_u16_be(at) {
+        Option::Some(x) => {
+            at = wrapping_add(at, 2);
+            let v = wrapping_i64(widen_u64(x));
+            if v >= 32768 {
+                wrapping_sub(v, 65536)
+            } else {
+                v
+            }
+        },
+        Option::None => {
+            malformed();
+            0
+        },
+    }
+}
+
+fn r32(in b: Slice[u8], inout at: u64) -> i64 eff [Fail[KwErr]] {
+    match b.try_read_u32_be(at) {
+        Option::Some(x) => {
+            at = wrapping_add(at, 4);
+            let v = wrapping_i64(widen_u64(x));
+            if v >= 2147483648 {
+                wrapping_sub(v, 4294967296)
+            } else {
+                v
+            }
+        },
+        Option::None => {
+            malformed();
+            0
+        },
+    }
+}
+
+fn r64(in b: Slice[u8], inout at: u64) -> i64 eff [Fail[KwErr]] {
+    match b.try_read_u64_be(at) {
+        Option::Some(x) => {
+            at = wrapping_add(at, 8);
+            wrapping_i64(x)
+        },
+        Option::None => {
+            malformed();
+            0
+        },
+    }
+}
+
+fn ruv(in b: Slice[u8], inout at: u64) -> u64 eff [Fail[KwErr]] {
+    let mut v: u64 = 0;
+    for i in 0..10 {
+        let x = match b.try_get(at) {
+            Option::Some(x) => widen_u64(x),
+            Option::None => {
+                malformed();
+                0
+            },
+        };
+        at = wrapping_add(at, 1);
+        v = v | wrapping_shl_u64(x & 127, wrapping_mul(7, i));
+        if (x & 128) == 0 {
+            return v;
+        }
+    }
+    malformed();
+    0
+}
+
+// `R::len`: -1 for null, else a length no larger than the bytes left.
+fn rlen(in b: Slice[u8], inout at: u64, flex: bool) -> i64 eff [Fail[KwErr]] {
+    let mut n: u64 = 0;
+    if flex {
+        let v = ruv(in b, inout at);
+        if v == 0 {
+            return -1;
+        }
+        n = wrapping_sub(v, 1);
+    } else {
+        let v = r32(in b, inout at);
+        if v == -1 {
+            return -1;
+        }
+        if v < 0 {
+            malformed();
+        }
+        n = wrapping_u64(v);
+    }
+    if n > wrapping_sub(b.len(), at) {
+        malformed();
+    }
+    wrapping_i64(n)
+}
+
+fn rarray(in b: Slice[u8], inout at: u64, flex: bool) -> u64 eff [Fail[KwErr]] {
+    let n = rlen(in b, inout at, flex);
+    if n < 0 {
+        0
+    } else {
+        wrapping_u64(n)
+    }
+}
+
+// `R::nstr`: the string's length, -1 for null; it starts at `at` minus
+// the length on return.
+fn rnstr(in b: Slice[u8], inout at: u64, flex: bool) -> i64 eff [Fail[KwErr]] {
+    let mut n: u64 = 0;
+    if flex {
+        let v = ruv(in b, inout at);
+        if v == 0 {
+            return -1;
+        }
+        n = wrapping_sub(v, 1);
+    } else {
+        let v = r16(in b, inout at);
+        if v == -1 {
+            return -1;
+        }
+        if v < 0 {
+            malformed();
+        }
+        n = wrapping_u64(v);
+    }
+    let start = take(in b, inout at, n);
+    if !utf8_ok(in b, start, at) {
+        malformed();
+    }
+    wrapping_i64(n)
+}
+
+// `R::str`: the string's start (its length is `at` minus it).
+fn rstr(in b: Slice[u8], inout at: u64, flex: bool) -> u64 eff [Fail[KwErr]] {
+    let n = rnstr(in b, inout at, flex);
+    if n < 0 {
+        malformed();
+    }
+    wrapping_sub(at, wrapping_u64(n))
+}
+
+fn skip_str(in b: Slice[u8], inout at: u64, flex: bool) eff [Fail[KwErr]] {
+    let _ = rstr(in b, inout at, flex);
+}
+
+// A string's (start, length) words; a null string is (0, -1).
+fn push_nstr(in b: Slice[u8], inout at: u64, flex: bool, inout out: ChunkSeq[i64]) eff [
+    Fail[KwErr]
+] {
+    let n = rnstr(in b, inout at, flex);
+    if n < 0 {
+        out.push(0);
+    } else {
+        out.push(wrapping_i64(wrapping_sub(at, wrapping_u64(n))));
+    }
+    out.push(n);
+}
+
+fn push_str(in b: Slice[u8], inout at: u64, flex: bool, inout out: ChunkSeq[i64]) eff [
+    Fail[KwErr]
+] {
+    let s = rstr(in b, inout at, flex);
+    out.push(wrapping_i64(s));
+    out.push(wrapping_i64(wrapping_sub(at, s)));
+}
+
+// `R::bytes`: (start, length), null read as empty.
+fn push_bytes(in b: Slice[u8], inout at: u64, flex: bool, inout out: ChunkSeq[i64]) eff [
+    Fail[KwErr]
+] {
+    let n = rlen(in b, inout at, flex);
+    if n < 0 {
+        out.push(0);
+        out.push(0);
+    } else {
+        let s = take(in b, inout at, wrapping_u64(n));
+        out.push(wrapping_i64(s));
+        out.push(n);
+    }
+}
+
+fn rtags(in b: Slice[u8], inout at: u64, flex: bool) eff [Fail[KwErr]] {
+    if !flex {
+        return;
+    }
+    let n = ruv(in b, inout at);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let _ = ruv(in b, inout at);
+        let size = ruv(in b, inout at);
+        let _ = take(in b, inout at, size);
+        i = wrapping_add(i, 1);
+    }
+}
+
+// The response header (`Conn::recv`): the correlation id must match, then
+// the tag section of a flexible header. Returns where the body starts.
+pub fn resp_header(in b: Slice[u8], corr: i64, flex: bool) -> u64 eff [Fail[KwErr]] {
+    let mut at: u64 = 0;
+    if r32(in b, inout at) != corr {
+        Fail::raise(KwErr::Proto(P_CORRELATION));
+    }
+    rtags(in b, inout at, flex);
+    at
+}
+
+// ApiVersions v0: (key, min, max) per api.
+pub fn resp_api_versions(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    let mut at: u64 = 0;
+    check(r16(in b, inout at));
+    let n = rarray(in b, inout at, false);
+    let mut out = ChunkSeq::with_capacity[i64](wrapping_mul(3, n));
+    for i in 0..n {
+        out.push(r16(in b, inout at));
+        out.push(r16(in b, inout at));
+        out.push(r16(in b, inout at));
+    }
+    out
+}
+
+// A body that starts with its error code (SaslHandshake).
+pub fn resp_lead_code(in b: Slice[u8]) eff [Fail[KwErr]] {
+    let mut at: u64 = 0;
+    check(r16(in b, inout at));
+}
+
+// A body of the throttle time and then the error code (Heartbeat,
+// LeaveGroup, AddOffsetsToTxn, EndTxn).
+pub fn resp_code(in b: Slice[u8]) eff [Fail[KwErr]] {
+    let mut at: u64 = 0;
+    let _ = r32(in b, inout at);
+    check(r16(in b, inout at));
+}
+
+// SaslAuthenticate v1: the server's bytes (start, length).
+pub fn resp_sasl_authenticate(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    let mut at: u64 = 0;
+    let code = r16(in b, inout at);
+    let m = rnstr(in b, inout at, false);
+    if code != 0 {
+        code_msg(
+            code,
+            wrapping_sub(
+                at,
+                if m < 0 {
+                    0
+                } else {
+                    wrapping_u64(m)
+                }
+            ),
+            m
+        );
+    }
+    let mut out = ChunkSeq::with_capacity[i64](2);
+    push_bytes(in b, inout at, false, inout out);
+    let _ = r64(in b, inout at);
+    out
+}
+
+// Metadata v8 for `topic` (`Client::refresh`), into `out` after its
+// three status words: (id, host start, host length, port) per broker,
+// then (partition, leader) per partition of `topic` without an error and
+// with a leader. `keep` is how much of `out` stands if a later read
+// fails: the leaders of every whole entry of `topic` read so far (the
+// Rust client inserted them as it went).
+fn metadata_in(
+    in b: Slice[u8],
+    in topic: Slice[u8],
+    inout out: ChunkSeq[i64],
+    inout keep: u64
+) eff [Fail[KwErr]] {
+    let mut at: u64 = 0;
+    let _ = r32(in b, inout at);
+    let nb = rarray(in b, inout at, false);
+    for i in 0..nb {
+        let id = r32(in b, inout at);
+        let hs = rstr(in b, inout at, false);
+        let hl = wrapping_sub(at, hs);
+        let port = r32(in b, inout at);
+        let _ = rnstr(in b, inout at, false);
+        out.push(id);
+        out.push(wrapping_i64(hs));
+        out.push(wrapping_i64(hl));
+        out.push(port);
+    }
+    let _ = out.try_set(2, wrapping_i64(nb));
+    keep = out.len();
+    let _ = rnstr(in b, inout at, false);
+    let _ = r32(in b, inout at);
+    let nt = rarray(in b, inout at, false);
+    for t in 0..nt {
+        let code = r16(in b, inout at);
+        let ns = rstr(in b, inout at, false);
+        let nl = wrapping_sub(at, ns);
+        let _ = r8(in b, inout at);
+        let np = rarray(in b, inout at, false);
+        for q in 0..np {
+            let pcode = r16(in b, inout at);
+            let index = r32(in b, inout at);
+            let leader = r32(in b, inout at);
+            let _ = r32(in b, inout at);
+            for k in 0..3 {
+                let n = rarray(in b, inout at, false);
+                let _ = take(in b, inout at, wrapping_mul(n, 4));
+            }
+            if pcode == 0 && leader >= 0 {
+                out.push(index);
+                out.push(leader);
+            }
+        }
+        let _ = r32(in b, inout at);
+        if bytes_eq_at(in b, ns, nl, in topic) {
+            if code != 0 {
+                out.truncate(keep);
+                code_err(code);
+            }
+            keep = out.len();
+        } else {
+            out.truncate(keep);
+        }
+    }
+}
+
+// The error code of a failed read, 65536 when malformed.
+fn status_of(e: KwErr) -> i64 {
+    match e {
+        KwErr::Code {
+            code,
+            at,
+            len
+        } => code,
+        _ => 65536,
+    }
+}
+
+// The status words: 0 when the body was read whole, 2 and the error code
+// for a broker error, 3 when malformed.
+fn set_status(inout out: ChunkSeq[i64], code: i64) {
+    if code == 65536 {
+        let _ = out.try_set(0, 3);
+    } else if code != 0 {
+        let _ = out.try_set(0, 2);
+        let _ = out.try_set(1, code);
+    }
+}
+
+pub fn resp_metadata(in b: Slice[u8], in topic: Slice[u8]) -> ChunkSeq[i64] {
+    let mut out = ChunkSeq::with_capacity[i64](16);
+    out.push(0);
+    out.push(0);
+    out.push(0);
+    let mut keep: u64 = 3;
+    let code = handle Fail[KwErr] in {
+        metadata_in(in b, in topic, inout out, inout keep);
+        0
+    } with {
+        return x => x,
+        raise(e, k) => status_of(e),
+    };
+    if code != 0 {
+        out.truncate(keep);
+    }
+    set_status(inout out, code);
+    out
+}
+
+fn bytes_eq_at(in b: Slice[u8], at: u64, len: u64, in s: Slice[u8]) -> bool {
+    if len != s.len() {
+        return false;
+    }
+    for i in 0..len {
+        if sb(in b, wrapping_add(at, i)) != sb(in s, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// CreateTopics v4: the first topic error, with its message.
+pub fn resp_create_topic(in b: Slice[u8]) eff [Fail[KwErr]] {
+    let mut at: u64 = 0;
+    let _ = r32(in b, inout at);
+    let n = rarray(in b, inout at, false);
+    for i in 0..n {
+        skip_str(in b, inout at, false);
+        let code = r16(in b, inout at);
+        let m = rnstr(in b, inout at, false);
+        if code != 0 {
+            code_msg(
+                code,
+                wrapping_sub(
+                    at,
+                    if m < 0 {
+                        0
+                    } else {
+                        wrapping_u64(m)
+                    }
+                ),
+                m
+            );
+        }
+    }
+}
+
+// DeleteRecords v1.
+pub fn resp_delete_records(in b: Slice[u8]) eff [Fail[KwErr]] {
+    let mut at: u64 = 0;
+    let _ = r32(in b, inout at);
+    let n = rarray(in b, inout at, false);
+    for i in 0..n {
+        skip_str(in b, inout at, false);
+        let np = rarray(in b, inout at, false);
+        for q in 0..np {
+            let _ = r32(in b, inout at);
+            let _ = r64(in b, inout at);
+            check(r16(in b, inout at));
+        }
+    }
+}
+
+// ListOffsets v5: (found, offset) of `partition`, the last one listed.
+pub fn resp_list_offsets(in b: Slice[u8], partition: i64) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    let mut at: u64 = 0;
+    let _ = r32(in b, inout at);
+    let mut found: i64 = 0;
+    let mut offset: i64 = 0;
+    let n = rarray(in b, inout at, false);
+    for i in 0..n {
+        skip_str(in b, inout at, false);
+        let np = rarray(in b, inout at, false);
+        for q in 0..np {
+            let p = r32(in b, inout at);
+            let code = r16(in b, inout at);
+            let _ = r64(in b, inout at);
+            let off = r64(in b, inout at);
+            let _ = r32(in b, inout at);
+            check(code);
+            if p == partition {
+                found = 1;
+                offset = off;
+            }
+        }
+    }
+    let mut out = ChunkSeq::with_capacity[i64](2);
+    out.push(found);
+    out.push(offset);
+    out
+}
+
+// Fetch v11 entries: per partition `partition`, in order, the words 1,
+// high watermark, last stable offset, log start, records start, records
+// length, aborted count, then (producer id, first offset) per aborted
+// transaction; then the end: 0 when the body was read whole, 2 and
+// the error code for a broker error, 3 when malformed.
+fn fetch_in(in b: Slice[u8], partition: i64, inout out: ChunkSeq[i64], inout keep: u64) eff [
+    Fail[KwErr]
+] {
+    let mut at: u64 = 0;
+    let _ = r32(in b, inout at);
+    check(r16(in b, inout at));
+    let _ = r32(in b, inout at);
+    let nt = rarray(in b, inout at, false);
+    for t in 0..nt {
+        skip_str(in b, inout at, false);
+        let np = rarray(in b, inout at, false);
+        for q in 0..np {
+            let p = r32(in b, inout at);
+            let code = r16(in b, inout at);
+            let hw = r64(in b, inout at);
+            let ls = r64(in b, inout at);
+            let log_start = r64(in b, inout at);
+            let na = rarray(in b, inout at, false);
+            let mark = out.len();
+            out.push(1);
+            out.push(hw);
+            out.push(ls);
+            out.push(log_start);
+            out.push(0);
+            out.push(0);
+            out.push(wrapping_i64(na));
+            for k in 0..na {
+                out.push(r64(in b, inout at));
+                out.push(r64(in b, inout at));
+            }
+            let _ = r32(in b, inout at);
+            let n = rlen(in b, inout at, false);
+            let mut rs: u64 = 0;
+            let mut rl: u64 = 0;
+            if n >= 0 {
+                rl = wrapping_u64(n);
+                rs = take(in b, inout at, rl);
+            }
+            if code != 0 || p != partition {
+                out.truncate(mark);
+            } else {
+                keep = out.len();
+                let _ = out.try_set(wrapping_add(mark, 4), wrapping_i64(rs));
+                let _ = out.try_set(wrapping_add(mark, 5), wrapping_i64(rl));
+            }
+            check(code);
+        }
+    }
+}
+
+pub fn resp_fetch(in b: Slice[u8], partition: i64) -> ChunkSeq[i64] {
+    let mut out = ChunkSeq::new[i64]();
+    let mut keep: u64 = 0;
+    let code = handle Fail[KwErr] in {
+        fetch_in(in b, partition, inout out, inout keep);
+        0
+    } with {
+        return x => x,
+        raise(e, k) => status_of(e),
+    };
+    // An entry stands once its records are read.
+    out.truncate(keep);
+    if code == 0 {
+        out.push(0);
+    } else if code == 65536 {
+        out.push(3);
+    } else {
+        out.push(2);
+        out.push(code);
+    }
+    out
+}
+
+// Produce v8 for `partition`, the last one listed: found, error code,
+// base offset, message start and length (-1 for none).
+pub fn resp_produce(in b: Slice[u8], partition: i64) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    let mut at: u64 = 0;
+    let mut out = ChunkSeq::with_capacity[i64](5);
+    for i in 0..5 {
+        out.push(0);
+    }
+    let nt = rarray(in b, inout at, false);
+    for t in 0..nt {
+        skip_str(in b, inout at, false);
+        let np = rarray(in b, inout at, false);
+        for q in 0..np {
+            let p = r32(in b, inout at);
+            let code = r16(in b, inout at);
+            let base = r64(in b, inout at);
+            let _ = r64(in b, inout at);
+            let _ = r64(in b, inout at);
+            let ne = rarray(in b, inout at, false);
+            for k in 0..ne {
+                let _ = r32(in b, inout at);
+                let _ = rnstr(in b, inout at, false);
+            }
+            let m = rnstr(in b, inout at, false);
+            if p == partition {
+                let _ = out.try_set(0, 1);
+                let _ = out.try_set(1, code);
+                let _ = out.try_set(2, base);
+                let _ = out
+                    .try_set(
+                        3,
+                        if m < 0 {
+                            0
+                        } else {
+                            wrapping_i64(wrapping_sub(at, wrapping_u64(m)))
+                        }
+                    );
+                let _ = out.try_set(4, m);
+            }
+        }
+    }
+    let _ = r32(in b, inout at);
+    out
+}
+
+// FindCoordinator v2: node id, host start and length, port.
+pub fn resp_find_coordinator(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    let mut at: u64 = 0;
+    let _ = r32(in b, inout at);
+    let code = r16(in b, inout at);
+    let m = rnstr(in b, inout at, false);
+    let ms = if m < 0 {
+        0
+    } else {
+        wrapping_sub(at, wrapping_u64(m))
+    };
+    let mut out = ChunkSeq::with_capacity[i64](4);
+    out.push(r32(in b, inout at));
+    push_str(in b, inout at, false, inout out);
+    out.push(r32(in b, inout at));
+    if code != 0 {
+        code_msg(code, ms, m);
+    }
+    out
+}
+
+// OffsetFetch v7 (flexible): (partition, offset, metadata start, metadata
+// length) per committed offset (offset >= 0; null metadata is empty).
+pub fn resp_offset_fetch(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    let mut at: u64 = 0;
+    let _ = r32(in b, inout at);
+    let mut out = ChunkSeq::new[i64]();
+    let mut first_err: i64 = 0;
+    let nt = rarray(in b, inout at, true);
+    for t in 0..nt {
+        skip_str(in b, inout at, true);
+        let np = rarray(in b, inout at, true);
+        for q in 0..np {
+            let p = r32(in b, inout at);
+            let offset = r64(in b, inout at);
+            let _ = r32(in b, inout at);
+            let m = rnstr(in b, inout at, true);
+            let ms = if m < 0 {
+                0
+            } else {
+                wrapping_sub(at, wrapping_u64(m))
+            };
+            let code = r16(in b, inout at);
+            rtags(in b, inout at, true);
+            if code != 0 && first_err == 0 {
+                first_err = code;
+            }
+            if offset >= 0 {
+                out.push(p);
+                out.push(offset);
+                if m < 0 {
+                    out.push(0);
+                    out.push(0);
+                } else {
+                    out.push(wrapping_i64(ms));
+                    out.push(m);
+                }
+            }
+        }
+        rtags(in b, inout at, true);
+    }
+    check(r16(in b, inout at));
+    check(first_err);
+    out
+}
+
+// JoinGroup v5: error code, generation, then the protocol, leader and
+// member id spans, the member count and (id, metadata) spans per member.
+pub fn resp_join_group(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    let mut at: u64 = 0;
+    let _ = r32(in b, inout at);
+    let mut out = ChunkSeq::new[i64]();
+    out.push(r16(in b, inout at));
+    out.push(r32(in b, inout at));
+    push_str(in b, inout at, false, inout out);
+    push_str(in b, inout at, false, inout out);
+    push_str(in b, inout at, false, inout out);
+    let n = rarray(in b, inout at, false);
+    out.push(wrapping_i64(n));
+    for i in 0..n {
+        push_str(in b, inout at, false, inout out);
+        let _ = rnstr(in b, inout at, false);
+        push_bytes(in b, inout at, false, inout out);
+    }
+    out
+}
+
+// SyncGroup v3: the assignment's (start, length).
+pub fn resp_sync_group(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    let mut at: u64 = 0;
+    let _ = r32(in b, inout at);
+    check(r16(in b, inout at));
+    let mut out = ChunkSeq::with_capacity[i64](2);
+    push_bytes(in b, inout at, false, inout out);
+    out
+}
+
+// InitProducerId v1: producer id and epoch.
+pub fn resp_init_producer(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    let mut at: u64 = 0;
+    let _ = r32(in b, inout at);
+    let code = r16(in b, inout at);
+    let id = r64(in b, inout at);
+    let epoch = r16(in b, inout at);
+    check(code);
+    let mut out = ChunkSeq::with_capacity[i64](2);
+    out.push(id);
+    out.push(epoch);
+    out
+}
+
+// AddPartitionsToTxn v2.
+pub fn resp_add_partitions(in b: Slice[u8]) eff [Fail[KwErr]] {
+    let mut at: u64 = 0;
+    let _ = r32(in b, inout at);
+    let nt = rarray(in b, inout at, false);
+    for t in 0..nt {
+        skip_str(in b, inout at, false);
+        let np = rarray(in b, inout at, false);
+        for q in 0..np {
+            let _ = r32(in b, inout at);
+            check(r16(in b, inout at));
+        }
+    }
+}
+
+// The per-partition errors of an offset commit (`read_offset_errors`).
+pub fn resp_offset_errors(in b: Slice[u8], flex: bool) eff [Fail[KwErr]] {
+    let mut at: u64 = 0;
+    let _ = r32(in b, inout at);
+    let nt = rarray(in b, inout at, flex);
+    for t in 0..nt {
+        skip_str(in b, inout at, flex);
+        let np = rarray(in b, inout at, flex);
+        for q in 0..np {
+            let _ = r32(in b, inout at);
+            check(r16(in b, inout at));
+            rtags(in b, inout at, flex);
+        }
+        rtags(in b, inout at, flex);
+    }
+    rtags(in b, inout at, flex);
+}
+
+// ---------------------------------------------------------------------
+// Consumer protocol (src/kafka_group.rs)
+// ---------------------------------------------------------------------
+
+// Subscription v0 of the bindings: binding i is the topic `data[..]` of
+// `su(in lens, i)` bytes and partition `si(in parts, i)`. The topics are the distinct
+// names in sorted order; the user data is the distinct (topic, partition)
+// bindings in sorted order (`subscription`'s `BTreeSet`s).
+pub fn subscription(in data: Slice[u8], in lens: Slice[u64], in parts: Slice[i64])
+    -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let n = lens.len();
+    let mut starts = ChunkSeq::with_capacity[u64](n);
+    let mut at: u64 = 0;
+    for l in lens {
+        starts.push(at);
+        at = wrapping_add(at, l);
+    }
+    // Sort the bindings by (topic, partition).
+    let mut order = ChunkSeq::with_capacity[u64](n);
+    for i in 0..n {
+        order.push(i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let a = qu(in order, wrapping_sub(j, 1));
+            let c = qu(in order, j);
+            let lt = if bytes_eq(
+                in data,
+                qu(in starts, c),
+                su(in lens, c),
+                qu(in starts, a),
+                su(in lens, a)
+            ) {
+                si(in parts, c) < si(in parts, a)
+            } else {
+                bytes_lt(
+                    in data,
+                    qu(in starts, c),
+                    su(in lens, c),
+                    qu(in starts, a),
+                    su(in lens, a)
+                )
+            };
+            if !lt {
+                break;
+            }
+            let _ = order.try_set(wrapping_sub(j, 1), c);
+            let _ = order.try_set(j, a);
+            j = wrapping_sub(j, 1);
+        }
+    }
+    let mut user = ChunkSeq::with_capacity[u8](
+        wrapping_add(4, wrapping_add(data.len(), wrapping_mul(6, n)))
+    );
+    let mut bindings: u64 = 0;
+    let mut names: u64 = 0;
+    for k in 0..n {
+        let c = qu(in order, k);
+        if k == 0 {
+            bindings = 1;
+            names = 1;
+        } else {
+            let a = qu(in order, wrapping_sub(k, 1));
+            if !bytes_eq(
+                in data,
+                qu(in starts, a),
+                su(in lens, a),
+                qu(in starts, c),
+                su(in lens, c)
+            ) {
+                names = wrapping_add(names, 1);
+                bindings = wrapping_add(bindings, 1);
+            } else if si(in parts, a) != si(in parts, c) {
+                bindings = wrapping_add(bindings, 1);
+            }
+        }
+    }
+    plen(inout user, false, bindings);
+    for k in 0..n {
+        let c = qu(in order, k);
+        let dup = if k == 0 {
+            false
+        } else {
+            let a = qu(in order, wrapping_sub(k, 1));
+            bytes_eq(in data, qu(in starts, a), su(in lens, a), qu(in starts, c), su(in lens, c))
+                && si(in parts, a) == si(in parts, c)
+        };
+        if !dup {
+            pstr(
+                inout user,
+                false,
+                in data[qu(in starts, c)..wrapping_add(qu(in starts, c), su(in lens, c))]
+            );
+            p32(inout user, si(in parts, c));
+        }
+    }
+    let mut o = ChunkSeq::with_capacity[u8](wrapping_add(10, wrapping_add(data.len(), user.len())));
+    p16(inout o, 0);
+    plen(inout o, false, names);
+    for k in 0..n {
+        let c = qu(in order, k);
+        let dup = if k == 0 {
+            false
+        } else {
+            let a = qu(in order, wrapping_sub(k, 1));
+            bytes_eq(in data, qu(in starts, a), su(in lens, a), qu(in starts, c), su(in lens, c))
+        };
+        if !dup {
+            pstr(
+                inout o,
+                false,
+                in data[qu(in starts, c)..wrapping_add(qu(in starts, c), su(in lens, c))]
+            );
+        }
+    }
+    pbytes(inout o, false, in user.as_slice());
+    o
+}
+
+// Assignment v0: topic i is `data[..]` of `su(in lens, i)` bytes with `su(in counts, i)`
+// partitions, taken in order from `parts` (the caller's sorted map).
+pub fn assignment(
+    in data: Slice[u8],
+    in lens: Slice[u64],
+    in counts: Slice[u64],
+    in parts: Slice[i64]
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    let n = lens.len();
+    let mut o = ChunkSeq::with_capacity[u8](
+        wrapping_add(
+            wrapping_add(10, data.len()),
+            wrapping_add(wrapping_mul(6, n), wrapping_mul(4, parts.len()))
+        )
+    );
+    p16(inout o, 0);
+    plen(inout o, false, n);
+    let mut at: u64 = 0;
+    let mut q: u64 = 0;
+    for i in 0..n {
+        let l = su(in lens, i);
+        pstr(inout o, false, in data[at..wrapping_add(at, l)]);
+        at = wrapping_add(at, l);
+        let c = su(in counts, i);
+        plen(inout o, false, c);
+        for k in 0..c {
+            p32(inout o, si(in parts, q));
+            q = wrapping_add(q, 1);
+        }
+    }
+    pbytes(inout o, false, in "".as_bytes());
+    o
+}
+
+// An assignment's (topic start, topic length, partition) per partition;
+// empty bytes are no assignment.
+pub fn parse_assignment(in b: Slice[u8]) -> ChunkSeq[i64] eff [Fail[KwErr]] {
+    let mut out = ChunkSeq::new[i64]();
+    if b.len() == 0 {
+        return out;
+    }
+    let mut at: u64 = 0;
+    let _ = r16(in b, inout at);
+    let nt = rarray(in b, inout at, false);
+    for t in 0..nt {
+        let s = rstr(in b, inout at, false);
+        let l = wrapping_sub(at, s);
+        let np = rarray(in b, inout at, false);
+        for q in 0..np {
+            let p = r32(in b, inout at);
+            out.push(wrapping_i64(s));
+            out.push(wrapping_i64(l));
+            out.push(p);
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------
+// Record batch framing (`encode_batch`, `decode_batches`)
+// ---------------------------------------------------------------------
+
+// A v2 batch around an already compressed `payload`: base offset 0, the
+// partition leader epoch -1, magic 2 and a zero CRC-32C the caller fills
+// in over `[21..]`.
+pub fn batch_frame(
+    in payload: Slice[u8],
+    attributes: i64,
+    count: i64,
+    base_ts: i64,
+    max_ts: i64,
+    pid: i64,
+    epoch: i64,
+    sequence: i64
+) -> ChunkSeq[u8] eff [Fail[KwErr]] {
+    // batchLength counts from partitionLeaderEpoch to the end.
+    let length = wrapping_add(49, payload.len());
+    if length > I32_MAX {
+        overflow();
+    }
+    let mut o = ChunkSeq::with_capacity[u8](wrapping_add(12, length));
+    p64(inout o, 0);
+    p32(inout o, wrapping_i64(length));
+    p32(inout o, -1);
+    p8(inout o, 2);
+    p32(inout o, 0);
+    p16(inout o, attributes);
+    p32(inout o, wrapping_sub(count, 1));
+    p64(inout o, base_ts);
+    p64(inout o, max_ts);
+    p64(inout o, pid);
+    p16(inout o, epoch);
+    p32(inout o, sequence);
+    p32(inout o, count);
+    o.extend(in payload);
+    o
+}
+
+// The batch at `at` of concatenated v2 batches (`decode_batches`' header
+// reads): the words kind, then for kind 1 (a batch) base offset, body
+// start, body end, stored CRC, attributes, last offset delta, base
+// timestamp, producer id, record count and a failure to raise after the
+// CRC check (0 none, 1 malformed, 2 batch header). Kind 0 is the end (no
+// whole batch left), 2 a negative batch length, 3 malformed before the
+// CRC, 4 a legacy magic.
+pub fn batch_head(in b: Slice[u8], at0: u64) -> ChunkSeq[i64] {
+    let mut out = ChunkSeq::with_capacity[i64](12);
+    let rest = wrapping_sub(b.len(), at0);
+    if at0 > b.len() || rest < 12 {
+        out.push(0);
+        return out;
+    }
+    let base_offset = match b.try_read_u64_be(at0) {
+        Option::Some(v) => wrapping_i64(v),
+        Option::None => 0,
+    };
+    let length = match b.try_read_u32_be(wrapping_add(at0, 8)) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    };
+    if length >= 2147483648 {
+        out.push(2);
+        return out;
+    }
+    let start = wrapping_add(at0, 12);
+    if length > wrapping_sub(rest, 12) {
+        out.push(0);
+        return out;
+    }
+    let end = wrapping_add(start, length);
+    let body = b[start..end];
+    let mut at: u64 = 0;
+    let res = handle Fail[KwErr] in {
+        let _ = r32(in body, inout at);
+        let magic = r8(in body, inout at);
+        if magic != 2 {
+            4
+        } else {
+            0
+        }
+    } with {
+        return x => x,
+        raise(e, k) => 3,
+    };
+    if res != 0 {
+        out.push(res);
+        return out;
+    }
+    let crc = match body.try_read_u32_be(5) {
+        Option::Some(v) => wrapping_i64(widen_u64(v)),
+        Option::None => {
+            out.push(3);
+            return out;
+        },
+    };
+    at = 9;
+    out.push(1);
+    out.push(base_offset);
+    out.push(wrapping_i64(start));
+    out.push(wrapping_i64(end));
+    out.push(crc);
+    for i in 0..6 {
+        out.push(0);
+    }
+    let post = handle Fail[KwErr] in {
+        let attributes = r16(in body, inout at);
+        let last_delta = r32(in body, inout at);
+        let base_ts = r64(in body, inout at);
+        let _ = r64(in body, inout at);
+        let producer_id = r64(in body, inout at);
+        let _ = r16(in body, inout at);
+        let _ = r32(in body, inout at);
+        let count = r32(in body, inout at);
+        let _ = out.try_set(5, attributes);
+        let _ = out.try_set(6, last_delta);
+        let _ = out.try_set(7, base_ts);
+        let _ = out.try_set(8, producer_id);
+        let _ = out.try_set(9, count);
+        if count < 0 || last_delta < 0 {
+            2
+        } else {
+            0
+        }
+    } with {
+        return x => x,
+        raise(e, k) => 1,
+    };
+    out.push(post);
+    out
+}
