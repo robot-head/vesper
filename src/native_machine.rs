@@ -116,6 +116,7 @@ enum IntegerOp {
     FloatToBits = 94,
     FloatSelect = 95,
     FloatReturn = 96,
+    CallFloat = 97,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -207,7 +208,7 @@ fn float_condition(cond: FloatCC) -> u64 {
     }
 }
 
-fn integer_argument_cells(params: &[AbiParam], allow_float: bool) -> Option<usize> {
+fn argument_cells(params: &[AbiParam]) -> Option<(usize, usize)> {
     let mut cells = 0;
     let mut floats = 0;
     for param in params {
@@ -219,8 +220,7 @@ fn integer_argument_cells(params: &[AbiParam], allow_float: bool) -> Option<usiz
             // SysV passes a wide argument on the stack if both registers
             // are unavailable. That layout requires aligned stack slots.
             cells += WIDE_INTEGER_CELLS;
-        } else if allow_float
-            && float_width(param.value_type).is_some()
+        } else if float_width(param.value_type).is_some()
             && *param == AbiParam::new(param.value_type)
         {
             floats += 1;
@@ -228,7 +228,7 @@ fn integer_argument_cells(params: &[AbiParam], allow_float: bool) -> Option<usiz
             return None;
         }
     }
-    (cells <= MAX_GP_ARGUMENTS && floats <= XMM_REGISTER_ARGUMENTS).then_some(cells)
+    (cells <= MAX_GP_ARGUMENTS && floats <= XMM_REGISTER_ARGUMENTS).then_some((cells, floats))
 }
 
 fn integer_return_cells(returns: &[AbiParam]) -> Option<usize> {
@@ -240,6 +240,10 @@ fn integer_return_cells(returns: &[AbiParam]) -> Option<usize> {
             .iter()
             .all(|param| *param == AbiParam::new(types::I64)))
     .then_some(returns.len())
+}
+
+fn returns_float(returns: &[AbiParam]) -> bool {
+    matches!(returns, [param] if float_width(param.value_type).is_some() && *param == AbiParam::new(param.value_type))
 }
 
 fn compare_op(ty: Type, immediate: bool) -> Option<IntegerOp> {
@@ -508,8 +512,13 @@ impl IntegerBlocks<'_> {
         {
             return None;
         }
-        let argument_cells = integer_argument_cells(&signature.params, false)?;
-        let return_cells = integer_return_cells(&signature.returns)?;
+        let (gp_arguments, float_arguments) = argument_cells(&signature.params)?;
+        let float_return = returns_float(&signature.returns);
+        let return_cells = if float_return {
+            1
+        } else {
+            integer_return_cells(&signature.returns)?
+        };
         let results = dfg.inst_results(inst);
         if signature.returns.len() != results.len()
             || signature
@@ -522,23 +531,42 @@ impl IntegerBlocks<'_> {
         }
         let op = match return_cells {
             0 => IntegerOp::CallVoid,
+            1 if float_return => IntegerOp::CallFloat,
             1 => IntegerOp::Call,
             GP_RESULTS => IntegerOp::CallPair,
             _ => return None,
         };
+        let mut xmm = [0; XMM_REGISTER_ARGUMENTS];
+        let mut xmm_count = 0;
         for (&arg, param) in args.iter().zip(&signature.params) {
             let arg = dfg.resolve_aliases(arg);
             let ty = dfg.value_type(arg);
             if ty != param.value_type {
                 return None;
             }
-            self.append(IntegerOp::CallArgument, [values.low[arg]?, 0, 0]);
-            if ty == types::I128 {
-                self.append(IntegerOp::CallArgument, [values.high[arg]?, 0, 0]);
+            let low = values.low[arg]?;
+            if float_width(ty).is_some() {
+                xmm[xmm_count] = low;
+                xmm_count += 1;
+            } else {
+                self.append(IntegerOp::CallArgument, [low, 0, 0]);
+                if ty == types::I128 {
+                    self.append(IntegerOp::CallArgument, [values.high[arg]?, 0, 0]);
+                }
             }
         }
+        for &arg in &xmm[..float_arguments] {
+            self.append(IntegerOp::CallArgument, [arg, 0, 0]);
+        }
         self.relocations = true;
-        let id = self.append(op, [u64::from(name.index), argument_cells as u64, 0]);
+        let id = self.append(
+            op,
+            [
+                u64::from(name.index),
+                (gp_arguments + float_arguments) as u64,
+                float_arguments as u64,
+            ],
+        );
         if let Some(&value) = results.first() {
             values.low[value] = Some(id);
         }
@@ -1585,9 +1613,10 @@ impl IntegerBlocks<'_> {
 /// right operand a second result ID as well.
 /// Leading StackSlot records declare frame slots by size and alignment.
 /// Stack addresses and accesses use a slot ordinal and an offset within the slot.
-/// Each call is preceded by its CallArgument records, in argument order.
-/// The call's left operand is the function ID and its right operand is the
-/// argument count. Argument records leave unreferenced slots.
+/// Each call is preceded by its CallArgument records, integer cells first,
+/// then XMM cells. The call's left operand is the function ID, its right
+/// operand is the total cell count, and its extra operand is the XMM count.
+/// Argument records leave unreferenced slots. CallFloat returns through XMM0.
 /// CallPair writes its low result and the immediately following CallHigh's
 /// slot holds its high result.
 /// Checked arithmetic writes its integer result, followed by OverflowFlag
@@ -1624,8 +1653,8 @@ fn integer_program(
     if signature.call_conv != CallConv::SystemV || !function.dynamic_stack_slots.is_empty() {
         return None;
     }
-    let arity = integer_argument_cells(&signature.params, true)?;
-    let float_return = matches!(signature.returns.as_slice(), [param] if float_width(param.value_type).is_some() && *param == AbiParam::new(param.value_type));
+    let (arity, _) = argument_cells(&signature.params)?;
+    let float_return = returns_float(&signature.returns);
     let return_cells = if float_return {
         1
     } else {

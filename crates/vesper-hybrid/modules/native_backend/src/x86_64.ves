@@ -17,6 +17,7 @@ const R15: u8 = 15;
 
 pub const ARGUMENTS: u64 = 6;
 pub const REGISTER_CODES: u64 = 16;
+pub const ALL_REGISTER_CODES: u64 = REGISTER_CODES + REGISTER_CODES;
 pub const XMM0: u8 = 16;
 pub const XMM_LEFT_SCRATCH: u8 = 30;
 pub const XMM_RIGHT_SCRATCH: u8 = 31;

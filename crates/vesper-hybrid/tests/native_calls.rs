@@ -97,6 +97,36 @@ fn call_records_require_relocations_and_keep_discarded_calls() {
         assert!(binding::x86_64_integer_block(&request).is_empty());
         assert!(!binding::x86_64_relocatable_block(&request).is_empty());
     }
+
+    const FLOAT_ARGUMENT: u64 = 79;
+    const ARGUMENT: u64 = 39;
+    const CALL_FLOAT: u64 = 97;
+    const FLOAT_RETURN: u64 = 96;
+    const FLOAT_BITS: u64 = (size_of::<f64>() * u8::BITS as usize) as u64;
+    const CALL_XMM_COUNT: usize = 13;
+    let mut mixed = [
+        0,
+        2,
+        FLOAT_ARGUMENT,
+        0,
+        0,
+        FLOAT_BITS,
+        ARGUMENT,
+        0,
+        0,
+        0,
+        CALL_FLOAT,
+        1,
+        1,
+        1,
+        FLOAT_RETURN,
+        0,
+        0,
+        0,
+    ];
+    assert!(!binding::x86_64_relocatable_block(&mixed).is_empty());
+    mixed[CALL_XMM_COUNT] = 0;
+    assert!(binding::x86_64_relocatable_block(&mixed).is_empty());
 }
 
 fn jit_module() -> JITModule {
@@ -435,6 +465,112 @@ fn wide_direct_calls_use_consecutive_integer_registers() {
         assert_eq!(unsafe { candidate(a, lo, hi, b) }, unsafe {
             reference(a, lo, hi, b)
         });
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
+fn mixed_float_calls_preserve_live_xmm_values_and_stack_arguments() {
+    type Single = unsafe extern "C" fn(u64, f32, f32, u64, f32, u64, u64, u64, u64, u64) -> f32;
+    type Double = unsafe extern "C" fn(u64, f64, f64, u64, f64, u64, u64, u64, u64, u64) -> f64;
+    let mut module = jit_module();
+    let integer = types::I64;
+    for fp in [types::F32, types::F64] {
+        let mut signature = module.make_signature();
+        signature.params.extend(
+            [
+                integer, fp, fp, integer, fp, integer, integer, integer, integer, integer,
+            ]
+            .map(AbiParam::new),
+        );
+        signature.returns.push(AbiParam::new(fp));
+        let callee = module.declare_anonymous_function(&signature).unwrap();
+        let mut context = module.make_context();
+        let mut builder_context = FunctionBuilderContext::new();
+        context.func.signature = signature.clone();
+        {
+            let mut b = FunctionBuilder::new(&mut context.func, &mut builder_context);
+            let entry = b.create_block();
+            b.append_block_params_for_function_params(entry);
+            b.switch_to_block(entry);
+            let [first, left, middle, _, right, _, _, _, _, stack] = *b.block_params(entry) else {
+                unreachable!()
+            };
+            let difference = b.ins().fsub(left, middle);
+            let product = b.ins().fmul(difference, right);
+            let gp_difference = b.ins().isub(first, stack);
+            let float_difference = b.ins().fcvt_from_sint(fp, gp_difference);
+            let result = b.ins().fadd(product, float_difference);
+            b.ins().return_(&[result]);
+            b.seal_all_blocks();
+            b.finalize();
+        }
+        module.define_function(callee, &mut context).unwrap();
+        module.clear_context(&mut context);
+        context.func.signature = signature.clone();
+        let target = module.declare_func_in_func(callee, &mut context.func);
+        {
+            let mut b = FunctionBuilder::new(&mut context.func, &mut builder_context);
+            let entry = b.create_block();
+            b.append_block_params_for_function_params(entry);
+            b.switch_to_block(entry);
+            let [first, left, middle, gp, right, a, c, d, e, stack] = *b.block_params(entry) else {
+                unreachable!()
+            };
+            // This rotates the first three XMM registers and passes the first
+            // integer argument on the stack. The original XMM0 stays live.
+            let call = b
+                .ins()
+                .call(target, &[stack, middle, right, gp, left, a, c, d, e, first]);
+            let returned = b.inst_results(call)[0];
+            let result = b.ins().fsub(returned, left);
+            b.ins().return_(&[result]);
+            b.seal_all_blocks();
+            b.finalize();
+        }
+        let reference = module.declare_anonymous_function(&signature).unwrap();
+        let candidate = module.declare_anonymous_function(&signature).unwrap();
+        define_callable(&mut module, candidate, callee, &context.func, 1);
+        module.define_function(reference, &mut context).unwrap();
+        module.finalize_definitions().unwrap();
+        let reference = module.get_finalized_function(reference);
+        let candidate = module.get_finalized_function(candidate);
+        for (first, left, middle, right, stack) in [
+            (23, 2.0, 7.0, 3.0, 89),
+            (55, -5.0, -0.0, 8.0, 13),
+            (13, 2.5, 1.0, -11.0, 1),
+        ] {
+            let (reference, candidate) = unsafe {
+                if fp == types::F32 {
+                    let reference = std::mem::transmute::<*const u8, Single>(reference);
+                    let candidate = std::mem::transmute::<*const u8, Single>(candidate);
+                    let run = |entry: Single| {
+                        entry(
+                            first,
+                            left as f32,
+                            middle as f32,
+                            5,
+                            right as f32,
+                            7,
+                            11,
+                            17,
+                            19,
+                            stack,
+                        )
+                        .to_bits()
+                    };
+                    (u64::from(run(reference)), u64::from(run(candidate)))
+                } else {
+                    let reference = std::mem::transmute::<*const u8, Double>(reference);
+                    let candidate = std::mem::transmute::<*const u8, Double>(candidate);
+                    let run = |entry: Double| {
+                        entry(first, left, middle, 5, right, 7, 11, 17, 19, stack).to_bits()
+                    };
+                    (run(reference), run(candidate))
+                }
+            };
+            assert_eq!(candidate, reference, "{fp}");
+        }
     }
     unsafe { module.free_memory() };
 }
