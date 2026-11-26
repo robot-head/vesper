@@ -433,3 +433,20 @@ itself (part 4b-4).
 | `self_host_sugar` `driver_matches_on_the_sugar_test_suites` | the 133 sugar programs of the test suites, with and without tests (266 expansions) | 0 differences, 2 macro-validation gaps |
 | `self_host_sugar` `driver_matches_on_the_fuzzed_corpus` | 500 edited programs, with and without tests | 0 differences |
 | `self_host_sugar` `driver_speed` (release, ignored) | the 133 suite programs ×5 | Vesper 1.38x Rust (single run) |
+
+## Part 4d: imports and definition scopes in the driver
+
+- The driver now takes the caller's imports as
+  `expand_sugar_with_scopes_for_execution` does: each imported
+  declaration is read and bound under its alias, and an alias that
+  renames a definition rewrites the rule's head word. Definition scopes
+  are shared per scope, as Rust shares them per slice. A sugar use inside
+  an imported template resolves in its author's scope: the innermost
+  region that holds its head, outside the holes. Regions record their
+  import, and the recursion rank check compares it. The Vesper entry is
+  `@vesper/sugar` `sugar_expand_scoped_words`.
+
+| Test | Cases | Result |
+|---|---|---|
+| `self_host_sugar` `driver_matches_on_the_import_examples` | the import examples of `crates/vesper-syntax/tests/sugar_expand.rs` and 6 refusals (missing scopes, invalid import, duplicate alias, unknown scope binding, broken and missing declarations) | 0 differences |
+| `self_host_sugar` `driver_matches_on_imported_sugar_test_suites` | the suite and scope programs with their declarations moved into imports: visible by name, under aliases, and behind a shared scope (1,035 programs, 2,070 expansions) | 0 differences, 4 macro-validation gaps |
