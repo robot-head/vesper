@@ -75,4 +75,9 @@ const EDITS: &[(&str, &str)] = &[
         "let target: f32 = if drive == 1 {",
         "let target: f32 = if drive == 3 {",
     ),
+    // world.rs (substeps): contacts bounce only when they separate.
+    (
+        "    let wanted: f32 = if vn_prev < 0.0 {",
+        "    let wanted: f32 = if vn_prev > 0.0 {",
+    ),
 ];

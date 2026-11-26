@@ -1,0 +1,180 @@
+"""Exercise native and PowerShell Stage 2 against deterministic Wasmtime fixtures."""
+
+load("./lib/binary-fixture.axl", "write_bytes")
+load("./lib/process.axl", "check", "root_path")
+load("./lib/task-fixture.axl", "contains", "equal", "fixture_launcher", "fixture_workspace", "invoke_fixture", "write_fixture")
+
+_ARCHIVE = "685466455dd42a14774a86c36c8f2e45cbb9bd6d92a850139315df60a75498a5"
+_MODE = "TEST_STAGE2_MODE"
+_VERSION = "TEST_WASMTIME_VERSION"
+
+def mock_wasmtime(ctx, cwd, tool, argv):
+    variant = ctx.std.env.var("VESPER_FIXTURE_CASE")
+    if variant == "wasmtime-install":
+        if tool == "curl":
+            equal(argv[:3], ["-fsSL", "https://github.com/bytecodealliance/wasmtime/releases/download/v50.0.1/wasmtime-v50.0.1-x86_64-linux.tar.xz", "-o"])
+            ctx.std.fs.write(argv[3], "archive fixture")
+            return 0
+        if tool == "sha256sum":
+            equal(ctx.std.fs.read_to_string(argv[0]), "archive fixture")
+            ctx.std.io.stdout.write((ctx.std.env.var("TEST_ARCHIVE_DIGEST") or _ARCHIVE) + " " + argv[0] + "\n")
+            return 0
+        if tool == "tar":
+            equal(argv[0], "-xJf")
+            equal(argv[2:4], ["--strip-components=1", "-C"])
+            equal(argv[1].rpartition("/")[0], argv[4])
+            ctx.std.fs.write(cwd + "/extracted", "")
+            path = argv[4] + "/wasmtime"
+            ctx.std.fs.copy(ctx.std.env.var("VESPER_FIXTURE_LAUNCHER"), path)
+            ctx.std.fs.set_permissions(path, 0o755)
+            return 0
+    if tool == "bazelisk":
+        equal(argv[-1], "@wasmtime//:wasmtime")
+        equal(ctx.std.fs.exists(cwd + "/.aspect"), True)
+        if argv[0] == "build":
+            ctx.std.io.stdout.write("building\n")
+        else:
+            equal(argv, ["cquery", "--output=files", "@wasmtime//:wasmtime"])
+            ctx.std.io.stdout.write("built wasmtime/bin\n")
+        return 0
+    if variant == "wasmtime-modes":
+        equal(ctx.std.fs.try_append(cwd + "/wasmtime.log", json.encode(argv) + "\n"), True)
+    if argv == ["--version"]:
+        ctx.std.io.stdout.write("wasmtime " + (ctx.std.env.var(_VERSION) or "50.0.1") + "\n")
+        return 0
+    if argv[0] == "compile":
+        equal(argv[2], "-o")
+        output = root_path(cwd, argv[3])
+        equal(ctx.std.fs.exists(output), False)
+        write_bytes(ctx, output, ctx.std.fs.open(root_path(cwd, argv[1])).read())
+        return 0
+    equal(argv[0], "run")
+    preopens = [argv[index + 1] for index, value in enumerate(argv) if value == "--dir"]
+    equal(preopens[0], cwd.rpartition("/")[0] + "::.")
+    filename = argv[-2].removeprefix("/out/")
+    output = preopens[1].removesuffix("::/out") + "/" + filename
+    equal(any([ctx.std.fs.exists(output + suffix) for suffix in ["", ".err.txt", ".stage", ".syms"]]), False)
+    mode = ctx.std.env.var(_MODE)
+    if mode == "diagnostic":
+        ctx.std.fs.write(output + ".err.txt", "compiler diagnostic")
+    elif mode == "empty":
+        ctx.std.fs.write(output + ".stage", "reached lowering")
+        ctx.std.fs.write(output, "")
+    elif mode == "wasmtime-failure":
+        return 43
+    else:
+        data = bytes("changed") if mode == "different" else ctx.std.fs.open(root_path(cwd, argv[-4])).read()
+        write_bytes(ctx, output, data)
+    return 0
+
+def _modes(ctx, workspace, launcher, run):
+    root, cwd = workspace.root, workspace.cwd
+    env = dict(launcher, VESPER_FIXTURE_CASE = "wasmtime-modes", WASMTIME_BIN = "../bin/wt", WASMTIME = "/unused",
+               VESPER_STAGE2_SYMS = "", VESPER_ALLOW_UNPINNED_WASMTIME = "", TEST_WASMTIME_VERSION = "", TEST_STAGE2_MODE = "")
+    write_fixture(ctx, cwd + "/input wasm.wasm", "wasm test bytes")
+    log = cwd + "/wasmtime.log"
+    ctx.std.fs.write(log, "")
+    expected = cwd + "/input wasm.cwasm"
+    ctx.std.fs.write(expected, "stale")
+    contains("../bin/wt", run(["which"], 0, env).stdout)
+    contains("Expected wasmtime 50.0.1", run(["which"], 1, dict(env, TEST_WASMTIME_VERSION = "50.0.10")).stderr)
+    run(["which"], 0, dict(env, WASMTIME_BIN = "", WASMTIME = root + "/bin/wt", TEST_WASMTIME_VERSION = "50.0.10",
+                           VESPER_ALLOW_UNPINNED_WASMTIME = "1"))
+    equal(run(["precompile", "input wasm.wasm"], 0, env).stdout, "input wasm.cwasm\n")
+    equal(ctx.std.fs.read_to_string(expected), "wasm test bytes")
+    output = "output space/stage3.wasm"
+    for suffix in ["", ".err.txt", ".stage", ".syms"]:
+        write_fixture(ctx, cwd + "/" + output + suffix, "stale")
+    run(["run", "--precompiled", "--", expected, "package path", output, "custom entry"], 0, dict(env, VESPER_STAGE2_SYMS = "2"))
+    argv = json.decode(ctx.std.fs.read_to_string(log).splitlines()[-1])
+    equal(argv, ["run", "--allow-precompiled", "--dir", root + "::.", "--dir", cwd + "/output space::/out",
+                 "--env", "VESPER_STAGE2_SYMS=2", "--argv0", "stage2", expected, "package path", "/out/stage3.wasm", "custom entry"])
+    for mode, status, diagnostic in [
+        ("diagnostic", 1, "compiler diagnostic"), ("empty", 1, "reached lowering"), ("wasmtime-failure", 43, "failed"),
+    ]:
+        result = run(["run", expected, "package", output], status, dict(env, TEST_STAGE2_MODE = mode))
+        contains(diagnostic, result.stderr)
+    for mode, flags in [("verify", []), ("fixed-point", ["--precompile"])]:
+        result = run([mode] + flags + ["input wasm.wasm", "verify scratch"], 0, env)
+        contains("stage2 == stage3 (15 bytes)", result.stdout)
+        args = json.decode(ctx.std.fs.read_to_string(log).splitlines()[-1])
+        equal("--allow-precompiled" in args, bool(flags))
+        equal(args[-3:], ["packages/vesper-stage2", "/out/stage3.wasm", "main"])
+        contains("VESPER_STAGE2_SYMS=1", args)
+    contains("fixed-point mismatch", run(["verify", "input wasm.wasm"], 1, dict(env, TEST_STAGE2_MODE = "different")).stderr)
+    for argv in [[], ["run", "--unknown"], ["run", "only one"], ["verify"], ["precompile"]]:
+        run(argv, 2, env)
+
+def _discovery(ctx, workspace, launcher, run):
+    root = workspace.root
+    tools = root + "/restricted"
+    ctx.std.fs.create_dir_all(tools)
+    launcher_bin = launcher["VESPER_FIXTURE_LAUNCHER"]
+    check(ctx, "ln", ["-sf", ctx.std.process.which("git"), tools + "/git"], root)
+    env = dict(launcher, PATH = tools, VESPER_FIXTURE_CASE = "wasmtime-discovery", WASMTIME = "", WASMTIME_BIN = "")
+    contains("Could not find Wasmtime", run(["which"], 1, env).stderr)
+    local = tools + "/wasmtime"
+    check(ctx, "ln", ["-s", launcher_bin, local], root)
+    equal(run(["which"], 0, env).stdout, local + "\n")
+    ctx.std.fs.remove_file(local)
+    built = root + "/built wasmtime/bin"
+    ctx.std.fs.create_dir_all(built.rpartition("/")[0])
+    ctx.std.fs.copy(launcher_bin, built)
+    ctx.std.fs.set_permissions(built, 0o755)
+    check(ctx, "ln", ["-s", launcher_bin, tools + "/bazelisk"], root)
+    result = run(["which"], 0, env)
+    equal(result.stdout, built + "\n")
+    contains("building", result.stderr)
+    ctx.std.fs.remove_file(built)
+    cached = root + "/bazel-bin/external/+wasmtime+wasmtime_test/wasmtime"
+    ctx.std.fs.create_dir_all(cached.rpartition("/")[0])
+    ctx.std.fs.copy(launcher_bin, cached)
+    ctx.std.fs.set_permissions(cached, 0o755)
+    equal(run(["which"], 0, env).stdout, cached + "\n")
+    ctx.std.fs.remove_file(cached)
+    ctx.std.fs.remove_file(tools + "/bazelisk")
+
+def _installer(ctx, workspace, launcher):
+    root, cwd = workspace.root, workspace.cwd
+    stale = root + "/runner temp/wasmtime/wasmtime"
+    write_fixture(ctx, stale, "previous good install")
+    env = dict(launcher, VESPER_FIXTURE_CASE = "wasmtime-install", RUNNER_TEMP = "runner temp",
+               VESPER_ALLOW_UNPINNED_WASMTIME = "", TEST_ARCHIVE_DIGEST = "", TEST_WASMTIME_VERSION = "")
+    argv = ["ci", "install-wasmtime"]
+    invoke_fixture(ctx, argv, cwd, 2, dict(env, RUNNER_TEMP = ""))
+    contains("archive checksum mismatch", invoke_fixture(ctx, argv, cwd, 1, dict(env, TEST_ARCHIVE_DIGEST = "bad")).stderr)
+    equal(ctx.std.fs.exists(root + "/extracted"), False)
+    equal(ctx.std.fs.read_to_string(stale), "previous good install")
+    invoke_fixture(ctx, argv, cwd, 1, dict(env, TEST_WASMTIME_VERSION = "49.0.0"))
+    equal(ctx.std.fs.exists(root + "/extracted"), True)
+    equal(ctx.std.fs.read_to_string(stale), "previous good install")
+    invoke_fixture(ctx, argv, cwd, env = env)
+    invoke_fixture(ctx, ["bootstrap", "stage2", "--", "which"], cwd, env = dict(env, WASMTIME_BIN = stale))
+
+def _test(ctx):
+    workspace = fixture_workspace(ctx, "vesper-wasmtime-test-")
+    launcher = fixture_launcher(ctx, workspace, "", ["wt", "curl", "tar", "sha256sum"])
+
+    def native(options, status, env):
+        return invoke_fixture(ctx, ["bootstrap", "stage2", "--"] + options, workspace.cwd, status, env)
+
+    _modes(ctx, workspace, launcher, native)
+    _discovery(ctx, workspace, launcher, native)
+    _installer(ctx, workspace, launcher)
+    pwsh = ctx.std.process.which("pwsh")
+    if pwsh:
+        script = "/scripts/windows/bootstrap-stage2.ps1"
+        write_fixture(ctx, workspace.root + script, ctx.std.fs.read_to_string(workspace.source + script))
+
+        def windows(options, status, env):
+            return invoke_fixture(ctx, ["-NoProfile", "-File", workspace.root + script] + options, workspace.cwd, status, env, pwsh)
+
+        _modes(ctx, workspace, launcher, windows)
+        _discovery(ctx, workspace, launcher, windows)
+    return 0
+
+test_stage2_wasmtime = task(
+    kind = "stage2-wasmtime", group = ["ci", "tests"],
+    summary = "Check Wasmtime discovery, verification and Stage 2 command parity with PowerShell",
+    implementation = _test,
+)

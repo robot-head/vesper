@@ -1,0 +1,231 @@
+"""Exercise current-source intra-doc definitions over actual framed stdio."""
+
+load("./lib/lsp-fixture.axl", "changed", "content_length", "decode_frames", "document", "error", "file_uri", "frame", "notice", "opened", "position", "request", "result", "session")
+load("./lib/process.axl", "root_path", "scratch_dir")
+
+_SCOPE = "actual current-source intra-doc definition locations; no semantic overlay or proof"
+_DISK = "fn on_disk() -> i64 { 99 } fn main() -> i64 { on_disk() }\n"
+
+def _equal(actual, expected, reason = ""):
+    if actual != expected:
+        fail("%s: expected %r, got %r" % (reason or "Unexpected navigation result", expected, actual))
+
+def _locate(identifier, uri, source, needle, delta = 0):
+    return request(identifier, "textDocument/definition", dict(document(uri), position = position(source, source.index(needle) + delta)))
+
+def _location(uri, source, marker, skip, name):
+    start = source.index(marker) + skip
+    end = start + len(name)
+    _equal(source[start:end], name, "Fixture declaration")
+    return {"uri": uri, "range": {"start": position(source, start), "end": position(source, end)}}
+
+def _fixture(ctx, root, name):
+    return ctx.std.fs.read_to_string(root + "/tests/fixtures/doc_navigation/" + name + ".ves")
+
+def _harness(ctx, root, binary, work):
+    disk = work + "/unchanged-🦀.ves"
+    ctx.std.fs.write(disk, _DISK)
+    return struct(disk = disk, uri = file_uri(disk), root = root, binary = binary, work = work, counts = {"sessions": 0, "requests": 0})
+
+def _session(ctx, h, messages):
+    messages = [request(1, "initialize", {"capabilities": {}})] + messages + [request(9999, "shutdown", {}), notice("exit", {})]
+    replies = session(ctx, h.root, h.work, h.binary, messages)
+    _equal(result(replies, 1)["capabilities"]["definitionProvider"], True, "Definition capability")
+    _equal(result(replies, 9999), None, "Shutdown")
+    _equal(ctx.std.fs.open(h.disk).read(), bytes(_DISK), "Stdio session must preserve on-disk source")
+    h.counts["sessions"] += 1
+    h.counts["requests"] += len([message for message in messages if "id" in message])
+    return replies
+
+def _local(ctx, h, source):
+    uri = h.uri
+    targets = [
+        ("[close]", "\nfn close", 4, "close"),
+        ("[`Tx::commit`]", "fn commit", 3, "commit"),
+        ("[Ask::ask]", "linear effect Ask { fn ask", 23, "ask"),
+        ("[Score]", "trait Score", 6, "Score"),
+        ("[i64::score]", "impl i64 { fn score", 14, "score"),
+        ("[Point::score]", "impl Point { fn score", 16, "score"),
+        ("[Tx]", "linear struct Tx", 14, "Tx"),
+        ("[Ask]", "linear effect Ask", 14, "Ask"),
+        ("[ask]", "\nfn ask", 4, "ask"),
+    ]
+    messages = [opened(uri, 1, source)]
+    expected = {}
+    for identifier, (reference, marker, skip, name) in enumerate(targets, 10):
+        messages.append(_locate(identifier, uri, source, reference))
+        expected[identifier] = _location(uri, source, marker, skip, name)
+
+    # Brackets and backticks belong to the half-open hit range.
+    commit = "[`Tx::commit`]"
+    midpoint = position(source, source.index("😀"))
+    midpoint["character"] += 1
+    messages.extend([
+        _locate(30, uri, source, commit, 1),
+        _locate(31, uri, source, commit, len(commit)),
+        _locate(32, uri, source, "; close", 2),
+        _locate(35, uri, source, commit, len(commit) - 1),
+        request(33, "textDocument/hover", dict(document(uri), position = position(source, source.index("[close]")))),
+        request(34, "textDocument/definition", dict(document(uri), position = midpoint)),
+    ])
+    replies = _session(ctx, h, messages)
+    for identifier, location in expected.items():
+        _equal(result(replies, identifier), location, "Definition reply %d" % identifier)
+    for identifier in [30, 35]:
+        _equal(result(replies, identifier), expected[11])
+    for identifier in [31, 33]:
+        _equal(result(replies, identifier), None)
+    _equal(result(replies, 32), _location(uri, source, "let close", 4, "close"))
+    error(replies, 34, -32602)
+
+def _exclusions(ctx, h):
+    uri = h.uri
+    source = _fixture(ctx, h.root, "exclusions")
+    excluded = ["NoInline", "NoDouble", "NoEscape", "NoImage", "NoUrl", "NoReference", "id", "T-CallProj", "NoFence", "NoTilde", "NoFourSlash", "NoOrdinary", "NoString"]
+    requests = [_locate(i, uri, source, "[" + name, 1) for i, name in enumerate(excluded, 20)]
+    replies = _session(ctx, h, [opened(uri, 1, source), _locate(10, uri, source, "[present]")] + requests)
+    _equal(result(replies, 10), _location(uri, source, "fn present", 3, "present"))
+    for i in range(20, 20 + len(excluded)):
+        _equal(result(replies, i), None)
+
+    source = _fixture(ctx, h.root, "collisions")
+    rejected = ["[Channel]", "[missing]", "[Self::commit]", "[@local/type::method]", "[Box[i64]]", "[i64]"]
+    requests = [_locate(i, uri, source, raw) for i, raw in enumerate(rejected, 10)]
+    replies = _session(ctx, h, [opened(uri, 1, source)] + requests + [
+        _locate(30, uri, source, "[Channel::read]"),
+        _locate(31, uri, source, "[current]"),
+    ])
+    for i in range(10, 10 + len(rejected)):
+        _equal(result(replies, i), None)
+    _equal(result(replies, 30), _location(uri, source, "fn read", 3, "read"))
+    _equal(result(replies, 31), _location(uri, source, "fn current", 3, "current"))
+
+def _edits(ctx, h):
+    uri = h.uri
+    original = "//! 😀 [current]\r\nfn current() -> i64 { 42 }\r\nfn main() -> i64 { current() }\r\n"
+    renamed = original.replace("current", "renamed")
+    broken = renamed.replace("[renamed]", "[current]")
+    final = original.replace("current", "final_name")
+    invalid = position(original, original.index("😀"))
+    invalid["character"] += 1
+    replies = _session(ctx, h, [
+        opened(uri, 1, original), _locate(10, uri, original, "[current]"),
+        changed(uri, 2, broken), _locate(11, uri, broken, "[current]"),
+        changed(uri, 3, renamed), _locate(12, uri, renamed, "[renamed]"),
+        changed(uri, 2, original), _locate(13, uri, renamed, "[renamed]"),
+        notice("textDocument/didChange", {
+            "textDocument": {"uri": uri, "version": 4},
+            "contentChanges": [{"range": {"start": invalid, "end": invalid}, "text": "x"}],
+        }),
+        _locate(14, uri, renamed, "[renamed]"),
+        changed(uri, 4, final), _locate(15, uri, final, "[final_name]"),
+        changed(uri, 5, "x" * (128 * 1024 + 1)), _locate(16, uri, final, "[final_name]"),
+        notice("textDocument/didClose", document(uri)), _locate(17, uri, final, "[final_name]"),
+        opened(uri, 1, original), _locate(18, uri, original, "[current]"),
+    ])
+    for ids, location in [
+        ([10, 18], _location(uri, original, "fn current", 3, "current")),
+        ([12, 13, 14], _location(uri, renamed, "fn renamed", 3, "renamed")),
+        ([15, 16], _location(uri, final, "fn final_name", 3, "final_name")),
+    ]:
+        for identifier in ids:
+            _equal(result(replies, identifier), location)
+    _equal(result(replies, 11), None)
+    error(replies, 17, -32602)
+
+def _refusals(ctx, h):
+    uri = h.uri
+    # Link resource refusal must not degrade an ordinary lexical definition.
+    source = "//! " + "[present]; " * 1025 + "\nfn present() -> i64 { 42 } fn main() -> i64 { present() }\n"
+    replies = _session(ctx, h, [opened(uri, 1, source), _locate(10, uri, source, "[present]"), _locate(11, uri, source, "{ present()", 2)])
+    error(replies, 10, -32003, "resource")
+    _equal(result(replies, 11), _location(uri, source, "fn present", 3, "present"))
+
+    macro = "//! [score]\nfn score(in value: ()) -> i64 { 42 }\nmacro make() -> expr { quote { () } }\nfn main() -> i64 { score(make!()) }\n"
+    replies = _session(ctx, h, [
+        opened(uri, 1, macro), _locate(10, uri, macro, "[score]"),
+        request(11, "vesper/macroPreview", {"textDocument": {"uri": uri, "version": 1}}),
+        _locate(12, uri, macro, "[score]"),
+    ])
+    error(replies, 10, -32003, "parse")
+    _equal(result(replies, 11)["status"], "expanded_checked")
+    error(replies, 12, -32003, "parse")
+    for source, kind in [("//! [main]\nfn main() -> bool { 42 }\n", "semantic"), ("//! [main]\nfn broken(\n", "parse")]:
+        replies = _session(ctx, h, [opened(uri, 1, source), _locate(10, uri, source, "[main]")])
+        error(replies, 10, -32003, kind)
+
+def _file(ctx, path):
+    return ctx.std.fs.exists(path) and ctx.std.fs.metadata(path).is_file
+
+def _check(ctx: TaskContext) -> int:
+    values = ctx.args.tool_args
+    if len(values) == 2 and values[0] == "--binary":
+        binary = values[1]
+    elif len(values) == 1 and values[0].startswith("--binary="):
+        binary = values[0].removeprefix("--binary=")
+    elif values == ["--help"] or values == ["-h"]:
+        ctx.std.io.stdout.write("Pass -- --binary <vesper>.\n")
+        return 0
+    else:
+        ctx.std.process.exit(2, "Expected --binary <vesper>")
+    root = ctx.std.env.aspect_root_dir()
+    binary = root_path(root, binary)
+    if not _file(ctx, binary):
+        binary += ".exe"
+    if not _file(ctx, binary):
+        fail("Compiler not found: " + binary)
+    h = _harness(ctx, root, binary, scratch_dir(ctx, "vesper-doc-navigation-"))
+    local = _fixture(ctx, root, "local")
+    for source in [local, local.replace("\n", "\r\n")]:
+        _local(ctx, h, source)
+    _exclusions(ctx, h)
+    _edits(ctx, h)
+    _refusals(ctx, h)
+    ctx.std.io.stdout.write(json.encode({
+        "status": "passed",
+        "stdio_sessions": h.counts["sessions"],
+        "jsonrpc_requests": h.counts["requests"],
+        "scope": _SCOPE,
+    }) + "\n")
+    return 0
+
+check_doc_navigation = task(
+    kind = "check-doc-navigation",
+    group = ["acceptance"],
+    summary = "Check actual document definition locations over framed stdio",
+    implementation = _check,
+    args = {"tool_args": args.trailing_var_args(description = "Pass -- --binary <vesper>.")},
+)
+
+def _test(ctx: TaskContext) -> int:
+    _equal(file_uri("/a b/é🦀.ves"), "file:///a%20b/%C3%A9%F0%9F%A6%80.ves")
+    source = "é😀x\r\n🦀y"
+    _equal(position(source, source.index("x")), {"line": 0, "character": 3})
+    _equal(position(source, source.index("y")), {"line": 1, "character": 2})
+    first = request(1, "test", {"text": "é🦀"})
+    last = notice("notice", {})
+    _equal(decode_frames(frame(first) + frame(last)), [first, last])
+    for header, size in [
+        ("content-length: 13", 13),
+        ("Extra: value\r\nCONTENT-LENGTH: 86 \t", 86),
+        ("Extra: value", 0),
+        ("Content-Length: 2\r\nContent-Length: 3", 0),
+        ("Content-Length: 2\r\nno separator", 0),
+        ("Content-Length: -1", 0),
+        ("Content-Length: 0", 0),
+        ("Content-Length: 2097152", 2097152),
+        ("Content-Length: 2097153", 0),
+    ]:
+        _equal(content_length(header), size, "Content-Length parsing")
+    replies = [{"jsonrpc": "2.0", "id": 1, "result": None}, {"jsonrpc": "2.0", "id": 2, "error": {"code": -32003, "data": {"kind": "parse"}}}]
+    _equal(result(replies, 1), None)
+    _equal(error(replies, 2, -32003, "parse")["code"], -32003)
+    ctx.std.io.stdout.write("Passed UTF-16 positions, URIs, framing and response cases\n")
+    return 0
+
+test_doc_navigation = task(
+    kind = "doc-navigation",
+    group = ["ci", "tests"],
+    summary = "Test document navigation protocol fixtures and UTF-16 positions",
+    implementation = _test,
+)

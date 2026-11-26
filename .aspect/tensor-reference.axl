@@ -1,0 +1,210 @@
+"""Regenerate independent Tensor quantization, dot-product and GPT-2 vectors."""
+
+load("./lib/binary-fixture.axl", "le", "read_le", "write_bytes")
+load("./lib/gpt2-reference.axl", "gpt2_fixtures")
+load("./lib/ieee-reference.axl", "F32", "bit_length", "dyadic", "hex_bits")
+load("./lib/pretty-json.axl", "pretty_json")
+load("./lib/process.axl", "root_path", "scratch_dir")
+load("./lib/tensor-reference.axl", "MASK32", "ONE", "SIGN32", "fadd", "fdiv", "fmul", "fp8_encode", "fsub", "half", "integers",
+     "max_component", "mx_exponent", "packed", "q4_0", "q4k_min_scale", "q4k_nibbles", "q8_0", "q8_k", "scale_power", "signed_byte", "units")
+
+_PATH = "/crates/vesper-tensor/fixtures/reference"
+_ROWS = 96
+_COLS = 1536
+_USAGE = "aspect crate tensor make-reference -- [DOWN11_F32 DOWN11_Q4K] [--output DIRECTORY]"
+
+def _require(value, message):
+    if not value:
+        fail(message)
+
+def _encode_blocks(values, width, quantize):
+    result = bytes([])
+    for index in range(0, len(values), width):
+        result += quantize(values[index:index + width])
+    return result
+
+def _dot_k(row, activation):
+    total, lanes = 0, [0] * 8
+    for index, y in enumerate(activation):
+        block = row[index * 144:(index + 1) * 144]
+        d = half(read_le(block, 0, 2))
+        dmin = half(read_le(block, 2, 2))
+        scales = block[4:16]
+        quant = q4k_nibbles(block[16:])
+        offset, products = 0, [0] * 8
+        for group in range(8):
+            scale, minimum = q4k_min_scale(scales, group)
+            offset += (y.sums[group * 2] + y.sums[group * 2 + 1]) * minimum
+            for k in range(32):
+                at = group * 32 + k
+                products[k % 8] += scale * y.qs[at] * quant[at]
+        dd = fmul(d, y.d)
+        for lane in range(8):
+            lanes[lane] = fadd(lanes[lane], fmul(dd, units(products[lane])))
+        total = fsub(total, fmul(fmul(dmin, y.d), units(offset)))
+    for lane in lanes:
+        total = fadd(total, lane)
+    return total
+
+def _dot_8(row, activation, q4):
+    stride = 18 if q4 else 34
+    sumf = 0
+    for index in range(len(row) // stride):
+        x, y = row[index * stride:(index + 1) * stride], activation[index * 34:(index + 1) * 34]
+        local = 0
+        for k in range(32):
+            value = (((x[2 + k % 16] >> (4 if k >= 16 else 0)) & 15) - 8) if q4 else signed_byte(x[2 + k])
+            local += value * signed_byte(y[2 + k])
+        dx, dy = half(read_le(x, 0, 2)), half(read_le(y, 0, 2))
+        product = fmul(fmul(units(local), dx), dy) if q4 else fmul(units(local), fmul(dx, dy))
+        sumf = fadd(sumf, product)
+    return sumf
+
+def _float_hex(value):
+    mantissa, power = dyadic(value, F32)
+    sign = "-" if value & SIGN32 else ""
+    n = abs(mantissa)
+    if not n:
+        return sign + "0x0.0p+0"
+    bits = bit_length(n)
+    exponent = power + bits - 1
+    significand = n - (1 << (bits - 1))
+    fraction = hex_bits(significand * (1 << (24 - bits)) * (1 << 29))
+    return "%s0x1.%sp%s%d" % (sign, ("0" * 13 + fraction)[-13:], "+" if exponent >= 0 else "-", abs(exponent))
+
+def _dots(weights, q4k, acts):
+    w8, w4 = _encode_blocks(weights, 32, q8_0), _encode_blocks(weights, 32, q4_0)
+    files = {"q8-weights.q8_0": w8, "q8-weights.q4_0": w4}
+    outputs = {"q4_k_q8_k": [], "q8_0_q8_0": [], "q4_0_q8_0": []}
+    all_k, all_8 = bytes([]), bytes([])
+    for at in range(0, len(acts), _COLS):
+        row = acts[at:at + _COLS]
+        yk = [q8_k(row[index:index + 256]) for index in range(0, len(row), 256)]
+        y8 = _encode_blocks(row, 32, q8_0)
+        for block in yk:
+            all_k += le(block.d, 4) + packed(block.qs, 1) + packed(block.sums, 2)
+        all_8 += y8
+        k_stride, w8_stride, w4_stride = 6 * 144, 48 * 34, 48 * 18
+        outputs["q4_k_q8_k"].append([_dot_k(q4k[i * k_stride:(i + 1) * k_stride], yk) for i in range(_ROWS)])
+        outputs["q8_0_q8_0"].append([_dot_8(w8[i * w8_stride:(i + 1) * w8_stride], y8, False) for i in range(_ROWS)])
+        outputs["q4_0_q8_0"].append([_dot_8(w4[i * w4_stride:(i + 1) * w4_stride], y8, True) for i in range(_ROWS)])
+    files.update({"q8-activations.q8_k": all_k, "q8-activations.q8_0": all_8})
+    for name, rows in outputs.items():
+        files["q8-dots-" + name + ".f32"] = packed([value for row in rows for value in row], 4)
+    expected = {name: [[_float_hex(value) for value in row] for row in rows] for name, rows in outputs.items()}
+    return files, expected
+
+def _fp8(matrix):
+    results, formats = {}, {}
+    for kind, maximum, element in [("e4m3", 448, 8), ("e5m2", 57344, 15)]:
+        limit = units(maximum)
+        channel_scales, channel_codes = [], []
+        for row in range(256):
+            values = matrix[row * 256:(row + 1) * 256]
+            amax = max_component(values) & MASK32
+            scale = fdiv(amax, limit) if amax else ONE
+            channel_scales.append(scale)
+            channel_codes.extend([fp8_encode(fdiv(value, scale), kind) for value in values])
+        results["fp8-channel-" + kind + ".scales"] = packed(channel_scales, 4)
+        results["fp8-channel-" + kind + ".codes"] = bytes(channel_codes)
+        block_scales, block_codes = [], [0] * (256 * 256)
+        for top, left in [(0, 0), (0, 128), (128, 0), (128, 128)]:
+            indices = [(top + row) * 256 + left + col for row in range(128) for col in range(128)]
+            amax = max([matrix[index] & MASK32 for index in indices])
+            scale = fdiv(amax, limit) if amax else ONE
+            block_scales.append(scale)
+            for index in indices:
+                block_codes[index] = fp8_encode(fdiv(matrix[index], scale), kind)
+        results["fp8-block128-" + kind + ".scales"] = packed(block_scales, 4)
+        results["fp8-block128-" + kind + ".codes"] = bytes(block_codes)
+        mx_scales, mx_codes = [], []
+        for start in range(0, len(matrix), 32):
+            values = matrix[start:start + 32]
+            exponent = mx_exponent(max_component(values) & MASK32, element)
+            mx_scales.append(exponent + 127)
+            mx_codes.extend([fp8_encode(scale_power(value, exponent), kind) for value in values])
+        results["mxfp8-" + kind + ".e8m0"] = bytes(mx_scales)
+        results["mxfp8-" + kind + ".codes"] = bytes(mx_codes)
+        formats[kind] = {"max_finite": float(maximum), "emax_elem": element}
+    return results, formats
+
+def _generate(ctx, root, output, inputs):
+    source = root + _PATH
+    work = scratch_dir(ctx, "vesper-tensor-reference-")
+    paths = ["q4k-smollm-blk11-ffn_down.bf16", "q4k-smollm-blk11-ffn_down.q4k", "q8-activations.f32", "fp8-input.f32"]
+    tensors = {name: ctx.std.fs.open(source + "/" + name).read() for name in paths}
+    if inputs:
+        f32, q4k = [ctx.std.fs.open(path).read() for path in inputs]
+        _require(len(f32) == 576 * _COLS * 4, "SmolLM FP32 weights must have shape 576 x 1536")
+        weights = integers(f32[:_ROWS * _COLS * 4], 4)
+        _require(not any([value & 65535 for value in weights]), "SmolLM weights must be BF16-exact")
+        tensors[paths[0]] = packed([value >> 16 for value in weights], 2)
+        tensors[paths[1]] = q4k[:_ROWS * (_COLS // 256) * 144]
+    else:
+        weights = [value * 65536 for value in integers(tensors[paths[0]], 2)]
+    _require(len(weights) == _ROWS * _COLS and len(tensors[paths[1]]) == _ROWS * (_COLS // 256) * 144, "Unexpected source weights")
+    acts = integers(tensors[paths[2]], 4)
+    matrix = integers(tensors[paths[3]], 4)
+    _require(len(acts) == 4 * _COLS and len(matrix) == 256 * 256, "Unexpected independent NumPy input shape")
+    dots, expected = _dots(weights, tensors[paths[1]], acts)
+    fp8, formats = _fp8(matrix)
+    gpt2, ids = gpt2_fixtures(ctx, root, source, work)
+    prior = json.decode(ctx.std.fs.read_to_string(source + "/manifest.json"))
+    manifest = {
+        "peers": prior["peers"],
+        "q4k": {"rows": _ROWS, "cols": _COLS},
+        "q8_dots": {"rows": _ROWS, "cols": _COLS, "activations": 4, "expected_f32_hex": expected},
+        "fp8": {"rows": 256, "cols": 256, "block": 128, "mx_block": 32, "formats": formats},
+        "gpt2": gpt2,
+    }
+    tensors.update(dots)
+    tensors.update(fp8)
+    tensors["gpt2-cases.bin"] = ids
+    ctx.std.fs.create_dir_all(output)
+    for name, data in tensors.items():
+        write_bytes(ctx, output + "/" + name, data)
+    ctx.std.fs.write(output + "/manifest.json", pretty_json(manifest, width = 1))
+    return list(tensors) + ["manifest.json"]
+
+def _run(ctx):
+    root, cwd = ctx.std.env.aspect_root_dir(), ctx.std.env.current_dir()
+    output = root + _PATH
+    inputs = []
+    pending = False
+    for value in ctx.args.tool_args:
+        if pending:
+            output = root_path(cwd, value)
+            pending = False
+        elif value == "--output":
+            pending = True
+        elif value in ["-h", "--help"]:
+            ctx.std.io.stdout.write(_USAGE + "\n")
+            return 0
+        elif not value.startswith("--"):
+            inputs.append(root_path(cwd, value))
+        else:
+            ctx.std.process.exit(2, _USAGE)
+    if pending or len(inputs) not in [0, 2]:
+        ctx.std.process.exit(2, _USAGE)
+    _generate(ctx, root, output, inputs)
+    return 0
+
+def _test(ctx):
+    root = ctx.std.env.aspect_root_dir()
+    output = scratch_dir(ctx, "vesper-tensor-reference-test-")
+    for name in _generate(ctx, root, output, []):
+        actual = ctx.std.fs.open(output + "/" + name).read()
+        expected = ctx.std.fs.open(root + _PATH + "/" + name).read()
+        _require(actual == expected, "Independent tensor reference differs for " + name)
+    ctx.std.io.stdout.write("Reproduced the Tensor quantization, dot-product and GPT-2 reference files byte for byte\n")
+    return 0
+
+make_tensor_reference = task(
+    kind = "make-reference", group = ["crate", "tensor"], summary = "Regenerate independent Tensor arithmetic and tokenizer fixtures",
+    implementation = _run, args = {"tool_args": args.trailing_var_args(description = _USAGE)},
+)
+
+test_tensor_reference = task(
+    kind = "tensor-reference-fixtures", group = ["ci", "tests"], summary = "Compare native Tensor reference generation with the committed vectors",
+    implementation = _test,
+)

@@ -1,7 +1,8 @@
 //! Q4_K, MXFP4, FP8, F16/BF16, Q8_0 and Q4_0 against independent
 //! implementations: the fixtures in fixtures/ were written by gguf-py 0.19.0
-//! (llama.cpp's Python package), safetensors 0.8.0 and ml_dtypes 0.6.0 (see
-//! fixtures/make_interop.py). Nothing here is produced by vesper-tensor.
+//! (llama.cpp's Python package), safetensors 0.8.0 and ml_dtypes 0.6.0.
+//! `aspect crate tensor make-interop` reproduces the fixtures from the
+//! independently generated inputs in fixtures/interop-source.json.
 use vesper_tensor::formats::{self, Fp8};
 use vesper_tensor::gguf::{GgmlType, Gguf, Value};
 use vesper_tensor::quant::{self, Matrix, WeightFormat};

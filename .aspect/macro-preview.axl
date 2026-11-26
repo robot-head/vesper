@@ -1,0 +1,166 @@
+"""Exercise macro previews of current unsaved source over framed stdio."""
+
+load("./lib/lsp-fixture.axl", "changed", "document", "error", "file_uri", "notice", "opened", "request", "result")
+load("./lib/source-macro-fixtures.axl", "accepted_preview", "byte_index", "check_with", "equal", "execute", "explicit_run", "fixture", "lsp", "parse_object", "preview", "read", "rejected_preview", "require", "source_range", "suite_with", "write")
+
+_NAME = "macro-preview"
+_DISK = "fn main()->u64{99}\n"
+_FIELDS = ["source_blake3", "expanded_blake3", "source_bytes", "expanded_bytes", "expanded_source", "source_map", "audits", "package", "invocations", "macro_definitions"]
+
+def _accepted(value, uri, version, source):
+    expanded = accepted_preview(value, uri, version, source)
+    require(value["macro_definitions"] == 1 and value["invocations"] == 1, "Expected exactly one macro and invocation")
+    return expanded
+
+def _compare_forge(ctx, h, value, source):
+    path = write(ctx, h, "comparison-%d.ves" % h.counts["commands"], source)
+    actual = parse_object(execute(ctx, h, ["forge", "check", path]))
+    for field in _FIELDS:
+        equal(value[field], actual[field], "Compiler and preview field " + field)
+    equal(read(ctx, path), bytes(source), "Compiler comparison must preserve source")
+
+def _copies(value, source):
+    start = byte_index(source, "twice!(n)") + len("twice!(")
+    spans = {}
+    for entry in value["source_map"]:
+        span = entry["expanded"]
+        if entry["original"] == {"start": start, "end": start + 1} and span["start"] < span["end"]:
+            spans[(span["start"], span["end"])] = True
+    ordered = sorted(spans)
+    require(len(ordered) >= 2 and all([left[1] <= right[0] for left, right in zip(ordered, ordered[1:])]), "Repeated input must retain distinct expanded spans")
+
+def _happy(ctx, h, path, uri):
+    for name in ["argument_capture", "reference_capture", "repeated", "helper_pure"]:
+        source = "// 😀 current unsaved buffer\r\n" + fixture(ctx, h, name)
+        replies = lsp(ctx, h, [
+            opened(uri, 1, source), preview(2, uri, 1), preview(3, uri),
+            request(4, "textDocument/hover", dict(document(uri), position = {"line": 1, "character": 3})),
+        ], verify_capability = True)
+        value = result(replies, 2)
+        expanded = _accepted(value, uri, 1, source)
+        equal(result(replies, 3), value, "Versionless preview")
+        error(replies, 4, -32003)
+        publications = [message["params"] for message in replies if message.get("method") == "textDocument/publishDiagnostics"]
+        require(len(publications) == 1 and publications[0]["vesper"]["status"] == "parse_error", "Expected original-source diagnostics")
+        require(publications[0]["uri"] == uri and publications[0]["version"] == 1, "Unexpected diagnostic URI or version")
+        equal(read(ctx, path), bytes(_DISK), "Preview must preserve on-disk text")
+        _compare_forge(ctx, h, value, source)
+        if name == "repeated":
+            _copies(value, source)
+        explicit_run(ctx, h, expanded, refusal = name == "helper_pure")
+
+def _authority_changes(ctx, h, uri, pure, fallible):
+    linear = fixture(ctx, h, "linear_duplicate")
+    equal(pure.partition("{")[0], fallible.partition("{")[0], "Authority drift fixture header")
+    replies = lsp(ctx, h, [
+        opened(uri, 1, pure), preview(2, uri, 1),
+        changed(uri, 2, fallible), preview(3, uri, 2),
+        changed(uri, 3, linear), preview(4, uri, 3),
+        changed(uri, 4, pure), preview(5, uri, 4),
+    ], verify_capability = True)
+    accepted = result(replies, 2)
+    rejected = result(replies, 3)
+    _accepted(accepted, uri, 1, pure)
+    rejected_preview(rejected, uri, 2, "authority")
+    require(rejected["source_blake3"] != accepted["source_blake3"], "Changed source must change the preview digest")
+    failure = result(replies, 4)
+    rejected_preview(failure, uri, 3, "check")
+    equal(failure["diagnostic_source"], "expanded", "Linear failure diagnostic source")
+    duplicate = [diagnostic for diagnostic in failure["diagnostics"] if diagnostic["code"] == "E0303"][0]
+    prior = [entry for entry in duplicate["related"] if entry["message"] == "earlier ownership-taking use of this place"][0]
+    require(prior["span"]["end"] <= duplicate["span"]["start"], "Ownership-taking diagnostic order")
+    equal(source_range(prior["span"], failure["expanded_source"]), source_range(duplicate["span"], failure["expanded_source"]), "Ownership-taking source spelling")
+    _accepted(result(replies, 5), uri, 4, pure)
+
+def _revisions(ctx, h, uri, repeated, pure, fallible):
+    messages = [opened(uri, 1, repeated), preview(2, uri, 1)]
+    current = ""
+    for version in range(2, 68):
+        current = "// reset revision %d 😀\r\n%s" % (version, repeated)
+        messages.append(changed(uri, version, current))
+    messages.extend([
+        preview(3, uri, 67), changed(uri, 68, current), preview(4, uri, 68), preview(5, uri, 67),
+        changed(uri, 68, fallible), preview(6, uri, 68), preview(7, "untitled:foreign", 1),
+        notice("textDocument/didClose", document(uri)), preview(8, uri, 68),
+        opened(uri, 1, pure), preview(9, uri, 1),
+    ])
+    replies = lsp(ctx, h, messages, verify_capability = True)
+    for id, version in [(3, 67), (4, 68), (6, 68)]:
+        _accepted(result(replies, id), uri, version, current)
+    digest = result(replies, 3)["source_blake3"]
+    equal(digest, result(replies, 4)["source_blake3"], "Repeated revision digest")
+    require(digest != result(replies, 2)["source_blake3"], "Revised source digest must differ")
+    error(replies, 5, -32801)
+    error(replies, 7, -32602)
+    error(replies, 8, -32602)
+    _accepted(result(replies, 9), uri, 1, pure)
+
+def _invalid_requests(ctx, h, uri, repeated):
+    invalid = [{}, [], {"textDocument": {}}]
+    invalid.extend([{"textDocument": {"uri": uri, "version": version}} for version in [None, True, "1", 1.5, 2147483648, -2147483649]])
+    for field in ["source", "policy", "graph", "world", "approved", "package"]:
+        invalid.extend([{"textDocument": {"uri": uri}, field: True}, {"textDocument": {"uri": uri, field: True}}])
+    messages = [opened(uri, 1, repeated)] + [request(id, "vesper/macroPreview", value) for id, value in enumerate(invalid, 10)]
+    replies = lsp(ctx, h, messages + [request(89, "vesper/macroPreview", None), preview(90, uri)], verify_capability = True)
+    for id in range(10, 10 + len(invalid)):
+        error(replies, id, -32602)
+    error(replies, None, -32600)
+    require(not any([reply.get("id") == 89 for reply in replies]), "Null params must be rejected before request routing")
+    _accepted(result(replies, 90), uri, 1, repeated)
+
+def _limits(ctx, h, uri, repeated):
+    malformed = fixture(ctx, h, "malformed")
+    oversized = "//" + "x" * (128 * 1024) + "\n" + repeated
+    inventory = "macro keep($x:expr)->expr{quote{$x}}\n" + "".join(["fn helper_%d()->u64{%d}\n" % (index, index) for index in range(129)]) + "fn main()->u64{keep!(42)}\n"
+    require(len(bytes(inventory)) < 128 * 1024, "Inventory fixture must fit in the source byte limit")
+    guest = '#[wasm_macro(component="file:///never-loaded.wasm")] macro x()->expr{quote{42}} fn main()->i64{x!()}'
+    replies = lsp(ctx, h, [
+        opened(uri, 1, malformed), preview(2, uri, 1), changed(uri, 2, oversized), preview(3, uri, 1), preview(4, uri, 2),
+        opened("untitled:oversized-open", 1, oversized), preview(5, "untitled:oversized-open", 1),
+        changed(uri, 2, inventory), preview(6, uri, 2), changed(uri, 3, guest), preview(7, uri, 3),
+        changed(uri, 4, repeated), preview(8, uri, 4),
+    ], verify_capability = True)
+    original = result(replies, 2)
+    rejected_preview(original, uri, 1, "parse")
+    equal(original["diagnostic_source"], "original", "Malformed source diagnostic scope")
+    equal(result(replies, 3), original, "Oversized edit must preserve the previous buffer")
+    error(replies, 4, -32801)
+    error(replies, 5, -32602)
+    rejected_preview(result(replies, 6), uri, 2, "resource")
+    refusal = result(replies, 7)
+    require(refusal["stage"] in ["parse", "unsupported"], "Guest macro must be refused")
+    rejected_preview(refusal, uri, 3, refusal["stage"])
+    _accepted(result(replies, 8), uri, 4, repeated)
+
+def _cases(ctx, h):
+    path = write(ctx, h, "existing.ves", _DISK)
+    uri = file_uri(path)
+    _happy(ctx, h, path, uri)
+    pure, fallible, repeated = fixture(ctx, h, "helper_pure"), fixture(ctx, h, "helper_fallible"), fixture(ctx, h, "repeated")
+    _authority_changes(ctx, h, uri, pure, fallible)
+    _revisions(ctx, h, uri, repeated, pure, fallible)
+    _invalid_requests(ctx, h, uri, repeated)
+    _limits(ctx, h, uri, repeated)
+    equal(read(ctx, path), bytes(_DISK), "Preview must preserve on-disk text")
+    return {
+        "stdio_sessions": h.counts["sessions"],
+        "jsonrpc_requests": h.counts["requests"],
+        "explicit_normal_source_runs": h.counts["runs"],
+        "declared_unhandled_entry_refusals": h.counts["refusals"],
+        "scope": "actual pure Tier1 expanded-source preview; ordinary semantics remain original-source",
+    }
+
+check_macro_preview = task(
+    kind = "check-macro-preview",
+    group = ["acceptance"],
+    summary = "Check current unsaved macro preview with a supplied compiler",
+    implementation = lambda ctx: check_with(ctx, _NAME, _cases),
+    args = {"tool_args": args.trailing_var_args(description = "Pass -- --binary <vesper> [--work <directory>].")},
+)
+
+test_macro_preview = task(
+    kind = "test-macro-preview",
+    group = ["acceptance"],
+    summary = "Exercise versioned unsaved macro previews and their refusal boundaries",
+    implementation = lambda ctx: suite_with(ctx, _NAME, "VESPER_MACRO_PREVIEW_BINARY", _cases),
+)

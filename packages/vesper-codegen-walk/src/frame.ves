@@ -15,7 +15,11 @@
 // the input is @vesper/codegen-calls' (check-data's names, types and world,
 // the place-ir program section, the calls section); per task a block
 // `E <entry> <0|1>`, then per instance `F <key>` and the plan's lines
-// (`FramePlan::text`), or `X <message>` where Rust would refuse.
+// (`FramePlan::text`), or `X <message>` where Rust would refuse. Before
+// each `F` come the instance's convention (`B <key> <status> <words>`,
+// part 4a), its source function (`I <name>`) and variables (`V <var>
+// <type index>`, part 4b); a task that planned every instance ends with
+// `W` and the decimal words of the variables' type table.
 //
 // Trace entries (`trace_ok` of `compile_entry`) are out of scope: their
 // discovery includes the entry and the calls family refuses them
@@ -28,6 +32,7 @@ use @vesper/check-data::util::{
     inc,
     push_decimal,
     u32_at,
+    u64_at,
     w
 };
 use @vesper/check-data::names::{
@@ -51,7 +56,8 @@ use @vesper/check-layout::{
     L_ENUM,
     Layouts,
     layout_of,
-    layouts_new
+    layouts_new,
+    out_new
 };
 use @vesper/place-ir::{
     read_program
@@ -565,6 +571,7 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
                 inout err
             );
         let mut ok = declared;
+        let mut table = out_new();
         if ok {
             for i in 0..found.insts.len() {
                 let x = found.inst(i);
@@ -595,6 +602,19 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
                 put(inout o, " ");
                 push_decimal(inout o, w(abi.result_words));
                 o.push(10);
+                // The instance (`InstanceMap`'s value), part 4b: its source
+                // function and each variable's type, an index into the
+                // task's `W` type table.
+                put(inout o, "I ");
+                c.names.write(x.name, inout o);
+                o.push(10);
+                for j in 0..vars.len() {
+                    put(inout o, "V ");
+                    c.names.write(vars.key(j), inout o);
+                    put(inout o, " ");
+                    push_decimal(inout o, table.ty(in c.types, in c.names, vars.ty(j)));
+                    o.push(10);
+                }
                 put(inout o, "F ");
                 c.names.write(x.key, inout o);
                 o.push(10);
@@ -617,6 +637,18 @@ pub fn frames_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
                     break;
                 }
             }
+        }
+        if ok {
+            // The type table of the `V` lines (check-layout's stream: 1,
+            // the names, the types), as decimal words.
+            let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            table.finish(inout words);
+            put(inout o, "W");
+            for j in 0..words.len() {
+                put(inout o, " ");
+                push_decimal(inout o, u64_at(in words, j));
+            }
+            o.push(10);
         }
         if !ok {
             put(inout o, "X ");

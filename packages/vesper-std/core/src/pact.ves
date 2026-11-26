@@ -1,0 +1,66 @@
+// Use a named Pact model only while checking and running this expression's
+// body. The enclosing block keeps its previous model selection.
+pub sugar using: expr {
+    rule (using model $model:ident $body:block) => {
+        {
+            use model $model;
+            $body
+        }
+    }
+}
+
+test {
+    model Descending: Ord for i64 {
+        fn cmp(in self, in other: i64) -> Ordering {
+            if self < other {
+                Greater
+            } else if self == other {
+                Equal
+            } else {
+                Less
+            }
+        }
+    }
+
+    model Ascending: Ord for i64 {
+        fn cmp(in self, in other: i64) -> Ordering {
+            if self < other {
+                Less
+            } else if self == other {
+                Equal
+            } else {
+                Greater
+            }
+        }
+    }
+
+    fn minimum[T: mod copy + Ord](a: T, b: T) -> T {
+        match a.cmp(b) {
+            Greater => b,
+            _ => a,
+        }
+    }
+
+    // @case canonical_before_and_after()
+    fn model_scope_is_restored() -> bool {
+        let before = minimum(1, 2);
+        let selected = using model Descending {
+            minimum(1, 2)
+        };
+        let after = minimum(1, 2);
+        before == 1 && selected == 2 && after == 1
+    }
+
+    // @case descending_ascending_descending()
+    fn nested_model_scope_restores_outer_override() -> bool {
+        let answers = using model Descending {
+            let before = minimum(1, 2);
+            let nested = using model Ascending {
+                minimum(1, 2)
+            };
+            let after = minimum(1, 2);
+            (before, nested, after)
+        };
+        answers == (2, 1, 2)
+    }
+}

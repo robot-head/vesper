@@ -1,0 +1,129 @@
+"""Check Bazel executable discovery, prebuild manifests, and hybrid CLI restoration."""
+
+load("./lib/task-fixture.axl", "contains", "equal", "fixture_launcher", "fixture_workspace", "invoke_fixture", "write_fixture")
+
+def mock_bazel_cli(ctx, cwd, tool, argv):
+    mode = ctx.std.env.var("VESPER_TEST_BAZEL_MODE")
+    if mode == "cached":
+        equal(tool, "cached")
+        equal(argv, ["two words"])
+        ctx.std.io.stdout.write(argv[0] + "\n")
+        return 19
+    if mode == "hybrid":
+        if tool == "cargo":
+            if argv[0] == "test":
+                equal(argv[-2:], ["--test", "fixture_cli"])
+                ctx.std.io.stdout.write(json.encode({
+                    "reason": "compiler-artifact", "executable": cwd + "/bin/test suite",
+                    "target": {"kind": ["test"], "name": "fixture_cli"},
+                }) + "\n")
+            else:
+                equal(argv[0], "build")
+            return 0
+        equal(tool, "test suite")
+        equal(argv, ["one arg"])
+        suffix = ctx.std.env.var("VESPER_FIXTURE_HYBRID_SUFFIX") or ""
+        equal(ctx.std.fs.read_to_string(cwd + "/build output/debug/vesper" + suffix), "hybrid")
+        equal(ctx.std.fs.try_append(cwd + "/exercised", "ran\n"), True)
+        return 19
+    verb = argv[0]
+    if mode == "build-manifest":
+        if verb == "build":
+            ctx.std.fs.write(cwd + "/bazel-build-args", "\n".join(argv) + "\n")
+        else:
+            equal(verb, "cquery")
+            ctx.std.io.stdout.write("@@//:one bin/one\n@//:two bin/two\n")
+        return 0
+    if mode in ["prebuild", "prebuild-fail"]:
+        if verb == "query":
+            ctx.std.io.stdout.write("//crates/example:example/test\n")
+        elif verb == "build":
+            equal(argv[3], "//crates/example:example/test")
+            return 8 if mode == "prebuild-fail" else 0
+        else:
+            equal(verb, "cquery")
+            ctx.std.io.stdout.write("@@//:bin/vesper bin/vesper\n@//crates/example:example/test bin/test\n")
+        return 0
+    equal(ctx.std.fs.try_append(cwd + "/bazel-calls", verb + "\n"), True)
+    if verb == "build":
+        equal(argv[1:], ["--config=ci", "//:uncached"])
+        ctx.std.io.stdout.write("build diagnostic\n")
+        return 19 if mode == "build-fail" else 0
+    equal(argv, ["cquery", "--config=ci", "--output=files", "//:uncached"])
+    if mode != "empty-query":
+        ctx.std.io.stdout.write("bin/output with spaces\nbin/second output\n")
+    return 0
+
+def _test(ctx):
+    workspace = fixture_workspace(ctx, "vesper-bazel-cli-test-")
+    root, cwd = workspace.root, workspace.cwd
+    env = fixture_launcher(ctx, workspace, "bazel-cli", ["bazel with spaces", "cached", "cargo", "test suite"])
+    env["BAZEL"] = root + "/bin/bazel with spaces"
+
+    def run(argv, mode, status = 0, more = {}, tool = None):
+        variables = dict(env, VESPER_TEST_BAZEL_MODE = mode, **more)
+        return invoke_fixture(ctx, argv, cwd, status, variables, tool)
+
+    prebuild = ["ci", "prebuild-acceptance", "--", "manifest with spaces"]
+    manifest = root + "/manifest with spaces"
+    result = run(prebuild, "prebuild", more = {"BAZEL_FLAGS": ""})
+    equal(ctx.std.fs.read_to_string(manifest), "//:bin/vesper bin/vesper\n//crates/example:example/test bin/test\n")
+    contains("Prebuilt 2 executables", result.stdout)
+    failed = run(prebuild, "prebuild-fail", more = {"BAZEL_FLAGS": ""})
+    contains("each task will build its own", failed.stderr)
+    equal(ctx.std.fs.exists(manifest), False)
+
+    helpers = ["maintenance", "bazel-helpers", "--"]
+    query = helpers + ["bazel_executable", "//:uncached"]
+    calls = root + "/bazel-calls"
+    for mode, status, invocations in [
+        ("normal", 0, ["build", "cquery"]),
+        ("build-fail", 19, ["build"]),
+        ("empty-query", 1, ["build", "cquery"]),
+    ]:
+        ctx.std.fs.write(calls, "")
+        result = run(query, mode, status, {"BAZEL_FLAGS": "--config=ci", "VESPER_BAZEL_EXECUTABLES": "missing"})
+        equal(ctx.std.fs.read_to_string(calls).splitlines(), invocations)
+        contains("build diagnostic", result.stderr)
+        equal(result.stdout, "bin/output with spaces\n" if status == 0 else "")
+
+    write_fixture(ctx, root + "/bazel-cache", "//:cached bin/cached\n")
+    cached = {"BAZEL": "/missing-bazel", "VESPER_BAZEL_EXECUTABLES": "bazel-cache"}
+    equal(run(helpers + ["bazel_executable", "//:cached"], "cached", more = cached).stdout, "bin/cached\n")
+    equal(run(helpers + ["bazel_exec", "//:cached", "two words"], "cached", 19, cached).stdout, "two words\n")
+    run(helpers + ["bazel_prebuild", "output with spaces", "//:one", "//:two"], "build-manifest", more = {"BAZEL_FLAGS": "--config=test"})
+    equal(ctx.std.fs.read_to_string(root + "/bazel-build-args").splitlines(), ["build", "--config=test", "//:one", "//:two"])
+    equal(ctx.std.fs.read_to_string(root + "/output with spaces"), "//:one bin/one\n//:two bin/two\n")
+    equal(ctx.std.fs.exists(root + "/output with spaces.tmp"), False)
+    for argv in [[], ["touch", "unexpected"]]:
+        result = run(helpers + argv, "invalid", 2)
+        contains("usage: aspect maintenance bazel-helpers", result.stderr)
+        equal(result.stdout, "")
+    equal(ctx.std.fs.exists(root + "/unexpected"), False)
+
+    write_fixture(ctx, root + "/tests/fixture_cli.rs", "")
+    write_fixture(ctx, root + "/tests/skip_cli.rs", "")
+    pwsh = ctx.std.process.which("pwsh")
+    modes = ["", ".exe"] if pwsh else [""]
+    for suffix in modes:
+        output = root + "/build output/debug/"
+        default = output + "vesper" + suffix
+        write_fixture(ctx, default, "default")
+        write_fixture(ctx, output + "vesper-hybrid" + suffix, "hybrid")
+        variables = {"CARGO_TARGET_DIR": "build output", "CLI_SUITES": "fixture_cli", "VESPER_FIXTURE_HYBRID_SUFFIX": suffix}
+        if suffix:
+            script = "/scripts/windows/test-hybrid-cli.ps1"
+            write_fixture(ctx, root + script, ctx.std.fs.read_to_string(workspace.source + script))
+            result = run(["-NoProfile", "-File", root + script, "one arg"], "hybrid", 1, variables, pwsh)
+        else:
+            result = run(["crate", "hybrid", "cli-suites", "--", "one arg"], "hybrid", 1, variables)
+        contains("1 suites on the hybrid, 1 failed", result.stdout)
+        equal(ctx.std.fs.read_to_string(default), "default")
+    equal(ctx.std.fs.read_to_string(root + "/exercised").splitlines(), ["ran"] * len(modes))
+    return 0
+
+test_bazel_cli = task(
+    kind = "bazel-cli", group = ["ci", "tests"],
+    summary = "Check Bazel prebuild and executable lookups, and hybrid compiler restoration",
+    implementation = _test,
+)

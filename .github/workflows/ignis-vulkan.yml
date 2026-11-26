@@ -17,6 +17,7 @@ on:
       - 'crates/vesper-ignis-vulkan/**'
       - 'crates/vesper-pulse/**'
       - '.github/workflows/ignis-vulkan.yml'
+      - '.aspect/hardware-ci.axl'
       - 'Cargo.toml'
       - 'Cargo.lock'
   pull_request:
@@ -28,6 +29,7 @@ on:
       - 'crates/vesper-ignis-vulkan/**'
       - 'crates/vesper-pulse/**'
       - '.github/workflows/ignis-vulkan.yml'
+      - '.aspect/hardware-ci.axl'
 
 permissions:
   contents: read
@@ -67,7 +69,15 @@ jobs:
           fetch-depth: 0
           sparse-checkout: |
             .github/actions
-            scripts/ci
+            .aspect
+      - name: Set up Aspect for the merge gate
+        if: github.event_name == 'pull_request'
+        uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
+        with:
+          launcher-version: '2026.47.12'
+          bazelrc-generate: 'false'
+          bazelisk-cache: 'false'
+          disk-cache: 'false'
       - name: Merge gate
         if: github.event_name == 'pull_request'
         uses: ./.gate/.github/actions/merge-gate
@@ -76,29 +86,13 @@ jobs:
           base-ref: ${{ github.event.pull_request.base.ref }}
           head-sha: ${{ github.event.pull_request.head.sha }}
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/aspect
       - name: Install Mesa lavapipe and the Vulkan validation layers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            mesa-vulkan-drivers libvulkan1 vulkan-validationlayers vulkan-tools \
-            xvfb libxcb1
+        run: aspect ci install-desktop-vulkan
       - name: Load udmabuf (lavapipe sync-fd export needs /dev/udmabuf)
-        run: |
-          # Built into some runner kernels; a module on others. The sync-fd
-          # test itself fails (VESPER_IGNIS_VULKAN_REQUIRE_SYNC_FD) if the
-          # extension is still missing afterwards.
-          if [ ! -e /dev/udmabuf ]; then
-            sudo modprobe udmabuf || {
-              sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)" &&
-                sudo modprobe udmabuf
-            } || echo "udmabuf unavailable"
-          fi
-          if [ -e /dev/udmabuf ]; then sudo chmod a+rw /dev/udmabuf; ls -l /dev/udmabuf; fi
+        run: aspect ci prepare-udmabuf
       - name: Report the Vulkan device
-        run: |
-          vulkaninfo | grep -E "external_(semaphore|fence)_fd|xcb_surface" || echo "no sync-fd or XCB extensions"
-          dpkg-query -W mesa-vulkan-drivers vulkan-validationlayers libvulkan1
-          vulkaninfo --summary
+        run: aspect ci report-desktop-vulkan
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Test vesper-ignis-vulkan on lavapipe

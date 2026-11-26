@@ -649,6 +649,12 @@ fn compiler() -> Result<PathBuf, String> {
         // Flags the outer build chose for its own target, not this host tool.
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("CARGO_TARGET_DIR");
+    if std::env::var_os("CLIPPY_ARGS").is_some() {
+        // The host compiler is a build dependency of the linted package.
+        command
+            .env_remove("CLIPPY_ARGS")
+            .env_remove("RUSTC_WORKSPACE_WRAPPER");
+    }
     run(&mut command, Path::new(&cargo))?;
     let exe = format!("vesper{}", std::env::consts::EXE_SUFFIX);
     Ok(target_dir.join(host).join("debug").join(exe))

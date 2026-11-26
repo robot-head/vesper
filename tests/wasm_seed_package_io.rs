@@ -2306,6 +2306,13 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::NonZero,
     ),
     (
+        "sugar",
+        "@vesper/sugar",
+        "packages/vesper-sugar",
+        "match_rule_words(in \"a $x:expra 1\", 12884901897, 100000).len()",
+        CompilerExecCheck::NonZero,
+    ),
+    (
         "backend-checks",
         "@vesper/backend-checks",
         "packages/vesper-backend-checks",

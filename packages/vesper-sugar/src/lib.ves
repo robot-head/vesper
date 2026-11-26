@@ -1,0 +1,99 @@
+// @vesper/sugar: the bounded sugar expansion of
+// crates/vesper-syntax/src/sugar_expand.rs in Vesper (SH1 lane 14, #1157,
+// part 4). It reads the surface profile of @vesper/front.
+//
+// Part 4a is the rule matcher (sugar_expand/matcher.rs, matcher.ves).
+// tests/self_host_sugar.rs checks `match_rule_words` against Rust's
+// `vesper_syntax::sugar_expand::match_rule_words` on a rule corpus and a
+// fuzzed corpus.
+
+use self::matcher::{
+    match_rule_encoded
+};
+
+// `match_rule(pattern, invocation, tail, work)` as words (see
+// matcher.ves `match_rule_encoded`). `text` is the pattern, then the
+// invocation, then the tail; `lens` holds the pattern's length in its low
+// 32 bits, the invocation's in bits 32-62, and bit 63 is set when there is
+// a tail (the rest of `text`). Native word functions take at most three
+// words.
+pub fn match_rule_words(in text: Str, lens: u64, work: u64) -> ChunkSeq[u64] {
+    let b = text.as_bytes();
+    let np = lens & 4294967295;
+    let ni = (lens >> 32) & 2147483647;
+    let has_tail = (lens >> 63) == 1;
+    let mut pattern = ChunkSeq::new[u8]();
+    let mut invocation = ChunkSeq::new[u8]();
+    for i in 0..wrapping_add(np, ni) {
+        let c = match b.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if i < np {
+            pattern.push(c);
+        } else {
+            invocation.push(c);
+        }
+    }
+    let tail_len = wrapping_sub(b.len(), wrapping_add(np, ni));
+    match_rule_encoded(in pattern, in invocation, has_tail, tail_len, work)
+}
+
+// Many `match_rule_words` calls in one, for measuring the matcher without
+// the host call around each: `text` is a run of records, each three
+// numbers of four base-128 digits (low digit first, so the text stays
+// ASCII) and then the pattern and the invocation. The numbers are the
+// pattern's length, the invocation's, and the tail's length plus one (0
+// for no tail). The result is each record's words in turn. Test hook for
+// tests/self_host_sugar.rs (`matcher_speed`).
+pub fn match_rule_batch(in text: Str, count: u64, work: u64) -> ChunkSeq[u64] {
+    let b = text.as_bytes();
+    let mut out = ChunkSeq::new[u64]();
+    let mut at: u64 = 0;
+    for r in 0..count {
+        let np = base128(in b, at);
+        let ni = base128(in b, wrapping_add(at, 4));
+        let nt = base128(in b, wrapping_add(at, 8));
+        at = wrapping_add(at, 12);
+        let mut pattern = ChunkSeq::new[u8]();
+        let mut invocation = ChunkSeq::new[u8]();
+        for i in 0..wrapping_add(np, ni) {
+            let c = match b.try_get(wrapping_add(at, i)) {
+                Option::Some(c) => c,
+                Option::None => 0,
+            };
+            if i < np {
+                pattern.push(c);
+            } else {
+                invocation.push(c);
+            }
+        }
+        at = wrapping_add(at, wrapping_add(np, ni));
+        let words = match_rule_encoded(
+            in pattern,
+            in invocation,
+            nt != 0,
+            wrapping_sub(nt, 1),
+            work
+        );
+        for j in 0..words.len() {
+            match words.try_get(j) {
+                Option::Some(w) => out.push(w),
+                Option::None => {},
+            }
+        }
+    }
+    out
+}
+
+fn base128(in b: Slice[u8], at: u64) -> u64 {
+    let mut v: u64 = 0;
+    for k in 0..4 {
+        let d = match b.try_get(wrapping_add(at, wrapping_sub(3, k))) {
+            Option::Some(c) => widen_u64(c),
+            Option::None => 0,
+        };
+        v = wrapping_add(wrapping_mul(v, 128), d);
+    }
+    v
+}

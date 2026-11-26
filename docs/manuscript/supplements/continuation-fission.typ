@@ -4,7 +4,7 @@
 // Integration notes:
 //   1. Insert inside `#let manuscript(chapter-deck) = [ ... ]` directly after
 //      Chapter 5 (`<ch-5-5>`, line 815 of `content.typ`) and increment
-//      subsequent chapter numbers (`6..41` -> `7..42`) and `verify.py` range,
+//      subsequent chapter numbers (`6..41` -> `7..42`) and the chapter range in `.aspect/manuscript.axl`,
 //      OR append after Chapter 41 as `= 42. ...` with zero renumbering.
 //   2. Uses `content.typ`'s native `#_infer`, `#_compact-listing`, `#chapter-deck`,
 //      and bundled fonts (`Libertinus Serif`, `DejaVu Sans Mono`,

@@ -1,18 +1,19 @@
 # Independent Arrow IPC fixtures
 
-Generated on 2026-11-12 by `generate.py` using **Apache Arrow pyarrow 20.0.0**
-(CPython 3.12, official manylinux wheel), then decoded again with PyArrow to
-record actual arrays and mathematical sums in `expected.json`. No Vesper code
-produces these bytes or the expectations. `expected.json` includes every file's
-byte length and SHA-256 digest. The sum-overflow fixture's mathematical sum is
+Originally generated and decoded on 2026-11-12 using **Apache Arrow pyarrow
+20.0.0**. The Aspect task assembles the original messages from
+`wire-metadata.json`, independently encodes the values and validity bitmaps,
+and uses the `lz4` command for compressed frames. It reproduces each stream
+and `expected.json` byte for byte without calling Vesper. The manifest records
+the decoded values, mathematical sums, byte lengths, and SHA-256 digests.
+The sum-overflow fixture's mathematical sum is
 9223372036854775808; a checked i64 projection cannot represent it.
 
-Reproduce in a user-local environment (no system package installation):
+With `lz4` on PATH, regenerate from the repository root:
 
 ```sh
-python3 -m venv /tmp/vesper-ipc-reference-venv
-/tmp/vesper-ipc-reference-venv/bin/pip install pyarrow==20.0.0
-/tmp/vesper-ipc-reference-venv/bin/python crates/vesper-grammar/tests/fixtures/ipc/generate.py
+aspect crate grammar generate
+aspect ci tests arrow-fixtures
 ```
 
 The positive streams cover V5 continuation framing, V4 legacy framing, two

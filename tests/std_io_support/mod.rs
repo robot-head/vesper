@@ -281,6 +281,7 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn posix_spawnattr_init(attr: *mut c_void) -> i32;
         fn posix_spawnattr_destroy(attr: *mut c_void) -> i32;
         fn posix_spawnattr_setflags(attr: *mut c_void, flags: i16) -> i32;
+        fn posix_spawnattr_setpgroup(attr: *mut c_void, pgroup: i32) -> i32;
         fn posix_spawnattr_setsigmask(attr: *mut c_void, set: *const c_void) -> i32;
         fn posix_spawnattr_setsigdefault(attr: *mut c_void, set: *const c_void) -> i32;
         fn sigemptyset(set: *mut c_void) -> i32;
@@ -307,6 +308,7 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn poll(fds: *mut c_void, n: usize, timeout: i32) -> i32;
         fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
         fn kill(pid: i32, sig: i32) -> i32;
+        fn clock_gettime(clock: i32, ts: *mut c_void) -> i32;
         fn exit(code: i32) -> !;
         fn readlink(path: *const c_char, buf: *mut c_char, n: usize) -> isize;
         fn realpath(path: *const c_char, resolved: *mut c_char) -> *mut c_char;
@@ -367,6 +369,10 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
             posix_spawnattr_setflags as *const u8,
         ),
         (
+            "posix_spawnattr_setpgroup",
+            posix_spawnattr_setpgroup as *const u8,
+        ),
+        (
             "posix_spawnattr_setsigmask",
             posix_spawnattr_setsigmask as *const u8,
         ),
@@ -389,6 +395,7 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("poll", poll as *const u8),
         ("waitpid", waitpid as *const u8),
         ("kill", kill as *const u8),
+        ("clock_gettime", clock_gettime as *const u8),
         ("exit", exit as *const u8),
         ("readlink", readlink as *const u8),
         ("realpath", realpath as *const u8),
@@ -536,6 +543,20 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn GetExitCodeProcess(h_process: *mut c_void, lp_exit_code: *mut u32) -> i32;
         fn TerminateProcess(h_process: *mut c_void, u_exit_code: u32) -> i32;
         fn GetProcessId(process: *mut c_void) -> u32;
+        fn ResumeThread(h_thread: *mut c_void) -> u32;
+        fn CreateJobObjectW(lp_job_attributes: *const c_void, lp_name: *const u16) -> *mut c_void;
+        fn AssignProcessToJobObject(h_job: *mut c_void, h_process: *mut c_void) -> i32;
+        fn TerminateJobObject(h_job: *mut c_void, u_exit_code: u32) -> i32;
+        fn PeekNamedPipe(
+            h_named_pipe: *mut c_void,
+            lp_buffer: *mut c_void,
+            n_buffer_size: u32,
+            lp_bytes_read: *mut u32,
+            lp_total_bytes_avail: *mut u32,
+            lp_bytes_left_this_message: *mut u32,
+        ) -> i32;
+        fn GetTickCount64() -> u64;
+        fn Sleep(dw_milliseconds: u32);
         fn ExitProcess(u_exit_code: u32);
         fn GetProcessHeap() -> *mut c_void;
         fn HeapAlloc(h_heap: *mut c_void, dw_flags: u32, dw_bytes: usize) -> *mut c_void;
@@ -604,6 +625,16 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("GetExitCodeProcess", GetExitCodeProcess as *const u8),
         ("TerminateProcess", TerminateProcess as *const u8),
         ("GetProcessId", GetProcessId as *const u8),
+        ("ResumeThread", ResumeThread as *const u8),
+        ("CreateJobObjectW", CreateJobObjectW as *const u8),
+        (
+            "AssignProcessToJobObject",
+            AssignProcessToJobObject as *const u8,
+        ),
+        ("TerminateJobObject", TerminateJobObject as *const u8),
+        ("PeekNamedPipe", PeekNamedPipe as *const u8),
+        ("GetTickCount64", GetTickCount64 as *const u8),
+        ("Sleep", Sleep as *const u8),
         ("ExitProcess", ExitProcess as *const u8),
         ("GetProcessHeap", GetProcessHeap as *const u8),
         ("HeapAlloc", HeapAlloc as *const u8),
