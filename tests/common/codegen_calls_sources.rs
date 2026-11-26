@@ -6,7 +6,7 @@
 use vesper::check::World;
 
 // The test crate's `check_harness` (Cargo and Bazel runfiles).
-use crate::check_harness::repo;
+use crate::check_harness::{quiet_panics, repo};
 
 /// The test files whose Vesper source strings exercise the decisions this
 /// package ports: function-value instances, `dyn` vtables and boxed
@@ -160,8 +160,7 @@ fn rust_string_literals(text: &str) -> Vec<String> {
 pub fn source_worlds() -> Vec<(String, World)> {
     let mut seen = std::collections::BTreeSet::new();
     let mut out = vec![];
-    let quiet = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    let quiet = quiet_panics();
     for file in SOURCE_TESTS.iter().copied() {
         let Ok(text) = std::fs::read_to_string(repo().join(file)) else {
             continue;
@@ -191,6 +190,6 @@ pub fn source_worlds() -> Vec<(String, World)> {
             }
         }
     }
-    std::panic::set_hook(quiet);
+    drop(quiet);
     out
 }

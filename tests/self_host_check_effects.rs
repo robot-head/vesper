@@ -102,8 +102,7 @@ fn fixture_worlds() -> &'static [(String, World)] {
         ] {
             walk(&repo().join("tests/fixtures").join(d), &mut files);
         }
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let quiet = quiet_panics();
         let mut out = vec![];
         for f in files {
             let Ok(src) = std::fs::read_to_string(&f) else {
@@ -123,7 +122,7 @@ fn fixture_worlds() -> &'static [(String, World)] {
                 ));
             }
         }
-        std::panic::set_hook(quiet);
+        drop(quiet);
         out
     })
 }

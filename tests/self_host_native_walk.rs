@@ -62,8 +62,7 @@ pub fn stages() -> &'static [Stage] {
     static S: OnceLock<Vec<Stage>> = OnceLock::new();
     S.get_or_init(|| {
         let mut out = vec![];
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let quiet = quiet_panics();
         let only: Option<Vec<String>> = std::env::var("NATIVE_WALK_WORLD")
             .ok()
             .map(|s| s.split(',').map(str::to_owned).collect());
@@ -105,7 +104,7 @@ pub fn stages() -> &'static [Stage] {
                 }
             }
         }
-        std::panic::set_hook(quiet);
+        drop(quiet);
         out
     })
 }

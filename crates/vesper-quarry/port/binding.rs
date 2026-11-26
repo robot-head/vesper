@@ -772,6 +772,8 @@ unsafe extern "C" {
     fn vesper_quarry_prepare(result: *mut u64, tabs: *mut u64, cols: *mut u64, meta: *mut u64, text: *mut u64, sql: *mut u64, limits: *mut u64) -> i64;
     fn vesper_quarry_set_rows(result: *mut u64, prog: *mut u64, text: *mut u64) -> i64;
     fn vesper_quarry_store_log_record_decode(payload: *mut u64, out_hdr: *mut u64, out_ranges: *mut u64) -> i64;
+    fn vesper_quarry_vaggregate_rows(result: *mut u64, prog: *mut u64, text: *mut u64) -> i64;
+    fn vesper_quarry_vexecute(result: *mut u64, prog: *mut u64, text: *mut u64, extra: *mut u64) -> i64;
     fn vesper_quarry_wal_decode(payload: *mut u64, meta: *mut u64) -> i64;
     fn vesper_quarry_wal_decode_header(h: *mut u64, out: *mut u64) -> i64;
     fn vesper_quarry_wal_encode(tag: i64, txn: i64, prev: i64, page: i64, undo_next: i64, slot: i64, b1: *mut u64, b2: *mut u64, out: *mut u64) -> i64;
@@ -919,6 +921,26 @@ pub fn store_log_record_decode(payload: &[u8], out_hdr: &mut [u64], out_ranges: 
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(payload, |view_payload| vesper_port_abi::with_slice_mut(out_hdr, |view_out_hdr| vesper_port_abi::with_slice_mut(out_ranges, |view_out_ranges| unsafe { vesper_quarry_store_log_record_decode(view_payload, view_out_hdr, view_out_ranges) })));
     raw as u64
+}
+
+/// Calls `vaggregate_rows` of the Vesper library `quarry` (`vesper_quarry_vaggregate_rows`).
+pub fn vaggregate_rows(prog: &[u64], text: &[u8]) -> Q {
+    let mut result = [0u64; 25];
+    // SAFETY: `vesper_quarry_vaggregate_rows` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(prog, |view_prog| vesper_port_abi::with_slice(text, |view_text| unsafe { vesper_quarry_vaggregate_rows(result.as_mut_ptr(), view_prog, view_text) }));
+    unsafe { Q::from_words(&result[0..]) }
+}
+
+/// Calls `vexecute` of the Vesper library `quarry` (`vesper_quarry_vexecute`).
+pub fn vexecute(prog: &[u64], text: &[u8], extra: &[u64]) -> Q {
+    let mut result = [0u64; 25];
+    // SAFETY: `vesper_quarry_vexecute` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(prog, |view_prog| vesper_port_abi::with_slice(text, |view_text| vesper_port_abi::with_slice(extra, |view_extra| unsafe { vesper_quarry_vexecute(result.as_mut_ptr(), view_prog, view_text, view_extra) })));
+    unsafe { Q::from_words(&result[0..]) }
 }
 
 /// Calls `wal_decode` of the Vesper library `quarry` (`vesper_quarry_wal_decode`).

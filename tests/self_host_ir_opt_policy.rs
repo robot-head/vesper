@@ -158,8 +158,7 @@ const VALIDATION: &str = "optimized IR failed ownership validation: ";
 #[test]
 fn policy_matches_rust() {
     policy();
-    let quiet = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    let quiet = quiet_panics();
     let (mut done, mut bad, mut skipped) = (0, 0, 0);
     for c in corpus_shard::Shard::from_environment().keep(inputs()) {
         let rust = std::panic::catch_unwind(|| {
@@ -194,7 +193,7 @@ fn policy_matches_rust() {
             }
         }
     }
-    std::panic::set_hook(quiet);
+    drop(quiet);
     eprintln!("policy: {bad} of {done} inputs differ ({skipped} skipped)");
     // The slice has 28 inputs; shards take four-input blocks (8, 8, 8, 4).
     let least = corpus_shard::Shard::from_environment().share(12);

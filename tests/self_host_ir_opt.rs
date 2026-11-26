@@ -166,8 +166,7 @@ fn debug(p: &Program) -> String {
 fn compare(mode: u64) -> (usize, usize, usize) {
     // Load and compile the package with panics shown.
     entry();
-    let quiet = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    let quiet = quiet_panics();
     let (mut bad, mut skipped, mut done) = (0, 0, 0);
     let (mut forwarded, mut errors, mut egglog_errors) = (0, 0, 0);
     // Bazel shards the inputs (BUILD.bazel `test_shards`).
@@ -209,7 +208,7 @@ fn compare(mode: u64) -> (usize, usize, usize) {
             }
         }
     }
-    std::panic::set_hook(quiet);
+    drop(quiet);
     eprintln!(
         "mode {mode}: {bad} of {done} inputs differ ({skipped} skipped), {forwarded} replaced or reused, {errors} errors ({egglog_errors} egglog refusals, compared by prefix)"
     );

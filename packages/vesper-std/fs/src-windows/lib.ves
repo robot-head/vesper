@@ -1004,3 +1004,204 @@ pub fn exists(in path: Str) -> bool eff [Ffi[StdFs]] {
         raise(_, _) => false,
     }
 }
+
+// `Path::is_dir`: whether `path` names a directory. Never fails.
+pub fn is_dir_path(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        metadata_path(in path).kind == kind_dir()
+    } with {
+        return v => v,
+        raise(_, _) => false,
+    }
+}
+
+// `Path::is_file`: whether `path` names a file. Never fails.
+pub fn is_file_path(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        metadata_path(in path).kind == kind_file()
+    } with {
+        return v => v,
+        raise(_, _) => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Error text.
+
+// Rust's `Display` of the `io::Error` that `e` stands for (#1896): the OS
+// error's message and number when it has one, else its kind's text.
+pub fn error_text(e: IoError) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if e.os != 0 {
+        os_error_message(inout out, e.os);
+        os_error_suffix(inout out, e.os);
+        return out;
+    }
+    out.extend(in kind_text(e.kind).as_bytes());
+    out
+}
+
+fn write_decimal(inout out: ChunkSeq[u8], v: u64) {
+    let mut n = v;
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    loop {
+        digits.push(wrapping_u8(wrapping_add(48, n % 10)));
+        n = n / 10;
+        if n == 0 {
+            break;
+        }
+    }
+    let len = digits.len();
+    for i in 0..len {
+        match digits.try_get(wrapping_sub(wrapping_sub(len, 1), i)) {
+            Option::Some(d) => out.push(d),
+            Option::None => (),
+        }
+    }
+}
+
+// An OS error number as Rust's `i32`.
+fn write_os_number(inout out: ChunkSeq[u8], os: u32) {
+    if os >= 2147483648 {
+        out.push(45);
+        write_decimal(inout out, wrapping_sub(4294967296, widen_u64(os)));
+    } else {
+        write_decimal(inout out, widen_u64(os));
+    }
+}
+
+// ` (os error <n>)`.
+fn os_error_suffix(inout out: ChunkSeq[u8], os: u32) {
+    out.extend(in " (os error ".as_bytes());
+    write_os_number(inout out, os);
+    out.push(41);
+}
+
+// `ErrorKind::as_str` of the kind the hybrid's error words decode to
+// (`io_error` in crates/vesper-hybrid/src/driver.rs): every other code is
+// `Other`.
+fn kind_text(kind: u32) -> Str {
+    match kind {
+        1 => "entity not found",
+        2 => "permission denied",
+        3 => "entity already exists",
+        4 => "not a directory",
+        5 => "is a directory",
+        6 => "directory not empty",
+        7 => "invalid input parameter",
+        8 => "operation interrupted",
+        9 => "unexpected end of file",
+        10 => "write zero",
+        11 => "unsupported",
+        12 => "out of memory",
+        _ => "other error",
+    }
+}
+
+const FORMAT_MESSAGE_ALLOCATE_BUFFER: u32 = 256;
+const FORMAT_MESSAGE_IGNORE_INSERTS: u32 = 512;
+const FORMAT_MESSAGE_FROM_HMODULE: u32 = 2048;
+const FORMAT_MESSAGE_FROM_SYSTEM: u32 = 4096;
+const FACILITY_NT_BIT: u32 = 268435456;
+const CP_UTF8: u32 = 65001;
+const WC_ERR_INVALID_CHARS: u32 = 128;
+// `std`'s message buffer holds 2048 UTF-16 units, NUL included; a longer
+// message fails there with `ERROR_INSUFFICIENT_BUFFER`.
+const MESSAGE_UNITS: u32 = 2048;
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+
+// `OS Error <n> (FormatMessageW() <why>)`.
+fn format_failed(inout out: ChunkSeq[u8], errnum: u32, in why: Slice[u8]) {
+    out.extend(in "OS Error ".as_bytes());
+    write_os_number(inout out, errnum);
+    out.extend(in " (FormatMessageW() ".as_bytes());
+    out.extend(in why);
+    out.push(41);
+}
+
+// Whether `b` is ASCII whitespace (`u8::is_ascii_whitespace`).
+fn ascii_space(b: u8) -> bool {
+    b == 32 || b == 9 || b == 10 || b == 12 || b == 13
+}
+
+// `std`'s message for the Win32 (or NT, through `NTDLL.DLL`) error `e`:
+// `FormatMessageW`'s text with its trailing whitespace trimmed.
+fn os_error_message(inout out: ChunkSeq[u8], e: u32) eff [Ffi[StdFs]] {
+    let mut errnum = e;
+    let mut module: u64 = 0;
+    let mut flags: u32 = 0;
+    if (errnum & FACILITY_NT_BIT) != 0 {
+        let mut ntdll: ChunkSeq[u16] = ChunkSeq::new[u16]();
+        let name = "NTDLL.DLL".as_bytes();
+        for i in 0..name.len() {
+            ntdll.push(widen_u16(u8_at(in name, i)));
+        }
+        ntdll.push(0);
+        module = match StdFs::GetModuleHandleW(in ntdll.as_slice()) {
+            Result::Ok(h) => h,
+            Result::Err(_) => 0,
+        };
+        if module != 0 {
+            errnum = errnum ^ FACILITY_NT_BIT;
+            flags = FORMAT_MESSAGE_FROM_HMODULE;
+        }
+    }
+    let mut buffer: u64 = 0;
+    let (units, fm_err) = StdFs::FormatMessageW(
+        flags | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_ALLOCATE_BUFFER,
+        module,
+        errnum,
+        0,
+        inout buffer,
+        0,
+        0
+    );
+    if units == 0 || units >= MESSAGE_UNITS {
+        if buffer != 0 {
+            let _ = StdFs::LocalFree(buffer);
+        }
+        let err = if units == 0 {
+            fm_err
+        } else {
+            ERROR_INSUFFICIENT_BUFFER
+        };
+        let mut why: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        why.extend(in "returned error ".as_bytes());
+        write_os_number(inout why, err);
+        format_failed(inout out, errnum, in why.as_slice());
+        return;
+    }
+    // At most 3 UTF-8 bytes a UTF-16 unit.
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    text.resize(wrapping_mul(widen_u64(units), 3), 0);
+    let n = StdFs::WideCharToMultiByte(
+        CP_UTF8,
+        WC_ERR_INVALID_CHARS,
+        buffer,
+        wrapping_i32(units),
+        inout text.as_slice_mut(),
+        0,
+        0
+    );
+    let _ = StdFs::LocalFree(buffer);
+    if n <= 0 {
+        format_failed(inout out, errnum, in "returned invalid UTF-16".as_bytes());
+        return;
+    }
+    let mut end = widen_u64(wrapping_u32(n));
+    loop {
+        if end == 0 {
+            break;
+        }
+        match text.try_get(wrapping_sub(end, 1)) {
+            Option::Some(b) => {
+                if !ascii_space(b) {
+                    break;
+                }
+            },
+            Option::None => break,
+        }
+        end = wrapping_sub(end, 1);
+    }
+    out.extend(in text[0..end]);
+}
