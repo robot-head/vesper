@@ -59,6 +59,7 @@ use self::state::{
     hi,
     inc,
     kind_has,
+    kind_sugar,
     lo,
     n32,
     none,
@@ -404,7 +405,9 @@ fn bind(inout s: St, m: u32, inout exported: ChunkSeq[u32]) {
                 s.err_msg.push_str(in msg);
                 emit(inout s, file);
             } else {
-                if public && !is_foreign(in s, key) {
+                // A sugar is no item of the output, and a `.vsys` type is
+                // not a source item: a root module exports neither.
+                if public && kind != kind_sugar() && !is_foreign(in s, key) {
                     exported.push(target);
                 }
                 s.names.insert(local, w(target) | wrapping_shl_u64(widen_u64(kind), 32));

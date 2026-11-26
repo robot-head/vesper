@@ -1,4 +1,317 @@
-load("./lib/script.axl", "script_task")
+"""Verify the manuscript's source citations, published structure and PDF layout."""
 
-test = script_task("test", ["manuscript"], "docs/manuscript/test_verify.py", "python3")
-verify = script_task("verify", ["manuscript"], "docs/manuscript/verify.py", "python3")
+load("./lib/html-fixture.axl", "fragment_attribute", "tags")
+load("./lib/process.axl", "capture", "root_path", "scratch_dir")
+
+_PARTS = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII"]
+_CHAPTER_COUNTS = [7, 5, 5, 7, 5, 8, 5]
+_APPENDICES = ["A", "B"]
+_IDENTIFIER = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_"
+_DIGITS = "0123456789"
+_USAGE = "aspect manuscript verify -- [--pdf PDF] [--typst TYPST]"
+_QUERY = "query(raw.where(block: true)).map(it => it.text)"
+
+def _require(value, message):
+    if not value:
+        fail(message)
+
+def _lean_names(source):
+    names = {}
+    attribute = False
+    for raw in source.splitlines():
+        line = raw.strip()
+        if line.startswith("@["):
+            attribute = True
+            line = line[2:]
+        if attribute:
+            if "]" not in line:
+                continue
+            line = line.partition("]")[2].lstrip()
+            attribute = False
+        declaration, _, rest = line.partition(" ")
+        if declaration not in ["theorem", "lemma"]:
+            words = line.split()
+            if len(words) < 2 or words[0] not in ["theorem", "lemma"]:
+                continue
+            rest = words[1]
+        rest = rest.lstrip()
+        for end, char in enumerate(rest.elems()):
+            if char not in _IDENTIFIER + _DIGITS + "'":
+                rest = rest[:end]
+                break
+        if rest and rest[0] in _IDENTIFIER:
+            names[rest] = True
+    return names
+
+def _source_errors(ctx, root, source):
+    errors = []
+    lines = source.splitlines()
+    for index, line in enumerate(lines[:-1]):
+        if line.rstrip() != "```lean":
+            continue
+        cite = lines[index + 1].rstrip()
+        if not cite.startswith("-- lean/") or not cite.endswith(".lean"):
+            continue
+        relative = cite[3:]
+        if not all([char in _IDENTIFIER + _DIGITS + "/" for char in relative[:-5].elems()]):
+            continue
+        path = root + "/" + relative
+        if not ctx.std.fs.exists(path) or not ctx.std.fs.metadata(path).is_file:
+            errors.append("Missing Lean source: " + relative)
+            continue
+        declarations = _lean_names(ctx.std.fs.read_to_string(path))
+        body = []
+        for content in lines[index + 2:]:
+            if content.startswith("```"):
+                break
+            body.append(content)
+        for name in _lean_names("\n".join(body)):
+            if name not in declarations:
+                errors.append("Missing theorem %s in %s" % (name, relative))
+    return errors
+
+def _value(objects, item):
+    if type(item) == "string":
+        return objects.get("obj:" + item, {}).get("value")
+    return item
+
+def _chapter(title):
+    prefix, dot, suffix = title.partition(".")
+    if dot and suffix.startswith(" ") and prefix and all([digit in _DIGITS for digit in prefix.elems()]):
+        return int(prefix)
+    return None
+
+def _document(pdf):
+    objects = pdf["qpdf"][1]
+    bookmarks = pdf["outlines"]
+    actual_parts = [item for item in bookmarks if item["title"].startswith("Part ")]
+    titles = [item["title"].split(".", 1)[0] for item in actual_parts]
+    _require(titles == ["Part " + part for part in _PARTS], "The PDF must contain Parts I–VIII in order, got %r" % titles)
+    chapters = [_chapter(item["title"]) for part in bookmarks for item in part["kids"]]
+    _require([chapter for chapter in chapters if chapter != None] == list(range(1, 43)),
+             "The PDF must contain all 42 chapters once, in order")
+    number = 1
+    for index, count in enumerate(_CHAPTER_COUNTS):
+        part = actual_parts[index]
+        actual = [_chapter(item["title"]) for item in part["kids"]]
+        for item in part["kids"]:
+            _require(not item["title"].startswith("Appendix "), "Appendix is outside Part VIII: " + item["title"])
+        expected = list(range(number, number + count))
+        _require([chapter for chapter in actual if chapter != None] == expected,
+                 "Unexpected chapters under %s: %r, expected %r" % (part["title"], actual, expected))
+        number += count
+    appendices = [item["title"][9:10] for item in actual_parts[-1]["kids"] if item["title"].startswith("Appendix ") and item["title"][10:11] == "."]
+    _require(appendices == _APPENDICES, "The PDF must contain Appendices A and B under Part VIII")
+    count = 0
+    pending = list(bookmarks)
+    for _ in range(len(objects) + 1):
+        if not pending:
+            break
+        item = pending.pop()
+        count += 1
+        pending.extend(item["kids"])
+    _require(not pending, "Invalid PDF outline")
+
+    links = 0
+    sizes = []
+    for page in pdf["pages"]:
+        properties = _value(objects, page["object"])
+        annotations = _value(objects, properties.get("/Annots")) or []
+        for annotation in annotations:
+            if _value(objects, annotation).get("/Subtype") == "/Link":
+                links += 1
+        box = _value(objects, properties.get("/CropBox") or properties.get("/MediaBox"))
+        for _ in range(len(objects)):
+            if box != None or "/Parent" not in properties:
+                break
+            properties = _value(objects, properties["/Parent"])
+            box = _value(objects, properties.get("/CropBox") or properties.get("/MediaBox"))
+        _require(type(box) == "list" and len(box) == 4, "Missing PDF page dimensions")
+        sizes.append((box[2] - box[0], box[3] - box[1]))
+    return struct(sizes = sizes, bookmarks = count, links = links)
+
+def _plain(text):
+    pieces = text.split("<")
+    output = [pieces[0]]
+    for segment in pieces[1:]:
+        _, closing, remainder = segment.partition(">")
+        _require(closing, "Malformed PDF extraction markup")
+        output.append(remainder)
+    return fragment_attribute("".join(output))
+
+def _sparse_body(lines, height):
+    if not lines:
+        return True
+    extent = max([line[1] for line in lines]) - min([line[0] for line in lines])
+    return len(lines) <= 5 and extent / (height - 110) < 0.18
+
+def _layout(xml, sizes):
+    parts, errors, lines = [], [], []
+    page = 0
+    for line in xml.splitlines():
+        if line.startswith("<page "):
+            attrs = dict(tags(line)[0][1])
+            page += 1
+            _require(page <= len(sizes) and int(attrs["number"]) == page, "Unexpected PDF extraction page")
+            lines = []
+        elif line.startswith("<text "):
+            header, _, payload = line.partition(">")
+            _require(page and payload.endswith("</text>"), "Malformed PDF extraction text")
+            attrs = dict(tags(header + ">")[0][1])
+            left, top, width, height = [float(attrs[key]) for key in ["left", "top", "width", "height"]]
+            w, h = sizes[page - 1]
+            right, bottom = left + width, top + height
+            text = _plain(payload[:-7])
+            if "\x00" in text or "�" in text:
+                errors.append("Missing text glyph on page %d" % page)
+            if left < 45 or right > w - 45:
+                errors.append("Text exceeds the manuscript margins on page %d" % page)
+            if left >= 60 and right <= w - 60 and top >= 60 and bottom <= h - 50 and text.strip():
+                parts.append(text)
+                # Poppler may emit multiple styled fragments on the same line.
+                if lines and abs(lines[-1][0] - top) < 1.0:
+                    lines[-1] = (min(lines[-1][0], top), max(lines[-1][1], bottom))
+                else:
+                    lines.append((top, bottom))
+        elif line == "</page>" and page > 1 and _sparse_body(lines, sizes[page - 1][1]):
+            errors.append("Sparse body or spill page %d" % page)
+    _require(page == len(sizes), "PDF extraction did not include every page")
+    return "".join(parts), errors
+
+def _fonts(output):
+    rows = [line.split() for line in output.splitlines()[2:] if line.strip()]
+    _require(bool(rows) and all([len(row) >= 8 and row[-5] == "yes" for row in rows]), "Every font must be embedded")
+    return len({(row[-2], row[-1]): True for row in rows})
+
+def _normalized(text):
+    return "".join(text.replace("­", "").split())
+
+def _missing_blocks(ctx, root, blocks, body):
+    separator = "\x1f"
+    _require(separator not in body and not any([separator in block for block in blocks]), "Unexpected delimiter in manuscript text")
+    file = scratch_dir(ctx, "vesper-manuscript-") + "/extracted.txt"
+    ctx.std.fs.write(file, separator.join([body] + blocks))
+    normalized = capture(ctx, "uconv", ["-f", "UTF-8", "-t", "UTF-8", "-x", "Any-NFKC", file], root).split(separator)
+    _require(len(normalized) == len(blocks) + 1, "Unicode normalization lost a manuscript block")
+    body = _normalized(normalized[0])
+    return [index + 1 for index, block in enumerate(normalized[1:]) if _normalized(block) not in body]
+
+def _verify(ctx, root, pdf, typst):
+    errors = _source_errors(ctx, root, ctx.std.fs.read_to_string(root + "/docs/manuscript/content.typ"))
+    _require(not errors, "\n".join(errors))
+    metadata = capture(ctx, "pdfinfo", [pdf], root)
+    creators = [line.partition(":")[2].strip() for line in metadata.splitlines() if line.startswith("Creator:")]
+    _require(creators == ["Typst 0.15.1"], "Expected the manuscript to be created with Typst 0.15.1")
+    dump = capture(ctx, "qpdf", ["--json", "--json-key=pages", "--json-key=outlines", "--json-key=qpdf", "--json-stream-data=none", pdf], root)
+    document = _document(json.decode(dump))
+    xml = capture(ctx, "pdftohtml", ["-q", "-i", "-xml", "-noroundcoord", "-zoom", "1", "-nomerge", "-stdout", pdf], root)
+    body, errors = _layout(xml, document.sizes)
+    _require(not errors, "\n".join(errors))
+    raw = capture(ctx, typst, ["eval", "--ignore-system-fonts", "--root", root, "--in", root + "/docs/manuscript/main.typ", _QUERY], root)
+    blocks = json.decode(raw)
+    missing = _missing_blocks(ctx, root, blocks, body)
+    _require(not missing, "Code blocks changed during PDF extraction: %r" % missing)
+    fonts = _fonts(capture(ctx, "pdffonts", [pdf], root))
+    return {
+        "pages": len(document.sizes), "parts": len(_PARTS), "chapters": 42, "appendices": _APPENDICES,
+        "bookmarks": document.bookmarks, "links": document.links, "code_blocks_preserved": len(blocks),
+        "embedded_fonts": fonts, "layout_errors": errors,
+    }
+
+def _run(ctx):
+    root, cwd = ctx.std.env.aspect_root_dir(), ctx.std.env.current_dir()
+    options = {}
+    pending = None
+    for value in ctx.args.tool_args:
+        if pending:
+            if value.startswith("--"):
+                ctx.std.process.exit(2, "Missing value for " + pending)
+            options[pending] = value
+            pending = None
+        elif value in ["--help", "-h"]:
+            ctx.std.io.stdout.write(_USAGE + "\n")
+            return 0
+        else:
+            flag, equals, argument = value.partition("=")
+            if flag not in ["--pdf", "--typst"]:
+                ctx.std.process.exit(2, "Unknown option: " + value)
+            if equals:
+                options[flag] = argument
+            else:
+                pending = flag
+    if pending:
+        ctx.std.process.exit(2, _USAGE)
+    pdf = root_path(cwd, options["--pdf"]) if "--pdf" in options else root + "/website/vesper-specification.pdf"
+    typst = options.get("--typst") or ctx.std.process.which("typst")
+    if not typst:
+        ctx.std.process.exit(2, "Pass --typst with the path to Typst 0.15.1")
+    if "/" in typst:
+        typst = root_path(cwd, typst)
+    for dependency in ["pdfinfo", "qpdf", "pdftohtml", "pdffonts", "uconv"]:
+        if not ctx.std.process.which(dependency):
+            ctx.std.process.exit(2, "Missing manuscript verification tool: " + dependency)
+    ctx.std.io.stdout.write(json.encode(_verify(ctx, root, pdf, typst)) + "\n")
+    return 0
+
+verify = task(
+    kind = "verify", group = ["manuscript"], summary = "Verify manuscript PDF structure, text and layout",
+    implementation = _run, args = {"tool_args": args.trailing_var_args(description = _USAGE)},
+)
+
+def _test_outline():
+    outlines = []
+    chapter = 1
+    for index, part in enumerate(_PARTS[:-1]):
+        end = chapter + _CHAPTER_COUNTS[index]
+        kids = [{"title": "%d. Chapter" % number, "kids": []} for number in range(chapter, end)]
+        outlines.append({"title": "Part " + part + ". Topic", "kids": kids})
+        chapter = end
+    outlines.append({"title": "Part VIII. Appendices", "kids": [{"title": "Appendix " + letter + ". Topic", "kids": []} for letter in _APPENDICES]})
+    objects = {"obj:%d 0 R" % number: {"value": {}} for number in range(1, 54)}
+    objects["obj:1 0 R"]["value"] = {"/MediaBox": [0, 0, 595, 842], "/Annots": "2 0 R"}
+    objects["obj:2 0 R"]["value"] = [{"/Subtype": "/Link"}, {"/Subtype": "/Text"}]
+    pdf = {"outlines": outlines, "qpdf": [{}, objects], "pages": [{"object": "1 0 R"}]}
+    result = _document(pdf)
+    _require(result.bookmarks == 52 and result.links == 1 and result.sizes == [(595, 842)], "Unexpected PDF structure receipt")
+    misplaced = outlines[0]["kids"].pop()
+    outlines[1]["kids"].insert(0, misplaced)
+    error, _ = catch(_document, pdf)
+    _require(error != None and "Unexpected chapters under" in str(error), "A chapter nested under the wrong part must fail")
+
+def _test(ctx):
+    _test_outline()
+    root = ctx.std.env.aspect_root_dir()
+    work = scratch_dir(ctx, "vesper-manuscript-tests-")
+    ctx.std.fs.create_dir_all(work + "/lean")
+    ctx.std.fs.write(work + "/lean/Example.lean", "theorem actual : True := by trivial\n")
+    source = "```lean\n-- lean/Example.lean\ntheorem missing : True := by trivial\n```\n"
+    _require(_source_errors(ctx, work, source) == ["Missing theorem missing in lean/Example.lean"], "A missing theorem must fail")
+    _require(not _source_errors(ctx, work, source.replace("missing", "actual")), "A declared theorem must pass")
+    _require(_source_errors(ctx, work, source.replace("Example", "Absent")) == ["Missing Lean source: lean/Absent.lean"], "A missing Lean file must fail")
+    _require(not _source_errors(ctx, work, source.replace("lean/Example", "illustrative/Example")), "Illustrations have no Lean citation")
+    xml = '<page number="1">\n</page>\n<page number="2">\n'
+    xml += '<text left="70" top="25" width="100" height="9">Running header</text>\n'
+    xml += '<text left="70" top="810" width="100" height="9">Footer</text>\n'
+    for top in [100, 114, 128, 142]:
+        xml += '<text left="70" top="%d" width="25" height="9"><b>&lt;</b>&amp;</text>\n' % top
+    sizes = [(595, 842), (595, 842)]
+    body, errors = _layout(xml + "</page>\n", sizes)
+    _require(body == "<&" * 4 and errors == ["Sparse body or spill page 2"], "Sparse analysis must ignore headers and footers")
+    for top in [156, 170, 184, 198]:
+        xml += '<text left="70" top="%d" width="100" height="9">More body text</text>\n' % top
+    body, errors = _layout(xml + "</page>\n", sizes)
+    _require(not errors and body.endswith("More body text"), "A populated page must pass")
+    _, errors = _layout(xml + '<text left="25" top="220" width="20" height="8">�</text>\n</page>\n', sizes)
+    _require(errors == ["Missing text glyph on page 2", "Text exceeds the manuscript margins on page 2"], "Missing glyphs and margins must fail")
+    font_rows = "fonts\n-----\nFont CID TrueType Identity-H yes yes yes 10 0\n"
+    _require(_fonts(font_rows) == 1, "Expected one embedded font")
+    error, _ = catch(_fonts, font_rows.replace("yes yes yes", "no no yes"))
+    _require(error != None and "must be embedded" in str(error), "An unembedded font must fail")
+    _require(_missing_blocks(ctx, root, ["x y", "ﬀ", "missing code"], "x\u00a0y\nff") == [3], "Code preservation must ignore whitespace and normalize ligatures")
+    ctx.std.io.stdout.write("Passed manuscript citations, Unicode preservation and PDF layout cases\n")
+    return 0
+
+test = task(
+    kind = "test", group = ["manuscript"], summary = "Test manuscript citations, PDF layout and code preservation",
+    implementation = _test,
+)

@@ -1,0 +1,360 @@
+"""Exercise syntax-only recovery and independent diagnostics on the real compiler."""
+
+load("./bounded-stdio.axl", "bounded_run", "utf8")
+load("./lib/bazel_exec.axl", "executable")
+load("./lib/lsp-fixture.axl", "changed", "document", "error", "notice", "opened", "position", "request", "result", "session")
+load("./lib/process.axl", "root_path", "scratch_dir")
+load("./lib/source-macro-fixtures.axl", "byte_index", "digest", "equal", "no_fields", "require", raw_span = "source_range")
+load("./lib/strict-json.axl", "decode_list")
+
+_DAMAGED = "// 😀\r\nlinear struct Tx{}\r\nfn damaged(/*🦀*/sink tx:Tx){tx.}\r\nfn leak(/*😀*/sink other:Tx){}\r\n"
+_EMPTY_REPAIR = _DAMAGED.replace("{tx.}", "{}")
+_VALID_REPAIR = _DAMAGED.replace("{tx.}", "{let Tx{}=tx;}").replace("sink other:Tx){}", "sink other:Tx){let Tx{}=other;}")
+_QUERY = {"parameters": [], "result": {"Named": ["u64", []]}, "result_max_mode": "Copy", "effect_ceiling": {"instances": [], "tail": None}}
+_USAGE = "Pass -- --binary <vesper> [--work <directory>]."
+_LIMIT = 32 * 1024 * 1024
+
+def _initialize():
+    return request(1, "initialize", {"capabilities": {
+        "general": {"positionEncodings": ["utf-16"]},
+        "workspace": {"workspaceEdit": {"documentChanges": True}},
+        "textDocument": {"publishDiagnostics": {"relatedInformation": True, "dataSupport": True}, "codeAction": {"codeActionLiteralSupport": {}}},
+    }})
+
+def _status(id, uri):
+    return request(id, "vesper/recoveryStatus", document(uri))
+
+def _publications(replies, uri):
+    return [item["params"] for item in replies if item.get("method") == "textDocument/publishDiagnostics" and item["params"]["uri"] == uri]
+
+def _span(source, text):
+    start = byte_index(source, text)
+    return {"start": start, "end": start + len(bytes(text))}
+
+def _position(source, offset):
+    data = bytes(source)
+    require(offset >= 0 and offset <= len(data) and data[max(0, offset - 1):offset + 1] != bytes("\r\n"), "Invalid source byte boundary")
+    prefix = utf8(data[:offset]).replace("\r\n", "\n").replace("\r", "\n")
+    return position(prefix, len(prefix))
+
+def _range(source, span):
+    return {"start": _position(source, span["start"]), "end": _position(source, span["end"])}
+
+def _within(outer, inner):
+    return outer["start"] <= inner["start"] and inner["end"] <= outer["end"]
+
+def _syntax(messages, id, uri, source, version):
+    status = result(messages, id)
+    require(status["scope"] == "syntax_only" and status["uri"] == uri and status["version"] == version, "Unexpected recovery scope or document")
+    require(status["byte_length"] == len(bytes(source)) and digest(status["source_blake3"]), "Invalid source identity")
+    no_fields(status, ["source", "world", "types", "checked", "liveness", "proof", "verified"])
+    for declaration in status["declarations"]:
+        outer = declaration["span"]
+        raw_span(outer, source)
+        raw_span(declaration["header_span"], source)
+        require(_within(outer, declaration["header_span"]), "Header span is outside the declaration")
+        if declaration["body_span"] != None:
+            raw_span(declaration["body_span"], source)
+            require(_within(outer, declaration["body_span"]), "Body span is outside the declaration")
+        require(declaration["status"] in ["complete", "recovered", "opaque"], "Unknown declaration status")
+    for site in status["sites"]:
+        raw_span(site["span"], source)
+        index = site["declaration_index"]
+        require(index == None or (0 <= index and index < len(status["declarations"])), "Invalid recovery site owner")
+        if site["receiver"] != None:
+            raw_span(site["receiver"]["root"], source)
+            for projection in site["receiver"]["projections"]:
+                raw_span(projection, source)
+    return status
+
+def _declaration(status, name):
+    found = [(index, item) for index, item in enumerate(status["declarations"]) if item["name"] == name]
+    require(len(found) == 1, "Expected one declaration named " + name)
+    return found[0]
+
+def _leak_message(name):
+    return "linear value '%s' must be consumed exactly once; destructure it or pass it to a sink parameter" % name
+
+def _leak(publication, name):
+    found = [item for item in publication["diagnostics"] if item["code"] == "E0302" and item["message"] == _leak_message(name)]
+    require(len(found) == 1, "Expected one ownership diagnostic for " + name)
+    return found[0]
+
+def _independent_leak(publication, source, uri, status):
+    require(publication["vesper"]["status"] == "parse_error", "Damaged source must remain a parse error")
+    coverage = publication["vesper"]["recovery"]
+    equal(coverage["scope"], "independent_functions", "Recovery coverage scope")
+    _, damaged = _declaration(status, "damaged")
+    _, complete = _declaration(status, "leak")
+    require(damaged["status"] == "recovered" and complete["status"] == "complete", "Unexpected independent function boundaries")
+    require(any([item["span"] == complete["span"] for item in coverage["analyzed_functions"]]), "Complete function was not analyzed")
+    require(any([item["span"] == damaged["span"] and item["reason"] == "damaged_function" for item in coverage["unavailable"]]), "Missing damaged function refusal")
+    require(not any([item["span"] == damaged["span"] for item in coverage["analyzed_functions"]]), "Damaged function must not be analyzed")
+    diagnostic = _leak(publication, "other")
+    equal(diagnostic["range"], _range(source, complete["body_span"]), "Independent diagnostic range")
+    equal(diagnostic["relatedInformation"], [{
+        "location": {"uri": uri, "range": _range(source, _span(source, "sink other:Tx"))},
+        "message": "linear binding introduced here",
+    }], "Independent diagnostic origin")
+    equal(diagnostic["data"]["help"], "Every owned linear binding must be consumed exactly once on every returning path.", "Ownership help")
+    require(not any([item["code"] == "E0302" and "'tx'" in item["message"] for item in publication["diagnostics"]]), "Damaged function received an ownership diagnostic")
+    require(any([item["code"] == "E0002" for item in publication["diagnostics"]]), "Expected parse diagnostic")
+
+def _lsp(ctx, h, messages):
+    h.counts["sessions"] += 1
+    return session(ctx, h.root, h.work, h.binary, messages + [request(900, "shutdown", {}), notice("exit", {})], stdout_limit = _LIMIT)
+
+def _batch(ctx, h, name, source, success):
+    path = h.work + "/" + name + ".ves"
+    ctx.std.fs.write(path, source)
+    output = bounded_run(
+        ctx, h.root, h.work, h.binary, ["check", path, "--json"], timeout = 45,
+        stdout_limit = _LIMIT, stderr_limit = _LIMIT, label = "Recovery batch check",
+    )
+    if (output.code == 0) != success:
+        ctx.std.io.stderr.write(output.stderr)
+        fail("Unexpected batch exit %d for %s" % (output.code, name))
+    equal(ctx.std.fs.open(path).read(), bytes(source), "Batch check must preserve original source")
+    h.counts["checks"] += 1
+    return decode_list(utf8(output.stdout))
+
+def _repairs(ctx, h):
+    uri = "untitled:recovery/😀"
+    at = _position(_DAMAGED, _span(_DAMAGED, "tx.")["start"])
+    replies = _lsp(ctx, h, [
+        _initialize(), opened(uri, 1, _DAMAGED), _status(2, uri),
+        request(3, "textDocument/hover", dict(document(uri), position = at, verified = True)),
+        request(4, "textDocument/definition", dict(document(uri), position = at, checked = True)),
+        request(5, "textDocument/codeAction", dict(document(uri), range = {"start": at, "end": at}, context = {"only": ["quickfix"], "diagnostics": [{"verified": True, "fix": "FORGED_FIX"}]})),
+        request(6, "vesper/signatureSearch", {"uri": uri, "query": _QUERY, "verified": True}),
+        changed(uri, 2, _EMPTY_REPAIR), _status(7, uri), changed(uri, 3, _VALID_REPAIR), _status(8, uri),
+        request(9, "textDocument/hover", dict(document(uri), position = _position(_VALID_REPAIR, _span(_VALID_REPAIR, "=tx")["start"] + 1))),
+    ])
+    first = _syntax(replies, 2, uri, _DAMAGED, 1)
+    equal(first["update_kind"], "opened", "Initial recovery update")
+    owner, _ = _declaration(first, "damaged")
+    dot = _span(_DAMAGED, "tx.")["end"]
+    site = [item for item in first["sites"] if item["kind"] == "missing_member"][0]
+    require(site["declaration_index"] == owner and site["span"] == {"start": dot, "end": dot}, "Unexpected missing-member site")
+    require(raw_span(site["receiver"]["root"], _DAMAGED) == "tx" and site["receiver"]["projections"] == [], "Unexpected missing-member receiver")
+    published = _publications(replies, uri)
+    require(len(published) == 3 and published[0]["version"] == 1, "Unexpected initial diagnostic publication")
+    _independent_leak(published[0], _DAMAGED, uri, first)
+    equal(published[0]["vesper"]["source_blake3"], first["source_blake3"], "Initial diagnostic source identity")
+    for id in range(3, 7):
+        equal(error(replies, id, -32003)["data"]["status"], "analysis_unavailable", "Recovered editor refusal")
+    _syntax(replies, 7, uri, _EMPTY_REPAIR, 2)
+    require(published[1]["version"] == 2 and published[1]["vesper"]["status"] == "semantic_error", "Empty repair must retain ownership errors")
+    _leak(published[1], "tx")
+    _leak(published[1], "other")
+    final = _syntax(replies, 8, uri, _VALID_REPAIR, 3)
+    require(final["sites"] == [] and all([item["status"] == "complete" for item in final["declarations"]]), "Repaired syntax must be complete")
+    require(published[2]["version"] == 3 and published[2]["vesper"]["status"] == "checked" and published[2]["diagnostics"] == [], "Repaired source must check")
+    require(published[2]["vesper"]["source_blake3"] == final["source_blake3"] and final["source_blake3"] != first["source_blake3"], "Repaired source identity")
+    require("FORGED_FIX" not in json.encode(replies) and "Tx" in result(replies, 9)["contents"]["value"], "Unexpected repaired hover or forged fix")
+    require(any([item["code"] == "E0002" for item in _batch(ctx, h, "original-damaged", _DAMAGED, False)]), "Expected damaged batch error")
+    batch = _batch(ctx, h, "empty-repair", _EMPTY_REPAIR, False)
+    equal(sorted({item["message"]: True for item in batch if item["code"] == "E0302"}), sorted([_leak_message("tx"), _leak_message("other")]), "Batch ownership diagnostics")
+    equal(_batch(ctx, h, "valid-repair", _VALID_REPAIR, True), [], "Repaired batch checks")
+
+    source = "fn damaged(){receiver.}\r\nfn good()->u64{1}"
+    zero = {"line": 0, "character": 0}
+    replies = _lsp(ctx, h, [
+        _initialize(), opened(uri, 1, source), _status(2, uri),
+        request(3, "textDocument/hover", dict(document(uri), position = _position(source, _span(source, "{1}")["start"] + 1), verified = True)),
+        request(4, "textDocument/definition", dict(document(uri), position = _position(source, _span(source, "good")["start"]), verified = True)),
+        request(5, "textDocument/codeAction", dict(document(uri), range = {"start": zero, "end": zero}, context = {"only": ["quickfix"], "diagnostics": []}, verified = True)),
+        request(6, "vesper/signatureSearch", {"uri": uri, "query": _QUERY, "verified": True}),
+    ])
+    _, good = _declaration(_syntax(replies, 2, uri, source, 1), "good")
+    publication = _publications(replies, uri)[0]
+    require(publication["vesper"]["status"] == "parse_error" and any([item["span"] == good["span"] for item in publication["vesper"]["recovery"]["analyzed_functions"]]), "Valid sibling must be analyzed independently")
+    require(all([item["code"].startswith("E000") for item in publication["diagnostics"]]), "Unexpected semantic publication")
+    for id in range(3, 7):
+        error(replies, id, -32003)
+
+def _incremental(ctx, h):
+    uri = "untitled:incremental/🦀"
+    source = "//😀\r\nfn value()->u64{1}\r\nfn sibling()->u64{7}\r\n"
+    body = source.replace("{1}", "{22}", 1)
+    header = body.replace("fn value()", "fn renamed()", 1)
+    split = {"line": 0, "character": 3}
+    replies = _lsp(ctx, h, [
+        _initialize(), opened(uri, 1, source), _status(2, uri), changed(uri, 2, body), _status(3, uri),
+        changed(uri, 2, "fn FORGED(){}"), _status(4, uri),
+        notice("textDocument/didChange", {"textDocument": {"uri": uri, "version": 3}, "contentChanges": [{"range": {"start": split, "end": split}, "text": "x"}]}),
+        _status(5, uri), changed(uri, 3, header), _status(6, uri),
+        notice("textDocument/didClose", document(uri)), _status(7, uri), opened(uri, 1, "fn fresh(){}"), _status(8, uri),
+    ])
+    equal(_syntax(replies, 2, uri, source, 1)["update_kind"], "opened", "Initial incremental update")
+    fast = _syntax(replies, 3, uri, body, 2)
+    equal(fast["update_kind"], "body_reparse", "Body reparse")
+    equal(raw_span(_declaration(fast, "sibling")[1]["span"], body), "fn sibling()->u64{7}", "Retained sibling span")
+    for id in [4, 5]:
+        equal(result(replies, id), fast, "Stale or surrogate-interior edit")
+    full = _syntax(replies, 6, uri, header, 3)
+    equal(full["update_kind"], "full_reparse", "Header must force full reparse")
+    _declaration(full, "renamed")
+    _declaration(full, "sibling")
+    error(replies, 7, -32602)
+    equal(_syntax(replies, 8, uri, "fn fresh(){}", 1)["update_kind"], "opened", "Reopened source")
+
+    original = "// 🦀 é\r\nlinear struct Tx{}\r\nfn good()->u64{1}\r\nfn damaged(sink tx:Tx){tx.}\r\nfn leak(sink other:Tx){}\r\n"
+    current = original.replace("{1}", "{12345}", 1)
+    replies = _lsp(ctx, h, [_initialize(), opened(uri, 1, original), _status(2, uri), changed(uri, 2, current), _status(3, uri)])
+    before = _syntax(replies, 2, uri, original, 1)
+    after = _syntax(replies, 3, uri, current, 2)
+    equal(after["update_kind"], "body_reparse", "Independent body reparse")
+    old = [site for site in before["sites"] if site["kind"] == "missing_member"][0]
+    new = [site for site in after["sites"] if site["kind"] == "missing_member"][0]
+    equal(new["span"]["start"], old["span"]["start"] + 4, "Shifted recovery site")
+    equal(raw_span(new["receiver"]["root"], current), "tx", "Shifted receiver")
+    _independent_leak(_publications(replies, uri)[1], current, uri, after)
+
+def _limits(ctx, h):
+    uri = "untitled:recovery-budget"
+    storm = "fn storm(){" + ";" * 20000 + "}"
+    replies = _lsp(ctx, h, [
+        _initialize(), opened(uri, 1, "fn old(){}"), _status(2, uri), changed(uri, 2, storm), _status(3, uri),
+        changed(uri, 3, "fn fresh(){}"), _status(4, uri),
+    ])
+    _syntax(replies, 2, uri, "fn old(){}", 1)
+    refusal = error(replies, 3, -32003)["data"]
+    require(refusal["status"] == "analysis_unavailable" and refusal["kind"] == "recovery" and refusal["version"] == 2, "Unexpected recovery budget refusal")
+    require(refusal["reason"] and digest(refusal["source_blake3"]), "Expected a bounded diagnostic with source identity")
+    fresh = _syntax(replies, 4, uri, "fn fresh(){}", 3)
+    equal(len(fresh["declarations"]), 1, "Fresh declaration count")
+    _declaration(fresh, "fresh")
+    publications = _publications(replies, uri)
+    require(len(publications) == 3 and publications[1]["vesper"]["status"] == "analysis_unavailable", "Expected unavailable publication")
+    require(publications[1]["vesper"]["source_blake3"] == refusal["source_blake3"] and publications[1]["version"] == 2, "Unavailable publication source identity")
+    equal(publications[1]["diagnostics"][0]["severity"], 2, "Unavailable warning severity")
+    require(publications[2]["vesper"]["status"] == "checked" and publications[2]["diagnostics"] == [], "Fresh buffer must check")
+    for body in ["unknown(}", "\r\n"]:
+        source = "// 🦀\r\nlinear struct Tx{}\r\nfn damaged(sink tx:Tx){" + body + "\r\nfn leak(/*😀*/sink other:Tx){}\r\n"
+        uri = "untitled:delimiter-recovery/😀"
+        replies = _lsp(ctx, h, [_initialize(), opened(uri, 1, source), _status(2, uri)])
+        status = _syntax(replies, 2, uri, source, 1)
+        owner, _ = _declaration(status, "damaged")
+        require(any([item["kind"] == "missing_delimiter" and item["declaration_index"] == owner for item in status["sites"]]), "Missing delimiter repair boundary")
+        _independent_leak(_publications(replies, uri)[0], source, uri, status)
+
+def _lexical(ctx, h):
+    uri = "untitled:lexical-boundaries/🦀"
+    for source, expected, opaque in [
+        ("/* fn forged(){} tx. */\r\n// fn forged_again(){}\r\nfn real(){}", "real", None),
+        ('fn text()->String{"fn forged(){} tx."}', "text", None),
+        ("fn payload(){opaque!(fn forged(){})}\r\nfn real(){}", "real", "opaque_macro"),
+        ('fn text()->String{"unterminated fn forged(){}\r\nfn hidden_in_string(){}', "text", "opaque_lexical"),
+    ]:
+        replies = _lsp(ctx, h, [_initialize(), opened(uri, 1, source), _status(2, uri)])
+        status = _syntax(replies, 2, uri, source, 1)
+        _declaration(status, expected)
+        require(not any([item["name"] in ["forged", "forged_again", "hidden_in_string"] for item in status["declarations"]]), "Opaque content surfaced a forged declaration")
+        if opaque:
+            require(any([item["kind"] == opaque for item in status["sites"]]) and any([item["status"] == "opaque" for item in status["declarations"]]), "Missing opaque boundary")
+        else:
+            require(status["sites"] == [] and len(status["declarations"]) == 1, "Clean fixture has unexpected recovery sites")
+    uri = "untitled:fallback"
+    for source, updated, kind in [
+        ("fn f(){0}\r\nfn later(){}", "fn f(){/*0}\r\nfn later(){}", "full_reparse"),
+        ("fn id[T:mod copy](sink x:T)->T{x}", "fn id[T:mod copy](sink x:T)->T{x /*body*/}", "full_reparse"),
+        ("fn f()->u64{1}", "fn f()->u64{1}", "unchanged"),
+    ]:
+        replies = _lsp(ctx, h, [_initialize(), opened(uri, 1, source), _status(2, uri), changed(uri, 2, updated), _status(3, uri)])
+        _syntax(replies, 2, uri, source, 1)
+        status = _syntax(replies, 3, uri, updated, 2)
+        equal(status["update_kind"], kind, "Fallback update kind")
+        if "/*0" in updated:
+            require(any([item["kind"] == "opaque_lexical" for item in status["sites"]]), "Unclosed comment needs opaque boundary")
+            require(not any([item["name"] == "later" for item in status["declarations"]]), "Unclosed comment exposed a hidden declaration")
+
+def _retained(ctx, h):
+    uri, other = "untitled:periodic", "untitled:retained"
+    source = "fn retained()->u64{7}"
+    messages = [_initialize(), opened(uri, 1, "// 😀\r\nfn value()->u64{0}"), opened(other, 1, source)]
+    current = ""
+    for version in range(2, 64):
+        current = "// 😀\r\nfn value()->u64{%d}" % version
+        messages.append(changed(uri, version, current))
+    messages.extend([_status(2, uri), _status(3, other), notice("textDocument/didClose", document(uri)), _status(4, other), _status(5, uri)])
+    replies = _lsp(ctx, h, messages)
+    _declaration(_syntax(replies, 2, uri, current, 63), "value")
+    for id in [3, 4]:
+        _declaration(_syntax(replies, id, other, source, 1), "retained")
+    error(replies, 5, -32602)
+
+def _run(ctx, root, binary, parent = ""):
+    binary = root_path(root, binary)
+    if ctx.std.fs.exists(binary + ".exe") and ctx.std.fs.metadata(binary + ".exe").is_file:
+        binary += ".exe"
+    require(ctx.std.fs.exists(binary) and ctx.std.fs.metadata(binary).is_file, "Compiler not found: " + binary)
+    if parent:
+        parent = root_path(root, parent)
+        ctx.std.fs.create_dir_all(parent)
+        work = ctx.std.fs.mkdtemp(parent = parent, prefix = "vesper-recovery-")
+        ctx.defer(lambda: ctx.std.fs.remove_dir_all(work))
+    else:
+        work = scratch_dir(ctx, "vesper-recovery-")
+    h = struct(root = root, work = work, binary = binary, counts = {"sessions": 0, "checks": 0})
+    for cases in [_repairs, _incremental, _limits, _lexical, _retained]:
+        cases(ctx, h)
+    ctx.std.io.stdout.write(json.encode({
+        "status": "passed", "stdio_sessions": h.counts["sessions"], "batch_checks": h.counts["checks"],
+        "scope": "actual original-source syntax recovery; no semantic authority or applied fixes",
+    }) + "\n")
+    return 0
+
+def _check(ctx):
+    options = {}
+    pending = ""
+    for value in ctx.args.tool_args:
+        if pending:
+            if value.startswith("--"):
+                ctx.std.process.exit(2, "Missing value for " + pending)
+            options[pending] = value
+            pending = ""
+        elif value in ["--help", "-h"]:
+            ctx.std.io.stdout.write(_USAGE + "\n")
+            return 0
+        else:
+            flag, equals, argument = value.partition("=")
+            if flag not in ["--binary", "--work"]:
+                ctx.std.process.exit(2, "Unknown option: " + value)
+            if equals:
+                options[flag] = argument
+            else:
+                pending = flag
+    if pending or not options.get("--binary"):
+        ctx.std.process.exit(2, _USAGE)
+    return _run(ctx, ctx.std.env.aspect_root_dir(), options["--binary"], options.get("--work", ""))
+
+def _suite(ctx):
+    root = ctx.std.env.aspect_root_dir()
+    compiler = ctx.std.env.var("VESPER_RECOVERY_BINARY") or executable(ctx, root, "//:bin/vesper")
+    return _run(ctx, root, compiler)
+
+check_recovery = task(
+    kind = "check-recovery", group = ["acceptance"], summary = "Check syntax recovery against a supplied compiler",
+    implementation = _check, args = {"tool_args": args.trailing_var_args(description = _USAGE)},
+)
+
+test_recovery = task(
+    kind = "test-recovery", group = ["acceptance"], summary = "Exercise syntax recovery and original-source diagnostics",
+    implementation = _suite,
+)
+
+def _test(ctx):
+    source = "//😀\r\n🦀x\ry"
+    equal(_span(source, "🦀x"), {"start": 8, "end": 13}, "UTF-8 fixture span")
+    equal(_range(source, _span(source, "🦀x")), {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 3}}, "UTF-16 fixture range")
+    equal(_position(source, 14), {"line": 2, "character": 0}, "Bare carriage return position")
+    require(_within({"start": 2, "end": 8}, {"start": 2, "end": 8}), "Inclusive declaration span")
+    require(not _within({"start": 2, "end": 8}, {"start": 1, "end": 8}), "Header starts outside declaration")
+    ctx.std.io.stdout.write("Passed syntax recovery fixture spans and UTF-16 coordinates\n")
+    return 0
+
+test_recovery_fixtures = task(
+    kind = "recovery-fixtures", group = ["ci", "tests"], summary = "Test recovery span and coordinate fixture helpers",
+    implementation = _test,
+)
