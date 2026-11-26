@@ -1,6 +1,26 @@
 // Unwrap a Result with `?` and pass its value to a named function.
-// The later arguments run only if the result succeeds.
+// A single bare `_` selects its position; without one, the value is first.
+// Evaluate and unwrap the result before any other argument, even when the
+// placeholder follows those arguments. Preserve their argument passes.
 pub sugar pipe_try: infix(`|?>`, pipeline, left) emits eff [Fail] {
+    rule ($result:expr |?> $callee:ident(_)) => {
+        $callee($result?)
+    }
+    rule ($result:expr |?> $callee:ident(_, $..after:args)) => {
+        $callee($result?, $..after)
+    }
+    rule ($result:expr |?> $callee:ident($..before:args, _)) => {
+        {
+            let piped = $result?;
+            $callee($..before, piped)
+        }
+    }
+    rule ($result:expr |?> $callee:ident($..before:args, _, $..after:args)) => {
+        {
+            let piped = $result?;
+            $callee($..before, piped, $..after)
+        }
+    }
     rule ($result:expr |?> $callee:ident($..args:args)) => {
         $callee($result?, $..args)
     }
@@ -40,6 +60,51 @@ test {
         let mut log: i64 = 0;
         let result = handle Fail[i64] in {
             run(inout log, ok)
+        } with {
+            return value => value,
+            raise(error, _) => error,
+        };
+        result == expected && log == expected_log
+    }
+
+    fn digits(in first: i64, second: i64, third: i64) -> i64 {
+        wrapping_add(wrapping_mul(first, 100), wrapping_add(wrapping_mul(second, 10), third))
+    }
+
+    fn inserts_unwrapped_value_at_the_selected_argument() -> bool eff [Fail[i64]] {
+        let one: i64 = 1;
+        let first: Result[i64, i64] = Result::Ok(one);
+        let second: Result[i64, i64] = Result::Ok(2);
+        let third: Result[i64, i64] = Result::Ok(3);
+        let sole = first |?> identity(_);
+        let leading = first |?> digits(_, 2, 3);
+        let middle = second |?> digits(in one, _, 3);
+        let last = third |?> digits(in one, 2, _);
+        let mut log: i64 = 0;
+        let recorded = third |?> record(inout log, _);
+        sole == 1 && leading == 123 && middle == 123 && last == 123 && recorded == 3 && log == 3
+    }
+
+    // @case all_positions()
+    fn test_placeholder_positions() -> bool {
+        handle Fail[i64] in {
+            inserts_unwrapped_value_at_the_selected_argument()
+        } with {
+            return value => value,
+            raise(_, _) => false,
+        }
+    }
+
+    fn run_placeholder(inout log: i64, ok: bool) -> i64 eff [Fail[i64]] {
+        source(inout log, ok) |?> digits(record(inout log, 2), _, record(inout log, 3))
+    }
+
+    // @case success(true, 213, 123)
+    // @case failure(false, 90, 1)
+    fn test_placeholder_order(ok: bool, expected: i64, expected_log: i64) -> bool {
+        let mut log: i64 = 0;
+        let result = handle Fail[i64] in {
+            run_placeholder(inout log, ok)
         } with {
             return value => value,
             raise(error, _) => error,

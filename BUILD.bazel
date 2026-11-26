@@ -129,11 +129,13 @@ vesper_crate(
             "//crates/vesper-prism-h3:files",
             "//crates/vesper-semver:files",
         ],
-        # sort imports `guard` and `when` from @vesper-std/sugar, so testing
-        # sort/src/unstable.ves resolves sort's manifest and its dependency.
+        # sort imports `guard` and `when` from @vesper-std/sugar and the
+        # Option methods from @vesper-std/core (#2026), so testing
+        # sort/src/unstable.ves resolves sort's manifest and its dependencies.
         "test/test_runner_cli": glob([
             "packages/vesper-std/*/src/*.ves",
         ]) + [
+            "packages/vesper-std/core/Loom.toml",
             "packages/vesper-std/sort/Loom.toml",
             "packages/vesper-std/sugar/Loom.toml",
             "//crates/vesper-crucible:files",
@@ -165,7 +167,10 @@ vesper_crate(
         # SH1 lane 14 (#1157) part 4: @vesper/sugar against sugar_expand on
         # the rules of the sugar test suites.
         "test/self_host_sugar": glob([
+            "packages/vesper-ast/**",
+            "packages/vesper-check-data/**",
             "packages/vesper-front/**",
+            "packages/vesper-std/**",
             "packages/vesper-sugar/**",
             "src/forge_frontend/sugar.rs",
             "src/packages/sugar.rs",
@@ -1338,7 +1343,18 @@ vesper_package(
     srcs = glob(["packages/vesper-std/sort/src/**/*.ves"]),
     manifest = "packages/vesper-std/sort/Loom.toml",
     visibility = ["//visibility:public"],
-    deps = [":std_sugar_package"],
+    deps = [
+        ":std_core_package",
+        ":std_sugar_package",
+    ],
+)
+
+# @vesper-std/core, for the `Option` methods @vesper-std/sort reads with.
+vesper_package(
+    name = "std_core_package",
+    srcs = glob(["packages/vesper-std/core/src/**/*.ves"]),
+    manifest = "packages/vesper-std/core/Loom.toml",
+    visibility = ["//visibility:public"],
 )
 
 # @vesper-std/sugar, the `guard` and `when` sugars, as a path dependency of

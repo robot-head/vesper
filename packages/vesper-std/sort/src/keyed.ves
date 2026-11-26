@@ -52,10 +52,7 @@ fn insertion_by[K: mod copy + Ord](in keys: Slice[K], inout order: Slice[u32], l
                         break;
                     }
                     let k = wrapping_sub(j, 1);
-                    let y = match order.try_get(k) {
-                        Option::Some(y) => y,
-                        Option::None => x,
-                    };
+                    let y = order.try_get(k).unwrap_or(x);
                     if !before(in keys, x, y) {
                         break;
                     }
@@ -154,20 +151,14 @@ fn partition_by[K: mod copy + Ord](
             if i >= last {
                 break;
             }
-            xi = match order.try_get(i) {
-                Option::Some(x) => x,
-                Option::None => p,
-            };
+            xi = order.try_get(i).unwrap_or(p);
             if !before(in keys, xi, p) {
                 break;
             }
         }
         loop {
             j = wrapping_sub(j, 1);
-            xj = match order.try_get(j) {
-                Option::Some(x) => x,
-                Option::None => p,
-            };
+            xj = order.try_get(j).unwrap_or(p);
             if !before(in keys, p, xj) {
                 break;
             }

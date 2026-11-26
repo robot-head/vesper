@@ -190,10 +190,9 @@ fn check_world(calls: &Entry, name: &str, w: &World, per: usize, tally: &mut Tal
     for ((entry, optimize), block) in tasks.iter().zip(blocks) {
         tally.tasks += 1;
         let start = Instant::now();
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let quiet = quiet_panics();
         let rust = std::panic::catch_unwind(|| rust_task(w, entry, *optimize));
-        std::panic::set_hook(quiet);
+        drop(quiet);
         tally.rust += start.elapsed();
         let Ok(rust) = rust else {
             tally.unverified += 1;

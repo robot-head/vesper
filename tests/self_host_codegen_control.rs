@@ -237,10 +237,9 @@ fn bindings_words(e: &mut Enc, bindings: &[EffectBinding], out: &mut Vec<u64>) {
 /// Encodes `w` and a task; `None` when a type cannot be encoded (a literal
 /// past 64 bits).
 fn encode_world(w: &World, task: impl FnOnce(&mut Enc, &mut Vec<u64>)) -> Option<Vec<u8>> {
-    let quiet = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    let quiet = quiet_panics();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| encode(w, task)));
-    std::panic::set_hook(quiet);
+    drop(quiet);
     r.ok()
 }
 
@@ -446,8 +445,7 @@ fn session_cases(w: &World) -> Vec<(String, Vec<EffectBinding>)> {
 }
 
 fn rust_plans(w: &World, cases: &[(String, Vec<EffectBinding>)]) -> Option<String> {
-    let quiet = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    let quiet = quiet_panics();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut out = String::new();
         for (entry, bindings) in cases {
@@ -458,7 +456,7 @@ fn rust_plans(w: &World, cases: &[(String, Vec<EffectBinding>)]) -> Option<Strin
         }
         out
     }));
-    std::panic::set_hook(quiet);
+    drop(quiet);
     r.ok()
 }
 
@@ -944,8 +942,7 @@ mod freshness {
                 }
             }
         }
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let quiet = quiet_panics();
         for c in corpus() {
             let w = &c.world;
             for (entry, bindings) in session_cases(w) {
@@ -963,7 +960,7 @@ mod freshness {
                 }
             }
         }
-        std::panic::set_hook(quiet);
+        drop(quiet);
         out
     }
 
