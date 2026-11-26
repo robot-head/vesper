@@ -1599,6 +1599,21 @@ vesper_package(
     deps = ["//crates/vesper-serde:port_package"],
 )
 
+# The verified code generator (#1886, part 4d-2), for the hybrid's
+# `verified_codegen` swap.
+vesper_package(
+    name = "verified_codegen_package",
+    srcs = glob(["packages/vesper-verified-codegen/src/**/*.ves"]),
+    manifest = "packages/vesper-verified-codegen/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":check_layout_package",
+        ":place_ir_package",
+        ":std_collections_package",
+    ],
+)
+
 # Self-hosting SH5 lane 18 (#1341): Lean extraction, for the hybrid's
 # `lean_extract` swap.
 # @vesper/proof-audit, `vesper proof-audit` in Vesper (SH5 lane 18, #1341),
