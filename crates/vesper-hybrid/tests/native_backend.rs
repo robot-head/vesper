@@ -16,8 +16,8 @@ mod floating;
 mod wide;
 
 use cranelift_codegen::ir::{
-    AbiParam, Block, BlockArg, BlockCall, Endianness, InstBuilder, JumpTableData, MemFlags, Opcode,
-    StackSlotData, StackSlotKind, Type, Value, condcodes::IntCC, types,
+    AbiParam, AtomicRmwOp, Block, BlockArg, BlockCall, Endianness, InstBuilder, JumpTableData,
+    MemFlags, Opcode, StackSlotData, StackSlotKind, Type, Value, condcodes::IntCC, types,
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -40,6 +40,9 @@ enum Case {
     Binary(Binary),
     MultiplyHigh(Type, bool),
     CheckedArithmetic(Type, Binary, bool, CheckedUse),
+    Atomic(Type),
+    AtomicIncrement,
+    ByteSwap(Type),
     Chain,
     RepeatedOperands,
     DeadValues,
@@ -191,6 +194,7 @@ fn integer_backend_matches_cranelift_results() {
         Case::LoadWidths,
         Case::WideningLoads,
         Case::RetainedLoad,
+        Case::AtomicIncrement,
         Case::MemoryStores,
         Case::GuardedMemory,
         Case::JoinedMemory,
@@ -214,6 +218,8 @@ fn integer_backend_matches_cranelift_results() {
                     }),
             )
             .chain([types::I8, types::I16, types::I32].map(Case::NarrowArithmetic))
+            .chain([types::I8, types::I16, types::I32, types::I64].map(Case::Atomic))
+            .chain([types::I16, types::I32, types::I64].map(Case::ByteSwap))
             .chain([types::I8, types::I16, types::I32, types::I64].map(Case::ImmediateBoundaries))
             .chain([types::I8, types::I16, types::I32].map(Case::NarrowShifts))
             .chain([types::I32, types::I64].into_iter().flat_map(|width| {
@@ -265,6 +271,64 @@ fn integer_backend_matches_cranelift_results() {
                 Binary::Or => builder.ins().bor(e, f),
                 Binary::Xor => builder.ins().bxor(e, f),
             },
+            Case::ByteSwap(width) => {
+                let input = if width == types::I64 {
+                    e
+                } else {
+                    builder.ins().ireduce(width, e)
+                };
+                let swapped = builder.ins().bswap(input);
+                if width == types::I64 {
+                    swapped
+                } else {
+                    builder.ins().uextend(types::I64, swapped)
+                }
+            }
+            Case::AtomicIncrement => {
+                builder
+                    .ins()
+                    .atomic_rmw(types::I64, MemFlags::trusted(), AtomicRmwOp::Add, a, b)
+            }
+            Case::Atomic(width) => {
+                let flags = MemFlags::trusted();
+                let (initial, argument) = if width == types::I64 {
+                    (b, c)
+                } else {
+                    (
+                        builder.ins().ireduce(width, b),
+                        builder.ins().ireduce(width, c),
+                    )
+                };
+                builder.ins().atomic_store(flags, initial, a);
+                let before_add =
+                    builder
+                        .ins()
+                        .atomic_rmw(width, flags, AtomicRmwOp::Add, a, argument);
+                builder
+                    .ins()
+                    .atomic_rmw(width, flags, AtomicRmwOp::Sub, a, initial);
+                let before_exchange =
+                    builder
+                        .ins()
+                        .atomic_rmw(width, flags, AtomicRmwOp::Xchg, a, initial);
+                let before_sub =
+                    builder
+                        .ins()
+                        .atomic_rmw(width, flags, AtomicRmwOp::Sub, a, argument);
+                builder.ins().fence();
+                let final_value = builder.ins().atomic_load(width, flags, a);
+                let [before_add, before_exchange, before_sub, final_value] =
+                    [before_add, before_exchange, before_sub, final_value].map(|value| {
+                        if width == types::I64 {
+                            value
+                        } else {
+                            builder.ins().uextend(types::I64, value)
+                        }
+                    });
+                let before = builder.ins().iadd(before_add, before_exchange);
+                let after = builder.ins().bxor(before_sub, final_value);
+                builder.ins().iadd(before, after)
+            }
             Case::MultiplyHigh(width, signed) => {
                 let preserved = builder.ins().iadd(a, b);
                 let (lhs, rhs) = if width == types::I64 {
@@ -834,6 +898,14 @@ fn integer_backend_matches_cranelift_results() {
         }
         let bytes = binding::x86_64_integer_block(&request);
         assert!(!bytes.is_empty(), "{case:?}");
+        if matches!(case, Case::Atomic(_)) {
+            const MFENCE: [u8; 3] = [0x0f, 0xae, 0xf0];
+            assert!(
+                bytes
+                    .windows(MFENCE.len())
+                    .any(|operation| operation == MFENCE)
+            );
+        }
         if matches!(case, Case::SpilledValues { fixed_slot: false }) {
             // This function has no explicit slots. The prologue reserves spills.
             assert!(bytes.starts_with(&[0x48, 0x83, 0xec]));
@@ -858,6 +930,52 @@ fn integer_backend_matches_cranelift_results() {
         let baseline: Fn6 = unsafe { std::mem::transmute(module.get_finalized_function(baseline)) };
         let candidate: Fn6 =
             unsafe { std::mem::transmute(module.get_finalized_function(candidate)) };
+        if matches!(case, Case::Atomic(_)) {
+            for (value, input) in [
+                (0, 1),
+                (u64::MAX, 2),
+                (0x1234_abcd_0000_0000, 0x1234_abcd_9876_ffff),
+            ] {
+                let mut reference_memory = 0x4856_0326_76ab_2468u64;
+                let mut candidate_memory = reference_memory;
+                let run = |function: Fn6, memory: &mut u64| unsafe {
+                    function(std::ptr::from_mut(memory) as u64, value, input, 0, 0, 0)
+                };
+                assert_eq!(
+                    run(candidate, &mut candidate_memory),
+                    run(baseline, &mut reference_memory)
+                );
+                assert_eq!(candidate_memory, reference_memory);
+            }
+            continue;
+        }
+        if matches!(case, Case::AtomicIncrement) {
+            use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+            const WORKERS: usize = 4;
+            const INCREMENTS: usize = 251;
+            let counter = AtomicU64::new(0);
+            let mut old_values = std::thread::scope(|scope| {
+                let counter = &counter;
+                let jobs: Vec<_> = (0..WORKERS)
+                    .map(|_| {
+                        scope.spawn(move || {
+                            (0..INCREMENTS)
+                                .map(|_| unsafe {
+                                    candidate(counter.as_ptr() as u64, 1, 0, 0, 0, 0)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                jobs.into_iter()
+                    .flat_map(|job| job.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            old_values.sort_unstable();
+            assert_eq!(counter.load(SeqCst), (WORKERS * INCREMENTS) as u64);
+            assert!(old_values.into_iter().eq(0..(WORKERS * INCREMENTS) as u64));
+            continue;
+        }
         let memory: [u8; 512] = std::array::from_fn(|i| i.wrapping_mul(97) as u8);
         if matches!(case, Case::GuardedMemory | Case::JoinedMemory) {
             for condition in [0, 0x100, 0x101, u64::MAX] {

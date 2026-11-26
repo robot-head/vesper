@@ -13,6 +13,7 @@ enum Case {
     Add,
     Subtract,
     HighHalf,
+    ByteSwap,
     SignedExtend,
     UnsignedExtend,
     Compare(IntCC),
@@ -58,6 +59,7 @@ fn wide_values_match_cranelift_across_registers_and_block_edges() {
         Case::Add,
         Case::Subtract,
         Case::HighHalf,
+        Case::ByteSwap,
         Case::SignedExtend,
         Case::UnsignedExtend,
         Case::Loop,
@@ -85,6 +87,7 @@ fn wide_values_match_cranelift_across_registers_and_block_edges() {
                 let (_, high) = builder.ins().isplit(sum);
                 builder.ins().iconcat(tail, high)
             }
+            Case::ByteSwap => builder.ins().bswap(left),
             Case::SignedExtend | Case::UnsignedExtend => {
                 let small = builder.ins().ireduce(types::I16, left);
                 if matches!(case, Case::SignedExtend) {

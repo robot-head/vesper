@@ -3,7 +3,7 @@ use cranelift_codegen::{
     binemit::Reloc,
     entity::SecondaryMap,
     ir::{
-        AbiParam, Block, BlockCall, Endianness, ExternalName, Function, GlobalValue,
+        AbiParam, AtomicRmwOp, Block, BlockCall, Endianness, ExternalName, Function, GlobalValue,
         GlobalValueData, Inst, InstructionData, MemFlags, Opcode, StackSlot, StackSlotKind,
         TrapCode, Type, Value, ValueDef,
         condcodes::{FloatCC, IntCC},
@@ -121,6 +121,11 @@ enum IntegerOp {
     FloatStackStore32 = 99,
     FloatStackStore64 = 100,
     FloatCopySign = 101,
+    AtomicAdd = 102,
+    AtomicSub = 103,
+    AtomicExchange = 104,
+    Fence = 105,
+    ByteSwap = 106,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -411,6 +416,10 @@ impl IntegerBlocks<'_> {
         flags.notrap()
             || (self.allow_hardware_faults
                 && flags.trap_code() == Some(TrapCode::HEAP_OUT_OF_BOUNDS))
+    }
+
+    fn supports_atomic_access(&self, flags: MemFlags) -> bool {
+        supports_memory_format(flags) && self.supports_memory_access(flags)
     }
 
     fn append(&mut self, op: IntegerOp, operands: [u64; 3]) -> u64 {
@@ -747,6 +756,16 @@ impl IntegerBlocks<'_> {
                 ]
             }
             InstructionData::Unary {
+                opcode: Opcode::Bswap,
+                arg,
+            } if output == types::I128 => {
+                let [low, high] = pair(arg)?;
+                [
+                    self.append(IntegerOp::ByteSwap, [high, 0, INTEGER_CELL_BITS]),
+                    self.append(IntegerOp::ByteSwap, [low, 0, INTEGER_CELL_BITS]),
+                ]
+            }
+            InstructionData::Unary {
                 opcode: opcode @ (Opcode::Uextend | Opcode::Sextend),
                 arg,
             } if output == types::I128 => {
@@ -921,6 +940,27 @@ impl IntegerBlocks<'_> {
         for inst in instructions {
             let input = |value| values.low[function.dfg.resolve_aliases(value)];
             let ty = |value| function.dfg.value_type(function.dfg.resolve_aliases(value));
+            if function.dfg.insts[inst].opcode() == Opcode::Fence {
+                self.append(IntegerOp::Fence, [0; 3]);
+                continue;
+            }
+            if let InstructionData::StoreNoOffset {
+                opcode: Opcode::AtomicStore,
+                flags,
+                args: [source, address],
+            } = function.dfg.insts[inst]
+            {
+                if ty(address) != types::I64 || !self.supports_atomic_access(flags) {
+                    return None;
+                }
+                // A memory exchange implements a sequentially consistent
+                // store on x86. Its previous value is dead.
+                self.append(
+                    IntegerOp::AtomicExchange,
+                    [input(address)?, input(source)?, integer_width(ty(source))?],
+                );
+                continue;
+            }
             if let InstructionData::StackStore {
                 opcode: Opcode::StackStore,
                 arg,
@@ -1022,6 +1062,37 @@ impl IntegerBlocks<'_> {
             let output = function.dfg.value_type(value);
             let width = integer_width(output)?;
             let (op, operands) = match function.dfg.insts[inst] {
+                InstructionData::LoadNoOffset {
+                    opcode: Opcode::AtomicLoad,
+                    flags,
+                    arg,
+                } if ty(arg) == types::I64 && self.supports_atomic_access(flags) => {
+                    // x86 orders a plain load strongly enough for a CLIF atomic load.
+                    (IntegerOp::Load, [input(arg)?, 0, width])
+                }
+                InstructionData::AtomicRmw {
+                    opcode: Opcode::AtomicRmw,
+                    flags,
+                    op,
+                    args: [address, source],
+                } if ty(address) == types::I64
+                    && ty(source) == output
+                    && self.supports_atomic_access(flags) =>
+                {
+                    let op = match op {
+                        AtomicRmwOp::Add => IntegerOp::AtomicAdd,
+                        AtomicRmwOp::Sub => IntegerOp::AtomicSub,
+                        AtomicRmwOp::Xchg => IntegerOp::AtomicExchange,
+                        _ => return None,
+                    };
+                    (op, [input(address)?, input(source)?, width])
+                }
+                InstructionData::Unary {
+                    opcode: Opcode::Bswap,
+                    arg,
+                } if ty(arg) == output && output != types::I8 => {
+                    (IntegerOp::ByteSwap, [input(arg)?, 0, width])
+                }
                 InstructionData::UnaryGlobalValue {
                     opcode: Opcode::GlobalValue | Opcode::SymbolValue,
                     global_value,
@@ -1622,6 +1693,8 @@ impl IntegerBlocks<'_> {
 /// for the boolean result of the same instruction.
 /// AddCarry and SubBorrow consume the immediately preceding flag as their
 /// third operand, with two i64 inputs and an i64 result.
+/// Atomic read-modify-write records take an address, operand, and width.
+/// They remain live for their memory effect even when the old value is unused.
 /// After the stack declarations, FloatArgument binds successive SysV XMM
 /// arguments. These use their own register bank and occupy normal value IDs.
 /// A trailing FloatReturn selects XMM0 for the single return value.

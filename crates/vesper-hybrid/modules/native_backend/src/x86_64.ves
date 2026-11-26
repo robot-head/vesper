@@ -91,6 +91,16 @@ pub const SSE_SQRT: u8 = 0x51;
 const SHIFT_GROUP_IMM8: u8 = 0xc1;
 const SHIFT_GROUP_CL: u8 = 0xd3;
 const XCHG_RM_R64: u8 = 0x87;
+const XCHG_RM_R8: u8 = 0x86;
+const LOCK_PREFIX: u8 = 0xf0;
+const XADD_RM_R8: u8 = 0xc0;
+const XADD_RM_R64: u8 = 0xc1;
+const ADD_RM_R8: u8 = 0x00;
+const SUB_RM_R8: u8 = 0x28;
+const FENCE_GROUP: u8 = 0xae;
+const MFENCE_MODRM: u8 = 0xf0;
+const BSWAP_REGISTER: u8 = 0xc8;
+const ROR_EXTENSION: u8 = 1;
 const CMP_RM_R8: u8 = 0x38;
 const CMP_RM_R64: u8 = 0x39;
 const SETCC: u8 = 0x90;
@@ -178,6 +188,13 @@ pub copy enum FixedArithmetic {
     UnsignedMultiplyHigh,
 }
 
+pub copy enum AtomicMemory {
+    FetchAdd,
+    Exchange,
+    Add,
+    Subtract,
+}
+
 pub copy enum Instruction {
     Immediate(u8, u64),
     FloatImmediate(u8, u64, u64),
@@ -193,6 +210,9 @@ pub copy enum Instruction {
     Multiply(u8, u8, u64),
     MultiplyImmediate(u8, u8, u32, u64),
     Fixed(FixedArithmetic, u8, u64),
+    Atomic(AtomicMemory, u8, u8, u64),
+    Fence,
+    ByteSwap(u8, u64),
     Unary(u8, u8, u64),
     Shift(u8, u8, u8, u64),
     ShiftRegister(u8, u8, u8, u64),
@@ -532,6 +552,43 @@ fn memory_operand(inout out: ChunkSeq[u8], reg: u8, base: u8, displacement: u32)
     }
 }
 
+fn atomic_memory(inout out: ChunkSeq[u8], in op: AtomicMemory, register: u8, base: u8, width: u64) {
+    match op {
+        AtomicMemory::Exchange => {},
+        _ => out.push(LOCK_PREFIX),
+    };
+    if width == WORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    // A REX prefix also selects the low byte of the argument registers.
+    out.push(rex(register, base, width == QWORD_BITS));
+    let byte = width == BYTE_BITS;
+    match op {
+        AtomicMemory::FetchAdd => {
+            out.push(TWO_BYTE_OPCODE);
+            out.push(if byte { XADD_RM_R8 } else { XADD_RM_R64 });
+        },
+        AtomicMemory::Exchange => out.push(if byte { XCHG_RM_R8 } else { XCHG_RM_R64 }),
+        AtomicMemory::Add => out.push(if byte { ADD_RM_R8 } else { ADD_RM_R64 }),
+        AtomicMemory::Subtract => out.push(if byte { SUB_RM_R8 } else { SUB_RM_R64 }),
+    };
+    memory_operand(inout out, register, base, 0);
+}
+
+fn byte_swap(inout out: ChunkSeq[u8], register: u8, width: u64) {
+    if width == WORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+        out.push(rex(0, register, false));
+        out.push(SHIFT_GROUP_IMM8);
+        out.push(modrm(ROR_EXTENSION, register));
+        out.push(wrapping_u8(BYTE_BITS));
+    } else {
+        out.push(rex(0, register, width == QWORD_BITS));
+        out.push(TWO_BYTE_OPCODE);
+        out.push(BSWAP_REGISTER | (register & LOW_REGISTER_MASK));
+    }
+}
+
 fn load_constant(inout out: ChunkSeq[u8], destination: u8, bits: u64) {
     if bits == 0 {
         let prefix = rex(destination, destination, false);
@@ -776,6 +833,19 @@ fn float_compare(
 
 pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
     match instruction {
+        Instruction::Atomic(op, register, base, width) => atomic_memory(
+            inout out,
+            in op,
+            register,
+            base,
+            width
+        ),
+        Instruction::Fence => {
+            out.push(TWO_BYTE_OPCODE);
+            out.push(FENCE_GROUP);
+            out.push(MFENCE_MODRM);
+        },
+        Instruction::ByteSwap(register, width) => byte_swap(inout out, register, width),
         Instruction::Fixed(op, rhs, width) => fixed_arithmetic(
             inout out,
             in op,

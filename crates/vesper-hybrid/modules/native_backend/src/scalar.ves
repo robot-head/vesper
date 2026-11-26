@@ -3,10 +3,10 @@ use self::x86_64::{
     FLOAT_UNORDERED_OR_GREATER_EQUAL, is_xmm, find_float_register, ADC_RM_R64, ADD_RM_R64,
     ALU_ADD_EXTENSION, ALU_AND_EXTENSION, ALU_OR_EXTENSION, ALU_SUB_EXTENSION, ALU_XOR_EXTENSION,
     AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A, CC_AE, CC_B, CC_BE,
-    CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, CC_O, FixedArithmetic, Instruction, NEG_EXTENSION,
-    NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION, SHR_EXTENSION,
-    SBB_RM_R64, SUB_RM_R64, UNASSIGNED, XOR_RM_R64, ALL_REGISTER_CODES, REGISTER_CODES,
-    arg_register, emit, emit_direct_call, emit_jump_table, emit_jump_table_entry,
+    CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, CC_O, AtomicMemory, FixedArithmetic, Instruction,
+    NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION,
+    SHR_EXTENSION, SBB_RM_R64, SUB_RM_R64, UNASSIGNED, XOR_RM_R64, ALL_REGISTER_CODES,
+    REGISTER_CODES, arg_register, emit, emit_direct_call, emit_jump_table, emit_jump_table_entry,
     emit_symbol_address, find_register, fits_signed_byte, patch_forward_branch,
     patch_relative_branch, patch_relative_offset, register_bit, home_register, xmm_home_register,
     HOME_REGISTERS
@@ -115,6 +115,11 @@ const FLOAT_STACK_LOAD: u64 = 98;
 const FLOAT_STACK_STORE32: u64 = 99;
 const FLOAT_STACK_STORE64: u64 = 100;
 const FLOAT_COPY_SIGN: u64 = 101;
+const ATOMIC_ADD: u64 = 102;
+const ATOMIC_SUB: u64 = 103;
+const ATOMIC_EXCHANGE: u64 = 104;
+const FENCE: u64 = 105;
+const BYTE_SWAP: u64 = 106;
 const XMM_ARGUMENTS: u64 = 8;
 const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
@@ -404,6 +409,7 @@ fn has_no_result(op: u64) -> bool {
         || op == CALL_ARGUMENT
         || op == CALL_VOID
         || op == TRAP
+        || op == FENCE
         || op == FLOAT_RETURN
         || op == FLOAT_STORE32
         || op == FLOAT_STORE64
@@ -412,6 +418,10 @@ fn has_no_result(op: u64) -> bool {
 
 fn is_call(op: u64) -> bool {
     op == CALL || op == CALL_VOID || op == CALL_PAIR || op == CALL_FLOAT
+}
+
+fn is_atomic_rmw(op: u64) -> bool {
+    op >= ATOMIC_ADD && op <= ATOMIC_EXCHANGE
 }
 
 fn is_fixed_arithmetic(op: u64) -> bool {
@@ -542,6 +552,7 @@ fn reads_left(in record: Record) -> bool {
         && op != CALL_HIGH
         && op != OVERFLOW_FLAG
         && op != TRAP
+        && op != FENCE
         && op != BLOCK_LABEL
         && op != EDGE_LABEL
         && op != JUMP_LABEL
@@ -563,6 +574,7 @@ fn reads_right(in record: Record, paired: bool) -> bool {
         || is_register_shift(op)
         || is_fixed_arithmetic(op)
         || is_checked_arithmetic(op)
+        || is_atomic_rmw(op)
         || consumes_carry(op)
         || is_store(op)
         || (is_branch_return(op) && paired && record.left != TRAP_VALUE)
@@ -792,7 +804,7 @@ fn find_last_reads(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > FLOAT_COPY_SIGN
+        if record.op > BYTE_SWAP
             || (!labeled && is_cfg_record(record.op))
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
@@ -801,7 +813,7 @@ fn find_last_reads(
         {
             return Option::None;
         }
-        if record.op >= FLOAT_ARGUMENT {
+        if record.op >= FLOAT_ARGUMENT && record.op <= FLOAT_COPY_SIGN {
             frame.floating = true;
             let entry_start = wrapping_add(frame.slots.len(), if labeled { 1 } else { 0 });
             if record.op == FLOAT_ARGUMENT
@@ -827,6 +839,16 @@ fn find_last_reads(
         }
         let last = last_read(in reads, value);
         let live = last != NEVER_READ || live_overflow_flag(in reads, value, record.op);
+        let atomic = is_atomic_rmw(record.op);
+        if atomic {
+            if !valid_width(record.extra) {
+                return Option::None;
+            }
+            frame.fixed = frame.fixed || live || record.op == ATOMIC_EXCHANGE;
+        }
+        if record.op == BYTE_SWAP && (record.extra < WORD_BITS || !valid_width(record.extra)) {
+            return Option::None;
+        }
         if labeled {
             if record.op == BLOCK_LABEL {
                 entry_end = block_end;
@@ -1019,6 +1041,7 @@ fn find_last_reads(
             || record.op == FLOAT_LOAD
             || record.op == STACK_LOAD
             || record.op == FLOAT_STACK_LOAD
+            || atomic
             || is_integer_division(record.op)
             || no_result
         {
@@ -1089,6 +1112,7 @@ fn emits_instruction(op: u64, result_live: bool) -> bool {
             || op == STACK_LOAD
             || op == FLOAT_STACK_LOAD
             || is_call(op)
+            || is_atomic_rmw(op)
             || is_integer_division(op)
             || has_no_result(op))
 }
@@ -1190,6 +1214,7 @@ fn allocate(
         }
         let call = is_call(record.op);
         let fixed = is_fixed_arithmetic(record.op);
+        let atomic = is_atomic_rmw(record.op);
         if call {
             has_calls = true;
             let start = wrapping_sub(index, record.right);
@@ -1252,6 +1277,10 @@ fn allocate(
         let third = compatible_register(third, floating);
         let register = if record.op == FLOAT_ARGUMENT {
             wrapping_add(XMM0, wrapping_u8(record.left))
+        } else if atomic && (used & register_bit(RAX)) == 0 {
+            RAX
+        } else if atomic && right != UNASSIGNED && right != left {
+            right
         } else if (fixed || record.op == CALL_FLOAT)
             && (survivors & register_bit(implicit_result)) == 0
         {
@@ -1270,7 +1299,7 @@ fn allocate(
             find_register(used)
         };
         used = survivors;
-        let location = if has_no_result(record.op) || ((call || fixed) && !result_live) {
+        let location = if has_no_result(record.op) || ((call || fixed || atomic) && !result_live) {
             Location::Absent
         } else if register != UNASSIGNED {
             if result_live {
@@ -1387,6 +1416,7 @@ fn operation(in record: Record, destination: u8, source: u8) -> Instruction {
         ADD_CARRY => Instruction::Binary(ADC_RM_R64, destination, source, QWORD_BITS),
         SUB_BORROW => Instruction::Binary(SBB_RM_R64, destination, source, QWORD_BITS),
         MUL => Instruction::Multiply(destination, source, width),
+        BYTE_SWAP => Instruction::ByteSwap(destination, width),
         AND => Instruction::Binary(AND_RM_R64, destination, source, width),
         OR => Instruction::Binary(OR_RM_R64, destination, source, width),
         XOR => Instruction::Binary(XOR_RM_R64, destination, source, width),
@@ -1564,6 +1594,50 @@ fn save_result(inout out: ChunkSeq[u8], in result: Location, source: u8) {
         ),
         Location::Absent => {},
     };
+}
+
+fn emit_atomic(
+    inout output: ChunkSeq[u8],
+    in record: Record,
+    in result: Location,
+    base: u8,
+    input: u8,
+    live: bool
+) {
+    let width = record.extra;
+    if !live && record.op != ATOMIC_EXCHANGE {
+        let op = if record.op == ATOMIC_ADD {
+            AtomicMemory::Add
+        } else {
+            AtomicMemory::Subtract
+        };
+        emit(inout output, in Instruction::Atomic(op, input, base, width));
+        return;
+    }
+    let register = match result {
+        Location::Register(register) => if register != base {
+            register
+        } else {
+            THIRD_SCRATCH
+        },
+        _ => THIRD_SCRATCH,
+    };
+    emit(inout output, in Instruction::Move(register, input));
+    if record.op == ATOMIC_SUB {
+        emit(inout output, in Instruction::Unary(NEG_EXTENSION, register, width));
+    }
+    let op = if record.op == ATOMIC_EXCHANGE {
+        AtomicMemory::Exchange
+    } else {
+        AtomicMemory::FetchAdd
+    };
+    emit(inout output, in Instruction::Atomic(op, register, base, width));
+    if live {
+        if width < DWORD_BITS {
+            emit(inout output, in Instruction::Truncate(register, register, width));
+        }
+        save_result(inout output, in result, register);
+    }
 }
 
 fn preserve_registers(inout out: ChunkSeq[u8], saved: u32, frame: u64, restoring: bool) {
@@ -1983,6 +2057,10 @@ pub fn encode_block(
             emit(inout output, in Instruction::Trap);
             return output;
         }
+        if record.op == FENCE {
+            emit(inout output, in Instruction::Fence);
+            continue;
+        }
         if is_branch_return(record.op) {
             if record.left == TRAP_VALUE {
                 emit(inout output, in Instruction::Trap);
@@ -2052,6 +2130,10 @@ pub fn encode_block(
             UNASSIGNED
         };
         let home = assigned(in allocation.locations, value);
+        if is_atomic_rmw(record.op) {
+            emit_atomic(inout output, in record, in home, left, right, result_live);
+            continue;
+        }
         let destination = match home {
             Location::Register(reg) => reg,
             Location::Spill(_) => if is_float_result(record.op) {
