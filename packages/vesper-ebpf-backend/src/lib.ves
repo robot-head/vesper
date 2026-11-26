@@ -183,8 +183,11 @@ pub fn ebpf_backend_words(in input: Str) -> ChunkSeq[u64] {
 // `object` and the summary after "wrote <path> (<n> bytes): " in `tail`,
 // or nonzero when Rust should build it (a compile error or anything the
 // Rust pass reports in its own words).
-pub fn ebpf_backend_build(in b: Slice[u8], inout object: ChunkSeq[u8], inout tail: ChunkSeq[u8])
-    -> u64 {
+pub fn ebpf_backend_build(
+    in b: Slice[u8],
+    inout object: ChunkSeq[u8],
+    inout tail: ChunkSeq[u8]
+) -> u64 {
     let mut r = Reader { pos: 0 };
     let mut c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);

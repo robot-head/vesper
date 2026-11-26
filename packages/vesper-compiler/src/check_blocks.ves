@@ -1,7 +1,12 @@
 // Lexical scopes and ownership environments are immutable bounded values.
 // No host ownership check substitutes for these source-language rules.
-fn c_block(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64)
-    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_block(
+    at: i64,
+    env: CEnv,
+    row: i64,
+    loans: CEnv,
+    depth: i64
+) -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let start = c_token(at).start;
     let end = c_group(at, 0);
     let value = c_statements(c_take(at, 34), env, row, loans, depth + 1, start, end);
@@ -17,8 +22,15 @@ fn c_block(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64)
         value_end: value.value_end
     }
 }
-fn c_statements(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64, start: i64, end: i64)
-    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_statements(
+    at: i64,
+    env: CEnv,
+    row: i64,
+    loans: CEnv,
+    depth: i64,
+    start: i64,
+    end: i64
+) -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if depth > 48 {
         let limit = c_limit(at);
         c_result(CType { tag: 0, at: 0 }, at, env, start, end, -1)
@@ -74,8 +86,13 @@ fn c_statements(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64, start: i6
         }
     }
 }
-fn c_if(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64)
-    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_if(
+    at: i64,
+    env: CEnv,
+    row: i64,
+    loans: CEnv,
+    depth: i64
+) -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let start = c_token(at).start;
     let cond = c_expr(c_next(at), env, 2, row, loans, depth + 1, true);
     let valid = c_expect_type(CType { tag: 1, at: 0 }, cond.ty, cond.start, cond.end);
@@ -88,8 +105,13 @@ fn c_if(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64)
     let result_ty = c_join_type(a.ty, b.ty, start, b.end);
     c_result(result_ty, b.next, c_join(cond.env, a.env, b.env, 0, start, b.end), start, b.end, -1)
 }
-fn c_match(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64)
-    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_match(
+    at: i64,
+    env: CEnv,
+    row: i64,
+    loans: CEnv,
+    depth: i64
+) -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let start = c_token(at).start;
     let value = c_expr(c_next(at), env, 2, row, loans, depth + 1, true);
     let end = c_group(value.next, 0);

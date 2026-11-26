@@ -31,8 +31,13 @@ fn wire_err[T](e: WireError) -> Result[T, TcpFail] {
     Result::Err(TcpFail::Wire(e))
 }
 
-pub fn tcb_on_segment(inout t: Tcb, now: u64, ips: Ips, in bytes: Slice[u8], inout ring: Slice[u8])
-    -> Result[RecvOut, TcpFail] {
+pub fn tcb_on_segment(
+    inout t: Tcb,
+    now: u64,
+    ips: Ips,
+    in bytes: Slice[u8],
+    inout ring: Slice[u8]
+) -> Result[RecvOut, TcpFail] {
     t.cmds.clear();
     if ring.len() != widen_u64(t.cfg.recv_buffer) {
         return Result::Err(TcpFail::RingSizeMismatch);
@@ -191,8 +196,13 @@ fn rst_to_peer(inout t: Tcb, seq: u32) {
         );
 }
 
-fn on_synchronized(inout t: Tcb, now: u64, seg0: Seg, in bytes: Slice[u8], inout ring: Slice[u8])
-    -> RecvOut {
+fn on_synchronized(
+    inout t: Tcb,
+    now: u64,
+    seg0: Seg,
+    in bytes: Slice[u8],
+    inout ring: Slice[u8]
+) -> RecvOut {
     let mut seg = seg0;
     let f = seg.h.flags;
     let is_rst = has(f, rst_bit());

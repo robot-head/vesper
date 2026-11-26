@@ -312,8 +312,12 @@ fn empty_header_info() -> HeaderInfo {
     }
 }
 
-fn validate_alg_node(in n: Slice[u64], val: u64, field: u64, reason: u64)
-    -> (u64, u64) eff [Fail[AErr]] {
+fn validate_alg_node(
+    in n: Slice[u64],
+    val: u64,
+    field: u64,
+    reason: u64
+) -> (u64, u64) eff [Fail[AErr]] {
     let k = kind(in n, val);
     if k == K_TEXT {
         return (ALG_TEXT, 0);
@@ -692,8 +696,12 @@ fn write_cbor_bstr(inout out: Slice[u8], at: u64, in data: Slice[u8]) -> u64 {
 // Construct RFC 8152 §4.4 Sig_structure for COSE_Sign1:
 // `["Signature1", body_protected, external_aad, payload]` into `out`,
 // returning the written byte count.
-pub fn sig_structure(in prot: Slice[u8], in aad: Slice[u8], in pay: Slice[u8], inout out: Slice[u8])
-    -> u64 {
+pub fn sig_structure(
+    in prot: Slice[u8],
+    in aad: Slice[u8],
+    in pay: Slice[u8],
+    inout out: Slice[u8]
+) -> u64 {
     let context = "Signature1".as_bytes();
     out.try_set(0, SIGN1_ARRAY_HEAD);
     out.try_set(1, SIGN1_CONTEXT_HEAD);

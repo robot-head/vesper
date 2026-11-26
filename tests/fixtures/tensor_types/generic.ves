@@ -3,12 +3,17 @@ copy struct Linear[I: dim, O: dim] {
     weight: Tensor[F32, [I, O]],
     bias: Tensor[F32, [O]],
 }
-fn apply[B: dim, I: dim, O: dim](layer: Linear[I, O], x: Tensor[F32, [B, I]])
-    -> Tensor[F32, [B, O]] eff [Tensor] {
+fn apply[B: dim, I: dim, O: dim](
+    layer: Linear[I, O],
+    x: Tensor[F32, [B, I]]
+) -> Tensor[F32, [B, O]] eff [Tensor] {
     Tensor::add(Tensor::matmul(x, layer.weight), layer.bias)
 }
-fn pick[N: dim](flag: bool, a: Tensor[F32, [1, N]], b: Tensor[F32, [1, N]])
-    -> Option[Tensor[F32, [1, N]]] {
+fn pick[N: dim](
+    flag: bool,
+    a: Tensor[F32, [1, N]],
+    b: Tensor[F32, [1, N]]
+) -> Option[Tensor[F32, [1, N]]] {
     if flag {
         Some(a)
     } else {

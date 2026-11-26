@@ -372,23 +372,27 @@ pub copy struct EvidenceGate {
 // ---------------------------------------------------------------------------
 // signed_rank.rs, signed_rank_confidence.rs
 
-pub fn signed_rank_exact(in differences: Slice[i64])
-    -> SignedRankProbability eff [Fail[SignedRankError]] {
+pub fn signed_rank_exact(
+    in differences: Slice[i64]
+) -> SignedRankProbability eff [Fail[SignedRankError]] {
     do_signed_rank_exact(in differences)
 }
 
-pub fn signed_rank_exact_paired_samples(in samples: Slice[Sample])
-    -> SignedRankProbability eff [Fail[SignedRankError]] {
+pub fn signed_rank_exact_paired_samples(
+    in samples: Slice[Sample]
+) -> SignedRankProbability eff [Fail[SignedRankError]] {
     do_signed_rank_exact_paired_samples(in samples)
 }
 
-pub fn signed_rank_confidence_set(in differences: Slice[i64])
-    -> ChunkSeq[Segment] eff [Fail[SignedRankConfidenceError]] {
+pub fn signed_rank_confidence_set(
+    in differences: Slice[i64]
+) -> ChunkSeq[Segment] eff [Fail[SignedRankConfidenceError]] {
     do_signed_rank_confidence_set(in differences)
 }
 
-pub fn paired_samples_confidence_set(in samples: Slice[Sample])
-    -> ChunkSeq[Segment] eff [Fail[PairedConfError]] {
+pub fn paired_samples_confidence_set(
+    in samples: Slice[Sample]
+) -> ChunkSeq[Segment] eff [Fail[PairedConfError]] {
     do_paired_samples_confidence_set(in samples)
 }
 
@@ -400,8 +404,12 @@ pub fn classify_samples(in segments: Slice[Segment], operations: u64, max_differ
     do_classify_samples(in segments, operations, max_difference)
 }
 
-pub fn compare_endpoint(endpoint_hi: u64, endpoint_lo: u64, operations: u64, max_difference: i64)
-    -> i64 {
+pub fn compare_endpoint(
+    endpoint_hi: u64,
+    endpoint_lo: u64,
+    operations: u64,
+    max_difference: i64
+) -> i64 {
     do_compare_endpoint(w(endpoint_hi, endpoint_lo), operations, max_difference)
 }
 
@@ -416,41 +424,55 @@ pub fn hodges_lehmann_paired(in differences: Slice[i64]) -> HlOut eff [Fail[Hodg
     do_hodges_lehmann_paired(in differences)
 }
 
-pub fn gate_paired_difference(in differences: Slice[i64], max_difference: i64)
-    -> HlGate eff [Fail[HodgesLehmannError]] {
+pub fn gate_paired_difference(
+    in differences: Slice[i64],
+    max_difference: i64
+) -> HlGate eff [Fail[HodgesLehmannError]] {
     do_gate_paired_difference(in differences, max_difference)
 }
 
-pub fn exact_paired_differences(in samples: Slice[Sample])
-    -> ChunkSeq[i64] eff [Fail[PairedDifferenceError]] {
+pub fn exact_paired_differences(
+    in samples: Slice[Sample]
+) -> ChunkSeq[i64] eff [Fail[PairedDifferenceError]] {
     do_exact_paired_differences(in samples)
 }
 
 // ---------------------------------------------------------------------------
 // statistics.rs, contract.rs PairedSample
 
-pub fn mann_whitney_ranks(in first: Slice[u64], in second: Slice[u64])
-    -> MannWhitneyRanks eff [Fail[PortError]] {
+pub fn mann_whitney_ranks(
+    in first: Slice[u64],
+    in second: Slice[u64]
+) -> MannWhitneyRanks eff [Fail[PortError]] {
     do_mann_whitney_ranks(in first, in second)
 }
 
-pub fn mann_whitney_exact(in first: Slice[u64], in second: Slice[u64])
-    -> ExactMw eff [Fail[PortError]] {
+pub fn mann_whitney_exact(
+    in first: Slice[u64],
+    in second: Slice[u64]
+) -> ExactMw eff [Fail[PortError]] {
     do_mann_whitney_exact(in first, in second)
 }
 
-pub fn mann_whitney_exact_with_ties(in first: Slice[u64], in second: Slice[u64])
-    -> ExactMw eff [Fail[PortError]] {
+pub fn mann_whitney_exact_with_ties(
+    in first: Slice[u64],
+    in second: Slice[u64]
+) -> ExactMw eff [Fail[PortError]] {
     do_mann_whitney_exact_with_ties(in first, in second)
 }
 
-pub fn analyze_pairs(in samples: Slice[Sample], max_regression_bp: i64)
-    -> AnalysisOut eff [Fail[PortError]] {
+pub fn analyze_pairs(
+    in samples: Slice[Sample],
+    max_regression_bp: i64
+) -> AnalysisOut eff [Fail[PortError]] {
     do_analyze_pairs(in samples, max_regression_bp)
 }
 
-pub fn paired_sample_new(baseline: u64, candidate: u64, operations: u64)
-    -> Sample eff [Fail[PortError]] {
+pub fn paired_sample_new(
+    baseline: u64,
+    candidate: u64,
+    operations: u64
+) -> Sample eff [Fail[PortError]] {
     do_paired_sample_new(baseline, candidate, operations)
 }
 
@@ -531,13 +553,21 @@ pub fn validate_config(
     )
 }
 
-pub fn fold_epoch(w0: u64, w1: u64, w2: u64, w3: u64, operations: u64)
-    -> Sample eff [Fail[PortError]] {
+pub fn fold_epoch(
+    w0: u64,
+    w1: u64,
+    w2: u64,
+    w3: u64,
+    operations: u64
+) -> Sample eff [Fail[PortError]] {
     do_fold_epoch(w0, w1, w2, w3, operations)
 }
 
-pub fn experiment_run(elapsed: u64, delay: u64, progress: u64)
-    -> ExperimentRun eff [Fail[CausalErr]] {
+pub fn experiment_run(
+    elapsed: u64,
+    delay: u64,
+    progress: u64
+) -> ExperimentRun eff [Fail[CausalErr]] {
     do_experiment_run(elapsed, delay, progress)
 }
 

@@ -218,8 +218,12 @@ fn try_open(inout s: Store, in uri: Str, version: i64, in text: Str) -> Result[u
     }
 }
 
-fn try_change(inout s: Store, in uri: Str, version: i64, in changes: ChunkSeq[Change])
-    -> Result[u64, StoreError] {
+fn try_change(
+    inout s: Store,
+    in uri: Str,
+    version: i64,
+    in changes: ChunkSeq[Change]
+) -> Result[u64, StoreError] {
     handle Fail[StoreError] in {
         count_ok(store_change(inout s, in uri, version, in changes))
     } with {

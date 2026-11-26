@@ -327,8 +327,13 @@ fn macro_start(in b: Slice[u8], in t: Tokens, at: u64) -> u64 {
 }
 
 // `macro_end`: (error, the token after the balanced closer or none).
-fn macro_end(in t: Tokens, in lim: ChunkSeq[u64], open: u64, limit: u64, inout work: u64)
-    -> (u64, u64) {
+fn macro_end(
+    in t: Tokens,
+    in lim: ChunkSeq[u64],
+    open: u64,
+    limit: u64,
+    inout work: u64
+) -> (u64, u64) {
     let mut stack = ChunkSeq::new[u8]();
     stack.push(closing(kind_at(in t, open)));
     let mut i = inc(open);

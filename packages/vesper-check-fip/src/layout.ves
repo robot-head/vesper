@@ -75,8 +75,14 @@ pub fn layout_size(inout s: Sizes, inout t: Types, in names: Names, in wd: World
     size
 }
 
-fn build(inout s: Sizes, inout t: Types, in names: Names, in wd: World, ty: u32, depth: u64)
-    -> u64 {
+fn build(
+    inout s: Sizes,
+    inout t: Types,
+    in names: Names,
+    in wd: World,
+    ty: u32,
+    depth: u64
+) -> u64 {
     let k = wd.k;
     if depth > 128 {
         return NO_SIZE;

@@ -137,8 +137,12 @@ pub fn copy_bytes(inout b: Builder, from: Value, to: Value, size: u32) eff [Ffi[
     }
 }
 
-pub fn coerce(inout b: Builder, v: Value, e: ElemDesc, optimize: bool)
-    -> Value eff [Ffi[Cranelift]] {
+pub fn coerce(
+    inout b: Builder,
+    v: Value,
+    e: ElemDesc,
+    optimize: bool
+) -> Value eff [Ffi[Cranelift]] {
     let bits = elem_bits(e);
     if bits == 0 {
         return v;
@@ -195,8 +199,12 @@ pub fn invariant_word(inout b: Builder, ptr: Value, offset: i32) -> Value eff [F
     ins_load(inout b, ty_i64(), flags, ptr, offset)
 }
 
-pub fn seq_word(inout b: Builder, ptr: Value, offset: i32, invariant: bool)
-    -> Value eff [Ffi[Cranelift]] {
+pub fn seq_word(
+    inout b: Builder,
+    ptr: Value,
+    offset: i32,
+    invariant: bool
+) -> Value eff [Ffi[Cranelift]] {
     if invariant {
         invariant_word(inout b, ptr, offset)
     } else {
@@ -263,8 +271,13 @@ pub fn seq_elem_addr(
     ins_iadd(inout b, data, offset)
 }
 
-pub fn seq_load_elem(inout b: Builder, in m: Module, addr: Value, e: ElemDesc, optimize: bool)
-    -> Value eff [Ffi[Cranelift]] {
+pub fn seq_load_elem(
+    inout b: Builder,
+    in m: Module,
+    addr: Value,
+    e: ElemDesc,
+    optimize: bool
+) -> Value eff [Ffi[Cranelift]] {
     if elem_is_agg(e) {
         let sz = elem_size(e);
         let copy = if optimize {
@@ -286,8 +299,13 @@ pub fn seq_load_elem(inout b: Builder, in m: Module, addr: Value, e: ElemDesc, o
     }
 }
 
-pub fn seq_elem_for_store(inout b: Builder, in m: Module, addr: Value, e: ElemDesc, optimize: bool)
-    -> Value eff [Ffi[Cranelift]] {
+pub fn seq_elem_for_store(
+    inout b: Builder,
+    in m: Module,
+    addr: Value,
+    e: ElemDesc,
+    optimize: bool
+) -> Value eff [Ffi[Cranelift]] {
     if optimize && elem_is_agg(e) {
         return addr;
     }
@@ -313,8 +331,13 @@ pub fn seq_store_elem(inout b: Builder, addr: Value, raw: Value, e: ElemDesc, op
     }
 }
 
-pub fn seq_slice_value(inout b: Builder, in m: Module, h: Value, start: Value, len: Value)
-    -> Value eff [Ffi[Cranelift]] {
+pub fn seq_slice_value(
+    inout b: Builder,
+    in m: Module,
+    h: Value,
+    start: Value,
+    len: Value
+) -> Value eff [Ffi[Cranelift]] {
     let ptr = alloc(inout b, in m, 24);
     seq_set_word(inout b, ptr, 0, h);
     seq_set_word(inout b, ptr, 8, start);

@@ -236,8 +236,11 @@ pub fn derivation_hash(in enc: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
 // (InvalidLabel, TooManyEntries: 6 options or 7 inputs), 6 or 7
 // (NotSorted), the string's length (StringTooLong), the string's offset
 // and, in `info2`, its length (StringNotUtf8).
-pub fn drv_decode(in bytes: Slice[u8], inout info: u64, inout info2: u64)
-    -> ChunkSeq[u64] eff [Fail[DrvErr]] {
+pub fn drv_decode(
+    in bytes: Slice[u8],
+    inout info: u64,
+    inout info2: u64
+) -> ChunkSeq[u64] eff [Fail[DrvErr]] {
     drv_scan(in bytes, inout info, inout info2)
 }
 
@@ -342,8 +345,10 @@ pub fn store_put_tree(
 }
 
 // `verify_object`: answers the size.
-pub fn store_verify(in root: Slice[u8], in id: Slice[u8])
-    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+pub fn store_verify(
+    in root: Slice[u8],
+    in id: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
     let mut r = reply_of(0);
     handle Fail[StoreErr] in {
         self::store::verify_object(inout r, in root, in id);
@@ -356,8 +361,11 @@ pub fn store_verify(in root: Slice[u8], in id: Slice[u8])
 
 // `read_blob` (`kind` 1) and `read_tree`'s read (`kind` 2): answers the
 // verified bytes.
-pub fn store_read(in root: Slice[u8], in id: Slice[u8], kind: u8)
-    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+pub fn store_read(
+    in root: Slice[u8],
+    in id: Slice[u8],
+    kind: u8
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
     let mut r = reply_of(0);
     handle Fail[StoreErr] in {
         self::store::read_verified(inout r, in root, in id, kind);
@@ -387,8 +395,10 @@ pub fn store_publish_derivation(
 }
 
 // `lookup_derivation`: answers 0, or 1 and the output id.
-pub fn store_lookup_derivation(in root: Slice[u8], in enc: Slice[u8])
-    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+pub fn store_lookup_derivation(
+    in root: Slice[u8],
+    in enc: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
     let mut r = reply_of(0);
     handle Fail[StoreErr] in {
         self::store::lookup_derivation(inout r, in root, in enc);
@@ -412,8 +422,12 @@ pub fn store_sweep(in root: Slice[u8], min_s: u64, min_ns: u64) -> ChunkSeq[u8] 
 }
 
 // `Store::put_file`.
-pub fn store_put_file(in root: Slice[u8], durable: bool, domain: u8, in path: Slice[u8])
-    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+pub fn store_put_file(
+    in root: Slice[u8],
+    durable: bool,
+    domain: u8,
+    in path: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
     let mut r = reply_of(0);
     handle Fail[StoreErr] in {
         self::store::put_file(inout r, in root, durable, domain, in path);
@@ -425,8 +439,12 @@ pub fn store_put_file(in root: Slice[u8], durable: bool, domain: u8, in path: Sl
 }
 
 // `Store::ingest_dir`.
-pub fn store_ingest_dir(in root: Slice[u8], durable: bool, domain: u8, in path: Slice[u8])
-    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+pub fn store_ingest_dir(
+    in root: Slice[u8],
+    durable: bool,
+    domain: u8,
+    in path: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
     let mut r = reply_of(0);
     handle Fail[StoreErr] in {
         self::store::ingest_dir(inout r, in root, durable, domain, in path);

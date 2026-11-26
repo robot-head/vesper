@@ -224,8 +224,12 @@ fn open_raw(in path: Slice[u8], flags: i32, perm: u32, inout err: u64) -> i32 ef
 // a private file is never readable by others on its way; the contents
 // then go through a 64 KiB buffer. The bytes copied, with `err` set on
 // failure.
-pub fn os_copy(in from: Slice[u8], in to: Slice[u8], perm: u32, inout err: u64)
-    -> u64 eff [Ffi[StdFs]] {
+pub fn os_copy(
+    in from: Slice[u8],
+    in to: Slice[u8],
+    perm: u32,
+    inout err: u64
+) -> u64 eff [Ffi[StdFs]] {
     let src = os_open(in from, 0, inout err);
     if src < 0 {
         return 0;
@@ -672,8 +676,12 @@ fn unlink_at(dirfd: i32, in name: Slice[u8], flags: i32, inout err: u64) -> u32 
 // Remove the directory `name` under `dirfd` and everything in it; a
 // `child` that turns out not to be a directory is unlinked, and one that
 // is already gone is not an error.
-fn remove_tree(dirfd: i32, in name: Slice[u8], child: bool, inout err: u64)
-    -> u32 eff [Ffi[StdFs]] {
+fn remove_tree(
+    dirfd: i32,
+    in name: Slice[u8],
+    child: bool,
+    inout err: u64
+) -> u32 eff [Ffi[StdFs]] {
     let flags = StdFs::O_CLOEXEC | StdFs::O_NOFOLLOW | StdFs::O_DIRECTORY;
     let fd = loop {
         match StdFs::openat(dirfd, in name, flags, 0) {

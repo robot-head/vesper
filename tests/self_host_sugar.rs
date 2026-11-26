@@ -33,6 +33,7 @@ struct Sugar {
     scope: native::WordFunction,
     pattern: native::WordFunction,
     expand: native::WordFunction,
+    expand_scoped: native::WordFunction,
 }
 
 fn sugar() -> &'static Sugar {
@@ -64,6 +65,7 @@ fn sugar() -> &'static Sugar {
             scope: compile("template_scope_words"),
             pattern: compile("template_pattern_words"),
             expand: compile("sugar_expand_words"),
+            expand_scoped: compile("sugar_expand_scoped_words"),
         }
     })
 }
@@ -1410,14 +1412,61 @@ fn region_text(
     emits: &str,
     call: (usize, usize),
     rule: (usize, usize),
+    import: Option<usize>,
 ) -> String {
     format!(
-        "{expanded:?} holes {holes:?} places {places:?} emits {emits} call {call:?} rule {rule:?}"
+        "{expanded:?} holes {holes:?} places {places:?} emits {emits} call {call:?} rule {rule:?} import {import:?}"
     )
 }
 
+/// A source with the caller's imports, as `expand_sugar_with_scopes_for_execution`
+/// takes them: (alias, declaration) per import, the definition scopes
+/// (`groups`, shared by `scope_of`; empty for none) and the visible imports.
+#[derive(Clone, Debug, Default)]
+struct Program {
+    source: String,
+    imports: Vec<(String, String)>,
+    groups: Vec<Vec<(String, usize)>>,
+    scope_of: Vec<usize>,
+    visible: Vec<usize>,
+}
+
+impl Program {
+    fn plain(source: &str) -> Self {
+        Program {
+            source: source.to_owned(),
+            ..Default::default()
+        }
+    }
+    fn is_plain(&self) -> bool {
+        self.imports.is_empty() && self.scope_of.is_empty() && self.visible.is_empty()
+    }
+}
+
 fn rust_expand(source: &str, include_tests: bool) -> Expansion {
-    match sugar_expand::expand_sugar_for_execution(source, include_tests) {
+    rust_expand_program(&Program::plain(source), include_tests)
+}
+
+fn rust_expand_program(p: &Program, include_tests: bool) -> Expansion {
+    let imports: Vec<(&str, &str)> = p
+        .imports
+        .iter()
+        .map(|(a, d)| (a.as_str(), d.as_str()))
+        .collect();
+    let scopes: Vec<&[(String, usize)]> =
+        p.scope_of.iter().map(|&g| p.groups[g].as_slice()).collect();
+    let result = if p.is_plain() {
+        sugar_expand::expand_sugar_for_execution(&p.source, include_tests)
+    } else {
+        sugar_expand::expand_sugar_with_scopes_for_execution(
+            &p.source,
+            &imports,
+            &scopes,
+            &p.visible,
+            include_tests,
+        )
+    };
+    match result {
         Err(d) => Expansion::Diagnostic {
             code: d.code,
             message: d.message,
@@ -1435,7 +1484,8 @@ fn rust_expand(source: &str, include_tests: bool) -> Expansion {
             regions: x
                 .regions
                 .iter()
-                .map(|r| {
+                .zip(&x.import_origins)
+                .map(|(r, &import)| {
                     let places: Vec<_> = r
                         .places
                         .iter()
@@ -1457,6 +1507,7 @@ fn rust_expand(source: &str, include_tests: bool) -> Expansion {
                         &format!("{:?}", r.emits),
                         (r.call.start, r.call.end),
                         (r.rule.start, r.rule.end),
+                        import,
                     )
                 })
                 .collect(),
@@ -1496,12 +1547,69 @@ impl Words<'_> {
 }
 
 fn vesper_expand(source: &str, include_tests: bool) -> Expansion {
-    let call = vesper_port_abi::HostCall::new()
-        .str(source)
-        .word(u64::from(include_tests))
-        .word(0);
-    // SAFETY: as `vesper_match`.
-    let words = unsafe { call.seq(JIT_RUNTIME, |w| sugar().expand.call(w).unwrap()) };
+    vesper_expand_program(&Program::plain(source), include_tests)
+}
+
+/// `sugar_expand_scoped_words`' input text (see lib.ves).
+fn scoped_text(p: &Program) -> String {
+    let mut text = String::new();
+    let number = |text: &mut String, n: usize| {
+        for k in 0..4 {
+            text.push(char::from((n >> (7 * k)) as u8 & 127));
+        }
+    };
+    let names: Vec<&(String, usize)> = p.groups.iter().flatten().collect();
+    number(&mut text, p.source.len());
+    number(&mut text, p.imports.len());
+    number(&mut text, p.scope_of.len());
+    number(&mut text, p.groups.len());
+    number(&mut text, names.len());
+    number(&mut text, p.visible.len());
+    for (alias, decl) in &p.imports {
+        number(&mut text, alias.len());
+        number(&mut text, decl.len());
+    }
+    for g in &p.scope_of {
+        number(&mut text, *g);
+    }
+    for g in &p.groups {
+        number(&mut text, g.len());
+    }
+    for (name, id) in &names {
+        number(&mut text, name.len());
+        number(&mut text, *id);
+    }
+    for v in &p.visible {
+        number(&mut text, *v);
+    }
+    text.push_str(&p.source);
+    for (alias, decl) in &p.imports {
+        text.push_str(alias);
+        text.push_str(decl);
+    }
+    for (name, _) in &names {
+        text.push_str(name);
+    }
+    text
+}
+
+fn vesper_expand_program(p: &Program, include_tests: bool) -> Expansion {
+    let words = if p.is_plain() {
+        let call = vesper_port_abi::HostCall::new()
+            .str(&p.source)
+            .word(u64::from(include_tests))
+            .word(0);
+        // SAFETY: as `vesper_match`.
+        unsafe { call.seq(JIT_RUNTIME, |w| sugar().expand.call(w).unwrap()) }
+    } else {
+        let text = scoped_text(p);
+        let call = vesper_port_abi::HostCall::new()
+            .str(&text)
+            .word(u64::from(include_tests))
+            .word(0);
+        // SAFETY: as `vesper_match`.
+        unsafe { call.seq(JIT_RUNTIME, |w| sugar().expand_scoped.call(w).unwrap()) }
+    };
     let mut w = Words(&words, 0);
     match w.next() {
         2 => {
@@ -1535,7 +1643,10 @@ fn vesper_expand(source: &str, include_tests: bool) -> Expansion {
                     let emits = emits_text(&row);
                     let call = (w.n(), w.n());
                     let rule = (w.n(), w.n());
-                    region_text(expanded, &holes, &places, &emits, call, rule)
+                    let import = Some(w.next())
+                        .filter(|&i| i != u64::MAX)
+                        .map(|i| i as usize);
+                    region_text(expanded, &holes, &places, &emits, call, rule, import)
                 })
                 .collect();
             let mappings = (0..w.n().min(words.len()))
@@ -1562,6 +1673,12 @@ fn emits_text(row: &str) -> String {
 /// Compare the driver on each program with and without test items; return
 /// (programs, expanded) and print the outcome histogram.
 fn check_expansions(programs: &[String]) -> (usize, usize) {
+    let programs: Vec<Program> = programs.iter().map(|s| Program::plain(s)).collect();
+    check_programs(&programs)
+}
+
+/// `check_expansions` for programs with imports.
+fn check_programs(programs: &[Program]) -> (usize, usize) {
     let mut failures = vec![];
     let mut outcomes = std::collections::BTreeMap::<String, usize>::new();
     let mut differ = std::collections::BTreeMap::<String, usize>::new();
@@ -1569,8 +1686,8 @@ fn check_expansions(programs: &[String]) -> (usize, usize) {
     let mut expanded = 0;
     for program in programs {
         for include_tests in [true, false] {
-            let rust = rust_expand(program, include_tests);
-            let vesper = vesper_expand(program, include_tests);
+            let rust = rust_expand_program(program, include_tests);
+            let vesper = vesper_expand_program(program, include_tests);
             let key = match &rust {
                 Expansion::Diagnostic { message, .. } => message.clone(),
                 Expansion::Unchanged => "unchanged".into(),
@@ -1585,7 +1702,7 @@ fn check_expansions(programs: &[String]) -> (usize, usize) {
             // validate_surface`), so a source whose macro use Rust's
             // reparse refuses expands in Vesper. Counted, not hidden.
             let macro_gap = matches!(&rust, Expansion::Diagnostic { code, .. } if code == "E0002")
-                && program.contains("macro")
+                && program.source.contains("macro")
                 && !matches!(&vesper, Expansion::Diagnostic { .. });
             if rust != vesper && macro_gap {
                 gaps += 1;
@@ -1754,4 +1871,189 @@ fn driver_matches_with_many_names() {
     assert!(matches!(rust, Expansion::Expanded { .. }), "{rust:?}");
     assert_eq!(rust, vesper);
     assert!(vesper_time.as_secs() < 60, "{vesper_time:?}");
+}
+
+/// The imports' own examples (crates/vesper-syntax/tests/sugar_expand.rs)
+/// and their refusals.
+fn import_examples() -> Vec<Program> {
+    let inner = "pub sugar inner:expr {rule (inner $x:expr $b:block) => { $x }}";
+    let outer = "pub sugar outer:expr {rule(outer $x:expr $b:block)=>{hidden $x {}}}";
+    let private = "sugar hidden:expr {rule(hidden $x:expr $b:block)=>{10 + $x}}";
+    let hidden = vec![("hidden".to_owned(), 1)];
+    let imports = |list: &[(&str, &str)]| {
+        list.iter()
+            .map(|(a, d)| (a.to_string(), d.to_string()))
+            .collect::<Vec<_>>()
+    };
+    vec![
+        Program {
+            source: "sugar outer:expr {rule (outer $x:expr $b:block) => { renamed $x {} }} fn main()->i64{outer 12 {} }".into(),
+            imports: imports(&[("renamed", inner)]),
+            visible: vec![0],
+            ..Default::default()
+        },
+        Program {
+            source: "sugar hidden:expr {rule(hidden $x:expr $b:block)=>{33}} fn main(){outer 2 {} }".into(),
+            imports: imports(&[("outer", outer), ("hidden", private)]),
+            groups: vec![hidden.clone()],
+            scope_of: vec![0, 0],
+            visible: vec![0],
+        },
+        // The scope of the outer import differs from the private one's.
+        Program {
+            source: "fn main(){outer 2 {} + hidden 1 {} }".into(),
+            imports: imports(&[("outer", outer), ("hidden", private)]),
+            groups: vec![hidden.clone(), vec![]],
+            scope_of: vec![0, 1],
+            visible: vec![0, 1],
+        },
+        // Refusals: a missing scope, an invalid import, a duplicate alias,
+        // an unknown scope binding, a broken declaration, no declaration.
+        Program {
+            source: "fn main(){outer 2 {} }".into(),
+            imports: imports(&[("outer", outer), ("hidden", private)]),
+            groups: vec![hidden.clone()],
+            scope_of: vec![0],
+            visible: vec![0],
+        },
+        Program {
+            source: "fn main(){outer 2 {} }".into(),
+            imports: imports(&[("outer", outer)]),
+            visible: vec![3],
+            ..Default::default()
+        },
+        Program {
+            source: "fn main(){same 2 {} }".into(),
+            imports: imports(&[("same", inner), ("same", private)]),
+            visible: vec![0, 1],
+            ..Default::default()
+        },
+        Program {
+            source: "fn main(){outer 2 {} }".into(),
+            imports: imports(&[("outer", outer)]),
+            groups: vec![vec![("hidden".to_owned(), 7)]],
+            scope_of: vec![0],
+            visible: vec![0],
+        },
+        Program {
+            source: "fn main(){outer 2 {} }".into(),
+            imports: imports(&[("outer", "pub sugar outer:expr {rule(outer")]),
+            visible: vec![0],
+            ..Default::default()
+        },
+        Program {
+            source: "fn main(){outer 2 {} }".into(),
+            imports: imports(&[("outer", "fn outer() {}")]),
+            visible: vec![0],
+            ..Default::default()
+        },
+    ]
+}
+
+/// The sugar declarations of `source`: (start, end, name).
+fn declarations(source: &str) -> Vec<(usize, usize, String)> {
+    let Ok(parse) = parser::parse_surface_cst(source, Default::default(), true) else {
+        return vec![];
+    };
+    parse
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == parser::SUGAR_DECL)
+        .filter(|n| {
+            !n.ancestors()
+                .skip(1)
+                .any(|a| a.kind() == parser::SUGAR_DECL)
+        })
+        .filter_map(|n| {
+            let r = n.text_range();
+            let (s, e) = (usize::from(r.start()), usize::from(r.end()));
+            let text = &source[s..e];
+            let at = text.find("sugar")? + "sugar".len();
+            let name: String = text[at..]
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            (!name.is_empty()).then_some((s, e, name))
+        })
+        .collect()
+}
+
+/// Programs whose declarations move into imports: all of them visible
+/// under their names; under aliases (the uses renamed); behind one shared
+/// definition scope with only the first visible and the last kept local.
+fn imported_programs(sources: &[String]) -> Vec<Program> {
+    let mut out = vec![];
+    for source in sources {
+        let decls = declarations(source);
+        if decls.is_empty() {
+            continue;
+        }
+        let mut rest = source.clone();
+        for (s, e, _) in decls.iter().rev() {
+            rest.replace_range(*s..*e, &" ".repeat(e - s));
+        }
+        let imports: Vec<(String, String)> = decls
+            .iter()
+            .map(|(s, e, name)| (name.clone(), source[*s..*e].to_owned()))
+            .collect();
+        let all: Vec<usize> = (0..imports.len()).collect();
+        out.push(Program {
+            source: rest.clone(),
+            imports: imports.clone(),
+            visible: all.clone(),
+            ..Default::default()
+        });
+        let mut renamed = rest.clone();
+        let mut aliased = imports.clone();
+        for (alias, _) in aliased.iter_mut() {
+            let new = format!("{alias}_alias");
+            renamed = renamed.replace(alias.as_str(), &new);
+            *alias = new;
+        }
+        out.push(Program {
+            source: renamed,
+            imports: aliased,
+            visible: all.clone(),
+            ..Default::default()
+        });
+        let group: Vec<(String, usize)> = decls
+            .iter()
+            .enumerate()
+            .map(|(i, (_, _, name))| (name.clone(), i))
+            .collect();
+        let (ls, le, _) = decls.last().unwrap();
+        let mut mixed = rest.clone();
+        mixed.replace_range(*ls..*le, &source[*ls..*le]);
+        out.push(Program {
+            source: mixed,
+            imports: imports.clone(),
+            groups: vec![group],
+            scope_of: vec![0; imports.len()],
+            visible: vec![0],
+        });
+    }
+    out
+}
+
+#[test]
+fn driver_matches_on_the_import_examples() {
+    let (programs, expanded) = check_programs(&import_examples());
+    assert!(
+        programs == 9 && expanded >= 3,
+        "{programs} programs, {expanded} expanded"
+    );
+}
+
+#[test]
+fn driver_matches_on_imported_sugar_test_suites() {
+    let mut sources = suite_programs();
+    for program in SCOPE_PROGRAMS {
+        scope_programs(program, &mut sources);
+    }
+    let (programs, expanded) = check_programs(&imported_programs(&sources));
+    assert!(
+        programs > 100 && expanded > 50,
+        "{programs} programs, {expanded} expanded"
+    );
 }

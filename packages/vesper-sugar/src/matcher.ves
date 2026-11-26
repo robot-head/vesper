@@ -205,8 +205,14 @@ fn text_is(in b: ChunkSeq[u8], in t: Toks, i: u64, in w: Slice[u8]) -> bool {
 }
 
 // `p.text(i) == t.text(j)` across two texts.
-fn same_text(in pb: ChunkSeq[u8], in p: Toks, i: u64, in tb: ChunkSeq[u8], in t: Toks, j: u64)
-    -> bool {
+fn same_text(
+    in pb: ChunkSeq[u8],
+    in p: Toks,
+    i: u64,
+    in tb: ChunkSeq[u8],
+    in t: Toks,
+    j: u64
+) -> bool {
     let pn = if i < len(in p) {
         sub(tok_e(in p, i), tok_s(in p, i))
     } else {
@@ -873,8 +879,13 @@ fn push_text(inout out: ChunkSeq[u64], in b: ChunkSeq[u8], s: u64, e: u64) {
 
 // The captures of a match whose log ends at `log`: [1, work, captures]
 // (see `match_rule_encoded`), or false (and the refusal).
-fn collect(in pb: ChunkSeq[u8], in p: Toks, inout m: Mx, log: u64, inout out: ChunkSeq[u64])
-    -> bool {
+fn collect(
+    in pb: ChunkSeq[u8],
+    in p: Toks,
+    inout m: Mx,
+    log: u64,
+    inout out: ChunkSeq[u64]
+) -> bool {
     // The log, newest first, as Rust walks it.
     let mut chain = ChunkSeq::new[u64]();
     let mut at = log;

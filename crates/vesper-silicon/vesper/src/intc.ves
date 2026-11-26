@@ -723,8 +723,13 @@ pub fn m_truncate_files(inout f: Fabric, b: u64, k: u64, keep: u64) {
     }
 }
 
-pub fn m_file_csr_read(in f: Fabric, b: u64, k: u64, g: u64, isel: u64)
-    -> u64 eff [Fail[IntcFault]] {
+pub fn m_file_csr_read(
+    in f: Fabric,
+    b: u64,
+    k: u64,
+    g: u64,
+    isel: u64
+) -> u64 eff [Fail[IntcFault]] {
     let i = file_idx(in f, b, k, g);
     let r: Lifted = handle Fail[AiaFault] in {
         ok(m_imsic_csr_read(in f.imsic, i, isel))

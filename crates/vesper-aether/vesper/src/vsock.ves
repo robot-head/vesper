@@ -511,8 +511,12 @@ fn vsock_rst_reply(inout st: VsockState, h: VsockHeader) {
 }
 
 // `connect_typed`: the error code and the new connection's slot.
-pub fn vsock_connect(inout st: VsockState, host_port: u32, guest_port: u32, kind: u16)
-    -> (u8, u64) {
+pub fn vsock_connect(
+    inout st: VsockState,
+    host_port: u32,
+    guest_port: u32,
+    kind: u16
+) -> (u8, u64) {
     if kind == VSOCK_TYPE_SEQPACKET && !vsock_seqpacket(in st) {
         return (VSOCK_E_WRONG_TYPE, 0);
     }
@@ -629,8 +633,12 @@ pub fn vsock_send_message(
 }
 
 // `send`: the bytes queued, or the error code with the top bit set.
-pub fn vsock_send(inout st: VsockState, guest_port: u32, host_port: u32, in data: Slice[u8])
-    -> u64 {
+pub fn vsock_send(
+    inout st: VsockState,
+    guest_port: u32,
+    host_port: u32,
+    in data: Slice[u8]
+) -> u64 {
     let key = vsock_key(guest_port, host_port);
     let slot = vsock_find(in st, key);
     let e = vsock_sendable(in st, slot, VSOCK_TYPE_STREAM);

@@ -137,8 +137,13 @@ fn helper_name(in c: Ctx, ty: u32) -> ChunkSeq[u8] {
 
 // `emit_drop_box_value` of `ty` can be emitted; `seen` holds the recursive
 // types whose helper is checked or being checked.
-fn value_ok(inout st: St, inout c: Ctx, inout m: Module, ty0: u32, inout seen: ChunkSeq[u32])
-    -> bool eff [Ffi[Cranelift]] {
+fn value_ok(
+    inout st: St,
+    inout c: Ctx,
+    inout m: Module,
+    ty0: u32,
+    inout seen: ChunkSeq[u32]
+) -> bool eff [Ffi[Cranelift]] {
     let ty = default_type(inout c.types, ty0);
     if mentions_dyn(in c, ty, 0) {
         return false;
@@ -183,8 +188,13 @@ fn load_ok(inout st: St, inout c: Ctx, ty: u32) -> bool {
     l != NONE32 && (st.ls.aggregate(l) || is_box(in c, ty))
 }
 
-fn inline_ok(inout st: St, inout c: Ctx, inout m: Module, ty: u32, inout seen: ChunkSeq[u32])
-    -> bool eff [Ffi[Cranelift]] {
+fn inline_ok(
+    inout st: St,
+    inout c: Ctx,
+    inout m: Module,
+    ty: u32,
+    inout seen: ChunkSeq[u32]
+) -> bool eff [Ffi[Cranelift]] {
     if !contains_box(inout c, ty) {
         return true;
     }
@@ -237,8 +247,13 @@ fn inline_ok(inout st: St, inout c: Ctx, inout m: Module, ty: u32, inout seen: C
 // The emission (src/native.rs).
 
 // `helper_load`: an aggregate is its address; a box is loaded.
-fn helper_load(inout st: St, inout c: Ctx, inout b: Builder, ptr: Value, ty: u32)
-    -> Value eff [Ffi[Cranelift]] {
+fn helper_load(
+    inout st: St,
+    inout c: Ctx,
+    inout b: Builder,
+    ptr: Value,
+    ty: u32
+) -> Value eff [Ffi[Cranelift]] {
     let l = lay(inout st, inout c, ty);
     if st.ls.aggregate(l) {
         ptr
@@ -348,8 +363,12 @@ fn drop_value(
 }
 
 // `declare_or_define_drop_helper`.
-fn drop_helper(inout st: St, inout c: Ctx, inout m: Module, ty: u32)
-    -> FuncId eff [Ffi[Cranelift]] {
+fn drop_helper(
+    inout st: St,
+    inout c: Ctx,
+    inout m: Module,
+    ty: u32
+) -> FuncId eff [Ffi[Cranelift]] {
     let name = helper_name(in c, ty);
     match module_get_function(inout m, in name.as_slice()) {
         Option::Some(id) => return id,

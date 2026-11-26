@@ -821,8 +821,13 @@ fn has_string(inout l: L, t: u32) -> bool {
     false
 }
 
-fn new_block(inout l: L, inout c: Code, inout locals: ChunkSeq[ValTy], nparams: u64, slots: u64)
-    -> u32 {
+fn new_block(
+    inout l: L,
+    inout c: Code,
+    inout locals: ChunkSeq[ValTy],
+    nparams: u64,
+    slots: u64
+) -> u32 {
     let b = temp(inout locals, nparams);
     c.i64_const(wrapping_i64(wrapping_mul(8, slots)));
     c.call(l.alloc);

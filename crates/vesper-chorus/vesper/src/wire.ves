@@ -221,8 +221,10 @@ pub fn batch_decode_range(
     h
 }
 
-pub fn batch_decode(in b: Slice[u8], inout out_entries: ChunkSeq[RaftEntry])
-    -> WireHeader eff [Fail[WireErr]] {
+pub fn batch_decode(
+    in b: Slice[u8],
+    inout out_entries: ChunkSeq[RaftEntry]
+) -> WireHeader eff [Fail[WireErr]] {
     batch_decode_range(in b, 0, b.len(), inout out_entries)
 }
 
@@ -293,8 +295,11 @@ pub fn votereq_encode_seq(in v: WireVoteReq, inout out: ChunkSeq[u8]) {
     let _ = out.try_write_u64_be(wrapping_add(base, 20), v.last_log_term);
 }
 
-pub fn votereq_decode_range(in b: Slice[u8], off: u64, len: u64)
-    -> WireVoteReq eff [Fail[WireErr]] {
+pub fn votereq_decode_range(
+    in b: Slice[u8],
+    off: u64,
+    len: u64
+) -> WireVoteReq eff [Fail[WireErr]] {
     if len != VOTE_REQ_LEN {
         Fail::raise(WireErr::Length { expected: VOTE_REQ_LEN, found: len });
     }

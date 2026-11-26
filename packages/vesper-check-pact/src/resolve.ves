@@ -571,8 +571,14 @@ fn sig_contains_projection(in t: Types, sy: Sy, in d: Decls, s: Sig) -> bool {
     false
 }
 
-fn bound_stub(in sess: PactSession, tr_idx: u64, method: u32, s: u64, e: u64, dyn_mode: bool)
-    -> ResolveOutcome {
+fn bound_stub(
+    in sess: PactSession,
+    tr_idx: u64,
+    method: u32,
+    s: u64,
+    e: u64,
+    dyn_mode: bool
+) -> ResolveOutcome {
     let tr = trait_at(in sess.d, tr_idx);
     let mut found_sig = false;
     let mut sig = Sig { name: 0, s: 0, e: 0, ga: 0, gn: 0, pa: 0, pn: 0, result: 0, row: 0 };

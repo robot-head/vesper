@@ -91,8 +91,12 @@ fn fail(inout status: Slice[u64], code: u64, a: u64, b: u64) eff [Fail[RuntimeEr
 }
 
 // `at + n` when `b` holds that many bytes from `at`.
-fn need(in b: Slice[u8], inout status: Slice[u64], at: u64, n: u64)
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+fn need(
+    in b: Slice[u8],
+    inout status: Slice[u64],
+    at: u64,
+    n: u64
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
     let end = at + n;
     if end > b.len() {
         fail(inout status, 1, 0, 0);
@@ -114,8 +118,13 @@ fn le(in b: Slice[u8], at: u64, n: u64) -> u64 eff [Fail[ArithOverflow], Fail[Ru
     v
 }
 
-fn put(inout tape: Slice[u64], inout status: Slice[u64], n: u64, tag: u64, payload: u64)
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+fn put(
+    inout tape: Slice[u64],
+    inout status: Slice[u64],
+    n: u64,
+    tag: u64,
+    payload: u64
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
     if n + 2 > tape.len() {
         fail(inout status, 30, 0, 0);
     }
@@ -125,8 +134,11 @@ fn put(inout tape: Slice[u64], inout status: Slice[u64], n: u64, tag: u64, paylo
 }
 
 // Checks the string at `at`; returns (its start, its end).
-fn string_at(in b: Slice[u8], inout status: Slice[u64], at: u64)
-    -> (u64, u64) eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+fn string_at(
+    in b: Slice[u8],
+    inout status: Slice[u64],
+    at: u64
+) -> (u64, u64) eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
     let start = need(in b, inout status, at, 8);
     let len = le(in b, at, 8);
     if len > MAX_STRING {
@@ -139,16 +151,24 @@ fn string_at(in b: Slice[u8], inout status: Slice[u64], at: u64)
     (start, end)
 }
 
-fn check_string(in b: Slice[u8], inout status: Slice[u64], at: u64)
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+fn check_string(
+    in b: Slice[u8],
+    inout status: Slice[u64],
+    at: u64
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
     let (start, end) = string_at(in b, inout status, at);
     end
 }
 
 // Reads a string at `at`; returns its end. Writes `(8 | len << 8, offset)`
 // at `tape[n..]`.
-fn read_string(in b: Slice[u8], inout tape: Slice[u64], inout status: Slice[u64], n: u64, at: u64)
-    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+fn read_string(
+    in b: Slice[u8],
+    inout tape: Slice[u64],
+    inout status: Slice[u64],
+    n: u64,
+    at: u64
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
     let (start, end) = string_at(in b, inout status, at);
     put(inout tape, inout status, n, 8 | ((end - start) << 8), start);
     end
@@ -330,8 +350,12 @@ fn geometry(ty: u64) -> (u64, u64) {
 }
 
 // Whether `b[start..start + len]` equals `word`.
-fn same_bytes(in b: Slice[u8], start: u64, len: u64, in word: Slice[u8])
-    -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+fn same_bytes(
+    in b: Slice[u8],
+    start: u64,
+    len: u64,
+    in word: Slice[u8]
+) -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     if len != word.len() {
         return false;
     }

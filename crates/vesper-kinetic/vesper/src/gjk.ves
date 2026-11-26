@@ -283,8 +283,12 @@ fn bit_count(mask: u64) -> u64 {
 // The barycentric weights (into `lam`) of the origin's projection onto the
 // affine hull of the points of `pts` that `mask` selects, if it lies
 // strictly inside that face (src/gjk.rs affine_closest).
-fn affine_closest(in pts: ChunkSeq[Sp], mask: u64, inout lam: ChunkSeq[f64], inout g: ChunkSeq[f64])
-    -> bool {
+fn affine_closest(
+    in pts: ChunkSeq[Sp],
+    mask: u64,
+    inout lam: ChunkSeq[f64],
+    inout g: ChunkSeq[f64]
+) -> bool {
     let k = bit_count(mask);
     for i in 0..u(4) {
         lam.try_set(i, 0.0);
@@ -539,8 +543,14 @@ fn canonical_sign(v: V3) -> V3 {
 const EPA_TOL: f64 = 0.000000001;
 
 // make_face of src/gjk.rs; `false` when the face has no normal.
-fn make_face(in pts: ChunkSeq[Sp], i: u64, j: u64, k: u64, inside: V3, inout out: ChunkSeq[Face])
-    -> bool {
+fn make_face(
+    in pts: ChunkSeq[Sp],
+    i: u64,
+    j: u64,
+    k: u64,
+    inside: V3,
+    inout out: ChunkSeq[Face]
+) -> bool {
     let a = sp_at(in pts, i).w;
     let b = sp_at(in pts, j).w;
     let c = sp_at(in pts, k).w;
@@ -775,8 +785,13 @@ fn toggle_edge(inout horizon: ChunkSeq[Edge], p: u64, q: u64) {
 
 // src/gjk.rs separation into `out` ([distance, normal (3), point_a (3),
 // point_b (3)]); a status.
-pub fn separation(ka: u32, in da: Slice[f64], kb: u32, in db: Slice[f64], inout out: Slice[f64])
-    -> u64 {
+pub fn separation(
+    ka: u32,
+    in da: Slice[f64],
+    kb: u32,
+    in db: Slice[f64],
+    inout out: Slice[f64]
+) -> u64 {
     if !shape_valid(ka, in da) || !shape_valid(kb, in db) {
         return invalid_shape();
     }

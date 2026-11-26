@@ -469,8 +469,12 @@ pub fn exp_record(inout counts: Slice[u64], inout st: ExpState, value: u64) eff 
 // ---------------------------------------------------------------------------
 // traceparent.rs: W3C TraceContext v00.
 
-pub fn span_context_new(trace_hi: u64, trace_lo: u64, span_id: u64, trace_flags: u8)
-    -> SpanContext eff [Fail[TraceError]] {
+pub fn span_context_new(
+    trace_hi: u64,
+    trace_lo: u64,
+    span_id: u64,
+    trace_flags: u8
+) -> SpanContext eff [Fail[TraceError]] {
     if trace_hi == 0 && trace_lo == 0 {
         Fail::raise(TraceError::ZeroTraceId);
     }
@@ -653,8 +657,12 @@ pub fn format_traceparent(in context: SpanContext, inout out: Slice[u8]) {
 // ---------------------------------------------------------------------------
 // spans.rs: SpanPool, ActiveSpan and TelemetryRing.
 
-pub fn pool_new(trace_hi: u64, trace_lo: u64, first_span_id: u64, flags: u8)
-    -> PoolState eff [Fail[TraceError]] {
+pub fn pool_new(
+    trace_hi: u64,
+    trace_lo: u64,
+    first_span_id: u64,
+    flags: u8
+) -> PoolState eff [Fail[TraceError]] {
     let context = span_context_new(trace_hi, trace_lo, first_span_id, flags);
     PoolState {
         trace_hi: context.trace_hi,
@@ -811,8 +819,11 @@ pub fn ring_pop_front(inout ring: RingState, capacity: u64, count: u64) {
 
 // Moves up to `out.len()` records, oldest first, into `out`; returns how
 // many. An empty ring or an empty `out` leaves the ring unchanged.
-pub fn ring_drain(inout records: Slice[SpanRow], inout ring: RingState, inout out: Slice[SpanRow])
-    -> u64 {
+pub fn ring_drain(
+    inout records: Slice[SpanRow],
+    inout ring: RingState,
+    inout out: Slice[SpanRow]
+) -> u64 {
     let n = ring_prefix_len(ring, out.len());
     let capacity = records.len();
     for i in 0..n {

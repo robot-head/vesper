@@ -238,6 +238,9 @@ fn pattern_names(in p: Program, at: u64, inout out: ChunkSeq[u32], depth: u64) -
 pub fn seq_class(in p: Program, in names: Names, pool: u64) -> u64 {
     let row = p.pool_row(pool);
     if row.kind == POOL_HOISTED {
+        if row.label >= 32 {
+            return add(SeqWord::HoistedWide, wrapping_sub(w(row.label), 32));
+        }
         return add(SeqWord::Hoisted, w(row.label));
     }
     if row.kind == POOL_GUARD {
@@ -301,7 +304,62 @@ pub fn seq_class(in p: Program, in names: Names, pool: u64) -> u64 {
     if names.has_prefix(s, in "BoundsGuard".as_bytes()) {
         return SeqWord::Guard;
     }
+    if names.has_prefix(s, in "Wide(Wide { ".as_bytes()) {
+        return add(SeqWord::Wide, wide_code(in names, s));
+    }
+    if names.has_prefix(s, in "Hoisted(Wide(Wide { ".as_bytes()) {
+        return add(SeqWord::HoistedWide, wide_code(in names, s));
+    }
     SeqWord::Any
+}
+
+// Whether name `s` holds the bytes of `t`.
+fn name_has(in names: Names, s: u32, in t: Str) -> bool {
+    let b = t.as_bytes();
+    let n = names.size(s);
+    if n < b.len() {
+        return false;
+    }
+    for i in 0..inc(wrapping_sub(n, b.len())) {
+        let mut all = true;
+        for j in 0..b.len() {
+            let c = match b.try_get(j) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            };
+            if names.byte(s, add(i, j)) != c {
+                all = false;
+                break;
+            }
+        }
+        if all {
+            return true;
+        }
+    }
+    false
+}
+
+// `Wide::code` of the `Debug` text of a `Wide` (`total * 12 + write * 6 +
+// width * 2 + big`, width 0, 1, 2 for 2, 4, 8 bytes).
+fn wide_code(in names: Names, s: u32) -> u64 {
+    let width: u64 = if name_has(in names, s, "bytes: 8") {
+        2
+    } else if name_has(in names, s, "bytes: 4") {
+        1
+    } else {
+        0
+    };
+    let mut code = wrapping_mul(width, 2);
+    if name_has(in names, s, "big: true") {
+        code = inc(code);
+    }
+    if name_has(in names, s, "write: true") {
+        code = add(code, 6);
+    }
+    if name_has(in names, s, "total: true") {
+        code = add(code, 12);
+    }
+    code
 }
 
 impl Enc {
@@ -501,8 +559,13 @@ fn inst_drops(in p: Program, at: u64, inout drops: ChunkSeq[u64]) -> u64 {
 }
 
 // Function `fi` of `p` as the input words of words.rs (step words zero).
-pub fn encode_fun(in p: Program, inout t: Types, in names: Names, inout tc: TypeCache, fi: u64)
-    -> ChunkSeq[u8] {
+pub fn encode_fun(
+    in p: Program,
+    inout t: Types,
+    in names: Names,
+    inout tc: TypeCache,
+    fi: u64
+) -> ChunkSeq[u8] {
     let mut e = Enc {
         out: ChunkSeq::new[u64](),
         loc: names_new(),

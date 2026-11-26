@@ -268,8 +268,14 @@ impl Planner {
     }
 
     // `fail_only(world, f)`.
-    fn fail_only(inout self, inout t: Types, in names: Names, in wd: World, in tb: Tables, f: Func)
-        -> bool {
+    fn fail_only(
+        inout self,
+        inout t: Types,
+        in names: Names,
+        in wd: World,
+        in tb: Tables,
+        f: Func
+    ) -> bool {
         let r = t.row(f.row);
         if r.tail != 0 {
             return false;
@@ -294,8 +300,13 @@ impl Planner {
         ! self.signature_has_function(inout t, in wd, in tb, f)
     }
 
-    fn signature_has_function(inout self, inout t: Types, in wd: World, in tb: Tables, f: Func)
-        -> bool {
+    fn signature_has_function(
+        inout self,
+        inout t: Types,
+        in wd: World,
+        in tb: Tables,
+        f: Func
+    ) -> bool {
         if self.contains_function(inout t, in wd, f.result) {
             return true;
         }
@@ -326,8 +337,14 @@ impl Planner {
     }
 
     // `reject_suspending_recursion`'s depth-first search from `fi`.
-    fn dfs(inout self, inout t: Types, in names: Names, in wd: World, in tb: Tables, fi: u32)
-        -> bool {
+    fn dfs(
+        inout self,
+        inout t: Types,
+        in names: Names,
+        in wd: World,
+        in tb: Tables,
+        fi: u32
+    ) -> bool {
         if bool_at(in self.done, w(fi)) {
             return true;
         }

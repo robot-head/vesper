@@ -559,8 +559,12 @@ fn parse_sections(
 
 // `Btf::parse_with`: `split` with the base's type count (including void)
 // and string section, or a standalone blob (`base_types` 1, no strings).
-pub fn parse_btf(in btf: Slice[u8], split: bool, base_types: u64, in base_strings: Slice[u8])
-    -> ChunkSeq[u64] {
+pub fn parse_btf(
+    in btf: Slice[u8],
+    split: bool,
+    base_types: u64,
+    in base_strings: Slice[u8]
+) -> ChunkSeq[u64] {
     let len = btf.len();
     if len < BTF_HDR_LEN || (byte(in btf, 0) | (byte(in btf, 1) << 8)) != BtfHeader::Magic {
         return failed(0, 0);

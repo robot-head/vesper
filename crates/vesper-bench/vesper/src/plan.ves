@@ -164,8 +164,13 @@ pub fn do_validate_config(
 
 // One measured A/B/B/A epoch: A = windows 0 + 3, B = windows 1 + 2, over
 // twice the window's operations.
-pub fn do_fold_epoch(w0: u64, w1: u64, w2: u64, w3: u64, operations: u64)
-    -> Sample eff [Fail[PortError]] {
+pub fn do_fold_epoch(
+    w0: u64,
+    w1: u64,
+    w2: u64,
+    w3: u64,
+    operations: u64
+) -> Sample eff [Fail[PortError]] {
     let a = cadd(w0, w3);
     let b = cadd(w1, w2);
     do_paired_sample_new(a, b, cmul(operations, WINDOWS_PER_ARM))
@@ -174,8 +179,11 @@ pub fn do_fold_epoch(w0: u64, w1: u64, w2: u64, w3: u64, operations: u64)
 // ---------------------------------------------------------------------------
 // causal.rs
 
-pub fn do_experiment_run(elapsed: u64, delay: u64, progress: u64)
-    -> ExperimentRun eff [Fail[CausalErr]] {
+pub fn do_experiment_run(
+    elapsed: u64,
+    delay: u64,
+    progress: u64
+) -> ExperimentRun eff [Fail[CausalErr]] {
     if progress == 0 {
         Fail::raise(CausalErr::EmptyEvidence);
     }

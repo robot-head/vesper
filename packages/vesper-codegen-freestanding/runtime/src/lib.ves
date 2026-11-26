@@ -369,8 +369,13 @@ copy struct Ids {
 // The functions.
 
 // putc(byte): wait until the UART can take a byte, then write it.
-fn build_putc(inout m: Module, ids: Ids, uart: u64, base: u64, inout traps: ChunkSeq[u8])
-    -> bool eff [Ffi[Cranelift]] {
+fn build_putc(
+    inout m: Module,
+    ids: Ids,
+    uart: u64,
+    base: u64,
+    inout traps: ChunkSeq[u8]
+) -> bool eff [Ffi[Cranelift]] {
     let mut b = match builder_new(in m, ids.s1) {
         Option::Some(b) => b,
         Option::None => return false,
@@ -434,8 +439,11 @@ fn build_puts(inout m: Module, ids: Ids, inout traps: ChunkSeq[u8]) -> bool eff 
 }
 
 // put_udec(value): decimal digits into a stack buffer, then puts.
-fn build_put_udec(inout m: Module, ids: Ids, inout traps: ChunkSeq[u8])
-    -> bool eff [Ffi[Cranelift]] {
+fn build_put_udec(
+    inout m: Module,
+    ids: Ids,
+    inout traps: ChunkSeq[u8]
+) -> bool eff [Ffi[Cranelift]] {
     let mut b = match builder_new(in m, ids.s1) {
         Option::Some(b) => b,
         Option::None => return false,
@@ -472,8 +480,11 @@ fn build_put_udec(inout m: Module, ids: Ids, inout traps: ChunkSeq[u8])
 }
 
 // put_hex(value): 16 digits.
-fn build_put_hex(inout m: Module, ids: Ids, inout traps: ChunkSeq[u8])
-    -> bool eff [Ffi[Cranelift]] {
+fn build_put_hex(
+    inout m: Module,
+    ids: Ids,
+    inout traps: ChunkSeq[u8]
+) -> bool eff [Ffi[Cranelift]] {
     let mut b = match builder_new(in m, ids.s1) {
         Option::Some(b) => b,
         Option::None => return false,
@@ -627,8 +638,12 @@ copy struct TrapStrings {
 // trap(cause, epc, tval): look `epc` up in the trap table, print the
 // reason and the registers, exit with EXIT_ABORT (found) or
 // EXIT_EXCEPTION.
-fn build_trap(inout m: Module, ids: Ids, strings: TrapStrings, inout traps: ChunkSeq[u8])
-    -> bool eff [Ffi[Cranelift]] {
+fn build_trap(
+    inout m: Module,
+    ids: Ids,
+    strings: TrapStrings,
+    inout traps: ChunkSeq[u8]
+) -> bool eff [Ffi[Cranelift]] {
     let mut b = match builder_new(in m, ids.s3) {
         Option::Some(b) => b,
         Option::None => return false,
@@ -755,8 +770,12 @@ fn bytes_of(in req: Slice[u8], s: Span) -> ChunkSeq[u8] {
 
 // Everything after the module is made: declarations, functions and data in
 // `runtime::build`'s order. Writes the result's object, CLIF and traps.
-fn emit(inout m: Module, in req: Slice[u8], in spec: Spec, inout traps: ChunkSeq[u8])
-    -> bool eff [Ffi[Cranelift]] {
+fn emit(
+    inout m: Module,
+    in req: Slice[u8],
+    in spec: Spec,
+    inout traps: ChunkSeq[u8]
+) -> bool eff [Ffi[Cranelift]] {
     let s1 = sig(inout m, 1, 0);
     let s2 = sig(inout m, 2, 0);
     let s3 = sig(inout m, 3, 0);

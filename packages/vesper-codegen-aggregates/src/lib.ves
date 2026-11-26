@@ -1977,8 +1977,14 @@ fn value_aggregate(inout e: Env, inout c: Ctx, in g: G, v: u32) -> bool {
 }
 
 // `window_ok`'s `fresh`.
-fn fresh(inout e: Env, inout c: Ctx, in p: Program, in g: G, in members: ChunkSeq[u8], v: u32)
-    -> bool {
+fn fresh(
+    inout e: Env,
+    inout c: Ctx,
+    in p: Program,
+    in g: G,
+    in members: ChunkSeq[u8],
+    v: u32
+) -> bool {
     u8_at(in members, w(v)) != 0
         || !value_aggregate(inout e, inout c, in g, v)
         || def_candidate(in p, in e, in g, v)
@@ -2559,8 +2565,14 @@ impl Reads {
 }
 
 // Whether path xs[xa..xa+xn] starts with ys[ya..ya+yn].
-fn starts_with(in xs: ChunkSeq[u32], xa: u64, xn: u64, in ys: ChunkSeq[u32], ya: u64, yn: u64)
-    -> bool {
+fn starts_with(
+    in xs: ChunkSeq[u32],
+    xa: u64,
+    xn: u64,
+    in ys: ChunkSeq[u32],
+    ya: u64,
+    yn: u64
+) -> bool {
     if yn > xn {
         return false;
     }
@@ -4170,7 +4182,8 @@ fn seq_option_op(in p: Program, in names: Names, in sh: Shapes, k: u64, pool: u6
         || label_is(in p, in names, pool, "Last", false) {
         return true;
     }
-    if label_is(in p, in names, pool, "Wide(", true) {
+    if label_is(in p, in names, pool, "Wide(", true)
+        || label_is(in p, in names, pool, "Hoisted(Wide(", true) {
         return label_has(in p, in names, pool, "write: false")
             && label_has(in p, in names, pool, "total: true");
     }
@@ -4532,8 +4545,14 @@ fn first_fresh_value(in p: Program, in g: G) -> u64 {
 
 // `native_aggregates::scalar_enums`: which values and locals of graph `g`
 // are kept as words, and their word values (`Plan`).
-fn scalar_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms, inout sh: Shapes)
-    -> Plan {
+fn scalar_plan(
+    inout e: Env,
+    inout c: Ctx,
+    in p: Program,
+    in g: G,
+    in s: Syms,
+    inout sh: Shapes
+) -> Plan {
     let f = p.function(g.fi);
     // Graphs with fip slots or `Box` drops keep the old lowering.
     for i in 0..f.tn {

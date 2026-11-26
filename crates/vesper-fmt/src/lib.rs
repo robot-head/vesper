@@ -819,6 +819,8 @@ fn sequence<'a>(
     // plain one-name-per-line layout.
     let mut separators = Vec::new();
     let mut commented = false;
+    // The previous atom was a non-empty parameter list before `->`.
+    let mut previous_params = false;
     while *pos < atoms.len() && Some(atoms[*pos].kind) != end {
         let current = atoms[*pos];
         // `{` after `.` or `::` opens a list, not a block: a tagged literal or
@@ -854,6 +856,12 @@ fn sequence<'a>(
             Gap::Soft
         } else {
             previous.map_or(Gap::None, |p| gap(p, current, block, previous_block))
+        };
+        // A return type follows its parameter list on the same line, as in
+        // rustfmt: the list breaks first (`) -> T {`).
+        let spacing = match spacing {
+            Gap::Return if previous_params => Gap::Soft,
+            spacing => spacing,
         };
         let after_comma = previous.is_some_and(|p| p.kind == K::Comma);
         let near_comment = matches!(current.kind, K::Comment | K::BlockComment)
@@ -898,6 +906,7 @@ fn sequence<'a>(
             }
         }
         *pos += 1;
+        let mut params = false;
         let node = if matches!(current.kind, K::LParen | K::LBracket | K::LBrace) {
             let close = match current.kind {
                 K::LParen => K::RParen,
@@ -924,6 +933,9 @@ fn sequence<'a>(
                 .ok_or(Error::Conservation)?;
             *pos += 1;
             let finish = document.push(Doc::Text(closing.text))?;
+            params = current.kind == K::LParen
+                && !empty
+                && atoms.get(*pos).is_some_and(|a| a.kind == K::Arrow);
             if empty {
                 document.push(Doc::Concat(vec![start, finish]))?
             } else {
@@ -945,7 +957,14 @@ fn sequence<'a>(
                         Doc::SoftLineOrEmpty
                     })?;
                 let all = document.push(Doc::Concat(vec![start, nest, trail, finish]))?;
-                document.push(Doc::Group(all))?
+                // A parameter list before `->` shares its line's group, so it
+                // breaks whenever the signature with its return type cannot
+                // fit on one line.
+                if params {
+                    all
+                } else {
+                    document.push(Doc::Group(all))?
+                }
             }
         } else {
             document.push(if matches!(current.kind, K::Comment | K::BlockComment) {
@@ -960,6 +979,7 @@ fn sequence<'a>(
             line.push(node);
         }
         previous_block = is_block;
+        previous_params = params;
         // A prefix `-`/`!` binds to its operand with no space.
         previous_unary =
             matches!(current.kind, K::Minus | K::Bang | K::Tilde) && !previous_ends_operand;

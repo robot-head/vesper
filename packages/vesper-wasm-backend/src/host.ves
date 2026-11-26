@@ -396,8 +396,12 @@ fn no_vals() -> ChunkSeq[ValTy] {
 }
 
 // module 0 `wasi:cli/environment`, 1 `wasi:filesystem/types`, 2 preopens
-fn imp(inout b: Builder, module: u8, in name: Str, in params: ChunkSeq[ValTy])
-    -> u32 eff [Fail[WErr]] {
+fn imp(
+    inout b: Builder,
+    module: u8,
+    in name: Str,
+    in params: ChunkSeq[ValTy]
+) -> u32 eff [Fail[WErr]] {
     let m = if module == 0 {
         "wasi:cli/environment@0.2.0"
     } else if module == 1 {

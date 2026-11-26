@@ -55,8 +55,14 @@ pub fn accept_mmap(
 
 // Validate and remove a tracked host mmap range. Returns `new_count`, or
 // `MMAP_ERR_INVALID` / `MMAP_ERR_CONFLICT` (untracked).
-pub fn unmap(inout iv: Slice[u64], count: u64, win_start: u64, win_end: u64, addr: u64, len: u64)
-    -> u64 {
+pub fn unmap(
+    inout iv: Slice[u64],
+    count: u64,
+    win_start: u64,
+    win_end: u64,
+    addr: u64,
+    len: u64
+) -> u64 {
     if len == 0 || (addr & PAGE_MASK) != 0 || (len & PAGE_MASK) != 0 {
         return MMAP_ERR_INVALID;
     }

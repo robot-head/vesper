@@ -52,8 +52,10 @@ fn fits_bytes(len: u64) -> bool {
 }
 
 // `TiledSlab::new`: the stride and the allocation length in samples.
-pub fn s_tiled(buffers: u64, block: u64)
-    -> (u64, u64) eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[SlabFault]] {
+pub fn s_tiled(
+    buffers: u64,
+    block: u64
+) -> (u64, u64) eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[SlabFault]] {
     let stride = match tiles(block) {
         Option::Some(s) => s,
         Option::None => {
@@ -77,8 +79,10 @@ pub fn s_tiled(buffers: u64, block: u64)
 
 // `DelaySlab::new`: `SlabWords::Line` metadata words per line, then the `Totals`:
 // the total stride and the allocation length (0 and 0 without lines).
-pub fn s_delays(in delays: Slice[u32], block: u64)
-    -> ChunkSeq[u64] eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[SlabFault]] {
+pub fn s_delays(
+    in delays: Slice[u32],
+    block: u64
+) -> ChunkSeq[u64] eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[SlabFault]] {
     let n = delays.len();
     if block == 0 {
         Fail::raise(SlabFault::TooLarge(n, block));

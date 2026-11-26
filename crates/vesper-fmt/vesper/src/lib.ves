@@ -320,8 +320,14 @@ fn has_break(in s: Slice[u8], a: u64, b: u64) -> bool {
     }
 }
 
-fn add_node(inout d: Doc, kind: u8, a: u64, b: u64, width: u64, depth: u64)
-    -> u64 eff [Fail[FmtFail]] {
+fn add_node(
+    inout d: Doc,
+    kind: u8,
+    a: u64,
+    b: u64,
+    width: u64,
+    depth: u64
+) -> u64 eff [Fail[FmtFail]] {
     if depth > MAX_DOC_DEPTH {
         fail(E_DEPTH);
     }
@@ -342,8 +348,13 @@ fn begin(inout d: Doc) eff [Fail[FmtFail]] {
 }
 
 // `Doc::Text` or `Doc::Comment` of `src[s..e]`.
-fn push_text(inout d: Doc, in src: Slice[u8], s: u64, e: u64, comment: bool)
-    -> u64 eff [Fail[FmtFail]] {
+fn push_text(
+    inout d: Doc,
+    in src: Slice[u8],
+    s: u64,
+    e: u64,
+    comment: bool
+) -> u64 eff [Fail[FmtFail]] {
     begin(inout d);
     charge(inout d.w, wrapping_sub(e, s));
     let line_comment = comment
@@ -401,8 +412,12 @@ fn push_concat(inout d: Doc, in ids: Slice[u32]) -> u64 eff [Fail[FmtFail]] {
     push_concat_range(inout d, in ids, 0, ids.len())
 }
 
-fn push_concat_range(inout d: Doc, in ids: Slice[u32], start: u64, end: u64)
-    -> u64 eff [Fail[FmtFail]] {
+fn push_concat_range(
+    inout d: Doc,
+    in ids: Slice[u32],
+    start: u64,
+    end: u64
+) -> u64 eff [Fail[FmtFail]] {
     begin(inout d);
     let n = wrapping_sub(end, start);
     if n > d.max_nodes {
@@ -485,8 +500,12 @@ fn push_frame(in d: Doc, inout frames: ChunkSeq[u64], id: u64, flat: bool) eff [
 // `Document::following_width`: the width of what follows on the current
 // line, from the top of the pending stack, until a line break or until it
 // passes `remaining`.
-fn following_width(inout d: Doc, in src: Slice[u8], in pending: ChunkSeq[u64], remaining: u64)
-    -> u64 eff [Fail[FmtFail]] {
+fn following_width(
+    inout d: Doc,
+    in src: Slice[u8],
+    in pending: ChunkSeq[u64],
+    remaining: u64
+) -> u64 eff [Fail[FmtFail]] {
     let mut width: u64 = 0;
     // Frames: node, flat flag and the next child index of a Concat.
     let mut frames = ChunkSeq::with_capacity[u64](16);
@@ -1343,6 +1362,8 @@ fn sequence(
     // plain one-name-per-line layout.
     let mut separators = ChunkSeq::new[u32]();
     let mut commented = false;
+    // The previous atom was a non-empty parameter list before `->`.
+    let mut previous_params = false;
     loop {
         if pos >= n {
             break;
@@ -1394,7 +1415,14 @@ fn sequence(
         } else if list && has_prev && prev == K_SEMI {
             G_SOFT
         } else if has_prev {
-            gap(prev, c, block, previous_block)
+            let g = gap(prev, c, block, previous_block);
+            // A return type follows its parameter list on the same line, as
+            // in rustfmt: the list breaks first (`) -> T {`).
+            if g == G_RETURN && previous_params {
+                G_SOFT
+            } else {
+                g
+            }
         } else {
             G_NONE
         };
@@ -1455,6 +1483,7 @@ fn sequence(
         let cs = w32(in at.start, pos);
         let ce = w32(in at.end, pos);
         pos = wrapping_add(pos, 1);
+        let mut params = false;
         let node = if c == K_L_PAREN || c == K_L_BRACKET || c == K_L_BRACE {
             let close = close_of(c);
             let empty = pos < n && akind(in at, pos) == close;
@@ -1483,6 +1512,7 @@ fn sequence(
             let fe = w32(in at.end, pos);
             pos = wrapping_add(pos, 1);
             let finish = push_text(inout d, in src, fs, fe, false);
+            params = c == K_L_PAREN && !empty && pos < n && akind(in at, pos) == K_ARROW;
             if empty {
                 concat4(inout d, start, finish, 4294967295, 4294967295)
             } else {
@@ -1509,7 +1539,14 @@ fn sequence(
                     }
                 );
                 let all = concat4(inout d, start, nest, trail, finish);
-                push_group(inout d, all)
+                // A parameter list before `->` shares its line's group, so it
+                // breaks whenever the signature with its return type cannot
+                // fit on one line.
+                if params {
+                    all
+                } else {
+                    push_group(inout d, all)
+                }
             }
         } else {
             push_text(inout d, in src, cs, ce, c == K_COMMENT || c == K_BLOCK_COMMENT)
@@ -1520,6 +1557,7 @@ fn sequence(
             line.push(wrapping_u32(node));
         }
         previous_block = is_block;
+        previous_params = params;
         previous_unary = (c == K_MINUS || c == K_BANG || c == K_TILDE) && !previous_ends_operand;
         let used_as_name = word_used_as_name(has_prev, prev, c, akind(in at, pos));
         has_prev = true;
@@ -2169,8 +2207,13 @@ struct Pass {
 }
 
 // Lay out and render the parse `p` of `src`.
-fn layout(in src: Slice[u8], in p: P, sink nodes: ChunkSeq[u64], in lim: Limits, inout w: Work)
-    -> Pass eff [Fail[FmtFail]] {
+fn layout(
+    in src: Slice[u8],
+    in p: P,
+    sink nodes: ChunkSeq[u64],
+    in lim: Limits,
+    inout w: Work
+) -> Pass eff [Fail[FmtFail]] {
     let mut at = atoms(in src, in p.t, in p.ev);
     if nodes.len() != 0 {
         annotate(inout at, in p, in src, in nodes);
@@ -2198,8 +2241,12 @@ fn first_diag(in p: P) -> u64 {
 // `once` without a capture: parse, lay out and render `src` (`surface::
 // syntax` without the macro profile). `t` is the token table the gate
 // accepted (lexed again by the caller when it has one already).
-fn once_tokens(in src: Slice[u8], sink t: Tokens, in lim: Limits, inout w: Work)
-    -> Pass eff [Fail[FmtFail]] {
+fn once_tokens(
+    in src: Slice[u8],
+    sink t: Tokens,
+    in lim: Limits,
+    inout w: Work
+) -> Pass eff [Fail[FmtFail]] {
     let ntok = t.kind.len();
     // Ordinary modules use the compiler parser. Its batch mode skips the
     // contents of test blocks, so parse those in surface mode as well.

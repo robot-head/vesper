@@ -186,8 +186,12 @@ fn align4(n: u64) -> Option[u64] {
 }
 
 // `scan_notes` over the window `[base, base + len)` of `elf`.
-fn scan_notes(in elf: Slice[u8], base: u64, len: u64, inout found: Option[u32])
-    -> Option[PvhFault] {
+fn scan_notes(
+    in elf: Slice[u8],
+    base: u64,
+    len: u64,
+    inout found: Option[u32]
+) -> Option[PvhFault] {
     let mut at: u64 = 0;
     loop {
         if at >= len {
@@ -278,8 +282,11 @@ fn seg_word(in out: Slice[u64], k: u64, w: u64) -> u64 {
 // `parse_pvh_elf`: `(entry, segment count)`, with the `PT_LOAD` segments in
 // `out` (room for MAX_PHDRS). `ram` is the guest layout as `(gpa, len)`
 // pairs.
-pub fn pvh_parse(in elf: Slice[u8], in ram: Slice[u64], inout out: Slice[u64])
-    -> Result[(u32, u64), PvhFault] {
+pub fn pvh_parse(
+    in elf: Slice[u8],
+    in ram: Slice[u64],
+    inout out: Slice[u64]
+) -> Result[(u32, u64), PvhFault] {
     let mut count: u64 = 0;
     let n = elf.len();
     if n < ELF_HEADER_BYTES {

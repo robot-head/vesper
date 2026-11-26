@@ -302,8 +302,10 @@ fn push_unique_name(inout out: ChunkSeq[ChunkSeq[u8]], in slice: Slice[u8]) {
     out.push(sink name);
 }
 
-fn scan_mods(in src: Slice[u8], include_super: bool)
-    -> (ChunkSeq[ChunkSeq[u8]], ChunkSeq[ChunkSeq[u8]]) {
+fn scan_mods(
+    in src: Slice[u8],
+    include_super: bool
+) -> (ChunkSeq[ChunkSeq[u8]], ChunkSeq[ChunkSeq[u8]]) {
     let mut self_out = ChunkSeq::new[ChunkSeq[u8]]();
     let mut super_out = ChunkSeq::new[ChunkSeq[u8]]();
     let mut pos: u64 = 0;
@@ -498,8 +500,10 @@ fn find_pkg_by_dir(in pkgs: ChunkSeq[PkgNode], in dir: Slice[u8]) -> Option[u64]
     Option::None
 }
 
-fn load_pkg_graph(in root_dir: Slice[u8], inout pkgs: ChunkSeq[PkgNode])
-    -> Option[u64] eff [Ffi[StdFs]] {
+fn load_pkg_graph(
+    in root_dir: Slice[u8],
+    inout pkgs: ChunkSeq[PkgNode]
+) -> Option[u64] eff [Ffi[StdFs]] {
     let norm = normalize_dir(in ".".as_bytes(), in root_dir);
     match find_pkg_by_dir(in pkgs, in norm.as_slice()) {
         Option::Some(idx) => {
@@ -1539,51 +1543,215 @@ fn append_extra_intrinsics(in mods: ChunkSeq[ModEntry], inout out: ChunkSeq[u8])
     }
 }
 
-fn contains_bytes(in s: Slice[u8], in p: Slice[u8]) -> bool {
-    let n = s.len();
-    let m = p.len();
-    if m > n {
-        return false;
+// Which of the option prelude's methods `tok` names: 0 `is_some`, 1
+// `is_none`, 2 `unwrap_or`, 3 `or`, or 4 for none of them.
+fn option_method_slot(in tok: Slice[u8]) -> u64 {
+    if eq_bytes(in tok, in "is_some".as_bytes()) {
+        return 0;
     }
-    for i in 0..wrapping_add(wrapping_sub(n, m), 1) {
-        if starts_with(in s[i..n], in p) {
-            return true;
+    if eq_bytes(in tok, in "is_none".as_bytes()) {
+        return 1;
+    }
+    if eq_bytes(in tok, in "unwrap_or".as_bytes()) {
+        return 2;
+    }
+    if eq_bytes(in tok, in "or".as_bytes()) {
+        return 3;
+    }
+    4
+}
+
+// Where `/*` at `pos` ends, past the `*/` that closes it (or at the end
+// of `src`). Block comments nest, as in the lexer.
+fn block_comment_end(in src: Slice[u8], pos: u64) -> u64 {
+    let n = src.len();
+    let mut depth: u64 = 1;
+    let mut p = wrapping_add(pos, 2);
+    loop {
+        if wrapping_add(p, 1) >= n {
+            return n;
+        }
+        let c = byte_at(in src, p);
+        let d = byte_at(in src, wrapping_add(p, 1));
+        if c == 47 && d == 42 {
+            depth = wrapping_add(depth, 1);
+            p = wrapping_add(p, 2);
+        } else if c == 42 && d == 47 {
+            depth = wrapping_sub(depth, 1);
+            p = wrapping_add(p, 2);
+            if depth == 0 {
+                return p;
+            }
+        } else {
+            p = wrapping_add(p, 1);
         }
     }
-    false
 }
 
-// Whether `src` calls one of `Option`'s prelude methods.
-fn calls_option_method(in src: Slice[u8]) -> bool {
-    contains_bytes(in src, in ".unwrap_or(".as_bytes())
-        || contains_bytes(in src, in ".or(".as_bytes())
-        || contains_bytes(in src, in ".is_some(".as_bytes())
-        || contains_bytes(in src, in ".is_none(".as_bytes())
+// Scans the code of `src`, not its comments or string literals, for the
+// option prelude's methods: `used[k]` when a `.` and the method's name
+// follow each other, `defined[k]` when `src` has an `impl` block for
+// `Option` that defines it.
+fn scan_option_methods(
+    in src: Slice[u8],
+    inout used: ChunkSeq[bool],
+    inout defined: ChunkSeq[bool]
+) {
+    let n = src.len();
+    let mut pos: u64 = 0;
+    let mut after_dot = false;
+    let mut after_fn = false;
+    // 0: no `impl` header; 1: in one, before its type; 2: its type is
+    // `Option`; 3: its type is another.
+    let mut header: u64 = 0;
+    let mut brackets: u64 = 0;
+    let mut depth: u64 = 0;
+    // The brace depth of the `Option` impl body being scanned, or 0.
+    let mut option_body: u64 = 0;
+    loop {
+        if pos >= n {
+            break;
+        }
+        let (next_p, skipped) = next_code_byte(in src, pos);
+        if skipped != 0 {
+            // A string literal ends a `.` or `fn` run; a line comment is
+            // trivia between tokens, like whitespace.
+            if byte_at(in src, pos) == 34 {
+                after_dot = false;
+                after_fn = false;
+            }
+            pos = next_p;
+            continue;
+        }
+        let b = byte_at(in src, pos);
+        if b == 47 && wrapping_add(pos, 1) < n && byte_at(in src, wrapping_add(pos, 1)) == 42 {
+            pos = block_comment_end(in src, pos);
+            continue;
+        }
+        if is_ident_byte(b) {
+            let start = pos;
+            loop {
+                if pos >= n || !is_ident_byte(byte_at(in src, pos)) {
+                    break;
+                }
+                pos = wrapping_add(pos, 1);
+            }
+            let tok = src[start..pos];
+            let slot = option_method_slot(in tok);
+            if slot < 4 && after_dot {
+                let _ = used.try_set(slot, true);
+            }
+            if slot < 4 && after_fn && option_body != 0 && depth == option_body {
+                let _ = defined.try_set(slot, true);
+            }
+            if eq_bytes(in tok, in "impl".as_bytes()) {
+                header = 1;
+                brackets = 0;
+            } else if header == 1 && brackets == 0 {
+                header = if eq_bytes(in tok, in "Option".as_bytes()) {
+                    2
+                } else {
+                    3
+                };
+            }
+            after_fn = eq_bytes(in tok, in "fn".as_bytes());
+            after_dot = false;
+            continue;
+        }
+        pos = wrapping_add(pos, 1);
+        if b == 32 || b == 9 || b == 10 || b == 13 {
+            continue;
+        }
+        after_dot = b == 46;
+        after_fn = false;
+        if b == 91 {
+            brackets = wrapping_add(brackets, 1);
+        } else if b == 93 && brackets > 0 {
+            brackets = wrapping_sub(brackets, 1);
+        } else if b == 123 {
+            depth = wrapping_add(depth, 1);
+            if header == 2 {
+                option_body = depth;
+            }
+            header = 0;
+        } else if b == 125 && depth > 0 {
+            if depth == option_body {
+                option_body = 0;
+            }
+            depth = wrapping_sub(depth, 1);
+        } else if b == 59 {
+            header = 0;
+        }
+    }
 }
 
-// The Rust checker's option prelude (src/option_methods.rs): `Option`'s
-// methods, added when a module calls one of them and no module defines
-// its own `impl Option[T]`.
+// The Rust checker's option prelude (src/option_methods.rs): an
+// `impl Option[T]` block with the methods no module defines itself, added
+// when a module calls one of those.
 fn append_option_methods(in mods: ChunkSeq[ModEntry], inout out: ChunkSeq[u8]) {
-    let mut used = false;
-    let mut defined = false;
+    let mut used = ChunkSeq::new[bool]();
+    let mut defined = ChunkSeq::new[bool]();
+    for _k in 0..4 {
+        used.push(false);
+        defined.push(false);
+    }
     for mi in 0..mods.len() {
         match mods.try_get(mi) {
-            Option::Some(m) => {
-                used = used || calls_option_method(in m.text.as_slice());
-                defined = defined
-                    || contains_bytes(in m.text.as_slice(), in "] Option[T] {".as_bytes());
-            },
+            Option::Some(m) => scan_option_methods(in m.text.as_slice(), inout used, inout defined),
             Option::None => {},
         }
     }
-    if used && !defined {
-        out
-            .extend(
-                in "impl [T: mod copy] Option[T] { fn is_some(self) -> bool { match self { Option::Some(_) => true, Option::None => false } } fn is_none(self) -> bool { match self { Option::Some(_) => false, Option::None => true } } fn unwrap_or(self, fallback: T) -> T { match self { Option::Some(x) => x, Option::None => fallback } } fn or(self, other: Option[T]) -> Option[T] { match self { Option::Some(x) => Option::Some(x), Option::None => other } } } "
-                    .as_bytes()
-            );
+    let mut wanted = false;
+    for k in 0..4 {
+        let u = match used.try_get(k) {
+            Option::Some(v) => v,
+            Option::None => false,
+        };
+        let d = match defined.try_get(k) {
+            Option::Some(v) => v,
+            Option::None => false,
+        };
+        wanted = wanted || (u && !d);
     }
+    if !wanted {
+        return;
+    }
+    out.extend(in "impl [T: mod copy] Option[T] { ".as_bytes());
+    for k in 0..4 {
+        let d = match defined.try_get(k) {
+            Option::Some(v) => v,
+            Option::None => true,
+        };
+        if d {
+            continue;
+        }
+        if k == 0 {
+            out
+                .extend(
+                    in "fn is_some(self) -> bool { match self { Option::Some(_) => true, Option::None => false } } "
+                        .as_bytes()
+                );
+        } else if k == 1 {
+            out
+                .extend(
+                    in "fn is_none(self) -> bool { match self { Option::Some(_) => false, Option::None => true } } "
+                        .as_bytes()
+                );
+        } else if k == 2 {
+            out
+                .extend(
+                    in "fn unwrap_or(self, fallback: T) -> T { match self { Option::Some(x) => x, Option::None => fallback } } "
+                        .as_bytes()
+                );
+        } else {
+            out
+                .extend(
+                    in "fn or(self, other: Option[T]) -> Option[T] { match self { Option::Some(x) => Option::Some(x), Option::None => other } } "
+                        .as_bytes()
+                );
+        }
+    }
+    out.extend(in "} ".as_bytes());
 }
 
 fn scan_dir_mods(
@@ -1946,4 +2114,62 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
         }
     }
     Option::Some(out)
+}
+
+test {
+    // Which of `is_some`, `is_none`, `unwrap_or` and `or` `src` calls and
+    // which it defines, each as four decimal digits, 1 for yes.
+    fn option_scan(in src: Slice[u8]) -> (u64, u64) {
+        let mut used = ChunkSeq::new[bool]();
+        let mut defined = ChunkSeq::new[bool]();
+        for _k in 0..4 {
+            used.push(false);
+            defined.push(false);
+        }
+        scan_option_methods(in src, inout used, inout defined);
+        let mut u: u64 = 0;
+        let mut d: u64 = 0;
+        for k in 0..4 {
+            u = wrapping_mul(u, 10);
+            d = wrapping_mul(d, 10);
+            if used.try_get(k).unwrap_or(false) {
+                u = wrapping_add(u, 1);
+            }
+            if defined.try_get(k).unwrap_or(false) {
+                d = wrapping_add(d, 1);
+            }
+        }
+        (u, d)
+    }
+
+    fn test_option_calls_with_trivia_count() -> bool {
+        let (a, _) = option_scan(in "x.unwrap_or(0)".as_bytes());
+        let (b, _) = option_scan(in "x.unwrap_or (0) + y\n    .is_some()".as_bytes());
+        let (c, _) = option_scan(in "x.or/* fallback */(y)".as_bytes());
+        a == 10 && b == 1010 && c == 1
+    }
+
+    fn test_option_names_in_strings_and_comments_do_not() -> bool {
+        let (a, _) = option_scan(in "let s = \"x.unwrap_or(0)\"; // y.is_some()\n".as_bytes());
+        let (b, _) = option_scan(in "/* x.or(y) */ or(x)".as_bytes());
+        a == 0 && b == 0
+    }
+
+    fn test_only_an_option_impl_defines() -> bool {
+        let (u, d) = option_scan(
+            in "impl [T: mod copy] Option[T] { fn unwrap_or(self, d: T) -> T { d } } fn f() { o.or(p) }"
+                .as_bytes()
+        );
+        let (_, other) = option_scan(in "impl Foo { fn or(self) -> bool { true } }".as_bytes());
+        u == 1 && d == 10 && other == 0
+    }
+
+    fn test_comments_between_tokens_are_trivia() -> bool {
+        let (u, d) = option_scan(
+            in "impl [T: mod copy] Option[T] { fn // c\n unwrap_or(self, d: T) -> T { d } } fn f() { o.unwrap_or(0) }"
+                .as_bytes()
+        );
+        let (nested, _) = option_scan(in "/* a /* b */ \" */ fn f() { o.unwrap_or(0) }".as_bytes());
+        u == 10 && d == 10 && nested == 10
+    }
 }

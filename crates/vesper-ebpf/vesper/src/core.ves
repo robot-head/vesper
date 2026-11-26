@@ -348,8 +348,13 @@ fn lname_len(in lt: Slice[u64], p: u64) -> u64 {
 
 // ---- matching
 
-fn kind_compatible(in lt: Slice[u64], p: u64, in tab: Slice[u64], in idx: Slice[u64], id: u64)
-    -> bool {
+fn kind_compatible(
+    in lt: Slice[u64],
+    p: u64,
+    in tab: Slice[u64],
+    in idx: Slice[u64],
+    id: u64
+) -> bool {
     let t = skip_mods(in tab, in idx, id);
     let k = tkind(in tab, in idx, t);
     let tag = ltag(in lt, p);

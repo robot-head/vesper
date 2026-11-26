@@ -463,8 +463,11 @@ impl Cx {
 
     // `layout::variant`: (index, is_enum) of `constructor` in the enum
     // or struct `ty`, and the shape whose variant `index` it is.
-    pub fn variant_of(inout self, ty: u32, constructor: u32)
-        -> (u64, bool, Shape) eff [Fail[WErr]] {
+    pub fn variant_of(
+        inout self,
+        ty: u32,
+        constructor: u32
+    ) -> (u64, bool, Shape) eff [Fail[WErr]] {
         let short = self.short_name(constructor);
         let sh = self.shape(ty);
         if sh.kind == SH_ENUM {
@@ -2025,8 +2028,14 @@ fn branches_to(in cx: Cx, blk_term: u8, ta: u64, b: u64) -> bool {
 
 // `resumed_value`: whether `value` returned from block `b` is (through
 // join parameters fed only by jumps) a tail resumption result.
-fn resumed_value(in cx: Cx, fi: u64, b: u64, value: u64, in tail: ChunkSeq[u64], depth: u64)
-    -> bool {
+fn resumed_value(
+    in cx: Cx,
+    fi: u64,
+    b: u64,
+    value: u64,
+    in tail: ChunkSeq[u64],
+    depth: u64
+) -> bool {
     if contains64(in tail, value) {
         return true;
     }

@@ -1316,8 +1316,14 @@ impl Fip {
     }
 
     // `merge_states(vec![a, b])`.
-    fn merge2(inout self, f: FnRow, sink a: FipState, sink b: FipState, start: u64, end: u64)
-        -> FipState {
+    fn merge2(
+        inout self,
+        f: FnRow,
+        sink a: FipState,
+        sink b: FipState,
+        start: u64,
+        end: u64
+    ) -> FipState {
         let mut acc = state_new(true);
         let mut have = false;
         let mut flags: ChunkSeq[u8] = ChunkSeq::new[u8]();

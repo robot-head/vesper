@@ -92,8 +92,11 @@ pub fn fr_decode(in input: Slice[u8], work: u64) -> P2 eff [Fail[GErr]] {
     decode_prefix(in input, work)
 }
 
-pub fn fr_encode_u64_into(value: u64, inout output: Slice[u8], in lim: Slice[u64])
-    -> u64 eff [Fail[GErr]] {
+pub fn fr_encode_u64_into(
+    value: u64,
+    inout output: Slice[u8],
+    in lim: Slice[u64]
+) -> u64 eff [Fail[GErr]] {
     encode_u64_into(value, inout output, in lim)
 }
 
@@ -106,8 +109,11 @@ pub fn fr_u24_frame_parts(in input: Slice[u8], in lim: Slice[u64]) -> P2 eff [Fa
     u24_frame_parts(in input, in lim)
 }
 
-pub fn fr_encode_u24_frame_into(in payload: Slice[u8], inout output: Slice[u8], in lim: Slice[u64])
-    -> u64 eff [Fail[GErr]] {
+pub fn fr_encode_u24_frame_into(
+    in payload: Slice[u8],
+    inout output: Slice[u8],
+    in lim: Slice[u64]
+) -> u64 eff [Fail[GErr]] {
     encode_u24_frame_into(in payload, inout output, in lim)
 }
 
@@ -120,8 +126,11 @@ pub fn fr_frame_encoded_len(payload_len: u64, in lim: Slice[u64]) -> u64 eff [Fa
     frame_encoded_len(payload_len, in lim)
 }
 
-pub fn fr_encode_frame_into(in payload: Slice[u8], inout output: Slice[u8], in lim: Slice[u64])
-    -> u64 eff [Fail[GErr]] {
+pub fn fr_encode_frame_into(
+    in payload: Slice[u8],
+    inout output: Slice[u8],
+    in lim: Slice[u64]
+) -> u64 eff [Fail[GErr]] {
     encode_frame_into(in payload, inout output, in lim)
 }
 
@@ -133,8 +142,12 @@ pub fn ar_from_wire(in bytes: Slice[u8]) -> P2 eff [Fail[GErr]] {
 }
 
 // (start, end).
-pub fn ar_checked_buffer_range(total: u64, offset_bytes: u64, byte_length: u64, alignment: u64)
-    -> P2 eff [Fail[GErr]] {
+pub fn ar_checked_buffer_range(
+    total: u64,
+    offset_bytes: u64,
+    byte_length: u64,
+    alignment: u64
+) -> P2 eff [Fail[GErr]] {
     checked_buffer_range(total, offset_bytes, byte_length, alignment)
 }
 
@@ -142,8 +155,13 @@ pub fn ar_validate(in body: Slice[u8], r: ArReq) -> ArCol eff [Fail[GErr]] {
     validate(in body, r)
 }
 
-pub fn ar_get(in values: Slice[u8], in validity: Slice[u8], has_validity: bool, rows: u64, row: u64)
-    -> P2 {
+pub fn ar_get(
+    in values: Slice[u8],
+    in validity: Slice[u8],
+    has_validity: bool,
+    rows: u64,
+    row: u64
+) -> P2 {
     get(in values, in validity, has_validity, rows, row)
 }
 
@@ -180,8 +198,11 @@ pub fn pk_unpacked_len(in input: Slice[u8], in lim: Slice[u64]) -> u64 eff [Fail
     unpacked_len(in input, in lim)
 }
 
-pub fn pk_unpack_into(in input: Slice[u8], inout output: Slice[u8], in lim: Slice[u64])
-    -> u64 eff [Fail[GErr]] {
+pub fn pk_unpack_into(
+    in input: Slice[u8],
+    inout output: Slice[u8],
+    in lim: Slice[u64]
+) -> u64 eff [Fail[GErr]] {
     unpack_into(in input, inout output, in lim)
 }
 
@@ -189,16 +210,23 @@ pub fn pk_packed_len(in input: Slice[u8], in lim: Slice[u64]) -> u64 eff [Fail[G
     packed_len(in input, in lim)
 }
 
-pub fn pk_pack_into(in input: Slice[u8], inout output: Slice[u8], in lim: Slice[u64])
-    -> u64 eff [Fail[GErr]] {
+pub fn pk_pack_into(
+    in input: Slice[u8],
+    inout output: Slice[u8],
+    in lim: Slice[u64]
+) -> u64 eff [Fail[GErr]] {
     pack_into(in input, inout output, in lim)
 }
 
 // grammar.rs (rules, lits and limits: see grammar.ves)
 
 // Grammar::validate: seven metadata words per rule.
-pub fn gr_validate(in rules: Slice[u64], in lits: Slice[u8], root: u64, in lim: Slice[u64])
-    -> ChunkSeq[u64] eff [Fail[GErr]] {
+pub fn gr_validate(
+    in rules: Slice[u64],
+    in lits: Slice[u8],
+    root: u64,
+    in lim: Slice[u64]
+) -> ChunkSeq[u64] eff [Fail[GErr]] {
     grammar_validate(in rules, in lits, root, in lim)
 }
 
@@ -258,18 +286,29 @@ pub fn cd_encode_into(
 
 // protobuf.rs (schema, limits and message streams: see protobuf.ves)
 
-pub fn pb_schema_validate(in schema: Slice[u64], root: u64, in lim: Slice[u64])
-    -> Unit eff [Fail[GErr]] {
+pub fn pb_schema_validate(
+    in schema: Slice[u64],
+    root: u64,
+    in lim: Slice[u64]
+) -> Unit eff [Fail[GErr]] {
     pb_validate(in schema, root, in lim)
 }
 
-pub fn pb_parse_exact(in schema: Slice[u64], root: u64, in lim: Slice[u64], in input: Slice[u8])
-    -> ChunkSeq[u64] eff [Fail[GErr]] {
+pub fn pb_parse_exact(
+    in schema: Slice[u64],
+    root: u64,
+    in lim: Slice[u64],
+    in input: Slice[u8]
+) -> ChunkSeq[u64] eff [Fail[GErr]] {
     pb_parse(in schema, root, in lim, in input)
 }
 
-pub fn pb_encoded_size(in schema: Slice[u64], root: u64, in lim: Slice[u64], in vals: Slice[u64])
-    -> u64 eff [Fail[GErr]] {
+pub fn pb_encoded_size(
+    in schema: Slice[u64],
+    root: u64,
+    in lim: Slice[u64],
+    in vals: Slice[u64]
+) -> u64 eff [Fail[GErr]] {
     pb_encoded(in schema, root, in lim, in vals)
 }
 
@@ -287,8 +326,11 @@ pub fn pb_encode_into(
 // der.rs. Schemas and values are graphs and documents are six-word
 // records (see der.ves).
 
-pub fn der_parse_prefix(in input: Slice[u8], in sch: Slice[u64], in lim: Slice[u64])
-    -> ChunkSeq[u64] eff [Fail[GErr]] {
+pub fn der_parse_prefix(
+    in input: Slice[u8],
+    in sch: Slice[u64],
+    in lim: Slice[u64]
+) -> ChunkSeq[u64] eff [Fail[GErr]] {
     der_parse(in input, in sch, in lim)
 }
 

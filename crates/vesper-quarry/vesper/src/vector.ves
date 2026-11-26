@@ -198,8 +198,14 @@ fn opd_tri(in v: V, in prog: Slice[u64], in r: Rel, ti0: u64, o: Opd, i: u64) ->
 
 // `cell_bytes` summed over the slots of the bindings in `mask` for tuple
 // `ti` of `t` (none: a NULL-extended tuple, every cell NULL).
-fn tuple_bytes(in v: V, in q: Q, in prog: Slice[u64], in t: ChunkSeq[u64], ti: u64, mask: u64)
-    -> u64 {
+fn tuple_bytes(
+    in v: V,
+    in q: Q,
+    in prog: Slice[u64],
+    in t: ChunkSeq[u64],
+    ti: u64,
+    mask: u64
+) -> u64 {
     let mut bytes: u64 = 0;
     let sv = size_value(in q);
     for s in 0..v.sbind.len() {

@@ -72,8 +72,10 @@ pub fn edt_core_submit(inout q: EdtCore, now_ns: u64, edt_ns: u64) -> Result[u64
 }
 
 // Advance, then the earliest departing packet as `(edt, index)`.
-pub fn edt_core_poll_release(inout q: EdtCore, now_ns: u64)
-    -> Result[Option[(u64, u64)], AdvanceError] {
+pub fn edt_core_poll_release(
+    inout q: EdtCore,
+    now_ns: u64
+) -> Result[Option[(u64, u64)], AdvanceError] {
     match q.wheel.advance(now_ns) {
         Option::Some(e) => Result::Err(e),
         Option::None => match q.wheel.pop_due() {

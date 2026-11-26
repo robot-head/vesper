@@ -320,8 +320,13 @@ fn emit_l_into_out(inout c: C, l: u64, at: u64) {
 // else `check::explore_locals` over the `nlocals` local types that follow
 // the role list. `out` is `0 states completed cut` or `1` and the error
 // words (explore.ves).
-pub fn explore(in w: Slice[u64], in t: Slice[u8], nlocals: u64, max_states: u64, max_queue: u64)
-    -> C {
+pub fn explore(
+    in w: Slice[u64],
+    in t: Slice[u8],
+    nlocals: u64,
+    max_states: u64,
+    max_queue: u64
+) -> C {
     let mut c = new_c();
     let mut locals: ChunkSeq[u64] = ChunkSeq::new[u64]();
     if nlocals == none() {
@@ -558,8 +563,10 @@ pub fn p2_batch_encode(in h: WireHeader, in entries: Slice[RaftEntry], inout out
     batch_encode(in h, in entries, inout out);
 }
 
-pub fn p2_batch_decode(in b: Slice[u8], inout out_entries: ChunkSeq[RaftEntry])
-    -> WireHeader eff [Fail[WireErr]] {
+pub fn p2_batch_decode(
+    in b: Slice[u8],
+    inout out_entries: ChunkSeq[RaftEntry]
+) -> WireHeader eff [Fail[WireErr]] {
     batch_decode(in b, inout out_entries)
 }
 
@@ -778,8 +785,13 @@ pub fn p2_replog_on_vote_resp(
     replog_on_vote_resp(inout rp, c, term, granted, resp_term)
 }
 
-pub fn p2_replog_finish_elect(inout rp: ReplogCore, now_ns: u64, c: u64, term: u64, votes: u64)
-    -> bool {
+pub fn p2_replog_finish_elect(
+    inout rp: ReplogCore,
+    now_ns: u64,
+    c: u64,
+    term: u64,
+    votes: u64
+) -> bool {
     replog_finish_elect(inout rp, now_ns, c, term, votes)
 }
 

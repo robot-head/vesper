@@ -806,8 +806,11 @@ fn section(
     }
 }
 
-fn request_fin(inout s: ServerCore, inout dec: DecoderCore, id: u64)
-    -> Result[Unit, ConnectionError] {
+fn request_fin(
+    inout s: ServerCore,
+    inout dec: DecoderCore,
+    id: u64
+) -> Result[Unit, ConnectionError] {
     let f = bsearch_u64(in s.r_id.as_slice(), id);
     if !f.found {
         return Result::Ok(());
@@ -869,8 +872,12 @@ fn request_fin(inout s: ServerCore, inout dec: DecoderCore, id: u64)
     Result::Ok(())
 }
 
-fn request_frames(inout s: ServerCore, inout dec: DecoderCore, in h: Huff, id: u64)
-    -> Result[Unit, ConnectionError] {
+fn request_frames(
+    inout s: ServerCore,
+    inout dec: DecoderCore,
+    in h: Huff,
+    id: u64
+) -> Result[Unit, ConnectionError] {
     loop {
         let f = bsearch_u64(in s.r_id.as_slice(), id);
         if !f.found {
@@ -1087,8 +1094,11 @@ fn request_frames(inout s: ServerCore, inout dec: DecoderCore, in h: Huff, id: u
     }
 }
 
-pub fn server_drain_unblocked(inout s: ServerCore, inout dec: DecoderCore, in h: Huff)
-    -> Result[Unit, ConnectionError] {
+pub fn server_drain_unblocked(
+    inout s: ServerCore,
+    inout dec: DecoderCore,
+    in h: Huff
+) -> Result[Unit, ConnectionError] {
     let mut i: u64 = 0;
     loop {
         if i >= s.conn.unb_kind.len() {
@@ -1407,8 +1417,11 @@ pub fn server_shutdown(inout s: ServerCore) {
     }
 }
 
-pub fn server_read_body_pre(inout s: ServerCore, id: u64, max_n: u64)
-    -> Result[BodyReadStep, SendError] {
+pub fn server_read_body_pre(
+    inout s: ServerCore,
+    id: u64,
+    max_n: u64
+) -> Result[BodyReadStep, SendError] {
     let f = bsearch_u64(in s.r_id.as_slice(), id);
     if !f.found {
         return Result::Err(SendError::StreamGone);
@@ -1495,8 +1508,11 @@ fn is_cl_name(in b: Slice[u8], lo: u64, nl: u64) -> bool {
     true
 }
 
-fn check_response_fields(inout s: ServerCore, in bytes: Slice[u8], in meta: Slice[u64])
-    -> Option[SendError] {
+fn check_response_fields(
+    inout s: ServerCore,
+    in bytes: Slice[u8],
+    in meta: Slice[u64]
+) -> Option[SendError] {
     let count = meta.len() / 3;
     let mut at: u64 = 0;
     s.conn.msg_meta.clear();
@@ -1671,8 +1687,11 @@ pub fn server_send_headers(
     Result::Ok(())
 }
 
-pub fn server_send_data(inout s: ServerCore, id: u64, in data: Slice[u8])
-    -> Result[Unit, SendError] {
+pub fn server_send_data(
+    inout s: ServerCore,
+    id: u64,
+    in data: Slice[u8]
+) -> Result[Unit, SendError] {
     match server_check_responder(in s, id) {
         Result::Ok(_) => {}
         Result::Err(e) => return Result::Err(e),
@@ -1880,8 +1899,12 @@ pub fn server_accept_session_establish(inout s: ServerCore, id: u64) {
     establish_session(inout s.conn.sess, inout s.conn.pool, inout s.conn.sev, id);
 }
 
-pub fn server_close_session(inout s: ServerCore, id: u64, code: u32, in reason: Slice[u8])
-    -> Result[Option[u64], SendError] {
+pub fn server_close_session(
+    inout s: ServerCore,
+    id: u64,
+    code: u32,
+    in reason: Slice[u8]
+) -> Result[Option[u64], SendError] {
     if reason.len() > max_close_reason() || !valid_utf8(in reason) {
         return Result::Err(SendError::BadCloseReason);
     }

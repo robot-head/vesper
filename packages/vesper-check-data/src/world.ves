@@ -768,8 +768,14 @@ fn mode_visit(
 
 // `World::field(ty, path)` for one path step `name` (a field name, a tuple
 // index, or a `[..]` segment, which `seg` marks). Returns NONE32 for None.
-pub fn field_step(inout t: Types, inout names: Names, in wd: World, ty: u32, name: u32, seg: bool)
-    -> u32 {
+pub fn field_step(
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    ty: u32,
+    name: u32,
+    seg: bool
+) -> u32 {
     let n = t.node(ty);
     let k = wd.k;
     if n.kind == TyKind::Named {

@@ -484,8 +484,13 @@ fn parse_raw_val_type(inout p: P) -> ValTy eff [Fail[VsysError]] {
     }
 }
 
-fn parse_wire_field_type(inout p: P, name_a: u64, name_b: u64, s0: u64, s1: u64)
-    -> WireField eff [Fail[VsysError]] {
+fn parse_wire_field_type(
+    inout p: P,
+    name_a: u64,
+    name_b: u64,
+    s0: u64,
+    s1: u64
+) -> WireField eff [Fail[VsysError]] {
     let (ta, tb) = take_word(inout p);
     let is_ba = eq_bytes(in p.arena[ta..tb], in "ByteArray".as_bytes());
     let is_zp = eq_bytes(in p.arena[ta..tb], in "ZeroPad".as_bytes());
@@ -562,8 +567,12 @@ fn parse_wire_field_type(inout p: P, name_a: u64, name_b: u64, s0: u64, s1: u64)
     }
 }
 
-fn parse_borrowed_param(inout p: P, name_a: u64, name_b: u64, access: u8)
-    -> ParDef eff [Fail[VsysError]] {
+fn parse_borrowed_param(
+    inout p: P,
+    name_a: u64,
+    name_b: u64,
+    access: u8
+) -> ParDef eff [Fail[VsysError]] {
     let mut nullable = false;
     if is_word(in p, in "Option") {
         let _ = bump(inout p);
@@ -860,8 +869,12 @@ fn find_wire(in ws: Slice[WireStructDef], in arena: Slice[u8], a: u64, b: u64) -
     Option::None
 }
 
-fn resolve_val_ty(in vt: ValTy, in es: Slice[EnumDef], in xs: Slice[ExternDef], in arena: Slice[u8])
-    -> ValTy eff [Fail[VsysError]] {
+fn resolve_val_ty(
+    in vt: ValTy,
+    in es: Slice[EnumDef],
+    in xs: Slice[ExternDef],
+    in arena: Slice[u8]
+) -> ValTy eff [Fail[VsysError]] {
     if vt.tag != 5 {
         return vt;
     }

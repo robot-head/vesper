@@ -1759,8 +1759,11 @@ impl L {
     }
 
     // `read_place` over path `path` (`segs`): (local, type).
-    pub fn read_place(inout self, root: u32, in segs: ChunkSeq[u32])
-        -> (u32, u32) eff [Fail[WErr]] {
+    pub fn read_place(
+        inout self,
+        root: u32,
+        in segs: ChunkSeq[u32]
+    ) -> (u32, u32) eff [Fail[WErr]] {
         let mut v = self.read_name(root);
         let mut ty = self.local_type(root);
         for i in 0..segs.len() {
@@ -1785,8 +1788,14 @@ impl L {
         self.write_name(root, new);
     }
 
-    fn cow(inout self, base: u32, ty: u32, in segs: ChunkSeq[u32], at: u64, v: u32)
-        -> u32 eff [Fail[WErr]] {
+    fn cow(
+        inout self,
+        base: u32,
+        ty: u32,
+        in segs: ChunkSeq[u32],
+        at: u64,
+        v: u32
+    ) -> u32 eff [Fail[WErr]] {
         let n = self.cx.slots(ty);
         let (off, fty) = self.cx.field(ty, u32_at(in segs, at));
         let dst = self.alloc_block(wrapping_mul(8, n));
@@ -3150,8 +3159,13 @@ impl L {
     }
 
     // `callable`: a callable block for table `slot`.
-    fn callable(inout self, slot: u32, snapshot: bool, has_caps: bool, in values: ChunkSeq[u32])
-        -> u32 {
+    fn callable(
+        inout self,
+        slot: u32,
+        snapshot: bool,
+        has_caps: bool,
+        in values: ChunkSeq[u32]
+    ) -> u32 {
         let block = self.alloc_block(24);
         let t = self.local();
         self.e.code.u64_const(widen_u64(slot));

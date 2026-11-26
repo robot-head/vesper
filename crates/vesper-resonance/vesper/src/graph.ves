@@ -345,8 +345,11 @@ enum Step: _ {
 const STEP_WORDS: u64 = 4;
 
 // The plan of the schedule `sched` for blocks of `block` frames.
-fn plan(in sched: ChunkSeq[u64], block: u64, nlines: u64)
-    -> ChunkSeq[u64] eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+fn plan(
+    in sched: ChunkSeq[u64],
+    block: u64,
+    nlines: u64
+) -> ChunkSeq[u64] eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     let mut p: ChunkSeq[u64] = ChunkSeq::new();
     let nops = get(in sched, Header::OpCount);
     let mut k: u64 = Words::Header;

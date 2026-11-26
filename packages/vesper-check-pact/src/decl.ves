@@ -563,8 +563,12 @@ fn read_items(
 }
 
 // Decodes the declaration section.
-pub fn read_decls(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tmap: ChunkSeq[u32])
-    -> Decls {
+pub fn read_decls(
+    inout r: Reader,
+    in b: Slice[u8],
+    in nmap: ChunkSeq[u32],
+    in tmap: ChunkSeq[u32]
+) -> Decls {
     let mut d = decls_new();
     d.identity = sym(in nmap, r.word(in b));
     let fns = r.word(in b);

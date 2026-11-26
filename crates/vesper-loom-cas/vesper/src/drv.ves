@@ -339,8 +339,11 @@ fn not_before(in s: Slice[u8], in spans: Slice[u64], a: u64, b: u64) -> bool {
     }
 }
 
-pub fn drv_scan(in s: Slice[u8], inout info: u64, inout info2: u64)
-    -> ChunkSeq[u64] eff [Fail[DrvErr]] {
+pub fn drv_scan(
+    in s: Slice[u8],
+    inout info: u64,
+    inout info2: u64
+) -> ChunkSeq[u64] eff [Fail[DrvErr]] {
     need(in s, 0, 4);
     if byte(in s, 0) != 86 || byte(in s, 1) != 76 || byte(in s, 2) != 68 || byte(in s, 3) != 73 {
         Fail::raise(DrvErr::BadMagic);

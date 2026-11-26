@@ -1270,8 +1270,14 @@ copy struct Rate {
     rb: V3
 }
 
-fn coordinate_rate(in b: Slice[f32], in jf: Slice[f32], a: u32, ob: u32, kind: u32, k: u64)
-    -> Rate {
+fn coordinate_rate(
+    in b: Slice[f32],
+    in jf: Slice[f32],
+    a: u32,
+    ob: u32,
+    kind: u32,
+    k: u64
+) -> Rate {
     let ia = widen_u64(a);
     let axis = rotate(bq(in b, ia), gv(in jf, wrapping_add(jb(k), J_AXIS_A)));
     if kind == 2 {

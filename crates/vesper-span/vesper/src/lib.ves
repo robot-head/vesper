@@ -223,8 +223,11 @@ fn is_continuation(b: u8) -> bool {
 // the Rust order. Each of the two Rust scans charges one unit of work per
 // byte (the LF of a CRLF included), and `2 * len <= max_work` is checked
 // first, so neither scan can exceed the work budget.
-pub fn line_table(in text: Str, in limits: Limits, line_size: usize)
-    -> ChunkSeq[u64] eff [Fail[Error]] {
+pub fn line_table(
+    in text: Str,
+    in limits: Limits,
+    line_size: usize
+) -> ChunkSeq[u64] eff [Fail[Error]] {
     validate(in limits);
     let bytes = text.as_bytes();
     let n = text.len();
@@ -266,8 +269,12 @@ pub fn line_table(in text: Str, in limits: Limits, line_size: usize)
 }
 
 // `LineIndex::offset`: the byte offset of a UTF-16 position.
-pub fn offset(in text: Str, in lines: Slice[u64], max_work: usize, p: Position)
-    -> usize eff [Fail[Error]] {
+pub fn offset(
+    in text: Str,
+    in lines: Slice[u64],
+    max_work: usize,
+    p: Position
+) -> usize eff [Fail[Error]] {
     let line = widen_u64(p.line);
     let count = lines.len() / LINE_WORDS;
     if line >= count {
@@ -334,8 +341,12 @@ fn lines_through(in lines: Slice[u64], offset: u64) -> u64 {
 }
 
 // `LineIndex::position`: the UTF-16 position of a byte offset.
-pub fn position(in text: Str, in lines: Slice[u64], max_work: usize, offset: usize)
-    -> Position eff [Fail[Error]] {
+pub fn position(
+    in text: Str,
+    in lines: Slice[u64],
+    max_work: usize,
+    offset: usize
+) -> Position eff [Fail[Error]] {
     let at = u(offset);
     let bytes = text.as_bytes();
     let n = text.len();
@@ -378,8 +389,12 @@ pub fn position(in text: Str, in lines: Slice[u64], max_work: usize, offset: usi
 }
 
 // `LineIndex::range`.
-pub fn range(in text: Str, in lines: Slice[u64], max_work: usize, span: ByteSpan)
-    -> Range eff [Fail[Error]] {
+pub fn range(
+    in text: Str,
+    in lines: Slice[u64],
+    max_work: usize,
+    span: ByteSpan
+) -> Range eff [Fail[Error]] {
     if span.start > span.end {
         Fail::raise(Error::ReversedRange);
     }
@@ -389,8 +404,12 @@ pub fn range(in text: Str, in lines: Slice[u64], max_work: usize, span: ByteSpan
 }
 
 // `LineIndex::span`.
-pub fn span(in text: Str, in lines: Slice[u64], max_work: usize, r: Range)
-    -> ByteSpan eff [Fail[Error]] {
+pub fn span(
+    in text: Str,
+    in lines: Slice[u64],
+    max_work: usize,
+    r: Range
+) -> ByteSpan eff [Fail[Error]] {
     if r.start.line > r.end.line
         || (r.start.line == r.end.line && r.start.character > r.end.character) {
         Fail::raise(Error::ReversedRange);
@@ -407,8 +426,14 @@ pub fn span(in text: Str, in lines: Slice[u64], max_work: usize, r: Range)
 // replacement.
 
 // Whether the source bytes `start .. end` equal the pool bytes from `off`.
-fn same_bytes(in text: Slice[u8], start: u64, end: u64, in pool: Slice[u8], off: u64, len: u64)
-    -> bool {
+fn same_bytes(
+    in text: Slice[u8],
+    start: u64,
+    end: u64,
+    in pool: Slice[u8],
+    off: u64,
+    len: u64
+) -> bool {
     if wrapping_sub(end, start) != len {
         return false;
     }

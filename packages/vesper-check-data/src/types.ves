@@ -127,8 +127,15 @@ pub fn types_new(inout names: Names) -> Types {
     t
 }
 
-fn node_hash(kind: u8, mode: u8, name: u32, in items: ChunkSeq[u32], r: u32, r2: u32, lit: i64)
-    -> u64 {
+fn node_hash(
+    kind: u8,
+    mode: u8,
+    name: u32,
+    in items: ChunkSeq[u32],
+    r: u32,
+    r2: u32,
+    lit: i64
+) -> u64 {
     let mut h = fold(14695981039346656037, widen_u64(kind));
     h = fold(h, widen_u64(mode));
     h = fold(h, w(name));
@@ -663,8 +670,13 @@ impl Types {
         id
     }
 
-    fn same_row(in self, id: u32, in es: ChunkSeq[EffNode], in args: ChunkSeq[u32], tail: u32)
-        -> bool {
+    fn same_row(
+        in self,
+        id: u32,
+        in es: ChunkSeq[EffNode],
+        in args: ChunkSeq[u32],
+        tail: u32
+    ) -> bool {
         let r = self.row(id);
         if r.tail != tail || w(r.n) != es.len() {
             return false;

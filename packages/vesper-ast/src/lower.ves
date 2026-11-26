@@ -2766,8 +2766,15 @@ fn unsupported_owned(inout l: L, from: u64) {
     }
 }
 
-fn conformance_rest(inout l: L, start: u64, model: u32, public: bool, gs: u32, bounds: u32, tr: u32)
-    -> u32 {
+fn conformance_rest(
+    inout l: L,
+    start: u64,
+    model: u32,
+    public: bool,
+    gs: u32,
+    bounds: u32,
+    tr: u32
+) -> u32 {
     let self_ty = ty(inout l);
     let wm = mark(in l);
     for i in 0..list_len(in l.ast, bounds) {
