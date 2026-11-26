@@ -56,6 +56,7 @@ enum IntegerOp {
     ReturnPair = 37,
     Call = 38,
     CallArgument = 39,
+    CallVoid = 40,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -76,6 +77,7 @@ const ARGUMENT_COUNT: usize = 0;
 const RETURN_VALUE: usize = 1;
 const HEADER_WORDS: usize = 2;
 const INSTRUCTION_WORDS: usize = 4;
+const NO_VALUE: u64 = u64::MAX;
 const GP_ARGUMENTS: usize = 6;
 const GP_RESULTS: usize = 2;
 const FUNCTION_NAMESPACE: u32 = 0;
@@ -232,6 +234,54 @@ impl IntegerBlocks<'_> {
         Some(target)
     }
 
+    fn direct_call(
+        &mut self,
+        inst: Inst,
+        callee: &cranelift_codegen::ir::ExtFuncData,
+        values: &mut Values,
+    ) -> Option<()> {
+        let dfg = &self.function.dfg;
+        let ExternalName::User(name) = callee.name else {
+            return None;
+        };
+        let name = &self.function.params.user_named_funcs()[name];
+        let signature = &dfg.signatures[callee.signature];
+        let args = dfg.inst_args(inst);
+        if name.namespace != FUNCTION_NAMESPACE
+            || signature.call_conv != CallConv::SystemV
+            || signature.params.len() != args.len()
+            || args.len() > GP_ARGUMENTS
+            || signature
+                .params
+                .iter()
+                .any(|param| *param != AbiParam::new(types::I64))
+        {
+            return None;
+        }
+        let (op, result) = match (signature.returns.as_slice(), dfg.inst_results(inst)) {
+            ([], []) => (IntegerOp::CallVoid, None),
+            ([param], [value])
+                if *param == AbiParam::new(types::I64) && dfg.value_type(*value) == types::I64 =>
+            {
+                (IntegerOp::Call, Some(*value))
+            }
+            _ => return None,
+        };
+        for &arg in args {
+            let arg = dfg.resolve_aliases(arg);
+            if dfg.value_type(arg) != types::I64 {
+                return None;
+            }
+            self.append(IntegerOp::CallArgument, [values[arg]?, 0, 0]);
+        }
+        self.calls = true;
+        let id = self.append(op, [u64::from(name.index), args.len() as u64, 0]);
+        if let Some(value) = result {
+            values[value] = Some(id);
+        }
+        Some(())
+    }
+
     // A block's arguments are already mapped by its incoming edge.
     fn emit_block(&mut self, block: Block, values: &mut Values) -> Option<Inst> {
         let function = self.function;
@@ -281,6 +331,15 @@ impl IntegerBlocks<'_> {
                 );
                 continue;
             }
+            if let InstructionData::Call {
+                opcode: Opcode::Call,
+                func_ref,
+                ..
+            } = function.dfg.insts[inst]
+            {
+                self.direct_call(inst, &function.dfg.ext_funcs[func_ref], values)?;
+                continue;
+            }
             let [value] = *function.dfg.inst_results(inst) else {
                 return None;
             };
@@ -294,42 +353,6 @@ impl IntegerBlocks<'_> {
                     IntegerOp::Constant,
                     [integer_bits(imm.bits(), output), 0, 0],
                 ),
-                InstructionData::Call {
-                    opcode: Opcode::Call,
-                    func_ref,
-                    ..
-                } if output == types::I64 => {
-                    let callee = &function.dfg.ext_funcs[func_ref];
-                    let ExternalName::User(name) = callee.name else {
-                        return None;
-                    };
-                    let name = &function.params.user_named_funcs()[name];
-                    let signature = &function.dfg.signatures[callee.signature];
-                    let args = function.dfg.inst_args(inst);
-                    if name.namespace != FUNCTION_NAMESPACE
-                        || signature.call_conv != CallConv::SystemV
-                        || signature.params.len() != args.len()
-                        || args.len() > GP_ARGUMENTS
-                        || signature.returns != [AbiParam::new(types::I64)]
-                        || signature
-                            .params
-                            .iter()
-                            .any(|param| *param != AbiParam::new(types::I64))
-                    {
-                        return None;
-                    }
-                    for &arg in args {
-                        if ty(arg) != types::I64 {
-                            return None;
-                        }
-                        self.append(IntegerOp::CallArgument, [input(arg)?, 0, 0]);
-                    }
-                    self.calls = true;
-                    (
-                        IntegerOp::Call,
-                        [u64::from(name.index), args.len() as u64, 0],
-                    )
-                }
                 InstructionData::StackLoad {
                     opcode: Opcode::StackAddr,
                     stack_slot,
@@ -503,6 +526,7 @@ impl IntegerBlocks<'_> {
             values[value]
         };
         match *arguments {
+            [] => Some((NO_VALUE, None)),
             [low] => Some((result(low)?, None)),
             [low, high] => Some((result(low)?, Some(result(high)?))),
             _ => None,
@@ -539,7 +563,8 @@ impl IntegerBlocks<'_> {
 
 /// Encodes supported System V i64 paths into a value stream for the Vesper backend.
 /// The header holds
-/// the argument count and the return value ID. The remaining words are
+/// the argument count and the return value ID, with NO_VALUE for a procedure.
+/// The remaining words are
 /// (opcode, left, right, extra) records. The extra word is the result width
 /// for operations such as loads and arithmetic, the condition code for comparisons, or
 /// the false value ID for selects. Arguments come first in the value space,
@@ -548,12 +573,13 @@ impl IntegerBlocks<'_> {
 /// value-producing instructions or arguments.
 /// A single BranchZero may skip to the instruction after EarlyReturn. These
 /// records also leave unreferenced slots, and the false arm uses the header's
-/// return value. Neither arm may read values defined in the other.
+/// return value. An early return from a procedure uses NO_VALUE too.
+/// Neither arm may read values defined in the other.
 /// A trailing ReturnPair gives the second result ID and makes EarlyReturn's
 /// right operand a second result ID as well.
 /// Leading StackSlot records declare frame slots by size and alignment.
 /// Stack addresses and accesses use a slot ordinal and an offset within the slot.
-/// Each Call is preceded by its CallArgument records, in argument order.
+/// Each Call or CallVoid is preceded by its CallArgument records, in argument order.
 /// The call's left operand is the function ID and its right operand is the
 /// argument count. Argument records leave unreferenced slots.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
@@ -565,7 +591,6 @@ fn integer_program(function: &Function) -> Option<(Vec<u64>, bool)> {
     let arity = signature.params.len();
     if signature.call_conv != CallConv::SystemV
         || arity > GP_ARGUMENTS
-        || signature.returns.is_empty()
         || signature.returns.len() > GP_RESULTS
         || signature
             .params

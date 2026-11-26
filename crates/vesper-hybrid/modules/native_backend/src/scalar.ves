@@ -47,6 +47,7 @@ const STACK_STORE_QWORD: u64 = 36;
 const RETURN_PAIR: u64 = 37;
 const CALL: u64 = 38;
 const CALL_ARGUMENT: u64 = 39;
+const CALL_VOID: u64 = 40;
 
 const EQUAL: u64 = 0;
 const NOT_EQUAL: u64 = 1;
@@ -68,7 +69,7 @@ const RIGHT: u64 = 2;
 const EXTRA: u64 = 3;
 const RECORD_WORDS: u64 = 4;
 const NEVER_READ: u64 = 0;
-const NO_SECOND_RESULT: u64 = 0xffffffffffffffff;
+const NO_VALUE: u64 = 0xffffffffffffffff;
 const DISP32_MASK: u64 = 0xffffffff;
 const STACK_ALIGNMENT: u64 = 16;
 const RETURN_ADDRESS_BYTES: u64 = 8;
@@ -229,6 +230,11 @@ fn has_no_result(op: u64) -> bool {
         || is_stack_store(op)
         || op == RETURN_PAIR
         || op == CALL_ARGUMENT
+        || op == CALL_VOID
+}
+
+fn is_call(op: u64) -> bool {
+    op == CALL || op == CALL_VOID
 }
 
 fn store_width(op: u64) -> u64 {
@@ -266,14 +272,16 @@ fn stack_displacement(in frame: FrameLayout, in record: Record) -> Option[u32] {
     }
 }
 
-fn reads_left(op: u64) -> bool {
+fn reads_left(in record: Record) -> bool {
+    let op = record.op;
     op != CONSTANT
         && op != STACK_SLOT
         && op != STACK_ADDRESS
         && op != STACK_LOAD
         && op != RETURN_PAIR
-        && op != CALL
+        && !is_call(op)
         && op != CALL_ARGUMENT
+        && (op != EARLY_RETURN || record.left != NO_VALUE)
 }
 
 fn reads_right(op: u64, paired: bool) -> bool {
@@ -321,8 +329,10 @@ fn find_last_reads(
     for i in 0..values {
         reads.push(NEVER_READ);
     }
-    let _ = reads.try_set(result, values);
-    let paired = second != NO_SECOND_RESULT;
+    if result != NO_VALUE {
+        let _ = reads.try_set(result, values);
+    }
+    let paired = second != NO_VALUE;
     if paired {
         let _ = reads.try_set(second, values);
     }
@@ -333,7 +343,7 @@ fn find_last_reads(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > CALL_ARGUMENT
+        if record.op > CALL_VOID
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
         {
@@ -383,7 +393,7 @@ fn find_last_reads(
             return Option::None;
         }
         if record.op == EARLY_RETURN {
-            if early_return_at != NEVER_READ {
+            if early_return_at != NEVER_READ || (record.left == NO_VALUE) != (result == NO_VALUE) {
                 return Option::None;
             }
             early_return_at = value;
@@ -396,7 +406,7 @@ fn find_last_reads(
             // The false arm cannot use a value created in the true arm.
             return Option::None;
         }
-        if record.op == CALL {
+        if is_call(record.op) {
             if !allow_calls
                 || record.right > ARGUMENTS
                 || record.right > index
@@ -415,7 +425,7 @@ fn find_last_reads(
             }
             pending_arguments = record.right;
         }
-        let has_left = reads_left(record.op);
+        let has_left = reads_left(in record);
         let has_right = reads_right(record.op, paired);
         let has_third = record.op == SELECT;
         if (has_left && record.left >= value)
@@ -514,7 +524,7 @@ fn allocate(
             locations.push(Location::Absent);
             continue;
         }
-        if record.op == CALL {
+        if is_call(record.op) {
             let start = wrapping_sub(index, record.right);
             for i in 0..record.right {
                 let operand = call_argument(in words, start, i);
@@ -535,7 +545,7 @@ fn allocate(
             }
             calls.push(saved);
         }
-        let left = if reads_left(record.op) {
+        let left = if reads_left(in record) {
             dying_register(in reads, in locations, record.left, value)
         } else {
             UNASSIGNED
@@ -794,21 +804,24 @@ pub fn encode_block(
     let result = word_at(in words, RETURN_VALUE);
     if wrapping_mul(count, RECORD_WORDS) != body_words
         || arguments > ARGUMENTS
-        || result >= wrapping_add(arguments, count)
+        || (result != NO_VALUE && result >= wrapping_add(arguments, count))
     {
         return ChunkSeq::new[u8]();
     }
     let second = if count == 0 {
-        NO_SECOND_RESULT
+        NO_VALUE
     } else {
         let tail = read_record(in words, wrapping_sub(count, 1));
         if tail.op == RETURN_PAIR {
             tail.left
         } else {
-            NO_SECOND_RESULT
+            NO_VALUE
         }
     };
-    let paired = second != NO_SECOND_RESULT;
+    let paired = second != NO_VALUE;
+    if paired && result == NO_VALUE {
+        return ChunkSeq::new[u8]();
+    }
     let mut frame = match frame_layout(in words, count) {
         Option::Some(layout) => layout,
         Option::None => return ChunkSeq::new[u8](),
@@ -863,7 +876,7 @@ pub fn encode_block(
         if !emits_instruction(record.op, result_live) {
             continue;
         }
-        if record.op == CALL {
+        if is_call(record.op) {
             let saved = match allocation.calls.try_get(call_index) {
                 Option::Some(saved) => saved,
                 Option::None => return ChunkSeq::new[u8](),
@@ -900,7 +913,7 @@ pub fn encode_block(
             continue;
         }
         let has_right = reads_right(record.op, paired);
-        let left = if reads_left(record.op) {
+        let left = if reads_left(in record) {
             let location = assigned(in allocation.locations, record.left);
             materialize(inout output, in location, LEFT_SCRATCH)
         } else {
