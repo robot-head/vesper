@@ -154,10 +154,7 @@ pub fn integer(inout r: Rd, i: u64, max: u64, in field: Str) -> u64 {
     }
     let mut n: u64 = 0;
     for p in t.start..t.end {
-        let b = match r.input.try_get(p) {
-            Option::Some(b) => b,
-            Option::None => 0,
-        };
+        let b = r.input.try_get(p).unwrap_or(0);
         if b < 48 || b > 57 {
             fail_field(inout r, in "expected an integer for", in field);
             return 0;
@@ -258,10 +255,7 @@ pub fn fields(inout r: Rd, i: u64, in names: Strs, open: bool, in what: Str) -> 
 }
 
 pub fn slot(in f: ChunkSeq[u64], n: u64) -> u64 {
-    match f.try_get(n) {
-        Option::Some(v) => v,
-        Option::None => NONE,
-    }
+    f.try_get(n).unwrap_or(NONE)
 }
 
 // Field `n` of `f`, required: a missing-field error naming `name`.

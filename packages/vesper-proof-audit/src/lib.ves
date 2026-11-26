@@ -322,15 +322,9 @@ fn text_report(inout out: ChunkSeq[u8], in r: Report) {
         let a0 = if t == 0 {
             0
         } else {
-            match r.ax_ends.try_get(wrapping_sub(t, 1)) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            }
+            r.ax_ends.try_get(wrapping_sub(t, 1)).unwrap_or(0)
         };
-        let a1 = match r.ax_ends.try_get(t) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let a1 = r.ax_ends.try_get(t).unwrap_or(0);
         for x in a0..a1 {
             if x > a0 {
                 put_str(inout out, in ", ");
