@@ -308,6 +308,7 @@ kinetic_check = port_checks(
             ("solve", ["joint_drives"], "hinge_motor_reaches_its_target_rate", "hinge_servo_holds_the_target_angle_against_gravity", "12"),
             ("world", ["contacts"], "restitution_bounces_to_e_squared_of_the_drop", "static_friction_holds_below_the_coulomb_limit", "13"),
             ("soft", ["soft"], "a_jelly_cube_lands_and_keeps_its_volume", "a_rope_hangs_straight_at_its_length", "14"),
+            ("couple", ["couple"], "a_jelly_rests_on_a_static_box", "coupling_errors_are_typed", "15"),
         ]
     ],
 )
