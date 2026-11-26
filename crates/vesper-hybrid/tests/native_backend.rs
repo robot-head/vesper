@@ -42,6 +42,7 @@ enum Case {
     ReturningBranch,
     ImmediateBranch,
     NestedBranches,
+    LoopEdges,
     ShiftCountInRcx,
     ShiftDestinationRcx,
     ShiftSameRegister,
@@ -145,6 +146,7 @@ fn integer_backend_matches_cranelift_results() {
         Case::ReturningBranch,
         Case::ImmediateBranch,
         Case::NestedBranches,
+        Case::LoopEdges,
         Case::ShiftCountInRcx,
         Case::ShiftDestinationRcx,
         Case::ShiftSameRegister,
@@ -378,6 +380,45 @@ fn integer_backend_matches_cranelift_results() {
                 }
                 builder.switch_to_block(join);
                 builder.ins().iadd(chosen, f)
+            }
+            Case::LoopEdges => {
+                let header = builder.create_block();
+                let body = builder.create_block();
+                let exit = builder.create_block();
+                let left = builder.append_block_param(header, types::I64);
+                let right = builder.append_block_param(header, types::I64);
+                let remaining = builder.append_block_param(header, types::I64);
+                let count = builder.ins().band_imm(c, 15);
+                builder.ins().jump(
+                    header,
+                    &[
+                        BlockArg::Value(a),
+                        BlockArg::Value(b),
+                        BlockArg::Value(count),
+                    ],
+                );
+                builder.switch_to_block(header);
+                builder.ins().brif(remaining, body, &[], exit, &[]);
+                builder.switch_to_block(body);
+                let next = builder.ins().iadd_imm(remaining, -1);
+                builder.ins().brif(
+                    d,
+                    header,
+                    &[
+                        BlockArg::Value(right),
+                        BlockArg::Value(left),
+                        BlockArg::Value(next),
+                    ],
+                    header,
+                    &[
+                        BlockArg::Value(left),
+                        BlockArg::Value(right),
+                        BlockArg::Value(next),
+                    ],
+                );
+                builder.switch_to_block(exit);
+                let sum = builder.ins().iadd(left, f);
+                builder.ins().isub(sum, right)
             }
             Case::ShiftCountInRcx => {
                 let shifted = builder.ins().ushr(a, d);
@@ -744,6 +785,19 @@ fn integer_backend_matches_cranelift_results() {
 }
 
 #[test]
+fn labeled_blocks_reject_unknown_jumps_and_register_values_from_other_blocks() {
+    const NO_VALUE: u64 = u64::MAX;
+    let missing = [0, NO_VALUE, 62, 0, 0, 0, 64, 1, 0, 0];
+    assert!(binding::x86_64_integer_block(&missing).is_empty());
+
+    // The entry register is only available in the first block.
+    let other_block = [
+        1, NO_VALUE, 62, 0, 0, 1, 64, 1, 0, 0, 62, 1, 0, 1, 66, 0, 0, 0,
+    ];
+    assert!(binding::x86_64_integer_block(&other_block).is_empty());
+}
+
+#[test]
 fn adjacent_branch_only_comparisons_use_flags_directly() {
     // The first comparison is used only by the branch.
     let mut words = [2, 1, 12, 0, 1, 0, 28, 2, 0, 0, 29, 0, 0, 3];
@@ -1029,10 +1083,10 @@ fn integer_backend_declines_excessive_spill_frames_and_unsupported_operations() 
 }
 
 #[test]
-fn integer_backend_declines_cycles_and_potential_traps_in_branch_arms() {
+fn integer_backend_declines_potential_traps_in_branch_arms() {
     let mut context = cranelift_codegen::Context::new();
     let mut builder_context = FunctionBuilderContext::new();
-    for branch_op in [Opcode::Jump, Opcode::Sdiv, Opcode::Load, Opcode::Store] {
+    for branch_op in [Opcode::Sdiv, Opcode::Load, Opcode::Store] {
         context.clear();
         context.func.signature.call_conv = cranelift_codegen::isa::CallConv::SystemV;
         context
@@ -1056,9 +1110,6 @@ fn integer_backend_declines_cycles_and_potential_traps_in_branch_arms() {
 
         builder.switch_to_block(yes);
         match branch_op {
-            Opcode::Jump => {
-                builder.ins().jump(yes, &[]);
-            }
             Opcode::Sdiv => {
                 let division = builder.ins().sdiv(argument, argument);
                 builder.ins().return_(&[division]);

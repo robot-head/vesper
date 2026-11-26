@@ -2,6 +2,7 @@
 pub const RAX: u8 = 0;
 const RCX: u8 = 1;
 pub const RDX: u8 = 2;
+const RBX: u8 = 3;
 pub const RSP: u8 = 4;
 const RSI: u8 = 6;
 const RDI: u8 = 7;
@@ -9,9 +10,14 @@ const R8: u8 = 8;
 const R9: u8 = 9;
 pub const R10: u8 = 10;
 pub const R11: u8 = 11;
+const R12: u8 = 12;
+const R13: u8 = 13;
+const R14: u8 = 14;
+const R15: u8 = 15;
 
 pub const ARGUMENTS: u64 = 6;
 pub const REGISTER_CODES: u64 = 16;
+pub const HOME_REGISTERS: u64 = 5;
 pub const UNASSIGNED: u8 = 255;
 pub const BYTE_BITS: u64 = 8;
 pub const WORD_BITS: u64 = 16;
@@ -64,6 +70,7 @@ const CMOVCC: u8 = 0x40;
 const JCC_NEAR: u8 = 0x80;
 const JCC_SHORT: u8 = 0x70;
 const JMP_SHORT: u8 = 0xeb;
+const JMP_REL32: u8 = 0xe9;
 const SIGN_EXTEND_DIVIDEND: u8 = 0x99;
 const MUL_EXTENSION: u8 = 4;
 const IMUL_EXTENSION: u8 = 5;
@@ -143,6 +150,7 @@ pub copy enum Instruction {
     BranchZero(u8),
     BranchCompare(u8, u8, u8, u64),
     BranchCompareImmediate(u8, u32, u8, u64),
+    Jump,
     FrameEnter(u32),
     FrameLeave(u32),
     StackAddress(u8, u32),
@@ -158,6 +166,17 @@ pub fn arg_register(argument: u64) -> u8 {
         3 => RCX,
         4 => R8,
         5 => R9,
+        _ => UNASSIGNED,
+    }
+}
+
+pub fn home_register(index: u64) -> u8 {
+    match index {
+        0 => RBX,
+        1 => R12,
+        2 => R13,
+        3 => R14,
+        4 => R15,
         _ => UNASSIGNED,
     }
 }
@@ -326,8 +345,13 @@ fn adjust_stack(inout out: ChunkSeq[u8], extension: u8, size: u32) {
 
 // The forward target is the next instruction, at the current end of output.
 pub fn patch_forward_branch(inout out: ChunkSeq[u8], branch_end: u64) -> bool {
-    let distance = wrapping_sub(out.len(), branch_end);
-    if distance > DISP32_MAX {
+    let target = out.len();
+    patch_relative_branch(inout out, branch_end, target)
+}
+
+pub fn patch_relative_branch(inout out: ChunkSeq[u8], branch_end: u64, target: u64) -> bool {
+    let distance = wrapping_sub(target, branch_end);
+    if distance > DISP32_MAX && distance < I32_MIN_BITS {
         return false;
     }
     let start = wrapping_sub(branch_end, IMM32_BYTES);
@@ -658,6 +682,10 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
         Instruction::BranchCompareImmediate(left, bits, cc, width) => {
             compare_immediate(inout out, left, bits, width);
             conditional_jump(inout out, cc);
+        },
+        Instruction::Jump => {
+            out.push(JMP_REL32);
+            immediate(inout out, 0, IMM32_BYTES);
         },
         Instruction::FrameEnter(size) => adjust_stack(inout out, ALU_SUB_EXTENSION, size),
         Instruction::FrameLeave(size) => adjust_stack(inout out, ALU_ADD_EXTENSION, size),

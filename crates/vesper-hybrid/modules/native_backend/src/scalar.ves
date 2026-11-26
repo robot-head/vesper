@@ -4,7 +4,8 @@ use self::x86_64::{
     CC_AE, CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, FixedArithmetic, Instruction,
     NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION,
     SHR_EXTENSION, SUB_RM_R64, UNASSIGNED, XOR_RM_R64, REGISTER_CODES, arg_register, emit,
-    emit_direct_call, emit_symbol_address, find_register, patch_forward_branch, register_bit
+    emit_direct_call, emit_symbol_address, find_register, patch_forward_branch,
+    patch_relative_branch, register_bit, home_register, HOME_REGISTERS
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -70,6 +71,12 @@ const COMPARE_IMMEDIATE: u64 = 58;
 const COMPARE_BYTE_IMMEDIATE: u64 = 59;
 const COMPARE_WORD_IMMEDIATE: u64 = 60;
 const COMPARE_DWORD_IMMEDIATE: u64 = 61;
+const BLOCK_LABEL: u64 = 62;
+const EDGE_LABEL: u64 = 63;
+const JUMP_LABEL: u64 = 64;
+const BRANCH_LABEL: u64 = 65;
+const BLOCK_RETURN: u64 = 66;
+const BRANCH_BLOCK: u64 = 67;
 
 // Relocation kinds shared with src/native_machine.rs.
 const PLT_CALL: u64 = 0;
@@ -128,12 +135,34 @@ copy struct BranchArm {
     end: u64,
 }
 
+copy enum BlockPart {
+    End,
+    Body,
+    Taken(u64),
+    AwaitingEdge(u64),
+    Untaken,
+    JumpOnly,
+}
+
+copy struct Label {
+    address: u64,
+    block: bool,
+}
+
+copy struct Fixup {
+    target: u64,
+    end: u64,
+    block: bool,
+}
+
 struct FrameLayout {
     slots: ChunkSeq[FrameSlot],
     size: u64,
     used: bool,
     outgoing: u64,
     fixed: bool,
+    home_slot: u64,
+    promoted: u64,
 }
 
 copy enum Location {
@@ -147,6 +176,7 @@ struct Allocation {
     frame_size: u32,
     saved_masks: ChunkSeq[u32],
     save_frame: u64,
+    home_save_frame: u64,
 }
 
 fn word_at(in words: Slice[u64], position: u64) -> u64 {
@@ -214,7 +244,15 @@ fn frame_layout(in words: Slice[u64], count: u64) -> Option[FrameLayout] {
     if size > STACK_PROBE_INTERVAL {
         return Option::None;
     }
-    Option::Some(FrameLayout { slots: slots, size: size, used: false, outgoing: 0, fixed: false })
+    Option::Some(FrameLayout {
+        slots: slots,
+        size: size,
+        used: false,
+        outgoing: 0,
+        fixed: false,
+        home_slot: NO_VALUE,
+        promoted: 0
+    })
 }
 
 fn last_read(in reads: ChunkSeq[u64], value: u64) -> u64 {
@@ -275,6 +313,22 @@ fn is_stack_operation(op: u64) -> bool {
     op >= STACK_ADDRESS && op <= STACK_STORE_QWORD
 }
 
+fn stack_slot(in record: Record) -> u64 {
+    if is_stack_store(record.op) {
+        record.right
+    } else {
+        record.left
+    }
+}
+
+fn stack_access_offset(in record: Record) -> u64 {
+    if is_stack_store(record.op) {
+        record.extra
+    } else {
+        record.right
+    }
+}
+
 fn has_no_result(op: u64) -> bool {
     (op >= STORE_BYTE && op <= STACK_SLOT)
         || is_stack_store(op)
@@ -282,6 +336,7 @@ fn has_no_result(op: u64) -> bool {
         || op == CALL_ARGUMENT
         || op == CALL_VOID
         || op == TRAP
+        || op >= BLOCK_LABEL
 }
 
 fn is_call(op: u64) -> bool {
@@ -355,7 +410,10 @@ fn reads_left(in record: Record) -> bool {
         && op != CALL_ARGUMENT
         && op != CALL_HIGH
         && op != TRAP
-        && (op != EARLY_RETURN || (record.left != NO_VALUE && record.left != TRAP_VALUE))
+        && op != BLOCK_LABEL
+        && op != EDGE_LABEL
+        && op != JUMP_LABEL
+        && (!is_branch_return(op) || (record.left != NO_VALUE && record.left != TRAP_VALUE))
 }
 
 fn reads_right(in record: Record, paired: bool) -> bool {
@@ -366,7 +424,78 @@ fn reads_right(in record: Record, paired: bool) -> bool {
         || is_register_shift(op)
         || is_fixed_arithmetic(op)
         || is_store(op)
-        || (op == EARLY_RETURN && paired && record.left != TRAP_VALUE)
+        || (is_branch_return(op) && paired && record.left != TRAP_VALUE)
+}
+
+fn is_branch_return(op: u64) -> bool {
+    op == EARLY_RETURN || op == BLOCK_RETURN
+}
+
+fn valid_block_layout(in words: Slice[u64], start: u64, count: u64, returns: u64) -> bool {
+    let mut part = BlockPart::End;
+    for index in start..count {
+        let record = read_record(in words, index);
+        match part {
+            BlockPart::End => {
+                if record.op != BLOCK_LABEL
+                    || record.extra != returns
+                    || record.left >= count
+                    || (index == start && record.left != 0)
+                    || (index != start && record.right != 0)
+                {
+                    return false;
+                }
+                part = BlockPart::Body;
+            },
+            BlockPart::Body => {
+                if record.op == BRANCH_LABEL {
+                    part = BlockPart::Taken(record.right);
+                } else if record.op == BRANCH_BLOCK {
+                    part = BlockPart::JumpOnly;
+                } else if record.op == JUMP_LABEL || record.op == BLOCK_RETURN {
+                    part = BlockPart::End;
+                } else if record.op == BLOCK_LABEL
+                    || record.op == EDGE_LABEL
+                    || record.op == BRANCH_ZERO
+                    || record.op == EARLY_RETURN
+                    || record.op == RETURN_PAIR
+                    || record.op == TRAP
+                {
+                    return false;
+                }
+            },
+            BlockPart::Taken(label) => {
+                if record.op == JUMP_LABEL {
+                    part = BlockPart::AwaitingEdge(label);
+                } else if !is_stack_store(record.op) {
+                    return false;
+                }
+            },
+            BlockPart::AwaitingEdge(label) => {
+                if record.op != EDGE_LABEL || record.left != label || record.left >= count {
+                    return false;
+                }
+                part = BlockPart::Untaken;
+            },
+            BlockPart::Untaken => {
+                if record.op == JUMP_LABEL {
+                    part = BlockPart::End;
+                } else if !is_stack_store(record.op) {
+                    return false;
+                }
+            },
+            BlockPart::JumpOnly => {
+                if record.op != JUMP_LABEL {
+                    return false;
+                }
+                part = BlockPart::End;
+            },
+        };
+    }
+    match part {
+        BlockPart::End => true,
+        _ => false,
+    }
 }
 
 // A shift must keep its count until the destructive instruction reads it.
@@ -389,8 +518,12 @@ fn condition_code(condition: u64) -> u8 {
     }
 }
 
+fn is_conditional_branch(op: u64) -> bool {
+    op == BRANCH_ZERO || op == BRANCH_LABEL || op == BRANCH_BLOCK
+}
+
 fn comparison_feeds_branch(in reads: ChunkSeq[u64], value: u64, in branch: Record) -> bool {
-    branch.op == BRANCH_ZERO
+    is_conditional_branch(branch.op)
         && branch.left == value
         && last_read(in reads, value) == wrapping_add(value, 1)
 }
@@ -405,6 +538,7 @@ fn find_last_reads(
     second: u64,
     return_arity: u64,
     allow_relocations: bool,
+    labeled: bool,
     inout frame: FrameLayout
 ) -> Option[ChunkSeq[u64]] {
     let values = wrapping_add(arguments, count);
@@ -422,11 +556,14 @@ fn find_last_reads(
     let mut arms = ChunkSeq::new[BranchArm]();
     let mut depth: u64 = 0;
     let mut pending_arguments: u64 = 0;
+    let mut block_end = values;
+    let mut entry_end = values;
     for reverse_index in 0..count {
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > COMPARE_DWORD_IMMEDIATE
+        if record.op > BRANCH_BLOCK
+            || (!labeled && record.op >= BLOCK_LABEL)
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
             || (record.op == TRAP && (reverse_index != 0 || result != NO_VALUE))
@@ -434,6 +571,15 @@ fn find_last_reads(
             return Option::None;
         }
         let last = last_read(in reads, value);
+        if labeled {
+            if record.op == BLOCK_LABEL {
+                entry_end = block_end;
+                block_end = value;
+            } else if last >= block_end {
+                // Every cross-block value must go through a frame home.
+                return Option::None;
+            }
+        }
         if is_fixed_arithmetic(record.op) {
             if record.extra != DWORD_BITS && record.extra != QWORD_BITS {
                 return Option::None;
@@ -460,6 +606,14 @@ fn find_last_reads(
                 Option::Some(_) => {},
                 Option::None => return Option::None,
             };
+            if frame.promoted != 0 && stack_slot(in record) == frame.home_slot {
+                let qword = record.op == STACK_STORE_QWORD
+                    || (record.op == STACK_LOAD && record.extra == QWORD_BITS);
+                if !qword || stack_access_offset(in record) % SPILL_SLOT_BYTES != 0 {
+                    // A narrow or addressable slot stays entirely in memory.
+                    frame.promoted = 0;
+                }
+            }
             frame.used = frame.used || record.op != STACK_ADDRESS || last != NEVER_READ;
         }
         if record.op >= ADD && record.op <= SAR && !valid_width(record.extra) {
@@ -520,6 +674,12 @@ fn find_last_reads(
             depth = wrapping_sub(depth, 1);
         } else if depth != 0 && (value <= arm.start || last > arm.end) {
             // A definition in this arm cannot reach past its return.
+            return Option::None;
+        }
+        if record.op == BLOCK_RETURN
+            && record.left != TRAP_VALUE
+            && (record.left == NO_VALUE) != (return_arity == 0)
+        {
             return Option::None;
         }
         if is_call(record.op) {
@@ -584,6 +744,13 @@ fn find_last_reads(
     }
     if depth != 0 {
         return Option::None;
+    }
+    if labeled {
+        for argument in 0..arguments {
+            if last_read(in reads, argument) >= entry_end {
+                return Option::None;
+            }
+        }
     }
     Option::Some(reads)
 }
@@ -761,6 +928,8 @@ fn allocate(
     }
     let save_frame = stack_end;
     stack_end = wrapping_add(stack_end, wrapping_mul(save_slots, SPILL_SLOT_BYTES));
+    let home_save_frame = stack_end;
+    stack_end = wrapping_add(stack_end, wrapping_mul(frame.promoted, SPILL_SLOT_BYTES));
     let size = if stack_end == 0 && !has_calls {
         0
     } else {
@@ -782,7 +951,8 @@ fn allocate(
         locations: locations,
         frame_size: wrapping_u32(size),
         saved_masks: saved_masks,
-        save_frame: save_frame
+        save_frame: save_frame,
+        home_save_frame: home_save_frame
     })
 }
 
@@ -1059,6 +1229,25 @@ pub fn encode_block(
     {
         return ChunkSeq::new[u8]();
     }
+    let mut frame = match frame_layout(in words, count) {
+        Option::Some(layout) => layout,
+        Option::None => return ChunkSeq::new[u8](),
+    };
+    let first = read_record(in words, frame.slots.len());
+    let labeled = frame.slots.len() < count && first.op == BLOCK_LABEL;
+    if labeled && first.right != 0 {
+        if first.right != frame.slots.len() {
+            return ChunkSeq::new[u8]();
+        }
+        frame.home_slot = wrapping_sub(first.right, 1);
+        let home = frame.slots.try_get(frame.home_slot).unwrap_or(FrameSlot { offset: 0, size: 0 });
+        let count = home.size / SPILL_SLOT_BYTES;
+        frame.promoted = if count < HOME_REGISTERS {
+            count
+        } else {
+            HOME_REGISTERS
+        };
+    }
     let tail = if count == 0 {
         Record { op: CONSTANT, left: 0, right: 0, extra: 0 }
     } else {
@@ -1069,7 +1258,9 @@ pub fn encode_block(
     } else {
         NO_VALUE
     };
-    let return_arity = if tail.op == TRAP {
+    let return_arity = if labeled {
+        first.extra
+    } else if tail.op == TRAP {
         tail.left
     } else if second != NO_VALUE {
         PAIRED_RESULTS
@@ -1079,13 +1270,14 @@ pub fn encode_block(
         0
     };
     let paired = return_arity == PAIRED_RESULTS;
-    if return_arity > PAIRED_RESULTS || (second != NO_VALUE && result == NO_VALUE) {
+    if return_arity > PAIRED_RESULTS
+        || (second != NO_VALUE && result == NO_VALUE)
+        || (labeled
+            && (result != NO_VALUE
+                || !valid_block_layout(in words, frame.slots.len(), count, return_arity)))
+    {
         return ChunkSeq::new[u8]();
     }
-    let mut frame = match frame_layout(in words, count) {
-        Option::Some(layout) => layout,
-        Option::None => return ChunkSeq::new[u8](),
-    };
     let reads = match find_last_reads(
         in words,
         arguments,
@@ -1094,6 +1286,7 @@ pub fn encode_block(
         second,
         return_arity,
         allow_relocations,
+        labeled,
         inout frame
     ) {
         Option::Some(last) => last,
@@ -1118,9 +1311,23 @@ pub fn encode_block(
 
     let mut output = ChunkSeq::new[u8]();
     emit(inout output, in Instruction::FrameEnter(frame_size));
+    let mut home_mask: u32 = 0;
+    for home in 0..frame.promoted {
+        home_mask = home_mask | register_bit(home_register(home));
+    }
+    if home_mask != 0 {
+        preserve_registers(inout output, home_mask, allocation.home_save_frame, false);
+    }
     let mut branch_ends = ChunkSeq::new[u64]();
     let mut branch_depth: u64 = 0;
     let mut clobber_index: u64 = 0;
+    let mut labels = ChunkSeq::new[Label]();
+    let mut fixups = ChunkSeq::new[Fixup]();
+    if labeled {
+        for index in 0..count {
+            labels.push(Label { address: NO_VALUE, block: false });
+        }
+    }
 
     for index in 0..count {
         let value = wrapping_add(arguments, index);
@@ -1129,13 +1336,36 @@ pub fn encode_block(
         if record.op == CALL_HIGH || !emits_instruction(record.op, result_live) {
             continue;
         }
+        if record.op == BLOCK_LABEL || record.op == EDGE_LABEL {
+            let old = labels.try_get(record.left).unwrap_or(Label { address: 0, block: false });
+            if old.address != NO_VALUE {
+                return ChunkSeq::new[u8]();
+            }
+            let _ = labels.try_set(
+                record.left,
+                Label { address: output.len(), block: record.op == BLOCK_LABEL }
+            );
+            continue;
+        }
+        if record.op == JUMP_LABEL {
+            if record.left == 0 {
+                return ChunkSeq::new[u8]();
+            }
+            let next = read_record(in words, wrapping_add(index, 1));
+            if next.op == BLOCK_LABEL && next.left == record.left {
+                continue;
+            }
+            emit(inout output, in Instruction::Jump);
+            fixups.push(Fixup { target: record.left, end: output.len(), block: true });
+            continue;
+        }
         if is_comparison(record.op) && wrapping_add(index, 1) < count {
             let next = read_record(in words, wrapping_add(index, 1));
             if comparison_feeds_branch(in reads, value, in next) {
                 continue;
             }
         }
-        if record.op == BRANCH_ZERO {
+        if is_conditional_branch(record.op) {
             let comparison = if index != 0 {
                 let previous = read_record(in words, wrapping_sub(index, 1));
                 if is_comparison(previous.op)
@@ -1174,6 +1404,17 @@ pub fn encode_block(
                 },
             };
             emit(inout output, in instruction);
+            if record.op != BRANCH_ZERO {
+                if record.right == 0 {
+                    return ChunkSeq::new[u8]();
+                }
+                fixups.push(Fixup {
+                    target: record.right,
+                    end: output.len(),
+                    block: record.op == BRANCH_BLOCK
+                });
+                continue;
+            }
             if branch_depth == branch_ends.len() {
                 branch_ends.push(output.len());
             } else {
@@ -1220,7 +1461,7 @@ pub fn encode_block(
             emit(inout output, in Instruction::Trap);
             return output;
         }
-        if record.op == EARLY_RETURN {
+        if is_branch_return(record.op) {
             if record.left == TRAP_VALUE {
                 emit(inout output, in Instruction::Trap);
             } else {
@@ -1230,8 +1471,13 @@ pub fn encode_block(
                 } else {
                     Location::Absent
                 };
-                // This epilogue runs only on the true path.
+                if home_mask != 0 {
+                    preserve_registers(inout output, home_mask, allocation.home_save_frame, true);
+                }
                 emit_return(inout output, in low, in high, frame_size);
+            }
+            if record.op == BLOCK_RETURN {
+                continue;
             }
             branch_depth = wrapping_sub(branch_depth, 1);
             let offset = branch_ends.try_get(branch_depth).unwrap_or(0);
@@ -1292,7 +1538,15 @@ pub fn encode_block(
                 )),
                 Option::None => return ChunkSeq::new[u8](),
             };
-            let instruction = if is_stack_store(record.op) {
+            let home = stack_access_offset(in record) / SPILL_SLOT_BYTES;
+            let instruction = if stack_slot(in record) == frame.home_slot && home < frame.promoted {
+                let register = home_register(home);
+                if is_stack_store(record.op) {
+                    Instruction::Move(register, left)
+                } else {
+                    Instruction::Move(destination, register)
+                }
+            } else if is_stack_store(record.op) {
                 Instruction::Store(left, RSP, offset, store_width(record.op))
             } else if record.op == STACK_LOAD {
                 Instruction::Load(destination, RSP, offset, record.extra)
@@ -1352,6 +1606,23 @@ pub fn encode_block(
             },
             _ => {},
         };
+    }
+    if labeled {
+        for index in 0..fixups.len() {
+            let fixup = fixups
+                .try_get(index)
+                .unwrap_or(Fixup { target: NO_VALUE, end: 0, block: false });
+            let target = labels
+                .try_get(fixup.target)
+                .unwrap_or(Label { address: NO_VALUE, block: false });
+            if target.address == NO_VALUE
+                || target.block != fixup.block
+                || !patch_relative_branch(inout output, fixup.end, target.address)
+            {
+                return ChunkSeq::new[u8]();
+            }
+        }
+        return output;
     }
     let low = assigned(in allocation.locations, result);
     let high = if paired {

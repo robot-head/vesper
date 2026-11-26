@@ -10,7 +10,7 @@ use cranelift_codegen::{
     isa::CallConv,
 };
 use cranelift_module::{DataId, Linkage, ModuleDeclarations, ModuleReloc, ModuleRelocTarget};
-use std::sync::OnceLock;
+use std::{collections::BTreeSet, sync::OnceLock};
 
 /// Opcodes in the architecture-independent integer block format.
 #[repr(u64)]
@@ -78,6 +78,12 @@ enum IntegerOp {
     CompareByteImmediate = 59,
     CompareWordImmediate = 60,
     CompareDwordImmediate = 61,
+    BlockLabel = 62,
+    EdgeLabel = 63,
+    JumpLabel = 64,
+    BranchLabel = 65,
+    BlockReturn = 66,
+    BranchBlock = 67,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -102,6 +108,7 @@ const NO_VALUE: u64 = u64::MAX;
 const TRAP_VALUE: u64 = NO_VALUE - 1;
 const GP_REGISTER_ARGUMENTS: usize = 6;
 const STACK_PROBE_INTERVAL: usize = 4096;
+const CFG_HOME_BYTES: u64 = size_of::<u64>() as u64;
 const MAX_GP_ARGUMENTS: usize = GP_REGISTER_ARGUMENTS + STACK_PROBE_INTERVAL / size_of::<u64>() - 1;
 const GP_RESULTS: usize = 2;
 // Limit code duplication when several paths share a suffix.
@@ -232,6 +239,7 @@ struct IntegerBlocks<'a> {
     words: Vec<u64>,
     relocations: bool,
     branches: usize,
+    needs_cfg: bool,
     allow_hardware_faults: bool,
     declarations: Option<&'a ModuleDeclarations>,
 }
@@ -698,7 +706,11 @@ impl IntegerBlocks<'_> {
         visited: &mut SecondaryMap<Block, bool>,
     ) -> Option<Inst> {
         loop {
-            if visited[block] || !self.function.layout.is_block_inserted(block) {
+            if visited[block] {
+                self.needs_cfg = true;
+                return None;
+            }
+            if !self.function.layout.is_block_inserted(block) {
                 return None;
             }
             visited[block] = true;
@@ -763,6 +775,7 @@ impl IntegerBlocks<'_> {
             };
         };
         if self.branches == MAX_LINEARIZED_BRANCHES {
+            self.needs_cfg = true;
             return None;
         }
         self.branches += 1;
@@ -779,6 +792,186 @@ impl IntegerBlocks<'_> {
 
         let no_block = self.edge(no_edge, &mut values)?;
         self.path_exit(no_block, values, visited)
+    }
+
+    fn cfg_edge(
+        &mut self,
+        edge: BlockCall,
+        labels: &SecondaryMap<Block, Option<u64>>,
+        homes: &Values,
+        slot: u64,
+        values: &Values,
+    ) -> Option<()> {
+        let dfg = &self.function.dfg;
+        let target = edge.block(&dfg.value_lists);
+        let params = dfg.block_params(target);
+        if params.len() != edge.len(&dfg.value_lists) {
+            return None;
+        }
+        // Source IDs are SSA snapshots. Stores cannot overwrite another
+        // source even when the destinations swap two block parameters.
+        for (&param, argument) in params.iter().zip(edge.args(&dfg.value_lists)) {
+            let arg = dfg.resolve_aliases(argument.as_value()?);
+            let ty = dfg.value_type(param);
+            if ty != dfg.value_type(arg) {
+                return None;
+            }
+            if arg == param {
+                continue;
+            }
+            self.append(stack_store_op(ty)?, [values[arg]?, slot, homes[param]?]);
+        }
+        self.append(IntegerOp::JumpLabel, [labels[target]?, 0, 0]);
+        Some(())
+    }
+
+    fn labeled_cfg(&mut self, entry: Block) -> Option<()> {
+        let function = self.function;
+        let dfg = &function.dfg;
+        let layout = &function.layout;
+        let mut labels = SecondaryMap::new();
+        let mut order = vec![entry];
+        labels[entry] = Some(0);
+        let mut index = 0;
+        while let Some(&block) = order.get(index) {
+            let end = layout.last_inst(block)?;
+            let terminator = &dfg.insts[end];
+            if !matches!(
+                terminator.opcode(),
+                Opcode::Jump | Opcode::Brif | Opcode::Return | Opcode::Trap
+            ) {
+                return None;
+            }
+            for edge in terminator.branch_destination(&dfg.jump_tables, &dfg.exception_tables) {
+                let target = edge.block(&dfg.value_lists);
+                if target == entry || !layout.is_block_inserted(target) {
+                    return None;
+                }
+                if labels[target].is_none() {
+                    labels[target] = Some(order.len() as u64);
+                    order.push(target);
+                }
+            }
+            index += 1;
+        }
+
+        let mut homes = Values::new();
+        let mut home_bytes = 0;
+        let mut incoming: SecondaryMap<Block, BTreeSet<Value>> = SecondaryMap::new();
+        let mut home = |value| {
+            integer_width(dfg.value_type(value))?;
+            if homes[value].is_none() {
+                homes[value] = Some(home_bytes);
+                home_bytes += CFG_HOME_BYTES;
+            }
+            Some(())
+        };
+        for &block in &order {
+            if block != entry {
+                for &param in dfg.block_params(block) {
+                    home(param)?;
+                }
+            }
+            let mut use_value = |operand| {
+                let operand = dfg.resolve_aliases(operand);
+                let (owner, param) = match dfg.value_def(operand) {
+                    ValueDef::Result(inst, _) => (layout.inst_block(inst)?, false),
+                    ValueDef::Param(block, _) => (block, true),
+                    ValueDef::Union(_, _) => return None,
+                };
+                if owner != block || (param && block != entry) {
+                    home(operand)?;
+                    incoming[block].insert(operand);
+                }
+                Some(())
+            };
+            for inst in layout.block_insts(block) {
+                for arg in dfg.inst_values(inst) {
+                    use_value(arg)?;
+                }
+            }
+        }
+        if home_bytes > STACK_PROBE_INTERVAL as u64 {
+            return None;
+        }
+        let slot = function.sized_stack_slots.len() as u64;
+        if home_bytes != 0 {
+            self.append(IntegerOp::StackSlot, [home_bytes, CFG_HOME_BYTES, 0]);
+        }
+        let results = function.signature.returns.len() as u64;
+        let mut next_edge = order.len() as u64;
+        for block in order {
+            let home_slot = if block == entry && home_bytes != 0 {
+                slot + 1
+            } else {
+                0
+            };
+            self.append(IntegerOp::BlockLabel, [labels[block]?, home_slot, results]);
+            let mut values = Values::new();
+            if block == entry {
+                for (index, &param) in dfg.block_params(block).iter().enumerate() {
+                    values[param] = Some(index as u64);
+                }
+            }
+            for &value in &incoming[block] {
+                let width = integer_width(dfg.value_type(value))?;
+                values[value] =
+                    Some(self.append(IntegerOp::StackLoad, [slot, homes[value]?, width]));
+            }
+            let end = self.emit_block(block, &mut values)?;
+            let definitions = dfg
+                .block_params(block)
+                .iter()
+                .copied()
+                .filter(|_| block == entry)
+                .chain(
+                    layout
+                        .block_insts(block)
+                        .flat_map(|inst| dfg.inst_results(inst).iter().copied()),
+                );
+            for value in definitions {
+                if let Some(offset) = homes[value] {
+                    self.append(
+                        stack_store_op(dfg.value_type(value))?,
+                        [values[value]?, slot, offset],
+                    );
+                }
+            }
+            match dfg.insts[end] {
+                InstructionData::Jump { destination, .. } => {
+                    self.cfg_edge(destination, &labels, &homes, slot, &values)?;
+                }
+                InstructionData::Brif {
+                    arg,
+                    blocks: [yes, no],
+                    ..
+                } => {
+                    integer_width(self.value_type(arg))?;
+                    let condition = values[dfg.resolve_aliases(arg)]?;
+                    if yes.len(&dfg.value_lists) == 0 && no.len(&dfg.value_lists) == 0 {
+                        let target = labels[no.block(&dfg.value_lists)]?;
+                        self.append(IntegerOp::BranchBlock, [condition, target, 0]);
+                        self.cfg_edge(yes, &labels, &homes, slot, &values)?;
+                    } else {
+                        self.append(IntegerOp::BranchLabel, [condition, next_edge, 0]);
+                        self.cfg_edge(yes, &labels, &homes, slot, &values)?;
+                        self.append(IntegerOp::EdgeLabel, [next_edge, 0, 0]);
+                        self.cfg_edge(no, &labels, &homes, slot, &values)?;
+                        next_edge += 1;
+                    }
+                }
+                _ => {
+                    let (low, high) =
+                        if self.allow_hardware_faults && dfg.insts[end].opcode() == Opcode::Trap {
+                            (TRAP_VALUE, None)
+                        } else {
+                            self.returned(end, &values)?
+                        };
+                    self.append(IntegerOp::BlockReturn, [low, high.unwrap_or(0), 0]);
+                }
+            }
+        }
+        Some(())
     }
 }
 
@@ -809,6 +1002,12 @@ impl IntegerBlocks<'_> {
 /// CallPair writes its low result and the immediately following CallHigh's
 /// slot holds its high result.
 /// SymbolRelative and SymbolGot read the data symbol ID from the left operand.
+/// A labeled function starts with BlockLabel after the stack declarations
+/// and returns through BlockReturn records. BranchLabel skips the taken edge
+/// transfers and its jump to the matching EdgeLabel. Cross-block operands
+/// reload from frame homes, and JumpLabel targets a non-entry BlockLabel.
+/// The entry label's right word identifies the private home slot plus one,
+/// or zero when the function needs no cross-block storage.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
     integer_program(function, false, None).map(|(words, _)| words)
 }
@@ -854,6 +1053,7 @@ fn integer_program(
         words: vec![0; HEADER_WORDS],
         relocations: false,
         branches: 0,
+        needs_cfg: false,
         allow_hardware_faults,
         declarations,
     };
@@ -865,17 +1065,25 @@ fn integer_program(
         blocks.append(IntegerOp::StackSlot, [u64::from(slot.size), alignment, 0]);
     }
     blocks.words[ARGUMENT_COUNT] = arity as u64;
-    match blocks.path_exit(block, values, SecondaryMap::new())? {
-        PathExit::Return(low, high) => {
+    let prefix = blocks.words.len();
+    match blocks.path_exit(block, values, SecondaryMap::new()) {
+        Some(PathExit::Return(low, high)) => {
             blocks.words[RETURN_VALUE] = low;
             if let Some(high) = high {
                 blocks.append(IntegerOp::ReturnPair, [high, 0, 0]);
             }
         }
-        PathExit::Trap => {
+        Some(PathExit::Trap) => {
             blocks.words[RETURN_VALUE] = NO_VALUE;
             blocks.append(IntegerOp::Trap, [signature.returns.len() as u64, 0, 0]);
         }
+        None if blocks.needs_cfg => {
+            blocks.words.truncate(prefix);
+            blocks.words[RETURN_VALUE] = NO_VALUE;
+            blocks.relocations = false;
+            blocks.labeled_cfg(block)?;
+        }
+        None => return None,
     }
     Some((blocks.words, blocks.relocations))
 }
