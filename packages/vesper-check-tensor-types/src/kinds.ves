@@ -210,44 +210,44 @@ pub fn elab_clear(inout cx: Cx) {
     cx.el_dims.clear();
 }
 
-pub fn elab_find(in cx: Cx, s: u64, e: u64) -> u64 {
+pub fn elab_find(in cx: Cx, start: u64, end: u64) -> u64 {
     let n = cx.el_s.len();
     for i in 0..n {
         if u8_at(in cx.el_kind, i) != 0
-            && u64_at(in cx.el_s, i) == s
-            && u64_at(in cx.el_e, i) == e {
+            && u64_at(in cx.el_s, i) == start
+            && u64_at(in cx.el_e, i) == end {
             return i;
         }
     }
     4294967295
 }
 
-pub fn elab_insert(inout cx: Cx, s: u64, e: u64, kind: u8, in dims: ChunkSeq[u32]) {
-    let da = n32(cx.el_dims.len());
-    let dn = n32(dims.len());
+pub fn elab_insert(inout cx: Cx, start: u64, end: u64, kind: u8, in dims: ChunkSeq[u32]) {
+    let dims_start = n32(cx.el_dims.len());
+    let dims_len = n32(dims.len());
     for i in 0..dims.len() {
         cx.el_dims.push(u32_at(in dims, i));
     }
     let n = cx.el_s.len();
     for i in 0..n {
-        if u64_at(in cx.el_s, i) == s && u64_at(in cx.el_e, i) == e {
+        if u64_at(in cx.el_s, i) == start && u64_at(in cx.el_e, i) == end {
             let ok0 = cx.el_kind.try_set(i, kind);
-            let ok1 = cx.el_da.try_set(i, da);
-            let ok2 = cx.el_dn.try_set(i, dn);
+            let ok1 = cx.el_da.try_set(i, dims_start);
+            let ok2 = cx.el_dn.try_set(i, dims_len);
             return;
         }
     }
-    cx.el_s.push(s);
-    cx.el_e.push(e);
+    cx.el_s.push(start);
+    cx.el_e.push(end);
     cx.el_kind.push(kind);
-    cx.el_da.push(da);
-    cx.el_dn.push(dn);
+    cx.el_da.push(dims_start);
+    cx.el_dn.push(dims_len);
 }
 
-pub fn elab_remove(inout cx: Cx, s: u64, e: u64) {
+pub fn elab_remove(inout cx: Cx, start: u64, end: u64) {
     let n = cx.el_s.len();
     for i in 0..n {
-        if u64_at(in cx.el_s, i) == s && u64_at(in cx.el_e, i) == e {
+        if u64_at(in cx.el_s, i) == start && u64_at(in cx.el_e, i) == end {
             let ok = cx.el_kind.try_set(i, 0);
         }
     }
@@ -255,25 +255,25 @@ pub fn elab_remove(inout cx: Cx, s: u64, e: u64) {
 
 // ----- tables keyed by name -------------------------------------------------------
 
-pub fn at32(in t: ChunkSeq[u32], i: u32) -> u32 {
-    match t.try_get(widen_u64(i)) {
-        Option::Some(v) => v,
+pub fn at32(in table: ChunkSeq[u32], i: u32) -> u32 {
+    match table.try_get(widen_u64(i)) {
+        Option::Some(value) => value,
         Option::None => NONE,
     }
 }
 
-pub fn set32(inout t: ChunkSeq[u32], i: u32, v: u32) {
-    if widen_u64(i) >= t.len() {
-        t.resize(inc(widen_u64(i)), NONE);
+pub fn set32(inout table: ChunkSeq[u32], i: u32, value: u32) {
+    if widen_u64(i) >= table.len() {
+        table.resize(inc(widen_u64(i)), NONE);
     }
-    let ok = t.try_set(widen_u64(i), v);
+    let ok = table.try_set(widen_u64(i), value);
 }
 
-pub fn set8(inout t: ChunkSeq[u8], i: u32, v: u8) {
-    if widen_u64(i) >= t.len() {
-        t.resize(inc(widen_u64(i)), 0);
+pub fn set8(inout table: ChunkSeq[u8], i: u32, value: u8) {
+    if widen_u64(i) >= table.len() {
+        table.resize(inc(widen_u64(i)), 0);
     }
-    let ok = t.try_set(widen_u64(i), v);
+    let ok = table.try_set(widen_u64(i), value);
 }
 
 // The `AdtKinds` row of a name, or NONE.
@@ -281,11 +281,11 @@ pub fn set8(inout t: ChunkSeq[u8], i: u32, v: u8) {
 // ----- AST access -------------------------------------------------------------------
 
 // The name of an AST symbol.
-pub fn nm(in st: St, s: u32) -> u32 {
-    if s == NONE {
+pub fn nm(in st: St, symbol: u32) -> u32 {
+    if symbol == NONE {
         NONE
     } else {
-        u32_at(in st.amap, widen_u64(s))
+        u32_at(in st.amap, widen_u64(symbol))
     }
 }
 
@@ -423,63 +423,67 @@ pub fn item_at(in a: Ast, i: u64) -> ItemNode {
 
 // A named type's name (as a name), or NONE.
 pub fn tname(in st: St, in a: Ast, t: u32) -> u32 {
-    let n = type_at(in a, t);
-    if n.kind == 1 { nm(in st, n.a) } else { NONE }
+    let node = type_at(in a, t);
+    if node.kind == 1 {
+        nm(in st, node.a)
+    } else {
+        NONE
+    }
 }
 
 // A named type's arguments list (0, the empty list, otherwise).
 pub fn targs(in a: Ast, t: u32) -> u32 {
-    let n = type_at(in a, t);
-    if n.kind == 1 { n.b } else { 0 }
+    let node = type_at(in a, t);
+    if node.kind == 1 { node.b } else { 0 }
 }
 
 // ----- names --------------------------------------------------------------------------
 
 // `RESERVED`.
-pub fn is_reserved(in st: St, n: u32) -> bool {
-    n == st.s_tensor
-        || n == st.s_kv
-        || n == st.s_lease
-        || n == st.s_seq
-        || n == st.s_kverr
-        || n == st.s_dims
-        || n == st.s_f32
-        || n == st.s_bf16
+pub fn is_reserved(in st: St, name: u32) -> bool {
+    name == st.s_tensor
+        || name == st.s_kv
+        || name == st.s_lease
+        || name == st.s_seq
+        || name == st.s_kverr
+        || name == st.s_dims
+        || name == st.s_f32
+        || name == st.s_bf16
 }
 
 // `wire_integer(n).is_some()`: `[ui](16|32|64)(le|be)`.
-pub fn is_wire_integer(in st: St, n: u32) -> bool {
-    if n == NONE || st.names.size(n) != 5 {
+pub fn is_wire_integer(in st: St, name: u32) -> bool {
+    if name == NONE || st.names.size(name) != 5 {
         return false;
     }
-    let b0 = st.names.byte(n, 0);
-    let b1 = st.names.byte(n, 1);
-    let b2 = st.names.byte(n, 2);
-    let b3 = st.names.byte(n, 3);
-    let b4 = st.names.byte(n, 4);
+    let b0 = st.names.byte(name, 0);
+    let b1 = st.names.byte(name, 1);
+    let b2 = st.names.byte(name, 2);
+    let b3 = st.names.byte(name, 3);
+    let b4 = st.names.byte(name, 4);
     let sign = b0 == 117 || b0 == 105;
     let bits = (b1 == 49 && b2 == 54) || (b1 == 51 && b2 == 50) || (b1 == 54 && b2 == 52);
     let end = (b3 == 108 && b4 == 101) || (b3 == 98 && b4 == 101);
     sign && bits && end
 }
 
-fn reserved_or_wire(in st: St, n: u32) -> bool {
-    is_reserved(in st, n)
-        || n == st.s_shape
-        || n == st.s_bytes
-        || n == st.s_pad
-        || is_wire_integer(in st, n)
+fn reserved_or_wire(in st: St, name: u32) -> bool {
+    is_reserved(in st, name)
+        || name == st.s_shape
+        || name == st.s_bytes
+        || name == st.s_pad
+        || is_wire_integer(in st, name)
 }
 
 // `path_mentions`.
-pub fn path_mentions(inout st: St, n: u32) -> bool {
-    if is_reserved(in st, n) {
+pub fn path_mentions(inout st: St, name: u32) -> bool {
+    if is_reserved(in st, name) {
         return true;
     }
-    let c = first_colons(in st, n);
-    if c < st.names.size(n) {
-        let p = name_prefix(inout st, n, c);
-        return is_reserved(in st, p);
+    let colons = first_colons(in st, name);
+    if colons < st.names.size(name) {
+        let prefix = name_prefix(inout st, name, colons);
+        return is_reserved(in st, prefix);
     }
     false
 }
@@ -487,46 +491,46 @@ pub fn path_mentions(inout st: St, n: u32) -> bool {
 // ----- mentions (infer.rs) ---------------------------------------------------------------
 
 pub fn type_mentions(in st: St, in a: Ast, t: u32) -> bool {
-    let n = type_at(in a, t);
-    if n.kind == 1 {
-        if reserved_or_wire(in st, nm(in st, n.a)) {
+    let node = type_at(in a, t);
+    if node.kind == 1 {
+        if reserved_or_wire(in st, nm(in st, node.a)) {
             return true;
         }
-        for i in 0..list_len(in a, n.b) {
-            if type_mentions(in st, in a, list_at(in a, n.b, i)) {
+        for i in 0..list_len(in a, node.b) {
+            if type_mentions(in st, in a, list_at(in a, node.b, i)) {
                 return true;
             }
         }
         false
-    } else if n.kind == 2 {
-        for i in 0..list_len(in a, n.a) {
-            if type_mentions(in st, in a, list_at(in a, n.a, i)) {
+    } else if node.kind == 2 {
+        for i in 0..list_len(in a, node.a) {
+            if type_mentions(in st, in a, list_at(in a, node.a, i)) {
                 return true;
             }
         }
         false
-    } else if n.kind == 3 {
-        let m = list_len(in a, n.a) >> 1;
-        for i in 0..m {
-            if type_mentions(in st, in a, list_at(in a, n.a, inc(wrapping_mul(i, 2)))) {
+    } else if node.kind == 3 {
+        let param_count = list_len(in a, node.a) >> 1;
+        for i in 0..param_count {
+            if type_mentions(in st, in a, list_at(in a, node.a, inc(wrapping_mul(i, 2)))) {
                 return true;
             }
         }
-        type_mentions(in st, in a, n.b) || row_mentions(in st, in a, n.c)
-    } else if n.kind == 4 {
-        row_mentions(in st, in a, n.a)
+        type_mentions(in st, in a, node.b) || row_mentions(in st, in a, node.c)
+    } else if node.kind == 4 {
+        row_mentions(in st, in a, node.a)
     } else {
         false
     }
 }
 
 pub fn effect_mentions(in st: St, in a: Ast, e: u32) -> bool {
-    let x = effectn(in a, e);
-    if is_reserved(in st, nm(in st, x.name)) {
+    let effect = effectn(in a, e);
+    if is_reserved(in st, nm(in st, effect.name)) {
         return true;
     }
-    for j in 0..list_len(in a, x.args) {
-        if type_mentions(in st, in a, list_at(in a, x.args, j)) {
+    for j in 0..list_len(in a, effect.args) {
+        if type_mentions(in st, in a, list_at(in a, effect.args, j)) {
             return true;
         }
     }
@@ -547,20 +551,20 @@ pub fn row_mentions(in st: St, in a: Ast, r: u32) -> bool {
 }
 
 fn pattern_mentions(inout st: St, in a: Ast, p: u32) -> bool {
-    let n = pat_at(in a, p);
-    if n.kind == 4 {
-        for i in 0..list_len(in a, n.a) {
-            if pattern_mentions(inout st, in a, list_at(in a, n.a, i)) {
+    let node = pat_at(in a, p);
+    if node.kind == 4 {
+        for i in 0..list_len(in a, node.a) {
+            if pattern_mentions(inout st, in a, list_at(in a, node.a, i)) {
                 return true;
             }
         }
-    } else if n.kind == 5 {
-        if path_mentions(inout st, nm(in st, n.a)) {
+    } else if node.kind == 5 {
+        if path_mentions(inout st, nm(in st, node.a)) {
             return true;
         }
-        let m = list_len(in a, n.b) >> 1;
-        for i in 0..m {
-            if pattern_mentions(inout st, in a, list_at(in a, n.b, inc(wrapping_mul(i, 2)))) {
+        let field_count = list_len(in a, node.b) >> 1;
+        for i in 0..field_count {
+            if pattern_mentions(inout st, in a, list_at(in a, node.b, inc(wrapping_mul(i, 2)))) {
                 return true;
             }
         }
@@ -576,9 +580,9 @@ fn opt_mentions(inout st: St, in a: Ast, e: u32) -> bool {
     }
 }
 
-fn list_mentions(inout st: St, in a: Ast, l: u32) -> bool {
-    for i in 0..list_len(in a, l) {
-        if expr_mentions(inout st, in a, list_at(in a, l, i)) {
+fn list_mentions(inout st: St, in a: Ast, list: u32) -> bool {
+    for i in 0..list_len(in a, list) {
+        if expr_mentions(inout st, in a, list_at(in a, list, i)) {
             return true;
         }
     }
@@ -587,124 +591,124 @@ fn list_mentions(inout st: St, in a: Ast, l: u32) -> bool {
 
 // `function_mentions`' walk of a body (`walk`).
 pub fn expr_mentions(inout st: St, in a: Ast, e: u32) -> bool {
-    let n = expr_at(in a, e);
-    let k = n.kind;
-    if k == 2 {
-        return path_mentions(inout st, nm(in st, n.a));
+    let node = expr_at(in a, e);
+    let kind = node.kind;
+    if kind == 2 {
+        return path_mentions(inout st, nm(in st, node.a));
     }
-    if k == 3 {
-        return list_mentions(inout st, in a, n.a);
+    if kind == 3 {
+        return list_mentions(inout st, in a, node.a);
     }
-    if k == 4 {
-        if path_mentions(inout st, nm(in st, n.a)) {
+    if kind == 4 {
+        if path_mentions(inout st, nm(in st, node.a)) {
             return true;
         }
-        let m = list_len(in a, n.b) >> 1;
-        for i in 0..m {
-            if expr_mentions(inout st, in a, list_at(in a, n.b, inc(wrapping_mul(i, 2)))) {
+        let field_count = list_len(in a, node.b) >> 1;
+        for i in 0..field_count {
+            if expr_mentions(inout st, in a, list_at(in a, node.b, inc(wrapping_mul(i, 2)))) {
                 return true;
             }
         }
         return false;
     }
-    if k == 5 {
-        for i in 0..list_len(in a, n.a) {
-            let s = stmtn(in a, list_at(in a, n.a, i));
-            if s.kind == 1 {
-                if type_mentions(in st, in a, s.ty)
-                    || pattern_mentions(inout st, in a, s.pat)
-                    || expr_mentions(inout st, in a, s.value) {
+    if kind == 5 {
+        for i in 0..list_len(in a, node.a) {
+            let stmt = stmtn(in a, list_at(in a, node.a, i));
+            if stmt.kind == 1 {
+                if type_mentions(in st, in a, stmt.ty)
+                    || pattern_mentions(inout st, in a, stmt.pat)
+                    || expr_mentions(inout st, in a, stmt.value) {
                     return true;
                 }
-            } else if expr_mentions(inout st, in a, s.value) {
+            } else if expr_mentions(inout st, in a, stmt.value) {
                 return true;
             }
         }
-        return opt_mentions(inout st, in a, n.b);
+        return opt_mentions(inout st, in a, node.b);
     }
-    if k == 6 {
-        if expr_mentions(inout st, in a, n.a) {
+    if kind == 6 {
+        if expr_mentions(inout st, in a, node.a) {
             return true;
         }
-        for i in 0..list_len(in a, n.b) {
-            if type_mentions(in st, in a, list_at(in a, n.b, i)) {
+        for i in 0..list_len(in a, node.b) {
+            if type_mentions(in st, in a, list_at(in a, node.b, i)) {
                 return true;
             }
         }
-        for i in 0..list_len(in a, n.c) {
-            if expr_mentions(inout st, in a, argn(in a, list_at(in a, n.c, i)).expr) {
-                return true;
-            }
-        }
-        return false;
-    }
-    if k == 7 || k == 9 || k == 17 {
-        return expr_mentions(inout st, in a, n.a);
-    }
-    if k == 10 {
-        return expr_mentions(inout st, in a, n.b);
-    }
-    if k == 8 || k == 19 {
-        return expr_mentions(inout st, in a, n.a) || expr_mentions(inout st, in a, n.b);
-    }
-    if k == 11 || k == 12 {
-        return expr_mentions(inout st, in a, n.b) || expr_mentions(inout st, in a, n.c);
-    }
-    if k == 13 {
-        return expr_mentions(inout st, in a, n.a)
-            || expr_mentions(inout st, in a, n.b)
-            || opt_mentions(inout st, in a, n.c);
-    }
-    if k == 14 {
-        if expr_mentions(inout st, in a, n.a) {
-            return true;
-        }
-        let m = list_len(in a, n.b) >> 1;
-        for i in 0..m {
-            if pattern_mentions(inout st, in a, list_at(in a, n.b, wrapping_mul(i, 2)))
-                || expr_mentions(inout st, in a, list_at(in a, n.b, inc(wrapping_mul(i, 2)))) {
+        for i in 0..list_len(in a, node.c) {
+            if expr_mentions(inout st, in a, argn(in a, list_at(in a, node.c, i)).expr) {
                 return true;
             }
         }
         return false;
     }
-    if k == 18 {
-        return expr_mentions(inout st, in a, n.b)
-            || pattern_mentions(inout st, in a, n.a)
-            || expr_mentions(inout st, in a, n.c);
+    if kind == 7 || kind == 9 || kind == 17 {
+        return expr_mentions(inout st, in a, node.a);
     }
-    if k == 20 || k == 21 {
-        return opt_mentions(inout st, in a, n.a);
+    if kind == 10 {
+        return expr_mentions(inout st, in a, node.b);
     }
-    if k == 15 {
-        for i in 0..list_len(in a, n.a) {
-            if type_mentions(in st, in a, paramn(in a, list_at(in a, n.a, i)).ty) {
+    if kind == 8 || kind == 19 {
+        return expr_mentions(inout st, in a, node.a) || expr_mentions(inout st, in a, node.b);
+    }
+    if kind == 11 || kind == 12 {
+        return expr_mentions(inout st, in a, node.b) || expr_mentions(inout st, in a, node.c);
+    }
+    if kind == 13 {
+        return expr_mentions(inout st, in a, node.a)
+            || expr_mentions(inout st, in a, node.b)
+            || opt_mentions(inout st, in a, node.c);
+    }
+    if kind == 14 {
+        if expr_mentions(inout st, in a, node.a) {
+            return true;
+        }
+        let arm_count = list_len(in a, node.b) >> 1;
+        for i in 0..arm_count {
+            if pattern_mentions(inout st, in a, list_at(in a, node.b, wrapping_mul(i, 2)))
+                || expr_mentions(inout st, in a, list_at(in a, node.b, inc(wrapping_mul(i, 2)))) {
                 return true;
             }
         }
-        return type_mentions(in st, in a, n.c)
-            || row_mentions(in st, in a, n.d)
-            || expr_mentions(inout st, in a, n.e);
+        return false;
     }
-    if k == 16 {
-        if effect_mentions(in st, in a, n.a) {
+    if kind == 18 {
+        return expr_mentions(inout st, in a, node.b)
+            || pattern_mentions(inout st, in a, node.a)
+            || expr_mentions(inout st, in a, node.c);
+    }
+    if kind == 20 || kind == 21 {
+        return opt_mentions(inout st, in a, node.a);
+    }
+    if kind == 15 {
+        for i in 0..list_len(in a, node.a) {
+            if type_mentions(in st, in a, paramn(in a, list_at(in a, node.a, i)).ty) {
+                return true;
+            }
+        }
+        return type_mentions(in st, in a, node.c)
+            || row_mentions(in st, in a, node.d)
+            || expr_mentions(inout st, in a, node.e);
+    }
+    if kind == 16 {
+        if effect_mentions(in st, in a, node.a) {
             return true;
         }
-        if n.b != NONE
-            && (pattern_mentions(inout st, in a, n.b) || expr_mentions(inout st, in a, n.c)) {
+        if node.b != NONE
+            && (pattern_mentions(inout st, in a, node.b) || expr_mentions(inout st, in a, node.c)) {
             return true;
         }
-        if expr_mentions(inout st, in a, n.d) {
+        if expr_mentions(inout st, in a, node.d) {
             return true;
         }
-        for i in 0..list_len(in a, n.e) {
-            let c = clausen(in a, list_at(in a, n.e, i));
-            for j in 0..list_len(in a, c.pats) {
-                if pattern_mentions(inout st, in a, list_at(in a, c.pats, j)) {
+        for i in 0..list_len(in a, node.e) {
+            let clause = clausen(in a, list_at(in a, node.e, i));
+            for j in 0..list_len(in a, clause.pats) {
+                if pattern_mentions(inout st, in a, list_at(in a, clause.pats, j)) {
                     return true;
                 }
             }
-            if expr_mentions(inout st, in a, c.body) {
+            if expr_mentions(inout st, in a, clause.body) {
                 return true;
             }
         }
@@ -713,25 +717,25 @@ pub fn expr_mentions(inout st: St, in a: Ast, e: u32) -> bool {
     false
 }
 
-pub fn function_mentions(inout st: St, in a: Ast, f: u32) -> bool {
-    let x = fnn(in a, f);
-    for i in 0..list_len(in a, x.params) {
-        if type_mentions(in st, in a, paramn(in a, list_at(in a, x.params, i)).ty) {
+pub fn function_mentions(inout st: St, in a: Ast, fn_id: u32) -> bool {
+    let func = fnn(in a, fn_id);
+    for i in 0..list_len(in a, func.params) {
+        if type_mentions(in st, in a, paramn(in a, list_at(in a, func.params, i)).ty) {
             return true;
         }
     }
-    if type_mentions(in st, in a, x.result) || row_mentions(in st, in a, x.effects) {
+    if type_mentions(in st, in a, func.result) || row_mentions(in st, in a, func.effects) {
         return true;
     }
-    if x.body != NONE {
-        return expr_mentions(inout st, in a, x.body);
+    if func.body != NONE {
+        return expr_mentions(inout st, in a, func.body);
     }
     false
 }
 
-pub fn fns_mention(inout st: St, in a: Ast, l: u32) -> bool {
-    for i in 0..list_len(in a, l) {
-        if function_mentions(inout st, in a, list_at(in a, l, i)) {
+pub fn fns_mention(inout st: St, in a: Ast, list: u32) -> bool {
+    for i in 0..list_len(in a, list) {
+        if function_mentions(inout st, in a, list_at(in a, list, i)) {
             return true;
         }
     }
@@ -741,37 +745,43 @@ pub fn fns_mention(inout st: St, in a: Ast, l: u32) -> bool {
 // `mentions_tensors`.
 pub fn mentions_tensors(inout st: St, in a: Ast) -> bool {
     for i in 0..a.m_items.len() {
-        let it = item_at(in a, i);
-        if it.kind == 1 {
-            let x = adtn(in a, it.node);
-            for v in 0..list_len(in a, x.variants) {
-                let vn = variantn(in a, list_at(in a, x.variants, v));
-                for f in 0..list_len(in a, vn.fields) {
-                    if type_mentions(in st, in a, fieldn(in a, list_at(in a, vn.fields, f)).ty) {
+        let item = item_at(in a, i);
+        if item.kind == 1 {
+            let adt = adtn(in a, item.node);
+            for variant_idx in 0..list_len(in a, adt.variants) {
+                let variant = variantn(in a, list_at(in a, adt.variants, variant_idx));
+                for field_idx in 0..list_len(in a, variant.fields) {
+                    if type_mentions(
+                        in st,
+                        in a,
+                        fieldn(in a, list_at(in a, variant.fields, field_idx)).ty
+                    ) {
                         return true;
                     }
                 }
             }
-        } else if it.kind == 2 {
-            if function_mentions(inout st, in a, it.node) {
+        } else if item.kind == 2 {
+            if function_mentions(inout st, in a, item.node) {
                 return true;
             }
-        } else if it.kind == 3 {
-            if fns_mention(inout st, in a, effdecln(in a, it.node).ops) {
+        } else if item.kind == 3 {
+            if fns_mention(inout st, in a, effdecln(in a, item.node).ops) {
                 return true;
             }
-        } else if it.kind == 4 {
-            let x = impln(in a, it.node);
-            if type_mentions(in st, in a, x.ty) || fns_mention(inout st, in a, x.methods) {
+        } else if item.kind == 4 {
+            let impl_node = impln(in a, item.node);
+            if type_mentions(in st, in a, impl_node.ty)
+                || fns_mention(inout st, in a, impl_node.methods) {
                 return true;
             }
-        } else if it.kind == 5 {
-            if fns_mention(inout st, in a, traitn(in a, it.node).methods) {
+        } else if item.kind == 5 {
+            if fns_mention(inout st, in a, traitn(in a, item.node).methods) {
                 return true;
             }
-        } else if it.kind == 6 {
-            let x = confn(in a, it.node);
-            if fns_mention(inout st, in a, x.methods) || type_mentions(in st, in a, x.self_ty) {
+        } else if item.kind == 6 {
+            let conf = confn(in a, item.node);
+            if fns_mention(inout st, in a, conf.methods)
+                || type_mentions(in st, in a, conf.self_ty) {
                 return true;
             }
         }
@@ -782,11 +792,11 @@ pub fn mentions_tensors(inout st: St, in a: Ast) -> bool {
 // `tensor_types::active`.
 pub fn active(inout st: St, in a: Ast) -> bool {
     for i in 0..a.m_items.len() {
-        let it = item_at(in a, i);
-        if it.kind == 1 && is_reserved(in st, nm(in st, adtn(in a, it.node).name)) {
+        let item = item_at(in a, i);
+        if item.kind == 1 && is_reserved(in st, nm(in st, adtn(in a, item.node).name)) {
             return false;
         }
-        if it.kind == 3 && is_reserved(in st, nm(in st, effdecln(in a, it.node).name)) {
+        if item.kind == 3 && is_reserved(in st, nm(in st, effdecln(in a, item.node).name)) {
             return false;
         }
     }
@@ -796,12 +806,12 @@ pub fn active(inout st: St, in a: Ast) -> bool {
 // ----- wire struct names (wire.rs) ------------------------------------------------------
 
 fn wire_only(in st: St, in a: Ast, t: u32) -> bool {
-    let n = type_at(in a, t);
-    if n.kind != 1 {
+    let node = type_at(in a, t);
+    if node.kind != 1 {
         return false;
     }
-    let name = nm(in st, n.a);
-    (list_len(in a, n.b) == 0 && is_wire_integer(in st, name))
+    let name = nm(in st, node.a);
+    (list_len(in a, node.b) == 0 && is_wire_integer(in st, name))
         || name == st.s_bytes
         || name == st.s_pad
 }
@@ -809,38 +819,42 @@ fn wire_only(in st: St, in a: Ast, t: u32) -> bool {
 // `wire_struct_names`.
 pub fn mark_blocks(in st: St, inout cx: Cx, in a: Ast) {
     for i in 0..a.m_items.len() {
-        let it = item_at(in a, i);
-        if it.kind != 1 {
+        let item = item_at(in a, i);
+        if item.kind != 1 {
             continue;
         }
-        let x = adtn(in a, it.node);
-        if x.is_enum {
+        let adt = adtn(in a, item.node);
+        if adt.is_enum {
             continue;
         }
         let mut wire = false;
-        for v in 0..list_len(in a, x.variants) {
-            let vn = variantn(in a, list_at(in a, x.variants, v));
-            for f in 0..list_len(in a, vn.fields) {
-                if wire_only(in st, in a, fieldn(in a, list_at(in a, vn.fields, f)).ty) {
+        for variant_idx in 0..list_len(in a, adt.variants) {
+            let variant = variantn(in a, list_at(in a, adt.variants, variant_idx));
+            for field_idx in 0..list_len(in a, variant.fields) {
+                if wire_only(
+                    in st,
+                    in a,
+                    fieldn(in a, list_at(in a, variant.fields, field_idx)).ty
+                ) {
                     wire = true;
                 }
             }
         }
         if wire {
-            set8(inout cx.blocks, nm(in st, x.name), 1);
+            set8(inout cx.blocks, nm(in st, adt.name), 1);
         }
     }
 }
 
-pub fn is_block(in cx: Cx, n: u32) -> bool {
-    u8_at(in cx.blocks, widen_u64(n)) == 1
+pub fn is_block(in cx: Cx, name: u32) -> bool {
+    u8_at(in cx.blocks, widen_u64(name)) == 1
 }
 
 // ----- kinds (types.rs) ---------------------------------------------------------------------
 
-fn in_gset(in cx: Cx, n: u32) -> bool {
+fn in_gset(in cx: Cx, name: u32) -> bool {
     for i in 0..cx.gset.len() {
-        if u32_at(in cx.gset, i) == n {
+        if u32_at(in cx.gset, i) == name {
             return true;
         }
     }
@@ -848,22 +862,22 @@ fn in_gset(in cx: Cx, n: u32) -> bool {
 }
 
 // `out.entry(n).or_default().insert(k)`.
-fn use_kind(inout cx: Cx, n: u32, k: u8) {
-    let bit = wrapping_shl_u8(1, widen_u32(k));
+fn use_kind(inout cx: Cx, name: u32, kind: u8) {
+    let bit = wrapping_shl_u8(1, widen_u32(kind));
     for i in 0..cx.us_name.len() {
-        if u32_at(in cx.us_name, i) == n {
-            let m = u8_at(in cx.us_mask, i) | bit;
-            let ok = cx.us_mask.try_set(i, m);
+        if u32_at(in cx.us_name, i) == name {
+            let mask = u8_at(in cx.us_mask, i) | bit;
+            let ok = cx.us_mask.try_set(i, mask);
             return;
         }
     }
-    cx.us_name.push(n);
+    cx.us_name.push(name);
     cx.us_mask.push(bit);
 }
 
-pub fn uses_of(in cx: Cx, n: u32) -> u8 {
+pub fn uses_of(in cx: Cx, name: u32) -> u8 {
     for i in 0..cx.us_name.len() {
-        if u32_at(in cx.us_name, i) == n {
+        if u32_at(in cx.us_name, i) == name {
             return u8_at(in cx.us_mask, i);
         }
     }
@@ -877,16 +891,16 @@ pub fn uses_clear(inout cx: Cx) {
 
 // `dim_names` with the `generics.contains` filter of its callers.
 fn dim_names(in st: St, inout cx: Cx, in a: Ast, t: u32) {
-    let n = type_at(in a, t);
-    if n.kind != 1 {
+    let node = type_at(in a, t);
+    if node.kind != 1 {
         return;
     }
-    let name = nm(in st, n.a);
+    let name = nm(in st, node.a);
     if name == st.s_prod || name == st.s_shape {
-        for i in 0..list_len(in a, n.b) {
-            dim_names(in st, inout cx, in a, list_at(in a, n.b, i));
+        for i in 0..list_len(in a, node.b) {
+            dim_names(in st, inout cx, in a, list_at(in a, node.b, i));
         }
-    } else if list_len(in a, n.b) == 0 {
+    } else if list_len(in a, node.b) == 0 {
         if in_gset(in cx, name) {
             use_kind(inout cx, name, KD_DIM);
         }
@@ -895,9 +909,9 @@ fn dim_names(in st: St, inout cx: Cx, in a: Ast, t: u32) {
 
 // Whether `t` is `Named(d, [])` with `d` a collected generic: `d`, or NONE.
 fn bare_generic(in st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
-    let n = type_at(in a, t);
-    if n.kind == 1 && list_len(in a, n.b) == 0 {
-        let d = nm(in st, n.a);
+    let node = type_at(in a, t);
+    if node.kind == 1 && list_len(in a, node.b) == 0 {
+        let d = nm(in st, node.a);
         if in_gset(in cx, d) {
             return d;
         }
@@ -907,15 +921,15 @@ fn bare_generic(in st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
 
 // `collect_kinds` over the generics in `cx.gset` into `cx.us_*`.
 pub fn collect_kinds(in st: St, inout cx: Cx, in a: Ast, t: u32) {
-    let n = type_at(in a, t);
-    if n.kind == 1 {
-        let name = nm(in st, n.a);
-        let args = n.b;
+    let node = type_at(in a, t);
+    if node.kind == 1 {
+        let name = nm(in st, node.a);
+        let args = node.b;
         let argc = list_len(in a, args);
         if name == st.s_tensor && argc == 2 {
-            let d = bare_generic(in st, in cx, in a, list_at(in a, args, 0));
-            if d != NONE {
-                use_kind(inout cx, d, KD_DTYPE);
+            let generic = bare_generic(in st, in cx, in a, list_at(in a, args, 0));
+            if generic != NONE {
+                use_kind(inout cx, generic, KD_DTYPE);
             } else {
                 collect_kinds(in st, inout cx, in a, list_at(in a, args, 0));
             }
@@ -929,39 +943,39 @@ pub fn collect_kinds(in st: St, inout cx: Cx, in a: Ast, t: u32) {
         } else {
             let row = at32(in cx.ak_row, name);
             for i in 0..argc {
-                let mut k: u8 = 9;
+                let mut kind: u8 = 9;
                 if row != NONE && i < widen_u64(u32_at(in cx.ak_n, widen_u64(row))) {
-                    k = u8_at(
+                    kind = u8_at(
                         in cx.ak_k,
                         wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(row))), i)
                     );
                 }
-                let x = list_at(in a, args, i);
-                if k == KD_DIM {
-                    dim_names(in st, inout cx, in a, x);
-                } else if k == KD_DTYPE {
-                    let d = bare_generic(in st, in cx, in a, x);
-                    if d != NONE {
-                        use_kind(inout cx, d, KD_DTYPE);
+                let arg = list_at(in a, args, i);
+                if kind == KD_DIM {
+                    dim_names(in st, inout cx, in a, arg);
+                } else if kind == KD_DTYPE {
+                    let generic = bare_generic(in st, in cx, in a, arg);
+                    if generic != NONE {
+                        use_kind(inout cx, generic, KD_DTYPE);
                     }
                 } else {
-                    collect_kinds(in st, inout cx, in a, x);
+                    collect_kinds(in st, inout cx, in a, arg);
                 }
             }
         }
-    } else if n.kind == 2 {
-        for i in 0..list_len(in a, n.a) {
-            collect_kinds(in st, inout cx, in a, list_at(in a, n.a, i));
+    } else if node.kind == 2 {
+        for i in 0..list_len(in a, node.a) {
+            collect_kinds(in st, inout cx, in a, list_at(in a, node.a, i));
         }
-    } else if n.kind == 3 {
-        let m = list_len(in a, n.a) >> 1;
-        for i in 0..m {
-            collect_kinds(in st, inout cx, in a, list_at(in a, n.a, inc(wrapping_mul(i, 2))));
+    } else if node.kind == 3 {
+        let param_count = list_len(in a, node.a) >> 1;
+        for i in 0..param_count {
+            collect_kinds(in st, inout cx, in a, list_at(in a, node.a, inc(wrapping_mul(i, 2))));
         }
-        collect_kinds(in st, inout cx, in a, n.b);
-        collect_row_kinds(in st, inout cx, in a, n.c);
-    } else if n.kind == 4 {
-        collect_row_kinds(in st, inout cx, in a, n.a);
+        collect_kinds(in st, inout cx, in a, node.b);
+        collect_row_kinds(in st, inout cx, in a, node.c);
+    } else if node.kind == 4 {
+        collect_row_kinds(in st, inout cx, in a, node.a);
     }
 }
 
@@ -971,13 +985,13 @@ pub fn collect_row_kinds(in st: St, inout cx: Cx, in a: Ast, r: u32) {
     }
     let row = effectsn(in a, r);
     for i in 0..list_len(in a, row.instances) {
-        let e = effectn(in a, list_at(in a, row.instances, i));
-        let kv = nm(in st, e.name) == st.s_kv;
-        for j in 0..list_len(in a, e.args) {
-            if kv {
-                dim_names(in st, inout cx, in a, list_at(in a, e.args, j));
+        let effect = effectn(in a, list_at(in a, row.instances, i));
+        let is_kv = nm(in st, effect.name) == st.s_kv;
+        for j in 0..list_len(in a, effect.args) {
+            if is_kv {
+                dim_names(in st, inout cx, in a, list_at(in a, effect.args, j));
             } else {
-                collect_kinds(in st, inout cx, in a, list_at(in a, e.args, j));
+                collect_kinds(in st, inout cx, in a, list_at(in a, effect.args, j));
             }
         }
     }
@@ -994,20 +1008,20 @@ pub fn resolve_kinds(
 ) -> bool {
     out.clear();
     for i in 0..names.len() {
-        let g = u32_at(in names, i);
-        let m = uses_of(in cx, g);
-        if m == 0 {
+        let generic = u32_at(in names, i);
+        let mask = uses_of(in cx, generic);
+        if mask == 0 {
             out.push(KD_TYPE);
-        } else if m == 1 {
+        } else if mask == 1 {
             out.push(KD_DIM);
-        } else if m == 2 {
+        } else if mask == 2 {
             out.push(KD_DTYPE);
-        } else if m == 4 {
+        } else if mask == 4 {
             out.push(KD_TYPE);
         } else {
             st.err.clear();
             put(inout st.err, in "generic '");
-            st.names.write(g, inout st.err);
+            st.names.write(generic, inout st.err);
             put(inout st.err, in "' is used both as a tensor dimension or dtype and as a type");
             out.clear();
             return false;
@@ -1017,21 +1031,21 @@ pub fn resolve_kinds(
 }
 
 // Sets the `AdtKinds` of `name`.
-pub fn set_kinds(inout cx: Cx, name: u32, in ks: ChunkSeq[u8]) {
+pub fn set_kinds(inout cx: Cx, name: u32, in kinds: ChunkSeq[u8]) {
     let row = wrapping_u32(cx.ak_a.len());
     cx.ak_a.push(wrapping_u32(cx.ak_k.len()));
-    cx.ak_n.push(wrapping_u32(ks.len()));
-    cx.ak_k.extend(in ks.as_slice());
+    cx.ak_n.push(wrapping_u32(kinds.len()));
+    cx.ak_k.extend(in kinds.as_slice());
     set32(inout cx.ak_row, name, row);
 }
 
-fn kinds_equal(in cx: Cx, row: u32, in ks: ChunkSeq[u8]) -> bool {
-    if row == NONE || widen_u64(u32_at(in cx.ak_n, widen_u64(row))) != ks.len() {
+fn kinds_equal(in cx: Cx, row: u32, in kinds: ChunkSeq[u8]) -> bool {
+    if row == NONE || widen_u64(u32_at(in cx.ak_n, widen_u64(row))) != kinds.len() {
         return false;
     }
-    for i in 0..ks.len() {
+    for i in 0..kinds.len() {
         if u8_at(in cx.ak_k, wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(row))), i))
-            != u8_at(in ks, i) {
+            != u8_at(in kinds, i) {
             return false;
         }
     }
@@ -1043,47 +1057,49 @@ fn kinds_equal(in cx: Cx, row: u32, in ks: ChunkSeq[u8]) -> bool {
 pub fn adt_kinds(inout st: St, inout cx: Cx, in a: Ast) {
     let base = st.dcode.len();
     let rounds = inc(a.m_items.len());
-    let mut ks = ChunkSeq::new[u8]();
+    let mut kinds = ChunkSeq::new[u8]();
     let mut names = ChunkSeq::new[u32]();
     for round in 0..rounds {
         let mut changed = false;
         diag_truncate_to(inout st, base);
         for i in 0..a.m_items.len() {
-            let it = item_at(in a, i);
-            if it.kind != 1 {
+            let item = item_at(in a, i);
+            if item.kind != 1 {
                 continue;
             }
-            let x = adtn(in a, it.node);
+            let adt = adtn(in a, item.node);
             names.clear();
-            for g in 0..list_len(in a, x.generics) {
-                names.push(nm(in st, genericn(in a, list_at(in a, x.generics, g)).name));
+            for generic_idx in 0..list_len(in a, adt.generics) {
+                names.push(
+                    nm(in st, genericn(in a, list_at(in a, adt.generics, generic_idx)).name)
+                );
             }
             cx.gset.clear();
             cx.gset.extend(in names.as_slice());
             uses_clear(inout cx);
-            for v in 0..list_len(in a, x.variants) {
-                let vn = variantn(in a, list_at(in a, x.variants, v));
-                for f in 0..list_len(in a, vn.fields) {
+            for variant_idx in 0..list_len(in a, adt.variants) {
+                let variant = variantn(in a, list_at(in a, adt.variants, variant_idx));
+                for field_idx in 0..list_len(in a, variant.fields) {
                     collect_kinds(
                         in st,
                         inout cx,
                         in a,
-                        fieldn(in a, list_at(in a, vn.fields, f)).ty
+                        fieldn(in a, list_at(in a, variant.fields, field_idx)).ty
                     );
                 }
             }
-            if !resolve_kinds(inout st, in cx, in names, inout ks) {
-                let mut m = ChunkSeq::new[u8]();
-                m.extend(in st.err.as_slice());
-                push_diag(inout st, 761, widen_u64(x.start), widen_u64(x.end), in m);
-                ks.clear();
-                for g in 0..names.len() {
-                    ks.push(KD_TYPE);
+            if !resolve_kinds(inout st, in cx, in names, inout kinds) {
+                let mut message = ChunkSeq::new[u8]();
+                message.extend(in st.err.as_slice());
+                push_diag(inout st, 761, widen_u64(adt.start), widen_u64(adt.end), in message);
+                kinds.clear();
+                for generic_idx in 0..names.len() {
+                    kinds.push(KD_TYPE);
                 }
             }
-            let name = nm(in st, x.name);
-            if !kinds_equal(in cx, at32(in cx.ak_row, name), in ks) {
-                set_kinds(inout cx, name, in ks);
+            let name = nm(in st, adt.name);
+            if !kinds_equal(in cx, at32(in cx.ak_row, name), in kinds) {
+                set_kinds(inout cx, name, in kinds);
                 changed = true;
             }
         }
@@ -1093,12 +1109,12 @@ pub fn adt_kinds(inout st: St, inout cx: Cx, in a: Ast) {
     }
 }
 
-pub fn push_diag(inout st: St, code: u32, start: u64, end: u64, in m: ChunkSeq[u8]) {
+pub fn push_diag(inout st: St, code: u32, start: u64, end: u64, in message: ChunkSeq[u8]) {
     st.dcode.push(code);
     st.dstart.push(start);
     st.dend.push(end);
     st.dma.push(st.dtext.len());
-    st.dtext.extend(in m.as_slice());
+    st.dtext.extend(in message.as_slice());
     st.dmb.push(st.dtext.len());
 }
 
@@ -1106,11 +1122,11 @@ pub fn diag_truncate_to(inout st: St, n: u64) {
     if n >= st.dcode.len() {
         return;
     }
-    let t = match st.dma.try_get(n) {
+    let text_len = match st.dma.try_get(n) {
         Option::Some(v) => v,
         Option::None => st.dtext.len(),
     };
-    st.dtext.truncate(t);
+    st.dtext.truncate(text_len);
     st.dcode.truncate(n);
     st.dstart.truncate(n);
     st.dend.truncate(n);
@@ -1120,8 +1136,16 @@ pub fn diag_truncate_to(inout st: St, n: u64) {
 
 // ----- Type Display and Debug (vesper_core::ast) -------------------------------------------
 
-fn put_types(in st: St, in a: Ast, inout o: ChunkSeq[u8], l: u32, step: u64, off: u64, disp: bool) {
-    let mut n = list_len(in a, l);
+fn put_types(
+    in st: St,
+    in a: Ast,
+    inout o: ChunkSeq[u8],
+    list: u32,
+    step: u64,
+    off: u64,
+    display: bool
+) {
+    let mut n = list_len(in a, list);
     if step == 2 {
         n = n >> 1;
     }
@@ -1129,63 +1153,63 @@ fn put_types(in st: St, in a: Ast, inout o: ChunkSeq[u8], l: u32, step: u64, off
         if i > 0 {
             put(inout o, in ", ");
         }
-        let t = list_at(in a, l, wrapping_add(wrapping_mul(i, step), off));
-        if disp {
-            put_type(in st, in a, inout o, t);
+        let ty = list_at(in a, list, wrapping_add(wrapping_mul(i, step), off));
+        if display {
+            put_type(in st, in a, inout o, ty);
         } else {
-            debug_type(in st, in a, inout o, t);
+            debug_type(in st, in a, inout o, ty);
         }
     }
 }
 
 // `impl Display for ast::Type`.
 pub fn put_type(in st: St, in a: Ast, inout o: ChunkSeq[u8], t: u32) {
-    let n = type_at(in a, t);
-    if n.kind == 1 {
-        let name = nm(in st, n.a);
-        if name == st.s_dyn && list_len(in a, n.b) == 1 {
+    let node = type_at(in a, t);
+    if node.kind == 1 {
+        let name = nm(in st, node.a);
+        if name == st.s_dyn && list_len(in a, node.b) == 1 {
             put(inout o, in "dyn ");
-            put_type(in st, in a, inout o, list_at(in a, n.b, 0));
+            put_type(in st, in a, inout o, list_at(in a, node.b, 0));
             return;
         }
         st.names.write(name, inout o);
-        if list_len(in a, n.b) > 0 {
+        if list_len(in a, node.b) > 0 {
             o.push(91);
-            put_types(in st, in a, inout o, n.b, 1, 0, true);
+            put_types(in st, in a, inout o, node.b, 1, 0, true);
             o.push(93);
         }
-    } else if n.kind == 2 {
+    } else if node.kind == 2 {
         o.push(40);
-        put_types(in st, in a, inout o, n.a, 1, 0, true);
+        put_types(in st, in a, inout o, node.a, 1, 0, true);
         o.push(41);
-    } else if n.kind == 3 {
+    } else if node.kind == 3 {
         put(inout o, in "fn(");
-        put_types(in st, in a, inout o, n.a, 2, 1, true);
+        put_types(in st, in a, inout o, node.a, 2, 1, true);
         put(inout o, in ") -> ");
-        put_type(in st, in a, inout o, n.b);
-    } else if n.kind == 4 {
+        put_type(in st, in a, inout o, node.b);
+    } else if node.kind == 4 {
         put(inout o, in "eff ");
-        debug_row(in st, in a, inout o, n.a);
-    } else if n.kind == 6 {
+        debug_row(in st, in a, inout o, node.a);
+    } else if node.kind == 6 {
         put(inout o, in "integer literal ");
-        push_decimal(inout o, widen_u64(n.a));
+        push_decimal(inout o, widen_u64(node.a));
     } else {
         o.push(95);
     }
 }
 
-fn debug_name(in st: St, inout o: ChunkSeq[u8], s: u32) {
+fn debug_name(in st: St, inout o: ChunkSeq[u8], name: u32) {
     o.push(34);
-    st.names.write(s, inout o);
+    st.names.write(name, inout o);
     o.push(34);
 }
 
-fn debug_opt_name(in st: St, inout o: ChunkSeq[u8], s: u32) {
-    if s == NONE {
+fn debug_opt_name(in st: St, inout o: ChunkSeq[u8], name: u32) {
+    if name == NONE {
         put(inout o, in "None");
     } else {
         put(inout o, in "Some(");
-        debug_name(in st, inout o, s);
+        debug_name(in st, inout o, name);
         o.push(41);
     }
 }
@@ -1197,13 +1221,13 @@ pub fn debug_row(in st: St, in a: Ast, inout o: ChunkSeq[u8], r: u32) {
         if i > 0 {
             put(inout o, in ", ");
         }
-        let e = effectn(in a, list_at(in a, row.instances, i));
+        let effect = effectn(in a, list_at(in a, row.instances, i));
         put(inout o, in "Effect { label: ");
-        debug_opt_name(in st, inout o, nm(in st, e.label));
+        debug_opt_name(in st, inout o, nm(in st, effect.label));
         put(inout o, in ", name: ");
-        debug_name(in st, inout o, nm(in st, e.name));
+        debug_name(in st, inout o, nm(in st, effect.name));
         put(inout o, in ", args: [");
-        put_types(in st, in a, inout o, e.args, 1, 0, false);
+        put_types(in st, in a, inout o, effect.args, 1, 0, false);
         put(inout o, in "] }");
     }
     put(inout o, in "], tail: ");
@@ -1212,57 +1236,57 @@ pub fn debug_row(in st: St, in a: Ast, inout o: ChunkSeq[u8], r: u32) {
 }
 
 pub fn debug_type(in st: St, in a: Ast, inout o: ChunkSeq[u8], t: u32) {
-    let n = type_at(in a, t);
-    if n.kind == 1 {
+    let node = type_at(in a, t);
+    if node.kind == 1 {
         put(inout o, in "Named(");
-        debug_name(in st, inout o, nm(in st, n.a));
+        debug_name(in st, inout o, nm(in st, node.a));
         put(inout o, in ", [");
-        put_types(in st, in a, inout o, n.b, 1, 0, false);
+        put_types(in st, in a, inout o, node.b, 1, 0, false);
         put(inout o, in "])");
-    } else if n.kind == 2 {
+    } else if node.kind == 2 {
         put(inout o, in "Tuple([");
-        put_types(in st, in a, inout o, n.a, 1, 0, false);
+        put_types(in st, in a, inout o, node.a, 1, 0, false);
         put(inout o, in "])");
-    } else if n.kind == 3 {
+    } else if node.kind == 3 {
         put(inout o, in "Function { params: [");
-        let m = list_len(in a, n.a) >> 1;
-        for i in 0..m {
+        let param_count = list_len(in a, node.a) >> 1;
+        for i in 0..param_count {
             if i > 0 {
                 put(inout o, in ", ");
             }
             o.push(40);
-            let p = list_at(in a, n.a, wrapping_mul(i, 2));
-            if p == 0 {
+            let pass = list_at(in a, node.a, wrapping_mul(i, 2));
+            if pass == 0 {
                 put(inout o, in "In");
-            } else if p == 1 {
+            } else if pass == 1 {
                 put(inout o, in "Inout");
             } else {
                 put(inout o, in "Sink");
             }
             put(inout o, in ", ");
-            debug_type(in st, in a, inout o, list_at(in a, n.a, inc(wrapping_mul(i, 2))));
+            debug_type(in st, in a, inout o, list_at(in a, node.a, inc(wrapping_mul(i, 2))));
             o.push(41);
         }
         put(inout o, in "], result: ");
-        debug_type(in st, in a, inout o, n.b);
+        debug_type(in st, in a, inout o, node.b);
         put(inout o, in ", effects: ");
-        debug_row(in st, in a, inout o, n.c);
+        debug_row(in st, in a, inout o, node.c);
         put(inout o, in ", mode: ");
-        if n.d == 0 {
+        if node.d == 0 {
             put(inout o, in "Copy");
-        } else if n.d == 1 {
+        } else if node.d == 1 {
             put(inout o, in "Affine");
         } else {
             put(inout o, in "Linear");
         }
         put(inout o, in " }");
-    } else if n.kind == 4 {
+    } else if node.kind == 4 {
         put(inout o, in "Row(");
-        debug_row(in st, in a, inout o, n.a);
+        debug_row(in st, in a, inout o, node.a);
         o.push(41);
-    } else if n.kind == 6 {
+    } else if node.kind == 6 {
         put(inout o, in "IntLiteral(");
-        push_decimal(inout o, widen_u64(n.a));
+        push_decimal(inout o, widen_u64(node.a));
         o.push(41);
     } else {
         put(inout o, in "Infer");
@@ -1271,25 +1295,25 @@ pub fn debug_type(in st: St, in a: Ast, inout o: ChunkSeq[u8], t: u32) {
 
 // `types::display_type`.
 pub fn display_type(in st: St, in a: Ast, inout o: ChunkSeq[u8], t: u32) {
-    let n = type_at(in a, t);
-    if n.kind == 1 {
-        let name = nm(in st, n.a);
-        let argc = list_len(in a, n.b);
+    let node = type_at(in a, t);
+    if node.kind == 1 {
+        let name = nm(in st, node.a);
+        let argc = list_len(in a, node.b);
         if name == st.s_shape {
             o.push(91);
             for i in 0..argc {
                 if i > 0 {
                     put(inout o, in ", ");
                 }
-                display_type(in st, in a, inout o, list_at(in a, n.b, i));
+                display_type(in st, in a, inout o, list_at(in a, node.b, i));
             }
             o.push(93);
             return;
         }
         if name == st.s_prod && argc == 2 {
-            display_type(in st, in a, inout o, list_at(in a, n.b, 0));
+            display_type(in st, in a, inout o, list_at(in a, node.b, 0));
             put(inout o, in " * ");
-            display_type(in st, in a, inout o, list_at(in a, n.b, 1));
+            display_type(in st, in a, inout o, list_at(in a, node.b, 1));
             return;
         }
         if argc > 0 {
@@ -1299,7 +1323,7 @@ pub fn display_type(in st: St, in a: Ast, inout o: ChunkSeq[u8], t: u32) {
                 if i > 0 {
                     put(inout o, in ", ");
                 }
-                display_type(in st, in a, inout o, list_at(in a, n.b, i));
+                display_type(in st, in a, inout o, list_at(in a, node.b, i));
             }
             o.push(93);
             return;
@@ -1310,15 +1334,15 @@ pub fn display_type(in st: St, in a: Ast, inout o: ChunkSeq[u8], t: u32) {
 
 // ----- Scope (types.rs) ----------------------------------------------------------------------
 
-// The kind of generic `n` in the scope, or 9 when it is not a generic.
-pub fn scope_kind(in cx: Cx, n: u32) -> u8 {
+// The kind of generic `name` in the scope, or 9 when it is not a generic.
+pub fn scope_kind(in cx: Cx, name: u32) -> u8 {
     let mut i = cx.sc_name.len();
     loop {
         if i == 0 {
             return 9;
         }
         i = wrapping_sub(i, 1);
-        if u32_at(in cx.sc_name, i) == n {
+        if u32_at(in cx.sc_name, i) == name {
             return u8_at(in cx.sc_kind, i);
         }
     }
@@ -1326,40 +1350,40 @@ pub fn scope_kind(in cx: Cx, n: u32) -> u8 {
 
 // `Scope::dim`: a dimension, or NONE with `err`.
 pub fn scope_dim(inout st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
-    let n = type_at(in a, t);
-    if n.kind == 1 {
-        let name = nm(in st, n.a);
-        let argc = list_len(in a, n.b);
+    let node = type_at(in a, t);
+    if node.kind == 1 {
+        let name = nm(in st, node.a);
+        let argc = list_len(in a, node.b);
         if name == st.s_prod && argc == 2 {
-            let x = scope_dim(inout st, in cx, in a, list_at(in a, n.b, 0));
-            if x == NONE {
+            let lhs = scope_dim(inout st, in cx, in a, list_at(in a, node.b, 0));
+            if lhs == NONE {
                 return NONE;
             }
-            let y = scope_dim(inout st, in cx, in a, list_at(in a, n.b, 1));
-            if y == NONE {
+            let rhs = scope_dim(inout st, in cx, in a, list_at(in a, node.b, 1));
+            if rhs == NONE {
                 return NONE;
             }
-            let d = dim_mul(inout st, x, y);
-            if d == NONE {
+            let dim = dim_mul(inout st, lhs, rhs);
+            if dim == NONE {
                 return dim_fail(inout st);
             }
-            return d;
+            return dim;
         }
         if argc == 0 && is_digits(in st, name) {
-            let mut v: u64 = 0;
+            let mut value: u64 = 0;
             for i in 0..st.names.size(name) {
-                let c = widen_u64(st.names.byte(name, i));
-                v = wrapping_add(wrapping_mul(v, 10), wrapping_sub(c, 48));
-                if v > MAX_DIM {
+                let digit = widen_u64(st.names.byte(name, i));
+                value = wrapping_add(wrapping_mul(value, 10), wrapping_sub(digit, 48));
+                if value > MAX_DIM {
                     st.derr = 1;
                     return dim_fail(inout st);
                 }
             }
-            let d = dim_const(inout st, v);
-            if d == NONE {
+            let dim = dim_const(inout st, value);
+            if dim == NONE {
                 return dim_fail(inout st);
             }
-            return d;
+            return dim;
         }
         if argc == 0 {
             if scope_kind(in cx, name) == KD_DIM {
@@ -1374,19 +1398,19 @@ pub fn scope_dim(inout st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
             return NONE;
         }
     }
-    let mut m = ChunkSeq::new[u8]();
-    put(inout m, in "expected a dimension, found '");
-    display_type(in st, in a, inout m, t);
-    m.push(39);
-    st.err = m;
+    let mut message = ChunkSeq::new[u8]();
+    put(inout message, in "expected a dimension, found '");
+    display_type(in st, in a, inout message, t);
+    message.push(39);
+    st.err = message;
     NONE
 }
 
 // `Scope::dtype`: a dtype word, or NONE with `err`.
 pub fn scope_dtype(inout st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
-    let n = type_at(in a, t);
-    if n.kind == 1 && list_len(in a, n.b) == 0 {
-        let name = nm(in st, n.a);
+    let node = type_at(in a, t);
+    if node.kind == 1 && list_len(in a, node.b) == 0 {
+        let name = nm(in st, node.a);
         if name == st.s_f32 {
             return 0;
         }
@@ -1400,23 +1424,23 @@ pub fn scope_dtype(inout st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
             return wrapping_add(2, wrapping_mul(name, 2));
         }
     }
-    let mut m = ChunkSeq::new[u8]();
-    m.push(39);
-    display_type(in st, in a, inout m, t);
+    let mut message = ChunkSeq::new[u8]();
+    message.push(39);
+    display_type(in st, in a, inout message, t);
     put(
-        inout m,
+        inout message,
         in "' is not a tensor dtype: use F32, Bf16, a quantized block wire struct or a dtype parameter"
     );
-    st.err = m;
+    st.err = message;
     NONE
 }
 
 // `Scope::shape`: the dims into `out`, or false with `err`.
 pub fn scope_shape(inout st: St, in cx: Cx, in a: Ast, t: u32, inout out: ChunkSeq[u32]) -> bool {
     out.clear();
-    let n = type_at(in a, t);
-    if n.kind == 1 && nm(in st, n.a) == st.s_shape {
-        let argc = list_len(in a, n.b);
+    let node = type_at(in a, t);
+    if node.kind == 1 && nm(in st, node.a) == st.s_shape {
+        let argc = list_len(in a, node.b);
         if argc > 4 {
             st.err.clear();
             put(inout st.err, in "tensor rank ");
@@ -1425,19 +1449,19 @@ pub fn scope_shape(inout st: St, in cx: Cx, in a: Ast, t: u32, inout out: ChunkS
             return false;
         }
         for i in 0..argc {
-            let d = scope_dim(inout st, in cx, in a, list_at(in a, n.b, i));
-            if d == NONE {
+            let dim = scope_dim(inout st, in cx, in a, list_at(in a, node.b, i));
+            if dim == NONE {
                 return false;
             }
-            out.push(d);
+            out.push(dim);
         }
         return true;
     }
-    let mut m = ChunkSeq::new[u8]();
-    put(inout m, in "expected a shape literal [d, ...], found '");
-    display_type(in st, in a, inout m, t);
-    m.push(39);
-    st.err = m;
+    let mut message = ChunkSeq::new[u8]();
+    put(inout message, in "expected a shape literal [d, ...], found '");
+    display_type(in st, in a, inout message, t);
+    message.push(39);
+    st.err = message;
     false
 }
 
@@ -1451,24 +1475,24 @@ fn err_named(inout st: St, in pre: Str, name: u32, in post: Str) -> u32 {
 
 // `Scope::ty`: a type, or NONE with `err`.
 pub fn scope_ty(inout st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
-    let n = type_at(in a, t);
-    if n.kind == 1 {
-        let name = nm(in st, n.a);
-        let args = n.b;
+    let node = type_at(in a, t);
+    if node.kind == 1 {
+        let name = nm(in st, node.a);
+        let args = node.b;
         let argc = list_len(in a, args);
         if name == st.s_tensor {
             if argc != 2 {
                 return fail(inout st, in "a tensor type is written Tensor[DType, [d, ...]]");
             }
-            let dt = scope_dtype(inout st, in cx, in a, list_at(in a, args, 0));
-            if dt == NONE {
+            let tensor_dtype = scope_dtype(inout st, in cx, in a, list_at(in a, args, 0));
+            if tensor_dtype == NONE {
                 return NONE;
             }
             let mut shape = ChunkSeq::new[u32]();
             if !scope_shape(inout st, in cx, in a, list_at(in a, args, 1), inout shape) {
                 return NONE;
             }
-            return mk_ty(inout st, T_TENSOR, dt, 0, in shape);
+            return mk_ty(inout st, T_TENSOR, tensor_dtype, 0, in shape);
         }
         if name == st.s_lease || name == st.s_seq {
             if argc != 2 {
@@ -1496,14 +1520,14 @@ pub fn scope_ty(inout st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
             return fail(inout st, in "a shape literal is only valid as a tensor's second argument");
         }
         if argc == 0 {
-            let k = scope_kind(in cx, name);
-            if k == KD_TYPE {
+            let kind = scope_kind(in cx, name);
+            if kind == KD_TYPE {
                 return ty_named(inout st, T_VAR, name);
             }
-            if k == KD_DTYPE {
+            if kind == KD_DTYPE {
                 return err_named(inout st, in "dtype parameter '", name, in "' is used as a type");
             }
-            if k == KD_DIM {
+            if kind == KD_DIM {
                 return err_named(inout st, in "dimension '", name, in "' is used as a type");
             }
             if is_digits(in st, name) {
@@ -1521,35 +1545,35 @@ pub fn scope_ty(inout st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
             }
             let mut items = ChunkSeq::new[u32]();
             for i in 0..argc {
-                let mut k = KD_TYPE;
+                let mut kind = KD_TYPE;
                 if row != NONE {
-                    k = u8_at(
+                    kind = u8_at(
                         in cx.ak_k,
                         wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(row))), i)
                     );
                 }
-                let x = list_at(in a, args, i);
-                if k == KD_DIM {
-                    let d = scope_dim(inout st, in cx, in a, x);
-                    if d == NONE {
+                let arg = list_at(in a, args, i);
+                if kind == KD_DIM {
+                    let dim = scope_dim(inout st, in cx, in a, arg);
+                    if dim == NONE {
                         return NONE;
                     }
                     items.push(1);
-                    items.push(d);
-                } else if k == KD_DTYPE {
-                    let d = scope_dtype(inout st, in cx, in a, x);
-                    if d == NONE {
+                    items.push(dim);
+                } else if kind == KD_DTYPE {
+                    let dtype = scope_dtype(inout st, in cx, in a, arg);
+                    if dtype == NONE {
                         return NONE;
                     }
                     items.push(2);
-                    items.push(d);
+                    items.push(dtype);
                 } else {
-                    let y = scope_ty(inout st, in cx, in a, x);
-                    if y == NONE {
+                    let arg_ty = scope_ty(inout st, in cx, in a, arg);
+                    if arg_ty == NONE {
                         return NONE;
                     }
                     items.push(0);
-                    items.push(y);
+                    items.push(arg_ty);
                 }
             }
             return mk_ty(inout st, T_ADT, name, 0, in items);
@@ -1563,11 +1587,11 @@ pub fn scope_ty(inout st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
             );
         }
         for i in 0..argc {
-            let y = scope_ty(inout st, in cx, in a, list_at(in a, args, i));
-            if y == NONE {
+            let arg_ty = scope_ty(inout st, in cx, in a, list_at(in a, args, i));
+            if arg_ty == NONE {
                 return NONE;
             }
-            if has_tensor(in st, y) {
+            if has_tensor(in st, arg_ty) {
                 return err_named(
                     inout st,
                     in "a tensor type cannot instantiate the parameters of '",
@@ -1578,32 +1602,37 @@ pub fn scope_ty(inout st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
         }
         return ty_named(inout st, T_BASE, name);
     }
-    if n.kind == 2 {
+    if node.kind == 2 {
         let mut items = ChunkSeq::new[u32]();
-        for i in 0..list_len(in a, n.a) {
-            let y = scope_ty(inout st, in cx, in a, list_at(in a, n.a, i));
-            if y == NONE {
+        for i in 0..list_len(in a, node.a) {
+            let elem_ty = scope_ty(inout st, in cx, in a, list_at(in a, node.a, i));
+            if elem_ty == NONE {
                 return NONE;
             }
-            items.push(y);
+            items.push(elem_ty);
         }
         return mk_ty(inout st, T_TUPLE, 0, 0, in items);
     }
-    if n.kind == 3 {
+    if node.kind == 3 {
         let mut items = ChunkSeq::new[u32]();
-        let m = list_len(in a, n.a) >> 1;
-        for i in 0..m {
-            let y = scope_ty(inout st, in cx, in a, list_at(in a, n.a, inc(wrapping_mul(i, 2))));
-            if y == NONE {
+        let param_count = list_len(in a, node.a) >> 1;
+        for i in 0..param_count {
+            let param_ty = scope_ty(
+                inout st,
+                in cx,
+                in a,
+                list_at(in a, node.a, inc(wrapping_mul(i, 2)))
+            );
+            if param_ty == NONE {
                 return NONE;
             }
-            items.push(y);
+            items.push(param_ty);
         }
-        let r = scope_ty(inout st, in cx, in a, n.b);
-        if r == NONE {
+        let result_ty = scope_ty(inout st, in cx, in a, node.b);
+        if result_ty == NONE {
             return NONE;
         }
-        return mk_ty(inout st, T_FN, 0, r, in items);
+        return mk_ty(inout st, T_FN, 0, result_ty, in items);
     }
     st.unknown
 }
