@@ -3213,8 +3213,11 @@ fn push_text(inout out: ChunkSeq[u64], in b: ChunkSeq[u8]) {
 // start, end, holes, (start, end)*, places, (start, end, pass)*, emits
 // row text, call start, end, rule start, end, import or NONE)*, mappings,
 // (expanded start, end, original start, end, copied)*].
-pub fn expand_words(in source: ChunkSeq[u8], in imp: Imports, include_tests: bool)
-    -> ChunkSeq[u64] {
+pub fn expand_words(
+    in source: ChunkSeq[u8],
+    in imp: Imports,
+    include_tests: bool
+) -> ChunkSeq[u64] {
     let x = expand(in source, in imp, include_tests);
     let mut out = ChunkSeq::new[u64]();
     if x.d.failed {
