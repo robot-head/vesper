@@ -102,11 +102,14 @@ pub fn raise_kind[T](kind: u32) -> T eff [Fail[IoError]] {
     )
 }
 
+// `mode` mirrors the Unix permission bits as far as Windows has them:
+// 0o444 for a read-only entry, 0o666 otherwise.
 pub copy struct Metadata {
     pub size: u64,
     pub mtime_s: i64,
     pub mtime_ns: u32,
     pub kind: u32,
+    pub mode: u32,
 }
 
 pub fn kind_file() -> u32 {
@@ -246,6 +249,34 @@ fn write_all_handle(h: u64, in data: Slice[u8]) -> u32 eff [Ffi[StdFs]] {
         off = wrapping_add(off, widen_u64(wrote));
     }
     0
+}
+
+// ---------------------------------------------------------------------------
+// Standard output and standard error.
+
+// Write all of `data` to standard output: `WriteFile` on the
+// `GetStdHandle(STD_OUTPUT_HANDLE)` handle, unbuffered. The bytes go out as
+// they are; a console shows them in its code page (Rust's `print!`
+// converts to UTF-16 for a console, so non-ASCII text can differ there).
+pub fn write_stdout(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_std_handle(StdFs::STD_OUTPUT_HANDLE, in data);
+}
+
+// Write all of `data` to standard error, as `write_stdout`.
+pub fn write_stderr(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_std_handle(StdFs::STD_ERROR_HANDLE, in data);
+}
+
+fn write_std_handle(which: i32, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    let h = StdFs::GetStdHandle(which);
+    // No handle (a detached process) takes everything, as Rust's stdout does.
+    if h == 0 || h == StdFs::INVALID_HANDLE_VALUE {
+        return;
+    }
+    let err = write_all_handle(h, in data);
+    if err != 0 {
+        raise_io(widen_u64(err))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -605,6 +636,51 @@ pub fn create_dir(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
     check_win32(StdFs::CreateDirectoryW(in wp.as_slice(), 0));
 }
 
+// Windows has no directory mode: a plain directory, as `std`'s
+// `DirBuilder` makes one there.
+pub fn create_dir_mode(in path: Str, mode: u32) eff [Ffi[StdFs], Fail[IoError]] {
+    let _ = mode;
+    create_dir(in path);
+}
+
+// The read-only attribute from the owner write bit (0o200), as
+// `std::fs::set_permissions` sets it on Windows; the other bits have no
+// meaning here.
+pub fn set_permissions(in path: Str, mode: u32) eff [Ffi[StdFs], Fail[IoError]] {
+    let wp = utf8_to_utf16(in path.as_bytes());
+    let attrs = match StdFs::GetFileAttributesW(in wp.as_slice()) {
+        Result::Ok((a, err)) => {
+            if a == 4294967295 {
+                return raise_io(widen_u64(err));
+            }
+            a
+        },
+        Result::Err(_) => return raise_kind(invalid_input()),
+    };
+    let ro = StdFs::FILE_ATTRIBUTE_READONLY;
+    let want = if (mode & 128) == 0 {
+        attrs | ro
+    } else {
+        attrs & (4294967295 ^ ro)
+    };
+    check_win32(StdFs::SetFileAttributesW(in wp.as_slice(), want));
+}
+
+// Copy the file `from` to `to` (`CopyFileW`, replacing `to`), as
+// `std::fs::copy`: the number of bytes copied, read from the copy (a
+// symbolic link's own attributes would give the link's size). A source
+// that is not a regular file is an `invalid_input()` error.
+pub fn copy(in from: Str, in to: Str) -> u64 eff [Ffi[StdFs], Fail[IoError]] {
+    let m = metadata(in from);
+    if m.kind != kind_file() {
+        return raise_kind(invalid_input());
+    }
+    let wf = utf8_to_utf16(in from.as_bytes());
+    let wt = utf8_to_utf16(in to.as_bytes());
+    check_win32(StdFs::CopyFileW(in wf.as_slice(), in wt.as_slice(), 0));
+    metadata(in to).size
+}
+
 pub fn create_dir_all(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
     create_dir_all_path(in path.as_bytes());
 }
@@ -744,11 +820,17 @@ fn meta_path(in path: Slice[u8], follow: bool) -> Metadata eff [Ffi[StdFs], Fail
             } else {
                 kind_file()
             };
+            let mode: u32 = if (info.dwFileAttributes & StdFs::FILE_ATTRIBUTE_READONLY) != 0 {
+                292
+            } else {
+                438
+            };
             Metadata {
                 size: size,
                 mtime_s: ms,
                 mtime_ns: mns,
                 kind: kind,
+                mode: mode,
             }
         }
         Result::Err(_) => raise_kind(invalid_input()),
@@ -765,6 +847,132 @@ pub fn metadata_path(in path: Slice[u8]) -> Metadata eff [Ffi[StdFs], Fail[IoErr
 
 pub fn symlink_metadata(in path: Str) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
     meta_path(in path.as_bytes(), false)
+}
+
+// `std::fs::canonicalize`: open `path` (a directory too, with backup
+// semantics) and ask for its final path, `\\?\C:\...` form as `std` gives it.
+pub fn canonicalize(in path: Str) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    canonicalize_path(in path.as_bytes())
+}
+
+pub fn canonicalize_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    let wpath = utf8_to_utf16(in path);
+    let h = match StdFs::CreateFileW(
+        in wpath.as_slice(),
+        0,
+        StdFs::FILE_SHARE_ALL,
+        0,
+        StdFs::OPEN_EXISTING,
+        StdFs::FILE_FLAG_BACKUP_SEMANTICS,
+        0
+    ) {
+        Result::Ok((h, err)) => {
+            if h == StdFs::INVALID_HANDLE_VALUE {
+                return raise_io(widen_u64(err));
+            }
+            h
+        }
+        Result::Err(_) => return raise_kind(invalid_input()),
+    };
+    let mut buf: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    buf.resize(260, 0);
+    let mut fail: u32 = 0;
+    let mut units: u64 = 0;
+    loop {
+        let (n, err) = StdFs::GetFinalPathNameByHandleW(h, inout buf.as_slice_mut(), 0);
+        if n == 0 {
+            fail = err;
+            break;
+        }
+        // Told the buffer holds `buf.len()` units (half what it does): a
+        // result at least that long is the size it needs.
+        let nu = widen_u64(n);
+        if nu < buf.len() {
+            units = nu;
+            break;
+        }
+        buf.resize(wrapping_add(nu, 1), 0);
+    }
+    let _ = StdFs::CloseHandle(h);
+    if fail != 0 {
+        return raise_io(widen_u64(fail));
+    }
+    packed_utf16_to_utf8(in buf.as_slice(), units)
+}
+
+// The first `units` UTF-16 units of `buf` (two per word, low half first)
+// as UTF-8; an unpaired surrogate becomes U+FFFD.
+fn packed_utf16_to_utf8(in buf: Slice[u32], units: u64) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= units {
+            break;
+        }
+        let w1 = packed_unit(in buf, i);
+        i = wrapping_add(i, 1);
+        if w1 >= 55296 && w1 <= 56319 && i < units {
+            let w2 = packed_unit(in buf, i);
+            if w2 >= 56320 && w2 <= 57343 {
+                i = wrapping_add(i, 1);
+                let hi = wrapping_shl_u32(wrapping_sub(w1, 55296), 10);
+                push_cp(inout out, wrapping_add(65536, hi | wrapping_sub(w2, 56320)));
+                continue;
+            }
+        }
+        if w1 >= 55296 && w1 <= 57343 {
+            push_cp(inout out, 65533);
+        } else {
+            push_cp(inout out, w1);
+        }
+    }
+    out
+}
+
+fn packed_unit(in buf: Slice[u32], i: u64) -> u32 {
+    let w = match buf.try_get(wrapping_shr_u64(i, 1)) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    if (i & 1) == 0 {
+        w & 65535
+    } else {
+        wrapping_shr_u32(w, 16)
+    }
+}
+
+fn push_cp(inout out: ChunkSeq[u8], cp: u32) {
+    if cp < 128 {
+        out.push(wrapping_u8(cp));
+    } else if cp < 2048 {
+        out.push(wrapping_u8(192 | wrapping_shr_u32(cp, 6)));
+        out.push(wrapping_u8(128 | (cp & 63)));
+    } else if cp < 65536 {
+        out.push(wrapping_u8(224 | wrapping_shr_u32(cp, 12)));
+        out.push(wrapping_u8(128 | (wrapping_shr_u32(cp, 6) & 63)));
+        out.push(wrapping_u8(128 | (cp & 63)));
+    } else {
+        out.push(wrapping_u8(240 | wrapping_shr_u32(cp, 18)));
+        out.push(wrapping_u8(128 | (wrapping_shr_u32(cp, 12) & 63)));
+        out.push(wrapping_u8(128 | (wrapping_shr_u32(cp, 6) & 63)));
+        out.push(wrapping_u8(128 | (cp & 63)));
+    }
+}
+
+// Whether `path` (following symbolic links) is a regular file: Windows has
+// no execute bit, so any file can run (`std`'s non-Unix check). Never fails.
+pub fn is_executable(in path: Str) -> bool eff [Ffi[StdFs]] {
+    is_executable_path(in path.as_bytes())
+}
+
+pub fn is_executable_path(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        let m = metadata_path(in path);
+        m.kind == kind_file()
+    } with {
+        return v => v,
+        raise(_e, _k) => false,
+    }
 }
 
 pub fn exists(in path: Str) -> bool eff [Ffi[StdFs]] {

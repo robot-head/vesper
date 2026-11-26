@@ -1,0 +1,67 @@
+"""Verify SIMD oracle corpus bytes and tool invocation order."""
+
+load("@std//hash.axl", "sha256")
+load("./lib/process.axl", "root_path")
+load("./lib/task-fixture.axl", "equal", "fixture_launcher", "fixture_workspace", "invoke_fixture", "write_fixture")
+
+def _digest(data):
+    hash = sha256()
+    hash.update(data)
+    return hash.hexdigest()
+
+def mock_simd_tool(ctx, cwd, tool, argv):
+    root = ctx.std.env.var("VESPER_TEST_FIXTURE_ROOT")
+    equal(ctx.std.fs.try_append(root + "/tool-order", tool + "\n"), True)
+    if tool == "emit":
+        equal(len(argv), 1)
+        scratch = root_path(cwd, argv[0])
+        ctx.std.fs.write(root + "/scratch", scratch)
+        ctx.std.fs.write(scratch + "/aarch64.o", "scanner object")
+        return 0
+    if tool == "assemble":
+        equal(argv, ["start.s", "-o", "start.o"])
+        equal(_digest(ctx.std.fs.open(cwd + "/start.s").read()), "b06a1ecbd3dba494ec4c384a85ff0ae7fef456f00bfb361afd6803967db90517")
+        ctx.std.fs.write(cwd + "/start.o", "start object")
+        return 0
+    if tool == "link":
+        equal(argv[:2], ["-z", "noexecstack"])
+        equal(argv[4], "-o")
+        equal([path.rpartition("/")[2] for path in argv[2:4]], ["start.o", "aarch64.o"])
+        equal(ctx.std.fs.read_to_string(root_path(cwd, argv[2])), "start object")
+        ctx.std.fs.write(root_path(cwd, argv[5]), "scanner")
+        return 0
+    equal(tool, "emulate")
+    equal(len(argv), 1)
+    binary = root_path(cwd, argv[0])
+    equal(ctx.std.fs.read_to_string(binary), "scanner")
+    scratch = binary.rpartition("/")[0]
+    for filename, length, digest in [
+        ("input.bin", 131120, "9675030ae6483c3ae9c2e1a56a93bb7ac7c04b01c22c82a5c47ace1b27be6cf8"),
+        ("cases.bin", 384000, "8f3f9664f5e5d4e18c981289c879cc3d82c4efbf3108c13a8104fa0e84ad725f"),
+    ]:
+        data = ctx.std.fs.open(scratch + "/" + filename).read()
+        equal((len(data), _digest(data)), (length, digest))
+    return int(ctx.std.env.var("VESPER_TEST_QEMU_STATUS"))
+
+def _test(ctx):
+    workspace = fixture_workspace(ctx, "vesper-simd-fixture-test-")
+    root, cwd = workspace.root, workspace.cwd
+    tools = ["emit", "assemble", "link", "emulate"]
+    env = dict(fixture_launcher(ctx, workspace, "simd", tools), VESPER_TEST_FIXTURE_ROOT = root,
+        VESPER_BAZEL_EXECUTABLES = "manifest", BAZEL = "/missing-bazel", AARCH64_AS = root + "/bin/assemble",
+        AARCH64_LD = root + "/bin/link", QEMU_AARCH64 = root + "/bin/emulate")
+    write_fixture(ctx, root + "/manifest", "//crates/vesper-simd:example/emit_objects bin/emit\n")
+    order = root + "/tool-order"
+    for status in [0, 7]:
+        ctx.std.fs.write(order, "")
+        output = invoke_fixture(ctx, ["acceptance", "test-simd-aarch64"], cwd, status, dict(env, VESPER_TEST_QEMU_STATUS = str(status)))
+        equal(ctx.std.fs.read_to_string(order).splitlines(), tools)
+        equal(ctx.std.fs.exists(ctx.std.fs.read_to_string(root + "/scratch")), False)
+        equal("9600 scalar-reference comparisons passed" in output.stdout, status == 0)
+    return 0
+
+test_simd_fixture = task(
+    kind = "simd-fixture", group = ["ci", "tests"],
+    summary = "Verify independent SIMD oracle inputs, tool arguments and failure handling",
+    implementation = _test,
+)

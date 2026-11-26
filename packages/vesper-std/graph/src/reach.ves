@@ -23,18 +23,10 @@ pub fn reachable_from_all(in g: Graph, in roots: Slice[u32]) -> ChunkSeq[bool] {
     let n = g.node_count();
     let mut seen = filled_bool(n, false);
     let mut work: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    let mut i: u64 = 0;
-    loop {
-        if i >= roots.len() {
-            break;
+    for root in roots {
+        if widen_u64(root) < n {
+            mark(inout seen, inout work, root);
         }
-        let r = get32(in roots, i, GraphIndex::Missing);
-        let rk = widen_u64(r);
-        if rk < n && !get_bool(in seen.as_slice(), rk) {
-            seen.try_set(rk, true);
-            work.push(r);
-        }
-        i = wrapping_add(i, 1);
     }
     loop {
         let v = match work.pop() {
@@ -42,21 +34,20 @@ pub fn reachable_from_all(in g: Graph, in roots: Slice[u32]) -> ChunkSeq[bool] {
             Option::None => break,
         };
         let (lo, hi) = g.succ_range(v);
-        let mut e = lo;
-        loop {
-            if e >= hi {
-                break;
-            }
-            let w = g.succ_edge(e);
-            let wk = widen_u64(w);
-            if !get_bool(in seen.as_slice(), wk) {
-                seen.try_set(wk, true);
-                work.push(w);
-            }
-            e = wrapping_add(e, 1);
+        for e in lo..hi {
+            mark(inout seen, inout work, g.succ_edge(e));
         }
     }
     seen
+}
+
+// Mark `v` seen and queue it on `work`, unless it was seen already.
+fn mark(inout seen: ChunkSeq[bool], inout work: ChunkSeq[u32], v: u32) {
+    let index = widen_u64(v);
+    if !get_bool(in seen.as_slice(), index) {
+        seen.try_set(index, true);
+        work.push(v);
+    }
 }
 
 // Whether `b` is reachable from `a` (every node reaches itself).
@@ -69,34 +60,19 @@ pub fn reaches(in g: Graph, a: u32, b: u32) -> bool {
     } else {
         let mut seen = filled_bool(n, false);
         let mut work: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        seen.try_set(widen_u64(a), true);
-        work.push(a);
+        mark(inout seen, inout work, a);
         loop {
             let v = match work.pop() {
                 Option::Some(x) => x,
                 Option::None => break false,
             };
             let (lo, hi) = g.succ_range(v);
-            let mut e = lo;
-            let mut found = false;
-            loop {
-                if e >= hi {
-                    break;
-                }
+            for e in lo..hi {
                 let w = g.succ_edge(e);
                 if w == b {
-                    found = true;
-                    break;
+                    return true;
                 }
-                let wk = widen_u64(w);
-                if !get_bool(in seen.as_slice(), wk) {
-                    seen.try_set(wk, true);
-                    work.push(w);
-                }
-                e = wrapping_add(e, 1);
-            }
-            if found {
-                break true;
+                mark(inout seen, inout work, w);
             }
         }
     }
@@ -112,9 +88,9 @@ pub fn postorder(in g: Graph, root: u32) -> ChunkSeq[u32] {
         let mut call_node: ChunkSeq[u32] = ChunkSeq::new[u32]();
         let mut call_edge: ChunkSeq[u64] = ChunkSeq::new[u64]();
         seen.try_set(widen_u64(root), true);
-        let (lo, _hi) = g.succ_range(root);
+        let (first_edge, _) = g.succ_range(root);
         call_node.push(root);
-        call_edge.push(lo);
+        call_edge.push(first_edge);
         loop {
             let depth = call_node.len();
             if depth == 0 {
@@ -123,18 +99,19 @@ pub fn postorder(in g: Graph, root: u32) -> ChunkSeq[u32] {
             let top = wrapping_sub(depth, 1);
             let v = get32(in call_node.as_slice(), top, 0);
             let e = get64(in call_edge.as_slice(), top, 0);
-            let (_lo, hi) = g.succ_range(v);
-            if e < hi {
+            let (_, end) = g.succ_range(v);
+            if e < end {
                 call_edge.try_set(top, wrapping_add(e, 1));
                 let w = g.succ_edge(e);
                 let wk = widen_u64(w);
                 if !get_bool(in seen.as_slice(), wk) {
                     seen.try_set(wk, true);
-                    let (wlo, _whi) = g.succ_range(w);
+                    let (w_first_edge, _) = g.succ_range(w);
                     call_node.push(w);
-                    call_edge.push(wlo);
+                    call_edge.push(w_first_edge);
                 }
             } else {
+                // Every edge of `v` is done: it is next in postorder.
                 call_node.truncate(top);
                 call_edge.truncate(top);
                 out.push(v);

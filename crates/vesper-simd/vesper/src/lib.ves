@@ -1,0 +1,344 @@
+// @export vsys Cranelift direct rust=vesper_cranelift_sys
+//
+// @vesper/simd: vesper-simd's Baseline128 delimiter-count/XOR scanner
+// (specification §14) in Vesper (SH6 lane 13, #1408; claim #1969). The
+// Rust crate keeps the target ISA and the JIT and object modules; it lends
+// a module to `define_scanner`, which declares the scanner and builds its
+// body through @vesper/cranelift. `check_features` and `profile_support`
+// are the crate's run-time profile decisions.
+use @vesper/cranelift::{
+    Block,
+    Ty,
+    Value,
+    append_block_param,
+    append_block_params_for_function_params,
+    block_param,
+    builder_new,
+    call_module,
+    call_return_module,
+    call_conv_default,
+    cc_eq,
+    cc_ult,
+    create_block,
+    declare_function,
+    define_function,
+    ins_band_imm,
+    ins_brif,
+    ins_bxor,
+    ins_extractlane,
+    ins_iadd,
+    ins_iadd_imm,
+    ins_iconst,
+    ins_icmp,
+    ins_jump,
+    ins_load,
+    ins_return1,
+    ins_splat,
+    ins_store,
+    ins_uextend,
+    is_invalid_func,
+    linkage_export,
+    module_clif,
+    module_error_text,
+    module_keep_clif,
+    seal_all_blocks,
+    sig_new,
+    sig_param,
+    sig_return,
+    switch_to_block,
+    ty_i64,
+    ty_i8,
+    ty_vector,
+    vals3
+};
+use self::vvec::{
+    binary as v_binary,
+    compare as v_compare,
+    load_masked as v_load_masked,
+    mask_zip as v_mask_zip,
+    prefix_bits as v_prefix_bits,
+    reduce_xor as v_reduce_xor,
+    scan as v_scan,
+    splat as v_splat,
+    store_masked as v_store_masked
+};
+
+// `check_features` and `profile_support` answers (the crate's `Error`).
+const SUPPORTED: u64 = 0;
+const UNSUPPORTED_PROFILE: u64 = 1;
+const UNSUPPORTED_HOST: u64 = 2;
+const MISSING_BASELINE_FEATURES: u64 = 3;
+
+// `IsaProfileKind::Baseline128`, the one profile with code.
+const BASELINE128: u64 = 0;
+
+// The host architectures `check_features` knows.
+const ARCH_X86_64: u64 = 1;
+const ARCH_AARCH64: u64 = 2;
+
+// The first byte of `define_scanner`'s answer.
+const DEFINED: u8 = 0;
+const FAILED: u8 = 1;
+
+// The C symbol of the scanner: `uint64_t scan(const uint8_t *data,
+// uint64_t len, uint8_t delimiter, uint8_t *xor_out)`.
+const SCANNER: Str = "vesper_simd_scan_baseline128_v1";
+
+// Whether a host of `arch` with these CPU features runs Baseline128 code:
+// x86_64 needs SSE3, SSSE3, SSE4.1 and SSE4.2; AArch64 needs NEON. Any
+// other `arch` is an unsupported host.
+pub fn check_features(arch: u64, sse3: bool, ssse3: bool, sse41: bool, sse42: bool, neon: bool)
+    -> u64 {
+    let supported = if arch == ARCH_X86_64 {
+        sse3 && ssse3 && sse41 && sse42
+    } else if arch == ARCH_AARCH64 {
+        neon
+    } else {
+        return UNSUPPORTED_HOST;
+    };
+    if supported {
+        SUPPORTED
+    } else {
+        MISSING_BASELINE_FEATURES
+    }
+}
+
+// Whether `profile` runs on a host with `pointer_bits`-bit pointers whose
+// features `check_features` answered `features` for. Only Baseline128 has
+// code, and its C ABI takes 64-bit pointers (x32 and arm64_32 hosts are
+// unsupported).
+pub fn profile_support(profile: u64, pointer_bits: u64, features: u64) -> u64 {
+    if profile != BASELINE128 {
+        return UNSUPPORTED_PROFILE;
+    }
+    if pointer_bits != 64 {
+        return UNSUPPORTED_HOST;
+    }
+    features
+}
+
+fn answer(status: u8, in text: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::with_capacity[u8](wrapping_add(text.len(), 1));
+    out.push(status);
+    out.extend(in text.as_slice());
+    out
+}
+
+fn failed(in why: Str) -> ChunkSeq[u8] {
+    let b = why.as_bytes();
+    let mut text = ChunkSeq::with_capacity[u8](b.len());
+    text.extend(in b);
+    answer(FAILED, in text)
+}
+
+// The block arguments `(offset, count, xor)`.
+fn args3(a: Value, c: Value, d: Value) -> ChunkSeq[u32] {
+    vals3(a, c, d)
+}
+
+// Declare the exported scanner in the lent module of `call` and define it.
+// The answer's first byte is 0 followed by the function's CLIF text, or 1
+// followed by the reason it failed.
+pub fn define_scanner(call: u64) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    match call_module(call) {
+        Option::Some(lent) => {
+            let mut m = lent;
+            module_keep_clif(inout m, true);
+            let defined = scanner(inout m);
+            let out = if defined {
+                let clif = module_clif(in m);
+                answer(DEFINED, in clif)
+            } else {
+                let why = module_error_text(in m);
+                answer(FAILED, in why)
+            };
+            module_keep_clif(inout m, false);
+            call_return_module(call, m);
+            out
+        },
+        Option::None => failed(in "no module was lent"),
+    }
+}
+
+// The scanner, as src/lib.rs built it with Cranelift's frontend: 16-byte
+// chunks compared with a splat of the delimiter and folded into an XOR
+// accumulator, then the checked scalar remainder. The blocks, their
+// parameters and the instructions come in the same order, so the CLIF
+// text is the same.
+fn scanner(inout m: Module) -> bool eff [Ffi[Cranelift]] {
+    let i8x16 = ty_vector(ty_i8(), 4);
+    let sig = sig_new(inout m, call_conv_default());
+    sig_param(inout m, sig, ty_i64());
+    sig_param(inout m, sig, ty_i64());
+    sig_param(inout m, sig, ty_i8());
+    sig_param(inout m, sig, ty_i64());
+    sig_return(inout m, sig, ty_i64());
+    let func = declare_function(inout m, in SCANNER.as_bytes(), linkage_export(), sig);
+    if is_invalid_func(func) {
+        return false;
+    }
+    let fb = match builder_new(in m, sig) {
+        Option::Some(b) => b,
+        Option::None => return false,
+    };
+    let mut b = fb;
+    let entry = create_block(inout b);
+    let vector_head = create_block(inout b);
+    let vector_body = create_block(inout b);
+    let reduce = create_block(inout b);
+    let scalar_head = create_block(inout b);
+    let scalar_body = create_block(inout b);
+    let finish = create_block(inout b);
+    append_block_params_for_function_params(inout b, entry);
+    // (offset, count, xor accumulator) for each block of both loops.
+    for_each_param3(inout b, vector_head, i8x16);
+    for_each_param3(inout b, vector_body, i8x16);
+    for_each_param3(inout b, reduce, i8x16);
+    for_each_param3(inout b, scalar_head, ty_i8());
+    for_each_param3(inout b, scalar_body, ty_i8());
+    for_each_param3(inout b, finish, ty_i8());
+
+    switch_to_block(inout b, entry);
+    let input = block_param(inout b, entry, 0);
+    let len = block_param(inout b, entry, 1);
+    let delim = block_param(inout b, entry, 2);
+    let output = block_param(inout b, entry, 3);
+    let zero = ins_iconst(inout b, ty_i64(), 0);
+    let zero_byte = ins_iconst(inout b, ty_i8(), 0);
+    let zero_vec = ins_splat(inout b, i8x16, zero_byte);
+    let needle = ins_splat(inout b, i8x16, delim);
+    // floor(len/16)*16 cannot overflow; offsets only increase below it.
+    let full_len = ins_band_imm(inout b, len, -16);
+    let start = args3(zero, zero, zero_vec);
+    ins_jump(inout b, vector_head, in start.as_slice());
+
+    switch_to_block(inout b, vector_head);
+    let offset = block_param(inout b, vector_head, 0);
+    let count = block_param(inout b, vector_head, 1);
+    let acc = block_param(inout b, vector_head, 2);
+    let more = ins_icmp(inout b, cc_ult(), offset, full_len);
+    let state = args3(offset, count, acc);
+    ins_brif(inout b, more, vector_body, in state.as_slice(), reduce, in state.as_slice());
+
+    switch_to_block(inout b, vector_body);
+    let offset = block_param(inout b, vector_body, 0);
+    let mut count = block_param(inout b, vector_body, 1);
+    let acc = block_param(inout b, vector_body, 2);
+    let address = ins_iadd(inout b, input, offset);
+    // No aligned/notrap flags: slices and tails can start unaligned.
+    let chunk = ins_load(inout b, i8x16, 0, address, 0);
+    let eq = ins_icmp(inout b, cc_eq(), chunk, needle);
+    // Avoid assuming the independent x86 POPCNT feature. Each mask lane
+    // is 0xff or 0, reduced to 1/0 and summed into a 64-bit count.
+    for lane in 0..16 {
+        let bit = ins_extractlane(inout b, eq, wrapping_u32(lane));
+        let bit = ins_band_imm(inout b, bit, 1);
+        let bit = ins_uextend(inout b, ty_i64(), bit);
+        count = ins_iadd(inout b, count, bit);
+    }
+    let xor = ins_bxor(inout b, acc, chunk);
+    let next = ins_iadd_imm(inout b, offset, 16);
+    let state = args3(next, count, xor);
+    ins_jump(inout b, vector_head, in state.as_slice());
+
+    switch_to_block(inout b, reduce);
+    let offset = block_param(inout b, reduce, 0);
+    let count = block_param(inout b, reduce, 1);
+    let acc = block_param(inout b, reduce, 2);
+    let mut xor = zero_byte;
+    for lane in 0..16 {
+        let byte = ins_extractlane(inout b, acc, wrapping_u32(lane));
+        xor = ins_bxor(inout b, xor, byte);
+    }
+    let state = args3(offset, count, xor);
+    ins_jump(inout b, scalar_head, in state.as_slice());
+
+    switch_to_block(inout b, scalar_head);
+    let offset = block_param(inout b, scalar_head, 0);
+    let count = block_param(inout b, scalar_head, 1);
+    let xor = block_param(inout b, scalar_head, 2);
+    let more = ins_icmp(inout b, cc_ult(), offset, len);
+    let state = args3(offset, count, xor);
+    ins_brif(inout b, more, scalar_body, in state.as_slice(), finish, in state.as_slice());
+
+    switch_to_block(inout b, scalar_body);
+    let offset = block_param(inout b, scalar_body, 0);
+    let count = block_param(inout b, scalar_body, 1);
+    let xor = block_param(inout b, scalar_body, 2);
+    let address = ins_iadd(inout b, input, offset);
+    let byte = ins_load(inout b, ty_i8(), 0, address, 0);
+    let equal = ins_icmp(inout b, cc_eq(), byte, delim);
+    let one = ins_uextend(inout b, ty_i64(), equal);
+    let count = ins_iadd(inout b, count, one);
+    let xor = ins_bxor(inout b, xor, byte);
+    let next = ins_iadd_imm(inout b, offset, 1);
+    let state = args3(next, count, xor);
+    ins_jump(inout b, scalar_head, in state.as_slice());
+
+    switch_to_block(inout b, finish);
+    let count = block_param(inout b, finish, 1);
+    let xor = block_param(inout b, finish, 2);
+    ins_store(inout b, 0, xor, output, 0);
+    ins_return1(inout b, count);
+    seal_all_blocks(inout b);
+    define_function(inout m, func, b)
+}
+
+// The three loop-state parameters of `blk`: offset and count (I64) and
+// the accumulator of type `acc`.
+fn for_each_param3(inout b: Builder, blk: Block, acc: Ty) eff [Ffi[Cranelift]] {
+    append_block_param(inout b, blk, ty_i64());
+    append_block_param(inout b, blk, ty_i64());
+    append_block_param(inout b, blk, acc);
+}
+
+// ---------------------------------------------------------------------------
+// src/vvec: the scalar profile's arm of each operation (module vvec).
+
+// The answer of `vvec_scan`: delimiter count and XOR of every byte.
+pub copy struct ScanCounts {
+    matches: u64,
+    xor: u8
+}
+
+pub fn vvec_prefix_bits(n: u64, inout bits: Slice[u64]) {
+    v_prefix_bits(n, inout bits);
+}
+
+pub fn vvec_mask_zip(op: u64, lanes: u64, inout a: Slice[u64], in b: Slice[u64]) {
+    v_mask_zip(op, lanes, inout a, in b);
+}
+
+pub fn vvec_splat(value: u8, n: u64, inout lanes: Slice[u8]) {
+    v_splat(value, n, inout lanes);
+}
+
+pub fn vvec_load_masked(
+    in src: Slice[u8],
+    in bits: Slice[u64],
+    passthru: u8,
+    n: u64,
+    inout lanes: Slice[u8]
+) {
+    v_load_masked(in src, in bits, passthru, n, inout lanes);
+}
+
+pub fn vvec_store_masked(inout dst: Slice[u8], in bits: Slice[u64], n: u64, in lanes: Slice[u8]) {
+    v_store_masked(inout dst, in bits, n, in lanes);
+}
+
+pub fn vvec_compare(op: u64, n: u64, in a: Slice[u8], in b: Slice[u8], inout bits: Slice[u64]) {
+    v_compare(op, n, in a, in b, inout bits);
+}
+
+pub fn vvec_binary(op: u64, n: u64, in a: Slice[u8], in b: Slice[u8], inout out: Slice[u8]) {
+    v_binary(op, n, in a, in b, inout out);
+}
+
+pub fn vvec_reduce_xor(n: u64, in a: Slice[u8]) -> u8 {
+    v_reduce_xor(n, in a)
+}
+
+pub fn vvec_scan(in data: Slice[u8], delim: u8) -> ScanCounts {
+    v_scan(in data, delim)
+}

@@ -25,6 +25,7 @@ use self::lex::{
     lex_with_limits,
     lex_sugar_with_limits,
     max_source_bytes,
+    max_tokens,
     max_diagnostics
 };
 use self::diag::{
@@ -35,6 +36,7 @@ use self::diag::{
 use self::parse::{
     parse_tokens,
     parse_surface_tokens,
+    parse_template_tokens,
     hard_depth
 };
 use self::recover::{
@@ -165,6 +167,11 @@ pub struct P {
     // delimiter, the index of the token closing it, else u32::MAX
     // (`group_ends`); empty outside the surface profile.
     surface: bool,
+    // The template-scopes refinement of the surface profile
+    // (`Parser::template_scopes`, `parse_template_scopes`): phrase bodies
+    // and tagged literal payloads are blocks, and raw phrase headers and
+    // nested pattern sugar are errors.
+    template_scopes: bool,
     before_handler_in: bool,
     group_end: ChunkSeq[u32]
 }
@@ -285,6 +292,64 @@ pub fn parse_surface_tables(in source: Str, limits: u64, counts: u64) -> ChunkSe
     let mut tree = tree_new();
     build_tree(inout tree, in p);
     report(in tree, in p)
+}
+
+// The template-scopes profile, as the tables of `parse_tables`:
+// `parser::parse_template_scopes(source)` (crates/vesper-syntax
+// `parser::parse_template_cst`), the surface profile under the default
+// limits with tests parsed, phrase bodies and tagged payloads as blocks.
+pub fn parse_template_tables(in source: Str) -> ChunkSeq[u64] {
+    let b = source.as_bytes();
+    let mut d = diags_new();
+    let t = lex_sugar_with_limits(
+        in b,
+        inout d,
+        max_source_bytes(),
+        max_tokens(),
+        max_diagnostics()
+    );
+    if t.rejected {
+        return report_rejected(in d);
+    }
+    let p = parse_template_tokens(in b, t, d);
+    let mut tree = tree_new();
+    build_tree(inout tree, in p);
+    report(in tree, in p)
+}
+
+// `parser::parse_sugar_fragment(b)` (the surface profile under the default
+// limits, tests hidden) for the sugar matcher's typed holes: 0 when it
+// parses without diagnostics, 1 when it has diagnostics, 2 when Rust
+// returns `Err(LexLimit)`, whose message goes to `m`.
+pub fn surface_fragment_status(in b: Slice[u8], inout m: ChunkSeq[u8]) -> u64 {
+    let mut d = diags_new();
+    let t = lex_sugar_with_limits(
+        in b,
+        inout d,
+        max_source_bytes(),
+        max_tokens(),
+        max_diagnostics()
+    );
+    if t.rejected {
+        let end = if d.at.len() > 1 {
+            w32(in d.at, 1)
+        } else {
+            d.text.len()
+        };
+        for j in w32(in d.at, 0)..end {
+            m.push(u8_at(in d.text, j));
+        }
+        return 2;
+    }
+    if d.code.len() != 0 {
+        return 1;
+    }
+    let p = parse_surface_tokens(in b, t, d, max_diagnostics(), hard_depth(), false);
+    if p.d.code.len() != 0 {
+        1
+    } else {
+        0
+    }
 }
 
 // The tables of a refused parse: no tokens or nodes, the diagnostics of `d`.

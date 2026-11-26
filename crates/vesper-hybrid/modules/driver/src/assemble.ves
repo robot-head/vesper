@@ -9,8 +9,8 @@
 //                 when it is not 0 the stream ends here (the Rust loader
 //                 loads such a graph, reporting them)
 //   modules       count; per module its file, then its renamed AST as the
-//                 `ast` section of `parse_words` (`put_ast` of
-//                 modules/parse/src/words.ves)
+//                 `ast` section of `parse_words` (`put_ast_words` of
+//                 @vesper/ast's words.ves)
 //   public        count; per name a text
 //   qualified     count; per renamed item its internal name and its
 //                 display name, two texts
@@ -26,9 +26,8 @@ use @vesper/check-names-packages::{
     assembly_metadata,
     assembly_parse_errors
 };
-use @vesper/hybrid-parse::words::{
-    pack,
-    put_ast
+use @vesper/ast::words::{
+    put_ast_words
 };
 use @vesper-std/intern::{
     Interner,
@@ -40,9 +39,27 @@ fn assembled_format() -> u64 {
     1
 }
 
+// `b`'s length, then its bytes eight per word, little-endian.
 fn put_text(inout o: ChunkSeq[u64], in b: Slice[u8]) {
     o.push(b.len());
-    pack(inout o, in b, 0, b.len());
+    let mut acc: u64 = 0;
+    let mut k: u32 = 0;
+    for i in 0..b.len() {
+        let c = match b.try_get(i) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        acc = acc | wrapping_shl_u64(c, wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == 8 {
+            o.push(acc);
+            acc = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        o.push(acc);
+    }
 }
 
 fn put_name(inout o: ChunkSeq[u64], in names: Interner, sym: u32) {
@@ -87,7 +104,7 @@ pub fn assembled_words(in graph: Slice[u8]) -> ChunkSeq[u64] {
         match assemble_next_bytes(inout a, in graph) {
             Option::Some(m) => {
                 o.push(widen_u64(m.file));
-                put_ast(inout o, in m.ast);
+                put_ast_words(inout o, in m.ast);
                 n = wrapping_add(n, 1);
             },
             Option::None => break,

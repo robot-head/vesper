@@ -4,6 +4,11 @@ load("@vesper_cargo//:packages.bzl", "PACKAGES")
 load("//tools/bazel:defs.bzl", "vesper_crate")
 load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
+filegroup(
+    name = "test_driver_srcs",
+    srcs = glob(["tests/common/*.rs"]),
+)
+
 # The default build, with its tests. The virtqueue walks are Vesper-only
 # (SH6 lane 14, #1409): build.rs links the object built below and checks
 # port/binding.rs against the generated binding, as for vesper-flux. The
@@ -25,6 +30,9 @@ vesper_crate(
     # tests/lean_model.rs reads lean/AetherMemory.lean; Lean rejects symlinked
     # runfiles outside --root, so it runs in a regular copy.
     copy_test_cwd = ["test/lean_model"],
+    # The unit tests' differentials drive the devices through the
+    # integration tests' ring driver (`#[path]` module in src/lib.rs).
+    extra_compile_data = [":test_driver_srcs"],
     extra_test_data = ["//:lean"],
 )
 

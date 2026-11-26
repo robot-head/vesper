@@ -1,0 +1,1101 @@
+// Monomorphization before slot lowering: src/verified_codegen/mono.rs in
+// Vesper (#1886, part 4b).
+//
+// `mono_input` reads the checked world and the Place IR after ir_opt (as
+// tests/common/ir_words.rs encodes them) and an extra section: the entry,
+// the instance limit, each world function's generics and the checker's
+// call type arguments (`World::calls`). Starting from the entry it
+// collects the reachable instances `(function, type arguments)` breadth
+// first and gives each one a copy of its function with every type
+// substituted and every direct callee renamed to the callee's instance.
+//
+// An instance's name is the function's name when it has no type
+// arguments, else `name<T=i64,U=bool>` (keys in name order). A call whose
+// type arguments are not all concrete is `Unsupported::Generic`.
+//
+// A `handle` expression's nested functions (named by the AST spans of
+// exprs.ves) are instantiated with the parent's arguments.
+//
+// Representation: an instance's copy shares the input's operand words
+// wherever nothing changes (block headers, terminators, the fip trailer
+// and operands without types). A substituted function header, an
+// instruction with a substituted call type and a renamed call get new
+// operand words.
+//
+// Output words: 0 and then `put_program`'s words, or 1 and the error text
+// packed by `pack_text`.
+
+use self::machine::{
+    Lowered,
+    lowered_new
+};
+use self::lower::{
+    E_LIMIT,
+    lower_rows,
+    put_lowered,
+    U_GENERIC,
+    VErr,
+    ap,
+    apn,
+    err,
+    put_error,
+    tx,
+    unsup
+};
+use self::evidence::{
+    evidence,
+    sites_new
+};
+use self::exprs::{
+    Ex,
+    X_HANDLE,
+    nested_name,
+    read_exprs
+};
+use @vesper/check-data::pack_text;
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    EffNode,
+    TyKind,
+    Types,
+    Vars,
+    default_type,
+    display,
+    substitute,
+    vars_new
+};
+use @vesper/check-data::input::{
+    Ctx,
+    Reader,
+    read_ctx
+};
+use @vesper/place-ir::{
+    BlockRow,
+    FnRow,
+    InstRow,
+    Program,
+    put_program,
+    read_program
+};
+use @vesper/place-ir::codes::{
+    Op,
+    Tag
+};
+
+const NONE32: u32 = 4294967295;
+const NO_ADT: u32 = 4294967295;
+
+// The symbols the pass compares against.
+pub copy struct Ms {
+    u8_: u32,
+    u32_: u32,
+    u64_: u32,
+    i64_: u32,
+    bool_: u32,
+    f64_: u32,
+    f32_: u32,
+    unit: u32,
+    never: u32,
+    string: u32,
+    wadd: u32,
+    wsub: u32,
+    wmul: u32,
+}
+
+// Lookups, not interning: a name the input lacks names no type or
+// function (`NONE32` matches nothing), and interning could grow the table.
+fn ms_new(in n: Names) -> Ms {
+    Ms {
+        u8_: n.lookup(in "u8".as_bytes()),
+        u32_: n.lookup(in "u32".as_bytes()),
+        u64_: n.lookup(in "u64".as_bytes()),
+        i64_: n.lookup(in "i64".as_bytes()),
+        bool_: n.lookup(in "bool".as_bytes()),
+        f64_: n.lookup(in "f64".as_bytes()),
+        f32_: n.lookup(in "f32".as_bytes()),
+        unit: n.lookup(in "Unit".as_bytes()),
+        never: n.lookup(in "Never".as_bytes()),
+        string: n.lookup(in "String".as_bytes()),
+        wadd: n.lookup(in "wrapping_add".as_bytes()),
+        wsub: n.lookup(in "wrapping_sub".as_bytes()),
+        wmul: n.lookup(in "wrapping_mul".as_bytes()),
+    }
+}
+
+pub struct Mo {
+    c: Ctx,
+    // the pool's expression rows
+    ex: Ex,
+    // the input's tables, with `fns` replaced by the instances
+    p: Program,
+    // the input's functions
+    src: ChunkSeq[FnRow],
+    sy: Ms,
+    // input function symbol -> index + 1
+    by_fn: SymMap,
+    // world function symbol -> index + 1
+    wf: SymMap,
+    // world function i: generics ga[i]..ga[i]+gn[i] of gname/grow
+    ga: ChunkSeq[u64],
+    gn: ChunkSeq[u64],
+    gname: ChunkSeq[u32],
+    grow: ChunkSeq[u8],
+    // `World::calls`, in (start, end) order: entry i is the pairs
+    // ca[i]..ca[i]+cn[i] of ck/cv
+    cs: ChunkSeq[u64],
+    ce: ChunkSeq[u64],
+    ca: ChunkSeq[u64],
+    cn: ChunkSeq[u64],
+    ck: ChunkSeq[u32],
+    cv: ChunkSeq[u32],
+    entry: u32,
+    max: u64,
+    // instance symbol -> 1 once seen
+    seen: SymMap,
+    nseen: u64,
+    // the queue: base, and the sorted pairs qa..qa+qn of qk/qv
+    qb: ChunkSeq[u32],
+    qa: ChunkSeq[u64],
+    qn: ChunkSeq[u64],
+    qk: ChunkSeq[u32],
+    qv: ChunkSeq[u32],
+}
+
+fn decode(sink c: Ctx, sink p: Program, sink ex: Ex, inout r: Reader, in b: Slice[u8]) -> Mo {
+    let mut c2 = c;
+    let sy = ms_new(in c2.names);
+    let Program {
+        fns,
+        blocks,
+        insts,
+        ops,
+        tags,
+        paths,
+        path_syms,
+        pool,
+    } = p;
+    let src_n = fns.len();
+    let mut m = Mo {
+        c: c2,
+        ex: ex,
+        p: Program {
+            fns: ChunkSeq::new[FnRow](),
+            blocks: blocks,
+            insts: insts,
+            ops: ops,
+            tags: tags,
+            paths: paths,
+            path_syms: path_syms,
+            pool: pool,
+        },
+        src: fns,
+        sy: sy,
+        by_fn: map_new(src_n),
+        wf: map_new(16),
+        ga: ChunkSeq::new[u64](),
+        gn: ChunkSeq::new[u64](),
+        gname: ChunkSeq::new[u32](),
+        grow: ChunkSeq::new[u8](),
+        cs: ChunkSeq::new[u64](),
+        ce: ChunkSeq::new[u64](),
+        ca: ChunkSeq::new[u64](),
+        cn: ChunkSeq::new[u64](),
+        ck: ChunkSeq::new[u32](),
+        cv: ChunkSeq::new[u32](),
+        entry: 0,
+        max: 0,
+        seen: map_new(src_n),
+        nseen: 0,
+        qb: ChunkSeq::new[u32](),
+        qa: ChunkSeq::new[u64](),
+        qn: ChunkSeq::new[u64](),
+        qk: ChunkSeq::new[u32](),
+        qv: ChunkSeq::new[u32](),
+    };
+    for fi in 0..m.src.len() {
+        let name = fn_row(in m.src, fi).name;
+        m.by_fn.set(name, n32(inc(fi)));
+    }
+    m.entry = sym(inout r, in b, in m.c);
+    m.max = r.word(in b);
+    let nw = r.word(in b);
+    for i in 0..nw {
+        let s = sym(inout r, in b, in m.c);
+        m.wf.set(s, n32(inc(i)));
+        m.ga.push(m.gname.len());
+        let ng = r.word(in b);
+        m.gn.push(ng);
+        for j in 0..ng {
+            let g = sym(inout r, in b, in m.c);
+            m.gname.push(g);
+            m.grow.push(wrapping_u8(r.word(in b)));
+        }
+    }
+    let nc = r.word(in b);
+    for i in 0..nc {
+        m.cs.push(r.word(in b));
+        m.ce.push(r.word(in b));
+        m.ca.push(m.ck.len());
+        let k = r.word(in b);
+        m.cn.push(k);
+        for j in 0..k {
+            let s = sym(inout r, in b, in m.c);
+            m.ck.push(s);
+            m.cv.push(u32_at(in m.c.tmap, r.word(in b)));
+        }
+    }
+    m
+}
+
+// A name index of the input, as a symbol.
+fn sym(inout r: Reader, in b: Slice[u8], in c: Ctx) -> u32 {
+    u32_at(in c.nmap, r.word(in b))
+}
+
+fn fn_row(in s: ChunkSeq[FnRow], i: u64) -> FnRow {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => FnRow {
+            name: 0,
+            ha: 0,
+            hn: 0,
+            b0: 0,
+            bc: 0,
+            ta: 0,
+            tn: 0
+        },
+    }
+}
+
+impl Mo {
+    fn op(in self, i: u64) -> u64 {
+        u64_at(in self.p.ops, i)
+    }
+
+    // The input function index + 1 of symbol `s`, or 0.
+    fn program_fn(in self, s: u32) -> u64 {
+        w(self.by_fn.get(s))
+    }
+
+    fn world_fn(in self, s: u32) -> u64 {
+        w(self.wf.get(s))
+    }
+}
+
+// ----- symbol maps --------------------------------------------------------------
+//
+// A map from symbols to nonzero values, by open addressing: a slot holds
+// the symbol + 1 (0 is empty). It doubles at half load. (A table indexed
+// by symbol would be as large as the names, and a sorted sequence costs a
+// shift per insert.)
+
+pub struct SymMap {
+    keys: ChunkSeq[u32],
+    vals: ChunkSeq[u32],
+    mask: u64,
+    n: u64,
+}
+
+fn map_new(min: u64) -> SymMap {
+    let mut cap: u64 = 16;
+    loop {
+        if cap >= wrapping_mul(min, 2) {
+            break;
+        }
+        cap = wrapping_mul(cap, 2);
+    }
+    let mut keys = ChunkSeq::with_capacity[u32](cap);
+    let mut vals = ChunkSeq::with_capacity[u32](cap);
+    for i in 0..cap {
+        keys.push(0);
+        vals.push(0);
+    }
+    SymMap {
+        keys: keys,
+        vals: vals,
+        mask: wrapping_sub(cap, 1),
+        n: 0
+    }
+}
+
+fn slot_of(s: u32, mask: u64) -> u64 {
+    (wrapping_mul(w(s), 2654435761) >> 7) & mask
+}
+
+impl SymMap {
+    // The value of `s`, or 0.
+    fn get(in self, s: u32) -> u32 {
+        let k = inc(w(s));
+        let mut i = slot_of(s, self.mask);
+        loop {
+            let x = w(u32_at(in self.keys, i));
+            if x == 0 {
+                return 0;
+            }
+            if x == k {
+                return u32_at(in self.vals, i);
+            }
+            i = wrapping_add(i, 1) & self.mask;
+        }
+    }
+
+    // Sets `s` to `v` (a later value replaces an earlier one).
+    fn set(inout self, s: u32, v: u32) {
+        if wrapping_mul(inc(self.n), 2) > inc(self.mask) {
+            self.grow();
+        }
+        let k = n32(inc(w(s)));
+        let mut i = slot_of(s, self.mask);
+        loop {
+            let x = u32_at(in self.keys, i);
+            if x == 0 {
+                let ok1 = self.keys.try_set(i, k);
+                let ok2 = self.vals.try_set(i, v);
+                self.n = inc(self.n);
+                return;
+            }
+            if x == k {
+                let ok = self.vals.try_set(i, v);
+                return;
+            }
+            i = wrapping_add(i, 1) & self.mask;
+        }
+    }
+
+    fn grow(inout self) {
+        let mut bigger = map_new(inc(self.mask));
+        for i in 0..self.keys.len() {
+            let x = u32_at(in self.keys, i);
+            if x != 0 {
+                bigger.set(wrapping_sub(x, 1), u32_at(in self.vals, i));
+            }
+        }
+        let SymMap {
+            keys,
+            vals,
+            mask,
+            n,
+        } = bigger;
+        self.keys = keys;
+        self.vals = vals;
+        self.mask = mask;
+        self.n = n;
+    }
+}
+
+// ----- types --------------------------------------------------------------------
+
+// `mono::subst`: the type unchanged without arguments, else substituted
+// and defaulted.
+fn subst(inout t: Types, ty: u32, in vars: Vars) -> u32 {
+    if vars.keys.len() == 0 {
+        return ty;
+    }
+    let s = substitute(inout t, ty, in vars);
+    default_type(inout t, s)
+}
+
+// An effect row with every instance argument substituted (`instantiate`
+// on `effects.instances`): the order and the tail stay.
+fn subst_effects(inout t: Types, ty: u32, in vars: Vars) -> u32 {
+    let node = t.node(ty);
+    if node.kind != TyKind::Row {
+        return subst(inout t, ty, in vars);
+    }
+    let row = t.row(node.r2);
+    let mut es: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(row.n) {
+        let e = t.effect_at(add(w(row.a), i));
+        let a = n32(args.len());
+        for j in 0..w(e.n) {
+            let x = u32_at(in t.items, add(w(e.a), j));
+            let s = subst(inout t, x, in vars);
+            args.push(s);
+        }
+        es
+            .push(
+                EffNode {
+                    label: e.label,
+                    name: e.name,
+                    a: a,
+                    n: e.n
+                }
+            );
+    }
+    let r = t.mk_row(in es, in args, row.tail);
+    t.row_type(r)
+}
+
+// `mono::mentions_generic`.
+fn mentions_generic(in m: Mo, t: u32) -> bool {
+    let node = m.c.types.node(t);
+    if node.kind == TyKind::Named {
+        if node.n == 0 {
+            let n = node.name;
+            let known = n == m.sy.i64_
+                || n == m.sy.u64_
+                || n == m.sy.u32_
+                || n == m.sy.u8_
+                || n == m.sy.bool_
+                || n == m.sy.f64_
+                || n == m.sy.f32_
+                || n == m.sy.unit
+                || n == m.sy.never
+                || n == m.sy.string;
+            return m.c.world.lookup(n) == NO_ADT && !known;
+        }
+        for i in 0..w(node.n) {
+            if mentions_generic(in m, m.c.types.arg(t, i)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if node.kind == TyKind::Tuple {
+        for i in 0..w(node.n) {
+            if mentions_generic(in m, m.c.types.arg(t, i)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    node.kind == TyKind::Fn || node.kind == TyKind::Infer
+}
+
+// ----- instance names -----------------------------------------------------------
+
+// Whether the text of `a` sorts before the text of `b` (`String` order).
+fn text_less(in names: Names, a: u32, b: u32) -> bool {
+    let na = names.size(a);
+    let nb = names.size(b);
+    let n = if na < nb {
+        na
+    } else {
+        nb
+    };
+    for i in 0..n {
+        let x = names.byte(a, i);
+        let y = names.byte(b, i);
+        if x != y {
+            return x < y;
+        }
+    }
+    na < nb
+}
+
+// `vars` as pairs sorted by key text (the `BTreeMap` order).
+fn sorted(in names: Names, in vars: Vars, inout keys: ChunkSeq[u32], inout vals: ChunkSeq[u32]) {
+    for i in 0..vars.keys.len() {
+        keys.push(u32_at(in vars.keys, i));
+        vals.push(u32_at(in vars.vals, i));
+    }
+    let n = keys.len();
+    for i in 1..n {
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let a = u32_at(in keys, wrapping_sub(j, 1));
+            let b = u32_at(in keys, j);
+            if !text_less(in names, b, a) {
+                break;
+            }
+            let va = u32_at(in vals, wrapping_sub(j, 1));
+            let vb = u32_at(in vals, j);
+            let ok1 = keys.try_set(wrapping_sub(j, 1), b);
+            let ok2 = keys.try_set(j, a);
+            let ok3 = vals.try_set(wrapping_sub(j, 1), vb);
+            let ok4 = vals.try_set(j, va);
+            j = wrapping_sub(j, 1);
+        }
+    }
+}
+
+// `instance_name`: the symbol of `base<k=T,...>` for the sorted pairs
+// `keys`/`vals` (`base` itself without pairs).
+fn instance_name(inout c: Ctx, base: u32, in keys: ChunkSeq[u32], in vals: ChunkSeq[u32]) -> u32 {
+    if keys.len() == 0 {
+        return base;
+    }
+    let mut t = ChunkSeq::new[u8]();
+    c.names.write(base, inout t);
+    t.push(60);
+    for i in 0..keys.len() {
+        if i > 0 {
+            t.push(44);
+        }
+        c.names.write(u32_at(in keys, i), inout t);
+        t.push(61);
+        display(in c.types, in c.names, u32_at(in vals, i), inout t);
+    }
+    t.push(62);
+    c.names.intern(in t.as_slice())
+}
+
+fn vars_of(in keys: ChunkSeq[u32], in vals: ChunkSeq[u32], a: u64, n: u64) -> Vars {
+    let mut v = vars_new();
+    for i in 0..n {
+        v.set(u32_at(in keys, add(a, i)), u32_at(in vals, add(a, i)));
+    }
+    v
+}
+
+// ----- the call's type arguments ------------------------------------------------
+
+// The `World::calls` entry of span `s0..s1`, or NONE.
+fn call_entry(in m: Mo, s0: u64, s1: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = m.cs.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, hi) / 2;
+        let a = u64_at(in m.cs, mid);
+        let b = u64_at(in m.ce, mid);
+        if a < s0 || (a == s0 && b < s1) {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+    if lo < m.cs.len() && u64_at(in m.cs, lo) == s0 && u64_at(in m.ce, lo) == s1 {
+        return lo;
+    }
+    18446744073709551615
+}
+
+// `call_vars`: the type arguments of the call to `callee` at `s0..s1`
+// with explicit (already substituted) types `explicit`, inside the
+// instance `caller` with arguments `outer`.
+fn call_vars(
+    inout m: Mo,
+    caller: u32,
+    callee: u32,
+    s0: u64,
+    s1: u64,
+    in explicit: ChunkSeq[u32],
+    in outer: Vars
+) -> Vars eff [Fail[VErr]] {
+    let fw = m.world_fn(callee);
+    if fw == 0 {
+        return vars_new();
+    }
+    let fi = wrapping_sub(fw, 1);
+    let ga = u64_at(in m.ga, fi);
+    let gn = u64_at(in m.gn, fi);
+    let mut vars = vars_new();
+    let e = call_entry(in m, s0, s1);
+    if e != 18446744073709551615 {
+        let a = u64_at(in m.ca, e);
+        for i in 0..u64_at(in m.cn, e) {
+            let k = u32_at(in m.ck, add(a, i));
+            let t = subst(inout m.c.types, u32_at(in m.cv, add(a, i)), in outer);
+            vars.set(k, t);
+        }
+    }
+    let nz = if gn < explicit.len() {
+        gn
+    } else {
+        explicit.len()
+    };
+    for i in 0..nz {
+        let g = u32_at(in m.gname, add(ga, i));
+        if u8_at(in m.grow, add(ga, i)) == 0 && vars.get(g) == NONE32 {
+            let t = subst(inout m.c.types, u32_at(in explicit, i), in outer);
+            vars.set(g, t);
+        }
+    }
+    let mut out = vars_new();
+    let mut row = false;
+    for i in 0..gn {
+        let g = u32_at(in m.gname, add(ga, i));
+        if u8_at(in m.grow, add(ga, i)) != 0 {
+            row = true;
+            continue;
+        }
+        let t = vars.get(g);
+        if t != NONE32 && !mentions_generic(in m, t) {
+            let d = default_type(inout m.c.types, t);
+            out.set(g, d);
+        } else {
+            let mut d = tx("call ");
+            m.c.names.write(callee, inout d);
+            ap(inout d, " with type parameter ");
+            m.c.names.write(g, inout d);
+            ap(inout d, " = ");
+            if t == NONE32 {
+                d.push(63);
+            } else {
+                display(in m.c.types, in m.c.names, t, inout d);
+            }
+            Fail::raise(unsup(U_GENERIC, caller, d));
+        }
+    }
+    if row {
+        let mut d = tx("call ");
+        m.c.names.write(callee, inout d);
+        ap(inout d, " (effect-row parameters)");
+        Fail::raise(unsup(U_GENERIC, caller, d));
+    }
+    out
+}
+
+// ----- the queue ----------------------------------------------------------------
+
+fn enqueue(inout m: Mo, base: u32, in vars: Vars) {
+    let mut keys = ChunkSeq::new[u32]();
+    let mut vals = ChunkSeq::new[u32]();
+    sorted(in m.c.names, in vars, inout keys, inout vals);
+    m.qb.push(base);
+    m.qa.push(m.qk.len());
+    m.qn.push(keys.len());
+    for i in 0..keys.len() {
+        m.qk.push(u32_at(in keys, i));
+        m.qv.push(u32_at(in vals, i));
+    }
+}
+
+// ----- instantiation ------------------------------------------------------------
+
+// Copies `ops[a..a+n]` with every type word substituted; returns the copy's
+// start. The word at `eff` is an effect row (`subst_effects`).
+fn copy_words(inout m: Mo, a: u64, n: u64, eff: u64, in vars: Vars) -> u64 {
+    let at = m.p.ops.len();
+    for i in a..add(a, n) {
+        let x = m.op(i);
+        let tag = m.p.tag(i);
+        if tag == Tag::Type {
+            let t = if i == eff {
+                subst_effects(inout m.c.types, n32(x), in vars)
+            } else {
+                subst(inout m.c.types, n32(x), in vars)
+            };
+            m.p.put(w(t), tag);
+        } else {
+            m.p.put(x, tag);
+        }
+    }
+    at
+}
+
+// The index of the header's effect-row word, and the names a `Read` of a
+// function value must not be (parameters and locals), into `bound`.
+fn header_info(in m: Mo, ha: u64, inout bound: ChunkSeq[u32]) -> u64 {
+    let mut at = ha;
+    let np = m.op(at);
+    at = inc(at);
+    for i in 0..np {
+        bound.push(n32(m.op(at)));
+        let k = m.op(add(at, 2));
+        at = add(at, add(3, k));
+        // type, s0, s1
+        at = add(at, 3);
+    }
+    let eff = inc(at);
+    at = add(at, 2);
+    let nb = m.op(at);
+    at = add(at, add(1, wrapping_mul(nb, 2)));
+    let nc = m.op(at);
+    at = add(at, add(1, nc));
+    let nv = m.op(at);
+    at = add(at, add(1, wrapping_mul(nv, 2)));
+    let nl = m.op(at);
+    at = inc(at);
+    for i in 0..nl {
+        bound.push(n32(m.op(add(at, wrapping_mul(i, 2)))));
+    }
+    eff
+}
+
+fn is_bound(in bound: ChunkSeq[u32], s: u32) -> bool {
+    for i in 0..bound.len() {
+        if u32_at(in bound, i) == s {
+            return true;
+        }
+    }
+    false
+}
+
+// One instruction of the instance `name` (arguments `vars`): its new row.
+fn instruction(inout m: Mo, i: InstRow, name: u32, in vars: Vars, in bound: ChunkSeq[u32])
+    -> InstRow eff [Fail[VErr]] {
+    let generic = vars.keys.len() != 0;
+    let mut row = i;
+    if generic {
+        row.ty = subst(inout m.c.types, i.ty, in vars);
+    }
+    if i.op == Op::Handle {
+        // The nested functions of the handler, in this instance's
+        // arguments: the body, the `return` clause, then the operation
+        // clauses.
+        let x = m.ex.row(m.op(add(i.a, 2)));
+        if x.kind == X_HANDLE {
+            let body = nested_name(inout m.c.names, "handler_body", x.b0, x.b1);
+            enqueue(inout m, body, in vars);
+            let ret = m.ex.clause(x.ret);
+            let rs = nested_name(inout m.c.names, "handler_clause", ret.s0, ret.s1);
+            enqueue(inout m, rs, in vars);
+            for j in 0..x.on {
+                let c = m.ex.clause(add(x.oa, j));
+                let cs = nested_name(inout m.c.names, "handler_clause", c.s0, c.s1);
+                enqueue(inout m, cs, in vars);
+            }
+        }
+        return row;
+    }
+    if i.op == Op::Read {
+        let root = n32(m.op(i.a));
+        let path = m.op(inc(i.a));
+        let fw = m.world_fn(root);
+        if m.p.path(path).n == 0
+            && fw != 0
+            && u64_at(in m.gn, wrapping_sub(fw, 1)) == 0
+            && m.program_fn(root) != 0
+            && !is_bound(in bound, root) {
+            enqueue(inout m, root, in vars_new());
+        }
+        return row;
+    }
+    if i.op != Op::Call {
+        return row;
+    }
+    let callee = n32(m.op(i.a));
+    let n = m.op(inc(i.a));
+    let tn = add(add(i.a, 2), wrapping_mul(n, 4));
+    let nt = m.op(tn);
+    let cap = m.op(add(inc(tn), nt));
+    let skip = cap != 0
+        || callee == m.sy.wadd
+        || callee == m.sy.wsub
+        || callee == m.sy.wmul
+        || m.program_fn(callee) == 0;
+    if skip {
+        if generic && nt != 0 {
+            row.a = copy_words(inout m, i.a, i.n, 18446744073709551615, in vars);
+        }
+        return row;
+    }
+    let mut explicit = ChunkSeq::new[u32]();
+    for k in 0..nt {
+        let t = n32(m.op(add(inc(tn), k)));
+        let s = subst(inout m.c.types, t, in vars);
+        explicit.push(s);
+    }
+    let cv = call_vars(inout m, name, callee, i.s0, i.s1, in explicit, in vars);
+    enqueue(inout m, callee, in cv);
+    let mut keys = ChunkSeq::new[u32]();
+    let mut vals = ChunkSeq::new[u32]();
+    sorted(in m.c.names, in cv, inout keys, inout vals);
+    let renamed = instance_name(inout m.c, callee, in keys, in vals);
+    let a = m.p.ops.len();
+    m.p.put(w(renamed), Tag::Name);
+    for k in inc(i.a)..tn {
+        m.p.put(m.op(k), m.p.tag(k));
+    }
+    m.p.put(0, Tag::Raw);
+    m.p.put(cap, Tag::OptName);
+    row.a = a;
+    row.n = wrapping_sub(m.p.ops.len(), a);
+    row
+}
+
+// The instance `name` of the input function `f` at the sorted pairs
+// `qa..qa+qn` of the queue.
+fn instantiate(inout m: Mo, f: FnRow, name: u32, in vars: Vars) eff [Fail[VErr]] {
+    let generic = vars.keys.len() != 0;
+    let mut bound = ChunkSeq::new[u32]();
+    let eff = header_info(in m, f.ha, inout bound);
+    let ha = if generic {
+        copy_words(inout m, f.ha, f.hn, eff, in vars)
+    } else {
+        f.ha
+    };
+    let b0 = m.p.blocks.len();
+    for bi in 0..f.bc {
+        let blk = m.p.block(add(f.b0, bi));
+        let i0 = m.p.insts.len();
+        for k in 0..blk.ic {
+            let i = m.p.inst(add(blk.i0, k));
+            let row = instruction(inout m, i, name, in vars, in bound);
+            m.p.insts.push(row);
+        }
+        m
+            .p
+            .blocks
+            .push(
+                BlockRow {
+                    ha: blk.ha,
+                    hn: blk.hn,
+                    i0: i0,
+                    ic: blk.ic,
+                    term: blk.term,
+                    ta: blk.ta,
+                    tn: blk.tn
+                }
+            );
+    }
+    m
+        .p
+        .fns
+        .push(
+            FnRow {
+                name: name,
+                ha: ha,
+                hn: f.hn,
+                b0: b0,
+                bc: f.bc,
+                ta: f.ta,
+                tn: f.tn
+            }
+        );
+}
+
+// `monomorphize`: every instance the entry reaches, breadth first.
+fn mono_all(inout m: Mo) eff [Fail[VErr]] {
+    let entry = m.entry;
+    enqueue(inout m, entry, in vars_new());
+    let mut head: u64 = 0;
+    loop {
+        if head >= m.qb.len() {
+            break;
+        }
+        let base = u32_at(in m.qb, head);
+        let qa = u64_at(in m.qa, head);
+        let qn = u64_at(in m.qn, head);
+        head = inc(head);
+        let mut keys = ChunkSeq::new[u32]();
+        let mut vals = ChunkSeq::new[u32]();
+        for i in 0..qn {
+            keys.push(u32_at(in m.qk, add(qa, i)));
+            vals.push(u32_at(in m.qv, add(qa, i)));
+        }
+        let name = instance_name(inout m.c, base, in keys, in vals);
+        if m.seen.get(name) != 0 {
+            continue;
+        }
+        m.seen.set(name, 1);
+        m.nseen = inc(m.nseen);
+        if m.nseen > m.max {
+            let mut d = tx("more than ");
+            apn(inout d, m.max);
+            ap(inout d, " function instances");
+            Fail::raise(err(E_LIMIT, d));
+        }
+        let fi = m.program_fn(base);
+        if fi == 0 {
+            continue;
+        }
+        let f = fn_row(in m.src, wrapping_sub(fi, 1));
+        let vars = vars_of(in keys, in vals, 0, qn);
+        instantiate(inout m, f, name, in vars);
+    }
+}
+
+// ----- entry --------------------------------------------------------------------
+
+pub fn mono_input(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c);
+    let ex = read_exprs(inout r, in b, in c);
+    let mut m = decode(c, p, ex, inout r, in b);
+    let e = handle Fail[VErr] in {
+        mono_all(inout m);
+        err(255, ChunkSeq::new[u8]())
+    } with {
+        return v => v,
+        raise(e, k) => e,
+    };
+    let mut o = ChunkSeq::new[u64]();
+    if e.kind != 255 {
+        let mut t = tx("error: ");
+        put_error(in m.c.names, in e, inout t);
+        ap(inout t, "\n");
+        o.push(1);
+        let packed = pack_text(in t);
+        o.extend(in packed.as_slice());
+        return o;
+    }
+    o.push(0);
+    put_program(in m.p, in m.c.types, in m.c.names, inout o);
+    o
+}
+
+// The instances in name order (the Rust `BTreeMap` order the lowering's
+// input has), by a merge sort on the names' text.
+fn sort_fns(in names: Names, inout fns: ChunkSeq[FnRow]) {
+    let n = fns.len();
+    let mut a = ChunkSeq::with_capacity[FnRow](n);
+    for i in 0..n {
+        a.push(fn_row(in fns, i));
+    }
+    let mut tmp = ChunkSeq::with_capacity[FnRow](n);
+    for i in 0..n {
+        tmp.push(fn_row(in fns, i));
+    }
+    let mut width: u64 = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        let mut lo: u64 = 0;
+        loop {
+            if lo >= n {
+                break;
+            }
+            let mid = min_u64(wrapping_add(lo, width), n);
+            let hi = min_u64(wrapping_add(lo, wrapping_mul(width, 2)), n);
+            let mut i = lo;
+            let mut j = mid;
+            let mut k = lo;
+            loop {
+                if k >= hi {
+                    break;
+                }
+                let take_left = if i >= mid {
+                    false
+                } else if j >= hi {
+                    true
+                } else {
+                    !text_less(in names, fn_row(in a, j).name, fn_row(in a, i).name)
+                };
+                if take_left {
+                    let ok = tmp.try_set(k, fn_row(in a, i));
+                    i = inc(i);
+                } else {
+                    let ok = tmp.try_set(k, fn_row(in a, j));
+                    j = inc(j);
+                }
+                k = inc(k);
+            }
+            lo = hi;
+        }
+        for x in 0..n {
+            let ok = a.try_set(x, fn_row(in tmp, x));
+        }
+        width = wrapping_mul(width, 2);
+    }
+    for x in 0..n {
+        let ok = fns.try_set(x, fn_row(in a, x));
+    }
+}
+
+fn min_u64(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+// Monomorphization, evidence passing (evidence.ves) and then the lowering
+// (lower.ves) in one pass over one input: the mono extras, then the
+// lowering's.
+pub fn front_input(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let mut lo = lowered_new();
+    let e = front_rows(in b, inout lo);
+    if e.len() != 0 {
+        return e;
+    }
+    let mut out = ChunkSeq::new[u8]();
+    put_lowered(in lo, inout out);
+    out
+}
+
+// `front_input` into `lo`: empty, or `error: `, the error's text and a
+// newline.
+pub fn front_rows(in b: Slice[u8], inout lo: Lowered) -> ChunkSeq[u8] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c);
+    let ex = read_exprs(inout r, in b, in c);
+    let mut m = decode(c, p, ex, inout r, in b);
+    let e = handle Fail[VErr] in {
+        mono_all(inout m);
+        err(255, ChunkSeq::new[u8]())
+    } with {
+        return v => v,
+        raise(e, k) => e,
+    };
+    if e.kind != 255 {
+        let mut t = tx("error: ");
+        put_error(in m.c.names, in e, inout t);
+        ap(inout t, "\n");
+        return t;
+    }
+    sort_fns(in m.c.names, inout m.p.fns);
+    let entry0 = m.entry;
+    // whether the region prelude is active: the lowering extras' fourth
+    // word, after the entry string and the two limits
+    let pos = r.pos;
+    let len = r.word(in b);
+    for i in 0..wrapping_add(len, 7) / 8 {
+        let x = r.word(in b);
+    }
+    let x1 = r.word(in b);
+    let x2 = r.word(in b);
+    let active = r.word(in b) != 0;
+    r.pos = pos;
+    let mut sites = sites_new();
+    let e2 = handle Fail[VErr] in {
+        sites = evidence(inout m.c, inout m.p, in m.ex, entry0, active);
+        err(255, ChunkSeq::new[u8]())
+    } with {
+        return v => v,
+        raise(e, k) => e,
+    };
+    if e2.kind != 255 {
+        let mut t = tx("error: ");
+        put_error(in m.c.names, in e2, inout t);
+        ap(inout t, "\n");
+        return t;
+    }
+    sort_fns(in m.c.names, inout m.p.fns);
+    let Mo {
+        c,
+        ex,
+        p,
+        src,
+        sy,
+        by_fn,
+        wf,
+        ga,
+        gn,
+        gname,
+        grow,
+        cs,
+        ce,
+        ca,
+        cn,
+        ck,
+        cv,
+        entry,
+        max,
+        seen,
+        nseen,
+        qb,
+        qa,
+        qn,
+        qk,
+        qv,
+    } = m;
+    lower_rows(c, p, ex, sites, inout r, in b, inout lo)
+}

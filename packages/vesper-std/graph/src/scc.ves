@@ -63,98 +63,165 @@ fn min32(a: u32, b: u32) -> u32 {
     }
 }
 
+// The discovery number of a node `scc` has not reached yet.
+const UNVISITED: u32 = GraphIndex::Missing;
+
+// The working state of `scc`. The recursion of Tarjan's algorithm is kept
+// as an explicit call stack: frame `f` is visiting `call_node[f]` and will
+// try its successor edge `call_edge[f]` next.
+struct Tarjan {
+    // Each node's discovery number, or `UNVISITED`.
+    index: ChunkSeq[u32],
+    // The lowest discovery number reachable from the node's subtree through
+    // nodes still on `stack`.
+    low: ChunkSeq[u32],
+    on_stack: ChunkSeq[bool],
+    stack: ChunkSeq[u32],
+    call_node: ChunkSeq[u32],
+    call_edge: ChunkSeq[u64],
+    next_index: u32,
+    // The result as it is built (see `Scc`).
+    comp: ChunkSeq[u32],
+    nodes: ChunkSeq[u32],
+    starts: ChunkSeq[u64],
+    component_count: u32
+}
+
+fn tarjan_new(n: u64) -> Tarjan {
+    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    starts.push(0);
+    Tarjan {
+        index: filled32(n, UNVISITED),
+        low: filled32(n, 0),
+        on_stack: filled_bool(n, false),
+        stack: ChunkSeq::new[u32](),
+        call_node: ChunkSeq::new[u32](),
+        call_edge: ChunkSeq::new[u64](),
+        next_index: 0,
+        comp: filled32(n, UNVISITED),
+        nodes: ChunkSeq::with_capacity[u32](n),
+        starts: starts,
+        component_count: 0
+    }
+}
+
+impl Tarjan {
+    fn index_of(in self, v: u64) -> u32 {
+        get32(in self.index.as_slice(), v, 0)
+    }
+
+    fn low_of(in self, v: u64) -> u32 {
+        get32(in self.low.as_slice(), v, 0)
+    }
+
+    // `low[v] = min(low[v], candidate)`.
+    fn lower_low(inout self, v: u64, candidate: u32) {
+        let current = self.low_of(v);
+        self.low.try_set(v, min32(current, candidate));
+    }
+
+    // Give `v` the next discovery number, push it on the stack and start a
+    // call frame for it at its first successor edge.
+    fn discover(inout self, in g: Graph, v: u32) {
+        let vk = widen_u64(v);
+        self.index.try_set(vk, self.next_index);
+        self.low.try_set(vk, self.next_index);
+        self.next_index = wrapping_add(self.next_index, 1);
+        self.stack.push(v);
+        self.on_stack.try_set(vk, true);
+        let (first_edge, _) = g.succ_range(v);
+        self.call_node.push(v);
+        self.call_edge.push(first_edge);
+    }
+
+    // Pop the stack down to `root` as one new component.
+    fn close_component(inout self, root: u32) {
+        let component = self.component_count;
+        loop {
+            let w = match self.stack.pop() {
+                Option::Some(x) => x,
+                Option::None => break,
+            };
+            let wk = widen_u64(w);
+            self.on_stack.try_set(wk, false);
+            self.comp.try_set(wk, component);
+            self.nodes.push(w);
+            if w == root {
+                break;
+            }
+        }
+        self.starts.push(self.nodes.len());
+        self.component_count = wrapping_add(component, 1);
+    }
+
+    // Run the call stack down to empty: the depth-first search from the
+    // node `discover` last started.
+    fn search(inout self, in g: Graph) {
+        loop {
+            let depth = self.call_node.len();
+            if depth == 0 {
+                break;
+            }
+            let top = wrapping_sub(depth, 1);
+            let v = get32(in self.call_node.as_slice(), top, 0);
+            let vk = widen_u64(v);
+            let e = get64(in self.call_edge.as_slice(), top, 0);
+            let (_, end) = g.succ_range(v);
+            if e < end {
+                // Follow the next edge `v -> w`.
+                self.call_edge.try_set(top, wrapping_add(e, 1));
+                let w = g.succ_edge(e);
+                let wk = widen_u64(w);
+                let w_index = self.index_of(wk);
+                if w_index == UNVISITED {
+                    self.discover(in g, w);
+                } else if get_bool(in self.on_stack.as_slice(), wk) {
+                    self.lower_low(vk, w_index);
+                }
+            } else {
+                // Every edge of `v` is done: return from its frame.
+                self.call_node.truncate(top);
+                self.call_edge.truncate(top);
+                let v_low = self.low_of(vk);
+                if v_low == self.index_of(vk) {
+                    self.close_component(v);
+                }
+                if top > 0 {
+                    let caller = widen_u64(
+                        get32(in self.call_node.as_slice(), wrapping_sub(top, 1), 0)
+                    );
+                    self.lower_low(caller, v_low);
+                }
+            }
+        }
+    }
+}
+
 // The strongly connected components of `g`. Roots are tried in node order
 // and edges in insertion order; the recursion is an explicit stack, so deep
 // graphs do not overflow.
 pub fn scc(in g: Graph) -> Scc {
     let n = g.node_count();
-    let unvisited: u32 = GraphIndex::Missing;
-    let mut index = filled32(n, unvisited);
-    let mut low = filled32(n, 0);
-    let mut on = filled_bool(n, false);
-    let mut comp = filled32(n, unvisited);
-    let mut stack: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    let mut call_node: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    let mut call_edge: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let mut nodes: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
-    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    starts.push(0);
-    let mut counter: u32 = 0;
-    let mut ncomp: u32 = 0;
-    let mut r: u64 = 0;
-    loop {
-        if r >= n {
-            break;
+    let mut state = tarjan_new(n);
+    for root in 0..n {
+        if state.index_of(root) == UNVISITED {
+            state.discover(in g, wrapping_u32(root));
+            state.search(in g);
         }
-        if get32(in index.as_slice(), r, 0) == unvisited {
-            let root = wrapping_u32(r);
-            index.try_set(r, counter);
-            low.try_set(r, counter);
-            counter = wrapping_add(counter, 1);
-            stack.push(root);
-            on.try_set(r, true);
-            let (lo, _hi) = g.succ_range(root);
-            call_node.push(root);
-            call_edge.push(lo);
-            loop {
-                let depth = call_node.len();
-                if depth == 0 {
-                    break;
-                }
-                let top = wrapping_sub(depth, 1);
-                let v = get32(in call_node.as_slice(), top, 0);
-                let vk = widen_u64(v);
-                let e = get64(in call_edge.as_slice(), top, 0);
-                let (_lo, hi) = g.succ_range(v);
-                if e < hi {
-                    call_edge.try_set(top, wrapping_add(e, 1));
-                    let w = g.succ_edge(e);
-                    let wk = widen_u64(w);
-                    let wi = get32(in index.as_slice(), wk, 0);
-                    if wi == unvisited {
-                        index.try_set(wk, counter);
-                        low.try_set(wk, counter);
-                        counter = wrapping_add(counter, 1);
-                        stack.push(w);
-                        on.try_set(wk, true);
-                        let (wlo, _whi) = g.succ_range(w);
-                        call_node.push(w);
-                        call_edge.push(wlo);
-                    } else if get_bool(in on.as_slice(), wk) {
-                        let lv = get32(in low.as_slice(), vk, 0);
-                        low.try_set(vk, min32(lv, wi));
-                    }
-                } else {
-                    call_node.truncate(top);
-                    call_edge.truncate(top);
-                    let lv = get32(in low.as_slice(), vk, 0);
-                    if lv == get32(in index.as_slice(), vk, 0) {
-                        loop {
-                            let w = match stack.pop() {
-                                Option::Some(x) => x,
-                                Option::None => break,
-                            };
-                            let wk = widen_u64(w);
-                            on.try_set(wk, false);
-                            comp.try_set(wk, ncomp);
-                            nodes.push(w);
-                            if w == v {
-                                break;
-                            }
-                        }
-                        starts.push(nodes.len());
-                        ncomp = wrapping_add(ncomp, 1);
-                    }
-                    if top > 0 {
-                        let u = widen_u64(get32(in call_node.as_slice(), wrapping_sub(top, 1), 0));
-                        let lu = get32(in low.as_slice(), u, 0);
-                        low.try_set(u, min32(lu, lv));
-                    }
-                }
-            }
-        }
-        r = wrapping_add(r, 1);
     }
+    let Tarjan {
+        index,
+        low,
+        on_stack,
+        stack,
+        call_node,
+        call_edge,
+        next_index,
+        comp,
+        nodes,
+        starts,
+        component_count,
+    } = state;
     Scc {
         comp: comp,
         nodes: nodes,

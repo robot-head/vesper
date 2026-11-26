@@ -127,14 +127,25 @@ fn unpack(words: &[u64]) -> String {
     String::from_utf8(bytes).expect("utf-8")
 }
 
-/// Decodes `native_walk_frames_bytes`'s answer to one task (parts 3b and
-/// 4a): each instance's entry-block plan (`F` blocks) and internal
-/// convention (`B key status words` lines) by key, or `None` when the task
-/// refused or a line does not parse, which leaves every plan to Rust.
+/// An instance `decode_entry_plans` is reading: its key, source function
+/// and variables as type-table indices.
+type OpenInstance = (String, String, Vec<(String, usize)>);
+
+/// Decodes `native_walk_frames_bytes`'s answer to one task (parts 3b, 4a
+/// and 4b): by instance key, the entry-block plan (`F` blocks), the internal
+/// convention (`B key status words`) and the instance itself (`I name`,
+/// `V var type-index`, with the types in the task's `W` table). `None` when
+/// the task refused or a line does not parse, which leaves every plan to
+/// Rust.
 pub fn decode_entry_plans(words: &[u64]) -> Option<vesper::native::EntryPlans> {
     let text = unpack(words);
     let mut plans = vesper::native::EntryPlans::default();
+    // The `F` block being read: its key and plan text.
     let mut current: Option<(String, String)> = None;
+    // The instance the last `B` line opened: its key, source function and
+    // variables as type indices.
+    let mut instances: Vec<OpenInstance> = vec![];
+    let mut table: Option<Vec<Type>> = None;
     let finish =
         |plans: &mut vesper::native::EntryPlans, current: Option<(String, String)>| -> Option<()> {
             if let Some((key, plan)) = current {
@@ -152,6 +163,7 @@ pub fn decode_entry_plans(words: &[u64]) -> Option<vesper::native::EntryPlans> {
             return None;
         }
         if let Some(rest) = line.strip_prefix("B ") {
+            finish(&mut plans, current.take())?;
             let mut fields = rest.rsplitn(3, ' ');
             let words: u32 = fields.next()?.parse().ok()?;
             let status = match fields.next()? {
@@ -164,7 +176,21 @@ pub fn decode_entry_plans(words: &[u64]) -> Option<vesper::native::EntryPlans> {
                 status,
                 result_words: (words != 0).then_some(words),
             };
-            plans.abi.insert(key, abi);
+            plans.abi.insert(key.clone(), abi);
+            instances.push((key, String::new(), vec![]));
+        } else if let Some(name) = line.strip_prefix("I ") {
+            instances.last_mut()?.1 = name.to_string();
+        } else if let Some(rest) = line.strip_prefix("V ") {
+            let (var, index) = rest.rsplit_once(' ')?;
+            let index = index.parse().ok()?;
+            instances.last_mut()?.2.push((var.to_string(), index));
+        } else if let Some(rest) = line.strip_prefix("W") {
+            finish(&mut plans, current.take())?;
+            let words: Vec<u64> = rest
+                .split_whitespace()
+                .map(|w| w.parse().ok())
+                .collect::<Option<_>>()?;
+            table = Some(check_words::decode_type_table(&words)?);
         } else if let Some(key) = line.strip_prefix("F ") {
             finish(&mut plans, current.take())?;
             current = Some((key.to_string(), String::new()));
@@ -175,5 +201,13 @@ pub fn decode_entry_plans(words: &[u64]) -> Option<vesper::native::EntryPlans> {
         }
     }
     finish(&mut plans, current)?;
+    let table = table?;
+    for (key, name, vars) in instances {
+        let vars = vars
+            .into_iter()
+            .map(|(var, i)| Some((var, table.get(i)?.clone())))
+            .collect::<Option<BTreeMap<_, _>>>()?;
+        plans.instances.insert(key, (name, vars));
+    }
     Some(plans)
 }

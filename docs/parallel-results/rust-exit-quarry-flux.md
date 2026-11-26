@@ -286,3 +286,57 @@ passes.
   median **1.19x**, 95% CI 1.142x..1.233x, digests agree. The check costs
   about twice the old Rust validation; the rest of `leaf_decode` (building
   the `Value`s) is unchanged, so the whole decoder stays inside the bar.
+
+## Flux Kafka wire codecs (2026-11-26)
+
+Every Kafka request and response the Flux client speaks is now one whole
+encoder or decoder in `crates/vesper-flux/vesper/src/kafka_api.ves`
+(`kw_req_*` and `kw_resp_*`): the request header and frame length, all 20
+requests (ApiVersions, SASL handshake and authenticate, Metadata,
+CreateTopics, DeleteRecords, ListOffsets, Fetch, Produce,
+FindCoordinator, OffsetFetch, JoinGroup, SyncGroup, Heartbeat,
+LeaveGroup, InitProducerId, AddPartitionsToTxn, AddOffsetsToTxn,
+TxnOffsetCommit with its by-topic grouping, EndTxn), the response header
+and all 18 response bodies, the consumer protocol's subscription (sorted,
+deduplicated topics and bindings), assignment and assignment parser, and
+the v2 record batch frame and header reads. Per-field crossings would cost
+more than they save, so each API crosses once: strings and bytes go in as
+slices, and a decoder returns its fields as words with strings as spans of
+the body. Each decoder fails like the Rust reader did: the same first
+error, every string checked as UTF-8 even when skipped, every length
+bounded by the bytes left. Where the old client kept partial results of a
+failed read (Metadata's leaders, Fetch's decoded batches), the decoders
+return the entries read before the failure and then the failure.
+
+`src/kafka_codec.rs` holds the thin wrappers; `Conn`, `Client`, the
+producer and `KafkaGroupSource` keep the sockets, TLS, SASL, retries and
+state. CRC-32C and the compression codecs stay Rust. The old `W`/`R`
+writer and reader and every old codec are kept only in
+`src/kafka_reference.rs`, built for tests and for the ABBA Rust arm.
+
+- Differentials (`circuit::codec::tests`): every request encoder on 4,000
+  random field sets (empty, multi-byte and over-long strings, nulls,
+  extreme integers); every response decoder in about 2.3 million calls on valid
+  bodies of each API with random fields, plus truncations, inserted bytes,
+  hostile lengths and bit flips, including the response header; the
+  consumer protocol on 3,000 binding sets; batch framing in every codec on
+  over 10,000 mutated batches: 0 diffs. Successes, broker codes and
+  protocol errors all come up.
+- Interop: all 11 `tests/kafka.rs` tests pass against Apache Kafka 4.3.2
+  (KRaft; PLAINTEXT, TLS, SASL PLAIN and SCRAM-SHA-256/512, transactions,
+  zombie fencing, consumer groups, compression, broker crashes).
+- Divergences `kafka_api` (strings not checked as UTF-8) and
+  `kafka_request` (an over-long string's i16 length is not refused) fail
+  the response and request differentials respectively while the other
+  passes.
+- ABBA (`examples/abba.rs` workload `kafka_wire`: 2,000 rounds per request
+  of a transactional consume-transform-produce member's traffic, every
+  request framed and every response decoded, fetch with one 8-record
+  batch; `RUSTFLAGS="-C target-cpu=native"`, release; the Rust arm is the
+  same example built with `--features abba-reference`, which runs the old
+  Rust codecs): two runs, median **1.10x** (95% CI 1.029x..1.186x) and
+  **1.26x** (95% CI 1.214x..1.301x), 12 epochs each, digests agree. Under
+  callgrind the two arms run the same instruction count (210M vs 209M per
+  request); writing integers a byte at a time instead of `resize` plus a
+  store removed the port's memset calls (1.27x before).
+

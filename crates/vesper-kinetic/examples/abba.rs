@@ -32,6 +32,10 @@
 //! - `rigid-solve`: eight box stacks and two driven hinge chains in
 //!   `RigidWorld`, 8 substeps: 4 ticks, then 24 more runs of the substep
 //!   solver on the last manifolds.
+//! - `world-substeps`: the `pile-lbvh` pile with friction, restitution and
+//!   joint chains: 2 ticks, then 16 more runs of the next tick's substeps.
+//! - `soft-step`: a tetrahedral soft box (8 x 4 x 8 cells, 16 substeps)
+//!   dropped on a frictional ground: 12 ticks.
 
 use std::time::Instant;
 use vesper_bench::{PairedSample, analyze_pairs};
@@ -46,8 +50,9 @@ macro_rules! workloads {
                 sphere_inv_inertia,
             };
             use $s::{
-                Body, BroadphaseMode, Colorer, ConstraintBodies, DistanceConstraint, MultiColorer,
-                SphereCollider, SweepAndPrune, World, WorldConfig, crmath, fastmath, gjk, morton,
+                Body, BroadphaseMode, Colorer, ConstraintBodies, ContactMaterial,
+                DistanceConstraint, MultiColorer, SoftConfig, SoftWorld, SphereCollider,
+                SweepAndPrune, World, WorldConfig, crmath, fastmath, gjk, morton,
             };
 
             fn rng(state: &mut u64) -> u64 {
@@ -337,6 +342,80 @@ macro_rules! workloads {
                 u64::from(w.header().world_state_blake3[0])
             }
 
+            /// The pile of `pile` with friction, restitution and 16
+            /// four-link joint chains: 2 ticks, then the next tick's
+            /// substeps 16 more times on its contacts.
+            pub fn world_substeps(_: u64) -> u64 {
+                let mut bodies = Vec::new();
+                for gx in 0..16 {
+                    for gz in 0..16 {
+                        for level in 0..4 {
+                            let seed = (gx * 13 + gz * 7 + level * 5) % 9 - 4;
+                            bodies.push(dynamic(
+                                [
+                                    gx as f32 * 0.5,
+                                    0.25 + level as f32 * 0.5,
+                                    gz as f32 * 0.5 + (level % 2) as f32 * 0.125,
+                                ],
+                                [seed as f32 * 0.0625, 0.0, -(seed as f32) * 0.03125],
+                            ));
+                        }
+                    }
+                }
+                let joints: Vec<DistanceConstraint> = (0..16u32)
+                    .flat_map(|c| {
+                        (0..4u32).map(move |k| DistanceConstraint {
+                            a: c * 64 + k * 4 + 3,
+                            b: c * 64 + k * 4 + 7,
+                            rest_length: 0.5,
+                            compliance: 1.0e-4,
+                        })
+                    })
+                    .collect();
+                let config = WorldConfig {
+                    cell_size: 1.0,
+                    contact_margin: 0.0625,
+                    max_contacts: bodies.len() * 8,
+                    ..WorldConfig::default()
+                };
+                let mut w =
+                    World::new(config, &bodies, &[SphereCollider { radius: 0.25 }], &joints)
+                        .unwrap();
+                w.set_broadphase(BroadphaseMode::Lbvh);
+                w.set_contact_material(ContactMaterial {
+                    static_friction: 0.5,
+                    dynamic_friction: 0.3,
+                    restitution: 0.4,
+                })
+                .unwrap();
+                for _ in 0..2 {
+                    w.step().unwrap();
+                }
+                w.bench_substeps(16).unwrap();
+                u64::from(w.header().world_state_blake3[0])
+            }
+
+            /// A tetrahedral soft box dropped on a frictional ground: 12
+            /// ticks of 16 substeps.
+            pub fn soft_step(_: u64) -> u64 {
+                let (particles, constraints) = SoftWorld::tetrahedral_box(
+                    [0.0, 0.1, 0.0],
+                    0.125,
+                    [8, 4, 8],
+                    4.0,
+                    1.0e-4,
+                    1.0e-5,
+                )
+                .unwrap();
+                let mut w =
+                    SoftWorld::new(SoftConfig::default(), &particles, &constraints).unwrap();
+                let mut last = None;
+                for _ in 0..12 {
+                    last = Some(w.step().unwrap());
+                }
+                u64::from(last.unwrap().blake3[0])
+            }
+
             pub fn pile_lbvh(_: u64) -> u64 {
                 pile(1)
             }
@@ -579,7 +658,7 @@ workloads!(port_build, vesper_kinetic);
 
 type Work = fn(u64) -> u64;
 
-const WORKLOADS: [(&str, Work, Work); 14] = [
+const WORKLOADS: [(&str, Work, Work); 16] = [
     ("morton", rust_build::morton, port_build::morton),
     ("fastmath", rust_build::fastmath, port_build::fastmath),
     ("crmath", rust_build::crmath, port_build::crmath),
@@ -606,6 +685,12 @@ const WORKLOADS: [(&str, Work, Work); 14] = [
         rust_build::rigid_solve,
         port_build::rigid_solve,
     ),
+    (
+        "world-substeps",
+        rust_build::world_substeps,
+        port_build::world_substeps,
+    ),
+    ("soft-step", rust_build::soft_step, port_build::soft_step),
 ];
 
 /// Total nanoseconds for `ops` timed runs after `ops / 4` warm-up ones.

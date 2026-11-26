@@ -31,10 +31,11 @@
 //! partitions the group gave away meanwhile.
 use super::cdc::CdcPolicy;
 use super::client::Client;
+use super::codec::{assignment, parse_assignment, subscription};
 use super::kafka::{
     GroupOffsetSource, GroupOffsets, KafkaBinding, KafkaConnection, KafkaSourceLimits,
 };
-use super::wire::{Fail, KResult, R, W};
+use super::wire::Fail;
 use super::{Circuit, EpochSource, TickInput};
 use crate::zset::Accumulator;
 use crate::{Budget, CdcHeader, Error, Limits, Row};
@@ -320,60 +321,6 @@ fn fingerprint(
     *h.finalize().as_bytes()
 }
 
-/// Consumer protocol subscription (version 0): the topics, with the exact
-/// bindings (topic, partition) as user data, so the leader can check that
-/// every member subscribes to the same bindings.
-fn subscription(topics: &[KafkaBinding]) -> KResult<Vec<u8>> {
-    let names: BTreeSet<&str> = topics.iter().map(|t| t.topic.as_str()).collect();
-    let bindings: BTreeSet<(&str, i32)> = topics
-        .iter()
-        .map(|t| (t.topic.as_str(), t.partition))
-        .collect();
-    let mut user = W::new(false);
-    user.array(bindings.len())?;
-    for (t, p) in bindings {
-        user.str(t)?;
-        user.i32(p);
-    }
-    let mut w = W::new(false);
-    w.i16(0);
-    w.array(names.len())?;
-    for n in names {
-        w.str(n)?;
-    }
-    w.bytes(&user.buf)?;
-    Ok(w.buf)
-}
-/// Consumer protocol assignment (version 0).
-fn assignment(parts: &BTreeMap<String, Vec<i32>>) -> KResult<Vec<u8>> {
-    let mut w = W::new(false);
-    w.i16(0);
-    w.array(parts.len())?;
-    for (t, ps) in parts {
-        w.str(t)?;
-        w.array(ps.len())?;
-        for p in ps {
-            w.i32(*p);
-        }
-    }
-    w.bytes(&[])?;
-    Ok(w.buf)
-}
-fn parse_assignment(b: &[u8]) -> KResult<Vec<(String, i32)>> {
-    if b.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut r = R::new(b, false);
-    r.i16()?;
-    let mut out = Vec::new();
-    for _ in 0..r.array()? {
-        let t = r.str()?;
-        for _ in 0..r.array()? {
-            out.push((t.clone(), r.i32()?));
-        }
-    }
-    Ok(out)
-}
 fn input_metadata(lsn: u64) -> String {
     format!("vflux/1 l={lsn}")
 }

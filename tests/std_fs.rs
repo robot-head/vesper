@@ -12,7 +12,9 @@ use std_io_support::{MODES, Temp, agree, check_driver, lit};
 const DRIVER: &str = r#"use @vesper-std/fs::{
     IoError, Metadata, read, read_path, read_string, write, append, create_new, replace, rename,
     remove_file, remove_dir, remove_dir_all, create_dir, create_dir_all, metadata,
-    symlink_metadata, exists, kind_file, kind_dir, error_text, is_dir_path, is_file_path
+    symlink_metadata, exists, kind_file, kind_dir, error_text, is_dir_path, is_file_path,
+    is_executable, canonicalize, write_stdout, write_stderr, create_dir_mode, set_permissions,
+    copy
 };
 use @vesper-std/fs::walk::{
     Entries, walk, list_dir, entry_count, entry_start, entry_end, entry_kind, entry_join
@@ -46,6 +48,64 @@ fn pattern(n: u64) -> ChunkSeq[u8] {
         b.push(wrapping_u8(wrapping_mul(i, 31)));
     }
     b
+}
+
+// Write a line to standard output and one to standard error: 0, or the
+// failed write's OS error code.
+pub fn stdio() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        write_stdout(in "@@vesper-stdout@@\n".as_bytes());
+        write_stderr(in "@@vesper-stderr@@\n".as_bytes());
+        0
+    } with {
+        return v => v,
+        raise(e, _) => widen_u64(e.os),
+    }
+}
+
+// The hash of each path's canonical form, or 1000 + kind when it fails.
+fn canon(in p: Str) -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        let c = canonicalize(in p);
+        hash(in c.as_slice())
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    }
+}
+
+pub fn canonical_paths() -> u64 eff [Ffi[StdFs]] {
+    let a = canon(in "@DIR@/x/run");
+    let b = canon(in "@DIR@/x/../x/plain");
+    let c = canon(in "@DIR@/x");
+    let d = canon(in "@DIR@/x/missing");
+    let e = canon(in "@DIR@/x/link");
+    let f = canon(in "@DIR@/x/dangling");
+    mix(mix(mix(mix(mix(a, b), c), d), e), f)
+}
+
+// Bit i is set when the i-th path is executable.
+pub fn executables() -> u64 eff [Ffi[StdFs]] {
+    let mut bits: u64 = 0;
+    if is_executable(in "@DIR@/x/run") {
+        bits = bits | 1;
+    }
+    if is_executable(in "@DIR@/x/plain") {
+        bits = bits | 2;
+    }
+    if is_executable(in "@DIR@/x") {
+        bits = bits | 4;
+    }
+    if is_executable(in "@DIR@/x/missing") {
+        bits = bits | 8;
+    }
+    if is_executable(in "@DIR@/x/link") {
+        bits = bits | 16;
+    }
+    if is_executable(in "@DIR@/x/dangling") {
+        bits = bits | 32;
+    }
+    bits
 }
 
 pub fn read_back() -> u64 eff [Ffi[StdFs]] {
@@ -226,6 +286,68 @@ pub fn meta() -> u64 eff [Ffi[StdFs]] {
         return v => v,
         raise(e, _) => code(e),
     }
+}
+
+// A private directory (0o700), permission changes and a copy that keeps
+// the source's bits; the source is made writable again at the end so the
+// next run can rewrite it.
+pub fn permissions() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        if exists(in "@DIR@/priv") {
+            remove_dir(in "@DIR@/priv");
+        }
+        create_dir_mode(in "@DIR@/priv", 448);
+        let d = metadata(in "@DIR@/priv");
+        write(in "@DIR@/p.txt", in "permission bits".as_bytes());
+        set_permissions(in "@DIR@/p.txt", 416);
+        let a = metadata(in "@DIR@/p.txt");
+        let n = copy(in "@DIR@/p.txt", in "@DIR@/q.txt");
+        let b = metadata(in "@DIR@/q.txt");
+        let q = read(in "@DIR@/q.txt");
+        set_permissions(in "@DIR@/p.txt", 292);
+        let c = metadata(in "@DIR@/p.txt");
+        set_permissions(in "@DIR@/p.txt", 420);
+        let mut h = mix(widen_u64(d.kind), widen_u64(d.mode));
+        h = mix(mix(h, widen_u64(a.mode)), mix(n, widen_u64(b.mode)));
+        mix(mix(h, hash(in q.as_slice())), widen_u64(c.mode))
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    }
+}
+
+// A private file larger than the copy buffer: the copy has its bits
+// and all its bytes.
+pub fn copy_private() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        let data = pattern(70000);
+        write(in "@DIR@/s.bin", in data.as_slice());
+        set_permissions(in "@DIR@/s.bin", 384);
+        let n = copy(in "@DIR@/s.bin", in "@DIR@/t.bin");
+        let m = metadata(in "@DIR@/t.bin");
+        let t = read(in "@DIR@/t.bin");
+        mix(mix(n, widen_u64(m.mode)), hash(in t.as_slice()))
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    }
+}
+
+// Copying a directory or a missing file.
+pub fn copy_errors() -> u64 eff [Ffi[StdFs]] {
+    let a = handle Fail[IoError] in {
+        copy(in "@DIR@", in "@DIR@/x.txt")
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    };
+    let b = handle Fail[IoError] in {
+        copy(in "@DIR@/no-such-file", in "@DIR@/x.txt")
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    };
+    mix(a, b)
 }
 
 fn entries_hash(in e: Entries) -> u64 {
@@ -639,6 +761,49 @@ fn directories_rename_and_metadata() {
 }
 
 #[test]
+fn permissions_and_copies_match_std() {
+    let dir = Temp::new("std-fs");
+    let checked = check_driver(&source(&dir));
+    let text = b"permission bits";
+    let n = text.len() as u64;
+    // On Windows the bits are the read-only attribute: 0o444 or 0o666.
+    let (dir_mode, rw, ro) = if cfg!(unix) {
+        (0o700, 0o640, 0o444)
+    } else {
+        (0o666, 0o666, 0o444)
+    };
+    let kind_dir = 2;
+    let mut h = mix(kind_dir, dir_mode);
+    h = mix(mix(h, rw), mix(n, rw));
+    let want = mix(mix(h, hash(text)), ro);
+    assert_eq!(agree(&checked, "permissions", &MODES), want);
+    let private = if cfg!(unix) { 0o600 } else { 0o666 };
+    assert_eq!(
+        agree(&checked, "copy_private", &MODES),
+        mix(mix(70000, private), hash(&pattern(70000)))
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        // What std does for the same requests.
+        let rust = dir.path().join("rust");
+        fs::DirBuilder::new().mode(0o700).create(&rust).unwrap();
+        let mode = |p: &Path| u64::from(fs::metadata(p).unwrap().permissions().mode() & 0o7777);
+        assert_eq!(mode(&rust), dir_mode);
+        let (p, q) = (dir.path().join("rp.txt"), dir.path().join("rq.txt"));
+        fs::write(&p, text).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(fs::copy(&p, &q).unwrap(), n);
+        assert_eq!(mode(&q), rw);
+        let want = mix(
+            code(&fs::copy(dir.path(), dir.path().join("x.txt")).unwrap_err()),
+            code(&fs::copy(dir.path().join("no-such-file"), dir.path().join("x.txt")).unwrap_err()),
+        );
+        assert_eq!(agree(&checked, "copy_errors", &MODES), want);
+    }
+}
+
+#[test]
 fn walks_are_sorted_by_path_bytes() {
     let dir = Temp::new("std-fs");
     let tree = dir.path().join("tree");
@@ -752,4 +917,154 @@ fn path_kinds_follow_std() {
     for mode in MODES {
         assert_eq!(agree(&checked, "path_kinds", &[mode]), want, "{mode:?}");
     }
+}
+
+/// `is_executable` is the check `vesper <tool>` makes before running a
+/// tool: a regular file (following links) with an execute bit on Unix.
+#[test]
+fn is_executable_matches_std_permissions() {
+    let dir = Temp::new("std-fs");
+    let x = dir.path().join("x");
+    fs::create_dir_all(&x).unwrap();
+    fs::write(x.join("run"), b"#!/bin/sh\n").unwrap();
+    fs::write(x.join("plain"), b"text").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(x.join("run"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(x.join("plain"), fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(x.join("run"), x.join("link")).unwrap();
+        std::os::unix::fs::symlink(x.join("gone"), x.join("dangling")).unwrap();
+    }
+    let rust = |p: &Path| -> bool {
+        let Ok(meta) = p.metadata() else {
+            return false;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            meta.is_file() && meta.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        meta.is_file()
+    };
+    let mut want = 0;
+    for (i, name) in ["run", "plain", "", "missing", "link", "dangling"]
+        .iter()
+        .enumerate()
+    {
+        let p = if name.is_empty() {
+            x.clone()
+        } else {
+            x.join(name)
+        };
+        if rust(&p) {
+            want |= 1 << i;
+        }
+    }
+    let checked = check_driver(&source(&dir));
+    assert_eq!(agree(&checked, "executables", &MODES), want);
+}
+
+/// The child of `stdout_and_stderr_are_written_unbuffered`: run `stdio`
+/// and exit with its answer.
+#[test]
+#[ignore = "run by stdout_and_stderr_are_written_unbuffered"]
+fn stdio_child() {
+    let Ok(mode) = std::env::var("VESPER_STD_STDIO_CHILD") else {
+        return;
+    };
+    let dir = Temp::new("std-fs");
+    let checked = check_driver(&source(&dir));
+    let mode = match mode.as_str() {
+        "jit" => std_io_support::Mode::Jit,
+        "nojit" => std_io_support::Mode::JitNoOpt,
+        _ => std_io_support::Mode::Evaluator,
+    };
+    // libtest has printed its own lines by now; point descriptor 1 at the
+    // full device only for the Vesper write.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("VESPER_STD_STDIO_FULL").is_some() {
+        use std::os::fd::AsRawFd;
+        let full = fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        // SAFETY: both descriptors are open; fd 1 is replaced in place.
+        assert!(unsafe { libc::dup2(full.as_raw_fd(), 1) } == 1);
+    }
+    let got = agree(&checked, "stdio", &[mode]);
+    std::process::exit(got as i32);
+}
+
+/// `write_stdout` and `write_stderr` reach the process's own streams
+/// (descriptors 1 and 2, or the standard handles), and a failed write
+/// raises the OS error (on Linux, a full device: ENOSPC).
+#[test]
+fn stdout_and_stderr_are_written_unbuffered() {
+    for mode in ["jit", "nojit", "eval"] {
+        if mode != "eval" && !std_io_support::jit_host() {
+            continue;
+        }
+        let child = || {
+            let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+            c.args(["--ignored", "--exact", "stdio_child", "--test-threads=1"])
+                .env("VESPER_STD_STDIO_CHILD", mode);
+            c
+        };
+        let out = child().output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{mode}: {out:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stdout.contains("@@vesper-stdout@@\n"), "{mode}: {stdout}");
+        assert!(!stdout.contains("@@vesper-stderr@@"), "{mode}: {stdout}");
+        assert!(stderr.contains("@@vesper-stderr@@\n"), "{mode}: {stderr}");
+        #[cfg(target_os = "linux")]
+        {
+            let status = child()
+                .env("VESPER_STD_STDIO_FULL", "1")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(28), "{mode}");
+        }
+    }
+}
+
+/// `canonicalize` is `std::fs::canonicalize`: links, `.` and `..`
+/// resolved, and a missing path (or a dangling link) an error.
+#[test]
+fn canonicalize_matches_std() {
+    let dir = Temp::new("std-fs");
+    let x = dir.path().join("x");
+    fs::create_dir_all(&x).unwrap();
+    fs::write(x.join("run"), b"run").unwrap();
+    fs::write(x.join("plain"), b"text").unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(x.join("run"), x.join("link")).unwrap();
+        std::os::unix::fs::symlink(x.join("gone"), x.join("dangling")).unwrap();
+    }
+    let rust = |p: &Path| -> u64 {
+        match fs::canonicalize(p) {
+            Ok(c) => hash(&std_io_support::oracle::os_bytes(c.as_os_str())),
+            Err(e) => code(&e),
+        }
+    };
+    let names = [
+        "x/run",
+        "x/../x/plain",
+        "x",
+        "x/missing",
+        "x/link",
+        "x/dangling",
+    ];
+    let mut want = 0;
+    for (i, n) in names.iter().enumerate() {
+        let h = rust(&dir.path().join(n));
+        want = if i == 0 { h } else { mix(want, h) };
+    }
+    let checked = check_driver(&source(&dir));
+    assert_eq!(agree(&checked, "canonical_paths", &MODES), want);
 }

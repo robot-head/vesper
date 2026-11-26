@@ -1,0 +1,59 @@
+"""Verify generated certificate identities, private keys and trust chains."""
+
+load("./lib/task-fixture.axl", "contains", "equal", "fixture_workspace", "invoke_fixture")
+
+def _test(ctx):
+    openssl = ctx.std.process.which("openssl")
+    if not openssl:
+        ctx.std.io.stdout.write("OpenSSL is unavailable\n")
+        return 0
+    workspace = fixture_workspace(ctx, "vesper-tls-fixture-test-")
+
+    def verify(argv, status = 0):
+        return invoke_fixture(ctx, argv, workspace.root, status, tool = openssl).stdout
+
+    chorus = [("node" + str(n), "node%d.chorus.test" % n, "node%d.chorus.test" % n, "chorus-ca") for n in range(16)]
+    chorus.append(("rogue-node1", "node1.chorus.test", "node1.chorus.test", "rogue-ca"))
+    suites = [("chorus", "/pki", "chorus-ca", chorus), ("warp-tls", "", "test-ca", [
+        ("server", "server", "warp.test", "test-ca"),
+        ("rogue-server", "rogue-server", "warp.test", "rogue-ca"),
+    ])]
+    for crate, directory, trusted, leaves in suites:
+        invoke_fixture(ctx, ["crate", crate, "gen"], workspace.cwd)
+        fixtures = workspace.root + "/crates/vesper-" + crate + "/tests/fixtures" + directory
+        names = [trusted + ".der", "rogue-ca.der"] + [leaf[0] + suffix for leaf in leaves for suffix in [".der", ".key.der"]]
+        equal(len(ctx.std.fs.read_dir(fixtures)), len(names))
+        for name in names:
+            equal(ctx.std.fs.exists(fixtures + "/" + name), True)
+
+        auxiliary = workspace.root + "/" + crate + " verification"
+        ctx.std.fs.create_dir_all(auxiliary)
+        for authority in [trusted, "rogue-ca"]:
+            cert = ["x509", "-inform", "DER", "-in", fixtures + "/" + authority + ".der"]
+            details = verify(cert + ["-noout", "-text"])
+            contains("CA:TRUE", details)
+            contains("Certificate Sign, CRL Sign", details)
+            verify(cert + ["-out", auxiliary + "/" + authority + ".pem"])
+        for name, subject, host, authority in leaves:
+            cert = ["x509", "-inform", "DER", "-in", fixtures + "/" + name + ".der"]
+            key = fixtures + "/" + name + ".key.der"
+            details = verify(cert + ["-noout", "-text"])
+            expected_subject = "Subject: CN=" + subject
+            normalized = [line.strip().replace("CN = ", "CN=") for line in details.splitlines()]
+            contains(expected_subject, normalized)
+            for field in ["DNS:" + host, "CA:FALSE", "Digital Signature",
+                          "TLS Web Server Authentication, TLS Web Client Authentication", "ASN1 OID: prime256v1"]:
+                contains(field, details)
+            equal(verify(["pkey", "-inform", "DER", "-in", key, "-pubout"]), verify(cert + ["-pubkey", "-noout"]))
+            pem = auxiliary + "/" + name + ".pem"
+            verify(cert + ["-out", pem])
+            verify(["verify", "-CAfile", auxiliary + "/" + authority + ".pem", pem])
+            if authority == "rogue-ca":
+                verify(["verify", "-CAfile", auxiliary + "/" + trusted + ".pem", pem], 2)
+    return 0
+
+test_tls_fixtures = task(
+    kind = "tls-fixtures", group = ["ci", "tests"],
+    summary = "Verify generated TLS fixture subjects, SANs, keys, usages and trust chains",
+    implementation = _test,
+)

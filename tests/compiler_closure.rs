@@ -252,7 +252,7 @@ fn the_compiler_links_only_the_allowed_crates() {
     assert!(
         left.is_empty(),
         "crates left the compiler's closure: {left:?}; delete their ALLOWED rows in \
-         tests/compiler_closure.rs and mark them flippable in scripts/rust-census.py"
+         tests/compiler_closure.rs and mark them flippable in .aspect/rust-census.axl"
     );
 }
 

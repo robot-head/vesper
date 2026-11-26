@@ -153,3 +153,281 @@ pub fn blk_config_space(disk_bytes: u64, read_only: bool, queues: u16, inout out
     }
     BLK_CONFIG_BYTES
 }
+
+// ---------------------------------------------------------------------------
+// The whole virtio-blk device (`BlockDevice`): request parsing and every
+// request type over the disk and its flushed copy, features, configuration
+// and the stats. Rust keeps the disk bytes (handed in as slices) and the
+// queue loop.
+
+const BLK_F_RO: u64 = 32;
+const BLK_F_BLK_SIZE: u64 = 64;
+const BLK_F_FLUSH: u64 = 512;
+const BLK_F_MQ: u64 = 4096;
+const BLK_F_DISCARD: u64 = 8192;
+const BLK_F_WRITE_ZEROES: u64 = 16384;
+const BLK_T_IN: u32 = 0;
+const BLK_T_OUT: u32 = 1;
+const BLK_T_FLUSH: u32 = 4;
+const BLK_T_GET_ID: u32 = 8;
+const BLK_T_DISCARD: u32 = 11;
+const BLK_T_WRITE_ZEROES: u32 = 13;
+const BLK_HEADER_BYTES: u64 = 16;
+const BLK_ID_BYTES: u64 = 20;
+const BLK_ZERO_BYTES: u64 = 65536;
+const BLK_NONE: u64 = 18446744073709551615;
+
+pub copy struct BlkStats {
+    pub reads: u64,
+    pub writes: u64,
+    pub flushes: u64,
+    pub io_errors: u64,
+    pub unsupported: u64,
+    pub discards: u64,
+    pub write_zeroes: u64,
+    pub q0: u64,
+    pub q1: u64,
+    pub q2: u64,
+    pub q3: u64,
+    pub q4: u64,
+    pub q5: u64,
+    pub q6: u64,
+    pub q7: u64,
+}
+
+struct BlkState {
+    read_only: bool,
+    queues: u16,
+    features: u64,
+    id: ChunkSeq[u8],
+    // `BLK_ZERO_BYTES` zeros to copy from.
+    zeros: ChunkSeq[u8],
+    stats: BlkStats,
+}
+
+pub fn blk_state_new(read_only: bool, in id: Slice[u8], queues: u16) -> BlkState {
+    let mut idb: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](BLK_ID_BYTES);
+    for i in 0..BLK_ID_BYTES {
+        idb.push(blk_byte(in id, i));
+    }
+    let mut zeros: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](BLK_ZERO_BYTES);
+    for _i in 0..BLK_ZERO_BYTES {
+        zeros.push(0);
+    }
+    BlkState {
+        read_only: read_only,
+        queues: queues,
+        features: 0,
+        id: idb,
+        zeros: zeros,
+        stats: BlkStats {
+            reads: 0,
+            writes: 0,
+            flushes: 0,
+            io_errors: 0,
+            unsupported: 0,
+            discards: 0,
+            write_zeroes: 0,
+            q0: 0,
+            q1: 0,
+            q2: 0,
+            q3: 0,
+            q4: 0,
+            q5: 0,
+            q6: 0,
+            q7: 0,
+        },
+    }
+}
+
+pub fn blk_stats(in st: BlkState) -> BlkStats {
+    st.stats
+}
+
+pub fn blk_set_queues(inout st: BlkState, queues: u16) {
+    st.queues = queues;
+}
+
+pub fn blk_activate(inout st: BlkState, features: u64) {
+    st.features = features;
+}
+
+pub fn blk_device_features(in st: BlkState) -> u64 {
+    let rw = if st.read_only {
+        BLK_F_RO
+    } else {
+        BLK_F_DISCARD | BLK_F_WRITE_ZEROES
+    };
+    let mq = if st.queues > 1 {
+        BLK_F_MQ
+    } else {
+        0
+    };
+    BLK_F_BLK_SIZE | BLK_F_FLUSH | rw | mq
+}
+
+fn blk_count_queue(inout st: BlkState, queue: u16) {
+    if queue == 0 {
+        st.stats.q0 = wrapping_add(st.stats.q0, 1);
+    } else if queue == 1 {
+        st.stats.q1 = wrapping_add(st.stats.q1, 1);
+    } else if queue == 2 {
+        st.stats.q2 = wrapping_add(st.stats.q2, 1);
+    } else if queue == 3 {
+        st.stats.q3 = wrapping_add(st.stats.q3, 1);
+    } else if queue == 4 {
+        st.stats.q4 = wrapping_add(st.stats.q4, 1);
+    } else if queue == 5 {
+        st.stats.q5 = wrapping_add(st.stats.q5, 1);
+    } else if queue == 6 {
+        st.stats.q6 = wrapping_add(st.stats.q6, 1);
+    } else if queue == 7 {
+        st.stats.q7 = wrapping_add(st.stats.q7, 1);
+    }
+}
+
+// Zeroes `buf[start..end]`.
+fn blk_zero(in st: BlkState, inout buf: Slice[u8], start: u64, end: u64) {
+    let mut at = start;
+    loop {
+        if at >= end {
+            break;
+        }
+        let n = min64(wrapping_sub(end, at), BLK_ZERO_BYTES);
+        let _c = buf.try_copy_from(at, in st.zeros[0..n]);
+        at = wrapping_add(at, n);
+    }
+}
+
+// The response of every request: `data_in` bytes (zeros) then the status.
+fn blk_status_only(in st: BlkState, inout out: Slice[u8], data_in: u64, status: u8) -> u64 {
+    blk_zero(in st, inout out, 0, data_in);
+    out.try_set(data_in, status);
+    wrapping_add(data_in, 1)
+}
+
+fn blk_discard_or_zero(
+    inout st: BlkState,
+    inout disk: Slice[u8],
+    in payload: Slice[u8],
+    data_in: u64,
+    discard: bool
+) -> u8 {
+    let mut spans: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](32);
+    for _i in 0..32 {
+        spans.push(0);
+    }
+    let (status, count) = blk_validate_discard_or_zero(
+        disk.len(),
+        st.read_only,
+        in payload,
+        data_in,
+        discard,
+        inout spans[0..32]
+    );
+    if status == BLK_S_OK {
+        for i in 0..count {
+            let s = at(in spans, wrapping_mul(i, 2));
+            let e = at(in spans, wrapping_add(wrapping_mul(i, 2), 1));
+            blk_zero(in st, inout disk, s, e);
+        }
+        if discard {
+            st.stats.discards = wrapping_add(st.stats.discards, 1);
+        } else {
+            st.stats.write_zeroes = wrapping_add(st.stats.write_zeroes, 1);
+        }
+    } else if status == BLK_S_UNSUPP {
+        st.stats.unsupported = wrapping_add(st.stats.unsupported, 1);
+    } else {
+        st.stats.io_errors = wrapping_add(st.stats.io_errors, 1);
+    }
+    status
+}
+
+// One request on queue `queue` (`BlockDevice::handle`): the response goes to
+// `out` (at least `writable` bytes) and its length is returned, which is
+// always `writable`; `BLK_NONE` when there is no room for the status byte.
+pub fn blk_request(
+    inout st: BlkState,
+    inout disk: Slice[u8],
+    inout flushed: Slice[u8],
+    queue: u16,
+    in readable: Slice[u8],
+    writable: u64,
+    inout out: Slice[u8]
+) -> u64 {
+    blk_count_queue(inout st, queue);
+    if writable == 0 || out.len() < writable {
+        return BLK_NONE;
+    }
+    let data_in = wrapping_sub(writable, 1);
+    let rlen = readable.len();
+    let hdr = BLK_HEADER_BYTES;
+    if rlen < BLK_HEADER_BYTES {
+        st.stats.io_errors = wrapping_add(st.stats.io_errors, 1);
+        return blk_status_only(in st, inout out, data_in, BLK_S_IOERR);
+    }
+    let kind = blk_read_u32_le(in readable, 0);
+    let sector = blk_read_u64_le(in readable, 8);
+    let plen = wrapping_sub(rlen, BLK_HEADER_BYTES);
+    if kind == BLK_T_IN {
+        if plen != 0 {
+            st.stats.io_errors = wrapping_add(st.stats.io_errors, 1);
+            return blk_status_only(in st, inout out, data_in, BLK_S_IOERR);
+        }
+        if data_in > 0 {
+            match blk_span(disk.len(), sector, data_in) {
+                Option::Some((s, e)) => {
+                    st.stats.reads = wrapping_add(st.stats.reads, 1);
+                    let _c = out.try_copy_from(0, in disk[s..e]);
+                    out.try_set(data_in, BLK_S_OK);
+                    return writable;
+                },
+                Option::None => {},
+            }
+        }
+        st.stats.io_errors = wrapping_add(st.stats.io_errors, 1);
+        return blk_status_only(in st, inout out, data_in, BLK_S_IOERR);
+    }
+    if kind == BLK_T_OUT {
+        if data_in != 0 {
+            st.stats.io_errors = wrapping_add(st.stats.io_errors, 1);
+            return blk_status_only(in st, inout out, data_in, BLK_S_IOERR);
+        }
+        let mut status = BLK_S_IOERR;
+        if !st.read_only && plen > 0 {
+            match blk_span(disk.len(), sector, plen) {
+                Option::Some((s, _e)) => {
+                    let _c = disk.try_copy_from(s, in readable[hdr..rlen]);
+                    st.stats.writes = wrapping_add(st.stats.writes, 1);
+                    status = BLK_S_OK;
+                },
+                Option::None => {},
+            }
+        }
+        if status != BLK_S_OK {
+            st.stats.io_errors = wrapping_add(st.stats.io_errors, 1);
+        }
+        return blk_status_only(in st, inout out, data_in, status);
+    }
+    if kind == BLK_T_FLUSH && (st.features & BLK_F_FLUSH) != 0 {
+        let _c = flushed.try_copy_from(0, in disk);
+        st.stats.flushes = wrapping_add(st.stats.flushes, 1);
+        return blk_status_only(in st, inout out, data_in, BLK_S_OK);
+    }
+    if kind == BLK_T_GET_ID && data_in >= BLK_ID_BYTES {
+        blk_status_only(in st, inout out, data_in, BLK_S_OK);
+        let _c = out.try_copy_from(0, in st.id.as_slice());
+        return writable;
+    }
+    if kind == BLK_T_DISCARD && (st.features & BLK_F_DISCARD) != 0 {
+        let s = blk_discard_or_zero(inout st, inout disk, in readable[hdr..rlen], data_in, true);
+        return blk_status_only(in st, inout out, data_in, s);
+    }
+    if kind == BLK_T_WRITE_ZEROES && (st.features & BLK_F_WRITE_ZEROES) != 0 {
+        let s = blk_discard_or_zero(inout st, inout disk, in readable[hdr..rlen], data_in, false);
+        return blk_status_only(in st, inout out, data_in, s);
+    }
+    st.stats.unsupported = wrapping_add(st.stats.unsupported, 1);
+    blk_status_only(in st, inout out, data_in, BLK_S_UNSUPP)
+}

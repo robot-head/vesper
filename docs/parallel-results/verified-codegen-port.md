@@ -177,9 +177,176 @@ proposals, is a different module and is not part of this port.
 
 **Rust lines deleted:** 0. `lower.rs` and `fail.rs` go at the retirement.
 
+## Part 4b: monomorphization
+
+### What changed
+
+- `packages/vesper-verified-codegen/src/mono.ves` ports
+  `src/verified_codegen/mono.rs`. Starting from the entry, it collects the
+  reachable instances `(function, type arguments)` breadth first. Each
+  instance gets a copy of its function with every type substituted
+  (parameters, result, effect arguments, values, locals, instruction and
+  call types) and every direct callee renamed to the callee's instance,
+  `name<T=i64,...>`. The instance limit and the `Unsupported::Generic`
+  errors have the Rust text.
+- An instance's copy shares the input's operand words wherever nothing
+  changes (block headers, terminators, the fip trailer). Only substituted
+  headers, call types and renamed calls get new words.
+- The input is the world and the Place IR after ir_opt
+  (`tests/common/ir_words.rs`), then an extra section: the entry, the
+  instance limit, the generics of the program's functions and the
+  `World::calls` entries of its calls, by name and type index. The output
+  is the program's `put_program` words, which the test decodes with
+  `ir_words::decode_program` and compares by the canonical dump.
+- `front_text` runs monomorphization and then the part 4a lowering in one
+  pass over one input, as `compile` will once evidence passing is ported.
+  The test compares it with Rust's monomorphization, evidence passing and
+  lowering on the programs that evidence passing leaves unchanged.
+- `src/verified_codegen.rs` gains `#[doc(hidden)]` hooks `mono_for_test`,
+  `front_for_test` and `front_timing_for_test`. `prepare` now calls the
+  shared `optimized` step; the steps and their order are unchanged.
+- Not ported yet (part 4c): `handle` expressions, whose nested handler
+  bodies are named by AST spans. For a program with one, the package
+  answers `not ported`.
+
+### Evidence (Linux x86_64 host, release)
+
+| Check | Result |
+|---|---|
+| Monomorphization, corpus programs, optimized and not | **0 of 222 differ** (42 with generic instances or `Generic` errors; 142 not ported) |
+| Monomorphization and lowering in one pass, same corpus | **0 of 212 differ** (144 lowered; 126 not ported) |
+| ABBA, front half over the corpus ×5: Rust mono + evidence + plan + lowering + text, Vesper decode + mono + plan + lowering + text | rust 32.9 ms, vesper 25.0 ms: **0.76x** |
+| ABBA, monomorphization alone (Vesper includes the decode and the output words) | rust 10.5 ms, vesper 16.3 ms: 1.55x |
+
+Monomorphization alone is over the bar because reading and writing the
+IR words costs about as much as the whole Rust pass: an identity round
+trip of the same inputs takes 10-13 ms. That cost is the crossing, which
+Stage 2 removes, so the gate that decides the swap is the front half,
+where the pass runs on the program the lowering reads.
+
+**Rust lines deleted:** 0. `mono.rs` goes at the retirement.
+
+## Part 4c-1: `handle Fail` handlers
+
+### What changed
+
+- `packages/vesper-verified-codegen/src/exprs.ves` reads the expressions of
+  the Place IR's payload pool that the backend needs: closures and `handle`
+  expressions, with their spans, free names, effect, state flag and clause
+  patterns. `tests/self_host_verified_codegen.rs` `expr_rows` writes them
+  right after the program section; the AST stays on the Rust side.
+- `mono.ves` instantiates a handler's nested functions (body, `return`
+  clause, operation clauses) with the parent's arguments.
+- `lower.ves` ports `fail::handler` and the non-resuming `handle Fail[E]`
+  lowering: the handled types join the failure codes, the plan resolves
+  each handler and adds its nested functions, the raise-set fixpoint
+  follows handlers, and a body call jumps to the `raise` clause on the
+  handled code. `assigned_capture` and the continuation check (`reads`,
+  over the free names of nested closures and handlers) have the Rust text.
+- Not ported yet: region blocks and region operations (4c-2), and evidence
+  passing (4c-3). For a program with one, the package answers `not ported`.
+
+### Evidence (Linux x86_64 host, release, `-C target-cpu=native`)
+
+| Check | Result |
+|---|---|
+| Lowering, corpus programs without handler sites, optimized and not | **0 of 278 differ** (186 lowered; 26 not ported, down from 82) |
+| Monomorphization, same corpus | **0 of 364 differ** (none left unported) |
+| Monomorphization and lowering in one pass | **0 of 270 differ** (178 lowered; 26 not ported) |
+| ABBA, lowering ×5 | rust 26.5 ms, vesper 30.3 ms: **1.14x** |
+| ABBA, front half ×5 | rust 51.1 ms, vesper 36.2 ms: **0.71x** |
+
+**Rust lines deleted:** 0. `fail.rs` goes at the retirement.
+
+## Part 4c-2: region blocks and region operations
+
+### What changed
+
+- `lower.ves` ports region capabilities: the plan gives each function its
+  row's `r: Region` labels, a region block's body the enclosing ones plus
+  its own (innermost last), and refuses a capability on the entry with the
+  Rust text. A call passes one header pointer word per capability after
+  its arguments; the prologue loads them.
+- Region blocks open a header on the program heap (bump allocation,
+  bounded by `HEAP_WORDS`), call the body like a nested function and close
+  the block with the pin rule. A failure that leaves the body closes the
+  open blocks, innermost first, before it propagates.
+- `Region::box`, `get`, `set` and `used` follow the Rust rows, including
+  the `vesper.region.accounting/1` bound checks. The payload size comes from
+  `@vesper/check-layout` (`Layout::of`).
+- Nothing in the corpus is answered `not ported` any more. Still left: evidence
+  passing (4c-3), which the front test skips by comparing only programs that
+  evidence leaves unchanged.
+
+### Evidence (Linux x86_64 host, release, `-C target-cpu=native`)
+
+| Check | Result |
+|---|---|
+| Lowering, corpus programs without handler sites, optimized and not | **0 of 304 differ** (204 lowered; none not ported, down from 26) |
+| Monomorphization and lowering in one pass | **0 of 296 differ** (196 lowered; none not ported) |
+| ABBA, lowering ×5 | rust 37.9 ms, vesper 37.9 ms: **1.00x** |
+| ABBA, front half ×5 | rust 64.0 ms, vesper 43.5 ms: **0.68x** |
+
+**Rust lines deleted:** 0. `lower.rs` goes at the retirement.
+
+## Part 4c-3: evidence passing
+
+### What changed
+
+- `packages/vesper-verified-codegen/src/evidence.ves` ports
+  `evidence::rewrite` on the monomorphized program. It runs function-value
+  specialization (`specialize_function_arguments`, `substitute_tree`) and
+  `prune`. Tail-resumptive handlers of user effects go through `site`,
+  `tail_resumptive` and `specialize`: clause captures become `$ev<n>.<name>`
+  evidence parameters, operations become clause calls, and effectful
+  callees get `f<E#n>` instances. Region labels are relabelled from `$cap<start>`.
+  Functions are edited by appending rows to the Place IR tables.
+- `lower.ves` takes the `Sites` it returns: one escape code per code and
+  site tag (`Fails::add_escapes`), recoded raise sets in the fixpoint, and
+  `recode_status` after a call of a clause or a handler body.
+- `front_text` is now monomorphization, evidence passing and lowering in
+  one pass. The front test compares every corpus program, including those
+  with handler sites and evidence errors. `FrontOutcome` lost its skip
+  flags.
+
+### Evidence (Linux x86_64 host, release, `-C target-cpu=native`)
+
+| Check | Result |
+|---|---|
+| Monomorphization, evidence passing and lowering in one pass | **0 of 364 differ** (214 lowered; none not ported, up from 296 compared) |
+| ABBA, front half ×5 | rust 90.8 ms, vesper 62.5 ms: **0.69x** |
+
+**Rust lines deleted:** 0. `evidence.rs` goes at the retirement.
+
+## Part 4d-1: `compile` end to end
+
+### What changed
+
+- `compile_words` (lib.ves) is `compile` in one Vesper call. It runs the
+  front half (`front_rows`), the certificate (`certificate::certify`) and
+  the back half (`back`). The back half runs the Rust checks in the Rust
+  order: the heap, riscv64 off Linux, x86-64 off Linux and Windows, the
+  per-row code-byte limit, `finish`, and the container.
+- The lowering now fills a `Lowered` (machine.ves): rows, function starts,
+  names, the entry's result words and label. `put_lowered` prints it as
+  before. `build_words` reads its input into a `Lowered` and calls `back`.
+- `Asm` keeps the first failure and its label (`why`, `why_label`), so
+  every assembler error has its Rust text.
+- `verified_codegen::compile` is split at `compile_prepared`, and
+  `compile_timing_for_test` times it from the optimized program.
+
+### Evidence (Linux x86_64 host, release, `-C target-cpu=native`)
+
+| Check | Result |
+|---|---|
+| `compile` on the corpus, 5 targets × 2 protocols × optimize on/off: bytes, code size, machine instructions, result words, certificate or error text | **0 of 3,640 differ** (2,068 built) |
+| ABBA, `compile` ×5 (host target) | rust 475.0 ms, vesper 490.7 ms: **1.03x** |
+
+**Rust lines deleted:** 0. All of `src/verified_codegen` goes at the retirement.
+
 ## Left
 
 - Optional: compare the per-arch `encoding_listing` text.
-- Part 4b: `mono`. Part 4c: handlers, `evidence` and regions. Part 4d:
+- Part 4d-2:
   `coverage`, `cli`, then the swap into the hybrid and `bootstrap/stage1.rs`, with `bootstrap/stage1.lock`
   reproduced, and the Rust deleted at the retirement.

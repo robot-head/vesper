@@ -450,8 +450,8 @@ checks the same thing, or the Rust test kept as a differential against the
 last Rust commit (the Aura pattern, #977). Say in the PR which tests moved
 where; the reviewer checks the counts.
 
-Rust tests come in three shapes. `python3 scripts/convert-rust-tests.py
-classify` sorts every file under `tests/` and `crates/*/tests/` and counts
+Rust tests come in three shapes. `aspect maintenance convert-rust-tests -- classify`
+sorts every file under `tests/` and `crates/*/tests/` and counts
 what is left (add `--files` for one row per file):
 
 | Shape | What the test does | Where it goes |
@@ -462,13 +462,13 @@ what is left (add `--files` for one row per file):
 
 ### The recipe
 
-1. **Classify.** Run `scripts/convert-rust-tests.py classify --files` and
+1. **Classify.** Run `aspect maintenance convert-rust-tests -- classify --files` and
    find the crate's or module's test files.
 2. **Convert what the converter knows.** Build the compiler
    (`cargo build --release --bin vesper`) and run
 
    ```sh
-   python3 scripts/convert-rust-tests.py convert tests/<file>.rs \
+   aspect maintenance convert-rust-tests -- convert tests/<file>.rs \
        --out tests/vesper/<file> --vesper target/release/vesper --write
    ```
 

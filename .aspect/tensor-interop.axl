@@ -1,0 +1,233 @@
+"""Regenerate Tensor GGUF and safetensors fixtures independently of Vesper."""
+
+load("@std//base64.axl", "base64")
+load("./lib/binary-fixture.axl", "le", "read_le", "write_bytes")
+load("./lib/ieee-reference.axl", "F32", "literal")
+load("./lib/process.axl", "root_path", "scratch_dir")
+load("./lib/tensor-reference.axl", "MASK32", "as_half", "dequantize", "fp8_decode", "fp8_encode", "half", "integers", "mxfp4", "packed", "q4_0", "q8_0", "units")
+
+_PATH = "/crates/vesper-tensor"
+_FORMATS = {"q8_0": (8, 32, 34, q8_0), "q4_0": (2, 32, 18, q4_0), "mxfp4": (39, 32, 17, mxfp4)}
+_USAGE = "aspect crate tensor make-interop -- [--output DIRECTORY]"
+
+def _require(value, message):
+    if not value:
+        fail(message)
+
+def _padding(length, boundary):
+    return bytes([0] * ((-length) % boundary))
+
+def _string(text):
+    data = bytes(text)
+    return le(len(data), 8) + data
+
+def _meta(type, value):
+    if type == 8:
+        return _string(value)
+    return le(value, {4: 4, 5: 4, 6: 4, 7: 1, 10: 8}[type])
+
+def _gguf(arch, metadata, tensors):
+    metadata = [("general.architecture", 8, arch)] + metadata
+    header = bytes("GGUF") + le(3, 4) + le(len(tensors), 8) + le(len(metadata), 8)
+    for key, type, value in metadata:
+        header += _string(key) + le(type, 4)
+        if type == 9:
+            elem, values = value
+            header += le(elem, 4) + le(len(values), 8)
+            for item in values:
+                header += _meta(elem, item)
+        else:
+            header += _meta(type, value)
+    offset = 0
+    bodies = []
+    for name, shape, type, data in tensors:
+        header += _string(name) + le(len(shape), 4) + packed(reversed(shape), 8) + le(type, 4) + le(offset, 8)
+        padded = data + _padding(len(data), 32)
+        bodies.append(padded)
+        offset += len(padded)
+    result = header + _padding(len(header), 32)
+    for body in bodies:
+        result += body
+    return result
+
+def _tensor(dtype, shape, data):
+    return struct(type = dtype, shape = shape, data = data)
+
+def _safetensors(tensors):
+    keys = sorted(tensors, key = lambda name: (-{"F32": 4, "F8_E4M3": 1, "F8_E5M2": 1, "U8": 0}[tensors[name].type], name))
+    header, offset = {}, 0
+    for name in keys:
+        row = tensors[name]
+        header[name] = {"dtype": row.type, "shape": row.shape, "data_offsets": [offset, offset + len(row.data)]}
+        offset += len(row.data)
+    encoded = bytes(json.encode(header))
+    encoded += bytes([32] * ((-len(encoded)) % 8))
+    result = le(len(encoded), 8) + encoded
+    for name in keys:
+        result += tensors[name].data
+    return result
+
+def _quant(values, width, encode):
+    blocks = [encode(values[index:index + width]) for index in range(0, len(values), width)]
+    out = bytes([])
+    for block in blocks:
+        out += block
+    return out
+
+def _interop(ctx, root):
+    source = json.decode(ctx.std.fs.read_to_string(root + _PATH + "/fixtures/interop-source.json"))
+    metadata = [
+        ("interop.string", 8, "héllo ▁world"), ("interop.u32", 4, 4000000000), ("interop.i32", 5, -7),
+        ("interop.f32", 6, literal("0.15625", F32)), ("interop.bool", 7, 1), ("interop.u64", 10, 1099511627776),
+        ("interop.strings", 9, (8, ["a", "▁b", "<0x0A>"])), ("interop.ints", 9, (5, [1, 2, 3])),
+    ]
+    gguf, safe = [], {}
+    for name in ["f32", "vec", "f16", "bf16", "q8_0", "q4_0", "mxfp4", "q4_k"]:
+        row = source[name]
+        shape, data = row["shape"], base64.decode(row["data"])
+        if name == "q4_k":
+            format = 12
+            reconstructed = [value for index in range(0, len(data), 144) for value in dequantize(data[index:index + 144], name)]
+            original = None
+        else:
+            original = data
+            values = integers(data, 4)
+            if name in ["f32", "vec"]:
+                format, reconstructed = 0, values
+                original = None
+            elif name == "f16":
+                format = 1
+                words = [as_half(value) for value in values]
+                reconstructed = [half(value) for value in words]
+                data = packed(words, 2)
+                original = None
+            elif name == "bf16":
+                format = 30
+                words = [(value + 32767 + ((value >> 16) & 1)) >> 16 for value in values]
+                reconstructed = [word * 65536 for word in words]
+                data = packed(words, 2)
+            else:
+                format, width, stride, encode = _FORMATS[name]
+                data = _quant(values, width, encode)
+                reconstructed = [value for index in range(0, len(data), stride) for value in dequantize(data[index:index + stride], name)]
+        gguf.append((name, shape, format, data))
+        safe["dequant." + name] = _tensor("F32", shape, packed(reconstructed, 4))
+        if original != None:
+            safe["source." + name] = _tensor("F32", shape, original)
+            safe["bytes." + name] = _tensor("U8", [len(data)], data)
+    samples = integers(base64.decode(source["fp8.samples"]["data"]), 4)
+    for kind, dtype, limit in [("e4m3", "F8_E4M3", 448), ("e5m2", "F8_E5M2", 57344)]:
+        prefix = "fp8." + kind + "."
+        codes = [fp8_decode(value, kind) for value in range(256)]
+        largest = units(limit)
+        inputs = [value for value in samples if (value & MASK32) <= largest]
+        encoded = bytes([fp8_encode(value, kind) for value in inputs])
+        safe[prefix + "decoded"] = _tensor("F32", [256], packed(codes, 4))
+        safe[prefix + "inputs"] = _tensor("F32", [len(inputs)], packed(inputs, 4))
+        safe[prefix + "encoded"] = _tensor("U8", [len(inputs)], encoded)
+        safe[prefix + "as_dtype"] = _tensor(dtype, [16], encoded[:16])
+    return _gguf("interop", metadata, gguf), _safetensors(safe)
+
+def _model_tensors(data, dim, hidden, layers, kv_dim, vocab):
+    position = [28]
+
+    def take(rows, columns):
+        size = rows * columns * 4
+        start = position[0]
+        position[0] += size
+        return data[start:start + size]
+
+    embeddings = take(vocab, dim)
+    specs = [
+        ("attn_norm", 1, dim, False), ("attn_q", dim, dim, True),
+        ("attn_k", kv_dim, dim, True), ("attn_v", kv_dim, dim, True),
+        ("attn_output", dim, dim, True), ("ffn_norm", 1, dim, False),
+        ("ffn_gate", hidden, dim, True), ("ffn_down", dim, hidden, True), ("ffn_up", hidden, dim, True),
+    ]
+    arrays = [take(layers * rows, columns) for _, rows, columns, _ in specs]
+    tensors = [("token_embd.weight", [vocab, dim], 0, embeddings)]
+    for layer in range(layers):
+        for index, spec in enumerate(specs):
+            name, rows, columns, matrix = spec
+            size = rows * columns * 4
+            raw = arrays[index][layer * size:(layer + 1) * size]
+            format = 0
+            if matrix and columns % 32 == 0:
+                raw = _quant(integers(raw, 4), 32, q8_0)
+                format = 8
+            shape = [rows, columns] if matrix else [columns]
+            tensors.append(("blk.%d.%s.weight" % (layer, name), shape, format, raw))
+    tensors.append(("output_norm.weight", [dim], 0, take(1, dim)))
+    return tensors, position[0]
+
+def _stories(ctx, root):
+    binary = ctx.std.fs.open(root + _PATH + "/models/stories260K.bin").read()
+    dim, hidden, layers, heads, kv_heads, vocab, context = [read_le(binary, index, 4) for index in range(0, 28, 4)]
+    _require(vocab < 2147483648, "Expected shared embedding weights")
+    hd = dim // heads
+    tensors, position = _model_tensors(binary, dim, hidden, layers, kv_heads * hd, vocab)
+    _require(position + 4 * context * hd == len(binary), "Unexpected checkpoint dimensions")
+    tokenizer = ctx.std.fs.open(root + _PATH + "/models/tok512.bin").read()
+    position = 4
+    pieces, scores = [], []
+    for _ in range(vocab):
+        scores.append(read_le(tokenizer, position, 4))
+        size = read_le(tokenizer, position + 4, 4)
+        position += 8
+        pieces.append(str(tokenizer[position:position + size]).replace(" ", "▁"))
+        position += size
+    _require(position == len(tokenizer), "Unexpected vocabulary length")
+    metadata = [
+        ("llama.context_length", 4, context), ("llama.embedding_length", 4, dim),
+        ("llama.feed_forward_length", 4, hidden), ("llama.block_count", 4, layers),
+        ("llama.attention.head_count", 4, heads), ("llama.attention.head_count_kv", 4, kv_heads),
+        ("llama.rope.dimension_count", 4, hd), ("llama.attention.layer_norm_rms_epsilon", 6, literal("1e-5", F32)),
+        ("llama.rope.freq_base", 6, literal("10000", F32)), ("tokenizer.ggml.model", 8, "llama"),
+        ("tokenizer.ggml.tokens", 9, (8, pieces)), ("tokenizer.ggml.scores", 9, (6, scores)),
+        ("tokenizer.ggml.bos_token_id", 4, 1), ("tokenizer.ggml.eos_token_id", 4, 2),
+    ]
+    return _gguf("llama", metadata, tensors)
+
+def _generate(ctx, root, output):
+    interop, expected = _interop(ctx, root)
+    stories = _stories(ctx, root)
+    ctx.std.fs.create_dir_all(output)
+    for name, data in [
+        ("interop.gguf", interop), ("interop-expected.safetensors", expected), ("stories260K-q8_0.gguf", stories),
+    ]:
+        write_bytes(ctx, output + "/" + name, data)
+
+def _run(ctx):
+    root = ctx.std.env.aspect_root_dir()
+    values = ctx.args.tool_args
+    if values in [["--help"], ["-h"]]:
+        ctx.std.io.stdout.write(_USAGE + "\n")
+        return 0
+    output = root + _PATH + "/fixtures"
+    if values:
+        if len(values) != 2 or values[0] != "--output":
+            ctx.std.process.exit(2, _USAGE)
+        output = root_path(ctx.std.env.current_dir(), values[1])
+    _generate(ctx, root, output)
+    return 0
+
+def _test(ctx):
+    root = ctx.std.env.aspect_root_dir()
+    output = scratch_dir(ctx, "vesper-tensor-interop-test-")
+    _generate(ctx, root, output)
+    for name in ["interop.gguf", "interop-expected.safetensors", "stories260K-q8_0.gguf"]:
+        actual = ctx.std.fs.open(output + "/" + name).read()
+        expected = ctx.std.fs.open(root + _PATH + "/fixtures/" + name).read()
+        _require(actual == expected, "Independent tensor fixture differs for " + name)
+    ctx.std.io.stdout.write("Reproduced the tensor interop fixtures and model checkpoint byte for byte\n")
+    return 0
+
+make_tensor_interop = task(
+    kind = "make-interop", group = ["crate", "tensor"], summary = "Regenerate independent GGUF and safetensors files",
+    implementation = _run, args = {"tool_args": args.trailing_var_args(description = _USAGE)},
+)
+
+test_tensor_interop = task(
+    kind = "tensor-interop-fixtures", group = ["ci", "tests"], summary = "Compare generated interop fixtures with the committed independent bytes",
+    implementation = _test,
+)

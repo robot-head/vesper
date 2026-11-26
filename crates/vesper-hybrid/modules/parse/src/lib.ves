@@ -32,6 +32,9 @@
 
 // @export abi 4
 
+use @vesper/ast::words::{
+    put_ast_words
+};
 use @vesper/ast::lower::{
     lower_source
 };
@@ -39,13 +42,6 @@ use @vesper/front::Diags;
 use @vesper/front::lex::{
     max_source_bytes,
     token_end
-};
-use self::words::{
-    pack,
-    put_ast,
-    u32_at,
-    u8_at,
-    w
 };
 use @vesper/front::diag::{
     limit_message_observed
@@ -72,6 +68,46 @@ fn module_kind() -> u64 {
 
 fn error_kind() -> u64 {
     69
+}
+
+fn w(x: u32) -> u64 {
+    widen_u64(x)
+}
+
+fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Bytes `from..to` of `b`, eight per word, little-endian.
+fn pack(inout o: ChunkSeq[u64], in b: Slice[u8], from: u64, to: u64) {
+    let mut acc: u64 = 0;
+    let mut k: u32 = 0;
+    for i in from..to {
+        let c = match b.try_get(i) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        acc = acc | wrapping_shl_u64(c, wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == 8 {
+            o.push(acc);
+            acc = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        o.push(acc);
+    }
 }
 
 fn token_word(kind: u64, start: u64, end: u64) -> u64 {
@@ -163,6 +199,6 @@ pub fn parse_words(in source: Str) -> ChunkSeq[u64] {
     // A halted or limited parse lowers nothing: its arenas hold the empty
     // module, which reads back as `Module::default()`.
     o.push(1);
-    put_ast(inout o, in l.ast);
+    put_ast_words(inout o, in l.ast);
     o
 }

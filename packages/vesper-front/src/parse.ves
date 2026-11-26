@@ -2261,6 +2261,11 @@ fn block_inner(inout p: P) -> Ex {
         }
         if p.surface && at_sugar_phrase(in p) {
             sugar_phrase(inout p, NodeKind::SugarStmt);
+            // A statement of the block under template scopes, of height 1
+            // (Rust records no height for it).
+            if p.template_scopes {
+                h = hmax(h, 1);
+            }
             continue;
         }
         if eat(inout p, k_let()) {
@@ -3585,6 +3590,7 @@ fn parse_tokens_new(
         item_start: 0,
         expansion: 0,
         surface: false,
+        template_scopes: false,
         before_handler_in: false,
         group_end: ChunkSeq::new[u32]()
     };
@@ -3818,8 +3824,13 @@ fn after_phrase_group(in p: P, open: u64) -> u64 {
     }
 }
 
-fn head_word(k: u8) -> bool {
+pub fn head_word(k: u8) -> bool {
     k == k_lower() || k == k_state() || k == k_with() || k == k_linear() || k == k_eff()
+}
+
+// `sugar_ops::core_operator(k).is_some()`: `k` is a core infix operator.
+pub fn core_operator_kind(k: u8) -> bool {
+    precedence(k) != 0
 }
 
 // `sugar_ops::core_operator`: the Rust level of a core infix operator.
@@ -3829,7 +3840,7 @@ fn core_level(k: u8) -> u64 {
 
 // `sugar_ops::sugar_operator` at token `start`: (level, end) of an
 // unbroken `|>`, `|?>` or dotted operator, else (0, 0).
-fn sugar_operator_at(in p: P, start: u64) -> (u64, u64) {
+pub fn sugar_operator_at(in p: P, start: u64) -> (u64, u64) {
     if inc(start) >= p.ntok {
         return (0, 0);
     }
@@ -3979,13 +3990,16 @@ fn tagged_literal(inout p: P, start: u64) -> Ex {
     trivia(inout p);
     start_node(inout p, NodeKind::TaggedLiteral);
     bump(inout p);
+    let mut h: u32 = 0;
     if at(in p, k_string()) {
         bump(inout p);
+    } else if p.template_scopes {
+        h = block(inout p).h;
     } else {
         sugar_group(inout p);
     }
     finish_node(inout p);
-    ex(x_tuple(), start, last_end(in p), 0)
+    ex(x_tuple(), start, last_end(in p), h)
 }
 
 // `Parser::macro_delimited_tokens`.
@@ -4178,6 +4192,9 @@ fn pattern_phrase(inout p: P) {
     let mark = p.binds.len();
     trivia(inout p);
     start_node(inout p, NodeKind::SugarPat);
+    if p.template_scopes {
+        err(inout p, in "nested pattern sugar requires pattern expansion before binding analysis");
+    }
     bump(inout p);
     loop {
         let k = kind(in p);
@@ -4268,9 +4285,9 @@ fn sugar_phrase(inout p: P, slot: u32) -> Ex {
         bump(inout p);
     }
     bump(inout p);
-    sugar_heads(inout p);
+    let mut h = sugar_heads(inout p);
     if at(in p, k_l_brace()) {
-        sugar_group(inout p);
+        h = hmax(h, phrase_body(inout p));
         loop {
             if slot == NodeKind::SugarItem
                 || !same_line(in p)
@@ -4280,8 +4297,8 @@ fn sugar_phrase(inout p: P, slot: u32) -> Ex {
             trivia(inout p);
             start_node(inout p, NodeKind::SugarContinuation);
             bump(inout p);
-            sugar_heads(inout p);
-            sugar_group(inout p);
+            h = hmax(h, sugar_heads(inout p));
+            h = hmax(h, phrase_body(inout p));
             finish_node(inout p);
         }
         if slot == NodeKind::SugarStmt {
@@ -4293,7 +4310,23 @@ fn sugar_phrase(inout p: P, slot: u32) -> Ex {
         err(inout p, in "expected a braced group after the sugar phrase");
     }
     finish_node(inout p);
-    ex(x_tuple(), start, last_end(in p), 0)
+    // Under template scopes the core parser sees a block of the operands.
+    if p.template_scopes {
+        ex(x_block(), start, last_end(in p), h)
+    } else {
+        ex(x_tuple(), start, last_end(in p), 0)
+    }
+}
+
+// `Parser::phrase_body`: a block under template scopes (its height), else
+// a token group.
+fn phrase_body(inout p: P) -> u32 {
+    if p.template_scopes {
+        block(inout p).h
+    } else {
+        sugar_group(inout p);
+        0
+    }
 }
 
 // `Parser::at_bracketed_head_word`: `scratch tmp[256]` (a head word with
@@ -4317,8 +4350,10 @@ fn at_bracketed_head_word(in p: P) -> bool {
     !(k == k_l_paren() || k == k_dot() || k == k_question()) && precedence(k) == 0
 }
 
-// `Parser::sugar_heads`.
-fn sugar_heads(inout p: P) {
+// `Parser::sugar_heads`: the height of the operands it reads (the
+// statements of the phrase's block under template scopes).
+fn sugar_heads(inout p: P) -> u32 {
+    let mut h: u32 = 0;
     loop {
         let k = kind(in p);
         if k == k_l_brace()
@@ -4328,7 +4363,7 @@ fn sugar_heads(inout p: P) {
             || k == k_r_paren()
             || k == k_r_bracket()
             || k == k_comma() {
-            return;
+            return h;
         }
         let before = p.pos;
         if k == k_let() {
@@ -4337,26 +4372,32 @@ fn sugar_heads(inout p: P) {
             pattern(inout p);
             p.binds.truncate(mark);
             expect(inout p, k_eq());
-            restricted(inout p);
+            h = hmax(h, restricted(inout p).h);
         } else if k == k_in() || k == k_inout() || k == k_sink() || at_lower(in p, 0, in "out") {
             bump(inout p);
             let old = p.no_struct;
             p.no_struct = true;
-            postfix(inout p, false);
+            h = hmax(h, postfix(inout p, false).h);
             p.no_struct = old;
         } else if k == k_l_paren() {
             bump(inout p);
-            args(inout p, false);
+            h = hmax(h, args(inout p, false));
             expect(inout p, k_r_paren());
         } else if k == k_l_bracket() {
+            if p.template_scopes {
+                err(
+                    inout p,
+                    in "raw phrase headers require typed hole matching before binding analysis"
+                );
+            }
             sugar_group(inout p);
         } else if k == k_else() || at_bracketed_head_word(in p) {
             bump(inout p);
         } else {
-            restricted(inout p);
+            h = hmax(h, restricted(inout p).h);
         }
         if p.pos == before {
-            return;
+            return h;
         }
     }
 }
@@ -4611,9 +4652,28 @@ pub fn parse_surface_tokens(
     max_depth: u64,
     include_tests: bool
 ) -> P {
+    parse_profile_tokens(in source, t, d, max_diag, max_depth, include_tests, false)
+}
+
+// `parse_template_scopes` (the surface profile under the default limits,
+// tests parsed, with template scopes) over `t`.
+pub fn parse_template_tokens(in source: Slice[u8], sink t: Tokens, sink d: Diags) -> P {
+    parse_profile_tokens(in source, t, d, max_diagnostics(), hard_depth(), true, true)
+}
+
+fn parse_profile_tokens(
+    in source: Slice[u8],
+    sink t: Tokens,
+    sink d: Diags,
+    max_diag: u64,
+    max_depth: u64,
+    include_tests: bool,
+    template_scopes: bool
+) -> P {
     let nsyms = inc(t.sym_start.len());
     let mut p = parse_tokens_new(in source, t, d, nsyms, max_diag, max_depth);
     p.surface = true;
+    p.template_scopes = template_scopes;
     start_node(inout p, NodeKind::Module);
     let ntok = p.ntok;
     if p.t.limited {

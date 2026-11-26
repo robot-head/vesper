@@ -11,9 +11,7 @@ use vesper::ast::{Diagnostic, Module};
 use vesper::packages::{Assembled, Loading, PackageDiagnostic};
 
 // The `ast` section reader of the parse swap.
-#[allow(dead_code)]
-#[path = "../parse_words.rs"]
-mod parse_words;
+use super::parse::parse_words;
 
 use super::{Registry, Swap, env_off, on, open, stats};
 
@@ -138,7 +136,7 @@ pub(crate) fn driver_assembled(
     let mut module = Module::default();
     for _ in 0..r.count() {
         let _file = r.next();
-        let m = parse_words::read_module(words, &mut r.at);
+        let m = parse_words::read_ast_section(words, &mut r.at).module;
         module.items.extend(m.items);
         module.trait_bounds.extend(m.trait_bounds);
         module.model_uses.extend(m.model_uses);

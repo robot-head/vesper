@@ -1,6 +1,7 @@
-//! The Vesper virtio-blk span math, discard/write-zeroes validation, and
-//! configuration-space encoder against the Rust reference (under `vesper-port`).
-#![cfg(feature = "vesper-port")]
+//! The Vesper virtio-blk device's span math, discard/write-zeroes
+//! validation and configuration space against the rules of virtio-v1.2
+//! §5.2 (the Rust device it replaced is compared in
+//! src/port_reference_tests/block.rs).
 
 use vesper_aether::devices::block::{
     BlockDevice, SECTOR_BYTES, VIRTIO_BLK_WRITE_ZEROES_FLAG_UNMAP,
@@ -29,7 +30,15 @@ fn span_and_config_match_rust() {
         (0, 513),
         (u64::MAX / 512, 1024),
     ] {
-        let port = dev.span_reference(sector, len);
+        let mut d =
+            BlockDevice::new(vec![0xAA; 64 * SECTOR_BYTES as usize], false, "test-disk").unwrap();
+        let mut req = [0u8; 16];
+        req[8..16].copy_from_slice(&sector.to_le_bytes());
+        let resp = d.handle_for_port_test(&req, len + 1).unwrap();
+        let port = (*resp.last().unwrap() == 0).then(|| {
+            let s = (sector * SECTOR_BYTES) as usize;
+            s..s + len as usize
+        });
         let expected = if len % SECTOR_BYTES != 0 {
             None
         } else {
@@ -88,32 +97,31 @@ fn discard_and_write_zeroes_match_rust() {
         (false, false, seg(0, 1, 0).to_vec(), 1),
     ];
 
-    for (ro, discard, payload, data_in) in cases {
-        let mut dev_ref =
+    // OK, IOERR, IOERR, UNSUPP, UNSUPP, OK, IOERR, IOERR, IOERR.
+    let want = [0u8, 1, 1, 2, 2, 0, 1, 1, 1];
+    for ((ro, discard, payload, data_in), want) in cases.iter().zip(want) {
+        let mut dev =
             BlockDevice::new(vec![0x5A; 64 * SECTOR_BYTES as usize], *ro, "test-disk").unwrap();
-        let mut dev_port =
-            BlockDevice::new(vec![0x5A; 64 * SECTOR_BYTES as usize], *ro, "test-disk").unwrap();
-        let ref_status = dev_ref.discard_or_zero_reference(payload, *data_in, *discard);
-        // Call through the port via `vesper_aether::devices::block::BlockDevice`
-        // by exercising `discard_or_zero` indirectly or comparing against ref:
-        let port_status = {
-            // `BlockDevice::handle` with VIRTIO_BLK_T_DISCARD (11) or WRITE_ZEROES (13)
-            let kind = if *discard { 11u32 } else { 13u32 };
-            let mut req = Vec::with_capacity(16 + payload.len());
-            req.extend_from_slice(&kind.to_le_bytes());
-            req.extend_from_slice(&0u32.to_le_bytes());
-            req.extend_from_slice(&0u64.to_le_bytes());
-            req.extend_from_slice(payload);
-            // Activate with DISCARD + WRITE_ZEROES features.
-            dev_port.activate((1 << 13) | (1 << 14));
-            let resp = dev_port.handle_for_port_test(&req, *data_in + 1).unwrap();
-            *resp.last().unwrap()
-        };
-        assert_eq!(port_status, ref_status);
-        if ref_status == 0 {
-            assert_eq!(dev_port.disk(), dev_ref.disk());
+        let kind = if *discard { 11u32 } else { 13u32 };
+        let mut req = Vec::with_capacity(16 + payload.len());
+        req.extend_from_slice(&kind.to_le_bytes());
+        req.extend_from_slice(&0u32.to_le_bytes());
+        req.extend_from_slice(&0u64.to_le_bytes());
+        req.extend_from_slice(payload);
+        // Activate with DISCARD + WRITE_ZEROES features.
+        dev.activate((1 << 13) | (1 << 14));
+        let resp = dev.handle_for_port_test(&req, *data_in + 1).unwrap();
+        let status = *resp.last().unwrap();
+        assert_eq!(status, want, "{payload:?}");
+        let zeroed: usize = dev.disk().iter().filter(|&&b| b == 0).count();
+        if status == 0 {
+            let sectors: u64 = payload
+                .chunks(16)
+                .map(|c| u64::from(u32::from_le_bytes(c[8..12].try_into().unwrap())))
+                .sum();
+            assert_eq!(zeroed as u64, sectors * SECTOR_BYTES);
         } else {
-            assert!(dev_port.disk().iter().all(|&b| b == 0x5A));
+            assert_eq!(zeroed, 0);
         }
     }
 }

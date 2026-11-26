@@ -128,16 +128,34 @@ pub fn decode(source: &str, words: &[u64]) -> Parse {
     }
 }
 
-/// Reads one `ast` section (`put_ast` of modules/parse/src/words.ves) at
-/// `*at`, and moves `*at` past it: the Vesper driver's assembled modules
-/// (swap/assemble.rs, #1986). The parse swap's copy of this file does not
-/// call it.
-#[allow(dead_code)]
-pub fn read_module(words: &[u64], at: &mut usize) -> Module {
+/// An `ast` section read on its own (the checker swaps' results, #1976):
+/// the module, and the names its symbols index for the side tables that
+/// follow the section.
+pub struct AstSection {
+    pub module: Module,
+    text: String,
+    starts: Vec<u64>,
+}
+
+impl AstSection {
+    /// The text of symbol `sym`.
+    pub fn name(&self, sym: u64) -> &str {
+        let sym = sym as usize;
+        &self.text[self.starts[sym] as usize..self.starts[sym + 1] as usize]
+    }
+}
+
+/// Reads the `ast` section at `words[*at..]` and moves `at` past it.
+pub fn read_ast_section(words: &[u64], at: &mut usize) -> AstSection {
     let mut r = Words { w: words, at: *at };
-    let module = Ast::read(&mut r).module();
+    let ast = Ast::read(&mut r);
     *at = r.at;
-    module
+    let module = ast.module();
+    AstSection {
+        module,
+        starts: ast.starts.to_vec(),
+        text: ast.text,
+    }
 }
 
 /// The arenas of `@vesper/ast`'s `Ast`, in the stream's order.

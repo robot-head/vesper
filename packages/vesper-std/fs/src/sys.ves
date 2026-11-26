@@ -142,9 +142,14 @@ fn open_flags(mode: u32) -> i32 {
 
 // Open `path` in `mode`: its descriptor, or -1 with `err` set.
 pub fn os_open(in path: Slice[u8], mode: u32, inout err: u64) -> i32 eff [Ffi[StdFs]] {
+    open_perm(in path, mode, 438, inout err)
+}
+
+// `os_open` creating a file with permission bits `perm` (less the umask).
+fn open_perm(in path: Slice[u8], mode: u32, perm: u32, inout err: u64) -> i32 eff [Ffi[StdFs]] {
     let flags = open_flags(mode);
     loop {
-        match StdFs::open(in path, flags, 438) {
+        match StdFs::open(in path, flags, widen_i64(perm)) {
             Result::Ok((fd, e)) => {
                 if fd >= 0 {
                     err = 0;
@@ -161,6 +166,44 @@ pub fn os_open(in path: Slice[u8], mode: u32, inout err: u64) -> i32 eff [Ffi[St
             },
         }
     }
+}
+
+// Copy the file `from` to `to` as `std::fs::copy` does on Unix: `to` is
+// created or truncated with the source's bits `perm` as its creation
+// mode and set to exactly them (`fchmod`) before any byte is written, so
+// a private file is never readable by others on its way; the contents
+// then go through a 64 KiB buffer. The bytes copied, with `err` set on
+// failure.
+pub fn os_copy(in from: Slice[u8], in to: Slice[u8], perm: u32, inout err: u64)
+    -> u64 eff [Ffi[StdFs]] {
+    let src = os_open(in from, 0, inout err);
+    if src < 0 {
+        return 0;
+    }
+    let dst = open_perm(in to, 1, perm & 4095, inout err);
+    if dst < 0 {
+        os_close(src);
+        return 0;
+    }
+    let mut total: u64 = 0;
+    let (r, e) = StdFs::fchmod(dst, perm & 4095);
+    if status(r, e, inout err) == 0 {
+        let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        loop {
+            buf.resize(65536, 0);
+            let n = os_read(src, inout buf, 0, inout err);
+            if err != 0 || n == 0 {
+                break;
+            }
+            if os_write(dst, in buf[0..n], inout err) != 0 {
+                break;
+            }
+            total = wrapping_add(total, n);
+        }
+    }
+    os_close(dst);
+    os_close(src);
+    total
 }
 
 // Close a descriptor `open` returned.
@@ -305,6 +348,7 @@ fn metadata_of(in st: Stat) -> Metadata {
         mtime_s: wrapping_i64(stat_word(in st, StdFs::STAT_MTIME_WORD)),
         mtime_ns: wrapping_u32(stat_word(in st, wrapping_add(StdFs::STAT_MTIME_WORD, 1))),
         kind: mode_kind(mode),
+        mode: wrapping_u32(mode & 4095),
     }
 }
 
@@ -314,6 +358,7 @@ fn empty_metadata() -> Metadata {
         mtime_s: 0,
         mtime_ns: 0,
         kind: 0,
+        mode: 0,
     }
 }
 
@@ -336,6 +381,51 @@ pub fn os_metadata(in path: Slice[u8], follow: bool, inout err: u64) -> Metadata
         Result::Err(_) => {
             err = bad_path();
             empty_metadata()
+        },
+    }
+}
+
+// Whether `path` (following symbolic links) is a regular file with an
+// execute bit, as `std` reads `metadata().permissions().mode() & 0o111`.
+pub fn os_is_executable(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    let mut st = new_stat();
+    match StdFs::stat(in path, inout st) {
+        Result::Ok((r, _e)) => {
+            if r != 0 {
+                return false;
+            }
+            let mode = wrapping_shr_u64(
+                stat_word(in st, StdFs::STAT_MODE_WORD),
+                wrapping_u32(StdFs::STAT_MODE_SHIFT)
+            );
+            mode_kind(mode) == kind_file() && (mode & 73) != 0
+        },
+        Result::Err(_) => false,
+    }
+}
+
+// `std::fs::canonicalize`: `realpath(path, NULL)`, copied out and freed;
+// empty with `err` set on failure.
+pub fn os_canonicalize(in path: Slice[u8], inout err: u64) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    match StdFs::realpath(in path, 0) {
+        Result::Ok((at, e)) => {
+            if at == 0 {
+                err = os_error_word(e);
+                return out;
+            }
+            let n = wrapping_sub(StdFs::find_byte(at, 0), at);
+            out.resize(n, 0);
+            if n != 0 {
+                StdFs::copy_from(at, inout out.as_slice_mut());
+            }
+            StdFs::free(at);
+            err = 0;
+            out
+        },
+        Result::Err(_) => {
+            err = bad_path();
+            out
         },
     }
 }
@@ -384,6 +474,17 @@ fn rmdir(in path: Slice[u8], inout err: u64) -> u32 eff [Ffi[StdFs]] {
 
 fn mkdir(in path: Slice[u8], inout err: u64) -> u32 eff [Ffi[StdFs]] {
     path_status(StdFs::mkdir(in path, 511), inout err)
+}
+
+// Create one directory with permission bits `mode` (less the umask), as
+// `DirBuilder::mode`.
+pub fn os_create_dir_mode(in path: Slice[u8], mode: u32, inout err: u64) -> u32 eff [Ffi[StdFs]] {
+    path_status(StdFs::mkdir(in path, mode & 4095), inout err)
+}
+
+// Set the permission bits of `path` (`chmod`, following a symbolic link).
+pub fn os_set_permissions(in path: Slice[u8], mode: u32, inout err: u64) -> u32 eff [Ffi[StdFs]] {
+    path_status(StdFs::chmod(in path, mode & 4095), inout err)
 }
 
 fn is_separator(b: u8) -> bool {

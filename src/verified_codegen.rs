@@ -357,11 +357,12 @@ const EXIT_SPACING: usize = 256 * 1024;
 
 /// The program [`compile`] lowers: `entry`'s world after IR lowering, the
 /// optional `ir_opt` pass, monomorphization and evidence passing.
-fn prepare(
+/// The entry checks, the Place IR and ir_opt: what monomorphization reads.
+fn optimized(
     world: &World,
     entry: &str,
     options: &Options,
-) -> Result<(crate::ir::Program, evidence::Sites), VerifiedError> {
+) -> Result<crate::ir::Program, VerifiedError> {
     let f = world
         .functions
         .get(entry)
@@ -375,20 +376,105 @@ fn prepare(
     if options.optimize {
         crate::ir_opt::optimize(world, &mut program).map_err(VerifiedError::Invalid)?;
     }
+    Ok(program)
+}
+
+/// The instance limit of monomorphization.
+fn max_instances(options: &Options) -> usize {
+    options.max_functions.saturating_mul(4)
+}
+
+/// The program monomorphization reads and its result, for the Vesper
+/// port's differential (#1886, part 4b).
+#[doc(hidden)]
+#[allow(clippy::type_complexity)]
+pub fn mono_for_test(
+    world: &World,
+    entry: &str,
+    options: &Options,
+) -> Result<
+    (
+        crate::ir::Program,
+        usize,
+        Result<crate::ir::Program, VerifiedError>,
+    ),
+    VerifiedError,
+> {
+    let program = optimized(world, entry, options)?;
+    let max = max_instances(options);
+    let mono = mono::monomorphize(world, &program, entry, max);
+    Ok((program, max, mono))
+}
+
+/// What the front half of `compile` (monomorphization, evidence passing
+/// and lowering) gives for one program, for the Vesper port's
+/// differential (#1886, part 4b).
+#[doc(hidden)]
+pub struct FrontOutcome {
+    pub lowered: Result<Lowered, VerifiedError>,
+}
+
+/// The program after ir_opt, the instance limit and the front half's
+/// outcome (or monomorphization's error; an evidence passing error is an
+/// outcome).
+#[doc(hidden)]
+#[allow(clippy::type_complexity)]
+pub fn front_for_test(
+    world: &World,
+    entry: &str,
+    options: &Options,
+) -> Result<
+    (
+        crate::ir::Program,
+        usize,
+        Result<FrontOutcome, VerifiedError>,
+    ),
+    VerifiedError,
+> {
+    let program = optimized(world, entry, options)?;
+    let max = max_instances(options);
+    let outcome = (|| {
+        let mut mono = mono::monomorphize(world, &program, entry, max)?;
+        let sites = match evidence::rewrite(world, &mut mono, &[entry.to_owned()], None) {
+            Ok(sites) => sites,
+            // Evidence passing refused the program.
+            Err(e) => return Ok(FrontOutcome { lowered: Err(e) }),
+        };
+        let lowered = lower_program(world, &mono, entry, options, &sites).map(|(_, lir)| lir);
+        Ok(FrontOutcome { lowered })
+    })();
+    Ok((program, max, outcome))
+}
+
+/// Monomorphization, evidence passing and lowering of an optimized
+/// program (the timing half of the flip gate).
+#[doc(hidden)]
+pub fn front_timing_for_test(
+    world: &World,
+    program: &crate::ir::Program,
+    entry: &str,
+    options: &Options,
+) -> Result<Lowered, VerifiedError> {
+    let mut mono = mono::monomorphize(world, program, entry, max_instances(options))?;
+    let sites = evidence::rewrite(world, &mut mono, &[entry.to_owned()], None)?;
+    lower_program(world, &mono, entry, options, &sites).map(|(_, lir)| lir)
+}
+
+fn prepare(
+    world: &World,
+    entry: &str,
+    options: &Options,
+) -> Result<(crate::ir::Program, evidence::Sites), VerifiedError> {
+    let program = optimized(world, entry, options)?;
     // One copy of every reachable function per instance the checker fixed.
-    let mut program = mono::monomorphize(
-        world,
-        &program,
-        entry,
-        options.max_functions.saturating_mul(4),
-    )?;
+    let mut program = mono::monomorphize(world, &program, entry, max_instances(options))?;
     // Tail-resumptive user-effect handlers by evidence passing.
     let sites = evidence::rewrite(world, &mut program, &[entry.to_owned()], None)?;
     Ok((program, sites))
 }
 
 /// The slot IR of every planned function, by name.
-type Lowered = Vec<(String, Vec<Lir>)>;
+pub type Lowered = Vec<(String, Vec<Lir>)>;
 
 /// The plan and the slot IR of every planned function of `program`.
 fn lower_program(
@@ -461,7 +547,31 @@ pub fn lower_for_test(
 /// Compile `entry` (no parameters) and everything it reaches.
 pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact, VerifiedError> {
     let (program, sites) = prepare(world, entry, options)?;
-    let (plan, lir) = lower_program(world, &program, entry, options, &sites)?;
+    compile_prepared(world, &program, &sites, entry, options)
+}
+
+/// [`compile`] of an optimized program (the timing half of the Vesper
+/// port's end-to-end flip gate).
+#[doc(hidden)]
+pub fn compile_timing_for_test(
+    world: &World,
+    program: &crate::ir::Program,
+    entry: &str,
+    options: &Options,
+) -> Result<Artifact, VerifiedError> {
+    let mut mono = mono::monomorphize(world, program, entry, max_instances(options))?;
+    let sites = evidence::rewrite(world, &mut mono, &[entry.to_owned()], None)?;
+    compile_prepared(world, &mono, &sites, entry, options)
+}
+
+fn compile_prepared(
+    world: &World,
+    program: &crate::ir::Program,
+    sites: &evidence::Sites,
+    entry: &str,
+    options: &Options,
+) -> Result<Artifact, VerifiedError> {
+    let (plan, lir) = lower_program(world, program, entry, options, sites)?;
     let certificate = certificate::check(&lir);
     if let (true, Err(r)) = (options.require_certificate, &certificate) {
         return Err(VerifiedError::Invalid(r.to_string()));

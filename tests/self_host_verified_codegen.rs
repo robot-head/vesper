@@ -17,6 +17,17 @@
 //!   same certificate or rejection on the corpus and on random programs,
 //!   and `validate` the same verdict on mutated certificates.
 //!
+//! - Part 4a: the plan and the lowering must give the same slot IR or
+//!   error text on the corpus (programs without handler sites).
+//! - Part 4b: monomorphization must give the same program (canonical dump)
+//!   or error text on the corpus.
+//!
+//! - Part 4d-1: `compile` end to end (the front half, the certificate and
+//!   the back half in one Vesper call) must give the same artifact bytes,
+//!   code size, machine instruction count, result word count and
+//!   certificate, or the same error text, on the corpus for every target
+//!   and both result protocols.
+//!
 //! - `VERIFIED_CODEGEN_STRIDE=n` keeps every n-th corpus world.
 //! - `CHECK_HARNESS_SPEED=1` runs the ABBA timing (release build).
 #[path = "common/check_harness.rs"]
@@ -1071,10 +1082,10 @@ fn certificate_flip_gate() {
 // `verified_codegen::lowering_for_test`: the program `compile` lowers (after
 // ir_opt, monomorphization and evidence passing), as ir_words encodes it,
 // then the entry, the limits, whether the region prelude is active and the
-// names of the world's functions. The package prints every planned
-// function's rows in the Rust `Debug` form, or the error's text. Programs
-// with `handle` expressions or region operations are part 4c's: the
-// package answers `not ported` for them.
+// names of the world's functions, after the expression rows of the payload
+// pool (`expr_rows`). The package prints every planned function's rows in
+// the Rust `Debug` form, or the error's text. `handle Fail` handlers
+// (part 4c-1) and regions (part 4c-2) are lowered.
 
 fn put_string(s: &str, words: &mut Vec<u64>) {
     words.push(s.len() as u64);
@@ -1091,18 +1102,113 @@ fn lowering_input(
     entry: &str,
     options: &verified::Options,
 ) -> Option<Vec<u8>> {
-    let (mut bytes, _) = ir_words::program_input(world, program)?;
-    let mut words = vec![];
-    put_string(entry, &mut words);
+    if !ir_words::encodable(world, program) {
+        return None;
+    }
+    let mut t = ir_words::Tables::of(program);
+    t.label_names();
+    let section = t.section();
+    let encoded = t.enc.world(world);
+    let mut words = expr_rows(&mut t)?;
+    lowering_extras(world, entry, options, &mut words);
+    let mut bytes = t.enc.finish(&encoded, &section);
+    bytes.extend(bytes_of(&words));
+    Some(bytes)
+}
+
+/// The lowering's extra section: the entry, the limits, whether the region
+/// prelude is active and the names of the world's functions.
+fn lowering_extras(
+    world: &vesper::check::World,
+    entry: &str,
+    options: &verified::Options,
+    words: &mut Vec<u64>,
+) {
+    put_string(entry, words);
     words.push(options.max_functions as u64);
     words.push(options.max_rows as u64);
     words.push(u64::from(vesper::regions::active(world)));
     words.push(world.functions.len() as u64);
     for name in world.functions.keys() {
-        put_string(name, &mut words);
+        put_string(name, words);
     }
-    bytes.extend(bytes_of(&words));
-    Some(bytes)
+}
+
+/// One clause of a `handle` expression: its operation name, patterns
+/// (0 `_`, 1 a name and the name, 2 any other) and body span.
+fn clause_row(t: &mut ir_words::Tables, c: &vesper::ast::Clause, out: &mut Vec<u64>) {
+    use vesper::ast::PatternKind;
+    let n = t.enc.name(&c.name);
+    out.push(n);
+    out.push(c.pats.len() as u64);
+    for p in &c.pats {
+        match &p.kind {
+            PatternKind::Wild => out.push(0),
+            PatternKind::Bind(b) => {
+                out.push(1);
+                let n = t.enc.name(b);
+                out.push(n);
+            }
+            _ => out.push(2),
+        }
+    }
+    out.extend([c.body.span.start as u64, c.body.span.end as u64]);
+}
+
+/// The expressions of the payload pool, by pool index: 0 for an operation;
+/// else 1 (a closure) or 2 (a `handle`), the span and the free names
+/// (`check::free_names`). A `handle` adds its effect (name, label + 1 or
+/// 0, argument types), whether it is stateful, the body span, the `return`
+/// clause and the operation clauses. `None` when a type cannot be encoded.
+fn expr_rows(t: &mut ir_words::Tables) -> Option<Vec<u64>> {
+    use vesper::ast::ExprKind;
+    let items = t.pool.items.clone();
+    let mut out = vec![items.len() as u64];
+    for item in &items {
+        let ir_words::Payload::Expr(e) = item else {
+            out.push(0);
+            continue;
+        };
+        let handle = matches!(e.kind, ExprKind::Handle { .. });
+        out.push(if handle { 2 } else { 1 });
+        out.extend([e.span.start as u64, e.span.end as u64]);
+        let free = vesper::check::free_names(e);
+        out.push(free.len() as u64);
+        for n in &free {
+            let i = t.enc.name(n);
+            out.push(i);
+        }
+        let ExprKind::Handle {
+            effect,
+            state,
+            body,
+            ret,
+            ops,
+        } = &e.kind
+        else {
+            continue;
+        };
+        if !effect.args.iter().all(ir_words::literal_fits) {
+            return None;
+        }
+        let n = t.enc.name(&effect.name);
+        out.push(n);
+        let label = effect.label.as_ref().map_or(0, |l| t.enc.name(l) + 1);
+        out.push(label);
+        out.push(effect.args.len() as u64);
+        for a in &effect.args {
+            let i = t.enc.ty(a);
+            out.push(i);
+        }
+        out.push(u64::from(state.is_some()));
+        out.extend([body.span.start as u64, body.span.end as u64]);
+        clause_row(t, ret, &mut out);
+        out.push(ops.len() as u64);
+        for c in ops {
+            clause_row(t, c, &mut out);
+        }
+    }
+    Some(out)
 }
 
 /// `lower_input`'s text for the Rust lowering's result.
@@ -1234,6 +1340,505 @@ fn lowering_flip_gate() {
                 for _ in 0..5 {
                     for (_, _, input, _) in &cases {
                         std::hint::black_box(lower.text(input));
+                    }
+                }
+            })
+        },
+    );
+    println!(
+        "flip-gate pairs rust={} vesper={}",
+        r.as_nanos(),
+        v.as_nanos()
+    );
+}
+
+// ----- part 4b: monomorphization (mono.ves) ---------------------------------
+//
+// `mono_words` reads the world and the Place IR after ir_opt, then an extra
+// section: the entry, the instance limit, every world function's generics
+// (name, then (name, row) per generic) and `World::calls` ((start, end), then
+// (name, type) per argument). Names and types are indices into the input's
+// tables. It answers 0 and the monomorphized program's
+// words, or 1 and the error's packed text.
+
+/// The input of `mono_words`, and the payload pool its program refers to.
+fn mono_input(
+    world: &vesper::check::World,
+    program: &vesper::ir::Program,
+    entry: &str,
+    max_instances: usize,
+    lowering: Option<&verified::Options>,
+) -> Option<(Vec<u8>, ir_words::Pool)> {
+    if !ir_words::encodable(world, program)
+        || !world
+            .calls
+            .values()
+            .all(|m| m.values().all(ir_words::literal_fits))
+    {
+        return None;
+    }
+    let mut t = ir_words::Tables::of(program);
+    t.label_names();
+    let section = t.section();
+    // Monomorphization reads only the ADTs of the world section (which
+    // names are types), so without the lowering the expression types and
+    // spans stay out.
+    let encoded = if lowering.is_some() {
+        t.enc.world(world)
+    } else {
+        t.enc.world(&vesper::check::World {
+            adts: world.adts.clone(),
+            effects: world.effects.clone(),
+            ..Default::default()
+        })
+    };
+    let mut words = expr_rows(&mut t)?;
+    let e = t.enc.name(entry);
+    words.push(e);
+    words.push(max_instances as u64);
+    // Only functions with a body are instantiated or called by instance,
+    // and only the type arguments of the program's calls are looked up.
+    let functions: Vec<_> = world
+        .functions
+        .iter()
+        .filter(|(name, _)| program.functions.contains_key(*name))
+        .collect();
+    let spans: std::collections::BTreeSet<(usize, usize)> = program
+        .functions
+        .values()
+        .flat_map(|f| &f.blocks)
+        .flat_map(|b| &b.instructions)
+        .filter(|i| matches!(i.op, vesper::ir::Op::Call { .. }))
+        .map(|i| (i.span.start, i.span.end))
+        .collect();
+    let calls: Vec<_> = world
+        .calls
+        .iter()
+        .filter(|(k, _)| spans.contains(k))
+        .collect();
+    words.push(functions.len() as u64);
+    for (name, f) in functions {
+        let n = t.enc.name(name);
+        words.push(n);
+        words.push(f.generics.len() as u64);
+        for g in &f.generics {
+            let n = t.enc.name(&g.name);
+            words.push(n);
+            words.push(u64::from(g.row));
+        }
+    }
+    words.push(calls.len() as u64);
+    for ((start, end), args) in calls {
+        words.push(*start as u64);
+        words.push(*end as u64);
+        words.push(args.len() as u64);
+        for (k, ty) in args {
+            let n = t.enc.name(k);
+            words.push(n);
+            let i = t.enc.ty(ty);
+            words.push(i);
+        }
+    }
+    if let Some(options) = lowering {
+        lowering_extras(world, entry, options, &mut words);
+    }
+    let mut bytes = t.enc.finish(&encoded, &section);
+    bytes.extend(bytes_of(&words));
+    Some((bytes, t.pool))
+}
+
+/// The text both sides compare: the program's canonical dump, or the
+/// error's text.
+fn rust_mono_text(mono: &Result<vesper::ir::Program, verified::VerifiedError>) -> String {
+    match mono {
+        Ok(p) => ir_words::dump(p),
+        Err(e) => format!("error: {e}\n"),
+    }
+}
+
+fn vesper_mono_text(words: &[u64], pool: &ir_words::Pool) -> String {
+    match words.first() {
+        Some(0) => ir_words::dump(&ir_words::decode_program(&words[1..], pool)),
+        Some(_) => unpack_text(&words[1..]),
+        None => "error: empty output\n".to_owned(),
+    }
+}
+
+/// One corpus program's monomorphization case.
+struct MonoCase {
+    name: String,
+    input: Vec<u8>,
+    pool: ir_words::Pool,
+    rust: String,
+}
+
+fn mono_cases(options: &verified::Options) -> Vec<MonoCase> {
+    let mut out = vec![];
+    for case in corpus().iter().step_by(stride()) {
+        let Ok((program, max, mono)) = verified::mono_for_test(&case.world, "main", options) else {
+            continue;
+        };
+        let Some((input, pool)) = mono_input(&case.world, &program, "main", max, None) else {
+            continue;
+        };
+        out.push(MonoCase {
+            name: case.name.clone(),
+            input,
+            pool,
+            rust: rust_mono_text(&mono),
+        });
+    }
+    out
+}
+
+#[test]
+fn mono_matches_rust_on_the_corpus() {
+    let Some(target) = verified::Target::host() else {
+        eprintln!("verified mono: no verified target for this host");
+        return;
+    };
+    let mono = entry("mono_words");
+    let mut bad = 0;
+    let mut compared = 0;
+    let mut generic = 0;
+    let mut not_ported = 0;
+    for optimize in [true, false] {
+        let mut options = verified::Options::new(target);
+        options.optimize = optimize;
+        for case in mono_cases(&options) {
+            let vesper = vesper_mono_text(&mono.words(&case.input), &case.pool);
+            if vesper.starts_with("error: not ported") {
+                not_ported += 1;
+                continue;
+            }
+            compared += 1;
+            if case.rust.contains('<') || case.rust.contains("unsupported Generic") {
+                generic += 1;
+            }
+            if vesper != case.rust {
+                bad += 1;
+                if bad <= 5 {
+                    let d = first_difference(&case.rust, &vesper);
+                    eprintln!(
+                        "verified mono ({}, optimize {optimize}): first difference {d:?}",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "verified mono corpus: {bad} of {compared} programs differ ({generic} with instances or generic errors, {not_ported} not ported)"
+    );
+    println!("flip-gate differential differences={bad} cases={compared}");
+    assert!(compared > 100, "only {compared} corpus programs compared");
+    assert_eq!(bad, 0);
+}
+
+// The front half: monomorphization, evidence passing and the lowering in
+// one Vesper pass (`front_text`), against Rust's, on every corpus program.
+
+/// One corpus program's front-half case.
+struct FrontCase {
+    name: String,
+    world: usize,
+    program: vesper::ir::Program,
+    input: Vec<u8>,
+    rust: String,
+}
+
+fn front_cases(options: &verified::Options) -> Vec<FrontCase> {
+    let mut out = vec![];
+    for (k, case) in corpus().iter().enumerate().step_by(stride()) {
+        let Ok((program, max, outcome)) = verified::front_for_test(&case.world, "main", options)
+        else {
+            continue;
+        };
+        let rust = match outcome {
+            Ok(o) => rust_lowering_text(&o.lowered),
+            Err(e) => format!("error: {e}\n"),
+        };
+        let Some((input, _)) = mono_input(&case.world, &program, "main", max, Some(options)) else {
+            continue;
+        };
+        out.push(FrontCase {
+            name: case.name.clone(),
+            world: k,
+            program,
+            input,
+            rust,
+        });
+    }
+    out
+}
+
+#[test]
+fn front_matches_rust_on_the_corpus() {
+    let Some(target) = verified::Target::host() else {
+        eprintln!("verified front: no verified target for this host");
+        return;
+    };
+    let front = entry("front_text");
+    let mut bad = 0;
+    let mut compared = 0;
+    let mut lowered = 0;
+    let mut not_ported = 0;
+    for optimize in [true, false] {
+        let mut options = verified::Options::new(target);
+        options.optimize = optimize;
+        for case in front_cases(&options) {
+            let vesper = front.text(&case.input);
+            if vesper.starts_with("error: not ported") {
+                not_ported += 1;
+                continue;
+            }
+            compared += 1;
+            if !case.rust.starts_with("error: ") {
+                lowered += 1;
+            }
+            if vesper != case.rust {
+                bad += 1;
+                if bad <= 5 {
+                    let d = first_difference(&case.rust, &vesper);
+                    eprintln!(
+                        "verified front ({}, optimize {optimize}): first difference {d:?}",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "verified front corpus: {bad} of {compared} programs differ ({lowered} lowered, {not_ported} not ported)"
+    );
+    println!("flip-gate differential differences={bad} cases={compared}");
+    assert!(lowered > 20, "only {lowered} corpus programs lower");
+    assert_eq!(bad, 0);
+}
+
+/// ABBA timing of the front half (`CHECK_HARNESS_SPEED=1`): Rust's
+/// monomorphization, evidence passing, plan, lowering and text against the
+/// package's decode, monomorphization, evidence passing, plan, lowering and
+/// text, over the corpus programs the package lowers.
+#[test]
+fn front_flip_gate() {
+    if !speed() {
+        return;
+    }
+    let Some(target) = verified::Target::host() else {
+        return;
+    };
+    let options = verified::Options::new(target);
+    let front = entry("front_text");
+    let cases: Vec<_> = front_cases(&options)
+        .into_iter()
+        .filter(|c| !front.text(&c.input).starts_with("error: not ported"))
+        .collect();
+    let (r, v) = abba(
+        "verified front",
+        &mut || {
+            time(|| {
+                for _ in 0..5 {
+                    for c in &cases {
+                        let world = &corpus()[c.world].world;
+                        let lowered =
+                            verified::front_timing_for_test(world, &c.program, "main", &options);
+                        std::hint::black_box(rust_lowering_text(&lowered));
+                    }
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for _ in 0..5 {
+                    for c in &cases {
+                        std::hint::black_box(front.text(&c.input));
+                    }
+                }
+            })
+        },
+    );
+    println!(
+        "flip-gate pairs rust={} vesper={}",
+        r.as_nanos(),
+        v.as_nanos()
+    );
+}
+
+// Part 4d-1: `compile` end to end (`compile_words`) against Rust's.
+
+fn target_words(options: &verified::Options) -> [u64; 5] {
+    let arch = match options.target.arch {
+        verified::Arch::X86_64 => 0,
+        verified::Arch::Aarch64 => 1,
+        verified::Arch::Riscv64 => 2,
+    };
+    let os = match options.target.os {
+        verified::Os::Linux => 0,
+        verified::Os::MacOs => 1,
+        verified::Os::Windows => 2,
+    };
+    let protocol = match options.protocol {
+        verified::ResultProtocol::ExitStatus => 0,
+        verified::ResultProtocol::Words => 1,
+    };
+    [
+        arch,
+        os,
+        protocol,
+        options.max_code_bytes as u64,
+        u64::from(options.require_certificate),
+    ]
+}
+
+/// `compile_words`'s text and bytes for a Rust `compile` result.
+fn rust_compile(r: &Result<verified::Artifact, verified::VerifiedError>) -> (String, Vec<u8>) {
+    match r {
+        Ok(a) => {
+            let cert = match &a.certificate {
+                Ok(c) => cert_text(c),
+                Err(r) => format!("{r}\n"),
+            };
+            (
+                format!(
+                    "code {}\ninstructions {}\nresult {}\n{cert}",
+                    a.code_len,
+                    a.machine_instructions,
+                    a.result_words.len()
+                ),
+                a.bytes.clone(),
+            )
+        }
+        Err(e) => (format!("error: {e}\n"), vec![]),
+    }
+}
+
+/// The two packings `compile_words` returns.
+fn vesper_compile(compile: &Entry, input: &[u8]) -> (String, Vec<u8>) {
+    let words = compile.words(input);
+    let unpack = |at: usize| -> (Vec<u8>, usize) {
+        let len = words[at] as usize;
+        let n = len.div_ceil(8);
+        let mut b: Vec<u8> = words[at + 1..at + 1 + n]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        b.truncate(len);
+        (b, at + 1 + n)
+    };
+    let (text, at) = unpack(0);
+    let (bytes, _) = unpack(at);
+    (String::from_utf8(text).unwrap(), bytes)
+}
+
+const TRIPLES: [&str; 5] = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "riscv64gc-unknown-linux-gnu",
+];
+
+#[test]
+fn compile_matches_rust_on_the_corpus() {
+    let compile = entry("compile_words");
+    let mut bad = 0;
+    let mut compared = 0;
+    let mut built = 0;
+    for optimize in [true, false] {
+        let mut base = verified::Options::new(verified::Target::from_triple(TRIPLES[0]).unwrap());
+        base.optimize = optimize;
+        for case in front_cases(&base) {
+            let world = &corpus()[case.world].world;
+            for triple in TRIPLES {
+                for protocol in [
+                    verified::ResultProtocol::ExitStatus,
+                    verified::ResultProtocol::Words,
+                ] {
+                    let options = verified::Options {
+                        protocol,
+                        optimize,
+                        ..verified::Options::new(verified::Target::from_triple(triple).unwrap())
+                    };
+                    let rust = rust_compile(&verified::compile(world, "main", &options));
+                    let mut input: Vec<u8> = target_words(&options)
+                        .iter()
+                        .flat_map(|w| w.to_le_bytes())
+                        .collect();
+                    input.extend_from_slice(&case.input);
+                    let vesper = vesper_compile(&compile, &input);
+                    compared += 1;
+                    if !rust.0.starts_with("error: ") {
+                        built += 1;
+                    }
+                    if vesper != rust {
+                        bad += 1;
+                        if bad <= 5 {
+                            let d = first_difference(&rust.0, &vesper.0);
+                            eprintln!(
+                                "verified compile ({}, {triple}, {protocol:?}, optimize {optimize}): text difference {d:?}, {} vs {} bytes",
+                                case.name,
+                                rust.1.len(),
+                                vesper.1.len()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("verified compile corpus: {bad} of {compared} builds differ ({built} built)");
+    println!("flip-gate differential differences={bad} cases={compared}");
+    assert!(built > 200, "only {built} corpus builds");
+    assert_eq!(bad, 0);
+}
+
+/// ABBA timing of `compile` end to end (`CHECK_HARNESS_SPEED=1`, host
+/// target): Rust's monomorphization, evidence passing, lowering,
+/// certificate and back half against `compile_words`, over the corpus
+/// programs the package builds.
+#[test]
+fn compile_flip_gate() {
+    if !speed() {
+        return;
+    }
+    let Some(target) = verified::Target::host() else {
+        return;
+    };
+    let options = verified::Options::new(target);
+    let compile = entry("compile_words");
+    let head: Vec<u8> = target_words(&options)
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    let cases: Vec<_> = front_cases(&options)
+        .into_iter()
+        .map(|c| {
+            let mut input = head.clone();
+            input.extend_from_slice(&c.input);
+            (c, input)
+        })
+        .filter(|(_, input)| !vesper_compile(&compile, input).0.starts_with("error: "))
+        .collect();
+    let (r, v) = abba(
+        "verified compile",
+        &mut || {
+            time(|| {
+                for _ in 0..5 {
+                    for (c, _) in &cases {
+                        let world = &corpus()[c.world].world;
+                        let a =
+                            verified::compile_timing_for_test(world, &c.program, "main", &options);
+                        std::hint::black_box(rust_compile(&a));
+                    }
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for _ in 0..5 {
+                    for (_, input) in &cases {
+                        std::hint::black_box(vesper_compile(&compile, input));
                     }
                 }
             })

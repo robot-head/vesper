@@ -27,6 +27,7 @@ test {
         check_version
     };
     use self::string_tests::check_fmt_string;
+    use self::control_tests::check_core_control;
     use self::traces::{
         map_trace,
         seq_trace
@@ -60,6 +61,7 @@ test {
         r = first_failure(12, check_radix_seq(radix), r);
         r = first_failure(13, check_version(), r);
         r = first_failure(14, check_fmt_string(), r);
+        r = first_failure(15, check_core_control(), r);
         r
     }
 
@@ -127,5 +129,60 @@ test {
 
     fn main() -> u64 {
         run_all()
+    }
+}
+
+test {
+    use @vesper-std/core::secret::{
+        ct_if
+    };
+    copy struct SecU64 {
+        value: u64,
+    }
+
+    copy struct SecMask64 {
+        bits: u64,
+    }
+
+    fn mark(inout log: u64, digit: u64) -> SecU64 eff [ConstTime] {
+        log = wrapping_add(wrapping_mul(log, 10), digit);
+        SecU64 {
+            value: digit
+        }
+    }
+
+    fn mask(inout log: u64, enabled: bool) -> SecMask64 eff [ConstTime] {
+        let three = mark(inout log, 3);
+        let other = SecU64 {
+            value: if enabled {
+                3
+            } else {
+                4
+            }
+        };
+        three.ct_eq(other)
+    }
+
+    fn select_with_log(inout log: u64, enabled: bool) -> SecU64 eff [ConstTime] {
+        ct_if mask(inout log, enabled) {
+            mark(inout log, 1)
+        } else {
+            mark(inout log, 2)
+        }
+    }
+
+    // @case selects_first(true, 1)
+    // @case selects_second(false, 2)
+    fn eager_arms_once_and_select(enabled: bool, expected: u64) -> bool {
+        let mut log: u64 = 0;
+        let got = select_with_log(inout log, enabled);
+        let matches = got
+            .ct_eq(
+                SecU64 {
+                    value: expected
+                }
+            )
+            .declassify_bool();
+        matches && log == 123
     }
 }

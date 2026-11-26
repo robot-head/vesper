@@ -129,9 +129,13 @@ vesper_crate(
             "//crates/vesper-prism-h3:files",
             "//crates/vesper-semver:files",
         ],
+        # sort imports `guard` and `when` from @vesper-std/sugar, so testing
+        # sort/src/unstable.ves resolves sort's manifest and its dependency.
         "test/test_runner_cli": glob([
             "packages/vesper-std/*/src/*.ves",
         ]) + [
+            "packages/vesper-std/sort/Loom.toml",
+            "packages/vesper-std/sugar/Loom.toml",
             "//crates/vesper-crucible:files",
             "//crates/vesper-lean-syntax:files",
             "//crates/vesper-simpulse:files",
@@ -157,6 +161,17 @@ vesper_crate(
             "tests/forge_cli.rs",
             "tests/fmt_cli.rs",
             "tests/package_paths.rs",
+        ]) + ["//crates/vesper-syntax:files"],
+        # SH1 lane 14 (#1157) part 4: @vesper/sugar against sugar_expand on
+        # the rules of the sugar test suites.
+        "test/self_host_sugar": glob([
+            "packages/vesper-front/**",
+            "packages/vesper-sugar/**",
+            "src/forge_frontend/sugar.rs",
+            "src/packages/sugar.rs",
+            "tests/forge_cli.rs",
+            "tests/package_paths.rs",
+            "tests/self_host_front_v2.rs",
         ]) + ["//crates/vesper-syntax:files"],
         # Self-hosting SH1 lane 9 (#1152): the Vesper AST against vesper_core::ast
         # on the same corpus as the front end v2 differential. Anchored globs.
@@ -742,6 +757,14 @@ vesper_crate(
             "src/doctest_extract.rs",
             "tests/doctest_cli.rs",
         ]),
+        # Part 8: the text reports of `vesper test` and `vesper test --doc`
+        # against test_report's Rust renderers, over texts of the .ves files.
+        "test/self_host_test_report": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+        ]),
         # Self-hosting SH4 lane 17 (#1291): @vesper/backend-checks against
         # native_verifiers on the verifier fixtures and the corpus. Anchored
         # globs; @vesper/resonance comes from its crate's package.
@@ -931,6 +954,12 @@ vesper_crate(
         "test/wasm_seed_package_io": [
             "resources:memory:12288",
             "resources:cpu:2",
+        ],
+        # Peaks near 6.8 GiB locally. Unreserved, it ran alongside the other
+        # codegen differentials until the kernel killed the Bazel server
+        # (exit 37) on "Self-host codegen differentials".
+        "test/self_host_native_walk": [
+            "resources:memory:8192",
         ],
         # The CLI audit subprocess permits Lean -M8192 and runs serially.
         "test/proof_audit_cli": [
@@ -1276,6 +1305,7 @@ vesper_crate(
         # The doctest generate differential (#1337) runs 39k snippets twice.
         "test/self_host_doctest_generate": "long",
         "test/self_host_doctest_verdict": "long",
+        "test/self_host_test_report": "long",
         # The backend-checks differential emits every corpus program 4 times.
         "test/self_host_backend_checks": "long",
         # The optimizer policy (#1279) optimizes every corpus world three times.
@@ -1307,6 +1337,16 @@ vesper_package(
     name = "std_sort_package",
     srcs = glob(["packages/vesper-std/sort/src/**/*.ves"]),
     manifest = "packages/vesper-std/sort/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":std_sugar_package"],
+)
+
+# @vesper-std/sugar, the `guard` and `when` sugars, as a path dependency of
+# @vesper-std/sort and any port package that imports them.
+vesper_package(
+    name = "std_sugar_package",
+    srcs = glob(["packages/vesper-std/sugar/src/**/*.ves"]),
+    manifest = "packages/vesper-std/sugar/Loom.toml",
     visibility = ["//visibility:public"],
 )
 
@@ -1491,12 +1531,41 @@ vesper_package(
     deps = ["//crates/vesper-serde:port_package"],
 )
 
+# Self-hosting SH5 lane 18 (#1341): Lean extraction, for the hybrid's
+# `lean_extract` swap.
+vesper_package(
+    name = "lean_extract_package",
+    srcs = glob(["packages/vesper-lean-extract/src/**/*.ves"]),
+    manifest = "packages/vesper-lean-extract/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":place_ir_package",
+        "//crates/vesper-lean-syntax:port_package",
+    ],
+)
+
 vesper_package(
     name = "check_loops_atomics_package",
     srcs = glob(["packages/vesper-check-loops-atomics/src/**/*.ves"]),
     manifest = "packages/vesper-check-loops-atomics/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [":check_data_package"],
+)
+
+# The dyn lowering as a dependency of the hybrid compiler's check_dyn
+# module (front-end wiring slice 4, #1976).
+vesper_package(
+    name = "check_dyn_package",
+    srcs = glob(["packages/vesper-check-dyn/src/**/*.ves"]),
+    manifest = "packages/vesper-check-dyn/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ast_package",
+        ":check_data_package",
+        ":std_arena_package",
+        ":std_intern_package",
+    ],
 )
 
 vesper_package(

@@ -252,6 +252,47 @@ impl Abi for FrErr {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum KwErr {
+    Malformed,
+    Overflow,
+    Proto(u64),
+    Code { code: i64, at: u64, len: i64 },
+}
+
+impl Abi for KwErr {
+    const WORDS: usize = 4;
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            KwErr::Malformed => {
+                out[0] = 0;
+            }
+            KwErr::Overflow => {
+                out[0] = 1;
+            }
+            KwErr::Proto(f0) => {
+                out[0] = 2;
+                Abi::put(f0, &mut out[1..]);
+            }
+            KwErr::Code { code: f0, at: f1, len: f2 } => {
+                out[0] = 3;
+                Abi::put(f0, &mut out[1..]);
+                Abi::put(f1, &mut out[2..]);
+                Abi::put(f2, &mut out[3..]);
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => KwErr::Malformed,
+            1 => KwErr::Overflow,
+            2 => KwErr::Proto(Abi::get(&words[1..])),
+            3 => KwErr::Code { code: Abi::get(&words[1..]), at: Abi::get(&words[2..]), len: Abi::get(&words[3..]) },
+            tag => panic!("invalid KwErr tag {tag} from Vesper"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LogErr {
     Overflow,
     Schema,
@@ -453,6 +494,7 @@ const _: () = assert!(<() as Abi>::WORDS == 1);
 const _: () = assert!(<CdcErr as Abi>::WORDS == 1);
 const _: () = assert!(<CpErr as Abi>::WORDS == 1);
 const _: () = assert!(<FrErr as Abi>::WORDS == 1);
+const _: () = assert!(<KwErr as Abi>::WORDS == 4);
 const _: () = assert!(<LogErr as Abi>::WORDS == 1);
 const _: () = assert!(<ZErr as Abi>::WORDS == 1);
 const _: () = assert!(<bool as Abi>::WORDS == 1);
@@ -479,8 +521,51 @@ unsafe extern "C" {
     fn vesper_flux_frontier_live_holds(live: i64) -> i64;
     fn vesper_flux_frontier_retire(gens: i64, holds: i64, live: *mut u64, watermark: *mut u64, slot: i64, generation: i64, timestamp: i64, fail: *mut u64) -> i64;
     fn vesper_flux_frontier_valid(gens: i64, holds: i64, live: i64, slot: i64, generation: i64, timestamp: i64) -> i64;
+    fn vesper_flux_kw_assignment(data: *mut u64, lens: *mut u64, counts: *mut u64, parts: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_batch_frame(payload: *mut u64, attributes: i64, count: i64, base_ts: i64, max_ts: i64, pid: i64, epoch: i64, sequence: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_batch_head(b: *mut u64, at0: i64) -> i64;
     fn vesper_flux_kw_decode_records(raw: *mut u64, count: i64, base_offset: i64, base_ts: i64, is_control: i64, cur: *mut u64, out_rec: *mut u64, out_hdr: *mut u64, out_ctrl: *mut u64) -> i64;
     fn vesper_flux_kw_encode_records(data: *mut u64, meta: *mut u64, hdr: *mut u64, count: i64, base_ts: i64, out: *mut u64) -> i64;
+    fn vesper_flux_kw_parse_assignment(b: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_add_offsets(version: i64, corr: i64, cid: *mut u64, txn: *mut u64, pid: i64, epoch: i64, group: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_add_partitions(version: i64, corr: i64, cid: *mut u64, txn: *mut u64, pid: i64, epoch: i64, topic: *mut u64, partition: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_api_versions(version: i64, corr: i64, cid: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_create_topic(version: i64, corr: i64, cid: *mut u64, topic: *mut u64, partitions: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_delete_records(version: i64, corr: i64, cid: *mut u64, topic: *mut u64, partition: i64, offset: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_end_txn(version: i64, corr: i64, cid: *mut u64, txn: *mut u64, pid: i64, epoch: i64, commit: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_fetch(version: i64, corr: i64, cid: *mut u64, topic: *mut u64, partition: i64, offset: i64, max_bytes: i64, committed: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_find_coordinator(version: i64, corr: i64, cid: *mut u64, key: *mut u64, kind: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_heartbeat(version: i64, corr: i64, cid: *mut u64, group: *mut u64, generation: i64, member: *mut u64, has_instance: i64, instance: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_init_producer(version: i64, corr: i64, cid: *mut u64, has_txn: i64, txn: *mut u64, timeout_ms: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_join_group(version: i64, corr: i64, cid: *mut u64, group: *mut u64, session_ms: i64, rebalance_ms: i64, member: *mut u64, has_instance: i64, instance: *mut u64, protocol: *mut u64, metadata: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_leave_group(version: i64, corr: i64, cid: *mut u64, group: *mut u64, member: *mut u64, has_instance: i64, instance: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_list_offsets(version: i64, corr: i64, cid: *mut u64, topic: *mut u64, partition: i64, ts: i64, committed: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_metadata(version: i64, corr: i64, cid: *mut u64, topic: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_offset_fetch(version: i64, corr: i64, cid: *mut u64, group: *mut u64, topic: *mut u64, partitions: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_produce(version: i64, corr: i64, cid: *mut u64, has_txn: i64, txn: *mut u64, topic: *mut u64, partition: i64, batch: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_sasl_authenticate(version: i64, corr: i64, cid: *mut u64, msg: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_sasl_handshake(version: i64, corr: i64, cid: *mut u64, mech: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_sync_group(version: i64, corr: i64, cid: *mut u64, group: *mut u64, generation: i64, member: *mut u64, has_instance: i64, instance: *mut u64, data: *mut u64, lens: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_req_txn_offset_commit(version: i64, corr: i64, cid: *mut u64, txn: *mut u64, group: *mut u64, pid: i64, epoch: i64, generation: i64, member: *mut u64, has_instance: i64, instance: *mut u64, data: *mut u64, lens: *mut u64, nums: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_resp_add_partitions(b: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_resp_api_versions(b: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_resp_code(b: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_resp_create_topic(b: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_resp_delete_records(b: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_resp_fetch(b: *mut u64, partition: i64) -> i64;
+    fn vesper_flux_kw_resp_find_coordinator(b: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_resp_header(b: *mut u64, corr: i64, flex: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_resp_init_producer(b: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_resp_join_group(b: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_resp_lead_code(b: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_resp_list_offsets(b: *mut u64, partition: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_resp_metadata(b: *mut u64, topic: *mut u64) -> i64;
+    fn vesper_flux_kw_resp_offset_errors(b: *mut u64, flex: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_resp_offset_fetch(b: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_resp_produce(b: *mut u64, partition: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_resp_sasl_authenticate(b: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_resp_sync_group(b: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_kw_subscription(data: *mut u64, lens: *mut u64, parts: *mut u64, fail: *mut u64) -> i64;
     fn vesper_flux_log_decode(payload: *mut u64, epoch: i64, widths: *mut u64, max_rows: i64, fail: *mut u64) -> i64;
     fn vesper_flux_log_frame(epoch: i64, schema_at: i64, cells: *mut u64, counts: *mut u64, widths: *mut u64, max_rows: i64, max_frame: i64, fail: *mut u64) -> i64;
     fn vesper_flux_log_frame_ok(body: *mut u64, len: i64) -> i64;
@@ -758,6 +843,43 @@ pub fn frontier_valid(gens: &[u64], holds: &[i64], live: &[u8], slot: u64, gener
     raw != 0
 }
 
+/// Calls `kw_assignment` of the Vesper library `flux` (`vesper_flux_kw_assignment`).
+pub fn kw_assignment(data: &[u8], lens: &[u64], counts: &[u64], parts: &[i64]) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_assignment` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(data, |view_data| vesper_port_abi::with_slice(lens, |view_lens| vesper_port_abi::with_slice(counts, |view_counts| vesper_port_abi::with_slice(parts, |view_parts| unsafe { vesper_flux_kw_assignment(view_data, view_lens, view_counts, view_parts, fail.as_mut_ptr()) }))));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_assignment"),
+    }
+}
+
+/// Calls `kw_batch_frame` of the Vesper library `flux` (`vesper_flux_kw_batch_frame`).
+pub fn kw_batch_frame(payload: &[u8], attributes: i64, count: i64, base_ts: i64, max_ts: i64, pid: i64, epoch: i64, sequence: i64) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_batch_frame` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(payload, |view_payload| unsafe { vesper_flux_kw_batch_frame(view_payload, attributes as i64, count as i64, base_ts as i64, max_ts as i64, pid as i64, epoch as i64, sequence as i64, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_batch_frame"),
+    }
+}
+
+/// Calls `kw_batch_head` of the Vesper library `flux` (`vesper_flux_kw_batch_head`).
+pub fn kw_batch_head(b: &[u8], at0: u64) -> Vec<i64> {
+    // SAFETY: `vesper_flux_kw_batch_head` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_batch_head(view_b, at0 as i64) });
+    unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }
+}
+
 /// Calls `kw_decode_records` of the Vesper library `flux` (`vesper_flux_kw_decode_records`).
 pub fn kw_decode_records(raw: &[u8], count: u64, base_offset: i64, base_ts: i64, is_control: u32, cur: &mut [u64], out_rec: &mut [i64], out_hdr: &mut [u64], out_ctrl: &mut [i64]) -> u64 {
     // SAFETY: `vesper_flux_kw_decode_records` has exactly this signature in the export ABI; every
@@ -774,6 +896,556 @@ pub fn kw_encode_records(data: &[u8], meta: &[i64], hdr: &[i64], count: u64, bas
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(data, |view_data| vesper_port_abi::with_slice(meta, |view_meta| vesper_port_abi::with_slice(hdr, |view_hdr| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_flux_kw_encode_records(view_data, view_meta, view_hdr, count as i64, base_ts as i64, view_out) }))));
     raw as u64
+}
+
+/// Calls `kw_parse_assignment` of the Vesper library `flux` (`vesper_flux_kw_parse_assignment`).
+pub fn kw_parse_assignment(b: &[u8]) -> Result<Vec<i64>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_parse_assignment` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_parse_assignment(view_b, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_parse_assignment"),
+    }
+}
+
+/// Calls `kw_req_add_offsets` of the Vesper library `flux` (`vesper_flux_kw_req_add_offsets`).
+pub fn kw_req_add_offsets(version: i64, corr: i64, cid: &[u8], txn: &[u8], pid: i64, epoch: i64, group: &[u8]) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_add_offsets` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(txn, |view_txn| vesper_port_abi::with_slice(group, |view_group| unsafe { vesper_flux_kw_req_add_offsets(version as i64, corr as i64, view_cid, view_txn, pid as i64, epoch as i64, view_group, fail.as_mut_ptr()) })));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_add_offsets"),
+    }
+}
+
+/// Calls `kw_req_add_partitions` of the Vesper library `flux` (`vesper_flux_kw_req_add_partitions`).
+pub fn kw_req_add_partitions(version: i64, corr: i64, cid: &[u8], txn: &[u8], pid: i64, epoch: i64, topic: &[u8], partition: i64) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_add_partitions` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(txn, |view_txn| vesper_port_abi::with_slice(topic, |view_topic| unsafe { vesper_flux_kw_req_add_partitions(version as i64, corr as i64, view_cid, view_txn, pid as i64, epoch as i64, view_topic, partition as i64, fail.as_mut_ptr()) })));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_add_partitions"),
+    }
+}
+
+/// Calls `kw_req_api_versions` of the Vesper library `flux` (`vesper_flux_kw_req_api_versions`).
+pub fn kw_req_api_versions(version: i64, corr: i64, cid: &[u8]) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_api_versions` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| unsafe { vesper_flux_kw_req_api_versions(version as i64, corr as i64, view_cid, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_api_versions"),
+    }
+}
+
+/// Calls `kw_req_create_topic` of the Vesper library `flux` (`vesper_flux_kw_req_create_topic`).
+pub fn kw_req_create_topic(version: i64, corr: i64, cid: &[u8], topic: &[u8], partitions: i64) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_create_topic` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(topic, |view_topic| unsafe { vesper_flux_kw_req_create_topic(version as i64, corr as i64, view_cid, view_topic, partitions as i64, fail.as_mut_ptr()) }));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_create_topic"),
+    }
+}
+
+/// Calls `kw_req_delete_records` of the Vesper library `flux` (`vesper_flux_kw_req_delete_records`).
+pub fn kw_req_delete_records(version: i64, corr: i64, cid: &[u8], topic: &[u8], partition: i64, offset: i64) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_delete_records` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(topic, |view_topic| unsafe { vesper_flux_kw_req_delete_records(version as i64, corr as i64, view_cid, view_topic, partition as i64, offset as i64, fail.as_mut_ptr()) }));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_delete_records"),
+    }
+}
+
+/// Calls `kw_req_end_txn` of the Vesper library `flux` (`vesper_flux_kw_req_end_txn`).
+pub fn kw_req_end_txn(version: i64, corr: i64, cid: &[u8], txn: &[u8], pid: i64, epoch: i64, commit: bool) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_end_txn` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(txn, |view_txn| unsafe { vesper_flux_kw_req_end_txn(version as i64, corr as i64, view_cid, view_txn, pid as i64, epoch as i64, commit as i64, fail.as_mut_ptr()) }));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_end_txn"),
+    }
+}
+
+/// Calls `kw_req_fetch` of the Vesper library `flux` (`vesper_flux_kw_req_fetch`).
+pub fn kw_req_fetch(version: i64, corr: i64, cid: &[u8], topic: &[u8], partition: i64, offset: i64, max_bytes: i64, committed: bool) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_fetch` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(topic, |view_topic| unsafe { vesper_flux_kw_req_fetch(version as i64, corr as i64, view_cid, view_topic, partition as i64, offset as i64, max_bytes as i64, committed as i64, fail.as_mut_ptr()) }));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_fetch"),
+    }
+}
+
+/// Calls `kw_req_find_coordinator` of the Vesper library `flux` (`vesper_flux_kw_req_find_coordinator`).
+pub fn kw_req_find_coordinator(version: i64, corr: i64, cid: &[u8], key: &[u8], kind: i64) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_find_coordinator` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(key, |view_key| unsafe { vesper_flux_kw_req_find_coordinator(version as i64, corr as i64, view_cid, view_key, kind as i64, fail.as_mut_ptr()) }));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_find_coordinator"),
+    }
+}
+
+/// Calls `kw_req_heartbeat` of the Vesper library `flux` (`vesper_flux_kw_req_heartbeat`).
+pub fn kw_req_heartbeat(version: i64, corr: i64, cid: &[u8], group: &[u8], generation: i64, member: &[u8], has_instance: bool, instance: &[u8]) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_heartbeat` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(group, |view_group| vesper_port_abi::with_slice(member, |view_member| vesper_port_abi::with_slice(instance, |view_instance| unsafe { vesper_flux_kw_req_heartbeat(version as i64, corr as i64, view_cid, view_group, generation as i64, view_member, has_instance as i64, view_instance, fail.as_mut_ptr()) }))));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_heartbeat"),
+    }
+}
+
+/// Calls `kw_req_init_producer` of the Vesper library `flux` (`vesper_flux_kw_req_init_producer`).
+pub fn kw_req_init_producer(version: i64, corr: i64, cid: &[u8], has_txn: bool, txn: &[u8], timeout_ms: i64) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_init_producer` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(txn, |view_txn| unsafe { vesper_flux_kw_req_init_producer(version as i64, corr as i64, view_cid, has_txn as i64, view_txn, timeout_ms as i64, fail.as_mut_ptr()) }));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_init_producer"),
+    }
+}
+
+/// Calls `kw_req_join_group` of the Vesper library `flux` (`vesper_flux_kw_req_join_group`).
+pub fn kw_req_join_group(version: i64, corr: i64, cid: &[u8], group: &[u8], session_ms: i64, rebalance_ms: i64, member: &[u8], has_instance: bool, instance: &[u8], protocol: &[u8], metadata: &[u8]) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_join_group` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(group, |view_group| vesper_port_abi::with_slice(member, |view_member| vesper_port_abi::with_slice(instance, |view_instance| vesper_port_abi::with_slice(protocol, |view_protocol| vesper_port_abi::with_slice(metadata, |view_metadata| unsafe { vesper_flux_kw_req_join_group(version as i64, corr as i64, view_cid, view_group, session_ms as i64, rebalance_ms as i64, view_member, has_instance as i64, view_instance, view_protocol, view_metadata, fail.as_mut_ptr()) }))))));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_join_group"),
+    }
+}
+
+/// Calls `kw_req_leave_group` of the Vesper library `flux` (`vesper_flux_kw_req_leave_group`).
+pub fn kw_req_leave_group(version: i64, corr: i64, cid: &[u8], group: &[u8], member: &[u8], has_instance: bool, instance: &[u8]) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_leave_group` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(group, |view_group| vesper_port_abi::with_slice(member, |view_member| vesper_port_abi::with_slice(instance, |view_instance| unsafe { vesper_flux_kw_req_leave_group(version as i64, corr as i64, view_cid, view_group, view_member, has_instance as i64, view_instance, fail.as_mut_ptr()) }))));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_leave_group"),
+    }
+}
+
+/// Calls `kw_req_list_offsets` of the Vesper library `flux` (`vesper_flux_kw_req_list_offsets`).
+pub fn kw_req_list_offsets(version: i64, corr: i64, cid: &[u8], topic: &[u8], partition: i64, ts: i64, committed: bool) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_list_offsets` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(topic, |view_topic| unsafe { vesper_flux_kw_req_list_offsets(version as i64, corr as i64, view_cid, view_topic, partition as i64, ts as i64, committed as i64, fail.as_mut_ptr()) }));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_list_offsets"),
+    }
+}
+
+/// Calls `kw_req_metadata` of the Vesper library `flux` (`vesper_flux_kw_req_metadata`).
+pub fn kw_req_metadata(version: i64, corr: i64, cid: &[u8], topic: &[u8]) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_metadata` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(topic, |view_topic| unsafe { vesper_flux_kw_req_metadata(version as i64, corr as i64, view_cid, view_topic, fail.as_mut_ptr()) }));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_metadata"),
+    }
+}
+
+/// Calls `kw_req_offset_fetch` of the Vesper library `flux` (`vesper_flux_kw_req_offset_fetch`).
+pub fn kw_req_offset_fetch(version: i64, corr: i64, cid: &[u8], group: &[u8], topic: &[u8], partitions: &[i64]) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_offset_fetch` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(group, |view_group| vesper_port_abi::with_slice(topic, |view_topic| vesper_port_abi::with_slice(partitions, |view_partitions| unsafe { vesper_flux_kw_req_offset_fetch(version as i64, corr as i64, view_cid, view_group, view_topic, view_partitions, fail.as_mut_ptr()) }))));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_offset_fetch"),
+    }
+}
+
+/// Calls `kw_req_produce` of the Vesper library `flux` (`vesper_flux_kw_req_produce`).
+pub fn kw_req_produce(version: i64, corr: i64, cid: &[u8], has_txn: bool, txn: &[u8], topic: &[u8], partition: i64, batch: &[u8]) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_produce` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(txn, |view_txn| vesper_port_abi::with_slice(topic, |view_topic| vesper_port_abi::with_slice(batch, |view_batch| unsafe { vesper_flux_kw_req_produce(version as i64, corr as i64, view_cid, has_txn as i64, view_txn, view_topic, partition as i64, view_batch, fail.as_mut_ptr()) }))));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_produce"),
+    }
+}
+
+/// Calls `kw_req_sasl_authenticate` of the Vesper library `flux` (`vesper_flux_kw_req_sasl_authenticate`).
+pub fn kw_req_sasl_authenticate(version: i64, corr: i64, cid: &[u8], msg: &[u8]) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_sasl_authenticate` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(msg, |view_msg| unsafe { vesper_flux_kw_req_sasl_authenticate(version as i64, corr as i64, view_cid, view_msg, fail.as_mut_ptr()) }));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_sasl_authenticate"),
+    }
+}
+
+/// Calls `kw_req_sasl_handshake` of the Vesper library `flux` (`vesper_flux_kw_req_sasl_handshake`).
+pub fn kw_req_sasl_handshake(version: i64, corr: i64, cid: &[u8], mech: &[u8]) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_sasl_handshake` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(mech, |view_mech| unsafe { vesper_flux_kw_req_sasl_handshake(version as i64, corr as i64, view_cid, view_mech, fail.as_mut_ptr()) }));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_sasl_handshake"),
+    }
+}
+
+/// Calls `kw_req_sync_group` of the Vesper library `flux` (`vesper_flux_kw_req_sync_group`).
+pub fn kw_req_sync_group(version: i64, corr: i64, cid: &[u8], group: &[u8], generation: i64, member: &[u8], has_instance: bool, instance: &[u8], data: &[u8], lens: &[u64]) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_sync_group` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(group, |view_group| vesper_port_abi::with_slice(member, |view_member| vesper_port_abi::with_slice(instance, |view_instance| vesper_port_abi::with_slice(data, |view_data| vesper_port_abi::with_slice(lens, |view_lens| unsafe { vesper_flux_kw_req_sync_group(version as i64, corr as i64, view_cid, view_group, generation as i64, view_member, has_instance as i64, view_instance, view_data, view_lens, fail.as_mut_ptr()) }))))));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_sync_group"),
+    }
+}
+
+/// Calls `kw_req_txn_offset_commit` of the Vesper library `flux` (`vesper_flux_kw_req_txn_offset_commit`).
+pub fn kw_req_txn_offset_commit(version: i64, corr: i64, cid: &[u8], txn: &[u8], group: &[u8], pid: i64, epoch: i64, generation: i64, member: &[u8], has_instance: bool, instance: &[u8], data: &[u8], lens: &[u64], nums: &[i64]) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_req_txn_offset_commit` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice(txn, |view_txn| vesper_port_abi::with_slice(group, |view_group| vesper_port_abi::with_slice(member, |view_member| vesper_port_abi::with_slice(instance, |view_instance| vesper_port_abi::with_slice(data, |view_data| vesper_port_abi::with_slice(lens, |view_lens| vesper_port_abi::with_slice(nums, |view_nums| unsafe { vesper_flux_kw_req_txn_offset_commit(version as i64, corr as i64, view_cid, view_txn, view_group, pid as i64, epoch as i64, generation as i64, view_member, has_instance as i64, view_instance, view_data, view_lens, view_nums, fail.as_mut_ptr()) }))))))));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_req_txn_offset_commit"),
+    }
+}
+
+/// Calls `kw_resp_add_partitions` of the Vesper library `flux` (`vesper_flux_kw_resp_add_partitions`).
+pub fn kw_resp_add_partitions(b: &[u8]) -> Result<(), KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_resp_add_partitions` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_resp_add_partitions(view_b, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_resp_add_partitions"),
+    }
+}
+
+/// Calls `kw_resp_api_versions` of the Vesper library `flux` (`vesper_flux_kw_resp_api_versions`).
+pub fn kw_resp_api_versions(b: &[u8]) -> Result<Vec<i64>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_resp_api_versions` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_resp_api_versions(view_b, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_resp_api_versions"),
+    }
+}
+
+/// Calls `kw_resp_code` of the Vesper library `flux` (`vesper_flux_kw_resp_code`).
+pub fn kw_resp_code(b: &[u8]) -> Result<(), KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_resp_code` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_resp_code(view_b, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_resp_code"),
+    }
+}
+
+/// Calls `kw_resp_create_topic` of the Vesper library `flux` (`vesper_flux_kw_resp_create_topic`).
+pub fn kw_resp_create_topic(b: &[u8]) -> Result<(), KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_resp_create_topic` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_resp_create_topic(view_b, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_resp_create_topic"),
+    }
+}
+
+/// Calls `kw_resp_delete_records` of the Vesper library `flux` (`vesper_flux_kw_resp_delete_records`).
+pub fn kw_resp_delete_records(b: &[u8]) -> Result<(), KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_resp_delete_records` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_resp_delete_records(view_b, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_resp_delete_records"),
+    }
+}
+
+/// Calls `kw_resp_fetch` of the Vesper library `flux` (`vesper_flux_kw_resp_fetch`).
+pub fn kw_resp_fetch(b: &[u8], partition: i64) -> Vec<i64> {
+    // SAFETY: `vesper_flux_kw_resp_fetch` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_resp_fetch(view_b, partition as i64) });
+    unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `kw_resp_find_coordinator` of the Vesper library `flux` (`vesper_flux_kw_resp_find_coordinator`).
+pub fn kw_resp_find_coordinator(b: &[u8]) -> Result<Vec<i64>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_resp_find_coordinator` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_resp_find_coordinator(view_b, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_resp_find_coordinator"),
+    }
+}
+
+/// Calls `kw_resp_header` of the Vesper library `flux` (`vesper_flux_kw_resp_header`).
+pub fn kw_resp_header(b: &[u8], corr: i64, flex: bool) -> Result<u64, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_resp_header` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_resp_header(view_b, corr as i64, flex as i64, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok(raw as u64),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_resp_header"),
+    }
+}
+
+/// Calls `kw_resp_init_producer` of the Vesper library `flux` (`vesper_flux_kw_resp_init_producer`).
+pub fn kw_resp_init_producer(b: &[u8]) -> Result<Vec<i64>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_resp_init_producer` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_resp_init_producer(view_b, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_resp_init_producer"),
+    }
+}
+
+/// Calls `kw_resp_join_group` of the Vesper library `flux` (`vesper_flux_kw_resp_join_group`).
+pub fn kw_resp_join_group(b: &[u8]) -> Result<Vec<i64>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_resp_join_group` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_resp_join_group(view_b, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_resp_join_group"),
+    }
+}
+
+/// Calls `kw_resp_lead_code` of the Vesper library `flux` (`vesper_flux_kw_resp_lead_code`).
+pub fn kw_resp_lead_code(b: &[u8]) -> Result<(), KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_resp_lead_code` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_resp_lead_code(view_b, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_resp_lead_code"),
+    }
+}
+
+/// Calls `kw_resp_list_offsets` of the Vesper library `flux` (`vesper_flux_kw_resp_list_offsets`).
+pub fn kw_resp_list_offsets(b: &[u8], partition: i64) -> Result<Vec<i64>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_resp_list_offsets` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_resp_list_offsets(view_b, partition as i64, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_resp_list_offsets"),
+    }
+}
+
+/// Calls `kw_resp_metadata` of the Vesper library `flux` (`vesper_flux_kw_resp_metadata`).
+pub fn kw_resp_metadata(b: &[u8], topic: &[u8]) -> Vec<i64> {
+    // SAFETY: `vesper_flux_kw_resp_metadata` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice(topic, |view_topic| unsafe { vesper_flux_kw_resp_metadata(view_b, view_topic) }));
+    unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `kw_resp_offset_errors` of the Vesper library `flux` (`vesper_flux_kw_resp_offset_errors`).
+pub fn kw_resp_offset_errors(b: &[u8], flex: bool) -> Result<(), KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_resp_offset_errors` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_resp_offset_errors(view_b, flex as i64, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_resp_offset_errors"),
+    }
+}
+
+/// Calls `kw_resp_offset_fetch` of the Vesper library `flux` (`vesper_flux_kw_resp_offset_fetch`).
+pub fn kw_resp_offset_fetch(b: &[u8]) -> Result<Vec<i64>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_resp_offset_fetch` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_resp_offset_fetch(view_b, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_resp_offset_fetch"),
+    }
+}
+
+/// Calls `kw_resp_produce` of the Vesper library `flux` (`vesper_flux_kw_resp_produce`).
+pub fn kw_resp_produce(b: &[u8], partition: i64) -> Result<Vec<i64>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_resp_produce` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_resp_produce(view_b, partition as i64, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_resp_produce"),
+    }
+}
+
+/// Calls `kw_resp_sasl_authenticate` of the Vesper library `flux` (`vesper_flux_kw_resp_sasl_authenticate`).
+pub fn kw_resp_sasl_authenticate(b: &[u8]) -> Result<Vec<i64>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_resp_sasl_authenticate` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_resp_sasl_authenticate(view_b, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_resp_sasl_authenticate"),
+    }
+}
+
+/// Calls `kw_resp_sync_group` of the Vesper library `flux` (`vesper_flux_kw_resp_sync_group`).
+pub fn kw_resp_sync_group(b: &[u8]) -> Result<Vec<i64>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_resp_sync_group` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_flux_kw_resp_sync_group(view_b, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_resp_sync_group"),
+    }
+}
+
+/// Calls `kw_subscription` of the Vesper library `flux` (`vesper_flux_kw_subscription`).
+pub fn kw_subscription(data: &[u8], lens: &[u64], parts: &[i64]) -> Result<Vec<u8>, KwErr> {
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_flux_kw_subscription` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(data, |view_data| vesper_port_abi::with_slice(lens, |view_lens| vesper_port_abi::with_slice(parts, |view_parts| unsafe { vesper_flux_kw_subscription(view_data, view_lens, view_parts, fail.as_mut_ptr()) })));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<KwErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_kw_subscription"),
+    }
 }
 
 /// Calls `log_decode` of the Vesper library `flux` (`vesper_flux_log_decode`).

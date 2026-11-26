@@ -27,7 +27,8 @@ fn standard_library_packages() {
         ("packages/vesper-std/graph", 80),
         ("packages/vesper-std/hash", 45),
         ("packages/vesper-std/sort", 82),
-        ("packages/vesper-std/tests", 3),
+        ("packages/vesper-std/sugar", 7),
+        ("packages/vesper-std/tests", 5),
     ]);
 }
 

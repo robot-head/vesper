@@ -374,9 +374,45 @@ a Vesper front end hands the words over directly. A hybrid swap of
 `lean::extract` does pay it, so the swap needs a cheaper encoder before
 it can flip.
 
+## Part 4: the `lean_extract` hybrid swap
+
+`lean::extract` (the text of `vesper emit --emit lean` and the driver's
+Lean emit step) is now a swap point, `LeanExtractTable`, with Rust as the
+default. The hybrid's `lean_extract` swap (crates/vesper-hybrid/modules/
+lean_extract and src/swap/lean_extract.rs) encodes the world with
+tests/common/lean_words.rs, the encoder moved out of the test so both
+share it, and calls the new entry `extract_text`, which stops after the
+module. A world the word format cannot hold keeps Rust's extraction.
+
+The divergent build (`divergent-lean-extract`) empties every text, and
+the differential must then fail.
+
+### Differential
+
+`cargo test -p vesper-hybrid --test lean_extract` runs `vesper emit
+--emit lean` with the default compiler and the hybrid over every `.ves`
+file of `examples/` and `tests/fixtures/`:
+
+| Test | Cases | Differences |
+|---|--:|--:|
+| `hybrid_lean_matches_the_default_compiler` | 531 files, 194 extracted (3.06 MB of Lean) | 0 |
+
+Hybrid 7.72 s against default 9.65 s (0.80x, debug builds, the whole
+command including the word encoding).
+
+Three files (`examples/traits/shapes.ves`,
+`tests/fixtures/bounded_generics/nested.ves`,
+`tests/fixtures/native_handlers/shared_locals.ves`) already differ in
+`--emit hir`: the hybrid's AST optimizer swap reassociates differently
+from Rust's (for example `x * 1000 + (y * 100 + result)` stays as written
+in the hybrid, while Rust moves `y * 100` first). That is upstream of
+extraction, so the test compares those three again with `--no-ast-opt`,
+where they agree.
+
 ## What is left
 
 - **Verify and proof commands** (`src/verify_commands.rs`,
   `src/proof_commands.rs`): port onto `@vesper/driver-commands`.
-- **Hybrid module `lean_extract`**: a swap point for `extract_report`,
-  then the Lean emit driver step, then deleting the Rust extractor.
+- **`extract_report` callers**: `verify --extract` and the forge
+  provenance path still build the Rust `Extraction`; they move with the
+  verify command, then the Rust extractor goes.

@@ -17,7 +17,8 @@ Claim: #1986 (part of hd_step group 1, #1896, and Stage 2 retirement,
   module with `@vesper/check-names-packages` (#1178), and the new host call
   `hd_assembled` reads the renamed modules, the qualified-name map and the
   assembler's diagnostics back into the session's `packages::Assembled`
-  (`src/swap/assemble.rs`).
+  (`src/swap/assemble.rs`). The modules cross as the parse swap's `ast` words
+(`put_ast_words` of `@vesper/ast`, read by `parse_words::read_ast_section`).
 - What stays in Rust for now: the loader's I/O and manifest checks
   (slice 2), sugar expansion (slice 3, after `@vesper/sugar` #1953), and
   every graph the Vesper assembler does not cover. A graph with manifest
@@ -48,9 +49,8 @@ Claim: #1986 (part of hd_step group 1, #1896, and Stage 2 retirement,
 | --- | --- |
 | Loader split (behaviour-neutral for every other caller) | `src/packages.rs` (`read_for_target`, `Loading`), `src/packages/sugar.rs` (`ModuleSugar::is_plain`) |
 | Assembler outputs for the driver | `packages/vesper-check-names-packages/src/{lib,state,load}.ves`: diagnostics as rows, parse diagnostic count |
-| The AST writer, shared | `crates/vesper-hybrid/modules/parse/src/words.ves` (`put_ast` moved out of `lib.ves`, unchanged) |
 | Driver | `crates/vesper-hybrid/modules/driver/src/{assemble,lib}.ves`, `Loom.toml`, `port/driver.rs` |
-| Host and read-back | `crates/vesper-hybrid/src/driver.rs` (`LoadPackage`, `hd_assembled`), `src/swap/assemble.rs`, `src/parse_words.rs` (`read_module`), `src/hybrid.rs` (re-export) |
+| Host and read-back | `crates/vesper-hybrid/src/driver.rs` (`LoadPackage`, `hd_assembled`), `src/swap/assemble.rs`, `src/hybrid.rs` (re-export) |
 | Test | `crates/vesper-hybrid/tests/driver_packages.rs` |
 | Bazel | `BUILD.bazel` (`check_names_packages_package`, `std_collections_package`), `crates/vesper-hybrid/BUILD.bazel` |
 

@@ -13,9 +13,13 @@ sys library StdFs (
     const CREATE_ALWAYS: u32 = 2;
     const OPEN_EXISTING: u32 = 3;
     const FILE_ATTRIBUTE_NORMAL: u32 = 128;
+    const FILE_ATTRIBUTE_READONLY: u32 = 1;
     const FILE_ATTRIBUTE_DIRECTORY: u32 = 16;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 1024;
     const MOVEFILE_REPLACE_EXISTING: u32 = 1;
+    const STD_OUTPUT_HANDLE: i32 = -11;
+    const STD_ERROR_HANDLE: i32 = -12;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 33554432;
     const ERROR_FILE_NOT_FOUND: u32 = 2;
     const ERROR_PATH_NOT_FOUND: u32 = 3;
     const ERROR_NO_MORE_FILES: u32 = 18;
@@ -56,6 +60,14 @@ sys library StdFs (
         lpOverlapped: u64
     ) -> ForeignVal[i32] errno;
     fn FlushFileBuffers(hFile: u64) -> ForeignVal[i32] errno;
+    fn GetStdHandle(nStdHandle: i32) -> ForeignVal[u64];
+    // `lpszFilePath` holds two UTF-16 units per word; `cchFilePath` is the
+    // word count, half what the buffer holds.
+    fn GetFinalPathNameByHandleW(
+        hFile: u64,
+        nocapture inout lpszFilePath: CSlice[u32],
+        dwFlags: u32
+    ) -> ForeignVal[u32] errno;
     fn CloseHandle(hObject: u64) -> ForeignVal[i32];
     fn GetFileSizeEx(hFile: u64, nocapture inout lpFileSize: i64) -> ForeignVal[i32] errno;
     fn GetFileAttributesExW(
@@ -82,6 +94,14 @@ sys library StdFs (
     fn CreateDirectoryW(
         nocapture in lpPathName: CWStr,
         lpSecurityAttributes: u64
+    ) -> ForeignVal[i32] errno;
+    // `set_permissions` (the read-only attribute) and `copy`.
+    fn GetFileAttributesW(nocapture in lpFileName: CWStr) -> ForeignVal[u32] errno;
+    fn SetFileAttributesW(nocapture in lpFileName: CWStr, dwFileAttributes: u32) -> ForeignVal[i32] errno;
+    fn CopyFileW(
+        nocapture in lpExistingFileName: CWStr,
+        nocapture in lpNewFileName: CWStr,
+        bFailIfExists: i32
     ) -> ForeignVal[i32] errno;
     fn GetCurrentProcessId() -> ForeignVal[u32];
     // `std`'s OS error message (`format_error` of

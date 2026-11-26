@@ -15,6 +15,7 @@ use @vesper/clif::{
     n32,
     read_func,
     u32_at,
+    u64_at,
     w
 };
 use @vesper/clif::codes::{
@@ -422,17 +423,10 @@ fn kind_step(kind: u64, known: bool, st: i64, inout out: i64) -> bool {
 }
 
 // `step`: how much an operation of `j` grows per iteration, when it is
-// affine; whether it is (into `out`). `ks`, `kn`, `kv` are the arguments'
-// kinds, known flags and steps.
-fn step(
-    in f: Func,
-    i: u32,
-    in args: ChunkSeq[u32],
-    in ks: ChunkSeq[u64],
-    in kn: ChunkSeq[u8],
-    in kv: ChunkSeq[i64],
-    inout out: i64
-) -> bool {
+// affine; whether it is (into `out`). `arg_kinds` holds its arguments'
+// kinds and steps.
+fn step(in f: Func, i: u32, in args: ChunkSeq[u32], in arg_kinds: ArgKinds, inout out: i64)
+    -> bool {
     let row = f.inst(w(i));
     let op = row.op;
     let binary = op == OP_IADD
@@ -455,23 +449,23 @@ fn step(
     let mut a: i64 = 0;
     let mut b: i64 = 0;
     if binary && op != OP_ICMP {
-        if !kind_step(at64(in ks, 0), at8(in kn, 0) != 0, at_i(in kv, 0), inout a) {
+        if !arg_kinds.step_into(0, inout a) {
             return false;
         }
-        if !kind_step(at64(in ks, 1), at8(in kn, 1) != 0, at_i(in kv, 1), inout b) {
+        if !arg_kinds.step_into(1, inout b) {
             return false;
         }
         let r = if op == OP_IADD {
             checked_add_i64(a, b)
         } else if op == OP_ISUB {
             checked_sub_i64(a, b)
-        } else if op == OP_IMUL && at64(in ks, 1) == K_INV {
+        } else if op == OP_IMUL && arg_kinds.kind_at(1) == K_INV {
             let mut c: i64 = 0;
             if !constant(in f, u32_at(in args, 1), inout c) {
                 return false;
             }
             checked_mul_i64(a, c)
-        } else if op == OP_IMUL && at64(in ks, 0) == K_INV {
+        } else if op == OP_IMUL && arg_kinds.kind_at(0) == K_INV {
             let mut c: i64 = 0;
             if !constant(in f, u32_at(in args, 0), inout c) {
                 return false;
@@ -489,7 +483,7 @@ fn step(
         };
     }
     if imm64 {
-        if !kind_step(at64(in ks, 0), at8(in kn, 0) != 0, at_i(in kv, 0), inout a) {
+        if !arg_kinds.step_into(0, inout a) {
             return false;
         }
         let imm = i64_of(row.imm);
@@ -515,25 +509,111 @@ fn step(
     false
 }
 
-fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
+fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
     match s.try_get(i) {
         Option::Some(v) => v,
         Option::None => 0,
     }
 }
 
-fn at8(in s: ChunkSeq[u8], i: u64) -> u8 {
+fn i64_at(in s: ChunkSeq[i64], i: u64) -> i64 {
     match s.try_get(i) {
         Option::Some(v) => v,
         Option::None => 0,
     }
 }
 
-fn at_i(in s: ChunkSeq[i64], i: u64) -> i64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
+// One instruction's arguments as `step` sees them: each argument's kind,
+// whether its step is known, and that step, in argument order.
+struct ArgKinds {
+    kinds: ChunkSeq[u64],
+    known: ChunkSeq[u8],
+    steps: ChunkSeq[i64],
+}
+
+fn arg_kinds_new() -> ArgKinds {
+    ArgKinds {
+        kinds: ChunkSeq::new[u64](),
+        known: ChunkSeq::new[u8](),
+        steps: ChunkSeq::new[i64](),
     }
+}
+
+impl ArgKinds {
+    fn clear(inout self) {
+        self.kinds.clear();
+        self.known.clear();
+        self.steps.clear();
+    }
+
+    // Appends argument `v` of kind `kind`, with its step from `values`.
+    fn push(inout self, in values: Kinds, v: u32, kind: u64) {
+        self.kinds.push(kind);
+        self
+            .known
+            .push(
+                if values.known_step(v) {
+                    1
+                } else {
+                    0
+                }
+            );
+        self.steps.push(values.step_of(v));
+    }
+
+    fn len(in self) -> u64 {
+        self.kinds.len()
+    }
+
+    fn kind_at(in self, a: u64) -> u64 {
+        u64_at(in self.kinds, a)
+    }
+
+    fn known_at(in self, a: u64) -> bool {
+        u8_at(in self.known, a) != 0
+    }
+
+    fn step_at(in self, a: u64) -> i64 {
+        i64_at(in self.steps, a)
+    }
+
+    // `s(k)` of argument `a`: whether it has a step (into `out`).
+    fn step_into(in self, a: u64, inout out: i64) -> bool {
+        kind_step(self.kind_at(a), self.known_at(a), self.step_at(a), inout out)
+    }
+}
+
+// Whether every instruction of header `h` but its terminator `term` is one
+// `header_op` allows.
+fn header_is_plain(in f: Func, h: u32, term: u32) -> bool {
+    let mut i = f.first_inst(h);
+    loop {
+        if i == NONE {
+            break true;
+        }
+        if i != term && !header_op(f.op(i)) {
+            break false;
+        }
+        i = f.next_inst(i);
+    }
+}
+
+// Whether every predecessor of block `b` is the block `pred` (reads `b`'s
+// predecessors into the two tables).
+fn preds_all_from(
+    in f: Func,
+    b: u32,
+    pred: u32,
+    inout pred_blocks: ChunkSeq[u32],
+    inout pred_insts: ChunkSeq[u32]
+) -> bool {
+    f.preds(b, inout pred_blocks, inout pred_insts);
+    for k in 0..pred_blocks.len() {
+        if u32_at(in pred_blocks, k) != pred {
+            return false;
+        }
+    }
+    true
 }
 
 // Whether block `b` is one of the loop's (`looped`).
@@ -574,16 +654,16 @@ fn plan(in f: Func, h: u32, inout p: Plan) -> bool {
     let cond = f.inst(w(cmp)).cond;
     let lhs = f.resolve(f.arg(cmp, 0));
     let rhs = f.resolve(f.arg(cmp, 1));
-    let mut zero: i64 = 0;
-    let mut bk: u64 = 0;
-    let mut ek: u64 = 1;
+    let mut rhs_const: i64 = 0;
+    let mut body_dest: u64 = 0;
+    let mut exit_dest: u64 = 1;
     let mut bound = NONE;
     let mut delta: i64 = 1;
     if cond == CC_ULT || cond == CC_ULE {
         bound = rhs;
-    } else if cond == CC_EQ && constant(in f, rhs, inout zero) && zero == 0 {
-        bk = 1;
-        ek = 0;
+    } else if cond == CC_EQ && constant(in f, rhs, inout rhs_const) && rhs_const == 0 {
+        body_dest = 1;
+        exit_dest = 0;
         delta = -1;
     } else {
         return false;
@@ -591,20 +671,16 @@ fn plan(in f: Func, h: u32, inout p: Plan) -> bool {
     if lhs != j {
         return false;
     }
-    let body = f.dest_block(term, bk);
-    let exit = f.dest_block(term, ek);
-    if f.dest_nargs(term, bk) != 0 || f.dest_nargs(term, ek) != 0 || body == h || exit == h {
+    let body = f.dest_block(term, body_dest);
+    let exit = f.dest_block(term, exit_dest);
+    if f.dest_nargs(term, body_dest) != 0
+        || f.dest_nargs(term, exit_dest) != 0
+        || body == h
+        || exit == h {
         return false;
     }
-    let mut i = f.first_inst(h);
-    loop {
-        if i == NONE {
-            break;
-        }
-        if i != term && !header_op(f.op(i)) {
-            return false;
-        }
-        i = f.next_inst(i);
+    if !header_is_plain(in f, h, term) {
+        return false;
     }
     if f.nparams(body) != 0 {
         return false;
@@ -615,8 +691,8 @@ fn plan(in f: Func, h: u32, inout p: Plan) -> bool {
     }
     // NONE when the body jumps back to the header itself.
     let mut latch = NONE;
-    let bop = f.op(body_term);
-    if bop == OP_JUMP {
+    let body_op = f.op(body_term);
+    if body_op == OP_JUMP {
         let l = f.dest_block(body_term, 0);
         let n = f.dest_nargs(body_term, 0);
         if n == 0 {
@@ -629,19 +705,19 @@ fn plan(in f: Func, h: u32, inout p: Plan) -> bool {
         } else {
             return false;
         }
-    } else if bop == OP_BRIF {
+    } else if body_op == OP_BRIF {
         let out = f.dest_block(body_term, 0);
         let l = f.dest_block(body_term, 1);
-        let c2 = compare(in f, strip_condition(in f, f.arg(body_term, 0)));
-        if c2 == NONE {
+        let body_cmp = compare(in f, strip_condition(in f, f.arg(body_term, 0)));
+        if body_cmp == NONE {
             return false;
         }
-        let x = f.resolve(f.arg(c2, 0));
-        let y = f.resolve(f.arg(c2, 1));
+        let x = f.resolve(f.arg(body_cmp, 0));
+        let y = f.resolve(f.arg(body_cmp, 1));
         if out != exit
             || f.dest_nargs(body_term, 0) != 0
             || f.dest_nargs(body_term, 1) != 0
-            || f.inst(w(c2)).cond != CC_EQ
+            || f.inst(w(body_cmp)).cond != CC_EQ
             || x != j
             || bound == NONE
             || y != bound {
@@ -655,15 +731,15 @@ fn plan(in f: Func, h: u32, inout p: Plan) -> bool {
         if latch == h || latch == body || f.nparams(latch) != 0 {
             return false;
         }
-        let lt = f.last_inst(latch);
-        if lt == NONE || f.op(lt) != OP_JUMP {
+        let latch_term = f.last_inst(latch);
+        if latch_term == NONE || f.op(latch_term) != OP_JUMP {
             return false;
         }
-        let back = f.dest_block(lt, 0);
-        if f.dest_nargs(lt, 0) != 1 {
+        let back = f.dest_block(latch_term, 0);
+        if f.dest_nargs(latch_term, 0) != 1 {
             return false;
         }
-        let next = f.dest_arg(lt, 0, 0);
+        let next = f.dest_arg(latch_term, 0, 0);
         if next == NONE || back != h || !is_step(in f, next, j, delta) {
             return false;
         }
@@ -672,8 +748,11 @@ fn plan(in f: Func, h: u32, inout p: Plan) -> bool {
             if q == NONE {
                 break;
             }
-            let o = f.op(q);
-            if q != lt && o != OP_ICONST && o != OP_IADD && o != OP_IADD_IMM {
+            let latch_op = f.op(q);
+            if q != latch_term
+                && latch_op != OP_ICONST
+                && latch_op != OP_IADD
+                && latch_op != OP_IADD_IMM {
                 return false;
             }
             q = f.next_inst(q);
@@ -684,33 +763,25 @@ fn plan(in f: Func, h: u32, inout p: Plan) -> bool {
     } else {
         body
     };
-    let mut pb = ChunkSeq::new[u32]();
-    let mut pi = ChunkSeq::new[u32]();
-    f.preds(body, inout pb, inout pi);
-    for k in 0..pb.len() {
-        if u32_at(in pb, k) != h {
-            return false;
-        }
+    let mut pred_blocks = ChunkSeq::new[u32]();
+    let mut pred_insts = ChunkSeq::new[u32]();
+    if !preds_all_from(in f, body, h, inout pred_blocks, inout pred_insts) {
+        return false;
     }
-    if latch != NONE {
-        f.preds(latch, inout pb, inout pi);
-        for k in 0..pb.len() {
-            if u32_at(in pb, k) != body {
-                return false;
-            }
-        }
+    if latch != NONE && !preds_all_from(in f, latch, body, inout pred_blocks, inout pred_insts) {
+        return false;
     }
     p.entries.clear();
-    f.preds(h, inout pb, inout pi);
-    for k in 0..pb.len() {
-        let q = u32_at(in pb, k);
-        if q == back_edge {
+    f.preds(h, inout pred_blocks, inout pred_insts);
+    for k in 0..pred_blocks.len() {
+        let pred = u32_at(in pred_blocks, k);
+        if pred == back_edge {
             continue;
         }
-        if q == h || q == body {
+        if pred == h || pred == body {
             return false;
         }
-        p.entries.push(u32_at(in pi, k));
+        p.entries.push(u32_at(in pred_insts, k));
     }
     if p.entries.len() == 0 {
         return false;
@@ -729,18 +800,14 @@ fn plan(in f: Func, h: u32, inout p: Plan) -> bool {
     let mut direction: i64 = 0;
     let mut stores = false;
     let mut args = ChunkSeq::new[u32]();
-    let mut ks = ChunkSeq::new[u64]();
-    let mut kn = ChunkSeq::new[u8]();
-    let mut kv = ChunkSeq::new[i64]();
+    let mut arg_kinds = arg_kinds_new();
     let mut i = f.first_inst(body);
     loop {
         if i == NONE || i == body_term {
             break;
         }
         args.clear();
-        ks.clear();
-        kn.clear();
-        kv.clear();
+        arg_kinds.clear();
         for a in 0..f.nargs(i) {
             let v = f.resolve(f.arg(i, a));
             let k = kind_of(in f, in kinds, v, h, body, latch);
@@ -748,32 +815,23 @@ fn plan(in f: Func, h: u32, inout p: Plan) -> bool {
                 return false;
             }
             args.push(v);
-            ks.push(k);
-            kn
-                .push(
-                    if kinds.known_step(v) {
-                        1
-                    } else {
-                        0
-                    }
-                );
-            kv.push(kinds.step_of(v));
+            arg_kinds.push(in kinds, v, k);
         }
         let row = f.inst(w(i));
         let op = row.op;
-        let nres = f.nresults(i);
+        let result_count = f.nresults(i);
         let mut kind = K_NONE;
         let mut known = false;
-        let mut st: i64 = 0;
+        let mut scalar_step: i64 = 0;
         if op == OP_LOAD {
             let ty = f.value_type(f.result(i, 0));
-            if at64(in ks, 0) == K_INV && readonly_can_move(row.mem) {
+            if arg_kinds.kind_at(0) == K_INV && readonly_can_move(row.mem) {
                 kind = K_INV;
             } else if ty == TY_I64 && !stores && plain(row.mem) {
-                if at64(in ks, 0) != K_SCALAR || at8(in kn, 0) == 0 {
+                if arg_kinds.kind_at(0) != K_SCALAR || !arg_kinds.known_at(0) {
                     return false;
                 }
-                direction = same_direction(direction, at_i(in kv, 0));
+                direction = same_direction(direction, arg_kinds.step_at(0));
                 if direction == 0 {
                     return false;
                 }
@@ -783,31 +841,31 @@ fn plan(in f: Func, h: u32, inout p: Plan) -> bool {
             }
         } else if op == OP_STORE {
             let ty = f.value_type(u32_at(in args, 0));
-            if at64(in ks, 1) != K_SCALAR || at8(in kn, 1) == 0 {
+            if arg_kinds.kind_at(1) != K_SCALAR || !arg_kinds.known_at(1) {
                 return false;
             }
-            let k0 = at64(in ks, 0);
+            let k0 = arg_kinds.kind_at(0);
             if ty != TY_I64 || !plain(row.mem) || k0 == K_STORE {
                 return false;
             }
             if k0 != K_LANE && k0 != K_INV {
                 return false;
             }
-            direction = same_direction(direction, at_i(in kv, 1));
+            direction = same_direction(direction, arg_kinds.step_at(1));
             if direction == 0 {
                 return false;
             }
             stores = true;
             kind = K_STORE;
         } else {
-            if nres != 1 || !pure(op) {
+            if result_count != 1 || !pure(op) {
                 return false;
             }
             let mut all_inv = true;
             let mut any_lane = false;
             let mut operands_ok = true;
-            for a in 0..ks.len() {
-                let k = at64(in ks, a);
+            for a in 0..arg_kinds.len() {
+                let k = arg_kinds.kind_at(a);
                 if k != K_INV {
                     all_inv = false;
                 }
@@ -832,11 +890,11 @@ fn plan(in f: Func, h: u32, inout p: Plan) -> bool {
                 kind = K_LANE;
             } else {
                 kind = K_SCALAR;
-                known = step(in f, i, in args, in ks, in kn, in kv, inout st);
+                known = step(in f, i, in args, in arg_kinds, inout scalar_step);
             }
         }
-        if nres > 0 {
-            kinds.set(f.resolve(f.result(i, 0)), kind, known, st);
+        if result_count > 0 {
+            kinds.set(f.resolve(f.result(i, 0)), kind, known, scalar_step);
         }
         p.insts.push(i);
         p.kinds.push(wrapping_u8(kind));
@@ -970,7 +1028,7 @@ fn addresses(
     stores.clear();
     for q in 0..p.insts.len() {
         let i = u32_at(in p.insts, q);
-        let kind = widen_u64(at8(in p.kinds, q));
+        let kind = widen_u64(u8_at(in p.kinds, q));
         if kind == K_SCALAR {
             let old = f.resolve(f.result(i, 0));
             let new = copy_inst(inout f, b, i, in m);
@@ -1030,7 +1088,7 @@ fn emit(inout f: Func, in p: Plan) {
     let jv = u32_at(in fr, 3);
     let mut invariants = new_map(f.nvalues());
     for q in 0..p.insts.len() {
-        if widen_u64(at8(in p.kinds, q)) == K_INV {
+        if widen_u64(u8_at(in p.kinds, q)) == K_INV {
             let i = u32_at(in p.insts, q);
             let old = if f.nresults(i) > 0 {
                 f.resolve(f.result(i, 0))
@@ -1093,7 +1151,7 @@ fn emit(inout f: Func, in p: Plan) {
     let mut si: u64 = 0;
     for q in 0..p.insts.len() {
         let i = u32_at(in p.insts, q);
-        let kind = widen_u64(at8(in p.kinds, q));
+        let kind = widen_u64(u8_at(in p.kinds, q));
         if kind == K_LANE {
             let result = f.resolve(f.result(i, 0));
             let op = f.op(i);
@@ -1178,15 +1236,8 @@ fn plan_widen(in f: Func, h: u32, inout p: WidenPlan) -> bool {
     if f.dest_nargs(term, 0) != 0 || f.dest_nargs(term, 1) != 0 || body == h || exit == h {
         return false;
     }
-    let mut i = f.first_inst(h);
-    loop {
-        if i == NONE {
-            break;
-        }
-        if i != term && !header_op(f.op(i)) {
-            return false;
-        }
-        i = f.next_inst(i);
+    if !header_is_plain(in f, h, term) {
+        return false;
     }
     if f.nparams(body) != 0 {
         return false;
@@ -1203,25 +1254,22 @@ fn plan_widen(in f: Func, h: u32, inout p: WidenPlan) -> bool {
     if next == NONE || back != h || !is_step(in f, next, j, 1) {
         return false;
     }
-    let mut pb = ChunkSeq::new[u32]();
-    let mut pi = ChunkSeq::new[u32]();
-    f.preds(body, inout pb, inout pi);
-    for k in 0..pb.len() {
-        if u32_at(in pb, k) != h {
-            return false;
-        }
+    let mut pred_blocks = ChunkSeq::new[u32]();
+    let mut pred_insts = ChunkSeq::new[u32]();
+    if !preds_all_from(in f, body, h, inout pred_blocks, inout pred_insts) {
+        return false;
     }
     p.entries.clear();
-    f.preds(h, inout pb, inout pi);
-    for k in 0..pb.len() {
-        let q = u32_at(in pb, k);
-        if q == body {
+    f.preds(h, inout pred_blocks, inout pred_insts);
+    for k in 0..pred_blocks.len() {
+        let pred = u32_at(in pred_blocks, k);
+        if pred == body {
             continue;
         }
-        if q == h {
+        if pred == h {
             return false;
         }
-        p.entries.push(u32_at(in pi, k));
+        p.entries.push(u32_at(in pred_insts, k));
     }
     if p.entries.len() == 0 {
         return false;
@@ -1241,9 +1289,7 @@ fn plan_widen(in f: Func, h: u32, inout p: WidenPlan) -> bool {
     let mut dst_offset: u64 = 0;
     let mut scale = NONE;
     let mut args = ChunkSeq::new[u32]();
-    let mut ks = ChunkSeq::new[u64]();
-    let mut kn = ChunkSeq::new[u8]();
-    let mut kv = ChunkSeq::new[i64]();
+    let mut arg_kinds = arg_kinds_new();
     let mut i = f.first_inst(body);
     loop {
         if i == NONE || i == body_term {
@@ -1360,9 +1406,7 @@ fn plan_widen(in f: Func, h: u32, inout p: WidenPlan) -> bool {
                 continue;
             }
         }
-        ks.clear();
-        kn.clear();
-        kv.clear();
+        arg_kinds.clear();
         let mut all_inv = true;
         for a in 0..args.len() {
             let v = u32_at(in args, a);
@@ -1373,23 +1417,14 @@ fn plan_widen(in f: Func, h: u32, inout p: WidenPlan) -> bool {
             if k != K_INV {
                 all_inv = false;
             }
-            ks.push(k);
-            kn
-                .push(
-                    if kinds.known_step(v) {
-                        1
-                    } else {
-                        0
-                    }
-                );
-            kv.push(kinds.step_of(v));
+            arg_kinds.push(in kinds, v, k);
         }
         if all_inv {
             kinds.set(r, K_INV, false, 0);
             p.invariants.push(i);
         } else {
             let mut st: i64 = 0;
-            let known = step(in f, i, in args, in ks, in kn, in kv, inout st);
+            let known = step(in f, i, in args, in arg_kinds, inout st);
             kinds.set(r, K_SCALAR, known, st);
             p.scalars.push(i);
         }

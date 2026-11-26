@@ -22,6 +22,13 @@
 //! into `DEVICE_NEEDS_RESET` (§2.1.2) and raises a configuration interrupt; it
 //! is never processed. `VIRTIO_F_RING_RESET` is not offered.
 //!
+//! The register file itself (every register's decode, the status state
+//! machine, feature negotiation and the counters) is Vesper
+//! (vesper/src/mmio.ves, SH6 lane 14, #1409); this side keeps the device
+//! model, the live rings and guest memory. The Rust register file it
+//! replaced is kept only as the unit tests' reference
+//! (src/devices/mmio/reference.rs).
+//!
 //! This is a host model on ordinary bytes ([`GuestMemory`]). There is no
 //! memory ordering with a concurrently running guest, no ioeventfd/irqfd and no
 //! KVM wiring; it validates the modelled register and ring protocol only.
@@ -292,36 +299,6 @@ impl QueueIo<'_> {
     }
 }
 
-#[derive(Debug)]
-struct ActiveQueue {
-    queue: VirtQueue,
-    pending: VecDeque<Chain>,
-}
-
-#[derive(Debug)]
-struct QueueSlot {
-    max: u16,
-    num: u16,
-    ready: bool,
-    desc: u64,
-    driver: u64,
-    device: u64,
-    active: Option<ActiveQueue>,
-}
-impl QueueSlot {
-    fn new(max: u16) -> Self {
-        Self {
-            max,
-            num: 0,
-            ready: false,
-            desc: 0,
-            driver: 0,
-            device: 0,
-            active: None,
-        }
-    }
-}
-
 /// Transport counters, for tests and reports.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TransportStats {
@@ -334,24 +311,73 @@ pub struct TransportStats {
     pub interrupts_suppressed: u64,
 }
 
+#[derive(Debug)]
+struct ActiveQueue {
+    queue: VirtQueue,
+    pending: VecDeque<Chain>,
+}
+
+/// Register-access results of the Vesper register file
+/// (vesper/src/mmio.ves): the kind in the low byte, a payload above it.
+mod access {
+    pub const OK: u8 = 0;
+    pub const DO_CONFIG: u8 = 1;
+    pub const DO_RESET: u8 = 2;
+    pub const DO_ACTIVATE: u8 = 3;
+    pub const DO_READY_ON: u8 = 4;
+    pub const DO_READY_OFF: u8 = 5;
+    pub const DO_NOTIFY: u8 = 6;
+    pub const DO_NOTIFY_DATA: u8 = 7;
+}
+
+/// The error an access result names (`offset`, `len` and `value` are the
+/// access's own).
+fn access_error(code: u64, offset: u64, len: usize, value: u32, from: u32) -> MmioError {
+    let payload = code >> 8;
+    match code as u8 {
+        16 => MmioError::Width { offset, len },
+        17 => MmioError::OutOfWindow { offset },
+        18 => MmioError::ReadOnlyRegister { offset },
+        19 => MmioError::WriteOnlyRegister { offset },
+        20 => MmioError::UnsupportedRegister { offset },
+        21 => MmioError::InvalidQueue {
+            index: payload as u32,
+        },
+        22 => MmioError::InvalidQueueSize {
+            size: payload as u32,
+            max: (payload >> 32) as u16,
+        },
+        23 => MmioError::QueueConfiguredWhileReady,
+        24 => MmioError::QueueReadyBeforeFeaturesOk,
+        25 => MmioError::StatusRegression { from, to: value },
+        26 => MmioError::DriverOkWithoutFeaturesOk,
+        27 => MmioError::DriverSetNeedsReset,
+        28 => MmioError::FeaturesAfterFeaturesOk,
+        29 => MmioError::ConfigOutOfRange { offset, len },
+        30 => MmioError::DeviceNeedsReset,
+        31 => MmioError::DriverFailed,
+        32 => MmioError::NotifyBeforeDriverOk,
+        33 => MmioError::QueueNotReady {
+            index: payload as u32,
+        },
+        k => unreachable!("unknown MMIO access result {k}"),
+    }
+}
+
 /// One VirtIO MMIO device: the register file plus the device model.
+///
+/// The register file (selectors, feature negotiation, the status machine,
+/// per-queue registers, interrupt status, configuration generation and the
+/// counters) is the Vesper port's state (vesper/src/mmio.ves); this side
+/// keeps the device model, the live rings and the guest memory accesses.
 #[derive(Debug)]
 pub struct MmioTransport<D: VirtioDevice> {
     device: D,
     vm_id: u64,
     limits: QueueLimits,
     ring_features: u64,
-    status: u32,
-    device_features_sel: u32,
-    driver_features_sel: u32,
-    driver_features: u64,
-    driver_accepted_unknown: bool,
-    negotiated: u64,
-    queue_sel: u32,
-    queues: Vec<QueueSlot>,
-    interrupt_status: u32,
-    config_generation: u32,
-    stats: TransportStats,
+    state: crate::binding::MmioState,
+    active: Vec<Option<ActiveQueue>>,
 }
 
 impl<D: VirtioDevice> MmioTransport<D> {
@@ -366,27 +392,20 @@ impl<D: VirtioDevice> MmioTransport<D> {
         t
     }
     pub fn with_limits(device: D, vm_id: u64, limits: QueueLimits) -> Self {
-        let queues = device
+        let maxes: Vec<u8> = device
             .queue_max_sizes()
             .iter()
-            .map(|&m| QueueSlot::new(m))
+            .flat_map(|m| m.to_le_bytes())
             .collect();
+        let state = crate::binding::mmio_state_new(device.device_type(), &maxes);
+        let active = device.queue_max_sizes().iter().map(|_| None).collect();
         Self {
             device,
             vm_id,
             limits,
             ring_features: RING_FEATURES,
-            status: 0,
-            device_features_sel: 0,
-            driver_features_sel: 0,
-            driver_features: 0,
-            driver_accepted_unknown: false,
-            negotiated: 0,
-            queue_sel: 0,
-            queues,
-            interrupt_status: 0,
-            config_generation: 0,
-            stats: TransportStats::default(),
+            state,
+            active,
         }
     }
     pub fn device(&self) -> &D {
@@ -400,21 +419,21 @@ impl<D: VirtioDevice> MmioTransport<D> {
         r
     }
     pub fn status(&self) -> u32 {
-        self.status
+        self.state.as_ref().status()
     }
     /// The VM this device belongs to.
     pub fn vm_id(&self) -> u64 {
         self.vm_id
     }
     pub fn negotiated_features(&self) -> u64 {
-        self.negotiated
+        self.state.as_ref().negotiated()
     }
     pub fn offered_features(&self) -> u64 {
         self.device.device_features() | VIRTIO_F_VERSION_1 | self.ring_features
     }
     /// The ring format negotiated queues use.
     pub fn ring_format(&self) -> RingFormat {
-        if self.negotiated & VIRTIO_F_RING_PACKED != 0 {
+        if self.negotiated_features() & VIRTIO_F_RING_PACKED != 0 {
             RingFormat::Packed
         } else {
             RingFormat::Split
@@ -422,137 +441,51 @@ impl<D: VirtioDevice> MmioTransport<D> {
     }
     /// Counters of queue `index`, once it is ready.
     pub fn queue_stats(&self, index: u32) -> Option<super::queue::QueueStats> {
-        self.queues
+        self.active
             .get(index as usize)?
-            .active
             .as_ref()
             .map(|a| a.queue.stats())
     }
     pub fn interrupt_pending(&self) -> bool {
-        self.interrupt_status != 0
+        self.state.as_ref().interrupt_status() != 0
     }
     pub fn stats(&self) -> TransportStats {
-        self.stats
+        self.state.as_ref().stats()
     }
 
     fn check_config_change(&mut self) {
         if self.device.take_config_change() {
-            self.config_generation = self.config_generation.wrapping_add(1);
-            self.raise(INT_CONFIG_CHANGE);
+            crate::binding::mmio_config_change(&mut self.state);
         }
-    }
-    fn raise(&mut self, bits: u32) {
-        self.interrupt_status |= bits;
-        self.stats.interrupts += 1;
-    }
-    fn needs_reset(&mut self) {
-        self.status |= status::DEVICE_NEEDS_RESET;
-        self.raise(INT_CONFIG_CHANGE);
     }
     fn reset(&mut self) {
         self.device.reset();
-        self.status = 0;
-        self.device_features_sel = 0;
-        self.driver_features_sel = 0;
-        self.driver_features = 0;
-        self.driver_accepted_unknown = false;
-        self.negotiated = 0;
-        self.queue_sel = 0;
-        for q in &mut self.queues {
-            *q = QueueSlot::new(q.max);
+        for a in &mut self.active {
+            *a = None;
         }
-        self.interrupt_status = 0;
-    }
-    fn selected(&self) -> Result<&QueueSlot, MmioError> {
-        self.queues
-            .get(self.queue_sel as usize)
-            .ok_or(MmioError::InvalidQueue {
-                index: self.queue_sel,
-            })
-    }
-    fn selected_mut(&mut self) -> Result<&mut QueueSlot, MmioError> {
-        let index = self.queue_sel;
-        let q = self
-            .queues
-            .get_mut(index as usize)
-            .ok_or(MmioError::InvalidQueue { index })?;
-        if q.ready {
-            return Err(MmioError::QueueConfiguredWhileReady);
-        }
-        Ok(q)
     }
 
     /// A driver read of `data.len()` bytes at `offset` in the register window.
     pub fn read(&mut self, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
-        if offset >= MMIO_WINDOW_BYTES {
-            return Err(MmioError::OutOfWindow { offset });
-        }
-        if offset >= reg::CONFIG {
-            return self.read_config(offset, data);
-        }
-        if data.len() != 4 || !offset.is_multiple_of(4) {
-            return Err(MmioError::Width {
-                offset,
-                len: data.len(),
-            });
-        }
-        let value = match offset {
-            reg::MAGIC_VALUE => MMIO_MAGIC,
-            reg::VERSION => MMIO_VERSION,
-            reg::DEVICE_ID => self.device.device_type(),
-            reg::VENDOR_ID => AETHER_VENDOR_ID,
-            reg::DEVICE_FEATURES => match self.device_features_sel {
-                0 => self.offered_features() as u32,
-                1 => (self.offered_features() >> 32) as u32,
-                _ => 0,
-            },
-            reg::QUEUE_NUM_MAX => self
-                .queues
-                .get(self.queue_sel as usize)
-                .map_or(0, |q| u32::from(q.max)),
-            reg::QUEUE_READY => u32::from(self.selected()?.ready),
-            reg::INTERRUPT_STATUS => self.interrupt_status,
-            reg::STATUS => self.status,
-            reg::SHM_LEN_LOW | reg::SHM_LEN_HIGH | reg::SHM_BASE_LOW | reg::SHM_BASE_HIGH => {
-                // No shared memory regions: length reads as -1 (§4.2.2).
-                u32::MAX
+        let r = crate::binding::mmio_read(
+            &self.state,
+            offset,
+            data.len() as u64,
+            self.offered_features(),
+            self.device.config_len() as u64,
+        );
+        match r as u8 {
+            access::OK => {
+                data.copy_from_slice(&((r >> 8) as u32).to_le_bytes());
+                Ok(())
             }
-            reg::CONFIG_GENERATION => self.config_generation,
-            reg::QUEUE_RESET => return Err(MmioError::UnsupportedRegister { offset }),
-            reg::DEVICE_FEATURES_SEL
-            | reg::DRIVER_FEATURES
-            | reg::DRIVER_FEATURES_SEL
-            | reg::QUEUE_SEL
-            | reg::QUEUE_NUM
-            | reg::QUEUE_NOTIFY
-            | reg::INTERRUPT_ACK
-            | reg::QUEUE_DESC_LOW
-            | reg::QUEUE_DESC_HIGH
-            | reg::QUEUE_DRIVER_LOW
-            | reg::QUEUE_DRIVER_HIGH
-            | reg::QUEUE_DEVICE_LOW
-            | reg::QUEUE_DEVICE_HIGH
-            | reg::SHM_SEL => return Err(MmioError::WriteOnlyRegister { offset }),
-            _ => return Err(MmioError::UnsupportedRegister { offset }),
-        };
-        data.copy_from_slice(&value.to_le_bytes());
-        Ok(())
-    }
-
-    fn read_config(&self, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
-        let len = data.len();
-        let off = (offset - reg::CONFIG) as usize;
-        if !matches!(len, 1 | 2 | 4 | 8) {
-            return Err(MmioError::Width { offset, len });
+            access::DO_CONFIG => {
+                self.device
+                    .read_config((offset - reg::CONFIG) as usize, data);
+                Ok(())
+            }
+            _ => Err(access_error(r, offset, data.len(), 0, 0)),
         }
-        if off
-            .checked_add(len)
-            .is_none_or(|e| e > self.device.config_len())
-        {
-            return Err(MmioError::ConfigOutOfRange { offset, len });
-        }
-        self.device.read_config(off, data);
-        Ok(())
     }
 
     /// A driver write. `memory` is the guest RAM (needed when a queue becomes
@@ -563,209 +496,65 @@ impl<D: VirtioDevice> MmioTransport<D> {
         offset: u64,
         data: &[u8],
     ) -> Result<(), MmioError> {
-        if offset >= MMIO_WINDOW_BYTES {
-            return Err(MmioError::OutOfWindow { offset });
-        }
-        if offset >= reg::CONFIG {
-            let len = data.len();
-            let off = (offset - reg::CONFIG) as usize;
-            if !matches!(len, 1 | 2 | 4 | 8) {
-                return Err(MmioError::Width { offset, len });
+        let value = <[u8; 4]>::try_from(data).map_or(0, u32::from_le_bytes);
+        let from = self.status();
+        let offered = self.offered_features();
+        let config_len = self.device.config_len() as u64;
+        let r = crate::binding::mmio_write(
+            &mut self.state,
+            offset,
+            data.len() as u64,
+            value,
+            offered,
+            config_len,
+        );
+        match r as u8 {
+            access::OK => Ok(()),
+            access::DO_CONFIG => {
+                self.device
+                    .write_config((offset - reg::CONFIG) as usize, data)?;
+                self.check_config_change();
+                Ok(())
             }
-            if off
-                .checked_add(len)
-                .is_none_or(|e| e > self.device.config_len())
-            {
-                return Err(MmioError::ConfigOutOfRange { offset, len });
-            }
-            self.device.write_config(off, data)?;
-            self.check_config_change();
-            return Ok(());
-        }
-        let value = match <[u8; 4]>::try_from(data) {
-            Ok(b) if offset.is_multiple_of(4) => u32::from_le_bytes(b),
-            _ => {
-                return Err(MmioError::Width {
-                    offset,
-                    len: data.len(),
-                });
-            }
-        };
-        match offset {
-            reg::DEVICE_FEATURES_SEL => self.device_features_sel = value,
-            reg::DRIVER_FEATURES_SEL => self.driver_features_sel = value,
-            reg::DRIVER_FEATURES => {
-                if self.status & status::FEATURES_OK != 0 {
-                    return Err(MmioError::FeaturesAfterFeaturesOk);
-                }
-                match self.driver_features_sel {
-                    0 => {
-                        self.driver_features =
-                            (self.driver_features & !0xffff_ffff) | u64::from(value)
-                    }
-                    1 => {
-                        self.driver_features =
-                            (self.driver_features & 0xffff_ffff) | (u64::from(value) << 32)
-                    }
-                    // Bits above 63 are never offered: accepting any of them
-                    // makes the feature set invalid at FEATURES_OK.
-                    _ if value != 0 => self.driver_accepted_unknown = true,
-                    _ => {}
-                }
-            }
-            reg::QUEUE_SEL => self.queue_sel = value,
-            reg::QUEUE_NUM => {
-                let q = self.selected_mut()?;
-                if value == 0 || value > u32::from(q.max) {
-                    return Err(MmioError::InvalidQueueSize {
-                        size: value,
-                        max: q.max,
-                    });
-                }
-                q.num = value as u16;
-            }
-            reg::QUEUE_DESC_LOW => set_low(&mut self.selected_mut()?.desc, value),
-            reg::QUEUE_DESC_HIGH => set_high(&mut self.selected_mut()?.desc, value),
-            reg::QUEUE_DRIVER_LOW => set_low(&mut self.selected_mut()?.driver, value),
-            reg::QUEUE_DRIVER_HIGH => set_high(&mut self.selected_mut()?.driver, value),
-            reg::QUEUE_DEVICE_LOW => set_low(&mut self.selected_mut()?.device, value),
-            reg::QUEUE_DEVICE_HIGH => set_high(&mut self.selected_mut()?.device, value),
-            reg::QUEUE_READY => self.set_queue_ready(memory, value != 0)?,
-            reg::QUEUE_NOTIFY => self.notify(memory, value)?,
-            reg::INTERRUPT_ACK => self.interrupt_status &= !value,
-            reg::STATUS => self.write_status(value)?,
-            reg::SHM_SEL => {}
-            reg::QUEUE_RESET => return Err(MmioError::UnsupportedRegister { offset }),
-            reg::MAGIC_VALUE
-            | reg::VERSION
-            | reg::DEVICE_ID
-            | reg::VENDOR_ID
-            | reg::DEVICE_FEATURES
-            | reg::QUEUE_NUM_MAX
-            | reg::INTERRUPT_STATUS
-            | reg::SHM_LEN_LOW
-            | reg::SHM_LEN_HIGH
-            | reg::SHM_BASE_LOW
-            | reg::SHM_BASE_HIGH
-            | reg::CONFIG_GENERATION => return Err(MmioError::ReadOnlyRegister { offset }),
-            _ => return Err(MmioError::UnsupportedRegister { offset }),
-        }
-        Ok(())
-    }
-
-    /// Sets the driver's feature word directly (for the port ABBA timings).
-    #[cfg(all(test, feature = "vesper-port"))]
-    pub(crate) fn set_driver_features_for_test(&mut self, features: u64) {
-        self.driver_features = features;
-    }
-
-    pub(crate) fn write_status(&mut self, new: u32) -> Result<(), MmioError> {
-        #[cfg(feature = "vesper-port")]
-        {
-            let outcome = crate::binding::mmio_write_status(
-                self.status,
-                new,
-                self.driver_accepted_unknown,
-                self.driver_features,
-                self.offered_features(),
-            )
-            .map_err(|fault| {
-                if let crate::port_types::MmioStatusFault::DriverOkWithoutFeaturesOk {
-                    rejected_features: true,
-                } = fault
-                {
-                    self.stats.rejected_feature_sets += 1;
-                }
-                MmioError::from(fault)
-            })?;
-            if outcome.reset {
+            access::DO_RESET => {
                 self.reset();
-                return Ok(());
+                Ok(())
             }
-            if outcome.rejected_features {
-                self.stats.rejected_feature_sets += 1;
+            access::DO_ACTIVATE => {
+                self.device.activate(self.negotiated_features());
+                Ok(())
             }
-            if outcome.accepted_features {
-                self.negotiated = self.driver_features;
+            access::DO_READY_ON => self.make_ready(memory, (r >> 8) as u32),
+            access::DO_READY_OFF => {
+                self.active[(r >> 8) as usize] = None;
+                Ok(())
             }
-            if outcome.activate {
-                self.device.activate(self.negotiated);
+            access::DO_NOTIFY => self.run_queue(memory, value, None),
+            access::DO_NOTIFY_DATA => {
+                // §2.9: vqn in bits 0..16, then next_idx (split) or next_off
+                // and next_wrap (packed).
+                let index = value & 0xffff;
+                let hint = self
+                    .active
+                    .get(index as usize)
+                    .and_then(Option::as_ref)
+                    .map(|a| a.queue.hint_from_data((value >> 16) as u16));
+                match hint {
+                    Some(Ok(h)) => self.run_queue(memory, index, Some(h)),
+                    Some(Err(_)) => Err(MmioError::InvalidNotification { value }),
+                    None => self.run_queue(memory, index, None),
+                }
             }
-            self.status = outcome.next_status;
-            Ok(())
+            _ => Err(access_error(r, offset, data.len(), value, from)),
         }
-        #[cfg(not(feature = "vesper-port"))]
-        self.write_status_reference(new)
     }
 
-    /// The Rust implementation of `write_status`, exposed for differential tests.
-    #[doc(hidden)]
-    pub fn write_status_reference(&mut self, new: u32) -> Result<(), MmioError> {
-        if new == 0 {
-            self.reset();
-            return Ok(());
-        }
-        let old = self.status;
-        let added = new & !old;
-        // DEVICE_NEEDS_RESET is device-owned; a driver may write it back
-        // unchanged but may not set it.
-        if added & status::DEVICE_NEEDS_RESET != 0 {
-            return Err(MmioError::DriverSetNeedsReset);
-        }
-        if old & !new & !status::DEVICE_NEEDS_RESET != 0 {
-            return Err(MmioError::StatusRegression { from: old, to: new });
-        }
-        let mut next = new | (old & status::DEVICE_NEEDS_RESET);
-        if added & status::FEATURES_OK != 0 {
-            let offered = self.offered_features();
-            let required = VIRTIO_F_VERSION_1;
-            if self.driver_accepted_unknown
-                || self.driver_features & !offered != 0
-                || self.driver_features & required != required
-            {
-                // §3.1.1: the device leaves FEATURES_OK clear; the driver
-                // re-reads status and gives up on the device.
-                next &= !status::FEATURES_OK;
-                self.stats.rejected_feature_sets += 1;
-            } else {
-                self.negotiated = self.driver_features;
-            }
-        }
-        if added & status::DRIVER_OK != 0 {
-            if next & status::FEATURES_OK == 0 {
-                return Err(MmioError::DriverOkWithoutFeaturesOk);
-            }
-            self.device.activate(self.negotiated);
-        }
-        self.status = next;
-        Ok(())
-    }
-
-    fn set_queue_ready(&mut self, memory: &GuestMemory, ready: bool) -> Result<(), MmioError> {
-        let index = self.queue_sel;
-        let limits = self.limits;
-        let q = self
-            .queues
-            .get_mut(index as usize)
-            .ok_or(MmioError::InvalidQueue { index })?;
-        if !ready {
-            q.ready = false;
-            q.active = None;
-            return Ok(());
-        }
-        if q.ready {
-            return Ok(());
-        }
-        if q.num == 0 {
-            return Err(MmioError::InvalidQueueSize {
-                size: 0,
-                max: q.max,
-            });
-        }
-        if self.status & status::FEATURES_OK == 0 {
-            return Err(MmioError::QueueReadyBeforeFeaturesOk);
-        }
-        let format = if self.negotiated & VIRTIO_F_RING_PACKED != 0 {
+    /// QueueReady=1 on queue `index`, which the register file accepted:
+    /// builds the live ring over the registers.
+    fn make_ready(&mut self, memory: &GuestMemory, index: u32) -> Result<(), MmioError> {
+        let q = crate::binding::mmio_queue(&self.state, index);
+        let negotiated = self.negotiated_features();
+        let format = if negotiated & VIRTIO_F_RING_PACKED != 0 {
             RingFormat::Packed
         } else {
             RingFormat::Split
@@ -779,8 +568,8 @@ impl<D: VirtioDevice> MmioTransport<D> {
         };
         let queue = VirtQueue::new(
             layout,
-            RingFeatures::from_bits(self.negotiated),
-            limits,
+            RingFeatures::from_bits(negotiated),
+            self.limits,
             memory,
         )
         .map_err(|e| match e {
@@ -790,32 +579,12 @@ impl<D: VirtioDevice> MmioTransport<D> {
             },
             _ => MmioError::RingNotInRam,
         })?;
-        q.active = Some(ActiveQueue {
+        self.active[index as usize] = Some(ActiveQueue {
             queue,
             pending: VecDeque::new(),
         });
-        q.ready = true;
+        crate::binding::mmio_queue_set_ready(&mut self.state, index);
         Ok(())
-    }
-
-    fn notify(&mut self, memory: &mut GuestMemory, value: u32) -> Result<(), MmioError> {
-        self.stats.notifications += 1;
-        if self.negotiated & VIRTIO_F_NOTIFICATION_DATA == 0 {
-            return self.run_queue(memory, value, None);
-        }
-        // §2.9: vqn in bits 0..16, then next_idx (split) or next_off and
-        // next_wrap (packed).
-        let index = value & 0xffff;
-        let hint = self
-            .queues
-            .get(index as usize)
-            .and_then(|q| q.active.as_ref())
-            .map(|a| a.queue.hint_from_data((value >> 16) as u16));
-        match hint {
-            Some(Ok(h)) => self.run_queue(memory, index, Some(h)),
-            Some(Err(_)) => Err(MmioError::InvalidNotification { value }),
-            None => self.run_queue(memory, index, None),
-        }
     }
 
     /// Host-side poll: process queue `index` again (e.g. after the backend has
@@ -830,20 +599,11 @@ impl<D: VirtioDevice> MmioTransport<D> {
         index: u32,
         hint: Option<AvailHint>,
     ) -> Result<(), MmioError> {
-        if self.status & status::DEVICE_NEEDS_RESET != 0 {
-            return Err(MmioError::DeviceNeedsReset);
+        let check = crate::binding::mmio_run_check(&self.state, index);
+        if check != 0 {
+            return Err(access_error(check, 0, 0, 0, 0));
         }
-        if self.status & status::FAILED != 0 {
-            return Err(MmioError::DriverFailed);
-        }
-        if self.status & status::DRIVER_OK == 0 {
-            return Err(MmioError::NotifyBeforeDriverOk);
-        }
-        let q = self
-            .queues
-            .get_mut(index as usize)
-            .ok_or(MmioError::InvalidQueue { index })?;
-        let Some(active) = q.active.as_mut() else {
+        let Some(active) = self.active[index as usize].as_mut() else {
             return Err(MmioError::QueueNotReady { index });
         };
         let mut captured = 0u64;
@@ -861,9 +621,8 @@ impl<D: VirtioDevice> MmioTransport<D> {
                 }
             }
         }
-        self.stats.chains_captured += captured;
         if let Some(e) = failure {
-            self.needs_reset();
+            crate::binding::mmio_run_done(&mut self.state, captured, true, 0, 0, false, false);
             return Err(e);
         }
         let mut io = QueueIo {
@@ -873,26 +632,25 @@ impl<D: VirtioDevice> MmioTransport<D> {
             completed: 0,
         };
         let result = self.device.process(index as u16, &mut io);
-        let completed = io.completed;
+        let completed = io.completed as u64;
         let flushed = active.queue.flush(memory);
-        self.stats.chains_completed += completed as u64;
-        match flushed {
-            Ok(true) => self.raise(INT_USED_BUFFER),
-            Ok(false) if completed > 0 => self.stats.interrupts_suppressed += 1,
-            Ok(false) => {}
-            Err(e) => {
-                self.needs_reset();
-                return Err(device_error(e));
-            }
+        let (flush_code, config_changed) = match flushed {
+            Ok(irq) => (u64::from(irq), self.device.take_config_change()),
+            Err(_) => (2, false),
+        };
+        crate::binding::mmio_run_done(
+            &mut self.state,
+            captured,
+            false,
+            completed,
+            flush_code,
+            config_changed,
+            result.is_err(),
+        );
+        if let Err(e) = flushed {
+            return Err(device_error(e));
         }
-        self.check_config_change();
-        match result {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                self.needs_reset();
-                Err(device_error(e))
-            }
-        }
+        result.map_err(device_error)
     }
 }
 
@@ -904,9 +662,7 @@ fn device_error(e: DeviceError) -> MmioError {
     }
 }
 
-fn set_low(field: &mut u64, value: u32) {
-    *field = (*field & !0xffff_ffff) | u64::from(value);
-}
-fn set_high(field: &mut u64, value: u32) {
-    *field = (*field & 0xffff_ffff) | (u64::from(value) << 32);
-}
+#[cfg(test)]
+mod reference;
+#[cfg(test)]
+pub(crate) use reference::MmioTransport as ReferenceMmioTransport;

@@ -1,0 +1,118 @@
+"""Validate disk cleanup boundaries and BuildBuddy watcher status handling."""
+
+load("./lib/process.axl", "capture", "check", "exit_code")
+load("./lib/task-fixture.axl", "contains", "equal", "fixture_launcher", "fixture_workspace", "invoke_fixture", "write_fixture")
+
+def mock_disk_tool(ctx, cwd, tool, argv):
+    watching = ctx.std.env.var("VESPER_FIXTURE_CASE") == "disk-watch"
+    slept = cwd + "/slept"
+    if tool == "find":
+        equal(argv[1:7], ["-mindepth", "1", "-maxdepth", "1", "-user", ctx.std.env.var("VESPER_FIXTURE_USER")])
+        ctx.std.fs.write(cwd + "/cleanup-ownership-verified", "")
+        return exit_code(ctx.std.process.command("find").args(argv).current_dir(cwd).status())
+    if tool == "df":
+        if argv == ["-Pk", "."]:
+            ctx.std.io.stdout.write("header\n/dev/fake 0 100 " + ("12582912" if watching else "10485759") + " 99% /\n")
+        elif watching:
+            ctx.std.io.stdout.write("report\n")
+        else:
+            equal(argv[:2], ["-h", "."])
+            equal(argv[2].endswith("tmp scratch"), True)
+            ctx.std.io.stdout.write("disk output\ndisk output\n")
+        return 0
+    if tool == "du":
+        if not watching:
+            ctx.std.io.stdout.write(json.encode(argv) + "\n")
+        return 124 if watching else 0
+    if tool == "sleep":
+        equal(argv, ["120"])
+        if ctx.std.fs.exists(slept):
+            return 22
+        ctx.std.fs.write(slept, "")
+        return 0
+    equal(tool, "bazel")
+    if watching:
+        if argv[0] != "test":
+            equal(argv, ["info", "output_base"])
+            return 1
+        equal(argv[1:], ["--config=ci", "//:target name"])
+        equal(ctx.std.env.var("VESPER_LEAN"), "/actual lean/bin/lean")
+        for _ in range(200):
+            if ctx.std.fs.exists(slept):
+                break
+            check(ctx, "sleep", ["0.05"], cwd)
+        equal(ctx.std.fs.exists(slept), True)
+        ctx.std.io.stdout.write("Bazel test\n")
+        return 37
+    equal(ctx.std.fs.try_append(cwd + "/bazel.log", " ".join(argv) + "\n"), True)
+    if argv == ["info", "output_base"]:
+        ctx.std.io.stdout.write("bazel output directory\n")
+        return 0
+    equal(argv, ["clean"])
+    return 23
+
+def _test(ctx):
+    workspace = fixture_workspace(ctx, "vesper-disk-ci-test-")
+    root, cwd = workspace.root, workspace.cwd
+    user = capture(ctx, "id", ["-u"], root).strip()
+    env = dict(fixture_launcher(ctx, workspace, "disk-clean", ["find", "df", "bazel", "du", "sleep"]),
+               VESPER_FIXTURE_USER = user, TMPDIR = "vesper-tmp scratch", VESPER_CI_MIN_FREE_GB = "9")
+    scratch = root + "/vesper-tmp scratch"
+    outside = root + "/outside/keep"
+    write_fixture(ctx, outside, "outside scratch")
+    keep = [scratch + "/unrelated/stage1-nested/keep", scratch + "/keep"]
+    for path in keep:
+        write_fixture(ctx, path, "nested or unrelated")
+    if user == "0":
+        foreign = scratch + "/vesper-foreign"
+        write_fixture(ctx, foreign, "owned by another user")
+        check(ctx, "chown", ["65534", foreign], root)
+        keep.append(foreign)
+    purge = [scratch + "/" + name for name in ["vesper-check", "stage1-test", "blake3-case", "native-probe", ".tmp fixture"]]
+    for directory in purge:
+        write_fixture(ctx, directory + "/artifact", "stale")
+    link = scratch + "/vesper-symlink"
+    check(ctx, "ln", ["-s", outside.rpartition("/")[0], link], root)
+
+    command = ["ci", "reclaim-disk"]
+    log = root + "/bazel.log"
+    ctx.std.fs.write(log, "")
+    invoke_fixture(ctx, command + ["--", "invalid"], cwd, 2, env)
+    report = invoke_fixture(ctx, command + ["--", "report"], cwd, env = env)
+    equal(len([line for line in report.stdout.splitlines() if line == "disk output"]), 1)
+    contains("bazel output directory", report.stdout)
+    equal(all([ctx.std.fs.exists(path) for path in purge]), True)
+    equal(ctx.std.fs.read_to_string(log).splitlines(), ["info output_base"])
+    ctx.std.fs.write(log, "")
+    invoke_fixture(ctx, command, cwd, env = env)
+    equal(ctx.std.fs.exists(root + "/cleanup-ownership-verified"), True)
+    equal(all([ctx.std.fs.exists(path) for path in [outside] + keep]), True)
+    equal(any([ctx.std.fs.exists(path) for path in purge + [link]]), False)
+    equal(ctx.std.fs.read_to_string(log).splitlines(), ["info output_base", "info output_base"])
+    ctx.std.fs.write(log, "")
+    result = invoke_fixture(ctx, command, cwd, env = dict(env, VESPER_CI_MIN_FREE_GB = ""))
+    contains("9 GB free, below 20 GB", result.stdout)
+    equal(ctx.std.fs.read_to_string(log).splitlines(), ["info output_base", "clean", "info output_base"])
+    equal(result.stdout.index("before cleanup") < result.stdout.index("after cleanup"), True)
+
+    env["VESPER_FIXTURE_CASE"] = "disk-watch"
+    watch = invoke_fixture(ctx, command + ["--", "watch"], cwd, 22, env)
+    line = watch.stdout.strip()
+    equal(line.startswith("reclaim-disk: ") and line.endswith(" 12 GB free"), True)
+    equal([len(field) for field in line.split()[1].split(":")], [2, 2, 2])
+    equal(all([field.isdigit() for field in line.split()[1].split(":")]), True)
+    ctx.std.fs.remove_file(root + "/slept")
+    lean = root + "/.ci-lean-path"
+    ctx.std.fs.write(lean, "/actual lean/bin/lean\r\n")
+    lane = ["ci", "bazel-tests", "--", "--config=ci", "//:target name"]
+    output = invoke_fixture(ctx, lane, cwd, 37, env).stdout
+    equal(output.index("Bazel test") < output.index("reclaim-disk: disk use"), True)
+    ctx.std.fs.write(lean, "\n")
+    contains("Lean executable path is required", invoke_fixture(ctx, lane, cwd, 1, env).stderr)
+    return 0
+
+test_disk_ci = task(
+    kind = "disk-ci", group = ["ci", "tests"],
+    summary = "Verify bounded temporary cleanup, watcher lifecycle and Bazel status propagation",
+    implementation = _test,
+)

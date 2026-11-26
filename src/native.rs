@@ -1066,17 +1066,29 @@ fn compile_entry<M: Module>(
     {
         return Err("native entry cannot expose specialized closure values; invoke them within the entry function".into());
     }
-    let instances = instances_for_entry(world, entry, trace_ok)?;
-    let mut program = crate::ir_swap::lower(world);
-    // The entry-block plans and internal conventions from the
-    // `entry_plans` swap hook (#1509 parts 3b and 4a), from the first
-    // lowering; a trace host keeps the Rust plans.
-    let plans = if trace_ok {
+    // The `entry_plans` swap hook (#1509 parts 3b, 4a and 4b) answers, from
+    // the first lowering, the instances, their entry-block plans and their
+    // internal conventions; a trace host keeps the Rust plans. Without the
+    // hook, discovery comes first as before.
+    let hook = if trace_ok {
         None
     } else {
-        crate::codegen_swap::installed()
-            .entry_plans
-            .and_then(|hook| hook(world, &program, entry, optimize))
+        crate::codegen_swap::installed().entry_plans
+    };
+    let (instances, mut program, plans) = match hook {
+        Some(hook) => {
+            let program = crate::ir_swap::lower(world);
+            let plans = hook(world, &program, entry, optimize);
+            let instances = match plans.as_ref().filter(|p| !p.instances.is_empty()) {
+                Some(p) => p.instances.clone(),
+                None => instances_for_entry(world, entry, trace_ok)?,
+            };
+            (instances, program, plans)
+        }
+        None => {
+            let instances = instances_for_entry(world, entry, trace_ok)?;
+            (instances, crate::ir_swap::lower(world), None)
+        }
     };
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
     wide_native::refine_wide_tuples(&mut program);
@@ -1204,7 +1216,7 @@ pub struct FramePlan {
     pub capabilities: BTreeMap<String, String>,
 }
 /// What the `entry_plans` swap hook answers for one entry compile
-/// (#1509 parts 3b and 4a), by instance key.
+/// (#1509 parts 3b, 4a and 4b), by instance key.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EntryPlans {
     /// Each instance's entry-block plan ([`frame_plan`]).
@@ -1212,6 +1224,9 @@ pub struct EntryPlans {
     /// Each instance's internal convention ([`NativeAbi::plan`] before the
     /// boundary and optimize filters).
     pub abi: BTreeMap<String, FnAbi>,
+    /// The instances themselves ([`instances_for_entry`]): each key's source
+    /// function and variables.
+    pub instances: BTreeMap<String, (String, BTreeMap<String, Type>)>,
 }
 /// Where a function builds its result ([`FramePlan::result`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2159,26 +2174,30 @@ pub(crate) fn local_symbol(i: usize, key: &str) -> String {
         .collect();
     format!("vesper_function_{i}_{name}")
 }
-/// Keeps a JIT module's code in one contiguous reservation on AArch64.
+/// Keeps a JIT module's code in one contiguous reservation on AArch64 and
+/// x86-64.
 ///
-/// Calls between a module's functions are `bl`, which reaches ±128 MiB.
-/// The default memory provider maps each allocation on its own, and in a
-/// long-lived process (a test that JIT-runs hundreds of programs) the
-/// mappings of one module can land further apart than that, so cranelift-jit
-/// aborts on the call relocation (`compiled_blob.rs`: `diff >> 26`). An arena
-/// keeps every function of the module within its reservation.
+/// Calls between a module's functions are `bl` on AArch64, which reaches
+/// ±128 MiB, and `call rel32` on x86-64, which reaches ±2 GiB. The default
+/// memory provider maps each allocation on its own, and in a long-lived
+/// process (a test that JIT-runs hundreds of programs) the mappings of one
+/// module can land further apart than that, so cranelift-jit aborts on the
+/// call relocation (`compiled_blob.rs`: `diff >> 26` on AArch64,
+/// `i32::try_from` (`PosOverflow`) on x86-64, seen in
+/// `stage2_compiles_compiler_packages`). An arena keeps every function of
+/// the module within its reservation.
 pub(crate) fn keep_code_near(builder: &mut JITBuilder) {
-    #[cfg(all(target_arch = "aarch64", not(windows)))]
+    #[cfg(all(any(target_arch = "aarch64", target_arch = "x86_64"), not(windows)))]
     if let Ok(arena) = cranelift_jit::ArenaMemoryProvider::new_with_size(JIT_ARENA_BYTES) {
         builder.memory_provider(Box::new(arena));
     }
-    #[cfg(not(all(target_arch = "aarch64", not(windows))))]
+    #[cfg(not(all(any(target_arch = "aarch64", target_arch = "x86_64"), not(windows))))]
     let _ = builder;
 }
 /// The reservation of [`keep_code_near`]: address space only (pages are
 /// committed as the module grows), and short enough that a `bl` from any
 /// byte of it reaches any other.
-#[cfg(all(target_arch = "aarch64", not(windows)))]
+#[cfg(all(any(target_arch = "aarch64", target_arch = "x86_64"), not(windows)))]
 const JIT_ARENA_BYTES: usize = 120 << 20;
 pub(crate) fn register_jit_runtime_symbols(builder: &mut JITBuilder, trace_host: bool) {
     builder.symbol("fmod", native_float_remainder as *const u8);

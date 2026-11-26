@@ -227,6 +227,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn unlink(path: *const c_char) -> i32;
         fn rmdir(path: *const c_char) -> i32;
         fn mkdir(path: *const c_char, mode: u32) -> i32;
+        fn chmod(path: *const c_char, mode: u32) -> i32;
+        fn fchmod(fd: i32, mode: u32) -> i32;
         fn getpid() -> i32;
         fn opendir(path: *const c_char) -> *mut c_void;
         fn readdir(dir: *mut c_void) -> *mut c_void;
@@ -281,6 +283,7 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn posix_spawnattr_init(attr: *mut c_void) -> i32;
         fn posix_spawnattr_destroy(attr: *mut c_void) -> i32;
         fn posix_spawnattr_setflags(attr: *mut c_void, flags: i16) -> i32;
+        fn posix_spawnattr_setpgroup(attr: *mut c_void, pgroup: i32) -> i32;
         fn posix_spawnattr_setsigmask(attr: *mut c_void, set: *const c_void) -> i32;
         fn posix_spawnattr_setsigdefault(attr: *mut c_void, set: *const c_void) -> i32;
         fn sigemptyset(set: *mut c_void) -> i32;
@@ -307,7 +310,10 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn poll(fds: *mut c_void, n: usize, timeout: i32) -> i32;
         fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
         fn kill(pid: i32, sig: i32) -> i32;
+        fn clock_gettime(clock: i32, ts: *mut c_void) -> i32;
         fn exit(code: i32) -> !;
+        fn readlink(path: *const c_char, buf: *mut c_char, n: usize) -> isize;
+        fn realpath(path: *const c_char, resolved: *mut c_char) -> *mut c_char;
         #[cfg_attr(target_os = "macos", link_name = "__error")]
         #[cfg_attr(not(target_os = "macos"), link_name = "__errno_location")]
         fn errno_address() -> *mut i32;
@@ -329,6 +335,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("unlink", unlink as *const u8),
         ("rmdir", rmdir as *const u8),
         ("mkdir", mkdir as *const u8),
+        ("chmod", chmod as *const u8),
+        ("fchmod", fchmod as *const u8),
         ("getpid", getpid as *const u8),
         ("opendir", opendir as *const u8),
         ("readdir", readdir as *const u8),
@@ -368,6 +376,10 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
             posix_spawnattr_setflags as *const u8,
         ),
         (
+            "posix_spawnattr_setpgroup",
+            posix_spawnattr_setpgroup as *const u8,
+        ),
+        (
             "posix_spawnattr_setsigmask",
             posix_spawnattr_setsigmask as *const u8,
         ),
@@ -390,7 +402,10 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("poll", poll as *const u8),
         ("waitpid", waitpid as *const u8),
         ("kill", kill as *const u8),
+        ("clock_gettime", clock_gettime as *const u8),
         ("exit", exit as *const u8),
+        ("readlink", readlink as *const u8),
+        ("realpath", realpath as *const u8),
         (
             if cfg!(target_os = "macos") {
                 "__error"
@@ -525,6 +540,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ) -> i32;
         fn SetHandleInformation(h_object: *mut c_void, dw_mask: u32, dw_flags: u32) -> i32;
         fn GetStdHandle(n_std_handle: i32) -> *mut c_void;
+        fn GetFinalPathNameByHandleW(h_file: u64, path: *mut u16, n: u32, flags: u32) -> u32;
+        fn GetModuleFileNameW(h_module: *mut c_void, name: *mut u16, n: u32) -> u32;
         fn CreateProcessW(
             lp_application_name: *const u16,
             lp_command_line: *mut u16,
@@ -541,12 +558,32 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn GetExitCodeProcess(h_process: *mut c_void, lp_exit_code: *mut u32) -> i32;
         fn TerminateProcess(h_process: *mut c_void, u_exit_code: u32) -> i32;
         fn GetProcessId(process: *mut c_void) -> u32;
+        fn ResumeThread(h_thread: *mut c_void) -> u32;
+        fn CreateJobObjectW(lp_job_attributes: *const c_void, lp_name: *const u16) -> *mut c_void;
+        fn AssignProcessToJobObject(h_job: *mut c_void, h_process: *mut c_void) -> i32;
+        fn TerminateJobObject(h_job: *mut c_void, u_exit_code: u32) -> i32;
+        fn PeekNamedPipe(
+            h_named_pipe: *mut c_void,
+            lp_buffer: *mut c_void,
+            n_buffer_size: u32,
+            lp_bytes_read: *mut u32,
+            lp_total_bytes_avail: *mut u32,
+            lp_bytes_left_this_message: *mut u32,
+        ) -> i32;
+        fn GetTickCount64() -> u64;
+        fn Sleep(dw_milliseconds: u32);
         fn ExitProcess(u_exit_code: u32);
         fn GetProcessHeap() -> *mut c_void;
         fn HeapAlloc(h_heap: *mut c_void, dw_flags: u32, dw_bytes: usize) -> *mut c_void;
         fn HeapFree(h_heap: *mut c_void, dw_flags: u32, lp_mem: *mut c_void) -> i32;
         fn RtlMoveMemory(dst: *mut c_void, src: *const c_void, len: usize);
         fn GetFileAttributesW(lp_file_name: *const u16) -> u32;
+        fn SetFileAttributesW(lp_file_name: *const u16, dw_file_attributes: u32) -> i32;
+        fn CopyFileW(
+            lp_existing_file_name: *const u16,
+            lp_new_file_name: *const u16,
+            b_fail_if_exists: i32,
+        ) -> i32;
         fn GetModuleFileNameW(h_module: *mut c_void, lp_filename: *mut u16, n_size: u32) -> u32;
         fn GetSystemDirectoryW(lp_buffer: *mut u16, u_size: u32) -> u32;
         fn GetWindowsDirectoryW(lp_buffer: *mut u16, u_size: u32) -> u32;
@@ -610,11 +647,26 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("CreatePipe", CreatePipe as *const u8),
         ("SetHandleInformation", SetHandleInformation as *const u8),
         ("GetStdHandle", GetStdHandle as *const u8),
+        (
+            "GetFinalPathNameByHandleW",
+            GetFinalPathNameByHandleW as *const u8,
+        ),
+        ("GetModuleFileNameW", GetModuleFileNameW as *const u8),
         ("CreateProcessW", CreateProcessW as *const u8),
         ("WaitForSingleObject", WaitForSingleObject as *const u8),
         ("GetExitCodeProcess", GetExitCodeProcess as *const u8),
         ("TerminateProcess", TerminateProcess as *const u8),
         ("GetProcessId", GetProcessId as *const u8),
+        ("ResumeThread", ResumeThread as *const u8),
+        ("CreateJobObjectW", CreateJobObjectW as *const u8),
+        (
+            "AssignProcessToJobObject",
+            AssignProcessToJobObject as *const u8,
+        ),
+        ("TerminateJobObject", TerminateJobObject as *const u8),
+        ("PeekNamedPipe", PeekNamedPipe as *const u8),
+        ("GetTickCount64", GetTickCount64 as *const u8),
+        ("Sleep", Sleep as *const u8),
         ("ExitProcess", ExitProcess as *const u8),
         ("GetProcessHeap", GetProcessHeap as *const u8),
         ("HeapAlloc", HeapAlloc as *const u8),
@@ -624,6 +676,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("FormatMessageW", FormatMessageW as *const u8),
         ("LocalFree", LocalFree as *const u8),
         ("GetFileAttributesW", GetFileAttributesW as *const u8),
+        ("SetFileAttributesW", SetFileAttributesW as *const u8),
+        ("CopyFileW", CopyFileW as *const u8),
         ("GetModuleFileNameW", GetModuleFileNameW as *const u8),
         ("GetSystemDirectoryW", GetSystemDirectoryW as *const u8),
         ("GetWindowsDirectoryW", GetWindowsDirectoryW as *const u8),

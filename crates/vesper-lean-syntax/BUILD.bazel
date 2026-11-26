@@ -10,6 +10,9 @@ vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
     manifest = "vesper/Loom.toml",
+    # @vesper/lean-extract prints through this package (#1341), and the
+    # hybrid's lean_extract module links it.
+    visibility = ["//visibility:public"],
 )
 
 vesper_port_object(

@@ -43,9 +43,13 @@ pub const BPF_JMP_JEQ_K: u16 = 0x15;
 pub const BPF_JMP_JA: u16 = 0x05;
 pub const BPF_RET_K: u16 = 0x06;
 
-// `struct seccomp_data` offsets.
+// `struct seccomp_data` offsets (the Vesper compiler has its own copies;
+// these are the Rust reference's).
+#[cfg(test)]
 const OFF_NR: u32 = 0;
+#[cfg(test)]
 const OFF_ARCH: u32 = 4;
+#[cfg(test)]
 const OFF_ARGS: u32 = 16;
 const SECCOMP_DATA_BYTES: u32 = 64;
 
@@ -341,47 +345,41 @@ impl SeccompProfile {
         v
     }
 
-    /// Compiles to classic BPF (see the module docs for the layout).
+    /// Compiles to classic BPF (see the module docs for the layout). The
+    /// compiler is the Vesper port's (`vesper/src/seccomp.ves`, SH6 lane 14,
+    /// #1409); the Rust one is kept only as the tests' reference.
     pub fn compile(&self) -> Result<Vec<SockFilter>, SeccompError> {
-        #[cfg(feature = "vesper-port")]
-        {
-            let mut nrs = Vec::with_capacity(self.allowed.len());
-            for &s in &self.allowed {
-                if s == Syscall::Ioctl {
-                    return Err(SeccompError::IoctlInPlainAllowlist);
-                }
-                nrs.push(s.number(self.arch).ok_or(SeccompError::UnknownSyscall(s))?);
+        let mut nrs = Vec::with_capacity(self.allowed.len());
+        for &s in &self.allowed {
+            if s == Syscall::Ioctl {
+                return Err(SeccompError::IoctlInPlainAllowlist);
             }
-            let ioctl_nr = Syscall::Ioctl
-                .number(self.arch)
-                .ok_or(SeccompError::UnknownSyscall(Syscall::Ioctl))?;
-            // The layout needs at most `n + m + 9` instructions (see
-            // `compile_reference`); longer profiles fail with `TooLong`.
-            let bound = (nrs.len() + self.ioctl_requests.len() + 9).min(BPF_MAXINSNS);
-            let mut out = vec![0u64; bound];
-            let count = crate::binding::seccomp_compile(
-                self.arch.audit(),
-                ioctl_nr,
-                self.default.ret(),
-                &nrs,
-                &self.ioctl_requests,
-                &mut out,
-            )
-            .map_err(SeccompError::from)?;
-            Ok(out[..count as usize]
-                .iter()
-                .copied()
-                .map(unpack_filter)
-                .collect())
+            nrs.push(s.number(self.arch).ok_or(SeccompError::UnknownSyscall(s))?);
         }
-        #[cfg(not(feature = "vesper-port"))]
-        self.compile_reference()
+        let ioctl_nr = Syscall::Ioctl
+            .number(self.arch)
+            .ok_or(SeccompError::UnknownSyscall(Syscall::Ioctl))?;
+        // The Vesper compiler sorts the inputs into their slots of the
+        // program, which needs at most `n + m + 9` instructions (see
+        // `compile_reference`); longer programs fail with `TooLong`.
+        let mut out = vec![0u64; nrs.len() + self.ioctl_requests.len() + 9];
+        let count = crate::binding::seccomp_compile(
+            self.arch.audit(),
+            ioctl_nr,
+            self.default.ret(),
+            &nrs,
+            &self.ioctl_requests,
+            &mut out,
+        )
+        .map_err(SeccompError::from)?;
+        out.truncate(count as usize);
+        Ok(out.into_iter().map(unpack_filter).collect())
     }
 
-    /// The Rust implementation of [`SeccompProfile::compile`], kept for
-    /// differential tests until the port flips.
-    #[doc(hidden)]
-    pub fn compile_reference(&self) -> Result<Vec<SockFilter>, SeccompError> {
+    /// The Rust implementation of [`SeccompProfile::compile`], kept only as
+    /// the tests' reference.
+    #[cfg(test)]
+    pub(crate) fn compile_reference(&self) -> Result<Vec<SockFilter>, SeccompError> {
         let mut nrs = Vec::with_capacity(self.allowed.len());
         for &s in &self.allowed {
             if s == Syscall::Ioctl {
@@ -569,7 +567,6 @@ fn pack_filter(f: SockFilter) -> u64 {
     u64::from(f.code) | (u64::from(f.jt) << 16) | (u64::from(f.jf) << 24) | (u64::from(f.k) << 32)
 }
 
-#[cfg(feature = "vesper-port")]
 fn unpack_filter(w: u64) -> SockFilter {
     SockFilter {
         code: w as u16,
