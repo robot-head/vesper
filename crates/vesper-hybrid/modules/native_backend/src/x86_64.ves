@@ -23,8 +23,14 @@ const REX_B: u8 = 0x01;
 const LOW_REGISTER_MASK: u8 = 0x07;
 const HIGH_REGISTER: u8 = 0x08;
 const MOD_REGISTER: u8 = 0xc0;
+const MOD_DISP8: u8 = 0x40;
+const MOD_DISP32: u8 = 0x80;
+const RM_SIB: u8 = 4;
+const RM_DISP32_WITHOUT_BASE: u8 = 5;
+const SIB_NO_INDEX: u8 = 0x20;
 const MOD_FIELD_SHIFT: u32 = 3;
 const MOV_RM_R64: u8 = 0x89;
+const MOV_R64_RM: u8 = 0x8b;
 const MOV_REGISTER_IMMEDIATE: u8 = 0xb8;
 const MOV_RM64_IMM32: u8 = 0xc7;
 const TWO_BYTE_OPCODE: u8 = 0x0f;
@@ -48,6 +54,8 @@ const MOVSXD_R64_RM32: u8 = 0x63;
 const RET_NEAR: u8 = 0xc3;
 const U32_MAX_BITS: u64 = 0xffffffff;
 const I32_MIN_BITS: u64 = 0xffffffff80000000;
+const DISP8_MAX: u32 = 0x7f;
+const DISP8_MIN_AS_DISP32: u32 = 0xffffff80;
 const IMM32_BYTES: u64 = 4;
 const IMM64_BYTES: u64 = 8;
 
@@ -81,6 +89,7 @@ pub copy enum Instruction {
     Unary(u8, u8, u64),
     Shift(u8, u8, u8, u64),
     ShiftRegister(u8, u8, u8, u64),
+    Load(u8, u8, u32, u64),
     Compare(u8, u8, u8, u8, u64),
     Select(u8, u8, u8, u8, u8),
     Truncate(u8, u8, u64),
@@ -123,10 +132,12 @@ pub fn find_register(used: u32) -> u8 {
     }
 }
 
+fn modrm_fields(reg: u8, rm: u8) -> u8 {
+    wrapping_shl_u8(reg & LOW_REGISTER_MASK, MOD_FIELD_SHIFT) | (rm & LOW_REGISTER_MASK)
+}
+
 fn modrm(reg: u8, rm: u8) -> u8 {
-    MOD_REGISTER
-        | wrapping_shl_u8(reg & LOW_REGISTER_MASK, MOD_FIELD_SHIFT)
-        | (rm & LOW_REGISTER_MASK)
+    MOD_REGISTER | modrm_fields(reg, rm)
 }
 
 fn rex(reg: u8, rm: u8, wide: bool) -> u8 {
@@ -146,6 +157,40 @@ fn immediate(inout out: ChunkSeq[u8], bits: u64, size: u64) {
     for i in 0..size {
         let shift = wrapping_mul(wrapping_u32(i), wrapping_u32(BYTE_BITS));
         out.push(wrapping_u8(wrapping_shr_u64(bits, shift)));
+    }
+}
+
+fn load_memory(inout out: ChunkSeq[u8], destination: u8, base: u8, displacement: u32, width: u64) {
+    out.push(rex(destination, base, width == QWORD_BITS));
+    if width == BYTE_BITS || width == WORD_BITS {
+        out.push(TWO_BYTE_OPCODE);
+        out.push(
+            if width == BYTE_BITS {
+                MOVZX_R32_RM8
+            } else {
+                MOVZX_R32_RM16
+            }
+        );
+    } else {
+        out.push(MOV_R64_RM);
+    }
+
+    let low_base = base & LOW_REGISTER_MASK;
+    let mode = if displacement == 0 && low_base != RM_DISP32_WITHOUT_BASE {
+        0
+    } else if displacement <= DISP8_MAX || displacement >= DISP8_MIN_AS_DISP32 {
+        MOD_DISP8
+    } else {
+        MOD_DISP32
+    };
+    out.push(mode | modrm_fields(destination, base));
+    if low_base == RM_SIB {
+        out.push(SIB_NO_INDEX | low_base);
+    }
+    if mode == MOD_DISP8 {
+        out.push(wrapping_u8(displacement));
+    } else if mode == MOD_DISP32 {
+        immediate(inout out, widen_u64(displacement), IMM32_BYTES);
     }
 }
 
@@ -286,6 +331,13 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
                 binary(inout out, XCHG_RM_R64, RCX, count, true);
             }
         },
+        Instruction::Load(destination, base, displacement, width) => load_memory(
+            inout out,
+            destination,
+            base,
+            displacement,
+            width
+        ),
         Instruction::Compare(destination, left, right, cc, width) => {
             if width == WORD_BITS {
                 out.push(OPERAND_SIZE_OVERRIDE);

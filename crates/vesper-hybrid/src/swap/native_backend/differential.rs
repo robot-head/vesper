@@ -1,6 +1,8 @@
 use super::binding;
 use super::machine::integer_block_words;
-use cranelift_codegen::ir::{AbiParam, BlockArg, InstBuilder, Type, condcodes::IntCC, types};
+use cranelift_codegen::ir::{
+    AbiParam, BlockArg, Endianness, InstBuilder, MemFlags, Opcode, Type, condcodes::IntCC, types,
+};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
@@ -27,6 +29,9 @@ enum Case {
     ShiftDestinationRcx,
     ShiftSameRegister,
     ShiftDword,
+    LoadWidths,
+    WideningLoads,
+    RetainedLoad,
     CompareImmediate,
     Select,
     SelectKeepingArms,
@@ -97,6 +102,9 @@ fn integer_backend_matches_cranelift_results() {
         Case::ShiftDestinationRcx,
         Case::ShiftSameRegister,
         Case::ShiftDword,
+        Case::LoadWidths,
+        Case::WideningLoads,
+        Case::RetainedLoad,
     ];
     let cases: Vec<_> = cases
         .into_iter()
@@ -276,6 +284,35 @@ fn integer_backend_matches_cranelift_results() {
                 let full = builder.ins().uextend(types::I64, shifted);
                 builder.ins().iadd(full, d)
             }
+            Case::LoadWidths => {
+                let flags = MemFlags::new().with_notrap();
+                let byte = builder.ins().load(types::I8, flags, a, -137);
+                let word = builder.ins().load(types::I16, flags, a, 0);
+                let dword = builder.ins().load(types::I32, flags, e, 7);
+                let qword = builder.ins().load(types::I64, flags, e, 152);
+                let byte = builder.ins().uextend(types::I64, byte);
+                let word = builder.ins().uextend(types::I64, word);
+                let dword = builder.ins().uextend(types::I64, dword);
+                let small = builder.ins().iadd(byte, word);
+                let large = builder.ins().bxor(qword, dword);
+                builder.ins().bxor(small, large)
+            }
+            Case::WideningLoads => {
+                let flags = MemFlags::new().with_notrap();
+                let byte = builder.ins().sload8(types::I64, flags, a, -128);
+                let word = builder.ins().sload16(types::I32, flags, e, 127);
+                let dword = builder.ins().sload32(flags, e, 128);
+                let unsigned = builder.ins().uload16(types::I64, flags, a, -129);
+                let word = builder.ins().sextend(types::I64, word);
+                let small = builder.ins().bxor(byte, word);
+                let large = builder.ins().iadd(dword, unsigned);
+                builder.ins().bxor(small, large)
+            }
+            Case::RetainedLoad => {
+                let flags = MemFlags::new().with_notrap();
+                builder.ins().load(types::I64, flags, a, 8);
+                builder.ins().load(types::I64, flags, a, 0)
+            }
             Case::CompareImmediate => {
                 let byte = builder.ins().ireduce(types::I8, a);
                 let zero = builder.ins().icmp_imm(IntCC::Equal, byte, 0);
@@ -311,6 +348,11 @@ fn integer_backend_matches_cranelift_results() {
             integer_block_words(&context.func).unwrap_or_else(|| panic!("declined {case:?}"));
         let bytes = binding::x86_64_integer_block(&request);
         assert!(!bytes.is_empty(), "{case:?}");
+        if matches!(case, Case::RetainedLoad) {
+            // The first read (mov rax, [rdi + 8]) is emitted even though the
+            // function returns only the second read.
+            assert!(bytes.starts_with(&[0x48, 0x8b, 0x47, 0x08]));
+        }
         module.define_function(baseline, &mut context).unwrap();
         let oracle = context.compiled_code().unwrap().code_buffer();
         byte_differences += usize::from(oracle != bytes);
@@ -326,7 +368,7 @@ fn integer_backend_matches_cranelift_results() {
         let baseline: Fn6 = unsafe { std::mem::transmute(module.get_finalized_function(baseline)) };
         let candidate: Fn6 =
             unsafe { std::mem::transmute(module.get_finalized_function(candidate)) };
-        for [a, b, c, d, e, f] in [
+        let scalar_inputs = [
             [2, 3, 5, 7, 13, 17],
             [0, 0, 0, 0, 0, 0],
             [u64::MAX, 1, 0, 0, u64::MAX, 2],
@@ -336,7 +378,20 @@ fn integer_backend_matches_cranelift_results() {
             [0x8000, 0x7fff, 0, 0, 0, 0],
             [0x8000_0000, 0x7fff_ffff, 0, 65, 33, 0],
             [u64::MAX, 0, 0, 32, 65, 0],
-        ] {
+        ];
+        let memory: [u8; 512] = std::array::from_fn(|i| i.wrapping_mul(97) as u8);
+        let middle = memory[256..].as_ptr() as u64;
+        let odd = memory[257..].as_ptr() as u64;
+        let memory_inputs = [[middle, 0, 0, 0, odd, 0], [odd, 0, 0, 0, middle, 0]];
+        let inputs: &[[u64; ABI_ARGS]] = if matches!(
+            case,
+            Case::LoadWidths | Case::WideningLoads | Case::RetainedLoad
+        ) {
+            &memory_inputs
+        } else {
+            &scalar_inputs
+        };
+        for &[a, b, c, d, e, f] in inputs {
             assert_eq!(
                 unsafe { candidate(a, b, c, d, e, f) },
                 unsafe { baseline(a, b, c, d, e, f) },
@@ -406,7 +461,7 @@ fn integer_backend_declines_register_pressure_and_unsupported_operations() {
 fn integer_backend_declines_cycles_and_effectful_branch_arms() {
     let mut context = cranelift_codegen::Context::new();
     let mut builder_context = FunctionBuilderContext::new();
-    for cyclic in [false, true] {
+    for branch_op in [Opcode::Jump, Opcode::Sdiv, Opcode::Load] {
         context.clear();
         context.func.signature.call_conv = cranelift_codegen::isa::CallConv::SystemV;
         context
@@ -429,15 +484,58 @@ fn integer_backend_declines_cycles_and_effectful_branch_arms() {
         builder.ins().brif(argument, yes, &[], no, &[]);
 
         builder.switch_to_block(yes);
-        if cyclic {
-            builder.ins().jump(yes, &[]);
-        } else {
-            let division = builder.ins().sdiv(argument, argument);
-            builder.ins().return_(&[division]);
+        match branch_op {
+            Opcode::Jump => {
+                builder.ins().jump(yes, &[]);
+            }
+            Opcode::Sdiv => {
+                let division = builder.ins().sdiv(argument, argument);
+                builder.ins().return_(&[division]);
+            }
+            Opcode::Load => {
+                let load = builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), argument, 0);
+                builder.ins().return_(&[load]);
+            }
+            _ => unreachable!(),
         }
 
         builder.switch_to_block(no);
         builder.ins().return_(&[argument]);
+        builder.seal_all_blocks();
+        builder.finalize();
+        assert!(integer_block_words(&context.func).is_none());
+    }
+}
+
+#[test]
+fn integer_backend_declines_trapping_and_big_endian_loads() {
+    let mut context = cranelift_codegen::Context::new();
+    let mut builder_context = FunctionBuilderContext::new();
+    for flags in [
+        MemFlags::new(),
+        MemFlags::trusted().with_endianness(Endianness::Big),
+    ] {
+        context.clear();
+        context.func.signature.call_conv = cranelift_codegen::isa::CallConv::SystemV;
+        context
+            .func
+            .signature
+            .params
+            .push(AbiParam::new(types::I64));
+        context
+            .func
+            .signature
+            .returns
+            .push(AbiParam::new(types::I64));
+        let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let base = builder.block_params(entry)[0];
+        let load = builder.ins().load(types::I64, flags, base, 0);
+        builder.ins().return_(&[load]);
         builder.seal_all_blocks();
         builder.finalize();
         assert!(integer_block_words(&context.func).is_none());

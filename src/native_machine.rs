@@ -2,8 +2,8 @@
 use cranelift_codegen::{
     entity::SecondaryMap,
     ir::{
-        AbiParam, Block, BlockCall, Function, Inst, InstructionData, Opcode, Type, Value,
-        condcodes::IntCC, types,
+        AbiParam, Block, BlockCall, Endianness, Function, Inst, InstructionData, Opcode, Type,
+        Value, condcodes::IntCC, types,
     },
     isa::CallConv,
 };
@@ -36,6 +36,7 @@ enum IntegerOp {
     ShiftLeftRegister = 20,
     ShiftRightLogicalRegister = 21,
     ShiftRightArithmeticRegister = 22,
+    Load = 23,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -105,6 +106,12 @@ fn integer_bits(bits: i64, ty: Type) -> u64 {
 
 type Values = SecondaryMap<Value, Option<u64>>;
 
+#[derive(Clone, Copy)]
+enum PathKind {
+    Executed,
+    Speculated,
+}
+
 struct IntegerBlocks<'a> {
     function: &'a Function,
     arity: usize,
@@ -151,8 +158,8 @@ impl IntegerBlocks<'_> {
     }
 
     // A block's arguments are already mapped by its incoming edge.
-    // The only operations added to the integer stream here are pure.
-    fn emit_block(&mut self, block: Block, values: &mut Values) -> Option<Inst> {
+    // Speculated paths admit only pure operations.
+    fn emit_block(&mut self, block: Block, values: &mut Values, path: PathKind) -> Option<Inst> {
         let function = self.function;
         let mut instructions = function.layout.block_insts(block);
         let terminator = instructions.next_back()?;
@@ -183,6 +190,42 @@ impl IntegerBlocks<'_> {
                         _ => return None,
                     };
                     (op, [input(arg)?, source_width, width])
+                }
+                InstructionData::Load {
+                    opcode,
+                    flags,
+                    arg,
+                    offset,
+                } if matches!(path, PathKind::Executed)
+                    && ty(arg) == types::I64
+                    && flags.notrap()
+                    && !flags.checked()
+                    && flags.endianness(Endianness::Little) == Endianness::Little =>
+                {
+                    let (access_width, signed) = match opcode {
+                        Opcode::Load => (width, false),
+                        Opcode::Uload8 => (u64::from(types::I8.bits()), false),
+                        Opcode::Uload16 => (u64::from(types::I16.bits()), false),
+                        Opcode::Uload32 => (u64::from(types::I32.bits()), false),
+                        Opcode::Sload8 => (u64::from(types::I8.bits()), true),
+                        Opcode::Sload16 => (u64::from(types::I16.bits()), true),
+                        Opcode::Sload32 => (u64::from(types::I32.bits()), true),
+                        _ => return None,
+                    };
+                    if opcode != Opcode::Load && access_width >= width {
+                        return None;
+                    }
+                    let load = [
+                        input(arg)?,
+                        u64::from(i32::from(offset) as u32),
+                        access_width,
+                    ];
+                    if signed {
+                        let value = self.append(IntegerOp::Load, load);
+                        (IntegerOp::SignExtend, [value, access_width, width])
+                    } else {
+                        (IntegerOp::Load, load)
+                    }
                 }
                 InstructionData::IntCompare {
                     opcode: Opcode::Icmp,
@@ -256,13 +299,14 @@ impl IntegerBlocks<'_> {
         mut block: Block,
         values: &mut Values,
         visited: &mut SecondaryMap<Block, bool>,
+        path: PathKind,
     ) -> Option<Inst> {
         loop {
             if visited[block] || !self.function.layout.is_block_inserted(block) {
                 return None;
             }
             visited[block] = true;
-            let terminator = self.emit_block(block, values)?;
+            let terminator = self.emit_block(block, values, path)?;
             match self.function.dfg.insts[terminator] {
                 InstructionData::Jump {
                     opcode: Opcode::Jump,
@@ -302,22 +346,24 @@ impl IntegerBlocks<'_> {
         let [yes_edge, no_edge] = arms;
         let mut yes_values = values.clone();
         let yes_block = self.edge(yes_edge, &mut yes_values)?;
-        let yes_return = self.follow_jumps(yes_block, &mut yes_values, visited)?;
+        let yes_return =
+            self.follow_jumps(yes_block, &mut yes_values, visited, PathKind::Speculated)?;
         let yes = self.returned(yes_return, &yes_values)?;
 
         let mut no_values = values;
         let no_block = self.edge(no_edge, &mut no_values)?;
-        let no_return = self.follow_jumps(no_block, &mut no_values, visited)?;
+        let no_return =
+            self.follow_jumps(no_block, &mut no_values, visited, PathKind::Speculated)?;
         let no = self.returned(no_return, &no_values)?;
         Some(self.append(IntegerOp::Select, [condition, yes, no]))
     }
 }
 
-/// Encodes pure System V i64 paths into a value stream for the Vesper backend.
+/// Encodes supported System V i64 paths into a value stream for the Vesper backend.
 /// The header holds
 /// the argument count and the return value ID. The remaining words are
 /// (opcode, left, right, extra) records. The extra word is the result width
-/// for arithmetic and conversions, the condition code for comparisons, or
+/// for operations such as loads and arithmetic, the condition code for comparisons, or
 /// the false value ID for selects. Arguments come first in the value space,
 /// followed by one value per instruction. Operand IDs refer to prior values.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
@@ -357,7 +403,7 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
         words: vec![0; HEADER_WORDS],
     };
     let mut visited = SecondaryMap::new();
-    let terminator = blocks.follow_jumps(block, &mut values, &mut visited)?;
+    let terminator = blocks.follow_jumps(block, &mut values, &mut visited, PathKind::Executed)?;
     let result = match function.dfg.insts[terminator] {
         InstructionData::Brif {
             opcode: Opcode::Brif,
