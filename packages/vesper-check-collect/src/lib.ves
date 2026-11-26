@@ -25,16 +25,18 @@ use @vesper/ast::{
 };
 use @vesper/ast::lower::{lower_source};
 use @vesper/check-data::{pack_text};
+use @vesper/preludes::{
+    atomics_source, option_source, regions_source, strings_source, workers_source
+};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{Interner, interner_new, symbol_from_id};
 use self::prelude::{
-    defined_methods, module_end, needs_option, needs_strings, option_source, replaced,
-    sorted_symbols, strings_source, used, uses_of, Uses, atomics_source, workers_source,
-    needs_workers
+    defined_methods, module_end, needs_option, needs_strings, needs_workers, replaced,
+    sorted_symbols, used, uses_of, Uses
 };
 use self::boxes::{box_dump, needs_atomics, needs_box};
 use self::floats::{float_source};
-use self::regions::{builtin_region, needs_region, region_source};
+use self::regions::{builtin_region, needs_region};
 use self::secret::{secret_source};
 use self::widths::{reserved_width_name, width_source};
 
@@ -1127,7 +1129,7 @@ fn collected(in source: Str) -> Collected {
     let uses = uses_of(in module);
     let with_region = needs_region(in module);
     let region = if with_region {
-        lower_source(in region_source()).ast
+        lower_source(in regions_source()).ast
     } else {
         lower_source(in "").ast
     };

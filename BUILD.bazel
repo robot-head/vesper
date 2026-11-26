@@ -39,6 +39,8 @@ vesper_crate(
     compile_data = [
         "assets/fonts/**",
         "examples/*.ves",
+        # The checker's preludes (src/strings.rs and the rest embed them).
+        "packages/vesper-preludes/preludes/*.ves",
         "src/**/*.ves",
         "tests/fixtures/source_macros/keep.ves",
         "lean/StylusAndLintSafety.lean",

@@ -1083,8 +1083,15 @@ impl Flow<'_> {
                 changed = true;
             }
         }
+        // Both maps are in key order, so walk them together instead of
+        // looking each of `b`'s values up in `out`: in a large function,
+        // those lookups were most of the dataflow's time. Values that are
+        // new to `out` are added after the walk.
+        let mut added = Vec::new();
+        let mut olds = out.values.iter_mut().peekable();
         for (id, value) in &b.values {
-            if let Some(old) = out.values.get_mut(id) {
+            while olds.next_if(|o| o.0 < id).is_some() {}
+            if let Some((_, old)) = olds.next_if(|o| o.0 == id) {
                 if old.owned && old.consumed != value.consumed && self.mode(&old.ty) == Mode::Linear
                 {
                     self.caused(format!("linear temporary %{id} has inconsistent ownership at a CFG join"), span.clone(), self.origins.value(*id), "Ownership of a linear temporary must agree on incoming control-flow edges.");
@@ -1098,10 +1105,11 @@ impl Flow<'_> {
                     changed = true;
                 }
             } else {
-                out.values.insert(*id, value.clone());
+                added.push((*id, value.clone()));
                 changed = true;
             }
         }
+        out.values.extend(added);
         changed
     }
     fn function(&mut self, f: &FunctionIr) {
@@ -1125,8 +1133,13 @@ impl Flow<'_> {
         }
         let mut incoming = BTreeMap::from([(0, initial)]);
         let mut queue = VecDeque::from([0]);
+        // Which blocks are in `queue`, so that queueing a block does not
+        // scan the whole queue.
+        let mut queued = vec![false; f.blocks.len().max(1)];
+        queued[0] = true;
         let mut visits = 0;
         while let Some(block) = queue.pop_front() {
+            queued[block] = false;
             visits += 1;
             if visits > f.blocks.len().saturating_mul(32).max(32) {
                 self.error("IR ownership dataflow did not converge", 0..0);
@@ -1193,7 +1206,8 @@ impl Flow<'_> {
                         true
                     }
                 };
-                if changed && !queue.contains(&target) {
+                if changed && !queued[target] {
+                    queued[target] = true;
                     queue.push_back(target);
                 }
             }

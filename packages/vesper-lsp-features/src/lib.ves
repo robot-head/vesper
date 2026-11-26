@@ -23,6 +23,7 @@ use self::proof::{proof_models};
 use self::ownership::{lens_facts, lens_requests, lens_view};
 use self::repair::{lens_repair};
 use self::proof_lenses::{proof_lenses};
+use self::lens_state::{lens_state};
 use self::hover::{Facts, facts_new, fact_function, fact_param, hover_answer};
 use self::nav::{
     Ix, MAX_DOCUMENTS, MAX_OUTPUT_BYTES, MAX_QUERY_BYTES, MAX_SYMBOLS, MAX_URI_BYTES, ERR_NONE,
@@ -562,4 +563,12 @@ pub fn lsp_lens_requests(in input: Str) -> ChunkSeq[u64] {
 // `proof_result_of`, `proof_status_of`; proof_lenses.ves).
 pub fn lsp_proof_lenses(in input: Str) -> ChunkSeq[u64] {
     proof_lenses(in input)
+}
+
+// The Lens session's request bookkeeping: the per-document debounce of
+// background proof runs, the pending-request table and their cancel tokens
+// (crates/vesper-lsp/src/lens.rs `Debouncer`, `PendingRequests`,
+// `CancelToken`; lens_state.ves).
+pub fn lsp_lens_state(in input: Str) -> ChunkSeq[u64] {
+    lens_state(in input)
 }
