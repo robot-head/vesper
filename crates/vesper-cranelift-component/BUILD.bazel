@@ -1,0 +1,21 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+# vesper-cranelift-sys as a wasm component (#2210). Bazel builds the crate
+# for the host only: build.rs generates the WIT and the glue from
+# cranelift.vsys, and tests/objects.rs checks the checked-in WIT. The
+# object comparison needs the component built for wasm32-wasip2 (Cargo,
+# or VESPER_CRANELIFT_COMPONENT) and says so when it is missing.
+vesper_crate(
+    build_script_data = ["//packages/vesper-cranelift:cranelift.vsys"],
+    build_script_env = {
+        # rules_rust already makes this execpath absolute.
+        "VESPER_CRANELIFT_VSYS": "$(execpath //packages/vesper-cranelift:cranelift.vsys)",
+    },
+    # tests/objects.rs shares vesper-cranelift-sys's test support module
+    # and its fixtures.
+    extra_integration_compile_data = ["//crates/vesper-cranelift-sys:tests/support/mod.rs"],
+    extra_test_data = [
+        "//crates/vesper-cranelift-sys:test_fixtures",
+        "//packages/vesper-cranelift:files",
+    ],
+)

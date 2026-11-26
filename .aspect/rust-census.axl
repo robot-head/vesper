@@ -103,6 +103,7 @@ CRATES = {
     "vesper-simd": ("partial", "in crate", "compile 1.0x", "out of the compiler's closure (#1398); Baseline128 scanner builder and profile decisions in Vesper behind vesper-port (#1969, same CLIF and object bytes), Rust stays the default until the flip; ISA and JIT/object modules hosted through vesper-cranelift-sys; vvec scalar profile in Vesper behind the same feature (scan 1.65x, wide strips 0.91x to 1.20x); SVE and RVV asm! wait on G10", "13"),
     "vesper-crypto-sys": ("shim", "", "", "vetted crypto C-ABI shim (SH6 lane 17)", "17"),
     "vesper-cranelift-sys": ("shim", "", "", "Cranelift C-ABI shim (owner 2026-11-19)", "-"),
+    "vesper-cranelift-component": ("shim", "", "", "the Cranelift shim as a wasm component, so Stage 2 emits native code under Wasm (#2210)", "-"),
     "vesper-codegen-verified": ("diverse", "", "", "DDC auditor, diverse on purpose", "owner"),
     "vesper-oracles": ("diverse", "", "", "test oracles (*42), diverse on purpose: exempt from the flip gate; moved out of `src/bin` (#1825)", "owner"),
 }
