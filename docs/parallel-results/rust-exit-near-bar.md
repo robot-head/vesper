@@ -135,3 +135,12 @@ The `decode` workload (the instruction codec, already the only build) is
 `Vec`, about 100 instructions per `encode` call against Rust's 43, and
 `decode_all` returns its instructions through a converted
 `ChunkSeq[Insn]`.
+
+Follow-up (#2226): with the bounds facts of #2220, the decoders' word reads
+and, after one length guard added to each encoder, the encoders' word stores
+compile without per-access checks (straight loads and stores). Re-timed with
+a compiler built from #2220: `wire` 2.28..2.55 (median interval), `decode`
+1.76..1.77. Both are still above the bar, so wire stays behind `vesper-port`. The
+Vesper bodies are now tight; the remaining time is the Rust side of each
+crossing (the 21-word struct conversion, the MAC conversion and the result
+`Vec`).
