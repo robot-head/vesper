@@ -25,9 +25,11 @@ enum IntegerOp {
     Compare = 12,
     CompareByte = 13,
     Select = 14,
-    ReduceByte = 15,
-    ZeroExtendByte = 16,
-    SignExtendByte = 17,
+    Truncate = 15,
+    ZeroExtend = 16,
+    SignExtend = 17,
+    CompareWord = 18,
+    CompareDword = 19,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -56,10 +58,16 @@ fn binary_op(opcode: Opcode) -> Option<IntegerOp> {
     })
 }
 
+fn integer_width(ty: Type) -> Option<u64> {
+    matches!(ty, types::I8 | types::I16 | types::I32 | types::I64).then(|| u64::from(ty.bits()))
+}
+
 fn compare_op(ty: Type) -> Option<IntegerOp> {
     match ty {
-        types::I64 => Some(IntegerOp::Compare),
         types::I8 => Some(IntegerOp::CompareByte),
+        types::I16 => Some(IntegerOp::CompareWord),
+        types::I32 => Some(IntegerOp::CompareDword),
+        types::I64 => Some(IntegerOp::Compare),
         _ => None,
     }
 }
@@ -81,10 +89,11 @@ fn condition(cc: IntCC) -> u64 {
 }
 
 fn integer_bits(bits: i64, ty: Type) -> u64 {
-    if ty == types::I8 {
-        u64::from(bits as u8)
-    } else {
-        bits as u64
+    match ty {
+        types::I8 => u64::from(bits as u8),
+        types::I16 => u64::from(bits as u16),
+        types::I32 => u64::from(bits as u32),
+        _ => bits as u64,
     }
 }
 
@@ -97,8 +106,9 @@ fn append(words: &mut Vec<u64>, arity: usize, op: IntegerOp, operands: [u64; 3])
 
 /// Encodes one System V i64 block for the Vesper backend. The header holds
 /// the argument count and the return value ID. The remaining words are
-/// (opcode, left, right, extra) records. The extra word is the condition
-/// code for comparisons or the false value ID for selects. Arguments come first in the value space,
+/// (opcode, left, right, extra) records. The extra word is the result width
+/// for arithmetic and conversions, the condition code for comparisons, or
+/// the false value ID for selects. Arguments come first in the value space,
 /// followed by one value per instruction. Operand IDs refer to prior values.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
     let signature = &function.signature;
@@ -151,26 +161,28 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
             return None;
         };
         let output = function.dfg.value_type(value);
+        let width = integer_width(output)?;
         let input = |value| values[function.dfg.resolve_aliases(value)];
         let ty = |value| function.dfg.value_type(function.dfg.resolve_aliases(value));
         let (op, operands) = match function.dfg.insts[inst] {
             InstructionData::UnaryImm {
                 opcode: Opcode::Iconst,
                 imm,
-            } if matches!(output, types::I64 | types::I8) => (
+            } => (
                 IntegerOp::Constant,
                 [integer_bits(imm.bits(), output), 0, 0],
             ),
             InstructionData::Unary { opcode, arg } => {
-                let op = match (opcode, ty(arg), output) {
-                    (Opcode::Ineg, types::I64, types::I64) => IntegerOp::Neg,
-                    (Opcode::Bnot, types::I64, types::I64) => IntegerOp::Not,
-                    (Opcode::Ireduce, types::I64, types::I8) => IntegerOp::ReduceByte,
-                    (Opcode::Uextend, types::I8, types::I64) => IntegerOp::ZeroExtendByte,
-                    (Opcode::Sextend, types::I8, types::I64) => IntegerOp::SignExtendByte,
+                let source_width = integer_width(ty(arg))?;
+                let op = match opcode {
+                    Opcode::Ineg if source_width == width => IntegerOp::Neg,
+                    Opcode::Bnot if source_width == width => IntegerOp::Not,
+                    Opcode::Ireduce if source_width > width => IntegerOp::Truncate,
+                    Opcode::Uextend if source_width < width => IntegerOp::ZeroExtend,
+                    Opcode::Sextend if source_width < width => IntegerOp::SignExtend,
                     _ => return None,
                 };
-                (op, [input(arg)?, 0, 0])
+                (op, [input(arg)?, source_width, width])
             }
             InstructionData::IntCompare {
                 opcode: Opcode::Icmp,
@@ -195,37 +207,26 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
             InstructionData::Ternary {
                 opcode: Opcode::Select,
                 args: [cond, yes, no],
-            } if matches!(ty(cond), types::I8 | types::I64)
-                && matches!(output, types::I8 | types::I64)
-                && ty(yes) == output
-                && ty(no) == output =>
-            {
+            } if integer_width(ty(cond)).is_some() && ty(yes) == output && ty(no) == output => {
                 (IntegerOp::Select, [input(cond)?, input(yes)?, input(no)?])
             }
             InstructionData::Binary {
                 opcode,
                 args: [left, right],
-            } if output == types::I64
-                || output == types::I8
-                    && matches!(opcode, Opcode::Band | Opcode::Bor | Opcode::Bxor) =>
-            {
-                (binary_op(opcode)?, [input(left)?, input(right)?, 0])
+            } if ty(left) == output && ty(right) == output => {
+                (binary_op(opcode)?, [input(left)?, input(right)?, width])
             }
-            InstructionData::BinaryImm64 { opcode, arg, imm }
-                if output == types::I64
-                    || output == types::I8
-                        && matches!(opcode, Opcode::BandImm | Opcode::BorImm | Opcode::BxorImm) =>
-            {
+            InstructionData::BinaryImm64 { opcode, arg, imm } if ty(arg) == output => {
                 let left = input(arg)?;
                 let bits = integer_bits(imm.bits(), output);
                 match opcode {
-                    Opcode::IshlImm => (IntegerOp::ShiftLeft, [left, bits, 0]),
-                    Opcode::UshrImm => (IntegerOp::ShiftRightLogical, [left, bits, 0]),
-                    Opcode::SshrImm => (IntegerOp::ShiftRightArithmetic, [left, bits, 0]),
+                    Opcode::IshlImm => (IntegerOp::ShiftLeft, [left, bits, width]),
+                    Opcode::UshrImm => (IntegerOp::ShiftRightLogical, [left, bits, width]),
+                    Opcode::SshrImm => (IntegerOp::ShiftRightArithmetic, [left, bits, width]),
                     _ => {
                         let op = binary_op(opcode)?;
                         let right = append(&mut words, arity, IntegerOp::Constant, [bits, 0, 0]);
-                        (op, [left, right, 0])
+                        (op, [left, right, width])
                     }
                 }
             }

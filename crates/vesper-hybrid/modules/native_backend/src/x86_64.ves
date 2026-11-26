@@ -11,6 +11,10 @@ const R11: u8 = 11;
 
 pub const ARGUMENTS: u64 = 6;
 pub const UNASSIGNED: u8 = 255;
+pub const BYTE_BITS: u64 = 8;
+pub const WORD_BITS: u64 = 16;
+pub const DWORD_BITS: u64 = 32;
+pub const QWORD_BITS: u64 = 64;
 
 const REX: u8 = 0x40;
 const REX_W: u8 = 0x48;
@@ -26,6 +30,8 @@ const MOV_RM64_IMM32: u8 = 0xc7;
 const TWO_BYTE_OPCODE: u8 = 0x0f;
 const IMUL_R64_RM64: u8 = 0xaf;
 const UNARY_GROUP: u8 = 0xf7;
+const SHIFT_BYTE_GROUP_IMM8: u8 = 0xc0;
+const OPERAND_SIZE_OVERRIDE: u8 = 0x66;
 const SHIFT_GROUP_IMM8: u8 = 0xc1;
 const CMP_RM_R8: u8 = 0x38;
 const CMP_RM_R64: u8 = 0x39;
@@ -34,12 +40,14 @@ const CMOVCC: u8 = 0x40;
 const TEST_RM_R64: u8 = 0x85;
 const MOVZX_R32_RM8: u8 = 0xb6;
 const MOVSX_R64_RM8: u8 = 0xbe;
+const MOVZX_R32_RM16: u8 = 0xb7;
+const MOVSX_R64_RM16: u8 = 0xbf;
+const MOVSXD_R64_RM32: u8 = 0x63;
 const RET_NEAR: u8 = 0xc3;
 const U32_MAX_BITS: u64 = 0xffffffff;
 const I32_MIN_BITS: u64 = 0xffffffff80000000;
 const IMM32_BYTES: u64 = 4;
 const IMM64_BYTES: u64 = 8;
-const BITS_PER_BYTE: u32 = 8;
 
 pub const ADD_RM_R64: u8 = 0x01;
 pub const SUB_RM_R64: u8 = 0x29;
@@ -66,13 +74,14 @@ pub const CC_G: u8 = 15;
 pub copy enum Instruction {
     Immediate(u8, u64),
     Move(u8, u8),
-    Binary(u8, u8, u8),
-    Multiply(u8, u8),
-    Unary(u8, u8),
-    Shift(u8, u8, u8),
-    Compare(u8, u8, u8, u8, bool),
+    Binary(u8, u8, u8, u64),
+    Multiply(u8, u8, u64),
+    Unary(u8, u8, u64),
+    Shift(u8, u8, u8, u64),
+    Compare(u8, u8, u8, u8, u64),
     Select(u8, u8, u8, u8, u8),
-    ExtendByte(u8, u8, bool),
+    Truncate(u8, u8, u64),
+    SignExtend(u8, u8, u64, u64),
     Return,
 }
 
@@ -124,15 +133,15 @@ fn rex(reg: u8, rm: u8, wide: bool) -> u8 {
     first | reg_extension | rm_extension
 }
 
-fn binary(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8) {
-    out.push(rex(source, destination, true));
+fn binary(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8, wide: bool) {
+    out.push(rex(source, destination, wide));
     out.push(opcode);
     out.push(modrm(source, destination));
 }
 
 fn immediate(inout out: ChunkSeq[u8], bits: u64, size: u64) {
     for i in 0..size {
-        let shift = wrapping_mul(wrapping_u32(i), BITS_PER_BYTE);
+        let shift = wrapping_mul(wrapping_u32(i), wrapping_u32(BYTE_BITS));
         out.push(wrapping_u8(wrapping_shr_u64(bits, shift)));
     }
 }
@@ -164,17 +173,48 @@ fn load_constant(inout out: ChunkSeq[u8], destination: u8, bits: u64) {
     }
 }
 
-fn extend_byte(inout out: ChunkSeq[u8], destination: u8, source: u8, signed_extend: bool) {
-    out.push(rex(destination, source, signed_extend));
-    out.push(TWO_BYTE_OPCODE);
-    out.push(
-        if signed_extend {
-            MOVSX_R64_RM8
-        } else {
-            MOVZX_R32_RM8
-        }
-    );
+fn truncate(inout out: ChunkSeq[u8], destination: u8, source: u8, width: u64) {
+    if width == DWORD_BITS {
+        // A 32-bit write zeroes the high half, even for a self-move.
+        binary(inout out, MOV_RM_R64, destination, source, false);
+    } else {
+        out.push(rex(destination, source, false));
+        out.push(TWO_BYTE_OPCODE);
+        out.push(
+            if width == BYTE_BITS {
+                MOVZX_R32_RM8
+            } else {
+                MOVZX_R32_RM16
+            }
+        );
+        out.push(modrm(destination, source));
+    }
+}
+
+fn sign_extend(inout out: ChunkSeq[u8], destination: u8, source: u8, from: u64, width: u64) {
+    out.push(rex(destination, source, width == QWORD_BITS));
+    if from == DWORD_BITS {
+        out.push(MOVSXD_R64_RM32);
+    } else {
+        out.push(TWO_BYTE_OPCODE);
+        out.push(
+            if from == BYTE_BITS {
+                MOVSX_R64_RM8
+            } else {
+                MOVSX_R64_RM16
+            }
+        );
+    }
     out.push(modrm(destination, source));
+    if width == WORD_BITS {
+        truncate(inout out, destination, destination, width);
+    }
+}
+
+fn normalize_small_result(inout out: ChunkSeq[u8], destination: u8, width: u64) {
+    if width < DWORD_BITS {
+        truncate(inout out, destination, destination, width);
+    }
 }
 
 pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
@@ -182,59 +222,88 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
         Instruction::Immediate(destination, bits) => load_constant(inout out, destination, bits),
         Instruction::Move(destination, source) => {
             if destination != source {
-                binary(inout out, MOV_RM_R64, destination, source);
+                binary(inout out, MOV_RM_R64, destination, source, true);
             }
         },
-        Instruction::Binary(opcode, destination, source) => binary(
-            inout out,
-            opcode,
-            destination,
-            source
-        ),
-        Instruction::Multiply(destination, source) => {
-            out.push(rex(destination, source, true));
+        Instruction::Binary(opcode, destination, source, width) => {
+            binary(inout out, opcode, destination, source, width == QWORD_BITS);
+            // Low-width bitwise operations preserve the zeroed upper bits.
+            if opcode == ADD_RM_R64 || opcode == SUB_RM_R64 {
+                normalize_small_result(inout out, destination, width);
+            }
+        },
+        Instruction::Multiply(destination, source, width) => {
+            out.push(rex(destination, source, width == QWORD_BITS));
             out.push(TWO_BYTE_OPCODE);
             out.push(IMUL_R64_RM64);
             out.push(modrm(destination, source));
+            normalize_small_result(inout out, destination, width);
         },
-        Instruction::Unary(extension, destination) => {
-            out.push(rex(0, destination, true));
+        Instruction::Unary(extension, destination, width) => {
+            out.push(rex(0, destination, width == QWORD_BITS));
             out.push(UNARY_GROUP);
             out.push(modrm(extension, destination));
+            normalize_small_result(inout out, destination, width);
         },
-        Instruction::Shift(extension, destination, count) => {
-            out.push(rex(0, destination, true));
-            out.push(SHIFT_GROUP_IMM8);
+        Instruction::Shift(extension, destination, count, width) => {
+            if width == WORD_BITS {
+                out.push(OPERAND_SIZE_OVERRIDE);
+            }
+            out.push(rex(0, destination, width == QWORD_BITS));
+            out.push(
+                if width == BYTE_BITS {
+                    SHIFT_BYTE_GROUP_IMM8
+                } else {
+                    SHIFT_GROUP_IMM8
+                }
+            );
             out.push(modrm(extension, destination));
             out.push(count);
+            normalize_small_result(inout out, destination, width);
         },
-        Instruction::Compare(destination, left, right, cc, wide) => {
+        Instruction::Compare(destination, left, right, cc, width) => {
+            if width == WORD_BITS {
+                out.push(OPERAND_SIZE_OVERRIDE);
+            }
             // REX also selects the low byte of rsi/rdi for byte operations.
-            out.push(rex(right, left, wide));
-            out.push(if wide { CMP_RM_R64 } else { CMP_RM_R8 });
+            out.push(rex(right, left, width == QWORD_BITS));
+            out.push(
+                if width == BYTE_BITS {
+                    CMP_RM_R8
+                } else {
+                    CMP_RM_R64
+                }
+            );
             out.push(modrm(right, left));
             out.push(rex(0, destination, false));
             out.push(TWO_BYTE_OPCODE);
             out.push(SETCC | cc);
             out.push(modrm(0, destination));
-            extend_byte(inout out, destination, destination, false);
+            truncate(inout out, destination, destination, BYTE_BITS);
         },
         Instruction::Select(destination, condition, first, alternative, cc) => {
             // Test before copying. The destination may share the condition register.
-            binary(inout out, TEST_RM_R64, condition, condition);
+            binary(inout out, TEST_RM_R64, condition, condition, true);
             if destination != first {
-                binary(inout out, MOV_RM_R64, destination, first);
+                binary(inout out, MOV_RM_R64, destination, first, true);
             }
             out.push(rex(destination, alternative, true));
             out.push(TWO_BYTE_OPCODE);
             out.push(CMOVCC | cc);
             out.push(modrm(destination, alternative));
         },
-        Instruction::ExtendByte(destination, source, signed_extend) => extend_byte(
+        Instruction::Truncate(destination, source, width) => truncate(
             inout out,
             destination,
             source,
-            signed_extend
+            width
+        ),
+        Instruction::SignExtend(destination, source, from, width) => sign_extend(
+            inout out,
+            destination,
+            source,
+            from,
+            width
         ),
         Instruction::Return => out.push(RET_NEAR),
     };

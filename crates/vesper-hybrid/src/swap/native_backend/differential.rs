@@ -1,6 +1,6 @@
 use super::binding;
 use super::machine::integer_block_words;
-use cranelift_codegen::ir::{AbiParam, InstBuilder, condcodes::IntCC, types};
+use cranelift_codegen::ir::{AbiParam, InstBuilder, Type, condcodes::IntCC, types};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
@@ -17,7 +17,10 @@ enum Case {
     DeadValues,
     HighRegisters,
     Compare64(IntCC),
-    CompareByte(IntCC),
+    CompareNarrow(Type, IntCC),
+    NarrowArithmetic(Type),
+    NarrowShifts(Type),
+    ChainedCasts,
     CompareImmediate,
     Select,
     SelectKeepingArms,
@@ -81,11 +84,23 @@ fn integer_backend_matches_cranelift_results() {
         Case::SelectKeepingArms,
         Case::SelectKeepingTrue,
         Case::ByteExtensions,
+        Case::ChainedCasts,
     ];
     let cases: Vec<_> = cases
         .into_iter()
         .chain(IntCC::all().iter().copied().map(Case::Compare64))
-        .chain(IntCC::all().iter().copied().map(Case::CompareByte))
+        .chain(
+            [types::I8, types::I16, types::I32]
+                .into_iter()
+                .flat_map(|width| {
+                    IntCC::all()
+                        .iter()
+                        .copied()
+                        .map(move |cc| Case::CompareNarrow(width, cc))
+                }),
+        )
+        .chain([types::I8, types::I16, types::I32].map(Case::NarrowArithmetic))
+        .chain([types::I8, types::I16, types::I32].map(Case::NarrowShifts))
         .collect();
     let case_count = cases.len();
     let mut byte_differences = 0;
@@ -156,11 +171,45 @@ fn integer_backend_matches_cranelift_results() {
                 let predicate = builder.ins().icmp(cc, e, f);
                 builder.ins().uextend(types::I64, predicate)
             }
-            Case::CompareByte(cc) => {
-                let left = builder.ins().ireduce(types::I8, a);
-                let right = builder.ins().ireduce(types::I8, b);
+            Case::CompareNarrow(width, cc) => {
+                let left = builder.ins().ireduce(width, a);
+                let right = builder.ins().ireduce(width, b);
                 let predicate = builder.ins().icmp(cc, left, right);
                 builder.ins().uextend(types::I64, predicate)
+            }
+            Case::NarrowArithmetic(width) => {
+                let left = builder.ins().ireduce(width, a);
+                let right = builder.ins().ireduce(width, b);
+                let salt = builder.ins().iconst(width, -13);
+                let sum = builder.ins().iadd(left, right);
+                let odd = builder.ins().bor_imm(sum, 1);
+                let product = builder.ins().imul(odd, salt);
+                let diff = builder.ins().isub(product, left);
+                let complement = builder.ins().bnot(diff);
+                let neg = builder.ins().ineg(complement);
+                let bits = builder.ins().bxor(neg, right);
+                let low = builder.ins().band_imm(bits, -2);
+                builder.ins().uextend(types::I64, low)
+            }
+            Case::NarrowShifts(width) => {
+                let input = builder.ins().ireduce(width, a);
+                let left = builder.ins().ishl_imm(input, i64::from(width.bits()) + 1);
+                let unsigned = builder.ins().ushr_imm(input, 1);
+                let signed = builder.ins().sshr_imm(input, i64::from(width.bits()) + 1);
+                let low = builder.ins().uextend(types::I64, left);
+                let high = builder.ins().uextend(types::I64, unsigned);
+                let separate = builder.ins().ishl_imm(high, 32);
+                let bits = builder.ins().bor(low, separate);
+                let signed = builder.ins().sextend(types::I64, signed);
+                builder.ins().bxor(bits, signed)
+            }
+            Case::ChainedCasts => {
+                let byte = builder.ins().ireduce(types::I8, a);
+                let signed_word = builder.ins().sextend(types::I16, byte);
+                let signed_dword = builder.ins().sextend(types::I32, signed_word);
+                let signed = builder.ins().sextend(types::I64, signed_dword);
+                let unsigned = builder.ins().uextend(types::I64, signed_word);
+                builder.ins().isub(signed, unsigned)
             }
             Case::CompareImmediate => {
                 let byte = builder.ins().ireduce(types::I8, a);
@@ -218,6 +267,8 @@ fn integer_backend_matches_cranelift_results() {
             [1, 2, 3, 4, 1 << 63, u64::MAX],
             [0x80, 0x7f, 0, 0, 0x80, 0xff],
             [0x100, u64::MAX - 1, 0, 0, 0x100, 0x80],
+            [0x8000, 0x7fff, 0, 0, 0, 0],
+            [0x8000_0000, 0x7fff_ffff, 0, 0, 0, 0],
         ] {
             assert_eq!(
                 unsafe { candidate(a, b, c, d, e, f) },

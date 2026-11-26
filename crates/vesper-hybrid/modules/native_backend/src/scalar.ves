@@ -1,8 +1,8 @@
 use self::x86_64::{
-    ADD_RM_R64, AND_RM_R64, ARGUMENTS, CC_A, CC_AE, CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE,
-    CC_NE, Instruction, NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, RAX, SAR_EXTENSION, SHL_EXTENSION,
-    SHR_EXTENSION, SUB_RM_R64, UNASSIGNED, XOR_RM_R64, arg_register, emit, find_register,
-    register_bit
+    ADD_RM_R64, AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A, CC_AE,
+    CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, Instruction, NEG_EXTENSION, NOT_EXTENSION,
+    OR_RM_R64, RAX, SAR_EXTENSION, SHL_EXTENSION, SHR_EXTENSION, SUB_RM_R64, UNASSIGNED, XOR_RM_R64,
+    arg_register, emit, find_register, register_bit
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -21,9 +21,11 @@ const SAR: u64 = 11;
 const COMPARE: u64 = 12;
 const COMPARE_BYTE: u64 = 13;
 const SELECT: u64 = 14;
-const REDUCE_BYTE: u64 = 15;
-const ZERO_EXTEND_BYTE: u64 = 16;
-const SIGN_EXTEND_BYTE: u64 = 17;
+const TRUNCATE: u64 = 15;
+const ZERO_EXTEND: u64 = 16;
+const SIGN_EXTEND: u64 = 17;
+const COMPARE_WORD: u64 = 18;
+const COMPARE_DWORD: u64 = 19;
 
 const EQUAL: u64 = 0;
 const NOT_EQUAL: u64 = 1;
@@ -45,7 +47,6 @@ const RIGHT: u64 = 2;
 const EXTRA: u64 = 3;
 const RECORD_WORDS: u64 = 4;
 const NEVER_READ: u64 = 0;
-const SHIFT_MASK: u64 = 63;
 
 copy struct Record {
     op: u64,
@@ -85,7 +86,20 @@ fn first_read_backwards(inout reads: ChunkSeq[u64], value: u64, user: u64) {
 }
 
 fn is_comparison(op: u64) -> bool {
-    op == COMPARE || op == COMPARE_BYTE
+    op == COMPARE || op == COMPARE_BYTE || op == COMPARE_WORD || op == COMPARE_DWORD
+}
+
+fn comparison_width(op: u64) -> u64 {
+    match op {
+        COMPARE_BYTE => BYTE_BITS,
+        COMPARE_WORD => WORD_BITS,
+        COMPARE_DWORD => DWORD_BITS,
+        _ => QWORD_BITS,
+    }
+}
+
+fn valid_width(width: u64) -> bool {
+    width == BYTE_BITS || width == WORD_BITS || width == DWORD_BITS || width == QWORD_BITS
 }
 
 fn reads_right(op: u64) -> bool {
@@ -125,8 +139,21 @@ fn find_last_reads(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > SIGN_EXTEND_BYTE {
+        if record.op > COMPARE_DWORD {
             return Option::None;
+        }
+        if record.op >= ADD && record.op <= SAR && !valid_width(record.extra) {
+            return Option::None;
+        }
+        if record.op >= TRUNCATE && record.op <= SIGN_EXTEND {
+            if !valid_width(record.extra) || !valid_width(record.right) {
+                return Option::None;
+            }
+            if (record.op == TRUNCATE && record.extra >= record.right)
+                || (record.op != TRUNCATE && record.extra <= record.right)
+            {
+                return Option::None;
+            }
         }
         let has_left = record.op != CONSTANT;
         let has_right = reads_right(record.op);
@@ -165,26 +192,20 @@ fn without_register(used: u32, register: u8) -> u32 {
 }
 
 fn operation(in record: Record, destination: u8, source: u8) -> Instruction {
+    let width = record.extra;
+    let count = wrapping_u8(record.right & wrapping_sub(width, 1));
     match record.op {
-        ADD => Instruction::Binary(ADD_RM_R64, destination, source),
-        SUB => Instruction::Binary(SUB_RM_R64, destination, source),
-        MUL => Instruction::Multiply(destination, source),
-        AND => Instruction::Binary(AND_RM_R64, destination, source),
-        OR => Instruction::Binary(OR_RM_R64, destination, source),
-        XOR => Instruction::Binary(XOR_RM_R64, destination, source),
-        NEG => Instruction::Unary(NEG_EXTENSION, destination),
-        NOT => Instruction::Unary(NOT_EXTENSION, destination),
-        SHL => Instruction::Shift(
-            SHL_EXTENSION,
-            destination,
-            wrapping_u8(record.right & SHIFT_MASK)
-        ),
-        SHR => Instruction::Shift(
-            SHR_EXTENSION,
-            destination,
-            wrapping_u8(record.right & SHIFT_MASK)
-        ),
-        _ => Instruction::Shift(SAR_EXTENSION, destination, wrapping_u8(record.right & SHIFT_MASK)),
+        ADD => Instruction::Binary(ADD_RM_R64, destination, source, width),
+        SUB => Instruction::Binary(SUB_RM_R64, destination, source, width),
+        MUL => Instruction::Multiply(destination, source, width),
+        AND => Instruction::Binary(AND_RM_R64, destination, source, width),
+        OR => Instruction::Binary(OR_RM_R64, destination, source, width),
+        XOR => Instruction::Binary(XOR_RM_R64, destination, source, width),
+        NEG => Instruction::Unary(NEG_EXTENSION, destination, width),
+        NOT => Instruction::Unary(NOT_EXTENSION, destination, width),
+        SHL => Instruction::Shift(SHL_EXTENSION, destination, count, width),
+        SHR => Instruction::Shift(SHR_EXTENSION, destination, count, width),
+        _ => Instruction::Shift(SAR_EXTENSION, destination, count, width),
     }
 }
 
@@ -274,16 +295,18 @@ pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
                     left,
                     right,
                     condition_code(record.extra),
-                    record.op == COMPARE
+                    comparison_width(record.op)
                 )
             );
-        } else if record.op == REDUCE_BYTE || record.op == SIGN_EXTEND_BYTE {
+        } else if record.op == TRUNCATE {
+            emit(inout output, in Instruction::Truncate(destination, left, record.extra));
+        } else if record.op == SIGN_EXTEND {
             emit(
                 inout output,
-                in Instruction::ExtendByte(destination, left, record.op == SIGN_EXTEND_BYTE)
+                in Instruction::SignExtend(destination, left, record.right, record.extra)
             );
-        } else if record.op == ZERO_EXTEND_BYTE {
-            // Byte results stay zero-extended in their physical registers.
+        } else if record.op == ZERO_EXTEND {
+            // Narrow results stay zero-extended in their physical registers.
             emit(inout output, in Instruction::Move(destination, left));
         } else {
             let reuse_right = !left_dies && right_dies && record.op != SUB;
