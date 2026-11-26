@@ -59,6 +59,7 @@ fn entry(name: &'static str) -> &'static Entry {
             "lsp_lens_view",
             "lsp_lens_requests",
             "lsp_proof_lenses",
+            "lsp_lens_state",
         ]
         .into_iter()
         .map(|n| (n, features().entry(n, optimize())))
@@ -3745,6 +3746,405 @@ fn proof_lenses_speed() {
     eprintln!(
         "proof-lens session per document ({} x {ROUNDS}): rust {r:?} vesper {v:?} ratio {:.2}",
         cases.len(),
+        v.as_secs_f64() / r.as_secs_f64()
+    );
+}
+
+// ------------------------------------------- debounce and pending requests
+
+/// One step of a Lens bookkeeping session (lens_state.ves): `kind`, three
+/// arguments and a text (a URI or a string request ID). A token argument
+/// past the tokens made names none; `u64::MAX` for `D_STARTED` is the token
+/// made last.
+#[derive(Clone)]
+struct LensStateOp {
+    kind: u64,
+    x: u64,
+    y: u64,
+    z: u64,
+    s: String,
+}
+
+/// The ops of lens_state.ves.
+mod lens_op {
+    pub const D_NEW: u64 = 1;
+    pub const D_TOUCH: u64 = 2;
+    pub const D_TIMER: u64 = 3;
+    pub const D_STARTED: u64 = 4;
+    pub const D_IS_CURRENT: u64 = 5;
+    pub const D_FINISHED: u64 = 6;
+    pub const D_FORGET: u64 = 7;
+    pub const D_CANCEL_ALL: u64 = 8;
+    pub const D_LEN: u64 = 9;
+    pub const P_NEW: u64 = 10;
+    pub const P_BEGIN: u64 = 11;
+    pub const P_CANCEL: u64 = 12;
+    pub const P_FINISH: u64 = 13;
+    pub const P_IS_PENDING: u64 = 14;
+    pub const P_CANCEL_ALL: u64 = 15;
+    pub const P_LEN: u64 = 16;
+    pub const T_NEW: u64 = 17;
+    pub const T_CANCEL: u64 = 18;
+}
+
+/// `Debouncer`, `PendingRequests` and `CancelToken` over `ops`, `rounds`
+/// times (the last answers, or "" for no rounds): a row per op, then the
+/// cancelled flag of every token.
+fn rust_lens_state(ops: &[LensStateOp], rounds: u64) -> String {
+    use lens_op::*;
+    use std::fmt::Write as _;
+    use vesper_lsp::lens::{CancelToken, Debouncer, PendingRequests, TimerAction};
+    let base = std::time::Instant::now();
+    let mut out = String::new();
+    for _ in 0..rounds {
+        out.clear();
+        let mut tokens: Vec<CancelToken> = vec![];
+        let mut d: Option<Debouncer> = None;
+        let mut p: Option<PendingRequests> = None;
+        let action = |a: TimerAction| match a {
+            TimerAction::Arm(delay) => format!("A {}", delay.as_nanos()),
+            TimerAction::Idle => "I".to_string(),
+            TimerAction::Fire { generation } => format!("F {generation}"),
+        };
+        let bit = |b: bool| if b { "1" } else { "0" };
+        for op in ops {
+            let at = base + Duration::from_nanos(op.x);
+            let id = || {
+                if op.y == 0 {
+                    vesper_lsp::Id::Integer(op.x as i64 as i32)
+                } else {
+                    vesper_lsp::Id::String(op.s.clone())
+                }
+            };
+            let row = match (op.kind, d.as_mut(), p.as_mut()) {
+                (D_NEW, ..) => match Debouncer::new(Duration::from_nanos(op.x), op.y as usize) {
+                    Ok(new) => {
+                        d = Some(new);
+                        ".".to_string()
+                    }
+                    Err(e) => {
+                        d = None;
+                        format!("E {e}")
+                    }
+                },
+                (P_NEW, ..) => match PendingRequests::new(op.x as usize) {
+                    Ok(new) => {
+                        p = Some(new);
+                        ".".to_string()
+                    }
+                    Err(e) => {
+                        p = None;
+                        format!("E {e}")
+                    }
+                },
+                (T_NEW, ..) => {
+                    tokens.push(CancelToken::new());
+                    (tokens.len() - 1).to_string()
+                }
+                (T_CANCEL, ..) => {
+                    if let Some(token) = tokens.get(op.z as usize) {
+                        token.cancel();
+                    }
+                    ".".to_string()
+                }
+                (D_TOUCH..=D_LEN, None, _) | (P_BEGIN..=P_LEN, _, None) => "-".to_string(),
+                (D_TOUCH, Some(d), _) => action(d.touch(&op.s, at)),
+                (D_TIMER, Some(d), _) => action(d.timer(&op.s, at)),
+                (D_STARTED, Some(d), _) => {
+                    let token = tokens.last().cloned().unwrap_or_default();
+                    d.started(&op.s, op.x, token);
+                    ".".to_string()
+                }
+                (D_IS_CURRENT, Some(d), _) => bit(d.is_current(&op.s, op.x)).to_string(),
+                (D_FINISHED, Some(d), _) => {
+                    d.finished(&op.s, op.x);
+                    ".".to_string()
+                }
+                (D_FORGET, Some(d), _) => {
+                    d.forget(&op.s);
+                    ".".to_string()
+                }
+                (D_CANCEL_ALL, Some(d), _) => {
+                    d.cancel_all();
+                    ".".to_string()
+                }
+                (D_LEN, Some(d), _) => d.len().to_string(),
+                (P_BEGIN, _, Some(p)) => match p.begin(id()) {
+                    Ok(token) => {
+                        tokens.push(token);
+                        format!("K {}", tokens.len() - 1)
+                    }
+                    Err(e) => format!("E {e}"),
+                },
+                (P_CANCEL, _, Some(p)) => bit(p.cancel(&id())).to_string(),
+                (P_FINISH, _, Some(p)) => {
+                    let job = tokens.get(op.z as usize).cloned().unwrap_or_default();
+                    bit(p.finish(&id(), &job)).to_string()
+                }
+                (P_IS_PENDING, _, Some(p)) => {
+                    let job = tokens.get(op.z as usize).cloned().unwrap_or_default();
+                    bit(p.is_pending(&id(), &job)).to_string()
+                }
+                (P_CANCEL_ALL, _, Some(p)) => p
+                    .cancel_all()
+                    .into_iter()
+                    .map(|id| match id {
+                        vesper_lsp::Id::Integer(n) => format!("i{n}"),
+                        vesper_lsp::Id::String(s) => format!("s{}:{s}", s.len()),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(","),
+                (P_LEN, _, Some(p)) => p.len().to_string(),
+                (kind, ..) => panic!("unknown op {kind}"),
+            };
+            let _ = writeln!(out, "{row}");
+        }
+        let flags: String = tokens
+            .iter()
+            .map(|t| if t.is_cancelled() { '1' } else { '0' })
+            .collect();
+        let _ = writeln!(out, "T {flags}");
+    }
+    out
+}
+
+/// The input of `lsp_lens_state`.
+fn lens_state_input(ops: &[LensStateOp], rounds: u64) -> Vec<u8> {
+    let mut w: Vec<u64> = vec![0, rounds, ops.len() as u64];
+    let mut blob = vec![];
+    for op in ops {
+        w.extend([op.kind, op.x, op.y, op.z, op.s.len() as u64]);
+        blob.extend_from_slice(op.s.as_bytes());
+    }
+    w[0] = w.len() as u64;
+    let mut input: Vec<u8> = w.iter().flat_map(|x| x.to_le_bytes()).collect();
+    input.extend_from_slice(&blob);
+    input
+}
+
+/// Seeded sessions: each sets its limits (some invalid), then mixes edits,
+/// timers that fire early, on time and late, runs that start for current
+/// and stale generations, closes, requests that begin, are cancelled, are
+/// answered (by the right job and a stale one) and exit cancellation, with
+/// integer and string IDs that repeat.
+fn lens_state_sessions() -> Vec<Vec<LensStateOp>> {
+    use lens_op::*;
+    let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = move |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n.max(1)
+    };
+    let op = |kind, x, y, z, s: &str| LensStateOp {
+        kind,
+        x,
+        y,
+        z,
+        s: s.to_string(),
+    };
+    let uris = [
+        "file:///a.ves",
+        "file:///b.ves",
+        "file:///c%20d.ves",
+        "file:///\u{e9}.ves",
+        "untitled:1",
+        "file:///a.ves#x",
+    ];
+    let ids = ["1", "", "a,b", "s3:x", "\u{1f600}", "vesper-lens-refresh-1"];
+    let ms = 1_000_000u64;
+    let limits = [
+        (150 * ms, 4096, 1024),
+        (0, 1, 1),
+        (60_000 * ms, 3, 3),
+        (60_000 * ms + 1, 3, 3),
+        (150 * ms, 0, 0),
+        (150 * ms, 4097, 1025),
+        (5 * ms, 2, 2),
+    ];
+    let mut sessions = vec![];
+    for s in 0..140 {
+        let (delay, max_d, max_p) = limits[s % limits.len()];
+        let mut ops = vec![op(D_NEW, delay, max_d, 0, ""), op(P_NEW, max_p, 0, 0, "")];
+        let mut now = 0u64;
+        let mut tokens = 0u64;
+        let mut generation = [0u64; 6];
+        for _ in 0..(40 + next(400)) {
+            now += next(4) * next(100) * ms / 2;
+            let u = next(uris.len() as u64) as usize;
+            let uri = uris[u];
+            let (y, x, text) = if next(2) == 0 {
+                let n = [0i64, 1, -1, 7, i32::MAX as i64, i32::MIN as i64][next(6) as usize];
+                (0, n as u64, "")
+            } else {
+                (1, 0, ids[next(ids.len() as u64) as usize])
+            };
+            let tok = if tokens == 0 {
+                None
+            } else {
+                Some(next(tokens))
+            };
+            match next(20) {
+                0..=4 => {
+                    generation[u] += 1;
+                    ops.push(op(D_TOUCH, now, 0, 0, uri));
+                }
+                5..=7 => ops.push(op(D_TIMER, now, 0, 0, uri)),
+                8 => {
+                    ops.push(op(T_NEW, 0, 0, 0, ""));
+                    tokens += 1;
+                    let g = generation[u].saturating_sub(next(2));
+                    // `u64::MAX`: the token just made.
+                    ops.push(op(D_STARTED, g, 0, u64::MAX, uri));
+                }
+                9 => ops.push(op(
+                    D_IS_CURRENT,
+                    generation[u].saturating_sub(next(2)),
+                    0,
+                    0,
+                    uri,
+                )),
+                10 => ops.push(op(
+                    D_FINISHED,
+                    generation[u].saturating_sub(next(2)),
+                    0,
+                    0,
+                    uri,
+                )),
+                11 => {
+                    if next(4) == 0 {
+                        ops.push(op(D_FORGET, 0, 0, 0, uri));
+                    } else {
+                        ops.push(op(D_LEN, 0, 0, 0, ""));
+                    }
+                }
+                12..=14 => {
+                    ops.push(op(P_BEGIN, x, y, 0, text));
+                    tokens += 1;
+                }
+                15 => ops.push(op(P_CANCEL, x, y, 0, text)),
+                16 => {
+                    if let Some(t) = tok {
+                        ops.push(op(P_FINISH, x, y, t, text));
+                    }
+                }
+                17 => {
+                    if let Some(t) = tok {
+                        ops.push(op(P_IS_PENDING, x, y, t, text));
+                    }
+                }
+                18 => match next(6) {
+                    0 => ops.push(op(D_CANCEL_ALL, 0, 0, 0, "")),
+                    1 => ops.push(op(P_CANCEL_ALL, 0, 0, 0, "")),
+                    2 => {
+                        if let Some(t) = tok {
+                            ops.push(op(T_CANCEL, 0, 0, t, ""));
+                        }
+                    }
+                    _ => ops.push(op(P_LEN, 0, 0, 0, "")),
+                },
+                _ => {
+                    // Wait out the delay, then fire.
+                    now += delay + next(3);
+                    ops.push(op(D_TIMER, now, 0, 0, uri));
+                }
+            }
+        }
+        sessions.push(ops);
+    }
+    sessions
+}
+
+/// `Debouncer`, `PendingRequests` and `CancelToken` (crates/vesper-lsp
+/// lens.rs) against the Vesper port on seeded sessions: every answer and
+/// the final state of every cancel token.
+#[test]
+fn lens_state_matches_rust() {
+    let entry = entry("lsp_lens_state");
+    let sessions = lens_state_sessions();
+    let (mut ops, mut fires, mut arms, mut errors, mut cancelled, mut diffs) = (0, 0, 0, 0, 0, 0);
+    for (i, session) in sessions.iter().enumerate() {
+        let rust = rust_lens_state(session, 1);
+        let port = entry.text(&lens_state_input(session, 1));
+        ops += session.len();
+        fires += rust.lines().filter(|l| l.starts_with("F ")).count();
+        arms += rust.lines().filter(|l| l.starts_with("A ")).count();
+        errors += rust.lines().filter(|l| l.starts_with("E ")).count();
+        cancelled += rust.lines().last().map_or(0, |l| l.matches('1').count());
+        if rust != port {
+            diffs += 1;
+            if diffs <= 6 {
+                let (a, b): (Vec<_>, Vec<_>) = (rust.lines().collect(), port.lines().collect());
+                let k = a
+                    .iter()
+                    .zip(&b)
+                    .position(|(x, y)| x != y)
+                    .unwrap_or(a.len().min(b.len()));
+                eprintln!(
+                    "session {i} line {k}:\n  rust   {:?}\n  vesper {:?}",
+                    a.get(k),
+                    b.get(k)
+                );
+            }
+        }
+    }
+    eprintln!(
+        "lens state: {} sessions, {ops} ops ({arms} timers armed, {fires} fired, {errors} \
+         errors, {cancelled} tokens cancelled), {diffs} differ",
+        sessions.len()
+    );
+    assert!(fires > 0 && arms > 0 && errors > 0 && cancelled > 0);
+    assert_eq!(diffs, 0);
+}
+
+/// Bookkeeping sessions, `rounds` of every one less the setup on both
+/// sides (`CHECK_HARNESS_SPEED=1 cargo test --release --test
+/// self_host_lsp_features lens_state_speed -- --ignored`).
+#[test]
+#[ignore]
+fn lens_state_speed() {
+    if !speed() {
+        return;
+    }
+    const ROUNDS: u64 = 64;
+    let sessions = lens_state_sessions();
+    let entry = entry("lsp_lens_state");
+    let inputs: Vec<[Vec<u8>; 2]> = sessions
+        .iter()
+        .map(|s| [0, ROUNDS].map(|n| lens_state_input(s, n)))
+        .collect();
+    let (mut rust, mut basis, mut fixed, mut full) =
+        (Duration::MAX, Duration::MAX, Duration::MAX, Duration::MAX);
+    for _ in 0..3 {
+        rust = rust.min(time(|| {
+            for s in &sessions {
+                std::hint::black_box(rust_lens_state(s, ROUNDS));
+            }
+        }));
+        basis = basis.min(time(|| {
+            for s in &sessions {
+                std::hint::black_box(rust_lens_state(s, 0));
+            }
+        }));
+        fixed = fixed.min(time(|| {
+            for [none, _] in &inputs {
+                std::hint::black_box(entry.text(none));
+            }
+        }));
+        full = full.min(time(|| {
+            for [_, all] in &inputs {
+                std::hint::black_box(entry.text(all));
+            }
+        }));
+    }
+    let n = sessions.len() as u32 * ROUNDS as u32;
+    let (r, v) = (
+        rust.saturating_sub(basis) / n,
+        full.saturating_sub(fixed) / n,
+    );
+    eprintln!(
+        "lens bookkeeping session ({} x {ROUNDS}): rust {r:?} vesper {v:?} ratio {:.2}",
+        sessions.len(),
         v.as_secs_f64() / r.as_secs_f64()
     );
 }
