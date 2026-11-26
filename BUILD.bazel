@@ -906,8 +906,12 @@ vesper_crate(
         "test/std_fs": [":files"],
         "test/std_process": [":files"],
         # The proof-lens runner (#1828 part 8): a driver over
-        # @vesper/lsp-proof-run and @vesper-std/fs, process and env.
-        "test/self_host_proof_lens": [":files"] + glob([
+        # @vesper/lsp-proof-run, @vesper/lsp and @vesper-std/fs, process and env.
+        "test/self_host_proof_lens": [
+            ":files",
+            "//crates/vesper-serde:files",
+        ] + glob([
+            "packages/vesper-lsp/**",
             "packages/vesper-lsp-proof-run/**",
             "packages/vesper-std/**",
             "tests/fixtures/proof-lens-toolchain/**",
