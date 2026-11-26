@@ -154,6 +154,11 @@ pub fn write_bytes(inout out: ChunkSeq[u8], in s: Slice[u8]) {
     out.extend(in s);
 }
 
+// Append the UTF-8 bytes of `s`.
+pub fn write_str(inout out: ChunkSeq[u8], in s: Str) {
+    write_bytes(inout out, in s.as_bytes());
+}
+
 // Parse all of `s` as an unsigned integer in `radix` (2..=36). Letters may
 // be either case. There is no sign, prefix or separator.
 pub fn parse_u64_radix(in s: Slice[u8], radix: u64) -> Result[u64, ParseIntError] {

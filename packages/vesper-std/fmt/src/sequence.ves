@@ -1,0 +1,50 @@
+// Append a sequence of typed writer calls to one destination. Each named
+// writer receives inout destination first, then its original arguments.
+// The calls run left to right, once each, with no intermediate buffer.
+pub sugar fmt: tag {
+    rule (
+        fmt{
+            inout $destination:ident;
+            $($writer:ident($..arguments:args)),*
+        }
+    ) => {
+        {
+            $($writer(inout $destination, $..arguments);)*
+        }
+    }
+}
+
+test {
+    use self::{write_str, write_u64, write_i64, write_hex_u64};
+
+    fn next(inout trace: u64, n: u64) -> u64 {
+        trace = wrapping_add(wrapping_mul(trace, 10), n);
+        n
+    }
+
+    // @case typed_writers()
+    fn appends_utf8_then_numbers_in_order() -> bool {
+        let mut out = ChunkSeq::new[u8]();
+        let mut trace: u64 = 0;
+        write_str(inout out, in "pré:");
+        fmt{
+            inout out;
+            write_str(in "digits="),
+            write_u64(next(inout trace, 1)),
+            write_i64(-9),
+            write_str(in ", hex="),
+            write_hex_u64(next(inout trace, 2), 3)
+        };
+        trace == 12 && out.as_slice().eq(in "pré:digits=1-9, hex=002".as_bytes())
+    }
+
+    // @case empty_without_arguments()
+    fn empty_sequence_is_a_noop() -> bool {
+        let mut out = ChunkSeq::new[u8]();
+        write_str(inout out, in "-");
+        fmt{
+            inout out;
+        };
+        out.as_slice().eq(in "-".as_bytes())
+    }
+}

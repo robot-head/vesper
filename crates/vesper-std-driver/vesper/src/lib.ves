@@ -22,7 +22,8 @@ use @vesper-std/fs::{IoError, read_path, replace_path, metadata_path, kind_file}
 use @vesper-std/fs::walk::{walk_path, entry_count, entry_start, entry_end, entry_kind, entry_join};
 use @vesper-std/process::{command_path, arg, output};
 use @vesper-std/env::var_bytes;
-use @vesper-std/fmt::{write_u64, write_i64, write_hex_u64};
+use @vesper-std/fmt::{write_u64, write_i64, write_hex_u64, write_str};
+use @vesper-std/fmt::sequence::fmt;
 
 fn fnv(in s: Slice[u8]) -> u64 {
     let mut h: u64 = 14695981039346656037;
@@ -133,11 +134,14 @@ fn drive() -> u64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Fail[IoError]] 
             total = wrapping_add(total, size);
         }
     }
-    report.extend(in "files ".as_bytes());
-    write_u64(inout report, files);
-    report.extend(in "\nbytes ".as_bytes());
-    write_u64(inout report, total);
-    report.push(10);
+    fmt{
+        inout report;
+        write_str(in "files "),
+        write_u64(files),
+        write_str(in "\nbytes "),
+        write_u64(total),
+        write_str(in "\n")
+    };
     compiler(in cc.as_slice(), inout report);
     replace_path(in out.as_slice(), in report.as_slice());
     files
