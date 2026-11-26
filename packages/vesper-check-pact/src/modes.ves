@@ -161,10 +161,7 @@ pub fn derive_adt_scheme(
         let mut dep = false;
         if u8_at(in is_row, i) == 0 {
             let max_m = widen_u64(u8_at(in bounds_max, i));
-            let st = match stride.try_get(i) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
+            let st = stride.try_get(i).unwrap_or(0);
             for mv in 1..inc(max_m) {
                 let at = wrapping_mul(mv, st);
                 if u8_at(in obs, at) > base {

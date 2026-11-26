@@ -6,10 +6,7 @@ use @vesper/span::{Position, Range};
 
 // Byte `i` of `b`, or 0 past its end.
 pub fn byte(in b: Slice[u8], i: u64) -> u8 {
-    match b.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    b.try_get(i).unwrap_or(0)
 }
 
 // Appends the bytes of `s`.
