@@ -75,6 +75,22 @@ fn failure(error: Error) -> Failure {
         partial: Box::new(Report::new(Limits::default())),
     }
 }
+
+fn publish_setup(stage: &std::path::Path, destination: &std::path::Path) -> Result<(), String> {
+    super::receipt_compiler(stage).map_err(|error| error.to_string())?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use rustix::fs::{CWD, RenameFlags, renameat_with};
+        renameat_with(CWD, stage, CWD, destination, RenameFlags::NOREPLACE)
+            .map_err(|error| format!("could not publish {}: {error}", destination.display()))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = destination;
+        Err("exclusive setup publication is unavailable on this platform".into())
+    }
+}
+
 pub fn main() -> std::process::ExitCode {
     let args = match arguments() {
         Ok(v) => v,
@@ -83,6 +99,20 @@ pub fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
+    if let [flag, stage, destination] = args.as_slice()
+        && flag == "--publish-setup"
+    {
+        return match publish_setup(
+            std::path::Path::new(stage),
+            std::path::Path::new(destination),
+        ) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
     if args.len() == 2 {
         match args[0].as_str() {
             "--fault-peer" => {

@@ -1,0 +1,79 @@
+{
+  "notes": [
+    "The flip gate for vesper-gpu-compute's Vulkan runtime (aspect ci flip-gate --,",
+    "SH6 lane 1, #1396; this crate's lane: SH6 lane 15, #1410). The runtime",
+    "(Context, Buffer, Kernel, Recording, Submission) is the Vesper library in",
+    "vesper/; SH6 lane 15 deleted the Rust runtime over ash (part 2c). The",
+    "broadphase's and the tensor kernels' checks and dispatches, and the decode",
+    "step, are Vesper too (part 2b). The kernels are committed SPIR-V whose binding",
+    "interface the Vesper library reads; naga is only the tests' WGSL compiler",
+    "(part 2d).",
+    "Every check needs a Vulkan device: run it on Mesa lavapipe",
+    "(.github/workflows/gpu-compute.yml installs it).",
+    "The runtime tests, the Tensor decoder and the broadphase against the CPU",
+    "references of vesper-tensor and vesper-kinetic (bit-exact pair sets,",
+    "matching tokens), the same tests the Rust runtime passed.",
+    "A B B A in fresh processes against the Rust runtime at its last commit;",
+    "both arms must print the same digest."
+  ],
+  "name": "vesper-gpu-compute",
+  "lane": "SH6-15",
+  "env": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "VESPER_GPU_REQUIRE": "1",
+    "VESPER_GPU_DEVICE": "llvmpipe"
+  },
+  "build": [
+    [
+      "cargo",
+      "build",
+      "--locked",
+      "--release",
+      "-p",
+      "vesper-gpu-compute",
+      "--example",
+      "runtime_bench",
+      "--example",
+      "broadphase_bench",
+      "--example",
+      "generation_bench"
+    ]
+  ],
+  "tests": [
+    {
+      "run": ["cargo", "test", "--locked", "-p", "vesper-gpu-compute", "-p", "vesper-kinetic-gpu"]
+    }
+  ],
+  "differential": {
+    "run": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "vesper-gpu-compute",
+      "--test",
+      "runtime",
+      "--test",
+      "generation",
+      "--test",
+      "broadphase",
+      "--test",
+      "spirv"
+    ]
+  },
+  "abba": [
+    {
+      "workload": "runtime",
+      "run": ["aspect", "crate", "gpu-compute", "bench-abba", "--", "runtime", "10"]
+    },
+    {
+      "workload": "broadphase",
+      "run": ["aspect", "crate", "gpu-compute", "bench-abba", "--", "broadphase", "10"]
+    },
+    {
+      "workload": "generation",
+      "run": ["aspect", "crate", "gpu-compute", "bench-abba", "--", "generation", "10"]
+    }
+  ]
+}

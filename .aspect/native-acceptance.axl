@@ -2,7 +2,11 @@ load("./lib/bazel_exec.axl", "executable", "run_target")
 load("./lib/process.axl", "capture", "check", "command", "exit_code", "root_path", "scratch_dir")
 
 def _native_cases(ctx: TaskContext, root: str) -> list[str]:
-    cases = ctx.std.fs.read_to_string(root + "/scripts/native-example-cases.txt").split()
+    relative = "/scripts/native-example-cases.txt"
+    path = root + relative
+    if not ctx.std.fs.exists(path):
+        path = ctx.std.env.aspect_root_dir() + relative
+    cases = ctx.std.fs.read_to_string(path).split()
     if not cases:
         ctx.std.process.exit(1, "No native example cases")
     return cases
@@ -169,7 +173,7 @@ test_fmt = task(
 )
 
 def _ci_host(ctx: TaskContext) -> int:
-    root = ctx.std.env.aspect_root_dir()
+    root = ctx.std.env.var("PLATFORM_WORKSPACE") or ctx.std.env.aspect_root_dir()
     compiler = ctx.std.env.var("VESPER_NATIVE_BINARY")
     if not compiler:
         ctx.std.process.exit(2, "Set VESPER_NATIVE_BINARY to the compiler executable")

@@ -50,7 +50,7 @@ Run the example with its small self-checking corpus, or supply bounded stdin:
 ```sh
 cargo run -p vesper-serde --example ndjson_columns
 cargo build -p vesper-serde --example ndjson_columns
-python3 scripts/check-ndjson-columns.py --binary target/debug/examples/ndjson_columns
+aspect acceptance check-ndjson-columns -- --binary target/debug/examples/ndjson_columns
 ```
 
 The example accepts `--stdin`, limited to 64 KiB and 128 records. It projects

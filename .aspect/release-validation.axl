@@ -1,0 +1,124 @@
+"""Attest that the exact release candidate passed all required validation."""
+
+load("./lib/process.axl", "capture")
+
+_LINUX = [
+    "Test all targets",
+    "Self-host differentials",
+    "Self-host differentials 2",
+    "Self-host codegen differentials",
+    "Native and acceptance scripts",
+]
+
+def valid_candidate(sha):
+    return sha != None and len(sha) == 40 and all([char in "0123456789abcdef" for char in sha.elems()])
+
+def candidate_receipt(sha, checked_sha, profile):
+    return valid_candidate(sha) and checked_sha == sha and profile == "full"
+
+def linux_checks(statuses):
+    latest = {}
+    for status in statuses:
+        context = status["context"]
+        if context not in latest or latest[context]["id"] < status["id"]:
+            latest[context] = status
+    missing = []
+    passing = []
+    for name in _LINUX:
+        status = latest.get(name)
+        if not status or status["state"] != "success":
+            missing.append(name)
+        else:
+            passing.append({"context": name, "id": status["id"], "state": status["state"], "target_url": status.get("target_url")})
+    return struct(missing = missing, passing = passing)
+
+def _request(ctx, args):
+    return capture(ctx, "gh", ["api"] + args, ctx.std.env.aspect_root_dir())
+
+def _statuses(ctx, prefix, sha, report):
+    rows = _request(ctx, ["--paginate", prefix + "/statuses/" + sha + "?per_page=100", "--jq", ".[] | @json"])
+    result = linux_checks([json.decode(row) for row in rows.splitlines() if row])
+    if result.missing:
+        ctx.std.process.exit(1, "Exact-candidate Linux check is %s: %s" % (
+            "no longer successful" if report else "not successful",
+            result.missing[0],
+        ))
+    return result.passing
+
+def _append(ctx, key, text):
+    path = ctx.std.env.var(key)
+    if not path or not ctx.std.fs.try_append(path, text):
+        ctx.std.process.exit(1, "Cannot write " + key)
+
+def _linux(ctx: TaskContext) -> int:
+    sha = ctx.std.env.var("CANDIDATE_SHA")
+    if not valid_candidate(sha):
+        ctx.std.process.exit(1, "candidate_sha must be an exact lowercase 40-character commit SHA")
+    prefix = "repos/" + ctx.std.env.var("GITHUB_REPOSITORY")
+    commit = json.decode(_request(ctx, [prefix + "/commits/" + sha]))
+    if commit["sha"] != sha:
+        ctx.std.process.exit(1, "GitHub did not resolve the exact candidate SHA")
+    _statuses(ctx, prefix, sha, False)
+    _append(ctx, "GITHUB_OUTPUT", "sha=" + sha + "\n")
+    return 0
+
+def _ready(ctx: TaskContext) -> int:
+    env = ctx.std.env.var
+    sha = env("CANDIDATE_SHA")
+    if not candidate_receipt(sha, env("CHECKED_SHA"), env("CHECKED_PROFILE")):
+        ctx.std.process.exit(1, "Both full platform jobs must validate the exact candidate")
+    linux = _statuses(ctx, "repos/" + env("GITHUB_REPOSITORY"), sha, True)
+    attestation = {
+        "schema_version": 1,
+        "candidate_sha": sha,
+        "profile": "full",
+        "supported_platforms": ["macOS AArch64", "Windows x86_64 MSVC"],
+        "linux": linux,
+        "workflow_run_id": int(env("GITHUB_RUN_ID")),
+    }
+    ctx.std.fs.write(env("RUNNER_TEMP") + "/release-validation.json", json.encode(attestation) + "\n")
+    _append(ctx, "GITHUB_STEP_SUMMARY", "## Release candidate validated\n\nFull supported platform validation passed for `%s`.\n" % sha)
+    return 0
+
+require_release_linux = task(
+    kind = "require-release-linux",
+    group = ["ci"],
+    summary = "Require green Linux statuses for the exact release candidate",
+    implementation = _linux,
+)
+
+attest_release_validation = task(
+    kind = "attest-release-validation",
+    group = ["ci"],
+    summary = "Recheck Linux and attest full native validation for the same candidate",
+    implementation = _ready,
+)
+
+def _test(ctx: TaskContext) -> int:
+    sha = "a" * 40
+    for invalid in [None, "", "main", "v1.0.0", "a" * 39, "A" * 40, sha + ";bad"]:
+        if valid_candidate(invalid) or candidate_receipt(invalid, invalid, "full"):
+            fail("Accepted an invalid candidate: %r" % invalid)
+    if not candidate_receipt(sha, sha, "full") or candidate_receipt(sha, sha, "pr") or candidate_receipt(sha, "b" * 40, "full"):
+        fail("Candidate receipt must require the exact SHA and full coverage")
+    good = [{"id": id, "context": name, "state": "success"} for id, name in enumerate(_LINUX, 1)]
+    original = linux_checks(good)
+    if original.missing or len(original.passing) != len(_LINUX):
+        fail("Expected all successful checks in the receipt")
+    for index, name in enumerate(_LINUX):
+        if linux_checks(good[:index] + good[index + 1:]).missing != [name]:
+            fail("Accepted a missing check: " + name)
+        for state in ["failure", "error", "pending"]:
+            failed = {"id": 99, "context": name, "state": state}
+            older = {"id": 0, "context": name, "state": state}
+            if linux_checks([failed] + good).missing != [name] or linux_checks(good + [older]) != original:
+                fail("Did not use the latest status for " + name)
+    ctx.std.io.stdout.write("Passed exact-candidate and latest-Linux-status cases\n")
+    return 0
+
+test_release_validation = task(
+    kind = "release-validation",
+    group = ["ci", "tests"],
+    summary = "Test release candidate identity and Linux status attestation",
+    implementation = _test,
+)

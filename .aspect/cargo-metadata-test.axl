@@ -1,0 +1,163 @@
+"""Test the native tasks that interpret Cargo workspace metadata."""
+
+load("./lib/process.axl", "capture", "check")
+load("./lib/task-fixture.axl", "contains", "equal", "fixture_launcher", "fixture_workspace", "invoke_fixture", "write_fixture")
+
+def mock_cargo_metadata(ctx, cwd, tool, argv):
+    if tool == "bazelisk":
+        equal(argv, ["query", "@vesper_cargo//:packages.bzl"])
+        ctx.std.io.stdout.write("Bazel checked the generated workspace repository\n")
+        return int(ctx.std.env.var("BAZEL_CODE") or "0")
+    equal(tool, "cargo")
+    expected = ["metadata", "--locked", "--no-deps", "--format-version", "1"]
+    if ctx.std.env.var("FIXTURE_METADATA") == "bazel":
+        expected = ["metadata", "--no-deps", "--format-version=1", "--quiet", "--offline"]
+    equal(argv, expected)
+    if ctx.std.env.var("METADATA_FAILURE"):
+        ctx.std.io.stderr.write("metadata failure\n")
+        return 29
+    ctx.std.io.stdout.write(ctx.std.fs.read_to_string(cwd + "/fixture metadata.json") + "\n")
+    return 0
+
+def _selection(ctx):
+    workspace = fixture_workspace(ctx, "vesper-port-selection-test-")
+    root, cwd = workspace.root, workspace.cwd
+    env = fixture_launcher(ctx, workspace, "metadata", ["cargo"])
+
+    def git(argv):
+        return capture(ctx, "git", argv, root).strip()
+
+    def run(argv, status = 0, variables = env):
+        return invoke_fixture(ctx, argv, cwd, status, variables)
+
+    git(["init", "-q", "-b", "main"])
+    for key, value in {"user.name": "Fixture", "user.email": "fixture@example.invalid", "commit.gpgsign": "false"}.items():
+        git(["config", key, value])
+    changed = "crates/source/file with spaces λ.rs"
+    write_fixture(ctx, root + "/" + changed, "fixture\n")
+    git(["add", "--", changed])
+    git(["commit", "-qm", "base"])
+    base = git(["rev-parse", "HEAD"])
+
+    def package(name, path, dependencies = [], targets = []):
+        return {
+            "name": name, "manifest_path": root + path + "/Cargo.toml",
+            "dependencies": [{"path": root + "/" + directory, "kind": kind} for directory, kind in dependencies],
+            "targets": [{"src_path": root + "/" + file, "kind": [kind]} for file, kind in targets],
+        }
+
+    metadata = root + "/fixture metadata.json"
+    ctx.std.fs.write(metadata, json.encode({"workspace_root": root, "packages": [
+        package("compiler", "", [("crates/seed", "build"), ("crates/source", "dev")]),
+        package("source", "/crates/source"),
+        package("seed", "/crates/seed", targets = [("crates/seed/../linked/src/lib.rs", "lib")]),
+        package("linked", "/crates/linked"),
+        package("middle", "/crates/middle", [("crates/source", "dev")]),
+        package("last", "/crates/last", [("crates/middle", "build")]),
+    ]}))
+    command = ["ci", "port-harness-selection", "--"]
+    pr = command + ["--profile", "pr", "--base"]
+    scoped = pr + [base, "--head", "HEAD"]
+    for flags in [["--profile", "full"], ["--profile=pr", "--event=push"], ["--profile", "pr"]]:
+        equal(run(command + flags + ["--head", "HEAD"]).stdout, "all\n")
+    equal(run(scoped).stdout, "all\n")
+    equal(run(pr + ["missing", "--head", "HEAD"]).stdout, "all\n")
+    run(command + ["--profile", "invalid", "--head", "HEAD"], 2)
+    run(command + ["--profile", "--head", "HEAD"], 2)
+
+    write_fixture(ctx, root + "/" + changed, "changed\n")
+    git(["commit", "-qam", "change a port"])
+    equal(run(scoped).stdout, "last middle source\n")
+    output = root + "/step-output"
+    ctx.std.fs.write(output, "earlier=record\n")
+    workflow_env = dict(env, GITHUB_OUTPUT = output, PULL_REQUEST = "", BASE_SHA = base, REQUESTED_PROFILE = "pr", EVENT = "pull_request")
+    workflow = ["ci", "choose-platform-ports"]
+    run(workflow, variables = workflow_env)
+    run(workflow, variables = dict(workflow_env, PULL_REQUEST = "42"))
+    equal(ctx.std.fs.read_to_string(output), "earlier=record\ncrates=last middle source\ncrates=none\n")
+    run(workflow, 2, dict(workflow_env, GITHUB_OUTPUT = ""))
+    run(workflow, 1, dict(workflow_env, GITHUB_OUTPUT = output + "/unwritable"))
+    run(workflow, 2, dict(workflow_env, REQUESTED_PROFILE = "other"))
+
+    write_fixture(ctx, root + "/crates/linked/src/lib.rs", "linked library\n")
+    git(["add", "crates/linked"])
+    git(["commit", "-qm", "change a compiler-linked file"])
+    equal(run(scoped).stdout, "all\n")
+    git(["reset", "--hard", base])
+    ctx.std.fs.create_dir_all(root + "/docs")
+    git(["mv", changed, "docs/renamed.md"])
+    git(["commit", "-qm", "move a port file to documentation"])
+    equal(run(scoped).stdout, "last middle source\n")
+
+    write_fixture(ctx, root + "/crates/guarded/src/nested/module.rs", '#[cfg(feature\n =\n "vesper-port")]\nfn port() {}\n')
+    write_fixture(ctx, root + "/crates/unconditional/src/lib.rs", "fn port() {}\n")
+    write_fixture(ctx, root + "/crates/unconditional/tests/fixture.rs", '#[cfg(feature = "vesper-port")]\nfn fixture() {}\n')
+    guard = ["ci", "tests", "port-divergent-features"]
+    for features in [["vesper-port"], []]:
+        ctx.std.fs.write(metadata, json.encode({"workspace_root": root, "packages": [
+            {"manifest_path": root + "/crates/" + name + "/Cargo.toml", "features": {"vesper-port-divergent": flags}}
+            for name, flags in [("guarded", features), ("unconditional", [])]
+        ]}))
+        if features:
+            contains("1 feature-gated ports", run(guard).stdout)
+        else:
+            result = run(guard, 1)
+            contains("vesper-port-divergent must enable vesper-port", result.stderr)
+            contains("/guarded/Cargo.toml", result.stderr)
+
+def _bazel(ctx):
+    workspace = fixture_workspace(ctx, "vesper-bazel-workspace-test-")
+    root, cwd = workspace.root, workspace.cwd
+    env = dict(fixture_launcher(ctx, workspace, "metadata", ["cargo"]), FIXTURE_METADATA = "bazel", METADATA_FAILURE = "", PATH = root + "/bin")
+    check(ctx, "ln", ["-s", ctx.std.process.which("git"), root + "/bin/git"], root)
+    command = ["maintenance", "bazel", "sync-build-files"]
+
+    def run(argv = [], status = 0, variables = env):
+        return invoke_fixture(ctx, command + argv, cwd, status, variables)
+
+    owned = root + "/crates/owned/BUILD.bazel"
+    write_fixture(ctx, owned, "manually edited\n")
+    for path in ["crates/first crate", "crates/second", "outside"]:
+        ctx.std.fs.create_dir_all(root + "/" + path)
+    ctx.std.fs.write(root + "/fixture metadata.json", json.encode({
+        "workspace_root": root, "workspace_members": ["root", "owned", "first", "second"],
+        "packages": [{"id": name, "manifest_path": root + path + "/Cargo.toml"} for name, path in [
+            ("root", ""), ("owned", "/crates/owned"), ("outside", "/outside"),
+            ("second", "/crates/second"), ("first", "/crates/first crate"),
+        ]],
+    }))
+    expected = ["crates/first crate/BUILD.bazel", "crates/second/BUILD.bazel"]
+    check_only = ["--", "--check"]
+    equal(run(check_only, 1).stdout.splitlines(), ["missing " + path + "; run aspect maintenance bazel sync-build-files" for path in expected])
+    equal([ctx.std.fs.exists(root + "/" + path) for path in expected], [False, False])
+    equal(run().stdout.splitlines(), ["created " + path for path in expected])
+    for path in expected:
+        created = root + "/" + path
+        equal(ctx.std.fs.read_to_string(created), 'load("//tools/bazel:defs.bzl", "vesper_crate")\n\nvesper_crate()\n')
+        equal(len(ctx.std.fs.read_dir(created.rpartition("/")[0])), 1)
+    equal(ctx.std.fs.exists(root + "/BUILD.bazel"), False)
+    equal(ctx.std.fs.exists(root + "/outside/BUILD.bazel"), False)
+    equal(ctx.std.fs.read_to_string(owned), "manually edited\n")
+    equal(run(check_only).stdout, "")
+    contains("usage:", run(["--", "--invalid"], 2).stderr)
+    contains("metadata failure", run(check_only, 29, dict(env, METADATA_FAILURE = "1")).stderr)
+
+    check(ctx, "ln", ["-s", env["VESPER_FIXTURE_LAUNCHER"], root + "/bin/bazelisk"], root)
+    contains("Bazel checked", run(check_only, variables = dict(env, METADATA_FAILURE = "1")).stdout)
+    ctx.std.fs.remove_file(root + "/bin/cargo")
+    contains("Bazel checked", run(check_only).stdout)
+    run(check_only, 43, dict(env, BAZEL_CODE = "43"))
+    contains("Cargo is required", run(status = 1).stderr)
+    ctx.std.fs.remove_file(root + "/bin/bazelisk")
+    contains("without working Cargo or Bazel", run(check_only, 1).stderr)
+
+def _test(ctx):
+    _selection(ctx)
+    _bazel(ctx)
+    return 0
+
+test_cargo_metadata = task(
+    kind = "cargo-metadata", group = ["ci", "tests"],
+    summary = "Check native port selection, feature guards and workspace Bazel generation",
+    implementation = _test,
+)
