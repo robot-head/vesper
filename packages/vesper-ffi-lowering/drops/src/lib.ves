@@ -20,8 +20,8 @@ const EFFECT_PREFIX: Str = "Ffi$";
 pub copy struct FnMeta {
     name: u32,
     fip: bool,
-    s0: u64,
-    s1: u64,
+    span_start: u64,
+    span_end: u64,
 }
 
 pub copy struct DropSite {
@@ -31,11 +31,11 @@ pub copy struct DropSite {
 }
 
 pub copy struct DropItem {
-    blk: u64,
+    block: u64,
     at: u64,
     // 0 = Value(v, ty), 1 = Place(root, path, ty), 2 = OtherFields(ty, keep)
     kind: u8,
-    v: u32,
+    value: u32,
     root: u32,
     path: u64,
     ty: u32,
@@ -56,55 +56,55 @@ pub struct FnPlan {
     before_term: ChunkSeq[DropItem],
 }
 
-fn push_str(inout out: ChunkSeq[u8], in s: Str) {
-    out.extend(in s.as_bytes());
+fn push_str(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
 }
 
 fn push_sym(inout out: ChunkSeq[u8], in names: Names, sym: u32) {
-    let a = names.start(sym);
-    let e = names.end(sym);
-    for i in a..e {
+    let lo = names.start(sym);
+    let hi = names.end(sym);
+    for i in lo..hi {
         out.push(u8_at(in names.text, i));
     }
 }
 
 fn sym_starts_with(in names: Names, sym: u32, in prefix: Str) -> bool {
-    let a = names.start(sym);
-    let e = names.end(sym);
-    let pb = prefix.as_bytes();
-    if wrapping_sub(e, a) < pb.len() {
+    let lo = names.start(sym);
+    let hi = names.end(sym);
+    let prefix_bytes = prefix.as_bytes();
+    if wrapping_sub(hi, lo) < prefix_bytes.len() {
         return false;
     }
-    for i in 0..pb.len() {
-        let ch = pb.try_get(i).unwrap_or(0);
-        if u8_at(in names.text, add(a, i)) != ch {
+    for i in 0..prefix_bytes.len() {
+        let expected = prefix_bytes.try_get(i).unwrap_or(0);
+        if u8_at(in names.text, add(lo, i)) != expected {
             return false;
         }
     }
     true
 }
 
-fn sym_has_byte(in names: Names, sym: u32, b: u8) -> bool {
-    let a = names.start(sym);
-    let e = names.end(sym);
-    for i in a..e {
-        if u8_at(in names.text, i) == b {
+fn sym_has_byte(in names: Names, sym: u32, byte: u8) -> bool {
+    let lo = names.start(sym);
+    let hi = names.end(sym);
+    for i in lo..hi {
+        if u8_at(in names.text, i) == byte {
             return true;
         }
     }
     false
 }
 
-fn sym_eq_str(in names: Names, sym: u32, in s: Str) -> bool {
-    let a = names.start(sym);
-    let e = names.end(sym);
-    let sb = s.as_bytes();
-    if wrapping_sub(e, a) != sb.len() {
+fn sym_eq_str(in names: Names, sym: u32, in text: Str) -> bool {
+    let lo = names.start(sym);
+    let hi = names.end(sym);
+    let text_bytes = text.as_bytes();
+    if wrapping_sub(hi, lo) != text_bytes.len() {
         return false;
     }
-    for i in 0..sb.len() {
-        let ch = sb.try_get(i).unwrap_or(0);
-        if u8_at(in names.text, add(a, i)) != ch {
+    for i in 0..text_bytes.len() {
+        let expected = text_bytes.try_get(i).unwrap_or(0);
+        if u8_at(in names.text, add(lo, i)) != expected {
             return false;
         }
     }
@@ -113,12 +113,12 @@ fn sym_eq_str(in names: Names, sym: u32, in s: Str) -> bool {
 
 // Interns `prefix + sym_text` in `names`.
 fn intern_prefixed(inout names: Names, in prefix: Str, sym: u32) -> u32 {
-    let pb = prefix.as_bytes();
-    let a = names.start(sym);
-    let e = names.end(sym);
-    let mut buf = ChunkSeq::with_capacity[u8](add(pb.len(), wrapping_sub(e, a)));
-    buf.extend(in pb);
-    for i in a..e {
+    let prefix_bytes = prefix.as_bytes();
+    let lo = names.start(sym);
+    let hi = names.end(sym);
+    let mut buf = ChunkSeq::with_capacity[u8](add(prefix_bytes.len(), wrapping_sub(hi, lo)));
+    buf.extend(in prefix_bytes);
+    for i in lo..hi {
         buf.push(u8_at(in names.text, i));
     }
     names.intern(in buf[0..buf.len()])
@@ -146,159 +146,159 @@ fn list_find_u32(in xs: ChunkSeq[u32], x: u32) -> u64 {
 
 // Parses the header of function `fi` and returns:
 // (params_count, params_start_op, result_ty, effects_ty, bounds_op, captures_op, nv_op, locals_op).
-fn fn_header_offsets(in p: Program, fi: u64) -> (u64, u64, u32, u32, u64, u64) {
-    let f = p.function(fi);
-    let mut pos = f.ha;
-    let np = p.op(pos);
+fn fn_header_offsets(in program: Program, fi: u64) -> (u64, u64, u32, u32, u64, u64) {
+    let func = program.function(fi);
+    let mut pos = func.ha;
+    let param_count = program.op(pos);
     pos = inc(pos);
     let params_op = pos;
-    for i in 0..np {
+    for i in 0..param_count {
         // name, pass, nproj
-        let nproj = p.op(add(pos, 2));
+        let nproj = program.op(add(pos, 2));
         // 3 + nproj + 3 (type, s0, s1)
         pos = add(pos, add(6, nproj));
     }
-    let result_ty = n32(p.op(pos));
-    let effects_ty = n32(p.op(inc(pos)));
+    let result_ty = n32(program.op(pos));
+    let effects_ty = n32(program.op(inc(pos)));
     pos = add(pos, 2);
     // bounds: nb, nb x (name, mode)
-    let nb = p.op(pos);
-    pos = add(inc(pos), wrapping_mul(nb, 2));
+    let bound_count = program.op(pos);
+    pos = add(inc(pos), wrapping_mul(bound_count, 2));
     // captures: nc, nc x name
-    let nc = p.op(pos);
-    pos = add(inc(pos), nc);
+    let capture_count = program.op(pos);
+    pos = add(inc(pos), capture_count);
     let nv_op = pos;
-    let nv = p.op(pos);
-    pos = add(inc(pos), wrapping_mul(nv, 2));
+    let value_count = program.op(pos);
+    pos = add(inc(pos), wrapping_mul(value_count, 2));
     let locals_op = pos;
-    (np, params_op, result_ty, effects_ty, nv_op, locals_op)
+    (param_count, params_op, result_ty, effects_ty, nv_op, locals_op)
 }
 
-fn fn_value_type(in p: Program, nv_op: u64, v: u32) -> u32 {
-    let nv = p.op(nv_op);
-    for i in 0..nv {
+fn fn_value_type(in program: Program, nv_op: u64, value: u32) -> u32 {
+    let value_count = program.op(nv_op);
+    for i in 0..value_count {
         let base = add(inc(nv_op), wrapping_mul(i, 2));
-        if n32(p.op(base)) == v {
-            return n32(p.op(inc(base)));
+        if n32(program.op(base)) == value {
+            return n32(program.op(inc(base)));
         }
     }
     NONE32
 }
 
 fn fn_local_or_param_type(
-    in p: Program,
-    np: u64,
+    in program: Program,
+    param_count: u64,
     params_op: u64,
     locals_op: u64,
     name: u32
 ) -> u32 {
     // locals first (matches drops.rs:324-327)
-    let nl = p.op(locals_op);
-    for i in 0..nl {
+    let local_count = program.op(locals_op);
+    for i in 0..local_count {
         let base = add(inc(locals_op), wrapping_mul(i, 2));
-        if n32(p.op(base)) == name {
-            return n32(p.op(inc(base)));
+        if n32(program.op(base)) == name {
+            return n32(program.op(inc(base)));
         }
     }
     let mut pos = params_op;
-    for i in 0..np {
-        let pname = n32(p.op(pos));
-        let nproj = p.op(add(pos, 2));
-        if pname == name {
-            return n32(p.op(add(pos, add(3, nproj))));
+    for i in 0..param_count {
+        let param_name = n32(program.op(pos));
+        let nproj = program.op(add(pos, 2));
+        if param_name == name {
+            return n32(program.op(add(pos, add(3, nproj))));
         }
         pos = add(pos, add(6, nproj));
     }
     NONE32
 }
 
-// Rebuilds `f`'s header with `value -> ty` inserted/updated in `values`.
-fn fn_set_value_type(inout p: Program, fi: u64, v: u32, ty: u32) {
-    let (_, _, _, _, nv_op, locals_op) = fn_header_offsets(in p, fi);
-    let nv = p.op(nv_op);
-    for i in 0..nv {
+// Rebuilds `func`'s header with `value -> ty` inserted/updated in `values`.
+fn fn_set_value_type(inout program: Program, fi: u64, value: u32, ty: u32) {
+    let (_, _, _, _, nv_op, locals_op) = fn_header_offsets(in program, fi);
+    let value_count = program.op(nv_op);
+    for i in 0..value_count {
         let base = add(inc(nv_op), wrapping_mul(i, 2));
-        if n32(p.op(base)) == v {
-            let _ = p.ops.try_set(inc(base), w(ty));
+        if n32(program.op(base)) == value {
+            let _ = program.ops.try_set(inc(base), w(ty));
             return;
         }
     }
     // Rebuild header in p.ops with (v, ty) appended in sorted ValueId order or at end.
-    let mut f = p.function(fi);
-    let new_ha = p.ops.len();
-    for pos in f.ha..inc(nv_op) {
+    let mut func = program.function(fi);
+    let new_header = program.ops.len();
+    for pos in func.ha..inc(nv_op) {
         if pos == nv_op {
-            p.put(inc(nv), Tag::Raw);
+            program.put(inc(value_count), Tag::Raw);
         } else {
-            p.put(p.op(pos), p.tag(pos));
+            program.put(program.op(pos), program.tag(pos));
         }
     }
     let mut inserted = false;
-    for i in 0..nv {
+    for i in 0..value_count {
         let base = add(inc(nv_op), wrapping_mul(i, 2));
-        let ev = n32(p.op(base));
-        if !inserted && v < ev {
-            p.put(w(v), Tag::Value);
-            p.put(w(ty), Tag::Type);
+        let entry_value = n32(program.op(base));
+        if !inserted && value < entry_value {
+            program.put(w(value), Tag::Value);
+            program.put(w(ty), Tag::Type);
             inserted = true;
         }
-        p.put(w(ev), Tag::Value);
-        p.put(p.op(inc(base)), Tag::Type);
+        program.put(w(entry_value), Tag::Value);
+        program.put(program.op(inc(base)), Tag::Type);
     }
     if !inserted {
-        p.put(w(v), Tag::Value);
-        p.put(w(ty), Tag::Type);
+        program.put(w(value), Tag::Value);
+        program.put(w(ty), Tag::Type);
     }
-    let tail_start = add(inc(nv_op), wrapping_mul(nv, 2));
-    let tail_end = add(f.ha, f.hn);
+    let tail_start = add(inc(nv_op), wrapping_mul(value_count, 2));
+    let tail_end = add(func.ha, func.hn);
     for pos in tail_start..tail_end {
-        p.put(p.op(pos), p.tag(pos));
+        program.put(program.op(pos), program.tag(pos));
     }
-    f.ha = new_ha;
-    f.hn = wrapping_sub(p.ops.len(), new_ha);
-    let _ = p.fns.try_set(fi, f);
+    func.ha = new_header;
+    func.hn = wrapping_sub(program.ops.len(), new_header);
+    let _ = program.fns.try_set(fi, func);
 }
 
-fn fn_max_value_id(in p: Program, fi: u64, nv_op: u64) -> u32 {
-    let mut m: u32 = 0;
+fn fn_max_value_id(in program: Program, fi: u64, nv_op: u64) -> u32 {
+    let mut max_id: u32 = 0;
     let mut has = false;
-    let nv = p.op(nv_op);
-    for i in 0..nv {
-        let v = n32(p.op(add(inc(nv_op), wrapping_mul(i, 2))));
-        if !has || v > m {
-            m = v;
+    let value_count = program.op(nv_op);
+    for i in 0..value_count {
+        let value = n32(program.op(add(inc(nv_op), wrapping_mul(i, 2))));
+        if !has || value > max_id {
+            max_id = value;
             has = true;
         }
     }
-    let f = p.function(fi);
-    for bi in f.b0..add(f.b0, f.bc) {
-        let b = p.block(bi);
-        let nbp = p.op(add(b.ha, add(3, wrapping_mul(p.op(inc(b.ha)), 2))));
+    let func = program.function(fi);
+    for bi in func.b0..add(func.b0, func.bc) {
+        let block = program.block(bi);
+        let nbp = program.op(add(block.ha, add(3, wrapping_mul(program.op(inc(block.ha)), 2))));
         // Actually read block header: entry_token(0), ni(1), ni*2 pairs, outgoing, np, np values
-        let ni = p.op(inc(b.ha));
-        let np_pos = add(b.ha, add(3, wrapping_mul(ni, 2)));
-        let np = p.op(np_pos);
-        for k in 0..np {
-            let v = n32(p.op(add(inc(np_pos), k)));
-            if !has || v > m {
-                m = v;
+        let incoming_count = program.op(inc(block.ha));
+        let param_pos = add(block.ha, add(3, wrapping_mul(incoming_count, 2)));
+        let param_count = program.op(param_pos);
+        for k in 0..param_count {
+            let value = n32(program.op(add(inc(param_pos), k)));
+            if !has || value > max_id {
+                max_id = value;
                 has = true;
             }
         }
-        for ii in b.i0..add(b.i0, b.ic) {
-            let inst = p.inst(ii);
-            if !has || inst.dest > m {
-                m = inst.dest;
+        for ii in block.i0..add(block.i0, block.ic) {
+            let inst = program.inst(ii);
+            if !has || inst.dest > max_id {
+                max_id = inst.dest;
                 has = true;
             }
         }
     }
-    if has { wrapping_add(m, 1) } else { 0 }
+    if has { wrapping_add(max_id, 1) } else { 0 }
 }
 
-fn find_fn_by_name(in p: Program, name: u32) -> u64 {
-    for fi in 0..p.fn_count() {
-        if p.function(fi).name == name {
+fn find_fn_by_name(in program: Program, name: u32) -> u64 {
+    for fi in 0..program.fn_count() {
+        if program.function(fi).name == name {
             return fi;
         }
     }
@@ -307,92 +307,94 @@ fn find_fn_by_name(in p: Program, name: u32) -> u64 {
 
 // ----- droppable handles & drop_function --------------------------------------
 
-// Returns parallel `(handles, effects)` for every `$drop$<H>` function in `p`.
-fn droppable(in c: Ctx, in p: Program) -> (ChunkSeq[u32], ChunkSeq[u32]) {
+// Returns parallel `(handles, effects)` for every `$drop$<H>` function in `program`.
+fn droppable(in ctx: Ctx, in program: Program) -> (ChunkSeq[u32], ChunkSeq[u32]) {
     let mut handles = ChunkSeq::new[u32]();
     let mut effects = ChunkSeq::new[u32]();
-    let plen: u64 = 6;
-    for fi in 0..p.fn_count() {
-        let f = p.function(fi);
-        if !sym_starts_with(in c.names, f.name, in DROP_PREFIX) {
+    let prefix_len: u64 = 6;
+    for fi in 0..program.fn_count() {
+        let func = program.function(fi);
+        if !sym_starts_with(in ctx.names, func.name, in DROP_PREFIX) {
             continue;
         }
-        let a = c.names.start(f.name);
-        let e = c.names.end(f.name);
+        let lo = ctx.names.start(func.name);
+        let hi = ctx.names.end(func.name);
         let mut has_dollar = false;
-        for i in add(a, plen)..e {
-            if u8_at(in c.names.text, i) == 36 {
+        for i in add(lo, prefix_len)..hi {
+            if u8_at(in ctx.names.text, i) == 36 {
                 has_dollar = true;
             }
         }
         if has_dollar {
             continue;
         }
-        let (_, _, _, effects_ty, _, _) = fn_header_offsets(in p, fi);
-        let row_id = c.types.node(effects_ty).r2;
-        let row = c.types.row(row_id);
+        let (_, _, _, effects_ty, _, _) = fn_header_offsets(in program, fi);
+        let row_id = ctx.types.node(effects_ty).r2;
+        let row = ctx.types.row(row_id);
         if row.n == 0 {
             continue;
         }
-        let eff_name = c.types.effect_at(w(row.a)).name;
+        let eff_name = ctx.types.effect_at(w(row.a)).name;
         // Intern handle name directly from slice (no mutation needed if we pass inout names,
         // or we compare bytes; here we intern into a copy or pass inout c.names).
         // Note: handled in caller with `inout c`.
-        handles.push(f.name);
+        handles.push(func.name);
         effects.push(eff_name);
     }
     (handles, effects)
 }
 
-fn droppable_resolved(inout c: Ctx, in p: Program) -> (ChunkSeq[u32], ChunkSeq[u32]) {
-    let (raw_fns, effects) = droppable(in c, in p);
+fn droppable_resolved(inout ctx: Ctx, in program: Program) -> (ChunkSeq[u32], ChunkSeq[u32]) {
+    let (raw_fns, effects) = droppable(in ctx, in program);
     let mut handles = ChunkSeq::new[u32]();
-    let plen: u64 = 6;
+    let prefix_len: u64 = 6;
     for i in 0..raw_fns.len() {
         let fn_sym = u32_at(in raw_fns, i);
-        let a = c.names.start(fn_sym);
-        let e = c.names.end(fn_sym);
+        let lo = ctx.names.start(fn_sym);
+        let hi = ctx.names.end(fn_sym);
         let mut buf = ChunkSeq::new[u8]();
-        for k in add(a, plen)..e {
-            buf.push(u8_at(in c.names.text, k));
+        for k in add(lo, prefix_len)..hi {
+            buf.push(u8_at(in ctx.names.text, k));
         }
-        handles.push(c.names.intern(in buf[0..buf.len()]));
+        handles.push(ctx.names.intern(in buf[0..buf.len()]));
     }
     (handles, effects)
 }
 
-fn drop_function(inout c: Ctx, ty: u32) -> u32 {
-    let nd = c.types.node(ty);
-    if nd.kind != TyKind::Named {
+fn drop_function(inout ctx: Ctx, ty: u32) -> u32 {
+    let node = ctx.types.node(ty);
+    if node.kind != TyKind::Named {
         return NONE32;
     }
-    if nd.n == 0 {
-        return intern_prefixed(inout c.names, in DROP_PREFIX, nd.name);
+    if node.n == 0 {
+        return intern_prefixed(inout ctx.names, in DROP_PREFIX, node.name);
     }
-    if sym_eq_str(in c.names, nd.name, in "Option") && nd.n == 1 {
-        let inner = c.types.arg(ty, 0);
-        let in_nd = c.types.node(inner);
-        if in_nd.kind == TyKind::Named && in_nd.n == 0 {
-            return intern_prefixed(inout c.names, in DROP_OPTION_PREFIX, in_nd.name);
+    if sym_eq_str(in ctx.names, node.name, in "Option") && node.n == 1 {
+        let inner = ctx.types.arg(ty, 0);
+        let inner_node = ctx.types.node(inner);
+        if inner_node.kind == TyKind::Named && inner_node.n == 0 {
+            return intern_prefixed(inout ctx.names, in DROP_OPTION_PREFIX, inner_node.name);
         }
     }
     NONE32
 }
 
 // Whether `ty` is `H` or `Option[H]` for some `H` in `handles`; returns `H` or `NONE32`.
-fn direct_or_option_handle(in c: Ctx, ty: u32, in handles: ChunkSeq[u32]) -> u32 {
-    let nd = c.types.node(ty);
-    if nd.kind != TyKind::Named {
+fn direct_or_option_handle(in ctx: Ctx, ty: u32, in handles: ChunkSeq[u32]) -> u32 {
+    let node = ctx.types.node(ty);
+    if node.kind != TyKind::Named {
         return NONE32;
     }
-    if nd.n == 0 && list_has_u32(in handles, nd.name) {
-        return nd.name;
+    if node.n == 0 && list_has_u32(in handles, node.name) {
+        return node.name;
     }
-    if sym_eq_str(in c.names, nd.name, in "Option") && nd.n == 1 {
-        let inner = c.types.arg(ty, 0);
-        let in_nd = c.types.node(inner);
-        if in_nd.kind == TyKind::Named && in_nd.n == 0 && list_has_u32(in handles, in_nd.name) {
-            return in_nd.name;
+    if sym_eq_str(in ctx.names, node.name, in "Option") && node.n == 1 {
+        let inner = ctx.types.arg(ty, 0);
+        let inner_node = ctx.types.node(inner);
+        if inner_node.kind == TyKind::Named
+            && inner_node.n == 0
+            && list_has_u32(in handles, inner_node.name) {
+            return inner_node.name;
         }
     }
     NONE32
@@ -400,33 +402,33 @@ fn direct_or_option_handle(in c: Ctx, ty: u32, in handles: ChunkSeq[u32]) -> u32
 
 // ----- holds ------------------------------------------------------------------
 
-fn holds(inout c: Ctx, ty: u32, in handles: ChunkSeq[u32], inout seen: ChunkSeq[u32]) -> bool {
-    let nd = c.types.node(ty);
-    if nd.kind == TyKind::Named {
-        if list_has_u32(in handles, nd.name) {
+fn holds(inout ctx: Ctx, ty: u32, in handles: ChunkSeq[u32], inout seen: ChunkSeq[u32]) -> bool {
+    let node = ctx.types.node(ty);
+    if node.kind == TyKind::Named {
+        if list_has_u32(in handles, node.name) {
             return true;
         }
-        let ar = c.types.arity(ty);
-        for i in 0..ar {
-            if holds(inout c, c.types.arg(ty, i), in handles, inout seen) {
+        let arity = ctx.types.arity(ty);
+        for i in 0..arity {
+            if holds(inout ctx, ctx.types.arg(ty, i), in handles, inout seen) {
                 return true;
             }
         }
-        if list_has_u32(in seen, nd.name) {
+        if list_has_u32(in seen, node.name) {
             return false;
         }
-        seen.push(nd.name);
-        let ai = c.world.lookup(nd.name);
+        seen.push(node.name);
+        let adt_index = ctx.world.lookup(node.name);
         let mut found = false;
-        if ai != NONE32 {
-            let a = c.world.adt(ai);
-            let vars = c.world.vars_of(in c.types, a, ty);
-            for vi in w(a.va)..add(w(a.va), w(a.vn)) {
-                let v = c.world.variant(vi);
-                for fi in w(v.fa)..add(w(v.fa), w(v.fc)) {
-                    let f = c.world.field(fi);
-                    let sub = substitute(inout c.types, f.ty, in vars);
-                    if holds(inout c, sub, in handles, inout seen) {
+        if adt_index != NONE32 {
+            let adt = ctx.world.adt(adt_index);
+            let vars = ctx.world.vars_of(in ctx.types, adt, ty);
+            for vi in w(adt.va)..add(w(adt.va), w(adt.vn)) {
+                let variant = ctx.world.variant(vi);
+                for fi in w(variant.fa)..add(w(variant.fa), w(variant.fc)) {
+                    let field = ctx.world.field(fi);
+                    let sub = substitute(inout ctx.types, field.ty, in vars);
+                    if holds(inout ctx, sub, in handles, inout seen) {
                         found = true;
                         break;
                     }
@@ -441,10 +443,10 @@ fn holds(inout c: Ctx, ty: u32, in handles: ChunkSeq[u32], inout seen: ChunkSeq[
         }
         return found;
     }
-    if nd.kind == TyKind::Tuple {
-        let ar = c.types.arity(ty);
-        for i in 0..ar {
-            if holds(inout c, c.types.arg(ty, i), in handles, inout seen) {
+    if node.kind == TyKind::Tuple {
+        let arity = ctx.types.arity(ty);
+        for i in 0..arity {
+            if holds(inout ctx, ctx.types.arg(ty, i), in handles, inout seen) {
                 return true;
             }
         }
@@ -455,9 +457,9 @@ fn holds(inout c: Ctx, ty: u32, in handles: ChunkSeq[u32], inout seen: ChunkSeq[
 // ----- pattern helpers --------------------------------------------------------
 
 // Skips one pattern in `p.ops` from `pos` and returns the next op index.
-fn skip_pattern(in p: Program, start_pos: u64) -> u64 {
+fn skip_pattern(in program: Program, start_pos: u64) -> u64 {
     let mut pos = start_pos;
-    let kind = n32(p.op(pos));
+    let kind = n32(program.op(pos));
     pos = add(pos, 3);
     if kind == Pat::Wild {
         return pos;
@@ -470,37 +472,41 @@ fn skip_pattern(in p: Program, start_pos: u64) -> u64 {
         return add(pos, 3);
     }
     if kind == Pat::Tuple {
-        let n = p.op(pos);
+        let n = program.op(pos);
         pos = inc(pos);
         for i in 0..n {
-            pos = skip_pattern(in p, pos);
+            pos = skip_pattern(in program, pos);
         }
         return pos;
     }
     if kind == Pat::Constructor {
         // name, named, n, n x (field_name, pattern)
-        let n = p.op(add(pos, 2));
+        let n = program.op(add(pos, 2));
         pos = add(pos, 3);
         for i in 0..n {
             pos = inc(pos);
-            pos = skip_pattern(in p, pos);
+            pos = skip_pattern(in program, pos);
         }
         return pos;
     }
     pos
 }
 
-fn collect_pattern_bound_names(in p: Program, start_pos: u64, inout names: ChunkSeq[u32]) -> u64 {
+fn collect_pattern_bound_names(
+    in program: Program,
+    start_pos: u64,
+    inout names: ChunkSeq[u32]
+) -> u64 {
     let mut pos = start_pos;
-    let kind = n32(p.op(pos));
+    let kind = n32(program.op(pos));
     pos = add(pos, 3);
     if kind == Pat::Wild {
         return pos;
     }
     if kind == Pat::Bind {
-        let nm = n32(p.op(pos));
-        if !list_has_u32(in names, nm) {
-            names.push(nm);
+        let name = n32(program.op(pos));
+        if !list_has_u32(in names, name) {
+            names.push(name);
         }
         return inc(pos);
     }
@@ -508,19 +514,19 @@ fn collect_pattern_bound_names(in p: Program, start_pos: u64, inout names: Chunk
         return add(pos, 3);
     }
     if kind == Pat::Tuple {
-        let n = p.op(pos);
+        let n = program.op(pos);
         pos = inc(pos);
         for i in 0..n {
-            pos = collect_pattern_bound_names(in p, pos, inout names);
+            pos = collect_pattern_bound_names(in program, pos, inout names);
         }
         return pos;
     }
     if kind == Pat::Constructor {
-        let n = p.op(add(pos, 2));
+        let n = program.op(add(pos, 2));
         pos = add(pos, 3);
         for i in 0..n {
             pos = inc(pos);
-            pos = collect_pattern_bound_names(in p, pos, inout names);
+            pos = collect_pattern_bound_names(in program, pos, inout names);
         }
         return pos;
     }
@@ -529,64 +535,68 @@ fn collect_pattern_bound_names(in p: Program, start_pos: u64, inout names: Chunk
 
 // ----- borrowed_scrutinees ----------------------------------------------------
 
-fn borrowed_scrutinees(in c: Ctx, in p: Program, fi: u64) -> ChunkSeq[u32] {
-    let f = p.function(fi);
+fn borrowed_scrutinees(in ctx: Ctx, in program: Program, fi: u64) -> ChunkSeq[u32] {
+    let func = program.function(fi);
     let mut matched = ChunkSeq::new[u32]();
-    for bi in f.b0..add(f.b0, f.bc) {
-        let b = p.block(bi);
-        if b.term == Term::Match {
-            let v = n32(p.op(b.ta));
-            if !list_has_u32(in matched, v) {
-                matched.push(v);
+    for bi in func.b0..add(func.b0, func.bc) {
+        let block = program.block(bi);
+        if block.term == Term::Match {
+            let scrutinee = n32(program.op(block.ta));
+            if !list_has_u32(in matched, scrutinee) {
+                matched.push(scrutinee);
             }
         }
     }
-    let (np, params_op, _, _, _, _) = fn_header_offsets(in p, fi);
-    let mut bnames = ChunkSeq::new[u32]();
+    let (param_count, params_op, _, _, _, _) = fn_header_offsets(in program, fi);
+    let mut bound_names = ChunkSeq::new[u32]();
     let mut pos = params_op;
-    for i in 0..np {
-        let pname = n32(p.op(pos));
-        let pass = p.op(inc(pos));
-        let nproj = p.op(add(pos, 2));
-        if pass != w(TyPass::Sink) && !list_has_u32(in bnames, pname) {
-            bnames.push(pname);
+    for i in 0..param_count {
+        let param_name = n32(program.op(pos));
+        let pass = program.op(inc(pos));
+        let nproj = program.op(add(pos, 2));
+        if pass != w(TyPass::Sink) && !list_has_u32(in bound_names, param_name) {
+            bound_names.push(param_name);
         }
         pos = add(pos, add(6, nproj));
     }
     let mut out = ChunkSeq::new[u32]();
     loop {
-        let bn = bnames.len();
-        let on = out.len();
-        for bi in f.b0..add(f.b0, f.bc) {
-            let b = p.block(bi);
-            for ii in b.i0..add(b.i0, b.ic) {
-                let inst = p.inst(ii);
+        let bound_len = bound_names.len();
+        let out_len = out.len();
+        for bi in func.b0..add(func.b0, func.bc) {
+            let block = program.block(bi);
+            for ii in block.i0..add(block.i0, block.ic) {
+                let inst = program.inst(ii);
                 if inst.op == Op::Read {
-                    let root = n32(p.op(inst.a));
+                    let root = n32(program.op(inst.a));
                     if list_has_u32(in matched, inst.dest)
-                        && list_has_u32(in bnames, root)
+                        && list_has_u32(in bound_names, root)
                         && !list_has_u32(in out, inst.dest) {
                         out.push(inst.dest);
                     }
                 } else if inst.op == Op::Seq {
-                    let row = p.pool_row(p.op(inst.a));
+                    let row = program.pool_row(program.op(inst.a));
                     if (
-                        sym_eq_str(in c.names, row.label, in "TryGet")
-                            || sym_eq_str(in c.names, row.label, in "Hoisted(TryGet)")
+                        sym_eq_str(in ctx.names, row.label, in "TryGet")
+                            || sym_eq_str(in ctx.names, row.label, in "Hoisted(TryGet)")
                     )
                         && list_has_u32(in matched, inst.dest)
                         && !list_has_u32(in out, inst.dest) {
                         out.push(inst.dest);
                     }
                 } else if inst.op == Op::Bind {
-                    let val = n32(p.op(inst.a));
-                    if list_has_u32(in out, val) {
-                        let _ = collect_pattern_bound_names(in p, inc(inst.a), inout bnames);
+                    let bound_value = n32(program.op(inst.a));
+                    if list_has_u32(in out, bound_value) {
+                        let _ = collect_pattern_bound_names(
+                            in program,
+                            inc(inst.a),
+                            inout bound_names
+                        );
                     }
                 }
             }
         }
-        if bnames.len() == bn && out.len() == on {
+        if bound_names.len() == bound_len && out.len() == out_len {
             return out;
         }
     }
@@ -595,63 +605,67 @@ fn borrowed_scrutinees(in c: Ctx, in p: Program, fi: u64) -> ChunkSeq[u32] {
 // ----- release_wildcards ------------------------------------------------------
 
 fn release_wildcards(
-    inout c: Ctx,
-    inout p: Program,
+    inout ctx: Ctx,
+    inout program: Program,
     fi: u64,
     in handles: ChunkSeq[u32],
     in effects: ChunkSeq[u32],
     inout sites: ChunkSeq[DropSite]
 ) {
-    let borrowed = borrowed_scrutinees(in c, in p, fi);
-    let f = p.function(fi);
-    let (_, _, _, _, nv_op, _) = fn_header_offsets(in p, fi);
-    for bi in f.b0..add(f.b0, f.bc) {
-        let b = p.block(bi);
-        for ii in b.i0..add(b.i0, b.ic) {
-            let mut inst = p.inst(ii);
+    let borrowed = borrowed_scrutinees(in ctx, in program, fi);
+    let func = program.function(fi);
+    let (_, _, _, _, nv_op, _) = fn_header_offsets(in program, fi);
+    for bi in func.b0..add(func.b0, func.bc) {
+        let block = program.block(bi);
+        for ii in block.i0..add(block.i0, block.ic) {
+            let mut inst = program.inst(ii);
             if inst.op != Op::Bind {
                 continue;
             }
-            let val = n32(p.op(inst.a));
-            let pat_kind = n32(p.op(inc(inst.a)));
-            if pat_kind != Pat::Wild || list_has_u32(in borrowed, val) {
+            let value = n32(program.op(inst.a));
+            let pat_kind = n32(program.op(inc(inst.a)));
+            if pat_kind != Pat::Wild || list_has_u32(in borrowed, value) {
                 continue;
             }
-            let ty = fn_value_type(in p, nv_op, val);
+            let ty = fn_value_type(in program, nv_op, value);
             if ty == NONE32 {
                 continue;
             }
-            let handle = direct_or_option_handle(in c, ty, in handles);
+            let handle = direct_or_option_handle(in ctx, ty, in handles);
             if handle == NONE32 {
                 continue;
             }
-            let callee = drop_function(inout c, ty);
+            let callee = drop_function(inout ctx, ty);
             if callee == NONE32 {
                 continue;
             }
-            let tfi = find_fn_by_name(in p, callee);
-            if tfi == NONE64 {
+            let drop_fi = find_fn_by_name(in program, callee);
+            if drop_fi == NONE64 {
                 continue;
             }
-            let (_, _, target_res, _, _, _) = fn_header_offsets(in p, tfi);
-            let op_start = p.ops.len();
-            p.put(w(callee), Tag::Name);
-            p.put(1, Tag::Raw);
-            p.put(w(TyPass::Sink), Tag::Raw);
-            p.put(w(val), Tag::Value);
-            p.put(0, Tag::OptName);
-            p.put(0, Tag::Path);
-            p.put(0, Tag::Raw);
-            p.put(0, Tag::OptName);
+            let (_, _, target_res, _, _, _) = fn_header_offsets(in program, drop_fi);
+            let op_start = program.ops.len();
+            program.put(w(callee), Tag::Name);
+            program.put(1, Tag::Raw);
+            program.put(w(TyPass::Sink), Tag::Raw);
+            program.put(w(value), Tag::Value);
+            program.put(0, Tag::OptName);
+            program.put(0, Tag::Path);
+            program.put(0, Tag::Raw);
+            program.put(0, Tag::OptName);
             inst.op = Op::Call;
             inst.a = op_start;
             inst.n = 8;
             inst.ty = target_res;
-            let _ = p.insts.try_set(ii, inst);
-            fn_set_value_type(inout p, fi, inst.dest, target_res);
-            let hidx = list_find_u32(in handles, handle);
+            let _ = program.insts.try_set(ii, inst);
+            fn_set_value_type(inout program, fi, inst.dest, target_res);
+            let handle_index = list_find_u32(in handles, handle);
             sites.push(
-                DropSite { graph: f.name, handle: handle, effect: u32_at(in effects, hidx) }
+                DropSite {
+                    graph: func.name,
+                    handle: handle,
+                    effect: u32_at(in effects, handle_index)
+                }
             );
         }
     }
@@ -660,18 +674,18 @@ fn release_wildcards(
 // ----- refuse_unplaced --------------------------------------------------------
 
 fn wild_handle(
-    inout c: Ctx,
-    in p: Program,
+    inout ctx: Ctx,
+    in program: Program,
     start_pos: u64,
     ty: u32,
     in handles: ChunkSeq[u32]
 ) -> (bool, u64) {
     let mut pos = start_pos;
-    let kind = n32(p.op(pos));
+    let kind = n32(program.op(pos));
     pos = add(pos, 3);
     if kind == Pat::Wild {
         let mut seen = ChunkSeq::new[u32]();
-        return (holds(inout c, ty, in handles, inout seen), pos);
+        return (holds(inout ctx, ty, in handles, inout seen), pos);
     }
     if kind == Pat::Bind {
         return (false, inc(pos));
@@ -680,64 +694,64 @@ fn wild_handle(
         return (false, add(pos, 3));
     }
     if kind == Pat::Tuple {
-        let n = p.op(pos);
+        let n = program.op(pos);
         pos = inc(pos);
-        let tnd = c.types.node(ty);
+        let ty_node = ctx.types.node(ty);
         let mut any = false;
         for i in 0..n {
-            let sub_ty = if tnd.kind == TyKind::Tuple && i < c.types.arity(ty) {
-                c.types.arg(ty, i)
+            let sub_ty = if ty_node.kind == TyKind::Tuple && i < ctx.types.arity(ty) {
+                ctx.types.arg(ty, i)
             } else {
-                c.types.unit
+                ctx.types.unit
             };
-            let (hit, next) = wild_handle(inout c, in p, pos, sub_ty, in handles);
+            let (hit, next) = wild_handle(inout ctx, in program, pos, sub_ty, in handles);
             pos = next;
-            if tnd.kind == TyKind::Tuple && hit {
+            if ty_node.kind == TyKind::Tuple && hit {
                 any = true;
             }
         }
         return (any, pos);
     }
     if kind == Pat::Constructor {
-        let cname = n32(p.op(pos));
-        let _named = p.op(inc(pos));
-        let n = p.op(add(pos, 2));
+        let ctor_name = n32(program.op(pos));
+        let _named = program.op(inc(pos));
+        let n = program.op(add(pos, 2));
         pos = add(pos, 3);
-        let tnd = c.types.node(ty);
-        if tnd.kind != TyKind::Named {
+        let ty_node = ctx.types.node(ty);
+        if ty_node.kind != TyKind::Named {
             for i in 0..n {
                 pos = inc(pos);
-                pos = skip_pattern(in p, pos);
+                pos = skip_pattern(in program, pos);
             }
             return (false, pos);
         }
-        let packed = constructor(in c.world, NONE32, cname);
+        let packed = constructor(in ctx.world, NONE32, ctor_name);
         if packed == NONE64 {
             for i in 0..n {
                 pos = inc(pos);
-                pos = skip_pattern(in p, pos);
+                pos = skip_pattern(in program, pos);
             }
             return (false, pos);
         }
-        let ai = wrapping_u32(packed >> 32);
-        let vi = packed & 4294967295;
-        let a = c.world.adt(ai);
-        let v = c.world.variant(vi);
-        let vars = c.world.vars_of(in c.types, a, ty);
+        let adt_index = wrapping_u32(packed >> 32);
+        let variant_index = packed & 4294967295;
+        let adt = ctx.world.adt(adt_index);
+        let variant = ctx.world.variant(variant_index);
+        let vars = ctx.world.vars_of(in ctx.types, adt, ty);
         let mut any = false;
         for i in 0..n {
-            let fname = n32(p.op(pos));
+            let field_name = n32(program.op(pos));
             pos = inc(pos);
-            let fty = c.world.find_field(v, fname);
-            if fty != NONE32 {
-                let sub_ty = substitute(inout c.types, fty, in vars);
-                let (hit, next) = wild_handle(inout c, in p, pos, sub_ty, in handles);
+            let field_ty = ctx.world.find_field(variant, field_name);
+            if field_ty != NONE32 {
+                let sub_ty = substitute(inout ctx.types, field_ty, in vars);
+                let (hit, next) = wild_handle(inout ctx, in program, pos, sub_ty, in handles);
                 pos = next;
                 if hit {
                     any = true;
                 }
             } else {
-                pos = skip_pattern(in p, pos);
+                pos = skip_pattern(in program, pos);
             }
         }
         return (any, pos);
@@ -746,28 +760,34 @@ fn wild_handle(
 }
 
 fn refuse_unplaced(
-    inout c: Ctx,
-    in p: Program,
+    inout ctx: Ctx,
+    in program: Program,
     fi: u64,
     in handles: ChunkSeq[u32],
     inout err: ChunkSeq[u8]
 ) -> bool {
-    let borrowed = borrowed_scrutinees(in c, in p, fi);
-    let f = p.function(fi);
-    let (np, params_op, _, _, nv_op, locals_op) = fn_header_offsets(in p, fi);
-    for bi in f.b0..add(f.b0, f.bc) {
-        let b = p.block(bi);
-        for ii in b.i0..add(b.i0, b.ic) {
-            let inst = p.inst(ii);
+    let borrowed = borrowed_scrutinees(in ctx, in program, fi);
+    let func = program.function(fi);
+    let (param_count, params_op, _, _, nv_op, locals_op) = fn_header_offsets(in program, fi);
+    for bi in func.b0..add(func.b0, func.bc) {
+        let block = program.block(bi);
+        for ii in block.i0..add(block.i0, block.ic) {
+            let inst = program.inst(ii);
             if inst.op == Op::Bind {
-                let val = n32(p.op(inst.a));
-                if !list_has_u32(in borrowed, val) {
-                    let ty = fn_value_type(in p, nv_op, val);
+                let value = n32(program.op(inst.a));
+                if !list_has_u32(in borrowed, value) {
+                    let ty = fn_value_type(in program, nv_op, value);
                     if ty != NONE32 {
-                        let (hit, _) = wild_handle(inout c, in p, inc(inst.a), ty, in handles);
+                        let (hit, _) = wild_handle(
+                            inout ctx,
+                            in program,
+                            inc(inst.a),
+                            ty,
+                            in handles
+                        );
                         if hit {
                             err.push(39);
-                            push_sym(inout err, in c.names, f.name);
+                            push_sym(inout err, in ctx.names, func.name);
                             push_str(
                                 inout err,
                                 in "' discards a handle with a drop import with `_` inside a pattern; bind it to a name so it is released"
@@ -778,26 +798,32 @@ fn refuse_unplaced(
                 }
             } else if inst.op == Op::Closure {
                 // operands: pool(0), captures(1): nc, nc x (name, name), moves: nm, nm x (root, path)
-                let nc = p.op(inc(inst.a));
-                let moves_pos = add(add(inst.a, 2), wrapping_mul(nc, 2));
-                let nm = p.op(moves_pos);
-                for m in 0..nm {
-                    let mpos = add(inc(moves_pos), wrapping_mul(m, 2));
-                    let root = n32(p.op(mpos));
-                    let path_idx = p.op(inc(mpos));
-                    let base_ty = fn_local_or_param_type(in p, np, params_op, locals_op, root);
+                let capture_count = program.op(inc(inst.a));
+                let moves_pos = add(add(inst.a, 2), wrapping_mul(capture_count, 2));
+                let move_count = program.op(moves_pos);
+                for move_index in 0..move_count {
+                    let move_pos = add(inc(moves_pos), wrapping_mul(move_index, 2));
+                    let root = n32(program.op(move_pos));
+                    let path_idx = program.op(inc(move_pos));
+                    let base_ty = fn_local_or_param_type(
+                        in program,
+                        param_count,
+                        params_op,
+                        locals_op,
+                        root
+                    );
                     if base_ty == NONE32 {
                         continue;
                     }
-                    let path_row = p.path(path_idx);
+                    let path_row = program.path(path_idx);
                     let mut ty = base_ty;
                     let mut ok = true;
                     for k in 0..path_row.n {
-                        let fname = p.path_name(path_idx, k);
+                        let fname = program.path_name(path_idx, k);
                         let next_ty = field_step(
-                            inout c.types,
-                            inout c.names,
-                            in c.world,
+                            inout ctx.types,
+                            inout ctx.names,
+                            in ctx.world,
                             ty,
                             fname,
                             false
@@ -810,9 +836,9 @@ fn refuse_unplaced(
                     }
                     if ok {
                         let mut seen = ChunkSeq::new[u32]();
-                        if holds(inout c, ty, in handles, inout seen) {
+                        if holds(inout ctx, ty, in handles, inout seen) {
                             err.push(39);
-                            push_sym(inout err, in c.names, f.name);
+                            push_sym(inout err, in ctx.names, func.name);
                             push_str(
                                 inout err,
                                 in "' moves a handle with a drop import into a closure; a dropped closure does not release it, so pass the handle to the closure's call instead"
@@ -829,57 +855,67 @@ fn refuse_unplaced(
 
 // ----- split_edge & apply -----------------------------------------------------
 
-fn split_edge(inout p: Program, fi: u64, from_rel: u64, to_rel: u64) {
-    let mut f = p.function(fi);
-    let at_rel = f.bc;
-    let from_abs = add(f.b0, from_rel);
-    let to_abs = add(f.b0, to_rel);
-    let mut from_blk = p.block(from_abs);
+fn split_edge(inout program: Program, fi: u64, from_rel: u64, to_rel: u64) {
+    let mut func = program.function(fi);
+    let at_rel = func.bc;
+    let from_abs = add(func.b0, from_rel);
+    let to_abs = add(func.b0, to_rel);
+    let mut from_blk = program.block(from_abs);
     // Outgoing token of `from_blk`: header word at 2 + ni * 2
-    let ni = p.op(inc(from_blk.ha));
-    let token = p.op(add(from_blk.ha, add(2, wrapping_mul(ni, 2))));
+    let incoming_count = program.op(inc(from_blk.ha));
+    let token = program.op(add(from_blk.ha, add(2, wrapping_mul(incoming_count, 2))));
     // Build new block header: entry_token, 1, (from_rel, token), outgoing_token, 0 params
-    let ha = p.ops.len();
-    p.put(token, Tag::Raw);
-    p.put(1, Tag::Raw);
-    p.put(from_rel, Tag::Block);
-    p.put(token, Tag::Raw);
-    p.put(token, Tag::Raw);
-    p.put(0, Tag::Raw);
-    let hn = wrapping_sub(p.ops.len(), ha);
+    let header_start = program.ops.len();
+    program.put(token, Tag::Raw);
+    program.put(1, Tag::Raw);
+    program.put(from_rel, Tag::Block);
+    program.put(token, Tag::Raw);
+    program.put(token, Tag::Raw);
+    program.put(0, Tag::Raw);
+    let header_len = wrapping_sub(program.ops.len(), header_start);
     // Terminator: Jump { block: to_rel, args: [] }
-    let ta = p.ops.len();
-    p.put(to_rel, Tag::Block);
-    p.put(0, Tag::Raw);
-    let tn = wrapping_sub(p.ops.len(), ta);
-    // Ensure `f`'s blocks are contiguous at the end of `p.blocks` before pushing.
-    let new_b0 = p.blocks.len();
-    if add(f.b0, f.bc) != new_b0 {
-        for bi in f.b0..add(f.b0, f.bc) {
-            p.blocks.push(p.block(bi));
+    let term_start = program.ops.len();
+    program.put(to_rel, Tag::Block);
+    program.put(0, Tag::Raw);
+    let term_len = wrapping_sub(program.ops.len(), term_start);
+    // Ensure `func`'s blocks are contiguous at the end of `p.blocks` before pushing.
+    let new_b0 = program.blocks.len();
+    if add(func.b0, func.bc) != new_b0 {
+        for bi in func.b0..add(func.b0, func.bc) {
+            program.blocks.push(program.block(bi));
         }
-        f.b0 = new_b0;
+        func.b0 = new_b0;
     }
-    p.blocks.push(BlockRow { ha: ha, hn: hn, i0: 0, ic: 0, term: Term::Jump, ta: ta, tn: tn });
-    f.bc = inc(f.bc);
-    let _ = p.fns.try_set(fi, f);
-    // Rewrite `from_blk`'s terminator target `to_rel -> at_rel`.
-    let from_abs_new = add(f.b0, from_rel);
-    from_blk = p.block(from_abs_new);
-    if from_blk.term == Term::Branch {
-        if p.op(inc(from_blk.ta)) == to_rel {
-            let _ = p.ops.try_set(inc(from_blk.ta), at_rel);
+    program.blocks.push(
+        BlockRow {
+            ha: header_start,
+            hn: header_len,
+            i0: 0,
+            ic: 0,
+            term: Term::Jump,
+            ta: term_start,
+            tn: term_len
         }
-        if p.op(add(from_blk.ta, 2)) == to_rel {
-            let _ = p.ops.try_set(add(from_blk.ta, 2), at_rel);
+    );
+    func.bc = inc(func.bc);
+    let _ = program.fns.try_set(fi, func);
+    // Rewrite `from_blk`'s terminator target `to_rel -> at_rel`.
+    let from_abs_new = add(func.b0, from_rel);
+    from_blk = program.block(from_abs_new);
+    if from_blk.term == Term::Branch {
+        if program.op(inc(from_blk.ta)) == to_rel {
+            let _ = program.ops.try_set(inc(from_blk.ta), at_rel);
+        }
+        if program.op(add(from_blk.ta, 2)) == to_rel {
+            let _ = program.ops.try_set(add(from_blk.ta, 2), at_rel);
         }
     } else if from_blk.term == Term::Match {
-        let na = p.op(inc(from_blk.ta));
+        let arm_count = program.op(inc(from_blk.ta));
         let mut pos = add(from_blk.ta, 2);
-        for i in 0..na {
-            pos = skip_pattern(in p, pos);
-            if p.op(pos) == to_rel {
-                let _ = p.ops.try_set(pos, at_rel);
+        for i in 0..arm_count {
+            pos = skip_pattern(in program, pos);
+            if program.op(pos) == to_rel {
+                let _ = program.ops.try_set(pos, at_rel);
             }
             pos = inc(pos);
         }
@@ -887,69 +923,69 @@ fn split_edge(inout p: Program, fi: u64, from_rel: u64, to_rel: u64) {
 }
 
 fn emit_drop(
-    inout c: Ctx,
-    inout p: Program,
+    inout ctx: Ctx,
+    inout program: Program,
     fi: u64,
-    in d: DropItem,
+    in item: DropItem,
     in handles: ChunkSeq[u32],
     in effects: ChunkSeq[u32],
     inout next_val: u32,
     inout sites: ChunkSeq[DropSite],
     inout err: ChunkSeq[u8]
 ) -> bool {
-    let f = p.function(fi);
-    if d.kind == 2 {
+    let func = program.function(fi);
+    if item.kind == 2 {
         push_str(inout err, in "'");
-        push_sym(inout err, in c.names, f.name);
+        push_sym(inout err, in ctx.names, func.name);
         push_str(inout err, in "' drops the fields of a `");
-        display(in c.types, in c.names, d.ty, inout err);
+        display(in ctx.types, in ctx.names, item.ty, inout err);
         push_str(inout err, in "` other than `");
-        push_sym(inout err, in c.names, d.keep);
+        push_sym(inout err, in ctx.names, item.keep);
         push_str(
             inout err,
             in "`, and one holds a handle with a drop import; bind the value and move each handle out"
         );
         return false;
     }
-    let handle = direct_or_option_handle(in c, d.ty, in handles);
+    let handle = direct_or_option_handle(in ctx, item.ty, in handles);
     if handle == NONE32 {
         push_str(inout err, in "'");
-        push_sym(inout err, in c.names, f.name);
+        push_sym(inout err, in ctx.names, func.name);
         push_str(inout err, in "' drops a `");
-        display(in c.types, in c.names, d.ty, inout err);
+        display(in ctx.types, in ctx.names, item.ty, inout err);
         push_str(
             inout err,
             in "` holding a handle with a drop import; only the handle itself or an `Option` of it is released implicitly, so move the handle out first"
         );
         return false;
     }
-    let callee = drop_function(inout c, d.ty);
-    let tfi = if callee == NONE32 {
+    let callee = drop_function(inout ctx, item.ty);
+    let drop_fi = if callee == NONE32 {
         NONE64
     } else {
-        find_fn_by_name(in p, callee)
+        find_fn_by_name(in program, callee)
     };
-    if tfi == NONE64 {
+    if drop_fi == NONE64 {
         push_str(inout err, in "no drop function for `");
-        display(in c.types, in c.names, d.ty, inout err);
+        display(in ctx.types, in ctx.names, item.ty, inout err);
         push_str(inout err, in "`");
         return false;
     }
-    let (_, _, target_res, _, _, _) = fn_header_offsets(in p, tfi);
-    let mut val = d.v;
-    if d.kind == 1 {
-        val = next_val;
+    let (_, _, target_res, _, _, _) = fn_header_offsets(in program, drop_fi);
+    let mut value = item.value;
+    if item.kind == 1 {
+        value = next_val;
         next_val = wrapping_add(next_val, 1);
-        fn_set_value_type(inout p, fi, val, d.ty);
-        let rop = p.ops.len();
-        p.put(w(d.root), Tag::Name);
-        p.put(d.path, Tag::Path);
-        p.put(w(TyPass::Sink), Tag::Raw);
-        p.put(0, Tag::Raw);
-        p.insts.push(
+        fn_set_value_type(inout program, fi, value, item.ty);
+        let read_ops = program.ops.len();
+        program.put(w(item.root), Tag::Name);
+        program.put(item.path, Tag::Path);
+        program.put(w(TyPass::Sink), Tag::Raw);
+        program.put(0, Tag::Raw);
+        program.insts.push(
             InstRow {
-                dest: val,
-                ty: d.ty,
+                dest: value,
+                ty: item.ty,
                 s0: 0,
                 s1: 0,
                 has_token: 0,
@@ -957,24 +993,24 @@ fn emit_drop(
                 tout: 0,
                 fallible: 0,
                 op: Op::Read,
-                a: rop,
+                a: read_ops,
                 n: 4
             }
         );
     }
     let dest = next_val;
     next_val = wrapping_add(next_val, 1);
-    fn_set_value_type(inout p, fi, dest, target_res);
-    let cop = p.ops.len();
-    p.put(w(callee), Tag::Name);
-    p.put(1, Tag::Raw);
-    p.put(w(TyPass::Sink), Tag::Raw);
-    p.put(w(val), Tag::Value);
-    p.put(0, Tag::OptName);
-    p.put(0, Tag::Path);
-    p.put(0, Tag::Raw);
-    p.put(0, Tag::OptName);
-    p.insts.push(
+    fn_set_value_type(inout program, fi, dest, target_res);
+    let call_ops = program.ops.len();
+    program.put(w(callee), Tag::Name);
+    program.put(1, Tag::Raw);
+    program.put(w(TyPass::Sink), Tag::Raw);
+    program.put(w(value), Tag::Value);
+    program.put(0, Tag::OptName);
+    program.put(0, Tag::Path);
+    program.put(0, Tag::Raw);
+    program.put(0, Tag::OptName);
+    program.insts.push(
         InstRow {
             dest: dest,
             ty: target_res,
@@ -985,18 +1021,20 @@ fn emit_drop(
             tout: 0,
             fallible: 0,
             op: Op::Call,
-            a: cop,
+            a: call_ops,
             n: 8
         }
     );
-    let hidx = list_find_u32(in handles, handle);
-    sites.push(DropSite { graph: f.name, handle: handle, effect: u32_at(in effects, hidx) });
+    let handle_index = list_find_u32(in handles, handle);
+    sites.push(
+        DropSite { graph: func.name, handle: handle, effect: u32_at(in effects, handle_index) }
+    );
     true
 }
 
 fn apply_plan(
-    inout c: Ctx,
-    inout p: Program,
+    inout ctx: Ctx,
+    inout program: Program,
     fi: u64,
     in plan: FnPlan,
     in handles: ChunkSeq[u32],
@@ -1011,21 +1049,21 @@ fn apply_plan(
         return true;
     }
     for si in 0..plan.splits.len() {
-        let sp = match plan.splits.try_get(si) {
+        let split = match plan.splits.try_get(si) {
             Option::Some(x) => x,
             Option::None => continue,
         };
-        split_edge(inout p, fi, sp.from, sp.to);
+        split_edge(inout program, fi, split.from, split.to);
     }
-    let (_, _, _, _, nv_op, _) = fn_header_offsets(in p, fi);
-    let mut next_val = fn_max_value_id(in p, fi, nv_op);
-    let f = p.function(fi);
-    for b_rel in 0..f.bc {
+    let (_, _, _, _, nv_op, _) = fn_header_offsets(in program, fi);
+    let mut next_val = fn_max_value_id(in program, fi, nv_op);
+    let func = program.function(fi);
+    for b_rel in 0..func.bc {
         let mut any = false;
         for j in 0..plan.before_inst.len() {
             match plan.before_inst.try_get(j) {
-                Option::Some(d) => {
-                    if d.blk == b_rel {
+                Option::Some(item) => {
+                    if item.block == b_rel {
                         any = true;
                     }
                 },
@@ -1034,8 +1072,8 @@ fn apply_plan(
         }
         for j in 0..plan.after_inst.len() {
             match plan.after_inst.try_get(j) {
-                Option::Some(d) => {
-                    if d.blk == b_rel {
+                Option::Some(item) => {
+                    if item.block == b_rel {
                         any = true;
                     }
                 },
@@ -1044,8 +1082,8 @@ fn apply_plan(
         }
         for j in 0..plan.before_term.len() {
             match plan.before_term.try_get(j) {
-                Option::Some(d) => {
-                    if d.blk == b_rel {
+                Option::Some(item) => {
+                    if item.block == b_rel {
                         any = true;
                     }
                 },
@@ -1055,21 +1093,21 @@ fn apply_plan(
         if !any {
             continue;
         }
-        let b_abs = add(f.b0, b_rel);
-        let mut blk = p.block(b_abs);
-        let old_i0 = blk.i0;
-        let old_ic = blk.ic;
-        let new_i0 = p.insts.len();
+        let block_index = add(func.b0, b_rel);
+        let mut block = program.block(block_index);
+        let old_i0 = block.i0;
+        let old_ic = block.ic;
+        let new_i0 = program.insts.len();
         for i in 0..old_ic {
             for j in 0..plan.before_inst.len() {
                 match plan.before_inst.try_get(j) {
-                    Option::Some(d) => {
-                        if d.blk == b_rel && d.at == i {
+                    Option::Some(item) => {
+                        if item.block == b_rel && item.at == i {
                             if !emit_drop(
-                                inout c,
-                                inout p,
+                                inout ctx,
+                                inout program,
                                 fi,
-                                in d,
+                                in item,
                                 in handles,
                                 in effects,
                                 inout next_val,
@@ -1083,16 +1121,16 @@ fn apply_plan(
                     _ => {},
                 }
             }
-            p.insts.push(p.inst(add(old_i0, i)));
+            program.insts.push(program.inst(add(old_i0, i)));
             for j in 0..plan.after_inst.len() {
                 match plan.after_inst.try_get(j) {
-                    Option::Some(d) => {
-                        if d.blk == b_rel && d.at == i {
+                    Option::Some(item) => {
+                        if item.block == b_rel && item.at == i {
                             if !emit_drop(
-                                inout c,
-                                inout p,
+                                inout ctx,
+                                inout program,
                                 fi,
-                                in d,
+                                in item,
                                 in handles,
                                 in effects,
                                 inout next_val,
@@ -1109,13 +1147,13 @@ fn apply_plan(
         }
         for j in 0..plan.before_term.len() {
             match plan.before_term.try_get(j) {
-                Option::Some(d) => {
-                    if d.blk == b_rel {
+                Option::Some(item) => {
+                    if item.block == b_rel {
                         if !emit_drop(
-                            inout c,
-                            inout p,
+                            inout ctx,
+                            inout program,
                             fi,
-                            in d,
+                            in item,
                             in handles,
                             in effects,
                             inout next_val,
@@ -1129,16 +1167,16 @@ fn apply_plan(
                 _ => {},
             }
         }
-        blk.i0 = new_i0;
-        blk.ic = wrapping_sub(p.insts.len(), new_i0);
-        let _ = p.blocks.try_set(b_abs, blk);
+        block.i0 = new_i0;
+        block.ic = wrapping_sub(program.insts.len(), new_i0);
+        let _ = program.blocks.try_set(block_index, block);
     }
     true
 }
 
 // ----- thread_tokens ----------------------------------------------------------
 
-fn is_state_action(in c: Ctx, in p: Program, in inst: InstRow) -> bool {
+fn is_state_action(in ctx: Ctx, in program: Program, in inst: InstRow) -> bool {
     if inst.fallible != 0 {
         return true;
     }
@@ -1157,36 +1195,36 @@ fn is_state_action(in c: Ctx, in p: Program, in inst: InstRow) -> bool {
         return true;
     }
     if inst.op == Op::Binary {
-        let op_sym = n32(p.op(inst.a));
-        return sym_eq_str(in c.names, op_sym, in "/")
-            || sym_eq_str(in c.names, op_sym, in "%")
-            || sym_eq_str(in c.names, op_sym, in "<<")
-            || sym_eq_str(in c.names, op_sym, in ">>");
+        let op_sym = n32(program.op(inst.a));
+        return sym_eq_str(in ctx.names, op_sym, in "/")
+            || sym_eq_str(in ctx.names, op_sym, in "%")
+            || sym_eq_str(in ctx.names, op_sym, in "<<")
+            || sym_eq_str(in ctx.names, op_sym, in ">>");
     }
     false
 }
 
-fn thread_tokens(in c: Ctx, inout p: Program) {
-    for fi in 0..p.fn_count() {
-        let f = p.function(fi);
-        let mut next = f.bc;
-        for b_rel in 0..f.bc {
-            let b_abs = add(f.b0, b_rel);
-            let b = p.block(b_abs);
+fn thread_tokens(in ctx: Ctx, inout program: Program) {
+    for fi in 0..program.fn_count() {
+        let func = program.function(fi);
+        let mut next = func.bc;
+        for b_rel in 0..func.bc {
+            let block_index = add(func.b0, b_rel);
+            let block = program.block(block_index);
             let entry = b_rel;
             let mut cur = entry;
-            for ii in b.i0..add(b.i0, b.ic) {
-                let mut inst = p.inst(ii);
-                let obs = inst.op == Op::Read;
-                let act = is_state_action(in c, in p, in inst);
-                if act {
+            for ii in block.i0..add(block.i0, block.ic) {
+                let mut inst = program.inst(ii);
+                let observes = inst.op == Op::Read;
+                let acts = is_state_action(in ctx, in program, in inst);
+                if acts {
                     let out_tok = next;
                     next = inc(next);
                     inst.has_token = 1;
                     inst.tin = cur;
                     inst.tout = out_tok;
                     cur = out_tok;
-                } else if obs {
+                } else if observes {
                     inst.has_token = 1;
                     inst.tin = cur;
                     inst.tout = cur;
@@ -1195,73 +1233,75 @@ fn thread_tokens(in c: Ctx, inout p: Program) {
                     inst.tin = 0;
                     inst.tout = 0;
                 }
-                let _ = p.insts.try_set(ii, inst);
+                let _ = program.insts.try_set(ii, inst);
             }
             // Write outgoing token temporarily into header word; rebuild headers after collecting edges.
-            let ni = p.op(inc(b.ha));
-            let _ = p.ops.try_set(b.ha, entry);
-            let _ = p.ops.try_set(add(b.ha, add(2, wrapping_mul(ni, 2))), cur);
+            let incoming_count = program.op(inc(block.ha));
+            let _ = program.ops.try_set(block.ha, entry);
+            let _ = program
+                .ops
+                .try_set(add(block.ha, add(2, wrapping_mul(incoming_count, 2))), cur);
         }
         let mut edge_src = ChunkSeq::new[u64]();
         let mut edge_dst = ChunkSeq::new[u64]();
         let mut edge_tok = ChunkSeq::new[u64]();
-        for b_rel in 0..f.bc {
-            let b = p.block(add(f.b0, b_rel));
-            let ni = p.op(inc(b.ha));
-            let out_tok = p.op(add(b.ha, add(2, wrapping_mul(ni, 2))));
-            if b.term == Term::Jump {
+        for b_rel in 0..func.bc {
+            let block = program.block(add(func.b0, b_rel));
+            let incoming_count = program.op(inc(block.ha));
+            let out_tok = program.op(add(block.ha, add(2, wrapping_mul(incoming_count, 2))));
+            if block.term == Term::Jump {
                 edge_src.push(b_rel);
-                edge_dst.push(p.op(b.ta));
+                edge_dst.push(program.op(block.ta));
                 edge_tok.push(out_tok);
-            } else if b.term == Term::Branch {
+            } else if block.term == Term::Branch {
                 edge_src.push(b_rel);
-                edge_dst.push(p.op(inc(b.ta)));
+                edge_dst.push(program.op(inc(block.ta)));
                 edge_tok.push(out_tok);
                 edge_src.push(b_rel);
-                edge_dst.push(p.op(add(b.ta, 2)));
+                edge_dst.push(program.op(add(block.ta, 2)));
                 edge_tok.push(out_tok);
-            } else if b.term == Term::Match {
-                let na = p.op(inc(b.ta));
-                let mut pos = add(b.ta, 2);
-                for i in 0..na {
-                    pos = skip_pattern(in p, pos);
+            } else if block.term == Term::Match {
+                let arm_count = program.op(inc(block.ta));
+                let mut pos = add(block.ta, 2);
+                for i in 0..arm_count {
+                    pos = skip_pattern(in program, pos);
                     edge_src.push(b_rel);
-                    edge_dst.push(p.op(pos));
+                    edge_dst.push(program.op(pos));
                     edge_tok.push(out_tok);
                     pos = inc(pos);
                 }
             }
         }
-        for b_rel in 0..f.bc {
-            let b_abs = add(f.b0, b_rel);
-            let mut b = p.block(b_abs);
-            let old_ni = p.op(inc(b.ha));
-            let out_tok = p.op(add(b.ha, add(2, wrapping_mul(old_ni, 2))));
-            let np_pos = add(b.ha, add(3, wrapping_mul(old_ni, 2)));
-            let np = p.op(np_pos);
+        for b_rel in 0..func.bc {
+            let block_index = add(func.b0, b_rel);
+            let mut block = program.block(block_index);
+            let old_ni = program.op(inc(block.ha));
+            let out_tok = program.op(add(block.ha, add(2, wrapping_mul(old_ni, 2))));
+            let param_pos = add(block.ha, add(3, wrapping_mul(old_ni, 2)));
+            let param_count = program.op(param_pos);
             let mut new_ni: u64 = 0;
             for ei in 0..edge_dst.len() {
                 if u64_at(in edge_dst, ei) == b_rel {
                     new_ni = inc(new_ni);
                 }
             }
-            let new_ha = p.ops.len();
-            p.put(b_rel, Tag::Raw);
-            p.put(new_ni, Tag::Raw);
+            let new_header = program.ops.len();
+            program.put(b_rel, Tag::Raw);
+            program.put(new_ni, Tag::Raw);
             for ei in 0..edge_dst.len() {
                 if u64_at(in edge_dst, ei) == b_rel {
-                    p.put(u64_at(in edge_src, ei), Tag::Block);
-                    p.put(u64_at(in edge_tok, ei), Tag::Raw);
+                    program.put(u64_at(in edge_src, ei), Tag::Block);
+                    program.put(u64_at(in edge_tok, ei), Tag::Raw);
                 }
             }
-            p.put(out_tok, Tag::Raw);
-            p.put(np, Tag::Raw);
-            for k in 0..np {
-                p.put(p.op(add(inc(np_pos), k)), Tag::Value);
+            program.put(out_tok, Tag::Raw);
+            program.put(param_count, Tag::Raw);
+            for k in 0..param_count {
+                program.put(program.op(add(inc(param_pos), k)), Tag::Value);
             }
-            b.ha = new_ha;
-            b.hn = wrapping_sub(p.ops.len(), new_ha);
-            let _ = p.blocks.try_set(b_abs, b);
+            block.ha = new_header;
+            block.hn = wrapping_sub(program.ops.len(), new_header);
+            let _ = program.blocks.try_set(block_index, block);
         }
     }
 }
@@ -1269,30 +1309,30 @@ fn thread_tokens(in c: Ctx, inout p: Program) {
 // ----- check_rows -------------------------------------------------------------
 
 fn check_rows(
-    in c: Ctx,
-    in p: Program,
+    in ctx: Ctx,
+    in program: Program,
     in metas: ChunkSeq[FnMeta],
     in sites: ChunkSeq[DropSite],
     inout out: ChunkSeq[u8]
 ) -> bool {
-    let mut seen_g = ChunkSeq::new[u32]();
-    let mut seen_e = ChunkSeq::new[u32]();
+    let mut seen_graphs = ChunkSeq::new[u32]();
+    let mut seen_effects = ChunkSeq::new[u32]();
     let mut any_diag = false;
-    let eplen: u64 = 4;
+    let prefix_len: u64 = 4;
     for si in 0..sites.len() {
         let site = match sites.try_get(si) {
             Option::Some(s) => s,
             Option::None => continue,
         };
-        let fi = find_fn_by_name(in p, site.graph);
+        let fi = find_fn_by_name(in program, site.graph);
         if fi == NONE64 {
             continue;
         }
-        let (_, _, _, effects_ty, _, _) = fn_header_offsets(in p, fi);
-        let row = c.types.row(c.types.node(effects_ty).r2);
+        let (_, _, _, effects_ty, _, _) = fn_header_offsets(in program, fi);
+        let row = ctx.types.row(ctx.types.node(effects_ty).r2);
         let mut performs = false;
         for ei in w(row.a)..add(w(row.a), w(row.n)) {
-            let eff = c.types.effect_at(ei);
+            let eff = ctx.types.effect_at(ei);
             if eff.name == site.effect && eff.label == 0 {
                 performs = true;
                 break;
@@ -1302,8 +1342,9 @@ fn check_rows(
             continue;
         }
         let mut dup = false;
-        for di in 0..seen_g.len() {
-            if u32_at(in seen_g, di) == site.graph && u32_at(in seen_e, di) == site.effect {
+        for di in 0..seen_graphs.len() {
+            if u32_at(in seen_graphs, di) == site.graph
+                && u32_at(in seen_effects, di) == site.effect {
                 dup = true;
                 break;
             }
@@ -1311,42 +1352,42 @@ fn check_rows(
         if dup {
             continue;
         }
-        seen_g.push(site.graph);
-        seen_e.push(site.effect);
+        seen_graphs.push(site.graph);
+        seen_effects.push(site.effect);
         any_diag = true;
-        let mut s0: u64 = 0;
-        let mut s1: u64 = 0;
+        let mut span_start: u64 = 0;
+        let mut span_end: u64 = 0;
         for mi in 0..metas.len() {
             match metas.try_get(mi) {
-                Option::Some(m) => {
-                    if m.name == site.graph {
-                        s0 = m.s0;
-                        s1 = m.s1;
+                Option::Some(meta) => {
+                    if meta.name == site.graph {
+                        span_start = meta.span_start;
+                        span_end = meta.span_end;
                         break;
                     }
                 },
                 _ => {},
             }
         }
-        let ea = c.names.start(site.effect);
-        let ee = c.names.end(site.effect);
-        let lib_a = if sym_starts_with(in c.names, site.effect, in EFFECT_PREFIX) {
-            add(ea, eplen)
+        let eff_start = ctx.names.start(site.effect);
+        let eff_end = ctx.names.end(site.effect);
+        let lib_start = if sym_starts_with(in ctx.names, site.effect, in EFFECT_PREFIX) {
+            add(eff_start, prefix_len)
         } else {
-            ea
+            eff_start
         };
         push_str(inout out, in "E0401 ");
-        push_decimal(inout out, s0);
+        push_decimal(inout out, span_start);
         push_str(inout out, in "..");
-        push_decimal(inout out, s1);
+        push_decimal(inout out, span_end);
         out.push(32);
         out.push(39);
-        push_sym(inout out, in c.names, site.graph);
+        push_sym(inout out, in ctx.names, site.graph);
         push_str(inout out, in "' may drop a `");
-        push_sym(inout out, in c.names, site.handle);
+        push_sym(inout out, in ctx.names, site.handle);
         push_str(inout out, in "`, which calls its drop import; add Ffi[");
-        for k in lib_a..ee {
-            out.push(u8_at(in c.names.text, k));
+        for k in lib_start..eff_end {
+            out.push(u8_at(in ctx.names.text, k));
         }
         push_str(inout out, in "] to its effect row\n");
     }
@@ -1355,37 +1396,37 @@ fn check_rows(
 
 // ----- DropCallees ------------------------------------------------------------
 
-fn parse_decimal_slice(in bytes: ChunkSeq[u8], a: u64, e: u64) -> (bool, u64) {
-    if a >= e {
+fn parse_decimal_slice(in bytes: ChunkSeq[u8], start: u64, end: u64) -> (bool, u64) {
+    if start >= end {
         return (false, 0);
     }
-    let mut v: u64 = 0;
-    for i in a..e {
-        let ch = u8_at(in bytes, i);
-        if ch < 48 || ch > 57 {
+    let mut value: u64 = 0;
+    for i in start..end {
+        let digit = u8_at(in bytes, i);
+        if digit < 48 || digit > 57 {
             return (false, 0);
         }
-        v = add(wrapping_mul(v, 10), widen_u64(wrapping_sub(ch, 48)));
+        value = add(wrapping_mul(value, 10), widen_u64(wrapping_sub(digit, 48)));
     }
-    (true, v)
+    (true, value)
 }
 
 fn drop_callees_of(
-    in c: Ctx,
-    in p: Program,
+    in ctx: Ctx,
+    in program: Program,
     in metas: ChunkSeq[FnMeta],
     target: u32,
     inout out: ChunkSeq[u8]
 ) {
-    let mut s0: u64 = 0;
-    let mut s1: u64 = 0;
+    let mut span_start: u64 = 0;
+    let mut span_end: u64 = 0;
     let mut has_meta = false;
     for mi in 0..metas.len() {
         match metas.try_get(mi) {
-            Option::Some(m) => {
-                if m.name == target {
-                    s0 = m.s0;
-                    s1 = m.s1;
+            Option::Some(meta) => {
+                if meta.name == target {
+                    span_start = meta.span_start;
+                    span_end = meta.span_end;
                     has_meta = true;
                     break;
                 }
@@ -1397,15 +1438,15 @@ fn drop_callees_of(
         return;
     }
     let mut graphs = ChunkSeq::new[u32]();
-    for fi in 0..p.fn_count() {
-        let f = p.function(fi);
+    for fi in 0..program.fn_count() {
+        let func = program.function(fi);
         let mut has_drop = false;
-        for bi in f.b0..add(f.b0, f.bc) {
-            let b = p.block(bi);
-            for ii in b.i0..add(b.i0, b.ic) {
-                let inst = p.inst(ii);
+        for bi in func.b0..add(func.b0, func.bc) {
+            let block = program.block(bi);
+            for ii in block.i0..add(block.i0, block.ic) {
+                let inst = program.inst(ii);
                 if inst.op == Op::Call
-                    && sym_starts_with(in c.names, n32(p.op(inst.a)), in DROP_PREFIX) {
+                    && sym_starts_with(in ctx.names, n32(program.op(inst.a)), in DROP_PREFIX) {
                     has_drop = true;
                     break;
                 }
@@ -1417,30 +1458,42 @@ fn drop_callees_of(
         if !has_drop {
             continue;
         }
-        if f.name == target {
-            if !list_has_u32(in graphs, f.name) {
-                graphs.push(f.name);
+        if func.name == target {
+            if !list_has_u32(in graphs, func.name) {
+                graphs.push(func.name);
             }
             continue;
         }
-        let na = c.names.start(f.name);
-        let ne = c.names.end(f.name);
-        if na < ne && u8_at(in c.names.text, na) == 36 {
+        let name_start = ctx.names.start(func.name);
+        let name_end = ctx.names.end(func.name);
+        if name_start < name_end && u8_at(in ctx.names.text, name_start) == 36 {
             // Find last two '_' in `$<name>_<start>_<end>`.
-            let mut u2 = NONE64;
-            let mut u1 = NONE64;
-            for k in add(na, 1)..ne {
-                if u8_at(in c.names.text, k) == 95 {
-                    u1 = u2;
-                    u2 = k;
+            let mut last_underscore = NONE64;
+            let mut prev_underscore = NONE64;
+            for k in add(name_start, 1)..name_end {
+                if u8_at(in ctx.names.text, k) == 95 {
+                    prev_underscore = last_underscore;
+                    last_underscore = k;
                 }
             }
-            if u1 != NONE64 && u2 != NONE64 {
-                let (ok1, gs) = parse_decimal_slice(in c.names.text, inc(u1), u2);
-                let (ok2, ge) = parse_decimal_slice(in c.names.text, inc(u2), ne);
-                if ok1 && ok2 && gs >= s0 && gs <= s1 && ge <= s1 {
-                    if !list_has_u32(in graphs, f.name) {
-                        graphs.push(f.name);
+            if prev_underscore != NONE64 && last_underscore != NONE64 {
+                let (start_ok, graph_start) = parse_decimal_slice(
+                    in ctx.names.text,
+                    inc(prev_underscore),
+                    last_underscore
+                );
+                let (end_ok, graph_end) = parse_decimal_slice(
+                    in ctx.names.text,
+                    inc(last_underscore),
+                    name_end
+                );
+                if start_ok
+                    && end_ok
+                    && graph_start >= span_start
+                    && graph_start <= span_end
+                    && graph_end <= span_end {
+                    if !list_has_u32(in graphs, func.name) {
+                        graphs.push(func.name);
                     }
                 }
             }
@@ -1453,15 +1506,16 @@ fn drop_callees_of(
             if j == 0 {
                 break;
             }
-            let a = u32_at(in graphs, wrapping_sub(j, 1));
-            let b = u32_at(in graphs, j);
-            let aa = c.names.start(a);
-            let ae = c.names.end(a);
-            let ba = c.names.start(b);
-            let be = c.names.end(b);
-            if c.names.text[aa..ae].cmp(in c.names.text[ba..be]) > 0 {
-                let _ = graphs.try_set(wrapping_sub(j, 1), b);
-                let _ = graphs.try_set(j, a);
+            let left = u32_at(in graphs, wrapping_sub(j, 1));
+            let right = u32_at(in graphs, j);
+            let left_start = ctx.names.start(left);
+            let left_end = ctx.names.end(left);
+            let right_start = ctx.names.start(right);
+            let right_end = ctx.names.end(right);
+            if ctx.names.text[left_start..left_end].cmp(in ctx.names.text[right_start..right_end])
+                > 0 {
+                let _ = graphs.try_set(wrapping_sub(j, 1), right);
+                let _ = graphs.try_set(j, left);
                 j = wrapping_sub(j, 1);
             } else {
                 break;
@@ -1470,18 +1524,18 @@ fn drop_callees_of(
     }
     let mut callees = ChunkSeq::new[u32]();
     for gi in 0..graphs.len() {
-        let fi = find_fn_by_name(in p, u32_at(in graphs, gi));
+        let fi = find_fn_by_name(in program, u32_at(in graphs, gi));
         if fi == NONE64 {
             continue;
         }
-        let f = p.function(fi);
-        for bi in f.b0..add(f.b0, f.bc) {
-            let b = p.block(bi);
-            for ii in b.i0..add(b.i0, b.ic) {
-                let inst = p.inst(ii);
+        let func = program.function(fi);
+        for bi in func.b0..add(func.b0, func.bc) {
+            let block = program.block(bi);
+            for ii in block.i0..add(block.i0, block.ic) {
+                let inst = program.inst(ii);
                 if inst.op == Op::Call {
-                    let callee = n32(p.op(inst.a));
-                    if sym_starts_with(in c.names, callee, in DROP_PREFIX)
+                    let callee = n32(program.op(inst.a));
+                    if sym_starts_with(in ctx.names, callee, in DROP_PREFIX)
                         && !list_has_u32(in callees, callee) {
                         callees.push(callee);
                     }
@@ -1493,114 +1547,128 @@ fn drop_callees_of(
         if ci > 0 {
             out.push(32);
         }
-        push_sym(inout out, in c.names, u32_at(in callees, ci));
+        push_sym(inout out, in ctx.names, u32_at(in callees, ci));
     }
 }
 
 // ----- harness entry ----------------------------------------------------------
 
 fn read_drop_item(
-    inout r: Reader,
-    in b: Slice[u8],
-    in c: Ctx,
-    inout p: Program,
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    in ctx: Ctx,
+    inout program: Program,
     blk: u64,
     at: u64
 ) -> DropItem {
-    let kind = wrapping_u8(r.word(in b));
+    let kind = wrapping_u8(reader.word(in bytes));
     if kind == 0 {
-        let v = n32(r.word(in b));
-        let ty = u32_at(in c.tmap, r.word(in b));
-        return DropItem { blk: blk, at: at, kind: 0, v: v, root: 0, path: 0, ty: ty, keep: 0 };
+        let value = n32(reader.word(in bytes));
+        let ty = u32_at(in ctx.tmap, reader.word(in bytes));
+        return DropItem {
+            block: blk,
+            at: at,
+            kind: 0,
+            value: value,
+            root: 0,
+            path: 0,
+            ty: ty,
+            keep: 0
+        };
     }
     if kind == 1 {
-        let root = u32_at(in c.nmap, r.word(in b));
-        let plen = r.word(in b);
+        let root = u32_at(in ctx.nmap, reader.word(in bytes));
+        let plen = reader.word(in bytes);
         let mut names = ChunkSeq::new[u32]();
         for i in 0..plen {
-            names.push(u32_at(in c.nmap, r.word(in b)));
+            names.push(u32_at(in ctx.nmap, reader.word(in bytes)));
         }
-        let path = p.add_path(in names);
-        let ty = u32_at(in c.tmap, r.word(in b));
+        let path = program.add_path(in names);
+        let ty = u32_at(in ctx.tmap, reader.word(in bytes));
         return DropItem {
-            blk: blk,
+            block: blk,
             at: at,
             kind: 1,
-            v: 0,
+            value: 0,
             root: root,
             path: path,
             ty: ty,
             keep: 0
         };
     }
-    let ty = u32_at(in c.tmap, r.word(in b));
-    let keep = u32_at(in c.nmap, r.word(in b));
-    DropItem { blk: blk, at: at, kind: 2, v: 0, root: 0, path: 0, ty: ty, keep: keep }
+    let ty = u32_at(in ctx.tmap, reader.word(in bytes));
+    let keep = u32_at(in ctx.nmap, reader.word(in bytes));
+    DropItem { block: blk, at: at, kind: 2, value: 0, root: 0, path: 0, ty: ty, keep: keep }
 }
 
 pub fn ffi_drops_entry(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let mut c = read_ctx(inout r, in b);
-    let mut p = read_program(inout r, in b, in c);
-    let nf = r.word(in b);
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let mut ctx = read_ctx(inout reader, in bytes);
+    let mut program = read_program(inout reader, in bytes, in ctx);
+    let meta_count = reader.word(in bytes);
     let mut metas = ChunkSeq::new[FnMeta]();
     let mut fip_fns = ChunkSeq::new[u32]();
-    for i in 0..nf {
-        let name = u32_at(in c.nmap, r.word(in b));
-        let fip = r.word(in b) != 0;
-        let s0 = r.word(in b);
-        let s1 = r.word(in b);
-        metas.push(FnMeta { name: name, fip: fip, s0: s0, s1: s1 });
+    for i in 0..meta_count {
+        let name = u32_at(in ctx.nmap, reader.word(in bytes));
+        let fip = reader.word(in bytes) != 0;
+        let span_start = reader.word(in bytes);
+        let span_end = reader.word(in bytes);
+        metas.push(FnMeta { name: name, fip: fip, span_start: span_start, span_end: span_end });
         if fip {
             fip_fns.push(name);
         }
     }
-    let mode = r.word(in b);
+    let mode = reader.word(in bytes);
     if mode == 1 {
-        let nq = r.word(in b);
+        let query_count = reader.word(in bytes);
         let mut out = ChunkSeq::new[u8]();
-        for i in 0..nq {
-            let target = u32_at(in c.nmap, r.word(in b));
-            push_sym(inout out, in c.names, target);
+        for i in 0..query_count {
+            let target = u32_at(in ctx.nmap, reader.word(in bytes));
+            push_sym(inout out, in ctx.names, target);
             push_str(inout out, in ": ");
-            drop_callees_of(in c, in p, in metas, target, inout out);
+            drop_callees_of(in ctx, in program, in metas, target, inout out);
             out.push(10);
         }
         return pack_text(in out);
     }
-    let np = r.word(in b);
+    let plan_count = reader.word(in bytes);
     let mut plans = ChunkSeq::new[FnPlan]();
-    for i in 0..np {
-        let fi = r.word(in b);
-        let ok = r.word(in b) != 0;
+    for i in 0..plan_count {
+        let fi = reader.word(in bytes);
+        let ok = reader.word(in bytes) != 0;
         let mut splits = ChunkSeq::new[EdgeSplit]();
-        let mut bi = ChunkSeq::new[DropItem]();
-        let mut ai = ChunkSeq::new[DropItem]();
-        let mut bt = ChunkSeq::new[DropItem]();
+        let mut before_inst = ChunkSeq::new[DropItem]();
+        let mut after_inst = ChunkSeq::new[DropItem]();
+        let mut before_term = ChunkSeq::new[DropItem]();
         if ok {
-            let ns = r.word(in b);
-            for k in 0..ns {
-                let from = r.word(in b);
-                let to = r.word(in b);
+            let split_count = reader.word(in bytes);
+            for k in 0..split_count {
+                let from = reader.word(in bytes);
+                let to = reader.word(in bytes);
                 splits.push(EdgeSplit { from: from, to: to });
             }
-            let nbi = r.word(in b);
-            for k in 0..nbi {
-                let blk = r.word(in b);
-                let at = r.word(in b);
-                bi.push(read_drop_item(inout r, in b, in c, inout p, blk, at));
+            let before_inst_count = reader.word(in bytes);
+            for k in 0..before_inst_count {
+                let block = reader.word(in bytes);
+                let at = reader.word(in bytes);
+                before_inst.push(
+                    read_drop_item(inout reader, in bytes, in ctx, inout program, block, at)
+                );
             }
-            let nai = r.word(in b);
-            for k in 0..nai {
-                let blk = r.word(in b);
-                let at = r.word(in b);
-                ai.push(read_drop_item(inout r, in b, in c, inout p, blk, at));
+            let after_inst_count = reader.word(in bytes);
+            for k in 0..after_inst_count {
+                let block = reader.word(in bytes);
+                let at = reader.word(in bytes);
+                after_inst.push(
+                    read_drop_item(inout reader, in bytes, in ctx, inout program, block, at)
+                );
             }
-            let nbt = r.word(in b);
-            for k in 0..nbt {
-                let blk = r.word(in b);
-                bt.push(read_drop_item(inout r, in b, in c, inout p, blk, 0));
+            let before_term_count = reader.word(in bytes);
+            for k in 0..before_term_count {
+                let block = reader.word(in bytes);
+                before_term
+                    .push(read_drop_item(inout reader, in bytes, in ctx, inout program, block, 0));
             }
         }
         plans.push(
@@ -1608,28 +1676,28 @@ pub fn ffi_drops_entry(in input: Str) -> ChunkSeq[u64] {
                 fi: fi,
                 ok: ok,
                 splits: splits,
-                before_inst: bi,
-                after_inst: ai,
-                before_term: bt
+                before_inst: before_inst,
+                after_inst: after_inst,
+                before_term: before_term
             }
         );
     }
-    let (handles, effects) = droppable_resolved(inout c, in p);
+    let (handles, effects) = droppable_resolved(inout ctx, in program);
     let mut sites = ChunkSeq::new[DropSite]();
     let mut err = ChunkSeq::new[u8]();
     let mut has_err = false;
     if handles.len() > 0 {
-        for fi in 0..p.fn_count() {
-            let f = p.function(fi);
-            if sym_starts_with(in c.names, f.name, in DROP_PREFIX)
-                || list_has_u32(in fip_fns, f.name) {
+        for fi in 0..program.fn_count() {
+            let func = program.function(fi);
+            if sym_starts_with(in ctx.names, func.name, in DROP_PREFIX)
+                || list_has_u32(in fip_fns, func.name) {
                 continue;
             }
-            release_wildcards(inout c, inout p, fi, in handles, in effects, inout sites);
-            let mut ebuf = ChunkSeq::new[u8]();
-            if !refuse_unplaced(inout c, in p, fi, in handles, inout ebuf) {
+            release_wildcards(inout ctx, inout program, fi, in handles, in effects, inout sites);
+            let mut refuse_err = ChunkSeq::new[u8]();
+            if !refuse_unplaced(inout ctx, in program, fi, in handles, inout refuse_err) {
                 if !has_err {
-                    err = ebuf;
+                    err = refuse_err;
                     has_err = true;
                 }
                 continue;
@@ -1637,30 +1705,30 @@ pub fn ffi_drops_entry(in input: Str) -> ChunkSeq[u64] {
             let mut found_plan = false;
             for pi in 0..plans.len() {
                 match plans.try_get(pi) {
-                    Option::Some(pl) => {
-                        if pl.fi == fi {
+                    Option::Some(plan) => {
+                        if plan.fi == fi {
                             found_plan = true;
-                            if !pl.ok {
+                            if !plan.ok {
                                 if !has_err {
                                     push_str(inout err, in "the drops of the handles in '");
-                                    push_sym(inout err, in c.names, f.name);
+                                    push_sym(inout err, in ctx.names, func.name);
                                     push_str(inout err, in "' do not reach a fixed point");
                                     has_err = true;
                                 }
                             } else {
-                                let mut abuf = ChunkSeq::new[u8]();
+                                let mut apply_err = ChunkSeq::new[u8]();
                                 if !apply_plan(
-                                    inout c,
-                                    inout p,
+                                    inout ctx,
+                                    inout program,
                                     fi,
-                                    in pl,
+                                    in plan,
                                     in handles,
                                     in effects,
                                     inout sites,
-                                    inout abuf
+                                    inout apply_err
                                 ) {
                                     if !has_err {
-                                        err = abuf;
+                                        err = apply_err;
                                         has_err = true;
                                     }
                                 }
@@ -1676,7 +1744,7 @@ pub fn ffi_drops_entry(in input: Str) -> ChunkSeq[u64] {
                 has_err = true;
             }
         }
-        thread_tokens(in c, inout p);
+        thread_tokens(in ctx, inout program);
     }
     if has_err {
         let mut out = ChunkSeq::new[u8]();
@@ -1685,11 +1753,11 @@ pub fn ffi_drops_entry(in input: Str) -> ChunkSeq[u64] {
         return pack_text(in out);
     }
     let mut diag_out = ChunkSeq::new[u8]();
-    if !check_rows(in c, in p, in metas, in sites, inout diag_out) {
+    if !check_rows(in ctx, in program, in metas, in sites, inout diag_out) {
         return pack_text(in diag_out);
     }
     let mut out = ChunkSeq::with_capacity[u64](1);
     out.push(0);
-    put_program(in p, in c.types, in c.names, inout out);
+    put_program(in program, in ctx.types, in ctx.names, inout out);
     out
 }

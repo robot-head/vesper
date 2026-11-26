@@ -22,42 +22,42 @@ use self::check::{Fip, fip_new};
 // Every diagnostic of `fip::check_world` as text, one per line: code, span
 // start, span end and message (packed by `pack_text`).
 pub fn check_fip(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let c = read_ctx(inout r, in b);
-    let ast = read_ast(inout r, in b, in c.nmap, in c.tmap);
-    let mut cx = fip_new(c, ast);
-    cx.check_world();
-    pack_text(in cx.out)
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let ctx = read_ctx(inout reader, in bytes);
+    let ast = read_ast(inout reader, in bytes, in ctx.nmap, in ctx.tmap);
+    let mut checker = fip_new(ctx, ast);
+    checker.check_world();
+    pack_text(in checker.out)
 }
 
 // Binary entrypoint for `vesper-hybrid`: takes the encoded world+task bytes
 // directly and returns packed diagnostic lines (`pack_text`).
-pub fn check_fip_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
-    let c = read_ctx(inout r, in b);
-    let ast = read_ast(inout r, in b, in c.nmap, in c.tmap);
-    let mut cx = fip_new(c, ast);
-    cx.check_world();
-    pack_text(in cx.out)
+pub fn check_fip_bytes(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
+    let ctx = read_ctx(inout reader, in bytes);
+    let ast = read_ast(inout reader, in bytes, in ctx.nmap, in ctx.tmap);
+    let mut checker = fip_new(ctx, ast);
+    checker.check_world();
+    pack_text(in checker.out)
 }
 
 // The number of diagnostics only (for timing without the text copy).
 pub fn check_fip_count(in input: Str) -> u64 {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let c = read_ctx(inout r, in b);
-    let ast = read_ast(inout r, in b, in c.nmap, in c.tmap);
-    let mut cx = fip_new(c, ast);
-    cx.check_world();
-    cx.count
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let ctx = read_ctx(inout reader, in bytes);
+    let ast = read_ast(inout reader, in bytes, in ctx.nmap, in ctx.tmap);
+    let mut checker = fip_new(ctx, ast);
+    checker.check_world();
+    checker.count
 }
 
 // Decoding only: the baseline the timing subtracts.
 pub fn check_fip_decode(in input: Str) -> u64 {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let c = read_ctx(inout r, in b);
-    let ast = read_ast(inout r, in b, in c.nmap, in c.tmap);
-    wrapping_add(ast.exprs.len(), c.world.adts.len())
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let ctx = read_ctx(inout reader, in bytes);
+    let ast = read_ast(inout reader, in bytes, in ctx.nmap, in ctx.tmap);
+    wrapping_add(ast.exprs.len(), ctx.world.adts.len())
 }

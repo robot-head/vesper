@@ -60,11 +60,12 @@ pub copy struct FnRow {
     fip: bool,
     start: u64,
     end: u64,
-    // generics[ga..ga+gn], params[pa..pa+pn]
-    ga: u32,
-    gn: u32,
-    pa: u32,
-    pn: u32,
+    // generics[generic_start..generic_start+generic_count],
+    // params[param_start..param_start+param_count]
+    generic_start: u32,
+    generic_count: u32,
+    param_start: u32,
+    param_count: u32,
     result: u32,
     // `Type::Row(f.effects)`
     effects: u32,
@@ -74,7 +75,7 @@ pub copy struct FnRow {
 
 pub copy struct GenRow {
     name: u32,
-    row: bool,
+    is_row: bool,
 }
 
 pub copy struct ParamRow {
@@ -107,47 +108,47 @@ const NO_FN: FnRow = FnRow {
     fip: false,
     start: 0,
     end: 0,
-    ga: 0,
-    gn: 0,
-    pa: 0,
-    pn: 0,
+    generic_start: 0,
+    generic_count: 0,
+    param_start: 0,
+    param_count: 0,
     result: 0,
     effects: 0,
     body: NONE32
 };
 
 impl Ast {
-    pub fn expr(in self, e: u32) -> ExprRow {
-        match self.exprs.try_get(w(e)) {
-            Option::Some(x) => x,
+    pub fn expr(in self, expr_id: u32) -> ExprRow {
+        match self.exprs.try_get(w(expr_id)) {
+            Option::Some(row) => row,
             Option::None => NO_EXPR,
         }
     }
 
-    pub fn pat(in self, p: u32) -> PatRow {
-        match self.pats.try_get(w(p)) {
-            Option::Some(x) => x,
+    pub fn pat(in self, pat_id: u32) -> PatRow {
+        match self.pats.try_get(w(pat_id)) {
+            Option::Some(row) => row,
             Option::None => NO_PAT,
         }
     }
 
-    pub fn func(in self, f: u32) -> FnRow {
-        match self.fns.try_get(w(f)) {
-            Option::Some(x) => x,
+    pub fn func(in self, fn_index: u32) -> FnRow {
+        match self.fns.try_get(w(fn_index)) {
+            Option::Some(row) => row,
             Option::None => NO_FN,
         }
     }
 
     pub fn generic(in self, i: u64) -> GenRow {
         match self.generics.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => GenRow { name: 0, row: false },
+            Option::Some(row) => row,
+            Option::None => GenRow { name: 0, is_row: false },
         }
     }
 
     pub fn param(in self, i: u64) -> ParamRow {
         match self.params.try_get(i) {
-            Option::Some(x) => x,
+            Option::Some(row) => row,
             Option::None => ParamRow { name: 0, pass: 0, ty: 0, start: 0, end: 0 },
         }
     }
@@ -162,35 +163,39 @@ impl Ast {
         if name == NONE32 {
             return NONE32;
         }
-        let x = u32_at(in self.fn_by_name, w(name));
-        if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
+        let entry = u32_at(in self.fn_by_name, w(name));
+        if entry == 0 {
+            NONE32
+        } else {
+            wrapping_sub(entry, 1)
+        }
     }
 }
 
-fn set_index(inout table: ChunkSeq[u32], name: u32, v: u32) {
+fn set_index(inout table: ChunkSeq[u32], name: u32, value: u32) {
     loop {
         if table.len() > w(name) {
             break;
         }
         table.push(0);
     }
-    let ok = table.try_set(w(name), v);
+    let ok = table.try_set(w(name), value);
 }
 
-fn sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
-    u32_at(in nmap, x)
+fn sym(in nmap: ChunkSeq[u32], index: u64) -> u32 {
+    u32_at(in nmap, index)
 }
 
-fn ty(in tmap: ChunkSeq[u32], x: u64) -> u32 {
-    u32_at(in tmap, x)
+fn ty(in tmap: ChunkSeq[u32], index: u64) -> u32 {
+    u32_at(in tmap, index)
 }
 
 // An index + 1 word (0 for none) as an index or NONE32.
-fn opt(x: u64) -> u32 {
-    if x == 0 {
+fn opt(word: u64) -> u32 {
+    if word == 0 {
         NONE32
     } else {
-        n32(wrapping_sub(x, 1))
+        n32(wrapping_sub(word, 1))
     }
 }
 
@@ -198,98 +203,108 @@ fn opt(x: u64) -> u32 {
 // and the functions. Names in pool words are tagged by the node kind that
 // owns them and mapped here, so the checker sees symbols and type ids.
 pub fn read_ast(
-    inout r: Reader,
-    in b: Slice[u8],
+    inout reader: Reader,
+    in bytes: Slice[u8],
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) -> Ast {
-    let pn = r.word(in b);
-    let mut pool: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](pn);
-    for i in 0..pn {
+    let pool_len = reader.word(in bytes);
+    let mut pool: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](pool_len);
+    for i in 0..pool_len {
         // 0: an index; 1: a name; 2: a type.
-        let tag = r.word(in b);
-        let x = r.word(in b);
+        let tag = reader.word(in bytes);
+        let value = reader.word(in bytes);
         if tag == 1 {
-            pool.push(sym(in nmap, x));
+            pool.push(sym(in nmap, value));
         } else if tag == 2 {
-            pool.push(ty(in tmap, x));
+            pool.push(ty(in tmap, value));
         } else {
-            pool.push(n32(x));
+            pool.push(n32(value));
         }
     }
-    let en = r.word(in b);
-    let mut exprs: ChunkSeq[ExprRow] = ChunkSeq::with_capacity[ExprRow](en);
-    for i in 0..en {
-        let kind = wrapping_u8(r.word(in b));
-        let start = r.word(in b);
-        let end = r.word(in b);
-        let mut a = n32(r.word(in b));
-        let bb = n32(r.word(in b));
-        let c = n32(r.word(in b));
-        let d = n32(r.word(in b));
-        let e = n32(r.word(in b));
+    let expr_count = reader.word(in bytes);
+    let mut exprs: ChunkSeq[ExprRow] = ChunkSeq::with_capacity[ExprRow](expr_count);
+    for i in 0..expr_count {
+        let kind = wrapping_u8(reader.word(in bytes));
+        let start = reader.word(in bytes);
+        let end = reader.word(in bytes);
+        let mut a = n32(reader.word(in bytes));
+        let bb = n32(reader.word(in bytes));
+        let c = n32(reader.word(in bytes));
+        let d = n32(reader.word(in bytes));
+        let e = n32(reader.word(in bytes));
         // Name fields: Name a, Field b, Handle a.
         if kind == 2 || kind == 16 {
             a = sym(in nmap, w(a));
         }
-        let b2 = if kind == 7 { sym(in nmap, w(bb)) } else { bb };
-        exprs.push(ExprRow { kind: kind, start: start, end: end, a: a, b: b2, c: c, d: d, e: e });
+        let mapped_b = if kind == 7 { sym(in nmap, w(bb)) } else { bb };
+        exprs.push(
+            ExprRow { kind: kind, start: start, end: end, a: a, b: mapped_b, c: c, d: d, e: e }
+        );
     }
-    let qn = r.word(in b);
-    let mut pats: ChunkSeq[PatRow] = ChunkSeq::with_capacity[PatRow](qn);
-    for i in 0..qn {
-        let kind = wrapping_u8(r.word(in b));
-        let start = r.word(in b);
-        let end = r.word(in b);
-        let mut a = n32(r.word(in b));
-        let bb = n32(r.word(in b));
-        let c = n32(r.word(in b));
+    let pat_count = reader.word(in bytes);
+    let mut pats: ChunkSeq[PatRow] = ChunkSeq::with_capacity[PatRow](pat_count);
+    for i in 0..pat_count {
+        let kind = wrapping_u8(reader.word(in bytes));
+        let start = reader.word(in bytes);
+        let end = reader.word(in bytes);
+        let mut a = n32(reader.word(in bytes));
+        let bb = n32(reader.word(in bytes));
+        let c = n32(reader.word(in bytes));
         if kind == 2 || kind == 5 {
             a = sym(in nmap, w(a));
         }
         pats.push(PatRow { kind: kind, start: start, end: end, a: a, b: bb, c: c });
     }
-    let fnn = r.word(in b);
-    let mut fns: ChunkSeq[FnRow] = ChunkSeq::with_capacity[FnRow](fnn);
+    let fn_count = reader.word(in bytes);
+    let mut fns: ChunkSeq[FnRow] = ChunkSeq::with_capacity[FnRow](fn_count);
     let mut generics: ChunkSeq[GenRow] = ChunkSeq::new[GenRow]();
     let mut params: ChunkSeq[ParamRow] = ChunkSeq::new[ParamRow]();
-    let mut by_name: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    for i in 0..fnn {
-        let name = sym(in nmap, r.word(in b));
-        let fip = r.word(in b) != 0;
-        let start = r.word(in b);
-        let end = r.word(in b);
-        let gn = r.word(in b);
-        let ga = n32(generics.len());
-        for j in 0..gn {
-            let g = sym(in nmap, r.word(in b));
-            let row = r.word(in b) != 0;
-            generics.push(GenRow { name: g, row: row });
+    let mut fn_by_name: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..fn_count {
+        let name = sym(in nmap, reader.word(in bytes));
+        let fip = reader.word(in bytes) != 0;
+        let start = reader.word(in bytes);
+        let end = reader.word(in bytes);
+        let generic_count = reader.word(in bytes);
+        let generic_start = n32(generics.len());
+        for j in 0..generic_count {
+            let generic_name = sym(in nmap, reader.word(in bytes));
+            let is_row = reader.word(in bytes) != 0;
+            generics.push(GenRow { name: generic_name, is_row: is_row });
         }
-        let qn2 = r.word(in b);
-        let pa = n32(params.len());
-        for j in 0..qn2 {
-            let pname = sym(in nmap, r.word(in b));
-            let pass = wrapping_u8(r.word(in b));
-            let pty = ty(in tmap, r.word(in b));
-            let ps = r.word(in b);
-            let pe = r.word(in b);
-            params.push(ParamRow { name: pname, pass: pass, ty: pty, start: ps, end: pe });
+        let param_count = reader.word(in bytes);
+        let param_start = n32(params.len());
+        for j in 0..param_count {
+            let param_name = sym(in nmap, reader.word(in bytes));
+            let pass = wrapping_u8(reader.word(in bytes));
+            let param_ty = ty(in tmap, reader.word(in bytes));
+            let param_span_start = reader.word(in bytes);
+            let param_span_end = reader.word(in bytes);
+            params.push(
+                ParamRow {
+                    name: param_name,
+                    pass: pass,
+                    ty: param_ty,
+                    start: param_span_start,
+                    end: param_span_end
+                }
+            );
         }
-        let result = ty(in tmap, r.word(in b));
-        let effects = ty(in tmap, r.word(in b));
-        let body = opt(r.word(in b));
-        set_index(inout by_name, name, wrapping_add(n32(i), 1));
+        let result = ty(in tmap, reader.word(in bytes));
+        let effects = ty(in tmap, reader.word(in bytes));
+        let body = opt(reader.word(in bytes));
+        set_index(inout fn_by_name, name, wrapping_add(n32(i), 1));
         fns.push(
             FnRow {
                 name: name,
                 fip: fip,
                 start: start,
                 end: end,
-                ga: ga,
-                gn: n32(gn),
-                pa: pa,
-                pn: n32(qn2),
+                generic_start: generic_start,
+                generic_count: n32(generic_count),
+                param_start: param_start,
+                param_count: n32(param_count),
                 result: result,
                 effects: effects,
                 body: body
@@ -303,6 +318,6 @@ pub fn read_ast(
         fns: fns,
         generics: generics,
         params: params,
-        fn_by_name: by_name
+        fn_by_name: fn_by_name
     }
 }

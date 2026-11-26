@@ -30,8 +30,8 @@ pub fn sizes_new() -> Sizes {
     Sizes { memo: ChunkSeq::new[u64](), failed: ChunkSeq::new[bool](), seen: ChunkSeq::new[u32]() }
 }
 
-fn fits_i32(x: i64) -> bool {
-    x <= 2147483647 && x >= -2147483648
+fn fits_i32(value: i64) -> bool {
+    value <= 2147483647 && value >= -2147483648
 }
 
 fn max_u64(a: u64, b: u64) -> u64 {
@@ -39,130 +39,154 @@ fn max_u64(a: u64, b: u64) -> u64 {
 }
 
 // `Layout::of(world, ty).map(|l| l.size)`, or NO_SIZE.
-pub fn layout_size(inout s: Sizes, inout t: Types, in names: Names, in wd: World, ty: u32) -> u64 {
-    let d = default_type(inout t, ty);
-    let at = w(d);
-    if at < s.memo.len() {
-        let m = u64_at(in s.memo, at);
-        if m != 0 {
-            return wrapping_sub(m, 1);
+pub fn layout_size(
+    inout sizes: Sizes,
+    inout types: Types,
+    in names: Names,
+    in world: World,
+    ty: u32
+) -> u64 {
+    let defaulted = default_type(inout types, ty);
+    let slot = w(defaulted);
+    if slot < sizes.memo.len() {
+        let cached = u64_at(in sizes.memo, slot);
+        if cached != 0 {
+            return wrapping_sub(cached, 1);
         }
-        match s.failed.try_get(at) {
-            Option::Some(f) => {
-                if f {
+        match sizes.failed.try_get(slot) {
+            Option::Some(failed) => {
+                if failed {
                     return NO_SIZE;
                 }
             }
             Option::None => {}
         }
     }
-    s.seen.clear();
-    let size = build(inout s, inout t, in names, in wd, d, 0);
-    if at >= s.memo.len() {
-        let n = inc(at);
-        s.memo.resize(n, 0);
-        s.failed.resize(n, false);
+    sizes.seen.clear();
+    let size = build(inout sizes, inout types, in names, in world, defaulted, 0);
+    if slot >= sizes.memo.len() {
+        let new_len = inc(slot);
+        sizes.memo.resize(new_len, 0);
+        sizes.failed.resize(new_len, false);
     }
     if size == NO_SIZE {
-        let ok = s.failed.try_set(at, true);
+        let ok = sizes.failed.try_set(slot, true);
     } else {
-        let ok = s.memo.try_set(at, inc(size));
+        let ok = sizes.memo.try_set(slot, inc(size));
     }
     size
 }
 
 fn build(
-    inout s: Sizes,
-    inout t: Types,
+    inout sizes: Sizes,
+    inout types: Types,
     in names: Names,
-    in wd: World,
+    in world: World,
     ty: u32,
     depth: u64
 ) -> u64 {
-    let k = wd.k;
+    let known = world.k;
     if depth > 128 {
         return NO_SIZE;
     }
-    let n = t.node(ty);
-    let name = if n.kind == TyKind::Named { n.name } else { 0 };
-    let scalar = n.kind == TyKind::Lit
-        || n.kind == TyKind::Fn
-        || (n.kind == TyKind::Named && k.is_scalar(name))
-        || (n.kind == TyKind::Named && (name == k.region_box || name == k.watermark))
-        || (n.kind == TyKind::Named && name == k.tiled_seq && (n.n == 1 || n.n == 2))
-        || (n.kind == TyKind::Named && name == k.chunk_seq && n.n == 1)
-        || (wd.box_active && n.kind == TyKind::Named && name == k.box_ && n.n == 1)
-        || ty == t.unit;
+    let node = types.node(ty);
+    let name = if node.kind == TyKind::Named {
+        node.name
+    } else {
+        0
+    };
+    let scalar = node.kind == TyKind::Lit
+        || node.kind == TyKind::Fn
+        || (node.kind == TyKind::Named && known.is_scalar(name))
+        || (node.kind == TyKind::Named && (name == known.region_box || name == known.watermark))
+        || (node.kind == TyKind::Named && name == known.tiled_seq && (node.n == 1 || node.n == 2))
+        || (node.kind == TyKind::Named && name == known.chunk_seq && node.n == 1)
+        || (world.box_active && node.kind == TyKind::Named && name == known.box_ && node.n == 1)
+        || ty == types.unit;
     if scalar {
         return 8;
     }
     // A trait object is the pair `{data, vtable}`; a slice is the view
     // `{handle, start, len}`.
-    if n.kind == TyKind::Named && name == k.dyn_ && n.n == 1 {
+    if node.kind == TyKind::Named && name == known.dyn_ && node.n == 1 {
         return 16;
     }
-    if n.kind == TyKind::Named && name == k.slice && n.n == 1 {
+    if node.kind == TyKind::Named && name == known.slice && node.n == 1 {
         return 24;
     }
-    if n.kind == TyKind::Tuple {
+    if node.kind == TyKind::Tuple {
         let mut offset: i64 = 0;
-        for i in 0..w(n.n) {
-            let ft = u32_at(in t.items, add(w(n.a), i));
-            let l = build(inout s, inout t, in names, in wd, ft, inc(depth));
-            if l == NO_SIZE {
+        for i in 0..w(node.n) {
+            let field_ty = u32_at(in types.items, add(w(node.a), i));
+            let field_size = build(
+                inout sizes,
+                inout types,
+                in names,
+                in world,
+                field_ty,
+                inc(depth)
+            );
+            if field_size == NO_SIZE {
                 return NO_SIZE;
             }
-            offset = wrapping_add(offset, widen_i64(wrapping_i32(n32(l))));
+            offset = wrapping_add(offset, widen_i64(wrapping_i32(n32(field_size))));
             if !fits_i32(offset) {
                 return NO_SIZE;
             }
         }
         return max_u64(widen_u64(wrapping_u32(wrapping_i32(offset))), 8);
     }
-    let words = vector_words(in t, in names, k, ty);
+    let words = vector_words(in types, in names, known, ty);
     if words != 0 {
         return wrapping_mul(w(words), 8);
     }
-    if n.kind == TyKind::Named && n.n == 0 && (name == k.string || name == k.str_) {
+    if node.kind == TyKind::Named && node.n == 0 && (name == known.string || name == known.str_) {
         return 24;
     }
-    if n.kind != TyKind::Named {
+    if node.kind != TyKind::Named {
         return NO_SIZE;
     }
-    let ai = wd.lookup(name);
-    if ai == NONE32 {
+    let adt_index = world.lookup(name);
+    if adt_index == NONE32 {
         return NO_SIZE;
     }
-    let a = wd.adt(ai);
-    if a.gn != n.n {
+    let adt = world.adt(adt_index);
+    if adt.gn != node.n {
         return NO_SIZE;
     }
-    for i in 0..s.seen.len() {
-        if u32_at(in s.seen, i) == ty {
+    for i in 0..sizes.seen.len() {
+        if u32_at(in sizes.seen, i) == ty {
             return NO_SIZE;
         }
     }
-    s.seen.push(ty);
-    let vars = wd.vars_of(in t, a, ty);
+    sizes.seen.push(ty);
+    let vars = world.vars_of(in types, adt, ty);
     let mut size: u64 = 8;
-    for vi in 0..w(a.vn) {
-        let v = wd.variant(add(w(a.va), vi));
-        let mut offset: i64 = if a.is_enum { 8 } else { 0 };
-        for fi in 0..w(v.fc) {
-            let f = wd.field(add(w(v.fa), fi));
-            let ft = substitute(inout t, f.ty, in vars);
-            let l = build(inout s, inout t, in names, in wd, ft, inc(depth));
-            if l == NO_SIZE {
+    for vi in 0..w(adt.vn) {
+        let variant = world.variant(add(w(adt.va), vi));
+        let mut offset: i64 = if adt.is_enum { 8 } else { 0 };
+        for fi in 0..w(variant.fc) {
+            let field = world.field(add(w(variant.fa), fi));
+            let field_ty = substitute(inout types, field.ty, in vars);
+            let field_size = build(
+                inout sizes,
+                inout types,
+                in names,
+                in world,
+                field_ty,
+                inc(depth)
+            );
+            if field_size == NO_SIZE {
                 return NO_SIZE;
             }
-            offset = wrapping_add(offset, widen_i64(wrapping_i32(n32(l))));
+            offset = wrapping_add(offset, widen_i64(wrapping_i32(n32(field_size))));
             if !fits_i32(offset) {
                 return NO_SIZE;
             }
         }
         size = max_u64(size, widen_u64(wrapping_u32(wrapping_i32(offset))));
     }
-    let last = wrapping_sub(s.seen.len(), 1);
-    s.seen.truncate(last);
+    let last = wrapping_sub(sizes.seen.len(), 1);
+    sizes.seen.truncate(last);
     size
 }
