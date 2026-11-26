@@ -8,6 +8,9 @@
 // Arguments are one byte arena (`Args`): every argument after the program
 // name, end to end, and the end offset of each. Option values live in the
 // `Options` text arena as spans.
+use self::triple::{
+    parse as parse_triple
+};
 use @vesper-std/fmt::{
     parse_u64
 };
@@ -1162,5 +1165,23 @@ pub fn with_extension_text(in input: Str) -> ChunkSeq[u64] {
     let p = with_extension(in b[1..b.len()], in "vesper.o", windows);
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
     pack(inout out, in p.as_slice());
+    out
+}
+
+// `triple::parse` of a `--target` value (the test hook of
+// tests/self_host_driver.rs, #1896): 1 and the five field codes, or 0.
+pub fn triple_words(in input: Str) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    match parse_triple(in input.as_bytes()) {
+        Option::Some(t) => {
+            out.push(1);
+            out.push(widen_u64(t.arch));
+            out.push(widen_u64(t.vendor));
+            out.push(widen_u64(t.os));
+            out.push(widen_u64(t.env));
+            out.push(widen_u64(t.binary_format));
+        },
+        Option::None => out.push(0),
+    }
     out
 }

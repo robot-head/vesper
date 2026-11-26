@@ -263,27 +263,27 @@ fn passes_with(args: &[&str], swaps: &str) -> u64 {
 }
 
 /// `--emit cst` of a standalone source runs no session pass after the
-/// load (IsPackage, Load); a package still runs Parse and EmitCst.
+/// load (Load; the driver decides whether the input is a package itself,
+/// #1896); a package still runs Parse and EmitCst.
 #[test]
 fn emit_cst_runs_in_the_vesper_driver() {
     assert_eq!(
         passes(&["emit", "--emit", "cst", "examples/counter.ves"]),
-        2
+        1
     );
-    // A syntax error goes to the session's passes (IsPackage, Load, Parse,
-    // EmitCst).
+    // A syntax error goes to the session's passes (Load, Parse, EmitCst).
     let scratch =
         std::env::temp_dir().join(format!("vesper-driver-front-cst-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
     let bad = scratch.join("bad.ves");
     std::fs::write(&bad, "fn main( -> i64 {\n").unwrap();
-    assert_eq!(passes(&["emit", "--emit", "cst", bad.to_str().unwrap()]), 4);
+    assert_eq!(passes(&["emit", "--emit", "cst", bad.to_str().unwrap()]), 3);
     let _ = std::fs::remove_dir_all(&scratch);
     // The driver's parse is the parse swap's: with no swaps, the session
     // parses and dumps.
     assert_eq!(
         passes_with(&["emit", "--emit", "cst", "examples/counter.ves"], "none"),
-        4
+        3
     );
 }
 

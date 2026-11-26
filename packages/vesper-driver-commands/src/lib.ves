@@ -33,6 +33,7 @@ use @vesper-std/process::{
 };
 use @vesper-std/fs::{
     IoError,
+    error_text,
     not_found,
     symlink_metadata,
     kind_dir,
@@ -77,6 +78,7 @@ use self::lsp::{
 enum Ascii: _ {
     LineFeed = 10,
     DoubleQuote = 34,
+    RightParen = 41,
     Dash = 45,
     Slash = 47,
     Digit0 = 48,
@@ -369,18 +371,15 @@ fn host_text_or_empty(which: u32) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
     host_text(which, inout none)
 }
 
-// Rust's `Display` of the `io::Error` with this host error word.
-fn io_error_text(word: u64) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
-    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    buf.resize(ERROR_TEXT_INITIAL_BYTES, 0);
-    let mut none = false;
-    loop {
-        let n = HybridCommands::hc_io_error(word, inout buf.as_slice_mut());
-        if !grown(n, inout buf, inout none) {
-            break;
+// Rust's `Display` of the `io::Error` with this error word (the kind in
+// the low byte, the OS error in the high half): @vesper-std/fs's text.
+pub fn io_error_text(word: u64) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    error_text(
+        IoError {
+            kind: wrapping_u32(word & 255),
+            os: wrapping_u32(word >> 32),
         }
-    }
-    buf
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -426,7 +425,7 @@ fn is_separator(b: u8, windows: bool) -> bool {
 
 // `Path::join` of a relative `name`: an empty directory gives the name,
 // and a separator is added unless the directory ends with one.
-fn join(in dir: Slice[u8], in name: Slice[u8], windows: bool) -> ChunkSeq[u8] {
+pub fn join(in dir: Slice[u8], in name: Slice[u8], windows: bool) -> ChunkSeq[u8] {
     let mut p: ChunkSeq[u8] = ChunkSeq::new[u8]();
     p.extend(in dir);
     // `PathBuf::push` adds no separator after an ordinary bare drive (`C:`):
@@ -593,7 +592,8 @@ fn missing(in t: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
 // `run` and `exit_code`: the tool with the arguments after the command,
 // inheriting the standard streams; its exit code, 128 plus the signal that
 // killed it, or 1.
-fn run_tool(in binary: Slice[u8], in args: Args) -> i64 eff [Ffi[StdProcess], Ffi[HybridCommands]] {
+fn run_tool(in binary: Slice[u8], in args: Args)
+    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[HybridCommands]] {
     let mut c = command_path(in binary);
     let n = args_count(in args);
     for i in 1..n {
@@ -620,8 +620,55 @@ fn run_tool(in binary: Slice[u8], in args: Args) -> i64 eff [Ffi[StdProcess], Ff
     }
 }
 
+// `measure_tee` of src/main.rs for `vesper build --tee` (hd_step group 1,
+// #1896): `vesper-tee measure <path>` with the CLI's standard streams; 0,
+// or 1 once its error is printed.
+pub fn measure_tee(in path: Slice[u8])
+    -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] {
+    let binary = locate(in "tee".as_bytes());
+    if binary.len() == 0 {
+        return missing(in "tee".as_bytes());
+    }
+    let mut c = command_path(in binary.as_slice());
+    proc_arg(inout c, in "measure".as_bytes());
+    proc_arg(inout c, in path);
+    let mut ch = match spawn(c) {
+        Result::Ok(ch) => ch,
+        Result::Err(e) => return spawn_failed(in binary.as_slice(), e),
+    };
+    let waited = wait(inout ch);
+    release(ch);
+    let code = match waited {
+        Result::Ok(st) => {
+            if st.exited {
+                st.code
+            } else if st.signal != 0 {
+                wrapping_add(SIGNAL_EXIT_BASE, widen_i64(st.signal))
+            } else {
+                1
+            }
+        },
+        Result::Err(e) => return spawn_failed(in binary.as_slice(), e),
+    };
+    if code == 0 {
+        return 0;
+    }
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m.extend(in "vesper-tee could not measure ".as_bytes());
+    m.extend(in path);
+    m.extend(in " (exit ".as_bytes());
+    if code < 0 {
+        m.push(Ascii::Dash);
+        push_decimal(inout m, wrapping_sub(0, wrapping_u64(code)));
+    } else {
+        push_decimal(inout m, wrapping_u64(code));
+    }
+    m.push(Ascii::RightParen);
+    fail(in m.as_slice())
+}
+
 // `{binary}: {e}`.
-fn spawn_failed(in binary: Slice[u8], e: IoError) -> i64 eff [Ffi[HybridCommands]] {
+fn spawn_failed(in binary: Slice[u8], e: IoError) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands]] {
     let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
     m.extend(in binary);
     m.extend(in ": ".as_bytes());
