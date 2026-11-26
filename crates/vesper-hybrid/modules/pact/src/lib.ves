@@ -5,17 +5,9 @@
 // @export abi 4
 
 use @vesper/check-pact::{
-    PactSession,
-    builtin_wanted_words,
-    declarations_words,
-    deps_words,
-    session_is_ok,
-    session_mono_check_words,
-    session_mono_plan_words,
-    session_open,
-    session_revision,
-    session_solve,
-    session_take_diagnostics
+    PactSession, builtin_wanted_words, declarations_words, deps_words, session_is_ok,
+    session_mono_check_words, session_mono_plan_words, session_open, session_revision,
+    session_solve, session_take_diagnostics
 };
 
 // The layout version of the hybrid pact module; the hybrid's tests check it.

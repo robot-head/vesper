@@ -7,61 +7,17 @@
 // Locations and Walsh sums need up to 67 bits, so they are `W` values
 // (module wide); ranks are doubled so midranks stay integers, as in Rust.
 use self::{
-    HlGate,
-    HlOut,
-    HodgesLehmannError,
-    PairedConfError,
-    PairedDifferenceError,
-    Sample,
-    Segment,
-    SignedRankConfidenceError,
-    SignedRankError,
-    SignedRankProbability,
-    W,
-    WalshEstimateError,
+    HlGate, HlOut, HodgesLehmannError, PairedConfError, PairedDifferenceError, Sample, Segment,
+    SignedRankConfidenceError, SignedRankError, SignedRankProbability, W, WalshEstimateError,
     WalshOut
 };
 use self::util::{
-    I64_MAX,
-    I64_MIN_MAGNITUDE,
-    MAX_PAIRS,
-    add,
-    add_rank,
-    cu,
-    cw,
-    dec,
-    gi,
-    gs,
-    inc,
-    min_u64,
-    mul,
-    pow2,
-    rem,
-    div,
-    sort_u64,
-    sort_w,
-    sub,
-    tail_sum,
-    uabs,
-    zeros
+    I64_MAX, I64_MIN_MAGNITUDE, MAX_PAIRS, add, add_rank, cu, cw, dec, gi, gs, inc, min_u64, mul,
+    pow2, rem, div, sort_u64, sort_w, sub, tail_sum, uabs, zeros
 };
 use self::wide::{
-    w,
-    w_to_i128,
-    w_add,
-    w_eq,
-    w_i64,
-    w_is_neg,
-    w_is_zero,
-    w_mul_u64,
-    w_slt,
-    w_sub,
-    w_twice,
-    w_u64,
-    w_uabs,
-    w_ucmp,
-    w_ult,
-    w_zero
+    w, w_to_i128, w_add, w_eq, w_i64, w_is_neg, w_is_zero, w_mul_u64, w_slt, w_sub, w_twice, w_u64,
+    w_uabs, w_ucmp, w_ult, w_zero
 };
 
 // A two-sided 5% test: each tail holds at most 1/TAIL_LIMIT_SCALE of the

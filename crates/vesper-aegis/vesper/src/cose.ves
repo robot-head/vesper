@@ -3,39 +3,10 @@
 // construction, and COSE_Key EC2 P-384 decoding for Arm CCA RAKs.
 use self::{AErr, AtErr};
 use self::cbor::{
-    CBOR_MAJOR_SHIFT,
-    CborAdditional,
-    CborMajor,
-    I64_MAX,
-    K_ARRAY,
-    K_BYTES,
-    K_MAP,
-    K_NEED_SCRATCH,
-    K_NINT,
-    K_NULL,
-    K_TAG,
-    K_TEXT,
-    K_UINT,
-    R_MALFORMED,
-    SCRATCH_BIT,
-    Scratch,
-    arg,
-    cbor_err,
-    cur_len,
-    decode_span,
-    decode_whole_at,
-    i64_bits,
-    int_nodes_eq,
-    is_i64,
-    kind,
-    materialize_bytes,
-    put_str,
-    set_len,
-    skip,
-    str_byte,
-    str_len,
-    str_nodes_eq,
-    text_eq_s
+    CBOR_MAJOR_SHIFT, CborAdditional, CborMajor, I64_MAX, K_ARRAY, K_BYTES, K_MAP, K_NEED_SCRATCH,
+    K_NINT, K_NULL, K_TAG, K_TEXT, K_UINT, R_MALFORMED, SCRATCH_BIT, Scratch, arg, cbor_err,
+    cur_len, decode_span, decode_whole_at, i64_bits, int_nodes_eq, is_i64, kind, materialize_bytes,
+    put_str, set_len, skip, str_byte, str_len, str_nodes_eq, text_eq_s
 };
 use self::reader::put;
 

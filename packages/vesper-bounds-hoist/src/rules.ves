@@ -4,19 +4,7 @@
 // `single_bindings`). A block set is a sorted `ChunkSeq[u32]`.
 
 use self::fun::{
-    Arg,
-    Blk,
-    Fun,
-    Ins,
-    add,
-    has,
-    has_receiver,
-    inc,
-    insert,
-    is_hoisted,
-    keeps_length,
-    n32,
-    u32_at,
+    Arg, Blk, Fun, Ins, add, has, has_receiver, inc, insert, is_hoisted, keeps_length, n32, u32_at,
     w
 };
 use @vesper/check-data::types::{TyPass};

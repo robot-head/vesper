@@ -23,38 +23,12 @@
 //     the returned pool.
 use self::{Acc, D, G, Opd, Q, Rel, V, Val};
 use self::util::{
-    bool_val,
-    bound,
-    cb,
-    cw,
-    div_rem,
-    ex,
-    fail,
-    lim,
-    new_d,
-    new_q,
-    node,
-    link,
-    none,
-    null_val,
-    order,
-    put,
-    put_u64,
-    same,
-    sw
+    bool_val, bound, cb, cw, div_rem, ex, fail, lim, new_d, new_q, node, link, none, null_val,
+    order, put, put_u64, same, sw
 };
 use self::check::{ex_end};
 use self::values::{
-    bind_val,
-    compare_vals,
-    dtab,
-    find_data,
-    size_value,
-    size_vec,
-    tick,
-    val_at,
-    vheap,
-    width
+    bind_val, compare_vals, dtab, find_data, size_value, size_vec, tick, val_at, vheap, width
 };
 use self::entry::{load_query};
 

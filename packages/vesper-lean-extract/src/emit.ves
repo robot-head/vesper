@@ -16,67 +16,17 @@ use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, w};
 use @vesper/check-data::world::{Adt, Variant, World, constructor};
 use @vesper/place-ir::{InstRow, Program};
 use self::build::{
-    B,
-    B_EXPLICIT,
-    B_IMPLICIT,
-    D_DEF,
-    K_PARTIAL,
-    OP_ADD,
-    OP_BOOL_AND,
-    OP_BOOL_EQ,
-    OP_BOOL_NE,
-    OP_BOOL_OR,
-    OP_DIV,
-    OP_GE,
-    OP_GT,
-    OP_LE,
-    OP_LT,
-    OP_MOD,
-    OP_MUL,
-    OP_SUB,
-    P_BIND,
-    P_BOOL,
-    P_CTOR,
-    P_INT,
-    P_STRING,
-    P_TUPLE,
-    P_WILD,
-    S_LET,
-    T_APP,
-    T_ASCRIBE,
-    T_BOOL,
-    T_DO,
-    T_FUN,
-    T_IF,
-    T_MATCH,
-    T_NAT,
-    T_PRODUCT,
-    T_PROJECT,
-    T_REF,
-    T_STRING,
-    T_TUPLE,
-    T_UNARY,
-    T_UPDATE,
-    U_BOOL_NOT,
-    U_NEG,
+    B, B_EXPLICIT, B_IMPLICIT, D_DEF, K_PARTIAL, OP_ADD, OP_BOOL_AND, OP_BOOL_EQ, OP_BOOL_NE,
+    OP_BOOL_OR, OP_DIV, OP_GE, OP_GT, OP_LE, OP_LT, OP_MOD, OP_MUL, OP_SUB, P_BIND, P_BOOL, P_CTOR,
+    P_INT, P_STRING, P_TUPLE, P_WILD, S_LET, T_APP, T_ASCRIBE, T_BOOL, T_DO, T_FUN, T_IF, T_MATCH,
+    T_NAT, T_PRODUCT, T_PROJECT, T_REF, T_STRING, T_TUPLE, T_UNARY, T_UPDATE, U_BOOL_NOT, U_NEG,
     put_decimal
 };
 use self::ty::{emit_ty, spells, ty_check};
 use self::fn_input::{Fns, Sig, SigParam};
 use self::cfg::{
-    ARG_WORDS,
-    Fun,
-    NONE32,
-    NONE64,
-    arg_at,
-    arm_bindings,
-    block_has,
-    block_params,
-    fun,
-    liveness,
-    pattern_end,
-    set_next,
-    takes
+    ARG_WORDS, Fun, NONE32, NONE64, arg_at, arm_bindings, block_has, block_params, fun, liveness,
+    pattern_end, set_next, takes
 };
 use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
 

@@ -8,16 +8,7 @@
 // holds `len` records from `head`: ascending packet numbers, acknowledged
 // and lost ones being tombstones until they reach the front.
 use self::{
-    AckOut,
-    AckRange,
-    PtoOut,
-    RecEntry,
-    RecErr,
-    RecEvent,
-    RecSpace,
-    RecState,
-    Rtt,
-    TimeoutOut
+    AckOut, AckRange, PtoOut, RecEntry, RecErr, RecEvent, RecSpace, RecState, Rtt, TimeoutOut
 };
 use self::frame::{fr_wire_next};
 use self::pn::{pn_limit};

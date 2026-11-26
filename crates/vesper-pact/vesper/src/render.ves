@@ -3,41 +3,10 @@
 // renderings that diagnostics quote, appended to `s.txt`.
 use self::{S};
 use self::term::{
-    b_canon,
-    b_named,
-    b_var,
-    c_nested,
-    dec,
-    field_a,
-    field_b,
-    field_c,
-    g_impl,
-    g_peq,
-    g_row,
-    inc,
-    kid,
-    kid_count,
-    l_eff,
-    m_const,
-    m_var,
-    none,
-    r_indcyc,
-    r_modelmis,
-    r_nocand,
-    st_alias,
-    st_assume,
-    st_conf,
-    st_mode,
-    st_norm,
-    st_passume,
-    st_pconf,
-    st_rigid,
-    t_ctor,
-    t_proj,
-    t_var,
-    tag_of,
-    vidx,
-    vkind
+    b_canon, b_named, b_var, c_nested, dec, field_a, field_b, field_c, g_impl, g_peq, g_row, inc,
+    kid, kid_count, l_eff, m_const, m_var, none, r_indcyc, r_modelmis, r_nocand, st_alias,
+    st_assume, st_conf, st_mode, st_norm, st_passume, st_pconf, st_rigid, t_ctor, t_proj, t_var,
+    tag_of, vidx, vkind
 };
 
 // ASCII bytes.

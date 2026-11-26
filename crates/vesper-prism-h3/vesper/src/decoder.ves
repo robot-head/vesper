@@ -11,36 +11,15 @@ use self::{DecoderCore, Sections, QpackError, Reason, PrefixError, Huff};
 use self::int::{inc, word, byte, max64, sat_add, sat_mul, remove_word, drain_front};
 use self::prefix::{Num, decode_int, encode_int, decode_string};
 use self::table::{
-    Static,
-    Table,
-    static_name_lo,
-    static_name_hi,
-    static_value_hi,
-    table_slot,
-    table_insert,
-    table_set_capacity,
-    slot_name_lo,
-    slot_name_hi,
-    slot_value_hi
+    Static, Table, static_name_lo, static_name_hi, static_value_hi, table_slot, table_insert,
+    table_set_capacity, slot_name_lo, slot_name_hi, slot_value_hi
 };
 
 use self::reason::{reason_of};
 use self::wire::{
-    Duplicate,
-    Indexed,
-    IndexedPostBase,
-    InsertCountIncrement,
-    InsertLiteral,
-    InsertNameRef,
-    LiteralName,
-    NameRef,
-    PostBaseNameRef,
-    SectionAck,
-    SectionPrefix,
-    SetCapacity,
-    StreamCancel,
-    ENTRY_OVERHEAD,
-    VALUE_PREFIX
+    Duplicate, Indexed, IndexedPostBase, InsertCountIncrement, InsertLiteral, InsertNameRef,
+    LiteralName, NameRef, PostBaseNameRef, SectionAck, SectionPrefix, SetCapacity, StreamCancel,
+    ENTRY_OVERHEAD, VALUE_PREFIX
 };
 
 // QPACK wire patterns (RFC 9204 §4): first-byte bits

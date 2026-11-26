@@ -3,22 +3,8 @@
 // to 6). Format code 2 (SnpReport).
 use self::{AErr, Rd};
 use self::reader::{
-    arr,
-    byte,
-    finish,
-    k_reserved,
-    nonzero,
-    raise,
-    rd,
-    reserved,
-    take,
-    rd_u32,
-    rd_u64,
-    unsupported,
-    zero,
-    put,
-    k_trailing,
-    k_unsupported
+    arr, byte, finish, k_reserved, nonzero, raise, rd, reserved, take, rd_u32, rd_u64, unsupported,
+    zero, put, k_trailing, k_unsupported
 };
 
 // src/snp.rs: the report versions read (2 to 6; CPUID fields from 3,

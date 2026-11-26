@@ -7,16 +7,7 @@ use self::util::{inc32, n32, u32_at};
 use self::names::{names_sized, Names, names_new};
 use self::types::{EffNode, Types, types_new, TyKind};
 use self::world::{
-    Adt,
-    EffectRow,
-    Field,
-    SpanRow,
-    Generic,
-    Variant,
-    World,
-    known_new,
-    set_by_symbol,
-    world_new
+    Adt, EffectRow, Field, SpanRow, Generic, Variant, World, known_new, set_by_symbol, world_new
 };
 
 const NONE32: u32 = 4294967295;

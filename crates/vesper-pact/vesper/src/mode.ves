@@ -3,27 +3,8 @@
 // for the mode of an unresolved inference variable.
 use self::{S};
 use self::term::{
-    add,
-    field_a,
-    field_b,
-    field_c,
-    inc,
-    intern1,
-    intern_with_kids,
-    is_inf,
-    k_list,
-    kid,
-    kid_count,
-    m_const,
-    m_var,
-    none,
-    push_kids,
-    t_ctor,
-    t_var,
-    tag_of,
-    vidx,
-    vkind,
-    word_at
+    add, field_a, field_b, field_c, inc, intern1, intern_with_kids, is_inf, k_list, kid, kid_count,
+    m_const, m_var, none, push_kids, t_ctor, t_var, tag_of, vidx, vkind, word_at
 };
 use self::fold::{inst};
 

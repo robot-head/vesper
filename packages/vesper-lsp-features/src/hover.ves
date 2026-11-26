@@ -16,25 +16,8 @@ use @vesper/check-data::world::{Bounds, bounds_new, mode_of};
 use @vesper-std/arena::{idx_from_raw};
 use self::json::{byte, put, put_bytes, put_string};
 use self::nav::{
-    Ix,
-    ERR_NONE,
-    ERR_TRAVERSAL,
-    ERR_OUTPUT_BYTES,
-    MAX_DEPTH,
-    MAX_OUTPUT_BYTES,
-    cursor,
-    fn_at,
-    hi,
-    lo,
-    n32,
-    node_at,
-    param_at,
-    put_name,
-    put_source_range,
-    token_start,
-    u32_at,
-    u8_at,
-    w
+    Ix, ERR_NONE, ERR_TRAVERSAL, ERR_OUTPUT_BYTES, MAX_DEPTH, MAX_OUTPUT_BYTES, cursor, fn_at, hi,
+    lo, n32, node_at, param_at, put_name, put_source_range, token_start, u32_at, u8_at, w
 };
 use @vesper/front::lex::{token_end};
 

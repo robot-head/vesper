@@ -2,23 +2,8 @@
 use self::codes::{Budget, OpTag, ValueTag, MAX_U64, NONE_ID};
 use self::{MNode, MProp, MSub, Mounted, Op, Prepared, Tree, ViewFault};
 use self::util::{
-    add,
-    bytes_eq,
-    dec,
-    find_key,
-    fits,
-    inc,
-    insert_at,
-    mnode,
-    mprop,
-    msub,
-    op,
-    position,
-    remove_at,
-    seq_u64,
-    tnode,
-    tprop,
-    tsub
+    add, bytes_eq, dec, find_key, fits, inc, insert_at, mnode, mprop, msub, op, position, remove_at,
+    seq_u64, tnode, tprop, tsub
 };
 use self::view::{tree_find, tree_new};
 

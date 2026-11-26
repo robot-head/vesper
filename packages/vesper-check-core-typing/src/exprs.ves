@@ -15,40 +15,16 @@
 use @vesper/check-data::util::{add, inc, n32, u32_at, u8_at, w};
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
-    Types,
-    Vars,
-    debug_type,
-    default_type,
-    substitute,
-    vars_new,
-    TyKind,
-    TyMode
+    Types, Vars, debug_type, default_type, substitute, vars_new, TyKind, TyMode
 };
 use @vesper/check-data::world::{
-    Adt,
-    Bounds,
-    Field,
-    Generic,
-    Known,
-    Variant,
-    World,
-    bounds_new,
-    constructor,
-    field_step,
-    mode_of,
-    set_by_symbol
+    Adt, Bounds, Field, Generic, Known, Variant, World, bounds_new, constructor, field_step,
+    mode_of, set_by_symbol
 };
 use @vesper/check-data::input::{Ctx, Reader};
 use self::ints::{Lit, default_fits, default_of, fits, lit_max};
 use self::relations::{
-    compatible,
-    infer,
-    item,
-    join_types,
-    lit_of,
-    mk_lit,
-    refine_annotation,
-    unresolved
+    compatible, infer, item, join_types, lit_of, mk_lit, refine_annotation, unresolved
 };
 use self::patterns::{Pats, arms_cover, irrefutable, pats_new};
 

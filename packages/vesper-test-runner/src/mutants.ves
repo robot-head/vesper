@@ -8,19 +8,8 @@
 // (tests/common/test_mutants_words.rs).
 
 use @vesper/ast::{
-    ArgNode,
-    Ast,
-    ClauseNode,
-    ConfNode,
-    FnNode,
-    ImplNode,
-    ItemNode,
-    StmtNode,
-    expr_at,
-    list_at,
-    list_len,
-    lit_at,
-    none
+    ArgNode, Ast, ClauseNode, ConfNode, FnNode, ImplNode, ItemNode, StmtNode, expr_at, list_at,
+    list_len, lit_at, none
 };
 use @vesper/ast::lower::{lower_source};
 use @vesper-std/arena::{idx_from_raw};
@@ -28,17 +17,7 @@ use @vesper-std/intern::{symbol_from_id};
 use @vesper/front::kinds::{k_block_comment, k_comment, k_whitespace};
 use self::discover::{Toks, case_marker, is_test_marker, preceding_comments, toks};
 use self::util::{
-    Reader,
-    add,
-    inc,
-    is_text,
-    put_text,
-    same,
-    sub,
-    trim_end,
-    trim_start,
-    u8_at,
-    u64_at
+    Reader, add, inc, is_text, put_text, same, sub, trim_end, trim_start, u8_at, u64_at
 };
 
 // The interned operators a site can replace.

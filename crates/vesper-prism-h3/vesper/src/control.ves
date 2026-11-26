@@ -10,17 +10,8 @@ use self::{Settings, FrameError, FrameOut, FrameReaderCore, ConnectionError, Uni
 use self::int::{inc, word, byte, remove_word};
 use self::varint::{vdec};
 use self::frame::{
-    cancel_push_type,
-    data_type,
-    goaway_type,
-    headers_type,
-    max_push_id_type,
-    push_promise_type,
-    reader_new,
-    reader_push,
-    reader_next,
-    settings_type,
-    webtransport_stream_type
+    cancel_push_type, data_type, goaway_type, headers_type, max_push_id_type, push_promise_type,
+    reader_new, reader_push, reader_next, settings_type, webtransport_stream_type
 };
 use self::priority::{priority_update_push, priority_update_request};
 

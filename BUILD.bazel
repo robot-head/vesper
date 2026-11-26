@@ -435,6 +435,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Stage 2 retirement (#2053): @vesper/run against `Runtime::run`
+        # over the same corpus.
+        "test/self_host_run": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # SH3 lane 13 (#1252): @vesper/place-ir-lower against
         # `ir::lower_world` over the same corpus.
         "test/self_host_ir_lower": glob([
@@ -1262,6 +1269,8 @@ vesper_crate(
         "test/self_host_codegen_export": "long",
         "test/self_host_place_ir_jit": "long",
         "test/self_host_ir_lower": "long",
+        # Every runnable corpus world under six fuel and optimizer settings.
+        "test/self_host_run": "long",
         # The eBPF backend differential (#1290) loads every corpus world.
         "test/self_host_ebpf_backend": "long",
         "test/self_host_codegen_calls": "long",
@@ -1599,6 +1608,21 @@ vesper_package(
     deps = ["//crates/vesper-serde:port_package"],
 )
 
+# The verified code generator (#1886, part 4d-2), for the hybrid's
+# `verified_codegen` swap.
+vesper_package(
+    name = "verified_codegen_package",
+    srcs = glob(["packages/vesper-verified-codegen/src/**/*.ves"]),
+    manifest = "packages/vesper-verified-codegen/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":check_layout_package",
+        ":place_ir_package",
+        ":std_collections_package",
+    ],
+)
+
 # Self-hosting SH5 lane 18 (#1341): Lean extraction, for the hybrid's
 # `lean_extract` swap.
 # @vesper/proof-audit, `vesper proof-audit` in Vesper (SH5 lane 18, #1341),
@@ -1669,6 +1693,19 @@ vesper_package(
     manifest = "packages/vesper-place-ir/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [":check_data_package"],
+)
+
+# The `vesper run` evaluator for the hybrid compiler's run module (Stage 2
+# retirement, #2053).
+vesper_package(
+    name = "run_package",
+    srcs = glob(["packages/vesper-run/src/**/*.ves"]),
+    manifest = "packages/vesper-run/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":place_ir_package",
+    ],
 )
 
 # The scalar lowering's plan and emission for the hybrid compiler's

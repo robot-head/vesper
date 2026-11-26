@@ -14,19 +14,8 @@
 
 use @vesper/ast::lower::{lower_source};
 use @vesper/front::kinds::{
-    k_affine,
-    k_block_comment,
-    k_comment,
-    k_copy,
-    k_effect,
-    k_enum,
-    k_eof,
-    k_fn,
-    k_impl,
-    k_linear,
-    k_lower,
-    k_struct,
-    k_whitespace
+    k_affine, k_block_comment, k_comment, k_copy, k_effect, k_enum, k_eof, k_fn, k_impl, k_linear,
+    k_lower, k_struct, k_whitespace
 };
 use self::discover::{toks};
 use self::util::{Reader, inc, is_text, push_range, put_buf, u8_at, u64_at};

@@ -15,23 +15,8 @@
 // environment entry names its fresh name by purpose and number.
 
 use @vesper/ast::{
-    Ast,
-    ArgNode,
-    ClauseNode,
-    ConfNode,
-    ExprNode,
-    FnNode,
-    ImplNode,
-    ItemNode,
-    ParamNode,
-    PatNode,
-    StmtNode,
-    TraitNode,
-    expr_at,
-    list_at,
-    list_len,
-    none,
-    pat_at
+    Ast, ArgNode, ClauseNode, ConfNode, ExprNode, FnNode, ImplNode, ItemNode, ParamNode, PatNode,
+    StmtNode, TraitNode, expr_at, list_at, list_len, none, pat_at
 };
 use @vesper/ast::lower::{lower_source, lower_template_source};
 use @vesper-std/arena::{idx_from_raw};
@@ -39,31 +24,10 @@ use @vesper-std/intern::{symbol_from_id};
 use @vesper/front::lex::{lex_raw, token_end, trivia_kind};
 use @vesper/front::diag::{diags_new};
 use @vesper/front::kinds::{
-    k_colon,
-    k_comma,
-    k_eof,
-    k_fat_arrow,
-    k_inout,
-    k_let,
-    k_l_paren,
-    k_r_paren,
-    k_semi,
-    k_sink
+    k_colon, k_comma, k_eof, k_fat_arrow, k_inout, k_let, k_l_paren, k_r_paren, k_semi, k_sink
 };
 use self::template::{
-    Caps,
-    Sk,
-    add,
-    b8,
-    cap_at,
-    inc,
-    push_decimal,
-    push_range,
-    sort_in,
-    sub,
-    text_is,
-    value_at,
-    w32,
+    Caps, Sk, add, b8, cap_at, inc, push_decimal, push_range, sort_in, sub, text_is, value_at, w32,
     w64
 };
 

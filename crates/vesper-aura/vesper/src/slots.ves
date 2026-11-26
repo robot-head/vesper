@@ -1,36 +1,12 @@
 // recording.rs: the slot, subscription and child patches.
 use self::apply::{
-    allocate,
-    budget,
-    foreign,
-    invalid,
-    push_text,
-    record,
-    same_text,
-    stale_widget,
-    word
+    allocate, budget, foreign, invalid, push_text, record, same_text, stale_widget, word
 };
 use self::codes::{Budget, Invalid, OpTag, ValueTag, WidgetKind, MAX_U64, NONE_ID};
 use self::recording::{
-    child_edge,
-    child_scan,
-    insert_edge,
-    move_edge,
-    move_target,
-    redge,
-    remove_edge,
-    rslot,
-    rsub,
-    rwidget,
-    session_ok,
-    set_widget,
-    slot_index,
-    sub_index,
-    widget_index,
-    widget_slot,
-    widget_slot_count,
-    widget_sub,
-    widget_sub_count
+    child_edge, child_scan, insert_edge, move_edge, move_target, redge, remove_edge, rslot, rsub,
+    rwidget, session_ok, set_widget, slot_index, sub_index, widget_index, widget_slot,
+    widget_slot_count, widget_sub, widget_sub_count
 };
 use self::{BackendFault, Edge, Lim, RSlot, RState, RSub, RWidget};
 use self::util::{dec, event_valid, inc, op, property_valid};

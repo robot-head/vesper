@@ -1,7 +1,7 @@
 //! `vesper build --codegen verified`: write a static ELF executable, link
 //! the Mach-O object with the system linker, or link the COFF object with
 //! the MSVC linker.
-use super::{Container, Options, Target, compile};
+use super::{Container, Options, Target, build};
 use crate::check::World;
 use std::path::Path;
 
@@ -25,7 +25,7 @@ pub fn build_command(
         optimize,
         ..Options::new(target)
     };
-    let artifact = compile(world, entry, &options).map_err(|e| e.to_string())?;
+    let artifact = build(world, entry, &options).map_err(|e| e.to_string())?;
     match artifact.container {
         Container::ElfExecutable => {
             std::fs::write(output, &artifact.bytes)

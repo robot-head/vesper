@@ -8,36 +8,9 @@
 
 use @vesper-std/intern::{symbol_from_id};
 use self::state::{
-    St,
-    at32,
-    at64,
-    const_of,
-    const_prefix,
-    join_path,
-    kind_both,
-    kind_sugar,
-    kind_value,
-    emit,
-    err,
-    find_module,
-    hi,
-    inc,
-    lo,
-    mod_path_into,
-    mod_path_len,
-    mod_seg,
-    n32,
-    none,
-    pair,
-    push_decimal,
-    push_sym,
-    sym_byte,
-    sym_len,
-    sym_less,
-    sym_path_split,
-    sym_slice,
-    sym_starts,
-    w
+    St, at32, at64, const_of, const_prefix, join_path, kind_both, kind_sugar, kind_value, emit, err,
+    find_module, hi, inc, lo, mod_path_into, mod_path_len, mod_seg, n32, none, pair, push_decimal,
+    push_sym, sym_byte, sym_len, sym_less, sym_path_split, sym_slice, sym_starts, w
 };
 
 pub fn no_key() -> u64 {

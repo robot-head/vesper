@@ -17,19 +17,8 @@
 // and `Op::Indirect`, is declined, so the Rust code emits it.
 
 use @vesper/cranelift::{
-    FuncRef,
-    SigRef,
-    Value,
-    call_arg,
-    call_arg_count,
-    call_builder,
-    call_op,
-    call_result_value,
-    call_return_builder,
-    inst_result,
-    ins_call,
-    ins_call_indirect,
-    value_of_word
+    FuncRef, SigRef, Value, call_arg, call_arg_count, call_builder, call_op, call_result_value,
+    call_return_builder, inst_result, ins_call, ins_call_indirect, value_of_word
 };
 use @vesper/codegen-base::{DECLINED, HANDLED, arg_u32, arg_value};
 

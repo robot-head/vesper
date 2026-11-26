@@ -2,11 +2,7 @@
 use self::codes::{Budget, Invalid, OpTag, ValueTag, MAX_U64, NONE_ID};
 use self::recording::{copy_state, redge, rslot, rwidget, session_ok, widget_index};
 use self::slots::{
-    patch_bind_slot,
-    patch_children,
-    patch_disconnect,
-    patch_set_slot,
-    patch_subscribe,
+    patch_bind_slot, patch_children, patch_disconnect, patch_set_slot, patch_subscribe,
     patch_unbind_slot
 };
 use self::{BackendFault, Lim, Op, RSlot, RState, Recorder};

@@ -6,22 +6,8 @@
 // value, the depth-0 call Rust makes everywhere.
 
 use self::fun::{
-    Arg,
-    Blk,
-    Fun,
-    Ins,
-    add,
-    has,
-    hoistable,
-    inc,
-    insert,
-    n32,
-    set_u32,
-    set_u8,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
+    Arg, Blk, Fun, Ins, add, has, hoistable, inc, insert, n32, set_u32, set_u8, u32_at, u64_at,
+    u8_at, w
 };
 use self::graph::{Graph, graph, successors};
 use self::rules::{all_blocks, block_drop_overlaps, changes_len, single_bindings, stable_place};
