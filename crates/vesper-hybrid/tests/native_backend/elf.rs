@@ -11,7 +11,11 @@ const EXTERNAL: &[u8] = b"sh7_plus";
 const LOCAL: &[u8] = b"sh7_local";
 const ADDRESS: &[u8] = b"sh7_addr";
 const GOT_CALL: &[u8] = b"sh7_via_got";
+const READ: &[u8] = b"sh7_read";
+const CONSTANT: &[u8] = b"sh7_constant";
 const TEXT_ALIGNMENT: u64 = 16;
+const RODATA_ALIGNMENT: u64 = 16;
+const RODATA: &[u8] = &[13, 41, 37];
 const TEXT: &[u8] = &[
     0x48, 0x83, 0xec, 0x08, // sub rsp, 8
     0xe8, 0, 0, 0, 0, // call sh7_local
@@ -31,6 +35,8 @@ const TEXT: &[u8] = &[
     0xff, 0x15, 0, 0, 0, 0, // call [rip + sh7_plus@GOTPCREL]
     0x48, 0x83, 0xc4, 0x08, // add rsp, 8
     0xc3, // ret
+    0x0f, 0xb6, 0x05, 0, 0, 0, 0,    // movzx eax, byte ptr [rip + sh7_constant]
+    0xc3, // ret
 ];
 const ENTRY_SIZE: u64 = 21;
 const LOCAL_START: u64 = 24;
@@ -39,16 +45,27 @@ const ADDRESS_START: u64 = 32;
 const ADDRESS_SIZE: u64 = 11;
 const GOT_START: u64 = 48;
 const GOT_SIZE: u64 = 20;
+const READ_START: u64 = 68;
+const READ_SIZE: u64 = 8;
 
 fn request() -> (Vec<u64>, Vec<u8>) {
-    let mut words = vec![TEXT.len() as u64, TEXT_ALIGNMENT, 5];
+    let mut words = vec![
+        TEXT.len() as u64,
+        TEXT_ALIGNMENT,
+        7,
+        RODATA.len() as u64,
+        RODATA_ALIGNMENT,
+    ];
     let mut bytes = TEXT.to_vec();
+    bytes.extend(RODATA);
     for (name, value, size, kind) in [
         (ENTRY, 0, ENTRY_SIZE, 1),
         (EXTERNAL, 0, 0, 2),
         (LOCAL, LOCAL_START, LOCAL_SIZE, 0),
         (ADDRESS, ADDRESS_START, ADDRESS_SIZE, 3),
         (GOT_CALL, GOT_START, GOT_SIZE, 1),
+        (READ, READ_START, READ_SIZE, 1),
+        (CONSTANT, 1, 1, 5),
     ] {
         words.extend([bytes.len() as u64, name.len() as u64, value, size, kind]);
         bytes.extend(name);
@@ -57,6 +74,7 @@ fn request() -> (Vec<u64>, Vec<u8>) {
     words.extend([12, 1, 3, (-4i64) as u64]);
     words.extend([34, 0, 1, 3]);
     words.extend([59, 1, 4, (-4i64) as u64]);
+    words.extend([71, 6, 2, (-4i64) as u64]);
     (words, bytes)
 }
 
@@ -64,6 +82,8 @@ fn reference() -> Vec<u8> {
     let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
     let text = object.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
     object.append_section_data(text, TEXT, TEXT_ALIGNMENT);
+    let rodata = object.add_section(Vec::new(), b".rodata".to_vec(), SectionKind::ReadOnlyData);
+    object.append_section_data(rodata, RODATA, RODATA_ALIGNMENT);
     object.add_section(Vec::new(), b".note.GNU-stack".to_vec(), SectionKind::Other);
     let mut add = |name: &[u8], value, size, scope, section| {
         object.add_symbol(Symbol {
@@ -72,6 +92,8 @@ fn reference() -> Vec<u8> {
             size,
             kind: if section == SymbolSection::Undefined {
                 SymbolKind::Unknown
+            } else if section == SymbolSection::Section(rodata) {
+                SymbolKind::Data
             } else {
                 SymbolKind::Text
             },
@@ -116,11 +138,26 @@ fn reference() -> Vec<u8> {
         SymbolScope::Dynamic,
         SymbolSection::Section(text),
     );
+    add(
+        READ,
+        READ_START,
+        READ_SIZE,
+        SymbolScope::Dynamic,
+        SymbolSection::Section(text),
+    );
+    let constant = add(
+        CONSTANT,
+        1,
+        1,
+        SymbolScope::Compilation,
+        SymbolSection::Section(rodata),
+    );
     for (offset, symbol, r_type, addend) in [
         (5, local, elf::R_X86_64_PC32, -4),
         (12, imported, elf::R_X86_64_PLT32, -4),
         (34, entry, elf::R_X86_64_64, 3),
         (59, imported, elf::R_X86_64_GOTPCREL, -4),
+        (71, constant, elf::R_X86_64_PC32, -4),
     ] {
         object
             .add_relocation(
@@ -138,7 +175,7 @@ fn reference() -> Vec<u8> {
 }
 
 #[test]
-fn elf_writer_matches_text_symbols_and_relocations() {
+fn elf_writer_matches_sections_symbols_and_relocations() {
     let (words, bytes) = request();
     let output = binding::x86_64_elf_object(&words, &bytes);
     let expected = reference();
@@ -147,11 +184,13 @@ fn elf_writer_matches_text_symbols_and_relocations() {
     assert_eq!(candidate.kind(), object::ObjectKind::Relocatable);
     assert_eq!(candidate.architecture(), Architecture::X86_64);
     assert_eq!(candidate.endianness(), Endianness::Little);
-    let section = candidate.section_by_name(".text").unwrap();
-    let reference_section = baseline.section_by_name(".text").unwrap();
-    assert_eq!(section.align(), reference_section.align());
-    assert_eq!(section.flags(), reference_section.flags());
-    assert_eq!(section.data().unwrap(), reference_section.data().unwrap());
+    for name in [".text", ".rodata"] {
+        let section = candidate.section_by_name(name).unwrap();
+        let reference_section = baseline.section_by_name(name).unwrap();
+        assert_eq!(section.align(), reference_section.align());
+        assert_eq!(section.flags(), reference_section.flags());
+        assert_eq!(section.data().unwrap(), reference_section.data().unwrap());
+    }
     let symbols = |file: &object::File<'_>| {
         file.symbols()
             .map(|symbol| {
@@ -162,6 +201,13 @@ fn elf_writer_matches_text_symbols_and_relocations() {
                         symbol.size(),
                         symbol.scope(),
                         symbol.flags(),
+                        symbol.section_index().map(|index| {
+                            file.section_by_index(index)
+                                .unwrap()
+                                .name()
+                                .unwrap()
+                                .to_owned()
+                        }),
                     ),
                 )
             })
@@ -193,6 +239,9 @@ fn elf_writer_matches_text_symbols_and_relocations() {
     assert!(binding::x86_64_elf_object(&words[..words.len() - 1], &bytes).is_empty());
     assert!(binding::x86_64_elf_object(&words, &bytes[..bytes.len() - 1]).is_empty());
     let mut invalid = words;
+    invalid[4] = 0;
+    assert!(binding::x86_64_elf_object(&invalid, &bytes).is_empty());
+    invalid[4] = RODATA_ALIGNMENT;
     invalid[1] = 3;
     assert!(binding::x86_64_elf_object(&invalid, &bytes).is_empty());
 }
@@ -214,9 +263,10 @@ fn elf_writer_links_an_import_and_local_call() {
          extern int sh7_entry(void);\n\
          extern uintptr_t sh7_addr(void);\n\
          extern int sh7_via_got(void);\n\
+         extern int sh7_read(void);\n\
          int sh7_plus(int n) { return n + 5; }\n\
          int main(void) {\n\
-             return sh7_entry() == 22 && sh7_via_got() == 22\n\
+             return sh7_entry() == 22 && sh7_via_got() == 22 && sh7_read() == 41\n\
                  && sh7_addr() == (uintptr_t)sh7_entry + 3 ? 0 : 1;\n\
          }\n",
     )

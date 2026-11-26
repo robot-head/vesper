@@ -1,5 +1,5 @@
 use super::binding;
-use object::{Object, ObjectSection, ObjectSymbol};
+use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use vesper::{check, native, parser};
 
@@ -12,10 +12,10 @@ fn checked(source: &str) -> check::Checked {
 }
 
 #[test]
-fn ordinary_native_objects_use_opt_in_elf_with_full_fallback() {
+fn ordinary_native_objects_use_opt_in_elf_with_read_only_data() {
     static EMITTED: AtomicU64 = AtomicU64::new(0);
     let code = checked("fn main() -> u64 { 42 }");
-    let data = checked("fn n(s: Str) -> u64 { s.len() } fn main() -> u64 { n(\"fallback\") }");
+    let data = checked("fn n(s: Str) -> u64 { s.len() } fn main() -> u64 { n(\"read-only\") }");
     let object = |checked: &check::Checked| {
         native::object_with_options(&checked.world, "main", None, false)
             .unwrap()
@@ -59,9 +59,39 @@ fn ordinary_native_objects_use_opt_in_elf_with_full_fallback() {
             .collect::<Vec<_>>()
     };
     assert_eq!(file_symbols(&candidate), file_symbols(&baseline));
-    assert_eq!(object(&data), baseline_data);
+    let candidate_data = object(&data);
+    assert_eq!(EMITTED.load(Relaxed), 2);
+    let actual = object::File::parse(candidate_data.as_slice()).unwrap();
+    let expected = object::File::parse(baseline_data.as_slice()).unwrap();
+    for name in [".text", ".rodata"] {
+        let actual = actual.section_by_name(name).unwrap();
+        let expected = expected.section_by_name(name).unwrap();
+        assert_eq!(actual.align(), expected.align());
+        assert_eq!(actual.flags(), expected.flags());
+        assert_eq!(actual.data().unwrap(), expected.data().unwrap());
+    }
+    let relocations = |file: &object::File<'_>| {
+        file.section_by_name(".text")
+            .unwrap()
+            .relocations()
+            .map(|(offset, relocation)| {
+                let RelocationTarget::Symbol(id) = relocation.target() else {
+                    panic!("expected symbol relocation")
+                };
+                let symbol = file.symbol_by_index(id).unwrap();
+                (
+                    offset,
+                    symbol.name_bytes().unwrap().to_vec(),
+                    relocation.flags(),
+                    relocation.addend(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(!relocations(&expected).is_empty());
+    assert_eq!(relocations(&actual), relocations(&expected));
     let (observed, _) =
         native::object_with_observer(&code.world, "main", None, false, Some(&mut |_| {})).unwrap();
     assert_eq!(observed, baseline_code);
-    assert_eq!(EMITTED.load(Relaxed), 1);
+    assert_eq!(EMITTED.load(Relaxed), 2);
 }

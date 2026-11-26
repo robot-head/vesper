@@ -1,9 +1,9 @@
-//! ELF serializer swap for ordinary, text-only Linux x86-64 objects.
+//! ELF serializer swap for Linux x86-64 code and read-only data.
 use cranelift_codegen::{
     Context, binemit::Reloc, control::ControlPlane, entity::SecondaryMap, ir, isa::TargetIsa,
 };
 use cranelift_module::{
-    DataDescription, DataId, FuncId, Linkage, Module, ModuleDeclarations, ModuleReloc,
+    DataDescription, DataId, FuncId, Init, Linkage, Module, ModuleDeclarations, ModuleReloc,
     ModuleRelocTarget, ModuleResult,
 };
 use cranelift_object::{ObjectBuilder, ObjectModule as CraneliftObject, ObjectProduct};
@@ -35,6 +35,9 @@ enum SymbolType {
     Undefined = 2,
     Hidden = 3,
     File = 4,
+    ReadOnlyLocal = 5,
+    ReadOnlyExport = 6,
+    ReadOnlyHidden = 7,
 }
 
 #[repr(u64)]
@@ -57,21 +60,28 @@ impl RelocationType {
 
 const SYMBOL_COUNT_WORD: usize = 2;
 const FUNCTION_NAMESPACE: u32 = 0;
+const DATA_NAMESPACE: u32 = 1;
+
+enum Target {
+    Function(FuncId),
+    Data(DataId),
+}
 
 struct TextRelocation {
     from: FuncId,
-    target: FuncId,
+    target: Target,
     offset: u32,
     kind: RelocationType,
     addend: i64,
 }
 
-struct TextObject {
-    alignment: u64,
+struct ElfObject {
+    text_alignment: u64,
+    rodata_alignment: u64,
     relocations: Vec<TextRelocation>,
 }
 
-impl TextObject {
+impl ElfObject {
     fn request(&self, product: &ObjectProduct) -> Option<(Vec<u64>, Vec<u8>)> {
         if product.object.flags != FileFlags::None {
             return None;
@@ -87,9 +97,35 @@ impl TextObject {
         if section.name() != Some(".text") {
             return None;
         }
-        let mut bytes = section.data().to_vec();
-        let mut words = vec![bytes.len() as u64, self.alignment, 0];
-        let mut indices = SecondaryMap::<FuncId, Option<u64>>::new();
+        let text = section.data();
+        let rodata_id = product.data_objects.values().find_map(|entry| {
+            let (symbol, defined) = (*entry)?;
+            if !defined {
+                return None;
+            }
+            product.object.symbol(symbol).section.id()
+        });
+        let rodata = if let Some(id) = rodata_id {
+            let section = product.object.section(id);
+            if section.name() != Some(".rodata") || self.rodata_alignment == 0 {
+                return None;
+            }
+            section.data()
+        } else {
+            &[]
+        };
+        let mut bytes = Vec::with_capacity(text.len() + rodata.len());
+        bytes.extend_from_slice(text);
+        bytes.extend_from_slice(rodata);
+        let mut words = vec![
+            text.len() as u64,
+            self.text_alignment,
+            0,
+            rodata.len() as u64,
+            self.rodata_alignment,
+        ];
+        let mut functions = SecondaryMap::<FuncId, Option<u64>>::new();
+        let mut data = SecondaryMap::<DataId, Option<u64>>::new();
         append_symbol(
             &mut words,
             &mut bytes,
@@ -118,7 +154,36 @@ impl TextObject {
                 }
                 _ => return None,
             };
-            indices[id] = Some(words[SYMBOL_COUNT_WORD]);
+            functions[id] = Some(words[SYMBOL_COUNT_WORD]);
+            append_symbol(
+                &mut words,
+                &mut bytes,
+                &symbol.name,
+                symbol.value,
+                symbol.size,
+                kind,
+            );
+        }
+        for (id, entry) in product.data_objects.iter() {
+            let Some((symbol, true)) = *entry else {
+                return None;
+            };
+            let symbol = product.object.symbol(symbol);
+            if rodata_id.is_none()
+                || symbol.section.id() != rodata_id
+                || symbol.kind != SymbolKind::Data
+                || symbol.weak
+                || symbol.flags != SymbolFlags::None
+            {
+                return None;
+            }
+            let kind = match symbol.scope {
+                SymbolScope::Compilation => SymbolType::ReadOnlyLocal,
+                SymbolScope::Dynamic => SymbolType::ReadOnlyExport,
+                SymbolScope::Linkage => SymbolType::ReadOnlyHidden,
+                _ => return None,
+            };
+            data[id] = Some(words[SYMBOL_COUNT_WORD]);
             append_symbol(
                 &mut words,
                 &mut bytes,
@@ -138,12 +203,11 @@ impl TextObject {
                 return None;
             }
             let at = source.value.checked_add(offset)?;
-            words.extend([
-                at,
-                indices[reloc.target]?,
-                reloc.kind as u64,
-                reloc.addend as u64,
-            ]);
+            let target = match reloc.target {
+                Target::Function(id) => functions[id]?,
+                Target::Data(id) => data[id]?,
+            };
+            words.extend([at, target, reloc.kind as u64, reloc.addend as u64]);
         }
         Some((words, bytes))
     }
@@ -172,15 +236,16 @@ fn append_symbol(
 /// module. The regular artifact is available intact if the writer declines.
 pub(super) struct ObjectModule {
     inner: CraneliftObject,
-    capture: Option<TextObject>,
+    capture: Option<ElfObject>,
 }
 
 impl ObjectModule {
     pub(super) fn new(builder: ObjectBuilder, enabled: bool) -> Self {
         Self {
             inner: CraneliftObject::new(builder),
-            capture: enabled.then(|| TextObject {
-                alignment: 1,
+            capture: enabled.then(|| ElfObject {
+                text_alignment: 1,
+                rodata_alignment: 0,
                 relocations: Vec::new(),
             }),
         }
@@ -193,18 +258,24 @@ impl ObjectModule {
         relocs: impl IntoIterator<Item = ModuleReloc>,
     ) {
         if let Some(capture) = &mut self.capture {
-            capture.alignment = capture
-                .alignment
+            capture.text_alignment = capture
+                .text_alignment
                 .max(alignment)
                 .max(self.inner.isa().symbol_alignment());
             for reloc in relocs {
-                let ModuleRelocTarget::User {
-                    namespace: FUNCTION_NAMESPACE,
-                    index,
-                } = reloc.name
-                else {
-                    self.capture = None;
-                    return;
+                let target = match reloc.name {
+                    ModuleRelocTarget::User {
+                        namespace: FUNCTION_NAMESPACE,
+                        index,
+                    } => Target::Function(FuncId::from_u32(index)),
+                    ModuleRelocTarget::User {
+                        namespace: DATA_NAMESPACE,
+                        index,
+                    } => Target::Data(DataId::from_u32(index)),
+                    _ => {
+                        self.capture = None;
+                        return;
+                    }
                 };
                 let kind = match reloc.kind {
                     Reloc::Abs8 => RelocationType::Absolute64,
@@ -218,7 +289,7 @@ impl ObjectModule {
                 };
                 capture.relocations.push(TextRelocation {
                     from,
-                    target: FuncId::from_u32(index),
+                    target,
                     offset: reloc.offset,
                     kind,
                     addend: reloc.addend,
@@ -268,17 +339,37 @@ impl Module for ObjectModule {
         writable: bool,
         tls: bool,
     ) -> ModuleResult<DataId> {
-        self.capture = None;
+        if writable || tls {
+            self.capture = None;
+        }
         self.inner.declare_data(name, linkage, writable, tls)
     }
 
     fn declare_anonymous_data(&mut self, writable: bool, tls: bool) -> ModuleResult<DataId> {
-        self.capture = None;
+        if writable || tls {
+            self.capture = None;
+        }
         self.inner.declare_anonymous_data(writable, tls)
     }
 
     fn define_data(&mut self, id: DataId, data: &DataDescription) -> ModuleResult<()> {
-        self.inner.define_data(id, data)
+        self.inner.define_data(id, data)?;
+        if let Some(capture) = &mut self.capture {
+            if !matches!(data.init, Init::Bytes { .. })
+                || !data.function_relocs.is_empty()
+                || !data.data_relocs.is_empty()
+                || data.custom_segment_section.is_some()
+                || data.used
+            {
+                self.capture = None;
+            } else {
+                capture.rodata_alignment = capture
+                    .rodata_alignment
+                    .max(data.align.unwrap_or(1))
+                    .max(self.inner.isa().symbol_alignment());
+            }
+        }
+        Ok(())
     }
 
     fn define_function_with_control_plane(
@@ -314,5 +405,44 @@ impl Module for ObjectModule {
             .define_function_bytes(id, alignment, bytes, relocations)?;
         self.record(id, alignment, relocations.iter().cloned());
         Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+    use cranelift_codegen::settings;
+
+    #[test]
+    fn writable_data_uses_the_original_artifact() {
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(settings::builder()))
+            .unwrap();
+        let object = |capture| {
+            let builder = ObjectBuilder::new(
+                isa.clone(),
+                MODULE_NAME,
+                cranelift_module::default_libcall_names(),
+            )
+            .unwrap();
+            let mut module = ObjectModule::new(builder, capture);
+            let signature = module.make_signature();
+            let entry = module
+                .declare_function("sh7_entry", Linkage::Export, &signature)
+                .unwrap();
+            module
+                .define_function_bytes(entry, 1, &[0xc3], &[])
+                .unwrap();
+            let data = module
+                .declare_data("sh7_writable", Linkage::Local, true, false)
+                .unwrap();
+            let mut description = DataDescription::new();
+            description.define(vec![31].into_boxed_slice());
+            module.define_data(data, &description).unwrap();
+            assert!(module.capture.is_none());
+            module.emit().unwrap()
+        };
+        assert_eq!(object(true), object(false));
     }
 }
