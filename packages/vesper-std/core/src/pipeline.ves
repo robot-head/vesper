@@ -1,0 +1,74 @@
+// Pass a value to a named call. A single bare `_` selects its position;
+// without one, the value is the first argument. Existing argument passes
+// (such as `in` or `inout`) are preserved.
+pub sugar pipe_at: infix(`|>`, pipeline, left) {
+    rule ($value:expr |> $callee:ident(_)) => {
+        $callee($value)
+    }
+    rule ($value:expr |> $callee:ident(_, $..after:args)) => {
+        $callee($value, $..after)
+    }
+    rule ($value:expr |> $callee:ident($..before:args, _)) => {
+        {
+            let piped = $value;
+            $callee($..before, piped)
+        }
+    }
+    rule ($value:expr |> $callee:ident($..before:args, _, $..after:args)) => {
+        {
+            let piped = $value;
+            $callee($..before, piped, $..after)
+        }
+    }
+    rule ($value:expr |> $callee:ident($..args:args)) => {
+        $callee($value, $..args)
+    }
+}
+
+test {
+    fn digits(in a: u64, b: u64, c: u64) -> u64 {
+        wrapping_add(wrapping_mul(a, 100), wrapping_add(wrapping_mul(b, 10), c))
+    }
+
+    fn identity(value: u64) -> u64 {
+        value
+    }
+
+    fn increment(inout value: u64, by: u64) -> u64 {
+        value = wrapping_add(value, by);
+        value
+    }
+
+    // @case all_positions()
+    fn inserts_at_the_selected_argument() -> bool {
+        let one: u64 = 1;
+        let sole = 3 |> identity(_);
+        let first = one |> digits(_, 2, 3);
+        let middle = 2 |> digits(in one, _, 3);
+        let last = 3 |> digits(in one, 2, _);
+        let implicit = one |> digits(2, 3);
+        let chained = 4 |> identity() |> identity(_);
+        let mut base: u64 = 5;
+        let borrowed = 2 |> increment(inout base, _);
+        sole == 3
+            && first == 123
+            && middle == 123
+            && last == 123
+            && implicit == 123
+            && chained == 4
+            && borrowed == 7
+            && base == 7
+    }
+
+    fn record(inout log: u64, step: u64) -> u64 {
+        log = wrapping_add(wrapping_mul(log, 10), step);
+        step
+    }
+
+    // @case once_in_source_order()
+    fn evaluates_the_left_side_before_other_arguments() -> bool {
+        let mut log: u64 = 0;
+        let out = record(inout log, 1) |> digits(record(inout log, 2), _, record(inout log, 3));
+        out == 213 && log == 123
+    }
+}
