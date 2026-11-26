@@ -1,0 +1,2714 @@
+// @vesper/quarry::vector: the vectorized (column-batch) executor of
+// src/vector.rs and src/vector/join.rs: single-table scans, filters and
+// projections over batches of `batch` rows, SQL three-valued predicate
+// masks, aggregates, hash joins (equality conjuncts of `ON` as keys, the
+// rest a residual over candidate-pair batches), nested-loop joins, and
+// chains of three or more inner joins reordered by the greedy cost model.
+// Rows, order, errors (kinds, messages and the order they are found in)
+// and the `work` counter equal the Rust executor's.
+//
+// No value is copied: a relation is a list of tuples of input row
+// positions (one per binding), so a column cell is read in place from the
+// encoded data (`prog`), and text compares in place in the pool.
+//
+// `vexecute_q(prog, text, extra)`: prog is the row executor's input
+// (`execute_q` in vesper/src/entry.ves). extra is
+//   stale, mode, batch, data position (of `ndata` in prog), nslots,
+//   (slot type)*, naggs, (agg, column)*, nout, (output column type)*
+// with mode Rows 0, Aggregates 1, Orders 2. On success words holds
+//   Rows: [work, nrows, (values of one output row)*] (also on a failure:
+//     the rows emitted before it, for the tile sink);
+//   Aggregates: [work, (value)*];
+//   Orders: [norders, (nleaves, (name off, name len)*)*] with the names in
+//     the returned pool.
+use self::{
+    Acc,
+    D,
+    G,
+    Opd,
+    Q,
+    Rel,
+    V,
+    Val
+};
+use self::util::{
+    bool_val,
+    bound,
+    cb,
+    cw,
+    div_rem,
+    ex,
+    fail,
+    lim,
+    new_d,
+    new_q,
+    node,
+    link,
+    none,
+    null_val,
+    order,
+    put,
+    put_u64,
+    same,
+    sw
+};
+use self::check::{
+    ex_end
+};
+use self::values::{
+    bind_val,
+    compare_vals,
+    dtab,
+    find_data,
+    size_value,
+    size_vec,
+    tick,
+    val_at,
+    vheap,
+    width
+};
+use self::entry::{
+    load_query
+};
+
+const SIGN_BIT: u64 = 0x8000000000000000;
+const ALL_ONES: u64 = 0xffffffffffffffff;
+const F64_EXP_BITS: u64 = 0x7ff0000000000000;
+const F64_MANT_BITS: u64 = 0x000fffffffffffff;
+const TY_BOOL: u64 = 3;
+// Three-valued truth, ordered so that AND is the minimum, OR the maximum
+// and NOT is `T_TRUE - t`.
+const T_FALSE: u8 = 0;
+const T_NULL: u8 = 1;
+const T_TRUE: u8 = 2;
+const MODE_ROWS: u64 = 0;
+const MODE_AGGS: u64 = 1;
+const MODE_ORDERS: u64 = 2;
+
+// 1 when x is 0, else 0.
+fn is_zero(x: u64) -> u64 {
+    ((x | wrapping_sub(0, x)) >> 63) ^ 1
+}
+
+// 1 when x < y (unsigned), else 0.
+fn lt_bit(x: u64, y: u64) -> u64 {
+    ((~x & y) | (~(x ^ y) & wrapping_sub(x, y))) >> 63
+}
+
+// The order key of a non-null fixed-width value of tag t (branch-free for
+// a fixed tag): unsigned key order is the value order, -0.0 equals 0.0.
+fn key_of(t: u64, a: u64) -> u64 {
+    if t == 2 {
+        a ^ SIGN_BIT
+    } else if t == 3 {
+        let b = a & wrapping_sub(is_zero(a ^ SIGN_BIT), 1);
+        b ^ (wrapping_sub(0, b >> 63) | SIGN_BIT)
+    } else {
+        a
+    }
+}
+
+fn inc(a: u64) -> u64 {
+    wrapping_add(a, 1)
+}
+
+fn quot(a: u64, b: u64) -> u64 {
+    let (x, _) = div_rem(a, b);
+    x
+}
+
+fn bit(i: u64) -> u64 {
+    let one: u64 = 1;
+    wrapping_shl_u64(one, wrapping_u32(i & 63))
+}
+
+fn new_v() -> V {
+    V {
+        nb: 0,
+        batch: 1024,
+        rows: 0,
+        bytes: 0,
+        sbind: ChunkSeq::new[u64](),
+        scol: ChunkSeq::new[u64](),
+        sty: ChunkSeq::new[u64](),
+        tri: ChunkSeq::new[u8](),
+        sel: ChunkSeq::new[u8](),
+        orders: ChunkSeq::new[u64](),
+        norders: 0
+    }
+}
+
+fn new_rel(mask: u64) -> Rel {
+    Rel {
+        t: ChunkSeq::new[u64](),
+        n: 0,
+        mask: mask
+    }
+}
+
+fn new_g() -> G {
+    G {
+        gid: ChunkSeq::new[u64](),
+        rep: ChunkSeq::new[u64](),
+        count: ChunkSeq::new[u64](),
+        start: ChunkSeq::new[u64](),
+        members: ChunkSeq::new[u64](),
+        table: ChunkSeq::new[u64](),
+        size: 0
+    }
+}
+
+fn scalar(v: Val) -> Opd {
+    Opd {
+        k: 0,
+        v: v,
+        s: 0,
+        ty: if v.t == 0 {
+            none()
+        } else {
+            wrapping_sub(v.t, 1)
+        }
+    }
+}
+
+fn tri_opd(off: u64) -> Opd {
+    Opd {
+        k: 2,
+        v: null_val(),
+        s: off,
+        ty: TY_BOOL
+    }
+}
+
+fn tri_of(b: bool) -> u8 {
+    if b {
+        T_TRUE
+    } else {
+        T_FALSE
+    }
+}
+
+fn tri_val(t: u8) -> Val {
+    if t == T_NULL {
+        null_val()
+    } else {
+        bool_val(t == T_TRUE)
+    }
+}
+
+// ---------------------------------------------------------------------
+// Cells.
+
+// The input position of the value of slot `s` in tuple `ti` of `t`, or
+// none for NULL.
+fn cell_at(in v: V, in t: ChunkSeq[u64], ti: u64, s: u64) -> u64 {
+    let addr = cw(in t, wrapping_add(wrapping_mul(ti, v.nb), cw(in v.sbind, s)));
+    if addr == none() {
+        return none();
+    }
+    wrapping_add(inc(addr), wrapping_mul(cw(in v.scol, s), 3))
+}
+
+fn val_in(in prog: Slice[u64], at: u64) -> Val {
+    if at == none() {
+        return null_val();
+    }
+    Val {
+        t: sw(in prog, at),
+        a: sw(in prog, inc(at)),
+        b: sw(in prog, wrapping_add(at, 2))
+    }
+}
+
+fn cell(in v: V, in prog: Slice[u64], in t: ChunkSeq[u64], ti: u64, s: u64) -> Val {
+    val_in(in prog, cell_at(in v, in t, ti, s))
+}
+
+// The value of operand `o` in row `i` of the batch starting at tuple `ti0`.
+fn opd_val(in v: V, in prog: Slice[u64], in r: Rel, ti0: u64, o: Opd, i: u64) -> Val {
+    if o.k == 0 {
+        o.v
+    } else if o.k == 1 {
+        cell(in v, in prog, in r.t, wrapping_add(ti0, i), o.s)
+    } else {
+        tri_val(cb(in v.tri, wrapping_add(o.s, i)))
+    }
+}
+
+// The three-valued truth of a boolean operand in row `i`.
+fn opd_tri(in v: V, in prog: Slice[u64], in r: Rel, ti0: u64, o: Opd, i: u64) -> u8 {
+    if o.k == 2 {
+        return cb(in v.tri, wrapping_add(o.s, i));
+    }
+    let x = opd_val(in v, in prog, in r, ti0, o, i);
+    if x.t == 0 {
+        T_NULL
+    } else {
+        tri_of(x.a != 0)
+    }
+}
+
+// `cell_bytes` summed over the slots of the bindings in `mask` for tuple
+// `ti` of `t` (none: a NULL-extended tuple, every cell NULL).
+fn tuple_bytes(in v: V, in q: Q, in prog: Slice[u64], in t: ChunkSeq[u64], ti: u64, mask: u64)
+    -> u64 {
+    let mut bytes: u64 = 0;
+    let sv = size_value(in q);
+    for s in 0..v.sbind.len() {
+        let b = cw(in v.sbind, s);
+        if (mask & bit(b)) != 0 {
+            bytes = wrapping_add(bytes, sv);
+            if ti != none() {
+                let at = cell_at(in v, in t, ti, s);
+                if at != none() {
+                    // Only text and bytes carry a nonzero `b` (their length).
+                    bytes = wrapping_add(bytes, sw(in prog, wrapping_add(at, 2)));
+                }
+            }
+        }
+    }
+    bytes
+}
+
+// ---------------------------------------------------------------------
+// Budgets (`Run::charge`, `Run::produced`, `Run::materialize`).
+
+fn produced(inout v: V, inout q: Q, rows: u64) {
+    v.rows = wrapping_add(v.rows, rows);
+    let r = v.rows;
+    bound(inout q, r, 10, "cumulative intermediate row limit");
+}
+
+fn materialize(inout v: V, inout q: Q, rows: u64, cells: u64) {
+    v.bytes = wrapping_add(v.bytes, wrapping_add(wrapping_mul(rows, size_vec(in q)), cells));
+    let b = v.bytes;
+    bound(inout q, b, 11, "cumulative intermediate byte limit");
+}
+
+// ---------------------------------------------------------------------
+// Expressions over one batch: rows `ti0 .. ti0 + n` of `r`.
+
+// The static type word of the expression at p (0 none, else type + 1).
+fn ty_word(in q: Q, p: u64) -> u64 {
+    ex(in q, inc(p))
+}
+
+// (c0, cl, cg) with `op` holding iff c0 + cl * lt + cg * gt is 1.
+fn cmp_coefficients(op: u64) -> (u64, u64, u64) {
+    if op == 0 {
+        (1, ALL_ONES, ALL_ONES)
+    } else if op == 1 {
+        (0, 1, 1)
+    } else if op == 2 {
+        (0, 1, 0)
+    } else if op == 3 {
+        (1, 0, ALL_ONES)
+    } else if op == 4 {
+        (0, 0, 1)
+    } else {
+        (1, ALL_ONES, 0)
+    }
+}
+
+fn holds_cmp(op: u64, o: u64) -> bool {
+    if op == 0 {
+        o == 1
+    } else if op == 1 {
+        o != 1
+    } else if op == 2 {
+        o == 0
+    } else if op == 3 {
+        o != 2
+    } else if op == 4 {
+        o == 2
+    } else {
+        o != 0
+    }
+}
+
+fn is_nan(bits: u64) -> bool {
+    (bits & F64_EXP_BITS) == F64_EXP_BITS && (bits & F64_MANT_BITS) != 0
+}
+
+// `scalar_order` of two non-null values: 0 less, 1 equal, 2 greater, or
+// none after a failure.
+fn scalar_order(inout q: Q, x: Val, y: Val) -> u64 {
+    if x.t != y.t {
+        fail(inout q, 5, "comparison mismatch");
+        return none();
+    }
+    if x.t == 3 && (is_nan(x.a) || is_nan(y.a)) {
+        fail(inout q, 8, "non-finite float");
+        return none();
+    }
+    compare_vals(in q, x, y)
+}
+
+// `as_bool`: a boolean operand, or a Type failure.
+fn as_bool(inout q: Q, o: Opd) -> Opd {
+    if o.k == 0 && o.v.t == 0 {
+        return o;
+    }
+    if o.ty != TY_BOOL {
+        fail(inout q, 5, "non-boolean checked predicate");
+    }
+    o
+}
+
+// A boolean operand as a three-valued column of the batch.
+fn to_tri(inout v: V, in prog: Slice[u64], in r: Rel, ti0: u64, n: u64, o: Opd) -> Opd {
+    if o.k == 2 {
+        return o;
+    }
+    let off = v.tri.len();
+    if o.k == 0 {
+        let t = if o.v.t == 0 {
+            T_NULL
+        } else {
+            tri_of(o.v.a != 0)
+        };
+        for i in 0..n {
+            v.tri.push(t);
+        }
+        return tri_opd(off);
+    }
+    let bnd = cw(in v.sbind, o.s);
+    let col = wrapping_mul(cw(in v.scol, o.s), 3);
+    let nb = v.nb;
+    let mut ti = wrapping_add(wrapping_mul(ti0, nb), bnd);
+    for i in 0..n {
+        let addr = cw(in r.t, ti);
+        ti = wrapping_add(ti, nb);
+        let t = if addr == none() {
+            T_NULL
+        } else {
+            let at = wrapping_add(inc(addr), col);
+            let null = is_zero(sw(in prog, at));
+            // A boolean cell holds 0 or 1.
+            wrapping_u8(null | wrapping_mul(sw(in prog, inc(at)) & (null ^ 1), 2))
+        };
+        v.tri.push(t);
+    }
+    tri_opd(off)
+}
+
+pub fn eval(
+    inout v: V,
+    inout q: Q,
+    in ds: D,
+    in prog: Slice[u64],
+    in r: Rel,
+    ti0: u64,
+    n: u64,
+    p: u64
+) -> Opd {
+    if q.err != 0 {
+        return scalar(null_val());
+    }
+    let tag = ex(in q, p);
+    if tag == 0 {
+        let slot = ex(in q, wrapping_add(p, 3));
+        if (r.mask & bit(cw(in v.sbind, slot))) == 0 {
+            fail(inout q, 10, "column of another binding");
+            return scalar(null_val());
+        }
+        Opd {
+            k: 1,
+            v: null_val(),
+            s: slot,
+            ty: cw(in v.sty, slot)
+        }
+    } else if tag == 1 {
+        scalar(bind_val(in ds, in q, ex(in q, wrapping_add(p, 3)), ex(in q, wrapping_add(p, 4))))
+    } else if tag == 2 {
+        scalar(val_at(in q, in q.ex, wrapping_add(p, 3)))
+    } else if tag == 3 {
+        let op = ex(in q, wrapping_add(p, 3));
+        let ap = wrapping_add(p, 4);
+        let bp = ex_end(in q, ap);
+        let tw = if ty_word(in q, ap) != 0 {
+            ty_word(in q, ap)
+        } else {
+            ty_word(in q, bp)
+        };
+        let a = eval(inout v, inout q, in ds, in prog, in r, ti0, n, ap);
+        let b = eval(inout v, inout q, in ds, in prog, in r, ti0, n, bp);
+        if q.err != 0 {
+            return scalar(null_val());
+        }
+        compare(inout v, inout q, in prog, in r, ti0, n, op, a, b, tw)
+    } else if tag == 4 || tag == 5 {
+        let ap = wrapping_add(p, 3);
+        let bp = ex_end(in q, ap);
+        let a0 = eval(inout v, inout q, in ds, in prog, in r, ti0, n, ap);
+        let a1 = as_bool(inout q, a0);
+        let b0 = eval(inout v, inout q, in ds, in prog, in r, ti0, n, bp);
+        let b1 = as_bool(inout q, b0);
+        if q.err != 0 {
+            return scalar(null_val());
+        }
+        let a = to_tri(inout v, in prog, in r, ti0, n, a1);
+        let b = to_tri(inout v, in prog, in r, ti0, n, b1);
+        let or_bit: u64 = if tag == 5 {
+            1
+        } else {
+            0
+        };
+        let off = v.tri.len();
+        for i in 0..n {
+            let x = widen_u64(cb(in v.tri, wrapping_add(a.s, i)));
+            let y = widen_u64(cb(in v.tri, wrapping_add(b.s, i)));
+            // AND is the minimum, OR the maximum.
+            let pick_x = lt_bit(x, y) ^ or_bit;
+            let t = y ^ ((x ^ y) & wrapping_sub(0, pick_x));
+            v.tri.push(wrapping_u8(t));
+        }
+        tri_opd(off)
+    } else if tag == 6 {
+        let x0 = eval(inout v, inout q, in ds, in prog, in r, ti0, n, wrapping_add(p, 3));
+        let x = as_bool(inout q, x0);
+        if q.err != 0 {
+            return scalar(null_val());
+        }
+        let off = v.tri.len();
+        for i in 0..n {
+            let t = opd_tri(in v, in prog, in r, ti0, x, i);
+            v.tri.push(wrapping_sub(T_TRUE, t));
+        }
+        tri_opd(off)
+    } else {
+        let negated = ex(in q, wrapping_add(p, 3)) != 0;
+        let x = eval(inout v, inout q, in ds, in prog, in r, ti0, n, wrapping_add(p, 4));
+        if q.err != 0 {
+            return scalar(null_val());
+        }
+        if x.k == 0 {
+            return scalar(bool_val((x.v.t == 0) != negated));
+        }
+        let off = v.tri.len();
+        for i in 0..n {
+            let is_null = if x.k == 2 {
+                cb(in v.tri, wrapping_add(x.s, i)) == T_NULL
+            } else {
+                cell_at(in v, in r.t, wrapping_add(ti0, i), x.s) == none()
+                    || sw(in prog, cell_at(in v, in r.t, wrapping_add(ti0, i), x.s)) == 0
+            };
+            v.tri.push(tri_of(is_null != negated));
+        }
+        tri_opd(off)
+    }
+}
+
+// An order key of a non-null fixed-width value: unsigned order of keys is
+// the value order.
+fn fixed_key(t: u64, a: u64) -> u64 {
+    if t == 2 {
+        a ^ SIGN_BIT
+    } else if t == 3 {
+        let b = if a == SIGN_BIT {
+            0
+        } else {
+            a
+        };
+        if (b >> 63) == 1 {
+            ~b
+        } else {
+            b | SIGN_BIT
+        }
+    } else {
+        a
+    }
+}
+
+fn key_order(x: u64, y: u64) -> u64 {
+    if x < y {
+        0
+    } else if x > y {
+        2
+    } else {
+        1
+    }
+}
+
+// `compare` of two evaluated operands with static type word `tw`.
+fn compare(
+    inout v: V,
+    inout q: Q,
+    in prog: Slice[u64],
+    in r: Rel,
+    ti0: u64,
+    n: u64,
+    op: u64,
+    a: Opd,
+    b: Opd,
+    tw: u64
+) -> Opd {
+    if a.k == 0 && b.k == 0 {
+        if a.v.t == 0 || b.v.t == 0 {
+            return scalar(null_val());
+        }
+        let o = scalar_order(inout q, a.v, b.v);
+        if q.err != 0 {
+            return scalar(null_val());
+        }
+        return scalar(bool_val(holds_cmp(op, o)));
+    }
+    if (a.k == 0 && a.v.t == 0) || (b.k == 0 && b.v.t == 0) {
+        return scalar(null_val());
+    }
+    if tw == 0 {
+        fail(inout q, 5, "comparison without a type");
+        return scalar(null_val());
+    }
+    let ty = wrapping_sub(tw, 1);
+    if a.ty != ty || b.ty != ty {
+        fail(inout q, 5, "comparison mismatch");
+        return scalar(null_val());
+    }
+    let off = v.tri.len();
+    let text = ty == 4 || ty == 5;
+    if a.k == 1 && b.k == 0 && !text {
+        // A column against a constant: the common shape.
+        // Branch-free per row: the truth is c0 + cl * (x < y) + cg * (x > y)
+        // (wrapping), NULL when the cell is.
+        let y = key_of(b.v.t, b.v.a);
+        let (c0, cl, cg) = cmp_coefficients(op);
+        let bnd = cw(in v.sbind, a.s);
+        let col = wrapping_mul(cw(in v.scol, a.s), 3);
+        let nb = v.nb;
+        let ty_tag = b.v.t;
+        let mut ti = wrapping_add(wrapping_mul(ti0, nb), bnd);
+        for i in 0..n {
+            let addr = cw(in r.t, ti);
+            ti = wrapping_add(ti, nb);
+            let t = if addr == none() {
+                T_NULL
+            } else {
+                let at = wrapping_add(inc(addr), col);
+                let null = is_zero(sw(in prog, at));
+                let x = key_of(ty_tag, sw(in prog, inc(at)));
+                let holds = wrapping_add(
+                    wrapping_add(c0, wrapping_mul(cl, lt_bit(x, y))),
+                    wrapping_mul(cg, lt_bit(y, x))
+                );
+                // NULL 1, else false 0 / true 2.
+                wrapping_u8(null | wrapping_mul(holds & (null ^ 1), 2))
+            };
+            v.tri.push(t);
+        }
+        return tri_opd(off);
+    }
+    if a.k == 1 && b.k == 0 {
+        // A text or bytes column against a constant, compared in place.
+        let bnd = cw(in v.sbind, a.s);
+        let col = wrapping_mul(cw(in v.scol, a.s), 3);
+        let nb = v.nb;
+        let mut ti = wrapping_add(wrapping_mul(ti0, nb), bnd);
+        for i in 0..n {
+            let addr = cw(in r.t, ti);
+            ti = wrapping_add(ti, nb);
+            let t = if addr == none() {
+                T_NULL
+            } else {
+                let at = wrapping_add(inc(addr), col);
+                if sw(in prog, at) == 0 {
+                    T_NULL
+                } else {
+                    let o = order(
+                        in q.pool,
+                        sw(in prog, inc(at)),
+                        sw(in prog, wrapping_add(at, 2)),
+                        b.v.a,
+                        b.v.b
+                    );
+                    tri_of(holds_cmp(op, o))
+                }
+            };
+            v.tri.push(t);
+        }
+        return tri_opd(off);
+    }
+    for i in 0..n {
+        let x = opd_val(in v, in prog, in r, ti0, a, i);
+        let y = opd_val(in v, in prog, in r, ti0, b, i);
+        let t = if x.t == 0 || y.t == 0 {
+            T_NULL
+        } else if text {
+            tri_of(holds_cmp(op, order(in q.pool, x.a, x.b, y.a, y.b)))
+        } else {
+            tri_of(holds_cmp(op, key_order(fixed_key(x.t, x.a), fixed_key(y.t, y.a))))
+        };
+        v.tri.push(t);
+    }
+    tri_opd(off)
+}
+
+// `mask`: the conjunction of the predicates `preds` over rows
+// `ti0 .. ti0 + n` of `r` into `v.sel` (1 = TRUE).
+fn mask(
+    inout v: V,
+    inout q: Q,
+    in ds: D,
+    in prog: Slice[u64],
+    in r: Rel,
+    ti0: u64,
+    n: u64,
+    in preds: ChunkSeq[u64]
+) {
+    v.sel.truncate(0);
+    v.sel.resize(n, 1);
+    for k in 0..preds.len() {
+        let mark = v.tri.len();
+        let o0 = eval(inout v, inout q, in ds, in prog, in r, ti0, n, cw(in preds, k));
+        let o = as_bool(inout q, o0);
+        if q.err != 0 {
+            return;
+        }
+        if o.k == 0 {
+            if o.v.t == 0 || o.v.a == 0 {
+                v.sel.truncate(0);
+                v.sel.resize(n, 0);
+            }
+        } else if o.k == 2 {
+            for i in 0..n {
+                // TRUE is 2: its bit 1.
+                let t = cb(in v.tri, wrapping_add(o.s, i));
+                v.sel.try_set(i, cb(in v.sel, i) & (t >> 1));
+            }
+        } else {
+            for i in 0..n {
+                let x = opd_val(in v, in prog, in r, ti0, o, i);
+                if x.t == 0 || x.a == 0 {
+                    v.sel.try_set(i, 0);
+                }
+            }
+        }
+        v.tri.truncate(mark);
+    }
+}
+
+fn count_sel(in v: V, n: u64) -> u64 {
+    let mut c: u64 = 0;
+    for i in 0..n {
+        if cb(in v.sel, i) == 1 {
+            c = inc(c);
+        }
+    }
+    c
+}
+
+fn expr_nodes(in q: Q, p: u64) -> u64 {
+    let tag = ex(in q, p);
+    if tag == 3 {
+        let ap = wrapping_add(p, 4);
+        inc(wrapping_add(expr_nodes(in q, ap), expr_nodes(in q, ex_end(in q, ap))))
+    } else if tag == 4 || tag == 5 {
+        let ap = wrapping_add(p, 3);
+        inc(wrapping_add(expr_nodes(in q, ap), expr_nodes(in q, ex_end(in q, ap))))
+    } else if tag == 6 {
+        inc(expr_nodes(in q, wrapping_add(p, 3)))
+    } else if tag == 7 {
+        inc(expr_nodes(in q, wrapping_add(p, 4)))
+    } else {
+        1
+    }
+}
+
+// The bindings an expression references, as a mask (`dependencies`).
+fn deps(in q: Q, p: u64) -> u64 {
+    let tag = ex(in q, p);
+    if tag == 0 {
+        bit(ex(in q, wrapping_add(p, 4)))
+    } else if tag == 3 {
+        let ap = wrapping_add(p, 4);
+        deps(in q, ap) | deps(in q, ex_end(in q, ap))
+    } else if tag == 4 || tag == 5 {
+        let ap = wrapping_add(p, 3);
+        deps(in q, ap) | deps(in q, ex_end(in q, ap))
+    } else if tag == 6 {
+        deps(in q, wrapping_add(p, 3))
+    } else if tag == 7 {
+        deps(in q, wrapping_add(p, 4))
+    } else {
+        0
+    }
+}
+
+// ---------------------------------------------------------------------
+// Aggregates.
+
+fn new_acc(inout q: Q, agg: u64, idx: u64, in outty: ChunkSeq[u64]) -> Acc {
+    let mut a = Acc {
+        kind: 0,
+        agg: agg,
+        idx: idx,
+        n: 0,
+        lo: 0,
+        hi: 0,
+        fbits: 0,
+        seen: false,
+        unsigned: false,
+        max: agg == 4,
+        has: false,
+        best: null_val()
+    };
+    if agg == 0 {
+        return a;
+    }
+    if idx >= outty.len() {
+        fail(inout q, 2, "aggregate column index");
+        return a;
+    }
+    let ty = cw(in outty, idx);
+    if agg == 2 {
+        if ty == 0 || ty == 1 {
+            a.kind = 1;
+            a.unsigned = ty == 0;
+        } else if ty == 2 {
+            a.kind = 2;
+        } else {
+            fail(inout q, 5, "SUM needs a numeric column");
+        }
+    } else if agg == 3 || agg == 4 {
+        a.kind = 3;
+    }
+    a
+}
+
+fn add128(a: Acc, x: u64, negative: bool) -> Acc {
+    let mut r = a;
+    let lo = wrapping_add(a.lo, x);
+    let carry: u64 = if lo < a.lo {
+        1
+    } else {
+        0
+    };
+    let xh = if negative {
+        ALL_ONES
+    } else {
+        0
+    };
+    r.lo = lo;
+    r.hi = wrapping_add(wrapping_add(a.hi, xh), carry);
+    r
+}
+
+fn input_fail(inout q: Q, a: Acc) {
+    if q.err != 0 {
+        return;
+    }
+    q.err = 5;
+    if a.agg == 2 {
+        put(inout q.msg, "Sum(");
+    } else if a.agg == 1 {
+        put(inout q.msg, "Count(");
+    } else if a.agg == 3 {
+        put(inout q.msg, "Min(");
+    } else if a.agg == 4 {
+        put(inout q.msg, "Max(");
+    } else {
+        put(inout q.msg, "CountRows input");
+        return;
+    }
+    put_u64(inout q.msg, a.idx);
+    put(inout q.msg, ") input");
+}
+
+// `Acc::push` of one value (`has` false: `COUNT(*)`'s row).
+fn acc_push(inout q: Q, a: Acc, has: bool, x: Val) -> Acc {
+    let mut r = a;
+    if !has {
+        if a.kind == 0 {
+            r.n = inc(a.n);
+        }
+        return r;
+    }
+    if x.t == 0 {
+        return r;
+    }
+    if a.kind == 0 {
+        r.n = inc(a.n);
+    } else if a.kind == 1 {
+        if x.t == 1 {
+            r = add128(a, x.a, false);
+        } else if x.t == 2 {
+            r = add128(a, x.a, (x.a >> 63) == 1);
+        } else {
+            input_fail(inout q, a);
+            return r;
+        }
+        r.seen = true;
+    } else if a.kind == 2 {
+        if x.t != 3 {
+            input_fail(inout q, a);
+            return r;
+        }
+        r.fbits = to_bits_f64(from_bits_f64(a.fbits) + from_bits_f64(x.a));
+        r.seen = true;
+    } else {
+        let replace = if !a.has {
+            true
+        } else {
+            let o = scalar_order(inout q, x, a.best);
+            if q.err != 0 {
+                return r;
+            }
+            if a.max {
+                o == 2
+            } else {
+                o == 0
+            }
+        };
+        if replace {
+            r.best = x;
+            r.has = true;
+        }
+    }
+    r
+}
+
+// `Acc::finish`: the aggregate's value, appended to `q.words`.
+fn acc_finish(inout q: Q, a: Acc) {
+    let mut out = null_val();
+    if a.kind == 0 {
+        out = Val {
+            t: 1,
+            a: a.n,
+            b: 0
+        };
+    } else if a.kind == 1 {
+        if a.seen {
+            if a.unsigned {
+                if a.hi != 0 {
+                    fail(inout q, 9, "SUM overflow");
+                    return;
+                }
+                out = Val {
+                    t: 1,
+                    a: a.lo,
+                    b: 0
+                };
+            } else {
+                let fits = (a.hi == 0 && (a.lo >> 63) == 0)
+                    || (a.hi == ALL_ONES && (a.lo >> 63) == 1);
+                if !fits {
+                    fail(inout q, 9, "SUM overflow");
+                    return;
+                }
+                out = Val {
+                    t: 2,
+                    a: a.lo,
+                    b: 0
+                };
+            }
+        }
+    } else if a.kind == 2 {
+        if a.seen {
+            out = Val {
+                t: 3,
+                a: a.fbits,
+                b: 0
+            };
+        }
+    } else if a.has {
+        out = a.best;
+    }
+    q.words.push(out.t);
+    q.words.push(out.a);
+    q.words.push(out.b);
+}
+
+fn acc_get(in accs: ChunkSeq[Acc], i: u64) -> Acc {
+    match accs.try_get(i) {
+        Option::Some(a) => a,
+        Option::None => Acc {
+            kind: 0,
+            agg: 0,
+            idx: 0,
+            n: 0,
+            lo: 0,
+            hi: 0,
+            fbits: 0,
+            seen: false,
+            unsigned: false,
+            max: false,
+            has: false,
+            best: null_val()
+        },
+    }
+}
+
+fn opd_get(in s: ChunkSeq[Opd], i: u64) -> Opd {
+    match s.try_get(i) {
+        Option::Some(o) => o,
+        Option::None => scalar(null_val()),
+    }
+}
+
+// One accumulator over the selected rows of slot column `slot`, with its
+// state in locals.
+fn acc_column(
+    inout v: V,
+    inout q: Q,
+    in prog: Slice[u64],
+    in r: Rel,
+    ti0: u64,
+    n: u64,
+    slot: u64,
+    a: Acc
+) -> Acc {
+    let mut out = a;
+    let bnd = cw(in v.sbind, slot);
+    let col = wrapping_mul(cw(in v.scol, slot), 3);
+    let nb = v.nb;
+    let mut ti = wrapping_add(wrapping_mul(ti0, nb), bnd);
+    let mut cnt = a.n;
+    let mut lo = a.lo;
+    let mut hi = a.hi;
+    let mut fs = from_bits_f64(a.fbits);
+    let mut seen = a.seen;
+    let mut has = a.has;
+    let mut best = a.best;
+    if a.kind != 3 {
+        // COUNT and SUM without branches: masked-out cells add nothing
+        // (+0.0 to a float sum that is never -0.0).
+        let signed: u64 = if a.unsigned {
+            0
+        } else {
+            1
+        };
+        for i in 0..n {
+            let addr = cw(in r.t, ti);
+            ti = wrapping_add(ti, nb);
+            if addr != none() {
+                let at = wrapping_add(inc(addr), col);
+                let live = widen_u64(cb(in v.sel, i)) & (is_zero(sw(in prog, at)) ^ 1);
+                let m = wrapping_sub(0, live);
+                let x = sw(in prog, inc(at)) & m;
+                cnt = wrapping_add(cnt, live);
+                let nlo = wrapping_add(lo, x);
+                let xh = wrapping_sub(0, (x >> 63) & signed);
+                hi = wrapping_add(wrapping_add(hi, xh), lt_bit(nlo, lo));
+                lo = nlo;
+                if a.kind == 2 {
+                    fs = fs + from_bits_f64(x);
+                }
+                seen = seen || live == 1;
+            }
+        }
+        if a.kind == 0 {
+            out.n = cnt;
+        } else if a.kind == 1 {
+            out.lo = lo;
+            out.hi = hi;
+            out.seen = seen;
+        } else {
+            out.fbits = to_bits_f64(fs);
+            out.seen = seen;
+        }
+        return out;
+    }
+    for i in 0..n {
+        let addr = cw(in r.t, ti);
+        ti = wrapping_add(ti, nb);
+        if cb(in v.sel, i) == 1 && addr != none() {
+            let at = wrapping_add(inc(addr), col);
+            let tag = sw(in prog, at);
+            if tag != 0 {
+                let x = sw(in prog, inc(at));
+                if a.kind == 0 {
+                    cnt = inc(cnt);
+                } else if a.kind == 1 {
+                    let nlo = wrapping_add(lo, x);
+                    let carry: u64 = if nlo < lo {
+                        1
+                    } else {
+                        0
+                    };
+                    let xh: u64 = if tag == 2 && (x >> 63) == 1 {
+                        ALL_ONES
+                    } else {
+                        0
+                    };
+                    lo = nlo;
+                    hi = wrapping_add(wrapping_add(hi, xh), carry);
+                    seen = true;
+                } else if a.kind == 2 {
+                    fs = fs + from_bits_f64(x);
+                    seen = true;
+                } else {
+                    let y = Val {
+                        t: tag,
+                        a: x,
+                        b: sw(in prog, wrapping_add(at, 2))
+                    };
+                    let replace = if !has {
+                        true
+                    } else {
+                        let o = if tag == 5 || tag == 6 {
+                            order(in q.pool, y.a, y.b, best.a, best.b)
+                        } else {
+                            key_order(fixed_key(tag, x), fixed_key(best.t, best.a))
+                        };
+                        if a.max {
+                            o == 2
+                        } else {
+                            o == 0
+                        }
+                    };
+                    if replace {
+                        best = y;
+                        has = true;
+                    }
+                }
+            }
+        }
+    }
+    out.n = cnt;
+    out.lo = lo;
+    out.hi = hi;
+    out.fbits = to_bits_f64(fs);
+    out.seen = seen;
+    out.has = has;
+    out.best = best;
+    out
+}
+
+// The aggregate sink: every accumulator over the selected rows of a batch.
+fn agg_batch(
+    inout v: V,
+    inout q: Q,
+    in prog: Slice[u64],
+    in r: Rel,
+    ti0: u64,
+    n: u64,
+    in projected: ChunkSeq[Opd],
+    inout accs: ChunkSeq[Acc]
+) {
+    let nsel = count_sel(in v, n);
+    for k in 0..accs.len() {
+        let mut a = acc_get(in accs, k);
+        if a.agg == 0 {
+            a.n = wrapping_add(a.n, nsel);
+        } else {
+            let o = opd_get(in projected, a.idx);
+            if a.agg == 1 && o.k == 0 {
+                if o.v.t != 0 {
+                    a.n = wrapping_add(a.n, nsel);
+                }
+            } else if a.kind == 1 && o.k != 0 && o.ty != 0 && o.ty != 1 {
+                fail(inout q, 5, "SUM input");
+            } else if a.kind == 2 && o.k != 0 && o.ty != 2 {
+                fail(inout q, 5, "SUM input");
+            } else if o.k == 1 {
+                a = acc_column(inout v, inout q, in prog, in r, ti0, n, o.s, a);
+            } else {
+                for i in 0..n {
+                    if q.err != 0 {
+                        return;
+                    }
+                    if cb(in v.sel, i) == 1 {
+                        let x = opd_val(in v, in prog, in r, ti0, o, i);
+                        a = acc_push(inout q, a, true, x);
+                    }
+                }
+            }
+        }
+        accs.try_set(k, a);
+        if q.err != 0 {
+            return;
+        }
+    }
+}
+
+// The row sink: selected rows with the output row and byte limits.
+fn rows_batch(
+    inout v: V,
+    inout q: Q,
+    in prog: Slice[u64],
+    in r: Rel,
+    ti0: u64,
+    n: u64,
+    in projected: ChunkSeq[Opd],
+    inout out_bytes: u64
+) {
+    let sv = size_value(in q);
+    let np = projected.len();
+    for i in 0..n {
+        if cb(in v.sel, i) == 1 {
+            let bn = inc(cw(in q.words, 1));
+            if !bound(inout q, bn, 12, "output row limit") {
+                return;
+            }
+            let mark = q.words.len();
+            let mut heap = size_vec(in q);
+            for k in 0..np {
+                let o = opd_get(in projected, k);
+                let x = if o.k == 1 {
+                    cell(in v, in prog, in r.t, wrapping_add(ti0, i), o.s)
+                } else {
+                    opd_val(in v, in prog, in r, ti0, o, i)
+                };
+                // Only text and bytes carry a nonzero `b` (their length).
+                heap = wrapping_add(wrapping_add(heap, sv), x.b);
+                q.words.push(x.t);
+                q.words.push(x.a);
+                q.words.push(x.b);
+            }
+            out_bytes = wrapping_add(out_bytes, heap);
+            let ob = out_bytes;
+            if !bound(inout q, ob, 13, "output byte limit") {
+                q.words.truncate(mark);
+                return;
+            }
+            q.words.try_set(1, bn);
+        }
+    }
+}
+
+// Evaluate the projection over a batch and feed the selected rows to the
+// mode's sink.
+fn sink(
+    inout v: V,
+    inout q: Q,
+    in ds: D,
+    in prog: Slice[u64],
+    in r: Rel,
+    ti0: u64,
+    n: u64,
+    in projs: ChunkSeq[u64],
+    mode: u64,
+    inout accs: ChunkSeq[Acc],
+    inout out_bytes: u64
+) {
+    let mark = v.tri.len();
+    let mut projected = ChunkSeq::new[Opd]();
+    for k in 0..projs.len() {
+        let o = eval(inout v, inout q, in ds, in prog, in r, ti0, n, cw(in projs, k));
+        projected.push(o);
+    }
+    if q.err != 0 {
+        return;
+    }
+    if mode == MODE_AGGS {
+        agg_batch(inout v, inout q, in prog, in r, ti0, n, in projected, inout accs);
+    } else {
+        rows_batch(inout v, inout q, in prog, in r, ti0, n, in projected, inout out_bytes);
+    }
+    v.tri.truncate(mark);
+}
+
+// ---------------------------------------------------------------------
+// Plans.
+
+fn has_join(in q: Q, n: u64) -> bool {
+    let x = node(in q, n);
+    if x.kind == 0 {
+        false
+    } else if x.kind == 1 {
+        has_join(in q, x.b)
+    } else {
+        true
+    }
+}
+
+fn bindings(in q: Q, n: u64) -> u64 {
+    let x = node(in q, n);
+    if x.kind == 0 {
+        bit(x.c)
+    } else if x.kind == 1 {
+        bindings(in q, x.b)
+    } else {
+        bindings(in q, x.b) | bindings(in q, x.c)
+    }
+}
+
+// Record every scan's slots (binding and table column) and the tuple width.
+fn scan_slots(inout v: V, in q: Q, n: u64) {
+    let x = node(in q, n);
+    if x.kind == 0 {
+        for k in 0..x.e {
+            let slot = ex(in q, wrapping_add(x.d, k));
+            v.sbind.try_set(slot, x.c);
+            v.scol.try_set(slot, k);
+        }
+        if inc(x.c) > v.nb {
+            v.nb = inc(x.c);
+        }
+    } else if x.kind == 1 {
+        scan_slots(inout v, in q, x.b);
+    } else {
+        scan_slots(inout v, in q, x.b);
+        scan_slots(inout v, in q, x.c);
+    }
+}
+
+// The scan predicates and then the filters, innermost first (`flatten`);
+// returns the scan node.
+fn flatten(in q: Q, n: u64, inout preds: ChunkSeq[u64]) -> u64 {
+    let x = node(in q, n);
+    if x.kind == 0 {
+        let mut l = x.f;
+        loop {
+            if l == none() {
+                break;
+            }
+            let k = link(in q, l);
+            preds.push(k.expr);
+            l = k.next;
+        }
+        n
+    } else {
+        let s = flatten(in q, x.b, inout preds);
+        preds.push(x.a);
+        s
+    }
+}
+
+// The rows of a data table as a relation of one binding.
+fn scan_rel(inout v: V, in q: Q, in ds: D, in prog: Slice[u64], n: u64) -> Rel {
+    let x = node(in q, n);
+    let t = dtab(in ds, in q, find_data(in ds, in q, x.a, x.b));
+    let mut r = new_rel(bit(x.c));
+    let nb = v.nb;
+    let mut at = t.start;
+    for row in 0..t.n {
+        for b in 0..nb {
+            if b == x.c {
+                r.t.push(at);
+            } else {
+                r.t.push(none());
+            }
+        }
+        at = wrapping_add(inc(at), wrapping_mul(sw(in prog, at), 3));
+    }
+    r.n = t.n;
+    r
+}
+
+// The single-table path of `drive`.
+fn drive_scan(
+    inout v: V,
+    inout q: Q,
+    in ds: D,
+    in prog: Slice[u64],
+    root: u64,
+    in projs: ChunkSeq[u64],
+    mode: u64,
+    inout accs: ChunkSeq[Acc]
+) {
+    let mut preds = ChunkSeq::new[u64]();
+    let scan = flatten(in q, root, inout preds);
+    let x = node(in q, scan);
+    let r = scan_rel(inout v, in q, in ds, in prog, scan);
+    let mut nodes: u64 = 0;
+    for k in 0..preds.len() {
+        nodes = wrapping_add(nodes, expr_nodes(in q, cw(in preds, k)));
+    }
+    for k in 0..projs.len() {
+        nodes = wrapping_add(nodes, expr_nodes(in q, cw(in projs, k)));
+    }
+    if nodes == 0 {
+        nodes = 1;
+    }
+    let per_row = wrapping_add(nodes, x.e);
+    let mut out_bytes: u64 = 0;
+    let mut start: u64 = 0;
+    loop {
+        if start >= r.n || q.err != 0 {
+            break;
+        }
+        let end = if wrapping_add(start, v.batch) < r.n {
+            wrapping_add(start, v.batch)
+        } else {
+            r.n
+        };
+        let n = wrapping_sub(end, start);
+        tick(inout q, wrapping_mul(n, per_row));
+        if q.err != 0 {
+            return;
+        }
+        mask(inout v, inout q, in ds, in prog, in r, start, n, in preds);
+        if q.err != 0 {
+            return;
+        }
+        if count_sel(in v, n) > 0 {
+            sink(
+                inout v,
+                inout q,
+                in ds,
+                in prog,
+                in r,
+                start,
+                n,
+                in projs,
+                mode,
+                inout accs,
+                inout out_bytes
+            );
+        }
+        start = end;
+    }
+}
+
+// ---------------------------------------------------------------------
+// Joins (src/vector/join.rs).
+
+fn conjuncts(in q: Q, p: u64, inout out: ChunkSeq[u64]) {
+    if ex(in q, p) == 4 {
+        let ap = wrapping_add(p, 3);
+        conjuncts(in q, ap, inout out);
+        conjuncts(in q, ex_end(in q, ap), inout out);
+    } else {
+        out.push(p);
+    }
+}
+
+// `a = b` between two columns: (true, slot a, binding a, slot b,
+// binding b).
+fn column_equality(in q: Q, p: u64) -> (bool, u64, u64, u64, u64) {
+    if ex(in q, p) != 3 || ex(in q, wrapping_add(p, 3)) != 0 {
+        return (false, 0, 0, 0, 0);
+    }
+    let ap = wrapping_add(p, 4);
+    let bp = ex_end(in q, ap);
+    if ex(in q, ap) != 0 || ex(in q, bp) != 0 {
+        return (false, 0, 0, 0, 0);
+    }
+    (
+        true,
+        ex(in q, wrapping_add(ap, 3)),
+        ex(in q, wrapping_add(ap, 4)),
+        ex(in q, wrapping_add(bp, 3)),
+        ex(in q, wrapping_add(bp, 4))
+    )
+}
+
+// The inputs and `ON` conjuncts of a maximal tree of inner joins.
+fn flatten_inner(in q: Q, n: u64, inout leaves: ChunkSeq[u64], inout on: ChunkSeq[u64]) {
+    let x = node(in q, n);
+    if x.kind == 2 && x.a == 0 {
+        flatten_inner(in q, x.b, inout leaves, inout on);
+        flatten_inner(in q, x.c, inout leaves, inout on);
+        conjuncts(in q, x.d, inout on);
+    } else {
+        leaves.push(n);
+    }
+}
+
+// The non-null key word of a value (`KeyPart::Word`; -0.0 is 0.0).
+fn key_word(x: Val) -> u64 {
+    if x.t == 3 && x.a == SIGN_BIT {
+        0
+    } else {
+        x.a
+    }
+}
+
+fn mix(h: u64, x: u64) -> u64 {
+    let m = wrapping_mul(h ^ x, 0x9e3779b97f4a7c15);
+    m ^ (m >> 29)
+}
+
+// The hash of the key of parts (`idx[k]`, `slots[k]`) of `t`, and whether
+// a part is NULL.
+fn key_hash(
+    in v: V,
+    in q: Q,
+    in prog: Slice[u64],
+    in t: ChunkSeq[u64],
+    in idx: ChunkSeq[u64],
+    in slots: ChunkSeq[u64]
+) -> (bool, u64) {
+    let mut h: u64 = 0x243f6a8885a308d3;
+    for k in 0..slots.len() {
+        let x = cell(in v, in prog, in t, cw(in idx, k), cw(in slots, k));
+        if x.t == 0 {
+            return (true, 0);
+        }
+        if x.t == 5 || x.t == 6 {
+            let mut f: u64 = 0xcbf29ce484222325;
+            for i in 0..x.b {
+                f = wrapping_mul(f ^ widen_u64(cb(in q.pool, wrapping_add(x.a, i))), 0x100000001b3);
+            }
+            h = mix(mix(h, 1), wrapping_add(f, x.b));
+        } else {
+            h = mix(mix(h, 2), key_word(x));
+        }
+    }
+    (false, h)
+}
+
+fn key_eq(
+    in v: V,
+    in q: Q,
+    in prog: Slice[u64],
+    in ta: ChunkSeq[u64],
+    in ia: ChunkSeq[u64],
+    in sa: ChunkSeq[u64],
+    in tb: ChunkSeq[u64],
+    in ib: ChunkSeq[u64],
+    in sb: ChunkSeq[u64]
+) -> bool {
+    for k in 0..sa.len() {
+        let x = cell(in v, in prog, in ta, cw(in ia, k), cw(in sa, k));
+        let y = cell(in v, in prog, in tb, cw(in ib, k), cw(in sb, k));
+        let xb = x.t == 5 || x.t == 6;
+        let yb = y.t == 5 || y.t == 6;
+        if xb != yb {
+            return false;
+        }
+        if xb {
+            if !same(in q.pool, x.a, x.b, y.a, y.b) {
+                return false;
+            }
+        } else if key_word(x) != key_word(y) {
+            return false;
+        }
+    }
+    true
+}
+
+fn fill_idx(inout idx: ChunkSeq[u64], n: u64, ti: u64) {
+    idx.truncate(0);
+    for k in 0..n {
+        idx.push(ti);
+    }
+}
+
+// Hash groups of the non-null keys `slots` of tuples `base .. base + n`
+// of `t` (rows are numbered from 0).
+fn groups(
+    in v: V,
+    in q: Q,
+    in prog: Slice[u64],
+    in t: ChunkSeq[u64],
+    base: u64,
+    n: u64,
+    in slots: ChunkSeq[u64]
+) -> G {
+    let mut g = new_g();
+    let mut size: u64 = 16;
+    loop {
+        if size >= wrapping_mul(n, 2) {
+            break;
+        }
+        size = wrapping_mul(size, 2);
+    }
+    g.size = size;
+    g.table.resize(size, none());
+    let mut ia = ChunkSeq::new[u64]();
+    let mut ib = ChunkSeq::new[u64]();
+    let ns = slots.len();
+    for j in 0..n {
+        fill_idx(inout ia, ns, wrapping_add(base, j));
+        let (null, h) = key_hash(in v, in q, in prog, in t, in ia, in slots);
+        if null {
+            g.gid.push(none());
+        } else {
+            let mut at = h & wrapping_sub(size, 1);
+            loop {
+                let e = cw(in g.table, at);
+                if e == none() {
+                    let id = g.rep.len();
+                    g.table.try_set(at, id);
+                    g.rep.push(j);
+                    g.count.push(1);
+                    g.gid.push(id);
+                    break;
+                }
+                fill_idx(inout ib, ns, wrapping_add(base, cw(in g.rep, e)));
+                if key_eq(in v, in q, in prog, in t, in ia, in slots, in t, in ib, in slots) {
+                    g.count.try_set(e, inc(cw(in g.count, e)));
+                    g.gid.push(e);
+                    break;
+                }
+                at = inc(at) & wrapping_sub(size, 1);
+            }
+        }
+    }
+    let mut s: u64 = 0;
+    let mut cursor = ChunkSeq::new[u64]();
+    for e in 0..g.rep.len() {
+        g.start.push(s);
+        cursor.push(s);
+        s = wrapping_add(s, cw(in g.count, e));
+    }
+    g.members.resize(s, 0);
+    for j in 0..n {
+        let e = cw(in g.gid, j);
+        if e != none() {
+            let c = cw(in cursor, e);
+            g.members.try_set(c, j);
+            cursor.try_set(e, inc(c));
+        }
+    }
+    g
+}
+
+// The group of the key parts (`idx`, `slots`) of `t`, or none.
+fn lookup(
+    in v: V,
+    in q: Q,
+    in prog: Slice[u64],
+    in g: G,
+    in gt: ChunkSeq[u64],
+    gbase: u64,
+    in gslots: ChunkSeq[u64],
+    in t: ChunkSeq[u64],
+    in idx: ChunkSeq[u64],
+    in slots: ChunkSeq[u64],
+    inout scratch: ChunkSeq[u64]
+) -> u64 {
+    let (null, h) = key_hash(in v, in q, in prog, in t, in idx, in slots);
+    if null {
+        return none();
+    }
+    let ns = gslots.len();
+    let mut at = h & wrapping_sub(g.size, 1);
+    loop {
+        let e = cw(in g.table, at);
+        if e == none() {
+            return none();
+        }
+        fill_idx(inout scratch, ns, wrapping_add(gbase, cw(in g.rep, e)));
+        if key_eq(in v, in q, in prog, in t, in idx, in slots, in gt, in scratch, in gslots) {
+            return e;
+        }
+        at = inc(at) & wrapping_sub(g.size, 1);
+    }
+}
+
+// Append tuple `ti` of `src` to `dst`, or an all-none tuple for none.
+fn push_tuple(in v: V, inout dst: ChunkSeq[u64], in src: ChunkSeq[u64], ti: u64) {
+    let nb = v.nb;
+    if ti == none() {
+        for b in 0..nb {
+            dst.push(none());
+        }
+        return;
+    }
+    let base = wrapping_mul(ti, nb);
+    for b in 0..nb {
+        dst.push(cw(in src, wrapping_add(base, b)));
+    }
+}
+
+// Overlay the bound entries of tuple `ti` of `src` onto tuple `di` of
+// `dst`.
+fn merge_tuple(in v: V, inout dst: ChunkSeq[u64], di: u64, in src: ChunkSeq[u64], ti: u64) {
+    if ti == none() {
+        return;
+    }
+    let nb = v.nb;
+    let base = wrapping_mul(ti, nb);
+    let dbase = wrapping_mul(di, nb);
+    for b in 0..nb {
+        let x = cw(in src, wrapping_add(base, b));
+        if x != none() {
+            dst.try_set(wrapping_add(dbase, b), x);
+        }
+    }
+}
+
+// `Run::rel`.
+fn rel(inout v: V, inout q: Q, in ds: D, in prog: Slice[u64], n: u64) -> Rel {
+    if q.err != 0 {
+        return new_rel(0);
+    }
+    let x = node(in q, n);
+    if x.kind == 0 {
+        let src = scan_rel(inout v, in q, in ds, in prog, n);
+        let cols = if x.e > 1 {
+            x.e
+        } else {
+            1
+        };
+        tick(inout q, wrapping_mul(src.n, cols));
+        let mut preds = ChunkSeq::new[u64]();
+        let mut l = x.f;
+        loop {
+            if l == none() {
+                break;
+            }
+            let k = link(in q, l);
+            preds.push(k.expr);
+            l = k.next;
+        }
+        filter(inout v, inout q, in ds, in prog, src, in preds)
+    } else if x.kind == 1 {
+        let input = rel(inout v, inout q, in ds, in prog, x.b);
+        let mut preds = ChunkSeq::new[u64]();
+        preds.push(x.a);
+        filter(inout v, inout q, in ds, in prog, input, in preds)
+    } else {
+        let mut leaves = ChunkSeq::new[u64]();
+        let mut on = ChunkSeq::new[u64]();
+        flatten_inner(in q, n, inout leaves, inout on);
+        if leaves.len() >= 3 {
+            return inner_chain(inout v, inout q, in ds, in prog, in leaves, in on);
+        }
+        let l = rel(inout v, inout q, in ds, in prog, x.b);
+        let r = rel(inout v, inout q, in ds, in prog, x.c);
+        join(inout v, inout q, in ds, in prog, x.a, x.b, x.c, x.d, in l, in r)
+    }
+}
+
+// `Run::filter`.
+fn filter(
+    inout v: V,
+    inout q: Q,
+    in ds: D,
+    in prog: Slice[u64],
+    sink r: Rel,
+    in preds: ChunkSeq[u64]
+) -> Rel {
+    if q.err != 0 {
+        return r;
+    }
+    if preds.len() == 0 {
+        produced(inout v, inout q, r.n);
+        return r;
+    }
+    let mut out = new_rel(r.mask);
+    let mut start: u64 = 0;
+    loop {
+        if start >= r.n || q.err != 0 {
+            break;
+        }
+        let end = if wrapping_add(start, v.batch) < r.n {
+            wrapping_add(start, v.batch)
+        } else {
+            r.n
+        };
+        let n = wrapping_sub(end, start);
+        tick(inout q, wrapping_mul(n, preds.len()));
+        if q.err != 0 {
+            break;
+        }
+        mask(inout v, inout q, in ds, in prog, in r, start, n, in preds);
+        if q.err != 0 {
+            break;
+        }
+        for i in 0..n {
+            if cb(in v.sel, i) == 1 {
+                let ti = wrapping_add(start, i);
+                let cells = tuple_bytes(in v, in q, in prog, in r.t, ti, r.mask);
+                materialize(inout v, inout q, 1, cells);
+                if q.err != 0 {
+                    return out;
+                }
+                push_tuple(in v, inout out.t, in r.t, ti);
+                out.n = inc(out.n);
+            }
+        }
+        start = end;
+    }
+    if q.err == 0 {
+        let k = out.n;
+        produced(inout v, inout q, k);
+    }
+    out
+}
+
+// The candidate batch of a join: left tuples `li`, right tuples `ri`.
+fn pair_batch(
+    inout v: V,
+    inout q: Q,
+    in prog: Slice[u64],
+    in l: Rel,
+    in r: Rel,
+    in li: ChunkSeq[u64],
+    in ri: ChunkSeq[u64]
+) -> Rel {
+    let n = li.len();
+    let mut bytes = wrapping_mul(n, size_vec(in q));
+    for c in 0..n {
+        bytes = wrapping_add(bytes, tuple_bytes(in v, in q, in prog, in l.t, cw(in li, c), l.mask));
+        bytes = wrapping_add(bytes, tuple_bytes(in v, in q, in prog, in r.t, cw(in ri, c), r.mask));
+    }
+    let mut out = new_rel(l.mask | r.mask);
+    if !bound(inout q, bytes, 11, "intermediate byte limit of a candidate-pair batch") {
+        return out;
+    }
+    for c in 0..n {
+        push_tuple(in v, inout out.t, in l.t, cw(in li, c));
+        merge_tuple(in v, inout out.t, c, in r.t, cw(in ri, c));
+    }
+    out.n = n;
+    out
+}
+
+fn bget(in s: ChunkSeq[bool], i: u64) -> bool {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => false,
+    }
+}
+
+// `Run::join`: a two-input join with a streaming probe.
+fn join(
+    inout v: V,
+    inout q: Q,
+    in ds: D,
+    in prog: Slice[u64],
+    kind: u64,
+    lhs: u64,
+    rhs: u64,
+    on: u64,
+    in l: Rel,
+    in r: Rel
+) -> Rel {
+    let mut out = new_rel(l.mask | r.mask);
+    if q.err != 0 {
+        return out;
+    }
+    let lb = bindings(in q, lhs);
+    let rb = bindings(in q, rhs);
+    let mut parts = ChunkSeq::new[u64]();
+    conjuncts(in q, on, inout parts);
+    let mut lkeys = ChunkSeq::new[u64]();
+    let mut rkeys = ChunkSeq::new[u64]();
+    let mut residual = ChunkSeq::new[u64]();
+    for k in 0..parts.len() {
+        let p = cw(in parts, k);
+        let (eq, sa, ba, sb, bb) = column_equality(in q, p);
+        if eq && (lb & bit(ba)) != 0 && (rb & bit(bb)) != 0 {
+            lkeys.push(sa);
+            rkeys.push(sb);
+        } else if eq && (lb & bit(bb)) != 0 && (rb & bit(ba)) != 0 {
+            lkeys.push(sb);
+            rkeys.push(sa);
+        } else {
+            residual.push(p);
+        }
+    }
+    let nk = lkeys.len();
+    let mut g = new_g();
+    if nk == 0 {
+        let pairs = wrapping_mul(l.n, r.n);
+        tick(inout q, pairs);
+        if q.err != 0 {
+            return out;
+        }
+        if !bound(inout q, pairs, 10, "cumulative intermediate row limit") {
+            return out;
+        }
+    } else {
+        g = groups(in v, in q, in prog, in r.t, 0, r.n, in rkeys);
+        tick(inout q, wrapping_mul(r.n, nk));
+        tick(inout q, wrapping_mul(l.n, nk));
+        if q.err != 0 {
+            return out;
+        }
+    }
+    let outer_left = kind == 1 || kind == 3;
+    let batch = v.batch;
+    let mut out_l = ChunkSeq::new[u64]();
+    let mut out_r = ChunkSeq::new[u64]();
+    let mut right_hit = ChunkSeq::new[bool]();
+    right_hit.resize(r.n, false);
+    let mut left_hit = ChunkSeq::new[bool]();
+    left_hit.resize(l.n, false);
+    let mut cand_l = ChunkSeq::with_capacity[u64](batch);
+    let mut cand_r = ChunkSeq::with_capacity[u64](batch);
+    let mut idx = ChunkSeq::new[u64]();
+    let mut scratch = ChunkSeq::new[u64]();
+    let mut i: u64 = 0;
+    let mut k: u64 = 0;
+    // The current match list: group members from `cur` (or every right row
+    // when `all`), `cur_n` long.
+    let mut cur: u64 = 0;
+    let mut cur_n: u64 = 0;
+    let mut closed: u64 = 0;
+    loop {
+        cand_l.truncate(0);
+        cand_r.truncate(0);
+        loop {
+            if cand_l.len() >= batch || i >= l.n {
+                break;
+            }
+            if k == 0 {
+                if nk == 0 {
+                    cur = 0;
+                    cur_n = r.n;
+                } else {
+                    fill_idx(inout idx, nk, i);
+                    let e = lookup(
+                        in v,
+                        in q,
+                        in prog,
+                        in g,
+                        in r.t,
+                        0,
+                        in rkeys,
+                        in l.t,
+                        in idx,
+                        in lkeys,
+                        inout scratch
+                    );
+                    if e == none() {
+                        cur = 0;
+                        cur_n = 0;
+                    } else {
+                        cur = cw(in g.start, e);
+                        cur_n = cw(in g.count, e);
+                    }
+                    tick(inout q, cur_n);
+                    produced(inout v, inout q, cur_n);
+                    if q.err != 0 {
+                        return out;
+                    }
+                }
+            }
+            let room = wrapping_sub(batch, cand_l.len());
+            let left = wrapping_sub(cur_n, k);
+            let take = if room < left {
+                room
+            } else {
+                left
+            };
+            for x in 0..take {
+                cand_l.push(i);
+                let j = if nk == 0 {
+                    wrapping_add(k, x)
+                } else {
+                    cw(in g.members, wrapping_add(wrapping_add(cur, k), x))
+                };
+                cand_r.push(j);
+            }
+            k = wrapping_add(k, take);
+            if k == cur_n {
+                i = inc(i);
+                k = 0;
+            }
+        }
+        let n = cand_l.len();
+        if n == 0 {
+            break;
+        }
+        if residual.len() == 0 {
+            v.sel.truncate(0);
+            v.sel.resize(n, 1);
+        } else {
+            let pair = pair_batch(inout v, inout q, in prog, in l, in r, in cand_l, in cand_r);
+            if q.err != 0 {
+                return out;
+            }
+            tick(inout q, wrapping_mul(n, wrapping_add(residual.len(), width(in q))));
+            if q.err != 0 {
+                return out;
+            }
+            mask(inout v, inout q, in ds, in prog, in pair, 0, n, in residual);
+            if q.err != 0 {
+                return out;
+            }
+        }
+        for c in 0..n {
+            let li = cw(in cand_l, c);
+            let rj = cw(in cand_r, c);
+            loop {
+                if closed >= li {
+                    break;
+                }
+                if outer_left && !bget(in left_hit, closed) {
+                    out_l.push(closed);
+                    out_r.push(none());
+                }
+                closed = inc(closed);
+            }
+            if cb(in v.sel, c) == 1 {
+                out_l.push(li);
+                out_r.push(rj);
+                left_hit.try_set(li, true);
+                right_hit.try_set(rj, true);
+            }
+        }
+    }
+    loop {
+        if closed >= l.n {
+            break;
+        }
+        if outer_left && !bget(in left_hit, closed) {
+            out_l.push(closed);
+            out_r.push(none());
+        }
+        closed = inc(closed);
+    }
+    if kind == 2 || kind == 3 {
+        for j in 0..r.n {
+            if !bget(in right_hit, j) {
+                out_l.push(none());
+                out_r.push(j);
+            }
+        }
+    }
+    let m = out_l.len();
+    produced(inout v, inout q, m);
+    tick(inout q, wrapping_mul(m, width(in q)));
+    if q.err != 0 {
+        return out;
+    }
+    let mut cells: u64 = 0;
+    for c in 0..m {
+        cells = wrapping_add(
+            cells,
+            tuple_bytes(in v, in q, in prog, in l.t, cw(in out_l, c), l.mask)
+        );
+        cells = wrapping_add(
+            cells,
+            tuple_bytes(in v, in q, in prog, in r.t, cw(in out_r, c), r.mask)
+        );
+    }
+    materialize(inout v, inout q, m, cells);
+    if q.err != 0 {
+        return out;
+    }
+    for c in 0..m {
+        push_tuple(in v, inout out.t, in l.t, cw(in out_l, c));
+        merge_tuple(in v, inout out.t, c, in r.t, cw(in out_r, c));
+    }
+    out.n = m;
+    out
+}
+
+// The leaf whose bindings include binding b, or none.
+fn leaf_of(in lmask: ChunkSeq[u64], b: u64) -> u64 {
+    for i in 0..lmask.len() {
+        if (cw(in lmask, i) & bit(b)) != 0 {
+            return i;
+        }
+    }
+    none()
+}
+
+// `Run::join_order`: the greedy order of an inner chain (leaf positions).
+fn join_order(
+    inout v: V,
+    inout q: Q,
+    in prog: Slice[u64],
+    in all: ChunkSeq[u64],
+    in lbase: ChunkSeq[u64],
+    in ln: ChunkSeq[u64],
+    in lmask: ChunkSeq[u64],
+    in on: ChunkSeq[u64],
+    inout order_out: ChunkSeq[u64]
+) {
+    let m = ln.len();
+    let mut start: u64 = 0;
+    for i in 1..m {
+        if cw(in ln, i) < cw(in ln, start) {
+            start = i;
+        }
+    }
+    order_out.push(start);
+    let mut in_order = bit(start);
+    let mut est = nearest_f64(cw(in ln, start));
+    loop {
+        if order_out.len() >= m || q.err != 0 {
+            break;
+        }
+        let mut found = false;
+        let mut bc = false;
+        let mut be = est;
+        let mut bi: u64 = 0;
+        for c in 0..m {
+            if (in_order & bit(c)) == 0 {
+                let mut kslots = ChunkSeq::new[u64]();
+                for e in 0..on.len() {
+                    let (eq, sa, ba, sb, bb) = column_equality(in q, cw(in on, e));
+                    if eq {
+                        let la = leaf_of(in lmask, ba);
+                        let lb = leaf_of(in lmask, bb);
+                        if la != none() && lb != none() {
+                            if (in_order & bit(la)) != 0 && lb == c {
+                                kslots.push(sb);
+                            } else if (in_order & bit(lb)) != 0 && la == c {
+                                kslots.push(sa);
+                            }
+                        }
+                    }
+                }
+                let nc = cw(in ln, c);
+                let size = nearest_f64(nc);
+                let connected = kslots.len() > 0;
+                let e = if connected {
+                    let g = groups(in v, in q, in prog, in all, cw(in lbase, c), nc, in kslots);
+                    tick(inout q, wrapping_mul(nc, kslots.len()));
+                    let d = if g.rep.len() > 1 {
+                        g.rep.len()
+                    } else {
+                        1
+                    };
+                    est * size / nearest_f64(d)
+                } else {
+                    est * size
+                };
+                if q.err != 0 {
+                    return;
+                }
+                let better = if !found {
+                    true
+                } else {
+                    (connected && !bc) || (connected == bc && e < be)
+                };
+                if better {
+                    found = true;
+                    bc = connected;
+                    be = e;
+                    bi = c;
+                }
+            }
+        }
+        order_out.push(bi);
+        in_order = in_order | bit(bi);
+        est = be;
+    }
+}
+
+// Append the readable name of a join input to the pool (`leaf_name`).
+fn leaf_name(inout q: Q, n: u64) {
+    let x = node(in q, n);
+    if x.kind == 0 {
+        for i in 0..x.b {
+            let c = cb(in q.pool, wrapping_add(x.a, i));
+            q.pool.push(c);
+        }
+    } else if x.kind == 1 {
+        leaf_name(inout q, x.b);
+    } else {
+        q.pool.push(40);
+        leaf_name(inout q, x.b);
+        q.pool.push(32);
+        leaf_name(inout q, x.c);
+        q.pool.push(41);
+    }
+}
+
+// Lexicographic order of chain tuples `a` and `b` (width m).
+fn tuple_less(in t: ChunkSeq[u64], m: u64, a: u64, b: u64) -> bool {
+    let pa = wrapping_mul(a, m);
+    let pb = wrapping_mul(b, m);
+    for k in 0..m {
+        let x = cw(in t, wrapping_add(pa, k));
+        let y = cw(in t, wrapping_add(pb, k));
+        if x != y {
+            return x < y;
+        }
+    }
+    false
+}
+
+// Sort the indexes `idx` of chain tuples (bottom-up merge sort).
+fn sort_tuples(in t: ChunkSeq[u64], m: u64, inout idx: ChunkSeq[u64]) {
+    let n = idx.len();
+    let mut tmp = ChunkSeq::new[u64]();
+    tmp.resize(n, 0);
+    let mut w: u64 = 1;
+    loop {
+        if w >= n {
+            break;
+        }
+        let mut lo: u64 = 0;
+        loop {
+            if lo >= n {
+                break;
+            }
+            let mid = if wrapping_add(lo, w) < n {
+                wrapping_add(lo, w)
+            } else {
+                n
+            };
+            let hi = if wrapping_add(mid, w) < n {
+                wrapping_add(mid, w)
+            } else {
+                n
+            };
+            let mut a = lo;
+            let mut b = mid;
+            for o in lo..hi {
+                let take_a = if a >= mid {
+                    false
+                } else if b >= hi {
+                    true
+                } else {
+                    !tuple_less(in t, m, cw(in idx, b), cw(in idx, a))
+                };
+                if take_a {
+                    tmp.try_set(o, cw(in idx, a));
+                    a = inc(a);
+                } else {
+                    tmp.try_set(o, cw(in idx, b));
+                    b = inc(b);
+                }
+            }
+            lo = hi;
+        }
+        for o in 0..n {
+            idx.try_set(o, cw(in tmp, o));
+        }
+        w = wrapping_mul(w, 2);
+    }
+}
+
+// The chain-tuple batch of `keep`: each candidate's member leaves merged.
+fn chain_batch(
+    in v: V,
+    in all: ChunkSeq[u64],
+    in lbase: ChunkSeq[u64],
+    members: u64,
+    m: u64,
+    in cand: ChunkSeq[u64],
+    n: u64,
+    mask: u64
+) -> Rel {
+    let mut out = new_rel(mask);
+    for c in 0..n {
+        push_tuple(in v, inout out.t, in all, none());
+        for leaf in 0..m {
+            if (members & bit(leaf)) != 0 {
+                let j = cw(in cand, wrapping_add(wrapping_mul(c, m), leaf));
+                merge_tuple(in v, inout out.t, c, in all, wrapping_add(cw(in lbase, leaf), j));
+            }
+        }
+    }
+    out.n = n;
+    out
+}
+
+// `Run::keep`: filter the candidate tuples by `residual` and move the
+// survivors to `next`.
+fn keep(
+    inout v: V,
+    inout q: Q,
+    in ds: D,
+    in prog: Slice[u64],
+    in all: ChunkSeq[u64],
+    in lbase: ChunkSeq[u64],
+    in lmask: ChunkSeq[u64],
+    members: u64,
+    m: u64,
+    in residual: ChunkSeq[u64],
+    inout cand: ChunkSeq[u64],
+    inout next: ChunkSeq[u64]
+) {
+    let n = quot(cand.len(), m);
+    if n == 0 || q.err != 0 {
+        cand.truncate(0);
+        return;
+    }
+    if residual.len() == 0 {
+        for k in 0..cand.len() {
+            next.push(cw(in cand, k));
+        }
+        cand.truncate(0);
+        return;
+    }
+    let mut bytes = wrapping_mul(n, size_vec(in q));
+    let mut mask_all: u64 = 0;
+    for leaf in 0..m {
+        if (members & bit(leaf)) != 0 {
+            let lm = cw(in lmask, leaf);
+            mask_all = mask_all | lm;
+            for c in 0..n {
+                let j = cw(in cand, wrapping_add(wrapping_mul(c, m), leaf));
+                bytes = wrapping_add(
+                    bytes,
+                    tuple_bytes(
+                        in v,
+                        in q,
+                        in prog,
+                        in all,
+                        wrapping_add(cw(in lbase, leaf), j),
+                        lm
+                    )
+                );
+            }
+        }
+    }
+    if !bound(inout q, bytes, 11, "intermediate byte limit of a candidate-tuple batch") {
+        return;
+    }
+    let b = chain_batch(in v, in all, in lbase, members, m, in cand, n, mask_all);
+    tick(inout q, wrapping_mul(n, wrapping_add(residual.len(), width(in q))));
+    if q.err != 0 {
+        return;
+    }
+    mask(inout v, inout q, in ds, in prog, in b, 0, n, in residual);
+    if q.err != 0 {
+        return;
+    }
+    for c in 0..n {
+        if cb(in v.sel, c) == 1 {
+            for k in 0..m {
+                next.push(cw(in cand, wrapping_add(wrapping_mul(c, m), k)));
+            }
+        }
+    }
+    cand.truncate(0);
+}
+
+// `Run::inner_chain`: a chain of three or more inner joins, reordered.
+fn inner_chain(
+    inout v: V,
+    inout q: Q,
+    in ds: D,
+    in prog: Slice[u64],
+    in leaves: ChunkSeq[u64],
+    in on: ChunkSeq[u64]
+) -> Rel {
+    let m = leaves.len();
+    let nb = v.nb;
+    // Every input materialized, one after the other in `all`.
+    let mut all = ChunkSeq::new[u64]();
+    let mut lbase = ChunkSeq::new[u64]();
+    let mut ln = ChunkSeq::new[u64]();
+    let mut lmask = ChunkSeq::new[u64]();
+    for i in 0..m {
+        let r = rel(inout v, inout q, in ds, in prog, cw(in leaves, i));
+        if q.err != 0 {
+            return new_rel(0);
+        }
+        lbase.push(quot(all.len(), nb));
+        ln.push(r.n);
+        lmask.push(bindings(in q, cw(in leaves, i)));
+        for k in 0..r.t.len() {
+            all.push(cw(in r.t, k));
+        }
+    }
+    let mut ord = ChunkSeq::new[u64]();
+    join_order(inout v, inout q, in prog, in all, in lbase, in ln, in lmask, in on, inout ord);
+    if q.err != 0 {
+        return new_rel(0);
+    }
+    v.orders.push(m);
+    for k in 0..m {
+        let off = q.pool.len();
+        leaf_name(inout q, cw(in leaves, cw(in ord, k)));
+        v.orders.push(off);
+        v.orders.push(wrapping_sub(q.pool.len(), off));
+    }
+    v.norders = inc(v.norders);
+    let mut applied = ChunkSeq::new[bool]();
+    applied.resize(on.len(), false);
+    let mut joined: u64 = 0;
+    let mut tuples = ChunkSeq::new[u64]();
+    let batch = v.batch;
+    let mut kleaf = ChunkSeq::new[u64]();
+    let mut kslot = ChunkSeq::new[u64]();
+    let mut cslot = ChunkSeq::new[u64]();
+    let mut idx = ChunkSeq::new[u64]();
+    let mut scratch = ChunkSeq::new[u64]();
+    for step in 0..m {
+        let c = cw(in ord, step);
+        let mut present: u64 = 0;
+        for x in 0..m {
+            if (joined & bit(x)) != 0 {
+                present = present | cw(in lmask, x);
+            }
+        }
+        kleaf.truncate(0);
+        kslot.truncate(0);
+        cslot.truncate(0);
+        if step > 0 {
+            for e in 0..on.len() {
+                if !bget(in applied, e) {
+                    let (eq, sa, ba, sb, bb) = column_equality(in q, cw(in on, e));
+                    if eq {
+                        let la = leaf_of(in lmask, ba);
+                        let lb = leaf_of(in lmask, bb);
+                        if la != none() && lb != none() {
+                            if (joined & bit(la)) != 0 && lb == c {
+                                kleaf.push(la);
+                                kslot.push(sa);
+                                cslot.push(sb);
+                                applied.try_set(e, true);
+                            } else if (joined & bit(lb)) != 0 && la == c {
+                                kleaf.push(lb);
+                                kslot.push(sb);
+                                cslot.push(sa);
+                                applied.try_set(e, true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        present = present | cw(in lmask, c);
+        let mut residual = ChunkSeq::new[u64]();
+        for e in 0..on.len() {
+            let p = cw(in on, e);
+            if !bget(in applied, e) && (deps(in q, p) & ~present) == 0 {
+                residual.push(p);
+                applied.try_set(e, true);
+            }
+        }
+        let nk = kleaf.len();
+        let cbase = cw(in lbase, c);
+        let cn = cw(in ln, c);
+        let mut g = new_g();
+        if step > 0 && nk > 0 {
+            g = groups(in v, in q, in prog, in all, cbase, cn, in cslot);
+            tick(inout q, wrapping_mul(cn, nk));
+            if q.err != 0 {
+                return new_rel(0);
+            }
+        }
+        let nbase = if step == 0 {
+            1
+        } else {
+            quot(tuples.len(), m)
+        };
+        let members = joined | bit(c);
+        let mut next = ChunkSeq::new[u64]();
+        let mut cand = ChunkSeq::new[u64]();
+        for tb in 0..nbase {
+            if q.err != 0 {
+                return new_rel(0);
+            }
+            let tpos = wrapping_mul(tb, m);
+            let mut js_start: u64 = 0;
+            let mut js_n: u64 = cn;
+            let mut grouped = false;
+            if step > 0 && nk == 0 {
+                tick(inout q, cn);
+                produced(inout v, inout q, cn);
+            } else if step > 0 {
+                idx.truncate(0);
+                for kk in 0..nk {
+                    let leaf = cw(in kleaf, kk);
+                    idx
+                        .push(
+                            wrapping_add(
+                                cw(in lbase, leaf),
+                                cw(in tuples, wrapping_add(tpos, leaf))
+                            )
+                        );
+                }
+                let e = lookup(
+                    in v,
+                    in q,
+                    in prog,
+                    in g,
+                    in all,
+                    cbase,
+                    in cslot,
+                    in all,
+                    in idx,
+                    in kslot,
+                    inout scratch
+                );
+                grouped = true;
+                if e == none() {
+                    js_n = 0;
+                } else {
+                    js_start = cw(in g.start, e);
+                    js_n = cw(in g.count, e);
+                }
+                let charge = if js_n > 1 {
+                    js_n
+                } else {
+                    1
+                };
+                tick(inout q, charge);
+                produced(inout v, inout q, js_n);
+            }
+            if q.err != 0 {
+                return new_rel(0);
+            }
+            for x in 0..js_n {
+                let j = if grouped {
+                    cw(in g.members, wrapping_add(js_start, x))
+                } else {
+                    x
+                };
+                for leaf in 0..m {
+                    if leaf == c {
+                        cand.push(j);
+                    } else if step == 0 {
+                        cand.push(none());
+                    } else {
+                        cand.push(cw(in tuples, wrapping_add(tpos, leaf)));
+                    }
+                }
+                if quot(cand.len(), m) >= batch {
+                    keep(
+                        inout v,
+                        inout q,
+                        in ds,
+                        in prog,
+                        in all,
+                        in lbase,
+                        in lmask,
+                        members,
+                        m,
+                        in residual,
+                        inout cand,
+                        inout next
+                    );
+                    if q.err != 0 {
+                        return new_rel(0);
+                    }
+                }
+            }
+        }
+        keep(
+            inout v,
+            inout q,
+            in ds,
+            in prog,
+            in all,
+            in lbase,
+            in lmask,
+            members,
+            m,
+            in residual,
+            inout cand,
+            inout next
+        );
+        if q.err != 0 {
+            return new_rel(0);
+        }
+        let nn = quot(next.len(), m);
+        produced(inout v, inout q, nn);
+        if q.err != 0 {
+            return new_rel(0);
+        }
+        tuples = next;
+        joined = members;
+    }
+    let n = quot(tuples.len(), m);
+    let mut order_idx = ChunkSeq::new[u64]();
+    for i in 0..n {
+        order_idx.push(i);
+    }
+    sort_tuples(in tuples, m, inout order_idx);
+    tick(inout q, wrapping_mul(n, width(in q)));
+    if q.err != 0 {
+        return new_rel(0);
+    }
+    let mut cells: u64 = 0;
+    let mut mask_all: u64 = 0;
+    for leaf in 0..m {
+        let lm = cw(in lmask, leaf);
+        mask_all = mask_all | lm;
+        for i in 0..n {
+            let j = cw(in tuples, wrapping_add(wrapping_mul(i, m), leaf));
+            cells = wrapping_add(
+                cells,
+                tuple_bytes(in v, in q, in prog, in all, wrapping_add(cw(in lbase, leaf), j), lm)
+            );
+        }
+    }
+    materialize(inout v, inout q, n, cells);
+    if q.err != 0 {
+        return new_rel(0);
+    }
+    let mut sorted = ChunkSeq::new[u64]();
+    for i in 0..n {
+        let t = cw(in order_idx, i);
+        for leaf in 0..m {
+            sorted.push(cw(in tuples, wrapping_add(wrapping_mul(t, m), leaf)));
+        }
+    }
+    let all_members = wrapping_sub(bit(m), 1);
+    chain_batch(in v, in all, in lbase, all_members, m, in sorted, n, mask_all)
+}
+
+// `Run::project`: projected batches of the materialized plan.
+fn project(
+    inout v: V,
+    inout q: Q,
+    in ds: D,
+    in prog: Slice[u64],
+    in r: Rel,
+    in projs: ChunkSeq[u64],
+    mode: u64,
+    inout accs: ChunkSeq[Acc]
+) {
+    let mut out_bytes: u64 = 0;
+    let np = if projs.len() > 1 {
+        projs.len()
+    } else {
+        1
+    };
+    let mut start: u64 = 0;
+    loop {
+        if start >= r.n || q.err != 0 {
+            break;
+        }
+        let end = if wrapping_add(start, v.batch) < r.n {
+            wrapping_add(start, v.batch)
+        } else {
+            r.n
+        };
+        let n = wrapping_sub(end, start);
+        v.sel.truncate(0);
+        v.sel.resize(n, 1);
+        tick(inout q, wrapping_mul(n, np));
+        if q.err != 0 {
+            return;
+        }
+        sink(
+            inout v,
+            inout q,
+            in ds,
+            in prog,
+            in r,
+            start,
+            n,
+            in projs,
+            mode,
+            inout accs,
+            inout out_bytes
+        );
+        start = end;
+    }
+}
+
+// ---------------------------------------------------------------------
+// Entry points.
+
+pub fn vexecute_q(in prog: Slice[u64], in text: Slice[u8], in extra: Slice[u64]) -> Q {
+    let mut q = new_q();
+    let mut ds = new_d();
+    let mut v = new_v();
+    let mut projs = ChunkSeq::new[u64]();
+    let stale = sw(in extra, 0) != 0;
+    let mode = sw(in extra, 1);
+    v.batch = sw(in extra, 2);
+    let data_at = sw(in extra, 3);
+    let nslots = sw(in extra, 4);
+    let mut p: u64 = 5;
+    for k in 0..nslots {
+        v.sty.push(sw(in extra, p));
+        v.sbind.push(0);
+        v.scol.push(0);
+        p = inc(p);
+    }
+    let naggs = sw(in extra, p);
+    let agg_at = inc(p);
+    p = wrapping_add(agg_at, wrapping_mul(naggs, 2));
+    let nout = sw(in extra, p);
+    let mut outty = ChunkSeq::new[u64]();
+    for k in 0..nout {
+        outty.push(sw(in extra, wrapping_add(inc(p), k)));
+    }
+    let mut accs = ChunkSeq::new[Acc]();
+    if mode == MODE_AGGS {
+        for k in 0..naggs {
+            let at = wrapping_add(agg_at, wrapping_mul(k, 2));
+            let a = new_acc(inout q, sw(in extra, at), sw(in extra, inc(at)), in outty);
+            accs.push(a);
+            if q.err != 0 {
+                return q;
+            }
+        }
+    }
+    if stale {
+        fail(inout q, 7, "prepared query or data schema snapshot differs in revision/content");
+        return q;
+    }
+    // The rows of a `DataSet` were validated against its catalog when they
+    // were set, and a call that is not stale has that catalog, so the
+    // row validation of `check_call` cannot fail here and is skipped.
+    let root = load_query(inout q, inout ds, in prog, in text, inout projs, false, false, data_at);
+    if q.err != 0 {
+        return q;
+    }
+    scan_slots(inout v, in q, root);
+    if mode == MODE_ORDERS {
+        if has_join(in q, root) {
+            rel(inout v, inout q, in ds, in prog, root);
+        }
+        if q.err != 0 {
+            return q;
+        }
+        q.words.push(v.norders);
+        for k in 0..v.orders.len() {
+            q.words.push(cw(in v.orders, k));
+        }
+        return q;
+    }
+    q.words.push(0);
+    if mode == MODE_ROWS {
+        q.words.push(0);
+    }
+    if has_join(in q, root) {
+        let r = rel(inout v, inout q, in ds, in prog, root);
+        if q.err == 0 {
+            project(inout v, inout q, in ds, in prog, in r, in projs, mode, inout accs);
+        }
+    } else {
+        drive_scan(inout v, inout q, in ds, in prog, root, in projs, mode, inout accs);
+    }
+    if q.err != 0 {
+        return q;
+    }
+    let w = q.work;
+    q.words.try_set(0, w);
+    if mode == MODE_AGGS {
+        for k in 0..accs.len() {
+            acc_finish(inout q, acc_get(in accs, k));
+            if q.err != 0 {
+                return q;
+            }
+        }
+    }
+    q
+}
+
+// `aggregate_rows`. prog is
+//   naggs, (agg, column)*, ncols, (column type)*, nrows, (nvals, values..)*
+// with ranges into text. On success words holds the aggregate values.
+pub fn vaggregate_rows_q(in prog: Slice[u64], in text: Slice[u8]) -> Q {
+    let mut q = new_q();
+    q.pool.extend(in text);
+    let naggs = sw(in prog, 0);
+    let mut p = wrapping_add(1, wrapping_mul(naggs, 2));
+    let ncols = sw(in prog, p);
+    let mut outty = ChunkSeq::new[u64]();
+    for k in 0..ncols {
+        outty.push(sw(in prog, wrapping_add(inc(p), k)));
+    }
+    p = wrapping_add(inc(p), ncols);
+    let mut accs = ChunkSeq::new[Acc]();
+    for k in 0..naggs {
+        let at = inc(wrapping_mul(k, 2));
+        let a = new_acc(inout q, sw(in prog, at), sw(in prog, inc(at)), in outty);
+        accs.push(a);
+        if q.err != 0 {
+            return q;
+        }
+    }
+    let nrows = sw(in prog, p);
+    p = inc(p);
+    for r in 0..nrows {
+        let nvals = sw(in prog, p);
+        for k in 0..naggs {
+            let mut a = acc_get(in accs, k);
+            if a.agg == 0 {
+                a = acc_push(inout q, a, false, null_val());
+            } else {
+                let x = if a.idx < nvals {
+                    val_in(in prog, wrapping_add(inc(p), wrapping_mul(a.idx, 3)))
+                } else {
+                    null_val()
+                };
+                a = acc_push(inout q, a, true, x);
+            }
+            accs.try_set(k, a);
+            if q.err != 0 {
+                return q;
+            }
+        }
+        p = wrapping_add(inc(p), wrapping_mul(nvals, 3));
+    }
+    for k in 0..naggs {
+        acc_finish(inout q, acc_get(in accs, k));
+        if q.err != 0 {
+            return q;
+        }
+    }
+    q
+}
