@@ -386,12 +386,14 @@ pub fn matrix_covered(
                     }
                 } else if pat.kind == P_TUPLE
                     && tag == pats.tuple_sym
-                    && w(pat.kid_count) == field_count {
+                    && w(pat.kid_count) == field_count
+                {
                     for j in 0..w(pat.kid_count) {
                         row.push(pats.kid(add(w(pat.kid_start), j)));
                     }
                 } else if (pat.kind == P_TRUE && tag == pats.true_sym)
-                    || (pat.kind == P_FALSE && tag == pats.false_sym) {
+                    || (pat.kind == P_FALSE && tag == pats.false_sym)
+                {
                     keep = true;
                 } else {
                     keep = false;

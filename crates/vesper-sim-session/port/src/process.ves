@@ -149,7 +149,8 @@ pub fn validate_model_bounds(
         || n_logs > MAX_LOGS
         || n_networks > MAX_NETWORKS
         || n_faults > MAX_FAULTS
-        || n_failures > MAX_FAILURES {
+        || n_failures > MAX_FAILURES
+    {
         return 4;
     }
     0
@@ -176,7 +177,8 @@ pub fn validate_network_bounds(
         || max_inbox == 0
         || max_inbox > MAX_QUEUE
         || max_message_bytes == 0
-        || max_message_bytes > MAX_MESSAGE_BYTES {
+        || max_message_bytes > MAX_MESSAGE_BYTES
+    {
         return 1;
     }
     if timeout_code > I32_MAX || unreachable_code > I32_MAX {
@@ -269,14 +271,16 @@ pub fn validate_warp_bounds(
     if max_in_flight == 0
         || max_in_flight > WARP_MAX_IN_FLIGHT
         || max_leases == 0
-        || max_leases > WARP_MAX_FRAMES {
+        || max_leases > WARP_MAX_FRAMES
+    {
         return 1;
     }
     if n_nics == 0
         || n_nics > WARP_MAX_NICS
         || n_links > WARP_MAX_LINKS
         || n_flows > WARP_MAX_FLOWS
-        || n_events > WARP_MAX_EVENTS {
+        || n_events > WARP_MAX_EVENTS
+    {
         return 2;
     }
     0
@@ -299,7 +303,8 @@ pub fn validate_warp_link_params(
         || ge_g2b > WARP_PPM
         || ge_b2g > WARP_PPM
         || ge_lg > WARP_PPM
-        || ge_lb > WARP_PPM {
+        || ge_lb > WARP_PPM
+    {
         return 1;
     }
     if buffer_packets == 0 || rate_bps == 0 {

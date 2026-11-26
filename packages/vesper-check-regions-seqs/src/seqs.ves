@@ -395,7 +395,8 @@ pub fn str_resolve(in types: Types, known: Known, name_index: u32, receiver: u32
     }
     let code = wrapping_add(OP_STR, op);
     if is_string_type(in types, known, receiver)
-        || (is_str_type(in types, known, receiver) && !mutates(code)) {
+        || (is_str_type(in types, known, receiver) && !mutates(code))
+    {
         code
     } else {
         0

@@ -599,14 +599,16 @@ pub fn archive_validate(in bytes: Slice[u8], lim: ArchiveLimits) -> u64 eff [Fai
     if byte(in bytes, 0) != MAGIC_V
         || byte(in bytes, 1) != MAGIC_S
         || byte(in bytes, 2) != MAGIC_P
-        || byte(in bytes, 3) != MAGIC_A {
+        || byte(in bytes, 3) != MAGIC_A
+    {
         raise(BinErrorKind::BMagic, 0);
     }
     if byte(in bytes, HDR_VERSION) != VERSION || byte(in bytes, wrapping_add(HDR_VERSION, 1)) != 0 {
         raise(BinErrorKind::BVersion, HDR_VERSION);
     }
     if byte(in bytes, HDR_SCHEMA) != TREE_SCHEMA
-        || byte(in bytes, wrapping_add(HDR_SCHEMA, 1)) != 0 {
+        || byte(in bytes, wrapping_add(HDR_SCHEMA, 1)) != 0
+    {
         raise(BinErrorKind::BSchema, HDR_SCHEMA);
     }
     let total = get_u32(in bytes, HDR_TOTAL_LEN);
@@ -720,7 +722,8 @@ pub fn archive_validate(in bytes: Slice[u8], lim: ArchiveLimits) -> u64 eff [Fai
                 );
                 if target.start < header_len()
                     || target.start >= range.end
-                    || wrapping_sub(target.start, header_len()) % NODE_BYTES != 0 {
+                    || wrapping_sub(target.start, header_len()) % NODE_BYTES != 0
+                {
                     raise(BinErrorKind::BTree, entry);
                 }
                 check_edge(

@@ -137,7 +137,8 @@ fn outermost(in spans: ChunkSeq[u64]) -> ChunkSeq[u64] {
         let end = sp_e(in spans, i);
         let kept_len = sp_n(in out);
         if kept_len == 0
-            || !covers(sp_s(in out, sub(kept_len, 1)), sp_e(in out, sub(kept_len, 1)), start, end) {
+            || !covers(sp_s(in out, sub(kept_len, 1)), sp_e(in out, sub(kept_len, 1)), start, end)
+        {
             sp_push(inout out, start, end);
         }
     }
@@ -495,7 +496,8 @@ fn jumps(in body: ChunkSeq[u8], inout ctl: Ctl) -> Sc {
         let start = j_at(in ctl, jump, 1);
         let end = j_at(in ctl, jump, 2);
         if enclosed(in forbidden, start, end)
-            || j_at(in ctl, jump, 0) != X_RETURN && enclosed(in handlers, start, end) {
+            || j_at(in ctl, jump, 0) != X_RETURN && enclosed(in handlers, start, end)
+        {
             return sc_err(
                 in "invalid control transfer across a handler or region boundary".as_bytes()
             );
@@ -522,7 +524,8 @@ fn jumps(in body: ChunkSeq[u8], inout ctl: Ctl) -> Sc {
         let start = j_at(in ctl, jump, 1);
         let end = j_at(in ctl, jump, 2);
         if j_at(in ctl, jump, 0) == X_RETURN
-            && (enclosed(in handlers, start, end) || enclosed(in loops, start, end)) {
+            && (enclosed(in handlers, start, end) || enclosed(in loops, start, end))
+        {
             ctl.crosses_loop = true;
         }
     }
@@ -855,7 +858,8 @@ fn ambient(in source: ChunkSeq[u8], call_start: u64, call_end: u64, inout amb: A
             || name_is(in ast, effect.name, in "Realtime".as_bytes())
             || name_is(in ast, effect.name, in "ConstDenorm".as_bytes())
             || name_is(in ast, effect.name, in "DetFloat".as_bytes())
-            || name_is(in ast, effect.name, in "Region".as_bytes()) {} else {
+            || name_is(in ast, effect.name, in "Region".as_bytes())
+        {} else {
             let mut is_linear = false;
             for j in 0.. linear.len() {
                 if match linear.try_get(j) {
@@ -1140,7 +1144,8 @@ pub fn lower(
         let tail = w64(in rendered.origins, add(row, 4)) != 0;
         if w64(in rendered.origins, add(row, 2)) == value_start
             && w64(in rendered.origins, add(row, 3)) == value_end
-            && tail == from_tail {
+            && tail == from_tail
+        {
             matches = inc(matches);
             body_start = w64(in rendered.origins, row);
             body_end = w64(in rendered.origins, inc(row));
@@ -1172,7 +1177,8 @@ pub fn lower(
     if first < 3
         || !word_is(in rendered.text, in toks, sub(first, 3), in "let".as_bytes())
         || !word_is(in rendered.text, in toks, sub(first, 1), in "=".as_bytes())
-        || !word_is(in rendered.text, in toks, after, in ";".as_bytes()) {
+        || !word_is(in rendered.text, in toks, after, in ";".as_bytes())
+    {
         return sc_err(
             in "bind the scope exit with `let exit = ...;` before resuming it".as_bytes()
         );

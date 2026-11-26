@@ -570,7 +570,8 @@ fn identity_error(in id: Identity) -> u64 {
     if id.version.len() > 256
         || id.source_tree.len() > 128
         || id.derivation.len() > 128
-        || id.output.len() > 128 {
+        || id.output.len() > 128
+    {
         return Msg::FieldTooLong;
     }
     if !semver_exact(in id.version.as_bytes()) {
@@ -586,7 +587,8 @@ fn identity_error(in id: Identity) -> u64 {
     let drv = id.derivation.as_bytes();
     if !starts_at(in drv, 0, in "drv:b3v1:".as_bytes())
         || drv.len() != 73
-        || !is_hex(in drv, 9, 32) {
+        || !is_hex(in drv, 9, 32)
+    {
         return Msg::InvalidDerivation;
     }
     let output = object_id(in id.output.as_bytes());
@@ -999,7 +1001,8 @@ pub fn verify(
     }
     if policy.minimum_operators < 2
         || policy.minimum_operators > MAX_POLICY_KEYS
-        || policy.max_statement_ttl == 0 {
+        || policy.max_statement_ttl == 0
+    {
         ds.push(diag(Code::InvalidPolicy, Field::Quorum, Msg::InvalidQuorum));
     }
     let nb = policy.builders.len();
@@ -1156,7 +1159,8 @@ pub fn verify(
                 }
                 if env.statement.expires_at < env.statement.issued_at
                     || wrapping_sub(env.statement.expires_at, env.statement.issued_at)
-                        > policy.max_statement_ttl {
+                        > policy.max_statement_ttl
+                {
                     ds.push(keyed(
                         Code::StatementTtl,
                         si,
@@ -1586,7 +1590,8 @@ pub fn screen(
             let os = s;
             s = e;
             if range_eq(in nb, os, e, in c, 0, c.len())
-                || wrapping_sub(e, os) > MAX_PACKAGE_NAME_LEN {
+                || wrapping_sub(e, os) > MAX_PACKAGE_NAME_LEN
+            {
                 continue;
             }
             let other = names[os..e];
@@ -1694,7 +1699,8 @@ pub fn screen(
     for f in findings {
         if f.reason == Reason::MissingFromCatalog
             || f.reason == Reason::OversizedPackageName
-            || f.reason == Reason::MissingOidcProvenance {
+            || f.reason == Reason::MissingOidcProvenance
+        {
             hard = true;
         }
     }

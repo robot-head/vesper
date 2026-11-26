@@ -64,7 +64,8 @@ fn read_form() -> u64 eff [Ffi[Walk]] {
         return FORM_INSTRUCTION;
     }
     if (by != PASS_SINK || has(p, SPLIT_SOURCE))
-        && (has(f, RESULT_AGGREGATE) || (by == PASS_INOUT && has(f, RESULT_FUNCTION))) {
+        && (has(f, RESULT_AGGREGATE) || (by == PASS_INOUT && has(f, RESULT_FUNCTION)))
+    {
         return FORM_PLACE_ADDRESS;
     }
     // A move frees or zeroes what the source owned.

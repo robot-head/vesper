@@ -3,7 +3,7 @@
 //
 // Import the forms a module uses, as with any other item:
 //
-//     use @vesper-std/sugar::{guard, when, while};
+//     use @vesper-std/sugar::{guard, when, while, trace_span};
 //
 // The pattern forms expand to `match` before checking. A template's
 // `$rhs` runs once, and `$body` or `$diverge` only on its own arm, so the
@@ -75,6 +75,49 @@ pub sugar while: expr {
     }
 }
 
+// Typed count attributes are safe for ordinary public counters only.
+pub copy struct TraceCount {
+    count: u64,
+}
+
+impl Telemetrable for TraceCount {
+    fn telemetry_attr(in self) -> TelemetryAttr {
+        TelemetryAttr::Count(self.count)
+    }
+}
+
+// Start a real Trace span for a Result-returning body. Finish it once
+// before returning the unchanged typed outcome. Only the successful arm
+// asks the caller's Telemetrable model for an attribute; failure reports
+// an explicitly public code and message, not the private error payload.
+pub sugar trace_span: tag emits eff [Trace] {
+    rule (
+        trace_span{
+            $name:expr schema $schema:expr;
+            attempt $body:block telemetry $attribute:block;
+            public_error $public_error:block
+        }
+    ) => {
+        {
+            let span = Trace::start_span($schema, $name);
+            let outcome = $body;
+            match outcome {
+                Result::Ok(completed) => {
+                    let attribute = $attribute;
+                    Trace::emit_attr(span, attribute.telemetry_attr());
+                    Result::Ok(completed)
+                },
+                Result::Err(error) => {
+                    let public: (u32, String) = $public_error;
+                    let (code, message) = public;
+                    Trace::emit_err(span, code, message);
+                    Result::Err(error)
+                },
+            }
+        }
+    }
+}
+
 test {
     fn first_or(in s: Str, fallback: u8) -> u8 {
         guard let Option::Some(b) = s.as_bytes().try_get(0) else {
@@ -115,6 +158,8 @@ test {
     // @case none(in "", 0, 1, 0)
     fn test_when_runs_only_on_match(in s: Str, a: u64, b: u64, expected: u64) -> bool {
         sum_present(in s, a, b) == expected
+            && trace_span_preserves_payload(false)
+            && trace_span_preserves_payload(true)
     }
 
     fn while_paths(limit: u64, stop: bool, expected_checks: u64, expected_sum: u64) -> bool {
@@ -157,5 +202,103 @@ test {
             && while_paths(3, false, 4, 5)
             && while_paths(8, true, 3, 2)
             && comparison_rereads_both_names()
+    }
+    copy struct Secret[T] {
+        value: T,
+    }
+
+    model TelemetryRedaction: Telemetrable for Secret[u64] {
+        fn telemetry_attr(in self) -> TelemetryAttr {
+            TelemetryAttr::Redacted
+        }
+    }
+
+    copy struct Observation {
+        outcome: Result[u64, Secret[u64]],
+        started: u64,
+        finished: u64,
+        attribute: u64,
+    }
+
+    fn ctx() -> SpanContext {
+        SpanContext { trace_id_hi: 1, trace_id_lo: 1, span_id: 1, flags: 1 }
+    }
+
+    fn trace_span_preserves_payload(failed: bool) -> bool {
+        use model TelemetryRedaction;
+        let secret: u64 = 9;
+        let success: u64 = 42;
+        let result: Observation = handle Trace in {
+            trace_span{
+                "work" schema 0;
+                attempt {
+                    if failed {
+                        Result::Err(
+                            Secret {
+                                value: secret
+                            }
+                        )
+                    } else {
+                        Result::Ok(success)
+                    }
+                }
+                telemetry {
+                    Secret {
+                        value: secret
+                    }
+                };
+                public_error {
+                    (1, "closed")
+                }
+            }
+        } with {
+            return value => Observation { outcome: value, started: 0, finished: 0, attribute: 0 },
+            current_ctx(resume) => resume(ctx()),
+            start_span(schema, _, resume) => {
+                let mut r = resume(ActiveSpan {
+                    ctx: ctx(),
+                    parent_span_id: 0,
+                    start_mono_ns: 1,
+                    schema_id: schema
+                });
+                r.started = wrapping_add(r.started, 1);
+                r
+            },
+            start_child(parent, schema, _, resume) => resume(ActiveSpan {
+                ctx: ctx(),
+                parent_span_id: parent.span_id,
+                start_mono_ns: 1,
+                schema_id: schema
+            }),
+            emit_ok(span, _, resume) => {
+                let ActiveSpan { ctx, parent_span_id, start_mono_ns, schema_id } = span;
+                let mut r = resume(());
+                r.finished = wrapping_add(r.finished, ctx.span_id);
+                r
+            },
+            emit_attr(span, attr, resume) => {
+                let ActiveSpan { ctx, parent_span_id, start_mono_ns, schema_id } = span;
+                let mut r = resume(());
+                r.finished = wrapping_add(r.finished, ctx.span_id);
+                r.attribute = match attr {
+                    TelemetryAttr::Redacted => 1,
+                    _ => 0
+                };
+                r
+            },
+            emit_err(span, code, msg, resume) => {
+                let ActiveSpan { ctx, parent_span_id, start_mono_ns, schema_id } = span;
+                let mut r = resume(());
+                r.finished = wrapping_add(r.finished, ctx.span_id);
+                if code == 1 && msg.as_bytes().eq(in "closed".as_bytes()) {
+                    r.attribute = 2;
+                }
+                r
+            },
+        };
+        result.started == 1 && result.finished == 1 && match result.outcome {
+            Result::Ok(val) => !failed && val == 42 && result.attribute == 1,
+            Result::Err(priv) => failed && priv.value == 9 && result.attribute == 2,
+        }
     }
 }

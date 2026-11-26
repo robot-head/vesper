@@ -1214,7 +1214,8 @@ fn is_const_function(in prog: Prog, symbol: u32) -> bool {
             }
             if at >= 2
                 && name_byte(in prog, symbol, sub(at, 1)) == 95
-                && name_byte(in prog, symbol, sub(at, 2)) == 95 {
+                && name_byte(in prog, symbol, sub(at, 2)) == 95
+            {
                 return true;
             }
         }
@@ -1274,7 +1275,8 @@ fn fail_row_only(in prog: Prog, row: u32) -> bool {
         let entry = add(inc(row_at), wrapping_mul(i, ROW_STRIDE));
         if u64_at(in prog.row_words, entry) != 0
             || u64_at(in prog.row_words, inc(entry)) != w(prog.fail_symbol)
-            || u64_at(in prog.row_words, add(entry, 2)) != 1 {
+            || u64_at(in prog.row_words, add(entry, 2)) != 1
+        {
             return false;
         }
     }
@@ -1476,7 +1478,8 @@ fn cost_of(in prog: Prog, target: Tgt, in folded: Folded, in blocks: ChunkSeq[u8
                         || inst.op == O_UNARY
                         || inst.op == O_READ
                         || inst.op == O_DATA
-                ) {
+                )
+            {
                 continue;
             }
             work = inc(work);
@@ -1598,7 +1601,8 @@ fn generic_body(in prog: Prog, func: Fun) -> u32 {
             if inst.op == O_UNARY
                 || inst.op == O_BINARY
                 || inst.op == O_INDEX
-                || inst.op == O_PROJECT {
+                || inst.op == O_PROJECT
+            {
                 return R_GENERIC_OPERATORS;
             }
         }
@@ -1712,7 +1716,8 @@ fn fold_literal_constants(inout prog: Prog) -> u64 {
         let func = prog.fun(n32(fun_index));
         if func.param_count != 0
             || func.block_count != 1
-            || !is_const_function(in prog, func.name) {
+            || !is_const_function(in prog, func.name)
+        {
             continue;
         }
         let block_row = prog.block(func, 0);
@@ -1723,7 +1728,8 @@ fn fold_literal_constants(inout prog: Prog) -> u64 {
         let inst = prog.inst(id);
         if w(inst.dest) == prog.op(w(block_row.term_at))
             && (inst.flags & I_FALLIBLE) == 0
-            && inst.op == O_CONST {
+            && inst.op == O_CONST
+        {
             set_u32(inout literal, fun_index, id);
             any = true;
         }
@@ -2010,7 +2016,8 @@ fn row_within(in prog: Prog, fun_index: u32, callee_row: u32, caller_row: u32) -
         let mut found = false;
         for j in 0..caller_count {
             if u64_at(in prog.row_words, add(inc(caller_at), add(wrapping_mul(j, ROW_STRIDE), 3)))
-                == key {
+                == key
+            {
                 found = true;
             }
         }
@@ -2053,7 +2060,8 @@ fn site_bindings(
     let func = prog.fun(target.fun_index);
     let arg_count = prog.op(arg_list_at);
     if arg_count != w(func.param_count)
-        || prog.value_ty(caller, w(dest)) != prog.map(target.instance, func.result_ty) {
+        || prog.value_ty(caller, w(dest)) != prog.map(target.instance, func.result_ty)
+    {
         return R_SITE_SIGNATURE;
     }
     let row = prog.row_of(target);
@@ -2068,7 +2076,8 @@ fn site_bindings(
         for v in 0..w(func.value_count) {
             let callee_ty = prog.value_ty(func, v);
             if callee_ty != NONE32
-                && mentions_names(in prog, prog.map(target.instance, callee_ty), in generics) {
+                && mentions_names(in prog, prog.map(target.instance, callee_ty), in generics)
+            {
                 return R_SITE_GENERICS;
             }
         }
@@ -2220,7 +2229,8 @@ fn constant(inout prog: Prog, target: Tgt, inst: Inst) -> Kn {
     }
     if inst.op == O_DATA
         && prog.op(inc(ops_at)) == 0
-        && prog.has(prog.map(target.instance, inst.ty), F_PLAIN) {
+        && prog.has(prog.map(target.instance, inst.ty), F_PLAIN)
+    {
         let short_name = short(inout prog, n32(prog.op(ops_at)));
         return Kn { kind: 3, lo: w(short_name), hi: 0 };
     }
@@ -2609,7 +2619,8 @@ fn eval_terminator(
                 && pattern_binds_any(
                     in prog,
                     prog.op(add(add(term_at, 2), wrapping_mul(w(taken), 2)))
-                ) {
+                )
+            {
                 taken = NONE32;
             }
         }
@@ -2760,7 +2771,8 @@ fn same_kns(in left: ChunkSeq[Kn], in right: ChunkSeq[Kn], n: u64) -> bool {
 fn same_round(in left: Round, in right: Round, block_count: u64, value_count: u64) -> bool {
     for k in 0..block_count {
         if u8_at(in left.live, k) != u8_at(in right.live, k)
-            || u32_at(in left.jumps, k) != u32_at(in right.jumps, k) {
+            || u32_at(in left.jumps, k) != u32_at(in right.jumps, k)
+        {
             return false;
         }
     }
@@ -2803,7 +2815,8 @@ fn fold(
         let current = fold_round(inout prog, target, in kept, in stable, in params);
         let next = round_params(in prog, func, in current, value_count);
         if same_round(in current, in prev, block_count, value_count)
-            && same_kns(in next, in params, value_count) {
+            && same_kns(in next, in params, value_count)
+        {
             let mut known = zeros8(value_count);
             for v in 0..value_count {
                 if kn_at(in current.values, v).kind != 0 {
@@ -2872,7 +2885,8 @@ fn pure(in prog: Prog, target: Tgt, func: Fun, inst: Inst) -> bool {
         || inst.op == O_UNARY
         || inst.op == O_PROJECT
         || inst.op == O_DATA
-        || inst.op == O_TUPLE {
+        || inst.op == O_TUPLE
+    {
         return prog.has(prog.map(target.instance, inst.ty), F_PLAIN);
     }
     if inst.op == O_BIND {
@@ -2991,7 +3005,8 @@ fn pure_head(
         for block in 1..n {
             if u8_at(in head, block) != 0
                 || u8_at(in folded.live, block) == 0
-                || u8_at(in pure_block, block) == 0 {
+                || u8_at(in pure_block, block) == 0
+            {
                 continue;
             }
             let mut any = false;
@@ -3648,7 +3663,8 @@ fn target(
 ) -> u64 {
     if split_plan.found
         && w(split_plan.branch_block) == from_block
-        && w(split_plan.cold_target) == to_block {
+        && w(split_plan.cold_target) == to_block
+    {
         cold_block
     } else {
         add(to_block, first)
@@ -3756,7 +3772,8 @@ fn find_instance(in prog: Prog, callee: u32, span_start: u64, span_end: u64) -> 
             Option::Some(instance) => {
                 if instance.callee == callee
                     && instance.span_start == span_start
-                    && instance.span_end == span_end {
+                    && instance.span_end == span_end
+                {
                     if instance.has_types {
                         return n32(k);
                     }
@@ -3931,7 +3948,8 @@ fn inline_into(
             }
             if why == R_OK
                 && owns_sequence(in prog, target)
-                && cold_block(in prog, caller_index, block) {
+                && cold_block(in prog, caller_index, block)
+            {
                 why = R_SITE_COLD;
             }
             if why == R_OK {
@@ -3970,7 +3988,8 @@ fn inline_into(
                         u64_at(in report.growth, w(key)),
                         u64_at(in report.contents_units, w(entry))
                     )
-                        > cap {
+                        > cap
+                    {
                         over_cap = true;
                     }
                     entry = u32_at(in report.contents_next, w(entry));
@@ -3978,8 +3997,8 @@ fn inline_into(
                 if add(added, cost_here) > prog.caller_growth
                     || add(report.added, cost_here) > prog.program_growth
                     || over_cap
-                    || add(handles_added, handler_sum(in prog, callee, true))
-                        > prog.caller_handles {
+                    || add(handles_added, handler_sum(in prog, callee, true)) > prog.caller_handles
+                {
                     why = R_GROWTH;
                 }
             }

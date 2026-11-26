@@ -127,7 +127,8 @@ pub fn tcb_close(inout t: Tcb) -> Result[Unit, TcpFail] {
         enter_closed(inout t, Option::None);
         Result::Ok(())
     } else if (s == State::SynReceived || s == State::Established || s == State::CloseWait)
-        && !t.fin_requested {
+        && !t.fin_requested
+    {
         t.fin_requested = true;
         if s == State::Established {
             t.st = State::FinWait1;

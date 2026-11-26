@@ -62,7 +62,8 @@ fn mmio_write_status(
     if (added & MMIO_STATUS_FEATURES_OK) != 0 {
         if driver_accepted_unknown
             || (driver_features & ~offered) != 0
-            || (driver_features & MMIO_VIRTIO_F_VERSION_1) != MMIO_VIRTIO_F_VERSION_1 {
+            || (driver_features & MMIO_VIRTIO_F_VERSION_1) != MMIO_VIRTIO_F_VERSION_1
+        {
             next = next & ~MMIO_STATUS_FEATURES_OK;
             rejected_features = true;
         } else {
@@ -360,7 +361,8 @@ pub fn mmio_read(in st: MmioState, offset: u64, len: u64, offered: u64, config_l
         || offset == 148
         || offset == 160
         || offset == 164
-        || offset == 172 {
+        || offset == 172
+    {
         return MMIO_E_WRITE_ONLY;
     } else {
         return MMIO_E_UNSUPPORTED;
@@ -530,7 +532,8 @@ pub fn mmio_write(
         || offset == 144
         || offset == 148
         || offset == 160
-        || offset == 164 {
+        || offset == 164
+    {
         return mmio_write_queue_reg(inout st, offset, value);
     } else if offset == 68 {
         return mmio_queue_ready(inout st, value != 0);
@@ -559,7 +562,8 @@ pub fn mmio_write(
         || offset == 180
         || offset == 184
         || offset == 188
-        || offset == 252 {
+        || offset == 252
+    {
         return MMIO_E_READ_ONLY;
     } else {
         return MMIO_E_UNSUPPORTED;

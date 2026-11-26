@@ -159,7 +159,8 @@ fn try_insert(
 ) -> Option[u64] {
     let size = wrapping_add(wrapping_add(name.len(), value.len()), ENTRY_OVERHEAD);
     if wrapping_mul(size, ENTRY_SHARE_SCALE)
-        > wrapping_mul(e.table.capacity, e.cfg.max_entry_share) {
+        > wrapping_mul(e.table.capacity, e.cfg.max_entry_share)
+    {
         return Option::None;
     }
     let n = match table_evictions_for(in e.table, size) {

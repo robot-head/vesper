@@ -329,7 +329,8 @@ fn check(in m: Model, in l: ProofLimits, inout f: ProofFail) -> u64 {
     if p.nodes != m.node_count
         || p.text != m.text_bytes
         || p.depth != m.depth
-        || p.comments != m.comments {
+        || p.comments != m.comments
+    {
         f = code(P_CONSERVATION);
         return 0;
     }

@@ -180,13 +180,15 @@ pub fn header(in f: Fun, h: u64) -> Head {
         && n.op == OP_INT
         && !n.neg
         && n.lo == 0
-        && n.hi == 0 {
+        && n.hi == 0
+    {
         if test.op == OP_BINARY
             && test.sub == B_EQ
             && test.a == i.dest
             && test.b == n.dest
             && k.term == T_BRANCH
-            && k.tv == test.dest {
+            && k.tv == test.dest
+        {
             return Head {
                 ok: true,
                 index: f.root_of(i.place),
@@ -601,7 +603,8 @@ impl Counted {
             return fail_lin();
         }
         if i.op == OP_BINARY
-            && (i.sub == B_ADD || i.sub == B_WADD || i.sub == B_SUB || i.sub == B_WSUB) {
+            && (i.sub == B_ADD || i.sub == B_WADD || i.sub == B_SUB || i.sub == B_WSUB)
+        {
             let negate = i.sub == B_SUB || i.sub == B_WSUB;
             let a = self.linear (in f, i.a, inc(depth));
             if !a.ok {
@@ -752,7 +755,8 @@ fn constant_value(in f: Fun, v: u32, depth: u64) -> SlotConst {
             }
             if i.op == OP_READ
                 && f.depth(i.place) == 1
-                && single_binding(in f, f.root_of(i.place)) {
+                && single_binding(in f, f.root_of(i.place))
+            {
                 let root = f.root_of(i.place);
                 for x in 0..f.insts.len() {
                     let d = f.inst(x);
@@ -922,7 +926,8 @@ fn changed_in(in f: Fun, in outer: ChunkSeq[u32], root: u32) -> bool {
         for j in 0..w(k.ic) {
             let i = f.inst(add(w(k.i0), j));
             if (i.op == OP_BIND && f.binds(i, root))
-                || (i.op == OP_WRITE && f.write_root(i) == root) {
+                || (i.op == OP_WRITE && f.write_root(i) == root)
+            {
                 return true;
             }
         }
@@ -1325,7 +1330,8 @@ pub fn counted_plan(in f: Fun) -> CountedPlan {
             if i.op == OP_READ
                 && b != h
                 && f.depth(i.place) == 1
-                && has(in locals, f.root_of(i.place)) {
+                && has(in locals, f.root_of(i.place))
+            {
                 let new = insert(inout c.induction, i.dest);
             }
         }
@@ -1618,7 +1624,8 @@ fn loop_candidate(
                         && (
                             has(in blocks, n32(rn.b))
                                 || fa.unchanged(in f, root, n32(rn.b), rn.c, pre, pre_len)
-                        ) {
+                        )
+                    {
                         bound = BoundRow { kind: 0, a: rn.a, b: 0 };
                         found = true;
                     }
@@ -1653,7 +1660,8 @@ fn loop_candidate(
                 if u32_at(in gplace, q) == len
                     && gb.kind == bound.kind
                     && gb.a == bound.a
-                    && gb.b == bound.b {
+                    && gb.b == bound.b
+                {
                     dup = true;
                 }
             }

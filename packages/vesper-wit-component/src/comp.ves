@@ -998,7 +998,8 @@ fn encode_plugin(in core: Slice[u8], in w: Wit, inout out: ChunkSeq[u8]) -> u64 
         let fu = func_at(in w, f);
         // The backend's plugin entry is fn(u32, u64) -> i64: no options.
         if takes_string(in w, fu)
-            || (fu.res != NONE32 && (has_string(in w, fu.res, 0) || flat(in w, fu.res, 0) > 1)) {
+            || (fu.res != NONE32 && (has_string(in w, fu.res, 0) || flat(in w, fu.res, 0) > 1))
+        {
             return X_PLUGIN;
         }
         let ty = func_type(inout root, inout b, in w, f);

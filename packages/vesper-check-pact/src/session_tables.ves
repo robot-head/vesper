@@ -527,7 +527,8 @@ pub fn build_tables(
                 pb,
                 u32_at(in meta.eff_name, ib)
             )
-                != 2 {
+                != 2
+            {
                 break;
             }
             let oa = u32_at(in ef_order, pj);
@@ -662,7 +663,8 @@ pub fn build_tables(
                 u64_at(in p_pkg, ib),
                 u32_at(in p_sym, ib)
             )
-                != 2 {
+                != 2
+            {
                 break;
             }
             let oa = u32_at(in ty_ord, pj);

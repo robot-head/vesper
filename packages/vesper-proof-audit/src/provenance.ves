@@ -220,7 +220,8 @@ pub fn verify(in t: Table) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
                 && same(
                     in t.fn_names.bytes[a..b],
                     in t.fn_names.bytes[start(in t.fn_names, g)..end(in t.fn_names, g)]
-                ) {
+                )
+            {
                 dup = true;
             }
         }
@@ -283,7 +284,8 @@ pub fn verify(in t: Table) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
             && (hosted.len() != 0) == expanded(in t, f);
         for k in 0..hosted.len() {
             if agree
-                && at(in hosted.as_slice(), k) != at(in t.fn_exps.as_slice(), wrapping_add(a, k)) {
+                && at(in hosted.as_slice(), k) != at(in t.fn_exps.as_slice(), wrapping_add(a, k))
+            {
                 agree = false;
             }
         }
@@ -398,7 +400,8 @@ fn expanded_with(in t: Table, in value: Slice[u8]) -> u64 {
             && same(
                 in t.fn_digests.bytes[start(in t.fn_digests, f)..end(in t.fn_digests, f)],
                 in value
-            ) {
+            )
+        {
             return f;
         }
     }
@@ -570,7 +573,8 @@ pub fn gate(
             let mut stem = count(in stems);
             for s in 0..count(in stems) {
                 if stem == count(in stems)
-                    && same(in stems.bytes[start(in stems, s)..end(in stems, s)], in dep) {
+                    && same(in stems.bytes[start(in stems, s)..end(in stems, s)], in dep)
+                {
                     stem = s;
                 }
             }

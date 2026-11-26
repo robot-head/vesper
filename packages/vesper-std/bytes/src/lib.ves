@@ -169,7 +169,8 @@ test {
     fn bytes_match(in bytes: Slice[u8], offset: u64, width: u64, packed: u64) -> bool {
         for i in 0..width {
             if bytes.try_get(wrapping_add(offset, i))
-                != Option::Some(wrapping_u8(wrapping_shr_u64(packed, wrapping_u32(i << 3)))) {
+                != Option::Some(wrapping_u8(wrapping_shr_u64(packed, wrapping_u32(i << 3))))
+            {
                 return false;
             }
         }

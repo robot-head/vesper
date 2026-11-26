@@ -86,7 +86,8 @@ impl Graph {
         let count = u64_at(in self.entry_count, node);
         for j in 0..count {
             if u64_at(in self.neighbor, add(start, j)) == other
-                && u8_at(in self.direction, add(start, j)) == direction {
+                && u8_at(in self.direction, add(start, j)) == direction
+            {
                 let last = add(start, wrapping_sub(count, 1));
                 let last_neighbor = u64_at(in self.neighbor, last);
                 let last_direction = u8_at(in self.direction, last);

@@ -830,7 +830,8 @@ pub fn fn_sig(in ctx: D, ast_ty: u32) -> u32 {
     }
     let node = ty(in ctx, trait_ty);
     if node.kind != 1
-        || (node.a != ctx.known.fn_ && node.a != ctx.known.fn_mut && node.a != ctx.known.fn_once) {
+        || (node.a != ctx.known.fn_ && node.a != ctx.known.fn_mut && node.a != ctx.known.fn_once)
+    {
         return NONE;
     }
     if ll(in ctx, node.b) != 1 {

@@ -135,7 +135,8 @@ pub fn set_of(in s: Strs) -> Strs {
             || !same(
                 in out.bytes[start(in out, wrapping_sub(n, 1))..end(in out, wrapping_sub(n, 1))],
                 in b
-            ) {
+            )
+        {
             push(inout out, in b);
         }
     }

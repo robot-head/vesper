@@ -511,7 +511,8 @@ pub fn vector_words(in types: Types, in names: Names, known: Known, ty: u32) -> 
     let node = types.node(ty);
     if node.kind != TyKind::Named
         || (node.name != known.vec && node.name != known.mask)
-        || node.n != 2 {
+        || node.n != 2
+    {
         return 0;
     }
     let elem = types.arg(ty, 0);
