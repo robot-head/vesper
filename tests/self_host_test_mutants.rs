@@ -10,6 +10,8 @@
 //!
 //! `TEST_MUTANTS_SPEED=1` runs the ABBA timing of the ignored test.
 
+#[path = "common/flip_gate.rs"]
+mod flip_gate;
 #[path = "common/test_mutants_words.rs"]
 mod words;
 
@@ -346,21 +348,9 @@ fn mutation_sites_speed() {
             }
         })
     };
-    // The flip gate (scripts/ci/flip-gate/test-mutants.json, #2207):
-    // `FLIP_GATE_EPOCHS` (default 12) ABBA rounds after one warm-up each.
-    if std::env::var_os("FLIP_GATE").is_some() {
-        let epochs: usize = std::env::var("FLIP_GATE_EPOCHS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(12);
-        rust();
-        vesper();
-        let mut pairs = String::new();
-        for _ in 0..epochs {
-            let (r1, v1, v2, r2) = (rust(), vesper(), vesper(), rust());
-            pairs += &format!(" {}:{}", (r1 + r2).as_nanos(), (v1 + v2).as_nanos());
-        }
-        println!("flip-gate pairs sites{pairs}");
+    // The flip gate (scripts/ci/flip-gate/test-mutants.json, #2207).
+    if flip_gate::on() {
+        flip_gate::pairs("sites", &mut || rust(), &mut || vesper());
         return;
     }
     let mut rs: Vec<Duration> = vec![];

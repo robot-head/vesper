@@ -10,6 +10,9 @@
 #[path = "../port/tensor_types.rs"]
 mod tensor_types_binding;
 
+#[path = "../../../tests/common/flip_gate.rs"]
+mod flip_gate;
+
 #[allow(dead_code)]
 #[path = "../../../tests/common/tensor_words.rs"]
 mod tensor_words;
@@ -139,19 +142,15 @@ fn time(f: impl FnOnce()) -> Duration {
     t.elapsed()
 }
 
-/// ABBA rounds (`FLIP_GATE_EPOCHS`, default 12) of `check` over every
+/// ABBA rounds ([`flip_gate::epochs`]) of `check` over every
 /// repository module, the checker's workload: `all` for every module,
 /// `tensor` for the tensor modules alone.
 #[test]
 #[ignore = "timing; FLIP_GATE=1"]
 fn flip_gate() {
-    if std::env::var_os("FLIP_GATE").is_none() {
+    if !flip_gate::on() {
         return;
     }
-    let epochs: usize = std::env::var("FLIP_GATE_EPOCHS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(12);
     let all: Vec<Module> = modules().into_iter().map(|(_, m)| m).collect();
     let tensor: Vec<Module> = all
         .iter()
@@ -160,27 +159,22 @@ fn flip_gate() {
         .collect();
     eprintln!("{} modules, {} tensor modules", all.len(), tensor.len());
     for (workload, set) in [("all", &all), ("tensor", &tensor)] {
-        let r = || {
-            time(|| {
-                for m in set.iter() {
-                    std::hint::black_box(rust(m));
-                }
-            })
-        };
-        let v = || {
-            time(|| {
-                for m in set.iter() {
-                    std::hint::black_box(swap(m));
-                }
-            })
-        };
-        r();
-        v();
-        let mut pairs = String::new();
-        for _ in 0..epochs {
-            let (r1, v1, v2, r2) = (r(), v(), v(), r());
-            pairs += &format!(" {}:{}", (r1 + r2).as_nanos(), (v1 + v2).as_nanos());
-        }
-        println!("flip-gate pairs {workload}{pairs}");
+        flip_gate::pairs(
+            workload,
+            &mut || {
+                time(|| {
+                    for m in set.iter() {
+                        std::hint::black_box(rust(m));
+                    }
+                })
+            },
+            &mut || {
+                time(|| {
+                    for m in set.iter() {
+                        std::hint::black_box(swap(m));
+                    }
+                })
+            },
+        );
     }
 }

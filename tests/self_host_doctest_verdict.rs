@@ -15,6 +15,8 @@
 //!
 //! `DOCTEST_VERDICT_SPEED=1` runs the ABBA timing of the ignored test.
 
+#[path = "common/flip_gate.rs"]
+mod flip_gate;
 #[path = "common/doctest_verdict_words.rs"]
 mod words;
 
@@ -494,21 +496,9 @@ fn doctest_verdict_speed() {
             );
         })
     };
-    // The flip gate (scripts/ci/flip-gate/doctest-verdict.json, #2207):
-    // `FLIP_GATE_EPOCHS` (default 12) ABBA rounds after one warm-up each.
-    if std::env::var_os("FLIP_GATE").is_some() {
-        let epochs: usize = std::env::var("FLIP_GATE_EPOCHS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(12);
-        run(false);
-        run(true);
-        let mut pairs = String::new();
-        for _ in 0..epochs {
-            let (r1, v1, v2, r2) = (run(false), run(true), run(true), run(false));
-            pairs += &format!(" {}:{}", (r1 + r2).as_nanos(), (v1 + v2).as_nanos());
-        }
-        println!("flip-gate pairs verdict{pairs}");
+    // The flip gate (scripts/ci/flip-gate/doctest-verdict.json, #2207).
+    if flip_gate::on() {
+        flip_gate::pairs("verdict", &mut || run(false), &mut || run(true));
         return;
     }
     let mut rs: Vec<Duration> = vec![];

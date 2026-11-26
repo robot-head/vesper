@@ -23,6 +23,8 @@
 
 #[path = "common/check_harness.rs"]
 mod check_harness;
+#[path = "common/flip_gate.rs"]
+mod flip_gate;
 
 use check_harness::{Package, repo};
 use serde::Serialize;
@@ -747,26 +749,9 @@ fn speed() {
         t.elapsed()
     };
     port();
-    // The flip gate (scripts/ci/flip-gate/doc.json, #2207):
-    // `FLIP_GATE_EPOCHS` (default 12) ABBA rounds after one warm-up each.
-    if std::env::var_os("FLIP_GATE").is_some() {
-        let epochs: usize = std::env::var("FLIP_GATE_EPOCHS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(12);
-        rust(&values);
-        vesper(&values);
-        let mut pairs = String::new();
-        for _ in 0..epochs {
-            let (r1, v1, v2, r2) = (
-                rust(&values),
-                vesper(&values),
-                vesper(&values),
-                rust(&values),
-            );
-            pairs += &format!(" {}:{}", (r1 + r2).as_nanos(), (v1 + v2).as_nanos());
-        }
-        println!("flip-gate pairs render{pairs}");
+    // The flip gate (scripts/ci/flip-gate/doc.json, #2207).
+    if flip_gate::on() {
+        flip_gate::pairs("render", &mut || rust(&values), &mut || vesper(&values));
         return;
     }
     let (a1, b1, b2, a2) = (

@@ -18,6 +18,9 @@ mod ast_words;
 #[path = "../src/parse_words.rs"]
 mod parse_words;
 
+#[path = "../../../tests/common/flip_gate.rs"]
+mod flip_gate;
+
 #[path = "../../../tests/common/dyn_words.rs"]
 mod dyn_words;
 
@@ -312,21 +315,9 @@ fn dyn_swap_speed() {
                 }
             })
         };
-        if std::env::var_os("FLIP_GATE").is_some() {
-            // The flip gate (scripts/ci/flip-gate/dyn.json, #2207):
-            // `FLIP_GATE_EPOCHS` (default 12) ABBA rounds after a warm-up.
-            let epochs: usize = std::env::var("FLIP_GATE_EPOCHS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(12);
-            rust();
-            vesper();
-            let mut pairs = String::new();
-            for _ in 0..epochs {
-                let (r1, v1, v2, r2) = (rust(), vesper(), vesper(), rust());
-                pairs += &format!(" {}:{}", (r1 + r2).as_nanos(), (v1 + v2).as_nanos());
-            }
-            println!("flip-gate pairs {workload}{pairs}");
+        if flip_gate::on() {
+            // The flip gate (scripts/ci/flip-gate/dyn.json, #2207).
+            flip_gate::pairs(workload, &mut rust, &mut vesper);
             continue;
         }
         abba_ci(label, 10, &mut rust, &mut vesper);
