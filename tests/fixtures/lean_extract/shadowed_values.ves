@@ -13,20 +13,13 @@ fn global_callable() -> u64 {
     op(42)
 }
 fn envelope[T](sink payload: T, value: u64) -> Envelope[T] {
-    Envelope {
-        payload: payload,
-        value: value
-    }
+    Envelope { payload: payload, value: value }
 }
 fn pack(value: u64, choose: bool) -> Wrapped {
     if choose {
-        Wrapped {
-            value: value
-        }
+        Wrapped { value: value }
     } else {
-        Wrapped {
-            value: value
-        }
+        Wrapped { value: value }
     }
 }
 fn ensures_pack(value: u64, choose: bool, result: Wrapped) -> bool {

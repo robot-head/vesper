@@ -14,9 +14,6 @@ fn step(in p: Pole, memory: f64, input: f64) -> f64 eff [Realtime, ConstDenorm] 
 }
 
 fn main() -> f64 {
-    let p = Pole {
-        a: 0.5,
-        b: 0.25
-    };
+    let p = Pole { a: 0.5, b: 0.25 };
     step(in p, 1.0, 2.0)
 }

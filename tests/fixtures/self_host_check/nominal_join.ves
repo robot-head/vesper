@@ -3,7 +3,5 @@ copy struct Wrapper {
     ticket: Ticket
 }
 fn main() {
-    let wrapper = Wrapper {
-        ticket: Ticket {}
-    };
+    let wrapper = Wrapper { ticket: Ticket {} };
 }

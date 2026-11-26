@@ -205,9 +205,7 @@ fn pooled(in b: Slice[u8], inout r: Rd, inout pool: ChunkSeq[u8]) -> u64 {
 }
 
 fn read_job(in b: Slice[u8]) -> Job {
-    let mut r = Rd {
-        pos: 0
-    };
+    let mut r = Rd { pos: 0 };
     let launcher = take(in b, inout r);
     let has_auditor = word(in b, inout r) != 0;
     let auditor = if has_auditor {
@@ -454,12 +452,7 @@ fn is_dir(in path: ChunkSeq[u8]) -> bool eff [Ffi[StdFs]] {
         if m.kind == kind_dir() {
             ok_unit()
         } else {
-            err_unit(
-                IoError {
-                    kind: 0,
-                    os: 0
-                }
-            )
+            err_unit(IoError { kind: 0, os: 0 })
         }
     } with {
         return v => v,
@@ -531,10 +524,7 @@ struct Ran {
 }
 
 fn ran(end: u8, sink text: ChunkSeq[u8]) -> Ran {
-    Ran {
-        end: end,
-        text: text
-    }
+    Ran { end: end, text: text }
 }
 
 // `child_output`: run with stdin null, both streams captured (8 MiB each)
@@ -620,11 +610,7 @@ struct Status {
 fn status1(code: u8, in a: Str) -> Status {
     let mut x = ChunkSeq::new[u8]();
     put(inout x, in a);
-    Status {
-        code: code,
-        a: x,
-        b: ChunkSeq::new[u8]()
-    }
+    Status { code: code, a: x, b: ChunkSeq::new[u8]() }
 }
 
 fn failed_status(in stage: Str, in reason: Slice[u8]) -> Status {
@@ -632,11 +618,7 @@ fn failed_status(in stage: Str, in reason: Slice[u8]) -> Status {
     put(inout s, in stage);
     let mut r = ChunkSeq::new[u8]();
     put_bytes(inout r, in reason);
-    Status {
-        code: FAILED,
-        a: s,
-        b: r
-    }
+    Status { code: FAILED, a: s, b: r }
 }
 
 // `status_row`.
@@ -907,11 +889,7 @@ fn cache_outcome(in st: St, in key: ChunkSeq[u8], inout out: Status) -> bool eff
         if kind(in d, c) == STRING {
             put_str_of(inout detail, in d, c);
         }
-        out = Status {
-            code: REFUTED,
-            a: detail,
-            b: ChunkSeq::new[u8]()
-        };
+        out = Status { code: REFUTED, a: detail, b: ChunkSeq::new[u8]() };
         return true;
     }
     if str_is(in d, s, in "checked_native".as_bytes()) {
@@ -919,11 +897,7 @@ fn cache_outcome(in st: St, in key: ChunkSeq[u8], inout out: Status) -> bool eff
         if kind(in d, c) == STRING {
             put_str_of(inout detail, in d, c);
         }
-        out = Status {
-            code: CHECKED_NATIVE,
-            a: detail,
-            b: ChunkSeq::new[u8]()
-        };
+        out = Status { code: CHECKED_NATIVE, a: detail, b: ChunkSeq::new[u8]() };
         return true;
     }
     false
@@ -1033,11 +1007,7 @@ fn bitvec_check(inout st: St, in job: Job, m: Model, in omega: ChunkSeq[u8], tim
     if r.end == 1 {
         let mut cex = ChunkSeq::new[u8]();
         if counterexample(in job, m, in r.text.as_slice(), inout cex) {
-            return Status {
-                code: REFUTED,
-                a: cex,
-                b: ChunkSeq::new[u8]()
-            };
+            return Status { code: REFUTED, a: cex, b: ChunkSeq::new[u8]() };
         }
         let mut reason = ChunkSeq::new[u8]();
         put(inout reason, in "omega: ");
@@ -1539,11 +1509,7 @@ fn run_stages(inout st: St, in job: Job) -> bool eff [Ffi[StdProcess], Ffi[StdFs
                 put(inout detail, in "kernel replayed ");
                 put_u64(inout detail, checked);
                 put(inout detail, in " constants with an empty axiom policy");
-                Status {
-                    code: PROVED,
-                    a: detail,
-                    b: ChunkSeq::new[u8]()
-                }
+                Status { code: PROVED, a: detail, b: ChunkSeq::new[u8]() }
             } else {
                 failed_status(
                     in "kernel",
@@ -1571,11 +1537,7 @@ fn run_stages(inout st: St, in job: Job) -> bool eff [Ffi[StdProcess], Ffi[StdFs
                 } else {
                     put_bytes(inout detail, in list.as_slice());
                 }
-                Status {
-                    code: PROVED,
-                    a: detail,
-                    b: ChunkSeq::new[u8]()
-                }
+                Status { code: PROVED, a: detail, b: ChunkSeq::new[u8]() }
             } else {
                 failed_status(
                     in "kernel",
@@ -1616,11 +1578,7 @@ fn fail_all(inout st: St, in job: Job) {
     st.sem.clear();
     let stage = copy_bytes(in st.fail_stage);
     let reason = bounded(in st.reason.as_slice());
-    let s = Status {
-        code: FAILED,
-        a: stage,
-        b: reason
-    };
+    let s = Status { code: FAILED, a: stage, b: reason };
     for i in 0..nfunctions(in job) {
         let f = function_name(in job, i);
         ext_row(inout st, in f.as_slice(), in s);

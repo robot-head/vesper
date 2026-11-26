@@ -88,10 +88,7 @@ pub fn newreno_on_rtt_sample(inout cc: NewReno, sample: RttSample) {
 
 pub fn newreno_on_event(inout cc: NewReno, event: CongestionEvent, now_ns: u64) {
     match event {
-        CongestionEvent::Acked {
-            packet,
-            bytes_in_flight
-        } => {
+        CongestionEvent::Acked { packet, bytes_in_flight } => {
             if !newreno_in_recovery(cc, packet.sent_ns) {
                 if cc.cwnd < cc.ssthresh {
                     // RFC 3465 appropriate byte counting with L = 2*SMSS.
@@ -105,17 +102,12 @@ pub fn newreno_on_event(inout cc: NewReno, event: CongestionEvent, now_ns: u64) 
                 }
             }
         },
-        CongestionEvent::Lost {
-            packet,
-            bytes_in_flight
-        } => {
+        CongestionEvent::Lost { packet, bytes_in_flight } => {
             if !newreno_in_recovery(cc, packet.sent_ns) {
                 newreno_reduce(inout cc, now_ns);
             }
         },
-        CongestionEvent::EcnCe {
-            count
-        } => {
+        CongestionEvent::EcnCe { count } => {
             let due = match cc.recovery_start_ns {
                 Option::Some(r) => now_ns > sat_add64(r, cc.srtt_ns),
                 Option::None => true,

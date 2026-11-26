@@ -37,14 +37,7 @@ fn reads_of(in pl: Planner, st: SubState) -> ChunkSeq[Rec] {
 
 fn push_read(inout pl: Planner, st: SubState, r: Rec) -> SubState {
     let at = wrapping_u32(pl.reads.len());
-    pl
-        .reads
-        .push(
-            RecNode {
-                rec: r,
-                next: none32()
-            }
-        );
+    pl.reads.push(RecNode { rec: r, next: none32() });
     let mut out = st;
     if st.reads_tail == none32() {
         out.reads_head = at;
@@ -110,15 +103,7 @@ fn set_covered(inout pl: Planner, st: SubState, queue: u32, c: Covered) -> SubSt
         }
     }
     let fresh = wrapping_u32(pl.covs.len());
-    pl
-        .covs
-        .push(
-            CovNode {
-                queue: queue,
-                cov: c,
-                next: st.cov_head
-            }
-        );
+    pl.covs.push(CovNode { queue: queue, cov: c, next: st.cov_head });
     let mut out = st;
     out.cov_head = fresh;
     out
@@ -165,15 +150,7 @@ fn clone_state(inout pl: Planner, st: SubState) -> SubState {
         match covs.try_get(i) {
             Option::Some(n) => {
                 let fresh = wrapping_u32(pl.covs.len());
-                pl
-                    .covs
-                    .push(
-                        CovNode {
-                            queue: n.queue,
-                            cov: n.cov,
-                            next: out.cov_head
-                        }
-                    );
+                pl.covs.push(CovNode { queue: n.queue, cov: n.cov, next: out.cov_head });
                 out.cov_head = fresh;
             },
             Option::None => (),
@@ -209,11 +186,7 @@ fn fold_access(in recs: ChunkSeq[Rec]) -> u32 {
 }
 
 fn single(slot: u32, value: u32) -> Placement {
-    Placement {
-        pk0: slot,
-        pk1: value,
-        pk2: 0
-    }
+    Placement { pk0: slot, pk1: value, pk2: 0 }
 }
 
 // `push_pending`: a texture barrier for one subresource (when `layouts`),
@@ -297,11 +270,7 @@ fn placement(in pl: Planner, p: u32, queue: u32, resource: u32, has_same_queue_p
             let pp = widen_u64(get32(in pl.qpos, widen_u64(p)));
             let tp = widen_u64(get32(in pl.qpos, widen_u64(t)));
             if pp > wrapping_add(tp, 1) {
-                return Placement {
-                    pk0: 4,
-                    pk1: t,
-                    pk2: p
-                };
+                return Placement { pk0: 4, pk1: t, pk2: p };
             }
         }
     }
@@ -385,12 +354,7 @@ fn handoff(
     out.has_layout = true;
     out.layout = mid;
     out.has_write = true;
-    out.write = Rec {
-        pass: t,
-        queue: producer,
-        sync: 0,
-        access: no_access()
-    };
+    out.write = Rec { pass: t, queue: producer, sync: 0, access: no_access() };
     out.reads_head = none32();
     out.reads_tail = none32();
     out.cov_head = none32();
@@ -558,21 +522,9 @@ fn process(
         );
     }
     for i in 0..cross.len() {
-        pl
-            .cross
-            .push(
-                Pair {
-                    key: p,
-                    value: get32(in cross, i)
-                }
-            );
+        pl.cross.push(Pair { key: p, value: get32(in cross, i) });
     }
-    let rec = Rec {
-        pass: p,
-        queue: queue,
-        sync: req.sync,
-        access: req.access
-    };
+    let rec = Rec { pass: p, queue: queue, sync: req.sync, access: req.access };
     if is_write {
         st.has_write = true;
         st.write = rec;
@@ -639,16 +591,7 @@ fn split_segments(inout pl: Planner, resource: u32, at: u64) {
             let state_index = wrapping_u32(pl.states.len());
             pl.states.push(copy_state);
             let fresh = wrapping_u32(pl.segs.len());
-            pl
-                .segs
-                .push(
-                    Seg {
-                        start: at,
-                        end: seg.end,
-                        sid: state_index,
-                        next: seg.next
-                    }
-                );
+            pl.segs.push(Seg { start: at, end: seg.end, sid: state_index, next: seg.next });
             let mut m = seg;
             m.end = at;
             m.next = fresh;

@@ -249,9 +249,7 @@ fn lookup(in s: Store, in uri: Str) -> u64 eff [Fail[StoreError]] {
     if !valid_uri(in s, in uri) {
         Fail::raise(StoreError::SInvalidUri);
     }
-    let mut k = Work {
-        left: s.l.max_work
-    };
+    let mut k = Work { left: s.l.max_work };
     spend(inout k, uri.len());
     spend(inout k, lookup_work(in s));
     let at = find(in s, in uri);
@@ -375,9 +373,7 @@ pub fn store_open(inout s: Store, in uri: Str, version: i64, in text: Str)
     if !valid_uri(in s, in uri) {
         Fail::raise(StoreError::SInvalidUri);
     }
-    let mut k = Work {
-        left: s.l.max_work
-    };
+    let mut k = Work { left: s.l.max_work };
     spend(inout k, uri.len());
     spend(inout k, lookup_work(in s));
     if find(in s, in uri) != s.uri_off.len() {
@@ -430,9 +426,7 @@ pub fn store_change(inout s: Store, in uri: Str, version: i64, in changes: Chunk
         Fail::raise(StoreError::SChangeLimit);
     }
     let revision = next_revision(in s);
-    let mut k = Work {
-        left: s.l.max_work
-    };
+    let mut k = Work { left: s.l.max_work };
     spend(inout k, uri.len());
     spend(inout k, lookup_work(in s));
     spend(inout k, mul(old_len, Cost::Copy));

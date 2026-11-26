@@ -34,6 +34,8 @@ mod backends;
 mod front;
 #[path = "driver/native.rs"]
 mod native_steps;
+#[path = "driver/world.rs"]
+mod world;
 
 /// The process entry: the Vesper driver on the CLI thread (the same name
 /// and stack as the Rust CLI's), or the Rust CLI when the driver hands the
@@ -282,6 +284,9 @@ impl Reader<'_> {
 pub struct Session {
     o: Options,
     loaded: Option<packages::Assembled>,
+    /// The package graph `LoadPackage` read for the Vesper driver to
+    /// assemble (`hd_assembled`, #1986).
+    loading: Option<packages::Loading<'static>>,
     /// The input as read (`original` in `cli()`).
     original: String,
     /// The compiled text: `original`, or its sugar expansion (`source`).
@@ -318,12 +323,13 @@ struct Checking {
 /// in parallel (#1896) don't collide: 28-39 the front-end passes (#1900),
 /// 40-49 front end (driver/front.rs, #1893), 50-59 IR and native
 /// (driver/native.rs, #1894), 60-69 the other backends
-/// (driver/backends.rs, #1895), 70-79 session and I/O (this file, #1896).
+/// (driver/backends.rs, #1895), 70-79 session and I/O (this file, #1896),
+/// 80-89 the world the Vesper driver holds (driver/world.rs, #2024).
 #[derive(Clone, Copy)]
 enum Step {
     // 1 (`IsPackage`), 19 (`IsWindowsTarget`), 21 (`Tee`) and 27
-    // (`IoError`) moved to the Vesper driver (#1896); numbers are not
-    // reused.
+    // (`IoError`) moved to the Vesper driver (#1896), and 17 (`CheckMain`)
+    // to the world it holds (#2024); numbers are not reused.
     Load = 2,
     EbpfBuild = 3,
     Parse = 4,
@@ -339,7 +345,6 @@ enum Step {
     Jit = 14,
     VerifiedBuild = 15,
     WasmBuild = 16,
-    CheckMain = 17,
     NativeObject = 18,
     WindowsLink = 20,
     EmitHir = 22,
@@ -359,6 +364,8 @@ enum Step {
     EbpfInput = 61,
     /// Load the package the Vesper driver found at the input (#1896).
     LoadPackage = 70,
+    /// The checked world's declarations, for the Vesper driver to hold.
+    WorldDecls = 80,
 }
 
 const STEPS: [Step; 32] = [
@@ -377,7 +384,6 @@ const STEPS: [Step; 32] = [
     Step::Jit,
     Step::VerifiedBuild,
     Step::WasmBuild,
-    Step::CheckMain,
     Step::NativeObject,
     Step::WindowsLink,
     Step::EmitHir,
@@ -394,6 +400,7 @@ const STEPS: [Step; 32] = [
     Step::WasmInput,
     Step::EbpfInput,
     Step::LoadPackage,
+    Step::WorldDecls,
 ];
 
 /// A pass failed; its message is the session's text.
@@ -418,21 +425,46 @@ impl Session {
         self.loaded.as_ref().map_or(&[][..], |p| &p.vsys[..])
     }
 
+    /// The end of `LoadPackage`: reports an assembled package's errors
+    /// (their count), or keeps it (0).
+    fn package_loaded(&mut self, assembled: packages::Assembled) -> i64 {
+        if !assembled.ok() {
+            crate::package_diagnostics(&assembled, &assembled.diagnostics, self.o.json);
+            return count(assembled.diagnostics.len() + assembled.manifest_errors.len());
+        }
+        self.original = assembled.sources.combined();
+        self.loaded = Some(assembled);
+        0
+    }
+
     fn step(&mut self, step: Step, arg: &[u8]) -> Result<i64, String> {
         let o = &self.o;
         match step {
+            // Reads the package graph. When the Vesper driver assembles it
+            // (#1986), the graph, read without its parses, waits in the
+            // session for `hd_assembled` and its assembly input is the
+            // session's text; else the Rust loader loads it here and the
+            // text is empty.
             Step::LoadPackage => {
+                let timer = crate::vesper_hybrid::driver_load_timer();
                 let path = Path::new(o.input());
-                let assembled = packages::load_for_target(path, o.target(), o.include_tests)?;
-                if !assembled.ok() {
-                    crate::package_diagnostics(&assembled, &assembled.diagnostics, o.json);
-                    return Ok(count(
-                        assembled.diagnostics.len() + assembled.manifest_errors.len(),
-                    ));
-                }
-                self.original = assembled.sources.combined();
-                self.loaded = Some(assembled);
-                Ok(0)
+                self.text.clear();
+                let assembled = if crate::vesper_hybrid::driver_assembles(o.include_tests) {
+                    let loading = packages::read_for_target(path, o.target(), false, true)?;
+                    if let Some(input) = crate::vesper_hybrid::driver_assembly_input(&loading) {
+                        self.text = input;
+                        self.loading = Some(loading);
+                        timer.stop();
+                        return Ok(0);
+                    }
+                    // Read without its parses: load it again, parsed.
+                    packages::load_for_target(path, o.target(), false)?
+                } else {
+                    packages::load_for_target(path, o.target(), o.include_tests)?
+                };
+                let n = self.package_loaded(assembled);
+                timer.stop();
+                Ok(n)
             }
             // The standalone source the Vesper driver read.
             Step::Load => {
@@ -459,24 +491,6 @@ impl Session {
                     json: o.json,
                     exclusive: o.exclusive(),
                 })?;
-                Ok(0)
-            }
-            Step::CheckMain => {
-                let f = self
-                    .checked()?
-                    .world
-                    .functions
-                    .get("main")
-                    .ok_or("missing main function")?;
-                if !f.params.is_empty()
-                    || !(vesper::numeric::is_integer_name(f.result.name())
-                        || matches!(f.result.name(), "Unit" | ""))
-                {
-                    return Err(
-                        "executable main must take no arguments and return an integer or Unit"
-                            .into(),
-                    );
-                }
                 Ok(0)
             }
             Step::Parse
@@ -506,6 +520,7 @@ impl Session {
             | Step::VerifiedBuild
             | Step::WasmInput
             | Step::EbpfInput => self.backends_step(step, arg),
+            Step::WorldDecls => self.world_step(step),
         }
     }
 }
@@ -585,6 +600,7 @@ pub mod host {
                 Box::into_raw(Box::new(Session {
                     o,
                     loaded: None,
+                    loading: None,
                     original: String::new(),
                     source: String::new(),
                     source_map: Vec::new(),
@@ -664,6 +680,50 @@ pub mod host {
             s.source = s.original.clone();
             s.source_map = Vec::new();
             s.parsed = Some(parsed);
+            n
+        })) {
+            Ok(n) => n,
+            Err(_) => PANIC,
+        }
+    }
+
+    /// The package graph `LoadPackage` read, as the Vesper driver
+    /// assembled it (`assembled_words` of modules/driver/src/assemble.ves,
+    /// #1986): `LoadPackage`'s result for it.
+    ///
+    /// # Safety
+    /// `s` is a live session lent `inout`; `words` a lent word slice.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hd_assembled(s: *mut Session, words: *const u64, len: usize) -> i64 {
+        // SAFETY: lent for the call.
+        let s = unsafe { &mut *s };
+        let words = if len == 0 || words.is_null() {
+            &[][..]
+        } else {
+            // SAFETY: `words` is valid for `len` words for the call.
+            unsafe { std::slice::from_raw_parts(words, len) }
+        };
+        PASSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // The Vesper assembly between the two timers is the assemble
+        // cost's Vesper time; the stats' load time adds it.
+        let timer = crate::vesper_hybrid::driver_load_timer();
+        match panic::catch_unwind(AssertUnwindSafe(|| {
+            let Some(loading) = s.loading.take() else {
+                s.text = b"driver: no package graph".to_vec();
+                return FAIL;
+            };
+            let o = &s.o;
+            let assembled = crate::vesper_hybrid::driver_assembled(loading, words, || {
+                packages::load_for_target(Path::new(o.input()), o.target(), o.include_tests)
+            });
+            let n = match assembled {
+                Ok(assembled) => s.package_loaded(assembled),
+                Err(message) => {
+                    s.text = message.into_bytes();
+                    FAIL
+                }
+            };
+            timer.stop();
             n
         })) {
             Ok(n) => n,

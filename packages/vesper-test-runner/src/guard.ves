@@ -41,15 +41,7 @@ use self::util::{Reader, put_text, sub};
 // ------------------------------------------------------------ node access
 
 fn item_at(in a: Ast, i: u32) -> ItemNode {
-    a
-        .items
-        .get_or(
-            idx_from_raw[ItemNode](i),
-            ItemNode {
-                kind: 0,
-                node: 0
-            }
-        )
+    a.items.get_or(idx_from_raw[ItemNode](i), ItemNode { kind: 0, node: 0 })
 }
 
 fn adt_at(in a: Ast, i: u32) -> AdtNode {
@@ -74,14 +66,7 @@ fn adt_at(in a: Ast, i: u32) -> AdtNode {
 fn variant_at(in a: Ast, i: u32) -> VariantNode {
     a
         .variants
-        .get_or(
-            idx_from_raw[VariantNode](i),
-            VariantNode {
-                name: 0,
-                fields: none(),
-                named: false
-            }
-        )
+        .get_or(idx_from_raw[VariantNode](i), VariantNode { name: 0, fields: none(), named: false })
 }
 
 fn field_at(in a: Ast, i: u32) -> FieldNode {
@@ -89,12 +74,7 @@ fn field_at(in a: Ast, i: u32) -> FieldNode {
         .fields
         .get_or(
             idx_from_raw[FieldNode](i),
-            FieldNode {
-                name: 0,
-                ty: none(),
-                modality: 3,
-                temperature: 0
-            }
+            FieldNode { name: 0, ty: none(), modality: 3, temperature: 0 }
         )
 }
 
@@ -119,11 +99,7 @@ fn impl_at(in a: Ast, i: u32) -> ImplNode {
         .impls
         .get_or(
             idx_from_raw[ImplNode](i),
-            ImplNode {
-                ty: none(),
-                generics: none(),
-                methods: none()
-            }
+            ImplNode { ty: none(), generics: none(), methods: none() }
         )
 }
 
@@ -151,40 +127,18 @@ fn param_at(in a: Ast, i: u32) -> ParamNode {
         .params
         .get_or(
             idx_from_raw[ParamNode](i),
-            ParamNode {
-                name: 0,
-                pass: 0,
-                projections: none(),
-                ty: none(),
-                start: 0,
-                end: 0
-            }
+            ParamNode { name: 0, pass: 0, projections: none(), ty: none(), start: 0, end: 0 }
         )
 }
 
 fn effects_at(in a: Ast, i: u32) -> EffectsNode {
-    a
-        .effects
-        .get_or(
-            idx_from_raw[EffectsNode](i),
-            EffectsNode {
-                instances: none(),
-                tail: none()
-            }
-        )
+    a.effects.get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: none(), tail: none() })
 }
 
 fn effect_at(in a: Ast, i: u32) -> EffectNode {
     a
         .effect_nodes
-        .get_or(
-            idx_from_raw[EffectNode](i),
-            EffectNode {
-                label: none(),
-                name: 0,
-                args: none()
-            }
-        )
+        .get_or(idx_from_raw[EffectNode](i), EffectNode { label: none(), name: 0, args: none() })
 }
 
 fn stmt_at(in a: Ast, i: u32) -> StmtNode {
@@ -192,27 +146,12 @@ fn stmt_at(in a: Ast, i: u32) -> StmtNode {
         .stmts
         .get_or(
             idx_from_raw[StmtNode](i),
-            StmtNode {
-                kind: 0,
-                pat: none(),
-                ty: none(),
-                value: none(),
-                mutable: false
-            }
+            StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
         )
 }
 
 fn arg_at(in a: Ast, i: u32) -> ArgNode {
-    a
-        .args
-        .get_or(
-            idx_from_raw[ArgNode](i),
-            ArgNode {
-                pass: 0,
-                explicit: false,
-                expr: none()
-            }
-        )
+    a.args.get_or(idx_from_raw[ArgNode](i), ArgNode { pass: 0, explicit: false, expr: none() })
 }
 
 // ---------------------------------------------------------------- errors
@@ -838,9 +777,7 @@ fn nominal_expansion(in a: Ast, limit: u64, nsym: u64) -> u64 {
 
 // `doctest_guard::rust_guard` over the input words.
 pub fn guard(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let (ss, se) = r.text(in b);
     let max_declarations = r.word(in b);
     let max_nominal = r.word(in b);

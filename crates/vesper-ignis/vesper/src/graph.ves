@@ -392,54 +392,29 @@ fn validate_use(in g: Graph, queue: QueueKind, use_index: u64, u: UseDesc) -> Us
     let access = u.access;
     if access == 0 || access == no_access() || (access & ~known_access()) != 0 {
         return UseCheck::Refused(
-            PassOutcome::InvalidAccess {
-                use_index: use_index,
-                access: access
-            }
+            PassOutcome::InvalidAccess { use_index: use_index, access: access }
         );
     }
     let sync = u.sync;
     if sync == 0 || (sync & split_bit()) != 0 {
-        return UseCheck::Refused(
-            PassOutcome::InvalidSync {
-                use_index: use_index,
-                sync: sync
-            }
-        );
+        return UseCheck::Refused(PassOutcome::InvalidSync { use_index: use_index, sync: sync });
     }
     let bad = access_incompatible_with_sync(access, sync);
     if bad != 0 {
         return UseCheck::Refused(
-            PassOutcome::AccessSyncMismatch {
-                use_index: use_index,
-                access: bad,
-                sync: sync
-            }
+            PassOutcome::AccessSyncMismatch { use_index: use_index, access: bad, sync: sync }
         );
     }
     if !access_contains(queue_supported_access(queue), access) {
-        return UseCheck::Refused(
-            PassOutcome::QueueAccess {
-                use_index: use_index,
-                access: access
-            }
-        );
+        return UseCheck::Refused(PassOutcome::QueueAccess { use_index: use_index, access: access });
     }
     if !access_contains(queue_supported_sync(queue), sync) {
-        return UseCheck::Refused(
-            PassOutcome::QueueSync {
-                use_index: use_index,
-                sync: sync
-            }
-        );
+        return UseCheck::Refused(PassOutcome::QueueSync { use_index: use_index, sync: sync });
     }
     if !info.texture && u.bytes {
         if (access & texture_only_access()) != 0 {
             return UseCheck::Refused(
-                PassOutcome::AccessResourceKindMismatch {
-                    use_index: use_index,
-                    access: access
-                }
+                PassOutcome::AccessResourceKindMismatch { use_index: use_index, access: access }
             );
         }
         match resolve_bytes(u.offset, u.size, info.size) {
@@ -456,19 +431,12 @@ fn validate_use(in g: Graph, queue: QueueKind, use_index: u64, u: UseDesc) -> Us
                     layout: Layout::Undefined
                 }
             ),
-            Option::None => UseCheck::Refused(
-                PassOutcome::InvalidRange {
-                    use_index: use_index
-                }
-            ),
+            Option::None => UseCheck::Refused(PassOutcome::InvalidRange { use_index: use_index }),
         }
     } else if info.texture && !u.bytes {
         if (access & buffer_only_access()) != 0 {
             return UseCheck::Refused(
-                PassOutcome::AccessResourceKindMismatch {
-                    use_index: use_index,
-                    access: access
-                }
+                PassOutcome::AccessResourceKindMismatch { use_index: use_index, access: access }
             );
         }
         if u.has_layout {
@@ -483,10 +451,7 @@ fn validate_use(in g: Graph, queue: QueueKind, use_index: u64, u: UseDesc) -> Us
             }
             if !queue_supports_layout(queue, u.layout) {
                 return UseCheck::Refused(
-                    PassOutcome::QueueLayout {
-                        use_index: use_index,
-                        layout: u.layout
-                    }
+                    PassOutcome::QueueLayout { use_index: use_index, layout: u.layout }
                 );
             }
         }
@@ -504,11 +469,7 @@ fn validate_use(in g: Graph, queue: QueueKind, use_index: u64, u: UseDesc) -> Us
                     layout: u.layout
                 }
             ),
-            Option::None => UseCheck::Refused(
-                PassOutcome::InvalidRange {
-                    use_index: use_index
-                }
-            ),
+            Option::None => UseCheck::Refused(PassOutcome::InvalidRange { use_index: use_index }),
         }
     } else {
         UseCheck::Refused(PassOutcome::ForeignHandle)
@@ -542,10 +503,7 @@ fn check_pairs(in uses: ChunkSeq[Use]) -> PassOutcome {
             if a.resource == b.resource && uses_overlap(a, b) {
                 let differ = a.has_layout && b.has_layout && a.layout != b.layout;
                 if access_is_write(a.access) || access_is_write(b.access) || differ {
-                    return PassOutcome::ConflictingUses {
-                        first_use: i,
-                        second_use: j
-                    };
+                    return PassOutcome::ConflictingUses { first_use: i, second_use: j };
                 }
                 if a.has_layout && !layout_allows(a.layout, b.access) {
                     return PassOutcome::AccessLayoutMismatch {
@@ -600,15 +558,7 @@ pub fn graph_add_pass(inout g: Graph, queue: u64, in descs: Slice[UseDesc]) -> P
     }
     let first = g.uses.len();
     g.uses.extend(in uses.as_slice());
-    g
-        .passes
-        .push(
-            PassInfo {
-                queue: wrapping_u32(queue),
-                first_use: first,
-                use_count: uses.len()
-            }
-        );
+    g.passes.push(PassInfo { queue: wrapping_u32(queue), first_use: first, use_count: uses.len() });
     PassOutcome::Added(wrapping_u32(index))
 }
 
@@ -633,13 +583,6 @@ pub fn graph_add_dependency(inout g: Graph, before: u64, after: u64) -> Dependen
             Option::None => (),
         }
     }
-    g
-        .explicit
-        .push(
-            Edge2 {
-                before: b,
-                after: a
-            }
-        );
+    g.explicit.push(Edge2 { before: b, after: a });
     DependencyOutcome::Added
 }

@@ -339,11 +339,7 @@ fn begin(inout v: V, rule: Str) {
 }
 
 fn raise_at(pc: u64) -> Never eff [Fail[VErr]] {
-    Fail::raise(
-        VErr {
-            insn: pc
-        }
-    )
+    Fail::raise(VErr { insn: pc })
 }
 
 fn fail(inout v: V, pc: u64, rule: Str, msg: Str) -> Never eff [Fail[VErr]] {
@@ -458,14 +454,7 @@ fn map_name(inout v: V, map: u64) {
 // Register types.
 
 fn mk(tag: u64, x: u64, y: u64, z: u64, off: i64, var: Scalar) -> R {
-    R {
-        tag: tag,
-        x: x,
-        y: y,
-        z: z,
-        off: off,
-        var: var
-    }
+    R { tag: tag, x: x, y: y, z: z, off: off, var: var }
 }
 
 fn zs() -> Scalar {
@@ -566,10 +555,7 @@ fn is_dw(s: Size) -> bool {
 
 fn slots_of(i: Insn) -> u64 {
     match i {
-        Insn::LdImm64 {
-            dst,
-            imm
-        } => 2,
+        Insn::LdImm64 { dst, imm } => 2,
         _ => 1,
     }
 }
@@ -893,11 +879,7 @@ fn copy_state(inout dst: St, in src: St) {
 }
 
 fn new_st() -> St {
-    St {
-        rs: ChunkSeq::new[R](),
-        ws: ChunkSeq::new[u64](),
-        low: ChunkSeq::new[u64]()
-    }
+    St { rs: ChunkSeq::new[R](), ws: ChunkSeq::new[u64](), low: ChunkSeq::new[u64]() }
 }
 
 // Apply a change to every register and spilled register of every frame
@@ -1411,15 +1393,8 @@ fn check_cfg(inout v: V) eff [Fail[VErr]] {
                     let t = target(inout v, pc, widen_i64(off));
                     starts.push(t);
                 },
-                Insn::LdImm64 {
-                    dst,
-                    imm
-                } => match imm {
-                    Imm64::Pseudo {
-                        src,
-                        imm_lo,
-                        imm_hi
-                    } => {
+                Insn::LdImm64 { dst, imm } => match imm {
+                    Imm64::Pseudo { src, imm_lo, imm_hi } => {
                         if src == 4 {
                             if imm_hi != 0 {
                                 fail(
@@ -1504,9 +1479,7 @@ fn check_cfg(inout v: V) eff [Fail[VErr]] {
         }
         let ends = match insn_at(in v, last) {
             Insn::Exit => true,
-            Insn::Ja {
-                off
-            } => true,
+            Insn::Ja { off } => true,
             _ => false,
         };
         if !ends {
@@ -1520,16 +1493,8 @@ fn check_cfg(inout v: V) eff [Fail[VErr]] {
             if is_start(in v, pc) {
                 let i = insn_at(in v, pc);
                 let (has, off, cond) = match i {
-                    Insn::Ja {
-                        off
-                    } => (true, widen_i64(off), false),
-                    Insn::Jcond {
-                        wide,
-                        op,
-                        dst,
-                        src,
-                        off
-                    } => (true, widen_i64(off), true),
+                    Insn::Ja { off } => (true, widen_i64(off), false),
+                    Insn::Jcond { wide, op, dst, src, off } => (true, widen_i64(off), true),
                     _ => (false, 0, false),
                 };
                 if has {
@@ -1580,19 +1545,11 @@ fn check_cfg(inout v: V) eff [Fail[VErr]] {
             let next = wrapping_add(pc, slots_of(i));
             match i {
                 Insn::Exit => {},
-                Insn::Ja {
-                    off
-                } => {
+                Insn::Ja { off } => {
                     let t = target(inout v, pc, widen_i64(off));
                     stack.push(t);
                 },
-                Insn::Jcond {
-                    wide,
-                    op,
-                    dst,
-                    src,
-                    off
-                } => {
+                Insn::Jcond { wide, op, dst, src, off } => {
                     let t = target(inout v, pc, widen_i64(off));
                     stack.push(t);
                     if next < n {
@@ -2122,10 +2079,7 @@ fn access(inout v: V, in st: St, pc: u64, p: R, off: i16, size: Size, write: boo
             }
             let sp = frame_subprog(in st, p.x);
             bump_depth(inout v, sp, wrapping_sub(0, bits(total)) & U32_MAX);
-            Target::Stack {
-                frame: p.x,
-                at: bits(wrapping_add(total, STACK_BYTES_I))
-            }
+            Target::Stack { frame: p.x, at: bits(wrapping_add(total, STACK_BYTES_I)) }
         },
         8 => {
             let vs = map_word(in v, p.x, 2);
@@ -2204,10 +2158,7 @@ fn load(inout v: V, in st: St, pc: u64, p: R, off: i16, size: Size) -> R eff [Fa
         Target::Scalar(sz) => r_scalar(
             scalar_unknown_bits(wrapping_u32(wrapping_mul(size_bytes(sz), 8)))
         ),
-        Target::Stack {
-            frame,
-            at
-        } => {
+        Target::Stack { frame, at } => {
             let slot = rr(in st, s_slot(frame, shr(at, 3)));
             let n = size_bytes(size);
             let first = (at & 7);
@@ -2245,10 +2196,7 @@ fn load(inout v: V, in st: St, pc: u64, p: R, off: i16, size: Size) -> R eff [Fa
 
 fn store(inout v: V, inout st: St, pc: u64, p: R, off: i16, size: Size, val: R) eff [Fail[VErr]] {
     match access(inout v, in st, pc, p, off, size, true) {
-        Target::Stack {
-            frame,
-            at
-        } => {
+        Target::Stack { frame, at } => {
             let n = size_bytes(size);
             let k = s_slot(frame, shr(at, 3));
             let slot = rr(in st, k);
@@ -2293,18 +2241,10 @@ fn store(inout v: V, inout st: St, pc: u64, p: R, off: i16, size: Size, val: R) 
 
 fn fetches(op: AtomicOp) -> bool {
     match op {
-        AtomicOp::Add {
-            fetch
-        } => fetch,
-        AtomicOp::Or {
-            fetch
-        } => fetch,
-        AtomicOp::And {
-            fetch
-        } => fetch,
-        AtomicOp::Xor {
-            fetch
-        } => fetch,
+        AtomicOp::Add { fetch } => fetch,
+        AtomicOp::Or { fetch } => fetch,
+        AtomicOp::And { fetch } => fetch,
+        AtomicOp::Xor { fetch } => fetch,
         AtomicOp::Xchg => true,
         AtomicOp::CmpXchg => true,
     }
@@ -2368,10 +2308,7 @@ fn atomic(
     }
     store(inout v, inout st, pc, p, off, size, r_unknown());
     match access(inout v, in st, pc, p, off, size, true) {
-        Target::Stack {
-            frame,
-            at
-        } => {
+        Target::Stack { frame, at } => {
             // the spill (if any) is now an unknown value
             let k = s_slot(frame, shr(at, 3));
             if rr(in st, k).tag < S_BYTES {
@@ -3633,20 +3570,11 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
     let insn = insn_at(in v, pc);
     let next = wrapping_add(pc, slots_of(insn));
     match insn {
-        Insn::Alu {
-            wide,
-            op,
-            dst,
-            src
-        } => {
+        Insn::Alu { wide, op, dst, src } => {
             alu(inout v, inout st, pc, wide, op, widen_u64(dst), src);
             Step::Next(next)
         },
-        Insn::Endian {
-            kind,
-            bits,
-            dst
-        } => {
+        Insn::Endian { kind, bits, dst } => {
             let d = widen_u64(dst);
             write_check(inout v, pc, d);
             let s = read(inout v, in st, pc, d);
@@ -3668,16 +3596,8 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
             set(inout st, d, r_scalar(r));
             Step::Next(next)
         },
-        Insn::Ja {
-            off
-        } => Step::Jump(target(inout v, pc, widen_i64(off))),
-        Insn::Jcond {
-            wide,
-            op,
-            dst,
-            src,
-            off
-        } => {
+        Insn::Ja { off } => Step::Jump(target(inout v, pc, widen_i64(off))),
+        Insn::Jcond { wide, op, dst, src, off } => {
             let t = target(inout v, pc, widen_i64(off));
             cond(inout v, inout st, inout alt, pc, wide, op, widen_u64(dst), src, t, next)
         },
@@ -3730,10 +3650,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
             CallTarget::Kfunc(k) => kfunc(inout v, inout st, inout alt, pc, next),
         },
         Insn::Exit => exit(inout v, inout st, inout alt, pc),
-        Insn::LdImm64 {
-            dst,
-            imm
-        } => {
+        Insn::LdImm64 { dst, imm } => {
             let d = widen_u64(dst);
             write_check(inout v, pc, d);
             let val = match imm {
@@ -3747,11 +3664,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
                     }
                     mk(T_MAP_PTR, widen_u64(wrapping_u32(i)), 0, 0, 0, zs())
                 },
-                Imm64::Pseudo {
-                    src,
-                    imm_lo,
-                    imm_hi
-                } => {
+                Imm64::Pseudo { src, imm_lo, imm_hi } => {
                     if src != 4 {
                         begin(inout v, "insn.unsupported");
                         lit(inout v.msg, "ld_imm64 pseudo source ");
@@ -3766,13 +3679,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
             set(inout st, d, val);
             Step::Next(next)
         },
-        Insn::Ldx {
-            size,
-            dst,
-            src,
-            off,
-            sign_extend
-        } => {
+        Insn::Ldx { size, dst, src, off, sign_extend } => {
             let d = widen_u64(dst);
             write_check(inout v, pc, d);
             let p = read(inout v, in st, pc, widen_u64(src));
@@ -3806,12 +3713,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
             }
             Step::Next(next)
         },
-        Insn::St {
-            size,
-            dst,
-            off,
-            imm
-        } => {
+        Insn::St { size, dst, off, imm } => {
             let p = read(inout v, in st, pc, widen_u64(dst));
             let skb = match v.ptype {
                 ProgramType::SchedCls => true,
@@ -3830,12 +3732,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
             taint_slot(inout st, p, off, size, false);
             Step::Next(next)
         },
-        Insn::Stx {
-            size,
-            dst,
-            src,
-            off
-        } => {
+        Insn::Stx { size, dst, src, off } => {
             let p = read(inout v, in st, pc, widen_u64(dst));
             let val = read(inout v, in st, pc, widen_u64(src));
             store(inout v, inout st, pc, p, off, size, val);
@@ -3843,22 +3740,16 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
             taint_slot(inout st, p, off, size, t);
             Step::Next(next)
         },
-        Insn::Atomic {
-            size,
-            op,
-            dst,
-            src,
-            off
-        } => {
+        Insn::Atomic { size, op, dst, src, off } => {
             atomic(inout v, inout st, pc, size, op, widen_u64(dst), widen_u64(src), off);
             Step::Next(next)
         },
-        Insn::LdLegacy {
-            size,
-            indirect,
-            src,
-            imm
-        } => fail(inout v, pc, "insn.unsupported", "BPF_LD_ABS/BPF_LD_IND are not supported"),
+        Insn::LdLegacy { size, indirect, src, imm } => fail(
+            inout v,
+            pc,
+            "insn.unsupported",
+            "BPF_LD_ABS/BPF_LD_IND are not supported"
+        ),
     }
 }
 
@@ -4334,24 +4225,17 @@ pub struct Outcome {
 // A decode error as one word: variant | b << 4 | a << 12.
 fn decode_code(e: DecodeError) -> u64 {
     match e {
-        DecodeError::TruncatedProgram {
-            len
-        } => shl(widen_u64(len), 12),
-        DecodeError::BadRegister {
-            pc,
-            reg
-        } => 1 | shl(widen_u64(reg), 4) | shl(widen_u64(pc), 12),
-        DecodeError::InvalidOpcode {
-            pc,
-            code
-        } => 2 | shl(widen_u64(code), 4) | shl(widen_u64(pc), 12),
-        DecodeError::ReservedFieldSet {
-            pc,
-            field
-        } => 3 | shl(widen_u64(field), 4) | shl(widen_u64(pc), 12),
-        DecodeError::BrokenLdImm64 {
-            pc
-        } => 4 | shl(widen_u64(pc), 12),
+        DecodeError::TruncatedProgram { len } => shl(widen_u64(len), 12),
+        DecodeError::BadRegister { pc, reg } => 1 | shl(widen_u64(reg), 4) | shl(widen_u64(pc), 12),
+        DecodeError::InvalidOpcode { pc, code } => 2 | shl(widen_u64(code), 4) | shl(
+            widen_u64(pc),
+            12
+        ),
+        DecodeError::ReservedFieldSet { pc, field } => 3 | shl(widen_u64(field), 4) | shl(
+            widen_u64(pc),
+            12
+        ),
+        DecodeError::BrokenLdImm64 { pc } => 4 | shl(widen_u64(pc), 12),
     }
 }
 
@@ -4361,12 +4245,7 @@ fn decode_outcome(c: u64) -> Outcome {
     w.push(c & 15);
     w.push(shr(c, 12));
     w.push(shr(c, 4) & 255);
-    Outcome {
-        words: w,
-        rule: ChunkSeq::new[u8](),
-        msg: ChunkSeq::new[u8](),
-        widenings: 0
-    }
+    Outcome { words: w, rule: ChunkSeq::new[u8](), msg: ChunkSeq::new[u8](), widenings: 0 }
 }
 
 fn simple_outcome(rule: Str, msg: Str) -> Outcome {
@@ -4377,12 +4256,7 @@ fn simple_outcome(rule: Str, msg: Str) -> Outcome {
     lit(inout r, rule);
     let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
     lit(inout m, msg);
-    Outcome {
-        words: w,
-        rule: r,
-        msg: m,
-        widenings: 0
-    }
+    Outcome { words: w, rule: r, msg: m, widenings: 0 }
 }
 
 // The verifier's record and worklist pools, kept by the caller between
@@ -4549,10 +4423,7 @@ fn verify_one(
         work: ChunkSeq::new[u64](),
         wrs: ChunkSeq::new[R](),
         wws: ChunkSeq::new[u64](),
-        ids: Ids {
-            old: ChunkSeq::new[u64](),
-            cur: ChunkSeq::new[u64]()
-        },
+        ids: Ids { old: ChunkSeq::new[u64](), cur: ChunkSeq::new[u64]() },
         msg: ChunkSeq::new[u8](),
         rule: ChunkSeq::new[u8]()
     };
@@ -4579,12 +4450,7 @@ fn verify_one(
     if res != wrapping_sub(none(), 1) {
         w.push(1);
         w.push(res);
-        return Outcome {
-            words: w,
-            rule: v.rule,
-            msg: v.msg,
-            widenings: v.widenings
-        };
+        return Outcome { words: w, rule: v.rule, msg: v.msg, widenings: v.widenings };
     }
     w.push(0);
     w.push(v.processed);
@@ -4602,12 +4468,7 @@ fn verify_one(
     for i in 1..v.work.len() {
         w.push(sq(in v.work, i));
     }
-    Outcome {
-        words: w,
-        rule: v.rule,
-        msg: v.msg,
-        widenings: v.widenings
-    }
+    Outcome { words: w, rule: v.rule, msg: v.msg, widenings: v.widenings }
 }
 
 // verifier::verify after the Rust wrapper's program-type and map checks.

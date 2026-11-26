@@ -312,12 +312,7 @@ fn write_stream(stream: u32, in text: Slice[u8]) eff [Ffi[StdFs], Fail[PrintFail
         }
     } with {
         return v => v,
-        raise(e, _) => Fail::raise(
-            PrintFailed {
-                stream: stream,
-                error: e
-            }
-        ),
+        raise(e, _) => Fail::raise(PrintFailed { stream: stream, error: e }),
     }
 }
 

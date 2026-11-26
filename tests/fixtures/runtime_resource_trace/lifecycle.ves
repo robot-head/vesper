@@ -46,15 +46,9 @@ fn repeated_site() -> i64 {
 fn transfer() -> i64 {
     let ticket = Ticket {};
     let answer = inspect(in ticket);
-    let envelope = Envelope {
-        ticket: relay(ticket),
-        answer: answer
-    };
+    let envelope = Envelope { ticket: relay(ticket), answer: answer };
     let copied = envelope.answer;
-    let Envelope {
-        ticket,
-        answer
-    } = envelope;
+    let Envelope { ticket, answer } = envelope;
     let ticket = relay(ticket);
     let (ticket, n) = (ticket, copied);
     close(ticket);

@@ -84,13 +84,7 @@ pub fn dec(a: u64) -> u64 {
 }
 
 pub fn op(tag: u64, a: u64, b: u64, c: u64, d: u64) -> Op {
-    Op {
-        tag: tag,
-        a: a,
-        b: b,
-        c: c,
-        d: d
-    }
+    Op { tag: tag, a: a, b: b, c: c, d: d }
 }
 
 pub fn tnode(in s: ChunkSeq[TNode], i: u64) -> TNode {
@@ -112,23 +106,14 @@ pub fn tnode(in s: ChunkSeq[TNode], i: u64) -> TNode {
 pub fn tprop(in s: ChunkSeq[TProp], i: u64) -> TProp {
     match s.try_get(i) {
         Option::Some(p) => p,
-        Option::None => TProp {
-            property: 0,
-            tag: 0,
-            payload: 0,
-            tstart: 0,
-            tlen: 0
-        },
+        Option::None => TProp { property: 0, tag: 0, payload: 0, tstart: 0, tlen: 0 },
     }
 }
 
 pub fn tsub(in s: ChunkSeq[TSub], i: u64) -> TSub {
     match s.try_get(i) {
         Option::Some(p) => p,
-        Option::None => TSub {
-            event: 0,
-            handler: 0
-        },
+        Option::None => TSub { event: 0, handler: 0 },
     }
 }
 
@@ -153,25 +138,14 @@ pub fn mnode(in s: ChunkSeq[MNode], i: u64) -> MNode {
 pub fn mprop(in s: ChunkSeq[MProp], i: u64) -> MProp {
     match s.try_get(i) {
         Option::Some(p) => p,
-        Option::None => MProp {
-            property: 0,
-            slot: 0,
-            tag: 0,
-            payload: 0,
-            tstart: 0,
-            tlen: 0
-        },
+        Option::None => MProp { property: 0, slot: 0, tag: 0, payload: 0, tstart: 0, tlen: 0 },
     }
 }
 
 pub fn msub(in s: ChunkSeq[MSub], i: u64) -> MSub {
     match s.try_get(i) {
         Option::Some(p) => p,
-        Option::None => MSub {
-            event: 0,
-            id: 0,
-            handler: 0
-        },
+        Option::None => MSub { event: 0, id: 0, handler: 0 },
     }
 }
 

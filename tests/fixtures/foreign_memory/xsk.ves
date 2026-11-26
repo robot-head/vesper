@@ -14,9 +14,7 @@ fn ring_bytes() -> u64 {
 fn umem() -> Pinned[u8] {
     let mut bytes = ChunkSeq::with_capacity[u8](32768);
     bytes.resize(32768, 0);
-    Pinned {
-        data: bytes
-    }
+    Pinned { data: bytes }
 }
 
 // Consume every descriptor the kernel produced: checksum its frame in the
@@ -62,9 +60,7 @@ pub fn rx(packets: u32) -> u64 eff [Ffi[Xsk]] {
     let mut socket = match Xsk::xsk_socket_new(inout umem, 2048) {
         Some(s) => s,
         None => {
-            let Pinned {
-                data
-            } = umem;
+            let Pinned { data } = umem;
             return 1;
         }
     };
@@ -72,9 +68,7 @@ pub fn rx(packets: u32) -> u64 eff [Ffi[Xsk]] {
         Some(r) => r,
         None => {
             Xsk::xsk_socket_free(socket);
-            let Pinned {
-                data
-            } = umem;
+            let Pinned { data } = umem;
             return 2;
         }
     };
@@ -100,9 +94,7 @@ pub fn rx(packets: u32) -> u64 eff [Ffi[Xsk]] {
     Xsk::xsk_ring_unmap(ring);
     Xsk::xsk_socket_free(socket);
     // Released: the UMEM's bytes are Vesper's again.
-    let Pinned {
-        data
-    } = umem;
+    let Pinned { data } = umem;
     sum
 }
 
@@ -112,9 +104,7 @@ pub fn refused() -> u64 eff [Ffi[Xsk]] {
     let socket = match Xsk::xsk_socket_new(inout umem, 2048) {
         Some(s) => s,
         None => {
-            let Pinned {
-                data
-            } = umem;
+            let Pinned { data } = umem;
             return 1;
         }
     };
@@ -126,9 +116,7 @@ pub fn refused() -> u64 eff [Ffi[Xsk]] {
         None => 70,
     };
     Xsk::xsk_socket_free(socket);
-    let Pinned {
-        data
-    } = umem;
+    let Pinned { data } = umem;
     wrapping_add(code, Xsk::xsk_live())
 }
 
@@ -139,9 +127,7 @@ pub fn view() -> u64 eff [Ffi[Xsk]] {
     let socket = match Xsk::xsk_socket_new(inout umem, 2048) {
         Some(s) => s,
         None => {
-            let Pinned {
-                data
-            } = umem;
+            let Pinned { data } = umem;
             return 1;
         }
     };
@@ -149,9 +135,7 @@ pub fn view() -> u64 eff [Ffi[Xsk]] {
         Some(r) => r,
         None => {
             Xsk::xsk_socket_free(socket);
-            let Pinned {
-                data
-            } = umem;
+            let Pinned { data } = umem;
             return 2;
         }
     };
@@ -161,9 +145,7 @@ pub fn view() -> u64 eff [Ffi[Xsk]] {
     };
     Xsk::xsk_ring_unmap(ring);
     Xsk::xsk_socket_free(socket);
-    let Pinned {
-        data
-    } = umem;
+    let Pinned { data } = umem;
     n
 }
 
@@ -202,9 +184,7 @@ pub fn rx_copy(packets: u32) -> u64 eff [Ffi[Xsk]] {
     let mut socket = match Xsk::xsk_socket_new(inout umem, 2048) {
         Some(s) => s,
         None => {
-            let Pinned {
-                data
-            } = umem;
+            let Pinned { data } = umem;
             return 1;
         }
     };
@@ -212,9 +192,7 @@ pub fn rx_copy(packets: u32) -> u64 eff [Ffi[Xsk]] {
         Some(r) => r,
         None => {
             Xsk::xsk_socket_free(socket);
-            let Pinned {
-                data
-            } = umem;
+            let Pinned { data } = umem;
             return 2;
         }
     };
@@ -241,9 +219,7 @@ pub fn rx_copy(packets: u32) -> u64 eff [Ffi[Xsk]] {
     }
     Xsk::xsk_ring_unmap(ring);
     Xsk::xsk_socket_free(socket);
-    let Pinned {
-        data
-    } = umem;
+    let Pinned { data } = umem;
     sum
 }
 

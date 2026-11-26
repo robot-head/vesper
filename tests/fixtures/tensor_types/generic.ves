@@ -25,14 +25,8 @@ fn chain[B: dim](
     w2: Tensor[F32, [6, 2]],
     b2: Tensor[F32, [2]],
 ) -> Tensor[F32, [1, B * 2]] eff [Tensor] {
-    let first = Linear {
-        weight: w1,
-        bias: b1
-    };
-    let second: Linear[6, 2] = Linear {
-        weight: w2,
-        bias: b2
-    };
+    let first = Linear { weight: w1, bias: b1 };
+    let second: Linear[6, 2] = Linear { weight: w2, bias: b2 };
     let y = apply(second, apply(first, x));
     let flat = Tensor::reshape[[1, 2 * B]](y);
     match pick(true, flat, Tensor::fill[[1, B * 2]](0.0)) {

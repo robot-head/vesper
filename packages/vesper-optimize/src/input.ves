@@ -114,28 +114,12 @@ fn push_list(inout a: Ast, in words: ChunkSeq[u32]) -> u32 {
             Option::None => {}
         }
     }
-    let r = a
-        .lists
-        .alloc(
-            ListRef {
-                first: first,
-                len: wrapping_u32(n)
-            }
-        );
+    let r = a.lists.alloc(ListRef { first: first, len: wrapping_u32(n) });
     r.raw()
 }
 
 fn node(kind: u8, start: u32, end: u32, a: u32, b: u32, c: u32) -> ExprNode {
-    ExprNode {
-        kind: kind,
-        start: start,
-        end: end,
-        a: a,
-        b: b,
-        c: c,
-        d: 0,
-        e: 0
-    }
+    ExprNode { kind: kind, start: start, end: end, a: a, b: b, c: c, d: 0, e: 0 }
 }
 
 // Appends an expression to the tree with its two capacities; returns its
@@ -162,14 +146,7 @@ pub fn add_int(inout t: Tree, v: i128, start: u32, end: u32) -> u32 {
     let l = t
         .ast
         .lits
-        .alloc(
-            Lit {
-                kind: 1,
-                neg: neg,
-                bits: wrapping_u64(m),
-                hi: wrapping_u64(m >> 64)
-            }
-        );
+        .alloc(Lit { kind: 1, neg: neg, bits: wrapping_u64(m), hi: wrapping_u64(m >> 64) });
     add_expr(inout t, node(1, start, end, l.raw(), 0, 0), 0, 0)
 }
 
@@ -184,26 +161,8 @@ pub fn add_binary(inout t: Tree, op: u32, cap: u64, left: u32, right: u32, start
 
 // A two-argument call `callee(in left, in right)` with no type arguments.
 pub fn add_call2(inout t: Tree, callee: u32, left: u32, right: u32, start: u32, end: u32) -> u32 {
-    let x = t
-        .ast
-        .args
-        .alloc(
-            ArgNode {
-                pass: 0,
-                explicit: false,
-                expr: left
-            }
-        );
-    let y = t
-        .ast
-        .args
-        .alloc(
-            ArgNode {
-                pass: 0,
-                explicit: false,
-                expr: right
-            }
-        );
+    let x = t.ast.args.alloc(ArgNode { pass: 0, explicit: false, expr: left });
+    let y = t.ast.args.alloc(ArgNode { pass: 0, explicit: false, expr: right });
     let mut words = ChunkSeq::new[u32]();
     words.push(x.raw());
     words.push(y.raw());
@@ -282,17 +241,7 @@ pub fn read_exprs(inout r: Reader, in b: Slice[u8], inout t: Tree, inout map: Ch
             let neg = r.word(in b) != 0;
             let bits = r.word(in b);
             let hi = r.word(in b);
-            let l = t
-                .ast
-                .lits
-                .alloc(
-                    Lit {
-                        kind: lk,
-                        neg: neg,
-                        bits: bits,
-                        hi: hi
-                    }
-                );
+            let l = t.ast.lits.alloc(Lit { kind: lk, neg: neg, bits: bits, hi: hi });
             add_expr(inout t, node(1, start, end, l.raw(), 0, 0), 0, 0)
         } else if kind == 2 {
             let s = sym_of(in t, r.word(in b));
@@ -306,18 +255,7 @@ pub fn read_exprs(inout r: Reader, in b: Slice[u8], inout t: Tree, inout map: Ch
             let acap = r.word(in b);
             let mut tw = ChunkSeq::new[u32]();
             for j in 0..ntypes {
-                let ty = t
-                    .ast
-                    .types
-                    .alloc(
-                        TypeNode {
-                            kind: 5,
-                            a: 0,
-                            b: 0,
-                            c: 0,
-                            d: 0
-                        }
-                    );
+                let ty = t.ast.types.alloc(TypeNode { kind: 5, a: 0, b: 0, c: 0, d: 0 });
                 tw.push(ty.raw());
             }
             let types = push_list(inout t.ast, in tw);
@@ -326,16 +264,7 @@ pub fn read_exprs(inout r: Reader, in b: Slice[u8], inout t: Tree, inout map: Ch
                 let pass = wrapping_u8(r.word(in b));
                 let explicit = r.word(in b) != 0;
                 let e = mapped(in map, r.word(in b));
-                let x = t
-                    .ast
-                    .args
-                    .alloc(
-                        ArgNode {
-                            pass: pass,
-                            explicit: explicit,
-                            expr: e
-                        }
-                    );
+                let x = t.ast.args.alloc(ArgNode { pass: pass, explicit: explicit, expr: e });
                 aw.push(x.raw());
             }
             let args = push_list(inout t.ast, in aw);
@@ -368,14 +297,7 @@ pub fn read_types(inout r: Reader, in b: Slice[u8], inout types: ChunkSeq[TypeRo
         let start = r.word32(in b);
         let end = r.word32(in b);
         let code = wrapping_u8(r.word(in b));
-        types
-            .push(
-                TypeRow {
-                    start: start,
-                    end: end,
-                    code: code
-                }
-            );
+        types.push(TypeRow { start: start, end: end, code: code });
     }
 }
 
@@ -428,23 +350,9 @@ pub fn read_cert(inout r: Reader, in b: Slice[u8], inout c: Cert) {
         let w2 = r.word(in b);
         let w3 = r.word(in b);
         let row = if tag == 0 {
-            TermRow {
-                kind: kind,
-                tag: 0,
-                op: 0,
-                value: wide(w1, w2),
-                a: 0,
-                b: 0
-            }
+            TermRow { kind: kind, tag: 0, op: 0, value: wide(w1, w2), a: 0, b: 0 }
         } else if tag == 1 {
-            TermRow {
-                kind: kind,
-                tag: 1,
-                op: 0,
-                value: 0,
-                a: wrapping_u32(w1),
-                b: 0
-            }
+            TermRow { kind: kind, tag: 1, op: 0, value: 0, a: wrapping_u32(w1), b: 0 }
         } else {
             TermRow {
                 kind: kind,

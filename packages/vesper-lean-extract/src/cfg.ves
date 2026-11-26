@@ -74,17 +74,7 @@ pub fn fun(in p: Program, in fx: Fns, fi: u64) -> Fun {
         let ty = n32(p.op(i));
         // type, span start and end
         i = add(i, 3);
-        f
-            .params
-            .push(
-                PRow {
-                    name: name,
-                    pass: pass,
-                    qa: qa,
-                    qn: qn,
-                    ty: ty
-                }
-            );
+        f.params.push(PRow { name: name, pass: pass, qa: qa, qn: qn, ty: ty });
     }
     f.result = n32(p.op(i));
     f.effects = n32(p.op(inc(i)));
@@ -176,13 +166,7 @@ impl Fun {
     pub fn param(in self, k: u64) -> PRow {
         match self.params.try_get(k) {
             Option::Some(r) => r,
-            Option::None => PRow {
-                name: 0,
-                pass: 0,
-                qa: 0,
-                qn: 0,
-                ty: 0
-            },
+            Option::None => PRow { name: 0, pass: 0, qa: 0, qn: 0, ty: 0 },
         }
     }
 

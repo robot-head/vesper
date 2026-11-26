@@ -374,51 +374,15 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
                         let s = u32_at(in a.nmap, r.word(in b));
                         a.eproj_syms.push(s);
                     }
-                    a
-                        .eprojs
-                        .push(
-                            Range {
-                                a: sa,
-                                n: sn
-                            }
-                        );
+                    a.eprojs.push(Range { a: sa, n: sn });
                 }
                 let ty = u32_at(in a.tmap, r.word(in b));
-                a
-                    .eparams
-                    .push(
-                        EffParam {
-                            pass: pass,
-                            qa: qa,
-                            qn: qn,
-                            ty: ty
-                        }
-                    );
+                a.eparams.push(EffParam { pass: pass, qa: qa, qn: qn, ty: ty });
             }
             let result = u32_at(in a.tmap, r.word(in b));
-            a
-                .eops
-                .push(
-                    EffOp {
-                        name: op,
-                        pa: pa,
-                        pn: pn,
-                        result: result
-                    }
-                );
+            a.eops.push(EffOp { name: op, pa: pa, pn: pn, result: result });
         }
-        a
-            .effs
-            .push(
-                EffDecl {
-                    name: name,
-                    linear: linear,
-                    ga: ga,
-                    gn: gn,
-                    oa: oa,
-                    on: on
-                }
-            );
+        a.effs.push(EffDecl { name: name, linear: linear, ga: ga, gn: gn, oa: oa, on: on });
         set_by_symbol(inout a.eff_by_name, name, n32(inc(i)));
     }
     a
@@ -464,14 +428,7 @@ impl Ast {
     pub fn eff(in self, i: u64) -> EffDecl {
         match self.effs.try_get(i) {
             Option::Some(e) => e,
-            Option::None => EffDecl {
-                name: 0,
-                linear: false,
-                ga: 0,
-                gn: 0,
-                oa: 0,
-                on: 0
-            },
+            Option::None => EffDecl { name: 0, linear: false, ga: 0, gn: 0, oa: 0, on: 0 },
         }
     }
 
@@ -482,12 +439,7 @@ impl Ast {
     pub fn eff_op(in self, e: EffDecl, i: u64) -> EffOp {
         match self.eops.try_get(add(e.oa, i)) {
             Option::Some(o) => o,
-            Option::None => EffOp {
-                name: 0,
-                pa: 0,
-                pn: 0,
-                result: 0
-            },
+            Option::None => EffOp { name: 0, pa: 0, pn: 0, result: 0 },
         }
     }
 
@@ -499,33 +451,20 @@ impl Ast {
                 return o;
             }
         }
-        EffOp {
-            name: 0,
-            pa: 0,
-            pn: 0,
-            result: 0
-        }
+        EffOp { name: 0, pa: 0, pn: 0, result: 0 }
     }
 
     pub fn op_param(in self, o: EffOp, i: u64) -> EffParam {
         match self.eparams.try_get(add(o.pa, i)) {
             Option::Some(p) => p,
-            Option::None => EffParam {
-                pass: 0,
-                qa: 0,
-                qn: 0,
-                ty: 0
-            },
+            Option::None => EffParam { pass: 0, qa: 0, qn: 0, ty: 0 },
         }
     }
 
     pub fn proj(in self, p: EffParam, q: u64) -> Range {
         match self.eprojs.try_get(add(p.qa, q)) {
             Option::Some(x) => x,
-            Option::None => Range {
-                a: 0,
-                n: 0
-            },
+            Option::None => Range { a: 0, n: 0 },
         }
     }
 

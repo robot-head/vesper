@@ -24,12 +24,7 @@ model RedactedSecret: Telemetrable for Secret[u64] {
 }
 
 fn main() -> u64 eff [Trace] {
-    let l = Login {
-        user_id: 5,
-        password: Secret {
-            value: 9
-        }
-    };
+    let l = Login { user_id: 5, password: Secret { value: 9 } };
     let s = Trace::start_span(0, "login");
     Trace::emit_attr(s, l.telemetry_attr());
     let p = Trace::start_span(0, "password");

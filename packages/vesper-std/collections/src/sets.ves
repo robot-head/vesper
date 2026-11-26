@@ -10,9 +10,7 @@ pub struct OrderedSet[K] {
 }
 
 pub fn ordered_set_new[K: mod copy + Ord]() -> OrderedSet[K] {
-    OrderedSet {
-        map: btree_new[K, ()]()
-    }
+    OrderedSet { map: btree_new[K, ()]() }
 }
 
 impl [K: mod copy + Ord] OrderedSet[K] {
@@ -100,9 +98,7 @@ pub struct FlatSet[K] {
 }
 
 pub fn flat_set_new[K: mod copy + Eq + Hash]() -> FlatSet[K] {
-    FlatSet {
-        map: flat_table_new[K, ()]()
-    }
+    FlatSet { map: flat_table_new[K, ()]() }
 }
 
 impl [K: mod copy + Eq + Hash] FlatSet[K] {

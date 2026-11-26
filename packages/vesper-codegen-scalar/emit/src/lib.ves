@@ -529,9 +529,7 @@ fn scalar(call: u64, inout b: Builder) -> u64 eff [Ffi[Cranelift]] {
     if op == LOCAL_READ {
         // `use_var`, then `coerce` to the read's type; the raw value too,
         // which the Rust code keeps the variable's facts on.
-        let var = Var {
-            id: wrapping_u32(call_arg(call, 0))
-        };
+        let var = Var { id: wrapping_u32(call_arg(call, 0)) };
         let raw = use_var(inout b, var);
         let v = coerce(inout b, raw, call_arg(call, 1), call_arg(call, 2) != 0);
         call_result_value(call, v);
@@ -547,9 +545,7 @@ fn scalar(call: u64, inout b: Builder) -> u64 eff [Ffi[Cranelift]] {
         return HANDLED;
     }
     if op == LOCAL_WRITE {
-        let var = Var {
-            id: wrapping_u32(call_arg(call, 0))
-        };
+        let var = Var { id: wrapping_u32(call_arg(call, 0)) };
         def_var(inout b, var, value_of_word(call_arg(call, 1)));
         return HANDLED;
     }

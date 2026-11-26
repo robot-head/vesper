@@ -466,9 +466,7 @@ fn check_reductions(inout c: Cx, f: u64, sequential_order: bool, fname: u64) {
     let mut lt = Lt {
         memo: filled(nv, 0),
         rows: ChunkSeq::new[u64](),
-        sh: Sh {
-            n: ChunkSeq::new[u64]()
-        },
+        sh: Sh { n: ChunkSeq::new[u64]() },
     };
     let first = fw(in c, f, F_INSTS);
     let n = fw(in c, f, F_NINSTS);

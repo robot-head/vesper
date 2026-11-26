@@ -134,12 +134,7 @@ pub fn caps_read(sink w: ChunkSeq[u64]) -> Caps {
         cr.push(efirst);
         cr.push(ne);
     }
-    Caps {
-        w: w,
-        cr: cr,
-        voff: voff,
-        eoff: eoff
-    }
+    Caps { w: w, cr: cr, voff: voff, eoff: eoff }
 }
 
 pub fn cap_count(in c: Caps) -> u64 {
@@ -913,9 +908,7 @@ pub fn skeleton_run(
         sk_fail(inout sk, in "invalid token in sugar template".as_bytes());
         return sk;
     }
-    let mut t = Tt {
-        tk: ChunkSeq::new[u32]()
-    };
+    let mut t = Tt { tk: ChunkSeq::new[u32]() };
     for i in 0..raw.kind.len() {
         t.tk.push(widen_u32(b8(in raw.kind, i)));
         t.tk.push(wrapping_u32(w32(in raw.start, i)));

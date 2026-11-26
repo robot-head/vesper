@@ -155,18 +155,10 @@ pub fn parse_value(ty: u64, in v: Slice[u8], inout out: ChunkSeq[u8])
     if ty == close_type() {
         let n = v.len();
         if n < CLOSE_CODE_LEN {
-            return Result::Err(
-                CapsuleError::Malformed {
-                    capsule_type: ty
-                }
-            );
+            return Result::Err(CapsuleError::Malformed { capsule_type: ty });
         }
         if !valid_utf8(in v[(CLOSE_CODE_LEN)..n]) {
-            return Result::Err(
-                CapsuleError::Malformed {
-                    capsule_type: ty
-                }
-            );
+            return Result::Err(CapsuleError::Malformed { capsule_type: ty });
         }
         let code = (widen_u64(byte(in v, 0)) << 24) | (widen_u64(byte(in v, 1)) << 16) | (
             widen_u64(byte(in v, 2)) << 8
@@ -175,11 +167,7 @@ pub fn parse_value(ty: u64, in v: Slice[u8], inout out: ChunkSeq[u8])
         return Result::Ok(CapsuleOut::CloseSession(wrapping_u32(code)));
     }
     if v.len() != 0 {
-        return Result::Err(
-            CapsuleError::Malformed {
-                capsule_type: ty
-            }
-        );
+        return Result::Err(CapsuleError::Malformed { capsule_type: ty });
     }
     Result::Ok(CapsuleOut::DrainSession)
 }
@@ -208,12 +196,7 @@ pub fn capsule_next(inout r: CapsuleReaderCore) -> Result[CapsuleOut, CapsuleErr
                     r.max_value
                 };
                 if len > bound {
-                    return Result::Err(
-                        CapsuleError::TooLarge {
-                            capsule_type: ty,
-                            len: len
-                        }
-                    );
+                    return Result::Err(CapsuleError::TooLarge { capsule_type: ty, len: len });
                 }
                 r.mode = Mode::Value;
                 r.ty = ty;

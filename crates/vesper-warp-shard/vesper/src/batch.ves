@@ -51,12 +51,7 @@ impl TableCore {
                 return Option::Some(CoreBatchFault::StaleHandle(i));
             }
             if kind == EV_RECEIVED && value >= PN_LIMIT {
-                return Option::Some(
-                    CoreBatchFault::PacketNumberRange {
-                        index: i,
-                        pn: value
-                    }
-                );
+                return Option::Some(CoreBatchFault::PacketNumberRange { index: i, pn: value });
             }
             let t = index / LANES;
             let l = index % LANES;

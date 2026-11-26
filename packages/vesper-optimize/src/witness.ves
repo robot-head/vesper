@@ -275,14 +275,7 @@ fn is_int_literal(in t: Tree, e: ExprNode) -> bool {
 fn term_at(in terms: ChunkSeq[TermRow], id: u32) -> TermRow {
     match terms.try_get(widen_u64(id)) {
         Option::Some(v) => v,
-        Option::None => TermRow {
-            kind: 255,
-            tag: 255,
-            op: 0,
-            value: 0,
-            a: 0,
-            b: 0
-        },
+        Option::None => TermRow { kind: 255, tag: 255, op: 0, value: 0, a: 0, b: 0 },
     }
 }
 
@@ -317,11 +310,7 @@ fn arg_at(in t: Tree, list: u32, i: u64) -> ArgNode {
         .args
         .get_or(
             idx_from_raw[ArgNode](list_at(in t.ast, list, i)),
-            ArgNode {
-                pass: 255,
-                explicit: false,
-                expr: none()
-            }
+            ArgNode { pass: 255, explicit: false, expr: none() }
         )
 }
 
@@ -451,23 +440,11 @@ pub copy struct Frame {
 }
 
 fn enter(e: u32, depth: u64) -> Frame {
-    Frame {
-        finish: false,
-        e: e,
-        depth: depth,
-        op: 0,
-        wrapping: false
-    }
+    Frame { finish: false, e: e, depth: depth, op: 0, wrapping: false }
 }
 
 fn finish(op: u8, wrapping: bool) -> Frame {
-    Frame {
-        finish: true,
-        e: 0,
-        depth: 0,
-        op: op,
-        wrapping: wrapping
-    }
+    Frame { finish: true, e: 0, depth: 0, op: op, wrapping: wrapping }
 }
 
 // ---------------------------------------------------------------- bind
@@ -521,14 +498,7 @@ pub fn bind_source(
         if e != 0 {
             return e;
         }
-        let mut term = TermRow {
-            kind: kind,
-            tag: 0,
-            op: 0,
-            value: 0,
-            a: 0,
-            b: 0
-        };
+        let mut term = TermRow { kind: kind, tag: 0, op: 0, value: 0, a: 0, b: 0 };
         if frame.finish {
             let right = match bound.values.pop() {
                 Option::Some(v) => v,
@@ -643,14 +613,7 @@ pub fn bind_source(
                 if e != 0 {
                     return e;
                 }
-                bound
-                    .origins
-                    .push(
-                        Origin {
-                            op: op,
-                            callee: x.a
-                        }
-                    );
+                bound.origins.push(Origin { op: op, callee: x.a });
                 let e = reserve(inout b, bound.stack.len(), inout stack_cap, 3, S_SOURCE_FRAME);
                 if e != 0 {
                     return e;
@@ -785,24 +748,14 @@ pub fn validate_terms(
             if !fits(current.kind, current.value) {
                 return E_CONSTANT_OUT_OF_RANGE;
             }
-            Shape {
-                depth: 1,
-                nodes: 1,
-                names: 0,
-                bytes: 0
-            }
+            Shape { depth: 1, nodes: 1, names: 0, bytes: 0 }
         } else if current.tag == T_INPUT {
             let name = bound_name(in bound, current.a);
             if name == none() {
                 return E_UNKNOWN_VARIABLE;
             }
             let len = sym_len(in t, name);
-            Shape {
-                depth: 1,
-                nodes: 1,
-                names: len,
-                bytes: len
-            }
+            Shape { depth: 1, nodes: 1, names: len, bytes: len }
         } else if is_binary(current) {
             let wrapping = current.tag == T_WRAPPING;
             if !in_range(in terms, current.a) {
@@ -852,12 +805,7 @@ pub fn validate_terms(
                 capped_sum(x.bytes, y.bytes, b.max_metadata_bytes),
                 b.max_metadata_bytes
             );
-            Shape {
-                depth: depth,
-                nodes: nodes,
-                names: names,
-                bytes: bytes
-            }
+            Shape { depth: depth, nodes: nodes, names: names, bytes: bytes }
         } else {
             return E_UNSUPPORTED_AST;
         };
@@ -870,12 +818,7 @@ pub fn validate_terms(
 fn shape_at(in shapes: ChunkSeq[Shape], id: u32) -> Shape {
     match shapes.try_get(widen_u64(id)) {
         Option::Some(v) => v,
-        Option::None => Shape {
-            depth: 0,
-            nodes: 0,
-            names: 0,
-            bytes: 0
-        },
+        Option::None => Shape { depth: 0, nodes: 0, names: 0, bytes: 0 },
     }
 }
 
@@ -893,13 +836,7 @@ pub fn compare_input(
     if e != 0 {
         return e;
     }
-    stack
-        .push(
-            Pair {
-                left: bound.root,
-                right: input
-            }
-        );
+    stack.push(Pair { left: bound.root, right: input });
     let mut nodes: u64 = 0;
     loop {
         let (left, right) = match stack.pop() {
@@ -930,20 +867,8 @@ pub fn compare_input(
             if e != 0 {
                 return e;
             }
-            stack
-                .push(
-                    Pair {
-                        left: x.b,
-                        right: y.b
-                    }
-                );
-            stack
-                .push(
-                    Pair {
-                        left: x.a,
-                        right: y.a
-                    }
-                );
+            stack.push(Pair { left: x.b, right: y.b });
+            stack.push(Pair { left: x.a, right: y.a });
         } else if !same_node(x, y) {
             return E_INPUT_MISMATCH;
         }
@@ -956,11 +881,7 @@ pub fn compare_input(
 }
 
 fn out_frame(e: u32, id: u32, depth: u64) -> OutFrame {
-    OutFrame {
-        e: e,
-        id: id,
-        depth: depth
-    }
+    OutFrame { e: e, id: id, depth: depth }
 }
 
 // `Expr == Expr` for a callee: both `Name`s here (`call_parts` passed).

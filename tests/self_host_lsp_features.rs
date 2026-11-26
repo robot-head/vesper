@@ -2239,13 +2239,14 @@ fn lsp_features_speed() {
 
 /// The preludes the checker can add to a module (their functions reach
 /// `World::functions` with spans into the prelude's own text).
-fn preludes() -> [&'static str; 5] {
+fn preludes() -> [&'static str; 6] {
     [
         vesper::strings::PRELUDE,
         vesper::atomics::PRELUDE,
         vesper::atomics::WORKERS_PRELUDE,
         vesper::trace_effects::PRELUDE,
         vesper::trace_effects::TELEMETRABLE_PRELUDE,
+        vesper::option_methods::PRELUDE,
     ]
 }
 

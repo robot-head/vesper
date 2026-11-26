@@ -109,18 +109,7 @@ fn udiag_at(inout l: L, code: u64, pkg: u64, dep: u64, snap: u64, mo: u64) {
     let ml = since(in l, mo);
     l
         .udiags
-        .push(
-            Diag {
-                snap: snap,
-                code: code,
-                pkg: pkg,
-                dep: dep,
-                so: 0,
-                sl: 0,
-                mo: mo,
-                ml: ml
-            }
-        );
+        .push(Diag { snap: snap, code: code, pkg: pkg, dep: dep, so: 0, sl: 0, mo: mo, ml: ml });
 }
 
 fn udiag(inout l: L, code: u64, pkg: u64, dep: u64, snap: u64, in msg: Str) {

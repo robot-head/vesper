@@ -25,12 +25,8 @@ fn apply[e: eff](sink f: fn(u64) -> u64 eff [e], x: u64) -> u64 eff [e] {
 
 fn main() -> u64 {
     let eff = 40;
-    let row = Row {
-        eff
-    };
-    let Row {
-        eff: inner
-    } = row;
+    let row = Row { eff };
+    let Row { eff: inner } = row;
     let g = | x: u64 | eff;
     let h = | x: u64 | -> u64 eff [] {
         wrapping_add(x, inner)
@@ -55,8 +51,6 @@ copy struct Make {
 
 impl Make {
     fn eff(n: u64) -> Make {
-        Make {
-            n
-        }
+        Make { n }
     }
 }

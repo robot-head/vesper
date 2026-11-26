@@ -89,11 +89,7 @@ pub fn toks(in src: Slice[u8]) -> Toks {
             );
         end.push(token_end(in t, i));
     }
-    Toks {
-        kind: t.kind,
-        start: start,
-        end: end
-    }
+    Toks { kind: t.kind, start: start, end: end }
 }
 
 // `preceding_comments(tokens, fn_start)`: the line comments directly before
@@ -199,9 +195,7 @@ fn push_location(inout m: ChunkSeq[u8], in src: Slice[u8], offset: u64) {
 // locals); per function item: index, span start, generic, has a body and
 // its name.
 pub fn case_rows(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let (ss, se) = r.text(in b);
     let src = b[ss..se];
     let name_count = r.word(in b);
@@ -612,12 +606,7 @@ fn put_test(
     for k in 0..it.pn {
         let p = match params.try_get(add(it.pa, k)) {
             Option::Some(p) => p,
-            Option::None => Param {
-                ns: 0,
-                ne: 0,
-                ts: 0,
-                te: 0
-            },
+            Option::None => Param { ns: 0, ne: 0, ts: 0, te: 0 },
         };
         let capability = is_text(in b, p.ts, p.te, in "SimStorageCtl")
             || is_text(in b, p.ts, p.te, in "SimNetCtl")
@@ -720,12 +709,7 @@ fn put_test(
     for k in 0..pins {
         let ca = match at.cases.try_get(add(fa.ca, k)) {
             Option::Some(ca) => ca,
-            Option::None => CaseAttr {
-                a: 0,
-                n: 0,
-                start: 0,
-                end: 0
-            },
+            Option::None => CaseAttr { a: 0, n: 0, start: 0, end: 0 },
         };
         out.push(ca.n);
         for j in 0..ca.n {
@@ -754,12 +738,7 @@ fn put_test(
     for k in 0..pins {
         let ca = match at.cases.try_get(add(fa.ca, k)) {
             Option::Some(ca) => ca,
-            Option::None => CaseAttr {
-                a: 0,
-                n: 0,
-                start: 0,
-                end: 0
-            },
+            Option::None => CaseAttr { a: 0, n: 0, start: 0, end: 0 },
         };
         out.push(ca.start);
         out.push(ca.end);
@@ -805,9 +784,7 @@ fn put_name_error(in b: Slice[u8], it: Item, in what: Str) -> ChunkSeq[u64] {
 // name, span, target function index). Result: 0 and the tests in source
 // order, or 1 and the error.
 pub fn discover(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let (ss, se) = r.text(in b);
     let src = b[ss..se];
     let item_count = r.word(in b);
@@ -845,15 +822,7 @@ pub fn discover(in b: Slice[u8]) -> ChunkSeq[u64] {
         for k in 0..pn {
             let (pns, pne) = r.text(in b);
             let (ts, te) = r.text(in b);
-            params
-                .push(
-                    Param {
-                        ns: pns,
-                        ne: pne,
-                        ts: ts,
-                        te: te
-                    }
-                );
+            params.push(Param { ns: pns, ne: pne, ts: ts, te: te });
         }
         let ea = effects.len() / 2;
         let en = r.word(in b);
@@ -887,18 +856,7 @@ pub fn discover(in b: Slice[u8]) -> ChunkSeq[u64] {
         let start = r.word(in b);
         let end = r.word(in b);
         let target = r.word(in b);
-        cases
-            .push(
-                Case {
-                    es: es,
-                    ee: ee,
-                    ns: ns,
-                    ne: ne,
-                    start: start,
-                    end: end,
-                    target: target
-                }
-            );
+        cases.push(Case { es: es, ee: ee, ns: ns, ne: ne, start: start, end: end, target: target });
     }
     let t = toks(in src);
     let at = extract_test_attrs(in src, in t.kind, in t.start, in t.end);
@@ -940,15 +898,7 @@ pub fn discover(in b: Slice[u8]) -> ChunkSeq[u64] {
         let has_real_attr = has_attrs && (fa.has_test || fa.cn > 0);
         // case_entries.get(name) and case_targets.contains(name).
         let mut is_case = false;
-        let mut c = Case {
-            es: 0,
-            ee: 0,
-            ns: 0,
-            ne: 0,
-            start: 0,
-            end: 0,
-            target: 0
-        };
+        let mut c = Case { es: 0, ee: 0, ns: 0, ne: 0, start: 0, end: 0, target: 0 };
         let mut is_target = false;
         for k in 0..case_count {
             match cases.try_get(k) {

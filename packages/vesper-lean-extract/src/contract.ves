@@ -74,14 +74,7 @@ fn read_gens(
         let name = u32_at(in nmap, r.word(in bytes));
         let bound = r.word(in bytes);
         let row = r.word(in bytes) != 0;
-        gens
-            .push(
-                Gen {
-                    name: name,
-                    bound: bound,
-                    row: row
-                }
-            );
+        gens.push(Gen { name: name, bound: bound, row: row });
     }
 }
 
@@ -131,11 +124,7 @@ pub fn read_contracts(inout r: Reader, in bytes: Slice[u8], in nmap: ChunkSeq[u3
 fn gen_at(in cs: Contracts, i: u64) -> Gen {
     match cs.gens.try_get(i) {
         Option::Some(g) => g,
-        Option::None => Gen {
-            name: 0,
-            bound: 0,
-            row: false
-        },
+        Option::None => Gen { name: 0, bound: 0, row: false },
     }
 }
 
@@ -523,10 +512,7 @@ pub fn contracts(
         }
         // a right-associated sum
         let nfail = failures.len();
-        let mut fail = T {
-            a: 0,
-            n: 0
-        };
+        let mut fail = T { a: 0, n: 0 };
         if nfail > 0 {
             fail = get(in failures, wrapping_sub(nfail, 1));
             let mut k = wrapping_sub(nfail, 1);
@@ -593,10 +579,7 @@ pub fn contracts(
         let result_ty = product(inout b, in outputs);
         // the model monad
         let has_model = nfail > 0 || fuel;
-        let mut model = T {
-            a: 0,
-            n: 0
-        };
+        let mut model = T { a: 0, n: 0 };
         if nfail == 0 && fuel {
             model = global(inout b, in "Option");
         } else if nfail > 0 && !fuel {
@@ -668,10 +651,7 @@ pub fn contracts(
         let call = app_args(inout b, callee, in call_args);
         // the postcondition
         let none = empty();
-        let mut post = T {
-            a: 0,
-            n: 0
-        };
+        let mut post = T { a: 0, n: 0 };
         if !has_model {
             let mut values = empty();
             for index in 0..output_count {
