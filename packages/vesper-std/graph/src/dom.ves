@@ -59,69 +59,34 @@ pub fn dominators(in g: Graph, root: u32) -> Dominators {
     if count > 0 {
         // po[v] is v's postorder number: higher is closer to the root.
         let mut po = filled32(n, 0);
-        let mut i: u64 = 0;
-        loop {
-            if i >= count {
-                break;
-            }
+        for i in 0..count {
             let v = get32(in rpo.as_slice(), i, 0);
             po.try_set(widen_u64(v), wrapping_u32(wrapping_sub(wrapping_sub(count, 1), i)));
-            i = wrapping_add(i, 1);
         }
         idom.try_set(widen_u64(root), root);
         loop {
             let mut changed = false;
-            let mut k: u64 = 1;
-            loop {
-                if k >= count {
-                    break;
-                }
+            // Every node but the root (`rpo[0]`), in reverse postorder.
+            for k in 1..count {
                 let b = get32(in rpo.as_slice(), k, 0);
+                // Intersect the dominators of the predecessors processed so far.
                 let (lo, hi) = g.pred_range(b);
-                let mut e = lo;
                 let mut new_idom = unreached;
-                loop {
-                    if e >= hi {
-                        break;
-                    }
+                for e in lo..hi {
                     let p = g.pred_edge(e);
                     if get32(in idom.as_slice(), widen_u64(p), unreached) != unreached {
-                        if new_idom == unreached {
-                            new_idom = p;
+                        new_idom = if new_idom == unreached {
+                            p
                         } else {
-                            // intersect(p, new_idom)
-                            let mut f1 = p;
-                            let mut f2 = new_idom;
-                            loop {
-                                if f1 == f2 {
-                                    break;
-                                }
-                                loop {
-                                    if get32(in po.as_slice(), widen_u64(f1), 0)
-                                        >= get32(in po.as_slice(), widen_u64(f2), 0) {
-                                        break;
-                                    }
-                                    f1 = get32(in idom.as_slice(), widen_u64(f1), root);
-                                }
-                                loop {
-                                    if get32(in po.as_slice(), widen_u64(f2), 0)
-                                        >= get32(in po.as_slice(), widen_u64(f1), 0) {
-                                        break;
-                                    }
-                                    f2 = get32(in idom.as_slice(), widen_u64(f2), root);
-                                }
-                            }
-                            new_idom = f1;
-                        }
+                            intersect(in idom.as_slice(), in po.as_slice(), root, p, new_idom)
+                        };
                     }
-                    e = wrapping_add(e, 1);
                 }
                 let bk = widen_u64(b);
                 if get32(in idom.as_slice(), bk, unreached) != new_idom {
                     idom.try_set(bk, new_idom);
                     changed = true;
                 }
-                k = wrapping_add(k, 1);
             }
             if !changed {
                 break;
@@ -131,6 +96,30 @@ pub fn dominators(in g: Graph, root: u32) -> Dominators {
     Dominators {
         root: root,
         idom: idom
+    }
+}
+
+// The nearest common dominator of `a` and `b` in the partial tree `idom`:
+// walk the finger with the lower postorder number up until they meet.
+fn intersect(in idom: Slice[u32], in po: Slice[u32], root: u32, a: u32, b: u32) -> u32 {
+    let mut finger_a = a;
+    let mut finger_b = b;
+    loop {
+        if finger_a == finger_b {
+            break finger_a;
+        }
+        loop {
+            if get32(in po, widen_u64(finger_a), 0) >= get32(in po, widen_u64(finger_b), 0) {
+                break;
+            }
+            finger_a = get32(in idom, widen_u64(finger_a), root);
+        }
+        loop {
+            if get32(in po, widen_u64(finger_b), 0) >= get32(in po, widen_u64(finger_a), 0) {
+                break;
+            }
+            finger_b = get32(in idom, widen_u64(finger_b), root);
+        }
     }
 }
 

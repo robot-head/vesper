@@ -227,6 +227,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn unlink(path: *const c_char) -> i32;
         fn rmdir(path: *const c_char) -> i32;
         fn mkdir(path: *const c_char, mode: u32) -> i32;
+        fn chmod(path: *const c_char, mode: u32) -> i32;
+        fn fchmod(fd: i32, mode: u32) -> i32;
         fn getpid() -> i32;
         fn opendir(path: *const c_char) -> *mut c_void;
         fn readdir(dir: *mut c_void) -> *mut c_void;
@@ -330,6 +332,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("unlink", unlink as *const u8),
         ("rmdir", rmdir as *const u8),
         ("mkdir", mkdir as *const u8),
+        ("chmod", chmod as *const u8),
+        ("fchmod", fchmod as *const u8),
         ("getpid", getpid as *const u8),
         ("opendir", opendir as *const u8),
         ("readdir", readdir as *const u8),
@@ -563,6 +567,12 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn HeapFree(h_heap: *mut c_void, dw_flags: u32, lp_mem: *mut c_void) -> i32;
         fn RtlMoveMemory(dst: *mut c_void, src: *const c_void, len: usize);
         fn GetFileAttributesW(lp_file_name: *const u16) -> u32;
+        fn SetFileAttributesW(lp_file_name: *const u16, dw_file_attributes: u32) -> i32;
+        fn CopyFileW(
+            lp_existing_file_name: *const u16,
+            lp_new_file_name: *const u16,
+            b_fail_if_exists: i32,
+        ) -> i32;
         fn GetModuleFileNameW(h_module: *mut c_void, lp_filename: *mut u16, n_size: u32) -> u32;
         fn GetSystemDirectoryW(lp_buffer: *mut u16, u_size: u32) -> u32;
         fn GetWindowsDirectoryW(lp_buffer: *mut u16, u_size: u32) -> u32;
@@ -641,6 +651,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("HeapFree", HeapFree as *const u8),
         ("RtlMoveMemory", RtlMoveMemory as *const u8),
         ("GetFileAttributesW", GetFileAttributesW as *const u8),
+        ("SetFileAttributesW", SetFileAttributesW as *const u8),
+        ("CopyFileW", CopyFileW as *const u8),
         ("GetModuleFileNameW", GetModuleFileNameW as *const u8),
         ("GetSystemDirectoryW", GetSystemDirectoryW as *const u8),
         ("GetWindowsDirectoryW", GetWindowsDirectoryW as *const u8),

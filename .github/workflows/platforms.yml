@@ -111,6 +111,14 @@ jobs:
         run: aspect ci verify-platform-dispatch
       - if: ${{ hashFiles('.aspect/fixtures/tool-launcher.rs') != '' || hashFiles('.aspect/workflow-policy-test.axl') == '' }}
         uses: dtolnay/rust-toolchain@stable
+      # The GPT-2 reference fixtures (.aspect/lib/gpt2-reference.axl)
+      # pretokenize with ripgrep's PCRE2 engine; the runner image has no rg.
+      - name: Refresh the package index for ripgrep
+        if: ${{ hashFiles('.aspect/lib/gpt2-reference.axl') != '' }}
+        run: sudo apt-get update --quiet
+      - name: Install ripgrep for the GPT-2 reference fixtures
+        if: ${{ hashFiles('.aspect/lib/gpt2-reference.axl') != '' }}
+        run: sudo apt-get install --yes --quiet --no-install-recommends ripgrep
       - name: Check CI policy and workflow regressions
         if: ${{ hashFiles('.aspect/workflow-policy-test.axl') != '' }}
         run: aspect ci platform-tests

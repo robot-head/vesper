@@ -114,11 +114,13 @@ fn mode_append() -> u32 {
 // What `metadata` reports. `kind` is `kind_file()`, `kind_dir()`,
 // `kind_symlink()` or `kind_other()`; the modification time is
 // `mtime_s` whole seconds since the Unix epoch plus `mtime_ns`.
+// `mode` is 0: WASI 0.2 reports no permission bits.
 pub copy struct Metadata {
     pub size: u64,
     pub mtime_s: i64,
     pub mtime_ns: u32,
     pub kind: u32,
+    pub mode: u32,
 }
 
 pub fn kind_file() -> u32 {
@@ -352,6 +354,60 @@ pub fn create_dir(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
     check(StdFs::vstd_fs_create_dir(in path.as_bytes(), false, inout err), err);
 }
 
+// WASI has no directory mode: a plain directory.
+pub fn create_dir_mode(in path: Str, mode: u32) eff [Ffi[StdFs], Fail[IoError]] {
+    let _ = mode;
+    create_dir(in path);
+}
+
+// WASI 0.2 cannot set permission bits: `unsupported()`.
+pub fn set_permissions(in path: Str, mode: u32) eff [Ffi[StdFs], Fail[IoError]] {
+    let _ = path.len();
+    let _ = mode;
+    raise_kind(unsupported())
+}
+
+// Copy the file `from` to `to`, creating or truncating `to`, through a
+// 64 KiB buffer: the number of bytes copied. A source that is not a
+// regular file is an `invalid_input()` error.
+pub fn copy(in from: Str, in to: Str) -> u64 eff [Ffi[StdFs], Fail[IoError]] {
+    let m = metadata(in from);
+    if m.kind != kind_file() {
+        return raise_kind(invalid_input());
+    }
+    let mut err: u64 = 0;
+    let mut src = match StdFs::vstd_fs_open(in from.as_bytes(), mode_read(), inout err) {
+        Option::Some(f) => f,
+        Option::None => return raise_io(err),
+    };
+    let mut dst = match StdFs::vstd_fs_open(in to.as_bytes(), mode_truncate(), inout err) {
+        Option::Some(f) => f,
+        Option::None => {
+            StdFs::vstd_fs_close(src);
+            return raise_io(err);
+        },
+    };
+    let mut total: u64 = 0;
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    buf.resize(65536, 0);
+    loop {
+        let n = StdFs::vstd_fs_read(inout src, inout buf.as_slice_mut(), inout err);
+        if err != 0 || n == 0 {
+            break;
+        }
+        if StdFs::vstd_fs_write(inout dst, in buf[0..n], inout err) != 0 {
+            break;
+        }
+        total = wrapping_add(total, n);
+    }
+    StdFs::vstd_fs_close(dst);
+    StdFs::vstd_fs_close(src);
+    if err != 0 {
+        return raise_io(err);
+    }
+    total
+}
+
 // Create a directory and any missing parents; an existing directory is
 // fine.
 pub fn create_dir_all(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
@@ -377,6 +433,7 @@ fn meta_path(in path: Slice[u8], follow: bool) -> Metadata eff [Ffi[StdFs], Fail
         mtime_s: m.mtime_s,
         mtime_ns: m.mtime_ns,
         kind: m.kind,
+        mode: 0,
     }
 }
 

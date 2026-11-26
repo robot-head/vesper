@@ -13,7 +13,7 @@ const DRIVER: &str = r#"use @vesper-std/fs::{
     IoError, Metadata, read, read_path, read_string, write, append, create_new, replace, rename,
     remove_file, remove_dir, remove_dir_all, create_dir, create_dir_all, metadata,
     symlink_metadata, exists, kind_file, kind_dir, is_executable, canonicalize, write_stdout,
-    write_stderr
+    write_stderr, create_dir_mode, set_permissions, copy
 };
 use @vesper-std/fs::walk::{
     Entries, walk, list_dir, entry_count, entry_start, entry_end, entry_kind, entry_join
@@ -285,6 +285,68 @@ pub fn meta() -> u64 eff [Ffi[StdFs]] {
         return v => v,
         raise(e, _) => code(e),
     }
+}
+
+// A private directory (0o700), permission changes and a copy that keeps
+// the source's bits; the source is made writable again at the end so the
+// next run can rewrite it.
+pub fn permissions() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        if exists(in "@DIR@/priv") {
+            remove_dir(in "@DIR@/priv");
+        }
+        create_dir_mode(in "@DIR@/priv", 448);
+        let d = metadata(in "@DIR@/priv");
+        write(in "@DIR@/p.txt", in "permission bits".as_bytes());
+        set_permissions(in "@DIR@/p.txt", 416);
+        let a = metadata(in "@DIR@/p.txt");
+        let n = copy(in "@DIR@/p.txt", in "@DIR@/q.txt");
+        let b = metadata(in "@DIR@/q.txt");
+        let q = read(in "@DIR@/q.txt");
+        set_permissions(in "@DIR@/p.txt", 292);
+        let c = metadata(in "@DIR@/p.txt");
+        set_permissions(in "@DIR@/p.txt", 420);
+        let mut h = mix(widen_u64(d.kind), widen_u64(d.mode));
+        h = mix(mix(h, widen_u64(a.mode)), mix(n, widen_u64(b.mode)));
+        mix(mix(h, hash(in q.as_slice())), widen_u64(c.mode))
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    }
+}
+
+// A private file larger than the copy buffer: the copy has its bits
+// and all its bytes.
+pub fn copy_private() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        let data = pattern(70000);
+        write(in "@DIR@/s.bin", in data.as_slice());
+        set_permissions(in "@DIR@/s.bin", 384);
+        let n = copy(in "@DIR@/s.bin", in "@DIR@/t.bin");
+        let m = metadata(in "@DIR@/t.bin");
+        let t = read(in "@DIR@/t.bin");
+        mix(mix(n, widen_u64(m.mode)), hash(in t.as_slice()))
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    }
+}
+
+// Copying a directory or a missing file.
+pub fn copy_errors() -> u64 eff [Ffi[StdFs]] {
+    let a = handle Fail[IoError] in {
+        copy(in "@DIR@", in "@DIR@/x.txt")
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    };
+    let b = handle Fail[IoError] in {
+        copy(in "@DIR@/no-such-file", in "@DIR@/x.txt")
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    };
+    mix(a, b)
 }
 
 fn entries_hash(in e: Entries) -> u64 {
@@ -662,6 +724,49 @@ fn directories_rename_and_metadata() {
         agree(&checked, "meta", &MODES),
         mix(mix(mix(1234, 1), t.as_secs()), 0)
     );
+}
+
+#[test]
+fn permissions_and_copies_match_std() {
+    let dir = Temp::new("std-fs");
+    let checked = check_driver(&source(&dir));
+    let text = b"permission bits";
+    let n = text.len() as u64;
+    // On Windows the bits are the read-only attribute: 0o444 or 0o666.
+    let (dir_mode, rw, ro) = if cfg!(unix) {
+        (0o700, 0o640, 0o444)
+    } else {
+        (0o666, 0o666, 0o444)
+    };
+    let kind_dir = 2;
+    let mut h = mix(kind_dir, dir_mode);
+    h = mix(mix(h, rw), mix(n, rw));
+    let want = mix(mix(h, hash(text)), ro);
+    assert_eq!(agree(&checked, "permissions", &MODES), want);
+    let private = if cfg!(unix) { 0o600 } else { 0o666 };
+    assert_eq!(
+        agree(&checked, "copy_private", &MODES),
+        mix(mix(70000, private), hash(&pattern(70000)))
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        // What std does for the same requests.
+        let rust = dir.path().join("rust");
+        fs::DirBuilder::new().mode(0o700).create(&rust).unwrap();
+        let mode = |p: &Path| u64::from(fs::metadata(p).unwrap().permissions().mode() & 0o7777);
+        assert_eq!(mode(&rust), dir_mode);
+        let (p, q) = (dir.path().join("rp.txt"), dir.path().join("rq.txt"));
+        fs::write(&p, text).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(fs::copy(&p, &q).unwrap(), n);
+        assert_eq!(mode(&q), rw);
+        let want = mix(
+            code(&fs::copy(dir.path(), dir.path().join("x.txt")).unwrap_err()),
+            code(&fs::copy(dir.path().join("no-such-file"), dir.path().join("x.txt")).unwrap_err()),
+        );
+        assert_eq!(agree(&checked, "copy_errors", &MODES), want);
+    }
 }
 
 #[test]
