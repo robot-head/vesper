@@ -8,10 +8,7 @@ test {
     }
 
     fn fold_pair(a: u64, b: u64) -> u64 eff [inner: Region, Fail[u64]] {
-        let words = WordPair {
-            left: a,
-            right: b
-        };
+        let words = WordPair { left: a, right: b };
         let pair = inner.box(words);
         if b == 0 {
             Fail::raise(a)
