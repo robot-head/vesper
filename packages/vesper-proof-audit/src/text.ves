@@ -2,7 +2,7 @@
 // carry: `io::Error`, `ExitStatus` and `FromUtf8Error` as `Display`
 // writes them, and the UTF-8 handling of `String::from_utf8`,
 // `from_utf8_lossy` and `str::trim`.
-use @vesper-std/fs::IoError;
+use @vesper-std/fs::{IoError, program_not_found};
 use @vesper-std/process::ExitStatus;
 use @vesper-std/env::{os, os_linux as linux_os, os_windows as windows_os};
 use self::strs::{
@@ -85,6 +85,10 @@ fn os_text(code: u32) -> Str {
 // The description of an error kind with no OS code (`io::ErrorKind`'s
 // `Display`), as @vesper-std/fs numbers the kinds.
 fn kind_text(kind: u32) -> Str {
+    // A Windows program that `CreateProcessW` would not find.
+    if kind == program_not_found() {
+        return "program not found";
+    }
     match kind {
         1 => "entity not found",
         2 => "permission denied",
