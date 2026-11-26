@@ -134,4 +134,13 @@ mod tests {
             fn f(o: Option[u64]) -> u64 { o.or(Option::None).unwrap_or(0) }";
         assert_eq!(methods(source), ["is_some", "is_none", "or"]);
     }
+
+    #[test]
+    fn a_module_without_core_checks_its_calls() {
+        let source = "fn pick(a: Option[u64], b: Option[u64]) -> u64 {
+                if a.is_none() && b.is_some() { b.unwrap_or(1) } else { a.or(b).unwrap_or(0) }
+            }";
+        let checked = crate::check::check(&crate::parser::parse(source).module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    }
 }
