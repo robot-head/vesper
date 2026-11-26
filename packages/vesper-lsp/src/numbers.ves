@@ -531,8 +531,8 @@ enum Pow10: _ {
     Max = 308,
     IndexMask = 511
 }
-const U64_MAX_TENTH: u64 = 1844674407370955161;
-const U64_MAX_LAST_DIGIT: u64 = 5;
+pub const U64_MAX_TENTH: u64 = 1844674407370955161;
+pub const U64_MAX_LAST_DIGIT: u64 = 5;
 const I32_MAX_TENTH: i64 = 214748364;
 const I32_MAX_LAST_DIGIT: i64 = 7;
 const I32_MAX: i64 = 2147483647;
