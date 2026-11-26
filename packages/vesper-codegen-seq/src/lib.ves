@@ -1088,9 +1088,7 @@ fn op_name(in a: ChunkSeq[u8], o: OpInfo, inout out: ChunkSeq[u8]) {
         str_name(in a, o, inout out);
     } else if head_is(in a, o, "Hoisted") {
         // `access.checked(false).name()`
-        if contains(in a, "Wide { ") {
-            wide_name(in a, inout out);
-        } else if inner_is(in a, o, "Get") {
+        if inner_is(in a, o, "Get") {
             put(inout out, "get");
         } else if inner_is(in a, o, "Set") {
             put(inout out, "set");
