@@ -1105,3 +1105,60 @@ pub fn template_skeleton_words(
         _ => vec![0],
     }
 }
+
+/// `template::render` of the rule's match as words (see
+/// `template::render_words`), or `[0]` when the rule refuses or does not
+/// match. Test hook for tests/self_host_sugar.rs.
+#[doc(hidden)]
+pub fn template_render_words(
+    pattern: &str,
+    invocation: &str,
+    tail: Option<&str>,
+    template: &str,
+    mark: &str,
+    max_bytes: usize,
+    work: usize,
+) -> Vec<u64> {
+    let mut left = work;
+    match matcher::match_rule(pattern, invocation, tail, &mut left) {
+        Ok(Some(captures)) => template::render_words(template, &captures, mark, max_bytes),
+        _ => vec![0],
+    }
+}
+
+/// `template::render` then `scope::lower` of the rule's match as words:
+/// `[1, items len, items, ..]` with the rendering after the items (see
+/// `template::render_words`), `[2, len, message]` for a refusal of either,
+/// or `[0]` when the rule refuses or does not match. `call` is the
+/// invocation's span in `source`. Test hook for tests/self_host_sugar.rs.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments, reason = "mirrors the expansion call")]
+pub fn template_scope_words(
+    pattern: &str,
+    invocation: &str,
+    tail: Option<&str>,
+    template: &str,
+    mark: &str,
+    source: &str,
+    call: Span,
+    max_bytes: usize,
+    work: usize,
+) -> Vec<u64> {
+    let mut left = work;
+    let Ok(Some(captures)) = matcher::match_rule(pattern, invocation, tail, &mut left) else {
+        return vec![0];
+    };
+    let mut r = match template::render(template, &captures, mark, max_bytes) {
+        Ok(r) => r,
+        Err(m) => return template::refusal_words(&m),
+    };
+    match scope::lower(&mut r, &captures, source, call, mark, max_bytes) {
+        Err(m) => template::refusal_words(&m),
+        Ok(items) => {
+            let mut out = vec![1, items.len() as u64];
+            out.extend(items.bytes().map(u64::from));
+            template::push_rendered(&mut out, &r);
+            out
+        }
+    }
+}

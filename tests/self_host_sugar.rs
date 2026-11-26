@@ -6,7 +6,12 @@
 //! sugar test suites, and on a fuzzed corpus. Part 4b-1: its template
 //! skeleton (template.ves, `template::render` before the flow analysis,
 //! through the `template_skeleton_words` hook) on the rules of the same
-//! suites and on fuzzed templates.
+//! suites and on fuzzed templates. Part 4b-4: the rendered template
+//! (flow.ves, the flow analysis of `template::render`, through
+//! `template_render_words`) on the same corpora. Part 4b-5: exit-aware
+//! scope captures (scope.ves, `scope::lower`, through
+//! `template_scope_words`) on scope rules over a corpus of callers and a
+//! fuzzed corpus.
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use vesper::{check, native, packages};
@@ -22,6 +27,8 @@ struct Sugar {
     matcher: native::WordFunction,
     batch: native::WordFunction,
     skeleton: native::WordFunction,
+    render: native::WordFunction,
+    scope: native::WordFunction,
 }
 
 fn sugar() -> &'static Sugar {
@@ -49,6 +56,8 @@ fn sugar() -> &'static Sugar {
             matcher: compile("match_rule_words"),
             batch: compile("match_rule_batch"),
             skeleton: compile("template_skeleton_words"),
+            render: compile("template_render_words"),
+            scope: compile("template_scope_words"),
         }
     })
 }
@@ -619,7 +628,14 @@ struct Render {
 
 const MARK: &str = "__sugar7_3_";
 
-fn vesper_skeleton(r: &Render) -> Vec<u64> {
+/// Which template stage a differential compares.
+#[derive(Clone, Copy)]
+enum Stage {
+    Skeleton,
+    Render,
+}
+
+fn vesper_template(stage: Stage, r: &Render) -> Vec<u64> {
     let mut text = String::new();
     let number = |text: &mut String, n: usize| {
         for k in 0..4 {
@@ -645,15 +661,23 @@ fn vesper_skeleton(r: &Render) -> Vec<u64> {
         .word(r.max as u64)
         .word(1 << 20);
     // SAFETY: as `vesper_match`.
-    unsafe { call.seq(JIT_RUNTIME, |w| sugar().skeleton.call(w).unwrap()) }
+    let f = match stage {
+        Stage::Skeleton => &sugar().skeleton,
+        Stage::Render => &sugar().render,
+    };
+    unsafe { call.seq(JIT_RUNTIME, |w| f.call(w).unwrap()) }
 }
 
 /// The cases that match, and the outcomes (skeleton or refusal) seen.
-fn check_renders(renders: &[Render]) -> (usize, usize) {
+fn check_renders(stage: Stage, renders: &[Render]) -> (usize, usize) {
     let mut failures = vec![];
     let (mut matched, mut ok) = (0, 0);
     for r in renders {
-        let rust = sugar_expand::template_skeleton_words(
+        let rust_words = match stage {
+            Stage::Skeleton => sugar_expand::template_skeleton_words,
+            Stage::Render => sugar_expand::template_render_words,
+        };
+        let rust = rust_words(
             &r.pattern,
             &r.invocation,
             r.tail.as_deref(),
@@ -662,7 +686,7 @@ fn check_renders(renders: &[Render]) -> (usize, usize) {
             r.max,
             1 << 20,
         );
-        let vesper = vesper_skeleton(r);
+        let vesper = vesper_template(stage, r);
         matched += usize::from(rust[0] != 0);
         ok += usize::from(rust[0] == 1);
         if rust != vesper {
@@ -861,8 +885,7 @@ fn max_bytes() -> [usize; 4] {
     [1 << 20, 4096, 24, 7]
 }
 
-#[test]
-fn skeleton_matches_on_the_template_examples() {
+fn example_renders() -> Vec<Render> {
     let mut renders = vec![];
     for &(pattern, invocation, template) in TEMPLATES {
         for max in max_bytes() {
@@ -877,7 +900,13 @@ fn skeleton_matches_on_the_template_examples() {
             }
         }
     }
-    let (matched, ok) = check_renders(&renders);
+    renders
+}
+
+#[test]
+fn skeleton_matches_on_the_template_examples() {
+    let renders = example_renders();
+    let (matched, ok) = check_renders(Stage::Skeleton, &renders);
     assert!(
         matched * 2 > renders.len() && ok > 40,
         "{matched} matched, {ok} ok"
@@ -885,11 +914,32 @@ fn skeleton_matches_on_the_template_examples() {
 }
 
 #[test]
+fn render_matches_on_the_template_examples() {
+    let renders = example_renders();
+    let (matched, ok) = check_renders(Stage::Render, &renders);
+    assert!(
+        matched * 2 > renders.len() && ok > 30,
+        "{matched} matched, {ok} ok"
+    );
+}
+
+#[test]
 fn skeleton_matches_on_the_sugar_test_suites() {
     let renders = corpus_renders();
-    let (matched, ok) = check_renders(&renders);
+    let (matched, ok) = check_renders(Stage::Skeleton, &renders);
     assert!(
         ok > 50,
+        "{} renders, {matched} matched, {ok} ok",
+        renders.len()
+    );
+}
+
+#[test]
+fn render_matches_on_the_sugar_test_suites() {
+    let renders = corpus_renders();
+    let (matched, ok) = check_renders(Stage::Render, &renders);
+    assert!(
+        ok > 40,
         "{} renders, {matched} matched, {ok} ok",
         renders.len()
     );
@@ -900,13 +950,12 @@ const TEMPLATE_FRAGMENTS: &[&str] = &[
     "(", ")", "{", "}", ";", ",", "let", "t", "=", "in", "inout", "..", "`", "\"s\"", "1",
 ];
 
-#[test]
-fn skeleton_matches_on_the_fuzzed_corpus() {
+fn fuzzed_renders(seed: u64) -> Vec<Render> {
     let rounds: usize = std::env::var("VESPER_SUGAR_FUZZ")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(4000);
-    let mut rng = Rng(0x5eed_4b01);
+    let mut rng = Rng(seed);
     let mut renders = vec![];
     for _ in 0..rounds {
         let (p, i, t) = TEMPLATES[rng.below(TEMPLATES.len())];
@@ -938,5 +987,318 @@ fn skeleton_matches_on_the_fuzzed_corpus() {
             max: max_bytes()[rng.below(4)],
         });
     }
-    check_renders(&renders);
+    renders
+}
+
+#[test]
+fn skeleton_matches_on_the_fuzzed_corpus() {
+    check_renders(Stage::Skeleton, &fuzzed_renders(0x5eed_4b01));
+}
+
+#[test]
+fn render_matches_on_the_fuzzed_corpus() {
+    check_renders(Stage::Render, &fuzzed_renders(0x5eed_4b04));
+}
+
+// ---------------------------------------------------------- scope capture
+
+/// Scope rules: the supported protocol and its refusals (unbound, resumed
+/// twice, resumed before cleanup, two scopes).
+const SCOPE_RULES: &[(&str, &str)] = &[
+    (
+        "defer $cleanup:block $..rest:scope",
+        "{\n let exit = $..rest;\n $cleanup;\n exit.resume()\n }",
+    ),
+    ("holding $body:scope", "{let result=$body;result.resume()}"),
+    (
+        "defer $cleanup:block $..rest:scope",
+        "{ $cleanup; $..rest }",
+    ),
+    (
+        "defer $cleanup:block $..rest:scope",
+        "{ let exit = $..rest; exit.resume(); exit.resume() }",
+    ),
+    (
+        "defer $cleanup:block $..rest:scope",
+        "{ let exit = $..rest; exit.resume(); $cleanup }",
+    ),
+    (
+        "defer $cleanup:block $..rest:scope",
+        "{ let exit = $..rest; let again = $..rest; $cleanup; exit.resume() }",
+    ),
+    (
+        "defer $cleanup:block $..rest:scope",
+        "{ let exit = $..rest; $cleanup; { exit.resume() } }",
+    ),
+];
+
+/// Callers of the scope rules: exits of every kind, loops, closures,
+/// handlers, regions, Fail rows and Option `?`.
+const SCOPE_PROGRAMS: &[&str] = &[
+    "fn early(inout n:i64, flag: bool)->i64 {\n defer { n = wrapping_add(n,1); }\n if flag { return 3; } 4\n}",
+    "fn failed(inout n:i64)->i64 eff [Fail[RuntimeError]] {\n defer { n = wrapping_add(n,1); }\n Fail::raise(RuntimeError::DivisionByZero)\n}",
+    "fn main()->i64 {\n let mut n:i64=0;\n let v = loop {\n defer { n = wrapping_add(n,1); }\n if n < 4 {continue;} break 5;\n };\n v\n}",
+    "fn main()->i64 {\n let mut n:i64=0;\n loop {\n defer { n = wrapping_add(n,1); }\n if n < 4 {continue;} break;\n }\n n\n}",
+    "fn f()->i64 { holding { 41 } }",
+    "fn f()->i64 { holding { if g() { return 1; } 2 } }",
+    "fn f(xs: Vec[i64])->i64 {\n defer { log(); }\n for x in xs { if x > 3 { return x; } }\n 0\n}",
+    "fn f()->i64 {\n defer { log(); }\n loop { if g() { return 7; } break; }\n 0\n}",
+    "fn f()->Option[i64] {\n defer { log(); }\n let x = g()?;\n Option::Some(x)\n}",
+    "fn f()->Option[i64] eff [Fail[RuntimeError]] {\n defer {}\n let x = Some(1)?;\n Some(x)\n}",
+    "fn f()->Option[(i64, bool)] {\n defer { log(); }\n let x = g()?.h()?;\n Option::Some((x, true))\n}",
+    "fn f()->i64 eff [Fail[RuntimeError], Fail[ParseError]] {\n defer { log(); }\n if g() { return 1; }\n parse()\n}",
+    "fn f()->i64 eff [Fail[RuntimeError], Fail[RuntimeError]] {\n defer { log(); }\n 3\n}",
+    "effect Stop {fn stop()->Never;}\nfn f()->i64 eff [Stop]{\n defer {}\n Stop::stop()\n}",
+    "linear effect Ask { fn ask() -> i64; }\nfn f()->i64 eff [Ask] {\n defer { log(); }\n Ask::ask()\n}",
+    "fn f()->i64 eff [ConstTime, DetFloat] {\n defer { log(); }\n 3\n}",
+    "fn f()->i64 {\n handle stop:Fail[i64] in {\n defer {}\n stop.raise(3)\n } with {return v=>v,raise(e,_)=>e,}\n}",
+    "fn f()->i64 {\n handle Fail[i64] in {\n defer { log(); }\n if g() { return 2; }\n 1\n } with {return v=>v,raise(e,_)=>e,}\n}",
+    "fn f()->i64 {\n defer { log(); }\n let k = |x: i64| -> i64 { return x; };\n k(2)\n}",
+    "fn f()->i64 {\n let k = || -> i64 eff [Fail[RuntimeError]] {\n defer { log(); }\n if g() { return 1; }\n 2\n };\n 3\n}",
+    "fn f()->i64 {\n let k = || {\n defer { log(); }\n 2\n };\n 3\n}",
+    "fn f()->i64 {\n defer { log(); }\n handle Fail[i64] in { if g() { return 1; } 2 } with {return v=>v,raise(e,_)=>e,}\n}",
+    "fn f()->i64 {\n defer { log(); }\n handle Fail[i64] in { 2 } with {return v=>{ return v; },raise(e,_)=>e,}\n}",
+    "fn f()->i64 {\n defer { log(); }\n region r {\n if g() { return 1; }\n }\n 2\n}",
+    "fn f()->i64 {\n loop {\n defer { log(); }\n if a() { break; }\n if b() { continue; }\n if c() { return 4; }\n }\n 0\n}",
+    "fn f()->i64 {\n let v = loop {\n defer { log(); }\n if a() { break 1; }\n if c() { return 4; }\n break 2;\n };\n v\n}",
+    "fn f()->i64 {\n for i in 0..3 {\n defer { log(); }\n if i == 1 { continue; }\n loop { if b() { return 3; } break; }\n }\n 0\n}",
+    "fn f()->fn() -> i64 {\n defer { log(); }\n for i in 0..3 { return g; }\n g\n}",
+    "fn f()->dyn Show {\n defer { log(); }\n loop { return g(); }\n}",
+    "impl Thing {\n fn m(self)->i64 {\n defer { log(); }\n if g() { return 1; }\n 2\n }\n}",
+    "fn f[e]()->i64 eff [e] {\n defer { log(); }\n 2\n}",
+    "fn f()->i64 {\n defer { log(); }\n let x = 1;\n defer { other(); }\n x\n}",
+    "fn f()->i64 {\n defer { log(); }\n match g() { 1 => return 2, _ => 3 }\n}",
+    "fn f()->Option[i64] {\n defer { log(); }\n let k = || -> Option[i64] { let y = g()?; Option::Some(y) };\n k()\n}",
+    "fn f()->Option[i64] {\n defer { log(); }\n handle Fail[i64] in { let y = g()?; Option::Some(y) } with {return v=>v,raise(e,_)=>Option::None,}\n}",
+    "fn f()->i64 {\n defer { log(); }\n return;\n}",
+    "fn f()->i64 {\n defer { log() }\n while_true { 3 }\n}",
+];
+
+struct ScopeCase {
+    render: Render,
+    source: String,
+    call: std::ops::Range<usize>,
+}
+
+fn vesper_scope(c: &ScopeCase) -> Vec<u64> {
+    let r = &c.render;
+    let mut text = String::new();
+    let number = |text: &mut String, n: usize| {
+        for k in 0..4 {
+            text.push(char::from((n >> (7 * k)) as u8 & 127));
+        }
+    };
+    number(&mut text, r.pattern.len());
+    number(&mut text, r.invocation.len());
+    number(&mut text, r.tail.as_ref().map_or(0, |t| t.len() + 1));
+    number(&mut text, r.template.len());
+    number(&mut text, MARK.len());
+    number(&mut text, c.source.len());
+    number(&mut text, c.call.start);
+    number(&mut text, c.call.end);
+    for part in [
+        r.pattern.as_str(),
+        &r.invocation,
+        r.tail.as_deref().unwrap_or(""),
+        &r.template,
+        MARK,
+        &c.source,
+    ] {
+        text.push_str(part);
+    }
+    let call = vesper_port_abi::HostCall::new()
+        .str(&text)
+        .word(r.max as u64)
+        .word(1 << 20);
+    // SAFETY: as `vesper_match`.
+    unsafe { call.seq(JIT_RUNTIME, |w| sugar().scope.call(w).unwrap()) }
+}
+
+/// The source `program` under each scope rule's declaration, with a case
+/// per statement or expression sugar use and rule.
+fn scope_cases(program: &str, cases: &mut Vec<ScopeCase>) {
+    for (k, (pattern, template)) in SCOPE_RULES.iter().enumerate() {
+        let sort = if pattern.starts_with("holding") {
+            "expr"
+        } else {
+            "stmt"
+        };
+        let name = pattern.split(' ').next().unwrap();
+        let source =
+            format!("sugar {name}:{sort} {{ rule ({pattern}) => {{{template}}} }}\n{program}");
+        let Ok(parse) = parser::parse_surface_cst(&source, Default::default(), true) else {
+            continue;
+        };
+        for node in parse.syntax().descendants() {
+            if !matches!(node.kind(), parser::SUGAR_STMT | parser::SUGAR_EXPR) {
+                continue;
+            }
+            let s = significant_start(&node);
+            let e = usize::from(node.text_range().end());
+            // `block_end`: the enclosing block's closing brace.
+            let mut depth = 0usize;
+            let mut end = None;
+            for (i, b) in source.bytes().enumerate().skip(e) {
+                if b == b'{' {
+                    depth += 1;
+                } else if b == b'}' {
+                    if depth == 0 {
+                        end = Some(i);
+                        break;
+                    }
+                    depth -= 1;
+                }
+            }
+            let tail = pattern
+                .contains("$..")
+                .then(|| end.map(|end| source[e..end].to_owned()))
+                .flatten();
+            if pattern.contains("$..") && tail.is_none() {
+                continue;
+            }
+            cases.push(ScopeCase {
+                render: Render {
+                    pattern: (*pattern).into(),
+                    invocation: source[s..e].to_owned(),
+                    tail,
+                    template: (*template).into(),
+                    max: match (k + cases.len()) % 4 {
+                        0 => 200,
+                        1 => 420,
+                        _ => 1 << 20,
+                    },
+                },
+                source: source.clone(),
+                call: s..e,
+            });
+        }
+    }
+}
+
+/// The cases that match, and those that lower.
+fn check_scopes(cases: &[ScopeCase]) -> (usize, usize) {
+    let mut failures = vec![];
+    let (mut matched, mut ok) = (0, 0);
+    let mut outcomes = std::collections::BTreeMap::<String, usize>::new();
+    for c in cases {
+        let r = &c.render;
+        let rust = sugar_expand::template_scope_words(
+            &r.pattern,
+            &r.invocation,
+            r.tail.as_deref(),
+            &r.template,
+            MARK,
+            &c.source,
+            c.call.clone(),
+            r.max,
+            1 << 20,
+        );
+        let vesper = vesper_scope(c);
+        let outcome = match rust[0] {
+            0 => "no match".to_owned(),
+            1 if rust[1] != 0 => "lowered with a return effect".to_owned(),
+            1 => "lowered".to_owned(),
+            _ => rust[2..].iter().map(|&b| char::from(b as u8)).collect(),
+        };
+        *outcomes.entry(outcome).or_default() += 1;
+        matched += usize::from(rust[0] != 0);
+        ok += usize::from(rust[0] == 1);
+        if rust != vesper {
+            let text = |w: &[u64]| -> String {
+                w.iter()
+                    .map(|&b| if b < 128 { char::from(b as u8) } else { '?' })
+                    .collect()
+            };
+            failures.push(format!(
+                "source {:?} call {:?} template {:?} max {}:\n  rust   {:?}\n  vesper {:?}",
+                c.source,
+                c.call,
+                r.template,
+                r.max,
+                text(&rust),
+                text(&vesper)
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} scope cases differ:\n{}",
+        failures.len(),
+        cases.len(),
+        failures[..failures.len().min(12)].join("\n")
+    );
+    println!("{outcomes:#?}");
+    (matched, ok)
+}
+
+#[test]
+fn scope_matches_on_the_scope_examples() {
+    let mut cases = vec![];
+    for program in SCOPE_PROGRAMS {
+        scope_cases(program, &mut cases);
+    }
+    let (matched, ok) = check_scopes(&cases);
+    assert!(
+        matched > 60 && ok > 20,
+        "{} cases, {matched} matched, {ok} ok",
+        cases.len()
+    );
+}
+
+/// Fragments the scope fuzzer splices into the callers.
+const SCOPE_FRAGMENTS: &[&str] = &[
+    "return 1;",
+    "return;",
+    "break;",
+    "break 2;",
+    "continue;",
+    "g()?;",
+    "x?",
+    "loop {",
+    "}",
+    "{",
+    "for i in xs {",
+    "|| {",
+    "|x: i64| -> i64 {",
+    "handle Fail[i64] in {",
+    "} with {return v=>v,raise(e,_)=>e,}",
+    "region r {",
+    "if a() {",
+    "defer { log(); }",
+    ";",
+    "holding { 1 }",
+    "eff [Fail[RuntimeError]]",
+    "-> Option[i64]",
+    "match x { _ => return 3 }",
+];
+
+#[test]
+fn scope_matches_on_the_fuzzed_corpus() {
+    let rounds: usize = std::env::var("VESPER_SUGAR_FUZZ")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4000)
+        / 8;
+    let mut rng = Rng(0x5eed_4b05);
+    let mut cases = vec![];
+    for _ in 0..rounds {
+        let base = SCOPE_PROGRAMS[rng.below(SCOPE_PROGRAMS.len())];
+        let mut parts: Vec<String> = base.split(' ').map(str::to_owned).collect();
+        for _ in 0..=rng.below(3) {
+            let at = rng.below(parts.len() + 1);
+            let f = SCOPE_FRAGMENTS[rng.below(SCOPE_FRAGMENTS.len())].to_owned();
+            match rng.below(3) {
+                0 if !parts.is_empty() => {
+                    parts.remove(at.min(parts.len() - 1));
+                }
+                1 if !parts.is_empty() => {
+                    let k = at.min(parts.len() - 1);
+                    parts[k] = f;
+                }
+                _ => parts.insert(at, f),
+            }
+        }
+        scope_cases(&parts.join(" "), &mut cases);
+    }
+    check_scopes(&cases);
 }

@@ -96,6 +96,7 @@ use @vesper/front::diag::{
 use @vesper/front::parse::{
     hard_depth,
     head_word,
+    parse_surface_tokens,
     parse_template_tokens,
     parse_tokens,
     sugar_operator_at
@@ -4549,6 +4550,17 @@ pub fn lower_source(in source: Str) -> L {
 // tagged literal the tuple of its payload block, a pattern phrase a
 // wildcard, and a sugar operator a binary expression.
 pub fn lower_template_source(in source: Str) -> L {
+    lower_profile_source(in source, true)
+}
+
+// The same for the surface profile itself (`parser::parse_expansion_scopes`
+// without its expression macro validation): phrases lower as above except
+// that an expression or statement phrase is the empty tuple.
+pub fn lower_surface_source(in source: Str) -> L {
+    lower_profile_source(in source, false)
+}
+
+fn lower_profile_source(in source: Str, template: bool) -> L {
     let b = source.as_bytes();
     let mut a = ast_new();
     let s = syms_new(inout a);
@@ -4565,7 +4577,11 @@ pub fn lower_template_source(in source: Str) -> L {
     if !oversized {
         text.push_str(in source);
     }
-    let p = parse_template_tokens(in b, t, d);
+    let p = if template {
+        parse_template_tokens(in b, t, d)
+    } else {
+        parse_surface_tokens(in b, t, d, max_diagnostics(), hard_depth(), true)
+    };
     let mut l = L {
         p: p,
         text: text,

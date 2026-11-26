@@ -36,6 +36,7 @@ use @vesper-std/intern::{
 use self::lower::{
     L,
     lower_source,
+    lower_surface_source,
     lower_template_source
 };
 use self::dump::{
@@ -1230,6 +1231,12 @@ pub fn ast_dump(in source: Str) -> ChunkSeq[u64] {
 // flow analysis reads.
 pub fn ast_template_dump(in source: Str) -> ChunkSeq[u64] {
     let l = lower_template_source(in source);
+    dump_words(in l)
+}
+
+// `ast_template_dump` for the surface profile (`lower_surface_source`).
+pub fn ast_surface_dump(in source: Str) -> ChunkSeq[u64] {
+    let l = lower_surface_source(in source);
     dump_words(in l)
 }
 

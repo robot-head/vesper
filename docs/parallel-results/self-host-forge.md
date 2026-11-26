@@ -369,3 +369,36 @@ itself (part 4b-4).
 | `self_host_front_v2` surface tests with `compare_template` | the sugar corpus, 20,000 fuzzed sources locally, and depth-limit cases, both bare and wrapped as `flow::render` wraps them | 0 differences |
 | `self_host_ast` `template_scopes_*` | 899 template sources, every repository `.ves` file, and 60,000 fuzzed sources locally (CI 3,000) | 0 differences |
 | core AST and front end differentials | after the changes | pass |
+
+## Part 4b-4 and 4b-5: template flow analysis and scope captures
+
+- **4b-4, flow analysis** (`packages/vesper-sugar/src/flow.ves`): ports
+  `template/flow.rs` and `Rendered::hole`. It parses the skeleton as
+  `flow::render` does: first with the core parser (`@vesper/ast`
+  `lower_source`), then with the template-scopes profile, then unwrapped.
+  It renames the template's binders to fresh names, plans single
+  evaluation of captured expressions, and checks each place capture's
+  pass. `emit` then substitutes the captured text and records the holes,
+  origins and places. The Rust test hook is
+  `sugar_expand::template_render_words`.
+- **4b-5, scope captures** (`packages/vesper-sugar/src/scope.ves`): ports
+  `scope.rs`. A scope capture checks the `let exit = ..; cleanup;
+  exit.resume()` protocol and finds the body's exits in the core AST. It
+  reads the caller's effect rows and result type from the surface-profile
+  AST of the whole source (`@vesper/ast` `lower_surface_source`, new). It
+  then wraps the body in the exit loop and handlers, dispatches at the
+  resume, and remaps holes, origins and places through the edits. The
+  Rust test hook is `sugar_expand::template_scope_words`.
+  - Gap: the surface profile does not yet run Rust's expression macro
+    validation (`macro_source::validate_surface`, part 6). A source with
+    an invalid expression macro is refused by Rust's scope capture but
+    not by the Vesper one.
+
+| Test | Cases | Result |
+|---|---|---|
+| `self_host_sugar` `render_matches_on_the_template_examples` | the 48 skeleton templates × 4 byte limits × tail | 0 differences |
+| `self_host_sugar` `render_matches_on_the_sugar_test_suites` | the 732 suite renders | 0 differences |
+| `self_host_sugar` `render_matches_on_the_fuzzed_corpus` | 4,000 fuzzed templates | 0 differences |
+| `self_host_sugar` `scope_matches_on_the_scope_examples` | 7 scope rules over 37 callers (315 cases: lowered, lowered with a return effect, and 15 kinds of refusal, under 3 byte budgets) | 0 differences |
+| `self_host_sugar` `scope_matches_on_the_fuzzed_corpus` | 500 edited callers (2,123 cases, 1,117 matching) | 0 differences |
+| `self_host_ast` `template_scopes_*` | now also the surface-profile AST of every case | 0 differences |
