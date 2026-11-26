@@ -1085,6 +1085,13 @@ fn overflow_argument(atoms: &[Piece<'_>], open: usize) -> Option<usize> {
     }
     (j > delimiter + 1 && atoms.get(j + 1)?.kind == K::RParen).then_some(width)
 }
+/// Where `block_argument` is relative to a closure's parameters.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Params {
+    Outside,
+    Inside,
+    After,
+}
 /// A call's last argument that is a block or a closure with a block body,
 /// after arguments with no braces, comments or other closures in them: the
 /// block's `{` and the width of the arguments up to and including it.
@@ -1094,8 +1101,7 @@ fn block_argument(atoms: &[Piece<'_>], open: usize) -> Option<(usize, usize)> {
     let mut depth = 0usize;
     let mut previous: Option<K> = None;
     let mut unary = false;
-    // Outside a closure's parameters, inside them, or after them.
-    let mut params = 0u8;
+    let mut params = Params::Outside;
     loop {
         let atom = atoms.get(i)?;
         let kind = atom.kind;
@@ -1107,29 +1113,32 @@ fn block_argument(atoms: &[Piece<'_>], open: usize) -> Option<(usize, usize)> {
         // The first token of an argument.
         let starts = depth == 0 && previous.is_none_or(|p| p == K::Comma);
         if kind == K::LBrace {
-            if depth != 0 || atom.tagged || !(params == 2 || starts && params == 0) {
+            if depth != 0
+                || atom.tagged
+                || !(params == Params::After || starts && params == Params::Outside)
+            {
                 return None;
             }
             return width
                 .checked_add(1 + usize::from(previous.is_some()))
                 .map(|w| (i, w));
         }
-        if params == 2 && depth == 0 && kind == K::Comma {
+        if params == Params::After && depth == 0 && kind == K::Comma {
             return None;
         }
         // Spaced as `sequence` spaces a closure's parameters: they hug their
         // pipes.
         let space = match previous {
             None => false,
-            Some(K::Pipe) if params == 1 => kind == K::Pipe,
-            Some(K::Comma) if params == 1 => true,
-            Some(_) if params == 1 && kind == K::Pipe => false,
+            Some(K::Pipe) if params == Params::Inside => kind == K::Pipe,
+            Some(K::Comma) if params == Params::Inside => true,
+            Some(_) if params == Params::Inside && kind == K::Pipe => false,
             Some(p) => spaced(p, *atom, unary),
         };
         if kind == K::Pipe {
             params = match params {
-                0 if starts => 1,
-                1 => 2,
+                Params::Outside if starts => Params::Inside,
+                Params::Inside => Params::After,
                 _ => return None,
             };
         }
