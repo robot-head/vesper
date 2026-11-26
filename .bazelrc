@@ -69,5 +69,14 @@ common:ci_tests --local_resources=memory=18432
 test:ci_tests --default_test_resources=memory=4096
 test:ci_tests --default_test_resources=cpu=1
 
+# --config=ci_opt: optimized test binaries for the corpus differentials
+# ("Self-host ..." checks). Nearly all of their time is the compiler compiling
+# the corpus, which unoptimized code did about 3.4 times slower (the Cargo
+# swap suite: 55 minutes unoptimized, 14 optimized). Debug assertions and
+# overflow checks stay on, as in Cargo's `port-compiler` profile.
+common:ci_opt --compilation_mode=opt
+common:ci_opt --@rules_rust//rust/settings:extra_rustc_flag=-Cdebug-assertions=on
+common:ci_opt --@rules_rust//rust/settings:extra_rustc_flag=-Coverflow-checks=on
+
 # Personal settings, such as the BuildBuddy API key.
 try-import %workspace%/user.bazelrc

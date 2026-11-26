@@ -68,3 +68,10 @@ run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate crmath 20"
 [[abba]]
 workload = "rigid-solve"
 run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate rigid-solve 5"
+
+# The particle world's substeps (World::advance's substep loop,
+# vesper/src/world.ves): a 1024-sphere pile with friction, restitution and
+# joint chains, 16 more substep runs after 2 ticks.
+[[abba]]
+workload = "world-substeps"
+run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate world-substeps 5"

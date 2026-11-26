@@ -1019,3 +1019,68 @@ fn operator_level(def: &Definition) -> Option<u8> {
     let lexed = lexer::sugar_lex_with_limits(op, Default::default()).ok()?;
     parser::sugar_operator(&lexed.tokens, 0).map(|(level, _)| level)
 }
+
+/// `matcher::match_rule` as words, the encoding of `@vesper/sugar`'s
+/// `match_rule_words` (packages/vesper-sugar/src/matcher.ves
+/// `match_rule_encoded`): `[2, work, len, message bytes]` for `Err`,
+/// `[0, work]` for no match, else `[1, work, count]` and per capture in
+/// name order its name and sort (each a length and bytes), pass mode
+/// (0 none, 1 in, 2 inout, 3 out, 4 sink), values (count; start, end,
+/// from_tail, indices as a length and words) and extents (count; indices,
+/// then the iteration count). Test hook for tests/self_host_sugar.rs;
+/// nothing else calls it.
+#[doc(hidden)]
+pub fn match_rule_words(
+    pattern: &str,
+    invocation: &str,
+    tail: Option<&str>,
+    work: usize,
+) -> Vec<u64> {
+    fn text(out: &mut Vec<u64>, s: &str) {
+        out.push(s.len() as u64);
+        out.extend(s.bytes().map(u64::from));
+    }
+    fn indices(out: &mut Vec<u64>, v: &[usize]) {
+        out.push(v.len() as u64);
+        out.extend(v.iter().map(|&i| i as u64));
+    }
+    let mut left = work;
+    let result = matcher::match_rule(pattern, invocation, tail, &mut left);
+    let mut out = Vec::new();
+    match result {
+        Err(message) => {
+            out.extend([2, left as u64]);
+            text(&mut out, &message);
+        }
+        Ok(None) => out.extend([0, left as u64]),
+        Ok(Some(captures)) => {
+            out.extend([1, left as u64, captures.len() as u64]);
+            for (name, cap) in &captures {
+                text(&mut out, name);
+                text(&mut out, &cap.sort);
+                out.push(match cap.pass.as_deref() {
+                    None => 0,
+                    Some("in") => 1,
+                    Some("inout") => 2,
+                    Some("out") => 3,
+                    Some(_) => 4,
+                });
+                out.push(cap.values.len() as u64);
+                for v in &cap.values {
+                    out.extend([
+                        v.span.start as u64,
+                        v.span.end as u64,
+                        u64::from(v.from_tail),
+                    ]);
+                    indices(&mut out, &v.indices);
+                }
+                out.push(cap.extents.len() as u64);
+                for (key, count) in &cap.extents {
+                    indices(&mut out, key);
+                    out.push(*count as u64);
+                }
+            }
+        }
+    }
+    out
+}
