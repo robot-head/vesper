@@ -42,6 +42,10 @@ pub const T_FN: u8 = 12;
 // A handler clause's continuation (`Value::Continuation`): its `conts`
 // index, with its serial in the high half.
 pub const T_CONT: u8 = 13;
+// A `ChunkSeq` (`Value::Seq`): its `seqs` index; a `Slice` view: its
+// `slices` index.
+pub const T_SEQ: u8 = 14;
+pub const T_SLICE: u8 = 15;
 pub const T_UNDEF: u8 = 255;
 
 // Unary codes; a conversion is U_CONV + family * 16 + target kind.
@@ -142,6 +146,20 @@ copy struct Wr {
     code: u64,
 }
 
+// A sequence: its elements `seq_items[at..at + len]`, with room for `cap`.
+copy struct Sq {
+    at: u64,
+    len: u64,
+    cap: u64,
+}
+
+// A slice: elements `start..start + len` of sequence `seq`.
+copy struct Sl {
+    seq: u64,
+    start: u64,
+    len: u64,
+}
+
 // A captured continuation (`Continuation`): the frames from its handler
 // up, and the arena entries above the handler's levels, in the `k_*`
 // stores at `*_start`; the levels when it was captured; the handler's
@@ -227,6 +245,12 @@ pub struct M {
     k_hnames: ChunkSeq[u32],
     k_hvals: ChunkSeq[Val],
     k_serial: u64,
+    // Sequences, their elements and slice views.
+    seqs: ChunkSeq[Sq],
+    seq_items: ChunkSeq[Val],
+    slices: ChunkSeq[Sl],
+    some_sym: u32,
+    none_sym: u32,
     fail_sym: u32,
     raise_sym: u32,
     overflow_sym: u32,
@@ -312,6 +336,11 @@ pub fn machine_new(sink ctx: Ctx, sink program: Program, fuel: u64) -> M {
         k_hnames: ChunkSeq::new[u32](),
         k_hvals: ChunkSeq::new[Val](),
         k_serial: 0,
+        seqs: ChunkSeq::new[Sq](),
+        seq_items: ChunkSeq::new[Val](),
+        slices: ChunkSeq::new[Sl](),
+        some_sym: 0,
+        none_sym: 0,
         fail_sym: 0,
         raise_sym: 0,
         overflow_sym: 0,
@@ -1376,8 +1405,6 @@ fn type_ok(in machine: M, ty: u32, depth: u64) -> bool {
             || name == known.f64_
             || name == known.i128_
             || name == known.u128_
-            || name == known.chunk_seq
-            || name == known.slice
             || name == known.tiled_seq
             || name == known.box_
             || name == known.vec
@@ -1560,6 +1587,8 @@ pub fn load(inout machine: M, entry_index: u64) {
     machine.ok_sym = machine.ctx.names.intern(in "Ok".as_bytes());
     machine.err_sym = machine.ctx.names.intern(in "Err".as_bytes());
     machine.zero_sym = machine.ctx.names.intern(in "0".as_bytes());
+    machine.some_sym = machine.ctx.names.intern(in "Some".as_bytes());
+    machine.none_sym = machine.ctx.names.intern(in "None".as_bytes());
     machine.dot_sym = machine.ctx.names.intern(in ".".as_bytes());
     machine.fail_sym = machine.ctx.names.intern(in "Fail".as_bytes());
     machine.raise_sym = machine.ctx.names.intern(in "raise".as_bytes());
@@ -1818,7 +1847,14 @@ pub fn scan(inout machine: M) {
             for inst_index in 0..block.ic {
                 let inst_id = add(block.i0, inst_index);
                 let inst = machine.program.inst(inst_id);
+                // A read of the continuation may name its type with the state's
+                // type resolved.
+                let reads_cont = cont_name != 0
+                    && inst.op == Op::Read
+                    && n32(machine.program.op(inst.a)) == wrapping_sub(cont_name, 1)
+                    && machine.program.op(inc(inst.a)) == 0;
                 if !(cont_type != 0 && inst.ty == wrapping_sub(cont_type, 1))
+                    && !reads_cont
                     && !type_ok(in machine, inst.ty, 0)
                 {
                     decline(inout machine, "a value type in ", fn_info.name);
@@ -1920,7 +1956,12 @@ pub fn scan(inout machine: M) {
                         scan_handle(inout machine, handle_site, inout work);
                     }
                 } else if op == Op::Seq {
-                    decline(inout machine, "a sequence operation in ", fn_info.name);
+                    let label = machine.program.pool_row(machine.program.op(operand_at)).label;
+                    let code = seq_code(in machine, label);
+                    let ok = machine.aux.try_set(inst_id, code);
+                    if code == 0 {
+                        decline(inout machine, "a sequence operation in ", fn_info.name);
+                    }
                 } else {
                     decline(inout machine, "a vector, tiled or Box operation in ", fn_info.name);
                 }
@@ -2022,6 +2063,17 @@ fn display(in machine: M, value: Val, inout out: ChunkSeq[u8], depth: u64) {
         put(inout out, ">");
     } else if value.tag == T_CONT {
         put(inout out, "<one-shot continuation>");
+    } else if value.tag == T_SEQ {
+        put(inout out, "<ChunkSeq len=");
+        push_decimal(inout out, sq_at(in machine, value.payload).len);
+        put(inout out, ">");
+    } else if value.tag == T_SLICE {
+        let view = sl_at(in machine, value.payload);
+        put(inout out, "<Slice ");
+        push_decimal(inout out, view.start);
+        put(inout out, "..");
+        push_decimal(inout out, add(view.start, view.len));
+        put(inout out, ">");
     } else if value.tag == T_TUPLE {
         let aggregate = agg(in machine, value);
         out.push(40);
@@ -2770,7 +2822,13 @@ fn invoke(inout machine: M, func_index: u64) {
                     found = true;
                 }
             }
-            if !found {
+            let value = val_at(in machine.arg_vals, i);
+            if !found && value.tag == T_SLICE {
+                // A slice view shares its sequence.
+                let cell = machine.cells.len();
+                machine.cells.push(value);
+                slots.push(En { name: param_row.name, cell: cell, seg_start: 0, seg_count: 0 });
+            } else if !found {
                 fail(inout machine, "inout argument requires place");
                 return;
             }
@@ -2996,6 +3054,21 @@ fn step(inout machine: M) {
             result = kid(in machine, add(aggregate.kid_start, j));
         } else {
             fail(inout machine, "IR projection requires data");
+            return;
+        }
+    } else if op == Op::Seq {
+        let n = collect_args(inout machine, inc(operand_at));
+        if machine.failed {
+            return;
+        }
+        let mut oob = false;
+        result = seq_op(inout machine, u64_at(in machine.aux, inst_id), inout oob);
+        if machine.failed || machine.declined {
+            return;
+        }
+        if oob {
+            suspend(inout machine, inst.dest, inst.ty);
+            raise(inout machine, P_INDEX);
             return;
         }
     } else if op == Op::Index {
@@ -3292,4 +3365,534 @@ fn drop_last(inout machine: M) {
     machine.k_hnames.truncate(k.hcap_start);
     machine.k_hvals.truncate(k.hcap_start);
     machine.conts.truncate(wrapping_sub(count, 1));
+}
+
+// ----- sequences -----------------------------------------------------------------
+
+// `SeqOp`s the machine runs, from the pool row's `Debug` text (`seq_code`).
+const SQ_NEW: u64 = 1;
+const SQ_WITH_CAPACITY: u64 = 2;
+const SQ_LEN: u64 = 3;
+const SQ_SLICE_LEN: u64 = 4;
+const SQ_PUSH: u64 = 5;
+const SQ_POP: u64 = 6;
+const SQ_GET: u64 = 7;
+const SQ_SET: u64 = 8;
+const SQ_TRY_GET: u64 = 9;
+const SQ_LAST: u64 = 10;
+const SQ_TRY_SET: u64 = 11;
+const SQ_CLEAR: u64 = 12;
+const SQ_TRUNCATE: u64 = 13;
+const SQ_RESERVE: u64 = 14;
+const SQ_EXTEND: u64 = 15;
+const SQ_FINISH: u64 = 16;
+const SQ_AS_SLICE: u64 = 17;
+const SQ_SUB_SLICE: u64 = 18;
+const SQ_FILL: u64 = 19;
+const SQ_COPY_FROM: u64 = 20;
+const SQ_TRY_COPY_FROM: u64 = 21;
+const SQ_EXTEND_REVERSED: u64 = 22;
+// A `SeqOp::Hoisted` access adds this to its checked access's code.
+const SQ_HOISTED: u64 = 1000;
+// A fixed-width byte access (`SeqOp::Wide`): this plus bytes * 8, then 4
+// when big-endian, 2 for a write and 1 for the total form.
+const SQ_WIDE: u64 = 200;
+const WIDE_BIG: u64 = 4;
+const WIDE_WRITE: u64 = 2;
+const WIDE_TOTAL: u64 = 1;
+const BITS_PER_BYTE: u64 = 8;
+const BYTE_MASK: u64 = 255;
+// The largest `with_capacity` the machine takes: Rust's `try_reserve` of a
+// larger one may fail.
+const SEQ_CAPACITY_LIMIT: u64 = 16777216;
+// A sequence's first allocation.
+const SEQ_MIN_CAPACITY: u64 = 4;
+
+// The code of `SeqOp` Debug text `sym`, or 0.
+fn seq_code(in machine: M, sym: u32) -> u64 {
+    if spells(in machine, sym, "New") {
+        SQ_NEW
+    } else if spells(in machine, sym, "WithCapacity") {
+        SQ_WITH_CAPACITY
+    } else if spells(in machine, sym, "Len") {
+        SQ_LEN
+    } else if spells(in machine, sym, "SliceLen") {
+        SQ_SLICE_LEN
+    } else if spells(in machine, sym, "Push") {
+        SQ_PUSH
+    } else if spells(in machine, sym, "Pop") {
+        SQ_POP
+    } else if spells(in machine, sym, "Get") || spells(in machine, sym, "SliceGet") {
+        SQ_GET
+    } else if spells(in machine, sym, "Set") || spells(in machine, sym, "SliceSet") {
+        SQ_SET
+    } else if spells(in machine, sym, "TryGet") {
+        SQ_TRY_GET
+    } else if spells(in machine, sym, "Last") {
+        SQ_LAST
+    } else if spells(in machine, sym, "TrySet") {
+        SQ_TRY_SET
+    } else if spells(in machine, sym, "Clear") {
+        SQ_CLEAR
+    } else if spells(in machine, sym, "Truncate") {
+        SQ_TRUNCATE
+    } else if spells(in machine, sym, "Reserve") {
+        SQ_RESERVE
+    } else if spells(in machine, sym, "Extend") {
+        SQ_EXTEND
+    } else if spells(in machine, sym, "Finish") {
+        SQ_FINISH
+    } else if spells(in machine, sym, "AsSlice") {
+        SQ_AS_SLICE
+    } else if spells(in machine, sym, "SubSlice") {
+        SQ_SUB_SLICE
+    } else if spells(in machine, sym, "Fill") {
+        SQ_FILL
+    } else if spells(in machine, sym, "CopyFrom { total: false }") {
+        SQ_COPY_FROM
+    } else if spells(in machine, sym, "CopyFrom { total: true }") {
+        SQ_TRY_COPY_FROM
+    } else if spells(in machine, sym, "ExtendReversed") {
+        SQ_EXTEND_REVERSED
+    } else if spells(in machine, sym, "Hoisted(Get)") {
+        add(SQ_HOISTED, SQ_GET)
+    } else if spells(in machine, sym, "Hoisted(Set)") {
+        add(SQ_HOISTED, SQ_SET)
+    } else if spells(in machine, sym, "Hoisted(TryGet)") {
+        add(SQ_HOISTED, SQ_TRY_GET)
+    } else if spells(in machine, sym, "Hoisted(TrySet)") {
+        add(SQ_HOISTED, SQ_TRY_SET)
+    } else {
+        wide_code(in machine, sym)
+    }
+}
+
+fn sq_at(in machine: M, id: u64) -> Sq {
+    match machine.seqs.try_get(id) {
+        Option::Some(found) => found,
+        Option::None => Sq { at: 0, len: 0, cap: 0 },
+    }
+}
+
+fn sl_at(in machine: M, id: u64) -> Sl {
+    match machine.slices.try_get(id) {
+        Option::Some(found) => found,
+        Option::None => Sl { seq: 0, start: 0, len: 0 },
+    }
+}
+
+fn new_seq(inout machine: M) -> Val {
+    let id = machine.seqs.len();
+    machine.seqs.push(Sq { at: machine.seq_items.len(), len: 0, cap: 0 });
+    Val { tag: T_SEQ, payload: id }
+}
+
+fn new_slice(inout machine: M, view: Sl) -> Val {
+    let id = machine.slices.len();
+    machine.slices.push(view);
+    Val { tag: T_SLICE, payload: id }
+}
+
+// Element `i` of a view.
+fn item(in machine: M, view: Sl, i: u64) -> Val {
+    val_at(in machine.seq_items, add(add(sq_at(in machine, view.seq).at, view.start), i))
+}
+
+fn set_item(inout machine: M, view: Sl, i: u64, value: Val) {
+    let at = add(add(sq_at(in machine, view.seq).at, view.start), i);
+    let ok = machine.seq_items.try_set(at, value);
+}
+
+// Room for `extra` more elements of sequence `id`, moving it to the end of
+// `seq_items` when it is full.
+fn grow(inout machine: M, id: u64, extra: u64) {
+    let sq = sq_at(in machine, id);
+    let need = add(sq.len, extra);
+    if need <= sq.cap {
+        return;
+    }
+    let mut cap = wrapping_mul(sq.cap, 2);
+    if cap < need {
+        cap = need;
+    }
+    if cap < SEQ_MIN_CAPACITY {
+        cap = SEQ_MIN_CAPACITY;
+    }
+    let at = machine.seq_items.len();
+    for i in 0..sq.len {
+        machine.seq_items.push(val_at(in machine.seq_items, add(sq.at, i)));
+    }
+    machine.seq_items.resize(add(at, cap), undef());
+    let ok = machine.seqs.try_set(id, Sq { at: at, len: sq.len, cap: cap });
+}
+
+fn push_item(inout machine: M, id: u64, value: Val) {
+    grow(inout machine, id, 1);
+    let sq = sq_at(in machine, id);
+    let ok = machine.seq_items.try_set(add(sq.at, sq.len), value);
+    let set = machine.seqs.try_set(id, Sq { at: sq.at, len: inc(sq.len), cap: sq.cap });
+}
+
+fn set_len(inout machine: M, id: u64, len: u64) {
+    let sq = sq_at(in machine, id);
+    let ok = machine.seqs.try_set(id, Sq { at: sq.at, len: len, cap: sq.cap });
+}
+
+// `index`: an unsigned integer, or a non-negative `i64`.
+fn seq_index(inout machine: M, value: Val) -> u64 {
+    if value.tag == K_U8 || value.tag == K_U16 || value.tag == K_U32 || value.tag == K_U64 {
+        return value.payload;
+    }
+    if value.tag == K_I64 {
+        if wrapping_i64(value.payload) < 0 {
+            fail(inout machine, "sequence index is negative");
+        }
+        return value.payload;
+    }
+    fail(inout machine, "sequence index must be an integer");
+    0
+}
+
+// The sequence and interval of a sequence or slice value (`view`).
+fn seq_view(inout machine: M, value: Val) -> Sl {
+    if value.tag == T_SEQ {
+        return Sl { seq: value.payload, start: 0, len: sq_at(in machine, value.payload).len };
+    }
+    if value.tag == T_SLICE {
+        return sl_at(in machine, value.payload);
+    }
+    fail(inout machine, "expected a ChunkSeq or Slice value");
+    Sl { seq: 0, start: 0, len: 0 }
+}
+
+// The sequence of a `ChunkSeq` value (`seq`).
+fn seq_id(inout machine: M, value: Val) -> u64 {
+    if value.tag == T_SEQ {
+        return value.payload;
+    }
+    fail(inout machine, "expected a ChunkSeq value");
+    0
+}
+
+// `Option::Some(value)` when `has`, else `Option::None`.
+fn option_val(inout machine: M, has: bool, value: Val) -> Val {
+    let kid_start = machine.kids.len();
+    if has {
+        push_kid(inout machine, machine.zero_sym, value);
+        return make(inout machine, T_DATA, machine.some_sym, kid_start);
+    }
+    make(inout machine, T_DATA, machine.none_sym, kid_start)
+}
+
+fn u64_val(n: u64) -> Val {
+    Val { tag: K_U64, payload: n }
+}
+
+// `seq_op` of operation `code` on `arg_vals`: its value, or `oob` for the
+// `IndexOutOfBounds` the caller raises.
+fn seq_op(inout machine: M, code: u64, inout oob: bool) -> Val {
+    let arg0 = val_at(in machine.arg_vals, 0);
+    let arg1 = val_at(in machine.arg_vals, 1);
+    let arg2 = val_at(in machine.arg_vals, 2);
+    if code > SQ_HOISTED {
+        // A hoisted access is its checked access under a guard that held.
+        let value = seq_op(inout machine, wrapping_sub(code, SQ_HOISTED), inout oob);
+        if oob {
+            oob = false;
+            decline(inout machine, "a hoisted access out of bounds", NONE32);
+        }
+        return value;
+    }
+    if code > SQ_WIDE {
+        return wide_op(inout machine, wrapping_sub(code, SQ_WIDE), inout oob);
+    }
+    if code == SQ_NEW {
+        return new_seq(inout machine);
+    }
+    if code == SQ_WITH_CAPACITY {
+        let cap = seq_index(inout machine, arg0);
+        if cap > SEQ_CAPACITY_LIMIT {
+            decline(inout machine, "a large ChunkSeq capacity", NONE32);
+        }
+        return new_seq(inout machine);
+    }
+    if code == SQ_LEN {
+        let id = seq_id(inout machine, arg0);
+        return u64_val(sq_at(in machine, id).len);
+    }
+    if code == SQ_SLICE_LEN {
+        return u64_val(seq_view(inout machine, arg0).len);
+    }
+    if code == SQ_PUSH {
+        let id = seq_id(inout machine, arg0);
+        if !machine.failed {
+            push_item(inout machine, id, arg1);
+        }
+        return unit();
+    }
+    if code == SQ_POP {
+        let id = seq_id(inout machine, arg0);
+        let sq = sq_at(in machine, id);
+        if machine.failed || sq.len == 0 {
+            return option_val(inout machine, false, unit());
+        }
+        let value = val_at(in machine.seq_items, add(sq.at, wrapping_sub(sq.len, 1)));
+        set_len(inout machine, id, wrapping_sub(sq.len, 1));
+        return option_val(inout machine, true, value);
+    }
+    if code == SQ_GET || code == SQ_SET || code == SQ_TRY_GET || code == SQ_TRY_SET {
+        let view = seq_view(inout machine, arg0);
+        let i = seq_index(inout machine, arg1);
+        if machine.failed {
+            return unit();
+        }
+        let inside = i < view.len;
+        if code == SQ_TRY_GET {
+            let value = if inside {
+                item(in machine, view, i)
+            } else {
+                unit()
+            };
+            return option_val(inout machine, inside, value);
+        }
+        if code == SQ_TRY_SET {
+            if inside {
+                set_item(inout machine, view, i, arg2);
+            }
+            return bool_val(inside);
+        }
+        if !inside {
+            oob = true;
+            return unit();
+        }
+        if code == SQ_GET {
+            return item(in machine, view, i);
+        }
+        set_item(inout machine, view, i, arg2);
+        return unit();
+    }
+    if code == SQ_LAST {
+        let view = seq_view(inout machine, arg0);
+        if view.len == 0 {
+            return option_val(inout machine, false, unit());
+        }
+        let value = item(in machine, view, wrapping_sub(view.len, 1));
+        return option_val(inout machine, true, value);
+    }
+    if code == SQ_CLEAR {
+        let id = seq_id(inout machine, arg0);
+        if !machine.failed {
+            set_len(inout machine, id, 0);
+        }
+        return unit();
+    }
+    if code == SQ_TRUNCATE {
+        let n = seq_index(inout machine, arg1);
+        let id = seq_id(inout machine, arg0);
+        if !machine.failed && n < sq_at(in machine, id).len {
+            set_len(inout machine, id, n);
+        }
+        return unit();
+    }
+    if code == SQ_RESERVE {
+        let n = seq_index(inout machine, arg1);
+        let id = seq_id(inout machine, arg0);
+        return unit();
+    }
+    if code == SQ_EXTEND || code == SQ_EXTEND_REVERSED {
+        let view = seq_view(inout machine, arg1);
+        let id = seq_id(inout machine, arg0);
+        if machine.failed {
+            return unit();
+        }
+        // Copy out first: the source may be a view of the same sequence.
+        let mut items: ChunkSeq[Val] = ChunkSeq::new[Val]();
+        for i in 0..view.len {
+            let at = if code == SQ_EXTEND {
+                i
+            } else {
+                wrapping_sub(wrapping_sub(view.len, 1), i)
+            };
+            items.push(item(in machine, view, at));
+        }
+        grow(inout machine, id, items.len());
+        for i in 0..items.len() {
+            push_item(inout machine, id, val_at(in items, i));
+        }
+        return unit();
+    }
+    if code == SQ_FINISH {
+        let id = seq_id(inout machine, arg0);
+        if !machine.failed && sq_at(in machine, id).len != 0 {
+            oob = true;
+        }
+        return unit();
+    }
+    if code == SQ_AS_SLICE {
+        let view = seq_view(inout machine, arg0);
+        return new_slice(inout machine, view);
+    }
+    if code == SQ_SUB_SLICE {
+        if arg0.tag == T_STR {
+            decline(inout machine, "a string slice", NONE32);
+            return unit();
+        }
+        let view = seq_view(inout machine, arg0);
+        let lo = seq_index(inout machine, arg1);
+        let hi = seq_index(inout machine, arg2);
+        if machine.failed {
+            return unit();
+        }
+        if lo <= hi && hi <= view.len {
+            return new_slice(
+                inout machine,
+                Sl { seq: view.seq, start: add(view.start, lo), len: wrapping_sub(hi, lo) }
+            );
+        }
+        fail(inout machine, "ChunkSeq fault: slice interval ");
+        push_decimal(inout machine.message, lo);
+        put(inout machine.message, "..");
+        push_decimal(inout machine.message, hi);
+        put(inout machine.message, " is out of bounds of length ");
+        push_decimal(inout machine.message, view.len);
+        return unit();
+    }
+    if code == SQ_FILL {
+        let view = seq_view(inout machine, arg0);
+        for i in 0..view.len {
+            set_item(inout machine, view, i, arg1);
+        }
+        return unit();
+    }
+    if code == SQ_COPY_FROM || code == SQ_TRY_COPY_FROM {
+        let total = code == SQ_TRY_COPY_FROM;
+        let view = seq_view(inout machine, arg0);
+        let at = seq_index(inout machine, arg1);
+        let src = seq_view(inout machine, arg2);
+        if machine.failed {
+            return unit();
+        }
+        if !(at <= view.len && src.len <= wrapping_sub(view.len, at)) {
+            if total {
+                return bool_val(false);
+            }
+            oob = true;
+            return unit();
+        }
+        let mut items: ChunkSeq[Val] = ChunkSeq::new[Val]();
+        for i in 0..src.len {
+            items.push(item(in machine, src, i));
+        }
+        for i in 0..items.len() {
+            set_item(inout machine, view, add(at, i), val_at(in items, i));
+        }
+        if total {
+            return bool_val(true);
+        }
+        return unit();
+    }
+    decline(inout machine, "a sequence operation", NONE32);
+    unit()
+}
+
+fn put_flag(inout out: ChunkSeq[u8], in field: Str, on: bool) {
+    put(inout out, field);
+    if on {
+        put(inout out, "true");
+    } else {
+        put(inout out, "false");
+    }
+}
+
+// The code of a `Wide(Wide { bytes, big, write, total })` Debug text, or 0.
+fn wide_code(in machine: M, sym: u32) -> u64 {
+    if !has_prefix(in machine, sym, "Wide(Wide { bytes: ") {
+        return 0;
+    }
+    for flags in 0..8 {
+        let mut bytes: u64 = 2;
+        loop {
+            if bytes > 8 {
+                break;
+            }
+            let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            put(inout text, "Wide(Wide { bytes: ");
+            push_decimal(inout text, bytes);
+            put_flag(inout text, ", big: ", flags & WIDE_BIG != 0);
+            put_flag(inout text, ", write: ", flags & WIDE_WRITE != 0);
+            put_flag(inout text, ", total: ", flags & WIDE_TOTAL != 0);
+            put(inout text, " })");
+            if machine.ctx.names.spells(sym, in text.as_slice()) {
+                return add(add(SQ_WIDE, wrapping_mul(bytes, BITS_PER_BYTE)), flags);
+            }
+            bytes = wrapping_mul(bytes, 2);
+        }
+    }
+    0
+}
+
+// `wide_op` of `form` (bytes * 8 plus the flags) on `arg_vals`.
+fn wide_op(inout machine: M, form: u64, inout oob: bool) -> Val {
+    let n = form / BITS_PER_BYTE;
+    let big = form & WIDE_BIG != 0;
+    let write = form & WIDE_WRITE != 0;
+    let total = form & WIDE_TOTAL != 0;
+    let view = seq_view(inout machine, val_at(in machine.arg_vals, 0));
+    let at = seq_index(inout machine, val_at(in machine.arg_vals, 1));
+    if machine.failed {
+        return unit();
+    }
+    let inside = at <= view.len && n <= wrapping_sub(view.len, at);
+    if write {
+        if inside {
+            let value = seq_index(inout machine, val_at(in machine.arg_vals, 2));
+            if machine.failed {
+                return unit();
+            }
+            for k in 0..n {
+                let byte_index = if big {
+                    wrapping_sub(wrapping_sub(n, 1), k)
+                } else {
+                    k
+                };
+                let shift_by = wrapping_u32(wrapping_mul(byte_index, BITS_PER_BYTE));
+                let byte = wrapping_shr_u64(value, shift_by) & BYTE_MASK;
+                set_item(inout machine, view, add(at, k), Val { tag: K_U8, payload: byte });
+            }
+        }
+        if total {
+            return bool_val(inside);
+        }
+        if !inside {
+            oob = true;
+        }
+        return unit();
+    }
+    let mut value: u64 = 0;
+    if inside {
+        for k in 0..n {
+            let item_index = if big {
+                add(at, k)
+            } else {
+                add(at, wrapping_sub(wrapping_sub(n, 1), k))
+            };
+            let byte = seq_index(inout machine, item(in machine, view, item_index));
+            value = wrapping_mul(value, inc(BYTE_MASK)) | (byte & BYTE_MASK);
+        }
+    }
+    let kind = if n == 2 {
+        K_U16
+    } else if n == 4 {
+        K_U32
+    } else {
+        K_U64
+    };
+    let read = Val { tag: kind, payload: value };
+    if total {
+        return option_val(inout machine, inside, read);
+    }
+    if !inside {
+        oob = true;
+    }
+    read
 }
