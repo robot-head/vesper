@@ -55,98 +55,105 @@ const NONE: u64 = 18446744073709551615;
 
 // ----- Names -------------------------------------------------------------------
 
-pub fn build_names(inout c: Cx) {
-    for i in 0..c.nfns {
-        let id = fw(in c, i, F_ID);
-        put_at(inout c.by_id, id, wrapping_add(fw(in c, i, F_KEY), 1));
-        put_at(inout c.defined, id, 1);
+pub fn build_names(inout ctx: Cx) {
+    for i in 0..ctx.fn_count {
+        let id = fw(in ctx, i, F_ID);
+        put_at(inout ctx.by_id, id, wrapping_add(fw(in ctx, i, F_KEY), 1));
+        put_at(inout ctx.defined, id, 1);
     }
-    for i in 0..c.nfns {
-        let ca = fw(in c, i, F_CALLEES);
-        for k in 0..fw(in c, i, wrapping_add(F_CALLEES, 1)) {
-            let id = pw(in c, wrapping_add(ca, wrapping_mul(k, 2)));
-            if g(in c.by_id, id) == 0 {
+    for i in 0..ctx.fn_count {
+        let callees_at = fw(in ctx, i, F_CALLEES);
+        for k in 0..fw(in ctx, i, wrapping_add(F_CALLEES, 1)) {
+            let id = pw(in ctx, wrapping_add(callees_at, wrapping_mul(k, 2)));
+            if g(in ctx.by_id, id) == 0 {
                 put_at(
-                    inout c.by_id,
+                    inout ctx.by_id,
                     id,
-                    wrapping_add(pw(in c, wrapping_add(ca, wrapping_add(wrapping_mul(k, 2), 1))), 1)
+                    wrapping_add(
+                        pw(in ctx, wrapping_add(callees_at, wrapping_add(wrapping_mul(k, 2), 1))),
+                        1
+                    )
                 );
             }
         }
     }
-    for id in 0..c.by_id.len() {
-        let s = g(in c.by_id, id);
-        if s != 0 {
-            put_at(inout c.by_name, wrapping_sub(s, 1), wrapping_add(id, 1));
+    for id in 0..ctx.by_id.len() {
+        let entry = g(in ctx.by_id, id);
+        if entry != 0 {
+            put_at(inout ctx.by_name, wrapping_sub(entry, 1), wrapping_add(id, 1));
         }
     }
-    for i in 0..c.nfns {
-        let sym = fw(in c, i, F_SYMBOL);
-        if g(in c.by_name, sym) == 0 {
-            put_at(inout c.by_name, sym, wrapping_add(fw(in c, i, F_ID), 1));
+    for i in 0..ctx.fn_count {
+        let sym = fw(in ctx, i, F_SYMBOL);
+        if g(in ctx.by_name, sym) == 0 {
+            put_at(inout ctx.by_name, sym, wrapping_add(fw(in ctx, i, F_ID), 1));
         }
-        put_at(inout c.by_key, fw(in c, i, F_KEY), wrapping_add(i, 1));
+        put_at(inout ctx.by_key, fw(in ctx, i, F_KEY), wrapping_add(i, 1));
     }
 }
 
-fn by_key(in c: Cx, key: u64) -> u64 {
-    let x = g(in c.by_key, key);
-    if x == 0 { NONE } else { wrapping_sub(x, 1) }
+fn by_key(in ctx: Cx, key: u64) -> u64 {
+    let entry = g(in ctx.by_key, key);
+    if entry == 0 {
+        NONE
+    } else {
+        wrapping_sub(entry, 1)
+    }
 }
 
 // `Names::source`: `u0:N` of a known func id -> its name.
-fn names_source(in c: Cx, name: u64) -> u64 {
-    if !starts(in c.nm, name, "u0:") {
+fn names_source(in ctx: Cx, name: u64) -> u64 {
+    if !starts(in ctx.names, name, "u0:") {
         return name;
     }
-    let t = wrapping_u32(name);
-    let n = c.nm.size(t);
+    let name_id = wrapping_u32(name);
+    let len = ctx.names.size(name_id);
     let mut i: u64 = 3;
-    if i < n && c.nm.byte(t, i) == 43 {
+    if i < len && ctx.names.byte(name_id, i) == 43 {
         i = 4;
     }
-    if i >= n {
+    if i >= len {
         return name;
     }
-    let mut v: u64 = 0;
+    let mut func_id: u64 = 0;
     loop {
-        if i >= n {
+        if i >= len {
             break;
         }
-        let d = widen_u64(c.nm.byte(t, i));
-        if d < 48 || d > 57 {
+        let digit = widen_u64(ctx.names.byte(name_id, i));
+        if digit < 48 || digit > 57 {
             return name;
         }
-        v = wrapping_add(wrapping_mul(v, 10), wrapping_sub(d, 48));
-        if v > 4294967295 {
+        func_id = wrapping_add(wrapping_mul(func_id, 10), wrapping_sub(digit, 48));
+        if func_id > 4294967295 {
             return name;
         }
         i = wrapping_add(i, 1);
     }
-    let s = g(in c.by_id, v);
+    let s = g(in ctx.by_id, func_id);
     if s == 0 { name } else { wrapping_sub(s, 1) }
 }
 
 // `Names::user`: `u0:<id>` of a name, or NONE.
-fn names_user(inout c: Cx, name: u64) -> u64 {
-    let id = g(in c.by_name, name);
+fn names_user(inout ctx: Cx, name: u64) -> u64 {
+    let id = g(in ctx.by_name, name);
     if id == 0 {
         return NONE;
     }
-    let at = c.r.tx.len();
-    put(inout c.r.tx, "u0:");
-    putn(inout c.r.tx, wrapping_sub(id, 1));
-    let s = c.nm.intern(in c.r.tx[at..c.r.tx.len()]);
-    c.r.tx.truncate(at);
-    widen_u64(s)
+    let at = ctx.report.text.len();
+    put(inout ctx.report.text, "u0:");
+    putn(inout ctx.report.text, wrapping_sub(id, 1));
+    let sym = ctx.names.intern(in ctx.report.text[at..ctx.report.text.len()]);
+    ctx.report.text.truncate(at);
+    widen_u64(sym)
 }
 
 // ----- findings ------------------------------------------------------------------
 
 fn push(
-    inout c: Cx,
+    inout ctx: Cx,
     verifier: u64,
-    function0: u64,
+    raw_function: u64,
     has_inst: bool,
     inst: u64,
     rule_at: u64,
@@ -154,170 +161,173 @@ fn push(
     msg_at: u64,
     msg_len: u64
 ) {
-    let function = names_source(in c, function0);
-    let f = by_key(in c, function);
+    let function = names_source(in ctx, raw_function);
+    let func = by_key(in ctx, function);
     let mut source = function;
-    if f != NONE {
-        source = fw(in c, f, F_SOURCE);
+    if func != NONE {
+        source = fw(in ctx, func, F_SOURCE);
     }
-    let wf = world_fn(in c, source);
+    let world_row = world_fn(in ctx, source);
     let mut has_loc = false;
     let mut loc: u64 = 0;
-    if f != NONE && has_inst {
+    if func != NONE && has_inst {
         let mut row = NONE;
         if verifier == V_CT || verifier == V_STACK {
-            row = ent_row(in c, f, inst);
-        } else if inst < fw(in c, f, F_NINSTS) {
-            row = wrapping_add(fw(in c, f, F_INSTS), inst);
+            row = ent_row(in ctx, func, inst);
+        } else if inst < fw(in ctx, func, F_NINSTS) {
+            row = wrapping_add(fw(in ctx, func, F_INSTS), inst);
         }
-        if row != NONE && iw(in c, row, I_HAS_LOC) == 1 {
+        if row != NONE && iw(in ctx, row, I_HAS_LOC) == 1 {
             has_loc = true;
-            loc = iw(in c, row, I_LOC);
+            loc = iw(in ctx, row, I_LOC);
         }
     }
-    c.r.fd.push(verifier);
-    c.r.fd.push(function);
+    ctx.report.findings.push(verifier);
+    ctx.report.findings.push(function);
     if has_inst {
-        c.r.fd.push(1);
+        ctx.report.findings.push(1);
     } else {
-        c.r.fd.push(0);
+        ctx.report.findings.push(0);
     }
-    c.r.fd.push(inst);
-    c.r.fd.push(rule_at);
-    c.r.fd.push(rule_len);
-    c.r.fd.push(msg_at);
-    c.r.fd.push(msg_len);
-    if wf == NONE {
-        c.r.fd.push(0);
-        c.r.fd.push(0);
-        c.r.fd.push(0);
+    ctx.report.findings.push(inst);
+    ctx.report.findings.push(rule_at);
+    ctx.report.findings.push(rule_len);
+    ctx.report.findings.push(msg_at);
+    ctx.report.findings.push(msg_len);
+    if world_row == NONE {
+        ctx.report.findings.push(0);
+        ctx.report.findings.push(0);
+        ctx.report.findings.push(0);
     } else {
-        c.r.fd.push(1);
-        c.r.fd.push(wfw(in c, wf, WF_START));
-        c.r.fd.push(wfw(in c, wf, WF_END));
+        ctx.report.findings.push(1);
+        ctx.report.findings.push(wfw(in ctx, world_row, WF_START));
+        ctx.report.findings.push(wfw(in ctx, world_row, WF_END));
     }
     if has_loc {
-        c.r.fd.push(1);
+        ctx.report.findings.push(1);
     } else {
-        c.r.fd.push(0);
+        ctx.report.findings.push(0);
     }
-    c.r.fd.push(loc);
+    ctx.report.findings.push(loc);
 }
 
 // Pushes the raw findings of one verifier (function override: `key`, or
 // NONE to keep each finding's own).
-fn push_raw(inout c: Cx, verifier: u64, key: u64) {
-    let n = c.raw.len() / RW;
+fn push_raw(inout ctx: Cx, verifier: u64, key: u64) {
+    let n = ctx.raw_findings.len() / RW;
     for k in 0..n {
-        let b = wrapping_mul(k, RW);
-        let mut function = g(in c.raw, b);
+        let base = wrapping_mul(k, RW);
+        let mut function = g(in ctx.raw_findings, base);
         if key != NONE {
             function = key;
         }
         push(
-            inout c,
+            inout ctx,
             verifier,
             function,
-            g(in c.raw, wrapping_add(b, 1)) == 1,
-            g(in c.raw, wrapping_add(b, 2)),
-            g(in c.raw, wrapping_add(b, 3)),
-            g(in c.raw, wrapping_add(b, 4)),
-            g(in c.raw, wrapping_add(b, 5)),
-            g(in c.raw, wrapping_add(b, 6))
+            g(in ctx.raw_findings, wrapping_add(base, 1)) == 1,
+            g(in ctx.raw_findings, wrapping_add(base, 2)),
+            g(in ctx.raw_findings, wrapping_add(base, 3)),
+            g(in ctx.raw_findings, wrapping_add(base, 4)),
+            g(in ctx.raw_findings, wrapping_add(base, 5)),
+            g(in ctx.raw_findings, wrapping_add(base, 6))
         );
     }
-    c.raw.truncate(0);
+    ctx.raw_findings.truncate(0);
 }
 
-fn err_sym(inout c: Cx, in head: Str, s: u64, in tail: Str) {
-    put(inout c.emsg, head);
-    puts(inout c.emsg, in c.nm, s);
-    put(inout c.emsg, tail);
-    c.err = true;
+fn err_sym(inout ctx: Cx, in head: Str, sym: u64, in tail: Str) {
+    put(inout ctx.error_text, head);
+    puts(inout ctx.error_text, in ctx.names, sym);
+    put(inout ctx.error_text, tail);
+    ctx.failed = true;
 }
 
 // ----- the verifiers -----------------------------------------------------------
 
 // `resolve_list`: `u0:N` names of a policy list, or an error.
-fn resolve(inout c: Cx, at: u64, n: u64, in what: Str, inout out: ChunkSeq[u64]) -> bool {
+fn resolve(inout ctx: Cx, at: u64, n: u64, in what: Str, inout out: ChunkSeq[u64]) -> bool {
     for k in 0..n {
-        let name = g(in c.p.pp, wrapping_add(at, k));
-        let u = names_user(inout c, name);
-        if u == NONE {
-            put(inout c.emsg, "verifier policy: ");
-            put(inout c.emsg, what);
-            put(inout c.emsg, " names unknown function '");
-            puts(inout c.emsg, in c.nm, name);
-            put(inout c.emsg, "'");
-            c.err = true;
+        let name = g(in ctx.policy.list_pool, wrapping_add(at, k));
+        let user_name = names_user(inout ctx, name);
+        if user_name == NONE {
+            put(inout ctx.error_text, "verifier policy: ");
+            put(inout ctx.error_text, what);
+            put(inout ctx.error_text, " names unknown function '");
+            puts(inout ctx.error_text, in ctx.names, name);
+            put(inout ctx.error_text, "'");
+            ctx.failed = true;
             return false;
         }
-        out.push(u);
+        out.push(user_name);
     }
     true
 }
 
-fn run_const_time(inout c: Cx) {
-    if c.p.ct.len() == 0 {
-        let m = c.r.tx.len();
-        put(inout c.r.tx, "const-time: the policy has no const_time entries; nothing was checked");
-        note(inout c, m);
+fn run_const_time(inout ctx: Cx) {
+    if ctx.policy.const_time.len() == 0 {
+        let message_at = ctx.report.text.len();
+        put(
+            inout ctx.report.text,
+            "const-time: the policy has no const_time entries; nothing was checked"
+        );
+        note(inout ctx, message_at);
     }
-    for e in 0..c.p.ct.len() / 7 {
-        let b = wrapping_mul(e, 7);
-        let name = g(in c.p.ct, b);
-        let f = by_key(in c, name);
-        if f == NONE {
+    for e in 0..ctx.policy.const_time.len() / 7 {
+        let base = wrapping_mul(e, 7);
+        let name = g(in ctx.policy.const_time, base);
+        let func = by_key(in ctx, name);
+        if func == NONE {
             err_sym(
-                inout c,
+                inout ctx,
                 "verifier policy: const_time names '",
                 name,
                 "', which was not emitted"
             );
             return;
         }
-        if fw(in c, f, F_INST_ERR) == 1 {
-            puts(inout c.emsg, in c.nm, fw(in c, f, F_INST_MSG));
-            c.err = true;
+        if fw(in ctx, func, F_INST_ERR) == 1 {
+            puts(inout ctx.error_text, in ctx.names, fw(in ctx, func, F_INST_MSG));
+            ctx.failed = true;
             return;
         }
-        let sret_code = fw(in c, f, F_SRET);
+        let sret_code = fw(in ctx, func, F_SRET);
         if sret_code == 2 {
-            puts(inout c.emsg, in c.nm, fw(in c, f, F_SRET_MSG));
-            c.err = true;
+            puts(inout ctx.error_text, in ctx.names, fw(in ctx, func, F_SRET_MSG));
+            ctx.failed = true;
             return;
         }
         let mut secret: ChunkSeq[u64] = ChunkSeq::new[u64]();
         let mut pointers: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        let sa = g(in c.p.ct, wrapping_add(b, 1));
-        let sn = g(in c.p.ct, wrapping_add(b, 2));
-        let pa = fw(in c, f, F_PARAMS);
-        let pn = fw(in c, f, wrapping_add(F_PARAMS, 1));
-        for k in 0..sn {
-            let want = g(in c.p.pp, wrapping_add(sa, k));
+        let secret_at = g(in ctx.policy.const_time, wrapping_add(base, 1));
+        let secret_count = g(in ctx.policy.const_time, wrapping_add(base, 2));
+        let param_at = fw(in ctx, func, F_PARAMS);
+        let param_count = fw(in ctx, func, wrapping_add(F_PARAMS, 1));
+        for k in 0..secret_count {
+            let want = g(in ctx.policy.list_pool, wrapping_add(secret_at, k));
             let mut index = NONE;
-            for q in 0..pn {
-                if index == NONE && pw(in c, wrapping_add(pa, wrapping_mul(q, 3))) == want {
+            for q in 0..param_count {
+                if index == NONE && pw(in ctx, wrapping_add(param_at, wrapping_mul(q, 3))) == want {
                     index = q;
                 }
             }
             if index == NONE {
-                put(inout c.emsg, "verifier policy: '");
-                puts(inout c.emsg, in c.nm, name);
-                put(inout c.emsg, "' has no parameter '");
-                puts(inout c.emsg, in c.nm, want);
-                put(inout c.emsg, "'");
-                c.err = true;
+                put(inout ctx.error_text, "verifier policy: '");
+                puts(inout ctx.error_text, in ctx.names, name);
+                put(inout ctx.error_text, "' has no parameter '");
+                puts(inout ctx.error_text, in ctx.names, want);
+                put(inout ctx.error_text, "'");
+                ctx.failed = true;
                 return;
             }
-            let code = pw(in c, wrapping_add(pa, wrapping_add(wrapping_mul(index, 3), 1)));
+            let code = pw(in ctx, wrapping_add(param_at, wrapping_add(wrapping_mul(index, 3), 1)));
             if code == 2 {
                 puts(
-                    inout c.emsg,
-                    in c.nm,
-                    pw(in c, wrapping_add(pa, wrapping_add(wrapping_mul(index, 3), 2)))
+                    inout ctx.error_text,
+                    in ctx.names,
+                    pw(in ctx, wrapping_add(param_at, wrapping_add(wrapping_mul(index, 3), 2)))
                 );
-                c.err = true;
+                ctx.failed = true;
                 return;
             }
             if code == 1 {
@@ -326,204 +336,211 @@ fn run_const_time(inout c: Cx) {
                 secret.push(wrapping_add(index, sret_code));
             }
         }
-        let da = g(in c.p.ct, wrapping_add(b, 3));
-        let dn = g(in c.p.ct, wrapping_add(b, 4));
-        let ta = g(in c.p.ct, wrapping_add(b, 5));
-        let tn = g(in c.p.ct, wrapping_add(b, 6));
-        let ca = fw(in c, f, F_CALLEES);
-        let cn = fw(in c, f, wrapping_add(F_CALLEES, 1));
-        for k in 0..wrapping_add(dn, tn) {
+        let declassify_at = g(in ctx.policy.const_time, wrapping_add(base, 3));
+        let declassify_count = g(in ctx.policy.const_time, wrapping_add(base, 4));
+        let trusted_at = g(in ctx.policy.const_time, wrapping_add(base, 5));
+        let trusted_count = g(in ctx.policy.const_time, wrapping_add(base, 6));
+        let callees_at = fw(in ctx, func, F_CALLEES);
+        let callee_count = fw(in ctx, func, wrapping_add(F_CALLEES, 1));
+        for k in 0..wrapping_add(declassify_count, trusted_count) {
             let mut callee: u64 = 0;
-            if k < dn {
-                callee = g(in c.p.pp, wrapping_add(da, k));
+            if k < declassify_count {
+                callee = g(in ctx.policy.list_pool, wrapping_add(declassify_at, k));
             } else {
-                callee = g(in c.p.pp, wrapping_add(ta, wrapping_sub(k, dn)));
+                callee = g(
+                    in ctx.policy.list_pool,
+                    wrapping_add(trusted_at, wrapping_sub(k, declassify_count))
+                );
             }
-            let id = g(in c.by_name, callee);
+            let id = g(in ctx.by_name, callee);
             let mut called = false;
             if id != 0 {
-                for q in 0..cn {
-                    if pw(in c, wrapping_add(ca, wrapping_mul(q, 2))) == wrapping_sub(id, 1) {
+                for q in 0..callee_count {
+                    if pw(in ctx, wrapping_add(callees_at, wrapping_mul(q, 2)))
+                        == wrapping_sub(id, 1) {
                         called = true;
                     }
                 }
             }
             if !called && id != 0 {
-                let m = c.r.tx.len();
-                put(inout c.r.tx, "const-time: '");
-                puts(inout c.r.tx, in c.nm, name);
-                put(inout c.r.tx, "' does not call '");
-                puts(inout c.r.tx, in c.nm, callee);
+                let message_at = ctx.report.text.len();
+                put(inout ctx.report.text, "const-time: '");
+                puts(inout ctx.report.text, in ctx.names, name);
+                put(inout ctx.report.text, "' does not call '");
+                puts(inout ctx.report.text, in ctx.names, callee);
                 put(
-                    inout c.r.tx,
+                    inout ctx.report.text,
                     "' in the emitted code (inlined or unused); its body is checked as part of '"
                 );
-                puts(inout c.r.tx, in c.nm, name);
-                put(inout c.r.tx, "'. Build with --no-opt to keep the call");
-                note(inout c, m);
+                puts(inout ctx.report.text, in ctx.names, name);
+                put(inout ctx.report.text, "'. Build with --no-opt to keep the call");
+                note(inout ctx, message_at);
             }
         }
         let mut declassify: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        declassify.push(intern_str(inout c.nm, "%vesper_ct_declassify"));
-        if !resolve(inout c, da, dn, "declassify", inout declassify) {
+        declassify.push(intern_str(inout ctx.names, "%vesper_ct_declassify"));
+        if !resolve(inout ctx, declassify_at, declassify_count, "declassify", inout declassify) {
             return;
         }
         let mut trusted: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        if !resolve(inout c, ta, tn, "constant_time_callees", inout trusted) {
+        if !resolve(inout ctx, trusted_at, trusted_count, "constant_time_callees", inout trusted) {
             return;
         }
-        verify_constant_time(inout c, f, in secret, in pointers, in declassify, in trusted);
-        push_raw(inout c, V_CT, NONE);
+        verify_constant_time(inout ctx, func, in secret, in pointers, in declassify, in trusted);
+        push_raw(inout ctx, V_CT, NONE);
     }
 }
 
-fn run_stack(inout c: Cx) {
-    if c.p.sroots.len() == 0 {
-        let m = c.r.tx.len();
+fn run_stack(inout ctx: Cx) {
+    if ctx.policy.stack_roots.len() == 0 {
+        let message_at = ctx.report.text.len();
         put(
-            inout c.r.tx,
+            inout ctx.report.text,
             "stack: the policy has no stack roots; only recursion and unbounded calls are reported"
         );
-        note(inout c, m);
+        note(inout ctx, message_at);
     }
-    let mut gr = measure_emitted(inout c);
-    if c.err {
+    let mut graph = measure_emitted(inout ctx);
+    if ctx.failed {
         return;
     }
-    for i in 0..gr.names.len() {
-        let s = names_source(in c, g(in gr.names, i));
-        st(inout gr.names, i, s);
+    for i in 0..graph.names.len() {
+        let source_name = names_source(in ctx, g(in graph.names, i));
+        st(inout graph.names, i, source_name);
     }
-    for e in 0..gr.external.len() / 4 {
-        let at = wrapping_add(wrapping_mul(e, 4), 1);
-        let s = names_source(in c, g(in gr.external, at));
-        st(inout gr.external, at, s);
+    for e in 0..graph.external.len() / 4 {
+        let name_at = wrapping_add(wrapping_mul(e, 4), 1);
+        let source_name = names_source(in ctx, g(in graph.external, name_at));
+        st(inout graph.external, name_at, source_name);
     }
-    for k in 0..c.p.sroots.len() / 2 {
-        let root = g(in c.p.sroots, wrapping_mul(k, 2));
-        if by_key(in c, root) == NONE {
-            err_sym(inout c, "verifier policy: stack root '", root, "' was not emitted");
+    for k in 0..ctx.policy.stack_roots.len() / 2 {
+        let root = g(in ctx.policy.stack_roots, wrapping_mul(k, 2));
+        if by_key(in ctx, root) == NONE {
+            err_sym(inout ctx, "verifier policy: stack root '", root, "' was not emitted");
             return;
         }
     }
-    let mut pol = pol_new();
-    pol.roots.extend(in c.p.sroots.as_slice());
-    pol.external_bounds.extend(in c.p.sext.as_slice());
-    analyze_stack(in c.nm, in gr, in pol, inout c.r);
-    for k in 0..c.r.sf.len() / 7 {
+    let mut stack_policy = pol_new();
+    stack_policy.roots.extend(in ctx.policy.stack_roots.as_slice());
+    stack_policy.external_bounds.extend(in ctx.policy.stack_ext_bounds.as_slice());
+    analyze_stack(in ctx.names, in graph, in stack_policy, inout ctx.report);
+    for k in 0..ctx.report.sf.len() / 7 {
         let b = wrapping_mul(k, 7);
         push(
-            inout c,
+            inout ctx,
             V_STACK,
-            g(in c.r.sf, b),
-            g(in c.r.sf, wrapping_add(b, 1)) == 1,
-            g(in c.r.sf, wrapping_add(b, 2)),
-            g(in c.r.sf, wrapping_add(b, 3)),
-            g(in c.r.sf, wrapping_add(b, 4)),
-            g(in c.r.sf, wrapping_add(b, 5)),
-            g(in c.r.sf, wrapping_add(b, 6))
+            g(in ctx.report.sf, b),
+            g(in ctx.report.sf, wrapping_add(b, 1)) == 1,
+            g(in ctx.report.sf, wrapping_add(b, 2)),
+            g(in ctx.report.sf, wrapping_add(b, 3)),
+            g(in ctx.report.sf, wrapping_add(b, 4)),
+            g(in ctx.report.sf, wrapping_add(b, 5)),
+            g(in ctx.report.sf, wrapping_add(b, 6))
         );
     }
 }
 
-fn run_realtime(inout c: Cx) {
-    if c.p.rroots.len() == 0 {
-        let m = c.r.tx.len();
-        put(inout c.r.tx, "realtime: the policy has no realtime roots; nothing was checked");
-        note(inout c, m);
+fn run_realtime(inout ctx: Cx) {
+    if ctx.policy.rt_roots.len() == 0 {
+        let message_at = ctx.report.text.len();
+        put(
+            inout ctx.report.text,
+            "realtime: the policy has no realtime roots; nothing was checked"
+        );
+        note(inout ctx, message_at);
     }
-    let by_id = dup(in c.by_id);
-    let by_name = dup(in c.by_name);
-    let defined = dup(in c.defined);
-    verify(inout c, in by_id, in by_name, in defined);
-    if c.err {
+    let by_id = dup(in ctx.by_id);
+    let by_name = dup(in ctx.by_name);
+    let defined = dup(in ctx.defined);
+    verify(inout ctx, in by_id, in by_name, in defined);
+    if ctx.failed {
         return;
     }
-    push_raw(inout c, V_RT, NONE);
+    push_raw(inout ctx, V_RT, NONE);
 }
 
-fn run_detfloat(inout c: Cx) {
-    let mut p = DetPolicy {
-        allow_fma: c.p.dfma,
-        allowed: dup(in c.p.dallowed),
-        canonicalizes: c.nan,
+fn run_detfloat(inout ctx: Cx) {
+    let mut det_policy = DetPolicy {
+        allow_fma: ctx.policy.df_allow_fma,
+        allowed: dup(in ctx.policy.df_allowed_calls),
+        canonicalizes: ctx.canonical_nan,
         sequential: false,
     };
-    if c.p.dred_has {
-        if spells(in c.nm, c.p.dred, "sequential") {
-            p.sequential = true;
-        } else if !spells(in c.nm, c.p.dred, "pairwise") {
+    if ctx.policy.df_has_reduction {
+        if spells(in ctx.names, ctx.policy.df_reduction_order, "sequential") {
+            det_policy.sequential = true;
+        } else if !spells(in ctx.names, ctx.policy.df_reduction_order, "pairwise") {
             err_sym(
-                inout c,
+                inout ctx,
                 "verifier policy: det_float.reduction_order must be pairwise or sequential, not '",
-                c.p.dred,
+                ctx.policy.df_reduction_order,
                 "'"
             );
             return;
         }
     }
     let mut selected: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    if c.p.dfun_has {
-        for k in 0..c.p.dfun.len() {
-            let n = g(in c.p.dfun, k);
-            let f = by_key(in c, n);
-            if f == NONE {
+    if ctx.policy.df_has_functions {
+        for k in 0..ctx.policy.df_functions.len() {
+            let name = g(in ctx.policy.df_functions, k);
+            let func = by_key(in ctx, name);
+            if func == NONE {
                 err_sym(
-                    inout c,
+                    inout ctx,
                     "verifier policy: det_float names '",
-                    n,
+                    name,
                     "', which was not emitted"
                 );
                 return;
             }
-            selected.push(f);
+            selected.push(func);
         }
     } else {
-        for i in 0..c.nfns {
+        for i in 0..ctx.fn_count {
             selected.push(i);
         }
     }
     for k in 0..selected.len() {
-        p.allowed.push(fw(in c, g(in selected, k), F_KEY));
+        det_policy.allowed.push(fw(in ctx, g(in selected, k), F_KEY));
     }
-    let by_id = dup(in c.by_id);
+    let by_id = dup(in ctx.by_id);
     for k in 0..selected.len() {
-        let f = g(in selected, k);
-        let key = fw(in c, f, F_KEY);
-        if fw(in c, f, F_VERIFY_ERR) == 1 {
-            err_sym(inout c, "detfloat verifier on '", key, "': invalid Cranelift IR: ");
-            puts(inout c.emsg, in c.nm, fw(in c, f, F_VERIFY_MSG));
+        let func = g(in selected, k);
+        let key = fw(in ctx, func, F_KEY);
+        if fw(in ctx, func, F_VERIFY_ERR) == 1 {
+            err_sym(inout ctx, "detfloat verifier on '", key, "': invalid Cranelift IR: ");
+            puts(inout ctx.error_text, in ctx.names, fw(in ctx, func, F_VERIFY_MSG));
             return;
         }
-        audit(inout c, f, in p, in by_id, key);
-        push_raw(inout c, V_DF, key);
+        audit(inout ctx, func, in det_policy, in by_id, key);
+        push_raw(inout ctx, V_DF, key);
     }
 }
 
-// `verify_emitted` with the verifiers in `mask` under `c.p`.
-pub fn verify_emitted(inout c: Cx, mask: u64) {
-    c.r.verifiers = mask;
-    c.r.functions = c.nfns;
+// `verify_emitted` with the verifiers in `mask` under `ctx.policy`.
+pub fn verify_emitted(inout ctx: Cx, mask: u64) {
+    ctx.report.verifiers = mask;
+    ctx.report.functions = ctx.fn_count;
     if mask & V_CT != 0 {
-        run_const_time(inout c);
-        if c.err {
+        run_const_time(inout ctx);
+        if ctx.failed {
             return;
         }
     }
     if mask & V_STACK != 0 {
-        run_stack(inout c);
-        if c.err {
+        run_stack(inout ctx);
+        if ctx.failed {
             return;
         }
     }
     if mask & V_RT != 0 {
-        run_realtime(inout c);
-        if c.err {
+        run_realtime(inout ctx);
+        if ctx.failed {
             return;
         }
     }
     if mask & V_DF != 0 {
-        run_detfloat(inout c);
+        run_detfloat(inout ctx);
     }
 }
 
@@ -542,351 +559,351 @@ fn cap_verifier(cap: u64) -> u64 {
     0
 }
 
-pub fn capability_verifiers(in c: Cx) -> u64 {
-    let mut out: u64 = 0;
-    for i in 0..c.wf.len() / 9 {
-        let caps = wfw(in c, i, WF_OWN) | wfw(in c, i, WF_CLOSURE);
+pub fn capability_verifiers(in ctx: Cx) -> u64 {
+    let mut verifiers: u64 = 0;
+    for i in 0..ctx.world_fns.len() / 9 {
+        let caps = wfw(in ctx, i, WF_OWN) | wfw(in ctx, i, WF_CLOSURE);
         if caps & CAP_CT != 0 {
-            out = out | V_CT;
+            verifiers = verifiers | V_CT;
         }
         if caps & CAP_RT != 0 {
-            out = out | V_RT;
+            verifiers = verifiers | V_RT;
         }
         if caps & CAP_DF != 0 {
-            out = out | V_DF;
+            verifiers = verifiers | V_DF;
         }
     }
-    out
+    verifiers
 }
 
-fn not_emitted(inout c: Cx, name: u64) {
-    let wf = world_fn(in c, name);
-    if wf != NONE && wfw(in c, wf, WF_SPECIALIZED) == 1 {
-        put(inout c.r.tx, "'");
-        puts(inout c.r.tx, in c.nm, name);
+fn not_emitted(inout ctx: Cx, name: u64) {
+    let world_row = world_fn(in ctx, name);
+    if world_row != NONE && wfw(in ctx, world_row, WF_SPECIALIZED) == 1 {
+        put(inout ctx.report.text, "'");
+        puts(inout ctx.report.text, in ctx.names, name);
         put(
-            inout c.r.tx,
+            inout ctx.report.text,
             "' is specialized into its callers (its row has non-capability effects other than Fail, or it returns a function value, or a function-value argument is not a top-level function); its code is checked only inside callers that carry the same capability"
         );
     } else {
-        put(inout c.r.tx, "'");
-        puts(inout c.r.tx, in c.nm, name);
-        put(inout c.r.tx, "' is not reachable from the entry and was not compiled");
+        put(inout ctx.report.text, "'");
+        puts(inout ctx.report.text, in ctx.names, name);
+        put(inout ctx.report.text, "' is not reachable from the entry and was not compiled");
     }
 }
 
-fn instances(in c: Cx, name: u64, inout out: ChunkSeq[u64]) {
+fn instances(in ctx: Cx, name: u64, inout out: ChunkSeq[u64]) {
     out.truncate(0);
-    for i in 0..c.nfns {
-        if fw(in c, i, F_SOURCE) == name {
+    for i in 0..ctx.fn_count {
+        if fw(in ctx, i, F_SOURCE) == name {
             out.push(i);
         }
     }
 }
 
 // `keep_emitted`: the emitted instance keys of the names in `list`, in name
-// order, appended to `c.p.pp`; returns (at, n).
-fn keep_emitted(inout c: Cx, in list: ChunkSeq[u64]) -> (u64, u64) {
+// order, appended to `ctx.policy.list_pool`; returns (at, n).
+fn keep_emitted(inout ctx: Cx, in list: ChunkSeq[u64]) -> (u64, u64) {
     let mut set: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for k in 0..list.len() {
         let name = g(in list, k);
-        for i in 0..c.nfns {
-            if fw(in c, i, F_SOURCE) == name {
-                set_insert(in c.nm, inout set, fw(in c, i, F_KEY));
+        for i in 0..ctx.fn_count {
+            if fw(in ctx, i, F_SOURCE) == name {
+                set_insert(in ctx.names, inout set, fw(in ctx, i, F_KEY));
             }
         }
     }
-    let at = c.p.pp.len();
-    c.p.pp.extend(in set.as_slice());
+    let at = ctx.policy.list_pool.len();
+    ctx.policy.list_pool.extend(in set.as_slice());
     (at, set.len())
 }
 
-fn has_key(in c: Cx, in rows: ChunkSeq[u64], width: u64, key: u64) -> bool {
+fn has_key(in ctx: Cx, in rows: ChunkSeq[u64], width: u64, key: u64) -> bool {
     find_row(in rows, width, key) != NONE
 }
 
-fn insert_sorted(inout c: Cx, which: u64, in row: ChunkSeq[u64]) {
+fn insert_sorted(inout ctx: Cx, which: u64, in row: ChunkSeq[u64]) {
     if which == 0 {
-        let at = sorted_slot(in c.nm, in c.p.ct, 7, g(in row, 0));
-        insert_row(inout c.p.ct, 7, at, in row);
+        let at = sorted_slot(in ctx.names, in ctx.policy.const_time, 7, g(in row, 0));
+        insert_row(inout ctx.policy.const_time, 7, at, in row);
     } else if which == 1 {
-        let at = sorted_slot(in c.nm, in c.p.rroots, 3, g(in row, 0));
-        insert_row(inout c.p.rroots, 3, at, in row);
+        let at = sorted_slot(in ctx.names, in ctx.policy.rt_roots, 3, g(in row, 0));
+        insert_row(inout ctx.policy.rt_roots, 3, at, in row);
     } else {
-        let at = sorted_slot(in c.nm, in c.p.reff, 3, g(in row, 0));
-        insert_row(inout c.p.reff, 3, at, in row);
+        let at = sorted_slot(in ctx.names, in ctx.policy.rt_effects, 3, g(in row, 0));
+        insert_row(inout ctx.policy.rt_effects, 3, at, in row);
     }
 }
 
 // `realtime.roots.entry(key).or_insert(budget)` and
 // `realtime.effects.entry(key).or_insert(["Realtime"])`.
-fn realtime_root(inout c: Cx, key: u64, has_budget: u64, budget: u64, rt: u64) {
-    if !has_key(in c, in c.p.rroots, 3, key) {
+fn realtime_root(inout ctx: Cx, key: u64, has_budget: u64, budget: u64, realtime_sym: u64) {
+    if !has_key(in ctx, in ctx.policy.rt_roots, 3, key) {
         let mut row: ChunkSeq[u64] = ChunkSeq::new[u64]();
         row.push(key);
         row.push(has_budget);
         row.push(budget);
-        insert_sorted(inout c, 1, in row);
+        insert_sorted(inout ctx, 1, in row);
     }
-    if !has_key(in c, in c.p.reff, 3, key) {
-        let at = c.p.pp.len();
-        c.p.pp.push(rt);
+    if !has_key(in ctx, in ctx.policy.rt_effects, 3, key) {
+        let at = ctx.policy.list_pool.len();
+        ctx.policy.list_pool.push(realtime_sym);
         let mut row: ChunkSeq[u64] = ChunkSeq::new[u64]();
         row.push(key);
         row.push(at);
         row.push(1);
-        insert_sorted(inout c, 2, in row);
+        insert_sorted(inout ctx, 2, in row);
     }
 }
 
-fn verifier_name(inout o: ChunkSeq[u8], v: u64) {
-    if v == V_CT {
-        put(inout o, "const-time");
-    } else if v == V_STACK {
-        put(inout o, "stack");
-    } else if v == V_RT {
-        put(inout o, "realtime");
+fn verifier_name(inout out: ChunkSeq[u8], verifier: u64) {
+    if verifier == V_CT {
+        put(inout out, "const-time");
+    } else if verifier == V_STACK {
+        put(inout out, "stack");
+    } else if verifier == V_RT {
+        put(inout out, "realtime");
     } else {
-        put(inout o, "detfloat");
+        put(inout out, "detfloat");
     }
 }
 
-// `derive_policy(world, functions, base, explicit_det_float_all)` into `c.p`.
-pub fn derive_policy(inout c: Cx, explicit0: bool) {
-    let explicit = explicit0 && !c.p.dfun_has;
-    let mut inst: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for e in 0..c.cct.len() / 7 {
-        let b = wrapping_mul(e, 7);
-        let function = g(in c.cct, b);
-        let wf = world_fn(in c, function);
-        if wf == NONE {
-            err_sym(inout c, "capability policy names unknown function '", function, "'");
+// `derive_policy(world, functions, base, explicit_det_float_all)` into `ctx.policy`.
+pub fn derive_policy(inout ctx: Cx, explicit_all: bool) {
+    let explicit = explicit_all && !ctx.policy.df_has_functions;
+    let mut emitted: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for e in 0..ctx.cap_const_time.len() / 7 {
+        let base = wrapping_mul(e, 7);
+        let function = g(in ctx.cap_const_time, base);
+        let world_row = world_fn(in ctx, function);
+        if world_row == NONE {
+            err_sym(inout ctx, "capability policy names unknown function '", function, "'");
             return;
         }
-        instances(in c, function, inout inst);
-        if inst.len() == 0 {
-            let m = c.r.tx.len();
-            put(inout c.r.tx, "const-time: ");
-            not_emitted(inout c, function);
-            dnote(inout c, m);
+        instances(in ctx, function, inout emitted);
+        if emitted.len() == 0 {
+            let message_at = ctx.report.text.len();
+            put(inout ctx.report.text, "const-time: ");
+            not_emitted(inout ctx, function);
+            dnote(inout ctx, message_at);
             continue;
         }
         let mut secret: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        let sa = g(in c.cct, wrapping_add(b, 1));
-        let sn = g(in c.cct, wrapping_add(b, 2));
-        let wpa = wfw(in c, wf, WF_PARAMS);
-        let wpn = wfw(in c, wf, wrapping_add(WF_PARAMS, 1));
-        for k in 0..sn {
-            let i = pw(in c, wrapping_add(sa, k));
-            if i >= wpn {
-                put(inout c.emsg, "capability policy: '");
-                puts(inout c.emsg, in c.nm, function);
-                put(inout c.emsg, "' has no parameter ");
-                putn(inout c.emsg, i);
-                c.err = true;
+        let cap_secret_at = g(in ctx.cap_const_time, wrapping_add(base, 1));
+        let cap_secret_count = g(in ctx.cap_const_time, wrapping_add(base, 2));
+        let world_param_at = wfw(in ctx, world_row, WF_PARAMS);
+        let world_param_count = wfw(in ctx, world_row, wrapping_add(WF_PARAMS, 1));
+        for k in 0..cap_secret_count {
+            let param_index = pw(in ctx, wrapping_add(cap_secret_at, k));
+            if param_index >= world_param_count {
+                put(inout ctx.error_text, "capability policy: '");
+                puts(inout ctx.error_text, in ctx.names, function);
+                put(inout ctx.error_text, "' has no parameter ");
+                putn(inout ctx.error_text, param_index);
+                ctx.failed = true;
                 return;
             }
-            secret.push(pw(in c, wrapping_add(wpa, i)));
+            secret.push(pw(in ctx, wrapping_add(world_param_at, param_index)));
         }
-        for q in 0..inst.len() {
-            let f = g(in inst, q);
-            let key = fw(in c, f, F_KEY);
-            if has_key(in c, in c.p.ct, 7, key)
-                || (key != function && has_key(in c, in c.p.ct, 7, function)) {
+        for q in 0..emitted.len() {
+            let func = g(in emitted, q);
+            let key = fw(in ctx, func, F_KEY);
+            if has_key(in ctx, in ctx.policy.const_time, 7, key)
+                || (key != function && has_key(in ctx, in ctx.policy.const_time, 7, function)) {
                 continue;
             }
             let mut declassify: ChunkSeq[u64] = ChunkSeq::new[u64]();
             let mut trusted: ChunkSeq[u64] = ChunkSeq::new[u64]();
-            let da = g(in c.cct, wrapping_add(b, 3));
-            for k in 0..g(in c.cct, wrapping_add(b, 4)) {
-                declassify.push(pw(in c, wrapping_add(da, k)));
+            let cap_declassify_at = g(in ctx.cap_const_time, wrapping_add(base, 3));
+            for k in 0..g(in ctx.cap_const_time, wrapping_add(base, 4)) {
+                declassify.push(pw(in ctx, wrapping_add(cap_declassify_at, k)));
             }
-            let ta = g(in c.cct, wrapping_add(b, 5));
-            for k in 0..g(in c.cct, wrapping_add(b, 6)) {
-                trusted.push(pw(in c, wrapping_add(ta, k)));
+            let cap_trusted_at = g(in ctx.cap_const_time, wrapping_add(base, 5));
+            for k in 0..g(in ctx.cap_const_time, wrapping_add(base, 6)) {
+                trusted.push(pw(in ctx, wrapping_add(cap_trusted_at, k)));
             }
-            let ba = fw(in c, f, F_BOUND);
-            for k in 0..fw(in c, f, wrapping_add(F_BOUND, 1)) {
-                let bound = pw(in c, wrapping_add(ba, k));
-                let wb = world_fn(in c, bound);
-                if wb != NONE && wfw(in c, wb, WF_OWN) & CAP_CT != 0 {
-                    if wfw(in c, wb, WF_GATE) == 1 {
+            let bound_at = fw(in ctx, func, F_BOUND);
+            for k in 0..fw(in ctx, func, wrapping_add(F_BOUND, 1)) {
+                let bound = pw(in ctx, wrapping_add(bound_at, k));
+                let bound_row = world_fn(in ctx, bound);
+                if bound_row != NONE && wfw(in ctx, bound_row, WF_OWN) & CAP_CT != 0 {
+                    if wfw(in ctx, bound_row, WF_GATE) == 1 {
                         declassify.push(bound);
                     } else {
                         trusted.push(bound);
                     }
                 }
             }
-            let sat = c.p.pp.len();
-            c.p.pp.extend(in secret.as_slice());
-            let (dat, dn) = keep_emitted(inout c, in declassify);
-            let (tat, tn) = keep_emitted(inout c, in trusted);
+            let secret_at = ctx.policy.list_pool.len();
+            ctx.policy.list_pool.extend(in secret.as_slice());
+            let (declassify_at, declassify_count) = keep_emitted(inout ctx, in declassify);
+            let (trusted_at, trusted_count) = keep_emitted(inout ctx, in trusted);
             let mut row: ChunkSeq[u64] = ChunkSeq::new[u64]();
             row.push(key);
-            row.push(sat);
+            row.push(secret_at);
             row.push(secret.len());
-            row.push(dat);
-            row.push(dn);
-            row.push(tat);
-            row.push(tn);
-            insert_sorted(inout c, 0, in row);
+            row.push(declassify_at);
+            row.push(declassify_count);
+            row.push(trusted_at);
+            row.push(trusted_count);
+            insert_sorted(inout ctx, 0, in row);
         }
     }
-    let rt = intern_str(inout c.nm, "Realtime");
-    for e in 0..c.crt.len() / 3 {
-        let b = wrapping_mul(e, 3);
-        let function = g(in c.crt, b);
-        instances(in c, function, inout inst);
-        if inst.len() == 0 {
-            let m = c.r.tx.len();
-            put(inout c.r.tx, "realtime: ");
-            not_emitted(inout c, function);
-            dnote(inout c, m);
+    let realtime_sym = intern_str(inout ctx.names, "Realtime");
+    for e in 0..ctx.cap_realtime.len() / 3 {
+        let base = wrapping_mul(e, 3);
+        let function = g(in ctx.cap_realtime, base);
+        instances(in ctx, function, inout emitted);
+        if emitted.len() == 0 {
+            let message_at = ctx.report.text.len();
+            put(inout ctx.report.text, "realtime: ");
+            not_emitted(inout ctx, function);
+            dnote(inout ctx, message_at);
             continue;
         }
-        for q in 0..inst.len() {
-            let key = fw(in c, g(in inst, q), F_KEY);
+        for q in 0..emitted.len() {
+            let key = fw(in ctx, g(in emitted, q), F_KEY);
             realtime_root(
-                inout c,
+                inout ctx,
                 key,
-                g(in c.crt, wrapping_add(b, 1)),
-                g(in c.crt, wrapping_add(b, 2)),
-                rt
+                g(in ctx.cap_realtime, wrapping_add(base, 1)),
+                g(in ctx.cap_realtime, wrapping_add(base, 2)),
+                realtime_sym
             );
         }
     }
-    if c.crt_reject {
-        c.p.rreject = true;
+    if ctx.cap_reject_unbounded {
+        ctx.policy.rt_reject_unbounded = true;
     }
-    let mut det: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for e in 0..c.cdf.len() / 4 {
-        let b = wrapping_mul(e, 4);
-        let function = g(in c.cdf, b);
-        instances(in c, function, inout inst);
-        if inst.len() == 0 {
-            let m = c.r.tx.len();
-            put(inout c.r.tx, "detfloat: ");
-            not_emitted(inout c, function);
-            dnote(inout c, m);
+    let mut det_functions: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for e in 0..ctx.cap_det_float.len() / 4 {
+        let base = wrapping_mul(e, 4);
+        let function = g(in ctx.cap_det_float, base);
+        instances(in ctx, function, inout emitted);
+        if emitted.len() == 0 {
+            let message_at = ctx.report.text.len();
+            put(inout ctx.report.text, "detfloat: ");
+            not_emitted(inout ctx, function);
+            dnote(inout ctx, message_at);
             continue;
         }
-        for q in 0..inst.len() {
-            det.push(fw(in c, g(in inst, q), F_KEY));
+        for q in 0..emitted.len() {
+            det_functions.push(fw(in ctx, g(in emitted, q), F_KEY));
         }
         let mut allowed: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        let aa = g(in c.cdf, wrapping_add(b, 1));
-        for k in 0..g(in c.cdf, wrapping_add(b, 2)) {
-            allowed.push(pw(in c, wrapping_add(aa, k)));
+        let cap_allowed_at = g(in ctx.cap_det_float, wrapping_add(base, 1));
+        for k in 0..g(in ctx.cap_det_float, wrapping_add(base, 2)) {
+            allowed.push(pw(in ctx, wrapping_add(cap_allowed_at, k)));
         }
-        let (kat, kn) = keep_emitted(inout c, in allowed);
-        for k in 0..kn {
-            let callee = g(in c.p.pp, wrapping_add(kat, k));
-            if !contains(in c.p.dallowed, callee) {
-                c.p.dallowed.push(callee);
+        let (allowed_at, allowed_count) = keep_emitted(inout ctx, in allowed);
+        for k in 0..allowed_count {
+            let callee = g(in ctx.policy.list_pool, wrapping_add(allowed_at, k));
+            if !contains(in ctx.policy.df_allowed_calls, callee) {
+                ctx.policy.df_allowed_calls.push(callee);
             }
         }
-        if g(in c.cdf, wrapping_add(b, 3)) == 1 {
-            c.p.dfma = true;
+        if g(in ctx.cap_det_float, wrapping_add(base, 3)) == 1 {
+            ctx.policy.df_allow_fma = true;
         }
     }
     // Capability closures.
-    for w in 0..c.wf.len() / 9 {
-        let name = wfw(in c, w, WF_NAME);
-        let own = wfw(in c, w, WF_OWN);
-        let closure = wfw(in c, w, WF_CLOSURE);
-        for ci in 0..4 {
-            let cap = wrapping_shl_u64(1, ci);
+    for world_index in 0..ctx.world_fns.len() / 9 {
+        let name = wfw(in ctx, world_index, WF_NAME);
+        let own = wfw(in ctx, world_index, WF_OWN);
+        let closure = wfw(in ctx, world_index, WF_CLOSURE);
+        for cap_bit in 0..4 {
+            let cap = wrapping_shl_u64(1, cap_bit);
             if closure & cap != 0 && cap != CAP_DENORM && own & cap == 0 {
-                instances(in c, name, inout inst);
-                if inst.len() == 0 {
-                    let m = c.r.tx.len();
-                    verifier_name(inout c.r.tx, cap_verifier(cap));
-                    put(inout c.r.tx, ": a closure in ");
-                    not_emitted(inout c, name);
-                    dnote(inout c, m);
+                instances(in ctx, name, inout emitted);
+                if emitted.len() == 0 {
+                    let message_at = ctx.report.text.len();
+                    verifier_name(inout ctx.report.text, cap_verifier(cap));
+                    put(inout ctx.report.text, ": a closure in ");
+                    not_emitted(inout ctx, name);
+                    dnote(inout ctx, message_at);
                 } else if cap == CAP_CT {
-                    let m = c.r.tx.len();
+                    let message_at = ctx.report.text.len();
                     put(
-                        inout c.r.tx,
+                        inout ctx.report.text,
                         "an eff [ConstTime] closure is specialized into this function, which is not ConstTime; the backend cannot tell which of its values are secret. Move the closure body into a named ConstTime function"
                     );
-                    let ml = wrapping_sub(c.r.tx.len(), m);
-                    let ra = c.r.tx.len();
-                    put(inout c.r.tx, "capability.closure-unsupported");
-                    c.r.fd.push(V_CT);
-                    c.r.fd.push(name);
-                    c.r.fd.push(0);
-                    c.r.fd.push(0);
-                    c.r.fd.push(ra);
-                    c.r.fd.push(wrapping_sub(c.r.tx.len(), ra));
-                    c.r.fd.push(m);
-                    c.r.fd.push(ml);
-                    c.r.fd.push(1);
-                    c.r.fd.push(wfw(in c, w, WF_START));
-                    c.r.fd.push(wfw(in c, w, WF_END));
-                    c.r.fd.push(0);
-                    c.r.fd.push(0);
+                    let message_len = wrapping_sub(ctx.report.text.len(), message_at);
+                    let rule_at = ctx.report.text.len();
+                    put(inout ctx.report.text, "capability.closure-unsupported");
+                    ctx.report.findings.push(V_CT);
+                    ctx.report.findings.push(name);
+                    ctx.report.findings.push(0);
+                    ctx.report.findings.push(0);
+                    ctx.report.findings.push(rule_at);
+                    ctx.report.findings.push(wrapping_sub(ctx.report.text.len(), rule_at));
+                    ctx.report.findings.push(message_at);
+                    ctx.report.findings.push(message_len);
+                    ctx.report.findings.push(1);
+                    ctx.report.findings.push(wfw(in ctx, world_index, WF_START));
+                    ctx.report.findings.push(wfw(in ctx, world_index, WF_END));
+                    ctx.report.findings.push(0);
+                    ctx.report.findings.push(0);
                 } else if cap == CAP_RT {
-                    let m = c.r.tx.len();
-                    put(inout c.r.tx, "realtime: '");
-                    puts(inout c.r.tx, in c.nm, name);
+                    let message_at = ctx.report.text.len();
+                    put(inout ctx.report.text, "realtime: '");
+                    puts(inout ctx.report.text, in ctx.names, name);
                     put(
-                        inout c.r.tx,
+                        inout ctx.report.text,
                         "' contains an eff [Realtime] closure and is checked as a realtime root as a whole"
                     );
-                    dnote(inout c, m);
-                    for q in 0..inst.len() {
-                        let key = fw(in c, g(in inst, q), F_KEY);
-                        realtime_root(inout c, key, 0, 0, rt);
+                    dnote(inout ctx, message_at);
+                    for q in 0..emitted.len() {
+                        let key = fw(in ctx, g(in emitted, q), F_KEY);
+                        realtime_root(inout ctx, key, 0, 0, realtime_sym);
                     }
                 } else {
-                    let m = c.r.tx.len();
-                    put(inout c.r.tx, "detfloat: '");
-                    puts(inout c.r.tx, in c.nm, name);
+                    let message_at = ctx.report.text.len();
+                    put(inout ctx.report.text, "detfloat: '");
+                    puts(inout ctx.report.text, in ctx.names, name);
                     put(
-                        inout c.r.tx,
+                        inout ctx.report.text,
                         "' contains an eff [DetFloat] closure and is audited as a whole"
                     );
-                    dnote(inout c, m);
-                    for q in 0..inst.len() {
-                        det.push(fw(in c, g(in inst, q), F_KEY));
+                    dnote(inout ctx, message_at);
+                    for q in 0..emitted.len() {
+                        det_functions.push(fw(in ctx, g(in emitted, q), F_KEY));
                     }
                 }
             }
         }
     }
-    if det.len() > 0 && !explicit {
-        c.p.dfun_has = true;
-        for k in 0..det.len() {
-            let f = g(in det, k);
-            if !contains(in c.p.dfun, f) {
-                c.p.dfun.push(f);
+    if det_functions.len() > 0 && !explicit {
+        ctx.policy.df_has_functions = true;
+        for k in 0..det_functions.len() {
+            let func = g(in det_functions, k);
+            if !contains(in ctx.policy.df_functions, func) {
+                ctx.policy.df_functions.push(func);
             }
         }
     }
 }
 
-// The run the input asks for (mode 0 or 1). The report is in `c.r`, or
-// `c.err` is set with `c.emsg`.
-pub fn run(inout c: Cx) {
-    build_names(inout c);
-    if c.mode == 0 {
-        verify_emitted(inout c, c.requested);
+// The run the input asks for (mode 0 or 1). The report is in `ctx.report`, or
+// `ctx.failed` is set with `ctx.error_text`.
+pub fn run(inout ctx: Cx) {
+    build_names(inout ctx);
+    if ctx.mode == 0 {
+        verify_emitted(inout ctx, ctx.requested);
         return;
     }
-    let mask = c.requested | capability_verifiers(in c);
+    let mask = ctx.requested | capability_verifiers(in ctx);
     if mask == 0 {
-        c.r.verifiers = 0;
-        c.r.functions = 0;
+        ctx.report.verifiers = 0;
+        ctx.report.functions = 0;
         return;
     }
-    derive_policy(inout c, c.requested & V_DF != 0);
-    if c.err {
+    derive_policy(inout ctx, ctx.requested & V_DF != 0);
+    if ctx.failed {
         return;
     }
-    verify_emitted(inout c, mask);
-    if c.err {
+    verify_emitted(inout ctx, mask);
+    if ctx.failed {
         return;
     }
-    c.r.notes.extend(in c.dnotes.as_slice());
+    ctx.report.notes.extend(in ctx.derived_notes.as_slice());
 }

@@ -86,7 +86,7 @@ does not touch).
 
 | Command | Rust layer | Engine | Owner or blocker |
 |---|---|---|---|
-| `fmt` (one file's read, format and replace) | `fmt_commands::format_file` | `vesper-fmt` (port) | CLI/walk/JSON in Vesper (#1644); bounded no-follow read and checked atomic replace in Vesper over `@vesper-std/fs` (#1996 part 3b); the formatter stays in `hc_fmt_source` (`fmt_commands::format_text`) |
+| `fmt` (one file's read, format and replace) | `fmt_commands::format_file` | `vesper-fmt` (port) | CLI/walk/JSON in Vesper (#1644); bounded no-follow read and checked atomic replace in Vesper over `@vesper-std/fs` (#1996 part 3b); the formatter is @vesper/fmt, the Vesper port of vesper_fmt (#1996 part 3d) |
 | `lint` | `HybridCommands::hc_lint_run` | `vesper::tooling::lint` / `vesper-lint` (port) | CLI option parsing, validation, and `--help` in Vesper (`lint.ves`, #1730) |
 | `forge` | `HybridCommands::hc_forge_run` | `vesper-forge` (port) | CLI option parsing, validation, and `--help` in Vesper (`forge.ves`, #1660) |
 | `ebpf` | `HybridCommands::hc_ebpf_check` | `vesper-ebpf` (port) / `vesper::stack_bound` | CLI option parsing, validation, and `--help` in Vesper (`ebpf.ves`, #1653) |
@@ -170,16 +170,18 @@ bounded read and the checked atomic replace itself, over
 - a re-read that checks dev, inode, length and mtime;
 - the rename.
 
-Only the formatter stays on the host: `hc_fmt_source` runs
-`fmt_commands::format_text` on the text that was read, and
-`hc_fmt_output` copies the output out. The Codex §39 formatter work had no
-open issue or PR, and nothing under crates/vesper-fmt changed.
+Until #1996 part 3d the formatter stayed on the host: `hc_fmt_source`
+ran `fmt_commands::format_text` on the text that was read, and
+`hc_fmt_output` copied the output out. Since part 3d, `fmt_run` calls
+@vesper/fmt (`format` and `format_recovery` with `Limits::default()`),
+whose port matches vesper_fmt on every repository file, damaged copies and
+limit sweeps (#2090, #2113, #2130). It also writes the error text
+(`cannot format source: <Error as Debug>`), and `hc_fmt_*` is gone.
 
 | Path | What |
 |---|---|
 | `packages/vesper-driver-commands/src/lib.ves` | `fmt`, the dispatch row, the walk, the JSON writer, the UTF-8 check |
-| `packages/vesper-driver-commands/commands.vsys` | `hc_fmt_source` (status, plus changed, output bytes and edits in a `u64` slice), `hc_fmt_output` (the output, copied out) and `hc_fmt_error` (the last error, copied out) |
-| `crates/vesper-hybrid/src/commands.rs` | their host side |
+| `packages/vesper-driver-commands/Loom.toml` | depends on @vesper/fmt (crates/vesper-fmt/vesper) |
 | `crates/vesper-hybrid/port/driver.rs` | regenerated binding (keeps the two symbols linked) |
 | `src/fmt_commands.rs` | `format_text` (the formatter of one file's text) is `pub(crate)` |
 | `crates/vesper-hybrid/tests/self_host_cli_commands.rs` | `fmt_matches_the_default_compiler`, `fmt_walk_limit_matches_the_default_compiler` (Linux: 200,000 entries walk, 200,001 give the bounded-walk error, on both compilers); `routing_runs_in_vesper` now expects `fmt` to print from Vesper |

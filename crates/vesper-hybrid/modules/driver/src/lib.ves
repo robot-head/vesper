@@ -50,7 +50,7 @@ use @vesper/wit-component::{wit_component_command};
 use @vesper/ebpf-backend::{ebpf_backend_build};
 // `vesper build --codegen verified` in Vesper (#1886).
 use @vesper/verified-codegen::{compile_bytes};
-use @vesper-std/fmt::{write_u64};
+use @vesper-std/fmt::{fmt, write_bytes, write_str, write_u64};
 // SH5 lane 13 (#1336): the layers of the commands off the compile path.
 use @vesper/driver-commands::{
     run as run_command, io_error_text as commands_io_error_text, join, measure_tee
@@ -754,10 +754,12 @@ fn wasm_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[Hybri
         return pass(inout s, step_wasm_build());
     }
     let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    line.extend(in "built ".as_bytes());
-    line.extend(in path.as_slice());
-    line.extend(in " (wasm32-wasip2 component)".as_bytes());
-    line.push(10);
+    fmt{
+        inout line;
+        write_str(in "built "),
+        write_bytes(in path.as_slice()),
+        write_str(in " (wasm32-wasip2 component)\n")
+    };
     print(stdout_stream(), in line.as_slice());
     0
 }
@@ -859,14 +861,16 @@ fn verified_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[H
         return pass(inout s, step_verified_build());
     }
     let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    line.extend(in "built ".as_bytes());
-    line.extend(in path.as_slice());
-    line.extend(in " (verified codegen, ".as_bytes());
-    line.extend(in b[8..wrapping_add(8, ll)]);
-    line.extend(in ", ".as_bytes());
-    line.extend(in code.as_slice());
-    line.extend(in " bytes of code)".as_bytes());
-    line.push(10);
+    fmt{
+        inout line;
+        write_str(in "built "),
+        write_bytes(in path.as_slice()),
+        write_str(in " (verified codegen, "),
+        write_bytes(in b[8..wrapping_add(8, ll)]),
+        write_str(in ", "),
+        write_bytes(in code.as_slice()),
+        write_str(in " bytes of code)\n")
+    };
     print(stdout_stream(), in line.as_slice());
     0
 }
@@ -1106,11 +1110,14 @@ fn native_code(
         return count_error(wrapping_i64(findings), in "native verifier finding(s)");
     }
     let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    line.extend(in "verified ".as_bytes());
-    write_u64(inout line, functions);
-    line.extend(in " emitted function(s): ".as_bytes());
-    line.extend(in b[names_start..names_end]);
-    line.push(10);
+    fmt{
+        inout line;
+        write_str(in "verified "),
+        write_u64(functions),
+        write_str(in " emitted function(s): "),
+        write_bytes(in b[names_start..names_end]),
+        write_str(in "\n")
+    };
     print(stderr_stream(), in line.as_slice());
     out.extend(in b[code_start..b.len()]);
     0

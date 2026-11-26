@@ -32,33 +32,33 @@ const V_DF: u64 = 8;
 const V_RT: u64 = 4;
 const V_STACK: u64 = 2;
 
-fn src_len(in c: Cx) -> u64 {
-    c.nm.size(wrapping_u32(c.source))
+fn src_len(in ctx: Cx) -> u64 {
+    ctx.names.size(wrapping_u32(ctx.source))
 }
 
-fn src(in c: Cx, i: u64) -> u8 {
-    c.nm.byte(wrapping_u32(c.source), i)
+fn src(in ctx: Cx, i: u64) -> u8 {
+    ctx.names.byte(wrapping_u32(ctx.source), i)
 }
 
-fn verifier_name(inout o: ChunkSeq[u8], v: u64) {
-    if v == V_CT {
-        put(inout o, "const-time");
-    } else if v == V_STACK {
-        put(inout o, "stack");
-    } else if v == V_RT {
-        put(inout o, "realtime");
+fn verifier_name(inout out: ChunkSeq[u8], verifier: u64) {
+    if verifier == V_CT {
+        put(inout out, "const-time");
+    } else if verifier == V_STACK {
+        put(inout out, "stack");
+    } else if verifier == V_RT {
+        put(inout out, "realtime");
     } else {
-        put(inout o, "detfloat");
+        put(inout out, "detfloat");
     }
 }
 
-fn text(inout o: ChunkSeq[u8], in tx: ChunkSeq[u8], at: u64, len: u64) {
+fn text(inout out: ChunkSeq[u8], in report_text: ChunkSeq[u8], at: u64, len: u64) {
     for i in at..wrapping_add(at, len) {
-        let b = match tx.try_get(i) {
-            Option::Some(b) => b,
+        let byte = match report_text.try_get(i) {
+            Option::Some(byte) => byte,
             Option::None => 0,
         };
-        o.push(b);
+        out.push(byte);
     }
 }
 
@@ -67,14 +67,14 @@ fn is_continuation(b: u8) -> bool {
 }
 
 // `file:line:col: ` of byte `offset` (back to a char boundary).
-fn at(in c: Cx, inout o: ChunkSeq[u8], offset: u64) {
-    let n = src_len(in c);
+fn at(in ctx: Cx, inout out: ChunkSeq[u8], offset: u64) {
+    let source_len = src_len(in ctx);
     let mut start = offset;
-    if start > n {
-        start = n;
+    if start > source_len {
+        start = source_len;
     }
     loop {
-        if start == 0 || start == n || !is_continuation(src(in c, start)) {
+        if start == 0 || start == source_len || !is_continuation(src(in ctx, start)) {
             break;
         }
         start = wrapping_sub(start, 1);
@@ -82,7 +82,7 @@ fn at(in c: Cx, inout o: ChunkSeq[u8], offset: u64) {
     let mut line: u64 = 1;
     let mut col: u64 = 0;
     for i in 0..start {
-        let b = src(in c, i);
+        let b = src(in ctx, i);
         if b == 10 {
             line = wrapping_add(line, 1);
             col = 0;
@@ -90,12 +90,12 @@ fn at(in c: Cx, inout o: ChunkSeq[u8], offset: u64) {
             col = wrapping_add(col, 1);
         }
     }
-    puts(inout o, in c.nm, c.file);
-    put(inout o, ":");
-    putn(inout o, line);
-    put(inout o, ":");
-    putn(inout o, wrapping_add(col, 1));
-    put(inout o, ": ");
+    puts(inout out, in ctx.names, ctx.file);
+    put(inout out, ":");
+    putn(inout out, line);
+    put(inout out, ":");
+    putn(inout out, wrapping_add(col, 1));
+    put(inout out, ": ");
 }
 
 fn is_space(b: u8) -> bool {
@@ -103,47 +103,49 @@ fn is_space(b: u8) -> bool {
 }
 
 // The span start past leading whitespace and `//` comment lines.
-fn item_start(in c: Cx, s: u64, e: u64) -> u64 {
-    let n = src_len(in c);
-    let mut start = s;
-    if start > n {
-        start = n;
+fn item_start(in ctx: Cx, span_start: u64, span_end: u64) -> u64 {
+    let source_len = src_len(in ctx);
+    let mut start = span_start;
+    if start > source_len {
+        start = source_len;
     }
-    let mut end = e;
-    if end > n {
-        end = n;
+    let mut end = span_end;
+    if end > source_len {
+        end = source_len;
     }
     if end < start {
         end = start;
     }
     loop {
         // `source.get(start..end)` fails off char boundaries.
-        if (start < n && is_continuation(src(in c, start)))
-            || (end < n && is_continuation(src(in c, end))) {
+        if (start < source_len && is_continuation(src(in ctx, start)))
+            || (end < source_len && is_continuation(src(in ctx, end))) {
             break;
         }
-        let mut k = start;
+        let mut trimmed = start;
         loop {
-            if k >= end || !is_space(src(in c, k)) {
+            if trimmed >= end || !is_space(src(in ctx, trimmed)) {
                 break;
             }
-            k = wrapping_add(k, 1);
+            trimmed = wrapping_add(trimmed, 1);
         }
-        if wrapping_add(k, 1) < end && src(in c, k) == 47 && src(in c, wrapping_add(k, 1)) == 47 {
-            let mut j = k;
+        if wrapping_add(trimmed, 1) < end
+            && src(in ctx, trimmed) == 47
+            && src(in ctx, wrapping_add(trimmed, 1)) == 47 {
+            let mut line_end = trimmed;
             loop {
-                if j >= end || src(in c, j) == 10 {
+                if line_end >= end || src(in ctx, line_end) == 10 {
                     break;
                 }
-                j = wrapping_add(j, 1);
+                line_end = wrapping_add(line_end, 1);
             }
-            if j < end {
-                start = wrapping_add(j, 1);
+            if line_end < end {
+                start = wrapping_add(line_end, 1);
             } else {
                 start = end;
             }
         } else {
-            start = k;
+            start = trimmed;
             break;
         }
     }
@@ -151,171 +153,187 @@ fn item_start(in c: Cx, s: u64, e: u64) -> u64 {
 }
 
 // `native_verifiers::render`.
-fn render_report(in c: Cx, inout o: ChunkSeq[u8]) {
-    for k in 0..c.r.notes.len() / 2 {
-        put(inout o, "note: ");
+fn render_report(in ctx: Cx, inout out: ChunkSeq[u8]) {
+    for k in 0..ctx.report.notes.len() / 2 {
+        put(inout out, "note: ");
         text(
-            inout o,
-            in c.r.tx,
-            g(in c.r.notes, wrapping_mul(k, 2)),
-            g(in c.r.notes, wrapping_add(wrapping_mul(k, 2), 1))
+            inout out,
+            in ctx.report.text,
+            g(in ctx.report.notes, wrapping_mul(k, 2)),
+            g(in ctx.report.notes, wrapping_add(wrapping_mul(k, 2), 1))
         );
-        put(inout o, "\n");
+        put(inout out, "\n");
     }
-    if c.r.has_stack {
-        render(in c.nm, in c.r, inout o);
+    if ctx.report.has_stack {
+        render(in ctx.names, in ctx.report, inout out);
     }
-    for k in 0..c.r.fd.len() / FDW {
-        let b = wrapping_mul(k, FDW);
-        if g(in c.r.fd, wrapping_add(b, 11)) == 1 {
-            at(in c, inout o, g(in c.r.fd, wrapping_add(b, 12)));
-        } else if g(in c.r.fd, wrapping_add(b, 8)) == 1 {
-            let s = item_start(
-                in c,
-                g(in c.r.fd, wrapping_add(b, 9)),
-                g(in c.r.fd, wrapping_add(b, 10))
+    for k in 0..ctx.report.findings.len() / FDW {
+        let row = wrapping_mul(k, FDW);
+        if g(in ctx.report.findings, wrapping_add(row, 11)) == 1 {
+            at(in ctx, inout out, g(in ctx.report.findings, wrapping_add(row, 12)));
+        } else if g(in ctx.report.findings, wrapping_add(row, 8)) == 1 {
+            let item_at = item_start(
+                in ctx,
+                g(in ctx.report.findings, wrapping_add(row, 9)),
+                g(in ctx.report.findings, wrapping_add(row, 10))
             );
-            at(in c, inout o, s);
+            at(in ctx, inout out, item_at);
         }
-        put(inout o, "error[");
-        verifier_name(inout o, g(in c.r.fd, b));
-        put(inout o, "/");
+        put(inout out, "error[");
+        verifier_name(inout out, g(in ctx.report.findings, row));
+        put(inout out, "/");
         text(
-            inout o,
-            in c.r.tx,
-            g(in c.r.fd, wrapping_add(b, 4)),
-            g(in c.r.fd, wrapping_add(b, 5))
+            inout out,
+            in ctx.report.text,
+            g(in ctx.report.findings, wrapping_add(row, 4)),
+            g(in ctx.report.findings, wrapping_add(row, 5))
         );
-        put(inout o, "]: ");
-        puts(inout o, in c.nm, g(in c.r.fd, wrapping_add(b, 1)));
-        if g(in c.r.fd, wrapping_add(b, 2)) == 1 {
-            put(inout o, " (inst ");
-            putn(inout o, g(in c.r.fd, wrapping_add(b, 3)));
-            put(inout o, ")");
+        put(inout out, "]: ");
+        puts(inout out, in ctx.names, g(in ctx.report.findings, wrapping_add(row, 1)));
+        if g(in ctx.report.findings, wrapping_add(row, 2)) == 1 {
+            put(inout out, " (inst ");
+            putn(inout out, g(in ctx.report.findings, wrapping_add(row, 3)));
+            put(inout out, ")");
         }
-        put(inout o, ": ");
+        put(inout out, ": ");
         text(
-            inout o,
-            in c.r.tx,
-            g(in c.r.fd, wrapping_add(b, 6)),
-            g(in c.r.fd, wrapping_add(b, 7))
+            inout out,
+            in ctx.report.text,
+            g(in ctx.report.findings, wrapping_add(row, 6)),
+            g(in ctx.report.findings, wrapping_add(row, 7))
         );
-        put(inout o, "\n");
+        put(inout out, "\n");
     }
 }
 
-fn opt(inout o: ChunkSeq[u8], has: bool, v: u64) {
+fn opt(inout out: ChunkSeq[u8], has: bool, v: u64) {
     if has {
-        putn(inout o, v);
+        putn(inout out, v);
     } else {
-        put(inout o, "-");
+        put(inout out, "-");
     }
 }
 
 // The report as tests/common/backend_checks_input.rs `dump` prints it.
-fn dump(in c: Cx, inout o: ChunkSeq[u8]) {
-    render_report(in c, inout o);
-    put(inout o, "--\nverifiers ");
+fn dump(in ctx: Cx, inout out: ChunkSeq[u8]) {
+    render_report(in ctx, inout out);
+    put(inout out, "--\nverifiers ");
     let mut first = true;
     for bit in 0..4 {
-        let v = wrapping_shl_u64(1, bit);
-        if c.r.verifiers & v != 0 {
+        let verifier = wrapping_shl_u64(1, bit);
+        if ctx.report.verifiers & verifier != 0 {
             if !first {
-                put(inout o, ",");
+                put(inout out, ",");
             }
             first = false;
-            verifier_name(inout o, v);
+            verifier_name(inout out, verifier);
         }
     }
-    put(inout o, "\nfunctions ");
-    putn(inout o, c.r.functions);
-    put(inout o, "\n");
-    for k in 0..c.r.notes.len() / 2 {
-        put(inout o, "note ");
+    put(inout out, "\nfunctions ");
+    putn(inout out, ctx.report.functions);
+    put(inout out, "\n");
+    for k in 0..ctx.report.notes.len() / 2 {
+        put(inout out, "note ");
         text(
-            inout o,
-            in c.r.tx,
-            g(in c.r.notes, wrapping_mul(k, 2)),
-            g(in c.r.notes, wrapping_add(wrapping_mul(k, 2), 1))
+            inout out,
+            in ctx.report.text,
+            g(in ctx.report.notes, wrapping_mul(k, 2)),
+            g(in ctx.report.notes, wrapping_add(wrapping_mul(k, 2), 1))
         );
-        put(inout o, "\n");
+        put(inout out, "\n");
     }
-    for k in 0..c.r.fd.len() / FDW {
-        let b = wrapping_mul(k, FDW);
-        put(inout o, "finding ");
-        verifier_name(inout o, g(in c.r.fd, b));
-        put(inout o, " ");
-        puts(inout o, in c.nm, g(in c.r.fd, wrapping_add(b, 1)));
-        put(inout o, " ");
-        opt(inout o, g(in c.r.fd, wrapping_add(b, 2)) == 1, g(in c.r.fd, wrapping_add(b, 3)));
-        put(inout o, " ");
-        text(
-            inout o,
-            in c.r.tx,
-            g(in c.r.fd, wrapping_add(b, 4)),
-            g(in c.r.fd, wrapping_add(b, 5))
+    for k in 0..ctx.report.findings.len() / FDW {
+        let row = wrapping_mul(k, FDW);
+        put(inout out, "finding ");
+        verifier_name(inout out, g(in ctx.report.findings, row));
+        put(inout out, " ");
+        puts(inout out, in ctx.names, g(in ctx.report.findings, wrapping_add(row, 1)));
+        put(inout out, " ");
+        opt(
+            inout out,
+            g(in ctx.report.findings, wrapping_add(row, 2)) == 1,
+            g(in ctx.report.findings, wrapping_add(row, 3))
         );
-        put(inout o, " ");
-        if g(in c.r.fd, wrapping_add(b, 8)) == 1 {
-            putn(inout o, g(in c.r.fd, wrapping_add(b, 9)));
-            put(inout o, "..");
-            putn(inout o, g(in c.r.fd, wrapping_add(b, 10)));
+        put(inout out, " ");
+        text(
+            inout out,
+            in ctx.report.text,
+            g(in ctx.report.findings, wrapping_add(row, 4)),
+            g(in ctx.report.findings, wrapping_add(row, 5))
+        );
+        put(inout out, " ");
+        if g(in ctx.report.findings, wrapping_add(row, 8)) == 1 {
+            putn(inout out, g(in ctx.report.findings, wrapping_add(row, 9)));
+            put(inout out, "..");
+            putn(inout out, g(in ctx.report.findings, wrapping_add(row, 10)));
         } else {
-            put(inout o, "-");
+            put(inout out, "-");
         }
-        put(inout o, " ");
-        opt(inout o, g(in c.r.fd, wrapping_add(b, 11)) == 1, g(in c.r.fd, wrapping_add(b, 12)));
-        put(inout o, " ");
-        text(
-            inout o,
-            in c.r.tx,
-            g(in c.r.fd, wrapping_add(b, 6)),
-            g(in c.r.fd, wrapping_add(b, 7))
+        put(inout out, " ");
+        opt(
+            inout out,
+            g(in ctx.report.findings, wrapping_add(row, 11)) == 1,
+            g(in ctx.report.findings, wrapping_add(row, 12))
         );
-        put(inout o, "\n");
+        put(inout out, " ");
+        text(
+            inout out,
+            in ctx.report.text,
+            g(in ctx.report.findings, wrapping_add(row, 6)),
+            g(in ctx.report.findings, wrapping_add(row, 7))
+        );
+        put(inout out, "\n");
     }
-    if c.r.has_stack {
-        for k in 0..c.r.sr.len() / 7 {
-            let b = wrapping_mul(k, 7);
-            put(inout o, "root ");
-            puts(inout o, in c.nm, g(in c.r.sr, b));
-            put(inout o, " ");
-            putn(inout o, g(in c.r.sr, wrapping_add(b, 1)));
-            put(inout o, " ");
-            opt(inout o, g(in c.r.sr, wrapping_add(b, 2)) == 1, g(in c.r.sr, wrapping_add(b, 3)));
-            put(inout o, " ");
-            putn(inout o, g(in c.r.sr, wrapping_add(b, 4)));
-            put(inout o, " ");
-            let pa = g(in c.r.sr, wrapping_add(b, 5));
-            for q in 0..g(in c.r.sr, wrapping_add(b, 6)) {
+    if ctx.report.has_stack {
+        for k in 0..ctx.report.sr.len() / 7 {
+            let row = wrapping_mul(k, 7);
+            put(inout out, "root ");
+            puts(inout out, in ctx.names, g(in ctx.report.sr, row));
+            put(inout out, " ");
+            putn(inout out, g(in ctx.report.sr, wrapping_add(row, 1)));
+            put(inout out, " ");
+            opt(
+                inout out,
+                g(in ctx.report.sr, wrapping_add(row, 2)) == 1,
+                g(in ctx.report.sr, wrapping_add(row, 3))
+            );
+            put(inout out, " ");
+            putn(inout out, g(in ctx.report.sr, wrapping_add(row, 4)));
+            put(inout out, " ");
+            let path_at = g(in ctx.report.sr, wrapping_add(row, 5));
+            for q in 0..g(in ctx.report.sr, wrapping_add(row, 6)) {
                 if q > 0 {
-                    put(inout o, " -> ");
+                    put(inout out, " -> ");
                 }
-                puts(inout o, in c.nm, g(in c.r.spool, wrapping_add(pa, q)));
+                puts(inout out, in ctx.names, g(in ctx.report.spool, wrapping_add(path_at, q)));
             }
-            put(inout o, "\n");
+            put(inout out, "\n");
         }
-        for k in 0..c.r.sf.len() / 7 {
-            let b = wrapping_mul(k, 7);
-            put(inout o, "stack ");
-            puts(inout o, in c.nm, g(in c.r.sf, b));
-            put(inout o, " ");
-            opt(inout o, g(in c.r.sf, wrapping_add(b, 1)) == 1, g(in c.r.sf, wrapping_add(b, 2)));
-            put(inout o, " ");
-            text(
-                inout o,
-                in c.r.tx,
-                g(in c.r.sf, wrapping_add(b, 3)),
-                g(in c.r.sf, wrapping_add(b, 4))
+        for k in 0..ctx.report.sf.len() / 7 {
+            let row = wrapping_mul(k, 7);
+            put(inout out, "stack ");
+            puts(inout out, in ctx.names, g(in ctx.report.sf, row));
+            put(inout out, " ");
+            opt(
+                inout out,
+                g(in ctx.report.sf, wrapping_add(row, 1)) == 1,
+                g(in ctx.report.sf, wrapping_add(row, 2))
             );
-            put(inout o, " ");
+            put(inout out, " ");
             text(
-                inout o,
-                in c.r.tx,
-                g(in c.r.sf, wrapping_add(b, 5)),
-                g(in c.r.sf, wrapping_add(b, 6))
+                inout out,
+                in ctx.report.text,
+                g(in ctx.report.sf, wrapping_add(row, 3)),
+                g(in ctx.report.sf, wrapping_add(row, 4))
             );
-            put(inout o, "\n");
+            put(inout out, " ");
+            text(
+                inout out,
+                in ctx.report.text,
+                g(in ctx.report.sf, wrapping_add(row, 5)),
+                g(in ctx.report.sf, wrapping_add(row, 6))
+            );
+            put(inout out, "\n");
         }
     }
 }
@@ -323,169 +341,174 @@ fn dump(in c: Cx, inout o: ChunkSeq[u8]) {
 // The verification run of the input: the dump of the report, or
 // `error <message>` (packed by `pack_text`).
 pub fn backend_verify(in input: Str) -> ChunkSeq[u64] {
-    let mut c = read_input(in input.as_bytes());
-    run(inout c);
-    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    if c.err {
-        put(inout o, "error ");
-        o.extend(in c.emsg.as_slice());
-        put(inout o, "\n");
+    let mut ctx = read_input(in input.as_bytes());
+    run(inout ctx);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if ctx.failed {
+        put(inout out, "error ");
+        out.extend(in ctx.error_text.as_slice());
+        put(inout out, "\n");
     } else {
-        dump(in c, inout o);
+        dump(in ctx, inout out);
     }
-    pack_text(in o)
+    pack_text(in out)
 }
 
 // The run without the text: the finding count (timing).
 pub fn backend_verify_count(in input: Str) -> u64 {
-    let mut c = read_input(in input.as_bytes());
-    run(inout c);
-    if c.err {
+    let mut ctx = read_input(in input.as_bytes());
+    run(inout ctx);
+    if ctx.failed {
         return 18446744073709551615;
     }
-    wrapping_add(c.r.fd.len() / FDW, c.r.notes.len())
+    wrapping_add(ctx.report.findings.len() / FDW, ctx.report.notes.len())
 }
 
 // Decoding only: the baseline the timing subtracts.
 pub fn backend_verify_decode(in input: Str) -> u64 {
-    let c = read_input(in input.as_bytes());
-    wrapping_add(c.insts.len(), c.nfns)
+    let ctx = read_input(in input.as_bytes());
+    wrapping_add(ctx.insts.len(), ctx.fn_count)
 }
 
-fn w_bytes(inout o: ChunkSeq[u64], in b: ChunkSeq[u8], at: u64, n: u64) {
-    o.push(n);
+fn w_bytes(inout out: ChunkSeq[u64], in bytes: ChunkSeq[u8], at: u64, n: u64) {
+    out.push(n);
     let mut i: u64 = 0;
     loop {
         if i >= n {
             break;
         }
         let mut word: u64 = 0;
-        let mut sh: u64 = 0;
+        let mut shift: u64 = 0;
         loop {
-            if sh >= 64 || i >= n {
+            if shift >= 64 || i >= n {
                 break;
             }
-            let byte = wrapping_u64(b8(in b, wrapping_add(at, i)));
-            word = word | wrapping_shl_u64(byte, wrapping_u32(sh));
-            sh = wrapping_add(sh, 8);
+            let byte = wrapping_u64(b8(in bytes, wrapping_add(at, i)));
+            word = word | wrapping_shl_u64(byte, wrapping_u32(shift));
+            shift = wrapping_add(shift, 8);
             i = wrapping_add(i, 1);
         }
-        o.push(word);
+        out.push(word);
     }
 }
 
-fn w_name(inout o: ChunkSeq[u64], in nm: Names, s: u64) {
-    let id = wrapping_u32(s);
-    let n = nm.size(id);
-    o.push(n);
+fn w_name(inout out: ChunkSeq[u64], in names: Names, sym: u64) {
+    let id = wrapping_u32(sym);
+    let n = names.size(id);
+    out.push(n);
     let mut i: u64 = 0;
     loop {
         if i >= n {
             break;
         }
         let mut word: u64 = 0;
-        let mut sh: u64 = 0;
+        let mut shift: u64 = 0;
         loop {
-            if sh >= 64 || i >= n {
+            if shift >= 64 || i >= n {
                 break;
             }
-            let byte = wrapping_u64(nm.byte(id, i));
-            word = word | wrapping_shl_u64(byte, wrapping_u32(sh));
-            sh = wrapping_add(sh, 8);
+            let byte = wrapping_u64(names.byte(id, i));
+            word = word | wrapping_shl_u64(byte, wrapping_u32(shift));
+            shift = wrapping_add(shift, 8);
             i = wrapping_add(i, 1);
         }
-        o.push(word);
+        out.push(word);
     }
 }
 
 // Structured report words for `vesper-hybrid`'s `codegen_swap::verifiers`
 // (#1291), matching `tests/common/backend_checks_input.rs::decode_report`.
-pub fn backend_verify_report_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut c = read_input(in b);
-    run(inout c);
-    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    if c.err {
-        o.push(1);
-        w_bytes(inout o, in c.emsg, 0, c.emsg.len());
-        return o;
+pub fn backend_verify_report_bytes(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut ctx = read_input(in bytes);
+    run(inout ctx);
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if ctx.failed {
+        out.push(1);
+        w_bytes(inout out, in ctx.error_text, 0, ctx.error_text.len());
+        return out;
     }
-    o.push(0);
-    o.push(c.r.verifiers);
-    o.push(c.r.functions);
-    let nnotes = c.r.notes.len() / 2;
-    o.push(nnotes);
-    for k in 0..nnotes {
-        let b0 = wrapping_mul(k, 2);
-        w_bytes(inout o, in c.r.tx, g(in c.r.notes, b0), g(in c.r.notes, wrapping_add(b0, 1)));
+    out.push(0);
+    out.push(ctx.report.verifiers);
+    out.push(ctx.report.functions);
+    let note_count = ctx.report.notes.len() / 2;
+    out.push(note_count);
+    for k in 0..note_count {
+        let note_row = wrapping_mul(k, 2);
+        w_bytes(
+            inout out,
+            in ctx.report.text,
+            g(in ctx.report.notes, note_row),
+            g(in ctx.report.notes, wrapping_add(note_row, 1))
+        );
     }
-    let nf = c.r.fd.len() / FDW;
-    o.push(nf);
-    for k in 0..nf {
+    let finding_count = ctx.report.findings.len() / FDW;
+    out.push(finding_count);
+    for k in 0..finding_count {
         let base = wrapping_mul(k, FDW);
-        o.push(g(in c.r.fd, base));
-        w_name(inout o, in c.nm, g(in c.r.fd, wrapping_add(base, 1)));
-        o.push(g(in c.r.fd, wrapping_add(base, 2)));
-        o.push(g(in c.r.fd, wrapping_add(base, 3)));
+        out.push(g(in ctx.report.findings, base));
+        w_name(inout out, in ctx.names, g(in ctx.report.findings, wrapping_add(base, 1)));
+        out.push(g(in ctx.report.findings, wrapping_add(base, 2)));
+        out.push(g(in ctx.report.findings, wrapping_add(base, 3)));
         w_bytes(
-            inout o,
-            in c.r.tx,
-            g(in c.r.fd, wrapping_add(base, 4)),
-            g(in c.r.fd, wrapping_add(base, 5))
+            inout out,
+            in ctx.report.text,
+            g(in ctx.report.findings, wrapping_add(base, 4)),
+            g(in ctx.report.findings, wrapping_add(base, 5))
         );
         w_bytes(
-            inout o,
-            in c.r.tx,
-            g(in c.r.fd, wrapping_add(base, 6)),
-            g(in c.r.fd, wrapping_add(base, 7))
+            inout out,
+            in ctx.report.text,
+            g(in ctx.report.findings, wrapping_add(base, 6)),
+            g(in ctx.report.findings, wrapping_add(base, 7))
         );
-        o.push(g(in c.r.fd, wrapping_add(base, 8)));
-        o.push(g(in c.r.fd, wrapping_add(base, 9)));
-        o.push(g(in c.r.fd, wrapping_add(base, 10)));
-        o.push(g(in c.r.fd, wrapping_add(base, 11)));
-        o.push(g(in c.r.fd, wrapping_add(base, 12)));
+        out.push(g(in ctx.report.findings, wrapping_add(base, 8)));
+        out.push(g(in ctx.report.findings, wrapping_add(base, 9)));
+        out.push(g(in ctx.report.findings, wrapping_add(base, 10)));
+        out.push(g(in ctx.report.findings, wrapping_add(base, 11)));
+        out.push(g(in ctx.report.findings, wrapping_add(base, 12)));
     }
-    if c.r.has_stack {
-        o.push(1);
-        let nsr = c.r.sr.len() / 7;
-        o.push(nsr);
-        for k in 0..nsr {
+    if ctx.report.has_stack {
+        out.push(1);
+        let root_count = ctx.report.sr.len() / 7;
+        out.push(root_count);
+        for k in 0..root_count {
             let base = wrapping_mul(k, 7);
-            w_name(inout o, in c.nm, g(in c.r.sr, base));
-            o.push(g(in c.r.sr, wrapping_add(base, 1)));
-            o.push(g(in c.r.sr, wrapping_add(base, 2)));
-            o.push(g(in c.r.sr, wrapping_add(base, 3)));
-            o.push(g(in c.r.sr, wrapping_add(base, 4)));
-            let pa = g(in c.r.sr, wrapping_add(base, 5));
-            let pn = g(in c.r.sr, wrapping_add(base, 6));
-            o.push(pn);
-            for q in 0..pn {
-                w_name(inout o, in c.nm, g(in c.r.spool, wrapping_add(pa, q)));
+            w_name(inout out, in ctx.names, g(in ctx.report.sr, base));
+            out.push(g(in ctx.report.sr, wrapping_add(base, 1)));
+            out.push(g(in ctx.report.sr, wrapping_add(base, 2)));
+            out.push(g(in ctx.report.sr, wrapping_add(base, 3)));
+            out.push(g(in ctx.report.sr, wrapping_add(base, 4)));
+            let path_at = g(in ctx.report.sr, wrapping_add(base, 5));
+            let path_len = g(in ctx.report.sr, wrapping_add(base, 6));
+            out.push(path_len);
+            for q in 0..path_len {
+                w_name(inout out, in ctx.names, g(in ctx.report.spool, wrapping_add(path_at, q)));
             }
         }
-        let nsf = c.r.sf.len() / 7;
-        o.push(nsf);
-        for k in 0..nsf {
+        let stack_finding_count = ctx.report.sf.len() / 7;
+        out.push(stack_finding_count);
+        for k in 0..stack_finding_count {
             let base = wrapping_mul(k, 7);
-            w_name(inout o, in c.nm, g(in c.r.sf, base));
-            o.push(g(in c.r.sf, wrapping_add(base, 1)));
-            o.push(g(in c.r.sf, wrapping_add(base, 2)));
+            w_name(inout out, in ctx.names, g(in ctx.report.sf, base));
+            out.push(g(in ctx.report.sf, wrapping_add(base, 1)));
+            out.push(g(in ctx.report.sf, wrapping_add(base, 2)));
             w_bytes(
-                inout o,
-                in c.r.tx,
-                g(in c.r.sf, wrapping_add(base, 3)),
-                g(in c.r.sf, wrapping_add(base, 4))
+                inout out,
+                in ctx.report.text,
+                g(in ctx.report.sf, wrapping_add(base, 3)),
+                g(in ctx.report.sf, wrapping_add(base, 4))
             );
             w_bytes(
-                inout o,
-                in c.r.tx,
-                g(in c.r.sf, wrapping_add(base, 5)),
-                g(in c.r.sf, wrapping_add(base, 6))
+                inout out,
+                in ctx.report.text,
+                g(in ctx.report.sf, wrapping_add(base, 5)),
+                g(in ctx.report.sf, wrapping_add(base, 6))
             );
         }
     } else {
-        o.push(0);
+        out.push(0);
     }
-    o
+    out
 }
 
 pub fn backend_verify_report(in input: Str) -> ChunkSeq[u64] {

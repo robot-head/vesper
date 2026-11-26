@@ -481,3 +481,54 @@ itself (part 4b-4).
 The release driver measured 1.38x Rust in part 4c. The debug numbers
 above are not a speed measurement. The row stays open until a release
 ABBA run on a sugar-heavy package and the macro gap close.
+
+## Part 6: the macro check in the driver, and the first release gate
+
+- **Macro check** (`packages/vesper-sugar/src/driver.ves`): each round now
+  parses with `@vesper/front` `parse_macro_surface_tokens`, the port of
+  `macro_source::validate_surface`, under the limits that
+  `parser::parse_expansion_scopes` uses (1 MiB, 65,536 tokens, depth 48).
+  The swap no longer keeps sources or imports that contain `macro` on
+  Rust; only a length the input's numbers cannot hold stays there.
+- **One parse per round**: hygiene protection lowers the parse the round
+  already made (`@vesper/ast` `lower_surface_parsed`) instead of lexing,
+  parsing and lowering the text again. Range copies in the driver and the
+  template renderer copy in bulk.
+- **Flip gate** (`scripts/ci/flip-gate/sugar.json`): the differential is
+  `self_host_sugar driver_matches`, and the ABBA workload `expand` is
+  `self_host_sugar flip_gate` (Rust `rust_expand_sugar` against input,
+  JIT call and decode, R V V R over the repository and suite corpus,
+  plain and with imports). `tests/common/sugar_words.rs` (moved from the
+  hybrid crate) is shared by the swap, the hybrid test and the gate.
+
+| Test | Cases | Result |
+|---|---|---|
+| `self_host_sugar` `driver_matches_*` (6 tests, now with `macro` sources) | examples, suites, fuzz, scopes, imports | 0 differences |
+| flip gate differential | 3,872 cases | 0 differences; tests 1/1 pass |
+| flip gate ABBA `expand` (release, `target-cpu=native`, n=12) | the corpus above | 1.60x before this part; 1.49x [1.40x, 1.61x] and 1.53x [1.46x, 1.62x] after, INCONCLUSIVE |
+
+A profile of the driver showed the rest of the gap in calls to tiny
+helpers (`b8`, `add`, `inc`, `w64`) that the IR inliner leaves in place:
+`ir_inline::Budget::default()` stops inlining once a program has grown by
+40,000 instructions, and the sugar driver with the front end and the AST
+is past that before it reaches them. With that cap lifted the same run
+measured about 1.29x. The row stays open until the inliner change lands
+and the gate passes.
+
+## Part 7: the inliner budget scales with the program, and the flip
+
+- **Inliner** (`src/ir_inline.rs`): `Budget::for_program` is
+  `Budget::default()` with the program-wide cap raised to three times the
+  program's own cost (`PROGRAM_GROWTH_FACTOR`), never below 40,000. The
+  JIT, `--lib` exports, sessions and optimized executables use it. The
+  sugar driver program costs 46,076 and its inlining wants 107,000; the
+  per-caller (2,000), per-callee (4,000) and handle caps are unchanged.
+- **Flip**: row `pass("sugar", "sugar", "#1157")`, so `gated` expands sugar
+  in Vesper.
+
+| Gate | Result |
+|---|---|
+| differential (`driver_matches`) | 0 differences on 3,872 cases |
+| tests | 1/1 pass |
+| ABBA `expand` (release, `target-cpu=native`, n=12) | 1.33x [1.28x, 1.36x]; an ABBA-only run measured 1.25x [1.22x, 1.36x] |
+| verdict | PASS |

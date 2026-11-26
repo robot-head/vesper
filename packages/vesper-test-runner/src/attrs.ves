@@ -9,6 +9,10 @@ use @vesper/front::kinds::{
     k_at, k_comma, k_eof, k_eq, k_false, k_float, k_fn, k_int, k_l_brace, k_l_bracket, k_l_paren,
     k_lower, k_minus, k_r_brace, k_r_bracket, k_r_paren, k_string, k_true, k_upper
 };
+use @vesper-std/bytes::ascii::{
+    BACKSLASH, CARRIAGE_RETURN, DIGIT_ZERO, HYPHEN, LOWER_N, LOWER_R, LOWER_T, NEWLINE, NUL, QUOTE,
+    TAB
+};
 use self::big::{Big, as_u64, parse_int};
 use self::util::{add, byte, inc, is_text, push_range, sub, trim_end, trim_start, u8_at, u64_at};
 
@@ -227,9 +231,9 @@ impl Stream {
     fn string_val(inout self, in b: Slice[u8], s: u64, e: u64) -> Val {
         let mut i = s;
         let mut j = e;
-        if j > i && byte(in b, i) == 34 {
+        if j > i && byte(in b, i) == QUOTE {
             i = inc(i);
-            if j > i && byte(in b, sub(j, 1)) == 34 {
+            if j > i && byte(in b, sub(j, 1)) == QUOTE {
                 j = sub(j, 1);
             } else {
                 // No closing quote: `strip_suffix` fails, so the raw text
@@ -244,30 +248,30 @@ impl Stream {
             }
             let c = byte(in b, i);
             i = inc(i);
-            if c != 92 {
+            if c != BACKSLASH {
                 self.out.txt.push(c);
                 continue;
             }
             if i >= j {
-                self.out.txt.push(92);
+                self.out.txt.push(BACKSLASH);
                 break;
             }
             let d = byte(in b, i);
             i = inc(i);
-            if d == 34 {
-                self.out.txt.push(34);
-            } else if d == 92 {
-                self.out.txt.push(92);
-            } else if d == 110 {
-                self.out.txt.push(10);
-            } else if d == 114 {
-                self.out.txt.push(13);
-            } else if d == 116 {
-                self.out.txt.push(9);
-            } else if d == 48 {
-                self.out.txt.push(0);
+            if d == QUOTE {
+                self.out.txt.push(QUOTE);
+            } else if d == BACKSLASH {
+                self.out.txt.push(BACKSLASH);
+            } else if d == LOWER_N {
+                self.out.txt.push(NEWLINE);
+            } else if d == LOWER_R {
+                self.out.txt.push(CARRIAGE_RETURN);
+            } else if d == LOWER_T {
+                self.out.txt.push(TAB);
+            } else if d == DIGIT_ZERO {
+                self.out.txt.push(NUL);
             } else {
-                self.out.txt.push(92);
+                self.out.txt.push(BACKSLASH);
                 self.out.txt.push(d);
             }
         }
@@ -320,7 +324,7 @@ impl Stream {
             self.text_val(V_FLOAT, in b, s0, e0)
         } else if n == 2 && k0 == k_minus() && k1 == k_float() {
             let a = self.out.txt.len();
-            self.out.txt.push(45);
+            self.out.txt.push(HYPHEN);
             push_range(inout self.out.txt, in b, s1, e1);
             Val { tag: V_FLOAT, a: a, b: self.out.txt.len(), int: no_big(), flag: false }
         } else if n == 1 && (k0 == k_lower() || k0 == k_upper()) {

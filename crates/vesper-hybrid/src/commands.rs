@@ -17,8 +17,6 @@ thread_local! {
     static LAST_PROOF_AUDIT_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LAST_VERIFY_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LAST_LSP_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-    static FMT_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
-    static FMT_OUTPUT: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 /// `vesper proof-audit` from the driver module (#1341, #2091): it takes the
@@ -131,96 +129,6 @@ pub mod host {
         }
         // SAFETY: as documented.
         unsafe { std::slice::from_raw_parts(ptr, len) }
-    }
-
-    /// Copy `text` into `buf` when it fits; its length (the copy-out
-    /// protocol), or -1 for none.
-    ///
-    /// # Safety
-    /// `buf` is a lent writable slice of `len` bytes.
-    unsafe fn copy_out(text: Option<&[u8]>, buf: *mut u8, len: usize) -> i64 {
-        let Some(text) = text else { return -1 };
-        if text.len() <= len && !buf.is_null() {
-            // SAFETY: `buf` holds `len >= text.len()` bytes.
-            unsafe { std::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len()) };
-        }
-        i64::try_from(text.len()).unwrap_or(i64::MAX)
-    }
-
-    /// The formatter of one `vesper fmt` file (`fmt_commands::format_text`),
-    /// after the Vesper command layer's bounded read: `text` is its UTF-8
-    /// contents and flag 2 is `--recovery`. The status is 0 formatted (the
-    /// output waits for `hc_fmt_output`) or 3 failed (`hc_fmt_error` has the
-    /// error); `stats` gets changed, output bytes, whether there is an edit
-    /// count, and the edit count.
-    ///
-    /// # Safety
-    /// `text` is a lent byte slice and `stats` a lent writable slice of
-    /// `slen` words.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_fmt_source(
-        text: *const u8,
-        len: usize,
-        flags: u32,
-        stats: *mut u64,
-        slen: usize,
-    ) -> u32 {
-        let out: &mut [u64] = if slen == 0 || stats.is_null() {
-            &mut []
-        } else {
-            // SAFETY: as documented.
-            unsafe { std::slice::from_raw_parts_mut(stats, slen) }
-        };
-        out.iter_mut().for_each(|w| *w = 0);
-        // SAFETY: lent for the call.
-        let Ok(text) = std::str::from_utf8(unsafe { bytes(text, len) }) else {
-            super::FMT_ERROR.with(|e| *e.borrow_mut() = "fmt input must be UTF-8".into());
-            return 3;
-        };
-        let (result, edits) = match crate::fmt_commands::format_text(text, flags & 2 != 0) {
-            Ok(done) => done,
-            Err(error) => {
-                super::FMT_ERROR.with(|e| *e.borrow_mut() = error);
-                return 3;
-            }
-        };
-        let values = [
-            u64::from(result.changed),
-            result.output.len() as u64,
-            u64::from(edits.is_some()),
-            edits.unwrap_or(0) as u64,
-        ];
-        for (slot, v) in out.iter_mut().zip(values) {
-            *slot = v;
-        }
-        super::FMT_OUTPUT.with(|o| *o.borrow_mut() = result.output);
-        0
-    }
-
-    /// The output of the last successful `hc_fmt_source` (copy-out).
-    ///
-    /// # Safety
-    /// `buf` is a lent writable slice.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_fmt_output(buf: *mut u8, len: usize) -> i64 {
-        super::FMT_OUTPUT.with(|o| {
-            let o = o.borrow();
-            // SAFETY: lent for the call.
-            unsafe { copy_out(Some(o.as_bytes()), buf, len) }
-        })
-    }
-
-    /// The error of the last failed `hc_fmt_source`.
-    ///
-    /// # Safety
-    /// `buf` is a lent writable slice.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_fmt_error(buf: *mut u8, len: usize) -> i64 {
-        super::FMT_ERROR.with(|e| {
-            let e = e.borrow();
-            // SAFETY: lent for the call.
-            unsafe { copy_out(Some(e.as_bytes()), buf, len) }
-        })
     }
 
     /// Run `vesper ebpf check` on `path`, printing verification/stack-bound

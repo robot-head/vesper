@@ -45,10 +45,7 @@ const EXIT_SPACING: u64 = 262144;
 const BUILD_UNSUPPORTED: u64 = 3;
 
 fn word_at(in b: Slice[u8], i: u64) -> u64 {
-    match b.try_read_u64_le(wrapping_mul(i, 8)) {
-        Option::Some(w) => w,
-        Option::None => 0,
-    }
+    b.try_read_u64_le(wrapping_mul(i, 8)).unwrap_or(0)
 }
 
 // `text` packed little-endian eight bytes per word after one header word,
@@ -227,10 +224,7 @@ fn back(in lo: Lowered, arch: u64, os: u64, protocol: u8, max_code: u64, inout b
     let nf = wrapping_sub(lo.starts.len(), 1);
     let mut lo_row: u64 = 0;
     for f in 0..nf {
-        let hi = match lo.starts.try_get(wrapping_add(f, 1)) {
-            Option::Some(x) => x,
-            Option::None => lo_row,
-        };
+        let hi = lo.starts.try_get(wrapping_add(f, 1)).unwrap_or(lo_row);
         for i in lo_row..hi {
             let r = match lo.rows.try_get(i) {
                 Option::Some(r) => r,

@@ -79,10 +79,7 @@ fn binary_format_names() -> Str {
 }
 
 fn byte_at(in s: Slice[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(b) => b,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn same(in a: Slice[u8], in b: Slice[u8]) -> bool {

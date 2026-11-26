@@ -1,7 +1,7 @@
 // The harness input: tests/common/check_harness.rs encodes names, types
 // (post-order), the world and each task's work list as little-endian u64
 // words in one `Str`, which any JIT entry can take. This decoder rebuilds
-// the tables; `r` is left at the task's own words.
+// the tables; the reader is left at the task's own words.
 
 use self::util::{inc32, n32, u32_at};
 use self::names::{names_sized, Names, names_new};
@@ -17,13 +17,13 @@ pub struct Reader {
 }
 
 impl Reader {
-    pub fn word(inout self, in b: Slice[u8]) -> u64 {
-        let x = match b.try_read_u64_le(self.pos) {
-            Option::Some(x) => x,
+    pub fn word(inout self, in bytes: Slice[u8]) -> u64 {
+        let value = match bytes.try_read_u64_le(self.pos) {
+            Option::Some(value) => value,
             Option::None => 0,
         };
         self.pos = wrapping_add(self.pos, 8);
-        x
+        value
     }
 }
 
@@ -37,185 +37,195 @@ pub struct Ctx {
     nmap: ChunkSeq[u32],
 }
 
-fn read_names(inout r: Reader, in b: Slice[u8], inout names: Names, inout nmap: ChunkSeq[u32]) {
-    let count = r.word(in b);
+fn read_names(
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout names: Names,
+    inout nmap: ChunkSeq[u32]
+) {
+    let count = reader.word(in bytes);
     for i in 0..count {
-        let len = r.word(in b);
-        let start = r.pos;
-        let s = names.intern(in b[start..wrapping_add(start, len)]);
-        nmap.push(s);
+        let len = reader.word(in bytes);
+        let start = reader.pos;
+        let symbol = names.intern(in bytes[start..wrapping_add(start, len)]);
+        nmap.push(symbol);
         let padded = wrapping_mul(wrapping_add(len, 7) / 8, 8);
-        r.pos = wrapping_add(start, padded);
+        reader.pos = wrapping_add(start, padded);
     }
 }
 
-fn sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
-    u32_at(in nmap, x)
+fn sym(in nmap: ChunkSeq[u32], index: u64) -> u32 {
+    u32_at(in nmap, index)
 }
 
 // An optional name: 0 for none, else name index + 1; returns symbol + 1.
-fn opt_sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
-    if x == 0 {
+fn opt_sym(in nmap: ChunkSeq[u32], opt_index: u64) -> u32 {
+    if opt_index == 0 {
         0
     } else {
-        inc32(u32_at(in nmap, wrapping_sub(x, 1)))
+        inc32(u32_at(in nmap, wrapping_sub(opt_index, 1)))
     }
 }
 
 fn read_row(
-    inout r: Reader,
-    in b: Slice[u8],
-    inout t: Types,
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout types: Types,
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) -> u32 {
-    let count = r.word(in b);
-    let mut es: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
+    let count = reader.word(in bytes);
+    let mut effs: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
     let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for i in 0..count {
-        let label = opt_sym(in nmap, r.word(in b));
-        let name = sym(in nmap, r.word(in b));
-        let n = r.word(in b);
-        let a = n32(args.len());
-        for j in 0..n {
-            args.push(u32_at(in tmap, r.word(in b)));
+        let label = opt_sym(in nmap, reader.word(in bytes));
+        let name = sym(in nmap, reader.word(in bytes));
+        let arg_count = reader.word(in bytes);
+        let arg_start = n32(args.len());
+        for j in 0..arg_count {
+            args.push(u32_at(in tmap, reader.word(in bytes)));
         }
-        es.push(EffNode { label: label, name: name, a: a, n: n32(n) });
+        effs.push(EffNode { label: label, name: name, a: arg_start, n: n32(arg_count) });
     }
-    let tail = opt_sym(in nmap, r.word(in b));
-    t.mk_row(in es, in args, tail)
+    let tail = opt_sym(in nmap, reader.word(in bytes));
+    types.mk_row(in effs, in args, tail)
 }
 
 fn read_types(
-    inout r: Reader,
-    in b: Slice[u8],
-    inout t: Types,
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout types: Types,
     in nmap: ChunkSeq[u32],
     inout tmap: ChunkSeq[u32]
 ) {
-    let count = r.word(in b);
+    let count = reader.word(in bytes);
     for i in 0..count {
-        let kind = r.word(in b);
+        let kind = reader.word(in bytes);
         let id = if kind == TyKind::Lit {
             {
-                let neg = r.word(in b) != 0;
-                t.literal(neg, r.word(in b))
+                let neg = reader.word(in bytes) != 0;
+                types.literal(neg, reader.word(in bytes))
             }
         } else if kind == TyKind::Named {
-            let name = sym(in nmap, r.word(in b));
-            let n = r.word(in b);
-            let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
-            for j in 0..n {
-                args.push(u32_at(in tmap, r.word(in b)));
+            let name = sym(in nmap, reader.word(in bytes));
+            let arity = reader.word(in bytes);
+            let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](arity);
+            for j in 0..arity {
+                args.push(u32_at(in tmap, reader.word(in bytes)));
             }
-            t.named(name, in args)
+            types.named(name, in args)
         } else if kind == TyKind::Tuple {
-            let n = r.word(in b);
-            let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
-            for j in 0..n {
-                args.push(u32_at(in tmap, r.word(in b)));
+            let arity = reader.word(in bytes);
+            let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](arity);
+            for j in 0..arity {
+                args.push(u32_at(in tmap, reader.word(in bytes)));
             }
-            t.tuple(in args)
+            types.tuple(in args)
         } else if kind == TyKind::Fn {
-            let n = r.word(in b);
-            let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
-            let mut passes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
-            for j in 0..n {
-                passes.push(wrapping_u8(r.word(in b)));
-                args.push(u32_at(in tmap, r.word(in b)));
+            let arity = reader.word(in bytes);
+            let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](arity);
+            let mut passes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](arity);
+            for j in 0..arity {
+                passes.push(wrapping_u8(reader.word(in bytes)));
+                args.push(u32_at(in tmap, reader.word(in bytes)));
             }
-            let result = u32_at(in tmap, r.word(in b));
-            let row = read_row(inout r, in b, inout t, in nmap, in tmap);
-            let mode = wrapping_u8(r.word(in b));
-            t.mk_with(TyKind::Fn, mode, 0, in args, in passes, result, row, 0)
+            let result = u32_at(in tmap, reader.word(in bytes));
+            let row = read_row(inout reader, in bytes, inout types, in nmap, in tmap);
+            let mode = wrapping_u8(reader.word(in bytes));
+            types.mk_with(TyKind::Fn, mode, 0, in args, in passes, result, row, 0)
         } else if kind == TyKind::Row {
-            let row = read_row(inout r, in b, inout t, in nmap, in tmap);
-            t.row_type(row)
+            let row = read_row(inout reader, in bytes, inout types, in nmap, in tmap);
+            types.row_type(row)
         } else {
-            t.infer
+            types.infer
         };
         tmap.push(id);
     }
 }
 
 fn read_world(
-    inout r: Reader,
-    in b: Slice[u8],
-    inout wd: World,
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout world: World,
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) {
-    wd.box_active = r.word(in b) != 0;
-    let count = r.word(in b);
+    world.box_active = reader.word(in bytes) != 0;
+    let count = reader.word(in bytes);
     for i in 0..count {
-        let name = sym(in nmap, r.word(in b));
-        let mode = wrapping_u8(r.word(in b));
-        let gn = r.word(in b);
-        let ga = n32(wd.generics.len());
-        for j in 0..gn {
-            let g = sym(in nmap, r.word(in b));
-            let bound = wrapping_u8(r.word(in b));
-            let row = r.word(in b) != 0;
-            wd.generics.push(Generic { name: g, bound: bound, row: row });
+        let name = sym(in nmap, reader.word(in bytes));
+        let mode = wrapping_u8(reader.word(in bytes));
+        let generic_count = reader.word(in bytes);
+        let generic_start = n32(world.generics.len());
+        for j in 0..generic_count {
+            let generic_name = sym(in nmap, reader.word(in bytes));
+            let bound = wrapping_u8(reader.word(in bytes));
+            let is_row = reader.word(in bytes) != 0;
+            world.generics.push(Generic { name: generic_name, bound: bound, row: is_row });
         }
-        let is_enum = r.word(in b) != 0;
-        let tile = n32(r.word(in b));
-        let span_zero = r.word(in b) != 0;
-        let vn = r.word(in b);
-        let va = n32(wd.variants.len());
-        for j in 0..vn {
-            let vname = sym(in nmap, r.word(in b));
-            let named = r.word(in b) != 0;
-            let fc = r.word(in b);
-            let fa = n32(wd.fields.len());
-            for k in 0..fc {
-                let fname = sym(in nmap, r.word(in b));
-                let fty = u32_at(in tmap, r.word(in b));
-                let modality = wrapping_u8(r.word(in b));
-                wd.fields.push(Field { name: fname, ty: fty, modality: modality });
+        let is_enum = reader.word(in bytes) != 0;
+        let tile = n32(reader.word(in bytes));
+        let span_zero = reader.word(in bytes) != 0;
+        let variant_count = reader.word(in bytes);
+        let variant_start = n32(world.variants.len());
+        for j in 0..variant_count {
+            let vname = sym(in nmap, reader.word(in bytes));
+            let named = reader.word(in bytes) != 0;
+            let field_count = reader.word(in bytes);
+            let field_start = n32(world.fields.len());
+            for k in 0..field_count {
+                let fname = sym(in nmap, reader.word(in bytes));
+                let field_ty = u32_at(in tmap, reader.word(in bytes));
+                let modality = wrapping_u8(reader.word(in bytes));
+                world.fields.push(Field { name: fname, ty: field_ty, modality: modality });
             }
-            wd.variants.push(Variant { name: vname, fa: fa, fc: n32(fc), named: named });
+            world.variants.push(Variant {
+                name: vname,
+                fa: field_start,
+                fc: n32(field_count),
+                named: named
+            });
         }
-        let id = n32(wd.adts.len());
-        wd.adts.push(Adt {
+        let id = n32(world.adts.len());
+        world.adts.push(Adt {
             name: name,
             mode: mode,
-            ga: ga,
-            gn: n32(gn),
-            va: va,
-            vn: n32(vn),
+            ga: generic_start,
+            gn: n32(generic_count),
+            va: variant_start,
+            vn: n32(variant_count),
             is_enum: is_enum,
             tile: tile,
             span_zero: span_zero
         });
-        wd.index(name, id);
+        world.index(name, id);
     }
-    let en = r.word(in b);
-    for i in 0..en {
-        let name = sym(in nmap, r.word(in b));
-        let linear = r.word(in b) != 0;
-        set_by_symbol(inout wd.effect_by_name, name, inc32(n32(wd.effects.len())));
-        wd.effects.push(EffectRow { name: name, linear: linear });
+    let effect_count = reader.word(in bytes);
+    for i in 0..effect_count {
+        let name = sym(in nmap, reader.word(in bytes));
+        let linear = reader.word(in bytes) != 0;
+        set_by_symbol(inout world.effect_by_name, name, inc32(n32(world.effects.len())));
+        world.effects.push(EffectRow { name: name, linear: linear });
     }
-    read_spans(inout r, in b, inout wd.expr_types, in tmap, true);
-    read_spans(inout r, in b, inout wd.partial_ops, in tmap, false);
-    read_spans(inout r, in b, inout wd.overflow_ops, in tmap, false);
+    read_spans(inout reader, in bytes, inout world.expr_types, in tmap, true);
+    read_spans(inout reader, in bytes, inout world.partial_ops, in tmap, false);
+    read_spans(inout reader, in bytes, inout world.overflow_ops, in tmap, false);
 }
 
 // A span table, sorted by the encoder: count, then (start, end[, type]).
 fn read_spans(
-    inout r: Reader,
-    in b: Slice[u8],
+    inout reader: Reader,
+    in bytes: Slice[u8],
     inout rows: ChunkSeq[SpanRow],
     in tmap: ChunkSeq[u32],
     typed: bool
 ) {
-    let n = r.word(in b);
+    let n = reader.word(in bytes);
     for i in 0..n {
-        let start = r.word(in b);
-        let end = r.word(in b);
+        let start = reader.word(in bytes);
+        let end = reader.word(in bytes);
         let ty = if typed {
-            u32_at(in tmap, r.word(in b))
+            u32_at(in tmap, reader.word(in bytes))
         } else {
             NONE32
         };
@@ -223,35 +233,35 @@ fn read_spans(
     }
 }
 
-// Decodes the common sections; `r` is left at the first task section.
-pub fn read_ctx(inout r: Reader, in b: Slice[u8]) -> Ctx {
+// Decodes the common sections; `reader` is left at the first task section.
+pub fn read_ctx(inout reader: Reader, in bytes: Slice[u8]) -> Ctx {
     let mut names = names_new();
     let mut nmap: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    read_names(inout r, in b, inout names, inout nmap);
+    read_names(inout reader, in bytes, inout names, inout nmap);
     let mut types = types_new(inout names);
-    let k = known_new(inout names);
+    let known = known_new(inout names);
     let mut tmap: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    read_types(inout r, in b, inout types, in nmap, inout tmap);
-    let mut world = world_new(k);
-    read_world(inout r, in b, inout world, in nmap, in tmap);
+    read_types(inout reader, in bytes, inout types, in nmap, inout tmap);
+    let mut world = world_new(known);
+    read_world(inout reader, in bytes, inout world, in nmap, in tmap);
     Ctx { names: names, types: types, world: world, tmap: tmap, nmap: nmap }
 }
 
 // The names of an input whose types section is empty and whose world is
 // empty (a task that needs no checker data, such as the stack bound):
-// the names in a table sized for them, and the name map. `r` is left at
-// the first task section. For any other input `ok` is false and `r` is
-// unmoved: its reader is `read_ctx`.
+// the names in a table sized for them, and the name map. `reader` is left
+// at the first task section. For any other input `ok` is false and `reader`
+// is unmoved: its reader is `read_ctx`.
 pub struct NamesCtx {
     names: Names,
     nmap: ChunkSeq[u32],
     ok: bool,
 }
 
-pub fn read_names_ctx(inout r: Reader, in b: Slice[u8]) -> NamesCtx {
-    let start = r.pos;
-    let count = r.word(in b);
-    r.pos = start;
+pub fn read_names_ctx(inout reader: Reader, in bytes: Slice[u8]) -> NamesCtx {
+    let start = reader.pos;
+    let count = reader.word(in bytes);
+    reader.pos = start;
     let mut slots: u64 = 16;
     loop {
         if slots >= wrapping_mul(count, 4) || slots >= 4096 {
@@ -262,19 +272,19 @@ pub fn read_names_ctx(inout r: Reader, in b: Slice[u8]) -> NamesCtx {
     let mut names = names_sized(slots);
     names.reserve_names(wrapping_add(count, 1), wrapping_mul(count, 16));
     let mut nmap: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](count);
-    read_names(inout r, in b, inout names, inout nmap);
+    read_names(inout reader, in bytes, inout names, inout nmap);
     // The types count, then the empty world: the fip flag (either), the
     // ADT and effect counts and the three span tables.
-    let types = r.word(in b);
-    let fip = r.word(in b);
-    let mut empty = types == 0;
+    let type_count = reader.word(in bytes);
+    let fip = reader.word(in bytes);
+    let mut empty = type_count == 0;
     for i in 0..5 {
-        if r.word(in b) != 0 {
+        if reader.word(in bytes) != 0 {
             empty = false;
         }
     }
     if !empty {
-        r.pos = start;
+        reader.pos = start;
     }
     NamesCtx { names: names, nmap: nmap, ok: empty }
 }
@@ -284,23 +294,23 @@ pub fn read_names_ctx(inout r: Reader, in b: Slice[u8]) -> NamesCtx {
 pub fn ctx_new() -> Ctx {
     let mut names = names_new();
     let types = types_new(inout names);
-    let k = known_new(inout names);
+    let known = known_new(inout names);
     Ctx {
         names: names,
         types: types,
-        world: world_new(k),
+        world: world_new(known),
         tmap: ChunkSeq::new[u32](),
         nmap: ChunkSeq::new[u32]()
     }
 }
 
-// Appends one part of an input to `c`: the names and types after the ones
-// `c` already has (indices continue from `c.nmap` and `c.tmap`), then a world
-// section whose ADTs, effects and span rows are added to `c.world`'s. The
+// Appends one part of an input to `ctx`: the names and types after the ones
+// `ctx` already has (indices continue from `ctx.nmap` and `ctx.tmap`), then a world
+// section whose ADTs, effects and span rows are added to `ctx.world`'s. The
 // hybrid build sends each compilation's world once in such parts
-// (`WorldLog` in tests/common/check_words.rs); `r` is left at the task.
-pub fn extend_ctx(inout r: Reader, in b: Slice[u8], inout c: Ctx) {
-    read_names(inout r, in b, inout c.names, inout c.nmap);
-    read_types(inout r, in b, inout c.types, in c.nmap, inout c.tmap);
-    read_world(inout r, in b, inout c.world, in c.nmap, in c.tmap);
+// (`WorldLog` in tests/common/check_words.rs); `reader` is left at the task.
+pub fn extend_ctx(inout reader: Reader, in bytes: Slice[u8], inout ctx: Ctx) {
+    read_names(inout reader, in bytes, inout ctx.names, inout ctx.nmap);
+    read_types(inout reader, in bytes, inout ctx.types, in ctx.nmap, inout ctx.tmap);
+    read_world(inout reader, in bytes, inout ctx.world, in ctx.nmap, in ctx.tmap);
 }

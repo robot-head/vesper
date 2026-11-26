@@ -34,26 +34,31 @@ pub fn fail_object_text(inout err: ChunkSeq[u8], in msg: Str) {
 
 // `FreestandingError::Object("{object}: {msg}")`.
 pub fn fail_object_in(inout err: ChunkSeq[u8], in object: Slice[u8], in msg: Str) {
-    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    m.extend(in object);
-    m.extend(in ": ".as_bytes());
-    m.extend(in msg.as_bytes());
-    fail_object(inout err, in m);
+    let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    message.extend(in object);
+    message.extend(in ": ".as_bytes());
+    message.extend(in msg.as_bytes());
+    fail_object(inout err, in message);
 }
 
 // A variant with one string field.
-fn fail_one(inout err: ChunkSeq[u8], kind: u64, in a: Slice[u8]) {
+fn fail_one(inout err: ChunkSeq[u8], kind: u64, in field: Slice[u8]) {
     err.clear();
     push64(inout err, kind);
-    put_str(inout err, in a);
+    put_str(inout err, in field);
 }
 
 // A variant with two string fields.
-fn fail_two(inout err: ChunkSeq[u8], kind: u64, in a: Slice[u8], in b: Slice[u8]) {
+fn fail_two(
+    inout err: ChunkSeq[u8],
+    kind: u64,
+    in first_field: Slice[u8],
+    in second_field: Slice[u8]
+) {
     err.clear();
     push64(inout err, kind);
-    put_str(inout err, in a);
-    put_str(inout err, in b);
+    put_str(inout err, in first_field);
+    put_str(inout err, in second_field);
 }
 
 // `UnsupportedRelocation { object, r_type }`.

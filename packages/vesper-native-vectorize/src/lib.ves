@@ -97,10 +97,7 @@ impl Kinds {
     }
 
     fn step_of(in self, v: u32) -> i64 {
-        match self.step.try_get(w(v)) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        }
+        self.step.try_get(w(v)).unwrap_or(0)
     }
 
     fn set(inout self, v: u32, kind: u64, known: bool, step: i64) {
@@ -117,10 +114,7 @@ impl Kinds {
     }
 
     fn scale_of(in self, v: u32) -> u32 {
-        match self.scale.try_get(w(v)) {
-            Option::Some(x) => x,
-            Option::None => NONE,
-        }
+        self.scale.try_get(w(v)).unwrap_or(NONE)
     }
 
     fn set_stage(inout self, v: u32, stage: u64, scale: u32) {
@@ -148,10 +142,7 @@ fn copy_map(in m: Map) -> Map {
 
 impl Map {
     fn get(in self, v: u32) -> u32 {
-        match self.to.try_get(w(v)) {
-            Option::Some(x) => x,
-            Option::None => NONE,
-        }
+        self.to.try_get(w(v)).unwrap_or(NONE)
     }
 
     // `map.get(&v).copied().unwrap_or(v)`.
@@ -434,17 +425,11 @@ fn step(
 }
 
 fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 fn i64_at(in s: ChunkSeq[i64], i: u64) -> i64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 // One instruction's arguments as `step` sees them: each argument's kind,

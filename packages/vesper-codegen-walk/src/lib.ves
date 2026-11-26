@@ -206,7 +206,7 @@ impl Gen {
                 ty: u32_at(in self.s.pty, k)
             });
         }
-        let conc = Conc { f: 0, params: params, result: g.result, row: g.row };
+        let conc = Conc { func_index: 0, params: params, result: g.result, row: g.row };
         let res = specialized(
             inout self.c.types,
             in self.c.names,

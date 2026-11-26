@@ -417,6 +417,15 @@ pub fn zs_consolidate(
 // ---------------------------------------------------------------------
 // operators (circuit.rs `apply`)
 
+fn spend(charge: u64, inout budget: u64) eff [Fail[ZErr]] {
+    if budget < charge {
+        Fail::raise(ZErr::Work);
+    }
+    budget = wrapping_sub(budget, charge);
+}
+
+const FILTER_EQUAL_KIND: u64 = 0;
+
 // `Filter`: kind 0 is `Equal`, 1 is `AtLeast`.
 pub fn zs_filter(
     width: u64,
@@ -429,32 +438,90 @@ pub fn zs_filter(
     max_rows: u64,
     inout budget: u64
 ) -> ChunkSeq[i64] eff [Fail[ZErr]] {
-    check_columns(width, max_columns);
-    let stride = wrapping_add(width, 1);
-    let mut out = ChunkSeq::new[i64]();
-    let mut count: u64 = 0;
-    for e in 0..n {
-        if budget < 1 {
-            Fail::raise(ZErr::Work);
+    zset{
+        keep from in a,
+        width width;
+        rows n at at when {
+            let key = cell(in a, wrapping_add(at, column));
+            if kind == FILTER_EQUAL_KIND {
+                key == value
+            } else {
+                key >= value
+            }
+        };
+        limits max_columns,
+        max_rows;
+        inout budget
+    }
+}
+
+// Project each input row to a fixed-width row and give it a signed weight.
+// The column expression runs once per output column and the weight once
+// per input row. Prepare each row once before either. Consolidation keeps
+// Map's work charges, row limit, ordering and cancellation semantics.
+// The keep form filters an already canonical batch without sorting or
+// consolidating it. The predicate sees the flat row offset, not an index.
+pub sugar zset: tag emits eff [Fail] {
+    rule (
+        zset{
+            $project:block => $weight:block
+                | $row:ident in 0.. $rows:expr with $prepared:ident = $prepare:block,
+            $column:ident in 0.. $columns:expr;
+            limits $max_columns:expr,
+            $max_rows:expr;
+            inout $budget:place
         }
-        budget = wrapping_sub(budget, 1);
-        let at = wrapping_mul(e, stride);
-        let x = cell(in a, wrapping_add(at, column));
-        let pass = if kind == 0 { x == value } else { x >= value };
-        if pass {
-            if budget < stride {
-                Fail::raise(ZErr::Work);
+    ) => {
+        {
+            let columns: u64 = $columns;
+            check_columns(columns, $max_columns);
+            let rows: u64 = $rows;
+            let charge = wrapping_add(wrapping_add(columns, columns), 1);
+            let mut mapped = ChunkSeq::new[i64]();
+            for $row in 0..rows {
+                let $prepared = $prepare;
+                for $column in 0..columns {
+                    mapped.push($project);
+                }
+                mapped.push($weight);
             }
-            budget = wrapping_sub(budget, stride);
-            count = wrapping_add(count, 1);
-            if count > max_rows {
-                Fail::raise(ZErr::Rows);
-            }
-            push_row(inout out, in a, at, width);
-            out.push(cell(in a, wrapping_add(at, width)));
+            consolidate_core(columns, in mapped.as_slice(), rows, charge, $max_rows, inout $budget)
         }
     }
-    out
+    rule (
+        zset{
+            keep from in $cells:ident,
+            width $width:expr;
+            rows $rows:expr at $offset:ident when $predicate:block;
+            limits $max_columns:expr,
+            $max_rows:expr;
+            inout $budget:ident
+        }
+    ) => {
+        {
+            let width: u64 = $width;
+            check_columns(width, $max_columns);
+            let stride = wrapping_add(width, 1);
+            let rows: u64 = $rows;
+            let row_limit: u64 = $max_rows;
+            let mut out = ChunkSeq::new[i64]();
+            let mut count: u64 = 0;
+            for row in 0..rows {
+                spend(1, inout $budget);
+                let $offset = wrapping_mul(row, stride);
+                if $predicate {
+                    spend(stride, inout $budget);
+                    count = wrapping_add(count, 1);
+                    if count > row_limit {
+                        Fail::raise(ZErr::Rows);
+                    }
+                    push_row(inout out, in $cells, $offset, width);
+                    out.push(cell(in $cells, wrapping_add($offset, width)));
+                }
+            }
+            out
+        }
+    }
 }
 
 // `Map`: `fields` holds a (kind, value) pair per output column; kind 0 is
@@ -469,25 +536,27 @@ pub fn zs_map(
     max_rows: u64,
     inout budget: u64
 ) -> ChunkSeq[i64] eff [Fail[ZErr]] {
-    check_columns(nf, max_columns);
     let stride = wrapping_add(width, 1);
-    // The Rust loop charges nf, then 1 + nf on insertion.
-    let charge = wrapping_add(wrapping_add(nf, nf), 1);
-    let mut mapped = ChunkSeq::new[i64]();
-    for e in 0..n {
-        let at = wrapping_mul(e, stride);
-        for f in 0..nf {
+    zset{
+        {
             let fk = wrapping_add(f, f);
             let v = cell(in fields, wrapping_add(fk, 1));
             if cell(in fields, fk) == 0 {
-                mapped.push(cell(in a, wrapping_add(at, wrapping_u64(v))));
+                cell(in a, wrapping_add(at, wrapping_u64(v)))
             } else {
-                mapped.push(v);
+                v
             }
+        } => {
+            cell(in a, wrapping_add(at, width))
         }
-        mapped.push(cell(in a, wrapping_add(at, width)));
+        | e in 0..n with at = {
+            wrapping_mul(e, stride)
+        },
+        f in 0..nf;
+        limits max_columns,
+        max_rows;
+        inout budget
     }
-    consolidate_core(nf, in mapped.as_slice(), n, charge, max_rows, inout budget)
 }
 
 // `Join`: rows of a and b whose key columns are equal, concatenated, with

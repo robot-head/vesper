@@ -1095,9 +1095,8 @@ fn compile_entry<M: Module>(
         // the world, never on the observer or instrument hooks, so a
         // verified build stays byte-identical to the plain one and the
         // verifiers check the code that ships.
-        inlined_into =
-            crate::ir_swap::inline(world, &mut program, &crate::ir_inline::Budget::default())
-                .inlined_into;
+        let budget = crate::ir_inline::Budget::for_program(world, &program);
+        inlined_into = crate::ir_swap::inline(world, &mut program, &budget).inlined_into;
     } else {
         crate::ir_opt::fip_reuse_pass(world, &mut program)?;
     }
@@ -1759,13 +1758,15 @@ fn define_instances_observed_with_trace<M: Module>(
             // The Fail record's exits and the trace host, after the
             // function-value bindings above (whose evidence reads the map).
             c.capabilities.extend(frame.capabilities.clone());
-            c.ir_function(
-                program
-                    .functions
-                    .get(name)
-                    .ok_or("missing lowered native function")?,
-                sret,
-            )?;
+            let body = program
+                .functions
+                .get(name)
+                .ok_or("missing lowered native function")?;
+            // Part 6 of the native walk (#2094): the `body` hook may emit
+            // the whole body; else the Rust walk does.
+            if !c.body_hook(name, &f, &frame, body, sret)? {
+                c.ir_function(body, sret)?;
+            }
             c.b.seal_all_blocks();
             c.b.finalize();
             c.wide_divisions
@@ -3974,6 +3975,58 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             PatternKind::Literal(_) => Ok(()),
         }
+    }
+    /// Asks the `body` hook to emit `body` (`codegen_swap::body`), when
+    /// the frame leaves the function plain; `true` when it did.
+    fn body_hook(
+        &mut self,
+        name: &str,
+        f: &Function,
+        frame: &FramePlan,
+        body: &crate::ir::FunctionIr,
+        sret: Option<ir::Value>,
+    ) -> Result<bool, String> {
+        let plain = self.operands_only
+            && matches!(frame.result, FrameResult::Value)
+            && self.denorm.is_empty()
+            && self.session.is_none()
+            && self.generic_vars.is_empty()
+            && !self.in_fip_fn
+            && self.trace_fail.is_none()
+            && self.fail_record.is_none()
+            && self.caller_slot.is_none()
+            && sret.is_none()
+            && self.result_buffer.is_none()
+            && self.own_abi.result_words.is_none()
+            && frame.function_args.is_empty()
+            && self.pointers.is_empty()
+            && self.capabilities.is_empty()
+            && body.fip_call_slots.is_empty()
+            && body.fip_join_slots.is_empty()
+            && body.box_drops_before_inst.is_empty()
+            && body.box_drops_after_inst.is_empty()
+            && body.box_drops_before_term.is_empty();
+        if !plain {
+            return Ok(false);
+        }
+        let mut args = vec![
+            u64::from(self.own_abi.status),
+            u64::from(self.source_locations),
+        ];
+        for p in &f.params {
+            let Some(var) = self.vars.get(&p.name) else {
+                return Ok(false);
+            };
+            args.push(u64::from(var.as_u32()));
+        }
+        crate::codegen_swap::body_request(
+            &mut self.b,
+            &mut *self.m,
+            self.world,
+            self.program,
+            name,
+            &args,
+        )
     }
     fn ir_function(
         &mut self,

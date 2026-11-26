@@ -58,7 +58,7 @@ vesper_hybrid(
         },
         "hybrid_layout": {
             "edit_src": "modules/layout/src/lib.ves",
-            "edits": {"        8\n    } else {\n        0\n": "        16\n    } else {\n        0\n"},
+            "edits": {"    if is_enum { 8 } else { 0 }\n": "    if is_enum { 16 } else { 0 }\n"},
         },
         "hybrid_optimize": {
             "edit_src": "modules/optimize/src/lib.ves",
@@ -79,9 +79,10 @@ vesper_hybrid(
     },
     # The included CLI sources (src/main.rs and its command modules) and
     # what they embed.
-    # The driver module's proof-audit (#1341, #2091) and the verify module
-    # link hash-sys's `[package] objects` (the BLAKE3 C library), which the
-    # harness compiles into its archive.
+    # The driver module (proof-audit, #1341, #2091, and @vesper/fmt for
+    # driver-commands' `fmt`) and the verify module link hash-sys's
+    # `[package] objects` (the BLAKE3 C library), which the harness compiles
+    # into its archive.
     build_script_data = [
         "//:std_hash_sys_manifest",
         "//:std_hash_sys_package",
@@ -218,6 +219,8 @@ vesper_hybrid(
             "//:verified_codegen_package",
             "//:wasm_backend_package",
             "//:wit_component_package",
+            # `vesper fmt`'s formatter (#1996 part 3d).
+            "//crates/vesper-fmt:port_package",
             "//crates/vesper-serde:port_package",
         ],
         # The eBPF backend swap (#1290) builds on @vesper/ebpf-backend.
@@ -351,6 +354,7 @@ vesper_hybrid(
             "//:check_data_package",
             "//:front_package",
             "//:std_arena_package",
+            "//:std_bytes_package",
             "//:std_hash_package",
             "//:std_intern_package",
             "//:test_runner_package",

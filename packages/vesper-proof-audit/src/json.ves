@@ -3,11 +3,12 @@
 // empty containers). Strings escape `"`, `\`, `\b`, `\f`, `\n`, `\r`,
 // `\t` and the other control bytes as `\u00xx`; everything else, UTF-8
 // included, is copied.
-use self::strs::{
+use @vesper-std/bytes::ascii::{
     BACKSLASH, BACKSPACE, CARRIAGE_RETURN, CLOSE_BRACE, CLOSE_BRACKET, COLON, COMMA, DIGIT_ZERO,
-    FORM_FEED, HEX_LETTER_BASE, LOWER_B, LOWER_F, LOWER_N, LOWER_R, LOWER_T, LOWER_U, NEWLINE,
-    OPEN_BRACE, OPEN_BRACKET, QUOTE, SPACE, TAB
+    FORM_FEED, LOWER_B, LOWER_F, LOWER_N, LOWER_R, LOWER_T, LOWER_U, NEWLINE, OPEN_BRACE,
+    OPEN_BRACKET, QUOTE, SPACE, TAB
 };
+use self::strs::HEX_LETTER_BASE;
 pub struct Json {
     pub out: ChunkSeq[u8],
     pretty: bool,
@@ -154,7 +155,7 @@ pub fn put_u64(inout out: ChunkSeq[u8], n: u64) {
         if m == 0 {
             break;
         }
-        digits.push(wrapping_add(wrapping_u8(m % 10), 48));
+        digits.push(wrapping_add(wrapping_u8(m % 10), DIGIT_ZERO));
         m = m / 10;
     }
     let mut i = digits.len();

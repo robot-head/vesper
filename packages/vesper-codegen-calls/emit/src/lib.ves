@@ -37,27 +37,27 @@ fn call_values(call: u64, from: u64) -> ChunkSeq[u32] eff [Ffi[Cranelift]] {
 }
 
 // Answer the `count` results of the call just emitted.
-fn answer_results(call: u64, inout b: Builder, count: u32) eff [Ffi[Cranelift]] {
+fn answer_results(call: u64, inout builder: Builder, count: u32) eff [Ffi[Cranelift]] {
     for i in 0..count {
-        let v = inst_result(inout b, i);
-        call_result_value(call, v);
+        let value = inst_result(inout builder, i);
+        call_result_value(call, value);
     }
 }
 
 // One `call` request on the lent builder.
-fn emit(call: u64, inout b: Builder) -> u64 eff [Ffi[Cranelift]] {
+fn emit(call: u64, inout builder: Builder) -> u64 eff [Ffi[Cranelift]] {
     let op = call_op(call);
     if op == CALL {
-        let f = FuncRef { id: arg_u32(call, 0) };
+        let func_ref = FuncRef { id: arg_u32(call, 0) };
         let args = call_values(call, 1);
-        let count = ins_call(inout b, f, in args.as_slice());
-        answer_results(call, inout b, count);
+        let count = ins_call(inout builder, func_ref, in args.as_slice());
+        answer_results(call, inout builder, count);
     } else if op == CALL_INDIRECT {
         let sig = SigRef { id: arg_u32(call, 0) };
         let target = arg_value(call, 1);
         let args = call_values(call, 2);
-        let count = ins_call_indirect(inout b, sig, target, in args.as_slice());
-        answer_results(call, inout b, count);
+        let count = ins_call_indirect(inout builder, sig, target, in args.as_slice());
+        answer_results(call, inout builder, count);
     } else {
         return DECLINED;
     }
@@ -70,11 +70,11 @@ pub fn call_hook(call: u64) -> u64 eff [Ffi[Cranelift]] {
     if op != CALL && op != CALL_INDIRECT {
         return DECLINED;
     }
-    let mut b = match call_builder(call) {
-        Some(b) => b,
+    let mut builder = match call_builder(call) {
+        Some(builder) => builder,
         None => return DECLINED,
     };
-    let handled = emit(call, inout b);
-    call_return_builder(call, b);
+    let handled = emit(call, inout builder);
+    call_return_builder(call, builder);
     handled
 }
