@@ -1530,6 +1530,21 @@ vesper_package(
     deps = [":check_data_package"],
 )
 
+# The dyn lowering as a dependency of the hybrid compiler's check_dyn
+# module (front-end wiring slice 4, #1976).
+vesper_package(
+    name = "check_dyn_package",
+    srcs = glob(["packages/vesper-check-dyn/src/**/*.ves"]),
+    manifest = "packages/vesper-check-dyn/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ast_package",
+        ":check_data_package",
+        ":std_arena_package",
+        ":std_intern_package",
+    ],
+)
+
 vesper_package(
     name = "ir_check_package",
     srcs = glob(["packages/vesper-ir-check/src/**/*.ves"]),

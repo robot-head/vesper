@@ -62,7 +62,7 @@ vesper_hybrid(
         },
         "hybrid_parse": {
             "edit_src": "modules/parse/src/lib.ves",
-            "edits": {"    if b {\n        1\n    } else {\n        0\n    }": "    if b {\n        0\n    } else {\n        1\n    }"},
+            "edits": {"    put_ast_words(inout o, in l.ast);\n": "    put_ast_words(inout o, in lower_source(in \"\").ast);\n"},
         },
         "hybrid_stack_bound": {
             "edit_src": "modules/stack_bound/src/lib.ves",
@@ -90,6 +90,15 @@ vesper_hybrid(
             "//:bounds_hoist_package",
             "//:check_data_package",
             "//:place_ir_package",
+        ],
+        # The dyn lowering swap (#1976) builds on @vesper/check-dyn.
+        "hybrid_check_dyn": [
+            "//:ast_package",
+            "//:check_data_package",
+            "//:check_dyn_package",
+            "//:front_package",
+            "//:std_arena_package",
+            "//:std_intern_package",
         ],
         # The checker swaps (#1177) build on @vesper/check-data.
         "hybrid_check_layout": [

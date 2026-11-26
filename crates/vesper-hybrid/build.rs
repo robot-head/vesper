@@ -196,12 +196,13 @@ const DIVERGENT_PACT_EDIT: (&str, &str) = (
     "    divergent_session(in input)\n",
 );
 
-/// The parse module's divergence check: every AST flag (`let mut`, `pub`,
-/// `@fip`, named fields, ...) reads back inverted (mirrored in BUILD.bazel).
+/// The parse module's divergence check: every source parses to the empty
+/// module's AST (mirrored in BUILD.bazel). The AST writer itself is
+/// `put_ast_words` in `@vesper/ast` (#1976), which the edit cannot reach.
 #[cfg(feature = "divergent-parse")]
 const DIVERGENT_PARSE_EDIT: (&str, &str) = (
-    "    if b {\n        1\n    } else {\n        0\n    }",
-    "    if b {\n        0\n    } else {\n        1\n    }",
+    "    put_ast_words(inout o, in l.ast);\n",
+    "    put_ast_words(inout o, in lower_source(in \"\").ast);\n",
 );
 
 fn main() {
