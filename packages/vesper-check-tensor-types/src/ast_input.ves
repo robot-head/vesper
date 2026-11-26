@@ -11,12 +11,12 @@ use @vesper/check-data::util::{add, n32};
 pub fn read_ast(in names: Str, inout r: Reader, in b: Slice[u8]) -> Ast {
     let mut a = ast_new();
     let n_names = r.word(in b);
-    let mut noff: u64 = 0;
+    let mut name_offset: u64 = 0;
     for _ in 0..n_names {
-        let nlen = r.word(in b);
-        let nend = add(noff, nlen);
-        let _ = a.names.intern(in names[noff..nend]);
-        noff = nend;
+        let name_len = r.word(in b);
+        let name_end = add(name_offset, name_len);
+        let _ = a.names.intern(in names[name_offset..name_end]);
+        name_offset = name_end;
     }
     let n_lits = r.word(in b);
     for _ in 0..n_lits {
