@@ -9,7 +9,7 @@
 use self::{GNode, GraphRun, L, Snap};
 use self::decode::{new_l, decode_tables, decode_solution};
 use self::solve::{solve};
-use self::util::{dep, diag, gnode, man, none, req, sedge, ssel, soff, slen, sw, ver};
+use self::util::{Code, dep, diag, gnode, man, none, req, sedge, ssel, soff, slen, sw, ver};
 use self::lock_json::{solution_from_json, name_ok};
 use self::lock_words::{solution_words};
 use self::manifest_toml::{json_str, put_dec};
@@ -188,35 +188,35 @@ fn json_ids(inout out: ChunkSeq[u8], in l: L, in ids: ChunkSeq[u64], depth: u64)
 }
 
 fn code_name(c: u64) -> Str {
-    if c == 0 {
+    if c == Code::ManifestSyntax {
         "manifest_syntax"
-    } else if c == 1 {
+    } else if c == Code::InvalidCapability {
         "invalid_capability"
-    } else if c == 2 {
+    } else if c == Code::UnsupportedBuildPolicy {
         "unsupported_build_policy"
-    } else if c == 3 {
+    } else if c == Code::InvalidFeature {
         "invalid_feature"
-    } else if c == 4 {
+    } else if c == Code::UnknownFeature {
         "unknown_feature"
-    } else if c == 5 {
+    } else if c == Code::UnknownDependency {
         "unknown_dependency"
-    } else if c == 6 {
+    } else if c == Code::InvalidSystemRequirement {
         "invalid_system_requirement"
-    } else if c == 7 {
+    } else if c == Code::DuplicatePackage {
         "duplicate_package"
-    } else if c == 8 {
+    } else if c == Code::DuplicateSystemPackage {
         "duplicate_system_package"
-    } else if c == 9 {
+    } else if c == Code::MissingRoot {
         "missing_root"
-    } else if c == 10 {
+    } else if c == Code::MissingDependency {
         "missing_dependency"
-    } else if c == 11 {
+    } else if c == Code::MissingSystemPackage {
         "missing_system_package"
-    } else if c == 12 {
+    } else if c == Code::VersionMismatch {
         "version_mismatch"
-    } else if c == 13 {
+    } else if c == Code::CapabilityEscalation {
         "capability_escalation"
-    } else if c == 14 {
+    } else if c == Code::EdgeCapabilityEscalation {
         "edge_capability_escalation"
     } else {
         "unsafe_ffi_forbidden"
