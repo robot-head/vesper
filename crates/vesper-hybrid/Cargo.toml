@@ -53,6 +53,9 @@ divergent-lean-extract = []
 # The same check for the verified code generator (#1886): every build's
 # summary comes back empty, so every build fails.
 divergent-verified-codegen = []
+# The same check for the sugar expansion module (#1157): every source reads
+# back as having no sugar.
+divergent-sugar = []
 
 [dependencies]
 vesper = { path = "../.." }

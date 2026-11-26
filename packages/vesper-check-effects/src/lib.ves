@@ -23,43 +23,43 @@ use self::policies::{build_policies_bin};
 // Task "check_effects": the input is the harness world followed by the
 // task words of `encode_task`; the result is one text line per diagnostic.
 pub fn check_effects(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let mut c = read_ctx(inout r, in b);
-    let p = read_prog(inout r, in b, in c);
-    let k = syms_new(inout c);
-    let mut s = walk_new(k);
-    let rows = check_world(inout c, in p, inout s);
-    let mut o = ChunkSeq::new[u8]();
-    write_text(in s, in rows, inout o);
-    pack_text(in o)
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let mut ctx = read_ctx(inout reader, in bytes);
+    let prog = read_prog(inout reader, in bytes, in ctx);
+    let syms = syms_new(inout ctx);
+    let mut walk = walk_new(syms);
+    let rows = check_world(inout ctx, in prog, inout walk);
+    let mut out = ChunkSeq::new[u8]();
+    write_text(in walk, in rows, inout out);
+    pack_text(in out)
 }
 
 // Binary entrypoint for `vesper-hybrid`: takes the encoded world+task bytes
 // directly and returns packed binary diagnostics (`write_bin`).
-pub fn check_effects_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
-    let mut c = read_ctx(inout r, in b);
-    let p = read_prog(inout r, in b, in c);
-    let k = syms_new(inout c);
-    let mut s = walk_new(k);
-    let rows = check_world(inout c, in p, inout s);
-    let mut o = ChunkSeq::new[u8]();
-    write_bin(in s, in rows, inout o);
-    pack_text(in o)
+pub fn check_effects_bytes(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
+    let mut ctx = read_ctx(inout reader, in bytes);
+    let prog = read_prog(inout reader, in bytes, in ctx);
+    let syms = syms_new(inout ctx);
+    let mut walk = walk_new(syms);
+    let rows = check_world(inout ctx, in prog, inout walk);
+    let mut out = ChunkSeq::new[u8]();
+    write_bin(in walk, in rows, inout out);
+    pack_text(in out)
 }
 
 // Binary entrypoint for `capability_policies`: takes the encoded world+task
 // bytes and returns packed binary `CapabilityPolicies` (`build_policies_bin`).
-pub fn check_policies_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
-    let mut c = read_ctx(inout r, in b);
-    let p = read_prog(inout r, in b, in c);
-    let k = syms_new(inout c);
-    let mut s = walk_new(k);
-    let mut o = ChunkSeq::new[u8]();
-    build_policies_bin(inout c, in p, inout s, inout o);
-    pack_text(in o)
+pub fn check_policies_bytes(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
+    let mut ctx = read_ctx(inout reader, in bytes);
+    let prog = read_prog(inout reader, in bytes, in ctx);
+    let syms = syms_new(inout ctx);
+    let mut walk = walk_new(syms);
+    let mut out = ChunkSeq::new[u8]();
+    build_policies_bin(inout ctx, in prog, inout walk, inout out);
+    pack_text(in out)
 }
 
 // Harness entry taking `in Str` for `tests/self_host_check_effects.rs`.

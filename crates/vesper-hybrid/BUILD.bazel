@@ -48,6 +48,10 @@ vesper_hybrid(
             "edit_src": "modules/lean_extract/src/lib.ves",
             "edits": {"(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    text\n": "(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = text;\n    let _ = t.try_set(0, 0);\n    t\n"},
         },
+        "hybrid_sugar": {
+            "edit_src": "modules/sugar/src/lib.ves",
+            "edits": {"(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    words\n": "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = words;\n    let _ = t.try_set(0, 0);\n    t\n"},
+        },
         "hybrid_verified_codegen": {
             "edit_src": "modules/verified_codegen/src/lib.ves",
             "edits": {"(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    words\n": "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = words;\n    let _ = t.try_set(0, 0);\n    t\n"},
@@ -312,6 +316,15 @@ vesper_hybrid(
         "hybrid_stack_bound": [
             "//:check_data_package",
             "//:check_loops_atomics_package",
+        ],
+        # Sugar expansion (#1157) is @vesper/sugar's driver.
+        "hybrid_sugar": [
+            "//:ast_package",
+            "//:check_data_package",
+            "//:front_package",
+            "//:std_arena_package",
+            "//:std_intern_package",
+            "//:sugar_package",
         ],
         # The tensor type checker (#1186) builds on @vesper/check-tensor-types.
         "hybrid_tensor_types": [

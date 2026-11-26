@@ -602,10 +602,7 @@ pub fn width_source(in u: Uses, in module: Ast) -> String {
     let mut out = String::new();
     let order = sorted_symbols(in names);
     for i in 0..order.len() {
-        let id = match order.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let id = order.try_get(i).unwrap_or(0);
         let mut t = String::new();
         let ok = names.resolve_into(symbol_from_id(id), inout t);
         let d = match defined.lookup(in t.as_str()) {

@@ -48,8 +48,72 @@ const F_ABORT_OP: u64 = 16;
 const F_ARGS: u64 = 24;
 /// A callable block: `[table slot, evidence block or 0, captures block or 0]`.
 /// The evidence block holds one frame (or 0, "the caller's") per evidence key.
+const C_TABLE_SLOT: u64 = 0;
 const C_EVIDENCE: u64 = 8;
 const C_CAPTURES: u64 = 16;
+const C_BYTES: u64 = 24;
+/// `F_ABORT_OP` of a Cps clause that finished without resuming; its result
+/// is in `F_ARGS`.
+const ABORT_OP_CPS_RESULT: i64 = -1;
+// Suspension record layout (byte offsets), see `HandlerFns::pending_offset`.
+const S_NEXT: u64 = 0;
+const S_POINT: u64 = 8;
+const S_OP: u64 = 16;
+const S_LOCALS: u64 = 24;
+
+/// Leading parameters of a dispatch function, `(frame, op)`, before the
+/// operation arguments.
+const DISPATCH_HEAD: usize = 2;
+/// Local index of a dispatch function's first operation argument.
+const DISPATCH_ARG0: u32 = DISPATCH_HEAD as u32;
+/// Hidden trailing parameters of a Cps clause: `(frame, record, value)`.
+const CPS_HIDDEN_PARAMS: usize = 3;
+
+/// log2 of the Wasm page size (64 KiB).
+const PAGE_BYTES_LOG2: i64 = 16;
+/// Alignment of every heap allocation, in bytes.
+const HEAP_ALIGN: i64 = 8;
+/// log2 of `layout::SLOT_BYTES`: shifting an index left by it gives its
+/// slot's byte offset.
+const SLOT_BYTES_LOG2: i64 = 3;
+/// Most IR blocks one function may have.
+const MAX_BLOCKS: usize = 4096;
+
+/// Most bytes one `blocking-write-and-flush` may write.
+const STDOUT_CHUNK_BYTES: i64 = 4096;
+/// Return area of `blocking-write-and-flush`, a `result<_, stream-error>`.
+const STREAM_RESULT_BYTES: i64 = 16;
+/// Locals of a host dispatch function beyond its parameters.
+const HOST_DISPATCH_LOCALS: u32 = 5;
+
+// Beacon trace records (see `host::BEACON_WIT`). A `SpanContext` is
+// `[trace_id_hi, trace_id_lo, span_id, flags]` in both the uniform and the
+// canonical layout (`flags` is a `u8` in the latter); an `ActiveSpan` is
+// `[ctx, parent_span_id, start_mono_ns, schema_id]` with `ctx` a pointer in
+// the uniform layout and the inline record in the canonical one.
+const SPAN_TRACE_ID_LO: u64 = 8;
+const SPAN_ID: u64 = 16;
+const SPAN_FLAGS: u64 = 24;
+/// Bytes of a uniform `SpanContext` or `ActiveSpan` block, and of a
+/// canonical `span-context`.
+const SPAN_BLOCK_BYTES: i64 = 32;
+const ACTIVE_PARENT_SPAN_ID: u64 = 8;
+const ACTIVE_START_MONO_NS: u64 = 16;
+const ACTIVE_SCHEMA_ID: u64 = 24;
+const CABI_ACTIVE_PARENT_SPAN_ID: u64 = 32;
+const CABI_ACTIVE_START_MONO_NS: u64 = 40;
+const CABI_ACTIVE_SCHEMA_ID: u64 = 48;
+/// Bytes of a canonical `active-span`.
+const CABI_ACTIVE_SPAN_BYTES: i64 = 56;
+// `Trace` operation indices (`trace_effects::OPERATIONS`); `current_ctx` is 0.
+const TRACE_START_SPAN: i64 = 1;
+const TRACE_START_CHILD: i64 = 2;
+const TRACE_EMIT_OK: i64 = 3;
+const TRACE_EMIT_ERR: i64 = 4;
+const TRACE_EMIT_ATTR: i64 = 5;
+// `TelemetryAttr` variant indices that carry a `u64` payload.
+const ATTR_COUNT: i64 = 1;
+const ATTR_BYTES: i64 = 2;
 
 pub(crate) struct FxTypes {
     pub ct: u32,
@@ -116,7 +180,7 @@ pub(crate) struct Lowerer<'a> {
 fn mem(offset: u64) -> MemArg {
     MemArg {
         offset,
-        align: 3,
+        align: layout::ALIGN_8_LOG2,
         memory_index: 0,
     }
 }
@@ -290,13 +354,13 @@ impl<'a> Lowerer<'a> {
         let env = plan.keys.iter().map(|k| (k.clone(), b.global(0))).collect();
         let alloc = b.declare("$alloc", &[ValType::I64], &[ValType::I64]);
         let arity = plan.max_arity;
-        let dispatch_ty = b.func_type(&vec![ValType::I64; 2 + arity], &[ValType::I64]);
+        let dispatch_ty = b.func_type(&vec![ValType::I64; DISPATCH_HEAD + arity], &[ValType::I64]);
         let fx = if stack_switching && plan.handlers.iter().any(|h| h.stack_switching) {
             let ct_func = b.func_type(&[ValType::I64], &[ValType::I64]);
             let ct = b.cont_type(ct_func);
-            let tag_ty = b.func_type(&vec![ValType::I64; 2 + arity], &[ValType::I64]);
+            let tag_ty = b.func_type(&vec![ValType::I64; DISPATCH_HEAD + arity], &[ValType::I64]);
             let tag = b.tag(tag_ty);
-            let mut results = vec![ValType::I64; 2 + arity];
+            let mut results = vec![ValType::I64; DISPATCH_HEAD + arity];
             results.push(ValType::Ref(RefType {
                 nullable: false,
                 heap_type: HeapType::Concrete(ct),
@@ -378,7 +442,7 @@ impl<'a> Lowerer<'a> {
                     HandlerMode::Abort => vec![],
                     HandlerMode::Tail => vec![ValType::I64],
                     HandlerMode::StackSwitching => vec![ValType::I64, self.k_type()],
-                    HandlerMode::Cps => vec![ValType::I64; 3],
+                    HandlerMode::Cps => vec![ValType::I64; CPS_HIDDEN_PARAMS],
                 };
                 (c.resume.clone(), hidden)
             }
@@ -401,7 +465,7 @@ impl<'a> Lowerer<'a> {
             self.funcs.insert(name.clone(), idx);
         }
         for (i, h) in self.plan.handlers.iter().enumerate() {
-            let a = vec![ValType::I64; 2 + self.arity];
+            let a = vec![ValType::I64; DISPATCH_HEAD + self.arity];
             let dispatch = self
                 .b
                 .declare(&format!("$dispatch{i}"), &a, &[ValType::I64]);
@@ -423,7 +487,7 @@ impl<'a> Lowerer<'a> {
                     &[ValType::I64, k, ValType::I64],
                     &[ValType::I64],
                 );
-                let mut p = vec![ValType::I64; 2 + self.arity];
+                let mut p = vec![ValType::I64; DISPATCH_HEAD + self.arity];
                 p.push(k);
                 let fx_op = self.b.declare(&format!("$fxop{i}"), &p, &[ValType::I64]);
                 (Some(entry), Some(run), Some(fx_op))
@@ -434,9 +498,9 @@ impl<'a> Lowerer<'a> {
                 self.b
                     .declare(&format!("$resume{i}"), &[ValType::I64; 3], &[ValType::I64])
             });
-            let pending_offset = F_ARGS + 8 * self.arity as u64;
-            let env_offset = pending_offset + 8;
-            let mut offset = env_offset + 8 * self.env.len() as u64;
+            let pending_offset = F_ARGS + layout::SLOT_BYTES * self.arity as u64;
+            let env_offset = pending_offset + layout::SLOT_BYTES;
+            let mut offset = env_offset + layout::SLOT_BYTES * self.env.len() as u64;
             let mut capture_offset = BTreeMap::new();
             for name in h
                 .ret_captures
@@ -445,11 +509,11 @@ impl<'a> Lowerer<'a> {
             {
                 if !capture_offset.contains_key(name) {
                     capture_offset.insert(name.clone(), offset);
-                    offset += 8;
+                    offset += layout::SLOT_BYTES;
                 }
             }
             let body_offset = offset;
-            offset += 8 * self.ir(&h.body).params.len() as u64;
+            offset += layout::SLOT_BYTES * self.ir(&h.body).params.len() as u64;
             self.hfns.push(HandlerFns {
                 dispatch_slot,
                 dispatch,
@@ -496,13 +560,13 @@ impl<'a> Lowerer<'a> {
         for c in self.plan.host.clone() {
             let idx = self.b.declare(
                 &format!("$host:{}", c.effect()),
-                &vec![ValType::I64; 2 + self.arity],
+                &vec![ValType::I64; DISPATCH_HEAD + self.arity],
                 &[ValType::I64],
             );
             let slot = self.b.table_slot(idx);
             self.host_slots.push((c, slot));
-            let a0 = 2u32;
-            let first = 2 + self.arity as u32;
+            let a0 = DISPATCH_ARG0;
+            let first = DISPATCH_ARG0 + self.arity as u32;
             let (h, ptr, rem, n, ret) = (first, first + 1, first + 2, first + 3, first + 4);
             let code = match c {
                 HostCapability::Stdout => {
@@ -512,14 +576,14 @@ impl<'a> Lowerer<'a> {
                         I::I64ExtendI32U,
                         I::LocalSet(h),
                         I::LocalGet(a0),
-                        I::I64Const(8),
+                        I::I64Const(layout::STR_HEADER_BYTES_I64),
                         I::I64Add,
                         I::LocalSet(ptr),
                         I::LocalGet(a0),
                         I::I32WrapI64,
                         I::I64Load(mem(0)),
                         I::LocalSet(rem),
-                        I::I64Const(16),
+                        I::I64Const(STREAM_RESULT_BYTES),
                         I::Call(self.alloc),
                         I::LocalSet(ret),
                         I::Block(BlockType::Empty),
@@ -529,9 +593,9 @@ impl<'a> Lowerer<'a> {
                         I::BrIf(1),
                         // At most 4096 bytes per blocking-write-and-flush.
                         I::LocalGet(rem),
-                        I::I64Const(4096),
+                        I::I64Const(STDOUT_CHUNK_BYTES),
                         I::LocalGet(rem),
-                        I::I64Const(4096),
+                        I::I64Const(STDOUT_CHUNK_BYTES),
                         I::I64LtU,
                         I::Select,
                         I::LocalSet(n),
@@ -583,13 +647,13 @@ impl<'a> Lowerer<'a> {
                     };
                     let mem_u32 = |offset| MemArg {
                         offset,
-                        align: 2,
+                        align: layout::ALIGN_4_LOG2,
                         memory_index: 0,
                     };
                     let push_str = |code: &mut Vec<I<'static>>, s: u32| {
                         code.extend([
                             I::LocalGet(s),
-                            I::I64Const(8),
+                            I::I64Const(layout::STR_HEADER_BYTES_I64),
                             I::I64Add,
                             I::I32WrapI64,
                             I::LocalGet(s),
@@ -605,13 +669,13 @@ impl<'a> Lowerer<'a> {
                             I::I64Load(mem(0)),
                             I::LocalGet(ptr),
                             I::I32WrapI64,
-                            I::I64Load(mem(8)),
+                            I::I64Load(mem(SPAN_TRACE_ID_LO)),
                             I::LocalGet(ptr),
                             I::I32WrapI64,
-                            I::I64Load(mem(16)),
+                            I::I64Load(mem(SPAN_ID)),
                             I::LocalGet(ptr),
                             I::I32WrapI64,
-                            I::I64Load(mem(24)),
+                            I::I64Load(mem(SPAN_FLAGS)),
                             I::I32WrapI64,
                         ]);
                     };
@@ -626,20 +690,20 @@ impl<'a> Lowerer<'a> {
                         code.extend([
                             I::LocalGet(span),
                             I::I32WrapI64,
-                            I::I64Load(mem(8)),
+                            I::I64Load(mem(ACTIVE_PARENT_SPAN_ID)),
                             I::LocalGet(span),
                             I::I32WrapI64,
-                            I::I64Load(mem(16)),
+                            I::I64Load(mem(ACTIVE_START_MONO_NS)),
                             I::LocalGet(span),
                             I::I32WrapI64,
-                            I::I64Load(mem(24)),
+                            I::I64Load(mem(ACTIVE_SCHEMA_ID)),
                             I::I32WrapI64,
                         ]);
                     };
                     let build_span_context =
                         |code: &mut Vec<I<'static>>, src: u32, dst: u32, alloc: u32| {
                             code.extend([
-                                I::I64Const(32),
+                                I::I64Const(SPAN_BLOCK_BYTES),
                                 I::Call(alloc),
                                 I::LocalTee(dst),
                                 I::I32WrapI64,
@@ -651,27 +715,27 @@ impl<'a> Lowerer<'a> {
                                 I::I32WrapI64,
                                 I::LocalGet(src),
                                 I::I32WrapI64,
-                                I::I64Load(mem(8)),
-                                I::I64Store(mem(8)),
+                                I::I64Load(mem(SPAN_TRACE_ID_LO)),
+                                I::I64Store(mem(SPAN_TRACE_ID_LO)),
                                 I::LocalGet(dst),
                                 I::I32WrapI64,
                                 I::LocalGet(src),
                                 I::I32WrapI64,
-                                I::I64Load(mem(16)),
-                                I::I64Store(mem(16)),
+                                I::I64Load(mem(SPAN_ID)),
+                                I::I64Store(mem(SPAN_ID)),
                                 I::LocalGet(dst),
                                 I::I32WrapI64,
                                 I::LocalGet(src),
                                 I::I32WrapI64,
-                                I::I64Load8U(mem_u8(24)),
-                                I::I64Store(mem(24)),
+                                I::I64Load8U(mem_u8(SPAN_FLAGS)),
+                                I::I64Store(mem(SPAN_FLAGS)),
                             ]);
                         };
                     let build_active_span =
                         |code: &mut Vec<I<'static>>, src: u32, ctx_l: u32, dst: u32, alloc: u32| {
                             build_span_context(code, src, ctx_l, alloc);
                             code.extend([
-                                I::I64Const(32),
+                                I::I64Const(SPAN_BLOCK_BYTES),
                                 I::Call(alloc),
                                 I::LocalTee(dst),
                                 I::I32WrapI64,
@@ -681,20 +745,20 @@ impl<'a> Lowerer<'a> {
                                 I::I32WrapI64,
                                 I::LocalGet(src),
                                 I::I32WrapI64,
-                                I::I64Load(mem(32)),
-                                I::I64Store(mem(8)),
+                                I::I64Load(mem(CABI_ACTIVE_PARENT_SPAN_ID)),
+                                I::I64Store(mem(ACTIVE_PARENT_SPAN_ID)),
                                 I::LocalGet(dst),
                                 I::I32WrapI64,
                                 I::LocalGet(src),
                                 I::I32WrapI64,
-                                I::I64Load(mem(40)),
-                                I::I64Store(mem(16)),
+                                I::I64Load(mem(CABI_ACTIVE_START_MONO_NS)),
+                                I::I64Store(mem(ACTIVE_START_MONO_NS)),
                                 I::LocalGet(dst),
                                 I::I32WrapI64,
                                 I::LocalGet(src),
                                 I::I32WrapI64,
-                                I::I64Load32U(mem_u32(48)),
-                                I::I64Store(mem(24)),
+                                I::I64Load32U(mem_u32(CABI_ACTIVE_SCHEMA_ID)),
+                                I::I64Store(mem(ACTIVE_SCHEMA_ID)),
                             ]);
                         };
                     let mut code = vec![
@@ -702,7 +766,7 @@ impl<'a> Lowerer<'a> {
                         I::LocalGet(1),
                         I::I64Eqz,
                         I::If(BlockType::Empty),
-                        I::I64Const(32),
+                        I::I64Const(SPAN_BLOCK_BYTES),
                         I::Call(self.alloc),
                         I::LocalTee(ret),
                         I::I32WrapI64,
@@ -713,10 +777,10 @@ impl<'a> Lowerer<'a> {
                         // op 1: start_span(schema_id, name) -> ActiveSpan
                         I::Else,
                         I::LocalGet(1),
-                        I::I64Const(1),
+                        I::I64Const(TRACE_START_SPAN),
                         I::I64Eq,
                         I::If(BlockType::Empty),
-                        I::I64Const(56),
+                        I::I64Const(CABI_ACTIVE_SPAN_BYTES),
                         I::Call(self.alloc),
                         I::LocalSet(ret),
                         I::LocalGet(a0),
@@ -733,10 +797,10 @@ impl<'a> Lowerer<'a> {
                         // op 2: start_child(parent, schema_id, name) -> ActiveSpan
                         I::Else,
                         I::LocalGet(1),
-                        I::I64Const(2),
+                        I::I64Const(TRACE_START_CHILD),
                         I::I64Eq,
                         I::If(BlockType::Empty),
-                        I::I64Const(56),
+                        I::I64Const(CABI_ACTIVE_SPAN_BYTES),
                         I::Call(self.alloc),
                         I::LocalSet(ret),
                     ]);
@@ -753,7 +817,7 @@ impl<'a> Lowerer<'a> {
                         // op 3: emit_ok(span, attr_u64) -> Unit
                         I::Else,
                         I::LocalGet(1),
-                        I::I64Const(3),
+                        I::I64Const(TRACE_EMIT_OK),
                         I::I64Eq,
                         I::If(BlockType::Empty),
                     ]);
@@ -766,7 +830,7 @@ impl<'a> Lowerer<'a> {
                         // op 4: emit_err(span, err_code, msg) -> Unit
                         I::Else,
                         I::LocalGet(1),
-                        I::I64Const(4),
+                        I::I64Const(TRACE_EMIT_ERR),
                         I::I64Eq,
                         I::If(BlockType::Empty),
                     ]);
@@ -780,23 +844,23 @@ impl<'a> Lowerer<'a> {
                         // op 5: emit_attr(span, attr) -> Unit
                         I::Else,
                         I::LocalGet(1),
-                        I::I64Const(5),
+                        I::I64Const(TRACE_EMIT_ATTR),
                         I::I64Eq,
                         I::If(BlockType::Empty),
                         I::LocalGet(a1),
                         I::I32WrapI64,
                         I::I64Load(mem(0)),
                         I::LocalTee(tag),
-                        I::I64Const(1),
+                        I::I64Const(ATTR_COUNT),
                         I::I64Eq,
                         I::LocalGet(tag),
-                        I::I64Const(2),
+                        I::I64Const(ATTR_BYTES),
                         I::I64Eq,
                         I::I32Or,
                         I::If(BlockType::Empty),
                         I::LocalGet(a1),
                         I::I32WrapI64,
-                        I::I64Load(mem(8)),
+                        I::I64Load(mem(layout::ENUM_PAYLOAD_OFFSET)),
                         I::LocalSet(payload),
                         I::Else,
                         I::I64Const(0),
@@ -825,7 +889,7 @@ impl<'a> Lowerer<'a> {
                     code
                 }
             };
-            let mut f = Function::new([(5, ValType::I64)]);
+            let mut f = Function::new([(HOST_DISPATCH_LOCALS, ValType::I64)]);
             for ins in &code {
                 f.instruction(ins);
             }
@@ -843,27 +907,27 @@ impl<'a> Lowerer<'a> {
             I::GlobalGet(self.heap),
             I::LocalTee(p),
             I::LocalGet(size),
-            I::I64Const(7),
+            I::I64Const(HEAP_ALIGN - 1),
             I::I64Add,
-            I::I64Const(-8),
+            I::I64Const(-HEAP_ALIGN),
             I::I64And,
             I::I64Add,
             I::LocalTee(end),
             I::MemorySize(0),
             I::I64ExtendI32U,
-            I::I64Const(16),
+            I::I64Const(PAGE_BYTES_LOG2),
             I::I64Shl,
             I::I64GtU,
             I::If(BlockType::Empty),
             I::LocalGet(end),
             I::MemorySize(0),
             I::I64ExtendI32U,
-            I::I64Const(16),
+            I::I64Const(PAGE_BYTES_LOG2),
             I::I64Shl,
             I::I64Sub,
-            I::I64Const(65535),
+            I::I64Const((1 << PAGE_BYTES_LOG2) - 1),
             I::I64Add,
-            I::I64Const(16),
+            I::I64Const(PAGE_BYTES_LOG2),
             I::I64ShrU,
             I::I32WrapI64,
             I::MemoryGrow(0),
@@ -961,7 +1025,7 @@ impl<'a> Lowerer<'a> {
             for c in 0..captures {
                 f.instruction(&I::LocalGet(caps));
                 f.instruction(&I::I32WrapI64);
-                f.instruction(&I::I64Load(mem(8 * c as u64)));
+                f.instruction(&I::I64Load(mem(layout::SLOT_BYTES * c as u64)));
             }
             for a in 0..arity {
                 f.instruction(&I::LocalGet(1 + a as u32));
@@ -995,7 +1059,7 @@ impl<'a> Lowerer<'a> {
         for (n, g) in keys.iter().enumerate() {
             f.instruction(&I::LocalGet(ev));
             f.instruction(&I::I32WrapI64);
-            f.instruction(&I::I64Load(mem(8 * n as u64)));
+            f.instruction(&I::I64Load(mem(layout::SLOT_BYTES * n as u64)));
             f.instruction(&I::LocalTee(r));
             f.instruction(&I::I64Const(0));
             f.instruction(&I::I64Ne);
@@ -1050,6 +1114,8 @@ impl<'a> Lowerer<'a> {
         );
         self.copies.insert(key, idx);
         let (v, markl, delta, n, x) = (0u32, 1u32, 2u32, 3u32, 4u32);
+        // The locals `n` and `x` after the three parameters.
+        const COPY_LOCALS: u32 = 2;
         let mut code = vec![
             I::LocalGet(v),
             I::LocalGet(markl),
@@ -1065,7 +1131,10 @@ impl<'a> Lowerer<'a> {
                       base: u64|
          -> Result<(), WasmError> {
             code.extend([
-                I::I64Const(8 * (ts.len() as i64 + base as i64 / 8)),
+                I::I64Const(
+                    layout::SLOT_BYTES_I64
+                        * (ts.len() as i64 + base as i64 / layout::SLOT_BYTES_I64),
+                ),
                 I::Call(l.alloc),
                 I::LocalSet(n),
             ]);
@@ -1080,7 +1149,7 @@ impl<'a> Lowerer<'a> {
                 ]);
             }
             for (i, t) in ts.iter().enumerate() {
-                let off = base + 8 * i as u64;
+                let off = base + layout::SLOT_BYTES * i as u64;
                 code.extend([
                     I::LocalGet(v),
                     I::I32WrapI64,
@@ -1112,7 +1181,7 @@ impl<'a> Lowerer<'a> {
                 I::LocalGet(v),
                 I::I32WrapI64,
                 I::I64Load(mem(0)),
-                I::I64Const(8),
+                I::I64Const(layout::STR_HEADER_BYTES_I64),
                 I::I64Add,
                 I::LocalTee(x),
                 I::Call(self.alloc),
@@ -1150,7 +1219,7 @@ impl<'a> Lowerer<'a> {
                         I::If(BlockType::Empty),
                     ]);
                     let ts: Vec<Type> = var.fields.iter().map(|(_, t)| t.clone()).collect();
-                    fields(self, &mut code, &ts, 8)?;
+                    fields(self, &mut code, &ts, layout::ENUM_PAYLOAD_OFFSET)?;
                     code.push(I::End);
                 }
                 code.push(I::Unreachable);
@@ -1160,7 +1229,7 @@ impl<'a> Lowerer<'a> {
             }
         }
         code.push(I::End);
-        let mut f = Function::new([(2, ValType::I64)]);
+        let mut f = Function::new([(COPY_LOCALS, ValType::I64)]);
         for ins in &code {
             f.instruction(ins);
         }
@@ -1253,14 +1322,14 @@ impl<'a> Lowerer<'a> {
             Shape::Tuple(ts) => {
                 code.push(I::I64Const(1));
                 for (i, t) in ts.iter().enumerate() {
-                    field(self, &mut code, 8 * i as u64, t)?;
+                    field(self, &mut code, layout::SLOT_BYTES * i as u64, t)?;
                     code.push(I::I64And);
                 }
             }
             Shape::Struct { fields, .. } => {
                 code.push(I::I64Const(1));
                 for (i, (_, t)) in fields.iter().enumerate() {
-                    field(self, &mut code, 8 * i as u64, t)?;
+                    field(self, &mut code, layout::SLOT_BYTES * i as u64, t)?;
                     code.push(I::I64And);
                 }
             }
@@ -1360,7 +1429,7 @@ impl<'a> Lowerer<'a> {
                     I::I64Add,
                     I::I32WrapI64,
                     I::I64Load8U(MemArg {
-                        offset: 8,
+                        offset: layout::STR_HEADER_BYTES,
                         align: 0,
                         memory_index: 0,
                     }),
@@ -1426,6 +1495,15 @@ impl<'a> Lowerer<'a> {
             const INF: i64 = 0x7ff0_0000_0000_0000;
             const MANT: i64 = (1 << 52) - 1;
             const HIDDEN: i64 = 1 << 52;
+            // Bit position of the biased exponent, and its mask once shifted down.
+            const EXP_SHIFT: i64 = 52;
+            const EXP_MASK: i64 = 0x7ff;
+            // Bit position of the sign.
+            const SIGN_SHIFT: i64 = 63;
+            // Bits above the mantissa (sign and exponent).
+            const NON_MANT_BITS: i64 = 12;
+            // Leading zeros of a normalized mantissa (leading bit at 52).
+            const NORM_CLZ: i64 = 11;
             let zero_times_x = [
                 I::F64Const(0.0.into()),
                 I::LocalGet(ox),
@@ -1438,19 +1516,19 @@ impl<'a> Lowerer<'a> {
                 I::LocalGet(x),
                 I::LocalSet(ox),
                 I::LocalGet(x),
-                I::I64Const(52),
+                I::I64Const(EXP_SHIFT),
                 I::I64ShrU,
-                I::I64Const(0x7ff),
+                I::I64Const(EXP_MASK),
                 I::I64And,
                 I::LocalSet(ex),
                 I::LocalGet(y),
-                I::I64Const(52),
+                I::I64Const(EXP_SHIFT),
                 I::I64ShrU,
-                I::I64Const(0x7ff),
+                I::I64Const(EXP_MASK),
                 I::I64And,
                 I::LocalSet(ey),
                 I::LocalGet(x),
-                I::I64Const(63),
+                I::I64Const(SIGN_SHIFT),
                 I::I64ShrU,
                 I::LocalSet(sx),
                 // y == ±0, y is NaN or x is not finite: NaN.
@@ -1465,7 +1543,7 @@ impl<'a> Lowerer<'a> {
                 I::I64GtU,
                 I::I32Or,
                 I::LocalGet(ex),
-                I::I64Const(0x7ff),
+                I::I64Const(EXP_MASK),
                 I::I64Eq,
                 I::I32Or,
                 I::If(BlockType::Empty),
@@ -1510,7 +1588,7 @@ impl<'a> Lowerer<'a> {
                     I::I64Eqz,
                     I::If(BlockType::Empty),
                     I::LocalGet(v),
-                    I::I64Const(12),
+                    I::I64Const(NON_MANT_BITS),
                     I::I64Shl,
                     I::I64Clz,
                     I::LocalSet(sh),
@@ -1578,7 +1656,7 @@ impl<'a> Lowerer<'a> {
                 // Renormalize: shift the leading bit back to bit 52.
                 I::LocalGet(x),
                 I::I64Clz,
-                I::I64Const(11),
+                I::I64Const(NORM_CLZ),
                 I::I64Sub,
                 I::LocalSet(sh),
                 I::LocalGet(x),
@@ -1597,7 +1675,7 @@ impl<'a> Lowerer<'a> {
                 I::I64Const(HIDDEN),
                 I::I64Sub,
                 I::LocalGet(ex),
-                I::I64Const(52),
+                I::I64Const(EXP_SHIFT),
                 I::I64Shl,
                 I::I64Or,
                 I::LocalSet(x),
@@ -1611,7 +1689,7 @@ impl<'a> Lowerer<'a> {
                 I::End,
                 I::LocalGet(x),
                 I::LocalGet(sx),
-                I::I64Const(63),
+                I::I64Const(SIGN_SHIFT),
                 I::I64Shl,
                 I::I64Or,
                 I::End,
@@ -1655,7 +1733,7 @@ impl<'a> Lowerer<'a> {
             code.extend([
                 I::LocalGet(frame),
                 I::I32WrapI64,
-                I::I64Load(mem(base + 8 * n as u64)),
+                I::I64Load(mem(base + layout::SLOT_BYTES * n as u64)),
                 I::GlobalSet(*g),
             ]);
         }
@@ -1712,7 +1790,7 @@ impl<'a> Lowerer<'a> {
                     code.extend([
                         I::LocalGet(value),
                         I::I32WrapI64,
-                        I::I64Load(mem(8 * i as u64)),
+                        I::I64Load(mem(layout::SLOT_BYTES * i as u64)),
                         I::LocalSet(tmp),
                     ]);
                     self.flatten(code, locals, nparams, p, tmp, t, count)?;
@@ -1761,7 +1839,7 @@ impl<'a> Lowerer<'a> {
             let t = 2 + locals.len() as u32;
             locals.push(ValType::I64);
             code.extend([
-                I::I64Const(16),
+                I::I64Const(2 * layout::SLOT_BYTES_I64),
                 I::Call(self.alloc),
                 I::LocalTee(t),
                 I::I32WrapI64,
@@ -1772,7 +1850,7 @@ impl<'a> Lowerer<'a> {
                 I::LocalGet(frame),
                 I::I32WrapI64,
                 I::I64Load(mem(F_STATE)),
-                I::I64Store(mem(8)),
+                I::I64Store(mem(layout::SLOT_BYTES)),
             ]);
             (t, Type::Tuple(vec![h.body_type.clone(), state.clone()]))
         } else {
@@ -1830,8 +1908,8 @@ impl<'a> Lowerer<'a> {
     /// $dispatch_i(frame, op, a0..): perform an operation on this handler.
     fn define_dispatch(&mut self, i: usize, h: &Handler) -> Result<(), WasmError> {
         let (frame, op) = (0u32, 1u32);
-        let nparams = 2 + self.arity as u32;
-        let args: Vec<u32> = (0..self.arity as u32).map(|j| 2 + j).collect();
+        let nparams = DISPATCH_ARG0 + self.arity as u32;
+        let args: Vec<u32> = (0..self.arity as u32).map(|j| DISPATCH_ARG0 + j).collect();
         let mut locals = vec![ValType::I64; self.env.len()];
         let env_save = nparams;
         let mut code = vec![];
@@ -1855,7 +1933,7 @@ impl<'a> Lowerer<'a> {
                             I::LocalGet(frame),
                             I::I32WrapI64,
                             I::LocalGet(*a),
-                            I::I64Store(mem(F_ARGS + 8 * j as u64)),
+                            I::I64Store(mem(F_ARGS + layout::SLOT_BYTES * j as u64)),
                         ]);
                     }
                     code.extend([
@@ -1919,7 +1997,7 @@ impl<'a> Lowerer<'a> {
                         I::LocalGet(frame),
                         I::I32WrapI64,
                         I::I64Load(mem(pending)),
-                        I::I64Store(mem(0)),
+                        I::I64Store(mem(S_NEXT)),
                         I::LocalGet(frame),
                         I::I32WrapI64,
                         I::LocalGet(rec),
@@ -1939,7 +2017,7 @@ impl<'a> Lowerer<'a> {
                         // handler's, so abort to the handler with it.
                         I::LocalGet(frame),
                         I::I32WrapI64,
-                        I::I64Const(-1),
+                        I::I64Const(ABORT_OP_CPS_RESULT),
                         I::I64Store(mem(F_ABORT_OP)),
                         I::LocalGet(frame),
                         I::I32WrapI64,
@@ -1980,11 +2058,11 @@ impl<'a> Lowerer<'a> {
         let (frame, rec, rv) = (0u32, 1u32, 2u32);
         let mut code = vec![];
         for c in h.ops.iter().filter(|c| c.mode == HandlerMode::Cps) {
-            let n = self.signature(&c.function).len() - 3;
+            let n = self.signature(&c.function).len() - CPS_HIDDEN_PARAMS;
             code.extend([
                 I::LocalGet(rec),
                 I::I32WrapI64,
-                I::I64Load(mem(16)),
+                I::I64Load(mem(S_OP)),
                 I::I64Const(c.op as i64),
                 I::I64Eq,
                 I::If(BlockType::Empty),
@@ -2018,7 +2096,7 @@ impl<'a> Lowerer<'a> {
                 I::LocalGet(frame),
                 I::I32WrapI64,
                 I::I64Load(mem(F_ABORT_OP)),
-                I::I64Const(-1),
+                I::I64Const(ABORT_OP_CPS_RESULT),
                 I::I64Eq,
                 I::If(BlockType::Empty),
                 I::LocalGet(frame),
@@ -2032,7 +2110,7 @@ impl<'a> Lowerer<'a> {
             code.extend([
                 I::LocalGet(frame),
                 I::I32WrapI64,
-                I::I64Load(mem(F_ARGS + 8 * j as u64)),
+                I::I64Load(mem(F_ARGS + layout::SLOT_BYTES * j as u64)),
                 I::LocalSet(*a),
             ]);
         }
@@ -2065,7 +2143,7 @@ impl<'a> Lowerer<'a> {
             code.extend([
                 I::LocalGet(frame),
                 I::I32WrapI64,
-                I::I64Load(mem(self.hfns[i].body_offset + 8 * j as u64)),
+                I::I64Load(mem(self.hfns[i].body_offset + layout::SLOT_BYTES * j as u64)),
             ]);
         }
         code.extend([I::Call(self.funcs[&h.body]), I::End]);
@@ -2081,10 +2159,12 @@ impl<'a> Lowerer<'a> {
         let (ct, tag, on_block) = (fx.ct, fx.tag, fx.on_block);
         let (frame, k, v) = (0u32, 1u32, 2u32);
         let nparams = 3;
-        let mut locals = vec![ValType::I64; 2 + self.arity];
+        let mut locals = vec![ValType::I64; DISPATCH_HEAD + self.arity];
         let f2 = nparams;
         let op = nparams + 1;
-        let args: Vec<u32> = (0..self.arity as u32).map(|j| nparams + 2 + j).collect();
+        let args: Vec<u32> = (0..self.arity as u32)
+            .map(|j| nparams + DISPATCH_ARG0 + j)
+            .collect();
         let r = nparams + locals.len() as u32;
         locals.push(ValType::I64);
         let k2 = nparams + locals.len() as u32;
@@ -2170,8 +2250,8 @@ impl<'a> Lowerer<'a> {
     fn define_fx_op(&mut self, i: usize, h: &Handler) -> Result<(), WasmError> {
         let frame = 0u32;
         let op = 1u32;
-        let args: Vec<u32> = (0..self.arity as u32).map(|j| 2 + j).collect();
-        let k = 2 + self.arity as u32;
+        let args: Vec<u32> = (0..self.arity as u32).map(|j| DISPATCH_ARG0 + j).collect();
+        let k = DISPATCH_ARG0 + self.arity as u32;
         let nparams = k + 1;
         let mut locals = vec![];
         let mut code = vec![];
@@ -2404,7 +2484,7 @@ impl<'l, 'a> Emit<'l, 'a> {
         let saved: Vec<u32> = (0..c.first_hidden)
             .chain(self.nparams..self.nparams + self.locals.len() as u32)
             .collect();
-        let size = 24 + 8 * saved.len() as i64;
+        let size = S_LOCALS as i64 + layout::SLOT_BYTES_I64 * saved.len() as i64;
         let mut saves = c.saves.clone();
         saves.sort_by_key(|(at, _, _)| std::cmp::Reverse(*at));
         for (at, rec, point) in saves {
@@ -2415,18 +2495,18 @@ impl<'l, 'a> Emit<'l, 'a> {
                 I::LocalGet(rec),
                 I::I32WrapI64,
                 I::I64Const(point as i64),
-                I::I64Store(mem(8)),
+                I::I64Store(mem(S_POINT)),
                 I::LocalGet(rec),
                 I::I32WrapI64,
                 I::I64Const(c.op as i64),
-                I::I64Store(mem(16)),
+                I::I64Store(mem(S_OP)),
             ];
             for (slot, x) in saved.iter().enumerate() {
                 seq.extend([
                     I::LocalGet(rec),
                     I::I32WrapI64,
                     I::LocalGet(*x),
-                    I::I64Store(mem(24 + 8 * slot as u64)),
+                    I::I64Store(mem(S_LOCALS + layout::SLOT_BYTES * slot as u64)),
                 ]);
             }
             seq.extend([I::LocalGet(rec), I::GlobalSet(self.l.cps)]);
@@ -2442,7 +2522,7 @@ impl<'l, 'a> Emit<'l, 'a> {
             pro.extend([
                 I::LocalGet(c.record),
                 I::I32WrapI64,
-                I::I64Load(mem(24 + 8 * slot as u64)),
+                I::I64Load(mem(S_LOCALS + layout::SLOT_BYTES * slot as u64)),
                 I::LocalSet(*x),
             ]);
         }
@@ -2451,7 +2531,7 @@ impl<'l, 'a> Emit<'l, 'a> {
             pro.extend([
                 I::LocalGet(c.record),
                 I::I32WrapI64,
-                I::I64Load(mem(8)),
+                I::I64Load(mem(S_POINT)),
                 I::I64Const(*point as i64),
                 I::I64Eq,
                 I::If(BlockType::Empty),
@@ -2595,11 +2675,11 @@ impl<'l, 'a> Emit<'l, 'a> {
     fn cow(&mut self, base: u32, ty: &Type, path: &[String], v: u32) -> Result<u32, WasmError> {
         let n = layout::slots(self.l.world, ty).map_err(|e| e.at(&self.name))?;
         let (off, fty) = layout::field(self.l.world, ty, &path[0]).map_err(|e| e.at(&self.name))?;
-        let copy = self.alloc(8 * n as u64);
+        let copy = self.alloc(layout::SLOT_BYTES * n as u64);
         for i in 0..n as u64 {
             self.code.extend([I::LocalGet(copy), I::I32WrapI64]);
-            self.load(base, 8 * i);
-            self.push(I::I64Store(mem(8 * i)));
+            self.load(base, layout::SLOT_BYTES * i);
+            self.push(I::I64Store(mem(layout::SLOT_BYTES * i)));
         }
         let inner = if path.len() == 1 {
             v
@@ -2615,9 +2695,9 @@ impl<'l, 'a> Emit<'l, 'a> {
 
     fn body(&mut self) -> Result<(), WasmError> {
         let f = self.f;
-        if f.blocks.len() > 4096 {
+        if f.blocks.len() > MAX_BLOCKS {
             return Err(WasmError::Limit(format!(
-                "{}: more than 4096 blocks",
+                "{}: more than {MAX_BLOCKS} blocks",
                 self.name
             )));
         }
@@ -2874,7 +2954,7 @@ impl<'l, 'a> Emit<'l, 'a> {
                 self.push(I::I32Const(1));
                 for (i, (p, t)) in ps.iter().zip(&ts).enumerate() {
                     let x = self.local();
-                    self.load(v, 8 * i as u64);
+                    self.load(v, layout::SLOT_BYTES * i as u64);
                     self.push(I::LocalSet(x));
                     self.condition(p, x, t)?;
                     self.push(I::I32And);
@@ -2922,7 +3002,7 @@ impl<'l, 'a> Emit<'l, 'a> {
                 };
                 for (i, (p, t)) in ps.iter().zip(&ts).enumerate() {
                     let x = self.local();
-                    self.load(v, 8 * i as u64);
+                    self.load(v, layout::SLOT_BYTES * i as u64);
                     self.push(I::LocalSet(x));
                     self.bind(p, x, t)?;
                 }
@@ -3127,10 +3207,10 @@ impl<'l, 'a> Emit<'l, 'a> {
                 self.code.extend([I::I64Const(0), I::LocalSet(d)]);
             }
             Op::Tuple(ids) => {
-                let block = self.alloc(8 * ids.len() as u64);
+                let block = self.alloc(layout::SLOT_BYTES * ids.len() as u64);
                 for (i, id) in ids.iter().enumerate() {
                     let v = self.value(*id)?;
-                    self.store(block, 8 * i as u64, v);
+                    self.store(block, layout::SLOT_BYTES * i as u64, v);
                 }
                 self.values.insert(inst.dest, block);
             }
@@ -3143,7 +3223,7 @@ impl<'l, 'a> Emit<'l, 'a> {
                     self.code.extend([I::I64Const(0), I::LocalSet(x)]);
                     x
                 } else {
-                    self.alloc(8 * slots)
+                    self.alloc(layout::SLOT_BYTES * slots)
                 };
                 if is_enum {
                     let t = self.local();
@@ -3190,7 +3270,7 @@ impl<'l, 'a> Emit<'l, 'a> {
                 self.code.extend([
                     I::LocalGet(b),
                     I::LocalGet(i),
-                    I::I64Const(3),
+                    I::I64Const(SLOT_BYTES_LOG2),
                     I::I64Shl,
                     I::I64Add,
                     I::I32WrapI64,
@@ -3245,10 +3325,10 @@ impl<'l, 'a> Emit<'l, 'a> {
                 let d = self.dest(inst.dest);
                 self.load(x, 0);
                 self.code.extend([I::I64Eqz, I::If(BlockType::Empty)]);
-                self.load(x, 8);
+                self.load(x, layout::ENUM_PAYLOAD_OFFSET);
                 self.code.extend([I::LocalSet(d), I::Else]);
                 let e = self.local();
-                self.load(x, 8);
+                self.load(x, layout::ENUM_PAYLOAD_OFFSET);
                 self.push(I::LocalSet(e));
                 self.perform("Fail", "raise", &[err_ty], None, &[e])?;
                 self.code.extend([I::Unreachable, I::End]);
@@ -3294,7 +3374,7 @@ impl<'l, 'a> Emit<'l, 'a> {
                     self.get(*v);
                 }
                 let d = self.dest(inst.dest);
-                self.load(c, 0);
+                self.load(c, C_TABLE_SLOT);
                 self.code.extend([
                     I::I32WrapI64,
                     I::CallIndirect {
@@ -3320,17 +3400,17 @@ impl<'l, 'a> Emit<'l, 'a> {
     /// A callable block for table `slot`: with `snapshot`, the evidence
     /// block records every evidence key's current frame.
     fn callable(&mut self, slot: u32, snapshot: bool, captures: Option<&[u32]>) -> u32 {
-        let block = self.alloc(24);
+        let block = self.alloc(C_BYTES);
         let t = self.local();
         self.code
             .extend([I::I64Const(i64::from(slot)), I::LocalSet(t)]);
-        self.store(block, 0, t);
+        self.store(block, C_TABLE_SLOT, t);
         let keys: Vec<u32> = self.l.env.values().copied().collect();
         let ev = if snapshot && !keys.is_empty() {
-            let ev = self.alloc(8 * keys.len() as u64);
+            let ev = self.alloc(layout::SLOT_BYTES * keys.len() as u64);
             for (n, g) in keys.iter().enumerate() {
                 self.code.extend([I::GlobalGet(*g), I::LocalSet(t)]);
-                self.store(ev, 8 * n as u64, t);
+                self.store(ev, layout::SLOT_BYTES * n as u64, t);
             }
             ev
         } else {
@@ -3341,9 +3421,9 @@ impl<'l, 'a> Emit<'l, 'a> {
         self.store(block, C_EVIDENCE, ev);
         let caps = match captures {
             Some(values) if !values.is_empty() => {
-                let caps = self.alloc(8 * values.len() as u64);
+                let caps = self.alloc(layout::SLOT_BYTES * values.len() as u64);
                 for (i, v) in values.iter().enumerate() {
-                    self.store(caps, 8 * i as u64, *v);
+                    self.store(caps, layout::SLOT_BYTES * i as u64, *v);
                 }
                 caps
             }
@@ -3406,7 +3486,7 @@ impl<'l, 'a> Emit<'l, 'a> {
         }
         let (old, ev, t) = (
             self.local(),
-            self.alloc(8 * keys.len() as u64),
+            self.alloc(layout::SLOT_BYTES * keys.len() as u64),
             self.local(),
         );
         self.load(c, C_EVIDENCE);
@@ -3420,7 +3500,7 @@ impl<'l, 'a> Emit<'l, 'a> {
                 I::Else,
                 I::LocalGet(old),
                 I::I32WrapI64,
-                I::I64Load(mem(8 * n as u64)),
+                I::I64Load(mem(layout::SLOT_BYTES * n as u64)),
                 I::End,
                 I::LocalSet(t),
             ]);
@@ -3444,10 +3524,10 @@ impl<'l, 'a> Emit<'l, 'a> {
                 }
                 self.push(I::End);
             }
-            self.store(ev, 8 * n as u64, t);
+            self.store(ev, layout::SLOT_BYTES * n as u64, t);
         }
-        let block = self.alloc(24);
-        for off in [0, C_CAPTURES] {
+        let block = self.alloc(C_BYTES);
+        for off in [C_TABLE_SLOT, C_CAPTURES] {
             self.load(c, off);
             self.push(I::LocalSet(t));
             self.store(block, off, t);
@@ -3506,7 +3586,7 @@ impl<'l, 'a> Emit<'l, 'a> {
                 continue;
             }
             let (v, _) = self.read_place(&place.root, &place.path)?;
-            let cell = self.alloc(8);
+            let cell = self.alloc(layout::SLOT_BYTES);
             self.store(cell, 0, v);
             out.push(cell);
             writeback.push((cell, place));
@@ -3702,7 +3782,7 @@ impl<'l, 'a> Emit<'l, 'a> {
     fn raise_runtime_error(&mut self, variant: &str) -> Result<(), WasmError> {
         let ty = Type::named("RuntimeError");
         let (index, _, _) = layout::variant(self.l.world, &ty, variant)?;
-        let e = self.alloc(8);
+        let e = self.alloc(layout::SLOT_BYTES);
         let t = self.local();
         self.code
             .extend([I::I64Const(index as i64), I::LocalSet(t)]);
@@ -4070,7 +4150,7 @@ impl<'l, 'a> Emit<'l, 'a> {
                 I::LocalGet(frame),
                 I::I32WrapI64,
                 I::GlobalGet(*g),
-                I::I64Store(mem(env_offset + 8 * n as u64)),
+                I::I64Store(mem(env_offset + layout::SLOT_BYTES * n as u64)),
             ]);
         }
         let alias = |e: &Self, n: &str| -> Result<String, WasmError> {
@@ -4094,7 +4174,7 @@ impl<'l, 'a> Emit<'l, 'a> {
                 continue;
             }
             let v = self.read_name(&slot)?;
-            let cell = self.alloc(8);
+            let cell = self.alloc(layout::SLOT_BYTES);
             self.store(cell, 0, v);
             body_args.push(cell);
             cells.push((cell, slot));
@@ -4108,7 +4188,7 @@ impl<'l, 'a> Emit<'l, 'a> {
                 .ok_or_else(|| WasmError::Invalid("stack switching types missing".into()))?;
             let ct = fx.ct;
             for (j, a) in body_args.iter().enumerate() {
-                self.store(frame, body_offset + 8 * j as u64, *a);
+                self.store(frame, body_offset + layout::SLOT_BYTES * j as u64, *a);
             }
             let fns = &self.l.hfns[id];
             let (entry, run) = (fns.body_entry.expect("entry"), fns.run.expect("run"));
@@ -4247,12 +4327,16 @@ fn topological(f: &FunctionIr) -> Option<Vec<usize>> {
             _ => vec![],
         }
     }
+    // DFS colours of a block.
+    const UNSEEN: u8 = 0;
+    const ON_STACK: u8 = 1;
+    const DONE: u8 = 2;
     let n = f.blocks.len();
-    let mut state = vec![0u8; n];
+    let mut state = vec![UNSEEN; n];
     let mut post = vec![];
     // Iterative DFS: (block, next successor index).
     let mut stack = vec![(0usize, 0usize)];
-    state[0] = 1;
+    state[0] = ON_STACK;
     while let Some((b, i)) = stack.pop() {
         let s = succ(&f.blocks[b].terminator);
         if i < s.len() {
@@ -4262,15 +4346,15 @@ fn topological(f: &FunctionIr) -> Option<Vec<usize>> {
                 return None;
             }
             match state[t] {
-                0 => {
-                    state[t] = 1;
+                UNSEEN => {
+                    state[t] = ON_STACK;
                     stack.push((t, 0));
                 }
-                1 => return None,
+                ON_STACK => return None,
                 _ => {}
             }
         } else {
-            state[b] = 2;
+            state[b] = DONE;
             post.push(b);
         }
     }

@@ -106,8 +106,8 @@ impl Gen {
         if t == NONE32 {
             return 0;
         }
-        let d = default_type(inout self.c.types, t);
-        let n = self.c.types.node(d);
+        let d = default_type(inout self.ctx.types, t);
+        let n = self.ctx.types.node(d);
         if n.kind == TyKind::Lit {
             return LANE_I64;
         }
@@ -117,7 +117,7 @@ impl Gen {
         if n.kind != TyKind::Named || n.n != 0 {
             return 0;
         }
-        let k = self.c.world.k;
+        let k = self.ctx.world.k;
         if n.name == k.f32_ {
             LANE_F32
         } else if n.name == k.f64_ {
@@ -134,12 +134,12 @@ impl Gen {
     // `Gen::is_register_scalar` of @vesper/native-walk: an integer, float
     // or `bool` local stays a frontend variable.
     fn body_register(inout self, t: u32) -> bool {
-        let d = default_type(inout self.c.types, t);
-        let n = self.c.types.node(d);
+        let d = default_type(inout self.ctx.types, t);
+        let n = self.ctx.types.node(d);
         if n.kind != TyKind::Named || n.n != 0 {
             return false;
         }
-        let k = self.c.world.k;
+        let k = self.ctx.world.k;
         k.is_integer(n.name) || n.name == k.f32_ || n.name == k.f64_ || n.name == k.bool_
     }
 
@@ -160,7 +160,7 @@ impl Gen {
     }
 
     fn body_never(in self, t: u32) -> bool {
-        t != NONE32 && self.c.types.name(t) == self.c.world.k.never
+        t != NONE32 && self.ctx.types.name(t) == self.ctx.world.k.never
     }
 
     // The header words of `f` (place-ir `header`).
@@ -176,42 +176,42 @@ impl Gen {
             plain: true
         };
         let mut i = f.ha;
-        let np = self.p.op(i);
+        let np = self.program.op(i);
         i = inc(i);
         for k in 0..np {
-            h.params.push(self.p.op(i));
-            let nproj = self.p.op(add(i, 2));
+            h.params.push(self.program.op(i));
+            let nproj = self.program.op(add(i, 2));
             i = add(add(i, 3), nproj);
-            h.pty.push(self.p.op(i));
+            h.pty.push(self.program.op(i));
             // type, span start, span end
             i = add(i, 3);
         }
-        h.result = n32(self.p.op(i));
-        let effects = n32(self.p.op(inc(i)));
-        let row = self.c.types.row(self.c.types.node(effects).r2);
+        h.result = n32(self.program.op(i));
+        let effects = n32(self.program.op(inc(i)));
+        let row = self.ctx.types.row(self.ctx.types.node(effects).r2);
         if row.n != 0 || row.tail != 0 {
             h.plain = false;
         }
         i = add(i, 2);
-        let nb = self.p.op(i);
+        let nb = self.program.op(i);
         i = add(inc(i), wrapping_mul(nb, 2));
-        let nc = self.p.op(i);
+        let nc = self.program.op(i);
         i = add(inc(i), nc);
         if nb != 0 || nc != 0 {
             h.plain = false;
         }
-        let nv = self.p.op(i);
+        let nv = self.program.op(i);
         i = inc(i);
         for k in 0..nv {
-            set(inout h.index, self.p.op(i), inc(k));
-            h.vty.push(self.p.op(inc(i)));
+            set(inout h.index, self.program.op(i), inc(k));
+            h.vty.push(self.program.op(inc(i)));
             i = add(i, 2);
         }
-        let nl = self.p.op(i);
+        let nl = self.program.op(i);
         i = inc(i);
         for k in 0..nl {
-            h.lname.push(self.p.op(i));
-            h.lty.push(self.p.op(inc(i)));
+            h.lname.push(self.program.op(i));
+            h.lty.push(self.program.op(inc(i)));
             i = add(i, 2);
         }
         h
@@ -248,7 +248,7 @@ impl Gen {
     // The value index of an operand word at `i`, pushed to `ops`; false
     // when the graph does not type it.
     fn body_operand(in self, in h: Header, i: u64, inout ops: ChunkSeq[u64]) -> bool {
-        let v = self.body_value(in h, self.p.op(i));
+        let v = self.body_value(in h, self.program.op(i));
         ops.push(v);
         v != NONE64
     }
@@ -266,7 +266,7 @@ impl Gen {
         if dest == NONE64 {
             return false;
         }
-        let ty = default_type(inout self.c.types, i.ty);
+        let ty = default_type(inout self.ctx.types, i.ty);
         let post = self.body_kind(ty);
         if post == NONE64 || self.body_lane(i.ty) == 0 {
             return false;
@@ -298,9 +298,9 @@ impl Gen {
             }
         } else if i.op == Op::Read {
             kind = INST_READ;
-            let root = self.p.op(i.a);
-            let path = self.p.path(self.p.op(inc(i.a)));
-            let nproj = self.p.op(add(i.a, 3));
+            let root = self.program.op(i.a);
+            let path = self.program.path(self.program.op(inc(i.a)));
+            let nproj = self.program.op(add(i.a, 3));
             let k = self.body_local(in h, root);
             if k == NONE64 || path.n != 0 || nproj != 0 {
                 return false;
@@ -317,11 +317,11 @@ impl Gen {
                 return false;
             }
             // pattern: kind, span start, span end, then a Bind's name
-            let pat = self.p.op(inc(i.a));
+            let pat = self.program.op(inc(i.a));
             if pat == Pat::Wild {
                 extra.push(NO_LOCAL);
             } else if pat == Pat::Bind {
-                let k = self.body_local(in h, self.p.op(add(i.a, 4)));
+                let k = self.body_local(in h, self.program.op(add(i.a, 4)));
                 if k == NONE64 {
                     return false;
                 }
@@ -331,8 +331,8 @@ impl Gen {
             }
         } else if i.op == Op::Write {
             kind = INST_WRITE;
-            let place = self.p.op(i.a);
-            let assign = n32(self.p.op(inc(i.a)));
+            let place = self.program.op(i.a);
+            let assign = n32(self.program.op(inc(i.a)));
             let k = self.body_local(in h, place);
             if k == NONE64 || assign != self.ops.assign {
                 return false;
@@ -343,11 +343,11 @@ impl Gen {
             // `ir_temp`'s read back coerces to the value's own type, and
             // the assignment's `zero` to the statement's.
             let temp = self.body_kind(n32(u64_at(in h.vty, u64_at(in ops, 0))));
-            let statement = self.c.world.expr_type(i.s0, i.s1);
+            let statement = self.ctx.world.expr_type(i.s0, i.s1);
             let stated = if statement == NONE32 {
                 0
             } else {
-                let d = default_type(inout self.c.types, statement);
+                let d = default_type(inout self.ctx.types, statement);
                 self.body_kind(d)
             };
             if temp == NONE64 || stated == NONE64 {
@@ -406,10 +406,10 @@ impl Gen {
         bi: u64,
         inout o: ChunkSeq[u64]
     ) -> bool {
-        let row = self.p.block(add(f.b0, bi));
+        let row = self.program.block(add(f.b0, bi));
         let ta = row.ta;
         if row.term == Term::Return {
-            let v = self.body_value(in h, self.p.op(ta));
+            let v = self.body_value(in h, self.program.op(ta));
             if v == NONE64 {
                 return false;
             }
@@ -420,14 +420,14 @@ impl Gen {
             return true;
         }
         if row.term == Term::Jump {
-            let target = self.p.op(ta);
-            let n = self.p.op(inc(ta));
-            let trow = self.p.block(add(f.b0, target));
+            let target = self.program.op(ta);
+            let n = self.program.op(inc(ta));
+            let trow = self.program.block(add(f.b0, target));
             o.push(TERM_JUMP);
             o.push(target);
             o.push(n);
             for k in 0..n {
-                let v = self.body_value(in h, self.p.op(add(add(ta, 2), k)));
+                let v = self.body_value(in h, self.program.op(add(add(ta, 2), k)));
                 let param = self.body_block_param(in h, trow.ha, k);
                 if v == NONE64 || param == NONE64 {
                     return false;
@@ -438,14 +438,14 @@ impl Gen {
             return true;
         }
         if row.term == Term::Branch {
-            let c = self.body_value(in h, self.p.op(ta));
+            let c = self.body_value(in h, self.program.op(ta));
             if c == NONE64 {
                 return false;
             }
             o.push(TERM_BRANCH);
             o.push(c);
-            o.push(self.p.op(inc(ta)));
-            o.push(self.p.op(add(ta, 2)));
+            o.push(self.program.op(inc(ta)));
+            o.push(self.program.op(add(ta, 2)));
             return true;
         }
         if row.term == Term::Unreachable {
@@ -458,23 +458,23 @@ impl Gen {
     // The start of a block's parameter words (place-ir `read_block`:
     // entry, the token pairs, out, then the parameter values).
     fn body_params_at(in self, ha: u64) -> u64 {
-        let ni = self.p.op(inc(ha));
+        let ni = self.program.op(inc(ha));
         add(add(ha, 3), wrapping_mul(ni, 2))
     }
 
     // The value index of a block's parameter `k`, or NONE64.
     fn body_block_param(in self, in h: Header, ha: u64, k: u64) -> u64 {
         let pa = self.body_params_at(ha);
-        if k >= self.p.op(pa) {
+        if k >= self.program.op(pa) {
             return NONE64;
         }
-        self.body_value(in h, self.p.op(add(inc(pa), k)))
+        self.body_value(in h, self.program.op(add(inc(pa), k)))
     }
 
     // Whether `f`'s fip side tables (its trailer) are all empty.
     fn body_no_trailer(in self, f: FnRow) -> bool {
         for i in f.ta..add(f.ta, f.tn) {
-            if self.p.op(i) != 0 {
+            if self.program.op(i) != 0 {
                 return false;
             }
         }
@@ -484,7 +484,7 @@ impl Gen {
     // The body plan of function `fi`, whose instruction plan records start
     // at `from` in `self.plan`, appended to `out` as `[fi, n, n words]`.
     pub fn body(inout self, fi: u64, from: u64, inout out: ChunkSeq[u64]) {
-        let f = self.p.function(fi);
+        let f = self.program.function(fi);
         let h = self.body_header(f);
         if !h.plain || f.bc == 0 || !self.body_no_trailer(f) || self.body_lane(h.result) == 0 {
             return;
@@ -523,12 +523,12 @@ impl Gen {
         }
         // Each block's parameters.
         for bi in 0..f.bc {
-            let row = self.p.block(add(f.b0, bi));
+            let row = self.program.block(add(f.b0, bi));
             let pa = self.body_params_at(row.ha);
-            let np = self.p.op(pa);
+            let np = self.program.op(pa);
             o.push(np);
             for k in 0..np {
-                let v = self.body_value(in h, self.p.op(add(inc(pa), k)));
+                let v = self.body_value(in h, self.program.op(add(inc(pa), k)));
                 if v == NONE64 {
                     return;
                 }
@@ -536,7 +536,7 @@ impl Gen {
             }
         }
         // The lowering order and the blocks sealed on the way.
-        let l = layout(in self.p, f);
+        let l = layout(in self.program, f);
         let mut sealed: ChunkSeq[u64] = ChunkSeq::new[u64]();
         for k in 0..l.sealed.len() {
             set(inout sealed, u64_at(in l.sealed, k), 1);
@@ -547,7 +547,7 @@ impl Gen {
             o.push(at(in sealed, b));
         }
         // The plan's record of each instruction, by its index in `f`.
-        let first = self.p.block(f.b0).i0;
+        let first = self.program.block(f.b0).i0;
         let mut record: ChunkSeq[u64] = ChunkSeq::new[u64]();
         let mut r = from;
         loop {
@@ -556,13 +556,13 @@ impl Gen {
             }
             let bi = u64_at(in self.plan, inc(r));
             let ii = u64_at(in self.plan, add(r, 2));
-            let row = self.p.block(add(f.b0, bi));
+            let row = self.program.block(add(f.b0, bi));
             set(inout record, wrapping_sub(add(row.i0, ii), first), inc(r));
             r = add(r, 6);
         }
         for k in 0..l.order.len() {
             let bi = u64_at(in l.order, k);
-            let row = self.p.block(add(f.b0, bi));
+            let row = self.program.block(add(f.b0, bi));
             o.push(row.ic);
             for ii in 0..row.ic {
                 let x = add(row.i0, ii);
@@ -572,7 +572,7 @@ impl Gen {
                 } else {
                     wrapping_sub(rec, 1)
                 };
-                if !self.body_inst(in h, self.p.inst(x), planned, inout o) {
+                if !self.body_inst(in h, self.program.inst(x), planned, inout o) {
                     return;
                 }
             }

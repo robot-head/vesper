@@ -25,28 +25,28 @@ use self::patterns::{Pats, arms_cover, irrefutable, is_uninhabited, pats_new};
 const P_TUPLE: u8 = 5;
 const P_CTOR: u8 = 6;
 
-fn put(inout o: ChunkSeq[u8], in s: Str) {
-    o.extend(in s.as_bytes());
+fn put(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
 }
 
-fn put_u64(inout o: ChunkSeq[u8], v: u64) {
-    if v >= 10 {
-        put_u64(inout o, v / 10);
+fn put_u64(inout out: ChunkSeq[u8], value: u64) {
+    if value >= 10 {
+        put_u64(inout out, value / 10);
     }
-    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+    out.push(wrapping_u8(wrapping_add(value % 10, 48)));
 }
 
-fn put_bool(inout o: ChunkSeq[u8], b: bool) {
-    o.push(32);
-    if b {
-        o.push(49);
+fn put_bool(inout out: ChunkSeq[u8], value: bool) {
+    out.push(32);
+    if value {
+        out.push(49);
     } else {
-        o.push(48);
+        out.push(48);
     }
 }
 
-fn put_debug(inout o: ChunkSeq[u8], in c: Ctx, ty: u32) {
-    debug_type(in c.types, in c.names, ty, inout o);
+fn put_debug(inout out: ChunkSeq[u8], in ctx: Ctx, ty: u32) {
+    debug_type(in ctx.types, in ctx.names, ty, inout out);
 }
 
 // Task "relations".
@@ -57,77 +57,77 @@ fn put_debug(inout o: ChunkSeq[u8], in c: Ctx, ty: u32) {
 //   `infer` over the pairs in order on one map, then a V line per binding
 //   (name, Debug) and a `-` line. The harness sorts each case's V lines.
 pub fn core_typing_relations(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let mut c = read_ctx(inout r, in b);
-    let k = c.world.k;
-    let mut o = ChunkSeq::new[u8]();
-    let n = r.word(in b);
-    for i in 0..n {
-        let x = u32_at(in c.tmap, r.word(in b));
-        let y = u32_at(in c.tmap, r.word(in b));
-        put(inout o, "P");
-        put_bool(inout o, compatible(in c.types, k, x, y));
-        put_bool(inout o, compatible(in c.types, k, y, x));
-        put_bool(inout o, unresolved(in c.types, x));
-        put(inout o, "\nJ ");
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let mut ctx = read_ctx(inout reader, in bytes);
+    let known = ctx.world.k;
+    let mut out = ChunkSeq::new[u8]();
+    let pair_count = reader.word(in bytes);
+    for i in 0..pair_count {
+        let first_ty = u32_at(in ctx.tmap, reader.word(in bytes));
+        let second_ty = u32_at(in ctx.tmap, reader.word(in bytes));
+        put(inout out, "P");
+        put_bool(inout out, compatible(in ctx.types, known, first_ty, second_ty));
+        put_bool(inout out, compatible(in ctx.types, known, second_ty, first_ty));
+        put_bool(inout out, unresolved(in ctx.types, first_ty));
+        put(inout out, "\nJ ");
         let mut errors: u64 = 0;
-        let j = join_types(inout c.types, k, x, y, inout errors);
-        put_debug(inout o, in c, j);
-        o.push(32);
-        put_u64(inout o, errors);
-        put(inout o, "\nR ");
-        let f = refine_annotation(inout c.types, x, y);
-        put_debug(inout o, in c, f);
-        o.push(10);
+        let joined = join_types(inout ctx.types, known, first_ty, second_ty, inout errors);
+        put_debug(inout out, in ctx, joined);
+        out.push(32);
+        put_u64(inout out, errors);
+        put(inout out, "\nR ");
+        let refined = refine_annotation(inout ctx.types, first_ty, second_ty);
+        put_debug(inout out, in ctx, refined);
+        out.push(10);
     }
-    let m = r.word(in b);
-    for i in 0..m {
-        let g = r.word(in b);
+    let case_count = reader.word(in bytes);
+    for i in 0..case_count {
+        let generic_count = reader.word(in bytes);
         let mut generics: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        for j in 0..g {
-            generics.push(u32_at(in c.nmap, r.word(in b)));
+        for j in 0..generic_count {
+            generics.push(u32_at(in ctx.nmap, reader.word(in bytes)));
         }
-        let p = r.word(in b);
+        let infer_pair_count = reader.word(in bytes);
         let mut vars = vars_new();
-        for j in 0..p {
-            let e = u32_at(in c.tmap, r.word(in b));
-            let a = u32_at(in c.tmap, r.word(in b));
-            infer(inout c.types, k, e, a, in generics, inout vars);
+        for j in 0..infer_pair_count {
+            let expected = u32_at(in ctx.tmap, reader.word(in bytes));
+            let actual = u32_at(in ctx.tmap, reader.word(in bytes));
+            infer(inout ctx.types, known, expected, actual, in generics, inout vars);
         }
         for j in 0..vars.keys.len() {
-            put(inout o, "V ");
-            c.names.write(u32_at(in vars.keys, j), inout o);
-            o.push(32);
-            put_debug(inout o, in c, u32_at(in vars.vals, j));
-            o.push(10);
+            put(inout out, "V ");
+            ctx.names.write(u32_at(in vars.keys, j), inout out);
+            out.push(32);
+            put_debug(inout out, in ctx, u32_at(in vars.vals, j));
+            out.push(10);
         }
-        put(inout o, "-\n");
+        put(inout out, "-\n");
     }
-    pack_text(in o)
+    pack_text(in out)
 }
 
 // One pattern tree of the task input (pre-order): kind; a tuple then has
 // n and n trees; a constructor its short name, n and n (field name, tree).
-fn read_pat(inout r: Reader, in b: Slice[u8], in c: Ctx, inout ps: Pats) -> u32 {
-    let kind = wrapping_u8(r.word(in b));
+fn read_pat(inout reader: Reader, in bytes: Slice[u8], in ctx: Ctx, inout pats: Pats) -> u32 {
+    let kind = wrapping_u8(reader.word(in bytes));
     let mut name: u32 = 0;
     let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    let mut knames: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut kid_names: ChunkSeq[u32] = ChunkSeq::new[u32]();
     if kind == P_CTOR {
-        name = u32_at(in c.nmap, r.word(in b));
+        name = u32_at(in ctx.nmap, reader.word(in bytes));
     }
     if kind == P_CTOR || kind == P_TUPLE {
-        let n = r.word(in b);
-        for i in 0..n {
+        let kid_count = reader.word(in bytes);
+        for i in 0..kid_count {
             if kind == P_CTOR {
-                knames.push(u32_at(in c.nmap, r.word(in b)));
+                kid_names.push(u32_at(in ctx.nmap, reader.word(in bytes)));
             }
-            let kid = read_pat(inout r, in b, in c, inout ps);
+            let kid = read_pat(inout reader, in bytes, in ctx, inout pats);
             kids.push(kid);
         }
     }
-    ps.add(kind, name, in kids, in knames)
+    pats.add(kind, name, in kids, in kid_names)
 }
 
 // Task "patterns".
@@ -135,53 +135,53 @@ fn read_pat(inout r: Reader, in b: Slice[u8], in c: Ctx, inout ps: Pats) -> u32 
 // - q cases (type, k, k pattern trees): C with whether the k arms cover
 //   the type (no E0212), then I per arm with whether it is irrefutable.
 pub fn core_typing_patterns(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let mut c = read_ctx(inout r, in b);
-    let mut ps = pats_new(inout c.names);
-    let mut o = ChunkSeq::new[u8]();
-    let u = r.word(in b);
-    for i in 0..u {
-        let ty = u32_at(in c.tmap, r.word(in b));
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let mut ctx = read_ctx(inout reader, in bytes);
+    let mut pats = pats_new(inout ctx.names);
+    let mut out = ChunkSeq::new[u8]();
+    let type_count = reader.word(in bytes);
+    for i in 0..type_count {
+        let ty = u32_at(in ctx.tmap, reader.word(in bytes));
         let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        put(inout o, "U");
-        put_bool(inout o, is_uninhabited(inout c.types, in c.world, ty, inout seen));
-        o.push(10);
+        put(inout out, "U");
+        put_bool(inout out, is_uninhabited(inout ctx.types, in ctx.world, ty, inout seen));
+        out.push(10);
     }
-    let q = r.word(in b);
-    for i in 0..q {
-        let ty = u32_at(in c.tmap, r.word(in b));
-        let k = r.word(in b);
+    let case_count = reader.word(in bytes);
+    for i in 0..case_count {
+        let ty = u32_at(in ctx.tmap, reader.word(in bytes));
+        let arm_count = reader.word(in bytes);
         let mut arms: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        for j in 0..k {
-            let p = read_pat(inout r, in b, in c, inout ps);
-            arms.push(p);
+        for j in 0..arm_count {
+            let arm_pat = read_pat(inout reader, in bytes, in ctx, inout pats);
+            arms.push(arm_pat);
         }
-        put(inout o, "C");
+        put(inout out, "C");
         put_bool(
-            inout o,
-            arms_cover(inout c.types, inout c.names, in c.world, inout ps, in arms, ty)
+            inout out,
+            arms_cover(inout ctx.types, inout ctx.names, in ctx.world, inout pats, in arms, ty)
         );
-        o.push(10);
-        for j in 0..k {
-            put(inout o, "I");
-            let p = u32_at(in arms, j);
+        out.push(10);
+        for j in 0..arm_count {
+            put(inout out, "I");
+            let arm_pat = u32_at(in arms, j);
             put_bool(
-                inout o,
-                irrefutable(inout c.types, inout c.names, in c.world, inout ps, p, ty)
+                inout out,
+                irrefutable(inout ctx.types, inout ctx.names, in ctx.world, inout pats, arm_pat, ty)
             );
-            o.push(10);
+            out.push(10);
         }
     }
-    pack_text(in o)
+    pack_text(in out)
 }
 
 // Expression typing: the per-span types of every supported function.
 pub fn core_typing_exprs(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let c = read_ctx(inout r, in b);
-    let mut ck = ck_new(sink c);
-    check_exprs(inout r, in b, inout ck);
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let ctx = read_ctx(inout reader, in bytes);
+    let mut ck = ck_new(sink ctx);
+    check_exprs(inout reader, in bytes, inout ck);
     pack_text(in ck.out)
 }

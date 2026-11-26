@@ -4,16 +4,19 @@
 // `from_utf8_lossy` and `str::trim`.
 use @vesper-std/fs::IoError;
 use @vesper-std/process::ExitStatus;
-use @vesper-std/env::os;
-use self::strs::{byte, put_str};
+use @vesper-std/env::{os, os_linux as linux_os, os_windows as windows_os};
+use self::strs::{
+    CARRIAGE_RETURN, CLOSE_PAREN, DIGIT_ZERO, HEX_LETTER_BASE, HYPHEN, NEWLINE, SPACE, TAB, byte,
+    put_str
+};
 use self::json::put_u64;
 
 fn os_linux() -> bool {
-    os() == 1
+    os() == linux_os()
 }
 
 fn os_windows() -> bool {
-    os() == 3
+    os() == windows_os()
 }
 
 // `strerror` for the codes the audit meets (glibc and Apple agree on these
@@ -120,7 +123,7 @@ pub fn put_io(inout out: ChunkSeq[u8], e: IoError) {
     }
     put_str(inout out, in " (os error ");
     put_u64(inout out, widen_u64(e.os));
-    out.push(41);
+    out.push(CLOSE_PAREN);
 }
 
 pub fn io_text(e: IoError) -> ChunkSeq[u8] {
@@ -176,9 +179,9 @@ fn put_hex(inout out: ChunkSeq[u8], n: u64) {
         let d = wrapping_u8(m & 15);
         digits.push(
             if d < 10 {
-                wrapping_add(d, 48)
+                wrapping_add(d, DIGIT_ZERO)
             } else {
-                wrapping_add(d, 87)
+                wrapping_add(d, HEX_LETTER_BASE)
             }
         );
         m = m >> 4;
@@ -198,19 +201,24 @@ fn put_hex(inout out: ChunkSeq[u8], n: u64) {
 
 fn put_i64(inout out: ChunkSeq[u8], n: i64) {
     if n < 0 {
-        out.push(45);
+        out.push(HYPHEN);
         put_u64(inout out, wrapping_u64(wrapping_sub(0, n)));
     } else {
         put_u64(inout out, wrapping_u64(n));
     }
 }
 
+// The low 32 bits of a Windows exit code, which `ExitStatus` holds widened.
+const U32_MASK: u64 = 4294967295;
+// Bit 31: a Windows exit code with it set is an NTSTATUS, printed in hex.
+const HIGH_BIT_32: u64 = 2147483648;
+
 // `ExitStatus`'s `Display`.
 pub fn put_status(inout out: ChunkSeq[u8], s: ExitStatus) {
     if os_windows() {
-        let code = wrapping_u64(s.code) & 4294967295;
+        let code = wrapping_u64(s.code) & U32_MASK;
         put_str(inout out, in "exit code: ");
-        if (code & 2147483648) != 0 {
+        if (code & HIGH_BIT_32) != 0 {
             put_str(inout out, in "0x");
             put_hex(inout out, code);
         } else {
@@ -229,7 +237,7 @@ pub fn put_status(inout out: ChunkSeq[u8], s: ExitStatus) {
     if name.len() != 0 {
         put_str(inout out, in " (");
         put_str(inout out, in name);
-        out.push(41);
+        out.push(CLOSE_PAREN);
     }
 }
 
@@ -354,7 +362,7 @@ pub fn take_chars(in s: Slice[u8], n: u64) -> ChunkSeq[u8] {
 }
 
 fn space(c: u8) -> bool {
-    c == 32 || (c >= 9 && c <= 13)
+    c == SPACE || (c >= TAB && c <= CARRIAGE_RETURN)
 }
 
 // `str::trim` for the ASCII white space a path printout ends with.
@@ -422,7 +430,7 @@ pub fn line_at(in s: Slice[u8], at: u64) -> (u64, u64) {
         if i >= s.len() {
             break;
         }
-        if byte(in s, i) == 10 {
+        if byte(in s, i) == NEWLINE {
             break;
         }
         i = wrapping_add(i, 1);
@@ -430,7 +438,7 @@ pub fn line_at(in s: Slice[u8], at: u64) -> (u64, u64) {
     let next = if i < s.len() { wrapping_add(i, 1) } else { i };
     // A `\r` goes only with a `\n`: the last line keeps its own.
     let mut end = i;
-    if i < s.len() && end > at && byte(in s, wrapping_sub(end, 1)) == 13 {
+    if i < s.len() && end > at && byte(in s, wrapping_sub(end, 1)) == CARRIAGE_RETURN {
         end = wrapping_sub(end, 1);
     }
     (end, next)

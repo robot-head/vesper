@@ -233,6 +233,11 @@ pub type RegisterLocalsHook = fn(
 pub type EntryPlansHook =
     fn(&World, &crate::ir::Program, &str, bool, bool) -> Option<crate::native::EntryPlans>;
 
+/// The block plan of one graph (`native::block_plan`, #2094): called with
+/// each block's successors, once per graph the walk lowers. `None`, or a
+/// plan that does not order every block, keeps the Rust plan.
+pub type BlockPlanHook = fn(&[Vec<usize>]) -> Option<crate::native::BlockPlan>;
+
 /// [`EntryPlansHook`] for a library object (`native_export::object`, part
 /// 5 of #1509): the instances every export root reaches, their entry blocks
 /// and internal conventions, every export a boundary. Called with the
@@ -326,6 +331,7 @@ pub struct CodegenHooks {
     pub register_locals: Option<RegisterLocalsHook>,
     pub entry_plans: Option<EntryPlansHook>,
     pub export_plans: Option<ExportPlansHook>,
+    pub block_plan: Option<BlockPlanHook>,
     /// The native walk's whole-function hook (`#2094`, part 6 of `#1509`):
     /// asked for each function body before the Rust walk ([`body`]).
     pub body: Option<Hook>,
@@ -358,6 +364,7 @@ impl CodegenHooks {
             || self.register_locals.is_some()
             || self.entry_plans.is_some()
             || self.export_plans.is_some()
+            || self.block_plan.is_some()
             || self.body.is_some()
     }
 }

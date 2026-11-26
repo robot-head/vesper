@@ -162,10 +162,7 @@ pub fn float_source(in u: Uses, in module: Ast) -> String {
     let mut names = ChunkSeq::new[u8]();
     let order = sorted_symbols(in u.names);
     for i in 0..order.len() {
-        let id = match order.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let id = order.try_get(i).unwrap_or(0);
         let mut t = String::new();
         let ok = u.names.resolve_into(symbol_from_id(id), inout t);
         let k = source_of(in t.as_str());
@@ -175,10 +172,7 @@ pub fn float_source(in u: Uses, in module: Ast) -> String {
         let mut c = ChunkSeq::new[u8]();
         closure(k, inout c);
         for j in 0..c.len() {
-            let f = match c.try_get(j) {
-                Option::Some(v) => v,
-                Option::None => 255,
-            };
+            let f = c.try_get(j).unwrap_or(255);
             if !is_defined(in defined, source_name(f)) && !has(in names, f) {
                 names.push(f);
             }
@@ -186,10 +180,7 @@ pub fn float_source(in u: Uses, in module: Ast) -> String {
     }
     let mut out = String::new();
     for i in 0..names.len() {
-        let k = match names.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 255,
-        };
+        let k = names.try_get(i).unwrap_or(255);
         out.push_str(in source_text(k));
         out.push_str(in "\n");
     }

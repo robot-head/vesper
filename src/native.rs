@@ -2724,6 +2724,91 @@ impl Drop for InstrumentedJit {
     }
 }
 
+/// The block plan of one graph (#2094, part 6a of #1509): the order the
+/// walk lowers its blocks in, the blocks on a cycle, and the blocks it seals
+/// as soon as they are lowered.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BlockPlan {
+    /// Every block once. An acyclic graph keeps its topological order, and
+    /// a graph with a loop takes a reverse postorder from the entry instead.
+    /// Blocks with no path from the entry (after a `break` or `return`,
+    /// `crate::loops`) come last, in index order.
+    pub order: Vec<usize>,
+    /// The blocks on a cycle of the reachable graph (a loop body).
+    pub cyclic: BTreeSet<usize>,
+    /// The blocks sealed when they are lowered: not the entry, not on a
+    /// cycle, and every predecessor lowered before them (#1151). The rest
+    /// wait for `seal_all_blocks`.
+    pub sealed: BTreeSet<usize>,
+}
+
+/// The successors of each block of `f`, in terminator order.
+pub fn block_targets(f: &crate::ir::FunctionIr) -> Vec<Vec<usize>> {
+    use crate::ir::Terminator;
+    f.blocks
+        .iter()
+        .map(|block| match &block.terminator {
+            Terminator::Jump { block, .. } => vec![*block],
+            Terminator::Branch { yes, no, .. } => vec![*yes, *no],
+            Terminator::Match { arms, .. } => arms.iter().map(|(_, b)| *b).collect(),
+            _ => vec![],
+        })
+        .collect()
+}
+
+/// The [`BlockPlan`] of a graph whose block `i` jumps to `targets[i]`.
+pub fn block_plan(targets: &[Vec<usize>]) -> BlockPlan {
+    let mut graph = petgraph::graphmap::DiGraphMap::<usize, ()>::new();
+    for id in 0..targets.len() {
+        graph.add_node(id);
+    }
+    for (id, ts) in targets.iter().enumerate() {
+        for &target in ts {
+            graph.add_edge(id, target, ());
+        }
+    }
+    let mut postorder = vec![];
+    let mut dfs = petgraph::visit::DfsPostOrder::new(&graph, 0);
+    while let Some(n) = dfs.next(&graph) {
+        postorder.push(n);
+    }
+    let reached = postorder.iter().copied().collect::<BTreeSet<_>>();
+    let unreached = (0..targets.len()).filter(|n| !reached.contains(n));
+    let mut live = graph.clone();
+    for n in unreached.clone() {
+        live.remove_node(n);
+    }
+    let mut order = petgraph::algo::toposort(&live, None).unwrap_or_else(|_| {
+        postorder.reverse();
+        postorder
+    });
+    order.extend(unreached);
+    // Blocks on a cycle of this graph (a loop body): an operation there
+    // can be performed again before its earlier resumption returns.
+    let cyclic = petgraph::algo::tarjan_scc(&live)
+        .into_iter()
+        .filter(|c| c.len() > 1 || live.contains_edge(c[0], c[0]))
+        .flatten()
+        .collect::<BTreeSet<_>>();
+    let mut lowered = vec![false; targets.len()];
+    let mut sealed = BTreeSet::new();
+    for &i in &order {
+        if i != 0
+            && !cyclic.contains(&i)
+            && graph
+                .neighbors_directed(i, petgraph::Direction::Incoming)
+                .all(|p| lowered[p])
+        {
+            sealed.insert(i);
+        }
+        lowered[i] = true;
+    }
+    BlockPlan {
+        order,
+        cyclic,
+        sealed,
+    }
+}
 #[derive(Clone)]
 struct Handler {
     identity: String,
@@ -4255,49 +4340,20 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             join_slot_params.insert(block_idx, entries);
         }
-        let mut graph = petgraph::graphmap::DiGraphMap::<usize, ()>::new();
-        for id in 0..f.blocks.len() {
-            graph.add_node(id);
-        }
-        for (id, block) in f.blocks.iter().enumerate() {
-            let targets = match &block.terminator {
-                Terminator::Jump { block, .. } => vec![*block],
-                Terminator::Branch { yes, no, .. } => vec![*yes, *no],
-                Terminator::Match { arms, .. } => arms.iter().map(|(_, b)| *b).collect(),
-                _ => vec![],
-            };
-            for target in targets {
-                graph.add_edge(id, target, ());
-            }
-        }
-        // Blocks after a `break` or `return` (`crate::loops`) have no
-        // predecessors; they are emitted last so the entry stays first.
-        // Acyclic graphs keep their topological order; a loop's back edges
-        // need a reverse postorder from the entry instead. Frontend
-        // variables join values across either order.
-        let mut postorder = vec![];
-        let mut dfs = petgraph::visit::DfsPostOrder::new(&graph, 0);
-        while let Some(n) = dfs.next(&graph) {
-            postorder.push(n);
-        }
-        let reached = postorder.iter().copied().collect::<BTreeSet<_>>();
-        let unreached = (0..f.blocks.len()).filter(|n| !reached.contains(n));
-        let mut live = graph.clone();
-        for n in unreached.clone() {
-            live.remove_node(n);
-        }
-        let mut order = petgraph::algo::toposort(&live, None).unwrap_or_else(|_| {
-            postorder.reverse();
-            postorder
-        });
-        order.extend(unreached);
-        // Blocks on a cycle of this graph (a loop body): an operation there
-        // can be performed again before its earlier resumption returns.
-        let cyclic = petgraph::algo::tarjan_scc(&live)
-            .into_iter()
-            .filter(|c| c.len() > 1 || live.contains_edge(c[0], c[0]))
-            .flatten()
-            .collect::<BTreeSet<_>>();
+        // Where each block goes, which blocks lie on a loop and which are
+        // sealed as soon as they are lowered ([`block_plan`]); the
+        // `block_plan` swap hook answers it from Vesper (#2094).
+        let targets = block_targets(f);
+        let plan = crate::codegen_swap::installed()
+            .block_plan
+            .and_then(|hook| hook(&targets))
+            .filter(|p| p.order.len() == f.blocks.len())
+            .unwrap_or_else(|| block_plan(&targets));
+        let BlockPlan {
+            order,
+            cyclic,
+            sealed,
+        } = plan;
         let base_cycle_depth = self.cycle_depth;
         // Box drop elaboration (`fip::elaborate_non_fip_drops`) solves
         // loops and early exits; refuse a graph it could not plan rather
@@ -4394,22 +4450,15 @@ impl<M: Module> Codegen<'_, '_, M> {
         // to `blocks`, so an acyclic block whose predecessors are all done
         // can take no new edge. The entry and blocks on cycles are left to
         // `seal_all_blocks`.
-        let mut lowered = vec![false; f.blocks.len()];
         for i in order {
             let block = &f.blocks[i];
             self.cycle_depth = base_cycle_depth + usize::from(cyclic.contains(&i));
             if self.b.current_block() != Some(blocks[i]) {
                 self.b.switch_to_block(blocks[i]);
             }
-            if i != 0
-                && !cyclic.contains(&i)
-                && graph
-                    .neighbors_directed(i, petgraph::Direction::Incoming)
-                    .all(|p| lowered[p])
-            {
+            if sealed.contains(&i) {
                 self.b.seal_block(blocks[i]);
             }
-            lowered[i] = true;
             for id in &block.params {
                 self.def_var(registers[id], parameters[id]);
                 values.insert(*id, parameters[id]);

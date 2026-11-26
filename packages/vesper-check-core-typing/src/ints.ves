@@ -37,72 +37,81 @@ pub fn lit_min(a: Lit, b: Lit) -> Lit {
 }
 
 // `n > i64::MAX as i128`.
-pub fn above_i64(a: Lit) -> bool {
-    !a.neg && a.mag > I64_MAX
+pub fn above_i64(value: Lit) -> bool {
+    !value.neg && value.mag > I64_MAX
 }
 
-// Width in bits of integer kind `s`, or 0 when `s` names no integer kind.
-pub fn int_bits(k: Known, s: u32) -> u32 {
-    if s == k.u8_ || s == k.i8_ {
+// Width in bits of integer kind `kind`, or 0 when it names no integer kind.
+pub fn int_bits(known: Known, kind: u32) -> u32 {
+    if kind == known.u8_ || kind == known.i8_ {
         8
-    } else if s == k.u16_ || s == k.i16_ {
+    } else if kind == known.u16_ || kind == known.i16_ {
         16
-    } else if s == k.u32_ || s == k.i32_ {
+    } else if kind == known.u32_ || kind == known.i32_ {
         32
-    } else if s == k.i128_ || s == k.u128_ {
+    } else if kind == known.i128_ || kind == known.u128_ {
         128
-    } else if k.is_integer(s) {
+    } else if known.is_integer(kind) {
         64
     } else {
         0
     }
 }
 
-pub fn int_unsigned(k: Known, s: u32) -> bool {
-    s == k.u8_ || s == k.u16_ || s == k.u32_ || s == k.u64_ || s == k.usize_ || s == k.u128_
+pub fn int_unsigned(known: Known, kind: u32) -> bool {
+    kind == known.u8_
+        || kind == known.u16_
+        || kind == known.u32_
+        || kind == known.u64_
+        || kind == known.usize_
+        || kind == known.u128_
 }
 
-// `IntegerKind::fits` for kind `s` (an integer name symbol).
-pub fn fits(k: Known, s: u32, v: Lit) -> bool {
-    let bits = int_bits(k, s);
+// `IntegerKind::fits` for `kind` (an integer name symbol).
+pub fn fits(known: Known, kind: u32, value: Lit) -> bool {
+    let bits = int_bits(known, kind);
     if bits == 0 {
         return false;
     }
-    if int_unsigned(k, s) {
-        if v.neg {
+    if int_unsigned(known, kind) {
+        if value.neg {
             return false;
         }
         if bits >= 64 {
             return true;
         }
-        return v.mag <= wrapping_sub(wrapping_shl_u64(1, bits), 1);
+        return value.mag <= wrapping_sub(wrapping_shl_u64(1, bits), 1);
     }
     // Every u64 magnitude fits a 128-bit kind.
     if bits == 128 {
         return true;
     }
     let half = wrapping_shl_u64(1, wrapping_sub(bits, 1));
-    if v.neg { v.mag <= half } else { v.mag < half }
+    if value.neg {
+        value.mag <= half
+    } else {
+        value.mag < half
+    }
 }
 
 // `IntegerKind::default_for(n).fits(m)`.
-pub fn default_fits(k: Known, n: Lit, m: Lit) -> bool {
-    fits(k, default_of(k, n), m)
+pub fn default_fits(known: Known, n: Lit, m: Lit) -> bool {
+    fits(known, default_of(known, n), m)
 }
 
 // `n < i64::MIN as i128`: a magnitude past 2^63, negated.
-pub fn below_i64(a: Lit) -> bool {
-    a.neg && a.mag > wrapping_add(I64_MAX, 1)
+pub fn below_i64(value: Lit) -> bool {
+    value.neg && value.mag > wrapping_add(I64_MAX, 1)
 }
 
 // `IntegerKind::default_for(n)`: u64 above i64::MAX, i128 below i64::MIN
 // (a kept magnitude never passes u64::MAX), else i64.
-pub fn default_of(k: Known, n: Lit) -> u32 {
+pub fn default_of(known: Known, n: Lit) -> u32 {
     if above_i64(n) {
-        k.u64_
+        known.u64_
     } else if below_i64(n) {
-        k.i128_
+        known.i128_
     } else {
-        k.i64_
+        known.i64_
     }
 }

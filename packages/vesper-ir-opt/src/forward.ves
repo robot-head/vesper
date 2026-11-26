@@ -288,14 +288,8 @@ fn forward_places(
         if root == NONE {
             continue;
         }
-        let lo = match qs.try_get(q) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
-        let hi = match qs.try_get(inc(q)) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let lo = qs.try_get(q).unwrap_or(0);
+        let hi = qs.try_get(inc(q)).unwrap_or(0);
         for j in lo..hi {
             let c = at32(in qc, j);
             let x = g.lookup(V_REF, wrapping_i64(w(c)), 0, 0);
@@ -337,10 +331,7 @@ fn rewrite(inout p: Program, f: FnRow, in aliases: ChunkSeq[u32], inout orig: Ch
             let to = add(bk.i0, kept);
             if to != at {
                 p.insts.try_set(to, i);
-                let o = match orig.try_get(at) {
-                    Option::Some(o) => o,
-                    Option::None => at,
-                };
+                let o = orig.try_get(at).unwrap_or(at);
                 orig.try_set(to, o);
             }
             kept = inc(kept);

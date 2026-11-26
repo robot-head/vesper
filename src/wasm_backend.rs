@@ -50,6 +50,9 @@ pub const TARGET: &str = "wasm32-wasip2";
 /// Version of the value representation and export conventions.
 pub const ABI: &str = "vesper.wasm/1";
 
+/// The most 64 KiB pages a 32-bit Wasm memory can have (4 GiB).
+const MAX_MEMORY_PAGES: u32 = 65536;
+
 /// Which world the component implements.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WasmWorld {
@@ -252,10 +255,10 @@ pub fn compile(
     {
         return r;
     }
-    if options.max_memory_pages == 0 || options.max_memory_pages > 65536 {
-        return Err(WasmError::Limit(
-            "max_memory_pages must be in 1..=65536".into(),
-        ));
+    if options.max_memory_pages == 0 || options.max_memory_pages > MAX_MEMORY_PAGES {
+        return Err(WasmError::Limit(format!(
+            "max_memory_pages must be in 1..={MAX_MEMORY_PAGES}"
+        )));
     }
     let f = world
         .functions
