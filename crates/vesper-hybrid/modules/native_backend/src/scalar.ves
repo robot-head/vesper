@@ -79,6 +79,7 @@ const RIGHT_SCRATCH: u8 = R10;
 const THIRD_SCRATCH: u8 = R11;
 // One Linux x86-64 base page. Larger frames need stack probes.
 const STACK_PROBE_INTERVAL: u64 = 4096;
+const MAX_ARGUMENTS: u64 = ARGUMENTS + STACK_PROBE_INTERVAL / SPILL_SLOT_BYTES - 1;
 
 copy struct Record {
     op: u64,
@@ -96,6 +97,7 @@ struct FrameLayout {
     slots: ChunkSeq[FrameSlot],
     size: u64,
     used: bool,
+    outgoing: u64,
 }
 
 copy enum Location {
@@ -176,7 +178,7 @@ fn frame_layout(in words: Slice[u64], count: u64) -> Option[FrameLayout] {
     if size > STACK_PROBE_INTERVAL {
         return Option::None;
     }
-    Option::Some(FrameLayout { slots: slots, size: size, used: false })
+    Option::Some(FrameLayout { slots: slots, size: size, used: false, outgoing: 0 })
 }
 
 fn last_read(in reads: ChunkSeq[u64], value: u64) -> u64 {
@@ -408,11 +410,19 @@ fn find_last_reads(
         }
         if is_call(record.op) {
             if !allow_calls
-                || record.right > ARGUMENTS
+                || record.right > MAX_ARGUMENTS
                 || record.right > index
                 || record.left > DISP32_MASK
             {
                 return Option::None;
+            }
+            if record.right > ARGUMENTS {
+                let slots = wrapping_sub(record.right, ARGUMENTS);
+                // Keep the explicit slots aligned after the outgoing area.
+                let bytes = align_up(wrapping_mul(slots, SPILL_SLOT_BYTES), STACK_ALIGNMENT);
+                if bytes > frame.outgoing {
+                    frame.outgoing = bytes;
+                }
             }
             let start = wrapping_sub(index, record.right);
             let limit = wrapping_add(arguments, start);
@@ -494,25 +504,32 @@ fn allocate(
     in reads: ChunkSeq[u64],
     arguments: u64,
     count: u64,
-    explicit_frame: u64,
+    in frame: FrameLayout,
     paired: bool,
     spills: bool
 ) -> Option[Allocation] {
     let mut locations = ChunkSeq::with_capacity[Location](wrapping_add(arguments, count));
     let reserved = if spills {
         register_bit(LEFT_SCRATCH) | register_bit(RIGHT_SCRATCH) | register_bit(THIRD_SCRATCH)
+    } else if frame.outgoing != 0 {
+        register_bit(THIRD_SCRATCH)
     } else {
         0
     };
     let mut used = reserved;
-    let mut stack_end = explicit_frame;
+    let mut stack_end = wrapping_add(frame.outgoing, if frame.used { frame.size } else { 0 });
     let mut calls = ChunkSeq::new[u32]();
     let mut call_slots: u64 = 0;
     for argument in 0..arguments {
-        let reg = arg_register(argument);
-        locations.push(Location::Register(reg));
-        if last_read(in reads, argument) != NEVER_READ {
-            used = used | register_bit(reg);
+        if argument < ARGUMENTS {
+            let reg = arg_register(argument);
+            locations.push(Location::Register(reg));
+            if last_read(in reads, argument) != NEVER_READ {
+                used = used | register_bit(reg);
+            }
+        } else {
+            // Resolve the incoming stack offsets once the frame size is known.
+            locations.push(Location::Absent);
         }
     }
 
@@ -603,6 +620,15 @@ fn allocate(
     };
     if size > STACK_PROBE_INTERVAL {
         return Option::None;
+    }
+    for argument in ARGUMENTS..arguments {
+        let slot = wrapping_sub(argument, ARGUMENTS);
+        // The caller's first stack argument follows our return address.
+        let offset = wrapping_add(
+            wrapping_add(size, RETURN_ADDRESS_BYTES),
+            wrapping_mul(slot, SPILL_SLOT_BYTES)
+        );
+        let _ = locations.try_set(argument, Location::Spill(wrapping_u32(offset)));
     }
     Option::Some(Allocation {
         locations: locations,
@@ -768,7 +794,20 @@ fn emit_call(
             slot = wrapping_add(slot, SPILL_SLOT_BYTES);
         }
     }
-    move_call_arguments(inout out, in words, in allocation.locations, start, arguments);
+    let register_arguments = if arguments > ARGUMENTS {
+        ARGUMENTS
+    } else {
+        arguments
+    };
+    // Stack arguments start at the current RSP before the call. Copy them
+    // before the register moves can overwrite one of their sources.
+    for i in register_arguments..arguments {
+        let home = assigned(in allocation.locations, call_argument(in words, start, i));
+        let register = materialize(inout out, in home, THIRD_SCRATCH);
+        let offset = wrapping_mul(wrapping_sub(i, register_arguments), SPILL_SLOT_BYTES);
+        emit(inout out, in Instruction::Store(register, RSP, wrapping_u32(offset), QWORD_BITS));
+    }
+    move_call_arguments(inout out, in words, in allocation.locations, start, register_arguments);
     let reference = emit_direct_call(inout out);
     // The new result's home is distinct from every saved value's home.
     match result {
@@ -803,7 +842,7 @@ pub fn encode_block(
     let arguments = word_at(in words, ARGUMENT_COUNT);
     let result = word_at(in words, RETURN_VALUE);
     if wrapping_mul(count, RECORD_WORDS) != body_words
-        || arguments > ARGUMENTS
+        || arguments > MAX_ARGUMENTS
         || (result != NO_VALUE && result >= wrapping_add(arguments, count))
     {
         return ChunkSeq::new[u8]();
@@ -838,23 +877,14 @@ pub fn encode_block(
         Option::Some(last) => last,
         Option::None => return ChunkSeq::new[u8](),
     };
-    let explicit_frame = if frame.used { frame.size } else { 0 };
-    let allocation = match allocate(
-        in words,
-        in reads,
-        arguments,
-        count,
-        explicit_frame,
-        paired,
-        false
-    ) {
+    let allocation = match allocate(in words, in reads, arguments, count, in frame, paired, false) {
         Option::Some(result) => result,
         Option::None => match allocate(
             in words,
             in reads,
             arguments,
             count,
-            explicit_frame,
+            in frame,
             paired,
             true
         ) {
@@ -955,7 +985,10 @@ pub fn encode_block(
             emit(inout output, in Instruction::Immediate(destination, record.left));
         } else if is_stack_operation(record.op) {
             let offset = match stack_displacement(in frame, in record) {
-                Option::Some(offset) => offset,
+                Option::Some(offset) => wrapping_u32(wrapping_add(
+                    frame.outgoing,
+                    widen_u64(offset)
+                )),
                 Option::None => return ChunkSeq::new[u8](),
             };
             let instruction = if is_stack_store(record.op) {

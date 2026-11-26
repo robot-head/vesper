@@ -37,8 +37,22 @@ fn call_twice(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) -> u64 {
 fn main() -> u64 { wrapping_add(call_twice(3, 5, 7, 11, 13, 17), 1) }
 ";
 const STACK_ARGUMENT: &str = "
-fn seventh(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64) -> u64 { g }
-fn main() -> u64 { wrapping_add(seventh(1, 2, 3, 4, 5, 6, 7), 1) }
+fn wide(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64, i: u64) -> u64 {
+    wrapping_add(wrapping_add(d, wrapping_mul(g, 3)), wrapping_add(h, wrapping_mul(i, 5)))
+}
+fn divide_wide(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64 {
+    wrapping_add(wide(a, b, c, d, e, f, g, h, a), g / 7)
+}
+fn forward(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64, i: u64) -> u64 {
+    let first = wide(g, h, i, b, d, e, i, g, a);
+    let second = divide_wide(a, b, c, d, e, f, first, h);
+    wrapping_add(second, i)
+}
+fn main() -> u64 { forward(1, 2, 3, 4, 5, 6, 7, 8, 9) }
+";
+const UNSUPPORTED_SIGNATURE: &str = "
+fn narrow(x: f64) -> f64 { x }
+fn main() -> u64 { if narrow(1.0) > 0.0 { 1 } else { 0 } }
 ";
 
 fn checked(source: &str) -> check::Checked {
@@ -194,21 +208,34 @@ fn void_calls_and_conditional_returns_preserve_side_effects() {
 }
 
 #[test]
-fn direct_calls_preserve_values_and_shuffle_six_arguments() {
+fn direct_calls_preserve_values_and_pass_register_and_stack_arguments() {
+    const REGISTER_ARGUMENTS: u64 = 6;
     static CALLABLE_BLOCKS: AtomicUsize = AtomicUsize::new(0);
+    static STACK_LEAF_BLOCKS: AtomicUsize = AtomicUsize::new(0);
     let program = checked(PROGRAM);
-    let unsupported = checked(STACK_ARGUMENT);
+    let stack_arguments = checked(STACK_ARGUMENT);
+    let unsupported = checked(UNSUPPORTED_SIGNATURE);
     let compile = |checked: &check::Checked| {
         native::object_with_options(&checked.world, "main", None, false)
             .unwrap()
             .0
     };
     let baseline = compile(&program);
+    let baseline_stack = compile(&stack_arguments);
     let baseline_unsupported = compile(&unsupported);
     assert!(
         native::machine::install_integer_encoder(|words| {
             let code = binding::x86_64_integer_block(words);
-            (!code.is_empty()).then_some(code)
+            if code.is_empty() {
+                return None;
+            }
+            if words
+                .first()
+                .is_some_and(|count| *count > REGISTER_ARGUMENTS)
+            {
+                STACK_LEAF_BLOCKS.fetch_add(1, Relaxed);
+            }
+            Some(code)
         })
         .is_ok()
     );
@@ -242,6 +269,12 @@ fn direct_calls_preserve_values_and_shuffle_six_arguments() {
         );
         assert_eq!(relocation.addend(), -4);
     }
+    let candidate_stack = compile(&stack_arguments);
+    assert_eq!(CALLABLE_BLOCKS.load(Relaxed), 4);
+    assert_eq!(STACK_LEAF_BLOCKS.load(Relaxed), 1);
+    // The division falls back to Cranelift and calls the Vesper-generated
+    // wide function. The stack ABI crosses the boundary in both directions.
+    assert_ne!(candidate_stack, baseline_stack);
     assert!(
         native::elf::install_object_encoder(|words, bytes| {
             let object = binding::x86_64_elf_object(words, bytes);
@@ -250,7 +283,9 @@ fn direct_calls_preserve_values_and_shuffle_six_arguments() {
         .is_ok()
     );
     let combined = compile(&program);
-    assert_eq!(CALLABLE_BLOCKS.load(Relaxed), 4);
+    let combined_stack = compile(&stack_arguments);
+    assert_eq!(CALLABLE_BLOCKS.load(Relaxed), 8);
+    assert_eq!(STACK_LEAF_BLOCKS.load(Relaxed), 2);
     assert_ne!(
         combined, candidate,
         "the ELF writer should also be selected"
@@ -260,10 +295,13 @@ fn direct_calls_preserve_values_and_shuffle_six_arguments() {
     }
     let dir = std::env::temp_dir().join(format!("vesper-sh7-call-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
-    for (name, object) in [
-        ("baseline", baseline),
-        ("candidate", candidate),
-        ("combined", combined),
+    for (name, object, expected) in [
+        ("baseline", baseline, 96),
+        ("candidate", candidate, 96),
+        ("combined", combined, 96),
+        ("baseline_stack", baseline_stack, 154),
+        ("candidate_stack", candidate_stack, 154),
+        ("combined_stack", combined_stack, 154),
     ] {
         let obj = dir.join(format!("{name}.o"));
         let exe = dir.join(name);
@@ -281,7 +319,7 @@ fn direct_calls_preserve_values_and_shuffle_six_arguments() {
         );
         assert_eq!(
             Command::new(&exe).status().unwrap().code(),
-            Some(96),
+            Some(expected),
             "{name}"
         );
     }

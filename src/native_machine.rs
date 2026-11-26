@@ -78,7 +78,9 @@ const RETURN_VALUE: usize = 1;
 const HEADER_WORDS: usize = 2;
 const INSTRUCTION_WORDS: usize = 4;
 const NO_VALUE: u64 = u64::MAX;
-const GP_ARGUMENTS: usize = 6;
+const GP_REGISTER_ARGUMENTS: usize = 6;
+const STACK_PROBE_INTERVAL: usize = 4096;
+const MAX_GP_ARGUMENTS: usize = GP_REGISTER_ARGUMENTS + STACK_PROBE_INTERVAL / size_of::<u64>() - 1;
 const GP_RESULTS: usize = 2;
 const FUNCTION_NAMESPACE: u32 = 0;
 const CALL_DISPLACEMENT_BYTES: i64 = size_of::<i32>() as i64;
@@ -250,7 +252,7 @@ impl IntegerBlocks<'_> {
         if name.namespace != FUNCTION_NAMESPACE
             || signature.call_conv != CallConv::SystemV
             || signature.params.len() != args.len()
-            || args.len() > GP_ARGUMENTS
+            || args.len() > MAX_GP_ARGUMENTS
             || signature
                 .params
                 .iter()
@@ -590,7 +592,7 @@ fn integer_program(function: &Function) -> Option<(Vec<u64>, bool)> {
     let signature = &function.signature;
     let arity = signature.params.len();
     if signature.call_conv != CallConv::SystemV
-        || arity > GP_ARGUMENTS
+        || arity > MAX_GP_ARGUMENTS
         || signature.returns.len() > GP_RESULTS
         || signature
             .params
