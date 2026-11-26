@@ -113,7 +113,7 @@ pub fn compared_list(in f: Fun) -> ChunkSeq[u64] {
         let k = f.block(w(b));
         for kk in 0..w(k.ic) {
             let x = add(w(k.i0), kk);
-            let a = fa.access_at(in f, x);
+            let a = fa.access_at(in f, x, true);
             if a == 4 {
                 continue;
             }
@@ -122,7 +122,12 @@ pub fn compared_list(in f: Fun) -> ChunkSeq[u64] {
             let index = f.arg(inc(w(i.g0))).value;
             let target = fa.length_place(in f, place);
             let t = fa.term(in f, index);
-            if fa.below_len(in f, t, target, b, kk, b, 0) {
+            let fits = if is_wide(a) {
+                fa.wide_fits(in f, t, access_width(a), target, b, kk, b)
+            } else {
+                fa.below_len(in f, t, target, b, kk, b, 0)
+            };
+            if fits {
                 out.push(wrapping_shl_u64(w(b), 40) | wrapping_shl_u64(kk, 8) | a);
             }
         }
@@ -1584,7 +1589,7 @@ fn loop_candidate(
         let k = f.block(w(b));
         for kk in 0..w(k.ic) {
             let x = add(w(k.i0), kk);
-            let access = fa.access_at(in f, x);
+            let access = fa.access_at(in f, x, false);
             if access == 4 {
                 continue;
             }
