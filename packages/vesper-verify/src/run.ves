@@ -383,7 +383,7 @@ fn execute_format(
         f = failure(IO, in a.err.as_slice());
         return none;
     }
-    let out = in_stage(in o, in v, in e.lean, in tc, in stage.as_slice(), inout f);
+    let out = in_stage(in o, in v, in e.lean, in tc, in stage.as_slice(), source.len(), inout f);
     stage_drop(in stage.as_slice());
     out
 }
@@ -394,6 +394,7 @@ fn in_stage(
     in witness: ChunkSeq[u8],
     in tc: @vesper/proof-audit::audit::Toolchain,
     in stage: Slice[u8],
+    input_bytes: u64,
     inout f: Failure
 ) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
     let none: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -488,8 +489,7 @@ fn in_stage(
     let oh = hash_hex(verified_output_hash(in v));
     put_string(inout out, in oh.as_slice());
     put_str(inout out, in ",\"input_bytes\":");
-    let src_len = read_len(in o.source.as_slice());
-    put_u64(inout out, src_len);
+    put_u64(inout out, input_bytes);
     put_str(inout out, in ",\"output_bytes\":");
     let output = verified_output(in v);
     put_u64(inout out, output.len());
@@ -508,13 +508,6 @@ fn in_stage(
         return none;
     }
     out
-}
-
-// The source's length again (the bytes `read_source` returned).
-fn read_len(in path: Slice[u8]) -> u64 eff [Ffi[StdFs]] {
-    let mut f = ok();
-    let b = read_source(in path, inout f);
-    b.len()
 }
 
 // ---------------------------------------------------------------- JSON

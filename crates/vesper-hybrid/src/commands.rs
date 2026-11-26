@@ -46,13 +46,29 @@ pub(crate) fn install_verify(run: VerifyRun) -> Result<(), VerifyRun> {
     VERIFY.set(run)
 }
 
-/// Whether packed `verify` arguments ask for `--format` (before `--`); the
-/// command layer has rejected `--format` with `--extract`.
+/// Whether packed `verify` arguments ask for `--format` (before `--`), as
+/// the command layer parsed them: an option's value (`--proofs --format`)
+/// is not a flag. The command layer has rejected `--format` with
+/// `--extract`.
 fn verify_format(packed: &[u8]) -> bool {
-    for arg in packed.split(|&b| b == 0) {
+    const VALUED: [&[u8]; 8] = [
+        b"--proofs",
+        b"--theorem",
+        b"--contract-proof",
+        b"--contract-witness",
+        b"--allow-axiom",
+        b"--olean-store",
+        b"--lean",
+        b"--timeout",
+    ];
+    let mut args = packed.split(|&b| b == 0);
+    while let Some(arg) = args.next() {
         match arg {
             b"--" => return false,
             b"--format" => return true,
+            _ if VALUED.contains(&arg) => {
+                args.next();
+            }
             _ => {}
         }
     }

@@ -1881,6 +1881,8 @@ fn verify_matches_the_default_compiler() {
         &["verify", ".", "--format", "--json"],
         &["verify", "--format", "--", "."],
         &["verify", ".", "--format", "--lean", "no-such-lean"],
+        // `--format` as `--proofs`'s value is an `--extract` run.
+        &["verify", "--extract", "--proofs", "--format", "missing.ves"],
     ];
     let mut diffs = vec![];
     for argv in cases {
