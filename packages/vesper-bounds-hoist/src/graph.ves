@@ -57,10 +57,7 @@ impl Graph {
     }
 
     pub fn idom_of(in self, b: u64) -> u32 {
-        match self.idom.try_get(b) {
-            Option::Some(x) => x,
-            Option::None => NONE32,
-        }
+        self.idom.try_get(b).unwrap_or(NONE32)
     }
 
     // Whether block `a` dominates block `b` (`dominates`).
@@ -214,10 +211,7 @@ fn post_order(in f: Fun, in cut: ChunkSeq[u8]) -> ChunkSeq[u32] {
             Option::Some(b) => b,
             Option::None => break,
         };
-        let next = match path_next.pop() {
-            Option::Some(k) => k,
-            Option::None => 0,
-        };
+        let next = path_next.pop().unwrap_or(0);
         succ.clear();
         successors(in f, in cut, w(b), inout succ);
         if w(next) < succ.len() {
